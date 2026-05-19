@@ -269,8 +269,10 @@ const SETUP_SECTIONS: &[&str] = &[
 /// Generate the setup skill from the crate README.
 fn generate_setup_from_readme(manifest_dir: &str, out_dir: &str) -> String {
     let readme_path = Path::new(manifest_dir).join("README_TELEMETRY.md");
-    let readme = fs::read_to_string(&readme_path)
-        .unwrap_or_else(|e| panic!("failed to read {}: {e}", readme_path.display()));
+    let readme = match fs::read_to_string(&readme_path) {
+        Ok(content) => content,
+        Err(_) => return String::new(),
+    };
 
     let mut body = String::from("# Instrumenting your app with dial9\n\n");
 
