@@ -1,7 +1,7 @@
 //! Two lock-free MPMC queues — one for sampled allocations, one for frees.
 
+use crate::primitives::sync::atomic::AtomicU64;
 use crossbeam_queue::ArrayQueue;
-use std::sync::atomic::AtomicU64;
 
 /// Default maximum frames captured per allocation. 128 × 8 B = 1 KiB stack budget.
 pub(crate) const DEFAULT_MAX_FRAMES: usize = 128;
@@ -28,7 +28,12 @@ pub(crate) struct RawAlloc<const MAX_FRAMES: usize = DEFAULT_MAX_FRAMES> {
 }
 
 impl<const MAX_FRAMES: usize> RawAlloc<MAX_FRAMES> {
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "used by allocator hook in a later commit")
+    )]
     pub(crate) fn frames(&self) -> &[u64] {
+        const { assert!(MAX_FRAMES <= u8::MAX as usize, "MAX_FRAMES must fit in u8") };
         &self.frames[..self.frame_count as usize]
     }
 }

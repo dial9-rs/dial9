@@ -1,11 +1,11 @@
 //! `Source` impl that drains the alloc and free queues each flush cycle.
 
 use crate::memory_profiling::ring::{DEFAULT_MAX_FRAMES, RawAlloc, RawFree, RingBuffers};
+use crate::primitives::sync::Arc;
 use crate::telemetry::buffer::with_encoder;
 use crate::telemetry::format::{AllocEvent, FreeEvent};
 use crate::telemetry::recorder::source::{FlushContext, Source};
 use std::collections::HashMap;
-use std::sync::Arc;
 
 /// Liveset entry tracking a live sampled allocation, kept by the consolidator
 /// (flush thread). Only `size` and `timestamp_ns` are needed: both are
@@ -48,17 +48,18 @@ impl<const MAX_FRAMES: usize> MemoryProfileSource<MAX_FRAMES> {
     }
 
     fn handle_alloc(&mut self, a: RawAlloc<MAX_FRAMES>, ctx: &FlushContext<'_>) {
-        let frames = a.frames().to_vec();
+        let frame_count = a.frame_count as usize;
         let RawAlloc {
             tid,
             size,
             addr,
             ts_ns,
+            frames,
             ..
         } = a;
         with_encoder(
             |enc| {
-                let callchain = enc.intern_stack_frames(&frames);
+                let callchain = enc.intern_stack_frames(&frames[..frame_count]);
                 enc.encode(&AllocEvent {
                     timestamp_ns: ts_ns,
                     tid,
@@ -152,14 +153,14 @@ impl<const MAX_FRAMES: usize> Source for MemoryProfileSource<MAX_FRAMES> {
 mod tests {
     use super::*;
     use crate::memory_profiling::ring::{DEFAULT_MAX_FRAMES, RawAlloc, RawFree, RingBuffers};
+    use crate::primitives::sync::atomic::AtomicU64;
+    use crate::primitives::sync::Arc;
     use crate::telemetry::buffer::drain_to_collector;
     use crate::telemetry::collector::CentralCollector;
     use crate::telemetry::events::{TelemetryEvent, ThreadRole};
     use crate::telemetry::format::decode_events;
     use crate::telemetry::recorder::source::FlushContext;
     use std::collections::HashMap;
-    use std::sync::Arc;
-    use std::sync::atomic::AtomicU64;
 
     fn make_raw_alloc(addr: u64, size: u64, ts_ns: u64) -> RawAlloc {
         let mut frames = [0u64; DEFAULT_MAX_FRAMES];
