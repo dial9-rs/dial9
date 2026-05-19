@@ -674,7 +674,260 @@ dealloc-heavy workloads.
 
 ---
 
-## 8. Overhead budget
+## 7.5. Header-bit allocation tagging (considered, rejected)
+
+An alternative to liveset-based dealloc tracking: stash a 'sampled'
+marker in a small header allocated alongside user data. On dealloc, read
+`*(ptr - HEADER_SIZE) == SAMPLED_SENTINEL` (~1 cycle, cache-local)
+instead of a hashmap lookup. This is the technique used by tcmalloc,
+jemalloc's `prof`, and Go's runtime allocator profiling.
+
+### Layout idea
+
+```
++------------+----------------+
+|  header    | user data ...  |
+| (16-32 B)  |                |
++------------+----------------+
+             ^
+             pointer returned to user
+```
+
+The allocator over-sizes the request, places the header before the
+returned pointer, and on dealloc walks back to read the header. Header
+contains a magic sentinel + (optionally) the size + (optionally) the
+alloc timestamp (denormalizing the data we currently store in the
+liveset).
+
+### How other allocators handle this
+
+**tcmalloc and jemalloc do NOT use per-allocation headers for small
+allocations.** They use *span metadata* — each span (contiguous run of
+pages) has a single metadata structure that records whether profiling is
+enabled for allocations from that span. Small allocations (<32 KiB in
+tcmalloc, <14 KiB in jemalloc) are carved from spans, and the span
+metadata is consulted on free. This works because the allocator has
+internal knowledge of its own span structure and can map `ptr →
+span_metadata` in O(1) via arena indexing.
+
+**Go's runtime does use per-allocation metadata**, but it's stored
+*out-of-band* in the span's `allocBits` bitmap, not inline with the
+allocation. The runtime maintains a `heapArena` structure per 64 MiB
+region that includes metadata for all allocations in that region. On
+free, Go walks back from the pointer to find the span, then indexes into
+the span's metadata. Crucially, Go controls the entire allocator — it
+doesn't wrap an external one.
+
+**Rust `GlobalAlloc` wrappers** (dhat, stats_alloc, tracking-allocator)
+that need per-allocation state either:
+1. Use a concurrent hashmap (same as our liveset approach), or
+2. Don't track deallocations at all (dhat's default mode just records
+   allocs and infers leaks from missing frees).
+
+None of the surveyed Rust crates use inline headers, likely because of
+the problems detailed below.
+
+### The problems
+
+#### 1. Alignment correctness
+
+`Layout` requires the returned pointer to be aligned to `layout.align()`.
+If we allocate a header before the user data, we must ensure:
+
+```
+returned_ptr = base_ptr + HEADER_SIZE
+returned_ptr % layout.align() == 0
+```
+
+This means `base_ptr` must be allocated with alignment
+`max(layout.align(), HEADER_ALIGN)` and `HEADER_SIZE` must be a multiple
+of `layout.align()`. For small alignments (≤16) this is manageable. For
+large alignments (32, 64, 128, or the user-specified alignment for
+over-aligned types), the header size must grow proportionally or we must
+over-allocate and waste space.
+
+**Example:** User requests 8 bytes with 64-byte alignment. We must
+allocate at least 64 + 8 = 72 bytes with 64-byte alignment, place the
+header in the first 64 bytes (wasting 48+ bytes), and return a pointer
+64 bytes in. This is a 9× memory overhead for a tiny allocation.
+
+tcmalloc/jemalloc avoid this because span metadata is out-of-band — the
+user allocation's alignment is unaffected.
+
+#### 2. Per-allocation memory overhead at scale
+
+A 16-byte header on every sampled allocation × millions of small allocs
+= real RSS. At a 512 KiB sample rate, a program doing 1 GB/s of
+allocation generates ~2000 samples/sec. If those allocations live for 10
+seconds on average, that's 20,000 live sampled allocations × 16 B = 320
+KiB of header overhead. Manageable, but non-trivial.
+
+Worse: if we want to store size + timestamp in the header (to avoid the
+liveset entirely), we need 16 bytes (8B size + 8B timestamp). For a
+program with 10 million live sampled allocations (not uncommon in
+long-running services with large heaps), that's 160 MB of header
+overhead. This is *in addition to* the user data, and it's memory the
+inner allocator never asked for.
+
+tcmalloc/jemalloc avoid this for small allocations by amortizing
+metadata across an entire span (one metadata structure per 32 KiB or
+more of user allocations).
+
+#### 3. Wild pointer / corrupted header false positives
+
+If user code does `free(arbitrary_ptr)`, walking back to read a header
+could:
+- Segfault (if `ptr - HEADER_SIZE` is unmapped or unreadable)
+- Read garbage that happens to match the sentinel, causing us to emit a
+  bogus `FreeEvent`
+
+The first case is caught by the OS (segfault → process death, which is
+actually fine — the program was already broken). The second case is
+silent corruption of the trace.
+
+**Mitigation:** Use a strong sentinel (e.g. 16 bytes of random data
+chosen at profiler install time, stored in `MemoryProfilerInner`). The
+probability of random garbage matching a 128-bit sentinel is ~2^-128,
+negligible. But this increases header size to 24-32 bytes (sentinel +
+size + timestamp), worsening problem #2.
+
+tcmalloc/jemalloc avoid this because they validate the pointer against
+their internal span structures before consulting metadata. If the
+pointer isn't in a known span, it's rejected. We can't do this because
+we don't control the inner allocator's structure.
+
+#### 4. Interaction with `A: GlobalAlloc` generic
+
+Our `Dial9Allocator<A>` wraps any `GlobalAlloc`. If we over-size every
+allocation by `HEADER_SIZE`, the inner allocator sees a different size
+than the user requested. This can break:
+- **Size-class bin packing:** jemalloc/tcmalloc use size classes (8, 16,
+  32, 48, 64, ...). A user request for 48 bytes becomes 64 bytes (48 +
+  16-byte header), bumping it into the next size class and wasting 16
+  bytes of the 64-byte slot. Across millions of allocations, this
+  fragmentation is measurable.
+- **Allocator-specific optimizations:** Some allocators (e.g. mimalloc)
+  use the requested size to choose between thread-local and shared
+  heaps. Inflating sizes by a constant factor can push allocations into
+  slower paths.
+- **Telemetry/debugging:** If the inner allocator has its own profiling
+  or stats, it will report inflated sizes, confusing users who are
+  trying to correlate dial9's profile with the allocator's own output.
+
+tcmalloc/jemalloc don't have this problem because they *are* the
+allocator — they control size-class assignment and can account for
+metadata separately.
+
+#### 5. `realloc` complexity
+
+`realloc(ptr, old_layout, new_size)` must:
+1. Walk back to read the old header (to decide if it was sampled)
+2. Allocate `new_size + HEADER_SIZE` from the inner allocator
+3. Copy `old_size` bytes from `old_ptr` to `new_ptr + HEADER_SIZE`
+4. Write the new header at `new_ptr`
+5. Free `old_ptr - HEADER_SIZE` (not `old_ptr`!) to the inner allocator
+
+Step 5 is the footgun: we must pass the *base* pointer to the inner
+allocator's `dealloc`, not the user-visible pointer. If we get this
+wrong (e.g. by accidentally calling `self.0.dealloc(old_ptr, ...)`
+instead of `self.0.dealloc(old_ptr - HEADER_SIZE, ...)`), we corrupt the
+inner allocator's free lists. This is a use-after-free waiting to happen.
+
+The same issue applies to `dealloc` itself: we must adjust the pointer
+before forwarding to the inner allocator.
+
+#### 6. `alloc_zeroed` subtlety
+
+`GlobalAlloc::alloc_zeroed` must return a pointer to zeroed memory. If
+we call `self.0.alloc_zeroed(layout.size() + HEADER_SIZE)`, the inner
+allocator zeros *everything*, including the header region. We then write
+the sentinel/size/timestamp into the header, so the user-visible region
+is still zero. This works, but it's a hidden cost: we're asking the
+inner allocator to zero bytes we're about to overwrite.
+
+**Mitigation:** Call `self.0.alloc(...)` instead of `alloc_zeroed`, then
+manually zero the user-visible region. But now we've lost the benefit of
+the inner allocator's optimized zeroing (e.g. `calloc` on Unix, which
+can return already-zeroed pages from the OS without a `memset`).
+
+### What we'd have to change in the design doc
+
+If we adopted the header approach:
+
+**§3 Events:** `FreeEvent.size` and `FreeEvent.alloc_timestamp_ns` could
+be read from the header instead of the liveset. But we'd still need the
+liveset for leak analysis (which allocations are live at end-of-trace),
+so the denormalization is still useful. No major change.
+
+**§4 Dial9Allocator:** Every method grows by `HEADER_SIZE`:
+- `alloc`: allocate `layout.size() + HEADER_SIZE`, write header, return
+  `base_ptr + HEADER_SIZE`.
+- `dealloc`: read header at `ptr - HEADER_SIZE`, decide whether to emit
+  `FreeEvent`, call `self.0.dealloc(ptr - HEADER_SIZE, adjusted_layout)`.
+- `realloc`: read old header, allocate new with header, copy, write new
+  header, free old base pointer.
+- `alloc_zeroed`: allocate, write header, manually zero user region (or
+  accept the cost of zeroing the header region twice).
+
+**§6 Reentrancy:** The header-write *is* the producer-side state
+mutation (no hashmap insert), so the reentrancy guard semantics are
+simpler. But we still need the guard to prevent recursion during stack
+capture + event encoding.
+
+**§7 Liveset tracking:** The liveset becomes optional even for
+`FreeEvent` emission (we can read size/timestamp from the header). But
+we'd still want it for leak analysis (end-of-trace dump of live
+allocations). So the liveset doesn't go away, it just becomes
+"leak-analysis-only" instead of "hot-path-consulted-on-every-dealloc."
+This is a real win: the dealloc path drops from ~30-60ns (liveset
+lookup) to ~5-10ns (header read).
+
+**§9 Overhead budget:** Update the per-dealloc cost from ~30-60ns (with
+liveset) or ~5ns (without) to ~5-10ns (header read). But add a note
+about the RSS overhead (16-32 bytes per live sampled allocation).
+
+### Recommendation: Reject
+
+**The header approach is a bad fit for a `GlobalAlloc` wrapper.**
+
+The core issue: tcmalloc, jemalloc, and Go all avoid per-allocation
+headers for small allocations by using *allocator-internal metadata*
+(span structures, arena maps, bitmaps). They can do this because they
+control the allocator. We don't. We're wrapping an arbitrary
+`GlobalAlloc`, so we have no access to its internal structure.
+
+The problems are severe:
+1. **Alignment handling is complex and wasteful** for over-aligned types.
+2. **RSS overhead is non-trivial** (160 MB for 10M live sampled allocs).
+3. **Pointer adjustment bugs are easy and catastrophic** (corrupt the
+   inner allocator's free lists → use-after-free).
+4. **Size inflation breaks inner allocator optimizations** (bin packing,
+   size-class selection).
+
+The benefit — dropping dealloc cost from ~30-60ns to ~5-10ns when
+liveset tracking is enabled — is real but narrow. It only matters when
+liveset tracking is on, which is off by default because of the dealloc
+overhead. For the common case (liveset off), the header approach
+provides no benefit and adds complexity + RSS cost.
+
+**Alternative: keep the liveset, optimize the lookup.** If the ~30-60ns
+liveset lookup on every dealloc is a problem, we can:
+- Use a faster concurrent map (e.g. `scc::HashMap` with lock-free reads)
+- Add a Bloom filter in front of the liveset (1 hash + bit-check for
+  ~99.9% of deallocs, falling through to the liveset only for sampled
+  ones)
+- Accept the cost as the price of leak analysis
+
+All of these are less risky than the header approach.
+
+**If we ever want header-style tracking, the right path is to build a
+*complete allocator* (not a wrapper) that integrates profiling into its
+internal metadata structures, like tcmalloc/jemalloc do.** That's a
+multi-month project and out of scope for this design.
+
+---
+
+## 9. Overhead budget
 
 Target: <1% at default settings (512 KiB sample rate, no liveset).
 
@@ -710,7 +963,7 @@ The implementation ships with a benchmark exercising the full
 
 ---
 
-## 9. Viewer changes
+## 10. Viewer changes
 
 ### Allocation flamegraph
 
@@ -733,7 +986,7 @@ stack, sorted by total bytes.
 
 ---
 
-## 10. Analysis toolkit
+## 11. Analysis toolkit
 
 Extend `dial9-viewer/skills/analyze.js` with:
 
@@ -748,7 +1001,7 @@ common questions ("what allocated the most bytes in this time range?",
 
 ---
 
-## 11. Testing strategy
+## 12. Testing strategy
 
 `MemoryProfiler::install` publishes a process-global `OnceLock` that is
 never reclaimed. Tests that exercise different configurations each need
@@ -786,7 +1039,7 @@ their own process. Use separate `tests/memory_profiling_*.rs` files —
 
 ---
 
-## 12. Open questions
+## 13. Open questions
 
 1. **Per-alloc allocator latency.** Wrapping `self.0.alloc` with a
    `clock_monotonic_ns` pair gives allocator latency for
@@ -811,7 +1064,7 @@ their own process. Use separate `tests/memory_profiling_*.rs` files —
 
 ---
 
-## 13. Known limitations
+## 14. Known limitations
 
 1. **`MAX_FRAME_SIZE` bias.** The unwinder stops walking if
    `saved_fp - fp > 256 KiB` (rejects wild pointers). For allocation
