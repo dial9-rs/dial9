@@ -36,10 +36,6 @@ impl<const MAX_FRAMES: usize> MemoryProfileSource<MAX_FRAMES> {
     /// `track_liveset = true` enables `FreeEvent` emission (matched against
     /// previously-sampled allocations); `false` means frees are silently
     /// dropped on the consumer side.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "wired up by allocator hook in a later commit")
-    )]
     pub(crate) fn new(rings: Arc<RingBuffers<MAX_FRAMES>>, track_liveset: bool) -> Self {
         Self {
             rings,

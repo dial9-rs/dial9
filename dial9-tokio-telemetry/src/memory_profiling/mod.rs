@@ -27,10 +27,18 @@
 //! Gated behind the `memory-profiling` cargo feature.
 
 mod allocator;
+mod config;
+mod profiler;
 mod ring;
 mod source;
 
 pub use allocator::Dial9Allocator;
+pub use config::{
+    DEFAULT_RING_CAPACITY, DEFAULT_SAMPLE_RATE_BYTES, MemoryProfilingConfig, TimestampMode,
+};
+pub use profiler::{
+    InstallError, MemoryProfiler, MemoryProfilerGuard, is_installed, push_test_alloc,
+};
 
 #[expect(
     unused_imports,
@@ -42,6 +50,6 @@ pub(crate) use ring::{
 };
 #[expect(
     unused_imports,
-    reason = "wired up by allocator hook in a later commit"
+    reason = "used by profiler.rs via direct import; re-export kept for consistency"
 )]
 pub(crate) use source::MemoryProfileSource;
