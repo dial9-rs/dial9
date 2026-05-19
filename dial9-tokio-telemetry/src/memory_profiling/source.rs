@@ -451,4 +451,52 @@ mod tests {
         assert_eq!(entry.size, 512);
         assert_eq!(entry.timestamp_ns, 300);
     }
+
+    /// Demonstrates that `poll_start_ts_or_now` produces strictly ordered
+    /// timestamps even for events that would otherwise share a clock tick —
+    /// the scenario that occurs during a realloc (free old + alloc new at
+    /// same address).
+    #[test]
+    fn monotonic_ts_solves_realloc_ordering() {
+        use crate::telemetry::recorder::poll_start_ts_monotonic;
+
+        // Simulate a realloc: alloc, free, alloc — all at the "same instant".
+        // poll_start_ts_or_now guarantees each gets a distinct, increasing timestamp.
+        let t1 = poll_start_ts_monotonic();
+        let t2 = poll_start_ts_monotonic();
+        let t3 = poll_start_ts_monotonic();
+        assert!(t1 < t2 && t2 < t3, "timestamps must be strictly ordered");
+
+        let rings = rings(16, 16);
+        rings.alloc_queue.push(make_raw_alloc(0x6000, 256, t1)).ok();
+        rings.free_queue.push(make_raw_free(0x6000, t2)).ok();
+        rings.alloc_queue.push(make_raw_alloc(0x6000, 512, t3)).ok();
+
+        let mut source = MemoryProfileSource::new(Arc::clone(&rings), true);
+        let events = flush_and_collect(&mut source);
+
+        let frees: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e, TelemetryEvent::Free { .. }))
+            .collect();
+        assert_eq!(frees.len(), 1);
+        match frees[0] {
+            TelemetryEvent::Free {
+                size,
+                alloc_timestamp_nanos,
+                ..
+            } => {
+                assert_eq!(*size, 256, "free should match the first alloc");
+                assert_eq!(*alloc_timestamp_nanos, t1);
+            }
+            _ => unreachable!(),
+        }
+
+        // Second alloc remains live.
+        let liveset = source.liveset.as_ref().unwrap();
+        assert_eq!(liveset.len(), 1);
+        let entry = liveset.get(&0x6000).unwrap();
+        assert_eq!(entry.size, 512);
+        assert_eq!(entry.timestamp_ns, t3);
+    }
 }

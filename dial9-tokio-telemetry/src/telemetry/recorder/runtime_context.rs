@@ -7,7 +7,6 @@ use crate::telemetry::format::{
 use crate::telemetry::task_metadata::TaskId;
 use std::cell::Cell;
 use std::collections::HashMap;
-#[cfg(feature = "taskdump")]
 use std::num::NonZeroU64;
 use std::sync::OnceLock;
 use std::sync::RwLock;
@@ -39,19 +38,31 @@ thread_local! {
     static TID_REGISTERED: Cell<bool> = const { Cell::new(false) };
     /// Monotonic timestamp captured in `on_before_task_poll`, cleared in
     /// `on_after_task_poll`. Allows code running inside a poll (e.g.
-    /// `TaskDumped`) to reuse the timestamp without an extra clock read.
-    #[cfg(feature = "taskdump")]
+    /// `TaskDumped`, memory profiler) to reuse the timestamp without an extra
+    /// clock read.
     static POLL_START_TS: Cell<Option<NonZeroU64>> = const { Cell::new(None) };
+    /// Last timestamp returned by `poll_start_ts_or_now`. Ensures strictly
+    /// increasing values within a thread by bumping +1ns on ties.
+    static LAST_TS: Cell<u64> = const { Cell::new(0) };
 }
 
-/// Returns the poll-start timestamp if we're inside a poll, otherwise reads
-/// the clock.
-#[cfg(feature = "taskdump")]
-pub(crate) fn poll_start_ts_or_now() -> u64 {
-    POLL_START_TS.with(|c| c.get()).map_or_else(
+/// Returns a strictly monotonic timestamp for this thread.
+///
+/// Uses the cached poll-start timestamp if inside a poll, otherwise reads
+/// the clock. Guarantees the returned value is always greater than the
+/// previous call on this thread (bumps by 1ns on ties). This ensures
+/// correct ordering for events that share a clock tick (e.g. a realloc
+/// producing free + alloc at the same address within one poll).
+pub(crate) fn poll_start_ts_monotonic() -> u64 {
+    let raw = POLL_START_TS.with(|c| c.get()).map_or_else(
         crate::telemetry::events::clock_monotonic_ns,
         NonZeroU64::get,
-    )
+    );
+    LAST_TS.with(|last| {
+        let next = last.get().wrapping_add(1).max(raw);
+        last.set(next);
+        next
+    })
 }
 
 impl RuntimeContext {
@@ -231,7 +242,6 @@ pub(super) fn make_poll_start(
         .map(|(_, idx)| ctx.local_queue_depth(idx))
         .unwrap_or(0);
     let timestamp_ns = crate::telemetry::events::clock_monotonic_ns();
-    #[cfg(feature = "taskdump")]
     POLL_START_TS.with(|c| c.set(NonZeroU64::new(timestamp_ns)));
     PollStart {
         timestamp_ns,
@@ -243,7 +253,6 @@ pub(super) fn make_poll_start(
 }
 
 pub(super) fn make_poll_end(ctx: &RuntimeContext, shared: &SharedState) -> PollEndEvent {
-    #[cfg(feature = "taskdump")]
     POLL_START_TS.with(|c| c.set(None));
     let resolved = ctx.resolve_worker(shared);
     PollEndEvent {

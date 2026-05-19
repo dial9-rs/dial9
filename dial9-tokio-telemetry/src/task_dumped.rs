@@ -125,7 +125,7 @@ impl<F: Future> Future for TaskDumped<F> {
         // interval. Short idles have a small but nonzero chance of being
         // sampled (~ idle / mean); long idles are sampled with probability
         // approaching 1. At most one emission per poll.
-        let poll_start = crate::telemetry::recorder::poll_start_ts_or_now();
+        let poll_start = crate::telemetry::recorder::poll_start_ts_monotonic();
         let should_emit = match *this.pending_capture_ts {
             Some(ts) if this.frames.has_data() => {
                 let idle_ns = poll_start.saturating_sub(ts.get()) as i64;
@@ -157,7 +157,7 @@ impl<F: Future> Future for TaskDumped<F> {
                 } else {
                     this.frames.capture(this.inner.as_mut(), cx);
                     *this.just_captured = true;
-                    let poll_end = crate::telemetry::recorder::poll_start_ts_or_now();
+                    let poll_end = crate::telemetry::recorder::poll_start_ts_monotonic();
                     *this.pending_capture_ts = NonZeroU64::new(poll_end);
                 }
             }
