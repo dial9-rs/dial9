@@ -335,8 +335,7 @@
       if (filterType === "sched") {
         for (const s of spans.parks) {
           if (hasSchedWait && s.schedWait > 100) {
-            const schedWaitNs = s.schedWait * 1000;
-            const wakeupShouldBe = s.end - schedWaitNs;
+            const wakeupShouldBe = s.end - s.schedWait;
             points.push({
               time: wakeupShouldBe,
               worker: w,
