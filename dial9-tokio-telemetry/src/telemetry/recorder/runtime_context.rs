@@ -65,6 +65,12 @@ pub(crate) fn poll_start_ts_monotonic() -> u64 {
     })
 }
 
+/// Alias for `poll_start_ts_monotonic` used by the memory profiler hook.
+#[cfg(feature = "memory-profiling")]
+pub(crate) fn poll_start_ts_or_now() -> u64 {
+    poll_start_ts_monotonic()
+}
+
 impl RuntimeContext {
     pub(crate) fn new(runtime_name: Option<String>) -> Self {
         Self {

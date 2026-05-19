@@ -56,16 +56,10 @@ pub(crate) struct RawFree {
 pub(crate) struct RingBuffers<const MAX_FRAMES: usize = DEFAULT_MAX_FRAMES> {
     pub(crate) alloc_queue: ArrayQueue<RawAlloc<MAX_FRAMES>>,
     pub(crate) free_queue: ArrayQueue<RawFree>,
-    #[expect(dead_code, reason = "incremented by allocator hook in a later commit")]
     pub(crate) dropped_allocs: AtomicU64,
-    #[expect(dead_code, reason = "incremented by allocator hook in a later commit")]
     pub(crate) dropped_frees: AtomicU64,
 }
 
-// `RingBuffers::new` is only called from tests in this commit. The allocator
-// hook in a later commit will call it from a non-test path; at that point
-// this `allow(dead_code)` becomes inert.
-#[cfg_attr(not(test), allow(dead_code))]
 impl<const MAX_FRAMES: usize> RingBuffers<MAX_FRAMES> {
     pub(crate) fn new(alloc_capacity: usize, free_capacity: usize) -> Self {
         Self {

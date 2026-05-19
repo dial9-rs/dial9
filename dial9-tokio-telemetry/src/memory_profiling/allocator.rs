@@ -1,12 +1,13 @@
 //! `Dial9Allocator<A>` — a `GlobalAlloc` wrapper that hooks every allocation
 //! and deallocation to feed dial9's memory profiler.
 //!
-//! In this commit the wrapper is a **pure passthrough**: `alloc`, `dealloc`,
-//! `realloc`, and `alloc_zeroed` simply delegate to the inner `A`. The hook
-//! calls (the actual sampling + queue push) land in a later commit. We're
-//! shipping the wrapper as a separate commit so users can drop it in as a
-//! `#[global_allocator]` today and the hook becomes active later when
-//! `MemoryProfiler::install()` is called.
+//! The wrapper checks `ACTIVE.get()` on every alloc/dealloc/realloc. When
+//! `None` (profiler not installed), all methods are pure passthrough — one
+//! Acquire load + null check (~1 ns). When `Some`, the hook runs the
+//! geometric sampling decision and, on the sampled path (~0.1% of allocs
+//! at the default 512 KiB rate), captures a stack and pushes a fixed-size
+//! POD record into the alloc queue. Per-thread state lives in TLS; no
+//! locks, no allocation, no syscalls on the unsampled path.
 //!
 //! See `docs/design/memory-profiling.md` §4 for the contract; in particular:
 //! realloc is treated as a free-of-old plus alloc-of-new, with the hooks only
@@ -83,32 +84,58 @@ impl<A: GlobalAlloc> Dial9Allocator<A> {
 
 // SAFETY: forwarding to the inner `GlobalAlloc` impl. The `unsafe` contract on
 // each method is exactly the same as the inner allocator's. The hook
-// invocations (added in a later commit) must be allocator-quiet — see
-// design §6.
+// invocations are allocator-quiet by construction — see
+// [`crate::memory_profiling::hook`] module docs and design §6.
 unsafe impl<A: GlobalAlloc> GlobalAlloc for Dial9Allocator<A> {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         // SAFETY: `layout` validity contract forwarded to the inner allocator.
-        unsafe { self.0.alloc(layout) }
+        let ptr = unsafe { self.0.alloc(layout) };
+        if !ptr.is_null()
+            && let Some(inner) = crate::memory_profiling::profiler::ACTIVE.get()
+        {
+            crate::memory_profiling::hook::on_alloc(inner, ptr, layout.size());
+        }
+        ptr
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        if let Some(inner) = crate::memory_profiling::profiler::ACTIVE.get() {
+            crate::memory_profiling::hook::on_dealloc(inner, ptr, layout.size());
+        }
         // SAFETY: `ptr`/`layout` validity contract forwarded to the inner
         // allocator.
-        unsafe { self.0.dealloc(ptr, layout) }
+        unsafe { self.0.dealloc(ptr, layout) };
     }
 
     unsafe fn realloc(&self, ptr: *mut u8, old_layout: Layout, new_size: usize) -> *mut u8 {
-        // SAFETY: forwarded to the inner allocator. When the hook is added
-        // (later commit), the free-of-old hook must only fire after
-        // confirming the inner realloc returned non-null — otherwise the
-        // old pointer is still live and must not be recorded as freed
-        // (design §3, "realloc handling").
-        unsafe { self.0.realloc(ptr, old_layout, new_size) }
+        // SAFETY: forwarded to the inner allocator. The hook below only
+        // fires after we've confirmed the inner realloc returned non-null
+        // — otherwise the old pointer is still live and must not be
+        // recorded as freed (design §3, "realloc handling").
+        let new_ptr = unsafe { self.0.realloc(ptr, old_layout, new_size) };
+        if !new_ptr.is_null()
+            && let Some(inner) = crate::memory_profiling::profiler::ACTIVE.get()
+        {
+            crate::memory_profiling::hook::on_realloc(
+                inner,
+                ptr,
+                old_layout.size(),
+                new_ptr,
+                new_size,
+            );
+        }
+        new_ptr
     }
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
         // SAFETY: forwarded to the inner allocator.
-        unsafe { self.0.alloc_zeroed(layout) }
+        let ptr = unsafe { self.0.alloc_zeroed(layout) };
+        if !ptr.is_null()
+            && let Some(inner) = crate::memory_profiling::profiler::ACTIVE.get()
+        {
+            crate::memory_profiling::hook::on_alloc(inner, ptr, layout.size());
+        }
+        ptr
     }
 }
 

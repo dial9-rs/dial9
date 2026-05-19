@@ -9,7 +9,7 @@
 pub(crate) struct SplitMix64(u64);
 
 impl SplitMix64 {
-    pub(crate) fn new(seed: u64) -> Self {
+    pub(crate) const fn new(seed: u64) -> Self {
         Self(seed)
     }
 
