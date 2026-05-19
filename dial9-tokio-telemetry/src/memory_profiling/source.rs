@@ -153,8 +153,8 @@ impl<const MAX_FRAMES: usize> Source for MemoryProfileSource<MAX_FRAMES> {
 mod tests {
     use super::*;
     use crate::memory_profiling::ring::{DEFAULT_MAX_FRAMES, RawAlloc, RawFree, RingBuffers};
-    use crate::primitives::sync::atomic::AtomicU64;
     use crate::primitives::sync::Arc;
+    use crate::primitives::sync::atomic::AtomicU64;
     use crate::telemetry::buffer::drain_to_collector;
     use crate::telemetry::collector::CentralCollector;
     use crate::telemetry::events::{TelemetryEvent, ThreadRole};

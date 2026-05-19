@@ -28,10 +28,7 @@ pub(crate) struct RawAlloc<const MAX_FRAMES: usize = DEFAULT_MAX_FRAMES> {
 }
 
 impl<const MAX_FRAMES: usize> RawAlloc<MAX_FRAMES> {
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "used by allocator hook in a later commit")
-    )]
+    #[expect(dead_code, reason = "used by allocator hook in a later commit")]
     pub(crate) fn frames(&self) -> &[u64] {
         const { assert!(MAX_FRAMES <= u8::MAX as usize, "MAX_FRAMES must fit in u8") };
         &self.frames[..self.frame_count as usize]
