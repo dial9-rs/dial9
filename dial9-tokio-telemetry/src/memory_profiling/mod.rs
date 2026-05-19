@@ -26,8 +26,11 @@
 //!
 //! Gated behind the `memory-profiling` cargo feature.
 
+mod allocator;
 mod ring;
 mod source;
+
+pub use allocator::Dial9Allocator;
 
 #[expect(
     unused_imports,
