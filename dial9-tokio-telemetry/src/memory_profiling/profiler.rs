@@ -2,6 +2,7 @@
 
 use crate::memory_profiling::config::{MemoryProfilingConfig, TimestampMode};
 use crate::memory_profiling::ring::{DEFAULT_MAX_FRAMES, RawAlloc, RingBuffers};
+
 use crate::memory_profiling::source::MemoryProfileSource;
 use crate::telemetry::recorder::TelemetryHandle;
 use dial9_perf_self_profile::unwinder::Unwinder;
@@ -15,7 +16,7 @@ use std::sync::{Arc, OnceLock};
 pub(crate) struct MemoryProfilerInner {
     pub(crate) unwinder: Unwinder,
     pub(crate) handle: TelemetryHandle,
-    pub(crate) rings: Arc<RingBuffers<DEFAULT_MAX_FRAMES>>,
+    pub(crate) rings: Arc<RingBuffers>,
     pub(crate) sample_rate_bytes: u64,
     pub(crate) track_liveset: bool,
     pub(crate) timestamp_mode: TimestampMode,

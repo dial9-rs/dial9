@@ -8,8 +8,10 @@ use dial9_tokio_telemetry::memory_profiling::{
     Dial9Allocator, MemoryProfiler, MemoryProfilingConfig,
 };
 use dial9_tokio_telemetry::telemetry::{TelemetryEvent, TracedRuntime};
-use std::alloc::{GlobalAlloc, Layout};
 use std::time::Duration;
+
+#[global_allocator]
+static ALLOC: Dial9Allocator = Dial9Allocator::system();
 
 #[test]
 fn hook_captures_sampled_allocations() {
@@ -31,17 +33,10 @@ fn hook_captures_sampled_allocations() {
     .install(handle)
     .expect("install should succeed");
 
-    // Exercise the hook by calling Dial9Allocator methods directly.
-    let allocator = Dial9Allocator::system();
     runtime.block_on(async {
         for _ in 0..100 {
-            let layout = Layout::from_size_align(1024, 8).unwrap();
-            // SAFETY: layout is valid.
-            let ptr = unsafe { allocator.alloc(layout) };
-            assert!(!ptr.is_null());
-            std::hint::black_box(ptr);
-            // SAFETY: ptr was allocated with this layout.
-            unsafe { allocator.dealloc(ptr, layout) };
+            let v: Vec<u8> = Vec::with_capacity(1024);
+            std::hint::black_box(v);
         }
         // Give the flush thread time to drain.
         tokio::time::sleep(Duration::from_millis(200)).await;

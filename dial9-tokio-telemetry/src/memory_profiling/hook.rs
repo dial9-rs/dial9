@@ -1,3 +1,4 @@
+#![deny(clippy::arithmetic_side_effects)]
 //! Allocator hook — the hot path called from `Dial9Allocator::alloc`/etc.
 //!
 //! # Soundness contract
@@ -33,7 +34,6 @@ use crate::memory_profiling::profiler::MemoryProfilerInner;
 use crate::memory_profiling::ring::{DEFAULT_MAX_FRAMES, RawAlloc, RawFree};
 use crate::sampling::SplitMix64;
 use crate::telemetry::events::current_tid;
-use std::sync::atomic::Ordering;
 
 /// Per-thread sampling state. Held in TLS so each thread reads/writes
 /// its own counter and PRNG without synchronization (design §1).
@@ -86,7 +86,8 @@ fn ensure_initialized(state: &mut SamplingState, inner: &MemoryProfilerInner) {
         }
     };
     state.rng = SplitMix64::new(seed);
-    state.next_sample_bytes = state.rng.draw_exponential(inner.sample_rate_bytes) as i64;
+    state.next_sample_bytes =
+        i64::try_from(state.rng.draw_exponential(inner.sample_rate_bytes)).unwrap_or(i64::MAX);
     state.initialized = true;
 }
 
@@ -117,7 +118,15 @@ pub(crate) fn on_alloc(inner: &MemoryProfilerInner, ptr: *mut u8, size: usize) {
         };
         ensure_initialized(&mut state, inner);
 
-        let remaining = state.next_sample_bytes - size as i64;
+        // Saturate at i64::MAX — allocations this large are unrealistic but we
+        // handle them defensively rather than wrapping.
+        let size_i64 = i64::try_from(size).unwrap_or(i64::MAX);
+
+        // OK: intentionally allowed to go negative — the design uses signed arithmetic
+        // so that a large allocation exceeding the remaining budget produces a negative value,
+        // which triggers sampling on the next line.
+        #[allow(clippy::arithmetic_side_effects)]
+        let remaining = state.next_sample_bytes - size_i64;
         if remaining > 0 {
             state.next_sample_bytes = remaining;
             return;
@@ -128,7 +137,10 @@ pub(crate) fn on_alloc(inner: &MemoryProfilerInner, ptr: *mut u8, size: usize) {
         // by more than one draw's worth (design §1).
         let mut next = remaining;
         while next <= 0 {
-            next = next.saturating_add(state.rng.draw_exponential(inner.sample_rate_bytes) as i64);
+            next = next.saturating_add(
+                i64::try_from(state.rng.draw_exponential(inner.sample_rate_bytes))
+                    .unwrap_or(i64::MAX),
+            );
         }
         state.next_sample_bytes = next;
 
@@ -153,9 +165,7 @@ pub(crate) fn on_alloc(inner: &MemoryProfilerInner, ptr: *mut u8, size: usize) {
             frame_count: result.frames_written.min(DEFAULT_MAX_FRAMES) as u8,
         };
 
-        if inner.rings.alloc_queue.push(sample).is_err() {
-            inner.rings.dropped_allocs.fetch_add(1, Ordering::Relaxed);
-        }
+        inner.rings.push_alloc(sample);
     });
 }
 
@@ -174,9 +184,7 @@ pub(crate) fn on_dealloc(inner: &MemoryProfilerInner, ptr: *mut u8, size: usize)
         size: size as u64,
         ts_ns: timestamp_ns,
     };
-    if inner.rings.free_queue.push(sample).is_err() {
-        inner.rings.dropped_frees.fetch_add(1, Ordering::Relaxed);
-    }
+    inner.rings.push_free(sample);
 }
 
 /// Allocator hook for realloc. Decomposes into free-of-old +

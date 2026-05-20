@@ -1,3 +1,4 @@
+#![deny(clippy::arithmetic_side_effects)]
 //! Shared geometric/Poisson sampling primitives.
 //!
 //! Used by the task-dump idle sampler (sampling on nanoseconds) and by the

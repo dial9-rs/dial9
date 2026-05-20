@@ -59,7 +59,7 @@ pub(crate) struct SharedState {
 }
 
 impl SharedState {
-    pub(super) fn new(start_time_ns: u64, task_dump_rng_seed: Option<u64>) -> Self {
+    pub(crate) fn new(start_time_ns: u64, task_dump_rng_seed: Option<u64>) -> Self {
         Self {
             enabled: AtomicBool::new(false),
             task_dumps_enabled: AtomicBool::new(false),
@@ -648,6 +648,10 @@ mod shuttle_tests {
 
         fn name(&self) -> &'static str {
             "mock"
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
         }
 
         // TODO: exercise on_worker_thread_start/on_thread_stop once shuttle
