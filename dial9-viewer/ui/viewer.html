@@ -4301,6 +4301,18 @@
 
                     let pollInfo = "";
                     let hasClickableStack = false;
+                    // Check if cursor is inside a block_in_place gap
+                    {
+                        const gapHit = (trace.blockInPlaceGaps || []).find(g =>
+                            g.workerId === workerId && ns >= g.startNs && ns < g.endNs
+                        );
+                        if (gapHit) {
+                            const gapNs = gapHit.endNs - gapHit.startNs;
+                            state = "⚠️ block_in_place";
+                            stateDetail = ` for <span class="value">${formatHumanDuration(gapNs)}</span>`;
+                            schedInfo = `<span class="label">Worker handed off:</span> <span class="value">tid ${gapHit.fromTid} → ${gapHit.toTid}</span><br>`;
+                        }
+                    }
                     {
                         const s = findSpanAt(spans.polls, ns);
                         if (s) {

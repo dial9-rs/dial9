@@ -10,47 +10,72 @@
 use dial9_tokio_telemetry::telemetry::{RotatingWriter, TracedRuntime};
 use std::time::Duration;
 
-/// Simulates a task that calls block_in_place to do synchronous I/O.
-async fn task_with_block_in_place(id: usize) {
-    // Do some async work first so the worker is clearly active.
-    tokio::time::sleep(Duration::from_millis(5)).await;
+/// CPU-intensive work that shows up in CPU profiles.
+fn burn_cpu(millis: u64) {
+    let start = std::time::Instant::now();
+    let mut x: u64 = 1;
+    while start.elapsed() < Duration::from_millis(millis) {
+        x = x.wrapping_mul(6364136223846793005).wrapping_add(1);
+    }
+    std::hint::black_box(x);
+}
 
-    // block_in_place: the worker hands off its core to a replacement thread.
+/// Task that burns CPU, then calls block_in_place, then burns more CPU.
+async fn task_with_block_in_place(id: usize) {
+    // Phase 1: CPU work visible in profiles (attributed to this worker).
+    burn_cpu(100);
+    tokio::task::yield_now().await;
+
+    // Phase 2: block_in_place — triggers worker handoff.
     tokio::task::block_in_place(|| {
-        // Simulate blocking work (e.g., synchronous file I/O).
-        std::thread::sleep(Duration::from_millis(50));
+        // Blocking work inside block_in_place.
+        std::thread::sleep(Duration::from_millis(100));
     });
 
-    // More async work after block_in_place returns.
-    tokio::time::sleep(Duration::from_millis(5)).await;
+    // Phase 3: More CPU work after block_in_place returns.
+    burn_cpu(100);
+    tokio::task::yield_now().await;
     println!("Task {id} done");
 }
 
-/// Normal async task that keeps workers busy between block_in_place calls.
-async fn background_work() {
-    for _ in 0..20 {
+/// Background CPU work to keep all workers busy and generating samples.
+async fn background_burn(id: usize) {
+    for _ in 0..10 {
+        burn_cpu(20);
         tokio::task::yield_now().await;
-        tokio::time::sleep(Duration::from_millis(2)).await;
+        tokio::time::sleep(Duration::from_millis(5)).await;
     }
+    println!("Background {id} done");
 }
 
 fn main() {
     let mut builder = tokio::runtime::Builder::new_multi_thread();
-    builder.worker_threads(2).enable_all();
+    builder.worker_threads(4).enable_all();
 
-    let writer = RotatingWriter::single_file("block_in_place_trace.bin").unwrap();
-    let (runtime, _guard) = TracedRuntime::builder()
+    let writer = RotatingWriter::builder()
+        .base_path("block_in_place_trace.bin")
+        .max_file_size(100 * 1024 * 1024)
+        .max_total_size(500 * 1024 * 1024)
+        .build()
+        .unwrap();
+    let (runtime, guard) = TracedRuntime::builder()
+        .with_trace_path("block_in_place_trace.bin")
         .with_task_tracking(true)
         .with_cpu_profiling(Default::default())
         .build_and_start(builder, writer)
         .unwrap();
 
     runtime.block_on(async {
-        // Spawn background work to keep workers active.
-        let bg: Vec<_> = (0..4).map(|_| tokio::spawn(background_work())).collect();
+        // Background work on all workers to generate CPU samples.
+        let bg: Vec<_> = (0..8)
+            .map(|i| tokio::spawn(background_burn(i)))
+            .collect();
+
+        // Let background work establish CPU sample baseline.
+        tokio::time::sleep(Duration::from_millis(200)).await;
 
         // Spawn tasks that call block_in_place.
-        let bip: Vec<_> = (0..3)
+        let bip: Vec<_> = (0..2)
             .map(|i| tokio::spawn(task_with_block_in_place(i)))
             .collect();
 
@@ -60,7 +85,14 @@ fn main() {
         for t in bg {
             let _ = t.await;
         }
+
+        // Final burst of CPU work to confirm attribution is correct after.
+        tokio::time::sleep(Duration::from_millis(100)).await;
     });
 
-    println!("Trace written to block_in_place_trace.bin");
+    drop(runtime);
+    // Graceful shutdown seals the final segment and runs symbolization.
+    guard.graceful_shutdown(Duration::from_secs(10)).ok();
+
+    println!("Trace written to block_in_place_trace.*.bin");
 }
