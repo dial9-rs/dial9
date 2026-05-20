@@ -3,7 +3,7 @@
 //!
 //! # Soundness contract
 //!
-//! Every function in this module must be **allocator-quiet** — it must not
+//! Every function in this module must be **allocation-free** — it must not
 //! allocate, deallocate, lock a mutex, call `tracing::warn!`, or do
 //! anything else that could trigger another allocation while we are
 //! inside `GlobalAlloc::alloc`. Any allocation here would re-enter our
@@ -102,12 +102,12 @@ fn stamp(mode: TimestampMode) -> u64 {
 /// Allocator hook: called from `Dial9Allocator::alloc` after the inner
 /// allocation succeeds (`ptr` is non-null).
 ///
-/// SAFETY: must be allocator-quiet — see module docs.
+/// SAFETY: must be allocation-free — see module docs.
 #[inline]
 pub(crate) fn on_alloc(inner: &MemoryProfilerInner, ptr: *mut u8, size: usize) {
     // `try_with` returns `Err` if the TLS slot is being destroyed during
     // thread teardown — silently skip those allocations rather than
-    // risking UB. Logging is forbidden here (allocator-quiet contract).
+    // risking UB. Logging is forbidden here (allocation-free contract).
     let _ = SAMPLE_STATE.try_with(|cell| {
         // `try_borrow_mut` is the reentrancy guard: if the current
         // thread is already inside `on_alloc` higher up the stack,
@@ -174,7 +174,7 @@ pub(crate) fn on_alloc(inner: &MemoryProfilerInner, ptr: *mut u8, size: usize) {
 
 /// Allocator hook for dealloc. No-op when liveset tracking is off.
 ///
-/// SAFETY: must be allocator-quiet — see module docs.
+/// SAFETY: must be allocation-free — see module docs.
 #[inline]
 pub(crate) fn on_dealloc(inner: &MemoryProfilerInner, ptr: *mut u8, _size: usize) {
     if !inner.track_liveset {
@@ -197,7 +197,7 @@ pub(crate) fn on_dealloc(inner: &MemoryProfilerInner, ptr: *mut u8, _size: usize
 /// otherwise the old pointer is still live and must not be recorded
 /// as freed.
 ///
-/// SAFETY: must be allocator-quiet — see module docs.
+/// SAFETY: must be allocation-free — see module docs.
 #[inline]
 pub(crate) fn on_realloc(
     inner: &MemoryProfilerInner,

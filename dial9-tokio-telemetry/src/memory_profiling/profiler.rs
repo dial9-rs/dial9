@@ -1,4 +1,4 @@
-//! `MemoryProfiler::install()` — the install-once entry point per design §8.
+//! `MemoryProfiler::install()` — the install-once entry point.
 
 use crate::memory_profiling::config::{MemoryProfilingConfig, TimestampMode};
 use crate::memory_profiling::ring::{DEFAULT_MAX_FRAMES, RawAlloc, RingBuffers};
@@ -11,10 +11,11 @@ use std::sync::{Arc, OnceLock};
 /// Process-global state for the active memory profiler.
 ///
 /// Published via `OnceLock` exactly once per process. Never reclaimed
-/// (see design §8: any thread's allocator hook may be reading this).
+/// because any thread's allocator hook may be reading this.
 #[allow(dead_code)]
 pub(crate) struct MemoryProfilerInner {
     pub(crate) unwinder: Unwinder,
+    /// Prevents `SharedState` from being dropped while the profiler is active.
     pub(crate) handle: TelemetryHandle,
     pub(crate) rings: Arc<RingBuffers>,
     pub(crate) sample_rate_bytes: u64,
@@ -93,7 +94,7 @@ impl std::error::Error for InstallError {
 /// Use `MemoryProfiler::from_config(cfg).install(handle)` or
 /// `MemoryProfiler::with_defaults().install(handle)`.
 ///
-/// Install is permanent for the life of the process (design §8).
+/// Install is permanent for the life of the process.
 #[derive(Debug)]
 pub struct MemoryProfiler {
     config: MemoryProfilingConfig,

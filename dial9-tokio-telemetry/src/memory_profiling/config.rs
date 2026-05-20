@@ -1,23 +1,20 @@
-//! `MemoryProfilingConfig` and the `TimestampMode` enum (design §8).
+//! Configuration types for the memory profiler.
 
 /// Default mean bytes-between-samples — geometric sampling rate.
 ///
 /// At 512 KiB, a service doing 1 GB/s of allocation generates ~2000
-/// samples/sec — plenty of signal, trivial overhead. See design §1.
+/// samples/sec — plenty of signal, trivial overhead.
 pub const DEFAULT_SAMPLE_RATE_BYTES: u64 = 512 * 1024;
 
-/// Default number of `RawAlloc` slots in the producer-to-consolidator
-/// alloc ring. See design §5 "Sizing the ring".
+/// Default number of slots in the producer-to-consolidator alloc ring.
 pub const DEFAULT_RING_CAPACITY: usize = 4096;
 
 /// How `AllocEvent.timestamp_ns` is populated.
-///
-/// See design §8 for the full motivation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub enum TimestampMode {
     /// Reuse the timestamp from the most recent `PollStart` on this thread
-    /// (~2 ns TLS load). Falls back to `clock_monotonic_ns()` when called
+    /// (~5 ns TLS load). Falls back to `clock_monotonic_ns()` when called
     /// outside a task poll (e.g., between polls, or on non-worker threads).
     #[default]
     ReusePollStart,
@@ -31,7 +28,7 @@ pub enum TimestampMode {
 
 /// Configuration for the memory profiler.
 ///
-/// Built via `MemoryProfilingConfig::builder()...build()`. See design §8.
+/// Built via `MemoryProfilingConfig::builder()...build()`.
 #[derive(Debug, Clone, bon::Builder)]
 #[non_exhaustive]
 pub struct MemoryProfilingConfig {

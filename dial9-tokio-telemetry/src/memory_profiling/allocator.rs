@@ -1,18 +1,5 @@
-//! `Dial9Allocator<A>` — a `GlobalAlloc` wrapper that hooks every allocation
-//! and deallocation to feed dial9's memory profiler.
-//!
-//! The wrapper checks `ACTIVE.get()` on every alloc/dealloc/realloc. When
-//! `None` (profiler not installed), all methods are pure passthrough — one
-//! Acquire load + null check (~1 ns). When `Some`, the hook runs the
-//! geometric sampling decision and, on the sampled path (~0.1% of allocs
-//! at the default 512 KiB rate), captures a stack and pushes a fixed-size
-//! POD record into the alloc queue. Per-thread state lives in TLS; no
-//! locks, no allocation, no syscalls on the unsampled path.
-//!
-//! See `docs/design/memory-profiling.md` §4 for the contract; in particular:
-//! realloc is treated as a free-of-old plus alloc-of-new, with the hooks only
-//! firing **after the inner realloc succeeds** (otherwise the old pointer is
-//! still live and must not be recorded as freed).
+//! `Dial9Allocator<A>` — a `GlobalAlloc` wrapper that feeds dial9's memory
+//! profiler.
 
 use std::alloc::{GlobalAlloc, Layout};
 
@@ -53,15 +40,11 @@ use std::alloc::{GlobalAlloc, Layout};
 ///
 /// # Cost
 ///
-/// Until `MemoryProfiler::install()` has been called, this is a zero-cost
-/// passthrough — the hook (added in a later commit) checks an
-/// `OnceLock<MemoryProfilerInner>` which returns `None` and skips all
-/// profiling work. After install, ~99.9% of allocations take the unsampled
-/// fast path: ~5 ns total per allocation (one Acquire load, one TLS load,
-/// one subtract+compare on the per-thread sample counter). The remaining
-/// ~0.1% of sampled allocations pay ~1 µs for stack capture and event
-/// emission. See `docs/design/memory-profiling.md` §9 for the full
-/// overhead budget.
+/// Until [`MemoryProfiler::install()`](super::MemoryProfiler::install) has
+/// been called, this is a zero-cost passthrough (~1 ns Acquire load +
+/// null check). After install, ~99.9% of allocations take the unsampled
+/// fast path (~5 ns). The remaining ~0.1% of sampled allocations pay
+/// ~1 µs for stack capture and event emission.
 #[derive(Debug)]
 pub struct Dial9Allocator<A = std::alloc::System>(A);
 
@@ -84,13 +67,13 @@ impl<A: GlobalAlloc> Dial9Allocator<A> {
 
 // SAFETY: forwarding to the inner `GlobalAlloc` impl. The `unsafe` contract on
 // each method is exactly the same as the inner allocator's. The hook
-// invocations are allocator-quiet by construction — see
+// invocations are allocation-free by construction — see
 // [`crate::memory_profiling::hook`] module docs and design §6.
 unsafe impl<A: GlobalAlloc> GlobalAlloc for Dial9Allocator<A> {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         // SAFETY: `layout` validity contract forwarded to the inner allocator.
         let ptr = unsafe { self.0.alloc(layout) };
-        // SAFETY: `on_alloc` is allocator-quiet (see hook module docs) — it
+        // SAFETY: `on_alloc` is allocation-free (see hook module docs) — it
         // performs no allocations, takes no locks, and only accesses lock-free
         // data structures. `ptr` is non-null (checked below) and valid.
         if !ptr.is_null()
@@ -102,7 +85,7 @@ unsafe impl<A: GlobalAlloc> GlobalAlloc for Dial9Allocator<A> {
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        // SAFETY: `on_dealloc` is allocator-quiet (see hook module docs) — it
+        // SAFETY: `on_dealloc` is allocation-free (see hook module docs) — it
         // performs no allocations, takes no locks, and only accesses lock-free
         // data structures. `ptr` is valid per the `dealloc` contract.
         if let Some(inner) = crate::memory_profiling::profiler::ACTIVE.get() {
@@ -119,7 +102,7 @@ unsafe impl<A: GlobalAlloc> GlobalAlloc for Dial9Allocator<A> {
         // — otherwise the old pointer is still live and must not be
         // recorded as freed (design §3, "realloc handling").
         let new_ptr = unsafe { self.0.realloc(ptr, old_layout, new_size) };
-        // SAFETY: `on_realloc` is allocator-quiet (see hook module docs) — it
+        // SAFETY: `on_realloc` is allocation-free (see hook module docs) — it
         // performs no allocations, takes no locks, and only accesses lock-free
         // data structures. `new_ptr` is non-null (checked below) and valid.
         if !new_ptr.is_null()
@@ -139,7 +122,7 @@ unsafe impl<A: GlobalAlloc> GlobalAlloc for Dial9Allocator<A> {
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
         // SAFETY: forwarded to the inner allocator.
         let ptr = unsafe { self.0.alloc_zeroed(layout) };
-        // SAFETY: `on_alloc` is allocator-quiet (see hook module docs) — it
+        // SAFETY: `on_alloc` is allocation-free (see hook module docs) — it
         // performs no allocations, takes no locks, and only accesses lock-free
         // data structures. `ptr` is non-null (checked below) and valid.
         if !ptr.is_null()

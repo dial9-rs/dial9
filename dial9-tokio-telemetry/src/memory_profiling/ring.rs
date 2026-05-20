@@ -8,11 +8,14 @@ use std::sync::atomic::Ordering;
 /// Default maximum frames captured per allocation. 128 × 8 B = 1 KiB stack budget.
 pub(crate) const DEFAULT_MAX_FRAMES: usize = 128;
 
-/// Default number of `RawAlloc` slots. ~4 MiB total at 128 frames (design §5).
+/// Default number of `RawAlloc` slots. ~4 MiB total at 128 frames.
 pub(crate) const DEFAULT_ALLOC_QUEUE_CAPACITY: usize = 4096;
 
-/// Default number of `RawFree` slots. 8× the alloc queue (design §9).
-#[expect(dead_code, reason = "wired up by allocator hook in a later commit")]
+/// Default number of `RawFree` slots. 8× the alloc queue.
+#[expect(
+    dead_code,
+    reason = "documents the sizing rationale; config uses ring_capacity * 8"
+)]
 pub(crate) const DEFAULT_FREE_QUEUE_CAPACITY: usize = DEFAULT_ALLOC_QUEUE_CAPACITY * 8;
 
 /// One sampled allocation captured on the producer thread.
@@ -30,7 +33,7 @@ pub(crate) struct RawAlloc {
 }
 
 impl RawAlloc {
-    #[expect(dead_code, reason = "used by allocator hook in a later commit")]
+    #[expect(dead_code, reason = "available for future consumers of RawAlloc")]
     pub(crate) fn frames(&self) -> &[u64] {
         let count = (self.frame_count as usize).min(DEFAULT_MAX_FRAMES);
         &self.frames[..count]
@@ -69,7 +72,7 @@ impl RingBuffers {
 
     /// Push a sampled allocation, incrementing the drop counter on overflow.
     ///
-    /// Allocator-quiet: only `ArrayQueue::push` (lock-free CAS) +
+    /// Allocation-free: only `ArrayQueue::push` (lock-free CAS) +
     /// `AtomicU64::fetch_add`.
     pub(crate) fn push_alloc(&self, sample: RawAlloc) {
         if self.alloc_queue.push(sample).is_err() {
@@ -79,7 +82,7 @@ impl RingBuffers {
 
     /// Push a free record, incrementing the drop counter on overflow.
     ///
-    /// Allocator-quiet: only `ArrayQueue::push` (lock-free CAS) +
+    /// Allocation-free: only `ArrayQueue::push` (lock-free CAS) +
     /// `AtomicU64::fetch_add`.
     pub(crate) fn push_free(&self, sample: RawFree) {
         if self.free_queue.push(sample).is_err() {
