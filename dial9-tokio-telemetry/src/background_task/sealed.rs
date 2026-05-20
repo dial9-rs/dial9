@@ -226,6 +226,31 @@ pub(crate) fn find_sealed_segments(dir: &Path, stem: &str) -> std::io::Result<Ve
     Ok(segments)
 }
 
+/// Trace-segment artifact found in the trace directory: a retained segment
+/// (`.bin` or write-back sibling like `.bin.gz`) or a stale `.bin.active`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SegmentArtifact {
+    Retained { index: u32 },
+    Active,
+}
+
+/// Classify a filename against the `{stem}.{index}.bin*` family.
+pub(crate) fn parse_segment_artifact(file_name: &str, stem: &str) -> Option<SegmentArtifact> {
+    let rest = file_name.strip_prefix(stem)?.strip_prefix('.')?;
+    if let Some(idx) = rest.strip_suffix(".bin.active")
+        && idx.parse::<u32>().is_ok()
+    {
+        return Some(SegmentArtifact::Active);
+    }
+    let (index, suffix) = rest.split_once(".bin")?;
+    if !suffix.is_empty() && !suffix.starts_with('.') {
+        return None;
+    }
+    Some(SegmentArtifact::Retained {
+        index: index.parse().ok()?,
+    })
+}
+
 /// Parse segment index from a filename like `trace.3.bin`.
 /// Returns `None` if the filename doesn't match `{stem}.{index}.bin`.
 fn parse_segment_index(file_name: &str, stem: &str) -> Option<u32> {
@@ -481,6 +506,24 @@ mod tests {
             Err(ParseTimestampError::EndOfStream { .. })
                 | Err(ParseTimestampError::NoAnchorInFirst10Events)
         ));
+    }
+
+    #[test]
+    fn parse_segment_artifact_classifies_family() {
+        check!(
+            parse_segment_artifact("trace.0.bin", "trace")
+                == Some(SegmentArtifact::Retained { index: 0 })
+        );
+        check!(
+            parse_segment_artifact("trace.42.bin.gz", "trace")
+                == Some(SegmentArtifact::Retained { index: 42 })
+        );
+        check!(
+            parse_segment_artifact("trace.5.bin.active", "trace") == Some(SegmentArtifact::Active)
+        );
+        check!(parse_segment_artifact("trace.bin", "trace").is_none());
+        check!(parse_segment_artifact("other.0.bin", "trace").is_none());
+        check!(parse_segment_artifact("trace.0.binx", "trace").is_none());
     }
 
     #[test]

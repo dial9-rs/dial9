@@ -4,17 +4,19 @@
 //! dispenses each sealed file at most once per `DiskFs` instance, plus
 //! eviction accounting for the writer's byte-budget shedding.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::background_task::sealed::{SealedSegment, SegmentRef, find_sealed_segments};
+use crate::background_task::sealed::{
+    SealedSegment, SegmentArtifact, SegmentRef, find_sealed_segments, parse_segment_artifact,
+};
 use crate::primitives::sync::Mutex;
 use crate::primitives::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use crate::rate_limit::rate_limited;
 
-use super::{ActiveHandle, RemoveReason, TakenFiles, TakenSegment};
+use super::{ActiveHandle, DiscoveredArtifacts, RemoveReason, TakenFiles, TakenSegment};
 
 /// Disk-backed filesystem state.
 ///
@@ -88,46 +90,8 @@ impl DiskFs {
     }
 
     pub(super) fn remove_sealed_inner(&self, seg: &SegmentRef, reason: RemoveReason) {
-        let Some(path) = seg.disk_path() else {
-            return;
-        };
-        match std::fs::remove_file(path) {
-            Ok(()) => {}
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                // Scan for extension-renamed siblings (e.g. `.gz` from WriteBack).
-                if let Some(file_name) = path.file_name().and_then(|n| n.to_str())
-                    && let Some(parent) = path.parent()
-                    && let Ok(entries) = std::fs::read_dir(parent)
-                {
-                    for entry in entries.flatten() {
-                        let name = entry.file_name();
-                        if let Some(name_str) = name.to_str()
-                            && name_str.starts_with(file_name)
-                            && name_str != file_name
-                            && let Err(e2) = std::fs::remove_file(entry.path())
-                        {
-                            rate_limited!(Duration::from_secs(60), {
-                                tracing::warn!(
-                                    target: "dial9_worker",
-                                    error = %e2,
-                                    path = %entry.path().display(),
-                                    "failed to evict renamed trace segment sibling"
-                                );
-                            });
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                rate_limited!(Duration::from_secs(60), {
-                    tracing::warn!(
-                        target: "dial9_worker",
-                        error = %e,
-                        path = %path.display(),
-                        "failed to remove sealed segment"
-                    );
-                });
-            }
+        if let Some(path) = seg.disk_path() {
+            remove_segment_family(path);
         }
         self.claimed.lock().unwrap().remove(&seg.index());
         if matches!(reason, RemoveReason::Eviction) {
@@ -255,6 +219,125 @@ impl DiskFs {
     }
 }
 
+impl DiskFs {
+    /// Scan `self.dir` and seed `DiscoveredArtifacts`. 
+    /// Sums whole-family sizes (`.bin` + `.bin.gz` + future write-back suffixes) per index
+    /// so the eviction budget covers post-processed artifacts and unlinks
+    /// stale `.bin.active` orphans from dead writers.
+    pub(super) fn discover_existing_inner(&self) -> io::Result<DiscoveredArtifacts> {
+        let mut retained_sizes: BTreeMap<u32, u64> = BTreeMap::new();
+
+        if !self.dir.exists() {
+            return Ok(DiscoveredArtifacts::default());
+        }
+        for entry in std::fs::read_dir(&self.dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            let metadata = match entry.metadata() {
+                Ok(m) => m,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(e),
+            };
+            if !metadata.is_file() {
+                continue;
+            }
+            let Some(file_name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            match parse_segment_artifact(file_name, &self.stem) {
+                Some(SegmentArtifact::Retained { index }) => {
+                    *retained_sizes.entry(index).or_default() += metadata.len();
+                }
+                Some(SegmentArtifact::Active) => {
+                    tracing::warn!(
+                        target: "dial9_worker",
+                        path = %path.display(),
+                        "discarding stale active trace segment from a previous writer"
+                    );
+                    match std::fs::remove_file(&path) {
+                        Ok(()) => {}
+                        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                        Err(e) => return Err(e),
+                    }
+                }
+                None => {}
+            }
+        }
+
+        let next_active_index = match retained_sizes.last_key_value() {
+            Some((&idx, _)) => idx
+                .checked_add(1)
+                .ok_or_else(|| io::Error::other("trace segment index overflow"))?,
+            None => 0,
+        };
+        let closed_files = retained_sizes
+            .into_iter()
+            .map(|(index, size)| {
+                let path = self.dir.join(format!("{}.{}.bin", self.stem, index));
+                (SegmentRef::Disk(SealedSegment { path, index }), size)
+            })
+            .collect();
+
+        Ok(DiscoveredArtifacts {
+            closed_files,
+            next_active_index,
+        })
+    }
+}
+
+/// Unlink `path` plus any sibling whose name extends `{file_name}.`
+/// (e.g. `.gz`).
+fn remove_segment_family(path: &Path) {
+    let Some(file_name) = path.file_name().and_then(|n| n.to_str()) else {
+        return;
+    };
+    let Some(parent) = path.parent() else {
+        return;
+    };
+    let entries = match std::fs::read_dir(parent) {
+        Ok(e) => e,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return,
+        Err(e) => {
+            rate_limited!(Duration::from_secs(60), {
+                tracing::warn!(
+                    target: "dial9_worker",
+                    error = %e,
+                    parent = %parent.display(),
+                    "failed to scan parent for trace family eviction"
+                );
+            });
+            return;
+        }
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name_str) = name.to_str() else {
+            continue;
+        };
+        let is_family = name_str == file_name
+            || name_str
+                .strip_prefix(file_name)
+                .is_some_and(|s| s.starts_with('.'));
+        if !is_family {
+            continue;
+        }
+        match std::fs::remove_file(entry.path()) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => {
+                rate_limited!(Duration::from_secs(60), {
+                    tracing::warn!(
+                        target: "dial9_worker",
+                        error = %e,
+                        path = %entry.path().display(),
+                        "failed to remove trace artifact"
+                    );
+                });
+            }
+        }
+    }
+}
+
 fn strip_active_suffix(path: &Path) -> PathBuf {
     let s = path.to_str().unwrap_or_default();
     if let Some(without) = s.strip_suffix(".active") {
@@ -372,6 +455,74 @@ mod tests {
         fs.remove_sealed(&seg, RemoveReason::Terminal);
         let t2 = fs.take_files();
         check!(t2.dropped_segments == 0);
+    }
+
+    #[test]
+    fn discover_existing_empty_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("trace.bin");
+        let disk = DiskFs::from_base_path(&base);
+        let d = disk.discover_existing_inner().unwrap();
+        check!(d.next_active_index == 0);
+        check!(d.closed_files.is_empty());
+    }
+
+    #[test]
+    fn discover_existing_sums_artifact_family_per_index() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("trace.0.bin"), vec![0u8; 100]).unwrap();
+        std::fs::write(dir.path().join("trace.0.bin.gz"), vec![0u8; 30]).unwrap();
+        std::fs::write(dir.path().join("trace.2.bin"), vec![0u8; 50]).unwrap();
+        let base = dir.path().join("trace.bin");
+        let disk = DiskFs::from_base_path(&base);
+        let d = disk.discover_existing_inner().unwrap();
+        check!(d.next_active_index == 3, "max(0,2)+1 = 3");
+        let by_index: std::collections::HashMap<u32, u64> = d
+            .closed_files
+            .iter()
+            .map(|(seg, size)| (seg.index(), *size))
+            .collect();
+        check!(by_index.get(&0) == Some(&130), ".bin + .bin.gz summed");
+        check!(by_index.get(&2) == Some(&50));
+    }
+
+    #[test]
+    fn discover_existing_discards_stale_active() {
+        let dir = tempfile::tempdir().unwrap();
+        let stale = dir.path().join("trace.7.bin.active");
+        std::fs::write(&stale, b"orphan").unwrap();
+        let base = dir.path().join("trace.bin");
+        let disk = DiskFs::from_base_path(&base);
+        let _ = disk.discover_existing_inner().unwrap();
+        check!(!stale.exists(), "stale .active must be discarded");
+    }
+
+    #[test]
+    fn discover_existing_ignores_unrelated_files() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("other.0.bin"), b"x").unwrap();
+        std::fs::write(dir.path().join("README"), b"x").unwrap();
+        std::fs::write(dir.path().join("trace.0.bin"), b"x").unwrap();
+        let base = dir.path().join("trace.bin");
+        let disk = DiskFs::from_base_path(&base);
+        let d = disk.discover_existing_inner().unwrap();
+        check!(d.closed_files.len() == 1);
+        check!(d.next_active_index == 1);
+    }
+
+    #[test]
+    fn remove_segment_family_removes_bin_and_gz_siblings() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("trace.3.bin");
+        let gz = dir.path().join("trace.3.bin.gz");
+        let unrelated = dir.path().join("trace.4.bin");
+        std::fs::write(&bin, b"x").unwrap();
+        std::fs::write(&gz, b"x").unwrap();
+        std::fs::write(&unrelated, b"x").unwrap();
+        remove_segment_family(&bin);
+        check!(!bin.exists());
+        check!(!gz.exists());
+        check!(unrelated.exists(), "sibling with different index untouched");
     }
 
     #[test]

@@ -307,23 +307,33 @@ impl RotatingWriter<Disk> {
             return Err(std::io::Error::other("Rotation period must not be zero"));
         }
         let base_path = base_path.into();
+        if let Some(parent) = base_path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent)?;
+        }
         let fs = Fs::disk(&base_path);
-        let first_path = Self::active_path(&base_path, 0);
+        let discovered = fs.discover_existing()?;
+        let first_index = discovered.next_active_index;
+        let next_index = first_index
+            .checked_add(1)
+            .ok_or_else(|| std::io::Error::other("trace segment index overflow"))?;
+        let first_path = Self::active_path(&base_path, first_index);
         let handle = fs.create(&first_path)?;
         let state = Self::prepare_segment(BufWriter::new(handle))?;
         let now = time_source().system_time().as_std();
         let drain_interval = rotation_period.min(DEFAULT_DRAIN_INTERVAL);
 
-        Ok(Self {
+        let mut writer = Self {
             base_path,
             max_file_size,
             max_total_size,
             rotation_period,
             next_rotation_time: Self::next_boundary(now, rotation_period),
-            closed_files: VecDeque::new(),
+            closed_files: discovered.closed_files,
             active_path: first_path,
             state,
-            next_index: 1,
+            next_index,
             did_rotate: false,
             segment_metadata,
             dropped_events: 0,
@@ -333,7 +343,11 @@ impl RotatingWriter<Disk> {
             fs,
             tracks_closed_files: true,
             _mode: PhantomData,
-        })
+        };
+        // Enforce the budget immediately so artifacts from prior writer
+        // lifetimes don't push us over the cap before we even rotate once.
+        writer.evict_oldest()?;
+        Ok(writer)
     }
 
     /// Create a writer that writes to a single file with no rotation or eviction.
@@ -760,6 +774,13 @@ impl<M: WriterMode> TraceWriter for RotatingWriter<M> {
             }
         }
 
+        // Final sealed segment must count toward the eviction budget too,
+        // otherwise finalize can leave the directory over `max_total_size`.
+        // No-ops on memory mode (`tracks_closed_files == false`).
+        if let Err(e) = self.evict_oldest() {
+            self.fs.mark_writer_done();
+            return Err(e);
+        }
         self.fs.mark_writer_done();
         Ok(())
     }
@@ -2281,6 +2302,106 @@ mod tests {
         tokio::time::advance(Duration::from_millis(5)).await;
         let _ = writer.drained();
         assert!(!writer.should_drain());
+    }
+
+    /// Across a process restart, retained `.bin`/`.bin.gz` artifacts from the
+    /// previous lifetime must count toward `max_total_size`. Without this, a
+    /// crash-restart loop grows the trace directory unbounded.
+    #[test]
+    fn test_restart_seeds_closed_files_and_evicts() {
+        let dir = TempDir::new().unwrap();
+        let base = dir.path().join("trace");
+        // Lifetime 1: write a few sealed segments.
+        let one_event = single_event_file_size();
+        {
+            let mut w = RotatingWriter::new(&base, one_event, 100_000).unwrap();
+            for _ in 0..4 {
+                w.write_encoded_batch(&test_batch()).unwrap();
+            }
+            w.finalize().unwrap();
+        }
+        let bin_count_before = (0..20)
+            .filter(|i| std::path::Path::new(&rotating_file(&base, *i)).exists())
+            .count();
+        assert!(
+            bin_count_before >= 2,
+            "lifetime 1 should leave multiple sealed segments"
+        );
+
+        // Lifetime 2: shrink the budget so existing artifacts must be evicted.
+        let new_budget = one_event + 1; // fits ~1 retained segment + the new active one
+        let writer = RotatingWriter::new(&base, one_event, new_budget).unwrap();
+        // Discovery + immediate evict_oldest should have shed older segments.
+        assert!(
+            total_disk_usage(dir.path()) <= new_budget,
+            "disk usage exceeds shrunk budget after restart: {}",
+            total_disk_usage(dir.path())
+        );
+        // Next active index must not collide with retained segments.
+        let next_active_path = writer.current_active_path();
+        assert!(next_active_path.exists());
+        assert!(
+            next_active_path
+                .to_str()
+                .is_some_and(|s| s.ends_with(".bin.active"))
+        );
+    }
+
+    /// Stale `.active` files from a dead writer can't be processed by the
+    /// worker — they must be cleaned up on startup so the next writer doesn't
+    /// trip over orphaned indices.
+    #[test]
+    fn test_restart_discards_stale_active_files() {
+        let dir = TempDir::new().unwrap();
+        let base = dir.path().join("trace");
+        // Simulate an orphan from a previous, crashed writer.
+        let orphan = dir.path().join("trace.99.bin.active");
+        std::fs::write(&orphan, b"orphaned").unwrap();
+
+        let _w = RotatingWriter::new(&base, 1024, 100_000).unwrap();
+        assert!(
+            !orphan.exists(),
+            "stale .active should be discarded on construction"
+        );
+    }
+
+    /// `.bin.gz` write-back siblings must count toward the eviction budget so
+    /// post-processing doesn't push retention past the cap.
+    #[test]
+    fn test_restart_counts_gz_siblings_toward_budget() {
+        let dir = TempDir::new().unwrap();
+        let base = dir.path().join("trace");
+        // Simulate a previous lifetime where WriteBack produced a .bin.gz.
+        let bin = dir.path().join("trace.0.bin");
+        let gz = dir.path().join("trace.0.bin.gz");
+        std::fs::write(&bin, vec![0u8; 4096]).unwrap();
+        std::fs::write(&gz, vec![0u8; 1024]).unwrap();
+
+        // Budget too small for both. Restart must evict the whole family.
+        let _w = RotatingWriter::new(&base, 100_000, 100).unwrap();
+        assert!(!bin.exists(), ".bin should be evicted under restart budget");
+        assert!(!gz.exists(), ".bin.gz must be evicted with its .bin family");
+    }
+
+    /// finalize() must run eviction so the final sealed segment counts toward
+    /// the budget. Without it, finalize can leave the directory over cap.
+    #[test]
+    fn test_finalize_evicts_to_budget() {
+        let dir = TempDir::new().unwrap();
+        let base = dir.path().join("trace");
+        let one_event = single_event_file_size();
+        let max_total_size = one_event * 2;
+        let mut writer = RotatingWriter::new(&base, one_event, max_total_size).unwrap();
+
+        for _ in 0..10 {
+            writer.write_encoded_batch(&test_batch()).unwrap();
+        }
+        writer.finalize().unwrap();
+
+        assert!(
+            total_disk_usage(dir.path()) <= max_total_size,
+            "finalize must leave disk usage within budget"
+        );
     }
 
     #[test]

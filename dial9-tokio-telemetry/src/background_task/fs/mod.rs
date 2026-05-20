@@ -6,6 +6,7 @@
 //! - `Fs::Disk(DiskFs)`: real filesystem. See [`disk`].
 //! - `Fs::Mem(MemFs)`: in-process ring channel. See [`mem`].
 
+use std::collections::VecDeque;
 use std::io::{self, Write};
 use std::path::Path;
 use std::time::Duration;
@@ -23,6 +24,13 @@ mod mem;
 
 use disk::DiskFs;
 use mem::{MemActiveWriter, MemFs};
+
+/// Retained trace artifacts found at writer construction.
+#[derive(Debug, Default)]
+pub(crate) struct DiscoveredArtifacts {
+    pub(crate) closed_files: VecDeque<(SegmentRef, u64)>,
+    pub(crate) next_active_index: u32,
+}
 
 pub(crate) enum RemoveReason {
     /// Writer-side backpressure shed. Counts toward `dropped_segments`.
@@ -156,6 +164,15 @@ impl Fs {
 
     pub(crate) fn memory(max_total_size: u64) -> Arc<Self> {
         Arc::new(Fs::Mem(MemFs::with_capacity(max_total_size)))
+    }
+
+    /// Scan for trace artifacts left by previous writer lifetimes.
+    /// Memory: default (no restart story).
+    pub(crate) fn discover_existing(&self) -> io::Result<DiscoveredArtifacts> {
+        match self {
+            Fs::Disk(d) => d.discover_existing_inner(),
+            Fs::Mem(_) => Ok(DiscoveredArtifacts::default()),
+        }
     }
 
     /// Seal `active_handle` as segment `index`.
