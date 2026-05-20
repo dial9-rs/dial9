@@ -2195,7 +2195,7 @@ mod worker_pipeline_tests {
         }
 
         for iter in 0..ITERS {
-            let fs = Fs::memory(8 * 1024 * 1024);
+            let fs = Fs::memory(64 * 1024, 8 * 1024 * 1024).unwrap();
             let processed = Arc::new(AtomicUsize::new(0));
             let stop = tokio_util::sync::CancellationToken::new();
 

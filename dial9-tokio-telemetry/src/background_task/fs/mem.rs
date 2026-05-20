@@ -1,9 +1,10 @@
 //! In-memory `Fs` variant.
 //!
 //! `MemFs` keeps sealed segments in a bounded ring (`BoundedQueue`). The
-//! writer pushes via `seal`; the worker pops one segment per
-//! `take_files` cycle. Eviction is byte-budget driven: pushing past
-//! `max_total_size` sheds the oldest slots. The shutdown handoff rides
+//! writer pushes via `seal`, the worker pops one segment per
+//! `take_files` cycle.
+//! The ring is slot-bounded, slot count derives from `max_total_size / max_segment_size`.
+//! On overflow, `force_push` drops the oldest. The shutdown handoff rides
 //! `writer_done` (Acquire/Release) plus a `Notify` for wakeups (lost
 //! wakeup avoided via enable-before-recheck).
 
@@ -46,24 +47,12 @@ struct MemSealedSegment {
 
 struct MemChannel {
     queue: BoundedQueue<MemSealedSegment>,
-    queued_bytes: AtomicU64,
     in_flight_bytes: Arc<AtomicU64>,
     in_flight_count: Arc<AtomicU64>,
     dropped: AtomicU64,
     /// Set by `mark_writer_done`; observed by the worker's drain loop.
     writer_done: AtomicBool,
     notify: Notify,
-    max_total_size: u64,
-}
-
-impl MemChannel {
-    fn sub_queued(&self, n: u64) {
-        let prev = self.queued_bytes.fetch_sub(n, Ordering::AcqRel);
-        debug_assert!(
-            prev >= n,
-            "queued_bytes underflow: prev={prev} sub={n} (slot size double-counted)"
-        );
-    }
 }
 
 /// In-memory segment channel.
@@ -72,28 +61,27 @@ pub(crate) struct MemFs {
 }
 
 impl MemFs {
-    pub(crate) fn with_capacity(max_total_size: u64) -> Self {
-        // Slot cap is just a safety net. `max_total_size` is the real bound.
-        // Sized for ~`TYPICAL_SEGMENT_BYTES` segments; much smaller segments
-        // make the slot cap bind first, showing "slot cap overflow" drops
-        // instead of "byte budget" ones.
-        const TYPICAL_SEGMENT_BYTES: u64 = 4096;
-        const MIN_SLOTS: u64 = 8;
-        const SLOT_HEADROOM: u64 = 4;
-        let slot_cap =
-            ((max_total_size / TYPICAL_SEGMENT_BYTES).max(MIN_SLOTS) + SLOT_HEADROOM) as usize;
-        Self {
+    /// `max_segment_size` and `max_total_size` together fix the slot count.
+    /// Returns `Err(InvalidInput)` if `max_segment_size` is zero or larger
+    /// than `max_total_size` (no slot could fit a segment).
+    pub(crate) fn with_capacity(max_segment_size: u64, max_total_size: u64) -> io::Result<Self> {
+        if max_segment_size == 0 || max_segment_size > max_total_size {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "max_segment_size must be > 0 and <= max_total_size",
+            ));
+        }
+        let slot_cap = (max_total_size / max_segment_size) as usize;
+        Ok(Self {
             channel: Arc::new(MemChannel {
                 queue: BoundedQueue::new(slot_cap),
-                queued_bytes: AtomicU64::new(0),
                 in_flight_bytes: Arc::new(AtomicU64::new(0)),
                 in_flight_count: Arc::new(AtomicU64::new(0)),
                 dropped: AtomicU64::new(0),
                 writer_done: AtomicBool::new(false),
                 notify: Notify::new(),
-                max_total_size,
             }),
-        }
+        })
     }
 
     pub(super) fn create_handle(&self, _path: &Path) -> io::Result<ActiveHandle> {
@@ -115,40 +103,12 @@ impl MemFs {
         let size = bytes.len() as u64;
         let ch = &self.channel;
 
-        // Increment queued_bytes *before* force_push so the byte-budget loop
-        // below sees the updated total even when evicting the just-pushed slot.
-        ch.queued_bytes.fetch_add(size, Ordering::AcqRel);
-
         if let Some(evicted) = ch.queue.force_push(MemSealedSegment { index, size, bytes }) {
-            ch.sub_queued(evicted.size);
             ch.dropped.fetch_add(1, Ordering::Relaxed);
             rate_limited!(Duration::from_secs(60), {
                 tracing::warn!(
                     target: "dial9_worker",
-                    "memory segment evicted (slot cap overflow): segment {} dropped",
-                    evicted.index
-                );
-            });
-        }
-
-        // Shed oldest until under budget. `in_memory` guarantees
-        // max_segment_size <= max_total_size so a lone segment fits, but guard
-        // the `==` boundary: never drop the segment this call just sealed only
-        // because it alone tops the budget. Stay briefly over instead.
-        while ch.queued_bytes.load(Ordering::Acquire) > ch.max_total_size {
-            let Some(evicted) = ch.queue.pop() else { break };
-            if evicted.index == index {
-                // Queue is now empty (this was the oldest, i.e. only, slot),
-                // so force_push cannot trigger a re-eviction here.
-                ch.queue.force_push(evicted);
-                break;
-            }
-            ch.sub_queued(evicted.size);
-            ch.dropped.fetch_add(1, Ordering::Relaxed);
-            rate_limited!(Duration::from_secs(60), {
-                tracing::warn!(
-                    target: "dial9_worker",
-                    "memory segment evicted (byte budget): segment {} dropped",
+                    "memory segment evicted (ring full): segment {} dropped",
                     evicted.index
                 );
             });
@@ -172,7 +132,7 @@ impl MemFs {
             return TakenFiles {
                 segments: vec![],
                 ring_depth: Some(ch.queue.len() as u64),
-                ring_bytes: Some(ch.queued_bytes.load(Ordering::Relaxed)),
+                ring_bytes: None,
                 in_flight_count: ch.in_flight_count.load(Ordering::Relaxed),
                 in_flight_bytes: ch.in_flight_bytes.load(Ordering::Relaxed),
                 dropped_segments: dropped,
@@ -180,7 +140,6 @@ impl MemFs {
         };
 
         let size = slot.size;
-        ch.sub_queued(size);
         ch.in_flight_bytes.fetch_add(size, Ordering::AcqRel);
         ch.in_flight_count.fetch_add(1, Ordering::AcqRel);
 
@@ -201,7 +160,7 @@ impl MemFs {
         TakenFiles {
             segments: vec![taken],
             ring_depth: Some(ch.queue.len() as u64),
-            ring_bytes: Some(ch.queued_bytes.load(Ordering::Relaxed)),
+            ring_bytes: None,
             in_flight_count: ch.in_flight_count.load(Ordering::Relaxed),
             in_flight_bytes: ch.in_flight_bytes.load(Ordering::Relaxed),
             dropped_segments: dropped,
@@ -246,7 +205,7 @@ mod tests {
 
     #[test]
     fn mem_fs_seal_take_roundtrip() {
-        let mem = MemFs::with_capacity(1024 * 1024);
+        let mem = MemFs::with_capacity(64, 1024 * 1024).unwrap();
         let handle = mem
             .create_handle(Path::new("mem://trace.0.bin.active"))
             .unwrap();
@@ -272,9 +231,10 @@ mod tests {
     }
 
     #[test]
-    fn mem_fs_byte_budget_eviction() {
-        // Budget: 100 bytes. Push two 60-byte segments → oldest evicted.
-        let mem = MemFs::with_capacity(100);
+    fn mem_fs_slot_cap_eviction() {
+        // 60-byte segments at 100-byte total => slot_cap = 1.
+        // Pushing the second segment evicts the first.
+        let mem = MemFs::with_capacity(60, 100).unwrap();
 
         for index in 0..2u32 {
             let handle = mem.create_handle(Path::new("dummy")).unwrap();
@@ -287,38 +247,28 @@ mod tests {
         }
 
         check!(mem.channel.dropped.load(Ordering::SeqCst) == 1);
-        check!(
-            mem.channel.queued_bytes.load(Ordering::SeqCst) <= 100,
-            "queued_bytes must not exceed max_total_size"
-        );
+        // Only the most recent segment remains.
+        let t = mem.take_files_inner();
+        check!(t.segments.len() == 1);
+        check!(t.segments[0].seg_ref.index() == 1);
     }
 
     #[test]
-    fn mem_fs_lone_oversized_segment_not_evicted() {
-        // Budget 50, single 60-byte segment > budget. The byte-budget loop
-        // must keep the just-sealed segment (freshest data) rather than drop
-        // it, staying transiently over budget.
-        let mem = MemFs::with_capacity(50);
-        let handle = mem.create_handle(Path::new("dummy")).unwrap();
-        let ActiveHandle::Mem(mut w) = handle else {
-            panic!()
+    fn mem_fs_rejects_invalid_sizes() {
+        // max_segment_size > max_total_size: no slot could fit a segment.
+        let Err(e) = MemFs::with_capacity(60, 50) else {
+            panic!("expected error for seg > total");
         };
-        w.buf.resize(60, 0u8);
-        mem.seal_handle(ActiveHandle::Mem(w), Path::new("dummy"), 0)
-            .unwrap();
-
-        check!(mem.channel.dropped.load(Ordering::SeqCst) == 0);
-        let t = mem.take_files_inner();
-        check!(
-            t.segments.len() == 1,
-            "lone oversized segment must be retained"
-        );
-        check!(t.segments[0].seg_ref.index() == 0);
+        check!(e.kind() == io::ErrorKind::InvalidInput);
+        let Err(e) = MemFs::with_capacity(0, 1024) else {
+            panic!("expected error for seg == 0");
+        };
+        check!(e.kind() == io::ErrorKind::InvalidInput);
     }
 
     #[test]
     fn mem_fs_ring_depth_after_pop() {
-        let mem = MemFs::with_capacity(1024 * 1024);
+        let mem = MemFs::with_capacity(64, 1024 * 1024).unwrap();
         for i in 0..3u32 {
             let handle = mem.create_handle(Path::new("x")).unwrap();
             let ActiveHandle::Mem(mut w) = handle else {
@@ -347,7 +297,7 @@ mod tests {
 
     #[test]
     fn mem_fs_take_pops_one_at_a_time() {
-        let mem = MemFs::with_capacity(1024 * 1024);
+        let mem = MemFs::with_capacity(64, 1024 * 1024).unwrap();
         for i in 0..3u32 {
             let handle = mem.create_handle(Path::new("dummy")).unwrap();
             let ActiveHandle::Mem(mut w) = handle else {
@@ -368,7 +318,7 @@ mod tests {
 
     #[test]
     fn mem_fs_remove_sealed_is_noop() {
-        let mem = MemFs::with_capacity(1024);
+        let mem = MemFs::with_capacity(64, 1024).unwrap();
         let seg = SegmentRef::Memory(MemorySegment { index: 0, size: 10 });
         // Should not panic
         mem.remove_sealed_inner(&seg, RemoveReason::Eviction);
@@ -376,10 +326,6 @@ mod tests {
     }
 }
 
-// Model-checked writer/worker handoff: concurrent seal/take_files, the
-// shutdown race on `writer_done`, and accounting under eviction
-// contention. The correctness handoff rides the shuttle-modeled atomics
-// + `BoundedQueue`.
 #[cfg(all(test, shuttle))]
 mod shuttle_tests {
     use super::*;
@@ -423,7 +369,7 @@ mod shuttle_tests {
     }
 
     fn run_scenario(capacity: u64, seg_size: usize, count: u32, expect_no_eviction: bool) {
-        let mem = Arc::new(MemFs::with_capacity(capacity));
+        let mem = Arc::new(MemFs::with_capacity(seg_size as u64, capacity).unwrap());
         let consumed = Arc::new(AtomicU64::new(0));
 
         let writer = {
@@ -454,7 +400,6 @@ mod shuttle_tests {
             check!(consumed == count as u64);
         }
         // Gauges fully settle once the writer is done and the ring is drained.
-        check!(mem.channel.queued_bytes.load(Ordering::Relaxed) == 0);
         check!(mem.channel.in_flight_count.load(Ordering::Relaxed) == 0);
         check!(mem.channel.in_flight_bytes.load(Ordering::Relaxed) == 0);
     }

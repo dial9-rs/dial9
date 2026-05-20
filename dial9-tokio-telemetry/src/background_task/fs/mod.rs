@@ -115,13 +115,11 @@ impl TakenSegment {
                 Ok((self.seg_ref, Payload::from_bytes(bytes), Some(accounting)))
             }
             None => {
-                // None means a disk segment, which always has a path. Error
-                // instead of panic: this is off the worker's catch_unwind, so
-                // a panic here would take telemetry down with it.
+                // None = disk segment, should always have a path.
                 let Some(path) = self.seg_ref.disk_path() else {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
-                        "TakenSegment with no payload and no disk path (invariant violation)",
+                        "TakenSegment with no payload and no disk path",
                     ));
                 };
                 let bytes = std::fs::read(path)?;
@@ -162,8 +160,11 @@ impl Fs {
         Arc::new(Fs::Disk(DiskFs::from_base_path(base_path)))
     }
 
-    pub(crate) fn memory(max_total_size: u64) -> Arc<Self> {
-        Arc::new(Fs::Mem(MemFs::with_capacity(max_total_size)))
+    pub(crate) fn memory(max_segment_size: u64, max_total_size: u64) -> io::Result<Arc<Self>> {
+        Ok(Arc::new(Fs::Mem(MemFs::with_capacity(
+            max_segment_size,
+            max_total_size,
+        )?)))
     }
 
     /// Scan for trace artifacts left by previous writer lifetimes.

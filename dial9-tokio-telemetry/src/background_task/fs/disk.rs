@@ -19,15 +19,11 @@ use crate::rate_limit::rate_limited;
 use super::{ActiveHandle, DiscoveredArtifacts, RemoveReason, TakenFiles, TakenSegment};
 
 /// Disk-backed filesystem state.
-///
-/// Claim-set dedup: each sealed file is dispensed to the worker at most once
-/// per `DiskFs` instance. `take_files` stats unclaimed files *outside* the
-/// claim mutex (to avoid contention with the writer's `remove_sealed`), then
-/// re-acquires once to batch-insert all new entries.
 pub(crate) struct DiskFs {
     dir: PathBuf,
     stem: String,
-    /// Claimed segment index → uncompressed size in bytes.
+    /// Claimed segment index -> uncompressed size in bytes. Dedup so each
+    /// sealed file is dispensed at most once per `DiskFs` instance.
     claimed: Mutex<HashMap<u32, u64>>,
     dropped: AtomicU64,
     writer_done: AtomicBool,
@@ -164,7 +160,8 @@ impl DiskFs {
         };
         let on_disk_indices: HashSet<u32> = on_disk.iter().map(|s| s.index).collect();
 
-        // Stat unclaimed files *outside* the claim mutex.
+        // Stat unclaimed files *outside* the claim mutex to avoid contending
+        // with the writer's `remove_sealed`.
         let mut new_claims: Vec<(u32, u64)> = Vec::new();
         let mut new_segments: Vec<TakenSegment> = Vec::new();
         {
@@ -220,7 +217,7 @@ impl DiskFs {
 }
 
 impl DiskFs {
-    /// Scan `self.dir` and seed `DiscoveredArtifacts`. 
+    /// Scan `self.dir` and seed `DiscoveredArtifacts`.
     /// Sums whole-family sizes (`.bin` + `.bin.gz` + future write-back suffixes) per index
     /// so the eviction budget covers post-processed artifacts and unlinks
     /// stale `.bin.active` orphans from dead writers.

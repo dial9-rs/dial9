@@ -392,19 +392,14 @@ impl RotatingWriter<Memory> {
     /// Create an in-memory writer. Encoded bytes flow through an in-process
     /// ring instead of disk.
     ///
-    /// `max_segment_size` bounds each segment. `max_total_size` is the ring
-    /// byte budget: oldest segments are evicted past it (so a single segment
-    /// must fit, i.e. `max_segment_size <= max_total_size`).
+    /// `max_segment_size` bounds each segment. The ring holds up to
+    /// `max_total_size / max_segment_size` segments; oldest is dropped on
+    /// overflow.
     ///
-    /// Returns `Err(InvalidInput)` if that invariant is violated.
+    /// Returns `Err(InvalidInput)` if `max_segment_size` is 0 or larger
+    /// than `max_total_size`.
     pub fn in_memory(max_segment_size: u64, max_total_size: u64) -> std::io::Result<Self> {
-        if max_segment_size > max_total_size {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "max_segment_size must not exceed max_total_size",
-            ));
-        }
-        let fs = Fs::memory(max_total_size);
+        let fs = Fs::memory(max_segment_size, max_total_size)?;
         // base_path is a dummy; the memory backend ignores paths entirely
         // but `active_path()` still needs a prefix to build a placeholder.
         let base_path = PathBuf::from("mem");
