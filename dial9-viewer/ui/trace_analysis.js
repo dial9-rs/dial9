@@ -855,6 +855,55 @@
     return { buckets, minDur: Math.exp(minLog), maxDur: Math.exp(maxLog) };
   }
 
+  /**
+   * Analyze memory allocation and free events.
+   * @param {Array<{timestamp: number, tid: number, size: number, addr: string, callchain: string[]}>} allocEvents
+   * @param {Array<{timestamp: number, tid: number, addr: string, size: number, allocTimestampNs: number}>} freeEvents
+   * @returns {{ topSites: Array<{callchain: string[], totalBytes: number, count: number}>, leaks: Array<{callchain: string[], size: number, timestamp: number, addr: string}>, summary: {totalAllocBytes: number, totalAllocCount: number, totalFreeCount: number, leakedBytes: number, leakedCount: number} }}
+   */
+  function analyzeAllocations(allocEvents, freeEvents) {
+    if (!allocEvents || !freeEvents) {
+      return { topSites: [], leaks: [], summary: { totalAllocBytes: 0, totalAllocCount: 0, totalFreeCount: 0, leakedBytes: 0, leakedCount: 0 } };
+    }
+
+    const freedAddrs = new Set(freeEvents.map(f => f.addr));
+
+    // Top allocation sites by callchain
+    const siteMap = new Map(); // callchain key → {callchain, totalBytes, count}
+    for (const a of allocEvents) {
+      const key = a.callchain.join(";");
+      let site = siteMap.get(key);
+      if (!site) { site = { callchain: a.callchain, totalBytes: 0, count: 0 }; siteMap.set(key, site); }
+      site.totalBytes += a.size;
+      site.count++;
+    }
+    const topSites = [...siteMap.values()].sort((a, b) => b.totalBytes - a.totalBytes).slice(0, 10);
+
+    // Leaks: allocs with no matching free
+    const leaks = [];
+    let leakedBytes = 0;
+    for (const a of allocEvents) {
+      if (!freedAddrs.has(a.addr)) {
+        leaks.push({ callchain: a.callchain, size: a.size, timestamp: a.timestamp, addr: a.addr });
+        leakedBytes += a.size;
+      }
+    }
+
+    const totalAllocBytes = allocEvents.reduce((sum, a) => sum + a.size, 0);
+
+    return {
+      topSites,
+      leaks,
+      summary: {
+        totalAllocBytes,
+        totalAllocCount: allocEvents.length,
+        totalFreeCount: freeEvents.length,
+        leakedBytes,
+        leakedCount: leaks.length,
+      },
+    };
+  }
+
   // Export for both browser and Node.js
   const analysisExports = {
     buildWorkerSpans,
@@ -869,6 +918,7 @@
     collectDescendants,
     selectSpanRenderSet,
     computeSpanLayout,
+    analyzeAllocations,
   };
 
   if (typeof module !== "undefined" && module.exports) {

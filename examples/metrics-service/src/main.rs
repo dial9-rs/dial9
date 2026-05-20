@@ -8,6 +8,9 @@ use std::time::Duration;
 
 use aws_config::BehaviorVersion;
 use clap::Parser;
+use dial9_tokio_telemetry::memory_profiling::{
+    Dial9Allocator, MemoryProfiler, MemoryProfilingConfig,
+};
 #[cfg(target_os = "linux")]
 use dial9_tokio_telemetry::telemetry::cpu_profile::{CpuProfilingConfig, SchedEventConfig};
 use dial9_tokio_telemetry::telemetry::{
@@ -19,6 +22,9 @@ use tokio_util::sync::CancellationToken;
 
 use buffer::MetricsBuffer;
 use ddb::DdbClient;
+
+#[global_allocator]
+static ALLOC: Dial9Allocator = Dial9Allocator::system();
 
 #[derive(Parser)]
 #[command(about = "Metrics service with DynamoDB persistence and telemetry")]
@@ -212,6 +218,11 @@ fn main() -> std::io::Result<()> {
     };
     guard.enable();
     let handle = guard.handle();
+
+    let _mem_guard =
+        MemoryProfiler::from_config(MemoryProfilingConfig::builder().track_liveset(true).build())
+            .install(guard.handle())
+            .expect("failed to install memory profiler");
 
     // Wrap the body in a spawned task so the root future is instrumented.
     // Inside, TelemetryHandle::current() is available on every worker thread.

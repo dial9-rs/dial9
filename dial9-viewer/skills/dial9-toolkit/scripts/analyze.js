@@ -21,7 +21,7 @@ function resolve(name) {
 
 const { parseTrace, EVENT_TYPES, formatFrame, symbolizeChain, deduplicateSamples } = require(resolve('trace_parser.js'));
 const { buildWorkerSpans, attachCpuSamples, buildActiveTaskTimeline,
-        computeSchedulingDelays, filterPointsOfInterest, buildSpanData } = require(resolve('trace_analysis.js'));
+        computeSchedulingDelays, filterPointsOfInterest, buildSpanData, analyzeAllocations } = require(resolve('trace_analysis.js'));
 
 // ── Helpers ──
 
@@ -101,6 +101,8 @@ function createAccumulator() {
     spanStats: new Map(), // spanName -> Histogram
     pollDurationByLoc: new Map(), // spawnLoc -> Histogram
     schedDelayHist: null, // Histogram
+    allocEvents: [],
+    freeEvents: [],
   };
 }
 
@@ -209,6 +211,10 @@ function accumulateTrace(acc, trace) {
       h.record(dur);
     }
   }
+
+  // Memory events
+  if (trace.allocEvents) for (const e of trace.allocEvents) acc.allocEvents.push(e);
+  if (trace.freeEvents) for (const e of trace.freeEvents) acc.freeEvents.push(e);
 }
 
 /** Finalize accumulator into the shape reportAnalysis expects. */
@@ -251,6 +257,7 @@ function finalizeAccumulator(acc) {
     spanStats: acc.spanStats,
     pollDurationByLoc: acc.pollDurationByLoc,
     schedDelayHist: acc.schedDelayHist,
+    memory: analyzeAllocations(acc.allocEvents, acc.freeEvents),
   };
 }
 
@@ -466,6 +473,27 @@ function reportAnalysis(a, label) {
     console.log(`${'─'.repeat(60)}`);
     for (const [name, h] of [...a.spanStats.entries()].sort((x, y) => y[1].count - x[1].count)) {
       console.log(`  ${name}: count=${h.count} p50=${(h.percentile(50)/1e3).toFixed(1)}µs p99=${(h.percentile(99)/1e3).toFixed(1)}µs max=${(h.max/1e3).toFixed(1)}µs`);
+    }
+  }
+
+  // ── Memory ──
+  if (a.memory && a.memory.summary.totalAllocCount > 0) {
+    const m = a.memory;
+    console.log(`\n${'─'.repeat(60)}`);
+    console.log(`MEMORY ALLOCATIONS`);
+    console.log(`${'─'.repeat(60)}`);
+    console.log(`  Total allocs: ${m.summary.totalAllocCount}, total bytes: ${m.summary.totalAllocBytes.toLocaleString()}`);
+    console.log(`  Total frees:  ${m.summary.totalFreeCount}`);
+    console.log(`  Leaked:       ${m.summary.leakedCount} allocs, ${m.summary.leakedBytes.toLocaleString()} bytes`);
+    if (m.topSites.length > 0) {
+      console.log(`\n  Top allocation sites:`);
+      for (const s of m.topSites.slice(0, 10)) {
+        const frames = symbolizeChain(s.callchain, callframeSymbols);
+        const syms = frames.slice(0, 16).map(f => f.symbol);
+        if (frames.length > 16) syms.push(`... ${frames.length - 16} more`);
+        console.log(`    ${s.totalBytes.toLocaleString()} bytes (${s.count} allocs)`);
+        console.log(`      ${syms.join(' > ')}`);
+      }
     }
   }
 

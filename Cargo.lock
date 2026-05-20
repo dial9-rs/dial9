@@ -2767,7 +2767,6 @@ dependencies = [
  "axum-core",
  "clap",
  "dial9-tokio-telemetry",
- "dial9-trace-format",
  "futures-util",
  "hostname",
  "hyper 1.9.0",
