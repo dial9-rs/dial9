@@ -90,6 +90,9 @@ unsafe impl<A: GlobalAlloc> GlobalAlloc for Dial9Allocator<A> {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         // SAFETY: `layout` validity contract forwarded to the inner allocator.
         let ptr = unsafe { self.0.alloc(layout) };
+        // SAFETY: `on_alloc` is allocator-quiet (see hook module docs) — it
+        // performs no allocations, takes no locks, and only accesses lock-free
+        // data structures. `ptr` is non-null (checked below) and valid.
         if !ptr.is_null()
             && let Some(inner) = crate::memory_profiling::profiler::ACTIVE.get()
         {
@@ -99,6 +102,9 @@ unsafe impl<A: GlobalAlloc> GlobalAlloc for Dial9Allocator<A> {
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        // SAFETY: `on_dealloc` is allocator-quiet (see hook module docs) — it
+        // performs no allocations, takes no locks, and only accesses lock-free
+        // data structures. `ptr` is valid per the `dealloc` contract.
         if let Some(inner) = crate::memory_profiling::profiler::ACTIVE.get() {
             crate::memory_profiling::hook::on_dealloc(inner, ptr, layout.size());
         }
@@ -113,6 +119,9 @@ unsafe impl<A: GlobalAlloc> GlobalAlloc for Dial9Allocator<A> {
         // — otherwise the old pointer is still live and must not be
         // recorded as freed (design §3, "realloc handling").
         let new_ptr = unsafe { self.0.realloc(ptr, old_layout, new_size) };
+        // SAFETY: `on_realloc` is allocator-quiet (see hook module docs) — it
+        // performs no allocations, takes no locks, and only accesses lock-free
+        // data structures. `new_ptr` is non-null (checked below) and valid.
         if !new_ptr.is_null()
             && let Some(inner) = crate::memory_profiling::profiler::ACTIVE.get()
         {
@@ -130,6 +139,9 @@ unsafe impl<A: GlobalAlloc> GlobalAlloc for Dial9Allocator<A> {
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
         // SAFETY: forwarded to the inner allocator.
         let ptr = unsafe { self.0.alloc_zeroed(layout) };
+        // SAFETY: `on_alloc` is allocator-quiet (see hook module docs) — it
+        // performs no allocations, takes no locks, and only accesses lock-free
+        // data structures. `ptr` is non-null (checked below) and valid.
         if !ptr.is_null()
             && let Some(inner) = crate::memory_profiling::profiler::ACTIVE.get()
         {

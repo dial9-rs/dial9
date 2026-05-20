@@ -107,7 +107,7 @@ fn stamp(mode: TimestampMode) -> u64 {
 pub(crate) fn on_alloc(inner: &MemoryProfilerInner, ptr: *mut u8, size: usize) {
     // `try_with` returns `Err` if the TLS slot is being destroyed during
     // thread teardown — silently skip those allocations rather than
-    // risking UB.
+    // risking UB. Logging is forbidden here (allocator-quiet contract).
     let _ = SAMPLE_STATE.try_with(|cell| {
         // `try_borrow_mut` is the reentrancy guard: if the current
         // thread is already inside `on_alloc` higher up the stack,
@@ -149,9 +149,13 @@ pub(crate) fn on_alloc(inner: &MemoryProfilerInner, ptr: *mut u8, size: usize) {
         // is intentionally held across `capture` and the queue push:
         // if those somehow allocated (they shouldn't — see module
         // docs), the reentrancy guard would correctly trip.
-        // SAFETY: `Unwinder::install` was called in `MemoryProfiler::install`,
-        // which is the only code path that publishes `inner`. Not called
-        // from inside a SIGSEGV handler.
+        // SAFETY: `Unwinder::install` was called and succeeded in
+        // `MemoryProfiler::install` before `inner` was published via
+        // `OnceLock::set`. The unwinder's SIGSEGV handler is installed.
+        // This is safe because:
+        // 1. We're not inside a signal handler (allocator hooks are not
+        //    signal-safe, so this is guaranteed by the allocator contract).
+        // 2. The stack is valid (normal allocation path, not corrupted).
         let mut frames = [0u64; DEFAULT_MAX_FRAMES];
         let result = unsafe { inner.unwinder.capture(&mut frames) };
 

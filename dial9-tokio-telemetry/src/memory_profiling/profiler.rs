@@ -27,6 +27,9 @@ pub(crate) struct MemoryProfilerInner {
 pub(crate) static ACTIVE: OnceLock<MemoryProfilerInner> = OnceLock::new();
 
 /// Returns `true` if the memory profiler has been installed in this process.
+///
+/// Note: This check is racy. If you need to conditionally install the profiler,
+/// call `install()` directly and handle `InstallError::AlreadyInstalled`.
 pub fn is_installed() -> bool {
     ACTIVE.get().is_some()
 }

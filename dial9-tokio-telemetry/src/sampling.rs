@@ -33,6 +33,8 @@ impl SplitMix64 {
         let u = (self.next_u64() >> 11) as f64 / ((1u64 << 53) as f64);
         let u = if u == 0.0 { f64::MIN_POSITIVE } else { u };
         let sample = -u.ln() * (mean as f64);
+        // Cast to u64 (truncates toward zero; NaN becomes 0), then clamp to
+        // at least 1 to avoid immediate re-trigger.
         (sample as u64).max(1)
     }
 }
