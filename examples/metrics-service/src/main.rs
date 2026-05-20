@@ -87,6 +87,9 @@ struct Args {
     #[arg(long, help = "Disable task dump capture")]
     no_task_dumps: bool,
 
+    #[arg(long, help = "Spawn a task that leaks memory continuously")]
+    leak: bool,
+
     #[arg(long, help = "Disable memory profiling")]
     no_memory_profiling: bool,
 
@@ -283,6 +286,18 @@ fn main() -> std::io::Result<()> {
                         flush_state.buffer.flush_to_ddb(&flush_state.ddb).await;
                     }
                 });
+
+                // intentional leak task: accumulates memory without freeing it
+                if args.leak {
+                    handle.spawn(async move {
+                        let mut sink: Vec<Vec<u8>> = Vec::new();
+                        let mut interval = tokio::time::interval(Duration::from_millis(10));
+                        loop {
+                            interval.tick().await;
+                            sink.push(vec![0u8; 64 * 1024]);
+                        }
+                    });
+                }
 
                 let app = routes::router(state);
                 let listener = tokio::net::TcpListener::bind(&args.server_addr)
