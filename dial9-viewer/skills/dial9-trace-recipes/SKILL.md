@@ -495,7 +495,10 @@ function inverseProb(size, rate) {
 const byCallSite = new Map();  // leaf symbol -> { bytes, count }
 
 for await (const trace of parseTrace('/path/to/traces/')) {
-  for (const ev of trace.allocEvents) {
+  // `allocEvents` may be absent on traces from older toolkit caches —
+  // memory profiling events were added to the directory cache after
+  // initial release. Defensive `?? []` keeps the recipe portable.
+  for (const ev of (trace.allocEvents ?? [])) {
     const frames = symbolizeChain(ev.callchain, trace.callframeSymbols);
     const leaf = frames[0] ? formatFrame(frames[0]).text : '(unknown)';
     const w = inverseProb(ev.size, SAMPLE_RATE_BYTES);
@@ -543,7 +546,10 @@ for await (const trace of parseTrace('/path/to/traces/')) {
     pollsByTid.set(tid, polls);
   }
 
-  for (const ev of trace.allocEvents) {
+  // `allocEvents` may be absent on traces from older toolkit caches —
+  // memory profiling events were added to the directory cache after
+  // initial release. Defensive `?? []` keeps the recipe portable.
+  for (const ev of (trace.allocEvents ?? [])) {
     const polls = pollsByTid.get(ev.tid);
     if (!polls) continue;
     // Find the poll containing ev.timestamp (linear scan; for big

@@ -724,6 +724,8 @@
     const events = [];
     const cpuSamples = [];
     const customEvents = [];
+    const allocEvents = [];
+    const freeEvents = [];
 
     let line;
     while ((line = nextLine()) !== null) {
@@ -744,11 +746,15 @@
         case 'e': events.push(rec.d); break;
         case 'c': cpuSamples.push(rec.d); break;
         case 'x': customEvents.push(rec.d); break;
+        case 'a': allocEvents.push(rec.d); break;
+        case 'f': freeEvents.push(rec.d); break;
       }
     }
     raw.events = events;
     raw.cpuSamples = cpuSamples;
     raw.customEvents = customEvents;
+    raw.allocEvents = allocEvents;
+    raw.freeEvents = freeEvents;
     return raw;
   }
 
