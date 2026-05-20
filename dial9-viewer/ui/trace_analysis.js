@@ -105,6 +105,25 @@
         }
 
         if (e.eventType === EVENT_TYPES.PollStart) {
+          // If there's already an open poll (no PollEnd arrived), close it
+          // at this timestamp. This happens during block_in_place: the task
+          // is still technically polling but the worker moved on to poll
+          // another task on the replacement thread.
+          if (openPoll[w] != null) {
+            const meta = openPollMeta[w] || {
+              taskId: 0,
+              spawnLocId: 0,
+              spawnLoc: null,
+            };
+            workerSpans[w].polls.push({
+              start: openPoll[w],
+              end: e.timestamp,
+              taskId: meta.taskId,
+              spawnLocId: meta.spawnLocId,
+              spawnLoc: meta.spawnLoc,
+              openEnded: true, // no matching PollEnd; actual duration unknown
+            });
+          }
           openPoll[w] = e.timestamp;
           openPollMeta[w] = {
             taskId: e.taskId,
@@ -128,6 +147,25 @@
             openPoll[w] = null;
           }
         } else if (e.eventType === EVENT_TYPES.WorkerPark) {
+          // Close any open poll at park time. During block_in_place the
+          // replacement thread may park while a task is mid-poll (the
+          // PollEnd arrives later on a different active period).
+          if (openPoll[w] != null) {
+            const meta = openPollMeta[w] || {
+              taskId: 0,
+              spawnLocId: 0,
+              spawnLoc: null,
+            };
+            workerSpans[w].polls.push({
+              start: openPoll[w],
+              end: e.timestamp,
+              taskId: meta.taskId,
+              spawnLocId: meta.spawnLocId,
+              spawnLoc: meta.spawnLoc,
+              openEnded: true,
+            });
+            openPoll[w] = null;
+          }
           openPark[w] = e.timestamp;
           if (openUnpark[w] != null) {
             const activeStart = openUnpark[w].timestamp;

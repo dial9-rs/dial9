@@ -2085,6 +2085,21 @@
                         ctx.fillRect(x1, bandTop, Math.max(x2 - x1, 1), bandH);
                     }
                 }
+                // Mark open-ended polls with a dashed right edge (block_in_place)
+                for (let i = pollStart; i < spans.polls.length; i++) {
+                    const s = spans.polls[i];
+                    if (s.start > viewEnd) break;
+                    if (!s.openEnded) continue;
+                    const x2 = Math.min(pw, nsToX(s.end, pw));
+                    ctx.strokeStyle = "#ff9800";
+                    ctx.lineWidth = 2;
+                    ctx.setLineDash([3, 2]);
+                    ctx.beginPath();
+                    ctx.moveTo(x2, bandTop);
+                    ctx.lineTo(x2, bandTop + bandH);
+                    ctx.stroke();
+                    ctx.setLineDash([]);
+                }
                 // Highlight current POI span
                 if (poiSpan) {
                     for (let i = pollStart; i < spans.polls.length; i++) {
@@ -4291,7 +4306,7 @@
                         if (s) {
                             const pollNs = s.end - s.start;
                             state = "⚡ Polling";
-                            pollInfo = `<span class="label">Poll duration:</span> <span class="value">${formatHumanDuration(pollNs)}</span><br>`;
+                            pollInfo = `<span class="label">Poll duration:</span> <span class="value">${formatHumanDuration(pollNs)}${s.openEnded ? ' (open-ended, block_in_place)' : ''}</span><br>`;
                             if (trace.hasTaskTracking && s.taskId) {
                                 pollInfo += `<span class="label">Task ID:</span> <span class="value">0x${s.taskId.toString(16)}</span><br>`;
                                 if (s.spawnLoc) {
