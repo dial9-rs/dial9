@@ -32,7 +32,8 @@ pub(crate) struct RawAlloc {
 impl RawAlloc {
     #[expect(dead_code, reason = "used by allocator hook in a later commit")]
     pub(crate) fn frames(&self) -> &[u64] {
-        &self.frames[..self.frame_count as usize]
+        let count = (self.frame_count as usize).min(DEFAULT_MAX_FRAMES);
+        &self.frames[..count]
     }
 }
 
