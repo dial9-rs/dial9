@@ -38,6 +38,7 @@ pub fn is_installed() -> bool {
 ///
 /// Returns `false` if the profiler is not installed or the queue is full.
 /// Intended for integration tests that verify the source→trace pipeline.
+#[cfg(feature = "analysis")]
 #[doc(hidden)]
 pub fn push_test_alloc(addr: u64, size: u64, ts_ns: u64) -> bool {
     let Some(inner) = ACTIVE.get() else {
