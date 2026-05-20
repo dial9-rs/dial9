@@ -6,7 +6,6 @@ use crate::telemetry::writer::{RotatingWriter, TraceWriter};
 use std::path::PathBuf;
 use std::time::Duration;
 
-use super::event_writer::EventWriter;
 use super::flush_loop::run_flush_loop;
 use super::guard::{TelemetryGuard, WorkerHandle};
 use super::handle::TelemetryHandle;
@@ -619,10 +618,10 @@ impl TelemetryCore {
         );
 
         #[allow(unused_mut)]
-        let mut event_writer = EventWriter::new(Box::new(writer));
+        let mut writer: Box<dyn crate::telemetry::writer::TraceWriter> = Box::new(writer);
 
         if !segment_metadata.is_empty() {
-            event_writer.update_segment_metadata(segment_metadata);
+            writer.update_segment_metadata(segment_metadata);
         }
 
         #[cfg(feature = "cpu-profiling")]
@@ -666,7 +665,7 @@ impl TelemetryCore {
 
                 #[cfg(feature = "cpu-profiling")]
                 let _ = dial9_perf_self_profile::register_current_thread();
-                run_flush_loop(control_rx, &shared, &flush_metrics_sink, event_writer);
+                run_flush_loop(control_rx, &shared, &flush_metrics_sink, writer);
                 #[cfg(feature = "cpu-profiling")]
                 dial9_perf_self_profile::unregister_current_thread();
             })

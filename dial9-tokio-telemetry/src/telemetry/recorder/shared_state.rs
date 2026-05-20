@@ -217,6 +217,24 @@ impl SharedState {
     pub(crate) fn bump_drain_epoch(&self) {
         self.drain_epoch.fetch_add(1, Ordering::Relaxed);
     }
+
+    /// Drain data sources and write their events into the collector.
+    pub(crate) fn flush_sources(&self) {
+        use super::source::FlushContext;
+
+        let roles = self.thread_roles.lock().unwrap().clone();
+
+        let ctx = FlushContext {
+            collector: &self.collector,
+            drain_epoch: &self.drain_epoch,
+            thread_roles: &roles,
+        };
+
+        let mut sources = self.sources.lock().unwrap();
+        for source in sources.iter_mut() {
+            source.flush(&ctx);
+        }
+    }
 }
 
 /// Handle provided by [`SharedState::if_enabled`] that proves recording is

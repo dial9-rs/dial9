@@ -1,5 +1,4 @@
 mod builder;
-mod event_writer;
 mod flush_loop;
 mod guard;
 mod handle;
@@ -24,8 +23,6 @@ pub(crate) use flush_loop::FlushStats;
 // Re-exports for internal test access
 #[cfg(test)]
 use builder::PipelineConfig;
-#[cfg(test)]
-use event_writer::EventWriter;
 #[cfg(test)]
 use handle::InstrumentedSpawnGuard;
 
@@ -260,12 +257,15 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::AtomicU64;
 
-    /// Drain all pending batches from a `CentralCollector` into an `EventWriter`.
+    /// Drain all pending batches from a `CentralCollector` into a writer.
     /// Call `buffer::drain_to_collector` first to flush the thread-local buffer.
-    fn drain_collector_to_writer(collector: &CentralCollector, ew: &mut EventWriter) {
+    fn drain_collector_to_writer(
+        collector: &CentralCollector,
+        writer: &mut dyn crate::telemetry::writer::TraceWriter,
+    ) {
         while let Some(batch) = collector.next() {
             if batch.event_count > 0 {
-                ew.write_encoded_batch(&batch).unwrap();
+                writer.write_encoded_batch(&batch).unwrap();
             }
         }
     }
@@ -410,7 +410,7 @@ mod tests {
             .max_total_size(100_000)
             .build()
             .unwrap();
-        let mut ew = EventWriter::new(Box::new(writer));
+        let mut ew: Box<dyn crate::telemetry::writer::TraceWriter> = Box::new(writer);
         let collector = Arc::new(CentralCollector::new());
         let drain_epoch = AtomicU64::new(0);
 
@@ -450,7 +450,7 @@ mod tests {
             // Drain after each iteration to produce separate small batches
             // that trigger file rotation (max_file_size is 100 bytes).
             buffer::drain_to_collector(&collector);
-            drain_collector_to_writer(&collector, &mut ew);
+            drain_collector_to_writer(&collector, &mut *ew);
         }
         ew.flush().unwrap();
         ew.finalize().unwrap();
@@ -757,11 +757,26 @@ mod tests {
     mod rotation_proptest {
         use super::*;
         use crate::telemetry::analysis::TraceReader;
+        use crate::telemetry::buffer::ThreadLocalBuffer;
+        use crate::telemetry::collector::Batch;
         use crate::telemetry::events::{CpuSampleData, CpuSampleSource, TelemetryEvent};
         use crate::telemetry::format::WorkerId;
         use crate::telemetry::task_metadata::TaskId;
         use crate::telemetry::writer::RotatingWriter;
         use proptest::prelude::*;
+
+        /// Encode a single event into a batch and write it through the writer.
+        fn write_raw_event(
+            writer: &mut dyn crate::telemetry::writer::TraceWriter,
+            event: &dyn crate::telemetry::buffer::Encodable,
+        ) -> std::io::Result<()> {
+            let encoded_bytes = ThreadLocalBuffer::encode_single(event);
+            let batch = Batch {
+                encoded_bytes,
+                event_count: 1,
+            };
+            writer.write_encoded_batch(&batch)
+        }
 
         #[derive(Debug, Clone)]
         enum FlushOp {
@@ -821,7 +836,7 @@ mod tests {
 
         fn execute_flush_round(
             round: &FlushRound,
-            ew: &mut EventWriter,
+            ew: &mut Box<dyn crate::telemetry::writer::TraceWriter>,
             locations: &[&'static Location<'static>],
             timestamp: &mut u64,
             expected_raw: &mut usize,
@@ -843,7 +858,7 @@ mod tests {
                         cpu: None,
                     };
                     *timestamp += 1;
-                    ew.write_raw_event(&data).unwrap();
+                    write_raw_event(&mut **ew, &data).unwrap();
                 }
             }
 
@@ -854,13 +869,16 @@ mod tests {
                     let ts = *timestamp;
                     *timestamp += 1;
 
-                    ew.write_raw_event(&runtime_context::PollStart {
-                        timestamp_ns: ts,
-                        worker_id: WorkerId::from(0usize),
-                        local_queue: 0,
-                        task_id,
-                        location: loc,
-                    })
+                    write_raw_event(
+                        &mut **ew,
+                        &runtime_context::PollStart {
+                            timestamp_ns: ts,
+                            worker_id: WorkerId::from(0usize),
+                            local_queue: 0,
+                            task_id,
+                            location: loc,
+                        },
+                    )
                     .unwrap();
                     *expected_raw += 1;
                 }
@@ -925,7 +943,7 @@ mod tests {
                     .build()
                     .unwrap();
 
-                let mut ew = EventWriter::new(Box::new(writer));
+                let mut ew: Box<dyn crate::telemetry::writer::TraceWriter> = Box::new(writer);
 
                 #[track_caller]
                 fn loc0() -> &'static Location<'static> { Location::caller() }
