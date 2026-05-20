@@ -817,6 +817,16 @@ impl<S: dial9_config_builder::State> Dial9ConfigBuilder<S> {
     /// `Fn + Send + Sync + 'static` so that
     /// [`build_or_disabled`](Self::build_or_disabled) can preserve the
     /// configurators on the disabled-fallback variant.
+    ///
+    /// # Warning
+    ///
+    /// Setting any of the 8 Tokio runtime hooks (`on_thread_start`,
+    /// `on_thread_stop`, `on_thread_park`, `on_thread_unpark`,
+    /// `on_task_spawn`, `on_task_terminate`, `on_before_task_poll`,
+    /// `on_after_task_poll`) via this closure will be silently overwritten
+    /// by dial9's internal hooks. Use
+    /// [`with_runtime`](Self::with_runtime) + [`TracedRuntimeBuilder::with_tokio_hooks`]
+    /// to compose user callbacks with dial9's hooks instead.
     pub fn with_tokio<F>(mut self, f: F) -> Self
     where
         F: Fn(&mut tokio::runtime::Builder) + Send + Sync + 'static,
