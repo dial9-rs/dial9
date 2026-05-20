@@ -237,6 +237,22 @@ pub enum TelemetryEvent {
         fields: Vec<(String, FieldValue)>,
     },
     /// A sampled memory allocation event.
+    ///
+    /// **The `size` field is the raw bytes of this single allocation,
+    /// NOT a scaled estimate.** Summing raw `size` values across many
+    /// samples will dramatically undercount allocations dominated by
+    /// small objects. To estimate total bytes allocated through a code
+    /// path, weight each sample by the inverse of its sampling
+    /// probability:
+    ///
+    /// ```text
+    /// total_bytes ≈ Σ s_i / (1 - exp(-s_i / R))
+    /// ```
+    ///
+    /// where `R` is `MemoryProfilingConfig::sample_rate_bytes` at the
+    /// time the trace was recorded. See the `Estimating totals from
+    /// samples` section in `docs/design/memory-profiling.md` for worked
+    /// examples and the aggregation order rules.
     Alloc {
         /// Wall-clock timestamp in nanoseconds (monotonic).
         #[serde(rename = "timestamp_ns")]

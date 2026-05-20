@@ -202,13 +202,115 @@ lifetime. Fixed N-of-every-M biases against large objects that get
 undersampled. Per-byte Bernoulli sampling via the geometric/exponential
 trick gives the lowest variance estimator of the simple strategies.
 
-### Small-object unbiasing
+### Estimating totals from samples
 
-When you sample at rate `R` and see an allocation of size `s < R`, the
-*expected* size represented is `R / (1 - exp(-s/R))`. The analysis toolkit
-applies this to produce unbiased byte totals. Jemalloc uses the same
-formula. Aggregation must happen *after* unbiasing per sample —
-sum-then-unbias underreports small-object stacks.
+> **Read this before consuming `AllocEvent.size`.** The raw `size` field
+> on a sampled event is the bytes of *that one* allocation, not a
+> scaled estimate. Summing raw sizes will undercount allocations
+> dominated by small objects, often dramatically (orders of magnitude
+> for tiny allocations).
+
+Each sampled allocation of size `s` survives Poisson sampling with
+probability:
+
+```
+P(sample | size = s) = 1 - exp(-s / R)
+```
+
+where `R` is `sample_rate_bytes`. The Horvitz–Thompson estimator
+weights each sample by the inverse of its sampling probability. To
+recover the total bytes allocated through a code path:
+
+```
+total_bytes ≈ Σ over sampled events  s_i / (1 - exp(-s_i / R))
+```
+
+To recover the total *count* of allocations:
+
+```
+total_count ≈ Σ over sampled events       1 / (1 - exp(-s_i / R))
+```
+
+#### Two regimes, one formula
+
+The same formula handles both extremes correctly:
+
+| Allocation size | `1 - exp(-s/R)` | Per-sample byte weight |
+|-----------------|-----------------|--------------------------|
+| `s << R` (tiny) | `≈ s / R`       | `s / (s/R) = R`          |
+| `s ≈ R`         | `≈ 0.63`        | `s / 0.63 ≈ 1.58 s`      |
+| `s >> R` (huge) | `≈ 1`           | `s / 1 = s`              |
+
+So a tiny sample contributes one full `R` worth of bytes to the
+estimate; a huge sample contributes its actual size.
+
+#### Worked example
+
+At `sample_rate_bytes = 512` and `total_allocated = 1 MiB` (= 1 048 576 B),
+the same total can be reached via radically different size
+distributions and the unbiased estimator recovers ~1 MiB in every case
+(figures from `unbiased_estimator_recovers_total_bytes_across_strategies`):
+
+| Strategy             | # allocs | # samples | Σ raw sizes | HT estimate | Rel. error |
+|----------------------|----------|-----------|-------------|-------------|------------|
+| 1 B × 1 048 576      | 1 048 576 | 2 040     | 2 040 B     | 1 045 500 B | 0.29% |
+| 64 B × 16 384        | 16 384   | 1 919     | 122 816 B   | 1 045 215 B | 0.32% |
+| 1 024 B × 1 024      | 1 024    | 890       | 911 360 B   | 1 054 004 B | 0.52% |
+| 64 KiB × 16          | 16       | 16        | 1 048 576 B | 1 048 576 B | 0.00% |
+| 1 MiB × 1            | 1        | 1         | 1 048 576 B | 1 048 576 B | 0.00% |
+
+The naive **`Σ raw sizes`** column varies from 2 KiB to 1 MiB across
+strategies — three orders of magnitude — even though every strategy
+allocated the same 1 MiB total. Always apply the inverse-probability
+weight before aggregating.
+
+#### Aggregation order matters
+
+When grouping by call site / task / type, **weight each sample
+individually before summing**:
+
+```
+# CORRECT — unbiased:
+for sample in stack_group:
+    weight = 1.0 / (1.0 - exp(-sample.size / R))
+    total_bytes += sample.size * weight
+
+# WRONG — sum-then-unbias under-reports small-object stacks:
+raw_sum = sum(sample.size for sample in stack_group)
+mean_size = raw_sum / len(stack_group)
+weight = 1.0 / (1.0 - exp(-mean_size / R))
+total_bytes = raw_sum * weight  # ← biased
+```
+
+The right-hand version uses the group's *mean* size as if every
+allocation in the group were that size; for skewed distributions this
+can be off by orders of magnitude.
+
+#### Where `R` comes from
+
+`sample_rate_bytes` is set at install time on `MemoryProfilingConfig`
+and is **not currently embedded in the trace** itself. Analysis
+tooling needs to know the rate that was active when the trace was
+recorded. Two patterns work:
+
+- **Pass it explicitly to your analysis** (e.g., a flag on the script
+  or a constant per service).
+- **Inject it into segment metadata** at install time using
+  `with_segment_metadata([("dial9.memory_profiling.sample_rate_bytes",
+  rate.to_string())])`. Analysis can then read it from
+  `TraceReader::segment_metadata`.
+
+Always pull `R` from a recorded source rather than a build-time
+constant — the default may change and operators may override it per
+deployment.
+
+#### `sample_rate_bytes <= 1` ("sample every allocation")
+
+In this mode every alloc is in the trace, so the raw `size` field is
+already the truth. The HT formula degenerates to the right answer
+(`exp(-s/1) ≈ 0` for any positive `s`, so the weight is ~1), but you
+can short-circuit: `total_bytes = Σ s_i`, `total_count = number of
+samples`.
 
 ---
 

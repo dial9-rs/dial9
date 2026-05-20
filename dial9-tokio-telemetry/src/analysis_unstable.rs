@@ -6,6 +6,23 @@
 //! The API surface here is still evolving.
 //! Expect breaking changes between minor versions.
 //!
+//! # Memory profiling: scaling sampled `Alloc` events
+//!
+//! `Alloc` events in the trace are sampled with Poisson sampling at the
+//! configured `MemoryProfilingConfig::sample_rate_bytes` (`R`). The
+//! `size` field on each event is the raw bytes of *that one* allocation
+//! — it is **not** a scaled estimate. To recover unbiased totals from
+//! the sample stream:
+//!
+//! ```text
+//! total_bytes ≈ Σ s_i / (1 - exp(-s_i / R))
+//! total_count ≈ Σ   1 / (1 - exp(-s_i / R))
+//! ```
+//!
+//! Always weight each sample individually before summing. See
+//! `MemoryProfilingConfig::sample_rate_bytes` and
+//! `docs/design/memory-profiling.md` for worked examples.
+//!
 //! # Quick start
 //!
 //! ```no_run

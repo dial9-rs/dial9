@@ -38,6 +38,33 @@ pub struct MemoryProfilingConfig {
     /// is a special "sample every allocation" mode: every call to the
     /// allocator is recorded, and the per-thread PRNG is bypassed
     /// entirely.
+    ///
+    /// # Going from sample sizes to estimated totals
+    ///
+    /// Each `Alloc` event in the trace carries the **raw size** of one
+    /// sampled allocation. Summing raw sizes will undercount because
+    /// only ~`s/R` allocations of size `s` are sampled. To recover
+    /// unbiased totals, weight each sample by the inverse Poisson
+    /// sampling probability:
+    ///
+    /// ```text
+    /// total_bytes ≈ Σ s_i / (1 - exp(-s_i / R))
+    /// total_count ≈ Σ   1 / (1 - exp(-s_i / R))
+    /// ```
+    ///
+    /// where `R` is the `sample_rate_bytes` value above. The same
+    /// formula handles all size regimes:
+    ///
+    /// - For `s << R`: each sample contributes ~`R` bytes (small
+    ///   samples are scaled up).
+    /// - For `s >> R`: each sample contributes ~`s` bytes (huge allocs
+    ///   are sampled with probability ~1, no scaling needed).
+    ///
+    /// **Aggregate per sample, not per group.** When grouping by call
+    /// site / task / type, weight each sample individually before
+    /// summing. Sum-then-unbias under-reports skewed groups.
+    ///
+    /// See `docs/design/memory-profiling.md` for worked examples.
     #[builder(default = DEFAULT_SAMPLE_RATE_BYTES)]
     sample_rate_bytes: u64,
 
