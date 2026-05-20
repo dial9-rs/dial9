@@ -1,11 +1,11 @@
-//! Tests that user-provided `on_thread_start` / `on_thread_stop` callbacks
-//! are invoked alongside dial9's internal hooks (issue #297).
+//! Tests that user-provided Tokio hooks are invoked alongside dial9's internal
+//! hooks via the `with_tokio_hooks` API.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use dial9_tokio_telemetry::telemetry::{
-    RotatingWriter, TelemetryCore, TelemetryHandle, ThreadHooks, TracedRuntime,
+    RotatingWriter, TelemetryCore, TelemetryHandle, TracedRuntime,
 };
 
 fn tmp_trace_path() -> std::path::PathBuf {
@@ -28,11 +28,13 @@ fn user_on_thread_start_is_called_alongside_dial9() {
 
     let writer = RotatingWriter::single_file(tmp_trace_path()).unwrap();
     let (runtime, guard) = TracedRuntime::builder()
-        .on_thread_start(move || {
-            start_c.fetch_add(1, Ordering::SeqCst);
-        })
-        .on_thread_stop(move || {
-            stop_c.fetch_add(1, Ordering::SeqCst);
+        .with_tokio_hooks(|h| {
+            h.on_thread_start(move || {
+                start_c.fetch_add(1, Ordering::SeqCst);
+            });
+            h.on_thread_stop(move || {
+                stop_c.fetch_add(1, Ordering::SeqCst);
+            });
         })
         .build_and_start_with_writer(builder, writer)
         .unwrap();
@@ -84,9 +86,11 @@ fn each_runtime_gets_its_own_callbacks() {
     b1.worker_threads(2).enable_all();
     let (rt1, _h1) = guard
         .trace_runtime("rt1")
-        .with_thread_hooks(ThreadHooks::new().on_thread_start(move || {
-            c1.fetch_add(1, Ordering::SeqCst);
-        }))
+        .with_tokio_hooks(|h| {
+            h.on_thread_start(move || {
+                c1.fetch_add(1, Ordering::SeqCst);
+            });
+        })
         .build(b1)
         .unwrap();
 
@@ -94,9 +98,11 @@ fn each_runtime_gets_its_own_callbacks() {
     b2.worker_threads(2).enable_all();
     let (rt2, _h2) = guard
         .trace_runtime("rt2")
-        .with_thread_hooks(ThreadHooks::new().on_thread_start(move || {
-            c2.fetch_add(1, Ordering::SeqCst);
-        }))
+        .with_tokio_hooks(|h| {
+            h.on_thread_start(move || {
+                c2.fetch_add(1, Ordering::SeqCst);
+            });
+        })
         .build(b2)
         .unwrap();
 
@@ -118,5 +124,43 @@ fn each_runtime_gets_its_own_callbacks() {
         rt2_count.load(Ordering::SeqCst),
         2,
         "rt2 callback should only fire for rt2's 2 workers"
+    );
+}
+
+/// `on_thread_park` fires alongside dial9's internal park event recording.
+#[test]
+fn on_thread_park_fires_for_each_park() {
+    let park_count = Arc::new(AtomicUsize::new(0));
+    let park_c = park_count.clone();
+
+    let num_workers = 2;
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.worker_threads(num_workers).enable_all();
+
+    let writer = RotatingWriter::single_file(tmp_trace_path()).unwrap();
+    let (runtime, guard) = TracedRuntime::builder()
+        .with_tokio_hooks(|h| {
+            h.on_thread_park(move || {
+                park_c.fetch_add(1, Ordering::SeqCst);
+            });
+        })
+        .build_and_start_with_writer(builder, writer)
+        .unwrap();
+
+    // Drive the runtime so workers park at least once.
+    runtime.block_on(async {
+        tokio::task::yield_now().await;
+        // Give workers time to park after the work is done.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    });
+
+    drop(runtime);
+    drop(guard);
+
+    // Workers should have parked at least once each.
+    assert!(
+        park_count.load(Ordering::SeqCst) >= num_workers,
+        "on_thread_park should fire at least once per worker, got {}",
+        park_count.load(Ordering::SeqCst)
     );
 }

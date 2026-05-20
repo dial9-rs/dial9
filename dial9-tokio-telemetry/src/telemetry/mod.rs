@@ -24,11 +24,12 @@ pub use format::{
     AllocEvent, FreeEvent, PollEndEvent, PollStartEvent, TaskSpawnEvent, WakeEventEvent, WorkerId,
     WorkerParkEvent, WorkerUnparkEvent,
 };
+#[allow(deprecated)]
 pub use recorder::{
     HasTracePath, NoTracePath, PipelineCustom, PipelineS3, PipelineUnset, RuntimeTelemetryHandle,
     TelemetryCore, TelemetryCoreBuilder, TelemetryGuard, TelemetryHandle, TelemetryRuntimeError,
-    ThreadHooks, TraceRuntimeCoreBuilder, TracedRuntime, TracedRuntimeBuilder, current_worker_id,
-    spawn,
+    ThreadHooks, TokioHooks, TraceRuntimeCoreBuilder, TracedRuntime, TracedRuntimeBuilder,
+    current_worker_id, spawn,
 };
 pub use task_dump_config::TaskDumpConfig;
 pub use task_metadata::{TaskId, UNKNOWN_TASK_ID};

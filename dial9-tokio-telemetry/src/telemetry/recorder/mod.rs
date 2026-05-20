@@ -39,49 +39,56 @@ crate::primitives::thread_local! {
     static INSTRUMENTED_SPAWN: Cell<u32> = const { Cell::new(0) };
 }
 
-/// User-provided callbacks to run on runtime thread start/stop.
+/// User-provided callbacks to run alongside dial9's internal Tokio runtime hooks.
 ///
-/// These are chained with dial9's internal hooks: `on_thread_start` fires
-/// after dial9's setup (so [`TelemetryHandle::current()`] is available),
-/// and `on_thread_stop` fires before dial9's teardown.
+/// All callbacks are composed with dial9's internal hooks: dial9 always runs
+/// first, then the user callback fires. This applies to all 8 hooks.
 ///
 /// # Example
 ///
 /// ```rust,no_run
-/// use dial9_tokio_telemetry::telemetry::{ThreadHooks, TracedRuntime, RotatingWriter};
-///
-/// let hooks = ThreadHooks::new()
-///     .on_thread_start(|| {
-///         println!("worker thread started");
-///     })
-///     .on_thread_stop(|| {
-///         println!("worker thread stopping");
-///     });
+/// use dial9_tokio_telemetry::telemetry::{TokioHooks, TracedRuntime, RotatingWriter};
 ///
 /// let mut builder = tokio::runtime::Builder::new_multi_thread();
 /// builder.worker_threads(4).enable_all();
 /// let writer = RotatingWriter::single_file("/tmp/trace.bin").unwrap();
 /// let (runtime, guard) = TracedRuntime::builder()
-///     .with_thread_hooks(hooks)
+///     .with_tokio_hooks(|h| {
+///         h.on_thread_start(|| println!("started"));
+///         h.on_thread_stop(|| println!("stopping"));
+///     })
 ///     .build_and_start_with_writer(builder, writer)
 ///     .unwrap();
 /// ```
 #[derive(Clone, Default)]
-pub struct ThreadHooks {
+#[non_exhaustive]
+pub struct TokioHooks {
     on_thread_start: Option<Arc<dyn Fn() + Send + Sync>>,
     on_thread_stop: Option<Arc<dyn Fn() + Send + Sync>>,
+    on_thread_park: Option<Arc<dyn Fn() + Send + Sync>>,
+    on_thread_unpark: Option<Arc<dyn Fn() + Send + Sync>>,
+    on_task_spawn: Option<Arc<dyn Fn(&tokio::runtime::TaskMeta<'_>) + Send + Sync>>,
+    on_task_terminate: Option<Arc<dyn Fn(&tokio::runtime::TaskMeta<'_>) + Send + Sync>>,
+    on_before_task_poll: Option<Arc<dyn Fn(&tokio::runtime::TaskMeta<'_>) + Send + Sync>>,
+    on_after_task_poll: Option<Arc<dyn Fn(&tokio::runtime::TaskMeta<'_>) + Send + Sync>>,
 }
 
-impl std::fmt::Debug for ThreadHooks {
+impl std::fmt::Debug for TokioHooks {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ThreadHooks")
+        f.debug_struct("TokioHooks")
             .field("on_thread_start", &self.on_thread_start.is_some())
             .field("on_thread_stop", &self.on_thread_stop.is_some())
+            .field("on_thread_park", &self.on_thread_park.is_some())
+            .field("on_thread_unpark", &self.on_thread_unpark.is_some())
+            .field("on_task_spawn", &self.on_task_spawn.is_some())
+            .field("on_task_terminate", &self.on_task_terminate.is_some())
+            .field("on_before_task_poll", &self.on_before_task_poll.is_some())
+            .field("on_after_task_poll", &self.on_after_task_poll.is_some())
             .finish()
     }
 }
 
-impl ThreadHooks {
+impl TokioHooks {
     /// Create empty hooks (no callbacks).
     pub fn new() -> Self {
         Self::default()
@@ -89,22 +96,84 @@ impl ThreadHooks {
 
     /// Set a callback to run on each runtime thread after it starts.
     ///
-    /// The callback fires after dial9's internal setup, so
-    /// [`TelemetryHandle::current()`] is available.
-    pub fn on_thread_start(mut self, f: impl Fn() + Send + Sync + 'static) -> Self {
+    /// Fires after dial9's internal setup, so [`TelemetryHandle::current()`] is available.
+    pub fn on_thread_start(&mut self, f: impl Fn() + Send + Sync + 'static) -> &mut Self {
         self.on_thread_start = Some(Arc::new(f));
         self
     }
 
-    /// Set a callback to run on each runtime thread before it stops.
+    /// Set a callback to run on each runtime thread after it stops.
     ///
-    /// The callback fires before dial9's internal teardown, so
-    /// [`TelemetryHandle::current()`] is still available.
-    pub fn on_thread_stop(mut self, f: impl Fn() + Send + Sync + 'static) -> Self {
+    /// Fires after dial9's internal teardown.
+    pub fn on_thread_stop(&mut self, f: impl Fn() + Send + Sync + 'static) -> &mut Self {
         self.on_thread_stop = Some(Arc::new(f));
         self
     }
+
+    /// Set a callback to run when a runtime thread parks.
+    ///
+    /// Fires after dial9 records the park event.
+    pub fn on_thread_park(&mut self, f: impl Fn() + Send + Sync + 'static) -> &mut Self {
+        self.on_thread_park = Some(Arc::new(f));
+        self
+    }
+
+    /// Set a callback to run when a runtime thread unparks.
+    ///
+    /// Fires after dial9 records the unpark event.
+    pub fn on_thread_unpark(&mut self, f: impl Fn() + Send + Sync + 'static) -> &mut Self {
+        self.on_thread_unpark = Some(Arc::new(f));
+        self
+    }
+
+    /// Set a callback to run when a task is spawned.
+    ///
+    /// Fires after dial9 records the spawn event.
+    pub fn on_task_spawn(
+        &mut self,
+        f: impl Fn(&tokio::runtime::TaskMeta<'_>) + Send + Sync + 'static,
+    ) -> &mut Self {
+        self.on_task_spawn = Some(Arc::new(f));
+        self
+    }
+
+    /// Set a callback to run when a task terminates.
+    ///
+    /// Fires after dial9 records the terminate event.
+    pub fn on_task_terminate(
+        &mut self,
+        f: impl Fn(&tokio::runtime::TaskMeta<'_>) + Send + Sync + 'static,
+    ) -> &mut Self {
+        self.on_task_terminate = Some(Arc::new(f));
+        self
+    }
+
+    /// Set a callback to run before a task is polled.
+    ///
+    /// Fires after dial9 records the poll_start event.
+    pub fn on_before_task_poll(
+        &mut self,
+        f: impl Fn(&tokio::runtime::TaskMeta<'_>) + Send + Sync + 'static,
+    ) -> &mut Self {
+        self.on_before_task_poll = Some(Arc::new(f));
+        self
+    }
+
+    /// Set a callback to run after a task is polled.
+    ///
+    /// Fires after dial9 records the poll_end event.
+    pub fn on_after_task_poll(
+        &mut self,
+        f: impl Fn(&tokio::runtime::TaskMeta<'_>) + Send + Sync + 'static,
+    ) -> &mut Self {
+        self.on_after_task_poll = Some(Arc::new(f));
+        self
+    }
 }
+
+/// Deprecated alias for [`TokioHooks`].
+#[deprecated(since = "0.4.0", note = "renamed to `TokioHooks`")]
+pub type ThreadHooks = TokioHooks;
 
 // ---------------------------------------------------------------------------
 // Channel-based control for the flush thread
@@ -223,125 +292,248 @@ fn register_hooks(
     shared: &Arc<SharedState>,
     control_tx: &crate::primitives::sync::mpsc::SyncSender<ControlCommand>,
     task_tracking_enabled: bool,
-    thread_hooks: ThreadHooks,
+    tokio_hooks: TokioHooks,
 ) {
     // TODO: these should rely on public APIs instead of utilizing `SharedState`
 
-    let c1 = ctx.clone();
-    let s1 = shared.clone();
-    let c2 = ctx.clone();
-    let s2 = shared.clone();
-    let c3 = ctx.clone();
-    let s3 = shared.clone();
-    let c4 = ctx.clone();
-    let s4 = shared.clone();
-
-    builder
-        .on_thread_park(move || {
+    // --- on_thread_park ---
+    if let Some(user_cb) = tokio_hooks.on_thread_park {
+        let c1 = ctx.clone();
+        let s1 = shared.clone();
+        builder.on_thread_park(move || {
             s1.if_enabled(|buf| {
                 let event = make_worker_park(&c1, &s1);
                 buf.record_encodable_event(&event);
             });
-        })
-        .on_thread_unpark(move || {
+            user_cb();
+        });
+    } else {
+        let c1 = ctx.clone();
+        let s1 = shared.clone();
+        builder.on_thread_park(move || {
+            s1.if_enabled(|buf| {
+                let event = make_worker_park(&c1, &s1);
+                buf.record_encodable_event(&event);
+            });
+        });
+    }
+
+    // --- on_thread_unpark ---
+    if let Some(user_cb) = tokio_hooks.on_thread_unpark {
+        let c2 = ctx.clone();
+        let s2 = shared.clone();
+        builder.on_thread_unpark(move || {
             s2.if_enabled(|buf| {
                 let event = make_worker_unpark(&c2, &s2);
                 buf.record_encodable_event(&event);
             });
-        })
-        .on_before_task_poll(move |meta| {
+            user_cb();
+        });
+    } else {
+        let c2 = ctx.clone();
+        let s2 = shared.clone();
+        builder.on_thread_unpark(move || {
+            s2.if_enabled(|buf| {
+                let event = make_worker_unpark(&c2, &s2);
+                buf.record_encodable_event(&event);
+            });
+        });
+    }
+
+    // --- on_before_task_poll ---
+    if let Some(user_cb) = tokio_hooks.on_before_task_poll {
+        let c3 = ctx.clone();
+        let s3 = shared.clone();
+        builder.on_before_task_poll(move |meta| {
             s3.if_enabled(|buf| {
                 let task_id = TaskId::from(meta.id());
                 let location = meta.spawned_at();
                 let event = make_poll_start(&c3, &s3, location, task_id);
                 buf.record_encodable_event(&event);
             });
-        })
-        .on_after_task_poll(move |_meta| {
+            user_cb(meta);
+        });
+    } else {
+        let c3 = ctx.clone();
+        let s3 = shared.clone();
+        builder.on_before_task_poll(move |meta| {
+            s3.if_enabled(|buf| {
+                let task_id = TaskId::from(meta.id());
+                let location = meta.spawned_at();
+                let event = make_poll_start(&c3, &s3, location, task_id);
+                buf.record_encodable_event(&event);
+            });
+        });
+    }
+
+    // --- on_after_task_poll ---
+    if let Some(user_cb) = tokio_hooks.on_after_task_poll {
+        let c4 = ctx.clone();
+        let s4 = shared.clone();
+        builder.on_after_task_poll(move |meta| {
+            s4.if_enabled(|buf| {
+                let event = make_poll_end(&c4, &s4);
+                buf.record_encodable_event(&event);
+            });
+            user_cb(meta);
+        });
+    } else {
+        let c4 = ctx.clone();
+        let s4 = shared.clone();
+        builder.on_after_task_poll(move |_meta| {
             s4.if_enabled(|buf| {
                 let event = make_poll_end(&c4, &s4);
                 buf.record_encodable_event(&event);
             });
         });
+    }
 
+    // --- on_task_spawn ---
     if task_tracking_enabled {
-        let s5 = shared.clone();
+        if let Some(user_cb) = tokio_hooks.on_task_spawn {
+            let s5 = shared.clone();
+            builder.on_task_spawn(move |meta| {
+                s5.if_enabled(|buf| {
+                    let task_id = TaskId::from(meta.id());
+                    let location = meta.spawned_at();
+                    let instrumented = INSTRUMENTED_SPAWN.with(|f| f.get()) > 0;
+                    let timestamp_ns = crate::telemetry::events::clock_monotonic_ns();
+                    buf.record_encodable_event(&runtime_context::TaskSpawn {
+                        timestamp_ns,
+                        task_id,
+                        location,
+                        instrumented,
+                    });
+                });
+                user_cb(meta);
+            });
+        } else {
+            let s5 = shared.clone();
+            builder.on_task_spawn(move |meta| {
+                s5.if_enabled(|buf| {
+                    let task_id = TaskId::from(meta.id());
+                    let location = meta.spawned_at();
+                    let instrumented = INSTRUMENTED_SPAWN.with(|f| f.get()) > 0;
+                    let timestamp_ns = crate::telemetry::events::clock_monotonic_ns();
+                    buf.record_encodable_event(&runtime_context::TaskSpawn {
+                        timestamp_ns,
+                        task_id,
+                        location,
+                        instrumented,
+                    });
+                });
+            });
+        }
+    } else if let Some(user_cb) = tokio_hooks.on_task_spawn {
         builder.on_task_spawn(move |meta| {
-            s5.if_enabled(|buf| {
-                let task_id = TaskId::from(meta.id());
-                let location = meta.spawned_at();
-                let instrumented = INSTRUMENTED_SPAWN.with(|f| f.get()) > 0;
-                let timestamp_ns = crate::telemetry::events::clock_monotonic_ns();
-                buf.record_encodable_event(&runtime_context::TaskSpawn {
-                    timestamp_ns,
-                    task_id,
-                    location,
-                    instrumented,
-                });
-            });
-        });
-        let s6 = shared.clone();
-        builder.on_task_terminate(move |meta| {
-            s6.if_enabled(|buf| {
-                let task_id = TaskId::from(meta.id());
-                buf.record_encodable_event(&TaskTerminateEvent {
-                    timestamp_ns: crate::telemetry::events::clock_monotonic_ns(),
-                    task_id,
-                });
-            });
+            user_cb(meta);
         });
     }
 
+    // --- on_task_terminate ---
+    if task_tracking_enabled {
+        if let Some(user_cb) = tokio_hooks.on_task_terminate {
+            let s6 = shared.clone();
+            builder.on_task_terminate(move |meta| {
+                s6.if_enabled(|buf| {
+                    let task_id = TaskId::from(meta.id());
+                    buf.record_encodable_event(&TaskTerminateEvent {
+                        timestamp_ns: crate::telemetry::events::clock_monotonic_ns(),
+                        task_id,
+                    });
+                });
+                user_cb(meta);
+            });
+        } else {
+            let s6 = shared.clone();
+            builder.on_task_terminate(move |meta| {
+                s6.if_enabled(|buf| {
+                    let task_id = TaskId::from(meta.id());
+                    buf.record_encodable_event(&TaskTerminateEvent {
+                        timestamp_ns: crate::telemetry::events::clock_monotonic_ns(),
+                        task_id,
+                    });
+                });
+            });
+        }
+    } else if let Some(user_cb) = tokio_hooks.on_task_terminate {
+        builder.on_task_terminate(move |meta| {
+            user_cb(meta);
+        });
+    }
+
+    // --- on_thread_start ---
     // Unified on_thread_start / on_thread_stop. Tokio only stores one
     // callback per hook, so any feature-gated work must live here rather
     // than registering its own hook.
     let handle_for_tl = TelemetryHandle::enabled(shared.clone(), control_tx.clone());
     #[cfg(feature = "cpu-profiling")]
     let s_start = shared.clone();
-    #[cfg(feature = "cpu-profiling")]
-    let s_stop = shared.clone();
 
-    let user_on_thread_start = thread_hooks.on_thread_start;
-    let user_on_thread_stop = thread_hooks.on_thread_stop;
-
-    builder
-        .on_thread_start(move || {
-            // Install this thread's TelemetryHandle so user code can call
-            // `TelemetryHandle::current()` from anywhere on this thread.
+    if let Some(user_cb) = tokio_hooks.on_thread_start {
+        builder.on_thread_start(move || {
             CURRENT_HANDLE.with(|cell| {
                 *cell.borrow_mut() = Some(handle_for_tl.clone());
             });
 
             #[cfg(feature = "cpu-profiling")]
             {
-                // Register as Blocking initially; worker threads will
-                // overwrite this to Worker(i) in resolve_worker_id.
-                // NOTE: `tokio::runtime::worker_index()` will always return `None` at this point
-                // so we can't utilize that here.
                 let tid = crate::telemetry::events::current_tid();
                 s_start
                     .thread_roles
                     .lock()
                     .unwrap()
                     .insert(tid, crate::telemetry::events::ThreadRole::Blocking);
-                // Sched event sampling is deferred to register_tid_if_needed(),
-                // which runs only for worker threads on their first poll/park.
-                // This avoids opening perf fds for blocking pool threads.
-
-                // Registers the current thread for the CPU-profiling fallback (ctimer).
-                // No-op when perf is the active backend (perf uses inherit).
                 let _ = dial9_perf_self_profile::register_current_thread();
             }
 
-            if let Some(ref cb) = user_on_thread_start {
-                cb();
+            user_cb();
+        });
+    } else {
+        builder.on_thread_start(move || {
+            CURRENT_HANDLE.with(|cell| {
+                *cell.borrow_mut() = Some(handle_for_tl.clone());
+            });
+
+            #[cfg(feature = "cpu-profiling")]
+            {
+                let tid = crate::telemetry::events::current_tid();
+                s_start
+                    .thread_roles
+                    .lock()
+                    .unwrap()
+                    .insert(tid, crate::telemetry::events::ThreadRole::Blocking);
+                let _ = dial9_perf_self_profile::register_current_thread();
             }
-        })
-        .on_thread_stop(move || {
-            if let Some(ref cb) = user_on_thread_stop {
-                cb();
+        });
+    }
+
+    // --- on_thread_stop ---
+    #[cfg(feature = "cpu-profiling")]
+    let s_stop = shared.clone();
+
+    if let Some(user_cb) = tokio_hooks.on_thread_stop {
+        builder.on_thread_stop(move || {
+            CURRENT_HANDLE.with(|cell| {
+                *cell.borrow_mut() = None;
+            });
+
+            #[cfg(feature = "cpu-profiling")]
+            {
+                let tid = crate::telemetry::events::current_tid();
+                s_stop.thread_roles.lock().unwrap().remove(&tid);
+                if let Ok(mut sources) = s_stop.sources.lock() {
+                    for source in sources.iter_mut() {
+                        source.on_thread_stop();
+                    }
+                }
+                dial9_perf_self_profile::unregister_current_thread();
             }
 
+            user_cb();
+        });
+    } else {
+        builder.on_thread_stop(move || {
             CURRENT_HANDLE.with(|cell| {
                 *cell.borrow_mut() = None;
             });
@@ -358,6 +550,7 @@ fn register_hooks(
                 dial9_perf_self_profile::unregister_current_thread();
             }
         });
+    }
 }
 
 /// Attach a runtime to an existing telemetry session: register hooks, build
@@ -368,7 +561,7 @@ fn attach_runtime(
     runtime_name: Option<String>,
     control_tx: &crate::primitives::sync::mpsc::SyncSender<ControlCommand>,
     task_tracking_enabled: bool,
-    thread_hooks: ThreadHooks,
+    tokio_hooks: TokioHooks,
 ) -> std::io::Result<tokio::runtime::Runtime> {
     let ctx = Arc::new(RuntimeContext::new(runtime_name));
     register_hooks(
@@ -377,7 +570,7 @@ fn attach_runtime(
         shared,
         control_tx,
         task_tracking_enabled,
-        thread_hooks,
+        tokio_hooks,
     );
 
     let runtime = builder.build()?;
@@ -919,7 +1112,7 @@ impl TelemetryGuard {
             guard: self,
             name: name.into(),
             task_tracking: false,
-            thread_hooks: ThreadHooks::default(),
+            thread_hooks: TokioHooks::default(),
         }
     }
 
@@ -1070,7 +1263,7 @@ pub struct TracedRuntimeBuilder<P = NoTracePath, M = PipelineUnset> {
     segment_metadata: Vec<(String, String)>,
     worker_poll_interval: Option<Duration>,
     worker_metrics_sink: Option<metrique_writer::BoxEntrySink>,
-    thread_hooks: ThreadHooks,
+    thread_hooks: TokioHooks,
     _marker: std::marker::PhantomData<(P, M)>,
 }
 
@@ -1180,8 +1373,9 @@ impl<P, M> TracedRuntimeBuilder<P, M> {
     /// This callback is chained with dial9's internal `on_thread_start`
     /// hook — both will fire on every runtime-owned thread. The user
     /// callback runs after dial9's internal setup.
+    #[deprecated(since = "0.4.0", note = "use `with_tokio_hooks` instead")]
     pub fn on_thread_start(mut self, f: impl Fn() + Send + Sync + 'static) -> Self {
-        self.thread_hooks = self.thread_hooks.on_thread_start(f);
+        self.thread_hooks.on_thread_start(f);
         self
     }
 
@@ -1189,15 +1383,29 @@ impl<P, M> TracedRuntimeBuilder<P, M> {
     ///
     /// This callback is chained with dial9's internal `on_thread_stop`
     /// hook — both will fire on every runtime-owned thread. The user
-    /// callback runs before dial9's internal teardown.
+    /// callback runs after dial9's internal teardown.
+    #[deprecated(since = "0.4.0", note = "use `with_tokio_hooks` instead")]
     pub fn on_thread_stop(mut self, f: impl Fn() + Send + Sync + 'static) -> Self {
-        self.thread_hooks = self.thread_hooks.on_thread_stop(f);
+        self.thread_hooks.on_thread_stop(f);
         self
     }
 
-    /// Set thread lifecycle hooks. See [`ThreadHooks`] for details.
-    pub fn with_thread_hooks(mut self, hooks: ThreadHooks) -> Self {
+    /// Set thread lifecycle hooks. See [`TokioHooks`] for details.
+    #[deprecated(since = "0.4.0", note = "use `with_tokio_hooks` instead")]
+    pub fn with_thread_hooks(mut self, hooks: TokioHooks) -> Self {
         self.thread_hooks = hooks;
+        self
+    }
+
+    /// Configure Tokio runtime hooks that fire alongside dial9's internal hooks.
+    ///
+    /// dial9 always runs its own hook logic first, then invokes the user callback.
+    /// See [`TokioHooks`] for the full list of available hooks.
+    pub fn with_tokio_hooks<F>(mut self, f: F) -> Self
+    where
+        F: FnOnce(&mut TokioHooks),
+    {
+        f(&mut self.thread_hooks);
         self
     }
 
@@ -1551,7 +1759,7 @@ pub struct TraceRuntimeCoreBuilder<'a> {
     guard: &'a TelemetryGuard,
     name: String,
     task_tracking: bool,
-    thread_hooks: ThreadHooks,
+    thread_hooks: TokioHooks,
 }
 
 impl<'a> TraceRuntimeCoreBuilder<'a> {
@@ -1562,9 +1770,22 @@ impl<'a> TraceRuntimeCoreBuilder<'a> {
         self
     }
 
-    /// Set thread lifecycle hooks for this runtime. See [`ThreadHooks`].
-    pub fn with_thread_hooks(mut self, hooks: ThreadHooks) -> Self {
+    /// Set thread lifecycle hooks for this runtime. See [`TokioHooks`].
+    #[deprecated(since = "0.4.0", note = "use `with_tokio_hooks` instead")]
+    pub fn with_thread_hooks(mut self, hooks: TokioHooks) -> Self {
         self.thread_hooks = hooks;
+        self
+    }
+
+    /// Configure Tokio runtime hooks that fire alongside dial9's internal hooks.
+    ///
+    /// dial9 always runs its own hook logic first, then invokes the user callback.
+    /// See [`TokioHooks`] for the full list of available hooks.
+    pub fn with_tokio_hooks<F>(mut self, f: F) -> Self
+    where
+        F: FnOnce(&mut TokioHooks),
+    {
+        f(&mut self.thread_hooks);
         self
     }
 
@@ -2062,7 +2283,7 @@ impl TracedRuntime {
             segment_metadata: Vec::new(),
             worker_poll_interval: None,
             worker_metrics_sink: None,
-            thread_hooks: ThreadHooks::default(),
+            thread_hooks: TokioHooks::default(),
             _marker: std::marker::PhantomData,
         }
     }
