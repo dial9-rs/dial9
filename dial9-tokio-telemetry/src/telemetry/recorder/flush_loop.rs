@@ -105,19 +105,24 @@ pub(super) fn flush_once(
     }
 }
 
-/// The flush thread main loop.
+/// The flush thread main loop. Extracted so `TelemetryCore::builder` stays readable.
 pub(super) fn run_flush_loop(
     control_rx: crate::primitives::sync::mpsc::Receiver<ControlCommand>,
     shared: &SharedState,
     flush_metrics_sink: &metrique_writer::BoxEntrySink,
     mut writer: Box<dyn TraceWriter>,
 ) {
+    // Drain the flush thread's own TL buffer every ~1s (200 × 5ms)
+    // rather than every cycle, so queue samples and CPU events
+    // are batched into reasonably-sized segments.
     let mut cycle_count: u64 = 0;
     const SELF_DRAIN_INTERVAL: u64 = 200;
     let mut events_written: u64 = 0;
 
     let sample_interval = Duration::from_millis(10);
     let mut last_sample = time_source().instant();
+    // Snapshot the user-provided segment metadata so we can
+    // merge it with runtime→worker entries on each flush cycle.
     let static_metadata = writer.segment_metadata().to_vec();
 
     let mut drain_state = DrainState::Idle;
@@ -125,17 +130,22 @@ pub(super) fn run_flush_loop(
     loop {
         let mut ack_tx = None;
         let mut exit = false;
+        // Wait for control commands up to 5ms.
         match control_rx.recv_timeout(Duration::from_millis(5)) {
             Ok(ControlCommand::FinalizeAndStop(ack)) => {
                 ack_tx = Some(ack);
                 exit = true;
             }
             Err(crate::primitives::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                // All senders dropped — do a best-effort finalize.
                 exit = true;
             }
             Err(crate::primitives::sync::mpsc::RecvTimeoutError::Timeout) => {}
         }
 
+        // When disabled, skip all recording work (queue sampling, metadata
+        // merging, drain coordination, flush). The loop still wakes every
+        // 5ms to check for control commands and the exit signal.
         if !exit && !shared.is_enabled() {
             continue;
         }
@@ -149,6 +159,8 @@ pub(super) fn run_flush_loop(
             }
         }
 
+        // Merge user-provided metadata with runtime→worker mappings
+        // so the next rotated segment is fully self-describing.
         let contexts = shared.contexts.lock().unwrap().clone();
         let runtime_entries: Vec<(String, String)> =
             contexts.iter().filter_map(|c| c.metadata_entry()).collect();
@@ -160,7 +172,17 @@ pub(super) fn run_flush_loop(
 
         cycle_count += 1;
         let drain_self = exit || cycle_count.is_multiple_of(SELF_DRAIN_INTERVAL);
-
+        // --- Drain coordination state machine ---
+        //
+        // When the writer reports a drain is due, we can't act immediately
+        // because thread-local buffers may still hold events that belong
+        // in the current segment.  The two-state machine ensures we:
+        //   Idle        → detect should_drain, bump epoch, transition
+        //   EpochBumped → intrusive drain + flush + drained(), back to Idle
+        //
+        // This avoids the bug where re-checking should_drain() every
+        // cycle (it stays true until we actually call drained()) would
+        // forever reschedule the drain and never reach the drained step.
         let do_drain = match drain_state {
             DrainState::Idle => {
                 if !exit && writer.should_drain() {
@@ -175,10 +197,13 @@ pub(super) fn run_flush_loop(
             }
         };
 
+        // On exit, bump + drain in the same tick since there is no next
+        // tick for the grace period.
         if exit {
             shared.bump_drain_epoch();
         }
 
+        // --- Execute intrusive drain when needed ---
         if exit || do_drain {
             let mut tl_drain_timer = Timer::start_now();
             let stats = shared.drain_all_tl_buffers();
@@ -195,6 +220,9 @@ pub(super) fn run_flush_loop(
         let stats = flush_once(&mut *writer, &mut events_written, shared, drain_self);
         flush_timer.stop();
 
+        // Notify the writer that TL buffers have been drained and flushed.
+        // The writer may rotate the segment or just advance its drain timer.
+        // Skip on exit — finalize() below will seal the final segment.
         if do_drain
             && !exit
             && let Err(e) = writer.drained()
@@ -204,6 +232,8 @@ pub(super) fn run_flush_loop(
             });
         }
 
+        // Create the metrics guard up front; mutate on the exit path,
+        // then let it drop (which emits the entry).
         let mut flush_guard =
             (stats.event_count > 0 || stats.dropped_batches > 0 || exit).then(|| {
                 FlushMetrics {
@@ -217,6 +247,8 @@ pub(super) fn run_flush_loop(
                 .append_on_drop(flush_metrics_sink.clone())
             });
         if exit {
+            // Write final metadata before sealing so single-segment
+            // traces contain runtime→worker mappings.
             if let Err(e) = writer.write_current_segment_metadata() {
                 rate_limited!(Duration::from_secs(60), {
                     tracing::warn!("failed to write final segment metadata: {e}");
