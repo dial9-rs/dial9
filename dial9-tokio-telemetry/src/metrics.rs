@@ -13,6 +13,7 @@ pub(crate) enum Operation {
     Flush,
     ProcessSegment,
     TlDrain,
+    WorkerCycle,
 }
 
 /// Metrics emitted by the flush thread each cycle.
@@ -34,6 +35,29 @@ pub(crate) struct FlushMetrics {
 
     /// True when finalizing (sealing) the segment failed during the final flush.
     pub finalize_failed: bool,
+}
+
+/// Metrics emitted once per worker cycle
+#[metrics(rename_all = "PascalCase")]
+#[derive(Debug)]
+pub(crate) struct WorkerCycleMetrics {
+    pub operation: Operation,
+    /// Memory ring depth: segments waiting in the in-process channel,
+    /// not popped this cycle. `None` on disk (disk backpressure
+    /// surfaces as `in_flight_*` + `dropped_segments`).
+    pub ring_depth: Option<u64>,
+    /// Bytes in the memory ring (the "how close to eviction" signal).
+    /// `None` on disk.
+    #[metrics(unit = metrique::unit::Byte)]
+    pub ring_bytes: Option<u64>,
+    /// Segments claimed and not yet released.
+    pub in_flight_count: u64,
+    #[metrics(unit = metrique::unit::Byte)]
+    pub in_flight_bytes: u64,
+    /// Cumulative backend-side evictions (disk: `evict_oldest`, memory: ring overflow).
+    pub dropped_segments: u64,
+    /// Segments handed into the pipeline this cycle.
+    pub segments_dispatched: u64,
 }
 
 /// Per-cycle counters produced by the intrusive thread-local buffer

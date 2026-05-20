@@ -5,7 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
-/// A sealed trace segment ready for processing.
+/// A sealed trace segment ready for processing (disk-backed).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SealedSegment {
     pub(crate) path: PathBuf,
@@ -21,6 +21,61 @@ impl SealedSegment {
     /// Segment index (e.g. `3` for `trace.3.bin`).
     pub fn index(&self) -> u32 {
         self.index
+    }
+}
+
+/// A sealed trace segment backed by in-process memory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemorySegment {
+    pub(crate) index: u32,
+    pub(crate) size: u64,
+}
+
+impl MemorySegment {
+    /// Segment index
+    pub fn index(&self) -> u32 {
+        self.index
+    }
+
+    /// Encoded segment size in bytes.
+    pub fn size(&self) -> u64 {
+        self.size
+    }
+}
+
+/// A sealed trace segment, either disk-backed or memory-backed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SegmentRef {
+    /// On-disk segment file
+    Disk(SealedSegment),
+    /// In-process segment
+    Memory(MemorySegment),
+}
+
+impl SegmentRef {
+    /// Segment index.
+    pub fn index(&self) -> u32 {
+        match self {
+            SegmentRef::Disk(s) => s.index,
+            SegmentRef::Memory(m) => m.index,
+        }
+    }
+
+    /// Returns the on-disk path for disk-backed segments.
+    pub(crate) fn disk_path(&self) -> Option<&Path> {
+        match self {
+            SegmentRef::Disk(s) => Some(&s.path),
+            SegmentRef::Memory(_) => None,
+        }
+    }
+}
+
+impl std::fmt::Display for SegmentRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SegmentRef::Disk(s) => write!(f, "{}", s.path.display()),
+            SegmentRef::Memory(m) => write!(f, "mem://{}", m.index),
+        }
     }
 }
 

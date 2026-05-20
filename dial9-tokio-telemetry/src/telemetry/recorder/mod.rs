@@ -1598,6 +1598,7 @@ impl TelemetryCore {
             pipeline,
         );
 
+        let writer_fs = writer.fs_handle();
         #[allow(unused_mut)]
         let mut event_writer = EventWriter::new(Box::new(writer));
 
@@ -1652,37 +1653,43 @@ impl TelemetryCore {
             })
         };
 
-        // Auto-construct worker config when we have a trace path and
-        // at least one processor. When the user supplies no processors
-        // there is nothing for the worker to do, so skip spawning it.
-        let worker_config = trace_path.and_then(|trace_path| {
-            if processors.is_empty() {
-                return None;
-            }
-
+        // Spawn the background worker when we have a filesystem backend
+        // (disk or memory via `writer_fs`) and at least one processor.
+        let worker_config = if processors.is_empty() {
+            None
+        } else if let Some(fs) = writer_fs {
             let poll_interval =
                 worker_poll_interval.unwrap_or(crate::background_task::DEFAULT_POLL_INTERVAL);
             let metrics_sink =
                 worker_metrics_sink.unwrap_or_else(metrique_writer::sink::DevNullSink::boxed);
 
-            Some(
+            let config = if let Some(tp) = trace_path {
                 crate::background_task::BackgroundTaskConfig::builder()
-                    .trace_path(trace_path)
+                    .trace_path(tp)
                     .poll_interval(poll_interval)
                     .processors(processors)
                     .metrics_sink(metrics_sink)
-                    .build(),
-            )
-        });
+                    .build()
+            } else {
+                crate::background_task::BackgroundTaskConfig::builder()
+                    .poll_interval(poll_interval)
+                    .processors(processors)
+                    .metrics_sink(metrics_sink)
+                    .build()
+            };
+            Some((config, fs))
+        } else {
+            None
+        };
 
         #[allow(unused_mut)]
         let mut worker = None;
-        if let Some(config) = worker_config {
+        if let Some((config, fs)) = worker_config {
             let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
             let wt = crate::primitives::thread::spawn_named("dial9-worker", move || {
                 #[cfg(feature = "cpu-profiling")]
                 let _ = dial9_perf_self_profile::register_current_thread();
-                crate::background_task::run_background_task(config, shutdown_rx);
+                crate::background_task::run_background_task(config, shutdown_rx, fs);
                 #[cfg(feature = "cpu-profiling")]
                 dial9_perf_self_profile::unregister_current_thread();
             });

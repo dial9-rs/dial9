@@ -5,7 +5,7 @@
 
 use crate::background_task::ProcessErrorKind;
 use crate::background_task::instance_metadata::InstanceIdentity;
-use crate::background_task::sealed::SealedSegment;
+use crate::background_task::sealed::SegmentRef;
 use aws_sdk_s3_transfer_manager::Client;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -149,7 +149,7 @@ impl S3Config {
     /// `{prefix}/{date}/{HHMM}/{service}/{instance}/{boot_id}/{epoch_secs}-{index}.bin.gz`
     pub(crate) fn object_key(
         &self,
-        segment: &SealedSegment,
+        segment: &SegmentRef,
         metadata: &HashMap<String, String>,
     ) -> String {
         let epoch_secs: u64 = metadata
@@ -159,7 +159,7 @@ impl S3Config {
 
         if let Some(key_fn) = &self.key_fn {
             let info = SegmentInfo {
-                index: segment.index,
+                index: segment.index(),
                 epoch_secs,
                 boot_id: self.boot_id.clone(),
             };
@@ -184,7 +184,7 @@ impl S3Config {
             self.instance_path.as_str(),
             self.boot_id,
             ts,
-            segment.index,
+            segment.index(),
             extension,
         );
         match &self.prefix {
@@ -250,7 +250,7 @@ impl S3Uploader {
     /// Returns the S3 key of the uploaded object.
     pub(crate) async fn upload_and_delete(
         &self,
-        segment: &SealedSegment,
+        segment: &SegmentRef,
         payload: super::Payload,
         metadata: &HashMap<String, String>,
     ) -> Result<String, ProcessErrorKind> {
@@ -271,7 +271,7 @@ impl S3Uploader {
             .content_type(content_type)
             .metadata("service", &self.config.service_name)
             .metadata("boot-id", &self.config.boot_id)
-            .metadata("segment-index", segment.index.to_string())
+            .metadata("segment-index", segment.index().to_string())
             .metadata(
                 "start-time",
                 metadata
@@ -285,12 +285,15 @@ impl S3Uploader {
 
         handle.join().await?;
 
-        match tokio::fs::remove_file(&segment.path).await {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                tracing::debug!(target: "dial9_worker", path = %segment.path.display(), "segment already removed");
+        // Remove local files if disk-backed (memory segments are gone once popped).
+        if let Some(path) = segment.disk_path() {
+            match tokio::fs::remove_file(path).await {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    tracing::debug!(target: "dial9_worker", path = %path.display(), "segment already removed");
+                }
+                Err(e) => return Err(e.into()),
             }
-            Err(e) => return Err(e.into()),
         }
 
         Ok(key)
@@ -301,7 +304,7 @@ impl S3Uploader {
 mod tests {
     use super::super::Payload;
     use super::*;
-    use crate::background_task::sealed::SealedSegment;
+    use crate::background_task::sealed::{SealedSegment, SegmentRef};
     use assert2::check;
     use flate2::read::GzDecoder;
     use std::io::Read;
@@ -326,11 +329,11 @@ mod tests {
             .build()
     }
 
-    fn make_segment(path: impl Into<PathBuf>, index: u32) -> SealedSegment {
-        SealedSegment {
+    fn make_segment(path: impl Into<PathBuf>, index: u32) -> SegmentRef {
+        SegmentRef::Disk(SealedSegment {
             path: path.into(),
             index,
-        }
+        })
     }
 
     fn make_metadata(epoch_secs: u64) -> HashMap<String, String> {
