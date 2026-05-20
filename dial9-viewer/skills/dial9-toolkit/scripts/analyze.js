@@ -114,7 +114,7 @@ function accumulateTrace(acc, trace) {
   const minTs = trace.minTs;
   const maxTs = trace.maxTs;
 
-  const spans = buildWorkerSpans(trace.events, workerIds, maxTs);
+  const spans = buildWorkerSpans(trace.events, workerIds, maxTs, trace.blockInPlaceGaps);
   attachCpuSamples(trace.cpuSamples, spans.workerSpans);
   const taskTimeline = buildActiveTaskTimeline(trace.taskSpawnTimes, trace.taskTerminateTimes);
   const schedDelays = computeSchedulingDelays(spans.workerSpans, workerIds, spans.wakesByTask);
@@ -680,6 +680,7 @@ async function parseWorkerMain(traceFile, cachePath) {
     runtimeWorkers: mapToEntries(trace.runtimeWorkers),
     taskDumps: mapToEntries(trace.taskDumps),
     clockSyncAnchors: trace.clockSyncAnchors, clockOffsetNs: trace.clockOffsetNs,
+    blockInPlaceGaps: trace.blockInPlaceGaps || [],
   }});
   for (const e of trace.events) writeLine({ t: 'e', d: e });
   for (const s of trace.cpuSamples) writeLine({ t: 'c', d: s });
@@ -722,7 +723,7 @@ function analyzeWorkerMain(cachePath) {
   const wids = [...new Set(trace.events.filter(e => e.eventType !== EVENT_TYPES.QueueSample && e.eventType !== EVENT_TYPES.WakeEvent).map(e => e.workerId))].sort((a, b) => a - b);
   const minTs = trace.events.reduce((m, e) => Math.min(m, e.timestamp), Infinity);
   const maxTs = trace.events.reduce((m, e) => Math.max(m, e.timestamp), -Infinity);
-  const spans = buildWorkerSpans(trace.events, wids, maxTs);
+  const spans = buildWorkerSpans(trace.events, wids, maxTs, trace.blockInPlaceGaps);
   attachCpuSamples(trace.cpuSamples, spans.workerSpans);
   const taskTimeline = buildActiveTaskTimeline(trace.taskSpawnTimes, trace.taskTerminateTimes);
   const schedDelays = computeSchedulingDelays(spans.workerSpans, wids, spans.wakesByTask);
@@ -748,6 +749,7 @@ function analyzeWorkerMain(cachePath) {
     cpuGroups: deduplicateSamples(onCpu, trace.callframeSymbols),
     schedGroups: deduplicateSamples(offCpu, trace.callframeSymbols),
     pollDurationsByLoc: {}, spanDurations: {},
+    blockInPlaceGaps: trace.blockInPlaceGaps || [],
   };
 
   for (const w of wids) {

@@ -397,3 +397,54 @@ for await (const trace of parseTrace('/path/to/traces/')) {
 }
 ```
 
+
+## Investigating `block_in_place` gaps
+
+When `tokio::task::block_in_place` is called, a worker's OS thread temporarily
+stops being a worker. The analysis layer detects these intervals as
+"block-in-place gaps" — periods where worker attribution is unknowable.
+
+`trace.blockInPlaceGaps` is an array of `{workerId, fromTid, toTid, startNs, endNs}`.
+- `fromTid`: the OS thread that *was* the worker before the handoff (now running the blocking closure).
+- `toTid`: the OS thread that took over the worker's scheduler responsibilities.
+
+To investigate what code triggered `block_in_place`, look at CPU samples on `fromTid` during the gap:
+
+```javascript
+const { parseTrace, symbolizeChain, formatFrame } = require('./trace_parser.js');
+
+for await (const trace of parseTrace('/path/to/traces/')) {
+  for (const gap of trace.blockInPlaceGaps) {
+    console.log(`\nWorker ${gap.workerId}: block_in_place gap ${((gap.endNs - gap.startNs) / 1e6).toFixed(2)}ms`);
+    console.log(`  fromTid=${gap.fromTid} → toTid=${gap.toTid}`);
+
+    // Stacks on fromTid during the gap — this is the blocking closure
+    const blockingSamples = trace.cpuSamples.filter(s =>
+      s.tid === gap.fromTid && s.timestamp >= gap.startNs && s.timestamp < gap.endNs
+    );
+    if (blockingSamples.length > 0) {
+      console.log(`  Blocking closure stacks (${blockingSamples.length} samples):`);
+      for (const s of blockingSamples.slice(0, 5)) {
+        const frames = symbolizeChain(s.callchain, trace.callframeSymbols);
+        console.log(`    ${formatFrame(frames[0]).text}`);
+      }
+    }
+
+    // Stacks on toTid during the gap — usually scheduler internals
+    const replacementSamples = trace.cpuSamples.filter(s =>
+      s.tid === gap.toTid && s.timestamp >= gap.startNs && s.timestamp < gap.endNs
+    );
+    if (replacementSamples.length > 0) {
+      console.log(`  Replacement thread stacks (${replacementSamples.length} samples):`);
+      for (const s of replacementSamples.slice(0, 5)) {
+        const frames = symbolizeChain(s.callchain, trace.callframeSymbols);
+        console.log(`    ${formatFrame(frames[0]).text}`);
+      }
+    }
+  }
+}
+```
+
+Note: `block_in_place` is not inherently a problem — it's a legitimate way to
+run blocking code on a worker thread. The gap detection helps you understand
+what happened during the interval, not flag it as an issue.
