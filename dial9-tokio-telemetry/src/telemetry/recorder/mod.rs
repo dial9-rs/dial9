@@ -23,11 +23,11 @@ pub(crate) use flush_loop::FlushStats;
 
 // Re-exports for internal test access
 #[cfg(test)]
-pub(self) use builder::PipelineConfig;
+use builder::PipelineConfig;
 #[cfg(test)]
-pub(self) use event_writer::EventWriter;
+use event_writer::EventWriter;
 #[cfg(test)]
-pub(self) use handle::InstrumentedSpawnGuard;
+use handle::InstrumentedSpawnGuard;
 
 use handle::{CURRENT_HANDLE, INSTRUMENTED_SPAWN};
 use runtime_context::{make_poll_end, make_poll_start, make_worker_park, make_worker_unpark};
