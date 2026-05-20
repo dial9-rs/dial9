@@ -164,3 +164,174 @@ fn on_thread_park_fires_for_each_park() {
         park_count.load(Ordering::SeqCst)
     );
 }
+
+/// `on_task_spawn` fires even when task_tracking is disabled.
+#[test]
+fn task_spawn_hook_fires_when_task_tracking_disabled() {
+    let spawn_count = Arc::new(AtomicUsize::new(0));
+    let spawn_c = spawn_count.clone();
+
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.worker_threads(2).enable_all();
+
+    let writer = RotatingWriter::single_file(tmp_trace_path()).unwrap();
+    let (runtime, guard) = TracedRuntime::builder()
+        .with_task_tracking(false)
+        .with_tokio_hooks(|h| {
+            h.on_task_spawn(move |_meta| {
+                spawn_c.fetch_add(1, Ordering::SeqCst);
+            });
+        })
+        .build_and_start_with_writer(builder, writer)
+        .unwrap();
+
+    runtime.block_on(async {
+        tokio::spawn(async {}).await.unwrap();
+        tokio::spawn(async {}).await.unwrap();
+    });
+
+    drop(runtime);
+    drop(guard);
+
+    assert!(
+        spawn_count.load(Ordering::SeqCst) >= 2,
+        "on_task_spawn should fire even with task_tracking disabled, got {}",
+        spawn_count.load(Ordering::SeqCst)
+    );
+}
+
+/// `on_before_task_poll` and `on_after_task_poll` fire for each poll.
+#[test]
+fn task_poll_hooks_fire() {
+    let before_count = Arc::new(AtomicUsize::new(0));
+    let after_count = Arc::new(AtomicUsize::new(0));
+    let before_c = before_count.clone();
+    let after_c = after_count.clone();
+
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.worker_threads(2).enable_all();
+
+    let writer = RotatingWriter::single_file(tmp_trace_path()).unwrap();
+    let (runtime, guard) = TracedRuntime::builder()
+        .with_tokio_hooks(|h| {
+            h.on_before_task_poll(move |_meta| {
+                before_c.fetch_add(1, Ordering::SeqCst);
+            });
+            h.on_after_task_poll(move |_meta| {
+                after_c.fetch_add(1, Ordering::SeqCst);
+            });
+        })
+        .build_and_start_with_writer(builder, writer)
+        .unwrap();
+
+    runtime.block_on(async {
+        tokio::spawn(async {
+            tokio::task::yield_now().await;
+        })
+        .await
+        .unwrap();
+    });
+
+    drop(runtime);
+    drop(guard);
+
+    assert!(
+        before_count.load(Ordering::SeqCst) > 0,
+        "on_before_task_poll should fire, got {}",
+        before_count.load(Ordering::SeqCst)
+    );
+    assert!(
+        after_count.load(Ordering::SeqCst) > 0,
+        "on_after_task_poll should fire, got {}",
+        after_count.load(Ordering::SeqCst)
+    );
+}
+
+/// `on_task_spawn` and `on_task_terminate` fire for task lifecycle.
+#[test]
+fn task_lifecycle_hooks_fire() {
+    let spawn_count = Arc::new(AtomicUsize::new(0));
+    let terminate_count = Arc::new(AtomicUsize::new(0));
+    let spawn_c = spawn_count.clone();
+    let terminate_c = terminate_count.clone();
+
+    let num_tasks = 5;
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.worker_threads(2).enable_all();
+
+    let writer = RotatingWriter::single_file(tmp_trace_path()).unwrap();
+    let (runtime, guard) = TracedRuntime::builder()
+        .with_task_tracking(true)
+        .with_tokio_hooks(|h| {
+            h.on_task_spawn(move |_meta| {
+                spawn_c.fetch_add(1, Ordering::SeqCst);
+            });
+            h.on_task_terminate(move |_meta| {
+                terminate_c.fetch_add(1, Ordering::SeqCst);
+            });
+        })
+        .build_and_start_with_writer(builder, writer)
+        .unwrap();
+
+    runtime.block_on(async {
+        let mut handles = Vec::new();
+        for _ in 0..num_tasks {
+            handles.push(tokio::spawn(async {}));
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
+    });
+
+    drop(runtime);
+    drop(guard);
+
+    assert!(
+        spawn_count.load(Ordering::SeqCst) >= num_tasks,
+        "on_task_spawn should fire for each task, got {}",
+        spawn_count.load(Ordering::SeqCst)
+    );
+    assert!(
+        terminate_count.load(Ordering::SeqCst) >= num_tasks,
+        "on_task_terminate should fire for each task, got {}",
+        terminate_count.load(Ordering::SeqCst)
+    );
+}
+
+/// `on_thread_unpark` fires when workers unpark.
+#[test]
+fn on_thread_unpark_fires() {
+    let unpark_count = Arc::new(AtomicUsize::new(0));
+    let unpark_c = unpark_count.clone();
+
+    let num_workers = 2;
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.worker_threads(num_workers).enable_all();
+
+    let writer = RotatingWriter::single_file(tmp_trace_path()).unwrap();
+    let (runtime, guard) = TracedRuntime::builder()
+        .with_tokio_hooks(|h| {
+            h.on_thread_unpark(move || {
+                unpark_c.fetch_add(1, Ordering::SeqCst);
+            });
+        })
+        .build_and_start_with_writer(builder, writer)
+        .unwrap();
+
+    runtime.block_on(async {
+        // Sleep to let workers park, then spawn work to unpark them.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        tokio::spawn(async { tokio::task::yield_now().await })
+            .await
+            .unwrap();
+    });
+
+    drop(runtime);
+    drop(guard);
+
+    assert!(
+        unpark_count.load(Ordering::SeqCst) > 0,
+        "on_thread_unpark should fire at least once, got {}",
+        unpark_count.load(Ordering::SeqCst)
+    );
+}

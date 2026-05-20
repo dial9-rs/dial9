@@ -171,10 +171,6 @@ impl TokioHooks {
     }
 }
 
-/// Deprecated alias for [`TokioHooks`].
-#[deprecated(since = "0.4.0", note = "renamed to `TokioHooks`")]
-pub type ThreadHooks = TokioHooks;
-
 // ---------------------------------------------------------------------------
 // Channel-based control for the flush thread
 // ---------------------------------------------------------------------------
@@ -1368,35 +1364,6 @@ impl<P, M> TracedRuntimeBuilder<P, M> {
         self
     }
 
-    /// Set a callback to run on each runtime thread after it starts.
-    ///
-    /// This callback is chained with dial9's internal `on_thread_start`
-    /// hook — both will fire on every runtime-owned thread. The user
-    /// callback runs after dial9's internal setup.
-    #[deprecated(since = "0.4.0", note = "use `with_tokio_hooks` instead")]
-    pub fn on_thread_start(mut self, f: impl Fn() + Send + Sync + 'static) -> Self {
-        self.thread_hooks.on_thread_start(f);
-        self
-    }
-
-    /// Set a callback to run on each runtime thread before it stops.
-    ///
-    /// This callback is chained with dial9's internal `on_thread_stop`
-    /// hook — both will fire on every runtime-owned thread. The user
-    /// callback runs after dial9's internal teardown.
-    #[deprecated(since = "0.4.0", note = "use `with_tokio_hooks` instead")]
-    pub fn on_thread_stop(mut self, f: impl Fn() + Send + Sync + 'static) -> Self {
-        self.thread_hooks.on_thread_stop(f);
-        self
-    }
-
-    /// Set thread lifecycle hooks. See [`TokioHooks`] for details.
-    #[deprecated(since = "0.4.0", note = "use `with_tokio_hooks` instead")]
-    pub fn with_thread_hooks(mut self, hooks: TokioHooks) -> Self {
-        self.thread_hooks = hooks;
-        self
-    }
-
     /// Configure Tokio runtime hooks that fire alongside dial9's internal hooks.
     ///
     /// dial9 always runs its own hook logic first, then invokes the user callback.
@@ -1767,13 +1734,6 @@ impl<'a> TraceRuntimeCoreBuilder<'a> {
     /// Defaults to `false`.
     pub fn task_tracking(mut self, enabled: bool) -> Self {
         self.task_tracking = enabled;
-        self
-    }
-
-    /// Set thread lifecycle hooks for this runtime. See [`TokioHooks`].
-    #[deprecated(since = "0.4.0", note = "use `with_tokio_hooks` instead")]
-    pub fn with_thread_hooks(mut self, hooks: TokioHooks) -> Self {
-        self.thread_hooks = hooks;
         self
     }
 
