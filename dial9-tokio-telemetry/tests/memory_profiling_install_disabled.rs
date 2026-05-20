@@ -35,7 +35,6 @@ fn default_config_uses_512_kib_sample_rate() {
         config.timestamp_mode(),
         dial9_tokio_telemetry::memory_profiling::TimestampMode::ReusePollStart
     );
-    assert_eq!(config.max_liveset_entries(), None);
     assert_eq!(config.rng_seed(), None);
     assert_eq!(config.ring_capacity(), 4096);
 }

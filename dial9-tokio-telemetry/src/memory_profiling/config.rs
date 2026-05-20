@@ -17,8 +17,8 @@ pub const DEFAULT_RING_CAPACITY: usize = 4096;
 #[non_exhaustive]
 pub enum TimestampMode {
     /// Reuse the timestamp from the most recent `PollStart` on this thread
-    /// (~2 ns TLS load). Falls back to `clock_monotonic_ns()` on threads
-    /// with no recorded `PollStart`.
+    /// (~2 ns TLS load). Falls back to `clock_monotonic_ns()` when called
+    /// outside a task poll (e.g., between polls, or on non-worker threads).
     #[default]
     ReusePollStart,
 
@@ -33,6 +33,7 @@ pub enum TimestampMode {
 ///
 /// Built via `MemoryProfilingConfig::builder()...build()`. See design §8.
 #[derive(Debug, Clone, bon::Builder)]
+#[non_exhaustive]
 pub struct MemoryProfilingConfig {
     /// Mean bytes between sampled allocations. Default 512 KiB.
     #[builder(default = DEFAULT_SAMPLE_RATE_BYTES)]
@@ -45,9 +46,6 @@ pub struct MemoryProfilingConfig {
     /// How `AllocEvent.timestamp_ns` is populated. See [`TimestampMode`].
     #[builder(default)]
     timestamp_mode: TimestampMode,
-
-    /// Cap the consolidator-side liveset. Default `None` (unbounded).
-    max_liveset_entries: Option<usize>,
 
     /// Optional fixed seed for per-thread sampling PRNGs.
     rng_seed: Option<u64>,
@@ -76,10 +74,6 @@ impl MemoryProfilingConfig {
     /// Timestamp mode for alloc events.
     pub fn timestamp_mode(&self) -> TimestampMode {
         self.timestamp_mode
-    }
-    /// Maximum liveset entries cap.
-    pub fn max_liveset_entries(&self) -> Option<usize> {
-        self.max_liveset_entries
     }
     /// Optional fixed RNG seed.
     pub fn rng_seed(&self) -> Option<u64> {
