@@ -86,6 +86,23 @@ struct Args {
 
     #[arg(long, help = "Disable task dump capture")]
     no_task_dumps: bool,
+
+    #[arg(long, help = "Disable memory profiling")]
+    no_memory_profiling: bool,
+
+    #[arg(
+        long,
+        default_value = "524288",
+        help = "Mean bytes between sampled allocations (default: 512 KiB)"
+    )]
+    alloc_sample_rate_bytes: u64,
+
+    #[arg(
+        long,
+        default_value = "true",
+        help = "Track liveset for leak detection"
+    )]
+    track_liveset: bool,
 }
 
 #[derive(Clone)]
@@ -219,10 +236,19 @@ fn main() -> std::io::Result<()> {
     guard.enable();
     let handle = guard.handle();
 
-    let _mem_guard =
-        MemoryProfiler::from_config(MemoryProfilingConfig::builder().track_liveset(true).build())
-            .install(guard.handle())
-            .expect("failed to install memory profiler");
+    let _mem_guard = if args.no_memory_profiling {
+        None
+    } else {
+        let config = MemoryProfilingConfig::builder()
+            .sample_rate_bytes(args.alloc_sample_rate_bytes)
+            .track_liveset(args.track_liveset)
+            .build();
+        Some(
+            MemoryProfiler::from_config(config)
+                .install(guard.handle())
+                .expect("failed to install memory profiler"),
+        )
+    };
 
     // Wrap the body in a spawned task so the root future is instrumented.
     // Inside, TelemetryHandle::current() is available on every worker thread.
