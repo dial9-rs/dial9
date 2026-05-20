@@ -33,6 +33,11 @@ pub enum TimestampMode {
 #[non_exhaustive]
 pub struct MemoryProfilingConfig {
     /// Mean bytes between sampled allocations. Default 512 KiB.
+    ///
+    /// Lower values sample more allocations. `sample_rate_bytes <= 1`
+    /// is a special "sample every allocation" mode: every call to the
+    /// allocator is recorded, and the per-thread PRNG is bypassed
+    /// entirely.
     #[builder(default = DEFAULT_SAMPLE_RATE_BYTES)]
     sample_rate_bytes: u64,
 

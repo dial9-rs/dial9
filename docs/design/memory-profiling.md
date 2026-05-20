@@ -84,25 +84,64 @@ fn on_alloc(size: usize) {
         return;               // fast path: one sub, one branch, done
     }
 
-    // Sampled. Draw a new gap — loop in case the draw is smaller than
-    // `-remaining` (rare, but possible for tiny rates / huge allocs).
-    let mut next = remaining;
-    while next <= 0 {
-        next += draw_exponential(sample_rate_bytes);
-    }
-    next_sample_bytes.set(next);
+    // Sampled. Draw a fresh gap to the next sample. We deliberately do
+    // NOT loop to "consume" the deficit when one allocation overshoots
+    // by more than one draw's worth — see "Why a single fresh draw"
+    // below.
+    next_sample_bytes.set(next_gap(rng, sample_rate_bytes));
 
     record_sample(size, capture_stack());
+}
+
+fn next_gap(rng: &mut SplitMix64, sample_rate_bytes: u64) -> i64 {
+    // `sample_rate_bytes <= 1` is the "sample every allocation" mode:
+    // returning 0 makes the next decision (`counter - size`) go ≤ 0
+    // for any positive `size`, triggering a sample without consulting
+    // the PRNG. Avoids ~63% per-alloc sampling at `size = 1, rate = 1`
+    // due to the exponential's variance around its mean.
+    if sample_rate_bytes <= 1 {
+        return 0;
+    }
+    rng.draw_exponential(sample_rate_bytes) as i64
 }
 ```
 
 Two important details:
 
-- The `while` loop handles the case where a single huge allocation (or
-  very low sample rate) pushes `next_sample_bytes` below zero by more
-  than one draw's worth.
 - `remaining` must be `i64` (signed). Subtracting `usize` from `usize`
   and comparing to zero invites wraparound bugs.
+- `sample_rate_bytes <= 1` short-circuits to "sample every allocation"
+  mode without consulting the PRNG. Matches user intuition: rate of 1
+  byte between samples means every byte is sampled, which for any
+  allocation larger than 1 byte means every allocation samples.
+
+### Why a single fresh draw (no redraw loop)
+
+A naive implementation handles the "sampled" branch by looping:
+
+```rust
+let mut next = remaining;       // negative for huge alloc + tiny rate
+while next <= 0 {
+    next += draw_exponential(sample_rate_bytes);
+}
+```
+
+This is the textbook way to keep Poisson-process semantics: each draw is
+a gap to the next event, so when an allocation spans multiple events the
+PRNG must advance by the right number of draws.
+
+But it's a footgun. With `sample_rate_bytes = 1` and a 1 GiB allocation,
+`next ≈ -1e9` and the loop calls `draw_exponential` ~1 billion times —
+~10 seconds inside the allocator hook holding the TLS RefCell.
+
+We don't need it. Each `RawAlloc` carries its own `size` field, so
+downstream rate estimators weight samples by the bytes they represent.
+The number of samples emitted per allocation is capped at one regardless
+of how the counter is replenished. By the strong law of large numbers, a
+single fresh draw on each sample produces the same long-run sampling
+probability per allocation — `1 - exp(-size / mean)` — as the looping
+variant. The `next_gap` helper makes this explicit and preserves the
+single-allocation worst case at O(1) PRNG work.
 
 Default `sample_rate_bytes = 512 KiB`. At that rate, a service doing 1 GB/s
 of allocation generates ~2000 samples/sec — plenty of signal, trivial
