@@ -343,3 +343,86 @@ fn task_spawn_hook_fires_when_task_tracking_disabled() {
         spawn_count.load(Ordering::Relaxed)
     );
 }
+
+#[test]
+fn task_terminate_hook_fires_when_task_tracking_disabled() {
+    let terminate_count = Arc::new(AtomicUsize::new(0));
+    let tc = terminate_count.clone();
+
+    let num_tasks = 5;
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.worker_threads(2).enable_all();
+
+    let (runtime, guard) = TracedRuntime::builder()
+        .with_task_tracking(false)
+        .with_tokio_hooks(|h| {
+            h.on_task_terminate(move |_meta| {
+                tc.fetch_add(1, Ordering::Relaxed);
+            });
+        })
+        .build_and_start_with_writer(builder, NullWriter)
+        .unwrap();
+
+    runtime.block_on(async {
+        let mut handles = Vec::new();
+        for _ in 0..num_tasks {
+            handles.push(tokio::spawn(async {
+                tokio::task::yield_now().await;
+            }));
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
+    });
+
+    drop(runtime);
+    drop(guard);
+
+    assert!(
+        terminate_count.load(Ordering::Relaxed) >= num_tasks,
+        "expected on_task_terminate to fire at least {num_tasks} times even with task_tracking disabled, got {}",
+        terminate_count.load(Ordering::Relaxed)
+    );
+}
+
+#[test]
+fn dial9_hooks_run_before_user_hooks() {
+    use dial9_tokio_telemetry::telemetry::TelemetryHandle;
+
+    let hook_fired = Arc::new(AtomicUsize::new(0));
+    let hf = hook_fired.clone();
+
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.worker_threads(2).enable_all();
+
+    let (runtime, guard) = TracedRuntime::builder()
+        .with_tokio_hooks(|h| {
+            h.on_thread_start(move || {
+                // dial9's hook must have already run and installed TelemetryHandle
+                let handle = TelemetryHandle::current();
+                assert!(
+                    handle.is_enabled(),
+                    "TelemetryHandle should be installed by dial9 before user hook runs"
+                );
+                hf.fetch_add(1, Ordering::Relaxed);
+            });
+        })
+        .build_and_start_with_writer(builder, NullWriter)
+        .unwrap();
+
+    runtime.block_on(async {
+        tokio::spawn(async {
+            tokio::task::yield_now().await;
+        })
+        .await
+        .unwrap();
+    });
+
+    drop(runtime);
+    drop(guard);
+
+    assert!(
+        hook_fired.load(Ordering::Relaxed) > 0,
+        "user on_thread_start hook should have fired"
+    );
+}

@@ -173,8 +173,8 @@ fn register_hooks(
             on_task_terminate,
             tokio_hooks.on_task_terminate,
             |meta| {
-                let task_id = TaskId::from(meta.id());
                 s6.if_enabled(|buf| {
+                    let task_id = TaskId::from(meta.id());
                     buf.record_encodable_event(&TaskTerminateEvent {
                         timestamp_ns: crate::telemetry::events::clock_monotonic_ns(),
                         task_id,
