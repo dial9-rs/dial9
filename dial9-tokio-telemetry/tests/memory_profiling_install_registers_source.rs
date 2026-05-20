@@ -1,5 +1,6 @@
 #![cfg(feature = "memory-profiling")]
 #![cfg(feature = "analysis")]
+#![cfg(target_os = "linux")]
 //! Test that install() registers the MemoryProfileSource with the recorder,
 //! so synthetic allocs pushed into the queue appear in the trace.
 

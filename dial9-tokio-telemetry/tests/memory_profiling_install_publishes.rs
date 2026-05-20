@@ -1,4 +1,5 @@
 #![cfg(feature = "memory-profiling")]
+#![cfg(target_os = "linux")]
 //! Test that install() publishes the process-global ACTIVE state.
 
 mod common;

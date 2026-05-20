@@ -1,5 +1,6 @@
 #![cfg(feature = "memory-profiling")]
 #![cfg(feature = "analysis")]
+#![cfg(target_os = "linux")]
 //! Test that the allocator hook captures sampled allocations into the trace.
 
 mod common;

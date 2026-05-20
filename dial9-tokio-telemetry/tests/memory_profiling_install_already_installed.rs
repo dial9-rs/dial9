@@ -1,4 +1,5 @@
 #![cfg(feature = "memory-profiling")]
+#![cfg(target_os = "linux")]
 //! Test that a second install() returns AlreadyInstalled.
 
 mod common;

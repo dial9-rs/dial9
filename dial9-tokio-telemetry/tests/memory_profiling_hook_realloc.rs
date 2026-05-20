@@ -1,5 +1,6 @@
 #![cfg(feature = "memory-profiling")]
 #![cfg(feature = "analysis")]
+#![cfg(target_os = "linux")]
 //! Test that realloc emits both AllocEvent and FreeEvent when liveset is on.
 
 mod common;
