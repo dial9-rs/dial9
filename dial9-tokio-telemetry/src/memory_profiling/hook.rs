@@ -77,10 +77,9 @@ fn ensure_initialized(state: &mut SamplingState, inner: &MemoryProfilerInner) {
     let seed = match inner.rng_seed {
         Some(s) => s.wrapping_add(nonce),
         None => {
-            // Mix wall clock with the static address of the inner state
-            // and the thread nonce. The address contributes only at
-            // process startup; thread spawn variability comes from
-            // `clock_monotonic_ns` and `current_tid`.
+            // Mix wall clock with the thread ID and the static address.
+            // `nonce` (= current_tid()) guarantees uniqueness across threads
+            // even if they initialize at the same nanosecond.
             let now = crate::telemetry::events::clock_monotonic_ns();
             now.wrapping_mul(0x517cc1b727220a95) ^ nonce ^ (inner as *const _ as u64)
         }
