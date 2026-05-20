@@ -104,13 +104,20 @@ impl MemoryProfileSource {
 
 impl Source for MemoryProfileSource {
     fn flush(&mut self, ctx: &FlushContext<'_>) {
-        // Merge-sort drain by timestamp. Hold one peeked element from each
-        // queue and emit the older one. `crossbeam_queue::ArrayQueue` has no
-        // peek API, so we pop into local slots and only refill after we
-        // emit. The producer can race in between; that's fine — anything it
-        // pushes during this loop has a timestamp later than anything we've
-        // already emitted, and we either pick it up this cycle (if our last
-        // pop sees it) or next cycle.
+        // Merge-sort drain by timestamp. This produces a best-effort
+        // timestamp-ordered stream. Ordering is not guaranteed to be perfect:
+        // - Multiple producers push concurrently, so queue order may not
+        //   match timestamp order.
+        // - TimestampMode::ReusePollStart can produce stale timestamps.
+        // For profiling purposes, approximate ordering is sufficient.
+        //
+        // Hold one peeked element from each queue and emit the older one.
+        // `crossbeam_queue::ArrayQueue` has no peek API, so we pop into
+        // local slots and only refill after we emit. The producer can race
+        // in between; that's fine — anything it pushes during this loop has
+        // a timestamp later than anything we've already emitted, and we
+        // either pick it up this cycle (if our last pop sees it) or next
+        // cycle.
         let mut next_alloc: Option<RawAlloc> = self.rings.alloc_queue.pop();
         let mut next_free: Option<RawFree> = self.rings.free_queue.pop();
         loop {
