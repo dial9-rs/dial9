@@ -67,9 +67,7 @@ fn main() {
 
     runtime.block_on(async {
         // Background work on all workers to generate CPU samples.
-        let bg: Vec<_> = (0..8)
-            .map(|i| tokio::spawn(background_burn(i)))
-            .collect();
+        let bg: Vec<_> = (0..8).map(|i| tokio::spawn(background_burn(i))).collect();
 
         // Let background work establish CPU sample baseline.
         tokio::time::sleep(Duration::from_millis(200)).await;
