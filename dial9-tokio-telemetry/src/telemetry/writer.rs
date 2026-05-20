@@ -841,6 +841,7 @@ mod tests {
             worker_id: crate::telemetry::format::WorkerId::from(0usize),
             local_queue: 2,
             cpu_time_ns: 0,
+            tid: 0,
         });
         Batch {
             encoded_bytes: enc.into_inner(),
@@ -1975,6 +1976,7 @@ mod tests {
             worker_id: crate::telemetry::format::WorkerId::from(0usize),
             local_queue: 0,
             cpu_time_ns: 0,
+            tid: 0,
         });
         let buf = enc.into_inner();
 
@@ -2012,6 +2014,7 @@ mod tests {
             worker_id: crate::telemetry::format::WorkerId::from(0usize),
             local_queue: 0,
             cpu_time_ns: 0,
+            tid: 0,
         });
         writer
             .write_encoded_batch(&Batch {
