@@ -294,7 +294,7 @@ fn main() -> std::io::Result<()> {
                         let mut interval = tokio::time::interval(Duration::from_millis(10));
                         loop {
                             interval.tick().await;
-                            sink.push(vec![0u8; 64 * 1024]);
+                            sink.push(vec![0u8; 512 * 1024]);
                         }
                     });
                 }
