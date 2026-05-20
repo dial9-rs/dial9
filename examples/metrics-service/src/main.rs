@@ -102,10 +102,9 @@ struct Args {
 
     #[arg(
         long,
-        default_value = "true",
-        help = "Track liveset for leak detection"
+        help = "Disable liveset tracking for leak detection (default: enabled)"
     )]
-    track_liveset: bool,
+    no_track_liveset: bool,
 }
 
 #[derive(Clone)]
@@ -244,7 +243,7 @@ fn main() -> std::io::Result<()> {
     } else {
         let config = MemoryProfilingConfig::builder()
             .sample_rate_bytes(args.alloc_sample_rate_bytes)
-            .track_liveset(args.track_liveset)
+            .track_liveset(!args.no_track_liveset)
             .build();
         Some(
             MemoryProfiler::from_config(config)

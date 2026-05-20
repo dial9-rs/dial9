@@ -4,8 +4,7 @@
 set -e
 
 if [ -z "$AWS_PROFILE" ]; then
-    echo "Error: AWS_PROFILE must be set." >&2
-    exit 1
+    echo "Warning: AWS_PROFILE not set. Using default AWS credentials." >&2
 fi
 
 REPO_ROOT="$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
