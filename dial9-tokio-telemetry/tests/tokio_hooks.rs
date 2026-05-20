@@ -1,5 +1,3 @@
-mod common;
-
 use dial9_tokio_telemetry::telemetry::{NullWriter, TelemetryCore, TracedRuntime};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
