@@ -4304,7 +4304,7 @@
                     // Check if cursor is inside a block_in_place gap
                     {
                         const gapHit = (trace.blockInPlaceGaps || []).find(g =>
-                            g.workerId === workerId && ns >= g.startNs && ns < g.endNs
+                            g.workerId === w && ns >= g.startNs && ns < g.endNs
                         );
                         if (gapHit) {
                             const gapNs = gapHit.endNs - gapHit.startNs;
