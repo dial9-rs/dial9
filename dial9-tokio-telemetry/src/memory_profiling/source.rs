@@ -187,7 +187,6 @@ mod tests {
         RawFree {
             tid: 2,
             addr,
-            size: 0, // size on the free side is informational; consolidator uses liveset
             ts_ns,
         }
     }

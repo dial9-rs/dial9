@@ -176,7 +176,7 @@ pub(crate) fn on_alloc(inner: &MemoryProfilerInner, ptr: *mut u8, size: usize) {
 ///
 /// SAFETY: must be allocator-quiet — see module docs.
 #[inline]
-pub(crate) fn on_dealloc(inner: &MemoryProfilerInner, ptr: *mut u8, size: usize) {
+pub(crate) fn on_dealloc(inner: &MemoryProfilerInner, ptr: *mut u8, _size: usize) {
     if !inner.track_liveset {
         return;
     }
@@ -184,7 +184,6 @@ pub(crate) fn on_dealloc(inner: &MemoryProfilerInner, ptr: *mut u8, size: usize)
     let sample = RawFree {
         tid: current_tid(),
         addr: ptr as u64,
-        size: size as u64,
         ts_ns: timestamp_ns,
     };
     inner.rings.push_free(sample);

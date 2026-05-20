@@ -42,11 +42,6 @@ impl RawAlloc {
 pub(crate) struct RawFree {
     pub(crate) tid: u32,
     pub(crate) addr: u64,
-    #[expect(
-        dead_code,
-        reason = "consolidator uses size from the liveset entry, not from RawFree; the field is here so the producer doesn't have to do a separate lookup"
-    )]
-    pub(crate) size: u64,
     pub(crate) ts_ns: u64,
 }
 
