@@ -156,6 +156,8 @@ fn register_hooks(
     shared: &Arc<SharedState>,
     control_tx: &crate::primitives::sync::mpsc::SyncSender<ControlCommand>,
     task_tracking_enabled: bool,
+    user_on_thread_start: Option<Arc<dyn Fn() + Send + Sync>>,
+    user_on_thread_stop: Option<Arc<dyn Fn() + Send + Sync>>,
 ) {
     // TODO: these should rely on public APIs instead of utilizing `SharedState`
 
@@ -261,8 +263,16 @@ fn register_hooks(
                 // No-op when perf is the active backend (perf uses inherit).
                 let _ = dial9_perf_self_profile::register_current_thread();
             }
+
+            if let Some(ref cb) = user_on_thread_start {
+                cb();
+            }
         })
         .on_thread_stop(move || {
+            if let Some(ref cb) = user_on_thread_stop {
+                cb();
+            }
+
             CURRENT_HANDLE.with(|cell| {
                 *cell.borrow_mut() = None;
             });
@@ -289,6 +299,8 @@ fn attach_runtime(
     runtime_name: Option<String>,
     control_tx: &crate::primitives::sync::mpsc::SyncSender<ControlCommand>,
     task_tracking_enabled: bool,
+    user_on_thread_start: Option<Arc<dyn Fn() + Send + Sync>>,
+    user_on_thread_stop: Option<Arc<dyn Fn() + Send + Sync>>,
 ) -> std::io::Result<tokio::runtime::Runtime> {
     let ctx = Arc::new(RuntimeContext::new(runtime_name));
     register_hooks(
@@ -297,6 +309,8 @@ fn attach_runtime(
         shared,
         control_tx,
         task_tracking_enabled,
+        user_on_thread_start,
+        user_on_thread_stop,
     );
 
     let runtime = builder.build()?;
@@ -988,6 +1002,8 @@ pub struct TracedRuntimeBuilder<P = NoTracePath, M = PipelineUnset> {
     segment_metadata: Vec<(String, String)>,
     worker_poll_interval: Option<Duration>,
     worker_metrics_sink: Option<metrique_writer::BoxEntrySink>,
+    on_thread_start: Option<Arc<dyn Fn() + Send + Sync>>,
+    on_thread_stop: Option<Arc<dyn Fn() + Send + Sync>>,
     _marker: std::marker::PhantomData<(P, M)>,
 }
 
@@ -1092,6 +1108,26 @@ impl<P, M> TracedRuntimeBuilder<P, M> {
         self
     }
 
+    /// Set a callback to run on each runtime thread after it starts.
+    ///
+    /// This callback is chained with dial9's internal `on_thread_start`
+    /// hook — both will fire on every runtime-owned thread. The user
+    /// callback runs after dial9's internal setup.
+    pub fn on_thread_start(mut self, f: impl Fn() + Send + Sync + 'static) -> Self {
+        self.on_thread_start = Some(Arc::new(f));
+        self
+    }
+
+    /// Set a callback to run on each runtime thread before it stops.
+    ///
+    /// This callback is chained with dial9's internal `on_thread_stop`
+    /// hook — both will fire on every runtime-owned thread. The user
+    /// callback runs before dial9's internal teardown.
+    pub fn on_thread_stop(mut self, f: impl Fn() + Send + Sync + 'static) -> Self {
+        self.on_thread_stop = Some(Arc::new(f));
+        self
+    }
+
     /// Attach a new runtime to an existing telemetry session.
     ///
     /// This reuses the `SharedState`, flush thread, writer, and CPU profiler
@@ -1114,6 +1150,8 @@ impl<P, M> TracedRuntimeBuilder<P, M> {
             self.runtime_name,
             control_tx,
             self.task_tracking_enabled,
+            self.on_thread_start,
+            self.on_thread_stop,
         )
     }
 
@@ -1132,6 +1170,8 @@ impl<P, M> TracedRuntimeBuilder<P, M> {
             segment_metadata: self.segment_metadata,
             worker_poll_interval: self.worker_poll_interval,
             worker_metrics_sink: self.worker_metrics_sink,
+            on_thread_start: self.on_thread_start,
+            on_thread_stop: self.on_thread_stop,
             _marker: std::marker::PhantomData,
         }
     }
@@ -1372,6 +1412,8 @@ impl<M> TracedRuntimeBuilder<HasTracePath, M> {
             self.runtime_name,
             &control_tx,
             self.task_tracking_enabled,
+            self.on_thread_start,
+            self.on_thread_stop,
         )?;
         Ok((runtime, guard))
     }
@@ -1478,6 +1520,8 @@ impl<'a> TraceRuntimeCoreBuilder<'a> {
             Some(self.name),
             control_tx,
             self.task_tracking,
+            None,
+            None,
         )?;
         let handle = RuntimeTelemetryHandle {
             runtime: runtime.handle().clone(),
@@ -1942,6 +1986,8 @@ impl TracedRuntime {
             segment_metadata: Vec::new(),
             worker_poll_interval: None,
             worker_metrics_sink: None,
+            on_thread_start: None,
+            on_thread_stop: None,
             _marker: std::marker::PhantomData,
         }
     }
