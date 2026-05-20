@@ -39,6 +39,73 @@ crate::primitives::thread_local! {
     static INSTRUMENTED_SPAWN: Cell<u32> = const { Cell::new(0) };
 }
 
+/// User-provided callbacks to run on runtime thread start/stop.
+///
+/// These are chained with dial9's internal hooks: `on_thread_start` fires
+/// after dial9's setup (so [`TelemetryHandle::current()`] is available),
+/// and `on_thread_stop` fires before dial9's teardown.
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use dial9_tokio_telemetry::telemetry::{ThreadHooks, TracedRuntime, RotatingWriter};
+///
+/// let hooks = ThreadHooks::new()
+///     .on_thread_start(|| {
+///         println!("worker thread started");
+///     })
+///     .on_thread_stop(|| {
+///         println!("worker thread stopping");
+///     });
+///
+/// let mut builder = tokio::runtime::Builder::new_multi_thread();
+/// builder.worker_threads(4).enable_all();
+/// let writer = RotatingWriter::single_file("/tmp/trace.bin").unwrap();
+/// let (runtime, guard) = TracedRuntime::builder()
+///     .with_thread_hooks(hooks)
+///     .build_and_start_with_writer(builder, writer)
+///     .unwrap();
+/// ```
+#[derive(Clone, Default)]
+pub struct ThreadHooks {
+    on_thread_start: Option<Arc<dyn Fn() + Send + Sync>>,
+    on_thread_stop: Option<Arc<dyn Fn() + Send + Sync>>,
+}
+
+impl std::fmt::Debug for ThreadHooks {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ThreadHooks")
+            .field("on_thread_start", &self.on_thread_start.is_some())
+            .field("on_thread_stop", &self.on_thread_stop.is_some())
+            .finish()
+    }
+}
+
+impl ThreadHooks {
+    /// Create empty hooks (no callbacks).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set a callback to run on each runtime thread after it starts.
+    ///
+    /// The callback fires after dial9's internal setup, so
+    /// [`TelemetryHandle::current()`] is available.
+    pub fn on_thread_start(mut self, f: impl Fn() + Send + Sync + 'static) -> Self {
+        self.on_thread_start = Some(Arc::new(f));
+        self
+    }
+
+    /// Set a callback to run on each runtime thread before it stops.
+    ///
+    /// The callback fires before dial9's internal teardown, so
+    /// [`TelemetryHandle::current()`] is still available.
+    pub fn on_thread_stop(mut self, f: impl Fn() + Send + Sync + 'static) -> Self {
+        self.on_thread_stop = Some(Arc::new(f));
+        self
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Channel-based control for the flush thread
 // ---------------------------------------------------------------------------
@@ -156,8 +223,7 @@ fn register_hooks(
     shared: &Arc<SharedState>,
     control_tx: &crate::primitives::sync::mpsc::SyncSender<ControlCommand>,
     task_tracking_enabled: bool,
-    user_on_thread_start: Option<Arc<dyn Fn() + Send + Sync>>,
-    user_on_thread_stop: Option<Arc<dyn Fn() + Send + Sync>>,
+    thread_hooks: ThreadHooks,
 ) {
     // TODO: these should rely on public APIs instead of utilizing `SharedState`
 
@@ -235,6 +301,9 @@ fn register_hooks(
     #[cfg(feature = "cpu-profiling")]
     let s_stop = shared.clone();
 
+    let user_on_thread_start = thread_hooks.on_thread_start;
+    let user_on_thread_stop = thread_hooks.on_thread_stop;
+
     builder
         .on_thread_start(move || {
             // Install this thread's TelemetryHandle so user code can call
@@ -299,8 +368,7 @@ fn attach_runtime(
     runtime_name: Option<String>,
     control_tx: &crate::primitives::sync::mpsc::SyncSender<ControlCommand>,
     task_tracking_enabled: bool,
-    user_on_thread_start: Option<Arc<dyn Fn() + Send + Sync>>,
-    user_on_thread_stop: Option<Arc<dyn Fn() + Send + Sync>>,
+    thread_hooks: ThreadHooks,
 ) -> std::io::Result<tokio::runtime::Runtime> {
     let ctx = Arc::new(RuntimeContext::new(runtime_name));
     register_hooks(
@@ -309,8 +377,7 @@ fn attach_runtime(
         shared,
         control_tx,
         task_tracking_enabled,
-        user_on_thread_start,
-        user_on_thread_stop,
+        thread_hooks,
     );
 
     let runtime = builder.build()?;
@@ -852,6 +919,7 @@ impl TelemetryGuard {
             guard: self,
             name: name.into(),
             task_tracking: false,
+            thread_hooks: ThreadHooks::default(),
         }
     }
 
@@ -1002,8 +1070,7 @@ pub struct TracedRuntimeBuilder<P = NoTracePath, M = PipelineUnset> {
     segment_metadata: Vec<(String, String)>,
     worker_poll_interval: Option<Duration>,
     worker_metrics_sink: Option<metrique_writer::BoxEntrySink>,
-    on_thread_start: Option<Arc<dyn Fn() + Send + Sync>>,
-    on_thread_stop: Option<Arc<dyn Fn() + Send + Sync>>,
+    thread_hooks: ThreadHooks,
     _marker: std::marker::PhantomData<(P, M)>,
 }
 
@@ -1114,7 +1181,7 @@ impl<P, M> TracedRuntimeBuilder<P, M> {
     /// hook — both will fire on every runtime-owned thread. The user
     /// callback runs after dial9's internal setup.
     pub fn on_thread_start(mut self, f: impl Fn() + Send + Sync + 'static) -> Self {
-        self.on_thread_start = Some(Arc::new(f));
+        self.thread_hooks = self.thread_hooks.on_thread_start(f);
         self
     }
 
@@ -1124,7 +1191,13 @@ impl<P, M> TracedRuntimeBuilder<P, M> {
     /// hook — both will fire on every runtime-owned thread. The user
     /// callback runs before dial9's internal teardown.
     pub fn on_thread_stop(mut self, f: impl Fn() + Send + Sync + 'static) -> Self {
-        self.on_thread_stop = Some(Arc::new(f));
+        self.thread_hooks = self.thread_hooks.on_thread_stop(f);
+        self
+    }
+
+    /// Set thread lifecycle hooks. See [`ThreadHooks`] for details.
+    pub fn with_thread_hooks(mut self, hooks: ThreadHooks) -> Self {
+        self.thread_hooks = hooks;
         self
     }
 
@@ -1150,8 +1223,7 @@ impl<P, M> TracedRuntimeBuilder<P, M> {
             self.runtime_name,
             control_tx,
             self.task_tracking_enabled,
-            self.on_thread_start,
-            self.on_thread_stop,
+            self.thread_hooks,
         )
     }
 
@@ -1170,8 +1242,7 @@ impl<P, M> TracedRuntimeBuilder<P, M> {
             segment_metadata: self.segment_metadata,
             worker_poll_interval: self.worker_poll_interval,
             worker_metrics_sink: self.worker_metrics_sink,
-            on_thread_start: self.on_thread_start,
-            on_thread_stop: self.on_thread_stop,
+            thread_hooks: self.thread_hooks,
             _marker: std::marker::PhantomData,
         }
     }
@@ -1412,8 +1483,7 @@ impl<M> TracedRuntimeBuilder<HasTracePath, M> {
             self.runtime_name,
             &control_tx,
             self.task_tracking_enabled,
-            self.on_thread_start,
-            self.on_thread_stop,
+            self.thread_hooks,
         )?;
         Ok((runtime, guard))
     }
@@ -1481,6 +1551,7 @@ pub struct TraceRuntimeCoreBuilder<'a> {
     guard: &'a TelemetryGuard,
     name: String,
     task_tracking: bool,
+    thread_hooks: ThreadHooks,
 }
 
 impl<'a> TraceRuntimeCoreBuilder<'a> {
@@ -1488,6 +1559,12 @@ impl<'a> TraceRuntimeCoreBuilder<'a> {
     /// Defaults to `false`.
     pub fn task_tracking(mut self, enabled: bool) -> Self {
         self.task_tracking = enabled;
+        self
+    }
+
+    /// Set thread lifecycle hooks for this runtime. See [`ThreadHooks`].
+    pub fn with_thread_hooks(mut self, hooks: ThreadHooks) -> Self {
+        self.thread_hooks = hooks;
         self
     }
 
@@ -1520,8 +1597,7 @@ impl<'a> TraceRuntimeCoreBuilder<'a> {
             Some(self.name),
             control_tx,
             self.task_tracking,
-            None,
-            None,
+            self.thread_hooks,
         )?;
         let handle = RuntimeTelemetryHandle {
             runtime: runtime.handle().clone(),
@@ -1986,8 +2062,7 @@ impl TracedRuntime {
             segment_metadata: Vec::new(),
             worker_poll_interval: None,
             worker_metrics_sink: None,
-            on_thread_start: None,
-            on_thread_stop: None,
+            thread_hooks: ThreadHooks::default(),
             _marker: std::marker::PhantomData,
         }
     }
