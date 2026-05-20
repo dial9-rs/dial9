@@ -904,17 +904,43 @@ impl TracedRuntime {
     /// underlying error on failure. Used by the
     /// `#[dial9_tokio_telemetry::main]` macro.
     ///
+    /// Reach for this directly when the macro doesn't fit — e.g. when an
+    /// application owns multiple tokio runtimes, when you need to control
+    /// runtime lifetime explicitly, or when you want to drive
+    /// [`TelemetryGuard::graceful_shutdown`] before the runtime drops.
+    ///
     /// Generic over any input that converts into a [`TracedRuntime`]: in
     /// practice that means either the fluent
     /// [`crate::Dial9Config`] (returned by
     /// [`Dial9Config::builder`](crate::Dial9Config::builder)) or the
-    /// deprecated positional [`crate::config::Dial9Config`].
+    /// deprecated positional [`crate::config::Dial9Config`]. The generic
+    /// shape is what keeps the macro source-compatible across these
+    /// input types.
     ///
     /// # Panics
     ///
-    /// Panics if the underlying conversion fails.
+    /// Panics if the underlying conversion fails — i.e. if the tokio
+    /// runtime cannot be built or the telemetry background worker fails
+    /// to start. When constructing from the fluent
+    /// [`crate::Dial9Config`], writer-transport I/O has already been
+    /// validated by
+    /// [`Dial9ConfigBuilder::build`](crate::Dial9ConfigBuilder::build),
+    /// so the only remaining failure modes are tokio-builder and
+    /// telemetry-core startup I/O.
     ///
     /// For fallible construction, use [`try_new`](Self::try_new).
+    ///
+    /// ```no_run
+    /// use dial9_tokio_telemetry::{Dial9Config, TracedRuntime};
+    /// let cfg = Dial9Config::builder()
+    ///     .base_path("trace.bin")
+    ///     .max_file_size(64 * 1024 * 1024)
+    ///     .max_total_size(1024 * 1024 * 1024)
+    ///     .build()?;
+    /// let rt = TracedRuntime::new(cfg);
+    /// rt.block_on(async { /* ... */ });
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
     pub fn new<C>(config: C) -> Self
     where
         C: TryInto<TracedRuntime>,
@@ -926,6 +952,24 @@ impl TracedRuntime {
     }
 
     /// Fallible counterpart to [`new`](Self::new).
+    ///
+    /// Returns the conversion error directly: when constructing from
+    /// [`crate::Dial9Config`] that's a [`TelemetryRuntimeError`]; when
+    /// constructing from the deprecated [`crate::config::Dial9Config`]
+    /// it's a [`std::io::Error`]. Use this when you want to handle
+    /// runtime construction failure rather than panic.
+    ///
+    /// ```no_run
+    /// use dial9_tokio_telemetry::{Dial9Config, TracedRuntime};
+    /// let cfg = Dial9Config::builder()
+    ///     .base_path("trace.bin")
+    ///     .max_file_size(64 * 1024 * 1024)
+    ///     .max_total_size(1024 * 1024 * 1024)
+    ///     .build()?;
+    /// let rt = TracedRuntime::try_new(cfg)?;
+    /// rt.block_on(async { /* ... */ });
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
     pub fn try_new<C>(config: C) -> Result<Self, <C as TryInto<TracedRuntime>>::Error>
     where
         C: TryInto<TracedRuntime>,
@@ -939,11 +983,20 @@ impl TracedRuntime {
     }
 
     /// Borrow the telemetry guard.
+    ///
+    /// The guard is always present, regardless of whether telemetry was
+    /// installed. Use [`TelemetryGuard::is_enabled`] to distinguish a
+    /// live telemetry session from an inert (disabled) guard.
     pub fn guard(&self) -> &TelemetryGuard {
         &self.guard
     }
 
     /// Run `fut` to completion on the runtime.
+    ///
+    /// The future is always spawned through the guard's
+    /// [`TelemetryHandle`]. On an enabled guard this records poll and
+    /// wake events; on a disabled guard the handle's `spawn` falls
+    /// through to plain [`tokio::spawn`].
     pub fn block_on<F>(&self, fut: F) -> F::Output
     where
         F: std::future::Future + Send + 'static,

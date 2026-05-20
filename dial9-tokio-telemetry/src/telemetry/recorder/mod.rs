@@ -155,14 +155,20 @@ fn register_hooks(
             {
                 // Register as Blocking initially; worker threads will
                 // overwrite this to Worker(i) in resolve_worker_id.
+                // NOTE: `tokio::runtime::worker_index()` will always return `None` at this point
+                // so we can't utilize that here.
                 let tid = crate::telemetry::events::current_tid();
                 s_start
                     .thread_roles
                     .lock()
                     .unwrap()
                     .insert(tid, crate::telemetry::events::ThreadRole::Blocking);
+                // Sched event sampling is deferred to register_tid_if_needed(),
+                // which runs only for worker threads on their first poll/park.
+                // This avoids opening perf fds for blocking pool threads.
 
                 // Registers the current thread for the CPU-profiling fallback (ctimer).
+                // No-op when perf is the active backend (perf uses inherit).
                 let _ = dial9_perf_self_profile::register_current_thread();
             }
         })
