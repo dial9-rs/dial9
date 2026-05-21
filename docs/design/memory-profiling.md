@@ -94,12 +94,14 @@ fn on_alloc(size: usize) {
 }
 
 fn next_gap(rng: &mut SplitMix64, sample_rate_bytes: u64) -> i64 {
-    // `sample_rate_bytes <= 1` is the "sample every allocation" mode:
-    // returning 0 makes the next decision (`counter - size`) go ≤ 0
-    // for any positive `size`, triggering a sample without consulting
-    // the PRNG. Avoids ~63% per-alloc sampling at `size = 1, rate = 1`
-    // due to the exponential's variance around its mean.
-    if sample_rate_bytes <= 1 {
+    // `sample_rate_bytes == 1` is the magic "sample every allocation"
+    // mode: returning 0 makes the next decision (`counter - size`) go
+    // ≤ 0 for any positive `size`, triggering a sample without
+    // consulting the PRNG. Avoids ~63% per-alloc sampling at
+    // `size = 1, rate = 1` due to the exponential's variance around
+    // its mean. `0` is rejected at config build time, so this branch
+    // only ever sees values `>= 1`.
+    if sample_rate_bytes == 1 {
         return 0;
     }
     rng.draw_exponential(sample_rate_bytes) as i64
@@ -110,10 +112,13 @@ Two important details:
 
 - `remaining` must be `i64` (signed). Subtracting `usize` from `usize`
   and comparing to zero invites wraparound bugs.
-- `sample_rate_bytes <= 1` short-circuits to "sample every allocation"
-  mode without consulting the PRNG. Matches user intuition: rate of 1
-  byte between samples means every byte is sampled, which for any
-  allocation larger than 1 byte means every allocation samples.
+- `sample_rate_bytes == 1` is the magic "sample every allocation"
+  short-circuit. The PRNG is bypassed; every call to the allocator is
+  recorded. Matches user intuition: a rate of "1 byte between samples"
+  means every byte is sampled, which for any allocation ≥ 1 byte means
+  every allocation samples. `0` is rejected at config build time
+  because it is ambiguous (sample everything? sample nothing?) — pass
+  `1` for the explicit "sample everything" mode.
 
 ### Why a single fresh draw (no redraw loop)
 
@@ -304,13 +309,15 @@ Always pull `R` from a recorded source rather than a build-time
 constant — the default may change and operators may override it per
 deployment.
 
-#### `sample_rate_bytes <= 1` ("sample every allocation")
+#### `sample_rate_bytes == 1` ("sample every allocation")
 
-In this mode every alloc is in the trace, so the raw `size` field is
-already the truth. The HT formula degenerates to the right answer
+In this magic mode every alloc is in the trace (`0` is rejected at
+config build time, so the only way to get this behaviour is by
+explicitly passing `1`). The raw `size` field is already the truth:
+the HT formula still gives the right answer
 (`exp(-s/1) ≈ 0` for any positive `s`, so the weight is ~1), but you
-can short-circuit: `total_bytes = Σ s_i`, `total_count = number of
-samples`.
+can short-circuit and just sum: `total_bytes = Σ s_i`,
+`total_count = number of samples`.
 
 ---
 

@@ -91,18 +91,21 @@ fn ensure_initialized(state: &mut SamplingState, inner: &MemoryProfilerInner) {
 
 /// Draw the next bytes-until-sample gap.
 ///
-/// `sample_rate_bytes <= 1` means "sample every allocation": we return 0,
-/// which makes the next decision (`counter - size`) go ≤ 0 for any
-/// positive `size`, triggering a sample without consulting the PRNG.
-/// This avoids the surprise where `sample_rate_bytes = 1` would otherwise
-/// produce ~63% per-allocation sampling for `size = 1` allocations
-/// because of the exponential's variance around the mean.
+/// `sample_rate_bytes == 1` is the magic "sample every allocation" mode:
+/// we return 0, which makes the next decision (`counter - size`) go ≤ 0
+/// for any positive `size`, triggering a sample without consulting the
+/// PRNG. This avoids the surprise where mean=1 exponential draws would
+/// otherwise produce ~63% per-allocation sampling for `size = 1`
+/// allocations due to the exponential's variance around its mean.
 ///
-/// For `sample_rate_bytes >= 2`, we draw from an exponential distribution
-/// with the given mean.
+/// `sample_rate_bytes == 0` is rejected at config build time, so this
+/// function only ever sees values `>= 1`.
+///
+/// For `sample_rate_bytes >= 2`, we draw from an exponential
+/// distribution with the given mean.
 #[inline]
 fn next_gap(rng: &mut SplitMix64, sample_rate_bytes: u64) -> i64 {
-    if sample_rate_bytes <= 1 {
+    if sample_rate_bytes == 1 {
         return 0;
     }
     i64::try_from(rng.draw_exponential(sample_rate_bytes)).unwrap_or(i64::MAX)
@@ -164,8 +167,9 @@ pub(crate) fn on_alloc(inner: &MemoryProfilerInner, ptr: *mut u8, size: usize) {
         // preserving unbiasedness of size-weighted rate estimates.
         //
         // `next_gap` short-circuits the draw entirely when
-        // `sample_rate_bytes <= 1`, so "sample every allocation" mode
-        // doesn't touch the PRNG.
+        // `sample_rate_bytes == 1` (the magic "sample every
+        // allocation" value), so that mode never touches the PRNG.
+        // `0` is rejected at config build time.
         state.next_sample_bytes = next_gap(&mut state.rng, inner.sample_rate_bytes);
 
         let timestamp_ns = stamp(inner.timestamp_mode);
@@ -489,8 +493,8 @@ mod tests {
         // `on_alloc(size = 1 GiB)` with `sample_rate_bytes = 1` ran a
         // loop that called `draw_exponential` ~1 billion times to
         // climb the counter back from -1 GiB. With the single-draw
-        // redraw + the `<= 1` short-circuit, even huge allocations
-        // complete in microseconds.
+        // redraw + the `== 1` magic-value short-circuit, even huge
+        // allocations complete in microseconds.
         let seed = 0xFEED_FACE;
         let sample_rate = 1;
         let huge = 1024 * 1024 * 1024; // 1 GiB
