@@ -50,7 +50,7 @@ impl DiskFs {
         }
     }
 
-    pub(super) fn create_handle(&self, path: &Path) -> io::Result<ActiveHandle> {
+    pub(super) fn create_segment(&self, path: &Path) -> io::Result<ActiveHandle> {
         match std::fs::File::create(path) {
             Ok(f) => Ok(ActiveHandle::Disk(f)),
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
@@ -67,7 +67,7 @@ impl DiskFs {
         }
     }
 
-    pub(super) fn seal_handle(
+    pub(super) fn seal(
         &self,
         active_handle: ActiveHandle,
         active_path: &Path,
@@ -85,7 +85,7 @@ impl DiskFs {
         }
     }
 
-    pub(super) fn remove_sealed_inner(&self, seg: &SegmentRef, reason: RemoveReason) {
+    pub(super) fn remove_sealed(&self, seg: &SegmentRef, reason: RemoveReason) {
         if let Some(path) = seg.disk_path() {
             remove_segment_family(path);
         }
@@ -95,7 +95,7 @@ impl DiskFs {
         }
     }
 
-    pub(super) fn remove_active_inner(&self, path: &Path) -> io::Result<()> {
+    pub(super) fn remove_active(&self, path: &Path) -> io::Result<()> {
         // Best-effort: a missing active file is expected (already sealed or
         // never created). Log anything else so silent FS failures (e.g.
         // permission) are observable instead of leaking active files.
@@ -121,7 +121,7 @@ impl DiskFs {
         self.claimed.lock().unwrap().remove(&index);
     }
 
-    pub(super) fn writer_done_inner(&self) -> bool {
+    pub(super) fn writer_done(&self) -> bool {
         self.writer_done.load(Ordering::Acquire)
     }
 
@@ -129,11 +129,11 @@ impl DiskFs {
     /// (`std::fs::rename`) happens-before this `Release` store, so any worker
     /// thread observing `writer_done == true` will see the renamed file on its
     /// next `take_files` scan.
-    pub(super) fn mark_writer_done_inner(&self) {
+    pub(super) fn mark_writer_done(&self) {
         self.writer_done.store(true, Ordering::Release);
     }
 
-    pub(super) async fn wait_for_more_inner(
+    pub(super) async fn wait_for_more(
         &self,
         stop: &tokio_util::sync::CancellationToken,
         poll_interval: Duration,
@@ -144,7 +144,7 @@ impl DiskFs {
         }
     }
 
-    pub(super) fn take_files_inner(&self) -> TakenFiles {
+    pub(super) fn take_files(&self) -> TakenFiles {
         let on_disk = match find_sealed_segments(&self.dir, &self.stem) {
             Ok(s) => s,
             Err(e) => {
@@ -222,7 +222,7 @@ impl DiskFs {
     /// Sums whole-family sizes (`.bin` + `.bin.gz` + future write-back suffixes) per index
     /// so the eviction budget covers post-processed artifacts and unlinks
     /// stale `.bin.active` orphans from dead writers.
-    pub(super) fn discover_existing_inner(&self) -> io::Result<DiscoveredArtifacts> {
+    pub(super) fn discover_existing(&self) -> io::Result<DiscoveredArtifacts> {
         let mut retained_sizes: BTreeMap<u32, u64> = BTreeMap::new();
 
         if !self.dir.exists() {
@@ -412,13 +412,13 @@ mod tests {
         let base = dir.path().join("trace.bin");
         let disk = DiskFs::from_base_path(&base);
 
-        let t1 = disk.take_files_inner();
+        let t1 = disk.take_files();
         check!(t1.segments.len() == 1);
 
         let seg = &t1.segments[0].seg_ref;
         disk.release_claim(seg.index());
 
-        let t2 = disk.take_files_inner();
+        let t2 = disk.take_files();
         check!(
             t2.segments.len() == 1,
             "released claim should be re-dispensed"
@@ -463,7 +463,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let base = dir.path().join("trace.bin");
         let disk = DiskFs::from_base_path(&base);
-        let d = disk.discover_existing_inner().unwrap();
+        let d = disk.discover_existing().unwrap();
         check!(d.next_active_index == 0);
         check!(d.closed_files.is_empty());
     }
@@ -476,7 +476,7 @@ mod tests {
         std::fs::write(dir.path().join("trace.2.bin"), vec![0u8; 50]).unwrap();
         let base = dir.path().join("trace.bin");
         let disk = DiskFs::from_base_path(&base);
-        let d = disk.discover_existing_inner().unwrap();
+        let d = disk.discover_existing().unwrap();
         check!(d.next_active_index == 3, "max(0,2)+1 = 3");
         let by_index: std::collections::HashMap<u32, u64> = d
             .closed_files
@@ -494,7 +494,7 @@ mod tests {
         std::fs::write(&stale, b"orphan").unwrap();
         let base = dir.path().join("trace.bin");
         let disk = DiskFs::from_base_path(&base);
-        let _ = disk.discover_existing_inner().unwrap();
+        let _ = disk.discover_existing().unwrap();
         check!(!stale.exists(), "stale .active must be discarded");
     }
 
@@ -506,7 +506,7 @@ mod tests {
         std::fs::write(dir.path().join("trace.0.bin"), b"x").unwrap();
         let base = dir.path().join("trace.bin");
         let disk = DiskFs::from_base_path(&base);
-        let d = disk.discover_existing_inner().unwrap();
+        let d = disk.discover_existing().unwrap();
         check!(d.closed_files.len() == 1);
         check!(d.next_active_index == 1);
     }

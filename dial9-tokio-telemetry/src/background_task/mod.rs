@@ -2234,7 +2234,7 @@ mod worker_pipeline_tests {
         let fs = Fs::new_in_memory(8).expect("memory fs should build");
         for i in 0..2u32 {
             let mut h = fs
-                .create(Path::new("x"))
+                .create_segment(Path::new("x"))
                 .expect("memory fs should create a handle");
             h.write_all(&[0u8; 50])
                 .expect("write into memory handle should succeed");
@@ -2276,7 +2276,7 @@ mod worker_pipeline_tests {
         use std::io::Write;
 
         let fs = Fs::new_in_memory(8).unwrap();
-        let mut h = fs.create(Path::new("x")).unwrap();
+        let mut h = fs.create_segment(Path::new("x")).unwrap();
         h.write_all(&[0u8; 50]).unwrap();
         fs.seal(h, Path::new("x"), 0).unwrap();
 
@@ -2358,7 +2358,7 @@ mod worker_pipeline_tests {
             let producer_fs = Arc::clone(&fs);
             let producer = tokio::spawn(async move {
                 for i in 0..SEGMENTS {
-                    let mut h = producer_fs.create(Path::new("x")).unwrap();
+                    let mut h = producer_fs.create_segment(Path::new("x")).unwrap();
                     h.write_all(b"event-bytes").unwrap();
                     producer_fs.seal(h, Path::new("x"), i).unwrap();
                 }

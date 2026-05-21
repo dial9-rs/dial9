@@ -180,10 +180,10 @@ pub(crate) enum Fs {
 
 impl Fs {
     /// Create a new active-segment write handle.
-    pub(crate) fn create(&self, path: &Path) -> io::Result<ActiveHandle> {
+    pub(crate) fn create_segment(&self, path: &Path) -> io::Result<ActiveHandle> {
         match self {
-            Fs::Disk(d) => d.create_handle(path),
-            Fs::Mem(m) => m.create_handle(path),
+            Fs::Disk(d) => d.create_segment(path),
+            Fs::Mem(m) => m.create_segment(path),
         }
     }
 
@@ -199,7 +199,7 @@ impl Fs {
     /// Memory: default (no restart story).
     pub(crate) fn discover_existing(&self) -> io::Result<DiscoveredArtifacts> {
         match self {
-            Fs::Disk(d) => d.discover_existing_inner(),
+            Fs::Disk(d) => d.discover_existing(),
             Fs::Mem(_) => Ok(DiscoveredArtifacts::default()),
         }
     }
@@ -218,8 +218,8 @@ impl Fs {
         index: u32,
     ) -> io::Result<SegmentRef> {
         match self {
-            Fs::Disk(d) => d.seal_handle(active_handle, active_path, index),
-            Fs::Mem(m) => m.seal_handle(active_handle, active_path, index),
+            Fs::Disk(d) => d.seal(active_handle, active_path, index),
+            Fs::Mem(m) => m.seal(active_handle, active_path, index),
         }
     }
 
@@ -230,16 +230,16 @@ impl Fs {
     /// Memory: no-op (bytes already left the ring on pop).
     pub(crate) fn remove_sealed(&self, seg: &SegmentRef, reason: RemoveReason) {
         match self {
-            Fs::Disk(d) => d.remove_sealed_inner(seg, reason),
-            Fs::Mem(m) => m.remove_sealed_inner(seg, reason),
+            Fs::Disk(d) => d.remove_sealed(seg, reason),
+            Fs::Mem(m) => m.remove_sealed(seg, reason),
         }
     }
 
     /// Discard an active-segment handle without sealing.
     pub(crate) fn remove_active(&self, path: &Path) -> io::Result<()> {
         match self {
-            Fs::Disk(d) => d.remove_active_inner(path),
-            Fs::Mem(m) => m.remove_active_inner(path),
+            Fs::Disk(d) => d.remove_active(path),
+            Fs::Mem(m) => m.remove_active(path),
         }
     }
 
@@ -250,8 +250,8 @@ impl Fs {
     /// bound peak in-flight memory to one segment regardless of backlog.
     pub(crate) fn take_files(&self) -> TakenFiles {
         match self {
-            Fs::Disk(d) => d.take_files_inner(),
-            Fs::Mem(m) => m.take_files_inner(),
+            Fs::Disk(d) => d.take_files(),
+            Fs::Mem(m) => m.take_files(),
         }
     }
 
@@ -261,16 +261,16 @@ impl Fs {
     /// Memory: awaits the ring `Notify` or stop, with lost-wakeup protection.
     pub(crate) async fn wait_for_more(&self, stop: &CancellationToken, poll_interval: Duration) {
         match self {
-            Fs::Disk(d) => d.wait_for_more_inner(stop, poll_interval).await,
-            Fs::Mem(m) => m.wait_for_more_inner(stop, poll_interval).await,
+            Fs::Disk(d) => d.wait_for_more(stop, poll_interval).await,
+            Fs::Mem(m) => m.wait_for_more(stop, poll_interval).await,
         }
     }
 
     /// Returns `true` once `RotatingWriter::finalize` has run.
     pub(crate) fn writer_done(&self) -> bool {
         match self {
-            Fs::Disk(d) => d.writer_done_inner(),
-            Fs::Mem(m) => m.writer_done_inner(),
+            Fs::Disk(d) => d.writer_done(),
+            Fs::Mem(m) => m.writer_done(),
         }
     }
 
@@ -278,8 +278,8 @@ impl Fs {
     /// pings `Notify` so a parked worker wakes.
     pub(crate) fn mark_writer_done(&self) {
         match self {
-            Fs::Disk(d) => d.mark_writer_done_inner(),
-            Fs::Mem(m) => m.mark_writer_done_inner(),
+            Fs::Disk(d) => d.mark_writer_done(),
+            Fs::Mem(m) => m.mark_writer_done(),
         }
     }
 

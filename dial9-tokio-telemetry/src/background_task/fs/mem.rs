@@ -82,11 +82,11 @@ impl MemFs {
         })
     }
 
-    pub(super) fn create_handle(&self, _path: &Path) -> io::Result<ActiveHandle> {
+    pub(super) fn create_segment(&self, _path: &Path) -> io::Result<ActiveHandle> {
         Ok(ActiveHandle::Mem(MemActiveWriter { buf: Vec::new() }))
     }
 
-    pub(super) fn seal_handle(
+    pub(super) fn seal(
         &self,
         active_handle: ActiveHandle,
         _active_path: &Path,
@@ -121,13 +121,13 @@ impl MemFs {
         Ok(SegmentRef::Memory(MemorySegment { index, size }))
     }
 
-    pub(super) fn remove_sealed_inner(&self, _seg: &SegmentRef, _reason: RemoveReason) {}
+    pub(super) fn remove_sealed(&self, _seg: &SegmentRef, _reason: RemoveReason) {}
 
-    pub(super) fn remove_active_inner(&self, _path: &Path) -> io::Result<()> {
+    pub(super) fn remove_active(&self, _path: &Path) -> io::Result<()> {
         Ok(())
     }
 
-    pub(super) fn take_files_inner(&self) -> TakenFiles {
+    pub(super) fn take_files(&self) -> TakenFiles {
         let ch = &self.channel;
         // Per-cycle delta: swap-to-zero so each emit reports drops that
         // occurred since the previous take_files.
@@ -184,7 +184,7 @@ impl MemFs {
         }
     }
 
-    pub(super) async fn wait_for_more_inner(
+    pub(super) async fn wait_for_more(
         &self,
         stop: &CancellationToken,
         _poll_interval: Duration,
@@ -205,11 +205,11 @@ impl MemFs {
         }
     }
 
-    pub(super) fn writer_done_inner(&self) -> bool {
+    pub(super) fn writer_done(&self) -> bool {
         self.channel.writer_done.load(Ordering::Acquire)
     }
 
-    pub(super) fn mark_writer_done_inner(&self) {
+    pub(super) fn mark_writer_done(&self) {
         self.channel.writer_done.store(true, Ordering::Release);
         self.channel.notify.notify_one();
     }
@@ -224,7 +224,7 @@ mod tests {
     fn mem_fs_seal_take_roundtrip() {
         let mem = MemFs::with_capacity(16).unwrap();
         let handle = mem
-            .create_handle(Path::new("mem://trace.0.bin.active"))
+            .create_segment(Path::new("mem://trace.0.bin.active"))
             .unwrap();
         let ActiveHandle::Mem(mut w) = handle else {
             panic!()
@@ -233,12 +233,12 @@ mod tests {
         let handle = ActiveHandle::Mem(w);
 
         let seg_ref = mem
-            .seal_handle(handle, Path::new("mem://trace.0.bin.active"), 0)
+            .seal(handle, Path::new("mem://trace.0.bin.active"), 0)
             .unwrap();
         check!(matches!(seg_ref, SegmentRef::Memory(_)));
         check!(seg_ref.index() == 0);
 
-        let taken = mem.take_files_inner();
+        let taken = mem.take_files();
         check!(taken.segments.len() == 1);
 
         let (loaded_ref, payload, _acct) =
@@ -253,18 +253,18 @@ mod tests {
         let mem = MemFs::with_capacity(1).unwrap();
 
         for index in 0..2u32 {
-            let handle = mem.create_handle(Path::new("dummy")).unwrap();
+            let handle = mem.create_segment(Path::new("dummy")).unwrap();
             let ActiveHandle::Mem(mut w) = handle else {
                 panic!()
             };
             w.buf.resize(60, index as u8);
-            mem.seal_handle(ActiveHandle::Mem(w), Path::new("dummy"), index)
+            mem.seal(ActiveHandle::Mem(w), Path::new("dummy"), index)
                 .unwrap();
         }
 
         check!(mem.channel.dropped.load(Ordering::SeqCst) == 1);
         // Only the most recent segment remains.
-        let t = mem.take_files_inner();
+        let t = mem.take_files();
         check!(t.segments.len() == 1);
         check!(t.segments[0].seg_ref.index() == 1);
     }
@@ -281,15 +281,15 @@ mod tests {
     fn mem_fs_queued_segments_after_pop() {
         let mem = MemFs::with_capacity(16).unwrap();
         for i in 0..3u32 {
-            let handle = mem.create_handle(Path::new("x")).unwrap();
+            let handle = mem.create_segment(Path::new("x")).unwrap();
             let ActiveHandle::Mem(mut w) = handle else {
                 panic!()
             };
             w.buf.push(i as u8);
-            mem.seal_handle(ActiveHandle::Mem(w), Path::new("x"), i)
+            mem.seal(ActiveHandle::Mem(w), Path::new("x"), i)
                 .unwrap();
         }
-        let t = mem.take_files_inner();
+        let t = mem.take_files();
         check!(t.segments.len() == 1);
         check!(
             t.queued_segments == Some(2),
@@ -297,13 +297,13 @@ mod tests {
         );
         check!(t.queued_bytes == Some(2), "two 1-byte segments queued");
 
-        let _ = mem.take_files_inner();
-        let t = mem.take_files_inner();
+        let _ = mem.take_files();
+        let t = mem.take_files();
         check!(t.segments.len() == 1);
         check!(t.queued_segments == Some(0), "ring drained");
         check!(t.queued_bytes == Some(0));
 
-        let t = mem.take_files_inner();
+        let t = mem.take_files();
         check!(t.segments.is_empty());
         check!(t.queued_segments == Some(0));
     }
@@ -312,20 +312,20 @@ mod tests {
     fn mem_fs_take_pops_one_at_a_time() {
         let mem = MemFs::with_capacity(16).unwrap();
         for i in 0..3u32 {
-            let handle = mem.create_handle(Path::new("dummy")).unwrap();
+            let handle = mem.create_segment(Path::new("dummy")).unwrap();
             let ActiveHandle::Mem(mut w) = handle else {
                 panic!()
             };
             w.buf.push(i as u8);
-            mem.seal_handle(ActiveHandle::Mem(w), Path::new("dummy"), i)
+            mem.seal(ActiveHandle::Mem(w), Path::new("dummy"), i)
                 .unwrap();
         }
 
         for _ in 0..3 {
-            let t = mem.take_files_inner();
+            let t = mem.take_files();
             check!(t.segments.len() == 1);
         }
-        let t = mem.take_files_inner();
+        let t = mem.take_files();
         check!(t.segments.is_empty());
     }
 
@@ -334,8 +334,8 @@ mod tests {
         let mem = MemFs::with_capacity(16).unwrap();
         let seg = SegmentRef::Memory(MemorySegment { index: 0, size: 10 });
         // Should not panic
-        mem.remove_sealed_inner(&seg, RemoveReason::Eviction);
-        mem.remove_sealed_inner(&seg, RemoveReason::Terminal);
+        mem.remove_sealed(&seg, RemoveReason::Eviction);
+        mem.remove_sealed(&seg, RemoveReason::Terminal);
     }
 }
 
@@ -345,12 +345,12 @@ mod shuttle_tests {
     use assert2::check;
 
     fn seal_one(mem: &MemFs, index: u32, size: usize) {
-        let handle = mem.create_handle(Path::new("x")).unwrap();
+        let handle = mem.create_segment(Path::new("x")).unwrap();
         let ActiveHandle::Mem(mut w) = handle else {
             unreachable!("mem backend yields a mem handle")
         };
         w.buf.resize(size, 0u8);
-        mem.seal_handle(ActiveHandle::Mem(w), Path::new("x"), index)
+        mem.seal(ActiveHandle::Mem(w), Path::new("x"), index)
             .unwrap();
     }
 
@@ -359,17 +359,17 @@ mod shuttle_tests {
     /// `segments_dropped` is per-cycle, so we accumulate each emit.
     fn drain(mem: &MemFs, consumed: &AtomicU64, dropped: &AtomicU64) {
         loop {
-            let t = mem.take_files_inner();
+            let t = mem.take_files();
             dropped.fetch_add(t.segments_dropped, Ordering::Relaxed);
             for seg in t.segments {
                 let _ = seg.load().unwrap();
                 consumed.fetch_add(1, Ordering::Relaxed);
             }
-            if mem.writer_done_inner() {
+            if mem.writer_done() {
                 // writer_done is Acquire and stored after every force_push, so
                 // the remaining queue is fully visible. Drain to empty.
                 loop {
-                    let t = mem.take_files_inner();
+                    let t = mem.take_files();
                     dropped.fetch_add(t.segments_dropped, Ordering::Relaxed);
                     if t.segments.is_empty() {
                         return;
@@ -395,7 +395,7 @@ mod shuttle_tests {
                 for i in 0..count {
                     seal_one(&mem, i, seg_size);
                 }
-                mem.mark_writer_done_inner();
+                mem.mark_writer_done();
             })
         };
         let worker = {

@@ -319,7 +319,7 @@ impl RotatingWriter<Disk> {
             .checked_add(1)
             .ok_or_else(|| std::io::Error::other("trace segment index overflow"))?;
         let first_path = Self::active_path(&base_path, first_index);
-        let handle = fs.create(&first_path)?;
+        let handle = fs.create_segment(&first_path)?;
         let state = Self::prepare_segment(BufWriter::new(handle))?;
         let now = time_source().system_time().as_std();
         let drain_interval = rotation_period.min(DEFAULT_DRAIN_INTERVAL);
@@ -361,7 +361,7 @@ impl RotatingWriter<Disk> {
         let path = path.into();
         let fs = Fs::new_disk(&path);
         let active_path = Self::active_path(&path, 0);
-        let handle = fs.create(&active_path)?;
+        let handle = fs.create_segment(&active_path)?;
         let state = Self::prepare_segment(BufWriter::new(handle))?;
         let now = time_source().system_time().as_std();
 
@@ -409,7 +409,7 @@ impl RotatingWriter<Memory> {
         // but `active_path()` still needs a prefix to build a placeholder.
         let base_path = PathBuf::from("mem");
         let active_path = Self::active_path(&base_path, 0);
-        let handle = fs.create(&active_path)?;
+        let handle = fs.create_segment(&active_path)?;
         let state = Self::prepare_segment(BufWriter::new(handle))?;
         let now = time_source().system_time().as_std();
         let rotation_period = DEFAULT_ROTATION_PERIOD;
@@ -594,7 +594,7 @@ impl<M: WriterMode> RotatingWriter<M> {
         // parent directory was removed underneath us, any other failure
         // leaves state = Finished so the writer stops cleanly rather than
         // retrying every drain cycle.
-        let handle: ActiveHandle = self.fs.create(&new_path)?;
+        let handle: ActiveHandle = self.fs.create_segment(&new_path)?;
 
         self.state = match Self::prepare_segment(BufWriter::new(handle)) {
             Ok(s) => s,
