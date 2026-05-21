@@ -2421,11 +2421,9 @@ mod tests {
     /// (mark_writer_done) -> WorkerLoop::run drain-to-empty -> processor.
     #[tokio::test]
     async fn mem_writer_e2e_delivers_all_events() {
-        use crate::background_task::{ProcessError, SegmentData, SegmentProcessor, WorkerLoop};
+        use crate::background_task::WorkerLoop;
+        use crate::background_task::testutil::CaptureProcessor;
         use crate::telemetry::{TelemetryEvent, format};
-        use std::future::Future;
-        use std::pin::Pin;
-        use std::sync::Mutex;
 
         const EVENTS: usize = 25;
 
@@ -2438,32 +2436,13 @@ mod tests {
         // Seals the active segment onto the ring and signals writer_done.
         writer.finalize().unwrap();
 
-        let captured = Arc::new(Mutex::new(Vec::<u8>::new()));
-
-        struct CaptureProcessor(Arc<Mutex<Vec<u8>>>);
-        impl SegmentProcessor for CaptureProcessor {
-            fn name(&self) -> &'static str {
-                "Capture"
-            }
-            fn process(
-                &mut self,
-                data: SegmentData,
-            ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>>
-            {
-                self.0
-                    .lock()
-                    .unwrap()
-                    .extend_from_slice(&data.payload().clone().into_vec());
-                Box::pin(async { Ok(data) })
-            }
-        }
-
+        let (capture, captured) = CaptureProcessor::new();
         // stop is never cancelled: the loop exits via writer_done only.
         let stop = tokio_util::sync::CancellationToken::new();
         let mut worker = WorkerLoop::new(
             fs,
             Duration::from_millis(5),
-            vec![Box::new(CaptureProcessor(captured.clone()))],
+            vec![Box::new(capture)],
             stop,
             metrique_writer::sink::DevNullSink::boxed(),
         );

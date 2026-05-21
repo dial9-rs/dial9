@@ -7,6 +7,8 @@ pub(crate) mod pipeline_metrics;
 #[cfg(feature = "worker-s3")]
 pub mod s3;
 pub(crate) mod sealed;
+#[cfg(test)]
+pub(crate) mod testutil;
 
 pub use payload::Payload;
 pub use sealed::{MemorySegment, SealedSegment, SegmentRef};
@@ -1828,29 +1830,13 @@ mod worker_pipeline_tests {
         };
         std::fs::write(dir.path().join("trace.0.bin"), &gzip_data).unwrap();
 
-        let output_bytes = Arc::new(std::sync::Mutex::new(Vec::new()));
-
-        struct CaptureProcessor(Arc<std::sync::Mutex<Vec<u8>>>);
-        impl SegmentProcessor for CaptureProcessor {
-            fn name(&self) -> &'static str {
-                "Capture"
-            }
-            fn process(
-                &mut self,
-                data: SegmentData,
-            ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>>
-            {
-                *self.0.lock().unwrap() = data.payload.clone().into_vec();
-                Box::pin(async { Ok(data) })
-            }
-        }
-
+        let (capture, output_bytes) = super::testutil::CaptureProcessor::new();
         let stop = tokio_util::sync::CancellationToken::new();
         stop.cancel();
 
         let processors: Vec<Box<dyn SegmentProcessor>> = vec![
             Box::new(GzipCompressor),
-            Box::new(CaptureProcessor(output_bytes.clone())),
+            Box::new(capture),
         ];
 
         let mut worker = WorkerLoop::new(
