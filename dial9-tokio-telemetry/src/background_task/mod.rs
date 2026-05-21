@@ -1437,7 +1437,7 @@ mod tests {
             vec![Box::new(CountingProcessor(processed.clone()))];
 
         let mut worker = WorkerLoop::new(
-            Fs::disk(config.trace_path().unwrap()),
+            Fs::new_disk(config.trace_path().unwrap()),
             config.poll_interval(),
             processors,
             stop,
@@ -1506,7 +1506,7 @@ mod tests {
         })];
 
         let mut worker = WorkerLoop::new(
-            Fs::disk(config.trace_path().unwrap()),
+            Fs::new_disk(config.trace_path().unwrap()),
             config.poll_interval(),
             processors,
             stop,
@@ -1579,7 +1579,7 @@ mod worker_pipeline_tests {
     use std::sync::Arc;
 
     fn fs_for(dir: &std::path::Path) -> Arc<Fs> {
-        Fs::disk(&dir.join("trace.bin"))
+        Fs::new_disk(&dir.join("trace.bin"))
     }
 
     fn default_poll() -> Duration {
@@ -2231,7 +2231,7 @@ mod worker_pipeline_tests {
             }
         }
 
-        let fs = Fs::memory(8).expect("memory fs should build");
+        let fs = Fs::new_in_memory(8).expect("memory fs should build");
         for i in 0..2u32 {
             let mut h = fs
                 .create(Path::new("x"))
@@ -2275,7 +2275,7 @@ mod worker_pipeline_tests {
     fn mem_take_files_reports_in_flight_bytes_peak() {
         use std::io::Write;
 
-        let fs = Fs::memory(8).unwrap();
+        let fs = Fs::new_in_memory(8).unwrap();
         let mut h = fs.create(Path::new("x")).unwrap();
         h.write_all(&[0u8; 50]).unwrap();
         fs.seal(h, Path::new("x"), 0).unwrap();
@@ -2338,7 +2338,7 @@ mod worker_pipeline_tests {
         }
 
         for iter in 0..ITERS {
-            let fs = Fs::memory(128).unwrap();
+            let fs = Fs::new_in_memory(128).unwrap();
             let processed = Arc::new(AtomicUsize::new(0));
             let stop = tokio_util::sync::CancellationToken::new();
 

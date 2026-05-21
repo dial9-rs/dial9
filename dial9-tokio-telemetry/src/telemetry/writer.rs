@@ -312,7 +312,7 @@ impl RotatingWriter<Disk> {
         {
             std::fs::create_dir_all(parent)?;
         }
-        let fs = Fs::disk(&base_path);
+        let fs = Fs::new_disk(&base_path);
         let discovered = fs.discover_existing()?;
         let first_index = discovered.next_active_index;
         let next_index = first_index
@@ -359,7 +359,7 @@ impl RotatingWriter<Disk> {
     /// Time-based rotation is disabled.
     pub fn single_file(path: impl Into<PathBuf>) -> std::io::Result<Self> {
         let path = path.into();
-        let fs = Fs::disk(&path);
+        let fs = Fs::new_disk(&path);
         let active_path = Self::active_path(&path, 0);
         let handle = fs.create(&active_path)?;
         let state = Self::prepare_segment(BufWriter::new(handle))?;
@@ -403,7 +403,7 @@ impl RotatingWriter<Memory> {
                 "max_segment_size must be > 0",
             ));
         }
-        let fs = Fs::memory(max_segments)?;
+        let fs = Fs::new_in_memory(max_segments)?;
         let max_total_size = max_segment_size.saturating_mul(max_segments as u64);
         // base_path is a dummy; the memory backend ignores paths entirely
         // but `active_path()` still needs a prefix to build a placeholder.

@@ -187,11 +187,11 @@ impl Fs {
         }
     }
 
-    pub(crate) fn disk(base_path: &Path) -> Arc<Self> {
+    pub(crate) fn new_disk(base_path: &Path) -> Arc<Self> {
         Arc::new(Fs::Disk(DiskFs::from_base_path(base_path)))
     }
 
-    pub(crate) fn memory(max_segments: usize) -> io::Result<Arc<Self>> {
+    pub(crate) fn new_in_memory(max_segments: usize) -> io::Result<Arc<Self>> {
         Ok(Arc::new(Fs::Mem(MemFs::with_capacity(max_segments)?)))
     }
 
