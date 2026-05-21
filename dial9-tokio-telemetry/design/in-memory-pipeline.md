@@ -127,7 +127,7 @@ pub(crate) enum RemoveReason {
 
 `DiskFs` and `MemFs` stay as the per-variant payload structs holding the backend-specific state. Inherent methods on `Fs` are a two-arm match that forwards to the active variant: static dispatch, branch-predicted, inlinable, no vtable.
 
-`TakenFiles` carries the dispensed claims plus per-cycle gauges (`ring_depth`, `ring_bytes`, `in_flight_count`, `in_flight_bytes`, `dropped_segments`). One scan per worker cycle drives both work and observability (see section 6 for metrics).
+`TakenFiles` carries the dispensed claims plus per-cycle gauges (`queued_segments`, `queued_bytes`, `in_flight_segments`, `in_flight_bytes`, `in_flight_bytes_peak`, `segments_dropped`). One scan per worker cycle drives both work and observability (see section 6 for metrics).
 
 - **`DiskFs`** holds the segment directory and stem at construction and maintains a `HashMap<u32, u64>` of claimed indices to uncompressed sizes (under a `Mutex`). `take_files` scans the directory, stats each unclaimed file **outside the claim-set mutex**, then re-acquires the mutex once to insert all new entries. Keeping `metadata()` syscalls off the locked path matters because the writer's `evict_oldest` takes the same mutex (via `remove_sealed`). The `std::fs::read` for the payload itself is deferred to `TakenSegment::load`.
 - **`MemFs`** holds active-only state (per-path `Vec<u8>` map) plus the internal writer-to-worker ring (`BoundedQueue` of `max_segments` slots). Sealed bytes do not live in `MemFs`'s active map. `seal` takes the `Vec<u8>`, wraps it as `Bytes` (zero-copy) and `force_push`es into the ring, which evicts the oldest slot when full (see section 3). `take_files` pops **at most one** segment from the ring per call and returns it with payload already in hand. `remove_sealed` is a no-op: bytes already left `MemFs`.
@@ -260,10 +260,12 @@ Disk already pays for the active buffer and one in-flight segment in RAM (lazy `
 
 Memory-mode gauges on the `MemFs` channel:
 
-- **`ring_depth`**: segments waiting in the ring after the current cycle's pop.
+- **`memory_queued_segments`** (Option, memory-only): segments waiting in the ring after the current cycle's pop. `None` on disk.
+- **`memory_queued_bytes`** (Option, memory-only): encoded bytes resident in the ring, maintained alongside the slot counter.
+- **`in_flight_segments`**: count of segments claimed by the worker.
 - **`in_flight_bytes`**: current payload bytes summed across in-flight segments. Tracks real RAM (symbolize grows, gzip shrinks) because the worker re-balances it via `SegmentAccounting::adjust` after each successful stage.
-- **`in_flight_count`**: matching segment-count gauge.
-- **`dropped_segments`**: cumulative segments shed by ring-slot eviction.
+- **`memory_peak_in_flight_bytes`** (Option, memory-only): high-water of in-flight bytes observed during this event's window. `None` on disk.
+- **`segments_evicted`**: segments shed by ring-slot eviction during this event's window (the channel atomic is swap-zeroed by `take_files`).
 
 The writer is the sole eviction source. The worker only consumes. Concurrent `queue.pop()` between writer eviction and worker consumption is safe because `BoundedQueue` is MPMC-safe, so each slot pops exactly once.
 
@@ -400,16 +402,17 @@ Memory mode keeps bytes in process heap that disk kept on disk. Regressions are 
 
 `FlushMetrics`, `SegmentProcessMetrics` and `TlDrainMetrics` cover writer, flush and per-segment paths as today. New: a per-cycle `WorkerCycleMetrics` entry (`Operation::WorkerCycle`) emitted once per `take_files` call, symmetric across disk and memory:
 
-- `RingDepth` (memory only): segments waiting in the ring after this cycle's pop. The primary "near eviction" gauge.
-- `RingBytes`: emitted as `None` today since the memory backend tracks slot counts, not ring bytes.
-- `InFlightCount` / `InFlightBytes`: segments claimed but not yet released by last-stage cleanup or `remove_sealed`. Memory updates `InFlightBytes` after every successful stage via `SegmentAccounting::adjust`, so the gauge follows payload growth (symbolization) and shrinkage (compression). Rising values mean the pipeline is not shedding work fast enough.
-- `DroppedSegments`: backend-side evictions. Disk: `remove_sealed(_, Eviction)` from `evict_oldest`. Memory: ring slot eviction via `force_push`.
+- `MemoryQueuedSegments` (memory only): segments waiting in the ring after this cycle's pop. The primary "near eviction" gauge. Prefix marks the backend so dashboard readers don't wonder why disk emits null.
+- `MemoryQueuedBytes` (memory only): encoded bytes still in the ring. Tracked alongside `MemoryQueuedSegments` via a side atomic.
+- `InFlightSegments` / `InFlightBytes`: claimed but not yet released by last-stage cleanup or `remove_sealed`. Memory updates `InFlightBytes` after every successful stage via `SegmentAccounting::adjust`, so the gauge follows payload growth (symbolization) and shrinkage (compression). Rising values mean the pipeline is not shedding work fast enough.
+- `MemoryPeakInFlightBytes` (memory only): high-water of `InFlightBytes` observed across this event's window. The point sample alone would miss the symbolize peak; this captures it. `None` on disk (no per-stage mutation, would just shadow `InFlightBytes`).
+- `SegmentsEvicted`: backend-side evictions during this event's window (per-event delta). Disk: `remove_sealed(_, Eviction)` from `evict_oldest`. Memory: ring slot eviction via `force_push`.
 - `SegmentsDispatched`: segments handed into the pipeline this cycle.
 
-Fires every cycle, drained-empty included, so a stuck pipeline shows climbing `InFlightBytes` with `SegmentsDispatched == 0`. `ChannelReceiver` keeps direct accessors for at-cadence sampling.
+Fires every cycle, drained-empty included, so a stuck pipeline shows climbing `InFlightBytes` with `SegmentsDispatched == 0`.
 
 ---
 
 ## 7. Open questions
 
-**Adaptive sizing:** The current design takes a static `max_segments`. We could measure ring depth and let the writer grow/shrink within a configured range, similar to how some allocators auto-tune their arenas. Container users could benefit from reading cgroup `memory.max` / `memory.high` as an outer cap. Initially keeping it out of scope for v1 or at least until implementation testing shows workload data. The metrics catalog (`RingDepth`, `InFlightBytes`, `DroppedSegments`) covers the internal inputs we'd need.
+**Adaptive sizing:** The current design takes a static `max_segments`. We could measure ring depth and let the writer grow/shrink within a configured range, similar to how some allocators auto-tune their arenas. Container users could benefit from reading cgroup `memory.max` / `memory.high` as an outer cap. Initially keeping it out of scope for v1 or at least until implementation testing shows workload data. The metrics catalog (`MemoryQueuedSegments`, `MemoryQueuedBytes`, `InFlightBytes`, `SegmentsEvicted`) covers the internal inputs we'd need.

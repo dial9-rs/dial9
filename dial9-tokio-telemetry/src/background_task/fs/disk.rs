@@ -155,7 +155,7 @@ impl DiskFs {
                         "failed to scan for sealed segments"
                     );
                 });
-                return empty_taken_files(self.dropped.load(Ordering::Relaxed));
+                return empty_taken_files(self.dropped.swap(0, Ordering::AcqRel));
             }
         };
         let on_disk_indices: HashSet<u32> = on_disk.iter().map(|s| s.index).collect();
@@ -196,7 +196,7 @@ impl DiskFs {
         // Gauges are best-effort: `claimed` is locked twice, so a racing
         // remove_sealed/release_claim shifts the counts. They feed backpressure
         // heuristics only, not correctness.
-        let (in_flight_count, in_flight_bytes) = {
+        let (in_flight_segments, in_flight_bytes) = {
             let mut claimed = self.claimed.lock().unwrap();
             claimed.retain(|idx, _| on_disk_indices.contains(idx));
             for (idx, size) in new_claims {
@@ -207,11 +207,12 @@ impl DiskFs {
 
         TakenFiles {
             segments: new_segments,
-            ring_depth: None,
-            ring_bytes: None,
-            in_flight_count,
+            queued_segments: None,
+            queued_bytes: None,
+            in_flight_segments,
             in_flight_bytes,
-            dropped_segments: self.dropped.load(Ordering::Relaxed),
+            in_flight_bytes_peak: None,
+            segments_dropped: self.dropped.swap(0, Ordering::AcqRel),
         }
     }
 }
@@ -344,15 +345,16 @@ fn strip_active_suffix(path: &Path) -> PathBuf {
     }
 }
 
-fn empty_taken_files(dropped_segments: u64) -> TakenFiles {
+fn empty_taken_files(segments_dropped: u64) -> TakenFiles {
     TakenFiles {
         segments: vec![],
         // Used only by DiskFs's early-return on scan failure.
-        ring_depth: None,
-        ring_bytes: None,
-        in_flight_count: 0,
+        queued_segments: None,
+        queued_bytes: None,
+        in_flight_segments: 0,
         in_flight_bytes: 0,
-        dropped_segments,
+        in_flight_bytes_peak: None,
+        segments_dropped,
     }
 }
 
@@ -389,7 +391,7 @@ mod tests {
 
         let t1 = fs.take_files();
         check!(t1.segments.len() == 1);
-        check!(t1.in_flight_count == 1);
+        check!(t1.in_flight_segments == 1);
 
         // Last-stage cleanup deletes the file out-of-band.
         std::fs::remove_file(&path).unwrap();
@@ -399,7 +401,7 @@ mod tests {
             t2.segments.is_empty(),
             "vanished file must not be re-dispatched"
         );
-        check!(t2.in_flight_count == 0, "stale claim must be pruned");
+        check!(t2.in_flight_segments == 0, "stale claim must be pruned");
         check!(t2.in_flight_bytes == 0);
     }
 
@@ -434,10 +436,12 @@ mod tests {
         check!(t.segments.len() == 1);
         let seg = t.segments.into_iter().next().unwrap().seg_ref;
 
-        check!(t.dropped_segments == 0);
+        check!(t.segments_dropped == 0);
         fs.remove_sealed(&seg, RemoveReason::Eviction);
         let t2 = fs.take_files();
-        check!(t2.dropped_segments == 1);
+        check!(t2.segments_dropped == 1);
+        let t3 = fs.take_files();
+        check!(t3.segments_dropped == 0);
     }
 
     #[test]
@@ -451,7 +455,7 @@ mod tests {
         let seg = t.segments.into_iter().next().unwrap().seg_ref;
         fs.remove_sealed(&seg, RemoveReason::Terminal);
         let t2 = fs.take_files();
-        check!(t2.dropped_segments == 0);
+        check!(t2.segments_dropped == 0);
     }
 
     #[test]

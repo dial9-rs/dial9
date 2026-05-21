@@ -45,10 +45,11 @@ struct MemSealedSegment {
 
 struct MemChannel {
     queue: BoundedQueue<MemSealedSegment>,
+    queued_bytes: AtomicU64,
     in_flight_bytes: Arc<AtomicU64>,
-    in_flight_count: Arc<AtomicU64>,
+    in_flight_segments: Arc<AtomicU64>,
+    in_flight_bytes_peak: Arc<AtomicU64>,
     dropped: AtomicU64,
-    /// Set by `mark_writer_done`; observed by the worker's drain loop.
     writer_done: AtomicBool,
     notify: Notify,
 }
@@ -71,8 +72,10 @@ impl MemFs {
         Ok(Self {
             channel: Arc::new(MemChannel {
                 queue: BoundedQueue::new(max_segments),
+                queued_bytes: AtomicU64::new(0),
                 in_flight_bytes: Arc::new(AtomicU64::new(0)),
-                in_flight_count: Arc::new(AtomicU64::new(0)),
+                in_flight_segments: Arc::new(AtomicU64::new(0)),
+                in_flight_bytes_peak: Arc::new(AtomicU64::new(0)),
                 dropped: AtomicU64::new(0),
                 writer_done: AtomicBool::new(false),
                 notify: Notify::new(),
@@ -99,7 +102,11 @@ impl MemFs {
         let size = bytes.len() as u64;
         let ch = &self.channel;
 
+        // Reserve the queued-bytes slot before the push so observers see
+        // the bytes accounted for the moment the slot becomes visible.
+        ch.queued_bytes.fetch_add(size, Ordering::AcqRel);
         if let Some(evicted) = ch.queue.force_push(MemSealedSegment { index, size, bytes }) {
+            ch.queued_bytes.fetch_sub(evicted.size, Ordering::AcqRel);
             ch.dropped.fetch_add(1, Ordering::Relaxed);
             rate_limited!(Duration::from_secs(60), {
                 tracing::warn!(
@@ -122,26 +129,39 @@ impl MemFs {
 
     pub(super) fn take_files_inner(&self) -> TakenFiles {
         let ch = &self.channel;
-        let dropped = ch.dropped.load(Ordering::Relaxed);
+        // Per-cycle delta: swap-to-zero so each emit reports drops that
+        // occurred since the previous take_files.
+        let segments_dropped = ch.dropped.swap(0, Ordering::AcqRel);
+
+        let in_flight_now = ch.in_flight_bytes.load(Ordering::Acquire);
+        let peak = ch
+            .in_flight_bytes_peak
+            .swap(in_flight_now, Ordering::AcqRel);
 
         let Some(slot) = ch.queue.pop() else {
             return TakenFiles {
                 segments: vec![],
-                ring_depth: Some(ch.queue.len() as u64),
-                ring_bytes: None,
-                in_flight_count: ch.in_flight_count.load(Ordering::Relaxed),
-                in_flight_bytes: ch.in_flight_bytes.load(Ordering::Relaxed),
-                dropped_segments: dropped,
+                queued_segments: Some(ch.queue.len() as u64),
+                queued_bytes: Some(ch.queued_bytes.load(Ordering::Acquire)),
+                in_flight_segments: ch.in_flight_segments.load(Ordering::Relaxed),
+                in_flight_bytes: in_flight_now,
+                in_flight_bytes_peak: Some(peak),
+                segments_dropped,
             };
         };
 
         let size = slot.size;
-        ch.in_flight_bytes.fetch_add(size, Ordering::AcqRel);
-        ch.in_flight_count.fetch_add(1, Ordering::AcqRel);
+        ch.queued_bytes.fetch_sub(size, Ordering::AcqRel);
+        let in_flight_total = ch.in_flight_bytes.fetch_add(size, Ordering::AcqRel) + size;
+        ch.in_flight_segments.fetch_add(1, Ordering::AcqRel);
+        // The just-popped segment seeds the next cycle's peak.
+        ch.in_flight_bytes_peak
+            .fetch_max(in_flight_total, Ordering::AcqRel);
 
         let accounting = SegmentAccounting {
             in_flight_bytes: Arc::clone(&ch.in_flight_bytes),
-            in_flight_count: Arc::clone(&ch.in_flight_count),
+            in_flight_segments: Arc::clone(&ch.in_flight_segments),
+            in_flight_bytes_peak: Arc::clone(&ch.in_flight_bytes_peak),
             size,
         };
         let taken = TakenSegment::memory(
@@ -155,11 +175,12 @@ impl MemFs {
 
         TakenFiles {
             segments: vec![taken],
-            ring_depth: Some(ch.queue.len() as u64),
-            ring_bytes: None,
-            in_flight_count: ch.in_flight_count.load(Ordering::Relaxed),
+            queued_segments: Some(ch.queue.len() as u64),
+            queued_bytes: Some(ch.queued_bytes.load(Ordering::Acquire)),
+            in_flight_segments: ch.in_flight_segments.load(Ordering::Relaxed),
             in_flight_bytes: ch.in_flight_bytes.load(Ordering::Relaxed),
-            dropped_segments: dropped,
+            in_flight_bytes_peak: Some(peak),
+            segments_dropped,
         }
     }
 
@@ -257,7 +278,7 @@ mod tests {
     }
 
     #[test]
-    fn mem_fs_ring_depth_after_pop() {
+    fn mem_fs_queued_segments_after_pop() {
         let mem = MemFs::with_capacity(16).unwrap();
         for i in 0..3u32 {
             let handle = mem.create_handle(Path::new("x")).unwrap();
@@ -271,18 +292,20 @@ mod tests {
         let t = mem.take_files_inner();
         check!(t.segments.len() == 1);
         check!(
-            t.ring_depth == Some(2),
+            t.queued_segments == Some(2),
             "two segments still waiting in the ring"
         );
+        check!(t.queued_bytes == Some(2), "two 1-byte segments queued");
 
         let _ = mem.take_files_inner();
         let t = mem.take_files_inner();
         check!(t.segments.len() == 1);
-        check!(t.ring_depth == Some(0), "ring drained");
+        check!(t.queued_segments == Some(0), "ring drained");
+        check!(t.queued_bytes == Some(0));
 
         let t = mem.take_files_inner();
         check!(t.segments.is_empty());
-        check!(t.ring_depth == Some(0));
+        check!(t.queued_segments == Some(0));
     }
 
     #[test]
@@ -333,9 +356,11 @@ mod shuttle_tests {
 
     /// Worker side: drain until the writer is done and the ring is empty.
     /// Loading each segment drops its `SegmentAccounting`, releasing in-flight.
-    fn drain(mem: &MemFs, consumed: &AtomicU64) {
+    /// `segments_dropped` is per-cycle, so we accumulate each emit.
+    fn drain(mem: &MemFs, consumed: &AtomicU64, dropped: &AtomicU64) {
         loop {
             let t = mem.take_files_inner();
+            dropped.fetch_add(t.segments_dropped, Ordering::Relaxed);
             for seg in t.segments {
                 let _ = seg.load().unwrap();
                 consumed.fetch_add(1, Ordering::Relaxed);
@@ -345,6 +370,7 @@ mod shuttle_tests {
                 // the remaining queue is fully visible. Drain to empty.
                 loop {
                     let t = mem.take_files_inner();
+                    dropped.fetch_add(t.segments_dropped, Ordering::Relaxed);
                     if t.segments.is_empty() {
                         return;
                     }
@@ -361,6 +387,7 @@ mod shuttle_tests {
     fn run_scenario(slots: usize, seg_size: usize, count: u32, expect_no_eviction: bool) {
         let mem = Arc::new(MemFs::with_capacity(slots).unwrap());
         let consumed = Arc::new(AtomicU64::new(0));
+        let dropped = Arc::new(AtomicU64::new(0));
 
         let writer = {
             let mem = Arc::clone(&mem);
@@ -374,13 +401,14 @@ mod shuttle_tests {
         let worker = {
             let mem = Arc::clone(&mem);
             let consumed = Arc::clone(&consumed);
-            crate::primitives::thread::spawn(move || drain(&mem, &consumed))
+            let dropped = Arc::clone(&dropped);
+            crate::primitives::thread::spawn(move || drain(&mem, &consumed, &dropped))
         };
         writer.join().unwrap();
         worker.join().unwrap();
 
         let consumed = consumed.load(Ordering::Relaxed);
-        let dropped = mem.channel.dropped.load(Ordering::Relaxed);
+        let dropped = dropped.load(Ordering::Relaxed);
 
         // Every segment is either consumed exactly once or evicted exactly
         // once, never both, never lost.
@@ -390,7 +418,7 @@ mod shuttle_tests {
             check!(consumed == count as u64);
         }
         // Gauges fully settle once the writer is done and the ring is drained.
-        check!(mem.channel.in_flight_count.load(Ordering::Relaxed) == 0);
+        check!(mem.channel.in_flight_segments.load(Ordering::Relaxed) == 0);
         check!(mem.channel.in_flight_bytes.load(Ordering::Relaxed) == 0);
     }
 

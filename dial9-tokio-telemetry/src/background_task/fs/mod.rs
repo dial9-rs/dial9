@@ -45,7 +45,8 @@ pub(crate) enum RemoveReason {
 #[derive(Debug)]
 pub(crate) struct SegmentAccounting {
     pub(crate) in_flight_bytes: Arc<AtomicU64>,
-    pub(crate) in_flight_count: Arc<AtomicU64>,
+    pub(crate) in_flight_segments: Arc<AtomicU64>,
+    pub(crate) in_flight_bytes_peak: Arc<AtomicU64>,
     pub(crate) size: u64,
 }
 
@@ -55,9 +56,10 @@ impl SegmentAccounting {
         if new_size == self.size {
             return;
         }
-        if new_size > self.size {
+        let total = if new_size > self.size {
             let delta = new_size - self.size;
-            self.in_flight_bytes.fetch_add(delta, Ordering::AcqRel);
+            let prev = self.in_flight_bytes.fetch_add(delta, Ordering::AcqRel);
+            prev + delta
         } else {
             let delta = self.size - new_size;
             let prev = self.in_flight_bytes.fetch_sub(delta, Ordering::AcqRel);
@@ -65,7 +67,9 @@ impl SegmentAccounting {
                 prev >= delta,
                 "in_flight_bytes underflow on adjust: prev={prev} sub={delta}"
             );
-        }
+            prev - delta
+        };
+        self.in_flight_bytes_peak.fetch_max(total, Ordering::AcqRel);
         self.size = new_size;
     }
 }
@@ -78,10 +82,10 @@ impl Drop for SegmentAccounting {
             "in_flight_bytes underflow: prev={prev_bytes} sub={}",
             self.size
         );
-        let prev_count = self.in_flight_count.fetch_sub(1, Ordering::AcqRel);
+        let prev_count = self.in_flight_segments.fetch_sub(1, Ordering::AcqRel);
         debug_assert!(
             prev_count >= 1,
-            "in_flight_count underflow: prev={prev_count}"
+            "in_flight_segments underflow: prev={prev_count}"
         );
     }
 }
@@ -156,12 +160,16 @@ impl TakenSegment {
 pub(crate) struct TakenFiles {
     pub(crate) segments: Vec<TakenSegment>,
     /// Segments still in the memory ring after this cycle's pop. `None` on disk.
-    pub(crate) ring_depth: Option<u64>,
-    /// Bytes still in the memory ring after this cycle's pop. `None` on disk.
-    pub(crate) ring_bytes: Option<u64>,
-    pub(crate) in_flight_count: u64,
+    pub(crate) queued_segments: Option<u64>,
+    /// Encoded bytes still in the memory ring after this cycle's pop. `None` on disk.
+    pub(crate) queued_bytes: Option<u64>,
+    pub(crate) in_flight_segments: u64,
     pub(crate) in_flight_bytes: u64,
-    pub(crate) dropped_segments: u64,
+    /// High-water of total in-flight bytes observed during the prior
+    /// cycle. `None` on disk (no per-stage tracking).
+    pub(crate) in_flight_bytes_peak: Option<u64>,
+    /// Segments evicted during this cycle (per-cycle delta).
+    pub(crate) segments_dropped: u64,
 }
 
 /// Unified filesystem abstraction covering the writer↔worker seam.
@@ -320,18 +328,22 @@ mod tests {
     fn accounting_adjust_tracks_payload_size() {
         let bytes = Arc::new(AtomicU64::new(500));
         let count = Arc::new(AtomicU64::new(1));
+        let peak = Arc::new(AtomicU64::new(500));
         let mut acct = SegmentAccounting {
             in_flight_bytes: Arc::clone(&bytes),
-            in_flight_count: Arc::clone(&count),
+            in_flight_segments: Arc::clone(&count),
+            in_flight_bytes_peak: Arc::clone(&peak),
             size: 500,
         };
         // Grow: symbolize-like stage.
         acct.adjust(900);
         check!(bytes.load(Ordering::SeqCst) == 900);
+        check!(peak.load(Ordering::SeqCst) == 900);
         check!(acct.size == 900);
         // Shrink: gzip-like stage.
         acct.adjust(200);
         check!(bytes.load(Ordering::SeqCst) == 200);
+        check!(peak.load(Ordering::SeqCst) == 900);
         check!(acct.size == 200);
         // No-op.
         acct.adjust(200);
@@ -346,10 +358,12 @@ mod tests {
     fn accounting_drop_decrements() {
         let bytes = Arc::new(AtomicU64::new(1000));
         let count = Arc::new(AtomicU64::new(1));
+        let peak = Arc::new(AtomicU64::new(0));
         {
             let _acct = SegmentAccounting {
                 in_flight_bytes: Arc::clone(&bytes),
-                in_flight_count: Arc::clone(&count),
+                in_flight_segments: Arc::clone(&count),
+                in_flight_bytes_peak: peak,
                 size: 500,
             };
         }

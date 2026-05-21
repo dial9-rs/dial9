@@ -919,11 +919,12 @@ impl WorkerLoop {
         drop(
             WorkerCycleMetrics {
                 operation: Operation::WorkerCycle,
-                ring_depth: taken.ring_depth,
-                ring_bytes: taken.ring_bytes,
-                in_flight_count: taken.in_flight_count,
+                memory_queued_segments: taken.queued_segments,
+                memory_queued_bytes: taken.queued_bytes,
+                in_flight_segments: taken.in_flight_segments,
                 in_flight_bytes: taken.in_flight_bytes,
-                dropped_segments: taken.dropped_segments,
+                memory_peak_in_flight_bytes: taken.in_flight_bytes_peak,
+                segments_evicted: taken.segments_dropped,
                 segments_dispatched,
             }
             .append_on_drop(self.metrics_sink.clone()),
@@ -2267,7 +2268,47 @@ mod worker_pipeline_tests {
         check!(samples == vec![(0, 150), (1, 5)]);
         let snap = fs.take_files();
         check!(snap.in_flight_bytes == 0);
-        check!(snap.in_flight_count == 0);
+        check!(snap.in_flight_segments == 0);
+    }
+
+    #[test]
+    fn mem_take_files_reports_in_flight_bytes_peak() {
+        use std::io::Write;
+
+        let fs = Fs::memory(8).unwrap();
+        let mut h = fs.create(Path::new("x")).unwrap();
+        h.write_all(&[0u8; 50]).unwrap();
+        fs.seal(h, Path::new("x"), 0).unwrap();
+
+        // Cycle 1: pop. Peak snapshot reads 0 (nothing happened before).
+        // Inside the same call, the pop seeds the channel peak at 50.
+        let mut snap = fs.take_files();
+        check!(snap.segments.len() == 1);
+        check!(snap.in_flight_bytes == 50);
+        check!(snap.in_flight_bytes_peak == Some(0));
+
+        let taken = snap.segments.remove(0);
+        let (_seg, payload, accounting) = taken.load().unwrap();
+        let mut acct = accounting.expect("memory segment carries accounting");
+        // Verify the in-cycle adjust path moves the peak.
+        let _ = payload;
+        acct.adjust(200);
+        acct.adjust(10);
+        drop(acct);
+
+        // Cycle 2: empty pop. Returned peak is the previous cycle's high.
+        let snap = fs.take_files();
+        check!(snap.segments.is_empty());
+        check!(snap.in_flight_bytes == 0);
+        check!(
+            snap.in_flight_bytes_peak == Some(200),
+            "peak should capture mid-cycle high; got {:?}",
+            snap.in_flight_bytes_peak
+        );
+
+        // Cycle 3: peak has been consumed
+        let snap = fs.take_files();
+        check!(snap.in_flight_bytes_peak == Some(0));
     }
 
     /// Multi-threaded race test for memory mode: producer seals segments and
