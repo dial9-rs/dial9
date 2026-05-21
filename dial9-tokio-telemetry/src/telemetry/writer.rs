@@ -37,6 +37,11 @@ impl mode_sealed::Sealed for Memory {}
 impl WriterMode for Disk {}
 impl WriterMode for Memory {}
 
+/// Alias for the disk-backed writer (the default mode).
+pub type DiskWriter = RotatingWriter<Disk>;
+/// Alias for the in-memory writer.
+pub type InMemoryWriter = RotatingWriter<Memory>;
+
 /// Trait for writing encoded telemetry batches to a destination.
 pub trait TraceWriter: Send {
     /// Flush buffered data to the underlying storage.
