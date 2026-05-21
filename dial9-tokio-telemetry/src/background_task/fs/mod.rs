@@ -39,12 +39,35 @@ pub(crate) enum RemoveReason {
     Terminal,
 }
 
-/// In-flight byte accounting for memory-backed segments. Decrements on drop.
+/// In-flight byte accounting for memory-backed segments. `size` is the
+/// last payload length the worker reported via [`adjust`](Self::adjust);
+/// drop returns that to the atomic.
 #[derive(Debug)]
 pub(crate) struct SegmentAccounting {
     pub(crate) in_flight_bytes: Arc<AtomicU64>,
     pub(crate) in_flight_count: Arc<AtomicU64>,
     pub(crate) size: u64,
+}
+
+impl SegmentAccounting {
+    /// Re-balance `in_flight_bytes` after a processor mutated the payload.
+    pub(crate) fn adjust(&mut self, new_size: u64) {
+        if new_size == self.size {
+            return;
+        }
+        if new_size > self.size {
+            let delta = new_size - self.size;
+            self.in_flight_bytes.fetch_add(delta, Ordering::AcqRel);
+        } else {
+            let delta = self.size - new_size;
+            let prev = self.in_flight_bytes.fetch_sub(delta, Ordering::AcqRel);
+            debug_assert!(
+                prev >= delta,
+                "in_flight_bytes underflow on adjust: prev={prev} sub={delta}"
+            );
+        }
+        self.size = new_size;
+    }
 }
 
 impl Drop for SegmentAccounting {
@@ -160,11 +183,8 @@ impl Fs {
         Arc::new(Fs::Disk(DiskFs::from_base_path(base_path)))
     }
 
-    pub(crate) fn memory(max_segment_size: u64, max_total_size: u64) -> io::Result<Arc<Self>> {
-        Ok(Arc::new(Fs::Mem(MemFs::with_capacity(
-            max_segment_size,
-            max_total_size,
-        )?)))
+    pub(crate) fn memory(max_segments: usize) -> io::Result<Arc<Self>> {
+        Ok(Arc::new(Fs::Mem(MemFs::with_capacity(max_segments)?)))
     }
 
     /// Scan for trace artifacts left by previous writer lifetimes.
@@ -294,6 +314,32 @@ mod tests {
         check!(seg.index() == 7);
         check!(seg.to_string().to_string() == "mem://7");
         check!(seg.disk_path().is_none());
+    }
+
+    #[test]
+    fn accounting_adjust_tracks_payload_size() {
+        let bytes = Arc::new(AtomicU64::new(500));
+        let count = Arc::new(AtomicU64::new(1));
+        let mut acct = SegmentAccounting {
+            in_flight_bytes: Arc::clone(&bytes),
+            in_flight_count: Arc::clone(&count),
+            size: 500,
+        };
+        // Grow: symbolize-like stage.
+        acct.adjust(900);
+        check!(bytes.load(Ordering::SeqCst) == 900);
+        check!(acct.size == 900);
+        // Shrink: gzip-like stage.
+        acct.adjust(200);
+        check!(bytes.load(Ordering::SeqCst) == 200);
+        check!(acct.size == 200);
+        // No-op.
+        acct.adjust(200);
+        check!(bytes.load(Ordering::SeqCst) == 200);
+        // Drop returns the last observed size, leaving the gauge balanced.
+        drop(acct);
+        check!(bytes.load(Ordering::SeqCst) == 0);
+        check!(count.load(Ordering::SeqCst) == 0);
     }
 
     #[test]

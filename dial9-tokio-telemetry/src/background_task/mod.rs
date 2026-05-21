@@ -842,6 +842,9 @@ impl WorkerLoop {
                     Ok(Ok(next)) => {
                         tracing::debug!(target: "dial9_worker", processor = processor.name(), segment = seg_idx + 1, elapsed_ms = proc_start.elapsed().as_secs_f64() * 1000.0, "processor succeeded");
                         data = next;
+                        if let Some(acct) = data.accounting.as_mut() {
+                            acct.adjust(data.payload.len() as u64);
+                        }
                         stage.succeed();
                         data.metrics.pipeline.push(processor.name(), stage);
                     }
@@ -2162,15 +2165,114 @@ mod worker_pipeline_tests {
         check!(processed.load(Ordering::SeqCst) == 2);
     }
 
-    /// Production `WorkerLoop::run()` against `Fs::Mem`, with the producer
-    /// racing the worker on a real multi-thread runtime: seals and
-    /// `mark_writer_done` land while the worker is in `wait_for_more` or
-    /// between an empty `take_files` and the `writer_done` check. The
-    /// drain-to-empty branch must consume every segment and a lost wakeup
-    /// must not strand the worker (a stranded worker hangs past the timeout
-    /// and fails the test). Many iterations shake the interleavings the
-    /// shuttle model cannot reach (no tokio runtime under shuttle, so the
-    /// async `Notify` wakeup is unmodeled there).
+    /// `in_flight_bytes` follows payload growth (symbolize) and shrinkage
+    /// (gzip), not just the pop-time size.
+    #[tokio::test]
+    async fn mem_worker_adjusts_in_flight_bytes_across_stages() {
+        use std::io::Write;
+        use std::sync::Mutex;
+        use std::sync::atomic::Ordering;
+
+        struct Mutator;
+        impl SegmentProcessor for Mutator {
+            fn name(&self) -> &'static str {
+                "Mutator"
+            }
+            fn process(
+                &mut self,
+                mut data: SegmentData,
+            ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>>
+            {
+                let index = data.segment().index();
+                Box::pin(async move {
+                    if index == 0 {
+                        let mut p = data.take_payload();
+                        p.push(bytes::Bytes::from(vec![0u8; 100]));
+                        data.set_payload(p);
+                    } else {
+                        data.set_payload(bytes::Bytes::from(vec![0u8; 5]));
+                    }
+                    Ok(data)
+                })
+            }
+        }
+
+        /// Reads `in_flight_bytes` so we can assert what the worker's
+        /// `adjust` set after `Mutator` returned.
+        struct Probe {
+            samples: Arc<Mutex<Vec<(u32, u64)>>>,
+        }
+        impl SegmentProcessor for Probe {
+            fn name(&self) -> &'static str {
+                "Probe"
+            }
+            fn process(
+                &mut self,
+                data: SegmentData,
+            ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>>
+            {
+                let index = data.segment().index();
+                let atomic = Arc::clone(
+                    &data
+                        .accounting
+                        .as_ref()
+                        .expect("memory segments should carry accounting")
+                        .in_flight_bytes,
+                );
+                let samples = Arc::clone(&self.samples);
+                Box::pin(async move {
+                    samples
+                        .lock()
+                        .expect("samples mutex should not be poisoned")
+                        .push((index, atomic.load(Ordering::Acquire)));
+                    Ok(data)
+                })
+            }
+        }
+
+        let fs = Fs::memory(8).expect("memory fs should build");
+        for i in 0..2u32 {
+            let mut h = fs
+                .create(Path::new("x"))
+                .expect("memory fs should create a handle");
+            h.write_all(&[0u8; 50])
+                .expect("write into memory handle should succeed");
+            fs.seal(h, Path::new("x"), i)
+                .expect("sealing into memory ring should succeed");
+        }
+        fs.mark_writer_done();
+
+        let samples = Arc::new(Mutex::new(Vec::new()));
+        let stop = tokio_util::sync::CancellationToken::new();
+        let mut worker = WorkerLoop::new(
+            Arc::clone(&fs),
+            Duration::from_millis(1),
+            vec![
+                Box::new(Mutator),
+                Box::new(Probe {
+                    samples: Arc::clone(&samples),
+                }),
+            ],
+            stop,
+            metrique_writer::sink::DevNullSink::boxed(),
+        );
+        tokio::time::timeout(Duration::from_secs(5), worker.run())
+            .await
+            .expect("worker exited");
+
+        let samples = samples
+            .lock()
+            .expect("samples mutex should not be poisoned")
+            .clone();
+        check!(samples == vec![(0, 150), (1, 5)]);
+        let snap = fs.take_files();
+        check!(snap.in_flight_bytes == 0);
+        check!(snap.in_flight_count == 0);
+    }
+
+    /// Multi-threaded race test for memory mode: producer seals segments and
+    /// marks writer_done while the worker may be parked in `wait_for_more`.
+    /// Ensures `run()` drains all segments and exits (no missed wakeup hang).
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn mem_worker_run_drains_late_push_no_loss() {
         use std::io::Write;
@@ -2195,7 +2297,7 @@ mod worker_pipeline_tests {
         }
 
         for iter in 0..ITERS {
-            let fs = Fs::memory(64 * 1024, 8 * 1024 * 1024).unwrap();
+            let fs = Fs::memory(128).unwrap();
             let processed = Arc::new(AtomicUsize::new(0));
             let stop = tokio_util::sync::CancellationToken::new();
 

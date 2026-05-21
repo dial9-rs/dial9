@@ -393,13 +393,18 @@ impl RotatingWriter<Memory> {
     /// ring instead of disk.
     ///
     /// `max_segment_size` bounds each segment. The ring holds up to
-    /// `max_total_size / max_segment_size` segments; oldest is dropped on
-    /// overflow.
+    /// `max_segments` slots, oldest drops on overflow.
     ///
-    /// Returns `Err(InvalidInput)` if `max_segment_size` is 0 or larger
-    /// than `max_total_size`.
-    pub fn in_memory(max_segment_size: u64, max_total_size: u64) -> std::io::Result<Self> {
-        let fs = Fs::memory(max_segment_size, max_total_size)?;
+    /// Errors with `InvalidInput` when either argument is zero.
+    pub fn in_memory(max_segment_size: u64, max_segments: usize) -> std::io::Result<Self> {
+        if max_segment_size == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "max_segment_size must be > 0",
+            ));
+        }
+        let fs = Fs::memory(max_segments)?;
+        let max_total_size = max_segment_size.saturating_mul(max_segments as u64);
         // base_path is a dummy; the memory backend ignores paths entirely
         // but `active_path()` still needs a prefix to build a placeholder.
         let base_path = PathBuf::from("mem");
@@ -2403,8 +2408,10 @@ mod tests {
     }
 
     #[test]
-    fn in_memory_rejects_segment_larger_than_total() {
-        let err = RotatingWriter::in_memory(2048, 1024).unwrap_err();
+    fn in_memory_rejects_zero_args() {
+        let err = RotatingWriter::in_memory(0, 4).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        let err = RotatingWriter::in_memory(1024, 0).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
     }
 
@@ -2422,7 +2429,7 @@ mod tests {
 
         const EVENTS: usize = 25;
 
-        let mut writer = RotatingWriter::in_memory(64 * 1024, 1 << 20).unwrap();
+        let mut writer = RotatingWriter::in_memory(64 * 1024, 16).unwrap();
         let fs = writer.fs_handle().expect("memory writer exposes its Fs");
 
         for _ in 0..EVENTS {

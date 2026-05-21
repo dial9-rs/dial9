@@ -1,12 +1,10 @@
 //! In-memory `Fs` variant.
 //!
-//! `MemFs` keeps sealed segments in a bounded ring (`BoundedQueue`). The
-//! writer pushes via `seal`, the worker pops one segment per
-//! `take_files` cycle.
-//! The ring is slot-bounded, slot count derives from `max_total_size / max_segment_size`.
-//! On overflow, `force_push` drops the oldest. The shutdown handoff rides
-//! `writer_done` (Acquire/Release) plus a `Notify` for wakeups (lost
-//! wakeup avoided via enable-before-recheck).
+//! `MemFs` keeps sealed segments in a slot-bounded ring (`BoundedQueue`).
+//! The writer pushes via `seal`, the worker pops one segment per
+//! `take_files` cycle. On overflow, `force_push` drops the oldest. The
+//! shutdown handoff rides `writer_done` (Acquire/Release) plus a `Notify`
+//! for wakeups (lost wakeup avoided via enable-before-recheck).
 
 use std::io::{self, Write};
 use std::path::Path;
@@ -61,20 +59,18 @@ pub(crate) struct MemFs {
 }
 
 impl MemFs {
-    /// `max_segment_size` and `max_total_size` together fix the slot count.
-    /// Returns `Err(InvalidInput)` if `max_segment_size` is zero or larger
-    /// than `max_total_size` (no slot could fit a segment).
-    pub(crate) fn with_capacity(max_segment_size: u64, max_total_size: u64) -> io::Result<Self> {
-        if max_segment_size == 0 || max_segment_size > max_total_size {
+    /// Build a memory channel with a ring capacity of `max_segments` slots.
+    /// Returns `Err(InvalidInput)` when `max_segments` is zero.
+    pub(crate) fn with_capacity(max_segments: usize) -> io::Result<Self> {
+        if max_segments == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "max_segment_size must be > 0 and <= max_total_size",
+                "max_segments must be > 0",
             ));
         }
-        let slot_cap = (max_total_size / max_segment_size) as usize;
         Ok(Self {
             channel: Arc::new(MemChannel {
-                queue: BoundedQueue::new(slot_cap),
+                queue: BoundedQueue::new(max_segments),
                 in_flight_bytes: Arc::new(AtomicU64::new(0)),
                 in_flight_count: Arc::new(AtomicU64::new(0)),
                 dropped: AtomicU64::new(0),
@@ -205,7 +201,7 @@ mod tests {
 
     #[test]
     fn mem_fs_seal_take_roundtrip() {
-        let mem = MemFs::with_capacity(64, 1024 * 1024).unwrap();
+        let mem = MemFs::with_capacity(16).unwrap();
         let handle = mem
             .create_handle(Path::new("mem://trace.0.bin.active"))
             .unwrap();
@@ -232,9 +228,8 @@ mod tests {
 
     #[test]
     fn mem_fs_slot_cap_eviction() {
-        // 60-byte segments at 100-byte total => slot_cap = 1.
-        // Pushing the second segment evicts the first.
-        let mem = MemFs::with_capacity(60, 100).unwrap();
+        // slot_cap = 1. Pushing the second segment evicts the first.
+        let mem = MemFs::with_capacity(1).unwrap();
 
         for index in 0..2u32 {
             let handle = mem.create_handle(Path::new("dummy")).unwrap();
@@ -255,20 +250,15 @@ mod tests {
 
     #[test]
     fn mem_fs_rejects_invalid_sizes() {
-        // max_segment_size > max_total_size: no slot could fit a segment.
-        let Err(e) = MemFs::with_capacity(60, 50) else {
-            panic!("expected error for seg > total");
-        };
-        check!(e.kind() == io::ErrorKind::InvalidInput);
-        let Err(e) = MemFs::with_capacity(0, 1024) else {
-            panic!("expected error for seg == 0");
+        let Err(e) = MemFs::with_capacity(0) else {
+            panic!("expected error for max_segments == 0");
         };
         check!(e.kind() == io::ErrorKind::InvalidInput);
     }
 
     #[test]
     fn mem_fs_ring_depth_after_pop() {
-        let mem = MemFs::with_capacity(64, 1024 * 1024).unwrap();
+        let mem = MemFs::with_capacity(16).unwrap();
         for i in 0..3u32 {
             let handle = mem.create_handle(Path::new("x")).unwrap();
             let ActiveHandle::Mem(mut w) = handle else {
@@ -297,7 +287,7 @@ mod tests {
 
     #[test]
     fn mem_fs_take_pops_one_at_a_time() {
-        let mem = MemFs::with_capacity(64, 1024 * 1024).unwrap();
+        let mem = MemFs::with_capacity(16).unwrap();
         for i in 0..3u32 {
             let handle = mem.create_handle(Path::new("dummy")).unwrap();
             let ActiveHandle::Mem(mut w) = handle else {
@@ -318,7 +308,7 @@ mod tests {
 
     #[test]
     fn mem_fs_remove_sealed_is_noop() {
-        let mem = MemFs::with_capacity(64, 1024).unwrap();
+        let mem = MemFs::with_capacity(16).unwrap();
         let seg = SegmentRef::Memory(MemorySegment { index: 0, size: 10 });
         // Should not panic
         mem.remove_sealed_inner(&seg, RemoveReason::Eviction);
@@ -368,8 +358,8 @@ mod shuttle_tests {
         }
     }
 
-    fn run_scenario(capacity: u64, seg_size: usize, count: u32, expect_no_eviction: bool) {
-        let mem = Arc::new(MemFs::with_capacity(seg_size as u64, capacity).unwrap());
+    fn run_scenario(slots: usize, seg_size: usize, count: u32, expect_no_eviction: bool) {
+        let mem = Arc::new(MemFs::with_capacity(slots).unwrap());
         let consumed = Arc::new(AtomicU64::new(0));
 
         let writer = {
@@ -405,13 +395,13 @@ mod shuttle_tests {
     }
 
     fn scenario_no_eviction() {
-        run_scenario(1 << 20, 16, 3, true);
+        run_scenario(16, 16, 3, true);
     }
 
     fn scenario_with_eviction() {
-        // Budget fits ~2 segments; the writer outruns the worker so the
-        // byte-budget loop evicts under contention.
-        run_scenario(40, 16, 4, false);
+        // Slot cap = 2; the writer outruns the worker so force_push evicts
+        // under contention.
+        run_scenario(2, 16, 4, false);
     }
 
     #[test]
