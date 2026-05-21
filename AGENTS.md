@@ -86,6 +86,7 @@ Unguarded logging in loops causes log spam that degrades observability and can i
 ## Pre-commit checks
 
 - You MUST run `cargo fmt --check` and `cargo clippy --all-targets --all-features` before every commit. Both must be clean.
+- **Preserve doc comments and inline comments.** Before presenting a PR, diff your changes and verify you have not accidentally deleted documentation comments (`///`, `//!`), inline explanatory comments (`//`), or module-level docs. Refactors that move code must carry all associated comments with it.
 
 ## Demo Trace
 
@@ -122,6 +123,7 @@ Failing to update it will cause the viewer to fail when loading the demo.
 ## Meta
 
 - Never declare done after pushing or opening a PR until CI is green. Check CI status and fix any failures before moving on.
+- **Do not stack PRs** (PR B targeting PR A's branch). The merge queue rewrites commits, so stacked PRs always end up with merge conflicts. Instead, wait for the first PR to merge, then rebase the second onto `main`.
 
 ## Ways of working
 - After finishing your work use showboat to demonstrate what you have done. include key code, tests, and what was changed.

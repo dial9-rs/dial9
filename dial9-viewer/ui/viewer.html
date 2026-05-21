@@ -428,6 +428,28 @@
                 height: 100%;
                 display: block;
             }
+            #custom-events-panel {
+                display: none;
+                height: 40px;
+                background: #1a1a2e;
+                border-top: 1px solid #333;
+                flex-shrink: 0;
+                position: relative;
+                overflow: hidden;
+            }
+            #custom-events-panel .chart-label {
+                position: absolute;
+                top: 4px;
+                left: 8px;
+                font-size: 0.75em;
+                color: #888;
+                z-index: 2;
+            }
+            #custom-events-panel canvas {
+                width: 100%;
+                height: 100%;
+                display: block;
+            }
             #task-detail .chart-label {
                 position: absolute;
                 top: 4px;
@@ -691,6 +713,15 @@
                     <span id="span-panel-info" style="position:absolute;top:4px;right:12px;font-size:0.75em;color:#aaa;z-index:2;pointer-events:none"></span>
                     <canvas id="span-panel-canvas"></canvas>
                 </div>
+                <div id="ce-legend" style="display:none;padding:4px 12px;background:#1a1a2e;border-top:1px solid #333;font-size:0.78em;color:#aaa">
+                    <button id="btn-ce-clear-names" style="font-size:0.8em;display:none">✕ Clear</button>
+                    <span id="ce-legend-items"></span>
+                </div>
+                <div id="custom-events-panel" style="display:none">
+                    <div class="chart-label" id="ce-panel-label">Events</div>
+                    <span id="ce-panel-info" style="position:absolute;top:4px;right:12px;font-size:0.75em;color:#aaa;z-index:2;pointer-events:none"></span>
+                    <canvas id="ce-panel-canvas"></canvas>
+                </div>
                 <div id="task-detail">
                     <span class="chart-label" id="task-detail-label">Task Detail</span>
                     <span id="task-detail-status" style="position:absolute;top:4px;right:12px;font-size:0.75em;color:#aaa;z-index:2"></span>
@@ -841,6 +872,15 @@
                 if (!color) {
                     color = SPAN_COLORS[_spanColorMap.size % SPAN_COLORS.length];
                     _spanColorMap.set(name, color);
+                }
+                return color;
+            }
+            const _ceColorMap = new Map();
+            function ceColor(name) {
+                let color = _ceColorMap.get(name);
+                if (!color) {
+                    color = SPAN_COLORS[_ceColorMap.size % SPAN_COLORS.length];
+                    _ceColorMap.set(name, color);
                 }
                 return color;
             }
@@ -1014,6 +1054,10 @@
             let filteredSpanIndex = -1;
             let selectedSpanNames = new Set(); // clicked span name chips
             let unmatchedSpans = [];
+            // Generic (non-span) custom events
+            let genericCustomEvents = []; // [{name, timestamp, fields}]
+            let selectedCENames = new Set(); // clicked event name chips
+            let cePanelHits = []; // [{event, x, y, w, h}] for hit testing
             let focusedSpanId = null; // when set, show this span + descendants
             // Lane canvases per worker (populated by buildLanes)
             let laneCanvases = {};
@@ -1378,6 +1422,69 @@
                     for (const s of allSpans) spansById.set(s.spanId, s);
                     const totalSegs = allSpans.reduce((s, sp) => s + sp.segments.length, 0);
                     console.log(`Span events: ${allSpans.length} spans (${totalSegs} segments), ${spanMeta.size} unique span IDs, maxDepth=${spanMaxDepth}, ${unmatchedSpans.length} unmatched`);
+                }
+
+                // Extract generic (non-span) custom events
+                {
+                    genericCustomEvents = [];
+                    _ceColorMap.clear();
+                    selectedCENames.clear();
+                    cePanelHits = [];
+                    if (trace.customEvents && trace.customEvents.length > 0) {
+                        const spanPrefixes = ["SpanEnter:", "SpanExit:"];
+                        const spanExact = new Set(["SpanEnterEvent", "SpanExitEvent", "SpanCloseEvent"]);
+                        for (const ev of trace.customEvents) {
+                            if (spanExact.has(ev.name)) continue;
+                            if (spanPrefixes.some(p => ev.name.startsWith(p))) continue;
+                            genericCustomEvents.push(ev);
+                        }
+                        genericCustomEvents.sort((a, b) => a.timestamp - b.timestamp);
+                        if (genericCustomEvents.length > 0) {
+                            console.log(`Generic custom events: ${genericCustomEvents.length}`);
+                        }
+                    }
+                }
+
+                // Populate custom events legend and show panel
+                {
+                    const ceLegend = document.getElementById("ce-legend");
+                    const cePanel = document.getElementById("custom-events-panel");
+                    const allCENames = new Set();
+                    for (const ev of genericCustomEvents) allCENames.add(ev.name);
+                    if (allCENames.size > 0) {
+                        function rebuildCEChips() {
+                            const items = [...allCENames].sort().map(name => {
+                                const active = selectedCENames.has(name);
+                                const bg = active ? ceColor(name) : "transparent";
+                                const border = `1px solid ${ceColor(name)}`;
+                                const color = active ? "#fff" : "#aaa";
+                                return `<span class="ce-chip" data-name="${esc(name)}" style="display:inline-block;padding:1px 6px;margin:0 2px;border-radius:3px;cursor:pointer;background:${bg};border:${border};color:${color};font-size:0.95em">${esc(name)}</span>`;
+                            }).join("");
+                            const clearBtn = document.getElementById("btn-ce-clear-names");
+                            clearBtn.style.display = selectedCENames.size > 0 ? "" : "none";
+                            document.getElementById("ce-legend-items").innerHTML = items;
+                            for (const chip of document.querySelectorAll(".ce-chip")) {
+                                chip.addEventListener("click", () => {
+                                    const name = chip.dataset.name;
+                                    if (selectedCENames.has(name)) selectedCENames.delete(name);
+                                    else selectedCENames.add(name);
+                                    rebuildCEChips();
+                                    renderAll();
+                                });
+                            }
+                        }
+                        rebuildCEChips();
+                        document.getElementById("btn-ce-clear-names").onclick = () => {
+                            selectedCENames.clear();
+                            rebuildCEChips();
+                            renderAll();
+                        };
+                        ceLegend.style.display = "block";
+                        cePanel.style.display = "block";
+                    } else {
+                        ceLegend.style.display = "none";
+                        cePanel.style.display = "none";
+                    }
                 }
             }
 
@@ -1761,6 +1868,7 @@
                 renderTimeline(drawW - scrollbarW);
                 for (const w of workerIds) renderLane(w, drawW);
                 renderSpanPanel(scrollbarW);
+                renderCustomEventsPanel(scrollbarW);
                 renderTaskDetail(scrollbarW);
                 renderQueueChart(drawW, scrollbarW);
 
@@ -2392,6 +2500,76 @@
                 }
             }
 
+            function renderCustomEventsPanel(scrollbarW) {
+                const panel = document.getElementById("custom-events-panel");
+                if (panel.style.display === "none") return;
+                const c = document.getElementById("ce-panel-canvas");
+                const ph = 40;
+
+                const layout = timePanelLayout(panel, scrollbarW);
+                const { pw, drawW, nsToPanelX, nsToPanelXClamped } = layout;
+                const ctx = layout.resizeCanvas(c, ph);
+                ctx.clearRect(0, 0, pw, ph);
+                cePanelHits = [];
+
+                if (drawW <= 0) return;
+
+                // Filter to visible events matching name selection
+                const visible = [];
+                for (const ev of genericCustomEvents) {
+                    if (ev.timestamp < viewStart || ev.timestamp > viewEnd) continue;
+                    if (selectedCENames.size > 0 && !selectedCENames.has(ev.name)) continue;
+                    visible.push(ev);
+                }
+
+                if (visible.length === 0) {
+                    ctx.fillStyle = "#555";
+                    ctx.font = "12px sans-serif";
+                    ctx.fillText(genericCustomEvents.length === 0 ? "No custom events" : "No events in view", LABEL_W + 10, 24);
+                    document.getElementById("ce-panel-info").textContent = "";
+                    return;
+                }
+
+                // Draw ticks, clustering events that land on the same pixel
+                const TICK_W = 3;
+                const buckets = new Map(); // pixelX → [event, ...]
+                for (const ev of visible) {
+                    const px = Math.round(nsToPanelXClamped(ev.timestamp));
+                    let bucket = buckets.get(px);
+                    if (!bucket) { bucket = []; buckets.set(px, bucket); }
+                    bucket.push(ev);
+                }
+
+                for (const [px, events] of buckets) {
+                    const rep = events[0];
+                    const w = Math.max(TICK_W, Math.min(TICK_W + Math.log2(events.length) * 2, 10));
+                    const h = ph - 4;
+                    const y = 2;
+                    const alpha = Math.min(0.4 + events.length * 0.15, 1.0);
+
+                    ctx.fillStyle = ceColor(rep.name);
+                    ctx.globalAlpha = alpha;
+                    ctx.fillRect(px - w / 2, y, w, h);
+
+                    // If cluster has mixed names, draw a small second-color stripe
+                    if (events.length > 1) {
+                        const names = new Set(events.map(e => e.name));
+                        if (names.size > 1) {
+                            const second = events.find(e => e.name !== rep.name);
+                            ctx.fillStyle = ceColor(second.name);
+                            ctx.fillRect(px - w / 2, y + h - 4, w, 4);
+                        }
+                    }
+
+                    // Pad hit region to at least 12px wide for easier hover targeting
+                    const hitW = Math.max(w, 12);
+                    cePanelHits.push({ events, x: px - hitW / 2, y, w: hitW, h });
+                }
+                ctx.globalAlpha = 1.0;
+
+                document.getElementById("ce-panel-info").textContent = `${visible.length} events · ${buckets.size} markers`;
+            }
+
             // Find the bucket at a given (x, y) position in the span panel canvas
             function findBucketAtXY(mx, my) {
                 for (let i = spanPanelHits.length - 1; i >= 0; i--) {
@@ -2533,6 +2711,65 @@
                     selectedTaskId = null;
                 }
                 renderAll();
+            });
+
+            // Custom events panel hover tooltip
+            document.getElementById("ce-panel-canvas").addEventListener("mousemove", (e) => {
+                const c = document.getElementById("ce-panel-canvas");
+                const rect = c.getBoundingClientRect();
+                const mx = e.clientX - rect.left;
+                const my = e.clientY - rect.top;
+
+                let hit = null;
+                for (let i = cePanelHits.length - 1; i >= 0; i--) {
+                    const h = cePanelHits[i];
+                    if (mx >= h.x && mx <= h.x + h.w && my >= h.y && my <= h.y + h.h) {
+                        hit = h;
+                        break;
+                    }
+                }
+
+                if (hit) {
+                    let html = "";
+                    if (hit.events.length === 1) {
+                        const ev = hit.events[0];
+                        html = `<span class="label">Event:</span> <span class="value">${esc(ev.name)}</span>`;
+                        const entries = Object.entries(ev.fields || {});
+                        if (entries.length > 0) {
+                            for (const [k, v] of entries) {
+                                html += `<br><span class="label">${esc(k)}:</span> <span class="value">${esc(String(v))}</span>`;
+                            }
+                        }
+                        html += `<br><span class="label">@</span> <span class="value">${fmtTs(ev.timestamp)}</span>`;
+                    } else {
+                        const nameCounts = {};
+                        for (const ev of hit.events) {
+                            nameCounts[ev.name] = (nameCounts[ev.name] || 0) + 1;
+                        }
+                        const nameList = Object.entries(nameCounts)
+                            .sort((a, b) => b[1] - a[1])
+                            .slice(0, 5)
+                            .map(([n, c]) => `${esc(n)}${c > 1 ? " \u00d7" + c : ""}`)
+                            .join(", ");
+                        html = `<span class="label">Cluster:</span> <span class="value">${hit.events.length} events</span>`;
+                        html += `<br><span class="label">Types:</span> <span class="value">${nameList}</span>`;
+                        const first = hit.events[0];
+                        const last = hit.events[hit.events.length - 1];
+                        html += `<br><span class="label">@</span> <span class="value">${fmtTs(first.timestamp)}</span>`;
+                        if (last.timestamp !== first.timestamp) {
+                            html += ` \u2013 <span class="value">${fmtTs(last.timestamp)}</span>`;
+                        }
+                    }
+                    tooltip.innerHTML = html;
+                    tooltip.style.display = "block";
+                    tooltip.style.left = Math.min(e.clientX + 12, window.innerWidth - 340) + "px";
+                    tooltip.style.top = (e.clientY + 16) + "px";
+                } else {
+                    tooltip.style.display = "none";
+                }
+            });
+            document.getElementById("ce-panel-canvas").addEventListener("mouseleave", () => {
+                tooltip.style.display = "none";
             });
 
             /**
@@ -4198,6 +4435,13 @@
                     // still want the crosshair to follow the mouse so users
                     // can correlate spans with the task detail / lanes below.
                     if (e.target.closest && e.target.closest("#span-panel")) {
+                        mouseNs = eventToTimelineNs(e.clientX);
+                        lanesContainer.style.cursor = "";
+                        scheduleCrosshairRedraw();
+                        return;
+                    }
+                    // Custom events panel also owns its own tooltip.
+                    if (e.target.closest && e.target.closest("#custom-events-panel")) {
                         mouseNs = eventToTimelineNs(e.clientX);
                         lanesContainer.style.cursor = "";
                         scheduleCrosshairRedraw();
