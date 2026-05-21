@@ -39,7 +39,6 @@ impl Write for MemActiveWriter {
 
 struct MemSealedSegment {
     index: u32,
-    size: u64,
     bytes: Bytes,
 }
 
@@ -105,8 +104,9 @@ impl MemFs {
         // Reserve the queued-bytes slot before the push so observers see
         // the bytes accounted for the moment the slot becomes visible.
         ch.queued_bytes.fetch_add(size, Ordering::AcqRel);
-        if let Some(evicted) = ch.queue.force_push(MemSealedSegment { index, size, bytes }) {
-            ch.queued_bytes.fetch_sub(evicted.size, Ordering::AcqRel);
+        if let Some(evicted) = ch.queue.force_push(MemSealedSegment { index, bytes }) {
+            ch.queued_bytes
+                .fetch_sub(evicted.bytes.len() as u64, Ordering::AcqRel);
             ch.dropped.fetch_add(1, Ordering::Relaxed);
             rate_limited!(Duration::from_secs(60), {
                 tracing::warn!(
@@ -150,7 +150,7 @@ impl MemFs {
             };
         };
 
-        let size = slot.size;
+        let size = slot.bytes.len() as u64;
         ch.queued_bytes.fetch_sub(size, Ordering::AcqRel);
         let in_flight_total = ch.in_flight_bytes.fetch_add(size, Ordering::AcqRel) + size;
         ch.in_flight_segments.fetch_add(1, Ordering::AcqRel);
