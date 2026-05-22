@@ -328,6 +328,7 @@
     const allocEvents = [];
     const freeEvents = [];
     const threadNames = new Map();
+    const tidToWorker = new Map(); // tid → workerId (stable mapping from park/unpark events)
     const runtimeWorkers = new Map(); // runtime name → [workerId, ...]
     const taskDumps = new Map(); // taskId → [{timestamp, callchain}] sorted by timestamp
     const customEvents = []; // unrecognized event types: {name, timestamp, fields}
@@ -420,6 +421,7 @@
           });
           break;
         case "WorkerParkEvent":
+          if (v.tid != null) tidToWorker.set(num(v.tid), num(v.worker_id));
           events.push({
             eventType: 2,
             timestamp: ts,
@@ -437,6 +439,7 @@
           });
           break;
         case "WorkerUnparkEvent":
+          if (v.tid != null) tidToWorker.set(num(v.tid), num(v.worker_id));
           events.push({
             eventType: 3,
             timestamp: ts,
@@ -687,6 +690,7 @@
       freeEvents,
       callframeSymbols,
       threadNames,
+      tidToWorker,
       taskTerminateTimes,
       runtimeWorkers,
       customEvents,

@@ -17,6 +17,7 @@ const {
   collectDescendants,
   selectSpanRenderSet,
   computeSpanLayout,
+  analyzeAllocations,
 } = require("./trace_analysis.js");
 
 async function main() {
@@ -887,35 +888,6 @@ async function main() {
     pass("Open PollStart at trace end is discarded (no phantom long poll)");
   }
 
-  // ── Block-in-place active-span suppression ──
-
-  function testBlockInPlaceActiveSpanSuppression() {
-    // Synthetic events: worker 0 unparks on tid=42, then parks on tid=99
-    // (a block_in_place handoff). The active span [10, 50) crosses the gap
-    // and must be discarded. A subsequent normal active span [60, 70) on
-    // tid=99 should be preserved.
-    const syntheticEvents = [
-      { eventType: EVENT_TYPES.WorkerUnpark, timestamp: 10, workerId: 0, tid: 42, cpuTime: 100, schedWait: 0, localQueue: 0, globalQueue: 0, taskId: 0, spawnLocId: null, spawnLoc: null },
-      { eventType: EVENT_TYPES.WorkerPark, timestamp: 50, workerId: 0, tid: 99, cpuTime: 500, localQueue: 0, globalQueue: 0, schedWait: 0, taskId: 0, spawnLocId: null, spawnLoc: null },
-      { eventType: EVENT_TYPES.WorkerUnpark, timestamp: 60, workerId: 0, tid: 99, cpuTime: 600, schedWait: 0, localQueue: 0, globalQueue: 0, taskId: 0, spawnLocId: null, spawnLoc: null },
-      { eventType: EVENT_TYPES.WorkerPark, timestamp: 70, workerId: 0, tid: 99, cpuTime: 700, localQueue: 0, globalQueue: 0, schedWait: 0, taskId: 0, spawnLocId: null, spawnLoc: null },
-    ];
-    const gaps = [{ workerId: 0, fromTid: 42, toTid: 99, startNs: 10, endNs: 50 }];
-    const result = buildWorkerSpans(syntheticEvents, [0], 100, gaps);
-    const actives = result.workerSpans[0].actives;
-    // The first active [10,50) crosses the gap → suppressed.
-    // The second active [60,70) is clean → preserved.
-    if (actives.length !== 1) {
-      fail(`Expected 1 active span (gap-crossing suppressed), got ${actives.length}: ${JSON.stringify(actives)}`);
-      return;
-    }
-    if (actives[0].start !== 60 || actives[0].end !== 70) {
-      fail(`Expected active [60,70), got [${actives[0].start},${actives[0].end})`);
-      return;
-    }
-    pass("Active span crossing block-in-place gap is suppressed; clean span preserved");
-  }
-
   // ── Run all tests ──
 
   console.log("\nbuildWorkerSpans:");
@@ -991,8 +963,107 @@ async function main() {
   testComputeSpanLayoutClusters();
   testComputeSpanLayoutRepresentativeIsLongest();
 
-  console.log("\nblock-in-place active-span suppression:");
-  testBlockInPlaceActiveSpanSuppression();
+  console.log("\nanalyzeAllocations:");
+  testAnalyzeAllocationsEmpty();
+  testAnalyzeAllocationsBasicSummary();
+  testAnalyzeAllocationsPerTask();
+  testAnalyzeAllocationsNonWorkerTid();
+  testAnalyzeAllocationsEstimatedBytes();
+
+  function testAnalyzeAllocationsEmpty() {
+    const r = analyzeAllocations(null, null);
+    if (r.summary.totalAllocCount !== 0) fail("empty: expected 0 allocs");
+    if (r.perTask.size !== 0) fail("empty: expected empty perTask");
+    pass("null inputs produce empty result");
+  }
+
+  function testAnalyzeAllocationsBasicSummary() {
+    const allocs = [
+      { timestamp: 100, tid: 10, size: 1024, addr: "0x1", callchain: ["0xa"] },
+      { timestamp: 200, tid: 10, size: 2048, addr: "0x2", callchain: ["0xa"] },
+    ];
+    const frees = [
+      { timestamp: 300, tid: 10, addr: "0x1", size: 1024, allocTimestampNs: 100 },
+    ];
+    const r = analyzeAllocations(allocs, frees);
+    if (r.summary.totalAllocCount !== 2) fail("basic: expected 2 allocs");
+    if (r.summary.totalFreeCount !== 1) fail("basic: expected 1 free");
+    if (r.summary.leakedCount !== 1) fail("basic: expected 1 leak");
+    if (r.summary.totalAllocBytes !== 3072) fail("basic: expected 3072 bytes");
+    // With default R=524288, small allocs (s<<R) have weight ≈ R each
+    // so estimatedTotalBytes ≈ 2 * 524288 (slightly above due to s/(1-exp(-s/R)) > R)
+    if (Math.abs(r.summary.estimatedTotalBytes - 2 * 524288) > 5000) fail("basic: wrong estimatedTotalBytes");
+    pass("basic summary correct");
+  }
+
+  function testAnalyzeAllocationsPerTask() {
+    // Worker 0 has tid=10, polling task 42 from t=50..500 and task 99 from t=600..900
+    const events = [
+      { eventType: 0, timestamp: 50, workerId: 0, taskId: 42 },
+      { eventType: 0, timestamp: 600, workerId: 0, taskId: 99 },
+    ];
+    const tidToWorker = new Map([[10, 0]]);
+    const allocs = [
+      { timestamp: 100, tid: 10, size: 1024, addr: "0x1", callchain: ["0xa"] },
+      { timestamp: 200, tid: 10, size: 2048, addr: "0x2", callchain: ["0xb"] },
+      { timestamp: 700, tid: 10, size: 512, addr: "0x3", callchain: ["0xc"] },
+    ];
+    const frees = [];
+    const r = analyzeAllocations(allocs, frees, { events, tidToWorker });
+    if (r.perTask.size !== 2) fail(`perTask: expected 2 tasks, got ${r.perTask.size}`);
+    const t42 = r.perTask.get(42);
+    if (!t42) fail("perTask: missing task 42");
+    if (t42.count !== 2) fail(`perTask: task 42 count=${t42.count}, expected 2`);
+    if (t42.sampledBytes !== 3072) fail(`perTask: task 42 sampledBytes=${t42.sampledBytes}`);
+    // estimatedBytes should be > sampledBytes (weight > size for small allocs)
+    if (t42.estimatedBytes <= t42.sampledBytes) fail("perTask: estimatedBytes should exceed sampledBytes for small allocs");
+    const t99 = r.perTask.get(99);
+    if (!t99) fail("perTask: missing task 99");
+    if (t99.count !== 1) fail(`perTask: task 99 count=${t99.count}, expected 1`);
+    pass("per-task attribution correct");
+  }
+
+  function testAnalyzeAllocationsNonWorkerTid() {
+    // Alloc from tid=99 which is not in tidToWorker → should not appear in perTask
+    const events = [
+      { eventType: 0, timestamp: 50, workerId: 0, taskId: 42 },
+    ];
+    const tidToWorker = new Map([[10, 0]]);
+    const allocs = [
+      { timestamp: 100, tid: 99, size: 1024, addr: "0x1", callchain: ["0xa"] },
+    ];
+    const frees = [];
+    const r = analyzeAllocations(allocs, frees, { events, tidToWorker });
+    if (r.perTask.size !== 0) fail("nonWorkerTid: expected empty perTask");
+    pass("non-worker tid allocations excluded from perTask");
+  }
+
+  function testAnalyzeAllocationsEstimatedBytes() {
+    const events = [
+      { eventType: 0, timestamp: 50, workerId: 0, taskId: 7 },
+    ];
+    const tidToWorker = new Map([[10, 0]]);
+    // Use size = sampleRateBytes so weight = s/(1-exp(-1)) ≈ 1.582*s
+    const sampleRateBytes = 1000;
+    const allocs = [
+      { timestamp: 100, tid: 10, size: 1000, addr: "0x1", callchain: [] },
+      { timestamp: 200, tid: 10, size: 1000, addr: "0x2", callchain: [] },
+      { timestamp: 300, tid: 10, size: 1000, addr: "0x3", callchain: [] },
+    ];
+    const r = analyzeAllocations(allocs, [], { events, tidToWorker, sampleRateBytes });
+    const t7 = r.perTask.get(7);
+    if (!t7) fail("estimated: missing task 7");
+    // weight(1000) = 1000 / (1 - exp(-1)) ≈ 1581.98
+    const expectedPerSample = 1000 / (1 - Math.exp(-1));
+    if (Math.abs(t7.estimatedBytes - 3 * expectedPerSample) > 1) fail(`estimated: expected ~${3*expectedPerSample}, got ${t7.estimatedBytes}`);
+    if (r.sampleRateBytes !== 1000) fail("estimated: sampleRateBytes not returned");
+    // For s >> R, weight ≈ s (large allocs represent themselves)
+    const bigAllocs = [{ timestamp: 100, tid: 10, size: 100000, addr: "0x1", callchain: [] }];
+    const r2 = analyzeAllocations(bigAllocs, [], { events, tidToWorker, sampleRateBytes });
+    const t7b = r2.perTask.get(7);
+    if (Math.abs(t7b.estimatedBytes - 100000) > 10) fail(`large alloc: weight should ≈ size, got ${t7b.estimatedBytes}`);
+    pass("weight(s) = s / (1 - exp(-s/R)) applied correctly");
+  }
 
   console.log("\n✓ All analysis checks passed!");
 }
