@@ -393,32 +393,88 @@ impl RotatingWriter<Disk> {
     }
 }
 
+/// Default segment size when no explicit segment size is provided.
+/// Always at least 8 slots of burst headroom in the ring.
+fn pick_segment_size(max_total_size: u64) -> u64 {
+    const MIN_SLOTS: u64 = 8;
+    (max_total_size / MIN_SLOTS).max(1)
+}
+
+#[bon::bon]
 impl RotatingWriter<Memory> {
-    /// Create an in-memory writer. Encoded bytes flow through an in-process
-    /// ring instead of disk.
+    /// Create an in-memory writer with a total byte budget. Segments live in process heap
+    /// instead of files. Auto-picks a reasonable segment size,
+    /// use [`in_memory_builder`](Self::in_memory_builder) for explicit control.
     ///
-    /// `max_segment_size` bounds each segment. The ring holds up to
-    /// `max_segments` slots, oldest drops on overflow.
-    ///
-    /// Errors with `InvalidInput` when either argument is zero.
-    pub fn in_memory(max_segment_size: u64, max_segments: usize) -> std::io::Result<Self> {
+    /// Same rotation semantics as the disk path. Errors when
+    /// `max_total_size == 0`.
+    pub fn new_in_memory(max_total_size: u64) -> std::io::Result<Self> {
+        Self::create_in_memory(
+            max_total_size,
+            pick_segment_size(max_total_size),
+            DEFAULT_ROTATION_PERIOD,
+            SegmentMetadata::default(),
+        )
+    }
+
+    /// Builder for in-memory writer configuration.
+    #[builder(builder_type = InMemoryWriterBuilder, finish_fn = build)]
+    pub fn in_memory_builder(
+        max_total_size: u64,
+        /// Override the default segment size.
+        max_segment_size: Option<u64>,
+        /// Wall-clock rotation period.
+        rotation_period: Option<Duration>,
+        segment_metadata: Option<Vec<(String, String)>>,
+    ) -> std::io::Result<Self> {
+        let seg_size = max_segment_size.unwrap_or_else(|| pick_segment_size(max_total_size));
+        Self::create_in_memory(
+            max_total_size,
+            seg_size,
+            rotation_period.unwrap_or(DEFAULT_ROTATION_PERIOD),
+            segment_metadata
+                .map(SegmentMetadata::new)
+                .unwrap_or_default(),
+        )
+    }
+
+    fn create_in_memory(
+        max_total_size: u64,
+        max_segment_size: u64,
+        rotation_period: Duration,
+        segment_metadata: SegmentMetadata,
+    ) -> std::io::Result<Self> {
+        if max_total_size == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "max_total_size must be > 0",
+            ));
+        }
         if max_segment_size == 0 {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 "max_segment_size must be > 0",
             ));
         }
-        let fs = Fs::new_in_memory(max_segments)?;
-        let max_total_size = max_segment_size.saturating_mul(max_segments as u64);
-        // base_path is a dummy; the memory backend ignores paths entirely
-        // but `active_path()` still needs a prefix to build a placeholder.
+        if rotation_period == Duration::from_secs(0) {
+            return Err(std::io::Error::other("Rotation period must not be zero"));
+        }
+        if max_total_size < max_segment_size {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "max_total_size must be >= max_segment_size",
+            ));
+        }
+        let fs = Fs::new_in_memory(max_total_size, max_segment_size)?;
+        // Dummy prefix, the memory backend ignores paths but `active_path`
+        // still needs one.
         let base_path = PathBuf::from("mem");
         let active_path = Self::active_path(&base_path, 0);
         let handle = fs.create_segment(&active_path)?;
         let state = Self::prepare_segment(BufWriter::new(handle))?;
         let now = time_source().system_time().as_std();
-        let rotation_period = DEFAULT_ROTATION_PERIOD;
-        let drain_interval = DEFAULT_DRAIN_INTERVAL;
+        // Drain at least as often as we rotate.
+        let drain_interval = rotation_period.min(DEFAULT_DRAIN_INTERVAL);
 
         Ok(Self {
             base_path,
@@ -431,7 +487,7 @@ impl RotatingWriter<Memory> {
             state,
             next_index: 1,
             did_rotate: false,
-            segment_metadata: SegmentMetadata::default(),
+            segment_metadata,
             dropped_events: 0,
             has_real_events: false,
             drain_interval,
@@ -2413,10 +2469,39 @@ mod tests {
     }
 
     #[test]
-    fn in_memory_rejects_zero_args() {
-        let err = RotatingWriter::in_memory(0, 4).unwrap_err();
+    fn in_memory_builder_wires_custom_options() {
+        use crate::telemetry::InMemoryWriter;
+        let writer = InMemoryWriter::in_memory_builder()
+            .max_total_size(8 * 1024 * 1024)
+            .max_segment_size(64 * 1024)
+            .rotation_period(Duration::from_secs(30))
+            .segment_metadata(vec![("svc".into(), "test".into())])
+            .build()
+            .unwrap();
+        assert_eq!(writer.max_file_size, 64 * 1024);
+        assert_eq!(writer.rotation_period, Duration::from_secs(30));
+        assert!(
+            writer
+                .segment_metadata
+                .entries
+                .iter()
+                .any(|(k, v)| k == "svc" && v == "test")
+        );
+    }
+
+    #[test]
+    fn in_memory_rejects_zero_total_size() {
+        let err = RotatingWriter::new_in_memory(0).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
-        let err = RotatingWriter::in_memory(1024, 0).unwrap_err();
+    }
+
+    #[test]
+    fn in_memory_builder_rejects_total_size_below_segment_size() {
+        let err = InMemoryWriter::in_memory_builder()
+            .max_total_size(1024)
+            .max_segment_size(2048)
+            .build()
+            .unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
     }
 
@@ -2432,7 +2517,7 @@ mod tests {
 
         const EVENTS: usize = 25;
 
-        let mut writer = RotatingWriter::in_memory(64 * 1024, 16).unwrap();
+        let mut writer = RotatingWriter::new_in_memory(1 << 20).unwrap();
         let fs = writer.fs_handle().expect("memory writer exposes its Fs");
 
         for _ in 0..EVENTS {

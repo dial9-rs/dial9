@@ -1,11 +1,13 @@
 //! In-memory `Fs` variant.
 //!
-//! `MemFs` keeps sealed segments in a slot-bounded ring (`BoundedQueue`).
-//! The writer pushes via `seal`, the worker pops one segment per
-//! `take_files` cycle. On overflow, `force_push` drops the oldest. The
-//! shutdown handoff rides `writer_done` (Acquire/Release) plus a `Notify`
-//! for wakeups (lost wakeup avoided via enable-before-recheck).
+//! `MemFs` keeps sealed segments in a byte-bounded ring. On each `seal`,
+//! the oldest segments are dropped until `queued_bytes <=
+//! max_total_size`. The worker pops one segment per `take_files` cycle.
+//!
+//! The shutdown handoff rides `writer_done` (Acquire/Release) plus a
+//! `Notify` for wakeups.
 
+use std::collections::VecDeque;
 use std::io::{self, Write};
 use std::path::Path;
 use std::time::Duration;
@@ -15,9 +17,8 @@ use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
 use crate::background_task::sealed::{MemorySegment, SegmentRef};
-use crate::primitives::BoundedQueue;
-use crate::primitives::sync::Arc;
 use crate::primitives::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use crate::primitives::sync::{Arc, Mutex};
 use crate::rate_limit::rate_limited;
 
 use super::{ActiveHandle, RemoveReason, SegmentAccounting, TakenFiles, TakenSegment};
@@ -42,13 +43,21 @@ struct MemSealedSegment {
     bytes: Bytes,
 }
 
+/// Holds the deque + bookkeeping that must move together under the lock.
+struct Queue {
+    segments: VecDeque<MemSealedSegment>,
+    /// Sum of `bytes.len()` across `segments`.
+    bytes: u64,
+    /// Segments evicted since the last `take_files` swap.
+    dropped: u64,
+}
+
 struct MemChannel {
-    queue: BoundedQueue<MemSealedSegment>,
-    queued_bytes: AtomicU64,
+    max_total_size: u64,
+    queue: Mutex<Queue>,
     in_flight_bytes: Arc<AtomicU64>,
     in_flight_segments: Arc<AtomicU64>,
     in_flight_bytes_peak: Arc<AtomicU64>,
-    dropped: AtomicU64,
     writer_done: AtomicBool,
     notify: Notify,
 }
@@ -59,23 +68,30 @@ pub(crate) struct MemFs {
 }
 
 impl MemFs {
-    /// Build a memory channel with a ring capacity of `max_segments` slots.
-    /// Returns `Err(InvalidInput)` when `max_segments` is zero.
-    pub(crate) fn with_capacity(max_segments: usize) -> io::Result<Self> {
-        if max_segments == 0 {
+    /// Build a memory channel with a byte budget.
+    pub(crate) fn with_capacity(max_total_size: u64, segment_size_hint: u64) -> io::Result<Self> {
+        if max_total_size == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "max_segments must be > 0",
+                "max_total_size must be > 0",
             ));
         }
+        let slots = if segment_size_hint == 0 {
+            1
+        } else {
+            (max_total_size / segment_size_hint).max(1) as usize
+        };
         Ok(Self {
             channel: Arc::new(MemChannel {
-                queue: BoundedQueue::new(max_segments),
-                queued_bytes: AtomicU64::new(0),
+                max_total_size,
+                queue: Mutex::new(Queue {
+                    segments: VecDeque::with_capacity(slots),
+                    bytes: 0,
+                    dropped: 0,
+                }),
                 in_flight_bytes: Arc::new(AtomicU64::new(0)),
                 in_flight_segments: Arc::new(AtomicU64::new(0)),
                 in_flight_bytes_peak: Arc::new(AtomicU64::new(0)),
-                dropped: AtomicU64::new(0),
                 writer_done: AtomicBool::new(false),
                 notify: Notify::new(),
             }),
@@ -101,18 +117,31 @@ impl MemFs {
         let size = bytes.len() as u64;
         let ch = &self.channel;
 
-        // Reserve the queued-bytes slot before the push so observers see
-        // the bytes accounted for the moment the slot becomes visible.
-        ch.queued_bytes.fetch_add(size, Ordering::AcqRel);
-        if let Some(evicted) = ch.queue.force_push(MemSealedSegment { index, bytes }) {
-            ch.queued_bytes
-                .fetch_sub(evicted.bytes.len() as u64, Ordering::AcqRel);
-            ch.dropped.fetch_add(1, Ordering::Relaxed);
+        let (evicted, first_idx, last_idx) = {
+            let mut q = ch.queue.lock().unwrap();
+            q.segments.push_back(MemSealedSegment { index, bytes });
+            q.bytes += size;
+            // Evict under the lock so worker pop can't race drop attribution.
+            let mut evicted = 0u64;
+            let mut first: Option<u32> = None;
+            let mut last: Option<u32> = None;
+            while q.bytes > ch.max_total_size
+                && let Some(old) = q.segments.pop_front()
+            {
+                q.bytes -= old.bytes.len() as u64;
+                evicted += 1;
+                first.get_or_insert(old.index);
+                last = Some(old.index);
+            }
+            q.dropped += evicted;
+            (evicted, first, last)
+        };
+
+        if let (Some(first), Some(last)) = (first_idx, last_idx) {
             rate_limited!(Duration::from_secs(60), {
                 tracing::warn!(
                     target: "dial9_worker",
-                    "memory segment evicted (ring full): segment {} dropped",
-                    evicted.index
+                    "memory segment evicted (over byte budget): {evicted} segment(s) dropped, indices {first}..={last}",
                 );
             });
         }
@@ -129,20 +158,30 @@ impl MemFs {
 
     pub(super) fn take_files(&self) -> TakenFiles {
         let ch = &self.channel;
-        // Per-cycle delta: swap-to-zero so each emit reports drops that
-        // occurred since the previous take_files.
-        let segments_dropped = ch.dropped.swap(0, Ordering::AcqRel);
 
+        // Floor peak at current in-flight, this cycle's pop seeds the next.
         let in_flight_now = ch.in_flight_bytes.load(Ordering::Acquire);
         let peak = ch
             .in_flight_bytes_peak
             .swap(in_flight_now, Ordering::AcqRel);
 
-        let Some(slot) = ch.queue.pop() else {
+        // Pop + drop-counter snapshot under one lock so the metric matches
+        // the queue state we sampled.
+        let (popped, queued_segments, queued_bytes, segments_dropped) = {
+            let mut q = ch.queue.lock().unwrap();
+            let popped = q.segments.pop_front();
+            if let Some(s) = &popped {
+                q.bytes -= s.bytes.len() as u64;
+            }
+            let segments_dropped = std::mem::take(&mut q.dropped);
+            (popped, q.segments.len() as u64, q.bytes, segments_dropped)
+        };
+
+        let Some(slot) = popped else {
             return TakenFiles {
                 segments: vec![],
-                queued_segments: Some(ch.queue.len() as u64),
-                queued_bytes: Some(ch.queued_bytes.load(Ordering::Acquire)),
+                queued_segments: Some(queued_segments),
+                queued_bytes: Some(queued_bytes),
                 in_flight_segments: ch.in_flight_segments.load(Ordering::Relaxed),
                 in_flight_bytes: in_flight_now,
                 in_flight_bytes_peak: Some(peak),
@@ -151,7 +190,6 @@ impl MemFs {
         };
 
         let size = slot.bytes.len() as u64;
-        ch.queued_bytes.fetch_sub(size, Ordering::AcqRel);
         let in_flight_total = ch.in_flight_bytes.fetch_add(size, Ordering::AcqRel) + size;
         ch.in_flight_segments.fetch_add(1, Ordering::AcqRel);
         // The just-popped segment seeds the next cycle's peak.
@@ -175,8 +213,8 @@ impl MemFs {
 
         TakenFiles {
             segments: vec![taken],
-            queued_segments: Some(ch.queue.len() as u64),
-            queued_bytes: Some(ch.queued_bytes.load(Ordering::Acquire)),
+            queued_segments: Some(queued_segments),
+            queued_bytes: Some(queued_bytes),
             in_flight_segments: ch.in_flight_segments.load(Ordering::Relaxed),
             in_flight_bytes: ch.in_flight_bytes.load(Ordering::Relaxed),
             in_flight_bytes_peak: Some(peak),
@@ -184,11 +222,7 @@ impl MemFs {
         }
     }
 
-    pub(super) async fn wait_for_more(
-        &self,
-        stop: &CancellationToken,
-        _poll_interval: Duration,
-    ) {
+    pub(super) async fn wait_for_more(&self, stop: &CancellationToken, _poll_interval: Duration) {
         let ch = &self.channel;
         // Register the notified future *before* loading writer_done so any
         // notify_one between the run loop's earlier check and this await
@@ -222,7 +256,7 @@ mod tests {
 
     #[test]
     fn mem_fs_seal_take_roundtrip() {
-        let mem = MemFs::with_capacity(16).unwrap();
+        let mem = MemFs::with_capacity(64 * 1024, 1024).unwrap();
         let handle = mem
             .create_segment(Path::new("mem://trace.0.bin.active"))
             .unwrap();
@@ -248,9 +282,10 @@ mod tests {
     }
 
     #[test]
-    fn mem_fs_slot_cap_eviction() {
-        // slot_cap = 1. Pushing the second segment evicts the first.
-        let mem = MemFs::with_capacity(1).unwrap();
+    fn mem_fs_byte_budget_eviction() {
+        // Budget = 60 bytes; segment 0 fills it. Segment 1 push triggers
+        // eviction of segment 0.
+        let mem = MemFs::with_capacity(60, 60).unwrap();
 
         for index in 0..2u32 {
             let handle = mem.create_segment(Path::new("dummy")).unwrap();
@@ -262,32 +297,51 @@ mod tests {
                 .unwrap();
         }
 
-        check!(mem.channel.dropped.load(Ordering::SeqCst) == 1);
         // Only the most recent segment remains.
         let t = mem.take_files();
+        check!(t.segments_dropped == 1, "one eviction reported");
         check!(t.segments.len() == 1);
         check!(t.segments[0].seg_ref.index() == 1);
     }
 
     #[test]
-    fn mem_fs_rejects_invalid_sizes() {
-        let Err(e) = MemFs::with_capacity(0) else {
-            panic!("expected error for max_segments == 0");
+    fn mem_fs_byte_budget_multi_evict() {
+        // Budget = 100 bytes; push three 60-byte segments. Each new push
+        // evicts everything that overflows. Final state: just segment 2.
+        let mem = MemFs::with_capacity(100, 60).unwrap();
+        for index in 0..3u32 {
+            let handle = mem.create_segment(Path::new("dummy")).unwrap();
+            let ActiveHandle::Mem(mut w) = handle else {
+                panic!()
+            };
+            w.buf.resize(60, index as u8);
+            mem.seal(ActiveHandle::Mem(w), Path::new("dummy"), index)
+                .unwrap();
+        }
+        let t = mem.take_files();
+        check!(t.segments_dropped == 2);
+        check!(t.segments.len() == 1);
+        check!(t.segments[0].seg_ref.index() == 2);
+    }
+
+    #[test]
+    fn mem_fs_rejects_zero_budget() {
+        let Err(e) = MemFs::with_capacity(0, 1024) else {
+            panic!("expected error for max_total_size == 0");
         };
         check!(e.kind() == io::ErrorKind::InvalidInput);
     }
 
     #[test]
     fn mem_fs_queued_segments_after_pop() {
-        let mem = MemFs::with_capacity(16).unwrap();
+        let mem = MemFs::with_capacity(64 * 1024, 1024).unwrap();
         for i in 0..3u32 {
             let handle = mem.create_segment(Path::new("x")).unwrap();
             let ActiveHandle::Mem(mut w) = handle else {
                 panic!()
             };
             w.buf.push(i as u8);
-            mem.seal(ActiveHandle::Mem(w), Path::new("x"), i)
-                .unwrap();
+            mem.seal(ActiveHandle::Mem(w), Path::new("x"), i).unwrap();
         }
         let t = mem.take_files();
         check!(t.segments.len() == 1);
@@ -310,7 +364,7 @@ mod tests {
 
     #[test]
     fn mem_fs_take_pops_one_at_a_time() {
-        let mem = MemFs::with_capacity(16).unwrap();
+        let mem = MemFs::with_capacity(64 * 1024, 1024).unwrap();
         for i in 0..3u32 {
             let handle = mem.create_segment(Path::new("dummy")).unwrap();
             let ActiveHandle::Mem(mut w) = handle else {
@@ -331,7 +385,7 @@ mod tests {
 
     #[test]
     fn mem_fs_remove_sealed_is_noop() {
-        let mem = MemFs::with_capacity(16).unwrap();
+        let mem = MemFs::with_capacity(64 * 1024, 1024).unwrap();
         let seg = SegmentRef::Memory(MemorySegment { index: 0, size: 10 });
         // Should not panic
         mem.remove_sealed(&seg, RemoveReason::Eviction);
@@ -384,8 +438,8 @@ mod shuttle_tests {
         }
     }
 
-    fn run_scenario(slots: usize, seg_size: usize, count: u32, expect_no_eviction: bool) {
-        let mem = Arc::new(MemFs::with_capacity(slots).unwrap());
+    fn run_scenario(budget: u64, seg_size: usize, count: u32, expect_no_eviction: bool) {
+        let mem = Arc::new(MemFs::with_capacity(budget, seg_size as u64).unwrap());
         let consumed = Arc::new(AtomicU64::new(0));
         let dropped = Arc::new(AtomicU64::new(0));
 
@@ -423,13 +477,14 @@ mod shuttle_tests {
     }
 
     fn scenario_no_eviction() {
-        run_scenario(16, 16, 3, true);
+        // Budget room for many 16-byte segments; nothing should evict.
+        run_scenario(1 << 16, 16, 3, true);
     }
 
     fn scenario_with_eviction() {
-        // Slot cap = 2; the writer outruns the worker so force_push evicts
-        // under contention.
-        run_scenario(2, 16, 4, false);
+        // Budget fits ~2 segments; the writer outruns the worker so the
+        // byte-budget loop evicts under contention.
+        run_scenario(40, 16, 4, false);
     }
 
     #[test]

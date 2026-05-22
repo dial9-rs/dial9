@@ -191,8 +191,14 @@ impl Fs {
         Arc::new(Fs::Disk(DiskFs::from_base_path(base_path)))
     }
 
-    pub(crate) fn new_in_memory(max_segments: usize) -> io::Result<Arc<Self>> {
-        Ok(Arc::new(Fs::Mem(MemFs::with_capacity(max_segments)?)))
+    pub(crate) fn new_in_memory(
+        max_total_size: u64,
+        segment_size_hint: u64,
+    ) -> io::Result<Arc<Self>> {
+        Ok(Arc::new(Fs::Mem(MemFs::with_capacity(
+            max_total_size,
+            segment_size_hint,
+        )?)))
     }
 
     /// Scan for trace artifacts left by previous writer lifetimes.

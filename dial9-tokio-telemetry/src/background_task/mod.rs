@@ -1834,10 +1834,8 @@ mod worker_pipeline_tests {
         let stop = tokio_util::sync::CancellationToken::new();
         stop.cancel();
 
-        let processors: Vec<Box<dyn SegmentProcessor>> = vec![
-            Box::new(GzipCompressor),
-            Box::new(capture),
-        ];
+        let processors: Vec<Box<dyn SegmentProcessor>> =
+            vec![Box::new(GzipCompressor), Box::new(capture)];
 
         let mut worker = WorkerLoop::new(
             fs_for(dir.path()),
@@ -2217,7 +2215,7 @@ mod worker_pipeline_tests {
             }
         }
 
-        let fs = Fs::new_in_memory(8).expect("memory fs should build");
+        let fs = Fs::new_in_memory(64 * 1024, 1024).expect("memory fs should build");
         for i in 0..2u32 {
             let mut h = fs
                 .create_segment(Path::new("x"))
@@ -2261,7 +2259,7 @@ mod worker_pipeline_tests {
     fn mem_take_files_reports_in_flight_bytes_peak() {
         use std::io::Write;
 
-        let fs = Fs::new_in_memory(8).unwrap();
+        let fs = Fs::new_in_memory(64 * 1024, 1024).unwrap();
         let mut h = fs.create_segment(Path::new("x")).unwrap();
         h.write_all(&[0u8; 50]).unwrap();
         fs.seal(h, Path::new("x"), 0).unwrap();
@@ -2324,7 +2322,7 @@ mod worker_pipeline_tests {
         }
 
         for iter in 0..ITERS {
-            let fs = Fs::new_in_memory(128).unwrap();
+            let fs = Fs::new_in_memory(64 * 1024, 1024).unwrap();
             let processed = Arc::new(AtomicUsize::new(0));
             let stop = tokio_util::sync::CancellationToken::new();
 

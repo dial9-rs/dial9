@@ -16,7 +16,7 @@ A single `pub(crate)` `Fs` enum covers the writer + worker boundary, with one va
 
 - A memory-only path that never touches the real filesystem for the segment data itself. Encoded bytes flow writer, in-process queue, worker, destination.
 - Reuse the existing `SegmentProcessor` pipeline. No new API for users who already wire `.s3(...)` or custom processors.
-- Bounded memory with the same "drop oldest, never block the recorder" policy the disk path already uses for eviction. Memory mode evicts at ring overflow on a slot-bounded ring (drop-at-seal via `force_push`). Disk mode evicts after seal (`evict_oldest` in the writer).
+- Bounded memory with the same "drop oldest, never block the recorder" policy the disk path already uses for eviction. Memory mode runs a byte-budget eviction loop at seal time (`Mutex<VecDeque>` ring; drop-oldest until `queued_bytes <= max_total_size`). Disk mode evicts after seal (`evict_oldest` in the writer).
 
 ## Non-goals
 
@@ -130,7 +130,7 @@ pub(crate) enum RemoveReason {
 `TakenFiles` carries the dispensed claims plus per-cycle gauges (`queued_segments`, `queued_bytes`, `in_flight_segments`, `in_flight_bytes`, `in_flight_bytes_peak`, `segments_dropped`). One scan per worker cycle drives both work and observability (see section 6 for metrics).
 
 - **`DiskFs`** holds the segment directory and stem at construction and maintains a `HashMap<u32, u64>` of claimed indices to uncompressed sizes (under a `Mutex`). `take_files` scans the directory, stats each unclaimed file **outside the claim-set mutex**, then re-acquires the mutex once to insert all new entries. Keeping `metadata()` syscalls off the locked path matters because the writer's `evict_oldest` takes the same mutex (via `remove_sealed`). The `std::fs::read` for the payload itself is deferred to `TakenSegment::load`.
-- **`MemFs`** holds active-only state (per-path `Vec<u8>` map) plus the internal writer-to-worker ring (`BoundedQueue` of `max_segments` slots). Sealed bytes do not live in `MemFs`'s active map. `seal` takes the `Vec<u8>`, wraps it as `Bytes` (zero-copy) and `force_push`es into the ring, which evicts the oldest slot when full (see section 3). `take_files` pops **at most one** segment from the ring per call and returns it with payload already in hand. `remove_sealed` is a no-op: bytes already left `MemFs`.
+- **`MemFs`** holds active-only state (per-path `Vec<u8>` map) plus the internal writer-to-worker ring (`Mutex<VecDeque<MemSealedSegment>>` with a `max_total_size` byte budget). Sealed bytes do not live in `MemFs`'s active map. `seal` takes the `Vec<u8>`, wraps it as `Bytes` (zero-copy), pushes to the back of the deque, then evicts oldest segments until `queued_bytes <= max_total_size` (see section 3). `take_files` pops **at most one** segment from the front per call and returns it with payload already in hand. `remove_sealed` is a no-op: bytes already left `MemFs`.
 
 ### At-most-once handoff and lazy load
 
@@ -174,7 +174,7 @@ Holds `Arc<Fs>`. Disk constructors build `Fs::Disk(DiskFs::from_base_path(&trace
 Eviction lives where it is natural:
 
 - **Disk:** writer holds `closed_files: VecDeque<(SegmentRef, u64)>`. After every rotation, `evict_oldest` pops the front and calls `Fs::remove_sealed(seg, RemoveReason::Eviction)` until the byte budget is satisfied. The `Eviction` reason bumps `dropped_segments`. Worker terminal cleanup calls `remove_sealed(seg, RemoveReason::Terminal)`, which unlinks without counting (a processing failure, not backpressure).
-- **Memory:** the ring is slot-bounded by `max_segments`. Push via `force_push` drops the oldest slot when full. The user-facing peak is `max_segment_size * max_segments`, with eviction triggered by slot count, segments smaller than `max_segment_size` (low-traffic time-based rotation) under-fill the budget but never evict early. `closed_files` stays empty.
+- **Memory:** the ring is byte-bounded by `max_total_size`. Seal pushes to the back; under the lock, the eviction loop pops oldest until `queued_bytes <= max_total_size`. The user-facing budget is bytes and is enforced exactly — no slot-truncation, no over- or under-utilization under variable segment sizes. `closed_files` stays empty.
 
 ### Rejected alternatives
 
@@ -238,36 +238,36 @@ Three byte pools contribute to peak working set:
 | Bucket | Owner | Size | Notes |
 |--------|-------|------|-------|
 | Active segment buffer | flush thread | up to `max_segment_size` | `Vec<u8>` inside the encoder. `RawEncoder` is a thin wrapper |
-| Queued sealed segments | `BoundedQueue` ring | up to `max_segment_size * max_segments` | `MemSealedSegment { index, bytes: Bytes }` per slot. `Bytes` is a zero-copy Arc clone. Slot-bounded: `force_push` evicts oldest on overflow |
+| Queued sealed segments | `Mutex<VecDeque>` ring | up to `max_total_size` | `MemSealedSegment { index, bytes: Bytes }` per entry. `Bytes` is a zero-copy Arc clone. Byte-bounded: seal pushes back, then evicts oldest under the lock until queued bytes are under budget |
 | In-flight pipeline data | worker | up to one `max_segment_size` + transient stage growth | Pipeline runs serial: at most one segment in-flight. Disk path bounds via lazy `TakenSegment::load`, memory via pop-one in the `Fs::Mem` arm of `take_files` (section 1). `SymbolizeProcessor` (cpu-profiling only) appends a symbol-table chunk. `GzipCompressor` output is a fraction of input. Benches will surface actual ratios. |
 
 Note on interning: per-batch string interning lives on the recording thread, not the writer. Each `ThreadLocalBuffer` resets its encoder on every flush (`Encoder::reset_to_infallible`), so the interner peak is bounded by one batch encode, not a segment's life.
 
 ### Peak working set
 
-The slot-bounded ring caps queued bytes at `max_segment_size * max_segments`. In-flight bytes are separate (the pipeline is serial, so at most one segment plus stage-internal growth is held outside the queue at any moment).
+The byte-bounded ring caps queued bytes at `max_total_size` exactly. In-flight bytes are separate (the pipeline is serial, so at most one segment plus stage-internal growth is held outside the queue at any moment).
 
-**Peak memory contract:** `max_segment_size * max_segments (queue) + max_segment_size (in-flight) + max_segment_size (active buffer)`. Add another `max_segment_size` in-flight when `cpu-profiling` is enabled, since `SymbolizeProcessor` appends a symbol-table chunk.
+**Peak memory contract:** `max_total_size (queue) + max_segment_size (in-flight) + max_segment_size (active buffer)`. Add another `max_segment_size` in-flight when `cpu-profiling` is enabled, since `SymbolizeProcessor` appends a symbol-table chunk.
 
-Pick `max_segments` so the worker can absorb a 5-10x burst of slowness before drops fire. With 1 MB segments at 60s rotation that means 10–15 slots. Steady state is ~3 MB (one active, one in-flight, a small queue).
+Pick `max_total_size` so the worker can absorb a 5-10x burst of slowness before drops fire. With 1 MB segments at 60s rotation that means a 10-15 MB budget. Steady state is ~3 MB (one active, one in-flight, a small queue).
 
 
 ### Comparison to the disk path
 
-Disk already pays for the active buffer and one in-flight segment in RAM (lazy `TakenSegment::load` keeps it at one regardless of backlog). Memory mode adds the ring itself, up to `max_segment_size * max_segments`, in process heap instead of as `.bin` files on disk. Encoded bytes are identical. Eviction fires under the same "worker can't keep up" trigger: disk via `evict_oldest`, memory via slot-bounded `force_push`.
+Disk already pays for the active buffer and one in-flight segment in RAM (lazy `TakenSegment::load` keeps it at one regardless of backlog). Memory mode adds the ring itself, up to `max_total_size`, in process heap instead of as `.bin` files on disk. Encoded bytes are identical. Eviction fires under the same "worker can't keep up" trigger: disk via `evict_oldest`, memory via the byte-budget loop at seal time.
 
 ### Byte accounting and drop-oldest
 
 Memory-mode gauges on the `MemFs` channel:
 
 - **`memory_queued_segments`** (Option, memory-only): segments waiting in the ring after the current cycle's pop. `None` on disk.
-- **`memory_queued_bytes`** (Option, memory-only): encoded bytes resident in the ring, maintained alongside the slot counter.
+- **`memory_queued_bytes`** (Option, memory-only): encoded bytes resident in the ring, summed alongside the deque under the same lock.
 - **`in_flight_segments`**: count of segments claimed by the worker.
 - **`in_flight_bytes`**: current payload bytes summed across in-flight segments. Tracks real RAM (symbolize grows, gzip shrinks) because the worker re-balances it via `SegmentAccounting::adjust` after each successful stage.
 - **`memory_peak_in_flight_bytes`** (Option, memory-only): high-water of in-flight bytes observed during this event's window. `None` on disk.
 - **`segments_evicted`**: segments shed by ring-slot eviction during this event's window (the channel atomic is swap-zeroed by `take_files`).
 
-The writer is the sole eviction source. The worker only consumes. Concurrent `queue.pop()` between writer eviction and worker consumption is safe because `BoundedQueue` is MPMC-safe, so each slot pops exactly once.
+The writer is the sole eviction source. The worker only consumes. Concurrent `pop_front` between writer eviction and worker consumption is serialized by the channel mutex, so each segment pops exactly once and drop attribution is exact.
 
 **Accounting spec.** `SegmentData` carries an `accounting: Option<SegmentAccounting>` populated only for memory-backed segments:
 
@@ -305,10 +305,17 @@ Drop signals: `dropped_segments` counter increments per evicted segment (see sec
 Memory mode is one constructor swap. The writer carries its `Arc<Fs>` and the runtime builder spawns the worker from it.
 
 ```rust
-let writer = RotatingWriter::in_memory(
-    /* max_segment_size */ 1 * MB,
-    /* max_segments     */ 16,
-)?;
+// Simple: one knob, dial9 picks segment size.
+let writer = InMemoryWriter::new_in_memory(16 * MB)?;
+
+// Advanced: builder for rotation_period, metadata, custom segment size.
+let writer = InMemoryWriter::in_memory_builder()
+    .max_total_size(16 * MB)
+    .max_segment_size(1 * MB)            // optional, dial9 picks if absent
+    .rotation_period(Duration::from_secs(60))
+    .segment_metadata(vec![("svc".into(), "trace".into())])
+    .build()?;
+
 let (runtime, guard) = TracedRuntime::builder()
     .with_s3_uploader(s3_config)
     .build_and_start(tokio_builder, writer)?;
@@ -330,7 +337,7 @@ impl WriterMode for Memory {}
 Constructors split:
 
 - `new`, `single_file`, `builder` return `RotatingWriter<Disk>`.
-- `in_memory` returns `RotatingWriter<Memory>`.
+- `new_in_memory` returns `RotatingWriter<Memory>`.
 
 Builder constraint:
 
@@ -344,17 +351,17 @@ Builder constraint:
 
 Pipeline mode is also enforced at compile time via `PipelineBuilder<DiskReq = NoDiskRequired>`. `.write_back()` transitions to `PipelineBuilder<RequiresDisk>`. Memory-writer entry points constrain `DiskReq = NoDiskRequired`, so attaching `WriteBackProcessor` to a memory writer is a compile error. User-supplied processors that need disk backing opt in via a `DiskBoundProcessor` marker trait and use `pipe_disk_bound(p)` instead of `pipe(p)`.
 
-### `RotatingWriter::in_memory` defaults
+### `InMemoryWriter::new_in_memory` defaults
 
 - `rotation_period`: reuses disk's `DEFAULT_ROTATION_PERIOD` (60 s). Caps how long an event can sit in the active buffer when traffic is low.
 - `drain_interval`: internal.
-- ring slot count: exactly `max_segments`. The user-facing budget is slots, not bytes, small segments under-fill the budget but never trigger early eviction.
+- `max_segment_size`: dial9 picks. Target ~1 MB, scaled down for small budgets so the ring keeps at least 4 slots (`pick_segment_size`).
+- ring storage: `Mutex<VecDeque<MemSealedSegment>>`. Slot count is dynamic; eviction fires on the byte budget, not on a fixed slot cap. Real queued bytes are bounded exactly by `max_total_size`.
 
-`in_memory` returns `Err(InvalidInput)` if `max_segment_size == 0` or `max_segments == 0`.
+`new_in_memory` errors with `InvalidInput` if `max_total_size == 0`. The builder also errors when `max_total_size < max_segment_size` (no slot would fit).
 
 ### Rejected alternatives
 
-- **`(max_segment_size, max_total_size)` byte budget.** Becomes `slot_cap = max_total_size / max_segment_size` internally, a slot budget dressed up as bytes, and the truncating division silently shaves the user's stated cap. Slot-count is what eviction acts on, so expose that directly.
 - **`take_pending_receiver` on `TraceWriter` plus writer-held `pending_receiver: Option<ChannelReceiver>`.** Trait method overridden only on `RotatingWriter` plus a writer field drained once at build time. `MemFs` owns the channel and the builder hands the worker the concrete `Arc<MemFs>` directly.
 - **`MemoryPipeline { writer, receiver }` newtype.** Same problem: an extra public type users carry around for a transient setup step.
 - **`builder.with_memory_writer(seg, total)` high-level method.** Loses writer-level config knobs (`rotation_period` etc.) at the builder level or forces per-knob builder methods.
@@ -373,9 +380,9 @@ Disk follows the same steps without `writer_done`. The worker's stop-token plus 
 
 **Ordering invariant:** Three sync points, the final segment is always delivered before the worker exits:
 
-1. **Writer seal:** `MemFs::seal_handle` invokes `BoundedQueue::force_push`, which establishes a Release synchronization point on the queued slot. Eviction of an oldest slot (when the ring is full) only displaces stale entries and does not gate the just-pushed slot.
+1. **Writer seal:** `MemFs::seal` takes the channel mutex, pushes back, and evicts oldest until under budget. Mutex acquire+release establishes Acquire/Release on the queue state. Eviction only displaces stale entries and does not gate the just-pushed segment.
 2. **Writer mark-done:** after the final `seal`, `RotatingWriter::finalize` calls `Fs::mark_writer_done`. On `MemFs` this does `writer_done.store(true, Release)` then `notify_one`.
-3. **Worker observe + re-drain:** the memory arm of `wait_for_more` does `writer_done.load(Acquire)`. Once it observes `true` the worker exits the wait and the run loop drains in a loop, calling `take_files` until the ring is empty. Each `BoundedQueue::pop` performs the `Acquire` on its slot. Every queued segment is consumed because the drain loop does not stop until `take_files` reports empty, and the final pushed segment is visible because the write to `writer_done` (Release) synchronizes-with the load (Acquire) and the queue push happens-before the `mark_done` store on the writer thread.
+3. **Worker observe + re-drain:** the memory arm of `wait_for_more` does `writer_done.load(Acquire)`. Once it observes `true` the worker exits the wait and the run loop drains in a loop, calling `take_files` until the ring is empty. Each `pop_front` runs under the channel mutex (Acquire-on-lock). Every queued segment is consumed because the drain loop does not stop until `take_files` reports empty, and the final pushed segment is visible because the write to `writer_done` (Release) synchronizes-with the load (Acquire) and the queue push happens-before the `mark_done` store on the writer thread.
 
 Lost-wakeup avoidance is handled by the standard `notified() / enable() / re-check writer_done / await` pattern in the memory arm of `wait_for_more`. The future is registered before the second `writer_done` load so any `notify_one` that fires between the first load and the await becomes the permit the await consumes.
 
@@ -389,13 +396,13 @@ Reuse the patterns from the disk path. The headline change is that **`RotatingWr
 
 **Integration.** Memory `RotatingWriter` paired with a test `SegmentProcessor` that captures `SegmentData`. Run a workload, confirm bytes decode and event counts match. S3 integration against `s3s` (already used by the disk-path S3 tests).
 
-**Stress + Shuttle.** High segment-emission rate against a slow downstream processor: verify drop-oldest fires, counters increment, writer never blocks. Shuttle scenarios: concurrent `force_push` / `pop`, shutdown race on `writer_done`, eviction-under-contention accounting, `SegmentData` drop racing with `force_push` eviction (no underflow).
+**Stress + Shuttle.** High segment-emission rate against a slow downstream processor: verify drop-oldest fires, counters increment, writer never blocks. Shuttle scenarios: concurrent seal-eviction and worker-pop under the channel mutex, shutdown race on `writer_done`, eviction-under-contention accounting (no underflow).
 
 ### Memory regression tests
 
 Memory mode keeps bytes in process heap that disk kept on disk. Regressions are easier to introduce and harder to spot. Two layers to be checked on PRs:
 
-- **Counter assertions.** Fixed-seed workload against a memory `RotatingWriter`. Assert `ring_depth` stays within `max_segments`, `in_flight_bytes` stays within `max_segment_size` (plus a margin when `cpu-profiling` symbolizes), eviction fires when the slot budget is intentionally tight, queue depth stays bounded. Catches accounting regressions.
+- **Counter assertions.** Fixed-seed workload against a memory `RotatingWriter`. Assert `memory_queued_bytes` stays within `max_total_size`, `in_flight_bytes` stays within `max_segment_size` (plus a margin when `cpu-profiling` symbolizes), eviction fires when the byte budget is intentionally tight, queue depth stays bounded. Catches accounting regressions.
 - **Heap baseline.** Same workload under a deterministic heap profiler (e.g. `dhat`), baseline checked into CI. Catches leaks and allocator-side regressions.
 
 ### Metrics
@@ -406,7 +413,7 @@ Memory mode keeps bytes in process heap that disk kept on disk. Regressions are 
 - `MemoryQueuedBytes` (memory only): encoded bytes still in the ring. Tracked alongside `MemoryQueuedSegments` via a side atomic.
 - `InFlightSegments` / `InFlightBytes`: claimed but not yet released by last-stage cleanup or `remove_sealed`. Memory updates `InFlightBytes` after every successful stage via `SegmentAccounting::adjust`, so the gauge follows payload growth (symbolization) and shrinkage (compression). Rising values mean the pipeline is not shedding work fast enough.
 - `MemoryPeakInFlightBytes` (memory only): high-water of `InFlightBytes` observed across this event's window. The point sample alone would miss the symbolize peak; this captures it. `None` on disk (no per-stage mutation, would just shadow `InFlightBytes`).
-- `SegmentsEvicted`: backend-side evictions during this event's window (per-event delta). Disk: `remove_sealed(_, Eviction)` from `evict_oldest`. Memory: ring slot eviction via `force_push`.
+- `SegmentsEvicted`: backend-side evictions during this event's window (per-event delta). Disk: `remove_sealed(_, Eviction)` from `evict_oldest`. Memory: byte-budget eviction loop at seal time.
 - `SegmentsDispatched`: segments handed into the pipeline this cycle.
 
 Fires every cycle, drained-empty included, so a stuck pipeline shows climbing `InFlightBytes` with `SegmentsDispatched == 0`.
@@ -415,4 +422,4 @@ Fires every cycle, drained-empty included, so a stuck pipeline shows climbing `I
 
 ## 7. Open questions
 
-**Adaptive sizing:** The current design takes a static `max_segments`. We could measure ring depth and let the writer grow/shrink within a configured range, similar to how some allocators auto-tune their arenas. Container users could benefit from reading cgroup `memory.max` / `memory.high` as an outer cap. Initially keeping it out of scope for v1 or at least until implementation testing shows workload data. The metrics catalog (`MemoryQueuedSegments`, `MemoryQueuedBytes`, `InFlightBytes`, `SegmentsEvicted`) covers the internal inputs we'd need.
+**Adaptive sizing:** The current design takes a static `max_total_size`. We could measure ring depth and let the writer grow/shrink within a configured range, similar to how some allocators auto-tune their arenas. Container users could benefit from reading cgroup `memory.max` / `memory.high` as an outer cap. Initially keeping it out of scope for v1 or at least until implementation testing shows workload data. The metrics catalog (`MemoryQueuedSegments`, `MemoryQueuedBytes`, `InFlightBytes`, `SegmentsEvicted`) covers the internal inputs we'd need.
