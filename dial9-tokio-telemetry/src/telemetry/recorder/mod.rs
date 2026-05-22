@@ -51,14 +51,14 @@ pub(crate) enum ControlCommand {
 
 /// Register a tokio hook, composing with an optional user callback.
 /// When `$user_hook` is None, registers only the dial9 closure (zero-cost).
-/// When Some, registers a closure that runs dial9 logic first, then the user callback.
+/// When Some, registers a closure that runs dial9 logic first, then the user callbacks.
 macro_rules! register_hook {
     // For hooks with no arguments: on_thread_park, on_thread_unpark, on_thread_start, on_thread_stop
     ($builder:expr, $method:ident, $user_hook:expr, $dial9_body:expr) => {
-        if let Some(user_cb) = $user_hook {
+        if let Some(user_hook) = $user_hook {
             $builder.$method(move || {
                 $dial9_body;
-                user_cb();
+                user_hook.execute();
             });
         } else {
             $builder.$method(move || {
@@ -68,10 +68,10 @@ macro_rules! register_hook {
     };
     // For hooks with a TaskMeta argument: on_before_task_poll, on_after_task_poll, on_task_spawn, on_task_terminate
     (meta: $builder:expr, $method:ident, $user_hook:expr, |$meta:ident| $dial9_body:expr) => {
-        if let Some(user_cb) = $user_hook {
+        if let Some(user_hook) = $user_hook {
             $builder.$method(move |$meta| {
                 $dial9_body;
-                user_cb($meta);
+                user_hook.execute($meta);
             });
         } else {
             $builder.$method(move |$meta| {
@@ -184,14 +184,14 @@ fn register_hooks(
         );
     } else {
         // When task tracking is disabled, still register user hooks if provided
-        if let Some(user_cb) = tokio_hooks.on_task_spawn {
+        if let Some(user_hook) = tokio_hooks.on_task_spawn {
             builder.on_task_spawn(move |meta| {
-                user_cb(meta);
+                user_hook.execute(meta);
             });
         }
-        if let Some(user_cb) = tokio_hooks.on_task_terminate {
+        if let Some(user_hook) = tokio_hooks.on_task_terminate {
             builder.on_task_terminate(move |meta| {
-                user_cb(meta);
+                user_hook.execute(meta);
             });
         }
     }

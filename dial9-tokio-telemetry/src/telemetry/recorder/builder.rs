@@ -172,13 +172,12 @@ impl<P, M> TracedRuntimeBuilder<P, M> {
 
     /// Configure user-provided callbacks to run alongside dial9's internal
     /// Tokio runtime hooks. dial9's logic always runs first, then the user
-    /// callback fires.
+    /// callbacks fire in registration order.
     ///
     /// This method can be called multiple times; each call receives a mutable
-    /// reference to the same `TokioHooks` instance. Setting the same hook
+    /// reference to the same `TokioHooks` instance. Registering the same hook
     /// multiple times (either within one closure or across multiple calls)
-    /// will overwrite the previous callback — only the last one registered
-    /// will fire.
+    /// stacks the callbacks — all registered callbacks will fire.
     pub fn with_tokio_hooks<F>(mut self, f: F) -> Self
     where
         F: FnOnce(&mut super::TokioHooks),

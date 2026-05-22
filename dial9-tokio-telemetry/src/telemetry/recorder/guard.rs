@@ -271,7 +271,7 @@ impl<'a> TraceRuntimeCoreBuilder<'a> {
 
     /// Configure user-provided callbacks to run alongside dial9's internal
     /// Tokio runtime hooks. dial9's logic always runs first, then the user
-    /// callback fires.
+    /// callbacks fire in registration order.
     pub fn with_tokio_hooks<F>(mut self, f: F) -> Self
     where
         F: FnOnce(&mut super::TokioHooks),

@@ -424,3 +424,177 @@ fn dial9_hooks_run_before_user_hooks() {
         "user on_thread_start hook should have fired"
     );
 }
+
+#[test]
+fn hook_stacking_single_callback_fires() {
+    let log = Arc::new(std::sync::Mutex::new(Vec::<&'static str>::new()));
+    let log_c = log.clone();
+
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.worker_threads(1).enable_all();
+
+    let (runtime, guard) = TracedRuntime::builder()
+        .with_tokio_hooks(|h| {
+            h.on_thread_park(move || {
+                log_c.lock().unwrap().push("park_a");
+            });
+        })
+        .build_and_start_with_writer(builder, NullWriter)
+        .unwrap();
+
+    runtime.block_on(async {
+        // Sleep to let the worker park at least once
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    });
+
+    drop(runtime);
+    drop(guard);
+
+    let entries = log.lock().unwrap();
+    assert!(
+        entries.contains(&"park_a"),
+        "expected single callback to fire, got: {entries:?}"
+    );
+}
+
+#[test]
+fn hook_stacking_multiple_callbacks_fire_in_order() {
+    let log = Arc::new(std::sync::Mutex::new(Vec::<&'static str>::new()));
+    let log_a = log.clone();
+    let log_b = log.clone();
+
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.worker_threads(1).enable_all();
+
+    let (runtime, guard) = TracedRuntime::builder()
+        .with_tokio_hooks(|h| {
+            h.on_thread_park(move || {
+                log_a.lock().unwrap().push("park_a");
+            });
+            h.on_thread_park(move || {
+                log_b.lock().unwrap().push("park_b");
+            });
+        })
+        .build_and_start_with_writer(builder, NullWriter)
+        .unwrap();
+
+    runtime.block_on(async {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    });
+
+    drop(runtime);
+    drop(guard);
+
+    let entries = log.lock().unwrap();
+    assert!(
+        entries.contains(&"park_a"),
+        "expected first callback to fire, got: {entries:?}"
+    );
+    assert!(
+        entries.contains(&"park_b"),
+        "expected second callback to fire, got: {entries:?}"
+    );
+    // Verify ordering: every "park_a" should appear before its corresponding "park_b"
+    let first_a = entries.iter().position(|e| *e == "park_a").unwrap();
+    let first_b = entries.iter().position(|e| *e == "park_b").unwrap();
+    assert!(
+        first_a < first_b,
+        "expected park_a before park_b, got: {entries:?}"
+    );
+}
+
+#[test]
+fn hook_stacking_multiple_with_tokio_hooks_calls() {
+    let log = Arc::new(std::sync::Mutex::new(Vec::<&'static str>::new()));
+    let log_a = log.clone();
+    let log_b = log.clone();
+
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.worker_threads(1).enable_all();
+
+    let (runtime, guard) = TracedRuntime::builder()
+        .with_tokio_hooks(|h| {
+            h.on_thread_park(move || {
+                log_a.lock().unwrap().push("call_1");
+            });
+        })
+        .with_tokio_hooks(|h| {
+            h.on_thread_park(move || {
+                log_b.lock().unwrap().push("call_2");
+            });
+        })
+        .build_and_start_with_writer(builder, NullWriter)
+        .unwrap();
+
+    runtime.block_on(async {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    });
+
+    drop(runtime);
+    drop(guard);
+
+    let entries = log.lock().unwrap();
+    assert!(
+        entries.contains(&"call_1"),
+        "expected first with_tokio_hooks callback to fire, got: {entries:?}"
+    );
+    assert!(
+        entries.contains(&"call_2"),
+        "expected second with_tokio_hooks callback to fire, got: {entries:?}"
+    );
+    let first_1 = entries.iter().position(|e| *e == "call_1").unwrap();
+    let first_2 = entries.iter().position(|e| *e == "call_2").unwrap();
+    assert!(
+        first_1 < first_2,
+        "expected call_1 before call_2, got: {entries:?}"
+    );
+}
+
+#[test]
+fn hook_stacking_task_meta_hooks_fire_in_order() {
+    let log = Arc::new(std::sync::Mutex::new(Vec::<&'static str>::new()));
+    let log_a = log.clone();
+    let log_b = log.clone();
+
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.worker_threads(1).enable_all();
+
+    let (runtime, guard) = TracedRuntime::builder()
+        .with_tokio_hooks(|h| {
+            h.on_before_task_poll(move |_meta| {
+                log_a.lock().unwrap().push("poll_a");
+            });
+            h.on_before_task_poll(move |_meta| {
+                log_b.lock().unwrap().push("poll_b");
+            });
+        })
+        .build_and_start_with_writer(builder, NullWriter)
+        .unwrap();
+
+    runtime.block_on(async {
+        tokio::spawn(async {
+            tokio::task::yield_now().await;
+        })
+        .await
+        .unwrap();
+    });
+
+    drop(runtime);
+    drop(guard);
+
+    let entries = log.lock().unwrap();
+    assert!(
+        entries.contains(&"poll_a"),
+        "expected first task meta callback to fire, got: {entries:?}"
+    );
+    assert!(
+        entries.contains(&"poll_b"),
+        "expected second task meta callback to fire, got: {entries:?}"
+    );
+    let first_a = entries.iter().position(|e| *e == "poll_a").unwrap();
+    let first_b = entries.iter().position(|e| *e == "poll_b").unwrap();
+    assert!(
+        first_a < first_b,
+        "expected poll_a before poll_b, got: {entries:?}"
+    );
+}

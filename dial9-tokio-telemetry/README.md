@@ -343,7 +343,7 @@ let (runtime, guard) = TracedRuntime::builder()
     .unwrap();
 ```
 
-dial9's internal hooks always run first, then your callbacks fire. This ensures `TelemetryHandle::current()` is available in your `on_thread_start` callback.
+dial9's internal hooks always run first, then your callbacks fire in registration order. This ensures `TelemetryHandle::current()` is available in your `on_thread_start` callback. Registering the same hook multiple times stacks the callbacks — all of them will fire.
 
 **Important:** Do not set hooks directly via `tokio::runtime::Builder::on_thread_start()` etc. — dial9 will overwrite them. Always use `with_tokio_hooks` to compose your callbacks with dial9's instrumentation.
 
