@@ -1,8 +1,7 @@
 //! Tests for the [`dial9_trace_format::de`] module — serde Deserializer for
 //! `RawEvent`.
 //!
-//! These tests cover the full matrix of behaviors described in
-//! `prd-serde-deserializer.md`:
+//! These tests cover the full matrix of behaviors:
 //!
 //! - Round-trip encode → decode → deserialize for all field types
 //!   (varints, signed/unsigned, bool, floats, strings, pooled strings,
@@ -10,6 +9,7 @@
 //! - Optional fields, both present and absent, deserialize correctly.
 //! - `#[serde(other)]` catches unknown event names.
 //! - Required-field schema mismatch produces an error from the deserializer.
+//! - Type coercion failures produce an error from the deserializer.
 //! - End-to-end test using `#[derive(TraceEvent)]` for the encode side and
 //!   `#[derive(serde::Deserialize)]` for the decode side.
 
@@ -612,7 +612,7 @@ fn option_field_absent_from_schema_defaults_to_none() {
     assert_eq!(event.new_optional_field, None);
 }
 
-// ── Test 11: pool-miss error paths ──────────────────────────────────────────
+// ── Test 11b: pool-miss error paths ──────────────────────────────────────────
 
 #[test]
 fn pooled_string_miss_returns_error() {
@@ -681,6 +681,43 @@ fn pooled_stack_frames_miss_returns_error() {
     })
     .expect("no decode error");
     assert!(got_err, "expected a pool-miss error");
+}
+
+// ── Test 11c: type coercion failure (bool from varint) ───────────────────────
+
+#[derive(Debug, Deserialize, PartialEq)]
+struct WantsBool {
+    timestamp_ns: u64,
+    flag: bool,
+}
+
+#[test]
+fn type_coercion_bool_from_varint_returns_error() {
+    let mut enc = Encoder::new();
+    let schema = enc
+        .register_schema("WantsBool", vec![FieldDef::new("flag", FieldType::Varint)])
+        .unwrap();
+    // Wire has a varint where the struct expects a bool.
+    enc.write_event(
+        &schema,
+        &[FieldValue::Varint(1_000), FieldValue::Varint(42)],
+    )
+    .unwrap();
+    let bytes = enc.finish();
+
+    let mut dec = Decoder::new(&bytes).expect("valid header");
+    let mut got_err = false;
+    dec.for_each_event(|raw| {
+        if let Err(e) = raw.deserialize::<WantsBool>() {
+            assert!(
+                e.message().contains("invalid type"),
+                "unexpected error: {e}"
+            );
+            got_err = true;
+        }
+    })
+    .expect("no decode error");
+    assert!(got_err, "expected a type coercion error");
 }
 
 // ── Test 12: DynamicList deserializes into Vec<T> ───────────────────────────
@@ -843,5 +880,51 @@ fn dynamic_map_deserializes_to_struct() {
             status: 200,
             path: "/api/users".into(),
         }
+    );
+}
+
+// ── Test 16: StringMap deserializes into Vec<(String, String)> ─────────────
+
+/// `Vec<(String, String)>` is the natural Rust shape for the wire-format
+/// `StringMap` when callers want order-preserving entries instead of a
+/// `HashMap`. The deserializer should present a `StringMap` as a sequence of
+/// (key, value) pairs so that this just works without `#[serde(deserialize_with = "...")]`
+/// helpers.
+#[derive(Debug, Deserialize, PartialEq)]
+struct WithStringMapAsVec {
+    timestamp_ns: u64,
+    headers: Vec<(String, String)>,
+}
+
+#[test]
+fn string_map_deserializes_to_vec_of_tuples() {
+    let mut enc = Encoder::new();
+    let schema = enc
+        .register_schema(
+            "WithStringMapAsVec",
+            vec![FieldDef::new("headers", FieldType::StringMap)],
+        )
+        .unwrap();
+    enc.write_event(
+        &schema,
+        &[
+            FieldValue::Varint(5_000),
+            FieldValue::StringMap(vec![
+                ("content-type".into(), "application/json".into()),
+                ("x-request-id".into(), "abc123".into()),
+            ]),
+        ],
+    )
+    .unwrap();
+    let bytes = enc.finish();
+
+    let event: WithStringMapAsVec = decode_first(&bytes);
+    assert_eq!(event.timestamp_ns, 5_000);
+    assert_eq!(
+        event.headers,
+        vec![
+            ("content-type".to_string(), "application/json".to_string()),
+            ("x-request-id".to_string(), "abc123".to_string()),
+        ]
     );
 }

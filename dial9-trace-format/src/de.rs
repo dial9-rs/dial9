@@ -71,7 +71,7 @@ pub struct DeserError(String);
 
 impl DeserError {
     /// Construct a new error with the given message.
-    pub fn new(msg: impl Into<String>) -> Self {
+    pub(crate) fn new(msg: impl Into<String>) -> Self {
         Self(msg.into())
     }
 
@@ -233,17 +233,12 @@ impl<'de, 'a, 'f> MapAccess<'de> for RawEventMapAccess<'a, 'f> {
         }
 
         let synthetic = self.synthetic_offset();
-        let key: &str;
-        let pending: PendingValue<'a, 'f>;
-        match self.index {
-            0 => {
-                key = "event";
-                pending = PendingValue::Name(self.name);
-            }
-            1 if self.timestamp_ns.is_some() => {
-                key = "timestamp_ns";
-                pending = PendingValue::Timestamp(self.timestamp_ns.unwrap());
-            }
+        let (key, pending) = match self.index {
+            0 => ("event", PendingValue::Name(self.name)),
+            1 if self.timestamp_ns.is_some() => (
+                "timestamp_ns",
+                PendingValue::Timestamp(self.timestamp_ns.unwrap()),
+            ),
             i => {
                 let field_idx = i - synthetic;
                 let field_def = self.schema.fields().get(field_idx).ok_or_else(|| {
@@ -258,14 +253,16 @@ impl<'de, 'a, 'f> MapAccess<'de> for RawEventMapAccess<'a, 'f> {
                         self.name
                     ))
                 })?;
-                key = field_def.name();
-                pending = PendingValue::Field {
-                    value,
-                    string_pool: self.string_pool,
-                    stack_pool: self.stack_pool,
-                };
+                (
+                    field_def.name(),
+                    PendingValue::Field {
+                        value,
+                        string_pool: self.string_pool,
+                        stack_pool: self.stack_pool,
+                    },
+                )
             }
-        }
+        };
 
         self.pending_value = Some(pending);
         self.index += 1;
@@ -413,6 +410,13 @@ impl<'de, 'a, 'f> de::Deserializer<'de> for FieldValueDeserializer<'a, 'f> {
             FieldValueRef::Bytes(v) => visitor.visit_seq(U64SeqAccess {
                 iter: v.iter().map(|&b| b as u64),
             }),
+            // A `StringMap` field can also be deserialized as a sequence of
+            // `(key, value)` tuples. This makes `Vec<(String, String)>` work
+            // naturally without `#[serde(deserialize_with = "...")]`, which is
+            // useful for ordered or duplicate-tolerant key-value data.
+            FieldValueRef::StringMap(map) => {
+                visitor.visit_seq(StringMapSeqAccess { iter: map.iter() })
+            }
             _ => self.deserialize_any(visitor),
         }
     }
@@ -527,12 +531,117 @@ impl<'de, 'a> MapAccess<'de> for StringMapAccess<'a> {
         let v = self
             .pending_value
             .take()
-            .expect("next_value without next_key");
+            .ok_or_else(|| DeserError::new("next_value called without preceding next_key"))?;
         seed.deserialize(StrDeserializer(v))
     }
 
     fn size_hint(&self) -> Option<usize> {
         Some(self.iter.len())
+    }
+}
+
+// ── Helpers: SeqAccess for StringMap (for `Vec<(String, String)>` decode) ──
+
+/// `SeqAccess` over a `StringMapIter`, yielding each `(key, value)` pair as
+/// a 2-element tuple deserializer. Together with [`StringMapPairDeserializer`]
+/// this lets `StringMap` fields decode into `Vec<(String, String)>` (or any
+/// shape serde can produce from a sequence of 2-tuples).
+struct StringMapSeqAccess<'a> {
+    iter: StringMapIter<'a>,
+}
+
+impl<'de, 'a> SeqAccess<'de> for StringMapSeqAccess<'a> {
+    type Error = DeserError;
+
+    fn next_element_seed<T: DeserializeSeed<'de>>(
+        &mut self,
+        seed: T,
+    ) -> Result<Option<T::Value>, Self::Error> {
+        match self.iter.next() {
+            Some((k, v)) => seed
+                .deserialize(StringMapPairDeserializer { k, v })
+                .map(Some),
+            None => Ok(None),
+        }
+    }
+
+    fn size_hint(&self) -> Option<usize> {
+        Some(self.iter.len())
+    }
+}
+
+/// Deserializer for one `(key, value)` pair of a `StringMap`, presented as
+/// a 2-element sequence so that `(String, String)` (and other 2-tuple shapes)
+/// decode naturally.
+struct StringMapPairDeserializer<'a> {
+    k: &'a str,
+    v: &'a str,
+}
+
+impl<'de, 'a> de::Deserializer<'de> for StringMapPairDeserializer<'a> {
+    type Error = DeserError;
+
+    fn deserialize_any<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
+        // Pairs are tuples by default — present as a 2-element sequence.
+        visitor.visit_seq(StringMapPairSeqAccess {
+            entries: [Some(self.k), Some(self.v)],
+            idx: 0,
+        })
+    }
+
+    fn deserialize_seq<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
+        self.deserialize_any(visitor)
+    }
+
+    fn deserialize_tuple<V: Visitor<'de>>(
+        self,
+        _len: usize,
+        visitor: V,
+    ) -> Result<V::Value, Self::Error> {
+        self.deserialize_any(visitor)
+    }
+
+    fn deserialize_tuple_struct<V: Visitor<'de>>(
+        self,
+        _name: &'static str,
+        _len: usize,
+        visitor: V,
+    ) -> Result<V::Value, Self::Error> {
+        self.deserialize_any(visitor)
+    }
+
+    serde::forward_to_deserialize_any! {
+        bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char
+        str string bytes byte_buf option unit unit_struct newtype_struct
+        map struct enum identifier ignored_any
+    }
+}
+
+/// `SeqAccess` walking the two entries `[key, value]` of a `StringMap` pair.
+struct StringMapPairSeqAccess<'a> {
+    entries: [Option<&'a str>; 2],
+    idx: usize,
+}
+
+impl<'de, 'a> SeqAccess<'de> for StringMapPairSeqAccess<'a> {
+    type Error = DeserError;
+
+    fn next_element_seed<T: DeserializeSeed<'de>>(
+        &mut self,
+        seed: T,
+    ) -> Result<Option<T::Value>, Self::Error> {
+        if self.idx >= self.entries.len() {
+            return Ok(None);
+        }
+        let entry = self.entries[self.idx]
+            .take()
+            .ok_or_else(|| DeserError::new("tuple pair entry already consumed"))?;
+        self.idx += 1;
+        seed.deserialize(StrDeserializer(entry)).map(Some)
+    }
+
+    fn size_hint(&self) -> Option<usize> {
+        Some(self.entries.len() - self.idx)
     }
 }
 
@@ -578,7 +687,7 @@ where
         let value = self
             .pending_value
             .take()
-            .expect("next_value without next_key");
+            .ok_or_else(|| DeserError::new("next_value called without preceding next_key"))?;
         seed.deserialize(FieldValueDeserializer {
             value,
             string_pool: self.string_pool,
