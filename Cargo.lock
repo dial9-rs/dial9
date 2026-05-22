@@ -1571,6 +1571,7 @@ dependencies = [
 name = "dial9-trace-format"
 version = "0.4.0"
 dependencies = [
+ "dial9-trace-format",
  "dial9-trace-format-derive",
  "flate2",
  "iai-callgrind",

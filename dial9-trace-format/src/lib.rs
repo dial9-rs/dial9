@@ -17,12 +17,16 @@
 //!   trait, and the [`EventEncoder`] used by derived code
 
 pub mod codec;
+#[cfg(feature = "serde-deserialize")]
+pub mod de;
 pub mod decoder;
 pub mod encoder;
 pub(crate) mod leb128;
 pub mod schema;
 pub mod types;
 
+#[cfg(feature = "serde-deserialize")]
+pub use de::DeserError;
 pub use dial9_trace_format_derive::TraceEvent;
 pub use types::DynamicListRef;
 pub use types::DynamicMapRef;

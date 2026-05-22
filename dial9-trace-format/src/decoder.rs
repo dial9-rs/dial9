@@ -70,6 +70,26 @@ impl<'a, 'f> RawEvent<'a, 'f> {
     pub fn field_names(&self) -> impl Iterator<Item = &'f str> {
         self.schema.fields.iter().map(|f| f.name.as_str())
     }
+
+    /// Deserialize this event into a typed value `E` via serde.
+    ///
+    /// The deserializer presents the event as a flat map containing:
+    ///
+    /// 1. `"event"` → the schema name (the discriminant for
+    ///    `#[serde(tag = "event")]`).
+    /// 2. `"timestamp_ns"` → the absolute frame-header timestamp (only if
+    ///    the schema has `has_timestamp = true`).
+    /// 3. One entry per schema field, keyed by field name.
+    ///
+    /// Pool-resolved values appear as their resolved form: `PooledString`
+    /// presents as a string, `PooledStackFrames` presents as a sequence of
+    /// `u64`. See [`crate::de`] for details.
+    ///
+    /// Available only when the `serde-deserialize` feature is enabled.
+    #[cfg(feature = "serde-deserialize")]
+    pub fn deserialize<E: serde::de::DeserializeOwned>(&self) -> Result<E, crate::de::DeserError> {
+        crate::de::from_raw_event(self)
+    }
 }
 
 /// A map from interned string IDs to their resolved string values.

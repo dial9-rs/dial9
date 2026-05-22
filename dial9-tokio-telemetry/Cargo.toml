@@ -107,6 +107,9 @@ dial9-tokio-telemetry = { path = ".", features = [
     "unstable-events",
     "worker-s3",
 ] }
+# Tests use the serde-based decoder API. Enabling the feature only here keeps
+# it out of the production build of the library.
+dial9-trace-format = { workspace = true, features = ["serde-deserialize"] }
 assert2 = { workspace = true }
 criterion = "0.5"
 clap = { version = "4", features = ["derive", "env"] }
