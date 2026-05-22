@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.11](https://github.com/dial9-rs/dial9/compare/dial9-tokio-telemetry-v0.3.10...dial9-tokio-telemetry-v0.3.11) - 2026-05-22
+
+### Added
+
+- composable user hooks for Tokio runtime callbacks ([#297](https://github.com/dial9-rs/dial9/pull/297)) ([#439](https://github.com/dial9-rs/dial9/pull/439))
+- add ring-buffer scaffold for memory profiling ([#428](https://github.com/dial9-rs/dial9/pull/428))
+- config from env ([#406](https://github.com/dial9-rs/dial9/pull/406))
+- add AllocEvent and FreeEvent to trace format ([#420](https://github.com/dial9-rs/dial9/pull/420))
+- *(viewer)* add custom events view ([#438](https://github.com/dial9-rs/dial9/pull/438))
+
+### Fixed
+
+- detect block_in_place gaps and correct CPU sample worker attribution ([#436](https://github.com/dial9-rs/dial9/pull/436))
+- enforce RotatingWriter retention across restarts ([#414](https://github.com/dial9-rs/dial9/pull/414))
+- *(viewer)* correct KSD navigation time calculation ([#422](https://github.com/dial9-rs/dial9/pull/422)) ([#432](https://github.com/dial9-rs/dial9/pull/432))
+
+### Other
+
+- inline EventWriter, delete the shallow wrapper ([#434](https://github.com/dial9-rs/dial9/pull/434))
+- split recorder/mod.rs into focused modules ([#433](https://github.com/dial9-rs/dial9/pull/433))
+- extract sampling primitives into shared module ([#418](https://github.com/dial9-rs/dial9/pull/418))
+- Extract Source trait for flush-thread data sources ([#408](https://github.com/dial9-rs/dial9/pull/408))
+- *(design)* in-memory pipeline ([#389](https://github.com/dial9-rs/dial9/pull/389))
+- Add connection-established / closed events to the demo trace ([#441](https://github.com/dial9-rs/dial9/pull/441))
+
 ## [0.3.10](https://github.com/dial9-rs/dial9/compare/dial9-tokio-telemetry-v0.3.9...dial9-tokio-telemetry-v0.3.10) - 2026-05-15
 
 ### Added
