@@ -7,6 +7,10 @@ use std::sync::atomic::Ordering;
 
 /// Default maximum frames captured per allocation. 128 × 8 B = 1 KiB stack budget.
 pub(crate) const DEFAULT_MAX_FRAMES: usize = 128;
+const _: () = assert!(
+    DEFAULT_MAX_FRAMES <= u8::MAX as usize,
+    "DEFAULT_MAX_FRAMES must fit in u8 (used as RawAlloc::frame_count)"
+);
 
 /// Default number of `RawAlloc` slots. ~4 MiB total at 128 frames.
 pub(crate) const DEFAULT_ALLOC_QUEUE_CAPACITY: usize = 4096;

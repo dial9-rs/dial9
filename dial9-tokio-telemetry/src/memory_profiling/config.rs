@@ -71,6 +71,15 @@ pub struct MemoryProfilingConfig {
     sample_rate_bytes: u64,
 
     /// Whether to track the liveset for leak detection. Default `false`.
+    ///
+    /// When enabled, a `RawFree` is pushed into the free queue on
+    /// **every** deallocation (not just sampled ones). At very high
+    /// dealloc rates the free queue can overflow; overflowed frees are
+    /// silently dropped (counted in `dropped_frees`). A dropped free
+    /// for a previously-sampled allocation means its liveset entry
+    /// persists, inflating the reported live set until the next flush
+    /// cycle or process exit. Size the `ring_capacity` accordingly for
+    /// high-throughput services.
     #[builder(default = false)]
     track_liveset: bool,
 

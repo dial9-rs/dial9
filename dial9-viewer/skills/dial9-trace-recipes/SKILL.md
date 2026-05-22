@@ -473,18 +473,24 @@ The same formula handles all size regimes:
 - For `s ≈ R`: each sample contributes ~`1.58 s` bytes.
 - For `s >> R` (huge allocs): each sample contributes ~`s` bytes.
 
-`R` is **not currently embedded in the trace**. Pass it explicitly to
-your analysis (a CLI flag, a constant per service), or inject it into
-segment metadata at install time via
-`with_segment_metadata([("dial9.memory_profiling.sample_rate_bytes",
-rate.to_string())])` and read it from `segmentMetadata` after parsing.
+`R` is recorded in segment metadata as `memory.sample_rate_bytes`.
+Read it from `trace.segmentMetadata` after parsing:
+
+```javascript
+const meta = Object.fromEntries(trace.segmentMetadata || []);
+const SAMPLE_RATE_BYTES = Number(meta['memory.sample_rate_bytes']) || 512 * 1024;
+```
+
+If analysing traces from older versions that lack this field, pass `R`
+explicitly (a CLI flag or a constant per service).
 
 ### Total bytes allocated by call site
 
 ```javascript
 const { parseTrace, symbolizeChain, formatFrame } = require('./trace_parser.js');
 
-const SAMPLE_RATE_BYTES = 512 * 1024;  // pull from your deployment config
+// Read R from segment metadata (falls back to default for old traces)
+let SAMPLE_RATE_BYTES = 512 * 1024;
 
 function inverseProb(size, rate) {
   // 1 / (1 - exp(-size/rate)). For very small size/rate, this approaches

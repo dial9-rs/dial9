@@ -77,8 +77,8 @@ Per-thread byte counter `next_sample_bytes`. On every allocation of size
 ```rust
 fn on_alloc(size: usize) {
     // i64: must be signed — subtracting a large `size` from a small
-    // remaining counter must go negative, not wrap around.
-    let remaining = next_sample_bytes.get() - size as i64;
+    // remaining counter saturates at i64::MIN rather than wrapping.
+    let remaining = next_sample_bytes.get().saturating_sub(size as i64);
     if remaining > 0 {
         next_sample_bytes.set(remaining);
         return;               // fast path: one sub, one branch, done
@@ -294,18 +294,13 @@ can be off by orders of magnitude.
 #### Where `R` comes from
 
 `sample_rate_bytes` is set at install time on `MemoryProfilingConfig`
-and is **not currently embedded in the trace** itself. Analysis
-tooling needs to know the rate that was active when the trace was
-recorded. Two patterns work:
+and is written into segment metadata as `memory.sample_rate_bytes`.
+Analysis tooling reads it from `TraceReader::segment_metadata` (Rust)
+or `trace.segmentMetadata` (JS). For traces recorded before this
+field was added, fall back to the deployment's configured rate or the
+default (512 KiB).
 
-- **Pass it explicitly to your analysis** (e.g., a flag on the script
-  or a constant per service).
-- **Inject it into segment metadata** at install time using
-  `with_segment_metadata([("dial9.memory_profiling.sample_rate_bytes",
-  rate.to_string())])`. Analysis can then read it from
-  `TraceReader::segment_metadata`.
-
-Always pull `R` from a recorded source rather than a build-time
+Always pull `R` from segment metadata rather than a build-time
 constant — the default may change and operators may override it per
 deployment.
 

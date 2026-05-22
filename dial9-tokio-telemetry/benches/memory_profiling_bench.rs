@@ -21,7 +21,7 @@
 //!   BENCH_CONFIG=sampling_only cargo bench --bench memory_profiling_bench --features memory-profiling
 //!   BENCH_CONFIG=sampling_with_liveset cargo bench --bench memory_profiling_bench --features memory-profiling
 
-use criterion::{Criterion, Throughput, criterion_group};
+use criterion::{Criterion, Throughput};
 use dial9_tokio_telemetry::memory_profiling::Dial9Allocator;
 use std::alloc::{GlobalAlloc, Layout};
 
@@ -93,12 +93,6 @@ fn bench_mixed_sizes(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(
-    benches,
-    bench_tight_alloc,
-    bench_realloc_growth,
-    bench_mixed_sizes
-);
 
 fn install_profiler() {
     use dial9_tokio_telemetry::memory_profiling::{MemoryProfiler, MemoryProfilingConfig};
@@ -141,6 +135,9 @@ fn main() {
         _ => {} // no profiler — measures baseline OnceLock::get() cost
     }
 
-    benches();
-    Criterion::default().configure_from_args().final_summary();
+    let mut criterion = Criterion::default().configure_from_args();
+    bench_tight_alloc(&mut criterion);
+    bench_realloc_growth(&mut criterion);
+    bench_mixed_sizes(&mut criterion);
+    criterion.final_summary();
 }

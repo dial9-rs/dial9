@@ -142,11 +142,7 @@ pub(crate) fn on_alloc(inner: &MemoryProfilerInner, ptr: *mut u8, size: usize) {
         // handle them defensively rather than wrapping.
         let size_i64 = i64::try_from(size).unwrap_or(i64::MAX);
 
-        // OK: intentionally allowed to go negative — the design uses signed arithmetic
-        // so that a large allocation exceeding the remaining budget produces a negative value,
-        // which triggers sampling on the next line.
-        #[allow(clippy::arithmetic_side_effects)]
-        let remaining = state.next_sample_bytes - size_i64;
+        let remaining = state.next_sample_bytes.saturating_sub(size_i64);
         if remaining > 0 {
             state.next_sample_bytes = remaining;
             return;
