@@ -159,14 +159,22 @@ pub(super) fn run_flush_loop(
             }
         }
 
-        // Merge user-provided metadata with runtime→worker mappings
-        // so the next rotated segment is fully self-describing.
+        // Merge user-provided metadata with runtime→worker mappings and
+        // source metadata so the next rotated segment is fully self-describing.
         let contexts = shared.contexts.lock().unwrap().clone();
         let runtime_entries: Vec<(String, String)> =
             contexts.iter().filter_map(|c| c.metadata_entry()).collect();
-        if !runtime_entries.is_empty() {
+        let source_entries: Vec<(String, String)> = shared
+            .sources
+            .lock()
+            .unwrap()
+            .iter()
+            .flat_map(|s| s.segment_metadata())
+            .collect();
+        if !runtime_entries.is_empty() || !source_entries.is_empty() {
             let mut merged = static_metadata.clone();
             merged.extend(runtime_entries);
+            merged.extend(source_entries);
             writer.update_segment_metadata(merged);
         }
 

@@ -34,4 +34,10 @@ pub(crate) trait Source: Send {
     /// Called when a thread stops. Used by per-thread sources like SchedProfiler
     /// to stop tracking the current thread.
     fn on_thread_stop(&mut self) {}
+
+    /// Key-value entries this source contributes to segment metadata.
+    /// Called each flush cycle alongside runtime context entries.
+    fn segment_metadata(&self) -> Vec<(String, String)> {
+        Vec::new()
+    }
 }

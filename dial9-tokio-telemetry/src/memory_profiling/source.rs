@@ -29,6 +29,7 @@ struct LivesetEntry {
 pub(crate) struct MemoryProfileSource {
     rings: Arc<RingBuffers>,
     liveset: Option<HashMap<u64, LivesetEntry>>,
+    sample_rate_bytes: u64,
 }
 
 impl MemoryProfileSource {
@@ -37,10 +38,15 @@ impl MemoryProfileSource {
     /// `track_liveset = true` enables `FreeEvent` emission (matched against
     /// previously-sampled allocations); `false` means frees are silently
     /// dropped on the consumer side.
-    pub(crate) fn new(rings: Arc<RingBuffers>, track_liveset: bool) -> Self {
+    pub(crate) fn new(
+        rings: Arc<RingBuffers>,
+        track_liveset: bool,
+        sample_rate_bytes: u64,
+    ) -> Self {
         Self {
             rings,
             liveset: track_liveset.then(HashMap::new),
+            sample_rate_bytes,
         }
     }
 
@@ -151,6 +157,13 @@ impl Source for MemoryProfileSource {
     fn name(&self) -> &'static str {
         "memory"
     }
+
+    fn segment_metadata(&self) -> Vec<(String, String)> {
+        vec![(
+            "memory.sample_rate_bytes".to_string(),
+            self.sample_rate_bytes.to_string(),
+        )]
+    }
 }
 
 #[cfg(test)]
@@ -221,6 +234,7 @@ mod tests {
         shared.push_source(Box::new(MemoryProfileSource::new(
             Arc::clone(&rings),
             false,
+            512 * 1024,
         )));
 
         let events = flush_and_collect(&shared);
@@ -257,7 +271,11 @@ mod tests {
         rings.free_queue.push(make_raw_free(0x2000, 300)).ok();
 
         let shared = new_shared();
-        shared.push_source(Box::new(MemoryProfileSource::new(Arc::clone(&rings), true)));
+        shared.push_source(Box::new(MemoryProfileSource::new(
+            Arc::clone(&rings),
+            true,
+            512 * 1024,
+        )));
 
         let events = flush_and_collect(&shared);
         let allocs: Vec<_> = events
@@ -294,7 +312,11 @@ mod tests {
         rings.free_queue.push(make_raw_free(0x9999, 400)).ok();
 
         let shared = new_shared();
-        shared.push_source(Box::new(MemoryProfileSource::new(Arc::clone(&rings), true)));
+        shared.push_source(Box::new(MemoryProfileSource::new(
+            Arc::clone(&rings),
+            true,
+            512 * 1024,
+        )));
 
         let events = flush_and_collect(&shared);
         let frees: Vec<_> = events
@@ -317,6 +339,7 @@ mod tests {
         shared.push_source(Box::new(MemoryProfileSource::new(
             Arc::clone(&rings),
             false,
+            512 * 1024,
         )));
 
         let events = flush_and_collect(&shared);
@@ -337,7 +360,11 @@ mod tests {
         let rings = rings(16, 16);
 
         let shared = new_shared();
-        shared.push_source(Box::new(MemoryProfileSource::new(Arc::clone(&rings), true)));
+        shared.push_source(Box::new(MemoryProfileSource::new(
+            Arc::clone(&rings),
+            true,
+            512 * 1024,
+        )));
 
         // First flush: only the alloc
         rings
@@ -417,7 +444,11 @@ mod tests {
             .ok();
 
         let shared = new_shared();
-        shared.push_source(Box::new(MemoryProfileSource::new(Arc::clone(&rings), true)));
+        shared.push_source(Box::new(MemoryProfileSource::new(
+            Arc::clone(&rings),
+            true,
+            512 * 1024,
+        )));
 
         let events = flush_and_collect(&shared);
         let allocs: Vec<&TelemetryEvent> = events
@@ -501,7 +532,11 @@ mod tests {
         rings.alloc_queue.push(make_raw_alloc(0x6000, 512, t3)).ok();
 
         let shared = new_shared();
-        shared.push_source(Box::new(MemoryProfileSource::new(Arc::clone(&rings), true)));
+        shared.push_source(Box::new(MemoryProfileSource::new(
+            Arc::clone(&rings),
+            true,
+            512 * 1024,
+        )));
         let events = flush_and_collect(&shared);
 
         let frees: Vec<_> = events
@@ -541,5 +576,20 @@ mod tests {
             }
             _ => unreachable!(),
         }
+    }
+
+    #[test]
+    fn segment_metadata_contains_sample_rate_bytes() {
+        use crate::telemetry::recorder::source::Source;
+        let rings = rings(16, 16);
+        let source = MemoryProfileSource::new(Arc::clone(&rings), false, 1024 * 1024);
+        let meta = source.segment_metadata();
+        assert_eq!(
+            meta,
+            vec![(
+                "memory.sample_rate_bytes".to_string(),
+                "1048576".to_string()
+            )]
+        );
     }
 }
