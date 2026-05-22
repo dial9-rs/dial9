@@ -34,8 +34,4 @@ pub(crate) trait Source: Send {
     /// Called when a thread stops. Used by per-thread sources like SchedProfiler
     /// to stop tracking the current thread.
     fn on_thread_stop(&mut self) {}
-
-    /// Downcast to `&dyn Any` for test assertions on internal state.
-    #[allow(dead_code)]
-    fn as_any(&self) -> &dyn std::any::Any;
 }

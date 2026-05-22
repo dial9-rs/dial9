@@ -213,10 +213,6 @@ impl Source for CpuProfiler {
     fn name(&self) -> &'static str {
         "cpu_profile"
     }
-
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
 }
 
 impl Source for SchedProfiler {
@@ -253,9 +249,5 @@ impl Source for SchedProfiler {
 
     fn name(&self) -> &'static str {
         "sched"
-    }
-
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
     }
 }

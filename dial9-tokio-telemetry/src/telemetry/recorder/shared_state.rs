@@ -650,10 +650,6 @@ mod shuttle_tests {
             "mock"
         }
 
-        fn as_any(&self) -> &dyn std::any::Any {
-            self
-        }
-
         // TODO: exercise on_worker_thread_start/on_thread_stop once shuttle
         // tests include a Tokio runtime.
     }

@@ -151,10 +151,6 @@ impl Source for MemoryProfileSource {
     fn name(&self) -> &'static str {
         "memory"
     }
-
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
 }
 
 #[cfg(test)]
@@ -459,19 +455,29 @@ mod tests {
         }
 
         // The second allocation must remain live in the liveset.
-        // Access the source directly to check internal state.
-        let sources = shared.sources.lock().unwrap();
-        let source = sources[0]
-            .as_any()
-            .downcast_ref::<MemoryProfileSource>()
-            .expect("source should be MemoryProfileSource");
-        let liveset = source.liveset.as_ref().expect("liveset is on");
-        assert_eq!(liveset.len(), 1, "second alloc should still be live");
-        let entry = liveset
-            .get(&0x5000)
-            .expect("addr 0x5000 should be in liveset");
-        assert_eq!(entry.size, 512);
-        assert_eq!(entry.timestamp_ns, 300);
+        // Prove it by freeing the address in a second flush cycle and checking
+        // the emitted FreeEvent carries the second alloc's size and timestamp.
+        rings.free_queue.push(make_raw_free(0x5000, 400)).ok();
+        let events2 = flush_and_collect(&shared);
+        let frees2: Vec<_> = events2
+            .iter()
+            .filter(|e| matches!(e, TelemetryEvent::Free { .. }))
+            .collect();
+        assert_eq!(frees2.len(), 1, "second flush should emit one free");
+        match frees2[0] {
+            TelemetryEvent::Free {
+                size,
+                alloc_timestamp_nanos,
+                ..
+            } => {
+                assert_eq!(*size, 512, "free should match second alloc size");
+                assert_eq!(
+                    *alloc_timestamp_nanos, 300,
+                    "free should reference timestamp of second alloc"
+                );
+            }
+            _ => unreachable!(),
+        }
     }
 
     /// Demonstrates that `poll_start_ts_or_now` produces strictly ordered
@@ -516,15 +522,24 @@ mod tests {
         }
 
         // Second alloc remains live.
-        let sources = shared.sources.lock().unwrap();
-        let source = sources[0]
-            .as_any()
-            .downcast_ref::<MemoryProfileSource>()
-            .expect("source should be MemoryProfileSource");
-        let liveset = source.liveset.as_ref().unwrap();
-        assert_eq!(liveset.len(), 1);
-        let entry = liveset.get(&0x6000).unwrap();
-        assert_eq!(entry.size, 512);
-        assert_eq!(entry.timestamp_ns, t3);
+        // Prove it by freeing the address in a second flush cycle.
+        rings.free_queue.push(make_raw_free(0x6000, t3 + 1)).ok();
+        let events2 = flush_and_collect(&shared);
+        let frees2: Vec<_> = events2
+            .iter()
+            .filter(|e| matches!(e, TelemetryEvent::Free { .. }))
+            .collect();
+        assert_eq!(frees2.len(), 1);
+        match frees2[0] {
+            TelemetryEvent::Free {
+                size,
+                alloc_timestamp_nanos,
+                ..
+            } => {
+                assert_eq!(*size, 512, "free should match second alloc size");
+                assert_eq!(*alloc_timestamp_nanos, t3);
+            }
+            _ => unreachable!(),
+        }
     }
 }
