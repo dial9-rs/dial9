@@ -93,7 +93,6 @@ fn bench_mixed_sizes(c: &mut Criterion) {
     group.finish();
 }
 
-
 fn install_profiler() {
     use dial9_tokio_telemetry::memory_profiling::{MemoryProfiler, MemoryProfilingConfig};
     use dial9_tokio_telemetry::telemetry::{NullWriter, TracedRuntime};
