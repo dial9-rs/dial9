@@ -18,6 +18,7 @@ use crate::metrics::{
     Operation, SegmentProcessMetrics, SegmentProcessMetricsGuard, WorkerCycleMetrics,
 };
 use crate::rate_limit::rate_limited;
+use crate::telemetry::writer::{Disk, WriterMode};
 use futures_util::FutureExt;
 use metrique::timers::Timer;
 use metrique_writer::BoxEntrySink;
@@ -25,6 +26,7 @@ use pipeline_metrics::{MetriqueResult, PipelineMetrics, StageMetrics};
 use std::collections::HashMap;
 use std::future::Future;
 use std::io;
+use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -315,11 +317,11 @@ pub trait SegmentProcessor: Send {
 
 /// Closure-scoped builder for assembling a custom processor pipeline.
 ///
-/// Obtained via `with_custom_pipeline(|p| ...)` on the runtime builder.
-/// Built-in processors are reachable through dedicated methods
-/// ([`gzip`](Self::gzip), [`write_back`](Self::write_back),
-/// [`s3`](Self::s3), [`symbolize`](Self::symbolize)); custom processors
-/// are added with [`pipe`](Self::pipe).
+/// Obtained via `with_custom_pipeline(|p| ...)` on the runtime builder. The
+/// `Mode` type parameter binds the pipeline to the writer's storage mode:
+/// disk-only processors like [`write_back`](Self::write_back) are not in
+/// scope on `PipelineBuilder<Memory>`, so wiring write-back into an
+/// in-memory pipeline is a compile error.
 ///
 /// # Example
 ///
@@ -340,14 +342,16 @@ pub trait SegmentProcessor: Send {
 /// builder.with_custom_pipeline(|p| p.pipe(Logger).gzip().write_back())
 /// ```
 #[must_use]
-pub struct PipelineBuilder {
+pub struct PipelineBuilder<Mode: WriterMode = Disk> {
     processors: Vec<Box<dyn SegmentProcessor>>,
+    _marker: PhantomData<Mode>,
 }
 
-impl PipelineBuilder {
+impl<Mode: WriterMode> PipelineBuilder<Mode> {
     pub(crate) fn new() -> Self {
         Self {
             processors: Vec::new(),
+            _marker: PhantomData,
         }
     }
 
@@ -367,14 +371,6 @@ impl PipelineBuilder {
     /// Gzip the segment payload in-memory.
     pub fn gzip(mut self) -> Self {
         self.processors.push(Box::new(GzipCompressor));
-        self
-    }
-
-    /// Write the current payload bytes back to disk. When the payload has
-    /// been gzipped earlier in the pipeline, the file is written with a
-    /// `.gz` suffix and the original sealed segment is removed.
-    pub fn write_back(mut self) -> Self {
-        self.processors.push(Box::new(WriteBackProcessor));
         self
     }
 
@@ -415,7 +411,18 @@ impl PipelineBuilder {
     }
 }
 
-impl std::fmt::Debug for PipelineBuilder {
+/// Disk-only methods on the pipeline builder.
+impl PipelineBuilder<Disk> {
+    /// Write the current payload bytes back to disk. When the payload has
+    /// been gzipped earlier in the pipeline, the file is written with a
+    /// `.gz` suffix and the original sealed segment is removed.
+    pub fn write_back(mut self) -> Self {
+        self.processors.push(Box::new(WriteBackProcessor));
+        self
+    }
+}
+
+impl<Mode: WriterMode> std::fmt::Debug for PipelineBuilder<Mode> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PipelineBuilder")
             .field("len", &self.processors.len())

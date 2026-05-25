@@ -21,7 +21,10 @@ mod mode_sealed {
 
 /// Marker trait for `RotatingWriter`'s backend mode. Sealed: only [`Disk`]
 /// and [`Memory`] implement it.
-pub trait WriterMode: mode_sealed::Sealed + Send + 'static {}
+pub trait WriterMode: mode_sealed::Sealed + Send + 'static {
+    /// Wether the writer mode is disk-backed.
+    const IS_DISK: bool;
+}
 
 /// Disk-backed mode (default).
 #[derive(Debug)]
@@ -34,8 +37,12 @@ pub struct Memory;
 
 impl mode_sealed::Sealed for Disk {}
 impl mode_sealed::Sealed for Memory {}
-impl WriterMode for Disk {}
-impl WriterMode for Memory {}
+impl WriterMode for Disk {
+    const IS_DISK: bool = true;
+}
+impl WriterMode for Memory {
+    const IS_DISK: bool = false;
+}
 
 /// Alias for the disk-backed writer (the default mode).
 pub type DiskWriter = RotatingWriter<Disk>;
@@ -43,7 +50,11 @@ pub type DiskWriter = RotatingWriter<Disk>;
 pub type InMemoryWriter = RotatingWriter<Memory>;
 
 /// Trait for writing encoded telemetry batches to a destination.
-pub trait TraceWriter: Send {
+///
+/// `Mode` ties the writer's storage backend (disk vs in-memory) to the
+/// builder's pipeline mode at the type level. Defaults to [`Disk`] so
+/// custom implementors of this trait need no changes for disk targets.
+pub trait TraceWriter<Mode: WriterMode = Disk>: Send {
     /// Flush buffered data to the underlying storage.
     fn flush(&mut self) -> std::io::Result<()>;
     /// Returns true if the writer rotated to a new file since the last call to this method.
@@ -93,7 +104,7 @@ pub trait TraceWriter: Send {
     }
 }
 
-impl<W: TraceWriter + ?Sized> TraceWriter for Box<W> {
+impl<Mode: WriterMode, W: TraceWriter<Mode> + ?Sized> TraceWriter<Mode> for Box<W> {
     fn flush(&mut self) -> std::io::Result<()> {
         (**self).flush()
     }
@@ -720,7 +731,7 @@ impl<M: WriterMode> RotatingWriter<M> {
     }
 }
 
-impl<M: WriterMode> TraceWriter for RotatingWriter<M> {
+impl<M: WriterMode> TraceWriter<M> for RotatingWriter<M> {
     #[allow(private_interfaces)]
     fn fs_handle(&self) -> Option<Arc<Fs>> {
         Some(Arc::clone(&self.fs))

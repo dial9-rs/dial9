@@ -1374,7 +1374,7 @@ mod tests {
     #[cfg(feature = "worker-s3")]
     #[test]
     fn with_s3_client_then_with_s3_uploader_preserves_client() {
-        use crate::background_task::s3::S3Config;
+        use crate::{background_task::s3::S3Config, telemetry::Disk};
 
         fn dummy_client() -> aws_sdk_s3::Client {
             let conf = aws_sdk_s3::Config::builder()
@@ -1397,7 +1397,7 @@ mod tests {
 
         // Order A: client set after the uploader — already worked.
         let mut builder = TracedRuntime::builder()
-            .with_s3_uploader(cfg("a"))
+            .with_s3_uploader::<Disk>(cfg("a"))
             .with_s3_client(dummy_client());
         match &mut builder.pipeline {
             PipelineConfig::S3(u) => {
@@ -1412,7 +1412,7 @@ mod tests {
         // Order B: client set first, then a follow-up `with_s3_uploader`. The
         // replacement must carry the previously-bound client across.
         let mut builder = TracedRuntime::builder()
-            .with_s3_uploader(cfg("a"))
+            .with_s3_uploader::<Disk>(cfg("a"))
             .with_s3_client(dummy_client())
             .with_s3_uploader(cfg("b"));
         match &mut builder.pipeline {
@@ -1433,6 +1433,7 @@ mod tests {
     /// `with_segment_metadata`.
     mod segment_metadata_routing {
         use super::*;
+        use crate::telemetry::writer::Disk;
 
         fn entries<P, M>(builder: &TracedRuntimeBuilder<P, M>) -> &[(String, String)] {
             &builder.segment_metadata
@@ -1451,7 +1452,7 @@ mod tests {
         #[cfg(feature = "worker-s3")]
         #[test]
         fn s3_preset_populates_from_config() {
-            let builder = TracedRuntime::builder().with_s3_uploader(s3_cfg());
+            let builder = TracedRuntime::builder().with_s3_uploader::<Disk>(s3_cfg());
             let m: std::collections::HashMap<&str, &str> = entries(&builder)
                 .iter()
                 .map(|(k, v)| (k.as_str(), v.as_str()))
@@ -1471,7 +1472,7 @@ mod tests {
                 .boot_id("other-boot")
                 .build();
             let builder = TracedRuntime::builder()
-                .with_s3_uploader(s3_cfg())
+                .with_s3_uploader::<Disk>(s3_cfg())
                 .with_s3_uploader(cfg2);
             let m: std::collections::HashMap<&str, &str> = entries(&builder)
                 .iter()
@@ -1532,7 +1533,7 @@ mod tests {
         fn with_segment_metadata_after_s3_overrides_preset() {
             let custom = vec![("env".to_string(), "prod".to_string())];
             let builder = TracedRuntime::builder()
-                .with_s3_uploader(s3_cfg())
+                .with_s3_uploader::<Disk>(s3_cfg())
                 .with_segment_metadata(custom.clone());
             assert_eq!(entries(&builder), custom.as_slice());
         }
@@ -1544,7 +1545,7 @@ mod tests {
         fn s3_after_with_segment_metadata_overwrites() {
             let builder = TracedRuntime::builder()
                 .with_segment_metadata(vec![("env".into(), "prod".into())])
-                .with_s3_uploader(s3_cfg());
+                .with_s3_uploader::<Disk>(s3_cfg());
             let m: std::collections::HashMap<&str, &str> = entries(&builder)
                 .iter()
                 .map(|(k, v)| (k.as_str(), v.as_str()))
