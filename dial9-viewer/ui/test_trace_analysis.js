@@ -887,6 +887,35 @@ async function main() {
     pass("Open PollStart at trace end is discarded (no phantom long poll)");
   }
 
+  // ── Block-in-place active-span suppression ──
+
+  function testBlockInPlaceActiveSpanSuppression() {
+    // Synthetic events: worker 0 unparks on tid=42, then parks on tid=99
+    // (a block_in_place handoff). The active span [10, 50) crosses the gap
+    // and must be discarded. A subsequent normal active span [60, 70) on
+    // tid=99 should be preserved.
+    const syntheticEvents = [
+      { eventType: EVENT_TYPES.WorkerUnpark, timestamp: 10, workerId: 0, tid: 42, cpuTime: 100, schedWait: 0, localQueue: 0, globalQueue: 0, taskId: 0, spawnLocId: null, spawnLoc: null },
+      { eventType: EVENT_TYPES.WorkerPark, timestamp: 50, workerId: 0, tid: 99, cpuTime: 500, localQueue: 0, globalQueue: 0, schedWait: 0, taskId: 0, spawnLocId: null, spawnLoc: null },
+      { eventType: EVENT_TYPES.WorkerUnpark, timestamp: 60, workerId: 0, tid: 99, cpuTime: 600, schedWait: 0, localQueue: 0, globalQueue: 0, taskId: 0, spawnLocId: null, spawnLoc: null },
+      { eventType: EVENT_TYPES.WorkerPark, timestamp: 70, workerId: 0, tid: 99, cpuTime: 700, localQueue: 0, globalQueue: 0, schedWait: 0, taskId: 0, spawnLocId: null, spawnLoc: null },
+    ];
+    const gaps = [{ workerId: 0, fromTid: 42, toTid: 99, startNs: 10, endNs: 50 }];
+    const result = buildWorkerSpans(syntheticEvents, [0], 100, gaps);
+    const actives = result.workerSpans[0].actives;
+    // The first active [10,50) crosses the gap → suppressed.
+    // The second active [60,70) is clean → preserved.
+    if (actives.length !== 1) {
+      fail(`Expected 1 active span (gap-crossing suppressed), got ${actives.length}: ${JSON.stringify(actives)}`);
+      return;
+    }
+    if (actives[0].start !== 60 || actives[0].end !== 70) {
+      fail(`Expected active [60,70), got [${actives[0].start},${actives[0].end})`);
+      return;
+    }
+    pass("Active span crossing block-in-place gap is suppressed; clean span preserved");
+  }
+
   // ── Run all tests ──
 
   console.log("\nbuildWorkerSpans:");
@@ -961,6 +990,9 @@ async function main() {
   testComputeSpanLayoutDurationY();
   testComputeSpanLayoutClusters();
   testComputeSpanLayoutRepresentativeIsLongest();
+
+  console.log("\nblock-in-place active-span suppression:");
+  testBlockInPlaceActiveSpanSuppression();
 
   console.log("\n✓ All analysis checks passed!");
 }

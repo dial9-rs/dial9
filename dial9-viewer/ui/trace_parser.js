@@ -112,6 +112,135 @@
   };
 
   /**
+   * Sentinel `workerId` used for CPU samples that cannot be confidently
+   * attributed to a specific worker. Matches the producer-side
+   * `WorkerId::UNKNOWN` value (also `WorkerId::BLOCKING - 1`).
+   */
+  const OFF_WORKER_WORKER_ID = 255;
+
+  /**
+   * Derive block-in-place gaps from WorkerPark/WorkerUnpark events and
+   * rewrite `cpuSamples[i].workerId` for samples that fall inside a gap.
+   *
+   * See `CONTEXT.md` (Block-in-place gap), ADR-0001 and ADR-0002. The
+   * detection algorithm is: for each worker `W`, track the currently-bound
+   * tid via park/unpark events. When the next park/unpark on `W` carries a
+   * tid that doesn't match the currently-bound tid, a `block_in_place`
+   * handoff happened at an unknown instant in the interval. The whole
+   * interval is a "gap"; samples on the old or new tid in this interval
+   * cannot be confidently attributed to `W` and have their `workerId`
+   * rewritten to {@link OFF_WORKER_WORKER_ID}.
+   *
+   * Old traces lacking `tid` on park/unpark events are silently ignored
+   * — gap detection is a no-op on them, no rewriting happens.
+   *
+   * Mutates `cpuSamples` in place. Returns the gap list sorted by start.
+   *
+   * @param {Array<TraceEvent>} events events sorted by timestamp
+   * @param {Array<CpuSample>} cpuSamples cpu samples to (possibly) rewrite
+   * @returns {Array<{workerId:number, fromTid:number, toTid:number, startNs:number, endNs:number}>}
+   */
+  function deriveBlockInPlaceGaps(events, cpuSamples) {
+    const gaps = [];
+    // Per-worker state: { currentTid: number|null, lastEventTs: number }.
+    // null currentTid means the worker is parked (or has never unparked).
+    const state = new Map();
+
+    for (const e of events) {
+      if (e.eventType !== EVENT_TYPES.WorkerPark &&
+          e.eventType !== EVENT_TYPES.WorkerUnpark) continue;
+      // Ignore events without a tid (older traces predate the field).
+      if (e.tid === undefined) continue;
+
+      const w = e.workerId;
+      const s = state.get(w);
+      if (s === undefined) {
+        // First event for this worker. Establish the binding.
+        state.set(w, {
+          currentTid: e.eventType === EVENT_TYPES.WorkerUnpark ? e.tid : null,
+          lastEventTs: e.timestamp,
+          // For a Park-first worker, we still know `tid` was bound to W up
+          // until the park, but we can't know for how long. Track the tid
+          // so a subsequent (mismatched) event flags a gap.
+          lastSeenTid: e.tid,
+        });
+        continue;
+      }
+
+      // Check for handoff: the event's tid differs from the tid we believe
+      // is currently bound to this worker.
+      const expectedTid = s.currentTid != null ? s.currentTid : s.lastSeenTid;
+      if (expectedTid !== e.tid) {
+        gaps.push({
+          workerId: w,
+          fromTid: expectedTid,
+          toTid: e.tid,
+          startNs: s.lastEventTs,
+          endNs: e.timestamp,
+        });
+      }
+
+      // Update state regardless of whether a gap was detected.
+      s.currentTid = e.eventType === EVENT_TYPES.WorkerUnpark ? e.tid : null;
+      s.lastEventTs = e.timestamp;
+      s.lastSeenTid = e.tid;
+    }
+
+    // Sort gaps by start timestamp for downstream consumers.
+    gaps.sort((a, b) => a.startNs - b.startNs);
+
+    if (gaps.length === 0) return gaps;
+
+    // Build per-worker gap lists for sample rewriting.
+    // We index by worker because gaps belong to a worker, but we suppress
+    // samples by tid: any sample whose tid matches the gap's fromTid OR
+    // toTid, falling inside the gap window, is unattributable.
+    const gapsByWorker = new Map();
+    for (const g of gaps) {
+      let arr = gapsByWorker.get(g.workerId);
+      if (!arr) { arr = []; gapsByWorker.set(g.workerId, arr); }
+      arr.push(g);
+    }
+
+    // Rewrite cpu samples in-place. For each sample, check the wire
+    // workerId's gap list (if any) and any gap matching the sample's tid.
+    // We iterate gaps directly per sample because:
+    //  - the per-worker gap count is small (typically 0–few per trace);
+    //  - samples might land inside a gap whose worker_id doesn't match
+    //    the wire value (the wire value is unreliable, ADR-0001), so we
+    //    must check by tid against ALL gaps the tid is involved in.
+    // To avoid an O(samples * gaps) blowup, build per-tid gap lists too.
+    const gapsByTid = new Map();
+    for (const g of gaps) {
+      for (const t of [g.fromTid, g.toTid]) {
+        let arr = gapsByTid.get(t);
+        if (!arr) { arr = []; gapsByTid.set(t, arr); }
+        arr.push(g);
+      }
+    }
+    // Sort each tid's list by start so we can early-exit.
+    for (const arr of gapsByTid.values()) {
+      arr.sort((a, b) => a.startNs - b.startNs);
+    }
+
+    for (const sample of cpuSamples) {
+      const tidGaps = gapsByTid.get(sample.tid);
+      if (!tidGaps) continue;
+      const ts = sample.timestamp;
+      for (const g of tidGaps) {
+        if (g.startNs > ts) break; // sorted by start, no more matches
+        if (ts < g.endNs) {
+          // sample falls within [startNs, endNs)
+          sample.workerId = OFF_WORKER_WORKER_ID;
+          break;
+        }
+      }
+    }
+
+    return gaps;
+  }
+
+  /**
    * Parse dial9 trace data from a buffer, file path, or directory.
    *
    * - Buffer/ArrayBuffer/Uint8Array: returns Promise<ParsedTrace> (browser compatible).
@@ -297,6 +426,9 @@
             workerId: num(v.worker_id),
             localQueue: num(v.local_queue),
             cpuTime: num(v.cpu_time_ns),
+            // tid was added later; old traces won't have it. Leave undefined
+            // so the block-in-place gap detection can skip them.
+            tid: v.tid != null ? num(v.tid) : undefined,
             globalQueue: 0,
             schedWait: 0,
             taskId: 0,
@@ -312,6 +444,9 @@
             localQueue: num(v.local_queue),
             cpuTime: num(v.cpu_time_ns),
             schedWait: num(v.sched_wait_ns),
+            // tid was added later; old traces won't have it. Leave undefined
+            // so the block-in-place gap detection can skip them.
+            tid: v.tid != null ? num(v.tid) : undefined,
             globalQueue: 0,
             taskId: 0,
             spawnLocId: null,
@@ -524,6 +659,12 @@
       if (t > evMaxTs) evMaxTs = t;
     }
 
+    // Second pass: derive worker attribution from WorkerPark/WorkerUnpark
+    // tid fields, detect block-in-place gaps, and rewrite cpuSamples.workerId.
+    // See ADR-0001 (worker_id derived at analysis) and ADR-0002 (block-in-place
+    // gap is unknowable).
+    const blockInPlaceGaps = deriveBlockInPlaceGaps(events, cpuSamples);
+
     return {
       magic: "D9TF",
       version: dec.version,
@@ -552,6 +693,7 @@
       taskDumps,
       clockSyncAnchors,
       clockOffsetNs,
+      blockInPlaceGaps,
     };
   }
 
@@ -907,19 +1049,23 @@
   if (typeof module !== "undefined" && module.exports) {
     module.exports = {
       EVENT_TYPES,
+      OFF_WORKER_WORKER_ID,
       parseTrace,
       parseOne,
       formatFrame,
       symbolizeChain,
       deduplicateSamples,
+      deriveBlockInPlaceGaps,
     };
   } else {
     exports.TraceParser = {
       EVENT_TYPES,
+      OFF_WORKER_WORKER_ID,
       parseTrace,
       formatFrame,
       symbolizeChain,
       deduplicateSamples,
+      deriveBlockInPlaceGaps,
     };
   }
 })(typeof exports === "undefined" ? this : exports);

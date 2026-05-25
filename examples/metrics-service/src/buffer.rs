@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+
 use tokio::sync::Mutex;
 
 use crate::ddb::DdbClient;
@@ -71,11 +72,11 @@ impl MetricsBuffer {
         let parent = tracing::Span::current();
         for (name, (sum, count, min, max)) in snapshot {
             let span = tracing::info_span!(parent: &parent, "put_aggregate", metric = %name);
-            if let Err(e) = ddb
+            let result = ddb
                 .put_aggregate(&name, ts, sum, count, min, max)
                 .instrument(span)
-                .await
-            {
+                .await;
+            if let Err(e) = result {
                 eprintln!("flush error for {name}: {e}");
             }
         }

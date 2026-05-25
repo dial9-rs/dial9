@@ -150,6 +150,7 @@ impl TelemetryGuard {
             guard: self,
             name: name.into(),
             task_tracking: false,
+            tokio_hooks: super::TokioHooks::default(),
         }
     }
 
@@ -257,6 +258,7 @@ pub struct TraceRuntimeCoreBuilder<'a> {
     guard: &'a TelemetryGuard,
     name: String,
     task_tracking: bool,
+    tokio_hooks: super::TokioHooks,
 }
 
 impl<'a> TraceRuntimeCoreBuilder<'a> {
@@ -264,6 +266,17 @@ impl<'a> TraceRuntimeCoreBuilder<'a> {
     /// Defaults to `false`.
     pub fn task_tracking(mut self, enabled: bool) -> Self {
         self.task_tracking = enabled;
+        self
+    }
+
+    /// Configure user-provided callbacks to run alongside dial9's internal
+    /// Tokio runtime hooks. dial9's logic always runs first, then the user
+    /// callbacks fire in registration order.
+    pub fn with_tokio_hooks<F>(mut self, f: F) -> Self
+    where
+        F: FnOnce(&mut super::TokioHooks),
+    {
+        f(&mut self.tokio_hooks);
         self
     }
 
@@ -296,6 +309,7 @@ impl<'a> TraceRuntimeCoreBuilder<'a> {
             Some(self.name),
             control_tx,
             self.task_tracking,
+            self.tokio_hooks,
         )?;
         let handle = RuntimeTelemetryHandle {
             runtime: runtime.handle().clone(),

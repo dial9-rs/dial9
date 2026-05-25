@@ -65,6 +65,8 @@ pub struct TracedRuntimeBuilder<P = NoTracePath, M = PipelineUnset, Mode: Writer
     pub(super) segment_metadata: Vec<(String, String)>,
     pub(super) worker_poll_interval: Option<Duration>,
     pub(super) worker_metrics_sink: Option<metrique_writer::BoxEntrySink>,
+
+    pub(super) tokio_hooks: super::TokioHooks,
     pub(super) _marker: std::marker::PhantomData<(P, M, Mode)>,
 }
 
@@ -169,6 +171,22 @@ impl<P, M, Mode: WriterMode> TracedRuntimeBuilder<P, M, Mode> {
         self
     }
 
+    /// Configure user-provided callbacks to run alongside dial9's internal
+    /// Tokio runtime hooks. dial9's logic always runs first, then the user
+    /// callbacks fire in registration order.
+    ///
+    /// This method can be called multiple times; each call receives a mutable
+    /// reference to the same `TokioHooks` instance. Registering the same hook
+    /// multiple times (either within one closure or across multiple calls)
+    /// stacks the callbacks — all registered callbacks will fire.
+    pub fn with_tokio_hooks<F>(mut self, f: F) -> Self
+    where
+        F: FnOnce(&mut super::TokioHooks),
+    {
+        f(&mut self.tokio_hooks);
+        self
+    }
+
     /// Attach a new runtime to an existing telemetry session.
     ///
     /// This reuses the `SharedState`, flush thread, writer, and CPU profiler
@@ -191,6 +209,7 @@ impl<P, M, Mode: WriterMode> TracedRuntimeBuilder<P, M, Mode> {
             self.runtime_name,
             control_tx,
             self.task_tracking_enabled,
+            self.tokio_hooks,
         )
     }
 
@@ -211,6 +230,7 @@ impl<P, M, Mode: WriterMode> TracedRuntimeBuilder<P, M, Mode> {
             segment_metadata: self.segment_metadata,
             worker_poll_interval: self.worker_poll_interval,
             worker_metrics_sink: self.worker_metrics_sink,
+            tokio_hooks: self.tokio_hooks,
             _marker: std::marker::PhantomData,
         }
     }
@@ -493,6 +513,7 @@ impl<M, Mode: WriterMode> TracedRuntimeBuilder<HasTracePath, M, Mode> {
             self.runtime_name,
             &control_tx,
             self.task_tracking_enabled,
+            self.tokio_hooks,
         )?;
         Ok((runtime, guard))
     }
@@ -848,6 +869,7 @@ impl TracedRuntime {
             segment_metadata: Vec::new(),
             worker_poll_interval: None,
             worker_metrics_sink: None,
+            tokio_hooks: super::TokioHooks::default(),
             _marker: std::marker::PhantomData,
         }
     }

@@ -33,11 +33,21 @@
    *   wakesByWorker: Object<number, Array<{timestamp: number, wakerTaskId: number, wokenTaskId: number}>>,
    * }}
    */
-  function buildWorkerSpans(events, workerIds, maxTs) {
+  function buildWorkerSpans(events, workerIds, maxTs, blockInPlaceGaps) {
     const workerSpans = {};
     const openPoll = {},
       openPark = {},
       openUnpark = {};
+
+    // Build per-worker gap lookup for active-span suppression.
+    // An active span that crosses any gap for its worker is discarded
+    // (ADR-0002: the CPU-time delta mixes two threads and is meaningless).
+    const gapsByW = {};
+    if (blockInPlaceGaps && blockInPlaceGaps.length > 0) {
+      for (const g of blockInPlaceGaps) {
+        (gapsByW[g.workerId] ??= []).push(g);
+      }
+    }
     const openPollMeta = {};
     const workerQueueSamples = {};
     let maxLocalQueue = 1;
@@ -95,6 +105,25 @@
         }
 
         if (e.eventType === EVENT_TYPES.PollStart) {
+          // If there's already an open poll (no PollEnd arrived), close it
+          // at this timestamp. This happens during block_in_place: the task
+          // is still technically polling but the worker moved on to poll
+          // another task on the replacement thread.
+          if (openPoll[w] != null) {
+            const meta = openPollMeta[w] || {
+              taskId: 0,
+              spawnLocId: 0,
+              spawnLoc: null,
+            };
+            workerSpans[w].polls.push({
+              start: openPoll[w],
+              end: e.timestamp,
+              taskId: meta.taskId,
+              spawnLocId: meta.spawnLocId,
+              spawnLoc: meta.spawnLoc,
+              openEnded: true, // no matching PollEnd; actual duration unknown
+            });
+          }
           openPoll[w] = e.timestamp;
           openPollMeta[w] = {
             taskId: e.taskId,
@@ -118,17 +147,50 @@
             openPoll[w] = null;
           }
         } else if (e.eventType === EVENT_TYPES.WorkerPark) {
+          // Close any open poll at park time. During block_in_place the
+          // replacement thread may park while a task is mid-poll (the
+          // PollEnd arrives later on a different active period).
+          if (openPoll[w] != null) {
+            const meta = openPollMeta[w] || {
+              taskId: 0,
+              spawnLocId: 0,
+              spawnLoc: null,
+            };
+            workerSpans[w].polls.push({
+              start: openPoll[w],
+              end: e.timestamp,
+              taskId: meta.taskId,
+              spawnLocId: meta.spawnLocId,
+              spawnLoc: meta.spawnLoc,
+              openEnded: true,
+            });
+            openPoll[w] = null;
+          }
           openPark[w] = e.timestamp;
           if (openUnpark[w] != null) {
-            const wallDelta = e.timestamp - openUnpark[w].timestamp;
-            const cpuDelta = e.cpuTime - openUnpark[w].cpuTime;
-            const ratio =
-              wallDelta > 0 ? Math.min(cpuDelta / wallDelta, 1.0) : 1.0;
-            workerSpans[w].actives.push({
-              start: openUnpark[w].timestamp,
-              end: e.timestamp,
-              ratio,
-            });
+            const activeStart = openUnpark[w].timestamp;
+            const activeEnd = e.timestamp;
+            // Suppress active spans that cross a block-in-place gap.
+            // The CPU-time delta mixes two threads and is meaningless.
+            const wGaps = gapsByW[w];
+            let crossesGap = false;
+            if (wGaps) {
+              for (const g of wGaps) {
+                if (g.startNs >= activeEnd) break;
+                if (g.endNs > activeStart) { crossesGap = true; break; }
+              }
+            }
+            if (!crossesGap) {
+              const wallDelta = activeEnd - activeStart;
+              const cpuDelta = e.cpuTime - openUnpark[w].cpuTime;
+              const ratio =
+                wallDelta > 0 ? Math.min(cpuDelta / wallDelta, 1.0) : 1.0;
+              workerSpans[w].actives.push({
+                start: activeStart,
+                end: activeEnd,
+                ratio,
+              });
+            }
             openUnpark[w] = null;
           }
         } else if (e.eventType === EVENT_TYPES.WorkerUnpark) {

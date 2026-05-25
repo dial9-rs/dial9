@@ -1360,7 +1360,7 @@
                 viewEnd = maxTs;
 
                 // Build spans (also extracts queue samples and indexes wake events)
-                const spanResult = buildWorkerSpans(evts, workerIds, maxTs);
+                const spanResult = buildWorkerSpans(evts, workerIds, maxTs, trace.blockInPlaceGaps);
                 workerSpans = spanResult.workerSpans;
                 const perWorker = spanResult.perWorker;
                 queueSamples = spanResult.queueSamples;
@@ -2033,6 +2033,10 @@
                 ctx.scale(dpr, dpr);
 
                 const spans = workerSpans[workerId];
+                // Block-in-place gaps for this worker (rendered as overlays).
+                const workerGaps = (trace.blockInPlaceGaps || [])
+                    .filter(g => g.workerId === workerId)
+                    .map(g => ({ start: g.startNs, end: g.endNs }));
 
                 // Background: active = dark, parked = distinct reddish-brown
                 // First fill entire lane as "active" (dark)
@@ -2056,6 +2060,26 @@
                             ctx.fillStyle = "#2a1a1a"; // red tint — heavily descheduled
                         }
                         ctx.fillRect(x1, 0, w, ph);
+                    }
+                }
+
+                // Draw block_in_place gap overlays (striped pattern, distinct from parks)
+                if (workerGaps && workerGaps.length > 0) {
+                    const gapStartIdx = findFirstVisible(workerGaps, viewStart);
+                    for (let i = gapStartIdx; i < workerGaps.length; i++) {
+                        const g = workerGaps[i];
+                        if (g.start > viewEnd) break;
+                        const x1 = Math.max(0, nsToX(g.start, pw));
+                        const x2 = Math.min(pw, nsToX(g.end, pw));
+                        const w = Math.max(x2 - x1, 1);
+                        // Diagonal stripe pattern to indicate unknowable interval
+                        ctx.fillStyle = "#3a2a00";
+                        ctx.fillRect(x1, 0, w, ph);
+                        ctx.strokeStyle = "#ff9800";
+                        ctx.lineWidth = 1;
+                        ctx.setLineDash([4, 4]);
+                        ctx.strokeRect(x1 + 0.5, 0.5, w - 1, ph - 1);
+                        ctx.setLineDash([]);
                     }
                 }
 
@@ -2168,6 +2192,21 @@
                         ctx.fillStyle = pollColor(s.start, s.end);
                         ctx.fillRect(x1, bandTop, Math.max(x2 - x1, 1), bandH);
                     }
+                }
+                // Mark open-ended polls with a dashed right edge (block_in_place)
+                for (let i = pollStart; i < spans.polls.length; i++) {
+                    const s = spans.polls[i];
+                    if (s.start > viewEnd) break;
+                    if (!s.openEnded) continue;
+                    const x2 = Math.min(pw, nsToX(s.end, pw));
+                    ctx.strokeStyle = "#ff9800";
+                    ctx.lineWidth = 2;
+                    ctx.setLineDash([3, 2]);
+                    ctx.beginPath();
+                    ctx.moveTo(x2, bandTop);
+                    ctx.lineTo(x2, bandTop + bandH);
+                    ctx.stroke();
+                    ctx.setLineDash([]);
                 }
                 // Highlight current POI span
                 if (poiSpan) {
@@ -4506,12 +4545,24 @@
 
                     let pollInfo = "";
                     let hasClickableStack = false;
+                    // Check if cursor is inside a block_in_place gap
+                    {
+                        const gapHit = (trace.blockInPlaceGaps || []).find(g =>
+                            g.workerId === w && ns >= g.startNs && ns < g.endNs
+                        );
+                        if (gapHit) {
+                            const gapNs = gapHit.endNs - gapHit.startNs;
+                            state = "⚠️ block_in_place";
+                            stateDetail = ` for <span class="value">${formatHumanDuration(gapNs)}</span>`;
+                            schedInfo = `<span class="label">Worker handed off:</span> <span class="value">tid ${gapHit.fromTid} → ${gapHit.toTid}</span><br>`;
+                        }
+                    }
                     {
                         const s = findSpanAt(spans.polls, ns);
                         if (s) {
                             const pollNs = s.end - s.start;
                             state = "⚡ Polling";
-                            pollInfo = `<span class="label">Poll duration:</span> <span class="value">${formatHumanDuration(pollNs)}</span><br>`;
+                            pollInfo = `<span class="label">Poll duration:</span> <span class="value">${formatHumanDuration(pollNs)}${s.openEnded ? ' (open-ended, block_in_place)' : ''}</span><br>`;
                             if (trace.hasTaskTracking && s.taskId) {
                                 pollInfo += `<span class="label">Task ID:</span> <span class="value">0x${s.taskId.toString(16)}</span><br>`;
                                 if (s.spawnLoc) {

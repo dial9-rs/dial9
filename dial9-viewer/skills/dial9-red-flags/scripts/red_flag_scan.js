@@ -28,7 +28,7 @@ async function redFlagScan(tracePath) {
     const maxTs = trace.maxTs;
     const minTs = trace.minTs;
     const durationMs = (maxTs - minTs) / 1e6;
-    const spans = buildWorkerSpans(trace.events, workerIds, maxTs);
+    const spans = buildWorkerSpans(trace.events, workerIds, maxTs, trace.blockInPlaceGaps);
     attachCpuSamples(trace.cpuSamples, spans.workerSpans);
     const taskTimeline = buildActiveTaskTimeline(trace.taskSpawnTimes, trace.taskTerminateTimes);
     const schedDelays = computeSchedulingDelays(spans.workerSpans, workerIds, spans.wakesByTask);

@@ -318,6 +318,35 @@ record_event(
 # }
 ```
 
+### Custom Runtime Hooks
+
+dial9 installs callbacks on all 8 Tokio runtime hooks to collect telemetry. If you need to run your own logic alongside dial9's instrumentation, use `with_tokio_hooks`:
+
+```rust,no_run
+use dial9_tokio_telemetry::telemetry::{TracedRuntime, NullWriter};
+
+let mut builder = tokio::runtime::Builder::new_multi_thread();
+builder.worker_threads(4).enable_all();
+
+let (runtime, guard) = TracedRuntime::builder()
+    .with_tokio_hooks(|hooks| {
+        hooks.on_thread_start(|| {
+            println!("Worker thread started");
+        });
+        hooks.on_thread_stop(|| {
+            println!("Worker thread stopping");
+        });
+        // Also available: on_thread_park, on_thread_unpark,
+        // on_task_spawn, on_task_terminate, on_before_task_poll, on_after_task_poll
+    })
+    .build_and_start_with_writer(builder, NullWriter)
+    .unwrap();
+```
+
+dial9's internal hooks always run first, then your callbacks fire in registration order. This ensures `TelemetryHandle::current()` is available in your `on_thread_start` callback. Registering the same hook multiple times stacks the callbacks — all of them will fire.
+
+**Important:** Do not set hooks directly via `tokio::runtime::Builder::on_thread_start()` etc. — dial9 will overwrite them. Always use `with_tokio_hooks` to compose your callbacks with dial9's instrumentation.
+
 ## Getting data out of dial9
 
 dial9 is recording data to in memory buffers and eventually to disk. For most applications, they would like the data to go somewhere else. `dial9` has a built in exporter for S3 and it is also possible to write your own exporter.
