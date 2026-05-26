@@ -57,3 +57,11 @@ crosses the gap is **discarded**, not split. The CPU-time delta across
 the gap mixes two different threads' `CLOCK_THREAD_CPUTIME_ID` readings
 and is therefore meaningless; dropping the polluted span is more honest
 than reporting a contaminated ratio.
+
+# Project Context
+
+## Architecture Notes
+
+- **JS decoder canonical location**: `dial9-trace-format/js/decode.js` is the single source of truth for the JS `TraceDecoder`.
+- `dial9-viewer/ui/decode.js` is a **symlink** → `../../dial9-trace-format/js/decode.js`.
+- `dial9-viewer/skills/dial9-toolkit/scripts/decode.js` is a **separate, smaller copy** (different feature set for the agent toolkit). Not a symlink.
