@@ -96,4 +96,58 @@ fn hook_realloc_emits_alloc_and_free_when_liveset_on() {
         !frees.is_empty(),
         "expected at least one FreeEvent when liveset tracking is on"
     );
+
+    // Stronger property: every FreeEvent must match a previously-recorded
+    // AllocEvent on (addr, size, alloc_timestamp_ns). Walk the trace in
+    // recording order, maintaining a "live" map keyed by addr; an Alloc
+    // overwrites any prior entry at that addr (an address can be reused
+    // after a free), and a Free must find the current entry and have its
+    // (size, alloc_timestamp_ns) match the recorded Alloc.
+    use std::collections::HashMap;
+    let mut live: HashMap<u64, (u64, u64)> = HashMap::new(); // addr -> (size, ts)
+    let mut matched_frees = 0usize;
+    for ev in events.iter() {
+        match ev {
+            TelemetryEvent::Alloc {
+                addr,
+                size,
+                timestamp_nanos,
+                ..
+            } => {
+                live.insert(*addr, (*size, *timestamp_nanos));
+            }
+            TelemetryEvent::Free {
+                addr,
+                size,
+                alloc_timestamp_nanos,
+                ..
+            } => {
+                let Some((recorded_size, recorded_ts)) = live.remove(addr) else {
+                    panic!(
+                        "FreeEvent at addr {addr:#x} has no matching prior AllocEvent \
+                         (free size={size}, alloc_ts={alloc_timestamp_nanos})"
+                    );
+                };
+                assert_eq!(
+                    recorded_size, *size,
+                    "FreeEvent at addr {addr:#x}: size {size} does not match \
+                     recorded Alloc size {recorded_size}"
+                );
+                assert_eq!(
+                    recorded_ts, *alloc_timestamp_nanos,
+                    "FreeEvent at addr {addr:#x}: alloc_timestamp_ns \
+                     {alloc_timestamp_nanos} does not match recorded \
+                     Alloc timestamp {recorded_ts}"
+                );
+                matched_frees = matched_frees.saturating_add(1);
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(
+        matched_frees,
+        frees.len(),
+        "all {} frees should have matched a prior alloc, only {matched_frees} did",
+        frees.len()
+    );
 }

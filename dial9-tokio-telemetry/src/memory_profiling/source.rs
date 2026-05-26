@@ -29,7 +29,11 @@ struct LivesetEntry {
 pub(crate) struct MemoryProfileSource {
     rings: Arc<RingBuffers>,
     liveset: Option<HashMap<u64, LivesetEntry>>,
-    sample_rate_bytes: u64,
+    /// Precomputed segment metadata, returned (cloned) on every flush
+    /// cycle. Cached in `new()` so the `segment_metadata()` hot path —
+    /// called from the flush loop every ~5 ms — does not allocate fresh
+    /// `String`s per cycle.
+    metadata: Vec<(String, String)>,
 }
 
 impl MemoryProfileSource {
@@ -46,7 +50,10 @@ impl MemoryProfileSource {
         Self {
             rings,
             liveset: track_liveset.then(HashMap::new),
-            sample_rate_bytes,
+            metadata: vec![(
+                "memory.sample_rate_bytes".to_string(),
+                sample_rate_bytes.to_string(),
+            )],
         }
     }
 
@@ -159,10 +166,11 @@ impl Source for MemoryProfileSource {
     }
 
     fn segment_metadata(&self) -> Vec<(String, String)> {
-        vec![(
-            "memory.sample_rate_bytes".to_string(),
-            self.sample_rate_bytes.to_string(),
-        )]
+        // Cached in `new()`. Cloned on every flush cycle (a tiny vec —
+        // typically one entry — so the clone cost is dwarfed by the
+        // surrounding lock acquisitions in the flush loop). Was previously
+        // rebuilding two `String`s per cycle; see PR #442 review.
+        self.metadata.clone()
     }
 }
 
@@ -511,7 +519,7 @@ mod tests {
         }
     }
 
-    /// Demonstrates that `poll_start_ts_or_now` produces strictly ordered
+    /// Demonstrates that `poll_start_ts_monotonic` produces strictly ordered
     /// timestamps even for events that would otherwise share a clock tick —
     /// the scenario that occurs during a realloc (free old + alloc new at
     /// same address).
@@ -520,7 +528,8 @@ mod tests {
         use crate::telemetry::recorder::poll_start_ts_monotonic;
 
         // Simulate a realloc: alloc, free, alloc — all at the "same instant".
-        // poll_start_ts_or_now guarantees each gets a distinct, increasing timestamp.
+        // poll_start_ts_monotonic guarantees each gets a distinct, increasing
+        // timestamp.
         let t1 = poll_start_ts_monotonic();
         let t2 = poll_start_ts_monotonic();
         let t3 = poll_start_ts_monotonic();

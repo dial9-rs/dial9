@@ -125,6 +125,8 @@ impl MemoryProfiler {
 
         let rings = Arc::new(RingBuffers::new(
             self.config.ring_capacity(),
+            // Free queue is sized 8× the alloc queue — see
+            // `DEFAULT_FREE_QUEUE_CAPACITY` in `ring.rs` for the rationale.
             self.config.ring_capacity() * 8,
         ));
 

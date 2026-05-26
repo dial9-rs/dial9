@@ -12,15 +12,19 @@ const _: () = assert!(
     "DEFAULT_MAX_FRAMES must fit in u8 (used as RawAlloc::frame_count)"
 );
 
-/// Default number of `RawAlloc` slots. ~4 MiB total at 128 frames.
-pub(crate) const DEFAULT_ALLOC_QUEUE_CAPACITY: usize = 4096;
-
-/// Default number of `RawFree` slots. 8× the alloc queue.
+/// Default number of `RawFree` slots. 8× the alloc queue
+/// ([`crate::memory_profiling::DEFAULT_RING_CAPACITY`]) — frees are smaller
+/// than allocs (no stack frames), so the budget is asymmetric in their favour
+/// to absorb burst free traffic without dropping. The actual capacity is
+/// derived from `MemoryProfilingConfig::ring_capacity()` in
+/// [`crate::memory_profiling::profiler::MemoryProfiler::install`]; this const
+/// exists to document the 8× relationship in one place.
 #[expect(
     dead_code,
-    reason = "documents the sizing rationale; config uses ring_capacity * 8"
+    reason = "documents the 8x sizing rationale referenced from MemoryProfiler::install"
 )]
-pub(crate) const DEFAULT_FREE_QUEUE_CAPACITY: usize = DEFAULT_ALLOC_QUEUE_CAPACITY * 8;
+pub(crate) const DEFAULT_FREE_QUEUE_CAPACITY: usize =
+    crate::memory_profiling::config::DEFAULT_RING_CAPACITY * 8;
 
 /// One sampled allocation captured on the producer thread.
 ///

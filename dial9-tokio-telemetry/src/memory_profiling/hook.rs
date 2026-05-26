@@ -114,7 +114,7 @@ fn next_gap(rng: &mut SplitMix64, sample_rate_bytes: u64) -> i64 {
 #[inline]
 fn stamp(mode: TimestampMode) -> u64 {
     match mode {
-        TimestampMode::ReusePollStart => crate::telemetry::recorder::poll_start_ts_or_now(),
+        TimestampMode::ReusePollStart => crate::telemetry::recorder::poll_start_ts_monotonic(),
         TimestampMode::None => 0,
         TimestampMode::Precise => crate::telemetry::events::clock_monotonic_ns(),
     }

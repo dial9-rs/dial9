@@ -14,12 +14,25 @@ pub const DEFAULT_RING_CAPACITY: usize = 4096;
 #[non_exhaustive]
 pub enum TimestampMode {
     /// Reuse the timestamp from the most recent `PollStart` on this thread
-    /// (~5 ns TLS load). Falls back to `clock_monotonic_ns()` when called
-    /// outside a task poll (e.g., between polls, or on non-worker threads).
+    /// (~5 ns TLS load), falling back to `clock_monotonic_ns()` when called
+    /// outside a task poll (e.g., between polls or on non-worker threads).
+    ///
+    /// In either case the returned timestamp is strictly greater than the
+    /// previous one this thread observed (a 1 ns bump on ties), so events
+    /// produced inside a single poll — including a free + alloc pair from
+    /// in-place realloc — always have distinct, ordered timestamps. This
+    /// is the default and the recommended mode when `track_liveset` is on.
     #[default]
     ReusePollStart,
 
     /// Emit events with `timestamp_ns = 0`. Smallest on-disk size.
+    ///
+    /// **Incompatible with `track_liveset(true)`** — the consolidator
+    /// relies on timestamp ordering to disambiguate same-address
+    /// free/alloc pairs (e.g. from in-place realloc). Use
+    /// [`TimestampMode::ReusePollStart`] or [`TimestampMode::Precise`]
+    /// instead when liveset tracking is on. The combination is rejected
+    /// at config build time.
     None,
 
     /// Call `clock_monotonic_ns()` per sampled allocation (~25 ns via vDSO).
@@ -105,12 +118,29 @@ impl<S: memory_profiling_config_builder::IsComplete> MemoryProfilingConfigBuilde
     /// "sample every allocation" mode — `0` would mean "zero bytes
     /// between samples", which is ambiguous (sample everything? sample
     /// nothing?), so we require the explicit `1`.
+    ///
+    /// Panics if `timestamp_mode == TimestampMode::None` is combined
+    /// with `track_liveset(true)`. The liveset matches `Free` events to
+    /// prior `Alloc` events by address, and relies on timestamp
+    /// ordering to disambiguate same-address free/alloc pairs (e.g.
+    /// in-place realloc). With every event at `ts = 0` the merge-sort
+    /// drain in `MemoryProfileSource` cannot order those pairs and
+    /// would corrupt the liveset.
     pub fn build(self) -> MemoryProfilingConfig {
         let config = self.build_inner();
         assert!(
             config.sample_rate_bytes >= 1,
             "MemoryProfilingConfig::sample_rate_bytes must be >= 1; pass 1 for \
              'sample every allocation' mode"
+        );
+        assert!(
+            !(config.track_liveset && matches!(config.timestamp_mode, TimestampMode::None)),
+            "MemoryProfilingConfig: TimestampMode::None is incompatible with \
+             track_liveset(true). With every event at ts=0 the consolidator's \
+             merge-sort drain cannot order same-address free/alloc pairs (e.g. \
+             from in-place realloc) and would corrupt the liveset. Choose \
+             TimestampMode::ReusePollStart (default) or TimestampMode::Precise \
+             when liveset tracking is on."
         );
         config
     }
@@ -171,5 +201,52 @@ mod tests {
         let _ = MemoryProfilingConfig::builder()
             .sample_rate_bytes(0)
             .build();
+    }
+
+    #[test]
+    #[should_panic(expected = "TimestampMode::None")]
+    fn build_rejects_none_timestamp_with_liveset() {
+        // Liveset tracking matches Free→Alloc by addr AND requires
+        // timestamp ordering to disambiguate same-address free/alloc
+        // pairs (e.g. in-place realloc). With every event at ts=0, the
+        // merge-sort drain in `MemoryProfileSource` cannot tell which
+        // came first — see PR #442 review.
+        let _ = MemoryProfilingConfig::builder()
+            .timestamp_mode(TimestampMode::None)
+            .track_liveset(true)
+            .build();
+    }
+
+    #[test]
+    fn build_accepts_none_timestamp_without_liveset() {
+        // The None+!liveset combo is fine: free events are dropped,
+        // so there's no ordering hazard.
+        let cfg = MemoryProfilingConfig::builder()
+            .timestamp_mode(TimestampMode::None)
+            .track_liveset(false)
+            .build();
+        assert!(matches!(cfg.timestamp_mode(), TimestampMode::None));
+        assert!(!cfg.track_liveset());
+    }
+
+    #[test]
+    fn build_accepts_liveset_with_reuse_poll_start() {
+        // The intended liveset combo: ReusePollStart provides per-poll
+        // timestamps, falling back to clock_monotonic_ns elsewhere.
+        let cfg = MemoryProfilingConfig::builder()
+            .timestamp_mode(TimestampMode::ReusePollStart)
+            .track_liveset(true)
+            .build();
+        assert!(cfg.track_liveset());
+    }
+
+    #[test]
+    fn build_accepts_liveset_with_precise() {
+        // Precise also provides real timestamps.
+        let cfg = MemoryProfilingConfig::builder()
+            .timestamp_mode(TimestampMode::Precise)
+            .track_liveset(true)
+            .build();
+        assert!(cfg.track_liveset());
     }
 }

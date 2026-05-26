@@ -239,8 +239,12 @@ pub struct AllocEvent {
     /// code; the underlying allocator may have rounded up, but that's not
     /// recorded here.
     pub size: u64,
-    /// Returned pointer. Only meaningful when liveset tracking is on; otherwise 0.
-    /// Always present so the schema is stable across track_liveset on/off.
+    /// Returned pointer. Always the actual address returned by the allocator;
+    /// it is only matched against `FreeEvent.addr` when liveset tracking is
+    /// on. Consumers should not assume cross-allocation uniqueness when
+    /// liveset is off — addresses are reused freely once the slot is freed,
+    /// and without paired frees you cannot tell which "generation" of the
+    /// address a given event belongs to.
     pub addr: u64,
     /// Stack at the allocation site. Frame 0 is the most-recent caller.
     pub callchain: InternedStackFrames,

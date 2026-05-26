@@ -9,8 +9,6 @@ pub(crate) mod source;
 pub(crate) use runtime_context::RuntimeContext;
 pub use runtime_context::current_worker_id;
 pub(crate) use runtime_context::poll_start_ts_monotonic;
-#[cfg(feature = "memory-profiling")]
-pub(crate) use runtime_context::poll_start_ts_or_now;
 pub(crate) use shared_state::SharedState;
 
 pub use builder::{
