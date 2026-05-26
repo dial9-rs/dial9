@@ -42,6 +42,95 @@
     return { minTs, maxTs, durationNs: maxTs - minTs };
   }
 
+  // ── Poll color heatmap ────────────────────────────────────────────────
+  // Maps a poll duration in nanoseconds to a hex color string using a
+  // log-scale ramp.
+  //
+  // Why log scale: poll durations span many orders of magnitude (≤100ns
+  // common, occasional 100ms+ stalls). A linear ramp would either compress
+  // most polls into a single color, or overwhelm the visualization with the
+  // hottest few. Log scale gives roughly equal visual weight to each decade.
+  //
+  // Anchor stops are pinned to the legend swatches in viewer.html so the
+  // legend stays an honest reference. Stops between anchors are interpolated
+  // linearly in RGB. Inputs below the floor (100ns) clamp to dim navy;
+  // inputs above the ceiling (1s) clamp to deep red.
+  //
+  // The previous bucketed scheme (4 colors at fixed thresholds) is replaced
+  // by this continuous version — see issue #450.
+  const POLL_HEATMAP_STOPS = [
+    { logNs: 2, rgb: [0x2a, 0x5a, 0x7a] }, // 100ns: dim navy (floor)
+    { logNs: 4, rgb: [0x4f, 0xc3, 0xf7] }, // 10µs: cyan
+    { logNs: 5, rgb: [0xff, 0x8a, 0x65] }, // 100µs: orange
+    { logNs: 6, rgb: [0xff, 0x44, 0x44] }, // 1ms: bright red
+    { logNs: 9, rgb: [0xff, 0x00, 0x00] }, // 1s+: pure red (ceiling)
+  ];
+
+  function _toHex2(n) {
+    const h = Math.round(n).toString(16);
+    return h.length === 1 ? "0" + h : h;
+  }
+
+  /**
+   * Continuous, log-scale color heatmap for poll durations.
+   * @param {number} durationNs poll duration in nanoseconds (≥ 0)
+   * @returns {string} `#rrggbb` color
+   */
+  function pollHeatmapColor(durationNs) {
+    const stops = POLL_HEATMAP_STOPS;
+    if (!(durationNs > 0)) {
+      const f = stops[0].rgb;
+      return "#" + _toHex2(f[0]) + _toHex2(f[1]) + _toHex2(f[2]);
+    }
+    const lg = Math.log10(durationNs);
+    if (lg <= stops[0].logNs) {
+      const f = stops[0].rgb;
+      return "#" + _toHex2(f[0]) + _toHex2(f[1]) + _toHex2(f[2]);
+    }
+    if (lg >= stops[stops.length - 1].logNs) {
+      const f = stops[stops.length - 1].rgb;
+      return "#" + _toHex2(f[0]) + _toHex2(f[1]) + _toHex2(f[2]);
+    }
+    // Find interpolation segment
+    for (let i = 0; i < stops.length - 1; i++) {
+      const a = stops[i],
+        b = stops[i + 1];
+      if (lg >= a.logNs && lg <= b.logNs) {
+        const t = (lg - a.logNs) / (b.logNs - a.logNs);
+        const r = a.rgb[0] + (b.rgb[0] - a.rgb[0]) * t;
+        const g = a.rgb[1] + (b.rgb[1] - a.rgb[1]) * t;
+        const bl = a.rgb[2] + (b.rgb[2] - a.rgb[2]) * t;
+        return "#" + _toHex2(r) + _toHex2(g) + _toHex2(bl);
+      }
+    }
+    // Unreachable
+    const f = stops[stops.length - 1].rgb;
+    return "#" + _toHex2(f[0]) + _toHex2(f[1]) + _toHex2(f[2]);
+  }
+
+  // Quantize a poll duration to a small fixed set of bucket colors. Used by
+  // the LOD path in viewer.html to merge adjacent polls with identical color
+  // into a single fillRect; with 16 quantization bins per decade-spanning
+  // log scale, runs of "approximately equal" polls still fold into one
+  // rectangle, which keeps zoomed-out rendering fast.
+  function pollHeatmapColorQuantized(durationNs, bins) {
+    const NBINS = bins || 24;
+    const stops = POLL_HEATMAP_STOPS;
+    const minLg = stops[0].logNs;
+    const maxLg = stops[stops.length - 1].logNs;
+    let lg;
+    if (!(durationNs > 0)) lg = minLg;
+    else lg = Math.log10(durationNs);
+    if (lg < minLg) lg = minLg;
+    if (lg > maxLg) lg = maxLg;
+    const t = (lg - minLg) / (maxLg - minLg);
+    const bin = Math.min(NBINS - 1, Math.floor(t * NBINS));
+    const lgBin = minLg + (bin / (NBINS - 1)) * (maxLg - minLg);
+    const dBin = Math.pow(10, lgBin);
+    return pollHeatmapColor(dBin);
+  }
+  }
+
   /**
    * Reconstruct poll/park/active spans from raw events using a state machine.
    * @param {import('./trace_parser.js').TraceEvent[]} events - raw trace events
@@ -1035,6 +1124,8 @@
     selectSpanRenderSet,
     computeSpanLayout,
     analyzeAllocations,
+    pollHeatmapColor,
+    pollHeatmapColorQuantized,
   };
 
   if (typeof module !== "undefined" && module.exports) {
