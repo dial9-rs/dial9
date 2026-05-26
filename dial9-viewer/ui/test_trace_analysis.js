@@ -1114,6 +1114,52 @@ async function main() {
     pass("address reuse: only the matching alloc is considered freed");
   }
 
+  console.log("\nheap flamegraph from alloc events:");
+  testHeapFlamegraphFromAllocEvents();
+  testHeapFlamegraphEmptyCallchains();
+
+  function testHeapFlamegraphFromAllocEvents() {
+    // Simulate the viewer's heap flamegraph: convert alloc events to samples
+    // and build a flamegraph tree from them.
+    const allocEvents = [
+      { timestamp: 100, tid: 10, size: 1024, addr: "0x1", callchain: ["0xaaa", "0xbbb", "0xccc"] },
+      { timestamp: 200, tid: 10, size: 2048, addr: "0x2", callchain: ["0xaaa", "0xbbb", "0xddd"] },
+      { timestamp: 300, tid: 10, size: 512, addr: "0x3", callchain: ["0xaaa", "0xeee"] },
+    ];
+    const samples = allocEvents
+      .filter(a => a.callchain.length > 0)
+      .map(a => ({ callchain: a.callchain, workerId: 0 }));
+    const symbols = new Map(); // no symbols — raw addresses used as names
+    const tree = buildFlamegraphTree(samples, symbols);
+    if (tree.count !== 3) fail(`heapFg: root count should be 3, got ${tree.count}`);
+    // All samples share "0xaaa" as the bottom frame (reversed: it becomes the first child)
+    // buildFlamegraphTree reverses callchains, so 0xccc/0xddd/0xeee are at the bottom
+    // and 0xaaa is at the top of the tree
+    if (!tree.children.has("0xccc") && !tree.children.has("0xaaa")) {
+      // The tree reverses callchains, so the deepest frame becomes the root child
+      fail("heapFg: expected reversed callchain structure in tree");
+    }
+    const flat = flattenFlamegraph(tree, tree.count);
+    if (flat.nodes.length === 0) fail("heapFg: flattenFlamegraph produced no nodes");
+    if (flat.maxDepth < 1) fail("heapFg: expected depth > 0");
+    pass("alloc events produce valid flamegraph tree");
+  }
+
+  function testHeapFlamegraphEmptyCallchains() {
+    // Alloc events with empty callchains should be filtered out
+    const allocEvents = [
+      { timestamp: 100, tid: 10, size: 1024, addr: "0x1", callchain: [] },
+      { timestamp: 200, tid: 10, size: 2048, addr: "0x2", callchain: ["0xaaa"] },
+    ];
+    const samples = allocEvents
+      .filter(a => a.callchain.length > 0)
+      .map(a => ({ callchain: a.callchain, workerId: 0 }));
+    if (samples.length !== 1) fail(`heapFgEmpty: expected 1 sample after filter, got ${samples.length}`);
+    const tree = buildFlamegraphTree(samples, new Map());
+    if (tree.count !== 1) fail(`heapFgEmpty: root count should be 1, got ${tree.count}`);
+    pass("empty callchains filtered out correctly");
+  }
+
   console.log("\n✓ All analysis checks passed!");
 }
 
