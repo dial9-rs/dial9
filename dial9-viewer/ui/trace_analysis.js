@@ -905,7 +905,7 @@
       return s / (1 - Math.exp(-ratio));
     }
 
-    const freedAddrs = new Set(freeEvents.map(f => f.addr));
+    const freedAddrs = new Set(freeEvents.map(f => f.addr + ":" + f.allocTimestampNs));
 
     // Top allocation sites by callchain
     const siteMap = new Map(); // callchain key → {callchain, totalBytes, count, estimatedBytes}
@@ -923,7 +923,7 @@
     const leaks = [];
     let leakedBytes = 0;
     for (const a of allocEvents) {
-      if (!freedAddrs.has(a.addr)) {
+      if (!freedAddrs.has(a.addr + ":" + a.timestamp)) {
         leaks.push({ callchain: a.callchain, size: a.size, timestamp: a.timestamp, addr: a.addr });
         leakedBytes += a.size;
       }

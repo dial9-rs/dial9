@@ -1,7 +1,9 @@
 //! `MemoryProfiler::install()` — the install-once entry point.
 
 use crate::memory_profiling::config::{MemoryProfilingConfig, TimestampMode};
-use crate::memory_profiling::ring::{DEFAULT_MAX_FRAMES, RawAlloc, RingBuffers};
+use crate::memory_profiling::ring::RingBuffers;
+#[cfg(feature = "analysis")]
+use crate::memory_profiling::ring::{DEFAULT_MAX_FRAMES, RawAlloc};
 
 use crate::memory_profiling::source::MemoryProfileSource;
 use crate::telemetry::recorder::TelemetryHandle;
