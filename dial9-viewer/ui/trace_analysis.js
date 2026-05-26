@@ -129,7 +129,6 @@
     const dBin = Math.pow(10, lgBin);
     return pollHeatmapColor(dBin);
   }
-  }
 
   /**
    * Reconstruct poll/park/active spans from raw events using a state machine.

@@ -2382,8 +2382,9 @@
                         lastY = y;
                     }
                     ctx.lineTo(pw, lastY);
-                    const colors = ["rgba(255,200,50,0.8)", "rgba(50,255,200,0.8)", "rgba(255,50,200,0.8)", "rgba(200,50,255,0.8)"];
-                    ctx.strokeStyle = colors[workerId % colors.length];
+                    // Single color for all workers — the legend's "Local Q"
+                    // swatch matches this. Per-worker colors were too noisy.
+                    ctx.strokeStyle = "rgba(255,200,50,0.8)";
                     ctx.lineWidth = 1.5;
                     ctx.stroke();
                 }
