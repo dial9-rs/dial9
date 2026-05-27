@@ -4972,15 +4972,14 @@
 
                 const filtered = allocs.map(a => ({ ...a, callchain: stripHookFrames(a.callchain) }))
                     .filter(a => a.callchain.length > 0);
-                // Estimate total bytes using unbiased weight: weight(s) = s / (1 - exp(-s/R))
-                const R = 524288; // default sample rate bytes (512 KiB)
-                // Attribute allocs to tasks via tid → workerId → poll lookup for spawn filter
-                const samples = filtered.map(a => {
+                const R = 524288;
+                // Build base samples with both weight types
+                const baseSamples = filtered.map(a => {
                     const wId = trace.tidToWorker && trace.tidToWorker.get(a.tid);
                     const s = a.size;
                     const ratio = s / R;
                     const invP = (s <= 0 || ratio > 50) ? 1 : 1 / (1 - Math.exp(-ratio));
-                    const sample = { callchain: a.callchain, workerId: wId != null ? 0 : 255, spawnLoc: null, weight: s * invP, allocWeight: invP };
+                    const sample = { callchain: a.callchain, workerId: wId != null ? 0 : 255, spawnLoc: null, byteWeight: s * invP, countWeight: invP };
                     if (wId != null && workerSpans[wId]) {
                         const polls = workerSpans[wId].polls;
                         let lo = 0, hi = polls.length - 1;
@@ -4995,48 +4994,111 @@
                     }
                     return sample;
                 });
-                if (samples.length === 0) {
+                if (baseSamples.length === 0) {
                     showToast("no-heap-samples", "No heap samples in selected region", "error", 4000);
                     return;
                 }
-                // Estimate total bytes (for header display)
-                let estimatedBytes = 0;
-                for (const s of samples) {
-                    estimatedBytes += s.weight;
-                }
-                const fmtBytes = estimatedBytes >= 1e9 ? (estimatedBytes / 1e9).toFixed(1) + " GB"
-                    : estimatedBytes >= 1e6 ? (estimatedBytes / 1e6).toFixed(1) + " MB"
-                    : estimatedBytes >= 1e3 ? (estimatedBytes / 1e3).toFixed(1) + " KB"
-                    : Math.round(estimatedBytes) + " B";
-                const rangeNote = (startNs != null || endNs != null) ? " in selected range" : " (full trace)";
-                const durStr = (startNs != null && endNs != null)
-                    ? ` · ${((endNs - startNs) / 1e6).toFixed(1)}ms`
-                    : "";
+
+                let estimatedBytes = 0, estimatedAllocs = 0;
+                for (const s of baseSamples) { estimatedBytes += s.byteWeight; estimatedAllocs += s.countWeight; }
                 function fmtB(bytes) {
                     return bytes >= 1e9 ? (bytes / 1e9).toFixed(1) + " GB"
                         : bytes >= 1e6 ? (bytes / 1e6).toFixed(1) + " MB"
                         : bytes >= 1e3 ? (bytes / 1e3).toFixed(1) + " KB"
                         : Math.round(bytes) + " B";
                 }
-                renderFlamegraphInSidebar({
-                    title: `Heap flamegraph — ~${fmtBytes}${durStr}`,
-                    subtitle: `${filtered.length} samples · ~${fmtBytes} estimated total allocations${rangeNote}`,
-                    samples,
-                    fgOpts: {
-                        workerLabel: "Worker thread allocations",
-                        offworkerLabel: "Non-worker thread allocations",
+                const fmtBytes = fmtB(estimatedBytes);
+                const rangeNote = (startNs != null || endNs != null) ? " in selected range" : " (full trace)";
+                const durStr = (startNs != null && endNs != null)
+                    ? ` · ${((endNs - startNs) / 1e6).toFixed(1)}ms`
+                    : "";
+
+                let heapMode = "bytes"; // "bytes" or "count"
+
+                function heapFgOpts(mode) {
+                    return {
+                        workerLabel: mode === "bytes" ? "Worker thread allocations (by bytes)" : "Worker thread allocations (by count)",
+                        offworkerLabel: mode === "bytes" ? "Non-worker thread allocations (by bytes)" : "Non-worker thread allocations (by count)",
                         formatCount(count, total, self, treeNode) {
                             const pct = ((count / total) * 100).toFixed(1);
-                            const est = fmtB(count);
-                            const allocs = treeNode && treeNode.allocCount != null ? Math.round(treeNode.allocCount) : null;
-                            let s = `~${est} (${pct}%)`;
-                            if (allocs != null) {
-                                s += ` · ~${allocs.toLocaleString()} allocs`;
-                                s += ` · ${fmtB(count / treeNode.allocCount)} avg`;
+                            if (mode === "bytes") {
+                                const allocs = treeNode && treeNode.allocCount != null ? Math.round(treeNode.allocCount) : null;
+                                let s = `~${fmtB(count)} (${pct}%)`;
+                                if (allocs != null) s += ` · ~${allocs.toLocaleString()} allocs · ${fmtB(count / treeNode.allocCount)} avg`;
+                                return s;
+                            } else {
+                                const bytes = treeNode && treeNode.allocCount != null ? treeNode.allocCount : count;
+                                // In count mode, count IS the alloc count, allocCount holds bytes
+                                let s = `~${Math.round(count).toLocaleString()} allocs (${pct}%)`;
+                                if (treeNode && treeNode.allocCount != null) s += ` · ~${fmtB(treeNode.allocCount)} · ${fmtB(treeNode.allocCount / count)} avg`;
+                                return s;
                             }
-                            return s;
                         }
-                    },
+                    };
+                }
+
+                function samplesForMode(mode) {
+                    return baseSamples.map(s => {
+                        if (mode === "bytes") {
+                            return { ...s, weight: s.byteWeight, allocWeight: s.countWeight };
+                        } else {
+                            // count mode: weight by alloc count, store bytes in allocWeight
+                            return { ...s, weight: s.countWeight, allocWeight: s.byteWeight };
+                        }
+                    });
+                }
+
+                // Render with initial mode
+                fgActive = true;
+                schedActive = false;
+                const sidebar = document.getElementById("stack-sidebar");
+                const titleEl = document.getElementById("stack-sidebar-title");
+                const body = document.getElementById("stack-sidebar-body");
+                document.getElementById("sidebar-tabs").style.display = "none";
+                titleEl.textContent = `Heap flamegraph — ~${fmtBytes}${durStr}`;
+                body.innerHTML = "";
+                body.style.display = "flex";
+                body.style.flexDirection = "column";
+
+                const actions = document.createElement("div");
+                actions.style.cssText = "display:flex;gap:8px;margin-bottom:6px;flex-shrink:0;align-items:center";
+                actions.innerHTML = `<span style="color:#888;font-size:0.85em">${filtered.length} samples · ~${fmtBytes} · ~${Math.round(estimatedAllocs).toLocaleString()} allocs${rangeNote}</span>`;
+
+                const toggle = document.createElement("span");
+                toggle.style.cssText = "display:inline-flex;border:1px solid #444;border-radius:4px;overflow:hidden;font-size:0.8em;cursor:pointer";
+                const btnBytes = document.createElement("span");
+                btnBytes.textContent = "Bytes";
+                btnBytes.style.cssText = "padding:2px 8px;background:#4caf50;color:#fff";
+                const btnCount = document.createElement("span");
+                btnCount.textContent = "Count";
+                btnCount.style.cssText = "padding:2px 8px;background:transparent;color:#888";
+                toggle.appendChild(btnBytes);
+                toggle.appendChild(btnCount);
+                function setToggle(mode) {
+                    heapMode = mode;
+                    btnBytes.style.background = mode === "bytes" ? "#4caf50" : "transparent";
+                    btnBytes.style.color = mode === "bytes" ? "#fff" : "#888";
+                    btnCount.style.background = mode === "count" ? "#4caf50" : "transparent";
+                    btnCount.style.color = mode === "count" ? "#fff" : "#888";
+                    requestAnimationFrame(() => {
+                        fgInstance.setData(samplesForMode(heapMode), trace.callframeSymbols, heapFgOpts(heapMode));
+                        fgInstance.resize();
+                    });
+                }
+                btnBytes.addEventListener("click", () => setToggle("bytes"));
+                btnCount.addEventListener("click", () => setToggle("count"));
+                actions.appendChild(toggle);
+                body.appendChild(actions);
+
+                fgContainer.style.flex = "1";
+                fgContainer.style.minHeight = "0";
+                body.appendChild(fgContainer);
+                const wasHidden = sidebar.style.display !== "flex";
+                sidebar.style.display = "flex";
+                if (wasHidden && trace) requestAnimationFrame(renderAll);
+                requestAnimationFrame(() => {
+                    fgInstance.setData(samplesForMode(heapMode), trace.callframeSymbols, heapFgOpts(heapMode));
+                    fgInstance.resize();
                 });
             }
 
