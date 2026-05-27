@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::fs::{self, File};
 use std::io::BufWriter;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant};
 
 use metrique_timesource::time_source;
 
@@ -42,9 +42,9 @@ pub trait TraceWriter: Send {
         Ok(())
     }
     /// Returns `true` when the flush loop should drain all thread-local
-    /// buffers before the next step. For `RotatingWriter` this fires when a
-    /// rotation boundary is crossed *or* when a periodic drain interval
-    /// elapses (whichever comes first). Default returns `false`.
+    /// buffers before the next step. For `RotatingWriter` this fires when the
+    /// rotation period has elapsed since the last rotation *or* when a periodic
+    /// drain interval elapses (whichever comes first). Default returns `false`.
     fn should_drain(&self) -> bool {
         false
     }
@@ -149,8 +149,8 @@ struct ExistingSegments {
 ///
 /// Rotation triggers when *either* condition is met:
 /// - `max_file_size`: the current file exceeds this many bytes
-/// - `rotation_period`: a wall-clock-aligned time boundary is crossed
-///   (default: 1 minute, aligned to round minute boundaries)
+/// - `rotation_period`: this much monotonic time has elapsed since the writer
+///   (or the previous rotation) started (default: 1 minute)
 ///
 /// **Prefer time-based rotation.** Time-based rotation is coordinated with the
 /// flush loop: thread-local buffers are drained before the segment is sealed,
@@ -171,11 +171,12 @@ pub struct RotatingWriter {
     base_path: PathBuf,
     max_file_size: u64,
     max_total_size: u64,
-    /// How often to rotate based on wall-clock time. `Duration::MAX` disables
+    /// How often to rotate based on monotonic time. `Duration::MAX` disables
     /// time-based rotation (used by `single_file()`).
     rotation_period: Duration,
-    /// The next wall-clock instant at which time-based rotation should fire.
-    next_rotation_time: SystemTime,
+    /// The next monotonic instant at which time-based rotation should fire,
+    /// or `None` if time-based rotation is disabled.
+    next_rotation_time: Option<Instant>,
     /// Tracks (path, size) of closed files oldest-first. The active file is
     /// not in this list — its size comes from `encoder.bytes_written()`.
     closed_files: VecDeque<(PathBuf, u64)>,
@@ -196,8 +197,8 @@ pub struct RotatingWriter {
     /// How often the flush loop should drain thread-local buffers, independent
     /// of rotation. Defaults to `min(rotation_period, 30s)`.
     drain_interval: Duration,
-    /// Next wall-clock instant at which `should_drain()` returns true.
-    next_drain_time: SystemTime,
+    /// Next monotonic instant at which `should_drain()` returns true.
+    next_drain_time: Instant,
 }
 
 impl std::fmt::Debug for RotatingWriter {
@@ -248,9 +249,9 @@ impl RotatingWriter {
         base_path: impl Into<PathBuf>,
         max_file_size: u64,
         max_total_size: u64,
-        /// How often to rotate based on wall-clock time, aligned to round
-        /// boundaries (e.g. a 60 s period rotates at the top of each minute).
-        /// Defaults to 60 seconds.
+        /// How often to rotate, measured in monotonic time since the writer
+        /// (or the previous rotation) started. Defaults to 60 seconds.
+        /// `Duration::MAX` disables time-based rotation.
         rotation_period: Option<Duration>,
         segment_metadata: Option<Vec<(String, String)>>,
     ) -> std::io::Result<Self> {
@@ -284,7 +285,7 @@ impl RotatingWriter {
         let file = File::create(&first_path)?;
         let writer = BufWriter::new(file);
         let state = Self::prepare_segment(writer)?;
-        let now = time_source().system_time().as_std();
+        let now = time_source().instant().as_std();
         let drain_interval = rotation_period.min(DEFAULT_DRAIN_INTERVAL);
         let next_index = existing_segments
             .next_active_index
@@ -296,7 +297,7 @@ impl RotatingWriter {
             max_file_size,
             max_total_size,
             rotation_period,
-            next_rotation_time: Self::next_boundary(now, rotation_period),
+            next_rotation_time: Self::next_rotation_from(now, rotation_period),
             closed_files: existing_segments.closed_files,
             active_path: first_path,
             state,
@@ -306,7 +307,7 @@ impl RotatingWriter {
             dropped_events: 0,
             has_real_events: false,
             drain_interval,
-            next_drain_time: Self::next_boundary(now, drain_interval),
+            next_drain_time: now + drain_interval,
         };
         writer.evict_oldest()?;
         Ok(writer)
@@ -328,14 +329,14 @@ impl RotatingWriter {
         let file = File::create(&active_path)?;
         let writer = BufWriter::new(file);
         let state = Self::prepare_segment(writer)?;
-        let now = time_source().system_time().as_std();
+        let now = time_source().instant().as_std();
 
         Ok(Self {
             base_path: path,
             max_file_size: u64::MAX,
             max_total_size: u64::MAX,
             rotation_period: Duration::MAX,
-            next_rotation_time: Self::next_boundary(now, Duration::MAX),
+            next_rotation_time: None,
             closed_files: VecDeque::new(),
             active_path,
             state,
@@ -345,7 +346,7 @@ impl RotatingWriter {
             dropped_events: 0,
             has_real_events: false,
             drain_interval: DEFAULT_DRAIN_INTERVAL,
-            next_drain_time: Self::next_boundary(now, DEFAULT_DRAIN_INTERVAL),
+            next_drain_time: now + DEFAULT_DRAIN_INTERVAL,
         })
     }
 
@@ -512,26 +513,10 @@ impl RotatingWriter {
         })
     }
 
-    /// Compute the next wall-clock-aligned rotation boundary after `now`.
-    ///
-    /// For a 60 s period, if `now` is 14:03:22 the result is 14:04:00.
-    /// Returns a far-future time when `period` is `Duration::MAX` (time
-    /// rotation disabled).
-    fn next_boundary(now: SystemTime, period: Duration) -> SystemTime {
-        if period == Duration::MAX {
-            // ~year 2554 — far enough to never trigger, small enough to not overflow.
-            return SystemTime::UNIX_EPOCH + Duration::from_secs(u32::MAX as u64 * 4);
-        }
-        let epoch_dur = now
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap_or_default();
-        let period_nanos = period.as_nanos();
-        if period_nanos == 0 {
-            return now;
-        }
-        let epoch_nanos = epoch_dur.as_nanos();
-        let next_nanos = ((epoch_nanos / period_nanos) + 1) * period_nanos;
-        SystemTime::UNIX_EPOCH + Duration::from_nanos(next_nanos as u64)
+    /// Compute the next rotation deadline as `now + period`, or `None` when
+    /// `period == Duration::MAX` (time-based rotation disabled).
+    fn next_rotation_from(now: Instant, period: Duration) -> Option<Instant> {
+        (period != Duration::MAX).then(|| now + period)
     }
 
     fn rotate(&mut self) -> std::io::Result<()> {
@@ -542,9 +527,9 @@ impl RotatingWriter {
         // Advance timers up front. If anything below fails the flush loop must
         // NOT see should_drain() return true on the next 5ms tick — otherwise
         // it busy-spins re-attempting the same failing rotate.
-        let now = time_source().system_time().as_std();
-        self.next_rotation_time = Self::next_boundary(now, self.rotation_period);
-        self.next_drain_time = Self::next_boundary(now, self.drain_interval);
+        let now = time_source().instant().as_std();
+        self.next_rotation_time = Self::next_rotation_from(now, self.rotation_period);
+        self.next_drain_time = now + self.drain_interval;
 
         // Best-effort flush. If the underlying file is gone the buffered bytes
         // are already lost; proceed to rotate rather than erroring.
@@ -731,20 +716,23 @@ impl TraceWriter for RotatingWriter {
     }
 
     fn should_drain(&self) -> bool {
-        self.has_real_events && time_source().system_time() >= self.next_drain_time
+        self.has_real_events && time_source().instant().as_std() >= self.next_drain_time
     }
 
     fn drained(&mut self) -> std::io::Result<bool> {
         if !self.has_real_events {
             return Ok(false);
         }
-        let now = time_source().system_time();
-        if now >= self.next_rotation_time {
+        let now = time_source().instant().as_std();
+        if self
+            .next_rotation_time
+            .is_some_and(|deadline| now >= deadline)
+        {
             self.rotate()?;
             return Ok(true);
         }
         // Periodic drain without rotation — just advance the drain timer.
-        self.next_drain_time = Self::next_boundary(now.as_std(), self.drain_interval);
+        self.next_drain_time = now + self.drain_interval;
         Ok(false)
     }
 
@@ -1657,51 +1645,6 @@ mod tests {
 
     // ---- Time-based rotation tests ----
 
-    #[test]
-    fn test_next_boundary_aligns_to_minute() {
-        use std::time::{Duration, SystemTime};
-        // 2026-01-01 14:03:22 UTC → epoch 1767272602
-        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_767_272_602);
-        let period = Duration::from_secs(60);
-        let boundary = RotatingWriter::next_boundary(now, period);
-        // Should align to 14:04:00 → epoch 1767272640
-        let expected = SystemTime::UNIX_EPOCH + Duration::from_secs(1_767_272_640);
-        assert_eq!(boundary, expected);
-    }
-
-    #[test]
-    fn test_next_boundary_at_exact_boundary() {
-        use std::time::{Duration, SystemTime};
-        // Exactly on a minute boundary: 14:03:00 → epoch 1767272580
-        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_767_272_580);
-        let period = Duration::from_secs(60);
-        let boundary = RotatingWriter::next_boundary(now, period);
-        // Should advance to 14:04:00
-        let expected = SystemTime::UNIX_EPOCH + Duration::from_secs(1_767_272_640);
-        assert_eq!(boundary, expected);
-    }
-
-    #[test]
-    fn test_next_boundary_5_minute_alignment() {
-        use std::time::{Duration, SystemTime};
-        // 14:03:22 with 5-minute period
-        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_767_272_602);
-        let period = Duration::from_secs(300);
-        let boundary = RotatingWriter::next_boundary(now, period);
-        // Should align to 14:05:00 → epoch 1767272700
-        let expected = SystemTime::UNIX_EPOCH + Duration::from_secs(1_767_272_700);
-        assert_eq!(boundary, expected);
-    }
-
-    #[test]
-    fn test_next_boundary_duration_max_returns_far_future() {
-        use std::time::{Duration, SystemTime};
-        let now = SystemTime::now();
-        let boundary = RotatingWriter::next_boundary(now, Duration::MAX);
-        // Should be far in the future — never triggers
-        assert!(boundary > now + Duration::from_secs(86400 * 365 * 100));
-    }
-
     #[tokio::test(start_paused = true)]
     async fn test_time_rotation_triggers_on_expired_boundary() {
         use metrique_timesource::{TimeSource, tokio::set_time_source_for_current_runtime};
@@ -1746,6 +1689,57 @@ mod tests {
             })
             .sum();
         assert_eq!(total, 2);
+    }
+
+    /// The first rotation must happen exactly `rotation_period` after the writer
+    /// is created, not earlier due to wall-clock alignment. Starting at a non-aligned
+    /// wall-clock time (UNIX_EPOCH + 22s) with a 60s period and advancing 50s must
+    /// NOT rotate. So only 50s of monotonic time have elapsed since the writer started.
+    #[tokio::test(start_paused = true)]
+    async fn test_first_rotation_uses_monotonic_period_not_wallclock_alignment() {
+        use metrique_timesource::{TimeSource, tokio::set_time_source_for_current_runtime};
+        let start_wall = std::time::UNIX_EPOCH + Duration::from_secs(22);
+        let _guard = set_time_source_for_current_runtime(TimeSource::tokio(start_wall));
+
+        let dir = TempDir::new().unwrap();
+        let base = dir.path().join("trace");
+        let mut writer = RotatingWriter::builder()
+            .base_path(&base)
+            .max_file_size(u64::MAX)
+            .max_total_size(100_000)
+            .rotation_period(Duration::from_secs(60))
+            .build()
+            .unwrap();
+
+        writer.write_encoded_batch(&test_batch()).unwrap();
+        writer.flush().unwrap();
+        let initial_index = writer.next_index;
+
+        // 50s of monotonic time have elapsed under the 60s period, so no rotation.
+        // On the old wall-clock-aligned implementation this would advance past the
+        // 60s wall-clock boundary (22s + 50s = 72s ≥ 60s) and incorrectly rotate.
+        tokio::time::advance(Duration::from_secs(50)).await;
+
+        writer.write_encoded_batch(&test_batch()).unwrap();
+        writer.flush().unwrap();
+        writer.drained().unwrap();
+
+        assert_eq!(
+            writer.next_index, initial_index,
+            "rotation must not fire before one full rotation_period of monotonic time has elapsed",
+        );
+
+        // after the period DOES elapse, rotation fires.
+        tokio::time::advance(Duration::from_secs(11)).await;
+        writer.write_encoded_batch(&test_batch()).unwrap();
+        writer.flush().unwrap();
+        writer.drained().unwrap();
+        assert!(
+            writer.next_index > initial_index,
+            "rotation should fire once a full rotation_period of monotonic time has elapsed",
+        );
+
+        writer.finalize().unwrap();
     }
 
     #[tokio::test(start_paused = true)]
