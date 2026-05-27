@@ -79,15 +79,11 @@ which dial9 uses to walk the call stack during CPU profiling.`,
       severity: 'warning',
       check: 'missing-wake-events',
       message: `${totalTaskSpawns} tasks were spawned but 0 wake events were recorded. Tasks are not instrumented.`,
-      fix: `Use TelemetryHandle::spawn() instead of tokio::spawn() to instrument tasks:
+      fix: `Use dial9's spawn() instead of tokio::spawn() to instrument tasks:
 
-use dial9_tokio_telemetry::telemetry::TelemetryHandle;
+use dial9_tokio_telemetry::telemetry::spawn;
 
-let handle = TelemetryHandle::current();
-handle.spawn(async { /* your task */ });
-
-// Or use the free function:
-dial9_tokio_telemetry::telemetry::spawn(async { /* your task */ });
+spawn(async { /* your task */ });
 
 Wake events let dial9 measure scheduling delays (time between Waker::wake()
 and the task actually being polled). Without them, you cannot diagnose
@@ -106,10 +102,8 @@ whether tasks are waiting too long in the queue.`,
         fix: `Ensure your release profile includes debug info. In Cargo.toml:
 
 [profile.release]
-debug = 1        # line tables only (minimal size overhead)
-# or
-debug = 2        # full debug info (larger binary, best diagnostics)
-strip = false    # do NOT strip symbols
+debug = "line-tables-only"   # minimal size overhead, enough for dial9
+strip = false                # do NOT strip symbols
 
 Do NOT pass -C strip=symbols in RUSTFLAGS for builds you want to profile.
 Debug info is needed for dial9 to resolve stack addresses to function names
@@ -136,7 +130,7 @@ and source locations. Without it, CPU profiles show only hex addresses.`,
        .with_runtime(|r| r.with_sched_events(SchedEventConfig::default()))
        // ...
 
-Or via environment variable:
+   Or via environment variable:
    DIAL9_SCHEDULE_PROFILE_ENABLED=true
 
 Scheduling events show stack traces when the kernel deschedules your worker
