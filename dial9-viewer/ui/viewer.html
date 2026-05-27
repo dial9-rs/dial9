@@ -4950,7 +4950,28 @@
                 let allocs = trace.allocEvents;
                 if (startNs != null) allocs = allocs.filter(a => a.timestamp >= startNs);
                 if (endNs != null) allocs = allocs.filter(a => a.timestamp <= endNs);
-                const filtered = allocs.filter(a => a.callchain.length > 0);
+
+                // Strip allocator hook frames from the top of each callchain
+                const HOOK_PATTERNS = [
+                    "memory_profiling::hook::on_alloc",
+                    "memory_profiling::allocator::Dial9Allocator",
+                    "__rustc::__rust_alloc",
+                    "__rustc::__rust_realloc",
+                ];
+                function stripHookFrames(chain) {
+                    let start = 0;
+                    while (start < chain.length) {
+                        const entry = trace.callframeSymbols.get(chain[start]);
+                        const frames = Array.isArray(entry) ? entry : [entry];
+                        const name = frames.map(f => f && f.symbol || "").join(" ");
+                        if (HOOK_PATTERNS.some(p => name.includes(p))) { start++; continue; }
+                        break;
+                    }
+                    return start > 0 ? chain.slice(start) : chain;
+                }
+
+                const filtered = allocs.map(a => ({ ...a, callchain: stripHookFrames(a.callchain) }))
+                    .filter(a => a.callchain.length > 0);
                 // Attribute allocs to tasks via tid → workerId → poll lookup for spawn filter
                 const samples = filtered.map(a => {
                     const wId = trace.tidToWorker && trace.tidToWorker.get(a.tid);
