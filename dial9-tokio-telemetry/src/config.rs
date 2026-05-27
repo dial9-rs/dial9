@@ -217,7 +217,6 @@ const DEFAULT_SCHEDULE_PROFILE_ENABLED: bool =
 const DEFAULT_TASK_DUMP_ENABLED: bool = false;
 
 const BYTES_PER_MIB: u64 = 1024 * 1024;
-const MAX_FILE_SIZE_CAP: u64 = 100 * BYTES_PER_MIB;
 
 trait EnvSource {
     fn get(&self, name: &str) -> Result<String, std::env::VarError>;
@@ -279,7 +278,9 @@ struct ResolvedEnvConfig {
     rotation_period: Option<Duration>,
 
     max_total_size: u64,
-    max_file_size: u64,
+
+    // None means the underlying RotatingWriter builder owns the default.
+    max_file_size: Option<u64>,
     task_tracking_enabled: bool,
 
     // Optional config: None means do not set a runtime name.
@@ -353,9 +354,6 @@ fn resolve_env_config(parsed: ParsedEnvConfig) -> ResolvedEnvConfig {
     let max_total_size = parsed
         .max_total_size
         .unwrap_or_else(|| DEFAULT_MAX_DISK_USAGE_MB.saturating_mul(BYTES_PER_MIB));
-    let max_file_size = parsed
-        .max_file_size
-        .unwrap_or_else(|| derive_max_file_size(max_total_size));
 
     ResolvedEnvConfig {
         enabled: parsed.enabled.unwrap_or(DEFAULT_ENABLED),
@@ -364,7 +362,7 @@ fn resolve_env_config(parsed: ParsedEnvConfig) -> ResolvedEnvConfig {
             .unwrap_or_else(|| PathBuf::from(DEFAULT_TRACE_DIR)),
         rotation_period: parsed.rotation_period,
         max_total_size,
-        max_file_size,
+        max_file_size: parsed.max_file_size,
         task_tracking_enabled: parsed
             .task_tracking_enabled
             .unwrap_or(DEFAULT_TASK_TRACKING_ENABLED),
@@ -472,12 +470,6 @@ impl<S: EnvSource> EnvSourceParser<S> {
         }
         Some(value.to_string())
     }
-}
-
-fn derive_max_file_size(max_total_size: u64) -> u64 {
-    // Keep size-based rotation as a safety valve without allowing huge
-    // segments when the total disk budget is large.
-    (max_total_size / 4).min(MAX_FILE_SIZE_CAP)
 }
 
 #[cfg(feature = "worker-s3")]
@@ -655,7 +647,7 @@ impl Dial9Config {
         let builder = Self::builder()
             .enabled(enabled)
             .base_path(trace_dir.join("trace.bin"))
-            .max_file_size(max_file_size)
+            .maybe_max_file_size(max_file_size)
             .max_total_size(max_total_size)
             .maybe_rotation_period(rotation_period);
 
@@ -689,11 +681,14 @@ impl Dial9Config {
     /// Start a fluent configuration chain.
     ///
     /// When telemetry is enabled (the default), the following setters are
-    /// required: [`base_path`](Dial9ConfigBuilder::base_path),
-    /// [`max_file_size`](Dial9ConfigBuilder::max_file_size),
+    /// required: [`base_path`](Dial9ConfigBuilder::base_path) and
     /// [`max_total_size`](Dial9ConfigBuilder::max_total_size). They may be
     /// omitted if `.enabled(false)` is set, in which case a plain tokio
     /// runtime is built without telemetry.
+    ///
+    /// [`max_file_size`](Dial9ConfigBuilder::max_file_size) is optional; when
+    /// not set, the underlying [`RotatingWriter`] defaults it to
+    /// `min(100 MiB, max_total_size / 4)`.
     #[builder(
         builder_type = Dial9ConfigBuilder,
         finish_fn = build,
@@ -762,13 +757,12 @@ fn assemble(args: AssembleArgs) -> Result<Inner, Dial9ConfigBuilderError> {
         });
     }
 
-    let required_fields = (base_path, max_file_size, max_total_size);
-    let (base_path, max_file_size, max_total_size) = match required_fields {
-        (Some(bp), Some(mfs), Some(mts)) => (bp, mfs, mts),
-        (bp, mfs, mts) => {
+    let required_fields = (base_path, max_total_size);
+    let (base_path, max_total_size) = match required_fields {
+        (Some(bp), Some(mts)) => (bp, mts),
+        (bp, mts) => {
             let missing = [
                 ("base_path", bp.is_none()),
-                ("max_file_size", mfs.is_none()),
                 ("max_total_size", mts.is_none()),
             ]
             .into_iter()
@@ -782,7 +776,7 @@ fn assemble(args: AssembleArgs) -> Result<Inner, Dial9ConfigBuilderError> {
 
     let writer = RotatingWriter::builder()
         .base_path(base_path.clone())
-        .max_file_size(max_file_size)
+        .maybe_max_file_size(max_file_size)
         .max_total_size(max_total_size)
         .maybe_rotation_period(rotation_period)
         .build()
@@ -993,10 +987,6 @@ mod tests {
             DEFAULT_MAX_DISK_USAGE_MB * BYTES_PER_MIB
         );
         assert_eq!(
-            resolved.max_file_size,
-            derive_max_file_size(resolved.max_total_size)
-        );
-        assert_eq!(
             resolved.task_tracking_enabled,
             DEFAULT_TASK_TRACKING_ENABLED
         );
@@ -1009,22 +999,10 @@ mod tests {
         assert!(resolved.s3.is_none());
 
         // Delegated defaults remain unset so their underlying config types own them.
+        assert_eq!(resolved.max_file_size, None);
         assert_eq!(resolved.rotation_period, None);
         assert_eq!(resolved.cpu_sample_hz, None);
         assert_eq!(resolved.task_dump_idle_threshold, None);
-    }
-
-    #[test]
-    fn env_default_max_file_size_caps_large_budgets_at_100_mib() {
-        assert_eq!(
-            derive_max_file_size(1024 * BYTES_PER_MIB),
-            100 * BYTES_PER_MIB
-        );
-    }
-
-    #[test]
-    fn env_default_max_file_size_uses_quarter_of_small_budgets() {
-        assert_eq!(derive_max_file_size(64 * BYTES_PER_MIB), 16 * BYTES_PER_MIB);
     }
 
     #[test]
@@ -1223,7 +1201,7 @@ mod tests {
     fn missing_required_fields_errors_with_all_missing_names() {
         match Dial9Config::builder().build() {
             Err(Dial9ConfigBuilderError::Validation(v)) => {
-                assert_eq!(v.fields(), ["base_path", "max_file_size", "max_total_size"]);
+                assert_eq!(v.fields(), ["base_path", "max_total_size"]);
             }
             Ok(_) => panic!("expected Validation error, got Ok"),
             Err(other) => panic!("expected Validation error, got {other:?}"),
@@ -1239,6 +1217,15 @@ mod tests {
             Ok(_) => panic!("expected Validation error, got Ok"),
             Err(other) => panic!("expected Validation error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn builder_defaults_max_file_size_when_omitted() {
+        let _ = Dial9Config::builder()
+            .base_path(tmp_base_path())
+            .max_total_size(64 * BYTES_PER_MIB)
+            .build()
+            .expect("build should succeed without explicit max_file_size");
     }
 
     #[test]

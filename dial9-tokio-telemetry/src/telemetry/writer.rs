@@ -134,6 +134,20 @@ const DEFAULT_ROTATION_PERIOD: Duration = Duration::from_secs(60);
 /// Default maximum interval between thread-local buffer drains.
 const DEFAULT_DRAIN_INTERVAL: Duration = Duration::from_secs(30);
 
+const BYTES_PER_MIB: u64 = 1024 * 1024;
+
+/// Hard cap on the builder-derived per-file size, regardless of the total
+/// disk budget. Time-based rotation should fire first under normal load;
+/// this cap keeps individual segments small enough to remain manageable.
+const MAX_FILE_SIZE_CAP: u64 = 100 * BYTES_PER_MIB;
+
+/// Default per-file rotation threshold derived from the total disk budget.
+/// Picks a quarter of the budget so a single segment never dominates
+/// retention, capped at 100 MiB.
+fn derive_max_file_size(max_total_size: u64) -> u64 {
+    (max_total_size / 4).min(MAX_FILE_SIZE_CAP)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SegmentArtifact {
     Retained { index: u32 },
@@ -159,7 +173,9 @@ struct ExistingSegments {
 /// not drain thread-local buffers, so segments may contain events that overlap
 /// in time. Set `max_file_size` large enough that time-based rotation fires
 /// first under normal conditions (e.g. 100 MB or more). Size-based rotation
-/// then acts as a safety valve for unexpected data bursts.
+/// then acts as a safety valve for unexpected data bursts. When using
+/// [`RotatingWriter::builder`] without specifying `max_file_size`, it
+/// defaults to `min(100 MiB, max_total_size / 4)`.
 ///
 /// `max_total_size` controls eviction: oldest retained files for this trace
 /// family are deleted when total size exceeds this budget, including artifacts
@@ -243,10 +259,15 @@ impl RotatingWriter {
     }
 
     /// Create a `RotatingWriterBuilder` for advanced configuration.
+    ///
+    /// When `max_file_size` is omitted, it defaults to
+    /// `min(100 MiB, max_total_size / 4)`.
     #[builder(builder_type = RotatingWriterBuilder, finish_fn = build)]
     pub fn builder(
         base_path: impl Into<PathBuf>,
-        max_file_size: u64,
+        /// Per-file rotation threshold in bytes. Defaults to
+        /// `min(100 MiB, max_total_size / 4)` when not set.
+        max_file_size: Option<u64>,
         max_total_size: u64,
         /// How often to rotate based on wall-clock time, aligned to round
         /// boundaries (e.g. a 60 s period rotates at the top of each minute).
@@ -256,7 +277,7 @@ impl RotatingWriter {
     ) -> std::io::Result<Self> {
         Self::create(
             base_path,
-            max_file_size,
+            max_file_size.unwrap_or_else(|| derive_max_file_size(max_total_size)),
             max_total_size,
             rotation_period.unwrap_or(DEFAULT_ROTATION_PERIOD),
             segment_metadata
@@ -919,6 +940,45 @@ mod tests {
         let path = dir.path().join("test_trace_v2.bin");
         let writer = RotatingWriter::single_file(&path);
         assert!(writer.is_ok());
+    }
+
+    #[test]
+    fn derive_max_file_size_caps_large_budgets_at_100_mib() {
+        assert_eq!(
+            derive_max_file_size(1024 * BYTES_PER_MIB),
+            100 * BYTES_PER_MIB
+        );
+    }
+
+    #[test]
+    fn derive_max_file_size_uses_quarter_of_small_budgets() {
+        assert_eq!(derive_max_file_size(64 * BYTES_PER_MIB), 16 * BYTES_PER_MIB);
+    }
+
+    #[test]
+    fn builder_defaults_max_file_size_from_total_size() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("default_size.bin");
+        let total = 64 * BYTES_PER_MIB;
+        let writer = RotatingWriter::builder()
+            .base_path(&path)
+            .max_total_size(total)
+            .build()
+            .expect("builder should succeed without max_file_size");
+        assert_eq!(writer.max_file_size, derive_max_file_size(total));
+    }
+
+    #[test]
+    fn builder_honors_explicit_max_file_size() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("explicit_size.bin");
+        let writer = RotatingWriter::builder()
+            .base_path(&path)
+            .max_file_size(7 * BYTES_PER_MIB)
+            .max_total_size(64 * BYTES_PER_MIB)
+            .build()
+            .expect("builder should succeed");
+        assert_eq!(writer.max_file_size, 7 * BYTES_PER_MIB);
     }
 
     #[test]
