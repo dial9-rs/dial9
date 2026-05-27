@@ -150,6 +150,7 @@ impl TelemetryGuard {
             guard: self,
             name: name.into(),
             task_tracking: false,
+            tokio_instrumentation_enabled: true,
             tokio_hooks: super::TokioHooks::default(),
         }
     }
@@ -258,6 +259,7 @@ pub struct TraceRuntimeCoreBuilder<'a> {
     guard: &'a TelemetryGuard,
     name: String,
     task_tracking: bool,
+    tokio_instrumentation_enabled: bool,
     tokio_hooks: super::TokioHooks,
 }
 
@@ -266,6 +268,13 @@ impl<'a> TraceRuntimeCoreBuilder<'a> {
     /// Defaults to `false`.
     pub fn task_tracking(mut self, enabled: bool) -> Self {
         self.task_tracking = enabled;
+        self
+    }
+
+    /// Enable or disable dial9's Tokio runtime instrumentation for this runtime.
+    /// Defaults to `true`.
+    pub fn with_tokio_instrumentation(mut self, enabled: bool) -> Self {
+        self.tokio_instrumentation_enabled = enabled;
         self
     }
 
@@ -283,7 +292,8 @@ impl<'a> TraceRuntimeCoreBuilder<'a> {
     /// Install telemetry hooks, build the runtime, and reserve worker IDs.
     ///
     /// Returns the runtime and a [`RuntimeTelemetryHandle`] for spawning
-    /// instrumented futures via [`RuntimeTelemetryHandle::spawn`].
+    /// instrumented futures via [`RuntimeTelemetryHandle::spawn`]. If Tokio
+    /// instrumentation is disabled, builds a plain runtime instead.
     pub fn build(
         self,
         mut builder: tokio::runtime::Builder,
@@ -303,6 +313,16 @@ impl<'a> TraceRuntimeCoreBuilder<'a> {
             };
             return Ok((runtime, handle));
         };
+
+        if !self.tokio_instrumentation_enabled {
+            let runtime = builder.build()?;
+            let handle = RuntimeTelemetryHandle {
+                runtime: runtime.handle().clone(),
+                traced: None,
+            };
+            return Ok((runtime, handle));
+        }
+
         let runtime = attach_runtime(
             shared,
             builder,
