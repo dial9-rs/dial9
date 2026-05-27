@@ -82,7 +82,7 @@ async fn main() {
 | --- | --- | --- |
 | `DIAL9_ENABLED` | `false` | Master switch for installing telemetry. |
 | `DIAL9_TRACE_DIR` | `/tmp/dial9-traces` | Directory for rotated trace segments. |
-| `DIAL9_ROTATION_SECS` | `60` | Wall-clock rotation period in seconds. |
+| `DIAL9_ROTATION_SECS` | `60` | Rotation period in seconds, measured monotonically from writer start. |
 | `DIAL9_MAX_DISK_USAGE_MB` | `1024` | Total on-disk trace budget in MiB. |
 | `DIAL9_MAX_FILE_SIZE_MB` | `min(100, total / 4)` | Per-file trace segment size in MiB. |
 

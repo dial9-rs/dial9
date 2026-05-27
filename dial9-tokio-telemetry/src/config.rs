@@ -581,7 +581,7 @@ impl Dial9Config {
     /// | --- | --- | --- |
     /// | `DIAL9_ENABLED` | `false` | Master switch for installing telemetry. |
     /// | `DIAL9_TRACE_DIR` | `/tmp/dial9-traces` | Directory for rotated trace segments. |
-    /// | `DIAL9_ROTATION_SECS` | `60` | Wall-clock rotation period in seconds. |
+    /// | `DIAL9_ROTATION_SECS` | `60` | Rotation period in seconds, measured monotonically from writer start. |
     /// | `DIAL9_MAX_DISK_USAGE_MB` | `1024` | Total on-disk trace budget in MiB. |
     /// | `DIAL9_MAX_FILE_SIZE_MB` | `min(100, total / 4)` | Per-file trace segment size in MiB. |
     ///
@@ -715,7 +715,8 @@ impl Dial9Config {
         max_file_size: Option<u64>,
         /// Total disk budget in bytes.
         max_total_size: Option<u64>,
-        /// Wall-clock rotation period for the writer.
+        /// Rotation period for the writer, measured monotonically from writer
+        /// (or last-rotation) start.
         rotation_period: Option<Duration>,
     ) -> Result<Dial9Config, Dial9ConfigBuilderError> {
         assemble(AssembleArgs {
