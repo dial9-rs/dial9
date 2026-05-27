@@ -4972,10 +4972,15 @@
 
                 const filtered = allocs.map(a => ({ ...a, callchain: stripHookFrames(a.callchain) }))
                     .filter(a => a.callchain.length > 0);
+                // Estimate total bytes using unbiased weight: weight(s) = s / (1 - exp(-s/R))
+                const R = 524288; // default sample rate bytes (512 KiB)
                 // Attribute allocs to tasks via tid → workerId → poll lookup for spawn filter
                 const samples = filtered.map(a => {
                     const wId = trace.tidToWorker && trace.tidToWorker.get(a.tid);
-                    const sample = { callchain: a.callchain, workerId: wId != null ? 0 : 255, spawnLoc: null };
+                    const s = a.size;
+                    const ratio = s / R;
+                    const invP = (s <= 0 || ratio > 50) ? 1 : 1 / (1 - Math.exp(-ratio));
+                    const sample = { callchain: a.callchain, workerId: wId != null ? 0 : 255, spawnLoc: null, weight: s * invP, allocWeight: invP };
                     if (wId != null && workerSpans[wId]) {
                         const polls = workerSpans[wId].polls;
                         let lo = 0, hi = polls.length - 1;
@@ -4994,14 +4999,10 @@
                     showToast("no-heap-samples", "No heap samples in selected region", "error", 4000);
                     return;
                 }
-                // Estimate total bytes using unbiased weight: weight(s) = s / (1 - exp(-s/R))
-                const R = 524288; // default sample rate bytes (512 KiB)
+                // Estimate total bytes (for header display)
                 let estimatedBytes = 0;
-                for (const a of filtered) {
-                    const s = a.size;
-                    if (s <= 0) continue;
-                    const ratio = s / R;
-                    estimatedBytes += ratio > 50 ? s : s / (1 - Math.exp(-ratio));
+                for (const s of samples) {
+                    estimatedBytes += s.weight;
                 }
                 const fmtBytes = estimatedBytes >= 1e9 ? (estimatedBytes / 1e9).toFixed(1) + " GB"
                     : estimatedBytes >= 1e6 ? (estimatedBytes / 1e6).toFixed(1) + " MB"
@@ -5017,7 +5018,6 @@
                         : bytes >= 1e3 ? (bytes / 1e3).toFixed(1) + " KB"
                         : Math.round(bytes) + " B";
                 }
-                const bytesPerSample = estimatedBytes / filtered.length;
                 renderFlamegraphInSidebar({
                     title: `Heap flamegraph — ~${fmtBytes}${durStr}`,
                     subtitle: `${filtered.length} samples · ~${fmtBytes} estimated total allocations${rangeNote}`,
@@ -5025,12 +5025,15 @@
                     fgOpts: {
                         workerLabel: "Worker thread allocations",
                         offworkerLabel: "Non-worker thread allocations",
-                        formatCount(count, total, self) {
+                        formatCount(count, total, self, treeNode) {
                             const pct = ((count / total) * 100).toFixed(1);
                             const selfPct = ((self / total) * 100).toFixed(1);
-                            const est = fmtB(count * bytesPerSample);
-                            const selfEst = fmtB(self * bytesPerSample);
-                            return `~${est} (${pct}%) \u00b7 ~${selfEst} self (${selfPct}%)`;
+                            const est = fmtB(count);
+                            const selfEst = fmtB(self);
+                            const allocs = treeNode && treeNode.allocCount != null ? Math.round(treeNode.allocCount) : null;
+                            let s = `~${est} (${pct}%) \u00b7 ~${selfEst} self (${selfPct}%)`;
+                            if (allocs != null) s += ` \u00b7 ~${allocs.toLocaleString()} allocs`;
+                            return s;
                         }
                     },
                 });

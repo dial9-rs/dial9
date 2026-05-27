@@ -481,7 +481,7 @@
           h += '<br><span style="color:#888">' + locShort + '</span>';
         }
       }
-      h += '<br>' + (formatCount ? formatCount(node.count, total, node.self) : node.count + ' samples (' + pct + '%) \u00b7 ' + node.self + ' self (' + selfPct + '%)');
+      h += '<br>' + (formatCount ? formatCount(node.count, total, node.self, tn) : node.count + ' samples (' + pct + '%) \u00b7 ' + node.self + ' self (' + selfPct + '%)');
       if (pinned && tn.docsUrl) {
         h += '<br><a href="' + tn.docsUrl + '" target="_blank" rel="noopener" style="color:#6c63ff;text-decoration:underline">docs.rs \u2197</a>';
       } else if (tn.docsUrl) {

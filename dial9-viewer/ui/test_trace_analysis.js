@@ -429,6 +429,56 @@ async function main() {
     pass("Unresolved addresses still produce a single tree level");
   }
 
+  function testFlamegraphWeightedSamples() {
+    const callframeSymbols = new Map([
+      ["0xA", [{ symbol: "alloc_fn", location: "alloc.rs:1" }]],
+      ["0xB", [{ symbol: "caller_fn", location: "caller.rs:1" }]],
+    ]);
+    // callchain is leaf-first: [leaf, ..., root]. Reversed internally to root→leaf.
+    const samples = [
+      { callchain: ["0xA", "0xB"], weight: 1000, allocWeight: 2 },
+      { callchain: ["0xA", "0xB"], weight: 500, allocWeight: 1.5 },
+      { callchain: ["0xA"], weight: 200, allocWeight: 1 },
+    ];
+    const tree = buildFlamegraphTree(samples, callframeSymbols);
+    if (tree.count !== 1700) fail(`root.count = ${tree.count}, expected 1700`);
+    if (tree.allocCount !== 4.5) fail(`root.allocCount = ${tree.allocCount}, expected 4.5`);
+    // First two samples: caller_fn -> alloc_fn. Third: alloc_fn only.
+    const caller = tree.children.get("caller_fn");
+    if (!caller) fail("expected caller_fn as child of root");
+    if (caller.count !== 1500) fail(`caller.count = ${caller.count}, expected 1500`);
+    if (caller.self !== 0) fail(`caller.self = ${caller.self}, expected 0`);
+    const alloc = caller.children.get("alloc_fn");
+    if (!alloc) fail("expected alloc_fn as child of caller_fn");
+    if (alloc.count !== 1500) fail(`alloc.count = ${alloc.count}, expected 1500`);
+    if (alloc.self !== 1500) fail(`alloc.self = ${alloc.self}, expected 1500`);
+    if (alloc.selfAllocCount !== 3.5) fail(`alloc.selfAllocCount = ${alloc.selfAllocCount}, expected 3.5`);
+    // Third sample: alloc_fn is root-level child
+    const allocDirect = tree.children.get("alloc_fn");
+    if (!allocDirect) fail("expected alloc_fn as direct child of root for single-frame sample");
+    if (allocDirect.count !== 200) fail(`allocDirect.count = ${allocDirect.count}, expected 200`);
+    if (allocDirect.self !== 200) fail(`allocDirect.self = ${allocDirect.self}, expected 200`);
+    if (allocDirect.selfAllocCount !== 1) fail(`allocDirect.selfAllocCount = ${allocDirect.selfAllocCount}, expected 1`);
+    pass("Weighted samples accumulate count, self, allocCount, selfAllocCount correctly");
+  }
+
+  function testFlamegraphDefaultWeightBackcompat() {
+    const callframeSymbols = new Map([
+      ["0xC", [{ symbol: "cpu_fn", location: "cpu.rs:1" }]],
+    ]);
+    const samples = [
+      { callchain: ["0xC"] },
+      { callchain: ["0xC"] },
+    ];
+    const tree = buildFlamegraphTree(samples, callframeSymbols);
+    if (tree.count !== 2) fail(`root.count = ${tree.count}, expected 2`);
+    const node = tree.children.get("cpu_fn");
+    if (node.count !== 2) fail(`node.count = ${node.count}, expected 2`);
+    if (node.self !== 2) fail(`node.self = ${node.self}, expected 2`);
+    if (node.allocCount != null) fail(`node.allocCount should be undefined for unweighted samples`);
+    pass("Unweighted samples default to weight=1, no allocCount fields");
+  }
+
   // ── TaskDumpEvent parsing (verified against the demo trace) ──
 
   function testTaskDumpsParsed() {
@@ -964,6 +1014,8 @@ async function main() {
   testFlamegraphInlineOrder();
   testFlamegraphInlineTolerantOfNullSlots();
   testFlamegraphUnknownAddress();
+  testFlamegraphWeightedSamples();
+  testFlamegraphDefaultWeightBackcompat();
 
   console.log("\ntaskDumps:");
   testTaskDumpsParsed();
