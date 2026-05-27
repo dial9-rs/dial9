@@ -167,6 +167,7 @@ fn my_config() -> Dial9Config {
         })
         .build_or_disabled()
 }
+# }
 ```
 
 #### Instrumenting multiple runtimes
@@ -290,7 +291,7 @@ async fn main() { /* ... */ }
 
 You can emit your own application-level events into the trace alongside the built-in runtime events. Define a struct with `#[derive(TraceEvent)]` and call `record_event`:
 
-```rust
+```rust,no_run
 # fn main() {
 use dial9_trace_format::TraceEvent;
 use dial9_tokio_telemetry::telemetry::{record_event, clock_monotonic_ns, TelemetryHandle};

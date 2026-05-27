@@ -117,6 +117,22 @@ process.stderr.write('\n');
   // ── Histograms ──
   spanStats: Map<spanName, Histogram>,      // tracing span duration histograms (ns)
   pollDurationByLoc: Map<spawnLoc, Histogram>,  // poll duration histograms by spawn location (ns)
+
+  // ── Memory profiling ──
+  memory: {                                 // null/undefined if no alloc events in trace
+    topSites: [{callchain, totalBytes, count, estimatedBytes}],  // top 10 allocation sites by estimated bytes
+    leaks: [{callchain, size, timestamp, addr}],                 // allocations with no matching free
+    perTask: Map<taskId, {sampledBytes, count, estimatedBytes}>, // per-task allocation attribution
+    sampleRateBytes: number,                                     // mean bytes between samples (default 524288)
+    summary: {
+      totalAllocBytes: number,              // sum of sampled allocation sizes
+      totalAllocCount: number,              // number of sampled allocations
+      totalFreeCount: number,               // number of matched frees
+      leakedBytes: number,                  // sum of leaked allocation sizes
+      leakedCount: number,                  // allocations with no matching free
+      estimatedTotalBytes: number,          // unbiased estimate of total allocation volume
+    },
+  },
 }
 ```
 

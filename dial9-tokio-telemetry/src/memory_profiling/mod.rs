@@ -1,9 +1,8 @@
 //! Memory profiling — sampled allocation tracking via ring buffers.
 //!
-//! See `docs/design/memory-profiling.md` for the full design. The
-//! architecture (design §5, §6, §9):
+//! The architecture:
 //!
-//! 1. The allocator hook (later commit) does the bare minimum on the
+//! 1. The allocator hook ([`Dial9Allocator`]) does the bare minimum on the
 //!    allocating thread: sampling decision, stack capture, push a
 //!    fixed-size POD record into one of two process-global lock-free
 //!    queues.
@@ -26,19 +25,17 @@
 //!
 //! Gated behind the `memory-profiling` cargo feature.
 
+mod allocator;
+mod config;
+mod hook;
+mod profiler;
 mod ring;
 mod source;
 
-#[expect(
-    unused_imports,
-    reason = "wired up by allocator hook in a later commit"
-)]
-pub(crate) use ring::{
-    DEFAULT_ALLOC_QUEUE_CAPACITY, DEFAULT_FREE_QUEUE_CAPACITY, DEFAULT_MAX_FRAMES, RawAlloc,
-    RawFree, RingBuffers,
+pub use allocator::Dial9Allocator;
+pub use config::{
+    DEFAULT_RING_CAPACITY, DEFAULT_SAMPLE_RATE_BYTES, MemoryProfilingConfig, TimestampMode,
 };
-#[expect(
-    unused_imports,
-    reason = "wired up by allocator hook in a later commit"
-)]
-pub(crate) use source::MemoryProfileSource;
+#[cfg(feature = "analysis")]
+pub use profiler::push_test_alloc;
+pub use profiler::{InstallError, MemoryProfiler, MemoryProfilerGuard, is_installed};

@@ -855,6 +855,140 @@
     return { buckets, minDur: Math.exp(minLog), maxDur: Math.exp(maxLog) };
   }
 
+  /**
+   * Analyze memory allocation and free events, including per-task attribution.
+   *
+   * ## Sampling rate → actual allocation conversion
+   *
+   * dial9 uses Poisson (geometric) byte sampling with mean gap `R`
+   * (`sampleRateBytes`). An allocation of size `s` is sampled with probability:
+   *
+   *   P(sampled | size=s) = 1 - exp(-s / R)
+   *
+   * The unbiased per-sample weight (inverse probability) is:
+   *
+   *   **weight(s) = s / (1 - exp(-s / R))**
+   *
+   * Intuition:
+   * - s << R: weight ≈ R  (small allocs rarely sampled; each represents ~R bytes)
+   * - s >> R: weight ≈ s  (large allocs almost always sampled; represent themselves)
+   * - s = R: weight ≈ 1.58R
+   *
+   * The estimated total allocation volume is Σ weight(s_i) over all samples.
+   *
+   * Default sampleRateBytes is 524288 (512 KiB).
+   *
+   * @param {Array<{timestamp: number, tid: number, size: number, addr: string, callchain: string[]}>} allocEvents
+   * @param {Array<{timestamp: number, tid: number, addr: string, size: number, allocTimestampNs: number}>} freeEvents
+   * @param {Object} [opts] - Optional parameters for per-task attribution
+   * @param {Array} [opts.events] - Parsed trace events (PollStart/PollEnd with workerId+taskId)
+   * @param {Map<number,number>} [opts.tidToWorker] - tid → workerId mapping from park/unpark events
+   * @param {number} [opts.sampleRateBytes] - Mean bytes between samples (default 524288)
+   * @returns {{ topSites: Array<{callchain: string[], totalBytes: number, count: number, estimatedBytes: number}>,
+   *             leaks: Array<{callchain: string[], size: number, timestamp: number, addr: string}>,
+   *             perTask: Map<number, {sampledBytes: number, count: number, estimatedBytes: number}>,
+   *             sampleRateBytes: number,
+   *             summary: {totalAllocBytes: number, totalAllocCount: number, totalFreeCount: number, leakedBytes: number, leakedCount: number, estimatedTotalBytes: number} }}
+   */
+  function analyzeAllocations(allocEvents, freeEvents, opts) {
+    const sampleRateBytes = (opts && opts.sampleRateBytes) || 524288;
+    if (!allocEvents || !freeEvents) {
+      return { topSites: [], leaks: [], perTask: new Map(), sampleRateBytes, summary: { totalAllocBytes: 0, totalAllocCount: 0, totalFreeCount: 0, leakedBytes: 0, leakedCount: 0, estimatedTotalBytes: 0 } };
+    }
+
+    /** Unbiased weight for a sampled allocation of size s with rate R. */
+    function allocWeight(s) {
+      if (s <= 0) return 0;
+      const ratio = s / sampleRateBytes;
+      // For very large ratios, 1-exp(-ratio) ≈ 1, so weight ≈ s
+      if (ratio > 50) return s;
+      return s / (1 - Math.exp(-ratio));
+    }
+
+    const freedAddrs = new Set(freeEvents.map(f => f.addr + ":" + f.allocTimestampNs));
+
+    // Top allocation sites by callchain
+    const siteMap = new Map(); // callchain key → {callchain, totalBytes, count, estimatedBytes}
+    for (const a of allocEvents) {
+      const key = a.callchain.join(";");
+      let site = siteMap.get(key);
+      if (!site) { site = { callchain: a.callchain, totalBytes: 0, count: 0, estimatedBytes: 0 }; siteMap.set(key, site); }
+      site.totalBytes += a.size;
+      site.count++;
+      site.estimatedBytes += allocWeight(a.size);
+    }
+    const topSites = [...siteMap.values()].sort((a, b) => b.estimatedBytes - a.estimatedBytes).slice(0, 10);
+
+    // Leaks: allocs with no matching free
+    const leaks = [];
+    let leakedBytes = 0;
+    for (const a of allocEvents) {
+      if (!freedAddrs.has(a.addr + ":" + a.timestamp)) {
+        leaks.push({ callchain: a.callchain, size: a.size, timestamp: a.timestamp, addr: a.addr });
+        leakedBytes += a.size;
+      }
+    }
+
+    const totalAllocBytes = allocEvents.reduce((sum, a) => sum + a.size, 0);
+    const estimatedTotalBytes = allocEvents.reduce((sum, a) => sum + allocWeight(a.size), 0);
+
+    // Per-task attribution via tid → workerId → taskId at timestamp
+    const perTask = new Map(); // taskId → {sampledBytes, count, estimatedBytes}
+    const events = opts && opts.events;
+    const tidToWorker = opts && opts.tidToWorker;
+    if (events && tidToWorker && allocEvents.length > 0) {
+      // Build per-worker poll timeline: sorted list of {start, taskId}
+      const workerPolls = new Map(); // workerId → [{start, taskId}] (sorted by start)
+      for (let i = 0; i < events.length; i++) {
+        const e = events[i];
+        if (e.eventType === 0 && e.taskId) { // PollStart
+          let arr = workerPolls.get(e.workerId);
+          if (!arr) { arr = []; workerPolls.set(e.workerId, arr); }
+          arr.push({ start: e.timestamp, taskId: e.taskId });
+        }
+      }
+
+      // For each alloc, find which task was being polled on that worker at that time
+      for (const a of allocEvents) {
+        const workerId = tidToWorker.get(a.tid);
+        if (workerId == null) continue; // non-worker thread allocation
+        const polls = workerPolls.get(workerId);
+        if (!polls || polls.length === 0) continue;
+
+        // Binary search for the last PollStart with start <= a.timestamp
+        let lo = 0, hi = polls.length - 1, best = -1;
+        while (lo <= hi) {
+          const mid = (lo + hi) >>> 1;
+          if (polls[mid].start <= a.timestamp) { best = mid; lo = mid + 1; }
+          else { hi = mid - 1; }
+        }
+        if (best < 0) continue;
+        const taskId = polls[best].taskId;
+
+        let entry = perTask.get(taskId);
+        if (!entry) { entry = { sampledBytes: 0, count: 0, estimatedBytes: 0 }; perTask.set(taskId, entry); }
+        entry.sampledBytes += a.size;
+        entry.count++;
+        entry.estimatedBytes += allocWeight(a.size);
+      }
+    }
+
+    return {
+      topSites,
+      leaks,
+      perTask,
+      sampleRateBytes,
+      summary: {
+        totalAllocBytes,
+        totalAllocCount: allocEvents.length,
+        totalFreeCount: freeEvents.length,
+        leakedBytes,
+        leakedCount: leaks.length,
+        estimatedTotalBytes: Math.round(estimatedTotalBytes),
+      },
+    };
+  }
+
   // Export for both browser and Node.js
   const analysisExports = {
     buildWorkerSpans,
@@ -869,6 +1003,7 @@
     collectDescendants,
     selectSpanRenderSet,
     computeSpanLayout,
+    analyzeAllocations,
   };
 
   if (typeof module !== "undefined" && module.exports) {

@@ -8,6 +8,9 @@ use std::time::Duration;
 
 use aws_config::BehaviorVersion;
 use clap::Parser;
+use dial9_tokio_telemetry::memory_profiling::{
+    Dial9Allocator, MemoryProfiler, MemoryProfilingConfig,
+};
 #[cfg(target_os = "linux")]
 use dial9_tokio_telemetry::telemetry::cpu_profile::{CpuProfilingConfig, SchedEventConfig};
 use dial9_tokio_telemetry::telemetry::{
@@ -19,6 +22,9 @@ use tokio_util::sync::CancellationToken;
 
 use buffer::MetricsBuffer;
 use ddb::DdbClient;
+
+#[global_allocator]
+static ALLOC: Dial9Allocator = Dial9Allocator::system();
 
 #[derive(Parser)]
 #[command(about = "Metrics service with DynamoDB persistence and telemetry")]
@@ -80,6 +86,25 @@ struct Args {
 
     #[arg(long, help = "Disable task dump capture")]
     no_task_dumps: bool,
+
+    #[arg(long, help = "Spawn a task that leaks memory continuously")]
+    leak: bool,
+
+    #[arg(long, help = "Disable memory profiling")]
+    no_memory_profiling: bool,
+
+    #[arg(
+        long,
+        default_value = "524288",
+        help = "Mean bytes between sampled allocations (default: 512 KiB)"
+    )]
+    alloc_sample_rate_bytes: u64,
+
+    #[arg(
+        long,
+        help = "Disable liveset tracking for leak detection (default: enabled)"
+    )]
+    no_track_liveset: bool,
 }
 
 #[derive(Clone)]
@@ -213,6 +238,20 @@ fn main() -> std::io::Result<()> {
     guard.enable();
     let handle = guard.handle();
 
+    let _mem_guard = if args.no_memory_profiling {
+        None
+    } else {
+        let config = MemoryProfilingConfig::builder()
+            .sample_rate_bytes(args.alloc_sample_rate_bytes)
+            .track_liveset(!args.no_track_liveset)
+            .build();
+        Some(
+            MemoryProfiler::from_config(config)
+                .install(guard.handle())
+                .expect("failed to install memory profiler"),
+        )
+    };
+
     // Wrap the body in a spawned task so the root future is instrumented.
     // Inside, TelemetryHandle::current() is available on every worker thread.
     runtime.block_on(async {
@@ -246,6 +285,18 @@ fn main() -> std::io::Result<()> {
                         flush_state.buffer.flush_to_ddb(&flush_state.ddb).await;
                     }
                 });
+
+                // intentional leak task: accumulates memory without freeing it
+                if args.leak {
+                    handle.spawn(async move {
+                        let mut sink: Vec<Vec<u8>> = Vec::new();
+                        let mut interval = tokio::time::interval(Duration::from_millis(10));
+                        loop {
+                            interval.tick().await;
+                            sink.push(vec![0u8; 512 * 1024]);
+                        }
+                    });
+                }
 
                 let app = routes::router(state);
                 let listener = tokio::net::TcpListener::bind(&args.server_addr)

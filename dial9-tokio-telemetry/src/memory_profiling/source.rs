@@ -1,6 +1,7 @@
+#![deny(clippy::arithmetic_side_effects)]
 //! `Source` impl that drains the alloc and free queues each flush cycle.
 
-use crate::memory_profiling::ring::{DEFAULT_MAX_FRAMES, RawAlloc, RawFree, RingBuffers};
+use crate::memory_profiling::ring::{RawAlloc, RawFree, RingBuffers};
 use crate::primitives::sync::Arc;
 use crate::telemetry::buffer::with_encoder;
 use crate::telemetry::format::{AllocEvent, FreeEvent};
@@ -25,29 +26,38 @@ struct LivesetEntry {
 /// correctness when the producer reuses an address within a single flush
 /// cycle (alloc → free → alloc-with-same-addr); naive "drain all allocs,
 /// then all frees" would race and corrupt the liveset.
-pub(crate) struct MemoryProfileSource<const MAX_FRAMES: usize = DEFAULT_MAX_FRAMES> {
-    rings: Arc<RingBuffers<MAX_FRAMES>>,
+pub(crate) struct MemoryProfileSource {
+    rings: Arc<RingBuffers>,
     liveset: Option<HashMap<u64, LivesetEntry>>,
+    /// Precomputed segment metadata, returned (cloned) on every flush
+    /// cycle. Cached in `new()` so the `segment_metadata()` hot path —
+    /// called from the flush loop every ~5 ms — does not allocate fresh
+    /// `String`s per cycle.
+    metadata: Vec<(String, String)>,
 }
 
-impl<const MAX_FRAMES: usize> MemoryProfileSource<MAX_FRAMES> {
+impl MemoryProfileSource {
     /// Create a new source that drains the supplied ring buffers.
     ///
     /// `track_liveset = true` enables `FreeEvent` emission (matched against
     /// previously-sampled allocations); `false` means frees are silently
     /// dropped on the consumer side.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "wired up by allocator hook in a later commit")
-    )]
-    pub(crate) fn new(rings: Arc<RingBuffers<MAX_FRAMES>>, track_liveset: bool) -> Self {
+    pub(crate) fn new(
+        rings: Arc<RingBuffers>,
+        track_liveset: bool,
+        sample_rate_bytes: u64,
+    ) -> Self {
         Self {
             rings,
             liveset: track_liveset.then(HashMap::new),
+            metadata: vec![(
+                "memory.sample_rate_bytes".to_string(),
+                sample_rate_bytes.to_string(),
+            )],
         }
     }
 
-    fn handle_alloc(&mut self, a: RawAlloc<MAX_FRAMES>, ctx: &FlushContext<'_>) {
+    fn handle_alloc(&mut self, a: RawAlloc, ctx: &FlushContext<'_>) {
         let frame_count = a.frame_count as usize;
         let RawAlloc {
             tid,
@@ -105,16 +115,23 @@ impl<const MAX_FRAMES: usize> MemoryProfileSource<MAX_FRAMES> {
     }
 }
 
-impl<const MAX_FRAMES: usize> Source for MemoryProfileSource<MAX_FRAMES> {
+impl Source for MemoryProfileSource {
     fn flush(&mut self, ctx: &FlushContext<'_>) {
-        // Merge-sort drain by timestamp. Hold one peeked element from each
-        // queue and emit the older one. `crossbeam_queue::ArrayQueue` has no
-        // peek API, so we pop into local slots and only refill after we
-        // emit. The producer can race in between; that's fine — anything it
-        // pushes during this loop has a timestamp later than anything we've
-        // already emitted, and we either pick it up this cycle (if our last
-        // pop sees it) or next cycle.
-        let mut next_alloc: Option<RawAlloc<MAX_FRAMES>> = self.rings.alloc_queue.pop();
+        // Merge-sort drain by timestamp. This produces a best-effort
+        // timestamp-ordered stream. Ordering is not guaranteed to be perfect:
+        // - Multiple producers push concurrently, so queue order may not
+        //   match timestamp order.
+        // - TimestampMode::ReusePollStart can produce stale timestamps.
+        // For profiling purposes, approximate ordering is sufficient.
+        //
+        // Hold one peeked element from each queue and emit the older one.
+        // `crossbeam_queue::ArrayQueue` has no peek API, so we pop into
+        // local slots and only refill after we emit. The producer can race
+        // in between; that's fine — anything it pushes during this loop has
+        // a timestamp later than anything we've already emitted, and we
+        // either pick it up this cycle (if our last pop sees it) or next
+        // cycle.
+        let mut next_alloc: Option<RawAlloc> = self.rings.alloc_queue.pop();
         let mut next_free: Option<RawFree> = self.rings.free_queue.pop();
         loop {
             match (&next_alloc, &next_free) {
@@ -147,6 +164,14 @@ impl<const MAX_FRAMES: usize> Source for MemoryProfileSource<MAX_FRAMES> {
     fn name(&self) -> &'static str {
         "memory"
     }
+
+    fn segment_metadata(&self) -> Vec<(String, String)> {
+        // Cached in `new()`. Cloned on every flush cycle (a tiny vec —
+        // typically one entry — so the clone cost is dwarfed by the
+        // surrounding lock acquisitions in the flush loop). Was previously
+        // rebuilding two `String`s per cycle; see PR #442 review.
+        self.metadata.clone()
+    }
 }
 
 #[cfg(test)]
@@ -154,13 +179,11 @@ mod tests {
     use super::*;
     use crate::memory_profiling::ring::{DEFAULT_MAX_FRAMES, RawAlloc, RawFree, RingBuffers};
     use crate::primitives::sync::Arc;
-    use crate::primitives::sync::atomic::AtomicU64;
-    use crate::telemetry::buffer::drain_to_collector;
-    use crate::telemetry::collector::CentralCollector;
-    use crate::telemetry::events::{TelemetryEvent, ThreadRole};
+    use crate::primitives::sync::atomic::Ordering;
+    use crate::telemetry::buffer;
+    use crate::telemetry::events::TelemetryEvent;
     use crate::telemetry::format::decode_events;
-    use crate::telemetry::recorder::source::FlushContext;
-    use std::collections::HashMap;
+    use crate::telemetry::recorder::SharedState;
 
     fn make_raw_alloc(addr: u64, size: u64, ts_ns: u64) -> RawAlloc {
         let mut frames = [0u64; DEFAULT_MAX_FRAMES];
@@ -181,7 +204,6 @@ mod tests {
         RawFree {
             tid: 2,
             addr,
-            size: 0, // size on the free side is informational; consolidator uses liveset
             ts_ns,
         }
     }
@@ -190,19 +212,17 @@ mod tests {
         Arc::new(RingBuffers::new(alloc_cap, free_cap))
     }
 
-    fn flush_and_collect(source: &mut MemoryProfileSource) -> Vec<TelemetryEvent> {
-        let collector = Arc::new(CentralCollector::new());
-        let drain_epoch = AtomicU64::new(0);
-        let thread_roles: HashMap<u32, ThreadRole> = HashMap::new();
-        let ctx = FlushContext {
-            collector: &collector,
-            drain_epoch: &drain_epoch,
-            thread_roles: &thread_roles,
-        };
-        source.flush(&ctx);
-        drain_to_collector(&collector);
+    fn new_shared() -> SharedState {
+        let shared = SharedState::new(0, None);
+        shared.enabled.store(true, Ordering::Relaxed);
+        shared
+    }
+
+    fn flush_and_collect(shared: &SharedState) -> Vec<TelemetryEvent> {
+        shared.flush_sources();
+        buffer::drain_to_collector(&shared.collector);
         let mut events = Vec::new();
-        while let Some(batch) = collector.next() {
+        while let Some(batch) = shared.collector.next() {
             if let Ok(decoded) = decode_events(&batch.encoded_bytes) {
                 events.extend(decoded);
             }
@@ -218,9 +238,14 @@ mod tests {
             .push(make_raw_alloc(0x1000, 4096, 100))
             .ok();
 
-        let mut source = MemoryProfileSource::new(Arc::clone(&rings), false);
+        let shared = new_shared();
+        shared.push_source(Box::new(MemoryProfileSource::new(
+            Arc::clone(&rings),
+            false,
+            512 * 1024,
+        )));
 
-        let events = flush_and_collect(&mut source);
+        let events = flush_and_collect(&shared);
         let allocs: Vec<_> = events
             .iter()
             .filter(|e| matches!(e, TelemetryEvent::Alloc { .. }))
@@ -253,9 +278,14 @@ mod tests {
             .ok();
         rings.free_queue.push(make_raw_free(0x2000, 300)).ok();
 
-        let mut source = MemoryProfileSource::new(Arc::clone(&rings), true);
+        let shared = new_shared();
+        shared.push_source(Box::new(MemoryProfileSource::new(
+            Arc::clone(&rings),
+            true,
+            512 * 1024,
+        )));
 
-        let events = flush_and_collect(&mut source);
+        let events = flush_and_collect(&shared);
         let allocs: Vec<_> = events
             .iter()
             .filter(|e| matches!(e, TelemetryEvent::Alloc { .. }))
@@ -289,9 +319,14 @@ mod tests {
         let rings = rings(16, 16);
         rings.free_queue.push(make_raw_free(0x9999, 400)).ok();
 
-        let mut source = MemoryProfileSource::new(Arc::clone(&rings), true);
+        let shared = new_shared();
+        shared.push_source(Box::new(MemoryProfileSource::new(
+            Arc::clone(&rings),
+            true,
+            512 * 1024,
+        )));
 
-        let events = flush_and_collect(&mut source);
+        let events = flush_and_collect(&shared);
         let frees: Vec<_> = events
             .iter()
             .filter(|e| matches!(e, TelemetryEvent::Free { .. }))
@@ -308,9 +343,14 @@ mod tests {
             .ok();
         rings.free_queue.push(make_raw_free(0x3000, 600)).ok();
 
-        let mut source = MemoryProfileSource::new(Arc::clone(&rings), false);
+        let shared = new_shared();
+        shared.push_source(Box::new(MemoryProfileSource::new(
+            Arc::clone(&rings),
+            false,
+            512 * 1024,
+        )));
 
-        let events = flush_and_collect(&mut source);
+        let events = flush_and_collect(&shared);
         let allocs: Vec<_> = events
             .iter()
             .filter(|e| matches!(e, TelemetryEvent::Alloc { .. }))
@@ -326,14 +366,20 @@ mod tests {
     #[test]
     fn alloc_then_free_in_separate_flush_cycles() {
         let rings = rings(16, 16);
-        let mut source = MemoryProfileSource::new(Arc::clone(&rings), true);
+
+        let shared = new_shared();
+        shared.push_source(Box::new(MemoryProfileSource::new(
+            Arc::clone(&rings),
+            true,
+            512 * 1024,
+        )));
 
         // First flush: only the alloc
         rings
             .alloc_queue
             .push(make_raw_alloc(0x4000, 256, 700))
             .ok();
-        let events = flush_and_collect(&mut source);
+        let events = flush_and_collect(&shared);
         assert_eq!(
             events
                 .iter()
@@ -351,7 +397,7 @@ mod tests {
 
         // Second flush: the free arrives
         rings.free_queue.push(make_raw_free(0x4000, 800)).ok();
-        let events = flush_and_collect(&mut source);
+        let events = flush_and_collect(&shared);
         assert_eq!(
             events
                 .iter()
@@ -405,9 +451,14 @@ mod tests {
             .push(make_raw_alloc(0x5000, 512, 300))
             .ok();
 
-        let mut source = MemoryProfileSource::new(Arc::clone(&rings), true);
+        let shared = new_shared();
+        shared.push_source(Box::new(MemoryProfileSource::new(
+            Arc::clone(&rings),
+            true,
+            512 * 1024,
+        )));
 
-        let events = flush_and_collect(&mut source);
+        let events = flush_and_collect(&shared);
         let allocs: Vec<&TelemetryEvent> = events
             .iter()
             .filter(|e| matches!(e, TelemetryEvent::Alloc { .. }))
@@ -443,16 +494,32 @@ mod tests {
         }
 
         // The second allocation must remain live in the liveset.
-        let liveset = source.liveset.as_ref().expect("liveset is on");
-        assert_eq!(liveset.len(), 1, "second alloc should still be live");
-        let entry = liveset
-            .get(&0x5000)
-            .expect("addr 0x5000 should be in liveset");
-        assert_eq!(entry.size, 512);
-        assert_eq!(entry.timestamp_ns, 300);
+        // Prove it by freeing the address in a second flush cycle and checking
+        // the emitted FreeEvent carries the second alloc's size and timestamp.
+        rings.free_queue.push(make_raw_free(0x5000, 400)).ok();
+        let events2 = flush_and_collect(&shared);
+        let frees2: Vec<_> = events2
+            .iter()
+            .filter(|e| matches!(e, TelemetryEvent::Free { .. }))
+            .collect();
+        assert_eq!(frees2.len(), 1, "second flush should emit one free");
+        match frees2[0] {
+            TelemetryEvent::Free {
+                size,
+                alloc_timestamp_nanos,
+                ..
+            } => {
+                assert_eq!(*size, 512, "free should match second alloc size");
+                assert_eq!(
+                    *alloc_timestamp_nanos, 300,
+                    "free should reference timestamp of second alloc"
+                );
+            }
+            _ => unreachable!(),
+        }
     }
 
-    /// Demonstrates that `poll_start_ts_or_now` produces strictly ordered
+    /// Demonstrates that `poll_start_ts_monotonic` produces strictly ordered
     /// timestamps even for events that would otherwise share a clock tick —
     /// the scenario that occurs during a realloc (free old + alloc new at
     /// same address).
@@ -461,7 +528,8 @@ mod tests {
         use crate::telemetry::recorder::poll_start_ts_monotonic;
 
         // Simulate a realloc: alloc, free, alloc — all at the "same instant".
-        // poll_start_ts_or_now guarantees each gets a distinct, increasing timestamp.
+        // poll_start_ts_monotonic guarantees each gets a distinct, increasing
+        // timestamp.
         let t1 = poll_start_ts_monotonic();
         let t2 = poll_start_ts_monotonic();
         let t3 = poll_start_ts_monotonic();
@@ -472,8 +540,13 @@ mod tests {
         rings.free_queue.push(make_raw_free(0x6000, t2)).ok();
         rings.alloc_queue.push(make_raw_alloc(0x6000, 512, t3)).ok();
 
-        let mut source = MemoryProfileSource::new(Arc::clone(&rings), true);
-        let events = flush_and_collect(&mut source);
+        let shared = new_shared();
+        shared.push_source(Box::new(MemoryProfileSource::new(
+            Arc::clone(&rings),
+            true,
+            512 * 1024,
+        )));
+        let events = flush_and_collect(&shared);
 
         let frees: Vec<_> = events
             .iter()
@@ -493,10 +566,39 @@ mod tests {
         }
 
         // Second alloc remains live.
-        let liveset = source.liveset.as_ref().unwrap();
-        assert_eq!(liveset.len(), 1);
-        let entry = liveset.get(&0x6000).unwrap();
-        assert_eq!(entry.size, 512);
-        assert_eq!(entry.timestamp_ns, t3);
+        // Prove it by freeing the address in a second flush cycle.
+        rings.free_queue.push(make_raw_free(0x6000, t3 + 1)).ok();
+        let events2 = flush_and_collect(&shared);
+        let frees2: Vec<_> = events2
+            .iter()
+            .filter(|e| matches!(e, TelemetryEvent::Free { .. }))
+            .collect();
+        assert_eq!(frees2.len(), 1);
+        match frees2[0] {
+            TelemetryEvent::Free {
+                size,
+                alloc_timestamp_nanos,
+                ..
+            } => {
+                assert_eq!(*size, 512, "free should match second alloc size");
+                assert_eq!(*alloc_timestamp_nanos, t3);
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn segment_metadata_contains_sample_rate_bytes() {
+        use crate::telemetry::recorder::source::Source;
+        let rings = rings(16, 16);
+        let source = MemoryProfileSource::new(Arc::clone(&rings), false, 1024 * 1024);
+        let meta = source.segment_metadata();
+        assert_eq!(
+            meta,
+            vec![(
+                "memory.sample_rate_bytes".to_string(),
+                "1048576".to_string()
+            )]
+        );
     }
 }

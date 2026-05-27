@@ -1,6 +1,6 @@
 ---
 name: dial9-trace-recipes
-description: Diagnostic recipes for common questions about dial9 Tokio runtime traces. Covers finding long polls, task leaks, worker utilization, blocking calls, wake chains, span analysis, task dumps, and time-window debugging. Use when answering specific diagnostic questions about trace data.
+description: Diagnostic recipes for common questions about dial9 Tokio runtime traces. Covers finding long polls, task leaks, worker utilization, blocking calls, wake chains, span analysis, task dumps, time-window debugging, and estimating allocation totals from sampled `Alloc` events. Use when answering specific diagnostic questions about trace data.
 ---
 
 # Diagnostic Recipes
@@ -448,3 +448,146 @@ for await (const trace of parseTrace('/path/to/traces/')) {
 Note: `block_in_place` is not inherently a problem — it's a legitimate way to
 run blocking code on a worker thread. The gap detection helps you understand
 what happened during the interval, not flag it as an issue.
+
+## Estimating allocation totals from sampled `Alloc` events
+
+> **Critical:** Each `Alloc` event's `size` is the raw bytes of *one*
+> sampled allocation, **not a scaled estimate**. If you sum raw `size`
+> values you will undercount, often by orders of magnitude. Always
+> scale by inverse Poisson sampling probability before aggregating.
+
+Memory profiling samples allocations at a configured rate `R` (mean
+bytes between samples — `MemoryProfilingConfig.sample_rate_bytes`,
+default 512 KiB). The sampling probability for one allocation of size
+`s` is `1 - exp(-s/R)`. The Horvitz–Thompson estimator weights each
+sample by `1 / P(sample)` to produce unbiased totals:
+
+```
+total_bytes ≈ Σ over sampled events  s_i / (1 - exp(-s_i / R))
+total_count ≈ Σ over sampled events       1 / (1 - exp(-s_i / R))
+```
+
+The same formula handles all size regimes:
+
+- For `s << R` (tiny allocs): each sample contributes ~`R` bytes.
+- For `s ≈ R`: each sample contributes ~`1.58 s` bytes.
+- For `s >> R` (huge allocs): each sample contributes ~`s` bytes.
+
+`R` is recorded in segment metadata as `memory.sample_rate_bytes`.
+Read it from `trace.segmentMetadata` after parsing:
+
+```javascript
+const meta = Object.fromEntries(trace.segmentMetadata || []);
+const SAMPLE_RATE_BYTES = Number(meta['memory.sample_rate_bytes']) || 512 * 1024;
+```
+
+If analysing traces from older versions that lack this field, pass `R`
+explicitly (a CLI flag or a constant per service).
+
+### Total bytes allocated by call site
+
+```javascript
+const { parseTrace, symbolizeChain, formatFrame } = require('./trace_parser.js');
+
+// Read R from segment metadata (falls back to default for old traces)
+let SAMPLE_RATE_BYTES = 512 * 1024;
+
+function inverseProb(size, rate) {
+  // 1 / (1 - exp(-size/rate)). For very small size/rate, this approaches
+  // rate/size; for size >> rate, approaches 1.
+  return 1.0 / (1.0 - Math.exp(-size / rate));
+}
+
+const byCallSite = new Map();  // leaf symbol -> { bytes, count }
+
+for await (const trace of parseTrace('/path/to/traces/')) {
+  // `allocEvents` may be absent on traces from older toolkit caches —
+  // memory profiling events were added to the directory cache after
+  // initial release. Defensive `?? []` keeps the recipe portable.
+  for (const ev of (trace.allocEvents ?? [])) {
+    const frames = symbolizeChain(ev.callchain, trace.callframeSymbols);
+    const leaf = frames[0] ? formatFrame(frames[0]).text : '(unknown)';
+    const w = inverseProb(ev.size, SAMPLE_RATE_BYTES);
+    const cur = byCallSite.get(leaf) ?? { bytes: 0, count: 0 };
+    // Weight EACH sample individually before summing — sum-then-unbias
+    // under-reports skewed groups.
+    cur.bytes += ev.size * w;
+    cur.count += w;
+    byCallSite.set(leaf, cur);
+  }
+}
+
+const top = [...byCallSite.entries()]
+  .sort((a, b) => b[1].bytes - a[1].bytes)
+  .slice(0, 20);
+for (const [leaf, { bytes, count }] of top) {
+  console.log(`${(bytes / 1024 / 1024).toFixed(1)} MiB  ${count.toFixed(0)} allocs  ${leaf}`);
+}
+```
+
+### Total bytes allocated per task (from poll-correlated allocs)
+
+`Alloc.tid` matches the worker's TID; cross-reference with poll spans
+to attribute allocations to the task running at the time:
+
+```javascript
+const { parseTrace, symbolizeChain, formatFrame } = require('./trace_parser.js');
+const { buildWorkerSpans } = require('./trace_analysis.js');
+
+const SAMPLE_RATE_BYTES = 512 * 1024;
+const inverseProb = (s, r) => 1.0 / (1.0 - Math.exp(-s / r));
+
+const byTask = new Map();  // taskId -> bytes (estimated)
+
+for await (const trace of parseTrace('/path/to/traces/')) {
+  const workerIds = [...new Set(trace.events.filter(e => e.workerId !== undefined).map(e => e.workerId))].sort((a,b)=>a-b);
+  const { workerSpans } = buildWorkerSpans(trace.events, workerIds, trace.maxTs);
+
+  // Index polls by tid for binary search.
+  const pollsByTid = new Map();
+  for (const wid of workerIds) {
+    const polls = workerSpans[wid].polls;
+    if (polls.length === 0) continue;
+    const tid = polls[0].tid;  // worker's OS tid
+    pollsByTid.set(tid, polls);
+  }
+
+  // `allocEvents` may be absent on traces from older toolkit caches —
+  // memory profiling events were added to the directory cache after
+  // initial release. Defensive `?? []` keeps the recipe portable.
+  for (const ev of (trace.allocEvents ?? [])) {
+    const polls = pollsByTid.get(ev.tid);
+    if (!polls) continue;
+    // Find the poll containing ev.timestamp (linear scan; for big
+    // traces use binary search).
+    const poll = polls.find(p => p.start <= ev.timestamp && ev.timestamp < p.end);
+    if (!poll) continue;
+    const w = inverseProb(ev.size, SAMPLE_RATE_BYTES);
+    byTask.set(poll.taskId, (byTask.get(poll.taskId) ?? 0) + ev.size * w);
+  }
+}
+
+const top = [...byTask.entries()].sort((a, b) => b[1] - a[1]).slice(0, 20);
+for (const [taskId, bytes] of top) {
+  console.log(`Task ${taskId}: ~${(bytes / 1024 / 1024).toFixed(1)} MiB`);
+}
+```
+
+### Common pitfalls
+
+- **Summing `Alloc.size` directly.** Will report ~2 KiB for a workload
+  that allocated 1 MiB if all allocations were 1 byte each. Always
+  weight by `1 / (1 - exp(-size / R))`.
+- **Sum-then-unbias.** Computing `(Σ s_i) / (1 - exp(-mean(s) / R))`
+  uses the group's mean size as if every allocation were that size;
+  for skewed groups (mix of small and huge) this can be wrong by
+  orders of magnitude. Weight each sample individually.
+- **Hard-coding `R`.** The default may change between releases. Pull
+  the rate from your deployment config or from segment metadata.
+- **Counting `Alloc` events as allocation count.** That's the
+  *sampled* count, not the actual count. Use the
+  `Σ 1 / (1 - exp(-s_i / R))` formula above.
+- **Forgetting `track_liveset`.** Live-set bytes (current allocation
+  footprint) requires pairing `Alloc` with `Free` events and only
+  works when `MemoryProfilingConfig.track_liveset(true)` was set at
+  install time.

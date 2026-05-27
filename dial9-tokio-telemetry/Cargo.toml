@@ -80,7 +80,7 @@ _shuttle = [
 taskdump = ["tokio/taskdump"]
 tracing-layer = ["dep:tracing-subscriber"]
 ## Sampled memory allocation profiling via ring buffers.
-memory-profiling = []
+memory-profiling = ["dep:dial9-perf-self-profile"]
 worker-s3 = [
     "dep:aws-sdk-s3-transfer-manager",
     "dep:aws-sdk-s3",
@@ -107,6 +107,9 @@ dial9-tokio-telemetry = { path = ".", features = [
     "unstable-events",
     "worker-s3",
 ] }
+# Tests use the serde-based decoder API. Enabling the feature only here keeps
+# it out of the production build of the library.
+dial9-trace-format = { workspace = true, features = ["serde-deserialize"] }
 assert2 = { workspace = true }
 criterion = "0.5"
 clap = { version = "4", features = ["derive", "env"] }
@@ -153,6 +156,11 @@ harness = false
 [[bench]]
 name = "e2e_workload"
 harness = false
+
+[[bench]]
+name = "memory_profiling_bench"
+harness = false
+required-features = ["memory-profiling"]
 
 [[example]]
 name = "blocking_pool_tracking"

@@ -237,6 +237,22 @@ pub enum TelemetryEvent {
         fields: Vec<(String, FieldValue)>,
     },
     /// A sampled memory allocation event.
+    ///
+    /// **The `size` field is the raw bytes of this single allocation,
+    /// NOT a scaled estimate.** Summing raw `size` values across many
+    /// samples will dramatically undercount allocations dominated by
+    /// small objects. To estimate total bytes allocated through a code
+    /// path, weight each sample by the inverse of its sampling
+    /// probability:
+    ///
+    /// ```text
+    /// total_bytes ≈ Σ s_i / (1 - exp(-s_i / R))
+    /// ```
+    ///
+    /// where `R` is `MemoryProfilingConfig::sample_rate_bytes` at the
+    /// time the trace was recorded. See the `Estimating totals from
+    /// samples` section in `docs/design/memory-profiling.md` for worked
+    /// examples and the aggregation order rules.
     Alloc {
         /// Wall-clock timestamp in nanoseconds (monotonic).
         #[serde(rename = "timestamp_ns")]
@@ -245,7 +261,10 @@ pub enum TelemetryEvent {
         tid: u32,
         /// Allocation size in bytes.
         size: u64,
-        /// Returned pointer address.
+        /// Returned pointer address. Always populated; only matched against
+        /// `Free.addr` when the producing trace had liveset tracking on.
+        /// See [`crate::telemetry::format::AllocEvent::addr`] for full
+        /// caveats about address reuse without liveset tracking.
         addr: u64,
         /// Raw instruction pointer addresses (leaf first).
         callchain: Vec<u64>,
@@ -696,7 +715,7 @@ mod tests {
     }
 
     #[test]
-    fn poll_start_ts_or_now_is_strictly_increasing() {
+    fn poll_start_ts_monotonic_is_strictly_increasing() {
         use crate::telemetry::recorder::poll_start_ts_monotonic;
         // Rapid-fire calls should never return the same value twice.
         let mut prev = poll_start_ts_monotonic();
@@ -704,7 +723,7 @@ mod tests {
             let next = poll_start_ts_monotonic();
             assert!(
                 next > prev,
-                "poll_start_ts_or_now must be strictly increasing: got {next} after {prev}"
+                "poll_start_ts_monotonic must be strictly increasing: got {next} after {prev}"
             );
             prev = next;
         }

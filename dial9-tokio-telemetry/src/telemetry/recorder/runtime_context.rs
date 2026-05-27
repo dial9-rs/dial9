@@ -41,18 +41,25 @@ thread_local! {
     /// `TaskDumped`, memory profiler) to reuse the timestamp without an extra
     /// clock read.
     static POLL_START_TS: Cell<Option<NonZeroU64>> = const { Cell::new(None) };
-    /// Last timestamp returned by `poll_start_ts_or_now`. Ensures strictly
+    /// Last timestamp returned by `poll_start_ts_monotonic`. Ensures strictly
     /// increasing values within a thread by bumping +1ns on ties.
     static LAST_TS: Cell<u64> = const { Cell::new(0) };
 }
 
 /// Returns a strictly monotonic timestamp for this thread.
 ///
-/// Uses the cached poll-start timestamp if inside a poll, otherwise reads
-/// the clock. Guarantees the returned value is always greater than the
-/// previous call on this thread (bumps by 1ns on ties). This ensures
-/// correct ordering for events that share a clock tick (e.g. a realloc
-/// producing free + alloc at the same address within one poll).
+/// Returns the cached `PollStart` timestamp from this thread's most
+/// recent `on_before_task_poll`, if any; otherwise reads the wall
+/// clock via [`crate::telemetry::events::clock_monotonic_ns`]. The
+/// returned value is always **strictly greater** than the previous
+/// call on this thread (bumps by 1 ns on ties), which keeps event
+/// ordering correct when several samples share a clock tick — e.g.
+/// an in-place realloc producing free + alloc at the same address
+/// within one poll, or repeated allocations inside a tight loop.
+///
+/// Used by:
+/// - the memory profiler hook ([`TimestampMode::ReusePollStart`]).
+/// - the task-dump idle/wake bookkeeping in [`crate::task_dumped`].
 pub(crate) fn poll_start_ts_monotonic() -> u64 {
     let raw = POLL_START_TS.with(|c| c.get()).map_or_else(
         crate::telemetry::events::clock_monotonic_ns,

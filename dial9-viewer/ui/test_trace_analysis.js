@@ -17,6 +17,7 @@ const {
   collectDescendants,
   selectSpanRenderSet,
   computeSpanLayout,
+  analyzeAllocations,
 } = require("./trace_analysis.js");
 
 async function main() {
@@ -993,6 +994,125 @@ async function main() {
 
   console.log("\nblock-in-place active-span suppression:");
   testBlockInPlaceActiveSpanSuppression();
+
+  console.log("\nanalyzeAllocations:");
+  testAnalyzeAllocationsEmpty();
+  testAnalyzeAllocationsBasicSummary();
+  testAnalyzeAllocationsPerTask();
+  testAnalyzeAllocationsNonWorkerTid();
+  testAnalyzeAllocationsEstimatedBytes();
+  testAnalyzeAllocationsAddressReuse();
+
+  function testAnalyzeAllocationsEmpty() {
+    const r = analyzeAllocations(null, null);
+    if (r.summary.totalAllocCount !== 0) fail("empty: expected 0 allocs");
+    if (r.perTask.size !== 0) fail("empty: expected empty perTask");
+    pass("null inputs produce empty result");
+  }
+
+  function testAnalyzeAllocationsBasicSummary() {
+    const allocs = [
+      { timestamp: 100, tid: 10, size: 1024, addr: "0x1", callchain: ["0xa"] },
+      { timestamp: 200, tid: 10, size: 2048, addr: "0x2", callchain: ["0xa"] },
+    ];
+    const frees = [
+      { timestamp: 300, tid: 10, addr: "0x1", size: 1024, allocTimestampNs: 100 },
+    ];
+    const r = analyzeAllocations(allocs, frees);
+    if (r.summary.totalAllocCount !== 2) fail("basic: expected 2 allocs");
+    if (r.summary.totalFreeCount !== 1) fail("basic: expected 1 free");
+    if (r.summary.leakedCount !== 1) fail("basic: expected 1 leak");
+    if (r.summary.totalAllocBytes !== 3072) fail("basic: expected 3072 bytes");
+    // With default R=524288, small allocs (s<<R) have weight ≈ R each
+    // so estimatedTotalBytes ≈ 2 * 524288 (slightly above due to s/(1-exp(-s/R)) > R)
+    if (Math.abs(r.summary.estimatedTotalBytes - 2 * 524288) > 5000) fail("basic: wrong estimatedTotalBytes");
+    pass("basic summary correct");
+  }
+
+  function testAnalyzeAllocationsPerTask() {
+    // Worker 0 has tid=10, polling task 42 from t=50..500 and task 99 from t=600..900
+    const events = [
+      { eventType: 0, timestamp: 50, workerId: 0, taskId: 42 },
+      { eventType: 0, timestamp: 600, workerId: 0, taskId: 99 },
+    ];
+    const tidToWorker = new Map([[10, 0]]);
+    const allocs = [
+      { timestamp: 100, tid: 10, size: 1024, addr: "0x1", callchain: ["0xa"] },
+      { timestamp: 200, tid: 10, size: 2048, addr: "0x2", callchain: ["0xb"] },
+      { timestamp: 700, tid: 10, size: 512, addr: "0x3", callchain: ["0xc"] },
+    ];
+    const frees = [];
+    const r = analyzeAllocations(allocs, frees, { events, tidToWorker });
+    if (r.perTask.size !== 2) fail(`perTask: expected 2 tasks, got ${r.perTask.size}`);
+    const t42 = r.perTask.get(42);
+    if (!t42) fail("perTask: missing task 42");
+    if (t42.count !== 2) fail(`perTask: task 42 count=${t42.count}, expected 2`);
+    if (t42.sampledBytes !== 3072) fail(`perTask: task 42 sampledBytes=${t42.sampledBytes}`);
+    // estimatedBytes should be > sampledBytes (weight > size for small allocs)
+    if (t42.estimatedBytes <= t42.sampledBytes) fail("perTask: estimatedBytes should exceed sampledBytes for small allocs");
+    const t99 = r.perTask.get(99);
+    if (!t99) fail("perTask: missing task 99");
+    if (t99.count !== 1) fail(`perTask: task 99 count=${t99.count}, expected 1`);
+    pass("per-task attribution correct");
+  }
+
+  function testAnalyzeAllocationsNonWorkerTid() {
+    // Alloc from tid=99 which is not in tidToWorker → should not appear in perTask
+    const events = [
+      { eventType: 0, timestamp: 50, workerId: 0, taskId: 42 },
+    ];
+    const tidToWorker = new Map([[10, 0]]);
+    const allocs = [
+      { timestamp: 100, tid: 99, size: 1024, addr: "0x1", callchain: ["0xa"] },
+    ];
+    const frees = [];
+    const r = analyzeAllocations(allocs, frees, { events, tidToWorker });
+    if (r.perTask.size !== 0) fail("nonWorkerTid: expected empty perTask");
+    pass("non-worker tid allocations excluded from perTask");
+  }
+
+  function testAnalyzeAllocationsEstimatedBytes() {
+    const events = [
+      { eventType: 0, timestamp: 50, workerId: 0, taskId: 7 },
+    ];
+    const tidToWorker = new Map([[10, 0]]);
+    // Use size = sampleRateBytes so weight = s/(1-exp(-1)) ≈ 1.582*s
+    const sampleRateBytes = 1000;
+    const allocs = [
+      { timestamp: 100, tid: 10, size: 1000, addr: "0x1", callchain: [] },
+      { timestamp: 200, tid: 10, size: 1000, addr: "0x2", callchain: [] },
+      { timestamp: 300, tid: 10, size: 1000, addr: "0x3", callchain: [] },
+    ];
+    const r = analyzeAllocations(allocs, [], { events, tidToWorker, sampleRateBytes });
+    const t7 = r.perTask.get(7);
+    if (!t7) fail("estimated: missing task 7");
+    // weight(1000) = 1000 / (1 - exp(-1)) ≈ 1581.98
+    const expectedPerSample = 1000 / (1 - Math.exp(-1));
+    if (Math.abs(t7.estimatedBytes - 3 * expectedPerSample) > 1) fail(`estimated: expected ~${3*expectedPerSample}, got ${t7.estimatedBytes}`);
+    if (r.sampleRateBytes !== 1000) fail("estimated: sampleRateBytes not returned");
+    // For s >> R, weight ≈ s (large allocs represent themselves)
+    const bigAllocs = [{ timestamp: 100, tid: 10, size: 100000, addr: "0x1", callchain: [] }];
+    const r2 = analyzeAllocations(bigAllocs, [], { events, tidToWorker, sampleRateBytes });
+    const t7b = r2.perTask.get(7);
+    if (Math.abs(t7b.estimatedBytes - 100000) > 10) fail(`large alloc: weight should ≈ size, got ${t7b.estimatedBytes}`);
+    pass("weight(s) = s / (1 - exp(-s/R)) applied correctly");
+  }
+
+  function testAnalyzeAllocationsAddressReuse() {
+    // Two allocs at the same address (reuse after free). Only the first is freed.
+    const allocs = [
+      { timestamp: 100, tid: 10, size: 1024, addr: "0x1", callchain: ["0xa"] },
+      { timestamp: 300, tid: 10, size: 2048, addr: "0x1", callchain: ["0xa"] }, // reused addr
+    ];
+    const frees = [
+      { timestamp: 200, tid: 10, addr: "0x1", size: 1024, allocTimestampNs: 100 }, // frees first alloc only
+    ];
+    const r = analyzeAllocations(allocs, frees);
+    if (r.summary.leakedCount !== 1) fail(`addressReuse: expected 1 leak, got ${r.summary.leakedCount}`);
+    if (r.leaks.length !== 1) fail(`addressReuse: expected 1 leak entry, got ${r.leaks.length}`);
+    if (r.leaks[0].timestamp !== 300) fail(`addressReuse: leaked alloc should be the second one (t=300)`);
+    pass("address reuse: only the matching alloc is considered freed");
+  }
 
   console.log("\n✓ All analysis checks passed!");
 }

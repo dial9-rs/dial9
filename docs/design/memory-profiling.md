@@ -77,32 +77,76 @@ Per-thread byte counter `next_sample_bytes`. On every allocation of size
 ```rust
 fn on_alloc(size: usize) {
     // i64: must be signed — subtracting a large `size` from a small
-    // remaining counter must go negative, not wrap around.
-    let remaining = next_sample_bytes.get() - size as i64;
+    // remaining counter saturates at i64::MIN rather than wrapping.
+    let remaining = next_sample_bytes.get().saturating_sub(size as i64);
     if remaining > 0 {
         next_sample_bytes.set(remaining);
         return;               // fast path: one sub, one branch, done
     }
 
-    // Sampled. Draw a new gap — loop in case the draw is smaller than
-    // `-remaining` (rare, but possible for tiny rates / huge allocs).
-    let mut next = remaining;
-    while next <= 0 {
-        next += draw_exponential(sample_rate_bytes);
-    }
-    next_sample_bytes.set(next);
+    // Sampled. Draw a fresh gap to the next sample. We deliberately do
+    // NOT loop to "consume" the deficit when one allocation overshoots
+    // by more than one draw's worth — see "Why a single fresh draw"
+    // below.
+    next_sample_bytes.set(next_gap(rng, sample_rate_bytes));
 
     record_sample(size, capture_stack());
+}
+
+fn next_gap(rng: &mut SplitMix64, sample_rate_bytes: u64) -> i64 {
+    // `sample_rate_bytes == 1` is the magic "sample every allocation"
+    // mode: returning 0 makes the next decision (`counter - size`) go
+    // ≤ 0 for any positive `size`, triggering a sample without
+    // consulting the PRNG. Avoids ~63% per-alloc sampling at
+    // `size = 1, rate = 1` due to the exponential's variance around
+    // its mean. `0` is rejected at config build time, so this branch
+    // only ever sees values `>= 1`.
+    if sample_rate_bytes == 1 {
+        return 0;
+    }
+    rng.draw_exponential(sample_rate_bytes) as i64
 }
 ```
 
 Two important details:
 
-- The `while` loop handles the case where a single huge allocation (or
-  very low sample rate) pushes `next_sample_bytes` below zero by more
-  than one draw's worth.
 - `remaining` must be `i64` (signed). Subtracting `usize` from `usize`
   and comparing to zero invites wraparound bugs.
+- `sample_rate_bytes == 1` is the magic "sample every allocation"
+  short-circuit. The PRNG is bypassed; every call to the allocator is
+  recorded. Matches user intuition: a rate of "1 byte between samples"
+  means every byte is sampled, which for any allocation ≥ 1 byte means
+  every allocation samples. `0` is rejected at config build time
+  because it is ambiguous (sample everything? sample nothing?) — pass
+  `1` for the explicit "sample everything" mode.
+
+### Why a single fresh draw (no redraw loop)
+
+A naive implementation handles the "sampled" branch by looping:
+
+```rust
+let mut next = remaining;       // negative for huge alloc + tiny rate
+while next <= 0 {
+    next += draw_exponential(sample_rate_bytes);
+}
+```
+
+This is the textbook way to keep Poisson-process semantics: each draw is
+a gap to the next event, so when an allocation spans multiple events the
+PRNG must advance by the right number of draws.
+
+But it's a footgun. With `sample_rate_bytes = 1` and a 1 GiB allocation,
+`next ≈ -1e9` and the loop calls `draw_exponential` ~1 billion times —
+~10 seconds inside the allocator hook holding the TLS RefCell.
+
+We don't need it. Each `RawAlloc` carries its own `size` field, so
+downstream rate estimators weight samples by the bytes they represent.
+The number of samples emitted per allocation is capped at one regardless
+of how the counter is replenished. By the strong law of large numbers, a
+single fresh draw on each sample produces the same long-run sampling
+probability per allocation — `1 - exp(-size / mean)` — as the looping
+variant. The `next_gap` helper makes this explicit and preserves the
+single-allocation worst case at O(1) PRNG work.
 
 Default `sample_rate_bytes = 512 KiB`. At that rate, a service doing 1 GB/s
 of allocation generates ~2000 samples/sec — plenty of signal, trivial
@@ -163,13 +207,112 @@ lifetime. Fixed N-of-every-M biases against large objects that get
 undersampled. Per-byte Bernoulli sampling via the geometric/exponential
 trick gives the lowest variance estimator of the simple strategies.
 
-### Small-object unbiasing
+### Estimating totals from samples
 
-When you sample at rate `R` and see an allocation of size `s < R`, the
-*expected* size represented is `R / (1 - exp(-s/R))`. The analysis toolkit
-applies this to produce unbiased byte totals. Jemalloc uses the same
-formula. Aggregation must happen *after* unbiasing per sample —
-sum-then-unbias underreports small-object stacks.
+> **Read this before consuming `AllocEvent.size`.** The raw `size` field
+> on a sampled event is the bytes of *that one* allocation, not a
+> scaled estimate. Summing raw sizes will undercount allocations
+> dominated by small objects, often dramatically (orders of magnitude
+> for tiny allocations).
+
+Each sampled allocation of size `s` survives Poisson sampling with
+probability:
+
+```
+P(sample | size = s) = 1 - exp(-s / R)
+```
+
+where `R` is `sample_rate_bytes`. The Horvitz–Thompson estimator
+weights each sample by the inverse of its sampling probability. To
+recover the total bytes allocated through a code path:
+
+```
+total_bytes ≈ Σ over sampled events  s_i / (1 - exp(-s_i / R))
+```
+
+To recover the total *count* of allocations:
+
+```
+total_count ≈ Σ over sampled events       1 / (1 - exp(-s_i / R))
+```
+
+#### Two regimes, one formula
+
+The same formula handles both extremes correctly:
+
+| Allocation size | `1 - exp(-s/R)` | Per-sample byte weight |
+|-----------------|-----------------|--------------------------|
+| `s << R` (tiny) | `≈ s / R`       | `s / (s/R) = R`          |
+| `s ≈ R`         | `≈ 0.63`        | `s / 0.63 ≈ 1.58 s`      |
+| `s >> R` (huge) | `≈ 1`           | `s / 1 = s`              |
+
+So a tiny sample contributes one full `R` worth of bytes to the
+estimate; a huge sample contributes its actual size.
+
+#### Worked example
+
+At `sample_rate_bytes = 512` and `total_allocated = 1 MiB` (= 1 048 576 B),
+the same total can be reached via radically different size
+distributions and the unbiased estimator recovers ~1 MiB in every case
+(figures from `unbiased_estimator_recovers_total_bytes_across_strategies`):
+
+| Strategy             | # allocs | # samples | Σ raw sizes | HT estimate | Rel. error |
+|----------------------|----------|-----------|-------------|-------------|------------|
+| 1 B × 1 048 576      | 1 048 576 | 2 040     | 2 040 B     | 1 045 500 B | 0.29% |
+| 64 B × 16 384        | 16 384   | 1 919     | 122 816 B   | 1 045 215 B | 0.32% |
+| 1 024 B × 1 024      | 1 024    | 890       | 911 360 B   | 1 054 004 B | 0.52% |
+| 64 KiB × 16          | 16       | 16        | 1 048 576 B | 1 048 576 B | 0.00% |
+| 1 MiB × 1            | 1        | 1         | 1 048 576 B | 1 048 576 B | 0.00% |
+
+The naive **`Σ raw sizes`** column varies from 2 KiB to 1 MiB across
+strategies — three orders of magnitude — even though every strategy
+allocated the same 1 MiB total. Always apply the inverse-probability
+weight before aggregating.
+
+#### Aggregation order matters
+
+When grouping by call site / task / type, **weight each sample
+individually before summing**:
+
+```
+# CORRECT — unbiased:
+for sample in stack_group:
+    weight = 1.0 / (1.0 - exp(-sample.size / R))
+    total_bytes += sample.size * weight
+
+# WRONG — sum-then-unbias under-reports small-object stacks:
+raw_sum = sum(sample.size for sample in stack_group)
+mean_size = raw_sum / len(stack_group)
+weight = 1.0 / (1.0 - exp(-mean_size / R))
+total_bytes = raw_sum * weight  # ← biased
+```
+
+The right-hand version uses the group's *mean* size as if every
+allocation in the group were that size; for skewed distributions this
+can be off by orders of magnitude.
+
+#### Where `R` comes from
+
+`sample_rate_bytes` is set at install time on `MemoryProfilingConfig`
+and is written into segment metadata as `memory.sample_rate_bytes`.
+Analysis tooling reads it from `TraceReader::segment_metadata` (Rust)
+or `trace.segmentMetadata` (JS). For traces recorded before this
+field was added, fall back to the deployment's configured rate or the
+default (512 KiB).
+
+Always pull `R` from segment metadata rather than a build-time
+constant — the default may change and operators may override it per
+deployment.
+
+#### `sample_rate_bytes == 1` ("sample every allocation")
+
+In this magic mode every alloc is in the trace (`0` is rejected at
+config build time, so the only way to get this behaviour is by
+explicitly passing `1`). The raw `size` field is already the truth:
+the HT formula still gives the right answer
+(`exp(-s/1) ≈ 0` for any positive `s`, so the weight is ~1), but you
+can short-circuit and just sum: `total_bytes = Σ s_i`,
+`total_count = number of samples`.
 
 ---
 
