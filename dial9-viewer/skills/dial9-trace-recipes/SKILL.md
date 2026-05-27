@@ -666,6 +666,7 @@ high-frequency small-allocation sites.
 
 ```javascript
 // Find top allocation-count nodes with small avg size
+// (assumes `tree` from the snippet above { ... } )
 const nodes = [];
 function collect(node) {
   if (node.allocCount > 0) nodes.push(node);

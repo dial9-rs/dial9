@@ -5027,7 +5027,6 @@
                                 if (allocs != null) s += ` · ~${allocs.toLocaleString()} allocs · ${fmtB(count / treeNode.allocCount)} avg`;
                                 return s;
                             } else {
-                                const bytes = treeNode && treeNode.allocCount != null ? treeNode.allocCount : count;
                                 // In count mode, count IS the alloc count, allocCount holds bytes
                                 let s = `~${Math.round(count).toLocaleString()} allocs (${pct}%)`;
                                 if (treeNode && treeNode.allocCount != null) s += ` · ~${fmtB(treeNode.allocCount)} · ${fmtB(treeNode.allocCount / count)} avg`;

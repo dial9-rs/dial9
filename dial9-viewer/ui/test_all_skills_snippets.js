@@ -82,7 +82,7 @@ async function main() {
   const { parseTrace, EVENT_TYPES, formatFrame, symbolizeChain, deduplicateSamples } = require("./trace_parser.js");
   const { buildWorkerSpans, attachCpuSamples, buildActiveTaskTimeline,
           computeSchedulingDelays, filterPointsOfInterest, buildFgData,
-          buildSpanData } = require("./trace_analysis.js");
+          buildSpanData, buildFlamegraphTree } = require("./trace_analysis.js");
 
   // Create a temp directory for directory-mode testing
   const os = require("os");
@@ -128,7 +128,7 @@ async function main() {
       trace, workerIds, minTs, maxTs, spans, schedDelays, taskTimeline,
       EVENT_TYPES, formatFrame, symbolizeChain, deduplicateSamples,
       buildWorkerSpans, attachCpuSamples, buildActiveTaskTimeline,
-      computeSchedulingDelays, filterPointsOfInterest, buildFgData, buildSpanData,
+      computeSchedulingDelays, filterPointsOfInterest, buildFgData, buildSpanData, buildFlamegraphTree,
       require, console, parseTrace, fs, path,
       event: trace.events[0],
       sample: trace.cpuSamples[0] || {},
