@@ -923,7 +923,7 @@
   function analyzeAllocations(allocEvents, freeEvents, opts) {
     const sampleRateBytes = (opts && opts.sampleRateBytes) || 524288;
     if (!allocEvents || !freeEvents) {
-      return { topSites: [], leaks: [], perTask: new Map(), sampleRateBytes, summary: { totalAllocBytes: 0, totalAllocCount: 0, totalFreeCount: 0, leakedBytes: 0, leakedCount: 0, estimatedTotalBytes: 0 } };
+      return { topSites: [], leaks: [], perTask: new Map(), sampleRateBytes, summary: { totalAllocBytes: 0, totalAllocCount: 0, totalFreeCount: 0, leakedBytes: 0, leakedCount: 0, estimatedTotalBytes: 0, totalDroppedAllocs: 0, totalDroppedFrees: 0 } };
     }
 
     /** Unbiased weight for a sampled allocation of size s with rate R. */

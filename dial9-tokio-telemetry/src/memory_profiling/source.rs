@@ -177,8 +177,6 @@ impl Source for MemoryProfileSource {
         let delta_allocs = current_dropped_allocs.saturating_sub(self.prev_dropped_allocs);
         let delta_frees = current_dropped_frees.saturating_sub(self.prev_dropped_frees);
         if delta_allocs > 0 || delta_frees > 0 {
-            self.prev_dropped_allocs = current_dropped_allocs;
-            self.prev_dropped_frees = current_dropped_frees;
             with_encoder(
                 |enc| {
                     enc.encode(&MemoryProfileOverflowEvent {
@@ -190,6 +188,8 @@ impl Source for MemoryProfileSource {
                 ctx.collector,
                 ctx.drain_epoch,
             );
+            self.prev_dropped_allocs = current_dropped_allocs;
+            self.prev_dropped_frees = current_dropped_frees;
         }
     }
 
