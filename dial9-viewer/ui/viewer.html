@@ -4978,9 +4978,10 @@
                     const wId = trace.tidToWorker && trace.tidToWorker.get(a.tid);
                     const s = a.size;
                     const ratio = s / R;
+                    // Horvitz-Thompson unbiased estimator: invP = 1/P(sample) where P = 1-exp(-size/R)
                     const invP = (s <= 0 || ratio > 50) ? 1 : 1 / (1 - Math.exp(-ratio));
                     const sample = { callchain: a.callchain, workerId: wId != null ? 0 : 255, spawnLoc: null, byteWeight: s * invP, countWeight: invP };
-                    if (wId != null && workerSpans[wId]) {
+                    if (wId != null && workerSpans[wId] && workerSpans[wId].polls) {
                         const polls = workerSpans[wId].polls;
                         let lo = 0, hi = polls.length - 1;
                         while (lo <= hi) {
