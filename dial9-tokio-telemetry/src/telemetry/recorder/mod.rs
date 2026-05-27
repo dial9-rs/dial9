@@ -319,10 +319,11 @@ mod tests {
     use crate::telemetry::NullWriter;
     use crate::telemetry::buffer;
     use crate::telemetry::collector::CentralCollector;
+    #[cfg(feature = "cpu-profiling")]
     use crate::telemetry::writer::RotatingWriter;
     use std::panic::Location;
     use std::sync::Arc;
-    use std::sync::atomic::AtomicU64;
+    use std::sync::atomic::{AtomicU64, AtomicUsize};
 
     /// Drain all pending batches from a `CentralCollector` into a writer.
     /// Call `buffer::drain_to_collector` first to flush the thread-local buffer.
@@ -415,6 +416,82 @@ mod tests {
              but {}/{} were UNKNOWN",
             unknown.len(),
             poll_starts.len()
+        );
+    }
+
+    #[test]
+    fn tokio_instrumentation_can_be_disabled_without_installing_hooks() {
+        let data = Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+        let hook_calls = Arc::new(AtomicUsize::new(0));
+        let on_thread_start_calls = hook_calls.clone();
+        let on_before_poll_calls = hook_calls.clone();
+
+        let mut builder = tokio::runtime::Builder::new_multi_thread();
+        builder.worker_threads(2).enable_all();
+
+        let (runtime, guard) = TracedRuntime::builder()
+            .with_tokio_instrumentation(false)
+            .with_task_tracking(true)
+            .with_tokio_hooks(|hooks| {
+                hooks.on_thread_start(move || {
+                    on_thread_start_calls.fetch_add(1, Ordering::Relaxed);
+                });
+                hooks.on_before_task_poll(move |_meta| {
+                    on_before_poll_calls.fetch_add(1, Ordering::Relaxed);
+                });
+            })
+            .build_and_start_with_writer(builder, CapturingWriter(data.clone()))
+            .unwrap();
+
+        assert!(guard.is_enabled());
+        assert!(guard.shared().unwrap().is_enabled());
+        assert!(
+            guard.shared().unwrap().contexts.lock().unwrap().is_empty(),
+            "disabled Tokio instrumentation should not register runtime contexts"
+        );
+
+        runtime.block_on(async {
+            for _ in 0..8 {
+                tokio::spawn(async {
+                    tokio::task::yield_now().await;
+                })
+                .await
+                .unwrap();
+            }
+        });
+
+        assert!(
+            guard.shared().unwrap().contexts.lock().unwrap().is_empty(),
+            "disabled Tokio instrumentation should not register runtime contexts after running work"
+        );
+        assert_eq!(
+            hook_calls.load(Ordering::Relaxed),
+            0,
+            "user Tokio hooks should not be installed when Tokio instrumentation is disabled"
+        );
+
+        drop(runtime);
+        drop(guard);
+
+        let raw = data.lock().unwrap();
+        let events = if raw.is_empty() {
+            Vec::new()
+        } else {
+            crate::telemetry::format::decode_events(&raw).unwrap()
+        };
+        assert!(
+            events.iter().all(|event| !matches!(
+                event,
+                crate::telemetry::events::TelemetryEvent::PollStart { .. }
+                    | crate::telemetry::events::TelemetryEvent::PollEnd { .. }
+                    | crate::telemetry::events::TelemetryEvent::WorkerPark { .. }
+                    | crate::telemetry::events::TelemetryEvent::WorkerUnpark { .. }
+                    | crate::telemetry::events::TelemetryEvent::QueueSample { .. }
+                    | crate::telemetry::events::TelemetryEvent::TaskSpawn { .. }
+                    | crate::telemetry::events::TelemetryEvent::TaskTerminate { .. }
+                    | crate::telemetry::events::TelemetryEvent::WakeEvent { .. }
+            )),
+            "Tokio runtime events should not be recorded when Tokio instrumentation is disabled: {events:?}"
         );
     }
 

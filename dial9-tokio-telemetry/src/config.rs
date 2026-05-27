@@ -195,6 +195,7 @@ const ENV_DIAL9_TRACE_DIR: &str = "DIAL9_TRACE_DIR";
 const ENV_DIAL9_ROTATION_SECS: &str = "DIAL9_ROTATION_SECS";
 const ENV_DIAL9_MAX_DISK_USAGE_MB: &str = "DIAL9_MAX_DISK_USAGE_MB";
 const ENV_DIAL9_MAX_FILE_SIZE_MB: &str = "DIAL9_MAX_FILE_SIZE_MB";
+const ENV_DIAL9_TOKIO_INSTRUMENTATION_ENABLED: &str = "DIAL9_TOKIO_INSTRUMENTATION_ENABLED";
 const ENV_DIAL9_TASK_TRACKING_ENABLED: &str = "DIAL9_TASK_TRACKING_ENABLED";
 const ENV_DIAL9_RUNTIME_NAME: &str = "DIAL9_RUNTIME_NAME";
 const ENV_DIAL9_S3_BUCKET: &str = "DIAL9_S3_BUCKET";
@@ -217,7 +218,6 @@ const DEFAULT_SCHEDULE_PROFILE_ENABLED: bool =
 const DEFAULT_TASK_DUMP_ENABLED: bool = false;
 
 const BYTES_PER_MIB: u64 = 1024 * 1024;
-const MAX_FILE_SIZE_CAP: u64 = 100 * BYTES_PER_MIB;
 
 trait EnvSource {
     fn get(&self, name: &str) -> Result<String, std::env::VarError>;
@@ -244,6 +244,7 @@ struct ParsedEnvConfig {
     rotation_period: Option<Duration>,
     max_total_size: Option<u64>,
     max_file_size: Option<u64>,
+    tokio_instrumentation_enabled: Option<bool>,
     task_tracking_enabled: Option<bool>,
     runtime_name: Option<String>,
     s3: Option<ParsedS3Config>,
@@ -279,7 +280,12 @@ struct ResolvedEnvConfig {
     rotation_period: Option<Duration>,
 
     max_total_size: u64,
-    max_file_size: u64,
+
+    // None means the underlying RotatingWriter builder owns the default.
+    max_file_size: Option<u64>,
+
+    tokio_instrumentation_enabled: Option<bool>,
+
     task_tracking_enabled: bool,
 
     // Optional config: None means do not set a runtime name.
@@ -301,6 +307,7 @@ struct ResolvedEnvConfig {
 }
 
 struct RuntimeEnvConfig {
+    tokio_instrumentation_enabled: Option<bool>,
     task_tracking_enabled: bool,
     runtime_name: Option<String>,
     cpu_profile_enabled: bool,
@@ -336,6 +343,7 @@ fn parse_env_config(env: &impl EnvSource) -> ParsedEnvConfig {
             .map(Duration::from_secs),
         max_total_size,
         max_file_size,
+        tokio_instrumentation_enabled: env.get_bool(ENV_DIAL9_TOKIO_INSTRUMENTATION_ENABLED),
         task_tracking_enabled: env.get_bool(ENV_DIAL9_TASK_TRACKING_ENABLED),
         runtime_name: env.get_string(ENV_DIAL9_RUNTIME_NAME),
         s3,
@@ -353,9 +361,6 @@ fn resolve_env_config(parsed: ParsedEnvConfig) -> ResolvedEnvConfig {
     let max_total_size = parsed
         .max_total_size
         .unwrap_or_else(|| DEFAULT_MAX_DISK_USAGE_MB.saturating_mul(BYTES_PER_MIB));
-    let max_file_size = parsed
-        .max_file_size
-        .unwrap_or_else(|| derive_max_file_size(max_total_size));
 
     ResolvedEnvConfig {
         enabled: parsed.enabled.unwrap_or(DEFAULT_ENABLED),
@@ -364,7 +369,8 @@ fn resolve_env_config(parsed: ParsedEnvConfig) -> ResolvedEnvConfig {
             .unwrap_or_else(|| PathBuf::from(DEFAULT_TRACE_DIR)),
         rotation_period: parsed.rotation_period,
         max_total_size,
-        max_file_size,
+        max_file_size: parsed.max_file_size,
+        tokio_instrumentation_enabled: parsed.tokio_instrumentation_enabled,
         task_tracking_enabled: parsed
             .task_tracking_enabled
             .unwrap_or(DEFAULT_TASK_TRACKING_ENABLED),
@@ -474,12 +480,6 @@ impl<S: EnvSource> EnvSourceParser<S> {
     }
 }
 
-fn derive_max_file_size(max_total_size: u64) -> u64 {
-    // Keep size-based rotation as a safety valve without allowing huge
-    // segments when the total disk budget is large.
-    (max_total_size / 4).min(MAX_FILE_SIZE_CAP)
-}
-
 #[cfg(feature = "worker-s3")]
 fn default_service_name() -> String {
     if let Ok(path) = std::env::current_exe()
@@ -518,6 +518,9 @@ fn apply_runtime_env<M>(
 ) -> TracedRuntimeBuilder<HasTracePath, M> {
     if let Some(name) = config.runtime_name {
         runtime = runtime.with_runtime_name(name);
+    }
+    if let Some(enabled) = config.tokio_instrumentation_enabled {
+        runtime = runtime.with_tokio_instrumentation(enabled);
     }
     runtime = runtime.with_task_tracking(config.task_tracking_enabled);
 
@@ -581,7 +584,7 @@ impl Dial9Config {
     /// | --- | --- | --- |
     /// | `DIAL9_ENABLED` | `false` | Master switch for installing telemetry. |
     /// | `DIAL9_TRACE_DIR` | `/tmp/dial9-traces` | Directory for rotated trace segments. |
-    /// | `DIAL9_ROTATION_SECS` | `60` | Wall-clock rotation period in seconds. |
+    /// | `DIAL9_ROTATION_SECS` | `60` | Rotation period in seconds, measured monotonically from writer start. |
     /// | `DIAL9_MAX_DISK_USAGE_MB` | `1024` | Total on-disk trace budget in MiB. |
     /// | `DIAL9_MAX_FILE_SIZE_MB` | `min(100, total / 4)` | Per-file trace segment size in MiB. |
     ///
@@ -590,6 +593,7 @@ impl Dial9Config {
     /// | Variable | Default | Meaning |
     /// | --- | --- | --- |
     /// | `DIAL9_TASK_TRACKING_ENABLED` | `true` | Track tasks spawned through dial9 handles. |
+    /// | `DIAL9_TOKIO_INSTRUMENTATION_ENABLED` | `true` | Install dial9's Tokio runtime hook instrumentation. |
     /// | `DIAL9_RUNTIME_NAME` | unset | Human-readable runtime name in trace metadata. |
     ///
     /// Supported S3 variables (`worker-s3` feature required):
@@ -632,6 +636,7 @@ impl Dial9Config {
             rotation_period,
             max_total_size,
             max_file_size,
+            tokio_instrumentation_enabled,
             task_tracking_enabled,
             runtime_name,
             s3,
@@ -643,6 +648,7 @@ impl Dial9Config {
         } = resolve_env_config(parse_env_config(env));
 
         let runtime_config = RuntimeEnvConfig {
+            tokio_instrumentation_enabled,
             task_tracking_enabled,
             runtime_name,
             cpu_profile_enabled,
@@ -655,7 +661,7 @@ impl Dial9Config {
         let builder = Self::builder()
             .enabled(enabled)
             .base_path(trace_dir.join("trace.bin"))
-            .max_file_size(max_file_size)
+            .maybe_max_file_size(max_file_size)
             .max_total_size(max_total_size)
             .maybe_rotation_period(rotation_period);
 
@@ -689,11 +695,14 @@ impl Dial9Config {
     /// Start a fluent configuration chain.
     ///
     /// When telemetry is enabled (the default), the following setters are
-    /// required: [`base_path`](Dial9ConfigBuilder::base_path),
-    /// [`max_file_size`](Dial9ConfigBuilder::max_file_size),
+    /// required: [`base_path`](Dial9ConfigBuilder::base_path) and
     /// [`max_total_size`](Dial9ConfigBuilder::max_total_size). They may be
     /// omitted if `.enabled(false)` is set, in which case a plain tokio
     /// runtime is built without telemetry.
+    ///
+    /// [`max_file_size`](Dial9ConfigBuilder::max_file_size) is optional; when
+    /// not set, the underlying [`RotatingWriter`] defaults it to
+    /// `min(100 MiB, max_total_size / 4)`.
     #[builder(
         builder_type = Dial9ConfigBuilder,
         finish_fn = build,
@@ -715,7 +724,8 @@ impl Dial9Config {
         max_file_size: Option<u64>,
         /// Total disk budget in bytes.
         max_total_size: Option<u64>,
-        /// Wall-clock rotation period for the writer.
+        /// Rotation period for the writer, measured monotonically from writer
+        /// (or last-rotation) start.
         rotation_period: Option<Duration>,
     ) -> Result<Dial9Config, Dial9ConfigBuilderError> {
         assemble(AssembleArgs {
@@ -762,13 +772,12 @@ fn assemble(args: AssembleArgs) -> Result<Inner, Dial9ConfigBuilderError> {
         });
     }
 
-    let required_fields = (base_path, max_file_size, max_total_size);
-    let (base_path, max_file_size, max_total_size) = match required_fields {
-        (Some(bp), Some(mfs), Some(mts)) => (bp, mfs, mts),
-        (bp, mfs, mts) => {
+    let required_fields = (base_path, max_total_size);
+    let (base_path, max_total_size) = match required_fields {
+        (Some(bp), Some(mts)) => (bp, mts),
+        (bp, mts) => {
             let missing = [
                 ("base_path", bp.is_none()),
-                ("max_file_size", mfs.is_none()),
                 ("max_total_size", mts.is_none()),
             ]
             .into_iter()
@@ -782,7 +791,7 @@ fn assemble(args: AssembleArgs) -> Result<Inner, Dial9ConfigBuilderError> {
 
     let writer = RotatingWriter::builder()
         .base_path(base_path.clone())
-        .max_file_size(max_file_size)
+        .maybe_max_file_size(max_file_size)
         .max_total_size(max_total_size)
         .maybe_rotation_period(rotation_period)
         .build()
@@ -971,6 +980,7 @@ mod tests {
         assert_eq!(parsed.rotation_period, None);
         assert_eq!(parsed.max_total_size, None);
         assert_eq!(parsed.max_file_size, None);
+        assert_eq!(parsed.tokio_instrumentation_enabled, None);
         assert_eq!(parsed.task_tracking_enabled, None);
         assert_eq!(parsed.runtime_name, None);
         assert!(parsed.s3.is_none());
@@ -993,13 +1003,10 @@ mod tests {
             DEFAULT_MAX_DISK_USAGE_MB * BYTES_PER_MIB
         );
         assert_eq!(
-            resolved.max_file_size,
-            derive_max_file_size(resolved.max_total_size)
-        );
-        assert_eq!(
             resolved.task_tracking_enabled,
             DEFAULT_TASK_TRACKING_ENABLED
         );
+        assert_eq!(resolved.tokio_instrumentation_enabled, None);
         assert_eq!(resolved.cpu_profile_enabled, supported_profiling);
         assert_eq!(resolved.schedule_profile_enabled, supported_profiling);
         assert_eq!(resolved.task_dump_enabled, DEFAULT_TASK_DUMP_ENABLED);
@@ -1009,22 +1016,10 @@ mod tests {
         assert!(resolved.s3.is_none());
 
         // Delegated defaults remain unset so their underlying config types own them.
+        assert_eq!(resolved.max_file_size, None);
         assert_eq!(resolved.rotation_period, None);
         assert_eq!(resolved.cpu_sample_hz, None);
         assert_eq!(resolved.task_dump_idle_threshold, None);
-    }
-
-    #[test]
-    fn env_default_max_file_size_caps_large_budgets_at_100_mib() {
-        assert_eq!(
-            derive_max_file_size(1024 * BYTES_PER_MIB),
-            100 * BYTES_PER_MIB
-        );
-    }
-
-    #[test]
-    fn env_default_max_file_size_uses_quarter_of_small_budgets() {
-        assert_eq!(derive_max_file_size(64 * BYTES_PER_MIB), 16 * BYTES_PER_MIB);
     }
 
     #[test]
@@ -1048,6 +1043,7 @@ mod tests {
     fn env_parses_runtime_storage_s3_cpu_and_taskdump_values() {
         let parsed = parse_env_config(
             &FakeEnv::default()
+                .with("DIAL9_TOKIO_INSTRUMENTATION_ENABLED", "off")
                 .with("DIAL9_TASK_TRACKING_ENABLED", "off")
                 .with("DIAL9_RUNTIME_NAME", " api-runtime ")
                 .with("DIAL9_MAX_FILE_SIZE_MB", "128")
@@ -1061,6 +1057,7 @@ mod tests {
                 .with("DIAL9_TASK_DUMP_IDLE_THRESHOLD_MS", "25"),
         );
 
+        assert_eq!(parsed.tokio_instrumentation_enabled, Some(false));
         assert_eq!(parsed.task_tracking_enabled, Some(false));
         assert_eq!(parsed.runtime_name.as_deref(), Some("api-runtime"));
         assert_eq!(parsed.max_file_size, Some(128 * 1024 * 1024));
@@ -1126,6 +1123,7 @@ mod tests {
         let parsed = parse_env_config(
             &FakeEnv::default()
                 .with("DIAL9_ENABLED", "maybe")
+                .with("DIAL9_TOKIO_INSTRUMENTATION_ENABLED", "maybe")
                 .with("DIAL9_TRACE_DIR", "   ")
                 .with("DIAL9_ROTATION_SECS", "0")
                 .with("DIAL9_MAX_DISK_USAGE_MB", "wat")
@@ -1137,6 +1135,7 @@ mod tests {
         );
 
         assert_eq!(parsed.enabled, None);
+        assert_eq!(parsed.tokio_instrumentation_enabled, None);
         assert_eq!(parsed.trace_dir, None);
         assert_eq!(parsed.rotation_period, None);
         assert_eq!(parsed.max_total_size, None);
@@ -1210,6 +1209,34 @@ mod tests {
     }
 
     #[test]
+    fn env_config_can_disable_tokio_instrumentation_without_disabling_telemetry() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let trace_dir = dir.path().to_str().expect("utf8 tempdir");
+        let env = FakeEnv::default()
+            .with("DIAL9_ENABLED", "true")
+            .with("DIAL9_TRACE_DIR", trace_dir)
+            .with("DIAL9_TOKIO_INSTRUMENTATION_ENABLED", "false");
+
+        let cfg = Dial9Config::from_env_source(&env);
+        let rt = TracedRuntime::try_new(cfg).expect("runtime should build");
+        assert!(rt.guard().is_enabled(), "telemetry should remain enabled");
+        assert!(
+            rt.guard()
+                .shared()
+                .expect("telemetry should be enabled")
+                .contexts
+                .lock()
+                .unwrap()
+                .is_empty(),
+            "no Tokio runtime contexts should be registered when Tokio instrumentation is disabled"
+        );
+        assert!(
+            !rt.block_on(async { crate::telemetry::TelemetryHandle::current().is_enabled() }),
+            "TelemetryHandle::current() should remain inert without Tokio hooks"
+        );
+    }
+
+    #[test]
     fn builder_accepts_required_fields() {
         let _ = Dial9Config::builder()
             .base_path(tmp_base_path())
@@ -1223,7 +1250,7 @@ mod tests {
     fn missing_required_fields_errors_with_all_missing_names() {
         match Dial9Config::builder().build() {
             Err(Dial9ConfigBuilderError::Validation(v)) => {
-                assert_eq!(v.fields(), ["base_path", "max_file_size", "max_total_size"]);
+                assert_eq!(v.fields(), ["base_path", "max_total_size"]);
             }
             Ok(_) => panic!("expected Validation error, got Ok"),
             Err(other) => panic!("expected Validation error, got {other:?}"),
@@ -1239,6 +1266,15 @@ mod tests {
             Ok(_) => panic!("expected Validation error, got Ok"),
             Err(other) => panic!("expected Validation error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn builder_defaults_max_file_size_when_omitted() {
+        let _ = Dial9Config::builder()
+            .base_path(tmp_base_path())
+            .max_total_size(64 * BYTES_PER_MIB)
+            .build()
+            .expect("build should succeed without explicit max_file_size");
     }
 
     #[test]

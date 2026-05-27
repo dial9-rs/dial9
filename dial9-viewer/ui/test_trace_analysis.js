@@ -17,6 +17,8 @@ const {
   collectDescendants,
   selectSpanRenderSet,
   computeSpanLayout,
+  getTraceTimeRange,
+  hasCpuProfileSamples,
   analyzeAllocations,
 } = require("./trace_analysis.js");
 
@@ -36,6 +38,39 @@ async function main() {
   function pass(msg) {
     console.log(`✓ ${msg}`);
   }
+
+  function testProfilerOnlyTraceRangeUsesCpuSamples() {
+    const profilerOnlyTrace = {
+      events: [],
+      cpuSamples: [
+        { timestamp: 300, source: 0, callchain: ["0x3"] },
+        { timestamp: 100, source: 0, callchain: ["0x1"] },
+        { timestamp: 200, source: 1, callchain: ["0x2"] },
+      ],
+    };
+
+    if (!hasCpuProfileSamples(profilerOnlyTrace.cpuSamples)) {
+      fail("CPU profile samples should make a trace displayable without runtime events");
+    }
+    const range = getTraceTimeRange(profilerOnlyTrace.events, profilerOnlyTrace.cpuSamples);
+    if (!range || range.minTs !== 100 || range.maxTs !== 300 || range.durationNs !== 200) {
+      fail(`profiler-only range should come from CPU profile samples, got ${JSON.stringify(range)}`);
+    }
+    pass("Profiler-only trace range uses CPU profile samples");
+  }
+
+  function testProfilerOnlyTraceRangeExpandsSingleCpuSample() {
+    const range = getTraceTimeRange([], [
+      { timestamp: 100, source: 0, callchain: ["0x1"] },
+    ]);
+    if (!range || range.minTs !== 100 || range.maxTs !== 101 || range.durationNs !== 1) {
+      fail(`single-sample profiler-only range should be non-zero, got ${JSON.stringify(range)}`);
+    }
+    pass("Single-sample profiler-only trace range is non-zero");
+  }
+
+  testProfilerOnlyTraceRangeUsesCpuSamples();
+  testProfilerOnlyTraceRangeExpandsSingleCpuSample();
 
   const trace = await parseTrace(fs.readFileSync(tracePath));
   const evts = trace.events;
