@@ -132,6 +132,7 @@ dial9 is fundamentally a central buffer that can collect data from different sou
 
 - [Tokio Events](#tokio-events): dial9 can capture poll, wake, and worker events from Tokio
 - [CPU profiling](#cpu-profiling-linux-only): dial9 can capture linux performance counters and events to produce flamegraphs
+- [Memory profiling](#memory-profiling): dial9 can sample heap allocations to produce allocation flamegraphs and detect leaks
 - [Tracing spans](#tracing-span-events-opt-in): dial9 can capture tracing spans to bring tracing context into your trace files
 - [Task dumps](#task-dumps-linux-only): dial9 can capture a task dump (a backtrace when your future goes idle) to determine what it is waiting for when idle
 - [Custom events](#custom-events): dial9 can record custom application events into the trace
@@ -188,7 +189,7 @@ Both of these events are tied to the precise instant and thread that they happen
 **Enable the `cpu-profiling` feature**:
 ```toml
 [dependencies]
-dial9-tokio-telemetry = { version = "0.3", features = ["cpu-profile"] }
+dial9-tokio-telemetry = { version = "0.3", features = ["cpu-profiling"] }
 ```
 
 **Enable frame pointers**:
@@ -228,6 +229,67 @@ Dial9Config::builder()
   ```bash
   sudo sysctl kernel.kptr_restrict=0
   ```
+
+### Memory profiling
+
+dial9 can sample heap allocations using [probabilistic sampling](docs/design/memory-profiling.md) and capture stack traces for each sample. This produces allocation flamegraphs showing where memory is being allocated. With liveset tracking enabled, you can also detect memory leaks by seeing which allocations are never freed. The agent toolkit includes skills for automated memory profiling analysis.
+
+**Enable the `memory-profiling` feature:**
+```toml
+[dependencies]
+dial9-tokio-telemetry = { version = "0.3", features = ["memory-profiling"] }
+```
+
+**Install the allocator and profiler:**
+
+```rust,no_run
+use dial9_tokio_telemetry::memory_profiling::{
+    Dial9Allocator, MemoryProfiler, MemoryProfilingConfig,
+};
+use dial9_tokio_telemetry::telemetry::TelemetryHandle;
+
+// Install as the global allocator. Zero-cost passthrough until
+// MemoryProfiler::install() is called.
+#[global_allocator]
+static ALLOC: Dial9Allocator = Dial9Allocator::system();
+
+// If you already use jemalloc or mimalloc, wrap it instead:
+// static ALLOC: Dial9Allocator<tikv_jemallocator::Jemalloc> =
+//     Dial9Allocator::new(tikv_jemallocator::Jemalloc);
+
+# fn example(handle: TelemetryHandle) {
+let config = MemoryProfilingConfig::builder()
+    .sample_rate_bytes(512 * 1024)  // sample ~every 512 KiB allocated (default)
+    .track_liveset(true)            // track frees for leak detection
+    .build();
+
+let _guard = MemoryProfiler::from_config(config)
+    .install(handle)
+    .expect("failed to install memory profiler");
+# }
+# fn main() {}
+```
+
+The `sample_rate_bytes` controls how frequently allocations are sampled. At the default of 512 KiB, a service allocating 1 GB/s produces ~2000 samples/sec. Set to `1` to sample every allocation (useful for tests, not production).
+
+#### Liveset tracking and leak detection
+
+When `track_liveset(true)` is set, dial9 records every deallocation so it can determine which sampled allocations are still live at any point in the trace. This is how you find memory leaks: allocations that appear in the liveset and grow over time without being freed.
+
+> **Caveat:** At very high deallocation rates the free queue can overflow. When a free event is dropped, the corresponding allocation remains in the liveset even if it was actually freed. The viewer and agent skills will flag when overflow is detected in the trace; if you see suspicious liveset growth in a high-throughput service, check for overflow warnings before concluding you have a real leak.
+
+#### Performance
+
+| Path | Overhead per call |
+| --- | --- |
+| Unsampled allocation (~99.9%) | ~5 ns |
+| Sampled allocation (~0.1%) | ~1 µs (stack capture) |
+| Every deallocation (liveset on) | ~200 ns |
+| Before `install()` | ~1 ns (null check) |
+
+Without liveset tracking, the profiler adds negligible overhead. With liveset tracking, the ~200 ns per free is the dominant cost — budget accordingly for allocation-heavy services.
+
+> **Note:** Memory profiling is not yet configurable via `Dial9Config::from_env()`. Use the programmatic API shown above. See [#457](https://github.com/dial9-rs/dial9-tokio-telemetry/issues/457) for tracking.
 
 ### Tracing span events (opt-in)
 
