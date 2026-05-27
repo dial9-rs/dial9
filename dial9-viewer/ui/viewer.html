@@ -3447,7 +3447,7 @@
             document.getElementById("poi-filter").addEventListener("change", updatePointsOfInterest);
             document.getElementById("sort-by-worst").addEventListener("change", updatePointsOfInterest);
             document.getElementById("btn-sched-panel").addEventListener("click", showSchedPanel);
-            document.getElementById("btn-heap-flamegraph").addEventListener("click", showHeapFlamegraph);
+            document.getElementById("btn-heap-flamegraph").addEventListener("click", () => showHeapFlamegraph());
             document.getElementById("btn-uninstrumented-info").addEventListener("click", (e) => {
                 showUninstrumentedPopup(e.target);
             });
@@ -5027,12 +5027,13 @@
                         offworkerLabel: "Non-worker thread allocations",
                         formatCount(count, total, self, treeNode) {
                             const pct = ((count / total) * 100).toFixed(1);
-                            const selfPct = ((self / total) * 100).toFixed(1);
                             const est = fmtB(count);
-                            const selfEst = fmtB(self);
                             const allocs = treeNode && treeNode.allocCount != null ? Math.round(treeNode.allocCount) : null;
-                            let s = `~${est} (${pct}%) \u00b7 ~${selfEst} self (${selfPct}%)`;
-                            if (allocs != null) s += ` \u00b7 ~${allocs.toLocaleString()} allocs`;
+                            let s = `~${est} (${pct}%)`;
+                            if (allocs != null) {
+                                s += ` · ~${allocs.toLocaleString()} allocs`;
+                                s += ` · ${fmtB(count / treeNode.allocCount)} avg`;
+                            }
                             return s;
                         }
                     },
