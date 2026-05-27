@@ -591,6 +591,14 @@ for (const [taskId, bytes] of top) {
   footprint) requires pairing `Alloc` with `Free` events and only
   works when `MemoryProfilingConfig.track_liveset(true)` was set at
   install time.
+- **Ring buffer overflow causing false leaks.** When the free queue
+  overflows (visible as `MemoryProfileOverflowEvent` in the trace or
+  `totalDroppedFrees > 0` in the analysis summary), dropped frees
+  leave their matching allocations permanently in the liveset. These
+  appear as leaks but are actually freed memory the profiler couldn't
+  record. If you see overflow warnings, increase `ring_capacity` in
+  `MemoryProfilingConfig` and re-record. Until then, treat leak
+  counts as upper bounds.
 
 ### Heap flamegraph: where are allocations happening and how big are they?
 

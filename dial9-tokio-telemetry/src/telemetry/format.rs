@@ -1,6 +1,7 @@
 use crate::telemetry::events::CpuSampleSource;
 #[cfg(any(feature = "analysis", test))]
 use crate::telemetry::events::TelemetryEvent;
+
 use crate::telemetry::task_metadata::TaskId;
 #[cfg(any(feature = "analysis", test))]
 use dial9_trace_format::decoder::{StackPool, StringPool};
@@ -274,6 +275,23 @@ pub struct FreeEvent {
     /// analysis to bucket frees by generation without needing the
     /// `AllocEvent` in the same (unrotated) trace.
     pub alloc_timestamp_ns: u64,
+}
+
+/// Wire-format event emitted when the memory profiler's ring buffers
+/// overflowed during a flush period. Each field is the delta (new drops
+/// since the previous flush), not a cumulative total. Only emitted when
+/// at least one counter is non-zero.
+///
+/// Dropped frees cause the liveset to retain addresses that were actually
+/// freed, producing false positives in leak analysis.
+#[derive(Debug, TraceEvent)]
+pub(crate) struct MemoryProfileOverflowEvent {
+    #[traceevent(timestamp)]
+    pub timestamp_ns: u64,
+    /// Alloc samples dropped since last flush due to alloc queue overflow.
+    pub dropped_allocs: u64,
+    /// Free samples dropped since last flush due to free queue overflow.
+    pub dropped_frees: u64,
 }
 
 /// Wire-format event for a wake notification.

@@ -131,6 +131,8 @@ process.stderr.write('\n');
       leakedBytes: number,                  // sum of leaked allocation sizes
       leakedCount: number,                  // allocations with no matching free
       estimatedTotalBytes: number,          // unbiased estimate of total allocation volume
+      totalDroppedAllocs: number,           // alloc samples lost to ring buffer overflow
+      totalDroppedFrees: number,            // free samples lost to ring buffer overflow (causes false leaks)
     },
   },
 }

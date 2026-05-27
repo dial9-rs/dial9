@@ -913,6 +913,7 @@
    * @param {Array} [opts.events] - Parsed trace events (PollStart/PollEnd with workerId+taskId)
    * @param {Map<number,number>} [opts.tidToWorker] - tid → workerId mapping from park/unpark events
    * @param {number} [opts.sampleRateBytes] - Mean bytes between samples (default 524288)
+   * @param {Array<{timestamp: number, droppedAllocs: number, droppedFrees: number}>} [opts.memoryOverflows] - Ring buffer overflow events
    * @returns {{ topSites: Array<{callchain: string[], totalBytes: number, count: number, estimatedBytes: number}>,
    *             leaks: Array<{callchain: string[], size: number, timestamp: number, addr: string}>,
    *             perTask: Map<number, {sampledBytes: number, count: number, estimatedBytes: number}>,
@@ -1002,6 +1003,10 @@
       }
     }
 
+    const overflows = (opts && opts.memoryOverflows) || [];
+    const totalDroppedAllocs = overflows.reduce((sum, o) => sum + o.droppedAllocs, 0);
+    const totalDroppedFrees = overflows.reduce((sum, o) => sum + o.droppedFrees, 0);
+
     return {
       topSites,
       leaks,
@@ -1014,6 +1019,8 @@
         leakedBytes,
         leakedCount: leaks.length,
         estimatedTotalBytes: Math.round(estimatedTotalBytes),
+        totalDroppedAllocs,
+        totalDroppedFrees,
       },
     };
   }
