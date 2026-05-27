@@ -39,9 +39,11 @@ pub type TaskId = u64;
 #[non_exhaustive]
 pub enum CpuSampleSource {
     /// Periodic CPU profiling sample (frequency-based).
-    CpuProfile = 0,
+    CpuProfile,
     /// Context switch captured by per-thread sched event tracking.
-    SchedEvent = 1,
+    SchedEvent,
+    /// Unknown variant from a newer trace format.
+    Unknown(u64),
 }
 
 impl<'de> serde::Deserialize<'de> for CpuSampleSource {
@@ -50,9 +52,7 @@ impl<'de> serde::Deserialize<'de> for CpuSampleSource {
         match v {
             0 => Ok(Self::CpuProfile),
             1 => Ok(Self::SchedEvent),
-            other => Err(serde::de::Error::custom(format!(
-                "unknown CpuSampleSource discriminant: {other}"
-            ))),
+            other => Ok(Self::Unknown(other)),
         }
     }
 }
