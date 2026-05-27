@@ -195,6 +195,10 @@ name = "kernel_sched_events"
 required-features = ["cpu-profiling", "analysis"]
 
 [[example]]
+name = "generate_diagnostic_traces"
+required-features = ["cpu-profiling"]
+
+[[example]]
 name = "thread_per_core"
 required-features = ["analysis"]
 
