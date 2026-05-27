@@ -41,7 +41,13 @@ impl Write for MemActiveWriter {
 struct MemSealedSegment {
     index: u32,
     bytes: Bytes,
+    /// 0 for a fresh seal, incremented each time the worker re-enqueues
+    /// after a retryable failure.
+    retry_count: u32,
 }
+
+/// Cap on retryable-failure re-enqueues for a memory segment.
+pub(crate) const MEMORY_RETRY_BUDGET: u32 = 3;
 
 /// Holds the deque + bookkeeping that must move together under the lock.
 struct Queue {
@@ -119,7 +125,11 @@ impl MemFs {
 
         let (evicted, first_idx, last_idx) = {
             let mut q = ch.queue.lock().unwrap();
-            q.segments.push_back(MemSealedSegment { index, bytes });
+            q.segments.push_back(MemSealedSegment {
+                index,
+                bytes,
+                retry_count: 0,
+            });
             q.bytes += size;
             // Evict under the lock so worker pop can't race drop attribution.
             let mut evicted = 0u64;
@@ -151,6 +161,25 @@ impl MemFs {
     }
 
     pub(super) fn remove_sealed(&self, _seg: &SegmentRef, _reason: RemoveReason) {}
+
+    /// Re-enqueue `bytes` for re-dispense on the next `take_files` cycle.
+    ///
+    /// `attempt` is the new retry count this segment carries.
+    /// Pushed to the front so a single failing segment cycles back ahead of fresh work.
+    pub(super) fn release_for_retry(&self, index: u32, bytes: Bytes, attempt: u32) {
+        let size = bytes.len() as u64;
+        let ch = &self.channel;
+        {
+            let mut q = ch.queue.lock().unwrap();
+            q.segments.push_front(MemSealedSegment {
+                index,
+                bytes,
+                retry_count: attempt,
+            });
+            q.bytes += size;
+        }
+        ch.notify.notify_one();
+    }
 
     pub(super) fn remove_active(&self, _path: &Path) -> io::Result<()> {
         Ok(())
@@ -209,6 +238,7 @@ impl MemFs {
             },
             slot.bytes,
             accounting,
+            slot.retry_count,
         );
 
         TakenFiles {

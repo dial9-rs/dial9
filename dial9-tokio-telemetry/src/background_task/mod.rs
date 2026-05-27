@@ -774,6 +774,10 @@ impl WorkerLoop {
         }
 
         'next_segment: for (seg_idx, taken) in segments.into_iter().enumerate() {
+            // Snapshot memory-only retry state before `load()` consumes
+            // `taken`, so re-dispense on a retryable failure gets the same bytes as the first attempt.
+            let retry_count = taken.retry_count();
+            let original_bytes = taken.original_bytes();
             let (seg_ref, payload, accounting) = match taken.load() {
                 Ok(t) => t,
                 Err(e) if e.kind() == io::ErrorKind::NotFound => {
@@ -867,8 +871,28 @@ impl WorkerLoop {
                         if e.kind.already_deleted() {
                             tracing::debug!(target: "dial9_worker", id = %data.segment, "segment evicted during processing, skipping");
                         } else if e.kind.retryable() {
-                            tracing::debug!(target: "dial9_worker", id = %data.segment, err = ?e.kind, "retryable error");
-                            self.fs.release_claim(&data.segment);
+                            match &data.segment {
+                                SegmentRef::Memory(_) => {
+                                    let attempt = retry_count
+                                        .expect("memory segment always carries retry_count")
+                                        + 1;
+                                    if attempt > crate::background_task::fs::MEMORY_RETRY_BUDGET {
+                                        rate_limited!(Duration::from_secs(60), {
+                                            tracing::warn!(target: "dial9_worker", id = %data.segment, err = ?e.kind, budget = crate::background_task::fs::MEMORY_RETRY_BUDGET, "memory retry budget exhausted, dropping segment");
+                                        });
+                                        // Segment release happens via `data.accounting` drop on `continue` below.
+                                    } else {
+                                        tokio::time::sleep(self.poll_interval).await;
+                                        let bytes = original_bytes
+                                            .expect("memory segment always carries snapshot");
+                                        self.fs.release_for_retry(&data.segment, bytes, attempt);
+                                    }
+                                }
+                                SegmentRef::Disk(_) => {
+                                    tracing::debug!(target: "dial9_worker", id = %data.segment, err = ?e.kind, "retryable error");
+                                    self.fs.release_claim(&data.segment);
+                                }
+                            }
                         } else {
                             self.fs.remove_sealed(&data.segment, RemoveReason::Terminal);
                             rate_limited!(Duration::from_secs(60), {
@@ -1638,6 +1662,117 @@ mod worker_pipeline_tests {
         }
     }
 
+    /// s3s wrapper that fails the first `fail_n` writes with 500, then
+    /// delegates to the inner backend.
+    struct FlakyS3<S> {
+        inner: S,
+        remaining_failures: Arc<std::sync::atomic::AtomicU32>,
+    }
+
+    impl<S> FlakyS3<S> {
+        fn should_fail(&self) -> bool {
+            use std::sync::atomic::Ordering;
+            let prev = self.remaining_failures.load(Ordering::SeqCst);
+            if prev == 0 {
+                return false;
+            }
+            self.remaining_failures
+                .compare_exchange(prev, prev - 1, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl<S: s3s::S3 + Send + Sync> s3s::S3 for FlakyS3<S> {
+        async fn put_object(
+            &self,
+            req: s3s::S3Request<s3s::dto::PutObjectInput>,
+        ) -> s3s::S3Result<s3s::S3Response<s3s::dto::PutObjectOutput>> {
+            if self.should_fail() {
+                return Err(s3s::S3Error::with_message(
+                    s3s::S3ErrorCode::InternalError,
+                    "injected 500",
+                ));
+            }
+            self.inner.put_object(req).await
+        }
+    }
+
+    struct FlakyHarness {
+        uploader: s3::S3Uploader,
+        fail_counter: Arc<std::sync::atomic::AtomicU32>,
+        s3_root: tempfile::TempDir,
+    }
+
+    /// Read the single object out of the fake S3 bucket. Panics if there
+    /// isn't exactly one. Used to assert uploaded bytes survived retries.
+    fn read_only_object(s3_root: &std::path::Path) -> Vec<u8> {
+        fn walk(p: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            let Ok(rd) = std::fs::read_dir(p) else { return };
+            for entry in rd.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(&path, out);
+                } else if path.is_file()
+                    && path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|n| !n.ends_with(".s3s-fs"))
+                {
+                    out.push(path);
+                }
+            }
+        }
+        let mut found = Vec::new();
+        walk(&s3_root.join("test-bucket"), &mut found);
+        assert_eq!(found.len(), 1, "expected exactly one object, got {found:?}");
+        std::fs::read(&found[0]).unwrap()
+    }
+
+    fn flaky_s3_harness(fail_n: u32) -> FlakyHarness {
+        let s3_root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(s3_root.path().join("test-bucket")).unwrap();
+        let fail_counter = Arc::new(std::sync::atomic::AtomicU32::new(fail_n));
+
+        let fs = s3s_fs::FileSystem::new(s3_root.path()).unwrap();
+        let flaky = FlakyS3 {
+            inner: fs,
+            remaining_failures: Arc::clone(&fail_counter),
+        };
+        let mut svc = s3s::service::S3ServiceBuilder::new(flaky);
+        svc.set_auth(s3s::auth::SimpleAuth::from_single("test", "test"));
+        let s3_client: s3s_aws::Client = svc.build().into();
+
+        let sdk_config = aws_sdk_s3::Config::builder()
+            .behavior_version_latest()
+            .credentials_provider(aws_sdk_s3::config::Credentials::new(
+                "test", "test", None, None, "test",
+            ))
+            .region(aws_sdk_s3::config::Region::new("us-east-1"))
+            // Disable SDK-internal retries so each worker attempt = 1 PUT.
+            .retry_config(aws_sdk_s3::config::retry::RetryConfig::disabled())
+            .http_client(s3_client)
+            .force_path_style(true)
+            .build();
+        let tm_client = aws_sdk_s3_transfer_manager::Client::new(
+            aws_sdk_s3_transfer_manager::Config::builder()
+                .client(aws_sdk_s3::Client::from_conf(sdk_config))
+                .build(),
+        );
+        let s3_config = s3::S3Config::builder()
+            .bucket("test-bucket")
+            .service_name("test")
+            .instance_path("test")
+            .boot_id("test")
+            .region("us-east-1")
+            .build();
+        FlakyHarness {
+            uploader: s3::S3Uploader::new(tm_client, s3_config),
+            fail_counter,
+            s3_root,
+        }
+    }
+
     fn always_failing_s3_uploader() -> (s3::S3Uploader, tempfile::TempDir) {
         let s3_root = tempfile::tempdir().unwrap();
         let fs = s3s_fs::FileSystem::new(s3_root.path()).unwrap();
@@ -2370,5 +2505,177 @@ mod worker_pipeline_tests {
                 processed.load(Ordering::SeqCst)
             );
         }
+    }
+
+    /// N<budget retryable failures followed by success: segment delivers,
+    /// in-flight accounting drains.
+    #[tokio::test(start_paused = true)]
+    async fn mem_worker_retries_retryable_within_budget() {
+        use std::io::Write;
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        struct Flaky {
+            fail_count: u32,
+            attempts: Arc<AtomicU32>,
+        }
+        impl SegmentProcessor for Flaky {
+            fn name(&self) -> &'static str {
+                "Flaky"
+            }
+            fn process(
+                &mut self,
+                data: SegmentData,
+            ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>>
+            {
+                let n = self.attempts.fetch_add(1, Ordering::SeqCst) + 1;
+                let fail_count = self.fail_count;
+                Box::pin(async move {
+                    if n <= fail_count {
+                        Err(ProcessError {
+                            data,
+                            kind: ProcessErrorKind::Transfer {
+                                source: Box::from("transient"),
+                                retryable: true,
+                            },
+                        })
+                    } else {
+                        Ok(data)
+                    }
+                })
+            }
+        }
+
+        let fs = Fs::new_in_memory(64 * 1024, 1024).unwrap();
+        let mut h = fs.create_segment(Path::new("x")).unwrap();
+        h.write_all(&[0u8; 50]).unwrap();
+        fs.seal(h, Path::new("x"), 0).unwrap();
+        fs.mark_writer_done();
+
+        let attempts = Arc::new(AtomicU32::new(0));
+        let stop = tokio_util::sync::CancellationToken::new();
+        let mut worker = WorkerLoop::new(
+            Arc::clone(&fs),
+            Duration::from_millis(1),
+            vec![Box::new(Flaky {
+                fail_count: 2,
+                attempts: Arc::clone(&attempts),
+            })],
+            stop,
+            metrique_writer::sink::DevNullSink::boxed(),
+        );
+        worker.run().await;
+        check!(attempts.load(Ordering::SeqCst) == 3, "2 fails + 1 success");
+        let snap = fs.take_files();
+        check!(snap.in_flight_bytes == 0);
+        check!(snap.in_flight_segments == 0);
+    }
+
+    /// Always-fail retryable: exactly `MEMORY_RETRY_BUDGET + 1` attempts,
+    /// then segment is dropped and accounting drains.
+    #[tokio::test(start_paused = true)]
+    async fn mem_worker_drops_after_retry_budget_exhausted() {
+        use std::io::Write;
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        struct AlwaysFails {
+            attempts: Arc<AtomicU32>,
+        }
+        impl SegmentProcessor for AlwaysFails {
+            fn name(&self) -> &'static str {
+                "AlwaysFails"
+            }
+            fn process(
+                &mut self,
+                data: SegmentData,
+            ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>>
+            {
+                self.attempts.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async move {
+                    Err(ProcessError {
+                        data,
+                        kind: ProcessErrorKind::Transfer {
+                            source: Box::from("permanent"),
+                            retryable: true,
+                        },
+                    })
+                })
+            }
+        }
+
+        let fs = Fs::new_in_memory(64 * 1024, 1024).unwrap();
+        let mut h = fs.create_segment(Path::new("x")).unwrap();
+        h.write_all(&[0u8; 50]).unwrap();
+        fs.seal(h, Path::new("x"), 0).unwrap();
+        fs.mark_writer_done();
+
+        let attempts = Arc::new(AtomicU32::new(0));
+        let stop = tokio_util::sync::CancellationToken::new();
+        let mut worker = WorkerLoop::new(
+            Arc::clone(&fs),
+            Duration::from_millis(1),
+            vec![Box::new(AlwaysFails {
+                attempts: Arc::clone(&attempts),
+            })],
+            stop,
+            metrique_writer::sink::DevNullSink::boxed(),
+        );
+        worker.run().await;
+        check!(
+            attempts.load(Ordering::SeqCst) == crate::background_task::fs::MEMORY_RETRY_BUDGET + 1,
+            "initial + budget retries",
+        );
+        let snap = fs.take_files();
+        check!(snap.in_flight_bytes == 0);
+        check!(snap.in_flight_segments == 0);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mem_e2e_real_s3_pipeline_recovers_within_budget() {
+        use std::io::Write;
+        use std::sync::atomic::Ordering;
+
+        let FlakyHarness {
+            uploader,
+            fail_counter,
+            s3_root,
+        } = flaky_s3_harness(2);
+        // > CB initial backoff (1s) so CB reopens between retries. CB
+        // doubles per failure; budget=3 fits 1s+2s within the 15s cap below.
+        let poll_interval = Duration::from_millis(1100);
+
+        let payload = b"segment-payload-bytes";
+        let fs = Fs::new_in_memory(64 * 1024, 1024).unwrap();
+        let mut h = fs.create_segment(Path::new("x")).unwrap();
+        h.write_all(payload).unwrap();
+        fs.seal(h, Path::new("x"), 0).unwrap();
+        fs.mark_writer_done();
+
+        let stop = tokio_util::sync::CancellationToken::new();
+        let mut worker = WorkerLoop::new(
+            Arc::clone(&fs),
+            poll_interval,
+            vec![Box::new(S3PipelineUploader::from_ready(
+                uploader,
+                connection::CircuitBreaker::new(),
+            ))],
+            stop,
+            metrique_writer::sink::DevNullSink::boxed(),
+        );
+        tokio::time::timeout(Duration::from_secs(15), worker.run())
+            .await
+            .expect("worker hung");
+
+        check!(
+            fail_counter.load(Ordering::SeqCst) == 0,
+            "all injected failures consumed",
+        );
+        let uploaded = read_only_object(s3_root.path());
+        check!(
+            uploaded == payload,
+            "uploaded body must match seal'd bytes (snapshot survived retries)",
+        );
+        let snap = fs.take_files();
+        check!(snap.in_flight_bytes == 0);
+        check!(snap.in_flight_segments == 0);
     }
 }

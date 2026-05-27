@@ -154,10 +154,6 @@ impl<T> BoundedQueue<T> {
     pub(crate) fn pop(&self) -> Option<T> {
         self.inner.pop()
     }
-
-    pub(crate) fn len(&self) -> usize {
-        self.inner.len()
-    }
 }
 
 #[cfg(shuttle)]
@@ -188,9 +184,5 @@ impl<T> BoundedQueue<T> {
 
     pub(crate) fn pop(&self) -> Option<T> {
         self.inner.lock().unwrap().pop_front()
-    }
-
-    pub(crate) fn len(&self) -> usize {
-        self.inner.lock().unwrap().len()
     }
 }

@@ -23,6 +23,7 @@ mod disk;
 mod mem;
 
 use disk::DiskFs;
+pub(crate) use mem::MEMORY_RETRY_BUDGET;
 use mem::{MemActiveWriter, MemFs};
 
 /// Retained trace artifacts found at writer construction.
@@ -111,11 +112,18 @@ impl Write for ActiveHandle {
     }
 }
 
+/// Memory-only state attached to a `TakenSegment`.
+pub(crate) struct MemoryPayload {
+    pub(crate) bytes: Bytes,
+    pub(crate) accounting: SegmentAccounting,
+    pub(crate) retry_count: u32,
+}
+
 /// A claim returned by `Fs::take_files`. Memory comes with payload in hand,
 /// disk loads lazily on `load()` so peak in-flight memory stays at one segment.
 pub(crate) struct TakenSegment {
     pub(crate) seg_ref: SegmentRef,
-    pre_loaded: Option<(Bytes, SegmentAccounting)>,
+    pre_loaded: Option<MemoryPayload>,
 }
 
 impl TakenSegment {
@@ -126,11 +134,31 @@ impl TakenSegment {
         }
     }
 
-    pub(super) fn memory(seg: MemorySegment, bytes: Bytes, accounting: SegmentAccounting) -> Self {
+    pub(super) fn memory(
+        seg: MemorySegment,
+        bytes: Bytes,
+        accounting: SegmentAccounting,
+        retry_count: u32,
+    ) -> Self {
         Self {
             seg_ref: SegmentRef::Memory(seg),
-            pre_loaded: Some((bytes, accounting)),
+            pre_loaded: Some(MemoryPayload {
+                bytes,
+                accounting,
+                retry_count,
+            }),
         }
+    }
+
+    /// Cheap clone of the original seal'd bytes, for memory
+    /// retry re-enqueue. `None` for disk (retry re-reads the file).
+    pub(crate) fn original_bytes(&self) -> Option<Bytes> {
+        self.pre_loaded.as_ref().map(|m| m.bytes.clone())
+    }
+
+    /// Re-enqueue count this dispense carries. `None` for disk.
+    pub(crate) fn retry_count(&self) -> Option<u32> {
+        self.pre_loaded.as_ref().map(|m| m.retry_count)
     }
 
     /// Load the segment payload.
@@ -138,9 +166,9 @@ impl TakenSegment {
     /// - memory: zero-copy `Bytes`.
     pub(crate) fn load(self) -> io::Result<(SegmentRef, Payload, Option<SegmentAccounting>)> {
         match self.pre_loaded {
-            Some((bytes, accounting)) => {
-                Ok((self.seg_ref, Payload::from_bytes(bytes), Some(accounting)))
-            }
+            Some(MemoryPayload {
+                bytes, accounting, ..
+            }) => Ok((self.seg_ref, Payload::from_bytes(bytes), Some(accounting))),
             None => {
                 // None = disk segment, should always have a path.
                 let Some(path) = self.seg_ref.disk_path() else {
@@ -292,12 +320,25 @@ impl Fs {
     /// Mark a previously dispensed segment as available for re-dispensing on
     /// the next `take_files`.
     ///
-    /// Disk: drops the claim entry. Memory: no-op (bytes left the ring on
-    /// pop and the segment is lost).
+    /// Disk: drops the claim entry.
+    /// Memory: no-op. Memory retry goes through [`Self::release_for_retry`]
+    /// which carries the bytes back into the ring.
     pub(crate) fn release_claim(&self, seg: &SegmentRef) {
         match self {
             Fs::Disk(d) => d.release_claim(seg.index()),
             Fs::Mem(_) => {}
+        }
+    }
+
+    /// Re-enqueue a memory segment after a retryable failure.
+    ///
+    /// Caller owns the [`MEMORY_RETRY_BUDGET`] check, this method always
+    /// pushes. Disk segments do not use this path, they retry via
+    /// [`Self::release_claim`] + directory rescan.
+    pub(crate) fn release_for_retry(&self, seg: &SegmentRef, bytes: bytes::Bytes, attempt: u32) {
+        match self {
+            Fs::Mem(m) => m.release_for_retry(seg.index(), bytes, attempt),
+            Fs::Disk(_) => unreachable!("release_for_retry called on disk segment"),
         }
     }
 }
