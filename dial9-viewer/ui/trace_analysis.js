@@ -18,6 +18,30 @@
   const EVENT_TYPES = parser.EVENT_TYPES;
   const formatFrame = parser.formatFrame;
 
+  function isCpuProfileSample(sample) {
+    return sample.callchain.length > 0 && sample.source !== 1;
+  }
+
+  function hasCpuProfileSamples(cpuSamples) {
+    return cpuSamples.some(isCpuProfileSample);
+  }
+
+  function getTraceTimeRange(events, cpuSamples) {
+    const timestamps = events.length
+      ? events.map((e) => e.timestamp)
+      : cpuSamples.filter(isCpuProfileSample).map((s) => s.timestamp);
+    if (!timestamps.length) return null;
+
+    let minTs = timestamps[0];
+    let maxTs = timestamps[0];
+    for (const timestamp of timestamps) {
+      if (timestamp < minTs) minTs = timestamp;
+      if (timestamp > maxTs) maxTs = timestamp;
+    }
+    if (maxTs === minTs) maxTs = minTs + 1;
+    return { minTs, maxTs, durationNs: maxTs - minTs };
+  }
+
   /**
    * Reconstruct poll/park/active spans from raw events using a state machine.
    * @param {import('./trace_parser.js').TraceEvent[]} events - raw trace events
@@ -999,6 +1023,8 @@
     buildFlamegraphTree,
     flattenFlamegraph,
     buildFgData,
+    getTraceTimeRange,
+    hasCpuProfileSamples,
     buildSpanData,
     collectDescendants,
     selectSpanRenderSet,

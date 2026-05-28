@@ -22,6 +22,7 @@ function resolve(name) {
 const { parseTrace, EVENT_TYPES, formatFrame, symbolizeChain, deduplicateSamples } = require(resolve('trace_parser.js'));
 const { buildWorkerSpans, attachCpuSamples, buildActiveTaskTimeline,
         computeSchedulingDelays, filterPointsOfInterest, buildSpanData, analyzeAllocations } = require(resolve('trace_analysis.js'));
+const { diagnoseSetup } = require(resolve('diagnose_setup.js'));
 
 // ── Helpers ──
 
@@ -621,6 +622,7 @@ async function main() {
   if (isDir) process.stderr.write('\n');
 
   const label = isDir ? `${result.files ? result.files.length : ''} files in ${path.basename(TRACE_PATH)}` : path.basename(TRACE_PATH);
+  await diagnoseSetup(TRACE_PATH);
   reportAnalysis(result, label);
 }
 

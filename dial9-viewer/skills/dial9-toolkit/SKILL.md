@@ -34,15 +34,33 @@ node scripts/analyze.js trace.bin --force          # ignore cached results
 | File | Purpose |
 |------|---------|
 | `scripts/analyze.js` | CLI entry point and `analyzeTraces()` aggregation function |
+| `scripts/diagnose_setup.js` | Setup diagnostic: detects missing frame pointers, wake events, debug symbols, sched events |
 | `scripts/trace_parser.js` | Binary parser: `parseTrace(path)` yields `ParsedTrace` objects |
 | `scripts/trace_analysis.js` | Analysis functions: `buildWorkerSpans`, `attachCpuSamples`, etc. |
 | `scripts/decode.js` | Low-level binary format decoder |
 
 ## Default workflow
 
-1. Always run `analyzeTraces(path)` first for trace diagnosis.
-2. Base initial findings on the aggregate result: long polls, worker spans, scheduling delays, CPU/off-CPU groups, queue depth, task lifecycle counts, and span summaries.
-3. Then use `parseTrace()` or lower-level helpers only to confirm assumptions, inspect raw events, or follow a specific task/wake/span chronology.
+1. Always run `analyzeTraces(path)` first for trace diagnosis. This automatically runs setup diagnostics first.
+2. If setup diagnostics report issues (missing frame pointers, missing wake events, missing debug symbols), help the user fix those before diving into performance analysis.
+3. Base initial findings on the aggregate result: long polls, worker spans, scheduling delays, CPU/off-CPU groups, queue depth, task lifecycle counts, and span summaries.
+4. Then use `parseTrace()` or lower-level helpers only to confirm assumptions, inspect raw events, or follow a specific task/wake/span chronology.
+
+## Setup diagnostic
+
+The setup diagnostic (`diagnose_setup.js`) runs automatically as part of `analyze.js` and checks for common configuration issues:
+
+| Check | Severity | Symptom |
+|-------|----------|---------|
+| `missing-frame-pointers` | critical | CPU stacks are 1–3 frames deep instead of 10+ |
+| `missing-wake-events` | warning | Tasks spawned but no wake events recorded |
+| `missing-debug-symbols` | warning | Stack addresses unresolved or no source locations |
+| `no-scheduling-events` | info | No off-CPU samples (sched profiling not enabled) |
+
+Run standalone:
+```bash
+node scripts/diagnose_setup.js <trace.bin or directory>
+```
 
 ```javascript
 const { analyzeTraces } = require('./scripts/analyze.js');

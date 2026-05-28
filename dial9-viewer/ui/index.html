@@ -248,8 +248,8 @@
     let serverHasPrefix = false;
 
     function updateSearchReady() {
-        const hasPrefix = serverHasPrefix || prefixInput.value.trim() !== '';
-        document.getElementById('search-btn').disabled = !hasPrefix;
+        const waitingForPrefix = serverHasPrefix && prefixInput.value.trim() === '';
+        document.getElementById('search-btn').disabled = waitingForPrefix;
     }
     prefixInput.addEventListener('input', updateSearchReady);
 

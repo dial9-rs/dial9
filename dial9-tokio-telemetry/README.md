@@ -42,8 +42,8 @@ use dial9_tokio_telemetry::{main, Dial9Config, telemetry::TelemetryHandle};
 fn my_config() -> Dial9Config {
     Dial9Config::builder()
         .base_path("/tmp/my_traces/trace.bin")
-        .max_file_size(1024 * 1024)        // rotate after 1 MiB per file
         .max_total_size(5 * 1024 * 1024)   // keep at most 5 MiB on disk
+        .max_file_size(1024 * 1024)     // optional: defaults to min(100 MiB, max_total_size / 4)
         .rotation_period(std::time::Duration::from_secs(300)) // optional: rotate every 5 min (default: 60 s)
         .with_runtime(|r| r.with_runtime_name("main").with_task_tracking(true))  // TracedRuntime knobs
         .with_tokio(|t| { t.worker_threads(4); }) // tokio knobs
@@ -82,7 +82,7 @@ async fn main() {
 | --- | --- | --- |
 | `DIAL9_ENABLED` | `false` | Master switch for installing telemetry. |
 | `DIAL9_TRACE_DIR` | `/tmp/dial9-traces` | Directory for rotated trace segments. |
-| `DIAL9_ROTATION_SECS` | `60` | Wall-clock rotation period in seconds. |
+| `DIAL9_ROTATION_SECS` | `60` | Rotation period in seconds, measured monotonically from writer start. |
 | `DIAL9_MAX_DISK_USAGE_MB` | `1024` | Total on-disk trace budget in MiB. |
 | `DIAL9_MAX_FILE_SIZE_MB` | `min(100, total / 4)` | Per-file trace segment size in MiB. |
 
@@ -91,6 +91,7 @@ Runtime knobs:
 | Name | Default | Meaning |
 | --- | --- | --- |
 | `DIAL9_TASK_TRACKING_ENABLED` | `true` | Track tasks spawned through dial9 handles. |
+| `DIAL9_TOKIO_INSTRUMENTATION_ENABLED` | `true` | Install dial9's Tokio runtime hook instrumentation. |
 | `DIAL9_RUNTIME_NAME` | unset | Human-readable runtime name in trace metadata. |
 
 S3 upload knobs (`worker-s3` feature required):
@@ -214,6 +215,34 @@ Dial9Config::builder()
     })
     // ...
 ```
+
+To use dial9 as a CPU profiler without installing Tokio runtime hooks, keep
+telemetry enabled and disable only Tokio instrumentation:
+
+```rust,ignore
+use dial9_tokio_telemetry::telemetry::cpu_profile::CpuProfilingConfig;
+use dial9_tokio_telemetry::telemetry::TracedRuntime;
+
+let (runtime, guard) = TracedRuntime::builder()
+    .with_cpu_profiling(CpuProfilingConfig::default())
+    .with_tokio_instrumentation(false)
+    .build_and_start(tokio::runtime::Builder::new_multi_thread(), writer)?;
+```
+
+You can also use `TelemetryCore::builder()` directly when you only need the
+telemetry session and want to decide separately whether to build or attach any
+Tokio runtime.
+
+Equivalent env config:
+
+```text
+DIAL9_ENABLED=true
+DIAL9_CPU_PROFILE_ENABLED=true
+DIAL9_TOKIO_INSTRUMENTATION_ENABLED=false
+```
+
+In this mode, dial9 does not install Tokio runtime hooks. APIs that depend on
+those hooks will not observe runtime context.
 
 #### System requirements
 - `perf_event_paranoid`: CPU profiling requires <= 2. `sched_events` requires <= 1.

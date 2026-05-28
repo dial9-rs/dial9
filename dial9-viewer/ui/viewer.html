@@ -791,7 +791,7 @@
         <script src="panel_layout.js"></script>
         <script>
             const { EVENT_TYPES: ET, parseTrace, formatFrame, symbolizeChain, deduplicateSamples } = TraceParser;
-            const { buildWorkerSpans, attachCpuSamples, buildActiveTaskTimeline, computeSchedulingDelays, filterPointsOfInterest, buildSpanData, collectDescendants, selectSpanRenderSet, computeSpanLayout } = TraceAnalysis;
+            const { buildWorkerSpans, attachCpuSamples, buildActiveTaskTimeline, computeSchedulingDelays, filterPointsOfInterest, buildSpanData, collectDescendants, selectSpanRenderSet, computeSpanLayout, getTraceTimeRange, hasCpuProfileSamples } = TraceAnalysis;
 
             function esc(s) {
                 return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -1204,10 +1204,16 @@
                     trace = await parseTrace(buffer, fullOpts);
                     updateLoadProgress(`Analyzing ${trace.events.length.toLocaleString()} events…`);
                     await new Promise((r) => setTimeout(r, 0));
-                    processTrace();
+                    if (!processTrace()) {
+                        resetDropZone();
+                        return;
+                    }
                     currentTraceBuffer = buffer;
                     currentTraceName = name;
                     showViewer(name);
+                    if (trace.events.length === 0 && hasCpuProfileSamples(trace.cpuSamples)) {
+                        requestAnimationFrame(() => showFlamegraph(minTs, maxTs));
+                    }
                 } catch (err) {
                     if (err.name === "AbortError") return;
                     alert("Error: " + err.message);
@@ -1337,9 +1343,10 @@
 
             function processTrace() {
                 const evts = trace.events;
-                if (!evts.length) {
-                    alert("No events in trace");
-                    return;
+                const timeRange = getTraceTimeRange(evts, trace.cpuSamples);
+                if (!timeRange) {
+                    alert("No runtime events or CPU profile samples in trace");
+                    return false;
                 }
 
                 const wSet = new Set();
@@ -1348,14 +1355,9 @@
                 });
                 workerIds = [...wSet].sort((a, b) => a - b);
 
-                minTs = evts[0].timestamp;
-                maxTs = evts[evts.length - 1].timestamp;
-                // Scan for true min/max in case events aren't sorted
-                for (const e of evts) {
-                    if (e.timestamp < minTs) minTs = e.timestamp;
-                    if (e.timestamp > maxTs) maxTs = e.timestamp;
-                }
-                durationNs = maxTs - minTs || 1;
+                minTs = timeRange.minTs;
+                maxTs = timeRange.maxTs;
+                durationNs = timeRange.durationNs;
                 viewStart = minTs;
                 viewEnd = maxTs;
 
@@ -1486,6 +1488,8 @@
                         cePanel.style.display = "none";
                     }
                 }
+
+                return true;
             }
 
             function showViewer(filename) {
