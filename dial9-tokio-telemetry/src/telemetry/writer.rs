@@ -200,7 +200,6 @@ fn derive_max_file_size(max_total_size: u64) -> u64 {
     (max_total_size / 4).min(MAX_FILE_SIZE_CAP)
 }
 
-
 /// A writer that rotates trace files to bound disk usage and time.
 ///
 /// Rotation triggers when *either* condition is met:

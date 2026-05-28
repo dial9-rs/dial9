@@ -199,12 +199,9 @@ fn measure(mode: Mode) -> Sample {
             Mode::Disk => {
                 let tmp = tempfile::tempdir().unwrap();
                 let trace_path = tmp.path().join("trace.bin");
-                let writer = RotatingWriter::new(
-                    trace_path.to_str().unwrap(),
-                    SEGMENT_SIZE,
-                    TOTAL_BUDGET,
-                )
-                .unwrap();
+                let writer =
+                    RotatingWriter::new(trace_path.to_str().unwrap(), SEGMENT_SIZE, TOTAL_BUDGET)
+                        .unwrap();
                 let r = TracedRuntime::builder()
                     .with_task_tracking(true)
                     .with_trace_path(&trace_path)
@@ -219,12 +216,9 @@ fn measure(mode: Mode) -> Sample {
             Mode::DiskCpu => {
                 let tmp = tempfile::tempdir().unwrap();
                 let trace_path = tmp.path().join("trace.bin");
-                let writer = RotatingWriter::new(
-                    trace_path.to_str().unwrap(),
-                    SEGMENT_SIZE,
-                    TOTAL_BUDGET,
-                )
-                .unwrap();
+                let writer =
+                    RotatingWriter::new(trace_path.to_str().unwrap(), SEGMENT_SIZE, TOTAL_BUDGET)
+                        .unwrap();
                 let r = TracedRuntime::builder()
                     .with_task_tracking(true)
                     .with_cpu_profiling(CpuProfilingConfig::default().frequency_hz(199))

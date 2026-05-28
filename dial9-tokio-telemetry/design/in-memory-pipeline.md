@@ -1,7 +1,5 @@
 # In-memory pipeline
 
-> **Status: design, not yet implemented.**
-
 ## Overview
 
 Let dial9 run with no filesystem dependency. Users with plenty of RAM, or running in environments where disk is unavailable or unwelcome, get a memory-only path: encoded bytes flow from the writer through an in-process queue to the worker, then through the existing `SegmentProcessor` pipeline to whichever destination they configured.
@@ -174,7 +172,7 @@ Holds `Arc<Fs>`. Disk constructors build `Fs::Disk(DiskFs::from_base_path(&trace
 Eviction lives where it is natural:
 
 - **Disk:** writer holds `closed_files: VecDeque<(SegmentRef, u64)>`. After every rotation, `evict_oldest` pops the front and calls `Fs::remove_sealed(seg, RemoveReason::Eviction)` until the byte budget is satisfied. The `Eviction` reason bumps `dropped_segments`. Worker terminal cleanup calls `remove_sealed(seg, RemoveReason::Terminal)`, which unlinks without counting (a processing failure, not backpressure).
-- **Memory:** the ring is byte-bounded by `max_total_size`. Seal pushes to the back; under the lock, the eviction loop pops oldest until `queued_bytes <= max_total_size`. The user-facing budget is bytes and is enforced exactly — no slot-truncation, no over- or under-utilization under variable segment sizes. `closed_files` stays empty.
+- **Memory:** the ring is byte-bounded by `max_total_size`. Seal pushes to the back; under the lock, the eviction loop pops oldest until `queued_bytes <= max_total_size`. Budget is enforced in bytes exactly: no slot truncation, no over/under-utilization under variable segment sizes. `closed_files` stays empty.
 
 ### Rejected alternatives
 
@@ -294,9 +292,7 @@ impl Drop for SegmentAccounting {
 
 The worker calls `acct.adjust(data.payload.len())` after each successful stage. Failure branches let `Drop` run with whatever size the last successful `adjust` set, so the gauge stays balanced no matter where the segment terminated. Stage-internal scratch (encoder buffers, etc.) is invisible, only `data.payload` bytes are tracked.
 
-Disk-backed segments hold `accounting: None`. Drop fires regardless of pipeline outcome: success, retry-budget exhaustion, non-retryable failure, and panic all converge on `SegmentData::drop`. Panic case: the panicked future owns `SegmentData` and drops it inside `catch_unwind`, so `SegmentAccounting::drop` runs with the size last set by the most recent successful stage. The synthetic `SegmentData` the worker emits for panic metrics carries `accounting: None`. In-flight segments are out of the ring once popped, so eviction can't double-count them.
-
-Drop signals: `dropped_segments` counter increments per evicted segment (see section 6 metrics catalog), plus a rate-limited `tracing::warn!` so sustained overruns are visible in logs.
+Disk-backed segments hold `accounting: None`. Drop fires on every pipeline outcome (success, retry-budget exhaustion, non-retryable failure, panic); all converge on `SegmentData::drop`. Panic case: the panicked future drops `SegmentData` inside `catch_unwind` with the size from the last successful stage. Popped segments are out of the ring, so eviction can't double-count them.
 
 ---
 
@@ -323,33 +319,15 @@ let (runtime, guard) = TracedRuntime::builder()
 
 ### Mode handling
 
-`RotatingWriter` carries a phantom `Mode` typestate: `RotatingWriter<Disk>` (default) or `RotatingWriter<Memory>`.
+`RotatingWriter<Mode = Disk>` phantom typestate. `Disk` and `Memory` marker types implement a sealed `WriterMode` trait. Constructors split: `new`, `single_file`, `builder` return `RotatingWriter<Disk>`; `new_in_memory` and `in_memory_builder` return `RotatingWriter<Memory>`.
 
-```rust
-pub struct RotatingWriter<Mode = Disk> { /* ... */ }
-pub trait WriterMode: sealed::Sealed {}
-pub struct Disk;
-pub struct Memory;
-impl WriterMode for Disk {}
-impl WriterMode for Memory {}
-```
-
-Constructors split:
-
-- `new`, `single_file`, `builder` return `RotatingWriter<Disk>`.
-- `new_in_memory` returns `RotatingWriter<Memory>`.
-
-Builder constraint:
-
-- `HasTracePath::build_and_start(rt, w: RotatingWriter<Disk>)`. Memory writer here is a compile error.
-- `NoTracePath::build_and_start(rt, w: RotatingWriter<Memory>)`. Memory-mode entry point.
-- `NoTracePath::build_and_start_with_writer(rt, w: impl TraceWriter)` keeps the generic path for `NullWriter`, custom writers and test doubles. Small breaking change: `NullWriter` / test-double callers that previously invoked `build_and_start` migrate to `build_and_start_with_writer`.
-
-`Mode` is `PhantomData` at runtime. Storage is mode-agnostic: the writer holds `Arc<Fs>` regardless, the phantom only drives the compile-time builder constraints above. A `tracks_closed_files: bool` field controls whether the writer runs `evict_oldest` after rotation (disk only). `finalize` unconditionally calls `Fs::mark_writer_done`, whose `Disk` arm is a no-op so disk mode pays nothing.
+`build_and_start` is generic over the writer's `Mode`, so a memory writer goes through the same call site as a disk one. No opt-in verb. Mode flows: writer arg → builder Mode → `PipelineBuilder<Mode>` → `.write_back()` gate. Storage is mode-agnostic: the writer holds `Arc<Fs>` either way. The phantom only drives compile-time gating.
 
 #### Preventing misuse
 
-Pipeline mode is also enforced at compile time via `PipelineBuilder<DiskReq = NoDiskRequired>`. `.write_back()` transitions to `PipelineBuilder<RequiresDisk>`. Memory-writer entry points constrain `DiskReq = NoDiskRequired`, so attaching `WriteBackProcessor` to a memory writer is a compile error. User-supplied processors that need disk backing opt in via a `DiskBoundProcessor` marker trait and use `pipe_disk_bound(p)` instead of `pipe(p)`.
+`PipelineBuilder<Mode>` carries the same phantom typestate as the writer, with `.write_back()` defined only on `PipelineBuilder<Disk>`. `with_custom_pipeline` takes a fresh `Mode` parameter that the closure body (via `.write_back()`) or the writer arg at `build_and_start` unifies. Pairing `.write_back()` with a memory writer is a compile error via that unification.
+
+Out of scope: catching `WriteBackProcessor` added via `.pipe(WriteBackProcessor)` (bypasses the gated `.write_back()` verb), or "memory writer with no delivery processor" (silent eviction). Both are user-error situations rcoh's posture accepts; surfacing them at compile time would mean a `DeliveryProcessor` typestate or marker-trait scheme that adds more friction than it pays for at this stage.
 
 ### `InMemoryWriter::new_in_memory` defaults
 
@@ -362,9 +340,9 @@ Pipeline mode is also enforced at compile time via `PipelineBuilder<DiskReq = No
 
 ### Rejected alternatives
 
-- **`take_pending_receiver` on `TraceWriter` plus writer-held `pending_receiver: Option<ChannelReceiver>`.** Trait method overridden only on `RotatingWriter` plus a writer field drained once at build time. `MemFs` owns the channel and the builder hands the worker the concrete `Arc<MemFs>` directly.
-- **`MemoryPipeline { writer, receiver }` newtype.** Same problem: an extra public type users carry around for a transient setup step.
-- **`builder.with_memory_writer(seg, total)` high-level method.** Loses writer-level config knobs (`rotation_period` etc.) at the builder level or forces per-knob builder methods.
+- **`take_pending_receiver` on `TraceWriter` plus writer-held channel.** Pollutes the trait. `MemFs` owns the channel, builder reaches it via `Arc<Fs>`.
+- **`MemoryPipeline { writer, receiver }` newtype.** Extra public type users carry through setup.
+- **`builder.with_memory_writer(seg, total)` high-level method.** Loses writer-level config knobs (`rotation_period`, metadata) or forces per-knob builder methods.
 
 ---
 
@@ -378,13 +356,13 @@ Graceful shutdown for memory mode mirrors disk:
 
 Disk follows the same steps without `writer_done`. The worker's stop-token plus the drain-until-empty loop handles shutdown.
 
-**Ordering invariant:** Three sync points, the final segment is always delivered before the worker exits:
+**Ordering invariant.** Final segment always delivered before worker exits:
 
-1. **Writer seal:** `MemFs::seal` takes the channel mutex, pushes back, and evicts oldest until under budget. Mutex acquire+release establishes Acquire/Release on the queue state. Eviction only displaces stale entries and does not gate the just-pushed segment.
-2. **Writer mark-done:** after the final `seal`, `RotatingWriter::finalize` calls `Fs::mark_writer_done`. On `MemFs` this does `writer_done.store(true, Release)` then `notify_one`.
-3. **Worker observe + re-drain:** the memory arm of `wait_for_more` does `writer_done.load(Acquire)`. Once it observes `true` the worker exits the wait and the run loop drains in a loop, calling `take_files` until the ring is empty. Each `pop_front` runs under the channel mutex (Acquire-on-lock). Every queued segment is consumed because the drain loop does not stop until `take_files` reports empty, and the final pushed segment is visible because the write to `writer_done` (Release) synchronizes-with the load (Acquire) and the queue push happens-before the `mark_done` store on the writer thread.
+1. **Seal.** `MemFs::seal` pushes under the channel mutex, then evicts oldest until under budget. Eviction displaces stale entries, never the just-pushed one.
+2. **Mark done.** `finalize` calls `mark_writer_done`: `writer_done.store(true, Release)` then `notify_one`.
+3. **Observe + drain.** `wait_for_more` does `writer_done.load(Acquire)`; on `true`, the run loop calls `take_files` until empty. Queue push happens-before the `mark_done` store, which synchronizes-with the worker's `Acquire` load, so the final segment is visible.
 
-Lost-wakeup avoidance is handled by the standard `notified() / enable() / re-check writer_done / await` pattern in the memory arm of `wait_for_more`. The future is registered before the second `writer_done` load so any `notify_one` that fires between the first load and the await becomes the permit the await consumes.
+Lost-wakeup avoided via the standard `notified() / enable() / re-check / await` pattern: the future is registered before the second `writer_done` load, so any `notify_one` between the two loads becomes the permit the await consumes.
 
 ---
 
@@ -396,7 +374,7 @@ Reuse the patterns from the disk path. The headline change is that **`RotatingWr
 
 **Integration.** Memory `RotatingWriter` paired with a test `SegmentProcessor` that captures `SegmentData`. Run a workload, confirm bytes decode and event counts match. S3 integration against `s3s` (already used by the disk-path S3 tests).
 
-**Stress + Shuttle.** High segment-emission rate against a slow downstream processor: verify drop-oldest fires, counters increment, writer never blocks. Shuttle scenarios: concurrent seal-eviction and worker-pop under the channel mutex, shutdown race on `writer_done`, eviction-under-contention accounting (no underflow).
+**Stress + Shuttle.** High segment-emission rate against a slow downstream processor: verify drop-oldest fires, counters increment, writer never blocks. Shuttle covers the atomics + queue handoff: handoff/no-loss, shutdown race on `writer_done`, byte-budget eviction accounting, no-underflow. The `Notify` lost-wakeup path in `wait_for_more` isn't shuttle-modeled (no tokio runtime under shuttle); a separate tokio test covers it.
 
 ### Memory regression tests
 
@@ -417,9 +395,3 @@ Memory mode keeps bytes in process heap that disk kept on disk. Regressions are 
 - `SegmentsDispatched`: segments handed into the pipeline this cycle.
 
 Fires every cycle, drained-empty included, so a stuck pipeline shows climbing `InFlightBytes` with `SegmentsDispatched == 0`.
-
----
-
-## 7. Open questions
-
-**Adaptive sizing:** The current design takes a static `max_total_size`. We could measure ring depth and let the writer grow/shrink within a configured range, similar to how some allocators auto-tune their arenas. Container users could benefit from reading cgroup `memory.max` / `memory.high` as an outer cap. Initially keeping it out of scope for v1 or at least until implementation testing shows workload data. The metrics catalog (`MemoryQueuedSegments`, `MemoryQueuedBytes`, `InFlightBytes`, `SegmentsEvicted`) covers the internal inputs we'd need.
