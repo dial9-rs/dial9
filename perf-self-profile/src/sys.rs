@@ -3,6 +3,8 @@ mod linux;
 #[cfg(target_os = "linux")]
 pub(crate) use linux::fp_profiler;
 #[cfg(target_os = "linux")]
+pub(crate) use linux::offline_symbolize::SymbolizeContainers;
+#[cfg(target_os = "linux")]
 pub(crate) use linux::offline_symbolize::write_symbol_data;
 #[cfg(target_os = "linux")]
 pub(crate) use linux::symbolize_one_shot;

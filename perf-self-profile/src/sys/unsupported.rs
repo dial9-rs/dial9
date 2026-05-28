@@ -49,7 +49,7 @@ impl PerfSampler {
 
 pub(crate) fn symbolize_one_shot(
     _decoder: dial9_trace_format::decoder::Decoder<'_>,
-    _addresses: &std::collections::HashSet<u64>,
+    _addresses: &dial9_trace_format::encoder::FxHashSet<u64>,
     _maps: &[crate::MapsEntry],
     _output: &mut impl std::io::Write,
 ) -> std::io::Result<()> {

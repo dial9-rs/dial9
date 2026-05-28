@@ -7,9 +7,9 @@
 
 use dial9_trace_format::{
     decoder::{Decoder, StackPool},
+    encoder::FxHashSet,
     types::{FieldValueRef, InternedString},
 };
-use std::collections::HashSet;
 use std::io::{self, Write};
 
 use crate::MapsEntry;
@@ -53,7 +53,7 @@ pub fn symbolize_trace_with_maps(
     maps: &[MapsEntry],
     output: &mut impl Write,
 ) -> io::Result<()> {
-    let mut addresses: HashSet<u64> = HashSet::new();
+    let mut addresses: FxHashSet<u64> = FxHashSet::default();
 
     let mut decoder = Decoder::new(input)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid trace header"))?;
@@ -74,7 +74,7 @@ pub fn symbolize_trace_with_maps(
 fn collect_stack_frame_addresses(
     values: &[FieldValueRef<'_>],
     stack_pool: &StackPool,
-    addresses: &mut HashSet<u64>,
+    addresses: &mut FxHashSet<u64>,
 ) {
     for field in values {
         match field {
@@ -182,6 +182,18 @@ impl OfflineSymbolizer {
     pub fn symbolizer_constructions(&self) -> u64 {
         self.inner.symbolizer_constructions()
     }
+
+    /// Number of times this `OfflineSymbolizer`'s worker thread has
+    /// constructed its [`SymbolizeState`] (reusable containers).
+    ///
+    /// Should be `0` before the first [`symbolize`](Self::symbolize) call
+    /// and `1` for every call thereafter. Tests use this to assert that
+    /// containers are reused across segments.
+    ///
+    /// On non-Linux platforms this always returns `0`.
+    pub fn state_constructions(&self) -> u64 {
+        self.inner.state_constructions()
+    }
 }
 
 impl Default for OfflineSymbolizer {
@@ -200,7 +212,7 @@ impl std::fmt::Debug for OfflineSymbolizer {
 
 #[cfg(target_os = "linux")]
 mod imp {
-    use super::{HashSet, MapsEntry, collect_stack_frame_addresses};
+    use super::{FxHashSet, MapsEntry, collect_stack_frame_addresses};
     use crate::rate_limit::rate_limited;
     use dial9_trace_format::decoder::Decoder;
     use std::io;
@@ -209,6 +221,31 @@ mod imp {
     use std::sync::{Arc, Mutex, mpsc};
     use std::thread::JoinHandle;
     use std::time::Duration;
+
+    /// Reusable state for the symbolize worker thread, avoiding per-segment
+    /// allocations. Containers are `.clear()`ed between requests but retain
+    /// their capacity.
+    struct SymbolizeState {
+        addresses: FxHashSet<u64>,
+        output: Vec<u8>,
+        containers: crate::sys::SymbolizeContainers,
+    }
+
+    impl SymbolizeState {
+        fn new() -> Self {
+            Self {
+                addresses: FxHashSet::default(),
+                output: Vec::new(),
+                containers: crate::sys::SymbolizeContainers::new(),
+            }
+        }
+
+        fn clear(&mut self) {
+            self.addresses.clear();
+            self.output.clear();
+            self.containers.clear();
+        }
+    }
 
     /// Work item submitted to the symbolizer thread.
     struct Request {
@@ -242,6 +279,7 @@ mod imp {
     pub(super) struct OfflineSymbolizerImpl {
         state: Mutex<Option<ThreadState>>,
         symbolizer_constructions: Arc<AtomicU64>,
+        state_constructions: Arc<AtomicU64>,
     }
 
     impl OfflineSymbolizerImpl {
@@ -249,6 +287,7 @@ mod imp {
             Self {
                 state: Mutex::new(None),
                 symbolizer_constructions: Arc::new(AtomicU64::new(0)),
+                state_constructions: Arc::new(AtomicU64::new(0)),
             }
         }
 
@@ -261,9 +300,10 @@ mod imp {
             }
             let (tx, rx) = mpsc::channel::<Request>();
             let counter = Arc::clone(&self.symbolizer_constructions);
+            let state_counter = Arc::clone(&self.state_constructions);
             let join = std::thread::Builder::new()
                 .name("dial9-symbolizer".to_string())
-                .spawn(move || worker_loop(rx, counter))
+                .spawn(move || worker_loop(rx, counter, state_counter))
                 .map_err(|e| {
                     io::Error::other(format!("failed to spawn dial9-symbolizer thread: {e}"))
                 })?;
@@ -295,6 +335,10 @@ mod imp {
         pub(super) fn symbolizer_constructions(&self) -> u64 {
             self.symbolizer_constructions.load(Ordering::Relaxed)
         }
+
+        pub(super) fn state_constructions(&self) -> u64 {
+            self.state_constructions.load(Ordering::Relaxed)
+        }
     }
 
     impl Drop for OfflineSymbolizerImpl {
@@ -309,10 +353,16 @@ mod imp {
         }
     }
 
-    fn worker_loop(rx: mpsc::Receiver<Request>, constructions: Arc<AtomicU64>) {
+    fn worker_loop(
+        rx: mpsc::Receiver<Request>,
+        constructions: Arc<AtomicU64>,
+        state_constructions: Arc<AtomicU64>,
+    ) {
         // Lazy: only construct the Symbolizer when we receive the first
         // request, so the cost is paid on first segment, not on creation.
         let mut symbolizer: Option<blazesym::symbolize::Symbolizer> = None;
+        let mut state = SymbolizeState::new();
+        state_constructions.fetch_add(1, Ordering::Relaxed);
 
         while let Ok(req) = rx.recv() {
             let sym = symbolizer.get_or_insert_with(|| {
@@ -320,7 +370,7 @@ mod imp {
                 blazesym::symbolize::Symbolizer::new()
             });
             let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
-                run_symbolize(&req.input, &req.maps, sym)
+                run_symbolize(&req.input, &req.maps, sym, &mut state)
             }));
             let result = match result {
                 Ok(r) => r,
@@ -346,25 +396,32 @@ mod imp {
         input: &[u8],
         maps: &[MapsEntry],
         symbolizer: &blazesym::symbolize::Symbolizer,
+        state: &mut SymbolizeState,
     ) -> io::Result<Vec<u8>> {
-        let mut addresses: HashSet<u64> = HashSet::new();
+        state.clear();
 
         let mut decoder = Decoder::new(input)
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid trace header"))?;
 
         decoder
             .for_each_event(|event| {
-                collect_stack_frame_addresses(event.fields, event.stack_pool, &mut addresses);
+                collect_stack_frame_addresses(event.fields, event.stack_pool, &mut state.addresses);
             })
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
 
-        let mut output: Vec<u8> = Vec::new();
-        if addresses.is_empty() {
-            return Ok(output);
+        if state.addresses.is_empty() {
+            return Ok(std::mem::take(&mut state.output));
         }
 
-        crate::sys::write_symbol_data(decoder, &addresses, maps, symbolizer, &mut output)?;
-        Ok(output)
+        crate::sys::write_symbol_data(
+            decoder,
+            &state.addresses,
+            maps,
+            symbolizer,
+            &mut state.containers,
+            &mut state.output,
+        )?;
+        Ok(std::mem::take(&mut state.output))
     }
 
     fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
@@ -398,6 +455,10 @@ mod imp {
         }
 
         pub(super) fn symbolizer_constructions(&self) -> u64 {
+            0
+        }
+
+        pub(super) fn state_constructions(&self) -> u64 {
             0
         }
     }
@@ -555,6 +616,45 @@ mod tests {
             symbolizer.symbolizer_constructions(),
             1,
             "OfflineSymbolizer must construct exactly one blazesym::Symbolizer",
+        );
+    }
+
+    /// The [`OfflineSymbolizer`] must reuse its internal `SymbolizeState`
+    /// (address set, output buffer, containers) across segments rather than
+    /// allocating fresh containers per call.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn offline_symbolizer_reuses_state_across_segments() {
+        let addr = offline_symbolizer_reuses_state_across_segments as *const () as u64;
+        let raw_maps = crate::read_proc_maps();
+
+        let mut segs: Vec<Vec<u8>> = Vec::with_capacity(3);
+        for _ in 0..3 {
+            let mut enc = Encoder::new();
+            let schema = enc
+                .register_schema("Ev", vec![FieldDef::new("frames", FieldType::StackFrames)])
+                .unwrap();
+            enc.write_event(
+                &schema,
+                &[
+                    FieldValue::Varint(0),
+                    FieldValue::StackFrames(vec![addr].into()),
+                ],
+            )
+            .unwrap();
+            segs.push(enc.finish());
+        }
+
+        let symbolizer = OfflineSymbolizer::new();
+        assert_eq!(symbolizer.state_constructions(), 0);
+        for seg in &segs {
+            let out = symbolizer.symbolize(seg, &raw_maps).unwrap();
+            assert!(!out.is_empty());
+        }
+        assert_eq!(
+            symbolizer.state_constructions(),
+            1,
+            "SymbolizeState must be constructed exactly once and reused",
         );
     }
 }

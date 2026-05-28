@@ -11,7 +11,7 @@ use crate::types::{
     CountingWriter, EncodeState, EventEncoder, InternedStackFrames, InternedString,
 };
 use std::any::TypeId;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::{BuildHasherDefault, Hasher};
 use std::io::{self, Write};
 use std::sync::Arc;
@@ -88,6 +88,8 @@ impl Hasher for FxHasher {
 pub type FxBuildHasher = BuildHasherDefault<FxHasher>;
 #[doc(hidden)]
 pub type FxHashMap<K, V> = HashMap<K, V, FxBuildHasher>;
+#[doc(hidden)]
+pub type FxHashSet<T> = HashSet<T, FxBuildHasher>;
 
 /// A schema handle returned by [`Encoder::register_schema`] or created via
 /// [`Schema::new`].
