@@ -78,3 +78,39 @@ jobs:
             --threshold-test percentage
             --threshold-max-sample-size 1
             --threshold-upper-boundary 0.05
+
+  # Peak-heap baseline for the writer + worker pipeline (disk/mem, with/without
+  # cpu-profiling). Uploads to Bencher for tracking
+  heap-baseline:
+    name: heap-baseline
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      RUST_BACKTRACE: 1
+      BENCHER_PROJECT: ${{ vars.BENCHER_PROJECT }}
+      RUSTFLAGS: '--cfg tokio_unstable'
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+
+      - name: Allow perf_event_open
+        run: sudo sysctl -w kernel.perf_event_paranoid=1
+
+      - uses: bencherdev/bencher@fa25a72c516046b4c0e31659bef70c5266b0f94d # v0.6.4
+
+      - name: Build heap bench
+        run: cargo bench --bench pipeline_heap_bench --features cpu-profiling --no-run
+
+      - name: Run heap bench and upload to Bencher (tracking only)
+        run: |
+          set -euo pipefail
+          cargo bench --bench pipeline_heap_bench --features cpu-profiling -- --bmf > heap.json
+          bencher run \
+            --token '${{ secrets.BENCHER_API_TOKEN }}' \
+            --branch '${{ github.event.inputs.bencher_branch != '' && github.event.inputs.bencher_branch || github.ref_name }}' \
+            --testbed ubuntu-latest \
+            --adapter json \
+            --file heap.json

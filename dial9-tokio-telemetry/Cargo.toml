@@ -162,6 +162,11 @@ name = "memory_profiling_bench"
 harness = false
 required-features = ["memory-profiling"]
 
+[[bench]]
+name = "pipeline_heap_bench"
+harness = false
+required-features = ["cpu-profiling"]
+
 [[example]]
 name = "blocking_pool_tracking"
 required-features = ["cpu-profiling"]
