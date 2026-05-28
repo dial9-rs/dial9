@@ -110,6 +110,8 @@ const WORKLOAD_SECS: u64 = 10;
 const TOTAL_BUDGET: u64 = 16 * 1024 * 1024;
 const SEGMENT_SIZE: u64 = 512 * 1024;
 const WORKER_THREADS: usize = 4;
+/// Short rotation so the workload exercises rotation + ring-handoff.
+const ROTATION_PERIOD: Duration = Duration::from_secs(3);
 
 async fn workload(handle: TelemetryHandle, tasks_done: Arc<AtomicU64>) {
     let stop_at = Instant::now() + Duration::from_secs(WORKLOAD_SECS);
@@ -199,9 +201,13 @@ fn measure(mode: Mode) -> Sample {
             Mode::Disk => {
                 let tmp = tempfile::tempdir().unwrap();
                 let trace_path = tmp.path().join("trace.bin");
-                let writer =
-                    RotatingWriter::new(trace_path.to_str().unwrap(), SEGMENT_SIZE, TOTAL_BUDGET)
-                        .unwrap();
+                let writer = RotatingWriter::builder()
+                    .base_path(trace_path.to_str().unwrap())
+                    .max_file_size(SEGMENT_SIZE)
+                    .max_total_size(TOTAL_BUDGET)
+                    .rotation_period(ROTATION_PERIOD)
+                    .build()
+                    .unwrap();
                 let r = TracedRuntime::builder()
                     .with_task_tracking(true)
                     .with_trace_path(&trace_path)
@@ -216,9 +222,13 @@ fn measure(mode: Mode) -> Sample {
             Mode::DiskCpu => {
                 let tmp = tempfile::tempdir().unwrap();
                 let trace_path = tmp.path().join("trace.bin");
-                let writer =
-                    RotatingWriter::new(trace_path.to_str().unwrap(), SEGMENT_SIZE, TOTAL_BUDGET)
-                        .unwrap();
+                let writer = RotatingWriter::builder()
+                    .base_path(trace_path.to_str().unwrap())
+                    .max_file_size(SEGMENT_SIZE)
+                    .max_total_size(TOTAL_BUDGET)
+                    .rotation_period(ROTATION_PERIOD)
+                    .build()
+                    .unwrap();
                 let r = TracedRuntime::builder()
                     .with_task_tracking(true)
                     .with_cpu_profiling(CpuProfilingConfig::default().frequency_hz(199))
@@ -233,6 +243,7 @@ fn measure(mode: Mode) -> Sample {
                 let writer = InMemoryWriter::in_memory_builder()
                     .max_total_size(TOTAL_BUDGET)
                     .max_segment_size(SEGMENT_SIZE)
+                    .rotation_period(ROTATION_PERIOD)
                     .build()
                     .expect("InMemoryWriter build");
                 TracedRuntime::builder()
@@ -245,6 +256,7 @@ fn measure(mode: Mode) -> Sample {
                 let writer = InMemoryWriter::in_memory_builder()
                     .max_total_size(TOTAL_BUDGET)
                     .max_segment_size(SEGMENT_SIZE)
+                    .rotation_period(ROTATION_PERIOD)
                     .build()
                     .expect("InMemoryWriter build");
                 TracedRuntime::builder()
@@ -308,9 +320,10 @@ fn print_table(rows: &[(Mode, Sample)]) {
     eprintln!();
     eprintln!("config: {WORKLOAD_TASKS} tasks × {WORKLOAD_SECS}s, {WORKER_THREADS} worker threads");
     eprintln!(
-        "        budget={} MiB total, {} KiB / segment",
+        "        budget={} MiB total, {} KiB / segment, rotation={}s",
         TOTAL_BUDGET / (1024 * 1024),
         SEGMENT_SIZE / 1024,
+        ROTATION_PERIOD.as_secs(),
     );
     eprintln!();
     eprintln!("note: 'baseline' is residual live bytes at the start of each per-mode");

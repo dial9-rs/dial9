@@ -26,6 +26,10 @@ use disk::DiskFs;
 pub(crate) use mem::MEMORY_RETRY_BUDGET;
 use mem::{MemActiveWriter, MemFs};
 
+/// Segments reserved outside the ring so `max_total_size` cap includes them.
+/// 1 active buffer + 1 in-flight segment.
+pub(crate) const PIPELINE_RESERVE_SEGMENTS: u64 = 2;
+
 /// Retained trace artifacts found at writer construction.
 #[derive(Debug, Default)]
 pub(crate) struct DiscoveredArtifacts {
@@ -219,13 +223,21 @@ impl Fs {
         Arc::new(Fs::Disk(DiskFs::from_base_path(base_path)))
     }
 
+    /// Ring budget = `max_total_size - PIPELINE_RESERVE_SEGMENTS * max_segment_size`.
     pub(crate) fn new_in_memory(
         max_total_size: u64,
-        segment_size_hint: u64,
+        max_segment_size: u64,
     ) -> io::Result<Arc<Self>> {
+        let reserve = PIPELINE_RESERVE_SEGMENTS.saturating_mul(max_segment_size);
+        let ring_budget = max_total_size.checked_sub(reserve).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "max_total_size below pipeline reserve",
+            )
+        })?;
         Ok(Arc::new(Fs::Mem(MemFs::with_capacity(
-            max_total_size,
-            segment_size_hint,
+            ring_budget,
+            max_segment_size,
         )?)))
     }
 

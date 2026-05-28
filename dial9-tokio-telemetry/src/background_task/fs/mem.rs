@@ -125,17 +125,12 @@ impl MemFs {
 
         let (evicted, first_idx, last_idx) = {
             let mut q = ch.queue.lock().unwrap();
-            q.segments.push_back(MemSealedSegment {
-                index,
-                bytes,
-                retry_count: 0,
-            });
-            q.bytes += size;
-            // Evict under the lock so worker pop can't race drop attribution.
+            // Evict-first under the lock: keeps `q.bytes <= max_total_size`
+            // at every observable moment, no transient overshoot.
             let mut evicted = 0u64;
             let mut first: Option<u32> = None;
             let mut last: Option<u32> = None;
-            while q.bytes > ch.max_total_size
+            while q.bytes + size > ch.max_total_size
                 && let Some(old) = q.segments.pop_front()
             {
                 q.bytes -= old.bytes.len() as u64;
@@ -144,6 +139,12 @@ impl MemFs {
                 last = Some(old.index);
             }
             q.dropped += evicted;
+            q.segments.push_back(MemSealedSegment {
+                index,
+                bytes,
+                retry_count: 0,
+            });
+            q.bytes += size;
             (evicted, first, last)
         };
 

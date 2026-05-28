@@ -515,10 +515,18 @@ impl RotatingWriter<Memory> {
         if rotation_period == Duration::from_secs(0) {
             return Err(std::io::Error::other("Rotation period must not be zero"));
         }
-        if max_total_size < max_segment_size {
+        // The active buffer and the worker's in-flight segment live outside the ring, so the ring needs
+        // room for at least one sealed segment on top of that reserve.
+        let min_total = (crate::background_task::fs::PIPELINE_RESERVE_SEGMENTS + 1)
+            .saturating_mul(max_segment_size);
+        if max_total_size < min_total {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
-                "max_total_size must be >= max_segment_size",
+                format!(
+                    "max_total_size ({max_total_size}) must be >= {min_total} \
+                     ({} × max_segment_size: 1 active + 1 in-flight + 1 ring slot)",
+                    crate::background_task::fs::PIPELINE_RESERVE_SEGMENTS + 1
+                ),
             ));
         }
         let fs = Fs::new_in_memory(max_total_size, max_segment_size)?;
