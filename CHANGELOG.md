@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.12](https://github.com/dial9-rs/dial9/compare/dial9-tokio-telemetry-v0.3.11...dial9-tokio-telemetry-v0.3.12) - 2026-05-28
+
+### Added
+
+- emit MemoryProfileOverflowEvent on ring buffer overflow ([#459](https://github.com/dial9-rs/dial9/pull/459))
+- *(tokio-telemetry)* add Deserialize to built-in event structs ([#451](https://github.com/dial9-rs/dial9/pull/451))
+- cpu profiler only mode ([#454](https://github.com/dial9-rs/dial9/pull/454))
+- Analysis toolkit for memory profiling [stacked] ([#443](https://github.com/dial9-rs/dial9/pull/443))
+- add `Dial9Allocator`, a profiling allocator that feeds events into dial9 traces ([#442](https://github.com/dial9-rs/dial9/pull/442))
+- *(viewer)* add heap flamegraph visualization ([#452](https://github.com/dial9-rs/dial9/pull/452))
+
+### Other
+
+- Add dial9.version ([#463](https://github.com/dial9-rs/dial9/pull/463))
+- Add setup diagnostic skill to toolkit ([#464](https://github.com/dial9-rs/dial9/pull/464))
+- make max_file_size optional ([#456](https://github.com/dial9-rs/dial9/pull/456))
+- Remove wallclock time for rotation ([#461](https://github.com/dial9-rs/dial9/pull/461))
+- *(README)* add memory profiling section, fix cpu-profiling feature name ([#458](https://github.com/dial9-rs/dial9/pull/458))
+- add Deserialize impl for dial9-trace-format ([#447](https://github.com/dial9-rs/dial9/pull/447))
+- rename tab title to "dial9 Trace Viewer" ([#466](https://github.com/dial9-rs/dial9/pull/466))
+- allow empty prefix when searching buckets ([#460](https://github.com/dial9-rs/dial9/pull/460))
+
 ## [0.3.11](https://github.com/dial9-rs/dial9/compare/dial9-tokio-telemetry-v0.3.10...dial9-tokio-telemetry-v0.3.11) - 2026-05-22
 
 ### Added
