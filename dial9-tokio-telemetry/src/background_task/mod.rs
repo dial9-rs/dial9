@@ -609,7 +609,7 @@ impl SegmentProcessor for SymbolizeProcessor {
             // thread and waits for the response).
             let result = tokio::task::spawn_blocking(move || {
                 let maps = dial9_perf_self_profile::read_proc_maps();
-                let output = symbolizer.symbolize(&input, &maps)?;
+                let output = symbolizer.symbolize_bytes(input.clone(), &maps)?;
                 // Hand back the original bytes plus the symbol output as two
                 // chunks — no copy of `input`.
                 let mut combined = Payload::new();

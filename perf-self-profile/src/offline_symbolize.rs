@@ -170,6 +170,16 @@ impl OfflineSymbolizer {
         self.inner.symbolize(input, maps)
     }
 
+    /// Zero-copy variant of [`symbolize`](Self::symbolize) that accepts
+    /// a [`Bytes`](bytes::Bytes) directly, avoiding a per-segment copy
+    /// when the caller already holds reference-counted bytes (e.g. from
+    /// a [`Payload`]).
+    ///
+    /// On non-Linux platforms this returns `Ok(Vec::new())`.
+    pub fn symbolize_bytes(&self, input: bytes::Bytes, maps: &[MapsEntry]) -> io::Result<Vec<u8>> {
+        self.inner.symbolize_bytes(input, maps)
+    }
+
     /// Number of times this `OfflineSymbolizer`'s worker thread has
     /// constructed its underlying `blazesym::Symbolizer`.
     ///
@@ -249,7 +259,7 @@ mod imp {
 
     /// Work item submitted to the symbolizer thread.
     struct Request {
-        input: Vec<u8>,
+        input: bytes::Bytes,
         maps: Vec<MapsEntry>,
         respond_to: mpsc::SyncSender<io::Result<Vec<u8>>>,
     }
@@ -315,12 +325,20 @@ mod imp {
         }
 
         pub(super) fn symbolize(&self, input: &[u8], maps: &[MapsEntry]) -> io::Result<Vec<u8>> {
+            self.symbolize_bytes(bytes::Bytes::copy_from_slice(input), maps)
+        }
+
+        pub(super) fn symbolize_bytes(
+            &self,
+            input: bytes::Bytes,
+            maps: &[MapsEntry],
+        ) -> io::Result<Vec<u8>> {
             let sender = self.ensure_thread()?;
             // sync_channel(1) gives us a bounded response channel — we
             // never queue responses; one in flight at a time.
             let (resp_tx, resp_rx) = mpsc::sync_channel::<io::Result<Vec<u8>>>(1);
             let req = Request {
-                input: input.to_vec(),
+                input,
                 maps: maps.to_vec(),
                 respond_to: resp_tx,
             };
@@ -451,6 +469,14 @@ mod imp {
         }
 
         pub(super) fn symbolize(&self, _input: &[u8], _maps: &[MapsEntry]) -> io::Result<Vec<u8>> {
+            Ok(Vec::new())
+        }
+
+        pub(super) fn symbolize_bytes(
+            &self,
+            _input: bytes::Bytes,
+            _maps: &[MapsEntry],
+        ) -> io::Result<Vec<u8>> {
             Ok(Vec::new())
         }
 
@@ -656,5 +682,38 @@ mod tests {
             1,
             "SymbolizeState must be constructed exactly once and reused",
         );
+    }
+
+    /// [`OfflineSymbolizer::symbolize_bytes`] produces the same output as
+    /// [`OfflineSymbolizer::symbolize`] but accepts `Bytes` directly,
+    /// avoiding a per-segment copy when the caller already holds
+    /// reference-counted bytes.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn symbolize_bytes_matches_symbolize_slice() {
+        let addr = symbolize_bytes_matches_symbolize_slice as *const () as u64;
+        let raw_maps = crate::read_proc_maps();
+
+        let mut enc = Encoder::new();
+        let schema = enc
+            .register_schema("Ev", vec![FieldDef::new("frames", FieldType::StackFrames)])
+            .unwrap();
+        enc.write_event(
+            &schema,
+            &[
+                FieldValue::Varint(0),
+                FieldValue::StackFrames(vec![addr].into()),
+            ],
+        )
+        .unwrap();
+        let buf = enc.finish();
+
+        let symbolizer = OfflineSymbolizer::new();
+        let out_slice = symbolizer.symbolize(&buf, &raw_maps).unwrap();
+        let out_bytes = symbolizer
+            .symbolize_bytes(bytes::Bytes::from(buf.clone()), &raw_maps)
+            .unwrap();
+        assert_eq!(out_slice, out_bytes);
+        assert!(!out_slice.is_empty());
     }
 }

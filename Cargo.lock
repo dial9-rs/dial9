@@ -1511,6 +1511,7 @@ name = "dial9-perf-self-profile"
 version = "0.4.3"
 dependencies = [
  "blazesym",
+ "bytes",
  "criterion",
  "crossbeam-utils",
  "dial9-trace-format",
