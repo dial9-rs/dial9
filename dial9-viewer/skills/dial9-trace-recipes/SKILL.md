@@ -591,3 +591,95 @@ for (const [taskId, bytes] of top) {
   footprint) requires pairing `Alloc` with `Free` events and only
   works when `MemoryProfilingConfig.track_liveset(true)` was set at
   install time.
+
+### Heap flamegraph: where are allocations happening and how big are they?
+
+Build a weighted flamegraph tree where each node accumulates estimated
+bytes and estimated allocation count. The ratio `bytes / allocs` gives
+the average allocation size for that call path — useful for finding
+code that makes many small allocations vs. few large ones.
+
+```javascript
+const { parseTrace, symbolizeChain, formatFrame } = require('./trace_parser.js');
+const { buildFlamegraphTree } = require('./trace_analysis.js');
+
+const R = 512 * 1024; // sample rate bytes
+
+for await (const trace of parseTrace('/path/to/traces/')) {
+  if (!trace.allocEvents || trace.allocEvents.length === 0) continue;
+
+  // Strip dial9 allocator hook frames (always the top 2 frames)
+  const HOOK_PATTERNS = [
+    'memory_profiling::hook::on_alloc',
+    'memory_profiling::allocator::Dial9Allocator',
+    '__rustc::__rust_alloc',
+    '__rustc::__rust_realloc',
+  ];
+  function stripHook(chain) {
+    let i = 0;
+    while (i < chain.length) {
+      const entry = trace.callframeSymbols.get(chain[i]);
+      const frames = Array.isArray(entry) ? entry : [entry];
+      const name = frames.map(f => f && f.symbol || '').join(' ');
+      if (HOOK_PATTERNS.some(p => name.includes(p))) { i++; continue; }
+      break;
+    }
+    return i > 0 ? chain.slice(i) : chain;
+  }
+
+  // Build weighted samples: weight = estimated bytes, allocWeight = estimated count
+  const samples = trace.allocEvents
+    .map(a => ({ ...a, callchain: stripHook(a.callchain) }))
+    .filter(a => a.callchain.length > 0)
+    .map(a => {
+      const s = a.size;
+      const invP = s <= 0 ? 1 : 1 / (1 - Math.exp(-s / R));
+      return { callchain: a.callchain, weight: s * invP, allocWeight: invP };
+    });
+
+  // buildFlamegraphTree accumulates weight into node.count and allocWeight into node.allocCount
+  const tree = buildFlamegraphTree(samples, trace.callframeSymbols);
+
+  // Walk the tree to find interesting nodes
+  function walk(node, depth) {
+    if (depth > 0 && node.allocCount > 0) {
+      const avgSize = node.count / node.allocCount;
+      const pct = (node.count / tree.count * 100).toFixed(1);
+      console.log(`${'  '.repeat(depth)}${node.name}: ~${(node.count/1024/1024).toFixed(1)} MiB (${pct}%), ~${Math.round(node.allocCount)} allocs, avg ${Math.round(avgSize)} B`);
+    }
+    for (const child of [...node.children.values()].sort((a, b) => b.count - a.count)) {
+      if (child.count / tree.count > 0.05) walk(child, depth + 1); // only >5%
+    }
+  }
+  walk(tree, 0);
+}
+```
+
+**Answering "how big are allocations in X?"**: Find the node for X in
+the tree and compute `node.count / node.allocCount`. This is the
+average allocation size for all code paths through that frame.
+
+**Answering "what's making lots of small allocations?"**: Sort nodes by
+`node.allocCount` descending and look for nodes where
+`node.count / node.allocCount` is small (e.g., < 1 KB). These are
+high-frequency small-allocation sites.
+
+```javascript
+// Find top allocation-count nodes with small avg size
+// (assumes `tree` from the snippet above { ... } )
+const nodes = [];
+function collect(node) {
+  if (node.allocCount > 0) nodes.push(node);
+  for (const child of node.children.values()) collect(child);
+}
+collect(tree);
+
+const smallAllocHotspots = nodes
+  .filter(n => n.allocCount > 10 && n.count / n.allocCount < 1024)
+  .sort((a, b) => b.allocCount - a.allocCount)
+  .slice(0, 10);
+
+for (const n of smallAllocHotspots) {
+  console.log(`${n.name}: ~${Math.round(n.allocCount)} allocs, avg ${Math.round(n.count / n.allocCount)} B`);
+}
+```

@@ -481,7 +481,7 @@
           h += '<br><span style="color:#888">' + locShort + '</span>';
         }
       }
-      h += '<br>' + node.count + ' samples (' + pct + '%) \u00b7 ' + node.self + ' self (' + selfPct + '%)';
+      h += '<br>' + (formatCount ? formatCount(node.count, total, node.self, tn) : node.count + ' samples (' + pct + '%) \u00b7 ' + node.self + ' self (' + selfPct + '%)');
       if (pinned && tn.docsUrl) {
         h += '<br><a href="' + tn.docsUrl + '" target="_blank" rel="noopener" style="color:#6c63ff;text-decoration:underline">docs.rs \u2197</a>';
       } else if (tn.docsUrl) {
@@ -682,18 +682,25 @@
       offworkerZoomStack = [];
 
       workerLabel.textContent =
-        `Worker threads \u2014 ${workerSamples.length} samples`;
+        `${workerLabelPrefix} \u2014 ${workerSamples.length} samples`;
       offworkerLabel.textContent =
-        `Off-worker (sampler thread) \u2014 ${offworkerSamples.length} samples`;
+        `${offworkerLabelPrefix} \u2014 ${offworkerSamples.length} samples`;
 
       renderAll();
     }
 
     spawnFilter.addEventListener("change", applySpawnFilter);
 
-    function setData(samples, callframeSymbols) {
+    let workerLabelPrefix = "Worker threads";
+    let offworkerLabelPrefix = "Off-worker (sampler thread)";
+    let formatCount = null;
+
+    function setData(samples, callframeSymbols, opts) {
       allSamples = samples;
       currentSymbols = callframeSymbols;
+      formatCount = (opts && opts.formatCount) || null;
+      workerLabelPrefix = (opts && opts.workerLabel) || "Worker threads";
+      offworkerLabelPrefix = (opts && opts.offworkerLabel) || "Off-worker (sampler thread)";
 
       // Build spawn location dropdown
       const locCounts = new Map();

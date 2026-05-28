@@ -511,9 +511,12 @@
   function buildFlamegraphTree(samples, callframeSymbols) {
     const root = { name: "(all)", children: new Map(), count: 0, self: 0 };
     for (const s of samples) {
+      const w = s.weight != null ? s.weight : 1;
+      const aw = s.allocWeight;
       const chain = s.callchain.slice().reverse();
       let node = root;
-      node.count++;
+      node.count += w;
+      if (aw != null) node.allocCount = (node.allocCount || 0) + aw;
       for (const addr of chain) {
         const entry = callframeSymbols.get(addr);
         // Expand inlined frames. Per blazesym, an array entry is ordered
@@ -541,10 +544,12 @@
             });
           }
           node = node.children.get(key);
-          node.count++;
+          node.count += w;
+          if (aw != null) node.allocCount = (node.allocCount || 0) + aw;
         }
       }
-      node.self++;
+      node.self += w;
+      if (aw != null) node.selfAllocCount = (node.selfAllocCount || 0) + aw;
     }
     return root;
   }
