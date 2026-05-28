@@ -205,9 +205,8 @@ mod imp {
     use dial9_trace_format::decoder::Decoder;
     use std::io;
     use std::panic::AssertUnwindSafe;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
-    use std::sync::mpsc;
+    use std::sync::{Arc, Mutex, mpsc};
     use std::thread::JoinHandle;
     use std::time::Duration;
 
@@ -218,43 +217,74 @@ mod imp {
         respond_to: mpsc::SyncSender<io::Result<Vec<u8>>>,
     }
 
+    /// Live thread state: channel handle and join handle. Held inside
+    /// a `Mutex<Option<_>>` so the thread can be spawned lazily on the
+    /// first `symbolize()` call.
+    struct ThreadState {
+        sender: mpsc::Sender<Request>,
+        join: JoinHandle<()>,
+    }
+
     /// Linux implementation: dedicated thread with one long-lived
-    /// `blazesym::Symbolizer`.
+    /// `blazesym::Symbolizer`. The thread is spawned **lazily** on the
+    /// first call to [`symbolize`](Self::symbolize), not in
+    /// [`new`](Self::new).
+    ///
+    /// This matters for CPU profiling: dial9 (and the underlying
+    /// `perf_event_open`) only samples threads that descend from a
+    /// thread which already has a tracked perf fd open. The runtime's
+    /// `dial9-worker` thread is the one that calls `process()` on us;
+    /// by deferring the spawn until that first call, the symbolizer
+    /// thread becomes a child of `dial9-worker` and inherits its perf
+    /// events. If we spawned in `new()`, the symbolizer thread would
+    /// be a sibling of `dial9-worker` and CPU samples from it would
+    /// never appear in the trace.
     pub(super) struct OfflineSymbolizerImpl {
-        sender: Option<mpsc::Sender<Request>>,
-        join: Option<JoinHandle<()>>,
+        state: Mutex<Option<ThreadState>>,
         symbolizer_constructions: Arc<AtomicU64>,
     }
 
     impl OfflineSymbolizerImpl {
         pub(super) fn new() -> Self {
-            let (tx, rx) = mpsc::channel::<Request>();
-            let symbolizer_constructions = Arc::new(AtomicU64::new(0));
-            let counter = Arc::clone(&symbolizer_constructions);
-            let join = std::thread::Builder::new()
-                .name("dial9-symbolizer".to_string())
-                .spawn(move || worker_loop(rx, counter))
-                .expect("failed to spawn dial9-symbolizer thread");
             Self {
-                sender: Some(tx),
-                join: Some(join),
-                symbolizer_constructions,
+                state: Mutex::new(None),
+                symbolizer_constructions: Arc::new(AtomicU64::new(0)),
             }
         }
 
+        /// Lazily spawn the worker thread on first use. Subsequent calls
+        /// reuse the same thread.
+        fn ensure_thread(&self) -> io::Result<mpsc::Sender<Request>> {
+            let mut guard = self.state.lock().unwrap();
+            if let Some(state) = guard.as_ref() {
+                return Ok(state.sender.clone());
+            }
+            let (tx, rx) = mpsc::channel::<Request>();
+            let counter = Arc::clone(&self.symbolizer_constructions);
+            let join = std::thread::Builder::new()
+                .name("dial9-symbolizer".to_string())
+                .spawn(move || worker_loop(rx, counter))
+                .map_err(|e| {
+                    io::Error::other(format!("failed to spawn dial9-symbolizer thread: {e}"))
+                })?;
+            *guard = Some(ThreadState {
+                sender: tx.clone(),
+                join,
+            });
+            Ok(tx)
+        }
+
         pub(super) fn symbolize(&self, input: &[u8], maps: &[MapsEntry]) -> io::Result<Vec<u8>> {
-            // sync_channel(0) gives us a rendezvous channel — the worker
-            // sends the result and we receive it; bounded so we don't
-            // accumulate stale responses if anything goes wrong.
+            let sender = self.ensure_thread()?;
+            // sync_channel(1) gives us a bounded response channel — we
+            // never queue responses; one in flight at a time.
             let (resp_tx, resp_rx) = mpsc::sync_channel::<io::Result<Vec<u8>>>(1);
             let req = Request {
                 input: input.to_vec(),
                 maps: maps.to_vec(),
                 respond_to: resp_tx,
             };
-            self.sender
-                .as_ref()
-                .expect("OfflineSymbolizer used after Drop")
+            sender
                 .send(req)
                 .map_err(|_| io::Error::other("symbolizer thread is no longer running"))?;
             resp_rx
@@ -270,9 +300,11 @@ mod imp {
     impl Drop for OfflineSymbolizerImpl {
         fn drop(&mut self) {
             // Closing the sender lets the worker loop exit on `recv()`.
-            self.sender.take();
-            if let Some(join) = self.join.take() {
-                let _ = join.join();
+            // If the thread was never spawned, there is nothing to do.
+            let state = self.state.lock().unwrap().take();
+            if let Some(state) = state {
+                drop(state.sender);
+                let _ = state.join.join();
             }
         }
     }
