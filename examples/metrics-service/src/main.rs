@@ -22,6 +22,9 @@ use tokio_util::sync::CancellationToken;
 
 use buffer::MetricsBuffer;
 use ddb::DdbClient;
+use metrique::local::{LocalFormat, OutputStyle};
+use metrique::writer::format::FormatExt;
+use metrique::writer::sink::FlushImmediatelyBuilder;
 
 #[global_allocator]
 static ALLOC: Dial9Allocator = Dial9Allocator::system();
@@ -105,6 +108,14 @@ struct Args {
         help = "Disable liveset tracking for leak detection (default: enabled)"
     )]
     no_track_liveset: bool,
+
+    #[arg(
+        long,
+        help = "Path to write pipeline metrics (Symbolize.Time, Gzip.Time, etc). \
+                When set, dial9 worker pipeline metrics are appended here in line-oriented format. \
+                Useful for measuring per-segment processor timings."
+    )]
+    worker_metrics_path: Option<std::path::PathBuf>,
 }
 
 #[derive(Clone)]
@@ -199,6 +210,21 @@ fn main() -> std::io::Result<()> {
         .with_trace_path(&args.trace_path)
         .with_task_tracking(true)
         .with_process_resource_usage(ProcessResourceUsageConfig::default());
+    let traced_builder = if let Some(path) = &args.worker_metrics_path {
+        // Open in append mode so multiple runs accumulate into the same
+        // file. Each segment processed by the dial9 background worker
+        // appends one line with PipelineMetrics including
+        // `Symbolize.Time`, `Gzip.Time`, `S3Upload.Time`, etc.
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)?;
+        let sink = FlushImmediatelyBuilder::new()
+            .build_boxed(LocalFormat::new(OutputStyle::Pretty).output_to(file));
+        traced_builder.with_worker_metrics_sink(sink)
+    } else {
+        traced_builder
+    };
     let traced_builder = if args.no_task_dumps {
         traced_builder
     } else {

@@ -2773,6 +2773,8 @@ dependencies = [
  "hyper 1.9.0",
  "hyper-util",
  "libc",
+ "metrique",
+ "metrique-writer",
  "reqwest",
  "serde",
  "serde_json",

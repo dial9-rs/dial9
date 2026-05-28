@@ -9,16 +9,31 @@ use super::USER_ADDR_LIMIT;
 use crate::MapsEntry;
 use crate::offline_symbolize::SymbolTableEntry;
 
-pub(crate) fn write_symbol_data(
+/// Construct a one-shot [`Symbolizer`] and run [`write_symbol_data`].
+///
+/// Used by [`crate::offline_symbolize::symbolize_trace_with_maps`], which
+/// is the legacy single-call API. Each call pays the full ELF/DWARF parse
+/// cost. Callers symbolizing many segments should prefer
+/// [`crate::offline_symbolize::OfflineSymbolizer`], which keeps a long-lived
+/// `Symbolizer` and amortises the cost across calls.
+pub(crate) fn symbolize_one_shot(
     decoder: Decoder<'_>,
     addresses: &HashSet<u64>,
     maps: &[MapsEntry],
     output: &mut impl Write,
 ) -> io::Result<()> {
-    let mut encoder = decoder.into_encoder(output);
-    // TODO: avoid recreating the Symbolizer here every time. This is a little non trivial because of threading issues and Symbolizer being !Send and !Sync.
-    // We need to basically have a background symbolization thread.
     let symbolizer = Symbolizer::new();
+    write_symbol_data(decoder, addresses, maps, &symbolizer, output)
+}
+
+pub(crate) fn write_symbol_data(
+    decoder: Decoder<'_>,
+    addresses: &HashSet<u64>,
+    maps: &[MapsEntry],
+    symbolizer: &Symbolizer,
+    output: &mut impl Write,
+) -> io::Result<()> {
+    let mut encoder = decoder.into_encoder(output);
 
     // Partition addresses into kernel vs userspace, group userspace by mapping.
     let mut kernel_addrs: Vec<u64> = Vec::new();

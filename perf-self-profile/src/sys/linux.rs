@@ -1,6 +1,6 @@
 mod ctimer_sampler;
 pub(crate) mod fp_profiler;
-mod offline_symbolize;
+pub(crate) mod offline_symbolize;
 mod perf_sampler;
 mod ring_buffer;
 mod sampler;
@@ -26,6 +26,6 @@ pub(crate) fn gettid() -> libc::pid_t {
 }
 
 pub use ctimer_sampler::is_ctimer_active;
-pub(crate) use offline_symbolize::write_symbol_data;
+pub(crate) use offline_symbolize::symbolize_one_shot;
 pub use sampler::PerfSampler;
 pub use symbolize::{resolve_symbol, resolve_symbol_with_maps, resolve_symbols_with_maps};

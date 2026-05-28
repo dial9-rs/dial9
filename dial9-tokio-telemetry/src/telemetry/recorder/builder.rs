@@ -588,7 +588,7 @@ pub(super) fn assemble_processors(
         PipelineConfig::Unset => {
             #[cfg(feature = "cpu-profiling")]
             if cpu_profiling_enabled {
-                processors.push(Box::new(crate::background_task::SymbolizeProcessor));
+                processors.push(Box::new(crate::background_task::SymbolizeProcessor::new()));
             }
             processors.push(Box::new(crate::background_task::GzipCompressor));
             if is_disk {
@@ -599,7 +599,7 @@ pub(super) fn assemble_processors(
         PipelineConfig::S3(uploader) => {
             #[cfg(feature = "cpu-profiling")]
             if cpu_profiling_enabled {
-                processors.push(Box::new(crate::background_task::SymbolizeProcessor));
+                processors.push(Box::new(crate::background_task::SymbolizeProcessor::new()));
             }
             processors.push(Box::new(crate::background_task::GzipCompressor));
             processors.push(Box::new(uploader));
