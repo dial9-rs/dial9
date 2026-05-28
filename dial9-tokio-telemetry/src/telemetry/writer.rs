@@ -138,14 +138,37 @@ impl<Mode: WriterMode, W: TraceWriter<Mode> + ?Sized> TraceWriter<Mode> for Box<
     }
 }
 
-#[derive(Default, Clone)]
+/// Segment-metadata key carrying the crates.io version of
+/// `dial9-tokio-telemetry`. Populated by default, any user-supplied entry with
+/// this key take precedence.
+const DIAL9_VERSION_KEY: &str = "dial9.dial9-tokio-telemetry.version";
+
+/// Compile-time value for `DIAL9_VERSION_KEY`.
+const DIAL9_VERSION_VALUE: &str = env!("CARGO_PKG_VERSION");
+
+#[derive(Clone)]
 struct SegmentMetadata {
     entries: Vec<(String, String)>,
 }
 
+impl Default for SegmentMetadata {
+    fn default() -> Self {
+        Self {
+            entries: vec![(
+                DIAL9_VERSION_KEY.to_string(),
+                DIAL9_VERSION_VALUE.to_string(),
+            )],
+        }
+    }
+}
+
 impl SegmentMetadata {
-    fn new(entries: Vec<(String, String)>) -> Self {
-        Self { entries }
+    /// Build segment metadata from user-supplied entries on top of the default
+    /// `dial9.dial9-tokio-telemetry.version` key. User entries with the same key override the default.
+    fn new(user_entries: Vec<(String, String)>) -> Self {
+        let mut s = Self::default();
+        s.merge(user_entries.into_iter());
+        s
     }
 
     /// Merge incoming entries with existing ones. Incoming entries take priority
@@ -1508,12 +1531,23 @@ mod tests {
             })
             .collect();
         assert_eq!(metadata.len(), 1);
-        assert_eq!(
-            metadata[0],
-            vec![
-                ("service".to_string(), "checkout-api".to_string()),
-                ("host".to_string(), "i-0abc123".to_string()),
-            ]
+        assert!(
+            metadata[0].contains(&("service".to_string(), "checkout-api".to_string())),
+            "missing service entry: {:?}",
+            metadata[0]
+        );
+        assert!(
+            metadata[0].contains(&("host".to_string(), "i-0abc123".to_string())),
+            "missing host entry: {:?}",
+            metadata[0]
+        );
+        assert!(
+            metadata[0].contains(&(
+                DIAL9_VERSION_KEY.to_string(),
+                DIAL9_VERSION_VALUE.to_string()
+            )),
+            "missing built-in dial9.dial9-tokio-telemetry.version: {:?}",
+            metadata[0]
         );
     }
 
@@ -1549,7 +1583,7 @@ mod tests {
             let all_events = format::decode_events(&std::fs::read(file).unwrap()).unwrap();
             let has_metadata = all_events.iter().any(|e| {
                 matches!(e, TelemetryEvent::SegmentMetadata { entries, .. }
-                    if *entries == vec![("k".to_string(), "v".to_string())])
+                    if entries.contains(&("k".to_string(), "v".to_string())))
             });
             assert!(has_metadata, "{}: expected SegmentMetadata", file.display());
         }
@@ -1635,7 +1669,8 @@ mod tests {
             .filter(|e| matches!(e, TelemetryEvent::WorkerPark { .. }))
             .count();
         assert_eq!(park_count, 1);
-        // Metadata should be present with empty entries
+        // Metadata should be present and carry only the built-in dial9.dial9-tokio-telemetry.version entry
+        // (no user-supplied entries via single_file()).
         let metadata: Vec<_> = all_events
             .iter()
             .filter_map(|e| match e {
@@ -1644,7 +1679,13 @@ mod tests {
             })
             .collect();
         assert_eq!(metadata.len(), 1);
-        assert!(metadata[0].is_empty());
+        assert_eq!(
+            metadata[0],
+            &vec![(
+                DIAL9_VERSION_KEY.to_string(),
+                DIAL9_VERSION_VALUE.to_string()
+            )]
+        );
     }
 
     /// When the background worker has renamed a sealed `.bin` to `.bin.gz`,
@@ -2317,6 +2358,76 @@ mod tests {
             metadata_count, 1,
             "identical update_segment_metadata should not trigger another write"
         );
+    }
+
+    /// The crates.io version of `dial9-tokio-telemetry` is embedded in every
+    /// segment's metadata under `dial9.dial9-tokio-telemetry.version`. Regression test for
+    /// https://github.com/dial9-rs/dial9/issues/423.
+    #[test]
+    fn test_dial9_version_in_segment_metadata() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("trace.bin");
+        let mut writer = RotatingWriter::single_file(&path).unwrap();
+        writer.write_encoded_batch(&test_batch()).unwrap();
+        writer.flush().unwrap();
+        writer.finalize().unwrap();
+
+        let sealed = dir.path().join("trace.0.bin");
+        let all = format::decode_events(&std::fs::read(&sealed).unwrap()).unwrap();
+        let version_entry = all.iter().find_map(|e| match e {
+            TelemetryEvent::SegmentMetadata { entries, .. } => entries
+                .iter()
+                .find(|(k, _)| k == DIAL9_VERSION_KEY)
+                .cloned(),
+            _ => None,
+        });
+        assert_eq!(
+            version_entry,
+            Some((
+                DIAL9_VERSION_KEY.to_string(),
+                env!("CARGO_PKG_VERSION").to_string()
+            )),
+            "expected dial9.dial9-tokio-telemetry.version entry matching CARGO_PKG_VERSION"
+        );
+    }
+
+    /// User-supplied `dial9.dial9-tokio-telemetry.version` entries win over the built-in default,
+    /// both at builder time and via `update_segment_metadata`.
+    #[test]
+    fn test_dial9_version_user_override_wins() {
+        let dir = TempDir::new().unwrap();
+        let base = dir.path().join("trace");
+        let mut writer = RotatingWriter::builder()
+            .base_path(&base)
+            .max_file_size(100_000)
+            .max_total_size(100_000)
+            .segment_metadata(vec![(DIAL9_VERSION_KEY.into(), "builder-override".into())])
+            .build()
+            .unwrap();
+        writer.write_encoded_batch(&test_batch()).unwrap();
+        writer.flush().unwrap();
+        // Rotate and then runtime-override on the next segment.
+        writer.rotate().unwrap();
+        writer.update_segment_metadata(vec![(DIAL9_VERSION_KEY.into(), "runtime-override".into())]);
+        writer.write_encoded_batch(&test_batch()).unwrap();
+        writer.flush().unwrap();
+        writer.finalize().unwrap();
+
+        let read_version = |idx: u32| -> String {
+            let all =
+                format::decode_events(&std::fs::read(rotating_file(&base, idx)).unwrap()).unwrap();
+            all.iter()
+                .find_map(|e| match e {
+                    TelemetryEvent::SegmentMetadata { entries, .. } => entries
+                        .iter()
+                        .find(|(k, _)| k == DIAL9_VERSION_KEY)
+                        .map(|(_, v)| v.clone()),
+                    _ => None,
+                })
+                .expect("expected dial9.dial9-tokio-telemetry.version entry")
+        };
+        assert_eq!(read_version(0), "builder-override");
+        assert_eq!(read_version(1), "runtime-override");
     }
 
     /// Regression test for https://github.com/dial9-rs/dial9/issues/386

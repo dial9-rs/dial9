@@ -4,9 +4,11 @@
 use crate::memory_profiling::ring::{RawAlloc, RawFree, RingBuffers};
 use crate::primitives::sync::Arc;
 use crate::telemetry::buffer::with_encoder;
-use crate::telemetry::format::{AllocEvent, FreeEvent};
+use crate::telemetry::events::clock_monotonic_ns;
+use crate::telemetry::format::{AllocEvent, FreeEvent, MemoryProfileOverflowEvent};
 use crate::telemetry::recorder::source::{FlushContext, Source};
 use std::collections::HashMap;
+use std::sync::atomic::Ordering;
 
 /// Liveset entry tracking a live sampled allocation, kept by the consolidator
 /// (flush thread). Only `size` and `timestamp_ns` are needed: both are
@@ -29,6 +31,10 @@ struct LivesetEntry {
 pub(crate) struct MemoryProfileSource {
     rings: Arc<RingBuffers>,
     liveset: Option<HashMap<u64, LivesetEntry>>,
+    /// Previous snapshot of `RingBuffers::dropped_allocs` for delta computation.
+    prev_dropped_allocs: u64,
+    /// Previous snapshot of `RingBuffers::dropped_frees` for delta computation.
+    prev_dropped_frees: u64,
     /// Precomputed segment metadata, returned (cloned) on every flush
     /// cycle. Cached in `new()` so the `segment_metadata()` hot path —
     /// called from the flush loop every ~5 ms — does not allocate fresh
@@ -50,6 +56,8 @@ impl MemoryProfileSource {
         Self {
             rings,
             liveset: track_liveset.then(HashMap::new),
+            prev_dropped_allocs: 0,
+            prev_dropped_frees: 0,
             metadata: vec![(
                 "memory.sample_rate_bytes".to_string(),
                 sample_rate_bytes.to_string(),
@@ -158,6 +166,30 @@ impl Source for MemoryProfileSource {
                     }
                 }
             }
+        }
+
+        // Emit overflow event if any samples were dropped since last flush.
+        // Relaxed ordering is sufficient: the flush thread is the sole reader,
+        // and we only need eventual visibility of producer increments. The two
+        // counters are independent so we don't need ordering between the loads.
+        let current_dropped_allocs = self.rings.dropped_allocs.load(Ordering::Relaxed);
+        let current_dropped_frees = self.rings.dropped_frees.load(Ordering::Relaxed);
+        let delta_allocs = current_dropped_allocs.saturating_sub(self.prev_dropped_allocs);
+        let delta_frees = current_dropped_frees.saturating_sub(self.prev_dropped_frees);
+        if delta_allocs > 0 || delta_frees > 0 {
+            with_encoder(
+                |enc| {
+                    enc.encode(&MemoryProfileOverflowEvent {
+                        timestamp_ns: clock_monotonic_ns(),
+                        dropped_allocs: delta_allocs,
+                        dropped_frees: delta_frees,
+                    });
+                },
+                ctx.collector,
+                ctx.drain_epoch,
+            );
+            self.prev_dropped_allocs = current_dropped_allocs;
+            self.prev_dropped_frees = current_dropped_frees;
         }
     }
 

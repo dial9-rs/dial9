@@ -327,6 +327,7 @@
     const cpuSamples = [];
     const allocEvents = [];
     const freeEvents = [];
+    const memoryOverflows = [];
     const threadNames = new Map();
     const tidToWorker = new Map(); // tid → workerId (stable mapping from park/unpark events)
     const runtimeWorkers = new Map(); // runtime name → [workerId, ...]
@@ -554,6 +555,14 @@
           });
           break;
         }
+        case "MemoryProfileOverflowEvent": {
+          memoryOverflows.push({
+            timestamp: ts,
+            droppedAllocs: num(v.dropped_allocs),
+            droppedFrees: num(v.dropped_frees),
+          });
+          break;
+        }
         case "ClockSyncEvent": {
           const real = num(v.realtime_ns);
           if (real > 0) {
@@ -688,6 +697,7 @@
       cpuSamples,
       allocEvents,
       freeEvents,
+      memoryOverflows,
       callframeSymbols,
       threadNames,
       tidToWorker,
@@ -730,6 +740,7 @@
     const customEvents = [];
     const allocEvents = [];
     const freeEvents = [];
+    const memoryOverflows = [];
 
     let line;
     while ((line = nextLine()) !== null) {
@@ -752,6 +763,7 @@
         case 'x': customEvents.push(rec.d); break;
         case 'a': allocEvents.push(rec.d); break;
         case 'f': freeEvents.push(rec.d); break;
+        case 'o': memoryOverflows.push(rec.d); break;
       }
     }
     raw.events = events;
@@ -759,6 +771,7 @@
     raw.customEvents = customEvents;
     raw.allocEvents = allocEvents;
     raw.freeEvents = freeEvents;
+    raw.memoryOverflows = memoryOverflows;
     return raw;
   }
 

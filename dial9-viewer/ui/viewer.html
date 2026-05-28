@@ -3,7 +3,7 @@
     <head>
         <meta charset="UTF-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-        <title>Tokio Trace Viewer</title>
+        <title>dial9 Trace Viewer</title>
         <link rel="stylesheet" href="flamegraph.css" />
         <style>
             * {
@@ -107,7 +107,7 @@
             }
 
             #stack-sidebar {
-                width: 400px;
+                width: min(640px, 50vw);
                 min-width: 200px;
                 max-width: 70vw;
                 background: #1a1a2e;
@@ -658,6 +658,7 @@
                     <span id="poi-counter" style="font-size:0.85em;color:#888"></span>
                     <span style="width:1px;height:20px;background:#444;margin:0 8px"></span>
                     <button id="btn-sched-panel" style="background:#3a1a1a;border-color:#ff4444;color:#ff8a65">⚠ Blocking Calls</button>
+                    <button id="btn-heap-flamegraph" style="display:none;background:#1a2a1a;border-color:#4caf50;color:#81c784;white-space:nowrap" title="Show heap allocation flamegraph">🔥 Heap</button>
                     <button id="btn-uninstrumented-info" style="display:none;background:#1e2050;border-color:#6c63ff;color:#d0ccff;white-space:nowrap" title="Some tasks lack wake tracking — click for details">ⓘ Blind spawns</button>
                     <button id="btn-set-range" title="Set time range filter (reloads with only events in range)">Set Range</button>
                     <button id="btn-clear-range" title="Clear time range filter" style="display:none">Clear Range</button>
@@ -728,9 +729,12 @@
                     <canvas id="task-detail-canvas"></canvas>
                 </div>
                 <div id="queue-chart" tabindex="0" aria-label="Queue depth chart">
-                    <span class="chart-label"
-                        >Queue Depth (global=blue, local max=orange)</span
-                    >
+                    <span class="chart-label" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+                        <span style="font-weight:600">Queue Depth</span>
+                        <span style="display:flex;align-items:center;gap:4px"><span style="width:12px;height:8px;background:rgba(79,195,247,0.5);border:1px solid #4fc3f7;display:inline-block"></span>Global</span>
+                        <span style="display:flex;align-items:center;gap:4px"><span style="width:12px;height:2px;background:#ff8a65;display:inline-block"></span>Max local</span>
+                        <span style="display:flex;align-items:center;gap:4px"><span style="width:12px;height:2px;background:#81c784;display:inline-block"></span>Active tasks</span>
+                    </span>
                     <div id="info-panel"></div>
                     <canvas id="queue-canvas"></canvas>
                 </div>
@@ -749,6 +753,7 @@
                     <span class="tab" id="tab-poll-detail" data-tab="poll-detail" style="display:none">Poll Detail</span>
                     <span class="tab" id="tab-flamegraph" data-tab="flamegraph">Flamegraph</span>
                     <span class="tab" id="tab-blocking" data-tab="blocking">Blocking Calls</span>
+                    <span class="tab" id="tab-heap" data-tab="heap" style="display:none">Heap</span>
                 </div>
                 <div class="sidebar-body" id="stack-sidebar-body"></div>
             </div>
@@ -851,13 +856,14 @@
             ];
             const ET_COLORS = { poll: "#4fc3f7", park: "#ff8a65" };
 
-            // Duration-based poll coloring: short=dim, long=hot
+            // Duration-based poll coloring: short=dim, long=hot. The
+            // continuous log-scale heatmap lives in trace_analysis.js
+            // (`pollHeatmapColor`); we call the quantized variant here so
+            // adjacent polls of "approximately equal" duration share a color
+            // string, which lets the LOD path merge them into one fillRect.
+            // See issue #450 (item 1).
             function pollColor(startNs, endNs) {
-                const durUs = (endNs - startNs) / 1e3;
-                if (durUs > 1000) return "#ff4444"; // >1ms: red
-                if (durUs > 100)  return "#ff8a65"; // >100µs: orange
-                if (durUs > 10)   return "#4fc3f7"; // >10µs: bright blue
-                return "#2a5a7a";                    // ≤10µs: dim blue
+                return TraceAnalysis.pollHeatmapColorQuantized(endNs - startNs);
             }
 
             const SPAN_COLORS = [
@@ -927,12 +933,17 @@
 
             let spanPctFilter = 0; // 0 = no filter, 50/90/99 = show only >= that percentile
 
+            // Dimmed variant of `pollColor` used when a task is selected, to
+            // fade the non-selected polls into the background. Compute the
+            // heatmap color and multiply each channel by ~0.4 so the hue is
+            // preserved but the bar visually recedes.
             function pollColorDim(startNs, endNs) {
-                const durUs = (endNs - startNs) / 1e3;
-                if (durUs > 1000) return "#803030"; // >1ms: muted red
-                if (durUs > 100)  return "#805540"; // >100µs: muted orange
-                if (durUs > 10)   return "#2a5a7a"; // >10µs: dim blue
-                return "#1e3040";                    // ≤10µs: very dim
+                const c = TraceAnalysis.pollHeatmapColorQuantized(endNs - startNs);
+                const r = Math.round(parseInt(c.slice(1, 3), 16) * 0.4);
+                const g = Math.round(parseInt(c.slice(3, 5), 16) * 0.4);
+                const b = Math.round(parseInt(c.slice(5, 7), 16) * 0.4);
+                const hex2 = (n) => n.toString(16).padStart(2, "0");
+                return "#" + hex2(r) + hex2(g) + hex2(b);
             }
 
             // ── State ──
@@ -1675,17 +1686,32 @@
                 if (uninstrumentedCount > 0) {
                     btnUninst.textContent = `ⓘ Uninstrumented (${uninstrumentedCount})`;
                 }
+
+                // Show heap flamegraph button if alloc events exist
+                const hasAllocEvents = trace.allocEvents && trace.allocEvents.length > 0;
+                const btnHeap = document.getElementById("btn-heap-flamegraph");
+                btnHeap.style.display = hasAllocEvents ? "" : "none";
+                if (hasAllocEvents) {
+                    btnHeap.textContent = `🔥 Heap (${trace.allocEvents.length})`;
+                }
+
                 showToast("shift-drag-hint", "⇧ Shift+drag to select a region", "info", 0, true);
                 showToast("option-drag-hint", "⌥ Option+drag to zoom", "info", 0, true);
                 requestAnimationFrame(renderAll);
             }
 
-            function updatePointsOfInterest() {
+            function updatePointsOfInterest({ autoJump = false } = {}) {
                 const filterType = document.getElementById("poi-filter").value;
                 const sortByWorst = document.getElementById("sort-by-worst").checked;
                 pointsOfInterest = filterPointsOfInterest(filterType, workerSpans, workerIds, schedDelays, { hasSchedWait: trace.hasSchedWait, sortByWorst, taskInstrumented: trace.taskInstrumented });
                 currentPoiIndex = -1;
                 updatePoiCounter();
+                // When the user changes the filter or sort, auto-jump to the
+                // first POI so they immediately see what matches. On initial
+                // trace load we leave the view at the overview (autoJump=false).
+                if (autoJump && pointsOfInterest.length > 0) {
+                    jumpToPoi(0);
+                }
             }
 
             function updatePoiCounter() {
@@ -2356,8 +2382,9 @@
                         lastY = y;
                     }
                     ctx.lineTo(pw, lastY);
-                    const colors = ["rgba(255,200,50,0.8)", "rgba(50,255,200,0.8)", "rgba(255,50,200,0.8)", "rgba(200,50,255,0.8)"];
-                    ctx.strokeStyle = colors[workerId % colors.length];
+                    // Single color for all workers — the legend's "Local Q"
+                    // swatch matches this. Per-worker colors were too noisy.
+                    ctx.strokeStyle = "rgba(255,200,50,0.8)";
                     ctx.lineWidth = 1.5;
                     ctx.stroke();
                 }
@@ -3437,9 +3464,10 @@
             }
 
             // ──  Pan ──
-            document.getElementById("poi-filter").addEventListener("change", updatePointsOfInterest);
-            document.getElementById("sort-by-worst").addEventListener("change", updatePointsOfInterest);
+            document.getElementById("poi-filter").addEventListener("change", () => updatePointsOfInterest({ autoJump: true }));
+            document.getElementById("sort-by-worst").addEventListener("change", () => updatePointsOfInterest({ autoJump: true }));
             document.getElementById("btn-sched-panel").addEventListener("click", showSchedPanel);
+            document.getElementById("btn-heap-flamegraph").addEventListener("click", () => showHeapFlamegraph());
             document.getElementById("btn-uninstrumented-info").addEventListener("click", (e) => {
                 showUninstrumentedPopup(e.target);
             });
@@ -3658,8 +3686,15 @@
                     const hasCpu = trace.cpuSamples.some(s =>
                         s.timestamp >= selStart && s.timestamp <= selEnd && s.callchain.length > 0 && s.source !== 1
                     );
-                    if (hasSched && !hasCpu) {
+                    const hasHeap = trace.allocEvents && trace.allocEvents.some(a =>
+                        a.callchain.length > 0 && a.timestamp >= selStart && a.timestamp <= selEnd
+                    );
+                    if (hasSched && !hasCpu && !hasHeap) {
                         showSchedPanel(selStart, selEnd);
+                    } else if (!hasCpu && hasHeap) {
+                        sidebarSelStart = selStart;
+                        sidebarSelEnd = selEnd;
+                        showHeapFlamegraph(selStart, selEnd);
                     } else {
                         showFlamegraph(selStart, selEnd);
                     }
@@ -3721,8 +3756,15 @@
                             const hasCpu = trace.cpuSamples.some(s =>
                                 s.timestamp >= selStart && s.timestamp <= selEnd && s.callchain.length > 0 && s.source !== 1
                             );
-                            if (hasSched && !hasCpu) {
+                            const hasHeap = trace.allocEvents && trace.allocEvents.some(a =>
+                                a.callchain.length > 0 && a.timestamp >= selStart && a.timestamp <= selEnd
+                            );
+                            if (hasSched && !hasCpu && !hasHeap) {
                                 showSchedPanel(selStart, selEnd);
+                            } else if (!hasCpu && hasHeap) {
+                                sidebarSelStart = selStart;
+                                sidebarSelEnd = selEnd;
+                                showHeapFlamegraph(selStart, selEnd);
                             } else {
                                 showFlamegraph(selStart, selEnd);
                             }
@@ -4032,20 +4074,30 @@
                 const pollDetail = tabs.querySelector("#tab-poll-detail");
                 const flamegraph = tabs.querySelector("#tab-flamegraph");
                 const blocking = tabs.querySelector("#tab-blocking");
+                const heap = tabs.querySelector("#tab-heap");
 
                 if (activeTab === "poll-detail") {
                     pollDetail.style.display = "";
                     flamegraph.style.display = "none";
                     blocking.style.display = "none";
+                    heap.style.display = "none";
                 } else {
                     pollDetail.style.display = "none";
                     flamegraph.style.display = "";
                     blocking.style.display = "";
+                    // Show heap tab if alloc events exist in the selection range
+                    const hasHeap = trace && trace.allocEvents && trace.allocEvents.some(a =>
+                        a.callchain.length > 0 &&
+                        (sidebarSelStart == null || a.timestamp >= sidebarSelStart) &&
+                        (sidebarSelEnd == null || a.timestamp <= sidebarSelEnd)
+                    );
+                    heap.style.display = hasHeap ? "" : "none";
                 }
 
                 pollDetail.classList.toggle("active", activeTab === "poll-detail");
                 flamegraph.classList.toggle("active", activeTab === "flamegraph");
                 blocking.classList.toggle("active", activeTab === "blocking");
+                heap.classList.toggle("active", activeTab === "heap");
             }
 
             document.getElementById("tab-flamegraph").addEventListener("click", () => {
@@ -4062,6 +4114,16 @@
                     document.getElementById("flamegraph-panel").appendChild(fgContainer);
                 }
                 showSchedPanel(sidebarSelStart, sidebarSelEnd);
+            });
+            document.getElementById("tab-heap").addEventListener("click", () => {
+                // Clean up flamegraph before switching
+                if (fgActive) {
+                    fgActive = false;
+                    document.getElementById("flamegraph-panel").appendChild(fgContainer);
+                }
+                schedActive = false;
+                showSidebarTabs("heap");
+                showHeapFlamegraph(sidebarSelStart, sidebarSelEnd);
             });
 
             // ── Sidebar resize drag ──
@@ -4758,17 +4820,24 @@
                 leg.style.cssText =
                     "font-size:0.8em;display:flex;gap:12px;align-items:center;flex-wrap:wrap;";
                 leg.innerHTML = `
-    <span style="display:flex;align-items:center;gap:4px"><span style="width:12px;height:12px;background:#2a5a7a;display:inline-block;border-radius:2px"></span>Poll ≤10µs</span>
-    <span style="display:flex;align-items:center;gap:4px"><span style="width:12px;height:12px;background:#4fc3f7;display:inline-block;border-radius:2px"></span>&gt;10µs</span>
-    <span style="display:flex;align-items:center;gap:4px"><span style="width:12px;height:12px;background:#ff8a65;display:inline-block;border-radius:2px"></span>&gt;100µs</span>
-    <span style="display:flex;align-items:center;gap:4px"><span style="width:12px;height:12px;background:#ff4444;display:inline-block;border-radius:2px"></span>&gt;1ms</span>
+    <span style="display:flex;align-items:center;gap:4px" title="Poll duration heatmap (log scale)">
+        Poll
+        <span style="display:inline-flex;flex-direction:column;align-items:stretch;gap:1px;position:relative">
+            <span style="width:140px;height:8px;background:linear-gradient(to right, #2a5a7a 0%, #4fc3f7 28.6%, #ff8a65 42.9%, #ff4444 57.1%, #ff0000 100%);display:inline-block;border-radius:1px"></span>
+            <span style="position:relative;width:140px;height:0.95em;font-size:0.85em;color:#888;line-height:1">
+                <span style="position:absolute;left:0;transform:translateX(0)">100ns</span>
+                <span style="position:absolute;left:28.6%;transform:translateX(-50%)">10µs</span>
+                <span style="position:absolute;left:57.1%;transform:translateX(-50%)">1ms</span>
+                <span style="position:absolute;left:100%;transform:translateX(-100%)">1s</span>
+            </span>
+        </span>
+    </span>
     <span style="display:flex;align-items:center;gap:4px"><span style="width:12px;height:12px;background:#2a1520;border-top:3px solid #cc5533;display:inline-block;border-radius:2px"></span>Parked</span>
     <span style="display:flex;align-items:center;gap:4px"><span style="width:12px;height:12px;background:#ff0000;display:inline-block;border-radius:2px"></span>Kernel Sched Delay</span>
     <span style="display:flex;align-items:center;gap:4px"><span style="width:12px;height:4px;background:#ce93d8;display:inline-block"></span>CPU Sampled</span>
     <span style="display:flex;align-items:center;gap:4px"><span style="color:#ff2222;font-size:10px">▲</span>Sched (blocking)</span>
     <span style="display:flex;align-items:center;gap:4px"><span style="color:#66bb6a;font-size:10px">▼</span>Wake</span>
     <span style="display:flex;align-items:center;gap:4px"><span style="width:12px;height:2px;background:rgba(255,200,50,0.7);display:inline-block"></span>Local Q</span>
-    <span style="display:flex;align-items:center;gap:4px"><span style="width:12px;height:2px;background:#81c784;display:inline-block"></span>Active Tasks</span>
   `;
                 tb.insertBefore(leg, tb.firstChild);
 
@@ -4806,7 +4875,7 @@
             // Used by `showTaskDumpStack`, `showIdleTimeFlamegraph`, and any
             // other caller that just wants "here's a pile of callchains, render
             // them as a flamegraph in the sidebar".
-            function renderFlamegraphInSidebar({ title, subtitle, samples }) {
+            function renderFlamegraphInSidebar({ title, subtitle, samples, fgOpts }) {
                 fgActive = true;
                 schedActive = false;
                 const sidebar = document.getElementById("stack-sidebar");
@@ -4828,7 +4897,7 @@
                 sidebar.style.display = "flex";
                 if (wasHidden && trace) requestAnimationFrame(renderAll);
                 requestAnimationFrame(() => {
-                    fgInstance.setData(samples, trace.callframeSymbols);
+                    fgInstance.setData(samples, trace.callframeSymbols, fgOpts);
                     fgInstance.resize();
                 });
             }
@@ -4903,6 +4972,163 @@
                 });
             }
 
+            function showHeapFlamegraph(startNs, endNs) {
+                if (!trace || !trace.allocEvents || trace.allocEvents.length === 0) return;
+                let allocs = trace.allocEvents;
+                if (startNs != null) allocs = allocs.filter(a => a.timestamp >= startNs);
+                if (endNs != null) allocs = allocs.filter(a => a.timestamp <= endNs);
+
+                // Strip allocator hook frames from the top of each callchain
+                const HOOK_PATTERNS = [
+                    "memory_profiling::hook::on_alloc",
+                    "memory_profiling::allocator::Dial9Allocator",
+                    "__rustc::__rust_alloc",
+                    "__rustc::__rust_realloc",
+                ];
+                function stripHookFrames(chain) {
+                    let start = 0;
+                    while (start < chain.length) {
+                        const entry = trace.callframeSymbols.get(chain[start]);
+                        const frames = Array.isArray(entry) ? entry : [entry];
+                        const name = frames.map(f => f && f.symbol || "").join(" ");
+                        if (HOOK_PATTERNS.some(p => name.includes(p))) { start++; continue; }
+                        break;
+                    }
+                    return start > 0 ? chain.slice(start) : chain;
+                }
+
+                const filtered = allocs.map(a => ({ ...a, callchain: stripHookFrames(a.callchain) }))
+                    .filter(a => a.callchain.length > 0);
+                const R = 524288;
+                // Build base samples with both weight types
+                const baseSamples = filtered.map(a => {
+                    const wId = trace.tidToWorker && trace.tidToWorker.get(a.tid);
+                    const s = a.size;
+                    const ratio = s / R;
+                    // Horvitz-Thompson unbiased estimator: invP = 1/P(sample) where P = 1-exp(-size/R)
+                    const invP = (s <= 0 || ratio > 50) ? 1 : 1 / (1 - Math.exp(-ratio));
+                    const sample = { callchain: a.callchain, workerId: wId != null ? 0 : 255, spawnLoc: null, byteWeight: s * invP, countWeight: invP };
+                    if (wId != null && workerSpans[wId] && workerSpans[wId].polls) {
+                        const polls = workerSpans[wId].polls;
+                        let lo = 0, hi = polls.length - 1;
+                        while (lo <= hi) {
+                            const mid = (lo + hi) >> 1;
+                            if (polls[mid].start <= a.timestamp) lo = mid + 1;
+                            else hi = mid - 1;
+                        }
+                        if (hi >= 0 && a.timestamp <= polls[hi].end) {
+                            sample.spawnLoc = polls[hi].spawnLoc;
+                        }
+                    }
+                    return sample;
+                });
+                if (baseSamples.length === 0) {
+                    showToast("no-heap-samples", "No heap samples in selected region", "error", 4000);
+                    return;
+                }
+
+                let estimatedBytes = 0, estimatedAllocs = 0;
+                for (const s of baseSamples) { estimatedBytes += s.byteWeight; estimatedAllocs += s.countWeight; }
+                function fmtB(bytes) {
+                    return bytes >= 1e9 ? (bytes / 1e9).toFixed(1) + " GB"
+                        : bytes >= 1e6 ? (bytes / 1e6).toFixed(1) + " MB"
+                        : bytes >= 1e3 ? (bytes / 1e3).toFixed(1) + " KB"
+                        : Math.round(bytes) + " B";
+                }
+                const fmtBytes = fmtB(estimatedBytes);
+                const rangeNote = (startNs != null || endNs != null) ? " in selected range" : " (full trace)";
+                const durStr = (startNs != null && endNs != null)
+                    ? ` · ${((endNs - startNs) / 1e6).toFixed(1)}ms`
+                    : "";
+
+                let heapMode = "bytes"; // "bytes" or "count"
+
+                function heapFgOpts(mode) {
+                    return {
+                        workerLabel: mode === "bytes" ? "Worker thread allocations (by bytes)" : "Worker thread allocations (by count)",
+                        offworkerLabel: mode === "bytes" ? "Non-worker thread allocations (by bytes)" : "Non-worker thread allocations (by count)",
+                        formatCount(count, total, self, treeNode) {
+                            const pct = ((count / total) * 100).toFixed(1);
+                            if (mode === "bytes") {
+                                const allocs = treeNode && treeNode.allocCount != null ? Math.round(treeNode.allocCount) : null;
+                                let s = `~${fmtB(count)} (${pct}%)`;
+                                if (allocs != null) s += ` · ~${allocs.toLocaleString()} allocs · ${fmtB(count / treeNode.allocCount)} avg`;
+                                return s;
+                            } else {
+                                // In count mode, count IS the alloc count, allocCount holds bytes
+                                let s = `~${Math.round(count).toLocaleString()} allocs (${pct}%)`;
+                                if (treeNode && treeNode.allocCount != null) s += ` · ~${fmtB(treeNode.allocCount)} · ${fmtB(treeNode.allocCount / count)} avg`;
+                                return s;
+                            }
+                        }
+                    };
+                }
+
+                function samplesForMode(mode) {
+                    return baseSamples.map(s => {
+                        if (mode === "bytes") {
+                            return { ...s, weight: s.byteWeight, allocWeight: s.countWeight };
+                        } else {
+                            // count mode: weight by alloc count, store bytes in allocWeight
+                            return { ...s, weight: s.countWeight, allocWeight: s.byteWeight };
+                        }
+                    });
+                }
+
+                // Render with initial mode
+                fgActive = true;
+                schedActive = false;
+                const sidebar = document.getElementById("stack-sidebar");
+                const titleEl = document.getElementById("stack-sidebar-title");
+                const body = document.getElementById("stack-sidebar-body");
+                document.getElementById("sidebar-tabs").style.display = "none";
+                titleEl.textContent = `Heap flamegraph — ~${fmtBytes}${durStr}`;
+                body.innerHTML = "";
+                body.style.display = "flex";
+                body.style.flexDirection = "column";
+
+                const actions = document.createElement("div");
+                actions.style.cssText = "display:flex;gap:8px;margin-bottom:6px;flex-shrink:0;align-items:center";
+                actions.innerHTML = `<span style="color:#888;font-size:0.85em">${filtered.length} samples · ~${fmtBytes} · ~${Math.round(estimatedAllocs).toLocaleString()} allocs${rangeNote}</span>`;
+
+                const toggle = document.createElement("span");
+                toggle.style.cssText = "display:inline-flex;border:1px solid #444;border-radius:4px;overflow:hidden;font-size:0.8em;cursor:pointer";
+                const btnBytes = document.createElement("span");
+                btnBytes.textContent = "Bytes";
+                btnBytes.style.cssText = "padding:2px 8px;background:#4caf50;color:#fff";
+                const btnCount = document.createElement("span");
+                btnCount.textContent = "Count";
+                btnCount.style.cssText = "padding:2px 8px;background:transparent;color:#888";
+                toggle.appendChild(btnBytes);
+                toggle.appendChild(btnCount);
+                function setToggle(mode) {
+                    heapMode = mode;
+                    btnBytes.style.background = mode === "bytes" ? "#4caf50" : "transparent";
+                    btnBytes.style.color = mode === "bytes" ? "#fff" : "#888";
+                    btnCount.style.background = mode === "count" ? "#4caf50" : "transparent";
+                    btnCount.style.color = mode === "count" ? "#fff" : "#888";
+                    requestAnimationFrame(() => {
+                        fgInstance.setData(samplesForMode(heapMode), trace.callframeSymbols, heapFgOpts(heapMode));
+                        fgInstance.resize();
+                    });
+                }
+                btnBytes.addEventListener("click", () => setToggle("bytes"));
+                btnCount.addEventListener("click", () => setToggle("count"));
+                actions.appendChild(toggle);
+                body.appendChild(actions);
+
+                fgContainer.style.flex = "1";
+                fgContainer.style.minHeight = "0";
+                body.appendChild(fgContainer);
+                const wasHidden = sidebar.style.display !== "flex";
+                sidebar.style.display = "flex";
+                if (wasHidden && trace) requestAnimationFrame(renderAll);
+                requestAnimationFrame(() => {
+                    fgInstance.setData(samplesForMode(heapMode), trace.callframeSymbols, heapFgOpts(heapMode));
+                    fgInstance.resize();
+                });
+            }
+
             function showFlamegraph(selStart, selEnd) {
                 const samples = FlamegraphRenderer.filterCpuSamples(trace.cpuSamples, selStart, selEnd);
                 if (!samples.length) {
@@ -4923,9 +5149,12 @@
                 const body = document.getElementById("stack-sidebar-body");
                 title.textContent = `${durMs}ms selected`;
 
-                // Show tabs if both data types exist
+                // Show tabs if multiple data types exist
                 const hasSched = collectSchedSamples({ start: selStart, end: selEnd }).length > 0;
-                if (hasSched) {
+                const hasHeapInRange = trace.allocEvents && trace.allocEvents.some(a =>
+                    a.callchain.length > 0 && a.timestamp >= selStart && a.timestamp <= selEnd
+                );
+                if (hasSched || hasHeapInRange) {
                     showSidebarTabs("flamegraph");
                 } else {
                     document.getElementById("sidebar-tabs").style.display = "none";

@@ -104,6 +104,7 @@ function createAccumulator() {
     schedDelayHist: null, // Histogram
     allocEvents: [],
     freeEvents: [],
+    memoryOverflows: [],
     tidToWorker: new Map(),
     pollEvents: [], // PollStart events for per-task alloc attribution
   };
@@ -218,6 +219,7 @@ function accumulateTrace(acc, trace) {
   // Memory events
   if (trace.allocEvents) for (const e of trace.allocEvents) acc.allocEvents.push(e);
   if (trace.freeEvents) for (const e of trace.freeEvents) acc.freeEvents.push(e);
+  if (trace.memoryOverflows) for (const e of trace.memoryOverflows) acc.memoryOverflows.push(e);
   if (trace.tidToWorker) for (const [k, v] of trace.tidToWorker) acc.tidToWorker.set(k, v);
   for (const e of trace.events) {
     if (e.eventType === 0 && e.taskId) acc.pollEvents.push(e); // PollStart
@@ -267,6 +269,7 @@ function finalizeAccumulator(acc) {
     memory: analyzeAllocations(acc.allocEvents, acc.freeEvents, {
       events: acc.pollEvents,
       tidToWorker: acc.tidToWorker,
+      memoryOverflows: acc.memoryOverflows,
     }),
   };
 }
@@ -497,6 +500,15 @@ function reportAnalysis(a, label) {
     console.log(`  Total allocs: ${m.summary.totalAllocCount} sampled, ~${m.summary.estimatedTotalBytes.toLocaleString()} bytes estimated`);
     console.log(`  Total frees:  ${m.summary.totalFreeCount}`);
     console.log(`  Leaked:       ${m.summary.leakedCount} allocs, ${m.summary.leakedBytes.toLocaleString()} sampled bytes`);
+    if (m.summary.totalDroppedAllocs > 0 || m.summary.totalDroppedFrees > 0) {
+      console.log(`  ⚠️  Ring buffer overflow: ${m.summary.totalDroppedAllocs} alloc samples and ${m.summary.totalDroppedFrees} free samples dropped`);
+      if (m.summary.totalDroppedAllocs > 0) {
+        console.log(`      Dropped allocs cause underreporting of allocation volume — increase ring_capacity`);
+      }
+      if (m.summary.totalDroppedFrees > 0) {
+        console.log(`      Dropped frees cause false positives in leak analysis — increase ring_capacity`);
+      }
+    }
     if (m.topSites.length > 0) {
       console.log(`\n  Top allocation sites:`);
       for (const s of m.topSites.slice(0, 10)) {
@@ -736,6 +748,7 @@ async function parseWorkerMain(traceFile, cachePath) {
   if (trace.customEvents) for (const x of trace.customEvents) writeLine({ t: 'x', d: x });
   if (trace.allocEvents) for (const a of trace.allocEvents) writeLine({ t: 'a', d: a });
   if (trace.freeEvents) for (const f of trace.freeEvents) writeLine({ t: 'f', d: f });
+  if (trace.memoryOverflows) for (const o of trace.memoryOverflows) writeLine({ t: 'o', d: o });
 
   await new Promise((res, rej) => { stream.end(() => { fs.renameSync(tmpPath, cachePath); res(); }); stream.on('error', rej); });
   process.stdout.write('OK\n');

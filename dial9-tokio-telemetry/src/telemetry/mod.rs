@@ -5,6 +5,9 @@
 
 #[cfg(feature = "analysis")]
 pub(crate) mod analysis;
+/// Decode-side companion structs for built-in trace events.
+#[cfg(any(feature = "analysis", test))]
+pub mod analysis_events;
 pub(crate) mod buffer;
 pub(crate) mod collector;
 pub use collector::Batch;

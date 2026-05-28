@@ -38,6 +38,7 @@ description: Parse and load dial9 Tokio runtime trace files. Covers the ParsedTr
   taskDumps: Map<number, [{timestamp, callchain}]>, // task ID → async stack captures (sorted by timestamp); see dial9-tokio-telemetry `taskdump` feature
   allocEvents: AllocEvent[],     // Sampled memory allocations (requires dial9-tokio-telemetry memory-profiling feature)
   freeEvents: FreeEvent[],       // Deallocations paired with sampled allocs (requires `track_liveset`)
+  memoryOverflows: [{timestamp, droppedAllocs, droppedFrees}], // Ring buffer overflow events (dropped samples per flush period)
   blockInPlaceGaps: [{workerId, fromTid, toTid, startNs, endNs}], // Detected block_in_place handoff intervals (worker attribution unknowable during gap)
   tidToWorker: Map<number, number>,  // thread ID → worker ID mapping (derived from park/unpark events)
 }
