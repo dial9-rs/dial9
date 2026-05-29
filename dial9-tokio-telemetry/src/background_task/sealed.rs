@@ -32,7 +32,7 @@ pub struct MemorySegment {
 }
 
 impl MemorySegment {
-    /// Segment index
+    /// Segment index.
     pub fn index(&self) -> u32 {
         self.index
     }

@@ -451,8 +451,9 @@ mod shuttle_tests {
                 consumed.fetch_add(1, Ordering::Relaxed);
             }
             if mem.writer_done() {
-                // writer_done is Acquire and stored after every force_push, so
-                // the remaining queue is fully visible. Drain to empty.
+                // writer_done is stored (Release) after the seal-time queue push,
+                // loading it Acquire here makes the remaining queue fully visible.
+                // Drain to empty.
                 loop {
                     let t = mem.take_files();
                     dropped.fetch_add(t.segments_dropped, Ordering::Relaxed);

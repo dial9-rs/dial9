@@ -22,7 +22,7 @@ mod mode_sealed {
 /// Marker trait for `RotatingWriter`'s backend mode. Sealed: only [`Disk`]
 /// and [`Memory`] implement it.
 pub trait WriterMode: mode_sealed::Sealed + Send + 'static {
-    /// Wether the writer mode is disk-backed.
+    /// Whether the writer mode is disk-backed.
     const IS_DISK: bool;
 }
 
@@ -2680,13 +2680,21 @@ mod tests {
     }
 
     #[test]
-    fn in_memory_builder_rejects_total_size_below_segment_size() {
+    fn in_memory_builder_enforces_3x_segment_min_total_size() {
+        let seg: u64 = 2048;
+        // Below the boundary: rejected (no room for even one ring slot).
         let err = InMemoryWriter::in_memory_builder()
-            .max_total_size(1024)
-            .max_segment_size(2048)
+            .max_total_size(3 * seg - 1)
+            .max_segment_size(seg)
             .build()
             .unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        // At boundary: accepted (1 active + 1 in-flight + 1 ring slot).
+        InMemoryWriter::in_memory_builder()
+            .max_total_size(3 * seg)
+            .max_segment_size(seg)
+            .build()
+            .expect("3× segment must be accepted");
     }
 
     /// End to end: a memory `RotatingWriter` feeds the real worker pipeline.

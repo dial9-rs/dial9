@@ -738,7 +738,7 @@ impl WorkerLoop {
             if self.stop.is_cancelled() || self.fs.writer_done() {
                 // Drain-to-empty: keep popping until the ring/directory is clear.
                 // Ordering invariant: writer calls mark_writer_done (Release) after
-                // force_push, so any late-racing push is visible here.
+                // the seal-time queue push, so any late-racing push is visible here.
                 loop {
                     let taken = self.fs.take_files();
                     let dispatched = taken.segments.len() as u64;

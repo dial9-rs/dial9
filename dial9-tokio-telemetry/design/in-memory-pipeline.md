@@ -6,7 +6,7 @@ Let dial9 run with no filesystem dependency. Users with plenty of RAM, or runnin
 
 The existing lifecycle is disk-mediated end to end. Flush thread writes encoded batches into `trace.N.bin.active`, writer renames to `trace.N.bin` on rotation, worker polls the directory every second, reads the file back into memory and runs the processor pipeline.
 
-A single `pub(crate)` `Fs` enum covers the writer + worker boundary, with one variant per backend. `Fs::Disk` wraps `std::fs` for the rotating disk path. `Fs::Mem` keeps active bytes in a per-path `Vec<u8>` map and routes sealed bytes through an internal channel to the worker. It covers the full segment lifecycle: write-side (`create`, `seal`, `remove_*`) and read-side (`take_files`, `wait_for_more`, `writer_done`, `mark_writer_done`). Not a trait: the set is closed (only these two) and never exposed publicly, so an enum beats a trait that would only ever be implemented twice.
+A single `pub(crate)` `Fs` enum covers the writer + worker boundary, with one variant per backend. `Fs::Disk` wraps `std::fs` for the rotating disk path. `Fs::Mem` hands out an in-memory `Vec<u8>` write handle (held by the writer) and routes sealed bytes through an internal byte-budgeted ring to the worker. It covers the full segment lifecycle: write-side (`create`, `seal`, `remove_*`) and read-side (`take_files`, `wait_for_more`, `writer_done`, `mark_writer_done`).
 
 **Core principle:** the disk path stays the default and unchanged. Memory mode is one constructor swap on the existing writer builder.
 
@@ -40,7 +40,7 @@ record_event() ──┐
           RotatingWriter
             │
             ├── Arc<Fs> ── full segment lifecycle
-            │   (DiskFs: real files | MemFs: per-path Vec<u8> + channel)
+            │   (DiskFs: real files | MemFs: byte-budgeted ring channel)
             │
             └── on seal:
                 ├── disk: file is now on the filesystem ──▶ worker calls
@@ -128,7 +128,7 @@ pub(crate) enum RemoveReason {
 `TakenFiles` carries the dispensed claims plus per-cycle gauges (`queued_segments`, `queued_bytes`, `in_flight_segments`, `in_flight_bytes`, `in_flight_bytes_peak`, `segments_dropped`). One scan per worker cycle drives both work and observability (see section 6 for metrics).
 
 - **`DiskFs`** holds the segment directory and stem at construction and maintains a `HashMap<u32, u64>` of claimed indices to uncompressed sizes (under a `Mutex`). `take_files` scans the directory, stats each unclaimed file **outside the claim-set mutex**, then re-acquires the mutex once to insert all new entries. Keeping `metadata()` syscalls off the locked path matters because the writer's `evict_oldest` takes the same mutex (via `remove_sealed`). The `std::fs::read` for the payload itself is deferred to `TakenSegment::load`.
-- **`MemFs`** holds active-only state (per-path `Vec<u8>` map) plus the internal writer-to-worker ring (`Mutex<VecDeque<MemSealedSegment>>` with a `max_total_size` byte budget). Sealed bytes do not live in `MemFs`'s active map. `seal` takes the `Vec<u8>`, wraps it as `Bytes` (zero-copy), pushes to the back of the deque, then evicts oldest segments until `queued_bytes <= max_total_size` (see section 3). `take_files` pops **at most one** segment from the front per call and returns it with payload already in hand. `remove_sealed` is a no-op: bytes already left `MemFs`.
+- **`MemFs`** holds the writer-to-worker ring (`Mutex<VecDeque<MemSealedSegment>>` with a `max_total_size` byte budget). Active bytes live in the `ActiveHandle::Mem` write handle held by the writer, not in `MemFs`. `seal` consumes the handle's `Vec<u8>`, wraps it as `Bytes` (zero-copy), evicts oldest segments under the lock until the new segment fits, then pushes to the back (see section 3). `take_files` pops **at most one** segment from the front per call and returns it with payload already in hand. `remove_sealed` is a no-op: bytes already left `MemFs`.
 
 ### At-most-once handoff and lazy load
 
@@ -196,8 +196,8 @@ Memory mode reuses the existing pipeline.
 The only obstacle is `SegmentData::segment`, today typed as `SealedSegment { path, index }` and filesystem-coupled. Memory mode has no real path. `SealedSegment` stays as the disk variant, paired with a new `MemorySegment`, both under a `SegmentRef` enum:
 
 ```rust
-pub struct SealedSegment { pub path: PathBuf, pub index: u32 }
-pub struct MemorySegment { pub index: u32, pub size: u64 }
+pub struct SealedSegment { pub(crate) path: PathBuf, pub(crate) index: u32 }
+pub struct MemorySegment { pub(crate) index: u32, pub(crate) size: u64 }
 
 pub enum SegmentRef {
     Disk(SealedSegment),
@@ -206,10 +206,10 @@ pub enum SegmentRef {
 
 impl SegmentRef {
     pub fn index(&self) -> u32 { ... }
-    /// Human-readable id for tracing and metric labels.
-    /// Disk renders the path, memory renders `mem://{index}`.
-    pub fn display_id(&self) -> impl std::fmt::Display + '_ { ... }
 }
+
+// `SealedSegment::path()`, `MemorySegment::size()` and the `Display` impl
+// on `SegmentRef` (renders `mem://{index}` for memory) cover external reads.
 ```
 
 `SegmentData::segment()` returns `&SegmentRef`. Disk-only call sites (`WriteBackProcessor`, the path-logging branch of `S3PipelineUploader`) match on the enum. `WriteBackProcessor` paired with a memory writer is a compile error via the `PipelineBuilder` typestate (see section 4), so the disk-only `match` arm is defense in depth.
@@ -220,10 +220,8 @@ impl SegmentRef {
 
 Apply to every pipeline stage (memory or disk). Worker wraps each processor's `process(...)` future:
 
-- **Bounded retry budget.** On `retryable: true`, the worker re-runs the stage up to `retry_budget` times before dropping the segment. Default 3. `S3PipelineUploader` wraps its own `CircuitBreaker` and is instantiated with `retry_budget = 1`. Memory mode needs this since segments leave the ring on pop. Without bounded retry, the first transient error would lose the segment.
+- **Bounded retry budget (memory only).** On `retryable: true` in memory mode, the worker re-enqueues the original seal'd bytes (Arc-clone snapshot) up to `MEMORY_RETRY_BUDGET = 3` times before dropping. Each re-enqueue pins a ring slot, so retries must be bounded. Disk re-reads the file and stays unbounded (`S3PipelineUploader`'s own `CircuitBreaker` handles transient backoff there).
 - **Panic isolation.** Stage future runs inside `AssertUnwindSafe(...).catch_unwind()`. A panic drops the segment, fires metrics and keeps the stage instance (so transient state like connection pools survives). **Contract for custom processor authors:** a panicked `process(...)` must leave the instance valid for the next call (no held locks, no half-filled buffers, no corrupted state).
-
-These attach to processors via `PipelineBuilder::pipe_with_config`.
 
 ---
 
@@ -327,7 +325,7 @@ let (runtime, guard) = TracedRuntime::builder()
 
 `PipelineBuilder<Mode>` carries the same phantom typestate as the writer, with `.write_back()` defined only on `PipelineBuilder<Disk>`. `with_custom_pipeline` takes a fresh `Mode` parameter that the closure body (via `.write_back()`) or the writer arg at `build_and_start` unifies. Pairing `.write_back()` with a memory writer is a compile error via that unification.
 
-Out of scope: catching `WriteBackProcessor` added via `.pipe(WriteBackProcessor)` (bypasses the gated `.write_back()` verb), or "memory writer with no delivery processor" (silent eviction). Both are user-error situations rcoh's posture accepts; surfacing them at compile time would mean a `DeliveryProcessor` typestate or marker-trait scheme that adds more friction than it pays for at this stage.
+Out of scope: catching `WriteBackProcessor` added via `.pipe(WriteBackProcessor)` (bypasses the gated `.write_back()` verb, runtime-errors instead), or "memory writer with no delivery processor" (silent eviction). Surfacing both at compile time would mean a `DeliveryProcessor` typestate or marker-trait scheme that adds more friction than it pays for at this stage.
 
 ### `InMemoryWriter::new_in_memory` defaults
 
