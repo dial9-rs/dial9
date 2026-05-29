@@ -281,9 +281,6 @@ pub struct RotatingWriter<Mode: WriterMode = Disk> {
     next_drain_time: Instant,
     /// Unified filesystem/channel abstraction.
     fs: Arc<Fs>,
-    /// True for disk mode: `closed_files` tracks sizes for budget eviction.
-    /// False for memory mode: eviction is handled by the memory backend at seal time.
-    tracks_closed_files: bool,
     _mode: PhantomData<Mode>,
 }
 
@@ -402,7 +399,6 @@ impl RotatingWriter<Disk> {
             drain_interval,
             next_drain_time: now + drain_interval,
             fs,
-            tracks_closed_files: true,
             _mode: PhantomData,
         };
         // Enforce the budget immediately so artifacts from prior writer
@@ -443,7 +439,6 @@ impl RotatingWriter<Disk> {
             drain_interval: DEFAULT_DRAIN_INTERVAL,
             next_drain_time: now + DEFAULT_DRAIN_INTERVAL,
             fs,
-            tracks_closed_files: true,
             _mode: PhantomData,
         })
     }
@@ -557,7 +552,6 @@ impl RotatingWriter<Memory> {
             drain_interval,
             next_drain_time: now + drain_interval,
             fs,
-            tracks_closed_files: false,
             _mode: PhantomData,
         })
     }
@@ -677,7 +671,7 @@ impl<M: WriterMode> RotatingWriter<M> {
         // segment and start a fresh one.
         match self.fs.seal(handle, &self.active_path, current_index) {
             Ok(seg_ref) => {
-                if self.tracks_closed_files {
+                if M::IS_DISK {
                     self.closed_files.push_back((seg_ref, closed_size));
                 }
             }
@@ -727,7 +721,7 @@ impl<M: WriterMode> RotatingWriter<M> {
     /// Total size across all closed + active segments (disk mode only).
     /// Always returns 0 in memory mode, eviction is handled by the memory backend.
     fn total_size(&self) -> u64 {
-        if !self.tracks_closed_files {
+        if !M::IS_DISK {
             return 0;
         }
         let closed: u64 = self.closed_files.iter().map(|(_, s)| s).sum();
@@ -739,7 +733,7 @@ impl<M: WriterMode> RotatingWriter<M> {
     }
 
     fn evict_oldest(&mut self) -> std::io::Result<()> {
-        if !self.tracks_closed_files {
+        if !M::IS_DISK {
             return Ok(());
         }
         // Always keep at least the current file.
@@ -853,7 +847,7 @@ impl<M: WriterMode> TraceWriter<M> for RotatingWriter<M> {
         if self.has_real_events {
             match self.fs.seal(handle, &self.active_path, current_index) {
                 Ok(seg_ref) => {
-                    if self.tracks_closed_files {
+                    if M::IS_DISK {
                         self.closed_files.push_back((seg_ref, bytes_written));
                     }
                 }
@@ -888,7 +882,7 @@ impl<M: WriterMode> TraceWriter<M> for RotatingWriter<M> {
 
         // Final sealed segment must count toward the eviction budget too,
         // otherwise finalize can leave the directory over `max_total_size`.
-        // No-ops on memory mode (`tracks_closed_files == false`).
+        // No-ops on memory mode (`!M::IS_DISK`).
         if let Err(e) = self.evict_oldest() {
             self.fs.mark_writer_done();
             return Err(e);

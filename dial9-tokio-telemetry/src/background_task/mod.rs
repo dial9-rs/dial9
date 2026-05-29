@@ -820,7 +820,9 @@ impl WorkerLoop {
             }
             .append_on_drop(self.metrics_sink.clone());
 
-            let seg_ref_for_panic = seg_ref.clone();
+            // Kept for metadata, metrics, and failure logging after `seg_ref`
+            // moves into `data` below.
+            let seg_ref_retained = seg_ref.clone();
             let mut data = SegmentData {
                 segment: seg_ref,
                 payload,
@@ -828,7 +830,7 @@ impl WorkerLoop {
                     ("epoch_secs".into(), epoch_secs.to_string()),
                     (
                         "segment_index".into(),
-                        seg_ref_for_panic.index().to_string(),
+                        seg_ref_retained.index().to_string(),
                     ),
                 ]),
                 metrics,
@@ -927,7 +929,7 @@ impl WorkerLoop {
                                 target: "dial9_worker",
                                 processor = processor.name(),
                                 segment = seg_idx + 1,
-                                id = %seg_ref_for_panic,
+                                id = %seg_ref_retained,
                                 panic = panic_msg,
                                 "processor panicked, skipping segment"
                             )
@@ -940,7 +942,7 @@ impl WorkerLoop {
                                 operation: Operation::ProcessSegment,
                                 total_time: Timer::start_now(),
                                 status: Some(MetriqueResult::Failure),
-                                segment_index: seg_ref_for_panic.index(),
+                                segment_index: seg_ref_retained.index(),
                                 uncompressed_size,
                                 compressed_size: None,
                                 invalid_file_header: !header_valid,
@@ -951,7 +953,7 @@ impl WorkerLoop {
                             .append_on_drop(self.metrics_sink.clone()),
                         );
                         self.fs
-                            .remove_sealed(&seg_ref_for_panic, RemoveReason::Terminal);
+                            .remove_sealed(&seg_ref_retained, RemoveReason::Terminal);
                         continue 'next_segment;
                     }
                 }
