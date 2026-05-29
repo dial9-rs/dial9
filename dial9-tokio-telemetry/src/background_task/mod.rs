@@ -828,10 +828,7 @@ impl WorkerLoop {
                 payload,
                 metadata: HashMap::from([
                     ("epoch_secs".into(), epoch_secs.to_string()),
-                    (
-                        "segment_index".into(),
-                        seg_ref_retained.index().to_string(),
-                    ),
+                    ("segment_index".into(), seg_ref_retained.index().to_string()),
                 ]),
                 metrics,
                 accounting,
