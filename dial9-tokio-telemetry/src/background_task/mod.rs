@@ -872,20 +872,34 @@ impl WorkerLoop {
                             tracing::debug!(target: "dial9_worker", id = %data.segment, "segment evicted during processing, skipping");
                         } else if e.kind.retryable() {
                             match &data.segment {
+                                // Memory segments always carry retry_count + a
+                                // byte snapshot (set in `TakenSegment::memory`).
+                                // If either is missing the invariant broke. In-flight
+                                // is released via `data.accounting` on `continue`.
                                 SegmentRef::Memory(_) => {
-                                    let attempt = retry_count
-                                        .expect("memory segment always carries retry_count")
-                                        + 1;
-                                    if attempt > crate::background_task::fs::MEMORY_RETRY_BUDGET {
-                                        rate_limited!(Duration::from_secs(60), {
-                                            tracing::warn!(target: "dial9_worker", id = %data.segment, err = ?e.kind, budget = crate::background_task::fs::MEMORY_RETRY_BUDGET, "memory retry budget exhausted, dropping segment");
-                                        });
-                                        // Segment release happens via `data.accounting` drop on `continue` below.
-                                    } else {
-                                        tokio::time::sleep(self.poll_interval).await;
-                                        let bytes = original_bytes
-                                            .expect("memory segment always carries snapshot");
-                                        self.fs.release_for_retry(&data.segment, bytes, attempt);
+                                    match (retry_count, original_bytes.as_ref()) {
+                                        (Some(prev), Some(bytes)) => {
+                                            let attempt = prev + 1;
+                                            if attempt
+                                                > crate::background_task::fs::MEMORY_RETRY_BUDGET
+                                            {
+                                                rate_limited!(Duration::from_secs(60), {
+                                                    tracing::warn!(target: "dial9_worker", id = %data.segment, err = ?e.kind, budget = crate::background_task::fs::MEMORY_RETRY_BUDGET, "memory retry budget exhausted, dropping segment");
+                                                });
+                                            } else {
+                                                tokio::time::sleep(self.poll_interval).await;
+                                                self.fs.release_for_retry(
+                                                    &data.segment,
+                                                    bytes.clone(),
+                                                    attempt,
+                                                );
+                                            }
+                                        }
+                                        _ => {
+                                            rate_limited!(Duration::from_secs(60), {
+                                                tracing::warn!(target: "dial9_worker", id = %data.segment, "memory segment missing retry state, dropping");
+                                            });
+                                        }
                                     }
                                 }
                                 SegmentRef::Disk(_) => {

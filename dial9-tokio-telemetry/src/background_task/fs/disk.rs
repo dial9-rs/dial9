@@ -160,34 +160,39 @@ impl DiskFs {
         };
         let on_disk_indices: HashSet<u32> = on_disk.iter().map(|s| s.index).collect();
 
-        // Stat unclaimed files *outside* the claim mutex to avoid contending
-        // with the writer's `remove_sealed`.
+        // Snapshot the claimed set under a brief lock, then stat candidates
+        // outside it: metadata() syscalls must not hold the claim mutex, or
+        // they contend with the writer's remove_sealed/release_claim. The
+        // worker is the only caller of take_files, so no new claims appear
+        // between this snapshot and the insert below.
+        let already_claimed: HashSet<u32> = {
+            let claimed = self.claimed.lock().unwrap();
+            claimed.keys().copied().collect()
+        };
+
         let mut new_claims: Vec<(u32, u64)> = Vec::new();
         let mut new_segments: Vec<TakenSegment> = Vec::new();
-        {
-            let claimed = self.claimed.lock().unwrap();
-            for seg in &on_disk {
-                if claimed.contains_key(&seg.index) {
-                    continue;
-                }
-                let size = match std::fs::metadata(&seg.path) {
-                    Ok(m) => m.len(),
-                    Err(e) => {
-                        rate_limited!(Duration::from_secs(60), {
-                            tracing::warn!(
-                                target: "dial9_worker",
-                                error = %e,
-                                path = %seg.path.display(),
-                                "failed to stat sealed segment; recording size 0 \
-                                 (in_flight_bytes will undercount this segment)"
-                            );
-                        });
-                        0
-                    }
-                };
-                new_claims.push((seg.index, size));
-                new_segments.push(TakenSegment::disk(seg.clone()));
+        for seg in &on_disk {
+            if already_claimed.contains(&seg.index) {
+                continue;
             }
+            let size = match std::fs::metadata(&seg.path) {
+                Ok(m) => m.len(),
+                Err(e) => {
+                    rate_limited!(Duration::from_secs(60), {
+                        tracing::warn!(
+                            target: "dial9_worker",
+                            error = %e,
+                            path = %seg.path.display(),
+                            "failed to stat sealed segment; recording size 0 \
+                             (in_flight_bytes will undercount this segment)"
+                        );
+                    });
+                    0
+                }
+            };
+            new_claims.push((seg.index, size));
+            new_segments.push(TakenSegment::disk(seg.clone()));
         }
 
         // Prune claims whose file is gone, add this cycle's claims, snapshot
