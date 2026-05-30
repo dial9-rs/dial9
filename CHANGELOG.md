@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Process resource usage source ([#470](https://github.com/dial9-rs/dial9/pull/470))
+- Add resource usage events to trace (rss, page faults etc.) ([#470](https://github.com/dial9-rs/dial9/pull/470))
 
 ## [0.3.12](https://github.com/dial9-rs/dial9/compare/dial9-tokio-telemetry-v0.3.11...dial9-tokio-telemetry-v0.3.12) - 2026-05-28
 
