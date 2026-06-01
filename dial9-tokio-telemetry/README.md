@@ -110,6 +110,13 @@ CPU profiling knobs (`cpu-profiling` feature required):
 | `DIAL9_CPU_SAMPLE_HZ` | `99` | CPU sampling frequency in Hz. |
 | `DIAL9_SCHEDULE_PROFILE_ENABLED` | `true` on Linux with `cpu-profiling`, `false` otherwise | Enable per-worker scheduler event capture. Requires the [CPU profiling setup](#cpu-profiling-linux-only). |
 
+Process resource usage knobs:
+
+| Name | Default | Meaning |
+| --- | --- | --- |
+| `DIAL9_PROCESS_RESOURCE_USAGE_ENABLED` | `true` on Unix, `false` otherwise | Enable process resource usage sampling from `getrusage(RUSAGE_SELF)`. |
+| `DIAL9_PROCESS_RESOURCE_USAGE_SAMPLE_INTERVAL_MS` | `100` | Sampling interval in milliseconds. |
+
 Task dump knobs (capture requires the `taskdump` feature):
 
 | Name | Default | Meaning |
@@ -132,6 +139,7 @@ Compared to [tokio-metrics](https://github.com/tokio-rs/tokio-metrics), which ex
 dial9 is fundamentally a central buffer that can collect data from different sources. You can pull in as many or as few as you want.
 
 - [Tokio Events](#tokio-events): dial9 can capture poll, wake, and worker events from Tokio
+- [Process resource usage](#process-resource-usage-unix): dial9 can sample process-level resource usage on Unix
 - [CPU profiling](#cpu-profiling-linux-only): dial9 can capture linux performance counters and events to produce flamegraphs
 - [Memory profiling](#memory-profiling): dial9 can sample heap allocations to produce allocation flamegraphs and detect leaks
 - [Tracing spans](#tracing-span-events-opt-in): dial9 can capture tracing spans to bring tracing context into your trace files
@@ -176,6 +184,28 @@ fn my_config() -> Dial9Config {
 
 `dial9` can also capture data from multiple runtimes. 
 See [`examples/thread_per_core.rs`](https://github.com/dial9-rs/dial9-tokio-telemetry/blob/main/dial9-tokio-telemetry/examples/thread_per_core.rs) and [`examples/multi_runtime.rs`](https://github.com/dial9-rs/dial9-tokio-telemetry/blob/main/dial9-tokio-telemetry/examples/multi_runtime.rs) for complete examples.
+
+### Process resource usage (Unix)
+
+Programmatic builders leave process resource usage sampling disabled unless you
+opt in:
+
+```rust,ignore
+use dial9_tokio_telemetry::telemetry::{ProcessResourceUsageConfig, TracedRuntime};
+
+let (runtime, guard) = TracedRuntime::builder()
+    .with_process_resource_usage(ProcessResourceUsageConfig::default())
+    .build_and_start(tokio::runtime::Builder::new_multi_thread(), writer)?;
+```
+
+Or use `TelemetryCore::builder().process_resource_usage(...)` directly.
+
+`Dial9Config::from_env()` enables this by default on Unix when telemetry itself
+is enabled. To opt out, set:
+
+```text
+DIAL9_PROCESS_RESOURCE_USAGE_ENABLED=false
+```
 
 ### CPU profiling (Linux only)
 

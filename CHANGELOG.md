@@ -16,6 +16,84 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Breaking:** renamed `RotatingWriter` to `DiskWriter`. The writer is now generic over its storage backend (`SegmentWriter<Mode>`) with `DiskWriter` / `InMemoryWriter` as the public types; memory constructors are `InMemoryWriter::new` / `::builder` ([#435](https://github.com/dial9-rs/dial9/pull/435))
 - **Breaking:** `SegmentData::segment()` returns `&SegmentRef` (disk- or memory-backed) instead of `&SealedSegment`; processors that read the segment path must match the enum ([#435](https://github.com/dial9-rs/dial9/pull/435))
 
+## [0.3.13](https://github.com/dial9-rs/dial9/compare/dial9-tokio-telemetry-v0.3.12...dial9-tokio-telemetry-v0.3.13) - 2026-05-29
+
+### Added
+
+- Add resource usage events to trace (rss, page faults etc.) ([#470](https://github.com/dial9-rs/dial9/pull/470))
+
+## [0.3.12](https://github.com/dial9-rs/dial9/compare/dial9-tokio-telemetry-v0.3.11...dial9-tokio-telemetry-v0.3.12) - 2026-05-28
+
+This release adds **memory profiling** and **CPU-profiler-only mode**.
+
+### Memory Profiling ([#442](https://github.com/dial9-rs/dial9/pull/442), [#443](https://github.com/dial9-rs/dial9/pull/443), [#452](https://github.com/dial9-rs/dial9/pull/452), [#459](https://github.com/dial9-rs/dial9/pull/459))
+
+dial9 can now sample heap allocations and produce allocation flamegraphs. With liveset tracking enabled, you can see which allocations are never freed.
+
+```rust
+use dial9_tokio_telemetry::memory_profiling::{
+    Dial9Allocator, MemoryProfiler, MemoryProfilingConfig,
+};
+
+#[global_allocator]
+static ALLOC: Dial9Allocator = Dial9Allocator::system();
+
+let config = MemoryProfilingConfig::builder()
+    .sample_rate_bytes(512 * 1024)  // sample ~every 512 KiB allocated
+    .track_liveset(true)            // track frees for leak detection
+    .build();
+
+let _guard = MemoryProfiler::from_config(config)
+    .install(handle)
+    .expect("failed to install memory profiler");
+```
+
+The viewer includes a new **heap flamegraph** tab with toggleable bytes/count views. The trace emits `MemoryProfileOverflowEvent` when ring buffers overflow so you know when leak counts may be inflated.
+
+### CPU Profiler Only Mode ([#454](https://github.com/dial9-rs/dial9/pull/454))
+
+dial9 can now be used purely as a CPU profiler without Tokio runtime hooks. Useful for non-Tokio applications or when you only need flamegraphs:
+
+```rust
+let (runtime, guard) = TracedRuntime::builder()
+    .with_cpu_profiling(CpuProfilingConfig::default())
+    .with_tokio_instrumentation(false)
+    .build_and_start(tokio::runtime::Builder::new_multi_thread(), writer)?;
+```
+
+Or via environment variables:
+
+```text
+DIAL9_ENABLED=true
+DIAL9_CPU_PROFILE_ENABLED=true
+DIAL9_TOKIO_INSTRUMENTATION_ENABLED=false
+```
+
+### Setup Diagnostics Skill ([#464](https://github.com/dial9-rs/dial9/pull/464))
+
+The agent toolkit now runs setup diagnostics before analysis, detecting missing frame pointers, uninstrumented tasks, stripped debug symbols, and disabled scheduling events. When detected, it provides instructions to fix:
+
+```
+🔴 [missing-frame-pointers] CPU stack traces are only 1.4 frames deep on average (expected 10+).
+
+  Fix: Add to .cargo/config.toml:
+  [build]
+  rustflags = ["--cfg", "tokio_unstable", "-C", "force-frame-pointers=yes"]
+
+🟡 [missing-wake-events] 50 tasks spawned but 0 wake events recorded.
+
+  Fix: Use TelemetryHandle::spawn() instead of tokio::spawn()
+```
+
+### Other Changes
+
+- *(tokio-telemetry)* Add `Deserialize` to built-in event structs ([#451](https://github.com/dial9-rs/dial9/pull/451), [#447](https://github.com/dial9-rs/dial9/pull/447))
+- *(viewer)* Continuous log-scale poll color heatmap replaces the old 4-bucket scheme ([#453](https://github.com/dial9-rs/dial9/pull/453))
+- `max_file_size` is now optional in `Dial9Config` — defaults to `min(100 MiB, max_total_size / 4)` ([#456](https://github.com/dial9-rs/dial9/pull/456))
+- Rotation period is now measured monotonically, removing wallclock-time edge cases ([#461](https://github.com/dial9-rs/dial9/pull/461))
+- Trace metadata now includes `dial9.version` for debugging version mismatches ([#463](https://github.com/dial9-rs/dial9/pull/463))
+- Viewer: allow empty prefix when searching S3 buckets ([#460](https://github.com/dial9-rs/dial9/pull/460))
+
 ## [0.3.11](https://github.com/dial9-rs/dial9/compare/dial9-tokio-telemetry-v0.3.10...dial9-tokio-telemetry-v0.3.11) - 2026-05-22
 
 ### Added

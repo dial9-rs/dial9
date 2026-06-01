@@ -14,7 +14,7 @@ use dial9_tokio_telemetry::memory_profiling::{
 #[cfg(target_os = "linux")]
 use dial9_tokio_telemetry::telemetry::cpu_profile::{CpuProfilingConfig, SchedEventConfig};
 use dial9_tokio_telemetry::telemetry::{
-    DiskWriter, TaskDumpConfig, TelemetryHandle, TracedRuntime,
+    DiskWriter, ProcessResourceUsageConfig, TaskDumpConfig, TelemetryHandle, TracedRuntime,
 };
 use dial9_tokio_telemetry::tracing_layer::Dial9TokioLayer;
 use tokio::runtime::Builder;
@@ -197,7 +197,8 @@ fn main() -> std::io::Result<()> {
     builder.worker_threads(args.worker_threads).enable_all();
     let traced_builder = TracedRuntime::builder()
         .with_trace_path(&args.trace_path)
-        .with_task_tracking(true);
+        .with_task_tracking(true)
+        .with_process_resource_usage(ProcessResourceUsageConfig::default());
     let traced_builder = if args.no_task_dumps {
         traced_builder
     } else {

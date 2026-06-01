@@ -206,6 +206,9 @@ const ENV_DIAL9_CPU_SAMPLE_HZ: &str = "DIAL9_CPU_SAMPLE_HZ";
 const ENV_DIAL9_SCHEDULE_PROFILE_ENABLED: &str = "DIAL9_SCHEDULE_PROFILE_ENABLED";
 const ENV_DIAL9_TASK_DUMP_ENABLED: &str = "DIAL9_TASK_DUMP_ENABLED";
 const ENV_DIAL9_TASK_DUMP_IDLE_THRESHOLD_MS: &str = "DIAL9_TASK_DUMP_IDLE_THRESHOLD_MS";
+const ENV_DIAL9_PROCESS_RESOURCE_USAGE_ENABLED: &str = "DIAL9_PROCESS_RESOURCE_USAGE_ENABLED";
+const ENV_DIAL9_PROCESS_RESOURCE_USAGE_SAMPLE_INTERVAL_MS: &str =
+    "DIAL9_PROCESS_RESOURCE_USAGE_SAMPLE_INTERVAL_MS";
 
 const DEFAULT_ENABLED: bool = false;
 const DEFAULT_TRACE_DIR: &str = "/tmp/dial9-traces";
@@ -216,6 +219,7 @@ const DEFAULT_CPU_PROFILE_ENABLED: bool = cfg!(all(target_os = "linux", feature 
 const DEFAULT_SCHEDULE_PROFILE_ENABLED: bool =
     cfg!(all(target_os = "linux", feature = "cpu-profiling"));
 const DEFAULT_TASK_DUMP_ENABLED: bool = false;
+const DEFAULT_PROCESS_RESOURCE_USAGE_ENABLED: bool = cfg!(unix);
 
 const BYTES_PER_MIB: u64 = 1024 * 1024;
 
@@ -253,6 +257,8 @@ struct ParsedEnvConfig {
     schedule_profile_enabled: Option<bool>,
     task_dump_enabled: Option<bool>,
     task_dump_idle_threshold: Option<Duration>,
+    process_resource_usage_enabled: Option<bool>,
+    process_resource_usage_sample_interval: Option<Duration>,
 }
 
 #[derive(Debug)]
@@ -304,6 +310,11 @@ struct ResolvedEnvConfig {
 
     // None means TaskDumpConfig::default() owns the idle threshold.
     task_dump_idle_threshold: Option<Duration>,
+
+    process_resource_usage_enabled: bool,
+
+    // None means ProcessResourceUsageConfig::default() owns the sample interval.
+    process_resource_usage_sample_interval: Option<Duration>,
 }
 
 struct RuntimeEnvConfig {
@@ -316,6 +327,8 @@ struct RuntimeEnvConfig {
     schedule_profile_enabled: bool,
     task_dump_enabled: bool,
     task_dump_idle_threshold: Option<Duration>,
+    process_resource_usage_enabled: bool,
+    process_resource_usage_sample_interval: Option<Duration>,
 }
 
 fn parse_env_config(env: &impl EnvSource) -> ParsedEnvConfig {
@@ -354,6 +367,10 @@ fn parse_env_config(env: &impl EnvSource) -> ParsedEnvConfig {
         task_dump_idle_threshold: env
             .get_positive_u64(ENV_DIAL9_TASK_DUMP_IDLE_THRESHOLD_MS)
             .map(Duration::from_millis),
+        process_resource_usage_enabled: env.get_bool(ENV_DIAL9_PROCESS_RESOURCE_USAGE_ENABLED),
+        process_resource_usage_sample_interval: env
+            .get_positive_u64(ENV_DIAL9_PROCESS_RESOURCE_USAGE_SAMPLE_INTERVAL_MS)
+            .map(Duration::from_millis),
     }
 }
 
@@ -391,6 +408,10 @@ fn resolve_env_config(parsed: ParsedEnvConfig) -> ResolvedEnvConfig {
             .task_dump_enabled
             .unwrap_or(DEFAULT_TASK_DUMP_ENABLED),
         task_dump_idle_threshold: parsed.task_dump_idle_threshold,
+        process_resource_usage_enabled: parsed
+            .process_resource_usage_enabled
+            .unwrap_or(DEFAULT_PROCESS_RESOURCE_USAGE_ENABLED),
+        process_resource_usage_sample_interval: parsed.process_resource_usage_sample_interval,
     }
 }
 
@@ -534,6 +555,16 @@ fn apply_runtime_env<M>(
         runtime = runtime.with_task_dumps(task_dump_config);
     }
 
+    if config.process_resource_usage_enabled {
+        let process_resource_usage_config = match config.process_resource_usage_sample_interval {
+            Some(interval) => crate::telemetry::ProcessResourceUsageConfig::builder()
+                .sample_interval(interval)
+                .build(),
+            None => crate::telemetry::ProcessResourceUsageConfig::default(),
+        };
+        runtime = runtime.with_process_resource_usage(process_resource_usage_config);
+    }
+
     #[cfg(feature = "cpu-profiling")]
     {
         use crate::telemetry::cpu_profile::{CpuProfilingConfig, SchedEventConfig};
@@ -612,6 +643,13 @@ impl Dial9Config {
     /// | `DIAL9_CPU_SAMPLE_HZ` | `99` | CPU sampling frequency in Hz. |
     /// | `DIAL9_SCHEDULE_PROFILE_ENABLED` | `true` on Linux with `cpu-profiling`, `false` otherwise | Enable per-worker scheduler event capture. Requires the [CPU profiling setup](https://github.com/dial9-rs/dial9/blob/HEAD/dial9-tokio-telemetry/README.md#cpu-profiling-linux-only). |
     ///
+    /// Supported process resource usage variables:
+    ///
+    /// | Variable | Default | Meaning |
+    /// | --- | --- | --- |
+    /// | `DIAL9_PROCESS_RESOURCE_USAGE_ENABLED` | `true` on Unix, `false` otherwise | Enable process resource usage sampling from `getrusage(RUSAGE_SELF)`. |
+    /// | `DIAL9_PROCESS_RESOURCE_USAGE_SAMPLE_INTERVAL_MS` | `100` | Sampling interval in milliseconds. |
+    ///
     /// Supported task dump variables (capture requires the `taskdump` feature):
     ///
     /// | Variable | Default | Meaning |
@@ -645,6 +683,8 @@ impl Dial9Config {
             schedule_profile_enabled,
             task_dump_enabled,
             task_dump_idle_threshold,
+            process_resource_usage_enabled,
+            process_resource_usage_sample_interval,
         } = resolve_env_config(parse_env_config(env));
 
         let runtime_config = RuntimeEnvConfig {
@@ -656,6 +696,8 @@ impl Dial9Config {
             schedule_profile_enabled,
             task_dump_enabled,
             task_dump_idle_threshold,
+            process_resource_usage_enabled,
+            process_resource_usage_sample_interval,
         };
 
         let builder = Self::builder()
@@ -989,6 +1031,8 @@ mod tests {
         assert_eq!(parsed.schedule_profile_enabled, None);
         assert_eq!(parsed.task_dump_enabled, None);
         assert_eq!(parsed.task_dump_idle_threshold, None);
+        assert_eq!(parsed.process_resource_usage_enabled, None);
+        assert_eq!(parsed.process_resource_usage_sample_interval, None);
     }
 
     #[test]
@@ -1010,6 +1054,10 @@ mod tests {
         assert_eq!(resolved.cpu_profile_enabled, supported_profiling);
         assert_eq!(resolved.schedule_profile_enabled, supported_profiling);
         assert_eq!(resolved.task_dump_enabled, DEFAULT_TASK_DUMP_ENABLED);
+        assert_eq!(
+            resolved.process_resource_usage_enabled,
+            DEFAULT_PROCESS_RESOURCE_USAGE_ENABLED
+        );
 
         // Optional config/integrations remain absent unless explicitly requested.
         assert_eq!(resolved.runtime_name, None);
@@ -1020,6 +1068,7 @@ mod tests {
         assert_eq!(resolved.rotation_period, None);
         assert_eq!(resolved.cpu_sample_hz, None);
         assert_eq!(resolved.task_dump_idle_threshold, None);
+        assert_eq!(resolved.process_resource_usage_sample_interval, None);
     }
 
     #[test]
@@ -1054,7 +1103,9 @@ mod tests {
                 .with("DIAL9_CPU_SAMPLE_HZ", "199")
                 .with("DIAL9_SCHEDULE_PROFILE_ENABLED", "false")
                 .with("DIAL9_TASK_DUMP_ENABLED", "true")
-                .with("DIAL9_TASK_DUMP_IDLE_THRESHOLD_MS", "25"),
+                .with("DIAL9_TASK_DUMP_IDLE_THRESHOLD_MS", "25")
+                .with("DIAL9_PROCESS_RESOURCE_USAGE_ENABLED", "true")
+                .with("DIAL9_PROCESS_RESOURCE_USAGE_SAMPLE_INTERVAL_MS", "250"),
         );
 
         assert_eq!(parsed.tokio_instrumentation_enabled, Some(false));
@@ -1072,6 +1123,11 @@ mod tests {
         assert_eq!(
             parsed.task_dump_idle_threshold,
             Some(Duration::from_millis(25))
+        );
+        assert_eq!(parsed.process_resource_usage_enabled, Some(true));
+        assert_eq!(
+            parsed.process_resource_usage_sample_interval,
+            Some(Duration::from_millis(250))
         );
     }
 
@@ -1131,7 +1187,9 @@ mod tests {
                 .with("DIAL9_RUNTIME_NAME", "   ")
                 .with("DIAL9_S3_BUCKET", "   ")
                 .with("DIAL9_CPU_SAMPLE_HZ", "0")
-                .with("DIAL9_TASK_DUMP_IDLE_THRESHOLD_MS", "wat"),
+                .with("DIAL9_TASK_DUMP_IDLE_THRESHOLD_MS", "wat")
+                .with("DIAL9_PROCESS_RESOURCE_USAGE_ENABLED", "maybe")
+                .with("DIAL9_PROCESS_RESOURCE_USAGE_SAMPLE_INTERVAL_MS", "0"),
         );
 
         assert_eq!(parsed.enabled, None);
@@ -1144,6 +1202,8 @@ mod tests {
         assert!(parsed.s3.is_none());
         assert_eq!(parsed.cpu_sample_hz, None);
         assert_eq!(parsed.task_dump_idle_threshold, None);
+        assert_eq!(parsed.process_resource_usage_enabled, None);
+        assert_eq!(parsed.process_resource_usage_sample_interval, None);
     }
 
     #[test]
@@ -1205,6 +1265,57 @@ mod tests {
         assert_eq!(
             shared.task_dump_idle_threshold_ns.load(Ordering::Relaxed),
             25_000_000
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn env_config_enables_process_resource_usage_by_default_on_unix() {
+        let dir = tempfile::tempdir().expect("temporary trace directory should be created");
+        let trace_dir = dir
+            .path()
+            .to_str()
+            .expect("temporary trace directory path should be valid UTF-8");
+        let env = FakeEnv::default()
+            .with("DIAL9_ENABLED", "true")
+            .with("DIAL9_TRACE_DIR", trace_dir);
+
+        let cfg = Dial9Config::from_env_source(&env);
+        let rt = TracedRuntime::try_new(cfg).expect("runtime should build");
+        let shared = rt.guard().shared().expect("telemetry should be enabled");
+        let sources = shared.sources.lock().unwrap();
+
+        assert!(
+            sources
+                .iter()
+                .any(|source| source.name() == "process_resource_usage"),
+            "from_env should enable process resource usage by default on Unix"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn env_config_can_disable_process_resource_usage() {
+        let dir = tempfile::tempdir().expect("temporary trace directory should be created");
+        let trace_dir = dir
+            .path()
+            .to_str()
+            .expect("temporary trace directory path should be valid UTF-8");
+        let env = FakeEnv::default()
+            .with("DIAL9_ENABLED", "true")
+            .with("DIAL9_TRACE_DIR", trace_dir)
+            .with("DIAL9_PROCESS_RESOURCE_USAGE_ENABLED", "false");
+
+        let cfg = Dial9Config::from_env_source(&env);
+        let rt = TracedRuntime::try_new(cfg).expect("runtime should build");
+        let shared = rt.guard().shared().expect("telemetry should be enabled");
+        let sources = shared.sources.lock().unwrap();
+
+        assert!(
+            sources
+                .iter()
+                .all(|source| source.name() != "process_resource_usage"),
+            "explicit env opt-out should disable process resource usage"
         );
     }
 

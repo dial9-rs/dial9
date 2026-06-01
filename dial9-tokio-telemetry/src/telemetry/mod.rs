@@ -15,6 +15,7 @@ pub use collector::Batch;
 pub mod cpu_profile;
 pub(crate) mod events;
 pub(crate) mod format;
+pub(crate) mod process_resource_usage;
 pub(crate) mod recorder;
 pub mod task_dump_config;
 pub(crate) mod task_metadata;
@@ -24,9 +25,10 @@ pub use crate::traced::TracedFuture;
 pub use buffer::{Encodable, ThreadLocalEncoder};
 pub use events::{CpuSampleSource, TelemetryEvent, clock_monotonic_ns};
 pub use format::{
-    AllocEvent, FreeEvent, PollEndEvent, PollStartEvent, TaskSpawnEvent, WakeEventEvent, WorkerId,
-    WorkerParkEvent, WorkerUnparkEvent,
+    AllocEvent, FreeEvent, PollEndEvent, PollStartEvent, ProcessResourceUsageEvent, TaskSpawnEvent,
+    WakeEventEvent, WorkerId, WorkerParkEvent, WorkerUnparkEvent,
 };
+pub use process_resource_usage::ProcessResourceUsageConfig;
 pub use recorder::{
     HasTracePath, NoTracePath, PipelineCustom, PipelineS3, PipelineUnset, RuntimeTelemetryHandle,
     TelemetryCore, TelemetryCoreBuilder, TelemetryGuard, TelemetryHandle, TelemetryRuntimeError,

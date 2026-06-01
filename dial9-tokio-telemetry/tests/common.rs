@@ -77,9 +77,11 @@ impl TraceWriter for BytesCapturingWriter {
 pub fn decode_all<T: DeserializeOwned>(batches: &[Vec<u8>]) -> Vec<T> {
     let mut events = Vec::new();
     for bytes in batches {
-        let mut dec = Decoder::new(bytes).expect("valid trace header");
+        let mut dec = Decoder::new(bytes).expect("captured batch should have a valid trace header");
         dec.for_each_event(|raw| {
-            let ev: T = raw.deserialize().expect("deserialize event");
+            let ev: T = raw
+                .deserialize()
+                .expect("captured event should deserialize as the requested type");
             events.push(ev);
         })
         .expect("decode batch");

@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 use dial9_tokio_telemetry::background_task::{ProcessError, SegmentData, SegmentProcessor};
 use dial9_tokio_telemetry::telemetry::cpu_profile::CpuProfilingConfig;
 use dial9_tokio_telemetry::telemetry::{
-    InMemoryWriter, RotatingWriter, TelemetryHandle, TracedRuntime,
+    DiskWriter, InMemoryWriter, TelemetryHandle, TracedRuntime,
 };
 
 // ── Tracking allocator ─────────────────────────────────────────────────────
@@ -201,7 +201,7 @@ fn measure(mode: Mode) -> Sample {
             Mode::Disk => {
                 let tmp = tempfile::tempdir().unwrap();
                 let trace_path = tmp.path().join("trace.bin");
-                let writer = RotatingWriter::builder()
+                let writer = DiskWriter::builder()
                     .base_path(trace_path.to_str().unwrap())
                     .max_file_size(SEGMENT_SIZE)
                     .max_total_size(TOTAL_BUDGET)
@@ -222,7 +222,7 @@ fn measure(mode: Mode) -> Sample {
             Mode::DiskCpu => {
                 let tmp = tempfile::tempdir().unwrap();
                 let trace_path = tmp.path().join("trace.bin");
-                let writer = RotatingWriter::builder()
+                let writer = DiskWriter::builder()
                     .base_path(trace_path.to_str().unwrap())
                     .max_file_size(SEGMENT_SIZE)
                     .max_total_size(TOTAL_BUDGET)
@@ -240,7 +240,7 @@ fn measure(mode: Mode) -> Sample {
                 r
             }
             Mode::Mem => {
-                let writer = InMemoryWriter::in_memory_builder()
+                let writer = InMemoryWriter::builder()
                     .max_total_size(TOTAL_BUDGET)
                     .max_segment_size(SEGMENT_SIZE)
                     .rotation_period(ROTATION_PERIOD)
@@ -253,7 +253,7 @@ fn measure(mode: Mode) -> Sample {
                     .expect("build_and_start (mem)")
             }
             Mode::MemCpu => {
-                let writer = InMemoryWriter::in_memory_builder()
+                let writer = InMemoryWriter::builder()
                     .max_total_size(TOTAL_BUDGET)
                     .max_segment_size(SEGMENT_SIZE)
                     .rotation_period(ROTATION_PERIOD)

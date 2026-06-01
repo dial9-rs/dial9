@@ -173,6 +173,33 @@ pub(crate) struct QueueSampleEvent {
     pub global_queue: u8,
 }
 
+/// Wire-format event for process resource usage sampled from `getrusage(RUSAGE_SELF)`.
+#[derive(Debug, TraceEvent)]
+#[cfg_attr(not(feature = "unstable-events"), non_exhaustive)]
+pub struct ProcessResourceUsageEvent {
+    /// Monotonic timestamp in nanoseconds.
+    #[traceevent(timestamp)]
+    pub timestamp_ns: u64,
+    /// Cumulative user CPU time used by this process.
+    pub user_cpu_ns: u64,
+    /// Cumulative system CPU time used by this process.
+    pub system_cpu_ns: u64,
+    /// Maximum resident set size in bytes.
+    pub max_rss_bytes: u64,
+    /// Page faults serviced without disk I/O.
+    pub minor_faults: u64,
+    /// Page faults serviced with disk I/O.
+    pub major_faults: u64,
+    /// Block input operations performed by the process.
+    pub block_input_ops: u64,
+    /// Block output operations performed by the process.
+    pub block_output_ops: u64,
+    /// Voluntary context switches performed by the process.
+    pub voluntary_context_switches: u64,
+    /// Involuntary context switches performed by the process.
+    pub involuntary_context_switches: u64,
+}
+
 /// Wire-format event for a task spawn.
 #[derive(Debug, TraceEvent)]
 pub struct TaskSpawnEvent {
