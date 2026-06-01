@@ -1,13 +1,28 @@
 ---
 name: dial9-html-report
-description: Compile dial9 trace analysis insights into a polished, self-contained HTML report folder with embedded flamegraphs, timeline strips, and viewer deep-links. Use when you have findings from trace analysis and need to deliver them as something a human can open in a browser.
+description: Compile dial9 trace analysis insights into a polished HTML report folder with embedded flamegraphs, timeline strips, and viewer deep-links. Use when you have findings from trace analysis and need to deliver them as something a human can open in a browser.
 ---
 
 # Building HTML Reports from Trace Insights
 
 ## When to use this skill
 
-You have already analyzed a dial9 trace (using the `dial9-toolkit` and `dial9-trace-analysis` skills) and have a set of findings. Now you need to deliver those findings as a self-contained artifact that a human can open in any browser — no server required, works from `file://`.
+You have already analyzed a dial9 trace (using the `dial9-toolkit` and `dial9-trace-analysis` skills) and have a set of findings. Now you need to deliver those findings as an HTML report — a folder a human can open in their browser via a tiny local server.
+
+## Viewing the report (important)
+
+Reports are **served, not opened directly**. Browsers block `fetch()` over `file://`, so the embedded flamegraph and timeline iframes will fail if the user opens `report.html` directly from disk. Tell the user (and yourself, when verifying):
+
+```bash
+# from the dial9 CLI (recommended)
+dial9 report serve path/to/report-folder
+# → http://localhost:8000/report.html
+
+# or any static-file server
+python3 -m http.server -d path/to/report-folder 8000
+```
+
+The folder is portable — zip it, attach it to a PR, drop it in Slack. The recipient just needs to serve it locally too.
 
 ## The shape of a report
 
@@ -124,17 +139,21 @@ Canonical link template:
 
 **Important constraints:**
 - The netlify viewer fetches the trace via HTTP. It cannot load `file://` paths or relative paths from a local report. The trace must be hosted at a reachable URL (S3 presigned URL, public bucket, etc.).
-- If you cannot host the trace, skip viewer deep-links and rely on `embed.html` (which works locally from `file://`).
+- If you cannot host the trace, skip viewer deep-links and rely on `embed.html` (which loads via the local `dial9 report serve` server).
 - **`?worker=` and `?task=` do NOT exist** as viewer URL params. Do not invent them.
 
 ## Slicing traces with `slice.js`
 
-Slice traces to keep report folders small and embed loading fast:
+Slice traces to keep report folders small and embed loading fast.
+
+**Important:** `--start`/`--end` are ABSOLUTE monotonic ns by default (matching `event.ts` from `parseTrace` — typically 10-15 digit numbers). Pass `--relative` if your numbers are offsets from trace start (typically 9-10 digit numbers like `3900000000` for 3.9s).
 
 ```bash
+# slice the burst window (3.9s–4.05s into the trace):
 node /path/to/dial9-trace-format/js/slice.js \
   --input full-trace.bin \
   --output report/traces/burst.bin \
+  --relative \
   --start 3900000000 \
   --end 4050000000
 ```
@@ -146,7 +165,10 @@ const { sliceTrace } = require('/path/to/dial9-trace-format/js/slice.js');
 const fs = require('fs');
 
 const input = fs.readFileSync('full-trace.bin');
-const sliced = sliceTrace(input, { timeRange: { startNs: '3900000000', endNs: '4050000000' } });
+const sliced = sliceTrace(input, {
+  timeRange: { startNs: '3900000000', endNs: '4050000000' },
+  relative: true,
+});
 fs.writeFileSync('report/traces/burst.bin', sliced);
 ```
 
@@ -242,4 +264,4 @@ a:hover { text-decoration: underline; }
 - **Don't render flamegraphs from scratch with CSS bars.** Use `embed.html` — it produces real interactive flamegraphs.
 - **Don't invent viewer URL params.** Only `trace`, `start`, `end`, `svc`, `host`, `from`, `to`, `segs` exist. There is no `?worker=`, `?task=`, or `?source=`.
 - **Don't copy the full multi-MB trace into the report folder.** Slice it to the relevant time window.
-- **Don't rely on a server.** Reports must work when opened from `file://` in any browser.
+- **Don't rely on `file://`.** Reports embed iframes that fetch trace files. Tell users to view via `dial9 report serve <folder>` (or `python3 -m http.server`).

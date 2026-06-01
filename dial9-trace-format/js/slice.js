@@ -28,6 +28,7 @@ const OPTIONAL_BIT = 0x80;
  * @param {Buffer|Uint8Array} input - Raw trace bytes (gzipped or raw)
  * @param {Object} [opts]
  * @param {Object} [opts.timeRange] - { startNs, endNs } monotonic ns bounds (inclusive)
+ * @param {boolean} [opts.relative] - If true, startNs/endNs are offsets from the trace's first timestamp
  * @returns {Buffer} - The sliced trace bytes (raw, not gzipped)
  */
 function sliceTrace(input, opts) {
@@ -37,8 +38,15 @@ function sliceTrace(input, opts) {
     // No filter — return as-is
     return Buffer.from(buf);
   }
-  const startNs = BigInt(timeRange.startNs);
-  const endNs = BigInt(timeRange.endNs);
+
+  let startNs = BigInt(timeRange.startNs);
+  let endNs = BigInt(timeRange.endNs);
+
+  if (opts && opts.relative) {
+    const minTs = findMinTs(buf);
+    startNs = minTs + startNs;
+    endNs = minTs + endNs;
+  }
 
   const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
   const out = [];
@@ -307,24 +315,144 @@ function maybeGunzipSync(input) {
   return b;
 }
 
+/**
+ * Find the first event's absolute timestamp (minTs) by scanning the trace.
+ * Walks frames until the first timestamped event is found.
+ */
+function findMinTs(buf) {
+  const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+  const schemas = new Map();
+  let timestampBaseNs = 0n;
+  let pos = 5; // skip header (magic + version)
+
+  while (pos < buf.length) {
+    const tag = view.getUint8(pos);
+
+    // Mid-stream header
+    if (tag === MAGIC[0] && pos + 5 <= buf.length) {
+      let isHeader = true;
+      for (let i = 1; i < 4; i++) {
+        if (view.getUint8(pos + i) !== MAGIC[i]) { isHeader = false; break; }
+      }
+      if (isHeader) { schemas.clear(); timestampBaseNs = 0n; pos += 5; continue; }
+    }
+
+    pos++; // consume tag
+
+    switch (tag) {
+      case TAG_SCHEMA: {
+        const typeId = view.getUint16(pos, true); pos += 2;
+        const nameLen = view.getUint16(pos, true); pos += 2;
+        pos += nameLen;
+        const hasTimestamp = view.getUint8(pos) !== 0; pos += 1;
+        const fieldCount = view.getUint16(pos, true); pos += 2;
+        const fields = [];
+        for (let i = 0; i < fieldCount; i++) {
+          const fnLen = view.getUint16(pos, true); pos += 2;
+          pos += fnLen;
+          const ft = view.getUint8(pos); pos++;
+          fields.push(ft);
+        }
+        schemas.set(typeId, { hasTimestamp, fields });
+        break;
+      }
+      case TAG_EVENT: {
+        const typeId = view.getUint16(pos, true); pos += 2;
+        const schema = schemas.get(typeId);
+        if (!schema) throw new Error(`Unknown type_id ${typeId} in findMinTs`);
+        if (schema.hasTimestamp) {
+          const b0 = view.getUint8(pos);
+          const b1 = view.getUint8(pos + 1);
+          const b2 = view.getUint8(pos + 2);
+          const deltaNs = b0 | (b1 << 8) | (b2 << 16);
+          return timestampBaseNs + BigInt(deltaNs);
+        }
+        // Skip fields to continue searching
+        pos += schema.hasTimestamp ? 3 : 0;
+        for (const ft of schema.fields) { pos += fieldSize(view, pos, ft); }
+        break;
+      }
+      case TAG_TIMESTAMP_RESET: {
+        const lo = view.getUint32(pos, true);
+        const hi = view.getUint32(pos + 4, true);
+        timestampBaseNs = (BigInt(hi) << 32n) | BigInt(lo);
+        pos += 8;
+        break;
+      }
+      case TAG_STRING_POOL: {
+        const count = view.getUint32(pos, true); pos += 4;
+        for (let i = 0; i < count; i++) {
+          pos += 4;
+          const len = view.getUint32(pos, true); pos += 4;
+          pos += len;
+        }
+        break;
+      }
+      case TAG_STACK_POOL: {
+        const count = view.getUint32(pos, true); pos += 4;
+        for (let i = 0; i < count; i++) {
+          pos += 4;
+          const frameCount = view.getUint32(pos, true); pos += 4;
+          pos += frameCount * 8;
+        }
+        break;
+      }
+      case TAG_SCHEMA_ANNOTATIONS: {
+        const [_typeId, varintSize] = decodeULEB128(view, pos);
+        pos += varintSize;
+        const annCount = view.getUint16(pos, true); pos += 2;
+        for (let i = 0; i < annCount; i++) {
+          pos += 2;
+          const keyLen = view.getUint16(pos, true); pos += 2;
+          pos += keyLen;
+          const valLen = view.getUint32(pos, true); pos += 4;
+          pos += valLen;
+        }
+        break;
+      }
+      default:
+        throw new Error(`Unknown frame tag 0x${tag.toString(16)} in findMinTs`);
+    }
+  }
+  throw new Error("No timestamped event found in trace");
+}
+
 // --- CLI ---
 if (require.main === module) {
   const fs = require("fs");
   const args = process.argv.slice(2);
-  let inputPath, outputPath, startNs, endNs;
+  let inputPath, outputPath, startNs, endNs, relative = false;
   for (let i = 0; i < args.length; i++) {
     switch (args[i]) {
       case "--input": inputPath = args[++i]; break;
       case "--output": outputPath = args[++i]; break;
       case "--start": startNs = args[++i]; break;
       case "--end": endNs = args[++i]; break;
+      case "--relative": relative = true; break;
       default:
         console.error(`Unknown arg: ${args[i]}`);
         process.exit(1);
     }
   }
   if (!inputPath || !outputPath) {
-    console.error("Usage: node slice.js --input <trace.bin> --output <sliced.bin> [--start <ns>] [--end <ns>]");
+    console.error(`Usage: node slice.js --input <trace.bin> --output <sliced.bin> [--start <ns>] [--end <ns>] [--relative]
+
+Options:
+  --input <path>    Input trace file (required)
+  --output <path>   Output sliced trace file (required)
+  --start <ns>      Start timestamp in nanoseconds (inclusive)
+  --end <ns>        End timestamp in nanoseconds (inclusive)
+  --relative        Interpret --start/--end as offsets from trace start (minTs).
+                    Without this flag, values are absolute monotonic ns (matching event.ts).
+                    Use --relative when your timestamps come from analyze.js or similar
+                    tools that report time relative to trace start.
+
+Examples:
+  # Absolute (event.ts values from parseTrace — typically 10-15 digit numbers):
+  node slice.js --input full.bin --output burst.bin --start 150439548276 --end 154676563153
+
+  # Relative (offsets from trace start — typically 9-10 digit numbers):
+  node slice.js --input full.bin --output burst.bin --relative --start 3900000000 --end 4050000000`);
     process.exit(1);
   }
   const input = fs.readFileSync(inputPath);
@@ -334,6 +462,9 @@ if (require.main === module) {
       startNs: startNs != null ? startNs : "0",
       endNs: endNs != null ? endNs : "18446744073709551615",
     };
+  }
+  if (relative) {
+    opts.relative = true;
   }
   const result = sliceTrace(input, opts);
   fs.writeFileSync(outputPath, result);

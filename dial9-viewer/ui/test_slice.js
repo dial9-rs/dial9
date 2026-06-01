@@ -127,6 +127,86 @@ async function main() {
     }
   }
 
+  // ── Test 6: Relative slice with [0, durationFull] returns all events ──
+  // Note: relative mode anchors from the first event's timestamp (findMinTs),
+  // which may differ slightly from parseTrace's minTs (global minimum).
+  // Use a generous end to ensure we capture everything.
+  {
+    const duration = full.maxTs - full.minTs;
+    const sliced = sliceTrace(input, {
+      timeRange: { startNs: "0", endNs: (duration + 1000000000).toString() },
+      relative: true,
+    });
+    const parsed = await parseTrace(sliced);
+    const slicedEventCount = parsed.events.length + parsed.cpuSamples.length + parsed.customEvents.length;
+    if (slicedEventCount === fullEventCount) {
+      pass(`Relative full-range slice preserves all ${fullEventCount} events`);
+    } else {
+      fail(`Relative full-range slice: expected ${fullEventCount} events, got ${slicedEventCount}`);
+    }
+  }
+
+  // ── Test 7: Relative slice with [0, halfDuration] returns ~half the events ──
+  {
+    const halfDuration = Math.floor((full.maxTs - full.minTs) / 2);
+    const sliced = sliceTrace(input, {
+      timeRange: { startNs: "0", endNs: halfDuration.toString() },
+      relative: true,
+    });
+    const parsed = await parseTrace(sliced);
+    const slicedEventCount = parsed.events.length + parsed.cpuSamples.length + parsed.customEvents.length;
+    // All events should be within [minTs, minTs + halfDuration]
+    let outOfRange = 0;
+    for (const e of parsed.events) {
+      if (e.timestamp < full.minTs || e.timestamp > full.minTs + halfDuration) outOfRange++;
+    }
+    for (const s of parsed.cpuSamples) {
+      if (s.timestamp < full.minTs || s.timestamp > full.minTs + halfDuration) outOfRange++;
+    }
+    for (const c of parsed.customEvents) {
+      if (c.timestamp < full.minTs || c.timestamp > full.minTs + halfDuration) outOfRange++;
+    }
+    if (slicedEventCount > 0 && slicedEventCount < fullEventCount && outOfRange === 0) {
+      pass(`Relative half-range slice: ${slicedEventCount} events, all within range`);
+    } else if (slicedEventCount === 0) {
+      fail("Relative half-range slice has 0 events");
+    } else if (outOfRange > 0) {
+      fail(`Relative half-range slice: ${outOfRange} events out of range`);
+    } else {
+      fail(`Relative half-range slice: expected fewer than ${fullEventCount}, got ${slicedEventCount}`);
+    }
+  }
+
+  // ── Test 8: Relative slice [3.9s, 4.05s] on demo-trace produces non-empty slice ──
+  {
+    const sliced = sliceTrace(input, {
+      timeRange: { startNs: "3900000000", endNs: "4050000000" },
+      relative: true,
+    });
+    const parsed = await parseTrace(sliced);
+    const slicedEventCount = parsed.events.length + parsed.cpuSamples.length + parsed.customEvents.length;
+    if (slicedEventCount > 0) {
+      pass(`Relative [3.9s, 4.05s] slice has ${slicedEventCount} events`);
+    } else {
+      fail("Relative [3.9s, 4.05s] slice has 0 events (this is the foot-gun case)");
+    }
+  }
+
+  // ── Test 9: Without --relative, small values produce 0-event slice (backward compat) ──
+  {
+    const sliced = sliceTrace(input, {
+      timeRange: { startNs: "3900000000", endNs: "4050000000" },
+      // no relative: true — absolute mode
+    });
+    const parsed = await parseTrace(sliced);
+    const slicedEventCount = parsed.events.length + parsed.cpuSamples.length + parsed.customEvents.length;
+    if (slicedEventCount === 0) {
+      pass("Absolute mode with small relative-looking values correctly produces 0 events");
+    } else {
+      fail(`Absolute mode with small values: expected 0 events, got ${slicedEventCount}`);
+    }
+  }
+
   console.log(`\n${failures === 0 ? "All tests passed" : `${failures} test(s) FAILED`}`);
   process.exit(failures === 0 ? 0 : 1);
 }
