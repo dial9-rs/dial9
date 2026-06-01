@@ -226,7 +226,7 @@ mod tests {
     use crate::telemetry::events::TelemetryEvent;
     use crate::telemetry::recorder::{TelemetryCore, TracedRuntime};
     use crate::telemetry::task_metadata::UNKNOWN_TASK_ID;
-    use crate::telemetry::writer::{NullWriter, RotatingWriter};
+    use crate::telemetry::writer::{DiskWriter, NullWriter};
     use futures_util::task::noop_waker;
     use std::pin::Pin;
     use std::sync::{Arc, Mutex};
@@ -265,7 +265,7 @@ mod tests {
     /// matches the spawned task when a `Notify` wakes it.
     ///
     /// This is an integration test: events are written to a real file via
-    /// `RotatingWriter` and then read back with `TraceReader`.
+    /// `DiskWriter` and then read back with `TraceReader`.
     #[test]
     #[cfg(feature = "analysis")]
     fn traced_emits_wake_events() {
@@ -277,7 +277,7 @@ mod tests {
         // BUFFER accesses — share a single thread with the test itself.
         let (runtime, guard) = TracedRuntime::build_and_start(
             tokio::runtime::Builder::new_current_thread(),
-            RotatingWriter::single_file(&trace_path).unwrap(),
+            DiskWriter::single_file(&trace_path).unwrap(),
         )
         .unwrap();
 
@@ -318,7 +318,7 @@ mod tests {
         buffer::drain_to_collector(&th.shared.collector);
 
         // Dropping the guard stops the background flush thread, joins it, then
-        // performs a final flush: collector → RotatingWriter → trace file.
+        // performs a final flush: collector → DiskWriter → trace file.
         drop(guard);
 
         // Parse the trace file and collect all WakeEvents.

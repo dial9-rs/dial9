@@ -41,7 +41,7 @@ pub(crate) const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(1);
 #[derive(bon::Builder)]
 #[builder(on(String, into))]
 pub struct BackgroundTaskConfig {
-    /// The trace base path (same path passed to `RotatingWriter::new`).
+    /// The trace base path (same path passed to `DiskWriter::new`).
     /// `None` when using the in-memory backend.
     #[builder(into)]
     trace_path: Option<PathBuf>,
@@ -2257,7 +2257,7 @@ mod worker_pipeline_tests {
     }
 
     /// Disk `mark_writer_done` alone (no stop-token cancel) drains and exits.
-    /// Symmetric with memory mode: `RotatingWriter::finalize` is a complete
+    /// Symmetric with memory mode: `DiskWriter::finalize` is a complete
     /// shutdown signal across both backends.
     #[tokio::test]
     async fn disk_worker_run_drains_on_writer_done() {

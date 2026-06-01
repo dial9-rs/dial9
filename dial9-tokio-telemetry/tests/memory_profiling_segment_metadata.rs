@@ -6,7 +6,7 @@
 use dial9_tokio_telemetry::memory_profiling::{
     Dial9Allocator, MemoryProfiler, MemoryProfilingConfig,
 };
-use dial9_tokio_telemetry::telemetry::{RotatingWriter, TelemetryEvent, TracedRuntime};
+use dial9_tokio_telemetry::telemetry::{DiskWriter, TelemetryEvent, TracedRuntime};
 use std::time::Duration;
 
 #[global_allocator]
@@ -17,7 +17,7 @@ fn memory_sample_rate_appears_in_segment_metadata() {
     let dir = tempfile::tempdir().unwrap();
     let trace_path = dir.path().join("trace.bin");
 
-    let writer = RotatingWriter::single_file(&trace_path).unwrap();
+    let writer = DiskWriter::single_file(&trace_path).unwrap();
 
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.worker_threads(1).enable_all();

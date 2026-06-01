@@ -1,4 +1,4 @@
-//! Telemetry example using `RotatingWriter` for bounded disk usage.
+//! Telemetry example using `DiskWriter` for bounded disk usage.
 //!
 //! This demonstrates how to collect runtime telemetry with automatic file
 //! rotation so that trace files never exceed a configured total size on disk.
@@ -9,18 +9,18 @@
 //! After running, inspect the trace files:
 //!   cargo run --example analyze_trace -- /tmp/telemetry_rotating/trace.0.bin
 
-use dial9_tokio_telemetry::telemetry::{RotatingWriter, TracedRuntime};
+use dial9_tokio_telemetry::telemetry::{DiskWriter, TracedRuntime};
 use std::time::Duration;
 
 fn main() -> std::io::Result<()> {
     let trace_dir = "/tmp/telemetry_rotating";
 
-    // RotatingWriter rotates to a new file when the current file exceeds
+    // DiskWriter rotates to a new file when the current file exceeds
     // `max_file_size`, and deletes the oldest files when total disk usage
     // exceeds `max_total_size`.
     //
     // Files are written as `trace.0.bin`, `trace.1.bin`, etc.
-    let writer = RotatingWriter::builder()
+    let writer = DiskWriter::builder()
         .base_path(format!("{trace_dir}/trace.bin"))
         .max_file_size(1024 * 1024) // rotate after 1 MiB per file
         .max_total_size(5 * 1024 * 1024) // keep at most 5 MiB of trace data on disk

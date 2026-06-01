@@ -320,7 +320,7 @@ mod tests {
     use crate::telemetry::buffer;
     use crate::telemetry::collector::CentralCollector;
     #[cfg(feature = "cpu-profiling")]
-    use crate::telemetry::writer::RotatingWriter;
+    use crate::telemetry::writer::DiskWriter;
     use std::panic::Location;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, AtomicUsize};
@@ -548,7 +548,7 @@ mod tests {
         let location_a = loc_a();
         let location_b = loc_b();
 
-        let writer = crate::telemetry::writer::RotatingWriter::builder()
+        let writer = crate::telemetry::writer::DiskWriter::builder()
             .base_path(&base)
             .max_file_size(100)
             .max_total_size(100_000)
@@ -751,7 +751,7 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let trace_path = dir.path().join("trace.bin");
 
-        let writer = crate::telemetry::writer::RotatingWriter::builder()
+        let writer = crate::telemetry::writer::DiskWriter::builder()
             .base_path(&trace_path)
             .max_file_size(1024 * 1024)
             .max_total_size(10 * 1024 * 1024)
@@ -906,7 +906,7 @@ mod tests {
         use crate::telemetry::events::{CpuSampleData, CpuSampleSource, TelemetryEvent};
         use crate::telemetry::format::WorkerId;
         use crate::telemetry::task_metadata::TaskId;
-        use crate::telemetry::writer::RotatingWriter;
+        use crate::telemetry::writer::DiskWriter;
         use proptest::prelude::*;
 
         /// Encode a single event into a batch and write it through the writer.
@@ -1080,7 +1080,7 @@ mod tests {
                 let dir = tempfile::TempDir::new().unwrap();
                 let base = dir.path().join("trace");
 
-                let writer = RotatingWriter::builder()
+                let writer = DiskWriter::builder()
                     .base_path(&base)
                     .max_file_size(max_file_size)
                     .max_total_size(1_000_000)
@@ -1737,7 +1737,7 @@ mod tests {
         let trace_path = dir.path().join("trace.bin");
 
         // Small max_file_size to force rotation quickly.
-        let writer = RotatingWriter::new(&trace_path, 4 * 1024, 10 * 1024 * 1024).unwrap();
+        let writer = DiskWriter::new(&trace_path, 4 * 1024, 10 * 1024 * 1024).unwrap();
 
         let guard = TelemetryCore::builder()
             .writer(writer)

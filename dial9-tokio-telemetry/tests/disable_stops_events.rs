@@ -1,6 +1,6 @@
 mod common;
 
-use dial9_tokio_telemetry::telemetry::{RotatingWriter, TelemetryEvent, TracedRuntime};
+use dial9_tokio_telemetry::telemetry::{DiskWriter, TelemetryEvent, TracedRuntime};
 use std::time::Duration;
 
 /// After `disable()` is called and in-flight events are drained, no new
@@ -163,7 +163,7 @@ fn disable_stops_cpu_sample_production() {
     drop(guard);
 }
 
-/// After `disable()`, the RotatingWriter must not produce new segments.
+/// After `disable()`, the DiskWriter must not produce new segments.
 ///
 /// Uses a 1-second rotation period and waits 5 seconds after disable.
 /// If the flush loop were still driving rotation, we'd see new `.bin`
@@ -173,7 +173,7 @@ fn disable_stops_segment_rotation() {
     let dir = tempfile::tempdir().unwrap();
     let trace_path = dir.path().join("trace.bin");
 
-    let writer = RotatingWriter::builder()
+    let writer = DiskWriter::builder()
         .base_path(&trace_path)
         .max_file_size(100 * 1024 * 1024)
         .max_total_size(500 * 1024 * 1024)

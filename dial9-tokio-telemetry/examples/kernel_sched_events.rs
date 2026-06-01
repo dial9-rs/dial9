@@ -44,7 +44,7 @@
 
 use dial9_tokio_telemetry::analysis_unstable::TraceReader;
 use dial9_tokio_telemetry::telemetry::{
-    CpuSampleSource, RotatingWriter, TelemetryEvent, TracedRuntime, cpu_profile::SchedEventConfig,
+    CpuSampleSource, DiskWriter, TelemetryEvent, TracedRuntime, cpu_profile::SchedEventConfig,
 };
 use std::time::Duration;
 
@@ -65,7 +65,7 @@ fn main() {
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.worker_threads(2).enable_all();
 
-    let writer = RotatingWriter::single_file(&trace_base).unwrap();
+    let writer = DiskWriter::single_file(&trace_base).unwrap();
     let (runtime, guard) = TracedRuntime::builder()
         .with_task_tracking(true)
         .with_sched_events(

@@ -20,7 +20,7 @@ A single `pub(crate)` `Fs` enum covers the writer + worker boundary, with one va
 
 - Recovering in-flight segments after a process crash. Anything in memory at crash time is gone (the disk path already drops segments under eviction pressure).
 - Spill-to-disk fallback when the memory budget is exhausted. A follow-up could make this configurable, but avoiding disk altogether keeps the feature usable in environments where disk access is unavailable.
-- Single-file mode analogue (`RotatingWriter::single_file`) under `MemFs`. Memory mode always rotates.
+- Single-file mode analogue (`DiskWriter::single_file`) under `MemFs`. Memory mode always rotates.
 
 ---
 
@@ -37,7 +37,7 @@ record_event() ──┐
         CentralCollector (existing)
                  │ drain
                  ▼
-          RotatingWriter
+          SegmentWriter
             │
             ├── Arc<Fs> ── full segment lifecycle
             │   (DiskFs: real files | MemFs: byte-budgeted ring channel)
@@ -165,7 +165,7 @@ loop {
 }
 ```
 
-### `RotatingWriter`
+### `SegmentWriter`
 
 Holds `Arc<Fs>`. Disk constructors build `Fs::Disk(DiskFs::from_base_path(&trace_path))`. The memory constructor builds `Fs::Mem(MemFs::with_capacity(...))`, which owns the internal writer-to-worker channel. The recorder builder hands the worker the same `Arc<Fs>`.
 
@@ -176,7 +176,7 @@ Eviction lives where it is natural:
 
 ### Rejected alternatives
 
-- **`MemoryWriter` as a sibling `TraceWriter` impl.** Duplicates encoder/rotation/metadata/drain-timer logic. Tests still need `TempDir`. A single `RotatingWriter<Mode>` is simpler.
+- **`MemoryWriter` as a sibling `TraceWriter` impl.** Duplicates encoder/rotation/metadata/drain-timer logic. Tests still need `TempDir`. A single `SegmentWriter<Mode>` is simpler.
 - **Split write-side and read-side enums.** Disk read-side is stateful (claim-set dedup) so the state would have to be shared across both anyway. One `Fs` keeps the lifecycle in one place.
 - **Eager payload load in `take_files`.** Reads every unclaimed file into RAM on each scan. First drain after boot or recovery scales with backlog size. Lazy `TakenSegment::load` bounds peak in-flight memory to one segment.
 - **`Fs` as a trait.** `Arc<dyn Fs>` would add a vtable hop per call plus a boxed `Write` handle and a boxed wait future, pure overhead on the `MemFs` hot path. A trait with associated types (`Self::Writer`, `async fn`) avoids the boxing but still carries a type parameter that would thread through the worker. The enum is static, branch-dispatched, and parameter-free.
@@ -300,10 +300,10 @@ Memory mode is one constructor swap. The writer carries its `Arc<Fs>` and the ru
 
 ```rust
 // Simple: one knob, dial9 picks segment size.
-let writer = InMemoryWriter::new_in_memory(16 * MB)?;
+let writer = InMemoryWriter::new(16 * MB)?;
 
 // Advanced: builder for rotation_period, metadata, custom segment size.
-let writer = InMemoryWriter::in_memory_builder()
+let writer = InMemoryWriter::builder()
     .max_total_size(16 * MB)
     .max_segment_size(1 * MB)            // optional, dial9 picks if absent
     .rotation_period(Duration::from_secs(60))
@@ -317,7 +317,7 @@ let (runtime, guard) = TracedRuntime::builder()
 
 ### Mode handling
 
-`RotatingWriter<Mode = Disk>` phantom typestate. `Disk` and `Memory` marker types implement a sealed `WriterMode` trait. Constructors split: `new`, `single_file`, `builder` return `RotatingWriter<Disk>`; `new_in_memory` and `in_memory_builder` return `RotatingWriter<Memory>`.
+`SegmentWriter<Mode = Disk>` phantom typestate. `Disk` and `Memory` marker types implement a sealed `WriterMode` trait. Constructors split: `new`, `single_file`, `builder` return `SegmentWriter<Disk>`; `InMemoryWriter::new` and `InMemoryWriter::builder` return `SegmentWriter<Memory>`.
 
 `build_and_start` is generic over the writer's `Mode`, so a memory writer goes through the same call site as a disk one. No opt-in verb. Mode flows: writer arg → builder Mode → `PipelineBuilder<Mode>` → `.write_back()` gate. Storage is mode-agnostic: the writer holds `Arc<Fs>` either way. The phantom only drives compile-time gating.
 
@@ -327,14 +327,14 @@ let (runtime, guard) = TracedRuntime::builder()
 
 Out of scope: catching `WriteBackProcessor` added via `.pipe(WriteBackProcessor)` (bypasses the gated `.write_back()` verb, runtime-errors instead), or "memory writer with no delivery processor" (silent eviction). Surfacing both at compile time would mean a `DeliveryProcessor` typestate or marker-trait scheme that adds more friction than it pays for at this stage.
 
-### `InMemoryWriter::new_in_memory` defaults
+### `InMemoryWriter::new` defaults
 
 - `rotation_period`: reuses disk's `DEFAULT_ROTATION_PERIOD` (60 s). Caps how long an event can sit in the active buffer when traffic is low.
 - `drain_interval`: internal.
 - `max_segment_size`: dial9 picks. Target ~1 MB, scaled down for small budgets so the ring keeps at least 4 slots (`pick_segment_size`).
 - ring storage: `Mutex<VecDeque<MemSealedSegment>>`. Slot count is dynamic; eviction fires on the byte budget, not on a fixed slot cap. Real queued bytes are bounded exactly by `max_total_size`.
 
-`new_in_memory` errors with `InvalidInput` if `max_total_size == 0`. The builder also errors when `max_total_size < max_segment_size` (no slot would fit).
+`InMemoryWriter::new` errors with `InvalidInput` if `max_total_size == 0`. The builder also errors when `max_total_size < max_segment_size` (no slot would fit).
 
 ### Rejected alternatives
 
@@ -349,7 +349,7 @@ Out of scope: catching `WriteBackProcessor` added via `.pipe(WriteBackProcessor)
 Graceful shutdown for memory mode mirrors disk:
 
 1. Stop the flush thread.
-2. `RotatingWriter::finalize`: seal the active segment via `Fs::seal` (`MemFs` pushes onto the ring) and signal `writer_done`. The worker observes `writer_done` on its next wait and exits after one final drain.
+2. `SegmentWriter::finalize`: seal the active segment via `Fs::seal` (`MemFs` pushes onto the ring) and signal `writer_done`. The worker observes `writer_done` on its next wait and exits after one final drain.
 3. `TelemetryGuard::graceful_shutdown(timeout)` waits for the worker to exit.
 
 Disk follows the same steps without `writer_done`. The worker's stop-token plus the drain-until-empty loop handles shutdown.
@@ -366,11 +366,11 @@ Lost-wakeup avoided via the standard `notified() / enable() / re-check / await` 
 
 ## 6. Testing
 
-Reuse the patterns from the disk path. The headline change is that **`RotatingWriter` tests can construct `Fs::Mem` directly as the backing store**, dropping `TempDir` for existing cases.
+Reuse the patterns from the disk path. The headline change is that **`SegmentWriter` tests can construct `Fs::Mem` directly as the backing store**, dropping `TempDir` for existing cases.
 
 **Unit coverage.** Each `Fs` arm (active map transitions, seal pushes and drains correctly, `Bytes` zero-copy), channel ordering and accounting, claim-set dedup on `Fs::Disk` (each file dispensed at most once), lazy payload (`TakenSegment::load` defers reads, NotFound between scan and load yields `Err`), writer rotation/eviction/metadata against `Fs::Mem` (small disk-only subset stays on `Fs::Disk` for rename atomicity and dir-scan edge cases).
 
-**Integration.** Memory `RotatingWriter` paired with a test `SegmentProcessor` that captures `SegmentData`. Run a workload, confirm bytes decode and event counts match. S3 integration against `s3s` (already used by the disk-path S3 tests).
+**Integration.** Memory `SegmentWriter` paired with a test `SegmentProcessor` that captures `SegmentData`. Run a workload, confirm bytes decode and event counts match. S3 integration against `s3s` (already used by the disk-path S3 tests).
 
 **Stress + Shuttle.** High segment-emission rate against a slow downstream processor: verify drop-oldest fires, counters increment, writer never blocks. Shuttle covers the atomics + queue handoff: handoff/no-loss, shutdown race on `writer_done`, byte-budget eviction accounting, no-underflow. The `Notify` lost-wakeup path in `wait_for_more` isn't shuttle-modeled (no tokio runtime under shuttle); a separate tokio test covers it.
 
@@ -378,7 +378,7 @@ Reuse the patterns from the disk path. The headline change is that **`RotatingWr
 
 Memory mode keeps bytes in process heap that disk kept on disk. Regressions are easier to introduce and harder to spot. Two layers to be checked on PRs:
 
-- **Counter assertions.** Fixed-seed workload against a memory `RotatingWriter`. Assert `memory_queued_bytes` stays within `max_total_size`, `in_flight_bytes` stays within `max_segment_size` (plus a margin when `cpu-profiling` symbolizes), eviction fires when the byte budget is intentionally tight, queue depth stays bounded. Catches accounting regressions.
+- **Counter assertions.** Fixed-seed workload against a memory `SegmentWriter`. Assert `memory_queued_bytes` stays within `max_total_size`, `in_flight_bytes` stays within `max_segment_size` (plus a margin when `cpu-profiling` symbolizes), eviction fires when the byte budget is intentionally tight, queue depth stays bounded. Catches accounting regressions.
 - **Heap baseline.** Same workload under a deterministic heap profiler (e.g. `dhat`), baseline checked into CI. Catches leaks and allocator-side regressions.
 
 ### Metrics

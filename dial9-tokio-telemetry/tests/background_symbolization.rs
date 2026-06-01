@@ -6,7 +6,7 @@
 #![cfg(all(feature = "cpu-profiling", target_os = "linux"))]
 
 use dial9_tokio_telemetry::telemetry::cpu_profile::CpuProfilingConfig;
-use dial9_tokio_telemetry::telemetry::{RotatingWriter, TracedRuntime};
+use dial9_tokio_telemetry::telemetry::{DiskWriter, TracedRuntime};
 use dial9_trace_format::decoder::Decoder;
 use flate2::read::GzDecoder;
 use std::io::Read;
@@ -35,7 +35,7 @@ fn background_symbolization_produces_symbol_table_entries() {
 
     // Small segments to force rotation so the worker has segments to process.
     // Large total size so segments aren't evicted before the worker processes them.
-    let writer = RotatingWriter::new(&trace_path, 4 * 1024, 10 * 1024 * 1024).unwrap();
+    let writer = DiskWriter::new(&trace_path, 4 * 1024, 10 * 1024 * 1024).unwrap();
 
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.worker_threads(2).enable_all();

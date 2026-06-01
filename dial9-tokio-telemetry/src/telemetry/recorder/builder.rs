@@ -2,7 +2,7 @@ use crate::primitives::sync::Arc;
 use crate::primitives::sync::atomic::Ordering;
 #[cfg(feature = "cpu-profiling")]
 use crate::rate_limit::rate_limited;
-use crate::telemetry::writer::{Disk, RotatingWriter, TraceWriter, WriterMode};
+use crate::telemetry::writer::{Disk, SegmentWriter, TraceWriter, WriterMode};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -309,7 +309,7 @@ impl<P> TracedRuntimeBuilder<P, PipelineUnset> {
     ///
     /// ```compile_fail
     /// use dial9_tokio_telemetry::telemetry::{InMemoryWriter, TracedRuntime};
-    /// let writer = InMemoryWriter::new_in_memory(4 * 1024 * 1024).unwrap();
+    /// let writer = InMemoryWriter::new(4 * 1024 * 1024).unwrap();
     /// let mut tk = tokio::runtime::Builder::new_current_thread();
     /// tk.enable_all();
     /// let _ = TracedRuntime::builder()
@@ -435,7 +435,7 @@ impl<M, Mode: WriterMode> TracedRuntimeBuilder<HasTracePath, M, Mode> {
         self
     }
 
-    /// Build the traced runtime with a `RotatingWriter`.
+    /// Build the traced runtime with a `DiskWriter`.
     ///
     /// The background worker is auto-spawned when cpu-profiling or any
     /// pipeline strategy is configured. Recording starts disabled; call
@@ -444,7 +444,7 @@ impl<M, Mode: WriterMode> TracedRuntimeBuilder<HasTracePath, M, Mode> {
     pub fn build(
         self,
         builder: tokio::runtime::Builder,
-        writer: RotatingWriter<Mode>,
+        writer: SegmentWriter<Mode>,
     ) -> std::io::Result<(tokio::runtime::Runtime, TelemetryGuard)> {
         self.build_inner(builder, Box::new(writer))
     }
@@ -453,7 +453,7 @@ impl<M, Mode: WriterMode> TracedRuntimeBuilder<HasTracePath, M, Mode> {
     pub fn build_and_start(
         self,
         builder: tokio::runtime::Builder,
-        writer: RotatingWriter<Mode>,
+        writer: SegmentWriter<Mode>,
     ) -> std::io::Result<(tokio::runtime::Runtime, TelemetryGuard)> {
         let (runtime, guard) = self.build(builder, writer)?;
         guard.enable();
@@ -605,9 +605,9 @@ pub(super) fn assemble_processors(
 /// [`TelemetryGuard::trace_runtime`] to attach one or more runtimes.
 ///
 /// ```rust,no_run
-/// # use dial9_tokio_telemetry::telemetry::{RotatingWriter, TelemetryCore};
+/// # use dial9_tokio_telemetry::telemetry::{DiskWriter, TelemetryCore};
 /// # fn main() -> std::io::Result<()> {
-/// let writer = RotatingWriter::single_file("/tmp/trace.bin")?;
+/// let writer = DiskWriter::single_file("/tmp/trace.bin")?;
 /// let guard = TelemetryCore::builder()
 ///     .writer(writer)
 ///     .build()?;
@@ -646,7 +646,7 @@ impl TelemetryCore {
         #[cfg(feature = "worker-s3")]
         #[builder(field)]
         s3_client: Option<aws_sdk_s3::Client>,
-        /// The trace writer (e.g. [`RotatingWriter`], [`NullWriter`](crate::telemetry::NullWriter)).
+        /// The trace writer (e.g. [`DiskWriter`], [`NullWriter`](crate::telemetry::NullWriter)).
         writer: impl TraceWriter<M> + 'static,
         /// Path for trace output. Enables the background worker when any
         /// segment processors are configured.
@@ -976,7 +976,7 @@ impl std::error::Error for TelemetryRuntimeError {
 
 /// Drive a [`crate::current_config::Inner`] to a tokio runtime + guard.
 ///
-/// `Inner::Enabled` already carries a built [`RotatingWriter`], so this
+/// `Inner::Enabled` already carries a built [`DiskWriter`], so this
 /// only needs to materialize the tokio builder and hand both off to
 /// [`TracedRuntimeBuilder::build_and_start`]. `Inner::Disabled`
 /// produces a plain tokio runtime paired with a disabled

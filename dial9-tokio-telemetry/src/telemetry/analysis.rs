@@ -864,7 +864,7 @@ mod tests {
     fn trace_reader_reads_gzip_trace_files() {
         use crate::telemetry::buffer::ThreadLocalBuffer;
         use crate::telemetry::format::WorkerParkEvent;
-        use crate::telemetry::writer::{RotatingWriter, TraceWriter};
+        use crate::telemetry::writer::{DiskWriter, TraceWriter};
         use flate2::Compression;
         use flate2::write::GzEncoder;
         use std::io::Write;
@@ -872,7 +872,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let raw_path = dir.path().join("trace.bin");
 
-        let mut writer = RotatingWriter::single_file(&raw_path).unwrap();
+        let mut writer = DiskWriter::single_file(&raw_path).unwrap();
         let batch = crate::telemetry::collector::Batch::new(
             ThreadLocalBuffer::encode_single(&WorkerParkEvent {
                 timestamp_ns: 1_000,

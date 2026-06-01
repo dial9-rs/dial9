@@ -3,7 +3,7 @@
 // Only one test per process can do this. All other tests must use `set_default`
 // (thread-local) instead.
 
-use dial9_tokio_telemetry::telemetry::{RotatingWriter, TracedRuntime};
+use dial9_tokio_telemetry::telemetry::{DiskWriter, TracedRuntime};
 use dial9_tokio_telemetry::tracing_layer::Dial9TokioLayer;
 use dial9_trace_format::types::FieldValueRef;
 use std::collections::HashSet;
@@ -127,7 +127,7 @@ fn span_events_appear_in_trace() {
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.worker_threads(4).enable_all();
 
-    let writer = RotatingWriter::single_file(&trace_path).unwrap();
+    let writer = DiskWriter::single_file(&trace_path).unwrap();
     let (runtime, guard) = TracedRuntime::build_and_start(builder, writer).unwrap();
 
     let subscriber = tracing_subscriber::registry().with(Dial9TokioLayer::new());
@@ -333,7 +333,7 @@ fn span_events_on_current_thread_runtime() {
     let mut builder = tokio::runtime::Builder::new_current_thread();
     builder.enable_all();
 
-    let writer = RotatingWriter::single_file(&trace_path).unwrap();
+    let writer = DiskWriter::single_file(&trace_path).unwrap();
     let (runtime, guard) = TracedRuntime::build_and_start(builder, writer).unwrap();
 
     let subscriber = tracing_subscriber::registry().with(Dial9TokioLayer::new());

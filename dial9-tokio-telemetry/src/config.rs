@@ -32,7 +32,7 @@ use std::time::Duration;
 use crate::telemetry::recorder::{
     HasTracePath, PipelineUnset, TelemetryGuard, TracedRuntime, TracedRuntimeBuilder,
 };
-use crate::telemetry::writer::RotatingWriter;
+use crate::telemetry::writer::DiskWriter;
 
 /// Type-erased terminal step for a [`TracedRuntimeBuilder`]: hides the
 /// pipeline-mode marker `M` so [`Inner::Enabled`] can stay non-generic.
@@ -40,7 +40,7 @@ pub(crate) trait BuildTracedRuntime: Send {
     fn build_and_start(
         self: Box<Self>,
         tokio_builder: tokio::runtime::Builder,
-        writer: RotatingWriter,
+        writer: DiskWriter,
     ) -> std::io::Result<(tokio::runtime::Runtime, TelemetryGuard)>;
 }
 
@@ -48,7 +48,7 @@ impl<M: Send + 'static> BuildTracedRuntime for TracedRuntimeBuilder<HasTracePath
     fn build_and_start(
         self: Box<Self>,
         tokio_builder: tokio::runtime::Builder,
-        writer: RotatingWriter,
+        writer: DiskWriter,
     ) -> std::io::Result<(tokio::runtime::Runtime, TelemetryGuard)> {
         TracedRuntimeBuilder::<HasTracePath, M>::build_and_start(*self, tokio_builder, writer)
     }
@@ -65,7 +65,7 @@ pub enum Dial9ConfigBuilderError {
     /// Telemetry is enabled (the default) but one or more required writer
     /// fields were never set on the builder.
     Validation(ValidationError),
-    /// Failure constructing the [`RotatingWriter`] backing telemetry — for
+    /// Failure constructing the [`DiskWriter`] backing telemetry — for
     /// example, an unwritable `base_path`.
     Io(std::io::Error),
 }
@@ -121,7 +121,7 @@ impl std::error::Error for Dial9ConfigBuilderError {
 ///
 /// - [`Dial9ConfigBuilder::build`] — strict; returns
 ///   `Result<Dial9Config, Dial9ConfigBuilderError>`. The
-///   [`RotatingWriter`] is probed eagerly inside `build`, so any I/O
+///   [`DiskWriter`] is probed eagerly inside `build`, so any I/O
 ///   failure surfaces here rather than later when the runtime is built.
 /// - [`Dial9ConfigBuilder::build_or_disabled`] — lenient; never reports
 ///   a build error, downgrades to a disabled config that preserves the
@@ -141,7 +141,7 @@ pub(crate) type TokioConfigurator =
 #[allow(clippy::large_enum_variant)]
 pub(crate) enum Inner {
     Enabled {
-        writer: RotatingWriter,
+        writer: DiskWriter,
         tokio_configurators: Vec<TokioConfigurator>,
         runtime_builder: Box<dyn BuildTracedRuntime>,
     },
@@ -276,12 +276,12 @@ struct ResolvedEnvConfig {
     enabled: bool,
     trace_dir: PathBuf,
 
-    // None means the underlying RotatingWriter builder owns the default.
+    // None means the underlying DiskWriter builder owns the default.
     rotation_period: Option<Duration>,
 
     max_total_size: u64,
 
-    // None means the underlying RotatingWriter builder owns the default.
+    // None means the underlying DiskWriter builder owns the default.
     max_file_size: Option<u64>,
 
     tokio_instrumentation_enabled: Option<bool>,
@@ -701,7 +701,7 @@ impl Dial9Config {
     /// runtime is built without telemetry.
     ///
     /// [`max_file_size`](Dial9ConfigBuilder::max_file_size) is optional; when
-    /// not set, the underlying [`RotatingWriter`] defaults it to
+    /// not set, the underlying [`DiskWriter`] defaults it to
     /// `min(100 MiB, max_total_size / 4)`.
     #[builder(
         builder_type = Dial9ConfigBuilder,
@@ -789,7 +789,7 @@ fn assemble(args: AssembleArgs) -> Result<Inner, Dial9ConfigBuilderError> {
         }
     };
 
-    let writer = RotatingWriter::builder()
+    let writer = DiskWriter::builder()
         .base_path(base_path.clone())
         .maybe_max_file_size(max_file_size)
         .max_total_size(max_total_size)
@@ -930,7 +930,7 @@ mod tests {
         path
     }
 
-    /// A path under a directory that does not exist; RotatingWriter::build()
+    /// A path under a directory that does not exist; DiskWriter::build()
     /// will fail to create the trace file there.
     fn unwritable_base_path() -> PathBuf {
         PathBuf::from("/this/dir/does/not/exist/dial9_test_trace.bin")

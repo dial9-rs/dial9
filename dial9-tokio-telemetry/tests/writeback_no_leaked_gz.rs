@@ -7,7 +7,7 @@
 #![cfg(all(feature = "cpu-profiling", target_os = "linux"))]
 
 use dial9_tokio_telemetry::telemetry::cpu_profile::CpuProfilingConfig;
-use dial9_tokio_telemetry::telemetry::{RotatingWriter, TracedRuntime};
+use dial9_tokio_telemetry::telemetry::{DiskWriter, TracedRuntime};
 use std::time::Duration;
 
 /// Produce enough trace data to trigger multiple rotations and evictions,
@@ -30,7 +30,7 @@ fn eviction_cleans_up_processed_gz_segments() {
     let max_number_files = 4;
     let max_total_size = max_number_files * max_file_size; // 16 KiB total ⇒ ~4 segments before eviction
 
-    let writer = RotatingWriter::new(&trace_path, max_file_size, max_total_size).unwrap();
+    let writer = DiskWriter::new(&trace_path, max_file_size, max_total_size).unwrap();
 
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.worker_threads(2).enable_all();

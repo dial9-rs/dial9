@@ -312,7 +312,7 @@ impl Fs {
         }
     }
 
-    /// Returns `true` once `RotatingWriter::finalize` has run.
+    /// Returns `true` once `DiskWriter::finalize` has run.
     pub(crate) fn writer_done(&self) -> bool {
         match self {
             Fs::Disk(d) => d.writer_done(),

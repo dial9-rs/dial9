@@ -64,7 +64,7 @@ async fn workload() {
 }
 
 fn main() -> std::io::Result<()> {
-    let writer = InMemoryWriter::new_in_memory(16 * 1024 * 1024)?; // 16 MB
+    let writer = InMemoryWriter::new(16 * 1024 * 1024)?; // 16 MB
 
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.worker_threads(4).enable_all();

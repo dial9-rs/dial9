@@ -191,10 +191,10 @@ impl TelemetryGuard {
     /// flush thread or background worker to drain.
     ///
     /// ```rust,no_run
-    /// # use dial9_tokio_telemetry::telemetry::{RotatingWriter, TracedRuntime};
+    /// # use dial9_tokio_telemetry::telemetry::{DiskWriter, TracedRuntime};
     /// # use std::time::Duration;
     /// # fn main() -> std::io::Result<()> {
-    /// # let writer = RotatingWriter::new("/tmp/t.bin", 1024, 4096)?;
+    /// # let writer = DiskWriter::new("/tmp/t.bin", 1024, 4096)?;
     /// # let builder = tokio::runtime::Builder::new_multi_thread();
     /// let (runtime, guard) = TracedRuntime::build_and_start(builder, writer)?;
     /// runtime.block_on(async { /* ... */ });

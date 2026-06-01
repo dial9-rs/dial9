@@ -7,7 +7,7 @@
 //!
 //! Produces: `block_in_place_trace.bin` in the current directory.
 
-use dial9_tokio_telemetry::telemetry::{RotatingWriter, TracedRuntime};
+use dial9_tokio_telemetry::telemetry::{DiskWriter, TracedRuntime};
 use std::time::Duration;
 
 /// CPU-intensive work that shows up in CPU profiles.
@@ -52,7 +52,7 @@ fn main() {
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.worker_threads(4).enable_all();
 
-    let writer = RotatingWriter::builder()
+    let writer = DiskWriter::builder()
         .base_path("block_in_place_trace.bin")
         .max_file_size(100 * 1024 * 1024)
         .max_total_size(500 * 1024 * 1024)

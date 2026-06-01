@@ -13,7 +13,7 @@ mod common;
 
 use dial9_tokio_telemetry::analysis_unstable::TraceReader;
 use dial9_tokio_telemetry::telemetry::{
-    RotatingWriter, TaskId, TelemetryEvent, TelemetryGuard, TraceWriter, TracedRuntime,
+    DiskWriter, TaskId, TelemetryEvent, TelemetryGuard, TraceWriter, TracedRuntime,
 };
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -76,7 +76,7 @@ fn spawn_with_joinset_emits_wake_events() {
 fn spawn_with_marks_taskspawn_and_preserves_caller() {
     let dir = tempfile::tempdir().unwrap();
     let trace_path = dir.path().join("trace.bin");
-    let writer = RotatingWriter::single_file(&trace_path).unwrap();
+    let writer = DiskWriter::single_file(&trace_path).unwrap();
     let (runtime, guard) = build_traced_runtime(writer);
 
     let handle = guard.handle();

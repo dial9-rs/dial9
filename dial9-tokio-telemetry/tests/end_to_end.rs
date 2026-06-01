@@ -2,7 +2,7 @@ mod common;
 mod validation;
 
 use dial9_tokio_telemetry::analysis_unstable::{TraceReader, analyze_trace};
-use dial9_tokio_telemetry::telemetry::{RotatingWriter, TelemetryEvent, TracedRuntime};
+use dial9_tokio_telemetry::telemetry::{DiskWriter, TelemetryEvent, TracedRuntime};
 use std::time::Duration;
 
 /// Run a known workload under TracedRuntime, read the trace back, and verify
@@ -19,7 +19,7 @@ fn end_to_end_trace_matches_workload_and_metrics() {
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.worker_threads(num_workers).enable_all();
 
-    let writer = RotatingWriter::single_file(&trace_path).unwrap();
+    let writer = DiskWriter::single_file(&trace_path).unwrap();
     let (runtime, guard) = TracedRuntime::build_and_start(builder, writer).unwrap();
 
     // Run workload, then snapshot tokio metrics.
@@ -161,7 +161,7 @@ fn custom_event_appears_in_trace() {
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.worker_threads(2).enable_all();
 
-    let writer = RotatingWriter::single_file(&trace_path).unwrap();
+    let writer = DiskWriter::single_file(&trace_path).unwrap();
     let (runtime, guard) = TracedRuntime::build_and_start(builder, writer).unwrap();
 
     let handle = guard.handle();
@@ -208,7 +208,7 @@ fn spawn_audit_detects_uninstrumented_spawns() {
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.worker_threads(2).enable_all();
 
-    let writer = RotatingWriter::single_file(&trace_path).unwrap();
+    let writer = DiskWriter::single_file(&trace_path).unwrap();
     let (runtime, guard) = TracedRuntime::builder()
         .with_task_tracking(true)
         .build_and_start(builder, writer)

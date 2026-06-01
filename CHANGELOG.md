@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- In-memory writer (`InMemoryWriter`): run the trace pipeline with no filesystem dependency, encoded segments are held in process memory and shipped by the existing processor pipeline ([#435](https://github.com/dial9-rs/dial9/pull/435))
+
+### Changed
+
+- **Breaking:** renamed `RotatingWriter` to `DiskWriter`. The writer is now generic over its storage backend (`SegmentWriter<Mode>`) with `DiskWriter` / `InMemoryWriter` as the public types; memory constructors are `InMemoryWriter::new` / `::builder` ([#435](https://github.com/dial9-rs/dial9/pull/435))
+- **Breaking:** `SegmentData::segment()` returns `&SegmentRef` (disk- or memory-backed) instead of `&SealedSegment`; processors that read the segment path must match the enum ([#435](https://github.com/dial9-rs/dial9/pull/435))
+
 ## [0.3.11](https://github.com/dial9-rs/dial9/compare/dial9-tokio-telemetry-v0.3.10...dial9-tokio-telemetry-v0.3.11) - 2026-05-22
 
 ### Added

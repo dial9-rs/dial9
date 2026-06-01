@@ -10,7 +10,7 @@
 //!   echo 2 | sudo tee /proc/sys/kernel/perf_event_paranoid
 
 use dial9_tokio_telemetry::telemetry::{
-    RotatingWriter, TelemetryEvent, TracedRuntime, cpu_profile::CpuProfilingConfig,
+    DiskWriter, TelemetryEvent, TracedRuntime, cpu_profile::CpuProfilingConfig,
 };
 use std::time::Duration;
 
@@ -43,7 +43,7 @@ fn main() {
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.worker_threads(4).enable_all();
 
-    let writer = RotatingWriter::builder()
+    let writer = DiskWriter::builder()
         .base_path(trace_base)
         .max_file_size(1024 * 1024 * 20) // rotate after 20 MiB per file
         .max_total_size(1024 * 1024 * 100) // keep at most 100 MiB on disk

@@ -14,7 +14,7 @@ use dial9_tokio_telemetry::memory_profiling::{
 #[cfg(target_os = "linux")]
 use dial9_tokio_telemetry::telemetry::cpu_profile::{CpuProfilingConfig, SchedEventConfig};
 use dial9_tokio_telemetry::telemetry::{
-    RotatingWriter, TaskDumpConfig, TelemetryHandle, TracedRuntime,
+    DiskWriter, TaskDumpConfig, TelemetryHandle, TracedRuntime,
 };
 use dial9_tokio_telemetry::tracing_layer::Dial9TokioLayer;
 use tokio::runtime::Builder;
@@ -179,7 +179,7 @@ fn main() -> std::io::Result<()> {
         args.trace_max_total_size = 100_000_000;
     }
 
-    let writer = RotatingWriter::builder()
+    let writer = DiskWriter::builder()
         .base_path(&args.trace_path)
         .max_file_size(args.trace_max_file_size)
         .max_total_size(args.trace_max_total_size)

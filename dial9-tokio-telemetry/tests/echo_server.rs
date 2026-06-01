@@ -1,7 +1,7 @@
 mod validation;
 
 use dial9_tokio_telemetry::analysis_unstable::{TraceReader, analyze_trace};
-use dial9_tokio_telemetry::telemetry::{RotatingWriter, TracedRuntime};
+use dial9_tokio_telemetry::telemetry::{DiskWriter, TracedRuntime};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -60,7 +60,7 @@ fn overhead_bench_validates() {
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.worker_threads(num_workers).enable_all();
 
-    let writer = RotatingWriter::single_file(&trace_path).unwrap();
+    let writer = DiskWriter::single_file(&trace_path).unwrap();
     let (runtime, guard) = TracedRuntime::builder()
         .with_task_tracking(true)
         .build_and_start(builder, writer)

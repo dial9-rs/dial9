@@ -5,7 +5,7 @@
 #![cfg(all(feature = "cpu-profiling", target_os = "linux"))]
 
 use dial9_tokio_telemetry::telemetry::cpu_profile::CpuProfilingConfig;
-use dial9_tokio_telemetry::telemetry::{RotatingWriter, TracedRuntime};
+use dial9_tokio_telemetry::telemetry::{DiskWriter, TracedRuntime};
 use flate2::read::GzDecoder;
 use std::io::Read;
 
@@ -14,7 +14,7 @@ fn graceful_shutdown_produces_clean_gzip_segments() {
     let trace_dir = tempfile::tempdir().unwrap();
     let trace_path = trace_dir.path().join("trace.bin");
 
-    let writer = RotatingWriter::new(&trace_path, 512 * 1024, 10 * 1024 * 1024).unwrap();
+    let writer = DiskWriter::new(&trace_path, 512 * 1024, 10 * 1024 * 1024).unwrap();
 
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.worker_threads(2).enable_all();

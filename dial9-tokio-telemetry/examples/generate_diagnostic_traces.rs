@@ -12,7 +12,7 @@
 //! with different RUSTFLAGS, so they are handled by the shell script wrapper.
 
 use dial9_tokio_telemetry::telemetry::{
-    RotatingWriter, TelemetryHandle, TracedRuntime,
+    DiskWriter, TelemetryHandle, TracedRuntime,
     cpu_profile::{CpuProfilingConfig, SchedEventConfig},
 };
 use std::path::PathBuf;
@@ -46,7 +46,7 @@ fn generate_no_wake_events(dir: &PathBuf) {
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.worker_threads(4).enable_all();
 
-    let writer = RotatingWriter::new(&trace_path, 4 * 1024, 50 * 1024 * 1024).unwrap();
+    let writer = DiskWriter::new(&trace_path, 4 * 1024, 50 * 1024 * 1024).unwrap();
     let (runtime, guard) = TracedRuntime::builder()
         .with_task_tracking(true)
         .with_cpu_profiling(CpuProfilingConfig::default().frequency_hz(999))
@@ -78,7 +78,7 @@ fn generate_good_trace(dir: &PathBuf) {
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.worker_threads(4).enable_all();
 
-    let writer = RotatingWriter::new(&trace_path, 4 * 1024, 50 * 1024 * 1024).unwrap();
+    let writer = DiskWriter::new(&trace_path, 4 * 1024, 50 * 1024 * 1024).unwrap();
     let (runtime, guard) = TracedRuntime::builder()
         .with_task_tracking(true)
         .with_cpu_profiling(CpuProfilingConfig::default().frequency_hz(999))
@@ -111,7 +111,7 @@ fn generate_no_sched_events(dir: &PathBuf) {
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.worker_threads(4).enable_all();
 
-    let writer = RotatingWriter::new(&trace_path, 4 * 1024, 50 * 1024 * 1024).unwrap();
+    let writer = DiskWriter::new(&trace_path, 4 * 1024, 50 * 1024 * 1024).unwrap();
     let (runtime, guard) = TracedRuntime::builder()
         .with_task_tracking(true)
         .with_cpu_profiling(CpuProfilingConfig::default().frequency_hz(999))

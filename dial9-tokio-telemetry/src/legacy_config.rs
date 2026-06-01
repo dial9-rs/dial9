@@ -18,7 +18,7 @@ use std::time::Duration;
 use crate::telemetry::recorder::{
     HasTracePath, PipelineUnset, TelemetryGuard, TracedRuntime, TracedRuntimeBuilder,
 };
-use crate::telemetry::writer::RotatingWriter;
+use crate::telemetry::writer::DiskWriter;
 
 /// Type-erased terminal step for a [`TracedRuntimeBuilder`]: hides the
 /// pipeline-mode marker `M` so [`Dial9Config`] can stay non-generic.
@@ -26,7 +26,7 @@ trait BuildTracedRuntime: Send {
     fn build_and_start(
         self: Box<Self>,
         tokio_builder: tokio::runtime::Builder,
-        writer: RotatingWriter,
+        writer: DiskWriter,
     ) -> std::io::Result<(tokio::runtime::Runtime, TelemetryGuard)>;
 }
 
@@ -34,7 +34,7 @@ impl<M: Send + 'static> BuildTracedRuntime for TracedRuntimeBuilder<HasTracePath
     fn build_and_start(
         self: Box<Self>,
         tokio_builder: tokio::runtime::Builder,
-        writer: RotatingWriter,
+        writer: DiskWriter,
     ) -> std::io::Result<(tokio::runtime::Runtime, TelemetryGuard)> {
         TracedRuntimeBuilder::<HasTracePath, M>::build_and_start(*self, tokio_builder, writer)
     }
@@ -81,7 +81,7 @@ impl Dial9Config {
                 tokio_builder,
                 runtime_builder,
             } => {
-                let writer = RotatingWriter::builder()
+                let writer = DiskWriter::builder()
                     .base_path(base_path)
                     .max_file_size(max_file_size)
                     .max_total_size(max_total_size)

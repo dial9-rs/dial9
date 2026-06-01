@@ -1,6 +1,6 @@
 //! Sealed-file detection for the worker pipeline.
 //!
-//! Finds `.bin` files produced by `RotatingWriter` rename-on-seal,
+//! Finds `.bin` files produced by `DiskWriter` rename-on-seal,
 //! ignoring `.active` files that are still being written.
 
 use std::path::{Path, PathBuf};
@@ -318,14 +318,14 @@ mod tests {
     #[test]
     fn test_parse_segment_timestamp() {
         use crate::telemetry::format::WorkerParkEvent;
-        use crate::telemetry::writer::{RotatingWriter, TraceWriter};
+        use crate::telemetry::writer::{DiskWriter, TraceWriter};
         use dial9_trace_format::encoder::Encoder;
         use tempfile::TempDir;
 
         let dir = TempDir::new().unwrap();
         let base = dir.path().join("trace");
 
-        let mut writer = RotatingWriter::single_file(&base).unwrap();
+        let mut writer = DiskWriter::single_file(&base).unwrap();
 
         let mut enc = Encoder::new_to(Vec::new()).unwrap();
         enc.write_infallible(&WorkerParkEvent {
@@ -358,14 +358,14 @@ mod tests {
     #[test]
     fn test_creation_epoch_secs_uses_parsed_timestamp() {
         use crate::telemetry::format::WorkerParkEvent;
-        use crate::telemetry::writer::{RotatingWriter, TraceWriter};
+        use crate::telemetry::writer::{DiskWriter, TraceWriter};
         use dial9_trace_format::encoder::Encoder;
         use tempfile::TempDir;
 
         let dir = TempDir::new().unwrap();
         let base = dir.path().join("trace");
 
-        let mut writer = RotatingWriter::single_file(&base).unwrap();
+        let mut writer = DiskWriter::single_file(&base).unwrap();
 
         let mut enc = Encoder::new_to(Vec::new()).unwrap();
         enc.write_infallible(&WorkerParkEvent {
@@ -417,14 +417,14 @@ mod tests {
     #[test]
     fn test_parse_segment_timestamp_no_metadata() {
         use crate::telemetry::format::WorkerParkEvent;
-        use crate::telemetry::writer::{RotatingWriter, TraceWriter};
+        use crate::telemetry::writer::{DiskWriter, TraceWriter};
         use dial9_trace_format::encoder::Encoder;
 
         let dir = TempDir::new().unwrap();
         let base = dir.path().join("trace");
 
         // Don't call set_segment_metadata — writer should still write one automatically
-        let mut writer = RotatingWriter::single_file(&base).unwrap();
+        let mut writer = DiskWriter::single_file(&base).unwrap();
         let mut enc = Encoder::new_to(Vec::new()).unwrap();
         enc.write_infallible(&WorkerParkEvent {
             timestamp_ns: 1_000_000_000,

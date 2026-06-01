@@ -1,4 +1,4 @@
-use dial9_tokio_telemetry::telemetry::{RotatingWriter, TracedRuntime};
+use dial9_tokio_telemetry::telemetry::{DiskWriter, TracedRuntime};
 use std::time::Duration;
 
 /// After TelemetryGuard is dropped, all trace files should be sealed (.bin),
@@ -11,7 +11,7 @@ fn guard_drop_produces_sealed_bin_files() {
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.worker_threads(2).enable_all();
 
-    let writer = RotatingWriter::new(&trace_path, 1024, 1024 * 1024).unwrap();
+    let writer = DiskWriter::new(&trace_path, 1024, 1024 * 1024).unwrap();
     let (runtime, guard) = TracedRuntime::build_and_start(builder, writer).unwrap();
 
     runtime.block_on(async {

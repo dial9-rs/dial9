@@ -16,7 +16,7 @@
 //! After running, inspect the trace:
 //!   cargo run --example analyze_trace -- /tmp/thread_per_core/trace.0.bin
 
-use dial9_tokio_telemetry::telemetry::{RotatingWriter, TelemetryCore, TelemetryEvent, WorkerId};
+use dial9_tokio_telemetry::telemetry::{DiskWriter, TelemetryCore, TelemetryEvent, WorkerId};
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
@@ -35,7 +35,7 @@ fn main() -> std::io::Result<()> {
         }
     }
 
-    let writer = RotatingWriter::builder()
+    let writer = DiskWriter::builder()
         .base_path(format!("{trace_dir}/trace.bin"))
         .max_file_size(1024 * 1024)
         .max_total_size(5 * 1024 * 1024)

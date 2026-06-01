@@ -5,7 +5,7 @@ mod bmf;
 
 #[cfg(target_os = "linux")]
 use dial9_tokio_telemetry::telemetry::cpu_profile::CpuProfilingConfig;
-use dial9_tokio_telemetry::telemetry::{RotatingWriter, TracedRuntime};
+use dial9_tokio_telemetry::telemetry::{DiskWriter, TracedRuntime};
 use std::time::Instant;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -67,7 +67,7 @@ fn main() {
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.worker_threads(4).enable_all();
 
-    let writer = RotatingWriter::single_file("/tmp/e2e_workload_trace.bin").unwrap();
+    let writer = DiskWriter::single_file("/tmp/e2e_workload_trace.bin").unwrap();
     let tb = TracedRuntime::builder().with_task_tracking(true);
     #[cfg(target_os = "linux")]
     let tb = tb.with_cpu_profiling(CpuProfilingConfig::default());
