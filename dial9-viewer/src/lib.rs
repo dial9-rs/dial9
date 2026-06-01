@@ -1,6 +1,9 @@
 pub mod cli;
+pub mod report_serve;
 pub mod server;
 pub mod storage;
+
+pub use report_serve::report_serve_router;
 
 use std::path::PathBuf;
 
