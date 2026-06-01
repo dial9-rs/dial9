@@ -517,6 +517,35 @@ async fn main() {
 
 To ensure the last segment is uploaded, use `guard.graceful_shutdown(timeout)`.
 
+### Running without disk (in-memory)
+
+To run with **no filesystem dependency** (disk unavailable, read-only, or unwelcome) use `InMemoryWriter`. Encoded segments stay in process memory and are shipped by the same processor pipeline (S3, custom, ...).
+
+```rust,no_run
+# #[cfg(feature = "worker-s3")]
+# mod inner {
+use dial9_tokio_telemetry::background_task::s3::S3Config;
+use dial9_tokio_telemetry::telemetry::{InMemoryWriter, TracedRuntime};
+
+# fn example() -> std::io::Result<()> {
+let writer = InMemoryWriter::new(16 * 1024 * 1024)?; // 16 MiB RAM budget
+
+let mut tk = tokio::runtime::Builder::new_multi_thread();
+tk.enable_all();
+
+let s3 = S3Config::builder().bucket("my-bucket").service_name("svc").build();
+let (runtime, guard) = TracedRuntime::builder()
+    .with_custom_pipeline(|p| p.gzip().s3(s3))
+    .build_and_start(tk, writer)?;
+# let _ = (runtime, guard);
+# Ok(())
+# }
+# }
+# fn main() {}
+```
+
+`max_total_size` bounds the in-memory buffers: if a slow exporter falls behind, the oldest sealed segments are dropped rather than blocking recording. See [`examples/in_memory_pipeline.rs`](https://github.com/dial9-rs/dial9-tokio-telemetry/blob/main/dial9-tokio-telemetry/examples/in_memory_pipeline.rs).
+
 ### Exporting data to other destinations
 
 For custom upload destinations or post-processing (e.g. shipping to a different object store, running analysis on each segment), you can replace the built-in pipeline entirely with `with_custom_pipeline`. See [`examples/custom_pipeline.rs`](https://github.com/dial9-rs/dial9-tokio-telemetry/blob/main/dial9-tokio-telemetry/examples/custom_pipeline.rs) for a complete example.
