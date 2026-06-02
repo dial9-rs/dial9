@@ -11,10 +11,10 @@ You have already analyzed a dial9 trace (using the `dial9-toolkit` and `dial9-tr
 
 ## Viewing the report (important)
 
-Reports are **served, not opened directly**. Browsers block `fetch()` over `file://`, so the embedded flamegraph and timeline iframes will fail if the user opens `report.html` directly from disk. Tell the user (and yourself, when verifying):
+Reports are **served, not opened directly**. Browsers block `fetch()` over `file://`, so flamegraph iframes and viewer deep-links will fail if the user opens `report.html` directly from disk. Tell the user (and yourself, when verifying):
 
 ```bash
-# from the dial9 CLI (recommended)
+# from the dial9 CLI (recommended — also enables viewer deep-links)
 dial9 report serve path/to/report-folder
 # → http://localhost:8000/report.html
 
@@ -29,22 +29,30 @@ The folder is portable — zip it, attach it to a PR, drop it in Slack. The reci
 A report is a **folder**, not a single file:
 
 ```
-my-report/
-├── report.html          # The main report document
-├── embed.html           # Embeddable viewer component (copy from dial9-viewer/ui/)
-├── flamegraph.js        # Required by embed.html (copy from dial9-viewer/ui/)
-├── flamegraph.css       # Required by embed.html (copy from dial9-viewer/ui/)
-├── decode.js            # Required by embed.html (copy from dial9-viewer/ui/)
-├── trace_parser.js      # Required by embed.html (copy from dial9-viewer/ui/)
-├── trace_analysis.js    # Required by embed.html (copy from dial9-viewer/ui/)
-├── flamegraphs/         # Standalone filtered flamegraph HTML files (optional)
-│   └── task-3-cpu.html  # Example: per-task flamegraph
-└── traces/
-    ├── burst-window.bin # Sliced trace for the burst finding
-    └── startup-io.bin   # Sliced trace for the startup finding
+report/
+├── report.html
+├── viewer.html              # full dial9 viewer
+├── flamegraph.css
+├── decode.js
+├── trace_parser.js
+├── trace_analysis.js
+├── flamegraph.js
+├── format.js                # required by viewer.html
+├── panel_layout.js          # required by viewer.html
+├── traces/
+│   └── full.bin             # may also have sliced files
+└── flamegraphs/
+    └── finding-1.html       # standalone flamegraph (one per finding)
 ```
 
-Copy `embed.html` and its JS/CSS dependencies from the dial9-viewer `ui/` directory into the report folder. Slice traces into `traces/` so the report is portable and small.
+Copy viewer and its dependencies from the dial9-viewer `ui/` directory into the report folder:
+
+```bash
+cp dial9-viewer/ui/{viewer,flamegraph}.{html,css} report/
+cp dial9-viewer/ui/{decode,trace_parser,trace_analysis,flamegraph,format,panel_layout}.js report/
+```
+
+Slice traces into `traces/` so the report is portable and small.
 
 ## Writing the report HTML
 
@@ -80,50 +88,82 @@ a:hover { text-decoration: underline; }
   </div>
   <p>Prose explanation of what was observed, with <span class="code-ref">source.rs:42</span> references.</p>
   <p><strong>Fix:</strong> Actionable recommendation.</p>
-  <!-- Optional: embedded visualization -->
-  <iframe src="embed.html?trace=traces/sliced.bin&amp;view=flamegraph" width="100%" height="320" style="border:0"></iframe>
+  <!-- Optional: standalone flamegraph for precise filtering -->
+  <iframe src="flamegraphs/finding-1.html" width="100%" height="320" style="border:0"></iframe>
+  <!-- Optional: link to explore the time window in the full viewer -->
+  <p class="viewer-link"><a href="viewer.html?trace=traces/full.bin&amp;start=150439548276&amp;end=150589548276" target="_blank">Open this 150ms window in the full viewer →</a></p>
 </div>
 ```
 
 **HTML escaping:** Always escape `<`, `>`, `&`, and `"` in any agent-generated text inserted into HTML attributes or element content.
 
-## Embedding visualizations with `embed.html`
+## Linking to the full viewer
 
-`embed.html` renders a single visualization from a trace file. It accepts these URL params:
+The report folder includes `viewer.html` and all its dependencies. This lets you deep-link into the full interactive viewer for any time window, served from the same folder.
 
-| Param | Required | Description |
-|-------|----------|-------------|
-| `trace` | yes | Relative path or URL to a `.bin` or `.bin.gz` trace file |
-| `view` | yes | `flamegraph` or `timeline` |
-| `start` | no | Filter events to >= this monotonic timestamp (nanoseconds) |
-| `end` | no | Filter events to < this monotonic timestamp (nanoseconds) |
-| `height` | no | Override container height in pixels (default: 320 for flamegraph, 180 for timeline) |
-
-### Flamegraph embed
-
-Shows an on-CPU flamegraph for the filtered time range:
+### Canonical link template
 
 ```html
-<iframe src="embed.html?trace=traces/burst.bin&amp;start=3900000000&amp;end=4050000000&amp;view=flamegraph"
-        width="100%" height="320" style="border:0"></iframe>
+<a href="viewer.html?trace=traces/full.bin&amp;start=<absolute_ns>&amp;end=<absolute_ns>"
+   target="_blank">Open in dial9 viewer</a>
 ```
 
-### Timeline embed
+The `trace` path is **relative** — it resolves from the same origin because `viewer.html` and `traces/` live in the same served folder.
 
-Shows worker-activity lanes (polls as colored bars, parks as red strips):
+### Computing start/end values
+
+`start` and `end` are **ABSOLUTE monotonic nanoseconds** — the same values found in `event.ts` from `TraceParser.parseTrace()`. They are NOT relative offsets from trace start.
+
+To compute an absolute timestamp from a relative offset:
+
+```js
+// trace.minTs is the earliest timestamp in the trace (absolute ns)
+const minTs = trace.minTs; // e.g., 150435648276n
+// "3.9 seconds into the trace" → absolute ns:
+const start = minTs + 3_900_000_000n; // 150439548276n
+const end   = minTs + 4_050_000_000n; // 150439698276n
+```
+
+### Available viewer URL params
+
+| Param | Description |
+|-------|-------------|
+| `trace` | Relative path or URL to a `.bin` trace file (fetched via `fetch()`) |
+| `start` | Start of time range filter (absolute monotonic ns) |
+| `end` | End of time range filter (absolute monotonic ns) |
+| `svc` | Service name (display label) |
+| `host` | Host name (display label) |
+| `from` | Wall-clock start (ISO 8601, for display) |
+| `to` | Wall-clock end (ISO 8601, for display) |
+| `segs` | Comma-separated segment keys (for multi-segment traces) |
+
+**`?worker=`, `?task=`, and `?source=` do NOT exist.** Do not invent them — they will be silently ignored.
+
+### Limitation
+
+The viewer needs the trace served via HTTP. Use `dial9 report serve <report-folder>` (or any static server). `file://` URLs will not work.
+
+### Worked example: viewer link in an insight card
 
 ```html
-<iframe src="embed.html?trace=traces/burst.bin&amp;start=3900000000&amp;end=4050000000&amp;view=timeline"
-        width="100%" height="180" style="border:0"></iframe>
+<div class="finding">
+  <div class="finding-header">
+    <span class="severity severity-warning">Warning</span>
+    <h3>Connection burst saturates workers (23ms scheduling delay)</h3>
+  </div>
+  <p>~80 tasks woken simultaneously at t≈3.9s cause wake-to-poll delays up to 23ms.</p>
+  <p><strong>Fix:</strong> Increase worker count or add connection backpressure.</p>
+  <p class="viewer-link"><a href="viewer.html?trace=traces/full.bin&amp;start=150439548276&amp;end=150439698276" target="_blank">Open this 150ms burst window in the full viewer →</a></p>
+</div>
 ```
 
 ## Flamegraphs: precise filtering via standalone HTML
 
-### When to use this vs. `embed.html?view=flamegraph`
+### When to use this vs. a viewer deep-link
 
-Use `embed.html?view=flamegraph&start=...&end=...` when the time range alone is the right filter — e.g., "show the burst window." It's one iframe tag and zero JS.
+Use a **viewer deep-link** when you want the user to explore the full interactive timeline + flamegraph for a time window.
 
-Use a **standalone HTML file** when you need anything more precise:
+Use a **standalone HTML file** when you need a precisely-filtered flamegraph embedded directly in the report:
 - A specific task's CPU profile
 - Only polls exceeding a duration threshold
 - Off-CPU (scheduling) samples only
@@ -133,7 +173,7 @@ Use a **standalone HTML file** when you need anything more precise:
 
 ### Skeleton (copy and fill in your filter)
 
-Place standalone flamegraph files in `report/flamegraphs/<name>.html`. They load the same JS modules as `embed.html` but give you full control over filtering.
+Place standalone flamegraph files in `report/flamegraphs/<name>.html`. They load the same JS modules and give you full control over filtering.
 
 ```html
 <!DOCTYPE html>
@@ -328,33 +368,6 @@ FlamegraphRenderer.createFlamegraph(el, () => {}).setData(samples, mergedSymbols
 
 **When NOT to use:** When you need to compare traces side-by-side (differences). Use two separate flamegraphs instead.
 
-## Linking back to the full viewer
-
-The hosted viewer at `https://dial9-tokio-telemetry.netlify.app/` accepts these URL params:
-
-| Param | Description |
-|-------|-------------|
-| `trace` | URL to the trace file (must be fetchable — absolute https URL) |
-| `start` | Start of time range filter (monotonic ns) |
-| `end` | End of time range filter (monotonic ns) |
-| `svc` | Service name (display label) |
-| `host` | Host name (display label) |
-| `from` | Wall-clock start (ISO 8601, for display) |
-| `to` | Wall-clock end (ISO 8601, for display) |
-| `segs` | Comma-separated segment keys (for multi-segment traces) |
-
-Canonical link template:
-
-```html
-<a href="https://dial9-tokio-telemetry.netlify.app/?trace=https://example.com/traces/full.bin&amp;start=3900000000&amp;end=4050000000"
-   target="_blank">Open in dial9 viewer</a>
-```
-
-**Important constraints:**
-- The netlify viewer fetches the trace via HTTP. It cannot load `file://` paths or relative paths from a local report. The trace must be hosted at a reachable URL (S3 presigned URL, public bucket, etc.).
-- If you cannot host the trace, skip viewer deep-links and rely on `embed.html` (which loads via the local `dial9 report serve` server).
-- **`?worker=` and `?task=` do NOT exist** as viewer URL params. Do not invent them.
-
 ## Slicing traces with `slice.js`
 
 Slice traces to keep report folders small and embed loading fast.
@@ -425,6 +438,7 @@ h2 { font-size: 1.4rem; margin: 2rem 0 1rem; border-bottom: 1px solid var(--bord
 .code-ref { font-family: 'SF Mono', monospace; font-size: 0.85rem; background: #1c2128; padding: 0.15rem 0.4rem; border-radius: 3px; }
 a { color: var(--accent); text-decoration: none; }
 a:hover { text-decoration: underline; }
+.viewer-link { font-size: 0.85rem; margin-top: 0.75rem; }
 </style>
 </head>
 <body>
@@ -442,8 +456,7 @@ a:hover { text-decoration: underline; }
   <p>Task 3 performs a synchronous file read that blocks worker 1 for 17.7ms at t=350µs.
      Source: <span class="code-ref">main.rs:260:14</span></p>
   <p><strong>Fix:</strong> Move config loading to <code>spawn_blocking</code>.</p>
-  <iframe src="embed.html?trace=traces/startup-io.bin&amp;view=flamegraph&amp;height=280"
-          width="100%" height="280" style="border:0"></iframe>
+  <iframe src="flamegraphs/startup-io.html" width="100%" height="280" style="border:0"></iframe>
 </div>
 
 <div class="finding">
@@ -453,8 +466,8 @@ a:hover { text-decoration: underline; }
   </div>
   <p>~80 tasks woken simultaneously at t≈3.9s cause wake-to-poll delays up to 23ms.</p>
   <p><strong>Fix:</strong> Increase worker count or add connection backpressure.</p>
-  <iframe src="embed.html?trace=traces/burst.bin&amp;start=3900000000&amp;end=4050000000&amp;view=timeline&amp;height=120"
-          width="100%" height="120" style="border:0"></iframe>
+  <iframe src="flamegraphs/burst-window.html" width="100%" height="320" style="border:0"></iframe>
+  <p class="viewer-link"><a href="viewer.html?trace=traces/full.bin&amp;start=150439548276&amp;end=150439698276" target="_blank">Open this 150ms burst window in the full viewer →</a></p>
 </div>
 
 <div class="finding">
@@ -474,8 +487,8 @@ a:hover { text-decoration: underline; }
 ## What NOT to do
 
 - **Don't inline trace bytes as base64.** Traces are megabytes; use sliced `.bin` files in `traces/`.
-- **Don't render flamegraphs from scratch with CSS bars.** Use `embed.html` — it produces real interactive flamegraphs.
-- **Don't use `embed.html?view=flamegraph` when the question is about a specific task, poll, or stack.** Use the standalone HTML pattern with a JS filter instead (see [Flamegraphs: precise filtering via standalone HTML](#flamegraphs-precise-filtering-via-standalone-html)).
+- **Don't render flamegraphs from scratch with CSS bars.** Use the standalone HTML flamegraph pattern — it produces real interactive flamegraphs.
 - **Don't invent viewer URL params.** Only `trace`, `start`, `end`, `svc`, `host`, `from`, `to`, `segs` exist. There is no `?worker=`, `?task=`, or `?source=`.
 - **Don't copy the full multi-MB trace into the report folder.** Slice it to the relevant time window.
-- **Don't rely on `file://`.** Reports embed iframes that fetch trace files. Tell users to view via `dial9 report serve <folder>` (or `python3 -m http.server`).
+- **Don't rely on `file://`.** Reports fetch trace files via HTTP. Tell users to view via `dial9 report serve <folder>` (or `python3 -m http.server`).
+- **Don't omit `viewer.html` + its deps from the report folder if you include viewer deep-links** — the link will 404.
