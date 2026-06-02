@@ -17,12 +17,7 @@
 mod common;
 
 use common::{BytesCapturingWriter, decode_all};
-use dial9_tokio_telemetry::telemetry::analysis_events::{CpuSampleSource, Dial9Event};
-
-// TODO: bring back WorkerId as a newtype wrapper around u64 in analysis_events
-// (currently using raw u64 constants for WORKER_UNKNOWN/WORKER_BLOCKING)
-const WORKER_UNKNOWN: u64 = 255;
-const WORKER_BLOCKING: u64 = 254;
+use dial9_tokio_telemetry::telemetry::analysis_events::{CpuSampleSource, Dial9Event, WorkerId};
 
 #[test]
 fn cpu_sample_timestamps_align_with_wall_clock() {
@@ -76,7 +71,7 @@ fn cpu_sample_timestamps_align_with_wall_clock() {
     let windows = burn_windows.lock().unwrap();
 
     // ── Extract CPU samples ────────────────────────────────────────────────
-    let cpu_samples: Vec<(u64, u64)> = events
+    let cpu_samples: Vec<(u64, WorkerId)> = events
         .iter()
         .filter_map(|e| match e {
             Dial9Event::CpuSampleEvent(s) if s.source == CpuSampleSource::CpuProfile => {
@@ -94,10 +89,10 @@ fn cpu_sample_timestamps_align_with_wall_clock() {
     // We track open PollStart events per worker and close them when we see a
     // matching PollEnd.  Each closed interval is recorded so we can later
     // identify which worker was running during each burn window.
-    let mut poll_intervals: Vec<(u64, u64, u64)> = Vec::new();
+    let mut poll_intervals: Vec<(u64, u64, WorkerId)> = Vec::new();
     {
         // worker_id → poll_start_ns
-        let mut open: std::collections::HashMap<u64, u64> = std::collections::HashMap::new();
+        let mut open: std::collections::HashMap<WorkerId, u64> = std::collections::HashMap::new();
         for event in &events {
             match event {
                 Dial9Event::PollStartEvent(e) => {
@@ -124,7 +119,7 @@ fn cpu_sample_timestamps_align_with_wall_clock() {
 
     for (i, &(burn_start, burn_end)) in windows.iter().enumerate() {
         // ── Timestamp alignment: at least one sample must fall in the window ──
-        let in_window: Vec<(u64, u64)> = cpu_samples
+        let in_window: Vec<(u64, WorkerId)> = cpu_samples
             .iter()
             .filter(|&&(t, _)| t >= burn_start.saturating_sub(slack_ns) && t <= burn_end + slack_ns)
             .copied()
@@ -178,7 +173,7 @@ fn cpu_sample_timestamps_align_with_wall_clock() {
             // Skip UNKNOWN_WORKER (255) samples — on CI the profiler can fire
             // before the thread-to-worker mapping is visible.
             for &(t, w) in &in_window {
-                if w == WORKER_UNKNOWN {
+                if w == WorkerId::UNKNOWN {
                     continue;
                 }
                 assert_eq!(
@@ -335,7 +330,7 @@ fn thread_name_attribution_for_external_and_blocking_threads() {
         .iter()
         .filter(|e| {
             matches!(e, Dial9Event::CpuSampleEvent(s)
-            if s.tid == ext_tid && s.worker_id == WORKER_UNKNOWN)
+            if s.tid == ext_tid && s.worker_id == WorkerId::UNKNOWN)
         })
         .collect();
     assert!(
@@ -347,7 +342,7 @@ fn thread_name_attribution_for_external_and_blocking_threads() {
         .iter()
         .filter(|e| {
             matches!(e, Dial9Event::CpuSampleEvent(s)
-            if s.tid == blocking_tid && s.worker_id == WORKER_BLOCKING)
+            if s.tid == blocking_tid && s.worker_id == WorkerId::BLOCKING)
         })
         .collect();
     assert!(

@@ -11,7 +11,7 @@
 
 use dial9_tokio_telemetry::telemetry::{
     DiskWriter, TracedRuntime,
-    analysis_events::{CpuSampleSource, Dial9Event},
+    analysis_events::{CpuSampleSource, Dial9Event, WorkerId},
     cpu_profile::CpuProfilingConfig,
 };
 use dial9_trace_format::decoder::Decoder;
@@ -86,7 +86,7 @@ fn main() {
 
     let mut cpu_samples = 0usize;
     let mut polls = 0usize;
-    let mut samples_by_worker: std::collections::HashMap<u64, usize> =
+    let mut samples_by_worker: std::collections::HashMap<WorkerId, usize> =
         std::collections::HashMap::new();
 
     decoder

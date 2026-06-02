@@ -3,7 +3,7 @@
 //! Usage:
 //!   cargo run --example analyze_trace --features analysis -- <trace_file>
 
-use dial9_tokio_telemetry::telemetry::analysis_events::Dial9Event;
+use dial9_tokio_telemetry::telemetry::analysis_events::{Dial9Event, WorkerId};
 use dial9_trace_format::decoder::Decoder;
 use std::collections::HashMap;
 use std::env;
@@ -29,8 +29,8 @@ fn main() {
     println!("Read {} events", events.len());
 
     // Per-worker stats
-    let mut worker_polls: HashMap<u64, usize> = HashMap::new();
-    let mut worker_parks: HashMap<u64, usize> = HashMap::new();
+    let mut worker_polls: HashMap<WorkerId, usize> = HashMap::new();
+    let mut worker_parks: HashMap<WorkerId, usize> = HashMap::new();
 
     // Task spawn locations
     let mut task_locs: HashMap<u64, String> = HashMap::new();

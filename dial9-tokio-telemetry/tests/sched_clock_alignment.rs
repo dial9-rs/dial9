@@ -6,7 +6,7 @@
 mod common;
 
 use common::{BytesCapturingWriter, decode_all};
-use dial9_tokio_telemetry::telemetry::analysis_events::{CpuSampleSource, Dial9Event};
+use dial9_tokio_telemetry::telemetry::analysis_events::{CpuSampleSource, Dial9Event, WorkerId};
 
 #[test]
 fn sched_event_timestamps_align_with_wall_clock() {
@@ -71,7 +71,8 @@ fn sched_event_timestamps_align_with_wall_clock() {
         .iter()
         .filter_map(|e| match e {
             Dial9Event::CpuSampleEvent(s)
-                if s.source == CpuSampleSource::SchedEvent && s.worker_id < num_workers =>
+                if s.source == CpuSampleSource::SchedEvent
+                    && s.worker_id < WorkerId(num_workers) =>
             {
                 Some(s.timestamp_ns)
             }

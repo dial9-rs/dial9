@@ -16,13 +16,11 @@
 //! After running, inspect the trace:
 //!   cargo run --example analyze_trace -- /tmp/thread_per_core/trace.0.bin
 
-use dial9_tokio_telemetry::telemetry::analysis_events::Dial9Event;
+use dial9_tokio_telemetry::telemetry::analysis_events::{Dial9Event, WorkerId};
 use dial9_tokio_telemetry::telemetry::{DiskWriter, TelemetryCore};
 use dial9_trace_format::decoder::Decoder;
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
-
-const WORKER_UNKNOWN: u64 = 255;
 
 fn main() -> std::io::Result<()> {
     let trace_dir = "/tmp/thread_per_core";
@@ -108,8 +106,8 @@ fn main() -> std::io::Result<()> {
     // Collect: runtime name → worker IDs (from metadata), and
     //          worker ID → poll event count (from PollStart/PollEnd).
     let mut runtime_workers: BTreeMap<String, Vec<u64>> = BTreeMap::new();
-    let mut poll_counts: BTreeMap<u64, usize> = BTreeMap::new();
-    let mut seen_workers: BTreeSet<u64> = BTreeSet::new();
+    let mut poll_counts: BTreeMap<WorkerId, usize> = BTreeMap::new();
+    let mut seen_workers: BTreeSet<WorkerId> = BTreeSet::new();
     let mut total_polls = 0usize;
     let mut unknown_polls = 0usize;
 
@@ -132,7 +130,7 @@ fn main() -> std::io::Result<()> {
                     }
                     Dial9Event::PollStartEvent(e) => {
                         total_polls += 1;
-                        if e.worker_id != WORKER_UNKNOWN {
+                        if e.worker_id != WorkerId::UNKNOWN {
                             seen_workers.insert(e.worker_id);
                             *poll_counts.entry(e.worker_id).or_default() += 1;
                         } else {
@@ -141,7 +139,7 @@ fn main() -> std::io::Result<()> {
                     }
                     Dial9Event::PollEndEvent(e) => {
                         total_polls += 1;
-                        if e.worker_id != WORKER_UNKNOWN {
+                        if e.worker_id != WorkerId::UNKNOWN {
                             seen_workers.insert(e.worker_id);
                             *poll_counts.entry(e.worker_id).or_default() += 1;
                         } else {
@@ -170,14 +168,18 @@ fn main() -> std::io::Result<()> {
         // Find which runtime this worker belongs to.
         let runtime = runtime_workers
             .iter()
-            .find(|(_, ids)| ids.contains(worker_id))
+            .find(|(_, ids)| ids.contains(&worker_id.0))
             .map(|(name, _)| name.as_str())
             .unwrap_or("unknown");
         println!("  worker {worker_id} ({runtime}): {count} poll events");
     }
 
     // Verify every worker that emitted events is accounted for in metadata.
-    let metadata_ids: BTreeSet<u64> = runtime_workers.values().flatten().copied().collect();
+    let metadata_ids: BTreeSet<WorkerId> = runtime_workers
+        .values()
+        .flatten()
+        .map(|&id| WorkerId(id))
+        .collect();
     let unaccounted: Vec<_> = seen_workers.difference(&metadata_ids).collect();
     if unaccounted.is_empty() {
         println!("\n✓ All worker IDs are accounted for in runtime metadata.");

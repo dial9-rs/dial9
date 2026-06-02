@@ -1,7 +1,7 @@
 mod common;
 
 use common::decode_file;
-use dial9_tokio_telemetry::telemetry::analysis_events::Dial9Event;
+use dial9_tokio_telemetry::telemetry::analysis_events::{Dial9Event, WorkerId};
 use dial9_tokio_telemetry::telemetry::{DiskWriter, TracedRuntime};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -129,7 +129,7 @@ fn overhead_bench_validates() {
         }
         let trace_polls = events
             .iter()
-            .filter(|e| matches!(e, Dial9Event::PollStartEvent(ev) if ev.worker_id == w as u64))
+            .filter(|e| matches!(e, Dial9Event::PollStartEvent(ev) if ev.worker_id == WorkerId(w as u64)))
             .count();
         assert!(
             trace_polls > 0,

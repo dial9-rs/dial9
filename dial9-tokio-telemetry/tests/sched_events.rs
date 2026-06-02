@@ -5,21 +5,7 @@
 mod common;
 
 use common::{BytesCapturingWriter, decode_all};
-use serde::Deserialize;
-
-#[derive(Debug, Deserialize)]
-#[serde(tag = "event")]
-enum SchedSample {
-    CpuSampleEvent {
-        worker_id: u64,
-        source: u8,
-    },
-    #[serde(other)]
-    Other,
-}
-
-const SOURCE_CPU_PROFILE: u8 = 0;
-const SOURCE_SCHED_EVENT: u8 = 1;
+use dial9_tokio_telemetry::telemetry::analysis_events::{CpuSampleSource, Dial9Event, WorkerId};
 
 #[test]
 fn sched_events_capture_context_switches() {
@@ -55,13 +41,13 @@ fn sched_events_capture_context_switches() {
     drop(guard);
 
     let b = batches.lock().unwrap();
-    let events: Vec<SchedSample> = decode_all(&b);
+    let events: Vec<Dial9Event> = decode_all(&b);
 
     let worker_sched_samples: Vec<_> = events
         .iter()
         .filter(|e| {
-            matches!(e, SchedSample::CpuSampleEvent { worker_id, source }
-            if *worker_id < num_workers && *source == SOURCE_SCHED_EVENT)
+            matches!(e, Dial9Event::CpuSampleEvent(s)
+            if s.worker_id < WorkerId(num_workers) && s.source == CpuSampleSource::SchedEvent)
         })
         .collect();
     assert!(
@@ -73,8 +59,8 @@ fn sched_events_capture_context_switches() {
     let cpu_profile_samples = events
         .iter()
         .filter(|e| {
-            matches!(e, SchedSample::CpuSampleEvent { source, .. }
-            if *source == SOURCE_CPU_PROFILE)
+            matches!(e, Dial9Event::CpuSampleEvent(s)
+            if s.source == CpuSampleSource::CpuProfile)
         })
         .count();
     assert_eq!(cpu_profile_samples, 0, "should have no CpuProfile samples");
@@ -123,12 +109,12 @@ fn sched_events_sampling_reduces_count() {
         drop(guard);
 
         let b = batches.lock().unwrap();
-        let events: Vec<SchedSample> = decode_all(&b);
+        let events: Vec<Dial9Event> = decode_all(&b);
         events
             .iter()
             .filter(|e| {
-                matches!(e, SchedSample::CpuSampleEvent { source, .. }
-                if *source == SOURCE_SCHED_EVENT)
+                matches!(e, Dial9Event::CpuSampleEvent(s)
+                if s.source == CpuSampleSource::SchedEvent)
             })
             .count()
     };

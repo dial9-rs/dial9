@@ -400,7 +400,7 @@ mod tests {
             .iter()
             .filter_map(|e| match e {
                 crate::telemetry::analysis_events::Dial9Event::PollStartEvent(ev) => {
-                    Some(crate::telemetry::format::WorkerId(ev.worker_id))
+                    Some(crate::telemetry::format::WorkerId(ev.worker_id.0))
                 }
                 _ => None,
             })
@@ -658,7 +658,6 @@ mod tests {
 
     #[test]
     fn build_and_attach_to_telemetry_produces_unique_worker_ids() {
-        use crate::telemetry::format::WorkerId;
         use std::collections::HashSet;
 
         let data = Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
@@ -725,9 +724,8 @@ mod tests {
                 _ => None,
             };
             if let Some(id) = wid {
-                let wid = WorkerId(id);
-                if wid != WorkerId::UNKNOWN {
-                    worker_ids.insert(wid.as_u64());
+                if id != crate::telemetry::analysis_events::WorkerId::UNKNOWN {
+                    worker_ids.insert(id.as_u64());
                 }
             }
         }
@@ -1185,7 +1183,6 @@ mod tests {
 
     #[test]
     fn telemetry_core_trace_runtime_multiple_runtimes_unique_worker_ids() {
-        use crate::telemetry::format::WorkerId;
         use std::collections::HashSet;
 
         let data = Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
@@ -1234,9 +1231,8 @@ mod tests {
         let mut worker_ids: HashSet<u64> = HashSet::new();
         for event in &captured {
             if let crate::telemetry::analysis_events::Dial9Event::PollStartEvent(e) = event {
-                let wid = WorkerId(e.worker_id);
-                if wid != WorkerId::UNKNOWN {
-                    worker_ids.insert(wid.as_u64());
+                if e.worker_id != crate::telemetry::analysis_events::WorkerId::UNKNOWN {
+                    worker_ids.insert(e.worker_id.as_u64());
                 }
             }
         }

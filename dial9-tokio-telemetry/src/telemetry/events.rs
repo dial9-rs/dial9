@@ -1,3 +1,4 @@
+#[cfg(feature = "cpu-profiling")]
 use crate::telemetry::format::WorkerId;
 use serde::Serialize;
 #[cfg(feature = "cpu-profiling")]

@@ -193,6 +193,74 @@ impl serde::Serialize for FieldValue {
     }
 }
 
+#[cfg(feature = "serde")]
+impl<'de> serde::Deserialize<'de> for FieldValue {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct FieldValueVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for FieldValueVisitor {
+            type Value = FieldValue;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("any trace field value")
+            }
+
+            fn visit_bool<E>(self, v: bool) -> Result<FieldValue, E> {
+                Ok(FieldValue::Bool(v))
+            }
+            fn visit_i64<E>(self, v: i64) -> Result<FieldValue, E> {
+                Ok(FieldValue::I64(v))
+            }
+            fn visit_u64<E>(self, v: u64) -> Result<FieldValue, E> {
+                Ok(FieldValue::Varint(v))
+            }
+            fn visit_f64<E>(self, v: f64) -> Result<FieldValue, E> {
+                Ok(FieldValue::F64(v))
+            }
+            fn visit_str<E>(self, v: &str) -> Result<FieldValue, E> {
+                Ok(FieldValue::String(v.to_string()))
+            }
+            fn visit_string<E>(self, v: String) -> Result<FieldValue, E> {
+                Ok(FieldValue::String(v))
+            }
+            fn visit_bytes<E>(self, v: &[u8]) -> Result<FieldValue, E> {
+                Ok(FieldValue::Bytes(v.to_vec()))
+            }
+            fn visit_none<E>(self) -> Result<FieldValue, E> {
+                Ok(FieldValue::None)
+            }
+            fn visit_some<D: serde::Deserializer<'de>>(
+                self,
+                deserializer: D,
+            ) -> Result<FieldValue, D::Error> {
+                serde::Deserialize::deserialize(deserializer)
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut seq: A,
+            ) -> Result<FieldValue, A::Error> {
+                let mut items = Vec::new();
+                while let Some(v) = seq.next_element()? {
+                    items.push(v);
+                }
+                Ok(FieldValue::List(items))
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<FieldValue, A::Error> {
+                let mut pairs = Vec::new();
+                while let Some((k, v)) = map.next_entry()? {
+                    pairs.push((k, v));
+                }
+                Ok(FieldValue::Map(pairs))
+            }
+        }
+
+        deserializer.deserialize_any(FieldValueVisitor)
+    }
+}
+
 impl FieldValue {
     pub fn string(s: &str) -> Self {
         FieldValue::String(s.to_string())

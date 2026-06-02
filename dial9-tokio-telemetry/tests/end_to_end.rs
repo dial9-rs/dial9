@@ -1,7 +1,7 @@
 mod common;
 
 use common::{BytesCapturingWriter, decode_all, decode_file};
-use dial9_tokio_telemetry::telemetry::analysis_events::Dial9Event;
+use dial9_tokio_telemetry::telemetry::analysis_events::{Dial9Event, WorkerId};
 use dial9_tokio_telemetry::telemetry::{DiskWriter, TracedRuntime};
 use std::time::Duration;
 
@@ -67,7 +67,7 @@ fn end_to_end_trace_matches_workload_and_metrics() {
     for &w in &active_workers {
         let worker_polls = events
             .iter()
-            .filter(|e| matches!(e, Dial9Event::PollStartEvent(ev) if ev.worker_id == w as u64))
+            .filter(|e| matches!(e, Dial9Event::PollStartEvent(ev) if ev.worker_id == WorkerId(w as u64)))
             .count();
         assert!(
             worker_polls > 0,
@@ -86,16 +86,41 @@ fn end_to_end_trace_matches_workload_and_metrics() {
             Dial9Event::WorkerUnparkEvent(e) => (e.timestamp_ns, e.worker_id),
             _ => continue,
         };
-        if wid >= num_workers as u64 {
+        if wid.as_u64() >= num_workers as u64 {
             continue;
         }
-        if let Some(prev) = last_ts[wid as usize] {
+        if let Some(prev) = last_ts[wid.as_u64() as usize] {
             assert!(
                 ts >= prev,
                 "timestamp regression on worker {wid}: {prev} -> {ts}"
             );
         }
-        last_ts[wid as usize] = Some(ts);
+        last_ts[wid.as_u64() as usize] = Some(ts);
+    }
+
+    // Park/unpark balance: each worker's parks and unparks should match within ±1
+    let mut parks_per_worker: std::collections::HashMap<WorkerId, usize> =
+        std::collections::HashMap::new();
+    let mut unparks_per_worker: std::collections::HashMap<WorkerId, usize> =
+        std::collections::HashMap::new();
+    for event in &events {
+        match event {
+            Dial9Event::WorkerParkEvent(e) => {
+                *parks_per_worker.entry(e.worker_id).or_default() += 1;
+            }
+            Dial9Event::WorkerUnparkEvent(e) => {
+                *unparks_per_worker.entry(e.worker_id).or_default() += 1;
+            }
+            _ => {}
+        }
+    }
+    for (&wid, &parks) in &parks_per_worker {
+        let unparks = unparks_per_worker.get(&wid).copied().unwrap_or(0);
+        let diff = (parks as i64 - unparks as i64).unsigned_abs();
+        assert!(
+            diff <= 1,
+            "worker {wid}: park/unpark imbalance: parks={parks}, unparks={unparks}"
+        );
     }
 }
 

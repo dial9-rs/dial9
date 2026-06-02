@@ -1,9 +1,6 @@
-// This module is used by tests but not by library consumers (pub(crate) gating).
-#![allow(dead_code, unused_imports, unreachable_pub)]
+// This module is gated behind `#[cfg(feature = "analysis")]` and used by tests.
 
-use crate::telemetry::analysis_events::{CpuSampleSource, Dial9Event, PollStartEvent, WorkerId};
-use crate::telemetry::format::WorkerId as FmtWorkerId;
-use dial9_trace_format::FieldValue;
+use crate::telemetry::analysis_events::{CpuSampleSource, Dial9Event, WorkerId};
 use dial9_trace_format::decoder::Decoder;
 use std::cmp::Reverse;
 use std::collections::HashMap;
@@ -69,8 +66,19 @@ impl TraceReader {
                     segment_metadata = e.entries.clone();
                 }
                 Dial9Event::Other | Dial9Event::ProcessResourceUsageEvent(_) => {
-                    // Custom/unknown event: resolve pooled fields and store as-is
-                    // We skip storing these since Dial9Event::Other has no data
+                    // Unknown event: deserialize as CustomEvent to get fields.
+                    match ev.deserialize::<crate::telemetry::analysis_events::CustomEvent>() {
+                        Ok(custom) => {
+                            events.push(Dial9Event::Custom(custom));
+                        }
+                        Err(e) => {
+                            tracing::debug!(
+                                event_name = ev.name,
+                                error = %e,
+                                "failed to deserialize custom event"
+                            );
+                        }
+                    }
                     return;
                 }
                 _ => {}
@@ -161,7 +169,7 @@ pub struct TraceAnalysis {
     /// Wall-clock duration of the trace in nanoseconds.
     pub duration_ns: u64,
     /// Per-worker aggregated statistics.
-    pub worker_stats: HashMap<FmtWorkerId, WorkerStats>,
+    pub worker_stats: HashMap<WorkerId, WorkerStats>,
     /// Maximum observed global queue depth across all samples.
     pub max_global_queue: usize,
     /// Average global queue depth across all samples.
@@ -188,6 +196,7 @@ fn event_timestamp(ev: &Dial9Event) -> Option<u64> {
         Dial9Event::AllocEvent(e) => Some(e.timestamp_ns),
         Dial9Event::FreeEvent(e) => Some(e.timestamp_ns),
         Dial9Event::ProcessResourceUsageEvent(e) => Some(e.timestamp_ns),
+        Dial9Event::Custom(e) => e.timestamp_ns,
         Dial9Event::Other => None,
     }
 }
@@ -217,9 +226,9 @@ fn lookup_global_queue_depth(timeline: &[(u64, usize)], timestamp: u64) -> usize
 
 /// Analyze a slice of telemetry events and produce a [`TraceAnalysis`] summary.
 pub fn analyze_trace(events: &[Dial9Event]) -> TraceAnalysis {
-    let mut worker_stats: HashMap<FmtWorkerId, WorkerStats> = HashMap::new();
-    let mut poll_starts: HashMap<FmtWorkerId, u64> = HashMap::new();
-    let mut poll_start_locs: HashMap<FmtWorkerId, String> = HashMap::new();
+    let mut worker_stats: HashMap<WorkerId, WorkerStats> = HashMap::new();
+    let mut poll_starts: HashMap<WorkerId, u64> = HashMap::new();
+    let mut poll_start_locs: HashMap<WorkerId, String> = HashMap::new();
     let mut spawn_location_stats: HashMap<String, SpawnLocationStats> = HashMap::new();
     let mut max_global_queue = 0;
     let mut global_queue_sum = 0u64;
@@ -241,14 +250,21 @@ pub fn analyze_trace(events: &[Dial9Event]) -> TraceAnalysis {
                 global_queue_count += 1;
             }
             Dial9Event::PollStartEvent(e) => {
-                let wid = FmtWorkerId(e.worker_id);
+                let wid = e.worker_id;
                 let stats = worker_stats.entry(wid).or_default();
                 stats.max_local_queue = stats.max_local_queue.max(e.local_queue as usize);
                 stats.poll_count += 1;
                 poll_starts.insert(wid, e.timestamp_ns);
+                if !e.spawn_loc.is_empty() {
+                    spawn_location_stats
+                        .entry(e.spawn_loc.clone())
+                        .or_default()
+                        .poll_count += 1;
+                    poll_start_locs.insert(wid, e.spawn_loc.clone());
+                }
             }
             Dial9Event::PollEndEvent(e) => {
-                let wid = FmtWorkerId(e.worker_id);
+                let wid = e.worker_id;
                 let stats = worker_stats.entry(wid).or_default();
                 if let Some(start) = poll_starts.get(&wid) {
                     let duration = e.timestamp_ns.saturating_sub(*start);
@@ -262,13 +278,13 @@ pub fn analyze_trace(events: &[Dial9Event]) -> TraceAnalysis {
                 }
             }
             Dial9Event::WorkerParkEvent(e) => {
-                let wid = FmtWorkerId(e.worker_id);
+                let wid = e.worker_id;
                 let stats = worker_stats.entry(wid).or_default();
                 stats.max_local_queue = stats.max_local_queue.max(e.local_queue as usize);
                 stats.park_count += 1;
             }
             Dial9Event::WorkerUnparkEvent(e) => {
-                let wid = FmtWorkerId(e.worker_id);
+                let wid = e.worker_id;
                 let stats = worker_stats.entry(wid).or_default();
                 stats.max_local_queue = stats.max_local_queue.max(e.local_queue as usize);
                 stats.unpark_count += 1;
@@ -331,7 +347,7 @@ pub fn compute_wake_to_poll_delays(events: &[Dial9Event]) -> Vec<u64> {
 #[derive(Debug)]
 pub struct ActivePeriod {
     /// Worker thread that was active during this period.
-    pub worker_id: FmtWorkerId,
+    pub worker_id: WorkerId,
     /// Timestamp when the worker was unparked (nanos).
     pub start_ns: u64,
     /// Timestamp when the worker parked again (nanos).
@@ -345,15 +361,15 @@ pub struct ActivePeriod {
 /// Compute scheduling ratios for each active period (unpark→park) per worker.
 pub fn compute_active_periods(events: &[Dial9Event]) -> Vec<ActivePeriod> {
     let mut periods = Vec::new();
-    let mut unpark_state: HashMap<FmtWorkerId, (u64, u64)> = HashMap::new();
+    let mut unpark_state: HashMap<WorkerId, (u64, u64)> = HashMap::new();
 
     for event in events {
         match event {
             Dial9Event::WorkerUnparkEvent(e) => {
-                unpark_state.insert(FmtWorkerId(e.worker_id), (e.timestamp_ns, e.cpu_time_ns));
+                unpark_state.insert(e.worker_id, (e.timestamp_ns, e.cpu_time_ns));
             }
             Dial9Event::WorkerParkEvent(e) => {
-                let wid = FmtWorkerId(e.worker_id);
+                let wid = e.worker_id;
                 if let Some((start_wall, start_cpu)) = unpark_state.remove(&wid) {
                     let wall_delta = e.timestamp_ns.saturating_sub(start_wall);
                     let cpu_delta = e.cpu_time_ns.saturating_sub(start_cpu);
@@ -432,18 +448,18 @@ pub fn print_analysis(analysis: &TraceAnalysis) {
 }
 
 /// Detect periods where a worker was parked while the global queue had pending work.
-pub fn detect_idle_workers(events: &[Dial9Event]) -> Vec<(FmtWorkerId, u64, usize)> {
+pub fn detect_idle_workers(events: &[Dial9Event]) -> Vec<(WorkerId, u64, usize)> {
     let global_queue_timeline = build_global_queue_timeline(events);
     let mut idle_periods = Vec::new();
-    let mut worker_park_times: HashMap<FmtWorkerId, u64> = HashMap::new();
+    let mut worker_park_times: HashMap<WorkerId, u64> = HashMap::new();
 
     for event in events {
         match event {
             Dial9Event::WorkerParkEvent(e) => {
-                worker_park_times.insert(FmtWorkerId(e.worker_id), e.timestamp_ns);
+                worker_park_times.insert(e.worker_id, e.timestamp_ns);
             }
             Dial9Event::WorkerUnparkEvent(e) => {
-                let wid = FmtWorkerId(e.worker_id);
+                let wid = e.worker_id;
                 if let Some(park_time) = worker_park_times.remove(&wid) {
                     let idle_duration = e.timestamp_ns.saturating_sub(park_time);
                     let global_queue_at_unpark =
@@ -464,7 +480,7 @@ pub fn detect_idle_workers(events: &[Dial9Event]) -> Vec<(FmtWorkerId, u64, usiz
 #[derive(Debug)]
 pub struct LongPoll {
     /// Worker that executed the poll.
-    pub worker_id: FmtWorkerId,
+    pub worker_id: WorkerId,
     /// Poll start timestamp (nanos).
     pub start_ns: u64,
     /// Poll end timestamp (nanos).
@@ -480,18 +496,18 @@ pub struct LongPoll {
 /// Detect polls that exceed `threshold_ns` nanoseconds.
 pub fn detect_long_polls(events: &[Dial9Event], threshold_ns: u64) -> Vec<LongPoll> {
     let mut long_polls = Vec::new();
-    let mut poll_starts: HashMap<FmtWorkerId, (u64, u64, String)> = HashMap::new();
+    let mut poll_starts: HashMap<WorkerId, (u64, u64, String)> = HashMap::new();
 
     for event in events {
         match event {
             Dial9Event::PollStartEvent(e) => {
                 poll_starts.insert(
-                    FmtWorkerId(e.worker_id),
+                    e.worker_id,
                     (e.timestamp_ns, e.task_id, e.spawn_loc.clone()),
                 );
             }
             Dial9Event::PollEndEvent(e) => {
-                let wid = FmtWorkerId(e.worker_id);
+                let wid = e.worker_id;
                 if let Some((start, task_id, spawn_loc)) = poll_starts.remove(&wid) {
                     let duration = e.timestamp_ns.saturating_sub(start);
                     if duration >= threshold_ns {
@@ -516,7 +532,7 @@ pub fn detect_long_polls(events: &[Dial9Event], threshold_ns: u64) -> Vec<LongPo
 #[derive(Debug)]
 pub struct SchedDelay {
     /// Worker that experienced the scheduling delay.
-    pub worker_id: FmtWorkerId,
+    pub worker_id: WorkerId,
     /// Timestamp when the worker parked (nanos).
     pub park_ns: u64,
     /// Timestamp when the worker was unparked (nanos).
@@ -528,15 +544,15 @@ pub struct SchedDelay {
 /// Detect park periods where OS scheduling wait exceeded `threshold_ns`.
 pub fn detect_sched_delays(events: &[Dial9Event], threshold_ns: u64) -> Vec<SchedDelay> {
     let mut delays = Vec::new();
-    let mut park_times: HashMap<FmtWorkerId, u64> = HashMap::new();
+    let mut park_times: HashMap<WorkerId, u64> = HashMap::new();
 
     for event in events {
         match event {
             Dial9Event::WorkerParkEvent(e) => {
-                park_times.insert(FmtWorkerId(e.worker_id), e.timestamp_ns);
+                park_times.insert(e.worker_id, e.timestamp_ns);
             }
             Dial9Event::WorkerUnparkEvent(e) => {
-                let wid = FmtWorkerId(e.worker_id);
+                let wid = e.worker_id;
                 if let Some(park_ns) = park_times.remove(&wid)
                     && e.sched_wait_ns >= threshold_ns
                 {
@@ -558,7 +574,7 @@ pub fn detect_sched_delays(events: &[Dial9Event], threshold_ns: u64) -> Vec<Sche
 #[derive(Debug)]
 pub struct WakeDelay {
     /// Worker that polled the task after the wake.
-    pub worker_id: FmtWorkerId,
+    pub worker_id: WorkerId,
     /// Timestamp of the wake event (nanos).
     pub wake_ns: u64,
     /// Timestamp of the subsequent poll start (nanos).
@@ -596,7 +612,7 @@ pub fn detect_wake_delays(events: &[Dial9Event], threshold_ns: u64) -> Vec<WakeD
                 let delay = p.timestamp_ns.saturating_sub(wakes[idx - 1]);
                 if delay >= threshold_ns && delay < MAX_REASONABLE_DELAY_NS {
                     delays.push(WakeDelay {
-                        worker_id: FmtWorkerId(p.worker_id),
+                        worker_id: p.worker_id,
                         wake_ns: wakes[idx - 1],
                         poll_ns: p.timestamp_ns,
                         delay_ns: delay,
@@ -613,7 +629,7 @@ pub fn detect_wake_delays(events: &[Dial9Event], threshold_ns: u64) -> Vec<WakeD
 #[derive(Debug)]
 pub struct SampledPoll {
     /// Worker that executed the poll.
-    pub worker_id: FmtWorkerId,
+    pub worker_id: WorkerId,
     /// Poll start timestamp (nanos).
     pub start_ns: u64,
     /// Poll end timestamp (nanos).
@@ -632,7 +648,7 @@ pub struct SampledPoll {
 /// their execution.
 pub fn detect_sampled_polls(events: &[Dial9Event]) -> Vec<SampledPoll> {
     struct PollSpan {
-        worker_id: FmtWorkerId,
+        worker_id: WorkerId,
         start_ns: u64,
         end_ns: u64,
         task_id: u64,
@@ -642,18 +658,18 @@ pub fn detect_sampled_polls(events: &[Dial9Event]) -> Vec<SampledPoll> {
     }
 
     let mut polls: Vec<PollSpan> = Vec::new();
-    let mut poll_starts: HashMap<FmtWorkerId, (u64, u64, String)> = HashMap::new();
+    let mut poll_starts: HashMap<WorkerId, (u64, u64, String)> = HashMap::new();
 
     for event in events {
         match event {
             Dial9Event::PollStartEvent(e) => {
                 poll_starts.insert(
-                    FmtWorkerId(e.worker_id),
+                    e.worker_id,
                     (e.timestamp_ns, e.task_id, e.spawn_loc.clone()),
                 );
             }
             Dial9Event::PollEndEvent(e) => {
-                let wid = FmtWorkerId(e.worker_id);
+                let wid = e.worker_id;
                 if let Some((start, task_id, spawn_loc)) = poll_starts.remove(&wid) {
                     polls.push(PollSpan {
                         worker_id: wid,
@@ -674,7 +690,7 @@ pub fn detect_sampled_polls(events: &[Dial9Event]) -> Vec<SampledPoll> {
 
     for event in events {
         if let Dial9Event::CpuSampleEvent(e) = event {
-            let wid = FmtWorkerId(e.worker_id);
+            let wid = e.worker_id;
             let start_idx = polls.partition_point(|p| p.worker_id < wid);
             let end_idx = polls.partition_point(|p| p.worker_id <= wid);
             let worker_polls = &mut polls[start_idx..end_idx];
@@ -709,7 +725,6 @@ pub fn detect_sampled_polls(events: &[Dial9Event]) -> Vec<SampledPoll> {
 mod tests {
     use super::*;
     use crate::telemetry::analysis_events::*;
-    use crate::telemetry::format::WorkerId as FmtWorkerId;
     use dial9_trace_format::InternedString;
     use dial9_trace_format::encoder::Encoder;
 
@@ -756,7 +771,7 @@ mod tests {
             panic!("expected WorkerParkEvent, got {:?}", events[0]);
         };
         assert_eq!(e.timestamp_ns, 1_000);
-        assert_eq!(e.worker_id, 7);
+        assert_eq!(e.worker_id, WorkerId(7));
         assert_eq!(e.local_queue, 3);
         assert_eq!(e.cpu_time_ns, 11);
     }
@@ -774,7 +789,7 @@ mod tests {
         let events = vec![
             Dial9Event::PollStartEvent(PollStartEvent {
                 timestamp_ns: 1_000_000,
-                worker_id: 0,
+                worker_id: WorkerId(0),
                 local_queue: 3,
                 task_id: 0,
                 spawn_loc: String::new(),
@@ -785,7 +800,7 @@ mod tests {
             }),
             Dial9Event::PollEndEvent(PollEndEvent {
                 timestamp_ns: 3_000_000,
-                worker_id: 0,
+                worker_id: WorkerId(0),
             }),
         ];
         let analysis = analyze_trace(&events);
@@ -799,21 +814,18 @@ mod tests {
         let events = vec![
             Dial9Event::PollStartEvent(PollStartEvent {
                 timestamp_ns: 1_000_000,
-                worker_id: 0,
+                worker_id: WorkerId(0),
                 local_queue: 10,
                 task_id: 0,
                 spawn_loc: String::new(),
             }),
             Dial9Event::PollEndEvent(PollEndEvent {
                 timestamp_ns: 2_000_000,
-                worker_id: 0,
+                worker_id: WorkerId(0),
             }),
         ];
         let analysis = analyze_trace(&events);
-        let stats = analysis
-            .worker_stats
-            .get(&FmtWorkerId::from(0usize))
-            .unwrap();
+        let stats = analysis.worker_stats.get(&WorkerId(0)).unwrap();
         assert_eq!(stats.max_local_queue, 10);
     }
 
@@ -836,7 +848,7 @@ mod tests {
             }),
             Dial9Event::WorkerParkEvent(WorkerParkEvent {
                 timestamp_ns: 2_000_000,
-                worker_id: 0,
+                worker_id: WorkerId(0),
                 local_queue: 0,
                 cpu_time_ns: 0,
                 tid: 0,
@@ -847,7 +859,7 @@ mod tests {
             }),
             Dial9Event::WorkerUnparkEvent(WorkerUnparkEvent {
                 timestamp_ns: 6_000_000,
-                worker_id: 0,
+                worker_id: WorkerId(0),
                 local_queue: 0,
                 cpu_time_ns: 0,
                 sched_wait_ns: 0,
@@ -856,7 +868,7 @@ mod tests {
         ];
         let idle = detect_idle_workers(&events);
         assert_eq!(idle.len(), 1);
-        assert_eq!(idle[0].0, FmtWorkerId::from(0usize));
+        assert_eq!(idle[0].0, WorkerId(0));
         assert_eq!(idle[0].1, 4_000_000);
         assert_eq!(idle[0].2, 20);
     }
@@ -866,30 +878,30 @@ mod tests {
         let events = vec![
             Dial9Event::PollStartEvent(PollStartEvent {
                 timestamp_ns: 1_000_000,
-                worker_id: 0,
+                worker_id: WorkerId(0),
                 local_queue: 0,
                 task_id: 1,
                 spawn_loc: String::new(),
             }),
             Dial9Event::PollEndEvent(PollEndEvent {
                 timestamp_ns: 3_000_000,
-                worker_id: 0,
+                worker_id: WorkerId(0),
             }),
             Dial9Event::PollStartEvent(PollStartEvent {
                 timestamp_ns: 4_000_000,
-                worker_id: 0,
+                worker_id: WorkerId(0),
                 local_queue: 0,
                 task_id: 2,
                 spawn_loc: String::new(),
             }),
             Dial9Event::PollEndEvent(PollEndEvent {
                 timestamp_ns: 4_500_000,
-                worker_id: 0,
+                worker_id: WorkerId(0),
             }),
         ];
         let long = detect_long_polls(&events, 1_000_000);
         assert_eq!(long.len(), 1);
-        assert_eq!(long[0].worker_id, FmtWorkerId::from(0usize));
+        assert_eq!(long[0].worker_id, WorkerId(0));
         assert_eq!(long[0].duration_ns, 2_000_000);
         assert_eq!(long[0].task_id, 1);
     }
@@ -899,14 +911,14 @@ mod tests {
         let events = vec![
             Dial9Event::PollStartEvent(PollStartEvent {
                 timestamp_ns: 1_000_000,
-                worker_id: 0,
+                worker_id: WorkerId(0),
                 local_queue: 0,
                 task_id: 0,
                 spawn_loc: String::new(),
             }),
             Dial9Event::PollEndEvent(PollEndEvent {
                 timestamp_ns: 1_500_000,
-                worker_id: 0,
+                worker_id: WorkerId(0),
             }),
         ];
         let long = detect_long_polls(&events, 1_000_000);
@@ -918,32 +930,32 @@ mod tests {
         let events = vec![
             Dial9Event::PollStartEvent(PollStartEvent {
                 timestamp_ns: 1_000_000,
-                worker_id: 0,
+                worker_id: WorkerId(0),
                 local_queue: 0,
                 task_id: 1,
                 spawn_loc: String::new(),
             }),
             Dial9Event::PollStartEvent(PollStartEvent {
                 timestamp_ns: 1_000_000,
-                worker_id: 1,
+                worker_id: WorkerId(1),
                 local_queue: 0,
                 task_id: 2,
                 spawn_loc: String::new(),
             }),
             Dial9Event::PollEndEvent(PollEndEvent {
                 timestamp_ns: 5_000_000,
-                worker_id: 0,
+                worker_id: WorkerId(0),
             }),
             Dial9Event::PollEndEvent(PollEndEvent {
                 timestamp_ns: 8_000_000,
-                worker_id: 1,
+                worker_id: WorkerId(1),
             }),
         ];
         let long = detect_long_polls(&events, 1_000_000);
         assert_eq!(long.len(), 2);
-        assert_eq!(long[0].worker_id, FmtWorkerId::from(0usize));
+        assert_eq!(long[0].worker_id, WorkerId(0));
         assert_eq!(long[0].duration_ns, 4_000_000);
-        assert_eq!(long[1].worker_id, FmtWorkerId::from(1usize));
+        assert_eq!(long[1].worker_id, WorkerId(1));
         assert_eq!(long[1].duration_ns, 7_000_000);
     }
 
@@ -952,14 +964,14 @@ mod tests {
         let events = vec![
             Dial9Event::WorkerParkEvent(WorkerParkEvent {
                 timestamp_ns: 1_000_000,
-                worker_id: 0,
+                worker_id: WorkerId(0),
                 local_queue: 0,
                 cpu_time_ns: 0,
                 tid: 0,
             }),
             Dial9Event::WorkerUnparkEvent(WorkerUnparkEvent {
                 timestamp_ns: 5_000_000,
-                worker_id: 0,
+                worker_id: WorkerId(0),
                 local_queue: 0,
                 cpu_time_ns: 0,
                 sched_wait_ns: 200_000,
@@ -968,7 +980,7 @@ mod tests {
         ];
         let delays = detect_sched_delays(&events, 100_000);
         assert_eq!(delays.len(), 1);
-        assert_eq!(delays[0].worker_id, FmtWorkerId::from(0usize));
+        assert_eq!(delays[0].worker_id, WorkerId(0));
         assert_eq!(delays[0].sched_wait_ns, 200_000);
         assert_eq!(delays[0].park_ns, 1_000_000);
         assert_eq!(delays[0].unpark_ns, 5_000_000);
@@ -979,14 +991,14 @@ mod tests {
         let events = vec![
             Dial9Event::WorkerParkEvent(WorkerParkEvent {
                 timestamp_ns: 1_000_000,
-                worker_id: 0,
+                worker_id: WorkerId(0),
                 local_queue: 0,
                 cpu_time_ns: 0,
                 tid: 0,
             }),
             Dial9Event::WorkerUnparkEvent(WorkerUnparkEvent {
                 timestamp_ns: 2_000_000,
-                worker_id: 0,
+                worker_id: WorkerId(0),
                 local_queue: 0,
                 cpu_time_ns: 0,
                 sched_wait_ns: 50_000,
@@ -1002,21 +1014,21 @@ mod tests {
         let events = vec![
             Dial9Event::WorkerParkEvent(WorkerParkEvent {
                 timestamp_ns: 1_000_000,
-                worker_id: 0,
+                worker_id: WorkerId(0),
                 local_queue: 0,
                 cpu_time_ns: 0,
                 tid: 0,
             }),
             Dial9Event::WorkerParkEvent(WorkerParkEvent {
                 timestamp_ns: 1_000_000,
-                worker_id: 1,
+                worker_id: WorkerId(1),
                 local_queue: 0,
                 cpu_time_ns: 0,
                 tid: 0,
             }),
             Dial9Event::WorkerUnparkEvent(WorkerUnparkEvent {
                 timestamp_ns: 3_000_000,
-                worker_id: 0,
+                worker_id: WorkerId(0),
                 local_queue: 0,
                 cpu_time_ns: 0,
                 sched_wait_ns: 500_000,
@@ -1024,7 +1036,7 @@ mod tests {
             }),
             Dial9Event::WorkerUnparkEvent(WorkerUnparkEvent {
                 timestamp_ns: 4_000_000,
-                worker_id: 1,
+                worker_id: WorkerId(1),
                 local_queue: 0,
                 cpu_time_ns: 0,
                 sched_wait_ns: 10_000,
@@ -1033,7 +1045,7 @@ mod tests {
         ];
         let delays = detect_sched_delays(&events, 100_000);
         assert_eq!(delays.len(), 1);
-        assert_eq!(delays[0].worker_id, FmtWorkerId::from(0usize));
+        assert_eq!(delays[0].worker_id, WorkerId(0));
     }
 
     #[test]
@@ -1047,21 +1059,21 @@ mod tests {
             }),
             Dial9Event::PollStartEvent(PollStartEvent {
                 timestamp_ns: 1_500_000,
-                worker_id: 0,
+                worker_id: WorkerId(0),
                 local_queue: 0,
                 task_id: 1,
                 spawn_loc: String::new(),
             }),
             Dial9Event::PollEndEvent(PollEndEvent {
                 timestamp_ns: 1_600_000,
-                worker_id: 0,
+                worker_id: WorkerId(0),
             }),
         ];
         let delays = detect_wake_delays(&events, 100_000);
         assert_eq!(delays.len(), 1);
         assert_eq!(delays[0].delay_ns, 500_000);
         assert_eq!(delays[0].task_id, 1);
-        assert_eq!(delays[0].worker_id, FmtWorkerId::from(0usize));
+        assert_eq!(delays[0].worker_id, WorkerId(0));
     }
 
     #[test]
@@ -1075,14 +1087,14 @@ mod tests {
             }),
             Dial9Event::PollStartEvent(PollStartEvent {
                 timestamp_ns: 1_050_000,
-                worker_id: 0,
+                worker_id: WorkerId(0),
                 local_queue: 0,
                 task_id: 1,
                 spawn_loc: String::new(),
             }),
             Dial9Event::PollEndEvent(PollEndEvent {
                 timestamp_ns: 1_100_000,
-                worker_id: 0,
+                worker_id: WorkerId(0),
             }),
         ];
         let delays = detect_wake_delays(&events, 100_000);
@@ -1100,14 +1112,14 @@ mod tests {
             }),
             Dial9Event::PollStartEvent(PollStartEvent {
                 timestamp_ns: 2_000_000_000,
-                worker_id: 0,
+                worker_id: WorkerId(0),
                 local_queue: 0,
                 task_id: 1,
                 spawn_loc: String::new(),
             }),
             Dial9Event::PollEndEvent(PollEndEvent {
                 timestamp_ns: 2_000_100_000,
-                worker_id: 0,
+                worker_id: WorkerId(0),
             }),
         ];
         let delays = detect_wake_delays(&events, 100_000);
@@ -1119,14 +1131,14 @@ mod tests {
         let events = vec![
             Dial9Event::PollStartEvent(PollStartEvent {
                 timestamp_ns: 1_000_000,
-                worker_id: 0,
+                worker_id: WorkerId(0),
                 local_queue: 0,
                 task_id: 1,
                 spawn_loc: String::new(),
             }),
             Dial9Event::CpuSampleEvent(CpuSampleEvent {
                 timestamp_ns: 1_500_000,
-                worker_id: 0,
+                worker_id: WorkerId(0),
                 tid: 100,
                 source: CpuSampleSource::CpuProfile,
                 thread_name: None,
@@ -1135,7 +1147,7 @@ mod tests {
             }),
             Dial9Event::CpuSampleEvent(CpuSampleEvent {
                 timestamp_ns: 1_800_000,
-                worker_id: 0,
+                worker_id: WorkerId(0),
                 tid: 100,
                 source: CpuSampleSource::SchedEvent,
                 thread_name: None,
@@ -1144,7 +1156,7 @@ mod tests {
             }),
             Dial9Event::PollEndEvent(PollEndEvent {
                 timestamp_ns: 2_000_000,
-                worker_id: 0,
+                worker_id: WorkerId(0),
             }),
         ];
         let sampled = detect_sampled_polls(&events);
@@ -1159,14 +1171,14 @@ mod tests {
         let events = vec![
             Dial9Event::PollStartEvent(PollStartEvent {
                 timestamp_ns: 1_000_000,
-                worker_id: 0,
+                worker_id: WorkerId(0),
                 local_queue: 0,
                 task_id: 0,
                 spawn_loc: String::new(),
             }),
             Dial9Event::PollEndEvent(PollEndEvent {
                 timestamp_ns: 2_000_000,
-                worker_id: 0,
+                worker_id: WorkerId(0),
             }),
         ];
         let sampled = detect_sampled_polls(&events);
@@ -1178,18 +1190,18 @@ mod tests {
         let events = vec![
             Dial9Event::PollStartEvent(PollStartEvent {
                 timestamp_ns: 1_000_000,
-                worker_id: 0,
+                worker_id: WorkerId(0),
                 local_queue: 0,
                 task_id: 0,
                 spawn_loc: String::new(),
             }),
             Dial9Event::PollEndEvent(PollEndEvent {
                 timestamp_ns: 2_000_000,
-                worker_id: 0,
+                worker_id: WorkerId(0),
             }),
             Dial9Event::CpuSampleEvent(CpuSampleEvent {
                 timestamp_ns: 3_000_000,
-                worker_id: 0,
+                worker_id: WorkerId(0),
                 tid: 100,
                 source: CpuSampleSource::CpuProfile,
                 thread_name: None,
@@ -1210,14 +1222,14 @@ mod tests {
             }),
             Dial9Event::WorkerParkEvent(WorkerParkEvent {
                 timestamp_ns: 2_000_000,
-                worker_id: 0,
+                worker_id: WorkerId(0),
                 local_queue: 0,
                 cpu_time_ns: 0,
                 tid: 0,
             }),
             Dial9Event::WorkerUnparkEvent(WorkerUnparkEvent {
                 timestamp_ns: 6_000_000,
-                worker_id: 0,
+                worker_id: WorkerId(0),
                 local_queue: 0,
                 cpu_time_ns: 0,
                 sched_wait_ns: 0,
@@ -1230,8 +1242,6 @@ mod tests {
 
     #[test]
     fn trace_reader_custom_events_resolve_interned_at_parse_time() {
-        // Custom events are decoded as Dial9Event::Other now, so the
-        // TraceReader skips them. This test verifies the reader doesn't panic.
         #[derive(dial9_trace_format::TraceEvent)]
         struct MyEvent {
             #[traceevent(timestamp)]
@@ -1254,7 +1264,19 @@ mod tests {
         std::fs::write(&path, enc.finish()).unwrap();
 
         let reader = TraceReader::new(path.to_str().unwrap()).unwrap();
-        // Custom events are skipped (Dial9Event::Other → return early)
-        assert_eq!(reader.all_events.len(), 0);
+        assert_eq!(reader.all_events.len(), 1);
+        let Dial9Event::Custom(ref e) = reader.all_events[0] else {
+            panic!("expected Custom, got {:?}", reader.all_events[0]);
+        };
+        assert_eq!(e.name, "MyEvent");
+        assert_eq!(e.timestamp_ns, Some(1_000));
+        assert_eq!(
+            e.fields.get("label"),
+            Some(&dial9_trace_format::FieldValue::String("alpha".to_string()))
+        );
+        assert_eq!(
+            e.fields.get("count"),
+            Some(&dial9_trace_format::FieldValue::Varint(1))
+        );
     }
 }
