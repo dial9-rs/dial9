@@ -1,8 +1,8 @@
 mod common;
 
 use common::decode_file;
+use dial9_tokio_telemetry::telemetry::analysis_events::Dial9Event;
 use dial9_tokio_telemetry::telemetry::{DiskWriter, TracedRuntime};
-use serde::Deserialize;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -10,30 +10,6 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
 const NUM_CLIENTS: usize = 20;
-
-#[derive(Debug, Deserialize)]
-#[allow(dead_code, clippy::enum_variant_names)]
-#[serde(tag = "event")]
-enum Event {
-    PollStartEvent {
-        timestamp_ns: u64,
-        worker_id: u64,
-    },
-    PollEndEvent {
-        timestamp_ns: u64,
-        worker_id: u64,
-    },
-    WorkerParkEvent {
-        timestamp_ns: u64,
-        worker_id: u64,
-    },
-    WorkerUnparkEvent {
-        timestamp_ns: u64,
-        worker_id: u64,
-    },
-    #[serde(other)]
-    Other,
-}
 
 async fn echo_server(listener: TcpListener, running: Arc<AtomicBool>) {
     while running.load(Ordering::Relaxed) {
@@ -127,16 +103,16 @@ fn overhead_bench_validates() {
 
     // Read trace via serde path
     let sealed_path = dir.path().join("trace.0.bin");
-    let events: Vec<Event> = decode_file(&sealed_path);
+    let events: Vec<Dial9Event> = decode_file(&sealed_path);
 
     // Basic validation: poll starts == poll ends
     let poll_starts = events
         .iter()
-        .filter(|e| matches!(e, Event::PollStartEvent { .. }))
+        .filter(|e| matches!(e, Dial9Event::PollStartEvent(_)))
         .count();
     let poll_ends = events
         .iter()
-        .filter(|e| matches!(e, Event::PollEndEvent { .. }))
+        .filter(|e| matches!(e, Dial9Event::PollEndEvent(_)))
         .count();
     assert_eq!(
         poll_starts, poll_ends,
@@ -153,9 +129,7 @@ fn overhead_bench_validates() {
         }
         let trace_polls = events
             .iter()
-            .filter(
-                |e| matches!(e, Event::PollStartEvent { worker_id, .. } if *worker_id == w as u64),
-            )
+            .filter(|e| matches!(e, Dial9Event::PollStartEvent(ev) if ev.worker_id == w as u64))
             .count();
         assert!(
             trace_polls > 0,

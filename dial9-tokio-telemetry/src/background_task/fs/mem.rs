@@ -82,10 +82,13 @@ impl MemFs {
                 "max_total_size must be > 0",
             ));
         }
-        let slots = max_total_size
-            .checked_div(segment_size_hint)
-            .unwrap_or(1)
-            .max(1) as usize;
+
+        #[allow(unknown_lints, clippy::manual_checked_ops)]
+        let slots = if segment_size_hint == 0 {
+            1
+        } else {
+            (max_total_size / segment_size_hint).max(1) as usize
+        };
         Ok(Self {
             channel: Arc::new(MemChannel {
                 max_total_size,

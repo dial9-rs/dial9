@@ -8,7 +8,9 @@
 //!
 //! Worker attribution: because each task is awaited sequentially and the CPU
 //! burn blocks the worker thread, all samples within a burn window must come
-//! from the single worker that was running that task.
+//! from the single worker that was running that task.  We discover that worker
+//! by finding the `PollStart` event whose time interval (PollStart →
+//! corresponding PollEnd) contains the burn window.
 
 #![cfg(all(feature = "cpu-profiling", target_os = "linux"))]
 
@@ -17,6 +19,8 @@ mod common;
 use common::{BytesCapturingWriter, decode_all};
 use dial9_tokio_telemetry::telemetry::analysis_events::{CpuSampleSource, Dial9Event};
 
+// TODO: bring back WorkerId as a newtype wrapper around u64 in analysis_events
+// (currently using raw u64 constants for WORKER_UNKNOWN/WORKER_BLOCKING)
 const WORKER_UNKNOWN: u64 = 255;
 const WORKER_BLOCKING: u64 = 254;
 
@@ -40,9 +44,13 @@ fn cpu_sample_timestamps_align_with_wall_clock() {
         .build_and_start(builder, writer)
         .unwrap();
 
+    // All timestamps are now absolute CLOCK_MONOTONIC nanoseconds.
     let _trace_start = guard.start_time();
     let burn_windows: Arc<Mutex<Vec<(u64, u64)>>> = Arc::new(Mutex::new(Vec::new()));
 
+    // Pattern: 150ms sleep → 80ms burn → 150ms sleep, repeated sequentially.
+    // The 150ms gaps are much larger than the ~25ms MONOTONIC_RAW offset,
+    // so a clock mismatch will cause samples to spill outside burn windows.
     runtime.block_on(async {
         for _ in 0..3u64 {
             let windows = burn_windows.clone();
@@ -67,7 +75,7 @@ fn cpu_sample_timestamps_align_with_wall_clock() {
     let events: Vec<Dial9Event> = decode_all(&b);
     let windows = burn_windows.lock().unwrap();
 
-    // Extract CPU samples
+    // ── Extract CPU samples ────────────────────────────────────────────────
     let cpu_samples: Vec<(u64, u64)> = events
         .iter()
         .filter_map(|e| match e {
@@ -81,9 +89,14 @@ fn cpu_sample_timestamps_align_with_wall_clock() {
     let cpu_ts: Vec<u64> = cpu_samples.iter().map(|&(t, _)| t).collect();
     assert!(!cpu_ts.is_empty(), "expected CPU profile samples");
 
-    // Build poll intervals: (poll_start_ns, poll_end_ns, worker_id)
+    // ── Build poll intervals: (poll_start_ns, poll_end_ns, worker_id) ─────
+    //
+    // We track open PollStart events per worker and close them when we see a
+    // matching PollEnd.  Each closed interval is recorded so we can later
+    // identify which worker was running during each burn window.
     let mut poll_intervals: Vec<(u64, u64, u64)> = Vec::new();
     {
+        // worker_id → poll_start_ns
         let mut open: std::collections::HashMap<u64, u64> = std::collections::HashMap::new();
         for event in &events {
             match event {
@@ -100,9 +113,17 @@ fn cpu_sample_timestamps_align_with_wall_clock() {
         }
     }
 
+    // ── For each burn window, find the worker that owned it ───────────────
+    //
+    // The burn window must be fully contained within a single poll interval
+    // because `std::thread::sleep` blocks the worker and tokio does not
+    // preempt it to another task.  We use a small slack to account for the
+    // fact that PollStart/PollEnd timestamps are recorded just outside the
+    // actual burn.
     let slack_ns = 1_000_000u64; // 1 ms
 
     for (i, &(burn_start, burn_end)) in windows.iter().enumerate() {
+        // ── Timestamp alignment: at least one sample must fall in the window ──
         let in_window: Vec<(u64, u64)> = cpu_samples
             .iter()
             .filter(|&&(t, _)| t >= burn_start.saturating_sub(slack_ns) && t <= burn_end + slack_ns)
@@ -137,13 +158,25 @@ fn cpu_sample_timestamps_align_with_wall_clock() {
             &cpu_ts[..cpu_ts.len().min(20)]
         );
 
-        // Worker attribution
+        // ── Worker attribution: find the poll interval covering this burn ──
+        //
+        // We extend both ends of the burn window by `slack_ns` when checking
+        // containment so that scheduling jitter at the boundary doesn't cause
+        // a false miss.
         let owning_poll = poll_intervals
             .iter()
             .find(|&&(ps, pe, _)| ps <= burn_start + slack_ns && pe + slack_ns >= burn_end);
 
         if let Some(&(ps, pe, expected_worker)) = owning_poll {
-            eprintln!("  burn window {i} owned by worker {expected_worker} (poll [{ps}..{pe}])");
+            eprintln!(
+                "  burn window {i} owned by worker {expected_worker} \
+                 (poll [{ps}..{pe}])"
+            );
+            // Every sample that falls inside this burn window must come from
+            // `expected_worker`.  A sample from a different worker would mean
+            // the profiler mis-attributed the sample.
+            // Skip UNKNOWN_WORKER (255) samples — on CI the profiler can fire
+            // before the thread-to-worker mapping is visible.
             for &(t, w) in &in_window {
                 if w == WORKER_UNKNOWN {
                     continue;
@@ -151,18 +184,23 @@ fn cpu_sample_timestamps_align_with_wall_clock() {
                 assert_eq!(
                     w, expected_worker,
                     "burn window {i}: CPU sample at {t}ns was attributed to worker \
-                     {w} but the task was running on worker {expected_worker}."
+                     {w} but the task was running on worker {expected_worker}.\n\
+                     burn window: [{burn_start}..{burn_end}]\n\
+                     poll interval: [{ps}..{pe}]"
                 );
             }
         } else {
             panic!(
                 "burn window {i} [{burn_start}..{burn_end}] \
-                 could not be matched to a poll interval"
+                 could not be matched to a poll interval; \
+                 skipping worker attribution check for this window.\n\
+                 available poll intervals: {poll_intervals:?}"
             );
         }
     }
 
-    // Global: ≥90% of all CPU samples must fall within a burn window
+    // ── Global: ≥90 % of all CPU samples must fall within a burn window ───
+    // With correct clocks, nearly 100 % will. With a 25 ms offset, many spill.
     let total = cpu_ts.len();
     let in_any_window = cpu_ts
         .iter()
@@ -176,10 +214,11 @@ fn cpu_sample_timestamps_align_with_wall_clock() {
     eprintln!("{in_any_window}/{total} samples in burn windows ({pct:.1}%)");
     assert!(
         pct >= 90.0,
-        "only {pct:.1}% of CPU samples fell within burn windows (expected >=90%)"
+        "only {pct:.1}% of CPU samples fell within burn windows (expected >=90%). \
+         likely clock domain mismatch (CLOCK_MONOTONIC_RAW vs CLOCK_MONOTONIC)"
     );
 
-    // All samples must lie within the total test duration
+    // ── All samples must lie within the total test duration ───────────────
     let now = clock_monotonic_ns();
     for &t in &cpu_ts {
         assert!(
@@ -200,7 +239,15 @@ fn burn_cpu(duration: std::time::Duration) {
     }
 }
 
-/// Verify that `ThreadNameDef` events are emitted for non-worker threads.
+/// Verify that `ThreadNameDef` events are emitted for non-worker threads:
+/// - A plain `std::thread` spawned outside the runtime
+/// - A `spawn_blocking` task running on tokio's blocking pool
+///
+/// Both threads burn CPU for longer than the 250ms flush interval, then exit.
+/// The flush cycle's `drain()` eagerly caches thread names from
+/// `/proc/self/task/<tid>/comm` while the threads are still alive. The final
+/// `ThreadNameDef` emission happens later at write time, after the threads
+/// have exited — proving the eager cache is necessary.
 #[test]
 fn thread_name_attribution_for_external_and_blocking_threads() {
     let _ = tracing_subscriber::fmt::try_init();
@@ -221,13 +268,13 @@ fn thread_name_attribution_for_external_and_blocking_threads() {
         .build_and_start(builder, writer)
         .unwrap();
 
-    // std::thread with a known name
+    // ── std::thread with a known name — exits before flush ───────────────
     let ext_handle = std::thread::Builder::new()
         .name("my-ext-thread".into())
         .spawn(|| burn_cpu(Duration::from_millis(400)))
         .unwrap();
 
-    // spawn_blocking
+    // ── spawn_blocking — also exits before flush ─────────────────────────
     let blocking_handle = runtime.spawn(async {
         tokio::task::spawn_blocking(|| burn_cpu(Duration::from_millis(400)));
         tokio::task::spawn_blocking(|| {
@@ -239,6 +286,7 @@ fn thread_name_attribution_for_external_and_blocking_threads() {
         .unwrap()
     });
 
+    // Wait for both to finish — threads are gone after this point
     ext_handle.join().unwrap();
     let blocking_tid = runtime.block_on(async {
         let tid = blocking_handle.await.unwrap();
@@ -252,7 +300,7 @@ fn thread_name_attribution_for_external_and_blocking_threads() {
     let b = batches.lock().unwrap();
     let events: Vec<Dial9Event> = decode_all(&b);
 
-    // Collect thread names from CpuSample events
+    // ── Collect thread names from CpuSample events ─────────────────────
     let thread_defs: Vec<(u32, &str)> = events
         .iter()
         .filter_map(|e| match e {
@@ -264,7 +312,7 @@ fn thread_name_attribution_for_external_and_blocking_threads() {
     let unique_defs: std::collections::HashMap<u32, &str> = thread_defs.iter().copied().collect();
     eprintln!("Thread names from CpuSample events: {unique_defs:?}");
 
-    // Verify the external thread name appears
+    // ── Verify the external thread name appears ──────────────────────────
     let ext_def = thread_defs
         .iter()
         .find(|(_, name)| *name == "my-ext-thread");
@@ -274,15 +322,15 @@ fn thread_name_attribution_for_external_and_blocking_threads() {
     );
     let ext_tid = ext_def.unwrap().0;
 
-    // Verify the blocking thread has the expected name
+    // ── Verify the blocking thread has the expected name ────────────────
     let blocking_name = unique_defs.get(&blocking_tid);
     eprintln!("Blocking thread tid={blocking_tid}, name={blocking_name:?}");
     assert!(
         blocking_name.is_some_and(|n| n.starts_with("test-traced-run")),
-        "expected blocking thread name starting with 'test-traced-run', got: {blocking_name:?}"
+        "expected blocking thread name starting with 'test-traced-run', got: {blocking_name:?} [{unique_defs:?}]"
     );
 
-    // Verify CpuSamples exist for both tids with expected worker ids
+    // ── Verify CpuSamples exist for both tids with expected worker ids ────────────────────────────
     let ext_samples: Vec<_> = events
         .iter()
         .filter(|e| {

@@ -1,44 +1,9 @@
 mod common;
 
 use common::{BytesCapturingWriter, decode_all, decode_file};
+use dial9_tokio_telemetry::telemetry::analysis_events::Dial9Event;
 use dial9_tokio_telemetry::telemetry::{DiskWriter, TracedRuntime};
-use serde::Deserialize;
 use std::time::Duration;
-
-#[derive(Debug, Deserialize)]
-#[allow(dead_code, clippy::enum_variant_names)]
-#[serde(tag = "event")]
-enum TraceEvent {
-    PollStartEvent {
-        timestamp_ns: u64,
-        worker_id: u64,
-        task_id: u64,
-    },
-    PollEndEvent {
-        timestamp_ns: u64,
-        worker_id: u64,
-    },
-    WorkerParkEvent {
-        timestamp_ns: u64,
-        worker_id: u64,
-    },
-    WorkerUnparkEvent {
-        timestamp_ns: u64,
-        worker_id: u64,
-    },
-    TaskSpawnEvent {
-        timestamp_ns: u64,
-        task_id: u64,
-        spawn_loc: String,
-        instrumented: bool,
-    },
-    TaskTerminateEvent {
-        timestamp_ns: u64,
-        task_id: u64,
-    },
-    #[serde(other)]
-    Other,
-}
 
 /// Run a known workload under TracedRuntime, read the trace back, and verify
 /// basic consistency.
@@ -77,16 +42,16 @@ fn end_to_end_trace_matches_workload_and_metrics() {
     drop(guard);
 
     let sealed_path = dir.path().join("trace.0.bin");
-    let events: Vec<TraceEvent> = decode_file(&sealed_path);
+    let events: Vec<Dial9Event> = decode_file(&sealed_path);
 
     // Basic validation: poll starts == poll ends
     let poll_starts = events
         .iter()
-        .filter(|e| matches!(e, TraceEvent::PollStartEvent { .. }))
+        .filter(|e| matches!(e, Dial9Event::PollStartEvent(_)))
         .count();
     let poll_ends = events
         .iter()
-        .filter(|e| matches!(e, TraceEvent::PollEndEvent { .. }))
+        .filter(|e| matches!(e, Dial9Event::PollEndEvent(_)))
         .count();
     assert_eq!(
         poll_starts, poll_ends,
@@ -102,7 +67,7 @@ fn end_to_end_trace_matches_workload_and_metrics() {
     for &w in &active_workers {
         let worker_polls = events
             .iter()
-            .filter(|e| matches!(e, TraceEvent::PollStartEvent { worker_id, .. } if *worker_id == w as u64))
+            .filter(|e| matches!(e, Dial9Event::PollStartEvent(ev) if ev.worker_id == w as u64))
             .count();
         assert!(
             worker_polls > 0,
@@ -115,23 +80,10 @@ fn end_to_end_trace_matches_workload_and_metrics() {
     let mut last_ts: Vec<Option<u64>> = vec![None; num_workers];
     for event in &events {
         let (ts, wid) = match event {
-            TraceEvent::PollStartEvent {
-                timestamp_ns,
-                worker_id,
-                ..
-            }
-            | TraceEvent::PollEndEvent {
-                timestamp_ns,
-                worker_id,
-            }
-            | TraceEvent::WorkerParkEvent {
-                timestamp_ns,
-                worker_id,
-            }
-            | TraceEvent::WorkerUnparkEvent {
-                timestamp_ns,
-                worker_id,
-            } => (*timestamp_ns, *worker_id),
+            Dial9Event::PollStartEvent(e) => (e.timestamp_ns, e.worker_id),
+            Dial9Event::PollEndEvent(e) => (e.timestamp_ns, e.worker_id),
+            Dial9Event::WorkerParkEvent(e) => (e.timestamp_ns, e.worker_id),
+            Dial9Event::WorkerUnparkEvent(e) => (e.timestamp_ns, e.worker_id),
             _ => continue,
         };
         if wid >= num_workers as u64 {
@@ -177,10 +129,10 @@ fn task_spawn_events_from_main_thread_are_captured() {
     drop(guard);
 
     let b = batches.lock().unwrap();
-    let events: Vec<TraceEvent> = decode_all(&b);
+    let events: Vec<Dial9Event> = decode_all(&b);
     let task_spawn_count = events
         .iter()
-        .filter(|e| matches!(e, TraceEvent::TaskSpawnEvent { .. }))
+        .filter(|e| matches!(e, Dial9Event::TaskSpawnEvent(_)))
         .count();
 
     assert_eq!(
@@ -217,10 +169,10 @@ fn task_terminate_events_are_captured() {
     drop(guard);
 
     let b = batches.lock().unwrap();
-    let events: Vec<TraceEvent> = decode_all(&b);
+    let events: Vec<Dial9Event> = decode_all(&b);
     let terminate_count = events
         .iter()
-        .filter(|e| matches!(e, TraceEvent::TaskTerminateEvent { .. }))
+        .filter(|e| matches!(e, Dial9Event::TaskTerminateEvent(_)))
         .count();
 
     assert!(
@@ -321,17 +273,14 @@ fn spawn_audit_detects_uninstrumented_spawns() {
     drop(guard);
 
     let sealed_path = dir.path().join("trace.0.bin");
-    let events: Vec<TraceEvent> = decode_file(&sealed_path);
+    let events: Vec<Dial9Event> = decode_file(&sealed_path);
 
     let instrumented_count = events
         .iter()
         .filter(|e| {
             matches!(
                 e,
-                TraceEvent::TaskSpawnEvent {
-                    instrumented: true,
-                    ..
-                }
+                Dial9Event::TaskSpawnEvent(ev) if ev.instrumented
             )
         })
         .count();
@@ -340,10 +289,7 @@ fn spawn_audit_detects_uninstrumented_spawns() {
         .filter(|e| {
             matches!(
                 e,
-                TraceEvent::TaskSpawnEvent {
-                    instrumented: false,
-                    ..
-                }
+                Dial9Event::TaskSpawnEvent(ev) if !ev.instrumented
             )
         })
         .count();
@@ -359,15 +305,13 @@ fn spawn_audit_detects_uninstrumented_spawns() {
 
     // Verify spawn locations resolve and point to this test file.
     for event in &events {
-        if let TraceEvent::TaskSpawnEvent {
-            spawn_loc,
-            instrumented: false,
-            ..
-        } = event
+        if let Dial9Event::TaskSpawnEvent(ev) = event
+            && !ev.instrumented
         {
             assert!(
-                spawn_loc.contains("end_to_end.rs"),
-                "uninstrumented spawn should point to this test file, got: {spawn_loc}"
+                ev.spawn_loc.contains("end_to_end.rs"),
+                "uninstrumented spawn should point to this test file, got: {}",
+                ev.spawn_loc
             );
         }
     }

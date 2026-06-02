@@ -154,7 +154,7 @@ pub struct SpawnLocationStats {
 }
 
 /// Summary of a decoded trace: event counts, timing, and per-worker statistics.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct TraceAnalysis {
     /// Total number of events in the trace.
     pub total_events: usize,
@@ -225,8 +225,12 @@ pub fn analyze_trace(events: &[Dial9Event]) -> TraceAnalysis {
     let mut global_queue_sum = 0u64;
     let mut global_queue_count = 0u64;
 
-    let start_time = events.first().and_then(event_timestamp).unwrap_or(0);
-    let end_time = events.last().and_then(event_timestamp).unwrap_or(0);
+    let Some(start_time) = events.first().and_then(event_timestamp) else {
+        return TraceAnalysis::default();
+    };
+    let Some(end_time) = events.last().and_then(event_timestamp) else {
+        return TraceAnalysis::default();
+    };
 
     for event in events {
         match event {

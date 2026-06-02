@@ -1,34 +1,33 @@
 //! Thread-per-core architecture using current-thread runtimes.
 //!
+//! Some applications pin one single-threaded tokio runtime per CPU core for
+//! cache locality and predictable latency. This example shows how to trace
+//! that pattern: the telemetry session is created first via `TelemetryCore`,
+//! then each runtime (coordinator + per-core) is attached via `trace_runtime`.
+//!
+//! After the workload completes, the trace file is read back and all
+//! PollStart/PollEnd worker IDs are printed alongside the runtime→worker
+//! mapping from segment metadata — verifying that every core's events
+//! landed in the trace with the correct identity.
+//!
 //! Usage:
 //!   cargo run --example thread_per_core --features analysis
+//!
+//! After running, inspect the trace:
+//!   cargo run --example analyze_trace -- /tmp/thread_per_core/trace.0.bin
 
+use dial9_tokio_telemetry::telemetry::analysis_events::Dial9Event;
 use dial9_tokio_telemetry::telemetry::{DiskWriter, TelemetryCore};
 use dial9_trace_format::decoder::Decoder;
-use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
-#[derive(Debug, Deserialize)]
-#[allow(dead_code, clippy::enum_variant_names)]
-#[serde(tag = "event")]
-enum Event {
-    PollStartEvent {
-        worker_id: u64,
-    },
-    PollEndEvent {
-        worker_id: u64,
-    },
-    SegmentMetadataEvent {
-        entries: Vec<(String, String)>,
-    },
-    #[serde(other)]
-    Other,
-}
+const WORKER_UNKNOWN: u64 = 255;
 
 fn main() -> std::io::Result<()> {
     let trace_dir = "/tmp/thread_per_core";
     let _ = std::fs::create_dir_all(trace_dir);
+    // Clean up previous runs.
     for entry in std::fs::read_dir(trace_dir)? {
         let entry = entry?;
         if entry
@@ -46,14 +45,16 @@ fn main() -> std::io::Result<()> {
         .max_total_size(5 * 1024 * 1024)
         .build()?;
 
+    // Create the telemetry session first — no runtime needed yet.
     let guard = TelemetryCore::builder()
         .writer(writer)
         .trace_path(format!("{trace_dir}/trace.bin"))
         .build()?;
     guard.enable();
 
+    // Spawn one current-thread runtime per core.
     let num_cores = std::thread::available_parallelism()
-        .map(|n| n.get().min(4))
+        .map(|n| n.get().min(4)) // cap at 4 for the demo
         .unwrap_or(2);
 
     println!("Spawning {num_cores} current-thread runtimes...");
@@ -72,6 +73,7 @@ fn main() -> std::io::Result<()> {
                 .name(format!("core-{core_id}"))
                 .spawn(move || {
                     core_rt
+                        // spawning into the traced handle allows for more tracking
                         .block_on(handle.spawn(async move {
                             for i in 0..20 {
                                 tokio::task::yield_now().await;
@@ -94,7 +96,8 @@ fn main() -> std::io::Result<()> {
 
     let _ = guard.graceful_shutdown(Duration::from_secs(5));
 
-    // Read back the trace and verify
+    // ── Read back the trace and verify ──────────────────────────────────
+
     let mut files: Vec<_> = std::fs::read_dir(trace_dir)?
         .filter_map(|e| e.ok())
         .map(|e| e.path())
@@ -102,13 +105,13 @@ fn main() -> std::io::Result<()> {
         .collect();
     files.sort();
 
+    // Collect: runtime name → worker IDs (from metadata), and
+    //          worker ID → poll event count (from PollStart/PollEnd).
     let mut runtime_workers: BTreeMap<String, Vec<u64>> = BTreeMap::new();
     let mut poll_counts: BTreeMap<u64, usize> = BTreeMap::new();
     let mut seen_workers: BTreeSet<u64> = BTreeSet::new();
     let mut total_polls = 0usize;
     let mut unknown_polls = 0usize;
-
-    const WORKER_UNKNOWN: u64 = 255;
 
     for file in &files {
         let data = std::fs::read(file)?;
@@ -116,10 +119,10 @@ fn main() -> std::io::Result<()> {
             Decoder::new(&data).ok_or_else(|| std::io::Error::other("invalid trace header"))?;
         decoder
             .for_each_event(|raw| {
-                let ev: Event = raw.deserialize().expect("deserialize");
+                let ev: Dial9Event = raw.deserialize().expect("deserialize");
                 match &ev {
-                    Event::SegmentMetadataEvent { entries } => {
-                        for (key, val) in entries {
+                    Dial9Event::SegmentMetadataEvent(e) => {
+                        for (key, val) in &e.entries {
                             if let Some(name) = key.strip_prefix("runtime.") {
                                 let ids: Vec<u64> =
                                     val.split(',').filter_map(|s| s.parse().ok()).collect();
@@ -127,16 +130,25 @@ fn main() -> std::io::Result<()> {
                             }
                         }
                     }
-                    Event::PollStartEvent { worker_id } | Event::PollEndEvent { worker_id } => {
+                    Dial9Event::PollStartEvent(e) => {
                         total_polls += 1;
-                        if *worker_id != WORKER_UNKNOWN {
-                            seen_workers.insert(*worker_id);
-                            *poll_counts.entry(*worker_id).or_default() += 1;
+                        if e.worker_id != WORKER_UNKNOWN {
+                            seen_workers.insert(e.worker_id);
+                            *poll_counts.entry(e.worker_id).or_default() += 1;
                         } else {
                             unknown_polls += 1;
                         }
                     }
-                    Event::Other => {}
+                    Dial9Event::PollEndEvent(e) => {
+                        total_polls += 1;
+                        if e.worker_id != WORKER_UNKNOWN {
+                            seen_workers.insert(e.worker_id);
+                            *poll_counts.entry(e.worker_id).or_default() += 1;
+                        } else {
+                            unknown_polls += 1;
+                        }
+                    }
+                    _ => {}
                 }
             })
             .map_err(|e| std::io::Error::other(e.to_string()))?;
@@ -155,6 +167,7 @@ fn main() -> std::io::Result<()> {
 
     println!("\n=== Poll events per worker ===");
     for (worker_id, count) in &poll_counts {
+        // Find which runtime this worker belongs to.
         let runtime = runtime_workers
             .iter()
             .find(|(_, ids)| ids.contains(worker_id))
@@ -163,6 +176,7 @@ fn main() -> std::io::Result<()> {
         println!("  worker {worker_id} ({runtime}): {count} poll events");
     }
 
+    // Verify every worker that emitted events is accounted for in metadata.
     let metadata_ids: BTreeSet<u64> = runtime_workers.values().flatten().copied().collect();
     let unaccounted: Vec<_> = seen_workers.difference(&metadata_ids).collect();
     if unaccounted.is_empty() {

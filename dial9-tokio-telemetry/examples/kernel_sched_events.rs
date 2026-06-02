@@ -1,32 +1,51 @@
 //! Example: sched events with kernel stack frames.
 //!
 //! Captures context-switch callchains that include kernel frames, showing
-//! exactly where in the kernel the thread was descheduled.
+//! exactly where in the kernel the thread was descheduled. Reads back the
+//! trace and prints sample callchains so you can verify your setup.
 //!
 //! Run with:
 //!   cargo run --release --features cpu-profiling --example kernel_sched_events
 //!
 //! Requirements:
 //!   - perf_event_paranoid ≤ 1:  sudo sysctl kernel.perf_event_paranoid=1
+//!
+//! Example output (nanosleep descheduling a tokio worker):
+//!
+//!   __schedule                                    ← kernel
+//!   schedule
+//!   do_nanosleep
+//!   hrtimer_nanosleep
+//!   __x64_sys_nanosleep
+//!   do_syscall_64
+//!   entry_SYSCALL_64_after_hwframe
+//!   __GI___nanosleep                              ← libc
+//!   std::thread::sleep                            ← userspace
+//!   kernel_sched_events::blocking_task::{{closure}}
+//!   tokio::runtime::task::core::Core<T,S>::poll
+//!   ...
+//!   start_thread
+//!
+//! Example output (tokio worker parking on futex):
+//!
+//!   __schedule                                    ← kernel
+//!   schedule
+//!   futex_wait_queue_me
+//!   futex_wait
+//!   do_futex
+//!   __x64_sys_futex
+//!   do_syscall_64
+//!   entry_SYSCALL_64_after_hwframe
+//!   syscall                                       ← libc
+//!   tokio::..::park::Inner::park_condvar          ← userspace
+//!   tokio::..::worker::Context::park_internal
+//!   ...
+//!   start_thread
 
+use dial9_tokio_telemetry::telemetry::analysis_events::{CpuSampleSource, Dial9Event};
 use dial9_tokio_telemetry::telemetry::{DiskWriter, TracedRuntime, cpu_profile::SchedEventConfig};
 use dial9_trace_format::decoder::Decoder;
-use serde::Deserialize;
 use std::time::Duration;
-
-#[derive(Debug, Deserialize)]
-#[serde(tag = "event")]
-enum SchedSample {
-    CpuSampleEvent {
-        worker_id: u64,
-        source: u8,
-        callchain: Vec<u64>,
-    },
-    #[serde(other)]
-    Other,
-}
-
-const SOURCE_SCHED_EVENT: u8 = 1;
 
 async fn blocking_task(id: usize) {
     for _ in 0..5 {
@@ -66,6 +85,7 @@ fn main() {
     drop(runtime);
     drop(guard);
 
+    // Read back and print callchains
     eprintln!("\n=== Reading trace from {trace_read_path} ===");
     let data = std::fs::read(&trace_read_path).unwrap();
     let mut decoder = Decoder::new(&data).unwrap();
@@ -75,21 +95,19 @@ fn main() {
 
     decoder
         .for_each_event(|raw| {
-            let ev: SchedSample = raw.deserialize().expect("deserialize");
-            if let SchedSample::CpuSampleEvent {
-                worker_id,
-                source,
-                callchain,
-            } = &ev
-            {
-                if *source != SOURCE_SCHED_EVENT {
+            let ev: Dial9Event = raw.deserialize().expect("deserialize");
+            if let Dial9Event::CpuSampleEvent(ref s) = ev {
+                if s.source != CpuSampleSource::SchedEvent {
                     return;
                 }
                 total_samples += 1;
                 if printed < 3 {
                     printed += 1;
-                    eprintln!("\n--- SchedEvent sample #{printed} (worker {worker_id}) ---");
-                    for addr in callchain {
+                    eprintln!(
+                        "\n--- SchedEvent sample #{printed} (worker {}) ---",
+                        s.worker_id
+                    );
+                    for addr in &s.callchain {
                         eprintln!("  {addr:#x}");
                     }
                 }

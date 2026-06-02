@@ -2,28 +2,8 @@ mod common;
 
 use common::{BytesCapturingWriter, decode_all};
 use dial9_tokio_telemetry::telemetry::TracedRuntime;
-use serde::Deserialize;
+use dial9_tokio_telemetry::telemetry::analysis_events::Dial9Event;
 use std::time::Duration;
-
-#[derive(Debug, Deserialize)]
-#[allow(dead_code, clippy::enum_variant_names)]
-#[serde(tag = "event")]
-enum RuntimeEvent {
-    PollStartEvent {
-        timestamp_ns: u64,
-    },
-    PollEndEvent {
-        timestamp_ns: u64,
-    },
-    WorkerParkEvent {
-        timestamp_ns: u64,
-    },
-    WorkerUnparkEvent {
-        timestamp_ns: u64,
-    },
-    #[serde(other)]
-    Other,
-}
 
 /// After `disable()` is called and in-flight events are drained, no new
 /// events should be produced by subsequent work.
@@ -63,7 +43,10 @@ fn disable_stops_all_event_production() {
 
     let count_after_disable = {
         let b = batches.lock().unwrap();
-        decode_all::<RuntimeEvent>(&b).len()
+        decode_all::<Dial9Event>(&b)
+            .iter()
+            .filter(|e| !matches!(e, Dial9Event::Other))
+            .count()
     };
 
     // Phase 2: produce more work while disabled
@@ -86,7 +69,10 @@ fn disable_stops_all_event_production() {
 
     let count_after_phase2 = {
         let b = batches.lock().unwrap();
-        decode_all::<RuntimeEvent>(&b).len()
+        decode_all::<Dial9Event>(&b)
+            .iter()
+            .filter(|e| !matches!(e, Dial9Event::Other))
+            .count()
     };
 
     assert_eq!(
@@ -109,17 +95,6 @@ fn disable_stops_all_event_production() {
 #[cfg(all(feature = "cpu-profiling", target_os = "linux"))]
 fn disable_stops_cpu_sample_production() {
     use dial9_tokio_telemetry::telemetry::cpu_profile::CpuProfilingConfig;
-
-    #[derive(Debug, Deserialize)]
-    #[allow(dead_code, clippy::enum_variant_names)]
-    #[serde(tag = "event")]
-    enum CpuEvent {
-        CpuSampleEvent {
-            timestamp_ns: u64,
-        },
-        #[serde(other)]
-        Other,
-    }
 
     let (writer, batches) = BytesCapturingWriter::new();
 
@@ -154,9 +129,9 @@ fn disable_stops_cpu_sample_production() {
 
     let cpu_samples_phase1 = {
         let b = batches.lock().unwrap();
-        decode_all::<CpuEvent>(&b)
+        decode_all::<Dial9Event>(&b)
             .iter()
-            .filter(|e| matches!(e, CpuEvent::CpuSampleEvent { .. }))
+            .filter(|e| matches!(e, Dial9Event::CpuSampleEvent(_)))
             .count()
     };
     assert!(
@@ -172,7 +147,7 @@ fn disable_stops_cpu_sample_production() {
 
     let total_after_disable = {
         let b = batches.lock().unwrap();
-        decode_all::<CpuEvent>(&b).len()
+        decode_all::<Dial9Event>(&b).len()
     };
 
     // Phase 2: burn CPU while disabled — should NOT produce any events
@@ -194,7 +169,7 @@ fn disable_stops_cpu_sample_production() {
 
     let total_after_phase2 = {
         let b = batches.lock().unwrap();
-        decode_all::<CpuEvent>(&b).len()
+        decode_all::<Dial9Event>(&b).len()
     };
 
     assert_eq!(
@@ -210,6 +185,10 @@ fn disable_stops_cpu_sample_production() {
 }
 
 /// After `disable()`, the DiskWriter must not produce new segments.
+///
+/// Uses a 1-second rotation period and waits 5 seconds after disable.
+/// If the flush loop were still driving rotation, we'd see new `.bin`
+/// files appear.
 #[test]
 fn disable_stops_segment_rotation() {
     use dial9_tokio_telemetry::telemetry::DiskWriter;
@@ -326,10 +305,18 @@ fn enable_after_disable_resumes_events() {
     drop(guard);
 
     let b = batches.lock().unwrap();
-    let events: Vec<RuntimeEvent> = decode_all(&b);
+    let events: Vec<Dial9Event> = decode_all(&b);
     let runtime_event_count = events
         .iter()
-        .filter(|e| !matches!(e, RuntimeEvent::Other))
+        .filter(|e| {
+            matches!(
+                e,
+                Dial9Event::PollStartEvent(_)
+                    | Dial9Event::PollEndEvent(_)
+                    | Dial9Event::WorkerParkEvent(_)
+                    | Dial9Event::WorkerUnparkEvent(_)
+            )
+        })
         .count();
     assert!(
         runtime_event_count > 0,

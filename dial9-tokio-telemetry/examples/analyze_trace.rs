@@ -3,46 +3,10 @@
 //! Usage:
 //!   cargo run --example analyze_trace --features analysis -- <trace_file>
 
+use dial9_tokio_telemetry::telemetry::analysis_events::Dial9Event;
 use dial9_trace_format::decoder::Decoder;
-use serde::Deserialize;
 use std::collections::HashMap;
 use std::env;
-
-#[derive(Debug, Deserialize)]
-#[allow(dead_code, clippy::enum_variant_names)]
-#[serde(tag = "event")]
-enum Event {
-    PollStartEvent {
-        timestamp_ns: u64,
-        worker_id: u64,
-        task_id: u64,
-        spawn_loc: String,
-    },
-    PollEndEvent {
-        timestamp_ns: u64,
-        worker_id: u64,
-    },
-    WorkerParkEvent {
-        timestamp_ns: u64,
-        worker_id: u64,
-    },
-    WorkerUnparkEvent {
-        timestamp_ns: u64,
-        worker_id: u64,
-    },
-    TaskSpawnEvent {
-        timestamp_ns: u64,
-        task_id: u64,
-        spawn_loc: String,
-    },
-    WakeEventEvent {
-        timestamp_ns: u64,
-        waker_task_id: u64,
-        woken_task_id: u64,
-    },
-    #[serde(other)]
-    Other,
-}
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -57,7 +21,7 @@ fn main() {
     let mut events = Vec::new();
     decoder
         .for_each_event(|raw| {
-            let ev: Event = raw.deserialize().expect("deserialize");
+            let ev: Dial9Event = raw.deserialize().expect("deserialize");
             events.push(ev);
         })
         .expect("decode");
@@ -73,26 +37,19 @@ fn main() {
 
     for e in &events {
         match e {
-            Event::PollStartEvent {
-                worker_id,
-                task_id,
-                spawn_loc,
-                ..
-            } => {
-                *worker_polls.entry(*worker_id).or_default() += 1;
+            Dial9Event::PollStartEvent(ev) => {
+                *worker_polls.entry(ev.worker_id).or_default() += 1;
                 task_locs
-                    .entry(*task_id)
-                    .or_insert_with(|| spawn_loc.clone());
+                    .entry(ev.task_id)
+                    .or_insert_with(|| ev.spawn_loc.clone());
             }
-            Event::WorkerParkEvent { worker_id, .. } => {
-                *worker_parks.entry(*worker_id).or_default() += 1;
+            Dial9Event::WorkerParkEvent(ev) => {
+                *worker_parks.entry(ev.worker_id).or_default() += 1;
             }
-            Event::TaskSpawnEvent {
-                task_id, spawn_loc, ..
-            } => {
+            Dial9Event::TaskSpawnEvent(ev) => {
                 task_locs
-                    .entry(*task_id)
-                    .or_insert_with(|| spawn_loc.clone());
+                    .entry(ev.task_id)
+                    .or_insert_with(|| ev.spawn_loc.clone());
             }
             _ => {}
         }
@@ -102,17 +59,21 @@ fn main() {
     let mut workers: Vec<_> = worker_polls.keys().copied().collect();
     workers.sort();
     for w in &workers {
-        let polls = worker_polls.get(w).copied().unwrap_or(0);
-        let parks = worker_parks.get(w).copied().unwrap_or(0);
+        // w came from worker_polls.keys(), so it's always present there
+        let &polls = worker_polls.get(w).expect("worker present in poll map");
+        let parks = match worker_parks.get(w) {
+            Some(&p) => p,
+            None => 0,
+        };
         println!("  worker {w}: polls={polls}, parks={parks}");
     }
 
     // Wake analysis
     let mut wakes_by_loc: HashMap<&str, usize> = HashMap::new();
     for e in &events {
-        if let Event::WakeEventEvent { waker_task_id, .. } = e {
+        if let Dial9Event::WakeEvent(ev) = e {
             let loc = task_locs
-                .get(waker_task_id)
+                .get(&ev.waker_task_id)
                 .map(|s| s.as_str())
                 .unwrap_or("<unknown>");
             *wakes_by_loc.entry(loc).or_default() += 1;
