@@ -40,10 +40,22 @@ pub use types::TraceField;
 use schema::{FieldDef, SchemaEntry};
 use types::FieldValueRef;
 
+/// Global counter for assigning dense type slots to `TraceEvent` impls.
+/// Slot 0 is reserved as "unset".
+#[doc(hidden)]
+pub static __NEXT_TYPE_SLOT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(1);
+
 /// Trait implemented by `#[derive(TraceEvent)]` for compile-time event types.
 pub trait TraceEvent {
     /// Decoded form of this event, potentially borrowing from the input buffer.
     type Ref<'a>;
+
+    /// Per-type dense slot letting encoders cache the wire ID. 
+    /// The default returns 0 ("no slot", always the slow path), the derive overrides it 
+    /// to lazily allocate a unique slot from [`__NEXT_TYPE_SLOT`] on first call.
+    fn type_slot() -> u16 {
+        0
+    }
 
     /// The event type name (used in schema registration).
     fn event_name() -> &'static str;
