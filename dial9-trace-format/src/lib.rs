@@ -38,13 +38,9 @@ pub use types::StackFrames;
 pub use types::TraceField;
 
 use schema::{FieldDef, SchemaEntry};
-use types::FieldValueRef;
 
 /// Trait implemented by `#[derive(TraceEvent)]` for compile-time event types.
 pub trait TraceEvent {
-    /// Decoded form of this event, potentially borrowing from the input buffer.
-    type Ref<'a>;
-
     /// The event type name (used in schema registration).
     fn event_name() -> &'static str;
     /// Field definitions for schema registration.
@@ -62,13 +58,6 @@ pub trait TraceEvent {
         &self,
         enc: &mut types::EventEncoder<'_, W>,
     ) -> std::io::Result<()>;
-    /// Decode from field values using field definitions for name resolution.
-    /// `timestamp_ns` is the absolute timestamp from the event header (if present).
-    fn decode<'a>(
-        timestamp_ns: Option<u64>,
-        fields: &[FieldValueRef<'a>],
-        field_defs: &[FieldDef],
-    ) -> Option<Self::Ref<'a>>;
 
     /// Build a SchemaEntry for this event type.
     fn schema_entry() -> SchemaEntry {
