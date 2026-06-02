@@ -1,65 +1,64 @@
-//! Convert a TOKIOTRC binary trace to "fat" JSONL with all metadata resolved inline.
+//! Convert a dial9 binary trace to "fat" JSONL with all metadata resolved inline.
 //!
 //! Usage:
-//!   cargo run --example trace_to_fat_jsonl -- <input.bin> [output.jsonl]
+//!   cargo run --example trace_to_fat_jsonl --features analysis -- <input.bin> [output.jsonl]
 
-use dial9_tokio_telemetry::analysis_unstable::TraceReader;
-use dial9_tokio_telemetry::telemetry::TelemetryEvent;
-use dial9_trace_format::FieldValue;
-use serde::Serialize;
+use dial9_trace_format::decoder::Decoder;
+use serde::{Deserialize, Serialize};
 use std::io::{BufWriter, Write};
 
-#[derive(Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "event")]
 enum FatEvent {
-    PollStart {
+    PollStartEvent {
         timestamp_ns: u64,
-        worker: u64,
-        local_q: usize,
+        worker_id: u64,
+        local_queue: u8,
         task_id: u64,
-        spawn_location: Option<String>,
+        spawn_loc: String,
     },
-    PollEnd {
+    PollEndEvent {
         timestamp_ns: u64,
-        worker: u64,
+        worker_id: u64,
     },
-    WorkerPark {
+    WorkerParkEvent {
         timestamp_ns: u64,
-        worker: u64,
-        local_q: usize,
-        cpu_ns: u64,
+        worker_id: u64,
+        local_queue: u8,
+        cpu_time_ns: u64,
         tid: u32,
     },
-    WorkerUnpark {
+    WorkerUnparkEvent {
         timestamp_ns: u64,
-        worker: u64,
-        local_q: usize,
-        cpu_ns: u64,
+        worker_id: u64,
+        local_queue: u8,
+        cpu_time_ns: u64,
         sched_wait_ns: u64,
         tid: u32,
     },
-    QueueSample {
+    QueueSampleEvent {
         timestamp_ns: u64,
-        global_q: usize,
+        global_queue: u8,
     },
-    CpuSample {
+    CpuSampleEvent {
         timestamp_ns: u64,
-        worker: u64,
-        source: String,
-        callchain: Vec<String>,
+        worker_id: u64,
+        source: u8,
+        callchain: Vec<u64>,
     },
-    WakeEvent {
+    WakeEventEvent {
         timestamp_ns: u64,
         waker_task_id: u64,
         woken_task_id: u64,
         target_worker: u8,
     },
-    Custom {
-        #[serde(skip_serializing_if = "Option::is_none")]
-        timestamp_ns: Option<u64>,
-        name: String,
-        fields: Vec<(String, FieldValue)>,
+    TaskSpawnEvent {
+        timestamp_ns: u64,
+        task_id: u64,
+        spawn_loc: String,
     },
+    #[serde(other)]
+    Other,
 }
 
 fn main() -> std::io::Result<()> {
@@ -69,8 +68,9 @@ fn main() -> std::io::Result<()> {
         std::process::exit(1);
     }
 
-    let reader = TraceReader::new(&args[1])?;
-    eprintln!("Converting to fat events...");
+    let data = std::fs::read(&args[1])?;
+    let mut decoder =
+        Decoder::new(&data).ok_or_else(|| std::io::Error::other("invalid trace header"))?;
 
     let out: Box<dyn Write> = if let Some(path) = args.get(2) {
         Box::new(std::fs::File::create(path)?)
@@ -80,117 +80,18 @@ fn main() -> std::io::Result<()> {
     let mut w = BufWriter::new(out);
 
     let mut count = 0u64;
-    for e in &reader.all_events {
-        if let Some(fat) = to_fat_event(e, &reader) {
-            serde_json::to_writer(&mut w, &fat).map_err(std::io::Error::other)?;
-            w.write_all(b"\n")?;
-            count += 1;
-        }
-    }
+    decoder
+        .for_each_event(|raw| {
+            let ev: FatEvent = raw.deserialize().expect("deserialize");
+            if !matches!(ev, FatEvent::Other) {
+                serde_json::to_writer(&mut w, &ev).expect("write json");
+                w.write_all(b"\n").expect("write newline");
+                count += 1;
+            }
+        })
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
+
     w.flush()?;
     eprintln!("{count} events written");
     Ok(())
-}
-
-fn to_fat_event(event: &TelemetryEvent, reader: &TraceReader) -> Option<FatEvent> {
-    match event {
-        TelemetryEvent::PollStart {
-            timestamp_nanos,
-            worker_id,
-            worker_local_queue_depth,
-            task_id,
-            spawn_loc,
-        } => Some(FatEvent::PollStart {
-            timestamp_ns: *timestamp_nanos,
-            worker: worker_id.as_u64(),
-            local_q: *worker_local_queue_depth,
-            task_id: task_id.to_u64(),
-            spawn_location: reader.spawn_locations.get(spawn_loc).cloned(),
-        }),
-        TelemetryEvent::PollEnd {
-            timestamp_nanos,
-            worker_id,
-        } => Some(FatEvent::PollEnd {
-            timestamp_ns: *timestamp_nanos,
-            worker: worker_id.as_u64(),
-        }),
-        TelemetryEvent::WorkerPark {
-            timestamp_nanos,
-            worker_id,
-            worker_local_queue_depth,
-            cpu_time_nanos,
-            tid,
-        } => Some(FatEvent::WorkerPark {
-            timestamp_ns: *timestamp_nanos,
-            worker: worker_id.as_u64(),
-            local_q: *worker_local_queue_depth,
-            cpu_ns: *cpu_time_nanos,
-            tid: *tid,
-        }),
-        TelemetryEvent::WorkerUnpark {
-            timestamp_nanos,
-            worker_id,
-            worker_local_queue_depth,
-            cpu_time_nanos,
-            sched_wait_delta_nanos,
-            tid,
-        } => Some(FatEvent::WorkerUnpark {
-            timestamp_ns: *timestamp_nanos,
-            worker: worker_id.as_u64(),
-            local_q: *worker_local_queue_depth,
-            cpu_ns: *cpu_time_nanos,
-            sched_wait_ns: *sched_wait_delta_nanos,
-            tid: *tid,
-        }),
-        TelemetryEvent::QueueSample {
-            timestamp_nanos,
-            global_queue_depth,
-        } => Some(FatEvent::QueueSample {
-            timestamp_ns: *timestamp_nanos,
-            global_q: *global_queue_depth,
-        }),
-        TelemetryEvent::CpuSample {
-            timestamp_nanos,
-            worker_id,
-            source,
-            callchain,
-            ..
-        } => Some(FatEvent::CpuSample {
-            timestamp_ns: *timestamp_nanos,
-            worker: worker_id.as_u64(),
-            source: format!("{:?}", source),
-            callchain: callchain
-                .iter()
-                .map(|addr| format!("0x{:x}", addr))
-                .collect(),
-        }),
-        TelemetryEvent::WakeEvent {
-            timestamp_nanos,
-            waker_task_id,
-            woken_task_id,
-            target_worker,
-        } => Some(FatEvent::WakeEvent {
-            timestamp_ns: *timestamp_nanos,
-            waker_task_id: waker_task_id.to_u64(),
-            woken_task_id: woken_task_id.to_u64(),
-            target_worker: *target_worker,
-        }),
-        TelemetryEvent::Custom {
-            timestamp_nanos,
-            name,
-            fields,
-        } => Some(FatEvent::Custom {
-            timestamp_ns: *timestamp_nanos,
-            name: name.clone(),
-            fields: fields.clone(),
-        }),
-        TelemetryEvent::TaskSpawn { .. }
-        | TelemetryEvent::TaskTerminate { .. }
-        | TelemetryEvent::TaskDump { .. }
-        | TelemetryEvent::Alloc { .. }
-        | TelemetryEvent::Free { .. }
-        | TelemetryEvent::ThreadNameDef { .. }
-        | TelemetryEvent::SegmentMetadata { .. }
-        | TelemetryEvent::ClockSync { .. } => None,
-    }
 }

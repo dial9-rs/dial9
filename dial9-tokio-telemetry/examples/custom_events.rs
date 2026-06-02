@@ -4,9 +4,6 @@
 //! 1. **Simple** — `#[derive(TraceEvent)]` struct passed directly to `record_event`
 //! 2. **Advanced** — manual `Encodable` impl with string interning for repeated values
 //!
-//! With the `analysis` feature, also demonstrates reading custom events back
-//! through `TraceReader` and resolving interned strings.
-//!
 //! Run with:
 //! ```sh
 //! cargo run --example custom_events --features analysis
@@ -20,9 +17,7 @@ use std::time::Duration;
 
 // ── Simple: derive-only, no interning ───────────────────────────────────────
 
-/// A custom event with primitive and optional fields. The blanket `Encodable` impl
-/// handles encoding automatically — just pass it to `record_event`.
-/// Optional fields use 1 byte on the wire when absent (None).
+/// A custom event with primitive and optional fields.
 #[derive(TraceEvent)]
 struct RequestCompleted {
     #[traceevent(timestamp)]
@@ -35,14 +30,12 @@ struct RequestCompleted {
 
 // ── Advanced: manual Encodable with string interning ────────────────────────
 
-/// Application-level event with a string field we want to intern.
 struct HttpRequest {
     timestamp_ns: u64,
     method: String,
     status: u32,
 }
 
-/// Wire-format struct with the interned string handle.
 #[derive(TraceEvent)]
 struct HttpRequestWire {
     #[traceevent(timestamp)]
@@ -74,7 +67,7 @@ fn main() -> std::io::Result<()> {
     let handle = guard.handle();
 
     runtime.block_on(async {
-        // Simple: derive-only events (some with optional field present)
+        // Simple: derive-only events
         for i in 0..10 {
             let error_message = if i % 4 == 3 {
                 Some(format!("timeout after {}ms", 100 + i))
@@ -93,7 +86,6 @@ fn main() -> std::io::Result<()> {
         }
 
         // Advanced: manual Encodable with interning
-        // "GET" is interned once and reused across all events in the batch.
         for _ in 0..10 {
             record_event(
                 HttpRequest {
@@ -132,38 +124,6 @@ fn main() -> std::io::Result<()> {
     assert_eq!(request_completed, 10);
     assert_eq!(http_request, 10);
     println!("✓ All custom events recorded successfully");
-
-    // ── Read custom events through TraceReader (requires `analysis` feature) ──
-    #[cfg(feature = "analysis")]
-    {
-        use dial9_tokio_telemetry::analysis_unstable::TraceReader;
-        use dial9_tokio_telemetry::telemetry::TelemetryEvent;
-
-        let reader = TraceReader::new(sealed.to_str().unwrap())?;
-
-        let custom_events: Vec<&TelemetryEvent> = reader
-            .all_events
-            .iter()
-            .filter(|e| matches!(e, TelemetryEvent::Custom { .. }))
-            .collect();
-
-        println!(
-            "\n=== TraceReader: {} custom events ===",
-            custom_events.len()
-        );
-        assert_eq!(custom_events.len(), 20); // 10 RequestCompleted + 10 HttpRequestWire
-
-        for event in &custom_events {
-            if let TelemetryEvent::Custom { name, fields, .. } = event {
-                print!("  {name}:");
-                for (fname, fval) in fields {
-                    print!(" {fname}={fval:?}");
-                }
-                println!();
-            }
-        }
-        println!("✓ TraceReader custom event round-trip verified");
-    }
 
     Ok(())
 }
