@@ -104,8 +104,35 @@ impl TraceField for WorkerId {
 
 // ── dial9-trace-format: derive structs ──────────────────────────────────────
 
+/// Static wire IDs for dial9's own events, in the reserved `0..STATIC_WIRE_ID_LIMIT` range.
+/// This enum is the single source of truth for id assignment: add a variant here and reference it from the event's
+/// `#[traceevent(wire_id = WireId::…)]` (prevents duplicate id assignment).
+#[repr(u16)]
+pub(crate) enum WireId {
+    PollStart = 1,
+    PollEnd = 2,
+    WorkerPark = 3,
+    WorkerUnpark = 4,
+    QueueSample = 5,
+    TaskSpawn = 6,
+    TaskTerminate = 7,
+    CpuSample = 8,
+    TaskDump = 9,
+    WakeEvent = 10,
+    SegmentMetadata = 11,
+    ClockSync = 12,
+    ProcessResourceUsage = 13,
+    Alloc = 14,
+    Free = 15,
+    MemoryProfileOverflow = 16,
+    // Only referenced when the span-event layer is compiled.
+    #[cfg(feature = "tracing-layer")]
+    SpanClose = 20,
+}
+
 /// Wire-format event for a task poll start.
 #[derive(Debug, TraceEvent)]
+#[traceevent(wire_id = WireId::PollStart)]
 pub struct PollStartEvent {
     /// Timestamp in nanoseconds.
     #[traceevent(timestamp)]
@@ -122,6 +149,7 @@ pub struct PollStartEvent {
 
 /// Wire-format event for a task poll end.
 #[derive(Debug, TraceEvent)]
+#[traceevent(wire_id = WireId::PollEnd)]
 pub struct PollEndEvent {
     /// Timestamp in nanoseconds.
     #[traceevent(timestamp)]
@@ -132,6 +160,7 @@ pub struct PollEndEvent {
 
 /// Wire-format event for a worker park.
 #[derive(Debug, TraceEvent)]
+#[traceevent(wire_id = WireId::WorkerPark)]
 pub struct WorkerParkEvent {
     /// Timestamp in nanoseconds.
     #[traceevent(timestamp)]
@@ -149,6 +178,7 @@ pub struct WorkerParkEvent {
 
 /// Wire-format event for a worker unpark.
 #[derive(Debug, TraceEvent)]
+#[traceevent(wire_id = WireId::WorkerUnpark)]
 pub struct WorkerUnparkEvent {
     /// Timestamp in nanoseconds.
     #[traceevent(timestamp)]
@@ -167,6 +197,7 @@ pub struct WorkerUnparkEvent {
 }
 
 #[derive(TraceEvent)]
+#[traceevent(wire_id = WireId::QueueSample)]
 pub(crate) struct QueueSampleEvent {
     #[traceevent(timestamp)]
     pub timestamp_ns: u64,
@@ -175,6 +206,7 @@ pub(crate) struct QueueSampleEvent {
 
 /// Wire-format event for process resource usage sampled from `getrusage(RUSAGE_SELF)`.
 #[derive(Debug, TraceEvent)]
+#[traceevent(wire_id = WireId::ProcessResourceUsage)]
 #[cfg_attr(not(feature = "unstable-events"), non_exhaustive)]
 pub struct ProcessResourceUsageEvent {
     /// Monotonic timestamp in nanoseconds.
@@ -202,6 +234,7 @@ pub struct ProcessResourceUsageEvent {
 
 /// Wire-format event for a task spawn.
 #[derive(Debug, TraceEvent)]
+#[traceevent(wire_id = WireId::TaskSpawn)]
 pub struct TaskSpawnEvent {
     /// Timestamp in nanoseconds.
     #[traceevent(timestamp)]
@@ -215,6 +248,7 @@ pub struct TaskSpawnEvent {
 }
 
 #[derive(TraceEvent)]
+#[traceevent(wire_id = WireId::TaskTerminate)]
 pub(crate) struct TaskTerminateEvent {
     #[traceevent(timestamp)]
     pub timestamp_ns: u64,
@@ -222,6 +256,7 @@ pub(crate) struct TaskTerminateEvent {
 }
 
 #[derive(TraceEvent)]
+#[traceevent(wire_id = WireId::CpuSample)]
 pub(crate) struct CpuSampleEvent {
     #[traceevent(timestamp)]
     pub timestamp_ns: u64,
@@ -240,6 +275,7 @@ pub(crate) struct CpuSampleEvent {
 /// Wire-format event for a task dump: async backtrace captured at a yield point
 /// after the task stayed idle past the configured threshold.
 #[derive(TraceEvent)]
+#[traceevent(wire_id = WireId::TaskDump)]
 pub(crate) struct TaskDumpEvent {
     #[traceevent(timestamp)]
     pub timestamp_ns: u64,
@@ -253,6 +289,7 @@ pub(crate) struct TaskDumpEvent {
 /// the geometric sampling counter. The sampling rate that produced this event
 /// lives in the segment metadata, not on each event.
 #[derive(Debug, TraceEvent)]
+#[traceevent(wire_id = WireId::Alloc)]
 #[cfg_attr(not(feature = "unstable-events"), non_exhaustive)]
 pub struct AllocEvent {
     /// Wall-clock timestamp in nanoseconds (monotonic).
@@ -286,6 +323,7 @@ pub struct AllocEvent {
 /// `AllocEvent` has been evicted by trace rotation. See design §3
 /// "Why denormalize size and alloc_timestamp_ns?" for the rationale.
 #[derive(Debug, TraceEvent)]
+#[traceevent(wire_id = WireId::Free)]
 #[cfg_attr(not(feature = "unstable-events"), non_exhaustive)]
 pub struct FreeEvent {
     /// Wall-clock timestamp in nanoseconds (monotonic) of the free.
@@ -312,6 +350,7 @@ pub struct FreeEvent {
 /// Dropped frees cause the liveset to retain addresses that were actually
 /// freed, producing false positives in leak analysis.
 #[derive(Debug, TraceEvent)]
+#[traceevent(wire_id = WireId::MemoryProfileOverflow)]
 pub(crate) struct MemoryProfileOverflowEvent {
     #[traceevent(timestamp)]
     pub timestamp_ns: u64,
@@ -323,6 +362,7 @@ pub(crate) struct MemoryProfileOverflowEvent {
 
 /// Wire-format event for a wake notification.
 #[derive(Debug, TraceEvent)]
+#[traceevent(wire_id = WireId::WakeEvent)]
 pub struct WakeEventEvent {
     /// Timestamp in nanoseconds.
     #[traceevent(timestamp)]
@@ -336,6 +376,7 @@ pub struct WakeEventEvent {
 }
 
 #[derive(TraceEvent)]
+#[traceevent(wire_id = WireId::SegmentMetadata)]
 pub(crate) struct SegmentMetadataEvent {
     #[traceevent(timestamp)]
     pub timestamp_ns: u64,
@@ -349,6 +390,7 @@ pub(crate) struct SegmentMetadataEvent {
 ///
 /// [`clock_pair`]: crate::telemetry::events::clock_pair
 #[derive(TraceEvent)]
+#[traceevent(wire_id = WireId::ClockSync)]
 pub(crate) struct ClockSyncEvent {
     #[traceevent(timestamp)]
     pub timestamp_ns: u64,

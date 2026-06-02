@@ -1,0 +1,80 @@
+---
+source: dial9-trace-format-derive/src/lib.rs
+expression: "expand_to_string(quote!\n{\n    #[traceevent(wire_id = 7)] struct WireIdEvent\n    { #[traceevent(timestamp)] timestamp_ns: u64, value: u32, }\n})"
+---
+const _: () = ::std::assert!(
+    ((7) as u16) < ::dial9_trace_format::STATIC_WIRE_ID_LIMIT,
+    "wire_id must be < STATIC_WIRE_ID_LIMIT",
+);
+#[derive(Debug, Clone)]
+struct WireIdEventRef<'a> {
+    pub timestamp_ns: u64,
+    pub value: <u32 as ::dial9_trace_format::TraceField>::Ref<'a>,
+}
+impl ::dial9_trace_format::TraceEvent for WireIdEvent {
+    type Ref<'a> = WireIdEventRef<'a>;
+    const STATIC_WIRE_ID: ::std::option::Option<u16> = ::std::option::Option::Some(
+        (7) as u16,
+    );
+    fn event_name() -> &'static str {
+        "WireIdEvent"
+    }
+    fn type_slot() -> u16 {
+        static SLOT: ::std::sync::atomic::AtomicU16 = ::std::sync::atomic::AtomicU16::new(
+            0,
+        );
+        let cached = SLOT.load(::std::sync::atomic::Ordering::Relaxed);
+        if cached != 0 {
+            return cached;
+        }
+        let new = ::dial9_trace_format::__NEXT_TYPE_SLOT
+            .fetch_add(1, ::std::sync::atomic::Ordering::Relaxed);
+        match SLOT
+            .compare_exchange(
+                0,
+                new,
+                ::std::sync::atomic::Ordering::Relaxed,
+                ::std::sync::atomic::Ordering::Relaxed,
+            )
+        {
+            Ok(_) => new,
+            Err(existing) => existing,
+        }
+    }
+    fn field_defs() -> Vec<::dial9_trace_format::schema::FieldDef> {
+        vec![
+            ::dial9_trace_format::schema::FieldDef::new("value", < u32 as
+            ::dial9_trace_format::TraceField > ::field_type(),)
+        ]
+    }
+    fn timestamp(&self) -> u64 {
+        self.timestamp_ns
+    }
+    fn encode_fields<W: ::std::io::Write>(
+        &self,
+        enc: &mut ::dial9_trace_format::EventEncoder<'_, W>,
+    ) -> ::std::io::Result<()> {
+        <u32 as ::dial9_trace_format::TraceField>::encode(&self.value, enc)?;
+        Ok(())
+    }
+    fn decode<'a>(
+        timestamp_ns: Option<u64>,
+        fields: &[::dial9_trace_format::types::FieldValueRef<'a>],
+        field_defs: &[::dial9_trace_format::schema::FieldDef],
+    ) -> Option<Self::Ref<'a>> {
+        Some(WireIdEventRef {
+            timestamp_ns: timestamp_ns?,
+            value: {
+                let val = field_defs
+                    .iter()
+                    .zip(fields.iter())
+                    .find(|(f, _)| f.name() == "value")
+                    .map(|(_, v)| v);
+                match val {
+                    Some(v) => <u32 as ::dial9_trace_format::TraceField>::decode_ref(v)?,
+                    None => <u32 as ::dial9_trace_format::TraceField>::decode_missing()?,
+                }
+            },
+        })
+    }
+}
