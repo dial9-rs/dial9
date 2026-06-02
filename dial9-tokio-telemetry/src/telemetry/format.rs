@@ -1,6 +1,4 @@
 use crate::telemetry::events::CpuSampleSource;
-#[cfg(any(feature = "analysis", test))]
-use crate::telemetry::events::TelemetryEvent;
 
 use crate::telemetry::task_metadata::TaskId;
 use dial9_trace_format::types::{EventEncoder, FieldType};
@@ -329,278 +327,32 @@ pub(crate) struct ClockSyncEvent {
 }
 
 // ── dial9-trace-format: decode ──────────────────────────────────────────────
+// Decode via `Dial9Event` in `analysis_events.rs` using `Decoder::for_each_event`.
 
-// ── dial9-trace-format: decode (serde-based) ────────────────────────────────
-
-/// Decode all events from a `dial9-trace-format` byte slice into `TelemetryEvent`s.
-///
-/// Uses the serde deserializer internally. Resolves `InternedString` fields
-/// (e.g. `CpuSample.thread_name`) via the decoder's string pool.
-#[cfg(any(feature = "analysis", test))]
-#[allow(dead_code, unreachable_pub)]
-pub fn decode_events(data: &[u8]) -> io::Result<Vec<TelemetryEvent>> {
-    use crate::telemetry::events::CpuSampleSource;
+/// Decode all events from a `dial9-trace-format` byte slice into `Dial9Event`s.
+/// Test-only helper used by internal tests across multiple modules.
+#[cfg(test)]
+pub(crate) fn decode_events(
+    data: &[u8],
+) -> std::io::Result<Vec<crate::telemetry::analysis_events::Dial9Event>> {
+    use crate::telemetry::analysis_events::Dial9Event;
     use dial9_trace_format::decoder::Decoder;
-    use serde::Deserialize;
-    use std::collections::HashMap;
 
-    #[derive(Deserialize)]
-    #[serde(tag = "event")]
-    #[allow(dead_code)]
-    enum RawEv {
-        PollStartEvent {
-            timestamp_ns: u64,
-            worker_id: u64,
-            local_queue: u8,
-            task_id: u64,
-            spawn_loc: String,
-        },
-        PollEndEvent {
-            timestamp_ns: u64,
-            worker_id: u64,
-        },
-        WorkerParkEvent {
-            timestamp_ns: u64,
-            worker_id: u64,
-            local_queue: u8,
-            cpu_time_ns: u64,
-            tid: u32,
-        },
-        WorkerUnparkEvent {
-            timestamp_ns: u64,
-            worker_id: u64,
-            local_queue: u8,
-            cpu_time_ns: u64,
-            sched_wait_ns: u64,
-            tid: u32,
-        },
-        QueueSampleEvent {
-            timestamp_ns: u64,
-            global_queue: u8,
-        },
-        TaskSpawnEvent {
-            timestamp_ns: u64,
-            task_id: u64,
-            spawn_loc: String,
-            instrumented: bool,
-        },
-        TaskTerminateEvent {
-            timestamp_ns: u64,
-            task_id: u64,
-        },
-        CpuSampleEvent {
-            timestamp_ns: u64,
-            worker_id: u64,
-            tid: u32,
-            source: u8,
-            thread_name: Option<String>,
-            callchain: Vec<u64>,
-            cpu: Option<u64>,
-        },
-        TaskDumpEvent {
-            timestamp_ns: u64,
-            task_id: u64,
-            callchain: Vec<u64>,
-        },
-        WakeEventEvent {
-            timestamp_ns: u64,
-            waker_task_id: u64,
-            woken_task_id: u64,
-            target_worker: u8,
-        },
-        SegmentMetadataEvent {
-            timestamp_ns: u64,
-            entries: HashMap<String, String>,
-        },
-        ClockSyncEvent {
-            timestamp_ns: u64,
-            realtime_ns: u64,
-        },
-        AllocEvent {
-            timestamp_ns: u64,
-            tid: u32,
-            size: u64,
-            addr: u64,
-            callchain: Vec<u64>,
-        },
-        FreeEvent {
-            timestamp_ns: u64,
-            tid: u32,
-            addr: u64,
-            size: u64,
-            alloc_timestamp_ns: u64,
-        },
-        #[serde(other)]
-        Other,
-    }
-
-    let mut dec = Decoder::new(data)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid trace header"))?;
+    let mut dec = Decoder::new(data).ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid trace header")
+    })?;
     let mut events = Vec::new();
 
     dec.for_each_event(|raw| {
-        let ev: RawEv = match raw.deserialize() {
+        let ev: Dial9Event = match raw.deserialize() {
             Ok(e) => e,
             Err(_) => return,
         };
-        let tel = match ev {
-            RawEv::PollStartEvent {
-                timestamp_ns,
-                worker_id,
-                local_queue,
-                task_id,
-                spawn_loc: _,
-            } => {
-                TelemetryEvent::PollStart {
-                    timestamp_nanos: timestamp_ns,
-                    worker_id: WorkerId(worker_id),
-                    worker_local_queue_depth: local_queue as usize,
-                    task_id: TaskId(task_id),
-                    spawn_loc: InternedString::from_raw(0), // pool ID not meaningful post-decode
-                }
-            }
-            RawEv::PollEndEvent {
-                timestamp_ns,
-                worker_id,
-            } => TelemetryEvent::PollEnd {
-                timestamp_nanos: timestamp_ns,
-                worker_id: WorkerId(worker_id),
-            },
-            RawEv::WorkerParkEvent {
-                timestamp_ns,
-                worker_id,
-                local_queue,
-                cpu_time_ns,
-                tid,
-            } => TelemetryEvent::WorkerPark {
-                timestamp_nanos: timestamp_ns,
-                worker_id: WorkerId(worker_id),
-                worker_local_queue_depth: local_queue as usize,
-                cpu_time_nanos: cpu_time_ns,
-                tid,
-            },
-            RawEv::WorkerUnparkEvent {
-                timestamp_ns,
-                worker_id,
-                local_queue,
-                cpu_time_ns,
-                sched_wait_ns,
-                tid,
-            } => TelemetryEvent::WorkerUnpark {
-                timestamp_nanos: timestamp_ns,
-                worker_id: WorkerId(worker_id),
-                worker_local_queue_depth: local_queue as usize,
-                cpu_time_nanos: cpu_time_ns,
-                sched_wait_delta_nanos: sched_wait_ns,
-                tid,
-            },
-            RawEv::QueueSampleEvent {
-                timestamp_ns,
-                global_queue,
-            } => TelemetryEvent::QueueSample {
-                timestamp_nanos: timestamp_ns,
-                global_queue_depth: global_queue as usize,
-            },
-            RawEv::TaskSpawnEvent {
-                timestamp_ns,
-                task_id,
-                spawn_loc: _,
-                instrumented,
-            } => TelemetryEvent::TaskSpawn {
-                timestamp_nanos: timestamp_ns,
-                task_id: TaskId(task_id),
-                spawn_loc: InternedString::from_raw(0),
-                instrumented: Some(instrumented),
-            },
-            RawEv::TaskTerminateEvent {
-                timestamp_ns,
-                task_id,
-            } => TelemetryEvent::TaskTerminate {
-                timestamp_nanos: timestamp_ns,
-                task_id: TaskId(task_id),
-            },
-            RawEv::CpuSampleEvent {
-                timestamp_ns,
-                worker_id,
-                tid,
-                source,
-                thread_name,
-                callchain,
-                cpu,
-            } => TelemetryEvent::CpuSample {
-                timestamp_nanos: timestamp_ns,
-                worker_id: WorkerId(worker_id),
-                tid,
-                thread_name,
-                source: CpuSampleSource::from_u8(source),
-                callchain,
-                cpu: cpu.map(|v| v as u32),
-            },
-            RawEv::TaskDumpEvent {
-                timestamp_ns,
-                task_id,
-                callchain,
-            } => TelemetryEvent::TaskDump {
-                timestamp_nanos: timestamp_ns,
-                task_id: TaskId(task_id),
-                callchain,
-            },
-            RawEv::WakeEventEvent {
-                timestamp_ns,
-                waker_task_id,
-                woken_task_id,
-                target_worker,
-            } => TelemetryEvent::WakeEvent {
-                timestamp_nanos: timestamp_ns,
-                waker_task_id: TaskId(waker_task_id),
-                woken_task_id: TaskId(woken_task_id),
-                target_worker,
-            },
-            RawEv::SegmentMetadataEvent {
-                timestamp_ns,
-                entries,
-            } => TelemetryEvent::SegmentMetadata {
-                timestamp_nanos: timestamp_ns,
-                entries,
-            },
-            RawEv::ClockSyncEvent {
-                timestamp_ns,
-                realtime_ns,
-            } => TelemetryEvent::ClockSync {
-                timestamp_nanos: timestamp_ns,
-                realtime_nanos: realtime_ns,
-            },
-            RawEv::AllocEvent {
-                timestamp_ns,
-                tid,
-                size,
-                addr,
-                callchain,
-            } => TelemetryEvent::Alloc {
-                timestamp_nanos: timestamp_ns,
-                tid,
-                size,
-                addr,
-                callchain,
-            },
-            RawEv::FreeEvent {
-                timestamp_ns,
-                tid,
-                addr,
-                size,
-                alloc_timestamp_ns,
-            } => TelemetryEvent::Free {
-                timestamp_nanos: timestamp_ns,
-                tid,
-                addr,
-                size,
-                alloc_timestamp_nanos: alloc_timestamp_ns,
-            },
-            RawEv::Other => return,
-        };
-        events.push(tel);
+        if !matches!(ev, Dial9Event::Other) {
+            events.push(ev);
+        }
     })
-    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+    .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
 
     Ok(events)
 }
@@ -608,6 +360,8 @@ pub fn decode_events(data: &[u8]) -> io::Result<Vec<TelemetryEvent>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::telemetry::analysis_events::Dial9Event;
+    use dial9_trace_format::decoder::Decoder;
     use dial9_trace_format::encoder::Encoder;
 
     #[test]
@@ -623,24 +377,21 @@ mod tests {
         });
         let buf = enc.into_inner();
 
-        let events = decode_events(&buf).unwrap();
+        let mut dec = Decoder::new(&buf).expect("valid header");
+        let mut events: Vec<Dial9Event> = Vec::new();
+        dec.for_each_event(|raw| {
+            events.push(raw.deserialize().expect("deserialize"));
+        })
+        .expect("decode");
         assert_eq!(events.len(), 1);
-        match &events[0] {
-            TelemetryEvent::Alloc {
-                timestamp_nanos,
-                tid,
-                size,
-                addr,
-                callchain,
-            } => {
-                assert_eq!(*timestamp_nanos, 123_456_789);
-                assert_eq!(*tid, 42);
-                assert_eq!(*size, 4096);
-                assert_eq!(*addr, 0xDEAD_BEEF_CAFE);
-                assert_eq!(callchain, &[0x1000, 0x2000, 0x3000]);
-            }
-            other => panic!("expected Alloc event, got {other:?}"),
-        }
+        let Dial9Event::AllocEvent(ref e) = events[0] else {
+            panic!("expected AllocEvent, got {:?}", events[0]);
+        };
+        assert_eq!(e.timestamp_ns, 123_456_789);
+        assert_eq!(e.tid, 42);
+        assert_eq!(e.size, 4096);
+        assert_eq!(e.addr, 0xDEAD_BEEF_CAFE);
+        assert_eq!(e.callchain, &[0x1000, 0x2000, 0x3000]);
     }
 
     #[test]
@@ -655,23 +406,20 @@ mod tests {
         });
         let buf = enc.into_inner();
 
-        let events = decode_events(&buf).unwrap();
+        let mut dec = Decoder::new(&buf).expect("valid header");
+        let mut events: Vec<Dial9Event> = Vec::new();
+        dec.for_each_event(|raw| {
+            events.push(raw.deserialize().expect("deserialize"));
+        })
+        .expect("decode");
         assert_eq!(events.len(), 1);
-        match &events[0] {
-            TelemetryEvent::Free {
-                timestamp_nanos,
-                tid,
-                addr,
-                size,
-                alloc_timestamp_nanos,
-            } => {
-                assert_eq!(*timestamp_nanos, 999_000_000);
-                assert_eq!(*tid, 7);
-                assert_eq!(*addr, 0xCAFE_BABE);
-                assert_eq!(*size, 2048);
-                assert_eq!(*alloc_timestamp_nanos, 100_000_000);
-            }
-            other => panic!("expected Free event, got {other:?}"),
-        }
+        let Dial9Event::FreeEvent(ref e) = events[0] else {
+            panic!("expected FreeEvent, got {:?}", events[0]);
+        };
+        assert_eq!(e.timestamp_ns, 999_000_000);
+        assert_eq!(e.tid, 7);
+        assert_eq!(e.addr, 0xCAFE_BABE);
+        assert_eq!(e.size, 2048);
+        assert_eq!(e.alloc_timestamp_ns, 100_000_000);
     }
 }

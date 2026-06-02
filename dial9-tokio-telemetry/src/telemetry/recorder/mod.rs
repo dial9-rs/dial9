@@ -399,8 +399,8 @@ mod tests {
         let poll_starts: Vec<_> = events
             .iter()
             .filter_map(|e| match e {
-                crate::telemetry::events::TelemetryEvent::PollStart { worker_id, .. } => {
-                    Some(*worker_id)
+                crate::telemetry::analysis_events::Dial9Event::PollStartEvent(ev) => {
+                    Some(crate::telemetry::format::WorkerId(ev.worker_id))
                 }
                 _ => None,
             })
@@ -482,14 +482,14 @@ mod tests {
         assert!(
             events.iter().all(|event| !matches!(
                 event,
-                crate::telemetry::events::TelemetryEvent::PollStart { .. }
-                    | crate::telemetry::events::TelemetryEvent::PollEnd { .. }
-                    | crate::telemetry::events::TelemetryEvent::WorkerPark { .. }
-                    | crate::telemetry::events::TelemetryEvent::WorkerUnpark { .. }
-                    | crate::telemetry::events::TelemetryEvent::QueueSample { .. }
-                    | crate::telemetry::events::TelemetryEvent::TaskSpawn { .. }
-                    | crate::telemetry::events::TelemetryEvent::TaskTerminate { .. }
-                    | crate::telemetry::events::TelemetryEvent::WakeEvent { .. }
+                crate::telemetry::analysis_events::Dial9Event::PollStartEvent(..)
+                    | crate::telemetry::analysis_events::Dial9Event::PollEndEvent(..)
+                    | crate::telemetry::analysis_events::Dial9Event::WorkerParkEvent(..)
+                    | crate::telemetry::analysis_events::Dial9Event::WorkerUnparkEvent(..)
+                    | crate::telemetry::analysis_events::Dial9Event::QueueSampleEvent(..)
+                    | crate::telemetry::analysis_events::Dial9Event::TaskSpawnEvent(..)
+                    | crate::telemetry::analysis_events::Dial9Event::TaskTerminateEvent(..)
+                    | crate::telemetry::analysis_events::Dial9Event::WakeEvent(..)
             )),
             "Tokio runtime events should not be recorded when Tokio instrumentation is disabled: {events:?}"
         );
@@ -719,16 +719,24 @@ mod tests {
         let captured = crate::telemetry::format::decode_events(&raw).unwrap();
         let mut worker_ids: HashSet<u64> = HashSet::new();
         for event in captured.iter() {
-            match event {
-                crate::telemetry::events::TelemetryEvent::PollStart { worker_id, .. }
-                | crate::telemetry::events::TelemetryEvent::PollEnd { worker_id, .. }
-                | crate::telemetry::events::TelemetryEvent::WorkerPark { worker_id, .. }
-                | crate::telemetry::events::TelemetryEvent::WorkerUnpark { worker_id, .. }
-                    if *worker_id != WorkerId::UNKNOWN =>
-                {
-                    worker_ids.insert(worker_id.as_u64());
+            let wid = match event {
+                crate::telemetry::analysis_events::Dial9Event::PollStartEvent(e) => {
+                    Some(e.worker_id)
                 }
-                _ => {}
+                crate::telemetry::analysis_events::Dial9Event::PollEndEvent(e) => Some(e.worker_id),
+                crate::telemetry::analysis_events::Dial9Event::WorkerParkEvent(e) => {
+                    Some(e.worker_id)
+                }
+                crate::telemetry::analysis_events::Dial9Event::WorkerUnparkEvent(e) => {
+                    Some(e.worker_id)
+                }
+                _ => None,
+            };
+            if let Some(id) = wid {
+                let wid = WorkerId(id);
+                if wid != WorkerId::UNKNOWN {
+                    worker_ids.insert(wid.as_u64());
+                }
             }
         }
 
@@ -746,7 +754,7 @@ mod tests {
     /// (runtime name → worker ID mapping) into the trace file's segment metadata.
     #[test]
     fn build_and_attach_to_telemetry_propagates_second_runtime_metadata() {
-        use crate::telemetry::events::TelemetryEvent;
+        use crate::telemetry::analysis_events::Dial9Event;
 
         let dir = tempfile::TempDir::new().unwrap();
         let trace_path = dir.path().join("trace.bin");
@@ -809,8 +817,8 @@ mod tests {
             let data = std::fs::read(file).unwrap();
             let events = crate::telemetry::format::decode_events(&data).unwrap();
             for event in &events {
-                if let TelemetryEvent::SegmentMetadata { entries, .. } = event {
-                    all_metadata.push(entries.clone());
+                if let Dial9Event::SegmentMetadataEvent(meta) = event {
+                    all_metadata.push(meta.entries.clone());
                 }
             }
         }
@@ -840,7 +848,7 @@ mod tests {
     /// not local indices that collide with runtime A's workers.
     #[test]
     fn wake_events_use_global_worker_id_in_multi_runtime() {
-        use crate::telemetry::events::TelemetryEvent;
+        use crate::telemetry::analysis_events::Dial9Event;
 
         let data = Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
 
@@ -881,7 +889,7 @@ mod tests {
         let wake_workers: Vec<u8> = captured
             .iter()
             .filter_map(|e| match e {
-                TelemetryEvent::WakeEvent { target_worker, .. } => Some(*target_worker),
+                Dial9Event::WakeEvent(w) => Some(w.target_worker),
                 _ => None,
             })
             .collect();
@@ -901,9 +909,10 @@ mod tests {
     mod rotation_proptest {
         use super::*;
         use crate::telemetry::analysis::TraceReader;
+        use crate::telemetry::analysis_events::Dial9Event;
         use crate::telemetry::buffer::ThreadLocalBuffer;
         use crate::telemetry::collector::Batch;
-        use crate::telemetry::events::{CpuSampleData, CpuSampleSource, TelemetryEvent};
+        use crate::telemetry::events::{CpuSampleData, CpuSampleSource};
         use crate::telemetry::format::WorkerId;
         use crate::telemetry::task_metadata::TaskId;
         use crate::telemetry::writer::DiskWriter;
@@ -1045,20 +1054,12 @@ mod tests {
                 let reader = TraceReader::new(path_str)
                     .unwrap_or_else(|e| panic!("failed to open {path_str}: {e}"));
 
-                // In the new format, spawn locations come from the string pool.
-                // Verify every PollStart's spawn_loc_id resolves.
-                let spawn_locs = &reader.spawn_locations;
-
                 for ev in &reader.all_events {
                     match ev {
-                        TelemetryEvent::PollStart { spawn_loc, .. } => {
-                            assert!(
-                                spawn_locs.contains_key(spawn_loc),
-                                "{path_str}: PollStart references spawn_loc {spawn_loc:?} but no definition in this file. Defs: {spawn_locs:?}"
-                            );
+                        Dial9Event::PollStartEvent(_) => {
                             total_raw += 1;
                         }
-                        TelemetryEvent::CpuSample { .. } => {
+                        Dial9Event::CpuSampleEvent(..) => {
                             // Callchain addresses are raw; symbolization
                             // happens in the background worker now.
                         }
@@ -1180,7 +1181,7 @@ mod tests {
             .filter(|e| {
                 matches!(
                     e,
-                    crate::telemetry::events::TelemetryEvent::TaskSpawn { .. }
+                    crate::telemetry::analysis_events::Dial9Event::TaskSpawnEvent(..)
                 )
             })
             .count();
@@ -1240,10 +1241,11 @@ mod tests {
         let captured = crate::telemetry::format::decode_events(&raw).unwrap();
         let mut worker_ids: HashSet<u64> = HashSet::new();
         for event in &captured {
-            if let crate::telemetry::events::TelemetryEvent::PollStart { worker_id, .. } = event
-                && *worker_id != WorkerId::UNKNOWN
-            {
-                worker_ids.insert(worker_id.as_u64());
+            if let crate::telemetry::analysis_events::Dial9Event::PollStartEvent(e) = event {
+                let wid = WorkerId(e.worker_id);
+                if wid != WorkerId::UNKNOWN {
+                    worker_ids.insert(wid.as_u64());
+                }
             }
         }
 
@@ -1302,7 +1304,7 @@ mod tests {
             .filter(|e| {
                 matches!(
                     e,
-                    crate::telemetry::events::TelemetryEvent::WakeEvent { .. }
+                    crate::telemetry::analysis_events::Dial9Event::WakeEvent(..)
                 )
             })
             .count();

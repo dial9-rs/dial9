@@ -212,8 +212,8 @@ mod tests {
     use crate::memory_profiling::ring::{DEFAULT_MAX_FRAMES, RawAlloc, RawFree, RingBuffers};
     use crate::primitives::sync::Arc;
     use crate::primitives::sync::atomic::Ordering;
+    use crate::telemetry::analysis_events::Dial9Event;
     use crate::telemetry::buffer;
-    use crate::telemetry::events::TelemetryEvent;
     use crate::telemetry::format::decode_events;
     use crate::telemetry::recorder::SharedState;
 
@@ -250,7 +250,7 @@ mod tests {
         shared
     }
 
-    fn flush_and_collect(shared: &SharedState) -> Vec<TelemetryEvent> {
+    fn flush_and_collect(shared: &SharedState) -> Vec<Dial9Event> {
         shared.flush_sources();
         buffer::drain_to_collector(&shared.collector);
         let mut events = Vec::new();
@@ -280,22 +280,16 @@ mod tests {
         let events = flush_and_collect(&shared);
         let allocs: Vec<_> = events
             .iter()
-            .filter(|e| matches!(e, TelemetryEvent::Alloc { .. }))
+            .filter(|e| matches!(e, Dial9Event::AllocEvent(..)))
             .collect();
         assert_eq!(allocs.len(), 1);
         match &allocs[0] {
-            TelemetryEvent::Alloc {
-                timestamp_nanos,
-                tid,
-                size,
-                addr,
-                callchain,
-            } => {
-                assert_eq!(*timestamp_nanos, 100);
-                assert_eq!(*tid, 1);
-                assert_eq!(*size, 4096);
-                assert_eq!(*addr, 0x1000);
-                assert_eq!(callchain, &[0xAAAA, 0xBBBB, 0xCCCC]);
+            Dial9Event::AllocEvent(e) => {
+                assert_eq!(e.timestamp_ns, 100);
+                assert_eq!(e.tid, 1);
+                assert_eq!(e.size, 4096);
+                assert_eq!(e.addr, 0x1000);
+                assert_eq!(e.callchain, &[0xAAAA, 0xBBBB, 0xCCCC]);
             }
             _ => unreachable!(),
         }
@@ -320,27 +314,21 @@ mod tests {
         let events = flush_and_collect(&shared);
         let allocs: Vec<_> = events
             .iter()
-            .filter(|e| matches!(e, TelemetryEvent::Alloc { .. }))
+            .filter(|e| matches!(e, Dial9Event::AllocEvent(..)))
             .collect();
         let frees: Vec<_> = events
             .iter()
-            .filter(|e| matches!(e, TelemetryEvent::Free { .. }))
+            .filter(|e| matches!(e, Dial9Event::FreeEvent(..)))
             .collect();
         assert_eq!(allocs.len(), 1);
         assert_eq!(frees.len(), 1);
         match &frees[0] {
-            TelemetryEvent::Free {
-                timestamp_nanos,
-                tid,
-                addr,
-                size,
-                alloc_timestamp_nanos,
-            } => {
-                assert_eq!(*timestamp_nanos, 300);
-                assert_eq!(*tid, 2);
-                assert_eq!(*addr, 0x2000);
-                assert_eq!(*size, 512);
-                assert_eq!(*alloc_timestamp_nanos, 200);
+            Dial9Event::FreeEvent(e) => {
+                assert_eq!(e.timestamp_ns, 300);
+                assert_eq!(e.tid, 2);
+                assert_eq!(e.addr, 0x2000);
+                assert_eq!(e.size, 512);
+                assert_eq!(e.alloc_timestamp_ns, 200);
             }
             _ => unreachable!(),
         }
@@ -361,7 +349,7 @@ mod tests {
         let events = flush_and_collect(&shared);
         let frees: Vec<_> = events
             .iter()
-            .filter(|e| matches!(e, TelemetryEvent::Free { .. }))
+            .filter(|e| matches!(e, Dial9Event::FreeEvent(..)))
             .collect();
         assert_eq!(frees.len(), 0);
     }
@@ -385,11 +373,11 @@ mod tests {
         let events = flush_and_collect(&shared);
         let allocs: Vec<_> = events
             .iter()
-            .filter(|e| matches!(e, TelemetryEvent::Alloc { .. }))
+            .filter(|e| matches!(e, Dial9Event::AllocEvent(..)))
             .collect();
         let frees: Vec<_> = events
             .iter()
-            .filter(|e| matches!(e, TelemetryEvent::Free { .. }))
+            .filter(|e| matches!(e, Dial9Event::FreeEvent(..)))
             .collect();
         assert_eq!(allocs.len(), 1);
         assert_eq!(frees.len(), 0);
@@ -415,14 +403,14 @@ mod tests {
         assert_eq!(
             events
                 .iter()
-                .filter(|e| matches!(e, TelemetryEvent::Alloc { .. }))
+                .filter(|e| matches!(e, Dial9Event::AllocEvent(..)))
                 .count(),
             1
         );
         assert_eq!(
             events
                 .iter()
-                .filter(|e| matches!(e, TelemetryEvent::Free { .. }))
+                .filter(|e| matches!(e, Dial9Event::FreeEvent(..)))
                 .count(),
             0
         );
@@ -433,23 +421,19 @@ mod tests {
         assert_eq!(
             events
                 .iter()
-                .filter(|e| matches!(e, TelemetryEvent::Alloc { .. }))
+                .filter(|e| matches!(e, Dial9Event::AllocEvent(..)))
                 .count(),
             0
         );
         let frees: Vec<_> = events
             .iter()
-            .filter(|e| matches!(e, TelemetryEvent::Free { .. }))
+            .filter(|e| matches!(e, Dial9Event::FreeEvent(..)))
             .collect();
         assert_eq!(frees.len(), 1);
         match &frees[0] {
-            TelemetryEvent::Free {
-                size,
-                alloc_timestamp_nanos,
-                ..
-            } => {
-                assert_eq!(*size, 256);
-                assert_eq!(*alloc_timestamp_nanos, 700);
+            Dial9Event::FreeEvent(e) => {
+                assert_eq!(e.size, 256);
+                assert_eq!(e.alloc_timestamp_ns, 700);
             }
             _ => unreachable!(),
         }
@@ -491,13 +475,13 @@ mod tests {
         )));
 
         let events = flush_and_collect(&shared);
-        let allocs: Vec<&TelemetryEvent> = events
+        let allocs: Vec<&Dial9Event> = events
             .iter()
-            .filter(|e| matches!(e, TelemetryEvent::Alloc { .. }))
+            .filter(|e| matches!(e, Dial9Event::AllocEvent(..)))
             .collect();
-        let frees: Vec<&TelemetryEvent> = events
+        let frees: Vec<&Dial9Event> = events
             .iter()
-            .filter(|e| matches!(e, TelemetryEvent::Free { .. }))
+            .filter(|e| matches!(e, Dial9Event::FreeEvent(..)))
             .collect();
         assert_eq!(allocs.len(), 2, "both allocs should be emitted");
         assert_eq!(
@@ -509,16 +493,11 @@ mod tests {
         // The single free must match the *first* allocation (size=256, t=100).
         // If drain order is wrong, the free would match alloc2 (size=512).
         match frees[0] {
-            TelemetryEvent::Free {
-                size,
-                alloc_timestamp_nanos,
-                addr,
-                ..
-            } => {
-                assert_eq!(*addr, 0x5000);
-                assert_eq!(*size, 256, "free should report size from first alloc");
+            Dial9Event::FreeEvent(e) => {
+                assert_eq!(e.addr, 0x5000);
+                assert_eq!(e.size, 256, "free should report size from first alloc");
                 assert_eq!(
-                    *alloc_timestamp_nanos, 100,
+                    e.alloc_timestamp_ns, 100,
                     "free should reference timestamp of first alloc"
                 );
             }
@@ -532,18 +511,14 @@ mod tests {
         let events2 = flush_and_collect(&shared);
         let frees2: Vec<_> = events2
             .iter()
-            .filter(|e| matches!(e, TelemetryEvent::Free { .. }))
+            .filter(|e| matches!(e, Dial9Event::FreeEvent(..)))
             .collect();
         assert_eq!(frees2.len(), 1, "second flush should emit one free");
         match frees2[0] {
-            TelemetryEvent::Free {
-                size,
-                alloc_timestamp_nanos,
-                ..
-            } => {
-                assert_eq!(*size, 512, "free should match second alloc size");
+            Dial9Event::FreeEvent(e) => {
+                assert_eq!(e.size, 512, "free should match second alloc size");
                 assert_eq!(
-                    *alloc_timestamp_nanos, 300,
+                    e.alloc_timestamp_ns, 300,
                     "free should reference timestamp of second alloc"
                 );
             }
@@ -582,17 +557,13 @@ mod tests {
 
         let frees: Vec<_> = events
             .iter()
-            .filter(|e| matches!(e, TelemetryEvent::Free { .. }))
+            .filter(|e| matches!(e, Dial9Event::FreeEvent(..)))
             .collect();
         assert_eq!(frees.len(), 1);
         match frees[0] {
-            TelemetryEvent::Free {
-                size,
-                alloc_timestamp_nanos,
-                ..
-            } => {
-                assert_eq!(*size, 256, "free should match the first alloc");
-                assert_eq!(*alloc_timestamp_nanos, t1);
+            Dial9Event::FreeEvent(e) => {
+                assert_eq!(e.size, 256, "free should match the first alloc");
+                assert_eq!(e.alloc_timestamp_ns, t1);
             }
             _ => unreachable!(),
         }
@@ -603,17 +574,13 @@ mod tests {
         let events2 = flush_and_collect(&shared);
         let frees2: Vec<_> = events2
             .iter()
-            .filter(|e| matches!(e, TelemetryEvent::Free { .. }))
+            .filter(|e| matches!(e, Dial9Event::FreeEvent(..)))
             .collect();
         assert_eq!(frees2.len(), 1);
         match frees2[0] {
-            TelemetryEvent::Free {
-                size,
-                alloc_timestamp_nanos,
-                ..
-            } => {
-                assert_eq!(*size, 512, "free should match second alloc size");
-                assert_eq!(*alloc_timestamp_nanos, t3);
+            Dial9Event::FreeEvent(e) => {
+                assert_eq!(e.size, 512, "free should match second alloc size");
+                assert_eq!(e.alloc_timestamp_ns, t3);
             }
             _ => unreachable!(),
         }
