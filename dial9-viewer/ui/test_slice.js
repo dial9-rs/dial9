@@ -207,6 +207,76 @@ async function main() {
     }
   }
 
+  // ── Test 10: Relative [0, 100ms] slice preserves all SymbolTableEntry events ──
+  {
+    const sliced = sliceTrace(input, {
+      timeRange: { startNs: "0", endNs: "100000000" },
+      relative: true,
+    });
+    const parsed = await parseTrace(sliced);
+    if (parsed.callframeSymbols.size > 0 && parsed.callframeSymbols.size === full.callframeSymbols.size) {
+      pass(`Relative [0, 100ms] slice preserves all ${parsed.callframeSymbols.size} symbols`);
+    } else {
+      fail(`Relative [0, 100ms] slice: expected ${full.callframeSymbols.size} symbols, got ${parsed.callframeSymbols.size}`);
+    }
+  }
+
+  // ── Test 11: Sliced events (excluding always-keep) respect time range ──
+  {
+    const halfDuration = Math.floor((full.maxTs - full.minTs) / 2);
+    const sliceEnd = full.minTs + halfDuration;
+    const sliced = sliceTrace(input, {
+      timeRange: { startNs: full.minTs.toString(), endNs: sliceEnd.toString() }
+    });
+    const parsed = await parseTrace(sliced);
+    let outOfRange = 0;
+    // Normal events (not symbols/metadata) must be in range
+    for (const e of parsed.events) {
+      if (e.timestamp < full.minTs || e.timestamp > sliceEnd) outOfRange++;
+    }
+    for (const s of parsed.cpuSamples) {
+      if (s.timestamp < full.minTs || s.timestamp > sliceEnd) outOfRange++;
+    }
+    for (const c of parsed.customEvents) {
+      if (c.timestamp < full.minTs || c.timestamp > sliceEnd) outOfRange++;
+    }
+    if (outOfRange === 0 && parsed.callframeSymbols.size === full.callframeSymbols.size) {
+      pass(`Half-range slice: time filter works AND all ${parsed.callframeSymbols.size} symbols preserved`);
+    } else if (outOfRange > 0) {
+      fail(`Half-range slice: ${outOfRange} normal events out of range`);
+    } else {
+      fail(`Half-range slice: expected ${full.callframeSymbols.size} symbols, got ${parsed.callframeSymbols.size}`);
+    }
+  }
+
+  // ── Test 12: Full-range absolute slice preserves all symbols ──
+  {
+    const sliced = sliceTrace(input, {
+      timeRange: { startNs: full.minTs.toString(), endNs: full.maxTs.toString() }
+    });
+    const parsed = await parseTrace(sliced);
+    const slicedEventCount = parsed.events.length + parsed.cpuSamples.length + parsed.customEvents.length;
+    if (slicedEventCount === fullEventCount && parsed.callframeSymbols.size === full.callframeSymbols.size) {
+      pass(`Full-range absolute slice: all ${fullEventCount} events and ${parsed.callframeSymbols.size} symbols preserved`);
+    } else {
+      fail(`Full-range absolute slice: events ${slicedEventCount}/${fullEventCount}, symbols ${parsed.callframeSymbols.size}/${full.callframeSymbols.size}`);
+    }
+  }
+
+  // ── Test 13: Relative [3.9s, 4.05s] slice has symbols for flamegraphs ──
+  {
+    const sliced = sliceTrace(input, {
+      timeRange: { startNs: "3900000000", endNs: "4050000000" },
+      relative: true,
+    });
+    const parsed = await parseTrace(sliced);
+    if (parsed.callframeSymbols.size === full.callframeSymbols.size) {
+      pass(`Relative [3.9s, 4.05s] slice preserves all ${parsed.callframeSymbols.size} symbols for flamegraphs`);
+    } else {
+      fail(`Relative [3.9s, 4.05s] slice: expected ${full.callframeSymbols.size} symbols, got ${parsed.callframeSymbols.size}`);
+    }
+  }
+
   console.log(`\n${failures === 0 ? "All tests passed" : `${failures} test(s) FAILED`}`);
   process.exit(failures === 0 ? 0 : 1);
 }

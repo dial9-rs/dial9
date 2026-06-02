@@ -22,6 +22,15 @@ const TAG_SCHEMA_ANNOTATIONS = 0x06;
 
 const OPTIONAL_BIT = 0x80;
 
+// Events that describe the trace itself and must survive time-range filtering.
+// Without these, the parser cannot resolve CPU sample addresses to symbols or
+// anchor monotonic timestamps to wall-clock time.
+const ALWAYS_KEEP_SCHEMA_NAMES = new Set([
+  "SymbolTableEntry",
+  "SegmentMetadataEvent",
+  "ClockSyncEvent",
+]);
+
 /**
  * Slice a trace buffer, keeping only events within the given time range.
  *
@@ -99,7 +108,8 @@ function sliceTrace(input, opts) {
         const schemaStart = pos;
         const typeId = view.getUint16(pos, true); pos += 2;
         const nameLen = view.getUint16(pos, true); pos += 2;
-        pos += nameLen; // skip name bytes
+        const name = Buffer.from(buf.slice(pos, pos + nameLen)).toString("utf8");
+        pos += nameLen;
         const hasTimestamp = view.getUint8(pos) !== 0; pos += 1;
         const fieldCount = view.getUint16(pos, true); pos += 2;
         const fields = [];
@@ -109,7 +119,7 @@ function sliceTrace(input, opts) {
           const ft = view.getUint8(pos); pos++;
           fields.push(ft);
         }
-        schemas.set(typeId, { hasTimestamp, fields });
+        schemas.set(typeId, { name, hasTimestamp, fields });
         // Always copy schema frames
         copyBytes(frameStart, pos);
         break;
@@ -142,6 +152,11 @@ function sliceTrace(input, opts) {
           if (eventTimestampNs < startNs || eventTimestampNs > endNs) {
             keep = false;
           }
+        }
+        // Always retain trace-describing events (symbols, metadata, clock sync)
+        // so the parser can resolve addresses and anchor timestamps.
+        if (!keep && ALWAYS_KEEP_SCHEMA_NAMES.has(schema.name)) {
+          keep = true;
         }
         // Events without timestamps (rare) are always kept
 

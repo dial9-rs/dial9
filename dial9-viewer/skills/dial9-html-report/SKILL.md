@@ -172,7 +172,7 @@ const sliced = sliceTrace(input, {
 fs.writeFileSync('report/traces/burst.bin', sliced);
 ```
 
-**Why slice?** A full trace can be 100+ MB. Slicing to the relevant window (typically a few seconds) produces files of 100 KB–2 MB, making the report folder portable and embeds load instantly.
+**Why slice?** A full trace can be 100+ MB. Slicing to the relevant window (typically a few seconds) produces files of 100 KB–2 MB, making the report folder portable and embeds load instantly. The slicer preserves symbol table entries, segment metadata, and clock sync events regardless of the time range, so flamegraphs in sliced traces render with full function names.
 
 Note: `slice.js` v1 supports `timeRange` filtering only. Event-type filtering is planned for a future release.
 
