@@ -1,36 +1,22 @@
 //! Verify that CPU profile sample timestamps align with wall-clock timestamps,
 //! and that samples are attributed to the correct worker thread.
+//!
+//! We spawn async tasks that sleep (150ms), burn CPU (80ms), then sleep again.
+//! CPU samples must land within the burn windows. If the perf clock were
+//! CLOCK_MONOTONIC_RAW instead of CLOCK_MONOTONIC, timestamps would be offset
+//! by ~25ms and many samples would spill outside the expected windows.
+//!
+//! Worker attribution: because each task is awaited sequentially and the CPU
+//! burn blocks the worker thread, all samples within a burn window must come
+//! from the single worker that was running that task.
 
 #![cfg(all(feature = "cpu-profiling", target_os = "linux"))]
 
 mod common;
 
 use common::{BytesCapturingWriter, decode_all};
-use serde::Deserialize;
+use dial9_tokio_telemetry::telemetry::analysis_events::{CpuSampleSource, Dial9Event};
 
-#[derive(Debug, Deserialize)]
-#[serde(tag = "event")]
-enum CpuEvent {
-    CpuSampleEvent {
-        timestamp_ns: u64,
-        worker_id: u64,
-        tid: u32,
-        source: u8,
-        thread_name: Option<String>,
-    },
-    PollStartEvent {
-        timestamp_ns: u64,
-        worker_id: u64,
-    },
-    PollEndEvent {
-        timestamp_ns: u64,
-        worker_id: u64,
-    },
-    #[serde(other)]
-    Other,
-}
-
-const SOURCE_CPU_PROFILE: u8 = 0;
 const WORKER_UNKNOWN: u64 = 255;
 const WORKER_BLOCKING: u64 = 254;
 
@@ -78,19 +64,16 @@ fn cpu_sample_timestamps_align_with_wall_clock() {
     drop(guard);
 
     let b = batches.lock().unwrap();
-    let events: Vec<CpuEvent> = decode_all(&b);
+    let events: Vec<Dial9Event> = decode_all(&b);
     let windows = burn_windows.lock().unwrap();
 
     // Extract CPU samples
     let cpu_samples: Vec<(u64, u64)> = events
         .iter()
         .filter_map(|e| match e {
-            CpuEvent::CpuSampleEvent {
-                timestamp_ns,
-                worker_id,
-                source,
-                ..
-            } if *source == SOURCE_CPU_PROFILE => Some((*timestamp_ns, *worker_id)),
+            Dial9Event::CpuSampleEvent(s) if s.source == CpuSampleSource::CpuProfile => {
+                Some((s.timestamp_ns, s.worker_id))
+            }
             _ => None,
         })
         .collect();
@@ -104,18 +87,12 @@ fn cpu_sample_timestamps_align_with_wall_clock() {
         let mut open: std::collections::HashMap<u64, u64> = std::collections::HashMap::new();
         for event in &events {
             match event {
-                CpuEvent::PollStartEvent {
-                    timestamp_ns,
-                    worker_id,
-                } => {
-                    open.insert(*worker_id, *timestamp_ns);
+                Dial9Event::PollStartEvent(e) => {
+                    open.insert(e.worker_id, e.timestamp_ns);
                 }
-                CpuEvent::PollEndEvent {
-                    timestamp_ns,
-                    worker_id,
-                } => {
-                    if let Some(start) = open.remove(worker_id) {
-                        poll_intervals.push((start, *timestamp_ns, *worker_id));
+                Dial9Event::PollEndEvent(e) => {
+                    if let Some(start) = open.remove(&e.worker_id) {
+                        poll_intervals.push((start, e.timestamp_ns, e.worker_id));
                     }
                 }
                 _ => {}
@@ -273,15 +250,13 @@ fn thread_name_attribution_for_external_and_blocking_threads() {
     guard.graceful_shutdown(Duration::from_secs(1)).unwrap();
 
     let b = batches.lock().unwrap();
-    let events: Vec<CpuEvent> = decode_all(&b);
+    let events: Vec<Dial9Event> = decode_all(&b);
 
     // Collect thread names from CpuSample events
     let thread_defs: Vec<(u32, &str)> = events
         .iter()
         .filter_map(|e| match e {
-            CpuEvent::CpuSampleEvent {
-                tid, thread_name, ..
-            } => thread_name.as_deref().map(|name| (*tid, name)),
+            Dial9Event::CpuSampleEvent(s) => s.thread_name.as_deref().map(|name| (s.tid, name)),
             _ => None,
         })
         .collect();
@@ -311,8 +286,8 @@ fn thread_name_attribution_for_external_and_blocking_threads() {
     let ext_samples: Vec<_> = events
         .iter()
         .filter(|e| {
-            matches!(e, CpuEvent::CpuSampleEvent { tid, worker_id, .. }
-            if *tid == ext_tid && *worker_id == WORKER_UNKNOWN)
+            matches!(e, Dial9Event::CpuSampleEvent(s)
+            if s.tid == ext_tid && s.worker_id == WORKER_UNKNOWN)
         })
         .collect();
     assert!(
@@ -323,8 +298,8 @@ fn thread_name_attribution_for_external_and_blocking_threads() {
     let blocking_samples: Vec<_> = events
         .iter()
         .filter(|e| {
-            matches!(e, CpuEvent::CpuSampleEvent { tid, worker_id, .. }
-            if *tid == blocking_tid && *worker_id == WORKER_BLOCKING)
+            matches!(e, Dial9Event::CpuSampleEvent(s)
+            if s.tid == blocking_tid && s.worker_id == WORKER_BLOCKING)
         })
         .collect();
     assert!(

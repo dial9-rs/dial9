@@ -192,10 +192,6 @@ name = "trace_to_jsonl"
 required-features = ["analysis"]
 
 [[example]]
-name = "trace_to_fat_jsonl"
-required-features = ["analysis"]
-
-[[example]]
 name = "kernel_sched_events"
 required-features = ["cpu-profiling", "analysis"]
 

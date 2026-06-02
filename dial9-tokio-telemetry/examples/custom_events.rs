@@ -17,7 +17,9 @@ use std::time::Duration;
 
 // ── Simple: derive-only, no interning ───────────────────────────────────────
 
-/// A custom event with primitive and optional fields.
+/// A custom event with primitive and optional fields. The blanket `Encodable` impl
+/// handles encoding automatically — just pass it to `record_event`.
+/// Optional fields use 1 byte on the wire when absent (None).
 #[derive(TraceEvent)]
 struct RequestCompleted {
     #[traceevent(timestamp)]
@@ -30,12 +32,14 @@ struct RequestCompleted {
 
 // ── Advanced: manual Encodable with string interning ────────────────────────
 
+/// Application-level event with a string field we want to intern.
 struct HttpRequest {
     timestamp_ns: u64,
     method: String,
     status: u32,
 }
 
+/// Wire-format struct with the interned string handle.
 #[derive(TraceEvent)]
 struct HttpRequestWire {
     #[traceevent(timestamp)]
@@ -86,6 +90,7 @@ fn main() -> std::io::Result<()> {
         }
 
         // Advanced: manual Encodable with interning
+        // "GET" is interned once and reused across all events in the batch.
         for _ in 0..10 {
             record_event(
                 HttpRequest {

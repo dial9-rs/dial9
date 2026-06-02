@@ -10,27 +10,12 @@
 //!   echo 2 | sudo tee /proc/sys/kernel/perf_event_paranoid
 
 use dial9_tokio_telemetry::telemetry::{
-    DiskWriter, TracedRuntime, cpu_profile::CpuProfilingConfig,
+    DiskWriter, TracedRuntime,
+    analysis_events::{CpuSampleSource, Dial9Event},
+    cpu_profile::CpuProfilingConfig,
 };
 use dial9_trace_format::decoder::Decoder;
-use serde::Deserialize;
 use std::time::Duration;
-
-#[derive(Debug, Deserialize)]
-#[serde(tag = "event")]
-enum CpuEvent {
-    CpuSampleEvent {
-        timestamp_ns: u64,
-        worker_id: u64,
-        source: u8,
-        callchain: Vec<u64>,
-    },
-    PollStartEvent {
-        timestamp_ns: u64,
-    },
-    #[serde(other)]
-    Other,
-}
 
 fn burn_cpu(duration: Duration) {
     let start = std::time::Instant::now();
@@ -45,6 +30,7 @@ fn burn_cpu(duration: Duration) {
 
 async fn cpu_heavy_task(id: usize) {
     for _ in 0..5 {
+        // This poll will show up as a long poll with CPU samples inside it
         burn_cpu(Duration::from_millis(20));
         tokio::task::yield_now().await;
     }
@@ -52,6 +38,8 @@ async fn cpu_heavy_task(id: usize) {
 }
 
 fn main() {
+    // Base path without extension: writer produces cpu_profile_trace.0.bin,
+    // which the background worker can detect, symbolize, and gzip-compress.
     let trace_base = "cpu_profile_trace.bin";
     let segment_path = "cpu_profile_trace.0.bin";
 
@@ -60,8 +48,8 @@ fn main() {
 
     let writer = DiskWriter::builder()
         .base_path(trace_base)
-        .max_file_size(1024 * 1024 * 20)
-        .max_total_size(1024 * 1024 * 100)
+        .max_file_size(1024 * 1024 * 20) // rotate after 20 MiB per file
+        .max_total_size(1024 * 1024 * 100) // keep at most 100 MiB on disk
         .build()
         .unwrap();
     let (runtime, guard) = TracedRuntime::builder()
@@ -77,16 +65,21 @@ fn main() {
         for task in tasks {
             let _ = task.await;
         }
+        // Give the flush thread time to drain samples
         tokio::time::sleep(Duration::from_millis(500)).await;
     });
 
     drop(runtime);
 
+    // Graceful shutdown: flush + seal the segment, then wait for the background
+    // worker to symbolize and gzip-compress it. Drop impl is a hard shutdown
+    // (worker exits without draining), so we must use graceful_shutdown here.
     eprintln!("Waiting for background worker to symbolize trace (up to 30s)...");
     if let Err(e) = guard.graceful_shutdown(Duration::from_secs(30)) {
         eprintln!("Worker shutdown warning: {e}");
     }
 
+    // Read back and report
     eprintln!("\n=== Reading trace from {segment_path} ===");
     let data = std::fs::read(segment_path).unwrap();
     let mut decoder = Decoder::new(&data).unwrap();
@@ -98,28 +91,26 @@ fn main() {
 
     decoder
         .for_each_event(|raw| {
-            let ev: CpuEvent = raw.deserialize().expect("deserialize");
+            let ev: Dial9Event = raw.deserialize().expect("deserialize");
             match &ev {
-                CpuEvent::CpuSampleEvent {
-                    worker_id,
-                    callchain,
-                    timestamp_ns,
-                    source,
-                } => {
+                Dial9Event::CpuSampleEvent(e) if e.source == CpuSampleSource::CpuProfile => {
                     cpu_samples += 1;
-                    *samples_by_worker.entry(*worker_id).or_default() += 1;
+                    *samples_by_worker.entry(e.worker_id).or_default() += 1;
                     if cpu_samples <= 10 {
                         eprintln!(
-                            "  CpuSample: worker={worker_id} t={timestamp_ns}ns source={source} frames={}",
-                            callchain.len()
+                            "  CpuSample: worker={} t={}ns source={:?} frames={}",
+                            e.worker_id,
+                            e.timestamp_ns,
+                            e.source,
+                            e.callchain.len()
                         );
-                        for (i, addr) in callchain.iter().take(8).enumerate() {
+                        for (i, addr) in e.callchain.iter().take(8).enumerate() {
                             eprintln!("    [{i}] {addr:#x}");
                         }
                     }
                 }
-                CpuEvent::PollStartEvent { .. } => polls += 1,
-                CpuEvent::Other => {}
+                Dial9Event::PollStartEvent(_) => polls += 1,
+                _ => {}
             }
         })
         .unwrap();

@@ -6,21 +6,7 @@
 mod common;
 
 use common::{BytesCapturingWriter, decode_all};
-use serde::Deserialize;
-
-#[derive(Debug, Deserialize)]
-#[serde(tag = "event")]
-enum SchedEvent {
-    CpuSampleEvent {
-        timestamp_ns: u64,
-        source: u8,
-        worker_id: u64,
-    },
-    #[serde(other)]
-    Other,
-}
-
-const SOURCE_SCHED_EVENT: u8 = 1;
+use dial9_tokio_telemetry::telemetry::analysis_events::{CpuSampleSource, Dial9Event};
 
 #[test]
 fn sched_event_timestamps_align_with_wall_clock() {
@@ -77,18 +63,18 @@ fn sched_event_timestamps_align_with_wall_clock() {
     drop(guard);
 
     let b = batches.lock().unwrap();
-    let events: Vec<SchedEvent> = decode_all(&b);
+    let events: Vec<Dial9Event> = decode_all(&b);
     let windows = sleep_windows.lock().unwrap();
 
     // Collect sched event timestamps attributed to workers
     let sched_timestamps: Vec<u64> = events
         .iter()
         .filter_map(|e| match e {
-            SchedEvent::CpuSampleEvent {
-                timestamp_ns,
-                source,
-                worker_id,
-            } if *source == SOURCE_SCHED_EVENT && *worker_id < num_workers => Some(*timestamp_ns),
+            Dial9Event::CpuSampleEvent(s)
+                if s.source == CpuSampleSource::SchedEvent && s.worker_id < num_workers =>
+            {
+                Some(s.timestamp_ns)
+            }
             _ => None,
         })
         .collect();
