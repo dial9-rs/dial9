@@ -198,6 +198,32 @@ async function main() {
     }
   }
 
+  // ── Type contract: trace timestamps are Numbers, not BigInts ──
+  // The skill's "compute absolute ns" guidance uses plain Number arithmetic
+  // (`minTs + 3_900_000_000`). If parseTrace ever returned BigInts, agents
+  // following the skill would silently produce blank flamegraphs because
+  // `Number + BigInt` throws and the script aborts before rendering.
+  {
+    const checks = [
+      ["trace.minTs", trace.minTs],
+      ["trace.maxTs", trace.maxTs],
+      ["cpuSamples[0].timestamp", trace.cpuSamples[0]?.timestamp],
+      ["events[0].timestamp", trace.events[0]?.timestamp],
+    ];
+    let bad = checks.filter(([_, v]) => v !== undefined && typeof v !== "number");
+    if (bad.length === 0) {
+      // Also check that arithmetic doesn't throw with the documented pattern
+      try {
+        const _ = trace.minTs + 3_900_000_000;
+        pass(`Skill type contract: trace timestamps are plain Numbers, arithmetic is safe`);
+      } catch (e) {
+        fail(`Skill type contract: arithmetic threw: ${e.message}`);
+      }
+    } else {
+      fail(`Skill type contract: ${bad.map(([k, v]) => `${k} is ${typeof v}`).join(", ")}`);
+    }
+  }
+
   console.log(`\n${failures === 0 ? "All tests passed" : `${failures} test(s) FAILED`}`);
   process.exit(failures === 0 ? 0 : 1);
 }

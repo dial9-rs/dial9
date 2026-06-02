@@ -117,12 +117,20 @@ The `trace` path is **relative** — it resolves from the same origin because `v
 To compute an absolute timestamp from a relative offset:
 
 ```js
-// trace.minTs is the earliest timestamp in the trace (absolute ns)
-const minTs = trace.minTs; // e.g., 150435648276n
+// trace.minTs is the earliest timestamp in the trace, as a Number (ns).
+// All trace timestamps (event.timestamp, poll.start/end, cpuSample.timestamp)
+// are Numbers, NOT BigInts. Use plain arithmetic, no `n` suffix.
+const minTs = trace.minTs; // e.g., 150439548276
 // "3.9 seconds into the trace" → absolute ns:
-const start = minTs + 3_900_000_000n; // 150439548276n
-const end   = minTs + 4_050_000_000n; // 150439698276n
+const start = minTs + 3_900_000_000; // 154339548276
+const end   = minTs + 4_050_000_000; // 154489548276
 ```
+
+> **Foot-gun:** do NOT use BigInt suffix (`3_900_000_000n`) when adding to
+> `trace.minTs`. `Number + BigInt` throws at runtime, producing a silent
+> blank flamegraph because the script aborts before rendering. Same goes
+> for filter predicates: comparing `cpuSample.timestamp` to `poll.start`
+> and similar — keep both as plain Numbers.
 
 ### Available viewer URL params
 
