@@ -385,7 +385,7 @@ Slice traces to keep report folders small and embed loading fast.
 ```bash
 # slice the burst window (3.9s–4.05s into the trace):
 node /path/to/dial9-trace-format/js/slice.js \
-  --input full-trace.bin \
+  --input /path/to/trace.bin \
   --output report/traces/burst.bin \
   --relative \
   --start 3900000000 \
@@ -398,7 +398,7 @@ Or programmatically:
 const { sliceTrace } = require('/path/to/dial9-trace-format/js/slice.js');
 const fs = require('fs');
 
-const input = fs.readFileSync('full-trace.bin');
+const input = fs.readFileSync('/path/to/trace.bin');
 const sliced = sliceTrace(input, {
   timeRange: { startNs: '3900000000', endNs: '4050000000' },
   relative: true,

@@ -39,6 +39,8 @@ function shouldSkip(recipe) {
   if (code.includes("{ ... }") || code === "..." || code === "") return true;
   if (recipe.heading.includes("Setup boilerplate")) return true;
   if (recipe.heading.includes("Working with large directories")) return true;
+  // Slicing operates on a single trace file; meaningless in directory mode.
+  if (recipe.heading.includes("Slicing traces")) return true;
   // Skip pure structure/type definitions
   if (/^\{\s*\n\s*(events|workerSpans|eventType|timestamp):/.test(code)) return true;
   // Skip S3 examples (need a running server)
