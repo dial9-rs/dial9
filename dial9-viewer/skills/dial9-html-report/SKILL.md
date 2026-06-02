@@ -37,6 +37,8 @@ my-report/
 ├── decode.js            # Required by embed.html (copy from dial9-viewer/ui/)
 ├── trace_parser.js      # Required by embed.html (copy from dial9-viewer/ui/)
 ├── trace_analysis.js    # Required by embed.html (copy from dial9-viewer/ui/)
+├── flamegraphs/         # Standalone filtered flamegraph HTML files (optional)
+│   └── task-3-cpu.html  # Example: per-task flamegraph
 └── traces/
     ├── burst-window.bin # Sliced trace for the burst finding
     └── startup-io.bin   # Sliced trace for the startup finding
@@ -114,6 +116,217 @@ Shows worker-activity lanes (polls as colored bars, parks as red strips):
 <iframe src="embed.html?trace=traces/burst.bin&amp;start=3900000000&amp;end=4050000000&amp;view=timeline"
         width="100%" height="180" style="border:0"></iframe>
 ```
+
+## Flamegraphs: precise filtering via standalone HTML
+
+### When to use this vs. `embed.html?view=flamegraph`
+
+Use `embed.html?view=flamegraph&start=...&end=...` when the time range alone is the right filter — e.g., "show the burst window." It's one iframe tag and zero JS.
+
+Use a **standalone HTML file** when you need anything more precise:
+- A specific task's CPU profile
+- Only polls exceeding a duration threshold
+- Off-CPU (scheduling) samples only
+- Leaf-frame search (e.g., "where does `load_native_certs` appear?")
+- Multi-trace union flamegraph
+- Any combination of the above
+
+### Skeleton (copy and fill in your filter)
+
+Place standalone flamegraph files in `report/flamegraphs/<name>.html`. They load the same JS modules as `embed.html` but give you full control over filtering.
+
+```html
+<!DOCTYPE html>
+<html><head><link rel="stylesheet" href="../flamegraph.css"></head><body>
+  <div id="fg" style="height:100vh"></div>
+  <script src="../decode.js"></script>
+  <script src="../trace_parser.js"></script>
+  <script src="../trace_analysis.js"></script>
+  <script src="../flamegraph.js"></script>
+  <script>(async () => {
+    const buf = await fetch('../traces/full.bin').then(r => r.arrayBuffer());
+    const trace = await TraceParser.parseTrace(buf);
+    const workerIds = [...new Set(trace.events.filter(e => e.workerId != null).map(e => e.workerId))];
+    const ws = TraceAnalysis.buildWorkerSpans(trace.events, workerIds, trace.maxTs, trace.blockInPlaceGaps);
+    TraceAnalysis.attachCpuSamples(trace.cpuSamples, ws.workerSpans);
+
+    // AGENT: replace this filter with your predicate.
+    const samples = trace.cpuSamples.filter(s => s.source === 0);
+
+    const el = document.getElementById('fg');
+    if (samples.length === 0) {
+      const total = trace.cpuSamples.length;
+      const onCpu = trace.cpuSamples.filter(s => s.source === 0).length;
+      const offCpu = trace.cpuSamples.filter(s => s.source === 1).length;
+      const locs = new Map();
+      trace.cpuSamples.forEach(s => { if (s.spawnLoc) locs.set(s.spawnLoc, (locs.get(s.spawnLoc)||0)+1); });
+      const top3 = [...locs.entries()].sort((a,b) => b[1]-a[1]).slice(0,3).map(([l,c]) => l.split('/').pop()+' ('+c+')').join(', ');
+      el.innerHTML = '<pre>No samples matched filter.\nTotal samples: '+total+' (on-CPU: '+onCpu+', off-CPU: '+offCpu+')\nTop spawn locs: '+top3+'</pre>';
+      return;
+    }
+    FlamegraphRenderer.createFlamegraph(el, () => {}).setData(samples, trace.callframeSymbols);
+  })();</script>
+</body></html>
+```
+
+**Key points:**
+- `buildWorkerSpans` + `attachCpuSamples` decorates each sample with `.spawnLoc` (the source location where the task was spawned). This is required for any recipe that filters by spawn location.
+- Polls in `ws.workerSpans[workerId].polls` have `.taskId`, `.start`, `.end`. Use these to filter samples by task or by poll duration.
+- `trace.callframeSymbols` is a `Map<string, entry|entry[]>` where each entry is `{symbol, location}`. Array entries are inlined frames (index 0 = outermost).
+
+### Recipes
+
+#### Recipe: Total on-CPU flamegraph
+
+**Question it answers:** "What is the application spending CPU on?"
+
+```js
+const samples = trace.cpuSamples.filter(s => s.source === 0);
+```
+
+**When NOT to use:** When you want off-CPU / scheduling delay analysis. Use `source === 1` instead.
+
+---
+
+#### Recipe: Off-CPU (scheduling) samples only
+
+**Question it answers:** "What code was running when the kernel moved my worker thread off-CPU?" Useful for diagnosing blocking calls in async code.
+
+```js
+const samples = trace.cpuSamples.filter(s => s.source === 1);
+```
+
+**When NOT to use:** When diagnosing high CPU usage — those are on-CPU samples (`source === 0`).
+
+---
+
+#### Recipe: Just task X
+
+**Question it answers:** "What does this specific task's CPU profile look like?"
+
+```js
+// Collect poll time ranges for the target task
+const TARGET_TASK_ID = 3;
+const taskPolls = [];
+for (const wid of Object.keys(ws.workerSpans)) {
+  for (const p of ws.workerSpans[wid].polls) {
+    if (p.taskId === TARGET_TASK_ID) taskPolls.push(p);
+  }
+}
+const samples = trace.cpuSamples.filter(s =>
+  s.source === 0 && taskPolls.some(p => s.timestamp >= p.start && s.timestamp <= p.end)
+);
+```
+
+**When NOT to use:** When the task has very few polls — you'll get too few samples for a useful flamegraph. Check `taskPolls.length` first.
+
+---
+
+#### Recipe: Just polls > N ms
+
+**Question it answers:** "What code paths cause long polls?"
+
+```js
+const THRESHOLD_NS = 5_000_000; // 5ms
+const longPolls = [];
+for (const wid of Object.keys(ws.workerSpans)) {
+  for (const p of ws.workerSpans[wid].polls) {
+    if ((p.end - p.start) > THRESHOLD_NS) longPolls.push(p);
+  }
+}
+const samples = trace.cpuSamples.filter(s =>
+  s.source === 0 && longPolls.some(p => s.timestamp >= p.start && s.timestamp <= p.end)
+);
+```
+
+**When NOT to use:** When the long polls are idle waits (off-CPU). Switch to `source === 1` if the on-CPU flamegraph looks thin.
+
+---
+
+#### Recipe: One specific poll instance
+
+**Question it answers:** "What happened during the single worst poll of task X?"
+
+```js
+const TARGET_TASK_ID = 3;
+let worstPoll = null;
+for (const wid of Object.keys(ws.workerSpans)) {
+  for (const p of ws.workerSpans[wid].polls) {
+    if (p.taskId === TARGET_TASK_ID) {
+      if (!worstPoll || (p.end - p.start) > (worstPoll.end - worstPoll.start)) worstPoll = p;
+    }
+  }
+}
+const samples = trace.cpuSamples.filter(s =>
+  s.source === 0 && s.timestamp >= worstPoll.start && s.timestamp <= worstPoll.end
+);
+```
+
+**When NOT to use:** When the worst poll has < 3 samples — the flamegraph won't be statistically meaningful. Show the raw sample stacks instead.
+
+---
+
+#### Recipe: Leaf-frame search
+
+**Question it answers:** "Which samples have a specific function at the leaf (i.e., the function was actually on-CPU)?"
+
+```js
+const SEARCH = 'load_native_certs';
+const samples = trace.cpuSamples.filter(s => {
+  const leaf = s.callchain[s.callchain.length - 1];
+  const sym = trace.callframeSymbols.get(leaf);
+  if (!sym) return false;
+  // Handle both plain entries and inlined-frame arrays
+  const name = Array.isArray(sym) ? sym[0].symbol : sym.symbol;
+  return name && name.includes(SEARCH);
+});
+```
+
+**When NOT to use:** When you want to find a function *anywhere* in the stack (not just at the leaf). Remove the `[s.callchain.length - 1]` indexing and iterate all frames with `.some()` instead.
+
+---
+
+#### Recipe: Filter by spawn location
+
+**Question it answers:** "What does the CPU profile look like for all tasks spawned from a specific call site?"
+
+```js
+const SPAWN_LOC = 'src/main.rs:260:14'; // substring match
+const samples = trace.cpuSamples.filter(s =>
+  s.source === 0 && s.spawnLoc && s.spawnLoc.includes(SPAWN_LOC)
+);
+```
+
+**When NOT to use:** When you want a single task instance, not all tasks from a spawn site. Use the task-ID recipe instead.
+
+---
+
+#### Recipe: Multi-trace union
+
+**Question it answers:** "What does the aggregate CPU profile look like across multiple trace files?" Useful for comparing before/after or aggregating across replicas.
+
+```js
+const traceFiles = ['../traces/trace-a.bin', '../traces/trace-b.bin'];
+const allSamples = [];
+const mergedSymbols = new Map();
+
+for (const url of traceFiles) {
+  const buf = await fetch(url).then(r => r.arrayBuffer());
+  const t = await TraceParser.parseTrace(buf);
+  // Merge symbols (first-writer-wins per address)
+  for (const [k, v] of t.callframeSymbols) {
+    if (!mergedSymbols.has(k)) mergedSymbols.set(k, v);
+  }
+  allSamples.push(...t.cpuSamples.filter(s => s.source === 0));
+}
+const samples = allSamples;
+// Use mergedSymbols instead of trace.callframeSymbols for setData()
+FlamegraphRenderer.createFlamegraph(el, () => {}).setData(samples, mergedSymbols);
+```
+
+**Warning:** Timestamps come from different monotonic clocks across traces. Do NOT use time-based predicates (e.g., `s.timestamp >= X`) across traces in a union — the timestamps are incomparable. Cross-trace flamegraphs work because they aggregate by callchain, not time.
+
+**When NOT to use:** When you need to compare traces side-by-side (differences). Use two separate flamegraphs instead.
 
 ## Linking back to the full viewer
 
@@ -262,6 +475,7 @@ a:hover { text-decoration: underline; }
 
 - **Don't inline trace bytes as base64.** Traces are megabytes; use sliced `.bin` files in `traces/`.
 - **Don't render flamegraphs from scratch with CSS bars.** Use `embed.html` — it produces real interactive flamegraphs.
+- **Don't use `embed.html?view=flamegraph` when the question is about a specific task, poll, or stack.** Use the standalone HTML pattern with a JS filter instead (see [Flamegraphs: precise filtering via standalone HTML](#flamegraphs-precise-filtering-via-standalone-html)).
 - **Don't invent viewer URL params.** Only `trace`, `start`, `end`, `svc`, `host`, `from`, `to`, `segs` exist. There is no `?worker=`, `?task=`, or `?source=`.
 - **Don't copy the full multi-MB trace into the report folder.** Slice it to the relevant time window.
 - **Don't rely on `file://`.** Reports embed iframes that fetch trace files. Tell users to view via `dial9 report serve <folder>` (or `python3 -m http.server`).
