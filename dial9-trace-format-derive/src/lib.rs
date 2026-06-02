@@ -140,11 +140,23 @@ fn derive_trace_event_impl(input: DeriveInput) -> proc_macro2::TokenStream {
 
             fn event_name() -> &'static str { #name_str }
             fn type_slot() -> u16 {
-                static SLOT: ::std::sync::OnceLock<u16> = ::std::sync::OnceLock::new();
-                *SLOT.get_or_init(|| {
-                    ::dial9_trace_format::__NEXT_TYPE_SLOT
-                        .fetch_add(1, ::std::sync::atomic::Ordering::Relaxed)
-                })
+                static SLOT: ::std::sync::atomic::AtomicU16 =
+                    ::std::sync::atomic::AtomicU16::new(0);
+                let cached = SLOT.load(::std::sync::atomic::Ordering::Relaxed);
+                if cached != 0 {
+                    return cached;
+                }
+                let new = ::dial9_trace_format::__NEXT_TYPE_SLOT
+                    .fetch_add(1, ::std::sync::atomic::Ordering::Relaxed);
+                match SLOT.compare_exchange(
+                    0,
+                    new,
+                    ::std::sync::atomic::Ordering::Relaxed,
+                    ::std::sync::atomic::Ordering::Relaxed,
+                ) {
+                    Ok(_) => new,
+                    Err(existing) => existing,
+                }
             }
             fn field_defs() -> Vec<::dial9_trace_format::schema::FieldDef> {
                 vec![#(#field_def_tokens),*]
