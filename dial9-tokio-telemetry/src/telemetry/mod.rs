@@ -23,7 +23,9 @@ pub(crate) mod writer;
 
 pub use crate::traced::TracedFuture;
 pub use buffer::{Encodable, ThreadLocalEncoder};
-pub use events::{CpuSampleSource, TelemetryEvent, clock_monotonic_ns};
+#[allow(unused_imports)]
+pub(crate) use events::TelemetryEvent;
+pub use events::{CpuSampleSource, clock_monotonic_ns};
 pub use format::{
     AllocEvent, FreeEvent, PollEndEvent, PollStartEvent, ProcessResourceUsageEvent, TaskSpawnEvent,
     WakeEventEvent, WorkerId, WorkerParkEvent, WorkerUnparkEvent,

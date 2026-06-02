@@ -1,45 +1,14 @@
 #![allow(dead_code)]
-use dial9_tokio_telemetry::analysis_unstable::decode_events;
-use dial9_tokio_telemetry::telemetry::{Batch, TelemetryEvent, TraceWriter};
+use dial9_tokio_telemetry::telemetry::{Batch, TraceWriter};
 use dial9_trace_format::decoder::Decoder;
 use serde::de::DeserializeOwned;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-/// A [`TraceWriter`] that accumulates all events into a shared `Vec`.
-pub struct CapturingWriter {
-    events: Arc<Mutex<Vec<TelemetryEvent>>>,
-}
-
-impl CapturingWriter {
-    pub fn new() -> (Self, Arc<Mutex<Vec<TelemetryEvent>>>) {
-        let events = Arc::new(Mutex::new(Vec::new()));
-        (
-            Self {
-                events: events.clone(),
-            },
-            events,
-        )
-    }
-}
-
-impl TraceWriter for CapturingWriter {
-    fn write_encoded_batch(&mut self, batch: &Batch) -> std::io::Result<()> {
-        let events = decode_events(batch.encoded_bytes()).expect("invalid batch");
-        self.events.lock().unwrap().extend_from_slice(&events);
-        Ok(())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
 /// A [`TraceWriter`] that accumulates the raw encoded bytes of every batch it
 /// receives.
 ///
-/// Unlike the old `CapturingWriter`, this writer does NOT pre-decode into
-/// `TelemetryEvent` — the test layer is responsible for decoding via the serde
-/// path under test.
+/// Tests decode via the serde path using [`decode_all`] or [`decode_file`].
 pub struct BytesCapturingWriter {
     batches: Arc<Mutex<Vec<Vec<u8>>>>,
 }

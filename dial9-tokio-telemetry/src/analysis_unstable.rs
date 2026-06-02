@@ -36,6 +36,8 @@
 //! # }
 //! ```
 
+#![allow(unused_imports, dead_code, unreachable_pub)]
+
 pub use crate::telemetry::analysis::{
     ActivePeriod, LongPoll, SampledPoll, SchedDelay, SpawnLocationStats, TraceAnalysis,
     TraceReader, WakeDelay, WorkerStats, analyze_trace, compute_active_periods,

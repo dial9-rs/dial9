@@ -58,7 +58,8 @@ impl ThreadName {
 /// It does NOT reflect the wire format.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "event")]
-pub enum TelemetryEvent {
+#[allow(dead_code)]
+pub(crate) enum TelemetryEvent {
     /// A task poll began on a worker thread.
     PollStart {
         /// Wall-clock timestamp in nanoseconds (monotonic).
@@ -286,6 +287,7 @@ pub enum TelemetryEvent {
     },
 }
 
+#[allow(dead_code, unreachable_pub)]
 impl TelemetryEvent {
     /// Returns the timestamp in nanoseconds, if this event type carries one.
     pub fn timestamp_nanos(&self) -> Option<u64> {

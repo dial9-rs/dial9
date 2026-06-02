@@ -1,3 +1,6 @@
+// This module is used by tests but not by library consumers (pub(crate) gating).
+#![allow(dead_code, unused_imports, unreachable_pub)]
+
 use crate::telemetry::analysis_events::Dial9Event;
 use crate::telemetry::events::{CpuSampleSource, TelemetryEvent};
 use crate::telemetry::format::WorkerId;

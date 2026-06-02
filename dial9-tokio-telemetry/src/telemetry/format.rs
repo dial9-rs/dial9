@@ -337,6 +337,7 @@ pub(crate) struct ClockSyncEvent {
 /// Uses the serde deserializer internally. Resolves `InternedString` fields
 /// (e.g. `CpuSample.thread_name`) via the decoder's string pool.
 #[cfg(any(feature = "analysis", test))]
+#[allow(dead_code, unreachable_pub)]
 pub fn decode_events(data: &[u8]) -> io::Result<Vec<TelemetryEvent>> {
     use crate::telemetry::events::CpuSampleSource;
     use dial9_trace_format::decoder::Decoder;
@@ -345,6 +346,7 @@ pub fn decode_events(data: &[u8]) -> io::Result<Vec<TelemetryEvent>> {
 
     #[derive(Deserialize)]
     #[serde(tag = "event")]
+    #[allow(dead_code)]
     enum RawEv {
         PollStartEvent {
             timestamp_ns: u64,
@@ -447,7 +449,7 @@ pub fn decode_events(data: &[u8]) -> io::Result<Vec<TelemetryEvent>> {
                 worker_id,
                 local_queue,
                 task_id,
-                spawn_loc,
+                spawn_loc: _,
             } => {
                 TelemetryEvent::PollStart {
                     timestamp_nanos: timestamp_ns,
