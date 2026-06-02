@@ -1114,14 +1114,20 @@ mod tests {
                 }],
             )
             .unwrap();
-        enc.write_event(&dynamic, &[FieldValue::Varint(2_000), FieldValue::Varint(1)])
-            .unwrap();
+        enc.write_event(
+            &dynamic,
+            &[FieldValue::Varint(2_000), FieldValue::Varint(1)],
+        )
+        .unwrap();
         let bytes = enc.finish();
 
         let mut dec = Decoder::new(&bytes).unwrap();
         let _ = dec.decode_all();
         // Annotated event registered at its declared id.
-        assert_eq!(dec.registry().get(WireTypeId(5)).unwrap().name(), "WithStatic");
+        assert_eq!(
+            dec.registry().get(WireTypeId(5)).unwrap().name(),
+            "WithStatic"
+        );
         // Dynamic schema sits at STATIC_WIRE_ID_LIMIT, not colliding with statics.
         assert_eq!(
             dec.registry()

@@ -56,12 +56,12 @@ pub trait TraceEvent {
 
     /// Fixed wire ID in `0..STATIC_WIRE_ID_LIMIT`, set via
     /// `#[traceevent(wire_id = N)]`. When `Some`, the encoder registers the
-    /// schema at that exact ID and uses it directly on the hot path. 
+    /// schema at that exact ID and uses it directly on the hot path.
     /// `None` (default) means a dynamic ID is assigned.
     const STATIC_WIRE_ID: Option<u16> = None;
 
     /// Per-type dense slot letting encoders cache the wire ID.
-    /// The default returns 0 ("no slot", always the slow path), the derive overrides it 
+    /// The default returns 0 ("no slot", always the slow path), the derive overrides it
     /// to lazily allocate a unique slot from [`__NEXT_TYPE_SLOT`] on first call.
     fn type_slot() -> u16 {
         0
