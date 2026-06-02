@@ -1,13 +1,34 @@
 mod common;
 
-use dial9_tokio_telemetry::telemetry::{DiskWriter, TelemetryEvent, TracedRuntime};
+use common::{BytesCapturingWriter, decode_all};
+use dial9_tokio_telemetry::telemetry::TracedRuntime;
+use serde::Deserialize;
 use std::time::Duration;
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "event")]
+enum RuntimeEvent {
+    PollStartEvent {
+        timestamp_ns: u64,
+    },
+    PollEndEvent {
+        timestamp_ns: u64,
+    },
+    WorkerParkEvent {
+        timestamp_ns: u64,
+    },
+    WorkerUnparkEvent {
+        timestamp_ns: u64,
+    },
+    #[serde(other)]
+    Other,
+}
 
 /// After `disable()` is called and in-flight events are drained, no new
 /// events should be produced by subsequent work.
 #[test]
 fn disable_stops_all_event_production() {
-    let (writer, events) = common::CapturingWriter::new();
+    let (writer, batches) = BytesCapturingWriter::new();
 
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.worker_threads(2).enable_all();
@@ -39,7 +60,10 @@ fn disable_stops_all_event_production() {
     // before disable.
     std::thread::sleep(Duration::from_millis(200));
 
-    let count_after_disable = events.lock().unwrap().len();
+    let count_after_disable = {
+        let b = batches.lock().unwrap();
+        decode_all::<RuntimeEvent>(&b).len()
+    };
 
     // Phase 2: produce more work while disabled
     runtime.block_on(async {
@@ -59,7 +83,10 @@ fn disable_stops_all_event_production() {
     // Give the flush thread plenty of time to pick up any leaked events.
     std::thread::sleep(Duration::from_millis(500));
 
-    let count_after_phase2 = events.lock().unwrap().len();
+    let count_after_phase2 = {
+        let b = batches.lock().unwrap();
+        decode_all::<RuntimeEvent>(&b).len()
+    };
 
     assert_eq!(
         count_after_disable,
@@ -82,7 +109,17 @@ fn disable_stops_all_event_production() {
 fn disable_stops_cpu_sample_production() {
     use dial9_tokio_telemetry::telemetry::cpu_profile::CpuProfilingConfig;
 
-    let (writer, events) = common::CapturingWriter::new();
+    #[derive(Debug, Deserialize)]
+    #[serde(tag = "event")]
+    enum CpuEvent {
+        CpuSampleEvent {
+            timestamp_ns: u64,
+        },
+        #[serde(other)]
+        Other,
+    }
+
+    let (writer, batches) = BytesCapturingWriter::new();
 
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.worker_threads(2).enable_all();
@@ -113,12 +150,13 @@ fn disable_stops_cpu_sample_production() {
         tokio::time::sleep(Duration::from_millis(1500)).await;
     });
 
-    let cpu_samples_phase1 = events
-        .lock()
-        .unwrap()
-        .iter()
-        .filter(|e| matches!(e, TelemetryEvent::CpuSample { .. }))
-        .count();
+    let cpu_samples_phase1 = {
+        let b = batches.lock().unwrap();
+        decode_all::<CpuEvent>(&b)
+            .iter()
+            .filter(|e| matches!(e, CpuEvent::CpuSampleEvent { .. }))
+            .count()
+    };
     assert!(
         cpu_samples_phase1 > 0,
         "phase 1 should produce CPU samples (got 0). Is perf_event_paranoid <= 2?"
@@ -130,7 +168,10 @@ fn disable_stops_cpu_sample_production() {
     // Wait for in-flight CPU samples to drain.
     std::thread::sleep(Duration::from_millis(1500));
 
-    let total_after_disable = events.lock().unwrap().len();
+    let total_after_disable = {
+        let b = batches.lock().unwrap();
+        decode_all::<CpuEvent>(&b).len()
+    };
 
     // Phase 2: burn CPU while disabled — should NOT produce any events
     runtime.block_on(async {
@@ -149,7 +190,10 @@ fn disable_stops_cpu_sample_production() {
         tokio::time::sleep(Duration::from_millis(500)).await;
     });
 
-    let total_after_phase2 = events.lock().unwrap().len();
+    let total_after_phase2 = {
+        let b = batches.lock().unwrap();
+        decode_all::<CpuEvent>(&b).len()
+    };
 
     assert_eq!(
         total_after_disable,
@@ -164,12 +208,10 @@ fn disable_stops_cpu_sample_production() {
 }
 
 /// After `disable()`, the DiskWriter must not produce new segments.
-///
-/// Uses a 1-second rotation period and waits 5 seconds after disable.
-/// If the flush loop were still driving rotation, we'd see new `.bin`
-/// files appear.
 #[test]
 fn disable_stops_segment_rotation() {
+    use dial9_tokio_telemetry::telemetry::DiskWriter;
+
     let dir = tempfile::tempdir().unwrap();
     let trace_path = dir.path().join("trace.bin");
 
@@ -248,7 +290,7 @@ fn disable_stops_segment_rotation() {
 /// After `disable()`, re-enabling with `enable()` should resume event production.
 #[test]
 fn enable_after_disable_resumes_events() {
-    let (writer, events) = common::CapturingWriter::new();
+    let (writer, batches) = BytesCapturingWriter::new();
 
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.worker_threads(2).enable_all();
@@ -281,18 +323,11 @@ fn enable_after_disable_resumes_events() {
     drop(runtime);
     drop(guard);
 
-    let final_events = events.lock().unwrap();
-    let runtime_event_count = final_events
+    let b = batches.lock().unwrap();
+    let events: Vec<RuntimeEvent> = decode_all(&b);
+    let runtime_event_count = events
         .iter()
-        .filter(|e| {
-            matches!(
-                e,
-                TelemetryEvent::PollStart { .. }
-                    | TelemetryEvent::PollEnd { .. }
-                    | TelemetryEvent::WorkerPark { .. }
-                    | TelemetryEvent::WorkerUnpark { .. }
-            )
-        })
+        .filter(|e| !matches!(e, RuntimeEvent::Other))
         .count();
     assert!(
         runtime_event_count > 0,

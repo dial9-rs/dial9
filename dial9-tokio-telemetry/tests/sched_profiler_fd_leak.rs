@@ -41,7 +41,7 @@ fn count_perf_fds() -> usize {
 #[test]
 fn sched_profiler_fds_bounded_with_many_blocking_threads() {
     let _lock = PERF_FD_TEST_LOCK.lock().unwrap();
-    let (writer, _events) = common::CapturingWriter::new();
+    let (writer, _events) = common::BytesCapturingWriter::new();
 
     let num_workers = 2;
     let num_blocking_tasks = 50;
@@ -103,7 +103,7 @@ fn sched_profiler_fds_cleaned_up_on_shutdown() {
     assert_eq!(count_perf_fds(), 0, "no perf fds should exist before test");
 
     {
-        let (writer, _events) = common::CapturingWriter::new();
+        let (writer, _events) = common::BytesCapturingWriter::new();
 
         let num_workers = 4;
         let mut builder = tokio::runtime::Builder::new_multi_thread();

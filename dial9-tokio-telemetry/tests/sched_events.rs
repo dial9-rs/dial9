@@ -4,19 +4,34 @@
 
 mod common;
 
+use common::{BytesCapturingWriter, decode_all};
+use serde::Deserialize;
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "event")]
+enum SchedSample {
+    CpuSampleEvent {
+        worker_id: u64,
+        source: u8,
+    },
+    #[serde(other)]
+    Other,
+}
+
+const SOURCE_CPU_PROFILE: u8 = 0;
+const SOURCE_SCHED_EVENT: u8 = 1;
+
 #[test]
 fn sched_events_capture_context_switches() {
-    use dial9_tokio_telemetry::telemetry::CpuSampleSource;
-    use dial9_tokio_telemetry::telemetry::TelemetryEvent;
     use dial9_tokio_telemetry::telemetry::TracedRuntime;
     use dial9_tokio_telemetry::telemetry::cpu_profile::SchedEventConfig;
     use std::time::Duration;
 
-    let (writer, events) = common::CapturingWriter::new();
+    let (writer, batches) = BytesCapturingWriter::new();
 
-    let num_workers = 2;
+    let num_workers = 2u64;
     let mut builder = tokio::runtime::Builder::new_multi_thread();
-    builder.worker_threads(num_workers).enable_all();
+    builder.worker_threads(num_workers as usize).enable_all();
 
     let (runtime, guard) = TracedRuntime::builder()
         .with_sched_events(SchedEventConfig::default())
@@ -39,18 +54,18 @@ fn sched_events_capture_context_switches() {
     drop(runtime);
     drop(guard);
 
-    let events = events.lock().unwrap();
+    let b = batches.lock().unwrap();
+    let events: Vec<SchedSample> = decode_all(&b);
 
-    // CpuSample events exist with SchedEvent source and some are attributed to workers
-    let worker_samples: Vec<_> = events
+    let worker_sched_samples: Vec<_> = events
         .iter()
         .filter(|e| {
-            matches!(e, TelemetryEvent::CpuSample { worker_id, source, .. }
-            if worker_id.as_u64() < num_workers as u64 && *source == CpuSampleSource::SchedEvent)
+            matches!(e, SchedSample::CpuSampleEvent { worker_id, source }
+            if *worker_id < num_workers && *source == SOURCE_SCHED_EVENT)
         })
         .collect();
     assert!(
-        !worker_samples.is_empty(),
+        !worker_sched_samples.is_empty(),
         "expected CpuSample events with source=SchedEvent attributed to workers"
     );
 
@@ -58,8 +73,8 @@ fn sched_events_capture_context_switches() {
     let cpu_profile_samples = events
         .iter()
         .filter(|e| {
-            matches!(e, TelemetryEvent::CpuSample { source, .. }
-            if *source == CpuSampleSource::CpuProfile)
+            matches!(e, SchedSample::CpuSampleEvent { source, .. }
+            if *source == SOURCE_CPU_PROFILE)
         })
         .count();
     assert_eq!(cpu_profile_samples, 0, "should have no CpuProfile samples");
@@ -67,14 +82,12 @@ fn sched_events_capture_context_switches() {
 
 #[test]
 fn sched_events_sampling_reduces_count() {
-    use dial9_tokio_telemetry::telemetry::CpuSampleSource;
-    use dial9_tokio_telemetry::telemetry::TelemetryEvent;
     use dial9_tokio_telemetry::telemetry::TracedRuntime;
     use dial9_tokio_telemetry::telemetry::cpu_profile::SchedEventConfig;
     use std::time::Duration;
 
     let count_sched_samples = |interval: Option<u64>| -> usize {
-        let (writer, events) = common::CapturingWriter::new();
+        let (writer, batches) = BytesCapturingWriter::new();
 
         let num_workers = 2;
         let mut builder = tokio::runtime::Builder::new_multi_thread();
@@ -109,13 +122,13 @@ fn sched_events_sampling_reduces_count() {
         drop(runtime);
         drop(guard);
 
+        let b = batches.lock().unwrap();
+        let events: Vec<SchedSample> = decode_all(&b);
         events
-            .lock()
-            .unwrap()
             .iter()
             .filter(|e| {
-                matches!(e, TelemetryEvent::CpuSample { source, .. }
-                if *source == CpuSampleSource::SchedEvent)
+                matches!(e, SchedSample::CpuSampleEvent { source, .. }
+                if *source == SOURCE_SCHED_EVENT)
             })
             .count()
     };

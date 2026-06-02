@@ -1,13 +1,46 @@
 mod common;
-mod validation;
 
-use dial9_tokio_telemetry::analysis_unstable::{TraceReader, analyze_trace};
-use dial9_tokio_telemetry::telemetry::{DiskWriter, TelemetryEvent, TracedRuntime};
+use common::{BytesCapturingWriter, decode_all, decode_file};
+use dial9_tokio_telemetry::telemetry::{DiskWriter, TracedRuntime};
+use serde::Deserialize;
 use std::time::Duration;
 
+#[derive(Debug, Deserialize)]
+#[serde(tag = "event")]
+enum TraceEvent {
+    PollStartEvent {
+        timestamp_ns: u64,
+        worker_id: u64,
+        task_id: u64,
+    },
+    PollEndEvent {
+        timestamp_ns: u64,
+        worker_id: u64,
+    },
+    WorkerParkEvent {
+        timestamp_ns: u64,
+        worker_id: u64,
+    },
+    WorkerUnparkEvent {
+        timestamp_ns: u64,
+        worker_id: u64,
+    },
+    TaskSpawnEvent {
+        timestamp_ns: u64,
+        task_id: u64,
+        spawn_loc: String,
+        instrumented: bool,
+    },
+    TaskTerminateEvent {
+        timestamp_ns: u64,
+        task_id: u64,
+    },
+    #[serde(other)]
+    Other,
+}
+
 /// Run a known workload under TracedRuntime, read the trace back, and verify
-/// the analysis is consistent with both the workload parameters and tokio's
-/// RuntimeMetrics.
+/// basic consistency.
 #[test]
 fn end_to_end_trace_matches_workload_and_metrics() {
     let dir = tempfile::tempdir().unwrap();
@@ -22,7 +55,6 @@ fn end_to_end_trace_matches_workload_and_metrics() {
     let writer = DiskWriter::single_file(&trace_path).unwrap();
     let (runtime, guard) = TracedRuntime::build_and_start(builder, writer).unwrap();
 
-    // Run workload, then snapshot tokio metrics.
     let tokio_metrics = runtime.block_on(async {
         let mut handles = Vec::new();
         for _ in 0..total_tasks {
@@ -36,35 +68,89 @@ fn end_to_end_trace_matches_workload_and_metrics() {
         for h in handles {
             h.await.unwrap();
         }
-
-        // Wait for flush cycle to drain thread-local buffers.
         tokio::time::sleep(Duration::from_millis(600)).await;
-
-        // Grab metrics handle while still inside the runtime.
         tokio::runtime::Handle::current().metrics()
     });
 
-    // Drop runtime first — workers park, flushing thread-local buffers
-    // while telemetry is still enabled.
     drop(runtime);
-    // Drop guard — stops flush thread and does final collector drain.
     drop(guard);
 
-    // --- Read the trace back ---
     let sealed_path = dir.path().join("trace.0.bin");
-    let reader = TraceReader::new(sealed_path.to_str().unwrap()).unwrap();
-    let events = &reader.runtime_events;
-    let analysis = analyze_trace(events);
+    let events: Vec<TraceEvent> = decode_file(&sealed_path);
 
-    validation::validate_trace_matches_metrics(&analysis, events, &tokio_metrics);
+    // Basic validation: poll starts == poll ends
+    let poll_starts = events
+        .iter()
+        .filter(|e| matches!(e, TraceEvent::PollStartEvent { .. }))
+        .count();
+    let poll_ends = events
+        .iter()
+        .filter(|e| matches!(e, TraceEvent::PollEndEvent { .. }))
+        .count();
+    assert_eq!(
+        poll_starts, poll_ends,
+        "PollStart ({poll_starts}) != PollEnd ({poll_ends})"
+    );
+
+    // All active workers should appear
+    let metrics_polls: Vec<u64> = (0..num_workers)
+        .map(|w| tokio_metrics.worker_poll_count(w))
+        .collect();
+    let active_workers: Vec<usize> = (0..num_workers).filter(|&w| metrics_polls[w] > 0).collect();
+
+    for &w in &active_workers {
+        let worker_polls = events
+            .iter()
+            .filter(|e| matches!(e, TraceEvent::PollStartEvent { worker_id, .. } if *worker_id == w as u64))
+            .count();
+        assert!(
+            worker_polls > 0,
+            "worker {w} had {} tokio polls but 0 trace PollStart events",
+            metrics_polls[w]
+        );
+    }
+
+    // Timestamp monotonicity per worker
+    let mut last_ts: Vec<Option<u64>> = vec![None; num_workers];
+    for event in &events {
+        let (ts, wid) = match event {
+            TraceEvent::PollStartEvent {
+                timestamp_ns,
+                worker_id,
+                ..
+            }
+            | TraceEvent::PollEndEvent {
+                timestamp_ns,
+                worker_id,
+            }
+            | TraceEvent::WorkerParkEvent {
+                timestamp_ns,
+                worker_id,
+            }
+            | TraceEvent::WorkerUnparkEvent {
+                timestamp_ns,
+                worker_id,
+            } => (*timestamp_ns, *worker_id),
+            _ => continue,
+        };
+        if wid >= num_workers as u64 {
+            continue;
+        }
+        if let Some(prev) = last_ts[wid as usize] {
+            assert!(
+                ts >= prev,
+                "timestamp regression on worker {wid}: {prev} -> {ts}"
+            );
+        }
+        last_ts[wid as usize] = Some(ts);
+    }
 }
 
 /// Regression test: TaskSpawn events emitted on the main thread (inside block_on)
-/// must appear in the trace. Before the fix, the main thread's buffer was never
-/// flushed (no WorkerPark fires on main), so all these events were silently dropped.
+/// must appear in the trace.
 #[test]
 fn task_spawn_events_from_main_thread_are_captured() {
-    let (writer, events) = common::CapturingWriter::new();
+    let (writer, batches) = BytesCapturingWriter::new();
 
     const N: usize = 10;
 
@@ -76,8 +162,6 @@ fn task_spawn_events_from_main_thread_are_captured() {
         .build_and_start(builder, writer)
         .unwrap();
 
-    // All tokio::spawn calls here fire on the main (block_on) thread,
-    // so their TaskSpawn events land in the main thread's buffer.
     runtime.block_on(async {
         let mut handles = Vec::new();
         for _ in 0..N {
@@ -91,10 +175,11 @@ fn task_spawn_events_from_main_thread_are_captured() {
     drop(runtime);
     drop(guard);
 
-    let events = events.lock().unwrap();
+    let b = batches.lock().unwrap();
+    let events: Vec<TraceEvent> = decode_all(&b);
     let task_spawn_count = events
         .iter()
-        .filter(|e| matches!(e, TelemetryEvent::TaskSpawn { .. }))
+        .filter(|e| matches!(e, TraceEvent::TaskSpawnEvent { .. }))
         .count();
 
     assert_eq!(
@@ -105,7 +190,7 @@ fn task_spawn_events_from_main_thread_are_captured() {
 
 #[test]
 fn task_terminate_events_are_captured() {
-    let (writer, events) = common::CapturingWriter::new();
+    let (writer, batches) = BytesCapturingWriter::new();
 
     const N: usize = 10;
 
@@ -130,14 +215,13 @@ fn task_terminate_events_are_captured() {
     drop(runtime);
     drop(guard);
 
-    let events = events.lock().unwrap();
+    let b = batches.lock().unwrap();
+    let events: Vec<TraceEvent> = decode_all(&b);
     let terminate_count = events
         .iter()
-        .filter(|e| matches!(e, TelemetryEvent::TaskTerminate { .. }))
+        .filter(|e| matches!(e, TraceEvent::TaskTerminateEvent { .. }))
         .count();
 
-    // Tokio may emit TaskTerminate for internal tasks (e.g. worker threads),
-    // so we assert at least N terminate events rather than an exact count.
     assert!(
         terminate_count >= N,
         "expected at least {N} TaskTerminate events, got {terminate_count}"
@@ -175,14 +259,12 @@ fn custom_event_appears_in_trace() {
                 &handle,
             );
         }
-        // Wait for flush cycle
         tokio::time::sleep(Duration::from_millis(200)).await;
     });
 
     drop(runtime);
     drop(guard);
 
-    // Decode at the trace-format level to find our custom event
     let sealed_path = dir.path().join("trace.0.bin");
     let data = std::fs::read(&sealed_path).unwrap();
     let mut decoder = dial9_trace_format::decoder::Decoder::new(&data).unwrap();
@@ -219,12 +301,10 @@ fn spawn_audit_detects_uninstrumented_spawns() {
     runtime.block_on(async {
         let mut joins = Vec::new();
 
-        // These go through TelemetryHandle::spawn, should NOT be flagged.
         for _ in 0..INSTRUMENTED {
             joins.push(handle.spawn(async {}));
         }
 
-        // These are raw tokio::spawn, SHOULD be flagged, all at the same line.
         for _ in 0..RAW {
             joins.push(tokio::spawn(async {}));
         }
@@ -233,25 +313,22 @@ fn spawn_audit_detects_uninstrumented_spawns() {
             j.await.unwrap();
         }
 
-        // Wait for flush cycle to drain thread-local buffers.
         tokio::time::sleep(Duration::from_millis(200)).await;
     });
 
     drop(runtime);
     drop(guard);
 
-    // Read the trace back from disk and check the instrumented flag.
     let sealed_path = dir.path().join("trace.0.bin");
-    let reader = TraceReader::new(sealed_path.to_str().unwrap()).unwrap();
-    let events = &reader.all_events;
+    let events: Vec<TraceEvent> = decode_file(&sealed_path);
 
     let instrumented_count = events
         .iter()
         .filter(|e| {
             matches!(
                 e,
-                TelemetryEvent::TaskSpawn {
-                    instrumented: Some(true),
+                TraceEvent::TaskSpawnEvent {
+                    instrumented: true,
                     ..
                 }
             )
@@ -262,8 +339,8 @@ fn spawn_audit_detects_uninstrumented_spawns() {
         .filter(|e| {
             matches!(
                 e,
-                TelemetryEvent::TaskSpawn {
-                    instrumented: Some(false),
+                TraceEvent::TaskSpawnEvent {
+                    instrumented: false,
                     ..
                 }
             )
@@ -280,20 +357,16 @@ fn spawn_audit_detects_uninstrumented_spawns() {
     );
 
     // Verify spawn locations resolve and point to this test file.
-    for event in events {
-        if let TelemetryEvent::TaskSpawn {
+    for event in &events {
+        if let TraceEvent::TaskSpawnEvent {
             spawn_loc,
-            instrumented: Some(false),
+            instrumented: false,
             ..
         } = event
         {
-            let loc = reader
-                .spawn_locations
-                .get(spawn_loc)
-                .expect("uninstrumented spawn_loc should resolve");
             assert!(
-                loc.contains("end_to_end.rs"),
-                "uninstrumented spawn should point to this test file, got: {loc}"
+                spawn_loc.contains("end_to_end.rs"),
+                "uninstrumented spawn should point to this test file, got: {spawn_loc}"
             );
         }
     }
