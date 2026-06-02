@@ -797,7 +797,7 @@ mod tests {
         let _ = guard.graceful_shutdown(std::time::Duration::from_secs(5));
 
         // Read all sealed trace files and collect SegmentMetadata entries.
-        let mut all_metadata: Vec<Vec<(String, String)>> = Vec::new();
+        let mut all_metadata: Vec<std::collections::HashMap<String, String>> = Vec::new();
         let mut files: Vec<_> = std::fs::read_dir(dir.path())
             .unwrap()
             .filter_map(|e| e.ok())

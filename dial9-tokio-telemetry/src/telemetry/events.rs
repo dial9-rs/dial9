@@ -212,7 +212,7 @@ pub enum TelemetryEvent {
         /// Wall-clock timestamp in nanoseconds (monotonic).
         timestamp_nanos: u64,
         /// Key-value metadata pairs.
-        entries: Vec<(String, String)>,
+        entries: std::collections::HashMap<String, String>,
     },
     /// Clock-correlation anchor pairing a monotonic timestamp with the
     /// wall-clock value captured at the same instant.
