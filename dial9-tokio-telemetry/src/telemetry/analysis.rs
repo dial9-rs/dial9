@@ -4,7 +4,6 @@
 use crate::telemetry::analysis_events::{CpuSampleSource, Dial9Event, PollStartEvent, WorkerId};
 use crate::telemetry::format::WorkerId as FmtWorkerId;
 use dial9_trace_format::FieldValue;
-use dial9_trace_format::InternedString;
 use dial9_trace_format::decoder::Decoder;
 use std::cmp::Reverse;
 use std::collections::HashMap;
@@ -21,10 +20,8 @@ pub struct TraceReader {
     pub all_events: Vec<Dial9Event>,
     /// Runtime events only (excludes TaskSpawn, SegmentMetadata, ClockSync).
     pub runtime_events: Vec<Dial9Event>,
-    /// Spawn location strings keyed by `InternedString` from the string pool.
-    pub spawn_locations: HashMap<InternedString, String>,
-    /// Task ID → spawn location mapping built from TaskSpawn events.
-    pub task_spawn_locs: HashMap<u64, InternedString>,
+    /// Task ID → spawn location string mapping built from TaskSpawn and PollStart events.
+    pub task_spawn_locs: HashMap<u64, String>,
     /// OS tid → thread name mapping built from CpuSampleEvent thread_name.
     pub thread_names: HashMap<u32, String>,
     /// Key-value metadata from the most recent SegmentMetadata event.
@@ -39,37 +36,29 @@ impl TraceReader {
             std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid trace header")
         })?;
 
-        let mut spawn_locations = HashMap::new();
-        let mut task_spawn_locs = HashMap::new();
+        let mut task_spawn_locs: HashMap<u64, String> = HashMap::new();
         let mut thread_names = HashMap::new();
         let mut segment_metadata = HashMap::new();
         let mut events = Vec::new();
 
         dec.for_each_event(|ev| {
-            // Resolve spawn locations from the string pool while it's valid
-            match ev.name {
-                "PollStartEvent" | "TaskSpawnEvent" => {
-                    for (name, val) in ev.field_names().zip(ev.fields.iter()) {
-                        if name == "spawn_loc"
-                            && let dial9_trace_format::types::FieldValueRef::PooledString(id) = val
-                            && let Some(s) = ev.string_pool.get(*id)
-                        {
-                            spawn_locations.insert(*id, s.to_string());
-                        }
-                    }
-                }
-                _ => {}
-            }
-
             // Deserialize into Dial9Event via serde
             let raw: Dial9Event = match ev.deserialize() {
                 Ok(e) => e,
-                Err(_) => return,
+                Err(e) => {
+                    tracing::debug!(event_name = ev.name, error = %e, "skipping unrecognized event");
+                    return;
+                }
             };
 
             match &raw {
                 Dial9Event::TaskSpawnEvent(e) => {
-                    task_spawn_locs.insert(e.task_id, InternedString::from_raw(0));
+                    task_spawn_locs.insert(e.task_id, e.spawn_loc.clone());
+                }
+                Dial9Event::PollStartEvent(e) => {
+                    task_spawn_locs
+                        .entry(e.task_id)
+                        .or_insert_with(|| e.spawn_loc.clone());
                 }
                 Dial9Event::CpuSampleEvent(e) => {
                     if let Some(ref name) = e.thread_name {
@@ -106,7 +95,6 @@ impl TraceReader {
         Ok(Self {
             all_events: events,
             runtime_events,
-            spawn_locations,
             task_spawn_locs,
             thread_names,
             segment_metadata,
@@ -179,7 +167,7 @@ pub struct TraceAnalysis {
     /// Average global queue depth across all samples.
     pub avg_global_queue: f64,
     /// Per-spawn-location statistics (only populated when task tracking is enabled).
-    pub spawn_location_stats: HashMap<InternedString, SpawnLocationStats>,
+    pub spawn_location_stats: HashMap<String, SpawnLocationStats>,
 }
 
 /// Helper: get timestamp from a Dial9Event.
@@ -231,8 +219,8 @@ fn lookup_global_queue_depth(timeline: &[(u64, usize)], timestamp: u64) -> usize
 pub fn analyze_trace(events: &[Dial9Event]) -> TraceAnalysis {
     let mut worker_stats: HashMap<FmtWorkerId, WorkerStats> = HashMap::new();
     let mut poll_starts: HashMap<FmtWorkerId, u64> = HashMap::new();
-    let mut poll_start_locs: HashMap<FmtWorkerId, InternedString> = HashMap::new();
-    let mut spawn_location_stats: HashMap<InternedString, SpawnLocationStats> = HashMap::new();
+    let mut poll_start_locs: HashMap<FmtWorkerId, String> = HashMap::new();
+    let mut spawn_location_stats: HashMap<String, SpawnLocationStats> = HashMap::new();
     let mut max_global_queue = 0;
     let mut global_queue_sum = 0u64;
     let mut global_queue_count = 0u64;
@@ -386,7 +374,7 @@ pub fn compute_active_periods(events: &[Dial9Event]) -> Vec<ActivePeriod> {
 }
 
 /// Print a human-readable summary of a [`TraceAnalysis`] to stdout.
-pub fn print_analysis(analysis: &TraceAnalysis, spawn_locations: &HashMap<InternedString, String>) {
+pub fn print_analysis(analysis: &TraceAnalysis) {
     println!("\n=== Trace Analysis ===");
     println!("Total events: {}", analysis.total_events);
     println!(
@@ -425,10 +413,7 @@ pub fn print_analysis(analysis: &TraceAnalysis, spawn_locations: &HashMap<Intern
         let mut locs: Vec<_> = analysis.spawn_location_stats.iter().collect();
         locs.sort_by_key(|b| Reverse(b.1.poll_count));
         for (id, stats) in locs {
-            let name = spawn_locations
-                .get(id)
-                .map(|s| s.as_str())
-                .unwrap_or("<unknown>");
+            let name = id.as_str();
             let avg_poll_us = if stats.poll_count > 0 {
                 stats.total_poll_time_ns as f64 / stats.poll_count as f64 / 1000.0
             } else {
@@ -485,20 +470,20 @@ pub struct LongPoll {
     /// Task that was being polled.
     pub task_id: u64,
     /// Spawn location of the task.
-    pub spawn_loc: InternedString,
+    pub spawn_loc: String,
 }
 
 /// Detect polls that exceed `threshold_ns` nanoseconds.
 pub fn detect_long_polls(events: &[Dial9Event], threshold_ns: u64) -> Vec<LongPoll> {
     let mut long_polls = Vec::new();
-    let mut poll_starts: HashMap<FmtWorkerId, (u64, u64, InternedString)> = HashMap::new();
+    let mut poll_starts: HashMap<FmtWorkerId, (u64, u64, String)> = HashMap::new();
 
     for event in events {
         match event {
             Dial9Event::PollStartEvent(e) => {
                 poll_starts.insert(
                     FmtWorkerId(e.worker_id),
-                    (e.timestamp_ns, e.task_id, InternedString::from_raw(0)),
+                    (e.timestamp_ns, e.task_id, e.spawn_loc.clone()),
                 );
             }
             Dial9Event::PollEndEvent(e) => {
@@ -632,7 +617,7 @@ pub struct SampledPoll {
     /// Task that was being polled.
     pub task_id: u64,
     /// Spawn location of the task.
-    pub spawn_loc: InternedString,
+    pub spawn_loc: String,
     /// Number of CPU profile samples collected during this poll.
     pub cpu_sample_count: usize,
     /// Number of scheduler event samples collected during this poll.
@@ -647,20 +632,20 @@ pub fn detect_sampled_polls(events: &[Dial9Event]) -> Vec<SampledPoll> {
         start_ns: u64,
         end_ns: u64,
         task_id: u64,
-        spawn_loc: InternedString,
+        spawn_loc: String,
         cpu_samples: usize,
         sched_samples: usize,
     }
 
     let mut polls: Vec<PollSpan> = Vec::new();
-    let mut poll_starts: HashMap<FmtWorkerId, (u64, u64, InternedString)> = HashMap::new();
+    let mut poll_starts: HashMap<FmtWorkerId, (u64, u64, String)> = HashMap::new();
 
     for event in events {
         match event {
             Dial9Event::PollStartEvent(e) => {
                 poll_starts.insert(
                     FmtWorkerId(e.worker_id),
-                    (e.timestamp_ns, e.task_id, InternedString::from_raw(0)),
+                    (e.timestamp_ns, e.task_id, e.spawn_loc.clone()),
                 );
             }
             Dial9Event::PollEndEvent(e) => {

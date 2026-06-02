@@ -617,19 +617,11 @@ mod tests {
             let path = file.to_str().unwrap();
             let reader = TraceReader::new(path).unwrap();
 
-            for (spawn_loc, loc) in &reader.spawn_locations {
+            for loc in reader.task_spawn_locs.values() {
                 assert!(
                     loc.contains(':'),
-                    "location should be file:line:col, got {loc:?} for {spawn_loc:?}"
+                    "location should be file:line:col, got {loc:?}"
                 );
-            }
-
-            for (task_id, spawn_loc) in &reader.task_spawn_locs {
-                reader.spawn_locations.get(spawn_loc).unwrap_or_else(|| {
-                    panic!(
-                        "file {path:?}: task {task_id:?} spawn_loc {spawn_loc:?} has no definition"
-                    )
-                });
             }
 
             let events = &reader.runtime_events;

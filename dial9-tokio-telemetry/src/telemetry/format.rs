@@ -346,7 +346,10 @@ pub(crate) fn decode_events(
     dec.for_each_event(|raw| {
         let ev: Dial9Event = match raw.deserialize() {
             Ok(e) => e,
-            Err(_) => return,
+            Err(e) => {
+                tracing::debug!(event_name = raw.name, error = %e, "skipping unrecognized event in decode");
+                return;
+            }
         };
         if !matches!(ev, Dial9Event::Other) {
             events.push(ev);

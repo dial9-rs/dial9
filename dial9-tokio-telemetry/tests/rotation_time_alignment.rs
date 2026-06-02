@@ -13,6 +13,7 @@ mod common;
 const MAX_OVERLAP_SECS: f64 = 2.0;
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code, clippy::enum_variant_names)]
 #[serde(tag = "event")]
 enum TimedEvent {
     PollStartEvent {

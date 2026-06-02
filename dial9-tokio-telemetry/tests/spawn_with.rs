@@ -15,6 +15,7 @@ use tokio::runtime::Runtime;
 use tokio::task::JoinSet;
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code, clippy::enum_variant_names)]
 #[serde(tag = "event")]
 enum SpawnEvent {
     TaskSpawnEvent {

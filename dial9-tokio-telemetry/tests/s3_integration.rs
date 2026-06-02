@@ -198,6 +198,7 @@ fn end_to_end_trace_to_s3_roundtrip() {
     let mut dec = Decoder::new(&trace_data).unwrap();
 
     #[derive(Debug, serde::Deserialize)]
+    #[allow(dead_code, clippy::enum_variant_names)]
     #[serde(tag = "event")]
     enum S3Event {
         SegmentMetadataEvent {

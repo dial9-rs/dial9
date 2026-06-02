@@ -12,6 +12,7 @@ use tokio::net::TcpListener;
 const NUM_CLIENTS: usize = 20;
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code, clippy::enum_variant_names)]
 #[serde(tag = "event")]
 enum Event {
     PollStartEvent {

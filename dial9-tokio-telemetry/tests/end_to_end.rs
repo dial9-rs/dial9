@@ -6,6 +6,7 @@ use serde::Deserialize;
 use std::time::Duration;
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code, clippy::enum_variant_names)]
 #[serde(tag = "event")]
 enum TraceEvent {
     PollStartEvent {

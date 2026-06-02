@@ -138,6 +138,7 @@ pub struct TaskSpawnEvent {
     /// Spawn location string.
     pub spawn_loc: String,
     /// Whether this spawn was instrumented.
+    #[serde(default)]
     pub instrumented: bool,
 }
 

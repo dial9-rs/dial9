@@ -6,6 +6,7 @@ use serde::Deserialize;
 use std::time::Duration;
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code, clippy::enum_variant_names)]
 #[serde(tag = "event")]
 enum RuntimeEvent {
     PollStartEvent {
@@ -110,6 +111,7 @@ fn disable_stops_cpu_sample_production() {
     use dial9_tokio_telemetry::telemetry::cpu_profile::CpuProfilingConfig;
 
     #[derive(Debug, Deserialize)]
+    #[allow(dead_code, clippy::enum_variant_names)]
     #[serde(tag = "event")]
     enum CpuEvent {
         CpuSampleEvent {

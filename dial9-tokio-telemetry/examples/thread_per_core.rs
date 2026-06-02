@@ -10,6 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code, clippy::enum_variant_names)]
 #[serde(tag = "event")]
 enum Event {
     PollStartEvent {

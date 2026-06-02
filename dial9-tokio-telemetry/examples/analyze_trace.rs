@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::env;
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code, clippy::enum_variant_names)]
 #[serde(tag = "event")]
 enum Event {
     PollStartEvent {
