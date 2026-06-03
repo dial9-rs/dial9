@@ -407,15 +407,10 @@ mod tests {
             .collect();
         assert_eq!(frees.len(), 1);
         match &frees[0] {
-            TelemetryEvent::Free {
-                addr,
-                size,
-                alloc_timestamp_nanos,
-                ..
-            } => {
-                assert_eq!(*addr, 0x9999);
-                assert_eq!(*size, 128);
-                assert_eq!(*alloc_timestamp_nanos, 100);
+            Dial9Event::FreeEvent(e) => {
+                assert_eq!(e.addr, 0x9999);
+                assert_eq!(e.size, 128);
+                assert_eq!(e.alloc_timestamp_ns, 100);
             }
             _ => unreachable!(),
         }
@@ -689,22 +684,16 @@ mod tests {
         let events = flush_and_collect(&shared);
         let frees: Vec<_> = events
             .iter()
-            .filter(|e| matches!(e, TelemetryEvent::Free { .. }))
+            .filter(|e| matches!(e, Dial9Event::FreeEvent(..)))
             .collect();
         assert_eq!(frees.len(), 1, "shutdown drain must emit one FreeEvent");
         match frees[0] {
-            TelemetryEvent::Free {
-                timestamp_nanos,
-                tid,
-                addr,
-                size,
-                alloc_timestamp_nanos,
-            } => {
-                assert_eq!(*timestamp_nanos, 200, "uses producer-push ts");
-                assert_eq!(*tid, 7, "uses producer-push tid");
-                assert_eq!(*addr, 0xAABB);
-                assert_eq!(*size, 4096, "from consolidator-side liveset peek");
-                assert_eq!(*alloc_timestamp_nanos, 100, "from liveset peek");
+            Dial9Event::FreeEvent(e) => {
+                assert_eq!(e.timestamp_ns, 200, "uses producer-push ts");
+                assert_eq!(e.tid, 7, "uses producer-push tid");
+                assert_eq!(e.addr, 0xAABB);
+                assert_eq!(e.size, 4096, "from consolidator-side liveset peek");
+                assert_eq!(e.alloc_timestamp_ns, 100, "from liveset peek");
             }
             _ => unreachable!(),
         }
@@ -746,7 +735,7 @@ mod tests {
         let events = flush_and_collect(&shared);
         let frees: Vec<_> = events
             .iter()
-            .filter(|e| matches!(e, TelemetryEvent::Free { .. }))
+            .filter(|e| matches!(e, Dial9Event::FreeEvent(..)))
             .collect();
         assert_eq!(
             frees.len(),
@@ -785,7 +774,7 @@ mod tests {
         let events = flush_and_collect(&shared);
         let frees: Vec<_> = events
             .iter()
-            .filter(|e| matches!(e, TelemetryEvent::Free { .. }))
+            .filter(|e| matches!(e, Dial9Event::FreeEvent(..)))
             .collect();
         assert_eq!(frees.len(), 0);
     }
