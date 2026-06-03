@@ -224,18 +224,17 @@ pub(crate) fn on_alloc(inner: &MemoryProfilerInner, ptr: *mut u8, size: usize) {
         // anyone moves the `liveset.insert` call site, `check_shutdown` must
         // be called first on every code path that touches the liveset, or
         // we'll panic in `sdd::Collector::current()` during teardown.
-        #[allow(clippy::collapsible_if)]
-        if let Some(liveset) = &inner.liveset {
-            if !crate::memory_profiling::opt_out::check_shutdown() {
-                let key = ptr as u64;
-                let val = (size as u64, timestamp_ns);
-                if let Err((k, v)) = liveset.insert(key, val) {
-                    use scc::hash_index::Entry;
-                    match liveset.entry(k) {
-                        Entry::Occupied(o) => o.update(v),
-                        Entry::Vacant(ve) => {
-                            let _ = ve.insert_entry(v);
-                        }
+        if let Some(liveset) = &inner.liveset
+            && !crate::memory_profiling::opt_out::check_shutdown()
+        {
+            let key = ptr as u64;
+            let val = (size as u64, timestamp_ns);
+            if let Err((k, v)) = liveset.insert(key, val) {
+                use scc::hash_index::Entry;
+                match liveset.entry(k) {
+                    Entry::Occupied(o) => o.update(v),
+                    Entry::Vacant(ve) => {
+                        let _ = ve.insert_entry(v);
                     }
                 }
             }
