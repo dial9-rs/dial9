@@ -4,8 +4,9 @@
 //! rather than reaching into sub-modules.
 
 #[cfg(feature = "analysis")]
-#[allow(dead_code, unreachable_pub)] // Used by tests and examples, not by library consumers.
-pub(crate) mod analysis;
+#[allow(dead_code)]
+/// Trace file reading and analysis utilities.
+pub mod analysis;
 /// Decode-side companion structs for built-in trace events.
 #[cfg(any(feature = "analysis", test))]
 pub mod analysis_events;
