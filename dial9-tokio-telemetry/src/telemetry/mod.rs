@@ -3,8 +3,7 @@
 //! All public types are re-exported here — use `dial9_tokio_telemetry::telemetry::*`
 //! rather than reaching into sub-modules.
 
-#[cfg(feature = "analysis")]
-#[allow(dead_code)]
+#[cfg(any(test, feature = "analysis"))]
 /// Trace file reading and analysis utilities.
 pub mod analysis;
 /// Decode-side companion structs for built-in trace events.
