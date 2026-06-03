@@ -3,7 +3,6 @@ source: dial9-trace-format-derive/src/lib.rs
 expression: "expand_to_string(quote!\n{ struct EmptyEvent { #[traceevent(timestamp)] timestamp_ns: u64, } })"
 ---
 impl ::dial9_trace_format::TraceEvent for EmptyEvent {
-    type Ref<'a> = ();
     fn event_name() -> &'static str {
         "EmptyEvent"
     }
@@ -18,12 +17,5 @@ impl ::dial9_trace_format::TraceEvent for EmptyEvent {
         enc: &mut ::dial9_trace_format::EventEncoder<'_, W>,
     ) -> ::std::io::Result<()> {
         Ok(())
-    }
-    fn decode<'a>(
-        _timestamp_ns: Option<u64>,
-        _fields: &[::dial9_trace_format::types::FieldValueRef<'a>],
-        _field_defs: &[::dial9_trace_format::schema::FieldDef],
-    ) -> Option<Self::Ref<'a>> {
-        None
     }
 }

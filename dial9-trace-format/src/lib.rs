@@ -38,7 +38,6 @@ pub use types::StackFrames;
 pub use types::TraceField;
 
 use schema::{FieldDef, SchemaEntry};
-use types::FieldValueRef;
 
 /// Slots `1..STATIC_WIRE_ID_LIMIT` double as wire IDs and take the inline fast
 /// path in the encoder. Only `#[traceevent(wire_slot)]` types claim a slot, so
@@ -53,9 +52,6 @@ pub static __NEXT_TYPE_SLOT: std::sync::atomic::AtomicU16 = std::sync::atomic::A
 
 /// Trait implemented by `#[derive(TraceEvent)]` for compile-time event types.
 pub trait TraceEvent {
-    /// Decoded form of this event, potentially borrowing from the input buffer.
-    type Ref<'a>;
-
     /// Per-type wire-ID slot. Default 0 means no slot (dynamic path);
     /// `#[traceevent(wire_slot)]` overrides it to claim a fast-path slot.
     fn type_slot() -> u16 {
@@ -79,13 +75,6 @@ pub trait TraceEvent {
         &self,
         enc: &mut types::EventEncoder<'_, W>,
     ) -> std::io::Result<()>;
-    /// Decode from field values using field definitions for name resolution.
-    /// `timestamp_ns` is the absolute timestamp from the event header (if present).
-    fn decode<'a>(
-        timestamp_ns: Option<u64>,
-        fields: &[FieldValueRef<'a>],
-        field_defs: &[FieldDef],
-    ) -> Option<Self::Ref<'a>>;
 
     /// Build a SchemaEntry for this event type.
     fn schema_entry() -> SchemaEntry {

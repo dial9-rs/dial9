@@ -1070,7 +1070,6 @@ mod tests {
         ts: u64,
     }
     impl TraceEvent for FastSlot {
-        type Ref<'a> = ();
         fn type_slot() -> u16 {
             5
         }
@@ -1085,13 +1084,6 @@ mod tests {
         }
         fn encode_fields<W: Write>(&self, _enc: &mut EventEncoder<'_, W>) -> io::Result<()> {
             Ok(())
-        }
-        fn decode<'a>(
-            _ts: Option<u64>,
-            _f: &[crate::types::FieldValueRef<'a>],
-            _d: &[FieldDef],
-        ) -> Option<Self::Ref<'a>> {
-            Some(())
         }
     }
 

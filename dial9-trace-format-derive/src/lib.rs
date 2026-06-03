@@ -106,7 +106,6 @@ fn derive_trace_event_impl(input: DeriveInput) -> proc_macro2::TokenStream {
 
     quote! {
         impl ::dial9_trace_format::TraceEvent for #name {
-            type Ref<'a> = ();
             fn event_name() -> &'static str { #name_str }
             #type_slot_impl
             fn field_defs() -> Vec<::dial9_trace_format::schema::FieldDef> {
@@ -116,9 +115,6 @@ fn derive_trace_event_impl(input: DeriveInput) -> proc_macro2::TokenStream {
             fn encode_fields<W: ::std::io::Write>(&self, enc: &mut ::dial9_trace_format::EventEncoder<'_, W>) -> ::std::io::Result<()> {
                 #(#encode_tokens)*
                 Ok(())
-            }
-            fn decode<'a>(_timestamp_ns: Option<u64>, _fields: &[::dial9_trace_format::types::FieldValueRef<'a>], _field_defs: &[::dial9_trace_format::schema::FieldDef]) -> Option<Self::Ref<'a>> {
-                None
             }
         }
     }
