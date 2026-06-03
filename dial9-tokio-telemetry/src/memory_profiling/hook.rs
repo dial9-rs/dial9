@@ -200,10 +200,39 @@ pub(crate) fn on_alloc(inner: &MemoryProfilerInner, ptr: *mut u8, size: usize) {
         // scc::HashIndex::insert is allocation-free on the hot path (it uses
         // epoch-based reclamation internally with no heap allocation per insert
         // on the common path).
+        //
+        // **Stale-entry handling.** `scc::HashIndex::insert` returns `Err` and
+        // does NOT overwrite when the key already exists. The address space is
+        // reused by the OS allocator, so a stale entry can land here in two
+        // cases:
+        //   1. The matching dealloc was skipped during thread-teardown by the
+        //      OPT_OUT sentinel (see `opt_out.rs`).
+        //   2. The matching dealloc's `RawFree` was dropped because the free
+        //      queue was full (`MemoryProfileOverflowEvent` was emitted).
+        // In both cases we'd otherwise emit a `FreeEvent` later carrying the
+        // *old* allocation's `(size, ts_ns)` — wrong data. Detect the failure
+        // and remove-then-reinsert. Brief race: a concurrent reader may
+        // observe a transient absence; that's no worse than any other
+        // producer interleaving and the worst outcome is a missed `FreeEvent`
+        // for the new allocation.
+        //
+        // **OPT_OUT init ordering invariant.** `check_shutdown()` MUST be
+        // called before any `liveset` op on this thread. It eagerly initialises
+        // the `LIFETIME_GUARD` TLS *before* `sdd`'s lazy TLS slot, so the
+        // destructor order at thread exit is `sdd` → `LIFETIME_GUARD`, with
+        // the guard flipping `IS_SHUTTING_DOWN = true` after sdd is gone. If
+        // anyone moves the `liveset.insert` call site, `check_shutdown` must
+        // be called first on every code path that touches the liveset, or
+        // we'll panic in `sdd::Collector::current()` during teardown.
         #[allow(clippy::collapsible_if)]
         if let Some(liveset) = &inner.liveset {
             if !crate::memory_profiling::opt_out::check_shutdown() {
-                let _ = liveset.insert(ptr as u64, (size as u64, timestamp_ns));
+                let key = ptr as u64;
+                let val = (size as u64, timestamp_ns);
+                if liveset.insert(key, val).is_err() {
+                    liveset.remove(&key);
+                    let _ = liveset.insert(key, val);
+                }
             }
         }
     });
@@ -213,16 +242,42 @@ pub(crate) fn on_alloc(inner: &MemoryProfilerInner, ptr: *mut u8, size: usize) {
 /// a `RawFree` if the address was previously sampled (filtering ~99.9% of
 /// deallocs on the producer side).
 ///
+/// **OPT_OUT init ordering invariant.** `check_shutdown()` MUST be called
+/// before any `liveset` op. See the matching comment on `on_alloc`'s liveset
+/// branch and `opt_out.rs` for the full mechanism.
+///
+/// **Shutdown drain.** During TLS teardown the producer can't safely peek
+/// the liveset (sdd's TLS may be destroyed), so it pushes a
+/// `RawFree { shutdown: true, .. }` carrying only `addr`. The consolidator
+/// (running on a different, healthy thread) does the liveset peek/remove
+/// and emits a `FreeEvent` on hit. This recovers dying-thread frees and
+/// bounds liveset growth across thread churn. See
+/// `MemoryProfileSource::handle_free` for the consumer side, including the
+/// `alloc_ts_ns <= free.ts_ns` race check.
+///
 /// SAFETY: must be allocation-free — see module docs.
 #[inline]
 pub(crate) fn on_dealloc(inner: &MemoryProfilerInner, ptr: *mut u8, _size: usize) {
     let Some(liveset) = &inner.liveset else {
         return;
     };
+    let addr = ptr as u64;
     if crate::memory_profiling::opt_out::check_shutdown() {
+        // Shutdown drain: producer can't touch scc here. Push a flagged
+        // RawFree and let the consolidator do the lookup. `size` and
+        // `alloc_ts_ns` are placeholders (0); the consolidator fills them
+        // in from its own peek_with. This is allocation-free and only
+        // touches the queue.
+        inner.rings.push_free(RawFree {
+            tid: current_tid(),
+            addr,
+            ts_ns: stamp(inner.timestamp_mode),
+            size: 0,
+            alloc_ts_ns: 0,
+            shutdown: true,
+        });
         return;
     }
-    let addr = ptr as u64;
     // peek_with returns Some if the address is in the liveset (was sampled).
     // On hit, remove it and push a RawFree with the denormalized metadata.
     let entry = liveset.peek_with(&addr, |_, v| *v);
@@ -234,6 +289,7 @@ pub(crate) fn on_dealloc(inner: &MemoryProfilerInner, ptr: *mut u8, _size: usize
             ts_ns: stamp(inner.timestamp_mode),
             size,
             alloc_ts_ns,
+            shutdown: false,
         };
         inner.rings.push_free(sample);
     }
@@ -622,5 +678,87 @@ mod tests {
             remaining = remaining.saturating_sub(size);
         }
         sizes
+    }
+
+    /// Build a `MemoryProfilerInner` with the producer-side liveset enabled,
+    /// for tests that exercise the address-reuse / stale-entry path.
+    fn make_inner_with_liveset(
+        sample_rate_bytes: u64,
+        ring_capacity: usize,
+    ) -> MemoryProfilerInner {
+        let unwinder = Unwinder::install().expect("unwinder install");
+        let rings = Arc::new(RingBuffers::new(ring_capacity, ring_capacity));
+        let liveset = Arc::new(scc::HashIndex::with_capacity_and_hasher(
+            0,
+            dial9_trace_format::encoder::FxBuildHasher::default(),
+        ));
+        MemoryProfilerInner {
+            unwinder,
+            handle: TelemetryHandle::disabled(),
+            rings,
+            sample_rate_bytes,
+            track_liveset: true,
+            liveset: Some(liveset),
+            timestamp_mode: TimestampMode::Precise,
+            rng_seed: Some(0),
+        }
+    }
+
+    /// Reproduces the address-reuse hazard fixed by the stale-entry overwrite
+    /// in `on_alloc`. Without overwrite-on-Err, the second `on_alloc` for the
+    /// same address silently drops its `(size, ts)` and a subsequent
+    /// `on_dealloc` reports the *first* allocation's metadata.
+    #[test]
+    fn on_alloc_overwrites_stale_liveset_entry() {
+        let inner = Arc::new(make_inner_with_liveset(1, 64));
+        let inner_for_thread = Arc::clone(&inner);
+        std::thread::spawn(move || {
+            seed_thread_sampling_state(0xBEEF_BEEF, 1);
+            let addr = 0xCAFE_F00D_usize as *mut u8;
+
+            // First sampled allocation: size 100. on_alloc inserts
+            // (100, ts1) into the liveset.
+            on_alloc(&inner_for_thread, addr, 100);
+
+            // Simulate the OPT_OUT skip / queue-overflow path: the matching
+            // dealloc never reaches `on_dealloc`. The (100, ts1) entry is
+            // now stale.
+
+            // Second sampled allocation at the same address: size 200. With
+            // the fix, on_alloc detects the duplicate-key Err from
+            // `scc::HashIndex::insert` and overwrites the entry with
+            // (200, ts2).
+            on_alloc(&inner_for_thread, addr, 200);
+
+            // Now dealloc: must observe size = 200, NOT the stale 100.
+            on_dealloc(&inner_for_thread, addr, 200);
+        })
+        .join()
+        .expect("scenario thread");
+
+        // Drain the queues. We expect 2 allocs and 1 free.
+        let mut allocs = Vec::new();
+        while let Some(a) = inner.rings.alloc_queue.pop() {
+            allocs.push(a);
+        }
+        let mut frees = Vec::new();
+        while let Some(f) = inner.rings.free_queue.pop() {
+            frees.push(f);
+        }
+        assert_eq!(allocs.len(), 2, "both allocs should have been recorded");
+        assert_eq!(allocs[0].size, 100);
+        assert_eq!(allocs[1].size, 200);
+
+        assert_eq!(frees.len(), 1, "the dealloc should have produced a free");
+        assert_eq!(
+            frees[0].size, 200,
+            "free must report the second alloc's size, not the stale first \
+             alloc's; without the overwrite fix this would be 100"
+        );
+        assert_eq!(
+            frees[0].alloc_ts_ns, allocs[1].ts_ns,
+            "free's alloc_ts_ns must match the second alloc, not the stale \
+             first one; without the overwrite fix this would be allocs[0].ts_ns"
+        );
     }
 }

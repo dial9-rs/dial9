@@ -10,6 +10,13 @@ use crate::telemetry::recorder::TelemetryHandle;
 use dial9_perf_self_profile::unwinder::Unwinder;
 use std::sync::{Arc, OnceLock};
 
+/// Producer-side liveset: maps allocation address → `(size, timestamp_ns)`.
+///
+/// See [`MemoryProfilerInner::liveset`] for the rationale on `Arc<...>` and
+/// `FxBuildHasher`.
+pub(crate) type Liveset =
+    scc::HashIndex<u64, (u64, u64), dial9_trace_format::encoder::FxBuildHasher>;
+
 /// Process-global state for the active memory profiler.
 ///
 /// Published via `OnceLock` exactly once per process. Never reclaimed
@@ -25,6 +32,21 @@ pub(crate) struct MemoryProfilerInner {
     /// Producer-side liveset: maps allocation address → (size, timestamp_ns).
     /// `None` when `track_liveset` is false, avoiding any overhead.
     ///
+    /// **Why `Arc<HashIndex>`?** `scc::HashIndex` *is* `Clone`, but the impl
+    /// is a *deep clone*: it iterates every entry and reinserts into a brand
+    /// new index with independent state (see `scc-2.x` `impl Clone for
+    /// HashIndex`). To share one map across all producer threads we need
+    /// reference-counted shared ownership, hence the `Arc`. This is unlike
+    /// e.g. `dashmap::DashMap` whose `Clone` is a shallow `Arc::clone`.
+    ///
+    /// **Why `FxBuildHasher`?** `scc` calls the `BuildHasher` per operation
+    /// (no internal hash caching — see `scc::hash_table::HashTable::hash`).
+    /// For a `u64` pointer key the default `RandomState`/SipHash-1-3 is
+    /// ~10–25 ns; `FxHash`'s multiply-shift is ~1–2 ns, and that cost
+    /// applies to **every** dealloc when liveset is on (`peek_with` always
+    /// hashes regardless of hit/miss). Pointer alignment-bit skew is not a
+    /// concern at scc's bucket granularity for the hit rates we see here.
+    ///
     /// **Known limitation:** the map is currently unbounded. A service that
     /// leaks sampled allocations indefinitely will grow this map without
     /// limit. The size is bounded in practice by the live sampled allocation
@@ -32,7 +54,7 @@ pub(crate) struct MemoryProfilerInner {
     /// expect ~20K entries (≈1.3 MiB including scc overhead). Adding a
     /// `max_liveset_entries` cap is tracked as a follow-up; see
     /// `docs/design/memory-profiling.md` §7.
-    pub(crate) liveset: Option<Arc<scc::HashIndex<u64, (u64, u64)>>>,
+    pub(crate) liveset: Option<Arc<Liveset>>,
     pub(crate) timestamp_mode: TimestampMode,
     pub(crate) rng_seed: Option<u64>,
 }
@@ -144,10 +166,17 @@ impl MemoryProfiler {
         ));
 
         let liveset = if self.config.track_liveset() {
-            Some(Arc::new(scc::HashIndex::new()))
+            Some(Arc::new(scc::HashIndex::with_capacity_and_hasher(
+                0,
+                dial9_trace_format::encoder::FxBuildHasher::default(),
+            )))
         } else {
             None
         };
+        // Clone the Arc for the consolidator (`MemoryProfileSource`) so it
+        // can service shutdown-flagged frees by doing the liveset peek/remove
+        // on its own healthy thread. See `source.rs::handle_free`.
+        let source_liveset = liveset.as_ref().map(Arc::clone);
 
         let inner = MemoryProfilerInner {
             unwinder,
@@ -168,6 +197,7 @@ impl MemoryProfiler {
         let source = MemoryProfileSource::new(
             rings,
             self.config.track_liveset(),
+            source_liveset,
             self.config.sample_rate_bytes(),
         );
         shared.push_source(Box::new(source));

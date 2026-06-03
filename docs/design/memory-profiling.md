@@ -807,6 +807,103 @@ hook entry), it drops *after* `sdd`'s destructor runs. Any subsequent hook
 entry sees the flag and returns without touching `scc`. Cost: ~1 ns
 (one TLS Cell read + branch).
 
+**Init-order invariant.** Every code path that touches the liveset must
+call `check_shutdown()` first on every entry — that's what eagerly
+initialises `LIFETIME_GUARD` before the first lazy `sdd` TLS init. If a
+new code path skips this and triggers an `scc` op before
+`check_shutdown()`, the destructor order at thread exit can flip and the
+guard becomes useless.
+
+### Stale-entry handling on `on_alloc`
+
+`scc::HashIndex::insert` returns `Err` and does **not** overwrite when the
+key already exists. Address space is recycled by the OS allocator, so a
+stale entry can land on `on_alloc`'s insert in two cases:
+
+1. **Shutdown skip** (see "Shutdown drain" below): the matching dealloc
+   pushed a flagged `RawFree` and the consolidator hasn't drained yet, OR
+   the race-check on the consolidator detected an overlap and left the
+   entry in place.
+2. **Queue overflow:** the matching dealloc's `RawFree` was dropped because
+   the free queue was full (`MemoryProfileOverflowEvent` was emitted).
+
+Without explicit handling, the new allocation's `(size, ts_ns)` would be
+silently dropped and a future `FreeEvent` would carry the *old*
+allocation's data — a hard-to-detect correctness bug. `on_alloc` therefore
+detects the failure and remove-then-reinserts:
+
+```rust
+let key = ptr as u64;
+let val = (size as u64, timestamp_ns);
+if liveset.insert(key, val).is_err() {
+    liveset.remove(&key);
+    let _ = liveset.insert(key, val);
+}
+```
+
+Brief race window: a concurrent reader may observe a transient absence
+between the `remove` and the second `insert`. That's no worse than any
+other producer interleaving, and the worst outcome is a missed `FreeEvent`
+for the new allocation.
+
+### Shutdown drain (consolidator-side cleanup)
+
+The OPT_OUT sentinel forbids the *producer* from touching the liveset
+during teardown, but the *consolidator* runs on a different thread with
+its own healthy `sdd` TLS. We exploit this asymmetry to recover the dying
+thread's `FreeEvent`s and bound liveset growth across thread churn.
+
+Protocol:
+
+1. **Producer (dying thread, `on_dealloc`):** when `check_shutdown()`
+   returns `true`, push a flagged record and bail:
+   ```rust
+   inner.rings.push_free(RawFree {
+       tid, addr, ts_ns: stamp(...),
+       size: 0, alloc_ts_ns: 0,   // placeholders
+       shutdown: true,
+   });
+   ```
+   The push is allocation-free and only touches the queue's CAS
+   tail-slot — no `scc`, no `sdd`.
+
+2. **Consolidator (`MemoryProfileSource::handle_free`):** for shutdown-
+   flagged frees, do the lookup here:
+   ```rust
+   let Some((size, alloc_ts_ns)) = liveset.peek_with(&f.addr, |_, v| *v) else {
+       return; // already cleaned, or never sampled
+   };
+   if alloc_ts_ns > f.ts_ns {
+       return; // race: address reused; leave entry for the new alloc
+   }
+   liveset.remove(&f.addr);
+   enc.encode(&FreeEvent { ts_ns: f.ts_ns, addr: f.addr, size, alloc_ts_ns, .. });
+   ```
+
+3. **Race window.** Between the producer's push (at `f.ts_ns`) and the
+   consolidator's drain (~5 ms later), a *live* thread may have freed
+   some unrelated sampled alloc at the same address and `on_alloc` may
+   have re-keyed the entry to a new allocation. The
+   `alloc_ts_ns > f.ts_ns` check identifies this exact case (the new
+   alloc's `alloc_ts_ns` is strictly greater than the older shutdown
+   push's `ts_ns`, given monotonic timestamps from
+   `TimestampMode::ReusePollStart` or `Precise`). On race, we leave the
+   entry in place; the new alloc's eventual non-shutdown free will emit
+   the correct event.
+
+   In the race case we lose the *original* (dying-thread) alloc's
+   `FreeEvent` — same outcome as the pre-shutdown-drain design — but we
+   avoid emitting a *wrong* `FreeEvent` and avoid removing the new
+   alloc's entry.
+
+4. **`TimestampMode::None` is rejected** at config build time when
+   `track_liveset(true)`; with every event at `ts = 0` the race check
+   would degenerate to "always remove" and the whole protocol breaks.
+
+This protocol does NOT require `catch_unwind`, does NOT add cost to the
+non-shutdown hot path, and does NOT need a separate background thread —
+the existing flush thread does the work as part of its 5-ms cycle.
+
 ### Bounded liveset
 
 `max_liveset_entries` caps the total count. When full:
