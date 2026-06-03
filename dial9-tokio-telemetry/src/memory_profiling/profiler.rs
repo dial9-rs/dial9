@@ -194,12 +194,8 @@ impl MemoryProfiler {
             .map_err(|_| InstallError::AlreadyInstalled)?;
 
         let shared = handle.shared().expect("checked is_enabled above");
-        let source = MemoryProfileSource::new(
-            rings,
-            self.config.track_liveset(),
-            source_liveset,
-            self.config.sample_rate_bytes(),
-        );
+        let source =
+            MemoryProfileSource::new(rings, source_liveset, self.config.sample_rate_bytes());
         shared.push_source(Box::new(source));
 
         Ok(MemoryProfilerGuard { _private: () })

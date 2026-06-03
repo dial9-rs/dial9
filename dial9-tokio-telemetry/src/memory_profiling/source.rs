@@ -26,10 +26,10 @@ use std::sync::atomic::Ordering;
 /// before the consolidator drains.
 pub(crate) struct MemoryProfileSource {
     rings: Arc<RingBuffers>,
-    track_liveset: bool,
     /// The producer-side liveset, shared with the allocator hook. `None`
-    /// when liveset tracking is off. Held here so the consolidator can
-    /// handle shutdown-flagged `RawFree`s — see `handle_free`.
+    /// when liveset tracking is off — in that mode the producer filters
+    /// frees and `handle_free` has nothing to emit. Held here so the
+    /// consolidator can also service shutdown-flagged `RawFree`s.
     liveset: Option<Arc<Liveset>>,
     /// Previous snapshot of `RingBuffers::dropped_allocs` for delta computation.
     prev_dropped_allocs: u64,
@@ -45,24 +45,17 @@ pub(crate) struct MemoryProfileSource {
 impl MemoryProfileSource {
     /// Create a new source that drains the supplied ring buffers.
     ///
-    /// `track_liveset = true` enables `FreeEvent` emission; `false` means
-    /// frees are filtered on the producer side and never reach the queue.
-    /// `liveset` must be `Some` whenever `track_liveset` is `true` so the
-    /// consolidator can service shutdown-flagged frees.
+    /// Pass `liveset = Some(_)` when liveset tracking is on; `None`
+    /// disables `FreeEvent` emission entirely. The Arc is shared with the
+    /// allocator hook so the consolidator can service shutdown-flagged
+    /// frees.
     pub(crate) fn new(
         rings: Arc<RingBuffers>,
-        track_liveset: bool,
         liveset: Option<Arc<Liveset>>,
         sample_rate_bytes: u64,
     ) -> Self {
-        debug_assert_eq!(
-            track_liveset,
-            liveset.is_some(),
-            "track_liveset and liveset.is_some() must agree"
-        );
         Self {
             rings,
-            track_liveset,
             liveset,
             prev_dropped_allocs: 0,
             prev_dropped_frees: 0,
@@ -100,67 +93,41 @@ impl MemoryProfileSource {
     }
 
     fn handle_free(&mut self, f: RawFree, ctx: &FlushContext<'_>) {
-        if !self.track_liveset {
+        // No liveset means the producer drops every free; nothing to emit.
+        let Some(liveset) = &self.liveset else {
             return;
-        }
-        if f.shutdown {
-            // Shutdown drain: the producer couldn't peek the liveset (sdd's
-            // TLS was already destroyed). Do the peek/remove here on the
-            // consolidator's healthy thread.
-            //
-            // **Race check.** Between the producer push (at `f.ts_ns`) and
-            // now, an address can be reused: a live thread may have freed
-            // some other sampled alloc, then `on_alloc` may have re-keyed
-            // the entry to a brand-new allocation. If the entry's
-            // `alloc_ts_ns` is greater than `f.ts_ns`, that's exactly what
-            // happened — the entry now belongs to a *later* allocation and
-            // we must not remove it (and especially must not emit a
-            // `FreeEvent` carrying its data, since the corresponding alloc
-            // is still live).
-            //
-            // This relies on `TimestampMode::ReusePollStart` /
-            // `TimestampMode::Precise` producing strictly-monotonic
-            // timestamps. `TimestampMode::None` is rejected at config build
-            // time when `track_liveset` is on (every event would be 0,
-            // breaking this invariant), so we only reach this code path in
-            // a mode where the comparison is meaningful.
-            let Some(liveset) = &self.liveset else {
-                return;
-            };
+        };
+
+        // Resolve `(size, alloc_ts_ns)`:
+        // - **Normal frees** carry denormalized data from the producer's
+        //   peek/remove (see `hook::on_dealloc`); use it directly.
+        // - **Shutdown-flagged frees** were pushed by a thread in TLS
+        //   teardown that couldn't safely touch `scc`. Do the peek/remove
+        //   here, with a race check: if the entry's `alloc_ts_ns` is
+        //   greater than `f.ts_ns`, an address-reuse race means the entry
+        //   now belongs to a *later* allocation. Leave it; the new alloc's
+        //   eventual non-shutdown free will emit the correct event.
+        let (size, alloc_ts_ns) = if f.shutdown {
             let Some((size, alloc_ts_ns)) = liveset.peek_with(&f.addr, |_, v| *v) else {
-                return; // already removed (e.g. by a normal dealloc) or never sampled
+                return; // already cleaned, or never sampled
             };
             if alloc_ts_ns > f.ts_ns {
-                // Race: entry belongs to a newer alloc that landed after
-                // our shutdown push. Leave it; its eventual free will emit
-                // the correct event.
-                return;
+                return; // address-reuse race — see comment above
             }
             liveset.remove(&f.addr);
-            with_encoder(
-                |enc| {
-                    enc.encode(&FreeEvent {
-                        timestamp_ns: f.ts_ns,
-                        tid: f.tid,
-                        addr: f.addr,
-                        size,
-                        alloc_timestamp_ns: alloc_ts_ns,
-                    });
-                },
-                ctx.collector,
-                ctx.drain_epoch,
-            );
-            return;
-        }
-        // Normal path: producer-filtered free with denormalized data.
+            (size, alloc_ts_ns)
+        } else {
+            (f.size, f.alloc_ts_ns)
+        };
+
         with_encoder(
             |enc| {
                 enc.encode(&FreeEvent {
                     timestamp_ns: f.ts_ns,
                     tid: f.tid,
                     addr: f.addr,
-                    size: f.size,
-                    alloc_timestamp_ns: f.alloc_ts_ns,
+                    size,
+                    alloc_timestamp_ns: alloc_ts_ns,
                 });
             },
             ctx.collector,
@@ -316,9 +283,9 @@ mod tests {
     }
 
     /// Convenience: build a `MemoryProfileSource` for tests where we don't
-    /// need to retain a separate handle on the liveset. Mirrors the
-    /// production `MemoryProfileSource::new` invariant
-    /// (`track_liveset == liveset.is_some()`).
+    /// need to retain a separate handle on the liveset. Pass
+    /// `track_liveset = true` to enable `FreeEvent` emission (the helper
+    /// builds a fresh liveset internally); `false` disables it.
     fn make_source(
         rings: Arc<RingBuffers>,
         track_liveset: bool,
@@ -329,7 +296,7 @@ mod tests {
         } else {
             None
         };
-        MemoryProfileSource::new(rings, track_liveset, liveset, sample_rate_bytes)
+        MemoryProfileSource::new(rings, liveset, sample_rate_bytes)
     }
 
     fn new_shared() -> SharedState {
@@ -715,7 +682,6 @@ mod tests {
         let shared = new_shared();
         shared.push_source(Box::new(MemoryProfileSource::new(
             Arc::clone(&rings),
-            true,
             Some(Arc::clone(&liveset)),
             512 * 1024,
         )));
@@ -773,7 +739,6 @@ mod tests {
         let shared = new_shared();
         shared.push_source(Box::new(MemoryProfileSource::new(
             Arc::clone(&rings),
-            true,
             Some(Arc::clone(&liveset)),
             512 * 1024,
         )));
@@ -813,7 +778,6 @@ mod tests {
         let shared = new_shared();
         shared.push_source(Box::new(MemoryProfileSource::new(
             Arc::clone(&rings),
-            true,
             Some(Arc::clone(&liveset)),
             512 * 1024,
         )));

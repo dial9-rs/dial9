@@ -211,10 +211,10 @@ pub(crate) fn on_alloc(inner: &MemoryProfilerInner, ptr: *mut u8, size: usize) {
         //      queue was full (`MemoryProfileOverflowEvent` was emitted).
         // In both cases we'd otherwise emit a `FreeEvent` later carrying the
         // *old* allocation's `(size, ts_ns)` — wrong data. Detect the failure
-        // and remove-then-reinsert. Brief race: a concurrent reader may
-        // observe a transient absence; that's no worse than any other
-        // producer interleaving and the worst outcome is a missed `FreeEvent`
-        // for the new allocation.
+        // and fall through to the `entry()` API to atomically overwrite (or
+        // insert, if a concurrent dealloc cleared the entry between our
+        // `insert` and `entry`). The hot path stays on the cheap lock-free
+        // `insert`; only the rare stale case pays the bucket-lock cost.
         //
         // **OPT_OUT init ordering invariant.** `check_shutdown()` MUST be
         // called before any `liveset` op on this thread. It eagerly initialises
@@ -229,9 +229,14 @@ pub(crate) fn on_alloc(inner: &MemoryProfilerInner, ptr: *mut u8, size: usize) {
             if !crate::memory_profiling::opt_out::check_shutdown() {
                 let key = ptr as u64;
                 let val = (size as u64, timestamp_ns);
-                if liveset.insert(key, val).is_err() {
-                    liveset.remove(&key);
-                    let _ = liveset.insert(key, val);
+                if let Err((k, v)) = liveset.insert(key, val) {
+                    use scc::hash_index::Entry;
+                    match liveset.entry(k) {
+                        Entry::Occupied(o) => o.update(v),
+                        Entry::Vacant(ve) => {
+                            let _ = ve.insert_entry(v);
+                        }
+                    }
                 }
             }
         }

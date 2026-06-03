@@ -906,12 +906,19 @@ the existing flush thread does the work as part of its 5-ms cycle.
 
 ### Bounded liveset
 
-`max_liveset_entries` caps the total count. When full:
+**Not yet implemented.** The liveset is currently unbounded. A service
+that leaks sampled allocations indefinitely will grow the map without
+limit. Size is bounded in practice by the live sampled allocation count:
+at default 512 KiB sample rate and 10 GiB live heap, expect ~20K entries
+(~1.3 MiB).
+
+A planned `max_liveset_entries` config would cap the total count. When
+full:
 - New `RawAlloc`: still emit `AllocEvent`, skip liveset insert. Emit a
   rate-limited warning event (once per 60s).
 - `RawFree`: still lookup (miss on overflow entries). No-op on miss.
 
-Default: `None` (unbounded). Users opt in to a cap.
+Tracked as a follow-up.
 
 ### Memory cost
 
