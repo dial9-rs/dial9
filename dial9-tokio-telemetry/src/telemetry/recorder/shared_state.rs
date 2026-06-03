@@ -498,7 +498,7 @@ mod shuttle_tests {
     /// Custom event for round-trip validation. Each event carries a
     /// per-thread monotonic `seq`, a `thread_id`, and a `timestamp_ns`
     /// that is mostly monotonic with occasional backward jumps.
-    #[derive(TraceEvent, Clone, Debug)]
+    #[derive(TraceEvent, Clone, Debug, serde::Deserialize)]
     struct ValidationEvent {
         #[traceevent(timestamp)]
         timestamp_ns: u64,
@@ -573,16 +573,10 @@ mod shuttle_tests {
         };
         let mut out = Vec::new();
         dec.for_each_event(|ev| {
-            if ev.name == "ValidationEvent"
-                && let Some(decoded) =
-                    ValidationEvent::decode(ev.timestamp_ns, ev.fields, &ev.schema.fields())
-            {
-                out.push(ValidationEvent {
-                    timestamp_ns: decoded.timestamp_ns,
-                    thread_id: decoded.thread_id,
-                    seq: decoded.seq,
-                    id: decoded.id,
-                });
+            if ev.name == "ValidationEvent" {
+                if let Ok(decoded) = ev.deserialize::<ValidationEvent>() {
+                    out.push(decoded);
+                }
             }
         })
         .expect("decode failed");

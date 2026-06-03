@@ -11,12 +11,14 @@
 //! landed in the trace with the correct identity.
 //!
 //! Usage:
-//!   cargo run --example thread_per_core
+//!   cargo run --example thread_per_core --features analysis
 //!
 //! After running, inspect the trace:
 //!   cargo run --example analyze_trace -- /tmp/thread_per_core/trace.0.bin
 
-use dial9_tokio_telemetry::telemetry::{DiskWriter, TelemetryCore, TelemetryEvent, WorkerId};
+use dial9_tokio_telemetry::telemetry::analysis_events::{Dial9Event, WorkerId};
+use dial9_tokio_telemetry::telemetry::{DiskWriter, TelemetryCore};
+use dial9_trace_format::decoder::Decoder;
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
@@ -104,39 +106,50 @@ fn main() -> std::io::Result<()> {
     // Collect: runtime name → worker IDs (from metadata), and
     //          worker ID → poll event count (from PollStart/PollEnd).
     let mut runtime_workers: BTreeMap<String, Vec<u64>> = BTreeMap::new();
-    let mut poll_counts: BTreeMap<u64, usize> = BTreeMap::new();
-    let mut seen_workers: BTreeSet<u64> = BTreeSet::new();
+    let mut poll_counts: BTreeMap<WorkerId, usize> = BTreeMap::new();
+    let mut seen_workers: BTreeSet<WorkerId> = BTreeSet::new();
     let mut total_polls = 0usize;
     let mut unknown_polls = 0usize;
 
     for file in &files {
         let data = std::fs::read(file)?;
-        let events = dial9_tokio_telemetry::analysis_unstable::decode_events(&data)?;
-        for event in &events {
-            match event {
-                TelemetryEvent::SegmentMetadata { entries, .. } => {
-                    for (key, val) in entries {
-                        if let Some(name) = key.strip_prefix("runtime.") {
-                            let ids: Vec<u64> =
-                                val.split(',').filter_map(|s| s.parse().ok()).collect();
-                            runtime_workers.insert(name.to_string(), ids);
+        let mut decoder =
+            Decoder::new(&data).ok_or_else(|| std::io::Error::other("invalid trace header"))?;
+        decoder
+            .for_each_event(|raw| {
+                let ev: Dial9Event = raw.deserialize().expect("deserialize");
+                match &ev {
+                    Dial9Event::SegmentMetadataEvent(e) => {
+                        for (key, val) in &e.entries {
+                            if let Some(name) = key.strip_prefix("runtime.") {
+                                let ids: Vec<u64> =
+                                    val.split(',').filter_map(|s| s.parse().ok()).collect();
+                                runtime_workers.insert(name.to_string(), ids);
+                            }
                         }
                     }
-                }
-                TelemetryEvent::PollStart { worker_id, .. }
-                | TelemetryEvent::PollEnd { worker_id, .. } => {
-                    total_polls += 1;
-                    if *worker_id != WorkerId::UNKNOWN {
-                        let id = worker_id.as_u64();
-                        seen_workers.insert(id);
-                        *poll_counts.entry(id).or_default() += 1;
-                    } else {
-                        unknown_polls += 1;
+                    Dial9Event::PollStartEvent(e) => {
+                        total_polls += 1;
+                        if e.worker_id != WorkerId::UNKNOWN {
+                            seen_workers.insert(e.worker_id);
+                            *poll_counts.entry(e.worker_id).or_default() += 1;
+                        } else {
+                            unknown_polls += 1;
+                        }
                     }
+                    Dial9Event::PollEndEvent(e) => {
+                        total_polls += 1;
+                        if e.worker_id != WorkerId::UNKNOWN {
+                            seen_workers.insert(e.worker_id);
+                            *poll_counts.entry(e.worker_id).or_default() += 1;
+                        } else {
+                            unknown_polls += 1;
+                        }
+                    }
+                    _ => {}
                 }
-                _ => {}
-            }
-        }
+            })
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
     }
 
     println!("=== Poll event summary ===");
@@ -155,14 +168,18 @@ fn main() -> std::io::Result<()> {
         // Find which runtime this worker belongs to.
         let runtime = runtime_workers
             .iter()
-            .find(|(_, ids)| ids.contains(worker_id))
+            .find(|(_, ids)| ids.contains(&worker_id.0))
             .map(|(name, _)| name.as_str())
             .unwrap_or("unknown");
         println!("  worker {worker_id} ({runtime}): {count} poll events");
     }
 
     // Verify every worker that emitted events is accounted for in metadata.
-    let metadata_ids: BTreeSet<u64> = runtime_workers.values().flatten().copied().collect();
+    let metadata_ids: BTreeSet<WorkerId> = runtime_workers
+        .values()
+        .flatten()
+        .map(|&id| WorkerId(id))
+        .collect();
     let unaccounted: Vec<_> = seen_workers.difference(&metadata_ids).collect();
     if unaccounted.is_empty() {
         println!("\n✓ All worker IDs are accounted for in runtime metadata.");

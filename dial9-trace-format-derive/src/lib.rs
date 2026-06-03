@@ -1,17 +1,10 @@
 use proc_macro::TokenStream;
-use quote::{format_ident, quote};
+use quote::quote;
 use syn::{Data, DeriveInput, Fields, parse_macro_input};
 
 fn derive_trace_event_impl(input: DeriveInput) -> proc_macro2::TokenStream {
     let name = &input.ident;
-    let vis = &input.vis;
     let name_str = name.to_string();
-    let ref_name = format_ident!("{}Ref", name);
-    let struct_doc_attrs: Vec<_> = input
-        .attrs
-        .iter()
-        .filter(|a| a.path().is_ident("doc"))
-        .collect();
 
     let fields = match &input.data {
         Data::Struct(data) => match &data.fields {
@@ -21,21 +14,29 @@ fn derive_trace_event_impl(input: DeriveInput) -> proc_macro2::TokenStream {
         _ => panic!("TraceEvent can only be derived for structs"),
     };
 
+    // Parse struct-level #[traceevent(wire_slot)]: opt this type into the
+    // encoder's inline fast path (a global slot doubling as wire id). Off by
+    // default.
+    let mut wire_slot = false;
+    for attr in &input.attrs {
+        if attr.path().is_ident("traceevent") {
+            let _ = attr.parse_nested_meta(|meta| {
+                if meta.path.is_ident("wire_slot") {
+                    wire_slot = true;
+                }
+                Ok(())
+            });
+        }
+    }
+
     // Find the field marked with #[traceevent(timestamp)]
     let mut timestamp_field_name = None;
-    let mut timestamp_doc_attrs = Vec::new();
     for field in fields.iter() {
         for attr in &field.attrs {
             if attr.path().is_ident("traceevent") {
                 let _ = attr.parse_nested_meta(|meta| {
                     if meta.path.is_ident("timestamp") {
                         timestamp_field_name = Some(field.ident.as_ref().unwrap().clone());
-                        timestamp_doc_attrs = field
-                            .attrs
-                            .iter()
-                            .filter(|a| a.path().is_ident("doc"))
-                            .cloned()
-                            .collect();
                     }
                     Ok(())
                 });
@@ -45,8 +46,6 @@ fn derive_trace_event_impl(input: DeriveInput) -> proc_macro2::TokenStream {
 
     let mut field_def_tokens = Vec::new();
     let mut encode_tokens = Vec::new();
-    let mut ref_fields = Vec::new();
-    let mut decode_tokens = Vec::new();
 
     for field in fields.iter() {
         let field_name = field.ident.as_ref().unwrap();
@@ -67,27 +66,6 @@ fn derive_trace_event_impl(input: DeriveInput) -> proc_macro2::TokenStream {
         encode_tokens.push(quote! {
             <#ty as ::dial9_trace_format::TraceField>::encode(&self.#field_name, enc)?;
         });
-
-        let doc_attrs: Vec<_> = field
-            .attrs
-            .iter()
-            .filter(|a| a.path().is_ident("doc"))
-            .collect();
-        ref_fields.push(quote! {
-            #(#doc_attrs)*
-            pub #field_name: <#ty as ::dial9_trace_format::TraceField>::Ref<'a>
-        });
-        decode_tokens.push(quote! {
-            #field_name: {
-                let val = field_defs.iter().zip(fields.iter())
-                    .find(|(f, _)| f.name() == #field_name_str)
-                    .map(|(_, v)| v);
-                match val {
-                    Some(v) => <#ty as ::dial9_trace_format::TraceField>::decode_ref(v)?,
-                    None => <#ty as ::dial9_trace_format::TraceField>::decode_missing()?,
-                }
-            }
-        });
     }
 
     let timestamp_impl = if let Some(ref ts_field) = timestamp_field_name {
@@ -98,62 +76,45 @@ fn derive_trace_event_impl(input: DeriveInput) -> proc_macro2::TokenStream {
         panic!("TraceEvent requires a field marked with #[traceevent(timestamp)]");
     };
 
-    let has_timestamp_impl = quote! {};
-
-    // For the Ref struct, include the timestamp field if present — populated from the decode parameter
-    let ref_timestamp_field = if let Some(ref ts_field) = timestamp_field_name {
-        let ts_docs = &timestamp_doc_attrs;
-        quote! { #(#ts_docs)* pub #ts_field: u64, }
-    } else {
-        quote! {}
-    };
-    let decode_timestamp_init = if let Some(ref ts_field) = timestamp_field_name {
-        quote! { #ts_field: timestamp_ns?, }
-    } else {
-        quote! {}
-    };
-
-    let phantom_field =
-        if fields.is_empty() || (fields.len() == 1 && timestamp_field_name.is_some()) {
-            quote! { _marker: ::std::marker::PhantomData<&'a ()>, }
-        } else {
-            quote! {}
-        };
-    let phantom_init = if fields.is_empty() || (fields.len() == 1 && timestamp_field_name.is_some())
-    {
-        quote! { _marker: ::std::marker::PhantomData, }
+    // `#[traceevent(wire_slot)]` types override `type_slot()`. Without it
+    // the trait default returns 0 and the encoder uses the dynamic path.
+    let type_slot_impl = if wire_slot {
+        quote! {
+            fn type_slot() -> u16 {
+                static SLOT: ::std::sync::atomic::AtomicU16 =
+                    ::std::sync::atomic::AtomicU16::new(0);
+                let cached = SLOT.load(::std::sync::atomic::Ordering::Relaxed);
+                if cached != 0 {
+                    return cached;
+                }
+                let new = ::dial9_trace_format::__NEXT_TYPE_SLOT
+                    .fetch_add(1, ::std::sync::atomic::Ordering::Relaxed);
+                match SLOT.compare_exchange(
+                    0,
+                    new,
+                    ::std::sync::atomic::Ordering::Relaxed,
+                    ::std::sync::atomic::Ordering::Relaxed,
+                ) {
+                    Ok(_) => new,
+                    Err(existing) => existing,
+                }
+            }
+        }
     } else {
         quote! {}
     };
 
     quote! {
-        #(#struct_doc_attrs)*
-        #[derive(Debug, Clone)]
-        #vis struct #ref_name<'a> {
-            #ref_timestamp_field
-            #(#ref_fields,)*
-            #phantom_field
-        }
-
         impl ::dial9_trace_format::TraceEvent for #name {
-            type Ref<'a> = #ref_name<'a>;
-
             fn event_name() -> &'static str { #name_str }
+            #type_slot_impl
             fn field_defs() -> Vec<::dial9_trace_format::schema::FieldDef> {
                 vec![#(#field_def_tokens),*]
             }
             #timestamp_impl
-            #has_timestamp_impl
             fn encode_fields<W: ::std::io::Write>(&self, enc: &mut ::dial9_trace_format::EventEncoder<'_, W>) -> ::std::io::Result<()> {
                 #(#encode_tokens)*
                 Ok(())
-            }
-            fn decode<'a>(timestamp_ns: Option<u64>, fields: &[::dial9_trace_format::types::FieldValueRef<'a>], field_defs: &[::dial9_trace_format::schema::FieldDef]) -> Option<Self::Ref<'a>> {
-                Some(#ref_name {
-                    #decode_timestamp_init
-                    #(#decode_tokens,)*
-                    #phantom_init
-                })
             }
         }
     }
@@ -169,6 +130,7 @@ pub fn derive_trace_event(input: TokenStream) -> TokenStream {
 mod tests {
     use super::*;
     use insta::assert_snapshot;
+    use quote::quote;
 
     fn expand_to_string(input: proc_macro2::TokenStream) -> String {
         let input: DeriveInput = syn::parse2(input).unwrap();
@@ -234,6 +196,18 @@ mod tests {
                 worker_id: u64,
                 /// Number of items in the local queue.
                 local_queue: u8,
+            }
+        }));
+    }
+
+    #[test]
+    fn wire_slot_event() {
+        assert_snapshot!(expand_to_string(quote! {
+            #[traceevent(wire_slot)]
+            struct WireSlotEvent {
+                #[traceevent(timestamp)]
+                timestamp_ns: u64,
+                value: u32,
             }
         }));
     }

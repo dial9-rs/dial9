@@ -1,22 +1,111 @@
 //! Verify that rotated trace segments contain events from non-overlapping
 //! (or minimally overlapping) time ranges.
-//!
-//! When rotation and flushing are properly coordinated, each segment should
-//! contain events from a contiguous time window. Adjacent segments may overlap
-//! by at most a small tolerance (e.g. 2 seconds) due to in-flight batches.
-//!
-//! This test uses a short rotation period (2s) and generates continuous events
-//! across multiple workers to exercise the rotation/flush coordination path.
-//!
-//! The test is built on `TelemetryCore` so we can attach a metrics sink to the
-//! flush thread and inspect its metrics when the test fails.
 
-use dial9_tokio_telemetry::telemetry::{DiskWriter, TelemetryCore, TelemetryEvent};
+use common::decode_file;
+use dial9_tokio_telemetry::telemetry::{DiskWriter, TelemetryCore};
 use metrique::local::{LocalFormat, OutputStyle};
+use serde::Deserialize;
 use std::time::Duration;
+
+mod common;
 
 /// Maximum allowed overlap between adjacent segments in seconds.
 const MAX_OVERLAP_SECS: f64 = 2.0;
+
+#[derive(Debug, Deserialize)]
+#[allow(dead_code, clippy::enum_variant_names)]
+#[serde(tag = "event")]
+enum TimedEvent {
+    PollStartEvent {
+        timestamp_ns: u64,
+    },
+    PollEndEvent {
+        timestamp_ns: u64,
+    },
+    WorkerParkEvent {
+        timestamp_ns: u64,
+    },
+    WorkerUnparkEvent {
+        timestamp_ns: u64,
+    },
+    QueueSampleEvent {
+        timestamp_ns: u64,
+    },
+    TaskSpawnEvent {
+        timestamp_ns: u64,
+    },
+    TaskTerminateEvent {
+        timestamp_ns: u64,
+    },
+    CpuSampleEvent {
+        timestamp_ns: u64,
+    },
+    TaskDumpEvent {
+        timestamp_ns: u64,
+    },
+    AllocEvent {
+        timestamp_ns: u64,
+    },
+    FreeEvent {
+        timestamp_ns: u64,
+    },
+    WakeEventEvent {
+        timestamp_ns: u64,
+    },
+    ClockSyncEvent {
+        timestamp_ns: u64,
+    },
+    SegmentMetadataEvent {
+        timestamp_ns: u64,
+    },
+    #[serde(other)]
+    Other,
+}
+
+impl TimedEvent {
+    fn timestamp_ns(&self) -> Option<u64> {
+        match self {
+            Self::PollStartEvent { timestamp_ns }
+            | Self::PollEndEvent { timestamp_ns }
+            | Self::WorkerParkEvent { timestamp_ns }
+            | Self::WorkerUnparkEvent { timestamp_ns }
+            | Self::QueueSampleEvent { timestamp_ns }
+            | Self::TaskSpawnEvent { timestamp_ns }
+            | Self::TaskTerminateEvent { timestamp_ns }
+            | Self::CpuSampleEvent { timestamp_ns }
+            | Self::TaskDumpEvent { timestamp_ns }
+            | Self::AllocEvent { timestamp_ns }
+            | Self::FreeEvent { timestamp_ns }
+            | Self::WakeEventEvent { timestamp_ns }
+            | Self::ClockSyncEvent { timestamp_ns } => Some(*timestamp_ns),
+            Self::SegmentMetadataEvent { .. } | Self::Other => None,
+        }
+    }
+
+    fn is_segment_metadata(&self) -> bool {
+        matches!(self, Self::SegmentMetadataEvent { .. })
+    }
+
+    fn type_name(&self) -> &'static str {
+        match self {
+            Self::PollStartEvent { .. } => "PollStart",
+            Self::PollEndEvent { .. } => "PollEnd",
+            Self::WorkerParkEvent { .. } => "WorkerPark",
+            Self::WorkerUnparkEvent { .. } => "WorkerUnpark",
+            Self::QueueSampleEvent { .. } => "QueueSample",
+            Self::TaskSpawnEvent { .. } => "TaskSpawn",
+            Self::TaskTerminateEvent { .. } => "TaskTerminate",
+            Self::CpuSampleEvent { .. } => "CpuSample",
+            Self::TaskDumpEvent { .. } => "TaskDump",
+            Self::AllocEvent { .. } => "Alloc",
+            Self::FreeEvent { .. } => "Free",
+            Self::WakeEventEvent { .. } => "WakeEvent",
+            Self::ClockSyncEvent { .. } => "ClockSync",
+            Self::SegmentMetadataEvent { .. } => "SegmentMetadata",
+            Self::Other => "Other",
+        }
+    }
+}
 
 #[test]
 fn rotated_segments_have_bounded_time_overlap() {
@@ -28,18 +117,15 @@ fn rotated_segments_have_bounded_time_overlap() {
 
     let writer = DiskWriter::builder()
         .base_path(&trace_path)
-        .max_file_size(u64::MAX) // only time-based rotation
+        .max_file_size(u64::MAX)
         .max_total_size(u64::MAX)
         .rotation_period(rotation_period)
         .build()
         .unwrap();
 
-    // Set up a metrics sink so we can capture flush-thread metrics for debugging.
     let (render_queue, metrics_sink) =
         metrique_writer::test_util::render_entry_sink(LocalFormat::new(OutputStyle::Pretty));
 
-    // Build the telemetry session via TelemetryCore so we get flush-thread
-    // metrics through the worker_metrics_sink.
     let guard = TelemetryCore::builder()
         .writer(writer)
         .worker_metrics_sink(metrics_sink)
@@ -52,9 +138,6 @@ fn rotated_segments_have_bounded_time_overlap() {
 
     let (runtime, _handle) = guard.trace_runtime("main").build(builder).unwrap();
 
-    // Generate continuous events across multiple rotation boundaries.
-    // With a 2s rotation period and 15s runtime, we should get 5+ segments
-    // even if the runtime takes a few seconds to start producing events.
     runtime.block_on(async {
         let start = tokio::time::Instant::now();
         let target_duration = Duration::from_secs(15);
@@ -73,7 +156,6 @@ fn rotated_segments_have_bounded_time_overlap() {
             h.await.unwrap();
         }
 
-        // Ensure we've actually waited the full duration
         let elapsed = start.elapsed();
         if elapsed < target_duration {
             tokio::time::sleep(target_duration - elapsed).await;
@@ -85,7 +167,6 @@ fn rotated_segments_have_bounded_time_overlap() {
         .graceful_shutdown(Duration::from_secs(5))
         .expect("graceful shutdown");
 
-    // Dump flush-thread metrics so they appear in test output on failure.
     let flush_metrics = render_queue.entries();
     eprintln!("flush-thread metrics ({} entries):", flush_metrics.len());
     for entry in &flush_metrics {
@@ -116,15 +197,8 @@ fn rotated_segments_have_bounded_time_overlap() {
         segment_files
     );
 
-    // For each segment, decode events and compute (min_timestamp, max_timestamp)
-    // from non-metadata events. Keep the events around for diagnostics on failure.
-    let segment_events: Vec<Vec<TelemetryEvent>> = segment_files
-        .iter()
-        .map(|path| {
-            let data = std::fs::read(path).unwrap();
-            dial9_tokio_telemetry::analysis_unstable::decode_events(&data).unwrap()
-        })
-        .collect();
+    let segment_events: Vec<Vec<TimedEvent>> =
+        segment_files.iter().map(|path| decode_file(path)).collect();
 
     let segment_ranges: Vec<(u64, u64)> = segment_events
         .iter()
@@ -132,8 +206,8 @@ fn rotated_segments_have_bounded_time_overlap() {
         .map(|(i, events)| {
             let timestamps: Vec<u64> = events
                 .iter()
-                .filter(|e| !matches!(e, TelemetryEvent::SegmentMetadata { .. }))
-                .filter_map(|e| e.timestamp_nanos())
+                .filter(|e| !e.is_segment_metadata())
+                .filter_map(|e| e.timestamp_ns())
                 .collect();
             assert!(
                 !timestamps.is_empty(),
@@ -146,29 +220,17 @@ fn rotated_segments_have_bounded_time_overlap() {
         })
         .collect();
 
-    // Validate: adjacent segments should have bounded overlap.
-    // Skip the last boundary — the final segment is the shutdown dump where
-    // all TL buffers are drained at once, so it inherently contains events
-    // spanning the entire last drain interval.
     let mut max_observed_overlap = Duration::ZERO;
     let non_final_boundaries = if segment_ranges.len() >= 3 {
         segment_ranges.len() - 2
     } else {
-        // With only 2 segments we can't skip the final boundary,
-        // but we still have at least 1 boundary to check.
-        assert!(
-            segment_ranges.len() >= 2,
-            "need at least 2 segments to validate overlap, got {}",
-            segment_ranges.len()
-        );
+        assert!(segment_ranges.len() >= 2);
         1
     };
     for i in 0..non_final_boundaries {
         let (_min_a, max_a) = segment_ranges[i];
         let (min_b, _max_b) = segment_ranges[i + 1];
 
-        // Overlap = how much of segment A's tail extends past segment B's start.
-        // If max_a > min_b, there's overlap.
         let overlap = if max_a > min_b {
             Duration::from_nanos(max_a - min_b)
         } else {
@@ -180,43 +242,28 @@ fn rotated_segments_have_bounded_time_overlap() {
         }
 
         let overlap_secs = overlap.as_secs_f64();
-        eprintln!(
-            "segments {i} → {}: overlap = {:.3}s (segment {i}: [{:.3}s, {:.3}s], segment {}: [{:.3}s, {:.3}s])",
-            i + 1,
-            overlap_secs,
-            segment_ranges[i].0 as f64 / 1e9,
-            segment_ranges[i].1 as f64 / 1e9,
-            i + 1,
-            segment_ranges[i + 1].0 as f64 / 1e9,
-            segment_ranges[i + 1].1 as f64 / 1e9,
-        );
+        eprintln!("segments {i} → {}: overlap = {:.3}s", i + 1, overlap_secs,);
 
         if overlap_secs > MAX_OVERLAP_SECS {
-            // Collect event types from segment A that bleed past segment B's start
             let late_in_a: Vec<_> = segment_events[i]
                 .iter()
-                .filter(|e| !matches!(e, TelemetryEvent::SegmentMetadata { .. }))
-                .filter(|e| e.timestamp_nanos().is_some_and(|t| t > min_b))
-                .map(|e| event_type_name(e))
+                .filter(|e| !e.is_segment_metadata())
+                .filter(|e| e.timestamp_ns().is_some_and(|t| t > min_b))
+                .map(|e| e.type_name())
                 .collect();
-            // Collect event types from segment B that precede segment A's end
             let early_in_b: Vec<_> = segment_events[i + 1]
                 .iter()
-                .filter(|e| !matches!(e, TelemetryEvent::SegmentMetadata { .. }))
-                .filter(|e| e.timestamp_nanos().is_some_and(|t| t < max_a))
-                .map(|e| event_type_name(e))
+                .filter(|e| !e.is_segment_metadata())
+                .filter(|e| e.timestamp_ns().is_some_and(|t| t < max_a))
+                .map(|e| e.type_name())
                 .collect();
             panic!(
-                "segment {i} → {} overlap is {:.3}s, exceeds {MAX_OVERLAP_SECS}s tolerance. \
-                 Segment {i} max={}, segment {} min={}\n\
+                "segment {i} → {} overlap is {:.3}s, exceeds {MAX_OVERLAP_SECS}s tolerance.\n\
                  Events in segment {i} past segment {} start ({} events): {:?}\n\
                  Events in segment {} before segment {i} end ({} events): {:?}\n\
                  Flush-thread metrics ({} entries):\n{}",
                 i + 1,
                 overlap_secs,
-                max_a,
-                i + 1,
-                min_b,
                 i + 1,
                 late_in_a.len(),
                 late_in_a,
@@ -234,25 +281,4 @@ fn rotated_segments_have_bounded_time_overlap() {
         max_observed_overlap.as_secs_f64(),
         non_final_boundaries
     );
-}
-
-fn event_type_name(event: &TelemetryEvent) -> &'static str {
-    match event {
-        TelemetryEvent::PollStart { .. } => "PollStart",
-        TelemetryEvent::PollEnd { .. } => "PollEnd",
-        TelemetryEvent::WorkerPark { .. } => "WorkerPark",
-        TelemetryEvent::WorkerUnpark { .. } => "WorkerUnpark",
-        TelemetryEvent::QueueSample { .. } => "QueueSample",
-        TelemetryEvent::TaskSpawn { .. } => "TaskSpawn",
-        TelemetryEvent::TaskTerminate { .. } => "TaskTerminate",
-        TelemetryEvent::CpuSample { .. } => "CpuSample",
-        TelemetryEvent::TaskDump { .. } => "TaskDump",
-        TelemetryEvent::Alloc { .. } => "Alloc",
-        TelemetryEvent::Free { .. } => "Free",
-        TelemetryEvent::ThreadNameDef { .. } => "ThreadNameDef",
-        TelemetryEvent::WakeEvent { .. } => "WakeEvent",
-        TelemetryEvent::SegmentMetadata { .. } => "SegmentMetadata",
-        TelemetryEvent::ClockSync { .. } => "ClockSync",
-        TelemetryEvent::Custom { .. } => "Custom",
-    }
 }

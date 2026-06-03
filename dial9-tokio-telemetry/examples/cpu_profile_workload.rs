@@ -10,8 +10,11 @@
 //!   echo 2 | sudo tee /proc/sys/kernel/perf_event_paranoid
 
 use dial9_tokio_telemetry::telemetry::{
-    DiskWriter, TelemetryEvent, TracedRuntime, cpu_profile::CpuProfilingConfig,
+    DiskWriter, TracedRuntime,
+    analysis_events::{CpuSampleSource, Dial9Event, WorkerId},
+    cpu_profile::CpuProfilingConfig,
 };
+use dial9_trace_format::decoder::Decoder;
 use std::time::Duration;
 
 fn burn_cpu(duration: Duration) {
@@ -76,46 +79,44 @@ fn main() {
         eprintln!("Worker shutdown warning: {e}");
     }
 
-    // Read back and report. TraceReader auto-detects gzip and parses
-    // SymbolTableEntry events into callframe_symbols.
+    // Read back and report
     eprintln!("\n=== Reading trace from {segment_path} ===");
-    let reader = dial9_tokio_telemetry::analysis_unstable::TraceReader::new(segment_path).unwrap();
-    let events = &reader.runtime_events;
-    let mut cpu_samples = 0;
-    let mut polls = 0;
-    let mut samples_by_worker: std::collections::HashMap<u64, usize> =
+    let data = std::fs::read(segment_path).unwrap();
+    let mut decoder = Decoder::new(&data).unwrap();
+
+    let mut cpu_samples = 0usize;
+    let mut polls = 0usize;
+    let mut samples_by_worker: std::collections::HashMap<WorkerId, usize> =
         std::collections::HashMap::new();
 
-    for event in events {
-        match event {
-            TelemetryEvent::CpuSample {
-                worker_id,
-                callchain,
-                timestamp_nanos,
-                source,
-                ..
-            } => {
-                cpu_samples += 1;
-                *samples_by_worker.entry(worker_id.as_u64()).or_default() += 1;
-                if cpu_samples <= 10 {
-                    eprintln!(
-                        "  CpuSample: worker={worker_id} t={timestamp_nanos}ns source={source:?} frames={}",
-                        callchain.len()
-                    );
-                    for (i, addr) in callchain.iter().take(8).enumerate() {
-                        eprintln!("    [{i}] {addr:#x}");
+    decoder
+        .for_each_event(|raw| {
+            let ev: Dial9Event = raw.deserialize().expect("deserialize");
+            match &ev {
+                Dial9Event::CpuSampleEvent(e) if e.source == CpuSampleSource::CpuProfile => {
+                    cpu_samples += 1;
+                    *samples_by_worker.entry(e.worker_id).or_default() += 1;
+                    if cpu_samples <= 10 {
+                        eprintln!(
+                            "  CpuSample: worker={} t={}ns source={:?} frames={}",
+                            e.worker_id,
+                            e.timestamp_ns,
+                            e.source,
+                            e.callchain.len()
+                        );
+                        for (i, addr) in e.callchain.iter().take(8).enumerate() {
+                            eprintln!("    [{i}] {addr:#x}");
+                        }
                     }
                 }
+                Dial9Event::PollStartEvent(_) => polls += 1,
+                _ => {}
             }
-            TelemetryEvent::PollStart { .. } => polls += 1,
-            _ => {}
-        }
-    }
+        })
+        .unwrap();
 
-    eprintln!("\nTotal events: {}", events.len());
-    eprintln!("Poll starts: {polls}");
+    eprintln!("\nPoll starts: {polls}");
     eprintln!("CPU samples: {cpu_samples}");
-    // eprintln!("Resolved symbols: {}", syms.len());
     for (worker, count) in &samples_by_worker {
         eprintln!("  worker {worker}: {count} samples");
     }

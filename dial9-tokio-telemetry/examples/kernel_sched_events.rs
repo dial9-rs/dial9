@@ -42,10 +42,9 @@
 //!   ...
 //!   start_thread
 
-use dial9_tokio_telemetry::analysis_unstable::TraceReader;
-use dial9_tokio_telemetry::telemetry::{
-    CpuSampleSource, DiskWriter, TelemetryEvent, TracedRuntime, cpu_profile::SchedEventConfig,
-};
+use dial9_tokio_telemetry::telemetry::analysis_events::{CpuSampleSource, Dial9Event};
+use dial9_tokio_telemetry::telemetry::{DiskWriter, TracedRuntime, cpu_profile::SchedEventConfig};
+use dial9_trace_format::decoder::Decoder;
 use std::time::Duration;
 
 async fn blocking_task(id: usize) {
@@ -88,33 +87,33 @@ fn main() {
 
     // Read back and print callchains
     eprintln!("\n=== Reading trace from {trace_read_path} ===");
-    let reader = TraceReader::new(&trace_read_path).unwrap();
-    let events = &reader.runtime_events;
+    let data = std::fs::read(&trace_read_path).unwrap();
+    let mut decoder = Decoder::new(&data).unwrap();
 
     let mut printed = 0;
     let mut total_samples = 0;
 
-    for event in events {
-        if let TelemetryEvent::CpuSample {
-            worker_id,
-            source,
-            callchain,
-            ..
-        } = event
-        {
-            if *source != CpuSampleSource::SchedEvent {
-                continue;
-            }
-            total_samples += 1;
-            if printed < 3 {
-                printed += 1;
-                eprintln!("\n--- SchedEvent sample #{printed} (worker {worker_id}) ---");
-                for addr in callchain {
-                    eprintln!("  {addr:#x}");
+    decoder
+        .for_each_event(|raw| {
+            let ev: Dial9Event = raw.deserialize().expect("deserialize");
+            if let Dial9Event::CpuSampleEvent(ref s) = ev {
+                if s.source != CpuSampleSource::SchedEvent {
+                    return;
+                }
+                total_samples += 1;
+                if printed < 3 {
+                    printed += 1;
+                    eprintln!(
+                        "\n--- SchedEvent sample #{printed} (worker {}) ---",
+                        s.worker_id
+                    );
+                    for addr in &s.callchain {
+                        eprintln!("  {addr:#x}");
+                    }
                 }
             }
-        }
-    }
+        })
+        .unwrap();
 
     eprintln!("\nTotal sched event samples: {total_samples}");
     if total_samples == 0 {

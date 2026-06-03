@@ -16,21 +16,23 @@
 
 mod common;
 
+use common::{BytesCapturingWriter, decode_all};
+use dial9_tokio_telemetry::telemetry::analysis_events::{CpuSampleSource, Dial9Event, WorkerId};
+
 #[test]
 fn cpu_sample_timestamps_align_with_wall_clock() {
     let _ = tracing_subscriber::fmt::try_init();
     use dial9_tokio_telemetry::telemetry::TracedRuntime;
-    use dial9_tokio_telemetry::telemetry::WorkerId;
+    use dial9_tokio_telemetry::telemetry::clock_monotonic_ns;
     use dial9_tokio_telemetry::telemetry::cpu_profile::CpuProfilingConfig;
-    use dial9_tokio_telemetry::telemetry::{CpuSampleSource, TelemetryEvent, clock_monotonic_ns};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
-    let (writer, events) = common::CapturingWriter::new();
+    let (writer, batches) = BytesCapturingWriter::new();
 
-    let num_workers = 2;
+    let num_workers = 2u64;
     let mut builder = tokio::runtime::Builder::new_multi_thread();
-    builder.worker_threads(num_workers).enable_all();
+    builder.worker_threads(num_workers as usize).enable_all();
 
     let (runtime, guard) = TracedRuntime::builder()
         .with_cpu_profiling(CpuProfilingConfig::default().frequency_hz(999))
@@ -58,32 +60,28 @@ fn cpu_sample_timestamps_align_with_wall_clock() {
             .await
             .unwrap();
         }
-        // Let flush cycle pick up all samples
         tokio::time::sleep(Duration::from_millis(500)).await;
     });
 
     drop(runtime);
     drop(guard);
 
-    let events = events.lock().unwrap();
+    let b = batches.lock().unwrap();
+    let events: Vec<Dial9Event> = decode_all(&b);
     let windows = burn_windows.lock().unwrap();
 
     // ── Extract CPU samples ────────────────────────────────────────────────
     let cpu_samples: Vec<(u64, WorkerId)> = events
         .iter()
         .filter_map(|e| match e {
-            TelemetryEvent::CpuSample {
-                timestamp_nanos,
-                worker_id,
-                source,
-                ..
-            } if *source == CpuSampleSource::CpuProfile => Some((*timestamp_nanos, *worker_id)),
+            Dial9Event::CpuSampleEvent(s) if s.source == CpuSampleSource::CpuProfile => {
+                Some((s.timestamp_ns, s.worker_id))
+            }
             _ => None,
         })
         .collect();
 
     let cpu_ts: Vec<u64> = cpu_samples.iter().map(|&(t, _)| t).collect();
-
     assert!(!cpu_ts.is_empty(), "expected CPU profile samples");
 
     // ── Build poll intervals: (poll_start_ns, poll_end_ns, worker_id) ─────
@@ -95,21 +93,14 @@ fn cpu_sample_timestamps_align_with_wall_clock() {
     {
         // worker_id → poll_start_ns
         let mut open: std::collections::HashMap<WorkerId, u64> = std::collections::HashMap::new();
-        for event in events.iter() {
+        for event in &events {
             match event {
-                TelemetryEvent::PollStart {
-                    timestamp_nanos,
-                    worker_id,
-                    ..
-                } => {
-                    open.insert(*worker_id, *timestamp_nanos);
+                Dial9Event::PollStartEvent(e) => {
+                    open.insert(e.worker_id, e.timestamp_ns);
                 }
-                TelemetryEvent::PollEnd {
-                    timestamp_nanos,
-                    worker_id,
-                } => {
-                    if let Some(start) = open.remove(worker_id) {
-                        poll_intervals.push((start, *timestamp_nanos, *worker_id));
+                Dial9Event::PollEndEvent(e) => {
+                    if let Some(start) = open.remove(&e.worker_id) {
+                        poll_intervals.push((start, e.timestamp_ns, e.worker_id));
                     }
                 }
                 _ => {}
@@ -176,7 +167,6 @@ fn cpu_sample_timestamps_align_with_wall_clock() {
                 "  burn window {i} owned by worker {expected_worker} \
                  (poll [{ps}..{pe}])"
             );
-
             // Every sample that falls inside this burn window must come from
             // `expected_worker`.  A sample from a different worker would mean
             // the profiler mis-attributed the sample.
@@ -256,13 +246,11 @@ fn burn_cpu(duration: std::time::Duration) {
 #[test]
 fn thread_name_attribution_for_external_and_blocking_threads() {
     let _ = tracing_subscriber::fmt::try_init();
-    use dial9_tokio_telemetry::telemetry::TelemetryEvent;
     use dial9_tokio_telemetry::telemetry::TracedRuntime;
-    use dial9_tokio_telemetry::telemetry::WorkerId;
     use dial9_tokio_telemetry::telemetry::cpu_profile::CpuProfilingConfig;
     use std::time::Duration;
 
-    let (writer, events) = common::CapturingWriter::new();
+    let (writer, batches) = BytesCapturingWriter::new();
 
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder
@@ -285,7 +273,7 @@ fn thread_name_attribution_for_external_and_blocking_threads() {
     let blocking_handle = runtime.spawn(async {
         tokio::task::spawn_blocking(|| burn_cpu(Duration::from_millis(400)));
         tokio::task::spawn_blocking(|| {
-            let tid = nix::unistd::gettid().as_raw() as u32; // p_tid is i32
+            let tid = nix::unistd::gettid().as_raw() as u32;
             burn_cpu(Duration::from_millis(400));
             tid
         })
@@ -304,20 +292,18 @@ fn thread_name_attribution_for_external_and_blocking_threads() {
     drop(runtime);
     guard.graceful_shutdown(Duration::from_secs(1)).unwrap();
 
-    let events = events.lock().unwrap();
+    let b = batches.lock().unwrap();
+    let events: Vec<Dial9Event> = decode_all(&b);
 
     // ── Collect thread names from CpuSample events ─────────────────────
     let thread_defs: Vec<(u32, &str)> = events
         .iter()
         .filter_map(|e| match e {
-            TelemetryEvent::CpuSample {
-                tid, thread_name, ..
-            } => thread_name.as_deref().map(|name| (*tid, name)),
+            Dial9Event::CpuSampleEvent(s) => s.thread_name.as_deref().map(|name| (s.tid, name)),
             _ => None,
         })
         .collect();
 
-    // Deduplicate for display
     let unique_defs: std::collections::HashMap<u32, &str> = thread_defs.iter().copied().collect();
     eprintln!("Thread names from CpuSample events: {unique_defs:?}");
 
@@ -342,12 +328,11 @@ fn thread_name_attribution_for_external_and_blocking_threads() {
     // ── Verify CpuSamples exist for both tids with expected worker ids ────────────────────────────
     let ext_samples: Vec<_> = events
         .iter()
-        .filter(|e| matches!(e, TelemetryEvent::CpuSample { tid, worker_id, .. } if *tid == ext_tid && *worker_id == WorkerId::UNKNOWN))
+        .filter(|e| {
+            matches!(e, Dial9Event::CpuSampleEvent(s)
+            if s.tid == ext_tid && s.worker_id == WorkerId::UNKNOWN)
+        })
         .collect();
-    eprintln!(
-        "CPU samples for ext thread (tid={ext_tid}): {}",
-        ext_samples.len()
-    );
     assert!(
         !ext_samples.is_empty(),
         "expected CPU samples for external thread tid={ext_tid}"
@@ -355,12 +340,11 @@ fn thread_name_attribution_for_external_and_blocking_threads() {
 
     let blocking_samples: Vec<_> = events
         .iter()
-        .filter(|e| matches!(e, TelemetryEvent::CpuSample { tid, worker_id, .. } if *tid == blocking_tid && *worker_id == WorkerId::BLOCKING))
+        .filter(|e| {
+            matches!(e, Dial9Event::CpuSampleEvent(s)
+            if s.tid == blocking_tid && s.worker_id == WorkerId::BLOCKING)
+        })
         .collect();
-    eprintln!(
-        "CPU samples for blocking thread (tid={blocking_tid}): {}",
-        blocking_samples.len()
-    );
     assert!(
         !blocking_samples.is_empty(),
         "expected CPU samples for blocking thread tid={blocking_tid}"

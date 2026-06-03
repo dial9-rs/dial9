@@ -9,7 +9,7 @@ use dial9_tokio_telemetry::telemetry::TracedRuntime;
 
 #[test]
 fn second_install_returns_already_installed() {
-    let (writer, _events) = common::CapturingWriter::new();
+    let (writer, _batches) = common::BytesCapturingWriter::new();
 
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.worker_threads(1).enable_all();

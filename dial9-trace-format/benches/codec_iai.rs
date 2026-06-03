@@ -21,6 +21,7 @@ use iai_callgrind::{library_benchmark, library_benchmark_group, main};
 use std::hint::black_box;
 
 #[derive(TraceEvent)]
+#[traceevent(wire_slot)]
 struct PollStart {
     #[traceevent(timestamp)]
     timestamp_ns: u64,
@@ -30,12 +31,14 @@ struct PollStart {
     spawn_loc_id: u64,
 }
 #[derive(TraceEvent)]
+#[traceevent(wire_slot)]
 struct PollEnd {
     #[traceevent(timestamp)]
     timestamp_ns: u64,
     worker_id: u64,
 }
 #[derive(TraceEvent)]
+#[traceevent(wire_slot)]
 struct WorkerPark {
     #[traceevent(timestamp)]
     timestamp_ns: u64,
@@ -44,6 +47,7 @@ struct WorkerPark {
     cpu_time_ns: u64,
 }
 #[derive(TraceEvent)]
+#[traceevent(wire_slot)]
 struct WakeEvent {
     #[traceevent(timestamp)]
     timestamp_ns: u64,
@@ -52,6 +56,7 @@ struct WakeEvent {
     target_worker: u64,
 }
 #[derive(TraceEvent)]
+#[traceevent(wire_slot)]
 struct CpuSample {
     #[traceevent(timestamp)]
     timestamp_ns: u64,

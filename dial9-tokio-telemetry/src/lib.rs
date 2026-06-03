@@ -8,9 +8,6 @@
 #![deny(unused_must_use, unsafe_op_in_unsafe_fn)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
-#[cfg(feature = "analysis")]
-/// Unstable analysis APIs (feature-gated).
-pub mod analysis_unstable;
 /// Background worker pipeline for processing sealed trace segments.
 pub mod background_task;
 #[cfg(feature = "memory-profiling")]
