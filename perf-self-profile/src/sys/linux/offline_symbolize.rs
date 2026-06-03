@@ -32,9 +32,6 @@ impl SymbolizeContainers {
 
     pub(crate) fn clear(&mut self) {
         self.kernel_addrs.clear();
-        for v in self.user_groups.values_mut() {
-            v.clear();
-        }
         self.user_groups.clear();
         self.offsets.clear();
         self.addrs.clear();
