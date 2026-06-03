@@ -155,8 +155,8 @@ impl Default for SchemaRegistry {
     fn default() -> Self {
         Self {
             schemas: FxHashMap::default(),
-            // `0..STATIC_WIRE_ID_LIMIT` is reserved for `#[traceevent(wire_id)]`
-            // events; dynamic registration starts here.
+            // `0..STATIC_WIRE_ID_LIMIT` is reserved for fast-path slot ids,
+            // dynamic registration starts here.
             next_id: crate::STATIC_WIRE_ID_LIMIT,
         }
     }

@@ -21,19 +21,6 @@ fn derive_trace_event_impl(input: DeriveInput) -> proc_macro2::TokenStream {
         _ => panic!("TraceEvent can only be derived for structs"),
     };
 
-    // Parse struct-level #[traceevent(wire_id = <expr>)].
-    let mut static_wire_id: Option<syn::Expr> = None;
-    for attr in &input.attrs {
-        if attr.path().is_ident("traceevent") {
-            let _ = attr.parse_nested_meta(|meta| {
-                if meta.path.is_ident("wire_id") {
-                    static_wire_id = Some(meta.value()?.parse()?);
-                }
-                Ok(())
-            });
-        }
-    }
-
     // Find the field marked with #[traceevent(timestamp)]
     let mut timestamp_field_name = None;
     let mut timestamp_doc_attrs = Vec::new();
@@ -139,27 +126,7 @@ fn derive_trace_event_impl(input: DeriveInput) -> proc_macro2::TokenStream {
         quote! {}
     };
 
-    // `STATIC_WIRE_ID` const and const range check.
-    let (static_wire_id_const, static_wire_id_assert) = if let Some(expr) = &static_wire_id {
-        (
-            quote! {
-                const STATIC_WIRE_ID: ::std::option::Option<u16> =
-                    ::std::option::Option::Some((#expr) as u16);
-            },
-            quote! {
-                const _: () = ::std::assert!(
-                    ((#expr) as u16) < ::dial9_trace_format::STATIC_WIRE_ID_LIMIT,
-                    "wire_id must be < STATIC_WIRE_ID_LIMIT",
-                );
-            },
-        )
-    } else {
-        (quote! {}, quote! {})
-    };
-
     quote! {
-        #static_wire_id_assert
-
         #(#struct_doc_attrs)*
         #[derive(Debug, Clone)]
         #vis struct #ref_name<'a> {
@@ -170,8 +137,6 @@ fn derive_trace_event_impl(input: DeriveInput) -> proc_macro2::TokenStream {
 
         impl ::dial9_trace_format::TraceEvent for #name {
             type Ref<'a> = #ref_name<'a>;
-
-            #static_wire_id_const
 
             fn event_name() -> &'static str { #name_str }
             fn type_slot() -> u16 {
@@ -250,19 +215,6 @@ mod tests {
             struct EmptyEvent {
                 #[traceevent(timestamp)]
                 timestamp_ns: u64,
-            }
-        }));
-    }
-
-    #[test]
-    fn static_wire_id_event() {
-        // wire_id sets STATIC_WIRE_ID and emits a const range assert.
-        assert_snapshot!(expand_to_string(quote! {
-            #[traceevent(wire_id = 7)]
-            struct WireIdEvent {
-                #[traceevent(timestamp)]
-                timestamp_ns: u64,
-                value: u32,
             }
         }));
     }

@@ -40,8 +40,8 @@ pub use types::TraceField;
 use schema::{FieldDef, SchemaEntry};
 use types::FieldValueRef;
 
-/// Wire IDs `0..STATIC_WIRE_ID_LIMIT` are reserved for events that declare a
-/// fixed ID via `#[traceevent(wire_id = N)]`, dynamic registration starts here.
+/// Type slots `1..STATIC_WIRE_ID_LIMIT` double as wire IDs and take the inline
+/// fast path in the encoder, dynamic registration starts here.
 pub const STATIC_WIRE_ID_LIMIT: u16 = 256;
 
 /// Global counter for assigning dense type slots to `TraceEvent` impls.
@@ -54,15 +54,10 @@ pub trait TraceEvent {
     /// Decoded form of this event, potentially borrowing from the input buffer.
     type Ref<'a>;
 
-    /// Fixed wire ID in `0..STATIC_WIRE_ID_LIMIT`, set via
-    /// `#[traceevent(wire_id = N)]`. When `Some`, the encoder registers the
-    /// schema at that exact ID and uses it directly on the hot path.
-    /// `None` (default) means a dynamic ID is assigned.
-    const STATIC_WIRE_ID: Option<u16> = None;
-
-    /// Per-type dense slot letting encoders cache the wire ID.
-    /// The default returns 0 ("no slot", always the slow path), the derive overrides it
-    /// to lazily allocate a unique slot from [`__NEXT_TYPE_SLOT`] on first call.
+    /// Per-type dense slot, lazily assigned from [`__NEXT_TYPE_SLOT`] on first
+    /// call. Doubles as the wire ID: slots in `1..STATIC_WIRE_ID_LIMIT` use the
+    /// encoder's inline fast path, the rest fall back to dynamic registration.
+    /// The default returns 0 (no slot), the derive overrides it.
     fn type_slot() -> u16 {
         0
     }
