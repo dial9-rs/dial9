@@ -723,10 +723,10 @@ mod tests {
                 }
                 _ => None,
             };
-            if let Some(id) = wid {
-                if id != crate::telemetry::analysis_events::WorkerId::UNKNOWN {
-                    worker_ids.insert(id.as_u64());
-                }
+            if let Some(id) = wid
+                && id != crate::telemetry::analysis_events::WorkerId::UNKNOWN
+            {
+                worker_ids.insert(id.as_u64());
             }
         }
 
@@ -1230,10 +1230,10 @@ mod tests {
         let captured = crate::telemetry::format::decode_events(&raw).unwrap();
         let mut worker_ids: HashSet<u64> = HashSet::new();
         for event in &captured {
-            if let crate::telemetry::analysis_events::Dial9Event::PollStartEvent(e) = event {
-                if e.worker_id != crate::telemetry::analysis_events::WorkerId::UNKNOWN {
-                    worker_ids.insert(e.worker_id.as_u64());
-                }
+            if let crate::telemetry::analysis_events::Dial9Event::PollStartEvent(e) = event
+                && e.worker_id != crate::telemetry::analysis_events::WorkerId::UNKNOWN
+            {
+                worker_ids.insert(e.worker_id.as_u64());
             }
         }
 
