@@ -7,12 +7,15 @@
 
 use dial9_trace_format::{
     decoder::{Decoder, StackPool},
-    encoder::FxHashSet,
+    encoder::FxBuildHasher,
     types::{FieldValueRef, InternedString},
 };
+use std::collections::HashSet;
 use std::io::{self, Write};
 
 use crate::MapsEntry;
+
+type FxHashSet<T> = HashSet<T, FxBuildHasher>;
 
 /// Schema-based event for resolved symbol table entries.
 ///

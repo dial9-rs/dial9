@@ -1508,7 +1508,7 @@ dependencies = [
 
 [[package]]
 name = "dial9-perf-self-profile"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "blazesym",
  "bytes",

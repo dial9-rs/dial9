@@ -2,8 +2,11 @@
 
 use blazesym::symbolize::{Input, Symbolized, Symbolizer, source};
 use dial9_trace_format::decoder::Decoder;
-use dial9_trace_format::encoder::{Encoder, FxHashMap, FxHashSet};
+use dial9_trace_format::encoder::{Encoder, FxBuildHasher, FxHashMap};
+use std::collections::HashSet;
 use std::io::{self, Write};
+
+type FxHashSet<T> = HashSet<T, FxBuildHasher>;
 
 use super::USER_ADDR_LIMIT;
 use crate::MapsEntry;
