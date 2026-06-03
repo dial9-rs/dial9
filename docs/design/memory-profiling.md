@@ -762,21 +762,50 @@ guard.graceful_shutdown(Duration::from_secs(5))?;
 
 ## 7. Liveset tracking
 
-When `track_liveset = true`, the **consolidator thread** maintains:
+When `track_liveset = true`, the **producer-side liveset** maintains a
+concurrent `scc::HashIndex<u64, (u64, u64)>` mapping each sampled
+allocation address to its `(size, timestamp_ns)`:
 
 ```rust
-struct LivesetEntry {
-    size: u64,
-    timestamp_ns: u64,
-}
-
-// Single-threaded — only the consolidator reads or writes it.
-liveset: HashMap<usize, LivesetEntry>,
+// Shared across all producer threads via Arc. Only present when
+// track_liveset is true; None otherwise (zero overhead).
+liveset: Option<Arc<scc::HashIndex<u64, (u64, u64)>>>
 ```
 
-The liveset is a plain `HashMap` because only the consolidator touches
-it. Producers push `RawFree` records into the free queue and never
-access the liveset directly — no synchronization needed.
+### Producer-side filtering
+
+On every `alloc` that fires the sampler, the hook inserts the address into
+the liveset. On every `dealloc`, the hook checks whether the address is in
+the liveset:
+
+- **Hit:** remove the entry, push a `RawFree` with denormalized `size` and
+  `alloc_ts_ns` into the free queue. The consolidator emits `FreeEvent`
+  directly — no second lookup needed.
+- **Miss (~99.9% of deallocs):** the address was never sampled. No queue
+  push, no contention. This is the key performance win: the old design
+  pushed every dealloc into the free queue and filtered on the consolidator,
+  causing ~84% CPU in the profiler under contention.
+
+### OPT_OUT TLS sentinel
+
+`scc` (via `sdd`) uses TLS internally. If the allocator hook is called
+during thread teardown after `sdd`'s TLS slot has been destroyed, the `scc`
+operation would panic. The **OPT_OUT sentinel** eliminates this without
+`catch_unwind`:
+
+```rust
+thread_local! {
+    static IS_SHUTTING_DOWN: Cell<bool> = const { Cell::new(false) };
+    static LIFETIME_GUARD: Lifetime = const { Lifetime };
+}
+// Lifetime::drop sets IS_SHUTTING_DOWN = true.
+// check_shutdown() reads IS_SHUTTING_DOWN; if true, bails out.
+```
+
+Because `LIFETIME_GUARD` is initialized before `sdd`'s TLS (on the first
+hook entry), it drops *after* `sdd`'s destructor runs. Any subsequent hook
+entry sees the flag and returns without touching `scc`. Cost: ~1 ns
+(one TLS Cell read + branch).
 
 ### Bounded liveset
 
@@ -789,31 +818,23 @@ Default: `None` (unbounded). Users opt in to a cap.
 
 ### Memory cost
 
-~32 bytes per live sampled allocation (16 B entry + 16 B HashMap
-overhead). At default 512 KiB sample rate and 1 GiB live heap: ~2K
-entries → ~64 KiB. At 10 GiB live heap: ~20K entries → ~640 KiB.
+~64 bytes per entry in `scc::HashIndex`. At default 512 KiB sample rate
+and 1 GiB live heap: ~2K entries → ~128 KiB. At 10 GiB live heap: ~20K
+entries → ~1.3 MiB.
 
-### Dealloc overhead
+### Performance
 
-Pushing `RawFree` records costs ~9.3 ns uncontended per dealloc. The
-MPMC queue saturates at ~2.7 M pushes/sec aggregate under heavy
-contention. For services with 10M+ deallocs/sec, a producer-side
-optimization is needed:
+| Metric | Old (consolidator-side) | New (producer-side scc) |
+|--------|------------------------|------------------------|
+| 8-thread ops/s | 1.79 M | 13.9 M |
+| Profiler CPU share | 84.2% | 10.6% |
+| Unsampled dealloc cost | ~9.3 ns (queue push) | ~20 ns (HashIndex miss) |
+| Sampled dealloc cost | ~9.3 ns + consolidator lookup | ~25 ns (peek + remove + push) |
 
-- **Per-thread free buffer:** batch frees in a TLS `[RawFree; 64]`
-  array; flush to the free queue every 64 frees. Converts 64 contended
-  pushes into 1.
-- **Producer-side bloom filter:** test whether the address was sampled
-  (~5 ns hash + bit-check) before pushing; 99.9% of deallocs skip the
-  push entirely.
-
-Pick at implementation time based on whether production workloads show
-actual contention. Consolidator-side `HashMap` miss for unsampled
-addresses is ~10–20 ns — not worth optimizing until profiling shows
-otherwise.
-
-Liveset is off by default because even 9.3 ns per dealloc adds up on
-dealloc-heavy workloads.
+The throughput improvement comes from eliminating 99.9% of queue pushes.
+Single-threaded per-op cost is higher (due to epoch-based reclamation
+bookkeeping), but under contention the reduction in CAS retries at the
+queue tail dominates.
 
 ---
 

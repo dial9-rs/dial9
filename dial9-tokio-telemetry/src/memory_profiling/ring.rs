@@ -49,11 +49,19 @@ impl RawAlloc {
 }
 
 /// One free captured on the producer thread when liveset tracking is on.
+///
+/// With the producer-side liveset, `size` and `alloc_ts_ns` are denormalized
+/// from the liveset entry so the consolidator can emit `FreeEvent` directly
+/// without a second lookup.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct RawFree {
     pub(crate) tid: u32,
     pub(crate) addr: u64,
     pub(crate) ts_ns: u64,
+    /// Size of the original sampled allocation (denormalized from liveset).
+    pub(crate) size: u64,
+    /// Timestamp of the original sampled allocation (denormalized from liveset).
+    pub(crate) alloc_ts_ns: u64,
 }
 
 /// Process-global pair of lock-free queues for the memory profiler.

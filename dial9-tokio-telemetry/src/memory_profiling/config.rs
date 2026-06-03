@@ -85,14 +85,10 @@ pub struct MemoryProfilingConfig {
 
     /// Whether to track the liveset for leak detection. Default `false`.
     ///
-    /// When enabled, a `RawFree` is pushed into the free queue on
-    /// **every** deallocation (not just sampled ones). At very high
-    /// dealloc rates the free queue can overflow; overflowed frees are
-    /// silently dropped (counted in `dropped_frees`). A dropped free
-    /// for a previously-sampled allocation means its liveset entry
-    /// persists, inflating the reported live set until the next flush
-    /// cycle or process exit. Size the `ring_capacity` accordingly for
-    /// high-throughput services.
+    /// When enabled, a producer-side `scc::HashIndex` tracks sampled
+    /// allocations. On dealloc, only addresses present in the liveset
+    /// (i.e. previously sampled) produce a `RawFree` — ~99.9% of deallocs
+    /// are filtered on the producer side with no queue contention.
     #[builder(default = false)]
     track_liveset: bool,
 

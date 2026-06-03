@@ -22,6 +22,17 @@ pub(crate) struct MemoryProfilerInner {
     pub(crate) rings: Arc<RingBuffers>,
     pub(crate) sample_rate_bytes: u64,
     pub(crate) track_liveset: bool,
+    /// Producer-side liveset: maps allocation address → (size, timestamp_ns).
+    /// `None` when `track_liveset` is false, avoiding any overhead.
+    ///
+    /// **Known limitation:** the map is currently unbounded. A service that
+    /// leaks sampled allocations indefinitely will grow this map without
+    /// limit. The size is bounded in practice by the live sampled allocation
+    /// count: at the default 512 KiB sample rate and a 10 GiB live heap,
+    /// expect ~20K entries (≈1.3 MiB including scc overhead). Adding a
+    /// `max_liveset_entries` cap is tracked as a follow-up; see
+    /// `docs/design/memory-profiling.md` §7.
+    pub(crate) liveset: Option<Arc<scc::HashIndex<u64, (u64, u64)>>>,
     pub(crate) timestamp_mode: TimestampMode,
     pub(crate) rng_seed: Option<u64>,
 }
@@ -132,12 +143,19 @@ impl MemoryProfiler {
             self.config.ring_capacity() * 8,
         ));
 
+        let liveset = if self.config.track_liveset() {
+            Some(Arc::new(scc::HashIndex::new()))
+        } else {
+            None
+        };
+
         let inner = MemoryProfilerInner {
             unwinder,
             handle: handle.clone(),
             rings: Arc::clone(&rings),
             sample_rate_bytes: self.config.sample_rate_bytes(),
             track_liveset: self.config.track_liveset(),
+            liveset,
             timestamp_mode: self.config.timestamp_mode(),
             rng_seed: self.config.rng_seed(),
         };

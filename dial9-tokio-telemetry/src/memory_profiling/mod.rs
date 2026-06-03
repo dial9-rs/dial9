@@ -28,6 +28,7 @@
 mod allocator;
 mod config;
 mod hook;
+mod opt_out;
 mod profiler;
 mod ring;
 mod source;

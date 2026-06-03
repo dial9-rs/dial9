@@ -194,24 +194,49 @@ pub(crate) fn on_alloc(inner: &MemoryProfilerInner, ptr: *mut u8, size: usize) {
         };
 
         inner.rings.push_alloc(sample);
+
+        // Insert into the producer-side liveset OUTSIDE the RefCell borrow.
+        // The borrow is still held (we're inside the try_with closure), but
+        // scc::HashIndex::insert is allocation-free on the hot path (it uses
+        // epoch-based reclamation internally with no heap allocation per insert
+        // on the common path).
+        #[allow(clippy::collapsible_if)]
+        if let Some(liveset) = &inner.liveset {
+            if !crate::memory_profiling::opt_out::check_shutdown() {
+                let _ = liveset.insert(ptr as u64, (size as u64, timestamp_ns));
+            }
+        }
     });
 }
 
-/// Allocator hook for dealloc. No-op when liveset tracking is off.
+/// Allocator hook for dealloc. With the producer-side liveset, only pushes
+/// a `RawFree` if the address was previously sampled (filtering ~99.9% of
+/// deallocs on the producer side).
 ///
 /// SAFETY: must be allocation-free — see module docs.
 #[inline]
 pub(crate) fn on_dealloc(inner: &MemoryProfilerInner, ptr: *mut u8, _size: usize) {
-    if !inner.track_liveset {
+    let Some(liveset) = &inner.liveset else {
+        return;
+    };
+    if crate::memory_profiling::opt_out::check_shutdown() {
         return;
     }
-    let timestamp_ns = stamp(inner.timestamp_mode);
-    let sample = RawFree {
-        tid: current_tid(),
-        addr: ptr as u64,
-        ts_ns: timestamp_ns,
-    };
-    inner.rings.push_free(sample);
+    let addr = ptr as u64;
+    // peek_with returns Some if the address is in the liveset (was sampled).
+    // On hit, remove it and push a RawFree with the denormalized metadata.
+    let entry = liveset.peek_with(&addr, |_, v| *v);
+    if let Some((size, alloc_ts_ns)) = entry {
+        liveset.remove(&addr);
+        let sample = RawFree {
+            tid: current_tid(),
+            addr,
+            ts_ns: stamp(inner.timestamp_mode),
+            size,
+            alloc_ts_ns,
+        };
+        inner.rings.push_free(sample);
+    }
 }
 
 /// Allocator hook for realloc. Decomposes into free-of-old +
@@ -298,6 +323,7 @@ mod tests {
             rings,
             sample_rate_bytes,
             track_liveset: false,
+            liveset: None,
             timestamp_mode: TimestampMode::None,
             rng_seed: Some(0),
         }
