@@ -21,6 +21,21 @@ fn derive_trace_event_impl(input: DeriveInput) -> proc_macro2::TokenStream {
         _ => panic!("TraceEvent can only be derived for structs"),
     };
 
+    // Parse struct-level #[traceevent(wire_slot)]: opt this type into the
+    // encoder's inline fast path (a global slot doubling as wire id). Off by
+    // default.
+    let mut wire_slot = false;
+    for attr in &input.attrs {
+        if attr.path().is_ident("traceevent") {
+            let _ = attr.parse_nested_meta(|meta| {
+                if meta.path.is_ident("wire_slot") {
+                    wire_slot = true;
+                }
+                Ok(())
+            });
+        }
+    }
+
     // Find the field marked with #[traceevent(timestamp)]
     let mut timestamp_field_name = None;
     let mut timestamp_doc_attrs = Vec::new();
@@ -126,19 +141,10 @@ fn derive_trace_event_impl(input: DeriveInput) -> proc_macro2::TokenStream {
         quote! {}
     };
 
-    quote! {
-        #(#struct_doc_attrs)*
-        #[derive(Debug, Clone)]
-        #vis struct #ref_name<'a> {
-            #ref_timestamp_field
-            #(#ref_fields,)*
-            #phantom_field
-        }
-
-        impl ::dial9_trace_format::TraceEvent for #name {
-            type Ref<'a> = #ref_name<'a>;
-
-            fn event_name() -> &'static str { #name_str }
+    // `#[traceevent(wire_slot)]` types override `type_slot()`. Without it
+    // the trait default returns 0 and the encoder uses the dynamic path.
+    let type_slot_impl = if wire_slot {
+        quote! {
             fn type_slot() -> u16 {
                 static SLOT: ::std::sync::atomic::AtomicU16 =
                     ::std::sync::atomic::AtomicU16::new(0);
@@ -158,6 +164,25 @@ fn derive_trace_event_impl(input: DeriveInput) -> proc_macro2::TokenStream {
                     Err(existing) => existing,
                 }
             }
+        }
+    } else {
+        quote! {}
+    };
+
+    quote! {
+        #(#struct_doc_attrs)*
+        #[derive(Debug, Clone)]
+        #vis struct #ref_name<'a> {
+            #ref_timestamp_field
+            #(#ref_fields,)*
+            #phantom_field
+        }
+
+        impl ::dial9_trace_format::TraceEvent for #name {
+            type Ref<'a> = #ref_name<'a>;
+
+            fn event_name() -> &'static str { #name_str }
+            #type_slot_impl
             fn field_defs() -> Vec<::dial9_trace_format::schema::FieldDef> {
                 vec![#(#field_def_tokens),*]
             }
@@ -253,6 +278,18 @@ mod tests {
                 worker_id: u64,
                 /// Number of items in the local queue.
                 local_queue: u8,
+            }
+        }));
+    }
+
+    #[test]
+    fn wire_slot_event() {
+        assert_snapshot!(expand_to_string(quote! {
+            #[traceevent(wire_slot)]
+            struct WireSlotEvent {
+                #[traceevent(timestamp)]
+                timestamp_ns: u64,
+                value: u32,
             }
         }));
     }

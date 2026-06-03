@@ -1,16 +1,38 @@
 ---
 source: dial9-trace-format-derive/src/lib.rs
-expression: "expand_to_string(quote!\n{\n    struct SimpleEvent\n    { #[traceevent(timestamp)] timestamp_ns: u64, value: u32, }\n})"
+expression: "expand_to_string(quote!\n{\n    #[traceevent(wire_slot)] struct WireSlotEvent\n    { #[traceevent(timestamp)] timestamp_ns: u64, value: u32, }\n})"
 ---
 #[derive(Debug, Clone)]
-struct SimpleEventRef<'a> {
+struct WireSlotEventRef<'a> {
     pub timestamp_ns: u64,
     pub value: <u32 as ::dial9_trace_format::TraceField>::Ref<'a>,
 }
-impl ::dial9_trace_format::TraceEvent for SimpleEvent {
-    type Ref<'a> = SimpleEventRef<'a>;
+impl ::dial9_trace_format::TraceEvent for WireSlotEvent {
+    type Ref<'a> = WireSlotEventRef<'a>;
     fn event_name() -> &'static str {
-        "SimpleEvent"
+        "WireSlotEvent"
+    }
+    fn type_slot() -> u16 {
+        static SLOT: ::std::sync::atomic::AtomicU16 = ::std::sync::atomic::AtomicU16::new(
+            0,
+        );
+        let cached = SLOT.load(::std::sync::atomic::Ordering::Relaxed);
+        if cached != 0 {
+            return cached;
+        }
+        let new = ::dial9_trace_format::__NEXT_TYPE_SLOT
+            .fetch_add(1, ::std::sync::atomic::Ordering::Relaxed);
+        match SLOT
+            .compare_exchange(
+                0,
+                new,
+                ::std::sync::atomic::Ordering::Relaxed,
+                ::std::sync::atomic::Ordering::Relaxed,
+            )
+        {
+            Ok(_) => new,
+            Err(existing) => existing,
+        }
     }
     fn field_defs() -> Vec<::dial9_trace_format::schema::FieldDef> {
         vec![
@@ -33,7 +55,7 @@ impl ::dial9_trace_format::TraceEvent for SimpleEvent {
         fields: &[::dial9_trace_format::types::FieldValueRef<'a>],
         field_defs: &[::dial9_trace_format::schema::FieldDef],
     ) -> Option<Self::Ref<'a>> {
-        Some(SimpleEventRef {
+        Some(WireSlotEventRef {
             timestamp_ns: timestamp_ns?,
             value: {
                 let val = field_defs
