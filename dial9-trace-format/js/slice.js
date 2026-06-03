@@ -78,6 +78,8 @@ function sliceTrace(input, opts) {
   for (let i = 0; i < 4; i++) {
     if (buf[i] !== MAGIC[i]) throw new Error("Invalid trace magic");
   }
+  const version = buf[4];
+  if (version < 1 || version > 127) throw new Error(`Unsupported trace version: ${version}`);
   copyBytes(0, 5);
   pos = 5;
 
@@ -468,6 +470,10 @@ Examples:
 
   # Relative (offsets from trace start — typically 9-10 digit numbers):
   node slice.js --input full.bin --output burst.bin --relative --start 3900000000 --end 4050000000`);
+    process.exit(1);
+  }
+  if (startNs != null && endNs != null && BigInt(startNs) > BigInt(endNs)) {
+    console.error("Error: --start must be <= --end");
     process.exit(1);
   }
   const input = fs.readFileSync(inputPath);
