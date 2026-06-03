@@ -241,7 +241,7 @@ impl<P, M, Mode: WriterMode> TracedRuntimeBuilder<P, M, Mode> {
         )
     }
 
-    pub(super) fn into_state<Q, N, NewMode: WriterMode>(
+    pub(crate) fn into_state<Q, N, NewMode: WriterMode>(
         self,
     ) -> TracedRuntimeBuilder<Q, N, NewMode> {
         TracedRuntimeBuilder {
@@ -970,10 +970,9 @@ impl TracedRuntime {
 /// Errors produced while constructing a [`TracedRuntime`] from a
 /// [`crate::Dial9Config`].
 ///
-/// Writer-transport I/O has already been validated by
-/// [`crate::Dial9ConfigBuilder::build`], so the only remaining failure
-/// modes here come from the tokio runtime builder and the telemetry
-/// background worker startup.
+/// Writer-transport I/O has already been validated by the config builder's
+/// strict `build`, so the only remaining failure modes here come from the
+/// tokio runtime builder and the telemetry background worker startup.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum TelemetryRuntimeError {
@@ -1005,11 +1004,9 @@ impl std::error::Error for TelemetryRuntimeError {
 
 /// Drive a [`crate::current_config::Inner`] to a tokio runtime + guard.
 ///
-/// `Inner::Enabled` already carries a built [`DiskWriter`], so this
-/// only needs to materialize the tokio builder and hand both off to
-/// [`TracedRuntimeBuilder::build_and_start`]. `Inner::Disabled`
-/// produces a plain tokio runtime paired with a disabled
-/// [`TelemetryGuard`].
+/// `Inner::Enabled` carries a `runtime_builder` that already owns its
+/// writer, so this only materializes the tokio builder and starts it.
+/// `Inner::Disabled` produces a plain tokio runtime paired with a disabled [`TelemetryGuard`].
 fn try_assemble_dial9_config(
     inner: crate::current_config::Inner,
 ) -> Result<(tokio::runtime::Runtime, TelemetryGuard), TelemetryRuntimeError> {
@@ -1017,13 +1014,12 @@ fn try_assemble_dial9_config(
 
     match inner {
         Inner::Enabled {
-            writer,
             tokio_configurators,
             runtime_builder,
         } => {
             let tokio_builder = materialize_tokio_builder(&tokio_configurators);
             let (runtime, guard) = runtime_builder
-                .build_and_start(tokio_builder, writer)
+                .build_and_start(tokio_builder)
                 .map_err(TelemetryRuntimeError::TelemetryCore)?;
             Ok((runtime, guard))
         }
@@ -1062,10 +1058,9 @@ impl TracedRuntime {
     /// runtime cannot be built or the telemetry background worker fails
     /// to start. When constructing from the fluent
     /// [`crate::Dial9Config`], writer-transport I/O has already been
-    /// validated by
-    /// [`Dial9ConfigBuilder::build`](crate::Dial9ConfigBuilder::build),
-    /// so the only remaining failure modes are tokio-builder and
-    /// telemetry-core startup I/O.
+    /// validated by the config builder's strict `build`, so the only
+    /// remaining failure modes are tokio-builder and telemetry-core
+    /// startup I/O.
     ///
     /// For fallible construction, use [`try_new`](Self::try_new).
     ///

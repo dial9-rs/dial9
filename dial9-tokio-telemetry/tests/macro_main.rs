@@ -28,12 +28,13 @@ mod fluent_builder {
 
     fn disabled_config() -> Dial9Config {
         Dial9Config::builder()
+            .base_path(tmp_base_path())
             .enabled(false)
             .with_tokio(|t| {
                 t.worker_threads(2);
             })
             .build()
-            .expect("config build failed")
+            .expect("disabled build should succeed")
     }
 
     #[dial9_tokio_telemetry::main(config = test_config)]
@@ -174,9 +175,10 @@ mod fluent_builder {
 
     fn disabled_config_default() -> Dial9Config {
         Dial9Config::builder()
+            .base_path(tmp_base_path())
             .enabled(false)
             .build()
-            .expect("config build failed")
+            .expect("disabled build should succeed")
     }
 
     #[dial9_tokio_telemetry::main(config = disabled_config)]
@@ -241,6 +243,58 @@ mod fluent_builder {
     #[test]
     fn macro_disabled_nested_spawn() {
         assert_eq!(disabled_nested_spawn(), 10);
+    }
+}
+
+// In-memory writer via `Dial9Config::builder().in_memory()`.
+mod in_memory {
+    use std::future::Future;
+    use std::pin::Pin;
+
+    use dial9_tokio_telemetry::Dial9Config;
+    use dial9_tokio_telemetry::background_task::{ProcessError, SegmentData, SegmentProcessor};
+    use dial9_tokio_telemetry::telemetry::TelemetryHandle;
+
+    /// Stand-in delivery processor: forwards each segment unchanged.
+    #[derive(Debug, Default)]
+    struct NoopProcessor;
+
+    impl SegmentProcessor for NoopProcessor {
+        fn name(&self) -> &'static str {
+            "Noop"
+        }
+
+        fn process(
+            &mut self,
+            data: SegmentData,
+        ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>> {
+            Box::pin(async move { Ok(data) })
+        }
+    }
+
+    fn memory_config() -> Dial9Config {
+        Dial9Config::builder()
+            .in_memory()
+            .max_total_size(16 * 1024 * 1024)
+            .with_runtime(|r| r.with_custom_pipeline(|p| p.pipe(NoopProcessor)))
+            .build()
+            .expect("in-memory config build failed")
+    }
+
+    #[dial9_tokio_telemetry::main(config = memory_config)]
+    async fn runs_with_memory_writer() -> bool {
+        let handle = TelemetryHandle::current();
+        let sub = handle.spawn(async { 7 + 3 });
+        assert_eq!(sub.await.unwrap(), 10);
+        handle.is_enabled()
+    }
+
+    #[test]
+    fn macro_runs_with_memory_writer() {
+        assert!(
+            runs_with_memory_writer(),
+            "in-memory config should keep telemetry enabled through the macro"
+        );
     }
 }
 

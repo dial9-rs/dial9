@@ -498,7 +498,8 @@ fn my_config() -> Dial9Config {
         .build();
 
     Dial9Config::builder()
-        // ...
+        .base_path("/tmp/dial9/trace.bin")
+        .max_total_size(1 << 30)
         .with_runtime(|r| {
             r.with_task_tracking(true)
              .with_s3_uploader(s3_config)

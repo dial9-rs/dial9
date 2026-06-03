@@ -168,6 +168,10 @@ harness = false
 required-features = ["cpu-profiling"]
 
 [[example]]
+name = "block_in_place_workload"
+required-features = ["cpu-profiling"]
+
+[[example]]
 name = "blocking_pool_tracking"
 required-features = ["cpu-profiling"]
 

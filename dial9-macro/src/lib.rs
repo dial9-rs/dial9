@@ -118,20 +118,19 @@ fn expand_main(args: MainArgs, input: ItemFn) -> Result<TokenStream2, syn::Error
 /// * `config` — a zero-argument function path or a zero-argument closure
 ///   returning any value convertible into a `TracedRuntime`. In
 ///   practice that means one of:
-///     - `Dial9Config` from `Dial9Config::builder().build()` (strict):
-///       any builder validation or writer-I/O failure surfaces from
-///       `.build()` as a `Dial9ConfigBuilderError`; runtime construction
+///     - `Dial9Config` from `Dial9Config::builder().base_path(..)..build()`
+///       or `..in_memory()..build()` (strict): a writer-I/O failure surfaces
+///       from `.build()` as a `Dial9ConfigBuilderError`; runtime construction
 ///       under the macro panics on tokio-builder or telemetry-core I/O.
-///     - `Dial9Config` from `Dial9Config::builder().build_or_disabled()`
-///       (lenient): the same `Dial9Config` type, but validation and
-///       writer-I/O failures are logged at `error!` and downgraded to a
-///       disabled config that still preserves your `with_tokio`
-///       configurators.
+///     - `Dial9Config` from `..build_or_disabled()` (lenient): the same
+///       `Dial9Config` type, but writer-I/O failures are logged at `error!`
+///       and downgraded to a disabled config that still preserves your
+///       `with_tokio` configurators.
 ///     - The deprecated positional `dial9_tokio_telemetry::config::Dial9Config`,
 ///       kept compatible via a bridge impl.
 ///
-///   Use `.enabled(false)` on the builder to run without telemetry
-///   while keeping your `with_tokio` configurators.
+///   Use `.enabled(false)` to run without telemetry while keeping your
+///   `with_tokio` configurators.
 ///
 /// # Examples
 ///
@@ -197,7 +196,24 @@ fn expand_main(args: MainArgs, input: ItemFn) -> Result<TokenStream2, syn::Error
 /// ```rust,ignore
 /// #[dial9_tokio_telemetry::main(config = || {
 ///     Dial9Config::builder()
+///         .base_path("/tmp/trace.bin")
 ///         .enabled(false)
+///         .build()
+///         .expect("config build failed")
+/// })]
+/// async fn main() {
+///     /* ... */
+/// }
+/// ```
+///
+/// In-memory writer (no telemetry on disk), select it with `.in_memory()`.
+///
+/// ```rust,ignore
+/// #[dial9_tokio_telemetry::main(config = || {
+///     Dial9Config::builder()
+///         .in_memory()
+///         .max_total_size(16 * 1024 * 1024)
+///         .with_runtime(|r| r.with_custom_pipeline(|p| p.pipe(MyUploader)))
 ///         .build()
 ///         .expect("config build failed")
 /// })]
