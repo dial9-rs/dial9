@@ -301,7 +301,7 @@ fn configure_dial9(opts: &Dial9Opts) -> Dial9Config {
     let (s3_bucket, s3_service) = (opts.s3_bucket.clone(), opts.service_name.clone());
 
     let cfg = Dial9Config::builder()
-        .base_path(base_path)
+        .on_disk_buffer(base_path)
         .enabled(opts.enabled)
         .max_file_size(max_file_size)
         .max_total_size(max_disk)

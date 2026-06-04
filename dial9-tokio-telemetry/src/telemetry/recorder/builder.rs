@@ -1067,7 +1067,7 @@ impl TracedRuntime {
     /// ```no_run
     /// use dial9_tokio_telemetry::{Dial9Config, TracedRuntime};
     /// let cfg = Dial9Config::builder()
-    ///     .base_path("trace.bin")
+    ///     .on_disk_buffer("trace.bin")
     ///     .max_file_size(64 * 1024 * 1024)
     ///     .max_total_size(1024 * 1024 * 1024)
     ///     .build()?;
@@ -1096,7 +1096,7 @@ impl TracedRuntime {
     /// ```no_run
     /// use dial9_tokio_telemetry::{Dial9Config, TracedRuntime};
     /// let cfg = Dial9Config::builder()
-    ///     .base_path("trace.bin")
+    ///     .on_disk_buffer("trace.bin")
     ///     .max_file_size(64 * 1024 * 1024)
     ///     .max_total_size(1024 * 1024 * 1024)
     ///     .build()?;

@@ -19,7 +19,7 @@ mod fluent_builder {
 
     fn test_config() -> Dial9Config {
         Dial9Config::builder()
-            .base_path(tmp_base_path())
+            .on_disk_buffer(tmp_base_path())
             .max_file_size(1024 * 1024)
             .max_total_size(4 * 1024 * 1024)
             .build()
@@ -28,7 +28,7 @@ mod fluent_builder {
 
     fn disabled_config() -> Dial9Config {
         Dial9Config::builder()
-            .base_path(tmp_base_path())
+            .on_disk_buffer(tmp_base_path())
             .enabled(false)
             .with_tokio(|t| {
                 t.worker_threads(2);
@@ -49,7 +49,7 @@ mod fluent_builder {
 
     #[dial9_tokio_telemetry::main(config = || {
         Dial9Config::builder()
-            .base_path(tmp_base_path())
+            .on_disk_buffer(tmp_base_path())
             .max_file_size(1024 * 1024)
             .max_total_size(4 * 1024 * 1024)
             .build()
@@ -67,7 +67,7 @@ mod fluent_builder {
     #[dial9_tokio_telemetry::main(config = move || {
         let path = tmp_base_path();
         Dial9Config::builder()
-            .base_path(path)
+            .on_disk_buffer(path)
             .max_file_size(1024 * 1024)
             .max_total_size(4 * 1024 * 1024)
             .build()
@@ -175,7 +175,7 @@ mod fluent_builder {
 
     fn disabled_config_default() -> Dial9Config {
         Dial9Config::builder()
-            .base_path(tmp_base_path())
+            .on_disk_buffer(tmp_base_path())
             .enabled(false)
             .build()
             .expect("disabled build should succeed")
@@ -246,7 +246,7 @@ mod fluent_builder {
     }
 }
 
-// In-memory writer via `Dial9Config::builder().in_memory()`.
+// In-memory writer via `Dial9Config::builder().in_memory_buffer()`.
 mod in_memory {
     use std::future::Future;
     use std::pin::Pin;
@@ -274,7 +274,7 @@ mod in_memory {
 
     fn memory_config() -> Dial9Config {
         Dial9Config::builder()
-            .in_memory()
+            .in_memory_buffer()
             .max_total_size(16 * 1024 * 1024)
             .with_runtime(|r| r.with_custom_pipeline(|p| p.pipe(NoopProcessor)))
             .build()
@@ -314,7 +314,7 @@ mod fluent_builder_fallback {
 
     fn fallback_config() -> Dial9Config {
         Dial9Config::builder()
-            .base_path(tmp_base_path())
+            .on_disk_buffer(tmp_base_path())
             .max_file_size(1024 * 1024)
             .max_total_size(4 * 1024 * 1024)
             .build_or_disabled()
@@ -326,7 +326,7 @@ mod fluent_builder_fallback {
 
     fn cascading_fallback_config() -> Dial9Config {
         Dial9Config::builder()
-            .base_path(unwritable_base_path())
+            .on_disk_buffer(unwritable_base_path())
             .max_file_size(1024 * 1024)
             .max_total_size(4 * 1024 * 1024)
             .build_or_disabled()

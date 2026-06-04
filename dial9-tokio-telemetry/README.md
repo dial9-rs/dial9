@@ -41,7 +41,7 @@ use dial9_tokio_telemetry::{main, Dial9Config, telemetry::TelemetryHandle};
 
 fn my_config() -> Dial9Config {
     Dial9Config::builder()
-        .base_path("/tmp/my_traces/trace.bin")
+        .on_disk_buffer("/tmp/my_traces/trace.bin")
         .max_total_size(5 * 1024 * 1024)   // keep at most 5 MiB on disk
         .max_file_size(1024 * 1024)     // optional: defaults to min(100 MiB, max_total_size / 4)
         .rotation_period(std::time::Duration::from_secs(300)) // optional: rotate every 5 min (default: 60 s)
@@ -167,7 +167,7 @@ fn my_config() -> Dial9Config {
         .build();
 
     Dial9Config::builder()
-        .base_path("/tmp/my_traces/trace.bin")
+        .on_disk_buffer("/tmp/my_traces/trace.bin")
         .max_file_size(100 * 1024 * 1024)
         .max_total_size(500 * 1024 * 1024)
         .with_tokio(|t| { t.worker_threads(4); })
@@ -498,7 +498,7 @@ fn my_config() -> Dial9Config {
         .build();
 
     Dial9Config::builder()
-        .base_path("/tmp/dial9/trace.bin")
+        .on_disk_buffer("/tmp/dial9/trace.bin")
         .max_total_size(1 << 30)
         .with_runtime(|r| {
             r.with_task_tracking(true)

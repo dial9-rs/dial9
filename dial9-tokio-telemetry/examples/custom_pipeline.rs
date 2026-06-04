@@ -186,7 +186,7 @@ async fn worker_task(id: usize) {
     let base_path = format!("{TRACE_DIR}/trace.bin");
 
     Dial9Config::builder()
-        .base_path(base_path)
+        .on_disk_buffer(base_path)
         // Small per-file budget + short rotation period so we get several
         // sealed segments in a few seconds of work - otherwise the whole
         // run might fit in a single segment and the stateful processor

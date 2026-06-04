@@ -1,8 +1,8 @@
 //! Unified configuration for the `#[dial9_tokio_telemetry::main]` macro.
 //!
 //! Start with [`Dial9Config::builder()`] and pick a writer mode:
-//! [`base_path`](Dial9ConfigBuilder::base_path) for disk or
-//! [`in_memory`](Dial9ConfigBuilder::in_memory). Each returns a builder
+//! [`on_disk_buffer`](Dial9ConfigBuilder::on_disk_buffer) for disk or
+//! [`in_memory_buffer`](Dial9ConfigBuilder::in_memory_buffer). Each returns a builder
 //! carrying only that mode's knobs, so disk and in-memory settings can't be
 //! mixed. `with_tokio` and `with_runtime` reach the underlying
 //! [`tokio::runtime::Builder`] and [`TracedRuntimeBuilder`]; `.enabled(false)`
@@ -732,7 +732,7 @@ impl Dial9Config {
 
         // `from_env` only builds a disk writer for now.
         let builder = Self::builder()
-            .base_path(trace_dir.join("trace.bin"))
+            .on_disk_buffer(trace_dir.join("trace.bin"))
             .enabled(enabled)
             .maybe_max_file_size(max_file_size)
             .max_total_size(max_total_size)
@@ -765,8 +765,8 @@ impl Dial9Config {
 
 impl Dial9Config {
     /// Start a configuration chain by picking a writer mode:
-    /// [`base_path`](Dial9ConfigBuilder::base_path) (disk) or
-    /// [`in_memory`](Dial9ConfigBuilder::in_memory). Each hands back a builder
+    /// [`on_disk_buffer`](Dial9ConfigBuilder::on_disk_buffer) (disk) or
+    /// [`in_memory_buffer`](Dial9ConfigBuilder::in_memory_buffer). Each hands back a builder
     /// carrying only the knobs that mode supports, so disk and in-memory
     /// settings can't be mixed. Either builder can be turned off with
     /// `.enabled(false)`.
@@ -788,25 +788,25 @@ impl Dial9ConfigBuilder {
     ///
     /// `max_total_size` is required, `max_file_size` and
     /// `rotation_period` are optional.
-    pub fn base_path(self, base_path: impl Into<PathBuf>) -> DiskConfigBuilder {
+    pub fn on_disk_buffer(self, base_path: impl Into<PathBuf>) -> DiskConfigBuilder {
         Dial9Config::disk(base_path.into())
     }
 
     /// Keep trace segments in process memory, with no filesystem usage.
     ///
     /// `max_total_size` is required.
-    pub fn in_memory(self) -> MemoryConfigBuilder {
+    pub fn in_memory_buffer(self) -> MemoryConfigBuilder {
         Dial9Config::memory()
     }
 }
 
 // The per-mode builders. These bon start functions are `pub` (so the builder
 // types they return are public) but `#[doc(hidden)]`: users reach them through
-// the `Dial9ConfigBuilder` selector (`base_path()` / `in_memory()`), not
+// the `Dial9ConfigBuilder` selector (`on_disk_buffer()` / `in_memory_buffer()`), not
 // `Dial9Config::disk()` / `::memory()` directly.
 #[bon::bon]
 impl Dial9Config {
-    /// Disk-writer builder. Reached via [`Dial9ConfigBuilder::base_path`].
+    /// Disk-writer builder. Reached via [`Dial9ConfigBuilder::on_disk_buffer`].
     #[doc(hidden)]
     #[builder(builder_type = DiskConfigBuilder, finish_fn = build, state_mod = disk_config_builder)]
     pub fn disk(
@@ -861,7 +861,7 @@ impl Dial9Config {
         }))
     }
 
-    /// In-memory-writer builder. Reached via [`Dial9ConfigBuilder::in_memory`].
+    /// In-memory-writer builder. Reached via [`Dial9ConfigBuilder::in_memory_buffer`].
     #[doc(hidden)]
     #[builder(builder_type = MemoryConfigBuilder, finish_fn = build, state_mod = memory_config_builder)]
     pub fn memory(
@@ -1062,11 +1062,11 @@ fn downgrade_on_err(
 
 /// Compile-fail assertions for the no-mix gating.
 ///
-/// `base_path` is disk-only, rejected on the memory builder:
+/// `max_file_size` is disk-only, rejected on the memory builder:
 ///
 /// ```compile_fail
 /// use dial9_tokio_telemetry::Dial9Config;
-/// let _ = Dial9Config::builder().in_memory().base_path("trace.bin");
+/// let _ = Dial9Config::builder().in_memory_buffer().max_file_size(1024);
 /// ```
 ///
 /// `write_back()` exists only for the disk writer:
@@ -1074,7 +1074,7 @@ fn downgrade_on_err(
 /// ```compile_fail
 /// use dial9_tokio_telemetry::Dial9Config;
 /// let _ = Dial9Config::builder()
-///     .in_memory()
+///     .in_memory_buffer()
 ///     .max_total_size(16 * 1024 * 1024)
 ///     .with_runtime(|r| r.with_custom_pipeline(|p| p.write_back()))
 ///     .build();
@@ -1488,9 +1488,9 @@ mod tests {
     }
 
     #[test]
-    fn base_path_accepts_required_fields() {
+    fn on_disk_buffer_accepts_required_fields() {
         let _ = Dial9Config::builder()
-            .base_path(tmp_base_path())
+            .on_disk_buffer(tmp_base_path())
             .max_file_size(1024)
             .max_total_size(4096)
             .build()
@@ -1498,18 +1498,18 @@ mod tests {
     }
 
     #[test]
-    fn base_path_defaults_max_file_size_when_omitted() {
+    fn on_disk_buffer_defaults_max_file_size_when_omitted() {
         let _ = Dial9Config::builder()
-            .base_path(tmp_base_path())
+            .on_disk_buffer(tmp_base_path())
             .max_total_size(64 * BYTES_PER_MIB)
             .build()
             .expect("build should succeed without explicit max_file_size");
     }
 
     #[test]
-    fn base_path_strict_build_returns_io_error_for_unwritable_base_path() {
+    fn on_disk_buffer_strict_build_returns_io_error_for_unwritable_base_path() {
         let result = Dial9Config::builder()
-            .base_path(unwritable_base_path())
+            .on_disk_buffer(unwritable_base_path())
             .max_file_size(1024)
             .max_total_size(4096)
             .build();
@@ -1521,9 +1521,9 @@ mod tests {
     }
 
     #[test]
-    fn base_path_with_runtime_write_back_pipeline_builds_enabled() {
+    fn on_disk_buffer_with_runtime_write_back_pipeline_builds_enabled() {
         let cfg = Dial9Config::builder()
-            .base_path(tmp_base_path())
+            .on_disk_buffer(tmp_base_path())
             .max_total_size(4 * 1024 * 1024)
             .with_runtime(|r| r.with_custom_pipeline(|p| p.write_back()))
             .build()
@@ -1542,7 +1542,7 @@ mod tests {
     #[test]
     fn in_memory_build_yields_enabled_runtime() {
         let cfg = Dial9Config::builder()
-            .in_memory()
+            .in_memory_buffer()
             .max_total_size(16 * BYTES_PER_MIB)
             .build()
             .expect("in-memory build should succeed");
@@ -1577,7 +1577,7 @@ mod tests {
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_for_closure = Arc::clone(&counter);
         let cfg = Dial9Config::builder()
-            .in_memory()
+            .in_memory_buffer()
             .max_total_size(16 * BYTES_PER_MIB)
             .with_runtime(move |r| {
                 counter_for_closure.fetch_add(1, Ordering::SeqCst);
@@ -1600,7 +1600,7 @@ mod tests {
     #[test]
     fn in_memory_build_returns_io_error_for_undersized_budget() {
         // Budget below the 3 × max_segment_size floor is rejected by the writer.
-        let result = Dial9Config::builder().in_memory().max_total_size(1).build();
+        let result = Dial9Config::builder().in_memory_buffer().max_total_size(1).build();
         match result {
             Err(Dial9ConfigBuilderError::Io(_)) => {}
             Ok(_) => panic!("expected Io error, got Ok"),
@@ -1611,7 +1611,7 @@ mod tests {
     #[test]
     fn in_memory_build_or_disabled_downgrades_on_undersized_budget() {
         let cfg = Dial9Config::builder()
-            .in_memory()
+            .in_memory_buffer()
             .max_total_size(1)
             .build_or_disabled();
         let rt = TracedRuntime::try_new(cfg).expect("undersized budget should downgrade");
@@ -1631,7 +1631,7 @@ mod tests {
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_for_closure = Arc::clone(&counter);
         let cfg = Dial9Config::builder()
-            .base_path(tmp_base_path())
+            .on_disk_buffer(tmp_base_path())
             .enabled(false)
             .with_tokio(move |b| {
                 counter_for_closure.fetch_add(1, Ordering::SeqCst);
@@ -1655,7 +1655,7 @@ mod tests {
     fn enabled_false_skips_required_field_validation() {
         // No max_total_size, but disabled, so it builds without error.
         let cfg = Dial9Config::builder()
-            .base_path(tmp_base_path())
+            .on_disk_buffer(tmp_base_path())
             .enabled(false)
             .build()
             .expect("disabled build needs no writer fields");
@@ -1667,7 +1667,7 @@ mod tests {
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_for_closure = Arc::clone(&counter);
         let _cfg = Dial9Config::builder()
-            .base_path(tmp_base_path())
+            .on_disk_buffer(tmp_base_path())
             .enabled(false)
             .with_runtime(move |r| {
                 counter_for_closure.fetch_add(1, Ordering::SeqCst);
@@ -1684,7 +1684,7 @@ mod tests {
 
     #[test]
     fn missing_max_total_size_when_enabled_is_validation_error() {
-        match Dial9Config::builder().base_path(tmp_base_path()).build() {
+        match Dial9Config::builder().on_disk_buffer(tmp_base_path()).build() {
             Err(Dial9ConfigBuilderError::Validation(v)) => {
                 assert_eq!(v.fields(), ["max_total_size"]);
             }
@@ -1694,7 +1694,7 @@ mod tests {
 
     #[test]
     fn in_memory_missing_max_total_size_when_enabled_is_validation_error() {
-        match Dial9Config::builder().in_memory().build() {
+        match Dial9Config::builder().in_memory_buffer().build() {
             Err(Dial9ConfigBuilderError::Validation(v)) => {
                 assert_eq!(v.fields(), ["max_total_size"]);
             }
@@ -1709,7 +1709,7 @@ mod tests {
     #[test]
     fn build_or_disabled_from_complete_builder_yields_enabled_runtime() {
         let cfg = Dial9Config::builder()
-            .base_path(tmp_base_path())
+            .on_disk_buffer(tmp_base_path())
             .max_file_size(1024)
             .max_total_size(4096)
             .build_or_disabled();
@@ -1723,7 +1723,7 @@ mod tests {
     #[test]
     fn build_or_disabled_downgrades_on_writer_io_failure() {
         let cfg = Dial9Config::builder()
-            .base_path(unwritable_base_path())
+            .on_disk_buffer(unwritable_base_path())
             .max_file_size(1024)
             .max_total_size(4096)
             .build_or_disabled();
@@ -1742,7 +1742,7 @@ mod tests {
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_for_closure = Arc::clone(&counter);
         let cfg = Dial9Config::builder()
-            .base_path(unwritable_base_path())
+            .on_disk_buffer(unwritable_base_path())
             .max_file_size(1024)
             .max_total_size(4096)
             .with_tokio(move |b| {
@@ -1768,7 +1768,7 @@ mod tests {
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_for_closure = Arc::clone(&counter);
         let cfg = Dial9Config::builder()
-            .base_path(tmp_base_path())
+            .on_disk_buffer(tmp_base_path())
             .max_file_size(1024 * 1024)
             .max_total_size(4 * 1024 * 1024)
             .with_tokio(move |b| {
@@ -1790,7 +1790,7 @@ mod tests {
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_for_closure = Arc::clone(&counter);
         let cfg = Dial9Config::builder()
-            .base_path(tmp_base_path())
+            .on_disk_buffer(tmp_base_path())
             .max_file_size(1024 * 1024)
             .max_total_size(4 * 1024 * 1024)
             .with_runtime(move |r| {
@@ -1813,7 +1813,7 @@ mod tests {
         let order_first = Arc::clone(&order);
         let order_second = Arc::clone(&order);
         let cfg = Dial9Config::builder()
-            .base_path(tmp_base_path())
+            .on_disk_buffer(tmp_base_path())
             .max_file_size(1024 * 1024)
             .max_total_size(4 * 1024 * 1024)
             .with_tokio(move |_b| {
