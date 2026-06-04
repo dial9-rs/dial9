@@ -1600,7 +1600,10 @@ mod tests {
     #[test]
     fn in_memory_build_returns_io_error_for_undersized_budget() {
         // Budget below the 3 × max_segment_size floor is rejected by the writer.
-        let result = Dial9Config::builder().in_memory_buffer().max_total_size(1).build();
+        let result = Dial9Config::builder()
+            .in_memory_buffer()
+            .max_total_size(1)
+            .build();
         match result {
             Err(Dial9ConfigBuilderError::Io(_)) => {}
             Ok(_) => panic!("expected Io error, got Ok"),
@@ -1684,7 +1687,10 @@ mod tests {
 
     #[test]
     fn missing_max_total_size_when_enabled_is_validation_error() {
-        match Dial9Config::builder().on_disk_buffer(tmp_base_path()).build() {
+        match Dial9Config::builder()
+            .on_disk_buffer(tmp_base_path())
+            .build()
+        {
             Err(Dial9ConfigBuilderError::Validation(v)) => {
                 assert_eq!(v.fields(), ["max_total_size"]);
             }
