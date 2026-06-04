@@ -379,6 +379,10 @@ mod imp {
         constructions: Arc<AtomicU64>,
         state_constructions: Arc<AtomicU64>,
     ) {
+        // Register with ctimer so this thread is profiled even without perf's
+        // inherit mode.
+        let _ = crate::register_current_thread();
+
         // Lazy: only construct the Symbolizer when we receive the first
         // request, so the cost is paid on first segment, not on creation.
         let mut symbolizer: Option<blazesym::symbolize::Symbolizer> = None;
@@ -411,6 +415,7 @@ mod imp {
             // That's fine — just skip this response.
             let _ = req.respond_to.send(result);
         }
+        crate::unregister_current_thread();
     }
 
     fn run_symbolize(
