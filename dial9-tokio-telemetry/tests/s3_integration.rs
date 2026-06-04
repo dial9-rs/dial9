@@ -91,11 +91,11 @@ fn graceful_shutdown_seals_segments() {
 }
 
 /// End-to-end: TracedRuntime → DiskWriter → rotation → worker uploads to
-/// s3s → download from s3s → decompress → parse with TraceReader → verify
+/// s3s → download from s3s → decompress → parse with serde decoder → verify
 /// real trace events are present.
 #[test]
 fn end_to_end_trace_to_s3_roundtrip() {
-    use dial9_tokio_telemetry::analysis_unstable::TraceReader;
+    use dial9_trace_format::decoder::Decoder;
 
     let s3_root = tempfile::tempdir().unwrap();
     let trace_dir = tempfile::tempdir().unwrap();
@@ -193,13 +193,45 @@ fn end_to_end_trace_to_s3_roundtrip() {
         std::fs::write(&downloaded_path, &decompressed).unwrap();
     });
 
-    // Parse the downloaded trace with TraceReader
-    let reader = TraceReader::new(downloaded_path.to_str().unwrap()).unwrap();
-    let metadata = reader
-        .segment_metadata
-        .clone()
-        .into_iter()
-        .collect::<HashMap<String, String>>();
+    // Parse the downloaded trace with serde decoder
+    let trace_data = std::fs::read(&downloaded_path).unwrap();
+    let mut dec = Decoder::new(&trace_data).unwrap();
+
+    #[derive(Debug, serde::Deserialize)]
+    #[allow(dead_code, clippy::enum_variant_names)]
+    #[serde(tag = "event")]
+    enum S3Event {
+        SegmentMetadataEvent {
+            entries: HashMap<String, String>,
+        },
+        PollStartEvent {
+            timestamp_ns: u64,
+        },
+        PollEndEvent {
+            timestamp_ns: u64,
+        },
+        WorkerParkEvent {
+            timestamp_ns: u64,
+        },
+        #[serde(other)]
+        Other,
+    }
+
+    let mut all_events = Vec::new();
+    dec.for_each_event(|raw| {
+        let ev: S3Event = raw.deserialize().expect("deserialize");
+        all_events.push(ev);
+    })
+    .unwrap();
+
+    let metadata: HashMap<String, String> = all_events
+        .iter()
+        .filter_map(|e| match e {
+            S3Event::SegmentMetadataEvent { entries } => Some(entries.clone()),
+            _ => None,
+        })
+        .flatten()
+        .collect();
     assert_eq!(metadata["bucket"], "test-bucket");
     assert_eq!(metadata["service_name"], "test-svc");
     assert_eq!(
@@ -207,18 +239,24 @@ fn end_to_end_trace_to_s3_roundtrip() {
         "expected eagerly populated worker IDs"
     );
     assert_eq!(metadata["custom-metadata"], "value");
-    let events = &reader.runtime_events;
+    let runtime_events: Vec<_> = all_events
+        .iter()
+        .filter(|e| !matches!(e, S3Event::Other | S3Event::SegmentMetadataEvent { .. }))
+        .collect();
     assert!(
-        !events.is_empty(),
+        !runtime_events.is_empty(),
         "expected trace events in downloaded segment, got none"
     );
 
     // Should contain at least some PollStart/PollEnd or WorkerPark events
-    let has_runtime_events = events.iter().any(|e| e.timestamp_nanos().is_some());
     assert!(
-        has_runtime_events,
-        "expected runtime events with timestamps, found none in {} events",
-        events.len()
+        runtime_events.iter().any(|e| matches!(
+            e,
+            S3Event::PollStartEvent { .. }
+                | S3Event::PollEndEvent { .. }
+                | S3Event::WorkerParkEvent { .. }
+        )),
+        "expected runtime events with timestamps"
     );
 }
 
@@ -226,7 +264,7 @@ fn end_to_end_trace_to_s3_roundtrip() {
 /// and corrects the client, even when the initial client has the wrong region.
 #[test]
 fn region_auto_detection_corrects_wrong_client_region() {
-    use dial9_tokio_telemetry::analysis_unstable::TraceReader;
+    use dial9_trace_format::decoder::Decoder;
 
     let s3_root = tempfile::tempdir().unwrap();
     let trace_dir = tempfile::tempdir().unwrap();
@@ -318,10 +356,15 @@ fn region_auto_detection_corrects_wrong_client_region() {
         std::fs::write(&downloaded_path, &decompressed).unwrap();
     });
 
-    let reader = TraceReader::new(downloaded_path.to_str().unwrap()).unwrap();
-    let events = &reader.runtime_events;
+    let trace_data = std::fs::read(&downloaded_path).unwrap();
+    let mut dec = Decoder::new(&trace_data).unwrap();
+    let mut event_count = 0usize;
+    dec.for_each_event(|_raw| {
+        event_count += 1;
+    })
+    .unwrap();
     assert!(
-        !events.is_empty(),
+        event_count > 0,
         "expected trace events after region correction"
     );
 }
@@ -341,7 +384,7 @@ fn region_auto_detection_corrects_wrong_client_region() {
 /// the worker would pick up any leftover segments.
 #[test]
 fn stress_test_all_segments_uploaded_and_valid() {
-    use dial9_tokio_telemetry::analysis_unstable::TraceReader;
+    use dial9_trace_format::decoder::Decoder;
 
     let s3_root = tempfile::tempdir().unwrap();
     let trace_dir = tempfile::tempdir().unwrap();
@@ -483,8 +526,13 @@ fn stress_test_all_segments_uploaded_and_valid() {
         // Parseable trace events.
         let tmp = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(tmp.path(), &decompressed).unwrap();
-        let reader = TraceReader::new(tmp.path().to_str().unwrap()).unwrap();
-        let segment_events = reader.all_events.len();
+        let trace_data = std::fs::read(tmp.path()).unwrap();
+        let mut dec = Decoder::new(&trace_data).expect("valid trace header");
+        let mut segment_events = 0usize;
+        dec.for_each_event(|_raw| {
+            segment_events += 1;
+        })
+        .unwrap();
         assert!(segment_events > 0, "expected events in {key}, got none");
         total_events += segment_events;
     }

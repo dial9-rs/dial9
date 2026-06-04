@@ -934,8 +934,9 @@ impl<M: WriterMode> Drop for SegmentWriter<M> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::telemetry::analysis_events::Dial9Event;
+    use crate::telemetry::format;
     use crate::telemetry::format::WorkerParkEvent;
-    use crate::telemetry::{TelemetryEvent, format};
     use std::io::Read;
     use tempfile::TempDir;
 
@@ -961,7 +962,7 @@ mod tests {
     }
 
     /// Read all non-metadata events from a trace file.
-    fn read_trace_events(path: &str) -> Vec<TelemetryEvent> {
+    fn read_trace_events(path: &str) -> Vec<Dial9Event> {
         let data = std::fs::read(path).unwrap();
         format::decode_events(&data)
             .unwrap()
@@ -969,7 +970,7 @@ mod tests {
             .filter(|e| {
                 !matches!(
                     e,
-                    TelemetryEvent::SegmentMetadata { .. } | TelemetryEvent::ClockSync { .. }
+                    Dial9Event::SegmentMetadataEvent(..) | Dial9Event::ClockSyncEvent(..)
                 )
             })
             .collect()
@@ -1529,26 +1530,24 @@ mod tests {
         let metadata: Vec<_> = all_events
             .iter()
             .filter_map(|e| match e {
-                TelemetryEvent::SegmentMetadata { entries, .. } => Some(entries.clone()),
+                Dial9Event::SegmentMetadataEvent(meta) => Some(meta.entries.clone()),
                 _ => None,
             })
             .collect();
         assert_eq!(metadata.len(), 1);
         assert!(
-            metadata[0].contains(&("service".to_string(), "checkout-api".to_string())),
+            metadata[0].get("service").map(String::as_str) == Some("checkout-api"),
             "missing service entry: {:?}",
             metadata[0]
         );
         assert!(
-            metadata[0].contains(&("host".to_string(), "i-0abc123".to_string())),
+            metadata[0].get("host").map(String::as_str) == Some("i-0abc123"),
             "missing host entry: {:?}",
             metadata[0]
         );
-        assert!(
-            metadata[0].contains(&(
-                DIAL9_VERSION_KEY.to_string(),
-                DIAL9_VERSION_VALUE.to_string()
-            )),
+        assert_eq!(
+            metadata[0].get(DIAL9_VERSION_KEY).map(String::as_str),
+            Some(DIAL9_VERSION_VALUE),
             "missing built-in dial9.dial9-tokio-telemetry.version: {:?}",
             metadata[0]
         );
@@ -1584,9 +1583,11 @@ mod tests {
 
         for file in &files {
             let all_events = format::decode_events(&std::fs::read(file).unwrap()).unwrap();
-            let has_metadata = all_events.iter().any(|e| {
-                matches!(e, TelemetryEvent::SegmentMetadata { entries, .. }
-                    if entries.contains(&("k".to_string(), "v".to_string())))
+            let has_metadata = all_events.iter().any(|e| match e {
+                Dial9Event::SegmentMetadataEvent(meta) => {
+                    meta.entries.get("k").map(String::as_str) == Some("v")
+                }
+                _ => false,
             });
             assert!(has_metadata, "{}: expected SegmentMetadata", file.display());
         }
@@ -1634,7 +1635,7 @@ mod tests {
             let meta: Vec<_> = all_events
                 .iter()
                 .filter_map(|e| match e {
-                    TelemetryEvent::SegmentMetadata { entries, .. } => Some(entries.clone()),
+                    Dial9Event::SegmentMetadataEvent(meta) => Some(meta.entries.clone()),
                     _ => None,
                 })
                 .collect();
@@ -1645,12 +1646,12 @@ mod tests {
                 file.display()
             );
             assert!(
-                meta[0].contains(&("service".to_string(), "myapp".to_string())),
+                meta[0].get("service").map(String::as_str) == Some("myapp"),
                 "{}: missing static metadata",
                 file.display()
             );
             assert!(
-                meta[0].contains(&("runtime.main".to_string(), "0,1,2,3".to_string())),
+                meta[0].get("runtime.main").map(String::as_str) == Some("0,1,2,3"),
                 "{}: missing dynamic runtime worker metadata",
                 file.display()
             );
@@ -1669,7 +1670,7 @@ mod tests {
             format::decode_events(&std::fs::read(writer.current_active_path()).unwrap()).unwrap();
         let park_count = all_events
             .iter()
-            .filter(|e| matches!(e, TelemetryEvent::WorkerPark { .. }))
+            .filter(|e| matches!(e, Dial9Event::WorkerParkEvent(..)))
             .count();
         assert_eq!(park_count, 1);
         // Metadata should be present and carry only the built-in dial9.dial9-tokio-telemetry.version entry
@@ -1677,17 +1678,14 @@ mod tests {
         let metadata: Vec<_> = all_events
             .iter()
             .filter_map(|e| match e {
-                TelemetryEvent::SegmentMetadata { entries, .. } => Some(entries),
+                Dial9Event::SegmentMetadataEvent(meta) => Some(&meta.entries),
                 _ => None,
             })
             .collect();
         assert_eq!(metadata.len(), 1);
         assert_eq!(
-            metadata[0],
-            &vec![(
-                DIAL9_VERSION_KEY.to_string(),
-                DIAL9_VERSION_VALUE.to_string()
-            )]
+            metadata[0].get(DIAL9_VERSION_KEY).map(String::as_str),
+            Some(DIAL9_VERSION_VALUE)
         );
     }
 
@@ -2037,19 +2035,19 @@ mod tests {
             .position(|e| {
                 !matches!(
                     e,
-                    TelemetryEvent::SegmentMetadata { .. } | TelemetryEvent::ClockSync { .. }
+                    Dial9Event::SegmentMetadataEvent(..) | Dial9Event::ClockSyncEvent(..)
                 )
             })
             .expect("expected at least one data event");
         let first_clock_sync_idx = all
             .iter()
-            .position(|e| matches!(e, TelemetryEvent::ClockSync { .. }))
+            .position(|e| matches!(e, Dial9Event::ClockSyncEvent(..)))
             .expect("expected a ClockSyncEvent in the file");
         assert!(first_clock_sync_idx < first_data_idx);
 
         match &all[first_clock_sync_idx] {
-            TelemetryEvent::ClockSync { realtime_nanos, .. } => {
-                assert!(*realtime_nanos >= LEGACY_EPOCH_NS_FLOOR);
+            Dial9Event::ClockSyncEvent(e) => {
+                assert!(e.realtime_ns >= LEGACY_EPOCH_NS_FLOOR);
             }
             _ => unreachable!(),
         }
@@ -2079,9 +2077,7 @@ mod tests {
         let seg_ts = all
             .iter()
             .find_map(|e| match e {
-                TelemetryEvent::SegmentMetadata {
-                    timestamp_nanos, ..
-                } => Some(*timestamp_nanos),
+                Dial9Event::SegmentMetadataEvent(m) => Some(m.timestamp_ns),
                 _ => None,
             })
             .expect("SegmentMetadata");
@@ -2122,7 +2118,7 @@ mod tests {
             let all = format::decode_events(&std::fs::read(file).unwrap()).unwrap();
             let has_clock_sync = all
                 .iter()
-                .any(|e| matches!(e, TelemetryEvent::ClockSync { .. }));
+                .any(|e| matches!(e, Dial9Event::ClockSyncEvent(..)));
             assert!(
                 has_clock_sync,
                 "{}: expected ClockSyncEvent",
@@ -2153,12 +2149,12 @@ mod tests {
         let all = format::decode_events(&buf).unwrap();
         assert!(
             all.iter()
-                .any(|e| matches!(e, TelemetryEvent::WorkerPark { .. })),
+                .any(|e| matches!(e, Dial9Event::WorkerParkEvent(..))),
             "expected WorkerPark to decode"
         );
         assert!(
             !all.iter()
-                .any(|e| matches!(e, TelemetryEvent::ClockSync { .. })),
+                .any(|e| matches!(e, Dial9Event::ClockSyncEvent(..))),
             "legacy trace must not contain ClockSync"
         );
     }
@@ -2200,19 +2196,14 @@ mod tests {
         let (sync_mono, sync_real) = all
             .iter()
             .find_map(|e| match e {
-                TelemetryEvent::ClockSync {
-                    timestamp_nanos,
-                    realtime_nanos,
-                } => Some((*timestamp_nanos, *realtime_nanos)),
+                Dial9Event::ClockSyncEvent(c) => Some((c.timestamp_ns, c.realtime_ns)),
                 _ => None,
             })
             .expect("ClockSync");
         let park_from_file = all
             .iter()
             .find_map(|e| match e {
-                TelemetryEvent::WorkerPark {
-                    timestamp_nanos, ..
-                } => Some(*timestamp_nanos),
+                Dial9Event::WorkerParkEvent(p) => Some(p.timestamp_ns),
                 _ => None,
             })
             .expect("WorkerPark");
@@ -2252,23 +2243,22 @@ mod tests {
         let metadata: Vec<_> = all
             .iter()
             .filter_map(|e| match e {
-                TelemetryEvent::SegmentMetadata { entries, .. } => Some(entries.clone()),
+                Dial9Event::SegmentMetadataEvent(meta) => Some(meta.entries.clone()),
                 _ => None,
             })
             .collect();
         assert!(!metadata.is_empty(), "expected SegmentMetadata event");
         assert!(
-            metadata
-                .last()
-                .unwrap()
-                .contains(&("bucket".to_string(), "my-bucket".to_string())),
+            metadata.last().unwrap().get("bucket").map(String::as_str) == Some("my-bucket"),
             "S3 metadata should be in segment"
         );
         assert!(
             metadata
                 .last()
                 .unwrap()
-                .contains(&("service_name".to_string(), "my-svc".to_string())),
+                .get("service_name")
+                .map(String::as_str)
+                == Some("my-svc"),
             "S3 metadata should be in segment"
         );
     }
@@ -2314,18 +2304,18 @@ mod tests {
             let meta: Vec<_> = all
                 .iter()
                 .filter_map(|e| match e {
-                    TelemetryEvent::SegmentMetadata { entries, .. } => Some(entries.clone()),
+                    Dial9Event::SegmentMetadataEvent(meta) => Some(meta.entries.clone()),
                     _ => None,
                 })
                 .collect();
             let last = meta.last().expect("expected SegmentMetadata");
             assert!(
-                last.contains(&("bucket".to_string(), "my-bucket".to_string())),
+                last.get("bucket").map(String::as_str) == Some("my-bucket"),
                 "{}: S3 metadata lost after merge",
                 file.display()
             );
             assert!(
-                last.contains(&("runtime.main".to_string(), "0,1".to_string())),
+                last.get("runtime.main").map(String::as_str) == Some("0,1"),
                 "{}: runtime metadata missing",
                 file.display()
             );
@@ -2355,7 +2345,7 @@ mod tests {
         let all = format::decode_events(&std::fs::read(rotating_file(&base, 0)).unwrap()).unwrap();
         let metadata_count = all
             .iter()
-            .filter(|e| matches!(e, TelemetryEvent::SegmentMetadata { .. }))
+            .filter(|e| matches!(e, Dial9Event::SegmentMetadataEvent(..)))
             .count();
         assert_eq!(
             metadata_count, 1,
@@ -2377,19 +2367,13 @@ mod tests {
 
         let sealed = dir.path().join("trace.0.bin");
         let all = format::decode_events(&std::fs::read(&sealed).unwrap()).unwrap();
-        let version_entry = all.iter().find_map(|e| match e {
-            TelemetryEvent::SegmentMetadata { entries, .. } => entries
-                .iter()
-                .find(|(k, _)| k == DIAL9_VERSION_KEY)
-                .cloned(),
+        let version_value = all.iter().find_map(|e| match e {
+            Dial9Event::SegmentMetadataEvent(meta) => meta.entries.get(DIAL9_VERSION_KEY).cloned(),
             _ => None,
         });
         assert_eq!(
-            version_entry,
-            Some((
-                DIAL9_VERSION_KEY.to_string(),
-                env!("CARGO_PKG_VERSION").to_string()
-            )),
+            version_value.as_deref(),
+            Some(env!("CARGO_PKG_VERSION")),
             "expected dial9.dial9-tokio-telemetry.version entry matching CARGO_PKG_VERSION"
         );
     }
@@ -2421,10 +2405,9 @@ mod tests {
                 format::decode_events(&std::fs::read(rotating_file(&base, idx)).unwrap()).unwrap();
             all.iter()
                 .find_map(|e| match e {
-                    TelemetryEvent::SegmentMetadata { entries, .. } => entries
-                        .iter()
-                        .find(|(k, _)| k == DIAL9_VERSION_KEY)
-                        .map(|(_, v)| v.clone()),
+                    Dial9Event::SegmentMetadataEvent(meta) => {
+                        meta.entries.get(DIAL9_VERSION_KEY).cloned()
+                    }
                     _ => None,
                 })
                 .expect("expected dial9.dial9-tokio-telemetry.version entry")
@@ -2700,7 +2683,7 @@ mod tests {
     async fn mem_writer_e2e_delivers_all_events() {
         use crate::background_task::WorkerLoop;
         use crate::background_task::testutil::CaptureProcessor;
-        use crate::telemetry::{TelemetryEvent, format};
+        use crate::telemetry::{analysis_events::Dial9Event, format};
 
         const EVENTS: usize = 25;
 
@@ -2733,7 +2716,7 @@ mod tests {
             .filter(|e| {
                 !matches!(
                     e,
-                    TelemetryEvent::SegmentMetadata { .. } | TelemetryEvent::ClockSync { .. }
+                    Dial9Event::SegmentMetadataEvent(..) | Dial9Event::ClockSyncEvent(..)
                 )
             })
             .count();

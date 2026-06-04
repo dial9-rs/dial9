@@ -222,8 +222,8 @@ impl<F: Future> Future for WakeTraced<F> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::telemetry::analysis_events::Dial9Event;
     use crate::telemetry::buffer;
-    use crate::telemetry::events::TelemetryEvent;
     use crate::telemetry::recorder::{TelemetryCore, TracedRuntime};
     use crate::telemetry::task_metadata::UNKNOWN_TASK_ID;
     use crate::telemetry::writer::{DiskWriter, NullWriter};
@@ -330,8 +330,8 @@ mod tests {
         let wake_task_ids: Vec<TaskId> = events
             .iter()
             .filter_map(|e| {
-                if let TelemetryEvent::WakeEvent { woken_task_id, .. } = e {
-                    Some(*woken_task_id)
+                if let Dial9Event::WakeEvent(w) = e {
+                    Some(TaskId(w.woken_task_id))
                 } else {
                     None
                 }

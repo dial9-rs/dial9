@@ -13,7 +13,7 @@ use dial9_tokio_telemetry::telemetry::TracedRuntime;
 fn install_publishes_active_inner() {
     assert!(!is_installed(), "should not be installed before install()");
 
-    let (writer, _events) = common::CapturingWriter::new();
+    let (writer, _batches) = common::BytesCapturingWriter::new();
 
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.worker_threads(1).enable_all();

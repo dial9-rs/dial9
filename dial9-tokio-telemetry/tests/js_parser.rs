@@ -1,7 +1,7 @@
 //! Integration test: verify JS trace parser matches Rust parser
 
-use dial9_tokio_telemetry::analysis_unstable::TraceReader;
 use dial9_tokio_telemetry::telemetry::{DiskWriter, TracedRuntime};
+use dial9_trace_format::decoder::Decoder;
 use std::io::{BufWriter, Write};
 use std::process::Command;
 use tempfile::TempDir;
@@ -59,15 +59,19 @@ fn test_js_parser_matches_rust() {
     let sealed_path = temp_dir.path().join("test_trace.0.bin");
     eprintln!("Generated trace at {}", sealed_path.display());
 
-    // Export to JSONL using Rust parser (in-process to avoid cargo subprocess overhead)
+    // Export to JSONL using serde decoder (in-process)
     {
-        let reader = TraceReader::new(sealed_path.to_str().unwrap()).unwrap();
+        let data = std::fs::read(&sealed_path).unwrap();
+        let mut decoder = Decoder::new(&data).unwrap();
         let file = std::fs::File::create(&jsonl_path).unwrap();
         let mut w = BufWriter::new(file);
-        for e in &reader.all_events {
-            serde_json::to_writer(&mut w, &e).unwrap();
-            w.write_all(b"\n").unwrap();
-        }
+        decoder
+            .for_each_event(|raw| {
+                let ev: serde_json::Value = raw.deserialize().expect("deserialize");
+                serde_json::to_writer(&mut w, &ev).unwrap();
+                w.write_all(b"\n").unwrap();
+            })
+            .unwrap();
         w.flush().unwrap();
     }
 

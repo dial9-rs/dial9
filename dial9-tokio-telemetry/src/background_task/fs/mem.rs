@@ -82,6 +82,8 @@ impl MemFs {
                 "max_total_size must be > 0",
             ));
         }
+
+        #[allow(unknown_lints, clippy::manual_checked_ops)]
         let slots = if segment_size_hint == 0 {
             1
         } else {

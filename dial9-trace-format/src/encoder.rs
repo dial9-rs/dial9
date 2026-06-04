@@ -166,6 +166,13 @@ pub struct Encoder<W: Write = Vec<u8>> {
     stack_pool: FxHashMap<Box<[u64]>, u32>,
     next_stack_pool_id: u32,
     schema_ids: FxHashMap<SchemaKey, WireTypeId>,
+    /// Per-type dense cache keyed by `TraceEvent::type_slot()`.
+    /// Stores `wire_id + 1` so that `0` means "unset".
+    slot_cache: Vec<u32>,
+    /// Bitset over `0..STATIC_WIRE_ID_LIMIT`: which fast-path wire IDs (type
+    /// slots) have had their schema frame emitted on this encoder. 256 bits =
+    /// 32 bytes inline.
+    registered_ids: [u64; (crate::STATIC_WIRE_ID_LIMIT as usize) / 64],
 }
 
 impl Default for Encoder<Vec<u8>> {
@@ -186,6 +193,8 @@ impl Encoder<Vec<u8>> {
             stack_pool: FxHashMap::default(),
             next_stack_pool_id: 0,
             schema_ids: FxHashMap::default(),
+            slot_cache: Vec::new(),
+            registered_ids: [0; (crate::STATIC_WIRE_ID_LIMIT as usize) / 64],
         }
     }
 
@@ -208,6 +217,8 @@ impl<W: Write> Encoder<W> {
             stack_pool: FxHashMap::default(),
             next_stack_pool_id: 0,
             schema_ids: FxHashMap::default(),
+            slot_cache: Vec::new(),
+            registered_ids: [0; (crate::STATIC_WIRE_ID_LIMIT as usize) / 64],
         })
     }
 
@@ -255,6 +266,8 @@ impl<W: Write> Encoder<W> {
             stack_pool: new_stack_pool,
             next_stack_pool_id,
             schema_ids,
+            slot_cache: Vec::new(),
+            registered_ids: [0; (crate::STATIC_WIRE_ID_LIMIT as usize) / 64],
         }
     }
 
@@ -283,6 +296,8 @@ impl<W: Write> Encoder<W> {
         self.next_stack_pool_id = 0;
         self.registry.clear();
         self.schema_ids.clear();
+        self.slot_cache.fill(0);
+        self.registered_ids.fill(0);
         // creating a new EncodeState resets the timestamp delta
         let old_state = std::mem::replace(&mut self.state, EncodeState::new(new_writer));
         Ok(old_state.writer.into_inner())
@@ -411,15 +426,22 @@ impl<W: Write> Encoder<W> {
     /// Write a derived TraceEvent. Auto-registers the schema on first call for this type.
     /// Handles timestamp encoding: emits TimestampReset if needed, packs u24 delta in header.
     pub fn write<T: TraceEvent + 'static>(&mut self, event: &T) -> io::Result<()> {
-        let key = SchemaKey::RustType(TypeId::of::<T>());
-        let tid = if let Some(&cached) = self.schema_ids.get(&key) {
-            cached
+        let slot = T::type_slot();
+        let tid = if slot != 0 && slot < crate::STATIC_WIRE_ID_LIMIT {
+            let word = (slot >> 6) as usize;
+            let bit = 1u64 << (slot & 63);
+            if self.registered_ids[word] & bit == 0 {
+                self.register_fast_id::<T>(slot)?;
+            }
+            WireTypeId(slot)
         } else {
-            let entry = T::schema_entry();
-            let schema = Schema::new(&entry.name, entry.fields);
-            let id = self.ensure_registered(&schema)?;
-            self.schema_ids.insert(key, id);
-            id
+            let s = slot as usize;
+            let cached = self.slot_cache.get(s).copied().unwrap_or(0);
+            if cached != 0 {
+                WireTypeId((cached - 1) as u16)
+            } else {
+                self.resolve_dynamic_wire_id::<T>(s)?
+            }
         };
         let ts_ns = event.timestamp();
         let ts_delta = self.state.encode_timestamp_delta(ts_ns)?;
@@ -428,6 +450,54 @@ impl<W: Write> Encoder<W> {
         codec::encode_u24_le(ts_delta, &mut self.state.writer)?;
         let mut enc = EventEncoder::new(&mut self.state);
         event.encode_fields(&mut enc)
+    }
+
+    /// Slow path for `write::<T>`: resolve the wire ID via the schema-ids
+    /// hashmap (registering the schema if needed) and populate the slot cache
+    /// so the next call for the same type takes the fast path.
+    #[cold]
+    fn resolve_dynamic_wire_id<T: TraceEvent + 'static>(
+        &mut self,
+        slot: usize,
+    ) -> io::Result<WireTypeId> {
+        let key = SchemaKey::RustType(TypeId::of::<T>());
+        let tid = if let Some(&existing) = self.schema_ids.get(&key) {
+            existing
+        } else {
+            let entry = T::schema_entry();
+            let schema = Schema::new(&entry.name, entry.fields);
+            let id = self.ensure_registered(&schema)?;
+            self.schema_ids.insert(key, id);
+            id
+        };
+        if slot != 0 {
+            if self.slot_cache.len() <= slot {
+                self.slot_cache.resize(slot + 1, 0);
+            }
+            self.slot_cache[slot] = (tid.0 as u32) + 1;
+        }
+        Ok(tid)
+    }
+
+    /// First write of a slot in `1..STATIC_WIRE_ID_LIMIT`: emit the schema frame
+    /// at the slot `id` and mark the bitset, so later writes skip registration.
+    #[cold]
+    fn register_fast_id<T: TraceEvent + 'static>(&mut self, id: u16) -> io::Result<()> {
+        let entry = T::schema_entry();
+        let wire = WireTypeId(id);
+        codec::encode_schema(wire, &entry, &mut self.state.writer)?;
+        if !entry.annotations.is_empty() {
+            codec::encode_schema_annotations(wire, &entry.annotations, &mut self.state.writer)?;
+        }
+        self.registry.register(wire, entry).map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("wire id {id} collision: {e}"),
+            )
+        })?;
+        // mark id registered: set bit (id % 64) in word (id / 64)
+        self.registered_ids[(id >> 6) as usize] |= 1u64 << (id & 63);
+        Ok(())
     }
 
     /// Intern a string, emitting a pool frame if new. Returns an [`InternedString`] handle.
@@ -992,6 +1062,69 @@ mod tests {
             .collect();
         // One from the base trace ("hello"), one from extend ("world")
         assert_eq!(pool_frames.len(), 2);
+    }
+
+    /// Minimal hand-rolled `TraceEvent` with a fixed fast-path slot, so the
+    /// encoder tests don't depend on the derive crate.
+    struct FastSlot {
+        ts: u64,
+    }
+    impl TraceEvent for FastSlot {
+        fn type_slot() -> u16 {
+            5
+        }
+        fn event_name() -> &'static str {
+            "FastSlot"
+        }
+        fn field_defs() -> Vec<FieldDef> {
+            Vec::new()
+        }
+        fn timestamp(&self) -> u64 {
+            self.ts
+        }
+        fn encode_fields<W: Write>(&self, _enc: &mut EventEncoder<'_, W>) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn fast_slot_registers_at_slot_id() {
+        use crate::decoder::Decoder;
+
+        let mut enc = Encoder::new();
+        enc.write(&FastSlot { ts: 1_000_000 }).unwrap();
+        // A plain dynamic schema must land in the dynamic range, above slots.
+        let dynamic = enc
+            .register_schema(
+                "Dyn",
+                vec![FieldDef {
+                    name: "v".into(),
+                    field_type: FieldType::Varint,
+                }],
+            )
+            .unwrap();
+        enc.write_event(
+            &dynamic,
+            &[FieldValue::Varint(2_000), FieldValue::Varint(1)],
+        )
+        .unwrap();
+        let bytes = enc.finish();
+
+        let mut dec = Decoder::new(&bytes).unwrap();
+        let _ = dec.decode_all();
+        // Fast-path event registered at its slot id.
+        assert_eq!(
+            dec.registry().get(WireTypeId(5)).unwrap().name(),
+            "FastSlot"
+        );
+        // Dynamic schema sits at STATIC_WIRE_ID_LIMIT, not colliding with slots.
+        assert_eq!(
+            dec.registry()
+                .get(WireTypeId(crate::STATIC_WIRE_ID_LIMIT))
+                .unwrap()
+                .name(),
+            "Dyn"
+        );
     }
 
     #[test]

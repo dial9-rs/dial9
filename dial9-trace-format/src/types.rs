@@ -193,6 +193,74 @@ impl serde::Serialize for FieldValue {
     }
 }
 
+#[cfg(feature = "serde")]
+impl<'de> serde::Deserialize<'de> for FieldValue {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct FieldValueVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for FieldValueVisitor {
+            type Value = FieldValue;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("any trace field value")
+            }
+
+            fn visit_bool<E>(self, v: bool) -> Result<FieldValue, E> {
+                Ok(FieldValue::Bool(v))
+            }
+            fn visit_i64<E>(self, v: i64) -> Result<FieldValue, E> {
+                Ok(FieldValue::I64(v))
+            }
+            fn visit_u64<E>(self, v: u64) -> Result<FieldValue, E> {
+                Ok(FieldValue::Varint(v))
+            }
+            fn visit_f64<E>(self, v: f64) -> Result<FieldValue, E> {
+                Ok(FieldValue::F64(v))
+            }
+            fn visit_str<E>(self, v: &str) -> Result<FieldValue, E> {
+                Ok(FieldValue::String(v.to_string()))
+            }
+            fn visit_string<E>(self, v: String) -> Result<FieldValue, E> {
+                Ok(FieldValue::String(v))
+            }
+            fn visit_bytes<E>(self, v: &[u8]) -> Result<FieldValue, E> {
+                Ok(FieldValue::Bytes(v.to_vec()))
+            }
+            fn visit_none<E>(self) -> Result<FieldValue, E> {
+                Ok(FieldValue::None)
+            }
+            fn visit_some<D: serde::Deserializer<'de>>(
+                self,
+                deserializer: D,
+            ) -> Result<FieldValue, D::Error> {
+                serde::Deserialize::deserialize(deserializer)
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut seq: A,
+            ) -> Result<FieldValue, A::Error> {
+                let mut items = Vec::new();
+                while let Some(v) = seq.next_element()? {
+                    items.push(v);
+                }
+                Ok(FieldValue::List(items))
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<FieldValue, A::Error> {
+                let mut pairs = Vec::new();
+                while let Some((k, v)) = map.next_entry()? {
+                    pairs.push((k, v));
+                }
+                Ok(FieldValue::Map(pairs))
+            }
+        }
+
+        deserializer.deserialize_any(FieldValueVisitor)
+    }
+}
+
 impl FieldValue {
     pub fn string(s: &str) -> Self {
         FieldValue::String(s.to_string())
@@ -1007,11 +1075,7 @@ impl<'a, W: Write> EventEncoder<'a, W> {
 
 /// Trait for types that can be used as trace fields.
 /// Provides schema metadata (`field_type`), encoding (`encode`), and
-/// decoding (`decode_ref`).
 pub trait TraceField {
-    /// The zero-copy decoded form of this field.
-    type Ref<'a>;
-
     fn field_type() -> FieldType;
     /// Whether this field is optional on the wire (high-bit modifier).
     fn is_optional() -> bool {
@@ -1019,221 +1083,122 @@ pub trait TraceField {
     }
     /// Encode this field's value into the event encoder.
     fn encode<W: Write>(&self, enc: &mut EventEncoder<'_, W>) -> io::Result<()>;
-    /// Extract this field's value from a zero-copy FieldValueRef.
-    fn decode_ref<'a>(val: &FieldValueRef<'a>) -> Option<Self::Ref<'a>>;
-    /// Called when the field is absent from the wire data (not in the schema).
-    /// Returns `None` for required fields (decode failure) and `Some(None)` for
-    /// optional fields.
-    fn decode_missing<'a>() -> Option<Self::Ref<'a>> {
-        None
-    }
 }
 
 impl TraceField for u8 {
-    type Ref<'a> = u8;
     fn field_type() -> FieldType {
         FieldType::U8
     }
     fn encode<W: Write>(&self, enc: &mut EventEncoder<'_, W>) -> io::Result<()> {
         enc.write_u8(*self)
     }
-    fn decode_ref<'a>(val: &FieldValueRef<'a>) -> Option<Self::Ref<'a>> {
-        match val {
-            FieldValueRef::Varint(v) => Some(*v as u8),
-            _ => None,
-        }
-    }
 }
 
 impl TraceField for u16 {
-    type Ref<'a> = u16;
     fn field_type() -> FieldType {
         FieldType::U16
     }
     fn encode<W: Write>(&self, enc: &mut EventEncoder<'_, W>) -> io::Result<()> {
         enc.write_u16(*self)
     }
-    fn decode_ref<'a>(val: &FieldValueRef<'a>) -> Option<Self::Ref<'a>> {
-        match val {
-            FieldValueRef::Varint(v) => Some(*v as u16),
-            _ => None,
-        }
-    }
 }
 
 impl TraceField for u32 {
-    type Ref<'a> = u32;
     fn field_type() -> FieldType {
         FieldType::U32
     }
     fn encode<W: Write>(&self, enc: &mut EventEncoder<'_, W>) -> io::Result<()> {
         enc.write_u32(*self)
     }
-    fn decode_ref<'a>(val: &FieldValueRef<'a>) -> Option<Self::Ref<'a>> {
-        match val {
-            FieldValueRef::Varint(v) => Some(*v as u32),
-            _ => None,
-        }
-    }
 }
 
 impl TraceField for u64 {
-    type Ref<'a> = u64;
     fn field_type() -> FieldType {
         FieldType::Varint
     }
     fn encode<W: Write>(&self, enc: &mut EventEncoder<'_, W>) -> io::Result<()> {
         enc.write_u64(*self)
     }
-    fn decode_ref<'a>(val: &FieldValueRef<'a>) -> Option<Self::Ref<'a>> {
-        match val {
-            FieldValueRef::Varint(v) => Some(*v),
-            _ => None,
-        }
-    }
 }
 
 impl TraceField for i64 {
-    type Ref<'a> = i64;
     fn field_type() -> FieldType {
         FieldType::I64
     }
     fn encode<W: Write>(&self, enc: &mut EventEncoder<'_, W>) -> io::Result<()> {
         enc.write_i64(*self)
     }
-    fn decode_ref<'a>(val: &FieldValueRef<'a>) -> Option<Self::Ref<'a>> {
-        match val {
-            FieldValueRef::I64(v) => Some(*v),
-            _ => None,
-        }
-    }
 }
 
 impl TraceField for f64 {
-    type Ref<'a> = f64;
     fn field_type() -> FieldType {
         FieldType::F64
     }
     fn encode<W: Write>(&self, enc: &mut EventEncoder<'_, W>) -> io::Result<()> {
         enc.write_f64(*self)
     }
-    fn decode_ref<'a>(val: &FieldValueRef<'a>) -> Option<Self::Ref<'a>> {
-        match val {
-            FieldValueRef::F64(v) => Some(*v),
-            _ => None,
-        }
-    }
 }
 
 impl TraceField for bool {
-    type Ref<'a> = bool;
     fn field_type() -> FieldType {
         FieldType::Bool
     }
     fn encode<W: Write>(&self, enc: &mut EventEncoder<'_, W>) -> io::Result<()> {
         enc.write_bool(*self)
     }
-    fn decode_ref<'a>(val: &FieldValueRef<'a>) -> Option<Self::Ref<'a>> {
-        match val {
-            FieldValueRef::Bool(v) => Some(*v),
-            _ => None,
-        }
-    }
 }
 
 impl TraceField for String {
-    type Ref<'a> = &'a str;
     fn field_type() -> FieldType {
         FieldType::String
     }
     fn encode<W: Write>(&self, enc: &mut EventEncoder<'_, W>) -> io::Result<()> {
         enc.write_string(self)
     }
-    fn decode_ref<'a>(val: &FieldValueRef<'a>) -> Option<Self::Ref<'a>> {
-        match val {
-            FieldValueRef::String(s) => Some(s),
-            _ => None,
-        }
-    }
 }
 
 impl TraceField for Vec<u8> {
-    type Ref<'a> = &'a [u8];
     fn field_type() -> FieldType {
         FieldType::Bytes
     }
     fn encode<W: Write>(&self, enc: &mut EventEncoder<'_, W>) -> io::Result<()> {
         enc.write_bytes(self)
     }
-    fn decode_ref<'a>(val: &FieldValueRef<'a>) -> Option<Self::Ref<'a>> {
-        match val {
-            FieldValueRef::Bytes(b) => Some(b),
-            _ => None,
-        }
-    }
 }
 
 impl TraceField for StackFrames {
-    type Ref<'a> = StackFramesRef<'a>;
     fn field_type() -> FieldType {
         FieldType::StackFrames
     }
     fn encode<W: Write>(&self, enc: &mut EventEncoder<'_, W>) -> io::Result<()> {
         enc.write_stack_frames(self)
     }
-    fn decode_ref<'a>(val: &FieldValueRef<'a>) -> Option<Self::Ref<'a>> {
-        match val {
-            FieldValueRef::StackFrames(r) => Some(r.clone()),
-            _ => None,
-        }
-    }
 }
 
 impl TraceField for InternedString {
-    type Ref<'a> = InternedString;
     fn field_type() -> FieldType {
         FieldType::PooledString
     }
     fn encode<W: Write>(&self, enc: &mut EventEncoder<'_, W>) -> io::Result<()> {
         enc.write_interned(*self)
     }
-    fn decode_ref<'a>(val: &FieldValueRef<'a>) -> Option<Self::Ref<'a>> {
-        match val {
-            FieldValueRef::PooledString(id) => Some(*id),
-            _ => None,
-        }
-    }
 }
 
 impl TraceField for InternedStackFrames {
-    type Ref<'a> = InternedStackFrames;
     fn field_type() -> FieldType {
         FieldType::PooledStackFrames
     }
     fn encode<W: Write>(&self, enc: &mut EventEncoder<'_, W>) -> io::Result<()> {
         enc.write_interned_stack_frames(*self)
     }
-    fn decode_ref<'a>(val: &FieldValueRef<'a>) -> Option<Self::Ref<'a>> {
-        match val {
-            FieldValueRef::PooledStackFrames(id) => Some(*id),
-            _ => None,
-        }
-    }
 }
 
 impl TraceField for Vec<(String, String)> {
-    type Ref<'a> = StringMapRef<'a>;
     fn field_type() -> FieldType {
         FieldType::StringMap
     }
     fn encode<W: Write>(&self, enc: &mut EventEncoder<'_, W>) -> io::Result<()> {
         enc.write_string_map(self)
-    }
-    fn decode_ref<'a>(val: &FieldValueRef<'a>) -> Option<Self::Ref<'a>> {
-        match val {
-            FieldValueRef::StringMap(r) => Some(r.clone()),
-            _ => None,
-        }
     }
 }
 
@@ -1248,8 +1213,6 @@ impl TraceField for Vec<(String, String)> {
 macro_rules! impl_optional_trace_field {
     ($inner:ty) => {
         impl TraceField for Option<$inner> {
-            type Ref<'a> = Option<<$inner as TraceField>::Ref<'a>>;
-
             fn field_type() -> FieldType {
                 FieldType::from_tag(
                     <$inner as TraceField>::field_type() as u8 | FieldType::OPTIONAL_BIT,
@@ -1269,17 +1232,6 @@ macro_rules! impl_optional_trace_field {
                         <$inner as TraceField>::encode(v, enc)
                     }
                 }
-            }
-
-            fn decode_ref<'a>(val: &FieldValueRef<'a>) -> Option<Self::Ref<'a>> {
-                match val {
-                    FieldValueRef::None => Some(None),
-                    other => Some(Some(<$inner as TraceField>::decode_ref(other)?)),
-                }
-            }
-
-            fn decode_missing<'a>() -> Option<Self::Ref<'a>> {
-                Some(None)
             }
         }
     };

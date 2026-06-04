@@ -195,14 +195,16 @@ function accumulateTrace(acc, trace) {
   for (const [k, v] of trace.taskTerminateTimes) acc.taskTerminateTimes.set(k, v);
   for (const [k, v] of trace.callframeSymbols) acc.callframeSymbols.set(k, v);
 
-  // Sample groups
+  // Sample groups — key by full stack to avoid merging unrelated stacks with same leaf
   for (const g of deduplicateSamples(onCpu, trace.callframeSymbols)) {
-    const e = acc.cpuGroupMap.get(g.leaf);
-    if (e) e.count += g.count; else acc.cpuGroupMap.set(g.leaf, { ...g });
+    const key = g.frames.map(f => f.symbol).join('\0');
+    const e = acc.cpuGroupMap.get(key);
+    if (e) e.count += g.count; else acc.cpuGroupMap.set(key, { ...g });
   }
   for (const g of deduplicateSamples(offCpu, trace.callframeSymbols)) {
-    const e = acc.schedGroupMap.get(g.leaf);
-    if (e) e.count += g.count; else acc.schedGroupMap.set(g.leaf, { ...g });
+    const key = g.frames.map(f => f.symbol).join('\0');
+    const e = acc.schedGroupMap.get(key);
+    if (e) e.count += g.count; else acc.schedGroupMap.set(key, { ...g });
   }
 
   // Span durations (native HDR histogram for bounded memory, exact percentiles)
@@ -691,14 +693,16 @@ function mergePartial(acc, p) {
   if (p.taskTerminateTimes) for (const [k, v] of p.taskTerminateTimes) acc.taskTerminateTimes.set(k, v);
   if (p.callframeSymbols) for (const [k, v] of p.callframeSymbols) acc.callframeSymbols.set(k, v);
 
-  // Sample groups
+  // Sample groups — key by full stack to avoid merging unrelated stacks with same leaf
   for (const g of (p.cpuGroups || [])) {
-    const e = acc.cpuGroupMap.get(g.leaf);
-    if (e) e.count += g.count; else acc.cpuGroupMap.set(g.leaf, { ...g });
+    const key = g.frames.map(f => f.symbol).join('\0');
+    const e = acc.cpuGroupMap.get(key);
+    if (e) e.count += g.count; else acc.cpuGroupMap.set(key, { ...g });
   }
   for (const g of (p.schedGroups || [])) {
-    const e = acc.schedGroupMap.get(g.leaf);
-    if (e) e.count += g.count; else acc.schedGroupMap.set(g.leaf, { ...g });
+    const key = g.frames.map(f => f.symbol).join('\0');
+    const e = acc.schedGroupMap.get(key);
+    if (e) e.count += g.count; else acc.schedGroupMap.set(key, { ...g });
   }
 
   // Poll durations by location -> histogram

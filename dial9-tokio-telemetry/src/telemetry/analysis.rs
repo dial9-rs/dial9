@@ -1,9 +1,7 @@
-use crate::telemetry::events::{CpuSampleSource, TelemetryEvent};
-use crate::telemetry::format::{self, TelemetryEventRef, WorkerId};
-use crate::telemetry::task_metadata::TaskId;
-use dial9_trace_format::FieldValue;
-use dial9_trace_format::InternedString;
-use dial9_trace_format::decoder::{Decoder, StringPool};
+// This module is gated behind `#[cfg(feature = "analysis")]` and used by tests.
+
+use crate::telemetry::analysis_events::{CpuSampleSource, Dial9Event, WorkerId};
+use dial9_trace_format::decoder::Decoder;
 use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::io::{Read as _, Result};
@@ -16,17 +14,15 @@ use std::io::{Read as _, Result};
 #[derive(Debug)]
 pub struct TraceReader {
     /// All decoded events (including metadata like TaskSpawn).
-    pub all_events: Vec<TelemetryEvent>,
-    /// Runtime events only (excludes TaskSpawn, ThreadNameDef, SegmentMetadata).
-    pub runtime_events: Vec<TelemetryEvent>,
-    /// Spawn location strings keyed by `InternedString` from the string pool.
-    pub spawn_locations: HashMap<InternedString, String>,
-    /// Task ID → spawn location mapping built from TaskSpawn events.
-    pub task_spawn_locs: HashMap<TaskId, InternedString>,
-    /// OS tid → thread name mapping built from ThreadNameDef events.
+    pub all_events: Vec<Dial9Event>,
+    /// Runtime events only (excludes TaskSpawn, SegmentMetadata, ClockSync).
+    pub runtime_events: Vec<Dial9Event>,
+    /// Task ID → spawn location string mapping built from TaskSpawn and PollStart events.
+    pub task_spawn_locs: HashMap<u64, String>,
+    /// OS tid → thread name mapping built from CpuSampleEvent thread_name.
     pub thread_names: HashMap<u32, String>,
     /// Key-value metadata from the most recent SegmentMetadata event.
-    pub segment_metadata: Vec<(String, String)>,
+    pub segment_metadata: HashMap<String, String>,
 }
 
 impl TraceReader {
@@ -37,104 +33,76 @@ impl TraceReader {
             std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid trace header")
         })?;
 
-        let mut spawn_locations = HashMap::new();
-        let mut task_spawn_locs = HashMap::new();
+        let mut task_spawn_locs: HashMap<u64, String> = HashMap::new();
         let mut thread_names = HashMap::new();
-        let mut segment_metadata = Vec::new();
+        let mut segment_metadata = HashMap::new();
         let mut events = Vec::new();
 
-        // Resolve InternedString fields (spawn_loc, thread_name) inside the
-        // callback where the string pool is still valid for the current batch.
-        // After a mid-stream header the pool resets, so deferred resolution
-        // would use the wrong pool for earlier batches.
         dec.for_each_event(|ev| {
-            if let Some(r) = format::decode_ref(ev.name, ev.timestamp_ns, ev.fields, ev.schema) {
-                match &r {
-                    TelemetryEventRef::PollStart(e) => {
-                        populate_spawn_loc(&mut spawn_locations, e.spawn_loc, ev.string_pool);
-                    }
-                    TelemetryEventRef::TaskSpawn(e) => {
-                        populate_spawn_loc(&mut spawn_locations, e.spawn_loc, ev.string_pool);
-                        task_spawn_locs.insert(e.task_id, e.spawn_loc);
-                    }
-                    TelemetryEventRef::SegmentMetadata(e) => {
-                        segment_metadata = e
-                            .entries
-                            .iter()
-                            .map(|(k, v)| (k.to_string(), v.to_string()))
-                            .collect();
-                    }
-                    _ => {}
+            // Deserialize into Dial9Event via serde
+            let raw: Dial9Event = match ev.deserialize() {
+                Ok(e) => e,
+                Err(e) => {
+                    tracing::debug!(event_name = ev.name, error = %e, "skipping unrecognized event");
+                    return;
                 }
-                let owned = format::to_owned_event(r, ev.string_pool, ev.stack_pool);
-                if let TelemetryEvent::CpuSample {
-                    tid,
-                    thread_name: Some(ref name),
-                    ..
-                } = owned
-                {
-                    thread_names.insert(tid, name.clone());
+            };
+
+            match &raw {
+                Dial9Event::TaskSpawnEvent(e) => {
+                    task_spawn_locs.insert(e.task_id, e.spawn_loc.clone());
                 }
-                events.push(owned);
-            } else {
-                // Unknown event name: capture as Custom, resolving any
-                // pooled fields to owned data while the segment-local pools
-                // are still available.
-                let fields = ev
-                    .field_names()
-                    .zip(ev.fields.iter())
-                    .map(|(name, val)| {
-                        let owned = match val {
-                            dial9_trace_format::types::FieldValueRef::PooledString(id) => {
-                                let s = ev
-                                    .string_pool
-                                    .get(*id)
-                                    .unwrap_or("<unresolved>")
-                                    .to_string();
-                                FieldValue::String(s)
-                            }
-                            dial9_trace_format::types::FieldValueRef::PooledStackFrames(id) => {
-                                let frames = ev
-                                    .stack_pool
-                                    .get(*id)
-                                    .expect("stack pool entry must exist for PooledStackFrames")
-                                    .to_vec();
-                                FieldValue::StackFrames(frames.into())
-                            }
-                            other => other.to_owned(),
-                        };
-                        (name.to_string(), owned)
-                    })
-                    .collect();
-                events.push(TelemetryEvent::Custom {
-                    timestamp_nanos: ev.timestamp_ns,
-                    name: ev.name.to_string(),
-                    fields,
-                });
+                Dial9Event::PollStartEvent(e) => {
+                    task_spawn_locs
+                        .entry(e.task_id)
+                        .or_insert_with(|| e.spawn_loc.clone());
+                }
+                Dial9Event::CpuSampleEvent(e) => {
+                    if let Some(ref name) = e.thread_name {
+                        thread_names.insert(e.tid, name.clone());
+                    }
+                }
+                Dial9Event::SegmentMetadataEvent(e) => {
+                    segment_metadata = e.entries.clone();
+                }
+                Dial9Event::Other | Dial9Event::ProcessResourceUsageEvent(_) => {
+                    // Unknown event: deserialize as CustomEvent to get fields.
+                    match ev.deserialize::<crate::telemetry::analysis_events::CustomEvent>() {
+                        Ok(custom) => {
+                            events.push(Dial9Event::Custom(custom));
+                        }
+                        Err(e) => {
+                            tracing::debug!(
+                                event_name = ev.name,
+                                error = %e,
+                                "failed to deserialize custom event"
+                            );
+                        }
+                    }
+                    return;
+                }
+                _ => {}
             }
+            events.push(raw);
         })
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
 
-        let all_events: Vec<TelemetryEvent> = events;
-
-        let runtime_events = all_events
+        let runtime_events = events
             .iter()
             .filter(|e| {
                 !matches!(
                     e,
-                    TelemetryEvent::TaskSpawn { .. }
-                        | TelemetryEvent::ThreadNameDef { .. }
-                        | TelemetryEvent::SegmentMetadata { .. }
-                        | TelemetryEvent::ClockSync { .. }
+                    Dial9Event::TaskSpawnEvent { .. }
+                        | Dial9Event::SegmentMetadataEvent { .. }
+                        | Dial9Event::ClockSyncEvent { .. }
                 )
             })
             .cloned()
             .collect();
 
         Ok(Self {
-            all_events,
+            all_events: events,
             runtime_events,
-            spawn_locations,
             task_spawn_locs,
             thread_names,
             segment_metadata,
@@ -163,18 +131,6 @@ fn maybe_decompress_gzip(data: Vec<u8>) -> Result<Vec<u8>> {
         )
     })?;
     Ok(decompressed)
-}
-
-fn populate_spawn_loc(
-    map: &mut HashMap<InternedString, String>,
-    interned: dial9_trace_format::InternedString,
-    pool: &StringPool,
-) {
-    if !map.contains_key(&interned)
-        && let Some(s) = pool.get(interned)
-    {
-        map.insert(interned, s.to_string());
-    }
 }
 
 /// Aggregated statistics for a single Tokio worker thread.
@@ -206,7 +162,7 @@ pub struct SpawnLocationStats {
 }
 
 /// Summary of a decoded trace: event counts, timing, and per-worker statistics.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct TraceAnalysis {
     /// Total number of events in the trace.
     pub total_events: usize,
@@ -219,18 +175,38 @@ pub struct TraceAnalysis {
     /// Average global queue depth across all samples.
     pub avg_global_queue: f64,
     /// Per-spawn-location statistics (only populated when task tracking is enabled).
-    pub spawn_location_stats: HashMap<InternedString, SpawnLocationStats>,
+    pub spawn_location_stats: HashMap<String, SpawnLocationStats>,
+}
+
+/// Helper: get timestamp from a Dial9Event.
+fn event_timestamp(ev: &Dial9Event) -> Option<u64> {
+    match ev {
+        Dial9Event::PollStartEvent(e) => Some(e.timestamp_ns),
+        Dial9Event::PollEndEvent(e) => Some(e.timestamp_ns),
+        Dial9Event::WorkerParkEvent(e) => Some(e.timestamp_ns),
+        Dial9Event::WorkerUnparkEvent(e) => Some(e.timestamp_ns),
+        Dial9Event::QueueSampleEvent(e) => Some(e.timestamp_ns),
+        Dial9Event::TaskSpawnEvent(e) => Some(e.timestamp_ns),
+        Dial9Event::TaskTerminateEvent(e) => Some(e.timestamp_ns),
+        Dial9Event::CpuSampleEvent(e) => Some(e.timestamp_ns),
+        Dial9Event::TaskDumpEvent(e) => Some(e.timestamp_ns),
+        Dial9Event::WakeEvent(e) => Some(e.timestamp_ns),
+        Dial9Event::SegmentMetadataEvent(e) => Some(e.timestamp_ns),
+        Dial9Event::ClockSyncEvent(e) => Some(e.timestamp_ns),
+        Dial9Event::AllocEvent(e) => Some(e.timestamp_ns),
+        Dial9Event::FreeEvent(e) => Some(e.timestamp_ns),
+        Dial9Event::ProcessResourceUsageEvent(e) => Some(e.timestamp_ns),
+        Dial9Event::Custom(e) => e.timestamp_ns,
+        Dial9Event::Other => None,
+    }
 }
 
 /// Build a sorted list of (timestamp, global_queue_depth) from QueueSample events.
-fn build_global_queue_timeline(events: &[TelemetryEvent]) -> Vec<(u64, usize)> {
+fn build_global_queue_timeline(events: &[Dial9Event]) -> Vec<(u64, usize)> {
     let mut timeline: Vec<(u64, usize)> = events
         .iter()
         .filter_map(|e| match e {
-            TelemetryEvent::QueueSample {
-                timestamp_nanos,
-                global_queue_depth,
-            } => Some((*timestamp_nanos, *global_queue_depth)),
+            Dial9Event::QueueSampleEvent(q) => Some((q.timestamp_ns, q.global_queue as usize)),
             _ => None,
         })
         .collect();
@@ -249,59 +225,51 @@ fn lookup_global_queue_depth(timeline: &[(u64, usize)], timestamp: u64) -> usize
 }
 
 /// Analyze a slice of telemetry events and produce a [`TraceAnalysis`] summary.
-pub fn analyze_trace(events: &[TelemetryEvent]) -> TraceAnalysis {
+pub fn analyze_trace(events: &[Dial9Event]) -> TraceAnalysis {
     let mut worker_stats: HashMap<WorkerId, WorkerStats> = HashMap::new();
     let mut poll_starts: HashMap<WorkerId, u64> = HashMap::new();
-    // Track spawn_loc at PollStart for computing per-location poll time at PollEnd
-    let mut poll_start_locs: HashMap<WorkerId, InternedString> = HashMap::new();
-    let mut spawn_location_stats: HashMap<InternedString, SpawnLocationStats> = HashMap::new();
+    let mut poll_start_locs: HashMap<WorkerId, String> = HashMap::new();
+    let mut spawn_location_stats: HashMap<String, SpawnLocationStats> = HashMap::new();
     let mut max_global_queue = 0;
     let mut global_queue_sum = 0u64;
     let mut global_queue_count = 0u64;
 
-    let start_time = events
-        .first()
-        .and_then(|e| e.timestamp_nanos())
-        .unwrap_or(0);
-    let end_time = events.last().and_then(|e| e.timestamp_nanos()).unwrap_or(0);
+    let Some(start_time) = events.first().and_then(event_timestamp) else {
+        return TraceAnalysis::default();
+    };
+    let Some(end_time) = events.last().and_then(event_timestamp) else {
+        return TraceAnalysis::default();
+    };
 
     for event in events {
         match event {
-            TelemetryEvent::QueueSample {
-                global_queue_depth, ..
-            } => {
-                max_global_queue = max_global_queue.max(*global_queue_depth);
-                global_queue_sum += *global_queue_depth as u64;
+            Dial9Event::QueueSampleEvent(q) => {
+                let depth = q.global_queue as usize;
+                max_global_queue = max_global_queue.max(depth);
+                global_queue_sum += depth as u64;
                 global_queue_count += 1;
             }
-            TelemetryEvent::PollStart {
-                timestamp_nanos,
-                worker_id,
-                worker_local_queue_depth,
-                spawn_loc,
-                ..
-            } => {
-                let stats = worker_stats.entry(*worker_id).or_default();
-                stats.max_local_queue = stats.max_local_queue.max(*worker_local_queue_depth);
+            Dial9Event::PollStartEvent(e) => {
+                let wid = e.worker_id;
+                let stats = worker_stats.entry(wid).or_default();
+                stats.max_local_queue = stats.max_local_queue.max(e.local_queue as usize);
                 stats.poll_count += 1;
-                poll_starts.insert(*worker_id, *timestamp_nanos);
-                if spawn_loc.raw_id() != 0 {
+                poll_starts.insert(wid, e.timestamp_ns);
+                if !e.spawn_loc.is_empty() {
                     spawn_location_stats
-                        .entry(*spawn_loc)
+                        .entry(e.spawn_loc.clone())
                         .or_default()
                         .poll_count += 1;
-                    poll_start_locs.insert(*worker_id, *spawn_loc);
+                    poll_start_locs.insert(wid, e.spawn_loc.clone());
                 }
             }
-            TelemetryEvent::PollEnd {
-                timestamp_nanos,
-                worker_id,
-            } => {
-                let stats = worker_stats.entry(*worker_id).or_default();
-                if let Some(start) = poll_starts.get(worker_id) {
-                    let duration = timestamp_nanos.saturating_sub(*start);
+            Dial9Event::PollEndEvent(e) => {
+                let wid = e.worker_id;
+                let stats = worker_stats.entry(wid).or_default();
+                if let Some(start) = poll_starts.get(&wid) {
+                    let duration = e.timestamp_ns.saturating_sub(*start);
                     stats.total_poll_time_ns += duration;
-                    if let Some(loc_id) = poll_start_locs.remove(worker_id) {
+                    if let Some(loc_id) = poll_start_locs.remove(&wid) {
                         spawn_location_stats
                             .entry(loc_id)
                             .or_default()
@@ -309,38 +277,21 @@ pub fn analyze_trace(events: &[TelemetryEvent]) -> TraceAnalysis {
                     }
                 }
             }
-            TelemetryEvent::WorkerPark {
-                worker_id,
-                worker_local_queue_depth,
-                ..
-            } => {
-                let stats = worker_stats.entry(*worker_id).or_default();
-                stats.max_local_queue = stats.max_local_queue.max(*worker_local_queue_depth);
+            Dial9Event::WorkerParkEvent(e) => {
+                let wid = e.worker_id;
+                let stats = worker_stats.entry(wid).or_default();
+                stats.max_local_queue = stats.max_local_queue.max(e.local_queue as usize);
                 stats.park_count += 1;
             }
-            TelemetryEvent::WorkerUnpark {
-                worker_id,
-                worker_local_queue_depth,
-                sched_wait_delta_nanos,
-                ..
-            } => {
-                let stats = worker_stats.entry(*worker_id).or_default();
-                stats.max_local_queue = stats.max_local_queue.max(*worker_local_queue_depth);
+            Dial9Event::WorkerUnparkEvent(e) => {
+                let wid = e.worker_id;
+                let stats = worker_stats.entry(wid).or_default();
+                stats.max_local_queue = stats.max_local_queue.max(e.local_queue as usize);
                 stats.unpark_count += 1;
-                stats.total_sched_wait_ns += sched_wait_delta_nanos;
-                stats.max_sched_wait_ns = stats.max_sched_wait_ns.max(*sched_wait_delta_nanos);
+                stats.total_sched_wait_ns += e.sched_wait_ns;
+                stats.max_sched_wait_ns = stats.max_sched_wait_ns.max(e.sched_wait_ns);
             }
-            TelemetryEvent::TaskSpawn { .. }
-            | TelemetryEvent::TaskTerminate { .. }
-            | TelemetryEvent::CpuSample { .. }
-            | TelemetryEvent::TaskDump { .. }
-            | TelemetryEvent::Alloc { .. }
-            | TelemetryEvent::Free { .. }
-            | TelemetryEvent::ThreadNameDef { .. }
-            | TelemetryEvent::WakeEvent { .. }
-            | TelemetryEvent::SegmentMetadata { .. }
-            | TelemetryEvent::ClockSync { .. }
-            | TelemetryEvent::Custom { .. } => {}
+            _ => {}
         }
     }
 
@@ -360,20 +311,14 @@ pub fn analyze_trace(events: &[TelemetryEvent]) -> TraceAnalysis {
 
 /// Compute wake→poll scheduling delays from wake events and poll starts.
 /// Returns a sorted vec of delay durations in nanoseconds.
-pub fn compute_wake_to_poll_delays(events: &[TelemetryEvent]) -> Vec<u64> {
-    // Index: task_id → sorted vec of wake timestamps
-    let mut wakes_by_task: HashMap<TaskId, Vec<u64>> = HashMap::new();
+pub fn compute_wake_to_poll_delays(events: &[Dial9Event]) -> Vec<u64> {
+    let mut wakes_by_task: HashMap<u64, Vec<u64>> = HashMap::new();
     for e in events {
-        if let TelemetryEvent::WakeEvent {
-            timestamp_nanos,
-            woken_task_id,
-            ..
-        } = e
-        {
+        if let Dial9Event::WakeEvent(w) = e {
             wakes_by_task
-                .entry(*woken_task_id)
+                .entry(w.woken_task_id)
                 .or_default()
-                .push(*timestamp_nanos);
+                .push(w.timestamp_ns);
         }
     }
     for v in wakes_by_task.values_mut() {
@@ -382,17 +327,12 @@ pub fn compute_wake_to_poll_delays(events: &[TelemetryEvent]) -> Vec<u64> {
 
     let mut delays = Vec::new();
     for e in events {
-        if let TelemetryEvent::PollStart {
-            timestamp_nanos,
-            task_id,
-            ..
-        } = e
-            && let Some(wakes) = wakes_by_task.get(task_id)
+        if let Dial9Event::PollStartEvent(p) = e
+            && let Some(wakes) = wakes_by_task.get(&p.task_id)
         {
-            // Binary search for last wake <= poll start
-            let idx = wakes.partition_point(|&t| t <= *timestamp_nanos);
+            let idx = wakes.partition_point(|&t| t <= p.timestamp_ns);
             if idx > 0 {
-                let delay = timestamp_nanos - wakes[idx - 1];
+                let delay = p.timestamp_ns - wakes[idx - 1];
                 if delay > 0 && delay < 1_000_000_000 {
                     delays.push(delay);
                 }
@@ -419,39 +359,29 @@ pub struct ActivePeriod {
 }
 
 /// Compute scheduling ratios for each active period (unpark→park) per worker.
-pub fn compute_active_periods(events: &[TelemetryEvent]) -> Vec<ActivePeriod> {
+pub fn compute_active_periods(events: &[Dial9Event]) -> Vec<ActivePeriod> {
     let mut periods = Vec::new();
-    // Track (wall_ns, cpu_ns) at unpark
     let mut unpark_state: HashMap<WorkerId, (u64, u64)> = HashMap::new();
 
     for event in events {
         match event {
-            TelemetryEvent::WorkerUnpark {
-                timestamp_nanos,
-                worker_id,
-                cpu_time_nanos,
-                ..
-            } => {
-                unpark_state.insert(*worker_id, (*timestamp_nanos, *cpu_time_nanos));
+            Dial9Event::WorkerUnparkEvent(e) => {
+                unpark_state.insert(e.worker_id, (e.timestamp_ns, e.cpu_time_ns));
             }
-            TelemetryEvent::WorkerPark {
-                timestamp_nanos,
-                worker_id,
-                cpu_time_nanos,
-                ..
-            } => {
-                if let Some((start_wall, start_cpu)) = unpark_state.remove(worker_id) {
-                    let wall_delta = timestamp_nanos.saturating_sub(start_wall);
-                    let cpu_delta = cpu_time_nanos.saturating_sub(start_cpu);
+            Dial9Event::WorkerParkEvent(e) => {
+                let wid = e.worker_id;
+                if let Some((start_wall, start_cpu)) = unpark_state.remove(&wid) {
+                    let wall_delta = e.timestamp_ns.saturating_sub(start_wall);
+                    let cpu_delta = e.cpu_time_ns.saturating_sub(start_cpu);
                     let ratio = if wall_delta > 0 {
                         (cpu_delta as f64 / wall_delta as f64).min(1.0)
                     } else {
                         1.0
                     };
                     periods.push(ActivePeriod {
-                        worker_id: *worker_id,
+                        worker_id: wid,
                         start_ns: start_wall,
-                        end_ns: *timestamp_nanos,
+                        end_ns: e.timestamp_ns,
                         cpu_delta_ns: cpu_delta,
                         scheduling_ratio: ratio,
                     });
@@ -464,7 +394,7 @@ pub fn compute_active_periods(events: &[TelemetryEvent]) -> Vec<ActivePeriod> {
 }
 
 /// Print a human-readable summary of a [`TraceAnalysis`] to stdout.
-pub fn print_analysis(analysis: &TraceAnalysis, spawn_locations: &HashMap<InternedString, String>) {
+pub fn print_analysis(analysis: &TraceAnalysis) {
     println!("\n=== Trace Analysis ===");
     println!("Total events: {}", analysis.total_events);
     println!(
@@ -503,10 +433,7 @@ pub fn print_analysis(analysis: &TraceAnalysis, spawn_locations: &HashMap<Intern
         let mut locs: Vec<_> = analysis.spawn_location_stats.iter().collect();
         locs.sort_by_key(|b| Reverse(b.1.poll_count));
         for (id, stats) in locs {
-            let name = spawn_locations
-                .get(id)
-                .map(|s| s.as_str())
-                .unwrap_or("<unknown>");
+            let name = id.as_str();
             let avg_poll_us = if stats.poll_count > 0 {
                 stats.total_poll_time_ns as f64 / stats.poll_count as f64 / 1000.0
             } else {
@@ -521,34 +448,24 @@ pub fn print_analysis(analysis: &TraceAnalysis, spawn_locations: &HashMap<Intern
 }
 
 /// Detect periods where a worker was parked while the global queue had pending work.
-///
-/// Uses the global queue sample timeline to look up the queue depth at unpark time,
-/// since global_queue_depth is only recorded on QueueSample events.
-pub fn detect_idle_workers(events: &[TelemetryEvent]) -> Vec<(WorkerId, u64, usize)> {
+pub fn detect_idle_workers(events: &[Dial9Event]) -> Vec<(WorkerId, u64, usize)> {
     let global_queue_timeline = build_global_queue_timeline(events);
     let mut idle_periods = Vec::new();
     let mut worker_park_times: HashMap<WorkerId, u64> = HashMap::new();
 
     for event in events {
         match event {
-            TelemetryEvent::WorkerPark {
-                timestamp_nanos,
-                worker_id,
-                ..
-            } => {
-                worker_park_times.insert(*worker_id, *timestamp_nanos);
+            Dial9Event::WorkerParkEvent(e) => {
+                worker_park_times.insert(e.worker_id, e.timestamp_ns);
             }
-            TelemetryEvent::WorkerUnpark {
-                timestamp_nanos,
-                worker_id,
-                ..
-            } => {
-                if let Some(park_time) = worker_park_times.remove(worker_id) {
-                    let idle_duration = timestamp_nanos.saturating_sub(park_time);
+            Dial9Event::WorkerUnparkEvent(e) => {
+                let wid = e.worker_id;
+                if let Some(park_time) = worker_park_times.remove(&wid) {
+                    let idle_duration = e.timestamp_ns.saturating_sub(park_time);
                     let global_queue_at_unpark =
-                        lookup_global_queue_depth(&global_queue_timeline, *timestamp_nanos);
+                        lookup_global_queue_depth(&global_queue_timeline, e.timestamp_ns);
                     if idle_duration > 1_000_000 && global_queue_at_unpark > 0 {
-                        idle_periods.push((*worker_id, idle_duration, global_queue_at_unpark));
+                        idle_periods.push((wid, idle_duration, global_queue_at_unpark));
                     }
                 }
             }
@@ -571,41 +488,33 @@ pub struct LongPoll {
     /// Duration of the poll in nanoseconds.
     pub duration_ns: u64,
     /// Task that was being polled.
-    pub task_id: TaskId,
+    pub task_id: u64,
     /// Spawn location of the task.
-    pub spawn_loc: InternedString,
+    pub spawn_loc: String,
 }
 
 /// Detect polls that exceed `threshold_ns` nanoseconds.
-///
-/// Returns long polls in timestamp order. Each entry captures the worker,
-/// time range, and task metadata (when task tracking is enabled).
-pub fn detect_long_polls(events: &[TelemetryEvent], threshold_ns: u64) -> Vec<LongPoll> {
+pub fn detect_long_polls(events: &[Dial9Event], threshold_ns: u64) -> Vec<LongPoll> {
     let mut long_polls = Vec::new();
-    let mut poll_starts: HashMap<WorkerId, (u64, TaskId, InternedString)> = HashMap::new();
+    let mut poll_starts: HashMap<WorkerId, (u64, u64, String)> = HashMap::new();
 
     for event in events {
         match event {
-            TelemetryEvent::PollStart {
-                timestamp_nanos,
-                worker_id,
-                task_id,
-                spawn_loc,
-                ..
-            } => {
-                poll_starts.insert(*worker_id, (*timestamp_nanos, *task_id, *spawn_loc));
+            Dial9Event::PollStartEvent(e) => {
+                poll_starts.insert(
+                    e.worker_id,
+                    (e.timestamp_ns, e.task_id, e.spawn_loc.clone()),
+                );
             }
-            TelemetryEvent::PollEnd {
-                timestamp_nanos,
-                worker_id,
-            } => {
-                if let Some((start, task_id, spawn_loc)) = poll_starts.remove(worker_id) {
-                    let duration = timestamp_nanos.saturating_sub(start);
+            Dial9Event::PollEndEvent(e) => {
+                let wid = e.worker_id;
+                if let Some((start, task_id, spawn_loc)) = poll_starts.remove(&wid) {
+                    let duration = e.timestamp_ns.saturating_sub(start);
                     if duration >= threshold_ns {
                         long_polls.push(LongPoll {
-                            worker_id: *worker_id,
+                            worker_id: wid,
                             start_ns: start,
-                            end_ns: *timestamp_nanos,
+                            end_ns: e.timestamp_ns,
                             duration_ns: duration,
                             task_id,
                             spawn_loc,
@@ -633,36 +542,25 @@ pub struct SchedDelay {
 }
 
 /// Detect park periods where OS scheduling wait exceeded `threshold_ns`.
-///
-/// `sched_wait_delta_nanos` on `WorkerUnpark` reports how long the thread was
-/// runnable but not scheduled by the OS during the preceding park.
-pub fn detect_sched_delays(events: &[TelemetryEvent], threshold_ns: u64) -> Vec<SchedDelay> {
+pub fn detect_sched_delays(events: &[Dial9Event], threshold_ns: u64) -> Vec<SchedDelay> {
     let mut delays = Vec::new();
     let mut park_times: HashMap<WorkerId, u64> = HashMap::new();
 
     for event in events {
         match event {
-            TelemetryEvent::WorkerPark {
-                timestamp_nanos,
-                worker_id,
-                ..
-            } => {
-                park_times.insert(*worker_id, *timestamp_nanos);
+            Dial9Event::WorkerParkEvent(e) => {
+                park_times.insert(e.worker_id, e.timestamp_ns);
             }
-            TelemetryEvent::WorkerUnpark {
-                timestamp_nanos,
-                worker_id,
-                sched_wait_delta_nanos,
-                ..
-            } => {
-                if let Some(park_ns) = park_times.remove(worker_id)
-                    && *sched_wait_delta_nanos >= threshold_ns
+            Dial9Event::WorkerUnparkEvent(e) => {
+                let wid = e.worker_id;
+                if let Some(park_ns) = park_times.remove(&wid)
+                    && e.sched_wait_ns >= threshold_ns
                 {
                     delays.push(SchedDelay {
-                        worker_id: *worker_id,
+                        worker_id: wid,
                         park_ns,
-                        unpark_ns: *timestamp_nanos,
-                        sched_wait_ns: *sched_wait_delta_nanos,
+                        unpark_ns: e.timestamp_ns,
+                        sched_wait_ns: e.sched_wait_ns,
                     });
                 }
             }
@@ -684,29 +582,20 @@ pub struct WakeDelay {
     /// Delay between wake and poll in nanoseconds.
     pub delay_ns: u64,
     /// Task that experienced the scheduling delay.
-    pub task_id: TaskId,
+    pub task_id: u64,
 }
 
 /// Detect wake-to-poll delays exceeding `threshold_ns`.
-///
-/// For each `PollStart`, finds the most recent wake for that task and reports
-/// the delay if it exceeds the threshold. Delays >= 1s are discarded as likely
-/// representing idle tasks rather than scheduling problems.
-pub fn detect_wake_delays(events: &[TelemetryEvent], threshold_ns: u64) -> Vec<WakeDelay> {
+pub fn detect_wake_delays(events: &[Dial9Event], threshold_ns: u64) -> Vec<WakeDelay> {
     const MAX_REASONABLE_DELAY_NS: u64 = 1_000_000_000;
 
-    let mut wakes_by_task: HashMap<TaskId, Vec<u64>> = HashMap::new();
+    let mut wakes_by_task: HashMap<u64, Vec<u64>> = HashMap::new();
     for event in events {
-        if let TelemetryEvent::WakeEvent {
-            timestamp_nanos,
-            woken_task_id,
-            ..
-        } = event
-        {
+        if let Dial9Event::WakeEvent(w) = event {
             wakes_by_task
-                .entry(*woken_task_id)
+                .entry(w.woken_task_id)
                 .or_default()
-                .push(*timestamp_nanos);
+                .push(w.timestamp_ns);
         }
     }
     for v in wakes_by_task.values_mut() {
@@ -715,24 +604,19 @@ pub fn detect_wake_delays(events: &[TelemetryEvent], threshold_ns: u64) -> Vec<W
 
     let mut delays = Vec::new();
     for event in events {
-        if let TelemetryEvent::PollStart {
-            timestamp_nanos,
-            worker_id,
-            task_id,
-            ..
-        } = event
-            && let Some(wakes) = wakes_by_task.get(task_id)
+        if let Dial9Event::PollStartEvent(p) = event
+            && let Some(wakes) = wakes_by_task.get(&p.task_id)
         {
-            let idx = wakes.partition_point(|&t| t <= *timestamp_nanos);
+            let idx = wakes.partition_point(|&t| t <= p.timestamp_ns);
             if idx > 0 {
-                let delay = timestamp_nanos.saturating_sub(wakes[idx - 1]);
+                let delay = p.timestamp_ns.saturating_sub(wakes[idx - 1]);
                 if delay >= threshold_ns && delay < MAX_REASONABLE_DELAY_NS {
                     delays.push(WakeDelay {
-                        worker_id: *worker_id,
+                        worker_id: p.worker_id,
                         wake_ns: wakes[idx - 1],
-                        poll_ns: *timestamp_nanos,
+                        poll_ns: p.timestamp_ns,
                         delay_ns: delay,
-                        task_id: *task_id,
+                        task_id: p.task_id,
                     });
                 }
             }
@@ -751,9 +635,9 @@ pub struct SampledPoll {
     /// Poll end timestamp (nanos).
     pub end_ns: u64,
     /// Task that was being polled.
-    pub task_id: TaskId,
+    pub task_id: u64,
     /// Spawn location of the task.
-    pub spawn_loc: InternedString,
+    pub spawn_loc: String,
     /// Number of CPU profile samples collected during this poll.
     pub cpu_sample_count: usize,
     /// Number of scheduler event samples collected during this poll.
@@ -761,43 +645,36 @@ pub struct SampledPoll {
 }
 
 /// Find polls that had CPU profile or scheduler event samples collected during
-/// their execution. Correlates `CpuSample` events with poll time ranges on the
-/// same worker.
-pub fn detect_sampled_polls(events: &[TelemetryEvent]) -> Vec<SampledPoll> {
+/// their execution.
+pub fn detect_sampled_polls(events: &[Dial9Event]) -> Vec<SampledPoll> {
     struct PollSpan {
         worker_id: WorkerId,
         start_ns: u64,
         end_ns: u64,
-        task_id: TaskId,
-        spawn_loc: InternedString,
+        task_id: u64,
+        spawn_loc: String,
         cpu_samples: usize,
         sched_samples: usize,
     }
 
-    // First pass: build poll spans per worker
     let mut polls: Vec<PollSpan> = Vec::new();
-    let mut poll_starts: HashMap<WorkerId, (u64, TaskId, InternedString)> = HashMap::new();
+    let mut poll_starts: HashMap<WorkerId, (u64, u64, String)> = HashMap::new();
 
     for event in events {
         match event {
-            TelemetryEvent::PollStart {
-                timestamp_nanos,
-                worker_id,
-                task_id,
-                spawn_loc,
-                ..
-            } => {
-                poll_starts.insert(*worker_id, (*timestamp_nanos, *task_id, *spawn_loc));
+            Dial9Event::PollStartEvent(e) => {
+                poll_starts.insert(
+                    e.worker_id,
+                    (e.timestamp_ns, e.task_id, e.spawn_loc.clone()),
+                );
             }
-            TelemetryEvent::PollEnd {
-                timestamp_nanos,
-                worker_id,
-            } => {
-                if let Some((start, task_id, spawn_loc)) = poll_starts.remove(worker_id) {
+            Dial9Event::PollEndEvent(e) => {
+                let wid = e.worker_id;
+                if let Some((start, task_id, spawn_loc)) = poll_starts.remove(&wid) {
                     polls.push(PollSpan {
-                        worker_id: *worker_id,
+                        worker_id: wid,
                         start_ns: start,
-                        end_ns: *timestamp_nanos,
+                        end_ns: e.timestamp_ns,
                         task_id,
                         spawn_loc,
                         cpu_samples: 0,
@@ -809,33 +686,26 @@ pub fn detect_sampled_polls(events: &[TelemetryEvent]) -> Vec<SampledPoll> {
         }
     }
 
-    // Sort polls by (worker_id, start_ns) for binary search
     polls.sort_unstable_by_key(|p| (p.worker_id, p.start_ns));
 
-    // Second pass: attribute each CpuSample to a poll
     for event in events {
-        if let TelemetryEvent::CpuSample {
-            timestamp_nanos,
-            worker_id,
-            source,
-            ..
-        } = event
-        {
-            let start_idx = polls.partition_point(|p| p.worker_id < *worker_id);
-            let end_idx = polls.partition_point(|p| p.worker_id <= *worker_id);
+        if let Dial9Event::CpuSampleEvent(e) = event {
+            let wid = e.worker_id;
+            let start_idx = polls.partition_point(|p| p.worker_id < wid);
+            let end_idx = polls.partition_point(|p| p.worker_id <= wid);
             let worker_polls = &mut polls[start_idx..end_idx];
 
-            let idx = worker_polls.partition_point(|p| p.start_ns <= *timestamp_nanos);
-            if idx > 0 && *timestamp_nanos <= worker_polls[idx - 1].end_ns {
-                match source {
+            let idx = worker_polls.partition_point(|p| p.start_ns <= e.timestamp_ns);
+            if idx > 0 && e.timestamp_ns <= worker_polls[idx - 1].end_ns {
+                match e.source {
                     CpuSampleSource::CpuProfile => worker_polls[idx - 1].cpu_samples += 1,
                     CpuSampleSource::SchedEvent => worker_polls[idx - 1].sched_samples += 1,
+                    CpuSampleSource::Unknown(_) => {}
                 }
             }
         }
     }
 
-    // Collect polls that had any samples, grouped by worker
     polls
         .into_iter()
         .filter(|p| p.cpu_samples > 0 || p.sched_samples > 0)
@@ -854,11 +724,9 @@ pub fn detect_sampled_polls(events: &[TelemetryEvent]) -> Vec<SampledPoll> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::telemetry::format::WorkerId;
-    use crate::telemetry::task_metadata::UNKNOWN_TASK_ID;
+    use crate::telemetry::analysis_events::*;
+    use dial9_trace_format::InternedString;
     use dial9_trace_format::encoder::Encoder;
-    use dial9_trace_format::{FieldValue, InternedString};
-    const UNKNOWN_SPAWN_LOC: InternedString = InternedString::from_raw(0);
 
     #[test]
     fn trace_reader_reads_gzip_trace_files() {
@@ -876,7 +744,7 @@ mod tests {
         let batch = crate::telemetry::collector::Batch::new(
             ThreadLocalBuffer::encode_single(&WorkerParkEvent {
                 timestamp_ns: 1_000,
-                worker_id: WorkerId::from(7usize),
+                worker_id: crate::telemetry::format::WorkerId::from(7usize),
                 local_queue: 3,
                 cpu_time_ns: 11,
                 tid: 0,
@@ -899,21 +767,18 @@ mod tests {
         let events = &reader.runtime_events;
 
         assert_eq!(events.len(), 1);
-        assert!(matches!(
-            events[0],
-            TelemetryEvent::WorkerPark {
-                timestamp_nanos: 1_000,
-                worker_id,
-                worker_local_queue_depth: 3,
-                cpu_time_nanos: 11,
-                ..
-            } if worker_id == WorkerId::from(7usize)
-        ));
+        let Dial9Event::WorkerParkEvent(ref e) = events[0] else {
+            panic!("expected WorkerParkEvent, got {:?}", events[0]);
+        };
+        assert_eq!(e.timestamp_ns, 1_000);
+        assert_eq!(e.worker_id, WorkerId(7));
+        assert_eq!(e.local_queue, 3);
+        assert_eq!(e.cpu_time_ns, 11);
     }
 
     #[test]
     fn test_analyze_empty() {
-        let events = vec![];
+        let events: Vec<Dial9Event> = vec![];
         let analysis = analyze_trace(&events);
         assert_eq!(analysis.total_events, 0);
         assert_eq!(analysis.max_global_queue, 0);
@@ -922,144 +787,139 @@ mod tests {
     #[test]
     fn test_global_queue_from_samples_only() {
         let events = vec![
-            TelemetryEvent::PollStart {
-                timestamp_nanos: 1_000_000,
-                worker_id: WorkerId::from(0usize),
-                worker_local_queue_depth: 3,
-                task_id: UNKNOWN_TASK_ID,
-                spawn_loc: UNKNOWN_SPAWN_LOC,
-            },
-            TelemetryEvent::QueueSample {
-                timestamp_nanos: 2_000_000,
-                global_queue_depth: 42,
-            },
-            TelemetryEvent::PollEnd {
-                timestamp_nanos: 3_000_000,
-                worker_id: WorkerId::from(0usize),
-            },
+            Dial9Event::PollStartEvent(PollStartEvent {
+                timestamp_ns: 1_000_000,
+                worker_id: WorkerId(0),
+                local_queue: 3,
+                task_id: 0,
+                spawn_loc: String::new(),
+            }),
+            Dial9Event::QueueSampleEvent(QueueSampleEvent {
+                timestamp_ns: 2_000_000,
+                global_queue: 42,
+            }),
+            Dial9Event::PollEndEvent(PollEndEvent {
+                timestamp_ns: 3_000_000,
+                worker_id: WorkerId(0),
+            }),
         ];
         let analysis = analyze_trace(&events);
         assert_eq!(analysis.max_global_queue, 42);
         assert_eq!(analysis.total_events, 3);
-        // Only the QueueSample contributes to avg
         assert!((analysis.avg_global_queue - 42.0).abs() < f64::EPSILON);
     }
 
     #[test]
     fn test_local_queue_tracked_on_all_worker_events() {
         let events = vec![
-            TelemetryEvent::PollStart {
-                timestamp_nanos: 1_000_000,
-                worker_id: WorkerId::from(0usize),
-                worker_local_queue_depth: 10,
-                task_id: UNKNOWN_TASK_ID,
-                spawn_loc: UNKNOWN_SPAWN_LOC,
-            },
-            TelemetryEvent::PollEnd {
-                timestamp_nanos: 2_000_000,
-                worker_id: WorkerId::from(0usize),
-            },
+            Dial9Event::PollStartEvent(PollStartEvent {
+                timestamp_ns: 1_000_000,
+                worker_id: WorkerId(0),
+                local_queue: 10,
+                task_id: 0,
+                spawn_loc: String::new(),
+            }),
+            Dial9Event::PollEndEvent(PollEndEvent {
+                timestamp_ns: 2_000_000,
+                worker_id: WorkerId(0),
+            }),
         ];
         let analysis = analyze_trace(&events);
-        let stats = analysis.worker_stats.get(&WorkerId::from(0usize)).unwrap();
+        let stats = analysis.worker_stats.get(&WorkerId(0)).unwrap();
         assert_eq!(stats.max_local_queue, 10);
     }
 
     #[test]
     fn test_lookup_global_queue_depth() {
         let timeline = vec![(1_000_000u64, 5), (3_000_000, 10), (5_000_000, 2)];
-        // Before any sample
         assert_eq!(lookup_global_queue_depth(&timeline, 500_000), 0);
-        // Exact match
         assert_eq!(lookup_global_queue_depth(&timeline, 1_000_000), 5);
-        // Between samples — use most recent
         assert_eq!(lookup_global_queue_depth(&timeline, 2_000_000), 5);
         assert_eq!(lookup_global_queue_depth(&timeline, 4_000_000), 10);
-        // After last sample
         assert_eq!(lookup_global_queue_depth(&timeline, 9_000_000), 2);
     }
 
     #[test]
     fn test_detect_idle_workers_with_samples() {
         let events = vec![
-            TelemetryEvent::QueueSample {
-                timestamp_nanos: 1_000_000,
-                global_queue_depth: 15,
-            },
-            TelemetryEvent::WorkerPark {
-                timestamp_nanos: 2_000_000,
-                worker_id: WorkerId::from(0usize),
-                worker_local_queue_depth: 0,
-                cpu_time_nanos: 0,
+            Dial9Event::QueueSampleEvent(QueueSampleEvent {
+                timestamp_ns: 1_000_000,
+                global_queue: 15,
+            }),
+            Dial9Event::WorkerParkEvent(WorkerParkEvent {
+                timestamp_ns: 2_000_000,
+                worker_id: WorkerId(0),
+                local_queue: 0,
+                cpu_time_ns: 0,
                 tid: 0,
-            },
-            TelemetryEvent::QueueSample {
-                timestamp_nanos: 5_000_000,
-                global_queue_depth: 20,
-            },
-            TelemetryEvent::WorkerUnpark {
-                timestamp_nanos: 6_000_000,
-                worker_id: WorkerId::from(0usize),
-                worker_local_queue_depth: 0,
-                cpu_time_nanos: 0,
-                sched_wait_delta_nanos: 0,
+            }),
+            Dial9Event::QueueSampleEvent(QueueSampleEvent {
+                timestamp_ns: 5_000_000,
+                global_queue: 20,
+            }),
+            Dial9Event::WorkerUnparkEvent(WorkerUnparkEvent {
+                timestamp_ns: 6_000_000,
+                worker_id: WorkerId(0),
+                local_queue: 0,
+                cpu_time_ns: 0,
+                sched_wait_ns: 0,
                 tid: 0,
-            },
+            }),
         ];
         let idle = detect_idle_workers(&events);
         assert_eq!(idle.len(), 1);
-        assert_eq!(idle[0].0, WorkerId::from(0usize)); // worker_id
-        assert_eq!(idle[0].1, 4_000_000); // idle duration
-        assert_eq!(idle[0].2, 20); // global queue depth at unpark
+        assert_eq!(idle[0].0, WorkerId(0));
+        assert_eq!(idle[0].1, 4_000_000);
+        assert_eq!(idle[0].2, 20);
     }
 
     #[test]
     fn test_detect_long_polls_above_threshold() {
         let events = vec![
-            TelemetryEvent::PollStart {
-                timestamp_nanos: 1_000_000,
-                worker_id: WorkerId::from(0usize),
-                worker_local_queue_depth: 0,
-                task_id: TaskId::from_u32(1),
-                spawn_loc: UNKNOWN_SPAWN_LOC,
-            },
-            TelemetryEvent::PollEnd {
-                timestamp_nanos: 3_000_000, // 2ms poll
-                worker_id: WorkerId::from(0usize),
-            },
-            TelemetryEvent::PollStart {
-                timestamp_nanos: 4_000_000,
-                worker_id: WorkerId::from(0usize),
-                worker_local_queue_depth: 0,
-                task_id: TaskId::from_u32(2),
-                spawn_loc: UNKNOWN_SPAWN_LOC,
-            },
-            TelemetryEvent::PollEnd {
-                timestamp_nanos: 4_500_000, // 0.5ms poll
-                worker_id: WorkerId::from(0usize),
-            },
+            Dial9Event::PollStartEvent(PollStartEvent {
+                timestamp_ns: 1_000_000,
+                worker_id: WorkerId(0),
+                local_queue: 0,
+                task_id: 1,
+                spawn_loc: String::new(),
+            }),
+            Dial9Event::PollEndEvent(PollEndEvent {
+                timestamp_ns: 3_000_000,
+                worker_id: WorkerId(0),
+            }),
+            Dial9Event::PollStartEvent(PollStartEvent {
+                timestamp_ns: 4_000_000,
+                worker_id: WorkerId(0),
+                local_queue: 0,
+                task_id: 2,
+                spawn_loc: String::new(),
+            }),
+            Dial9Event::PollEndEvent(PollEndEvent {
+                timestamp_ns: 4_500_000,
+                worker_id: WorkerId(0),
+            }),
         ];
-        let long = detect_long_polls(&events, 1_000_000); // 1ms threshold
+        let long = detect_long_polls(&events, 1_000_000);
         assert_eq!(long.len(), 1);
-        assert_eq!(long[0].worker_id, WorkerId::from(0usize));
+        assert_eq!(long[0].worker_id, WorkerId(0));
         assert_eq!(long[0].duration_ns, 2_000_000);
-        assert_eq!(long[0].task_id, TaskId::from_u32(1));
+        assert_eq!(long[0].task_id, 1);
     }
 
     #[test]
     fn test_detect_long_polls_none_above_threshold() {
         let events = vec![
-            TelemetryEvent::PollStart {
-                timestamp_nanos: 1_000_000,
-                worker_id: WorkerId::from(0usize),
-                worker_local_queue_depth: 0,
-                task_id: UNKNOWN_TASK_ID,
-                spawn_loc: UNKNOWN_SPAWN_LOC,
-            },
-            TelemetryEvent::PollEnd {
-                timestamp_nanos: 1_500_000, // 0.5ms
-                worker_id: WorkerId::from(0usize),
-            },
+            Dial9Event::PollStartEvent(PollStartEvent {
+                timestamp_ns: 1_000_000,
+                worker_id: WorkerId(0),
+                local_queue: 0,
+                task_id: 0,
+                spawn_loc: String::new(),
+            }),
+            Dial9Event::PollEndEvent(PollEndEvent {
+                timestamp_ns: 1_500_000,
+                worker_id: WorkerId(0),
+            }),
         ];
         let long = detect_long_polls(&events, 1_000_000);
         assert!(long.is_empty());
@@ -1068,59 +928,59 @@ mod tests {
     #[test]
     fn test_detect_long_polls_multiple_workers() {
         let events = vec![
-            TelemetryEvent::PollStart {
-                timestamp_nanos: 1_000_000,
-                worker_id: WorkerId::from(0usize),
-                worker_local_queue_depth: 0,
-                task_id: TaskId::from_u32(1),
-                spawn_loc: UNKNOWN_SPAWN_LOC,
-            },
-            TelemetryEvent::PollStart {
-                timestamp_nanos: 1_000_000,
-                worker_id: WorkerId::from(1usize),
-                worker_local_queue_depth: 0,
-                task_id: TaskId::from_u32(2),
-                spawn_loc: UNKNOWN_SPAWN_LOC,
-            },
-            TelemetryEvent::PollEnd {
-                timestamp_nanos: 5_000_000, // 4ms
-                worker_id: WorkerId::from(0usize),
-            },
-            TelemetryEvent::PollEnd {
-                timestamp_nanos: 8_000_000, // 7ms
-                worker_id: WorkerId::from(1usize),
-            },
+            Dial9Event::PollStartEvent(PollStartEvent {
+                timestamp_ns: 1_000_000,
+                worker_id: WorkerId(0),
+                local_queue: 0,
+                task_id: 1,
+                spawn_loc: String::new(),
+            }),
+            Dial9Event::PollStartEvent(PollStartEvent {
+                timestamp_ns: 1_000_000,
+                worker_id: WorkerId(1),
+                local_queue: 0,
+                task_id: 2,
+                spawn_loc: String::new(),
+            }),
+            Dial9Event::PollEndEvent(PollEndEvent {
+                timestamp_ns: 5_000_000,
+                worker_id: WorkerId(0),
+            }),
+            Dial9Event::PollEndEvent(PollEndEvent {
+                timestamp_ns: 8_000_000,
+                worker_id: WorkerId(1),
+            }),
         ];
         let long = detect_long_polls(&events, 1_000_000);
         assert_eq!(long.len(), 2);
-        assert_eq!(long[0].worker_id, WorkerId::from(0usize));
+        assert_eq!(long[0].worker_id, WorkerId(0));
         assert_eq!(long[0].duration_ns, 4_000_000);
-        assert_eq!(long[1].worker_id, WorkerId::from(1usize));
+        assert_eq!(long[1].worker_id, WorkerId(1));
         assert_eq!(long[1].duration_ns, 7_000_000);
     }
 
     #[test]
     fn test_detect_sched_delays_above_threshold() {
         let events = vec![
-            TelemetryEvent::WorkerPark {
-                timestamp_nanos: 1_000_000,
-                worker_id: WorkerId::from(0usize),
-                worker_local_queue_depth: 0,
-                cpu_time_nanos: 0,
+            Dial9Event::WorkerParkEvent(WorkerParkEvent {
+                timestamp_ns: 1_000_000,
+                worker_id: WorkerId(0),
+                local_queue: 0,
+                cpu_time_ns: 0,
                 tid: 0,
-            },
-            TelemetryEvent::WorkerUnpark {
-                timestamp_nanos: 5_000_000,
-                worker_id: WorkerId::from(0usize),
-                worker_local_queue_depth: 0,
-                cpu_time_nanos: 0,
-                sched_wait_delta_nanos: 200_000, // 200us
+            }),
+            Dial9Event::WorkerUnparkEvent(WorkerUnparkEvent {
+                timestamp_ns: 5_000_000,
+                worker_id: WorkerId(0),
+                local_queue: 0,
+                cpu_time_ns: 0,
+                sched_wait_ns: 200_000,
                 tid: 0,
-            },
+            }),
         ];
-        let delays = detect_sched_delays(&events, 100_000); // 100us threshold
+        let delays = detect_sched_delays(&events, 100_000);
         assert_eq!(delays.len(), 1);
-        assert_eq!(delays[0].worker_id, WorkerId::from(0usize));
+        assert_eq!(delays[0].worker_id, WorkerId(0));
         assert_eq!(delays[0].sched_wait_ns, 200_000);
         assert_eq!(delays[0].park_ns, 1_000_000);
         assert_eq!(delays[0].unpark_ns, 5_000_000);
@@ -1129,21 +989,21 @@ mod tests {
     #[test]
     fn test_detect_sched_delays_below_threshold() {
         let events = vec![
-            TelemetryEvent::WorkerPark {
-                timestamp_nanos: 1_000_000,
-                worker_id: WorkerId::from(0usize),
-                worker_local_queue_depth: 0,
-                cpu_time_nanos: 0,
+            Dial9Event::WorkerParkEvent(WorkerParkEvent {
+                timestamp_ns: 1_000_000,
+                worker_id: WorkerId(0),
+                local_queue: 0,
+                cpu_time_ns: 0,
                 tid: 0,
-            },
-            TelemetryEvent::WorkerUnpark {
-                timestamp_nanos: 2_000_000,
-                worker_id: WorkerId::from(0usize),
-                worker_local_queue_depth: 0,
-                cpu_time_nanos: 0,
-                sched_wait_delta_nanos: 50_000, // 50us
+            }),
+            Dial9Event::WorkerUnparkEvent(WorkerUnparkEvent {
+                timestamp_ns: 2_000_000,
+                worker_id: WorkerId(0),
+                local_queue: 0,
+                cpu_time_ns: 0,
+                sched_wait_ns: 50_000,
                 tid: 0,
-            },
+            }),
         ];
         let delays = detect_sched_delays(&events, 100_000);
         assert!(delays.is_empty());
@@ -1152,92 +1012,90 @@ mod tests {
     #[test]
     fn test_detect_sched_delays_multiple_workers() {
         let events = vec![
-            TelemetryEvent::WorkerPark {
-                timestamp_nanos: 1_000_000,
-                worker_id: WorkerId::from(0usize),
-                worker_local_queue_depth: 0,
-                cpu_time_nanos: 0,
+            Dial9Event::WorkerParkEvent(WorkerParkEvent {
+                timestamp_ns: 1_000_000,
+                worker_id: WorkerId(0),
+                local_queue: 0,
+                cpu_time_ns: 0,
                 tid: 0,
-            },
-            TelemetryEvent::WorkerPark {
-                timestamp_nanos: 1_000_000,
-                worker_id: WorkerId::from(1usize),
-                worker_local_queue_depth: 0,
-                cpu_time_nanos: 0,
+            }),
+            Dial9Event::WorkerParkEvent(WorkerParkEvent {
+                timestamp_ns: 1_000_000,
+                worker_id: WorkerId(1),
+                local_queue: 0,
+                cpu_time_ns: 0,
                 tid: 0,
-            },
-            TelemetryEvent::WorkerUnpark {
-                timestamp_nanos: 3_000_000,
-                worker_id: WorkerId::from(0usize),
-                worker_local_queue_depth: 0,
-                cpu_time_nanos: 0,
-                sched_wait_delta_nanos: 500_000, // 500us
+            }),
+            Dial9Event::WorkerUnparkEvent(WorkerUnparkEvent {
+                timestamp_ns: 3_000_000,
+                worker_id: WorkerId(0),
+                local_queue: 0,
+                cpu_time_ns: 0,
+                sched_wait_ns: 500_000,
                 tid: 0,
-            },
-            TelemetryEvent::WorkerUnpark {
-                timestamp_nanos: 4_000_000,
-                worker_id: WorkerId::from(1usize),
-                worker_local_queue_depth: 0,
-                cpu_time_nanos: 0,
-                sched_wait_delta_nanos: 10_000, // 10us - below threshold
+            }),
+            Dial9Event::WorkerUnparkEvent(WorkerUnparkEvent {
+                timestamp_ns: 4_000_000,
+                worker_id: WorkerId(1),
+                local_queue: 0,
+                cpu_time_ns: 0,
+                sched_wait_ns: 10_000,
                 tid: 0,
-            },
+            }),
         ];
         let delays = detect_sched_delays(&events, 100_000);
         assert_eq!(delays.len(), 1);
-        assert_eq!(delays[0].worker_id, WorkerId::from(0usize));
+        assert_eq!(delays[0].worker_id, WorkerId(0));
     }
 
     #[test]
     fn test_detect_wake_delays_above_threshold() {
-        let task = TaskId::from_u32(1);
         let events = vec![
-            TelemetryEvent::WakeEvent {
-                timestamp_nanos: 1_000_000,
-                waker_task_id: UNKNOWN_TASK_ID,
-                woken_task_id: task,
+            Dial9Event::WakeEvent(WakeEvent {
+                timestamp_ns: 1_000_000,
+                waker_task_id: 0,
+                woken_task_id: 1,
                 target_worker: 0,
-            },
-            TelemetryEvent::PollStart {
-                timestamp_nanos: 1_500_000, // 500us delay
-                worker_id: WorkerId::from(0usize),
-                worker_local_queue_depth: 0,
-                task_id: task,
-                spawn_loc: UNKNOWN_SPAWN_LOC,
-            },
-            TelemetryEvent::PollEnd {
-                timestamp_nanos: 1_600_000,
-                worker_id: WorkerId::from(0usize),
-            },
+            }),
+            Dial9Event::PollStartEvent(PollStartEvent {
+                timestamp_ns: 1_500_000,
+                worker_id: WorkerId(0),
+                local_queue: 0,
+                task_id: 1,
+                spawn_loc: String::new(),
+            }),
+            Dial9Event::PollEndEvent(PollEndEvent {
+                timestamp_ns: 1_600_000,
+                worker_id: WorkerId(0),
+            }),
         ];
-        let delays = detect_wake_delays(&events, 100_000); // 100us threshold
+        let delays = detect_wake_delays(&events, 100_000);
         assert_eq!(delays.len(), 1);
         assert_eq!(delays[0].delay_ns, 500_000);
-        assert_eq!(delays[0].task_id, task);
-        assert_eq!(delays[0].worker_id, WorkerId::from(0usize));
+        assert_eq!(delays[0].task_id, 1);
+        assert_eq!(delays[0].worker_id, WorkerId(0));
     }
 
     #[test]
     fn test_detect_wake_delays_below_threshold() {
-        let task = TaskId::from_u32(1);
         let events = vec![
-            TelemetryEvent::WakeEvent {
-                timestamp_nanos: 1_000_000,
-                waker_task_id: UNKNOWN_TASK_ID,
-                woken_task_id: task,
+            Dial9Event::WakeEvent(WakeEvent {
+                timestamp_ns: 1_000_000,
+                waker_task_id: 0,
+                woken_task_id: 1,
                 target_worker: 0,
-            },
-            TelemetryEvent::PollStart {
-                timestamp_nanos: 1_050_000, // 50us delay
-                worker_id: WorkerId::from(0usize),
-                worker_local_queue_depth: 0,
-                task_id: task,
-                spawn_loc: UNKNOWN_SPAWN_LOC,
-            },
-            TelemetryEvent::PollEnd {
-                timestamp_nanos: 1_100_000,
-                worker_id: WorkerId::from(0usize),
-            },
+            }),
+            Dial9Event::PollStartEvent(PollStartEvent {
+                timestamp_ns: 1_050_000,
+                worker_id: WorkerId(0),
+                local_queue: 0,
+                task_id: 1,
+                spawn_loc: String::new(),
+            }),
+            Dial9Event::PollEndEvent(PollEndEvent {
+                timestamp_ns: 1_100_000,
+                worker_id: WorkerId(0),
+            }),
         ];
         let delays = detect_wake_delays(&events, 100_000);
         assert!(delays.is_empty());
@@ -1245,25 +1103,24 @@ mod tests {
 
     #[test]
     fn test_detect_wake_delays_discards_idle_tasks() {
-        let task = TaskId::from_u32(1);
         let events = vec![
-            TelemetryEvent::WakeEvent {
-                timestamp_nanos: 1_000_000,
-                waker_task_id: UNKNOWN_TASK_ID,
-                woken_task_id: task,
+            Dial9Event::WakeEvent(WakeEvent {
+                timestamp_ns: 1_000_000,
+                waker_task_id: 0,
+                woken_task_id: 1,
                 target_worker: 0,
-            },
-            TelemetryEvent::PollStart {
-                timestamp_nanos: 2_000_000_000, // over 1s cap
-                worker_id: WorkerId::from(0usize),
-                worker_local_queue_depth: 0,
-                task_id: task,
-                spawn_loc: UNKNOWN_SPAWN_LOC,
-            },
-            TelemetryEvent::PollEnd {
-                timestamp_nanos: 2_000_100_000,
-                worker_id: WorkerId::from(0usize),
-            },
+            }),
+            Dial9Event::PollStartEvent(PollStartEvent {
+                timestamp_ns: 2_000_000_000,
+                worker_id: WorkerId(0),
+                local_queue: 0,
+                task_id: 1,
+                spawn_loc: String::new(),
+            }),
+            Dial9Event::PollEndEvent(PollEndEvent {
+                timestamp_ns: 2_000_100_000,
+                worker_id: WorkerId(0),
+            }),
         ];
         let delays = detect_wake_delays(&events, 100_000);
         assert!(delays.is_empty());
@@ -1272,57 +1129,57 @@ mod tests {
     #[test]
     fn test_detect_sampled_polls_with_samples() {
         let events = vec![
-            TelemetryEvent::PollStart {
-                timestamp_nanos: 1_000_000,
-                worker_id: WorkerId::from(0usize),
-                worker_local_queue_depth: 0,
-                task_id: TaskId::from_u32(1),
-                spawn_loc: UNKNOWN_SPAWN_LOC,
-            },
-            TelemetryEvent::CpuSample {
-                timestamp_nanos: 1_500_000,
-                worker_id: WorkerId::from(0usize),
+            Dial9Event::PollStartEvent(PollStartEvent {
+                timestamp_ns: 1_000_000,
+                worker_id: WorkerId(0),
+                local_queue: 0,
+                task_id: 1,
+                spawn_loc: String::new(),
+            }),
+            Dial9Event::CpuSampleEvent(CpuSampleEvent {
+                timestamp_ns: 1_500_000,
+                worker_id: WorkerId(0),
                 tid: 100,
-                thread_name: None,
                 source: CpuSampleSource::CpuProfile,
-                callchain: vec![],
-                cpu: None,
-            },
-            TelemetryEvent::CpuSample {
-                timestamp_nanos: 1_800_000,
-                worker_id: WorkerId::from(0usize),
-                tid: 100,
                 thread_name: None,
-                source: CpuSampleSource::SchedEvent,
                 callchain: vec![],
                 cpu: None,
-            },
-            TelemetryEvent::PollEnd {
-                timestamp_nanos: 2_000_000,
-                worker_id: WorkerId::from(0usize),
-            },
+            }),
+            Dial9Event::CpuSampleEvent(CpuSampleEvent {
+                timestamp_ns: 1_800_000,
+                worker_id: WorkerId(0),
+                tid: 100,
+                source: CpuSampleSource::SchedEvent,
+                thread_name: None,
+                callchain: vec![],
+                cpu: None,
+            }),
+            Dial9Event::PollEndEvent(PollEndEvent {
+                timestamp_ns: 2_000_000,
+                worker_id: WorkerId(0),
+            }),
         ];
         let sampled = detect_sampled_polls(&events);
         assert_eq!(sampled.len(), 1);
         assert_eq!(sampled[0].cpu_sample_count, 1);
         assert_eq!(sampled[0].sched_sample_count, 1);
-        assert_eq!(sampled[0].task_id, TaskId::from_u32(1));
+        assert_eq!(sampled[0].task_id, 1);
     }
 
     #[test]
     fn test_detect_sampled_polls_no_samples() {
         let events = vec![
-            TelemetryEvent::PollStart {
-                timestamp_nanos: 1_000_000,
-                worker_id: WorkerId::from(0usize),
-                worker_local_queue_depth: 0,
-                task_id: UNKNOWN_TASK_ID,
-                spawn_loc: UNKNOWN_SPAWN_LOC,
-            },
-            TelemetryEvent::PollEnd {
-                timestamp_nanos: 2_000_000,
-                worker_id: WorkerId::from(0usize),
-            },
+            Dial9Event::PollStartEvent(PollStartEvent {
+                timestamp_ns: 1_000_000,
+                worker_id: WorkerId(0),
+                local_queue: 0,
+                task_id: 0,
+                spawn_loc: String::new(),
+            }),
+            Dial9Event::PollEndEvent(PollEndEvent {
+                timestamp_ns: 2_000_000,
+                worker_id: WorkerId(0),
+            }),
         ];
         let sampled = detect_sampled_polls(&events);
         assert!(sampled.is_empty());
@@ -1331,26 +1188,26 @@ mod tests {
     #[test]
     fn test_detect_sampled_polls_sample_outside_poll() {
         let events = vec![
-            TelemetryEvent::PollStart {
-                timestamp_nanos: 1_000_000,
-                worker_id: WorkerId::from(0usize),
-                worker_local_queue_depth: 0,
-                task_id: UNKNOWN_TASK_ID,
-                spawn_loc: UNKNOWN_SPAWN_LOC,
-            },
-            TelemetryEvent::PollEnd {
-                timestamp_nanos: 2_000_000,
-                worker_id: WorkerId::from(0usize),
-            },
-            TelemetryEvent::CpuSample {
-                timestamp_nanos: 3_000_000, // after poll ended
-                worker_id: WorkerId::from(0usize),
+            Dial9Event::PollStartEvent(PollStartEvent {
+                timestamp_ns: 1_000_000,
+                worker_id: WorkerId(0),
+                local_queue: 0,
+                task_id: 0,
+                spawn_loc: String::new(),
+            }),
+            Dial9Event::PollEndEvent(PollEndEvent {
+                timestamp_ns: 2_000_000,
+                worker_id: WorkerId(0),
+            }),
+            Dial9Event::CpuSampleEvent(CpuSampleEvent {
+                timestamp_ns: 3_000_000,
+                worker_id: WorkerId(0),
                 tid: 100,
-                thread_name: None,
                 source: CpuSampleSource::CpuProfile,
+                thread_name: None,
                 callchain: vec![],
                 cpu: None,
-            },
+            }),
         ];
         let sampled = detect_sampled_polls(&events);
         assert!(sampled.is_empty());
@@ -1359,33 +1216,32 @@ mod tests {
     #[test]
     fn test_detect_idle_workers_no_queue_pressure() {
         let events = vec![
-            TelemetryEvent::QueueSample {
-                timestamp_nanos: 1_000_000,
-                global_queue_depth: 0, // no queue pressure
-            },
-            TelemetryEvent::WorkerPark {
-                timestamp_nanos: 2_000_000,
-                worker_id: WorkerId::from(0usize),
-                worker_local_queue_depth: 0,
-                cpu_time_nanos: 0,
+            Dial9Event::QueueSampleEvent(QueueSampleEvent {
+                timestamp_ns: 1_000_000,
+                global_queue: 0,
+            }),
+            Dial9Event::WorkerParkEvent(WorkerParkEvent {
+                timestamp_ns: 2_000_000,
+                worker_id: WorkerId(0),
+                local_queue: 0,
+                cpu_time_ns: 0,
                 tid: 0,
-            },
-            TelemetryEvent::WorkerUnpark {
-                timestamp_nanos: 6_000_000,
-                worker_id: WorkerId::from(0usize),
-                worker_local_queue_depth: 0,
-                cpu_time_nanos: 0,
-                sched_wait_delta_nanos: 0,
+            }),
+            Dial9Event::WorkerUnparkEvent(WorkerUnparkEvent {
+                timestamp_ns: 6_000_000,
+                worker_id: WorkerId(0),
+                local_queue: 0,
+                cpu_time_ns: 0,
+                sched_wait_ns: 0,
                 tid: 0,
-            },
+            }),
         ];
         let idle = detect_idle_workers(&events);
-        assert!(idle.is_empty()); // no idle periods flagged because global queue was empty
+        assert!(idle.is_empty());
     }
 
     #[test]
     fn trace_reader_custom_events_resolve_interned_at_parse_time() {
-        // A custom event type with an interned string field.
         #[derive(dial9_trace_format::TraceEvent)]
         struct MyEvent {
             #[traceevent(timestamp)]
@@ -1394,215 +1250,12 @@ mod tests {
             count: u32,
         }
 
-        // Helper: build a batch with one event whose label is an interned string.
-        fn make_batch(ts: u64, label: &str, count: u32) -> Vec<u8> {
-            let mut enc = Encoder::new();
-            let s = enc.intern_string_infallible(label);
-            enc.write(&MyEvent {
-                timestamp_ns: ts,
-                label: s,
-                count,
-            })
-            .unwrap();
-            enc.reset_to_infallible(Vec::new())
-        }
-
-        // Helper: extract resolved label strings from Custom events.
-        fn custom_labels(reader: &TraceReader) -> Vec<String> {
-            reader
-                .all_events
-                .iter()
-                .filter_map(|ev| {
-                    if let TelemetryEvent::Custom { fields, .. } = ev
-                        && let FieldValue::String(s) = &fields[0].1
-                    {
-                        return Some(s.clone());
-                    }
-                    None
-                })
-                .collect()
-        }
-
-        // Three segments with different strings, same pool size (1 entry each).
-        // All three get raw ID 0 since each encoder starts fresh, but
-        // PooledString is resolved to String at parse time.
-        let mut output = Encoder::new().finish();
-        output.extend_from_slice(&make_batch(1_000, "alpha", 1));
-        output.extend_from_slice(&make_batch(2_000, "beta", 2));
-        output.extend_from_slice(&make_batch(3_000, "gamma", 3));
-
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("trace.bin");
-        std::fs::write(&path, &output).unwrap();
-
-        let reader = TraceReader::new(path.to_str().unwrap()).unwrap();
-        let labels = custom_labels(&reader);
-        assert_eq!(labels, vec!["alpha", "beta", "gamma"]);
-
-        // Colliding first value: two segments both intern "shared" as their
-        // first string (same raw ID), plus a second string that differs.
-        let mut output2 = Encoder::new().finish();
-        {
-            let mut enc = Encoder::new();
-            let shared = enc.intern_string_infallible("shared");
-            let unique = enc.intern_string_infallible("seg1_only");
-            enc.write(&MyEvent {
-                timestamp_ns: 10_000,
-                label: shared,
-                count: 1,
-            })
-            .unwrap();
-            enc.write(&MyEvent {
-                timestamp_ns: 11_000,
-                label: unique,
-                count: 2,
-            })
-            .unwrap();
-            output2.extend_from_slice(&enc.reset_to_infallible(Vec::new()));
-        }
-        {
-            let mut enc = Encoder::new();
-            let shared = enc.intern_string_infallible("shared");
-            let unique = enc.intern_string_infallible("seg2_only");
-            enc.write(&MyEvent {
-                timestamp_ns: 20_000,
-                label: shared,
-                count: 3,
-            })
-            .unwrap();
-            enc.write(&MyEvent {
-                timestamp_ns: 21_000,
-                label: unique,
-                count: 4,
-            })
-            .unwrap();
-            output2.extend_from_slice(&enc.reset_to_infallible(Vec::new()));
-        }
-
-        let path2 = dir.path().join("trace2.bin");
-        std::fs::write(&path2, &output2).unwrap();
-        let reader2 = TraceReader::new(path2.to_str().unwrap()).unwrap();
-        let labels2 = custom_labels(&reader2);
-        assert_eq!(labels2, vec!["shared", "seg1_only", "shared", "seg2_only"]);
-    }
-
-    #[test]
-    fn trace_reader_custom_event_primitive_fields_only() {
-        #[derive(dial9_trace_format::TraceEvent)]
-        struct CounterEvent {
-            #[traceevent(timestamp)]
-            timestamp_ns: u64,
-            count: u32,
-            rate: u64,
-        }
-
         let mut enc = Encoder::new();
-        enc.write(&CounterEvent {
-            timestamp_ns: 5_000,
-            count: 42,
-            rate: 1_000_000,
-        })
-        .unwrap();
-
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("trace.bin");
-        std::fs::write(&path, enc.finish()).unwrap();
-
-        let reader = TraceReader::new(path.to_str().unwrap()).unwrap();
-        let custom: Vec<&TelemetryEvent> = reader
-            .all_events
-            .iter()
-            .filter(|e| matches!(e, TelemetryEvent::Custom { .. }))
-            .collect();
-        assert_eq!(custom.len(), 1);
-
-        if let TelemetryEvent::Custom {
-            name,
-            timestamp_nanos,
-            fields,
-        } = &custom[0]
-        {
-            assert_eq!(name, "CounterEvent");
-            assert_eq!(*timestamp_nanos, Some(5_000));
-            assert_eq!(fields.len(), 2);
-            assert_eq!(fields[0], ("count".to_string(), FieldValue::Varint(42)));
-            assert_eq!(
-                fields[1],
-                ("rate".to_string(), FieldValue::Varint(1_000_000))
-            );
-        } else {
-            panic!("expected Custom");
-        }
-    }
-
-    #[test]
-    fn trace_reader_custom_event_inline_string_fields() {
-        #[derive(dial9_trace_format::TraceEvent)]
-        struct LogEvent {
-            #[traceevent(timestamp)]
-            timestamp_ns: u64,
-            message: String,
-            level: u32,
-        }
-
-        let mut enc = Encoder::new();
-        enc.write(&LogEvent {
-            timestamp_ns: 7_000,
-            message: "request handled".to_string(),
-            level: 2,
-        })
-        .unwrap();
-
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("trace.bin");
-        std::fs::write(&path, enc.finish()).unwrap();
-
-        let reader = TraceReader::new(path.to_str().unwrap()).unwrap();
-        let custom: Vec<&TelemetryEvent> = reader
-            .all_events
-            .iter()
-            .filter(|e| matches!(e, TelemetryEvent::Custom { .. }))
-            .collect();
-        assert_eq!(custom.len(), 1);
-
-        if let TelemetryEvent::Custom {
-            name,
-            timestamp_nanos,
-            fields,
-        } = &custom[0]
-        {
-            assert_eq!(name, "LogEvent");
-            assert_eq!(*timestamp_nanos, Some(7_000));
-            assert_eq!(fields.len(), 2);
-            assert_eq!(
-                fields[0],
-                (
-                    "message".to_string(),
-                    FieldValue::String("request handled".to_string())
-                )
-            );
-            assert_eq!(fields[1], ("level".to_string(), FieldValue::Varint(2)));
-        } else {
-            panic!("expected Custom");
-        }
-    }
-
-    #[test]
-    fn trace_reader_custom_event_interned_string_resolved_eagerly() {
-        #[derive(dial9_trace_format::TraceEvent)]
-        struct MixedEvent {
-            #[traceevent(timestamp)]
-            timestamp_ns: u64,
-            tag: InternedString,
-            count: u32,
-        }
-
-        let mut enc = Encoder::new();
-        let tag = enc.intern_string_infallible("important");
-        enc.write(&MixedEvent {
+        let s = enc.intern_string_infallible("alpha");
+        enc.write(&MyEvent {
             timestamp_ns: 1_000,
-            tag,
-            count: 7,
+            label: s,
+            count: 1,
         })
         .unwrap();
 
@@ -1611,20 +1264,19 @@ mod tests {
         std::fs::write(&path, enc.finish()).unwrap();
 
         let reader = TraceReader::new(path.to_str().unwrap()).unwrap();
-        let event = reader
-            .all_events
-            .iter()
-            .find(|e| matches!(e, TelemetryEvent::Custom { .. }))
-            .expect("should have a custom event");
-
-        if let TelemetryEvent::Custom { fields, .. } = event {
-            // PooledString resolved to String at parse time
-            assert_eq!(fields[0].0, "tag");
-            assert_eq!(fields[0].1, FieldValue::String("important".to_string()));
-            assert_eq!(fields[1].0, "count");
-            assert_eq!(fields[1].1, FieldValue::Varint(7));
-        } else {
-            panic!("expected Custom");
-        }
+        assert_eq!(reader.all_events.len(), 1);
+        let Dial9Event::Custom(ref e) = reader.all_events[0] else {
+            panic!("expected Custom, got {:?}", reader.all_events[0]);
+        };
+        assert_eq!(e.name, "MyEvent");
+        assert_eq!(e.timestamp_ns, Some(1_000));
+        assert_eq!(
+            e.fields.get("label"),
+            Some(&dial9_trace_format::FieldValue::String("alpha".to_string()))
+        );
+        assert_eq!(
+            e.fields.get("count"),
+            Some(&dial9_trace_format::FieldValue::Varint(1))
+        );
     }
 }

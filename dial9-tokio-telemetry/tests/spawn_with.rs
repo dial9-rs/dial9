@@ -1,24 +1,35 @@
 //! Integration tests for the custom-spawn tracing API:
 //! - [`TelemetryHandle::spawn_with`]
 //! - [`RuntimeTelemetryHandle::spawn_with`]
-//!
-//! `spawn_with(fut, |f| spawn_fn(f))` is the way to spawn an instrumented
-//! future through APIs other than `TelemetryHandle::spawn` (e.g.
-//! `tokio::task::JoinSet::spawn`, `JoinSet::spawn_on`, etc.). It must:
-//!   - emit `WakeEvent`s for the polled future, and
-//!   - mark the resulting `TaskSpawn` as `instrumented = true`,
-//!   - while preserving the user's call site as `spawn_loc`.
 
 mod common;
 
-use dial9_tokio_telemetry::analysis_unstable::TraceReader;
+use common::{BytesCapturingWriter, decode_all, decode_file};
 use dial9_tokio_telemetry::telemetry::{
-    DiskWriter, TaskId, TelemetryEvent, TelemetryGuard, TraceWriter, TracedRuntime,
+    DiskWriter, TaskId, TelemetryGuard, TraceWriter, TracedRuntime,
 };
+use serde::Deserialize;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::runtime::Runtime;
 use tokio::task::JoinSet;
+
+#[derive(Debug, Deserialize)]
+#[allow(dead_code, clippy::enum_variant_names)]
+#[serde(tag = "event")]
+enum SpawnEvent {
+    TaskSpawnEvent {
+        task_id: u64,
+        spawn_loc: String,
+        instrumented: bool,
+    },
+    WakeEventEvent {
+        waker_task_id: u64,
+        woken_task_id: u64,
+    },
+    #[serde(other)]
+    Other,
+}
 
 /// Standard 2-worker multi_thread runtime with task tracking enabled.
 fn build_traced_runtime<W: TraceWriter + 'static>(writer: W) -> (Runtime, TelemetryGuard) {
@@ -34,7 +45,7 @@ fn build_traced_runtime<W: TraceWriter + 'static>(writer: W) -> (Runtime, Teleme
 /// spawned task — the same as `handle.spawn(fut)` would.
 #[test]
 fn spawn_with_joinset_emits_wake_events() {
-    let (writer, events) = common::CapturingWriter::new();
+    let (writer, batches) = BytesCapturingWriter::new();
     let (runtime, guard) = build_traced_runtime(writer);
 
     let handle = guard.handle();
@@ -43,9 +54,6 @@ fn spawn_with_joinset_emits_wake_events() {
 
     runtime.block_on(async move {
         let mut set: JoinSet<()> = JoinSet::new();
-        // `yield_now().await` self-wakes through the active waker, which
-        // here is our wake-tracking waker — so a `WakeEvent` fires without
-        // depending on cross-task scheduling order.
         handle.spawn_with(
             async move {
                 *id_w.lock().unwrap() = tokio::task::try_id().map(TaskId::from);
@@ -60,10 +68,11 @@ fn spawn_with_joinset_emits_wake_events() {
     drop(runtime);
     drop(guard);
 
-    let events = events.lock().unwrap();
+    let b = batches.lock().unwrap();
+    let events: Vec<SpawnEvent> = decode_all(&b);
     let expected = spawned_id.lock().unwrap().expect("task id captured");
     let saw_wake = events.iter().any(|e| {
-        matches!(e, TelemetryEvent::WakeEvent { woken_task_id, .. } if *woken_task_id == expected)
+        matches!(e, SpawnEvent::WakeEventEvent { woken_task_id, .. } if *woken_task_id == expected.to_u64())
     });
     assert!(saw_wake, "expected WakeEvent for joinset task {expected:?}");
 }
@@ -98,31 +107,25 @@ fn spawn_with_marks_taskspawn_and_preserves_caller() {
     drop(guard);
 
     let sealed = dir.path().join("trace.0.bin");
-    let reader = TraceReader::new(sealed.to_str().unwrap()).unwrap();
+    let events: Vec<SpawnEvent> = decode_file(&sealed);
 
     let mut instrumented_user_loc = 0;
     let mut raw = 0;
-    for event in &reader.all_events {
-        if let TelemetryEvent::TaskSpawn {
+    for event in &events {
+        if let SpawnEvent::TaskSpawnEvent {
             spawn_loc,
             instrumented,
             ..
         } = event
         {
-            match instrumented {
-                Some(true) => {
-                    let loc = reader
-                        .spawn_locations
-                        .get(spawn_loc)
-                        .expect("spawn_loc should resolve");
-                    assert!(
-                        loc.contains("spawn_with.rs"),
-                        "instrumented spawn caller should resolve to the closure call site, got {loc}"
-                    );
-                    instrumented_user_loc += 1;
-                }
-                Some(false) => raw += 1,
-                None => {}
+            if *instrumented {
+                assert!(
+                    spawn_loc.contains("spawn_with.rs"),
+                    "instrumented spawn caller should resolve to the closure call site, got {spawn_loc}"
+                );
+                instrumented_user_loc += 1;
+            } else {
+                raw += 1;
             }
         }
     }
@@ -133,12 +136,10 @@ fn spawn_with_marks_taskspawn_and_preserves_caller() {
     assert!(raw >= 1, "expected at least 1 raw TaskSpawn, got {raw}");
 }
 
-/// `spawn_with` returns whatever the closure returns. Useful so callers
-/// can keep the `JoinHandle` / `AbortHandle` / etc. produced by their
-/// spawn function.
+/// `spawn_with` returns whatever the closure returns.
 #[test]
 fn spawn_with_returns_closure_value() {
-    let (writer, _events) = common::CapturingWriter::new();
+    let (writer, _batches) = BytesCapturingWriter::new();
     let (runtime, guard) = build_traced_runtime(writer);
 
     let handle = guard.handle();
@@ -154,14 +155,12 @@ fn spawn_with_returns_closure_value() {
 }
 
 /// `RuntimeTelemetryHandle::spawn_with` composes with `JoinSet::spawn_on`
-/// to target a specific runtime even when called from outside any
-/// runtime context, while still emitting wake events and marking the
-/// `TaskSpawn` instrumented.
+/// to target a specific runtime.
 #[test]
 fn runtime_handle_spawn_with_targets_correct_runtime() {
     use dial9_tokio_telemetry::telemetry::TelemetryCore;
 
-    let (writer, events) = common::CapturingWriter::new();
+    let (writer, batches) = BytesCapturingWriter::new();
     let guard = TelemetryCore::builder().writer(writer).build().unwrap();
     guard.enable();
 
@@ -218,17 +217,18 @@ fn runtime_handle_spawn_with_targets_correct_runtime() {
 
     let task_id_a = task_id_a.lock().unwrap().expect("task id a captured");
     let task_id_b = task_id_b.lock().unwrap().expect("task id b captured");
-    let events = events.lock().unwrap();
+    let b = batches.lock().unwrap();
+    let events: Vec<SpawnEvent> = decode_all(&b);
 
     for expected in [task_id_a, task_id_b] {
         let saw_instrumented_spawn = events.iter().any(|event| {
             matches!(
                 event,
-                TelemetryEvent::TaskSpawn {
+                SpawnEvent::TaskSpawnEvent {
                     task_id,
-                    instrumented: Some(true),
+                    instrumented: true,
                     ..
-                } if *task_id == expected
+                } if *task_id == expected.to_u64()
             )
         });
         assert!(
@@ -237,7 +237,7 @@ fn runtime_handle_spawn_with_targets_correct_runtime() {
         );
 
         let saw_wake = events.iter().any(|event| {
-            matches!(event, TelemetryEvent::WakeEvent { woken_task_id, .. } if *woken_task_id == expected)
+            matches!(event, SpawnEvent::WakeEventEvent { woken_task_id, .. } if *woken_task_id == expected.to_u64())
         });
         assert!(
             saw_wake,
