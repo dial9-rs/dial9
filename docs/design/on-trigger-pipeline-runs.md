@@ -5,462 +5,425 @@
 Issue [#469](https://github.com/dial9-rs/dial9/issues/469) asks for a mode
 where dial9 keeps buffering trace segments as today (in the disk or memory
 ring) but does not upload to S3 unless the application explicitly asks for
-it. The motivating use case is incident debugging: applications generate
-large quantities of trace data, most of which is uninteresting; the
-operator only wants to pay upload cost when something noteworthy happens
-(for example, a Tokio idle ratio drop, a latency spike, or an application
-assertion that should never fire).
+it. Applications generate large quantities of trace data, most of which is
+uninteresting; the operator only wants to pay upload cost when something
+noteworthy happens (a Tokio idle ratio drop, a latency spike, an
+application assertion that should never fire).
 
-**Core principle.** The trigger controls **when** the pipeline runs, not
-**what** the pipeline does. The same `SegmentProcessor` chain that
-processes segments continuously today will process them on demand under
-the new schedule. No new pipeline stages are required to make the trigger
-work, only a different worker schedule.
+The trigger controls **when** the pipeline runs, not **what** it does. The
+same `SegmentProcessor` chain that processes segments continuously today
+runs on demand under the new schedule. The wire-up is one new builder
+method (`with_trigger`), one cloneable control type, and a metadata
+convention the S3 uploader already knows how to read.
 
-This design splits the change into two layers:
+## Usage examples
 
-- **Layer 1: generic on-trigger schedule.** A new `WorkerSchedule`
-  selector and a `PipelineRun` handle let any pipeline (custom or preset)
-  run on demand. No S3-specific concepts.
-- **Layer 2: S3 dump sugar.** When the pipeline ends at S3 and we want
-  each triggered run to be a correlatable unit (a stable id, a
-  human-readable name, a dedicated key prefix, a completion sentinel),
-  we add a `with_s3_dump_on_trigger` preset and a `DumpHandle`. "Dump"
-  is a Layer 2 word; it implies S3 plus an addressable correlation
-  unit.
+`with_trigger(rx)` is orthogonal to pipeline selection. Whichever
+pipeline shape you would have wired for continuous mode, you keep, and
+adding `with_trigger(rx)` flips that same pipeline into on-demand
+operation. Three representative compositions follow.
 
-The two layers are independent. A user wiring `with_custom_pipeline` plus
-`with_worker_schedule(OnTrigger)` gets the timing behavior without any
-dump semantics. A user wiring `with_s3_dump_on_trigger` gets both layers
-in one call.
+### S3 preset
 
-## Architecture
-
-The writer keeps producing sealed segments into the ring exactly as today.
-For the memory backend, `MemFs::seal` evicts oldest
-segments on push when bytes would exceed `max_total_size`. For the disk
-backend, `DiskFs::seal` renames the
-active file to its sealed name and lets the file accumulate on disk under
-the writer's existing budget. _Neither backend depends on the worker
-running_.
-
-In the default `Continuous` schedule, the worker loop
-(`WorkerLoop::run`) pops segments from
-the ring as they appear and runs each through the configured processor
-chain. Between cycles it parks on `Fs::wait_for_more`.
-
-In the new `OnTrigger` schedule, the worker parks indefinitely on a
-request channel instead. It does not call `Fs::take_files` between
-triggers. When a request arrives it takes a snapshot of what is sealed at
-that instant and runs each captured segment through the same processor
-chain. A small worker-loop hook fires once per triggered run, after the
-last segment finishes its pipeline (Layer 2 uses it to write a
-completion sentinel). Then the worker re-parks.
-
-So, we end up reusing the entire `SegmentProcessor` trait, the `PipelineBuilder`
-DSL, the per-segment drain code in `WorkerLoop::process_segments`,
-`Fs::take_files`, panic catching, retry semantics, metrics emission. What's new is one schedule enum on the builder, one handle type returned from
-`build`, one end-of-run hook.
-
-## Layer 1: Generic on-trigger schedule
-
-### 1. Worker schedule
-
-A new enum exposed on the builder, orthogonal to pipeline selection:
+The default for most callers: `with_s3_uploader(config)` builds the
+standard `[Symbolize?, Gzip, S3]` pipeline and auto-populates writer
+segment metadata.
 
 ```rust
-pub enum WorkerSchedule {
-    /// Today's behavior. Worker pops segments as they are sealed and
-    /// runs each through the configured pipeline immediately.
-    Continuous,
-    /// Worker parks until a `PipelineRun::process_now` /
-    /// `process_window` request arrives, then drains the snapshot
-    /// through the pipeline once.
-    OnTrigger,
-}
-```
+use dial9::trigger;
 
-The schedule is independent of `with_custom_pipeline`,
-`with_s3_uploader`, or any future pipeline preset. A representative
-composition:
+let (control, rx) = trigger::channel();
 
-```rust
-let (guard, run) = TracedRuntime::builder()
-    .with_custom_pipeline(|p| p.symbolize().gzip().write_back())
-    .with_worker_schedule(WorkerSchedule::OnTrigger)
+let _guard = TracedRuntime::builder()
+    .with_s3_uploader(s3_config.clone())
+    .with_trigger(rx)
     .build()?;
+
+// Hand `control` to whatever subsystem decides when to dump
+// (an idle-ratio watcher, a panic hook, a `/dump` HTTP handler, ...).
+// `TriggerControl` is `Clone`; share it freely.
+
+let receipt = control
+    .dump_window(Some(Duration::from_secs(300)), Duration::from_secs(60))
+    .with_metadata([("reason".into(), "idle-ratio-drop".into())].into())
+    .await?;
+
+tracing::info!(
+    dump_id = %receipt.dump_id,
+    segments = receipt.segments_processed,
+    "dump complete",
+);
 ```
 
-The builder method attaches at the point where `TracedRuntimeBuilder`
-already varies on the pipeline-state phantom type. The
-schedule is carried in a separate, orthogonal field; phantom-state
-transitions for pipeline choice are unaffected. Default value is
-`Continuous` so existing callers see no behavior change.
+That is the whole user-facing surface for the S3 case. No
+`WorkerSchedule` enum, no dump-specific builder preset, no end-of-run
+callback to plumb. The application registers a receiver, holds a
+sender, and awaits a receipt. Completion is signalled by the receipt
+resolving; applications that need a durable cross-process signal can
+publish it through whatever channel they already use (incidents-table
+row, Slack message, etc.).
 
-### 2. Run handle
+### Custom pipeline
 
-When `OnTrigger` is selected, `build` returns a `PipelineRun` handle
-alongside the existing `TelemetryGuard`:
+`with_custom_pipeline(|p| ...)` gives you the full chain. The trigger
+feature is pipeline-agnostic; it stamps `dump_id` onto segment
+metadata before any stage runs, and stages decide what to do with it.
+Two interesting variants.
+
+**Custom pipeline ending at S3.** Equivalent to the preset but you
+control the exact stage list (omit symbolize, add a redactor, etc.).
+The `s3()` stage reads `metadata.get("dump_id")` the same way the
+preset does, so the dump key layout applies automatically.
 
 ```rust
-#[derive(Clone)]
-pub struct PipelineRun {
-    // sender into the worker's request channel
-}
+let _guard = TracedRuntime::builder()
+    .with_custom_pipeline(|p| p.symbolize().redact(my_redactor).gzip().s3(s3_config.clone()))
+    .with_trigger(rx)
+    .build()?;
 
-impl PipelineRun {
-    /// Snapshot run. Captures the set of segments currently sealed at
-    /// invocation, runs them through the configured pipeline, resolves
-    /// after the last segment finishes its pipeline.
-    pub async fn process_now(&self) -> Result<RunReceipt, RunError>;
-
-    /// Windowed run. Captures the current snapshot as the "pre" set,
-    /// then keeps consuming segments sealed during `post`. Resolves
-    /// after the post window elapses and every segment finishes its
-    /// pipeline.
-    pub async fn process_window(&self, post: Duration)
-        -> Result<RunReceipt, RunError>;
-}
-
-pub struct RunReceipt {
-    pub run_id: RunId,
-    pub segments_processed: usize,
-    pub started_at: SystemTime,
-    pub finished_at: SystemTime,
-}
+// `control.dump(...)` is identical to the S3-preset example. The
+// dump-style S3 key layout is produced by the `.s3(...)` stage in the
+// chain, not by the preset.
 ```
 
-The receipt is intentionally generic. Layer 2 wraps `PipelineRun` and
-returns a richer `DumpReceipt` that includes the dump's S3 prefix,
-segment keys, and sentinel key.
+Unlike the preset, the custom path does not auto-populate writer
+segment metadata. If you want identity entries (service, host, etc.)
+embedded in trace files, call `with_segment_metadata(...)` explicitly.
 
-### 3. Worker loop in OnTrigger mode
+**Custom pipeline ending at `write_back()` (no S3).** Dumps to disk
+under the writer's directory. There is no S3 stage, so no
+`dumps/{dump_id}/` prefix. The receipt still carries `dump_id`, and
+each segment's metadata carries `dump_id` plus whatever was passed to
+`.with_metadata(...)`; if you want dump-aware filenames on disk,
+insert a thin processor before `write_back()` that reads metadata and
+renames. The disk-mode trade-offs in
+[`Non-S3 dump key conventions`](#out-of-scope) apply.
 
-Today's run loop alternates `take_files` plus `process_segments` with
-`wait_for_more`. In `OnTrigger` mode the same `WorkerLoop` selects on:
+```rust
+let _guard = TracedRuntime::builder()
+    .with_custom_pipeline(|p| p.symbolize().gzip().write_back())
+    .with_trigger(rx)
+    .build()?;
+
+let receipt = control.dump_now().await?;
+// receipt.dump_id is set; on-disk filenames follow the writer's
+// existing rotation scheme unless a custom processor reads metadata.
+```
+
+### Time spans
+
+Two methods cover the useful shapes:
+
+```rust
+// Whole ring at trigger time; resolve as soon as those segments
+// finish the pipeline.
+control.dump_now().await?;
+
+// Look-back plus a post-trigger window. "-5 min .. +1 min": only
+// segments whose `end_epoch >= now - 300s` are included from the
+// ring, then keep capturing for another 60s before resolving.
+control
+    .dump_window(Some(Duration::from_secs(300)), Duration::from_secs(60))
+    .await?;
+
+// Whole ring plus a post-trigger window. `pre = None` means take
+// everything the ring still has.
+control
+    .dump_window(None, Duration::from_secs(60))
+    .await?;
+```
+
+The pre filter is best-effort: the ring keeps only what
+`max_total_size` lets it keep, so the actual covered span (reported as
+`receipt.time_range`) may be shorter than the requested `pre`. The
+post window is wall-clock and starts at trigger time.
+
+Both methods return a `DumpRun` that resolves to
+`Result<DumpReceipt, DumpError>` when awaited. Chain
+`.with_metadata(...)` before `.await` to attach correlation pairs that
+get stamped onto each captured segment.
+
+## Return value
+
+`DumpReceipt` resolves once the last captured segment finishes the
+pipeline. It carries everything the caller needs to find the dump later
+or to log what landed:
+
+| Field                | Meaning                                                                                                       |
+| -------------------- | ------------------------------------------------------------------------------------------------------------- |
+| `dump_id: DumpId`    | ULID minted at `send` time. Time-sortable. Shows up in S3 keys and in `dump-id` user metadata on each object. |
+| `segments_processed` | Count of segments that made it through the pipeline.                                                          |
+| `finished_at`        | When the last segment finished the pipeline.                                                                  |
+| `time_range`         | Actual covered span. May be shorter than the requested `pre` if the ring did not retain that much history.    |
+
+The trigger time itself (when `send` was called) is embedded in `dump_id`
+and can be extracted via `DumpId`.
+
+When the pipeline ends at S3, each dump materializes under its own prefix:
+
+```
+{prefix}/dumps/{dump_id}/{epoch_secs}-{index}.bin.gz
+```
+
+`ListObjectsV2 prefix={prefix}/dumps/` returns ULID-prefixed entries
+sorted by time, and `ListObjectsV2 prefix={prefix}/dumps/{dump_id}/`
+returns one dump.
+
+Per-segment objects carry the same S3 user metadata as continuous-mode
+uploads (`service`, `boot-id`, `segment-index`, `start-time`, `host`;
+see `background_task/s3.rs`) plus `dump-id`. Callers that want
+additional correlation pairs (e.g. a human-readable reason, an
+incident id) pass them via `.with_metadata(...)` on the `DumpRun`;
+pipeline stages decide what to do with them (the S3 stage can surface
+them as additional user metadata, a custom redactor can read them, etc.).
+
+| Field                        | Where it lives                                                |
+| ---------------------------- | ------------------------------------------------------------- |
+| `dump_id`                    | Key path; also `dump-id` S3 user metadata on every segment    |
+| `triggered_at`               | Embedded in the ULID (`DumpId` can extract)                   |
+| `service`, `boot_id`, `host` | Existing per-segment S3 user metadata, unchanged              |
+| `segment.index`              | Key path; also `segment-index` S3 user metadata               |
+| `segment.size_bytes`         | S3 object `ContentLength` (free)                              |
+| `segment.start_epoch`        | Key path; also `start-time` S3 user metadata                  |
+| `total_compressed_bytes`     | Sum of `ContentLength` from `ListObjectsV2`                   |
+| Caller-supplied correlation  | `.with_metadata(...)`, stamped onto `SegmentData::metadata`   |
+
+Completion is signalled in-process by `DumpReceipt` resolving. There is
+no library-written completion marker in S3; applications that need a
+cross-process signal publish it through whatever channel they already
+use.
+
+## What the library does for you
+
+When the `DumpRun` future is awaited, the control mints a `DumpId`,
+packs the timing parameters and any `with_metadata` entries into a
+request, and forwards it to the worker over the trigger channel.
+
+The worker stamps the following into each captured segment's
+`SegmentData::metadata` before the pipeline runs:
+
+- `dump_id` (always set on a triggered run)
+- Anything from `.with_metadata(...)`
+
+Pipeline stages read `SegmentData::metadata` the same way they already
+read keys like `epoch_secs` and `content_encoding`. The S3 uploader
+branches on `metadata.get("dump_id")`:
+
+- Present: emit the dump-style key layout above and attach `dump-id`
+  as per-object S3 user metadata.
+- Absent (continuous mode): emit today's continuous-mode key,
+  unchanged. The continuous layout, rationale, and partition strategy
+  are documented in `s3-worker-design.md` section 2.
+
+Nothing in the worker is S3-specific. The trigger feature stamps
+metadata; the S3 uploader reads it. A custom redactor or a
+`write_back()` stage sees the same metadata and can react however it
+wants.
+
+## Worker
+
+The writer keeps producing sealed segments into the ring exactly as
+today. `MemFs::seal` evicts the oldest segments on push when bytes
+would exceed `max_total_size`. `DiskFs::seal` renames the active file
+to its sealed name and lets the file accumulate on disk under the
+writer's existing budget. Neither backend depends on the worker
+running.
+
+Without a trigger registered, `WorkerLoop::run` behaves as today: pop
+segments from the ring as they appear, run each through the configured
+processor chain, park on `Fs::wait_for_more` between cycles.
+
+With `with_trigger(rx)` set, the same loop selects on:
 
 - `self.stop` (existing `CancellationToken`, used on shutdown)
 - `self.fs.writer_done` (existing, used to start drain-to-empty)
-- a new `request_rx: mpsc::Receiver<RunRequest>` populated by
-  `PipelineRun`
+- the new `trigger_rx` populated by `TriggerControl::dump`
 
-The worker only calls `take_files` once a `RunRequest` is received.
-Snapshot semantics fall out: whatever is sealed at the moment the
-request arrives is the captured set.
+It does not call `take_files` between triggers. When a request
+arrives, it stamps the metadata, takes the snapshot, runs each captured
+segment through the same processor chain, and resolves the receipt
+when the last one finishes. Then it re-parks.
 
-Windowed semantics layer on the same path. On a windowed request the
-worker captures the pre-snapshot as a `HashSet<SegmentIndex>`, arms a
-`tokio::time::sleep(post)` deadline, and keeps popping segments from
-`take_files` until the deadline fires. The union (pre snapshot plus
-post-window arrivals) is then run through the processor chain and the
-single end-of-run hook fires once.
+Timing collapses to a single code path. At trigger time the worker
+reads the current highest sealed segment index as `H`. The pre-set is
+exactly `{ idx : idx <= H }`, additionally filtered to
+`epoch >= now - pre` when `pre` is `Some`; the post-set is exactly
+`{ idx : idx > H }` arriving before the `post` deadline. A single `u32`
+high-water-mark replaces the more obvious `HashSet<SegmentIndex>`: no
+allocation, no membership probe, identical correctness because writer
+indices are monotonic.
 
-**Memory-mode failure mode for windowed runs.** If `post` exceeds the
-ring's drain budget, post-window segments may evict before the worker
-claims them. This is a real loss, not a degraded-but-correct outcome.
-The doc surfaces this explicitly; we do not silently mask it. The
-mitigation is on the caller side: size `max_total_size` for the worst
-expected `post`.
+`dump_now()` is equivalent to `dump_window(None, Duration::ZERO)`.
+With `post == 0` the worker short-circuits the deadline so the future
+resolves as soon as the pre-set finishes the pipeline. Otherwise it
+arms `tokio::time::sleep(post)` and keeps popping `take_files` until
+the deadline fires; the union of pre and post goes through the same
+processor chain.
+
+The only semantic difference between snapshot and windowed runs is
+whether post-trigger arrivals are included. In memory mode, a windowed
+run can lose post segments if `post` exceeds the ring's drain budget
+(see "Memory-mode windowed loss" below); a snapshot run has no such
+failure mode.
+
+Overlapping windowed runs are not supported in v1: while one is in
+flight, the worker is committed to a single `dump_id` stamp for
+incoming segments, and a second windowed dump would force a per-segment
+fan-out (which `dump_id` to write?). Calling `dump_window` with
+`post > 0` while another windowed dump is in flight returns
+`DumpError::InFlight`. `dump_now()` never claims future arrivals and is
+not affected.
+
+**Memory-mode windowed loss.** If `post` exceeds the ring's drain
+budget, post-window segments may evict before the worker claims them.
+This is a real loss, not a degraded-but-correct outcome. The doc
+surfaces it explicitly; the mitigation is on the caller side, size
+`max_total_size` for the worst expected `post`.
 
 **Disk-mode behavior when parked.** Sealed files accumulate on disk
 under the writer's existing budget. If the application never triggers,
 the budget acts as a circular FIFO exactly as today when S3 is
-unreachable (cross-reference `s3-worker-design.md` section 4 disk-space
-safety). The `max_total_size` knob is the lever.
+unreachable (see `s3-worker-design.md` section 4 on disk-space safety).
+The `max_total_size` knob is the lever.
 
-## Layer 2: S3 dump sugar
+### Open decision: how to handle `post` larger than the ring
 
-"Dump" is a Layer 2 word. It describes a triggered run whose terminal
-stage is S3 and which we want to find later by id and by a
-human-readable reason. Layer 2 adds four things on top of Layer 1: a
-**dump id** (ULID, time-sortable), an application-supplied **name
-slug**, a dedicated **key prefix** for the dump, and a **completion
-sentinel**. The reason the dump fired lives in the name slug and in
-the application's own logs; we deliberately do not bundle a per-dump
-sidecar file because every other piece of context is already on the
-per-segment S3 objects today (`background_task/s3.rs` sets `service`,
-`boot-id`, `segment-index`, `start-time`, `host` as user-defined
-metadata on every uploaded object). The generic primitive in Layer 1
-stays neutral: `process_now`, `process_window`.
+The "Memory-mode windowed loss" callout above just warns the caller.
+There are three structural ways to handle it more robustly. Picking one
+(or layering them) is left open.
 
-### 1. Builder preset
+**Option 1 — Pin captured segments in the ring.** The worker marks
+captured segments so the writer's eviction skips them.
 
-```rust
-let (guard, dump) = TracedRuntime::builder()
-    .with_s3_dump_on_trigger(s3_config)
-    .build()?;
-```
+- 1a. Live stream loses data when the pinned set fills the ring.
+- 1b. Reserve a fraction of the ring for pinned segments; dump
+  truncates when the reserve fills.
 
-`with_s3_dump_on_trigger(config)` is a sibling of `with_s3_uploader`,
-mutually exclusive with it (same phantom-state transition from
-`PipelineUnset` to `PipelineS3`). It composes three things internally:
+Pros: total memory stays bounded by `max_total_size`. Cons: writer's
+eviction code learns about pinning; either live tracing has a new drop
+path (1a) or the dump has a hidden hard cap (1b).
 
-1. `WorkerSchedule::OnTrigger`.
-2. The standard S3 pipeline (`SymbolizeProcessor` when the
-   `cpu-profiling` feature is on, then `GzipCompressor`, then the S3
-   uploader with the dump-aware key layout described in section 4
-   below).
-3. A completion-sentinel end-of-run hook described in section 5.
-
-Users who want to add custom processors into the trigger pipeline (for
-example, a custom redaction step before S3) drop down to Layer 1
-manually: `with_custom_pipeline(|p| ...)` plus
-`with_worker_schedule(OnTrigger)`. The S3 preset is a convenience for
-the common case, not the only path.
-
-### 2. Dump handle
+**Option 2 — Surface partial captures.** Nothing in the ring or the
+writer changes. The worker counts capture targets that evicted before
+pickup and reports them on the receipt:
 
 ```rust
-#[derive(Clone)]
-pub struct DumpHandle {
-    // wraps PipelineRun + the S3 client and config needed to compute
-    // keys and upload the sentinel
-}
-
-impl DumpHandle {
-    /// Snapshot dump. `name` is a short application-supplied slug
-    /// identifying why this dump fired. It is sanitized and appended
-    /// to the dump id in the S3 key prefix.
-    pub async fn dump_now(&self, name: impl Into<String>)
-        -> Result<DumpReceipt, DumpError>;
-
-    pub async fn dump_window(&self, post: Duration, name: impl Into<String>)
-        -> Result<DumpReceipt, DumpError>;
-}
-
 pub struct DumpReceipt {
-    pub dump_id: DumpId,              // ULID, time-sortable
-    pub name: String,                 // sanitized echo of the input
-    pub prefix: String,               // dumps/{dump_id}-{name}/
-    pub segment_keys: Vec<String>,    // full S3 keys for the trace files
-    pub sentinel_key: String,         // dumps/{dump_id}-{name}/_complete
+    pub dump_id: DumpId,
+    pub segments_processed: usize,
+    pub segments_lost: usize,           // new
+    pub finished_at: SystemTime,
     pub time_range: (SystemTime, SystemTime),
 }
 ```
 
-Name sanitization rules: ASCII alphanumerics, hyphen, underscore,
-period. Anything else is replaced with `-`. Empty name is allowed; the
-path becomes `dumps/{dump_id}/...` (no trailing hyphen). Max length 64
-characters; longer inputs are truncated. The receipt echoes back the
-sanitized form so the application can log exactly what was used.
+Pros: zero change to ring/writer; honest about loss. Cons: caller has
+to inspect the receipt; default behavior is still partial-loss-by-
+silence unless the caller acts.
 
-Internally `DumpHandle` mints a `DumpId` (ULID for sortability) and
-sanitizes `name`, then threads both through the existing
-`SegmentData::metadata` HashMap so the S3 uploader can use them when
-computing the object key (section 4). After Layer 1 finishes draining
-the captured set, the end-of-run hook uses the same id and name to
-write the sentinel (section 5).
+**Option 3 — Move captures into a side buffer.** On capture, the
+worker moves the segment out of the ring into a dump-owned side buffer
+(memory mode: `Arc` transfer; disk mode: rename to a staging
+directory). The ring's budget drops immediately; the live stream is
+isolated. The pipeline drains the side buffer at its own pace.
 
-### 3. What gets uploaded per dump
+Pros: writer's eviction unchanged; live stream fully isolated; dump
+completeness guaranteed. Cons: process memory/disk usage grows beyond
+`max_total_size` during a dump. Optionally cap with a separate
+`max_dump_holding_size`; overflow truncates the dump.
 
-Per dump we push two kinds of artifacts to S3:
+**Comparison.**
 
-**Segment files.** Each captured segment is the same binary trace
-format produced today, gzipped. A `.bin.gz` is self-contained and
-decoder readable: it carries the schema preamble plus the event stream
-(CPU samples, task spans, park/unpark, tracing-layer events, process
-resource usage). No new file format.
+| Aspect              | Option 1 (pin)                             | Option 2 (surface) | Option 3 (side buffer)                          |
+| ------------------- | ------------------------------------------ | ------------------ | ----------------------------------------------- |
+| Dump completeness   | Guaranteed within a pin reserve            | Best-effort        | Guaranteed within an optional holding cap       |
+| Live stream cost    | Possible drops (1a) or capped reserve (1b) | None               | None                                            |
+| Memory/disk ceiling | Stays at `max_total_size`                  | Stays              | Grows during a dump                             |
+| Writer changes      | Eviction consults a pin flag               | None               | None (capture moves segments out)               |
+| Worker changes      | Pin/unpin on capture/release               | Counter + check    | Move-out on capture; own buffer and drain loop  |
+| Caller burden       | None                                       | Inspect receipt    | None (unless cap is set and overflowed)         |
 
-Every segment uploaded in a dump carries the same per-object S3
-user-defined metadata as continuous-mode uploads
-(`service`, `boot-id`, `segment-index`, `start-time`, `host`; see
-`background_task/s3.rs`) plus two new keys:
+A natural combination is **Option 3 with an optional cap, plus
+Option 2's `segments_lost` reporting when the cap is exceeded**. This
+gives default-on completeness, an operator-controlled memory ceiling,
+and honest reporting when the ceiling truncates a dump. Option 1 is
+not subsumed and remains an alternative if "stay strictly within
+`max_total_size`, no matter what" is a hard requirement.
+
+Decision pending.
+
+## API reference
 
 ```rust
-.metadata("dump-id", dump_id.to_string())
-.metadata("dump-name", &sanitized_name)
+pub mod trigger {
+    pub fn channel() -> (TriggerControl, TriggerRx);
+}
+
+#[derive(Clone)]
+pub struct TriggerControl { /* tx side of the trigger channel */ }
+
+impl TriggerControl {
+    /// Capture the ring as it is right now. Equivalent to
+    /// `dump_window(None, Duration::ZERO)`.
+    pub fn dump_now(&self) -> DumpRun<'_>;
+
+    /// Capture the ring plus a post-trigger window. `pre` filters the
+    /// pre-trigger segments to those with `end_epoch >= now - pre`;
+    /// `None` takes whatever the ring still has. `post` is the
+    /// wall-clock window of post-trigger arrivals to include.
+    pub fn dump_window(&self, pre: Option<Duration>, post: Duration) -> DumpRun<'_>;
+}
+
+/// In-flight dump request. Resolves to `Result<DumpReceipt, DumpError>`
+/// when awaited (via `IntoFuture`). Chain `.with_metadata(...)` before
+/// awaiting to attach correlation pairs.
+#[must_use = "DumpRun does nothing unless awaited"]
+pub struct DumpRun<'a> { /* private */ }
+
+impl<'a> DumpRun<'a> {
+    /// Attach caller-supplied correlation pairs. Stamped onto every
+    /// captured segment's `SegmentData::metadata` before the pipeline
+    /// runs; pipeline stages decide what to do with them.
+    pub fn with_metadata(self, metadata: HashMap<String, String>) -> Self;
+}
+
+impl<'a> IntoFuture for DumpRun<'a> {
+    type Output = Result<DumpReceipt, DumpError>;
+    type IntoFuture = /* boxed or named future */;
+    fn into_future(self) -> Self::IntoFuture;
+}
+
+#[non_exhaustive]
+pub struct DumpReceipt {
+    pub dump_id: DumpId,
+    pub segments_processed: usize,
+    pub finished_at: SystemTime,
+    pub time_range: (SystemTime, SystemTime),
+}
+
+#[non_exhaustive]
+pub enum DumpError {
+    /// A windowed dump is already running and v1 does not support overlap.
+    InFlight,
+    /// The worker is shutting down or already stopped.
+    WorkerStopped,
+    /// A pipeline stage failed on one of the captured segments.
+    Pipeline(ProcessError),
+}
 ```
 
-These ride on every segment object in the dump. They are redundant
-with the key path (which also contains both) but cheap, and they make
-a single object self-describing without parsing the key.
+`with_trigger(rx)` on `TracedRuntimeBuilder` writes a private
+`Option<TriggerRx>`. Absence (the default) keeps today's continuous
+behavior; presence flips the worker into triggered mode. `build()`
+returns the existing `TelemetryGuard` regardless; no new axis on the
+builder's phantom-state machinery.
 
-**Completion sentinel.** A zero-byte object at `_complete` in the
-dump's prefix. Written **last**, after every captured segment has
-finished uploading. Its presence is the atomic "this dump is done"
-signal for any reader. A reader observing a `dumps/{dump_id}-{name}/`
-prefix without `_complete` treats the dump as in-flight or failed.
-
-That is the complete artifact list per dump: N segment objects plus
-one sentinel. No sidecar file, no index. Section 4 below lays out
-where each piece of per-dump context lives so a reader needs nothing
-beyond the segments themselves.
-
-### 4. S3 key layout for dumps
-
-The dump layout differs deliberately from the continuous-mode layout.
-Today (`background_task/s3.rs` `object_key`, around line 150) the key
-is time-first:
-
-```
-{prefix}/{date-time}/{service}/{instance}/{epoch_secs}-{index}.bin.gz
-```
-
-The rationale for that layout (incident correlation across services,
-Athena partitioning, lifecycle policies) is documented in
-`s3-worker-design.md` section 2. For dumps the access pattern is
-different: a dump is its own correlation unit, addressed by its id, not
-by a minute bucket.
-
-Dump key layout:
-
-```
-{prefix}/dumps/{dump_id}-{name}/{epoch_secs}-{index}.bin.gz
-{prefix}/dumps/{dump_id}-{name}/_complete
-```
-
-When `name` is empty after sanitization, the trailing hyphen is
-dropped:
-
-```
-{prefix}/dumps/{dump_id}/{epoch_secs}-{index}.bin.gz
-{prefix}/dumps/{dump_id}/_complete
-```
-
-Listing all dumps is `ListObjectsV2 prefix={prefix}/dumps/` and returns
-ULID-prefixed entries sorted by time (ULIDs encode their timestamp in
-their leading bits). Listing a single dump is `ListObjectsV2
-prefix={prefix}/dumps/{dump_id}-`.
-
-Where each piece of per-dump context lives:
-
-| Field                        | Where it lives                                                                      |
-| ---------------------------- | ----------------------------------------------------------------------------------- |
-| `dump_id`                    | Key path; also `dump-id` S3 user metadata on every segment                          |
-| `name` (the "why")           | Key path; also `dump-name` S3 user metadata on every segment                        |
-| `triggered_at`               | Embedded in the ULID (`DumpId` can extract); also the `LastModified` of `_complete` |
-| `service`, `boot_id`, `host` | Existing per-segment S3 user metadata, unchanged                                    |
-| `segment.index`              | Key path; also `segment-index` S3 user metadata                                     |
-| `segment.size_bytes`         | S3 object `ContentLength` (free)                                                    |
-| `segment.start_epoch`        | Key path; also `start-time` S3 user metadata                                        |
-| `total_compressed_bytes`     | Sum of `ContentLength` from `ListObjectsV2`                                         |
-| Completion                   | `_complete` sentinel                                                                |
-
-Implementation: the S3 processor selects the dump path when the
-processor metadata map contains a `dump_id` key, otherwise it falls
-through to today's continuous-mode layout. `DumpHandle` is the only
-thing that inserts `dump_id`. `with_s3_uploader` and the continuous
-layout are untouched.
-
-### 5. End-of-run hook: upload the sentinel
-
-The sentinel cannot live in a per-segment `SegmentProcessor`. No
-individual processor knows that it just processed the last segment of
-a run; the iteration over captured segments lives in
-`WorkerLoop::process_segments`, and the S3 uploader only ever sees one
-segment at a time.
-
-We add a small worker-loop hook, called once per triggered run after
-the last segment's pipeline finishes. The S3 dump preset registers a
-hook implementation that:
-
-1. Collects the per-segment S3 keys produced during the run (the S3
-   uploader returns each on success; the hook accumulates them in a
-   side channel for the receipt).
-2. Issues a single `PutObject` with zero-byte body at
-   `{prefix}/dumps/{dump_id}-{name}/_complete`, using the same
-   `aws_sdk_s3::Client` the uploader used.
-3. Resolves the `DumpReceipt` future returned to the caller, with the
-   collected segment keys, the sentinel key, and the observed time
-   range.
-
-On sentinel upload failure, the `DumpReceipt` future resolves with
-`DumpError`. The segments themselves may all be present in S3 in that
-case, but without `_complete` the dump is effectively in-flight from a
-reader's perspective. The caller can retry the sentinel upload via a
-follow-up call (which would mint a new dump id, since v1 does not
-support resuming an existing dump).
-
-The hook surface stays internal in v1. If Layer 1 users later want an
-end-of-run extension point of their own, we expose it then. We do not
-promise it now.
-
-## Snapshot vs windowed: side-by-side
-
-| Aspect                   | `dump_now` (snapshot)                   | `dump_window(post)` (windowed)                              |
-| ------------------------ | --------------------------------------- | ----------------------------------------------------------- |
-| Pre-trigger context      | Whole ring at trigger time              | Whole ring at trigger time                                  |
-| Post-trigger context     | None                                    | `post` seconds                                              |
-| Future resolves          | After upload of captured set + sentinel | After `post` + upload + sentinel                            |
-| Memory-mode failure mode | None new                                | Post segments may evict if `post` exceeds ring drain budget |
-| API shape                | One method per layer                    | One method per layer                                        |
-| Worker complexity        | One wake source                         | Wake source + deadline + pre-snapshot set                   |
-| Implementation effort    | Small                                   | Medium                                                      |
-
-Two small clarifications on top of the table:
-
-- `dump_now` is semantically equivalent to `dump_window(Duration::ZERO)`.
-  We keep both because the common case deserves the simpler signature
-  and a future that resolves as soon as the snapshot uploads, without
-  the deadline-arming code path.
-- Overlapping windowed runs are not supported in v1. Calling
-  `dump_window` while a window is in flight returns
-  `DumpError::DumpInFlight`. The same constraint at Layer 1:
-  `process_window` while a window is in flight returns
-  `RunError::RunInFlight`. Revisit if a user asks; for now the
-  single-window restriction has no real downside for the motivating
-  use case.
-
-## What is deliberately out of scope
-
-- **Default triggers.** Tokio idle ratio, latency thresholds, error
-  rates, and similar policy live in the application, not the library.
-  We ship the primitive; users wire the policy. Example recipes belong
-  under `examples/`, not in the public API.
-- **Per-dump sidecar file.** All correlation data lives in the key
-  path and on per-object S3 user metadata (section 4 maps each field).
-  A tiny sidecar carrying only `{dump_id, name, schema_version}` would
-  add no information beyond what is already in the prefix and on the
-  objects, and would commit us to a versioned JSON surface we would
-  have to maintain.
-- **Structured k/v labels** on a dump. Only a single `name` slug is
-  supported. If a user later needs structured labels, two options
-  exist (S3 object tagging, a thin sidecar JSON) and neither blocks
-  v1.
-- **Per-segment marking.** The issue thread surfaces a "mark eligible
-  for upload" framing (zz85's coworker). It is more expressive, but it
-  requires plumbing a marker through `SegmentRef`, `MemorySegment`, and
-  the writer-side seal path. No clear demand. Revisit if a real user
-  asks.
-- **Time-range dumps.** A `dump_range(start_epoch, end_epoch)` would
-  filter the ring by segment header epoch before draining. The ring is
-  short relative to the windows users typically care about, so "the
-  ring" usually overlaps the range of interest already. Adds API
-  surface for small expected payoff.
-- **Non-S3 dump semantics.** Layer 2 ships S3 only. The Layer 1
-  primitive is general by construction, so write-back-on-trigger for
-  local debugging falls out naturally for users who compose it
-  themselves. We do not invent "dump-to-disk" or "dump-to-custom"
-  presets.
-- **Coalescing under burst triggers.** Application concern. If a
-  trigger fires a hundred times in a second the application should
-  debounce; the library will not.
-- **Speculative work between triggers** (for example, pre-symbolizing
-  newly sealed segments while the worker is parked). Defeats the
-  purpose of `OnTrigger`. Not added.
-
-## Open questions
-
-- **Single `process_window` instead of `process_now` + `process_window`?**
-  Collapse would reduce the API to one method per layer. Recommendation:
-  keep both. The no-wait case is the common case and a simpler signature
-  is worthwhile; the future also resolves faster because it never arms a
-  deadline.
-- **Symbolization cost on trigger.** The standard S3 pipeline prepends
-  `SymbolizeProcessor` when the `cpu-profiling` feature is on; that
-  stage is CPU-heavy. A dump triggered during a hot moment will spike
-  the worker thread. The worker is on a dedicated tokio current-thread
-  runtime so it cannot steal time from the application's runtime, but
-  the spike is real and worth flagging in user-facing docs. No design
-  change implied.
-- **Name sanitization rules.** Proposal: ASCII alphanumerics plus
-  `-_.`, max 64 characters, invalid characters replaced with `-`.
-  Open to a stricter rule if it turns out S3 lifecycle policies or
-  consumer tooling impose narrower constraints (for example, prefixes
-  that are also Glue catalog partition keys).
-- **Disk-mode unbounded growth when never triggered.** If the
-  application installs `OnTrigger` and never triggers, the writer keeps
-  sealing files into the disk ring. The existing `max_total_size`
-  budget bounds this, but the user must set it consciously (the typical
-  default is generous because the worker normally consumes files
-  quickly). Document; the lever already exists.
+Implementation note on the S3 uploader: `object_key` in
+`background_task/s3.rs` (around line 150) switches on
+`metadata.get("dump_id")`. When present it emits the dump-style key;
+otherwise it falls through to today's continuous-mode layout. The
+uploader knows nothing about the trigger feature directly; it reads
+metadata, and the trigger feature is the source of that metadata.
+`with_s3_uploader` itself is untouched, and continuous-mode uploads
+never carry `dump_id`, so the continuous key layout stays exactly as
+today.
