@@ -57,6 +57,7 @@ process.stderr.write('\n');
 ```
 {
   // ── Metadata ──
+  files: string[],                  // base filenames of analyzed trace files
   workerIds: number[],              // sorted worker thread IDs
   minTs: number,                    // earliest timestamp (ns)
   maxTs: number,                    // latest timestamp (ns)
@@ -91,8 +92,8 @@ process.stderr.write('\n');
   schedDelayHist: Histogram|null,    // Node.js perf_hooks Histogram of all delay values (ns), null if no delays
 
   // ── Long polls ──
-  longPolls: [{dur, poll, worker}], // polls > 1ms, top 100 sorted by duration descending
-                                    // poll: {start, end, taskId, spawnLoc}
+  longPolls: [{dur, poll, worker, file}], // polls > 1ms, top 100 sorted by duration descending
+                                    // poll: {start, end, taskId, spawnLoc}; file: source trace filename
 
   // ── Queue depth ──
   queueDepthStats: {

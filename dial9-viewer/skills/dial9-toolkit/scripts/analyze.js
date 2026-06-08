@@ -40,8 +40,10 @@ function frameKind(sym) {
     if (/^(schedule|expand_fd|expand_files|alloc_fd|ep_poll|ep_send|futex_|sock_|inet_|tcp_|vfs_|filp_|fd_install|ksys_|fput|fget)/.test(sym)) return 'kernel';
   }
   // Tokio runtime internals
-  if (/^tokio::runtime::(scheduler|task|blocking|context|coop)/.test(sym)) return 'runtime';
+  if (/^<?tokio::runtime::(scheduler|task|blocking|context|coop)/.test(sym)) return 'runtime';
   if (/^std::(panicking|sys|thread)::/.test(sym)) return 'runtime';
+  if (/^<std::(sys|thread)::/.test(sym)) return 'runtime';
+  if (/^core::(ops::function|panicking)::/.test(sym)) return 'runtime';
   return 'app';
 }
 
@@ -111,7 +113,7 @@ function createAccumulator() {
 }
 
 /** Accumulate one trace's analysis into the running accumulator. */
-function accumulateTrace(acc, trace) {
+function accumulateTrace(acc, trace, sourceFile) {
   const workerIds = [...new Set(
     trace.events.filter(e => e.eventType !== EVENT_TYPES.QueueSample && e.eventType !== EVENT_TYPES.WakeEvent)
       .map(e => e.workerId)
@@ -159,7 +161,7 @@ function accumulateTrace(acc, trace) {
       h.record(Math.max(1, Math.round(dur)));
 
       if (dur > 1e6) {
-        acc.longPolls.push({ dur, poll: p, worker: w });
+        acc.longPolls.push({ dur, poll: p, worker: w, file: sourceFile });
         if (acc.longPolls.length > 200) { acc.longPolls.sort((a, b) => b.dur - a.dur); acc.longPolls.length = 100; }
       }
     }
@@ -284,12 +286,15 @@ function reportAnalysis(a, label) {
   console.log(`\n${'='.repeat(60)}`);
   console.log(`TRACE SUMMARY: ${label}`);
   console.log(`${'='.repeat(60)}`);
+  if (a.files && a.files.length > 0) {
+    console.log(`Files (${a.files.length}):`);
+    for (const f of a.files) console.log(`  ${f}`);
+  }
   console.log(`Duration:       ${durationMs.toFixed(1)}ms`);
   console.log(`Workers:        ${workerIds.length} (IDs: ${workerIds.join(', ')})`);
   console.log(`Events:         ${a.eventCount.toLocaleString()}`);
   console.log(`CPU samples:    ${a.cpuSampleCount.toLocaleString()}`);
   console.log(`Tasks spawned:  ${a.taskSpawnCount}`);
-  console.log(`Tasks alive at end: ${a.taskAliveAtEnd}`);
 
   // ── Worker utilization ──
   console.log(`\n${'─'.repeat(60)}`);
@@ -315,7 +320,7 @@ function reportAnalysis(a, label) {
     console.log(`  Found ${longPolls.length} long poll(s)\n`);
     for (const lp of longPolls.slice(0, 10)) {
       const p = lp.poll;
-      console.log(`  ▸ ${fmtDur(lp.dur)} on worker ${lp.worker} at ${fmtRel(p.start, minTs)}`);
+      console.log(`  ▸ ${fmtDur(lp.dur)} on worker ${lp.worker} at ${fmtRel(p.start, minTs)}${lp.file ? ' [' + lp.file + ']' : ''}`);
       console.log(`    Task ${p.taskId}, spawn: ${p.spawnLoc || '(unknown)'}`);
 
       if (p.schedSamples?.length) {
@@ -347,8 +352,20 @@ function reportAnalysis(a, label) {
         console.log(`    ${p.cpuSamples.length} CPU sample(s) — on-CPU stacks:`);
         for (const s of p.cpuSamples.slice(0, 3)) {
           const frames = symbolizeChain(s.callchain, callframeSymbols);
-          const { trigger } = diagnoseStack(frames);
-          if (trigger) console.log(`      ${trigger.display}`);
+          const { classified } = diagnoseStack(frames);
+          const appFrames = classified.filter(f => f.kind === 'app');
+          if (appFrames.length > 0) {
+            const show = appFrames.length <= 8 ? appFrames : [
+              ...appFrames.slice(0, 3),
+              { display: `... ${appFrames.length - 6} more frames ...`, location: null },
+              ...appFrames.slice(-3),
+            ];
+            for (const f of show) {
+              const loc = f.location ? ` [${f.location}]` : '';
+              console.log(`      ${f.display}${loc}`);
+            }
+            if (p.cpuSamples.length > 1) console.log();
+          }
         }
       }
       if (!p.schedSamples?.length && !p.cpuSamples?.length) {
@@ -363,7 +380,9 @@ function reportAnalysis(a, label) {
   console.log(`SCHEDULING DELAYS (wake → poll latency)`);
   console.log(`${'─'.repeat(60)}`);
   const sds = a.schedDelayStats;
-  if (sds.highCount === 0) {
+  if (sds.total === 0) {
+    console.log('  No tasks instrumented — use dial9::spawn() to measure scheduling delays');
+  } else if (sds.highCount === 0) {
     console.log('  No delays > 1ms ✅');
   } else {
     const sorted = sds.worst.slice().sort((a, b) => b.delay - a.delay);
@@ -382,8 +401,11 @@ function reportAnalysis(a, label) {
     console.log(`\n${'─'.repeat(60)}`);
     console.log(`POLL DURATION BY SPAWN LOCATION`);
     console.log(`${'─'.repeat(60)}`);
-    for (const [loc, h] of [...a.pollDurationByLoc.entries()].sort((x, y) => y[1].max - x[1].max)) {
-      console.log(`  ${loc}: count=${h.count} p50=${(h.percentile(50)/1e3).toFixed(1)}µs p99=${(h.percentile(99)/1e3).toFixed(1)}µs max=${(h.max/1e6).toFixed(2)}ms`);
+    const entries = [...a.pollDurationByLoc.entries()].sort((x, y) => y[1].max - x[1].max);
+    for (const [loc, h] of entries) {
+      const maxMs = h.max / 1e6;
+      const flag = maxMs > 10 ? ' ⚠️' : maxMs > 1 ? ' 🟡' : '';
+      console.log(`  ${loc}: count=${h.count} p50=${(h.percentile(50)/1e3).toFixed(1)}µs p99=${(h.percentile(99)/1e3).toFixed(1)}µs max=${maxMs.toFixed(2)}ms${flag}`);
     }
   }
 
@@ -402,11 +424,22 @@ function reportAnalysis(a, label) {
 
   const atSamples = a.taskTimeline.activeTaskSamples;
   if (atSamples.length > 0) {
-    const peak = maxBy(atSamples, s => s.count);
-    const final_ = atSamples[atSamples.length - 1].count;
-    console.log(`\n  Peak active tasks: ${peak}`);
-    console.log(`  Active at trace end: ${final_}`);
-    if (final_ > atSamples[0].count * 2 && final_ === peak) {
+    // Recompute from merged spawn/terminate maps for accurate cross-file count
+    // Tasks that terminate without a recorded spawn were alive at trace start
+    let preExisting = 0;
+    for (const [taskId] of taskTerminateTimes) {
+      if (!taskSpawnTimes.has(taskId)) preExisting++;
+    }
+    const taskEvents = [];
+    for (const [, t] of taskSpawnTimes) taskEvents.push({ t, delta: 1 });
+    for (const [, t] of taskTerminateTimes) taskEvents.push({ t, delta: -1 });
+    taskEvents.sort((a, b) => a.t - b.t);
+    let count = preExisting, peak = preExisting;
+    for (const te of taskEvents) { count += te.delta; if (count > peak) peak = count; }
+    const alive = count;
+    console.log(`\n  Peak active tasks: ${peak}${preExisting > 0 ? ` (${preExisting} pre-existing at trace start)` : ''}`);
+    console.log(`  Active at trace end: ${alive}`);
+    if (alive > peak / 2 && alive === peak) {
       console.log('  ⚠ POSSIBLE TASK LEAK — active count grew monotonically');
       const alive = new Map();
       for (const [taskId] of taskSpawnTimes) {
@@ -426,7 +459,25 @@ function reportAnalysis(a, label) {
   console.log(`BLOCKING CALLS (scheduling/off-CPU samples)`);
   console.log(`${'─'.repeat(60)}`);
   if (a.offCpuSampleCount === 0) {
-    console.log('  No off-CPU samples in trace');
+    console.log('  ℹ️  Schedule profiling not enabled — no off-CPU stack traces available.');
+    console.log('     Enable with DIAL9_SCHEDULE_PROFILE_ENABLED=true to capture blocking call stacks.');
+    // Show any active periods where CPU ratio was low (worker was off-CPU during active work)
+    const offCpuPeriods = [];
+    for (const w of workerIds) {
+      const ws = a.workerSpans[w];
+      if (ws.schedWaits && ws.schedWaits.length > 0) {
+        const over1ms = ws.schedWaits.filter(w => w > 1e6);
+        if (over1ms.length > 0) {
+          offCpuPeriods.push({ worker: w, count: over1ms.length, maxMs: over1ms[0] / 1e6 });
+        }
+      }
+    }
+    if (offCpuPeriods.length > 0) {
+      console.log(`\n  Workers with kernel scheduling delays > 1ms (possible blocking):`);
+      for (const p of offCpuPeriods.sort((a, b) => b.maxMs - a.maxMs)) {
+        console.log(`    Worker ${p.worker}: ${p.count} events, max ${p.maxMs.toFixed(1)}ms`);
+      }
+    }
   } else {
     console.log(`  ${a.offCpuSampleCount} off-CPU sample(s)\n`);
     for (const g of a.schedGroups.slice(0, 10)) {
@@ -447,12 +498,36 @@ function reportAnalysis(a, label) {
     console.log('  No CPU samples in trace');
   } else {
     console.log(`  ${a.onCpuSampleCount} CPU sample(s)\n`);
-    for (const g of a.cpuGroups.slice(0, 10)) {
-      const pct = (g.count / a.onCpuSampleCount * 100).toFixed(1);
-      const { trigger } = diagnoseStack(g.frames);
-      console.log(`  ${String(g.count).padStart(5)} samples (${pct}%) — leaf: ${g.leaf}`);
-      if (trigger) console.log(`         app frame: ${trigger.display}`);
+    // Build a flamegraph tree from app-level frames
+    const root = { name: '(all)', count: 0, self: 0, children: new Map() };
+    for (const g of a.cpuGroups) {
+      const { classified } = diagnoseStack(g.frames);
+      const appFrames = classified.filter(f => f.kind === 'app');
+      if (appFrames.length === 0) continue;
+      // Walk from root (deepest caller) to leaf
+      let node = root;
+      node.count += g.count;
+      for (let i = appFrames.length - 1; i >= 0; i--) {
+        const name = appFrames[i].display;
+        let child = node.children.get(name);
+        if (!child) { child = { name, count: 0, self: 0, children: new Map() }; node.children.set(name, child); }
+        child.count += g.count;
+        if (i === 0) child.self += g.count;
+        node = child;
+      }
     }
+    // Print top-down, collapsing single-child chains
+    function printTree(node, indent, minPct) {
+      const sorted = [...node.children.values()].sort((a, b) => b.count - a.count);
+      for (const child of sorted) {
+        const pct = (child.count / a.onCpuSampleCount * 100);
+        if (pct < minPct) continue;
+        const selfStr = child.self > 0 ? ` (self: ${child.self})` : '';
+        console.log(`${indent}${child.count} samples (${pct.toFixed(1)}%) ${child.name}${selfStr}`);
+        if (child.children.size > 0) printTree(child, indent + '  ', minPct);
+      }
+    }
+    printTree(root, '  ', 1.0);
   }
 
   // ── Queue depth ──
@@ -548,10 +623,13 @@ async function analyzeTraces(tracePath, opts) {
 
   if (!isDir) {
     const { onParseProgress, onParseComplete, onAnalysisProgress, ...parseOpts } = opts;
-    for await (const trace of parseTrace(tracePath, parseOpts)) {
-      accumulateTrace(acc, trace);
+    const iter = parseTrace(tracePath, parseOpts);
+    for await (const trace of iter) {
+      accumulateTrace(acc, trace, path.basename(tracePath));
     }
-    return finalizeAccumulator(acc);
+    const result = finalizeAccumulator(acc);
+    result.files = [path.basename(tracePath)];
+    return result;
   }
 
   // Phase 1: parallel parse (populate cache)
@@ -601,7 +679,9 @@ async function analyzeTraces(tracePath, opts) {
     dispatch();
   });
 
-  return finalizeAccumulator(acc);
+  const result = finalizeAccumulator(acc);
+  result.files = iter.files || [];
+  return result;
 }
 
 async function main() {
@@ -792,6 +872,7 @@ function loadCacheFile(cachePath) {
 
 function analyzeWorkerMain(cachePath) {
   const trace = loadCacheFile(cachePath);
+  const sourceFile = path.basename(cachePath).replace(/\.json$/, '.bin');
   const wids = [...new Set(trace.events.filter(e => e.eventType !== EVENT_TYPES.QueueSample && e.eventType !== EVENT_TYPES.WakeEvent).map(e => e.workerId))].sort((a, b) => a - b);
   const minTs = trace.events.reduce((m, e) => Math.min(m, e.timestamp), Infinity);
   const maxTs = trace.events.reduce((m, e) => Math.max(m, e.timestamp), -Infinity);
@@ -834,7 +915,7 @@ function analyzeWorkerMain(cachePath) {
       const dur = p.end - p.start;
       const loc = p.spawnLoc || '(unknown)';
       (partial.pollDurationsByLoc[loc] || (partial.pollDurationsByLoc[loc] = [])).push(Math.max(1, Math.round(dur)));
-      if (dur > 1e6) partial.longPolls.push({ dur, poll: p, worker: w });
+      if (dur > 1e6) partial.longPolls.push({ dur, poll: p, worker: w, file: sourceFile });
     }
   }
   partial.longPolls.sort((a, b) => b.dur - a.dur);
