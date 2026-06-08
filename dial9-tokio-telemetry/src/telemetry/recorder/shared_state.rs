@@ -485,13 +485,11 @@ mod tests {
 mod shuttle_tests {
     use crate::primitives::sync::atomic::{AtomicU64, Ordering};
     use crate::primitives::sync::{Arc, Mutex};
-    use crate::telemetry::collector::Batch;
     use crate::telemetry::recorder::TelemetryCore;
-    use crate::telemetry::writer::TraceWriter;
+    use crate::telemetry::writer::DiskWriter;
     use dial9_trace_format::TraceEvent;
     use shuttle::rand::Rng;
     use std::collections::HashMap;
-    use std::io;
 
     // ── Event definition ────────────────────────────────────────────────
 
@@ -517,50 +515,6 @@ mod shuttle_tests {
             *prev += rng.gen_range(1u64..=1000);
         }
         *prev
-    }
-
-    // ── Writer ──────────────────────────────────────────────────────────
-
-    /// A TraceWriter that captures encoded bytes into per-segment buffers
-    /// and randomly triggers rotation via `should_drain`/`drained`.
-    struct InvariantCheckingWriter {
-        segments: Arc<Mutex<Vec<Vec<u8>>>>,
-    }
-
-    impl InvariantCheckingWriter {
-        fn new(segments: Arc<Mutex<Vec<Vec<u8>>>>) -> Self {
-            segments.lock().unwrap().push(Vec::new());
-            Self { segments }
-        }
-    }
-
-    impl TraceWriter for InvariantCheckingWriter {
-        fn write_encoded_batch(&mut self, batch: &Batch) -> std::io::Result<()> {
-            self.segments
-                .lock()
-                .unwrap()
-                .last_mut()
-                .unwrap()
-                .extend_from_slice(batch.encoded_bytes());
-            Ok(())
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-
-        fn should_drain(&self) -> bool {
-            shuttle::rand::thread_rng().gen_range(0u32..10) < 3
-        }
-
-        fn drained(&mut self) -> std::io::Result<bool> {
-            if shuttle::rand::thread_rng().gen_range(0u32..2) == 0 {
-                self.segments.lock().unwrap().push(Vec::new());
-                Ok(true)
-            } else {
-                Ok(false)
-            }
-        }
     }
 
     // ── Decoding ────────────────────────────────────────────────────────
@@ -658,15 +612,19 @@ mod shuttle_tests {
 
         let num_threads = 3;
         let next_id = Arc::new(AtomicU64::new(0));
-        let segments: Arc<Mutex<Vec<Vec<u8>>>> = Arc::new(Mutex::new(Vec::new()));
+
+        let dir = tempfile::tempdir().unwrap();
+        let writer = DiskWriter::builder()
+            .base_path(dir.path().join("trace"))
+            .max_file_size(256)
+            .max_total_size(100 * 1024 * 1024)
+            .build()
+            .unwrap();
 
         // Mock source: worker threads push events here, flush thread drains them.
         let source_pending: Arc<Mutex<Vec<ValidationEvent>>> = Arc::new(Mutex::new(Vec::new()));
 
-        let guard = TelemetryCore::builder()
-            .writer(InvariantCheckingWriter::new(segments.clone()))
-            .build()
-            .unwrap();
+        let guard = TelemetryCore::builder().writer(writer).build().unwrap();
         guard
             .shared()
             .unwrap()
@@ -713,12 +671,17 @@ mod shuttle_tests {
         }
         drop(guard);
 
-        // Decode per-segment.
-        let segs = segments.lock().unwrap();
-        let decoded_segments: Vec<Vec<ValidationEvent>> =
-            segs.iter().map(|s| decode_validation_events(s)).collect();
-        let all_decoded: Vec<ValidationEvent> =
-            decoded_segments.iter().flatten().cloned().collect();
+        // Decode per-segment from the sealed `.bin` files.
+        let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.to_string_lossy().contains(".bin"))
+            .collect();
+        files.sort();
+        let all_decoded: Vec<ValidationEvent> = files
+            .iter()
+            .flat_map(|p| decode_validation_events(&std::fs::read(p).unwrap()))
+            .collect();
         let expected = expected.lock().unwrap();
 
         // Run all invariants.
@@ -736,51 +699,16 @@ mod shuttle_tests {
         shuttle::check_pct(test_telemetry_core_pipeline, 10000, 3);
     }
 
-    // ── Always-erroring writer ──────────────────────────────────────────
+    // ── Error injection ─────────────────────────────────────────────────
     //
-    // The companion to `InvariantCheckingWriter`: every fallible method
-    // returns an `io::Error`. This exercises the error paths in the flush
-    // loop and lets us assert that rate limiting bounds log output even
-    // when every operation fails.
+    // The companion to the round-trip pipeline test: a `DiskWriter` with
+    // `.fail_all_writes()` set makes every fallible method return an
+    // `io::Error` and `should_drain` always fire. This exercises the error
+    // paths in the flush loop and lets us assert that rate limiting bounds log
+    // output even when every operation fails.
 
     use std::sync::Arc as StdArc;
     use std::sync::atomic::{AtomicU64 as StdAtomicU64, Ordering as StdOrdering};
-
-    struct AlwaysErroringWriter;
-
-    impl AlwaysErroringWriter {
-        fn err() -> io::Error {
-            io::Error::from(io::ErrorKind::PermissionDenied)
-        }
-    }
-
-    impl TraceWriter for AlwaysErroringWriter {
-        fn write_encoded_batch(&mut self, _batch: &Batch) -> io::Result<()> {
-            Err(Self::err())
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Err(Self::err())
-        }
-
-        fn finalize(&mut self) -> io::Result<()> {
-            Err(Self::err())
-        }
-
-        fn write_current_segment_metadata(&mut self) -> io::Result<()> {
-            Err(Self::err())
-        }
-
-        fn should_drain(&self) -> bool {
-            // Always want to drain so the post-drain error path is exercised
-            // every flush tick.
-            true
-        }
-
-        fn drained(&mut self) -> io::Result<bool> {
-            Err(Self::err())
-        }
-    }
 
     // ── Counting subscriber ─────────────────────────────────────────────
     //
@@ -840,10 +768,11 @@ mod shuttle_tests {
             let num_threads = 3;
             let next_id = Arc::new(AtomicU64::new(0));
 
-            let guard = TelemetryCore::builder()
-                .writer(AlwaysErroringWriter)
-                .build()
-                .unwrap();
+            let dir = tempfile::tempdir().unwrap();
+            let writer = DiskWriter::single_file(dir.path().join("trace.bin"))
+                .unwrap()
+                .fail_all_writes();
+            let guard = TelemetryCore::builder().writer(writer).build().unwrap();
             guard.enable();
             let handle = guard.handle();
 

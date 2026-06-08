@@ -4,7 +4,8 @@
 
 mod common;
 
-use common::{BytesCapturingWriter, decode_all};
+use common::{CAPTURE_BUFFER_SIZE, capture_processor, decode_all};
+use dial9_tokio_telemetry::telemetry::InMemoryWriter;
 use dial9_tokio_telemetry::telemetry::analysis_events::{CpuSampleSource, Dial9Event, WorkerId};
 
 #[test]
@@ -13,7 +14,7 @@ fn sched_events_capture_context_switches() {
     use dial9_tokio_telemetry::telemetry::cpu_profile::SchedEventConfig;
     use std::time::Duration;
 
-    let (writer, batches) = BytesCapturingWriter::new();
+    let (capture, batches) = capture_processor();
 
     let num_workers = 2u64;
     let mut builder = tokio::runtime::Builder::new_multi_thread();
@@ -21,7 +22,8 @@ fn sched_events_capture_context_switches() {
 
     let (runtime, guard) = TracedRuntime::builder()
         .with_sched_events(SchedEventConfig::default())
-        .build_and_start(builder, writer)
+        .with_custom_pipeline(|p| p.pipe(capture))
+        .build_and_start(builder, InMemoryWriter::new(CAPTURE_BUFFER_SIZE).unwrap())
         .unwrap();
 
     runtime.block_on(async {
@@ -38,7 +40,9 @@ fn sched_events_capture_context_switches() {
     });
 
     drop(runtime);
-    drop(guard);
+    guard
+        .graceful_shutdown(std::time::Duration::from_secs(1))
+        .expect("clean shutdown");
 
     let b = batches.lock().unwrap();
     let events: Vec<Dial9Event> = decode_all(&b);
@@ -73,7 +77,7 @@ fn sched_events_sampling_reduces_count() {
     use std::time::Duration;
 
     let count_sched_samples = |interval: Option<u64>| -> usize {
-        let (writer, batches) = BytesCapturingWriter::new();
+        let (capture, batches) = capture_processor();
 
         let num_workers = 2;
         let mut builder = tokio::runtime::Builder::new_multi_thread();
@@ -86,7 +90,8 @@ fn sched_events_sampling_reduces_count() {
 
         let (runtime, guard) = TracedRuntime::builder()
             .with_sched_events(config)
-            .build_and_start(builder, writer)
+            .with_custom_pipeline(|p| p.pipe(capture))
+            .build_and_start(builder, InMemoryWriter::new(CAPTURE_BUFFER_SIZE).unwrap())
             .unwrap();
 
         runtime.block_on(async {
@@ -106,7 +111,9 @@ fn sched_events_sampling_reduces_count() {
         });
 
         drop(runtime);
-        drop(guard);
+        guard
+            .graceful_shutdown(std::time::Duration::from_secs(1))
+            .expect("clean shutdown");
 
         let b = batches.lock().unwrap();
         let events: Vec<Dial9Event> = decode_all(&b);

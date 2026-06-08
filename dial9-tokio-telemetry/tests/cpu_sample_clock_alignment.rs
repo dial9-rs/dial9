@@ -16,7 +16,8 @@
 
 mod common;
 
-use common::{BytesCapturingWriter, decode_all};
+use common::{CAPTURE_BUFFER_SIZE, capture_processor, decode_all};
+use dial9_tokio_telemetry::telemetry::InMemoryWriter;
 use dial9_tokio_telemetry::telemetry::analysis_events::{CpuSampleSource, Dial9Event, WorkerId};
 
 #[test]
@@ -28,7 +29,7 @@ fn cpu_sample_timestamps_align_with_wall_clock() {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
-    let (writer, batches) = BytesCapturingWriter::new();
+    let (capture, batches) = capture_processor();
 
     let num_workers = 2u64;
     let mut builder = tokio::runtime::Builder::new_multi_thread();
@@ -36,7 +37,8 @@ fn cpu_sample_timestamps_align_with_wall_clock() {
 
     let (runtime, guard) = TracedRuntime::builder()
         .with_cpu_profiling(CpuProfilingConfig::default().frequency_hz(999))
-        .build_and_start(builder, writer)
+        .with_custom_pipeline(|p| p.pipe(capture))
+        .build_and_start(builder, InMemoryWriter::new(CAPTURE_BUFFER_SIZE).unwrap())
         .unwrap();
 
     // All timestamps are now absolute CLOCK_MONOTONIC nanoseconds.
@@ -64,7 +66,9 @@ fn cpu_sample_timestamps_align_with_wall_clock() {
     });
 
     drop(runtime);
-    drop(guard);
+    guard
+        .graceful_shutdown(std::time::Duration::from_secs(1))
+        .expect("clean shutdown");
 
     let b = batches.lock().unwrap();
     let events: Vec<Dial9Event> = decode_all(&b);
@@ -250,7 +254,7 @@ fn thread_name_attribution_for_external_and_blocking_threads() {
     use dial9_tokio_telemetry::telemetry::cpu_profile::CpuProfilingConfig;
     use std::time::Duration;
 
-    let (writer, batches) = BytesCapturingWriter::new();
+    let (capture, batches) = capture_processor();
 
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder
@@ -260,7 +264,8 @@ fn thread_name_attribution_for_external_and_blocking_threads() {
 
     let (runtime, guard) = TracedRuntime::builder()
         .with_cpu_profiling(CpuProfilingConfig::default().frequency_hz(999))
-        .build_and_start(builder, writer)
+        .with_custom_pipeline(|p| p.pipe(capture))
+        .build_and_start(builder, InMemoryWriter::new(CAPTURE_BUFFER_SIZE).unwrap())
         .unwrap();
 
     // ── std::thread with a known name — exits before flush ───────────────
@@ -290,7 +295,9 @@ fn thread_name_attribution_for_external_and_blocking_threads() {
     });
 
     drop(runtime);
-    guard.graceful_shutdown(Duration::from_secs(1)).unwrap();
+    guard
+        .graceful_shutdown(Duration::from_secs(1))
+        .expect("clean shutdown");
 
     let b = batches.lock().unwrap();
     let events: Vec<Dial9Event> = decode_all(&b);

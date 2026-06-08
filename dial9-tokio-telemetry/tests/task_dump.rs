@@ -2,8 +2,8 @@
 
 mod common;
 
-use common::{BytesCapturingWriter, decode_all};
-use dial9_tokio_telemetry::telemetry::{TaskDumpConfig, TracedRuntime};
+use common::{CAPTURE_BUFFER_SIZE, capture_processor, decode_all};
+use dial9_tokio_telemetry::telemetry::{InMemoryWriter, TaskDumpConfig, TracedRuntime};
 use serde::Deserialize;
 use std::time::Duration;
 use tokio::task::JoinSet;
@@ -32,14 +32,15 @@ enum DumpEvent {
 /// produce at least one `TaskDump` event.
 #[test]
 fn task_dump_emitted_for_long_sleep() {
-    let (writer, batches) = BytesCapturingWriter::new();
+    let (capture, batches) = capture_processor();
 
     let mut builder = tokio::runtime::Builder::new_current_thread();
     builder.enable_all();
     let (runtime, guard) = TracedRuntime::builder()
         .with_task_tracking(true)
         .with_task_dumps(TaskDumpConfig::builder().rng_seed(42).build())
-        .build_and_start(builder, writer)
+        .with_custom_pipeline(|p| p.pipe(capture))
+        .build_and_start(builder, InMemoryWriter::new(CAPTURE_BUFFER_SIZE).unwrap())
         .unwrap();
 
     let handle = guard.handle();
@@ -52,7 +53,9 @@ fn task_dump_emitted_for_long_sleep() {
     });
 
     drop(runtime);
-    drop(guard);
+    guard
+        .graceful_shutdown(std::time::Duration::from_secs(1))
+        .expect("clean shutdown");
 
     let b = batches.lock().unwrap();
     let events: Vec<DumpEvent> = decode_all(&b);
@@ -72,7 +75,7 @@ fn task_dump_emitted_for_long_sleep() {
 /// A task whose idles are all below threshold should produce zero dumps.
 #[test]
 fn no_task_dump_for_short_sleep() {
-    let (writer, batches) = BytesCapturingWriter::new();
+    let (capture, batches) = capture_processor();
 
     let mut builder = tokio::runtime::Builder::new_current_thread();
     builder.enable_all();
@@ -84,7 +87,8 @@ fn no_task_dump_for_short_sleep() {
                 .rng_seed(42)
                 .build(),
         )
-        .build_and_start(builder, writer)
+        .with_custom_pipeline(|p| p.pipe(capture))
+        .build_and_start(builder, InMemoryWriter::new(CAPTURE_BUFFER_SIZE).unwrap())
         .unwrap();
 
     let handle = guard.handle();
@@ -113,7 +117,7 @@ fn no_task_dump_for_short_sleep() {
 #[test]
 fn task_dump_does_not_produce_extra_events() {
     fn run(enable: bool) -> (usize, usize, usize) {
-        let (writer, batches) = BytesCapturingWriter::new();
+        let (capture, batches) = capture_processor();
 
         let mut builder = tokio::runtime::Builder::new_current_thread();
         builder.enable_all();
@@ -121,7 +125,10 @@ fn task_dump_does_not_produce_extra_events() {
         if enable {
             tb = tb.with_task_dumps(TaskDumpConfig::builder().rng_seed(42).build());
         }
-        let (runtime, guard) = tb.build_and_start(builder, writer).unwrap();
+        let (runtime, guard) = tb
+            .with_custom_pipeline(|p| p.pipe(capture))
+            .build_and_start(builder, InMemoryWriter::new(CAPTURE_BUFFER_SIZE).unwrap())
+            .unwrap();
 
         let handle = guard.handle();
         runtime.block_on(async {
@@ -164,14 +171,15 @@ fn task_dump_does_not_produce_extra_events() {
 /// Custom spawn APIs should get the same task-dump instrumentation.
 #[test]
 fn spawn_with_joinset_emits_task_dump() {
-    let (writer, batches) = BytesCapturingWriter::new();
+    let (capture, batches) = capture_processor();
 
     let mut builder = tokio::runtime::Builder::new_current_thread();
     builder.enable_all();
     let (runtime, guard) = TracedRuntime::builder()
         .with_task_tracking(true)
         .with_task_dumps(TaskDumpConfig::builder().rng_seed(42).build())
-        .build_and_start(builder, writer)
+        .with_custom_pipeline(|p| p.pipe(capture))
+        .build_and_start(builder, InMemoryWriter::new(CAPTURE_BUFFER_SIZE).unwrap())
         .unwrap();
 
     let handle = guard.handle();
@@ -188,7 +196,9 @@ fn spawn_with_joinset_emits_task_dump() {
     });
 
     drop(runtime);
-    drop(guard);
+    guard
+        .graceful_shutdown(std::time::Duration::from_secs(1))
+        .expect("clean shutdown");
 
     let b = batches.lock().unwrap();
     let events: Vec<DumpEvent> = decode_all(&b);

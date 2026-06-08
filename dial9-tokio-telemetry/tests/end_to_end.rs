@@ -1,8 +1,8 @@
 mod common;
 
-use common::{BytesCapturingWriter, decode_all, decode_file};
+use common::{CAPTURE_BUFFER_SIZE, capture_processor, decode_all, decode_file};
 use dial9_tokio_telemetry::telemetry::analysis_events::{Dial9Event, WorkerId};
-use dial9_tokio_telemetry::telemetry::{DiskWriter, TracedRuntime};
+use dial9_tokio_telemetry::telemetry::{DiskWriter, InMemoryWriter, TracedRuntime};
 use std::time::Duration;
 
 /// Run a known workload under TracedRuntime, read the trace back, and verify
@@ -128,7 +128,7 @@ fn end_to_end_trace_matches_workload_and_metrics() {
 /// must appear in the trace.
 #[test]
 fn task_spawn_events_from_main_thread_are_captured() {
-    let (writer, batches) = BytesCapturingWriter::new();
+    let (capture, batches) = capture_processor();
 
     const N: usize = 10;
 
@@ -137,7 +137,8 @@ fn task_spawn_events_from_main_thread_are_captured() {
 
     let (runtime, guard) = TracedRuntime::builder()
         .with_task_tracking(true)
-        .build_and_start(builder, writer)
+        .with_custom_pipeline(|p| p.pipe(capture))
+        .build_and_start(builder, InMemoryWriter::new(CAPTURE_BUFFER_SIZE).unwrap())
         .unwrap();
 
     runtime.block_on(async {
@@ -151,7 +152,9 @@ fn task_spawn_events_from_main_thread_are_captured() {
     });
 
     drop(runtime);
-    drop(guard);
+    guard
+        .graceful_shutdown(std::time::Duration::from_secs(1))
+        .expect("clean shutdown");
 
     let b = batches.lock().unwrap();
     let events: Vec<Dial9Event> = decode_all(&b);
@@ -168,7 +171,7 @@ fn task_spawn_events_from_main_thread_are_captured() {
 
 #[test]
 fn task_terminate_events_are_captured() {
-    let (writer, batches) = BytesCapturingWriter::new();
+    let (capture, batches) = capture_processor();
 
     const N: usize = 10;
 
@@ -177,7 +180,8 @@ fn task_terminate_events_are_captured() {
 
     let (runtime, guard) = TracedRuntime::builder()
         .with_task_tracking(true)
-        .build_and_start(builder, writer)
+        .with_custom_pipeline(|p| p.pipe(capture))
+        .build_and_start(builder, InMemoryWriter::new(CAPTURE_BUFFER_SIZE).unwrap())
         .unwrap();
 
     runtime.block_on(async {
@@ -191,7 +195,9 @@ fn task_terminate_events_are_captured() {
     });
 
     drop(runtime);
-    drop(guard);
+    guard
+        .graceful_shutdown(std::time::Duration::from_secs(1))
+        .expect("clean shutdown");
 
     let b = batches.lock().unwrap();
     let events: Vec<Dial9Event> = decode_all(&b);

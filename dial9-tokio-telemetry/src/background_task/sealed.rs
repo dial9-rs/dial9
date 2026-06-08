@@ -318,7 +318,7 @@ mod tests {
     #[test]
     fn test_parse_segment_timestamp() {
         use crate::telemetry::format::WorkerParkEvent;
-        use crate::telemetry::writer::{DiskWriter, TraceWriter};
+        use crate::telemetry::writer::DiskWriter;
         use dial9_trace_format::encoder::Encoder;
         use tempfile::TempDir;
 
@@ -358,7 +358,7 @@ mod tests {
     #[test]
     fn test_creation_epoch_secs_uses_parsed_timestamp() {
         use crate::telemetry::format::WorkerParkEvent;
-        use crate::telemetry::writer::{DiskWriter, TraceWriter};
+        use crate::telemetry::writer::DiskWriter;
         use dial9_trace_format::encoder::Encoder;
         use tempfile::TempDir;
 
@@ -417,7 +417,7 @@ mod tests {
     #[test]
     fn test_parse_segment_timestamp_no_metadata() {
         use crate::telemetry::format::WorkerParkEvent;
-        use crate::telemetry::writer::{DiskWriter, TraceWriter};
+        use crate::telemetry::writer::DiskWriter;
         use dial9_trace_format::encoder::Encoder;
 
         let dir = TempDir::new().unwrap();

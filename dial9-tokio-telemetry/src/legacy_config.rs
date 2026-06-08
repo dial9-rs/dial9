@@ -16,29 +16,23 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::telemetry::recorder::{
-    HasTracePath, PipelineUnset, TelemetryGuard, TracedRuntime, TracedRuntimeBuilder,
+    BuildAndStartRuntime, HasTracePath, PipelineUnset, TelemetryGuard, TracedRuntime,
+    TracedRuntimeBuilder,
 };
-use crate::telemetry::writer::DiskWriter;
+use crate::telemetry::writer::{Disk, DiskWriter};
 
-/// Type-erased terminal step for a [`TracedRuntimeBuilder`]: hides the
-/// pipeline-mode marker `M` so [`Dial9Config`] can stay non-generic.
-trait BuildTracedRuntime: Send {
-    fn build_and_start(
-        self: Box<Self>,
-        tokio_builder: tokio::runtime::Builder,
-        writer: DiskWriter,
-    ) -> std::io::Result<(tokio::runtime::Runtime, TelemetryGuard)>;
-}
-
-impl<M: Send + 'static> BuildTracedRuntime for TracedRuntimeBuilder<HasTracePath, M> {
-    fn build_and_start(
-        self: Box<Self>,
-        tokio_builder: tokio::runtime::Builder,
-        writer: DiskWriter,
-    ) -> std::io::Result<(tokio::runtime::Runtime, TelemetryGuard)> {
-        TracedRuntimeBuilder::<HasTracePath, M>::build_and_start(*self, tokio_builder, writer)
-    }
-}
+/// Type-erased terminal step: a closure that builds and starts the runtime,
+/// capturing the configured builder at the point its pipeline-mode marker `M`
+/// is concrete (so `build_and_start_runtime` resolves). Takes the `DiskWriter`
+/// since it's constructed later, in [`Dial9Config::build`]. Keeps
+/// [`Dial9Config`] non-generic.
+type LegacyRuntimeBuilderFn = Box<
+    dyn FnOnce(
+            tokio::runtime::Builder,
+            DiskWriter,
+        ) -> std::io::Result<(tokio::runtime::Runtime, TelemetryGuard)>
+        + Send,
+>;
 
 // ---------------------------------------------------------------------------
 // Dial9Config — opaque value the macro consumes
@@ -59,7 +53,7 @@ enum Inner {
         max_total_size: u64,
         rotation_period: Option<Duration>,
         tokio_builder: tokio::runtime::Builder,
-        runtime_builder: Box<dyn BuildTracedRuntime>,
+        runtime_builder: LegacyRuntimeBuilderFn,
     },
     Disabled {
         tokio_builder: tokio::runtime::Builder,
@@ -87,7 +81,7 @@ impl Dial9Config {
                     .max_total_size(max_total_size)
                     .maybe_rotation_period(rotation_period)
                     .build()?;
-                let (runtime, guard) = runtime_builder.build_and_start(tokio_builder, writer)?;
+                let (runtime, guard) = runtime_builder(tokio_builder, writer)?;
                 Ok((runtime, Some(guard)))
             }
             Inner::Disabled { mut tokio_builder } => {
@@ -204,14 +198,20 @@ impl<M: Send + 'static> Dial9ConfigBuilder<M> {
     }
 
     /// Finalize into a [`Dial9Config`] ready for the macro.
-    pub fn build(self) -> Dial9Config {
+    pub fn build(self) -> Dial9Config
+    where
+        TracedRuntimeBuilder<HasTracePath, M>: BuildAndStartRuntime<Disk>,
+    {
+        // `M` is concrete here, so capture the typed builder into a closure
+        // whose `build_and_start_runtime` resolves to the right per-state method.
+        let rb = self.runtime_builder;
         Dial9Config(Inner::Enabled {
             base_path: self.base_path,
             max_file_size: self.max_file_size,
             max_total_size: self.max_total_size,
             rotation_period: self.rotation_period,
             tokio_builder: self.tokio_builder,
-            runtime_builder: Box::new(self.runtime_builder),
+            runtime_builder: Box::new(move |tk, writer| rb.build_and_start_runtime(tk, writer)),
         })
     }
 }

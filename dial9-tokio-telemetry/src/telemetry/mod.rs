@@ -33,16 +33,14 @@ pub use format::{
 };
 pub use process_resource_usage::ProcessResourceUsageConfig;
 pub use recorder::{
-    HasTracePath, NoTracePath, PipelineCustom, PipelineS3, PipelineUnset, RuntimeTelemetryHandle,
-    TelemetryCore, TelemetryCoreBuilder, TelemetryGuard, TelemetryHandle, TelemetryRuntimeError,
-    TokioHooks, TraceRuntimeCoreBuilder, TracedRuntime, TracedRuntimeBuilder, current_worker_id,
-    spawn,
+    BuildAndStartRuntime, HasTracePath, NoTracePath, PipelineCustom, PipelineS3, PipelineUnset,
+    RuntimeTelemetryHandle, TelemetryCore, TelemetryCoreBuilder, TelemetryGuard, TelemetryHandle,
+    TelemetryRuntimeError, TokioHooks, TraceRuntimeCoreBuilder, TracedRuntime,
+    TracedRuntimeBuilder, current_worker_id, spawn,
 };
 pub use task_dump_config::TaskDumpConfig;
 pub use task_metadata::{TaskId, UNKNOWN_TASK_ID};
-pub use writer::{
-    Disk, DiskWriter, InMemoryWriter, Memory, NullWriter, SegmentWriter, TraceWriter, WriterMode,
-};
+pub use writer::{Disk, DiskWriter, InMemoryWriter, Memory, SegmentWriter, WriterMode};
 
 /// Record a custom event into the trace.
 ///

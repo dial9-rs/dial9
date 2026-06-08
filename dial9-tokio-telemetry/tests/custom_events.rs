@@ -1,7 +1,9 @@
 mod common;
 
-use common::BytesCapturingWriter;
-use dial9_tokio_telemetry::telemetry::{CustomEventsConfig, TelemetryCore, TracedRuntime};
+use common::{CAPTURE_BUFFER_SIZE, capture_processor};
+use dial9_tokio_telemetry::telemetry::{
+    CustomEventsConfig, InMemoryWriter, TelemetryCore, TracedRuntime,
+};
 use dial9_trace_format::TraceEvent;
 use dial9_trace_format::decoder::Decoder;
 
@@ -29,7 +31,7 @@ fn decode_queued_events(batches: &[Vec<u8>]) -> Vec<QueuedEvent> {
 
 #[test]
 fn traced_runtime_records_custom_events_callback_events() {
-    let (writer, batches) = BytesCapturingWriter::new();
+    let (capture, batches) = capture_processor();
     let (tx, rx) = std::sync::mpsc::channel();
     tx.send(QueuedEvent {
         timestamp_ns: 1,
@@ -46,11 +48,14 @@ fn traced_runtime_records_custom_events_callback_events() {
                 ctx.record_event(event);
             }
         })
-        .build_and_start_with_writer(builder, writer)
+        .with_custom_pipeline(|p| p.pipe(capture))
+        .build_and_start(builder, InMemoryWriter::new(CAPTURE_BUFFER_SIZE).unwrap())
         .unwrap();
 
     drop(runtime);
-    drop(guard);
+    guard
+        .graceful_shutdown(std::time::Duration::from_secs(1))
+        .expect("clean shutdown");
 
     let batches = batches.lock().unwrap();
     let events = decode_queued_events(&batches);
@@ -62,7 +67,7 @@ fn traced_runtime_records_custom_events_callback_events() {
 
 #[test]
 fn telemetry_core_attach_runtime_records_custom_events_callback_events() {
-    let (writer, batches) = BytesCapturingWriter::new();
+    let (capture, batches) = capture_processor();
     let (tx, rx) = std::sync::mpsc::channel();
     tx.send(QueuedEvent {
         timestamp_ns: 2,
@@ -71,7 +76,11 @@ fn telemetry_core_attach_runtime_records_custom_events_callback_events() {
     .unwrap();
     drop(tx);
 
-    let guard = TelemetryCore::builder().writer(writer).build().unwrap();
+    let guard = TelemetryCore::builder()
+        .writer(InMemoryWriter::new(CAPTURE_BUFFER_SIZE).unwrap())
+        .processors(vec![Box::new(capture)])
+        .build()
+        .unwrap();
     guard.enable();
 
     let mut builder = tokio::runtime::Builder::new_multi_thread();
@@ -87,7 +96,9 @@ fn telemetry_core_attach_runtime_records_custom_events_callback_events() {
         .unwrap();
 
     drop(runtime);
-    drop(guard);
+    guard
+        .graceful_shutdown(std::time::Duration::from_secs(1))
+        .expect("clean shutdown");
 
     let batches = batches.lock().unwrap();
     let events = decode_queued_events(&batches);
