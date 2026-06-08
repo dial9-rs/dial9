@@ -58,7 +58,6 @@ thread_local! {
 /// within one poll, or repeated allocations inside a tight loop.
 ///
 /// Used by:
-/// - the memory profiler hook ([`TimestampMode::ReusePollStart`]).
 /// - the task-dump idle/wake bookkeeping in [`crate::task_dumped`].
 pub(crate) fn poll_start_ts_monotonic() -> u64 {
     let raw = POLL_START_TS.with(|c| c.get()).map_or_else(

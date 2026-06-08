@@ -140,10 +140,9 @@ impl Source for MemoryProfileSource {
     fn flush(&mut self, ctx: &FlushContext<'_>) {
         // Merge-sort drain by timestamp. This produces a best-effort
         // timestamp-ordered stream. Ordering is not guaranteed to be perfect:
-        // - Multiple producers push concurrently, so queue order may not
-        //   match timestamp order.
-        // - TimestampMode::ReusePollStart can produce stale timestamps.
-        // For profiling purposes, approximate ordering is sufficient.
+        // multiple producers push concurrently, so queue order may not match
+        // timestamp order. For profiling purposes, approximate ordering is
+        // sufficient.
         //
         // Hold one peeked element from each queue and emit the older one.
         // `crossbeam_queue::ArrayQueue` has no peek API, so we pop into

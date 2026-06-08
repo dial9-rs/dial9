@@ -1,6 +1,6 @@
 //! `MemoryProfiler::install()` — the install-once entry point.
 
-use crate::memory_profiling::config::{MemoryProfilingConfig, TimestampMode};
+use crate::memory_profiling::config::MemoryProfilingConfig;
 use crate::memory_profiling::ring::RingBuffers;
 #[cfg(feature = "analysis")]
 use crate::memory_profiling::ring::{DEFAULT_MAX_FRAMES, RawAlloc};
@@ -21,16 +21,22 @@ pub(crate) type Liveset =
 ///
 /// Published via `OnceLock` exactly once per process. Never reclaimed
 /// because any thread's allocator hook may be reading this.
-#[allow(dead_code)]
 pub(crate) struct MemoryProfilerInner {
     pub(crate) unwinder: Unwinder,
-    /// Prevents `SharedState` from being dropped while the profiler is active.
+    /// Held to prevent `SharedState` from being dropped while the
+    /// profiler is active. Never read after construction; the value
+    /// matters, not its accesses.
+    #[expect(
+        dead_code,
+        reason = "lifetime hold for SharedState; the field's existence is the contract"
+    )]
     pub(crate) handle: TelemetryHandle,
     pub(crate) rings: Arc<RingBuffers>,
     pub(crate) sample_rate_bytes: u64,
-    pub(crate) track_liveset: bool,
     /// Producer-side liveset: maps allocation address → (size, timestamp_ns).
-    /// `None` when `track_liveset` is false, avoiding any overhead.
+    /// `None` when liveset tracking is disabled, avoiding any overhead.
+    /// Whether liveset tracking is on is determined by `liveset.is_some()`
+    /// — there is no separate boolean flag.
     ///
     /// **Why `Arc<HashIndex>`?** `scc::HashIndex` *is* `Clone`, but the impl
     /// is a *deep clone*: it iterates every entry and reinserts into a brand
@@ -55,7 +61,6 @@ pub(crate) struct MemoryProfilerInner {
     /// `max_liveset_entries` cap is tracked as a follow-up; see
     /// `docs/design/memory-profiling.md` §7.
     pub(crate) liveset: Option<Arc<Liveset>>,
-    pub(crate) timestamp_mode: TimestampMode,
     pub(crate) rng_seed: Option<u64>,
 }
 
@@ -183,9 +188,7 @@ impl MemoryProfiler {
             handle: handle.clone(),
             rings: Arc::clone(&rings),
             sample_rate_bytes: self.config.sample_rate_bytes(),
-            track_liveset: self.config.track_liveset(),
             liveset,
-            timestamp_mode: self.config.timestamp_mode(),
             rng_seed: self.config.rng_seed(),
         };
 
