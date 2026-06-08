@@ -84,7 +84,6 @@ function fmtRel(ns, minTs) { return fmtDur(ns - minTs); }
 /** Create an empty accumulator for multi-trace analysis. */
 function createAccumulator() {
   return {
-    files: [],
     workerIds: new Set(),
     minTs: Infinity, maxTs: -Infinity,
     eventCount: 0, cpuSampleCount: 0,
