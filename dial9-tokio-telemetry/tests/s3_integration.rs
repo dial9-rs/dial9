@@ -796,17 +796,28 @@ fn permanently_broken_s3_produces_failure_metrics() {
         .build_and_start(builder, writer)
         .unwrap();
 
-    // Generate enough events to seal at least one segment, then shut down.
+    let has_pipeline_metric = || {
+        inspector
+            .entries()
+            .iter()
+            .any(|e| e.metrics.contains_key("Failure") || e.metrics.contains_key("Success"))
+    };
+
+    // Generate enough events to seal segments, then poll until the worker has
+    // recorded a pipeline (Failure/Success) metric.
     runtime.block_on(async {
         for _ in 0..50 {
             tokio::spawn(async { tokio::task::yield_now().await });
         }
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !has_pipeline_metric() && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
     });
 
     drop(runtime);
     guard
-        .graceful_shutdown(std::time::Duration::from_secs(1))
+        .graceful_shutdown(std::time::Duration::from_secs(2))
         .expect("graceful shutdown");
 
     let entries = inspector.entries();
