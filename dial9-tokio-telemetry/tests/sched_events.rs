@@ -34,11 +34,10 @@ fn sched_events_capture_context_switches() {
         for h in handles {
             h.await.unwrap();
         }
-        tokio::time::sleep(Duration::from_millis(500)).await;
     });
 
     drop(runtime);
-    drop(guard);
+    guard.graceful_shutdown(Duration::from_secs(5)).unwrap();
 
     let b = batches.lock().unwrap();
     let events: Vec<Dial9Event> = decode_all(&b);
@@ -108,14 +107,13 @@ fn sched_events_sampling_reduces_count() {
         for h in handles {
             h.await.unwrap();
         }
-        tokio::time::sleep(Duration::from_millis(500)).await;
     });
 
     // Snapshot again while the worker threads are still alive.
     let after = common::snapshot_task_switches();
 
     drop(runtime);
-    drop(guard);
+    guard.graceful_shutdown(Duration::from_secs(5)).unwrap();
 
     let b = batches.lock().unwrap();
     let events: Vec<Dial9Event> = decode_all(&b);
