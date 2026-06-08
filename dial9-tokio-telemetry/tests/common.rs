@@ -98,7 +98,10 @@ pub fn snapshot_task_switches() -> std::collections::HashMap<u32, u64> {
         return map;
     };
     for entry in entries.flatten() {
-        if let Some(tid) = entry.file_name().to_str().and_then(|s| s.parse::<u32>().ok())
+        if let Some(tid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|s| s.parse::<u32>().ok())
             && let Some(count) = read_switch_count(tid)
         {
             map.insert(tid, count);
