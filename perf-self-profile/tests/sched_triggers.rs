@@ -137,34 +137,73 @@ fn captures_sleep_stack() {
     );
 }
 
+/// Total context switches for the calling thread, from `/proc/thread-self/status`
+/// (`voluntary_ctxt_switches` + `nonvoluntary_ctxt_switches`). This is the same
+/// quantity perf's `SwContextSwitches` event counts, so it is an independent
+/// kernel ground truth for the sampling ratio.
+fn thread_switch_count() -> u64 {
+    let status =
+        std::fs::read_to_string("/proc/thread-self/status").expect("read /proc/thread-self/status");
+    let mut total = 0u64;
+    for line in status.lines() {
+        if let Some(rest) = line
+            .strip_prefix("voluntary_ctxt_switches:")
+            .or_else(|| line.strip_prefix("nonvoluntary_ctxt_switches:"))
+        {
+            total += rest.trim().parse::<u64>().expect("parse switch count");
+        }
+    }
+    total
+}
+
+/// `Period(N)` must record ~1/N of the context switches that actually occur.
+///
+/// A previous version compared two independent runs, but their total switch
+/// counts vary, making the ratio flaky. Instead we run once and compare the
+/// recorded sample count against the kernel's own switch counter for this
+/// thread: both numbers come from the same run, so `records ≈ total / N` holds
+/// with only small boundary error.
 #[test]
 fn sampling_interval_controls_ratio() {
     unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 1) };
 
-    let run = |period: u64| -> usize {
-        let sampler = Arc::new(Mutex::new(
-            PerfSampler::new_per_thread(
-                SamplerConfig::default()
-                    .event_source(EventSource::SwContextSwitches)
-                    .include_kernel(false)
-                    .sampling(SamplingMode::Period(period)),
-            )
-            .expect("failed to create sampler"),
-        ));
-        sampler.lock().unwrap().track_current_thread().unwrap();
+    const PERIOD: u64 = 10;
 
-        for _ in 0..200 {
-            thread::sleep(std::time::Duration::from_millis(1));
-        }
-
-        let mut s = sampler.lock().unwrap();
-        s.drain_samples().len()
+    let mut sampler = match PerfSampler::new_per_thread(
+        SamplerConfig::default()
+            .event_source(EventSource::SwContextSwitches)
+            .include_kernel(false)
+            .sampling(SamplingMode::Period(PERIOD)),
+    ) {
+        Ok(s) => s,
+        // perf_event_open blocked (e.g. restricted CI); nothing to verify.
+        Err(e) if e.kind() == std::io::ErrorKind::Unsupported => return,
+        Err(e) => panic!("failed to create sampler: {e}"),
     };
+    sampler.track_current_thread().unwrap();
 
-    let n_all = run(1);
-    let n_sampled = run(10);
-    let ratio = n_all / n_sampled.max(1);
-    assert_eq!(ratio, 10, "n_all={n_all}, n_sampled={n_sampled}");
+    let before = thread_switch_count();
+    for _ in 0..400 {
+        thread::sleep(std::time::Duration::from_millis(1));
+    }
+    sampler.disable();
+    let after = thread_switch_count();
+
+    let records = sampler.drain_samples().len();
+    let total = after - before;
+
+    assert!(
+        total > 100,
+        "workload produced too few context switches to test ({total})"
+    );
+
+    let expected = total as f64 / PERIOD as f64;
+    let ratio = records as f64 / expected;
+    assert!(
+        (0.8..=1.2).contains(&ratio),
+        "expected records ~ total/{PERIOD}; records={records}, total={total}, \
+         expected~{expected:.0}, ratio={ratio:.2}"
+    );
 }
 
 #[test]
