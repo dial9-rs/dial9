@@ -12,7 +12,9 @@ The trigger controls **when** the pipeline runs, not **what** it does. The
 same `SegmentProcessor` chain that processes segments continuously today
 runs on demand under the new schedule. The wire-up is one new builder
 method (`with_trigger(rx)`), one cloneable control type, and a `dump-id`
-metadata convention the S3 uploader already knows how to read.
+metadata convention the S3 uploader already knows how to read. Trace files
+stay in their normal location; the S3 stage additionally writes a small
+per-dump manifest under `dumps/` so a dump is discoverable in a single GET.
 
 ## Wiring a trigger
 
@@ -84,12 +86,47 @@ control
 
 ## Finding a dump in S3
 
-Dumped objects land in the **same S3 location** as continuous-mode uploads,
-under today's key layout. The only difference is a `dump-id` value attached
-as S3 user metadata on every object in the dump (the ULID minted at trigger
-time, also returned on the receipt). To retrieve a dump's objects, filter on
-that tag. There is no separate `dumps/` prefix and no manifest file; the
-trace files are exactly where they would be during normal operation.
+Dumped trace objects land in the **same S3 location** as continuous-mode
+uploads, under today's key layout, each carrying a `dump-id` value as S3 user
+metadata (the ULID minted at trigger time, also returned on the receipt). The
+trace files are never relocated.
+
+On top of that, the S3 stage writes one **manifest** object per dump at:
+
+```
+{prefix}/dumps/{dump_id}.json
+```
+
+The manifest is the index for the dump. It lists the keys of every trace object
+the dump produced, plus the dump's identity (`dump_id`, `triggered_at`,
+`time_range`, `segments_processed`, and any caller `with_metadata(...)` pairs):
+
+```json
+{
+  "dump_id": "01J9Z...",
+  "triggered_at": "2026-06-09T14:30:42Z",
+  "time_range": ["2026-06-09T14:25:42Z", "2026-06-09T14:30:42Z"],
+  "segments_processed": 12,
+  "metadata": { "reason": "idle-ratio-drop" },
+  "segments": [
+    "traces/2026-06-09/1425/checkout-api/i-0abc/1741384200-1.bin.gz",
+    "traces/2026-06-09/1430/checkout-api/i-0abc/1741384542-3.bin.gz"
+  ]
+}
+```
+
+Because `dump_id` is a ULID, discovery is two cheap steps:
+
+- `ListObjectsV2 prefix={prefix}/dumps/` returns every dump's manifest, sorted
+  by time (ULIDs are time-sortable). No bucket traversal, no `HeadObject` fan-out.
+- `GetObject {prefix}/dumps/{dump_id}.json` returns one dump's full set of trace
+  keys, ready to fetch.
+
+This keeps the trace files where an operator would expect them during normal
+operation (continuous-mode tooling and lifecycle policies apply unchanged) while
+still giving "which files belong to this dump?" a one-GET answer. The original
+design relocated dump objects under a `dumps/{dump_id}/` prefix; this manifest
+approach points at the files instead of moving them.
 
 ## Best-effort semantics
 
@@ -134,7 +171,10 @@ trace files, call `with_segment_metadata(...)` explicitly.
 writer's directory. The receipt still carries `dump_id`, and each segment's
 metadata carries `dump_id` plus whatever was passed to `.with_metadata(...)`;
 if you want dump-aware filenames on disk, insert a thin processor before
-`write_back()` that reads metadata and renames.
+`write_back()` that reads metadata and renames. There is no manifest in this
+mode: the manifest is written by the `s3()` stage, so pipelines that do not end
+at S3 get only the per-segment `dump_id` metadata (`receipt.manifest_key` is
+`None`).
 
 ```rust
 let _guard = TracedRuntime::builder()
@@ -161,6 +201,7 @@ log what landed:
 | `segments_processed` | Count of segments that made it through the pipeline.                                                          |
 | `finished_at`        | When the last segment finished the pipeline.                                                                  |
 | `time_range`         | Actual covered span. May be shorter than the requested look-back if the ring did not retain that much history. |
+| `manifest_key`       | `Some({prefix}/dumps/{dump_id}.json)` when the pipeline ends at S3; `None` otherwise (no manifest off S3).     |
 
 The trigger time itself is embedded in `dump_id` and can be extracted via
 `DumpId`.
@@ -173,19 +214,24 @@ id) pass them via `.with_metadata(...)`; pipeline stages decide what to do
 with them (the S3 stage surfaces them as additional user metadata, a custom
 redactor can read them, etc.).
 
-| Field                        | Where it lives                                                |
-| ---------------------------- | ------------------------------------------------------------- |
-| `dump_id`                    | `dump-id` S3 user metadata on every object in the dump        |
-| `triggered_at`               | Embedded in the ULID (`DumpId` can extract)                   |
-| `service`, `boot_id`, `host` | Existing per-segment S3 user metadata, unchanged              |
-| `segment.index`              | Key path; also `segment-index` S3 user metadata               |
-| `segment.size_bytes`         | S3 object `ContentLength` (free)                              |
-| `segment.start_epoch`        | Key path; also `start-time` S3 user metadata                  |
-| Caller-supplied correlation  | `.with_metadata(...)`, stamped onto `SegmentData::metadata`   |
+| Field                        | Where it lives                                                          |
+| ---------------------------- | ----------------------------------------------------------------------- |
+| `dump_id`                    | `dump-id` S3 user metadata on every object; also the manifest filename  |
+| `triggered_at`               | Embedded in the ULID (`DumpId` can extract); also in the manifest       |
+| `time_range`                 | Manifest field; also `receipt.time_range`                               |
+| `segments` (object keys)     | Manifest `segments` array                                               |
+| `service`, `boot_id`, `host` | Existing per-segment S3 user metadata, unchanged                        |
+| `segment.index`              | Key path; also `segment-index` S3 user metadata                         |
+| `segment.size_bytes`         | S3 object `ContentLength` (free)                                        |
+| `segment.start_epoch`        | Key path; also `start-time` S3 user metadata                            |
+| Caller-supplied correlation  | `.with_metadata(...)`, stamped onto `SegmentData::metadata`; also in the manifest `metadata` |
+| Manifest                     | `{prefix}/dumps/{dump_id}.json`; also `receipt.manifest_key`            |
 
-Completion is signalled in-process by `DumpReceipt` resolving. There is no
-library-written completion marker in S3; applications that need a
-cross-process signal publish it through whatever channel they already use
+Completion is signalled in-process by `DumpReceipt` resolving. For S3
+pipelines the manifest doubles as the cross-process signal: its presence at
+`{prefix}/dumps/{dump_id}.json` means the dump finished writing and lists what
+landed. Off-S3 pipelines have no manifest, so applications that need a
+cross-process signal there publish it through whatever channel they already use
 (incidents-table row, Slack message, etc.).
 
 ## What the library does for you
@@ -206,12 +252,23 @@ keys like `epoch_secs` and `content_encoding`. The S3 uploader checks
 `metadata.get("dump_id")`:
 
 - Present: attach `dump-id` as per-object S3 user metadata. The key layout is
-  today's continuous-mode layout, unchanged.
+  today's continuous-mode layout, unchanged. The uploader also records the key
+  it just wrote against this `dump_id` so it can build the manifest later.
 - Absent (continuous mode): emit today's continuous-mode object, unchanged.
 
-Nothing in the worker is S3-specific. The trigger feature stamps metadata;
-the S3 uploader reads it. A custom redactor or a `write_back()` stage sees the
-same metadata and can react however it wants.
+When the dump completes, the S3 stage writes the manifest. The worker already
+tracks dump completion (it is what resolves `DumpReceipt` once the last captured
+segment finishes the pipeline); on completion it signals the terminal stage to
+finalize, and the S3 stage PUTs `{prefix}/dumps/{dump_id}.json` from the keys it
+accumulated. The exact finalize-hook signature is an implementation detail for
+the code PR; the contract is "worker says the dump is done, the S3 stage flushes
+its manifest."
+
+Nothing in the worker is S3-specific. The trigger feature stamps metadata and
+signals completion; the S3 stage owns both the per-object `dump-id` tag and the
+manifest. A custom redactor or a `write_back()` stage sees the same metadata and
+the same completion signal and can react however it wants (off-S3 stages simply
+write no manifest).
 
 ## Worker
 
@@ -302,6 +359,9 @@ pub struct DumpReceipt {
     pub segments_processed: usize,
     pub finished_at: SystemTime,
     pub time_range: (SystemTime, SystemTime),
+    /// `Some({prefix}/dumps/{dump_id}.json)` when the pipeline ends at S3;
+    /// `None` for off-S3 terminals (no manifest is written there).
+    pub manifest_key: Option<String>,
 }
 
 #[non_exhaustive]
@@ -321,8 +381,10 @@ machinery.
 
 Implementation note on the S3 uploader: `object_key` in
 `background_task/s3.rs` (around line 150) is unchanged; both modes produce
-the same key layout. The only dump-specific behavior is that, when
-`metadata.get("dump_id")` is present, the uploader attaches `dump-id` as
-per-object S3 user metadata. The uploader knows nothing about the trigger
-feature directly; it reads metadata, and the trigger feature is the source of
-that metadata. `with_s3_uploader` itself is untouched.
+the same key layout for trace objects. The dump-specific behavior is additive:
+when `metadata.get("dump_id")` is present, the uploader attaches `dump-id` as
+per-object S3 user metadata and records the written key against the `dump_id`;
+on the worker's end-of-dump signal it PUTs `{prefix}/dumps/{dump_id}.json`. The
+uploader knows nothing about the trigger feature directly; it reads metadata and
+reacts to a completion signal, and the trigger feature is the source of both.
+`with_s3_uploader` itself is untouched.
