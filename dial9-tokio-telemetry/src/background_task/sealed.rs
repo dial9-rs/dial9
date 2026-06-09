@@ -5,6 +5,8 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::primitives::fs;
+
 /// A sealed trace segment ready for processing (disk-backed).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SealedSegment {
@@ -95,7 +97,7 @@ pub(crate) fn creation_epoch_secs(data: &[u8], path: &Path) -> (u64, bool) {
             });
         }
     }
-    let secs = std::fs::metadata(path)
+    let secs = fs::metadata(path)
         .and_then(|m| m.modified())
         .ok()
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
@@ -206,7 +208,7 @@ impl std::fmt::Display for ParseTimestampError {
 /// that don't match the expected naming pattern.
 pub(crate) fn find_sealed_segments(dir: &Path, stem: &str) -> std::io::Result<Vec<SealedSegment>> {
     let mut segments = Vec::new();
-    for entry in std::fs::read_dir(dir)? {
+    for entry in fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
         if path.extension().is_none_or(|ext| ext != "bin") {

@@ -16,6 +16,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::background_task::payload::Payload;
 use crate::background_task::sealed::{MemorySegment, SealedSegment, SegmentRef};
+use crate::primitives::fs;
 use crate::primitives::sync::Arc;
 use crate::primitives::sync::atomic::{AtomicU64, Ordering};
 
@@ -97,7 +98,7 @@ impl Drop for SegmentAccounting {
 
 /// Active-segment write handle.
 pub(crate) enum ActiveHandle {
-    Disk(std::fs::File),
+    Disk(fs::File),
     Mem(MemActiveWriter),
 }
 
@@ -181,7 +182,7 @@ impl TakenSegment {
                         "TakenSegment with no payload and no disk path",
                     ));
                 };
-                let bytes = std::fs::read(path)?;
+                let bytes = fs::read(path)?;
                 Ok((self.seg_ref, Payload::from_vec(bytes), None))
             }
         }

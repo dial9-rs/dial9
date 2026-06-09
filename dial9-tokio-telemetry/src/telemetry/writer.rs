@@ -2,6 +2,7 @@ use dial9_trace_format::encoder::{Encoder, RawEncoder};
 
 use crate::background_task::fs::{ActiveHandle, Fs, RemoveReason};
 use crate::background_task::sealed::SegmentRef;
+use crate::primitives::fs;
 use crate::rate_limit::rate_limited;
 use crate::telemetry::collector::Batch;
 use crate::telemetry::events::clock_pair;
@@ -162,11 +163,6 @@ pub struct SegmentWriter<Mode: WriterMode = Disk> {
     active_path: PathBuf,
     state: WriterState,
     next_index: u32,
-    /// Test-only error injection: when set, the fallible methods return
-    /// `PermissionDenied` and `should_drain` always fires. Set via
-    /// [`fail_all_writes`](Self::fail_all_writes).
-    #[cfg(test)]
-    fail_writes: bool,
     /// Metadata written at the start of each segment. Updated by the flush
     /// thread to include runtime names alongside any user-provided entries.
     segment_metadata: SegmentMetadata,
@@ -269,7 +265,7 @@ impl SegmentWriter<Disk> {
         if let Some(parent) = base_path.parent()
             && !parent.as_os_str().is_empty()
         {
-            std::fs::create_dir_all(parent)?;
+            fs::create_dir_all(parent)?;
         }
         let fs = Fs::new_disk(&base_path);
         let discovered = fs.discover_existing()?;
@@ -293,8 +289,6 @@ impl SegmentWriter<Disk> {
             active_path: first_path,
             state,
             next_index,
-            #[cfg(test)]
-            fail_writes: false,
             segment_metadata,
             dropped_events: 0,
             has_real_events: false,
@@ -334,8 +328,6 @@ impl SegmentWriter<Disk> {
             active_path,
             state,
             next_index: 1,
-            #[cfg(test)]
-            fail_writes: false,
             segment_metadata: SegmentMetadata::default(),
             dropped_events: 0,
             has_real_events: false,
@@ -463,8 +455,6 @@ impl SegmentWriter<Memory> {
             active_path,
             state,
             next_index: 1,
-            #[cfg(test)]
-            fail_writes: false,
             segment_metadata,
             dropped_events: 0,
             has_real_events: false,
@@ -681,34 +671,12 @@ impl<M: WriterMode> SegmentWriter<M> {
 }
 
 impl<M: WriterMode> SegmentWriter<M> {
-    /// Test-only: make every fallible write return `PermissionDenied` and
-    /// force `should_drain` to fire. Used by the shuttle error-injection test.
-    #[cfg(test)]
-    #[cfg_attr(not(shuttle), allow(dead_code))]
-    pub(crate) fn fail_all_writes(mut self) -> Self {
-        self.fail_writes = true;
-        self
-    }
-
-    /// Test-only error-injection point. Returns `PermissionDenied` once
-    /// [`fail_all_writes`](Self::fail_all_writes) armed it. Called at the top of
-    /// every fallible write.
-    #[cfg(test)]
-    fn fail_point(&self) -> std::io::Result<()> {
-        if self.fail_writes {
-            return Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
-        }
-        Ok(())
-    }
-
     pub(crate) fn fs_handle(&self) -> Option<Arc<Fs>> {
         Some(Arc::clone(&self.fs))
     }
 
     /// Flush buffered data to the underlying storage.
     pub fn flush(&mut self) -> std::io::Result<()> {
-        #[cfg(test)]
-        self.fail_point()?;
         if let WriterState::Active { writer: raw, .. } = &mut self.state {
             raw.flush()?;
         }
@@ -730,22 +698,14 @@ impl<M: WriterMode> SegmentWriter<M> {
     }
 
     pub(crate) fn write_current_segment_metadata(&mut self) -> std::io::Result<()> {
-        #[cfg(test)]
-        self.fail_point()?;
         self.write_metadata_if_needed()
     }
 
     pub(crate) fn should_drain(&self) -> bool {
-        #[cfg(test)]
-        if self.fail_writes {
-            return true;
-        }
         self.has_real_events && time_source().instant().as_std() >= self.next_drain_time
     }
 
     pub(crate) fn drained(&mut self) -> std::io::Result<bool> {
-        #[cfg(test)]
-        self.fail_point()?;
         if !self.has_real_events {
             return Ok(false);
         }
@@ -765,8 +725,6 @@ impl<M: WriterMode> SegmentWriter<M> {
     /// Finalize the writer: flush, seal the active segment, and prevent further
     /// writes. Terminal — the writer is inert afterward.
     pub fn finalize(&mut self) -> std::io::Result<()> {
-        #[cfg(test)]
-        self.fail_point()?;
         if matches!(self.state, WriterState::Finished) {
             rate_limited!(Duration::from_secs(60), {
                 tracing::warn!("writer is already closed.");
@@ -842,8 +800,6 @@ impl<M: WriterMode> SegmentWriter<M> {
 
     /// Transcode an encoded batch into the active segment.
     pub fn write_encoded_batch(&mut self, batch: &Batch) -> std::io::Result<()> {
-        #[cfg(test)]
-        self.fail_point()?;
         self.write_metadata_if_needed()?;
         let WriterState::Active { writer: raw, .. } = &mut self.state else {
             self.dropped_events += batch.event_count as usize;

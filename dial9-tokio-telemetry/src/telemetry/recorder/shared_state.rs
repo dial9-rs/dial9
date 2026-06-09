@@ -483,6 +483,7 @@ mod tests {
 
 #[cfg(all(test, shuttle))]
 mod shuttle_tests {
+    use crate::primitives::fs;
     use crate::primitives::sync::atomic::{AtomicU64, Ordering};
     use crate::primitives::sync::{Arc, Mutex};
     use crate::telemetry::recorder::TelemetryCore;
@@ -701,11 +702,9 @@ mod shuttle_tests {
 
     // ── Error injection ─────────────────────────────────────────────────
     //
-    // The companion to the round-trip pipeline test: a `DiskWriter` with
-    // `.fail_all_writes()` set makes every fallible method return an
-    // `io::Error` and `should_drain` always fire. This exercises the error
-    // paths in the flush loop and lets us assert that rate limiting bounds log
-    // output even when every operation fails.
+    // Companion to the round-trip pipeline test. `primitives::fs` is armed
+    // with a fault policy so the writer's real I/O points (write/flush/rename/
+    // remove) fail, exercising the flush loop's error paths.
 
     use std::sync::Arc as StdArc;
     use std::sync::atomic::{AtomicU64 as StdAtomicU64, Ordering as StdOrdering};
@@ -753,7 +752,9 @@ mod shuttle_tests {
 
     // ── Erroring-pipeline test body ─────────────────────────────────────
 
-    fn test_telemetry_core_erroring_pipeline() {
+    /// Drive the pipeline with the fs armed to `fault`, returning the
+    /// number of WARN/ERROR events the flush loop emitted.
+    fn run_erroring_pipeline(fault: fs::FaultPolicy) -> u64 {
         let _ts_guard =
             metrique_timesource::set_time_source(metrique_timesource::TimeSource::custom(
                 metrique_timesource::fakes::StaticTimeSource::at_time(std::time::UNIX_EPOCH),
@@ -769,9 +770,8 @@ mod shuttle_tests {
             let next_id = Arc::new(AtomicU64::new(0));
 
             let dir = tempfile::tempdir().unwrap();
-            let writer = DiskWriter::single_file(dir.path().join("trace.bin"))
-                .unwrap()
-                .fail_all_writes();
+            let writer = DiskWriter::single_file(dir.path().join("trace.bin")).unwrap();
+            let _fault = fs::set_fault(fault);
             let guard = TelemetryCore::builder().writer(writer).build().unwrap();
             guard.enable();
             let handle = guard.handle();
@@ -810,12 +810,35 @@ mod shuttle_tests {
             drop(guard);
         });
 
-        // Bound the warn+error count by the number of distinct rate-limited
-        // call sites. There are roughly 6 sites that might fire on every
-        // shuttle run; allow some slack but cap firmly below "one per loop
-        // iteration". If a `rate_limited!` wrapper is removed from the flush
-        // loop, this number explodes.
-        let total = warn_count.load(StdOrdering::Relaxed);
+        warn_count.load(StdOrdering::Relaxed)
+    }
+
+    /// The fault is armed on the test thread but read on the flush thread,
+    /// this proves it crosses that boundary.
+    fn fs_fault_visible_across_threads() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fault_probe");
+        std::fs::write(&path, b"x").unwrap();
+
+        let _fault = fs::set_fault(fs::FaultPolicy::FailAll);
+        let observed_fault =
+            crate::primitives::thread::spawn(move || fs::remove_file(&path).is_err())
+                .join()
+                .unwrap();
+
+        assert!(
+            observed_fault,
+            "fault armed on the test thread was not observed on a spawned thread"
+        );
+    }
+
+    #[test]
+    fn determinism_check_fs_fault_visible() {
+        shuttle::check_uncontrolled_nondeterminism(fs_fault_visible_across_threads, 100);
+    }
+
+    fn test_telemetry_core_erroring_pipeline() {
+        let total = run_erroring_pipeline(fs::FaultPolicy::FailAll);
         assert!(
             total <= 10,
             "rate limiting failed under persistent writer errors: \
@@ -832,5 +855,27 @@ mod shuttle_tests {
     #[test]
     fn pct_erroring_pipeline() {
         shuttle::check_pct(test_telemetry_core_erroring_pipeline, 10000, 3);
+    }
+
+    fn test_telemetry_core_probabilistic_fs_faults() {
+        let total = run_erroring_pipeline(fs::FaultPolicy::FailProb(0.5));
+        assert!(
+            total <= 10,
+            "rate limiting failed under probabilistic fs faults: observed {total} \
+             WARN/ERROR events, expected <= 10."
+        );
+    }
+
+    #[test]
+    fn determinism_check_probabilistic_fs_faults() {
+        shuttle::check_uncontrolled_nondeterminism(
+            test_telemetry_core_probabilistic_fs_faults,
+            10000,
+        );
+    }
+
+    #[test]
+    fn pct_probabilistic_fs_faults() {
+        shuttle::check_pct(test_telemetry_core_probabilistic_fs_faults, 10000, 3);
     }
 }

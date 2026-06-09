@@ -12,6 +12,7 @@ use std::time::Duration;
 use crate::background_task::sealed::{
     SealedSegment, SegmentArtifact, SegmentRef, find_sealed_segments, parse_segment_artifact,
 };
+use crate::primitives::fs;
 use crate::primitives::sync::Mutex;
 use crate::primitives::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use crate::rate_limit::rate_limited;
@@ -51,7 +52,7 @@ impl DiskFs {
     }
 
     pub(super) fn create_segment(&self, path: &Path) -> io::Result<ActiveHandle> {
-        match std::fs::File::create(path) {
+        match fs::File::create(path) {
             Ok(f) => Ok(ActiveHandle::Disk(f)),
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
                 // Parent directory missing. Recreate it once and retry. If
@@ -59,9 +60,9 @@ impl DiskFs {
                 if let Some(parent) = path.parent()
                     && !parent.as_os_str().is_empty()
                 {
-                    std::fs::create_dir_all(parent)?;
+                    fs::create_dir_all(parent)?;
                 }
-                std::fs::File::create(path).map(ActiveHandle::Disk)
+                fs::File::create(path).map(ActiveHandle::Disk)
             }
             Err(e) => Err(e),
         }
@@ -76,7 +77,7 @@ impl DiskFs {
         // File is flushed+closed when the handle is dropped.
         drop(active_handle);
         let sealed_path = strip_active_suffix(active_path);
-        match std::fs::rename(active_path, &sealed_path) {
+        match fs::rename(active_path, &sealed_path) {
             Ok(()) => Ok(SegmentRef::Disk(SealedSegment {
                 path: sealed_path,
                 index,
@@ -99,7 +100,7 @@ impl DiskFs {
         // Best-effort: a missing active file is expected (already sealed or
         // never created). Log anything else so silent FS failures (e.g.
         // permission) are observable instead of leaking active files.
-        match std::fs::remove_file(path) {
+        match fs::remove_file(path) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
             Err(e) => {
@@ -176,7 +177,7 @@ impl DiskFs {
             if already_claimed.contains(&seg.index) {
                 continue;
             }
-            let size = match std::fs::metadata(&seg.path) {
+            let size = match fs::metadata(&seg.path) {
                 Ok(m) => m.len(),
                 Err(e) => {
                     rate_limited!(Duration::from_secs(60), {
@@ -233,7 +234,7 @@ impl DiskFs {
         if !self.dir.exists() {
             return Ok(DiscoveredArtifacts::default());
         }
-        for entry in std::fs::read_dir(&self.dir)? {
+        for entry in fs::read_dir(&self.dir)? {
             let entry = entry?;
             let path = entry.path();
             let metadata = match entry.metadata() {
@@ -257,7 +258,7 @@ impl DiskFs {
                         path = %path.display(),
                         "discarding stale active trace segment from a previous writer"
                     );
-                    match std::fs::remove_file(&path) {
+                    match fs::remove_file(&path) {
                         Ok(()) => {}
                         Err(e) if e.kind() == io::ErrorKind::NotFound => {}
                         Err(e) => return Err(e),
@@ -297,7 +298,7 @@ fn remove_segment_family(path: &Path) {
     let Some(parent) = path.parent() else {
         return;
     };
-    let entries = match std::fs::read_dir(parent) {
+    let entries = match fs::read_dir(parent) {
         Ok(e) => e,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return,
         Err(e) => {
@@ -324,7 +325,7 @@ fn remove_segment_family(path: &Path) {
         if !is_family {
             continue;
         }
-        match std::fs::remove_file(entry.path()) {
+        match fs::remove_file(&entry.path()) {
             Ok(()) => {}
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}
             Err(e) => {
