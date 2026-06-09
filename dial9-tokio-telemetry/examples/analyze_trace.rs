@@ -1,8 +1,10 @@
-use dial9_tokio_telemetry::analysis_unstable::{
-    TraceReader, analyze_trace, compute_wake_to_poll_delays, detect_idle_workers, print_analysis,
-};
-use dial9_tokio_telemetry::telemetry::{TaskId, TelemetryEvent, UNKNOWN_TASK_ID};
-use dial9_trace_format::InternedString;
+//! Example: analyze a dial9 trace file using the serde decode path.
+//!
+//! Usage:
+//!   cargo run --example analyze_trace --features analysis -- <trace_file>
+
+use dial9_tokio_telemetry::telemetry::analysis_events::{Dial9Event, WorkerId};
+use dial9_trace_format::decoder::Decoder;
 use std::collections::HashMap;
 use std::env;
 
@@ -13,150 +15,77 @@ fn main() {
         std::process::exit(1);
     }
 
-    let trace_file = &args[1];
-    println!("Analyzing trace: {}", trace_file);
+    let data = std::fs::read(&args[1]).expect("Failed to read trace file");
+    let mut decoder = Decoder::new(&data).expect("Invalid trace header");
 
-    let reader = TraceReader::new(trace_file).expect("Failed to open trace file");
+    let mut events = Vec::new();
+    decoder
+        .for_each_event(|raw| {
+            let ev: Dial9Event = raw.deserialize().expect("deserialize");
+            events.push(ev);
+        })
+        .expect("decode");
 
-    let events = &reader.runtime_events;
     println!("Read {} events", events.len());
-    if !reader.spawn_locations.is_empty() {
-        println!("Spawn locations: {}", reader.spawn_locations.len());
-    }
 
-    let analysis = analyze_trace(events);
-    print_analysis(&analysis, &reader.spawn_locations);
+    // Per-worker stats
+    let mut worker_polls: HashMap<WorkerId, usize> = HashMap::new();
+    let mut worker_parks: HashMap<WorkerId, usize> = HashMap::new();
 
-    println!("\n=== Idle Worker Detection ===");
-    let idle_periods = detect_idle_workers(events);
+    // Task spawn locations
+    let mut task_locs: HashMap<u64, String> = HashMap::new();
 
-    let delays = compute_wake_to_poll_delays(events);
-    if !delays.is_empty() {
-        let p50 = delays[delays.len() * 50 / 100];
-        let p99 = delays[delays.len() * 99 / 100];
-        let p999 = delays[delays.len() * 999 / 1000];
-        let max = *delays.last().unwrap();
-        println!("\n=== Wake→Poll Delays ({} samples) ===", delays.len());
-        println!(
-            "  p50: {:.1}µs, p99: {:.1}µs, p99.9: {:.1}µs, max: {:.1}µs",
-            p50 as f64 / 1000.0,
-            p99 as f64 / 1000.0,
-            p999 as f64 / 1000.0,
-            max as f64 / 1000.0,
-        );
-    }
-
-    // Build task_id → spawn_loc from PollStart events (more complete than TaskSpawn alone)
-    let mut task_locs: HashMap<TaskId, InternedString> = HashMap::new();
-    for e in events {
-        if let TelemetryEvent::PollStart {
-            task_id, spawn_loc, ..
-        } = e
-        {
-            task_locs.entry(*task_id).or_insert(*spawn_loc);
-        }
-    }
-    // Also include TaskSpawn mappings from the reader
-    for (task_id, spawn_loc) in &reader.task_spawn_locs {
-        task_locs.entry(*task_id).or_insert(*spawn_loc);
-    }
-
-    // Count wakes by waker spawn location
-    let mut wakes_by_loc: HashMap<Option<&str>, usize> = HashMap::new();
-    let mut resolved = 0usize;
-    let mut unresolved = 0usize;
-    for e in events {
-        if let TelemetryEvent::WakeEvent { waker_task_id, .. } = e {
-            let id = waker_task_id;
-            if *id == UNKNOWN_TASK_ID {
-                *wakes_by_loc.entry(Some("<non-task context>")).or_default() += 1;
-                resolved += 1;
-            } else if let Some(loc) = task_locs.get(id) {
-                let loc_name = reader.spawn_locations.get(loc);
-                *wakes_by_loc
-                    .entry(loc_name.map(|s| s.as_str()))
-                    .or_default() += 1;
-                resolved += 1;
-            } else {
-                unresolved += 1;
+    for e in &events {
+        match e {
+            Dial9Event::PollStartEvent(ev) => {
+                *worker_polls.entry(ev.worker_id).or_default() += 1;
+                task_locs
+                    .entry(ev.task_id)
+                    .or_insert_with(|| ev.spawn_loc.clone());
             }
+            Dial9Event::WorkerParkEvent(ev) => {
+                *worker_parks.entry(ev.worker_id).or_default() += 1;
+            }
+            Dial9Event::TaskSpawnEvent(ev) => {
+                task_locs
+                    .entry(ev.task_id)
+                    .or_insert_with(|| ev.spawn_loc.clone());
+            }
+            _ => {}
         }
     }
-    if resolved + unresolved > 0 {
-        println!(
-            "\n=== Waker Identity ({} resolved, {} unresolved of {} total tasks in trace) ===",
-            resolved,
-            unresolved,
-            task_locs.len()
-        );
 
-        // Debug: show some unresolved waker task IDs vs known task IDs
-        let mut unresolved_ids: HashMap<TaskId, usize> = HashMap::new();
-        for e in events {
-            if let TelemetryEvent::WakeEvent { waker_task_id, .. } = e
-                && *waker_task_id != UNKNOWN_TASK_ID
-                && !task_locs.contains_key(waker_task_id)
-            {
-                *unresolved_ids.entry(*waker_task_id).or_default() += 1;
-            }
+    println!("\n=== Per-Worker Stats ===");
+    let mut workers: Vec<_> = worker_polls.keys().copied().collect();
+    workers.sort();
+    for w in &workers {
+        // w came from worker_polls.keys(), so it's always present there
+        let &polls = worker_polls.get(w).expect("worker present in poll map");
+        let parks = match worker_parks.get(w) {
+            Some(&p) => p,
+            None => 0,
+        };
+        println!("  worker {w}: polls={polls}, parks={parks}");
+    }
+
+    // Wake analysis
+    let mut wakes_by_loc: HashMap<&str, usize> = HashMap::new();
+    for e in &events {
+        if let Dial9Event::WakeEvent(ev) = e {
+            let loc = task_locs
+                .get(&ev.waker_task_id)
+                .map(|s| s.as_str())
+                .unwrap_or("<unknown>");
+            *wakes_by_loc.entry(loc).or_default() += 1;
         }
-        let mut top_unresolved: Vec<_> = unresolved_ids.into_iter().collect();
-        top_unresolved.sort_by_key(|b| std::cmp::Reverse(b.1));
-        println!("  Top unresolved waker IDs:");
-        for (id, count) in top_unresolved.iter().take(5) {
-            let raw = id.to_u64();
-            println!("    0x{:016x} ({}) — {} wakes", raw, raw, count);
-        }
-        println!("  Known task IDs (sample):");
-        for (id, loc) in task_locs.iter().take(5) {
-            let loc_name = reader.spawn_locations.get(loc);
-            let raw = id.to_u64();
-            println!(
-                "    0x{:016x} ({}) — {}",
-                raw,
-                raw,
-                loc_name.map(|s| s.as_str()).unwrap_or("?")
-            );
-        }
-        println!(
-            "  task_spawn_locs from reader: {} entries",
-            reader.task_spawn_locs.len()
-        );
-        println!("  task_locs from PollStart: {} entries", task_locs.len());
-        // Check: are the unresolved IDs in task_spawn_locs?
-        for (id, count) in top_unresolved.iter().take(5) {
-            let in_spawn = reader.task_spawn_locs.contains_key(id);
-            let raw = id.to_u64();
-            println!(
-                "    0x{:016x}: in task_spawn_locs={}, in task_locs={}, wakes={}",
-                raw,
-                in_spawn,
-                task_locs.contains_key(id),
-                count
-            );
-        }
+    }
+
+    if !wakes_by_loc.is_empty() {
+        println!("\n=== Waker Identity ===");
         let mut by_count: Vec<_> = wakes_by_loc.into_iter().collect();
         by_count.sort_by_key(|b| std::cmp::Reverse(b.1));
-        for (loc, count) in &by_count {
-            let name = loc.unwrap_or("<unknown>");
-            println!("  {:>8} wakes from {}", count, name);
-        }
-    }
-
-    if idle_periods.is_empty() {
-        println!("No significant idle periods detected with work in queue");
-    } else {
-        println!(
-            "Found {} idle periods with work in queue:",
-            idle_periods.len()
-        );
-        for (worker_id, duration_ns, queue_depth) in idle_periods.iter().take(10) {
-            println!(
-                "  Worker {} idle for {:.2}ms with {} tasks in global queue",
-                worker_id,
-                *duration_ns as f64 / 1_000_000.0,
-                queue_depth
-            );
+        for (loc, count) in by_count.iter().take(10) {
+            println!("  {count:>8} wakes from {loc}");
         }
     }
 }

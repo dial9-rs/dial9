@@ -41,7 +41,7 @@ use dial9_tokio_telemetry::{main, Dial9Config, telemetry::TelemetryHandle};
 
 fn my_config() -> Dial9Config {
     Dial9Config::builder()
-        .base_path("/tmp/my_traces/trace.bin")
+        .on_disk_buffer("/tmp/my_traces/trace.bin")
         .max_total_size(5 * 1024 * 1024)   // keep at most 5 MiB on disk
         .max_file_size(1024 * 1024)     // optional: defaults to min(100 MiB, max_total_size / 4)
         .rotation_period(std::time::Duration::from_secs(300)) // optional: rotate every 5 min (default: 60 s)
@@ -167,7 +167,7 @@ fn my_config() -> Dial9Config {
         .build();
 
     Dial9Config::builder()
-        .base_path("/tmp/my_traces/trace.bin")
+        .on_disk_buffer("/tmp/my_traces/trace.bin")
         .max_file_size(100 * 1024 * 1024)
         .max_total_size(500 * 1024 * 1024)
         .with_tokio(|t| { t.worker_threads(4); })
@@ -440,6 +440,37 @@ record_event(
 # }
 ```
 
+### Custom event callbacks
+
+You can also register a callback that runs from dial9's flush thread and emits
+custom events. This is useful for draining application-owned queues or taking
+periodic snapshots without passing a [`TelemetryHandle`] through your code:
+
+```rust,no_run
+use dial9_trace_format::TraceEvent;
+use dial9_tokio_telemetry::telemetry::{CustomEventsConfig, TracedRuntime};
+
+#[derive(TraceEvent)]
+struct CacheEvent {
+    #[traceevent(timestamp)]
+    timestamp_ns: u64,
+    entries: u64,
+}
+
+let (_runtime, _guard) = TracedRuntime::builder()
+    .with_custom_events(CustomEventsConfig::default(), move |ctx| {
+        while let Ok(event) = rx.try_recv() {
+            ctx.record_event(event);
+        }
+    })
+    .build_and_start_with_writer(builder, writer)?;
+```
+
+`CustomEventsConfig::default()` runs the callback every flush cycle
+while telemetry is enabled, which fits drain-style callbacks. For polling-style
+callbacks, configure `minimum_interval(...)` to limit how often dial9 invokes
+the callback.
+
 ### Custom Runtime Hooks
 
 dial9 installs callbacks on all 8 Tokio runtime hooks to collect telemetry. If you need to run your own logic alongside dial9's instrumentation, use `with_tokio_hooks`:
@@ -498,7 +529,8 @@ fn my_config() -> Dial9Config {
         .build();
 
     Dial9Config::builder()
-        // ...
+        .on_disk_buffer("/tmp/dial9/trace.bin")
+        .max_total_size(1 << 30)
         .with_runtime(|r| {
             r.with_task_tracking(true)
              .with_s3_uploader(s3_config)

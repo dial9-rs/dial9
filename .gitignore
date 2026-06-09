@@ -7,3 +7,4 @@ target/
 .agents/skills/
 .claude/
 .zed/
+.progress/

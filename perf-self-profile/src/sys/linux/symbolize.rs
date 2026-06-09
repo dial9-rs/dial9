@@ -158,7 +158,13 @@ mod tests {
 
     #[test]
     fn resolve_kernel_symbol_returns_name() {
-        // Pick a well-known kernel symbol from /proc/kallsyms
+        // Pick a well-known kernel symbol from /proc/kallsyms.
+        //
+        // On systems where `kptr_restrict` hides kernel addresses (e.g.
+        // most non-root, recent distros), every entry in `/proc/kallsyms`
+        // shows as `0000000000000000`. Running this test there would
+        // pass `addr = 0` to `resolve_symbol`, which can't be symbolized.
+        // Skip cleanly in that environment instead of failing.
         let kallsyms = fs::read_to_string("/proc/kallsyms").unwrap_or_default();
         let entry = kallsyms
             .lines()
@@ -170,6 +176,13 @@ mod tests {
             })
             .expect("schedule not found in kallsyms");
         let addr = u64::from_str_radix(entry.split_whitespace().next().unwrap(), 16).unwrap();
+        if addr == 0 {
+            eprintln!(
+                "skipping: /proc/kallsyms shows masked kernel addresses \
+                 (kptr_restrict>0 or kernel lockdown)"
+            );
+            return;
+        }
         let info = resolve_symbol(addr);
         assert_eq!(info.name.as_deref(), Some("schedule"));
     }

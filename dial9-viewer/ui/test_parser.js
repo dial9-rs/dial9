@@ -29,10 +29,12 @@ async function main() {
     const expectedEvents = jsonl.trim().split("\n").filter(l => l.trim()).map(l => JSON.parse(l));
     console.log(`Expected ${expectedEvents.length} events`);
 
-    // Map Rust event names to JS eventType numbers
+    // Map Rust event names to JS eventType numbers.
+    // The Rust JSONL is now produced by the serde Deserializer, which uses
+    // wire schema names (with the "Event" suffix) as the discriminator.
     const rustNameToType = {
-        PollStart: 0, PollEnd: 1, WorkerPark: 2, WorkerUnpark: 3,
-        QueueSample: 4, WakeEvent: 9,
+        PollStartEvent: 0, PollEndEvent: 1, WorkerParkEvent: 2, WorkerUnparkEvent: 3,
+        QueueSampleEvent: 4, WakeEventEvent: 9,
     };
 
     // Count runtime events (skip metadata-only events)
@@ -82,7 +84,7 @@ async function main() {
     console.log("✓ All callframe symbols match");
 
     // Check CPU sample count
-    const rustCpuSamples = expectedEvents.filter(e => e.event === "CpuSample").length;
+    const rustCpuSamples = expectedEvents.filter(e => e.event === "CpuSampleEvent").length;
     if (trace.cpuSamples.length !== rustCpuSamples) {
         console.log(`\n✗ CPU sample count: JS=${trace.cpuSamples.length} Rust=${rustCpuSamples}`);
         process.exit(1);

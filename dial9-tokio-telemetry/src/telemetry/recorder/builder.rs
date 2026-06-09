@@ -60,6 +60,7 @@ pub struct TracedRuntimeBuilder<P = NoTracePath, M = PipelineUnset, Mode: Writer
     #[cfg(feature = "cpu-profiling")]
     pub(super) sched_event_config: Option<crate::telemetry::cpu_profile::SchedEventConfig>,
     pub(super) process_resource_usage_config: Option<crate::telemetry::ProcessResourceUsageConfig>,
+    pub(super) custom_event_sources: Vec<crate::telemetry::custom_events::CustomEventsSource>,
     pub(super) pipeline: PipelineConfig,
     /// Static segment metadata to inject into every rotated segment's
     /// header. The S3 preset populates this from `S3Config::as_metadata`
@@ -179,6 +180,30 @@ impl<P, M, Mode: WriterMode> TracedRuntimeBuilder<P, M, Mode> {
         self
     }
 
+    /// Register a custom event callback.
+    ///
+    /// The callback runs during flush cycles while telemetry is enabled.
+    /// Use [`CustomEventsConfig::minimum_interval`](crate::telemetry::CustomEventsConfig::minimum_interval)
+    /// to throttle polling-style callbacks. The default interval is
+    /// [`Duration::ZERO`], which runs the callback on every flush cycle.
+    ///
+    /// This method can be called multiple times to configure multiple
+    /// callbacks.
+    pub fn with_custom_events<F>(
+        mut self,
+        config: crate::telemetry::CustomEventsConfig,
+        callback: F,
+    ) -> Self
+    where
+        F: for<'a> FnMut(&mut crate::telemetry::CustomEventsContext<'a>) + Send + 'static,
+    {
+        self.custom_event_sources
+            .push(crate::telemetry::custom_events::CustomEventsSource::new(
+                config, callback,
+            ));
+        self
+    }
+
     /// Set how often the background worker polls for sealed segments.
     pub fn with_worker_poll_interval(mut self, interval: Duration) -> Self {
         self.worker_poll_interval = Some(interval);
@@ -226,22 +251,31 @@ impl<P, M, Mode: WriterMode> TracedRuntimeBuilder<P, M, Mode> {
             // telemetry hooks so attaching still works gracefully.
             return builder.build();
         };
+        let custom_event_sources = self.custom_event_sources;
 
         if !self.tokio_instrumentation_enabled {
-            return builder.build();
+            let runtime = builder.build()?;
+            for source in custom_event_sources {
+                shared.push_source(Box::new(source));
+            }
+            return Ok(runtime);
         }
 
-        attach_runtime(
+        let runtime = attach_runtime(
             shared,
             builder,
             self.runtime_name,
             control_tx,
             self.task_tracking_enabled,
             self.tokio_hooks,
-        )
+        )?;
+        for source in custom_event_sources {
+            shared.push_source(Box::new(source));
+        }
+        Ok(runtime)
     }
 
-    pub(super) fn into_state<Q, N, NewMode: WriterMode>(
+    pub(crate) fn into_state<Q, N, NewMode: WriterMode>(
         self,
     ) -> TracedRuntimeBuilder<Q, N, NewMode> {
         TracedRuntimeBuilder {
@@ -256,6 +290,7 @@ impl<P, M, Mode: WriterMode> TracedRuntimeBuilder<P, M, Mode> {
             #[cfg(feature = "cpu-profiling")]
             sched_event_config: self.sched_event_config,
             process_resource_usage_config: self.process_resource_usage_config,
+            custom_event_sources: self.custom_event_sources,
             pipeline: self.pipeline,
             segment_metadata: self.segment_metadata,
             worker_poll_interval: self.worker_poll_interval,
@@ -508,6 +543,8 @@ impl<M, Mode: WriterMode> TracedRuntimeBuilder<HasTracePath, M, Mode> {
             return TracedRuntime::build_disabled(builder);
         }
 
+        let custom_event_sources = self.custom_event_sources;
+
         let processors = assemble_processors(
             #[cfg(feature = "cpu-profiling")]
             self.cpu_profiling_config.is_some(),
@@ -531,6 +568,12 @@ impl<M, Mode: WriterMode> TracedRuntimeBuilder<HasTracePath, M, Mode> {
             .maybe_sched_events(self.sched_event_config);
 
         let guard = core_builder.build()?;
+
+        if let Some(shared) = guard.shared() {
+            for source in custom_event_sources {
+                shared.push_source(Box::new(source));
+            }
+        }
 
         if !self.tokio_instrumentation_enabled {
             let runtime = builder.build()?;
@@ -588,7 +631,7 @@ pub(super) fn assemble_processors(
         PipelineConfig::Unset => {
             #[cfg(feature = "cpu-profiling")]
             if cpu_profiling_enabled {
-                processors.push(Box::new(crate::background_task::SymbolizeProcessor));
+                processors.push(Box::new(crate::background_task::SymbolizeProcessor::new()));
             }
             processors.push(Box::new(crate::background_task::GzipCompressor));
             if is_disk {
@@ -599,7 +642,7 @@ pub(super) fn assemble_processors(
         PipelineConfig::S3(uploader) => {
             #[cfg(feature = "cpu-profiling")]
             if cpu_profiling_enabled {
-                processors.push(Box::new(crate::background_task::SymbolizeProcessor));
+                processors.push(Box::new(crate::background_task::SymbolizeProcessor::new()));
             }
             processors.push(Box::new(crate::background_task::GzipCompressor));
             processors.push(Box::new(uploader));
@@ -920,6 +963,7 @@ impl TracedRuntime {
             #[cfg(feature = "cpu-profiling")]
             sched_event_config: None,
             process_resource_usage_config: None,
+            custom_event_sources: Vec::new(),
             pipeline: PipelineConfig::Unset,
             segment_metadata: Vec::new(),
             worker_poll_interval: None,
@@ -970,10 +1014,9 @@ impl TracedRuntime {
 /// Errors produced while constructing a [`TracedRuntime`] from a
 /// [`crate::Dial9Config`].
 ///
-/// Writer-transport I/O has already been validated by
-/// [`crate::Dial9ConfigBuilder::build`], so the only remaining failure
-/// modes here come from the tokio runtime builder and the telemetry
-/// background worker startup.
+/// Writer-transport I/O has already been validated by the config builder's
+/// strict `build`, so the only remaining failure modes here come from the
+/// tokio runtime builder and the telemetry background worker startup.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum TelemetryRuntimeError {
@@ -1005,11 +1048,9 @@ impl std::error::Error for TelemetryRuntimeError {
 
 /// Drive a [`crate::current_config::Inner`] to a tokio runtime + guard.
 ///
-/// `Inner::Enabled` already carries a built [`DiskWriter`], so this
-/// only needs to materialize the tokio builder and hand both off to
-/// [`TracedRuntimeBuilder::build_and_start`]. `Inner::Disabled`
-/// produces a plain tokio runtime paired with a disabled
-/// [`TelemetryGuard`].
+/// `Inner::Enabled` carries a `runtime_builder` that already owns its
+/// writer, so this only materializes the tokio builder and starts it.
+/// `Inner::Disabled` produces a plain tokio runtime paired with a disabled [`TelemetryGuard`].
 fn try_assemble_dial9_config(
     inner: crate::current_config::Inner,
 ) -> Result<(tokio::runtime::Runtime, TelemetryGuard), TelemetryRuntimeError> {
@@ -1017,13 +1058,12 @@ fn try_assemble_dial9_config(
 
     match inner {
         Inner::Enabled {
-            writer,
             tokio_configurators,
             runtime_builder,
         } => {
             let tokio_builder = materialize_tokio_builder(&tokio_configurators);
             let (runtime, guard) = runtime_builder
-                .build_and_start(tokio_builder, writer)
+                .build_and_start(tokio_builder)
                 .map_err(TelemetryRuntimeError::TelemetryCore)?;
             Ok((runtime, guard))
         }
@@ -1062,17 +1102,16 @@ impl TracedRuntime {
     /// runtime cannot be built or the telemetry background worker fails
     /// to start. When constructing from the fluent
     /// [`crate::Dial9Config`], writer-transport I/O has already been
-    /// validated by
-    /// [`Dial9ConfigBuilder::build`](crate::Dial9ConfigBuilder::build),
-    /// so the only remaining failure modes are tokio-builder and
-    /// telemetry-core startup I/O.
+    /// validated by the config builder's strict `build`, so the only
+    /// remaining failure modes are tokio-builder and telemetry-core
+    /// startup I/O.
     ///
     /// For fallible construction, use [`try_new`](Self::try_new).
     ///
     /// ```no_run
     /// use dial9_tokio_telemetry::{Dial9Config, TracedRuntime};
     /// let cfg = Dial9Config::builder()
-    ///     .base_path("trace.bin")
+    ///     .on_disk_buffer("trace.bin")
     ///     .max_file_size(64 * 1024 * 1024)
     ///     .max_total_size(1024 * 1024 * 1024)
     ///     .build()?;
@@ -1101,7 +1140,7 @@ impl TracedRuntime {
     /// ```no_run
     /// use dial9_tokio_telemetry::{Dial9Config, TracedRuntime};
     /// let cfg = Dial9Config::builder()
-    ///     .base_path("trace.bin")
+    ///     .on_disk_buffer("trace.bin")
     ///     .max_file_size(64 * 1024 * 1024)
     ///     .max_total_size(1024 * 1024 * 1024)
     ///     .build()?;

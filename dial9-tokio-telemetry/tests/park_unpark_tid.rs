@@ -4,7 +4,21 @@ mod common;
 
 use common::{BytesCapturingWriter, decode_all};
 use dial9_tokio_telemetry::telemetry::TracedRuntime;
-use dial9_tokio_telemetry::telemetry::analysis_events::Dial9Event;
+use serde::Deserialize;
+
+/// Tagged union over the events this test cares about.
+#[derive(Debug, Deserialize)]
+#[serde(tag = "event")]
+enum ParkOrUnpark {
+    WorkerParkEvent {
+        tid: u32,
+    },
+    WorkerUnparkEvent {
+        tid: u32,
+    },
+    #[serde(other)]
+    Other,
+}
 
 #[test]
 fn worker_park_unpark_events_carry_nonzero_tid() {
@@ -35,12 +49,12 @@ fn worker_park_unpark_events_carry_nonzero_tid() {
     drop(guard);
 
     let batches = batches.lock().unwrap();
-    let events: Vec<Dial9Event> = decode_all(&batches);
+    let events: Vec<ParkOrUnpark> = decode_all(&batches);
 
     let park_tids: Vec<u32> = events
         .iter()
         .filter_map(|e| match e {
-            Dial9Event::WorkerParkEvent(p) => Some(p.tid),
+            ParkOrUnpark::WorkerParkEvent { tid, .. } => Some(*tid),
             _ => None,
         })
         .collect();
@@ -48,7 +62,7 @@ fn worker_park_unpark_events_carry_nonzero_tid() {
     let unpark_tids: Vec<u32> = events
         .iter()
         .filter_map(|e| match e {
-            Dial9Event::WorkerUnparkEvent(u) => Some(u.tid),
+            ParkOrUnpark::WorkerUnparkEvent { tid, .. } => Some(*tid),
             _ => None,
         })
         .collect();

@@ -2,13 +2,7 @@
 source: dial9-trace-format-derive/src/lib.rs
 expression: "expand_to_string(quote!\n{\n    struct SimpleEvent\n    { #[traceevent(timestamp)] timestamp_ns: u64, value: u32, }\n})"
 ---
-#[derive(Debug, Clone)]
-struct SimpleEventRef<'a> {
-    pub timestamp_ns: u64,
-    pub value: <u32 as ::dial9_trace_format::TraceField>::Ref<'a>,
-}
 impl ::dial9_trace_format::TraceEvent for SimpleEvent {
-    type Ref<'a> = SimpleEventRef<'a>;
     fn event_name() -> &'static str {
         "SimpleEvent"
     }
@@ -27,25 +21,5 @@ impl ::dial9_trace_format::TraceEvent for SimpleEvent {
     ) -> ::std::io::Result<()> {
         <u32 as ::dial9_trace_format::TraceField>::encode(&self.value, enc)?;
         Ok(())
-    }
-    fn decode<'a>(
-        timestamp_ns: Option<u64>,
-        fields: &[::dial9_trace_format::types::FieldValueRef<'a>],
-        field_defs: &[::dial9_trace_format::schema::FieldDef],
-    ) -> Option<Self::Ref<'a>> {
-        Some(SimpleEventRef {
-            timestamp_ns: timestamp_ns?,
-            value: {
-                let val = field_defs
-                    .iter()
-                    .zip(fields.iter())
-                    .find(|(f, _)| f.name() == "value")
-                    .map(|(_, v)| v);
-                match val {
-                    Some(v) => <u32 as ::dial9_trace_format::TraceField>::decode_ref(v)?,
-                    None => <u32 as ::dial9_trace_format::TraceField>::decode_missing()?,
-                }
-            },
-        })
     }
 }

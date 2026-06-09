@@ -383,7 +383,7 @@ impl<Mode: WriterMode> PipelineBuilder<Mode> {
     /// symbolized stack frames in your trace files.
     #[cfg(feature = "cpu-profiling")]
     pub fn symbolize(mut self) -> Self {
-        self.processors.push(Box::new(SymbolizeProcessor));
+        self.processors.push(Box::new(SymbolizeProcessor::new()));
         self
     }
 
@@ -546,9 +546,41 @@ impl SegmentProcessor for GzipCompressor {
 
 /// Resolves stack-frame addresses in the segment to symbol names using
 /// the current process's `/proc/self/maps`.
+///
+/// Owns a long-lived
+/// [`OfflineSymbolizer`](dial9_perf_self_profile::offline_symbolize::OfflineSymbolizer)
+/// running on a dedicated thread, so blazesym's per-ELF DWARF cache
+/// stays warm across segments. Without this, every segment paid the
+/// full ELF parse cost (hundreds of ms — see #462).
 #[cfg(feature = "cpu-profiling")]
-#[derive(Debug, Default)]
-pub(crate) struct SymbolizeProcessor;
+pub(crate) struct SymbolizeProcessor {
+    symbolizer: std::sync::Arc<dial9_perf_self_profile::offline_symbolize::OfflineSymbolizer>,
+}
+
+#[cfg(feature = "cpu-profiling")]
+impl SymbolizeProcessor {
+    pub(crate) fn new() -> Self {
+        Self {
+            symbolizer: std::sync::Arc::new(
+                dial9_perf_self_profile::offline_symbolize::OfflineSymbolizer::new(),
+            ),
+        }
+    }
+}
+
+#[cfg(feature = "cpu-profiling")]
+impl Default for SymbolizeProcessor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(feature = "cpu-profiling")]
+impl std::fmt::Debug for SymbolizeProcessor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SymbolizeProcessor").finish_non_exhaustive()
+    }
+}
 
 #[cfg(feature = "cpu-profiling")]
 impl SegmentProcessor for SymbolizeProcessor {
@@ -560,6 +592,7 @@ impl SegmentProcessor for SymbolizeProcessor {
         &mut self,
         mut data: SegmentData,
     ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>> {
+        let symbolizer = self.symbolizer.clone();
         Box::pin(async move {
             // Skip already-compressed segments (e.g. leftover from a previous run).
             if data.payload.starts_with(&[0x1f, 0x8b]) {
@@ -571,14 +604,12 @@ impl SegmentProcessor for SymbolizeProcessor {
             // zero-copy `Bytes::clone`-equivalent; the `BytesMut` concat
             // path runs only on already-segmented input (rare).
             let input = std::mem::take(&mut data.payload).into_bytes();
+            // Hand off to a blocking thread because `OfflineSymbolizer::symbolize`
+            // is itself a blocking call (it sends to its dedicated symbolizer
+            // thread and waits for the response).
             let result = tokio::task::spawn_blocking(move || {
                 let maps = dial9_perf_self_profile::read_proc_maps();
-                let mut output = Vec::new();
-                dial9_perf_self_profile::offline_symbolize::symbolize_trace_with_maps(
-                    &input,
-                    &maps,
-                    &mut output,
-                )?;
+                let output = symbolizer.symbolize_bytes(input.clone(), &maps)?;
                 // Hand back the original bytes plus the symbol output as two
                 // chunks — no copy of `input`.
                 let mut combined = Payload::new();

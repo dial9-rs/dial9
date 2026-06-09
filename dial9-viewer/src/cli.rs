@@ -48,6 +48,25 @@ enum Commands {
         #[arg(long)]
         dev: bool,
     },
+    /// Tools for working with agent-generated HTML reports
+    Report {
+        #[command(subcommand)]
+        action: ReportAction,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ReportAction {
+    /// Serve a report folder over HTTP so embedded iframes can fetch
+    /// trace files (browsers block `fetch()` over `file://`).
+    Serve {
+        /// Path to the report folder (containing `report.html` and assets)
+        path: PathBuf,
+
+        /// Port to listen on
+        #[arg(long, default_value = "8000")]
+        port: u16,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -124,6 +143,26 @@ pub async fn run() -> anyhow::Result<()> {
         } => {
             return crate::serve(port, bucket, prefix, local_dir, dev).await;
         }
+        Commands::Report { action } => match action {
+            ReportAction::Serve { path, port } => {
+                let canon = std::fs::canonicalize(&path).map_err(|e| {
+                    anyhow::anyhow!("report path '{}' not found: {e}", path.display())
+                })?;
+                if !canon.is_dir() {
+                    anyhow::bail!("report path '{}' is not a directory", canon.display());
+                }
+                let app = crate::report_serve_router(&canon);
+                let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
+                eprintln!("Serving report from {}", canon.display());
+                let entry = if canon.join("report.html").exists() {
+                    "report.html"
+                } else {
+                    ""
+                };
+                println!("\n  → http://localhost:{port}/{entry}\n");
+                axum::serve(listener, app).await?;
+            }
+        },
     }
     Ok(())
 }

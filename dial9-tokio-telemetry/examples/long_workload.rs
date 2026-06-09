@@ -7,7 +7,7 @@ use tokio::net::TcpListener;
 
 fn my_config() -> Dial9Config {
     Dial9Config::builder()
-        .base_path("long_trace.bin")
+        .on_disk_buffer("long_trace.bin")
         .max_file_size(64 * 1024 * 1024)
         .max_total_size(256 * 1024 * 1024)
         .with_tokio(|t| {

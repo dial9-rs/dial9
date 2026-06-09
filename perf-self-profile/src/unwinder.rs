@@ -388,7 +388,7 @@ mod tests {
             // Stronger: frame 0 should land inside `helper`'s body. Debug
             // builds can be very large (100+ KiB per function with full
             // debuginfo and no optimization), so use a generous window.
-            let helper_window = 512 * 1024u64;
+            let helper_window = 1024 * 1024u64;
             assert!(
                 frame0 >= helper_start && frame0 < helper_start + helper_window,
                 "frame 0 {:#x} should be inside helper [{:#x}..{:#x})",

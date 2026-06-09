@@ -1508,9 +1508,10 @@ dependencies = [
 
 [[package]]
 name = "dial9-perf-self-profile"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "blazesym",
+ "bytes",
  "criterion",
  "crossbeam-utils",
  "dial9-trace-format",
@@ -2773,6 +2774,8 @@ dependencies = [
  "hyper 1.9.0",
  "hyper-util",
  "libc",
+ "metrique",
+ "metrique-writer",
  "reqwest",
  "serde",
  "serde_json",

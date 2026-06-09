@@ -51,7 +51,10 @@ fn annotations_round_trip() {
                 type_id,
                 annotations,
             } => {
-                assert_eq!(*type_id, WireTypeId(0));
+                assert_eq!(
+                    *type_id,
+                    WireTypeId(dial9_trace_format::STATIC_WIRE_ID_LIMIT)
+                );
                 assert_eq!(annotations.len(), 3);
                 assert_eq!(annotations[0].field_index(), 0);
                 assert_eq!(annotations[0].key(), "metrique.unit");
@@ -71,7 +74,10 @@ fn annotations_round_trip() {
     assert!(saw_annotations);
 
     // Verify annotations are merged into the registry
-    let registry_entry = dec.registry().get(WireTypeId(0)).unwrap();
+    let registry_entry = dec
+        .registry()
+        .get(WireTypeId(dial9_trace_format::STATIC_WIRE_ID_LIMIT))
+        .unwrap();
     assert_eq!(registry_entry.annotations().len(), 3);
     assert_eq!(registry_entry.annotations()[0].key(), "metrique.unit");
 }
@@ -129,11 +135,17 @@ fn multiple_schemas_with_mixed_annotations() {
     assert_eq!(annotation_frames.len(), 1);
 
     // Annotations attached to the right schema
-    let annotated_entry = dec.registry().get(WireTypeId(0)).unwrap();
+    let annotated_entry = dec
+        .registry()
+        .get(WireTypeId(dial9_trace_format::STATIC_WIRE_ID_LIMIT))
+        .unwrap();
     assert_eq!(annotated_entry.name(), "Annotated");
     assert_eq!(annotated_entry.annotations().len(), 1);
 
-    let plain_entry = dec.registry().get(WireTypeId(1)).unwrap();
+    let plain_entry = dec
+        .registry()
+        .get(WireTypeId(dial9_trace_format::STATIC_WIRE_ID_LIMIT + 1))
+        .unwrap();
     assert_eq!(plain_entry.name(), "Plain");
     assert!(plain_entry.annotations().is_empty());
 }
@@ -212,7 +224,10 @@ fn annotations_unknown_type_id_skipped() {
     assert!(has_event, "decoder should continue past unknown annotation");
 
     // The "Real" schema should have no annotations
-    let real_entry = dec.registry().get(WireTypeId(0)).unwrap();
+    let real_entry = dec
+        .registry()
+        .get(WireTypeId(dial9_trace_format::STATIC_WIRE_ID_LIMIT))
+        .unwrap();
     assert!(real_entry.annotations().is_empty());
 }
 

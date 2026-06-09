@@ -28,8 +28,37 @@
 
 use serde::Deserialize;
 
-/// Worker thread identifier (decoded as a plain `u64`).
-pub type WorkerId = u64;
+/// Worker thread identifier.
+///
+/// Wraps a `u64` matching the wire encoding. Use the [`UNKNOWN`](Self::UNKNOWN)
+/// and [`BLOCKING`](Self::BLOCKING) constants to test for sentinel values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize)]
+#[repr(transparent)]
+pub struct WorkerId(pub u64);
+
+impl WorkerId {
+    /// Sentinel for events from non-worker threads (value `255`).
+    pub const UNKNOWN: WorkerId = WorkerId(255);
+    /// Sentinel for events from Tokio's blocking thread pool (value `254`).
+    pub const BLOCKING: WorkerId = WorkerId(254);
+
+    /// Returns the raw `u64` value.
+    pub fn as_u64(self) -> u64 {
+        self.0
+    }
+}
+
+impl From<u64> for WorkerId {
+    fn from(v: u64) -> Self {
+        WorkerId(v)
+    }
+}
+
+impl std::fmt::Display for WorkerId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
 
 /// Task identifier (decoded as a plain `u64`).
 pub type TaskId = u64;
@@ -138,6 +167,7 @@ pub struct TaskSpawnEvent {
     /// Spawn location string.
     pub spawn_loc: String,
     /// Whether this spawn was instrumented.
+    #[serde(default)]
     pub instrumented: bool,
 }
 
@@ -279,13 +309,59 @@ pub struct ProcessResourceUsageEvent {
     pub involuntary_context_switches: u64,
 }
 
+/// An application-defined custom event not recognized as a built-in type.
+///
+/// Fields are resolved from the string/stack pools at parse time so they
+/// remain valid after the segment's pools are discarded.
+///
+/// Can be deserialized directly from a `RawEvent` via
+/// `raw_event.deserialize::<CustomEvent>()`.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub struct CustomEvent {
+    /// Event type name from the wire schema (e.g. `"RequestCompleted"`).
+    pub name: String,
+    /// Monotonic timestamp in nanoseconds, if the event schema has one.
+    pub timestamp_ns: Option<u64>,
+    /// Named field values, resolved from pools. Excludes `event` and `timestamp_ns`.
+    pub fields: std::collections::HashMap<String, dial9_trace_format::FieldValue>,
+}
+
+impl<'de> Deserialize<'de> for CustomEvent {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        // Deserialize the entire event as a flat HashMap. The deserializer
+        // presents "event", "timestamp_ns", and all schema fields as map entries.
+        let mut map: std::collections::HashMap<String, dial9_trace_format::FieldValue> =
+            serde::Deserialize::deserialize(deserializer)?;
+
+        let name = match map.remove("event") {
+            Some(dial9_trace_format::FieldValue::String(s)) => s,
+            _ => return Err(serde::de::Error::missing_field("event")),
+        };
+
+        let timestamp_ns = match map.remove("timestamp_ns") {
+            Some(dial9_trace_format::FieldValue::Varint(t)) => Some(t),
+            _ => None,
+        };
+
+        Ok(CustomEvent {
+            name,
+            timestamp_ns,
+            fields: map,
+        })
+    }
+}
+
 /// Tagged enum of all built-in event types for use as a serde decode target.
 ///
-/// Use with `#[serde(tag = "event")]` — the discriminant matches the wire
-/// schema name (e.g. `"PollStartEvent"`).
+/// The discriminant matches the wire schema name (e.g. `"PollStartEvent"`).
 ///
-/// Unknown event types (custom events, future additions) are captured by the
-/// `Other` variant via `#[serde(other)]`.
+/// Unknown event types (custom user events, future additions) land in the
+/// [`Custom`](Self::Custom) variant when decoded through
+/// [`TraceReader`](crate::telemetry::analysis::TraceReader), or in
+/// [`Other`](Self::Other) when using `raw_event.deserialize::<Dial9Event>()`
+/// directly. In the latter case, call `raw_event.deserialize::<CustomEvent>()`
+/// to get the full custom event with fields.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(tag = "event")]
 #[non_exhaustive]
@@ -323,7 +399,14 @@ pub enum Dial9Event {
     FreeEvent(FreeEvent),
     /// Process resource usage.
     ProcessResourceUsageEvent(ProcessResourceUsageEvent),
-    /// Unknown/custom event type.
+    /// An application-defined custom event. Produced by
+    /// [`TraceReader`](crate::telemetry::analysis::TraceReader) for unknown
+    /// event types. Not populated by direct serde deserialization (use
+    /// [`Other`](Self::Other) + `raw_event.deserialize::<CustomEvent>()`).
+    #[serde(skip)]
+    Custom(CustomEvent),
+    /// Unknown event type encountered during direct serde deserialization.
+    /// Use `raw_event.deserialize::<CustomEvent>()` to get the full event.
     #[serde(other)]
     Other,
 }
@@ -509,7 +592,7 @@ mod tests {
             panic!("expected PollStartEvent, got {:?}", events[0]);
         };
         assert_eq!(e.timestamp_ns, 1_000_000);
-        assert_eq!(e.worker_id, 2);
+        assert_eq!(e.worker_id, WorkerId(2));
         assert_eq!(e.local_queue, 5);
         assert_eq!(e.task_id, 100);
         assert_eq!(e.spawn_loc, "src/main.rs:42");
@@ -519,14 +602,14 @@ mod tests {
             panic!("expected PollEndEvent, got {:?}", events[1]);
         };
         assert_eq!(e.timestamp_ns, 1_000_500);
-        assert_eq!(e.worker_id, 2);
+        assert_eq!(e.worker_id, WorkerId(2));
 
         // 3. WorkerParkEvent
         let Dial9Event::WorkerParkEvent(ref e) = events[2] else {
             panic!("expected WorkerParkEvent, got {:?}", events[2]);
         };
         assert_eq!(e.timestamp_ns, 2_000_000);
-        assert_eq!(e.worker_id, 1);
+        assert_eq!(e.worker_id, WorkerId(1));
         assert_eq!(e.local_queue, 0);
         assert_eq!(e.cpu_time_ns, 500_000);
         assert_eq!(e.tid, 12345);
@@ -536,7 +619,7 @@ mod tests {
             panic!("expected WorkerUnparkEvent, got {:?}", events[3]);
         };
         assert_eq!(e.timestamp_ns, 3_000_000);
-        assert_eq!(e.worker_id, 1);
+        assert_eq!(e.worker_id, WorkerId(1));
         assert_eq!(e.local_queue, 3);
         assert_eq!(e.cpu_time_ns, 600_000);
         assert_eq!(e.sched_wait_ns, 100_000);
@@ -570,7 +653,7 @@ mod tests {
             panic!("expected CpuSampleEvent, got {:?}", events[7]);
         };
         assert_eq!(e.timestamp_ns, 7_000_000);
-        assert_eq!(e.worker_id, 0);
+        assert_eq!(e.worker_id, WorkerId(0));
         assert_eq!(e.tid, 9999);
         assert_eq!(e.source, CpuSampleSource::CpuProfile);
         assert_eq!(e.thread_name.as_deref(), Some("tokio-runtime-worker"));

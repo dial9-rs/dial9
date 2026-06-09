@@ -5,10 +5,12 @@
 
 mod common;
 
+use common::{BytesCapturingWriter, decode_all};
 use dial9_tokio_telemetry::memory_profiling::{
     Dial9Allocator, MemoryProfiler, MemoryProfilingConfig,
 };
-use dial9_tokio_telemetry::telemetry::{TelemetryEvent, TracedRuntime};
+use dial9_tokio_telemetry::telemetry::TracedRuntime;
+use dial9_tokio_telemetry::telemetry::analysis_events::Dial9Event;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -38,7 +40,7 @@ static ALLOC: Dial9Allocator<CountingAllocator> = Dial9Allocator::new(CountingAl
 
 #[test]
 fn hook_realloc_emits_alloc_and_free_when_liveset_on() {
-    let (writer, events) = common::CapturingWriter::new();
+    let (writer, batches) = BytesCapturingWriter::new();
 
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.worker_threads(1).enable_all();
@@ -58,7 +60,6 @@ fn hook_realloc_emits_alloc_and_free_when_liveset_on() {
     .expect("install should succeed");
 
     runtime.block_on(async {
-        // Push in a loop to force Vec reallocation (capacity growth).
         let mut v: Vec<u8> = Vec::new();
         for i in 0..1000u16 {
             v.push((i & 0xff) as u8);
@@ -72,20 +73,20 @@ fn hook_realloc_emits_alloc_and_free_when_liveset_on() {
     drop(runtime);
     drop(guard);
 
-    // Verify the inner allocator was actually called.
     assert!(
         ALLOC_COUNT.load(Ordering::Relaxed) > 0,
         "expected CountingAllocator to have been called"
     );
 
-    let events = events.lock().unwrap();
+    let b = batches.lock().unwrap();
+    let events: Vec<Dial9Event> = decode_all(&b);
     let allocs: Vec<_> = events
         .iter()
-        .filter(|e| matches!(e, TelemetryEvent::Alloc { .. }))
+        .filter(|e| matches!(e, Dial9Event::AllocEvent(_)))
         .collect();
     let frees: Vec<_> = events
         .iter()
-        .filter(|e| matches!(e, TelemetryEvent::Free { .. }))
+        .filter(|e| matches!(e, Dial9Event::FreeEvent(_)))
         .collect();
 
     assert!(
@@ -97,57 +98,29 @@ fn hook_realloc_emits_alloc_and_free_when_liveset_on() {
         "expected at least one FreeEvent when liveset tracking is on"
     );
 
-    // Stronger property: every FreeEvent must match a previously-recorded
-    // AllocEvent on (addr, size, alloc_timestamp_ns). Walk the trace in
-    // recording order, maintaining a "live" map keyed by addr; an Alloc
-    // overwrites any prior entry at that addr (an address can be reused
-    // after a free), and a Free must find the current entry and have its
-    // (size, alloc_timestamp_ns) match the recorded Alloc.
+    // Verify every FreeEvent matches a prior AllocEvent on (addr, size, alloc_timestamp_ns).
     use std::collections::HashMap;
     let mut live: HashMap<u64, (u64, u64)> = HashMap::new(); // addr -> (size, ts)
     let mut matched_frees = 0usize;
-    for ev in events.iter() {
+    for ev in &events {
         match ev {
-            TelemetryEvent::Alloc {
-                addr,
-                size,
-                timestamp_nanos,
-                ..
-            } => {
-                live.insert(*addr, (*size, *timestamp_nanos));
+            Dial9Event::AllocEvent(a) => {
+                live.insert(a.addr, (a.size, a.timestamp_ns));
             }
-            TelemetryEvent::Free {
-                addr,
-                size,
-                alloc_timestamp_nanos,
-                ..
-            } => {
-                let Some((recorded_size, recorded_ts)) = live.remove(addr) else {
+            Dial9Event::FreeEvent(f) => {
+                let Some((recorded_size, recorded_ts)) = live.remove(&f.addr) else {
                     panic!(
-                        "FreeEvent at addr {addr:#x} has no matching prior AllocEvent \
-                         (free size={size}, alloc_ts={alloc_timestamp_nanos})"
+                        "FreeEvent at addr {:#x} has no matching prior AllocEvent \
+                         (free size={}, alloc_ts={})",
+                        f.addr, f.size, f.alloc_timestamp_ns
                     );
                 };
-                assert_eq!(
-                    recorded_size, *size,
-                    "FreeEvent at addr {addr:#x}: size {size} does not match \
-                     recorded Alloc size {recorded_size}"
-                );
-                assert_eq!(
-                    recorded_ts, *alloc_timestamp_nanos,
-                    "FreeEvent at addr {addr:#x}: alloc_timestamp_ns \
-                     {alloc_timestamp_nanos} does not match recorded \
-                     Alloc timestamp {recorded_ts}"
-                );
-                matched_frees = matched_frees.saturating_add(1);
+                assert_eq!(recorded_size, f.size);
+                assert_eq!(recorded_ts, f.alloc_timestamp_ns);
+                matched_frees += 1;
             }
             _ => {}
         }
     }
-    assert_eq!(
-        matched_frees,
-        frees.len(),
-        "all {} frees should have matched a prior alloc, only {matched_frees} did",
-        frees.len()
-    );
+    assert_eq!(matched_frees, frees.len());
 }

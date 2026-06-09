@@ -6,13 +6,15 @@
 
 mod common;
 
+use common::{BytesCapturingWriter, decode_all};
 use dial9_tokio_telemetry::memory_profiling::{MemoryProfiler, push_test_alloc};
-use dial9_tokio_telemetry::telemetry::{TelemetryEvent, TracedRuntime};
+use dial9_tokio_telemetry::telemetry::TracedRuntime;
+use dial9_tokio_telemetry::telemetry::analysis_events::Dial9Event;
 use std::time::Duration;
 
 #[test]
 fn install_registers_source_with_recorder() {
-    let (writer, events) = common::CapturingWriter::new();
+    let (writer, batches) = BytesCapturingWriter::new();
 
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.worker_threads(1).enable_all();
@@ -39,10 +41,11 @@ fn install_registers_source_with_recorder() {
     drop(runtime);
     drop(guard);
 
-    let events = events.lock().unwrap();
+    let b = batches.lock().unwrap();
+    let events: Vec<Dial9Event> = decode_all(&b);
     let allocs: Vec<_> = events
         .iter()
-        .filter(|e| matches!(e, TelemetryEvent::Alloc { .. }))
+        .filter(|e| matches!(e, Dial9Event::AllocEvent(_)))
         .collect();
 
     assert!(
@@ -50,18 +53,9 @@ fn install_registers_source_with_recorder() {
         "expected at least one AllocEvent from the synthetic push"
     );
 
-    // Verify the event has the expected fields.
-    match &allocs[0] {
-        TelemetryEvent::Alloc {
-            addr,
-            size,
-            callchain,
-            ..
-        } => {
-            assert_eq!(*addr, 0xCAFE_0000);
-            assert_eq!(*size, 4096);
-            assert_eq!(callchain, &[0xDEAD, 0xBEEF]);
-        }
-        _ => unreachable!(),
+    if let Dial9Event::AllocEvent(e) = &allocs[0] {
+        assert_eq!(e.addr, 0xCAFE_0000);
+        assert_eq!(e.size, 4096);
+        assert_eq!(e.callchain, &[0xDEAD, 0xBEEF]);
     }
 }
