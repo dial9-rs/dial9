@@ -135,7 +135,7 @@ impl TelemetryGuard {
     /// # use dial9_tokio_telemetry::telemetry::{InMemoryWriter, TelemetryCore};
     /// # fn main() -> std::io::Result<()> {
     /// let guard = TelemetryCore::builder()
-    ///     .writer(InMemoryWriter::discard())
+    ///     .writer(InMemoryWriter::new(16 * 1024 * 1024)?)
     ///     .build()?;
     /// guard.enable();
     ///

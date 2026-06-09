@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 use dial9_tokio_telemetry::background_task::{ProcessError, SegmentData, SegmentProcessor};
+use dial9_tokio_telemetry::telemetry::InMemoryWriter;
 use dial9_trace_format::decoder::Decoder;
 use serde::de::DeserializeOwned;
 use std::future::Future;
@@ -10,6 +11,16 @@ use std::sync::{Arc, Mutex};
 /// Total in-memory byte budget for capture tests. Large enough that a test's
 /// events fit without the ring dropping the oldest segment.
 pub const CAPTURE_BUFFER_SIZE: u64 = 16 * 1024 * 1024;
+
+/// Fixed-size in-memory writer for tests that run a telemetry runtime but don't
+/// read the trace back.
+pub fn small_mem_writer() -> InMemoryWriter {
+    InMemoryWriter::builder()
+        .max_total_size(16 * 1024 * 1024)
+        .max_segment_size(4 * 1024 * 1024)
+        .build()
+        .expect("fixed sizes are valid")
+}
 
 /// A [`SegmentProcessor`] that stores each sealed segment's payload bytes,
 /// one `Vec<u8>` per segment.

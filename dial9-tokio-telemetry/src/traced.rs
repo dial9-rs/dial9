@@ -236,7 +236,7 @@ mod tests {
     #[test]
     fn traced_future_falls_back_after_missing_task_context() {
         let guard = TelemetryCore::builder()
-            .writer(InMemoryWriter::discard())
+            .writer(InMemoryWriter::new(16 * 1024 * 1024).unwrap())
             .build()
             .unwrap();
         let handle = guard

@@ -363,21 +363,6 @@ impl SegmentWriter<Memory> {
         )
     }
 
-    /// An in-memory writer whose output is discarded. Used for benchmarks
-    /// measuring hook overhead and tests that don't read the trace. Fixed
-    /// 4 MiB segments / 16 MiB ring (the sizes satisfy every [`create_in_memory`](Self::create_in_memory)
-    /// precondition).
-    #[doc(hidden)]
-    pub fn discard() -> Self {
-        Self::create_in_memory(
-            16 * 1024 * 1024,
-            4 * 1024 * 1024,
-            DEFAULT_ROTATION_PERIOD,
-            SegmentMetadata::default(),
-        )
-        .expect("discard() sizes satisfy create_in_memory validation")
-    }
-
     /// Builder for in-memory writer configuration.
     #[builder(builder_type = InMemoryWriterBuilder, finish_fn = build)]
     pub fn builder(

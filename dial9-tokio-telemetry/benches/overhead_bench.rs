@@ -10,7 +10,7 @@
 //! Modes:
 //!   baseline  – plain tokio runtime, no hooks
 //!   telemetry – hooks installed, writing to a temp file
-//!   noop      – hooks installed, InMemoryWriter::discard() (measures pure hook overhead)
+//!   noop      – hooks installed, InMemoryWriter (no I/O)
 //!
 //! Duration defaults to 30 seconds. A 3-second warmup precedes measurement.
 //! --bmf runs all three modes and outputs Bencher Metric Format JSON.
@@ -121,7 +121,7 @@ fn run_bench(mode: &str, duration_secs: u64) -> BenchResult {
         }
         "noop" => {
             let (rt, g) = TracedRuntime::builder()
-                .build_and_start(builder, InMemoryWriter::discard())
+                .build_and_start(builder, InMemoryWriter::new(16 * 1024 * 1024).unwrap())
                 .unwrap();
             (rt, Some(g))
         }

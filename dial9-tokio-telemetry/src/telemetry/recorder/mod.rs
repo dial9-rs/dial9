@@ -497,7 +497,7 @@ mod tests {
         let builder = tokio::runtime::Builder::new_multi_thread();
         let (runtime, guard) = TracedRuntime::builder()
             .install(false)
-            .build(builder, InMemoryWriter::discard())
+            .build(builder, InMemoryWriter::new(16 * 1024 * 1024).unwrap())
             .unwrap();
 
         // Guard methods should be safe no-ops
@@ -629,7 +629,7 @@ mod tests {
     fn build_and_attach_to_telemetry_attaches_second_runtime() {
         let builder_a = tokio::runtime::Builder::new_multi_thread();
         let (runtime_a, guard) = TracedRuntime::builder()
-            .build_and_start(builder_a, InMemoryWriter::discard())
+            .build_and_start(builder_a, InMemoryWriter::new(16 * 1024 * 1024).unwrap())
             .unwrap();
 
         let builder_b = tokio::runtime::Builder::new_multi_thread();
@@ -1114,7 +1114,7 @@ mod tests {
     #[test]
     fn telemetry_core_builds_guard_without_runtime() {
         let guard = TelemetryCore::builder()
-            .writer(InMemoryWriter::discard())
+            .writer(InMemoryWriter::new(16 * 1024 * 1024).unwrap())
             .build()
             .unwrap();
         assert!(guard.is_enabled());
@@ -1124,7 +1124,7 @@ mod tests {
     #[test]
     fn telemetry_core_trace_runtime_produces_working_runtime() {
         let guard = TelemetryCore::builder()
-            .writer(InMemoryWriter::discard())
+            .writer(InMemoryWriter::new(16 * 1024 * 1024).unwrap())
             .build()
             .unwrap();
         guard.enable();
@@ -1320,7 +1320,7 @@ mod tests {
     #[test]
     fn trace_runtime_handle_spawns_on_correct_runtime_from_outside() {
         let guard = TelemetryCore::builder()
-            .writer(InMemoryWriter::discard())
+            .writer(InMemoryWriter::new(16 * 1024 * 1024).unwrap())
             .build()
             .unwrap();
         guard.enable();
@@ -1724,7 +1724,7 @@ mod tests {
         let s3 = S3Config::builder().bucket("b").service_name("s").build();
 
         let guard = TelemetryCore::builder()
-            .writer(InMemoryWriter::discard())
+            .writer(InMemoryWriter::new(16 * 1024 * 1024).unwrap())
             .trace_path(&trace_path)
             .s3_config(s3)
             .build()

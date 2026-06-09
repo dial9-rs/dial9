@@ -3,14 +3,16 @@
 //! Test that a second install() returns AlreadyInstalled.
 
 use dial9_tokio_telemetry::memory_profiling::{InstallError, MemoryProfiler};
-use dial9_tokio_telemetry::telemetry::{InMemoryWriter, TracedRuntime};
+use dial9_tokio_telemetry::telemetry::TracedRuntime;
+
+mod common;
 
 #[test]
 fn second_install_returns_already_installed() {
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.worker_threads(1).enable_all();
     let (_runtime, guard) = TracedRuntime::builder()
-        .build_and_start(builder, InMemoryWriter::discard())
+        .build_and_start(builder, common::small_mem_writer())
         .unwrap();
 
     let handle = guard.handle();

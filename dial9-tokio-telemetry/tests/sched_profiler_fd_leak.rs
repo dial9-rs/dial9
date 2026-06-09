@@ -9,8 +9,10 @@
 
 #![cfg(all(feature = "cpu-profiling", target_os = "linux"))]
 
+use dial9_tokio_telemetry::telemetry::TracedRuntime;
 use dial9_tokio_telemetry::telemetry::cpu_profile::SchedEventConfig;
-use dial9_tokio_telemetry::telemetry::{InMemoryWriter, TracedRuntime};
+
+mod common;
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -47,7 +49,7 @@ fn sched_profiler_fds_bounded_with_many_blocking_threads() {
 
     let (runtime, guard) = TracedRuntime::builder()
         .with_sched_events(SchedEventConfig::default())
-        .build_and_start(builder, InMemoryWriter::discard())
+        .build_and_start(builder, common::small_mem_writer())
         .unwrap();
 
     // Let workers start and resolve their identity.
@@ -107,7 +109,7 @@ fn sched_profiler_fds_cleaned_up_on_shutdown() {
 
         let (runtime, guard) = TracedRuntime::builder()
             .with_sched_events(SchedEventConfig::default())
-            .build_and_start(builder, InMemoryWriter::discard())
+            .build_and_start(builder, common::small_mem_writer())
             .unwrap();
 
         // Do some work so workers resolve their identity.

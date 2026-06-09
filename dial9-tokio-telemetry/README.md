@@ -492,7 +492,7 @@ let (runtime, guard) = TracedRuntime::builder()
         // Also available: on_thread_park, on_thread_unpark,
         // on_task_spawn, on_task_terminate, on_before_task_poll, on_after_task_poll
     })
-    .build_and_start(builder, InMemoryWriter::discard())
+    .build_and_start(builder, InMemoryWriter::new(16 * 1024 * 1024).unwrap())
     .unwrap();
 ```
 

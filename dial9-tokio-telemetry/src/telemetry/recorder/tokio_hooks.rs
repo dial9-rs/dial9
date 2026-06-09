@@ -71,7 +71,7 @@ impl TokioHook<TaskMetaCb> {
 ///         h.on_thread_start(|| println!("started"));
 ///         h.on_thread_stop(|| println!("stopping"));
 ///     })
-///     .build_and_start(builder, InMemoryWriter::discard())
+///     .build_and_start(builder, InMemoryWriter::new(16 * 1024 * 1024).unwrap())
 ///     .unwrap();
 /// ```
 #[derive(Clone, Default)]

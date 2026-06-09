@@ -152,7 +152,7 @@ fn spawn_with_returns_closure_value() {
     builder.worker_threads(2).enable_all();
     let (runtime, guard) = TracedRuntime::builder()
         .with_task_tracking(true)
-        .build_and_start(builder, InMemoryWriter::discard())
+        .build_and_start(builder, common::small_mem_writer())
         .unwrap();
 
     let handle = guard.handle();

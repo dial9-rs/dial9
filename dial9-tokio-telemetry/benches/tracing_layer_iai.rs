@@ -36,7 +36,7 @@ fn setup_tracing_only() -> Harness {
     let mut builder = tokio::runtime::Builder::new_current_thread();
     builder.enable_all();
     let (runtime, _telemetry_guard) = TracedRuntime::builder()
-        .build_and_start(builder, InMemoryWriter::discard())
+        .build_and_start(builder, InMemoryWriter::new(16 * 1024 * 1024).unwrap())
         .unwrap();
     let _sub_guard = tracing::subscriber::set_default(tracing_subscriber::registry());
     Harness {
@@ -50,7 +50,7 @@ fn setup_with_dial9() -> Harness {
     let mut builder = tokio::runtime::Builder::new_current_thread();
     builder.enable_all();
     let (runtime, _telemetry_guard) = TracedRuntime::builder()
-        .build_and_start(builder, InMemoryWriter::discard())
+        .build_and_start(builder, InMemoryWriter::new(16 * 1024 * 1024).unwrap())
         .unwrap();
     let _sub_guard = tracing::subscriber::set_default(
         tracing_subscriber::registry().with(Dial9TokioLayer::new()),

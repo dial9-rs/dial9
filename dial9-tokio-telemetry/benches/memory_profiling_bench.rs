@@ -103,7 +103,7 @@ fn install_profiler() {
     // We leak the runtime and guard so they live for the process lifetime.
     // This is intentional — the profiler is process-permanent anyway.
     let (runtime, guard) = TracedRuntime::builder()
-        .build_and_start(builder, InMemoryWriter::discard())
+        .build_and_start(builder, InMemoryWriter::new(16 * 1024 * 1024).unwrap())
         .unwrap();
     let handle = guard.handle();
 
