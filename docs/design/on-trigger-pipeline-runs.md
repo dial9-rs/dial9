@@ -47,23 +47,29 @@ Two shapes cover the useful cases:
 ```rust
 use std::time::Duration;
 
-// Everything the ring still holds, right now.
-control.dump_now();
+// Everything the ring still holds, right now. No forward window.
+control.dump_current_data();
 
-// The last 5 minutes of history: only segments whose
-// `end_epoch >= now - 300s`. You can look back as far as the ring
-// buffer still retains; a `lookback` wider than the retained history
-// just captures everything the ring has (see "Best-effort semantics").
-control.dump_since(Duration::from_secs(300));
+// A window around the trigger: the 5 minutes before it and the 5 minutes
+// after. The look-back captures pre-trigger segments whose `end_epoch >=
+// now - 300s`; the look-forward keeps the dump open for 300s and captures
+// segments as they seal. You can look back only as far as the ring still
+// retains, and forward only as long as the process keeps running; both
+// sides are best-effort (see "Best-effort semantics").
+control.dump_time_range(Duration::from_secs(300), Duration::from_secs(300));
+
+// Pure look-back (no forward window): pass a zero look-forward.
+control.dump_time_range(Duration::from_secs(300), Duration::ZERO);
 ```
 
 Both dispatch the moment you call them; you do not have to await anything
-for the dump to run. Await the returned handle only when you want the
-receipt:
+for the dump to run. A look-back dump runs immediately; a dump with a
+look-forward stays open until its forward deadline elapses. Await the
+returned handle only when you want the receipt:
 
 ```rust
 let receipt = control
-    .dump_since(Duration::from_secs(300))
+    .dump_time_range(Duration::from_secs(300), Duration::from_secs(300))
     .with_metadata("reason", "idle-ratio-drop")
     .await?;
 
@@ -79,7 +85,7 @@ data to every captured segment:
 
 ```rust
 control
-    .dump_now()
+    .dump_current_data()
     .with_metadata("reason", "panic")
     .with_metadata("incident", incident_id);
 ```
@@ -88,8 +94,10 @@ control
 
 Dumped trace objects land in the **same S3 location** as continuous-mode
 uploads, under today's key layout, each carrying a `dump-id` value as S3 user
-metadata (the ULID minted at trigger time, also returned on the receipt). The
-trace files are never relocated.
+metadata (the ULID minted at trigger time, also returned on the receipt). A
+segment that falls inside the forward windows of several concurrent dumps
+carries all of their ids as a comma-joined `dump-id` value, and its key appears
+in each of those dumps' manifests. The trace files are never relocated.
 
 On top of that, the S3 stage writes one **manifest** object per dump at:
 
@@ -105,7 +113,7 @@ the dump produced, plus the dump's identity (`dump_id`, `triggered_at`,
 {
   "dump_id": "01J9Z...",
   "triggered_at": "2026-06-09T14:30:42Z",
-  "time_range": ["2026-06-09T14:25:42Z", "2026-06-09T14:30:42Z"],
+  "time_range": ["2026-06-09T14:25:42Z", "2026-06-09T14:35:42Z"],
   "segments_processed": 12,
   "metadata": { "reason": "idle-ratio-drop" },
   "segments": [
@@ -130,18 +138,26 @@ approach points at the files instead of moving them.
 
 ## Best-effort semantics
 
-A dump captures only data the ring still holds at trigger time, on a strict
-best-effort basis. There is no forward window, no ring resizing, no segment
-pinning, and no duplication of buffered data. If a requested look-back is
-wider than the ring retained, the dump gets whatever survived and the
-application keeps running.
+Both sides of a dump are strictly best-effort. There is no ring resizing, no
+segment pinning, and no duplication of buffered data. If the requested window
+cannot be fully covered, the dump gets whatever survived and the application
+keeps running.
 
 The look-back is bounded by what the ring retained. The ring keeps only what
-`max_total_size` lets it keep, so `dump_since(d)` with a `d` wider than the
-retained history simply returns the segments that survived; the actual
-covered span is reported as `receipt.time_range`. This is never an error and
-never resizes or pins the ring. Size `max_total_size` for the history depth
-you expect to need.
+`max_total_size` lets it keep, so a `lookback` wider than the retained history
+simply captures the segments that survived; under upload pressure the oldest
+part of a wide look-back can be evicted before the worker reaches it. The
+actual covered span is reported as `receipt.time_range`. This is never an
+error and never resizes or pins the ring. Size `max_total_size` for the
+history depth you expect to need.
+
+The look-forward is bounded by the process lifetime and by the same ring
+budget. A forward window keeps the dump open until `triggered_at +
+lookforward`, capturing segments as they seal and flow through the pipeline.
+Captured segments are uploaded as they are popped, exactly like continuous
+mode, so if uploads lag the producer a forward segment can be evicted before
+the worker pops it. Nothing is held back or pre-allocated for the forward
+window; it is the same seal/pop/upload path, gated by a deadline.
 
 ## Custom pipelines
 
@@ -159,8 +175,8 @@ let _guard = TracedRuntime::builder()
     .with_trigger(rx)
     .build()?;
 
-// `control.dump_now()` / `control.dump_since(..)` behave identically to the
-// S3-preset example.
+// `control.dump_current_data()` / `control.dump_time_range(..)` behave
+// identically to the S3-preset example.
 ```
 
 Unlike the preset, the custom path does not auto-populate writer segment
@@ -182,26 +198,28 @@ let _guard = TracedRuntime::builder()
     .with_trigger(rx)
     .build()?;
 
-let receipt = control.dump_now().await?;
+let receipt = control.dump_current_data().await?;
 // receipt.dump_id is set; on-disk filenames follow the writer's existing
 // rotation scheme unless a custom processor reads metadata.
 ```
 
 ## Return value
 
-Awaiting a dump is optional. The dump is dispatched when you call `dump_now`
-or `dump_since`; awaiting the returned handle only retrieves the
-`DumpReceipt`, which resolves once the last captured segment finishes the
-pipeline. It carries everything the caller needs to find the dump later or to
+Awaiting a dump is optional. The dump is dispatched when you call
+`dump_current_data` or `dump_time_range`; awaiting the returned handle only
+retrieves the `DumpReceipt`. For a look-back-only dump it resolves once the
+last captured segment finishes the pipeline; for a dump with a look-forward it
+resolves after the forward deadline elapses and the last in-window segment
+finishes. It carries everything the caller needs to find the dump later or to
 log what landed:
 
-| Field                | Meaning                                                                                                       |
-| -------------------- | ------------------------------------------------------------------------------------------------------------- |
-| `dump_id: DumpId`    | ULID minted when the dump is dispatched. Time-sortable. Surfaces as `dump-id` user metadata on each S3 object. |
-| `segments_processed` | Count of segments that made it through the pipeline.                                                          |
-| `finished_at`        | When the last segment finished the pipeline.                                                                  |
-| `time_range`         | Actual covered span. May be shorter than the requested look-back if the ring did not retain that much history. |
-| `manifest_key`       | `Some({prefix}/dumps/{dump_id}.json)` when the pipeline ends at S3; `None` otherwise (no manifest off S3).     |
+| Field                | Meaning                                                                                                                                                                                                                                                             |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `dump_id: DumpId`    | ULID minted when the dump is dispatched. Time-sortable. Surfaces as `dump-id` user metadata on each S3 object.                                                                                                                                                      |
+| `segments_processed` | Count of segments that made it through the pipeline.                                                                                                                                                                                                                |
+| `finished_at`        | When the last segment finished the pipeline.                                                                                                                                                                                                                        |
+| `time_range`         | Actual covered span, which can extend past `triggered_at` when a look-forward was requested. May be shorter than the requested window on either side: look-back if the ring did not retain that much history, look-forward if the dump stopped before the deadline. |
+| `manifest_key`       | `Some({prefix}/dumps/{dump_id}.json)` when the pipeline ends at S3; `None` otherwise (no manifest off S3).                                                                                                                                                          |
 
 The trigger time itself is embedded in `dump_id` and can be extracted via
 `DumpId`.
@@ -214,18 +232,18 @@ id) pass them via `.with_metadata(...)`; pipeline stages decide what to do
 with them (the S3 stage surfaces them as additional user metadata, a custom
 redactor can read them, etc.).
 
-| Field                        | Where it lives                                                          |
-| ---------------------------- | ----------------------------------------------------------------------- |
-| `dump_id`                    | `dump-id` S3 user metadata on every object; also the manifest filename  |
-| `triggered_at`               | Embedded in the ULID (`DumpId` can extract); also in the manifest       |
-| `time_range`                 | Manifest field; also `receipt.time_range`                               |
-| `segments` (object keys)     | Manifest `segments` array                                               |
-| `service`, `boot_id`, `host` | Existing per-segment S3 user metadata, unchanged                        |
-| `segment.index`              | Key path; also `segment-index` S3 user metadata                         |
-| `segment.size_bytes`         | S3 object `ContentLength` (free)                                        |
-| `segment.start_epoch`        | Key path; also `start-time` S3 user metadata                            |
+| Field                        | Where it lives                                                                               |
+| ---------------------------- | -------------------------------------------------------------------------------------------- |
+| `dump_id`                    | `dump-id` S3 user metadata on every object; also the manifest filename                       |
+| `triggered_at`               | Embedded in the ULID (`DumpId` can extract); also in the manifest                            |
+| `time_range`                 | Manifest field; also `receipt.time_range`                                                    |
+| `segments` (object keys)     | Manifest `segments` array                                                                    |
+| `service`, `boot_id`, `host` | Existing per-segment S3 user metadata, unchanged                                             |
+| `segment.index`              | Key path; also `segment-index` S3 user metadata                                              |
+| `segment.size_bytes`         | S3 object `ContentLength` (free)                                                             |
+| `segment.start_epoch`        | Key path; also `start-time` S3 user metadata                                                 |
 | Caller-supplied correlation  | `.with_metadata(...)`, stamped onto `SegmentData::metadata`; also in the manifest `metadata` |
-| Manifest                     | `{prefix}/dumps/{dump_id}.json`; also `receipt.manifest_key`            |
+| Manifest                     | `{prefix}/dumps/{dump_id}.json`; also `receipt.manifest_key`                                 |
 
 Completion is signalled in-process by `DumpReceipt` resolving. For S3
 pipelines the manifest doubles as the cross-process signal: its presence at
@@ -236,33 +254,37 @@ cross-process signal there publish it through whatever channel they already use
 
 ## What the library does for you
 
-When you call `dump_now` or `dump_since`, the control mints a `DumpId`, packs
-the look-back (if any) and any `with_metadata` entries into a request, and
-forwards it to the worker over the trigger channel immediately. Awaiting the
-returned handle is optional and only retrieves the receipt.
+When you call `dump_current_data` or `dump_time_range`, the control mints a
+`DumpId`, packs the look-back and look-forward (either may be zero) and any
+`with_metadata` entries into a request, and forwards it to the worker over the
+trigger channel immediately. Awaiting the returned handle is optional and only
+retrieves the receipt.
 
 The worker stamps the following into each captured segment's
 `SegmentData::metadata` before the pipeline runs:
 
-- `dump_id` (always set on a triggered run)
+- `dump_id` (always set on a triggered run; carries every active dump the
+  segment matched, so a segment in two forward windows gets both ids)
 - Anything from `.with_metadata(...)`
 
 Pipeline stages read `SegmentData::metadata` the same way they already read
 keys like `epoch_secs` and `content_encoding`. The S3 uploader checks
 `metadata.get("dump_id")`:
 
-- Present: attach `dump-id` as per-object S3 user metadata. The key layout is
-  today's continuous-mode layout, unchanged. The uploader also records the key
-  it just wrote against this `dump_id` so it can build the manifest later.
+- Present: attach `dump-id` as per-object S3 user metadata (comma-joined when
+  the segment belongs to more than one dump). The key layout is today's
+  continuous-mode layout, unchanged. The uploader also records the key it just
+  wrote against each of those dump ids so it can build their manifests later.
 - Absent (continuous mode): emit today's continuous-mode object, unchanged.
 
-When the dump completes, the S3 stage writes the manifest. The worker already
+When a dump completes, the S3 stage writes its manifest. The worker already
 tracks dump completion (it is what resolves `DumpReceipt` once the last captured
 segment finishes the pipeline); on completion it signals the terminal stage to
-finalize, and the S3 stage PUTs `{prefix}/dumps/{dump_id}.json` from the keys it
-accumulated. The exact finalize-hook signature is an implementation detail for
-the code PR; the contract is "worker says the dump is done, the S3 stage flushes
-its manifest."
+finalize that dump, and the S3 stage PUTs `{prefix}/dumps/{dump_id}.json` from
+the keys it accumulated for that id. The same key may appear in several
+manifests when it was captured by overlapping forward windows. The exact
+finalize-hook signature is an implementation detail for the code PR; the
+contract is "worker says the dump is done, the S3 stage flushes its manifest."
 
 Nothing in the worker is S3-specific. The trigger feature stamps metadata and
 signals completion; the S3 stage owns both the per-object `dump-id` tag and the
@@ -289,15 +311,26 @@ With `with_trigger(rx)` set, the same loop selects on:
 - the new `trigger_rx` populated by `DumpControl`
 
 It does not call `take_files` between triggers. When a request arrives, it
-takes a snapshot of the segments currently in the ring (optionally filtered to
-`end_epoch >= now - lookback`), stamps the metadata, runs each captured
-segment through the same processor chain, and resolves the receipt when the
-last one finishes. Then it re-parks.
+registers the dump with its window `[trigger - lookback, trigger +
+lookforward]` and a deadline at `trigger + lookforward`. It then drains the
+ring as usual, and for each segment it pops it attaches the segment to every
+active dump whose window covers the segment's epoch, stamps the metadata, and
+runs it through the same processor chain. A pure look-back dump (zero
+look-forward) has its window fully in the past, so it resolves as soon as the
+matching ring segments finish. A dump with a look-forward stays registered:
+the select loop gains a deadline branch, and the dump keeps collecting
+newly-sealed segments until wall-clock passes its deadline, at which point it
+stops accepting segments and its receipt resolves once the last in-window
+segment finishes.
 
-Because a dump never claims future arrivals, there is no contention over the
-`dump_id` stamp: dumps may overlap freely and run concurrently. A dump that
-requests more history than the ring holds simply captures what is there, with
-no error and no effect on the live stream.
+Because a forward window claims future arrivals, a single newly-sealed segment
+can fall inside the windows of several concurrent dumps. The worker therefore
+associates each popped segment with _all_ active dumps it matches, rather than
+a single owner. Dumps still run concurrently with no contention; the only
+shared effect is that one segment may be recorded against more than one
+`dump_id` (see "Finding a dump in S3"). A dump that requests more history than
+the ring holds, or whose forward segments evict under upload pressure, simply
+captures what survived, with no error and no effect on the live stream.
 
 **Disk-mode behavior when parked.** Sealed files accumulate on disk under the
 writer's existing budget. If the application never triggers, the budget acts
@@ -318,25 +351,28 @@ pub mod dump {
 pub struct DumpControl { /* tx side of the trigger channel */ }
 
 impl DumpControl {
-    /// Capture everything the ring still holds, right now.
-    pub fn dump_now(&self) -> DumpRun<'_>;
+    /// Capture everything the ring still holds, right now. No forward window.
+    pub fn dump_current_data(&self) -> DumpRun<'_>;
 
-    /// Capture the last `lookback` of history: pre-trigger segments with
-    /// `end_epoch >= now - lookback`.
+    /// Capture the window `[trigger - lookback, trigger + lookforward]`. Either
+    /// side may be `Duration::ZERO`.
     ///
-    /// You can look back only as far as the ring buffer still retains.
-    /// `lookback` is capped, in effect, by `max_total_size`: a window
-    /// wider than the retained history is best-effort and simply captures
-    /// every segment the ring still holds. The actual covered span is
-    /// reported on `DumpReceipt::time_range`. This never errors and never
-    /// resizes or pins the ring.
-    pub fn dump_since(&self, lookback: Duration) -> DumpRun<'_>;
+    /// `lookback` captures pre-trigger segments with `end_epoch >= trigger -
+    /// lookback`; you can look back only as far as the ring still retains, so a
+    /// `lookback` wider than the retained history is best-effort and captures
+    /// what survived. `lookforward` keeps the dump open until `trigger +
+    /// lookforward`, attaching segments as they seal; it is uncapped and bounded
+    /// only by the process lifetime, and is best-effort under upload pressure.
+    /// The actual covered span is reported on `DumpReceipt::time_range`. This
+    /// never errors and never resizes or pins the ring.
+    pub fn dump_time_range(&self, lookback: Duration, lookforward: Duration) -> DumpRun<'_>;
 }
 
-/// In-flight dump request. The dump is dispatched when `dump_now` /
-/// `dump_since` is called; this handle is only needed to retrieve the
+/// In-flight dump request. The dump is dispatched when `dump_current_data` /
+/// `dump_time_range` is called; this handle is only needed to retrieve the
 /// receipt. Resolves to `Result<DumpReceipt, DumpError>` when awaited (via
-/// `IntoFuture`). Chain `.with_metadata(...)` before awaiting to attach
+/// `IntoFuture`). For a look-forward dump the future resolves after the forward
+/// deadline elapses. Chain `.with_metadata(...)` before awaiting to attach
 /// correlation pairs. Dropping the handle does not cancel the dump.
 pub struct DumpRun<'a> { /* private */ }
 
