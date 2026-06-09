@@ -3,7 +3,11 @@ mod linux;
 #[cfg(target_os = "linux")]
 pub(crate) use linux::fp_profiler;
 #[cfg(target_os = "linux")]
-pub(crate) use linux::write_symbol_data;
+pub(crate) use linux::offline_symbolize::SymbolizeContainers;
+#[cfg(target_os = "linux")]
+pub(crate) use linux::offline_symbolize::write_symbol_data;
+#[cfg(target_os = "linux")]
+pub(crate) use linux::symbolize_one_shot;
 #[cfg(target_os = "linux")]
 pub use linux::{
     PerfSampler, is_ctimer_active, resolve_symbol, resolve_symbol_with_maps,
@@ -13,6 +17,6 @@ pub use linux::{
 #[cfg(not(target_os = "linux"))]
 mod unsupported;
 #[cfg(not(target_os = "linux"))]
-pub(crate) use unsupported::write_symbol_data;
+pub(crate) use unsupported::symbolize_one_shot;
 #[cfg(not(target_os = "linux"))]
 pub use unsupported::{PerfSampler, resolve_symbol};

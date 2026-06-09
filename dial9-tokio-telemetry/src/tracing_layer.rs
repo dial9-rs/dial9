@@ -69,6 +69,7 @@ use tracing::span;
 use tracing_subscriber::{Layer, layer::Context, registry::LookupSpan};
 
 #[derive(TraceEvent)]
+#[traceevent(wire_slot)]
 struct SpanCloseEvent {
     #[traceevent(timestamp)]
     timestamp_ns: u64,

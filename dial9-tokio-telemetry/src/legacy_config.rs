@@ -7,9 +7,9 @@
 //!
 //! Equivalent calls on the fluent builder, we encourage you to migrate to:
 //! - `Dial9ConfigBuilder::new(..)` →
-//!   `Dial9Config::builder().base_path(..).max_file_size(..).max_total_size(..)`.
+//!   `Dial9Config::builder().on_disk_buffer(..).max_file_size(..).max_total_size(..)`.
 //! - `Dial9ConfigBuilder::disabled()` →
-//!   `Dial9Config::builder().enabled(false)`.
+//!   `Dial9Config::builder().on_disk_buffer(..).enabled(false)`.
 //! - `.with_tokio()` / `.with_runtime()` are unchanged.
 
 use std::path::PathBuf;

@@ -513,7 +513,7 @@ mod tests {
     mod task_dump_tests {
         use super::ThreadLocalBuffer;
         use crate::task_dumped::TaskDumpData;
-        use crate::telemetry::events::TelemetryEvent;
+        use crate::telemetry::analysis_events::Dial9Event;
         use crate::telemetry::format::decode_events;
         use crate::telemetry::task_metadata::TaskId;
 
@@ -527,29 +527,24 @@ mod tests {
             let encoded = ThreadLocalBuffer::encode_single(&dump);
             let events = decode_events(&encoded).expect("decode");
             assert_eq!(events.len(), 1);
-            match events.into_iter().next().unwrap() {
-                TelemetryEvent::TaskDump {
-                    timestamp_nanos,
-                    task_id,
-                    callchain,
-                } => {
-                    assert_eq!(timestamp_nanos, 42_000);
-                    assert_eq!(task_id, TaskId::from_u32(17));
-                    assert_eq!(callchain, vec![0x1111_2222, 0x3333_4444, 0x5555_6666]);
-                }
-                other => panic!("expected TaskDump, got {other:?}"),
-            }
+            let Dial9Event::TaskDumpEvent(ref e) = events[0] else {
+                panic!("expected TaskDumpEvent, got {:?}", events[0]);
+            };
+            assert_eq!(e.timestamp_ns, 42_000);
+            assert_eq!(e.task_id, 17);
+            assert_eq!(e.callchain, vec![0x1111_2222, 0x3333_4444, 0x5555_6666]);
         }
     }
 
     #[cfg(feature = "cpu-profiling")]
     mod cpu_tests {
         use super::ThreadLocalBuffer;
+        use crate::telemetry::analysis_events::Dial9Event;
 
         /// Encode a single `CpuSampleData` through a real thread-local buffer
-        /// and decode it back via the public `decode_events` path, asserting that
+        /// and decode it back via the `decode_events` path, asserting that
         /// the `cpu` field round-trips.
-        fn cpu_sample_round_trip(cpu: Option<u32>) -> crate::telemetry::events::TelemetryEvent {
+        fn cpu_sample_round_trip(cpu: Option<u32>) -> Dial9Event {
             use crate::telemetry::events::{CpuSampleData, CpuSampleSource};
             use crate::telemetry::format::{WorkerId, decode_events};
 
@@ -570,31 +565,20 @@ mod tests {
 
         #[test]
         fn cpu_sample_event_round_trips_with_cpu() {
-            use crate::telemetry::events::TelemetryEvent;
-            match cpu_sample_round_trip(Some(7)) {
-                TelemetryEvent::CpuSample {
-                    tid,
-                    cpu,
-                    callchain,
-                    ..
-                } => {
-                    assert_eq!(tid, 4242);
-                    assert_eq!(cpu, Some(7));
-                    assert_eq!(callchain, vec![0xdead_beef, 0xcafe_babe]);
-                }
-                other => panic!("expected CpuSample, got {other:?}"),
-            }
+            let Dial9Event::CpuSampleEvent(e) = cpu_sample_round_trip(Some(7)) else {
+                panic!("expected CpuSampleEvent");
+            };
+            assert_eq!(e.tid, 4242);
+            assert_eq!(e.cpu, Some(7));
+            assert_eq!(e.callchain, vec![0xdead_beef, 0xcafe_babe]);
         }
 
         #[test]
         fn cpu_sample_event_round_trips_without_cpu() {
-            use crate::telemetry::events::TelemetryEvent;
-            match cpu_sample_round_trip(None) {
-                TelemetryEvent::CpuSample { cpu, .. } => {
-                    assert_eq!(cpu, None);
-                }
-                other => panic!("expected CpuSample, got {other:?}"),
-            }
+            let Dial9Event::CpuSampleEvent(e) = cpu_sample_round_trip(None) else {
+                panic!("expected CpuSampleEvent");
+            };
+            assert_eq!(e.cpu, None);
         }
     }
 }

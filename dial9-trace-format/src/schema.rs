@@ -145,10 +145,21 @@ impl SchemaEntry {
     }
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub struct SchemaRegistry {
     pub(crate) schemas: FxHashMap<WireTypeId, SchemaEntry>,
     pub(crate) next_id: u16,
+}
+
+impl Default for SchemaRegistry {
+    fn default() -> Self {
+        Self {
+            schemas: FxHashMap::default(),
+            // `0..STATIC_WIRE_ID_LIMIT` is reserved for fast-path slot ids,
+            // dynamic registration starts here.
+            next_id: crate::STATIC_WIRE_ID_LIMIT,
+        }
+    }
 }
 
 impl SchemaRegistry {
@@ -158,7 +169,7 @@ impl SchemaRegistry {
 
     /// Resets the schema registry to a blank slate without releasing the allocations
     pub fn clear(&mut self) {
-        self.next_id = 0;
+        self.next_id = crate::STATIC_WIRE_ID_LIMIT;
         self.schemas.clear();
     }
 
@@ -197,6 +208,7 @@ impl SchemaRegistry {
     /// Call this after bulk-inserting schemas (e.g. from a decoded trace) so
     /// that [`next_type_id`](Self::next_type_id) won't collide.
     pub fn sync_next_id(&mut self) {
+        self.next_id = crate::STATIC_WIRE_ID_LIMIT;
         for &id in self.schemas.keys() {
             if id.0 >= self.next_id {
                 self.next_id = id.0 + 1;
@@ -309,7 +321,7 @@ mod tests {
         let id1 = reg.next_type_id();
         let id2 = reg.next_type_id();
         assert_ne!(id1, id2);
-        assert_eq!(id1, WireTypeId(0));
-        assert_eq!(id2, WireTypeId(1));
+        assert_eq!(id1, WireTypeId(crate::STATIC_WIRE_ID_LIMIT));
+        assert_eq!(id2, WireTypeId(crate::STATIC_WIRE_ID_LIMIT + 1));
     }
 }

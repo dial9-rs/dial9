@@ -168,6 +168,10 @@ harness = false
 required-features = ["cpu-profiling"]
 
 [[example]]
+name = "block_in_place_workload"
+required-features = ["cpu-profiling"]
+
+[[example]]
 name = "blocking_pool_tracking"
 required-features = ["cpu-profiling"]
 
@@ -189,10 +193,6 @@ required-features = ["analysis"]
 
 [[example]]
 name = "trace_to_jsonl"
-required-features = ["analysis"]
-
-[[example]]
-name = "trace_to_fat_jsonl"
 required-features = ["analysis"]
 
 [[example]]

@@ -5,10 +5,12 @@
 
 mod common;
 
+use common::{BytesCapturingWriter, decode_all};
 use dial9_tokio_telemetry::memory_profiling::{
     Dial9Allocator, MemoryProfiler, MemoryProfilingConfig,
 };
-use dial9_tokio_telemetry::telemetry::{TelemetryEvent, TracedRuntime};
+use dial9_tokio_telemetry::telemetry::TracedRuntime;
+use dial9_tokio_telemetry::telemetry::analysis_events::Dial9Event;
 use std::time::Duration;
 
 #[global_allocator]
@@ -16,7 +18,7 @@ static ALLOC: Dial9Allocator = Dial9Allocator::system();
 
 #[test]
 fn hook_captures_sampled_allocations() {
-    let (writer, events) = common::CapturingWriter::new();
+    let (writer, batches) = BytesCapturingWriter::new();
 
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.worker_threads(1).enable_all();
@@ -46,10 +48,11 @@ fn hook_captures_sampled_allocations() {
     drop(runtime);
     drop(guard);
 
-    let events = events.lock().unwrap();
+    let b = batches.lock().unwrap();
+    let events: Vec<Dial9Event> = decode_all(&b);
     let allocs: Vec<_> = events
         .iter()
-        .filter(|e| matches!(e, TelemetryEvent::Alloc { .. }))
+        .filter(|e| matches!(e, Dial9Event::AllocEvent(_)))
         .collect();
 
     assert!(
@@ -58,16 +61,11 @@ fn hook_captures_sampled_allocations() {
     );
 
     // Verify the event has reasonable fields.
-    match &allocs[0] {
-        TelemetryEvent::Alloc {
-            size, callchain, ..
-        } => {
-            assert!(*size > 0, "size should be non-zero");
-            assert!(
-                !callchain.is_empty(),
-                "callchain should have at least one frame"
-            );
-        }
-        _ => unreachable!(),
+    if let Dial9Event::AllocEvent(e) = &allocs[0] {
+        assert!(e.size > 0, "size should be non-zero");
+        assert!(
+            !e.callchain.is_empty(),
+            "callchain should have at least one frame"
+        );
     }
 }

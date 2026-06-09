@@ -1,51 +1,40 @@
 //! Verify that sched event timestamps (from perf) align with wall-clock
 //! timestamps from `clock_monotonic_ns()` (CLOCK_MONOTONIC).
-//!
-//! We spawn async tasks that call `std::thread::sleep` for known durations,
-//! recording wall-clock timestamps around each sleep. Sched events (context
-//! switches) must land within the sleep windows — if the perf clock were
-//! CLOCK_MONOTONIC_RAW instead of CLOCK_MONOTONIC, timestamps would drift
-//! and events would fall outside the expected windows.
 
 #![cfg(all(feature = "cpu-profiling", target_os = "linux"))]
 
 mod common;
 
+use common::{BytesCapturingWriter, decode_all};
+use dial9_tokio_telemetry::telemetry::analysis_events::{CpuSampleSource, Dial9Event, WorkerId};
+
 #[test]
 fn sched_event_timestamps_align_with_wall_clock() {
     use dial9_tokio_telemetry::telemetry::TracedRuntime;
+    use dial9_tokio_telemetry::telemetry::clock_monotonic_ns;
     use dial9_tokio_telemetry::telemetry::cpu_profile::SchedEventConfig;
-    use dial9_tokio_telemetry::telemetry::{CpuSampleSource, TelemetryEvent, clock_monotonic_ns};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
-    use crate::common::CapturingWriter;
+    let (writer, batches) = BytesCapturingWriter::new();
 
-    let (writer, events) = CapturingWriter::new();
-
-    let num_workers = 2;
+    let num_workers = 2u64;
     let mut builder = tokio::runtime::Builder::new_multi_thread();
-    builder.worker_threads(num_workers).enable_all();
+    builder.worker_threads(num_workers as usize).enable_all();
 
     let (runtime, guard) = TracedRuntime::builder()
         .with_sched_events(SchedEventConfig::default())
         .build_and_start(builder, writer)
         .unwrap();
 
-    // All timestamps are now absolute CLOCK_MONOTONIC nanoseconds.
     let _trace_start = guard.start_time();
     let sleep_windows: Arc<Mutex<Vec<(u64, u64)>>> = Arc::new(Mutex::new(Vec::new()));
 
     let sleep_duration = Duration::from_millis(1);
-    let num_sleeps = 4;
+    let num_sleeps = 4u64;
 
     runtime.block_on(async {
-        // Warmup: ensure all worker threads are fully initialized and perf
-        // events are flowing before we start measuring. Without this, the
-        // first sleep window can race with worker thread startup — Tokio
-        // spawns workers via the blocking pool and `set_thread_id` /
-        // `resolve_worker_id` may not have run yet, causing sched events
-        // to be attributed to `Blocking` instead of `Worker(i)`.
+        // Warmup
         for _ in 0..num_workers {
             tokio::spawn(async {
                 std::thread::sleep(Duration::from_millis(10));
@@ -53,14 +42,11 @@ fn sched_event_timestamps_align_with_wall_clock() {
             .await
             .unwrap();
         }
-        // Let the flush cycle drain warmup sched events
         tokio::time::sleep(Duration::from_millis(100)).await;
 
-        // Space out sleeps so windows don't overlap
         for i in 0..num_sleeps {
             let windows = sleep_windows.clone();
             tokio::spawn(async move {
-                // Stagger starts so sleeps don't all overlap
                 tokio::time::sleep(Duration::from_millis(i * 100)).await;
                 let before = clock_monotonic_ns();
                 std::thread::sleep(sleep_duration);
@@ -70,29 +56,25 @@ fn sched_event_timestamps_align_with_wall_clock() {
             .await
             .unwrap();
         }
-        // Let flush cycle pick up all sched events
         tokio::time::sleep(Duration::from_millis(500)).await;
     });
 
     drop(runtime);
     drop(guard);
 
-    let events = events.lock().unwrap();
+    let b = batches.lock().unwrap();
+    let events: Vec<Dial9Event> = decode_all(&b);
     let windows = sleep_windows.lock().unwrap();
 
     // Collect sched event timestamps attributed to workers
     let sched_timestamps: Vec<u64> = events
         .iter()
         .filter_map(|e| match e {
-            TelemetryEvent::CpuSample {
-                timestamp_nanos,
-                source,
-                worker_id,
-                ..
-            } if *source == CpuSampleSource::SchedEvent
-                && worker_id.as_u64() < num_workers as u64 =>
+            Dial9Event::CpuSampleEvent(s)
+                if s.source == CpuSampleSource::SchedEvent
+                    && s.worker_id < WorkerId(num_workers) =>
             {
-                Some(*timestamp_nanos)
+                Some(s.timestamp_ns)
             }
             _ => None,
         })
@@ -103,11 +85,7 @@ fn sched_event_timestamps_align_with_wall_clock() {
         "expected sched events attributed to workers"
     );
 
-    // For each sleep window, at least one sched event should fall within it
-    // (the thread going off-CPU when it calls sleep). We allow 1ms of slack
-    // for scheduling jitter. Without the CLOCK_MONOTONIC fix in the sampler,
-    // the offset is ~25ms on typical machines, so this easily catches regressions.
-    let slack_ns = 1_000_000; // 1ms
+    let slack_ns = 1_000_000u64; // 1ms
     for (i, &(start, end)) in windows.iter().enumerate() {
         let in_window: Vec<u64> = sched_timestamps
             .iter()
@@ -141,14 +119,12 @@ fn sched_event_timestamps_align_with_wall_clock() {
         );
     }
 
-    // Verify no sched events have wildly wrong timestamps (would indicate clock mismatch).
-    // All sched events should be after trace start and before now.
+    // Verify no sched events have wildly wrong timestamps
     let now = clock_monotonic_ns();
     for &t in &sched_timestamps {
         assert!(
             t <= now + slack_ns,
-            "sched event timestamp {t}ns exceeds current time {now}ns — \
-             likely clock domain mismatch (CLOCK_MONOTONIC_RAW vs CLOCK_MONOTONIC)"
+            "sched event timestamp {t}ns exceeds current time {now}ns"
         );
     }
 }

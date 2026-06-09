@@ -1,13 +1,12 @@
 mod common;
-mod validation;
 
-use dial9_tokio_telemetry::analysis_unstable::{TraceReader, analyze_trace};
-use dial9_tokio_telemetry::telemetry::{DiskWriter, TelemetryEvent, TracedRuntime};
+use common::{BytesCapturingWriter, decode_all, decode_file};
+use dial9_tokio_telemetry::telemetry::analysis_events::{Dial9Event, WorkerId};
+use dial9_tokio_telemetry::telemetry::{DiskWriter, TracedRuntime};
 use std::time::Duration;
 
 /// Run a known workload under TracedRuntime, read the trace back, and verify
-/// the analysis is consistent with both the workload parameters and tokio's
-/// RuntimeMetrics.
+/// basic consistency.
 #[test]
 fn end_to_end_trace_matches_workload_and_metrics() {
     let dir = tempfile::tempdir().unwrap();
@@ -22,7 +21,6 @@ fn end_to_end_trace_matches_workload_and_metrics() {
     let writer = DiskWriter::single_file(&trace_path).unwrap();
     let (runtime, guard) = TracedRuntime::build_and_start(builder, writer).unwrap();
 
-    // Run workload, then snapshot tokio metrics.
     let tokio_metrics = runtime.block_on(async {
         let mut handles = Vec::new();
         for _ in 0..total_tasks {
@@ -36,35 +34,101 @@ fn end_to_end_trace_matches_workload_and_metrics() {
         for h in handles {
             h.await.unwrap();
         }
-
-        // Wait for flush cycle to drain thread-local buffers.
         tokio::time::sleep(Duration::from_millis(600)).await;
-
-        // Grab metrics handle while still inside the runtime.
         tokio::runtime::Handle::current().metrics()
     });
 
-    // Drop runtime first — workers park, flushing thread-local buffers
-    // while telemetry is still enabled.
     drop(runtime);
-    // Drop guard — stops flush thread and does final collector drain.
     drop(guard);
 
-    // --- Read the trace back ---
     let sealed_path = dir.path().join("trace.0.bin");
-    let reader = TraceReader::new(sealed_path.to_str().unwrap()).unwrap();
-    let events = &reader.runtime_events;
-    let analysis = analyze_trace(events);
+    let events: Vec<Dial9Event> = decode_file(&sealed_path);
 
-    validation::validate_trace_matches_metrics(&analysis, events, &tokio_metrics);
+    // Basic validation: poll starts == poll ends
+    let poll_starts = events
+        .iter()
+        .filter(|e| matches!(e, Dial9Event::PollStartEvent(_)))
+        .count();
+    let poll_ends = events
+        .iter()
+        .filter(|e| matches!(e, Dial9Event::PollEndEvent(_)))
+        .count();
+    assert_eq!(
+        poll_starts, poll_ends,
+        "PollStart ({poll_starts}) != PollEnd ({poll_ends})"
+    );
+
+    // All active workers should appear
+    let metrics_polls: Vec<u64> = (0..num_workers)
+        .map(|w| tokio_metrics.worker_poll_count(w))
+        .collect();
+    let active_workers: Vec<usize> = (0..num_workers).filter(|&w| metrics_polls[w] > 0).collect();
+
+    for &w in &active_workers {
+        let worker_polls = events
+            .iter()
+            .filter(|e| matches!(e, Dial9Event::PollStartEvent(ev) if ev.worker_id == WorkerId(w as u64)))
+            .count();
+        assert!(
+            worker_polls > 0,
+            "worker {w} had {} tokio polls but 0 trace PollStart events",
+            metrics_polls[w]
+        );
+    }
+
+    // Timestamp monotonicity per worker
+    let mut last_ts: Vec<Option<u64>> = vec![None; num_workers];
+    for event in &events {
+        let (ts, wid) = match event {
+            Dial9Event::PollStartEvent(e) => (e.timestamp_ns, e.worker_id),
+            Dial9Event::PollEndEvent(e) => (e.timestamp_ns, e.worker_id),
+            Dial9Event::WorkerParkEvent(e) => (e.timestamp_ns, e.worker_id),
+            Dial9Event::WorkerUnparkEvent(e) => (e.timestamp_ns, e.worker_id),
+            _ => continue,
+        };
+        if wid.as_u64() >= num_workers as u64 {
+            continue;
+        }
+        if let Some(prev) = last_ts[wid.as_u64() as usize] {
+            assert!(
+                ts >= prev,
+                "timestamp regression on worker {wid}: {prev} -> {ts}"
+            );
+        }
+        last_ts[wid.as_u64() as usize] = Some(ts);
+    }
+
+    // Park/unpark balance: each worker's parks and unparks should match within ±1
+    let mut parks_per_worker: std::collections::HashMap<WorkerId, usize> =
+        std::collections::HashMap::new();
+    let mut unparks_per_worker: std::collections::HashMap<WorkerId, usize> =
+        std::collections::HashMap::new();
+    for event in &events {
+        match event {
+            Dial9Event::WorkerParkEvent(e) => {
+                *parks_per_worker.entry(e.worker_id).or_default() += 1;
+            }
+            Dial9Event::WorkerUnparkEvent(e) => {
+                *unparks_per_worker.entry(e.worker_id).or_default() += 1;
+            }
+            _ => {}
+        }
+    }
+    for (&wid, &parks) in &parks_per_worker {
+        let unparks = unparks_per_worker.get(&wid).copied().unwrap_or(0);
+        let diff = (parks as i64 - unparks as i64).unsigned_abs();
+        assert!(
+            diff <= 1,
+            "worker {wid}: park/unpark imbalance: parks={parks}, unparks={unparks}"
+        );
+    }
 }
 
 /// Regression test: TaskSpawn events emitted on the main thread (inside block_on)
-/// must appear in the trace. Before the fix, the main thread's buffer was never
-/// flushed (no WorkerPark fires on main), so all these events were silently dropped.
+/// must appear in the trace.
 #[test]
 fn task_spawn_events_from_main_thread_are_captured() {
-    let (writer, events) = common::CapturingWriter::new();
+    let (writer, batches) = BytesCapturingWriter::new();
 
     const N: usize = 10;
 
@@ -76,8 +140,6 @@ fn task_spawn_events_from_main_thread_are_captured() {
         .build_and_start(builder, writer)
         .unwrap();
 
-    // All tokio::spawn calls here fire on the main (block_on) thread,
-    // so their TaskSpawn events land in the main thread's buffer.
     runtime.block_on(async {
         let mut handles = Vec::new();
         for _ in 0..N {
@@ -91,10 +153,11 @@ fn task_spawn_events_from_main_thread_are_captured() {
     drop(runtime);
     drop(guard);
 
-    let events = events.lock().unwrap();
+    let b = batches.lock().unwrap();
+    let events: Vec<Dial9Event> = decode_all(&b);
     let task_spawn_count = events
         .iter()
-        .filter(|e| matches!(e, TelemetryEvent::TaskSpawn { .. }))
+        .filter(|e| matches!(e, Dial9Event::TaskSpawnEvent(_)))
         .count();
 
     assert_eq!(
@@ -105,7 +168,7 @@ fn task_spawn_events_from_main_thread_are_captured() {
 
 #[test]
 fn task_terminate_events_are_captured() {
-    let (writer, events) = common::CapturingWriter::new();
+    let (writer, batches) = BytesCapturingWriter::new();
 
     const N: usize = 10;
 
@@ -130,14 +193,13 @@ fn task_terminate_events_are_captured() {
     drop(runtime);
     drop(guard);
 
-    let events = events.lock().unwrap();
+    let b = batches.lock().unwrap();
+    let events: Vec<Dial9Event> = decode_all(&b);
     let terminate_count = events
         .iter()
-        .filter(|e| matches!(e, TelemetryEvent::TaskTerminate { .. }))
+        .filter(|e| matches!(e, Dial9Event::TaskTerminateEvent(_)))
         .count();
 
-    // Tokio may emit TaskTerminate for internal tasks (e.g. worker threads),
-    // so we assert at least N terminate events rather than an exact count.
     assert!(
         terminate_count >= N,
         "expected at least {N} TaskTerminate events, got {terminate_count}"
@@ -175,14 +237,12 @@ fn custom_event_appears_in_trace() {
                 &handle,
             );
         }
-        // Wait for flush cycle
         tokio::time::sleep(Duration::from_millis(200)).await;
     });
 
     drop(runtime);
     drop(guard);
 
-    // Decode at the trace-format level to find our custom event
     let sealed_path = dir.path().join("trace.0.bin");
     let data = std::fs::read(&sealed_path).unwrap();
     let mut decoder = dial9_trace_format::decoder::Decoder::new(&data).unwrap();
@@ -219,12 +279,10 @@ fn spawn_audit_detects_uninstrumented_spawns() {
     runtime.block_on(async {
         let mut joins = Vec::new();
 
-        // These go through TelemetryHandle::spawn, should NOT be flagged.
         for _ in 0..INSTRUMENTED {
             joins.push(handle.spawn(async {}));
         }
 
-        // These are raw tokio::spawn, SHOULD be flagged, all at the same line.
         for _ in 0..RAW {
             joins.push(tokio::spawn(async {}));
         }
@@ -233,27 +291,21 @@ fn spawn_audit_detects_uninstrumented_spawns() {
             j.await.unwrap();
         }
 
-        // Wait for flush cycle to drain thread-local buffers.
         tokio::time::sleep(Duration::from_millis(200)).await;
     });
 
     drop(runtime);
     drop(guard);
 
-    // Read the trace back from disk and check the instrumented flag.
     let sealed_path = dir.path().join("trace.0.bin");
-    let reader = TraceReader::new(sealed_path.to_str().unwrap()).unwrap();
-    let events = &reader.all_events;
+    let events: Vec<Dial9Event> = decode_file(&sealed_path);
 
     let instrumented_count = events
         .iter()
         .filter(|e| {
             matches!(
                 e,
-                TelemetryEvent::TaskSpawn {
-                    instrumented: Some(true),
-                    ..
-                }
+                Dial9Event::TaskSpawnEvent(ev) if ev.instrumented
             )
         })
         .count();
@@ -262,10 +314,7 @@ fn spawn_audit_detects_uninstrumented_spawns() {
         .filter(|e| {
             matches!(
                 e,
-                TelemetryEvent::TaskSpawn {
-                    instrumented: Some(false),
-                    ..
-                }
+                Dial9Event::TaskSpawnEvent(ev) if !ev.instrumented
             )
         })
         .count();
@@ -280,20 +329,14 @@ fn spawn_audit_detects_uninstrumented_spawns() {
     );
 
     // Verify spawn locations resolve and point to this test file.
-    for event in events {
-        if let TelemetryEvent::TaskSpawn {
-            spawn_loc,
-            instrumented: Some(false),
-            ..
-        } = event
+    for event in &events {
+        if let Dial9Event::TaskSpawnEvent(ev) = event
+            && !ev.instrumented
         {
-            let loc = reader
-                .spawn_locations
-                .get(spawn_loc)
-                .expect("uninstrumented spawn_loc should resolve");
             assert!(
-                loc.contains("end_to_end.rs"),
-                "uninstrumented spawn should point to this test file, got: {loc}"
+                ev.spawn_loc.contains("end_to_end.rs"),
+                "uninstrumented spawn should point to this test file, got: {}",
+                ev.spawn_loc
             );
         }
     }

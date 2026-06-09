@@ -3,10 +3,14 @@
 #![cfg(target_os = "linux")]
 //! End-to-end test: memory.sample_rate_bytes appears in segment metadata.
 
+mod common;
+
+use common::decode_file;
 use dial9_tokio_telemetry::memory_profiling::{
     Dial9Allocator, MemoryProfiler, MemoryProfilingConfig,
 };
-use dial9_tokio_telemetry::telemetry::{DiskWriter, TelemetryEvent, TracedRuntime};
+use dial9_tokio_telemetry::telemetry::analysis_events::Dial9Event;
+use dial9_tokio_telemetry::telemetry::{DiskWriter, TracedRuntime};
 use std::time::Duration;
 
 #[global_allocator]
@@ -37,14 +41,12 @@ fn memory_sample_rate_appears_in_segment_metadata() {
     .expect("install should succeed");
 
     runtime.block_on(async {
-        // Give the flush thread time to merge source metadata.
         tokio::time::sleep(Duration::from_millis(100)).await;
     });
 
     drop(runtime);
     let _ = guard.graceful_shutdown(Duration::from_secs(5));
 
-    // Read all trace files and find SegmentMetadata events.
     let mut found = false;
     let files: Vec<_> = std::fs::read_dir(dir.path())
         .unwrap()
@@ -54,14 +56,14 @@ fn memory_sample_rate_appears_in_segment_metadata() {
         .collect();
 
     for file in &files {
-        let data = std::fs::read(file).unwrap();
-        let events =
-            dial9_tokio_telemetry::analysis_unstable::decode_events(&data).unwrap_or_default();
+        let events: Vec<Dial9Event> = decode_file(file);
         for event in &events {
-            if let TelemetryEvent::SegmentMetadata { entries, .. } = event {
-                found |= entries
-                    .iter()
-                    .any(|(k, v)| k == "memory.sample_rate_bytes" && v == "2048");
+            if let Dial9Event::SegmentMetadataEvent(m) = event {
+                found |= m
+                    .entries
+                    .get("memory.sample_rate_bytes")
+                    .map(String::as_str)
+                    == Some("2048");
             }
         }
     }

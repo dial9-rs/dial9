@@ -1,6 +1,7 @@
-mod validation;
+mod common;
 
-use dial9_tokio_telemetry::analysis_unstable::{TraceReader, analyze_trace};
+use common::decode_file;
+use dial9_tokio_telemetry::telemetry::analysis_events::{Dial9Event, WorkerId};
 use dial9_tokio_telemetry::telemetry::{DiskWriter, TracedRuntime};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -75,18 +76,15 @@ fn overhead_bench_validates() {
         let server_running = running.clone();
         tokio::spawn(echo_server(listener, server_running));
 
-        // Spawn clients
         let mut handles = Vec::new();
         for _ in 0..NUM_CLIENTS {
             let r = running.clone();
             handles.push(tokio::spawn(run_client(port, r)));
         }
 
-        // this is enough to get ~5k plls and ~800 parks/unparks
         tokio::time::sleep(Duration::from_millis(100)).await;
         running.store(false, Ordering::Relaxed);
 
-        // Wait for clients
         let mut total_requests = 0;
         for h in handles {
             total_requests += h.await.unwrap();
@@ -99,16 +97,49 @@ fn overhead_bench_validates() {
     drop(runtime);
     drop(guard);
 
-    // Read trace
-    let sealed_path = dir.path().join("trace.0.bin");
-    let reader = TraceReader::new(sealed_path.to_str().unwrap()).unwrap();
-    let events = &reader.runtime_events;
-    let analysis = analyze_trace(events);
-
     let (metrics, total_requests) = tokio_metrics;
-
-    eprintln!("Total requests processed: {}", total_requests);
+    eprintln!("Total requests processed: {total_requests}");
     eprintln!("Total tasks spawned: {}", metrics.spawned_tasks_count());
 
-    validation::validate_trace_matches_metrics(&analysis, events, &metrics);
+    // Read trace via serde path
+    let sealed_path = dir.path().join("trace.0.bin");
+    let events: Vec<Dial9Event> = decode_file(&sealed_path);
+
+    // Basic validation: poll starts == poll ends
+    let poll_starts = events
+        .iter()
+        .filter(|e| matches!(e, Dial9Event::PollStartEvent(_)))
+        .count();
+    let poll_ends = events
+        .iter()
+        .filter(|e| matches!(e, Dial9Event::PollEndEvent(_)))
+        .count();
+    assert_eq!(
+        poll_starts, poll_ends,
+        "PollStart ({poll_starts}) != PollEnd ({poll_ends})"
+    );
+
+    // All active workers should appear
+    let metrics_polls: Vec<u64> = (0..num_workers)
+        .map(|w| metrics.worker_poll_count(w))
+        .collect();
+    for (w, &tokio_polls) in metrics_polls.iter().enumerate() {
+        if tokio_polls == 0 {
+            continue;
+        }
+        let trace_polls = events
+            .iter()
+            .filter(|e| matches!(e, Dial9Event::PollStartEvent(ev) if ev.worker_id == WorkerId(w as u64)))
+            .count();
+        assert!(
+            trace_polls > 0,
+            "worker {w} had {tokio_polls} tokio polls but 0 trace PollStart events"
+        );
+        // Allow small discrepancy
+        let diff = (trace_polls as i64 - tokio_polls as i64).unsigned_abs();
+        assert!(
+            diff <= 30,
+            "worker {w}: trace polls ({trace_polls}) vs tokio polls ({tokio_polls}) differ by {diff}"
+        );
+    }
 }

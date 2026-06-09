@@ -2,6 +2,7 @@ name: Security audit
 on:
   push:
     paths:
+      - '.github/workflows/audit.yml'
       - '**/Cargo.toml'
       - '**/Cargo.lock'
   schedule:
@@ -10,6 +11,7 @@ on:
 permissions:
   checks: write
   contents: read
+  issues: write
 
 jobs:
   security_audit:

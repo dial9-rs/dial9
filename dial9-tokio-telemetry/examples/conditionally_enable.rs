@@ -22,8 +22,8 @@ use dial9_tokio_telemetry::telemetry::TelemetryHandle;
 
 fn my_config() -> Dial9Config {
     Dial9Config::builder()
+        .on_disk_buffer("conditionally_enable_trace.bin")
         .enabled(std::env::var("ENABLE_DIAL9").is_ok())
-        .base_path("conditionally_enable_trace.bin")
         .max_file_size(64 * 1024 * 1024)
         .max_total_size(256 * 1024 * 1024)
         .with_tokio(|t| {

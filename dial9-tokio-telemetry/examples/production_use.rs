@@ -10,14 +10,14 @@
 //!
 //! ### Enabling and disabling
 //!
-//! - Setting [`.enabled(false)`](dial9_tokio_telemetry::Dial9ConfigBuilder::enabled) on the config builder produces a
+//! - Setting [`.enabled(false)`](dial9_tokio_telemetry::DiskConfigBuilder::enabled) on the config builder produces a
 //!   pass-through config: the `#[main]` macro builds a plain, unmodified tokio runtime with zero dial9 overhead.
 //!   [`TelemetryHandle::current()`](dial9_tokio_telemetry::telemetry::TelemetryHandle::current) returns an inert
 //!   handle, and `handle.spawn` falls through to `tokio::spawn`, so application code does not need branches.
 //! - Alternatively, you can install dial9 but leave recording disabled at runtime via the handle's
 //!   [`disable()`](dial9_tokio_telemetry::telemetry::TelemetryHandle::disable). The runtime hooks are installed
 //!   but all event writes are no-ops behind a relaxed atomic read. This has slightly more overhead than
-//!   [`.enabled(false)`](dial9_tokio_telemetry::Dial9ConfigBuilder::enabled) but lets a background task flip
+//!   [`.enabled(false)`](dial9_tokio_telemetry::DiskConfigBuilder::enabled) but lets a background task flip
 //!   recording on from dynamic configuration later. It is a larger surface area of code, so it is higher risk.
 //!
 //! > Note! dial9 must be created _before_ your async runtime. dial9 relies on installing itself into the runtime
@@ -301,8 +301,8 @@ fn configure_dial9(opts: &Dial9Opts) -> Dial9Config {
     let (s3_bucket, s3_service) = (opts.s3_bucket.clone(), opts.service_name.clone());
 
     let cfg = Dial9Config::builder()
+        .on_disk_buffer(base_path)
         .enabled(opts.enabled)
-        .base_path(base_path)
         .max_file_size(max_file_size)
         .max_total_size(max_disk)
         .rotation_period(opts.rotation());

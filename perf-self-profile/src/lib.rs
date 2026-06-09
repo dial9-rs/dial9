@@ -38,6 +38,7 @@
 //! ```
 
 pub mod offline_symbolize;
+mod rate_limit;
 mod sampler;
 mod symbolize;
 mod sys;

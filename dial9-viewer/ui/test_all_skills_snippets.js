@@ -39,6 +39,8 @@ function shouldSkip(recipe) {
   if (code.includes("{ ... }") || code === "..." || code === "") return true;
   if (recipe.heading.includes("Setup boilerplate")) return true;
   if (recipe.heading.includes("Working with large directories")) return true;
+  // Slicing operates on a single trace file; meaningless in directory mode.
+  if (recipe.heading.includes("Slicing traces")) return true;
   // Skip pure structure/type definitions
   if (/^\{\s*\n\s*(events|workerSpans|eventType|timestamp):/.test(code)) return true;
   // Skip S3 examples (need a running server)
@@ -233,6 +235,7 @@ async function main() {
       .replace(/:\s*(Histogram)(\|null)?/g, (_, __, n) => ': "Histogram' + (n ? '|null' : '') + '"')
       .replace(/:\s*(number\[\])/g, ': "number[]"')
       .replace(/:\s*(number)(\|null)?/g, (_, __, n) => ': "number' + (n ? '|null' : '') + '"')
+      .replace(/:\s*(string\[\])/g, ': "string[]"')
       .replace(/:\s*(string)(\|null)?/g, (_, __, n) => ': "string' + (n ? '|null' : '') + '"')
       .replace(/:\s*(boolean)/g, ': "boolean"')
       .replace(/:\s*(\w+)\[\]/g, ': "unknown[]"')
@@ -261,6 +264,7 @@ async function main() {
       if (Array.isArray(val)) {
         if (val.length === 0) return '[]';
         if (typeof val[0] === 'number') return 'number[]';
+        if (typeof val[0] === 'string') return 'string[]';
         if (typeof val[0] === 'object' && val[0] !== null) return [toSkeleton(val[0])];
         return 'unknown[]';
       }
@@ -286,6 +290,7 @@ async function main() {
           if (actual === '_empty_') return;
           if (doc.endsWith('|null') && (actual === doc.replace('|null', '') || actual === '_null_')) return;
           if (doc === 'number[]' && actual === '[]') return;
+          if (doc === 'string[]' && actual === '[]') return;
           if (doc === 'unknown[]' && actual === '[]') return;
           deepErrors.push(`${p}: type mismatch (documented: ${doc}, actual: ${actual})`);
           return;
