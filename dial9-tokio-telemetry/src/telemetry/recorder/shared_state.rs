@@ -487,7 +487,7 @@ mod shuttle_tests {
     use crate::primitives::sync::atomic::{AtomicU64, Ordering};
     use crate::primitives::sync::{Arc, Mutex};
     use crate::telemetry::recorder::TelemetryCore;
-    use crate::telemetry::writer::DiskWriter;
+    use crate::telemetry::writer::{DiskWriter, InMemoryWriter};
     use dial9_trace_format::TraceEvent;
     use shuttle::rand::Rng;
     use std::collections::HashMap;
@@ -614,13 +614,14 @@ mod shuttle_tests {
         let num_threads = 3;
         let next_id = Arc::new(AtomicU64::new(0));
 
-        let dir = tempfile::tempdir().unwrap();
-        let writer = DiskWriter::builder()
-            .base_path(dir.path().join("trace"))
-            .max_file_size(256)
+        // Small segments force frequent rotation: the 100 MiB budget is far above the test's data,
+        // so the ring never evicts before we drain it.
+        let writer = InMemoryWriter::builder()
             .max_total_size(100 * 1024 * 1024)
+            .max_segment_size(256)
             .build()
             .unwrap();
+        let fs = writer.fs_handle().expect("in-memory writer exposes its fs");
 
         // Mock source: worker threads push events here, flush thread drains them.
         let source_pending: Arc<Mutex<Vec<ValidationEvent>>> = Arc::new(Mutex::new(Vec::new()));
@@ -672,17 +673,18 @@ mod shuttle_tests {
         }
         drop(guard);
 
-        // Decode per-segment from the sealed `.bin` files.
-        let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(dir.path())
-            .unwrap()
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| p.to_string_lossy().contains(".bin"))
-            .collect();
-        files.sort();
-        let all_decoded: Vec<ValidationEvent> = files
-            .iter()
-            .flat_map(|p| decode_validation_events(&std::fs::read(p).unwrap()))
-            .collect();
+        // Drain the in-memory ring (memory pops one sealed segment per call).
+        let mut all_decoded: Vec<ValidationEvent> = Vec::new();
+        loop {
+            let taken = fs.take_files();
+            if taken.segments.is_empty() {
+                break;
+            }
+            for seg in taken.segments {
+                let (_seg_ref, payload, _accounting) = seg.load().unwrap();
+                all_decoded.extend(decode_validation_events(&payload.into_vec()));
+            }
+        }
         let expected = expected.lock().unwrap();
 
         // Run all invariants.
