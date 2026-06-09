@@ -600,15 +600,15 @@ k²N/8000² second-order self-samples. The geometric series converges fast;
 steady-state self-pollution is ~0.01% of trace events.
 
 **Same-thread reentrancy from `scc`.** When the liveset is on, the
-allocator hook calls into `scc::HashIndex` (`insert`/`peek_with`/`remove`)
-which can in turn allocate (bucket resizes) or free (epoch-reclamation of
-retired buckets). Those re-enter the same hook on the same thread. Both
+allocator hook calls into `scc::HashIndex` (`insert`/`entry`) which can
+in turn allocate (bucket resizes) or free (epoch-reclamation of retired
+buckets). Those re-enter the same hook on the same thread. Both
 `on_alloc` and `on_dealloc` defend against this with a per-thread
 `SAMPLE_STATE` `RefCell` borrow taken across the whole liveset
 operation: a re-entrant call sees the borrow already held, gets `Err`
 from `try_borrow_mut`, and silently skips. This makes a same-thread
-deadlock between an outer `remove`'s bucket write lock and a re-entrant
-`remove` on the same bucket impossible. The shutdown-drain branch of
+deadlock between an outer `entry`'s bucket write lock and a re-entrant
+`entry` on the same bucket impossible. The shutdown-drain branch of
 `on_dealloc` deliberately sits *outside* this guard — it never touches
 `scc`/`sdd` and `SAMPLE_STATE`'s `LocalKey` may already be destroyed
 late in TLS teardown, so a guarded `try_with` would silently drop the
@@ -890,8 +890,8 @@ Protocol:
    let Some((size, alloc_ts_ns)) = liveset.peek_with(&f.addr, |_, v| *v) else {
        return; // already cleaned, or never sampled
    };
-   if alloc_ts_ns > f.ts_ns {
-       return; // race: address reused; leave entry for the new alloc
+   if alloc_ts_ns >= f.ts_ns {
+       return; // race or timestamp tie: leave entry for the new alloc
    }
    liveset.remove(&f.addr);
    enc.encode(&FreeEvent { ts_ns: f.ts_ns, addr: f.addr, size, alloc_ts_ns, .. });
@@ -901,12 +901,15 @@ Protocol:
    consolidator's drain (~5 ms later), a *live* thread may have freed
    some unrelated sampled alloc at the same address and `on_alloc` may
    have re-keyed the entry to a new allocation. The
-   `alloc_ts_ns > f.ts_ns` check identifies this exact case: the new
-   alloc's `alloc_ts_ns` is strictly greater than the older shutdown
+   `alloc_ts_ns >= f.ts_ns` check identifies this case: the new
+   alloc's `alloc_ts_ns` is greater than or equal to the older shutdown
    push's `ts_ns` because **all memory profile timestamps are
-   `clock_monotonic_ns()`** — globally monotonic across threads. On
-   race, we leave the entry in place; the new alloc's eventual
-   non-shutdown free will emit the correct event.
+   `clock_monotonic_ns()`** — globally monotonic across threads. The
+   `>=` (rather than strict `>`) handles ties: `clock_monotonic_ns()`
+   can return the same value on nearby cores, and treating a tie as a
+   race conservatively avoids removing a live entry. On race, we leave
+   the entry in place; the new alloc's eventual non-shutdown free will
+   emit the correct event.
 
    In the race case we lose the *original* (dying-thread) alloc's
    `FreeEvent` — same outcome as the pre-shutdown-drain design — but we

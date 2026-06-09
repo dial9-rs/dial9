@@ -224,6 +224,8 @@ pub(crate) fn on_alloc(inner: &MemoryProfilerInner, ptr: *mut u8, size: usize) {
                 match liveset.entry(k) {
                     Entry::Occupied(o) => o.update(v),
                     Entry::Vacant(ve) => {
+                        // Concurrent dealloc removed the stale entry between our
+                        // `insert` and `entry` — treat as fresh insert.
                         let _ = ve.insert_entry(v);
                     }
                 }
@@ -247,22 +249,21 @@ pub(crate) fn on_alloc(inner: &MemoryProfilerInner, ptr: *mut u8, size: usize) {
 /// and emits a `FreeEvent` on hit. This recovers dying-thread frees and
 /// bounds liveset growth across thread churn. See
 /// `MemoryProfileSource::handle_free` for the consumer side, including the
-/// `alloc_ts_ns <= free.ts_ns` race check.
+/// `alloc_ts_ns >= free.ts_ns` race-detection check.
 ///
 /// **Re-entrancy guard.** The non-shutdown branch takes the
 /// `SAMPLE_STATE` `RefCell` borrow as a per-thread re-entrancy guard,
-/// symmetric with `on_alloc`. `liveset.peek_with` and `liveset.remove`
-/// are documented as allocation-free on the hot path, but `scc`'s
-/// epoch-based reclamation (via `sdd`) can free retired buckets when an
-/// epoch guard drops, and `remove` takes a per-bucket write lock — so a
-/// re-entrant `on_dealloc` from inside `scc` internals could in theory
-/// hit the same bucket the outer `remove` already holds locked and
-/// deadlock against itself. The guard makes that impossible by
-/// short-circuiting the inner call. The shutdown branch sits *outside*
-/// the guard because (a) it never touches `scc`/`sdd` (just a
-/// queue-CAS push) and (b) `SAMPLE_STATE`'s `LocalKey` may already be
-/// destroyed late in TLS teardown — `try_with` would return `Err` and
-/// silently drop the dying thread's free, defeating the shutdown drain.
+/// symmetric with `on_alloc`. `liveset.entry` acquires a per-bucket
+/// write lock, and `scc`'s epoch-based reclamation (via `sdd`) can free
+/// retired buckets when an epoch guard drops — so a re-entrant
+/// `on_dealloc` from inside `scc` internals could in theory hit the
+/// same bucket the outer `entry` already holds locked and deadlock
+/// against itself. The guard makes that impossible by short-circuiting
+/// the inner call. The shutdown branch sits *outside* the guard because
+/// (a) it never touches `scc`/`sdd` (just a queue-CAS push) and (b)
+/// `SAMPLE_STATE`'s `LocalKey` may already be destroyed late in TLS
+/// teardown — `try_with` would return `Err` and silently drop the
+/// dying thread's free, defeating the shutdown drain.
 ///
 /// SAFETY: must be allocation-free — see module docs.
 #[inline]
@@ -291,19 +292,21 @@ pub(crate) fn on_dealloc(inner: &MemoryProfilerInner, ptr: *mut u8, _size: usize
     // Non-shutdown branch: take the SAMPLE_STATE borrow as a re-entrancy
     // guard. If a prior `on_alloc`/`on_dealloc` frame on this thread is
     // still on the stack and holds the borrow, skip — otherwise the
-    // re-entrant `liveset.remove` could deadlock against the outer one
-    // on a shared bucket lock, and any allocation triggered inside `scc`
+    // re-entrant `liveset.entry` could deadlock against the outer one on
+    // a shared bucket lock, and any allocation triggered inside `scc`
     // would otherwise be unguarded.
     let _ = SAMPLE_STATE.try_with(|cell| {
         let Ok(_state) = cell.try_borrow_mut() else {
             return;
         };
-        // peek_with returns Some if the address is in the liveset (was
-        // sampled). On hit, remove it and push a RawFree with the
-        // denormalized metadata.
-        let entry = liveset.peek_with(&addr, |_, v| *v);
-        if let Some((size, alloc_ts_ns)) = entry {
-            liveset.remove(&addr);
+        // Use the entry() API for atomic peek + remove. The bucket lock
+        // is held for the duration of the Entry, so a concurrent on_alloc
+        // overwriting the same address cannot interleave between our read
+        // and remove — preventing stale metadata on the emitted RawFree.
+        use scc::hash_index::Entry;
+        if let Entry::Occupied(o) = liveset.entry(addr) {
+            let (size, alloc_ts_ns) = *o.get();
+            o.remove_entry();
             let sample = RawFree {
                 tid: current_tid(),
                 addr,

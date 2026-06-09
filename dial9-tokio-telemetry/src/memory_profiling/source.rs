@@ -104,15 +104,16 @@ impl MemoryProfileSource {
         // - **Shutdown-flagged frees** were pushed by a thread in TLS
         //   teardown that couldn't safely touch `scc`. Do the peek/remove
         //   here, with a race check: if the entry's `alloc_ts_ns` is
-        //   greater than `f.ts_ns`, an address-reuse race means the entry
-        //   now belongs to a *later* allocation. Leave it; the new alloc's
-        //   eventual non-shutdown free will emit the correct event.
+        //   greater than or equal to `f.ts_ns`, an address-reuse race (or
+        //   timestamp tie on nearby cores) means the entry now belongs to a
+        //   *later* allocation. Leave it; the new alloc's eventual
+        //   non-shutdown free will emit the correct event.
         let (size, alloc_ts_ns) = if f.shutdown {
             let Some((size, alloc_ts_ns)) = liveset.peek_with(&f.addr, |_, v| *v) else {
                 return; // already cleaned, or never sampled
             };
-            if alloc_ts_ns > f.ts_ns {
-                return; // address-reuse race — see comment above
+            if alloc_ts_ns >= f.ts_ns {
+                return; // address-reuse race or timestamp tie — see comment above
             }
             liveset.remove(&f.addr);
             (size, alloc_ts_ns)
@@ -776,5 +777,49 @@ mod tests {
             .filter(|e| matches!(e, Dial9Event::FreeEvent(..)))
             .collect();
         assert_eq!(frees.len(), 0);
+    }
+
+    /// Timestamp tie: the shutdown-flagged free has the SAME timestamp as the
+    /// liveset entry's `alloc_ts_ns`. This can happen when `clock_monotonic_ns()`
+    /// returns the same value on nearby cores. The consolidator must treat ties
+    /// conservatively: skip the drain rather than risk removing a live entry that
+    /// belongs to a concurrent new allocation with the same timestamp.
+    #[test]
+    fn shutdown_drain_skips_on_timestamp_tie() {
+        let rings = rings(16, 16);
+        let liveset = fresh_liveset();
+        // Liveset entry has alloc_ts_ns = 100.
+        liveset.insert(0xBBCC, (2048, 100)).expect("liveset insert");
+
+        // Shutdown free also has ts_ns = 100 (tie).
+        rings
+            .free_queue
+            .push(make_shutdown_free(0xBBCC, 100, 3))
+            .ok();
+
+        let shared = new_shared();
+        shared.push_source(Box::new(MemoryProfileSource::new(
+            Arc::clone(&rings),
+            Some(Arc::clone(&liveset)),
+            512 * 1024,
+        )));
+
+        let events = flush_and_collect(&shared);
+        let frees: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e, Dial9Event::FreeEvent(..)))
+            .collect();
+        assert_eq!(
+            frees.len(),
+            0,
+            "timestamp tie must be treated as a race — no FreeEvent emitted"
+        );
+
+        // Entry must remain intact.
+        assert_eq!(
+            liveset.peek_with(&0xBBCC, |_, v| *v),
+            Some((2048, 100)),
+            "liveset entry must survive when timestamps tie"
+        );
     }
 }
