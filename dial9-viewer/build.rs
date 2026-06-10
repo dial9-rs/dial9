@@ -45,7 +45,7 @@ fn main() {
             let body = strip_frontmatter(&skill_md);
 
             // Collect all files in the skill directory (recursively)
-            let mut files: Vec<(String, String)> = Vec::new(); // (relative_path, absolute_path)
+            let mut files: Vec<(String, RelReference)> = Vec::new(); // (relative_path, src_rel)
             collect_files(&dir_path, &dir_path, &mut files);
 
             skills.push(SkillInfo {
@@ -78,8 +78,8 @@ fn main() {
 
     // HEADER constant
     code.push_str(&format!(
-        "pub const HEADER: &str = include_str!({:?});\n\n",
-        resolve_path(&header_path)
+        "pub const HEADER: &str = {};\n\n",
+        env_dir_include_str("OUT_DIR", "header.md")
     ));
 
     // Write stripped body files to OUT_DIR for the `skill` command
@@ -97,19 +97,19 @@ fn main() {
     code.push_str("}\n\n");
     code.push_str("pub const SKILL_DIRS: &[SkillDir] = &[\n");
     for skill in &skills {
-        let body_path = Path::new(&out_dir).join(format!("{}-body.md", skill.name));
         code.push_str("    SkillDir {\n");
         code.push_str(&format!("        name: {:?},\n", skill.name));
         code.push_str(&format!("        description: {:?},\n", skill.description));
         code.push_str(&format!(
-            "        body: include_str!({:?}),\n",
-            resolve_path(&body_path)
+            "        body: {},\n",
+            env_dir_include_str("OUT_DIR", &format!("{}-body.md", skill.name))
         ));
         code.push_str("        files: &[\n");
-        for (rel, abs) in &skill.files {
+        for (rel, src_rel) in &skill.files {
             code.push_str(&format!(
-                "            ({:?}, include_str!({:?})),\n",
-                rel, abs
+                "            ({:?}, {}),\n",
+                rel,
+                rel_ref_include_str(src_rel)
             ));
         }
         code.push_str("        ],\n");
@@ -121,10 +121,14 @@ fn main() {
     let toolkit_skill = skills.iter().find(|s| s.name == "dial9-toolkit");
     code.push_str("pub const TOOLKIT_FILES: &[(&str, &str)] = &[\n");
     if let Some(tk) = toolkit_skill {
-        for (rel, abs) in &tk.files {
+        for (rel, src_rel) in &tk.files {
             if rel.starts_with("scripts/") {
                 let filename = rel.strip_prefix("scripts/").unwrap();
-                code.push_str(&format!("    ({:?}, include_str!({:?})),\n", filename, abs));
+                code.push_str(&format!(
+                    "    ({:?}, {}),\n",
+                    filename,
+                    rel_ref_include_str(src_rel)
+                ));
             }
         }
     }
@@ -133,22 +137,54 @@ fn main() {
     fs::write(dest, code).unwrap();
 }
 
+enum RelReference {
+    SrcRel(String),
+    OutRel(String),
+}
+
 struct SkillInfo {
     name: String,
     description: String,
     body: String,
-    files: Vec<(String, String)>, // (relative_path, resolved_absolute_path)
+    files: Vec<(String, RelReference)>, // (relative_path, rel_src)
 }
 
-fn resolve_path(path: &Path) -> String {
-    fs::canonicalize(path)
-        .unwrap_or_else(|_| path.to_path_buf())
-        .to_string_lossy()
-        .to_string()
+fn env_dir_include_str(env: &str, path: &str) -> String {
+    format!("include_str!(concat!(env!(\"{env}\"), \"/{path}\"))")
+}
+
+fn rel_ref_include_str(src_rel: &RelReference) -> String {
+    match src_rel {
+        RelReference::SrcRel(path) => env_dir_include_str("CARGO_MANIFEST_DIR", path),
+        RelReference::OutRel(path) => env_dir_include_str("OUT_DIR", path),
+    }
+}
+
+fn resolve_path(path: &Path) -> RelReference {
+    let res = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let src_dir = fs::canonicalize(env::var("CARGO_MANIFEST_DIR").unwrap()).unwrap();
+    let out_dir = fs::canonicalize(env::var("OUT_DIR").unwrap()).unwrap();
+    if res.starts_with(&src_dir) {
+        RelReference::SrcRel(
+            res.strip_prefix(&src_dir)
+                .unwrap()
+                .to_path_buf()
+                .to_string_lossy()
+                .to_string(),
+        )
+    } else {
+        RelReference::OutRel(
+            res.strip_prefix(&out_dir)
+                .unwrap()
+                .to_path_buf()
+                .to_string_lossy()
+                .to_string(),
+        )
+    }
 }
 
 /// Recursively collect all files in a directory, resolving symlinks.
-fn collect_files(base: &Path, dir: &Path, out: &mut Vec<(String, String)>) {
+fn collect_files(base: &Path, dir: &Path, out: &mut Vec<(String, RelReference)>) {
     let mut entries: Vec<_> = fs::read_dir(dir).unwrap().filter_map(|e| e.ok()).collect();
     entries.sort_by_key(|e| e.file_name());
 
