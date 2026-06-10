@@ -17,7 +17,7 @@ pub use builder::{
     TracedRuntimeBuilder,
 };
 pub use guard::{TelemetryGuard, TraceRuntimeCoreBuilder};
-pub use handle::{RuntimeTelemetryHandle, TelemetryHandle, spawn};
+pub use handle::{RecorderHandle, RuntimeTelemetryHandle, TelemetryHandle, spawn};
 
 mod tokio_hooks;
 pub use tokio_hooks::TokioHooks;
@@ -200,7 +200,7 @@ fn register_hooks(
     // Unified on_thread_start / on_thread_stop. Tokio only stores one
     // callback per hook, so any feature-gated work must live here rather
     // than registering its own hook.
-    let handle_for_tl = TelemetryHandle::enabled(shared.clone(), control_tx.clone());
+    let handle_for_tl = RecorderHandle::enabled(shared.clone(), control_tx.clone());
     #[cfg(feature = "cpu-profiling")]
     let s_start = shared.clone();
     #[cfg(feature = "cpu-profiling")]
@@ -280,7 +280,7 @@ fn attach_runtime(
     // this thread IS the worker (block_on runs here), so the tracing layer
     // needs CURRENT_HANDLE to be set. Harmless for multi_thread runtimes.
     CURRENT_HANDLE.with(|cell| {
-        *cell.borrow_mut() = Some(TelemetryHandle::enabled(shared.clone(), control_tx.clone()));
+        *cell.borrow_mut() = Some(RecorderHandle::enabled(shared.clone(), control_tx.clone()));
     });
 
     // Pre-reserve a contiguous block of worker IDs and set metrics atomically.
