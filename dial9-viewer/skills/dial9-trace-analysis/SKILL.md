@@ -113,7 +113,16 @@ process.stderr.write('\n');
   // ── CPU profiling ──
   callframeSymbols: Map<address, {symbol, location}|[{symbol, location}]>, // address → resolved symbol (array for inlined frames)
   cpuGroups: [{count, leaf, leafRaw, frames}],       // on-CPU sample groups, sorted by count descending
-  schedGroups: [{count, leaf, leafRaw, frames}],     // off-CPU sample groups, sorted by count descending
+  schedGroups: [{count, leaf, leafRaw, frames}],     // off-CPU sample groups (all), sorted by count descending
+
+  // ── Off-CPU split: real blocking vs idle parking ──
+  // An off-CPU sample inside a poll = a task blocked mid-poll (real blocking);
+  // between polls = a worker parked with no work (idle, though itself a futex/condvar wait).
+  // Caveat: an async lock wait (lock().await) ends the poll, so it counts as idle, not in-poll.
+  inPollGroups: [{count, leaf, leafRaw, frames}],    // in-poll (real blocking) sample groups, sorted by count descending
+  offCpuInPollCount: number,        // off-CPU samples taken inside a poll (real blocking)
+  offCpuIdleCount: number,          // off-CPU samples taken between polls (idle parking)
+  inPollByLoc: [{loc, count}],      // in-poll blocking sample count by task spawn location, sorted by count descending
 
   // ── Histograms ──
   spanStats: Map<spanName, Histogram>,      // tracing span duration histograms (ns)

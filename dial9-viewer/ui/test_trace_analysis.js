@@ -184,6 +184,89 @@ async function main() {
     );
   }
 
+  function testInPollFlagMatchesAttachment() {
+    // attachCpuSamples must set sample.inPoll === true iff the sample was
+    // attached to a poll (the in-poll = real-blocking signal). Cross-check the
+    // flag against ground truth: the set of samples actually attached to polls.
+    const attached = new Set();
+    for (const w of workerIds) {
+      for (const p of workerSpans[w].polls) {
+        for (const s of p.cpuSamples || []) attached.add(s);
+        for (const s of p.schedSamples || []) attached.add(s);
+      }
+    }
+    let mismatches = 0;
+    for (const s of trace.cpuSamples) {
+      if (!!s.inPoll !== attached.has(s)) mismatches++;
+    }
+    if (mismatches > 0)
+      fail(`${mismatches} sample(s) have inPoll inconsistent with poll attachment`);
+    pass(`inPoll flag matches poll attachment for all ${trace.cpuSamples.length} samples`);
+  }
+
+  function testOffCpuSplitIsExhaustive() {
+    // Splitting off-CPU samples by inPoll must partition them exactly: every
+    // off-CPU sample is either in-poll (real blocking) or idle-park, never both
+    // or neither. This is the invariant the BLOCKING CALLS report relies on.
+    const offCpu = trace.cpuSamples.filter((s) => s.source === 1);
+    const inPoll = offCpu.filter((s) => s.inPoll);
+    const idle = offCpu.filter((s) => !s.inPoll);
+    if (inPoll.length + idle.length !== offCpu.length)
+      fail(
+        `off-CPU split not exhaustive: ${inPoll.length} + ${idle.length} != ${offCpu.length}`
+      );
+    pass(
+      `off-CPU split exhaustive: ${offCpu.length} = ${inPoll.length} in-poll + ${idle.length} idle-park`
+    );
+  }
+
+  function testSchedDelayMidPollWakeAdjustment() {
+    // Bug-1 regression guard: the mid-poll wake adjustment. If a wake lands
+    // inside an earlier poll of the same task, the delay must be measured from
+    // that poll's end, not the wake itself. The demo trace may not exercise
+    // this branch, so drive it with a synthetic two-poll task.
+    const ws = {
+      0: {
+        polls: [
+          { taskId: 1, start: 100, end: 200 },
+          { taskId: 1, start: 500, end: 600 },
+        ],
+      },
+    };
+    // Wake at t=150 lands inside the first poll [100,200].
+    const wakes = { 1: [{ timestamp: 150, wakerTaskId: 9 }] };
+    const r = computeSchedulingDelays(ws, [0], wakes);
+    // For poll #2 (start=500), effectiveWake should snap to poll #1.end = 200,
+    // giving delay = 500 - 200 = 300 (not 500 - 150 = 350).
+    if (r.length !== 1) fail(`expected 1 sched delay, got ${r.length}`);
+    if (r[0].wakeTime !== 200 || r[0].delay !== 300)
+      fail(
+        `mid-poll wake not adjusted: wakeTime=${r[0].wakeTime} delay=${r[0].delay} (expected 200/300)`
+      );
+    pass("mid-poll wake adjusted to containing poll's end (binary search)");
+  }
+
+  function testSchedDelayWakeInGapUnadjusted() {
+    // Counterpart: a wake that falls in the gap between polls (inside no poll)
+    // must NOT be adjusted — delay is measured straight from the wake.
+    const ws = {
+      0: {
+        polls: [
+          { taskId: 1, start: 100, end: 200 },
+          { taskId: 1, start: 500, end: 600 },
+        ],
+      },
+    };
+    const wakes = { 1: [{ timestamp: 300, wakerTaskId: 9 }] }; // in gap (200,500)
+    const r = computeSchedulingDelays(ws, [0], wakes);
+    if (r.length !== 1) fail(`expected 1 sched delay, got ${r.length}`);
+    if (r[0].wakeTime !== 300 || r[0].delay !== 200)
+      fail(
+        `gap wake wrongly adjusted: wakeTime=${r[0].wakeTime} delay=${r[0].delay} (expected 300/200)`
+      );
+    pass("wake in inter-poll gap left unadjusted");
+  }
+
   // ── extractLocalQueueSamples (via buildWorkerSpans) ──
 
   function testLocalQueueNonNegative() {
@@ -1015,6 +1098,8 @@ async function main() {
   console.log("\nattachCpuSamples:");
   testAttachedSamplesWithinPollBounds();
   testCpuResultCounts();
+  testInPollFlagMatchesAttachment();
+  testOffCpuSplitIsExhaustive();
 
   console.log("\nextractLocalQueueSamples:");
   testLocalQueueNonNegative();
@@ -1034,6 +1119,8 @@ async function main() {
   testDelaysBounded();
   testWakeBeforePoll();
   testDelaysSorted();
+  testSchedDelayMidPollWakeAdjustment();
+  testSchedDelayWakeInGapUnadjusted();
 
   console.log("\nfilterPointsOfInterest:");
   testLongPollFilter();
