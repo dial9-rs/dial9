@@ -2561,7 +2561,7 @@
                     const name = meta?.spanName || focusedSpan?.spanName || "Span";
                     let html = `<div style="color:#ccc;margin-bottom:3px">${esc(name)}</div>`;
                     for (const [k, v] of Object.entries(fields)) {
-                        const val = String(v);
+                        const val = formatFieldValue(v);
                         html += `<div class="kv-row"><span class="kv-key">${esc(k)}:</span><span class="kv-val" title="${esc(val)}">${esc(val)}</span><button class="kv-copy" data-val="${esc(val)}">⎘</button></div>`;
                     }
                     label.innerHTML = html;
@@ -2679,7 +2679,7 @@
                         if (rep.fields && typeof rep.fields === "object") {
                             const entries = Object.entries(rep.fields);
                             if (entries.length > 0) {
-                                html += `<br><span class="label">Fields:</span> <span class="value">${entries.map(([k, v]) => esc(k) + "=" + esc(String(v))).join(", ")}</span>`;
+                                html += `<br><span class="label">Fields:</span> <span class="value">${entries.map(([k, v]) => esc(k) + "=" + esc(formatFieldValue(v, rep.units?.[k]))).join(", ")}</span>`;
                             }
                         }
                     } else {
@@ -2807,7 +2807,7 @@
                         const entries = Object.entries(ev.fields || {});
                         if (entries.length > 0) {
                             for (const [k, v] of entries) {
-                                html += `<br><span class="label">${esc(k)}:</span> <span class="value">${esc(String(v))}</span>`;
+                                html += `<br><span class="label">${esc(k)}:</span> <span class="value">${esc(formatFieldValue(v, ev.units?.[k]))}</span>`;
                             }
                         }
                         html += `<br><span class="label">@</span> <span class="value">${fmtTs(ev.timestamp)}</span>`;
