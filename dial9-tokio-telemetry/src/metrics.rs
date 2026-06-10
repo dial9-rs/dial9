@@ -35,6 +35,13 @@ pub(crate) struct FlushMetrics {
 
     /// True when finalizing (sealing) the segment failed during the final flush.
     pub finalize_failed: bool,
+
+    /// True on the cycle where a real `ENOSPC` wiped dial9's footprint and
+    /// disabled telemetry for the process lifetime (ADR-0003 §6).
+    pub disk_full_encountered: bool,
+
+    /// True when this flush's write/seal/rotate failed with `ENOSPC`.
+    pub write_stopped_no_space: bool,
 }
 
 /// Metrics emitted once per worker cycle
@@ -59,11 +66,30 @@ pub(crate) struct WorkerCycleMetrics {
     /// `None` on disk (no per-stage mutation tracking).
     #[metrics(unit = metrique::unit::Byte)]
     pub memory_peak_in_flight_bytes: Option<u64>,
-    /// Segments evicted during this event's window (disk: `evict_oldest`,
+    /// Segments evicted during this event's window (disk: `DiskFs` eviction,
     /// memory: ring overflow).
     pub segments_evicted: u64,
+    /// Bytes evicted during this event's window. Disk only meaningful (`0` on
+    /// memory).
+    #[metrics(unit = Byte)]
+    pub bytes_evicted: u64,
     /// Segments handed into the pipeline during this cycle.
     pub segments_dispatched: u64,
+    /// Total retained on-disk bytes after the cycle's reconcile. `None` on
+    /// memory (its ring is self-bounding).
+    #[metrics(unit = Byte)]
+    pub retained_bytes: Option<u64>,
+    /// Retained segment families after the cycle's reconcile. `None` on memory.
+    pub retained_segments: Option<u64>,
+    /// The retention budget (`max_total_size`), so utilization is derivable.
+    /// `None` on memory.
+    #[metrics(unit = Byte)]
+    pub retention_budget_bytes: Option<u64>,
+    /// `|model - scan|` byte drift at reconcile; non-zero means something
+    /// mutated trace files outside `DiskFs` — a canary for the exact-model
+    /// invariant. `None` on memory.
+    #[metrics(unit = Byte)]
+    pub reconcile_drift_bytes: Option<u64>,
 }
 
 /// Per-cycle counters produced by the intrusive thread-local buffer

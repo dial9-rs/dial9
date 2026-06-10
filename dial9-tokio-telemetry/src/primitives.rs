@@ -133,10 +133,64 @@ pub(crate) mod fs {
     use std::io::{self, Write};
     use std::path::Path;
 
+    // ── Test-only ENOSPC fault injection ────────────────────────────────────
+    //
+    // Lets ordinary `cargo test` drive the disk-full path deterministically
+    // (ADR-0003 §6) without a real out-of-space volume. Armed per-thread via
+    // `arm_enospc`; honored by `create`, `File::write`, and `rename` — the
+    // points where the writer/worker actually hit `ENOSPC`.
+    #[cfg(test)]
+    mod fault {
+        use std::cell::Cell;
+        use std::io;
+
+        thread_local! {
+            static ENOSPC: Cell<bool> = const { Cell::new(false) };
+        }
+
+        /// Arm synthetic `ENOSPC` for the current thread until the returned
+        /// guard drops.
+        #[must_use]
+        pub(crate) fn arm_enospc() -> EnospcGuard {
+            let prev = ENOSPC.with(|f| f.replace(true));
+            EnospcGuard { prev }
+        }
+
+        pub(crate) struct EnospcGuard {
+            prev: bool,
+        }
+        impl Drop for EnospcGuard {
+            fn drop(&mut self) {
+                ENOSPC.with(|f| f.set(self.prev));
+            }
+        }
+
+        pub(super) fn check() -> io::Result<()> {
+            if ENOSPC.with(|f| f.get()) {
+                Err(io::Error::from_raw_os_error(libc::ENOSPC))
+            } else {
+                Ok(())
+            }
+        }
+    }
+    #[cfg(test)]
+    pub(crate) use fault::arm_enospc;
+
+    #[cfg(test)]
+    fn enospc_check() -> io::Result<()> {
+        fault::check()
+    }
+    #[cfg(not(test))]
+    #[inline]
+    fn enospc_check() -> io::Result<()> {
+        Ok(())
+    }
+
     pub(crate) fn create_dir_all(path: &Path) -> io::Result<()> {
         std::fs::create_dir_all(path)
     }
     pub(crate) fn rename(from: &Path, to: &Path) -> io::Result<()> {
+        enospc_check()?;
         std::fs::rename(from, to)
     }
     pub(crate) fn remove_file(path: &Path) -> io::Result<()> {
@@ -158,6 +212,7 @@ pub(crate) mod fs {
 
     impl File {
         pub(crate) fn create(path: &Path) -> io::Result<File> {
+            enospc_check()?;
             std::fs::File::create(path).map(File)
         }
     }
@@ -165,6 +220,7 @@ pub(crate) mod fs {
     impl Write for File {
         #[inline]
         fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            enospc_check()?;
             self.0.write(buf)
         }
         #[inline]

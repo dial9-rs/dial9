@@ -6,7 +6,6 @@
 //! - `Fs::Disk(DiskFs)`: real filesystem. See [`disk`].
 //! - `Fs::Mem(MemFs)`: in-process ring channel. See [`mem`].
 
-use std::collections::VecDeque;
 use std::io::{self, Write};
 use std::path::Path;
 use std::time::Duration;
@@ -24,6 +23,7 @@ mod disk;
 mod mem;
 
 use disk::DiskFs;
+pub(crate) use disk::is_enospc;
 pub(crate) use mem::MEMORY_RETRY_BUDGET;
 use mem::{MemActiveWriter, MemFs};
 
@@ -31,15 +31,20 @@ use mem::{MemActiveWriter, MemFs};
 /// 1 active buffer + 1 in-flight segment.
 pub(crate) const PIPELINE_RESERVE_SEGMENTS: u64 = 2;
 
-/// Retained trace artifacts found at writer construction.
+/// Retained trace artifacts found at writer construction. The per-family byte
+/// sizes are seeded directly into `DiskFs`'s model by `discover_existing`; the
+/// writer only needs `next_active_index`.
 #[derive(Debug, Default)]
 pub(crate) struct DiscoveredArtifacts {
-    pub(crate) closed_files: VecDeque<(SegmentRef, u64)>,
     pub(crate) next_active_index: u32,
 }
 
 pub(crate) enum RemoveReason {
-    /// Writer-side backpressure shed. Counts toward `dropped_segments`.
+    /// Explicit eviction shed. Counts toward `dropped_segments`/`bytes_evicted`.
+    /// `DiskFs::evict_to_budget` is the primary eviction path and accounts
+    /// directly; this variant covers callers that remove a specific segment
+    /// and want it counted as an eviction.
+    #[cfg_attr(not(test), allow(dead_code))]
     Eviction,
     /// Worker cleanup after terminal pipeline failure.
     Terminal,
@@ -203,6 +208,17 @@ pub(crate) struct TakenFiles {
     pub(crate) in_flight_bytes_peak: Option<u64>,
     /// Segments evicted during this cycle (per-cycle delta).
     pub(crate) segments_dropped: u64,
+    /// Bytes evicted during this cycle (per-cycle delta).
+    pub(crate) bytes_evicted: u64,
+    /// Total retained on-disk bytes after the cycle's reconcile. `None` on memory.
+    pub(crate) retained_bytes: Option<u64>,
+    /// Retained segment families after the cycle's reconcile. `None` on memory.
+    pub(crate) retained_segments: Option<u64>,
+    /// The retention budget (`max_total_size`). `None` on memory.
+    pub(crate) retention_budget_bytes: Option<u64>,
+    /// `|model - scan|` drift at the cycle's reconcile; non-zero means
+    /// something mutated trace files outside `DiskFs`. `None` on memory.
+    pub(crate) reconcile_drift_bytes: Option<u64>,
 }
 
 /// Unified filesystem abstraction covering the writer↔worker seam.
@@ -220,8 +236,12 @@ impl Fs {
         }
     }
 
-    pub(crate) fn new_disk(base_path: &Path) -> Arc<Self> {
-        Arc::new(Fs::Disk(DiskFs::from_base_path(base_path)))
+    pub(crate) fn new_disk(base_path: &Path, max_total_size: u64, max_file_size: u64) -> Arc<Self> {
+        Arc::new(Fs::Disk(DiskFs::new(
+            base_path,
+            max_total_size,
+            max_file_size,
+        )))
     }
 
     /// Ring budget = `max_total_size - PIPELINE_RESERVE_SEGMENTS * max_segment_size`.
@@ -263,10 +283,55 @@ impl Fs {
         active_handle: ActiveHandle,
         active_path: &Path,
         index: u32,
+        sealed_size: u64,
     ) -> io::Result<SegmentRef> {
         match self {
-            Fs::Disk(d) => d.seal(active_handle, active_path, index),
+            Fs::Disk(d) => d.seal(active_handle, active_path, index, sealed_size),
             Fs::Mem(m) => m.seal(active_handle, active_path, index),
+        }
+    }
+
+    /// Evict sealed families oldest-first to stay within the retention budget
+    /// (disk only). On memory the ring evicts inside `seal`, so this is a no-op.
+    pub(crate) fn evict_to_budget(&self) {
+        match self {
+            Fs::Disk(d) => d.evict_to_budget(),
+            Fs::Mem(_) => {}
+        }
+    }
+
+    /// Whether a real `ENOSPC` wiped our footprint and disabled telemetry
+    /// (disk only). Always `false` on memory.
+    pub(crate) fn disk_full(&self) -> bool {
+        match self {
+            Fs::Disk(d) => d.disk_full(),
+            Fs::Mem(_) => false,
+        }
+    }
+
+    /// Terminal disk-full handler: wipe our footprint and latch the disable
+    /// flag (disk only). No-op on memory.
+    pub(crate) fn on_enospc(&self) {
+        match self {
+            Fs::Disk(d) => d.on_enospc(),
+            Fs::Mem(_) => {}
+        }
+    }
+
+    /// Route a sealed-artifact write-back through `DiskFs` so it owns the size
+    /// change. Unreachable on memory (write-back is `Disk`-only).
+    pub(crate) async fn write_back(
+        &self,
+        index: u32,
+        original: &Path,
+        dest: &Path,
+        bytes: crate::background_task::payload::Payload,
+    ) -> io::Result<()> {
+        match self {
+            Fs::Disk(d) => d.write_back(index, original, dest, bytes).await,
+            Fs::Mem(_) => Err(io::Error::other(
+                "write_back called on memory-backed segment",
+            )),
         }
     }
 

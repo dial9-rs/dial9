@@ -57,3 +57,31 @@ crosses the gap is **discarded**, not split. The CPU-time delta across
 the gap mixes two different threads' `CLOCK_THREAD_CPUTIME_ID` readings
 and is therefore meaningless; dropping the polluted span is more honest
 than reporting a contaminated ratio.
+
+## Retention
+
+dial9 bounds how much trace data it keeps on local disk. These terms
+describe how that bound is defined and enforced.
+
+A **segment** is one self-contained trace file. At any moment exactly one
+segment is the **active segment** — the file currently being written. When
+it reaches a size or time threshold it is **sealed**: finalized and renamed
+so it is no longer written to. A **sealed segment** is eligible to be
+processed (e.g. compressed, uploaded) and to be evicted.
+
+A **segment family** is every on-disk artifact sharing one segment's
+identity: the sealed file plus any output later derived from it (e.g. a
+compressed copy). A family is accounted for, and removed, as a unit — its
+on-disk size is the sum of all its artifacts.
+
+The **retention budget** is the maximum total bytes dial9 keeps on disk
+across all segments. The governing invariant: **no single on-disk file —
+sealed or active — and no total across all families may exceed the budget.**
+
+**Eviction** is dropping segments, oldest-first, to stay within the
+retention budget. Eviction may drop a segment that is currently being
+processed — it does not spare in-flight work, because the budget is a hard
+cap and dial9 is a "good citizen" that loses trace data rather than disrupt
+the host application or overrun its disk allotment. The active segment is
+evicted only as a last resort: when it alone exceeds the budget (only
+reachable under misconfiguration), dial9 stops writing and deletes it.

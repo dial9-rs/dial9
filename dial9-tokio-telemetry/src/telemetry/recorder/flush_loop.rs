@@ -83,6 +83,10 @@ pub(super) fn flush_once<M: WriterMode>(
                 rate_limited!(Duration::from_secs(60), {
                     tracing::warn!("failed to transcode batch: {e}");
                 });
+                // A real ENOSPC triggers the terminal wipe + disable latch in
+                // `DiskFs`; the run loop observes `writer.disk_full()` next and
+                // records it. Other write errors just disable recording.
+                writer.note_io_error(&e);
                 shared.enabled.store(false, Ordering::Relaxed);
                 return FlushStats {
                     event_count: *events_written - events_before,
@@ -97,6 +101,7 @@ pub(super) fn flush_once<M: WriterMode>(
         rate_limited!(Duration::from_secs(60), {
             tracing::warn!("failed to flush trace data: {e}");
         });
+        writer.note_io_error(&e);
     }
     FlushStats {
         event_count: *events_written - events_before,
@@ -126,6 +131,9 @@ pub(super) fn run_flush_loop<M: WriterMode>(
     let static_metadata = writer.segment_metadata().to_vec();
 
     let mut drain_state = DrainState::Idle;
+    // Latches the one-shot `disk_full` observation so we disable + emit the
+    // metric exactly once (ADR-0003 §6).
+    let mut disk_full_reported = false;
 
     loop {
         let mut ack_tx = None;
@@ -141,6 +149,36 @@ pub(super) fn run_flush_loop<M: WriterMode>(
                 exit = true;
             }
             Err(crate::primitives::sync::mpsc::RecvTimeoutError::Timeout) => {}
+        }
+
+        // Observe the ENOSPC poison flag set by whichever thread (this flush
+        // thread or the worker's write-back) hit out-of-space. Disable
+        // recording once and emit a one-shot disk-pressure metric; the loop
+        // then winds down via the `!is_enabled()` path below.
+        if !disk_full_reported && writer.disk_full() {
+            use crate::primitives::sync::atomic::Ordering;
+            disk_full_reported = true;
+            shared.enabled.store(false, Ordering::Relaxed);
+            rate_limited!(Duration::from_secs(60), {
+                tracing::error!("dial9: disk full — telemetry disabled for the process lifetime");
+            });
+            drop(
+                FlushMetrics {
+                    operation: Operation::Flush,
+                    stats: FlushStats {
+                        event_count: 0,
+                        dropped_batches: 0,
+                        cpu_flush_duration: Duration::ZERO,
+                    },
+                    flush_duration: Timer::start_now(),
+                    last_flush: false,
+                    write_metadata_failed: false,
+                    finalize_failed: false,
+                    disk_full_encountered: true,
+                    write_stopped_no_space: true,
+                }
+                .append_on_drop(flush_metrics_sink.clone()),
+            );
         }
 
         // When disabled, skip all recording work (queue sampling, metadata
@@ -251,6 +289,8 @@ pub(super) fn run_flush_loop<M: WriterMode>(
                     last_flush: exit,
                     write_metadata_failed: false,
                     finalize_failed: false,
+                    disk_full_encountered: false,
+                    write_stopped_no_space: false,
                 }
                 .append_on_drop(flush_metrics_sink.clone())
             });

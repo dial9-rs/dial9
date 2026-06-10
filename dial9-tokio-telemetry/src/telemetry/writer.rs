@@ -1,13 +1,11 @@
 use dial9_trace_format::encoder::{Encoder, RawEncoder};
 
-use crate::background_task::fs::{ActiveHandle, Fs, RemoveReason};
-use crate::background_task::sealed::SegmentRef;
+use crate::background_task::fs::{ActiveHandle, Fs};
 use crate::primitives::fs;
 use crate::rate_limit::rate_limited;
 use crate::telemetry::collector::Batch;
 use crate::telemetry::events::clock_pair;
 use crate::telemetry::format::{ClockSyncEvent, SegmentMetadataEvent};
-use std::collections::VecDeque;
 use std::io::BufWriter;
 use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
@@ -155,9 +153,6 @@ pub struct SegmentWriter<Mode: WriterMode = Disk> {
     /// The next monotonic instant at which time-based rotation should fire,
     /// or `None` if time-based rotation is disabled.
     next_rotation_time: Option<Instant>,
-    /// Tracks (seg_ref, size) of closed segments oldest-first for disk eviction.
-    /// Always empty in memory mode (eviction handled by the memory backend).
-    closed_files: VecDeque<(SegmentRef, u64)>,
     /// Path of the currently active (being-written) segment.
     /// Used as a HashMap key in memory mode; a real path in disk mode.
     active_path: PathBuf,
@@ -267,7 +262,9 @@ impl SegmentWriter<Disk> {
         {
             fs::create_dir_all(parent)?;
         }
-        let fs = Fs::new_disk(&base_path);
+        let fs = Fs::new_disk(&base_path, max_total_size, max_file_size);
+        // Seeds `DiskFs`'s family model with artifacts from prior writer
+        // lifetimes so eviction accounts for them.
         let discovered = fs.discover_existing()?;
         let first_index = discovered.next_active_index;
         let next_index = first_index
@@ -279,13 +276,17 @@ impl SegmentWriter<Disk> {
         let now = time_source().instant().as_std();
         let drain_interval = rotation_period.min(DEFAULT_DRAIN_INTERVAL);
 
-        let mut writer = Self {
+        // Enforce the budget immediately so artifacts from prior writer
+        // lifetimes don't push us over the cap before we even rotate once.
+        // `DiskFs` owns eviction (ADR-0003).
+        fs.evict_to_budget();
+
+        Ok(Self {
             base_path,
             max_file_size,
             max_total_size,
             rotation_period,
             next_rotation_time: Self::next_rotation_from(now, rotation_period),
-            closed_files: discovered.closed_files,
             active_path: first_path,
             state,
             next_index,
@@ -296,11 +297,7 @@ impl SegmentWriter<Disk> {
             next_drain_time: now + drain_interval,
             fs,
             _mode: PhantomData,
-        };
-        // Enforce the budget immediately so artifacts from prior writer
-        // lifetimes don't push us over the cap before we even rotate once.
-        writer.evict_oldest()?;
-        Ok(writer)
+        })
     }
 
     /// Create a writer that writes to a single file with no rotation or eviction.
@@ -312,7 +309,7 @@ impl SegmentWriter<Disk> {
     /// Time-based rotation is disabled.
     pub fn single_file(path: impl Into<PathBuf>) -> std::io::Result<Self> {
         let path = path.into();
-        let fs = Fs::new_disk(&path);
+        let fs = Fs::new_disk(&path, u64::MAX, u64::MAX);
         let active_path = Self::active_path(&path, 0);
         let handle = fs.create_segment(&active_path)?;
         let state = Self::prepare_segment(BufWriter::new(handle))?;
@@ -324,7 +321,6 @@ impl SegmentWriter<Disk> {
             max_total_size: u64::MAX,
             rotation_period: Duration::MAX,
             next_rotation_time: None,
-            closed_files: VecDeque::new(),
             active_path,
             state,
             next_index: 1,
@@ -436,7 +432,6 @@ impl SegmentWriter<Memory> {
             max_total_size,
             rotation_period,
             next_rotation_time: Self::next_rotation_from(now, rotation_period),
-            closed_files: VecDeque::new(),
             active_path,
             state,
             next_index: 1,
@@ -560,15 +555,15 @@ impl<M: WriterMode> SegmentWriter<M> {
             .into_inner()
             .unwrap_or_else(|e| e.into_inner().into_parts().0);
 
-        // Seal the current segment. If `.active` was removed externally
-        // (disk only: operator, log rotation, container teardown) abandon the
-        // segment and start a fresh one.
-        match self.fs.seal(handle, &self.active_path, current_index) {
-            Ok(seg_ref) => {
-                if M::IS_DISK {
-                    self.closed_files.push_back((seg_ref, closed_size));
-                }
-            }
+        // Seal the current segment, reporting its on-disk size to the backend
+        // (`DiskFs` records it in the family model — ADR-0003). If `.active`
+        // was removed externally (disk only: operator, log rotation, container
+        // teardown) abandon the segment and start a fresh one.
+        match self
+            .fs
+            .seal(handle, &self.active_path, current_index, closed_size)
+        {
+            Ok(_seg_ref) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 rate_limited!(Duration::from_secs(60), {
                     tracing::warn!(
@@ -583,6 +578,12 @@ impl<M: WriterMode> SegmentWriter<M> {
                 return Err(e);
             }
         }
+
+        // Trigger (b): evict sealed families down to budget immediately after
+        // sealing, before opening the next active file. A growth bound that
+        // holds even if the worker loop is jammed, since growth requires
+        // sealing. No-op on memory (the ring evicts inside `seal`).
+        self.fs.evict_to_budget();
 
         let new_path = Self::active_path(&self.base_path, self.next_index);
         self.next_index += 1;
@@ -607,44 +608,35 @@ impl<M: WriterMode> SegmentWriter<M> {
             segment_index = self.next_index - 1,
             "rotated to new trace segment"
         );
-        self.evict_oldest()?;
         Ok(())
     }
 
-    /// Total size across all closed + active segments (disk mode only).
-    /// Always returns 0 in memory mode, eviction is handled by the memory backend.
-    fn total_size(&self) -> u64 {
+    /// The one retention rule that stays on the writer (ADR-0003 §5): only the
+    /// writer can observe the live active segment growing. If the active
+    /// segment *alone* exceeds the whole budget (only reachable under
+    /// misconfiguration), stop writing and delete it rather than leaking it.
+    /// Everything else — sealed-family accounting and eviction — is owned by
+    /// `DiskFs`. No-op on memory.
+    fn stop_if_active_over_budget(&mut self) {
         if !M::IS_DISK {
-            return 0;
+            return;
         }
-        let closed: u64 = self.closed_files.iter().map(|(_, s)| s).sum();
         let active = match &self.state {
             WriterState::Active { writer, .. } => writer.bytes_written(),
-            WriterState::Finished => 0,
+            WriterState::Finished => return,
         };
-        closed + active
-    }
-
-    fn evict_oldest(&mut self) -> std::io::Result<()> {
-        if !M::IS_DISK {
-            return Ok(());
-        }
-        // Always keep at least the current file.
-        while self.total_size() > self.max_total_size && !self.closed_files.is_empty() {
-            if let Some((seg_ref, _size)) = self.closed_files.pop_front() {
-                self.fs.remove_sealed(&seg_ref, RemoveReason::Eviction);
-            }
-        }
-        // If even the current file alone exceeds total budget, stop writing.
-        if self.total_size() > self.max_total_size {
+        if active > self.max_total_size {
             self.state = WriterState::Finished;
+            let _ = self.fs.remove_active(&self.active_path);
         }
-        Ok(())
     }
 
     /// Rotate if the current file exceeds max_file_size.
     /// Called after writing a complete logical unit (def + event).
     fn maybe_rotate(&mut self) -> std::io::Result<()> {
+        // Misconfiguration guard: if the active segment alone has blown the
+        // whole budget, stop rather than leak it.
+        self.stop_if_active_over_budget();
         let WriterState::Active { writer: raw, .. } = &self.state else {
             return Ok(());
         };
@@ -737,12 +729,11 @@ impl<M: WriterMode> SegmentWriter<M> {
         let current_index = self.next_index - 1;
 
         if self.has_real_events {
-            match self.fs.seal(handle, &self.active_path, current_index) {
-                Ok(seg_ref) => {
-                    if M::IS_DISK {
-                        self.closed_files.push_back((seg_ref, bytes_written));
-                    }
-                }
+            match self
+                .fs
+                .seal(handle, &self.active_path, current_index, bytes_written)
+            {
+                Ok(_seg_ref) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                     rate_limited!(Duration::from_secs(60), {
                         tracing::warn!(
@@ -774,13 +765,25 @@ impl<M: WriterMode> SegmentWriter<M> {
 
         // Final sealed segment must count toward the eviction budget too,
         // otherwise finalize can leave the directory over `max_total_size`.
-        // No-ops on memory mode (`!M::IS_DISK`).
-        if let Err(e) = self.evict_oldest() {
-            self.fs.mark_writer_done();
-            return Err(e);
-        }
+        // `DiskFs` owns eviction; no-op on memory mode.
+        self.fs.evict_to_budget();
         self.fs.mark_writer_done();
         Ok(())
+    }
+
+    /// Whether a real `ENOSPC` has wiped our footprint and disabled telemetry.
+    /// The flush loop polls this to flip `shared.enabled = false`.
+    pub(crate) fn disk_full(&self) -> bool {
+        self.fs.disk_full()
+    }
+
+    /// Bridge a flush-path I/O error to the `DiskFs` ENOSPC handler. When `e`
+    /// is a real `ENOSPC`, this triggers the terminal wipe + disable latch.
+    /// Other errors are ignored here (graceful eviction handles over-budget).
+    pub(crate) fn note_io_error(&self, e: &std::io::Error) {
+        if crate::background_task::fs::is_enospc(e) {
+            self.fs.on_enospc();
+        }
     }
 
     /// Transcode an encoded batch into the active segment.
@@ -1087,43 +1090,41 @@ mod tests {
         );
     }
 
-    /// Bug: write_encoded_batch sets stopped=true when total_size slightly exceeds
-    /// max_total_size, without attempting eviction. This happens right after
-    /// rotate() + evict_oldest() brings total_size just under budget, then the
-    /// first batch in the new file pushes it a few bytes over. The writer
-    /// permanently stops even though eviction could free space.
-    ///
-    /// Reproduces the stress test failure: 64-worker runtime with 1MB segments
-    /// and 100MB budget stops producing segments after ~100 rotations.
+    /// Regression: the writer must not permanently stop under accumulating
+    /// per-file overshoot. Under the old design the writer's own `evict_oldest`
+    /// ledger (uncompressed seal sizes) drifted from disk and latched
+    /// `Finished` on a few bytes of overshoot. With `DiskFs` owning eviction
+    /// (ADR-0003) the writer only stops if the *active* segment alone exceeds
+    /// the whole budget — which never happens here (`max_file_size` ≪ budget).
     #[test]
-    fn test_writer_stops_on_tiny_overshoot_after_eviction() {
+    fn test_writer_does_not_stop_under_accumulating_overshoot() {
         let dir = TempDir::new().unwrap();
         let base = dir.path().join("trace");
-        // Use max_file_size that doesn't evenly divide by batch size,
-        // so files end up slightly under max_file_size (with leftover bytes).
-        // Over 100 files, these leftovers accumulate and push total_size
-        // past max_total_size after eviction.
         let max_file_size = 200;
         let num_files = 100u64;
         let max_total_size = max_file_size * num_files;
         let mut writer = DiskWriter::new(&base, max_file_size, max_total_size).unwrap();
 
-        // Write many batches. The batch size doesn't divide evenly into
-        // (max_file_size - header), so each file wastes a few bytes. After
-        // 100 rotations, total_size drifts above max_total_size.
         for i in 0..5000 {
             writer.write_encoded_batch(&test_batch()).unwrap();
             if matches!(writer.state, WriterState::Finished) {
                 panic!(
-                    "Writer stopped at batch {i}! total_size={}, max_total_size={}, \
-                     closed_files={}. \
-                     write_encoded_batch should try eviction before stopping.",
-                    writer.total_size(),
-                    max_total_size,
-                    writer.closed_files.len()
+                    "Writer stopped at batch {i}! max_total_size={max_total_size}. \
+                     The active segment alone never exceeds the budget, so the \
+                     writer must keep going and let DiskFs evict sealed families."
                 );
             }
         }
+
+        // Disk stays bounded: DiskFs evicts sealed families down to
+        // `max_total_size - max_file_size`, leaving headroom for the active
+        // segment, so the directory total never exceeds the budget.
+        writer.finalize().unwrap();
+        assert!(
+            total_disk_usage(dir.path()) <= max_total_size,
+            "disk usage {} exceeds budget {max_total_size}",
+            total_disk_usage(dir.path())
+        );
     }
 
     #[test]
@@ -1582,22 +1583,25 @@ mod tests {
     }
 
     /// When the background worker has renamed a sealed `.bin` to `.bin.gz`,
-    /// eviction should clean up the `.gz` variant instead of silently leaking it.
+    /// `DiskFs` eviction must clean up the whole family (`.bin.gz` included),
+    /// not silently leak the derived artifact. Eviction is owned by `DiskFs`
+    /// (ADR-0003); the per-cycle reconcile picks up the renamed `.gz`.
     #[test]
     fn test_eviction_removes_gz_variant() {
         let dir = TempDir::new().unwrap();
         let base = dir.path().join("trace");
         let one_event = single_event_file_size();
         let max_file_size = one_event;
-        // Budget fits many files so segment 0 is not immediately evicted.
-        let max_total_size = max_file_size * 100;
+        // Tight budget: with the active-segment reserve (one `max_file_size`),
+        // the sealed target is ~2×`max_file_size`, so a couple of sealed
+        // families trigger eviction of the oldest.
+        let max_total_size = max_file_size * 3;
         let mut writer = DiskWriter::new(&base, max_file_size, max_total_size).unwrap();
 
         // Write two batches: the first fills segment 0, the second triggers
         // rotation (sealing segment 0 as trace.0.bin) and starts segment 1.
         writer.write_encoded_batch(&test_batch()).unwrap();
         writer.write_encoded_batch(&test_batch()).unwrap();
-        // Segment 0 is now sealed as trace.0.bin.
 
         // Simulate the background worker renaming trace.0.bin → trace.0.bin.gz.
         let seg0 = dir.path().join("trace.0.bin");
@@ -1605,10 +1609,9 @@ mod tests {
         assert!(seg0.exists(), "trace.0.bin should exist after rotation");
         std::fs::rename(&seg0, &seg0_gz).unwrap();
 
-        // Now shrink the budget so the next rotation triggers eviction of
-        // segment 0 (which has been renamed to .bin.gz on disk).
-        writer.max_total_size = max_file_size;
-        for _ in 0..3 {
+        // Keep sealing segments. Once the reconcile sees the .gz family and the
+        // total exceeds budget, DiskFs evicts segment 0's whole family.
+        for _ in 0..6 {
             writer.write_encoded_batch(&test_batch()).unwrap();
         }
         writer.finalize().unwrap();
@@ -2499,6 +2502,42 @@ mod tests {
         let _w = DiskWriter::new(&base, 100_000, 100).unwrap();
         assert!(!bin.exists(), ".bin should be evicted under restart budget");
         assert!(!gz.exists(), ".bin.gz must be evicted with its .bin family");
+    }
+
+    /// ADR-0003 §6: a real `ENOSPC` on a rotate (which seals via `fs.rename`)
+    /// must wipe dial9's footprint and latch `disk_full()`, the flag the flush
+    /// loop polls to disable telemetry. Uses the test-only ENOSPC fault seam.
+    #[test]
+    fn test_enospc_on_rotate_wipes_and_latches_disk_full() {
+        let dir = TempDir::new().unwrap();
+        let base = dir.path().join("trace");
+        let one_event = single_event_file_size();
+        let mut writer = DiskWriter::new(&base, one_event, one_event * 100).unwrap();
+
+        // Seal one segment normally so there is a footprint to wipe.
+        writer.write_encoded_batch(&test_batch()).unwrap();
+        writer.write_encoded_batch(&test_batch()).unwrap();
+        assert!(dir.path().join("trace.0.bin").exists());
+        assert!(!writer.disk_full());
+
+        // Arm ENOSPC; the next rotation's seal (rename) fails out-of-space.
+        let _fault = crate::primitives::fs::arm_enospc();
+        for _ in 0..4 {
+            // Errors are surfaced; we only care that ENOSPC latched.
+            let _ = writer.write_encoded_batch(&test_batch());
+            if writer.disk_full() {
+                break;
+            }
+        }
+        drop(_fault);
+
+        assert!(writer.disk_full(), "ENOSPC must latch disk_full");
+        // The whole footprint is wiped.
+        assert_eq!(
+            total_disk_usage(dir.path()),
+            0,
+            "ENOSPC wipe must remove all dial9 segments"
+        );
     }
 
     /// finalize() must run eviction so the final sealed segment counts toward

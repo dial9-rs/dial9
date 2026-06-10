@@ -134,6 +134,11 @@ pub struct SegmentData {
     /// Held only for its `Drop` (releases in-flight counters).
     #[allow(dead_code)]
     pub(crate) accounting: Option<SegmentAccounting>,
+    /// The worker's filesystem handle, so processors that mutate sealed
+    /// artifacts (currently [`WriteBackProcessor`]) route the change through
+    /// the directory owner `DiskFs` (ADR-0003 §2). The worker stamps it on
+    /// each segment; `None` only on the test-helper construction path.
+    pub(crate) fs: Option<Arc<Fs>>,
 }
 
 impl SegmentData {
@@ -648,6 +653,12 @@ impl SegmentProcessor for SymbolizeProcessor {
 /// Writes the current payload bytes back to disk. If a
 /// `write_back_extension` metadata key is present, the bytes are written to
 /// `{original}{extension}` and the original segment file is removed.
+///
+/// Write-back is routed through [`DiskFs`](crate::background_task::fs) (ADR-0003
+/// §2): `DiskFs` owns the directory, so it must observe this size change (often
+/// a 5–10× shrink) to keep its retention accounting honest and to detect
+/// `ENOSPC`. The worker provides the `Arc<Fs>` on each [`SegmentData`]; a
+/// segment without one (e.g. memory-backed) fails closed.
 #[derive(Debug, Default)]
 pub(crate) struct WriteBackProcessor;
 
@@ -661,6 +672,14 @@ impl SegmentProcessor for WriteBackProcessor {
         data: SegmentData,
     ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>> {
         Box::pin(async move {
+            let Some(fs) = data.fs.clone() else {
+                return Err(ProcessError::io(
+                    data,
+                    std::io::Error::other(
+                        "WriteBackProcessor requires the disk worker pipeline (no Fs on segment)",
+                    ),
+                ));
+            };
             let original_path = match data.segment.disk_path() {
                 Some(p) => p.to_owned(),
                 None => {
@@ -681,47 +700,16 @@ impl SegmentProcessor for WriteBackProcessor {
                 }
                 None => original_path.clone(),
             };
+            let index = data.segment.index();
             let payload = data.payload.clone();
-            let write_dest = dest_path.clone();
-            let result = tokio::task::spawn_blocking(move || {
-                use std::io::{BufWriter, Write};
-                let mut f = BufWriter::new(std::fs::File::create(&write_dest)?);
-                for chunk in payload.chunks() {
-                    f.write_all(chunk)?;
-                }
-                f.flush()
-            })
-            .await;
-            match result {
-                Ok(Ok(())) => {
-                    if dest_path != original_path {
-                        // Remove the original .bin now that .bin.gz exists.
-                        // If the writer already evicted it, clean up the dest
-                        // file we just wrote so it doesn't leak on disk.
-                        match std::fs::remove_file(&original_path) {
-                            Ok(()) => {}
-                            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                                let _ = std::fs::remove_file(&dest_path);
-                            }
-                            Err(e) => {
-                                rate_limited!(Duration::from_secs(60), {
-                                    tracing::warn!(
-                                        "failed to remove original segment {}: {e}",
-                                        original_path.display()
-                                    );
-                                });
-                            }
-                        }
-                    }
-                    Ok(data)
-                }
-                Ok(Err(e)) => Err(ProcessError {
-                    data,
-                    kind: ProcessErrorKind::Io(e),
-                }),
+            match fs
+                .write_back(index, &original_path, &dest_path, payload)
+                .await
+            {
+                Ok(()) => Ok(data),
                 Err(e) => Err(ProcessError {
                     data,
-                    kind: ProcessErrorKind::Io(std::io::Error::other(e)),
+                    kind: ProcessErrorKind::Io(e),
                 }),
             }
         })
@@ -761,6 +749,11 @@ impl WorkerLoop {
 
     pub(crate) async fn run(&mut self) {
         loop {
+            // Trigger (a): reclamation that outlives writer `Finished` — the
+            // worker is the one component still alive afterward (ADR-0003 §3).
+            // Run before `take_files` so the cycle's reconcile + gauges reflect
+            // the post-eviction state.
+            self.fs.evict_to_budget();
             let taken = self.fs.take_files();
             let dispatched = taken.segments.len() as u64;
             self.emit_cycle_metrics(&taken, dispatched);
@@ -771,6 +764,7 @@ impl WorkerLoop {
                 // Ordering invariant: writer calls mark_writer_done (Release) after
                 // the seal-time queue push, so any late-racing push is visible here.
                 loop {
+                    self.fs.evict_to_budget();
                     let taken = self.fs.take_files();
                     let dispatched = taken.segments.len() as u64;
                     self.emit_cycle_metrics(&taken, dispatched);
@@ -863,6 +857,7 @@ impl WorkerLoop {
                 ]),
                 metrics,
                 accounting,
+                fs: Some(Arc::clone(&self.fs)),
             };
 
             for processor in &mut self.processors {
@@ -1002,7 +997,12 @@ impl WorkerLoop {
                 in_flight_bytes: taken.in_flight_bytes,
                 memory_peak_in_flight_bytes: taken.in_flight_bytes_peak,
                 segments_evicted: taken.segments_dropped,
+                bytes_evicted: taken.bytes_evicted,
                 segments_dispatched,
+                retained_bytes: taken.retained_bytes,
+                retained_segments: taken.retained_segments,
+                retention_budget_bytes: taken.retention_budget_bytes,
+                reconcile_drift_bytes: taken.reconcile_drift_bytes,
             }
             .append_on_drop(self.metrics_sink.clone()),
         );
@@ -1387,6 +1387,8 @@ mod tests {
             ]),
             metrics,
             accounting: None,
+            // No write-back in this S3 pipeline, so no Fs is needed.
+            fs: None,
         };
 
         for processor in &mut processors {
@@ -1514,7 +1516,7 @@ mod tests {
             vec![Box::new(CountingProcessor(processed.clone()))];
 
         let mut worker = WorkerLoop::new(
-            Fs::new_disk(config.trace_path().unwrap()),
+            Fs::new_disk(config.trace_path().unwrap(), u64::MAX, u64::MAX),
             config.poll_interval(),
             processors,
             stop,
@@ -1583,7 +1585,7 @@ mod tests {
         })];
 
         let mut worker = WorkerLoop::new(
-            Fs::new_disk(config.trace_path().unwrap()),
+            Fs::new_disk(config.trace_path().unwrap(), u64::MAX, u64::MAX),
             config.poll_interval(),
             processors,
             stop,
@@ -1602,6 +1604,110 @@ mod tests {
             .build();
 
         check!(config.trace_dir() == std::path::Path::new("."));
+    }
+
+    /// Regression guard for the v0.3.12 "processor loop consumed a full CPU
+    /// trying to compress them" spin (the customer report).
+    ///
+    /// When a disk segment's upload keeps failing with a *retryable* error,
+    /// the worker releases the claim and re-dispenses it — but it must back
+    /// off `poll_interval` between attempts rather than re-reading and
+    /// re-compressing the same segment in a tight loop. The pre-refactor 0.3.x
+    /// loop slept only when a scan found *no* segments, so a persistently
+    /// kept segment pinned a core.
+    ///
+    /// Paused virtual time makes this exact: each backed-off cycle advances
+    /// the clock by one `poll_interval`, so `ATTEMPTS - 1` retryable attempts
+    /// must elapse at least `(ATTEMPTS - 1) * poll_interval`. A spinning loop
+    /// would elapse ~0.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn worker_backs_off_between_retryable_redispatches() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("trace.0.bin"), b"raw trace segment bytes").unwrap();
+
+        const ATTEMPTS: usize = 5;
+        let calls = Arc::new(AtomicUsize::new(0));
+
+        struct RetryThenStop {
+            calls: Arc<AtomicUsize>,
+            stop: tokio_util::sync::CancellationToken,
+        }
+        impl SegmentProcessor for RetryThenStop {
+            fn name(&self) -> &'static str {
+                "RetryThenStop"
+            }
+            fn process(
+                &mut self,
+                data: SegmentData,
+            ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>>
+            {
+                // Emulate the CPU the customer saw burning: gzip every attempt.
+                use flate2::write::GzEncoder;
+                use std::io::Write;
+                let mut enc = GzEncoder::new(Vec::new(), flate2::Compression::fast());
+                for chunk in data.payload.chunks() {
+                    enc.write_all(chunk).unwrap();
+                }
+                drop(enc.finish().unwrap());
+
+                let n = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+                let stop = self.stop.clone();
+                Box::pin(async move {
+                    if n >= ATTEMPTS {
+                        // Last attempt: stop the worker. Returning Ok keeps the
+                        // claim (no re-dispense), so the shutdown drain finds
+                        // nothing new and exits cleanly.
+                        stop.cancel();
+                        Ok(data)
+                    } else {
+                        // Persistent retryable upload failure (e.g. S3 outage):
+                        // the worker releases the claim and re-dispenses next
+                        // cycle.
+                        Err(ProcessError::new(
+                            data,
+                            ProcessErrorKind::Transfer {
+                                source: Box::new(std::io::Error::other("s3 outage")),
+                                retryable: true,
+                            },
+                        ))
+                    }
+                })
+            }
+        }
+
+        let config = BackgroundTaskConfig::builder()
+            .trace_path(dir.path().join("trace.bin"))
+            .build();
+        let poll_interval = config.poll_interval();
+        let stop = tokio_util::sync::CancellationToken::new();
+        let processors: Vec<Box<dyn SegmentProcessor>> = vec![Box::new(RetryThenStop {
+            calls: calls.clone(),
+            stop: stop.clone(),
+        })];
+
+        let mut worker = WorkerLoop::new(
+            Fs::new_disk(config.trace_path().unwrap(), u64::MAX, u64::MAX),
+            poll_interval,
+            processors,
+            stop,
+            metrique_writer::sink::DevNullSink::boxed(),
+        );
+
+        let start = tokio::time::Instant::now();
+        worker.run().await;
+        let elapsed = start.elapsed();
+
+        check!(calls.load(Ordering::SeqCst) == ATTEMPTS);
+        // The worker backed off one poll interval between each of the
+        // ATTEMPTS-1 retryable re-dispatches instead of spinning.
+        check!(
+            elapsed >= poll_interval * (ATTEMPTS as u32 - 1),
+            "expected >= {:?} of backoff across {} retryable attempts, got {:?} \
+             (a tight spin would elapse ~0)",
+            poll_interval * (ATTEMPTS as u32 - 1),
+            ATTEMPTS,
+            elapsed
+        );
     }
 }
 
@@ -1656,7 +1762,7 @@ mod worker_pipeline_tests {
     use std::sync::Arc;
 
     fn fs_for(dir: &std::path::Path) -> Arc<Fs> {
-        Fs::new_disk(&dir.join("trace.bin"))
+        Fs::new_disk(&dir.join("trace.bin"), u64::MAX, u64::MAX)
     }
 
     fn default_poll() -> Duration {
@@ -2073,6 +2179,7 @@ mod worker_pipeline_tests {
             metadata: HashMap::from([("write_back_extension".into(), ".gz".into())]),
             metrics,
             accounting: None,
+            fs: Some(fs_for(dir.path())),
         };
 
         let mut processor = WriteBackProcessor;
@@ -2119,6 +2226,7 @@ mod worker_pipeline_tests {
             metadata: HashMap::new(),
             metrics,
             accounting: None,
+            fs: Some(fs_for(dir.path())),
         };
 
         let mut processor = WriteBackProcessor;
@@ -2411,7 +2519,7 @@ mod worker_pipeline_tests {
                 .expect("memory fs should create a handle");
             h.write_all(&[0u8; 50])
                 .expect("write into memory handle should succeed");
-            fs.seal(h, Path::new("x"), i)
+            fs.seal(h, Path::new("x"), i, 0)
                 .expect("sealing into memory ring should succeed");
         }
         fs.mark_writer_done();
@@ -2451,7 +2559,7 @@ mod worker_pipeline_tests {
         let fs = Fs::new_in_memory(64 * 1024, 1024).unwrap();
         let mut h = fs.create_segment(Path::new("x")).unwrap();
         h.write_all(&[0u8; 50]).unwrap();
-        fs.seal(h, Path::new("x"), 0).unwrap();
+        fs.seal(h, Path::new("x"), 0, 0).unwrap();
 
         // Cycle 1: pop. Peak snapshot reads 0 (nothing happened before).
         // Inside the same call, the pop seeds the channel peak at 50.
@@ -2533,7 +2641,7 @@ mod worker_pipeline_tests {
                 for i in 0..SEGMENTS {
                     let mut h = producer_fs.create_segment(Path::new("x")).unwrap();
                     h.write_all(b"event-bytes").unwrap();
-                    producer_fs.seal(h, Path::new("x"), i).unwrap();
+                    producer_fs.seal(h, Path::new("x"), i, 0).unwrap();
                 }
                 producer_fs.mark_writer_done();
             });
@@ -2595,7 +2703,7 @@ mod worker_pipeline_tests {
         let fs = Fs::new_in_memory(64 * 1024, 1024).unwrap();
         let mut h = fs.create_segment(Path::new("x")).unwrap();
         h.write_all(&[0u8; 50]).unwrap();
-        fs.seal(h, Path::new("x"), 0).unwrap();
+        fs.seal(h, Path::new("x"), 0, 0).unwrap();
         fs.mark_writer_done();
 
         let attempts = Arc::new(AtomicU32::new(0));
@@ -2652,7 +2760,7 @@ mod worker_pipeline_tests {
         let fs = Fs::new_in_memory(64 * 1024, 1024).unwrap();
         let mut h = fs.create_segment(Path::new("x")).unwrap();
         h.write_all(&[0u8; 50]).unwrap();
-        fs.seal(h, Path::new("x"), 0).unwrap();
+        fs.seal(h, Path::new("x"), 0, 0).unwrap();
         fs.mark_writer_done();
 
         let attempts = Arc::new(AtomicU32::new(0));
@@ -2694,7 +2802,7 @@ mod worker_pipeline_tests {
         let fs = Fs::new_in_memory(64 * 1024, 1024).unwrap();
         let mut h = fs.create_segment(Path::new("x")).unwrap();
         h.write_all(payload).unwrap();
-        fs.seal(h, Path::new("x"), 0).unwrap();
+        fs.seal(h, Path::new("x"), 0, 0).unwrap();
         fs.mark_writer_done();
 
         let stop = tokio_util::sync::CancellationToken::new();

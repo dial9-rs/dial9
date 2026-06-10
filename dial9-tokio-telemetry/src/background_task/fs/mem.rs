@@ -218,6 +218,11 @@ impl MemFs {
                 in_flight_bytes: in_flight_now,
                 in_flight_bytes_peak: Some(peak),
                 segments_dropped,
+                bytes_evicted: 0,
+                retained_bytes: None,
+                retained_segments: None,
+                retention_budget_bytes: None,
+                reconcile_drift_bytes: None,
             };
         };
 
@@ -252,6 +257,11 @@ impl MemFs {
             in_flight_bytes: ch.in_flight_bytes.load(Ordering::Relaxed),
             in_flight_bytes_peak: Some(peak),
             segments_dropped,
+            bytes_evicted: 0,
+            retained_bytes: None,
+            retained_segments: None,
+            retention_budget_bytes: None,
+            reconcile_drift_bytes: None,
         }
     }
 
