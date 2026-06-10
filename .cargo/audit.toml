@@ -7,6 +7,7 @@
 
 [advisories]
 ignore = [
+    "RUSTSEC-2025-0141", # bincode: unmaintained (transitive dep, no action needed)
     "RUSTSEC-2026-0098", # rustls-webpki: URI name constraints incorrectly accepted
     "RUSTSEC-2026-0099", # rustls-webpki: name constraints accepted for wildcard certs
     "RUSTSEC-2026-0104", # rustls-webpki: reachable panic in CRL parsing (we do not parse CRLs)
