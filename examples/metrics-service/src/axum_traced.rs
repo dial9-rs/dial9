@@ -51,6 +51,9 @@ struct ConnectionClosedWire {
     #[traceevent(timestamp)]
     timestamp_ns: u64,
     remote_addr: InternedString,
+    /// Rendered as a human-friendly duration in the viewer via the unit
+    /// annotation.
+    #[traceevent(unit = "us")]
     duration_us: u64,
 }
 
