@@ -277,7 +277,7 @@ class TraceDecoder {
       const units = {};
       for (const a of annotations) {
         const field = schema.fields[a.fieldIndex];
-        if (a.key === 'metrique.unit' && field) units[field.name] = a.value;
+        if (a.key === 'unit' && field) units[field.name] = a.value;
       }
       schema.units = units;
     }

@@ -44,8 +44,8 @@ function formatHumanBytes(bytes) {
   return `${value.toFixed(2)} ${units[i]}`;
 }
 
-// Format a field value according to its schema unit annotation
-// ("metrique.unit"). Unknown or missing units fall back to String(value),
+// Format a field value according to its schema unit annotation.
+// Unknown or missing units fall back to String(value),
 // matching how unannotated fields have always rendered.
 //
 // The accepted set must stay in sync with SUPPORTED_UNITS in

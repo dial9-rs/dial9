@@ -61,7 +61,7 @@ fn derive_trace_event_impl(input: DeriveInput) -> Result<proc_macro2::TokenStrea
         let field_name = field.ident.as_ref().unwrap();
         let ty = &field.ty;
 
-        // Parse #[traceevent(unit = "...")]: emitted as a "metrique.unit"
+        // Parse #[traceevent(unit = "...")]: emitted as a "unit"
         // schema annotation so viewers can render the field in that unit.
         let mut unit: Option<syn::LitStr> = None;
         for attr in &field.attrs {
@@ -101,7 +101,7 @@ fn derive_trace_event_impl(input: DeriveInput) -> Result<proc_macro2::TokenStrea
             // excludes the timestamp field.
             let idx = field_def_tokens.len() as u16;
             annotation_tokens.push(quote! {
-                ::dial9_trace_format::schema::FieldAnnotation::new(#idx, "metrique.unit", #unit)
+                ::dial9_trace_format::schema::FieldAnnotation::new(#idx, "unit", #unit)
             });
         }
 
@@ -196,7 +196,7 @@ fn derive_trace_event_impl(input: DeriveInput) -> Result<proc_macro2::TokenStrea
 ///   header, not as a regular field.
 /// - `#[traceevent(wire_slot)]` (struct): opts the type into the encoder's
 ///   inline fast path by claiming a static wire-ID slot.
-/// - `#[traceevent(unit = "...")]` (field): attaches a `metrique.unit` schema
+/// - `#[traceevent(unit = "...")]` (field): attaches a `unit` schema
 ///   annotation so viewers render the field in that unit. Supported values:
 ///   `"ns"`, `"us"`, `"ms"`, `"s"`, `"bytes"`. Any other value is a compile
 ///   error, as is placing `unit` on the timestamp field (the timestamp is

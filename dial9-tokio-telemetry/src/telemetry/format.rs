@@ -393,7 +393,7 @@ mod tests {
         let units: Vec<(&str, &str)> = entry
             .annotations()
             .iter()
-            .filter(|a| a.key() == "metrique.unit")
+            .filter(|a| a.key() == "unit")
             .map(|a| (entry.fields()[a.field_index() as usize].name(), a.value()))
             .collect();
         assert_eq!(
