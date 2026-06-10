@@ -582,7 +582,7 @@ function reportAnalysis(a, label) {
     // bucket captures synchronous blocking but not .await-style async lock waits.
     console.log(`\n  Caveat: an async lock wait (lock().await) ends the poll, so its off-CPU time`);
     console.log(`          is counted as idle-park, not in-poll. The IN-POLL bucket captures`);
-    console.log(`          synchronous blocking but not .await-style async lock waits.`);
+    console.log(`          synchronous blocking but not .await-style async lock waits. To see async lock wait, consider enabling task dumps`);
   }
 
   // ── CPU hotspots ──
