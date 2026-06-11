@@ -205,6 +205,20 @@ pub(crate) struct TakenFiles {
     pub(crate) segments_dropped: u64,
 }
 
+/// Closed creation-epoch window a triggered dump matches segments against.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct EpochWindow {
+    /// `None`: unbounded look-back (`dump_current_data`).
+    pub(crate) start_secs: Option<u64>,
+    pub(crate) end_secs: u64,
+}
+
+impl EpochWindow {
+    pub(crate) fn contains(&self, epoch_secs: u64) -> bool {
+        self.start_secs.is_none_or(|s| epoch_secs >= s) && epoch_secs <= self.end_secs
+    }
+}
+
 /// Unified filesystem abstraction covering the writer↔worker seam.
 pub(crate) enum Fs {
     Disk(DiskFs),
@@ -299,6 +313,21 @@ impl Fs {
         match self {
             Fs::Disk(d) => d.take_files(),
             Fs::Mem(m) => m.take_files(),
+        }
+    }
+
+    /// Like [`Self::take_files`], but only dispense segments whose creation
+    /// epoch falls inside one of `windows`. Used by the triggered worker so
+    /// out-of-window history stays in the ring for later dumps.
+    ///
+    /// Memory: pops the oldest matching slot, leaving non-matching slots in
+    /// place (still at most one segment per call). Disk: returns all new
+    /// claims; the worker filters after reading the header and releases
+    /// unmatched claims.
+    pub(crate) fn take_files_matching(&self, windows: &[EpochWindow]) -> TakenFiles {
+        match self {
+            Fs::Disk(d) => d.take_files(),
+            Fs::Mem(m) => m.take_files_matching(windows),
         }
     }
 
