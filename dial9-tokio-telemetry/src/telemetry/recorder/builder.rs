@@ -43,7 +43,7 @@ pub struct PipelineCustom;
 pub(super) enum PipelineConfig {
     Unset,
     #[cfg(feature = "worker-s3")]
-    S3(crate::background_task::S3PipelineUploader),
+    S3(Box<crate::background_task::S3PipelineUploader>),
     Custom(Vec<Box<dyn crate::background_task::SegmentProcessor>>),
 }
 
@@ -344,8 +344,8 @@ impl<P> TracedRuntimeBuilder<P, PipelineUnset> {
             .as_metadata()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
-        self.pipeline = PipelineConfig::S3(crate::background_task::S3PipelineUploader::new(
-            config, None,
+        self.pipeline = PipelineConfig::S3(Box::new(
+            crate::background_task::S3PipelineUploader::new(config, None),
         ));
         self.into_state()
     }
@@ -421,8 +421,8 @@ impl<P, Mode: WriterMode> TracedRuntimeBuilder<P, PipelineS3, Mode> {
             PipelineConfig::S3(uploader) => uploader.take_client(),
             _ => None,
         };
-        self.pipeline = PipelineConfig::S3(crate::background_task::S3PipelineUploader::new(
-            config, carried,
+        self.pipeline = PipelineConfig::S3(Box::new(
+            crate::background_task::S3PipelineUploader::new(config, carried),
         ));
         self
     }
@@ -699,7 +699,7 @@ pub(super) fn assemble_processors(
                 processors.push(Box::new(crate::background_task::SymbolizeProcessor::new()));
             }
             processors.push(Box::new(crate::background_task::GzipCompressor));
-            processors.push(Box::new(uploader));
+            processors.push(uploader);
         }
         PipelineConfig::Custom(user) => {
             processors.extend(user);
@@ -808,9 +808,9 @@ impl TelemetryCore {
                         .map(|(k, v)| (k.to_string(), v.to_string()))
                         .collect();
                 }
-                PipelineConfig::S3(crate::background_task::S3PipelineUploader::new(
+                PipelineConfig::S3(Box::new(crate::background_task::S3PipelineUploader::new(
                     config, s3_client,
-                ))
+                )))
             } else {
                 PipelineConfig::Unset
             }

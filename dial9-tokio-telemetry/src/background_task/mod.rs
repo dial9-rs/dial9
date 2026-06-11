@@ -319,6 +319,23 @@ pub trait SegmentProcessor: Send {
         &mut self,
         data: SegmentData,
     ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>>;
+
+    /// Called once per finished dump in triggered mode (see
+    /// [`crate::dump`]), in pipeline order, so stages can flush any
+    /// per-dump state they accumulated. Return the S3 key of a manifest
+    /// written for this dump, or `None`; the last `Some` across the
+    /// pipeline lands on [`DumpReceipt::manifest_key`](crate::dump::DumpReceipt::manifest_key).
+    ///
+    /// Default: no-op returning `None`. Never called in continuous mode.
+    /// The same panic-safety contract as [`process()`](Self::process)
+    /// applies.
+    fn finalize_dump(
+        &mut self,
+        completion: &crate::dump::DumpCompletion,
+    ) -> Pin<Box<dyn Future<Output = Option<String>> + Send + '_>> {
+        let _ = completion;
+        Box::pin(std::future::ready(None))
+    }
 }
 
 /// Closure-scoped builder for assembling a custom processor pipeline.
@@ -812,9 +829,29 @@ impl ActiveDump {
         self.deadline.is_none_or(|d| now >= d)
     }
 
+    /// Actual covered span: the captured segments' epoch extent, or the
+    /// trigger instant for an empty dump.
+    fn time_range(&self) -> (SystemTime, SystemTime) {
+        match (self.first_epoch, self.last_epoch) {
+            (Some(first), Some(last)) => (epoch_to_system(first), epoch_to_system(last)),
+            _ => (self.triggered_at, self.triggered_at),
+        }
+    }
+
+    /// The completion signal handed to each stage's `finalize_dump`.
+    fn completion(&self) -> crate::dump::DumpCompletion {
+        crate::dump::DumpCompletion {
+            dump_id: self.id,
+            triggered_at: self.triggered_at,
+            time_range: self.time_range(),
+            segments_processed: self.segments_processed,
+            metadata: self.metadata.clone(),
+        }
+    }
+
     /// Best-effort policy: `Ok` whenever anything succeeded or nothing
     /// failed; `Err(Pipeline)` only on total failure.
-    fn into_result(mut self) -> (
+    fn into_result(mut self, manifest_key: Option<String>) -> (
         tokio::sync::oneshot::Sender<Result<DumpReceipt, DumpError>>,
         Result<DumpReceipt, DumpError>,
     ) {
@@ -824,21 +861,13 @@ impl ActiveDump {
             .expect("receipt_tx only taken at resolution");
         let result = match self.first_error {
             Some(kind) if self.segments_processed == 0 => Err(DumpError::Pipeline(kind)),
-            _ => {
-                let time_range = match (self.first_epoch, self.last_epoch) {
-                    (Some(first), Some(last)) => {
-                        (epoch_to_system(first), epoch_to_system(last))
-                    }
-                    _ => (self.triggered_at, self.triggered_at),
-                };
-                Ok(DumpReceipt {
-                    dump_id: self.id,
-                    segments_processed: self.segments_processed,
-                    finished_at: SystemTime::now(),
-                    time_range,
-                    manifest_key: None,
-                })
-            }
+            _ => Ok(DumpReceipt {
+                dump_id: self.id,
+                segments_processed: self.segments_processed,
+                finished_at: SystemTime::now(),
+                time_range: self.time_range(),
+                manifest_key,
+            }),
         };
         (tx, result)
     }
@@ -1021,9 +1050,46 @@ impl WorkerLoop {
         }
     }
 
-    /// Resolve a finished dump: send the receipt to whoever is awaiting it.
+    /// Resolve a finished dump: signal every stage in pipeline order so it
+    /// can flush per-dump state (the S3 stage writes the manifest here),
+    /// then send the receipt to whoever is awaiting it. Finalize runs for
+    /// every resolved dump — errored and empty ones included — so stages
+    /// always get to clear their per-dump bookkeeping.
     async fn resolve_dump(&mut self, dump: ActiveDump) {
-        let (tx, result) = dump.into_result();
+        let completion = dump.completion();
+        let mut manifest_key = None;
+        for processor in &mut self.processors {
+            let processor_name = processor.name();
+            // Same panic discipline as `process()`: a panicking finalize
+            // is caught, logged, and the receipt still resolves.
+            let finalize_result = {
+                // `Option::take` moves the `&mut` out of the capture so the
+                // returned future borrows the processor, not the closure.
+                let mut slot = Some(&mut **processor);
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let p = slot.take().expect("closure called once");
+                    p.finalize_dump(&completion)
+                })) {
+                    Ok(fut) => std::panic::AssertUnwindSafe(fut).catch_unwind().await,
+                    Err(panic_payload) => Err(panic_payload),
+                }
+            };
+            match finalize_result {
+                Ok(Some(key)) => manifest_key = Some(key),
+                Ok(None) => {}
+                Err(_) => {
+                    rate_limited!(Duration::from_secs(60), {
+                        tracing::error!(
+                            target: "dial9_worker",
+                            processor = processor_name,
+                            dump_id = %completion.dump_id,
+                            "finalize_dump panicked"
+                        );
+                    });
+                }
+            }
+        }
+        let (tx, result) = dump.into_result(manifest_key);
         // The caller may have dropped the handle; that does not cancel.
         let _ = tx.send(result);
     }
@@ -1355,6 +1421,10 @@ impl WorkerLoop {
 #[cfg(feature = "worker-s3")]
 pub(crate) struct S3PipelineUploader {
     state: S3UploaderState,
+    /// Triggered mode: object keys written per dump id, accumulated while
+    /// the dump is open and flushed into its manifest at `finalize_dump`.
+    /// A key appears under several ids when forward windows overlap.
+    dump_keys: HashMap<String, Vec<String>>,
 }
 
 #[cfg(feature = "worker-s3")]
@@ -1385,6 +1455,7 @@ impl S3PipelineUploader {
     pub(crate) fn new(s3_config: s3::S3Config, client: Option<aws_sdk_s3::Client>) -> Self {
         Self {
             state: S3UploaderState::Pending { s3_config, client },
+            dump_keys: HashMap::new(),
         }
     }
 
@@ -1424,6 +1495,7 @@ impl S3PipelineUploader {
                 uploader,
                 circuit_breaker,
             },
+            dump_keys: HashMap::new(),
         }
     }
 
@@ -1526,6 +1598,16 @@ impl SegmentProcessor for S3PipelineUploader {
             {
                 Ok(key) => {
                     circuit_breaker.on_success();
+                    // Triggered dumps: remember the key under every dump id
+                    // the segment belongs to, for that dump's manifest.
+                    if let Some(dump_ids) = data.metadata.get("dump_id") {
+                        for id in dump_ids.split(',').filter(|id| !id.is_empty()) {
+                            self.dump_keys
+                                .entry(id.to_string())
+                                .or_default()
+                                .push(key.clone());
+                        }
+                    }
                     rate_limited!(Duration::from_secs(10), {
                         tracing::info!(target: "dial9_worker", "uploaded {key}");
                     });
@@ -1542,6 +1624,57 @@ impl SegmentProcessor for S3PipelineUploader {
                         });
                     }
                     Err(ProcessError { data, kind })
+                }
+            }
+        })
+    }
+
+    fn finalize_dump(
+        &mut self,
+        completion: &crate::dump::DumpCompletion,
+    ) -> Pin<Box<dyn Future<Output = Option<String>> + Send + '_>> {
+        // Always take the entry so per-dump state clears even when the
+        // manifest PUT fails. An empty dump still gets an (empty-segments)
+        // manifest: its presence is the cross-process completion signal.
+        let segments = self
+            .dump_keys
+            .remove(&completion.dump_id.to_string())
+            .unwrap_or_default();
+        let manifest = s3::DumpManifest::new(completion, segments);
+        Box::pin(async move {
+            // The manifest may be the first object of the run (e.g. an
+            // empty dump before any segment upload): lazily initialize
+            // exactly like `process()` does.
+            if let S3UploaderState::Pending { s3_config, client } = &self.state {
+                let cfg = s3_config.clone();
+                let cli = client.clone();
+                let (uploader, circuit_breaker) = Self::initialize(cfg, cli).await;
+                self.state = S3UploaderState::Ready {
+                    uploader,
+                    circuit_breaker,
+                };
+            }
+            let S3UploaderState::Ready { uploader, .. } = &self.state else {
+                return None;
+            };
+            let body = match serde_json::to_vec(&manifest) {
+                Ok(body) => body,
+                Err(e) => {
+                    rate_limited!(Duration::from_secs(60), {
+                        tracing::warn!(target: "dial9_worker", error = %e, "failed to serialize dump manifest");
+                    });
+                    return None;
+                }
+            };
+            let key = uploader.manifest_key(&manifest.dump_id);
+            // Best-effort: a failed manifest PUT never fails the receipt.
+            match uploader.upload_manifest(&key, body).await {
+                Ok(()) => Some(key),
+                Err(e) => {
+                    rate_limited!(Duration::from_secs(60), {
+                        tracing::warn!(target: "dial9_worker", error = %e, dump_id = %manifest.dump_id, "failed to write dump manifest");
+                    });
+                    None
                 }
             }
         })
@@ -3079,17 +3212,13 @@ mod worker_pipeline_tests {
     }
 }
 
+/// Shared helpers for the triggered-worker and finalize-dump test modules.
 #[cfg(test)]
-mod triggered_worker_tests {
+mod triggered_test_support {
     use super::*;
-    use crate::dump::{self, DumpError};
-    use assert2::check;
     use std::io::Write as _;
-    use std::sync::Mutex;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use testutil::CapturingProcessor;
 
-    fn now_epoch() -> u64 {
+    pub(super) fn now_epoch() -> u64 {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -3097,7 +3226,7 @@ mod triggered_worker_tests {
     }
 
     /// Valid trace bytes whose first clock anchor reports `epoch_secs`.
-    fn segment_with_epoch(epoch_secs: u64) -> Vec<u8> {
+    pub(super) fn segment_with_epoch(epoch_secs: u64) -> Vec<u8> {
         use dial9_trace_format::encoder::Encoder;
         let mut enc = Encoder::new_to(Vec::new()).unwrap();
         enc.write_infallible(&crate::telemetry::format::ClockSyncEvent {
@@ -3107,16 +3236,16 @@ mod triggered_worker_tests {
         enc.into_inner()
     }
 
-    fn seal_mem(fs: &Fs, index: u32, epoch_secs: u64) {
+    pub(super) fn seal_mem(fs: &Fs, index: u32, epoch_secs: u64) {
         let mut h = fs.create_segment(Path::new("x")).unwrap();
         h.write_all(&segment_with_epoch(epoch_secs)).unwrap();
         fs.seal(h, Path::new("x"), index).unwrap();
     }
 
-    fn spawn_worker(
+    pub(super) fn spawn_worker(
         fs: Arc<Fs>,
         processors: Vec<Box<dyn SegmentProcessor>>,
-        rx: dump::DumpRx,
+        rx: crate::dump::DumpRx,
         stop: tokio_util::sync::CancellationToken,
     ) -> tokio::task::JoinHandle<()> {
         let mut worker = WorkerLoop::new(
@@ -3129,6 +3258,17 @@ mod triggered_worker_tests {
         );
         tokio::spawn(async move { worker.run().await })
     }
+}
+
+#[cfg(test)]
+mod triggered_worker_tests {
+    use super::triggered_test_support::*;
+    use super::*;
+    use crate::dump::{self, DumpError};
+    use assert2::check;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use testutil::CapturingProcessor;
 
     /// Records every segment's pipeline metadata for assertions.
     struct MetadataRecorder(Arc<Mutex<Vec<HashMap<String, String>>>>);
@@ -3517,5 +3657,353 @@ mod triggered_worker_tests {
         check!(snap.segments.len() == 1);
         check!(snap.segments[0].seg_ref.index() == 1);
         check!(snap.queued_segments == Some(1));
+    }
+}
+
+#[cfg(test)]
+mod finalize_dump_tests {
+    use super::triggered_test_support::*;
+    use super::*;
+    use crate::dump::{self, DumpCompletion, DumpId};
+    use assert2::check;
+    use std::sync::Mutex;
+
+    type SeenCompletions = Arc<Mutex<Vec<(DumpId, usize, Vec<(String, String)>)>>>;
+
+    /// Passes segments through; `finalize_dump` records the completion and
+    /// returns a fixed key (or `None`).
+    struct FinalizeStub {
+        key: Option<String>,
+        completions: SeenCompletions,
+    }
+
+    impl SegmentProcessor for FinalizeStub {
+        fn name(&self) -> &'static str {
+            "FinalizeStub"
+        }
+        fn process(
+            &mut self,
+            data: SegmentData,
+        ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>>
+        {
+            Box::pin(async move { Ok(data) })
+        }
+        fn finalize_dump(
+            &mut self,
+            completion: &DumpCompletion,
+        ) -> Pin<Box<dyn Future<Output = Option<String>> + Send + '_>> {
+            self.completions.lock().unwrap().push((
+                completion.dump_id,
+                completion.segments_processed,
+                completion.metadata.clone(),
+            ));
+            let key = self.key.clone();
+            Box::pin(std::future::ready(key))
+        }
+    }
+
+    struct PanickingFinalize;
+
+    impl SegmentProcessor for PanickingFinalize {
+        fn name(&self) -> &'static str {
+            "PanickingFinalize"
+        }
+        fn process(
+            &mut self,
+            data: SegmentData,
+        ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>>
+        {
+            Box::pin(async move { Ok(data) })
+        }
+        fn finalize_dump(
+            &mut self,
+            _completion: &DumpCompletion,
+        ) -> Pin<Box<dyn Future<Output = Option<String>> + Send + '_>> {
+            panic!("finalize boom");
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn manifest_key_flows_to_receipt_last_stage_wins() {
+        let fs = Fs::new_in_memory(64 * 1024, 1024).unwrap();
+        let (control, rx) = dump::trigger();
+        seal_mem(&fs, 0, now_epoch());
+
+        let completions = Arc::new(Mutex::new(Vec::new()));
+        let stop = tokio_util::sync::CancellationToken::new();
+        let worker = spawn_worker(
+            Arc::clone(&fs),
+            vec![
+                Box::new(FinalizeStub {
+                    key: Some("dumps/early.json".into()),
+                    completions: completions.clone(),
+                }),
+                Box::new(FinalizeStub {
+                    key: Some("dumps/late.json".into()),
+                    completions: completions.clone(),
+                }),
+            ],
+            rx,
+            stop.clone(),
+        );
+
+        let receipt = control
+            .dump_current_data()
+            .with_metadata("reason", "test")
+            .await
+            .unwrap();
+
+        check!(receipt.manifest_key.as_deref() == Some("dumps/late.json"));
+        {
+            let seen = completions.lock().unwrap();
+            check!(seen.len() == 2, "both stages finalized");
+            for (id, count, metadata) in seen.iter() {
+                check!(*id == receipt.dump_id);
+                check!(*count == 1);
+                check!(metadata == &vec![("reason".to_string(), "test".to_string())]);
+            }
+        }
+
+        stop.cancel();
+        worker.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn default_finalize_yields_no_manifest_key() {
+        let fs = Fs::new_in_memory(64 * 1024, 1024).unwrap();
+        let (control, rx) = dump::trigger();
+        seal_mem(&fs, 0, now_epoch());
+
+        let stop = tokio_util::sync::CancellationToken::new();
+        let (capture, _captured) = testutil::CapturingProcessor::new();
+        let worker = spawn_worker(Arc::clone(&fs), vec![Box::new(capture)], rx, stop.clone());
+
+        let receipt = control.dump_current_data().await.unwrap();
+        check!(receipt.manifest_key.is_none());
+
+        stop.cancel();
+        worker.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn finalize_runs_for_empty_dump() {
+        let fs = Fs::new_in_memory(64 * 1024, 1024).unwrap();
+        let (control, rx) = dump::trigger();
+
+        let completions = Arc::new(Mutex::new(Vec::new()));
+        let stop = tokio_util::sync::CancellationToken::new();
+        let worker = spawn_worker(
+            Arc::clone(&fs),
+            vec![Box::new(FinalizeStub {
+                key: Some("dumps/empty.json".into()),
+                completions: completions.clone(),
+            })],
+            rx,
+            stop.clone(),
+        );
+
+        let receipt = control.dump_current_data().await.unwrap();
+        check!(receipt.segments_processed == 0);
+        check!(receipt.manifest_key.as_deref() == Some("dumps/empty.json"));
+        check!(completions.lock().unwrap().len() == 1);
+
+        stop.cancel();
+        worker.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn panicking_finalize_is_caught_receipt_resolves() {
+        let fs = Fs::new_in_memory(64 * 1024, 1024).unwrap();
+        let (control, rx) = dump::trigger();
+        seal_mem(&fs, 0, now_epoch());
+
+        let stop = tokio_util::sync::CancellationToken::new();
+        let worker = spawn_worker(
+            Arc::clone(&fs),
+            vec![Box::new(PanickingFinalize)],
+            rx,
+            stop.clone(),
+        );
+
+        let receipt = control.dump_current_data().await.unwrap();
+        check!(receipt.segments_processed == 1);
+        check!(receipt.manifest_key.is_none());
+
+        stop.cancel();
+        worker.await.unwrap();
+    }
+}
+
+#[cfg(all(test, feature = "worker-s3"))]
+mod s3_dump_manifest_tests {
+    use super::triggered_test_support::*;
+    use super::*;
+    use crate::dump;
+    use assert2::check;
+
+    fn fake_tm_client(fs_root: &Path) -> aws_sdk_s3_transfer_manager::Client {
+        let fs = s3s_fs::FileSystem::new(fs_root).unwrap();
+        let mut builder = s3s::service::S3ServiceBuilder::new(fs);
+        builder.set_auth(s3s::auth::SimpleAuth::from_single("test", "test"));
+        let s3_service = builder.build();
+        let s3_client: s3s_aws::Client = s3_service.into();
+        let s3_config = aws_sdk_s3::Config::builder()
+            .behavior_version_latest()
+            .credentials_provider(aws_sdk_s3::config::Credentials::new(
+                "test", "test", None, None, "test",
+            ))
+            .region(aws_sdk_s3::config::Region::new("us-east-1"))
+            .http_client(s3_client)
+            .force_path_style(true)
+            .build();
+        let sdk_client = aws_sdk_s3::Client::from_conf(s3_config);
+        aws_sdk_s3_transfer_manager::Client::new(
+            aws_sdk_s3_transfer_manager::Config::builder()
+                .client(sdk_client)
+                .build(),
+        )
+    }
+
+    fn s3_uploader_for(root: &Path) -> S3PipelineUploader {
+        let config = s3::S3Config::builder()
+            .bucket("test-bucket")
+            .prefix("traces")
+            .service_name("test")
+            .instance_path("test")
+            .boot_id("test")
+            .region("us-east-1")
+            .build();
+        let uploader = s3::S3Uploader::new(fake_tm_client(root), config);
+        S3PipelineUploader::from_ready(uploader, connection::CircuitBreaker::new())
+    }
+
+    fn read_manifest(root: &Path, key: &str) -> serde_json::Value {
+        let path = root.join("test-bucket").join(key);
+        let bytes = std::fs::read(&path)
+            .unwrap_or_else(|e| panic!("manifest at {} unreadable: {e}", path.display()));
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[tokio::test]
+    async fn dump_writes_manifest_listing_uploaded_keys() {
+        let s3_root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(s3_root.path().join("test-bucket")).unwrap();
+
+        let fs = Fs::new_in_memory(64 * 1024, 1024).unwrap();
+        let (control, rx) = dump::trigger();
+        seal_mem(&fs, 0, now_epoch());
+        seal_mem(&fs, 1, now_epoch());
+
+        let stop = tokio_util::sync::CancellationToken::new();
+        let worker = spawn_worker(
+            Arc::clone(&fs),
+            vec![
+                Box::new(GzipCompressor),
+                Box::new(s3_uploader_for(s3_root.path())),
+            ],
+            rx,
+            stop.clone(),
+        );
+
+        let receipt = control
+            .dump_current_data()
+            .with_metadata("reason", "test")
+            .await
+            .unwrap();
+
+        let manifest_key = receipt.manifest_key.clone().expect("S3 pipeline writes a manifest");
+        check!(
+            manifest_key == format!("traces/dumps/{}.json", receipt.dump_id),
+            "manifest key layout"
+        );
+
+        let manifest = read_manifest(s3_root.path(), &manifest_key);
+        check!(manifest["dump_id"] == serde_json::json!(receipt.dump_id.to_string()));
+        check!(manifest["segments_processed"] == serde_json::json!(2));
+        check!(manifest["metadata"]["reason"] == serde_json::json!("test"));
+        let segments = manifest["segments"].as_array().unwrap();
+        check!(segments.len() == 2);
+        for key in segments {
+            let key = key.as_str().unwrap();
+            check!(
+                s3_root.path().join("test-bucket").join(key).exists(),
+                "manifest lists a real object: {key}"
+            );
+        }
+
+        stop.cancel();
+        worker.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn overlapping_dumps_fan_out_shared_key_to_both_manifests() {
+        let s3_root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(s3_root.path().join("test-bucket")).unwrap();
+
+        let fs = Fs::new_in_memory(64 * 1024, 1024).unwrap();
+        let (control, rx) = dump::trigger();
+
+        let stop = tokio_util::sync::CancellationToken::new();
+        let worker = spawn_worker(
+            Arc::clone(&fs),
+            vec![
+                Box::new(GzipCompressor),
+                Box::new(s3_uploader_for(s3_root.path())),
+            ],
+            rx,
+            stop.clone(),
+        );
+
+        let fut_a = std::future::IntoFuture::into_future(
+            control.dump_time_range(Duration::from_secs(60), Duration::from_secs(1)),
+        );
+        let fut_b = std::future::IntoFuture::into_future(
+            control.dump_time_range(Duration::from_secs(60), Duration::from_secs(1)),
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        seal_mem(&fs, 0, now_epoch());
+
+        let (receipt_a, receipt_b) = tokio::join!(fut_a, fut_b);
+        let receipt_a = receipt_a.unwrap();
+        let receipt_b = receipt_b.unwrap();
+
+        let manifest_a = read_manifest(s3_root.path(), receipt_a.manifest_key.as_ref().unwrap());
+        let manifest_b = read_manifest(s3_root.path(), receipt_b.manifest_key.as_ref().unwrap());
+        let segs_a = manifest_a["segments"].as_array().unwrap();
+        let segs_b = manifest_b["segments"].as_array().unwrap();
+        check!(segs_a.len() == 1);
+        check!(segs_a == segs_b, "the shared key appears in both manifests");
+
+        stop.cancel();
+        worker.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn empty_dump_still_writes_manifest_as_completion_signal() {
+        let s3_root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(s3_root.path().join("test-bucket")).unwrap();
+
+        let fs = Fs::new_in_memory(64 * 1024, 1024).unwrap();
+        let (control, rx) = dump::trigger();
+
+        let stop = tokio_util::sync::CancellationToken::new();
+        let worker = spawn_worker(
+            Arc::clone(&fs),
+            vec![
+                Box::new(GzipCompressor),
+                Box::new(s3_uploader_for(s3_root.path())),
+            ],
+            rx,
+            stop.clone(),
+        );
+
+        let receipt = control.dump_current_data().await.unwrap();
+        check!(receipt.segments_processed == 0);
+        let manifest =
+            read_manifest(s3_root.path(), receipt.manifest_key.as_ref().unwrap());
+        check!(manifest["segments"] == serde_json::json!([]));
+
+        stop.cancel();
+        worker.await.unwrap();
     }
 }

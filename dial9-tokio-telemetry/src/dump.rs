@@ -20,9 +20,10 @@
 //! control.dump_current_data();
 //! ```
 //!
-//! Both [`DumpControl::dump_current_data`] and
-//! [`DumpControl::dump_time_range`] dispatch immediately; awaiting the
-//! returned [`DumpRun`] is optional and only retrieves the [`DumpReceipt`].
+//! Both [`DumpControl::dump_current_data`](crate::dump::DumpControl::dump_current_data) and
+//! [`DumpControl::dump_time_range`](crate::dump::DumpControl::dump_time_range) dispatch
+//! immediately; awaiting the returned [`DumpRun`](crate::dump::DumpRun) is optional and
+//! only retrieves the [`DumpReceipt`](crate::dump::DumpReceipt).
 //! Dumps are strictly best-effort: a window wider than what the ring
 //! retained captures whatever survived, with no error and no effect on the
 //! live stream.
@@ -241,6 +242,25 @@ impl Future for DumpFuture {
             DumpFutureInner::Stopped => Poll::Ready(Err(DumpError::WorkerStopped)),
         }
     }
+}
+
+/// Worker → pipeline-stage signal that a dump finished; passed to
+/// [`SegmentProcessor::finalize_dump`](crate::background_task::SegmentProcessor::finalize_dump)
+/// so stages can flush per-dump state (the S3 stage writes the dump's
+/// manifest from it).
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct DumpCompletion {
+    /// Id of the dump that finished.
+    pub dump_id: DumpId,
+    /// When the dump was dispatched.
+    pub triggered_at: SystemTime,
+    /// Actual covered span (see [`DumpReceipt::time_range`]).
+    pub time_range: (SystemTime, SystemTime),
+    /// Count of segments that made it through the pipeline.
+    pub segments_processed: usize,
+    /// Caller correlation pairs from `with_metadata(...)`.
+    pub metadata: Vec<(String, String)>,
 }
 
 /// What a completed dump produced.
