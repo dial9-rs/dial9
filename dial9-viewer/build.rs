@@ -1,6 +1,6 @@
 use std::env;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Generates files in OUT_DIR for the new Agent Skills directory structure:
 ///
@@ -9,14 +9,14 @@ use std::path::Path;
 ///   - `HEADER: &str` auto-generated overview from skill frontmatter
 ///   - `TOOLKIT_FILES: &[(&str, &str)]` for the `agents toolkit` command
 fn main() {
-    let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
-    let out_dir = env::var("OUT_DIR").unwrap();
+    let manifest_dir = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap());
+    let out_dir = PathBuf::from(env::var_os("OUT_DIR").unwrap());
 
     println!("cargo::rerun-if-changed=skills");
     println!("cargo::rerun-if-changed=ui");
     println!("cargo::rerun-if-changed=README_TELEMETRY.md");
 
-    let skills_dir = Path::new(&manifest_dir).join("skills");
+    let skills_dir = manifest_dir.join("skills");
     let mut skills: Vec<SkillInfo> = Vec::new();
 
     // Walk each subdirectory in skills/
@@ -46,7 +46,13 @@ fn main() {
 
             // Collect all files in the skill directory (recursively)
             let mut files: Vec<(String, RelReference)> = Vec::new(); // (relative_path, src_rel)
-            collect_files(&dir_path, &dir_path, &mut files);
+            let base_relative_to_manifest_dir = Path::new("skills").join(entry.file_name());
+            collect_files(
+                &manifest_dir,
+                &base_relative_to_manifest_dir,
+                Path::new(""),
+                &mut files,
+            );
 
             skills.push(SkillInfo {
                 name,
@@ -63,17 +69,17 @@ fn main() {
         name: "dial9-setup".to_string(),
         description: "How to instrument your app with dial9-tokio-telemetry. Covers prerequisites, macro and manual setup, the tracing layer, and wake event tracking.".to_string(),
         body: setup_body,
-        files: vec![("SKILL.md".to_string(), resolve_path(&Path::new(&out_dir).join("dial9-setup-SKILL.md")))],
+        files: vec![("SKILL.md".to_string(), RelReference::OutRel(PathBuf::from("dial9-setup-SKILL.md")))],
     });
     skills.sort_by(|a, b| a.name.cmp(&b.name));
 
     // Generate the header from skill descriptions
     let header = generate_header(&skills);
-    let header_path = Path::new(&out_dir).join("header.md");
+    let header_path = out_dir.join("header.md");
     fs::write(&header_path, &header).unwrap();
 
     // Generate skills.rs
-    let dest = Path::new(&out_dir).join("skills.rs");
+    let dest = out_dir.join("skills.rs");
     let mut code = String::new();
 
     // HEADER constant
@@ -84,7 +90,7 @@ fn main() {
 
     // Write stripped body files to OUT_DIR for the `skill` command
     for skill in &skills {
-        let body_path = Path::new(&out_dir).join(format!("{}-body.md", skill.name));
+        let body_path = out_dir.join(format!("{}-body.md", skill.name));
         fs::write(&body_path, &skill.body).unwrap();
     }
 
@@ -102,7 +108,7 @@ fn main() {
         code.push_str(&format!("        description: {:?},\n", skill.description));
         code.push_str(&format!(
             "        body: {},\n",
-            env_dir_include_str("OUT_DIR", &format!("{}-body.md", skill.name))
+            env_dir_include_str("OUT_DIR", format!("{}-body.md", skill.name))
         ));
         code.push_str("        files: &[\n");
         for (rel, src_rel) in &skill.files {
@@ -138,8 +144,8 @@ fn main() {
 }
 
 enum RelReference {
-    SrcRel(String),
-    OutRel(String),
+    SrcRel(PathBuf),
+    OutRel(PathBuf),
 }
 
 struct SkillInfo {
@@ -149,7 +155,8 @@ struct SkillInfo {
     files: Vec<(String, RelReference)>, // (relative_path, rel_src)
 }
 
-fn env_dir_include_str(env: &str, path: &str) -> String {
+fn env_dir_include_str(env: &str, path: impl AsRef<Path>) -> String {
+    let path = path.as_ref().to_str().unwrap();
     format!("include_str!(concat!(env!(\"{env}\"), \"/{path}\"))")
 }
 
@@ -160,46 +167,31 @@ fn rel_ref_include_str(src_rel: &RelReference) -> String {
     }
 }
 
-fn resolve_path(path: &Path) -> RelReference {
-    let res = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    let src_dir = fs::canonicalize(env::var("CARGO_MANIFEST_DIR").unwrap()).unwrap();
-    let out_dir = fs::canonicalize(env::var("OUT_DIR").unwrap()).unwrap();
-    if res.starts_with(&src_dir) {
-        RelReference::SrcRel(
-            res.strip_prefix(&src_dir)
-                .unwrap()
-                .to_path_buf()
-                .to_string_lossy()
-                .to_string(),
-        )
-    } else {
-        RelReference::OutRel(
-            res.strip_prefix(&out_dir)
-                .unwrap()
-                .to_path_buf()
-                .to_string_lossy()
-                .to_string(),
-        )
-    }
-}
-
 /// Recursively collect all files in a directory, resolving symlinks.
-fn collect_files(base: &Path, dir: &Path, out: &mut Vec<(String, RelReference)>) {
-    let mut entries: Vec<_> = fs::read_dir(dir).unwrap().filter_map(|e| e.ok()).collect();
+fn collect_files(
+    manifest_dir: &Path,
+    base: &Path,
+    nested_dir: &Path,
+    out: &mut Vec<(String, RelReference)>,
+) {
+    let abs_dir = manifest_dir.join(base).join(nested_dir);
+    let mut entries: Vec<_> = fs::read_dir(abs_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .collect();
     entries.sort_by_key(|e| e.file_name());
 
     for entry in entries {
-        let path = entry.path();
-        let rel = path
-            .strip_prefix(base)
-            .unwrap()
-            .to_string_lossy()
-            .to_string();
+        let abs_path = entry.path();
+        let rel = nested_dir.join(entry.file_name());
 
-        if path.is_dir() && !path.is_symlink() {
-            collect_files(base, &path, out);
-        } else if path.is_file() || path.is_symlink() {
-            out.push((rel, resolve_path(&path)));
+        if abs_path.is_dir() && !abs_path.is_symlink() {
+            collect_files(manifest_dir, base, &rel, out);
+        } else if abs_path.is_file() || abs_path.is_symlink() {
+            out.push((
+                rel.to_string_lossy().into_owned(),
+                RelReference::SrcRel(base.join(rel)),
+            ));
         }
     }
 }
@@ -303,8 +295,8 @@ const SETUP_SECTIONS: &[&str] = &[
 ];
 
 /// Generate the setup skill from the crate README.
-fn generate_setup_from_readme(manifest_dir: &str, out_dir: &str) -> String {
-    let readme_path = Path::new(manifest_dir).join("README_TELEMETRY.md");
+fn generate_setup_from_readme(manifest_dir: &Path, out_dir: &Path) -> String {
+    let readme_path = manifest_dir.join("README_TELEMETRY.md");
     let readme = fs::read_to_string(&readme_path)
         .unwrap_or_else(|e| panic!("failed to read {}: {e}", readme_path.display()));
 
@@ -323,7 +315,7 @@ fn generate_setup_from_readme(manifest_dir: &str, out_dir: &str) -> String {
     );
     full.push_str(&body);
 
-    let dest = Path::new(out_dir).join("dial9-setup-SKILL.md");
+    let dest = out_dir.join("dial9-setup-SKILL.md");
     fs::write(&dest, &full).unwrap();
 
     body
