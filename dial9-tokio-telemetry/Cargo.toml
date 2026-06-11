@@ -64,6 +64,7 @@ metrique = { version = "0.1.23", features = ["local-format"] }
 metrique-timesource = "0.1"
 dial9-macro = { workspace = true }
 shuttle = { version = "0.9.1", optional = true }
+ulid = "1"
 
 [features]
 analysis = []
