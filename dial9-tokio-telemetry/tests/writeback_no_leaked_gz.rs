@@ -94,17 +94,60 @@ fn eviction_cleans_up_processed_gz_segments() {
         gz_files.len()
     );
 
-    // Compute total size of .gz files on disk.
+    // Total compressed size on disk, for diagnostics in the assertion message.
     let total_gz_bytes: u64 = gz_files
         .iter()
         .map(|p| std::fs::metadata(p).unwrap().len())
         .sum();
 
-    // The total compressed size on disk must be smaller or equal to the max total size
+    // The on-disk `.bin.gz` total cannot be compared directly against
+    // `max_total_size`. Eviction (`SegmentWriter::evict_oldest`) accounts for
+    // the budget in *uncompressed* segment bytes (`total_size()` sums each
+    // segment's `bytes_written()`), and it *always retains at least the
+    // most-recent segment*. Two consequences break a naive `total <= budget`
+    // check, and both have flaked in CI:
+    //   * A single logical unit (e.g. one CPU-profile stack sample) can exceed
+    //     `max_file_size`, so the most-recent segment alone can be larger than
+    //     the whole budget — eviction never drops below one segment. (An
+    //     over-budget segment is only ever retained while it is the most-recent
+    //     one: once it rotates and becomes a closed segment, eviction drops it
+    //     immediately because `total_size()` then exceeds the budget.)
+    //   * gzip framing overhead on poorly-compressible profiling data can push
+    //     the compressed size a few bytes above the uncompressed budget.
+    //
+    // The invariant eviction *does* guarantee is that, once the always-retained
+    // most-recent segment (highest index) is set aside, the remaining (older)
+    // segments fit within the budget. A real leak — old `.bin.gz` files that
+    // eviction failed to delete after renaming `.bin` -> `.bin.gz` — would
+    // accumulate and blow this bound, so we still catch the regression this
+    // test exists to guard against.
+    //
+    // Segments are named `trace.<index>.bin.gz`; the most-recent has the
+    // highest index.
+    fn segment_index(path: &std::path::Path) -> u64 {
+        let name = path.file_name().unwrap().to_string_lossy();
+        let stem = name
+            .strip_suffix(".bin.gz")
+            .expect("gz files are collected by their .bin.gz suffix");
+        stem.rsplit('.')
+            .next()
+            .and_then(|s| s.parse::<u64>().ok())
+            .expect("trace segment files should be named trace.<index>.bin.gz")
+    }
+
+    let newest_index = gz_files.iter().map(|p| segment_index(p)).max();
+    let evictable_gz_bytes: u64 = gz_files
+        .iter()
+        .filter(|p| Some(segment_index(p)) != newest_index)
+        .map(|p| std::fs::metadata(p).unwrap().len())
+        .sum();
+
     assert!(
-        total_gz_bytes <= max_total_size,
-        "total .bin.gz size on disk ({total_gz_bytes} bytes) exceeds the configured \
-         budget ({max_total_size} bytes) — processed segments are leaking. \
+        evictable_gz_bytes <= max_total_size,
+        "after setting aside the always-retained most-recent segment, the \
+         remaining .bin.gz size on disk ({evictable_gz_bytes} bytes; \
+         {total_gz_bytes} bytes total) exceeds the configured budget \
+         ({max_total_size} bytes) — processed segments are leaking. \
          Files: {gz_files:?}"
     );
 }
