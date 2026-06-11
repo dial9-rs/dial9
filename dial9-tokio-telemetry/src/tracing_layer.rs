@@ -51,8 +51,8 @@
 //!
 //! Each span enter+exit pair costs roughly **300ns** total (tracing dispatch
 //! plus dial9 encoding), of which **~50-100ns** is the dial9 encoding overhead.
-//! Measured with `NullWriter` on a `current_thread` runtime to isolate
-//! encoding from I/O. This scales linearly with nesting depth and is
+//! Measured with an in-memory writer on a `current_thread` runtime to
+//! isolate encoding from I/O. This scales linearly with nesting depth and is
 //! comparable to the cost of a single poll event, so the layer is suitable
 //! for production use with appropriate span filtering.
 

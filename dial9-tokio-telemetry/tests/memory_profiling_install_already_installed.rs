@@ -2,19 +2,17 @@
 #![cfg(target_os = "linux")]
 //! Test that a second install() returns AlreadyInstalled.
 
-mod common;
-
 use dial9_tokio_telemetry::memory_profiling::{InstallError, MemoryProfiler};
 use dial9_tokio_telemetry::telemetry::TracedRuntime;
 
+mod common;
+
 #[test]
 fn second_install_returns_already_installed() {
-    let (writer, _batches) = common::BytesCapturingWriter::new();
-
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.worker_threads(1).enable_all();
     let (_runtime, guard) = TracedRuntime::builder()
-        .build_and_start_with_writer(builder, writer)
+        .build_and_start(builder, common::small_mem_writer())
         .unwrap();
 
     let handle = guard.handle();

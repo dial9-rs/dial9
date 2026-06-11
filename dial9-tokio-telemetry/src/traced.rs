@@ -226,7 +226,7 @@ mod tests {
     use crate::telemetry::buffer;
     use crate::telemetry::recorder::{TelemetryCore, TracedRuntime};
     use crate::telemetry::task_metadata::UNKNOWN_TASK_ID;
-    use crate::telemetry::writer::{DiskWriter, NullWriter};
+    use crate::telemetry::writer::{DiskWriter, InMemoryWriter};
     use futures_util::task::noop_waker;
     use std::pin::Pin;
     use std::sync::{Arc, Mutex};
@@ -235,7 +235,10 @@ mod tests {
 
     #[test]
     fn traced_future_falls_back_after_missing_task_context() {
-        let guard = TelemetryCore::builder().writer(NullWriter).build().unwrap();
+        let guard = TelemetryCore::builder()
+            .writer(InMemoryWriter::new(16 * 1024 * 1024).unwrap())
+            .build()
+            .unwrap();
         let handle = guard
             .handle()
             .traced_handle()

@@ -128,6 +128,155 @@ macro_rules! define_thread_local {
 #[cfg(shuttle)]
 pub(crate) use define_thread_local as thread_local;
 
+#[cfg(not(shuttle))]
+pub(crate) mod fs {
+    use std::io::{self, Write};
+    use std::path::Path;
+
+    pub(crate) fn create_dir_all(path: &Path) -> io::Result<()> {
+        std::fs::create_dir_all(path)
+    }
+    pub(crate) fn rename(from: &Path, to: &Path) -> io::Result<()> {
+        std::fs::rename(from, to)
+    }
+    pub(crate) fn remove_file(path: &Path) -> io::Result<()> {
+        std::fs::remove_file(path)
+    }
+    pub(crate) fn read_dir(path: &Path) -> io::Result<std::fs::ReadDir> {
+        std::fs::read_dir(path)
+    }
+    pub(crate) fn metadata(path: &Path) -> io::Result<std::fs::Metadata> {
+        std::fs::metadata(path)
+    }
+    pub(crate) fn read(path: &Path) -> io::Result<Vec<u8>> {
+        std::fs::read(path)
+    }
+
+    /// Active-segment file handle.
+    #[derive(Debug)]
+    pub(crate) struct File(std::fs::File);
+
+    impl File {
+        pub(crate) fn create(path: &Path) -> io::Result<File> {
+            std::fs::File::create(path).map(File)
+        }
+    }
+
+    impl Write for File {
+        #[inline]
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0.write(buf)
+        }
+        #[inline]
+        fn flush(&mut self) -> io::Result<()> {
+            self.0.flush()
+        }
+    }
+}
+
+#[cfg(shuttle)]
+pub(crate) mod fs {
+    use std::cell::Cell;
+    use std::io::{self, ErrorKind, Write};
+    use std::path::Path;
+
+    use shuttle::rand::Rng;
+
+    /// How to fail filesystem operations during a shuttle run.
+    #[derive(Clone, Copy, Debug)]
+    pub(crate) enum FaultPolicy {
+        /// Delegate to real `std::fs`, nothing fails.
+        None,
+        /// Every fallible op returns `PermissionDenied`.
+        FailAll,
+        /// Each op independently fails with this probability, drawn from
+        /// shuttle's RNG so the scheduler explores the fault schedule.
+        FailProb(f64),
+    }
+
+    std::thread_local! {
+        static FAULT: Cell<FaultPolicy> = const { Cell::new(FaultPolicy::None) };
+    }
+
+    /// Arm `policy`: the returned guard restores the previous one on drop so a
+    /// fault can't leak into the next shuttle iteration.
+    #[must_use]
+    pub(crate) fn set_fault(policy: FaultPolicy) -> FaultGuard {
+        let prev = FAULT.with(|f| f.replace(policy));
+        FaultGuard { prev }
+    }
+
+    pub(crate) struct FaultGuard {
+        prev: FaultPolicy,
+    }
+
+    impl Drop for FaultGuard {
+        fn drop(&mut self) {
+            FAULT.with(|f| f.set(self.prev));
+        }
+    }
+
+    fn check() -> io::Result<()> {
+        let fail = match FAULT.with(|f| f.get()) {
+            FaultPolicy::None => false,
+            FaultPolicy::FailAll => true,
+            FaultPolicy::FailProb(p) => shuttle::rand::thread_rng().gen_bool(p),
+        };
+        if fail {
+            Err(io::Error::from(ErrorKind::PermissionDenied))
+        } else {
+            Ok(())
+        }
+    }
+
+    pub(crate) fn create_dir_all(path: &Path) -> io::Result<()> {
+        check()?;
+        std::fs::create_dir_all(path)
+    }
+    pub(crate) fn rename(from: &Path, to: &Path) -> io::Result<()> {
+        check()?;
+        std::fs::rename(from, to)
+    }
+    pub(crate) fn remove_file(path: &Path) -> io::Result<()> {
+        check()?;
+        std::fs::remove_file(path)
+    }
+    pub(crate) fn read_dir(path: &Path) -> io::Result<std::fs::ReadDir> {
+        check()?;
+        std::fs::read_dir(path)
+    }
+    pub(crate) fn metadata(path: &Path) -> io::Result<std::fs::Metadata> {
+        check()?;
+        std::fs::metadata(path)
+    }
+    pub(crate) fn read(path: &Path) -> io::Result<Vec<u8>> {
+        check()?;
+        std::fs::read(path)
+    }
+
+    /// Active-segment file handle whose `write`/`flush` honor the armed fault
+    /// policy. `create` is never faulted, so a writer can always be built.
+    #[derive(Debug)]
+    pub(crate) struct File(std::fs::File);
+
+    impl File {
+        pub(crate) fn create(path: &Path) -> io::Result<File> {
+            std::fs::File::create(path).map(File)
+        }
+    }
+
+    impl Write for File {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            check()?;
+            self.0.write(buf)
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            check()?;
+            self.0.flush()
+        }
+    }
+}
+
 // ── BoundedQueue ────────────────────────────────────────────────────────────
 
 /// A bounded MPMC queue. Production uses `crossbeam_queue::ArrayQueue`;

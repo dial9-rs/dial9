@@ -2016,7 +2016,7 @@ mod worker_pipeline_tests {
         };
         std::fs::write(dir.path().join("trace.0.bin"), &gzip_data).unwrap();
 
-        let (capture, output_bytes) = super::testutil::CaptureProcessor::new();
+        let (capture, output_bytes) = super::testutil::CapturingProcessor::new();
         let stop = tokio_util::sync::CancellationToken::new();
         stop.cancel();
 
@@ -2033,7 +2033,10 @@ mod worker_pipeline_tests {
         worker.run().await;
 
         // The captured bytes should be identical to the input (not double-gzipped).
-        check!(output_bytes.lock().unwrap().as_slice() == gzip_data.as_slice());
+        // Single segment in this test, so check the first (only) captured payload.
+        let captured = output_bytes.lock().unwrap();
+        check!(captured.len() == 1);
+        check!(captured[0].as_slice() == gzip_data.as_slice());
     }
 
     /// WriteBackProcessor writes to a new path when `write_back_extension` is

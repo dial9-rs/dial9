@@ -2,8 +2,8 @@
 
 mod common;
 
-use common::{BytesCapturingWriter, decode_all};
-use dial9_tokio_telemetry::telemetry::TracedRuntime;
+use common::{CAPTURE_BUFFER_SIZE, capture_processor, decode_all};
+use dial9_tokio_telemetry::telemetry::{InMemoryWriter, TracedRuntime};
 use serde::Deserialize;
 
 /// Tagged union over the events this test cares about.
@@ -22,12 +22,13 @@ enum ParkOrUnpark {
 
 #[test]
 fn worker_park_unpark_events_carry_nonzero_tid() {
-    let (writer, batches) = BytesCapturingWriter::new();
+    let (capture, batches) = capture_processor();
 
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.worker_threads(2).enable_all();
     let (runtime, guard) = TracedRuntime::builder()
-        .build_and_start_with_writer(builder, writer)
+        .with_custom_pipeline(|p| p.pipe(capture))
+        .build_and_start(builder, InMemoryWriter::new(CAPTURE_BUFFER_SIZE).unwrap())
         .unwrap();
 
     // Generate park/unpark cycles by spawning work that yields.
@@ -46,7 +47,9 @@ fn worker_park_unpark_events_carry_nonzero_tid() {
     });
 
     drop(runtime);
-    drop(guard);
+    guard
+        .graceful_shutdown(std::time::Duration::from_secs(1))
+        .expect("clean shutdown");
 
     let batches = batches.lock().unwrap();
     let events: Vec<ParkOrUnpark> = decode_all(&batches);

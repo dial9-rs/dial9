@@ -95,7 +95,7 @@ fn bench_mixed_sizes(c: &mut Criterion) {
 
 fn install_profiler() {
     use dial9_tokio_telemetry::memory_profiling::{MemoryProfiler, MemoryProfilingConfig};
-    use dial9_tokio_telemetry::telemetry::{NullWriter, TracedRuntime};
+    use dial9_tokio_telemetry::telemetry::{InMemoryWriter, TracedRuntime};
 
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.worker_threads(1).enable_all();
@@ -103,7 +103,7 @@ fn install_profiler() {
     // We leak the runtime and guard so they live for the process lifetime.
     // This is intentional — the profiler is process-permanent anyway.
     let (runtime, guard) = TracedRuntime::builder()
-        .build_and_start(builder, NullWriter)
+        .build_and_start(builder, InMemoryWriter::new(16 * 1024 * 1024).unwrap())
         .unwrap();
     let handle = guard.handle();
 

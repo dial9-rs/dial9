@@ -70,6 +70,54 @@ function diagnoseStack(frames) {
   return { syscall, blocker, trigger, classified };
 }
 
+/**
+ * Group off-CPU (scheduling) samples, splitting real blocking from idle parking.
+ *
+ * An off-CPU sample taken *inside a poll* means a task voluntarily blocked
+ * mid-poll — that is real blocking. An off-CPU sample taken *between polls*
+ * means a worker parked because it had no work — that is idle, even though the
+ * park is itself a futex/condvar wait at the kernel level. Reporting both as
+ * "blocking calls" makes a mostly-idle runtime look 100% blocked on a futex.
+ *
+ * attachCpuSamples sets sample.inPoll (true when the sample landed within a
+ * poll). We split on that flag, deduplicate the in-poll stacks for the blocking
+ * report, and attribute them per spawn location.
+ *
+ * Caveat: an async lock wait (lock().await returning Pending) ends the poll, so
+ * its subsequent off-CPU time is tagged between-polls (idle), not in-poll. The
+ * in-poll bucket captures synchronous blocking but not .await-style async lock
+ * waits, so the "idle" bucket should not itself be over-trusted.
+ *
+ * Shared by both analysis paths (accumulateTrace and analyzeWorkerMain) so they
+ * cannot drift apart.
+ *
+ * @param {Array} offCpu - off-CPU samples (source === 1), each with .inPoll/.spawnLoc set
+ * @param {Map} callframeSymbols
+ * @returns {{ inPollGroups: Array, inPollCount: number, idleCount: number, inPollByLoc: Array<{loc: string, count: number}> }}
+ */
+function groupOffCpuSamples(offCpu, callframeSymbols) {
+  const inPoll = [];
+  let idleCount = 0;
+  const byLoc = new Map();
+  for (const s of offCpu) {
+    if (s.inPoll) {
+      inPoll.push(s);
+      const loc = s.spawnLoc || '(unknown spawn location)';
+      byLoc.set(loc, (byLoc.get(loc) || 0) + 1);
+    } else {
+      idleCount++;
+    }
+  }
+  return {
+    inPollGroups: deduplicateSamples(inPoll, callframeSymbols),
+    inPollCount: inPoll.length,
+    idleCount,
+    inPollByLoc: [...byLoc.entries()]
+      .map(([loc, count]) => ({ loc, count }))
+      .sort((a, b) => b.count - a.count),
+  };
+}
+
 function fmtDur(ns) {
   if (ns >= 1e9) return (ns / 1e9).toFixed(2) + 's';
   if (ns >= 1e6) return (ns / 1e6).toFixed(2) + 'ms';
@@ -101,6 +149,11 @@ function createAccumulator() {
     callframeSymbols: new Map(),
     cpuGroupMap: new Map(),
     schedGroupMap: new Map(),
+    // Off-CPU split: in-poll = real blocking, idle = worker parked with no work.
+    inPollGroupMap: new Map(),     // stack key -> in-poll blocking sample group
+    offCpuInPollCount: 0,          // off-CPU samples taken inside a poll (real blocking)
+    offCpuIdleCount: 0,            // off-CPU samples taken between polls (idle parking)
+    inPollByLocMap: new Map(),     // spawnLoc -> in-poll blocking sample count
     spanStats: new Map(), // spanName -> Histogram
     pollDurationByLoc: new Map(), // spawnLoc -> Histogram
     schedDelayHist: null, // Histogram
@@ -208,6 +261,18 @@ function accumulateTrace(acc, trace, sourceFile) {
     const e = acc.schedGroupMap.get(key);
     if (e) e.count += g.count; else acc.schedGroupMap.set(key, { ...g });
   }
+  // Off-CPU split: real blocking (in-poll) vs idle parking (between polls).
+  const offCpuSplit = groupOffCpuSamples(offCpu, trace.callframeSymbols);
+  acc.offCpuInPollCount += offCpuSplit.inPollCount;
+  acc.offCpuIdleCount += offCpuSplit.idleCount;
+  for (const g of offCpuSplit.inPollGroups) {
+    const key = g.frames.map(f => f.symbol).join('\0');
+    const e = acc.inPollGroupMap.get(key);
+    if (e) e.count += g.count; else acc.inPollGroupMap.set(key, { ...g });
+  }
+  for (const { loc, count } of offCpuSplit.inPollByLoc) {
+    acc.inPollByLocMap.set(loc, (acc.inPollByLocMap.get(loc) || 0) + count);
+  }
 
   // Span durations (native HDR histogram for bounded memory, exact percentiles)
   if (trace.customEvents && trace.customEvents.length > 0) {
@@ -267,6 +332,13 @@ function finalizeAccumulator(acc) {
     taskTerminateTimes: acc.taskTerminateTimes, callframeSymbols: acc.callframeSymbols,
     cpuGroups: [...acc.cpuGroupMap.values()].sort((a, b) => b.count - a.count),
     schedGroups: [...acc.schedGroupMap.values()].sort((a, b) => b.count - a.count),
+    // Off-CPU split: in-poll groups are real blocking; idle is parked-with-no-work.
+    inPollGroups: [...acc.inPollGroupMap.values()].sort((a, b) => b.count - a.count),
+    offCpuInPollCount: acc.offCpuInPollCount,
+    offCpuIdleCount: acc.offCpuIdleCount,
+    inPollByLoc: [...acc.inPollByLocMap.entries()]
+      .map(([loc, count]) => ({ loc, count }))
+      .sort((a, b) => b.count - a.count),
     spanStats: acc.spanStats,
     pollDurationByLoc: acc.pollDurationByLoc,
     schedDelayHist: acc.schedDelayHist,
@@ -479,15 +551,38 @@ function reportAnalysis(a, label) {
       }
     }
   } else {
-    console.log(`  ${a.offCpuSampleCount} off-CPU sample(s)\n`);
-    for (const g of a.schedGroups.slice(0, 10)) {
-      const pct = (g.count / a.offCpuSampleCount * 100).toFixed(1);
-      const { syscall, blocker, trigger } = diagnoseStack(g.frames);
-      console.log(`  ${String(g.count).padStart(5)} samples (${pct}%) — leaf: ${g.leaf}`);
-      if (blocker) console.log(`         blocked by: ${blocker.symbol} (kernel)`);
-      if (syscall) console.log(`         syscall:    ${syscall.display}`);
-      if (trigger) console.log(`         called from: ${trigger.display}`);
+    const inPoll = a.offCpuInPollCount || 0;
+    const idle = a.offCpuIdleCount || 0;
+    console.log(`  ${a.offCpuSampleCount} off-CPU sample(s): ${inPoll} IN-POLL (real blocking), ${idle} idle-park`);
+    console.log(`  NOTE: idle-park = a worker with no work parked between polls (itself a futex/condvar`);
+    console.log(`        wait); it is NOT blocking. Only IN-POLL samples are a task blocked mid-poll.\n`);
+
+    if (inPoll === 0) {
+      console.log('  No in-poll blocking detected — all off-CPU samples are idle worker parking. ✅');
+    } else {
+      // Per-spawn-location attribution of the real (in-poll) blocking.
+      console.log(`  IN-POLL blocking by task spawn location:`);
+      for (const { loc, count } of (a.inPollByLoc || []).slice(0, 10)) {
+        const pct = (count / inPoll * 100).toFixed(1);
+        console.log(`    ${String(count).padStart(5)} (${pct}%) — ${loc}`);
+      }
+      // Blocking call stacks for the in-poll samples (the actionable part).
+      console.log(`\n  IN-POLL blocking call stacks:`);
+      for (const g of (a.inPollGroups || []).slice(0, 10)) {
+        const pct = (g.count / inPoll * 100).toFixed(1);
+        const { syscall, blocker, trigger } = diagnoseStack(g.frames);
+        console.log(`  ${String(g.count).padStart(5)} samples (${pct}%) — leaf: ${g.leaf}`);
+        if (blocker) console.log(`         blocked by: ${blocker.symbol} (kernel)`);
+        if (syscall) console.log(`         syscall:    ${syscall.display}`);
+        if (trigger) console.log(`         called from: ${trigger.display}`);
+      }
     }
+    // Caveat: an async lock wait (lock().await returning Pending) ends the poll,
+    // so its subsequent off-CPU time is tagged idle, not in-poll. The in-poll
+    // bucket captures synchronous blocking but not .await-style async lock waits.
+    console.log(`\n  Caveat: an async lock wait (lock().await) ends the poll, so its off-CPU time`);
+    console.log(`          is counted as idle-park, not in-poll. The IN-POLL bucket captures`);
+    console.log(`          synchronous blocking but not .await-style async lock waits. To see async lock wait, consider enabling task dumps`);
   }
 
   // ── CPU hotspots ──
@@ -784,6 +879,17 @@ function mergePartial(acc, p) {
     const e = acc.schedGroupMap.get(key);
     if (e) e.count += g.count; else acc.schedGroupMap.set(key, { ...g });
   }
+  // Off-CPU split: in-poll blocking groups + in-poll/idle counts + per-loc attribution.
+  acc.offCpuInPollCount += p.offCpuInPollCount || 0;
+  acc.offCpuIdleCount += p.offCpuIdleCount || 0;
+  for (const g of (p.inPollGroups || [])) {
+    const key = g.frames.map(f => f.symbol).join('\0');
+    const e = acc.inPollGroupMap.get(key);
+    if (e) e.count += g.count; else acc.inPollGroupMap.set(key, { ...g });
+  }
+  for (const { loc, count } of (p.inPollByLoc || [])) {
+    acc.inPollByLocMap.set(loc, (acc.inPollByLocMap.get(loc) || 0) + count);
+  }
 
   // Poll durations by location -> histogram
   for (const [loc, durations] of Object.entries(p.pollDurationsByLoc || {})) {
@@ -882,6 +988,7 @@ function analyzeWorkerMain(cachePath) {
   const schedDelays = computeSchedulingDelays(spans.workerSpans, wids, spans.wakesByTask);
   const onCpu = trace.cpuSamples.filter(s => s.source === 0);
   const offCpu = trace.cpuSamples.filter(s => s.source === 1);
+  const offCpuSplit = groupOffCpuSamples(offCpu, trace.callframeSymbols);
 
   const partial = {
     workerIds: wids, minTs, maxTs,
@@ -901,6 +1008,11 @@ function analyzeWorkerMain(cachePath) {
     callframeSymbols: mapToEntries(trace.callframeSymbols),
     cpuGroups: deduplicateSamples(onCpu, trace.callframeSymbols),
     schedGroups: deduplicateSamples(offCpu, trace.callframeSymbols),
+    // Off-CPU split: in-poll = real blocking, idle = parked with no work.
+    inPollGroups: offCpuSplit.inPollGroups,
+    offCpuInPollCount: offCpuSplit.inPollCount,
+    offCpuIdleCount: offCpuSplit.idleCount,
+    inPollByLoc: offCpuSplit.inPollByLoc,
     pollDurationsByLoc: {}, spanDurations: {},
     blockInPlaceGaps: trace.blockInPlaceGaps || [],
   };

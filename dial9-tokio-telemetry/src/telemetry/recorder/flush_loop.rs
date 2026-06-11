@@ -1,7 +1,7 @@
 use crate::metrics::{FlushMetrics, Operation, TlDrainMetrics};
 use crate::rate_limit::rate_limited;
 use crate::telemetry::buffer;
-use crate::telemetry::writer::{TraceWriter, WriterMode};
+use crate::telemetry::writer::{SegmentWriter, WriterMode};
 use metrique::timers::Timer;
 use metrique::unit::Microsecond;
 use metrique::unit_of_work::metrics;
@@ -46,7 +46,7 @@ pub(crate) struct FlushStats {
 /// events to disk, and flush the writer. This is the only code path that
 /// touches the writer, and it runs exclusively on the flush thread.
 pub(super) fn flush_once<M: WriterMode>(
-    writer: &mut dyn TraceWriter<M>,
+    writer: &mut SegmentWriter<M>,
     events_written: &mut u64,
     shared: &SharedState,
     drain_self: bool,
@@ -110,7 +110,7 @@ pub(super) fn run_flush_loop<M: WriterMode>(
     control_rx: crate::primitives::sync::mpsc::Receiver<ControlCommand>,
     shared: &SharedState,
     flush_metrics_sink: &metrique_writer::BoxEntrySink,
-    mut writer: Box<dyn TraceWriter<M>>,
+    mut writer: SegmentWriter<M>,
 ) {
     // Drain the flush thread's own TL buffer every ~1s (200 × 5ms)
     // rather than every cycle, so queue samples and CPU events
@@ -225,7 +225,7 @@ pub(super) fn run_flush_loop<M: WriterMode>(
             .append_on_drop(flush_metrics_sink.clone());
         }
         let mut flush_timer = Timer::start_now();
-        let stats = flush_once(&mut *writer, &mut events_written, shared, drain_self);
+        let stats = flush_once(&mut writer, &mut events_written, shared, drain_self);
         flush_timer.stop();
 
         // Notify the writer that TL buffers have been drained and flushed.

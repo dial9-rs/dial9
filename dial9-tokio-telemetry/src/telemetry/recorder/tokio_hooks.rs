@@ -62,7 +62,7 @@ impl TokioHook<TaskMetaCb> {
 /// # Example
 ///
 /// ```rust,no_run
-/// use dial9_tokio_telemetry::telemetry::{TokioHooks, TracedRuntime, NullWriter};
+/// use dial9_tokio_telemetry::telemetry::{InMemoryWriter, TokioHooks, TracedRuntime};
 ///
 /// let mut builder = tokio::runtime::Builder::new_multi_thread();
 /// builder.worker_threads(4).enable_all();
@@ -71,7 +71,7 @@ impl TokioHook<TaskMetaCb> {
 ///         h.on_thread_start(|| println!("started"));
 ///         h.on_thread_stop(|| println!("stopping"));
 ///     })
-///     .build_and_start_with_writer(builder, NullWriter)
+///     .build_and_start(builder, InMemoryWriter::new(16 * 1024 * 1024).unwrap())
 ///     .unwrap();
 /// ```
 #[derive(Clone, Default)]

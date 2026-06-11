@@ -1,4 +1,6 @@
-use dial9_tokio_telemetry::telemetry::{NullWriter, TelemetryCore, TracedRuntime};
+use dial9_tokio_telemetry::telemetry::{TelemetryCore, TracedRuntime};
+
+mod common;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -22,7 +24,7 @@ fn on_thread_start_and_stop_fire() {
                 stc.fetch_add(1, Ordering::Relaxed);
             });
         })
-        .build_and_start_with_writer(builder, NullWriter)
+        .build_and_start(builder, common::small_mem_writer())
         .unwrap();
 
     runtime.block_on(async {
@@ -60,7 +62,10 @@ fn each_runtime_gets_own_hooks() {
     let ca = count_a.clone();
     let cb = count_b.clone();
 
-    let guard = TelemetryCore::builder().writer(NullWriter).build().unwrap();
+    let guard = TelemetryCore::builder()
+        .writer(common::small_mem_writer())
+        .build()
+        .unwrap();
     guard.enable();
 
     let mut builder_a = tokio::runtime::Builder::new_multi_thread();
@@ -147,7 +152,7 @@ fn on_thread_park_fires() {
                 pc.fetch_add(1, Ordering::Relaxed);
             });
         })
-        .build_and_start_with_writer(builder, NullWriter)
+        .build_and_start(builder, common::small_mem_writer())
         .unwrap();
 
     runtime.block_on(async {
@@ -178,7 +183,7 @@ fn on_thread_unpark_fires() {
                 uc.fetch_add(1, Ordering::Relaxed);
             });
         })
-        .build_and_start_with_writer(builder, NullWriter)
+        .build_and_start(builder, common::small_mem_writer())
         .unwrap();
 
     runtime.block_on(async {
@@ -222,7 +227,7 @@ fn task_poll_hooks_fire() {
                 ac.fetch_add(1, Ordering::Relaxed);
             });
         })
-        .build_and_start_with_writer(builder, NullWriter)
+        .build_and_start(builder, common::small_mem_writer())
         .unwrap();
 
     runtime.block_on(async {
@@ -271,7 +276,7 @@ fn task_lifecycle_hooks_fire() {
                 tc.fetch_add(1, Ordering::Relaxed);
             });
         })
-        .build_and_start_with_writer(builder, NullWriter)
+        .build_and_start(builder, common::small_mem_writer())
         .unwrap();
 
     runtime.block_on(async {
@@ -317,7 +322,7 @@ fn task_spawn_hook_fires_when_task_tracking_disabled() {
                 sc.fetch_add(1, Ordering::Relaxed);
             });
         })
-        .build_and_start_with_writer(builder, NullWriter)
+        .build_and_start(builder, common::small_mem_writer())
         .unwrap();
 
     runtime.block_on(async {
@@ -358,7 +363,7 @@ fn task_terminate_hook_fires_when_task_tracking_disabled() {
                 tc.fetch_add(1, Ordering::Relaxed);
             });
         })
-        .build_and_start_with_writer(builder, NullWriter)
+        .build_and_start(builder, common::small_mem_writer())
         .unwrap();
 
     runtime.block_on(async {
@@ -405,7 +410,7 @@ fn dial9_hooks_run_before_user_hooks() {
                 hf.fetch_add(1, Ordering::Relaxed);
             });
         })
-        .build_and_start_with_writer(builder, NullWriter)
+        .build_and_start(builder, common::small_mem_writer())
         .unwrap();
 
     runtime.block_on(async {
@@ -439,7 +444,7 @@ fn hook_stacking_single_callback_fires() {
                 log_c.lock().unwrap().push("park_a");
             });
         })
-        .build_and_start_with_writer(builder, NullWriter)
+        .build_and_start(builder, common::small_mem_writer())
         .unwrap();
 
     runtime.block_on(async {
@@ -475,7 +480,7 @@ fn hook_stacking_multiple_callbacks_fire_in_order() {
                 log_b.lock().unwrap().push("park_b");
             });
         })
-        .build_and_start_with_writer(builder, NullWriter)
+        .build_and_start(builder, common::small_mem_writer())
         .unwrap();
 
     runtime.block_on(async {
@@ -523,7 +528,7 @@ fn hook_stacking_multiple_with_tokio_hooks_calls() {
                 log_b.lock().unwrap().push("call_2");
             });
         })
-        .build_and_start_with_writer(builder, NullWriter)
+        .build_and_start(builder, common::small_mem_writer())
         .unwrap();
 
     runtime.block_on(async {
@@ -568,7 +573,7 @@ fn hook_stacking_task_meta_hooks_fire_in_order() {
                 log_b.lock().unwrap().push("poll_b");
             });
         })
-        .build_and_start_with_writer(builder, NullWriter)
+        .build_and_start(builder, common::small_mem_writer())
         .unwrap();
 
     runtime.block_on(async {

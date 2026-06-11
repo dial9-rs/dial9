@@ -732,7 +732,7 @@ mod tests {
     fn trace_reader_reads_gzip_trace_files() {
         use crate::telemetry::buffer::ThreadLocalBuffer;
         use crate::telemetry::format::WorkerParkEvent;
-        use crate::telemetry::writer::{DiskWriter, TraceWriter};
+        use crate::telemetry::writer::DiskWriter;
         use flate2::Compression;
         use flate2::write::GzEncoder;
         use std::io::Write;

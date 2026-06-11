@@ -18,7 +18,7 @@
 #[cfg(not(iai_enabled))]
 fn main() {}
 
-use dial9_tokio_telemetry::telemetry::{NullWriter, TelemetryGuard, TracedRuntime};
+use dial9_tokio_telemetry::telemetry::{InMemoryWriter, TelemetryGuard, TracedRuntime};
 use dial9_tokio_telemetry::tracing_layer::Dial9TokioLayer;
 use iai_callgrind::{library_benchmark, library_benchmark_group, main};
 use std::hint::black_box;
@@ -36,7 +36,7 @@ fn setup_tracing_only() -> Harness {
     let mut builder = tokio::runtime::Builder::new_current_thread();
     builder.enable_all();
     let (runtime, _telemetry_guard) = TracedRuntime::builder()
-        .build_and_start(builder, NullWriter)
+        .build_and_start(builder, InMemoryWriter::new(16 * 1024 * 1024).unwrap())
         .unwrap();
     let _sub_guard = tracing::subscriber::set_default(tracing_subscriber::registry());
     Harness {
@@ -50,7 +50,7 @@ fn setup_with_dial9() -> Harness {
     let mut builder = tokio::runtime::Builder::new_current_thread();
     builder.enable_all();
     let (runtime, _telemetry_guard) = TracedRuntime::builder()
-        .build_and_start(builder, NullWriter)
+        .build_and_start(builder, InMemoryWriter::new(16 * 1024 * 1024).unwrap())
         .unwrap();
     let _sub_guard = tracing::subscriber::set_default(
         tracing_subscriber::registry().with(Dial9TokioLayer::new()),

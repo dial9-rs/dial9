@@ -12,8 +12,9 @@ pub(crate) use runtime_context::poll_start_ts_monotonic;
 pub(crate) use shared_state::SharedState;
 
 pub use builder::{
-    HasTracePath, NoTracePath, PipelineCustom, PipelineS3, PipelineUnset, TelemetryCore,
-    TelemetryCoreBuilder, TelemetryRuntimeError, TracedRuntime, TracedRuntimeBuilder,
+    BuildAndStartRuntime, HasTracePath, NoTracePath, PipelineCustom, PipelineS3, PipelineUnset,
+    TelemetryCore, TelemetryCoreBuilder, TelemetryRuntimeError, TracedRuntime,
+    TracedRuntimeBuilder,
 };
 pub use guard::{TelemetryGuard, TraceRuntimeCoreBuilder};
 pub use handle::{RuntimeTelemetryHandle, TelemetryHandle, spawn};
@@ -316,43 +317,28 @@ fn attach_runtime(
 #[cfg(all(test, not(shuttle)))]
 mod tests {
     use super::*;
-    use crate::telemetry::NullWriter;
+    use crate::background_task::testutil::{CapturingProcessor, decode_captured};
     use crate::telemetry::buffer;
     use crate::telemetry::collector::CentralCollector;
-    #[cfg(feature = "cpu-profiling")]
-    use crate::telemetry::writer::DiskWriter;
+    use crate::telemetry::writer::InMemoryWriter;
     use std::panic::Location;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, AtomicUsize};
 
+    /// In-memory capture budget for runtime tests.
+    const CAPTURE_SIZE: u64 = 16 * 1024 * 1024;
+
     /// Drain all pending batches from a `CentralCollector` into a writer.
     /// Call `buffer::drain_to_collector` first to flush the thread-local buffer.
+    #[cfg(feature = "analysis")]
     fn drain_collector_to_writer(
         collector: &CentralCollector,
-        writer: &mut dyn crate::telemetry::writer::TraceWriter,
+        writer: &mut crate::telemetry::writer::DiskWriter,
     ) {
         while let Some(batch) = collector.next() {
             if batch.event_count > 0 {
                 writer.write_encoded_batch(&batch).unwrap();
             }
-        }
-    }
-
-    /// Writer that captures encoded bytes for test assertions.
-    struct CapturingWriter(Arc<std::sync::Mutex<Vec<u8>>>);
-    impl crate::telemetry::writer::TraceWriter for CapturingWriter {
-        fn write_encoded_batch(
-            &mut self,
-            batch: &crate::telemetry::collector::Batch,
-        ) -> std::io::Result<()> {
-            self.0
-                .lock()
-                .unwrap()
-                .extend_from_slice(batch.encoded_bytes());
-            Ok(())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
         }
     }
 
@@ -374,13 +360,14 @@ mod tests {
 
     #[test]
     fn current_thread_runtime_resolves_worker_ids() {
-        let data = Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+        let (capture, data) = CapturingProcessor::new();
 
         let mut builder = tokio::runtime::Builder::new_current_thread();
         builder.enable_all();
 
         let (rt, guard) = TracedRuntime::builder()
-            .build_and_start_with_writer(builder, CapturingWriter(data.clone()))
+            .with_custom_pipeline(|p| p.pipe(capture))
+            .build_and_start(builder, InMemoryWriter::new(CAPTURE_SIZE).unwrap())
             .unwrap();
 
         rt.block_on(async {
@@ -392,10 +379,12 @@ mod tests {
         });
 
         drop(rt);
-        drop(guard);
+        guard
+            .graceful_shutdown(std::time::Duration::from_secs(1))
+            .unwrap();
 
         let raw = data.lock().unwrap();
-        let events = crate::telemetry::format::decode_events(&raw).unwrap();
+        let events = decode_captured(&raw);
         let poll_starts: Vec<_> = events
             .iter()
             .filter_map(|e| match e {
@@ -421,7 +410,7 @@ mod tests {
 
     #[test]
     fn tokio_instrumentation_can_be_disabled_without_installing_hooks() {
-        let data = Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+        let (capture, data) = CapturingProcessor::new();
         let hook_calls = Arc::new(AtomicUsize::new(0));
         let on_thread_start_calls = hook_calls.clone();
         let on_before_poll_calls = hook_calls.clone();
@@ -440,7 +429,8 @@ mod tests {
                     on_before_poll_calls.fetch_add(1, Ordering::Relaxed);
                 });
             })
-            .build_and_start_with_writer(builder, CapturingWriter(data.clone()))
+            .with_custom_pipeline(|p| p.pipe(capture))
+            .build_and_start(builder, InMemoryWriter::new(CAPTURE_SIZE).unwrap())
             .unwrap();
 
         assert!(guard.is_enabled());
@@ -471,13 +461,15 @@ mod tests {
         );
 
         drop(runtime);
-        drop(guard);
+        guard
+            .graceful_shutdown(std::time::Duration::from_secs(1))
+            .unwrap();
 
         let raw = data.lock().unwrap();
         let events = if raw.is_empty() {
             Vec::new()
         } else {
-            crate::telemetry::format::decode_events(&raw).unwrap()
+            decode_captured(&raw)
         };
         assert!(
             events.iter().all(|event| !matches!(
@@ -505,7 +497,7 @@ mod tests {
         let builder = tokio::runtime::Builder::new_multi_thread();
         let (runtime, guard) = TracedRuntime::builder()
             .install(false)
-            .build(builder, NullWriter)
+            .build(builder, InMemoryWriter::new(16 * 1024 * 1024).unwrap())
             .unwrap();
 
         // Guard methods should be safe no-ops
@@ -554,7 +546,7 @@ mod tests {
             .max_total_size(100_000)
             .build()
             .unwrap();
-        let mut ew: Box<dyn crate::telemetry::writer::TraceWriter> = Box::new(writer);
+        let mut ew = writer;
         let collector = Arc::new(CentralCollector::new());
         let drain_epoch = AtomicU64::new(0);
 
@@ -594,7 +586,7 @@ mod tests {
             // Drain after each iteration to produce separate small batches
             // that trigger file rotation (max_file_size is 100 bytes).
             buffer::drain_to_collector(&collector);
-            drain_collector_to_writer(&collector, &mut *ew);
+            drain_collector_to_writer(&collector, &mut ew);
         }
         ew.flush().unwrap();
         ew.finalize().unwrap();
@@ -637,7 +629,7 @@ mod tests {
     fn build_and_attach_to_telemetry_attaches_second_runtime() {
         let builder_a = tokio::runtime::Builder::new_multi_thread();
         let (runtime_a, guard) = TracedRuntime::builder()
-            .build_and_start_with_writer(builder_a, NullWriter)
+            .build_and_start(builder_a, InMemoryWriter::new(16 * 1024 * 1024).unwrap())
             .unwrap();
 
         let builder_b = tokio::runtime::Builder::new_multi_thread();
@@ -660,13 +652,14 @@ mod tests {
     fn build_and_attach_to_telemetry_produces_unique_worker_ids() {
         use std::collections::HashSet;
 
-        let data = Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+        let (capture, data) = CapturingProcessor::new();
 
         let mut builder_a = tokio::runtime::Builder::new_multi_thread();
         builder_a.worker_threads(2);
         let (runtime_a, guard) = TracedRuntime::builder()
             .with_task_tracking(true)
-            .build_and_start_with_writer(builder_a, CapturingWriter(data.clone()))
+            .with_custom_pipeline(|p| p.pipe(capture))
+            .build_and_start(builder_a, InMemoryWriter::new(CAPTURE_SIZE).unwrap())
             .unwrap();
 
         let mut builder_b = tokio::runtime::Builder::new_multi_thread();
@@ -704,10 +697,12 @@ mod tests {
         // Drop runtimes, then guard to flush
         drop(runtime_a);
         drop(runtime_b);
-        drop(guard);
+        guard
+            .graceful_shutdown(std::time::Duration::from_secs(1))
+            .unwrap();
 
         let raw = data.lock().unwrap();
-        let captured = crate::telemetry::format::decode_events(&raw).unwrap();
+        let captured = decode_captured(&raw);
         let mut worker_ids: HashSet<u64> = HashSet::new();
         for event in captured.iter() {
             let wid = match event {
@@ -792,7 +787,7 @@ mod tests {
 
         drop(runtime_a);
         drop(runtime_b);
-        let _ = guard.graceful_shutdown(std::time::Duration::from_secs(5));
+        let _ = guard.graceful_shutdown(std::time::Duration::from_secs(1));
 
         // Read all sealed trace files and collect SegmentMetadata entries.
         let mut all_metadata: Vec<std::collections::HashMap<String, String>> = Vec::new();
@@ -840,13 +835,14 @@ mod tests {
     fn wake_events_use_global_worker_id_in_multi_runtime() {
         use crate::telemetry::analysis_events::Dial9Event;
 
-        let data = Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+        let (capture, data) = CapturingProcessor::new();
 
         let mut builder_a = tokio::runtime::Builder::new_multi_thread();
         builder_a.worker_threads(2);
         let (runtime_a, guard) = TracedRuntime::builder()
             .with_task_tracking(true)
-            .build_and_start_with_writer(builder_a, CapturingWriter(data.clone()))
+            .with_custom_pipeline(|p| p.pipe(capture))
+            .build_and_start(builder_a, InMemoryWriter::new(CAPTURE_SIZE).unwrap())
             .unwrap();
 
         let mut builder_b = tokio::runtime::Builder::new_multi_thread();
@@ -872,10 +868,12 @@ mod tests {
 
         drop(runtime_a);
         drop(runtime_b);
-        drop(guard);
+        guard
+            .graceful_shutdown(std::time::Duration::from_secs(1))
+            .unwrap();
 
         let raw = data.lock().unwrap();
-        let captured = crate::telemetry::format::decode_events(&raw).unwrap();
+        let captured = decode_captured(&raw);
         let wake_workers: Vec<u8> = captured
             .iter()
             .filter_map(|e| match e {
@@ -910,7 +908,7 @@ mod tests {
 
         /// Encode a single event into a batch and write it through the writer.
         fn write_raw_event(
-            writer: &mut dyn crate::telemetry::writer::TraceWriter,
+            writer: &mut DiskWriter,
             event: &dyn crate::telemetry::buffer::Encodable,
         ) -> std::io::Result<()> {
             let encoded_bytes = ThreadLocalBuffer::encode_single(event);
@@ -979,7 +977,7 @@ mod tests {
 
         fn execute_flush_round(
             round: &FlushRound,
-            ew: &mut Box<dyn crate::telemetry::writer::TraceWriter>,
+            ew: &mut DiskWriter,
             locations: &[&'static Location<'static>],
             timestamp: &mut u64,
             expected_raw: &mut usize,
@@ -1001,7 +999,7 @@ mod tests {
                         cpu: None,
                     };
                     *timestamp += 1;
-                    write_raw_event(&mut **ew, &data).unwrap();
+                    write_raw_event(&mut *ew, &data).unwrap();
                 }
             }
 
@@ -1013,7 +1011,7 @@ mod tests {
                     *timestamp += 1;
 
                     write_raw_event(
-                        &mut **ew,
+                        &mut *ew,
                         &runtime_context::PollStart {
                             timestamp_ns: ts,
                             worker_id: WorkerId::from(0usize),
@@ -1078,7 +1076,7 @@ mod tests {
                     .build()
                     .unwrap();
 
-                let mut ew: Box<dyn crate::telemetry::writer::TraceWriter> = Box::new(writer);
+                let mut ew = writer;
 
                 #[track_caller]
                 fn loc0() -> &'static Location<'static> { Location::caller() }
@@ -1115,14 +1113,20 @@ mod tests {
 
     #[test]
     fn telemetry_core_builds_guard_without_runtime() {
-        let guard = TelemetryCore::builder().writer(NullWriter).build().unwrap();
+        let guard = TelemetryCore::builder()
+            .writer(InMemoryWriter::new(16 * 1024 * 1024).unwrap())
+            .build()
+            .unwrap();
         assert!(guard.is_enabled());
         let _ = guard.graceful_shutdown(std::time::Duration::from_secs(1));
     }
 
     #[test]
     fn telemetry_core_trace_runtime_produces_working_runtime() {
-        let guard = TelemetryCore::builder().writer(NullWriter).build().unwrap();
+        let guard = TelemetryCore::builder()
+            .writer(InMemoryWriter::new(16 * 1024 * 1024).unwrap())
+            .build()
+            .unwrap();
         guard.enable();
 
         let mut builder = tokio::runtime::Builder::new_multi_thread();
@@ -1140,9 +1144,10 @@ mod tests {
 
     #[test]
     fn telemetry_core_task_tracking_produces_task_spawn_events() {
-        let data = Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+        let (capture, data) = CapturingProcessor::new();
         let guard = TelemetryCore::builder()
-            .writer(CapturingWriter(data.clone()))
+            .writer(InMemoryWriter::new(CAPTURE_SIZE).unwrap())
+            .processors(vec![Box::new(capture)])
             .build()
             .unwrap();
         guard.enable();
@@ -1162,10 +1167,12 @@ mod tests {
         });
 
         drop(runtime);
-        drop(guard);
+        guard
+            .graceful_shutdown(std::time::Duration::from_secs(1))
+            .unwrap();
 
         let raw = data.lock().unwrap();
-        let events = crate::telemetry::format::decode_events(&raw).unwrap();
+        let events = decode_captured(&raw);
         let spawn_count = events
             .iter()
             .filter(|e| {
@@ -1185,9 +1192,10 @@ mod tests {
     fn telemetry_core_trace_runtime_multiple_runtimes_unique_worker_ids() {
         use std::collections::HashSet;
 
-        let data = Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+        let (capture, data) = CapturingProcessor::new();
         let guard = TelemetryCore::builder()
-            .writer(CapturingWriter(data.clone()))
+            .writer(InMemoryWriter::new(CAPTURE_SIZE).unwrap())
+            .processors(vec![Box::new(capture)])
             .build()
             .unwrap();
         guard.enable();
@@ -1224,10 +1232,12 @@ mod tests {
 
         drop(runtime_a);
         drop(runtime_b);
-        drop(guard);
+        guard
+            .graceful_shutdown(std::time::Duration::from_secs(1))
+            .unwrap();
 
         let raw = data.lock().unwrap();
-        let captured = crate::telemetry::format::decode_events(&raw).unwrap();
+        let captured = decode_captured(&raw);
         let mut worker_ids: HashSet<u64> = HashSet::new();
         for event in &captured {
             if let crate::telemetry::analysis_events::Dial9Event::PollStartEvent(e) = event
@@ -1247,9 +1257,10 @@ mod tests {
 
     #[test]
     fn trace_runtime_build_returns_telemetry_handle() {
-        let data = Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+        let (capture, data) = CapturingProcessor::new();
         let guard = TelemetryCore::builder()
-            .writer(CapturingWriter(data.clone()))
+            .writer(InMemoryWriter::new(CAPTURE_SIZE).unwrap())
+            .processors(vec![Box::new(capture)])
             .build()
             .unwrap();
         guard.enable();
@@ -1282,11 +1293,13 @@ mod tests {
         );
 
         drop(runtime);
-        drop(guard);
+        guard
+            .graceful_shutdown(std::time::Duration::from_secs(1))
+            .unwrap();
 
         // Verify wake events were recorded (handle.spawn wraps with wake tracking)
         let raw = data.lock().unwrap();
-        let events = crate::telemetry::format::decode_events(&raw).unwrap();
+        let events = decode_captured(&raw);
         let wake_count = events
             .iter()
             .filter(|e| {
@@ -1306,7 +1319,10 @@ mod tests {
     /// correct runtime even when called from outside any runtime context.
     #[test]
     fn trace_runtime_handle_spawns_on_correct_runtime_from_outside() {
-        let guard = TelemetryCore::builder().writer(NullWriter).build().unwrap();
+        let guard = TelemetryCore::builder()
+            .writer(InMemoryWriter::new(16 * 1024 * 1024).unwrap())
+            .build()
+            .unwrap();
         guard.enable();
 
         let mut builder_a = tokio::runtime::Builder::new_multi_thread();
@@ -1708,7 +1724,7 @@ mod tests {
         let s3 = S3Config::builder().bucket("b").service_name("s").build();
 
         let guard = TelemetryCore::builder()
-            .writer(NullWriter)
+            .writer(InMemoryWriter::new(16 * 1024 * 1024).unwrap())
             .trace_path(&trace_path)
             .s3_config(s3)
             .build()
@@ -1725,6 +1741,7 @@ mod tests {
     #[test]
     fn telemetry_core_builder_cpu_profiling_auto_wires_processors() {
         use crate::telemetry::cpu_profile::CpuProfilingConfig;
+        use crate::telemetry::writer::DiskWriter;
 
         let dir = tempfile::tempdir().unwrap();
         let trace_path = dir.path().join("trace.bin");

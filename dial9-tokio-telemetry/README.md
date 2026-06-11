@@ -446,7 +446,7 @@ You can also register a callback that runs from dial9's flush thread and emits
 custom events. This is useful for draining application-owned queues or taking
 periodic snapshots without passing a [`TelemetryHandle`] through your code:
 
-```rust,no_run
+```rust,ignore
 use dial9_trace_format::TraceEvent;
 use dial9_tokio_telemetry::telemetry::{CustomEventsConfig, TracedRuntime};
 
@@ -463,7 +463,7 @@ let (_runtime, _guard) = TracedRuntime::builder()
             ctx.record_event(event);
         }
     })
-    .build_and_start_with_writer(builder, writer)?;
+    .build_and_start(builder, writer)?;
 ```
 
 `CustomEventsConfig::default()` runs the callback every flush cycle
@@ -476,7 +476,7 @@ the callback.
 dial9 installs callbacks on all 8 Tokio runtime hooks to collect telemetry. If you need to run your own logic alongside dial9's instrumentation, use `with_tokio_hooks`:
 
 ```rust,no_run
-use dial9_tokio_telemetry::telemetry::{TracedRuntime, NullWriter};
+use dial9_tokio_telemetry::telemetry::{InMemoryWriter, TracedRuntime};
 
 let mut builder = tokio::runtime::Builder::new_multi_thread();
 builder.worker_threads(4).enable_all();
@@ -492,7 +492,7 @@ let (runtime, guard) = TracedRuntime::builder()
         // Also available: on_thread_park, on_thread_unpark,
         // on_task_spawn, on_task_terminate, on_before_task_poll, on_after_task_poll
     })
-    .build_and_start_with_writer(builder, NullWriter)
+    .build_and_start(builder, InMemoryWriter::new(16 * 1024 * 1024).unwrap())
     .unwrap();
 ```
 

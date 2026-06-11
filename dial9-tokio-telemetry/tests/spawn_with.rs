@@ -4,9 +4,9 @@
 
 mod common;
 
-use common::{BytesCapturingWriter, decode_all, decode_file};
+use common::{CAPTURE_BUFFER_SIZE, capture_processor, decode_all, decode_file};
 use dial9_tokio_telemetry::telemetry::{
-    DiskWriter, TaskId, TelemetryGuard, TraceWriter, TracedRuntime,
+    DiskWriter, InMemoryWriter, TaskId, TelemetryGuard, TracedRuntime,
 };
 use serde::Deserialize;
 use std::sync::{Arc, Mutex};
@@ -32,21 +32,23 @@ enum SpawnEvent {
 }
 
 /// Standard 2-worker multi_thread runtime with task tracking enabled.
-fn build_traced_runtime<W: TraceWriter + 'static>(writer: W) -> (Runtime, TelemetryGuard) {
+fn build_capturing_runtime() -> (Runtime, TelemetryGuard, Arc<Mutex<Vec<Vec<u8>>>>) {
+    let (capture, batches) = capture_processor();
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.worker_threads(2).enable_all();
-    TracedRuntime::builder()
+    let (runtime, guard) = TracedRuntime::builder()
         .with_task_tracking(true)
-        .build_and_start(builder, writer)
-        .unwrap()
+        .with_custom_pipeline(|p| p.pipe(capture))
+        .build_and_start(builder, InMemoryWriter::new(CAPTURE_BUFFER_SIZE).unwrap())
+        .unwrap();
+    (runtime, guard, batches)
 }
 
 /// `spawn_with(fut, |f| set.spawn(f))` produces `WakeEvent`s for the
 /// spawned task — the same as `handle.spawn(fut)` would.
 #[test]
 fn spawn_with_joinset_emits_wake_events() {
-    let (writer, batches) = BytesCapturingWriter::new();
-    let (runtime, guard) = build_traced_runtime(writer);
+    let (runtime, guard, batches) = build_capturing_runtime();
 
     let handle = guard.handle();
     let spawned_id: Arc<Mutex<Option<TaskId>>> = Arc::new(Mutex::new(None));
@@ -66,7 +68,9 @@ fn spawn_with_joinset_emits_wake_events() {
     });
 
     drop(runtime);
-    drop(guard);
+    guard
+        .graceful_shutdown(Duration::from_secs(1))
+        .expect("clean shutdown");
 
     let b = batches.lock().unwrap();
     let events: Vec<SpawnEvent> = decode_all(&b);
@@ -86,7 +90,12 @@ fn spawn_with_marks_taskspawn_and_preserves_caller() {
     let dir = tempfile::tempdir().unwrap();
     let trace_path = dir.path().join("trace.bin");
     let writer = DiskWriter::single_file(&trace_path).unwrap();
-    let (runtime, guard) = build_traced_runtime(writer);
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.worker_threads(2).enable_all();
+    let (runtime, guard) = TracedRuntime::builder()
+        .with_task_tracking(true)
+        .build_and_start(builder, writer)
+        .unwrap();
 
     let handle = guard.handle();
 
@@ -139,8 +148,12 @@ fn spawn_with_marks_taskspawn_and_preserves_caller() {
 /// `spawn_with` returns whatever the closure returns.
 #[test]
 fn spawn_with_returns_closure_value() {
-    let (writer, _batches) = BytesCapturingWriter::new();
-    let (runtime, guard) = build_traced_runtime(writer);
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.worker_threads(2).enable_all();
+    let (runtime, guard) = TracedRuntime::builder()
+        .with_task_tracking(true)
+        .build_and_start(builder, common::small_mem_writer())
+        .unwrap();
 
     let handle = guard.handle();
 
@@ -151,7 +164,9 @@ fn spawn_with_returns_closure_value() {
     });
 
     drop(runtime);
-    drop(guard);
+    guard
+        .graceful_shutdown(Duration::from_secs(1))
+        .expect("clean shutdown");
 }
 
 /// `RuntimeTelemetryHandle::spawn_with` composes with `JoinSet::spawn_on`
@@ -160,8 +175,12 @@ fn spawn_with_returns_closure_value() {
 fn runtime_handle_spawn_with_targets_correct_runtime() {
     use dial9_tokio_telemetry::telemetry::TelemetryCore;
 
-    let (writer, batches) = BytesCapturingWriter::new();
-    let guard = TelemetryCore::builder().writer(writer).build().unwrap();
+    let (capture, batches) = capture_processor();
+    let guard = TelemetryCore::builder()
+        .writer(InMemoryWriter::new(CAPTURE_BUFFER_SIZE).unwrap())
+        .processors(vec![Box::new(capture)])
+        .build()
+        .unwrap();
     guard.enable();
 
     let mut builder_a = tokio::runtime::Builder::new_multi_thread();

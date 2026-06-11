@@ -6,7 +6,7 @@ mod fake_s3;
 use aws_config::Region;
 use aws_sdk_s3::Client;
 use dial9_tokio_telemetry::background_task::s3::S3Config;
-use dial9_tokio_telemetry::telemetry::{DiskWriter, TraceWriter, TracedRuntime};
+use dial9_tokio_telemetry::telemetry::{DiskWriter, TracedRuntime};
 use fake_s3::{
     fake_s3_client, fake_s3_client_always_failing, fake_s3_client_flaky, fake_s3_client_hanging,
     fake_s3_client_with_region,
@@ -78,7 +78,7 @@ fn graceful_shutdown_seals_segments() {
         .unwrap();
 
     drop(runtime);
-    let result = guard.graceful_shutdown(std::time::Duration::from_secs(5));
+    let result = guard.graceful_shutdown(std::time::Duration::from_secs(1));
 
     assert!(result.is_ok());
 
@@ -145,7 +145,9 @@ fn end_to_end_trace_to_s3_roundtrip() {
     });
 
     drop(runtime);
-    guard.graceful_shutdown(Duration::from_secs(1)).unwrap();
+    guard
+        .graceful_shutdown(Duration::from_secs(1))
+        .expect("clean shutdown");
 
     // List objects in the bucket — should have at least one uploaded segment
     let list_rt = tokio::runtime::Builder::new_current_thread()
@@ -313,7 +315,9 @@ fn region_auto_detection_corrects_wrong_client_region() {
     });
 
     drop(runtime);
-    guard.graceful_shutdown(Duration::from_secs(1)).unwrap();
+    guard
+        .graceful_shutdown(Duration::from_secs(1))
+        .expect("clean shutdown");
 
     // Verify objects were uploaded despite the wrong initial region.
     let list_rt = tokio::runtime::Builder::new_current_thread()
@@ -792,17 +796,28 @@ fn permanently_broken_s3_produces_failure_metrics() {
         .build_and_start(builder, writer)
         .unwrap();
 
-    // Generate enough events to seal at least one segment, then shut down.
+    let has_pipeline_metric = || {
+        inspector
+            .entries()
+            .iter()
+            .any(|e| e.metrics.contains_key("Failure") || e.metrics.contains_key("Success"))
+    };
+
+    // Generate enough events to seal segments, then poll until the worker has
+    // recorded a pipeline (Failure/Success) metric.
     runtime.block_on(async {
         for _ in 0..50 {
             tokio::spawn(async { tokio::task::yield_now().await });
         }
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !has_pipeline_metric() && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
     });
 
     drop(runtime);
     guard
-        .graceful_shutdown(std::time::Duration::from_secs(5))
+        .graceful_shutdown(std::time::Duration::from_secs(2))
         .expect("graceful shutdown");
 
     let entries = inspector.entries();

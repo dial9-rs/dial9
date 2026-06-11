@@ -9,10 +9,10 @@
 
 #![cfg(all(feature = "cpu-profiling", target_os = "linux"))]
 
-mod common;
-
 use dial9_tokio_telemetry::telemetry::TracedRuntime;
 use dial9_tokio_telemetry::telemetry::cpu_profile::SchedEventConfig;
+
+mod common;
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -41,8 +41,6 @@ fn count_perf_fds() -> usize {
 #[test]
 fn sched_profiler_fds_bounded_with_many_blocking_threads() {
     let _lock = PERF_FD_TEST_LOCK.lock().unwrap();
-    let (writer, _events) = common::BytesCapturingWriter::new();
-
     let num_workers = 2;
     let num_blocking_tasks = 50;
 
@@ -51,7 +49,7 @@ fn sched_profiler_fds_bounded_with_many_blocking_threads() {
 
     let (runtime, guard) = TracedRuntime::builder()
         .with_sched_events(SchedEventConfig::default())
-        .build_and_start(builder, writer)
+        .build_and_start(builder, common::small_mem_writer())
         .unwrap();
 
     // Let workers start and resolve their identity.
@@ -80,7 +78,9 @@ fn sched_profiler_fds_bounded_with_many_blocking_threads() {
     let perf_fds_after = count_perf_fds();
 
     drop(runtime);
-    drop(guard);
+    guard
+        .graceful_shutdown(std::time::Duration::from_secs(1))
+        .expect("clean shutdown");
 
     // Only worker threads should have perf fds. Before the fix, we'd see
     // ~50 new perf fds (one per blocking thread). After the fix, the count
@@ -103,15 +103,13 @@ fn sched_profiler_fds_cleaned_up_on_shutdown() {
     assert_eq!(count_perf_fds(), 0, "no perf fds should exist before test");
 
     {
-        let (writer, _events) = common::BytesCapturingWriter::new();
-
         let num_workers = 4;
         let mut builder = tokio::runtime::Builder::new_multi_thread();
         builder.worker_threads(num_workers).enable_all();
 
         let (runtime, guard) = TracedRuntime::builder()
             .with_sched_events(SchedEventConfig::default())
-            .build_and_start(builder, writer)
+            .build_and_start(builder, common::small_mem_writer())
             .unwrap();
 
         // Do some work so workers resolve their identity.
@@ -132,7 +130,9 @@ fn sched_profiler_fds_cleaned_up_on_shutdown() {
         );
 
         drop(runtime);
-        drop(guard);
+        guard
+            .graceful_shutdown(std::time::Duration::from_secs(1))
+            .expect("clean shutdown");
     }
 
     let perf_fds_after = count_perf_fds();

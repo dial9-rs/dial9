@@ -338,7 +338,7 @@
   /**
    * Attach CPU samples to the poll spans they fall within using binary search.
    * Mutates workerSpans poll objects (adds .cpuSamples[], .schedSamples[])
-   * and sample objects (sets .spawnLoc).
+   * and sample objects (sets .spawnLoc and .inPoll).
    * @param {import('./trace_parser.js').CpuSample[]} cpuSamples
    * @param {Object} workerSpans - as returned by buildWorkerSpans
    * @returns {{ pollsWithCpuSamples: number, pollsWithSchedSamples: number }}
@@ -375,6 +375,12 @@
         found = true;
       }
       if (!found) sample.spawnLoc = null;
+      // inPoll records whether the sample landed inside a poll, independent of
+      // whether that poll's spawn location is known. For off-CPU samples this
+      // is the blocking-vs-idle signal: in-poll = a task voluntarily blocked
+      // mid-poll (real blocking); not-in-poll = a worker parked with no work
+      // (idle, even though the park is itself a futex/condvar wait).
+      sample.inPoll = found;
     }
 
     let pollsWithCpuSamples = 0;
@@ -456,12 +462,31 @@
           let effectiveWake = wake.timestamp;
           const taskPolls = pollsByTask[s.taskId];
           if (taskPolls) {
-            for (const p of taskPolls) {
-              if (p.start >= s.start) break;
-              if (wake.timestamp >= p.start && wake.timestamp <= p.end) {
+            // If the wake landed mid-poll (the task was already being polled
+            // when it was woken), measure the delay from the end of that poll
+            // rather than the wake itself. taskPolls is sorted by start and a
+            // single task's polls never overlap, so at most one poll's
+            // [start, end] can contain wake.timestamp. Binary search for the
+            // rightmost poll with start <= wake.timestamp instead of linearly
+            // scanning every poll of the task (which is O(P^2) for a
+            // long-lived task with millions of polls).
+            let plo = 0,
+              phi = taskPolls.length - 1,
+              pbest = -1;
+            while (plo <= phi) {
+              const pmid = (plo + phi) >> 1;
+              if (taskPolls[pmid].start <= wake.timestamp) {
+                pbest = pmid;
+                plo = pmid + 1;
+              } else phi = pmid - 1;
+            }
+            if (pbest >= 0) {
+              const p = taskPolls[pbest];
+              // Preserve original semantics: only an earlier poll counts, and
+              // the wake must fall within it (start <= wake is guaranteed by
+              // the search above).
+              if (p.start < s.start && wake.timestamp <= p.end)
                 effectiveWake = p.end;
-                break;
-              }
             }
           }
           const delay = s.start - effectiveWake;

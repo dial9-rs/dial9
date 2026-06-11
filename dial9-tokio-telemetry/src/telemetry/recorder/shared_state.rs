@@ -483,15 +483,14 @@ mod tests {
 
 #[cfg(all(test, shuttle))]
 mod shuttle_tests {
+    use crate::primitives::fs;
     use crate::primitives::sync::atomic::{AtomicU64, Ordering};
     use crate::primitives::sync::{Arc, Mutex};
-    use crate::telemetry::collector::Batch;
     use crate::telemetry::recorder::TelemetryCore;
-    use crate::telemetry::writer::TraceWriter;
+    use crate::telemetry::writer::{DiskWriter, InMemoryWriter};
     use dial9_trace_format::TraceEvent;
     use shuttle::rand::Rng;
     use std::collections::HashMap;
-    use std::io;
 
     // ── Event definition ────────────────────────────────────────────────
 
@@ -517,50 +516,6 @@ mod shuttle_tests {
             *prev += rng.gen_range(1u64..=1000);
         }
         *prev
-    }
-
-    // ── Writer ──────────────────────────────────────────────────────────
-
-    /// A TraceWriter that captures encoded bytes into per-segment buffers
-    /// and randomly triggers rotation via `should_drain`/`drained`.
-    struct InvariantCheckingWriter {
-        segments: Arc<Mutex<Vec<Vec<u8>>>>,
-    }
-
-    impl InvariantCheckingWriter {
-        fn new(segments: Arc<Mutex<Vec<Vec<u8>>>>) -> Self {
-            segments.lock().unwrap().push(Vec::new());
-            Self { segments }
-        }
-    }
-
-    impl TraceWriter for InvariantCheckingWriter {
-        fn write_encoded_batch(&mut self, batch: &Batch) -> std::io::Result<()> {
-            self.segments
-                .lock()
-                .unwrap()
-                .last_mut()
-                .unwrap()
-                .extend_from_slice(batch.encoded_bytes());
-            Ok(())
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-
-        fn should_drain(&self) -> bool {
-            shuttle::rand::thread_rng().gen_range(0u32..10) < 3
-        }
-
-        fn drained(&mut self) -> std::io::Result<bool> {
-            if shuttle::rand::thread_rng().gen_range(0u32..2) == 0 {
-                self.segments.lock().unwrap().push(Vec::new());
-                Ok(true)
-            } else {
-                Ok(false)
-            }
-        }
     }
 
     // ── Decoding ────────────────────────────────────────────────────────
@@ -658,15 +613,20 @@ mod shuttle_tests {
 
         let num_threads = 3;
         let next_id = Arc::new(AtomicU64::new(0));
-        let segments: Arc<Mutex<Vec<Vec<u8>>>> = Arc::new(Mutex::new(Vec::new()));
+
+        // Small segments force frequent rotation: the 100 MiB budget is far above the test's data,
+        // so the ring never evicts before we drain it.
+        let writer = InMemoryWriter::builder()
+            .max_total_size(100 * 1024 * 1024)
+            .max_segment_size(256)
+            .build()
+            .unwrap();
+        let fs = writer.fs_handle().expect("in-memory writer exposes its fs");
 
         // Mock source: worker threads push events here, flush thread drains them.
         let source_pending: Arc<Mutex<Vec<ValidationEvent>>> = Arc::new(Mutex::new(Vec::new()));
 
-        let guard = TelemetryCore::builder()
-            .writer(InvariantCheckingWriter::new(segments.clone()))
-            .build()
-            .unwrap();
+        let guard = TelemetryCore::builder().writer(writer).build().unwrap();
         guard
             .shared()
             .unwrap()
@@ -713,12 +673,18 @@ mod shuttle_tests {
         }
         drop(guard);
 
-        // Decode per-segment.
-        let segs = segments.lock().unwrap();
-        let decoded_segments: Vec<Vec<ValidationEvent>> =
-            segs.iter().map(|s| decode_validation_events(s)).collect();
-        let all_decoded: Vec<ValidationEvent> =
-            decoded_segments.iter().flatten().cloned().collect();
+        // Drain the in-memory ring (memory pops one sealed segment per call).
+        let mut all_decoded: Vec<ValidationEvent> = Vec::new();
+        loop {
+            let taken = fs.take_files();
+            if taken.segments.is_empty() {
+                break;
+            }
+            for seg in taken.segments {
+                let (_seg_ref, payload, _accounting) = seg.load().unwrap();
+                all_decoded.extend(decode_validation_events(&payload.into_vec()));
+            }
+        }
         let expected = expected.lock().unwrap();
 
         // Run all invariants.
@@ -736,51 +702,14 @@ mod shuttle_tests {
         shuttle::check_pct(test_telemetry_core_pipeline, 10000, 3);
     }
 
-    // ── Always-erroring writer ──────────────────────────────────────────
+    // ── Error injection ─────────────────────────────────────────────────
     //
-    // The companion to `InvariantCheckingWriter`: every fallible method
-    // returns an `io::Error`. This exercises the error paths in the flush
-    // loop and lets us assert that rate limiting bounds log output even
-    // when every operation fails.
+    // Companion to the round-trip pipeline test. `primitives::fs` is armed
+    // with a fault policy so the writer's real I/O points (write/flush/rename/
+    // remove) fail, exercising the flush loop's error paths.
 
     use std::sync::Arc as StdArc;
     use std::sync::atomic::{AtomicU64 as StdAtomicU64, Ordering as StdOrdering};
-
-    struct AlwaysErroringWriter;
-
-    impl AlwaysErroringWriter {
-        fn err() -> io::Error {
-            io::Error::from(io::ErrorKind::PermissionDenied)
-        }
-    }
-
-    impl TraceWriter for AlwaysErroringWriter {
-        fn write_encoded_batch(&mut self, _batch: &Batch) -> io::Result<()> {
-            Err(Self::err())
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Err(Self::err())
-        }
-
-        fn finalize(&mut self) -> io::Result<()> {
-            Err(Self::err())
-        }
-
-        fn write_current_segment_metadata(&mut self) -> io::Result<()> {
-            Err(Self::err())
-        }
-
-        fn should_drain(&self) -> bool {
-            // Always want to drain so the post-drain error path is exercised
-            // every flush tick.
-            true
-        }
-
-        fn drained(&mut self) -> io::Result<bool> {
-            Err(Self::err())
-        }
-    }
 
     // ── Counting subscriber ─────────────────────────────────────────────
     //
@@ -825,7 +754,9 @@ mod shuttle_tests {
 
     // ── Erroring-pipeline test body ─────────────────────────────────────
 
-    fn test_telemetry_core_erroring_pipeline() {
+    /// Drive the pipeline with the fs armed to `fault`, returning the
+    /// number of WARN/ERROR events the flush loop emitted.
+    fn run_erroring_pipeline(fault: fs::FaultPolicy) -> u64 {
         let _ts_guard =
             metrique_timesource::set_time_source(metrique_timesource::TimeSource::custom(
                 metrique_timesource::fakes::StaticTimeSource::at_time(std::time::UNIX_EPOCH),
@@ -840,10 +771,10 @@ mod shuttle_tests {
             let num_threads = 3;
             let next_id = Arc::new(AtomicU64::new(0));
 
-            let guard = TelemetryCore::builder()
-                .writer(AlwaysErroringWriter)
-                .build()
-                .unwrap();
+            let dir = tempfile::tempdir().unwrap();
+            let writer = DiskWriter::single_file(dir.path().join("trace.bin")).unwrap();
+            let _fault = fs::set_fault(fault);
+            let guard = TelemetryCore::builder().writer(writer).build().unwrap();
             guard.enable();
             let handle = guard.handle();
 
@@ -881,12 +812,35 @@ mod shuttle_tests {
             drop(guard);
         });
 
-        // Bound the warn+error count by the number of distinct rate-limited
-        // call sites. There are roughly 6 sites that might fire on every
-        // shuttle run; allow some slack but cap firmly below "one per loop
-        // iteration". If a `rate_limited!` wrapper is removed from the flush
-        // loop, this number explodes.
-        let total = warn_count.load(StdOrdering::Relaxed);
+        warn_count.load(StdOrdering::Relaxed)
+    }
+
+    /// The fault is armed on the test thread but read on the flush thread,
+    /// this proves it crosses that boundary.
+    fn fs_fault_visible_across_threads() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fault_probe");
+        std::fs::write(&path, b"x").unwrap();
+
+        let _fault = fs::set_fault(fs::FaultPolicy::FailAll);
+        let observed_fault =
+            crate::primitives::thread::spawn(move || fs::remove_file(&path).is_err())
+                .join()
+                .unwrap();
+
+        assert!(
+            observed_fault,
+            "fault armed on the test thread was not observed on a spawned thread"
+        );
+    }
+
+    #[test]
+    fn determinism_check_fs_fault_visible() {
+        shuttle::check_uncontrolled_nondeterminism(fs_fault_visible_across_threads, 100);
+    }
+
+    fn test_telemetry_core_erroring_pipeline() {
+        let total = run_erroring_pipeline(fs::FaultPolicy::FailAll);
         assert!(
             total <= 10,
             "rate limiting failed under persistent writer errors: \
@@ -903,5 +857,27 @@ mod shuttle_tests {
     #[test]
     fn pct_erroring_pipeline() {
         shuttle::check_pct(test_telemetry_core_erroring_pipeline, 10000, 3);
+    }
+
+    fn test_telemetry_core_probabilistic_fs_faults() {
+        let total = run_erroring_pipeline(fs::FaultPolicy::FailProb(0.5));
+        assert!(
+            total <= 10,
+            "rate limiting failed under probabilistic fs faults: observed {total} \
+             WARN/ERROR events, expected <= 10."
+        );
+    }
+
+    #[test]
+    fn determinism_check_probabilistic_fs_faults() {
+        shuttle::check_uncontrolled_nondeterminism(
+            test_telemetry_core_probabilistic_fs_faults,
+            10000,
+        );
+    }
+
+    #[test]
+    fn pct_probabilistic_fs_faults() {
+        shuttle::check_pct(test_telemetry_core_probabilistic_fs_faults, 10000, 3);
     }
 }

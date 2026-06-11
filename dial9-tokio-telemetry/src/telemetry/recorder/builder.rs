@@ -2,7 +2,7 @@ use crate::primitives::sync::Arc;
 use crate::primitives::sync::atomic::Ordering;
 #[cfg(feature = "cpu-profiling")]
 use crate::rate_limit::rate_limited;
-use crate::telemetry::writer::{Disk, SegmentWriter, TraceWriter, WriterMode};
+use crate::telemetry::writer::{Disk, SegmentWriter, WriterMode};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -360,7 +360,7 @@ impl<P> TracedRuntimeBuilder<P, PipelineUnset> {
     /// tk.enable_all();
     /// let _ = TracedRuntime::builder()
     ///     .with_custom_pipeline(|p| p.write_back())
-    ///     .build_with_writer(tk, writer);
+    ///     .build(tk, writer);
     /// ```
     pub fn with_custom_pipeline<F, Mode>(
         mut self,
@@ -419,58 +419,37 @@ impl<M, Mode: WriterMode> TracedRuntimeBuilder<NoTracePath, M, Mode> {
         self.trace_path = Some(path.into());
         self.into_state()
     }
+}
 
-    /// Build with a custom writer (for tests or `NullWriter`).
-    /// No background worker is spawned.
-    pub fn build_with_writer<W>(
+/// Build methods for the no-pipeline state. The writer drives `Mode`: pass a
+/// [`DiskWriter`] or [`InMemoryWriter`](crate::telemetry::InMemoryWriter) and
+/// the mode is inferred. Generic over the trace-path state `P` and the
+/// builder's current mode `BMode` (a no-pipeline builder never pins a mode, so
+/// the writer's `Mode` re-types it freely). Mode-bound pipeline states have
+/// their own `build`, where the writer mode must match the pinned `Mode`.
+impl<P, BMode: WriterMode> TracedRuntimeBuilder<P, PipelineUnset, BMode> {
+    /// Build the traced runtime. Recording starts disabled. `Mode` is inferred
+    /// from `writer`. The background worker spawns only when a pipeline is set,
+    /// so a plain no-pipeline build never starts one.
+    pub fn build<Mode: WriterMode>(
         self,
         builder: tokio::runtime::Builder,
-        writer: W,
-    ) -> std::io::Result<(tokio::runtime::Runtime, TelemetryGuard)>
-    where
-        W: TraceWriter<Mode> + 'static,
-    {
-        self.into_state::<HasTracePath, M, Mode>()
-            .build_inner(builder, Box::new(writer))
+        writer: SegmentWriter<Mode>,
+    ) -> std::io::Result<(tokio::runtime::Runtime, TelemetryGuard)> {
+        self.into_state::<HasTracePath, PipelineUnset, Mode>()
+            .build_inner(builder, writer)
     }
 
-    /// Build with a custom writer and immediately enable recording.
-    pub fn build_and_start_with_writer<W>(
+    /// Build the traced runtime and immediately enable recording. `Mode` is
+    /// inferred from `writer`.
+    pub fn build_and_start<Mode: WriterMode>(
         self,
         builder: tokio::runtime::Builder,
-        writer: W,
-    ) -> std::io::Result<(tokio::runtime::Runtime, TelemetryGuard)>
-    where
-        W: TraceWriter<Mode> + 'static,
-    {
-        let (runtime, guard) = self.build_with_writer(builder, writer)?;
+        writer: SegmentWriter<Mode>,
+    ) -> std::io::Result<(tokio::runtime::Runtime, TelemetryGuard)> {
+        let (runtime, guard) = self.build(builder, writer)?;
         guard.enable();
         Ok((runtime, guard))
-    }
-
-    /// Build the traced runtime. No background worker is spawned
-    /// (use `with_trace_path()` first for worker support).
-    pub fn build<W>(
-        self,
-        builder: tokio::runtime::Builder,
-        writer: W,
-    ) -> std::io::Result<(tokio::runtime::Runtime, TelemetryGuard)>
-    where
-        W: TraceWriter<Mode> + 'static,
-    {
-        self.build_with_writer(builder, writer)
-    }
-
-    /// Build and immediately enable recording.
-    pub fn build_and_start<W>(
-        self,
-        builder: tokio::runtime::Builder,
-        writer: W,
-    ) -> std::io::Result<(tokio::runtime::Runtime, TelemetryGuard)>
-    where
-        W: TraceWriter<Mode> + 'static,
-    {
-        self.build_and_start_with_writer(builder, writer)
     }
 }
 
@@ -481,63 +460,10 @@ impl<M, Mode: WriterMode> TracedRuntimeBuilder<HasTracePath, M, Mode> {
         self
     }
 
-    /// Build the traced runtime with a `DiskWriter`.
-    ///
-    /// The background worker is auto-spawned when cpu-profiling or any
-    /// pipeline strategy is configured. Recording starts disabled; call
-    /// [`TelemetryGuard::enable`] to begin, or use
-    /// [`build_and_start`](Self::build_and_start).
-    pub fn build(
-        self,
-        builder: tokio::runtime::Builder,
-        writer: SegmentWriter<Mode>,
-    ) -> std::io::Result<(tokio::runtime::Runtime, TelemetryGuard)> {
-        self.build_inner(builder, Box::new(writer))
-    }
-
-    /// Build the traced runtime and immediately enable recording.
-    pub fn build_and_start(
-        self,
-        builder: tokio::runtime::Builder,
-        writer: SegmentWriter<Mode>,
-    ) -> std::io::Result<(tokio::runtime::Runtime, TelemetryGuard)> {
-        let (runtime, guard) = self.build(builder, writer)?;
-        guard.enable();
-        Ok((runtime, guard))
-    }
-
-    /// Build with a custom writer (for tests). The background worker is
-    /// still spawned if cpu-profiling or any pipeline strategy is configured
-    /// and `trace_path` is set.
-    pub fn build_with_writer<W>(
-        self,
-        builder: tokio::runtime::Builder,
-        writer: W,
-    ) -> std::io::Result<(tokio::runtime::Runtime, TelemetryGuard)>
-    where
-        W: TraceWriter<Mode> + 'static,
-    {
-        self.build_inner(builder, Box::new(writer))
-    }
-
-    /// Build with a custom writer and immediately enable recording.
-    pub fn build_and_start_with_writer<W>(
-        self,
-        builder: tokio::runtime::Builder,
-        writer: W,
-    ) -> std::io::Result<(tokio::runtime::Runtime, TelemetryGuard)>
-    where
-        W: TraceWriter<Mode> + 'static,
-    {
-        let (runtime, guard) = self.build_with_writer(builder, writer)?;
-        guard.enable();
-        Ok((runtime, guard))
-    }
-
     fn build_inner(
         self,
         mut builder: tokio::runtime::Builder,
-        writer: Box<dyn TraceWriter<Mode>>,
+        writer: SegmentWriter<Mode>,
     ) -> std::io::Result<(tokio::runtime::Runtime, TelemetryGuard)> {
         if !self.enabled {
             return TracedRuntime::build_disabled(builder);
@@ -596,6 +522,114 @@ impl<M, Mode: WriterMode> TracedRuntimeBuilder<HasTracePath, M, Mode> {
             self.tokio_hooks,
         )?;
         Ok((runtime, guard))
+    }
+}
+
+/// Build methods for a custom-pipeline runtime. The pipeline pins `Mode`, so
+/// the writer must match it (a `Disk` pipeline cannot take a `Memory` writer).
+/// Generic over the trace-path state `P` (the worker still only spawns once a
+/// path is set; a no-path build just skips it).
+impl<P, Mode: WriterMode> TracedRuntimeBuilder<P, PipelineCustom, Mode> {
+    /// Build the traced runtime. Recording starts disabled.
+    pub fn build(
+        self,
+        builder: tokio::runtime::Builder,
+        writer: SegmentWriter<Mode>,
+    ) -> std::io::Result<(tokio::runtime::Runtime, TelemetryGuard)> {
+        self.into_state::<HasTracePath, PipelineCustom, Mode>()
+            .build_inner(builder, writer)
+    }
+
+    /// Build the traced runtime and immediately enable recording.
+    pub fn build_and_start(
+        self,
+        builder: tokio::runtime::Builder,
+        writer: SegmentWriter<Mode>,
+    ) -> std::io::Result<(tokio::runtime::Runtime, TelemetryGuard)> {
+        let (runtime, guard) = self.build(builder, writer)?;
+        guard.enable();
+        Ok((runtime, guard))
+    }
+}
+
+/// Build methods for an S3-pipeline runtime. The pipeline pins `Mode`, so the
+/// writer must match it. Generic over the trace-path state `P`.
+#[cfg(feature = "worker-s3")]
+impl<P, Mode: WriterMode> TracedRuntimeBuilder<P, PipelineS3, Mode> {
+    /// Build the traced runtime. Recording starts disabled.
+    pub fn build(
+        self,
+        builder: tokio::runtime::Builder,
+        writer: SegmentWriter<Mode>,
+    ) -> std::io::Result<(tokio::runtime::Runtime, TelemetryGuard)> {
+        self.into_state::<HasTracePath, PipelineS3, Mode>()
+            .build_inner(builder, writer)
+    }
+
+    /// Build the traced runtime and immediately enable recording.
+    pub fn build_and_start(
+        self,
+        builder: tokio::runtime::Builder,
+        writer: SegmentWriter<Mode>,
+    ) -> std::io::Result<(tokio::runtime::Runtime, TelemetryGuard)> {
+        let (runtime, guard) = self.build(builder, writer)?;
+        guard.enable();
+        Ok((runtime, guard))
+    }
+}
+
+/// Crate-internal: re-unifies `build_and_start` across the pipeline-marker
+/// states so the `#[main]` macro / [`crate::Dial9Config`] path can stay generic
+/// over the marker `N`. The public build methods are split per state (to infer
+/// `Mode` only on the safe no-pipeline state); this trait lets the erased macro
+/// path call a single method regardless of marker.
+///
+/// Public-but-hidden: it appears in the `where` bounds of the public
+/// `Dial9Config` builder methods (`with_runtime`/`build`), so it must be at
+/// least as visible as them to satisfy `private_interfaces`.
+#[doc(hidden)]
+pub trait BuildAndStartRuntime<Mode: WriterMode> {
+    fn build_and_start_runtime(
+        self,
+        builder: tokio::runtime::Builder,
+        writer: SegmentWriter<Mode>,
+    ) -> std::io::Result<(tokio::runtime::Runtime, TelemetryGuard)>;
+}
+
+impl<BMode: WriterMode, Mode: WriterMode> BuildAndStartRuntime<Mode>
+    for TracedRuntimeBuilder<HasTracePath, PipelineUnset, BMode>
+{
+    fn build_and_start_runtime(
+        self,
+        builder: tokio::runtime::Builder,
+        writer: SegmentWriter<Mode>,
+    ) -> std::io::Result<(tokio::runtime::Runtime, TelemetryGuard)> {
+        self.build_and_start(builder, writer)
+    }
+}
+
+impl<Mode: WriterMode> BuildAndStartRuntime<Mode>
+    for TracedRuntimeBuilder<HasTracePath, PipelineCustom, Mode>
+{
+    fn build_and_start_runtime(
+        self,
+        builder: tokio::runtime::Builder,
+        writer: SegmentWriter<Mode>,
+    ) -> std::io::Result<(tokio::runtime::Runtime, TelemetryGuard)> {
+        self.build_and_start(builder, writer)
+    }
+}
+
+#[cfg(feature = "worker-s3")]
+impl<Mode: WriterMode> BuildAndStartRuntime<Mode>
+    for TracedRuntimeBuilder<HasTracePath, PipelineS3, Mode>
+{
+    fn build_and_start_runtime(
+        self,
+        builder: tokio::runtime::Builder,
+        writer: SegmentWriter<Mode>,
+    ) -> std::io::Result<(tokio::runtime::Runtime, TelemetryGuard)> {
+        self.build_and_start(builder, writer)
     }
 }
 
@@ -701,8 +735,8 @@ impl TelemetryCore {
         #[cfg(feature = "worker-s3")]
         #[builder(field)]
         s3_client: Option<aws_sdk_s3::Client>,
-        /// The trace writer (e.g. [`DiskWriter`], [`NullWriter`](crate::telemetry::NullWriter)).
-        writer: impl TraceWriter<M> + 'static,
+        /// The trace writer ([`DiskWriter`] or [`InMemoryWriter`](crate::telemetry::InMemoryWriter)).
+        writer: SegmentWriter<M>,
         /// Path for trace output. Enables the background worker when any
         /// segment processors are configured.
         #[builder(into)]
@@ -762,7 +796,7 @@ impl TelemetryCore {
         };
 
         #[allow(unused_mut)]
-        let mut writer: Box<dyn crate::telemetry::writer::TraceWriter<M>> = Box::new(writer);
+        let mut writer = writer;
         let writer_fs = writer.fs_handle();
 
         let processors = assemble_processors(
@@ -892,9 +926,7 @@ impl TelemetryCore {
 }
 
 // Custom methods on the generated builder.
-impl<M: WriterMode, W: TraceWriter<M>, S: telemetry_core_builder::State>
-    TelemetryCoreBuilder<M, W, S>
-{
+impl<M: WriterMode, S: telemetry_core_builder::State> TelemetryCoreBuilder<M, S> {
     /// Configure S3 upload for sealed trace segments.
     #[cfg(feature = "worker-s3")]
     pub fn s3_config(mut self, config: crate::background_task::s3::S3Config) -> Self {
@@ -937,11 +969,11 @@ impl<M: WriterMode, W: TraceWriter<M>, S: telemetry_core_builder::State>
 ///   (panicking, used by the `#[dial9_tokio_telemetry::main]` macro) or
 ///   [`TracedRuntime::try_new`] (fallible).
 /// - **Low-level**: via [`TracedRuntime::builder`] →
-///   [`TracedRuntimeBuilder::build_and_start`] for direct control over the
-///   raw [`tokio::runtime::Builder`] and [`crate::telemetry::TraceWriter`].
-///   This is the path used by example code, benchmarks, and integration
-///   tests that want to wire a [`crate::telemetry::NullWriter`] or other
-///   custom writer.
+///   [`build_and_start`](TracedRuntimeBuilder::build_and_start) for direct
+///   control over the raw [`tokio::runtime::Builder`] and the
+///   [`DiskWriter`](crate::telemetry::DiskWriter) /
+///   [`InMemoryWriter`](crate::telemetry::InMemoryWriter). This is the path
+///   used by example code, benchmarks, and integration tests.
 #[derive(Debug)]
 pub struct TracedRuntime {
     pub(crate) runtime: tokio::runtime::Runtime,
@@ -984,26 +1016,22 @@ impl TracedRuntime {
         Ok((runtime, TelemetryGuard::disabled()))
     }
 
-    /// Build the traced runtime. Recording starts disabled. Writer mode is
-    /// inferred from the writer.
-    pub fn build<Mode: WriterMode, W: TraceWriter<Mode> + 'static>(
+    /// Build the traced runtime. Recording starts disabled. `Mode` is inferred
+    /// from the writer.
+    pub fn build<Mode: WriterMode>(
         builder: tokio::runtime::Builder,
-        writer: W,
+        writer: SegmentWriter<Mode>,
     ) -> std::io::Result<(tokio::runtime::Runtime, TelemetryGuard)> {
-        Self::builder()
-            .into_state::<NoTracePath, PipelineUnset, Mode>()
-            .build_with_writer(builder, writer)
+        Self::builder().build(builder, writer)
     }
 
-    /// Build the traced runtime and immediately enable recording. Writer
-    /// mode is inferred from the writer.
-    pub fn build_and_start<Mode: WriterMode, W: TraceWriter<Mode> + 'static>(
+    /// Build the traced runtime and immediately enable recording. `Mode` is
+    /// inferred from the writer.
+    pub fn build_and_start<Mode: WriterMode>(
         builder: tokio::runtime::Builder,
-        writer: W,
+        writer: SegmentWriter<Mode>,
     ) -> std::io::Result<(tokio::runtime::Runtime, TelemetryGuard)> {
-        Self::builder()
-            .into_state::<NoTracePath, PipelineUnset, Mode>()
-            .build_and_start_with_writer(builder, writer)
+        Self::builder().build_and_start(builder, writer)
     }
 }
 
@@ -1062,9 +1090,8 @@ fn try_assemble_dial9_config(
             runtime_builder,
         } => {
             let tokio_builder = materialize_tokio_builder(&tokio_configurators);
-            let (runtime, guard) = runtime_builder
-                .build_and_start(tokio_builder)
-                .map_err(TelemetryRuntimeError::TelemetryCore)?;
+            let (runtime, guard) =
+                runtime_builder(tokio_builder).map_err(TelemetryRuntimeError::TelemetryCore)?;
             Ok((runtime, guard))
         }
         Inner::Disabled {

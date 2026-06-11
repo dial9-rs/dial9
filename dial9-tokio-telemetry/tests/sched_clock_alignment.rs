@@ -5,7 +5,8 @@
 
 mod common;
 
-use common::{BytesCapturingWriter, decode_all};
+use common::{CAPTURE_BUFFER_SIZE, capture_processor, decode_all};
+use dial9_tokio_telemetry::telemetry::InMemoryWriter;
 use dial9_tokio_telemetry::telemetry::analysis_events::{CpuSampleSource, Dial9Event, WorkerId};
 
 #[test]
@@ -16,7 +17,7 @@ fn sched_event_timestamps_align_with_wall_clock() {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
-    let (writer, batches) = BytesCapturingWriter::new();
+    let (capture, batches) = capture_processor();
 
     let num_workers = 2u64;
     let mut builder = tokio::runtime::Builder::new_multi_thread();
@@ -24,7 +25,8 @@ fn sched_event_timestamps_align_with_wall_clock() {
 
     let (runtime, guard) = TracedRuntime::builder()
         .with_sched_events(SchedEventConfig::default())
-        .build_and_start(builder, writer)
+        .with_custom_pipeline(|p| p.pipe(capture))
+        .build_and_start(builder, InMemoryWriter::new(CAPTURE_BUFFER_SIZE).unwrap())
         .unwrap();
 
     let _trace_start = guard.start_time();
@@ -60,7 +62,9 @@ fn sched_event_timestamps_align_with_wall_clock() {
     });
 
     drop(runtime);
-    drop(guard);
+    guard
+        .graceful_shutdown(std::time::Duration::from_secs(1))
+        .expect("clean shutdown");
 
     let b = batches.lock().unwrap();
     let events: Vec<Dial9Event> = decode_all(&b);

@@ -2,6 +2,7 @@ use dial9_trace_format::encoder::{Encoder, RawEncoder};
 
 use crate::background_task::fs::{ActiveHandle, Fs, RemoveReason};
 use crate::background_task::sealed::SegmentRef;
+use crate::primitives::fs;
 use crate::rate_limit::rate_limited;
 use crate::telemetry::collector::Batch;
 use crate::telemetry::events::clock_pair;
@@ -48,95 +49,6 @@ impl WriterMode for Memory {
 pub type DiskWriter = SegmentWriter<Disk>;
 /// Alias for the in-memory writer.
 pub type InMemoryWriter = SegmentWriter<Memory>;
-
-/// Trait for writing encoded telemetry batches to a destination.
-///
-/// `Mode` ties the writer's storage backend (disk vs in-memory) to the
-/// builder's pipeline mode at the type level. Defaults to [`Disk`] so
-/// custom implementors of this trait need no changes for disk targets.
-pub trait TraceWriter<Mode: WriterMode = Disk>: Send {
-    /// Flush buffered data to the underlying storage.
-    fn flush(&mut self) -> std::io::Result<()>;
-    /// Returns true if the writer rotated to a new file since the last call to this method.
-    fn take_rotated(&mut self) -> bool {
-        false
-    }
-    /// Finalize the writer: flush, rename `.active` → `.bin`, and prevent
-    /// further writes. This is a terminal operation — the writer becomes
-    /// inert afterward.
-    fn finalize(&mut self) -> std::io::Result<()> {
-        self.flush()
-    }
-    /// Transcode encoded bytes into this writer.
-    fn write_encoded_batch(&mut self, batch: &Batch) -> std::io::Result<()>;
-    /// Return the current segment metadata entries. Default returns empty.
-    fn segment_metadata(&self) -> &[(String, String)] {
-        &[]
-    }
-    /// Merge the segment metadata entries that will be written into the next
-    /// rotated segment (e.g. merged static + runtime names). Default is a no-op.
-    fn update_segment_metadata(&mut self, _entries: Vec<(String, String)>) {}
-    /// Write a `SegmentMetadataEvent` into the current segment. Called before
-    /// finalize so that single-segment traces contain runtime→worker mappings.
-    /// Default is a no-op.
-    fn write_current_segment_metadata(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-    /// Returns `true` when the flush loop should drain all thread-local
-    /// buffers before the next step. For `SegmentWriter` this fires when the
-    /// rotation period has elapsed since the last rotation *or* when a periodic
-    /// drain interval elapses (whichever comes first). Default returns `false`.
-    fn should_drain(&self) -> bool {
-        false
-    }
-    /// Called by the flush loop after thread-local buffers have been drained
-    /// and flushed. The writer may rotate the segment, advance a drain timer,
-    /// or do nothing. Returns `true` if a segment rotation occurred.
-    fn drained(&mut self) -> std::io::Result<bool> {
-        Ok(false)
-    }
-    /// Return the `Arc<Fs>` backing this writer, if any, so the recorder
-    /// builder can share it with the worker. Default `None`.
-    #[doc(hidden)]
-    #[allow(private_interfaces)]
-    fn fs_handle(&self) -> Option<Arc<Fs>> {
-        None
-    }
-}
-
-impl<Mode: WriterMode, W: TraceWriter<Mode> + ?Sized> TraceWriter<Mode> for Box<W> {
-    fn flush(&mut self) -> std::io::Result<()> {
-        (**self).flush()
-    }
-    fn take_rotated(&mut self) -> bool {
-        (**self).take_rotated()
-    }
-    fn finalize(&mut self) -> std::io::Result<()> {
-        (**self).finalize()
-    }
-    fn write_encoded_batch(&mut self, batch: &Batch) -> std::io::Result<()> {
-        (**self).write_encoded_batch(batch)
-    }
-    fn segment_metadata(&self) -> &[(String, String)] {
-        (**self).segment_metadata()
-    }
-    fn update_segment_metadata(&mut self, entries: Vec<(String, String)>) {
-        (**self).update_segment_metadata(entries)
-    }
-    fn write_current_segment_metadata(&mut self) -> std::io::Result<()> {
-        (**self).write_current_segment_metadata()
-    }
-    fn should_drain(&self) -> bool {
-        (**self).should_drain()
-    }
-    fn drained(&mut self) -> std::io::Result<bool> {
-        (**self).drained()
-    }
-    #[allow(private_interfaces)]
-    fn fs_handle(&self) -> Option<Arc<Fs>> {
-        (**self).fs_handle()
-    }
-}
 
 /// Segment-metadata key carrying the crates.io version of
 /// `dial9-tokio-telemetry`. Populated by default, any user-supplied entry with
@@ -186,20 +98,6 @@ impl SegmentMetadata {
         }
         self.entries = merged;
         true
-    }
-}
-
-/// A writer that discards all events. Useful for benchmarking hook overhead
-/// without I/O costs.
-#[derive(Debug)]
-pub struct NullWriter;
-
-impl TraceWriter for NullWriter {
-    fn write_encoded_batch(&mut self, _batch: &Batch) -> std::io::Result<()> {
-        Ok(())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
     }
 }
 
@@ -265,8 +163,6 @@ pub struct SegmentWriter<Mode: WriterMode = Disk> {
     active_path: PathBuf,
     state: WriterState,
     next_index: u32,
-    /// Set after rotation; cleared by `take_rotated()`.
-    did_rotate: bool,
     /// Metadata written at the start of each segment. Updated by the flush
     /// thread to include runtime names alongside any user-provided entries.
     segment_metadata: SegmentMetadata,
@@ -369,7 +265,7 @@ impl SegmentWriter<Disk> {
         if let Some(parent) = base_path.parent()
             && !parent.as_os_str().is_empty()
         {
-            std::fs::create_dir_all(parent)?;
+            fs::create_dir_all(parent)?;
         }
         let fs = Fs::new_disk(&base_path);
         let discovered = fs.discover_existing()?;
@@ -393,7 +289,6 @@ impl SegmentWriter<Disk> {
             active_path: first_path,
             state,
             next_index,
-            did_rotate: false,
             segment_metadata,
             dropped_events: 0,
             has_real_events: false,
@@ -433,7 +328,6 @@ impl SegmentWriter<Disk> {
             active_path,
             state,
             next_index: 1,
-            did_rotate: false,
             segment_metadata: SegmentMetadata::default(),
             dropped_events: 0,
             has_real_events: false,
@@ -546,7 +440,6 @@ impl SegmentWriter<Memory> {
             active_path,
             state,
             next_index: 1,
-            did_rotate: false,
             segment_metadata,
             dropped_events: 0,
             has_real_events: false,
@@ -708,7 +601,6 @@ impl<M: WriterMode> SegmentWriter<M> {
             }
         };
         self.active_path = new_path;
-        self.did_rotate = true;
         self.has_real_events = false;
 
         tracing::debug!(
@@ -763,28 +655,25 @@ impl<M: WriterMode> SegmentWriter<M> {
     }
 }
 
-impl<M: WriterMode> TraceWriter<M> for SegmentWriter<M> {
-    #[allow(private_interfaces)]
-    fn fs_handle(&self) -> Option<Arc<Fs>> {
+impl<M: WriterMode> SegmentWriter<M> {
+    pub(crate) fn fs_handle(&self) -> Option<Arc<Fs>> {
         Some(Arc::clone(&self.fs))
     }
 
-    fn flush(&mut self) -> std::io::Result<()> {
+    /// Flush buffered data to the underlying storage.
+    pub fn flush(&mut self) -> std::io::Result<()> {
         if let WriterState::Active { writer: raw, .. } = &mut self.state {
             raw.flush()?;
         }
         Ok(())
     }
 
-    fn take_rotated(&mut self) -> bool {
-        std::mem::take(&mut self.did_rotate)
-    }
-
-    fn segment_metadata(&self) -> &[(String, String)] {
+    pub(crate) fn segment_metadata(&self) -> &[(String, String)] {
         &self.segment_metadata.entries
     }
 
-    fn update_segment_metadata(&mut self, entries: Vec<(String, String)>) {
+    /// Merge the segment metadata entries written into the next rotated segment.
+    pub fn update_segment_metadata(&mut self, entries: Vec<(String, String)>) {
         if self.segment_metadata.merge(entries.into_iter()) {
             match &mut self.state {
                 WriterState::Active { need_metadata, .. } => *need_metadata = true,
@@ -793,15 +682,15 @@ impl<M: WriterMode> TraceWriter<M> for SegmentWriter<M> {
         }
     }
 
-    fn write_current_segment_metadata(&mut self) -> std::io::Result<()> {
+    pub(crate) fn write_current_segment_metadata(&mut self) -> std::io::Result<()> {
         self.write_metadata_if_needed()
     }
 
-    fn should_drain(&self) -> bool {
+    pub(crate) fn should_drain(&self) -> bool {
         self.has_real_events && time_source().instant().as_std() >= self.next_drain_time
     }
 
-    fn drained(&mut self) -> std::io::Result<bool> {
+    pub(crate) fn drained(&mut self) -> std::io::Result<bool> {
         if !self.has_real_events {
             return Ok(false);
         }
@@ -818,7 +707,9 @@ impl<M: WriterMode> TraceWriter<M> for SegmentWriter<M> {
         Ok(false)
     }
 
-    fn finalize(&mut self) -> std::io::Result<()> {
+    /// Finalize the writer: flush, seal the active segment, and prevent further
+    /// writes. Terminal — the writer is inert afterward.
+    pub fn finalize(&mut self) -> std::io::Result<()> {
         if matches!(self.state, WriterState::Finished) {
             rate_limited!(Duration::from_secs(60), {
                 tracing::warn!("writer is already closed.");
@@ -892,7 +783,8 @@ impl<M: WriterMode> TraceWriter<M> for SegmentWriter<M> {
         Ok(())
     }
 
-    fn write_encoded_batch(&mut self, batch: &Batch) -> std::io::Result<()> {
+    /// Transcode an encoded batch into the active segment.
+    pub fn write_encoded_batch(&mut self, batch: &Batch) -> std::io::Result<()> {
         self.write_metadata_if_needed()?;
         let WriterState::Active { writer: raw, .. } = &mut self.state else {
             self.dropped_events += batch.event_count as usize;
@@ -2675,28 +2567,22 @@ mod tests {
             .expect("3× segment must be accepted");
     }
 
-    /// End to end: a memory `SegmentWriter` feeds the real worker pipeline.
-    /// Bytes must decode and every written event must arrive. Exercises the
-    /// full seam: in_memory -> write -> Fs::Mem seal -> ring -> finalize
-    /// (mark_writer_done) -> WorkerLoop::run drain-to-empty -> processor.
-    #[tokio::test]
-    async fn mem_writer_e2e_delivers_all_events() {
+    /// Drive a memory writer through the real worker pipeline and return the
+    /// captured per-segment payloads. Exercises the full seam: write ->
+    /// Fs::Mem seal -> ring -> finalize (mark_writer_done) -> WorkerLoop::run
+    /// drain-to-empty -> processor.
+    async fn run_mem_e2e(mut writer: InMemoryWriter, events: usize) -> Vec<Vec<u8>> {
         use crate::background_task::WorkerLoop;
-        use crate::background_task::testutil::CaptureProcessor;
-        use crate::telemetry::{analysis_events::Dial9Event, format};
+        use crate::background_task::testutil::CapturingProcessor;
 
-        const EVENTS: usize = 25;
-
-        let mut writer = InMemoryWriter::new(1 << 20).unwrap();
         let fs = writer.fs_handle().expect("memory writer exposes its Fs");
-
-        for _ in 0..EVENTS {
+        for _ in 0..events {
             writer.write_encoded_batch(&test_batch()).unwrap();
         }
         // Seals the active segment onto the ring and signals writer_done.
         writer.finalize().unwrap();
 
-        let (capture, captured) = CaptureProcessor::new();
+        let (capture, captured) = CapturingProcessor::new();
         // stop is never cancelled: the loop exits via writer_done only.
         let stop = tokio_util::sync::CancellationToken::new();
         let mut worker = WorkerLoop::new(
@@ -2708,10 +2594,16 @@ mod tests {
         );
         worker.run().await;
 
-        let bytes = captured.lock().unwrap().clone();
-        assert!(!bytes.is_empty(), "worker captured no bytes");
-        let events = format::decode_events(&bytes)
-            .unwrap()
+        let segments = captured.lock().unwrap();
+        segments.clone()
+    }
+
+    /// Count decoded payload events across `segments`, dropping the per-segment
+    /// metadata/clock-sync framing the writer emits.
+    fn count_payload_events(segments: &[Vec<u8>]) -> usize {
+        use crate::telemetry::analysis_events::Dial9Event;
+
+        crate::background_task::testutil::decode_captured(segments)
             .into_iter()
             .filter(|e| {
                 !matches!(
@@ -2719,10 +2611,46 @@ mod tests {
                     Dial9Event::SegmentMetadataEvent(..) | Dial9Event::ClockSyncEvent(..)
                 )
             })
-            .count();
+            .count()
+    }
+
+    #[tokio::test]
+    async fn mem_writer_e2e_delivers_all_events() {
+        const EVENTS: usize = 25;
+
+        let segments = run_mem_e2e(InMemoryWriter::new(1 << 20).unwrap(), EVENTS).await;
+
+        assert!(!segments.is_empty(), "worker captured no segments");
         assert_eq!(
-            events, EVENTS,
+            count_payload_events(&segments),
+            EVENTS,
             "every written event must reach the processor"
+        );
+    }
+
+    /// Same as `mem_writer_e2e_delivers_all_events`, but a tiny `max_segment_size` forces several rotations so the
+    /// worker delivers multiple sealed segments.
+    #[tokio::test]
+    async fn mem_writer_e2e_delivers_all_events_across_rotations() {
+        const EVENTS: usize = 60;
+
+        // Huge ring (nothing evicts) + tiny segments (rotate every few batches).
+        let writer = InMemoryWriter::builder()
+            .max_total_size(16 * 1024 * 1024)
+            .max_segment_size(256)
+            .build()
+            .unwrap();
+        let segments = run_mem_e2e(writer, EVENTS).await;
+
+        assert!(
+            segments.len() >= 2,
+            "tiny segments must force rotation, got {} segment(s)",
+            segments.len()
+        );
+        assert_eq!(
+            count_payload_events(&segments),
+            EVENTS,
+            "every event across all rotated segments must reach the processor"
         );
     }
 }
