@@ -309,7 +309,7 @@ fn attach_runtime(
         }
     }
 
-    shared.contexts.lock().unwrap().push(ctx);
+    shared.push_source(Box::new(runtime_context::TokioRuntimeSource::new(ctx)));
 
     Ok(runtime)
 }
@@ -436,8 +436,16 @@ mod tests {
         assert!(guard.is_enabled());
         assert!(guard.shared().unwrap().is_enabled());
         assert!(
-            guard.shared().unwrap().contexts.lock().unwrap().is_empty(),
-            "disabled Tokio instrumentation should not register runtime contexts"
+            !guard
+                .shared()
+                .unwrap()
+                .sources
+                .lock()
+                .unwrap()
+                .iter()
+                .flat_map(|s| s.segment_metadata())
+                .any(|(k, _)| k.starts_with("runtime.")),
+            "disabled Tokio instrumentation should not produce runtime metadata"
         );
 
         runtime.block_on(async {
@@ -451,8 +459,16 @@ mod tests {
         });
 
         assert!(
-            guard.shared().unwrap().contexts.lock().unwrap().is_empty(),
-            "disabled Tokio instrumentation should not register runtime contexts after running work"
+            !guard
+                .shared()
+                .unwrap()
+                .sources
+                .lock()
+                .unwrap()
+                .iter()
+                .flat_map(|s| s.segment_metadata())
+                .any(|(k, _)| k.starts_with("runtime.")),
+            "disabled Tokio instrumentation should not produce runtime metadata after running work"
         );
         assert_eq!(
             hook_calls.load(Ordering::Relaxed),

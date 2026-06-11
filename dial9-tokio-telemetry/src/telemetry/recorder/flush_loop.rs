@@ -5,7 +5,6 @@ use crate::telemetry::writer::{SegmentWriter, WriterMode};
 use metrique::timers::Timer;
 use metrique::unit::Microsecond;
 use metrique::unit_of_work::metrics;
-use metrique_timesource::time_source;
 use std::time::Duration;
 
 use super::ControlCommand;
@@ -119,10 +118,8 @@ pub(super) fn run_flush_loop<M: WriterMode>(
     const SELF_DRAIN_INTERVAL: u64 = 200;
     let mut events_written: u64 = 0;
 
-    let sample_interval = Duration::from_millis(10);
-    let mut last_sample = time_source().instant();
     // Snapshot the user-provided segment metadata so we can
-    // merge it with runtime→worker entries on each flush cycle.
+    // merge it with per-source entries on each flush cycle.
     let static_metadata = writer.segment_metadata().to_vec();
 
     let mut drain_state = DrainState::Idle;
@@ -150,20 +147,9 @@ pub(super) fn run_flush_loop<M: WriterMode>(
             continue;
         }
 
-        if last_sample.elapsed() >= sample_interval {
-            last_sample = time_source().instant();
-            let contexts = shared.contexts.lock().unwrap().clone();
-            let total_global_queue: usize = contexts.iter().map(|c| c.global_queue_depth()).sum();
-            if !contexts.is_empty() {
-                shared.record_queue_sample(total_global_queue);
-            }
-        }
-
-        // Merge user-provided metadata with runtime→worker mappings and
-        // source metadata so the next rotated segment is fully self-describing.
-        let contexts = shared.contexts.lock().unwrap().clone();
-        let runtime_entries: Vec<(String, String)> =
-            contexts.iter().filter_map(|c| c.metadata_entry()).collect();
+        // Merge user-provided metadata with per-source metadata (including
+        // per-runtime worker mappings) so the next rotated segment is fully
+        // self-describing.
         let source_entries: Vec<(String, String)> = shared
             .sources
             .lock()
@@ -171,9 +157,8 @@ pub(super) fn run_flush_loop<M: WriterMode>(
             .iter()
             .flat_map(|s| s.segment_metadata())
             .collect();
-        if !runtime_entries.is_empty() || !source_entries.is_empty() {
+        if !source_entries.is_empty() {
             let mut merged = static_metadata.clone();
-            merged.extend(runtime_entries);
             merged.extend(source_entries);
             writer.update_segment_metadata(merged);
         }
