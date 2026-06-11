@@ -10,7 +10,7 @@
 use dial9_tokio_telemetry::memory_profiling::{
     Dial9Allocator, MemoryProfiler, MemoryProfilingConfig,
 };
-use dial9_tokio_telemetry::telemetry::{NullWriter, TracedRuntime};
+use dial9_tokio_telemetry::telemetry::{InMemoryWriter, TracedRuntime};
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -61,7 +61,7 @@ fn opt_out_prevents_tls_teardown_panic() {
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.worker_threads(1).enable_all();
     let (runtime, guard) = TracedRuntime::builder()
-        .build_and_start_with_writer(builder, NullWriter)
+        .build_and_start(builder, InMemoryWriter::new(16 * 1024 * 1024).unwrap())
         .unwrap();
 
     let handle = guard.handle();
