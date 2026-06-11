@@ -2591,6 +2591,7 @@ mod tests {
             vec![Box::new(capture)],
             stop,
             metrique_writer::sink::DevNullSink::boxed(),
+            None,
         );
         worker.run().await;
 

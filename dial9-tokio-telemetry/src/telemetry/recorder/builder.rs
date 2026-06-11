@@ -68,6 +68,7 @@ pub struct TracedRuntimeBuilder<P = NoTracePath, M = PipelineUnset, Mode: Writer
     pub(super) segment_metadata: Vec<(String, String)>,
     pub(super) worker_poll_interval: Option<Duration>,
     pub(super) worker_metrics_sink: Option<metrique_writer::BoxEntrySink>,
+    pub(super) trigger_rx: Option<crate::dump::DumpRx>,
 
     pub(super) tokio_hooks: super::TokioHooks,
     pub(super) _marker: std::marker::PhantomData<(P, M, Mode)>,
@@ -216,6 +217,23 @@ impl<P, M, Mode: WriterMode> TracedRuntimeBuilder<P, M, Mode> {
         self
     }
 
+    /// Flip the background worker into on-demand operation.
+    ///
+    /// Sealed segments keep accumulating in the ring (memory or disk), but
+    /// the configured pipeline only runs when a dump is requested through
+    /// the paired [`DumpControl`](crate::dump::DumpControl). Orthogonal to
+    /// pipeline selection: whichever pipeline you would have wired for
+    /// continuous mode, you keep. Without this call the worker processes
+    /// segments continuously, as today.
+    ///
+    /// If no pipeline is configured the worker never spawns and every dump
+    /// request resolves with
+    /// [`DumpError::WorkerStopped`](crate::dump::DumpError::WorkerStopped).
+    pub fn with_trigger(mut self, rx: crate::dump::DumpRx) -> Self {
+        self.trigger_rx = Some(rx);
+        self
+    }
+
     /// Configure user-provided callbacks to run alongside dial9's internal
     /// Tokio runtime hooks. dial9's logic always runs first, then the user
     /// callbacks fire in registration order.
@@ -295,6 +313,7 @@ impl<P, M, Mode: WriterMode> TracedRuntimeBuilder<P, M, Mode> {
             segment_metadata: self.segment_metadata,
             worker_poll_interval: self.worker_poll_interval,
             worker_metrics_sink: self.worker_metrics_sink,
+            trigger_rx: self.trigger_rx,
             tokio_hooks: self.tokio_hooks,
             _marker: std::marker::PhantomData,
         }
@@ -485,6 +504,7 @@ impl<M, Mode: WriterMode> TracedRuntimeBuilder<HasTracePath, M, Mode> {
             .maybe_process_resource_usage(self.process_resource_usage_config)
             .maybe_worker_poll_interval(self.worker_poll_interval)
             .maybe_worker_metrics_sink(self.worker_metrics_sink)
+            .maybe_trigger(self.trigger_rx)
             .processors(processors)
             .segment_metadata(self.segment_metadata);
 
@@ -756,6 +776,9 @@ impl TelemetryCore {
         worker_poll_interval: Option<Duration>,
         /// Metrics sink for the flush/worker threads.
         worker_metrics_sink: Option<metrique_writer::BoxEntrySink>,
+        /// Trigger receiver flipping the background worker into on-demand
+        /// operation; see [`crate::dump`]. `None` keeps continuous mode.
+        trigger: Option<crate::dump::DumpRx>,
     ) -> std::io::Result<TelemetryGuard> {
         let start_mono_ns = crate::telemetry::events::clock_monotonic_ns();
         let rng_seed = task_dump_config.as_ref().and_then(|cfg| cfg.rng_seed());
@@ -887,12 +910,14 @@ impl TelemetryCore {
                     .poll_interval(poll_interval)
                     .processors(processors)
                     .metrics_sink(metrics_sink)
+                    .maybe_trigger(trigger)
                     .build()
             } else {
                 crate::background_task::BackgroundTaskConfig::builder()
                     .poll_interval(poll_interval)
                     .processors(processors)
                     .metrics_sink(metrics_sink)
+                    .maybe_trigger(trigger)
                     .build()
             };
             Some((config, fs))
@@ -1000,6 +1025,7 @@ impl TracedRuntime {
             segment_metadata: Vec::new(),
             worker_poll_interval: None,
             worker_metrics_sink: None,
+            trigger_rx: None,
             tokio_hooks: super::TokioHooks::default(),
             _marker: std::marker::PhantomData,
         }

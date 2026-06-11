@@ -54,6 +54,9 @@ pub struct BackgroundTaskConfig {
     /// Metrics sink. Defaults to [`DevNullSink`](metrique_writer::sink::DevNullSink).
     #[builder(default = metrique_writer::sink::DevNullSink::boxed())]
     metrics_sink: BoxEntrySink,
+    /// Trigger receiver flipping the worker into on-demand operation; see
+    /// [`crate::dump`]. `None` (the default) keeps continuous processing.
+    trigger: Option<crate::dump::DumpRx>,
 }
 
 impl std::fmt::Debug for BackgroundTaskConfig {
@@ -448,8 +451,9 @@ pub(crate) fn run_background_task(
 
     let processors = std::mem::take(&mut config.processors);
     let metrics_sink = config.metrics_sink.clone();
+    let trigger = config.trigger.take();
 
-    tracing::info!(target: "dial9_worker", dir = %config.trace_dir().display(), stem = %config.trace_stem(), processors = processors.len(), "worker started");
+    tracing::info!(target: "dial9_worker", dir = %config.trace_dir().display(), stem = %config.trace_stem(), processors = processors.len(), triggered = trigger.is_some(), "worker started");
     rt.block_on(async {
         let stop = tokio_util::sync::CancellationToken::new();
         let mut worker = WorkerLoop::new(
@@ -458,6 +462,7 @@ pub(crate) fn run_background_task(
             processors,
             stop.clone(),
             metrics_sink,
+            trigger,
         );
         let mut run_fut = std::pin::pin!(worker.run());
         // Poll the worker until we receive a shutdown signal with a drain timeout.
@@ -740,6 +745,9 @@ pub(crate) struct WorkerLoop {
     /// When cancelled, the worker finishes its current cycle and exits
     /// instead of sleeping.
     stop: tokio_util::sync::CancellationToken,
+    /// Present: on-demand operation, segments only run through the
+    /// pipeline when a dump is requested. Absent: continuous processing.
+    trigger: Option<crate::dump::DumpRx>,
 }
 
 impl WorkerLoop {
@@ -749,6 +757,7 @@ impl WorkerLoop {
         processors: Vec<Box<dyn SegmentProcessor>>,
         stop: tokio_util::sync::CancellationToken,
         metrics_sink: BoxEntrySink,
+        trigger: Option<crate::dump::DumpRx>,
     ) -> Self {
         Self {
             fs,
@@ -756,6 +765,7 @@ impl WorkerLoop {
             processors,
             metrics_sink,
             stop,
+            trigger,
         }
     }
 
@@ -1519,6 +1529,7 @@ mod tests {
             processors,
             stop,
             metrique_writer::sink::DevNullSink::boxed(),
+            None,
         );
         worker.run().await;
 
@@ -1588,6 +1599,7 @@ mod tests {
             processors,
             stop,
             metrique_writer::sink::DevNullSink::boxed(),
+            None,
         );
         worker.run().await;
 
@@ -1869,6 +1881,7 @@ mod worker_pipeline_tests {
             processors,
             stop,
             metrique_writer::sink::DevNullSink::boxed(),
+            None,
         );
         worker.process_open_segments().await;
 
@@ -1899,6 +1912,7 @@ mod worker_pipeline_tests {
             processors,
             stop,
             metrique_writer::sink::DevNullSink::boxed(),
+            None,
         );
         worker.process_open_segments().await;
 
@@ -1947,6 +1961,7 @@ mod worker_pipeline_tests {
             processors,
             stop,
             metrique_writer::sink::DevNullSink::boxed(),
+            None,
         );
         worker.process_open_segments().await;
 
@@ -1993,6 +2008,7 @@ mod worker_pipeline_tests {
             processors,
             stop,
             metrique_writer::sink::DevNullSink::boxed(),
+            None,
         );
         worker.process_open_segments().await;
 
@@ -2029,6 +2045,7 @@ mod worker_pipeline_tests {
             processors,
             stop,
             metrique_writer::sink::DevNullSink::boxed(),
+            None,
         );
         worker.run().await;
 
@@ -2149,6 +2166,7 @@ mod worker_pipeline_tests {
             processors,
             stop,
             metrique_writer::sink::DevNullSink::boxed(),
+            None,
         );
         worker.run().await;
 
@@ -2215,6 +2233,7 @@ mod worker_pipeline_tests {
             processors,
             stop,
             inspector.clone().boxed(),
+            None,
         );
         worker.run().await;
 
@@ -2276,6 +2295,7 @@ mod worker_pipeline_tests {
             processors,
             stop.clone(),
             metrique_writer::sink::DevNullSink::boxed(),
+            None,
         );
 
         let run_fut = worker.run();
@@ -2330,6 +2350,7 @@ mod worker_pipeline_tests {
             vec![Box::new(CountingProcessor(processed.clone()))],
             stop,
             metrique_writer::sink::DevNullSink::boxed(),
+            None,
         );
 
         fs.mark_writer_done();
@@ -2429,6 +2450,7 @@ mod worker_pipeline_tests {
             ],
             stop,
             metrique_writer::sink::DevNullSink::boxed(),
+            None,
         );
         tokio::time::timeout(Duration::from_secs(5), worker.run())
             .await
@@ -2521,6 +2543,7 @@ mod worker_pipeline_tests {
                 vec![Box::new(CountingProcessor(processed.clone()))],
                 stop,
                 metrique_writer::sink::DevNullSink::boxed(),
+                None,
             );
             let worker_task = tokio::spawn(async move { worker.run().await });
 
@@ -2609,6 +2632,7 @@ mod worker_pipeline_tests {
             })],
             stop,
             metrique_writer::sink::DevNullSink::boxed(),
+            None,
         );
         worker.run().await;
         check!(attempts.load(Ordering::SeqCst) == 3, "2 fails + 1 success");
@@ -2665,6 +2689,7 @@ mod worker_pipeline_tests {
             })],
             stop,
             metrique_writer::sink::DevNullSink::boxed(),
+            None,
         );
         worker.run().await;
         check!(
@@ -2707,6 +2732,7 @@ mod worker_pipeline_tests {
             ))],
             stop,
             metrique_writer::sink::DevNullSink::boxed(),
+            None,
         );
         tokio::time::timeout(Duration::from_secs(15), worker.run())
             .await
