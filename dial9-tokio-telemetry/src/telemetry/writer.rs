@@ -1617,6 +1617,56 @@ mod tests {
         assert!(!seg0_gz.exists(), "trace.0.bin.gz should have been evicted");
     }
 
+    /// Eviction must never drop below the most-recent segment, even when that
+    /// single segment alone exceeds `max_total_size`. In that case it retains
+    /// the segment on disk (so on-disk usage legitimately exceeds the budget)
+    /// and signals "stop writing" by transitioning to `Finished`.
+    ///
+    /// This is the floor that makes an end-to-end `on-disk bytes <=
+    /// max_total_size` assertion unsound — see `tests/writeback_no_leaked_gz.rs`.
+    #[test]
+    fn test_eviction_keeps_most_recent_segment_when_over_budget() {
+        let dir = TempDir::new().unwrap();
+        let base = dir.path().join("trace");
+        let one_event = single_event_file_size();
+        // No rotation (huge per-file size) so the single active segment is the
+        // only one; a budget smaller than one segment forces the floor.
+        let max_file_size = u64::MAX;
+        let max_total_size = one_event / 2;
+        assert!(
+            max_total_size < one_event,
+            "test setup: budget must be smaller than a single segment"
+        );
+        let mut writer = DiskWriter::new(&base, max_file_size, max_total_size).unwrap();
+
+        writer.write_encoded_batch(&test_batch()).unwrap();
+        // The lone active segment already exceeds the total budget.
+        assert!(
+            writer.total_size() > max_total_size,
+            "single segment ({}) should exceed budget ({max_total_size})",
+            writer.total_size()
+        );
+
+        // Eviction has no closed segments to drop and must NOT delete the
+        // current (most-recent) segment. It signals "stop" instead.
+        writer.evict_oldest().unwrap();
+
+        assert!(
+            matches!(writer.state, WriterState::Finished),
+            "writer should stop once even the most-recent segment exceeds budget"
+        );
+        // The most-recent segment is retained on disk despite exceeding the
+        // budget — eviction never drops below one segment.
+        assert!(
+            std::path::Path::new(&writer.current_active_path()).exists(),
+            "the most-recent segment must not be evicted"
+        );
+        assert!(
+            total_disk_usage(dir.path()) > max_total_size,
+            "retained segment is expected to push on-disk usage over the budget"
+        );
+    }
+
     // ---- Time-based rotation tests ----
 
     #[tokio::test(start_paused = true)]
