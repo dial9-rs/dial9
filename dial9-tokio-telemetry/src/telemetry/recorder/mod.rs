@@ -258,6 +258,7 @@ fn register_hooks(
 /// the runtime, reserve worker IDs, and push the context.
 fn attach_runtime(
     shared: &Arc<SharedState>,
+    contexts: &runtime_context::RuntimeContextRegistry,
     mut builder: tokio::runtime::Builder,
     runtime_name: Option<String>,
     control_tx: &crate::primitives::sync::mpsc::SyncSender<ControlCommand>,
@@ -309,7 +310,7 @@ fn attach_runtime(
         }
     }
 
-    shared.push_source(Box::new(runtime_context::TokioRuntimeSource::new(ctx)));
+    contexts.lock().unwrap().push(ctx);
 
     Ok(runtime)
 }

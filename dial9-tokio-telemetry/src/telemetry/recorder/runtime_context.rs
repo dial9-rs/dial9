@@ -1,6 +1,6 @@
 use super::shared_state::{PARKED_SCHED_WAIT, SharedState};
 use super::source::{FlushContext, Source};
-use crate::primitives::sync::Arc;
+use crate::primitives::sync::{Arc, Mutex};
 use crate::telemetry::buffer::{Encodable, ThreadLocalEncoder, record_encodable_event};
 use crate::telemetry::events::{SchedStat, clock_monotonic_ns};
 use crate::telemetry::format::{
@@ -77,34 +77,45 @@ pub(crate) fn poll_start_ts_monotonic() -> u64 {
     })
 }
 
-/// Flush-thread [`Source`] for one tokio runtime: samples its global queue
-/// depth each cycle and contributes its runtime->worker segment metadata.
-pub(crate) struct TokioRuntimeSource {
-    ctx: Arc<RuntimeContext>,
+/// Shared list of all attached runtimes.
+pub(crate) type RuntimeContextRegistry = Arc<Mutex<Vec<Arc<RuntimeContext>>>>;
+
+/// Flush-thread [`Source`] over all tokio runtimes. Each cycle it samples the
+/// summed global queue depth across runtimes and contributes each runtime's
+/// runtime->worker segment metadata.
+pub(crate) struct TokioRuntimesSource {
+    contexts: RuntimeContextRegistry,
     last_sample: Instant,
     sample_interval: Duration,
 }
 
-impl TokioRuntimeSource {
-    pub(crate) fn new(ctx: Arc<RuntimeContext>) -> Self {
+impl TokioRuntimesSource {
+    pub(crate) fn new(contexts: RuntimeContextRegistry) -> Self {
         Self {
-            ctx,
+            contexts,
             last_sample: time_source().instant(),
             sample_interval: Duration::from_millis(10),
         }
     }
 }
 
-impl Source for TokioRuntimeSource {
+impl Source for TokioRuntimesSource {
     fn flush(&mut self, ctx: &FlushContext<'_>) {
         if self.last_sample.elapsed() < self.sample_interval {
             return;
         }
         self.last_sample = time_source().instant();
+        let total_global_queue: usize = {
+            let contexts = self.contexts.lock().unwrap();
+            if contexts.is_empty() {
+                return;
+            }
+            contexts.iter().map(|c| c.global_queue_depth()).sum()
+        };
         record_encodable_event(
             &QueueSampleEvent {
                 timestamp_ns: clock_monotonic_ns(),
-                global_queue: self.ctx.global_queue_depth() as u8,
+                global_queue: total_global_queue as u8,
             },
             ctx.collector,
             ctx.drain_epoch,
@@ -112,15 +123,28 @@ impl Source for TokioRuntimeSource {
     }
 
     fn name(&self) -> &'static str {
-        "tokio_runtime"
+        "tokio_runtimes"
     }
 
     fn segment_metadata(&self) -> Vec<(String, String)> {
-        self.ctx.metadata_entry().into_iter().collect()
+        self.contexts
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|c| c.metadata_entry())
+            .collect()
     }
 }
 
 impl RuntimeContext {
+    pub(crate) fn new(runtime_name: Option<String>) -> Self {
+        Self {
+            runtime_name,
+            metrics_and_base: OnceLock::new(),
+            worker_ids: RwLock::new(HashMap::new()),
+        }
+    }
+
     /// Build segment metadata entries for this runtime, e.g. `("runtime.main", "0,1,2,3")`.
     /// Returns `None` if unnamed or no workers resolved yet.
     pub(crate) fn metadata_entry(&self) -> Option<(String, String)> {
@@ -145,14 +169,6 @@ impl RuntimeContext {
             .get()
             .map(|(m, _)| m.global_queue_depth())
             .unwrap_or(0)
-    }
-
-    pub(crate) fn new(runtime_name: Option<String>) -> Self {
-        Self {
-            runtime_name,
-            metrics_and_base: OnceLock::new(),
-            worker_ids: RwLock::new(HashMap::new()),
-        }
     }
 
     /// Local queue depth for a worker in this runtime.
