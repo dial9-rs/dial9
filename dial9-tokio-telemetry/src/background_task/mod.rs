@@ -1708,9 +1708,19 @@ impl SegmentProcessor for S3PipelineUploader {
                     circuit_breaker,
                 };
             }
-            let S3UploaderState::Ready { uploader, .. } = &self.state else {
+            let S3UploaderState::Ready {
+                uploader,
+                circuit_breaker,
+            } = &mut self.state
+            else {
                 return None;
             };
+            if !circuit_breaker.should_attempt() {
+                rate_limited!(Duration::from_secs(60), {
+                    tracing::warn!(target: "dial9_worker", dump_id = %manifest.dump_id, "circuit breaker open, skipping dump manifest");
+                });
+                return None;
+            }
             let body = match serde_json::to_vec(&manifest) {
                 Ok(body) => body,
                 Err(e) => {
@@ -1723,8 +1733,12 @@ impl SegmentProcessor for S3PipelineUploader {
             let key = uploader.manifest_key(&manifest.dump_id);
             // Best-effort: a failed manifest PUT never fails the receipt.
             match uploader.upload_manifest(&key, body).await {
-                Ok(()) => Some(key),
+                Ok(()) => {
+                    circuit_breaker.on_success();
+                    Some(key)
+                }
                 Err(e) => {
+                    circuit_breaker.on_failure();
                     rate_limited!(Duration::from_secs(60), {
                         tracing::warn!(target: "dial9_worker", error = %e, dump_id = %manifest.dump_id, "failed to write dump manifest");
                     });
