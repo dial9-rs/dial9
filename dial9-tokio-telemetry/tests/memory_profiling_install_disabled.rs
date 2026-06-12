@@ -31,10 +31,6 @@ fn default_config_uses_512_kib_sample_rate() {
     let config = MemoryProfilingConfig::default();
     assert_eq!(config.sample_rate_bytes(), 512 * 1024);
     assert!(!config.track_liveset());
-    assert_eq!(
-        config.timestamp_mode(),
-        dial9_tokio_telemetry::memory_profiling::TimestampMode::ReusePollStart
-    );
     assert_eq!(config.rng_seed(), None);
     assert_eq!(config.ring_capacity(), 4096);
 }

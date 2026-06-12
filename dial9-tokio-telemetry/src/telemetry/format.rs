@@ -158,10 +158,13 @@ pub struct ProcessResourceUsageEvent {
     #[traceevent(timestamp)]
     pub timestamp_ns: u64,
     /// Cumulative user CPU time used by this process.
+    #[traceevent(unit = "ns")]
     pub user_cpu_ns: u64,
     /// Cumulative system CPU time used by this process.
+    #[traceevent(unit = "ns")]
     pub system_cpu_ns: u64,
     /// Maximum resident set size in bytes.
+    #[traceevent(unit = "bytes")]
     pub max_rss_bytes: u64,
     /// Page faults serviced without disk I/O.
     pub minor_faults: u64,
@@ -382,6 +385,26 @@ mod tests {
     use crate::telemetry::analysis_events::Dial9Event;
     use dial9_trace_format::decoder::Decoder;
     use dial9_trace_format::encoder::Encoder;
+
+    #[test]
+    fn process_resource_usage_unit_annotations() {
+        use dial9_trace_format::TraceEvent;
+        let entry = ProcessResourceUsageEvent::schema_entry();
+        let units: Vec<(&str, &str)> = entry
+            .annotations()
+            .iter()
+            .filter(|a| a.key() == "unit")
+            .map(|a| (entry.fields()[a.field_index() as usize].name(), a.value()))
+            .collect();
+        assert_eq!(
+            units,
+            vec![
+                ("user_cpu_ns", "ns"),
+                ("system_cpu_ns", "ns"),
+                ("max_rss_bytes", "bytes"),
+            ]
+        );
+    }
 
     #[test]
     fn alloc_event_round_trip() {

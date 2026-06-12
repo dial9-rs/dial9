@@ -599,6 +599,21 @@ encoding them does ~kN allocations, ~kN/8000 trip the sampler, producing
 k²N/8000² second-order self-samples. The geometric series converges fast;
 steady-state self-pollution is ~0.01% of trace events.
 
+**Same-thread reentrancy from `scc`.** When the liveset is on, the
+allocator hook calls into `scc::HashIndex` (`insert`/`entry`) which can
+in turn allocate (bucket resizes) or free (epoch-reclamation of retired
+buckets). Those re-enter the same hook on the same thread. Both
+`on_alloc` and `on_dealloc` defend against this with a per-thread
+`SAMPLE_STATE` `RefCell` borrow taken across the whole liveset
+operation: a re-entrant call sees the borrow already held, gets `Err`
+from `try_borrow_mut`, and silently skips. This makes a same-thread
+deadlock between an outer `entry`'s bucket write lock and a re-entrant
+`entry` on the same bucket impossible. The shutdown-drain branch of
+`on_dealloc` deliberately sits *outside* this guard — it never touches
+`scc`/`sdd` and `SAMPLE_STATE`'s `LocalKey` may already be destroyed
+late in TLS teardown, so a guarded `try_with` would silently drop the
+dying thread's flagged free.
+
 **Allocation during stack capture.** `Unwinder::capture()` never allocates —
 it uses only the on-stack `[u64; 128]` buffer and the allocation-free
 frame-pointer unwinder.
@@ -619,7 +634,7 @@ at install time.
 
 ```rust
 use dial9_tokio_telemetry::memory_profiling::{
-    Dial9Allocator, MemoryProfiler, TimestampMode,
+    Dial9Allocator, MemoryProfiler,
 };
 
 #[global_allocator]
@@ -632,10 +647,13 @@ fn main() {
         .build()?;
     guard.enable();
 
+    // Memory profile timestamps always come from `clock_monotonic_ns()`
+    // (~25 ns vDSO call per sampled allocation). Globally monotonic, so
+    // cross-thread comparisons in the liveset's shutdown-drain race
+    // detector (§7) are sound.
     let _mem = MemoryProfiler::builder()
         .sample_rate_bytes(512 * 1024)
         .track_liveset(true)
-        .timestamp_mode(TimestampMode::ReusePollStart)
         .install(guard.handle())?;
 
     let (rt, _) = guard.trace_runtime("main").build(rt_builder)?;
@@ -717,34 +735,22 @@ fn alloc(&self, layout: Layout) -> *mut u8 {
 ```rust
 #[derive(Debug, Clone)]
 pub struct MemoryProfilingConfig {
-    sample_rate_bytes: u64,             // default 512 KiB
-    track_liveset: bool,                // default false
-    timestamp_mode: TimestampMode,      // default ReusePollStart
-    max_liveset_entries: Option<usize>, // default None (unbounded)
-    rng_seed: Option<u64>,              // test-only deterministic seeding
-    ring_capacity: usize,              // default 4096 slots
-}
-
-/// How `AllocEvent.timestamp_ns` is populated.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum TimestampMode {
-    /// Reuse the timestamp from the most recent `PollStart` on this
-    /// thread when available (~2 ns TLS load). Falls back to
-    /// `clock_monotonic_ns()` on threads with no recorded `PollStart`.
-    /// Default.
-    ReusePollStart,
-
-    /// Emit events with `timestamp_ns = 0`. Smallest on-disk size.
-    /// Analysis can still group by stack and size; loses time-range
-    /// filtering.
-    None,
-
-    /// Call `clock_monotonic_ns()` per sampled allocation (~25 ns via
-    /// vDSO). Use for tight allocation loop investigations.
-    Precise,
+    sample_rate_bytes: u64,                 // default 512 KiB
+    track_liveset: bool,                    // default false
+    max_liveset_entries: Option<usize>,     // default None (unbounded)
+    rng_seed: Option<u64>,                  // test-only deterministic seeding
+    ring_capacity: usize,                   // default 4096 slots
 }
 ```
+
+Memory profile events always carry `clock_monotonic_ns()` timestamps —
+~25 ns vDSO call, globally monotonic across threads. There is no
+opt-out: the `timestamp_mode` knob and `TimestampMode` enum that earlier
+revisions exposed have been removed. The cost (~25 ns × ~2K
+samples/sec = ~50 µs/sec at default rate) is dominated by the stack
+capture in the same critical section, and per-thread monotonic
+alternatives leak into a soundness hole in the liveset's shutdown-drain
+race detector (§7).
 
 Built via `#[bon::builder]` as with other dial9 configs.
 
@@ -762,58 +768,204 @@ guard.graceful_shutdown(Duration::from_secs(5))?;
 
 ## 7. Liveset tracking
 
-When `track_liveset = true`, the **consolidator thread** maintains:
+When `track_liveset = true`, the **producer-side liveset** maintains a
+concurrent `scc::HashIndex<u64, (u64, u64)>` mapping each sampled
+allocation address to its `(size, timestamp_ns)`:
 
 ```rust
-struct LivesetEntry {
-    size: u64,
-    timestamp_ns: u64,
-}
-
-// Single-threaded — only the consolidator reads or writes it.
-liveset: HashMap<usize, LivesetEntry>,
+// Shared across all producer threads via Arc. Only present when
+// track_liveset is true; None otherwise (zero overhead).
+liveset: Option<Arc<scc::HashIndex<u64, (u64, u64)>>>
 ```
 
-The liveset is a plain `HashMap` because only the consolidator touches
-it. Producers push `RawFree` records into the free queue and never
-access the liveset directly — no synchronization needed.
+### Producer-side filtering
+
+On every `alloc` that fires the sampler, the hook inserts the address into
+the liveset. On every `dealloc`, the hook checks whether the address is in
+the liveset:
+
+- **Hit:** remove the entry, push a `RawFree` with denormalized `size` and
+  `alloc_ts_ns` into the free queue. The consolidator emits `FreeEvent`
+  directly — no second lookup needed.
+- **Miss (~99.9% of deallocs):** the address was never sampled. No queue
+  push, no contention. This is the key performance win: the old design
+  pushed every dealloc into the free queue and filtered on the consolidator,
+  causing ~84% CPU in the profiler under contention.
+
+### OPT_OUT TLS sentinel
+
+`scc` (via `sdd`) uses TLS internally. If the allocator hook is called
+during thread teardown after `sdd`'s TLS slot has been destroyed, the `scc`
+operation would panic. The **OPT_OUT sentinel** eliminates this without
+`catch_unwind`:
+
+```rust
+thread_local! {
+    static IS_SHUTTING_DOWN: Cell<bool> = const { Cell::new(false) };
+    static LIFETIME_GUARD: Lifetime = const { Lifetime };
+}
+// Lifetime::drop sets IS_SHUTTING_DOWN = true.
+// check_shutdown() reads IS_SHUTTING_DOWN; if true, bails out.
+```
+
+Because `LIFETIME_GUARD` is initialized before `sdd`'s TLS (on the first
+hook entry), it drops *after* `sdd`'s destructor runs. Any subsequent hook
+entry sees the flag and returns without touching `scc`. Cost: ~1 ns
+(one TLS Cell read + branch).
+
+**Init-order invariant.** Every code path that touches the liveset must
+call `check_shutdown()` first on every entry — that's what eagerly
+initialises `LIFETIME_GUARD` before the first lazy `sdd` TLS init. If a
+new code path skips this and triggers an `scc` op before
+`check_shutdown()`, the destructor order at thread exit can flip and the
+guard becomes useless.
+
+### Stale-entry handling on `on_alloc`
+
+`scc::HashIndex::insert` returns `Err` and does **not** overwrite when the
+key already exists. Address space is recycled by the OS allocator, so a
+stale entry can land on `on_alloc`'s insert in two cases:
+
+1. **Shutdown skip** (see "Shutdown drain" below): the matching dealloc
+   pushed a flagged `RawFree` and the consolidator hasn't drained yet, OR
+   the race-check on the consolidator detected an overlap and left the
+   entry in place.
+2. **Queue overflow:** the matching dealloc's `RawFree` was dropped because
+   the free queue was full (`MemoryProfileOverflowEvent` was emitted).
+
+Without explicit handling, the new allocation's `(size, ts_ns)` would be
+silently dropped and a future `FreeEvent` would carry the *old*
+allocation's data — a hard-to-detect correctness bug.
+
+The hot path stays on the cheap lock-free `insert`. On the rare `Err`
+(stale entry), we fall through to `scc::HashIndex::entry` and overwrite
+atomically inside the bucket lock:
+
+```rust
+let key = ptr as u64;
+let val = (size as u64, timestamp_ns);
+if let Err((k, v)) = liveset.insert(key, val) {
+    use scc::hash_index::Entry;
+    match liveset.entry(k) {
+        Entry::Occupied(o) => o.update(v),
+        Entry::Vacant(ve) => {
+            // A concurrent dealloc removed the stale entry between our
+            // `insert` and `entry` — fine, treat as a fresh insert.
+            let _ = ve.insert_entry(v);
+        }
+    }
+}
+```
+
+The `entry()` API was chosen over the simpler "remove + re-insert" pair
+because it eliminates the brief transient-absence window that the
+remove/insert pattern had between the two calls. Concurrent readers
+either see the old `(size, ts_ns)` or the new one — never `None` — so a
+concurrent `peek_with` from `on_dealloc` can't miss the entry mid-update.
+
+### Shutdown drain (consolidator-side cleanup)
+
+The OPT_OUT sentinel forbids the *producer* from touching the liveset
+during teardown, but the *consolidator* runs on a different thread with
+its own healthy `sdd` TLS. We exploit this asymmetry to recover the dying
+thread's `FreeEvent`s and bound liveset growth across thread churn.
+
+Protocol:
+
+1. **Producer (dying thread, `on_dealloc`):** when `check_shutdown()`
+   returns `true`, push a flagged record and bail:
+   ```rust
+   inner.rings.push_free(RawFree {
+       tid, addr, ts_ns: stamp(...),
+       size: 0, alloc_ts_ns: 0,   // placeholders
+       shutdown: true,
+   });
+   ```
+   The push is allocation-free and only touches the queue's CAS
+   tail-slot — no `scc`, no `sdd`.
+
+2. **Consolidator (`MemoryProfileSource::handle_free`):** for shutdown-
+   flagged frees, do the lookup here:
+   ```rust
+   let Some((size, alloc_ts_ns)) = liveset.peek_with(&f.addr, |_, v| *v) else {
+       return; // already cleaned, or never sampled
+   };
+   if alloc_ts_ns >= f.ts_ns {
+       return; // race or timestamp tie: leave entry for the new alloc
+   }
+   liveset.remove(&f.addr);
+   enc.encode(&FreeEvent { ts_ns: f.ts_ns, addr: f.addr, size, alloc_ts_ns, .. });
+   ```
+
+3. **Race window.** Between the producer's push (at `f.ts_ns`) and the
+   consolidator's drain (~5 ms later), a *live* thread may have freed
+   some unrelated sampled alloc at the same address and `on_alloc` may
+   have re-keyed the entry to a new allocation. The
+   `alloc_ts_ns >= f.ts_ns` check identifies this case: the new
+   alloc's `alloc_ts_ns` is greater than or equal to the older shutdown
+   push's `ts_ns` because **all memory profile timestamps are
+   `clock_monotonic_ns()`** — globally monotonic across threads. The
+   `>=` (rather than strict `>`) handles ties: `clock_monotonic_ns()`
+   can return the same value on nearby cores, and treating a tie as a
+   race conservatively avoids removing a live entry. On race, we leave
+   the entry in place; the new alloc's eventual non-shutdown free will
+   emit the correct event.
+
+   In the race case we lose the *original* (dying-thread) alloc's
+   `FreeEvent` — same outcome as the pre-shutdown-drain design — but we
+   avoid emitting a *wrong* `FreeEvent` and avoid removing the new
+   alloc's entry.
+
+4. **Why a globally monotonic clock is required.** Earlier revisions
+   exposed a `TimestampMode` knob (`ReusePollStart` / `None` /
+   `Precise`) so callers could trade timestamp resolution for ~20 ns of
+   per-sample overhead. That knob was removed because the cheap modes
+   were *unsound* with the liveset on: the shutdown free's `f.ts_ns` is
+   sampled on the dying thread while the reusing alloc's `alloc_ts_ns`
+   is sampled on a *different* live worker, so per-thread monotonicity
+   tells us nothing about the ordering between them, and `ts = 0`
+   collapses the race check entirely. With `clock_monotonic_ns()` the
+   comparison is sound by construction.
+
+This protocol does NOT require `catch_unwind`, does NOT add cost to the
+non-shutdown hot path, and does NOT need a separate background thread —
+the existing flush thread does the work as part of its 5-ms cycle.
 
 ### Bounded liveset
 
-`max_liveset_entries` caps the total count. When full:
+**Not yet implemented.** The liveset is currently unbounded. A service
+that leaks sampled allocations indefinitely will grow the map without
+limit. Size is bounded in practice by the live sampled allocation count:
+at default 512 KiB sample rate and 10 GiB live heap, expect ~20K entries
+(~1.3 MiB).
+
+A planned `max_liveset_entries` config would cap the total count. When
+full:
 - New `RawAlloc`: still emit `AllocEvent`, skip liveset insert. Emit a
   rate-limited warning event (once per 60s).
 - `RawFree`: still lookup (miss on overflow entries). No-op on miss.
 
-Default: `None` (unbounded). Users opt in to a cap.
+Tracked as a follow-up.
 
 ### Memory cost
 
-~32 bytes per live sampled allocation (16 B entry + 16 B HashMap
-overhead). At default 512 KiB sample rate and 1 GiB live heap: ~2K
-entries → ~64 KiB. At 10 GiB live heap: ~20K entries → ~640 KiB.
+~64 bytes per entry in `scc::HashIndex`. At default 512 KiB sample rate
+and 1 GiB live heap: ~2K entries → ~128 KiB. At 10 GiB live heap: ~20K
+entries → ~1.3 MiB.
 
-### Dealloc overhead
+### Performance
 
-Pushing `RawFree` records costs ~9.3 ns uncontended per dealloc. The
-MPMC queue saturates at ~2.7 M pushes/sec aggregate under heavy
-contention. For services with 10M+ deallocs/sec, a producer-side
-optimization is needed:
+| Metric | Old (consolidator-side) | New (producer-side scc) |
+|--------|------------------------|------------------------|
+| 8-thread ops/s | 1.79 M | 13.9 M |
+| Profiler CPU share | 84.2% | 10.6% |
+| Unsampled dealloc cost | ~9.3 ns (queue push) | ~20 ns (HashIndex miss) |
+| Sampled dealloc cost | ~9.3 ns + consolidator lookup | ~25 ns (peek + remove + push) |
 
-- **Per-thread free buffer:** batch frees in a TLS `[RawFree; 64]`
-  array; flush to the free queue every 64 frees. Converts 64 contended
-  pushes into 1.
-- **Producer-side bloom filter:** test whether the address was sampled
-  (~5 ns hash + bit-check) before pushing; 99.9% of deallocs skip the
-  push entirely.
-
-Pick at implementation time based on whether production workloads show
-actual contention. Consolidator-side `HashMap` miss for unsampled
-addresses is ~10–20 ns — not worth optimizing until profiling shows
-otherwise.
-
-Liveset is off by default because even 9.3 ns per dealloc adds up on
-dealloc-heavy workloads.
+The throughput improvement comes from eliminating 99.9% of queue pushes.
+Single-threaded per-op cost is higher (due to epoch-based reclamation
+bookkeeping), but under contention the reduction in CAS retries at the
+queue tail dominates.
 
 ---
 
@@ -835,7 +987,7 @@ For a service doing 1M allocs/sec: ~1 ms/sec of CPU per core (0.1%).
 - Stack capture: ~110 ns (20 frames warm-cache; ~200–400 ns cold)
 - Build `RawAlloc` on stack: ~30 ns
 - `ArrayQueue::push`: ~50–100 ns uncontended
-- Optional timestamp: ~25 ns (`TimestampMode::Precise`)
+- `clock_monotonic_ns()` timestamp: ~25 ns via vDSO
 - Total: **~1226 ns** (dominated by stack capture)
 
 At 2K samples/sec: ~2.5 ms/sec of CPU per core (0.25%).

@@ -28,14 +28,13 @@
 mod allocator;
 mod config;
 mod hook;
+mod opt_out;
 mod profiler;
 mod ring;
 mod source;
 
 pub use allocator::Dial9Allocator;
-pub use config::{
-    DEFAULT_RING_CAPACITY, DEFAULT_SAMPLE_RATE_BYTES, MemoryProfilingConfig, TimestampMode,
-};
+pub use config::{DEFAULT_RING_CAPACITY, DEFAULT_SAMPLE_RATE_BYTES, MemoryProfilingConfig};
 #[cfg(feature = "analysis")]
 pub use profiler::push_test_alloc;
 pub use profiler::{InstallError, MemoryProfiler, MemoryProfilerGuard, is_installed};

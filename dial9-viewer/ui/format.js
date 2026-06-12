@@ -28,6 +28,46 @@ function formatHumanDuration(ns) {
   return `${days}d ${hr}h ${min}m`;
 }
 
+// Format a byte count as a human-friendly string using binary units
+// (conventional for memory sizes like RSS): "512 B", "1.50 KiB", "12.00 GiB".
+function formatHumanBytes(bytes) {
+  if (!isFinite(bytes) || bytes < 0) return "0 B";
+  if (bytes < 1024) return `${Math.round(bytes)} B`;
+
+  const units = ["KiB", "MiB", "GiB", "TiB"];
+  let value = bytes / 1024;
+  let i = 0;
+  while (value >= 1024 && i < units.length - 1) {
+    value /= 1024;
+    i++;
+  }
+  return `${value.toFixed(2)} ${units[i]}`;
+}
+
+// Format a field value according to its schema unit annotation.
+// Unknown or missing units fall back to String(value),
+// matching how unannotated fields have always rendered.
+//
+// The accepted set must stay in sync with SUPPORTED_UNITS in
+// dial9-trace-format-derive (which validates `#[traceevent(unit = "...")]`
+// at compile time).
+function formatFieldValue(value, unit) {
+  switch (unit) {
+    case "ns":
+      return formatHumanDuration(Number(value));
+    case "us":
+      return formatHumanDuration(Number(value) * 1e3);
+    case "ms":
+      return formatHumanDuration(Number(value) * 1e6);
+    case "s":
+      return formatHumanDuration(Number(value) * 1e9);
+    case "bytes":
+      return formatHumanBytes(Number(value));
+    default:
+      return String(value);
+  }
+}
+
 if (typeof module !== "undefined" && module.exports) {
-  module.exports = { formatHumanDuration };
+  module.exports = { formatHumanDuration, formatHumanBytes, formatFieldValue };
 }

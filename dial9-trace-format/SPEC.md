@@ -18,10 +18,10 @@ A valid stream starts with exactly one header, followed by zero or more frames. 
 
 ## Header
 
-| Offset | Size | Description |
-|--------|------|-------------|
-| 0 | 4 | Magic bytes: `0x54 0x52 0x43 0x00` (`TRC\0`) |
-| 4 | 1 | Version (`0x01`) |
+| Offset | Size | Description                                  |
+| ------ | ---- | -------------------------------------------- |
+| 0      | 4    | Magic bytes: `0x54 0x52 0x43 0x00` (`TRC\0`) |
+| 4      | 1    | Version (`0x01`)                             |
 
 Total: **5 bytes**.
 
@@ -31,13 +31,13 @@ A decoder **must** reject streams whose magic bytes do not match or whose versio
 
 Every frame begins with a 1-byte tag:
 
-| Tag | Frame Type |
-|-----|------------|
-| `0x01` | Schema |
-| `0x02` | Event |
-| `0x03` | String Pool |
-| `0x04` | Stack Pool |
-| `0x05` | Timestamp Reset |
+| Tag    | Frame Type         |
+| ------ | ------------------ |
+| `0x01` | Schema             |
+| `0x02` | Event              |
+| `0x03` | String Pool        |
+| `0x04` | Stack Pool         |
+| `0x05` | Timestamp Reset    |
 | `0x06` | Schema Annotations |
 
 Unknown tags **must** cause the decoder to stop (the stream cannot be advanced without knowing the frame size).
@@ -48,23 +48,23 @@ Frames may appear in any order, with one constraint: a schema frame for a given 
 
 Defines the layout of an event type.
 
-| Field | Type | Description |
-|-------|------|-------------|
-| tag | u8 | `0x01` |
-| type_id | u16 | Unique event type identifier |
-| name_len | u16 | Length of name in bytes |
-| name | [u8; name_len] | UTF-8 event type name |
-| has_timestamp | u8 | `1` if events of this type carry a packed timestamp, `0` otherwise |
-| field_count | u16 | Number of fields |
-| fields | [FieldDef; field_count] | Field definitions (see below) |
+| Field         | Type                    | Description                                                        |
+| ------------- | ----------------------- | ------------------------------------------------------------------ |
+| tag           | u8                      | `0x01`                                                             |
+| type_id       | u16                     | Unique event type identifier                                       |
+| name_len      | u16                     | Length of name in bytes                                            |
+| name          | [u8; name_len]          | UTF-8 event type name                                              |
+| has_timestamp | u8                      | `1` if events of this type carry a packed timestamp, `0` otherwise |
+| field_count   | u16                     | Number of fields                                                   |
+| fields        | [FieldDef; field_count] | Field definitions (see below)                                      |
 
 Each **FieldDef**:
 
-| Field | Type | Description |
-|-------|------|-------------|
-| name_len | u16 | Length of field name in bytes |
-| name | [u8; name_len] | UTF-8 field name |
-| field_type | u8 | Field type tag (see Field Types) |
+| Field      | Type           | Description                      |
+| ---------- | -------------- | -------------------------------- |
+| name_len   | u16            | Length of field name in bytes    |
+| name       | [u8; name_len] | UTF-8 field name                 |
+| field_type | u8             | Field type tag (see Field Types) |
 
 A `type_id` **must not** be registered more than once in a stream with a different schema. Re-registering the same `type_id` with an identical schema is permitted (idempotent) and decoders **must** accept it.
 
@@ -76,20 +76,20 @@ Carries one event whose layout is defined by a previously-registered schema.
 
 **Without timestamp** (`has_timestamp = 0`):
 
-| Field | Type | Description |
-|-------|------|-------------|
-| tag | u8 | `0x02` |
-| type_id | u16 | References a schema's `type_id` |
-| values | ... | Field values, encoded in schema field order |
+| Field   | Type | Description                                 |
+| ------- | ---- | ------------------------------------------- |
+| tag     | u8   | `0x02`                                      |
+| type_id | u16  | References a schema's `type_id`             |
+| values  | ...  | Field values, encoded in schema field order |
 
 **With timestamp** (`has_timestamp = 1`):
 
-| Field | Type | Description |
-|-------|------|-------------|
-| tag | u8 | `0x02` |
-| type_id | u16 | References a schema's `type_id` |
-| timestamp_delta_ns | u24 | Nanosecond delta from the current timestamp base (3 bytes LE) |
-| values | ... | Field values, encoded in schema field order |
+| Field              | Type | Description                                                   |
+| ------------------ | ---- | ------------------------------------------------------------- |
+| tag                | u8   | `0x02`                                                        |
+| type_id            | u16  | References a schema's `type_id`                               |
+| timestamp_delta_ns | u24  | Nanosecond delta from the current timestamp base (3 bytes LE) |
+| values             | ...  | Field values, encoded in schema field order                   |
 
 The `timestamp_delta_ns` is a 24-bit unsigned integer (0–16,777,215) representing nanoseconds elapsed since the current timestamp base. This gives ~16.7 ms of range per reset. The encoder **must** emit a Timestamp Reset frame before any event whose delta would exceed 16,777,215 ns or whose timestamp is earlier than the current base.
 
@@ -101,19 +101,19 @@ The decoder **must** know the schema for `type_id` to determine how many fields 
 
 Provides string data that can be referenced by `PooledString` fields.
 
-| Field | Type | Description |
-|-------|------|-------------|
-| tag | u8 | `0x03` |
-| count | u32 | Number of entries |
+| Field   | Type               | Description              |
+| ------- | ------------------ | ------------------------ |
+| tag     | u8                 | `0x03`                   |
+| count   | u32                | Number of entries        |
 | entries | [PoolEntry; count] | Pool entries (see below) |
 
 Each **PoolEntry**:
 
-| Field | Type | Description |
-|-------|------|-------------|
-| pool_id | u32 | Identifier referenced by `PooledString` values |
-| data_len | u32 | Length of data in bytes |
-| data | [u8; data_len] | UTF-8 string data |
+| Field    | Type           | Description                                    |
+| -------- | -------------- | ---------------------------------------------- |
+| pool_id  | u32            | Identifier referenced by `PooledString` values |
+| data_len | u32            | Length of data in bytes                        |
+| data     | [u8; data_len] | UTF-8 string data                              |
 
 Multiple string pool frames may appear in a stream. A `pool_id` should be defined before it is referenced, but a decoder may choose to resolve references lazily.
 
@@ -121,19 +121,19 @@ Multiple string pool frames may appear in a stream. A `pool_id` should be define
 
 Provides stack-frame data that can be referenced by `PooledStackFrames` fields.
 
-| Field | Type | Description |
-|-------|------|-------------|
-| tag | u8 | `0x04` |
-| count | u32 | Number of entries |
+| Field   | Type                    | Description              |
+| ------- | ----------------------- | ------------------------ |
+| tag     | u8                      | `0x04`                   |
+| count   | u32                     | Number of entries        |
 | entries | [StackPoolEntry; count] | Pool entries (see below) |
 
 Each **StackPoolEntry**:
 
-| Field | Type | Description |
-|-------|------|-------------|
-| pool_id | u32 | Identifier referenced by `PooledStackFrames` values |
-| frame_count | u32 | Number of stack frame addresses |
-| frames | [u64; frame_count] | Frame addresses, leaf-first, u64 LE |
+| Field       | Type               | Description                                         |
+| ----------- | ------------------ | --------------------------------------------------- |
+| pool_id     | u32                | Identifier referenced by `PooledStackFrames` values |
+| frame_count | u32                | Number of stack frame addresses                     |
+| frames      | [u64; frame_count] | Frame addresses, leaf-first, u64 LE                 |
 
 Multiple stack pool frames may appear in a stream. A `pool_id` should be defined before it is referenced, but a decoder may choose to resolve references lazily.
 
@@ -141,10 +141,10 @@ Multiple stack pool frames may appear in a stream. A `pool_id` should be defined
 
 Resets the running timestamp base used for packed event timestamps. The encoder emits this frame when the nanosecond delta between the current base and the next event's timestamp exceeds what a u24 can represent (16,777,215 ns ≈ 16.7 ms), or when the next event's timestamp is earlier than the current base.
 
-| Field | Type | Description |
-|-------|------|-------------|
-| tag | u8 | `0x05` |
-| timestamp_ns | u64 | Absolute timestamp in nanoseconds |
+| Field        | Type | Description                       |
+| ------------ | ---- | --------------------------------- |
+| tag          | u8   | `0x05`                            |
+| timestamp_ns | u64  | Absolute timestamp in nanoseconds |
 
 Total: **9 bytes**.
 
@@ -154,46 +154,48 @@ After decoding this frame, the decoder sets `timestamp_base_ns = timestamp_ns`. 
 
 Carries per-field metadata for a previously-registered schema. Annotations are key-value string pairs attached to individual fields by index. A schema with no annotations produces no annotation frame.
 
-| Field | Type | Description |
-|-------|------|-------------|
-| tag | u8 | `0x06` |
-| type_id | LEB128 u64 | References a schema's `type_id` (varint-encoded to allow future overflow beyond u16) |
-| count | u16 | Number of annotation entries |
-| entries | [FieldAnnotation; count] | Annotation entries (see below) |
+| Field   | Type                     | Description                                                                          |
+| ------- | ------------------------ | ------------------------------------------------------------------------------------ |
+| tag     | u8                       | `0x06`                                                                               |
+| type_id | LEB128 u64               | References a schema's `type_id` (varint-encoded to allow future overflow beyond u16) |
+| count   | u16                      | Number of annotation entries                                                         |
+| entries | [FieldAnnotation; count] | Annotation entries (see below)                                                       |
 
 Each **FieldAnnotation**:
 
-| Field | Type | Description |
-|-------|------|-------------|
-| field_index | u16 | Index into the schema's field list (0-based) |
-| key_len | u16 | Length of key in bytes |
-| key | [u8; key_len] | UTF-8 annotation key (e.g. `metrique.unit`) |
-| value_len | u32 | Length of value in bytes |
-| value | [u8; value_len] | UTF-8 annotation value (e.g. `microseconds`) |
+| Field       | Type            | Description                                  |
+| ----------- | --------------- | -------------------------------------------- |
+| field_index | u16             | Index into the schema's field list (0-based) |
+| key_len     | u16             | Length of key in bytes                       |
+| key         | [u8; key_len]   | UTF-8 annotation key (e.g. `metrique.unit`)  |
+| value_len   | u32             | Length of value in bytes                     |
+| value       | [u8; value_len] | UTF-8 annotation value (e.g. `microseconds`) |
 
 Multiple annotation frames for the same `type_id` are permitted; the decoder accumulates entries. The encoder typically emits one annotation frame immediately after the schema frame it annotates, but the format does not mandate ordering beyond the requirement that the referenced `type_id` must already be registered.
 
 A decoder that encounters an annotation frame referencing an unknown `type_id` may skip it leniently (the annotations have nowhere to attach).
 
+Annotation keys and values are free-form at the wire level. By convention, the `unit` key carries a field's unit; the values the viewer recognizes for human-friendly rendering are `ns`, `us`, `ms`, `s`, and `bytes` (the same set the `#[traceevent(unit = "...")]` derive attribute accepts at compile time). Unrecognized values render as the raw number.
+
 ## Field Types
 
-| Tag | Name | Wire Encoding | Size |
-|-----|------|---------------|------|
-| 1 | I64 | 8-byte little-endian signed | 8 |
-| 2 | F64 | 8-byte IEEE 754 double, little-endian | 8 |
-| 3 | Bool | 1 byte (`0x00` = false, nonzero = true) | 1 |
-| 4 | String | u32 length prefix + UTF-8 bytes | 4 + len |
-| 5 | Bytes | u32 length prefix + raw bytes | 4 + len |
-| 6 | PooledStackFrames | u32 pool ID | 4 |
-| 7 | PooledString | u32 pool ID | 4 |
-| 8 | StackFrames | u32 count + count × u64 LE addresses | 4 + 8×count |
-| 9 | Varint | Unsigned LEB128 | 1–10 |
-| 10 | StringMap | u32 count + count × (u32 key_len + key bytes + u32 val_len + val bytes) | variable |
-| 11 | U8 | 1-byte unsigned | 1 |
-| 12 | U16 | 2-byte little-endian unsigned | 2 |
-| 13 | U32 | 4-byte little-endian unsigned | 4 |
-| 14 | DynamicList | u32 count + count × (u8 tag + value) | variable |
-| 15 | DynamicMap | u32 count + count × (u8 key_tag + key + u8 value_tag + value) | variable |
+| Tag | Name              | Wire Encoding                                                           | Size        |
+| --- | ----------------- | ----------------------------------------------------------------------- | ----------- |
+| 1   | I64               | 8-byte little-endian signed                                             | 8           |
+| 2   | F64               | 8-byte IEEE 754 double, little-endian                                   | 8           |
+| 3   | Bool              | 1 byte (`0x00` = false, nonzero = true)                                 | 1           |
+| 4   | String            | u32 length prefix + UTF-8 bytes                                         | 4 + len     |
+| 5   | Bytes             | u32 length prefix + raw bytes                                           | 4 + len     |
+| 6   | PooledStackFrames | u32 pool ID                                                             | 4           |
+| 7   | PooledString      | u32 pool ID                                                             | 4           |
+| 8   | StackFrames       | u32 count + count × u64 LE addresses                                    | 4 + 8×count |
+| 9   | Varint            | Unsigned LEB128                                                         | 1–10        |
+| 10  | StringMap         | u32 count + count × (u32 key_len + key bytes + u32 val_len + val bytes) | variable    |
+| 11  | U8                | 1-byte unsigned                                                         | 1           |
+| 12  | U16               | 2-byte little-endian unsigned                                           | 2           |
+| 13  | U32               | 4-byte little-endian unsigned                                           | 4           |
+| 14  | DynamicList       | u32 count + count × (u8 tag + value)                                    | variable    |
+| 15  | DynamicMap        | u32 count + count × (u8 key_tag + key + u8 value_tag + value)           | variable    |
 
 ### Optional Field Modifier (`0x80`)
 
@@ -267,16 +269,16 @@ Entries may be heterogeneous. Both keys and values can be any field type includi
 
 ## Limits
 
-| Item | Limit | Notes |
-|------|-------|-------|
-| type_id | 0–65535 | u16 |
-| field_count per schema | 0–65535 | u16 |
-| field/event name length | 0–65535 bytes | u16 length prefix |
-| string/bytes field length | 0–4,294,967,295 bytes | u32 length prefix |
-| StackFrames count | 0–4,294,967,295 | u32 count |
-| string pool entry count | 0–4,294,967,295 per frame | u32 count |
-| stack pool entry count | 0–4,294,967,295 per frame | u32 count |
-| stack pool frame_count | 0–4,294,967,295 | u32 count per entry |
-| pool_id | 0–4,294,967,295 | u32 (shared range across pools) |
-| Varint | 0–2^64-1 | unsigned LEB128 |
-| Timestamp delta | 0–16,777,215 ns | u24; overflow triggers Timestamp Reset frame |
+| Item                      | Limit                     | Notes                                        |
+| ------------------------- | ------------------------- | -------------------------------------------- |
+| type_id                   | 0–65535                   | u16                                          |
+| field_count per schema    | 0–65535                   | u16                                          |
+| field/event name length   | 0–65535 bytes             | u16 length prefix                            |
+| string/bytes field length | 0–4,294,967,295 bytes     | u32 length prefix                            |
+| StackFrames count         | 0–4,294,967,295           | u32 count                                    |
+| string pool entry count   | 0–4,294,967,295 per frame | u32 count                                    |
+| stack pool entry count    | 0–4,294,967,295 per frame | u32 count                                    |
+| stack pool frame_count    | 0–4,294,967,295           | u32 count per entry                          |
+| pool_id                   | 0–4,294,967,295           | u32 (shared range across pools)              |
+| Varint                    | 0–2^64-1                  | unsigned LEB128                              |
+| Timestamp delta           | 0–16,777,215 ns           | u24; overflow triggers Timestamp Reset frame |

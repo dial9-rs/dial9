@@ -1,36 +1,36 @@
 #![deny(clippy::arithmetic_side_effects)]
 //! `Source` impl that drains the alloc and free queues each flush cycle.
 
+use crate::memory_profiling::profiler::Liveset;
 use crate::memory_profiling::ring::{RawAlloc, RawFree, RingBuffers};
 use crate::primitives::sync::Arc;
 use crate::telemetry::buffer::with_encoder;
 use crate::telemetry::events::clock_monotonic_ns;
 use crate::telemetry::format::{AllocEvent, FreeEvent, MemoryProfileOverflowEvent};
 use crate::telemetry::recorder::source::{FlushContext, Source};
-use std::collections::HashMap;
 use std::sync::atomic::Ordering;
-
-/// Liveset entry tracking a live sampled allocation, kept by the consolidator
-/// (flush thread). Only `size` and `timestamp_ns` are needed: both are
-/// denormalized onto `FreeEvent` so leak analysis stays useful when the
-/// matching `AllocEvent` has been evicted by trace rotation. Storing the stack
-/// here would bloat the liveset (see design §8).
-#[derive(Debug, Clone, Copy)]
-struct LivesetEntry {
-    size: u64,
-    timestamp_ns: u64,
-}
 
 /// Drains the alloc and free queues into the trace each flush cycle.
 ///
-/// The drain is timestamp-ordered: at each step we look at the head of each
-/// queue and process the older one first. This matters for liveset
-/// correctness when the producer reuses an address within a single flush
-/// cycle (alloc → free → alloc-with-same-addr); naive "drain all allocs,
-/// then all frees" would race and corrupt the liveset.
+/// With the producer-side liveset, every non-shutdown `RawFree` that arrives
+/// in the queue is guaranteed to correspond to a previously-sampled
+/// allocation: the producer already did the peek/remove and denormalized
+/// `size` and `alloc_ts_ns` onto the record. The consolidator emits
+/// `FreeEvent` directly with no lookup.
+///
+/// **Shutdown-flagged frees** (`RawFree::shutdown == true`) are different:
+/// the producer was in TLS teardown and couldn't safely peek the liveset,
+/// so it pushed an addr-only record. The consolidator does the peek/remove
+/// here against the shared `liveset` Arc. See `handle_free` for the race
+/// check that prevents emitting wrong events when an address is reused
+/// before the consolidator drains.
 pub(crate) struct MemoryProfileSource {
     rings: Arc<RingBuffers>,
-    liveset: Option<HashMap<u64, LivesetEntry>>,
+    /// The producer-side liveset, shared with the allocator hook. `None`
+    /// when liveset tracking is off — in that mode the producer filters
+    /// frees and `handle_free` has nothing to emit. Held here so the
+    /// consolidator can also service shutdown-flagged `RawFree`s.
+    liveset: Option<Arc<Liveset>>,
     /// Previous snapshot of `RingBuffers::dropped_allocs` for delta computation.
     prev_dropped_allocs: u64,
     /// Previous snapshot of `RingBuffers::dropped_frees` for delta computation.
@@ -45,17 +45,18 @@ pub(crate) struct MemoryProfileSource {
 impl MemoryProfileSource {
     /// Create a new source that drains the supplied ring buffers.
     ///
-    /// `track_liveset = true` enables `FreeEvent` emission (matched against
-    /// previously-sampled allocations); `false` means frees are silently
-    /// dropped on the consumer side.
+    /// Pass `liveset = Some(_)` when liveset tracking is on; `None`
+    /// disables `FreeEvent` emission entirely. The Arc is shared with the
+    /// allocator hook so the consolidator can service shutdown-flagged
+    /// frees.
     pub(crate) fn new(
         rings: Arc<RingBuffers>,
-        track_liveset: bool,
+        liveset: Option<Arc<Liveset>>,
         sample_rate_bytes: u64,
     ) -> Self {
         Self {
             rings,
-            liveset: track_liveset.then(HashMap::new),
+            liveset,
             prev_dropped_allocs: 0,
             prev_dropped_frees: 0,
             metadata: vec![(
@@ -89,32 +90,45 @@ impl MemoryProfileSource {
             ctx.collector,
             ctx.drain_epoch,
         );
-        if let Some(liveset) = self.liveset.as_mut() {
-            liveset.insert(
-                addr,
-                LivesetEntry {
-                    size,
-                    timestamp_ns: ts_ns,
-                },
-            );
-        }
     }
 
     fn handle_free(&mut self, f: RawFree, ctx: &FlushContext<'_>) {
-        let Some(liveset) = self.liveset.as_mut() else {
+        // No liveset means the producer drops every free; nothing to emit.
+        let Some(liveset) = &self.liveset else {
             return;
         };
-        let Some(entry) = liveset.remove(&f.addr) else {
-            return;
+
+        // Resolve `(size, alloc_ts_ns)`:
+        // - **Normal frees** carry denormalized data from the producer's
+        //   peek/remove (see `hook::on_dealloc`); use it directly.
+        // - **Shutdown-flagged frees** were pushed by a thread in TLS
+        //   teardown that couldn't safely touch `scc`. Do the peek/remove
+        //   here, with a race check: if the entry's `alloc_ts_ns` is
+        //   greater than or equal to `f.ts_ns`, an address-reuse race (or
+        //   timestamp tie on nearby cores) means the entry now belongs to a
+        //   *later* allocation. Leave it; the new alloc's eventual
+        //   non-shutdown free will emit the correct event.
+        let (size, alloc_ts_ns) = if f.shutdown {
+            let Some((size, alloc_ts_ns)) = liveset.peek_with(&f.addr, |_, v| *v) else {
+                return; // already cleaned, or never sampled
+            };
+            if alloc_ts_ns >= f.ts_ns {
+                return; // address-reuse race or timestamp tie — see comment above
+            }
+            liveset.remove(&f.addr);
+            (size, alloc_ts_ns)
+        } else {
+            (f.size, f.alloc_ts_ns)
         };
+
         with_encoder(
             |enc| {
                 enc.encode(&FreeEvent {
                     timestamp_ns: f.ts_ns,
                     tid: f.tid,
                     addr: f.addr,
-                    size: entry.size,
-                    alloc_timestamp_ns: entry.timestamp_ns,
+                    size,
+                    alloc_timestamp_ns: alloc_ts_ns,
                 });
             },
             ctx.collector,
@@ -127,10 +141,9 @@ impl Source for MemoryProfileSource {
     fn flush(&mut self, ctx: &FlushContext<'_>) {
         // Merge-sort drain by timestamp. This produces a best-effort
         // timestamp-ordered stream. Ordering is not guaranteed to be perfect:
-        // - Multiple producers push concurrently, so queue order may not
-        //   match timestamp order.
-        // - TimestampMode::ReusePollStart can produce stale timestamps.
-        // For profiling purposes, approximate ordering is sufficient.
+        // multiple producers push concurrently, so queue order may not match
+        // timestamp order. For profiling purposes, approximate ordering is
+        // sufficient.
         //
         // Hold one peeked element from each queue and emit the older one.
         // `crossbeam_queue::ArrayQueue` has no peek API, so we pop into
@@ -232,16 +245,58 @@ mod tests {
         }
     }
 
-    fn make_raw_free(addr: u64, ts_ns: u64) -> RawFree {
+    fn make_raw_free(addr: u64, ts_ns: u64, size: u64, alloc_ts_ns: u64) -> RawFree {
         RawFree {
             tid: 2,
             addr,
             ts_ns,
+            size,
+            alloc_ts_ns,
+            shutdown: false,
+        }
+    }
+
+    /// Build a shutdown-flagged `RawFree`. The producer pushes these during
+    /// TLS teardown when it can't safely peek the liveset; the consolidator
+    /// fills in size / alloc_ts_ns from its own peek.
+    fn make_shutdown_free(addr: u64, ts_ns: u64, tid: u32) -> RawFree {
+        RawFree {
+            tid,
+            addr,
+            ts_ns,
+            size: 0,
+            alloc_ts_ns: 0,
+            shutdown: true,
         }
     }
 
     fn rings(alloc_cap: usize, free_cap: usize) -> Arc<RingBuffers> {
         Arc::new(RingBuffers::new(alloc_cap, free_cap))
+    }
+
+    /// Build a fresh empty liveset with the same hasher we use in production.
+    fn fresh_liveset() -> Arc<Liveset> {
+        Arc::new(scc::HashIndex::with_capacity_and_hasher(
+            0,
+            dial9_trace_format::encoder::FxBuildHasher::default(),
+        ))
+    }
+
+    /// Convenience: build a `MemoryProfileSource` for tests where we don't
+    /// need to retain a separate handle on the liveset. Pass
+    /// `track_liveset = true` to enable `FreeEvent` emission (the helper
+    /// builds a fresh liveset internally); `false` disables it.
+    fn make_source(
+        rings: Arc<RingBuffers>,
+        track_liveset: bool,
+        sample_rate_bytes: u64,
+    ) -> MemoryProfileSource {
+        let liveset = if track_liveset {
+            Some(fresh_liveset())
+        } else {
+            None
+        };
+        MemoryProfileSource::new(rings, liveset, sample_rate_bytes)
     }
 
     fn new_shared() -> SharedState {
@@ -271,11 +326,7 @@ mod tests {
             .ok();
 
         let shared = new_shared();
-        shared.push_source(Box::new(MemoryProfileSource::new(
-            Arc::clone(&rings),
-            false,
-            512 * 1024,
-        )));
+        shared.push_source(Box::new(make_source(Arc::clone(&rings), false, 512 * 1024)));
 
         let events = flush_and_collect(&shared);
         let allocs: Vec<_> = events
@@ -302,14 +353,14 @@ mod tests {
             .alloc_queue
             .push(make_raw_alloc(0x2000, 512, 200))
             .ok();
-        rings.free_queue.push(make_raw_free(0x2000, 300)).ok();
+        // Producer-side liveset denormalizes size and alloc_ts onto RawFree.
+        rings
+            .free_queue
+            .push(make_raw_free(0x2000, 300, 512, 200))
+            .ok();
 
         let shared = new_shared();
-        shared.push_source(Box::new(MemoryProfileSource::new(
-            Arc::clone(&rings),
-            true,
-            512 * 1024,
-        )));
+        shared.push_source(Box::new(make_source(Arc::clone(&rings), true, 512 * 1024)));
 
         let events = flush_and_collect(&shared);
         let allocs: Vec<_> = events
@@ -334,24 +385,35 @@ mod tests {
         }
     }
 
+    /// With the producer-side liveset, a RawFree only reaches the queue if the
+    /// address was in the liveset. The consolidator emits every RawFree it sees.
+    /// This test verifies that behavior: a RawFree in the queue produces a FreeEvent.
     #[test]
-    fn free_without_alloc_is_silently_dropped() {
+    fn free_in_queue_is_always_emitted() {
         let rings = rings(16, 16);
-        rings.free_queue.push(make_raw_free(0x9999, 400)).ok();
+        // Simulate a RawFree that passed producer-side filtering.
+        rings
+            .free_queue
+            .push(make_raw_free(0x9999, 400, 128, 100))
+            .ok();
 
         let shared = new_shared();
-        shared.push_source(Box::new(MemoryProfileSource::new(
-            Arc::clone(&rings),
-            true,
-            512 * 1024,
-        )));
+        shared.push_source(Box::new(make_source(Arc::clone(&rings), true, 512 * 1024)));
 
         let events = flush_and_collect(&shared);
         let frees: Vec<_> = events
             .iter()
             .filter(|e| matches!(e, Dial9Event::FreeEvent(..)))
             .collect();
-        assert_eq!(frees.len(), 0);
+        assert_eq!(frees.len(), 1);
+        match &frees[0] {
+            Dial9Event::FreeEvent(e) => {
+                assert_eq!(e.addr, 0x9999);
+                assert_eq!(e.size, 128);
+                assert_eq!(e.alloc_timestamp_ns, 100);
+            }
+            _ => unreachable!(),
+        }
     }
 
     #[test]
@@ -361,14 +423,13 @@ mod tests {
             .alloc_queue
             .push(make_raw_alloc(0x3000, 128, 500))
             .ok();
-        rings.free_queue.push(make_raw_free(0x3000, 600)).ok();
+        rings
+            .free_queue
+            .push(make_raw_free(0x3000, 600, 128, 500))
+            .ok();
 
         let shared = new_shared();
-        shared.push_source(Box::new(MemoryProfileSource::new(
-            Arc::clone(&rings),
-            false,
-            512 * 1024,
-        )));
+        shared.push_source(Box::new(make_source(Arc::clone(&rings), false, 512 * 1024)));
 
         let events = flush_and_collect(&shared);
         let allocs: Vec<_> = events
@@ -388,11 +449,7 @@ mod tests {
         let rings = rings(16, 16);
 
         let shared = new_shared();
-        shared.push_source(Box::new(MemoryProfileSource::new(
-            Arc::clone(&rings),
-            true,
-            512 * 1024,
-        )));
+        shared.push_source(Box::new(make_source(Arc::clone(&rings), true, 512 * 1024)));
 
         // First flush: only the alloc
         rings
@@ -415,8 +472,11 @@ mod tests {
             0
         );
 
-        // Second flush: the free arrives
-        rings.free_queue.push(make_raw_free(0x4000, 800)).ok();
+        // Second flush: the free arrives (denormalized from producer-side liveset)
+        rings
+            .free_queue
+            .push(make_raw_free(0x4000, 800, 256, 700))
+            .ok();
         let events = flush_and_collect(&shared);
         assert_eq!(
             events
@@ -439,40 +499,30 @@ mod tests {
         }
     }
 
-    /// Regression test for the address-reuse race during a single flush cycle.
-    ///
-    /// Sequence at the producer (timestamps strictly increasing):
-    ///   t=100  alloc 0x5000 (size 256)   → alloc_queue
-    ///   t=200  free  0x5000              → free_queue
-    ///   t=300  alloc 0x5000 (size 512)   → alloc_queue
-    ///
-    /// Naïve "drain all allocs, then all frees" emits:
-    ///   alloc(t=100, size=256), alloc(t=300, size=512), free(t=200)
-    /// and the free incorrectly evicts the *second* alloc (size=512, t=300)
-    /// from the liveset — the second allocation looks freed even though it's
-    /// still live.
-    ///
-    /// Timestamp-ordered drain emits alloc, free, alloc and the second
-    /// allocation correctly remains in the liveset.
+    /// With the producer-side liveset, address reuse is handled atomically
+    /// by the scc::HashIndex (insert/remove are serialized per-key). The
+    /// consolidator simply emits every RawFree it receives. This test verifies
+    /// that two allocs and one free at the same address produce the expected
+    /// events when processed by the source.
     #[test]
-    fn address_reuse_within_flush_cycle_preserves_liveset() {
+    fn address_reuse_within_flush_cycle_emits_correct_events() {
         let rings = rings(16, 16);
         rings
             .alloc_queue
             .push(make_raw_alloc(0x5000, 256, 100))
             .ok();
-        rings.free_queue.push(make_raw_free(0x5000, 200)).ok();
+        // Free carries denormalized data from the first alloc.
+        rings
+            .free_queue
+            .push(make_raw_free(0x5000, 200, 256, 100))
+            .ok();
         rings
             .alloc_queue
             .push(make_raw_alloc(0x5000, 512, 300))
             .ok();
 
         let shared = new_shared();
-        shared.push_source(Box::new(MemoryProfileSource::new(
-            Arc::clone(&rings),
-            true,
-            512 * 1024,
-        )));
+        shared.push_source(Box::new(make_source(Arc::clone(&rings), true, 512 * 1024)));
 
         let events = flush_and_collect(&shared);
         let allocs: Vec<&Dial9Event> = events
@@ -490,8 +540,7 @@ mod tests {
             "the matching free should be emitted exactly once"
         );
 
-        // The single free must match the *first* allocation (size=256, t=100).
-        // If drain order is wrong, the free would match alloc2 (size=512).
+        // The free carries denormalized data from the first alloc.
         match frees[0] {
             Dial9Event::FreeEvent(e) => {
                 assert_eq!(e.addr, 0x5000);
@@ -504,10 +553,11 @@ mod tests {
             _ => unreachable!(),
         }
 
-        // The second allocation must remain live in the liveset.
-        // Prove it by freeing the address in a second flush cycle and checking
-        // the emitted FreeEvent carries the second alloc's size and timestamp.
-        rings.free_queue.push(make_raw_free(0x5000, 400)).ok();
+        // Verify a second free for the second alloc also works.
+        rings
+            .free_queue
+            .push(make_raw_free(0x5000, 400, 512, 300))
+            .ok();
         let events2 = flush_and_collect(&shared);
         let frees2: Vec<_> = events2
             .iter()
@@ -529,7 +579,9 @@ mod tests {
     /// Demonstrates that `poll_start_ts_monotonic` produces strictly ordered
     /// timestamps even for events that would otherwise share a clock tick —
     /// the scenario that occurs during a realloc (free old + alloc new at
-    /// same address).
+    /// same address). The producer-side liveset resolves address reuse
+    /// atomically, but timestamp ordering is still useful for event ordering
+    /// in the trace viewer.
     #[test]
     fn monotonic_ts_solves_realloc_ordering() {
         use crate::telemetry::recorder::poll_start_ts_monotonic;
@@ -544,15 +596,15 @@ mod tests {
 
         let rings = rings(16, 16);
         rings.alloc_queue.push(make_raw_alloc(0x6000, 256, t1)).ok();
-        rings.free_queue.push(make_raw_free(0x6000, t2)).ok();
+        // Free carries denormalized data from first alloc.
+        rings
+            .free_queue
+            .push(make_raw_free(0x6000, t2, 256, t1))
+            .ok();
         rings.alloc_queue.push(make_raw_alloc(0x6000, 512, t3)).ok();
 
         let shared = new_shared();
-        shared.push_source(Box::new(MemoryProfileSource::new(
-            Arc::clone(&rings),
-            true,
-            512 * 1024,
-        )));
+        shared.push_source(Box::new(make_source(Arc::clone(&rings), true, 512 * 1024)));
         let events = flush_and_collect(&shared);
 
         let frees: Vec<_> = events
@@ -568,9 +620,12 @@ mod tests {
             _ => unreachable!(),
         }
 
-        // Second alloc remains live.
-        // Prove it by freeing the address in a second flush cycle.
-        rings.free_queue.push(make_raw_free(0x6000, t3 + 1)).ok();
+        // Second alloc still exists — push a free for it.
+        let t4 = poll_start_ts_monotonic();
+        rings
+            .free_queue
+            .push(make_raw_free(0x6000, t4, 512, t3))
+            .ok();
         let events2 = flush_and_collect(&shared);
         let frees2: Vec<_> = events2
             .iter()
@@ -590,7 +645,7 @@ mod tests {
     fn segment_metadata_contains_sample_rate_bytes() {
         use crate::telemetry::recorder::source::Source;
         let rings = rings(16, 16);
-        let source = MemoryProfileSource::new(Arc::clone(&rings), false, 1024 * 1024);
+        let source = make_source(Arc::clone(&rings), false, 1024 * 1024);
         let meta = source.segment_metadata();
         assert_eq!(
             meta,
@@ -598,6 +653,173 @@ mod tests {
                 "memory.sample_rate_bytes".to_string(),
                 "1048576".to_string()
             )]
+        );
+    }
+
+    /// Happy-path shutdown drain: the producer pushed an addr-only flagged
+    /// `RawFree` because it was in TLS teardown. The liveset still has the
+    /// original entry; the consolidator peeks it, emits a correct
+    /// `FreeEvent`, and removes the entry.
+    #[test]
+    fn shutdown_drain_emits_free_event_and_cleans_liveset() {
+        let rings = rings(16, 16);
+        let liveset = fresh_liveset();
+        // Producer-side state: the dying thread sampled this allocation
+        // earlier with timestamp 100 and size 4096.
+        liveset.insert(0xAABB, (4096, 100)).expect("liveset insert");
+
+        // Producer pushed a shutdown-flagged free at ts=200.
+        rings
+            .free_queue
+            .push(make_shutdown_free(0xAABB, 200, 7))
+            .ok();
+
+        let shared = new_shared();
+        shared.push_source(Box::new(MemoryProfileSource::new(
+            Arc::clone(&rings),
+            Some(Arc::clone(&liveset)),
+            512 * 1024,
+        )));
+
+        let events = flush_and_collect(&shared);
+        let frees: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e, Dial9Event::FreeEvent(..)))
+            .collect();
+        assert_eq!(frees.len(), 1, "shutdown drain must emit one FreeEvent");
+        match frees[0] {
+            Dial9Event::FreeEvent(e) => {
+                assert_eq!(e.timestamp_ns, 200, "uses producer-push ts");
+                assert_eq!(e.tid, 7, "uses producer-push tid");
+                assert_eq!(e.addr, 0xAABB);
+                assert_eq!(e.size, 4096, "from consolidator-side liveset peek");
+                assert_eq!(e.alloc_timestamp_ns, 100, "from liveset peek");
+            }
+            _ => unreachable!(),
+        }
+
+        assert!(
+            liveset.peek_with(&0xAABB, |_, _| ()).is_none(),
+            "consolidator must have removed the entry"
+        );
+    }
+
+    /// Race detection: between the producer's shutdown push (ts=100) and
+    /// the consolidator drain, the address was reused for a NEW sampled
+    /// allocation (ts=300, after the shutdown push). The consolidator must
+    /// detect this via `alloc_ts_ns > free.ts_ns` and *not* remove the
+    /// entry — otherwise it would emit a wrong `FreeEvent` and lose the
+    /// new alloc's eventual free.
+    #[test]
+    fn shutdown_drain_detects_address_reuse_race() {
+        let rings = rings(16, 16);
+        let liveset = fresh_liveset();
+        // Liveset contains the NEW allocation's data — the dying thread's
+        // entry was already overwritten by `on_alloc` (via the
+        // remove-then-reinsert path) before the consolidator ran.
+        liveset.insert(0xAABB, (8192, 300)).expect("liveset insert");
+
+        // Producer's shutdown push has ts=100 (older than the new alloc).
+        rings
+            .free_queue
+            .push(make_shutdown_free(0xAABB, 100, 9))
+            .ok();
+
+        let shared = new_shared();
+        shared.push_source(Box::new(MemoryProfileSource::new(
+            Arc::clone(&rings),
+            Some(Arc::clone(&liveset)),
+            512 * 1024,
+        )));
+
+        let events = flush_and_collect(&shared);
+        let frees: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e, Dial9Event::FreeEvent(..)))
+            .collect();
+        assert_eq!(
+            frees.len(),
+            0,
+            "race must be detected and no FreeEvent emitted"
+        );
+
+        // The new alloc's entry must remain so its eventual free still
+        // emits a correct FreeEvent.
+        assert_eq!(
+            liveset.peek_with(&0xAABB, |_, v| *v),
+            Some((8192, 300)),
+            "new alloc's entry must survive the race-aware drain"
+        );
+    }
+
+    /// If a shutdown-flagged free arrives for an address that's not in the
+    /// liveset (already cleaned by a prior dealloc, or never sampled), the
+    /// consolidator must silently drop it — no `FreeEvent`, no panic.
+    #[test]
+    fn shutdown_drain_ignores_misses() {
+        let rings = rings(16, 16);
+        let liveset = fresh_liveset();
+        rings
+            .free_queue
+            .push(make_shutdown_free(0xDEAD, 100, 1))
+            .ok();
+
+        let shared = new_shared();
+        shared.push_source(Box::new(MemoryProfileSource::new(
+            Arc::clone(&rings),
+            Some(Arc::clone(&liveset)),
+            512 * 1024,
+        )));
+
+        let events = flush_and_collect(&shared);
+        let frees: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e, Dial9Event::FreeEvent(..)))
+            .collect();
+        assert_eq!(frees.len(), 0);
+    }
+
+    /// Timestamp tie: the shutdown-flagged free has the SAME timestamp as the
+    /// liveset entry's `alloc_ts_ns`. This can happen when `clock_monotonic_ns()`
+    /// returns the same value on nearby cores. The consolidator must treat ties
+    /// conservatively: skip the drain rather than risk removing a live entry that
+    /// belongs to a concurrent new allocation with the same timestamp.
+    #[test]
+    fn shutdown_drain_skips_on_timestamp_tie() {
+        let rings = rings(16, 16);
+        let liveset = fresh_liveset();
+        // Liveset entry has alloc_ts_ns = 100.
+        liveset.insert(0xBBCC, (2048, 100)).expect("liveset insert");
+
+        // Shutdown free also has ts_ns = 100 (tie).
+        rings
+            .free_queue
+            .push(make_shutdown_free(0xBBCC, 100, 3))
+            .ok();
+
+        let shared = new_shared();
+        shared.push_source(Box::new(MemoryProfileSource::new(
+            Arc::clone(&rings),
+            Some(Arc::clone(&liveset)),
+            512 * 1024,
+        )));
+
+        let events = flush_and_collect(&shared);
+        let frees: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e, Dial9Event::FreeEvent(..)))
+            .collect();
+        assert_eq!(
+            frees.len(),
+            0,
+            "timestamp tie must be treated as a race — no FreeEvent emitted"
+        );
+
+        // Entry must remain intact.
+        assert_eq!(
+            liveset.peek_with(&0xBBCC, |_, v| *v),
+            Some((2048, 100)),
+            "liveset entry must survive when timestamps tie"
         );
     }
 }

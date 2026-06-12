@@ -1,6 +1,6 @@
 //! `MemoryProfiler::install()` — the install-once entry point.
 
-use crate::memory_profiling::config::{MemoryProfilingConfig, TimestampMode};
+use crate::memory_profiling::config::MemoryProfilingConfig;
 use crate::memory_profiling::ring::RingBuffers;
 #[cfg(feature = "analysis")]
 use crate::memory_profiling::ring::{DEFAULT_MAX_FRAMES, RawAlloc};
@@ -10,19 +10,57 @@ use crate::telemetry::recorder::TelemetryHandle;
 use dial9_perf_self_profile::unwinder::Unwinder;
 use std::sync::{Arc, OnceLock};
 
+/// Producer-side liveset: maps allocation address → `(size, timestamp_ns)`.
+///
+/// See [`MemoryProfilerInner::liveset`] for the rationale on `Arc<...>` and
+/// `FxBuildHasher`.
+pub(crate) type Liveset =
+    scc::HashIndex<u64, (u64, u64), dial9_trace_format::encoder::FxBuildHasher>;
+
 /// Process-global state for the active memory profiler.
 ///
 /// Published via `OnceLock` exactly once per process. Never reclaimed
 /// because any thread's allocator hook may be reading this.
-#[allow(dead_code)]
 pub(crate) struct MemoryProfilerInner {
     pub(crate) unwinder: Unwinder,
-    /// Prevents `SharedState` from being dropped while the profiler is active.
+    /// Held to prevent `SharedState` from being dropped while the
+    /// profiler is active. Never read after construction; the value
+    /// matters, not its accesses.
+    #[expect(
+        dead_code,
+        reason = "lifetime hold for SharedState; the field's existence is the contract"
+    )]
     pub(crate) handle: TelemetryHandle,
     pub(crate) rings: Arc<RingBuffers>,
     pub(crate) sample_rate_bytes: u64,
-    pub(crate) track_liveset: bool,
-    pub(crate) timestamp_mode: TimestampMode,
+    /// Producer-side liveset: maps allocation address → (size, timestamp_ns).
+    /// `None` when liveset tracking is disabled, avoiding any overhead.
+    /// Whether liveset tracking is on is determined by `liveset.is_some()`
+    /// — there is no separate boolean flag.
+    ///
+    /// **Why `Arc<HashIndex>`?** `scc::HashIndex` *is* `Clone`, but the impl
+    /// is a *deep clone*: it iterates every entry and reinserts into a brand
+    /// new index with independent state (see `scc-2.x` `impl Clone for
+    /// HashIndex`). To share one map across all producer threads we need
+    /// reference-counted shared ownership, hence the `Arc`. This is unlike
+    /// e.g. `dashmap::DashMap` whose `Clone` is a shallow `Arc::clone`.
+    ///
+    /// **Why `FxBuildHasher`?** `scc` calls the `BuildHasher` per operation
+    /// (no internal hash caching — see `scc::hash_table::HashTable::hash`).
+    /// For a `u64` pointer key the default `RandomState`/SipHash-1-3 is
+    /// ~10–25 ns; `FxHash`'s multiply-shift is ~1–2 ns, and that cost
+    /// applies to **every** dealloc when liveset is on (`peek_with` always
+    /// hashes regardless of hit/miss). Pointer alignment-bit skew is not a
+    /// concern at scc's bucket granularity for the hit rates we see here.
+    ///
+    /// **Known limitation:** the map is currently unbounded. A service that
+    /// leaks sampled allocations indefinitely will grow this map without
+    /// limit. The size is bounded in practice by the live sampled allocation
+    /// count: at the default 512 KiB sample rate and a 10 GiB live heap,
+    /// expect ~20K entries (≈1.3 MiB including scc overhead). Adding a
+    /// `max_liveset_entries` cap is tracked as a follow-up; see
+    /// `docs/design/memory-profiling.md` §7.
+    pub(crate) liveset: Option<Arc<Liveset>>,
     pub(crate) rng_seed: Option<u64>,
 }
 
@@ -132,13 +170,25 @@ impl MemoryProfiler {
             self.config.ring_capacity() * 8,
         ));
 
+        let liveset = if self.config.track_liveset() {
+            Some(Arc::new(scc::HashIndex::with_capacity_and_hasher(
+                0,
+                dial9_trace_format::encoder::FxBuildHasher::default(),
+            )))
+        } else {
+            None
+        };
+        // Clone the Arc for the consolidator (`MemoryProfileSource`) so it
+        // can service shutdown-flagged frees by doing the liveset peek/remove
+        // on its own healthy thread. See `source.rs::handle_free`.
+        let source_liveset = liveset.as_ref().map(Arc::clone);
+
         let inner = MemoryProfilerInner {
             unwinder,
             handle: handle.clone(),
             rings: Arc::clone(&rings),
             sample_rate_bytes: self.config.sample_rate_bytes(),
-            track_liveset: self.config.track_liveset(),
-            timestamp_mode: self.config.timestamp_mode(),
+            liveset,
             rng_seed: self.config.rng_seed(),
         };
 
@@ -147,11 +197,8 @@ impl MemoryProfiler {
             .map_err(|_| InstallError::AlreadyInstalled)?;
 
         let shared = handle.shared().expect("checked is_enabled above");
-        let source = MemoryProfileSource::new(
-            rings,
-            self.config.track_liveset(),
-            self.config.sample_rate_bytes(),
-        );
+        let source =
+            MemoryProfileSource::new(rings, source_liveset, self.config.sample_rate_bytes());
         shared.push_source(Box::new(source));
 
         Ok(MemoryProfilerGuard { _private: () })
