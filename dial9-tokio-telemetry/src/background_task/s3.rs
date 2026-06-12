@@ -854,6 +854,7 @@ mod tests {
             ),
             segments_processed: 2,
             metadata: req.metadata,
+            failed: false,
         };
         let manifest = DumpManifest::new(
             &completion,

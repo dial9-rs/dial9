@@ -261,6 +261,11 @@ pub struct DumpCompletion {
     pub segments_processed: usize,
     /// Caller correlation pairs from `with_metadata(...)`.
     pub metadata: Vec<(String, String)>,
+    /// True when the dump resolves with [`DumpError::Pipeline`]: a captured
+    /// segment failed terminally and nothing made it through. Stages still
+    /// get to clear per-dump state, but should skip success artifacts (the
+    /// S3 stage writes no manifest for a failed dump).
+    pub failed: bool,
 }
 
 /// What a completed dump produced.

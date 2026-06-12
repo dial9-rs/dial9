@@ -843,6 +843,13 @@ impl ActiveDump {
         }
     }
 
+    /// Total failure: a captured segment failed terminally and nothing
+    /// made it through. Drives both the `Err` receipt and the S3 stage
+    /// skipping the manifest.
+    fn failed(&self) -> bool {
+        self.first_error.is_some() && self.segments_processed == 0
+    }
+
     /// The completion signal handed to each stage's `finalize_dump`.
     fn completion(&self) -> crate::dump::DumpCompletion {
         crate::dump::DumpCompletion {
@@ -851,6 +858,7 @@ impl ActiveDump {
             time_range: self.time_range(),
             segments_processed: self.segments_processed,
             metadata: self.metadata.clone(),
+            failed: self.failed(),
         }
     }
 
@@ -864,8 +872,8 @@ impl ActiveDump {
             .receipt_tx
             .take()
             .expect("receipt_tx only taken at resolution");
-        let result = match self.first_error {
-            Some(kind) if self.segments_processed == 0 => Err(DumpError::Pipeline(kind)),
+        let result = match (self.failed(), self.first_error.take()) {
+            (true, Some(kind)) => Err(DumpError::Pipeline(kind)),
             _ => Ok(DumpReceipt {
                 dump_id: self.id,
                 segments_processed: self.segments_processed,
@@ -1687,13 +1695,18 @@ impl SegmentProcessor for S3PipelineUploader {
         &mut self,
         completion: &crate::dump::DumpCompletion,
     ) -> Pin<Box<dyn Future<Output = Option<String>> + Send + '_>> {
-        // Always take the entry so per-dump state clears even when the
-        // manifest PUT fails. An empty dump still gets an (empty-segments)
-        // manifest: its presence is the cross-process completion signal.
+        // Always take the entry so per-dump state clears even when no
+        // manifest gets written. An empty dump still gets an
+        // (empty-segments) manifest: its presence is the cross-process
+        // completion signal, so it is only written for dumps that
+        // completed (a failed dump resolves `Err` and leaves no manifest).
         let segments = self
             .dump_keys
             .remove(&completion.dump_id.to_string())
             .unwrap_or_default();
+        if completion.failed {
+            return Box::pin(std::future::ready(None));
+        }
         let manifest = s3::DumpManifest::new(completion, segments);
         Box::pin(async move {
             // The manifest may be the first object of the run (e.g. an
@@ -3848,7 +3861,7 @@ mod finalize_dump_tests {
     use assert2::check;
     use std::sync::Mutex;
 
-    type SeenCompletions = Arc<Mutex<Vec<(DumpId, usize, Vec<(String, String)>)>>>;
+    type SeenCompletions = Arc<Mutex<Vec<(DumpId, usize, Vec<(String, String)>, bool)>>>;
 
     /// Passes segments through; `finalize_dump` records the completion and
     /// returns a fixed key (or `None`).
@@ -3876,6 +3889,7 @@ mod finalize_dump_tests {
                 completion.dump_id,
                 completion.segments_processed,
                 completion.metadata.clone(),
+                completion.failed,
             ));
             let key = self.key.clone();
             Box::pin(std::future::ready(key))
@@ -3937,10 +3951,11 @@ mod finalize_dump_tests {
         {
             let seen = completions.lock().unwrap();
             check!(seen.len() == 2, "both stages finalized");
-            for (id, count, metadata) in seen.iter() {
+            for (id, count, metadata, failed) in seen.iter() {
                 check!(*id == receipt.dump_id);
                 check!(*count == 1);
                 check!(metadata == &vec![("reason".to_string(), "test".to_string())]);
+                check!(!*failed);
             }
         }
 
@@ -3963,6 +3978,88 @@ mod finalize_dump_tests {
 
         stop.cancel();
         worker.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn failed_dump_signals_failed_completion() {
+        struct AlwaysFail;
+        impl SegmentProcessor for AlwaysFail {
+            fn name(&self) -> &'static str {
+                "AlwaysFail"
+            }
+            fn process(
+                &mut self,
+                data: SegmentData,
+            ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>>
+            {
+                Box::pin(async move {
+                    Err(ProcessError::io(data, io::Error::other("broken stage")))
+                })
+            }
+        }
+
+        let fs = Fs::new_in_memory(64 * 1024, 1024).unwrap();
+        let (control, rx) = dump::trigger();
+        seal_mem(&fs, 0, now_epoch());
+
+        let completions = Arc::new(Mutex::new(Vec::new()));
+        let stop = tokio_util::sync::CancellationToken::new();
+        let worker = spawn_worker(
+            Arc::clone(&fs),
+            vec![
+                Box::new(AlwaysFail),
+                Box::new(FinalizeStub {
+                    key: Some("dumps/failed.json".into()),
+                    completions: completions.clone(),
+                }),
+            ],
+            rx,
+            stop.clone(),
+        );
+
+        let err = control.dump_current_data().await.unwrap_err();
+        check!(matches!(err, crate::dump::DumpError::Pipeline(_)));
+        {
+            let seen = completions.lock().unwrap();
+            check!(seen.len() == 1, "finalize still runs for a failed dump");
+            check!(seen[0].3, "completion carries failed=true");
+        }
+
+        stop.cancel();
+        worker.await.unwrap();
+    }
+
+    /// The S3 stage clears per-dump state but writes no manifest for a
+    /// failed dump (manifest presence means successful completion).
+    #[cfg(feature = "worker-s3")]
+    #[tokio::test]
+    async fn s3_finalize_skips_manifest_for_failed_dump() {
+        let config = s3::S3Config::builder()
+            .bucket("b")
+            .service_name("s")
+            .instance_path("i")
+            .boot_id("boot")
+            .build();
+        let mut uploader = S3PipelineUploader::new(config, None);
+
+        let (control, mut rx) = dump::trigger();
+        control.dump_current_data();
+        let req = rx.rx.try_recv().unwrap();
+        uploader
+            .dump_keys
+            .insert(req.id.to_string(), vec!["traces/x.bin.gz".into()]);
+
+        let completion = crate::dump::DumpCompletion {
+            dump_id: req.id,
+            triggered_at: SystemTime::now(),
+            time_range: (SystemTime::now(), SystemTime::now()),
+            segments_processed: 0,
+            metadata: Vec::new(),
+            failed: true,
+        };
+        let key = uploader.finalize_dump(&completion).await;
+        check!(key.is_none());
+        check!(uploader.dump_keys.is_empty(), "per-dump state still cleared");
     }
 
     #[tokio::test(start_paused = true)]
