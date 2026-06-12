@@ -115,10 +115,9 @@ impl SharedState {
         Some(f(&EventBuffer(self)))
     }
 
-    /// Record a user-defined [`Encodable`](crate::telemetry::buffer::Encodable) event.
-    ///
-    /// Callers must ensure recording is enabled (via [`if_enabled`](Self::if_enabled)
-    /// or [`is_enabled`](Self::is_enabled)) before calling this method.
+    /// Test-only shortcut to record an event directly. Production code records
+    /// through [`EventBuffer`] via [`if_enabled`](Self::if_enabled).
+    #[cfg(test)]
     fn record_encodable_event(&self, event: &dyn buffer::Encodable) {
         if let Some(handle) =
             buffer::record_encodable_event(event, &self.collector, &self.drain_epoch)
