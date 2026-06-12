@@ -808,8 +808,12 @@ impl ActiveDump {
             start_secs,
             end_secs: trigger_epoch.saturating_add(req.lookforward.as_secs()),
         };
-        let deadline = (!req.lookforward.is_zero())
-            .then(|| tokio::time::Instant::now() + req.lookforward);
+        let deadline = (!req.lookforward.is_zero()).then(|| {
+            // Anchor at trigger time so worker pickup latency does not
+            // extend the forward window.
+            let elapsed = req.triggered_at.elapsed().unwrap_or_default();
+            tokio::time::Instant::now() + req.lookforward.saturating_sub(elapsed)
+        });
         Self {
             id: req.id,
             triggered_at: req.triggered_at,
