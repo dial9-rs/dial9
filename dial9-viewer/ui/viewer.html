@@ -109,7 +109,7 @@
             #stack-sidebar {
                 width: min(640px, 50vw);
                 min-width: 200px;
-                max-width: 70vw;
+                max-width: 92vw;
                 background: #1a1a2e;
                 display: none;
                 flex-direction: column;
@@ -658,6 +658,7 @@
                     <span id="poi-counter" style="font-size:0.85em;color:#888"></span>
                     <span style="width:1px;height:20px;background:#444;margin:0 8px"></span>
                     <button id="btn-sched-panel" style="background:#3a1a1a;border-color:#ff4444;color:#ff8a65">⚠ Blocking Calls</button>
+                    <button id="btn-cpu-flamegraph" style="display:none;background:#2a1a2a;border-color:#b388ff;color:#d0bcff;white-space:nowrap" title="Show a CPU flamegraph for the whole trace">🔥 Flamegraph</button>
                     <button id="btn-heap-flamegraph" style="display:none;background:#1a2a1a;border-color:#4caf50;color:#81c784;white-space:nowrap" title="Show heap allocation flamegraph">🔥 Heap</button>
                     <button id="btn-uninstrumented-info" style="display:none;background:#1e2050;border-color:#6c63ff;color:#d0ccff;white-space:nowrap" title="Some tasks lack wake tracking — click for details">ⓘ Blind spawns</button>
                     <button id="btn-set-range" title="Set time range filter (reloads with only events in range)">Set Range</button>
@@ -1693,6 +1694,14 @@
                 btnHeap.style.display = hasAllocEvents ? "" : "none";
                 if (hasAllocEvents) {
                     btnHeap.textContent = `🔥 Heap (${trace.allocEvents.length})`;
+                }
+
+                // Show CPU flamegraph button (whole-trace) if CPU samples exist.
+                const hasCpu = hasCpuProfileSamples(trace.cpuSamples);
+                const btnCpu = document.getElementById("btn-cpu-flamegraph");
+                btnCpu.style.display = hasCpu ? "" : "none";
+                if (hasCpu) {
+                    btnCpu.textContent = `🔥 Flamegraph (${trace.cpuSamples.length})`;
                 }
 
                 showToast("shift-drag-hint", "⇧ Shift+drag to select a region", "info", 0, true);
@@ -3468,6 +3477,10 @@
             document.getElementById("sort-by-worst").addEventListener("change", () => updatePointsOfInterest({ autoJump: true }));
             document.getElementById("btn-sched-panel").addEventListener("click", showSchedPanel);
             document.getElementById("btn-heap-flamegraph").addEventListener("click", () => showHeapFlamegraph());
+            document.getElementById("btn-cpu-flamegraph").addEventListener("click", () => {
+                // Whole-trace CPU flamegraph: select the full time range.
+                showFlamegraph(minTs, maxTs);
+            });
             document.getElementById("btn-uninstrumented-info").addEventListener("click", (e) => {
                 showUninstrumentedPopup(e.target);
             });
@@ -4150,7 +4163,7 @@
                     const dx = startX - e.clientX; // dragging left = wider
                     const newW = Math.min(
                         Math.max(200, startW + dx),
-                        window.innerWidth * 0.7
+                        window.innerWidth * 0.92
                     );
                     sidebar.style.width = newW + "px";
                     if (trace && !resizeRafId) {
@@ -4871,7 +4884,15 @@
             const fgContainer = document.getElementById("fg-container");
             const fgInstance = FlamegraphRenderer.createFlamegraph(fgContainer);
 
-            // Open the stack sidebar showing a flamegraph built from `samples`.
+            // When a flamegraph is first opened, default the stack sidebar to a
+            // large fraction of the viewport (it otherwise opens at a narrow
+            // ~50vw). The user can still drag it back via the resize handle.
+            const FLAMEGRAPH_DEFAULT_VW = 0.78;
+            function widenSidebarForFlamegraph() {
+                const sidebar = document.getElementById("stack-sidebar");
+                sidebar.style.width = Math.round(window.innerWidth * FLAMEGRAPH_DEFAULT_VW) + "px";
+            }
+
             // Used by `showTaskDumpStack`, `showIdleTimeFlamegraph`, and any
             // other caller that just wants "here's a pile of callchains, render
             // them as a flamegraph in the sidebar".
@@ -4895,6 +4916,7 @@
                 body.appendChild(fgContainer);
                 const wasHidden = sidebar.style.display !== "flex";
                 sidebar.style.display = "flex";
+                if (wasHidden) widenSidebarForFlamegraph();
                 if (wasHidden && trace) requestAnimationFrame(renderAll);
                 requestAnimationFrame(() => {
                     fgInstance.setData(samples, trace.callframeSymbols, fgOpts);
@@ -5122,6 +5144,7 @@
                 body.appendChild(fgContainer);
                 const wasHidden = sidebar.style.display !== "flex";
                 sidebar.style.display = "flex";
+                if (wasHidden) widenSidebarForFlamegraph();
                 if (wasHidden && trace) requestAnimationFrame(renderAll);
                 requestAnimationFrame(() => {
                     fgInstance.setData(samplesForMode(heapMode), trace.callframeSymbols, heapFgOpts(heapMode));
@@ -5176,6 +5199,7 @@
                 clearToasts();
                 const wasHidden = sidebar.style.display !== "flex";
                 sidebar.style.display = "flex";
+                if (wasHidden) widenSidebarForFlamegraph();
                 if (wasHidden && trace) requestAnimationFrame(renderAll);
 
                 // Give the container a frame to get its layout, then render

@@ -244,8 +244,8 @@
         <button class="primary" id="view-btn" onclick="viewSelected()" disabled>
             View Selected in Trace Viewer
         </button>
-        <button id="cpu-btn" onclick="viewCpuProfile()" disabled style="display:none">
-            CPU Profiling
+        <button id="cpu-btn" onclick="viewCpuProfile()" disabled title="Open a CPU flamegraph of the selected segments">
+            🔥 Flamegraph
         </button>
         <span id="selection-warn" style="color:#ff6b6b;font-size:0.8em"></span>
         <span class="count" id="selection-count"></span>
@@ -982,9 +982,22 @@
         setHeatmapSelection(null);
     });
 
-    // CPU Profiling button — wired in Stage 3 (filtered flamegraph trace).
+    // CPU Profiling button: open a flamegraph of the selected segments. The
+    // flamegraph view builds from the trace's CpuSampleEvents (and resolves
+    // symbols from SymbolTableEntry), ignoring all other event types, so we
+    // serve the full trace via /api/trace — no server-side event filtering is
+    // needed for a working flamegraph. The selection is already size-capped.
     function viewCpuProfile() {
-        /* implemented in Stage 3 */
+        if (!heatmapSelection || !heatmapSelection.keys.length) return;
+        const bucket = bucketInput.value.trim();
+        if (!bucket) { alert('Bucket is required'); return; }
+        const params = new URLSearchParams();
+        params.set('bucket', bucket);
+        for (const key of heatmapSelection.keys) {
+            params.append('keys', key);
+        }
+        const traceUrl = '/api/trace?' + params.toString();
+        window.open('flamegraph.html?trace=' + encodeURIComponent(traceUrl), '_blank');
     }
 
     // ── Raw search mode ──
@@ -1103,7 +1116,7 @@
             }
             const over = sel.bytes > MAX_OPEN_BYTES;
             viewBtn.disabled = over;
-            cpuBtn.disabled = false;
+            cpuBtn.disabled = over;
             warn.textContent = over
                 ? `Too large to open (${formatSize(sel.bytes)} > 100 MB) — narrow your selection.`
                 : '';
