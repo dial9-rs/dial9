@@ -768,11 +768,12 @@ pub(crate) struct WorkerLoop {
     /// Present: on-demand operation, segments only run through the
     /// pipeline when a dump is requested. Absent: continuous processing.
     trigger: Option<crate::dump::DumpRx>,
-    /// Triggered mode, disk backend only: creation epochs of segments
-    /// already inspected and found outside every active window, so their
-    /// files are not re-read on each pass. Entries leave when the segment
-    /// is processed or removed; bounded by the writer's disk budget.
-    epoch_cache: HashMap<u32, u64>,
+    /// Triggered mode, disk backend only: `(creation, seal)` epochs of
+    /// segments already inspected and found outside every active window, so
+    /// their files are not re-read on each pass. Entries leave when the
+    /// segment is processed or removed; bounded by the writer's disk
+    /// budget.
+    epoch_cache: HashMap<u32, (u64, u64)>,
 }
 
 /// A dump registered with the triggered worker, accumulating receipt state
@@ -961,8 +962,9 @@ impl WorkerLoop {
     }
 
     /// On-demand operation: park between triggers (no `take_files`), and on
-    /// a dump request drain only the segments whose creation epoch falls in
-    /// an active window. Segments outside every window stay in the ring.
+    /// a dump request drain only the segments whose `[creation, seal]` span
+    /// overlaps an active window. Segments outside every window stay in the
+    /// ring.
     async fn run_triggered(&mut self, mut rx: crate::dump::DumpRx) {
         let mut dumps: Vec<ActiveDump> = Vec::new();
         let mut rx_open = true;
@@ -1122,8 +1124,8 @@ impl WorkerLoop {
             // already inspected and found out-of-window is released without
             // re-reading its file.
             if !dumps.is_empty()
-                && let Some(&cached) = self.epoch_cache.get(&taken.seg_ref.index())
-                && !dumps.iter().any(|d| d.window.contains(cached))
+                && let Some(&(start, seal)) = self.epoch_cache.get(&taken.seg_ref.index())
+                && !dumps.iter().any(|d| d.window.overlaps(start, seal))
             {
                 self.fs.release_claim(&taken.seg_ref);
                 continue;
@@ -1132,6 +1134,7 @@ impl WorkerLoop {
             // `taken`, so re-dispense on a retryable failure gets the same bytes as the first attempt.
             let retry_count = taken.retry_count();
             let original_bytes = taken.original_bytes();
+            let mem_epochs = taken.mem_epochs();
             let (seg_ref, payload, accounting) = match taken.load() {
                 Ok(t) => t,
                 Err(e) if e.kind() == io::ErrorKind::NotFound => {
@@ -1159,19 +1162,26 @@ impl WorkerLoop {
             let header_bytes = payload.chunks().first().map_or(&[][..], |b| b.as_ref());
             let (epoch_secs, header_valid) =
                 sealed::creation_epoch_secs(header_bytes, path_for_header);
+            // Seal epoch: memory slots carry it; disk derives it from the
+            // file's mtime (best-effort).
+            let seal_secs = match mem_epochs {
+                Some((_, seal)) => seal,
+                None => sealed::seal_epoch_secs(path_for_header),
+            };
 
             // Triggered mode: match against every active dump window.
             let matched: Vec<usize> = dumps
                 .iter()
                 .enumerate()
-                .filter(|(_, d)| d.window.contains(epoch_secs))
+                .filter(|(_, d)| d.window.overlaps(epoch_secs, seal_secs))
                 .map(|(i, _)| i)
                 .collect();
             if !dumps.is_empty() && matched.is_empty() {
                 // Outside every window: leave it in place for later dumps.
                 match &seg_ref {
                     SegmentRef::Disk(_) => {
-                        self.epoch_cache.insert(seg_ref.index(), epoch_secs);
+                        self.epoch_cache
+                            .insert(seg_ref.index(), (epoch_secs, seal_secs));
                         self.fs.release_claim(&seg_ref);
                     }
                     SegmentRef::Memory(_) => {
@@ -1180,7 +1190,12 @@ impl WorkerLoop {
                         // burning a retry attempt.
                         if let (Some(count), Some(bytes)) = (retry_count, original_bytes.as_ref())
                         {
-                            self.fs.release_for_retry(&seg_ref, bytes.clone(), count);
+                            self.fs.release_for_retry(
+                                &seg_ref,
+                                bytes.clone(),
+                                count,
+                                (epoch_secs, seal_secs),
+                            );
                         }
                     }
                 }
@@ -1296,6 +1311,7 @@ impl WorkerLoop {
                                                     &data.segment,
                                                     bytes.clone(),
                                                     attempt,
+                                                    (epoch_secs, seal_secs),
                                                 );
                                             }
                                         }
@@ -1386,7 +1402,7 @@ impl WorkerLoop {
                     let d = &mut dumps[i];
                     d.segments_processed += 1;
                     d.first_epoch = Some(d.first_epoch.map_or(epoch_secs, |e| e.min(epoch_secs)));
-                    d.last_epoch = Some(d.last_epoch.map_or(epoch_secs, |e| e.max(epoch_secs)));
+                    d.last_epoch = Some(d.last_epoch.map_or(seal_secs, |e| e.max(seal_secs)));
                 }
             }
         }
@@ -3389,6 +3405,7 @@ mod triggered_worker_tests {
         let (control, rx) = dump::trigger();
         let now = now_epoch();
         seal_mem(&fs, 0, now - 3600); // outside a 60s look-back
+        fs.set_seal_secs_for_test(0, now - 3600);
         seal_mem(&fs, 1, now);
 
         let stop = tokio_util::sync::CancellationToken::new();
@@ -3411,6 +3428,31 @@ mod triggered_worker_tests {
         let snap = fs.take_files();
         check!(snap.segments.len() == 1);
         check!(snap.segments[0].seg_ref.index() == 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn lookback_captures_segment_spanning_window_start() {
+        let fs = Fs::new_in_memory(64 * 1024, 1024).unwrap();
+        let (control, rx) = dump::trigger();
+        let now = now_epoch();
+        // Started before the 60s window, sealed inside it: the span
+        // overlaps, so the segment is captured.
+        seal_mem(&fs, 0, now - 300);
+        fs.set_seal_secs_for_test(0, now - 30);
+
+        let stop = tokio_util::sync::CancellationToken::new();
+        let (capture, captured) = CapturingProcessor::new();
+        let worker = spawn_worker(Arc::clone(&fs), vec![Box::new(capture)], rx, stop.clone());
+
+        let receipt = control
+            .dump_time_range(Duration::from_secs(60), Duration::ZERO)
+            .await
+            .unwrap();
+        check!(receipt.segments_processed == 1);
+        check!(captured.lock().unwrap().len() == 1);
+
+        stop.cancel();
+        worker.await.unwrap();
     }
 
     #[tokio::test(start_paused = true)]
@@ -3639,6 +3681,7 @@ mod triggered_worker_tests {
         let fs = Fs::new_in_memory(64 * 1024, 1024).unwrap();
         let now = now_epoch();
         seal_mem(&fs, 0, now - 3600);
+        fs.set_seal_secs_for_test(0, now - 3600);
         seal_mem(&fs, 1, now);
 
         // Window matching nothing: ring untouched.

@@ -122,6 +122,9 @@ pub(crate) struct MemoryPayload {
     pub(crate) bytes: Bytes,
     pub(crate) accounting: SegmentAccounting,
     pub(crate) retry_count: u32,
+    /// `(creation, seal)` epochs carried from the ring slot so the worker
+    /// and retry re-enqueue never re-parse them.
+    pub(crate) epochs: (u64, u64),
 }
 
 /// A claim returned by `Fs::take_files`. Memory comes with payload in hand,
@@ -144,6 +147,7 @@ impl TakenSegment {
         bytes: Bytes,
         accounting: SegmentAccounting,
         retry_count: u32,
+        epochs: (u64, u64),
     ) -> Self {
         Self {
             seg_ref: SegmentRef::Memory(seg),
@@ -151,6 +155,7 @@ impl TakenSegment {
                 bytes,
                 accounting,
                 retry_count,
+                epochs,
             }),
         }
     }
@@ -164,6 +169,12 @@ impl TakenSegment {
     /// Re-enqueue count this dispense carries. `None` for disk.
     pub(crate) fn retry_count(&self) -> Option<u32> {
         self.pre_loaded.as_ref().map(|m| m.retry_count)
+    }
+
+    /// `(creation, seal)` epochs the ring slot carried. `None` for disk
+    /// (the worker derives them from the header and file mtime).
+    pub(crate) fn mem_epochs(&self) -> Option<(u64, u64)> {
+        self.pre_loaded.as_ref().map(|m| m.epochs)
     }
 
     /// Load the segment payload.
@@ -205,7 +216,11 @@ pub(crate) struct TakenFiles {
     pub(crate) segments_dropped: u64,
 }
 
-/// Closed creation-epoch window a triggered dump matches segments against.
+/// Closed epoch window a triggered dump matches segments against.
+///
+/// A segment matches when its `[creation, seal]` span overlaps the window,
+/// so a segment that started before the window but holds in-window data is
+/// still captured.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct EpochWindow {
     /// `None`: unbounded look-back (`dump_current_data`).
@@ -214,8 +229,8 @@ pub(crate) struct EpochWindow {
 }
 
 impl EpochWindow {
-    pub(crate) fn contains(&self, epoch_secs: u64) -> bool {
-        self.start_secs.is_none_or(|s| epoch_secs >= s) && epoch_secs <= self.end_secs
+    pub(crate) fn overlaps(&self, start_secs: u64, seal_secs: u64) -> bool {
+        start_secs <= self.end_secs && self.start_secs.is_none_or(|s| seal_secs >= s)
     }
 }
 
@@ -316,9 +331,10 @@ impl Fs {
         }
     }
 
-    /// Like [`Self::take_files`], but only dispense segments whose creation
-    /// epoch falls inside one of `windows`. Used by the triggered worker so
-    /// out-of-window history stays in the ring for later dumps.
+    /// Like [`Self::take_files`], but only dispense segments whose
+    /// `[creation, seal]` span overlaps one of `windows`. Used by the
+    /// triggered worker so out-of-window history stays in the ring for
+    /// later dumps.
     ///
     /// Memory: pops the oldest matching slot, leaving non-matching slots in
     /// place (still at most one segment per call). Disk: returns all new
@@ -375,12 +391,29 @@ impl Fs {
     /// Re-enqueue a memory segment after a retryable failure.
     ///
     /// Caller owns the [`MEMORY_RETRY_BUDGET`] check, this method always
-    /// pushes. Disk segments do not use this path, they retry via
+    /// pushes. `epochs` is the `(creation, seal)` pair the slot originally
+    /// carried. Disk segments do not use this path, they retry via
     /// [`Self::release_claim`] + directory rescan.
-    pub(crate) fn release_for_retry(&self, seg: &SegmentRef, bytes: bytes::Bytes, attempt: u32) {
+    pub(crate) fn release_for_retry(
+        &self,
+        seg: &SegmentRef,
+        bytes: bytes::Bytes,
+        attempt: u32,
+        epochs: (u64, u64),
+    ) {
         match self {
-            Fs::Mem(m) => m.release_for_retry(seg.index(), bytes, attempt),
+            Fs::Mem(m) => m.release_for_retry(seg.index(), bytes, attempt, epochs),
             Fs::Disk(_) => unreachable!("release_for_retry called on disk segment"),
+        }
+    }
+
+    /// Test-only: override the seal epoch of a queued memory slot so tests
+    /// can simulate segments sealed in the past.
+    #[cfg(test)]
+    pub(crate) fn set_seal_secs_for_test(&self, index: u32, seal_secs: u64) {
+        match self {
+            Fs::Mem(m) => m.set_seal_secs_for_test(index, seal_secs),
+            Fs::Disk(_) => panic!("set_seal_secs_for_test is memory-only"),
         }
     }
 }
