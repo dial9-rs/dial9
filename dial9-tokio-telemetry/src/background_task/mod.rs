@@ -889,6 +889,8 @@ struct PassStats {
     /// Ids of the dumps matched by segments actually re-enqueued after a
     /// retryable failure; those dumps stay open until the retry settles.
     retry_dump_ids: Vec<crate::dump::DumpId>,
+    /// Segments that passed window matching and entered the pipeline.
+    entered_pipeline: usize,
 }
 
 /// Record a terminal pipeline error against every matched dump that has
@@ -1041,7 +1043,7 @@ impl WorkerLoop {
                 return Vec::new();
             }
             let windows: Vec<EpochWindow> = dumps.iter().map(|d| d.window).collect();
-            let taken = self.fs.take_files_matching(&windows);
+            let mut taken = self.fs.take_files_matching(&windows);
             // Prune cache entries for files no longer dispensed (disk
             // dispenses every unclaimed file per pass, so absence means
             // the writer evicted it).
@@ -1050,12 +1052,15 @@ impl WorkerLoop {
                     taken.segments.iter().map(|t| t.seg_ref.index()).collect();
                 self.epoch_cache.retain(|idx, _| live.contains(idx));
             }
-            let dispatched = taken.segments.len() as u64;
-            self.emit_cycle_metrics(&taken, dispatched);
             if taken.segments.is_empty() {
+                self.emit_cycle_metrics(&taken, 0);
                 return Vec::new();
             }
-            let stats = self.process_segments(taken.segments, dumps).await;
+            let segments = std::mem::take(&mut taken.segments);
+            let stats = self.process_segments(segments, dumps).await;
+            // Out-of-window claims are released, not dispatched; only
+            // count segments that actually entered the pipeline.
+            self.emit_cycle_metrics(&taken, stats.entered_pipeline as u64);
             if !stats.retry_dump_ids.is_empty() {
                 return stats.retry_dump_ids;
             }
@@ -1215,6 +1220,7 @@ impl WorkerLoop {
                 }
                 continue;
             }
+            stats.entered_pipeline += 1;
 
             let metrics = SegmentProcessMetrics {
                 operation: Operation::ProcessSegment,
