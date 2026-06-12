@@ -30,9 +30,14 @@ runs:
           env:
               RUSTFLAGS: "--cfg tokio_unstable -C force-frame-pointers=yes"
           run: |
-              if [ "${{ inputs.toolchain }}" = nightly ]; then
-                  rm -fv Cargo.lock
-              fi
+              # NOTE: we intentionally do NOT remove Cargo.lock on nightly.
+              # Removing it floats onto the latest semver-compatible deps, which
+              # (as of 2026-06-12) pulls aws-smithy-types 1.5.0 and fails to
+              # compile with E0119 (conflicting From impls for the `time` crate's
+              # HourBase) — an upstream breakage unrelated to this repo. Building
+              # nightly against the committed Cargo.lock keeps it a pure
+              # nightly-compiler canary. Restore dependency-floating (and this
+              # comment) once the upstream aws-smithy-types/time issue is fixed.
               # tokio's `taskdump` feature only compiles on linux aarch64/x86/x86_64.
               # On macOS drop it from --all-features; leave everything else intact.
               if [ "$RUNNER_OS" = "Linux" ]; then
