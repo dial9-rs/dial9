@@ -407,6 +407,14 @@ impl Fs {
         }
     }
 
+    /// Whether one `take_files_matching` call dispenses every matching
+    /// segment at once (disk claims the whole backlog; memory pops one slot
+    /// per call). The triggered worker uses this to decide if a pass that
+    /// ended on a retry still covered all other matching work.
+    pub(crate) fn take_is_exhaustive(&self) -> bool {
+        matches!(self, Fs::Disk(_))
+    }
+
     /// Test-only: override the seal epoch of a queued memory slot so tests
     /// can simulate segments sealed in the past.
     #[cfg(test)]

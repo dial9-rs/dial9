@@ -884,10 +884,11 @@ fn epoch_to_system(epoch_secs: u64) -> SystemTime {
 #[derive(Debug, Default)]
 struct PassStats {
     /// Window-matched segments that reached a terminal outcome (pipeline
-    /// success, terminal failure, eviction, panic).
+    /// success, terminal failure, eviction, panic, retry budget spent).
     matched_done: usize,
-    /// Window-matched segments re-enqueued after a retryable failure.
-    matched_retry: usize,
+    /// Ids of the dumps matched by segments actually re-enqueued after a
+    /// retryable failure; those dumps stay open until the retry settles.
+    retry_dump_ids: Vec<crate::dump::DumpId>,
 }
 
 /// Record a terminal pipeline error against every matched dump that has
@@ -971,20 +972,24 @@ impl WorkerLoop {
 
         loop {
             if !dumps.is_empty() {
-                let retry_pending = self.drain_matching(&mut dumps).await;
-                // Windows quiesced: resolve every dump whose forward
-                // deadline elapsed (or that never had one). A pending
-                // matching retry keeps all due dumps open; it re-enters
-                // through the ring and the next pass settles it.
-                if !retry_pending {
-                    let now = tokio::time::Instant::now();
-                    let mut i = 0;
-                    while i < dumps.len() {
-                        if dumps[i].due(now) {
-                            self.resolve_dump(dumps.swap_remove(i)).await;
-                        } else {
-                            i += 1;
-                        }
+                let retry_hold = self.drain_matching(&mut dumps).await;
+                // Resolve every dump whose forward deadline elapsed (or
+                // that never had one) and that is not held open by a
+                // pending retry. A disk pass covers the whole backlog, so
+                // a retry there only holds the dumps the retrying segment
+                // matched; the memory pop dispenses one slot per pass, so
+                // a retry there keeps everything open until the head of
+                // the ring settles (budget-bounded, brief).
+                let exhaustive = self.fs.take_is_exhaustive();
+                let now = tokio::time::Instant::now();
+                let mut i = 0;
+                while i < dumps.len() {
+                    let held = !retry_hold.is_empty()
+                        && (!exhaustive || retry_hold.contains(&dumps[i].id));
+                    if dumps[i].due(now) && !held {
+                        self.resolve_dump(dumps.swap_remove(i)).await;
+                    } else {
+                        i += 1;
                     }
                 }
             }
@@ -1026,28 +1031,29 @@ impl WorkerLoop {
         }
     }
 
-    /// Run matching passes until the active windows quiesce. Returns `true`
-    /// when the pass ended because a matched segment failed retryably (the
-    /// caller bails to its select instead of hot-looping the retry).
-    async fn drain_matching(&mut self, dumps: &mut [ActiveDump]) -> bool {
+    /// Run matching passes until the active windows quiesce. Returns the
+    /// ids of dumps matched by segments that failed retryably (the caller
+    /// bails to its select instead of hot-looping the retry and keeps
+    /// those dumps open); empty means the windows quiesced.
+    async fn drain_matching(&mut self, dumps: &mut [ActiveDump]) -> Vec<crate::dump::DumpId> {
         loop {
             if dumps.is_empty() {
-                return false;
+                return Vec::new();
             }
             let windows: Vec<EpochWindow> = dumps.iter().map(|d| d.window).collect();
             let taken = self.fs.take_files_matching(&windows);
             let dispatched = taken.segments.len() as u64;
             self.emit_cycle_metrics(&taken, dispatched);
             if taken.segments.is_empty() {
-                return false;
+                return Vec::new();
             }
             let stats = self.process_segments(taken.segments, dumps).await;
-            if stats.matched_retry > 0 {
-                return true;
+            if !stats.retry_dump_ids.is_empty() {
+                return stats.retry_dump_ids;
             }
             if stats.matched_done == 0 {
                 // Only out-of-window segments (disk): nothing matching left.
-                return false;
+                return Vec::new();
             }
         }
     }
@@ -1287,9 +1293,6 @@ impl WorkerLoop {
                                 stats.matched_done += 1;
                             }
                         } else if e.kind.retryable() {
-                            if !matched.is_empty() {
-                                stats.matched_retry += 1;
-                            }
                             match &data.segment {
                                 // Memory segments always carry retry_count + a
                                 // byte snapshot (set in `TakenSegment::memory`).
@@ -1305,6 +1308,13 @@ impl WorkerLoop {
                                                 rate_limited!(Duration::from_secs(60), {
                                                     tracing::warn!(target: "dial9_worker", id = %data.segment, err = ?e.kind, budget = crate::background_task::fs::MEMORY_RETRY_BUDGET, "memory retry budget exhausted, dropping segment");
                                                 });
+                                                // Budget spent: terminal for any
+                                                // matched dump, same as a
+                                                // non-retryable failure.
+                                                if !matched.is_empty() {
+                                                    stats.matched_done += 1;
+                                                    record_dump_error(dumps, &matched, e.kind);
+                                                }
                                             } else {
                                                 tokio::time::sleep(self.poll_interval).await;
                                                 self.fs.release_for_retry(
@@ -1313,18 +1323,28 @@ impl WorkerLoop {
                                                     attempt,
                                                     (epoch_secs, seal_secs),
                                                 );
+                                                stats
+                                                    .retry_dump_ids
+                                                    .extend(matched.iter().map(|&i| dumps[i].id));
                                             }
                                         }
                                         _ => {
                                             rate_limited!(Duration::from_secs(60), {
                                                 tracing::warn!(target: "dial9_worker", id = %data.segment, "memory segment missing retry state, dropping");
                                             });
+                                            if !matched.is_empty() {
+                                                stats.matched_done += 1;
+                                                record_dump_error(dumps, &matched, e.kind);
+                                            }
                                         }
                                     }
                                 }
                                 SegmentRef::Disk(_) => {
                                     tracing::debug!(target: "dial9_worker", id = %data.segment, err = ?e.kind, "retryable error");
                                     self.fs.release_claim(&data.segment);
+                                    stats
+                                        .retry_dump_ids
+                                        .extend(matched.iter().map(|&i| dumps[i].id));
                                 }
                             }
                         } else {
@@ -3452,6 +3472,91 @@ mod triggered_worker_tests {
         check!(captured.lock().unwrap().len() == 1);
 
         stop.cancel();
+        worker.await.unwrap();
+    }
+
+    /// A retrying segment only holds open the dumps it matched (disk: one
+    /// pass covers the whole backlog); an unrelated due dump resolves.
+    #[tokio::test(start_paused = true)]
+    async fn disk_retry_holds_only_matched_dumps() {
+        /// Fails retryably, forever, any segment whose creation epoch
+        /// matches `old_epoch`; passes everything else through.
+        struct FailOldForever {
+            old_epoch: String,
+        }
+        impl SegmentProcessor for FailOldForever {
+            fn name(&self) -> &'static str {
+                "FailOldForever"
+            }
+            fn process(
+                &mut self,
+                data: SegmentData,
+            ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>>
+            {
+                let fail = data.metadata().get("epoch_secs") == Some(&self.old_epoch);
+                Box::pin(async move {
+                    if fail {
+                        Err(ProcessError::new(
+                            data,
+                            ProcessErrorKind::Transfer {
+                                source: Box::from("transient"),
+                                retryable: true,
+                            },
+                        ))
+                    } else {
+                        Ok(data)
+                    }
+                })
+            }
+        }
+
+        fn set_mtime(path: &Path, epoch_secs: u64) {
+            let f = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+            f.set_times(
+                std::fs::FileTimes::new()
+                    .set_modified(UNIX_EPOCH + Duration::from_secs(epoch_secs)),
+            )
+            .unwrap();
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let now = now_epoch();
+        let old_path = dir.path().join("trace.0.bin");
+        std::fs::write(&old_path, segment_with_epoch(now - 3600)).unwrap();
+        set_mtime(&old_path, now - 3600);
+        std::fs::write(dir.path().join("trace.1.bin"), segment_with_epoch(now)).unwrap();
+
+        let fs = Fs::new_disk(&dir.path().join("trace.bin"));
+        let (control, rx) = dump::trigger();
+        let stop = tokio_util::sync::CancellationToken::new();
+        let worker = spawn_worker(
+            Arc::clone(&fs),
+            vec![Box::new(FailOldForever {
+                old_epoch: (now - 3600).to_string(),
+            })],
+            rx,
+            stop.clone(),
+        );
+
+        // Wide dump matches both segments; its old one retries forever.
+        let fut_wide = std::future::IntoFuture::into_future(
+            control.dump_time_range(Duration::from_secs(7200), Duration::ZERO),
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Narrow dump's window cannot match the retrying segment: it must
+        // resolve despite the wide dump's pending retry.
+        let receipt_narrow = control
+            .dump_time_range(Duration::from_secs(60), Duration::ZERO)
+            .await
+            .unwrap();
+        check!(receipt_narrow.segments_processed == 0);
+
+        // The wide dump stays open until shutdown truncates it; the fresh
+        // segment it captured before the retry stall is on the receipt.
+        stop.cancel();
+        let receipt_wide = fut_wide.await.unwrap();
+        check!(receipt_wide.segments_processed == 1);
         worker.await.unwrap();
     }
 
