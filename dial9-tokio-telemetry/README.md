@@ -547,7 +547,13 @@ async fn main() {
 # fn main() {}
 ```
 
-To ensure the last segment is uploaded, use `guard.graceful_shutdown(timeout)`.
+When you use `#[dial9_tokio_telemetry::main]`, this shutdown drain happens
+automatically once `main` returns: the macro drops the runtime and then calls
+`graceful_shutdown` with a 1s deadline so the final segment is uploaded. Tune it
+with `.graceful_shutdown(Duration)` on the config builder, or turn it off with
+`.disable_graceful_shutdown()`. If you build a `TracedRuntime` by hand instead of
+using the macro, call `guard.graceful_shutdown(timeout)` yourself after the
+runtime is dropped.
 
 ### Running without disk (in-memory)
 
