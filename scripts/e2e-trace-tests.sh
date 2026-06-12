@@ -38,6 +38,9 @@ scripts/regenerate_demo_trace.sh
 echo "--- Checking trace integrity ---"
 node dial9-viewer/ui/test_trace_integrity.js
 
+echo "--- Checking task lifecycle consistency logic ---"
+node dial9-viewer/ui/test_task_lifecycle.js
+
 echo "--- Checking trace analysis ---"
 node dial9-viewer/ui/test_trace_analysis.js
 
