@@ -7,10 +7,10 @@ use super::ControlCommand;
 use super::shared_state::SharedState;
 
 crate::primitives::thread_local! {
-    /// Per-thread [`RecorderHandle`], populated in `on_thread_start` and
-    /// cleared in `on_thread_stop`. Backs [`RecorderHandle::current`] and
+    /// Per-thread [`Dial9Handle`], populated in `on_thread_start` and
+    /// cleared in `on_thread_stop`. Backs [`Dial9Handle::current`] and
     /// [`TelemetryHandle::current`].
-    pub(super) static CURRENT_HANDLE: RefCell<Option<RecorderHandle>> = const { RefCell::new(None) };
+    pub(super) static CURRENT_HANDLE: RefCell<Option<Dial9Handle>> = const { RefCell::new(None) };
 
     /// Nest count for [`InstrumentedSpawnGuard`]. `on_task_spawn` treats
     /// any value `> 0` as an instrumented spawn.
@@ -26,13 +26,13 @@ crate::primitives::thread_local! {
 /// - **Enabled** — backed by a real telemetry session; methods record
 ///   events and control recording.
 /// - **Disabled** — an inert sentinel returned by
-///   [`RecorderHandle::disabled`] and by [`RecorderHandle::current`]
+///   [`Dial9Handle::disabled`] and by [`Dial9Handle::current`]
 ///   when called from a thread that is not owned by a dial9 runtime.
 ///   All methods are no-ops.
 ///
 /// Use [`is_enabled`](Self::is_enabled) to distinguish the two modes.
 #[derive(Clone)]
-pub struct RecorderHandle {
+pub struct Dial9Handle {
     inner: Option<HandleInner>,
 }
 
@@ -42,15 +42,15 @@ struct HandleInner {
     control_tx: crate::primitives::sync::mpsc::SyncSender<ControlCommand>,
 }
 
-impl std::fmt::Debug for RecorderHandle {
+impl std::fmt::Debug for Dial9Handle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RecorderHandle")
+        f.debug_struct("Dial9Handle")
             .field("enabled", &self.is_enabled())
             .finish_non_exhaustive()
     }
 }
 
-impl RecorderHandle {
+impl Dial9Handle {
     pub(crate) fn enabled(
         shared: Arc<SharedState>,
         control_tx: crate::primitives::sync::mpsc::SyncSender<ControlCommand>,
@@ -69,8 +69,8 @@ impl RecorderHandle {
     /// Whether this handle is connected to a live telemetry session.
     ///
     /// Returns `false` for handles obtained via
-    /// [`RecorderHandle::disabled`], and for handles returned by
-    /// [`RecorderHandle::current`] when called from a thread that is
+    /// [`Dial9Handle::disabled`], and for handles returned by
+    /// [`Dial9Handle::current`] when called from a thread that is
     /// not owned by a dial9 runtime.
     pub fn is_enabled(&self) -> bool {
         self.inner.is_some()
@@ -86,7 +86,7 @@ impl RecorderHandle {
         self.inner.as_ref().map(|i| &i.control_tx)
     }
 
-    /// Return the [`RecorderHandle`] for the current thread.
+    /// Return the [`Dial9Handle`] for the current thread.
     ///
     /// On threads owned by a dial9 runtime (workers and blocking
     /// threads — installed via the runtime's `on_thread_start` hook,
@@ -97,7 +97,7 @@ impl RecorderHandle {
     /// `runtime.block_on(...)` on a `current_thread` runtime, threads
     /// outside any tokio context, and threads owned by a runtime built
     /// with telemetry disabled) this returns an inert handle whose
-    /// methods are all no-ops — see [`RecorderHandle::disabled`].
+    /// methods are all no-ops — see [`Dial9Handle::disabled`].
     ///
     /// Use [`is_enabled`](Self::is_enabled) when you need to branch on
     /// whether telemetry is actually live on the current thread.
@@ -107,7 +107,7 @@ impl RecorderHandle {
             .unwrap_or_else(Self::disabled)
     }
 
-    /// Return the [`RecorderHandle`] installed for the current thread,
+    /// Return the [`Dial9Handle`] installed for the current thread,
     /// or `None` if no dial9 runtime has claimed this thread.
     ///
     /// Prefer [`current`](Self::current) instead.
@@ -170,19 +170,19 @@ impl RecorderHandle {
     }
 }
 
-/// Tokio-aware telemetry handle: everything a [`RecorderHandle`] does, plus
+/// Tokio-aware telemetry handle: everything a [`Dial9Handle`] does, plus
 /// spawning instrumented futures.
 ///
-/// Derefs to [`RecorderHandle`], so recording and control methods
+/// Derefs to [`Dial9Handle`], so recording and control methods
 /// (`enable`, `disable`, `is_enabled`, ...) are available directly. On an
 /// enabled handle, [`spawn`](Self::spawn) wraps the future with wake-event
 /// tracking; on a disabled handle it falls back to [`tokio::spawn`].
 #[derive(Clone)]
-pub struct TelemetryHandle(RecorderHandle);
+pub struct TelemetryHandle(Dial9Handle);
 
 impl Deref for TelemetryHandle {
-    type Target = RecorderHandle;
-    fn deref(&self) -> &RecorderHandle {
+    type Target = Dial9Handle;
+    fn deref(&self) -> &Dial9Handle {
         &self.0
     }
 }
@@ -200,20 +200,20 @@ impl TelemetryHandle {
         shared: Arc<SharedState>,
         control_tx: crate::primitives::sync::mpsc::SyncSender<ControlCommand>,
     ) -> Self {
-        Self(RecorderHandle::enabled(shared, control_tx))
+        Self(Dial9Handle::enabled(shared, control_tx))
     }
 
     /// Return an inert handle that is not connected to any telemetry
     /// session. All methods are no-ops; [`spawn`](Self::spawn) falls
     /// back to [`tokio::spawn`] without wake tracking.
     pub fn disabled() -> Self {
-        Self(RecorderHandle::disabled())
+        Self(Dial9Handle::disabled())
     }
 
     /// Return the [`TelemetryHandle`] for the current thread. See
-    /// [`RecorderHandle::current`] for the exact semantics.
+    /// [`Dial9Handle::current`] for the exact semantics.
     pub fn current() -> Self {
-        Self(RecorderHandle::current())
+        Self(Dial9Handle::current())
     }
 
     /// Return the [`TelemetryHandle`] installed for the current thread,
@@ -221,7 +221,7 @@ impl TelemetryHandle {
     ///
     /// Prefer [`current`](Self::current) instead.
     pub fn try_current() -> Option<Self> {
-        RecorderHandle::try_current().map(Self)
+        Dial9Handle::try_current().map(Self)
     }
 
     /// Spawn a future on the ambient tokio runtime.

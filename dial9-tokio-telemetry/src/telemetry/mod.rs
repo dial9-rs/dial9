@@ -34,7 +34,7 @@ pub use format::{
 pub use process_resource_usage::ProcessResourceUsageConfig;
 pub use recorder::{
     BuildAndStartRuntime, HasTracePath, NoTracePath, PipelineCustom, PipelineS3, PipelineUnset,
-    RecorderHandle, RuntimeTelemetryHandle, TelemetryCore, TelemetryCoreBuilder, TelemetryGuard,
+    Dial9Handle, RuntimeTelemetryHandle, TelemetryCore, TelemetryCoreBuilder, TelemetryGuard,
     TelemetryHandle, TelemetryRuntimeError, TokioHooks, TraceRuntimeCoreBuilder, TracedRuntime,
     TracedRuntimeBuilder, current_worker_id, spawn,
 };
