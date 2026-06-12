@@ -771,8 +771,8 @@ pub(crate) struct WorkerLoop {
     /// Triggered mode, disk backend only: `(creation, seal)` epochs of
     /// segments already inspected and found outside every active window, so
     /// their files are not re-read on each pass. Entries leave when the
-    /// segment is processed or removed; bounded by the writer's disk
-    /// budget.
+    /// segment is processed or removed, and each matching pass prunes
+    /// entries for files no longer on disk (writer-evicted).
     epoch_cache: HashMap<u32, (u64, u64)>,
 }
 
@@ -1042,6 +1042,14 @@ impl WorkerLoop {
             }
             let windows: Vec<EpochWindow> = dumps.iter().map(|d| d.window).collect();
             let taken = self.fs.take_files_matching(&windows);
+            // Prune cache entries for files no longer dispensed (disk
+            // dispenses every unclaimed file per pass, so absence means
+            // the writer evicted it).
+            if !self.epoch_cache.is_empty() {
+                let live: std::collections::HashSet<u32> =
+                    taken.segments.iter().map(|t| t.seg_ref.index()).collect();
+                self.epoch_cache.retain(|idx, _| live.contains(idx));
+            }
             let dispatched = taken.segments.len() as u64;
             self.emit_cycle_metrics(&taken, dispatched);
             if taken.segments.is_empty() {
