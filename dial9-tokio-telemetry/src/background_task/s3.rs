@@ -263,6 +263,12 @@ fn valid_user_metadata_key(key: &str) -> bool {
         && !RESERVED.contains(&key)
 }
 
+/// Values ride HTTP headers too; a non-ASCII or oversized value would fail
+/// the whole trace-object PUT, so a bad caller pair is skipped instead.
+fn valid_user_metadata_value(value: &str) -> bool {
+    value.len() <= 256 && value.bytes().all(|b| (0x20..=0x7e).contains(&b))
+}
+
 /// Convert epoch seconds to `YYYY-MM-DD/HHMM` string for S3 key bucketing.
 fn time_bucket_from_epoch(epoch_secs: u64) -> String {
     let dt = time::OffsetDateTime::from_unix_timestamp(epoch_secs as i64)
@@ -358,14 +364,14 @@ impl S3Uploader {
             for (k, v) in metadata {
                 if let Some(stripped) = k.strip_prefix("dump.") {
                     let header_key = stripped.to_ascii_lowercase();
-                    if valid_user_metadata_key(&header_key) {
+                    if valid_user_metadata_key(&header_key) && valid_user_metadata_value(v) {
                         input = input.metadata(header_key, v);
                     } else {
                         rate_limited!(Duration::from_secs(60), {
                             tracing::warn!(
                                 target: "dial9_worker",
                                 key = %stripped,
-                                "dump metadata key not valid as S3 user metadata, skipping"
+                                "dump metadata pair not valid as S3 user metadata, skipping"
                             );
                         });
                     }
@@ -789,8 +795,9 @@ mod tests {
         let mut metadata = make_metadata(1741209000);
         metadata.insert("dump_id".into(), "01ABC,01DEF".into());
         metadata.insert("dump.reason".into(), "idle-ratio-drop".into());
-        metadata.insert("dump.Incident ID!".into(), "i-99".into()); // invalid: skipped
+        metadata.insert("dump.Incident ID!".into(), "i-99".into()); // invalid key: skipped
         metadata.insert("dump.host".into(), "spoofed".into()); // reserved: skipped
+        metadata.insert("dump.note".into(), "caf\u{e9}".into()); // non-ASCII value: skipped
 
         let compressed = gzip_compress_file_sync(&segment_path).unwrap();
         let key = uploader
@@ -809,6 +816,7 @@ mod tests {
         check!(meta.get("dump-id").unwrap() == "01ABC,01DEF");
         check!(meta.get("reason").unwrap() == "idle-ratio-drop");
         check!(!meta.contains_key("incident id!"));
+        check!(!meta.contains_key("note"), "non-ASCII value skipped");
         // Reserved fixed field never overridden by caller pairs.
         check!(meta.get("host").unwrap() == "us-east-1/i-0abc123");
     }
