@@ -170,7 +170,19 @@ fn try_remove_namespace(dir: &Path) -> io::Result<()> {
     Ok(())
 }
 
-pub(crate) fn setup_namespace(base_path: &Path) -> io::Result<(String, PathBuf, stdfs::File)> {
+/// Result of setting up a per-process namespace: the boot id, the rewritten
+/// trace path inside `{parent}/{boot_id}/`, and the lock handle that must be
+/// kept alive for the process lifetime.
+pub(crate) struct Namespace {
+    pub(crate) boot_id: String,
+    pub(crate) trace_path: PathBuf,
+    pub(crate) lock: stdfs::File,
+}
+
+/// Create `{parent}/{boot_id}/` under `base_path`'s directory, lock it, and
+/// rewrite the trace path to live inside it. When `gc` is true, dead peers'
+/// namespaces under the same parent are reclaimed first.
+pub(crate) fn setup_namespace(base_path: &Path, gc: bool) -> io::Result<Namespace> {
     let parent = base_path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -181,12 +193,17 @@ pub(crate) fn setup_namespace(base_path: &Path) -> io::Result<(String, PathBuf, 
 
     let boot_id = generate_boot_id();
     let ns_dir = parent.join(&boot_id);
-    let lock_file = acquire_namespace_lock(&ns_dir)?;
+    let lock = acquire_namespace_lock(&ns_dir)?;
 
-    let rewritten_path = ns_dir.join(filename);
-    gc_dead_namespaces(parent, &boot_id);
+    if gc {
+        gc_dead_namespaces(parent, &boot_id);
+    }
 
-    Ok((boot_id, rewritten_path, lock_file))
+    Ok(Namespace {
+        boot_id,
+        trace_path: ns_dir.join(filename),
+        lock,
+    })
 }
 
 #[cfg(test)]
@@ -293,12 +310,31 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let base = dir.path().join("trace.bin");
 
-        let (boot_id, rewritten, _lock) = setup_namespace(&base).unwrap();
+        let ns = setup_namespace(&base, true).unwrap();
 
-        assert!(is_valid_boot_id(&boot_id));
-        assert_eq!(rewritten, dir.path().join(&boot_id).join("trace.bin"));
-        assert!(dir.path().join(&boot_id).exists());
-        assert!(dir.path().join(&boot_id).join(".lock").exists());
+        assert!(is_valid_boot_id(&ns.boot_id));
+        assert_eq!(
+            ns.trace_path,
+            dir.path().join(&ns.boot_id).join("trace.bin")
+        );
+        assert!(dir.path().join(&ns.boot_id).exists());
+        assert!(dir.path().join(&ns.boot_id).join(".lock").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn setup_namespace_without_gc_keeps_dead_peer() {
+        let dir = TempDir::new().unwrap();
+        let dead_ns = dir.path().join("dead-9999");
+        std::fs::create_dir(&dead_ns).unwrap();
+        std::fs::write(dead_ns.join(".lock"), b"").unwrap();
+        std::fs::write(dead_ns.join("trace.0.bin"), b"data").unwrap();
+
+        let base = dir.path().join("trace.bin");
+        let _ns = setup_namespace(&base, false).unwrap();
+
+        // GC disabled, so the dead peer's directory survives.
+        assert!(dead_ns.exists());
     }
 
     #[cfg(unix)]
