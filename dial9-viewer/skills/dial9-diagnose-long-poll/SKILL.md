@@ -1,32 +1,24 @@
 ---
 name: dial9-diagnose-long-poll
-description: Root-cause WHY a poll was long, not just where it was. Covers what on-CPU vs off-CPU truly means, how to find the cause of an off-CPU stall even with no scheduling events captured (the per-OS-thread CPU census + correlation method), and how to distinguish an in-process holder from an off-box wait. Use when a long poll has been identified (by red_flag_scan.js or analyze.js) and you need to explain it and recommend a fix. Use when the user says "why is this poll long", "diagnose this long poll", "what is it blocked on", "is something holding a lock", or "off-CPU but no sched events".
+description: Root-cause why a poll was long, not just where it was. Use after `red_flag_scan.js` or `analyze.js` flags a long poll and you need to explain it and recommend a fix — including the off-CPU case with no scheduling events captured. Use when the user says "why is this poll long", "what is it blocked on", "is something holding a lock", or "off-CPU but no sched events".
 ---
 
 # Diagnosing the root cause of a long poll
 
 Finding long polls is easy (`red_flag_scan.js`, `analyze.js`). Explaining *why* a
-poll was long — and recommending the right fix — is the hard part, and it is where
-most analyses jump to a wrong conclusion. This skill is the method.
+poll was long is the hard part. This skill is the method.
 
-Read `dial9-runtime` first for the execution model (what a poll is, why a long one
-hurts). Use `dial9-zoom-window` for the windowing this method relies on.
+Read `dial9-runtime` first for the execution model. Use `dial9-zoom-window` for
+the windowing this method relies on.
 
-## "Long" is relative, not an absolute number
+## Judge a poll against this runtime's own distribution
 
-There is no universal millisecond threshold for "long." A poll is long when it sits
-in the **far tail of this runtime's own poll-duration distribution**. In a service
-whose p99 poll is 500µs, a 1ms poll is a 2×+ tail outlier worth chasing; in a batch
-job whose p99 is 40ms, a 5ms poll is noise. A fixed threshold (e.g. "1ms = bad")
-cries wolf on the batch job and stays silent on the latency-critical one until
-polls are already catastrophic.
+Express the candidate as a multiple of this runtime's `pollDurationByLoc` p99,
+not an absolute number. A 1ms poll is a 2× outlier when p99 is 500µs; a 5ms poll
+is in-distribution when p99 is 40ms.
 
-So **always calibrate against the distribution first**: read
-`pollDurationByLoc` (or the `analyzeTraces` poll histograms) to learn this app's
-p50/p99 per spawn location, and judge any candidate poll as a *multiple of p99*,
-not an absolute value. The script does this automatically — its default threshold
-is `3× p99` (with a 1ms floor to skip sub-ms noise), and it labels each poll with
-how many × the runtime's p99 it is.
+The script does this automatically — its default threshold is `3× p99` (with a
+1ms floor to skip sub-ms noise), and it labels each poll as a multiple of p99.
 
 ## Run it
 
@@ -62,7 +54,7 @@ Two independent questions, often conflated:
   did not cause harm does not mean it couldn't cause harm in other situations.
 
 
-## Step 2 — On-CPU vs off-CPU: what it TRULY means
+## Step 2 — On-CPU vs off-CPU
 
 dial9 attaches CPU samples to each poll. `attachCpuSamples()` splits them:
 `poll.cpuSamples` (source=0, **on-CPU**) and `poll.schedSamples` (source=1,
@@ -79,7 +71,7 @@ So the on-CPU sample count of the long poll itself tells you which world you're 
 | Observation | Meaning | Where the fix lives |
 |---|---|---|
 | **Has on-CPU samples** | The future ran synchronous work for that long — serialization, parsing, crypto, big collection ops, allocation. The stacks point straight at the hot code. | The spawn location's code: `spawn_blocking`, `yield_now`, or optimize the hot path. |
-| **No on-CPU samples** (off-CPU) | The worker was descheduled by the kernel **inside the poll** — blocked on a syscall, a `std::sync::Mutex`, file/DNS I/O, or a network round-trip. The future did almost no CPU work; it *waited*. | Depends on *what* it waited on — Step 3. |
+| **No on-CPU samples** (off-CPU) | Most likely the worker was descheduled by the kernel **inside the poll** — blocked on a syscall, a `std::sync::Mutex`, file/DNS I/O, or a network round-trip. Caveat: at the 99Hz default the sampler may simply have missed a short on-CPU burst, so for polls only a few × `MS_PER_SAMPLE` long, treat "no samples" as inconclusive. | Depends on *what* it waited on — Step 3. |
 
 Crucial corollary: **the off-CPU poll's own (absent) samples can never tell you
 why it was long.** There is nothing on-CPU to sample. The answer is always in
@@ -119,12 +111,14 @@ Then read the result:
   pool thread, a metrics/telemetry flusher, a background compaction thread, or the
   allocator. (That is exactly why a task/await scan misses it and the *thread*
   census finds it.)
-- **No samples from anyone** in the window → the whole box was idle while this poll
-  waited. There is **no in-process holder**. The poll is blocked **off-box**: a
-  network or disk syscall, or a futex whose owner is also parked. The cause is the
-  external dependency the spawn location awaits (an RPC, a DB/journal round-trip,
-  the next inbound bytes). No amount of local-CPU hunting will find a holder
-  because there isn't one.
+- **No samples from anyone** in the window → *if* the window is long enough that
+  the sampler should have caught any continuously-running thread (rule of thumb:
+  the poll spans at least ~3 sampling periods, i.e. ~30ms at 99Hz), the box was
+  idle while this poll waited. There is **no in-process holder**. The poll is
+  blocked **off-box**: a network or disk syscall, or a futex whose owner is also
+  parked. For shorter polls, "no samples" is **UNKNOWN** — a brief on-CPU holder
+  could have been missed; raise `--hz` or pool evidence across adjacent polls
+  before declaring it off-box. The script makes this distinction explicitly.
 
 > ### The sampling-math trap — read this twice
 > The easiest mistake in the entire workflow: seeing "only 5 samples" on a thread

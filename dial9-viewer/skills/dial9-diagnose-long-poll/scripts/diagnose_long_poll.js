@@ -16,7 +16,7 @@
 //      one-off coincidence is not.
 //
 // Usage:
-//   node diagnose_long_poll.js <trace.bin|dir> [--task <id>] [--min-ms 8] [--top 1]
+//   node diagnose_long_poll.js <trace.bin|dir> [--task <id>] [--min-ms 8] [--top 1] [--hz 99]
 "use strict";
 
 const fs = require("fs");
@@ -32,9 +32,6 @@ function resolve(name) {
 
 const { parseTrace, EVENT_TYPES, symbolizeChain, formatFrame } = require(resolve("trace_parser.js"));
 const { buildWorkerSpans, attachCpuSamples } = require(resolve("trace_analysis.js"));
-
-const HZ = 99;                 // dial9 default CPU sampling frequency
-const MS_PER_SAMPLE = 1000 / HZ; // ~10.1ms of on-CPU time per sample, per thread
 
 function argVal(flag, def) {
   const i = process.argv.indexOf(flag);
@@ -63,8 +60,10 @@ async function main() {
   const pctlMult = parseFloat(argVal("--pctl-mult", "3")); // N× p99
   const floorMs = parseFloat(argVal("--floor-ms", "1"));   // ignore sub-ms noise
   const top = parseInt(argVal("--top", "1"), 10);
+  const hz = parseFloat(argVal("--hz", "99"));             // perf sampling frequency
+  const msPerSample = 1000 / hz;
   if (!dir) {
-    console.error("usage: node diagnose_long_poll.js <trace.bin|dir> [--task <id>] [--min-ms <abs>] [--pctl-mult 3] [--floor-ms 1] [--top 1]");
+    console.error("usage: node diagnose_long_poll.js <trace.bin|dir> [--task <id>] [--min-ms <abs>] [--pctl-mult 3] [--floor-ms 1] [--top 1] [--hz 99]");
     process.exit(2);
   }
 
@@ -166,22 +165,36 @@ async function main() {
         if (!lg) { lg = { count: 0, stack: st }; g.leaves.set(key, lg); }
         lg.count++;
       }
-      console.log(`\nWHO ELSE WAS ON-CPU during this ${tp.durMs.toFixed(0)}ms (per-tid census; ~${MS_PER_SAMPLE.toFixed(0)}ms on-CPU per sample at ${HZ}Hz):`);
+      const expectedSamples = tp.durMs / msPerSample; // per always-on thread over the poll window
+      console.log(`\nWHO ELSE WAS ON-CPU during this ${tp.durMs.toFixed(0)}ms (per-tid census; ~${msPerSample.toFixed(1)}ms on-CPU per sample at ${hz}Hz; expected ≤${expectedSamples.toFixed(1)} samp/thread):`);
+      if (expectedSamples < 3) {
+        console.log(`  NOTE: poll is short relative to the sampling period — per-tid counts are noisy.`);
+        console.log(`        A thread on-CPU for the full window may still produce 0 samples. Treat absences as UNKNOWN.`);
+      }
       if (byTid.size === 0) {
-        console.log(`  *** NOBODY. The whole box was off-CPU/idle while this poll waited. ***`);
-        console.log(`  => No in-process holder. This poll is blocked OFF-BOX: a network or disk syscall,`);
-        console.log(`     or a futex with the owner also parked. Look at the spawn location's await: it's`);
-        console.log(`     waiting on an external round-trip (RPC/DB/journal) or the next inbound bytes.`);
+        if (expectedSamples >= 3) {
+          console.log(`  *** NO ON-CPU SAMPLES from any other thread. The box looks off-CPU/idle while this poll waited. ***`);
+          console.log(`  => No in-process holder. This poll is likely blocked OFF-BOX: a network or disk syscall,`);
+          console.log(`     or a futex with the owner also parked. Look at the spawn location's await: it's`);
+          console.log(`     waiting on an external round-trip (RPC/DB/journal) or the next inbound bytes.`);
+        } else {
+          console.log(`  *** UNKNOWN: no on-CPU samples, but the poll is too short for the sampler to confirm an idle box. ***`);
+          console.log(`  => Cannot distinguish "blocked off-box" from "sampler missed a brief on-CPU holder".`);
+          console.log(`     Re-run with --hz higher, or examine adjacent longer polls.`);
+        }
         continue;
       }
       const ranked = [...byTid.entries()].map(([tid, g]) => {
-        const estMs = g.times.length * MS_PER_SAMPLE;
+        const estMs = g.times.length * msPerSample;
         const coverage = Math.min(1, estMs / tp.durMs);
         return { tid, samples: g.times.length, estMs, coverage, leaves: g.leaves };
       }).sort((a, b) => b.samples - a.samples);
 
+      // Only call out a thread as "pinned" when there were enough expected samples
+      // to make the coverage claim meaningful. Below ~3 samples the inference is noise.
+      const canTrustPinned = expectedSamples >= 3;
       for (const r of ranked.slice(0, 5)) {
-        const pinned = r.coverage >= 0.6;
+        const pinned = canTrustPinned && r.coverage >= 0.6 && r.samples >= 3;
         console.log(`  tid=${r.tid}: ${r.samples} samples ≈ ${r.estMs.toFixed(0)}ms on-CPU (${(r.coverage * 100).toFixed(0)}% of the poll)${pinned ? "  <<< PINNED — likely the blocker" : ""}`);
         const topLeaf = [...r.leaves.values()].sort((a, b) => b.count - a.count)[0];
         console.log(`        ${topLeaf.stack.slice(0, 6).join(" < ")}`);
@@ -189,7 +202,7 @@ async function main() {
 
       // ── Step 4: corroborate by correlation across the other long polls ──
       const suspect = ranked[0];
-      if (suspect && suspect.coverage >= 0.6) {
+      if (suspect && canTrustPinned && suspect.coverage >= 0.6 && suspect.samples >= 3) {
         const suspectLeaf = [...suspect.leaves.values()].sort((a, b) => b.count - a.count)[0].stack[0];
         // For every OTHER long poll, was the suspect's leaf on-CPU inside its window?
         const others = polls.filter((p) => p !== tp);

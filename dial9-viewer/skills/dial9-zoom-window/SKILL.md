@@ -1,19 +1,17 @@
 ---
 name: dial9-zoom-window
-description: Zoom into a narrow time window of a dial9 trace to see exactly what every worker and OS thread was doing at one moment. Use when an aggregate view (analyze.js, red_flag_scan.js) points at a specific timestamp — a long poll, a queue spike, a latency outlier — and you need to reconstruct the instant rather than the 60-second average. Use when the user says "zoom in", "what was happening at +6953ms", "dive into that spike", or "show me the window around that poll".
+description: Zoom into a narrow time window of a dial9 trace to see every worker and OS thread at one moment. Use after an aggregate pass (`analyze.js`, `red_flag_scan.js`) flags a timestamp — a long poll, a queue spike, a latency outlier. Use when the user says "zoom in", "what was happening at +6953ms", or "show me the window around that poll".
 ---
 
 # Zooming into a time window
 
-Aggregate analysis (`analyze.js`, `red_flag_scan.js`) tells you *that* something
-happened and roughly *when*. It averages over the whole trace, so it cannot tell
-you what was happening **around** a single event. Most root-cause work is done by
-picking one timestamp and reconstructing the instant: which polls ran on which
-workers, who was on-CPU, whether the queue was backed up, what else was in flight.
+Aggregate analysis averages over the whole trace; it cannot show what was
+happening **around** a single event. Pick a timestamp and reconstruct the
+instant: which polls ran on which workers, who was on-CPU, whether the queue
+was backed up.
 
-This skill is the disciplined version of that. Pair it with
-`dial9-diagnose-long-poll` (which applies this windowing to root-cause a specific
-long poll) and `dial9-runtime` (the first-principles model of what the events mean).
+Pair with `dial9-diagnose-long-poll` (applies this windowing to root-cause one
+poll) and `dial9-runtime` (the execution model).
 
 ## When to zoom
 

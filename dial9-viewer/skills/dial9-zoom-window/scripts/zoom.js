@@ -5,11 +5,16 @@
 // dominant poll.
 //
 // Usage:
-//   node zoom.js <trace.bin|dir> <centerMs> [halfWindowMs=20]
+//   node zoom.js <trace.bin|dir> <centerMs> [halfWindowMs=20] [--hz N]
 //
 // centerMs is milliseconds from the start of the trace (the same "+N ms"
 // numbers the analyzer and red-flag scan print). Find an interesting centerMs
 // first — e.g. the timestamp of a long poll from `red_flag_scan.js`.
+//
+// --hz overrides the assumed perf sampling frequency (default 99 Hz, dial9's
+// default). At 99 Hz a thread accumulates ~1 on-CPU sample per 10ms, so a
+// window of ~30ms or less is below the sampler's noise floor; treat the
+// per-tid census there as suggestive rather than authoritative.
 "use strict";
 
 const fs = require("fs");
@@ -31,12 +36,21 @@ function leafOf(sample, symbols) {
   return frames[0] ? formatFrame(frames[0]).text : "(unknown)";
 }
 
+function argVal(flag, def) {
+  const i = process.argv.indexOf(flag);
+  return i >= 0 && i + 1 < process.argv.length ? process.argv[i + 1] : def;
+}
+
 async function main() {
   const dir = process.argv[2];
   const centerMs = parseFloat(process.argv[3]);
-  const halfMs = parseFloat(process.argv[4] || "20");
+  // halfWindowMs is optional positional arg 4; ignore it if it looks like a flag.
+  const positionalHalf = process.argv[4] && !process.argv[4].startsWith("--") ? process.argv[4] : "20";
+  const halfMs = parseFloat(positionalHalf);
+  const hz = parseFloat(argVal("--hz", "99"));
+  const msPerSample = 1000 / hz;
   if (!dir || Number.isNaN(centerMs)) {
-    console.error("usage: node zoom.js <trace.bin|dir> <centerMs> [halfWindowMs=20]");
+    console.error("usage: node zoom.js <trace.bin|dir> <centerMs> [halfWindowMs=20] [--hz N]");
     process.exit(2);
   }
 
@@ -104,26 +118,37 @@ async function main() {
 
     // ── Per-OS-thread CPU census (THE key view for off-CPU long polls) ──
     // perf only samples on-CPU threads, so a tid with samples here was running.
-    // At 99 Hz, ~1 sample / 10ms of on-CPU time. Even spacing => continuously on-CPU.
+    // At the configured sampling Hz, ~1 sample / msPerSample of on-CPU time.
+    // Even spacing => continuously on-CPU.
     const inWin = trace.cpuSamples.filter((s) => s.timestamp >= lo && s.timestamp <= hi);
     const byTid = new Map();
+    let onTotal = 0;
     for (const s of inWin) {
       let g = byTid.get(s.tid);
       if (!g) { g = { on: 0, off: 0, leaves: new Map(), times: [] }; byTid.set(s.tid, g); }
-      if (s.source === 1) g.off++; else g.on++;
+      if (s.source === 1) g.off++; else { g.on++; onTotal++; }
       const leaf = leafOf(s, trace.callframeSymbols);
       g.leaves.set(leaf, (g.leaves.get(leaf) || 0) + 1);
       g.times.push(s.timestamp);
     }
-    console.log(`\nper-tid CPU census in window (${inWin.length} samples; ~1 on-CPU samp / 10ms at 99Hz):`);
-    if (inWin.length === 0) {
-      console.log("  (no CPU samples in window — whole box was off-CPU/idle; a long poll here is blocked off-box: network/disk/futex)");
+    const expectedSamples = winMs / msPerSample; // per always-on thread, per window
+    console.log(`\nper-tid CPU census in window (${onTotal} on-CPU samples; ~1 on-CPU samp / ${msPerSample.toFixed(1)}ms at ${hz}Hz; expected ≤${expectedSamples.toFixed(1)} samp/thread):`);
+    if (expectedSamples < 3) {
+      console.log(`  (window is short relative to sampling period — per-tid counts are noisy; treat absent/sparse tids as UNKNOWN, not idle)`);
     }
-    const tids = [...byTid.entries()].sort((a, b) => (b[1].on + b[1].off) - (a[1].on + a[1].off));
+    if (onTotal === 0) {
+      if (expectedSamples >= 3) {
+        console.log("  (no on-CPU samples in window — likely the whole box was off-CPU/idle; a long poll here is probably blocked off-box: network/disk/futex)");
+      } else {
+        console.log("  (no on-CPU samples in window, but expected sample count is small — UNKNOWN; not enough sampling resolution to call this)");
+      }
+    }
+    // Sort by ON-CPU samples only — off-CPU sched samples don't indicate "running".
+    const tids = [...byTid.entries()].sort((a, b) => b[1].on - a[1].on);
     for (const [tid, g] of tids) {
-      const estOnMs = g.on * 10;
+      const estOnMs = g.on * msPerSample;
       const topLeaf = [...g.leaves.entries()].sort((a, b) => b[1] - a[1])[0];
-      // gap regularity: stddev of inter-sample gaps relative to mean
+      // gap regularity: mean of inter-sample gaps
       const ts = g.times.sort((a, b) => a - b);
       let cadence = "";
       if (ts.length >= 3) {
@@ -132,7 +157,7 @@ async function main() {
         const mean = gaps.reduce((a, b) => a + b, 0) / gaps.length;
         cadence = ` gaps~${mean.toFixed(1)}ms`;
       }
-      console.log(`  tid=${String(tid).padStart(5)}: on=${String(g.on).padStart(3)} off=${String(g.off).padStart(3)}  ~${estOnMs}ms on-CPU${cadence}  leaf: ${topLeaf[0]}`);
+      console.log(`  tid=${String(tid).padStart(5)}: on=${String(g.on).padStart(3)} off=${String(g.off).padStart(3)}  ~${estOnMs.toFixed(0)}ms on-CPU${cadence}  leaf: ${topLeaf[0]}`);
     }
 
     // ── Queue depth across the window ──
