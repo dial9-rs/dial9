@@ -337,6 +337,73 @@ mod tests {
         assert!(dead_ns.exists());
     }
 
+    /// flock is associated with the open file description, so a *second*
+    /// independent `open()` of the same lock file conflicts even from the same
+    /// process. This is the contention a second live process would hit, which
+    /// is what `is_lock_held` relies on to detect a live owner.
+    #[cfg(unix)]
+    #[test]
+    fn second_acquire_conflicts_while_first_held() {
+        let dir = TempDir::new().unwrap();
+        let ns_dir = dir.path().join("abcd-1234");
+
+        let first = acquire_namespace_lock(&ns_dir).unwrap();
+
+        let second = acquire_namespace_lock(&ns_dir);
+        assert!(
+            matches!(&second, Err(e) if e.kind() == io::ErrorKind::WouldBlock),
+            "second acquire of a held lock must fail with WouldBlock, got {second:?}"
+        );
+
+        // Releasing the first lets the next acquire succeed.
+        drop(first);
+        assert!(acquire_namespace_lock(&ns_dir).is_ok());
+    }
+
+    /// Two concurrent `setup_namespace` calls (two "live processes") must land
+    /// in distinct directories, each holding its own lock, and neither GC's the
+    /// other.
+    #[cfg(unix)]
+    #[test]
+    fn two_live_owners_get_isolated_namespaces() {
+        let dir = TempDir::new().unwrap();
+        let base = dir.path().join("trace.bin");
+
+        let a = setup_namespace(&base, true).unwrap();
+        let b = setup_namespace(&base, true).unwrap();
+
+        // Distinct namespaces.
+        assert_ne!(
+            a.boot_id, b.boot_id,
+            "two owners must get distinct boot_ids"
+        );
+        assert!(a.trace_path.starts_with(dir.path().join(&a.boot_id)));
+        assert!(b.trace_path.starts_with(dir.path().join(&b.boot_id)));
+
+        // Each owner still holds its lock — neither GC'd the other.
+        assert!(dir.path().join(&a.boot_id).join(".lock").exists());
+        assert!(dir.path().join(&b.boot_id).join(".lock").exists());
+        // The live locks are observed as held from a fresh fd.
+        assert!(is_lock_held(&dir.path().join(&a.boot_id)));
+        assert!(is_lock_held(&dir.path().join(&b.boot_id)));
+    }
+
+    /// A peer whose lock is still held (alive) must NOT be reclaimed by GC,
+    /// even though its directory contains only recognized files.
+    #[cfg(unix)]
+    #[test]
+    fn gc_preserves_live_peer_holding_lock() {
+        let dir = TempDir::new().unwrap();
+        let peer = dir.path().join("abcd-1");
+        let _peer_lock = acquire_namespace_lock(&peer).unwrap();
+        std::fs::write(peer.join("trace.0.bin"), b"live data").unwrap();
+
+        gc_dead_namespaces(dir.path(), "zzzz-2");
+
+        assert!(peer.exists(), "live peer must survive GC");
+        assert!(peer.join("trace.0.bin").exists());
+    }
+
     #[cfg(unix)]
     #[test]
     fn gc_removes_dead_namespace() {
