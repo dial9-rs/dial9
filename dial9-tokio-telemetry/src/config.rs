@@ -831,15 +831,21 @@ impl Dial9Config {
             })
         })?;
 
-        let writer = DiskWriter::builder()
-            .base_path(base_path.clone())
+        let (boot_id, namespaced_path, namespace_lock) =
+            crate::background_task::boot_id::setup_namespace(&base_path)
+                .map_err(Dial9ConfigBuilderError::Io)?;
+
+        let mut writer = DiskWriter::builder()
+            .base_path(namespaced_path.clone())
             .maybe_max_file_size(max_file_size)
             .max_total_size(max_total_size)
             .maybe_rotation_period(rotation_period)
             .build()
             .map_err(Dial9ConfigBuilderError::Io)?;
 
-        let seed = TracedRuntime::builder().with_trace_path(base_path);
+        writer.set_namespace(boot_id, namespace_lock);
+
+        let seed = TracedRuntime::builder().with_trace_path(namespaced_path);
         let runtime_builder: RuntimeBuilderFn = match runtime_finalizer {
             Some(finalize) => finalize(seed, writer),
             None => Box::new(move |tk| seed.build_and_start(tk, writer)),
@@ -1363,13 +1369,24 @@ mod tests {
             rt.guard().is_enabled(),
             "config should keep telemetry enabled"
         );
-        let wrote_trace_file = std::fs::read_dir(dir.path())
+        // With per-process namespace isolation, trace files land in a
+        // boot_id subdirectory: {trace_dir}/{boot_id}/trace.0.bin.active
+        let has_namespace_dir = std::fs::read_dir(dir.path())
             .expect("trace dir should exist")
             .filter_map(Result::ok)
-            .any(|entry| entry.file_name().to_string_lossy().starts_with("trace."));
+            .any(|entry| {
+                let name = entry.file_name().to_string_lossy().to_string();
+                crate::background_task::boot_id::is_valid_boot_id(&name)
+                    && entry.path().is_dir()
+                    && std::fs::read_dir(entry.path())
+                        .into_iter()
+                        .flatten()
+                        .flatten()
+                        .any(|e| e.file_name().to_string_lossy().starts_with("trace."))
+            });
         assert!(
-            wrote_trace_file,
-            "from_env should wire DIAL9_TRACE_DIR so trace segments land in <dir>"
+            has_namespace_dir,
+            "from_env should wire DIAL9_TRACE_DIR so trace segments land in <dir>/<boot_id>/"
         );
     }
 

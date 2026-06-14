@@ -1,3 +1,4 @@
+pub(crate) mod boot_id;
 #[cfg(feature = "worker-s3")]
 pub(crate) mod connection;
 pub(crate) mod fs;
