@@ -27,11 +27,28 @@
 //! Dumps are strictly best-effort: a window wider than what the ring
 //! retained captures whatever survived, with no error and no effect on the
 //! live stream.
+//!
+//! # Concurrent dumps
+//!
+//! Dumps are independent: triggering two at once registers two dumps, each
+//! with its own [`DumpId`] and (off S3) its own manifest. A segment whose
+//! span overlaps both windows is captured by both. There is no coordination
+//! by default - this is intentional, so unrelated subsystems can dump
+//! without stepping on each other.
+//!
+//! When a single source fires repeatedly (a watcher that re-trips every
+//! poll, a hot path that dumps on every slow request), use
+//! [`DumpControl::with_debounce`] to coalesce a burst into one dump:
+//! triggers within the debounce window after a dump dispatched resolve
+//! [`DumpError::Coalesced`], naming the dump they folded into instead of
+//! starting a new one. (A *cooldown* that rejects extra triggers outright,
+//! rather than folding them, is a possible future addition.)
 
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use tokio::sync::{mpsc, oneshot};
 
@@ -41,7 +58,13 @@ use crate::background_task::ProcessErrorKind;
 /// `with_trigger(rx)` on the runtime builder.
 pub fn trigger() -> (DumpControl, DumpRx) {
     let (tx, rx) = mpsc::unbounded_channel();
-    (DumpControl { tx }, DumpRx { rx })
+    (
+        DumpControl {
+            tx,
+            debounce: None,
+        },
+        DumpRx { rx },
+    )
 }
 
 /// Identifier minted for each dump request.
@@ -97,16 +120,52 @@ pub(crate) struct DumpRequest {
     pub(crate) receipt_tx: oneshot::Sender<Result<DumpReceipt, DumpError>>,
 }
 
+/// Leading-edge debounce gate shared across [`DumpControl`] clones.
+///
+/// Records when the last dump *dispatched* and the [`DumpId`] it was given.
+/// A request arriving within `window` of that dispatch coalesces into that
+/// id rather than starting a new dump. The window is measured from the last
+/// dispatched dump and is not extended by coalesced requests, so a burst all
+/// folds into the first dump and the effective rate is at most one dump per
+/// `window`.
+#[derive(Debug)]
+struct Debounce {
+    window: Duration,
+    last: Mutex<Option<(Instant, DumpId)>>,
+}
+
 /// Sending half of the trigger channel.
 ///
 /// Cloneable; share it with whatever subsystem decides when to dump (an
-/// idle-ratio watcher, a panic hook, a `/dump` HTTP handler, ...).
+/// idle-ratio watcher, a panic hook, a `/dump` HTTP handler, ...). Clones
+/// produced by [`with_debounce`](Self::with_debounce) share the debounce
+/// gate.
 #[derive(Debug, Clone)]
 pub struct DumpControl {
     tx: mpsc::UnboundedSender<DumpRequest>,
+    /// `Some` once [`with_debounce`](Self::with_debounce) has been called;
+    /// shared by reference so every clone honors one gate.
+    debounce: Option<Arc<Debounce>>,
 }
 
 impl DumpControl {
+    /// Coalesce duplicate triggers within `window` into a single dump.
+    ///
+    /// Call once right after [`trigger`], then clone the returned control;
+    /// every clone shares one gate. The first trigger in a quiet period
+    /// dispatches normally; any trigger arriving within `window` of that
+    /// dispatch resolves [`DumpError::Coalesced`] (naming the dump it folded
+    /// into) without starting a new dump. Useful when a single source - a
+    /// watcher that re-trips every poll, a hot path that dumps per slow
+    /// request - would otherwise fire a burst of near-identical dumps.
+    pub fn with_debounce(mut self, window: Duration) -> Self {
+        self.debounce = Some(Arc::new(Debounce {
+            window,
+            last: Mutex::new(None),
+        }));
+        self
+    }
+
     /// Capture everything the ring still holds, right now. No forward
     /// window.
     pub fn dump_current_data(&self) -> DumpRun<'_> {
@@ -129,10 +188,25 @@ impl DumpControl {
     }
 
     fn request(&self, lookback: Lookback, lookforward: Duration) -> DumpRun<'_> {
+        let id = DumpId::new();
+
+        // Leading-edge debounce: a trigger within `window` of the last
+        // dispatched dump coalesces into it instead of dispatching a new one.
+        if let Some(debounce) = &self.debounce {
+            let now = Instant::now();
+            let mut last = debounce.last.lock().expect("debounce mutex poisoned");
+            match *last {
+                Some((at, into)) if now.duration_since(at) < debounce.window => {
+                    return DumpRun::preempted(&self.tx, DumpError::Coalesced { into });
+                }
+                _ => *last = Some((now, id)),
+            }
+        }
+
         let (receipt_tx, receipt_rx) = oneshot::channel();
         DumpRun {
             request: Some(DumpRequest {
-                id: DumpId::new(),
+                id,
                 triggered_at: SystemTime::now(),
                 lookback,
                 lookforward,
@@ -141,6 +215,7 @@ impl DumpControl {
             }),
             tx: &self.tx,
             receipt_rx: Some(receipt_rx),
+            preempt: None,
         }
     }
 }
@@ -164,9 +239,23 @@ pub struct DumpRun<'a> {
     request: Option<DumpRequest>,
     tx: &'a mpsc::UnboundedSender<DumpRequest>,
     receipt_rx: Option<oneshot::Receiver<Result<DumpReceipt, DumpError>>>,
+    /// Set when the run never dispatches (debounced): awaiting resolves this
+    /// error directly. `request` is `None` for a preempted run, so
+    /// [`dispatch`](Self::dispatch) and `Drop` are no-ops.
+    preempt: Option<DumpError>,
 }
 
-impl DumpRun<'_> {
+impl<'a> DumpRun<'a> {
+    /// A run that never dispatches; awaiting resolves `err`.
+    fn preempted(tx: &'a mpsc::UnboundedSender<DumpRequest>, err: DumpError) -> Self {
+        DumpRun {
+            request: None,
+            tx,
+            receipt_rx: None,
+            preempt: Some(err),
+        }
+    }
+
     /// Attach a caller-supplied correlation pair. Chainable. Each pair is
     /// stamped onto every captured segment's metadata (namespaced as
     /// `dump.{key}`) before the pipeline runs; pipeline stages decide what
@@ -203,6 +292,11 @@ impl<'a> IntoFuture for DumpRun<'a> {
     type IntoFuture = DumpFuture;
 
     fn into_future(mut self) -> Self::IntoFuture {
+        if let Some(err) = self.preempt.take() {
+            return DumpFuture {
+                inner: DumpFutureInner::Preempted(err),
+            };
+        }
         let sent = self.dispatch();
         let inner = match (sent, self.receipt_rx.take()) {
             (true, Some(rx)) => DumpFutureInner::Waiting(rx),
@@ -226,13 +320,16 @@ pub struct DumpFuture {
 enum DumpFutureInner {
     Waiting(oneshot::Receiver<Result<DumpReceipt, DumpError>>),
     Stopped,
+    /// Debounced: never dispatched, resolves this error.
+    Preempted(DumpError),
 }
 
 impl Future for DumpFuture {
     type Output = Result<DumpReceipt, DumpError>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        match &mut self.get_mut().inner {
+        let inner = &mut self.get_mut().inner;
+        match inner {
             DumpFutureInner::Waiting(rx) => match Pin::new(rx).poll(cx) {
                 Poll::Ready(Ok(result)) => Poll::Ready(result),
                 // Worker exited without resolving the receipt.
@@ -240,6 +337,13 @@ impl Future for DumpFuture {
                 Poll::Pending => Poll::Pending,
             },
             DumpFutureInner::Stopped => Poll::Ready(Err(DumpError::WorkerStopped)),
+            // Move the error out; the future is not polled again after Ready.
+            DumpFutureInner::Preempted(_) => {
+                match std::mem::replace(inner, DumpFutureInner::Stopped) {
+                    DumpFutureInner::Preempted(err) => Poll::Ready(Err(err)),
+                    _ => unreachable!("matched Preempted above"),
+                }
+            }
         }
     }
 }
@@ -296,6 +400,13 @@ pub enum DumpError {
     WorkerStopped,
     /// Every captured segment failed in a pipeline stage.
     Pipeline(ProcessErrorKind),
+    /// The trigger was coalesced into an in-flight dump by the debounce gate
+    /// (see [`DumpControl::with_debounce`]). No new dump ran; `into` names the
+    /// dump that covers this trigger.
+    Coalesced {
+        /// Id of the dump this trigger folded into.
+        into: DumpId,
+    },
 }
 
 impl std::fmt::Display for DumpError {
@@ -303,6 +414,7 @@ impl std::fmt::Display for DumpError {
         match self {
             Self::WorkerStopped => write!(f, "worker is shutting down or already stopped"),
             Self::Pipeline(kind) => write!(f, "pipeline stage failed: {kind}"),
+            Self::Coalesced { into } => write!(f, "coalesced into dump {into}"),
         }
     }
 }
@@ -313,6 +425,7 @@ impl std::error::Error for DumpError {
             Self::WorkerStopped => None,
             Self::Pipeline(ProcessErrorKind::Io(e)) => Some(e),
             Self::Pipeline(ProcessErrorKind::Transfer { source, .. }) => Some(source.as_ref()),
+            Self::Coalesced { .. } => None,
         }
     }
 }
@@ -394,6 +507,59 @@ mod tests {
         drop(req);
         let err = fut.await.unwrap_err();
         assert!(matches!(err, DumpError::WorkerStopped));
+    }
+
+    #[tokio::test]
+    async fn debounce_coalesces_into_the_first_dump() {
+        let (control, mut rx) = trigger();
+        let control = control.with_debounce(Duration::from_secs(60));
+
+        // First trigger dispatches (drop dispatches the un-awaited run).
+        let _ = control.dump_current_data();
+        let first = rx.rx.try_recv().expect("first trigger dispatched");
+
+        // Second trigger within the window folds into the first.
+        let err = control.dump_current_data().await.unwrap_err();
+        assert!(matches!(err, DumpError::Coalesced { into } if into == first.id));
+        assert!(rx.rx.try_recv().is_err(), "coalesced trigger must not dispatch");
+    }
+
+    #[tokio::test]
+    async fn debounce_dispatches_again_after_window() {
+        let (control, mut rx) = trigger();
+        let control = control.with_debounce(Duration::from_millis(30));
+
+        let _ = control.dump_current_data();
+        let first = rx.rx.try_recv().expect("first dispatched");
+
+        tokio::time::sleep(Duration::from_millis(80)).await;
+
+        let _ = control.dump_current_data();
+        let second = rx.rx.try_recv().expect("dispatched again after window");
+        assert_ne!(first.id, second.id, "post-window dump gets a fresh id");
+    }
+
+    #[tokio::test]
+    async fn debounce_gate_is_shared_across_clones() {
+        let (control, mut rx) = trigger();
+        let control = control.with_debounce(Duration::from_secs(60));
+        let clone = control.clone();
+
+        let _ = control.dump_current_data();
+        let first = rx.rx.try_recv().expect("first dispatched");
+
+        // A clone honors the same gate, so its trigger coalesces too.
+        let err = clone.dump_current_data().await.unwrap_err();
+        assert!(matches!(err, DumpError::Coalesced { into } if into == first.id));
+    }
+
+    #[tokio::test]
+    async fn without_debounce_duplicate_triggers_both_dispatch() {
+        let (control, mut rx) = trigger();
+        let _ = control.dump_current_data();
+        let _ = control.dump_current_data();
+        assert!(rx.rx.try_recv().is_ok(), "first dispatched");
+        assert!(rx.rx.try_recv().is_ok(), "second dispatched (no coordination)");
     }
 
     #[test]
