@@ -471,15 +471,15 @@ impl<M: WriterMode> SegmentWriter<M> {
     }
 
     /// Per-process boot identifier, if namespace isolation is active. This is
-    /// the name of the [`trace_dir`](Self::trace_dir) subdirectory and matches
-    /// the `boot_id` embedded in S3 keys.
+    /// the name of the [`trace_dir`](Self::trace_dir) subdirectory.
     pub fn boot_id(&self) -> Option<&str> {
         self.boot_id.as_deref()
     }
 
-    /// Directory containing this writer's trace segments. When namespace
-    /// isolation is active this is `{configured_dir}/{boot_id}/`; otherwise it
-    /// is the configured directory directly.
+    /// Directory this writer's trace segments live in. When namespace
+    /// isolation is active this is the per-process `{configured_dir}/{boot_id}/`
+    /// subdirectory; otherwise it is the configured directory directly. Use
+    /// this to locate the segment files on disk.
     pub fn trace_dir(&self) -> &Path {
         self.base_path
             .parent()
