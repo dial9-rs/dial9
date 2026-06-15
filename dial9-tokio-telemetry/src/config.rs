@@ -6,7 +6,9 @@
 //! carrying only that mode's knobs, so disk and in-memory settings can't be
 //! mixed. `with_tokio` and `with_runtime` reach the underlying
 //! [`tokio::runtime::Builder`] and [`TracedRuntimeBuilder`]; `.enabled(false)`
-//! turns telemetry off while keeping a plain tokio runtime.
+//! turns telemetry off while keeping a plain tokio runtime. `graceful_shutdown`
+//! / `disable_graceful_shutdown` tune the implicit drain the `#[main]` macro
+//! runs after the async body returns (default 1s).
 //!
 //! Two finish functions cover the strict / lenient axis:
 //!
@@ -122,7 +124,20 @@ impl std::error::Error for Dial9ConfigBuilderError {
 ///   to a disabled config that preserves the user's `with_tokio`
 ///   configurators on validation or I/O failure.
 #[derive(Debug)]
-pub struct Dial9Config(pub(crate) Inner);
+pub struct Dial9Config {
+    pub(crate) inner: Inner,
+    /// Graceful-shutdown timeout applied by the `#[dial9_tokio_telemetry::main]`
+    /// macro after the async body completes. `Some(timeout)` drains the
+    /// background worker with that deadline; `None` skips the implicit drain
+    /// (the guard's `Drop` still flushes and seals the final segment).
+    ///
+    /// Defaults to `Some(`[`DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT`]`)`.
+    pub(crate) graceful_shutdown_timeout: Option<Duration>,
+}
+
+/// Default graceful-shutdown timeout used by the `#[dial9_tokio_telemetry::main]`
+/// macro when the user does not override it.
+pub(crate) const DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// A configurator closure that customizes a [`tokio::runtime::Builder`].
 ///
@@ -808,6 +823,8 @@ impl Dial9Config {
         base_path: PathBuf,
         #[builder(field)] tokio_configurators: Vec<TokioConfigurator>,
         #[builder(field)] runtime_finalizer: Option<RuntimeFinalizer<Disk>>,
+        #[builder(field = Some(DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT))]
+        graceful_shutdown_timeout: Option<Duration>,
         /// Defaults to `true`. When `false`, the writer fields are ignored and
         /// a plain tokio runtime is built without telemetry.
         #[builder(default = true)]
@@ -821,9 +838,12 @@ impl Dial9Config {
         rotation_period: Option<Duration>,
     ) -> Result<Dial9Config, Dial9ConfigBuilderError> {
         if !enabled {
-            return Ok(Dial9Config(Inner::Disabled {
-                tokio_configurators,
-            }));
+            return Ok(Dial9Config {
+                inner: Inner::Disabled {
+                    tokio_configurators,
+                },
+                graceful_shutdown_timeout,
+            });
         }
         let max_total_size = max_total_size.ok_or_else(|| {
             Dial9ConfigBuilderError::Validation(ValidationError {
@@ -845,10 +865,13 @@ impl Dial9Config {
             None => Box::new(move |tk| seed.build_and_start(tk, writer)),
         };
 
-        Ok(Dial9Config(Inner::Enabled {
-            tokio_configurators,
-            runtime_builder,
-        }))
+        Ok(Dial9Config {
+            inner: Inner::Enabled {
+                tokio_configurators,
+                runtime_builder,
+            },
+            graceful_shutdown_timeout,
+        })
     }
 
     /// In-memory-writer builder. Reached via [`Dial9ConfigBuilder::in_memory_buffer`].
@@ -857,6 +880,8 @@ impl Dial9Config {
     pub fn memory(
         #[builder(field)] tokio_configurators: Vec<TokioConfigurator>,
         #[builder(field)] runtime_finalizer: Option<RuntimeFinalizer<Memory>>,
+        #[builder(field = Some(DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT))]
+        graceful_shutdown_timeout: Option<Duration>,
         /// Defaults to `true`. When `false`, the writer fields are ignored and
         /// a plain tokio runtime is built without telemetry.
         #[builder(default = true)]
@@ -870,9 +895,12 @@ impl Dial9Config {
         rotation_period: Option<Duration>,
     ) -> Result<Dial9Config, Dial9ConfigBuilderError> {
         if !enabled {
-            return Ok(Dial9Config(Inner::Disabled {
-                tokio_configurators,
-            }));
+            return Ok(Dial9Config {
+                inner: Inner::Disabled {
+                    tokio_configurators,
+                },
+                graceful_shutdown_timeout,
+            });
         }
         let max_total_size = max_total_size.ok_or_else(|| {
             Dial9ConfigBuilderError::Validation(ValidationError {
@@ -897,10 +925,13 @@ impl Dial9Config {
             None => Box::new(move |tk| seed.build_and_start(tk, writer)),
         };
 
-        Ok(Dial9Config(Inner::Enabled {
-            tokio_configurators,
-            runtime_builder,
-        }))
+        Ok(Dial9Config {
+            inner: Inner::Enabled {
+                tokio_configurators,
+                runtime_builder,
+            },
+            graceful_shutdown_timeout,
+        })
     }
 }
 
@@ -911,6 +942,20 @@ macro_rules! with_tokio_doc {
     };
 }
 
+/// Doc text shared by both modes' `graceful_shutdown`.
+macro_rules! graceful_shutdown_doc {
+    () => {
+        "Set the graceful-shutdown timeout applied by `#[dial9_tokio_telemetry::main]`.\n\nAfter the async body returns, the macro drops the runtime (so Tokio worker threads exit and flush their thread-local buffers) and then calls [`TelemetryGuard::graceful_shutdown`](crate::telemetry::TelemetryGuard::graceful_shutdown) with this timeout, draining the background worker (symbolize, compress, upload) before the process exits.\n\nDefaults to 1 second. Call [`disable_graceful_shutdown`](Self::disable_graceful_shutdown) to skip the implicit drain. Has no effect on the low-level [`TracedRuntime`](crate::TracedRuntime) API, where you call `graceful_shutdown` yourself."
+    };
+}
+
+/// Doc text shared by both modes' `disable_graceful_shutdown`.
+macro_rules! disable_graceful_shutdown_doc {
+    () => {
+        "Skip the implicit graceful shutdown performed by `#[dial9_tokio_telemetry::main]`.\n\nWith graceful shutdown disabled the guard's `Drop` still flushes and seals the final segment, but the background worker is not drained (it exits without finishing symbolization/compression/upload of the last segment). The inverse of [`graceful_shutdown`](Self::graceful_shutdown)."
+    };
+}
+
 impl<S: disk_config_builder::State> DiskConfigBuilder<S> {
     #[doc = with_tokio_doc!()]
     pub fn with_tokio<F>(mut self, f: F) -> Self
@@ -918,6 +963,18 @@ impl<S: disk_config_builder::State> DiskConfigBuilder<S> {
         F: Fn(&mut tokio::runtime::Builder) + Send + Sync + 'static,
     {
         self.tokio_configurators.push(Arc::new(f));
+        self
+    }
+
+    #[doc = graceful_shutdown_doc!()]
+    pub fn graceful_shutdown(mut self, timeout: Duration) -> Self {
+        self.graceful_shutdown_timeout = Some(timeout);
+        self
+    }
+
+    #[doc = disable_graceful_shutdown_doc!()]
+    pub fn disable_graceful_shutdown(mut self) -> Self {
+        self.graceful_shutdown_timeout = None;
         self
     }
 
@@ -957,6 +1014,18 @@ impl<S: memory_config_builder::State> MemoryConfigBuilder<S> {
         F: Fn(&mut tokio::runtime::Builder) + Send + Sync + 'static,
     {
         self.tokio_configurators.push(Arc::new(f));
+        self
+    }
+
+    #[doc = graceful_shutdown_doc!()]
+    pub fn graceful_shutdown(mut self, timeout: Duration) -> Self {
+        self.graceful_shutdown_timeout = Some(timeout);
+        self
+    }
+
+    #[doc = disable_graceful_shutdown_doc!()]
+    pub fn disable_graceful_shutdown(mut self) -> Self {
+        self.graceful_shutdown_timeout = None;
         self
     }
 
@@ -1001,7 +1070,8 @@ impl<S: disk_config_builder::IsComplete> DiskConfigBuilder<S> {
     /// [`Dial9ConfigBuilderError`].
     pub fn build_or_disabled(self) -> Dial9Config {
         let fallback = self.tokio_configurators.clone();
-        downgrade_on_err(self.build(), fallback)
+        let graceful_shutdown_timeout = self.graceful_shutdown_timeout;
+        downgrade_on_err(self.build(), fallback, graceful_shutdown_timeout)
     }
 }
 
@@ -1025,13 +1095,15 @@ impl<S: memory_config_builder::IsComplete> MemoryConfigBuilder<S> {
     /// [`Dial9ConfigBuilderError`].
     pub fn build_or_disabled(self) -> Dial9Config {
         let fallback = self.tokio_configurators.clone();
-        downgrade_on_err(self.build(), fallback)
+        let graceful_shutdown_timeout = self.graceful_shutdown_timeout;
+        downgrade_on_err(self.build(), fallback, graceful_shutdown_timeout)
     }
 }
 
 fn downgrade_on_err(
     result: Result<Dial9Config, Dial9ConfigBuilderError>,
     fallback: Vec<TokioConfigurator>,
+    graceful_shutdown_timeout: Option<Duration>,
 ) -> Dial9Config {
     match result {
         Ok(cfg) => cfg,
@@ -1043,9 +1115,12 @@ fn downgrade_on_err(
             error(format_args!(
                 "dial9: telemetry config build failed; falling back to plain tokio runtime: {e}"
             ));
-            Dial9Config(Inner::Disabled {
-                tokio_configurators: fallback,
-            })
+            Dial9Config {
+                inner: Inner::Disabled {
+                    tokio_configurators: fallback,
+                },
+                graceful_shutdown_timeout,
+            }
         }
     }
 }
@@ -1341,7 +1416,7 @@ mod tests {
     fn env_config_builds_disabled_by_default() {
         let cfg = Dial9Config::from_env_source(&FakeEnv::default());
 
-        assert!(matches!(cfg.0, Inner::Disabled { .. }));
+        assert!(matches!(cfg.inner, Inner::Disabled { .. }));
     }
 
     #[test]
@@ -1355,7 +1430,7 @@ mod tests {
         let cfg = Dial9Config::from_env_source(&env);
 
         assert!(
-            matches!(cfg.0, Inner::Enabled { .. }),
+            matches!(cfg.inner, Inner::Enabled { .. }),
             "DIAL9_ENABLED + DIAL9_TRACE_DIR should produce an enabled config"
         );
         let rt = TracedRuntime::try_new(cfg).expect("runtime should build");
@@ -1661,7 +1736,7 @@ mod tests {
             .enabled(false)
             .build()
             .expect("disabled build needs no writer fields");
-        assert!(matches!(cfg.0, Inner::Disabled { .. }));
+        assert!(matches!(cfg.inner, Inner::Disabled { .. }));
     }
 
     #[test]
@@ -1853,5 +1928,156 @@ mod tests {
         );
         let source = std::error::Error::source(&err);
         assert!(source.is_some(), "source() must return the inner io::Error");
+    }
+
+    // ---------------------------------------------------------------
+    // graceful shutdown dial (issue #479)
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn disk_graceful_shutdown_defaults_to_one_second() {
+        let cfg = Dial9Config::builder()
+            .on_disk_buffer(tmp_base_path())
+            .max_total_size(4 * BYTES_PER_MIB)
+            .build()
+            .expect("build should succeed");
+        assert_eq!(
+            cfg.graceful_shutdown_timeout,
+            Some(Duration::from_secs(1)),
+            "disk config must default the graceful-shutdown timeout to 1s"
+        );
+    }
+
+    #[test]
+    fn memory_graceful_shutdown_defaults_to_one_second() {
+        let cfg = Dial9Config::builder()
+            .in_memory_buffer()
+            .max_total_size(16 * BYTES_PER_MIB)
+            .build()
+            .expect("build should succeed");
+        assert_eq!(
+            cfg.graceful_shutdown_timeout,
+            Some(Duration::from_secs(1)),
+            "in-memory config must default the graceful-shutdown timeout to 1s"
+        );
+    }
+
+    #[test]
+    fn graceful_shutdown_setter_overrides_default() {
+        let cfg = Dial9Config::builder()
+            .on_disk_buffer(tmp_base_path())
+            .max_total_size(4 * BYTES_PER_MIB)
+            .graceful_shutdown(Duration::from_secs(7))
+            .build()
+            .expect("build should succeed");
+        assert_eq!(cfg.graceful_shutdown_timeout, Some(Duration::from_secs(7)));
+    }
+
+    #[test]
+    fn disable_graceful_shutdown_sets_none() {
+        let cfg = Dial9Config::builder()
+            .on_disk_buffer(tmp_base_path())
+            .max_total_size(4 * BYTES_PER_MIB)
+            .disable_graceful_shutdown()
+            .build()
+            .expect("build should succeed");
+        assert_eq!(cfg.graceful_shutdown_timeout, None);
+    }
+
+    #[test]
+    fn memory_disable_graceful_shutdown_sets_none() {
+        let cfg = Dial9Config::builder()
+            .in_memory_buffer()
+            .max_total_size(16 * BYTES_PER_MIB)
+            .disable_graceful_shutdown()
+            .build()
+            .expect("build should succeed");
+        assert_eq!(cfg.graceful_shutdown_timeout, None);
+    }
+
+    #[test]
+    fn graceful_shutdown_timeout_preserved_when_disabled_downgrades() {
+        // build_or_disabled on a writer-I/O failure must keep the configured
+        // graceful-shutdown timeout on the downgraded (disabled) config.
+        let cfg = Dial9Config::builder()
+            .on_disk_buffer(unwritable_base_path())
+            .max_total_size(4 * BYTES_PER_MIB)
+            .graceful_shutdown(Duration::from_secs(3))
+            .build_or_disabled();
+        assert!(matches!(cfg.inner, Inner::Disabled { .. }));
+        assert_eq!(cfg.graceful_shutdown_timeout, Some(Duration::from_secs(3)));
+    }
+
+    #[test]
+    fn graceful_shutdown_timeout_flows_to_traced_runtime() {
+        let cfg = Dial9Config::builder()
+            .on_disk_buffer(tmp_base_path())
+            .max_total_size(4 * BYTES_PER_MIB)
+            .graceful_shutdown(Duration::from_millis(250))
+            .build()
+            .expect("build should succeed");
+        let rt = TracedRuntime::try_new(cfg).expect("runtime should build");
+        assert_eq!(
+            rt.graceful_shutdown_timeout,
+            Some(Duration::from_millis(250)),
+            "the configured timeout must flow into the TracedRuntime"
+        );
+    }
+
+    #[test]
+    fn graceful_shutdown_drains_worker_after_block_on() {
+        use crate::background_task::{ProcessError, SegmentData, SegmentProcessor};
+        use std::future::Future;
+        use std::pin::Pin;
+
+        #[derive(Debug)]
+        struct CountingProcessor(Arc<AtomicUsize>);
+        impl SegmentProcessor for CountingProcessor {
+            fn name(&self) -> &'static str {
+                "Counting"
+            }
+            fn process(
+                &mut self,
+                data: SegmentData,
+            ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>>
+            {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async move { Ok(data) })
+            }
+        }
+
+        let processed = Arc::new(AtomicUsize::new(0));
+        let processed_for_pipeline = Arc::clone(&processed);
+        let cfg = Dial9Config::builder()
+            .in_memory_buffer()
+            .max_total_size(16 * BYTES_PER_MIB)
+            .with_runtime(move |r| {
+                let processed = Arc::clone(&processed_for_pipeline);
+                r.with_custom_pipeline(move |p| p.pipe(CountingProcessor(processed)))
+            })
+            .build()
+            .expect("in-memory build with custom pipeline should succeed");
+        let rt = TracedRuntime::try_new(cfg).expect("runtime should build");
+        let output = rt.block_on(async { 99u32 });
+        assert_eq!(output, 99, "future output must be returned");
+        // The generous default 1s timeout is plenty for the no-op processor; the
+        // worker is joined, so by the time this returns the segment is drained.
+        rt.graceful_shutdown();
+        assert!(
+            processed.load(Ordering::SeqCst) >= 1,
+            "graceful shutdown must drain the background worker (process the sealed segment)"
+        );
+    }
+
+    #[test]
+    fn graceful_shutdown_on_disabled_runtime_is_noop() {
+        let cfg = Dial9Config::builder()
+            .on_disk_buffer(tmp_base_path())
+            .enabled(false)
+            .build()
+            .expect("disabled build should succeed");
+        let rt = TracedRuntime::try_new(cfg).expect("disabled runtime should build");
+        assert_eq!(rt.block_on(async { 5u32 }), 5);
+        rt.graceful_shutdown();
     }
 }

@@ -10,9 +10,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - In-memory writer (`InMemoryWriter`): run the trace pipeline with no filesystem dependency, encoded segments are held in process memory and shipped by the existing processor pipeline ([#435](https://github.com/dial9-rs/dial9/pull/435))
+- `#[dial9_tokio_telemetry::main]` now performs an implicit graceful shutdown after the async body returns: it drops the runtime and drains the background worker so the final segment is symbolized, compressed, and uploaded. Configure the deadline with `Dial9Config::builder()...graceful_shutdown(Duration)` (default 1s) or skip it with `.disable_graceful_shutdown()`. The low-level `TracedRuntime` API is unchanged — call `TelemetryGuard::graceful_shutdown` yourself ([#479](https://github.com/dial9-rs/dial9/issues/479))
 
 ### Changed
 
+- Programs using `#[dial9_tokio_telemetry::main]` with the fluent `Dial9Config` now drain the telemetry worker on clean exit (up to the graceful-shutdown deadline, default 1s) instead of exiting immediately. This adds a bounded amount of shutdown latency but ensures the final segment is processed; opt out with `.disable_graceful_shutdown()`. The deprecated positional config is unaffected ([#479](https://github.com/dial9-rs/dial9/issues/479))
 - **Breaking:** renamed `RotatingWriter` to `DiskWriter`. The writer is now generic over its storage backend (`SegmentWriter<Mode>`) with `DiskWriter` / `InMemoryWriter` as the public types; memory constructors are `InMemoryWriter::new` / `::builder` ([#435](https://github.com/dial9-rs/dial9/pull/435))
 - **Breaking:** `SegmentData::segment()` returns `&SegmentRef` (disk- or memory-backed) instead of `&SealedSegment`; processors that read the segment path must match the enum ([#435](https://github.com/dial9-rs/dial9/pull/435))
 
