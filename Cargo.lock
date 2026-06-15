@@ -1502,6 +1502,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "dial9-core"
+version = "0.4.0-alpha.1"
+dependencies = [
+ "crossbeam-queue",
+ "shuttle",
+]
+
+[[package]]
 name = "dial9-macro"
 version = "0.3.7"
 dependencies = [
@@ -1542,6 +1550,7 @@ dependencies = [
  "clap",
  "criterion",
  "crossbeam-queue",
+ "dial9-core",
  "dial9-macro",
  "dial9-perf-self-profile",
  "dial9-tokio-telemetry",

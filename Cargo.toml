@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = [
+    "dial9-core",
     "dial9-tokio-telemetry",
     "dial9-trace-format",
     "dial9-trace-format-derive",
@@ -22,6 +23,7 @@ repository = "https://github.com/dial9-rs/dial9-tokio-telemetry"
 
 [workspace.dependencies]
 libc = "0.2"
+dial9-core = { version = "0.4.0-alpha.1", path = "dial9-core" }
 dial9-perf-self-profile = { version = "0.4.4", path = "perf-self-profile" }
 dial9-trace-format = { version = "0.4.1", path = "dial9-trace-format" }
 dial9-trace-format-derive = { version = "0.4.1", path = "dial9-trace-format-derive" }

@@ -1,0 +1,17 @@
+[package]
+name = "dial9-core"
+version = "0.4.0-alpha.1"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Telemetry event bus for dial9"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(shuttle)"] }
+
+[dependencies]
+crossbeam-queue = "0.3"
+shuttle = { version = "0.9.1", optional = true }
+
+[features]
+_shuttle = ["dep:shuttle"]
