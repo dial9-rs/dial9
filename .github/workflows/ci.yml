@@ -64,6 +64,25 @@ jobs:
           toolchain: ${{ matrix.toolchain }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
+  # TEMPORARY (2026-06-15): the nightly build is disabled for ~2 weeks. This
+  # gate skips `build-nightly` until 2026-06-29 (UTC), after which the job
+  # re-enables automatically. Remove this `nightly-gate` job and the `needs:`/
+  # `if:` lines on `build-nightly` once the guard has expired.
+  nightly-gate:
+    name: Nightly build gate
+    runs-on: ubuntu-latest
+    outputs:
+      enabled: ${{ steps.check.outputs.enabled }}
+    steps:
+      - id: check
+        run: |
+          if [[ "$(date -u +%Y-%m-%d)" < "2026-06-29" ]]; then
+            echo "Nightly build temporarily disabled until 2026-06-29; skipping."
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          fi
+
   build-nightly:
     name: Build (${{ matrix.os }}, nightly)
     runs-on: ${{ matrix.os }}
@@ -72,6 +91,8 @@ jobs:
     # toolchain/ecosystem breakage and is intentionally NOT part of `ci-pass`, so
     # a nightly rustc regression or a freshly published dependency does not block
     # PRs. Watch it on main; fix forward when it goes red.
+    needs: nightly-gate
+    if: needs.nightly-gate.outputs.enabled == 'true'
     continue-on-error: true
     strategy:
       fail-fast: false
