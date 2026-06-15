@@ -9,11 +9,19 @@
 //! something is worth keeping. Most trace data is uninteresting; this mode
 //! pays processing cost only when it matters.
 //!
+//! This example models the realistic case: a background monitor task samples
+//! the ring on an interval and, when it spots an "incident", triggers a dump -
+//! the same shape as a watcher checking an idle-ratio or a p999 latency every
+//! few hundred milliseconds. A real watcher re-trips on consecutive ticks, so
+//! the control is built with `with_debounce(...)`: the first trigger dumps and
+//! the burst that follows folds into it (resolving `DumpError::Coalesced`)
+//! instead of producing a pile of near-identical dumps.
+//!
 //! `dump::trigger()` returns a `(control, rx)` pair: `rx` is wired into the
 //! runtime config, and `control` is what the application calls to dump. The
 //! `#[dial9_tokio_telemetry::main]` macro builds the runtime from the config
-//! closure, so `control` is published through a `static` for the body (and,
-//! realistically, for a panic hook) to reach.
+//! closure, so `control` is published through a `static` for the body (the
+//! monitor task, a panic hook, ...) to reach.
 //!
 //! This example uses a local `gzip` + `write_back` pipeline (no AWS setup).
 //! Dumped segments land as `*.bin.gz` in the trace dir.
@@ -27,13 +35,13 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use dial9_tokio_telemetry::Dial9Config;
-use dial9_tokio_telemetry::dump::{self, DumpControl};
+use dial9_tokio_telemetry::dump::{self, DumpControl, DumpError};
 use dial9_tokio_telemetry::telemetry::TelemetryHandle;
 
 const TRACE_DIR: &str = "/tmp/dial9-on-trigger-dump";
 
-/// Published by the config closure so the app body (or a panic hook, an HTTP
-/// handler, ...) can reach the dump control. `DumpControl` is `Clone`.
+/// Published by the config closure so the monitor task (or a panic hook, an
+/// HTTP handler, ...) can reach the dump control. `DumpControl` is `Clone`.
 static DUMP: OnceLock<DumpControl> = OnceLock::new();
 
 /// Count sealed segments in the ring (`*.bin`, excluding the active file).
@@ -53,9 +61,10 @@ fn sealed_segments() -> usize {
     let trace_path = format!("{TRACE_DIR}/trace.bin");
 
     // Create the trigger pair. `rx` is moved into the builder below;
-    // `control` is published so the body can dump on demand.
+    // `control` is published so the monitor can dump on demand. The debounce
+    // gate folds a burst of re-trips into a single dump.
     let (control, rx) = dump::trigger();
-    let _ = DUMP.set(control);
+    let _ = DUMP.set(control.with_debounce(Duration::from_secs(30)));
 
     Dial9Config::builder()
         .on_disk_buffer(trace_path)
@@ -74,46 +83,59 @@ fn sealed_segments() -> usize {
         .build_or_disabled()
 })]
 async fn main() {
-    // Produce trace data. Segments seal into the ring, but the pipeline stays
-    // parked: nothing is gzipped or written back yet.
     let handle = TelemetryHandle::current();
-    let tasks: Vec<_> = (0..8)
-        .map(|id| {
-            handle.spawn(async move {
-                for _ in 0..40 {
-                    tokio::time::sleep(Duration::from_millis(50)).await;
-                    std::hint::black_box(id);
-                }
-            })
-        })
-        .collect();
-    for t in tasks {
-        let _ = t.await;
+    let control = DUMP
+        .get()
+        .expect("DumpControl published by config closure")
+        .clone();
+
+    // Steady workload so the ring keeps sealing segments. The pipeline stays
+    // parked: nothing is gzipped or written back until the monitor dumps.
+    for id in 0..8 {
+        handle.spawn(async move {
+            for _ in 0..200 {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+                std::hint::black_box(id);
+            }
+        });
     }
 
-    // Wait until the writer has sealed at least one segment into the ring.
-    for _ in 0..200 {
-        if sealed_segments() > 0 {
-            break;
-        }
+    // Background monitor: sample the ring each tick and decide when to dump.
+    // Here the "incident" is simply that segments have accumulated; in a real
+    // app this is an idle-ratio drop, a p999 latency spike, a panic hook, etc.
+    while sealed_segments() == 0 {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     println!(
-        "buffered {} sealed segment(s), pipeline still parked",
+        "monitor: incident detected, {} sealed segment(s) buffered",
         sealed_segments()
     );
 
-    // Something noteworthy happened - dump what the ring holds, tagging the
-    // dump with a reason. The dump dispatches immediately; awaiting only
-    // retrieves the receipt.
-    println!("incident detected, dumping buffered segments ...");
-    let control = DUMP.get().expect("DumpControl published by config closure");
-    let receipt = control
-        .dump_current_data()
-        .with_metadata("reason", "demo")
-        .await
-        .expect("dump receipt");
+    // A real watcher re-trips on consecutive ticks. The first trigger dumps;
+    // the rest fold into it via the debounce gate.
+    let mut receipt = None;
+    for tick in 0..3 {
+        match control
+            .dump_current_data()
+            .with_metadata("reason", "idle-ratio-drop")
+            .await
+        {
+            Ok(r) => {
+                println!(
+                    "monitor: tick {tick}: dump {} captured {} segment(s)",
+                    r.dump_id, r.segments_processed
+                );
+                receipt.get_or_insert(r);
+            }
+            Err(DumpError::Coalesced { into }) => {
+                println!("monitor: tick {tick}: re-trip folded into dump {into}, skipping");
+            }
+            Err(e) => println!("monitor: tick {tick}: dump error: {e}"),
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 
+    let receipt = receipt.expect("at least one dump ran");
     println!("dump complete:");
     println!("  dump_id            = {}", receipt.dump_id);
     println!("  segments_processed = {}", receipt.segments_processed);
