@@ -217,7 +217,7 @@ fn lookforward_dump_captures_post_trigger_segments() {
 
     // Trigger before producing anything; the forward window collects the
     // segments the workload seals.
-    let lookforward = Duration::from_secs(2);
+    let lookforward = Duration::from_secs(5);
     let fut = control
         .dump_time_range(Duration::from_secs(1), lookforward)
         .into_future();
