@@ -126,8 +126,6 @@ fn expand_main(args: MainArgs, input: ItemFn) -> Result<TokenStream2, syn::Error
 ///       `Dial9Config` type, but writer-I/O failures are logged at `error!`
 ///       and downgraded to a disabled config that still preserves your
 ///       `with_tokio` configurators.
-///     - The deprecated positional `dial9_tokio_telemetry::config::Dial9Config`,
-///       kept compatible via a bridge impl.
 ///
 ///   Use `.enabled(false)` to run without telemetry while keeping your
 ///   `with_tokio` configurators.

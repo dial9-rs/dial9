@@ -1130,12 +1130,9 @@ impl TracedRuntime {
     /// [`TelemetryGuard::graceful_shutdown`] before the runtime drops.
     ///
     /// Generic over any input that converts into a [`TracedRuntime`]: in
-    /// practice that means either the fluent
-    /// [`crate::Dial9Config`] (returned by
-    /// [`Dial9Config::builder`](crate::Dial9Config::builder)) or the
-    /// deprecated positional [`crate::config::Dial9Config`]. The generic
-    /// shape is what keeps the macro source-compatible across these
-    /// input types.
+    /// practice that means the fluent [`crate::Dial9Config`] (returned by
+    /// [`Dial9Config::builder`](crate::Dial9Config::builder)). The generic
+    /// shape is what keeps the macro source-compatible across input types.
     ///
     /// # Panics
     ///
@@ -1173,10 +1170,9 @@ impl TracedRuntime {
     /// Fallible counterpart to [`new`](Self::new).
     ///
     /// Returns the conversion error directly: when constructing from
-    /// [`crate::Dial9Config`] that's a [`TelemetryRuntimeError`]; when
-    /// constructing from the deprecated [`crate::config::Dial9Config`]
-    /// it's a [`std::io::Error`]. Use this when you want to handle
-    /// runtime construction failure rather than panic.
+    /// [`crate::Dial9Config`] that's a [`TelemetryRuntimeError`]. Use this
+    /// when you want to handle runtime construction failure rather than
+    /// panic.
     ///
     /// ```no_run
     /// use dial9_tokio_telemetry::{Dial9Config, TracedRuntime};
@@ -1238,21 +1234,5 @@ impl TryFrom<crate::Dial9Config> for TracedRuntime {
     fn try_from(config: crate::Dial9Config) -> Result<Self, Self::Error> {
         let (runtime, guard) = try_assemble_dial9_config(config.0)?;
         Ok(Self { runtime, guard })
-    }
-}
-
-/// Bridge for the deprecated positional config API at
-/// [`crate::config::Dial9Config`] so that it remains compatible with
-/// [`TracedRuntime::new`] (and therefore the
-/// `#[dial9_tokio_telemetry::main]` macro).
-impl TryFrom<crate::config::Dial9Config> for TracedRuntime {
-    type Error = std::io::Error;
-
-    fn try_from(config: crate::config::Dial9Config) -> Result<Self, Self::Error> {
-        let (runtime, guard) = config.build()?;
-        Ok(Self {
-            runtime,
-            guard: guard.unwrap_or_else(TelemetryGuard::disabled),
-        })
     }
 }

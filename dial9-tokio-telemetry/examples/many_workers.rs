@@ -8,20 +8,19 @@
 
 use std::time::Duration;
 
-use dial9_tokio_telemetry::config::{Dial9Config, Dial9ConfigBuilder};
+use dial9_tokio_telemetry::Dial9Config;
 use dial9_tokio_telemetry::telemetry::TelemetryHandle;
 
 fn my_config() -> Dial9Config {
-    Dial9ConfigBuilder::new(
-        "many_workers_trace.bin",
-        64 * 1024 * 1024,
-        256 * 1024 * 1024,
-    )
-    .with_tokio(|t| {
-        t.worker_threads(48);
-    })
-    .with_runtime(|r| r.with_task_tracking(true))
-    .build()
+    Dial9Config::builder()
+        .on_disk_buffer("many_workers_trace.bin")
+        .max_file_size(64 * 1024 * 1024)
+        .max_total_size(256 * 1024 * 1024)
+        .with_tokio(|t| {
+            t.worker_threads(48);
+        })
+        .with_runtime(|r| r.with_task_tracking(true))
+        .build_or_disabled()
 }
 
 #[dial9_tokio_telemetry::main(config = my_config)]
