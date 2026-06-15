@@ -10,25 +10,7 @@ use aws_sdk_s3_transfer_manager::Client;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-/// Generate a short boot identifier (4 lowercase alpha chars).
-///
-/// Derived from the current system time nanoseconds. Different process
-/// restarts pick different values, letting you disambiguate segments
-/// from successive runs of the same service on the same host.
-fn default_boot_id() -> String {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let mut v = nanos as u64;
-    let mut s = String::with_capacity(4);
-    for _ in 0..4 {
-        s.push((b'a' + (v % 26) as u8) as char);
-        v /= 26;
-    }
-    s.push_str(&format!("-{}", std::process::id()));
-    s
-}
+use crate::background_task::boot_id::generate_boot_id as default_boot_id;
 
 /// Metadata about a sealed trace segment, passed to custom key functions.
 #[derive(Debug, Clone, Default)]

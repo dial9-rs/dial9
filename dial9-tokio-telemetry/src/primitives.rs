@@ -142,6 +142,9 @@ pub(crate) mod fs {
     pub(crate) fn remove_file(path: &Path) -> io::Result<()> {
         std::fs::remove_file(path)
     }
+    pub(crate) fn remove_dir(path: &Path) -> io::Result<()> {
+        std::fs::remove_dir(path)
+    }
     pub(crate) fn read_dir(path: &Path) -> io::Result<std::fs::ReadDir> {
         std::fs::read_dir(path)
     }
@@ -240,6 +243,10 @@ pub(crate) mod fs {
     pub(crate) fn remove_file(path: &Path) -> io::Result<()> {
         check()?;
         std::fs::remove_file(path)
+    }
+    pub(crate) fn remove_dir(path: &Path) -> io::Result<()> {
+        check()?;
+        std::fs::remove_dir(path)
     }
     pub(crate) fn read_dir(path: &Path) -> io::Result<std::fs::ReadDir> {
         check()?;

@@ -9,11 +9,12 @@ use std::path::{Path, PathBuf};
 
 use crate::primitives::fs;
 
-// Startup-only operations that don't need shuttle fault-injection.
-use std::fs as stdfs;
-
-use crate::background_task::sealed::parse_segment_artifact;
-
+/// Generate a boot identifier of the form `{4-alpha}-{pid}` (e.g. `qmxz-481`).
+///
+/// The 4 letters are derived from the current system-time nanoseconds and the
+/// pid makes it unique among live processes. Also used by the S3 uploader as
+/// `S3Config`'s default `boot_id`, so both the on-disk namespace and S3 keys
+/// share one identity format.
 pub(crate) fn generate_boot_id() -> String {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -40,102 +41,133 @@ pub(crate) fn is_valid_boot_id(name: &str) -> bool {
         && pid.bytes().all(|b| b.is_ascii_digit())
 }
 
-/// Acquire an exclusive advisory lock on `{namespace_dir}/.lock`.
-/// Returns the file handle — lock is held until the handle is dropped.
-/// Kernel releases automatically on process death (including SIGKILL).
+/// Advisory file locking via `flock(2)`. Confined to one place so the only
+/// `unsafe` in this module lives behind a small, documented API.
+///
+/// On non-unix targets there is no `flock`, so [`is_held`] conservatively
+/// reports "held" and the startup GC never reclaims a peer — isolation still
+/// works, only cross-process cleanup is skipped.
 #[cfg(unix)]
-pub(crate) fn acquire_namespace_lock(namespace_dir: &Path) -> io::Result<stdfs::File> {
+mod flock {
+    use std::io;
     use std::os::unix::io::AsRawFd;
+    use std::path::Path;
 
-    fs::create_dir_all(namespace_dir)?;
-    let lock_path = namespace_dir.join(".lock");
-    let file = stdfs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(false)
-        .open(&lock_path)?;
+    // The lock fd is a real OS handle; shuttle can't model `flock`, so the
+    // lockfile open/lock path deliberately uses `std::fs` rather than the
+    // crate's shuttle-aware `primitives::fs`.
+    use std::fs::{File, OpenOptions};
 
-    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-    if rc != 0 {
-        let err = io::Error::last_os_error();
-        return Err(io::Error::new(
-            io::ErrorKind::WouldBlock,
-            format!("namespace lock held by another process: {err}"),
-        ));
+    /// Open (creating if needed) and exclusively `flock` `path`, non-blocking.
+    /// The lock is held until the returned [`File`] is dropped; the kernel
+    /// releases it automatically on process death (including SIGKILL).
+    /// Returns `WouldBlock` if another open file description holds the lock.
+    pub(super) fn acquire(path: &Path) -> io::Result<File> {
+        let file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(path)?;
+        // SAFETY: `as_raw_fd` returns a valid fd owned by `file`, which
+        // outlives this call. `flock` only reads the fd and the constant
+        // flags; no memory is involved.
+        let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if rc != 0 {
+            let err = io::Error::last_os_error();
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                format!("namespace lock held by another process: {err}"),
+            ));
+        }
+        Ok(file)
     }
-    Ok(file)
+
+    /// Whether `path`'s lock is currently held by some live process. Probes by
+    /// trying to acquire it from a fresh fd: success means the owner is gone.
+    pub(super) fn is_held(path: &Path) -> bool {
+        let Ok(file) = OpenOptions::new().read(true).open(path) else {
+            return false;
+        };
+        // SAFETY: same as `acquire` — `file` owns the fd for the duration.
+        let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if rc == 0 {
+            // We got it, so no one else holds it: release our probe lock.
+            // SAFETY: same fd, still owned by `file`.
+            unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
+            false
+        } else {
+            true
+        }
+    }
+}
+
+/// Acquire the namespace lock at `{namespace_dir}/.lock`, creating the
+/// directory if needed. The returned handle must be held for the process
+/// lifetime; dropping it releases the lock.
+#[cfg(unix)]
+pub(crate) fn acquire_namespace_lock(namespace_dir: &Path) -> io::Result<std::fs::File> {
+    fs::create_dir_all(namespace_dir)?;
+    flock::acquire(&namespace_dir.join(".lock"))
 }
 
 #[cfg(not(unix))]
-pub(crate) fn acquire_namespace_lock(namespace_dir: &Path) -> io::Result<stdfs::File> {
+pub(crate) fn acquire_namespace_lock(namespace_dir: &Path) -> io::Result<std::fs::File> {
     fs::create_dir_all(namespace_dir)?;
-    let lock_path = namespace_dir.join(".lock");
-    stdfs::OpenOptions::new()
+    std::fs::OpenOptions::new()
         .create(true)
         .write(true)
         .truncate(false)
-        .open(&lock_path)
+        .open(namespace_dir.join(".lock"))
 }
 
-#[cfg(unix)]
+/// Whether `namespace_dir`'s owner is still alive. On non-unix there is no
+/// `flock`, so this conservatively returns `true` and GC never runs.
 fn is_lock_held(namespace_dir: &Path) -> bool {
-    use std::os::unix::io::AsRawFd;
-
-    let lock_path = namespace_dir.join(".lock");
-    let file = match stdfs::OpenOptions::new().read(true).open(&lock_path) {
-        Ok(f) => f,
-        Err(_) => return false,
-    };
-    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-    if rc == 0 {
-        // Acquired — owner is dead. Release immediately.
-        unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
-        false
-    } else {
+    #[cfg(unix)]
+    {
+        flock::is_held(&namespace_dir.join(".lock"))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = namespace_dir;
         true
     }
 }
 
-#[cfg(not(unix))]
-fn is_lock_held(_namespace_dir: &Path) -> bool {
-    // No flock — conservatively assume alive so GC never runs.
-    true
-}
-
-fn is_safe_to_delete(entry: &stdfs::DirEntry, stem: &str) -> bool {
-    let Ok(meta) = entry.metadata() else {
+/// Whether a file is one this crate creates and may therefore delete: the
+/// `.lock` or any `{stem}.{index}.bin[.gz|.active]` segment artifact, for any
+/// stem.
+fn is_recognized_artifact(name: &str) -> bool {
+    if name == ".lock" {
+        return true;
+    }
+    let Some((head, tail)) = name.split_once(".bin") else {
         return false;
     };
-    if !meta.is_file() {
+    if !tail.is_empty() && tail != ".gz" && tail != ".active" {
         return false;
     }
-    let name = entry.file_name();
-    let Some(name) = name.to_str() else {
-        return false;
-    };
-    name == ".lock" || parse_segment_artifact(name, stem).is_some()
+    // `head` is `{stem}.{index}` — require a trailing `.{digits}` index.
+    matches!(head.rsplit_once('.'), Some((_, idx)) if !idx.is_empty() && idx.bytes().all(|b| b.is_ascii_digit()))
 }
 
-/// Infer the trace stem from any recognized file in the directory.
-fn infer_stem(entries: &[stdfs::DirEntry]) -> Option<String> {
-    for entry in entries {
-        let name = entry.file_name();
-        let name = name.to_str()?;
-        if let Some(dot_pos) = name.find('.') {
-            let candidate = &name[..dot_pos];
-            if !candidate.is_empty() && parse_segment_artifact(name, candidate).is_some() {
-                return Some(candidate.to_string());
-            }
-        }
-    }
-    None
-}
-
-/// Fails closed: unrecognized files cause the directory to be skipped.
-/// Never recursive.
+/// Reclaim dead peers' namespace directories under `parent_dir`. A directory
+/// is eligible only if its name is a boot_id, it isn't ours, its lock is free
+/// (owner dead), and it contains nothing but recognized artifacts. Fails
+/// closed: an unrecognized file leaves the directory untouched. Never
+/// recursive.
 pub(crate) fn gc_dead_namespaces(parent_dir: &Path, own_boot_id: &str) {
-    let Ok(entries) = fs::read_dir(parent_dir) else {
-        return;
+    let entries = match fs::read_dir(parent_dir) {
+        Ok(entries) => entries,
+        Err(e) => {
+            tracing::debug!(
+                target: "dial9_worker",
+                error = %e,
+                dir = %parent_dir.display(),
+                "namespace GC: failed to scan parent directory"
+            );
+            return;
+        }
     };
 
     for entry in entries.flatten() {
@@ -150,24 +182,34 @@ pub(crate) fn gc_dead_namespaces(parent_dir: &Path, own_boot_id: &str) {
         if name == own_boot_id || !is_valid_boot_id(name) || is_lock_held(&path) {
             continue;
         }
-        let _ = try_remove_namespace(&path);
+        if let Err(e) = try_remove_namespace(&path) {
+            tracing::debug!(
+                target: "dial9_worker",
+                error = %e,
+                dir = %path.display(),
+                "namespace GC: failed to reclaim dead peer"
+            );
+        }
     }
 }
 
 fn try_remove_namespace(dir: &Path) -> io::Result<()> {
-    let entries: Vec<_> = stdfs::read_dir(dir)?.filter_map(|e| e.ok()).collect();
-
-    let stem = infer_stem(&entries).unwrap_or_else(|| "trace".to_string());
-
-    if entries.iter().any(|e| !is_safe_to_delete(e, &stem)) {
-        return Ok(());
+    let mut paths = Vec::new();
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        match name.to_str() {
+            Some(name) if is_recognized_artifact(name) => paths.push(entry.path()),
+            // Anything we don't recognize (or a non-UTF-8 name) means this
+            // isn't safely ours to delete — fail closed, leave it alone.
+            _ => return Ok(()),
+        }
     }
 
-    for entry in &entries {
-        let _ = fs::remove_file(&entry.path());
+    for path in paths {
+        fs::remove_file(&path)?;
     }
-    let _ = stdfs::remove_dir(dir);
-    Ok(())
+    fs::remove_dir(dir)
 }
 
 /// Result of setting up a per-process namespace: the boot id, the rewritten
@@ -176,7 +218,7 @@ fn try_remove_namespace(dir: &Path) -> io::Result<()> {
 pub(crate) struct Namespace {
     pub(crate) boot_id: String,
     pub(crate) trace_path: PathBuf,
-    pub(crate) lock: stdfs::File,
+    pub(crate) lock: std::fs::File,
 }
 
 /// Create `{parent}/{boot_id}/` under `base_path`'s directory, lock it, and
@@ -240,53 +282,24 @@ mod tests {
         assert!(!is_valid_boot_id(""));
     }
 
-    fn make_entry(dir: &Path, name: &str) -> stdfs::DirEntry {
-        let path = dir.join(name);
-        std::fs::write(&path, b"x").unwrap();
-        stdfs::read_dir(dir)
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .find(|e| e.file_name() == std::ffi::OsStr::new(name))
-            .unwrap()
+    #[test]
+    fn is_recognized_artifact_accepts_known() {
+        assert!(is_recognized_artifact(".lock"));
+        assert!(is_recognized_artifact("trace.0.bin"));
+        assert!(is_recognized_artifact("trace.0.bin.active"));
+        assert!(is_recognized_artifact("trace.0.bin.gz"));
+        assert!(is_recognized_artifact("my-app.42.bin"));
+        assert!(is_recognized_artifact("some.other.stem.7.bin.gz"));
     }
 
     #[test]
-    fn is_safe_to_delete_accepts_known() {
-        let dir = TempDir::new().unwrap();
-        assert!(is_safe_to_delete(&make_entry(dir.path(), ".lock"), "trace"));
-        assert!(is_safe_to_delete(
-            &make_entry(dir.path(), "trace.0.bin"),
-            "trace"
-        ));
-        assert!(is_safe_to_delete(
-            &make_entry(dir.path(), "trace.0.bin.active"),
-            "trace"
-        ));
-        assert!(is_safe_to_delete(
-            &make_entry(dir.path(), "trace.0.bin.gz"),
-            "trace"
-        ));
-        assert!(is_safe_to_delete(
-            &make_entry(dir.path(), "my-app.42.bin"),
-            "my-app"
-        ));
-    }
-
-    #[test]
-    fn is_safe_to_delete_rejects_unknown() {
-        let dir = TempDir::new().unwrap();
-        assert!(!is_safe_to_delete(
-            &make_entry(dir.path(), "README.md"),
-            "trace"
-        ));
-        assert!(!is_safe_to_delete(
-            &make_entry(dir.path(), "data.json"),
-            "trace"
-        ));
-        assert!(!is_safe_to_delete(
-            &make_entry(dir.path(), ".hidden"),
-            "trace"
-        ));
+    fn is_recognized_artifact_rejects_unknown() {
+        assert!(!is_recognized_artifact("README.md"));
+        assert!(!is_recognized_artifact("data.json"));
+        assert!(!is_recognized_artifact(".hidden"));
+        assert!(!is_recognized_artifact("trace.bin")); // no index
+        assert!(!is_recognized_artifact("trace.x.bin")); // non-numeric index
+        assert!(!is_recognized_artifact("trace.0.bin.tmp")); // unknown suffix
     }
 
     #[cfg(unix)]
