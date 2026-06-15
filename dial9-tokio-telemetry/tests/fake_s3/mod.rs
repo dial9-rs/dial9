@@ -2,6 +2,10 @@
 //!
 //! Provides in-process S3 clients backed by `s3s-fs` with optional
 //! region enforcement, flaky injection, and hanging behavior.
+//!
+//! Each integration test binary compiles this module independently and uses
+//! only the helpers it needs, so unused-helper warnings are expected here.
+#![allow(dead_code)]
 
 /// Create an `aws_sdk_s3::Client` backed by s3s-fs (in-memory fake S3).
 pub fn fake_s3_client(fs_root: &std::path::Path) -> aws_sdk_s3::Client {
