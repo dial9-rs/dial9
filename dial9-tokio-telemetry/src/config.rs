@@ -1387,10 +1387,17 @@ mod tests {
         let cfg = Dial9Config::from_env_source(&env);
         let rt = TracedRuntime::try_new(cfg).expect("runtime should build");
         let shared = rt.guard().shared().expect("telemetry should be enabled");
-        let contexts = shared.contexts.lock().unwrap();
-
-        assert_eq!(contexts.len(), 1);
-        assert_eq!(contexts[0].runtime_name.as_deref(), Some("api-runtime"));
+        let runtime_meta: Vec<(String, String)> = shared
+            .sources
+            .lock()
+            .unwrap()
+            .iter()
+            .flat_map(|s| s.segment_metadata())
+            .collect();
+        assert!(
+            runtime_meta.iter().any(|(k, _)| k == "runtime.api-runtime"),
+            "env runtime name should surface in segment metadata"
+        );
         assert!(shared.task_dumps_enabled.load(Ordering::Relaxed));
         assert_eq!(
             shared.task_dump_idle_threshold_ns.load(Ordering::Relaxed),
@@ -1462,14 +1469,16 @@ mod tests {
         let rt = TracedRuntime::try_new(cfg).expect("runtime should build");
         assert!(rt.guard().is_enabled(), "telemetry should remain enabled");
         assert!(
-            rt.guard()
+            !rt.guard()
                 .shared()
                 .expect("telemetry should be enabled")
-                .contexts
+                .sources
                 .lock()
                 .unwrap()
-                .is_empty(),
-            "no Tokio runtime contexts should be registered when Tokio instrumentation is disabled"
+                .iter()
+                .flat_map(|s| s.segment_metadata())
+                .any(|(k, _)| k.starts_with("runtime.")),
+            "no Tokio runtime metadata should be present when Tokio instrumentation is disabled"
         );
         assert!(
             !rt.block_on(async { crate::telemetry::TelemetryHandle::current().is_enabled() }),

@@ -1,36 +1,38 @@
 use crate::primitives::sync::Arc;
 use std::cell::Cell;
 use std::cell::RefCell;
+use std::ops::Deref;
 
 use super::ControlCommand;
 use super::shared_state::SharedState;
 
 crate::primitives::thread_local! {
-    /// Per-thread [`TelemetryHandle`], populated in `on_thread_start` and
-    /// cleared in `on_thread_stop`. Enables [`TelemetryHandle::current`].
-    pub(super) static CURRENT_HANDLE: RefCell<Option<TelemetryHandle>> = const { RefCell::new(None) };
+    /// Per-thread [`Dial9Handle`], populated in `on_thread_start` and
+    /// cleared in `on_thread_stop`. Backs [`Dial9Handle::current`] and
+    /// [`TelemetryHandle::current`].
+    pub(super) static CURRENT_HANDLE: RefCell<Option<Dial9Handle>> = const { RefCell::new(None) };
 
     /// Nest count for [`InstrumentedSpawnGuard`]. `on_task_spawn` treats
     /// any value `> 0` as an instrumented spawn.
     pub(super) static INSTRUMENTED_SPAWN: Cell<u32> = const { Cell::new(0) };
 }
 
-/// Cheap, cloneable handle for controlling telemetry from anywhere.
+/// Cheap, cloneable handle for recording events and controlling telemetry.
+///
+/// For the Tokio-aware handle that can spawn instrumented futures, see [`TelemetryHandle`].
 ///
 /// A handle may be in one of two modes:
 ///
 /// - **Enabled** — backed by a real telemetry session; methods record
-///   events, control recording, and wrap spawned futures with wake
-///   tracking.
+///   events and control recording.
 /// - **Disabled** — an inert sentinel returned by
-///   [`TelemetryHandle::disabled`] and by [`TelemetryHandle::current`]
+///   [`Dial9Handle::disabled`] and by [`Dial9Handle::current`]
 ///   when called from a thread that is not owned by a dial9 runtime.
-///   All methods are no-ops; [`spawn`](Self::spawn) falls back to
-///   [`tokio::spawn`] without wake tracking.
+///   All methods are no-ops.
 ///
 /// Use [`is_enabled`](Self::is_enabled) to distinguish the two modes.
 #[derive(Clone)]
-pub struct TelemetryHandle {
+pub struct Dial9Handle {
     inner: Option<HandleInner>,
 }
 
@@ -40,15 +42,15 @@ struct HandleInner {
     control_tx: crate::primitives::sync::mpsc::SyncSender<ControlCommand>,
 }
 
-impl std::fmt::Debug for TelemetryHandle {
+impl std::fmt::Debug for Dial9Handle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TelemetryHandle")
+        f.debug_struct("Dial9Handle")
             .field("enabled", &self.is_enabled())
             .finish_non_exhaustive()
     }
 }
 
-impl TelemetryHandle {
+impl Dial9Handle {
     pub(crate) fn enabled(
         shared: Arc<SharedState>,
         control_tx: crate::primitives::sync::mpsc::SyncSender<ControlCommand>,
@@ -59,8 +61,7 @@ impl TelemetryHandle {
     }
 
     /// Return an inert handle that is not connected to any telemetry
-    /// session. All methods are no-ops; [`spawn`](Self::spawn) falls
-    /// back to [`tokio::spawn`] without wake tracking.
+    /// session. All methods are no-ops.
     pub fn disabled() -> Self {
         Self { inner: None }
     }
@@ -68,8 +69,8 @@ impl TelemetryHandle {
     /// Whether this handle is connected to a live telemetry session.
     ///
     /// Returns `false` for handles obtained via
-    /// [`TelemetryHandle::disabled`], and for handles returned by
-    /// [`TelemetryHandle::current`] when called from a thread that is
+    /// [`Dial9Handle::disabled`], and for handles returned by
+    /// [`Dial9Handle::current`] when called from a thread that is
     /// not owned by a dial9 runtime.
     pub fn is_enabled(&self) -> bool {
         self.inner.is_some()
@@ -85,7 +86,7 @@ impl TelemetryHandle {
         self.inner.as_ref().map(|i| &i.control_tx)
     }
 
-    /// Return the [`TelemetryHandle`] for the current thread.
+    /// Return the [`Dial9Handle`] for the current thread.
     ///
     /// On threads owned by a dial9 runtime (workers and blocking
     /// threads — installed via the runtime's `on_thread_start` hook,
@@ -96,7 +97,7 @@ impl TelemetryHandle {
     /// `runtime.block_on(...)` on a `current_thread` runtime, threads
     /// outside any tokio context, and threads owned by a runtime built
     /// with telemetry disabled) this returns an inert handle whose
-    /// methods are all no-ops — see [`TelemetryHandle::disabled`].
+    /// methods are all no-ops — see [`Dial9Handle::disabled`].
     ///
     /// Use [`is_enabled`](Self::is_enabled) when you need to branch on
     /// whether telemetry is actually live on the current thread.
@@ -106,7 +107,7 @@ impl TelemetryHandle {
             .unwrap_or_else(Self::disabled)
     }
 
-    /// Return the [`TelemetryHandle`] installed for the current thread,
+    /// Return the [`Dial9Handle`] installed for the current thread,
     /// or `None` if no dial9 runtime has claimed this thread.
     ///
     /// Prefer [`current`](Self::current) instead.
@@ -166,6 +167,61 @@ impl TelemetryHandle {
         if let Some(inner) = &self.inner {
             inner.shared.if_enabled(|buf| buf.with_encoder(f));
         }
+    }
+}
+
+/// Tokio-aware telemetry handle: everything a [`Dial9Handle`] does, plus
+/// spawning instrumented futures.
+///
+/// Derefs to [`Dial9Handle`], so recording and control methods
+/// (`enable`, `disable`, `is_enabled`, ...) are available directly. On an
+/// enabled handle, [`spawn`](Self::spawn) wraps the future with wake-event
+/// tracking; on a disabled handle it falls back to [`tokio::spawn`].
+#[derive(Clone)]
+pub struct TelemetryHandle(Dial9Handle);
+
+impl Deref for TelemetryHandle {
+    type Target = Dial9Handle;
+    fn deref(&self) -> &Dial9Handle {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for TelemetryHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TelemetryHandle")
+            .field("enabled", &self.is_enabled())
+            .finish_non_exhaustive()
+    }
+}
+
+impl TelemetryHandle {
+    pub(crate) fn enabled(
+        shared: Arc<SharedState>,
+        control_tx: crate::primitives::sync::mpsc::SyncSender<ControlCommand>,
+    ) -> Self {
+        Self(Dial9Handle::enabled(shared, control_tx))
+    }
+
+    /// Return an inert handle that is not connected to any telemetry
+    /// session. All methods are no-ops; [`spawn`](Self::spawn) falls
+    /// back to [`tokio::spawn`] without wake tracking.
+    pub fn disabled() -> Self {
+        Self(Dial9Handle::disabled())
+    }
+
+    /// Return the [`TelemetryHandle`] for the current thread. See
+    /// [`Dial9Handle::current`] for the exact semantics.
+    pub fn current() -> Self {
+        Self(Dial9Handle::current())
+    }
+
+    /// Return the [`TelemetryHandle`] installed for the current thread,
+    /// or `None` if no dial9 runtime has claimed this thread.
+    ///
+    /// Prefer [`current`](Self::current) instead.
+    pub fn try_current() -> Option<Self> {
+        Dial9Handle::try_current().map(Self)
     }
 
     /// Spawn a future on the ambient tokio runtime.

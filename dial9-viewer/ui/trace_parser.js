@@ -625,6 +625,7 @@
               name: frame.name,
               timestamp: ts,
               fields: v,
+              units: dec.schemas.get(frame.typeId)?.units || null,
             });
           }
           break;

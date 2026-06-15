@@ -5,13 +5,11 @@ use crate::telemetry::buffer;
 use crate::telemetry::buffer::TlBufferHandle;
 use crate::telemetry::collector::CentralCollector;
 use crate::telemetry::events::ThreadRole;
-use crate::telemetry::format::{QueueSampleEvent, WakeEventEvent};
+use crate::telemetry::format::WakeEventEvent;
 use crate::telemetry::task_metadata::TaskId;
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::time::Duration;
-
-use super::RuntimeContext;
 
 crate::primitives::thread_local! {
     /// schedstat wait_time_ns captured at park time, used to compute delta on unpark.
@@ -47,10 +45,6 @@ pub(crate) struct SharedState {
     /// Weak handles to all registered thread-local buffers. The flush thread
     /// uses these to intrusively drain idle/silent buffers.
     tl_buffers: Mutex<Vec<TlBufferHandle>>,
-    /// All registered `RuntimeContext`s. The flush thread clones this vec each
-    /// cycle for queue sampling and metadata generation. `build_and_attach_to_telemetry`
-    /// pushes new contexts here so the flush thread picks them up.
-    pub(crate) contexts: Mutex<Vec<Arc<RuntimeContext>>>,
     /// Maps OS tid → thread role so that CPU samples returned from perf can be
     /// attributed to the correct worker or blocking-pool bucket at flush time.
     pub(crate) thread_roles: Mutex<HashMap<u32, ThreadRole>>,
@@ -70,7 +64,6 @@ impl SharedState {
             next_worker_id: AtomicU64::new(0),
             drain_epoch: AtomicU64::new(0),
             tl_buffers: Mutex::new(Vec::new()),
-            contexts: Mutex::new(Vec::new()),
             thread_roles: Mutex::new(HashMap::new()),
             sources: Mutex::new(Vec::new()),
         }
@@ -122,17 +115,9 @@ impl SharedState {
         Some(f(&EventBuffer(self)))
     }
 
-    pub(crate) fn record_queue_sample(&self, global_queue_depth: usize) {
-        self.record_encodable_event(&QueueSampleEvent {
-            timestamp_ns: self.timestamp_nanos(),
-            global_queue: global_queue_depth as u8,
-        });
-    }
-
-    /// Record a user-defined [`Encodable`](crate::telemetry::buffer::Encodable) event.
-    ///
-    /// Callers must ensure recording is enabled (via [`if_enabled`](Self::if_enabled)
-    /// or [`is_enabled`](Self::is_enabled)) before calling this method.
+    /// Test-only shortcut to record an event directly. Production code records
+    /// through [`EventBuffer`] via [`if_enabled`](Self::if_enabled).
+    #[cfg(test)]
     fn record_encodable_event(&self, event: &dyn buffer::Encodable) {
         if let Some(handle) =
             buffer::record_encodable_event(event, &self.collector, &self.drain_epoch)

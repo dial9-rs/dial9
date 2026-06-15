@@ -3,6 +3,7 @@ use crate::telemetry::buffer;
 use std::time::Duration;
 
 use super::handle::{RuntimeTelemetryHandle, TelemetryHandle};
+use super::runtime_context::RuntimeContextRegistry;
 use super::shared_state::SharedState;
 use super::{ControlCommand, attach_runtime};
 
@@ -36,6 +37,7 @@ struct EnabledGuard {
     handle: TelemetryHandle,
     flush_thread: Option<crate::primitives::thread::JoinHandle<()>>,
     worker: Option<WorkerHandle>,
+    contexts: RuntimeContextRegistry,
 }
 
 impl std::fmt::Debug for TelemetryGuard {
@@ -51,12 +53,14 @@ impl TelemetryGuard {
         handle: TelemetryHandle,
         flush_thread: Option<crate::primitives::thread::JoinHandle<()>>,
         worker: Option<WorkerHandle>,
+        contexts: RuntimeContextRegistry,
     ) -> Self {
         Self {
             inner: GuardInner::Enabled(EnabledGuard {
                 handle,
                 flush_thread,
                 worker,
+                contexts,
             }),
         }
     }
@@ -110,6 +114,14 @@ impl TelemetryGuard {
     pub(crate) fn shared(&self) -> Option<&Arc<SharedState>> {
         match &self.inner {
             GuardInner::Enabled(eg) => eg.handle.shared(),
+            GuardInner::Disabled => None,
+        }
+    }
+
+    /// Registry of attached runtimes, so additional runtimes can register.
+    pub(crate) fn contexts(&self) -> Option<&RuntimeContextRegistry> {
+        match &self.inner {
+            GuardInner::Enabled(eg) => Some(&eg.contexts),
             GuardInner::Disabled => None,
         }
     }
@@ -325,8 +337,9 @@ impl<'a> TraceRuntimeCoreBuilder<'a> {
         self,
         mut builder: tokio::runtime::Builder,
     ) -> std::io::Result<(tokio::runtime::Runtime, RuntimeTelemetryHandle)> {
-        let (Some(shared), Some(control_tx), Some(traced)) = (
+        let (Some(shared), Some(contexts), Some(control_tx), Some(traced)) = (
             self.guard.shared(),
+            self.guard.contexts(),
             self.guard.control_tx(),
             self.guard.handle().traced_handle(),
         ) else {
@@ -355,6 +368,7 @@ impl<'a> TraceRuntimeCoreBuilder<'a> {
 
         let runtime = attach_runtime(
             shared,
+            contexts,
             builder,
             Some(self.name),
             control_tx,

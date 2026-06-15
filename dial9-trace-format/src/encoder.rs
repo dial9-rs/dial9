@@ -466,8 +466,7 @@ impl<W: Write> Encoder<W> {
         let tid = if let Some(&existing) = self.schema_ids.get(&key) {
             existing
         } else {
-            let entry = T::schema_entry();
-            let schema = Schema::new(&entry.name, entry.fields);
+            let schema = Schema::from_entry(T::schema_entry());
             let id = self.ensure_registered(&schema)?;
             self.schema_ids.insert(key, id);
             id

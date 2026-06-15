@@ -15,8 +15,9 @@ pub(crate) struct FlushContext<'a> {
 
 /// A data source that the flush thread drains into the central collector.
 ///
-/// Implementors (e.g. `CpuProfiler`, `SchedProfiler`) provide a `flush` method
-/// that drains pending data and records it via `record_encodable_event`.
+/// Implementors (e.g. `CpuProfiler`, `SchedProfiler`, `TokioRuntimesSource`)
+/// provide a `flush` method that drains pending data and records it via
+/// `record_encodable_event`.
 pub(crate) trait Source: Send {
     /// Drain pending data into the dial9 trace. Called once per flush cycle
     /// from the flush thread.
@@ -36,7 +37,7 @@ pub(crate) trait Source: Send {
     fn on_thread_stop(&mut self) {}
 
     /// Key-value entries this source contributes to segment metadata.
-    /// Called each flush cycle alongside runtime context entries.
+    /// Merged into the next rotated segment each flush cycle.
     fn segment_metadata(&self) -> Vec<(String, String)> {
         Vec::new()
     }

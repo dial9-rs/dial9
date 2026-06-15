@@ -29,11 +29,10 @@
 //!
 //! See design §6 (Reentrancy) for the full argument.
 
-use crate::memory_profiling::config::TimestampMode;
 use crate::memory_profiling::profiler::MemoryProfilerInner;
 use crate::memory_profiling::ring::{DEFAULT_MAX_FRAMES, RawAlloc, RawFree};
 use crate::sampling::SplitMix64;
-use crate::telemetry::events::current_tid;
+use crate::telemetry::events::{clock_monotonic_ns, current_tid};
 
 /// Per-thread sampling state. Held in TLS so each thread reads/writes
 /// its own counter and PRNG without synchronization (design §1).
@@ -80,7 +79,7 @@ fn ensure_initialized(state: &mut SamplingState, inner: &MemoryProfilerInner) {
             // Mix wall clock with the thread ID and the static address.
             // `nonce` (= current_tid()) guarantees uniqueness across threads
             // even if they initialize at the same nanosecond.
-            let now = crate::telemetry::events::clock_monotonic_ns();
+            let now = clock_monotonic_ns();
             now.wrapping_mul(0x517cc1b727220a95) ^ nonce ^ (inner as *const _ as u64)
         }
     };
@@ -109,15 +108,6 @@ fn next_gap(rng: &mut SplitMix64, sample_rate_bytes: u64) -> i64 {
         return 0;
     }
     i64::try_from(rng.draw_exponential(sample_rate_bytes)).unwrap_or(i64::MAX)
-}
-
-#[inline]
-fn stamp(mode: TimestampMode) -> u64 {
-    match mode {
-        TimestampMode::ReusePollStart => crate::telemetry::recorder::poll_start_ts_monotonic(),
-        TimestampMode::None => 0,
-        TimestampMode::Precise => crate::telemetry::events::clock_monotonic_ns(),
-    }
 }
 
 /// Allocator hook: called from `Dial9Allocator::alloc` after the inner
@@ -168,7 +158,7 @@ pub(crate) fn on_alloc(inner: &MemoryProfilerInner, ptr: *mut u8, size: usize) {
         // `0` is rejected at config build time.
         state.next_sample_bytes = next_gap(&mut state.rng, inner.sample_rate_bytes);
 
-        let timestamp_ns = stamp(inner.timestamp_mode);
+        let timestamp_ns = clock_monotonic_ns();
 
         // Stack capture into a stack-resident buffer. The `RefMut`
         // is intentionally held across `capture` and the queue push:
@@ -194,24 +184,140 @@ pub(crate) fn on_alloc(inner: &MemoryProfilerInner, ptr: *mut u8, size: usize) {
         };
 
         inner.rings.push_alloc(sample);
+
+        // Insert into the producer-side liveset OUTSIDE the RefCell borrow.
+        // The borrow is still held (we're inside the try_with closure), but
+        // scc::HashIndex::insert is allocation-free on the hot path (it uses
+        // epoch-based reclamation internally with no heap allocation per insert
+        // on the common path).
+        //
+        // **Stale-entry handling.** `scc::HashIndex::insert` returns `Err` and
+        // does NOT overwrite when the key already exists. The address space is
+        // reused by the OS allocator, so a stale entry can land here in two
+        // cases:
+        //   1. The matching dealloc was skipped during thread-teardown by the
+        //      OPT_OUT sentinel (see `opt_out.rs`).
+        //   2. The matching dealloc's `RawFree` was dropped because the free
+        //      queue was full (`MemoryProfileOverflowEvent` was emitted).
+        // In both cases we'd otherwise emit a `FreeEvent` later carrying the
+        // *old* allocation's `(size, ts_ns)` — wrong data. Detect the failure
+        // and fall through to the `entry()` API to atomically overwrite (or
+        // insert, if a concurrent dealloc cleared the entry between our
+        // `insert` and `entry`). The hot path stays on the cheap lock-free
+        // `insert`; only the rare stale case pays the bucket-lock cost.
+        //
+        // **OPT_OUT init ordering invariant.** `check_shutdown()` MUST be
+        // called before any `liveset` op on this thread. It eagerly initialises
+        // the `LIFETIME_GUARD` TLS *before* `sdd`'s lazy TLS slot, so the
+        // destructor order at thread exit is `sdd` → `LIFETIME_GUARD`, with
+        // the guard flipping `IS_SHUTTING_DOWN = true` after sdd is gone. If
+        // anyone moves the `liveset.insert` call site, `check_shutdown` must
+        // be called first on every code path that touches the liveset, or
+        // we'll panic in `sdd::Collector::current()` during teardown.
+        if let Some(liveset) = &inner.liveset
+            && !crate::memory_profiling::opt_out::check_shutdown()
+        {
+            let key = ptr as u64;
+            let val = (size as u64, timestamp_ns);
+            if let Err((k, v)) = liveset.insert(key, val) {
+                use scc::hash_index::Entry;
+                match liveset.entry(k) {
+                    Entry::Occupied(o) => o.update(v),
+                    Entry::Vacant(ve) => {
+                        // Concurrent dealloc removed the stale entry between our
+                        // `insert` and `entry` — treat as fresh insert.
+                        let _ = ve.insert_entry(v);
+                    }
+                }
+            }
+        }
     });
 }
 
-/// Allocator hook for dealloc. No-op when liveset tracking is off.
+/// Allocator hook for dealloc. With the producer-side liveset, only pushes
+/// a `RawFree` if the address was previously sampled (filtering ~99.9% of
+/// deallocs on the producer side).
+///
+/// **OPT_OUT init ordering invariant.** `check_shutdown()` MUST be called
+/// before any `liveset` op. See the matching comment on `on_alloc`'s liveset
+/// branch and `opt_out.rs` for the full mechanism.
+///
+/// **Shutdown drain.** During TLS teardown the producer can't safely peek
+/// the liveset (sdd's TLS may be destroyed), so it pushes a
+/// `RawFree { shutdown: true, .. }` carrying only `addr`. The consolidator
+/// (running on a different, healthy thread) does the liveset peek/remove
+/// and emits a `FreeEvent` on hit. This recovers dying-thread frees and
+/// bounds liveset growth across thread churn. See
+/// `MemoryProfileSource::handle_free` for the consumer side, including the
+/// `alloc_ts_ns >= free.ts_ns` race-detection check.
+///
+/// **Re-entrancy guard.** The non-shutdown branch takes the
+/// `SAMPLE_STATE` `RefCell` borrow as a per-thread re-entrancy guard,
+/// symmetric with `on_alloc`. `liveset.entry` acquires a per-bucket
+/// write lock, and `scc`'s epoch-based reclamation (via `sdd`) can free
+/// retired buckets when an epoch guard drops — so a re-entrant
+/// `on_dealloc` from inside `scc` internals could in theory hit the
+/// same bucket the outer `entry` already holds locked and deadlock
+/// against itself. The guard makes that impossible by short-circuiting
+/// the inner call. The shutdown branch sits *outside* the guard because
+/// (a) it never touches `scc`/`sdd` (just a queue-CAS push) and (b)
+/// `SAMPLE_STATE`'s `LocalKey` may already be destroyed late in TLS
+/// teardown — `try_with` would return `Err` and silently drop the
+/// dying thread's free, defeating the shutdown drain.
 ///
 /// SAFETY: must be allocation-free — see module docs.
 #[inline]
 pub(crate) fn on_dealloc(inner: &MemoryProfilerInner, ptr: *mut u8, _size: usize) {
-    if !inner.track_liveset {
+    let Some(liveset) = &inner.liveset else {
+        return;
+    };
+    let addr = ptr as u64;
+    if crate::memory_profiling::opt_out::check_shutdown() {
+        // Shutdown drain: producer can't touch scc here. Push a flagged
+        // RawFree and let the consolidator do the lookup. `size` and
+        // `alloc_ts_ns` are placeholders (0); the consolidator fills them
+        // in from its own peek_with. This is allocation-free and only
+        // touches the queue. Intentionally outside the SAMPLE_STATE
+        // borrow guard — see the function doc.
+        inner.rings.push_free(RawFree {
+            tid: current_tid(),
+            addr,
+            ts_ns: clock_monotonic_ns(),
+            size: 0,
+            alloc_ts_ns: 0,
+            shutdown: true,
+        });
         return;
     }
-    let timestamp_ns = stamp(inner.timestamp_mode);
-    let sample = RawFree {
-        tid: current_tid(),
-        addr: ptr as u64,
-        ts_ns: timestamp_ns,
-    };
-    inner.rings.push_free(sample);
+    // Non-shutdown branch: take the SAMPLE_STATE borrow as a re-entrancy
+    // guard. If a prior `on_alloc`/`on_dealloc` frame on this thread is
+    // still on the stack and holds the borrow, skip — otherwise the
+    // re-entrant `liveset.entry` could deadlock against the outer one on
+    // a shared bucket lock, and any allocation triggered inside `scc`
+    // would otherwise be unguarded.
+    let _ = SAMPLE_STATE.try_with(|cell| {
+        let Ok(_state) = cell.try_borrow_mut() else {
+            return;
+        };
+        // Use the entry() API for atomic peek + remove. The bucket lock
+        // is held for the duration of the Entry, so a concurrent on_alloc
+        // overwriting the same address cannot interleave between our read
+        // and remove — preventing stale metadata on the emitted RawFree.
+        use scc::hash_index::Entry;
+        if let Entry::Occupied(o) = liveset.entry(addr) {
+            let (size, alloc_ts_ns) = *o.get();
+            o.remove_entry();
+            let sample = RawFree {
+                tid: current_tid(),
+                addr,
+                ts_ns: clock_monotonic_ns(),
+                size,
+                alloc_ts_ns,
+                shutdown: false,
+            };
+            inner.rings.push_free(sample);
+        }
+    });
 }
 
 /// Allocator hook for realloc. Decomposes into free-of-old +
@@ -239,7 +345,6 @@ pub(crate) fn on_realloc(
 #[cfg(target_os = "linux")]
 mod tests {
     use super::*;
-    use crate::memory_profiling::config::TimestampMode;
     use crate::memory_profiling::profiler::MemoryProfilerInner;
     use crate::memory_profiling::ring::RingBuffers;
     use crate::sampling::SplitMix64;
@@ -297,8 +402,7 @@ mod tests {
             handle: TelemetryHandle::disabled(),
             rings,
             sample_rate_bytes,
-            track_liveset: false,
-            timestamp_mode: TimestampMode::None,
+            liveset: None,
             rng_seed: Some(0),
         }
     }
@@ -596,5 +700,143 @@ mod tests {
             remaining = remaining.saturating_sub(size);
         }
         sizes
+    }
+
+    /// Build a `MemoryProfilerInner` with the producer-side liveset enabled,
+    /// for tests that exercise the address-reuse / stale-entry path.
+    fn make_inner_with_liveset(
+        sample_rate_bytes: u64,
+        ring_capacity: usize,
+    ) -> MemoryProfilerInner {
+        let unwinder = Unwinder::install().expect("unwinder install");
+        let rings = Arc::new(RingBuffers::new(ring_capacity, ring_capacity));
+        let liveset = Arc::new(scc::HashIndex::with_capacity_and_hasher(
+            0,
+            dial9_trace_format::encoder::FxBuildHasher::default(),
+        ));
+        MemoryProfilerInner {
+            unwinder,
+            handle: TelemetryHandle::disabled(),
+            rings,
+            sample_rate_bytes,
+            liveset: Some(liveset),
+            rng_seed: Some(0),
+        }
+    }
+
+    /// Reproduces the address-reuse hazard fixed by the stale-entry overwrite
+    /// in `on_alloc`. Without overwrite-on-Err, the second `on_alloc` for the
+    /// same address silently drops its `(size, ts)` and a subsequent
+    /// `on_dealloc` reports the *first* allocation's metadata.
+    #[test]
+    fn on_alloc_overwrites_stale_liveset_entry() {
+        let inner = Arc::new(make_inner_with_liveset(1, 64));
+        let inner_for_thread = Arc::clone(&inner);
+        std::thread::spawn(move || {
+            seed_thread_sampling_state(0xBEEF_BEEF, 1);
+            let addr = 0xCAFE_F00D_usize as *mut u8;
+
+            // First sampled allocation: size 100. on_alloc inserts
+            // (100, ts1) into the liveset.
+            on_alloc(&inner_for_thread, addr, 100);
+
+            // Simulate the OPT_OUT skip / queue-overflow path: the matching
+            // dealloc never reaches `on_dealloc`. The (100, ts1) entry is
+            // now stale.
+
+            // Second sampled allocation at the same address: size 200. With
+            // the fix, on_alloc detects the duplicate-key Err from
+            // `scc::HashIndex::insert` and overwrites the entry with
+            // (200, ts2).
+            on_alloc(&inner_for_thread, addr, 200);
+
+            // Now dealloc: must observe size = 200, NOT the stale 100.
+            on_dealloc(&inner_for_thread, addr, 200);
+        })
+        .join()
+        .expect("scenario thread");
+
+        // Drain the queues. We expect 2 allocs and 1 free.
+        let mut allocs = Vec::new();
+        while let Some(a) = inner.rings.alloc_queue.pop() {
+            allocs.push(a);
+        }
+        let mut frees = Vec::new();
+        while let Some(f) = inner.rings.free_queue.pop() {
+            frees.push(f);
+        }
+        assert_eq!(allocs.len(), 2, "both allocs should have been recorded");
+        assert_eq!(allocs[0].size, 100);
+        assert_eq!(allocs[1].size, 200);
+
+        assert_eq!(frees.len(), 1, "the dealloc should have produced a free");
+        assert_eq!(
+            frees[0].size, 200,
+            "free must report the second alloc's size, not the stale first \
+             alloc's; without the overwrite fix this would be 100"
+        );
+        assert_eq!(
+            frees[0].alloc_ts_ns, allocs[1].ts_ns,
+            "free's alloc_ts_ns must match the second alloc, not the stale \
+             first one; without the overwrite fix this would be allocs[0].ts_ns"
+        );
+    }
+
+    /// Re-entrancy guard for `on_dealloc`. If a prior frame on this thread is
+    /// already inside `on_alloc`/`on_dealloc` and holds the `SAMPLE_STATE`
+    /// borrow, a re-entrant `on_dealloc` must skip — otherwise the inner
+    /// call's `liveset.remove` could try to take a bucket write lock that
+    /// the outer call already holds (same-thread deadlock if `scc` happens
+    /// to recycle a stale liveset key into the very bucket the outer
+    /// operation is mutating).
+    ///
+    /// This test holds the `SAMPLE_STATE::RefCell` borrow explicitly to
+    /// simulate the "outer call still on the stack" condition, then calls
+    /// `on_dealloc`. Without the guard, `on_dealloc` would peek/remove the
+    /// liveset entry and push a `RawFree`. With the guard, both side
+    /// effects must be suppressed.
+    #[test]
+    fn on_dealloc_skips_when_sample_state_is_already_borrowed() {
+        let inner = Arc::new(make_inner_with_liveset(1, 64));
+        let inner_for_thread = Arc::clone(&inner);
+        let addr_u64 = 0xFEED_FACE_u64;
+
+        std::thread::spawn(move || {
+            seed_thread_sampling_state(0xDEAD_C0DE, 1);
+            let addr = addr_u64 as usize as *mut u8;
+
+            // Seed the liveset with a real entry via on_alloc so we have
+            // something for a re-entrant on_dealloc to find.
+            on_alloc(&inner_for_thread, addr, 64);
+
+            // Simulate being mid-flight in on_alloc / on_dealloc: hold the
+            // SAMPLE_STATE borrow before calling on_dealloc. With the
+            // re-entrancy guard, on_dealloc must observe the borrow and
+            // bail without touching the liveset or queue.
+            SAMPLE_STATE.with(|cell| {
+                let _outer_borrow = cell
+                    .try_borrow_mut()
+                    .expect("test thread holds the only borrow");
+                on_dealloc(&inner_for_thread, addr, 64);
+            });
+        })
+        .join()
+        .expect("scenario thread");
+
+        // The liveset entry must still be present — the inner on_dealloc
+        // must not have removed it.
+        let liveset = inner.liveset.as_ref().expect("liveset configured");
+        assert!(
+            liveset.peek_with(&addr_u64, |_, _| ()).is_some(),
+            "re-entrant on_dealloc must skip the liveset.remove; entry was \
+             unexpectedly removed (the guard is not in place)"
+        );
+
+        // And no RawFree should have been pushed.
+        assert!(
+            inner.rings.free_queue.is_empty(),
+            "re-entrant on_dealloc must skip the RawFree push; the queue is \
+             non-empty (the guard is not in place)"
+        );
     }
 }

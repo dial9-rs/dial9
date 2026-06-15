@@ -89,7 +89,7 @@ A poll is "long" when the future does significant work between await points. Com
 4. **Batch processing without yielding**: Processing all available items in a loop (pipelined requests, channel drains, batch inserts) without giving other tasks a chance to run.
 5. **Memory allocation**: Large allocations or heavy allocator contention can add microseconds to hundreds of microseconds.
 
-In traces, look at `poll.cpuSamples` (what was on-CPU during the poll) and `poll.schedSamples` (what caused the OS to deschedule the worker — indicates blocking syscalls).
+In traces, look at `poll.cpuSamples` (what was on-CPU during the poll) and `poll.schedSamples` (what caused the OS to deschedule the worker — indicates blocking syscalls). For the full root-cause method — including how to find the cause of an off-CPU poll when no scheduling samples were captured — see the `dial9-diagnose-long-poll` skill.
 
 ## The global injection queue
 

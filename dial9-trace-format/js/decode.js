@@ -7,6 +7,7 @@ const TAG_EVENT = 0x02;
 const TAG_STRING_POOL = 0x03;
 const TAG_STACK_POOL = 0x04;
 const TAG_TIMESTAMP_RESET = 0x05;
+const TAG_SCHEMA_ANNOTATIONS = 0x06;
 
 const FieldType = {
   I64: 1, F64: 2, Bool: 3, String: 4,
@@ -165,6 +166,7 @@ class TraceDecoder {
         case TAG_EVENT: return this._decodeEvent();
         case TAG_STRING_POOL: return this._decodeStringPool();
         case TAG_STACK_POOL: return this._decodeStackPool();
+        case TAG_SCHEMA_ANNOTATIONS: return this._decodeSchemaAnnotations();
         case TAG_TIMESTAMP_RESET: {
           const lo = this._view.getUint32(this._pos, true);
           const hi = this._view.getUint32(this._pos + 4, true);
@@ -245,6 +247,41 @@ class TraceDecoder {
     const result = { type: 'event', typeId, name: schema.name, values };
     if (timestampNs !== null) result.timestamp_ns = timestampNs;
     return result;
+  }
+
+  _decodeSchemaAnnotations() {
+    // Unlike schema/event frames, type_id is LEB128 here.
+    const [typeIdBig, consumed] = decodeULEB128(this._view, this._pos);
+    this._pos += consumed;
+    const typeId = Number(typeIdBig);
+    const count = this._view.getUint16(this._pos, true); this._pos += 2;
+    const td = new TextDecoder();
+    const annotations = [];
+    for (let i = 0; i < count; i++) {
+      const fieldIndex = this._view.getUint16(this._pos, true); this._pos += 2;
+      const keyLen = this._view.getUint16(this._pos, true); this._pos += 2;
+      const key = td.decode(
+        new Uint8Array(this._view.buffer, this._view.byteOffset + this._pos, keyLen));
+      this._pos += keyLen;
+      const valueLen = this._view.getUint32(this._pos, true); this._pos += 4;
+      const value = td.decode(
+        new Uint8Array(this._view.buffer, this._view.byteOffset + this._pos, valueLen));
+      this._pos += valueLen;
+      annotations.push({ fieldIndex, key, value });
+    }
+    // Lenient like the Rust decoder: annotations for an unknown schema are
+    // parsed (to keep the stream aligned) but not attached.
+    const schema = this.schemas.get(typeId);
+    if (schema) {
+      schema.annotations = annotations;
+      const units = {};
+      for (const a of annotations) {
+        const field = schema.fields[a.fieldIndex];
+        if (a.key === 'unit' && field) units[field.name] = a.value;
+      }
+      schema.units = units;
+    }
+    return { type: 'schema_annotations', typeId, annotations };
   }
 
   /** Current byte offset into the buffer. */

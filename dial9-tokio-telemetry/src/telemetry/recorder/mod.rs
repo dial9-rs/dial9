@@ -17,7 +17,7 @@ pub use builder::{
     TracedRuntimeBuilder,
 };
 pub use guard::{TelemetryGuard, TraceRuntimeCoreBuilder};
-pub use handle::{RuntimeTelemetryHandle, TelemetryHandle, spawn};
+pub use handle::{Dial9Handle, RuntimeTelemetryHandle, TelemetryHandle, spawn};
 
 mod tokio_hooks;
 pub use tokio_hooks::TokioHooks;
@@ -200,7 +200,7 @@ fn register_hooks(
     // Unified on_thread_start / on_thread_stop. Tokio only stores one
     // callback per hook, so any feature-gated work must live here rather
     // than registering its own hook.
-    let handle_for_tl = TelemetryHandle::enabled(shared.clone(), control_tx.clone());
+    let handle_for_tl = Dial9Handle::enabled(shared.clone(), control_tx.clone());
     #[cfg(feature = "cpu-profiling")]
     let s_start = shared.clone();
     #[cfg(feature = "cpu-profiling")]
@@ -258,6 +258,7 @@ fn register_hooks(
 /// the runtime, reserve worker IDs, and push the context.
 fn attach_runtime(
     shared: &Arc<SharedState>,
+    contexts: &runtime_context::RuntimeContextRegistry,
     mut builder: tokio::runtime::Builder,
     runtime_name: Option<String>,
     control_tx: &crate::primitives::sync::mpsc::SyncSender<ControlCommand>,
@@ -280,7 +281,7 @@ fn attach_runtime(
     // this thread IS the worker (block_on runs here), so the tracing layer
     // needs CURRENT_HANDLE to be set. Harmless for multi_thread runtimes.
     CURRENT_HANDLE.with(|cell| {
-        *cell.borrow_mut() = Some(TelemetryHandle::enabled(shared.clone(), control_tx.clone()));
+        *cell.borrow_mut() = Some(Dial9Handle::enabled(shared.clone(), control_tx.clone()));
     });
 
     // Pre-reserve a contiguous block of worker IDs and set metrics atomically.
@@ -309,7 +310,7 @@ fn attach_runtime(
         }
     }
 
-    shared.contexts.lock().unwrap().push(ctx);
+    contexts.lock().unwrap().push(ctx);
 
     Ok(runtime)
 }
@@ -436,8 +437,16 @@ mod tests {
         assert!(guard.is_enabled());
         assert!(guard.shared().unwrap().is_enabled());
         assert!(
-            guard.shared().unwrap().contexts.lock().unwrap().is_empty(),
-            "disabled Tokio instrumentation should not register runtime contexts"
+            !guard
+                .shared()
+                .unwrap()
+                .sources
+                .lock()
+                .unwrap()
+                .iter()
+                .flat_map(|s| s.segment_metadata())
+                .any(|(k, _)| k.starts_with("runtime.")),
+            "disabled Tokio instrumentation should not produce runtime metadata"
         );
 
         runtime.block_on(async {
@@ -451,8 +460,16 @@ mod tests {
         });
 
         assert!(
-            guard.shared().unwrap().contexts.lock().unwrap().is_empty(),
-            "disabled Tokio instrumentation should not register runtime contexts after running work"
+            !guard
+                .shared()
+                .unwrap()
+                .sources
+                .lock()
+                .unwrap()
+                .iter()
+                .flat_map(|s| s.segment_metadata())
+                .any(|(k, _)| k.starts_with("runtime.")),
+            "disabled Tokio instrumentation should not produce runtime metadata after running work"
         );
         assert_eq!(
             hook_calls.load(Ordering::Relaxed),

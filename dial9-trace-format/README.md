@@ -86,6 +86,19 @@ for frame in dec.decode_all() {
 
 The `#[traceevent(timestamp)]` attribute marks a `u64` field as the event's timestamp. It is encoded as a u24 nanosecond delta in the event header (not as a regular field), giving nanosecond precision with no accumulation error. The encoder automatically emits `TimestampReset` frames when the delta exceeds ~16.7 ms.
 
+The `#[traceevent(unit = "...")]` attribute attaches a `unit` schema annotation to a field, so viewers render its value in a human-friendly unit (e.g. `1.50ms` instead of `1500000`, `12.00 GiB` instead of `12884901888`). Supported values are `"ns"`, `"us"`, `"ms"`, `"s"`, and `"bytes"`; anything else is a compile error.
+
+```rust,ignore
+#[derive(TraceEvent)]
+struct RequestCompleted {
+    #[traceevent(timestamp)]
+    timestamp_ns: u64,
+    #[traceevent(unit = "us")]
+    latency_us: u64,
+    status_code: u32,
+}
+```
+
 Integer fields use fixed-width little-endian encoding (`u8`, `u16`, `u32`) or LEB128 (`u64`). The derive macro handles the mapping automatically.
 
 Fields of type `Option<T>` are encoded as optional: 1 byte (`0x00`) when `None`, or 1 byte (`0x01`) followed by the inner encoding when `Some`. On decode, missing fields (not present in the wire schema) default to `None`. This supports schema evolution across feature flags and reduces wire size for frequently-absent values.

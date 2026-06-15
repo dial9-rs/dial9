@@ -1,5 +1,5 @@
-use crate::primitives::sync::Arc;
 use crate::primitives::sync::atomic::Ordering;
+use crate::primitives::sync::{Arc, Mutex};
 #[cfg(feature = "cpu-profiling")]
 use crate::rate_limit::rate_limited;
 use crate::telemetry::writer::{Disk, SegmentWriter, WriterMode};
@@ -264,7 +264,9 @@ impl<P, M, Mode: WriterMode> TracedRuntimeBuilder<P, M, Mode> {
         mut builder: tokio::runtime::Builder,
         guard: &TelemetryGuard,
     ) -> std::io::Result<tokio::runtime::Runtime> {
-        let (Some(shared), Some(control_tx)) = (guard.shared(), guard.control_tx()) else {
+        let (Some(shared), Some(contexts), Some(control_tx)) =
+            (guard.shared(), guard.contexts(), guard.control_tx())
+        else {
             // Disabled guard: produce a plain tokio runtime with no
             // telemetry hooks so attaching still works gracefully.
             return builder.build();
@@ -281,6 +283,7 @@ impl<P, M, Mode: WriterMode> TracedRuntimeBuilder<P, M, Mode> {
 
         let runtime = attach_runtime(
             shared,
+            contexts,
             builder,
             self.runtime_name,
             control_tx,
@@ -533,8 +536,12 @@ impl<M, Mode: WriterMode> TracedRuntimeBuilder<HasTracePath, M, Mode> {
         let shared = guard
             .shared()
             .expect("TelemetryCore::builder().build() always returns an enabled guard");
+        let contexts = guard
+            .contexts()
+            .expect("TelemetryCore::builder().build() always returns an enabled guard");
         let runtime = attach_runtime(
             shared,
+            contexts,
             builder,
             self.runtime_name,
             &control_tx,
@@ -833,6 +840,12 @@ impl TelemetryCore {
             writer.update_segment_metadata(segment_metadata);
         }
 
+        let contexts: super::runtime_context::RuntimeContextRegistry =
+            Arc::new(Mutex::new(Vec::new()));
+        shared.push_source(Box::new(super::runtime_context::TokioRuntimesSource::new(
+            contexts.clone(),
+        )));
+
         if let Some(config) = process_resource_usage {
             #[cfg(unix)]
             shared.push_source(Box::new(
@@ -946,6 +959,7 @@ impl TelemetryCore {
             TelemetryHandle::enabled(shared, control_tx),
             Some(flush_thread),
             worker,
+            contexts,
         ))
     }
 }
