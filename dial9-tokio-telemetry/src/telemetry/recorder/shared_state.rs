@@ -47,7 +47,7 @@ pub(crate) struct SharedState {
     tl_buffers: Mutex<Vec<TlBufferHandle>>,
     /// Maps OS tid → thread role so that CPU samples returned from perf can be
     /// attributed to the correct worker or blocking-pool bucket at flush time.
-    pub(crate) thread_roles: Mutex<HashMap<u32, ThreadRole>>,
+    pub(crate) thread_roles: Arc<Mutex<HashMap<u32, ThreadRole>>>,
     /// Data sources (CPU profiler, sched profiler, etc.) that the flush thread drains.
     pub(crate) sources: Mutex<Vec<Box<dyn super::source::Source>>>,
 }
@@ -64,7 +64,7 @@ impl SharedState {
             next_worker_id: AtomicU64::new(0),
             drain_epoch: AtomicU64::new(0),
             tl_buffers: Mutex::new(Vec::new()),
-            thread_roles: Mutex::new(HashMap::new()),
+            thread_roles: Arc::new(Mutex::new(HashMap::new())),
             sources: Mutex::new(Vec::new()),
         }
     }
@@ -207,12 +207,9 @@ impl SharedState {
     pub(crate) fn flush_sources(&self) {
         use super::source::FlushContext;
 
-        let roles = self.thread_roles.lock().unwrap().clone();
-
         let ctx = FlushContext {
             collector: &self.collector,
             drain_epoch: &self.drain_epoch,
-            thread_roles: &roles,
         };
 
         let mut sources = self.sources.lock().unwrap();

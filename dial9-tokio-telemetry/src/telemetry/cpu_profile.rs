@@ -1,16 +1,22 @@
 //! CPU profiling integration: merges perf stack traces into the telemetry stream.
 //!
 //! When enabled, a process-wide `PerfSampler` captures CPU stack traces at a
-//! configurable frequency. The flush thread drains raw samples; the caller
-//! (EventWriter) maps OS thread IDs to worker IDs via SharedState.thread_roles.
+//! configurable frequency. The flush thread drains raw samples; each profiler
+//! source maps OS thread IDs to worker IDs via its clone of the shared
+//! `thread_roles` map.
 
+use crate::primitives::sync::{Arc, Mutex};
 use crate::telemetry::buffer::record_encodable_event;
-use crate::telemetry::events::{CpuSampleData, CpuSampleSource, ThreadName};
+use crate::telemetry::events::{CpuSampleData, CpuSampleSource, ThreadName, ThreadRole};
 use crate::telemetry::format::WorkerId;
 use crate::telemetry::recorder::source::{FlushContext, Source};
 use dial9_perf_self_profile::{EventSource, PerfSampler, SamplerConfig, SamplingMode};
 use std::collections::HashMap;
 use std::io;
+
+/// Shared OS-tid -> worker-role map. Written by the tokio thread hooks, read by
+/// the cpu/sched profilers to attribute samples to workers at flush time.
+type WorkerRoles = Arc<Mutex<HashMap<u32, ThreadRole>>>;
 
 /// Read the thread name from `/proc/self/task/<tid>/comm`.
 /// Returns `None` if the file can't be read.
@@ -99,10 +105,11 @@ pub(crate) struct CpuProfiler {
     /// OS tid → thread name, eagerly cached at drain time so short-lived threads
     /// are captured before they exit and `/proc/self/task/<tid>/comm` disappears.
     tid_to_name: HashMap<u32, ThreadName>,
+    roles: WorkerRoles,
 }
 
 impl CpuProfiler {
-    pub(crate) fn start(config: CpuProfilingConfig) -> io::Result<Self> {
+    pub(crate) fn start(config: CpuProfilingConfig, roles: WorkerRoles) -> io::Result<Self> {
         let sampler = PerfSampler::start(
             SamplerConfig::default()
                 .event_source(config.event_source)
@@ -113,6 +120,7 @@ impl CpuProfiler {
             sampler,
             pid: std::process::id(),
             tid_to_name: HashMap::new(),
+            roles,
         })
     }
 
@@ -149,17 +157,18 @@ impl CpuProfiler {
 /// Per-thread sched event profiler. Yields raw samples without worker IDs.
 pub(crate) struct SchedProfiler {
     sampler: PerfSampler,
+    roles: WorkerRoles,
 }
 
 impl SchedProfiler {
-    pub(crate) fn new(config: SchedEventConfig) -> io::Result<Self> {
+    pub(crate) fn new(config: SchedEventConfig, roles: WorkerRoles) -> io::Result<Self> {
         let sampler = PerfSampler::new_per_thread(
             SamplerConfig::default()
                 .event_source(EventSource::SwContextSwitches)
                 .sampling(SamplingMode::Period(config.sampling_interval.unwrap_or(1)))
                 .include_kernel(config.include_kernel),
         )?;
-        Ok(Self { sampler })
+        Ok(Self { sampler, roles })
     }
 
     pub(crate) fn track_current_thread(&mut self) -> io::Result<()> {
@@ -187,10 +196,11 @@ impl SchedProfiler {
 
 impl Source for CpuProfiler {
     fn flush(&mut self, ctx: &FlushContext<'_>) {
+        let roles = self.roles.lock().unwrap().clone();
         let resolve = |tid: u32| -> WorkerId {
-            match ctx.thread_roles.get(&tid) {
-                Some(crate::telemetry::events::ThreadRole::Worker(id)) => WorkerId::from(*id),
-                Some(crate::telemetry::events::ThreadRole::Blocking) => WorkerId::BLOCKING,
+            match roles.get(&tid) {
+                Some(ThreadRole::Worker(id)) => WorkerId::from(*id),
+                Some(ThreadRole::Blocking) => WorkerId::BLOCKING,
                 None => WorkerId::UNKNOWN,
             }
         };
@@ -217,10 +227,11 @@ impl Source for CpuProfiler {
 
 impl Source for SchedProfiler {
     fn flush(&mut self, ctx: &FlushContext<'_>) {
+        let roles = self.roles.lock().unwrap().clone();
         let resolve = |tid: u32| -> WorkerId {
-            match ctx.thread_roles.get(&tid) {
-                Some(crate::telemetry::events::ThreadRole::Worker(id)) => WorkerId::from(*id),
-                Some(crate::telemetry::events::ThreadRole::Blocking) => WorkerId::BLOCKING,
+            match roles.get(&tid) {
+                Some(ThreadRole::Worker(id)) => WorkerId::from(*id),
+                Some(ThreadRole::Blocking) => WorkerId::BLOCKING,
                 None => WorkerId::UNKNOWN,
             }
         };
