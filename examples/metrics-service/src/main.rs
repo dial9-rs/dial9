@@ -14,7 +14,7 @@ use dial9_tokio_telemetry::memory_profiling::{
 #[cfg(target_os = "linux")]
 use dial9_tokio_telemetry::telemetry::cpu_profile::{CpuProfilingConfig, SchedEventConfig};
 use dial9_tokio_telemetry::telemetry::{
-    DiskWriter, ProcessResourceUsageConfig, TaskDumpConfig, TelemetryHandle, TracedRuntime,
+    Dial9TokioHandle, DiskWriter, ProcessResourceUsageConfig, TaskDumpConfig, TracedRuntime,
 };
 use dial9_tokio_telemetry::tracing_layer::Dial9TokioLayer;
 use tokio::runtime::Builder;
@@ -263,7 +263,7 @@ fn main() -> std::io::Result<()> {
         traced_builder.build(builder, writer)?
     };
     guard.enable();
-    let handle = guard.handle();
+    let handle = guard.tokio_handle(runtime.handle());
 
     let _mem_guard = if args.no_memory_profiling {
         None
@@ -280,7 +280,7 @@ fn main() -> std::io::Result<()> {
     };
 
     // Wrap the body in a spawned task so the root future is instrumented.
-    // Inside, TelemetryHandle::current() is available on every worker thread.
+    // Inside, Dial9TokioHandle::current() is available on every worker thread.
     runtime.block_on(async {
         handle
             .spawn(async move {
@@ -300,7 +300,7 @@ fn main() -> std::io::Result<()> {
                     .await
                     .expect("failed to ensure DynamoDB table");
 
-                let handle = TelemetryHandle::current();
+                let handle = Dial9TokioHandle::current();
 
                 // background flush worker
                 let flush_state = state.clone();

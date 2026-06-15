@@ -1394,9 +1394,15 @@ mod tests {
             .iter()
             .flat_map(|s| s.segment_metadata())
             .collect();
-        assert!(
-            runtime_meta.iter().any(|(k, _)| k == "runtime.api-runtime"),
-            "env runtime name should surface in segment metadata"
+        let runtime_keys: Vec<&str> = runtime_meta
+            .iter()
+            .map(|(k, _)| k.as_str())
+            .filter(|k| k.starts_with("runtime."))
+            .collect();
+        assert_eq!(
+            runtime_keys,
+            ["runtime.api-runtime"],
+            "exactly one runtime, named from env, should surface in segment metadata"
         );
         assert!(shared.task_dumps_enabled.load(Ordering::Relaxed));
         assert_eq!(
@@ -1481,8 +1487,8 @@ mod tests {
             "no Tokio runtime metadata should be present when Tokio instrumentation is disabled"
         );
         assert!(
-            !rt.block_on(async { crate::telemetry::TelemetryHandle::current().is_enabled() }),
-            "TelemetryHandle::current() should remain inert without Tokio hooks"
+            !rt.block_on(async { crate::telemetry::Dial9Handle::current().is_enabled() }),
+            "Dial9Handle::current() should remain inert without Tokio hooks"
         );
     }
 

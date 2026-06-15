@@ -12,7 +12,7 @@
 //! with different RUSTFLAGS, so they are handled by the shell script wrapper.
 
 use dial9_tokio_telemetry::telemetry::{
-    DiskWriter, TelemetryHandle, TracedRuntime,
+    Dial9TokioHandle, DiskWriter, TracedRuntime,
     cpu_profile::{CpuProfilingConfig, SchedEventConfig},
 };
 use std::path::PathBuf;
@@ -38,7 +38,7 @@ async fn cpu_task(_id: usize) {
 }
 
 /// Generate a trace where tasks are NOT instrumented (no wake events).
-/// Uses tokio::spawn instead of TelemetryHandle::spawn.
+/// Uses tokio::spawn instead of Dial9TokioHandle::spawn.
 fn generate_no_wake_events(dir: &PathBuf) {
     std::fs::create_dir_all(dir).unwrap();
     let trace_path = dir.join("trace.bin");
@@ -56,7 +56,7 @@ fn generate_no_wake_events(dir: &PathBuf) {
         .unwrap();
 
     runtime.block_on(async {
-        // Deliberately use tokio::spawn — NOT TelemetryHandle::spawn
+        // Deliberately use tokio::spawn — NOT Dial9TokioHandle::spawn
         let tasks: Vec<_> = (0..50).map(|i| tokio::spawn(cpu_task(i))).collect();
         for t in tasks {
             let _ = t.await;
@@ -89,7 +89,7 @@ fn generate_good_trace(dir: &PathBuf) {
         .unwrap();
 
     runtime.block_on(async {
-        let handle = TelemetryHandle::current();
+        let handle = Dial9TokioHandle::current();
         let tasks: Vec<_> = (0..50).map(|i| handle.spawn(cpu_task(i))).collect();
         for t in tasks {
             let _ = t.await;
@@ -122,7 +122,7 @@ fn generate_no_sched_events(dir: &PathBuf) {
         .unwrap();
 
     runtime.block_on(async {
-        let handle = TelemetryHandle::current();
+        let handle = Dial9TokioHandle::current();
         let tasks: Vec<_> = (0..50).map(|i| handle.spawn(cpu_task(i))).collect();
         for t in tasks {
             let _ = t.await;

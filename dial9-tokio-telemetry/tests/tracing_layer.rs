@@ -309,13 +309,13 @@ fn span_events_appear_in_trace() {
     );
 }
 
-/// Verify the layer silently skips when no TelemetryHandle is present.
+/// Verify the layer silently skips when no Dial9Handle is present.
 #[test]
 fn no_telemetry_handle_does_not_panic() {
     let subscriber = tracing_subscriber::registry().with(Dial9TokioLayer::new());
     let _guard = tracing::subscriber::set_default(subscriber);
 
-    // This runs on a plain thread with no dial9 runtime, so no TelemetryHandle.
+    // This runs on a plain thread with no dial9 runtime, so no Dial9Handle.
     // The layer should silently skip without panicking.
     let span = tracing::info_span!("orphan_span", key = "value");
     let _enter = span.enter();

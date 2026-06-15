@@ -110,7 +110,7 @@ fn expand_main(args: MainArgs, input: ItemFn) -> Result<TokenStream2, syn::Error
 /// `runtime.block_on(...)` is invisible to the telemetry hooks.
 ///
 /// To spawn sub-tasks with wake-event tracking from anywhere inside the
-/// body, call `TelemetryHandle::current()` — the handle is installed on
+/// body, call `Dial9TokioHandle::current()` — the handle is installed on
 /// every runtime-owned thread by `on_thread_start`.
 ///
 /// # Arguments
@@ -137,7 +137,7 @@ fn expand_main(args: MainArgs, input: ItemFn) -> Result<TokenStream2, syn::Error
 /// Using a named function:
 ///
 /// ```rust,ignore
-/// use dial9_tokio_telemetry::{main, Dial9Config, telemetry::TelemetryHandle};
+/// use dial9_tokio_telemetry::{main, Dial9Config, telemetry::Dial9TokioHandle};
 ///
 /// fn my_config() -> Dial9Config {
 ///     Dial9Config::builder()
@@ -150,7 +150,7 @@ fn expand_main(args: MainArgs, input: ItemFn) -> Result<TokenStream2, syn::Error
 ///
 /// #[dial9_tokio_telemetry::main(config = my_config)]
 /// async fn main() {
-///     let handle = TelemetryHandle::current();
+///     let handle = Dial9TokioHandle::current();
 ///     handle
 ///         .spawn(async { /* instrumented sub-task */ })
 ///         .await

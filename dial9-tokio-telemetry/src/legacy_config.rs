@@ -277,7 +277,7 @@ mod tests {
         let config = Dial9ConfigBuilder::new(tmp_base_path(), 1024 * 1024, 4 * 1024 * 1024).build();
         let (runtime, guard) = config.build().expect("build failed");
         let guard = guard.expect("guard should be Some for enabled config");
-        let handle = guard.handle();
+        let handle = guard.tokio_handle(runtime.handle());
         let result = runtime.block_on(async { handle.spawn(async { 42 }).await.unwrap() });
         assert_eq!(result, 42);
     }
@@ -289,7 +289,7 @@ mod tests {
             .build();
         let (runtime, guard) = config.build().expect("build failed");
         let guard = guard.expect("guard should be Some");
-        let handle = guard.handle();
+        let handle = guard.tokio_handle(runtime.handle());
         let result = runtime.block_on(async { handle.spawn(async { 7 }).await.unwrap() });
         assert_eq!(result, 7);
     }
@@ -304,7 +304,7 @@ mod tests {
             .build();
         let (runtime, guard) = config.build().expect("build failed");
         let guard = guard.expect("guard should be Some");
-        let handle = guard.handle();
+        let handle = guard.tokio_handle(runtime.handle());
         let result = runtime.block_on(async { handle.spawn(async { 99 }).await.unwrap() });
         assert_eq!(result, 99);
     }
@@ -318,7 +318,7 @@ mod tests {
             .build();
         let (runtime, guard) = config.build().expect("build failed");
         let guard = guard.expect("guard should be Some");
-        let handle = guard.handle();
+        let handle = guard.tokio_handle(runtime.handle());
         let result = runtime.block_on(async { handle.spawn(async { 3 }).await.unwrap() });
         assert_eq!(result, 3);
     }
@@ -330,7 +330,7 @@ mod tests {
             .build();
         let (runtime, guard) = config.build().expect("build failed");
         let guard = guard.expect("guard should be Some");
-        let handle = guard.handle();
+        let handle = guard.tokio_handle(runtime.handle());
         let result = runtime.block_on(async { handle.spawn(async { 1 }).await.unwrap() });
         assert_eq!(result, 1);
     }

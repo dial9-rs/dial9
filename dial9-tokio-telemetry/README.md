@@ -37,7 +37,7 @@ rustflags = [
 ```
 
 ```rust,no_run
-use dial9_tokio_telemetry::{main, Dial9Config, telemetry::TelemetryHandle};
+use dial9_tokio_telemetry::{main, Dial9Config, telemetry::Dial9TokioHandle};
 
 fn my_config() -> Dial9Config {
     Dial9Config::builder()
@@ -52,7 +52,7 @@ fn my_config() -> Dial9Config {
 
 #[dial9_tokio_telemetry::main(config = my_config)] // inline config function is also supported
 async fn main() {
-    let handle = TelemetryHandle::current();
+    let handle = Dial9TokioHandle::current();
     handle
         .spawn(async { /* wake events tracked */ })
         .await
@@ -63,7 +63,7 @@ async fn main() {
 For zero-code configuration in production, use `Dial9Config::from_env()`:
 
 ```rust,no_run
-use dial9_tokio_telemetry::{main, Dial9Config, telemetry::TelemetryHandle};
+use dial9_tokio_telemetry::{main, Dial9Config, telemetry::Dial9TokioHandle};
 
 fn my_config() -> Dial9Config {
     Dial9Config::from_env()
@@ -71,7 +71,7 @@ fn my_config() -> Dial9Config {
 
 #[dial9_tokio_telemetry::main(config = my_config)]
 async fn main() {
-    let handle = TelemetryHandle::current();
+    let handle = Dial9TokioHandle::current();
     handle.spawn(async { /* wake events tracked when enabled */ }).await.unwrap();
 }
 ```
@@ -305,7 +305,7 @@ dial9-tokio-telemetry = { version = "0.3", features = ["memory-profiling"] }
 use dial9_tokio_telemetry::memory_profiling::{
     Dial9Allocator, MemoryProfiler, MemoryProfilingConfig,
 };
-use dial9_tokio_telemetry::telemetry::TelemetryHandle;
+use dial9_tokio_telemetry::telemetry::Dial9Handle;
 
 // Install as the global allocator. Zero-cost passthrough until
 // MemoryProfiler::install() is called.
@@ -316,7 +316,7 @@ static ALLOC: Dial9Allocator = Dial9Allocator::system();
 // static ALLOC: Dial9Allocator<tikv_jemallocator::Jemalloc> =
 //     Dial9Allocator::new(tikv_jemallocator::Jemalloc);
 
-# fn example(handle: TelemetryHandle) {
+# fn example(handle: Dial9Handle) {
 let config = MemoryProfilingConfig::builder()
     .sample_rate_bytes(512 * 1024)  // sample ~every 512 KiB allocated (default)
     .track_liveset(true)            // track frees for leak detection
@@ -415,7 +415,7 @@ You can emit your own application-level events into the trace alongside the buil
 ```rust,no_run
 # fn main() {
 use dial9_trace_format::TraceEvent;
-use dial9_tokio_telemetry::telemetry::{record_event, clock_monotonic_ns, TelemetryHandle};
+use dial9_tokio_telemetry::telemetry::{clock_monotonic_ns, Dial9Handle};
 
 #[derive(TraceEvent)]
 struct RequestCompleted {
@@ -427,16 +427,13 @@ struct RequestCompleted {
     error_message: Option<String>,
 }
 
-# let handle: TelemetryHandle = todo!();
-record_event(
-    RequestCompleted {
-        timestamp_ns: clock_monotonic_ns(),
-        status_code: 200,
-        latency_us: 1500,
-        error_message: None,
-    },
-    &handle,
-);
+# let handle: Dial9Handle = todo!();
+handle.record_event(RequestCompleted {
+    timestamp_ns: clock_monotonic_ns(),
+    status_code: 200,
+    latency_us: 1500,
+    error_message: None,
+});
 # }
 ```
 
@@ -444,7 +441,7 @@ record_event(
 
 You can also register a callback that runs from dial9's flush thread and emits
 custom events. This is useful for draining application-owned queues or taking
-periodic snapshots without passing a [`TelemetryHandle`] through your code:
+periodic snapshots without passing a [`Dial9Handle`] through your code:
 
 ```rust,ignore
 use dial9_trace_format::TraceEvent;
@@ -496,7 +493,7 @@ let (runtime, guard) = TracedRuntime::builder()
     .unwrap();
 ```
 
-dial9's internal hooks always run first, then your callbacks fire in registration order. This ensures `TelemetryHandle::current()` is available in your `on_thread_start` callback. Registering the same hook multiple times stacks the callbacks — all of them will fire.
+dial9's internal hooks always run first, then your callbacks fire in registration order. This ensures `Dial9Handle::current()` is available in your `on_thread_start` callback. Registering the same hook multiple times stacks the callbacks — all of them will fire.
 
 **Important:** Do not set hooks directly via `tokio::runtime::Builder::on_thread_start()` etc. — dial9 will overwrite them. Always use `with_tokio_hooks` to compose your callbacks with dial9's instrumentation.
 

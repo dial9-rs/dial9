@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use super::flush_loop::run_flush_loop;
 use super::guard::{TelemetryGuard, WorkerHandle};
-use super::handle::TelemetryHandle;
+use super::handle::Dial9Handle;
 use super::shared_state::SharedState;
 use super::{ControlCommand, attach_runtime};
 
@@ -857,7 +857,7 @@ impl TelemetryCore {
             }
         }
 
-        // Channel for TelemetryHandle/Guard → flush thread communication.
+        // Channel for Dial9Handle/Guard → flush thread communication.
         let (control_tx, control_rx) =
             crate::primitives::sync::mpsc::sync_channel::<ControlCommand>(1);
 
@@ -931,7 +931,7 @@ impl TelemetryCore {
         }
 
         Ok(TelemetryGuard::enabled(
-            TelemetryHandle::enabled(shared, control_tx),
+            Dial9Handle::enabled(shared, control_tx),
             Some(flush_thread),
             worker,
             contexts,
@@ -1212,16 +1212,17 @@ impl TracedRuntime {
 
     /// Run `fut` to completion on the runtime.
     ///
-    /// The future is always spawned through the guard's
-    /// [`TelemetryHandle`]. On an enabled guard this records poll and
-    /// wake events; on a disabled guard the handle's `spawn` falls
-    /// through to plain [`tokio::spawn`].
+    /// The future is always spawned through a
+    /// [`Dial9TokioHandle`](super::handle::Dial9TokioHandle) bound to this
+    /// runtime. On an enabled guard this records poll and wake events; on
+    /// a disabled guard the handle's `spawn` falls through to plain
+    /// [`tokio::spawn`].
     pub fn block_on<F>(&self, fut: F) -> F::Output
     where
         F: std::future::Future + Send + 'static,
         F::Output: Send + 'static,
     {
-        let handle = self.guard.handle();
+        let handle = self.guard.tokio_handle(self.runtime.handle());
         self.runtime.block_on(async move {
             match handle.spawn(fut).await {
                 Ok(output) => output,

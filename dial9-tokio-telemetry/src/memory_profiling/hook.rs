@@ -348,7 +348,7 @@ mod tests {
     use crate::memory_profiling::profiler::MemoryProfilerInner;
     use crate::memory_profiling::ring::RingBuffers;
     use crate::sampling::SplitMix64;
-    use crate::telemetry::recorder::TelemetryHandle;
+    use crate::telemetry::recorder::Dial9Handle;
     use dial9_perf_self_profile::unwinder::Unwinder;
     use std::sync::Arc;
 
@@ -399,7 +399,7 @@ mod tests {
         let rings = Arc::new(RingBuffers::new(ring_capacity, ring_capacity));
         MemoryProfilerInner {
             unwinder,
-            handle: TelemetryHandle::disabled(),
+            handle: Dial9Handle::disabled(),
             rings,
             sample_rate_bytes,
             liveset: None,
@@ -716,7 +716,7 @@ mod tests {
         ));
         MemoryProfilerInner {
             unwinder,
-            handle: TelemetryHandle::disabled(),
+            handle: Dial9Handle::disabled(),
             rings,
             sample_rate_bytes,
             liveset: Some(liveset),

@@ -96,9 +96,9 @@ mod fluent_builder {
 
     #[dial9_tokio_telemetry::main(config = test_config)]
     async fn with_nested_spawn() -> i32 {
-        // `TelemetryHandle::current()` is populated by `on_thread_start` on
+        // `Dial9TokioHandle::current()` is populated by `on_thread_start` on
         // every runtime-owned thread — use it to spawn instrumented sub-tasks.
-        let handle = dial9_tokio_telemetry::telemetry::TelemetryHandle::current();
+        let handle = dial9_tokio_telemetry::telemetry::Dial9TokioHandle::current();
         let sub = handle.spawn(async { 7 + 3 });
         sub.await.unwrap()
     }
@@ -216,7 +216,7 @@ mod fluent_builder {
     #[dial9_tokio_telemetry::main(config = disabled_config)]
     async fn disabled_no_telemetry_handle() -> bool {
         // The current handle should be inert when telemetry is disabled.
-        !dial9_tokio_telemetry::telemetry::TelemetryHandle::current().is_enabled()
+        !dial9_tokio_telemetry::telemetry::Dial9Handle::current().is_enabled()
     }
 
     #[test]
@@ -253,7 +253,7 @@ mod in_memory {
 
     use dial9_tokio_telemetry::Dial9Config;
     use dial9_tokio_telemetry::background_task::{ProcessError, SegmentData, SegmentProcessor};
-    use dial9_tokio_telemetry::telemetry::TelemetryHandle;
+    use dial9_tokio_telemetry::telemetry::{Dial9Handle, Dial9TokioHandle};
 
     /// Stand-in delivery processor: forwards each segment unchanged.
     #[derive(Debug, Default)]
@@ -283,10 +283,9 @@ mod in_memory {
 
     #[dial9_tokio_telemetry::main(config = memory_config)]
     async fn runs_with_memory_writer() -> bool {
-        let handle = TelemetryHandle::current();
-        let sub = handle.spawn(async { 7 + 3 });
+        let sub = Dial9TokioHandle::current().spawn(async { 7 + 3 });
         assert_eq!(sub.await.unwrap(), 10);
-        handle.is_enabled()
+        Dial9Handle::current().is_enabled()
     }
 
     #[test]
@@ -308,7 +307,7 @@ mod fluent_builder_fallback {
     use std::path::PathBuf;
 
     use dial9_tokio_telemetry::Dial9Config;
-    use dial9_tokio_telemetry::telemetry::TelemetryHandle;
+    use dial9_tokio_telemetry::telemetry::Dial9Handle;
 
     use super::tmp_base_path;
 
@@ -335,7 +334,7 @@ mod fluent_builder_fallback {
     #[dial9_tokio_telemetry::main(config = fallback_config)]
     async fn fallback_runs_async_body() -> bool {
         tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-        TelemetryHandle::current().is_enabled()
+        Dial9Handle::current().is_enabled()
     }
 
     #[test]
@@ -351,7 +350,7 @@ mod fluent_builder_fallback {
     async fn cascade_runs_async_body() -> bool {
         let result = tokio::spawn(async { 21 + 21 }).await.unwrap();
         assert_eq!(result, 42);
-        !TelemetryHandle::current().is_enabled()
+        !Dial9Handle::current().is_enabled()
     }
 
     #[test]
@@ -411,7 +410,7 @@ mod legacy_builder {
 
     #[dial9_tokio_telemetry::main(config = test_config)]
     async fn with_nested_spawn() -> i32 {
-        let handle = dial9_tokio_telemetry::telemetry::TelemetryHandle::current();
+        let handle = dial9_tokio_telemetry::telemetry::Dial9TokioHandle::current();
         let sub = handle.spawn(async { 7 + 3 });
         sub.await.unwrap()
     }
@@ -524,7 +523,7 @@ mod legacy_builder {
 
     #[dial9_tokio_telemetry::main(config = disabled_config)]
     async fn disabled_no_telemetry_handle() -> bool {
-        !dial9_tokio_telemetry::telemetry::TelemetryHandle::current().is_enabled()
+        !dial9_tokio_telemetry::telemetry::Dial9Handle::current().is_enabled()
     }
 
     #[test]

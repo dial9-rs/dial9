@@ -1,7 +1,8 @@
+use crate::TracedFuture;
 use crate::primitives::sync::Arc;
+use crate::traced::TracedHandle;
 use std::cell::Cell;
 use std::cell::RefCell;
-use std::ops::Deref;
 
 use super::ControlCommand;
 use super::shared_state::SharedState;
@@ -9,7 +10,7 @@ use super::shared_state::SharedState;
 crate::primitives::thread_local! {
     /// Per-thread [`Dial9Handle`], populated in `on_thread_start` and
     /// cleared in `on_thread_stop`. Backs [`Dial9Handle::current`] and
-    /// [`TelemetryHandle::current`].
+    /// [`Dial9TokioHandle::current`].
     pub(super) static CURRENT_HANDLE: RefCell<Option<Dial9Handle>> = const { RefCell::new(None) };
 
     /// Nest count for [`InstrumentedSpawnGuard`]. `on_task_spawn` treats
@@ -19,7 +20,7 @@ crate::primitives::thread_local! {
 
 /// Cheap, cloneable handle for recording events and controlling telemetry.
 ///
-/// For the Tokio-aware handle that can spawn instrumented futures, see [`TelemetryHandle`].
+/// For the Tokio handle that spawns instrumented tasks, see [`Dial9TokioHandle`].
 ///
 /// A handle may be in one of two modes:
 ///
@@ -143,6 +144,15 @@ impl Dial9Handle {
         })
     }
 
+    /// Record a custom event into the trace.
+    ///
+    /// Any type implementing [`dial9_trace_format::TraceEvent`] (typically via
+    /// `#[derive(TraceEvent)]`) works directly. No-op on a disabled handle or
+    /// when recording is paused.
+    pub fn record_event(&self, event: impl crate::telemetry::buffer::Encodable) {
+        self.record_encodable_event(&event);
+    }
+
     /// Record a user-defined [`Encodable`](crate::telemetry::buffer::Encodable) event.
     ///
     /// No-op on a disabled handle or when recording is paused.
@@ -170,85 +180,93 @@ impl Dial9Handle {
     }
 }
 
-/// Tokio-aware telemetry handle: everything a [`Dial9Handle`] does, plus
-/// spawning instrumented futures.
+/// Tokio handle for spawning instrumented tasks.
 ///
-/// Derefs to [`Dial9Handle`], so recording and control methods
-/// (`enable`, `disable`, `is_enabled`, ...) are available directly. On an
-/// enabled handle, [`spawn`](Self::spawn) wraps the future with wake-event
-/// tracking; on a disabled handle it falls back to [`tokio::spawn`].
+/// Spawned futures are wrapped with wake-event tracking when telemetry is live
+/// on this handle. Otherwise they spawn plainly. Obtain one for the current
+/// runtime with [`current`](Self::current), or bound to a specific runtime
+/// from [`TelemetryGuard::tokio_handle`](super::guard::TelemetryGuard::tokio_handle)
+/// or [`trace_runtime`](super::guard::TelemetryGuard::trace_runtime)'s builder.
+///
+/// This handle only spawns. For recording and control, use [`Dial9Handle`].
 #[derive(Clone)]
-pub struct TelemetryHandle(Dial9Handle);
-
-impl Deref for TelemetryHandle {
-    type Target = Dial9Handle;
-    fn deref(&self) -> &Dial9Handle {
-        &self.0
-    }
+pub struct Dial9TokioHandle {
+    /// `None` spawns on the current runtime (`tokio::spawn`), `Some` targets a
+    /// specific runtime and works from any thread.
+    runtime: Option<tokio::runtime::Handle>,
+    traced: Option<TracedHandle>,
 }
 
-impl std::fmt::Debug for TelemetryHandle {
+impl std::fmt::Debug for Dial9TokioHandle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TelemetryHandle")
-            .field("enabled", &self.is_enabled())
+        f.debug_struct("Dial9TokioHandle")
+            .field("enabled", &self.traced.is_some())
             .finish_non_exhaustive()
     }
 }
 
-impl TelemetryHandle {
-    pub(crate) fn enabled(
-        shared: Arc<SharedState>,
-        control_tx: crate::primitives::sync::mpsc::SyncSender<ControlCommand>,
-    ) -> Self {
-        Self(Dial9Handle::enabled(shared, control_tx))
-    }
-
-    /// Return an inert handle that is not connected to any telemetry
-    /// session. All methods are no-ops; [`spawn`](Self::spawn) falls
-    /// back to [`tokio::spawn`] without wake tracking.
-    pub fn disabled() -> Self {
-        Self(Dial9Handle::disabled())
-    }
-
-    /// Return the [`TelemetryHandle`] for the current thread. See
-    /// [`Dial9Handle::current`] for the exact semantics.
+impl Dial9TokioHandle {
+    /// Handle that spawns on the **current** tokio runtime (like `tokio::spawn`).
+    ///
+    /// Wraps spawned futures with wake tracking when the current thread is owned
+    /// by a live dial9 runtime, otherwise spawns plainly.
     pub fn current() -> Self {
-        Self(Dial9Handle::current())
+        Self {
+            runtime: None,
+            traced: Dial9Handle::current().traced_handle(),
+        }
     }
 
-    /// Return the [`TelemetryHandle`] installed for the current thread,
-    /// or `None` if no dial9 runtime has claimed this thread.
-    ///
-    /// Prefer [`current`](Self::current) instead.
-    pub fn try_current() -> Option<Self> {
-        Dial9Handle::try_current().map(Self)
+    /// Inert handle: [`spawn`](Self::spawn) falls back to [`tokio::spawn`]
+    /// without wake tracking.
+    pub fn disabled() -> Self {
+        Self {
+            runtime: None,
+            traced: None,
+        }
     }
 
-    /// Spawn a future on the ambient tokio runtime.
+    /// Handle bound to a specific runtime. Used by the guard's runtime builder
+    /// and [`TelemetryGuard::tokio_handle`](super::guard::TelemetryGuard::tokio_handle).
+    pub(super) fn for_runtime(
+        runtime: tokio::runtime::Handle,
+        traced: Option<crate::traced::TracedHandle>,
+    ) -> Self {
+        Self {
+            runtime: Some(runtime),
+            traced,
+        }
+    }
+
+    /// Spawn an instrumented future.
     ///
-    /// On an enabled handle, the future is wrapped with wake-event
-    /// tracking. On a disabled handle, this is a passthrough to
-    /// [`tokio::spawn`].
+    /// On an enabled handle the future is wrapped with wake-event tracking. The
+    /// task runs on this handle's runtime, the current one for [`current`](Self::current),
+    /// or the specific runtime the handle was built for.
     ///
     /// # Panics
     ///
-    /// Panics if called from outside a tokio runtime context (same
-    /// as [`tokio::spawn`]).
+    /// For a [`current`](Self::current)-runtime handle, panics if called outside
+    /// a tokio runtime context (same as [`tokio::spawn`]).
     #[track_caller]
     pub fn spawn<F>(&self, future: F) -> tokio::task::JoinHandle<F::Output>
     where
         F: std::future::Future + Send + 'static,
         F::Output: Send + 'static,
     {
-        match self.traced_handle() {
-            Some(traced_handle) => {
+        match &self.traced {
+            Some(traced) => {
                 let _guard = InstrumentedSpawnGuard::enter();
-                tokio::spawn(crate::telemetry::TracedFuture::new(
-                    future,
-                    Some(traced_handle),
-                ))
+                let future = TracedFuture::new(future, Some(traced.clone()));
+                match &self.runtime {
+                    Some(rt) => rt.spawn(future),
+                    None => tokio::spawn(future),
+                }
             }
-            None => tokio::spawn(future),
+            None => match &self.runtime {
+                Some(rt) => rt.spawn(future),
+                None => tokio::spawn(future),
+            },
         }
     }
 
@@ -267,148 +285,13 @@ impl TelemetryHandle {
     /// Spawn into a [`tokio::task::JoinSet`]:
     ///
     /// ```rust,no_run
-    /// # use dial9_tokio_telemetry::telemetry::TelemetryHandle;
+    /// # use dial9_tokio_telemetry::telemetry::Dial9TokioHandle;
     /// # use tokio::task::JoinSet;
     /// # async fn work() {}
     /// # async fn demo() {
-    /// let handle = TelemetryHandle::current();
+    /// let handle = Dial9TokioHandle::current();
     /// let mut set: JoinSet<()> = JoinSet::new();
     /// handle.spawn_with(work(), |f| set.spawn(f));
-    /// # }
-    /// ```
-    ///
-    /// Spawn into a [`tokio::task::JoinSet`] on a specific runtime:
-    ///
-    /// ```rust,no_run
-    /// # use dial9_tokio_telemetry::telemetry::TelemetryHandle;
-    /// # use tokio::runtime::Runtime;
-    /// # use tokio::task::JoinSet;
-    /// # async fn work() {}
-    /// # fn demo(runtime: &Runtime) {
-    /// let handle = TelemetryHandle::current();
-    /// let mut set: JoinSet<()> = JoinSet::new();
-    /// handle.spawn_with(work(), |f| set.spawn_on(f, runtime.handle()));
-    /// # }
-    /// ```
-    ///
-    /// [`TracedFuture<F>`]: crate::telemetry::TracedFuture
-    pub fn spawn_with<F, S>(
-        &self,
-        future: F,
-        spawn_fn: impl FnOnce(crate::telemetry::TracedFuture<F>) -> S,
-    ) -> S
-    where
-        F: std::future::Future + Send + 'static,
-        F::Output: Send + 'static,
-    {
-        let traced_handle = self.traced_handle();
-        let future = crate::telemetry::TracedFuture::new(future, traced_handle.clone());
-        match traced_handle {
-            Some(_) => {
-                let _guard = InstrumentedSpawnGuard::enter();
-                spawn_fn(future)
-            }
-            None => spawn_fn(future),
-        }
-    }
-}
-
-/// Spawn a traced task on the current tokio runtime.
-///
-/// Like [`tokio::spawn`], but wraps the future with wake-event tracking
-/// when called from a thread owned by a dial9 runtime. On other threads,
-/// falls back to plain [`tokio::spawn`].
-///
-/// Equivalent to [`TelemetryHandle::current().spawn(future)`](TelemetryHandle::spawn).
-///
-/// # Panics
-///
-/// Panics if called from outside a tokio runtime context (same
-/// as [`tokio::spawn`]).
-#[track_caller]
-pub fn spawn<F>(future: F) -> tokio::task::JoinHandle<F::Output>
-where
-    F: std::future::Future + Send + 'static,
-    F::Output: Send + 'static,
-{
-    TelemetryHandle::current().spawn(future)
-}
-
-/// RAII guard that increments `INSTRUMENTED_SPAWN` on creation and
-/// decrements it on drop, even if the protected closure panics.
-pub(super) struct InstrumentedSpawnGuard;
-
-impl InstrumentedSpawnGuard {
-    pub(super) fn enter() -> Self {
-        INSTRUMENTED_SPAWN.with(|c| c.set(c.get().saturating_add(1)));
-        Self
-    }
-}
-
-impl Drop for InstrumentedSpawnGuard {
-    fn drop(&mut self) {
-        INSTRUMENTED_SPAWN.with(|c| c.set(c.get().saturating_sub(1)));
-    }
-}
-
-/// Handle for spawning instrumented futures on a specific runtime.
-///
-/// Returned by [`TraceRuntimeCoreBuilder::build`](super::guard::TraceRuntimeCoreBuilder::build).
-/// Unlike [`TelemetryHandle::spawn`] which uses `tokio::spawn()` (requiring an
-/// ambient runtime context), this type targets a specific runtime and works from
-/// any thread.
-///
-/// `Clone` is cheap — both inner handles are `Arc`-based.
-#[derive(Clone, Debug)]
-pub struct RuntimeTelemetryHandle {
-    pub(super) runtime: tokio::runtime::Handle,
-    pub(super) traced: Option<crate::traced::TracedHandle>,
-}
-
-impl RuntimeTelemetryHandle {
-    /// Spawn a future with wake-event tracking on this handle's runtime.
-    ///
-    /// On a handle obtained from a disabled [`TelemetryGuard`](super::guard::TelemetryGuard),
-    /// wake tracking is skipped and the future is spawned plainly.
-    #[track_caller]
-    pub fn spawn<F>(&self, future: F) -> tokio::task::JoinHandle<F::Output>
-    where
-        F: std::future::Future + Send + 'static,
-        F::Output: Send + 'static,
-    {
-        match self.traced.clone() {
-            Some(traced_handle) => {
-                let _guard = InstrumentedSpawnGuard::enter();
-                self.runtime.spawn(crate::telemetry::TracedFuture::new(
-                    future,
-                    Some(traced_handle),
-                ))
-            }
-            None => self.runtime.spawn(future),
-        }
-    }
-
-    /// Spawn an instrumented future through a user-supplied spawn function.
-    ///
-    /// Mirrors [`TelemetryHandle::spawn_with`] for callers that already hold a
-    /// [`RuntimeTelemetryHandle`]. `spawn_fn` must synchronously perform a real
-    /// Tokio spawn (or an equivalent operation) before returning; do not defer
-    /// the future or run it with `block_on`. To record the resulting task as
-    /// instrumented, target a dial9-traced runtime with task tracking enabled,
-    /// typically via [`tokio::task::JoinSet::spawn_on`] with the appropriate
-    /// [`tokio::runtime::Handle`].
-    ///
-    /// # Examples
-    ///
-    /// Spawn into a [`tokio::task::JoinSet`] on a specific runtime:
-    ///
-    /// ```rust,no_run
-    /// # use dial9_tokio_telemetry::telemetry::RuntimeTelemetryHandle;
-    /// # use tokio::runtime::Runtime;
-    /// # use tokio::task::JoinSet;
-    /// # async fn work() {}
-    /// # fn demo(runtime: &Runtime, handle: RuntimeTelemetryHandle, set: &mut JoinSet<()>) {
-    /// handle.spawn_with(work(), |f| set.spawn_on(f, runtime.handle()));
     /// # }
     /// ```
     ///
@@ -430,5 +313,43 @@ impl RuntimeTelemetryHandle {
             }
             None => spawn_fn(future),
         }
+    }
+}
+
+/// Spawn a traced task on the current tokio runtime.
+///
+/// Like [`tokio::spawn`], but wraps the future with wake-event tracking
+/// when called from a thread owned by a dial9 runtime. On other threads,
+/// falls back to plain [`tokio::spawn`].
+///
+/// Equivalent to [`Dial9TokioHandle::current().spawn(future)`](Dial9TokioHandle::spawn).
+///
+/// # Panics
+///
+/// Panics if called from outside a tokio runtime context (same
+/// as [`tokio::spawn`]).
+#[track_caller]
+pub fn spawn<F>(future: F) -> tokio::task::JoinHandle<F::Output>
+where
+    F: std::future::Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    Dial9TokioHandle::current().spawn(future)
+}
+
+/// RAII guard that increments `INSTRUMENTED_SPAWN` on creation and
+/// decrements it on drop, even if the protected closure panics.
+pub(super) struct InstrumentedSpawnGuard;
+
+impl InstrumentedSpawnGuard {
+    pub(super) fn enter() -> Self {
+        INSTRUMENTED_SPAWN.with(|c| c.set(c.get().saturating_add(1)));
+        Self
+    }
+}
+
+impl Drop for InstrumentedSpawnGuard {
+    fn drop(&mut self) {
+        INSTRUMENTED_SPAWN.with(|c| c.set(c.get().saturating_sub(1)));
     }
 }

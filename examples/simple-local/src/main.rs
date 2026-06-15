@@ -1,5 +1,5 @@
 use dial9_tokio_telemetry::config::{Dial9Config, Dial9ConfigBuilder};
-use dial9_tokio_telemetry::telemetry::TelemetryHandle;
+use dial9_tokio_telemetry::telemetry::Dial9TokioHandle;
 use std::time::Duration;
 
 const TRACE_DIR: &str = "/tmp/simple-local-traces";
@@ -33,7 +33,7 @@ fn my_config() -> Dial9Config {
 
 #[dial9_tokio_telemetry::main(config = my_config)]
 async fn main() {
-    let handle = TelemetryHandle::current();
+    let handle = Dial9TokioHandle::current();
     let mut handles = vec![];
 
     for _ in 0..100 {

@@ -9,7 +9,7 @@
 use std::time::Duration;
 
 use dial9_tokio_telemetry::config::{Dial9Config, Dial9ConfigBuilder};
-use dial9_tokio_telemetry::telemetry::TelemetryHandle;
+use dial9_tokio_telemetry::telemetry::Dial9TokioHandle;
 
 fn my_config() -> Dial9Config {
     Dial9ConfigBuilder::new(
@@ -28,7 +28,7 @@ fn my_config() -> Dial9Config {
 async fn main() {
     println!("Running workload with 48 workers...");
 
-    let handle = TelemetryHandle::current();
+    let handle = Dial9TokioHandle::current();
     let tasks: Vec<_> = (0..500)
         .map(|i| {
             handle.spawn(async move {

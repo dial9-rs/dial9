@@ -1,6 +1,5 @@
 //! Integration tests for the custom-spawn tracing API:
-//! - [`TelemetryHandle::spawn_with`]
-//! - [`RuntimeTelemetryHandle::spawn_with`]
+//! - [`Dial9TokioHandle::spawn_with`]
 
 mod common;
 
@@ -50,7 +49,7 @@ fn build_capturing_runtime() -> (Runtime, TelemetryGuard, Arc<Mutex<Vec<Vec<u8>>
 fn spawn_with_joinset_emits_wake_events() {
     let (runtime, guard, batches) = build_capturing_runtime();
 
-    let handle = guard.handle();
+    let handle = guard.tokio_handle(runtime.handle());
     let spawned_id: Arc<Mutex<Option<TaskId>>> = Arc::new(Mutex::new(None));
     let id_w = spawned_id.clone();
 
@@ -97,7 +96,7 @@ fn spawn_with_marks_taskspawn_and_preserves_caller() {
         .build_and_start(builder, writer)
         .unwrap();
 
-    let handle = guard.handle();
+    let handle = guard.tokio_handle(runtime.handle());
 
     runtime.block_on(async move {
         let mut set: JoinSet<()> = JoinSet::new();
@@ -155,7 +154,7 @@ fn spawn_with_returns_closure_value() {
         .build_and_start(builder, common::small_mem_writer())
         .unwrap();
 
-    let handle = guard.handle();
+    let handle = guard.tokio_handle(runtime.handle());
 
     runtime.block_on(async move {
         let join = handle.spawn_with(async { 42u32 }, tokio::spawn);
@@ -169,7 +168,7 @@ fn spawn_with_returns_closure_value() {
         .expect("clean shutdown");
 }
 
-/// `RuntimeTelemetryHandle::spawn_with` composes with `JoinSet::spawn_on`
+/// `Dial9TokioHandle::spawn_with` composes with `JoinSet::spawn_on`
 /// to target a specific runtime.
 #[test]
 fn runtime_handle_spawn_with_targets_correct_runtime() {
