@@ -453,14 +453,6 @@ mod tests {
             assert_eq!(result.frames_written, 0);
             assert!(result.truncated);
         }
-
-        // NOTE: the test that replaces the process-wide SIGSEGV handler to check
-        // `capture`'s `debug_assert!` lives in `tests/handler_replacement.rs`. It
-        // cannot run here: under the default `cargo test` harness all unit tests
-        // share one process across multiple threads, so replacing SIGSEGV raced
-        // with sibling tests (e.g. `capture_produces_frames`) that call
-        // `capture()` concurrently and assert the handler is still active. A
-        // separate integration-test binary gives it an isolated process.
     }
 
     #[cfg(not(all(
