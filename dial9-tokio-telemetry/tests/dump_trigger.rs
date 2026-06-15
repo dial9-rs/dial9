@@ -52,3 +52,80 @@ fn trigger_without_pipeline_resolves_worker_stopped() {
     drop(runtime);
     drop(guard);
 }
+
+/// Two `dump_current_data()` calls fired concurrently both succeed with
+/// distinct dump ids and at least one captures the ring. Per-dump fan-out (a
+/// segment captured by every overlapping window) is covered by the worker
+/// unit tests; this pins the end-to-end answer to "what happens if two dumps
+/// are triggered at once": they run independently, no coordination.
+#[test]
+fn concurrent_dumps_both_resolve_with_distinct_ids() {
+    use std::time::Duration;
+
+    let dir = tempfile::tempdir().unwrap();
+    let trace_path = dir.path().join("trace.bin");
+
+    let (control, rx) = dump::trigger();
+
+    // Small segments so the workload seals a few into the ring quickly.
+    let writer = DiskWriter::new(&trace_path, 512, 50 * 1024).unwrap();
+
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.worker_threads(2).enable_all();
+
+    let (runtime, guard) = TracedRuntime::builder()
+        .with_trace_path(&trace_path)
+        .with_custom_pipeline::<_, Disk>(|p| p.gzip().write_back())
+        .with_trigger(rx)
+        .with_worker_poll_interval(Duration::from_millis(50))
+        .build_and_start(builder, writer)
+        .unwrap();
+
+    // Count sealed segments in the ring (`*.bin`; the active file is `.active`).
+    let count_sealed = || {
+        std::fs::read_dir(dir.path())
+            .map(|rd| {
+                rd.flatten()
+                    .filter(|e| e.file_name().to_string_lossy().ends_with(".bin"))
+                    .count()
+            })
+            .unwrap_or(0)
+    };
+
+    let (first, second) = runtime.block_on(async {
+        // Generate trace data; the pipeline stays parked until we dump.
+        let mut handles = Vec::new();
+        for _ in 0..200 {
+            handles.push(tokio::spawn(async { tokio::task::yield_now().await }));
+        }
+        for h in handles {
+            let _ = h.await;
+        }
+        // Wait until at least one segment has sealed into the ring.
+        for _ in 0..200 {
+            if count_sealed() > 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        // Fire two dumps concurrently.
+        tokio::join!(
+            control.dump_current_data().with_metadata("reason", "a"),
+            control.dump_current_data().with_metadata("reason", "b"),
+        )
+    });
+
+    let first = first.expect("first dump resolves");
+    let second = second.expect("second dump resolves");
+    assert_ne!(
+        first.dump_id, second.dump_id,
+        "concurrent dumps get distinct ids"
+    );
+    assert!(
+        first.segments_processed + second.segments_processed > 0,
+        "at least one concurrent dump captured the ring"
+    );
+
+    drop(runtime);
+    drop(guard);
+}
