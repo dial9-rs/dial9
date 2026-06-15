@@ -1,15 +1,6 @@
 //! Verifies that [`Unwinder::capture`] panics via `debug_assert!` when its
 //! SIGSEGV handler has been replaced out from under it. This protects against
 //! third-party signal handlers silently breaking stack-walk fault recovery.
-//!
-//! This lives in its own integration-test file *on purpose*. Replacing SIGSEGV
-//! is a process-global mutation: with the default `cargo test` harness all unit
-//! tests share one process and run on multiple threads, so doing this inside the
-//! `unwinder` unit-test module raced with sibling tests that call `capture()`
-//! concurrently — their `debug_assert!(verify_handler())` would fire during the
-//! window where SIGSEGV is replaced. Each file under `tests/` compiles to its
-//! own binary and runs in its own process, so the replacement here cannot affect
-//! any other test.
 #![cfg(all(
     target_os = "linux",
     any(target_arch = "x86_64", target_arch = "aarch64")
