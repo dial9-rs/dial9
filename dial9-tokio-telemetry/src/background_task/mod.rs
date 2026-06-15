@@ -864,7 +864,10 @@ impl ActiveDump {
 
     /// Best-effort policy: `Ok` whenever anything succeeded or nothing
     /// failed; `Err(Pipeline)` only on total failure.
-    fn into_result(mut self, manifest_key: Option<String>) -> (
+    fn into_result(
+        mut self,
+        manifest_key: Option<String>,
+    ) -> (
         tokio::sync::oneshot::Sender<Result<DumpReceipt, DumpError>>,
         Result<DumpReceipt, DumpError>,
     ) {
@@ -1219,8 +1222,7 @@ impl WorkerLoop {
                         // Defensive: the windowed pop only dispenses
                         // matching slots. Put the bytes back without
                         // burning a retry attempt.
-                        if let (Some(count), Some(bytes)) = (retry_count, original_bytes.as_ref())
-                        {
+                        if let (Some(count), Some(bytes)) = (retry_count, original_bytes.as_ref()) {
                             self.fs.release_for_retry(
                                 &seg_ref,
                                 bytes.clone(),
@@ -3361,8 +3363,7 @@ mod triggered_worker_tests {
         fn process(
             &mut self,
             data: SegmentData,
-        ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>>
-        {
+        ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>> {
             self.0.lock().unwrap().push(data.metadata().clone());
             Box::pin(async move { Ok(data) })
         }
@@ -3378,8 +3379,7 @@ mod triggered_worker_tests {
         fn process(
             &mut self,
             data: SegmentData,
-        ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>>
-        {
+        ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>> {
             let fail = self
                 .0
                 .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
@@ -3742,7 +3742,12 @@ mod triggered_worker_tests {
         seal_mem(&fs, 0, now_epoch());
 
         let stop = tokio_util::sync::CancellationToken::new();
-        let worker = spawn_worker(Arc::clone(&fs), vec![Box::new(EvictedSim)], rx, stop.clone());
+        let worker = spawn_worker(
+            Arc::clone(&fs),
+            vec![Box::new(EvictedSim)],
+            rx,
+            stop.clone(),
+        );
 
         // Best-effort: the vanished segment is silently uncounted.
         let receipt = control.dump_current_data().await.unwrap();
@@ -3764,9 +3769,9 @@ mod triggered_worker_tests {
                 data: SegmentData,
             ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>>
             {
-                Box::pin(async move {
-                    Err(ProcessError::io(data, io::Error::other("broken stage")))
-                })
+                Box::pin(
+                    async move { Err(ProcessError::io(data, io::Error::other("broken stage"))) },
+                )
             }
         }
 
@@ -3775,7 +3780,12 @@ mod triggered_worker_tests {
         seal_mem(&fs, 0, now_epoch());
 
         let stop = tokio_util::sync::CancellationToken::new();
-        let worker = spawn_worker(Arc::clone(&fs), vec![Box::new(AlwaysFail)], rx, stop.clone());
+        let worker = spawn_worker(
+            Arc::clone(&fs),
+            vec![Box::new(AlwaysFail)],
+            rx,
+            stop.clone(),
+        );
 
         let err = control.dump_current_data().await.unwrap_err();
         check!(matches!(err, DumpError::Pipeline(_)));
@@ -3877,8 +3887,7 @@ mod finalize_dump_tests {
         fn process(
             &mut self,
             data: SegmentData,
-        ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>>
-        {
+        ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>> {
             Box::pin(async move { Ok(data) })
         }
         fn finalize_dump(
@@ -3905,8 +3914,7 @@ mod finalize_dump_tests {
         fn process(
             &mut self,
             data: SegmentData,
-        ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>>
-        {
+        ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>> {
             Box::pin(async move { Ok(data) })
         }
         fn finalize_dump(
@@ -3992,9 +4000,9 @@ mod finalize_dump_tests {
                 data: SegmentData,
             ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>>
             {
-                Box::pin(async move {
-                    Err(ProcessError::io(data, io::Error::other("broken stage")))
-                })
+                Box::pin(
+                    async move { Err(ProcessError::io(data, io::Error::other("broken stage"))) },
+                )
             }
         }
 
@@ -4059,7 +4067,10 @@ mod finalize_dump_tests {
         };
         let key = uploader.finalize_dump(&completion).await;
         check!(key.is_none());
-        check!(uploader.dump_keys.is_empty(), "per-dump state still cleared");
+        check!(
+            uploader.dump_keys.is_empty(),
+            "per-dump state still cleared"
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -4188,7 +4199,10 @@ mod s3_dump_manifest_tests {
             .await
             .unwrap();
 
-        let manifest_key = receipt.manifest_key.clone().expect("S3 pipeline writes a manifest");
+        let manifest_key = receipt
+            .manifest_key
+            .clone()
+            .expect("S3 pipeline writes a manifest");
         check!(
             manifest_key == format!("traces/dumps/{}.json", receipt.dump_id),
             "manifest key layout"
@@ -4276,8 +4290,7 @@ mod s3_dump_manifest_tests {
 
         let receipt = control.dump_current_data().await.unwrap();
         check!(receipt.segments_processed == 0);
-        let manifest =
-            read_manifest(s3_root.path(), receipt.manifest_key.as_ref().unwrap());
+        let manifest = read_manifest(s3_root.path(), receipt.manifest_key.as_ref().unwrap());
         check!(manifest["segments"] == serde_json::json!([]));
 
         stop.cancel();

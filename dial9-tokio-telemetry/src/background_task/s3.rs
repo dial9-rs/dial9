@@ -870,9 +870,7 @@ mod tests {
         );
         check!(value["segments_processed"] == serde_json::json!(2));
         check!(value["metadata"] == serde_json::json!({"reason": "idle-ratio-drop"}));
-        check!(
-            value["segments"] == serde_json::json!(["traces/a.bin.gz", "traces/b.bin.gz"])
-        );
+        check!(value["segments"] == serde_json::json!(["traces/a.bin.gz", "traces/b.bin.gz"]));
     }
 
     #[tokio::test]
