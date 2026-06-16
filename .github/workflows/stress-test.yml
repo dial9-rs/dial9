@@ -45,3 +45,80 @@ jobs:
           else
             cargo nextest run --all-features --stress-duration '${{ inputs.duration_minutes || '60' }}m'
           fi
+
+  trace-integrity-stress:
+    # Repeatedly regenerate the demo trace and run the integrity checks. The
+    # task-lifecycle check (terminate-before-spawn) only flakes when independent
+    # CLOCK_MONOTONIC reads on different worker cores skew across a short-lived
+    # task's lifetime, which is rare per run — so we hammer the demo pipeline to
+    # surface any regression in the skew tolerance.
+    name: Trace Integrity Stress (demo regen loop)
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    env:
+      RUST_BACKTRACE: 1
+      AWS_ENDPOINT_URL: http://localhost:8000
+      AWS_ACCESS_KEY_ID: local
+      AWS_SECRET_ACCESS_KEY: local
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_PROFILE: fake-profile
+    services:
+      dynamodb-local:
+        image: amazon/dynamodb-local
+        ports:
+          - 8000:8000
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@1.94.1
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+      - name: Enable perf_event_open and kallsyms
+        run: |
+          sudo sysctl kernel.perf_event_paranoid=1
+          sudo sysctl kernel.kptr_restrict=0
+      - name: Build metrics-service (release)
+        run: cargo build --release -p metrics-service
+      - name: Unit test the lifecycle-inversion logic
+        run: node dial9-viewer/ui/test_task_lifecycle.js
+      - name: Loop demo regeneration + integrity checks
+        run: |
+          DURATION_MIN='${{ inputs.duration_minutes || '60' }}'
+          # Leave a few minutes of headroom under timeout-minutes for the final
+          # iteration to finish.
+          DEADLINE=$(( $(date +%s) + DURATION_MIN * 60 ))
+          ARTIFACT_DIR="$RUNNER_TEMP/failing-trace"
+          mkdir -p "$ARTIFACT_DIR"
+          i=0
+          while [ "$(date +%s)" -lt "$DEADLINE" ]; do
+            i=$((i + 1))
+            echo "::group::iteration $i"
+            scripts/regenerate_demo_trace.sh
+            # Capture the integrity output; on failure keep the log AND the
+            # exact demo-trace.bin that the check parsed, so the flake can be
+            # reproduced offline (node dial9-viewer/ui/test_trace_integrity.js <file>).
+            rc=0
+            node dial9-viewer/ui/test_trace_integrity.js > "$ARTIFACT_DIR/integrity.log" 2>&1 || rc=$?
+            cat "$ARTIFACT_DIR/integrity.log"
+            echo "::endgroup::"
+            if [ "$rc" -ne 0 ]; then
+              echo "::error::Trace integrity check failed on iteration $i — saving demo trace as an artifact for debugging"
+              cp dial9-viewer/ui/demo-trace.bin "$ARTIFACT_DIR/failing-demo-trace.bin"
+              {
+                echo "iteration=$i"
+                echo "reproduce with: node dial9-viewer/ui/test_trace_integrity.js failing-demo-trace.bin"
+              } > "$ARTIFACT_DIR/README.txt"
+              exit 1
+            fi
+          done
+          rm -f "$ARTIFACT_DIR/integrity.log"
+          echo "Completed $i demo-regen + integrity iterations with no failures"
+      - name: Upload failing trace artifact
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: failing-trace-integrity
+          path: ${{ runner.temp }}/failing-trace
+          if-no-files-found: ignore
+          retention-days: 14
