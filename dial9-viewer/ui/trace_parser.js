@@ -676,6 +676,14 @@
     // tid fields, detect block-in-place gaps, and rewrite cpuSamples.workerId.
     // See ADR-0001 (worker_id derived at analysis) and ADR-0002 (block-in-place
     // gap is unknowable).
+    //
+    // Samples are attributed by tid: resolve each through the tid -> worker map.
+    // Leave the wire value untouched when the tid is unmapped, so legacy traces
+    // (park/unpark without a tid) keep their pre-resolved worker id.
+    for (const sample of cpuSamples) {
+      const w = tidToWorker.get(sample.tid);
+      if (w !== undefined) sample.workerId = w;
+    }
     const blockInPlaceGaps = deriveBlockInPlaceGaps(events, cpuSamples);
 
     return {

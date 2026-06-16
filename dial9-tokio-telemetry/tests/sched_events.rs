@@ -4,7 +4,7 @@
 
 mod common;
 
-use common::{CAPTURE_BUFFER_SIZE, capture_processor, decode_all};
+use common::{CAPTURE_BUFFER_SIZE, capture_processor, decode_all, tid_to_worker};
 use dial9_tokio_telemetry::telemetry::InMemoryWriter;
 use dial9_tokio_telemetry::telemetry::analysis_events::{CpuSampleSource, Dial9Event, WorkerId};
 
@@ -47,11 +47,13 @@ fn sched_events_capture_context_switches() {
     let b = batches.lock().unwrap();
     let events: Vec<Dial9Event> = decode_all(&b);
 
+    let t2w = tid_to_worker(&events);
     let worker_sched_samples: Vec<_> = events
         .iter()
         .filter(|e| {
             matches!(e, Dial9Event::CpuSampleEvent(s)
-            if s.worker_id < WorkerId(num_workers) && s.source == CpuSampleSource::SchedEvent)
+            if s.source == CpuSampleSource::SchedEvent
+                && t2w.get(&s.tid).is_some_and(|w| *w < WorkerId(num_workers)))
         })
         .collect();
     assert!(
@@ -125,12 +127,14 @@ fn sched_events_sampling_reduces_count() {
     let events: Vec<Dial9Event> = decode_all(&b);
 
     // Worker sched samples and the set of worker tids that produced them.
+    let t2w = tid_to_worker(&events);
     let mut worker_tids = HashSet::new();
     let records = events
         .iter()
         .filter(|e| {
             matches!(e, Dial9Event::CpuSampleEvent(s)
-            if s.worker_id < WorkerId(num_workers) && s.source == CpuSampleSource::SchedEvent)
+            if s.source == CpuSampleSource::SchedEvent
+                && t2w.get(&s.tid).is_some_and(|w| *w < WorkerId(num_workers)))
         })
         .inspect(|e| {
             if let Dial9Event::CpuSampleEvent(s) = e {

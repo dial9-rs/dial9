@@ -840,10 +840,7 @@ impl TelemetryCore {
         #[cfg(feature = "cpu-profiling")]
         {
             if let Some(ref config) = cpu_profiling {
-                match crate::telemetry::cpu_profile::CpuProfiler::start(
-                    config.clone(),
-                    shared.thread_roles.clone(),
-                ) {
+                match crate::telemetry::cpu_profile::CpuProfiler::start(config.clone()) {
                     Ok(sampler) => shared.push_source(Box::new(sampler)),
                     Err(e) => rate_limited!(Duration::from_secs(60), {
                         tracing::warn!("failed to start CPU profiler: {e}");
@@ -851,10 +848,7 @@ impl TelemetryCore {
                 }
             }
             if let Some(sched_cfg) = sched_events {
-                match crate::telemetry::cpu_profile::SchedProfiler::new(
-                    sched_cfg,
-                    shared.thread_roles.clone(),
-                ) {
+                match crate::telemetry::cpu_profile::SchedProfiler::new(sched_cfg) {
                     Ok(sched) => shared.push_source(Box::new(sched)),
                     Err(e) => rate_limited!(Duration::from_secs(60), {
                         tracing::warn!("failed to start scheduler event profiler: {e}");

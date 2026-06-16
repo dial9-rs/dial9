@@ -4,11 +4,9 @@ use crate::primitives::sync::{Arc, Mutex};
 use crate::telemetry::buffer;
 use crate::telemetry::buffer::TlBufferHandle;
 use crate::telemetry::collector::CentralCollector;
-use crate::telemetry::events::ThreadRole;
 use crate::telemetry::format::WakeEventEvent;
 use crate::telemetry::task_metadata::TaskId;
 use std::cell::Cell;
-use std::collections::HashMap;
 use std::time::Duration;
 
 crate::primitives::thread_local! {
@@ -45,9 +43,6 @@ pub(crate) struct SharedState {
     /// Weak handles to all registered thread-local buffers. The flush thread
     /// uses these to intrusively drain idle/silent buffers.
     tl_buffers: Mutex<Vec<TlBufferHandle>>,
-    /// Maps OS tid → thread role so that CPU samples returned from perf can be
-    /// attributed to the correct worker or blocking-pool bucket at flush time.
-    pub(crate) thread_roles: Arc<Mutex<HashMap<u32, ThreadRole>>>,
     /// Data sources (CPU profiler, sched profiler, etc.) that the flush thread drains.
     pub(crate) sources: Mutex<Vec<Box<dyn super::source::Source>>>,
 }
@@ -64,7 +59,6 @@ impl SharedState {
             next_worker_id: AtomicU64::new(0),
             drain_epoch: AtomicU64::new(0),
             tl_buffers: Mutex::new(Vec::new()),
-            thread_roles: Arc::new(Mutex::new(HashMap::new())),
             sources: Mutex::new(Vec::new()),
         }
     }

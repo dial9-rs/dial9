@@ -5,7 +5,7 @@
 
 mod common;
 
-use common::{CAPTURE_BUFFER_SIZE, capture_processor, decode_all};
+use common::{CAPTURE_BUFFER_SIZE, capture_processor, decode_all, tid_to_worker};
 use dial9_tokio_telemetry::telemetry::InMemoryWriter;
 use dial9_tokio_telemetry::telemetry::analysis_events::{CpuSampleSource, Dial9Event, WorkerId};
 
@@ -71,12 +71,13 @@ fn sched_event_timestamps_align_with_wall_clock() {
     let windows = sleep_windows.lock().unwrap();
 
     // Collect sched event timestamps attributed to workers
+    let t2w = tid_to_worker(&events);
     let sched_timestamps: Vec<u64> = events
         .iter()
         .filter_map(|e| match e {
             Dial9Event::CpuSampleEvent(s)
                 if s.source == CpuSampleSource::SchedEvent
-                    && s.worker_id < WorkerId(num_workers) =>
+                    && t2w.get(&s.tid).is_some_and(|w| *w < WorkerId(num_workers)) =>
             {
                 Some(s.timestamp_ns)
             }

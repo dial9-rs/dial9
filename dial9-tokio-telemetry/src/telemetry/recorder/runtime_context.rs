@@ -189,7 +189,7 @@ impl RuntimeContext {
 
         register_worker_if_needed(self, local_index, global_id);
         #[cfg(feature = "cpu-profiling")]
-        register_tid_if_needed(global_id, shared);
+        start_sched_sampling_if_needed(shared);
         #[cfg(not(feature = "cpu-profiling"))]
         let _ = shared;
 
@@ -210,17 +210,11 @@ fn register_worker_if_needed(ctx: &RuntimeContext, local_index: usize, global_id
     });
 }
 
-/// Register the current thread's OS tid for CPU profiling (once per thread).
-/// Also starts sched event sampling for this worker thread.
+/// Start sched event sampling for this worker thread (once per thread).
 #[cfg(feature = "cpu-profiling")]
-fn register_tid_if_needed(global_id: u64, shared: &SharedState) {
+fn start_sched_sampling_if_needed(shared: &SharedState) {
     TID_REGISTERED.with(|cell| {
         if !cell.get() {
-            let os_tid = crate::telemetry::events::current_tid();
-            shared.thread_roles.lock().unwrap().insert(
-                os_tid,
-                crate::telemetry::events::ThreadRole::Worker(global_id as usize),
-            );
             // Start sched event sampling for this worker thread. Deferred from
             // on_thread_start so that only worker threads (not blocking pool
             // threads) open perf fds.
