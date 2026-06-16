@@ -5,8 +5,10 @@ expression: output
 #[allow(unused)]
 fn main() {
     let __dial9_rt = ::dial9_tokio_telemetry::TracedRuntime::new(my_config());
-    __dial9_rt
+    let __dial9_out = __dial9_rt
         .block_on(async move {
             let _ = 42;
-        })
+        });
+    __dial9_rt.graceful_shutdown();
+    __dial9_out
 }

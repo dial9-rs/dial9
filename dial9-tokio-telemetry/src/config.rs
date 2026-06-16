@@ -6,7 +6,9 @@
 //! carrying only that mode's knobs, so disk and in-memory settings can't be
 //! mixed. `with_tokio` and `with_runtime` reach the underlying
 //! [`tokio::runtime::Builder`] and [`TracedRuntimeBuilder`]; `.enabled(false)`
-//! turns telemetry off while keeping a plain tokio runtime.
+//! turns telemetry off while keeping a plain tokio runtime. `graceful_shutdown`
+//! / `disable_graceful_shutdown` tune the implicit drain the `#[main]` macro
+//! runs after the async body returns (default 1s).
 //!
 //! Two finish functions cover the strict / lenient axis:
 //!
@@ -122,7 +124,20 @@ impl std::error::Error for Dial9ConfigBuilderError {
 ///   to a disabled config that preserves the user's `with_tokio`
 ///   configurators on validation or I/O failure.
 #[derive(Debug)]
-pub struct Dial9Config(pub(crate) Inner);
+pub struct Dial9Config {
+    pub(crate) inner: Inner,
+    /// Graceful-shutdown timeout applied by the `#[dial9_tokio_telemetry::main]`
+    /// macro after the async body completes. `Some(timeout)` drains the
+    /// background worker with that deadline; `None` skips the implicit drain
+    /// (the guard's `Drop` still flushes and seals the final segment).
+    ///
+    /// Defaults to `Some(`[`DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT`]`)`.
+    pub(crate) graceful_shutdown_timeout: Option<Duration>,
+}
+
+/// Default graceful-shutdown timeout used by the `#[dial9_tokio_telemetry::main]`
+/// macro when the user does not override it.
+pub(crate) const DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// A configurator closure that customizes a [`tokio::runtime::Builder`].
 ///
@@ -232,6 +247,9 @@ const ENV_DIAL9_TASK_DUMP_IDLE_THRESHOLD_MS: &str = "DIAL9_TASK_DUMP_IDLE_THRESH
 const ENV_DIAL9_PROCESS_RESOURCE_USAGE_ENABLED: &str = "DIAL9_PROCESS_RESOURCE_USAGE_ENABLED";
 const ENV_DIAL9_PROCESS_RESOURCE_USAGE_SAMPLE_INTERVAL_MS: &str =
     "DIAL9_PROCESS_RESOURCE_USAGE_SAMPLE_INTERVAL_MS";
+const ENV_DIAL9_SOCKET_ACCEPT_QUEUES_ENABLED: &str = "DIAL9_SOCKET_ACCEPT_QUEUES_ENABLED";
+const ENV_DIAL9_SOCKET_ACCEPT_QUEUES_SAMPLE_INTERVAL_MS: &str =
+    "DIAL9_SOCKET_ACCEPT_QUEUES_SAMPLE_INTERVAL_MS";
 
 const DEFAULT_ENABLED: bool = false;
 const DEFAULT_TRACE_DIR: &str = "/tmp/dial9-traces";
@@ -282,6 +300,8 @@ struct ParsedEnvConfig {
     task_dump_idle_threshold: Option<Duration>,
     process_resource_usage_enabled: Option<bool>,
     process_resource_usage_sample_interval: Option<Duration>,
+    socket_accept_queues_enabled: Option<bool>,
+    socket_accept_queues_sample_interval: Option<Duration>,
 }
 
 #[derive(Debug)]
@@ -338,6 +358,12 @@ struct ResolvedEnvConfig {
 
     // None means ProcessResourceUsageConfig::default() owns the sample interval.
     process_resource_usage_sample_interval: Option<Duration>,
+
+    // Optional source: Some(true) registers it; otherwise leave the builder untouched.
+    socket_accept_queues_enabled: Option<bool>,
+
+    // None means SocketAcceptQueuesConfig::default() owns the sample interval.
+    socket_accept_queues_sample_interval: Option<Duration>,
 }
 
 struct RuntimeEnvConfig {
@@ -352,6 +378,9 @@ struct RuntimeEnvConfig {
     task_dump_idle_threshold: Option<Duration>,
     process_resource_usage_enabled: bool,
     process_resource_usage_sample_interval: Option<Duration>,
+    socket_accept_queues_enabled: Option<bool>,
+    #[cfg_attr(not(feature = "linux-socket"), allow(dead_code))]
+    socket_accept_queues_sample_interval: Option<Duration>,
 }
 
 fn parse_env_config(env: &impl EnvSource) -> ParsedEnvConfig {
@@ -394,6 +423,10 @@ fn parse_env_config(env: &impl EnvSource) -> ParsedEnvConfig {
         process_resource_usage_sample_interval: env
             .get_positive_u64(ENV_DIAL9_PROCESS_RESOURCE_USAGE_SAMPLE_INTERVAL_MS)
             .map(Duration::from_millis),
+        socket_accept_queues_enabled: env.get_bool(ENV_DIAL9_SOCKET_ACCEPT_QUEUES_ENABLED),
+        socket_accept_queues_sample_interval: env
+            .get_positive_u64(ENV_DIAL9_SOCKET_ACCEPT_QUEUES_SAMPLE_INTERVAL_MS)
+            .map(Duration::from_millis),
     }
 }
 
@@ -435,6 +468,8 @@ fn resolve_env_config(parsed: ParsedEnvConfig) -> ResolvedEnvConfig {
             .process_resource_usage_enabled
             .unwrap_or(DEFAULT_PROCESS_RESOURCE_USAGE_ENABLED),
         process_resource_usage_sample_interval: parsed.process_resource_usage_sample_interval,
+        socket_accept_queues_enabled: parsed.socket_accept_queues_enabled,
+        socket_accept_queues_sample_interval: parsed.socket_accept_queues_sample_interval,
     }
 }
 
@@ -588,6 +623,24 @@ fn apply_runtime_env<M>(
         runtime = runtime.with_process_resource_usage(process_resource_usage_config);
     }
 
+    #[cfg(feature = "linux-socket")]
+    if config.socket_accept_queues_enabled == Some(true) {
+        let socket_accept_queues_config = match config.socket_accept_queues_sample_interval {
+            Some(interval) => crate::telemetry::SocketAcceptQueuesConfig::builder()
+                .sample_interval(interval)
+                .build(),
+            None => crate::telemetry::SocketAcceptQueuesConfig::default(),
+        };
+        runtime = runtime.with_socket_accept_queues(socket_accept_queues_config);
+    }
+
+    #[cfg(not(feature = "linux-socket"))]
+    if config.socket_accept_queues_enabled == Some(true) {
+        warn(format_args!(
+            "dial9: socket accept queues requested but `linux-socket` feature is not enabled; ignoring"
+        ));
+    }
+
     #[cfg(feature = "cpu-profiling")]
     {
         use crate::telemetry::cpu_profile::{CpuProfilingConfig, SchedEventConfig};
@@ -673,6 +726,13 @@ impl Dial9Config {
     /// | `DIAL9_PROCESS_RESOURCE_USAGE_ENABLED` | `true` on Unix, `false` otherwise | Enable process resource usage sampling from `getrusage(RUSAGE_SELF)`. |
     /// | `DIAL9_PROCESS_RESOURCE_USAGE_SAMPLE_INTERVAL_MS` | `100` | Sampling interval in milliseconds. |
     ///
+    /// Supported socket accept queue variables (`linux-socket` feature required):
+    ///
+    /// | Variable | Default | Meaning |
+    /// | --- | --- | --- |
+    /// | `DIAL9_SOCKET_ACCEPT_QUEUES_ENABLED` | `false` | Enable TCP accept queue snapshots from Linux sock_diag. |
+    /// | `DIAL9_SOCKET_ACCEPT_QUEUES_SAMPLE_INTERVAL_MS` | `400` | Sampling interval in milliseconds. |
+    ///
     /// Supported task dump variables (capture requires the `taskdump` feature):
     ///
     /// | Variable | Default | Meaning |
@@ -708,6 +768,8 @@ impl Dial9Config {
             task_dump_idle_threshold,
             process_resource_usage_enabled,
             process_resource_usage_sample_interval,
+            socket_accept_queues_enabled,
+            socket_accept_queues_sample_interval,
         } = resolve_env_config(parse_env_config(env));
 
         let runtime_config = RuntimeEnvConfig {
@@ -721,6 +783,8 @@ impl Dial9Config {
             task_dump_idle_threshold,
             process_resource_usage_enabled,
             process_resource_usage_sample_interval,
+            socket_accept_queues_enabled,
+            socket_accept_queues_sample_interval,
         };
 
         // `from_env` only builds a disk writer for now.
@@ -808,6 +872,8 @@ impl Dial9Config {
         base_path: PathBuf,
         #[builder(field)] tokio_configurators: Vec<TokioConfigurator>,
         #[builder(field)] runtime_finalizer: Option<RuntimeFinalizer<Disk>>,
+        #[builder(field = Some(DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT))]
+        graceful_shutdown_timeout: Option<Duration>,
         /// Defaults to `true`. When `false`, the writer fields are ignored and
         /// a plain tokio runtime is built without telemetry.
         #[builder(default = true)]
@@ -821,9 +887,12 @@ impl Dial9Config {
         rotation_period: Option<Duration>,
     ) -> Result<Dial9Config, Dial9ConfigBuilderError> {
         if !enabled {
-            return Ok(Dial9Config(Inner::Disabled {
-                tokio_configurators,
-            }));
+            return Ok(Dial9Config {
+                inner: Inner::Disabled {
+                    tokio_configurators,
+                },
+                graceful_shutdown_timeout,
+            });
         }
         let max_total_size = max_total_size.ok_or_else(|| {
             Dial9ConfigBuilderError::Validation(ValidationError {
@@ -845,10 +914,13 @@ impl Dial9Config {
             None => Box::new(move |tk| seed.build_and_start(tk, writer)),
         };
 
-        Ok(Dial9Config(Inner::Enabled {
-            tokio_configurators,
-            runtime_builder,
-        }))
+        Ok(Dial9Config {
+            inner: Inner::Enabled {
+                tokio_configurators,
+                runtime_builder,
+            },
+            graceful_shutdown_timeout,
+        })
     }
 
     /// In-memory-writer builder. Reached via [`Dial9ConfigBuilder::in_memory_buffer`].
@@ -857,6 +929,8 @@ impl Dial9Config {
     pub fn memory(
         #[builder(field)] tokio_configurators: Vec<TokioConfigurator>,
         #[builder(field)] runtime_finalizer: Option<RuntimeFinalizer<Memory>>,
+        #[builder(field = Some(DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT))]
+        graceful_shutdown_timeout: Option<Duration>,
         /// Defaults to `true`. When `false`, the writer fields are ignored and
         /// a plain tokio runtime is built without telemetry.
         #[builder(default = true)]
@@ -870,9 +944,12 @@ impl Dial9Config {
         rotation_period: Option<Duration>,
     ) -> Result<Dial9Config, Dial9ConfigBuilderError> {
         if !enabled {
-            return Ok(Dial9Config(Inner::Disabled {
-                tokio_configurators,
-            }));
+            return Ok(Dial9Config {
+                inner: Inner::Disabled {
+                    tokio_configurators,
+                },
+                graceful_shutdown_timeout,
+            });
         }
         let max_total_size = max_total_size.ok_or_else(|| {
             Dial9ConfigBuilderError::Validation(ValidationError {
@@ -897,10 +974,13 @@ impl Dial9Config {
             None => Box::new(move |tk| seed.build_and_start(tk, writer)),
         };
 
-        Ok(Dial9Config(Inner::Enabled {
-            tokio_configurators,
-            runtime_builder,
-        }))
+        Ok(Dial9Config {
+            inner: Inner::Enabled {
+                tokio_configurators,
+                runtime_builder,
+            },
+            graceful_shutdown_timeout,
+        })
     }
 }
 
@@ -911,6 +991,20 @@ macro_rules! with_tokio_doc {
     };
 }
 
+/// Doc text shared by both modes' `graceful_shutdown`.
+macro_rules! graceful_shutdown_doc {
+    () => {
+        "Set the graceful-shutdown timeout applied by `#[dial9_tokio_telemetry::main]`.\n\nAfter the async body returns, the macro drops the runtime (so Tokio worker threads exit and flush their thread-local buffers) and then calls [`TelemetryGuard::graceful_shutdown`](crate::telemetry::TelemetryGuard::graceful_shutdown) with this timeout, draining the background worker (symbolize, compress, upload) before the process exits.\n\nDefaults to 1 second. Call [`disable_graceful_shutdown`](Self::disable_graceful_shutdown) to skip the implicit drain. Has no effect on the low-level [`TracedRuntime`](crate::TracedRuntime) API, where you call `graceful_shutdown` yourself."
+    };
+}
+
+/// Doc text shared by both modes' `disable_graceful_shutdown`.
+macro_rules! disable_graceful_shutdown_doc {
+    () => {
+        "Skip the implicit graceful shutdown performed by `#[dial9_tokio_telemetry::main]`.\n\nWith graceful shutdown disabled the guard's `Drop` still flushes and seals the final segment, but the background worker is not drained (it exits without finishing symbolization/compression/upload of the last segment). The inverse of [`graceful_shutdown`](Self::graceful_shutdown)."
+    };
+}
+
 impl<S: disk_config_builder::State> DiskConfigBuilder<S> {
     #[doc = with_tokio_doc!()]
     pub fn with_tokio<F>(mut self, f: F) -> Self
@@ -918,6 +1012,18 @@ impl<S: disk_config_builder::State> DiskConfigBuilder<S> {
         F: Fn(&mut tokio::runtime::Builder) + Send + Sync + 'static,
     {
         self.tokio_configurators.push(Arc::new(f));
+        self
+    }
+
+    #[doc = graceful_shutdown_doc!()]
+    pub fn graceful_shutdown(mut self, timeout: Duration) -> Self {
+        self.graceful_shutdown_timeout = Some(timeout);
+        self
+    }
+
+    #[doc = disable_graceful_shutdown_doc!()]
+    pub fn disable_graceful_shutdown(mut self) -> Self {
+        self.graceful_shutdown_timeout = None;
         self
     }
 
@@ -957,6 +1063,18 @@ impl<S: memory_config_builder::State> MemoryConfigBuilder<S> {
         F: Fn(&mut tokio::runtime::Builder) + Send + Sync + 'static,
     {
         self.tokio_configurators.push(Arc::new(f));
+        self
+    }
+
+    #[doc = graceful_shutdown_doc!()]
+    pub fn graceful_shutdown(mut self, timeout: Duration) -> Self {
+        self.graceful_shutdown_timeout = Some(timeout);
+        self
+    }
+
+    #[doc = disable_graceful_shutdown_doc!()]
+    pub fn disable_graceful_shutdown(mut self) -> Self {
+        self.graceful_shutdown_timeout = None;
         self
     }
 
@@ -1001,7 +1119,8 @@ impl<S: disk_config_builder::IsComplete> DiskConfigBuilder<S> {
     /// [`Dial9ConfigBuilderError`].
     pub fn build_or_disabled(self) -> Dial9Config {
         let fallback = self.tokio_configurators.clone();
-        downgrade_on_err(self.build(), fallback)
+        let graceful_shutdown_timeout = self.graceful_shutdown_timeout;
+        downgrade_on_err(self.build(), fallback, graceful_shutdown_timeout)
     }
 }
 
@@ -1025,13 +1144,15 @@ impl<S: memory_config_builder::IsComplete> MemoryConfigBuilder<S> {
     /// [`Dial9ConfigBuilderError`].
     pub fn build_or_disabled(self) -> Dial9Config {
         let fallback = self.tokio_configurators.clone();
-        downgrade_on_err(self.build(), fallback)
+        let graceful_shutdown_timeout = self.graceful_shutdown_timeout;
+        downgrade_on_err(self.build(), fallback, graceful_shutdown_timeout)
     }
 }
 
 fn downgrade_on_err(
     result: Result<Dial9Config, Dial9ConfigBuilderError>,
     fallback: Vec<TokioConfigurator>,
+    graceful_shutdown_timeout: Option<Duration>,
 ) -> Dial9Config {
     match result {
         Ok(cfg) => cfg,
@@ -1043,9 +1164,12 @@ fn downgrade_on_err(
             error(format_args!(
                 "dial9: telemetry config build failed; falling back to plain tokio runtime: {e}"
             ));
-            Dial9Config(Inner::Disabled {
-                tokio_configurators: fallback,
-            })
+            Dial9Config {
+                inner: Inner::Disabled {
+                    tokio_configurators: fallback,
+                },
+                graceful_shutdown_timeout,
+            }
         }
     }
 }
@@ -1152,6 +1276,8 @@ mod tests {
         assert_eq!(parsed.task_dump_idle_threshold, None);
         assert_eq!(parsed.process_resource_usage_enabled, None);
         assert_eq!(parsed.process_resource_usage_sample_interval, None);
+        assert_eq!(parsed.socket_accept_queues_enabled, None);
+        assert_eq!(parsed.socket_accept_queues_sample_interval, None);
     }
 
     #[test]
@@ -1177,6 +1303,7 @@ mod tests {
             resolved.process_resource_usage_enabled,
             DEFAULT_PROCESS_RESOURCE_USAGE_ENABLED
         );
+        assert_eq!(resolved.socket_accept_queues_enabled, None);
 
         // Optional config/integrations remain absent unless explicitly requested.
         assert_eq!(resolved.runtime_name, None);
@@ -1188,6 +1315,7 @@ mod tests {
         assert_eq!(resolved.cpu_sample_hz, None);
         assert_eq!(resolved.task_dump_idle_threshold, None);
         assert_eq!(resolved.process_resource_usage_sample_interval, None);
+        assert_eq!(resolved.socket_accept_queues_sample_interval, None);
     }
 
     #[test]
@@ -1224,7 +1352,9 @@ mod tests {
                 .with("DIAL9_TASK_DUMP_ENABLED", "true")
                 .with("DIAL9_TASK_DUMP_IDLE_THRESHOLD_MS", "25")
                 .with("DIAL9_PROCESS_RESOURCE_USAGE_ENABLED", "true")
-                .with("DIAL9_PROCESS_RESOURCE_USAGE_SAMPLE_INTERVAL_MS", "250"),
+                .with("DIAL9_PROCESS_RESOURCE_USAGE_SAMPLE_INTERVAL_MS", "250")
+                .with("DIAL9_SOCKET_ACCEPT_QUEUES_ENABLED", "true")
+                .with("DIAL9_SOCKET_ACCEPT_QUEUES_SAMPLE_INTERVAL_MS", "1000"),
         );
 
         assert_eq!(parsed.tokio_instrumentation_enabled, Some(false));
@@ -1247,6 +1377,11 @@ mod tests {
         assert_eq!(
             parsed.process_resource_usage_sample_interval,
             Some(Duration::from_millis(250))
+        );
+        assert_eq!(parsed.socket_accept_queues_enabled, Some(true));
+        assert_eq!(
+            parsed.socket_accept_queues_sample_interval,
+            Some(Duration::from_millis(1000))
         );
     }
 
@@ -1308,7 +1443,9 @@ mod tests {
                 .with("DIAL9_CPU_SAMPLE_HZ", "0")
                 .with("DIAL9_TASK_DUMP_IDLE_THRESHOLD_MS", "wat")
                 .with("DIAL9_PROCESS_RESOURCE_USAGE_ENABLED", "maybe")
-                .with("DIAL9_PROCESS_RESOURCE_USAGE_SAMPLE_INTERVAL_MS", "0"),
+                .with("DIAL9_PROCESS_RESOURCE_USAGE_SAMPLE_INTERVAL_MS", "0")
+                .with("DIAL9_SOCKET_ACCEPT_QUEUES_ENABLED", "maybe")
+                .with("DIAL9_SOCKET_ACCEPT_QUEUES_SAMPLE_INTERVAL_MS", "0"),
         );
 
         assert_eq!(parsed.enabled, None);
@@ -1323,6 +1460,8 @@ mod tests {
         assert_eq!(parsed.task_dump_idle_threshold, None);
         assert_eq!(parsed.process_resource_usage_enabled, None);
         assert_eq!(parsed.process_resource_usage_sample_interval, None);
+        assert_eq!(parsed.socket_accept_queues_enabled, None);
+        assert_eq!(parsed.socket_accept_queues_sample_interval, None);
     }
 
     #[test]
@@ -1341,7 +1480,7 @@ mod tests {
     fn env_config_builds_disabled_by_default() {
         let cfg = Dial9Config::from_env_source(&FakeEnv::default());
 
-        assert!(matches!(cfg.0, Inner::Disabled { .. }));
+        assert!(matches!(cfg.inner, Inner::Disabled { .. }));
     }
 
     #[test]
@@ -1355,7 +1494,7 @@ mod tests {
         let cfg = Dial9Config::from_env_source(&env);
 
         assert!(
-            matches!(cfg.0, Inner::Enabled { .. }),
+            matches!(cfg.inner, Inner::Enabled { .. }),
             "DIAL9_ENABLED + DIAL9_TRACE_DIR should produce an enabled config"
         );
         let rt = TracedRuntime::try_new(cfg).expect("runtime should build");
@@ -1394,9 +1533,15 @@ mod tests {
             .iter()
             .flat_map(|s| s.segment_metadata())
             .collect();
-        assert!(
-            runtime_meta.iter().any(|(k, _)| k == "runtime.api-runtime"),
-            "env runtime name should surface in segment metadata"
+        let runtime_keys: Vec<&str> = runtime_meta
+            .iter()
+            .map(|(k, _)| k.as_str())
+            .filter(|k| k.starts_with("runtime."))
+            .collect();
+        assert_eq!(
+            runtime_keys,
+            ["runtime.api-runtime"],
+            "exactly one runtime, named from env, should surface in segment metadata"
         );
         assert!(shared.task_dumps_enabled.load(Ordering::Relaxed));
         assert_eq!(
@@ -1456,6 +1601,57 @@ mod tests {
         );
     }
 
+    #[cfg(all(target_os = "linux", feature = "linux-socket"))]
+    #[test]
+    fn env_config_does_not_enable_socket_accept_queues_by_default() {
+        let dir = tempfile::tempdir().expect("temporary trace directory should be created");
+        let trace_dir = dir
+            .path()
+            .to_str()
+            .expect("temporary trace directory path should be valid UTF-8");
+        let env = FakeEnv::default()
+            .with("DIAL9_ENABLED", "true")
+            .with("DIAL9_TRACE_DIR", trace_dir);
+
+        let cfg = Dial9Config::from_env_source(&env);
+        let rt = TracedRuntime::try_new(cfg).expect("runtime should build");
+        let shared = rt.guard().shared().expect("telemetry should be enabled");
+        let sources = shared.sources.lock().unwrap();
+
+        assert!(
+            sources
+                .iter()
+                .all(|source| source.name() != "socket_accept_queues"),
+            "from_env should leave socket accept queues disabled by default"
+        );
+    }
+
+    #[cfg(all(target_os = "linux", feature = "linux-socket"))]
+    #[test]
+    fn env_config_can_enable_socket_accept_queues() {
+        let dir = tempfile::tempdir().expect("temporary trace directory should be created");
+        let trace_dir = dir
+            .path()
+            .to_str()
+            .expect("temporary trace directory path should be valid UTF-8");
+        let env = FakeEnv::default()
+            .with("DIAL9_ENABLED", "true")
+            .with("DIAL9_TRACE_DIR", trace_dir)
+            .with("DIAL9_SOCKET_ACCEPT_QUEUES_ENABLED", "true");
+
+        let cfg = Dial9Config::from_env_source(&env);
+        let rt = TracedRuntime::try_new(cfg).expect("runtime should build");
+        let shared = rt.guard().shared().expect("telemetry should be enabled");
+        let sources = shared.sources.lock().unwrap();
+
+        assert!(
+            sources
+                .iter()
+                .any(|source| source.name() == "socket_accept_queues"),
+            "explicit env opt-in should enable socket accept queues"
+        );
+    }
+
     #[test]
     fn env_config_can_disable_tokio_instrumentation_without_disabling_telemetry() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1481,8 +1677,8 @@ mod tests {
             "no Tokio runtime metadata should be present when Tokio instrumentation is disabled"
         );
         assert!(
-            !rt.block_on(async { crate::telemetry::TelemetryHandle::current().is_enabled() }),
-            "TelemetryHandle::current() should remain inert without Tokio hooks"
+            !rt.block_on(async { crate::telemetry::Dial9Handle::current().is_enabled() }),
+            "Dial9Handle::current() should remain inert without Tokio hooks"
         );
     }
 
@@ -1661,7 +1857,7 @@ mod tests {
             .enabled(false)
             .build()
             .expect("disabled build needs no writer fields");
-        assert!(matches!(cfg.0, Inner::Disabled { .. }));
+        assert!(matches!(cfg.inner, Inner::Disabled { .. }));
     }
 
     #[test]
@@ -1853,5 +2049,156 @@ mod tests {
         );
         let source = std::error::Error::source(&err);
         assert!(source.is_some(), "source() must return the inner io::Error");
+    }
+
+    // ---------------------------------------------------------------
+    // graceful shutdown dial (issue #479)
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn disk_graceful_shutdown_defaults_to_one_second() {
+        let cfg = Dial9Config::builder()
+            .on_disk_buffer(tmp_base_path())
+            .max_total_size(4 * BYTES_PER_MIB)
+            .build()
+            .expect("build should succeed");
+        assert_eq!(
+            cfg.graceful_shutdown_timeout,
+            Some(Duration::from_secs(1)),
+            "disk config must default the graceful-shutdown timeout to 1s"
+        );
+    }
+
+    #[test]
+    fn memory_graceful_shutdown_defaults_to_one_second() {
+        let cfg = Dial9Config::builder()
+            .in_memory_buffer()
+            .max_total_size(16 * BYTES_PER_MIB)
+            .build()
+            .expect("build should succeed");
+        assert_eq!(
+            cfg.graceful_shutdown_timeout,
+            Some(Duration::from_secs(1)),
+            "in-memory config must default the graceful-shutdown timeout to 1s"
+        );
+    }
+
+    #[test]
+    fn graceful_shutdown_setter_overrides_default() {
+        let cfg = Dial9Config::builder()
+            .on_disk_buffer(tmp_base_path())
+            .max_total_size(4 * BYTES_PER_MIB)
+            .graceful_shutdown(Duration::from_secs(7))
+            .build()
+            .expect("build should succeed");
+        assert_eq!(cfg.graceful_shutdown_timeout, Some(Duration::from_secs(7)));
+    }
+
+    #[test]
+    fn disable_graceful_shutdown_sets_none() {
+        let cfg = Dial9Config::builder()
+            .on_disk_buffer(tmp_base_path())
+            .max_total_size(4 * BYTES_PER_MIB)
+            .disable_graceful_shutdown()
+            .build()
+            .expect("build should succeed");
+        assert_eq!(cfg.graceful_shutdown_timeout, None);
+    }
+
+    #[test]
+    fn memory_disable_graceful_shutdown_sets_none() {
+        let cfg = Dial9Config::builder()
+            .in_memory_buffer()
+            .max_total_size(16 * BYTES_PER_MIB)
+            .disable_graceful_shutdown()
+            .build()
+            .expect("build should succeed");
+        assert_eq!(cfg.graceful_shutdown_timeout, None);
+    }
+
+    #[test]
+    fn graceful_shutdown_timeout_preserved_when_disabled_downgrades() {
+        // build_or_disabled on a writer-I/O failure must keep the configured
+        // graceful-shutdown timeout on the downgraded (disabled) config.
+        let cfg = Dial9Config::builder()
+            .on_disk_buffer(unwritable_base_path())
+            .max_total_size(4 * BYTES_PER_MIB)
+            .graceful_shutdown(Duration::from_secs(3))
+            .build_or_disabled();
+        assert!(matches!(cfg.inner, Inner::Disabled { .. }));
+        assert_eq!(cfg.graceful_shutdown_timeout, Some(Duration::from_secs(3)));
+    }
+
+    #[test]
+    fn graceful_shutdown_timeout_flows_to_traced_runtime() {
+        let cfg = Dial9Config::builder()
+            .on_disk_buffer(tmp_base_path())
+            .max_total_size(4 * BYTES_PER_MIB)
+            .graceful_shutdown(Duration::from_millis(250))
+            .build()
+            .expect("build should succeed");
+        let rt = TracedRuntime::try_new(cfg).expect("runtime should build");
+        assert_eq!(
+            rt.graceful_shutdown_timeout,
+            Some(Duration::from_millis(250)),
+            "the configured timeout must flow into the TracedRuntime"
+        );
+    }
+
+    #[test]
+    fn graceful_shutdown_drains_worker_after_block_on() {
+        use crate::background_task::{ProcessError, SegmentData, SegmentProcessor};
+        use std::future::Future;
+        use std::pin::Pin;
+
+        #[derive(Debug)]
+        struct CountingProcessor(Arc<AtomicUsize>);
+        impl SegmentProcessor for CountingProcessor {
+            fn name(&self) -> &'static str {
+                "Counting"
+            }
+            fn process(
+                &mut self,
+                data: SegmentData,
+            ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>>
+            {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async move { Ok(data) })
+            }
+        }
+
+        let processed = Arc::new(AtomicUsize::new(0));
+        let processed_for_pipeline = Arc::clone(&processed);
+        let cfg = Dial9Config::builder()
+            .in_memory_buffer()
+            .max_total_size(16 * BYTES_PER_MIB)
+            .with_runtime(move |r| {
+                let processed = Arc::clone(&processed_for_pipeline);
+                r.with_custom_pipeline(move |p| p.pipe(CountingProcessor(processed)))
+            })
+            .build()
+            .expect("in-memory build with custom pipeline should succeed");
+        let rt = TracedRuntime::try_new(cfg).expect("runtime should build");
+        let output = rt.block_on(async { 99u32 });
+        assert_eq!(output, 99, "future output must be returned");
+        // The generous default 1s timeout is plenty for the no-op processor; the
+        // worker is joined, so by the time this returns the segment is drained.
+        rt.graceful_shutdown();
+        assert!(
+            processed.load(Ordering::SeqCst) >= 1,
+            "graceful shutdown must drain the background worker (process the sealed segment)"
+        );
+    }
+
+    #[test]
+    fn graceful_shutdown_on_disabled_runtime_is_noop() {
+        let cfg = Dial9Config::builder()
+            .on_disk_buffer(tmp_base_path())
+            .enabled(false)
+            .build()
+            .expect("disabled build should succeed");
+        let rt = TracedRuntime::try_new(cfg).expect("disabled runtime should build");
+        assert_eq!(rt.block_on(async { 5u32 }), 5);
+        rt.graceful_shutdown();
     }
 }

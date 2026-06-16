@@ -37,7 +37,7 @@ rustflags = [
 ```
 
 ```rust,no_run
-use dial9_tokio_telemetry::{main, Dial9Config, telemetry::TelemetryHandle};
+use dial9_tokio_telemetry::{main, Dial9Config, telemetry::Dial9TokioHandle};
 
 fn my_config() -> Dial9Config {
     Dial9Config::builder()
@@ -52,7 +52,7 @@ fn my_config() -> Dial9Config {
 
 #[dial9_tokio_telemetry::main(config = my_config)] // inline config function is also supported
 async fn main() {
-    let handle = TelemetryHandle::current();
+    let handle = Dial9TokioHandle::current();
     handle
         .spawn(async { /* wake events tracked */ })
         .await
@@ -63,7 +63,7 @@ async fn main() {
 For zero-code configuration in production, use `Dial9Config::from_env()`:
 
 ```rust,no_run
-use dial9_tokio_telemetry::{main, Dial9Config, telemetry::TelemetryHandle};
+use dial9_tokio_telemetry::{main, Dial9Config, telemetry::Dial9TokioHandle};
 
 fn my_config() -> Dial9Config {
     Dial9Config::from_env()
@@ -71,7 +71,7 @@ fn my_config() -> Dial9Config {
 
 #[dial9_tokio_telemetry::main(config = my_config)]
 async fn main() {
-    let handle = TelemetryHandle::current();
+    let handle = Dial9TokioHandle::current();
     handle.spawn(async { /* wake events tracked when enabled */ }).await.unwrap();
 }
 ```
@@ -117,6 +117,13 @@ Process resource usage knobs:
 | `DIAL9_PROCESS_RESOURCE_USAGE_ENABLED` | `true` on Unix, `false` otherwise | Enable process resource usage sampling from `getrusage(RUSAGE_SELF)`. |
 | `DIAL9_PROCESS_RESOURCE_USAGE_SAMPLE_INTERVAL_MS` | `100` | Sampling interval in milliseconds. |
 
+Socket accept queue knobs (`linux-socket` feature required, Linux only):
+
+| Name | Default | Meaning |
+| --- | --- | --- |
+| `DIAL9_SOCKET_ACCEPT_QUEUES_ENABLED` | `false` | Enable TCP accept queue snapshots from Linux sock_diag. |
+| `DIAL9_SOCKET_ACCEPT_QUEUES_SAMPLE_INTERVAL_MS` | `400` | Sampling interval in milliseconds. |
+
 Task dump knobs (capture requires the `taskdump` feature):
 
 | Name | Default | Meaning |
@@ -140,6 +147,7 @@ dial9 is fundamentally a central buffer that can collect data from different sou
 
 - [Tokio Events](#tokio-events): dial9 can capture poll, wake, and worker events from Tokio
 - [Process resource usage](#process-resource-usage-unix): dial9 can sample process-level resource usage on Unix
+- [Socket accept queues](#socket-accept-queues-linux-only): dial9 can sample pending TCP listener connections and backlog limits on Linux
 - [CPU profiling](#cpu-profiling-linux-only): dial9 can capture linux performance counters and events to produce flamegraphs
 - [Memory profiling](#memory-profiling): dial9 can sample heap allocations to produce allocation flamegraphs and detect leaks
 - [Tracing spans](#tracing-span-events-opt-in): dial9 can capture tracing spans to bring tracing context into your trace files
@@ -205,6 +213,31 @@ is enabled. To opt out, set:
 
 ```text
 DIAL9_PROCESS_RESOURCE_USAGE_ENABLED=false
+```
+
+### Socket accept queues (Linux only)
+
+With the `linux-socket` feature, dial9 can sample TCP listener accept
+queues from Linux `sock_diag`. Each snapshot records the listener address,
+pending connection count, and backlog limit for sockets owned by the current
+process.
+
+Programmatic builders leave socket accept queue sampling disabled unless you
+opt in:
+
+```rust,ignore
+use dial9_tokio_telemetry::telemetry::{SocketAcceptQueuesConfig, TracedRuntime};
+
+let (runtime, guard) = TracedRuntime::builder()
+    .with_socket_accept_queues(SocketAcceptQueuesConfig::default())
+    .build_and_start(tokio::runtime::Builder::new_multi_thread(), writer)?;
+```
+
+`Dial9Config::from_env()` also leaves this source disabled by default. To opt
+in, set:
+
+```text
+DIAL9_SOCKET_ACCEPT_QUEUES_ENABLED=true
 ```
 
 ### CPU profiling (Linux only)
@@ -305,7 +338,7 @@ dial9-tokio-telemetry = { version = "0.3", features = ["memory-profiling"] }
 use dial9_tokio_telemetry::memory_profiling::{
     Dial9Allocator, MemoryProfiler, MemoryProfilingConfig,
 };
-use dial9_tokio_telemetry::telemetry::TelemetryHandle;
+use dial9_tokio_telemetry::telemetry::Dial9Handle;
 
 // Install as the global allocator. Zero-cost passthrough until
 // MemoryProfiler::install() is called.
@@ -316,7 +349,7 @@ static ALLOC: Dial9Allocator = Dial9Allocator::system();
 // static ALLOC: Dial9Allocator<tikv_jemallocator::Jemalloc> =
 //     Dial9Allocator::new(tikv_jemallocator::Jemalloc);
 
-# fn example(handle: TelemetryHandle) {
+# fn example(handle: Dial9Handle) {
 let config = MemoryProfilingConfig::builder()
     .sample_rate_bytes(512 * 1024)  // sample ~every 512 KiB allocated (default)
     .track_liveset(true)            // track frees for leak detection
@@ -415,7 +448,7 @@ You can emit your own application-level events into the trace alongside the buil
 ```rust,no_run
 # fn main() {
 use dial9_trace_format::TraceEvent;
-use dial9_tokio_telemetry::telemetry::{record_event, clock_monotonic_ns, TelemetryHandle};
+use dial9_tokio_telemetry::telemetry::{clock_monotonic_ns, Dial9Handle};
 
 #[derive(TraceEvent)]
 struct RequestCompleted {
@@ -427,16 +460,13 @@ struct RequestCompleted {
     error_message: Option<String>,
 }
 
-# let handle: TelemetryHandle = todo!();
-record_event(
-    RequestCompleted {
-        timestamp_ns: clock_monotonic_ns(),
-        status_code: 200,
-        latency_us: 1500,
-        error_message: None,
-    },
-    &handle,
-);
+# let handle: Dial9Handle = todo!();
+handle.record_event(RequestCompleted {
+    timestamp_ns: clock_monotonic_ns(),
+    status_code: 200,
+    latency_us: 1500,
+    error_message: None,
+});
 # }
 ```
 
@@ -444,7 +474,7 @@ record_event(
 
 You can also register a callback that runs from dial9's flush thread and emits
 custom events. This is useful for draining application-owned queues or taking
-periodic snapshots without passing a [`TelemetryHandle`] through your code:
+periodic snapshots without passing a [`Dial9Handle`] through your code:
 
 ```rust,ignore
 use dial9_trace_format::TraceEvent;
@@ -496,7 +526,7 @@ let (runtime, guard) = TracedRuntime::builder()
     .unwrap();
 ```
 
-dial9's internal hooks always run first, then your callbacks fire in registration order. This ensures `TelemetryHandle::current()` is available in your `on_thread_start` callback. Registering the same hook multiple times stacks the callbacks — all of them will fire.
+dial9's internal hooks always run first, then your callbacks fire in registration order. This ensures `Dial9Handle::current()` is available in your `on_thread_start` callback. Registering the same hook multiple times stacks the callbacks — all of them will fire.
 
 **Important:** Do not set hooks directly via `tokio::runtime::Builder::on_thread_start()` etc. — dial9 will overwrite them. Always use `with_tokio_hooks` to compose your callbacks with dial9's instrumentation.
 
@@ -547,7 +577,13 @@ async fn main() {
 # fn main() {}
 ```
 
-To ensure the last segment is uploaded, use `guard.graceful_shutdown(timeout)`.
+When you use `#[dial9_tokio_telemetry::main]`, this shutdown drain happens
+automatically once `main` returns: the macro drops the runtime and then calls
+`graceful_shutdown` with a 1s deadline so the final segment is uploaded. Tune it
+with `.graceful_shutdown(Duration)` on the config builder, or turn it off with
+`.disable_graceful_shutdown()`. If you build a `TracedRuntime` by hand instead of
+using the macro, call `guard.graceful_shutdown(timeout)` yourself after the
+runtime is dropped.
 
 ### Running without disk (in-memory)
 

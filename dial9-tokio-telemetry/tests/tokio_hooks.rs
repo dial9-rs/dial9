@@ -390,7 +390,7 @@ fn task_terminate_hook_fires_when_task_tracking_disabled() {
 
 #[test]
 fn dial9_hooks_run_before_user_hooks() {
-    use dial9_tokio_telemetry::telemetry::TelemetryHandle;
+    use dial9_tokio_telemetry::telemetry::Dial9Handle;
 
     let hook_fired = Arc::new(AtomicUsize::new(0));
     let hf = hook_fired.clone();
@@ -401,11 +401,11 @@ fn dial9_hooks_run_before_user_hooks() {
     let (runtime, guard) = TracedRuntime::builder()
         .with_tokio_hooks(|h| {
             h.on_thread_start(move || {
-                // dial9's hook must have already run and installed TelemetryHandle
-                let handle = TelemetryHandle::current();
+                // dial9's hook must have already run and installed Dial9Handle
+                let handle = Dial9Handle::current();
                 assert!(
                     handle.is_enabled(),
-                    "TelemetryHandle should be installed by dial9 before user hook runs"
+                    "Dial9Handle should be installed by dial9 before user hook runs"
                 );
                 hf.fetch_add(1, Ordering::Relaxed);
             });
