@@ -10,7 +10,7 @@
 //! ```
 
 use dial9_tokio_telemetry::telemetry::{
-    DiskWriter, Encodable, ThreadLocalEncoder, TracedRuntime, clock_monotonic_ns, record_event,
+    DiskWriter, Encodable, ThreadLocalEncoder, TracedRuntime, clock_monotonic_ns,
 };
 use dial9_trace_format::{InternedString, TraceEvent};
 use std::time::Duration;
@@ -81,28 +81,22 @@ fn main() -> std::io::Result<()> {
             } else {
                 None
             };
-            record_event(
-                RequestCompleted {
-                    timestamp_ns: clock_monotonic_ns(),
-                    status_code: if error_message.is_some() { 500 } else { 200 },
-                    latency_us: 100 + i,
-                    error_message,
-                },
-                &handle,
-            );
+            handle.record_event(RequestCompleted {
+                timestamp_ns: clock_monotonic_ns(),
+                status_code: if error_message.is_some() { 500 } else { 200 },
+                latency_us: 100 + i,
+                error_message,
+            });
         }
 
         // Advanced: manual Encodable with interning
         // "GET" is interned once and reused across all events in the batch.
         for _ in 0..10 {
-            record_event(
-                HttpRequest {
-                    timestamp_ns: clock_monotonic_ns(),
-                    method: "GET".into(),
-                    status: 200,
-                },
-                &handle,
-            );
+            handle.record_event(HttpRequest {
+                timestamp_ns: clock_monotonic_ns(),
+                method: "GET".into(),
+                status: 200,
+            });
         }
 
         tokio::time::sleep(Duration::from_millis(100)).await;

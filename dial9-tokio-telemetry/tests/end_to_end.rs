@@ -235,13 +235,10 @@ fn custom_event_appears_in_trace() {
     let handle = guard.handle();
     runtime.block_on(async {
         for i in 0..5 {
-            dial9_tokio_telemetry::telemetry::record_event(
-                MyCustomEvent {
-                    timestamp_ns: dial9_tokio_telemetry::telemetry::clock_monotonic_ns(),
-                    request_count: i,
-                },
-                &handle,
-            );
+            handle.record_event(MyCustomEvent {
+                timestamp_ns: dial9_tokio_telemetry::telemetry::clock_monotonic_ns(),
+                request_count: i,
+            });
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
     });
@@ -280,7 +277,7 @@ fn spawn_audit_detects_uninstrumented_spawns() {
         .build_and_start(builder, writer)
         .unwrap();
 
-    let handle = guard.handle();
+    let handle = guard.tokio_handle(runtime.handle());
 
     runtime.block_on(async {
         let mut joins = Vec::new();

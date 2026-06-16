@@ -191,7 +191,7 @@ pub struct TaskSpawnEvent {
     pub task_id: TaskId,
     /// Interned spawn location.
     pub spawn_loc: InternedString,
-    /// Whether this spawn was instrumented (via `TelemetryHandle::spawn`).
+    /// Whether this spawn was instrumented (via `Dial9TokioHandle::spawn`).
     pub instrumented: bool,
 }
 

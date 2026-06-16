@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use super::flush_loop::run_flush_loop;
 use super::guard::{TelemetryGuard, WorkerHandle};
-use super::handle::TelemetryHandle;
+use super::handle::Dial9Handle;
 use super::shared_state::SharedState;
 use super::{ControlCommand, attach_runtime};
 
@@ -857,7 +857,7 @@ impl TelemetryCore {
             }
         }
 
-        // Channel for TelemetryHandle/Guard → flush thread communication.
+        // Channel for Dial9Handle/Guard → flush thread communication.
         let (control_tx, control_rx) =
             crate::primitives::sync::mpsc::sync_channel::<ControlCommand>(1);
 
@@ -931,7 +931,7 @@ impl TelemetryCore {
         }
 
         Ok(TelemetryGuard::enabled(
-            TelemetryHandle::enabled(shared, control_tx),
+            Dial9Handle::enabled(shared, control_tx),
             Some(flush_thread),
             worker,
             contexts,
@@ -992,6 +992,11 @@ impl<M: WriterMode, S: telemetry_core_builder::State> TelemetryCoreBuilder<M, S>
 pub struct TracedRuntime {
     pub(crate) runtime: tokio::runtime::Runtime,
     pub(crate) guard: TelemetryGuard,
+    /// Graceful-shutdown timeout carried from the [`crate::Dial9Config`].
+    /// Consumed by [`graceful_shutdown`](TracedRuntime::graceful_shutdown)
+    /// (used by the `#[dial9_tokio_telemetry::main]` macro). `None` skips the
+    /// implicit drain.
+    pub(crate) graceful_shutdown_timeout: Option<Duration>,
 }
 
 impl TracedRuntime {
@@ -1130,12 +1135,9 @@ impl TracedRuntime {
     /// [`TelemetryGuard::graceful_shutdown`] before the runtime drops.
     ///
     /// Generic over any input that converts into a [`TracedRuntime`]: in
-    /// practice that means either the fluent
-    /// [`crate::Dial9Config`] (returned by
-    /// [`Dial9Config::builder`](crate::Dial9Config::builder)) or the
-    /// deprecated positional [`crate::config::Dial9Config`]. The generic
-    /// shape is what keeps the macro source-compatible across these
-    /// input types.
+    /// practice that means the fluent [`crate::Dial9Config`] (returned by
+    /// [`Dial9Config::builder`](crate::Dial9Config::builder)). The generic
+    /// shape is what keeps the macro source-compatible across input types.
     ///
     /// # Panics
     ///
@@ -1173,10 +1175,9 @@ impl TracedRuntime {
     /// Fallible counterpart to [`new`](Self::new).
     ///
     /// Returns the conversion error directly: when constructing from
-    /// [`crate::Dial9Config`] that's a [`TelemetryRuntimeError`]; when
-    /// constructing from the deprecated [`crate::config::Dial9Config`]
-    /// it's a [`std::io::Error`]. Use this when you want to handle
-    /// runtime construction failure rather than panic.
+    /// [`crate::Dial9Config`] that's a [`TelemetryRuntimeError`]. Use this
+    /// when you want to handle runtime construction failure rather than
+    /// panic.
     ///
     /// ```no_run
     /// use dial9_tokio_telemetry::{Dial9Config, TracedRuntime};
@@ -1212,16 +1213,17 @@ impl TracedRuntime {
 
     /// Run `fut` to completion on the runtime.
     ///
-    /// The future is always spawned through the guard's
-    /// [`TelemetryHandle`]. On an enabled guard this records poll and
-    /// wake events; on a disabled guard the handle's `spawn` falls
-    /// through to plain [`tokio::spawn`].
+    /// The future is always spawned through a
+    /// [`Dial9TokioHandle`](super::handle::Dial9TokioHandle) bound to this
+    /// runtime. On an enabled guard this records poll and wake events; on
+    /// a disabled guard the handle's `spawn` falls through to plain
+    /// [`tokio::spawn`].
     pub fn block_on<F>(&self, fut: F) -> F::Output
     where
         F: std::future::Future + Send + 'static,
         F::Output: Send + 'static,
     {
-        let handle = self.guard.handle();
+        let handle = self.guard.tokio_handle(self.runtime.handle());
         self.runtime.block_on(async move {
             match handle.spawn(fut).await {
                 Ok(output) => output,
@@ -1230,29 +1232,65 @@ impl TracedRuntime {
             }
         })
     }
+
+    /// Drop the runtime and perform the configured graceful shutdown.
+    ///
+    /// This is what `#[dial9_tokio_telemetry::main]` calls after the body
+    /// completes. It:
+    ///
+    /// 1. drops the tokio runtime so worker threads exit and flush their
+    ///    thread-local telemetry buffers, then
+    /// 2. if a graceful-shutdown timeout was configured on the
+    ///    [`crate::Dial9Config`] (the default is 1s; `None` when disabled via
+    ///    [`disable_graceful_shutdown`](crate::DiskConfigBuilder::disable_graceful_shutdown)),
+    ///    calls [`TelemetryGuard::graceful_shutdown`] with that timeout to
+    ///    drain the background worker.
+    ///
+    /// Typically paired with [`block_on`](Self::block_on):
+    ///
+    /// ```no_run
+    /// # use dial9_tokio_telemetry::{Dial9Config, TracedRuntime};
+    /// # let cfg = Dial9Config::builder().on_disk_buffer("trace.bin").max_total_size(1 << 20).build()?;
+    /// let rt = TracedRuntime::new(cfg);
+    /// let out = rt.block_on(async { /* ... */ });
+    /// rt.graceful_shutdown();
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    ///
+    /// The drain is best-effort: any error returned by
+    /// [`TelemetryGuard::graceful_shutdown`] is logged at `error!` and
+    /// otherwise ignored. When you need the deadline at a call site, the
+    /// configured value is available via the original [`crate::Dial9Config`];
+    /// the low-level [`TelemetryGuard::graceful_shutdown`] also takes an
+    /// explicit timeout.
+    pub fn graceful_shutdown(self) {
+        let Self {
+            runtime,
+            guard,
+            graceful_shutdown_timeout,
+        } = self;
+        // Drop the runtime first so Tokio worker threads exit and flush their
+        // thread-local buffers into the collector before the guard drains the
+        // background worker.
+        drop(runtime);
+        if let Some(timeout) = graceful_shutdown_timeout
+            && let Err(e) = guard.graceful_shutdown(timeout)
+        {
+            tracing::error!(target: "dial9_telemetry", error = %e, "dial9 graceful shutdown failed");
+        }
+    }
 }
 
 impl TryFrom<crate::Dial9Config> for TracedRuntime {
     type Error = TelemetryRuntimeError;
 
     fn try_from(config: crate::Dial9Config) -> Result<Self, Self::Error> {
-        let (runtime, guard) = try_assemble_dial9_config(config.0)?;
-        Ok(Self { runtime, guard })
-    }
-}
-
-/// Bridge for the deprecated positional config API at
-/// [`crate::config::Dial9Config`] so that it remains compatible with
-/// [`TracedRuntime::new`] (and therefore the
-/// `#[dial9_tokio_telemetry::main]` macro).
-impl TryFrom<crate::config::Dial9Config> for TracedRuntime {
-    type Error = std::io::Error;
-
-    fn try_from(config: crate::config::Dial9Config) -> Result<Self, Self::Error> {
-        let (runtime, guard) = config.build()?;
+        let graceful_shutdown_timeout = config.graceful_shutdown_timeout;
+        let (runtime, guard) = try_assemble_dial9_config(config.inner)?;
         Ok(Self {
             runtime,
-            guard: guard.unwrap_or_else(TelemetryGuard::disabled),
+            guard,
+            graceful_shutdown_timeout,
         })
     }
 }

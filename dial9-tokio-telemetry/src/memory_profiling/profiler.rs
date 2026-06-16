@@ -6,7 +6,7 @@ use crate::memory_profiling::ring::RingBuffers;
 use crate::memory_profiling::ring::{DEFAULT_MAX_FRAMES, RawAlloc};
 
 use crate::memory_profiling::source::MemoryProfileSource;
-use crate::telemetry::recorder::TelemetryHandle;
+use crate::telemetry::recorder::Dial9Handle;
 use dial9_perf_self_profile::unwinder::Unwinder;
 use std::sync::{Arc, OnceLock};
 
@@ -30,7 +30,7 @@ pub(crate) struct MemoryProfilerInner {
         dead_code,
         reason = "lifetime hold for SharedState; the field's existence is the contract"
     )]
-    pub(crate) handle: TelemetryHandle,
+    pub(crate) handle: Dial9Handle,
     pub(crate) rings: Arc<RingBuffers>,
     pub(crate) sample_rate_bytes: u64,
     /// Producer-side liveset: maps allocation address → (size, timestamp_ns).
@@ -156,7 +156,7 @@ impl MemoryProfiler {
     /// On a disabled handle, install is a no-op (returns `Ok` but does not
     /// publish state). `ACTIVE.get()` remains `None` so the allocator hook
     /// short-circuits.
-    pub fn install(self, handle: TelemetryHandle) -> Result<MemoryProfilerGuard, InstallError> {
+    pub fn install(self, handle: Dial9Handle) -> Result<MemoryProfilerGuard, InstallError> {
         if !handle.is_enabled() {
             return Ok(MemoryProfilerGuard { _private: () });
         }

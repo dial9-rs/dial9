@@ -2,11 +2,11 @@
 //! Test that install with a disabled handle is a no-op.
 
 use dial9_tokio_telemetry::memory_profiling::{MemoryProfiler, MemoryProfilingConfig};
-use dial9_tokio_telemetry::telemetry::TelemetryHandle;
+use dial9_tokio_telemetry::telemetry::Dial9Handle;
 
 #[test]
 fn install_with_disabled_handle_is_noop() {
-    let handle = TelemetryHandle::disabled();
+    let handle = Dial9Handle::disabled();
     let _guard = MemoryProfiler::from_config(MemoryProfilingConfig::default())
         .install(handle)
         .expect("install with disabled handle should succeed");
@@ -17,7 +17,7 @@ fn install_with_disabled_handle_is_noop() {
 fn install_with_disabled_handle_does_not_prevent_future_install() {
     // A disabled-handle install doesn't consume the OnceLock slot,
     // so a second disabled-handle install also succeeds.
-    let handle = TelemetryHandle::disabled();
+    let handle = Dial9Handle::disabled();
     let _g1 = MemoryProfiler::with_defaults()
         .install(handle.clone())
         .expect("first disabled install should succeed");

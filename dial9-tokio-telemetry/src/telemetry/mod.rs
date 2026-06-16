@@ -33,46 +33,11 @@ pub use format::{
 };
 pub use process_resource_usage::ProcessResourceUsageConfig;
 pub use recorder::{
-    BuildAndStartRuntime, Dial9Handle, HasTracePath, NoTracePath, PipelineCustom, PipelineS3,
-    PipelineUnset, RuntimeTelemetryHandle, TelemetryCore, TelemetryCoreBuilder, TelemetryGuard,
-    TelemetryHandle, TelemetryRuntimeError, TokioHooks, TraceRuntimeCoreBuilder, TracedRuntime,
+    BuildAndStartRuntime, Dial9Handle, Dial9TokioHandle, HasTracePath, NoTracePath, PipelineCustom,
+    PipelineS3, PipelineUnset, TelemetryCore, TelemetryCoreBuilder, TelemetryGuard,
+    TelemetryRuntimeError, TokioHooks, TraceRuntimeCoreBuilder, TracedRuntime,
     TracedRuntimeBuilder, current_worker_id, spawn,
 };
 pub use task_dump_config::TaskDumpConfig;
 pub use task_metadata::{TaskId, UNKNOWN_TASK_ID};
 pub use writer::{Disk, DiskWriter, InMemoryWriter, Memory, SegmentWriter, WriterMode};
-
-/// Record a custom event into the trace.
-///
-/// Events are encoded into a thread-local buffer and flushed to disk by the
-/// background flush thread. This function is very cheap (~100–200 ns) and
-/// safe to call on hot paths.
-///
-/// Any type implementing [`dial9_trace_format::TraceEvent`] (typically via
-/// `#[derive(TraceEvent)]`) automatically implements [`Encodable`] and can
-/// be passed directly. For events that need string interning, implement
-/// [`Encodable`] manually.
-///
-/// Does nothing if telemetry is disabled on the handle.
-///
-/// # Example
-///
-/// ```ignore
-/// use dial9_trace_format::TraceEvent;
-/// use dial9_tokio_telemetry::telemetry::{record_event, clock_monotonic_ns};
-///
-/// #[derive(TraceEvent)]
-/// struct HttpRequest {
-///     #[traceevent(timestamp)]
-///     timestamp_ns: u64,
-///     status_code: u32,
-/// }
-///
-/// record_event(
-///     HttpRequest { timestamp_ns: clock_monotonic_ns(), status_code: 200 },
-///     &handle,
-/// );
-/// ```
-pub fn record_event(event: impl Encodable, handle: &TelemetryHandle) {
-    handle.record_encodable_event(&event);
-}
