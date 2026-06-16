@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-// Verify isDateLayer() in index.html recognizes when a bucket's root children
-// are date partitions (YYYY-MM-DD/) rather than genuine key prefixes.
+// Verify isDateLayer() recognizes when a bucket's root children are date
+// partitions (YYYY-MM-DD/) rather than genuine key prefixes.
 //
 // Regression test for issue #471: buckets with no key prefix expose date
 // partitions directly at the listing root. Those dates must NOT be treated as
@@ -8,32 +8,7 @@
 // date layer.
 
 "use strict";
-const fs = require("fs");
-const path = require("path");
-const vm = require("vm");
-
-const html = fs.readFileSync(path.join(__dirname, "index.html"), "utf8");
-
-function extract(name) {
-    const re = new RegExp("function " + name + "\\([\\s\\S]*?\\n    \\}\\n");
-    const m = html.match(re);
-    if (!m) {
-        console.error(`could not locate ${name}() in index.html`);
-        process.exit(1);
-    }
-    return m[0];
-}
-
-const sandbox = { isDateLayer: null, lastSegment: null };
-vm.createContext(sandbox);
-vm.runInContext(
-    extract("lastSegment") +
-        "\n" +
-        extract("isDateLayer") +
-        "\nthis.isDateLayer = isDateLayer;\nthis.lastSegment = lastSegment;",
-    sandbox,
-);
-const isDateLayer = sandbox.isDateLayer;
+const { isDateLayer } = require("./prefix_detect.js");
 
 function assert(cond, label) {
     if (!cond) {

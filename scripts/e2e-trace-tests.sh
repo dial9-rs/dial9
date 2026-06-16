@@ -44,4 +44,7 @@ node dial9-viewer/ui/test_trace_analysis.js
 echo "--- Checking skills snippets ---"
 node dial9-viewer/ui/test_all_skills_snippets.js
 
+echo "--- Checking prefix detection ---"
+node dial9-viewer/ui/test_prefix_detection.js
+
 echo "All E2E trace checks passed."

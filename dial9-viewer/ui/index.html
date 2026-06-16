@@ -202,6 +202,7 @@
         <span style="color:#555;font-size:0.8em;margin-left:auto">drop a .bin file to open viewer</span>
     </footer>
 
+    <script src="prefix_detect.js"></script>
     <script>
     // ── ?trace= passthrough: redirect to viewer ──
     (function() {
@@ -297,7 +298,7 @@
             // (YYYY-MM-DD/), the bucket has no key prefix — the trace data
             // starts directly at the date layer. Don't offer the dates as
             // prefix suggestions; the correct prefix is empty.
-            if (isDateLayer(prefixes)) {
+            if (!serverHasPrefix && isDateLayer(prefixes)) {
                 prefixInput.value = '';
                 prefixInput.placeholder = '(no prefix — dates at root)';
                 serverHasPrefix = false;
@@ -356,25 +357,7 @@
     });
 
     // ── Helpers ──
-
-    // Return the last non-empty path segment of an S3 prefix.
-    // e.g. "traces/2026-06-12/" → "2026-06-12", "traces/" → "traces".
-    function lastSegment(prefix) {
-        return String(prefix).replace(/\/+$/, '').split('/').pop();
-    }
-
-    // Issue #471: detect when a bucket's root children are date partitions
-    // (YYYY-MM-DD/) rather than genuine key prefixes. The default S3 key
-    // layout is `{prefix}/{YYYY-MM-DD}/{HHMM}/{service}/…`; when there is no
-    // prefix, the date layer sits directly at the listing root. Those dates
-    // are NOT selectable prefixes — the prefix is empty. We only treat the
-    // listing as a date layer when *every* child looks like a date, so a
-    // bucket that mixes a real prefix with stray date keys keeps showing
-    // suggestions rather than silently emptying the prefix.
-    function isDateLayer(prefixes) {
-        if (!prefixes || prefixes.length === 0) return false;
-        return prefixes.every(p => /^\d{4}-\d{2}-\d{2}$/.test(lastSegment(p)));
-    }
+    // isDateLayer / lastSegment live in prefix_detect.js (loaded above).
 
     function esc(s) {
         const d = document.createElement('div');
