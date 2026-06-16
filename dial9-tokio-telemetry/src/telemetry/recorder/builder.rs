@@ -811,6 +811,7 @@ impl TelemetryCore {
         worker_metrics_sink: Option<metrique_writer::BoxEntrySink>,
         /// Trigger receiver flipping the background worker into on-demand
         /// operation; see [`crate::dump`]. `None` keeps continuous mode.
+        #[builder(setters(vis = "pub(crate)"))]
         trigger: Option<crate::dump::DumpRx>,
     ) -> std::io::Result<TelemetryGuard> {
         let start_mono_ns = crate::telemetry::events::clock_monotonic_ns();

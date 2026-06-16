@@ -63,13 +63,7 @@ use crate::background_task::ProcessErrorKind;
 /// [`TelemetryHandle::dump_control`](crate::telemetry::TelemetryHandle::dump_control).
 pub(crate) fn channel() -> (DumpControl, DumpRx) {
     let (tx, rx) = mpsc::unbounded_channel();
-    (
-        DumpControl {
-            tx,
-            debounce: None,
-        },
-        DumpRx { rx },
-    )
+    (DumpControl { tx, debounce: None }, DumpRx { rx })
 }
 
 /// On-demand dump configuration, passed to
@@ -566,7 +560,10 @@ mod tests {
         // Second trigger within the window folds into the first.
         let err = control.dump_current_data().await.unwrap_err();
         assert!(matches!(err, DumpError::Coalesced { into } if into == first.id));
-        assert!(rx.rx.try_recv().is_err(), "coalesced trigger must not dispatch");
+        assert!(
+            rx.rx.try_recv().is_err(),
+            "coalesced trigger must not dispatch"
+        );
     }
 
     #[tokio::test]
@@ -604,7 +601,10 @@ mod tests {
         let _ = control.dump_current_data();
         let _ = control.dump_current_data();
         assert!(rx.rx.try_recv().is_ok(), "first dispatched");
-        assert!(rx.rx.try_recv().is_ok(), "second dispatched (no coordination)");
+        assert!(
+            rx.rx.try_recv().is_ok(),
+            "second dispatched (no coordination)"
+        );
     }
 
     #[test]

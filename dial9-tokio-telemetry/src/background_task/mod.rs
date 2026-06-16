@@ -59,6 +59,7 @@ pub struct BackgroundTaskConfig {
     metrics_sink: BoxEntrySink,
     /// Trigger receiver flipping the worker into on-demand operation; see
     /// [`crate::dump`]. `None` (the default) keeps continuous processing.
+    #[builder(setters(vis = "pub(crate)"))]
     trigger: Option<crate::dump::DumpRx>,
 }
 
