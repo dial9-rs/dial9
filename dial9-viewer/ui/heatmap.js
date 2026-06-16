@@ -11,6 +11,13 @@
 // out clearly. Real per-event density would require downloading and decoding
 // every segment, which is not viable for a browse listing.
 //
+// A segment's end is `last_modified` (S3 upload time), which runs a second or
+// two past the next segment's start because of upload lag. Left as-is, those
+// trailing bytes get counted in BOTH segments at the seam — double-counting
+// density into a bright boundary artifact. tileSegments() clamps each end to
+// the next start so consecutive segments tile instead of overlap; the leftover
+// holes (genuine missing coverage) are surfaced by segmentGaps().
+//
 // All functions here are pure and unit-tested in test_heatmap.js. Rendering and
 // pointer interaction live in index.html and call into these helpers.
 
@@ -113,6 +120,42 @@ function accumulateDensity(segments, t0, t1, width) {
     return cols;
 }
 
+// Return density-rendering copies of a row's segments with each segment's end
+// clamped to the next segment's start, so consecutive segments tile instead of
+// overlapping at the seam (see the file header for why ends overshoot). Input
+// need not be sorted; a sorted copy drives the clamp. The original `end` is
+// preserved on `realEnd` so callers that need the true file extent (selection,
+// gap detection) are unaffected. Bytes are NOT rescaled: clamping shortens the
+// span so the same bytes spread over slightly less time — a small, uniform
+// density bump that is far less misleading than the double-count it removes.
+function tileSegments(rowSegments) {
+    const sorted = [...rowSegments].sort((a, b) => a.start - b.start);
+    return sorted.map((seg, i) => {
+        const next = sorted[i + 1];
+        let end = seg.end;
+        // Clamp only on real overlap, and never past the start (segmentSpan
+        // gives a zero/negative span its MIN_SEGMENT_SECONDS floor).
+        if (next && next.start > seg.start && next.start < end) end = next.start;
+        return { ...seg, end, realEnd: seg.end };
+    });
+}
+
+// Genuine coverage gaps within a row: intervals [end_i, start_{i+1}] where the
+// next segment starts after the current one's real end. Normal back-to-back
+// rotation overlaps (upload lag) so it yields no gap; only real missing
+// coverage (a host that stopped reporting for a while) does. Input need not be
+// sorted. Returns [{ start, end }] in seconds, sorted by start.
+function segmentGaps(rowSegments) {
+    const sorted = [...rowSegments].sort((a, b) => a.start - b.start);
+    const out = [];
+    for (let i = 0; i < sorted.length - 1; i++) {
+        const end = segmentSpan(sorted[i]).end;
+        const nextStart = sorted[i + 1].start;
+        if (nextStart > end) out.push({ start: end, end: nextStart });
+    }
+    return out;
+}
+
 // Segments whose [start, end) span touches the query range [t0, t1] in seconds.
 // The start is inclusive so a point query (t0 === t1, used for a single click)
 // landing exactly on a segment's start still selects it; the end stays
@@ -164,6 +207,8 @@ if (typeof module !== "undefined" && module.exports) {
         segmentSpan,
         groupByHost,
         bootTransitions,
+        tileSegments,
+        segmentGaps,
         accumulateDensity,
         segmentsOverlapping,
         totalBytes,

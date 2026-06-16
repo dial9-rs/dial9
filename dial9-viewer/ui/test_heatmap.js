@@ -7,6 +7,8 @@ const {
     MAX_OPEN_BYTES,
     groupByHost,
     bootTransitions,
+    tileSegments,
+    segmentGaps,
     accumulateDensity,
     segmentsOverlapping,
     totalBytes,
@@ -116,6 +118,50 @@ function seg(o) {
     const cols = accumulateDensity([seg({ size: 800, start: 0, end: 80 })], 40, 80, 4);
     const sum = cols.reduce((a, b) => a + b, 0);
     approx(sum, 400, 1e-6, "accumulateDensity: partial overlap attributes only the in-range bytes");
+}
+
+// ── tileSegments & segmentGaps ──
+{
+    // Upload-lag overlap: each segment's end (last_modified) runs past the next
+    // segment's start. tileSegments clamps the end to the next start; the raw
+    // overlap would double-count density at the seam.
+    const segs = [
+        seg({ key: "a", size: 100, start: 0, end: 17 }),  // ends 2s into b
+        seg({ key: "b", size: 100, start: 15, end: 32 }), // ends 2s into c
+        seg({ key: "c", size: 100, start: 30, end: 47 }),
+    ];
+    const tiled = tileSegments(segs);
+    ok(tiled[0].end === 15 && tiled[1].end === 30,
+        "tileSegments: ends clamped to the next start");
+    ok(tiled[2].end === 47, "tileSegments: last segment keeps its end");
+    ok(tiled[0].realEnd === 17 && tiled[1].realEnd === 32,
+        "tileSegments: real end preserved for selection/gaps");
+    ok(segmentGaps(segs).length === 0, "segmentGaps: overlapping rotation has no gap");
+
+    // The seam column is no longer brighter than a body column once tiled.
+    const cols = accumulateDensity(tiled, 0, 47, 47);
+    const seam = cols[15]; // the a/b boundary second
+    const body = cols[5];
+    ok(seam <= body * 1.2,
+        `tileSegments: seam no longer spikes (seam ${seam.toFixed(1)} vs body ${body.toFixed(1)})`);
+
+    // A real coverage hole (next starts after this one's real end) is a gap.
+    const withHole = [
+        seg({ key: "a", size: 100, start: 0, end: 17 }),
+        seg({ key: "b", size: 100, start: 60, end: 77 }), // 43s hole after a
+    ];
+    const gaps = segmentGaps(withHole);
+    ok(gaps.length === 1 && gaps[0].start === 17 && gaps[0].end === 60,
+        "segmentGaps: real coverage hole detected with [end, nextStart]");
+    // Tiling must not invent coverage across the hole.
+    ok(tileSegments(withHole)[0].end === 17,
+        "tileSegments: no clamp across a real gap (next start is past end)");
+
+    // Inputs need not be pre-sorted.
+    const unsorted = [seg({ start: 30, end: 47 }), seg({ start: 0, end: 17 }), seg({ start: 15, end: 32 })];
+    const ts = tileSegments(unsorted);
+    ok(ts[0].start === 0 && ts[1].start === 15 && ts[2].start === 30,
+        "tileSegments: sorts before clamping");
 }
 
 // ── segmentsOverlapping & totalBytes ──

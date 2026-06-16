@@ -87,9 +87,17 @@
             border-bottom: 1px solid #222; display: flex; gap: 16px; align-items: center; flex-wrap: wrap;
         }
         #heatmap-hint .legend { display: inline-flex; align-items: center; gap: 6px; }
+        #heatmap-reset-zoom { padding: 2px 10px; font-size: 0.95em; }
         #heatmap-hint .legend .bar {
             width: 90px; height: 10px; border-radius: 2px;
             background: linear-gradient(to right, #2a2a5a, #6c63ff, #ff6b6b, #ffd93d);
+        }
+        #heatmap-hint .legend .gap-swatch {
+            width: 16px; height: 12px; border-radius: 2px;
+            border-left: 1px solid rgba(150,150,190,0.6); border-right: 1px solid rgba(150,150,190,0.6);
+            background-color: #15152a;
+            background-image: repeating-linear-gradient(-45deg,
+                rgba(120,120,160,0.35) 0 1px, transparent 1px 6px);
         }
         #heatmap-body { flex: 1; overflow: auto; display: flex; min-height: 0; }
         #heatmap-labels { flex-shrink: 0; width: var(--heatmap-label-w); border-right: 2px solid #3a3a5e; }
@@ -108,6 +116,11 @@
         #heatmap-sel {
             position: absolute; top: 0; pointer-events: none; display: none;
             background: rgba(108,99,255,0.22); border: 1px solid #6c63ff;
+        }
+        /* Zoom rubber-band: cyan, left/right edges only, to read as a time cut. */
+        #heatmap-sel.zoom {
+            background: rgba(0,229,255,0.12);
+            border: none; border-left: 1px solid #00e5ff; border-right: 1px solid #00e5ff;
         }
         #heatmap-axis {
             flex-shrink: 0; height: 22px; position: relative;
@@ -196,9 +209,11 @@
             </div>
             <div id="heatmap-view" style="display:none">
                 <div id="heatmap-hint">
-                    <span>Drag across the timeline to select a window, then open it or profile it.</span>
+                    <span>Drag to select a window, then open or profile it. <b>⌥ Option+drag</b> to zoom, double-click to reset.</span>
                     <span class="legend">low <span class="bar"></span> high data density</span>
+                    <span class="legend"><span class="gap-swatch"></span> gap (no data)</span>
                     <span style="color:#00e5ff">▏ boot change</span>
+                    <button id="heatmap-reset-zoom" style="display:none" onclick="resetHeatmapZoom()">Reset zoom</button>
                 </div>
                 <div id="heatmap-body">
                     <div id="heatmap-labels"></div>
@@ -295,7 +310,8 @@
     let allObjects = [];       // all objects from time-range search
     let heatmapSegments = [];  // normalized segments for the timeline
     let heatmapRows = [];      // groupByHost(heatmapSegments)
-    let heatmapDomain = null;  // { tMin, tMax } in epoch seconds
+    let heatmapDomain = null;  // { tMin, tMax } currently displayed (may be zoomed)
+    let heatmapFullDomain = null; // full data extent; restored on zoom reset
     let heatmapCols = [];      // per-row Float64Array of bytes-per-column
     let heatmapColMax = 0;     // global max column value (for normalization)
     let heatmapSelection = null; // { keys:[], bytes, t0, t1 }
@@ -733,7 +749,17 @@
             if (span.end > tMax) tMax = span.end;
         }
         if (!(tMax > tMin)) tMax = tMin + 1;
+        heatmapFullDomain = { tMin, tMax };
         heatmapDomain = { tMin, tMax };
+        updateZoomResetBtn();
+
+        // Precompute per-row density inputs once (reused across zoom/resize
+        // redraws): segments tiled so upload-lag overlaps don't double-count,
+        // plus the genuine coverage gaps between them.
+        for (const row of heatmapRows) {
+            row.tiled = tileSegments(row.segments);
+            row.gaps = segmentGaps(row.segments);
+        }
 
         // Host labels (one row per service/host; boot count annotated).
         for (const row of heatmapRows) {
@@ -769,7 +795,9 @@
         const { tMin, tMax } = heatmapDomain;
 
         // Pass 1: per-row density columns + global max (for normalization).
-        heatmapCols = heatmapRows.map(r => accumulateDensity(r.segments, tMin, tMax, W));
+        // Uses tiled segments (ends clamped to the next start) so upload-lag
+        // overlaps at segment seams don't double-count into a bright artifact.
+        heatmapCols = heatmapRows.map(r => accumulateDensity(r.tiled || r.segments, tMin, tMax, W));
         heatmapColMax = 0;
         for (const cols of heatmapCols) {
             for (let i = 0; i < cols.length; i++) {
@@ -804,6 +832,38 @@
             if (runColor !== null) {
                 ctx.fillStyle = runColor;
                 ctx.fillRect(runStart, y, W - runStart, ROW_H);
+            }
+            // Coverage gaps: a host that stopped reporting leaves a real hole
+            // between segments (vs. the seamless rotation overlaps the tiling
+            // removed). Mark each with a faint hatched band plus thin edge ticks
+            // so it reads as "no data here", distinct from low-but-present
+            // density. Sub-pixel gaps still get a 1px tick so they're not lost.
+            for (const g of (heatmapRows[r].gaps || [])) {
+                const gx0 = timeToX(Math.max(g.start, tMin), tMin, tMax, W);
+                const gx1 = timeToX(Math.min(g.end, tMax), tMin, tMax, W);
+                if (gx1 < 0 || gx0 > W) continue;
+                const lo = Math.max(0, gx0), hi = Math.min(W, gx1);
+                const gw = Math.max(1, hi - lo);
+                ctx.save();
+                ctx.beginPath();
+                ctx.rect(lo, y + 1, gw, ROW_H - 2);
+                ctx.clip();
+                ctx.fillStyle = '#15152a';
+                ctx.fillRect(lo, y + 1, gw, ROW_H - 2);
+                // Diagonal hatch.
+                ctx.strokeStyle = 'rgba(120,120,160,0.35)';
+                ctx.lineWidth = 1;
+                ctx.beginPath();
+                for (let hx = lo - ROW_H; hx < hi + ROW_H; hx += 6) {
+                    ctx.moveTo(hx, y + ROW_H);
+                    ctx.lineTo(hx + ROW_H, y);
+                }
+                ctx.stroke();
+                ctx.restore();
+                // Edge ticks frame the hole so even a 1px gap stays visible.
+                ctx.fillStyle = 'rgba(150,150,190,0.6)';
+                ctx.fillRect(Math.round(lo), y + 1, 1, ROW_H - 2);
+                if (hi - lo > 2) ctx.fillRect(Math.round(hi) - 1, y + 1, 1, ROW_H - 2);
             }
             // Boot-change dividers: a consistent dashed cyan line so they read
             // as boundaries, never as a data spike.
@@ -842,11 +902,13 @@
         }
     }
 
-    // ── Region selection on the heatmap ──
+    // ── Region selection / zoom on the heatmap ──
+    // Plain drag selects a region (to open or profile); Option/Alt+drag zooms
+    // the time axis to the dragged span; double-click resets the zoom.
     (function setupHeatmapInteraction() {
         const plot = document.getElementById('heatmap-plot');
         const sel = document.getElementById('heatmap-sel');
-        let dragging = false, startX = 0, startY = 0;
+        let dragging = false, zooming = false, startX = 0, startY = 0;
 
         function localXY(e) {
             const rect = plot.getBoundingClientRect();
@@ -864,25 +926,39 @@
         plot.addEventListener('mousedown', (e) => {
             if (!heatmapRows.length) return;
             dragging = true;
+            zooming = e.altKey;
             const { x, y } = localXY(e);
             startX = x; startY = y;
+            const H = heatmapRows.length * ROW_H;
+            sel.classList.toggle('zoom', zooming);
             sel.style.display = 'block';
             sel.style.left = x + 'px'; sel.style.width = '0px';
-            sel.style.top = y + 'px'; sel.style.height = '0px';
+            // A zoom drag is purely horizontal, so its rubber-band spans all rows.
+            sel.style.top = (zooming ? 0 : y) + 'px';
+            sel.style.height = (zooming ? H : 0) + 'px';
             e.preventDefault();
         });
         window.addEventListener('mousemove', (e) => {
             if (!dragging) return;
             const { x, y } = localXY(e);
             const l = Math.min(x, startX), r = Math.max(x, startX);
-            const t = Math.min(y, startY), b = Math.max(y, startY);
             sel.style.left = l + 'px'; sel.style.width = (r - l) + 'px';
-            sel.style.top = t + 'px'; sel.style.height = (b - t) + 'px';
+            if (!zooming) {
+                const t = Math.min(y, startY), b = Math.max(y, startY);
+                sel.style.top = t + 'px'; sel.style.height = (b - t) + 'px';
+            }
         });
         window.addEventListener('mouseup', (e) => {
             if (!dragging) return;
             dragging = false;
+            sel.classList.remove('zoom');
             const { x, y } = localXY(e);
+            if (zooming) {
+                zooming = false;
+                sel.style.display = 'none'; // rubber-band was transient
+                zoomToX(Math.min(x, startX), Math.max(x, startX));
+                return;
+            }
             const dx = Math.abs(x - startX), dy = Math.abs(y - startY);
             if (dx < 4 && dy < 4) {
                 selectSegmentAt(startX, startY); // treat as a click
@@ -890,7 +966,48 @@
                 finalizeSelection(Math.min(x, startX), Math.max(x, startX), Math.min(y, startY), Math.max(y, startY));
             }
         });
+        // Double-click anywhere on the plot resets to the full time range.
+        plot.addEventListener('dblclick', () => resetHeatmapZoom());
     })();
+
+    // Zoom the displayed time domain to the pixel range [x0, x1]. Ignores drags
+    // too narrow to be intentional. The whole heatmap is re-rendered against the
+    // new domain (density re-normalizes to the visible window, so a region that
+    // looked flat when zoomed out reveals its internal structure).
+    function zoomToX(x0, x1) {
+        if (!heatmapDomain || x1 - x0 < 4) return;
+        const canvas = document.getElementById('heatmap-canvas');
+        const W = canvas.clientWidth || parseFloat(canvas.style.width) || 1;
+        const { tMin, tMax } = heatmapDomain;
+        let t0 = xToTime(x0, tMin, tMax, W);
+        let t1 = xToTime(x1, tMin, tMax, W);
+        if (!(t1 > t0)) return;
+        heatmapDomain = { tMin: t0, tMax: t1 };
+        setHeatmapSelection(null);
+        drawHeatmapCanvas();
+        updateZoomResetBtn();
+    }
+
+    // Restore the full data extent (no-op if not currently zoomed).
+    function resetHeatmapZoom() {
+        if (!heatmapFullDomain) return;
+        const { tMin, tMax } = heatmapFullDomain;
+        if (heatmapDomain && heatmapDomain.tMin === tMin && heatmapDomain.tMax === tMax) return;
+        heatmapDomain = { tMin, tMax };
+        setHeatmapSelection(null);
+        drawHeatmapCanvas();
+        updateZoomResetBtn();
+    }
+
+    // Show the "Reset zoom" control only while a sub-range is displayed.
+    function updateZoomResetBtn() {
+        const btn = document.getElementById('heatmap-reset-zoom');
+        if (!btn) return;
+        const zoomed = heatmapFullDomain && heatmapDomain &&
+            (heatmapDomain.tMin !== heatmapFullDomain.tMin ||
+             heatmapDomain.tMax !== heatmapFullDomain.tMax);
+        btn.style.display = zoomed ? '' : 'none';
+    }
 
     // Position the persistent selection rectangle over whole rows [r0,r1] and
     // the time span [t0,t1], so it is clear which rows/time the selection covers.
