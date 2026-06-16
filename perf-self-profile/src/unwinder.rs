@@ -354,6 +354,15 @@ mod tests {
         /// `Unwinder::capture` itself. This catches the bug where the old
         /// double-`#[inline(never)]` layering made frame 0 point at an
         /// instruction inside `Unwinder::capture`'s body.
+        ///
+        /// We check the contract by *symbolizing* frame 0 rather than
+        /// comparing it against `helper as *const ()` plus a byte window.
+        /// A function pointer is only the symbol's entry address; codegen is
+        /// free to place basic blocks (and cold/split fragments) below that
+        /// entry, so a captured return address can legitimately land *before*
+        /// `helper as *const ()`. Earlier window-based versions of this test
+        /// were flaky for exactly that reason under different toolchains. The
+        /// symbol name is the layout-independent ground truth.
         #[test]
         fn frame_zero_points_into_caller_of_capture() {
             let Some(unwinder) = install_or_skip() else {
@@ -371,30 +380,25 @@ mod tests {
             }
 
             let frame0 = helper(&unwinder);
-            let helper_start = helper as *const () as u64;
-            let capture_fn = Unwinder::capture as *const () as u64;
+            let name = crate::resolve_symbol(frame0).name;
+            let Some(name) = name else {
+                // Without symbols (e.g. a stripped test binary) there is
+                // nothing to assert against; the address-non-zero contract is
+                // already covered by `capture_produces_frames`.
+                eprintln!("skipping: frame 0 {frame0:#x} did not symbolize");
+                return;
+            };
 
-            // Frame 0 must NOT be inside Unwinder::capture's body. Allow a
-            // generous 4 KiB window around its entry in case of debug bloat.
-            let capture_window = 4096u64;
-            assert!(
-                !(frame0 >= capture_fn && frame0 < capture_fn + capture_window),
-                "frame 0 {:#x} must not be inside Unwinder::capture [{:#x}..{:#x})",
-                frame0,
-                capture_fn,
-                capture_fn + capture_window,
-            );
-
-            // Stronger: frame 0 should land inside `helper`'s body. Debug
-            // builds can be very large (100+ KiB per function with full
-            // debuginfo and no optimization), so use a generous window.
-            let helper_window = 1024 * 1024u64;
-            assert!(
-                frame0 >= helper_start && frame0 < helper_start + helper_window,
-                "frame 0 {:#x} should be inside helper [{:#x}..{:#x})",
-                frame0,
-                helper_start,
-                helper_start + helper_window,
+            // Frame 0 is the return address of `capture`, i.e. a PC inside
+            // `helper`. It must resolve to `helper` and in particular must NOT
+            // resolve to `Unwinder::capture` (the old inlining bug). Match on
+            // the trailing path segment: the enclosing test function name
+            // itself contains "capture", so a substring check would be
+            // ambiguous, but the leaf symbol is `…::helper` vs `…::capture`.
+            let leaf = name.rsplit("::").next().unwrap_or(&name);
+            assert_eq!(
+                leaf, "helper",
+                "frame 0 {frame0:#x} should symbolize to `helper`, got {name:?}",
             );
         }
 
