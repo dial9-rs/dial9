@@ -16,7 +16,7 @@ Each finding has a severity: critical, warning, or info.
 ## Checks performed
 
 ### long-poll
-A single `.poll()` call took too long (>10ms warning, >50ms critical). This blocks the worker from processing other tasks. Look at `poll.cpuSamples` and `poll.schedSamples` for stack traces.
+A single `.poll()` call took too long. This blocks the worker from processing other tasks. The fixed >10ms warning / >50ms critical cutoffs here are a coarse default, not a universal truth — "long" is really *relative to this runtime's own poll distribution*. In a service whose p99 poll is 500µs, a 1ms poll is a severe tail outlier these cutoffs miss entirely; in a batch job whose p99 is 40ms, a 20ms poll is normal. Calibrate against `pollDurationByLoc` (p50/p99 per spawn location) before trusting an absolute threshold. Look at `poll.cpuSamples` and `poll.schedSamples` for stack traces. To root-cause *why* a flagged poll was long — especially an off-CPU one with no scheduling stacks — use the `dial9-diagnose-long-poll` skill (which thresholds on p99 by default), and `dial9-zoom-window` to inspect the surrounding instant.
 
 ### task-leak
 Active task count grows without bound. Tasks are spawned but never complete. Check `taskSpawnLocs` for spawn locations of unterminated tasks.

@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 use dial9_tokio_telemetry::background_task::{ProcessError, SegmentData, SegmentProcessor};
 use dial9_tokio_telemetry::telemetry::cpu_profile::CpuProfilingConfig;
 use dial9_tokio_telemetry::telemetry::{
-    DiskWriter, InMemoryWriter, TelemetryHandle, TracedRuntime,
+    Dial9TokioHandle, DiskWriter, InMemoryWriter, TracedRuntime,
 };
 
 // ── Tracking allocator ─────────────────────────────────────────────────────
@@ -113,7 +113,7 @@ const WORKER_THREADS: usize = 4;
 /// Short rotation so the workload exercises rotation + ring-handoff.
 const ROTATION_PERIOD: Duration = Duration::from_secs(3);
 
-async fn workload(handle: TelemetryHandle, tasks_done: Arc<AtomicU64>) {
+async fn workload(handle: Dial9TokioHandle, tasks_done: Arc<AtomicU64>) {
     let stop_at = Instant::now() + Duration::from_secs(WORKLOAD_SECS);
     let joins: Vec<_> = (0..WORKLOAD_TASKS)
         .map(|id| {
@@ -268,7 +268,7 @@ fn measure(mode: Mode) -> Sample {
             }
         };
         guard.enable();
-        let handle = guard.handle();
+        let handle = guard.tokio_handle(runtime.handle());
         runtime.block_on(workload(handle, tasks_done.clone()));
         let steady = ALLOC.peak();
         guard

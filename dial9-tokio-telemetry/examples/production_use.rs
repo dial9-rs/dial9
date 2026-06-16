@@ -12,10 +12,10 @@
 //!
 //! - Setting [`.enabled(false)`](dial9_tokio_telemetry::DiskConfigBuilder::enabled) on the config builder produces a
 //!   pass-through config: the `#[main]` macro builds a plain, unmodified tokio runtime with zero dial9 overhead.
-//!   [`TelemetryHandle::current()`](dial9_tokio_telemetry::telemetry::TelemetryHandle::current) returns an inert
+//!   [`Dial9TokioHandle::current()`](dial9_tokio_telemetry::telemetry::Dial9TokioHandle::current) returns an inert
 //!   handle, and `handle.spawn` falls through to `tokio::spawn`, so application code does not need branches.
 //! - Alternatively, you can install dial9 but leave recording disabled at runtime via the handle's
-//!   [`disable()`](dial9_tokio_telemetry::telemetry::TelemetryHandle::disable). The runtime hooks are installed
+//!   [`disable()`](dial9_tokio_telemetry::telemetry::Dial9Handle::disable). The runtime hooks are installed
 //!   but all event writes are no-ops behind a relaxed atomic read. This has slightly more overhead than
 //!   [`.enabled(false)`](dial9_tokio_telemetry::DiskConfigBuilder::enabled) but lets a background task flip
 //!   recording on from dynamic configuration later. It is a larger surface area of code, so it is higher risk.
@@ -168,7 +168,7 @@ use std::time::Duration;
 use clap::Parser;
 use dial9_tokio_telemetry::Dial9Config;
 use dial9_tokio_telemetry::telemetry::{
-    HasTracePath, PipelineUnset, TelemetryHandle, TracedRuntimeBuilder,
+    Dial9TokioHandle, HasTracePath, PipelineUnset, TracedRuntimeBuilder,
 };
 use metrique::local::{LocalFormat, OutputStyle};
 use metrique::writer::format::FormatExt;
@@ -273,7 +273,7 @@ fn configure_runtime_common(
 /// validation failure (unwritable `trace_dir`, zero-sized budget, etc.)
 /// logs an error and returns a pass-through config that builds a plain
 /// tokio runtime. In both the disabled and fallback cases,
-/// `TelemetryHandle::current()` returns an inert handle and
+/// `Dial9TokioHandle::current()` returns an inert handle and
 /// `handle.spawn` delegates to `tokio::spawn`, so application code does
 /// not need to branch on whether dial9 is running.
 fn configure_dial9(opts: &Dial9Opts) -> Dial9Config {
@@ -385,7 +385,7 @@ async fn workload_task(id: usize) {
 
 #[dial9_tokio_telemetry::main(config = my_config)]
 async fn main() {
-    let handle = TelemetryHandle::current();
+    let handle = Dial9TokioHandle::current();
     let tasks: Vec<_> = (0..100).map(|i| handle.spawn(workload_task(i))).collect();
     for task in tasks {
         let _ = task.await;

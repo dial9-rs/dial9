@@ -6,7 +6,7 @@ use std::{convert::Infallible, fmt::Debug, future::Future, io, marker::PhantomDa
 use axum::serve::Listener;
 use axum_core::{body::Body, extract::Request, response::Response};
 use dial9_tokio_telemetry::telemetry::{
-    Encodable, TelemetryHandle, ThreadLocalEncoder, clock_monotonic_ns, record_event,
+    Dial9Handle, Dial9TokioHandle, Encodable, ThreadLocalEncoder, clock_monotonic_ns,
 };
 use dial9_trace_format::{InternedString, TraceEvent};
 use futures_util::FutureExt as _;
@@ -68,7 +68,7 @@ impl Encodable for ConnectionClosed {
     }
 }
 
-/// A hyper executor that routes spawns through dial9's TelemetryHandle
+/// A hyper executor that routes spawns through dial9 (Dial9TokioHandle)
 /// so HTTP/2 internal tasks get wake event tracking.
 #[derive(Clone)]
 struct TracedExecutor;
@@ -166,7 +166,7 @@ where
             });
 
             let (close_tx, close_rx) = watch::channel(());
-            let handle = TelemetryHandle::current();
+            let handle = Dial9Handle::current();
 
             loop {
                 let (io, remote_addr) = tokio::select! {
@@ -175,13 +175,10 @@ where
                 };
 
                 let addr_string = format!("{remote_addr:?}");
-                record_event(
-                    ConnectionAccepted {
-                        timestamp_ns: clock_monotonic_ns(),
-                        remote_addr: addr_string.clone(),
-                    },
-                    &handle,
-                );
+                handle.record_event(ConnectionAccepted {
+                    timestamp_ns: clock_monotonic_ns(),
+                    remote_addr: addr_string.clone(),
+                });
 
                 let io = TokioIo::new(io);
 
@@ -221,14 +218,11 @@ where
                         }
                     }
 
-                    record_event(
-                        ConnectionClosed {
-                            timestamp_ns: clock_monotonic_ns(),
-                            remote_addr: addr_string,
-                            duration_us: conn_start.elapsed().as_micros() as u64,
-                        },
-                        &conn_handle,
-                    );
+                    conn_handle.record_event(ConnectionClosed {
+                        timestamp_ns: clock_monotonic_ns(),
+                        remote_addr: addr_string,
+                        duration_us: conn_start.elapsed().as_micros() as u64,
+                    });
                     drop(close_rx);
                 });
             }
@@ -246,5 +240,5 @@ where
     F: Future + Send + 'static,
     F::Output: Send + 'static,
 {
-    TelemetryHandle::current().spawn(fut);
+    Dial9TokioHandle::current().spawn(fut);
 }

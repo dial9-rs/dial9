@@ -919,6 +919,8 @@ async function parseWorkerMain(traceFile, cachePath) {
 
   writeLine({ t: 'm', d: {
     magic: trace.magic, version: trace.version,
+    minTs: trace.minTs, maxTs: trace.maxTs,
+    recordMinTs: trace.recordMinTs, recordMaxTs: trace.recordMaxTs,
     truncated: trace.truncated, timeFiltered: trace.timeFiltered,
     filterStartTime: trace.filterStartTime, filterEndTime: trace.filterEndTime,
     hasCpuTime: trace.hasCpuTime, hasSchedWait: trace.hasSchedWait, hasTaskTracking: trace.hasTaskTracking,

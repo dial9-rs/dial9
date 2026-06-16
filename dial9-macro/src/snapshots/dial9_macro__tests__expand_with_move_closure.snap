@@ -6,8 +6,10 @@ fn main() {
     let __dial9_rt = ::dial9_tokio_telemetry::TracedRuntime::new(
         (move || my_config())(),
     );
-    __dial9_rt
+    let __dial9_out = __dial9_rt
         .block_on(async move {
             do_work().await;
-        })
+        });
+    __dial9_rt.graceful_shutdown();
+    __dial9_out
 }

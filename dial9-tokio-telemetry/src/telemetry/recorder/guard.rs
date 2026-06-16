@@ -2,7 +2,8 @@ use crate::primitives::sync::Arc;
 use crate::telemetry::buffer;
 use std::time::Duration;
 
-use super::handle::{RuntimeTelemetryHandle, TelemetryHandle};
+use super::handle::{Dial9Handle, Dial9TokioHandle};
+use super::runtime_context::RuntimeContextRegistry;
 use super::shared_state::SharedState;
 use super::{ControlCommand, attach_runtime};
 
@@ -19,7 +20,7 @@ pub(crate) struct WorkerHandle {
 /// the user opted out via `enabled(false)` or because a lenient config
 /// path downgraded after a build failure), the guard is in an inert
 /// mode: all methods are no-ops, [`handle`](Self::handle) returns an
-/// inert [`TelemetryHandle`], and [`graceful_shutdown`](Self::graceful_shutdown)
+/// inert [`Dial9Handle`], and [`graceful_shutdown`](Self::graceful_shutdown)
 /// is a successful no-op.
 ///
 /// Use [`is_enabled`](Self::is_enabled) to distinguish the two modes.
@@ -33,9 +34,10 @@ enum GuardInner {
 }
 
 struct EnabledGuard {
-    handle: TelemetryHandle,
+    handle: Dial9Handle,
     flush_thread: Option<crate::primitives::thread::JoinHandle<()>>,
     worker: Option<WorkerHandle>,
+    contexts: RuntimeContextRegistry,
 }
 
 impl std::fmt::Debug for TelemetryGuard {
@@ -48,15 +50,17 @@ impl std::fmt::Debug for TelemetryGuard {
 
 impl TelemetryGuard {
     pub(crate) fn enabled(
-        handle: TelemetryHandle,
+        handle: Dial9Handle,
         flush_thread: Option<crate::primitives::thread::JoinHandle<()>>,
         worker: Option<WorkerHandle>,
+        contexts: RuntimeContextRegistry,
     ) -> Self {
         Self {
             inner: GuardInner::Enabled(EnabledGuard {
                 handle,
                 flush_thread,
                 worker,
+                contexts,
             }),
         }
     }
@@ -78,12 +82,21 @@ impl TelemetryGuard {
     /// Get a cloneable handle for controlling telemetry.
     ///
     /// On a disabled guard this returns an inert handle whose methods
-    /// are all no-ops — see [`TelemetryHandle::disabled`].
-    pub fn handle(&self) -> TelemetryHandle {
+    /// are all no-ops — see [`Dial9Handle::disabled`].
+    pub fn handle(&self) -> Dial9Handle {
         match &self.inner {
             GuardInner::Enabled(eg) => eg.handle.clone(),
-            GuardInner::Disabled => TelemetryHandle::disabled(),
+            GuardInner::Disabled => Dial9Handle::disabled(),
         }
+    }
+
+    /// Get a [`Dial9TokioHandle`] for spawning instrumented tasks on `runtime`,
+    /// carrying this session's wake-tracking state.
+    ///
+    /// On a disabled guard, spawns fall through to plain `tokio::spawn` without
+    /// wake tracking.
+    pub fn tokio_handle(&self, runtime: &tokio::runtime::Handle) -> Dial9TokioHandle {
+        Dial9TokioHandle::for_runtime(runtime.clone(), self.handle().traced_handle())
     }
 
     /// Monotonic start time of the telemetry session in nanoseconds, if
@@ -110,6 +123,14 @@ impl TelemetryGuard {
     pub(crate) fn shared(&self) -> Option<&Arc<SharedState>> {
         match &self.inner {
             GuardInner::Enabled(eg) => eg.handle.shared(),
+            GuardInner::Disabled => None,
+        }
+    }
+
+    /// Registry of attached runtimes, so additional runtimes can register.
+    pub(crate) fn contexts(&self) -> Option<&RuntimeContextRegistry> {
+        match &self.inner {
+            GuardInner::Enabled(eg) => Some(&eg.contexts),
             GuardInner::Disabled => None,
         }
     }
@@ -318,26 +339,23 @@ impl<'a> TraceRuntimeCoreBuilder<'a> {
 
     /// Install telemetry hooks, build the runtime, and reserve worker IDs.
     ///
-    /// Returns the runtime and a [`RuntimeTelemetryHandle`] for spawning
-    /// instrumented futures via [`RuntimeTelemetryHandle::spawn`]. If Tokio
+    /// Returns the runtime and a [`Dial9TokioHandle`] for spawning
+    /// instrumented futures via [`Dial9TokioHandle::spawn`]. If Tokio
     /// instrumentation is disabled, builds a plain runtime instead.
     pub fn build(
         self,
         mut builder: tokio::runtime::Builder,
-    ) -> std::io::Result<(tokio::runtime::Runtime, RuntimeTelemetryHandle)> {
-        let (Some(shared), Some(control_tx), Some(traced)) = (
+    ) -> std::io::Result<(tokio::runtime::Runtime, Dial9TokioHandle)> {
+        let (Some(shared), Some(contexts), Some(control_tx), Some(traced)) = (
             self.guard.shared(),
+            self.guard.contexts(),
             self.guard.control_tx(),
             self.guard.handle().traced_handle(),
         ) else {
             // Disabled guard: build a plain tokio runtime and return a
-            // RuntimeTelemetryHandle that effectively short-circuits to
-            // tokio::spawn.
+            // Dial9TokioHandle that effectively short-circuits to tokio::spawn.
             let runtime = builder.build()?;
-            let handle = RuntimeTelemetryHandle {
-                runtime: runtime.handle().clone(),
-                traced: None,
-            };
+            let handle = Dial9TokioHandle::for_runtime(runtime.handle().clone(), None);
             return Ok((runtime, handle));
         };
 
@@ -346,15 +364,13 @@ impl<'a> TraceRuntimeCoreBuilder<'a> {
             for source in self.custom_event_sources {
                 shared.push_source(Box::new(source));
             }
-            let handle = RuntimeTelemetryHandle {
-                runtime: runtime.handle().clone(),
-                traced: None,
-            };
+            let handle = Dial9TokioHandle::for_runtime(runtime.handle().clone(), None);
             return Ok((runtime, handle));
         }
 
         let runtime = attach_runtime(
             shared,
+            contexts,
             builder,
             Some(self.name),
             control_tx,
@@ -364,10 +380,7 @@ impl<'a> TraceRuntimeCoreBuilder<'a> {
         for source in self.custom_event_sources {
             shared.push_source(Box::new(source));
         }
-        let handle = RuntimeTelemetryHandle {
-            runtime: runtime.handle().clone(),
-            traced: Some(traced),
-        };
+        let handle = Dial9TokioHandle::for_runtime(runtime.handle().clone(), Some(traced));
         Ok((runtime, handle))
     }
 }
