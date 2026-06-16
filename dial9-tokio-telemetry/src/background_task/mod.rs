@@ -2102,7 +2102,7 @@ mod worker_pipeline_tests {
             accounting: None,
         };
 
-        let mut processor = WriteBackProcessor;
+        let mut processor = WriteBackProcessor::default();
         let result = processor.process(data).await;
         check!(result.is_ok());
 
@@ -2148,7 +2148,7 @@ mod worker_pipeline_tests {
             accounting: None,
         };
 
-        let mut processor = WriteBackProcessor;
+        let mut processor = WriteBackProcessor::default();
         let result = processor.process(data).await;
         check!(result.is_ok());
 
@@ -2167,8 +2167,10 @@ mod worker_pipeline_tests {
         let stop = tokio_util::sync::CancellationToken::new();
         stop.cancel();
 
-        let processors: Vec<Box<dyn SegmentProcessor>> =
-            vec![Box::new(GzipCompressor), Box::new(WriteBackProcessor)];
+        let processors: Vec<Box<dyn SegmentProcessor>> = vec![
+            Box::new(GzipCompressor),
+            Box::new(WriteBackProcessor::default()),
+        ];
 
         let mut worker = WorkerLoop::new(
             fs_for(dir.path()),
