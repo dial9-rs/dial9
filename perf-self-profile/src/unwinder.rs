@@ -389,25 +389,17 @@ mod tests {
                 return;
             };
 
-            // The hard contract: frame 0 must NOT resolve to
-            // `Unwinder::capture` — that would mean the inlining shim leaked
-            // into the captured stack, which is the regression this test
-            // guards against.
-            assert!(
-                !name.ends_with("::capture"),
-                "frame 0 {frame0:#x} must not land inside Unwinder::capture, got {name:?}",
-            );
-
-            // Ideally frame 0 resolves to `helper`. When built without
-            // `-C force-frame-pointers=yes` the frame chain may be
-            // unreliable, so we only warn rather than fail.
+            // Frame 0 is the return address of `capture`, i.e. a PC inside
+            // `helper`. It must resolve to `helper` and in particular must NOT
+            // resolve to `Unwinder::capture` (the old inlining bug). Match on
+            // the trailing path segment: the enclosing test function name
+            // itself contains "capture", so a substring check would be
+            // ambiguous, but the leaf symbol is `…::helper` vs `…::capture`.
             let leaf = name.rsplit("::").next().unwrap_or(&name);
-            if leaf != "helper" {
-                eprintln!(
-                    "note: frame 0 {frame0:#x} resolved to {name:?} (expected `helper`); \
-                     likely built without frame pointers"
-                );
-            }
+            assert_eq!(
+                leaf, "helper",
+                "frame 0 {frame0:#x} should symbolize to `helper`, got {name:?}",
+            );
         }
 
         #[test]
