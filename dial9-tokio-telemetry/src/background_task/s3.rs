@@ -839,7 +839,7 @@ mod tests {
     fn dump_manifest_serializes_doc_shape() {
         use std::time::{Duration, UNIX_EPOCH};
 
-        let (control, mut rx) = crate::dump::trigger();
+        let (control, mut rx) = crate::dump::channel();
         control
             .dump_current_data()
             .with_metadata("reason", "idle-ratio-drop");

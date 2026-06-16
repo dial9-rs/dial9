@@ -1,28 +1,25 @@
 //! Builder wiring for on-trigger pipeline runs.
 
 use dial9_tokio_telemetry::background_task::s3::S3Config;
-use dial9_tokio_telemetry::dump::{self, DumpError};
+use dial9_tokio_telemetry::dump::DumpError;
 use dial9_tokio_telemetry::telemetry::{Disk, DiskWriter, TracedRuntime};
 
 /// `with_trigger` is available in every pipeline state (compile check).
 #[allow(dead_code)]
 fn with_trigger_compiles_in_all_pipeline_states() {
-    let (_control, rx) = dump::trigger();
-    let _unset = TracedRuntime::builder().with_trigger(rx);
+    let _unset = TracedRuntime::builder().with_trigger(|_| {});
 
-    let (_control, rx) = dump::trigger();
     let s3_config = S3Config::builder()
         .bucket("bucket")
         .service_name("service")
         .build();
     let _s3 = TracedRuntime::builder()
         .with_s3_uploader::<Disk>(s3_config)
-        .with_trigger(rx);
+        .with_trigger(|_| {});
 
-    let (_control, rx) = dump::trigger();
     let _custom = TracedRuntime::builder()
         .with_custom_pipeline::<_, Disk>(|p| p.gzip().write_back())
-        .with_trigger(rx);
+        .with_trigger(|_| {});
 }
 
 /// A trigger without a configured pipeline never spawns the worker; the
@@ -32,17 +29,17 @@ fn trigger_without_pipeline_resolves_worker_stopped() {
     let dir = tempfile::tempdir().unwrap();
     let trace_path = dir.path().join("trace.bin");
 
-    let (control, rx) = dump::trigger();
-
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.worker_threads(1).enable_all();
     let writer = DiskWriter::single_file(&trace_path).unwrap();
 
     let (runtime, guard) = TracedRuntime::builder()
         .with_trace_path(&trace_path)
-        .with_trigger(rx)
+        .with_trigger(|_| {})
         .build_and_start(builder, writer)
         .unwrap();
+
+    let control = guard.handle().dump_control().expect("trigger wired");
 
     let err = runtime
         .block_on(async { control.dump_current_data().await })
@@ -65,8 +62,6 @@ fn concurrent_dumps_both_resolve_with_distinct_ids() {
     let dir = tempfile::tempdir().unwrap();
     let trace_path = dir.path().join("trace.bin");
 
-    let (control, rx) = dump::trigger();
-
     // Small segments so the workload seals a few into the ring quickly.
     let writer = DiskWriter::new(&trace_path, 512, 50 * 1024).unwrap();
 
@@ -76,10 +71,12 @@ fn concurrent_dumps_both_resolve_with_distinct_ids() {
     let (runtime, guard) = TracedRuntime::builder()
         .with_trace_path(&trace_path)
         .with_custom_pipeline::<_, Disk>(|p| p.gzip().write_back())
-        .with_trigger(rx)
+        .with_trigger(|_| {})
         .with_worker_poll_interval(Duration::from_millis(50))
         .build_and_start(builder, writer)
         .unwrap();
+
+    let control = guard.handle().dump_control().expect("trigger wired");
 
     // Count sealed segments in the ring (`*.bin`; the active file is `.active`).
     let count_sealed = || {

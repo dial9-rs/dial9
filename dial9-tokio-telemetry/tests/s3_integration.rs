@@ -850,8 +850,6 @@ fn permanently_broken_s3_produces_failure_metrics() {
 /// `end_to_end_trace_to_s3_roundtrip` but on the on-demand path.
 #[test]
 fn dump_trigger_uploads_segments_and_writes_manifest() {
-    use dial9_tokio_telemetry::dump;
-
     let s3_root = tempfile::tempdir().unwrap();
     let trace_dir = tempfile::tempdir().unwrap();
     let trace_path = trace_dir.path().join("trace.bin");
@@ -871,8 +869,6 @@ fn dump_trigger_uploads_segments_and_writes_manifest() {
         .region("us-east-1")
         .build();
 
-    let (control, rx) = dump::trigger();
-
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.worker_threads(2).enable_all();
 
@@ -880,10 +876,12 @@ fn dump_trigger_uploads_segments_and_writes_manifest() {
         .with_trace_path(&trace_path)
         .with_s3_uploader(s3_config.clone())
         .with_s3_client(client.clone())
-        .with_trigger(rx)
+        .with_trigger(|_| {})
         .with_worker_poll_interval(Duration::from_millis(50))
         .build_and_start(builder, writer)
         .unwrap();
+
+    let control = guard.handle().dump_control().expect("trigger wired");
 
     let count_sealed = || {
         std::fs::read_dir(trace_dir.path())

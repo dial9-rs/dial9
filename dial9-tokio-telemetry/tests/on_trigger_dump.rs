@@ -6,7 +6,6 @@
 mod fake_s3;
 
 use dial9_tokio_telemetry::background_task::s3::S3Config;
-use dial9_tokio_telemetry::dump;
 use dial9_tokio_telemetry::telemetry::{DiskWriter, TracedRuntime};
 use fake_s3::fake_s3_client;
 use std::future::IntoFuture;
@@ -81,7 +80,6 @@ fn nothing_uploads_until_dump_then_manifest_indexes_it() {
 
     let client = fake_s3_client(s3_root.path());
     let writer = DiskWriter::new(&trace_path, 512, 50 * 1024).unwrap();
-    let (control, rx) = dump::trigger();
 
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.worker_threads(1).enable_all();
@@ -91,9 +89,11 @@ fn nothing_uploads_until_dump_then_manifest_indexes_it() {
         .with_s3_uploader(test_s3_config())
         .with_s3_client(client.clone())
         .with_worker_poll_interval(Duration::from_millis(50))
-        .with_trigger(rx)
+        .with_trigger(|_| {})
         .build_and_start(builder, writer)
         .unwrap();
+
+    let control = guard.handle().dump_control().expect("trigger wired");
 
     run_workload(&runtime);
     wait_for_sealed_segment(trace_dir.path());
@@ -201,7 +201,6 @@ fn lookforward_dump_captures_post_trigger_segments() {
 
     let client = fake_s3_client(s3_root.path());
     let writer = DiskWriter::new(&trace_path, 512, 50 * 1024).unwrap();
-    let (control, rx) = dump::trigger();
 
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.worker_threads(1).enable_all();
@@ -211,9 +210,11 @@ fn lookforward_dump_captures_post_trigger_segments() {
         .with_s3_uploader(test_s3_config())
         .with_s3_client(client.clone())
         .with_worker_poll_interval(Duration::from_millis(50))
-        .with_trigger(rx)
+        .with_trigger(|_| {})
         .build_and_start(builder, writer)
         .unwrap();
+
+    let control = guard.handle().dump_control().expect("trigger wired");
 
     // Trigger before producing anything; the forward window collects the
     // segments the workload seals.
@@ -265,7 +266,6 @@ fn off_s3_pipeline_dumps_without_manifest() {
     let trace_path = trace_dir.path().join("trace.bin");
 
     let writer = DiskWriter::new(&trace_path, 512, 50 * 1024).unwrap();
-    let (control, rx) = dump::trigger();
 
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.worker_threads(1).enable_all();
@@ -274,9 +274,11 @@ fn off_s3_pipeline_dumps_without_manifest() {
         .with_trace_path(&trace_path)
         .with_custom_pipeline(|p| p.gzip().write_back())
         .with_worker_poll_interval(Duration::from_millis(50))
-        .with_trigger(rx)
+        .with_trigger(|_| {})
         .build_and_start(builder, writer)
         .unwrap();
+
+    let control = guard.handle().dump_control().expect("trigger wired");
 
     run_workload(&runtime);
     wait_for_sealed_segment(trace_dir.path());
@@ -311,7 +313,6 @@ fn shutdown_truncates_open_lookforward_dump() {
 
     let client = fake_s3_client(s3_root.path());
     let writer = DiskWriter::new(&trace_path, 512, 50 * 1024).unwrap();
-    let (control, rx) = dump::trigger();
 
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.worker_threads(1).enable_all();
@@ -321,9 +322,11 @@ fn shutdown_truncates_open_lookforward_dump() {
         .with_s3_uploader(test_s3_config())
         .with_s3_client(client)
         .with_worker_poll_interval(Duration::from_millis(50))
-        .with_trigger(rx)
+        .with_trigger(|_| {})
         .build_and_start(builder, writer)
         .unwrap();
+
+    let control = guard.handle().dump_control().expect("trigger wired");
 
     // Hour-long forward window, then shut down long before the deadline.
     let fut = control
