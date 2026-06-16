@@ -18,7 +18,7 @@
 //! `DumpError::Coalesced`) instead of producing a pile of near-identical dumps.
 //!
 //! The runtime mints the trigger channel internally; the application reaches
-//! the `DumpControl` through the ambient `TelemetryHandle::current()` from any
+//! the `DumpControl` through the ambient `Dial9Handle::current()` from any
 //! thread the runtime owns (the monitor task, a panic hook, ...). No global
 //! plumbing.
 //!
@@ -34,7 +34,7 @@ use std::time::Duration;
 
 use dial9_tokio_telemetry::Dial9Config;
 use dial9_tokio_telemetry::dump::DumpError;
-use dial9_tokio_telemetry::telemetry::TelemetryHandle;
+use dial9_tokio_telemetry::telemetry::{Dial9Handle, Dial9TokioHandle};
 
 const TRACE_DIR: &str = "/tmp/dial9-on-trigger-dump";
 
@@ -72,10 +72,12 @@ fn sealed_segments() -> usize {
         .build_or_disabled()
 })]
 async fn main() {
-    let handle = TelemetryHandle::current();
+    let handle = Dial9TokioHandle::current();
     // Reach the dump control through the ambient handle, the runtime stashed
     // it when `with_trigger` was configured.
-    let control = handle.dump_control().expect("on-demand mode enabled");
+    let control = Dial9Handle::current()
+        .dump_control()
+        .expect("on-demand mode enabled");
 
     // Steady workload so the ring keeps sealing segments. The pipeline stays
     // parked: nothing is gzipped or written back until the monitor dumps.
