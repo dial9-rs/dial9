@@ -130,6 +130,15 @@ function seg(o) {
         "segmentsOverlapping: picks overlapping segments");
     ok(totalBytes(sel) === 30, "totalBytes: sums selected sizes");
     ok(segmentsOverlapping(segs, 200, 300).length === 0, "segmentsOverlapping: none outside range");
+
+    // A point query (single click) exactly on a segment's start must select it
+    // rather than fall through the crack between adjacent segments.
+    const atStart = segmentsOverlapping(segs, 60, 60);
+    ok(atStart.length === 1 && atStart[0].key === "b",
+        "segmentsOverlapping: click on a segment's start selects that segment");
+    const atZero = segmentsOverlapping(segs, 0, 0);
+    ok(atZero.length === 1 && atZero[0].key === "a",
+        "segmentsOverlapping: click on the very first start still selects");
 }
 
 // ── densityColor ──

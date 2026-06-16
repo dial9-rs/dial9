@@ -113,11 +113,15 @@ function accumulateDensity(segments, t0, t1, width) {
     return cols;
 }
 
-// Segments overlapping the half-open time range [t0, t1) in seconds.
+// Segments whose [start, end) span touches the query range [t0, t1] in seconds.
+// The start is inclusive so a point query (t0 === t1, used for a single click)
+// landing exactly on a segment's start still selects it; the end stays
+// exclusive so a click on the boundary between two adjacent segments picks the
+// later one (the segment that starts there) rather than both.
 function segmentsOverlapping(segments, t0, t1) {
     return segments.filter((seg) => {
         const { start, end } = segmentSpan(seg);
-        return start < t1 && end > t0;
+        return start <= t1 && end > t0;
     });
 }
 
