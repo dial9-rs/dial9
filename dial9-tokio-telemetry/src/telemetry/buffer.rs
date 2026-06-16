@@ -112,7 +112,7 @@ impl ThreadLocalEncoder<'_> {
 ///
 /// Any type implementing [`TraceEvent`](dial9_trace_format::TraceEvent) automatically
 /// implements `Encodable` via a blanket impl, so you can pass it directly to
-/// [`record_event`](crate::telemetry::record_event):
+/// [`Dial9Handle::record_event`](crate::telemetry::Dial9Handle::record_event):
 ///
 /// ```ignore
 /// #[derive(TraceEvent)]
@@ -121,7 +121,7 @@ impl ThreadLocalEncoder<'_> {
 ///     timestamp_ns: u64,
 ///     request_count: u32,
 /// }
-/// record_event(MyEvent { timestamp_ns: now, request_count: 42 }, &handle);
+/// handle.record_event(MyEvent { timestamp_ns: now, request_count: 42 });
 /// ```
 ///
 /// # Advanced case — string interning

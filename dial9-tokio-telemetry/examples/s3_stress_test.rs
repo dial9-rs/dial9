@@ -154,7 +154,7 @@ fn main() -> std::io::Result<()> {
         .with_worker_metrics_sink(metrics_sink)
         .build_and_start(builder, writer)?;
 
-    let handle = guard.handle();
+    let handle = guard.tokio_handle(runtime.handle());
     let load_duration = Duration::from_secs(args.duration);
     let tasks_done = Arc::new(AtomicU64::new(0));
     let start = Instant::now();

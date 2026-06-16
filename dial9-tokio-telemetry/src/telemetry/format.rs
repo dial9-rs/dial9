@@ -180,6 +180,30 @@ pub struct ProcessResourceUsageEvent {
     pub involuntary_context_switches: u64,
 }
 
+/// Wire-format event for a TCP listener accept queue snapshot.
+#[derive(Debug, TraceEvent)]
+#[traceevent(wire_slot)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) struct TcpAcceptQueueEvent {
+    /// Monotonic timestamp in nanoseconds.
+    #[traceevent(timestamp)]
+    pub(crate) timestamp_ns: u64,
+    /// Linux socket cookie reported by sock_diag.
+    pub(crate) socket_cookie: u64,
+    /// Linux socket inode reported by sock_diag.
+    pub(crate) socket_inode: u64,
+    /// IP version for `local_addr`: 4 or 6.
+    pub(crate) ip_version: u8,
+    /// Local listener address.
+    pub(crate) local_addr: String,
+    /// Local listener port.
+    pub(crate) local_port: u16,
+    /// Completed connections waiting to be accepted.
+    pub(crate) pending_connections: u32,
+    /// Effective accept backlog limit.
+    pub(crate) backlog_limit: u32,
+}
+
 /// Wire-format event for a task spawn.
 #[derive(Debug, TraceEvent)]
 #[traceevent(wire_slot)]
@@ -191,7 +215,7 @@ pub struct TaskSpawnEvent {
     pub task_id: TaskId,
     /// Interned spawn location.
     pub spawn_loc: InternedString,
-    /// Whether this spawn was instrumented (via `TelemetryHandle::spawn`).
+    /// Whether this spawn was instrumented (via `Dial9TokioHandle::spawn`).
     pub instrumented: bool,
 }
 

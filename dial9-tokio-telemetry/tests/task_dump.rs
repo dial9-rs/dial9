@@ -43,7 +43,7 @@ fn task_dump_emitted_for_long_sleep() {
         .build_and_start(builder, InMemoryWriter::new(CAPTURE_BUFFER_SIZE).unwrap())
         .unwrap();
 
-    let handle = guard.handle();
+    let handle = guard.tokio_handle(runtime.handle());
     runtime.block_on(async {
         let join = handle.spawn(async {
             // Well above the 10ms default threshold.
@@ -91,7 +91,7 @@ fn no_task_dump_for_short_sleep() {
         .build_and_start(builder, InMemoryWriter::new(CAPTURE_BUFFER_SIZE).unwrap())
         .unwrap();
 
-    let handle = guard.handle();
+    let handle = guard.tokio_handle(runtime.handle());
     runtime.block_on(async {
         let join = handle.spawn(async {
             tokio::time::sleep(Duration::from_millis(1)).await;
@@ -130,7 +130,7 @@ fn task_dump_does_not_produce_extra_events() {
             .build_and_start(builder, InMemoryWriter::new(CAPTURE_BUFFER_SIZE).unwrap())
             .unwrap();
 
-        let handle = guard.handle();
+        let handle = guard.tokio_handle(runtime.handle());
         runtime.block_on(async {
             let join = handle.spawn(async {
                 tokio::task::yield_now().await;
@@ -182,7 +182,7 @@ fn spawn_with_joinset_emits_task_dump() {
         .build_and_start(builder, InMemoryWriter::new(CAPTURE_BUFFER_SIZE).unwrap())
         .unwrap();
 
-    let handle = guard.handle();
+    let handle = guard.tokio_handle(runtime.handle());
     runtime.block_on(async {
         let mut set: JoinSet<()> = JoinSet::new();
         handle.spawn_with(

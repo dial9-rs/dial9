@@ -86,6 +86,10 @@
    *   magic: "D9TF",
    *   version: number,
    *   events: TraceEvent[],
+   *   minTs: number|null,
+   *   maxTs: number|null,
+   *   recordMinTs: number|null,
+   *   recordMaxTs: number|null,
    *   truncated: boolean,
    *   hasCpuTime: boolean,
    *   hasSchedWait: boolean,
@@ -308,6 +312,7 @@
     const maxEvents = (options && options.maxEvents != null) ? options.maxEvents : MAX_EVENTS;
     const startTime = (options && options.startTime != null) ? options.startTime : 0;
     const endTime = (options && options.endTime != null) ? options.endTime : Infinity;
+    const hasTimeFilter = startTime > 0 || endTime < Infinity;
     const onProgress = (options && options.onParseProgress) || null;
     const YIELD_BYTES = 100 * 1024; // yield to browser every 100KB
     const TD = getTraceDecoder();
@@ -353,6 +358,17 @@
       "SegmentMetadataEvent",
       "ClockSyncEvent",
     ]);
+    const TRACE_BOUND_EXCLUDED_FRAMES = new Set([
+      "SymbolTableEntry",
+      "SegmentMetadataEvent",
+      "ClockSyncEvent",
+    ]);
+    let recordMinTs = Infinity, recordMaxTs = -Infinity;
+    function includeRecordTimestamp(t) {
+      if (t == null) return;
+      if (t < recordMinTs) recordMinTs = t;
+      if (t > recordMaxTs) recordMaxTs = t;
+    }
 
     let lastYieldPos = 0;
     let frame;
@@ -384,6 +400,9 @@
       // (uncapped frames like symbols/metadata are always processed)
       const inTimeRange = ts >= startTime && ts <= endTime;
       if (!inTimeRange && !UNCAPPED_FRAMES.has(frame.name)) continue;
+      if (inTimeRange && !TRACE_BOUND_EXCLUDED_FRAMES.has(frame.name)) {
+        includeRecordTimestamp(ts);
+      }
 
       switch (frame.name) {
         case "PollStartEvent": {
@@ -662,9 +681,7 @@
       const a0 = clockSyncAnchors[0];
       clockOffsetNs = a0.realtimeNs - a0.monotonicNs;
     }
-    const hasTimeFilter = startTime > 0 || endTime < Infinity;
-
-    // Compute timestamp bounds from events (safe for large arrays)
+    // Keep the historical event-only bounds for runtime analysis consumers.
     let evMinTs = Infinity, evMaxTs = -Infinity;
     for (let i = 0; i < events.length; i++) {
       const t = events[i].timestamp;
@@ -684,6 +701,8 @@
       events,
       minTs: events.length > 0 ? evMinTs : null,
       maxTs: events.length > 0 ? evMaxTs : null,
+      recordMinTs: recordMinTs < Infinity ? recordMinTs : null,
+      recordMaxTs: recordMaxTs > -Infinity ? recordMaxTs : null,
       truncated: events.length >= maxEvents,
       timeFiltered: hasTimeFilter,
       filterStartTime: hasTimeFilter ? startTime : null,

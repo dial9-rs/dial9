@@ -284,7 +284,7 @@ mod tests {
         )
         .unwrap();
 
-        let handle = guard.handle();
+        let handle = guard.tokio_handle(runtime.handle());
         let notify = Arc::new(tokio::sync::Notify::new());
         let notify_clone = notify.clone();
 
@@ -315,7 +315,8 @@ mod tests {
         // Wake events land in the thread-local buffer (capacity 1_024), so a
         // single event will not auto-flush.  Manually drain the buffer into the
         // collector so that the guard flush below picks it up.
-        let th = handle
+        let th = guard
+            .handle()
             .traced_handle()
             .expect("enabled handle yields TracedHandle");
         buffer::drain_to_collector(&th.shared.collector);

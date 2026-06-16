@@ -196,6 +196,7 @@ fn event_timestamp(ev: &Dial9Event) -> Option<u64> {
         Dial9Event::AllocEvent(e) => Some(e.timestamp_ns),
         Dial9Event::FreeEvent(e) => Some(e.timestamp_ns),
         Dial9Event::ProcessResourceUsageEvent(e) => Some(e.timestamp_ns),
+        Dial9Event::TcpAcceptQueueEvent(e) => Some(e.timestamp_ns),
         Dial9Event::Custom(e) => e.timestamp_ns,
         Dial9Event::Other => None,
     }

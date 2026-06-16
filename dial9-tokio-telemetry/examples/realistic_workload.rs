@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use dial9_tokio_telemetry::Dial9Config;
-use dial9_tokio_telemetry::telemetry::TelemetryHandle;
+use dial9_tokio_telemetry::telemetry::Dial9TokioHandle;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
@@ -26,7 +26,7 @@ async fn cpu_bound_work(n: u64) -> u64 {
 }
 
 async fn network_server(listener: TcpListener) {
-    let handle = TelemetryHandle::current();
+    let handle = Dial9TokioHandle::current();
     loop {
         if let Ok((mut socket, _)) = listener.accept().await {
             handle.spawn(async move {
@@ -59,7 +59,7 @@ async fn network_client(port: u16, id: usize) {
 }
 
 async fn mixed_workload(port: u16) {
-    let handle = TelemetryHandle::current();
+    let handle = Dial9TokioHandle::current();
 
     let clients: Vec<_> = (0..5)
         .map(|i| handle.spawn(network_client(port, i)))
@@ -88,7 +88,7 @@ async fn mixed_workload(port: u16) {
 async fn main() {
     println!("Running realistic workload...");
 
-    let handle = TelemetryHandle::current();
+    let handle = Dial9TokioHandle::current();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     handle.spawn(network_server(listener));

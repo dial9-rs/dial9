@@ -101,29 +101,48 @@ fn hook_realloc_emits_alloc_and_free_when_liveset_on() {
         "expected at least one FreeEvent when liveset tracking is on"
     );
 
-    // Verify every FreeEvent matches a prior AllocEvent on (addr, size, alloc_timestamp_ns).
+    // Verify every FreeEvent matches an AllocEvent on the allocation's full
+    // identity: (addr, size, alloc_timestamp_ns). The FreeEvent denormalizes
+    // all three fields from the same producer-side liveset entry that the
+    // matching `on_alloc` inserted, so `(addr, alloc_timestamp_ns)` uniquely
+    // identifies the allocation it refers to.
+    //
+    // We match against *all* AllocEvents, regardless of their position in the
+    // stream — NOT by replaying events in order and tracking "what is live at
+    // this addr right now." The consolidator only guarantees *approximate*
+    // timestamp ordering: it best-effort merge-drains two independent producer
+    // queues, possibly across flush cycles (see `MemoryProfileSource::flush`).
+    // Meanwhile the growing `Vec` makes the system allocator reuse freed
+    // addresses, so a reuse's AllocEvent can appear in the stream *before* the
+    // prior occupant's FreeEvent. An addr-keyed, in-order replay would then
+    // clobber the live entry and match the free to the wrong allocation —
+    // the source of this test's former flakiness. Keying on the alloc's full
+    // identity makes the check order-independent.
     use std::collections::HashMap;
-    let mut live: HashMap<u64, (u64, u64)> = HashMap::new(); // addr -> (size, ts)
-    let mut matched_frees = 0usize;
-    for ev in &events {
-        match ev {
-            Dial9Event::AllocEvent(a) => {
-                live.insert(a.addr, (a.size, a.timestamp_ns));
-            }
-            Dial9Event::FreeEvent(f) => {
-                let Some((recorded_size, recorded_ts)) = live.remove(&f.addr) else {
-                    panic!(
-                        "FreeEvent at addr {:#x} has no matching prior AllocEvent \
-                         (free size={}, alloc_ts={})",
-                        f.addr, f.size, f.alloc_timestamp_ns
-                    );
-                };
-                assert_eq!(recorded_size, f.size);
-                assert_eq!(recorded_ts, f.alloc_timestamp_ns);
-                matched_frees += 1;
-            }
-            _ => {}
-        }
+    let alloc_sizes: HashMap<(u64, u64), u64> = events
+        .iter()
+        .filter_map(|e| match e {
+            Dial9Event::AllocEvent(a) => Some(((a.addr, a.timestamp_ns), a.size)),
+            _ => None,
+        })
+        .collect();
+
+    for free in &frees {
+        let Dial9Event::FreeEvent(f) = free else {
+            unreachable!("frees was filtered to FreeEvent above");
+        };
+        let Some(&alloc_size) = alloc_sizes.get(&(f.addr, f.alloc_timestamp_ns)) else {
+            panic!(
+                "FreeEvent at addr {:#x} (size={}, alloc_ts={}) has no matching \
+                 AllocEvent with that (addr, timestamp)",
+                f.addr, f.size, f.alloc_timestamp_ns
+            );
+        };
+        assert_eq!(
+            alloc_size, f.size,
+            "FreeEvent at addr {:#x} reports size {} but its matching AllocEvent \
+             (alloc_ts={}) had size {alloc_size}",
+            f.addr, f.size, f.alloc_timestamp_ns
+        );
     }
-    assert_eq!(matched_frees, frees.len());
 }

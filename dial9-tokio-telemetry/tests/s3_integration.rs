@@ -429,7 +429,7 @@ fn stress_test_all_segments_uploaded_and_valid() {
         .build_and_start(builder, writer)
         .unwrap();
 
-    let handle = guard.handle();
+    let handle = guard.tokio_handle(runtime.handle());
 
     // Generate load for 1 second — enough to produce several segments at 64KB each.
     runtime.block_on(async {
@@ -637,7 +637,7 @@ fn graceful_shutdown_completes_when_s3_hangs() {
         .unwrap();
 
     // Generate trace data on the TracedRuntime, then let the worker pick it up.
-    let handle = guard.handle();
+    let handle = guard.tokio_handle(runtime.handle());
     runtime.block_on(async {
         for _ in 0..50 {
             handle.spawn(async { tokio::task::yield_now().await });
@@ -708,7 +708,7 @@ fn stress_test_with_s3_failures() {
         .build_and_start(builder, writer)
         .unwrap();
 
-    let handle = guard.handle();
+    let handle = guard.tokio_handle(runtime.handle());
 
     runtime.block_on(async {
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
