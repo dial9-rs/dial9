@@ -15,7 +15,7 @@
 //!   [`Dial9TokioHandle::current()`](dial9_tokio_telemetry::telemetry::Dial9TokioHandle::current) returns an inert
 //!   handle, and `handle.spawn` falls through to `tokio::spawn`, so application code does not need branches.
 //! - Alternatively, you can install dial9 but leave recording disabled at runtime via the handle's
-//!   [`disable()`](dial9_tokio_telemetry::telemetry::Dial9TokioHandle::disable). The runtime hooks are installed
+//!   [`disable()`](dial9_tokio_telemetry::telemetry::Dial9Handle::disable). The runtime hooks are installed
 //!   but all event writes are no-ops behind a relaxed atomic read. This has slightly more overhead than
 //!   [`.enabled(false)`](dial9_tokio_telemetry::DiskConfigBuilder::enabled) but lets a background task flip
 //!   recording on from dynamic configuration later. It is a larger surface area of code, so it is higher risk.

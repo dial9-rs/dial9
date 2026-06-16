@@ -15,6 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Breaking:** renamed `RotatingWriter` to `DiskWriter`. The writer is now generic over its storage backend (`SegmentWriter<Mode>`) with `DiskWriter` / `InMemoryWriter` as the public types; memory constructors are `InMemoryWriter::new` / `::builder` ([#435](https://github.com/dial9-rs/dial9/pull/435))
 - **Breaking:** `SegmentData::segment()` returns `&SegmentRef` (disk- or memory-backed) instead of `&SealedSegment`; processors that read the segment path must match the enum ([#435](https://github.com/dial9-rs/dial9/pull/435))
+- **Breaking:** collapsed the handle types into `Dial9Handle` (record/control, runtime-agnostic) and `Dial9TokioHandle` (spawn only). `TelemetryHandle` and `RuntimeTelemetryHandle` are removed ([#535](https://github.com/dial9-rs/dial9/pull/535))
+- **Breaking:** recording is now a method: `record_event(event, &handle)` becomes `handle.record_event(event)` ([#535](https://github.com/dial9-rs/dial9/pull/535))
+- **Breaking:** `guard.handle()` now returns `Dial9Handle` (record/control). To spawn instrumented tasks use `Dial9TokioHandle::current()`, `guard.tokio_handle(&runtime)`, or the handle from `trace_runtime().build()` ([#535](https://github.com/dial9-rs/dial9/pull/535))
 
 ## [0.3.13](https://github.com/dial9-rs/dial9/compare/dial9-tokio-telemetry-v0.3.12...dial9-tokio-telemetry-v0.3.13) - 2026-05-29
 
