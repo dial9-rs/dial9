@@ -1035,7 +1035,7 @@ impl WorkerLoop {
                 req = rx.rx.recv(), if rx_open => {
                     match req {
                         Some(req) => dumps.push(ActiveDump::register(req)),
-                        // All `DumpControl`s dropped; disable the branch so
+                        // All `DumpTrigger`s dropped; disable the branch so
                         // the closed channel does not spin the select.
                         None => rx_open = false,
                     }
@@ -3404,7 +3404,7 @@ mod triggered_worker_tests {
     #[tokio::test(start_paused = true)]
     async fn triggered_worker_idles_until_stop() {
         let fs = Fs::new_in_memory(64 * 1024, 1024).unwrap();
-        let (_control, rx) = dump::channel();
+        let (_trigger, rx) = dump::channel();
         seal_mem(&fs, 0, now_epoch());
         seal_mem(&fs, 1, now_epoch());
 
@@ -3427,7 +3427,7 @@ mod triggered_worker_tests {
     #[tokio::test(start_paused = true)]
     async fn dump_current_data_captures_ring_and_stamps_metadata() {
         let fs = Fs::new_in_memory(64 * 1024, 1024).unwrap();
-        let (control, rx) = dump::channel();
+        let (trigger, rx) = dump::channel();
         seal_mem(&fs, 0, now_epoch());
         seal_mem(&fs, 1, now_epoch());
 
@@ -3444,7 +3444,7 @@ mod triggered_worker_tests {
             stop.clone(),
         );
 
-        let receipt = control
+        let receipt = trigger
             .dump_current_data()
             .with_metadata("reason", "test")
             .await
@@ -3468,7 +3468,7 @@ mod triggered_worker_tests {
     #[tokio::test(start_paused = true)]
     async fn narrow_lookback_preserves_out_of_window_history() {
         let fs = Fs::new_in_memory(64 * 1024, 1024).unwrap();
-        let (control, rx) = dump::channel();
+        let (trigger, rx) = dump::channel();
         let now = now_epoch();
         seal_mem(&fs, 0, now - 3600); // outside a 60s look-back
         fs.set_seal_secs_for_test(0, now - 3600);
@@ -3478,7 +3478,7 @@ mod triggered_worker_tests {
         let (capture, captured) = CapturingProcessor::new();
         let worker = spawn_worker(Arc::clone(&fs), vec![Box::new(capture)], rx, stop.clone());
 
-        let receipt = control
+        let receipt = trigger
             .dump_time_range(Duration::from_secs(60), Duration::ZERO)
             .await
             .unwrap();
@@ -3499,7 +3499,7 @@ mod triggered_worker_tests {
     #[tokio::test(start_paused = true)]
     async fn lookback_captures_segment_spanning_window_start() {
         let fs = Fs::new_in_memory(64 * 1024, 1024).unwrap();
-        let (control, rx) = dump::channel();
+        let (trigger, rx) = dump::channel();
         let now = now_epoch();
         // Started before the 60s window, sealed inside it: the span
         // overlaps, so the segment is captured.
@@ -3510,7 +3510,7 @@ mod triggered_worker_tests {
         let (capture, captured) = CapturingProcessor::new();
         let worker = spawn_worker(Arc::clone(&fs), vec![Box::new(capture)], rx, stop.clone());
 
-        let receipt = control
+        let receipt = trigger
             .dump_time_range(Duration::from_secs(60), Duration::ZERO)
             .await
             .unwrap();
@@ -3573,7 +3573,7 @@ mod triggered_worker_tests {
         std::fs::write(dir.path().join("trace.1.bin"), segment_with_epoch(now)).unwrap();
 
         let fs = Fs::new_disk(&dir.path().join("trace.bin"));
-        let (control, rx) = dump::channel();
+        let (trigger, rx) = dump::channel();
         let stop = tokio_util::sync::CancellationToken::new();
         let worker = spawn_worker(
             Arc::clone(&fs),
@@ -3586,13 +3586,13 @@ mod triggered_worker_tests {
 
         // Wide dump matches both segments; its old one retries forever.
         let fut_wide = std::future::IntoFuture::into_future(
-            control.dump_time_range(Duration::from_secs(7200), Duration::ZERO),
+            trigger.dump_time_range(Duration::from_secs(7200), Duration::ZERO),
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         // Narrow dump's window cannot match the retrying segment: it must
         // resolve despite the wide dump's pending retry.
-        let receipt_narrow = control
+        let receipt_narrow = trigger
             .dump_time_range(Duration::from_secs(60), Duration::ZERO)
             .await
             .unwrap();
@@ -3609,14 +3609,14 @@ mod triggered_worker_tests {
     #[tokio::test(start_paused = true)]
     async fn lookforward_captures_post_trigger_seals() {
         let fs = Fs::new_in_memory(64 * 1024, 1024).unwrap();
-        let (control, rx) = dump::channel();
+        let (trigger, rx) = dump::channel();
 
         let stop = tokio_util::sync::CancellationToken::new();
         let (capture, captured) = CapturingProcessor::new();
         let worker = spawn_worker(Arc::clone(&fs), vec![Box::new(capture)], rx, stop.clone());
 
         let started = tokio::time::Instant::now();
-        let run = control.dump_time_range(Duration::ZERO, Duration::from_secs(5));
+        let run = trigger.dump_time_range(Duration::ZERO, Duration::from_secs(5));
         let fut = std::future::IntoFuture::into_future(run);
         // Let the worker register the dump, then seal inside the window.
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -3635,7 +3635,7 @@ mod triggered_worker_tests {
     #[tokio::test(start_paused = true)]
     async fn overlapping_forward_windows_share_segment() {
         let fs = Fs::new_in_memory(64 * 1024, 1024).unwrap();
-        let (control, rx) = dump::channel();
+        let (trigger, rx) = dump::channel();
 
         let stop = tokio_util::sync::CancellationToken::new();
         let metadata = Arc::new(Mutex::new(Vec::new()));
@@ -3647,10 +3647,10 @@ mod triggered_worker_tests {
         );
 
         let fut_a = std::future::IntoFuture::into_future(
-            control.dump_time_range(Duration::from_secs(60), Duration::from_secs(5)),
+            trigger.dump_time_range(Duration::from_secs(60), Duration::from_secs(5)),
         );
         let fut_b = std::future::IntoFuture::into_future(
-            control.dump_time_range(Duration::from_secs(60), Duration::from_secs(5)),
+            trigger.dump_time_range(Duration::from_secs(60), Duration::from_secs(5)),
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
         seal_mem(&fs, 0, now_epoch());
@@ -3677,13 +3677,13 @@ mod triggered_worker_tests {
     #[tokio::test(start_paused = true)]
     async fn zero_zero_dump_resolves_empty() {
         let fs = Fs::new_in_memory(64 * 1024, 1024).unwrap();
-        let (control, rx) = dump::channel();
+        let (trigger, rx) = dump::channel();
 
         let stop = tokio_util::sync::CancellationToken::new();
         let (capture, _captured) = CapturingProcessor::new();
         let worker = spawn_worker(Arc::clone(&fs), vec![Box::new(capture)], rx, stop.clone());
 
-        let receipt = control
+        let receipt = trigger
             .dump_time_range(Duration::ZERO, Duration::ZERO)
             .await
             .unwrap();
@@ -3697,7 +3697,7 @@ mod triggered_worker_tests {
     #[tokio::test(start_paused = true)]
     async fn retryable_failure_holds_dump_open_until_retry_succeeds() {
         let fs = Fs::new_in_memory(64 * 1024, 1024).unwrap();
-        let (control, rx) = dump::channel();
+        let (trigger, rx) = dump::channel();
         seal_mem(&fs, 0, now_epoch());
 
         let stop = tokio_util::sync::CancellationToken::new();
@@ -3709,7 +3709,7 @@ mod triggered_worker_tests {
             stop.clone(),
         );
 
-        let receipt = control.dump_current_data().await.unwrap();
+        let receipt = trigger.dump_current_data().await.unwrap();
         check!(receipt.segments_processed == 1);
         check!(captured.lock().unwrap().len() == 1);
 
@@ -3739,7 +3739,7 @@ mod triggered_worker_tests {
         }
 
         let fs = Fs::new_in_memory(64 * 1024, 1024).unwrap();
-        let (control, rx) = dump::channel();
+        let (trigger, rx) = dump::channel();
         seal_mem(&fs, 0, now_epoch());
 
         let stop = tokio_util::sync::CancellationToken::new();
@@ -3751,7 +3751,7 @@ mod triggered_worker_tests {
         );
 
         // Best-effort: the vanished segment is silently uncounted.
-        let receipt = control.dump_current_data().await.unwrap();
+        let receipt = trigger.dump_current_data().await.unwrap();
         check!(receipt.segments_processed == 0);
 
         stop.cancel();
@@ -3777,7 +3777,7 @@ mod triggered_worker_tests {
         }
 
         let fs = Fs::new_in_memory(64 * 1024, 1024).unwrap();
-        let (control, rx) = dump::channel();
+        let (trigger, rx) = dump::channel();
         seal_mem(&fs, 0, now_epoch());
 
         let stop = tokio_util::sync::CancellationToken::new();
@@ -3788,7 +3788,7 @@ mod triggered_worker_tests {
             stop.clone(),
         );
 
-        let err = control.dump_current_data().await.unwrap_err();
+        let err = trigger.dump_current_data().await.unwrap_err();
         check!(matches!(err, DumpError::Pipeline(_)));
 
         stop.cancel();
@@ -3798,14 +3798,14 @@ mod triggered_worker_tests {
     #[tokio::test(start_paused = true)]
     async fn shutdown_resolves_open_forward_dump_truncated() {
         let fs = Fs::new_in_memory(64 * 1024, 1024).unwrap();
-        let (control, rx) = dump::channel();
+        let (trigger, rx) = dump::channel();
 
         let stop = tokio_util::sync::CancellationToken::new();
         let (capture, _captured) = CapturingProcessor::new();
         let worker = spawn_worker(Arc::clone(&fs), vec![Box::new(capture)], rx, stop.clone());
 
         let fut = std::future::IntoFuture::into_future(
-            control.dump_time_range(Duration::ZERO, Duration::from_secs(3600)),
+            trigger.dump_time_range(Duration::ZERO, Duration::from_secs(3600)),
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
         seal_mem(&fs, 0, now_epoch());
@@ -3822,11 +3822,11 @@ mod triggered_worker_tests {
     #[tokio::test(start_paused = true)]
     async fn queued_request_at_shutdown_resolves_worker_stopped() {
         let fs = Fs::new_in_memory(64 * 1024, 1024).unwrap();
-        let (control, rx) = dump::channel();
+        let (trigger, rx) = dump::channel();
 
         let stop = tokio_util::sync::CancellationToken::new();
         // Request queued and stop cancelled before the worker ever runs.
-        let fut = std::future::IntoFuture::into_future(control.dump_current_data());
+        let fut = std::future::IntoFuture::into_future(trigger.dump_current_data());
         stop.cancel();
 
         let (capture, _captured) = CapturingProcessor::new();
@@ -3929,7 +3929,7 @@ mod finalize_dump_tests {
     #[tokio::test(start_paused = true)]
     async fn manifest_key_flows_to_receipt_last_stage_wins() {
         let fs = Fs::new_in_memory(64 * 1024, 1024).unwrap();
-        let (control, rx) = dump::channel();
+        let (trigger, rx) = dump::channel();
         seal_mem(&fs, 0, now_epoch());
 
         let completions = Arc::new(Mutex::new(Vec::new()));
@@ -3950,7 +3950,7 @@ mod finalize_dump_tests {
             stop.clone(),
         );
 
-        let receipt = control
+        let receipt = trigger
             .dump_current_data()
             .with_metadata("reason", "test")
             .await
@@ -3975,14 +3975,14 @@ mod finalize_dump_tests {
     #[tokio::test(start_paused = true)]
     async fn default_finalize_yields_no_manifest_key() {
         let fs = Fs::new_in_memory(64 * 1024, 1024).unwrap();
-        let (control, rx) = dump::channel();
+        let (trigger, rx) = dump::channel();
         seal_mem(&fs, 0, now_epoch());
 
         let stop = tokio_util::sync::CancellationToken::new();
         let (capture, _captured) = testutil::CapturingProcessor::new();
         let worker = spawn_worker(Arc::clone(&fs), vec![Box::new(capture)], rx, stop.clone());
 
-        let receipt = control.dump_current_data().await.unwrap();
+        let receipt = trigger.dump_current_data().await.unwrap();
         check!(receipt.manifest_key.is_none());
 
         stop.cancel();
@@ -4008,7 +4008,7 @@ mod finalize_dump_tests {
         }
 
         let fs = Fs::new_in_memory(64 * 1024, 1024).unwrap();
-        let (control, rx) = dump::channel();
+        let (trigger, rx) = dump::channel();
         seal_mem(&fs, 0, now_epoch());
 
         let completions = Arc::new(Mutex::new(Vec::new()));
@@ -4026,7 +4026,7 @@ mod finalize_dump_tests {
             stop.clone(),
         );
 
-        let err = control.dump_current_data().await.unwrap_err();
+        let err = trigger.dump_current_data().await.unwrap_err();
         check!(matches!(err, crate::dump::DumpError::Pipeline(_)));
         {
             let seen = completions.lock().unwrap();
@@ -4051,8 +4051,8 @@ mod finalize_dump_tests {
             .build();
         let mut uploader = S3PipelineUploader::new(config, None);
 
-        let (control, mut rx) = dump::channel();
-        control.dump_current_data();
+        let (trigger, mut rx) = dump::channel();
+        trigger.dump_current_data();
         let req = rx.rx.try_recv().unwrap();
         uploader
             .dump_keys
@@ -4077,7 +4077,7 @@ mod finalize_dump_tests {
     #[tokio::test(start_paused = true)]
     async fn finalize_runs_for_empty_dump() {
         let fs = Fs::new_in_memory(64 * 1024, 1024).unwrap();
-        let (control, rx) = dump::channel();
+        let (trigger, rx) = dump::channel();
 
         let completions = Arc::new(Mutex::new(Vec::new()));
         let stop = tokio_util::sync::CancellationToken::new();
@@ -4091,7 +4091,7 @@ mod finalize_dump_tests {
             stop.clone(),
         );
 
-        let receipt = control.dump_current_data().await.unwrap();
+        let receipt = trigger.dump_current_data().await.unwrap();
         check!(receipt.segments_processed == 0);
         check!(receipt.manifest_key.as_deref() == Some("dumps/empty.json"));
         check!(completions.lock().unwrap().len() == 1);
@@ -4103,7 +4103,7 @@ mod finalize_dump_tests {
     #[tokio::test(start_paused = true)]
     async fn panicking_finalize_is_caught_receipt_resolves() {
         let fs = Fs::new_in_memory(64 * 1024, 1024).unwrap();
-        let (control, rx) = dump::channel();
+        let (trigger, rx) = dump::channel();
         seal_mem(&fs, 0, now_epoch());
 
         let stop = tokio_util::sync::CancellationToken::new();
@@ -4114,7 +4114,7 @@ mod finalize_dump_tests {
             stop.clone(),
         );
 
-        let receipt = control.dump_current_data().await.unwrap();
+        let receipt = trigger.dump_current_data().await.unwrap();
         check!(receipt.segments_processed == 1);
         check!(receipt.manifest_key.is_none());
 
@@ -4179,7 +4179,7 @@ mod s3_dump_manifest_tests {
         std::fs::create_dir(s3_root.path().join("test-bucket")).unwrap();
 
         let fs = Fs::new_in_memory(64 * 1024, 1024).unwrap();
-        let (control, rx) = dump::channel();
+        let (trigger, rx) = dump::channel();
         seal_mem(&fs, 0, now_epoch());
         seal_mem(&fs, 1, now_epoch());
 
@@ -4194,7 +4194,7 @@ mod s3_dump_manifest_tests {
             stop.clone(),
         );
 
-        let receipt = control
+        let receipt = trigger
             .dump_current_data()
             .with_metadata("reason", "test")
             .await
@@ -4233,7 +4233,7 @@ mod s3_dump_manifest_tests {
         std::fs::create_dir(s3_root.path().join("test-bucket")).unwrap();
 
         let fs = Fs::new_in_memory(64 * 1024, 1024).unwrap();
-        let (control, rx) = dump::channel();
+        let (trigger, rx) = dump::channel();
 
         let stop = tokio_util::sync::CancellationToken::new();
         let worker = spawn_worker(
@@ -4247,10 +4247,10 @@ mod s3_dump_manifest_tests {
         );
 
         let fut_a = std::future::IntoFuture::into_future(
-            control.dump_time_range(Duration::from_secs(60), Duration::from_secs(1)),
+            trigger.dump_time_range(Duration::from_secs(60), Duration::from_secs(1)),
         );
         let fut_b = std::future::IntoFuture::into_future(
-            control.dump_time_range(Duration::from_secs(60), Duration::from_secs(1)),
+            trigger.dump_time_range(Duration::from_secs(60), Duration::from_secs(1)),
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
         seal_mem(&fs, 0, now_epoch());
@@ -4276,7 +4276,7 @@ mod s3_dump_manifest_tests {
         std::fs::create_dir(s3_root.path().join("test-bucket")).unwrap();
 
         let fs = Fs::new_in_memory(64 * 1024, 1024).unwrap();
-        let (control, rx) = dump::channel();
+        let (trigger, rx) = dump::channel();
 
         let stop = tokio_util::sync::CancellationToken::new();
         let worker = spawn_worker(
@@ -4289,7 +4289,7 @@ mod s3_dump_manifest_tests {
             stop.clone(),
         );
 
-        let receipt = control.dump_current_data().await.unwrap();
+        let receipt = trigger.dump_current_data().await.unwrap();
         check!(receipt.segments_processed == 0);
         let manifest = read_manifest(s3_root.path(), receipt.manifest_key.as_ref().unwrap());
         check!(manifest["segments"] == serde_json::json!([]));

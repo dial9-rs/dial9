@@ -876,12 +876,12 @@ fn dump_trigger_uploads_segments_and_writes_manifest() {
         .with_trace_path(&trace_path)
         .with_s3_uploader(s3_config.clone())
         .with_s3_client(client.clone())
-        .with_trigger(|_| {})
+        .with_dump_trigger(|_| {})
         .with_worker_poll_interval(Duration::from_millis(50))
         .build_and_start(builder, writer)
         .unwrap();
 
-    let control = guard.handle().dump_control().expect("trigger wired");
+    let trigger = guard.handle().dump_trigger().expect("trigger wired");
 
     let count_sealed = || {
         std::fs::read_dir(trace_dir.path())
@@ -934,7 +934,7 @@ fn dump_trigger_uploads_segments_and_writes_manifest() {
             }
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
-        control
+        trigger
             .dump_current_data()
             .with_metadata("reason", "test")
             .await

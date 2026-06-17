@@ -17,21 +17,21 @@
 //! let (runtime, _guard) = TracedRuntime::builder()
 //!     .with_trace_path(path)
 //!     .with_custom_pipeline(|p| p.gzip().write_back())
-//!     .with_trigger(|_| {})
+//!     .with_dump_trigger(|_| {})
 //!     .build_and_start(builder, writer)?;
 //!
-//! // From any thread owned by this runtime, reach the control through the
+//! // From any thread owned by this runtime, reach the trigger through the
 //! // ambient handle - no need to thread it through your own state.
-//! let control = Dial9Handle::current()
-//!     .dump_control()
+//! let trigger = Dial9Handle::current()
+//!     .dump_trigger()
 //!     .expect("on-demand mode enabled");
-//! control.dump_current_data();
+//! trigger.dump_current_data();
 //! # Ok(())
 //! # }
 //! ```
 //!
-//! Both [`DumpControl::dump_current_data`](crate::dump::DumpControl::dump_current_data) and
-//! [`DumpControl::dump_time_range`](crate::dump::DumpControl::dump_time_range) dispatch
+//! Both [`DumpTrigger::dump_current_data`](crate::dump::DumpTrigger::dump_current_data) and
+//! [`DumpTrigger::dump_time_range`](crate::dump::DumpTrigger::dump_time_range) dispatch
 //! immediately; awaiting the returned [`DumpRun`](crate::dump::DumpRun) is optional and
 //! only retrieves the [`DumpReceipt`](crate::dump::DumpReceipt).
 //! Dumps are strictly best-effort: a window wider than what the ring
@@ -48,11 +48,11 @@
 //!
 //! When a single source fires repeatedly (a watcher that re-trips every
 //! poll, a hot path that dumps on every slow request), configure
-//! [`DumpTrigger::debounce`] to coalesce a burst into one dump: triggers
+//! [`DumpTriggerConfig::debounce`] to coalesce a burst into one dump: triggers
 //! within the debounce window after a dump dispatched resolve
 //! [`DumpError::Coalesced`], naming the dump they folded into instead of
-//! starting a new one. The gate lives on the control stored in the session,
-//! so every [`dump_control`](crate::telemetry::TelemetryHandle::dump_control)
+//! starting a new one. The gate lives on the trigger stored in the session,
+//! so every [`dump_trigger`](crate::telemetry::Dial9Handle::dump_trigger)
 //! clone shares it. (A *cooldown* that rejects extra triggers outright,
 //! rather than folding them, is a possible future addition.)
 
@@ -66,28 +66,29 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::background_task::ProcessErrorKind;
 
-/// Mint a dump control + receiver pair. The builder wires the receiver into
-/// the worker and stashes the control in the session so it can be reached via
-/// [`TelemetryHandle::dump_control`](crate::telemetry::TelemetryHandle::dump_control).
-pub(crate) fn channel() -> (DumpControl, DumpRx) {
+/// Mint a dump trigger + receiver pair. The builder wires the receiver into
+/// the worker and stashes the trigger in the session so it can be reached via
+/// [`Dial9Handle::dump_trigger`](crate::telemetry::Dial9Handle::dump_trigger).
+pub(crate) fn channel() -> (DumpTrigger, DumpRx) {
     let (tx, rx) = mpsc::unbounded_channel();
-    (DumpControl { tx, debounce: None }, DumpRx { rx })
+    (DumpTrigger { tx, debounce: None }, DumpRx { rx })
 }
 
 /// On-demand dump configuration, passed to
-/// [`with_trigger`](crate::telemetry::TracedRuntimeBuilder::with_trigger).
+/// [`with_dump_trigger`](crate::telemetry::TracedRuntimeBuilder::with_dump_trigger).
 ///
 /// Flips the worker from continuous processing into on-demand operation:
 /// segments keep accumulating in the ring and the pipeline only runs when the
-/// application requests a dump. Retrieve the control through any
-/// [`TelemetryHandle`](crate::telemetry::TelemetryHandle) for the runtime via
-/// [`dump_control`](crate::telemetry::TelemetryHandle::dump_control).
+/// application requests a dump. Configure coalescing with
+/// [`debounce`](Self::debounce); the resulting [`DumpTrigger`] is then reached
+/// through any [`Dial9Handle`](crate::telemetry::Dial9Handle) for the runtime
+/// via [`dump_trigger`](crate::telemetry::Dial9Handle::dump_trigger).
 #[derive(Debug, Default, Clone)]
-pub struct DumpTrigger {
+pub struct DumpTriggerConfig {
     debounce: Option<Duration>,
 }
 
-impl DumpTrigger {
+impl DumpTriggerConfig {
     /// Default trigger: on-demand dumps with no debounce.
     pub fn new() -> Self {
         Self::default()
@@ -99,7 +100,7 @@ impl DumpTrigger {
     /// arriving within `window` of that dispatch resolves
     /// [`DumpError::Coalesced`] (naming the dump it folded into) without
     /// starting a new dump. The gate is shared by every
-    /// [`dump_control`](crate::telemetry::TelemetryHandle::dump_control) clone,
+    /// [`dump_trigger`](crate::telemetry::Dial9Handle::dump_trigger) clone,
     /// so the effective rate is at most one dump per `window` across all
     /// callers.
     pub fn debounce(&mut self, window: Duration) {
@@ -164,7 +165,7 @@ pub(crate) struct DumpRequest {
     pub(crate) receipt_tx: oneshot::Sender<Result<DumpReceipt, DumpError>>,
 }
 
-/// Leading-edge debounce gate shared across [`DumpControl`] clones.
+/// Leading-edge debounce gate shared across [`DumpTrigger`] clones.
 ///
 /// Records when the last dump *dispatched* and the [`DumpId`] it was given.
 /// A request arriving within `window` of that dispatch coalesces into that
@@ -181,24 +182,24 @@ struct Debounce {
 /// Sending half of the trigger channel.
 ///
 /// Cloneable; reach it from any thread owned by the runtime via
-/// [`TelemetryHandle::dump_control`](crate::telemetry::TelemetryHandle::dump_control)
+/// [`Dial9Handle::dump_trigger`](crate::telemetry::Dial9Handle::dump_trigger)
 /// and hand it to whatever subsystem decides when to dump (an idle-ratio
 /// watcher, a panic hook, a `/dump` HTTP handler, ...). Every clone shares the
-/// debounce gate configured by [`DumpTrigger::debounce`].
+/// debounce gate configured by [`DumpTriggerConfig::debounce`].
 #[derive(Debug, Clone)]
-pub struct DumpControl {
+pub struct DumpTrigger {
     tx: mpsc::UnboundedSender<DumpRequest>,
     /// `Some` once a debounce window is configured via
-    /// [`DumpTrigger::debounce`]; shared by reference so every clone honors one
+    /// [`DumpTriggerConfig::debounce`]; shared by reference so every clone honors one
     /// gate.
     debounce: Option<Arc<Debounce>>,
 }
 
-impl DumpControl {
+impl DumpTrigger {
     /// Coalesce duplicate triggers within `window` into a single dump.
     ///
-    /// Applied once at build time from [`DumpTrigger::debounce`]; every
-    /// [`dump_control`](crate::telemetry::TelemetryHandle::dump_control) clone
+    /// Applied once at build time from [`DumpTriggerConfig::debounce`]; every
+    /// [`dump_trigger`](crate::telemetry::Dial9Handle::dump_trigger) clone
     /// then shares one gate. The first trigger in a quiet period dispatches
     /// normally; any trigger arriving within `window` of that dispatch resolves
     /// [`DumpError::Coalesced`] (naming the dump it folded into) without
@@ -448,7 +449,7 @@ pub enum DumpError {
     /// Every captured segment failed in a pipeline stage.
     Pipeline(ProcessErrorKind),
     /// The trigger was coalesced into an in-flight dump by the debounce gate
-    /// (see [`DumpControl::with_debounce`]). No new dump ran; `into` names the
+    /// (see [`DumpTrigger::with_debounce`]). No new dump ran; `into` names the
     /// dump that covers this trigger.
     Coalesced {
         /// Id of the dump this trigger folded into.
@@ -483,9 +484,9 @@ mod tests {
 
     #[tokio::test]
     async fn dispatches_on_drop_without_await() {
-        let (control, mut rx) = channel();
+        let (trigger, mut rx) = channel();
         {
-            let _run = control
+            let _run = trigger
                 .dump_time_range(Duration::from_secs(300), Duration::from_secs(60))
                 .with_metadata("reason", "test")
                 .with_metadata("incident", "i-123");
@@ -505,8 +506,8 @@ mod tests {
 
     #[tokio::test]
     async fn dump_current_data_is_unbounded_lookback() {
-        let (control, mut rx) = channel();
-        control.dump_current_data();
+        let (trigger, mut rx) = channel();
+        trigger.dump_current_data();
         let req = rx.rx.try_recv().expect("dispatched");
         assert!(matches!(req.lookback, Lookback::Unbounded));
         assert_eq!(req.lookforward, Duration::ZERO);
@@ -514,8 +515,8 @@ mod tests {
 
     #[tokio::test]
     async fn awaiting_dispatches_exactly_once_and_resolves_receipt() {
-        let (control, mut rx) = channel();
-        let run = control.dump_current_data();
+        let (trigger, mut rx) = channel();
+        let run = trigger.dump_current_data();
 
         let worker = tokio::spawn(async move {
             let req = rx.rx.recv().await.expect("one request");
@@ -537,9 +538,9 @@ mod tests {
 
     #[tokio::test]
     async fn closed_channel_resolves_worker_stopped() {
-        let (control, rx) = channel();
+        let (trigger, rx) = channel();
         drop(rx);
-        let err = control.dump_current_data().await.unwrap_err();
+        let err = trigger.dump_current_data().await.unwrap_err();
         assert!(matches!(err, DumpError::WorkerStopped));
     }
 
@@ -547,8 +548,8 @@ mod tests {
     async fn dropped_receipt_sender_resolves_worker_stopped() {
         use std::future::IntoFuture;
 
-        let (control, mut rx) = channel();
-        let fut = control.dump_current_data().into_future();
+        let (trigger, mut rx) = channel();
+        let fut = trigger.dump_current_data().into_future();
         let req = rx.rx.try_recv().expect("dispatched at into_future");
         // Worker exiting without resolving the receipt drops `receipt_tx`.
         drop(req);
@@ -558,15 +559,15 @@ mod tests {
 
     #[tokio::test]
     async fn debounce_coalesces_into_the_first_dump() {
-        let (control, mut rx) = channel();
-        let control = control.with_debounce(Duration::from_secs(60));
+        let (trigger, mut rx) = channel();
+        let trigger = trigger.with_debounce(Duration::from_secs(60));
 
         // First trigger dispatches (drop dispatches the un-awaited run).
-        let _ = control.dump_current_data();
+        let _ = trigger.dump_current_data();
         let first = rx.rx.try_recv().expect("first trigger dispatched");
 
         // Second trigger within the window folds into the first.
-        let err = control.dump_current_data().await.unwrap_err();
+        let err = trigger.dump_current_data().await.unwrap_err();
         assert!(matches!(err, DumpError::Coalesced { into } if into == first.id));
         assert!(
             rx.rx.try_recv().is_err(),
@@ -576,26 +577,26 @@ mod tests {
 
     #[tokio::test]
     async fn debounce_dispatches_again_after_window() {
-        let (control, mut rx) = channel();
-        let control = control.with_debounce(Duration::from_millis(30));
+        let (trigger, mut rx) = channel();
+        let trigger = trigger.with_debounce(Duration::from_millis(30));
 
-        let _ = control.dump_current_data();
+        let _ = trigger.dump_current_data();
         let first = rx.rx.try_recv().expect("first dispatched");
 
         tokio::time::sleep(Duration::from_millis(80)).await;
 
-        let _ = control.dump_current_data();
+        let _ = trigger.dump_current_data();
         let second = rx.rx.try_recv().expect("dispatched again after window");
         assert_ne!(first.id, second.id, "post-window dump gets a fresh id");
     }
 
     #[tokio::test]
     async fn debounce_gate_is_shared_across_clones() {
-        let (control, mut rx) = channel();
-        let control = control.with_debounce(Duration::from_secs(60));
-        let clone = control.clone();
+        let (trigger, mut rx) = channel();
+        let trigger = trigger.with_debounce(Duration::from_secs(60));
+        let clone = trigger.clone();
 
-        let _ = control.dump_current_data();
+        let _ = trigger.dump_current_data();
         let first = rx.rx.try_recv().expect("first dispatched");
 
         // A clone honors the same gate, so its trigger coalesces too.
@@ -605,9 +606,9 @@ mod tests {
 
     #[tokio::test]
     async fn without_debounce_duplicate_triggers_both_dispatch() {
-        let (control, mut rx) = channel();
-        let _ = control.dump_current_data();
-        let _ = control.dump_current_data();
+        let (trigger, mut rx) = channel();
+        let _ = trigger.dump_current_data();
+        let _ = trigger.dump_current_data();
         assert!(rx.rx.try_recv().is_ok(), "first dispatched");
         assert!(
             rx.rx.try_recv().is_ok(),

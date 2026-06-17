@@ -2,9 +2,9 @@
 //! the application asks for a dump.
 //!
 //! By default the dial9 worker processes every sealed segment continuously.
-//! Wiring a trigger (`with_trigger(|_| {})`) flips that same
+//! Wiring a trigger (`with_dump_trigger(|_| {})`) flips that same
 //! pipeline into on-demand operation: segments keep accumulating in the ring,
-//! and the pipeline only runs when a `DumpControl` requests a dump - from a
+//! and the pipeline only runs when a `DumpTrigger` requests a dump - from a
 //! panic hook, an idle-ratio watcher, a `/dump` handler, whatever decides
 //! something is worth keeping. Most trace data is uninteresting; this mode
 //! pays processing cost only when it matters.
@@ -18,7 +18,7 @@
 //! `DumpError::Coalesced`) instead of producing a pile of near-identical dumps.
 //!
 //! The runtime mints the trigger channel internally; the application reaches
-//! the `DumpControl` through the ambient `Dial9Handle::current()` from any
+//! the `DumpTrigger` through the ambient `Dial9Handle::current()` from any
 //! thread the runtime owns (the monitor task, a panic hook, ...). No global
 //! plumbing.
 //!
@@ -63,20 +63,20 @@ fn sealed_segments() -> usize {
         .rotation_period(Duration::from_millis(500))
         .with_tokio(|t| { t.worker_threads(2); })
         // The pipeline is whatever you would run continuously (here: gzip +
-        // write_back); `with_trigger(...)` only changes *when* it runs. The
+        // write_back); `with_dump_trigger(...)` only changes *when* it runs. The
         // debounce gate folds a burst of re-trips into a single dump.
         .with_runtime(|r| r
             .with_task_tracking(true)
             .with_custom_pipeline(|p| p.gzip().write_back())
-            .with_trigger(|t| t.debounce(Duration::from_secs(30))))
+            .with_dump_trigger(|t| t.debounce(Duration::from_secs(30))))
         .build_or_disabled()
 })]
 async fn main() {
     let handle = Dial9TokioHandle::current();
-    // Reach the dump control through the ambient handle, the runtime stashed
-    // it when `with_trigger` was configured.
-    let control = Dial9Handle::current()
-        .dump_control()
+    // Reach the dump trigger through the ambient handle, the runtime stashed
+    // it when `with_dump_trigger` was configured.
+    let trigger = Dial9Handle::current()
+        .dump_trigger()
         .expect("on-demand mode enabled");
 
     // Steady workload so the ring keeps sealing segments. The pipeline stays
@@ -105,7 +105,7 @@ async fn main() {
     // the rest fold into it via the debounce gate.
     let mut receipt = None;
     for tick in 0..3 {
-        match control
+        match trigger
             .dump_current_data()
             .with_metadata("reason", "idle-ratio-drop")
             .await

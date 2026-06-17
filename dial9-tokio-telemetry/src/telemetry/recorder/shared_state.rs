@@ -50,10 +50,10 @@ pub(crate) struct SharedState {
     pub(crate) thread_roles: Mutex<HashMap<u32, ThreadRole>>,
     /// Data sources (CPU profiler, sched profiler, etc.) that the flush thread drains.
     pub(crate) sources: Mutex<Vec<Box<dyn super::source::Source>>>,
-    /// On-demand dump control, set once at build time when the runtime is
-    /// built with `with_trigger`. Reached by application code through
-    /// [`Dial9Handle::dump_control`](super::handle::Dial9Handle::dump_control).
-    dump_control: std::sync::OnceLock<crate::dump::DumpControl>,
+    /// On-demand dump trigger, set once at build time when the runtime is
+    /// built with `with_dump_trigger`. Reached by application code through
+    /// [`Dial9Handle::dump_trigger`](super::handle::Dial9Handle::dump_trigger).
+    dump_trigger: std::sync::OnceLock<crate::dump::DumpTrigger>,
 }
 
 impl SharedState {
@@ -70,7 +70,7 @@ impl SharedState {
             tl_buffers: Mutex::new(Vec::new()),
             thread_roles: Mutex::new(HashMap::new()),
             sources: Mutex::new(Vec::new()),
-            dump_control: std::sync::OnceLock::new(),
+            dump_trigger: std::sync::OnceLock::new(),
         }
     }
 
@@ -79,16 +79,16 @@ impl SharedState {
         self.sources.lock().unwrap().push(source);
     }
 
-    /// Install the on-demand dump control. Set once at build time; later
+    /// Install the on-demand dump trigger. Set once at build time; later
     /// calls are ignored.
-    pub(crate) fn set_dump_control(&self, control: crate::dump::DumpControl) {
-        let _ = self.dump_control.set(control);
+    pub(crate) fn set_dump_trigger(&self, trigger: crate::dump::DumpTrigger) {
+        let _ = self.dump_trigger.set(trigger);
     }
 
-    /// The on-demand dump control, or `None` when the runtime was built
-    /// without `with_trigger`.
-    pub(crate) fn dump_control(&self) -> Option<&crate::dump::DumpControl> {
-        self.dump_control.get()
+    /// The on-demand dump trigger, or `None` when the runtime was built
+    /// without `with_dump_trigger`.
+    pub(crate) fn dump_trigger(&self) -> Option<&crate::dump::DumpTrigger> {
+        self.dump_trigger.get()
     }
 
     fn timestamp_nanos(&self) -> u64 {

@@ -71,10 +71,10 @@ pub struct TracedRuntimeBuilder<P = NoTracePath, M = PipelineUnset, Mode: Writer
     pub(super) worker_poll_interval: Option<Duration>,
     pub(super) worker_metrics_sink: Option<metrique_writer::BoxEntrySink>,
     pub(super) trigger_rx: Option<crate::dump::DumpRx>,
-    /// Control half of the trigger channel minted by [`with_trigger`]. Stashed
+    /// Sending half of the trigger channel minted by [`with_dump_trigger`]. Stashed
     /// into [`SharedState`] at build time so it is reachable via
-    /// [`TelemetryHandle::dump_control`](crate::telemetry::TelemetryHandle::dump_control).
-    pub(super) dump_control: Option<crate::dump::DumpControl>,
+    /// [`Dial9Handle::dump_trigger`](crate::telemetry::Dial9Handle::dump_trigger).
+    pub(super) dump_trigger: Option<crate::dump::DumpTrigger>,
 
     pub(super) tokio_hooks: super::TokioHooks,
     pub(super) _marker: std::marker::PhantomData<(P, M, Mode)>,
@@ -255,33 +255,33 @@ impl<P, M, Mode: WriterMode> TracedRuntimeBuilder<P, M, Mode> {
     ///
     /// Sealed segments keep accumulating in the ring (memory or disk), but
     /// the configured pipeline only runs when a dump is requested. Retrieve
-    /// the [`DumpControl`](crate::dump::DumpControl) from any thread owned by
+    /// the [`DumpTrigger`](crate::dump::DumpTrigger) from any thread owned by
     /// this runtime via
-    /// [`TelemetryHandle::dump_control`](crate::telemetry::TelemetryHandle::dump_control);
+    /// [`Dial9Handle::dump_trigger`](crate::telemetry::Dial9Handle::dump_trigger);
     /// no need to thread it through your own state. Orthogonal to pipeline
     /// selection: whichever pipeline you would have wired for continuous mode,
     /// you keep. Without this call the worker processes segments continuously,
     /// as today.
     ///
     /// Pass `|_| {}` for the default, or configure coalescing with
-    /// [`DumpTrigger::debounce`](crate::dump::DumpTrigger::debounce), e.g.
-    /// `with_trigger(|t| t.debounce(window))`.
+    /// [`DumpTriggerConfig::debounce`](crate::dump::DumpTriggerConfig::debounce), e.g.
+    /// `with_dump_trigger(|t| t.debounce(window))`.
     ///
     /// If no pipeline is configured the worker never spawns and every dump
     /// request resolves with
     /// [`DumpError::WorkerStopped`](crate::dump::DumpError::WorkerStopped).
-    pub fn with_trigger<F>(mut self, configure: F) -> Self
+    pub fn with_dump_trigger<F>(mut self, configure: F) -> Self
     where
-        F: FnOnce(&mut crate::dump::DumpTrigger),
+        F: FnOnce(&mut crate::dump::DumpTriggerConfig),
     {
-        let mut trigger = crate::dump::DumpTrigger::new();
-        configure(&mut trigger);
-        let (mut control, rx) = crate::dump::channel();
-        if let Some(window) = trigger.debounce_window() {
-            control = control.with_debounce(window);
+        let mut config = crate::dump::DumpTriggerConfig::new();
+        configure(&mut config);
+        let (mut trigger, rx) = crate::dump::channel();
+        if let Some(window) = config.debounce_window() {
+            trigger = trigger.with_debounce(window);
         }
         self.trigger_rx = Some(rx);
-        self.dump_control = Some(control);
+        self.dump_trigger = Some(trigger);
         self
     }
 
@@ -380,7 +380,7 @@ impl<P, M, Mode: WriterMode> TracedRuntimeBuilder<P, M, Mode> {
             worker_poll_interval: self.worker_poll_interval,
             worker_metrics_sink: self.worker_metrics_sink,
             trigger_rx: self.trigger_rx,
-            dump_control: self.dump_control,
+            dump_trigger: self.dump_trigger,
             tokio_hooks: self.tokio_hooks,
             _marker: std::marker::PhantomData,
         }
@@ -556,7 +556,7 @@ impl<M, Mode: WriterMode> TracedRuntimeBuilder<HasTracePath, M, Mode> {
         }
 
         let custom_event_sources = self.custom_event_sources;
-        let dump_control = self.dump_control;
+        let dump_trigger = self.dump_trigger;
 
         let processors = assemble_processors(
             #[cfg(feature = "cpu-profiling")]
@@ -593,8 +593,8 @@ impl<M, Mode: WriterMode> TracedRuntimeBuilder<HasTracePath, M, Mode> {
             for source in custom_event_sources {
                 shared.push_source(Box::new(source));
             }
-            if let Some(control) = dump_control {
-                shared.set_dump_control(control);
+            if let Some(trigger) = dump_trigger {
+                shared.set_dump_trigger(trigger);
             }
         }
 
@@ -1149,7 +1149,7 @@ impl TracedRuntime {
             worker_poll_interval: None,
             worker_metrics_sink: None,
             trigger_rx: None,
-            dump_control: None,
+            dump_trigger: None,
             tokio_hooks: super::TokioHooks::default(),
             _marker: std::marker::PhantomData,
         }

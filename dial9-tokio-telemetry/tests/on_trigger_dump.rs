@@ -89,11 +89,11 @@ fn nothing_uploads_until_dump_then_manifest_indexes_it() {
         .with_s3_uploader(test_s3_config())
         .with_s3_client(client.clone())
         .with_worker_poll_interval(Duration::from_millis(50))
-        .with_trigger(|_| {})
+        .with_dump_trigger(|_| {})
         .build_and_start(builder, writer)
         .unwrap();
 
-    let control = guard.handle().dump_control().expect("trigger wired");
+    let trigger = guard.handle().dump_trigger().expect("trigger wired");
 
     run_workload(&runtime);
     wait_for_sealed_segment(trace_dir.path());
@@ -120,7 +120,7 @@ fn nothing_uploads_until_dump_then_manifest_indexes_it() {
 
     let receipt = check_rt
         .block_on(async {
-            control
+            trigger
                 .dump_current_data()
                 .with_metadata("reason", "e2e-test")
                 .await
@@ -210,16 +210,16 @@ fn lookforward_dump_captures_post_trigger_segments() {
         .with_s3_uploader(test_s3_config())
         .with_s3_client(client.clone())
         .with_worker_poll_interval(Duration::from_millis(50))
-        .with_trigger(|_| {})
+        .with_dump_trigger(|_| {})
         .build_and_start(builder, writer)
         .unwrap();
 
-    let control = guard.handle().dump_control().expect("trigger wired");
+    let trigger = guard.handle().dump_trigger().expect("trigger wired");
 
     // Trigger before producing anything; the forward window collects the
     // segments the workload seals.
     let lookforward = Duration::from_secs(5);
-    let fut = control
+    let fut = trigger
         .dump_time_range(Duration::from_secs(1), lookforward)
         .into_future();
     let triggered = Instant::now();
@@ -274,18 +274,18 @@ fn off_s3_pipeline_dumps_without_manifest() {
         .with_trace_path(&trace_path)
         .with_custom_pipeline(|p| p.gzip().write_back())
         .with_worker_poll_interval(Duration::from_millis(50))
-        .with_trigger(|_| {})
+        .with_dump_trigger(|_| {})
         .build_and_start(builder, writer)
         .unwrap();
 
-    let control = guard.handle().dump_control().expect("trigger wired");
+    let trigger = guard.handle().dump_trigger().expect("trigger wired");
 
     run_workload(&runtime);
     wait_for_sealed_segment(trace_dir.path());
 
     let check_rt = assertion_runtime();
     let receipt = check_rt
-        .block_on(async { control.dump_current_data().await })
+        .block_on(async { trigger.dump_current_data().await })
         .unwrap();
     assert!(receipt.segments_processed >= 1);
     assert!(receipt.manifest_key.is_none(), "no manifest off S3");
@@ -322,14 +322,14 @@ fn shutdown_truncates_open_lookforward_dump() {
         .with_s3_uploader(test_s3_config())
         .with_s3_client(client)
         .with_worker_poll_interval(Duration::from_millis(50))
-        .with_trigger(|_| {})
+        .with_dump_trigger(|_| {})
         .build_and_start(builder, writer)
         .unwrap();
 
-    let control = guard.handle().dump_control().expect("trigger wired");
+    let trigger = guard.handle().dump_trigger().expect("trigger wired");
 
     // Hour-long forward window, then shut down long before the deadline.
-    let fut = control
+    let fut = trigger
         .dump_time_range(Duration::from_secs(1), Duration::from_secs(3600))
         .into_future();
     run_workload(&runtime);
