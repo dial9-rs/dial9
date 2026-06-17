@@ -178,6 +178,8 @@ pub struct SegmentWriter<Mode: WriterMode = Disk> {
     next_drain_time: Instant,
     /// Unified filesystem/channel abstraction.
     fs: Arc<Fs>,
+    boot_id: Option<String>,
+    _namespace_lock: Option<std::fs::File>,
     _mode: PhantomData<Mode>,
 }
 
@@ -295,12 +297,19 @@ impl SegmentWriter<Disk> {
             drain_interval,
             next_drain_time: now + drain_interval,
             fs,
+            boot_id: None,
+            _namespace_lock: None,
             _mode: PhantomData,
         };
         // Enforce the budget immediately so artifacts from prior writer
         // lifetimes don't push us over the cap before we even rotate once.
         writer.evict_oldest()?;
         Ok(writer)
+    }
+
+    pub(crate) fn set_namespace(&mut self, boot_id: String, lock: std::fs::File) {
+        self.boot_id = Some(boot_id);
+        self._namespace_lock = Some(lock);
     }
 
     /// Create a writer that writes to a single file with no rotation or eviction.
@@ -334,6 +343,8 @@ impl SegmentWriter<Disk> {
             drain_interval: DEFAULT_DRAIN_INTERVAL,
             next_drain_time: now + DEFAULT_DRAIN_INTERVAL,
             fs,
+            boot_id: None,
+            _namespace_lock: None,
             _mode: PhantomData,
         })
     }
@@ -446,6 +457,8 @@ impl SegmentWriter<Memory> {
             drain_interval,
             next_drain_time: now + drain_interval,
             fs,
+            boot_id: None,
+            _namespace_lock: None,
             _mode: PhantomData,
         })
     }
@@ -455,6 +468,23 @@ impl<M: WriterMode> SegmentWriter<M> {
     /// The base path used for trace segment files.
     pub fn base_path(&self) -> &Path {
         &self.base_path
+    }
+
+    /// Per-process boot identifier, if namespace isolation is active. This is
+    /// the name of the [`trace_dir`](Self::trace_dir) subdirectory.
+    pub fn boot_id(&self) -> Option<&str> {
+        self.boot_id.as_deref()
+    }
+
+    /// Directory this writer's trace segments live in. When namespace
+    /// isolation is active this is the per-process `{configured_dir}/{boot_id}/`
+    /// subdirectory; otherwise it is the configured directory directly. Use
+    /// this to locate the segment files on disk.
+    pub fn trace_dir(&self) -> &Path {
+        self.base_path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."))
     }
 
     /// The path of the currently active (being-written) segment file.

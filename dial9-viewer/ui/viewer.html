@@ -109,7 +109,7 @@
             #stack-sidebar {
                 width: min(640px, 50vw);
                 min-width: 200px;
-                max-width: 70vw;
+                max-width: 92vw;
                 background: #1a1a2e;
                 display: none;
                 flex-direction: column;
@@ -658,6 +658,7 @@
                     <span id="poi-counter" style="font-size:0.85em;color:#888"></span>
                     <span style="width:1px;height:20px;background:#444;margin:0 8px"></span>
                     <button id="btn-sched-panel" style="background:#3a1a1a;border-color:#ff4444;color:#ff8a65">⚠ Blocking Calls</button>
+                    <button id="btn-cpu-flamegraph" style="display:none;background:#2a1a2a;border-color:#b388ff;color:#d0bcff;white-space:nowrap" title="Show a CPU flamegraph for the whole trace">🔥 Flamegraph</button>
                     <button id="btn-heap-flamegraph" style="display:none;background:#1a2a1a;border-color:#4caf50;color:#81c784;white-space:nowrap" title="Show heap allocation flamegraph">🔥 Heap</button>
                     <button id="btn-uninstrumented-info" style="display:none;background:#1e2050;border-color:#6c63ff;color:#d0ccff;white-space:nowrap" title="Some tasks lack wake tracking — click for details">ⓘ Blind spawns</button>
                     <button id="btn-set-range" title="Set time range filter (reloads with only events in range)">Set Range</button>
@@ -1282,14 +1283,18 @@
                 document.getElementById("load-demo")?.addEventListener("click", onLoadDemo);
             }
 
-            async function loadTraceFromUrl(url) {
+            // `urls` may be a single URL or a list (one per repeated `trace=`).
+            // Each component is fetched and gunzipped independently, then the raw
+            // buffers are concatenated into one trace (see fetchTraces).
+            async function loadTraceFromUrl(urls) {
+                const list = Array.isArray(urls) ? urls : [urls];
                 try {
-                    updateLoadProgress("Fetching…");
-                    const response = await fetch(url, { signal: loadAbortController?.signal });
-                    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-                    const arrayBuffer = await response.arrayBuffer();
+                    updateLoadProgress(list.length > 1 ? `Fetching ${list.length} traces…` : "Fetching…");
+                    const arrayBuffer = await TraceParser.fetchTraces(list, { signal: loadAbortController?.signal });
                     loadAbortController = null;
-                    const name = urlParams.get('svc') || url.split('/').pop()?.split('?')[0] || 'trace.bin';
+                    const name = urlParams.get('svc')
+                        || list[0].split('/').pop()?.split('?')[0]
+                        || 'trace.bin';
                     await parseAndShowTrace(arrayBuffer, name, getParseOptions());
                 } catch (err) {
                     if (err.name === 'AbortError') return;
@@ -1313,9 +1318,10 @@
                 clearRangeBtn.style.display = (startNs != null || endNs != null) ? "" : "none";
             }
 
-            // Check for URL parameter on load
+            // Check for URL parameter on load. `trace` is repeatable — each
+            // value is a separate (possibly gzipped) component to concatenate.
             const urlParams = new URLSearchParams(window.location.search);
-            const traceUrl = urlParams.get('trace');
+            const traceUrls = urlParams.getAll('trace');
 
             /** Build parseTrace options from current URL time range params. */
             function getParseOptions() {
@@ -1339,9 +1345,9 @@
                 window.history.replaceState(null, '', newUrl);
             }
 
-            if (traceUrl) {
-                showLoadingState('Loading trace…');
-                loadTraceFromUrl(traceUrl);
+            if (traceUrls.length) {
+                showLoadingState(traceUrls.length > 1 ? `Loading ${traceUrls.length} traces…` : 'Loading trace…');
+                loadTraceFromUrl(traceUrls);
             }
 
             function onLoadDemo(e) {
@@ -1693,6 +1699,14 @@
                 btnHeap.style.display = hasAllocEvents ? "" : "none";
                 if (hasAllocEvents) {
                     btnHeap.textContent = `🔥 Heap (${trace.allocEvents.length})`;
+                }
+
+                // Show CPU flamegraph button (whole-trace) if CPU samples exist.
+                const hasCpu = hasCpuProfileSamples(trace.cpuSamples);
+                const btnCpu = document.getElementById("btn-cpu-flamegraph");
+                btnCpu.style.display = hasCpu ? "" : "none";
+                if (hasCpu) {
+                    btnCpu.textContent = `🔥 Flamegraph (${trace.cpuSamples.length})`;
                 }
 
                 showToast("shift-drag-hint", "⇧ Shift+drag to select a region", "info", 0, true);
@@ -3468,6 +3482,10 @@
             document.getElementById("sort-by-worst").addEventListener("change", () => updatePointsOfInterest({ autoJump: true }));
             document.getElementById("btn-sched-panel").addEventListener("click", showSchedPanel);
             document.getElementById("btn-heap-flamegraph").addEventListener("click", () => showHeapFlamegraph());
+            document.getElementById("btn-cpu-flamegraph").addEventListener("click", () => {
+                // Whole-trace CPU flamegraph: select the full time range.
+                showFlamegraph(minTs, maxTs);
+            });
             document.getElementById("btn-uninstrumented-info").addEventListener("click", (e) => {
                 showUninstrumentedPopup(e.target);
             });
@@ -4150,7 +4168,7 @@
                     const dx = startX - e.clientX; // dragging left = wider
                     const newW = Math.min(
                         Math.max(200, startW + dx),
-                        window.innerWidth * 0.7
+                        window.innerWidth * 0.92
                     );
                     sidebar.style.width = newW + "px";
                     if (trace && !resizeRafId) {
@@ -4871,7 +4889,15 @@
             const fgContainer = document.getElementById("fg-container");
             const fgInstance = FlamegraphRenderer.createFlamegraph(fgContainer);
 
-            // Open the stack sidebar showing a flamegraph built from `samples`.
+            // When a flamegraph is first opened, default the stack sidebar to a
+            // large fraction of the viewport (it otherwise opens at a narrow
+            // ~50vw). The user can still drag it back via the resize handle.
+            const FLAMEGRAPH_DEFAULT_VW = 0.78;
+            function widenSidebarForFlamegraph() {
+                const sidebar = document.getElementById("stack-sidebar");
+                sidebar.style.width = Math.round(window.innerWidth * FLAMEGRAPH_DEFAULT_VW) + "px";
+            }
+
             // Used by `showTaskDumpStack`, `showIdleTimeFlamegraph`, and any
             // other caller that just wants "here's a pile of callchains, render
             // them as a flamegraph in the sidebar".
@@ -4895,6 +4921,7 @@
                 body.appendChild(fgContainer);
                 const wasHidden = sidebar.style.display !== "flex";
                 sidebar.style.display = "flex";
+                if (wasHidden) widenSidebarForFlamegraph();
                 if (wasHidden && trace) requestAnimationFrame(renderAll);
                 requestAnimationFrame(() => {
                     fgInstance.setData(samples, trace.callframeSymbols, fgOpts);
@@ -5122,6 +5149,7 @@
                 body.appendChild(fgContainer);
                 const wasHidden = sidebar.style.display !== "flex";
                 sidebar.style.display = "flex";
+                if (wasHidden) widenSidebarForFlamegraph();
                 if (wasHidden && trace) requestAnimationFrame(renderAll);
                 requestAnimationFrame(() => {
                     fgInstance.setData(samplesForMode(heapMode), trace.callframeSymbols, heapFgOpts(heapMode));
@@ -5176,6 +5204,7 @@
                 clearToasts();
                 const wasHidden = sidebar.style.display !== "flex";
                 sidebar.style.display = "flex";
+                if (wasHidden) widenSidebarForFlamegraph();
                 if (wasHidden && trace) requestAnimationFrame(renderAll);
 
                 // Give the container a frame to get its layout, then render
@@ -5190,18 +5219,19 @@
 
             function handleFgPopout() {
                 const params = new URLSearchParams(window.location.search);
-                let traceUrl = params.get("trace");
+                let traceUrls = params.getAll("trace");
                 let isBlobUrl = false;
-                if (!traceUrl && currentTraceBuffer) {
+                if (!traceUrls.length && currentTraceBuffer) {
                     const blob = new Blob([currentTraceBuffer]);
-                    traceUrl = URL.createObjectURL(blob);
+                    traceUrls = [URL.createObjectURL(blob)];
                     isBlobUrl = true;
                 }
-                if (!traceUrl) {
+                if (!traceUrls.length) {
                     showToast("popout-no-url", "Pop-out requires a loaded trace", "error", 3000);
                     return;
                 }
-                let url = `flamegraph.html?trace=${encodeURIComponent(traceUrl)}&start=${Math.round(fgSelStart)}&end=${Math.round(fgSelEnd)}`;
+                const traceQs = traceUrls.map(u => `trace=${encodeURIComponent(u)}`).join("&");
+                let url = `flamegraph.html?${traceQs}&start=${Math.round(fgSelStart)}&end=${Math.round(fgSelEnd)}`;
                 const z = fgInstance.getZoomPath();
                 if (z.worker.length > 0) url += `&worker-zoom=${encodeURIComponent(z.worker.join("\t"))}`;
                 if (z.offworker.length > 0) url += `&offworker-zoom=${encodeURIComponent(z.offworker.join("\t"))}`;

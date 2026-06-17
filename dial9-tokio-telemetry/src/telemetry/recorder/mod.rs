@@ -202,8 +202,6 @@ fn register_hooks(
     // than registering its own hook.
     let handle_for_tl = Dial9Handle::enabled(shared.clone(), control_tx.clone());
     #[cfg(feature = "cpu-profiling")]
-    let s_start = shared.clone();
-    #[cfg(feature = "cpu-profiling")]
     let s_stop = shared.clone();
 
     register_hook!(builder, on_thread_start, tokio_hooks.on_thread_start, {
@@ -215,17 +213,7 @@ fn register_hooks(
 
         #[cfg(feature = "cpu-profiling")]
         {
-            // Register as Blocking initially; worker threads will
-            // overwrite this to Worker(i) in resolve_worker_id.
-            // NOTE: `tokio::runtime::worker_index()` will always return `None` at this point
-            // so we can't utilize that here.
-            let tid = crate::telemetry::events::current_tid();
-            s_start
-                .thread_roles
-                .lock()
-                .unwrap()
-                .insert(tid, crate::telemetry::events::ThreadRole::Blocking);
-            // Sched event sampling is deferred to register_tid_if_needed(),
+            // Sched event sampling is deferred to start_sched_sampling_if_needed(),
             // which runs only for worker threads on their first poll/park.
             // This avoids opening perf fds for blocking pool threads.
 
@@ -242,8 +230,6 @@ fn register_hooks(
 
         #[cfg(feature = "cpu-profiling")]
         {
-            let tid = crate::telemetry::events::current_tid();
-            s_stop.thread_roles.lock().unwrap().remove(&tid);
             if let Ok(mut sources) = s_stop.sources.lock() {
                 for source in sources.iter_mut() {
                     source.on_thread_stop();

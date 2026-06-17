@@ -3,14 +3,11 @@
 use crate::primitives::sync::Arc;
 use crate::primitives::sync::atomic::AtomicU64;
 use crate::telemetry::collector::CentralCollector;
-use crate::telemetry::events::ThreadRole;
-use std::collections::HashMap;
 
 /// Context passed to [`Source::flush`] containing shared state needed for draining.
 pub(crate) struct FlushContext<'a> {
     pub collector: &'a Arc<CentralCollector>,
     pub drain_epoch: &'a AtomicU64,
-    pub thread_roles: &'a HashMap<u32, ThreadRole>,
 }
 
 /// A data source that the flush thread drains into the central collector.

@@ -3,6 +3,7 @@
 - You MUST use Red/Green TDD.
 - BEFORE COMMITING: `cargo nextest run --stress-duration 20s`. The package has no flaky tests. If you find a flaky test, you created it.
 - **JS/HTML-only changes** (no `.rs` files touched, no trace format changes): you do NOT need to run the full Rust test suite or the stress test. Run the relevant JS tests under `dial9-viewer/ui/test_*.js` with `node <test>` and a quick `cargo build -p dial9-viewer` to confirm `rust-embed` picks up any new files. Skip `cargo nextest` / stress run.
+- **Adding a new `dial9-viewer/ui/test_*.js` file:** CI does NOT auto-discover JS tests. You MUST register the new file in `scripts/e2e-trace-tests.sh` (the `trace-integrity` CI job runs that script), or it will never run in CI. See `dial9-viewer/ui/README.md`.
 
 ## API Design
 

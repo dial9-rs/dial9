@@ -49,6 +49,43 @@
   }
 
   /**
+   * Fetch one or more trace URLs, gunzip each component individually, and
+   * concatenate them into a single ArrayBuffer.
+   *
+   * The `trace` query parameter is repeatable: each component is fetched
+   * independently and may be gzipped on its own (unlike `/api/trace`, which
+   * gunzips server-side before serving). We therefore ungzip every component
+   * here, then concatenate the raw bytes. The trace decoder treats a
+   * concatenated stream as multiple segments — a mid-stream `TRC\0` header
+   * resets the frame parser — so the combined buffer parses as one trace.
+   *
+   * @param {string|string[]} urls one URL or a list of URLs (order preserved)
+   * @param {{signal?: AbortSignal}} [opts]
+   * @returns {Promise<ArrayBuffer>}
+   */
+  async function fetchTraces(urls, opts = {}) {
+    const list = Array.isArray(urls) ? urls : [urls];
+    const parts = await Promise.all(
+      list.map(async (url) => {
+        const resp = await fetch(url, { signal: opts.signal });
+        if (!resp.ok) throw new Error(`HTTP ${resp.status} fetching ${url}`);
+        const raw = await maybeGunzip(await resp.arrayBuffer());
+        return raw instanceof ArrayBuffer ? new Uint8Array(raw) : raw;
+      })
+    );
+    if (parts.length === 1) return parts[0].buffer;
+    let total = 0;
+    for (const p of parts) total += p.length;
+    const out = new Uint8Array(total);
+    let off = 0;
+    for (const p of parts) {
+      out.set(p, off);
+      off += p.length;
+    }
+    return out.buffer;
+  }
+
+  /**
    * @typedef {{
    *   eventType: number,
    *   timestamp: number,
@@ -693,6 +730,14 @@
     // tid fields, detect block-in-place gaps, and rewrite cpuSamples.workerId.
     // See ADR-0001 (worker_id derived at analysis) and ADR-0002 (block-in-place
     // gap is unknowable).
+    //
+    // Samples are attributed by tid: resolve each through the tid -> worker map.
+    // Leave the wire value untouched when the tid is unmapped, so legacy traces
+    // (park/unpark without a tid) keep their pre-resolved worker id.
+    for (const sample of cpuSamples) {
+      const w = tidToWorker.get(sample.tid);
+      if (w !== undefined) sample.workerId = w;
+    }
     const blockInPlaceGaps = deriveBlockInPlaceGaps(events, cpuSamples);
 
     return {
@@ -1095,6 +1140,7 @@
       OFF_WORKER_WORKER_ID,
       parseTrace,
       parseOne,
+      fetchTraces,
       formatFrame,
       symbolizeChain,
       deduplicateSamples,
@@ -1105,6 +1151,7 @@
       EVENT_TYPES,
       OFF_WORKER_WORKER_ID,
       parseTrace,
+      fetchTraces,
       formatFrame,
       symbolizeChain,
       deduplicateSamples,

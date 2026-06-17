@@ -20,11 +20,14 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 static TRACE_DIR: OnceLock<PathBuf> = OnceLock::new();
+static OUTPUT_DIR: OnceLock<PathBuf> = OnceLock::new();
 
 fn macro_test_config() -> Dial9Config {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("trace.bin");
+    let output = dir.path().join("output");
     TRACE_DIR.get_or_init(|| dir.path().to_path_buf());
+    OUTPUT_DIR.get_or_init(|| output.clone());
     std::mem::forget(dir);
 
     Dial9Config::builder()
@@ -34,7 +37,10 @@ fn macro_test_config() -> Dial9Config {
         .max_total_size(256 * 1024 * 1024)
         // Generous deadline so the drain finishes symbolizing the segment.
         .graceful_shutdown(Duration::from_secs(10))
-        .with_runtime(|r| r.with_cpu_profiling(CpuProfilingConfig::default().frequency_hz(999)))
+        .with_runtime(|r| {
+            r.with_cpu_profiling(CpuProfilingConfig::default().frequency_hz(999))
+                .with_custom_pipeline(move |p| p.symbolize().gzip().write_back_to(output.clone()))
+        })
         .build()
         .unwrap()
 }
@@ -70,10 +76,10 @@ fn macro_implicit_graceful_shutdown_symbolizes_trace() {
     // The only call. The macro drops the runtime and drains the worker on return.
     run_workload();
 
-    let trace_dir = TRACE_DIR.get().expect("TRACE_DIR not set");
+    let output_dir = OUTPUT_DIR.get().expect("OUTPUT_DIR not set");
 
     let mut symbol_table_entries = 0usize;
-    for entry in std::fs::read_dir(trace_dir).unwrap() {
+    for entry in std::fs::read_dir(output_dir).unwrap() {
         let path = entry.unwrap().path();
         let name = path.file_name().unwrap().to_string_lossy();
         if !name.ends_with(".bin") && !name.ends_with(".bin.gz") {

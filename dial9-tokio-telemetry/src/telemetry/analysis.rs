@@ -660,6 +660,10 @@ pub fn detect_sampled_polls(events: &[Dial9Event]) -> Vec<SampledPoll> {
 
     let mut polls: Vec<PollSpan> = Vec::new();
     let mut poll_starts: HashMap<WorkerId, (u64, u64, String)> = HashMap::new();
+    // CPU samples identify their thread by OS tid, not worker id. Park/unpark
+    // events pair tid with worker id, and a worker thread keeps one tid, so they
+    // give a stable tid → worker map to attribute samples by.
+    let mut tid_to_worker: HashMap<u32, WorkerId> = HashMap::new();
 
     for event in events {
         match event {
@@ -668,6 +672,12 @@ pub fn detect_sampled_polls(events: &[Dial9Event]) -> Vec<SampledPoll> {
                     e.worker_id,
                     (e.timestamp_ns, e.task_id, e.spawn_loc.clone()),
                 );
+            }
+            Dial9Event::WorkerParkEvent(e) => {
+                tid_to_worker.insert(e.tid, e.worker_id);
+            }
+            Dial9Event::WorkerUnparkEvent(e) => {
+                tid_to_worker.insert(e.tid, e.worker_id);
             }
             Dial9Event::PollEndEvent(e) => {
                 let wid = e.worker_id;
@@ -691,7 +701,10 @@ pub fn detect_sampled_polls(events: &[Dial9Event]) -> Vec<SampledPoll> {
 
     for event in events {
         if let Dial9Event::CpuSampleEvent(e) = event {
-            let wid = e.worker_id;
+            // Attribute by tid. The wire `worker_id` is the fallback for legacy
+            // traces whose park/unpark lack a `tid`, so the map is empty; current
+            // traces set it to `UNKNOWN`, leaving non-worker samples unattributed.
+            let wid = tid_to_worker.get(&e.tid).copied().unwrap_or(e.worker_id);
             let start_idx = polls.partition_point(|p| p.worker_id < wid);
             let end_idx = polls.partition_point(|p| p.worker_id <= wid);
             let worker_polls = &mut polls[start_idx..end_idx];
@@ -1212,6 +1225,87 @@ mod tests {
         ];
         let sampled = detect_sampled_polls(&events);
         assert!(sampled.is_empty());
+    }
+
+    #[test]
+    fn test_detect_sampled_polls_reconstructs_worker_from_tid() {
+        let events = vec![
+            Dial9Event::WorkerParkEvent(WorkerParkEvent {
+                timestamp_ns: 500_000,
+                worker_id: WorkerId(1),
+                local_queue: 0,
+                cpu_time_ns: 0,
+                tid: 200,
+            }),
+            Dial9Event::PollStartEvent(PollStartEvent {
+                timestamp_ns: 1_000_000,
+                worker_id: WorkerId(1),
+                local_queue: 0,
+                task_id: 7,
+                spawn_loc: String::new(),
+            }),
+            Dial9Event::CpuSampleEvent(CpuSampleEvent {
+                timestamp_ns: 1_500_000,
+                worker_id: WorkerId::UNKNOWN,
+                tid: 200,
+                source: CpuSampleSource::CpuProfile,
+                thread_name: None,
+                callchain: vec![],
+                cpu: None,
+            }),
+            Dial9Event::PollEndEvent(PollEndEvent {
+                timestamp_ns: 2_000_000,
+                worker_id: WorkerId(1),
+            }),
+        ];
+        let sampled = detect_sampled_polls(&events);
+        assert_eq!(sampled.len(), 1);
+        assert_eq!(sampled[0].worker_id, WorkerId(1));
+        assert_eq!(sampled[0].cpu_sample_count, 1);
+        assert_eq!(sampled[0].task_id, 7);
+    }
+
+    /// Legacy trace: park/unpark predate the `tid` field (decoded as 0), so the
+    /// tid map can't resolve the sample. It falls back to the producer-resolved
+    /// wire `worker_id`.
+    #[test]
+    fn test_detect_sampled_polls_legacy_wire_worker_id_fallback() {
+        let events = vec![
+            // Old park event with no real tid (field absent -> 0).
+            Dial9Event::WorkerParkEvent(WorkerParkEvent {
+                timestamp_ns: 500_000,
+                worker_id: WorkerId(1),
+                local_queue: 0,
+                cpu_time_ns: 0,
+                tid: 0,
+            }),
+            Dial9Event::PollStartEvent(PollStartEvent {
+                timestamp_ns: 1_000_000,
+                worker_id: WorkerId(1),
+                local_queue: 0,
+                task_id: 9,
+                spawn_loc: String::new(),
+            }),
+            // Sample's tid (100) isn't in the map, but the wire worker_id is real.
+            Dial9Event::CpuSampleEvent(CpuSampleEvent {
+                timestamp_ns: 1_500_000,
+                worker_id: WorkerId(1),
+                tid: 100,
+                source: CpuSampleSource::CpuProfile,
+                thread_name: None,
+                callchain: vec![],
+                cpu: None,
+            }),
+            Dial9Event::PollEndEvent(PollEndEvent {
+                timestamp_ns: 2_000_000,
+                worker_id: WorkerId(1),
+            }),
+        ];
+        let sampled = detect_sampled_polls(&events);
+        assert_eq!(sampled.len(), 1);
+        assert_eq!(sampled[0].worker_id, WorkerId(1));
+        assert_eq!(sampled[0].cpu_sample_count, 1);
+        assert_eq!(sampled[0].task_id, 9);
     }
 
     #[test]

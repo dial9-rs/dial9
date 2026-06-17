@@ -250,12 +250,14 @@ const ENV_DIAL9_PROCESS_RESOURCE_USAGE_SAMPLE_INTERVAL_MS: &str =
 const ENV_DIAL9_SOCKET_ACCEPT_QUEUES_ENABLED: &str = "DIAL9_SOCKET_ACCEPT_QUEUES_ENABLED";
 const ENV_DIAL9_SOCKET_ACCEPT_QUEUES_SAMPLE_INTERVAL_MS: &str =
     "DIAL9_SOCKET_ACCEPT_QUEUES_SAMPLE_INTERVAL_MS";
+const ENV_DIAL9_GC_DEAD_NAMESPACES: &str = "DIAL9_GC_DEAD_NAMESPACES";
 
 const DEFAULT_ENABLED: bool = false;
 const DEFAULT_TRACE_DIR: &str = "/tmp/dial9-traces";
 const DEFAULT_S3_PREFIX: &str = "dial9-traces";
 const DEFAULT_MAX_DISK_USAGE_MB: u64 = 1024;
 const DEFAULT_TASK_TRACKING_ENABLED: bool = true;
+const DEFAULT_GC_DEAD_NAMESPACES: bool = true;
 const DEFAULT_CPU_PROFILE_ENABLED: bool = cfg!(all(target_os = "linux", feature = "cpu-profiling"));
 const DEFAULT_SCHEDULE_PROFILE_ENABLED: bool =
     cfg!(all(target_os = "linux", feature = "cpu-profiling"));
@@ -302,6 +304,7 @@ struct ParsedEnvConfig {
     process_resource_usage_sample_interval: Option<Duration>,
     socket_accept_queues_enabled: Option<bool>,
     socket_accept_queues_sample_interval: Option<Duration>,
+    gc_dead_namespaces: Option<bool>,
 }
 
 #[derive(Debug)]
@@ -364,6 +367,8 @@ struct ResolvedEnvConfig {
 
     // None means SocketAcceptQueuesConfig::default() owns the sample interval.
     socket_accept_queues_sample_interval: Option<Duration>,
+
+    gc_dead_namespaces: bool,
 }
 
 struct RuntimeEnvConfig {
@@ -427,6 +432,7 @@ fn parse_env_config(env: &impl EnvSource) -> ParsedEnvConfig {
         socket_accept_queues_sample_interval: env
             .get_positive_u64(ENV_DIAL9_SOCKET_ACCEPT_QUEUES_SAMPLE_INTERVAL_MS)
             .map(Duration::from_millis),
+        gc_dead_namespaces: env.get_bool(ENV_DIAL9_GC_DEAD_NAMESPACES),
     }
 }
 
@@ -470,6 +476,9 @@ fn resolve_env_config(parsed: ParsedEnvConfig) -> ResolvedEnvConfig {
         process_resource_usage_sample_interval: parsed.process_resource_usage_sample_interval,
         socket_accept_queues_enabled: parsed.socket_accept_queues_enabled,
         socket_accept_queues_sample_interval: parsed.socket_accept_queues_sample_interval,
+        gc_dead_namespaces: parsed
+            .gc_dead_namespaces
+            .unwrap_or(DEFAULT_GC_DEAD_NAMESPACES),
     }
 }
 
@@ -685,6 +694,17 @@ fn default_tokio_builder() -> tokio::runtime::Builder {
 impl Dial9Config {
     /// Build a production-oriented config from standard `DIAL9_*` environment variables.
     ///
+    /// # Per-process namespace isolation
+    ///
+    /// On the disk path, segments are written to a per-process subdirectory
+    /// `{DIAL9_TRACE_DIR}/{boot_id}/`, where `boot_id` is `{4-alpha}-{pid}`
+    /// (e.g. `qmxz-48291`). This keeps processes that share a trace directory
+    /// from reading and re-uploading each other's segments. Each process holds
+    /// an advisory `flock` on `{boot_id}/.lock` for its lifetime; on startup it
+    /// reclaims any sibling namespace whose lock it can acquire (i.e. the owner
+    /// has exited). Set `DIAL9_GC_DEAD_NAMESPACES=false` to keep prior runs'
+    /// directories instead — handy locally when comparing traces across runs.
+    ///
     /// Supported local trace writer variables:
     ///
     /// | Variable | Default | Meaning |
@@ -694,6 +714,7 @@ impl Dial9Config {
     /// | `DIAL9_ROTATION_SECS` | `60` | Rotation period in seconds, measured monotonically from writer start. |
     /// | `DIAL9_MAX_DISK_USAGE_MB` | `1024` | Total on-disk trace budget in MiB. |
     /// | `DIAL9_MAX_FILE_SIZE_MB` | `min(100, total / 4)` | Per-file trace segment size in MiB. |
+    /// | `DIAL9_GC_DEAD_NAMESPACES` | `true` | Reclaim dead peers' namespace dirs at startup. |
     ///
     /// Supported runtime variables:
     ///
@@ -770,6 +791,7 @@ impl Dial9Config {
             process_resource_usage_sample_interval,
             socket_accept_queues_enabled,
             socket_accept_queues_sample_interval,
+            gc_dead_namespaces,
         } = resolve_env_config(parse_env_config(env));
 
         let runtime_config = RuntimeEnvConfig {
@@ -793,6 +815,7 @@ impl Dial9Config {
             .enabled(enabled)
             .maybe_max_file_size(max_file_size)
             .max_total_size(max_total_size)
+            .gc_dead_namespaces(gc_dead_namespaces)
             .maybe_rotation_period(rotation_period);
 
         #[cfg(feature = "worker-s3")]
@@ -885,6 +908,11 @@ impl Dial9Config {
         max_total_size: Option<u64>,
         /// Rotation period, measured monotonically from writer start.
         rotation_period: Option<Duration>,
+        /// Reclaim dead peers' namespace directories at startup. Defaults to
+        /// `true`. Set `false` to keep trace files from previous runs around —
+        /// useful for local development where you want to compare runs.
+        #[builder(default = true)]
+        gc_dead_namespaces: bool,
     ) -> Result<Dial9Config, Dial9ConfigBuilderError> {
         if !enabled {
             return Ok(Dial9Config {
@@ -900,15 +928,20 @@ impl Dial9Config {
             })
         })?;
 
-        let writer = DiskWriter::builder()
-            .base_path(base_path.clone())
+        let namespace =
+            crate::background_task::boot_id::setup_namespace(&base_path, gc_dead_namespaces)
+                .map_err(Dial9ConfigBuilderError::Io)?;
+
+        let mut writer = DiskWriter::builder()
+            .base_path(namespace.trace_path.clone())
             .maybe_max_file_size(max_file_size)
             .max_total_size(max_total_size)
             .maybe_rotation_period(rotation_period)
             .build()
             .map_err(Dial9ConfigBuilderError::Io)?;
 
-        let seed = TracedRuntime::builder().with_trace_path(base_path);
+        let seed = TracedRuntime::builder().with_trace_path(namespace.trace_path.clone());
+        writer.set_namespace(namespace.boot_id, namespace.lock);
         let runtime_builder: RuntimeBuilderFn = match runtime_finalizer {
             Some(finalize) => finalize(seed, writer),
             None => Box::new(move |tk| seed.build_and_start(tk, writer)),
@@ -1278,6 +1311,17 @@ mod tests {
         assert_eq!(parsed.process_resource_usage_sample_interval, None);
         assert_eq!(parsed.socket_accept_queues_enabled, None);
         assert_eq!(parsed.socket_accept_queues_sample_interval, None);
+        assert_eq!(parsed.gc_dead_namespaces, None);
+    }
+
+    #[test]
+    fn env_gc_dead_namespaces_parses_and_defaults() {
+        let parsed =
+            parse_env_config(&FakeEnv::default().with("DIAL9_GC_DEAD_NAMESPACES", "false"));
+        assert_eq!(parsed.gc_dead_namespaces, Some(false));
+
+        let resolved = resolve_env_config(parse_env_config(&FakeEnv::default()));
+        assert_eq!(resolved.gc_dead_namespaces, DEFAULT_GC_DEAD_NAMESPACES);
     }
 
     #[test]
@@ -1502,13 +1546,24 @@ mod tests {
             rt.guard().is_enabled(),
             "config should keep telemetry enabled"
         );
-        let wrote_trace_file = std::fs::read_dir(dir.path())
+        // With per-process namespace isolation, trace files land in a
+        // boot_id subdirectory: {trace_dir}/{boot_id}/trace.0.bin.active
+        let has_namespace_dir = std::fs::read_dir(dir.path())
             .expect("trace dir should exist")
             .filter_map(Result::ok)
-            .any(|entry| entry.file_name().to_string_lossy().starts_with("trace."));
+            .any(|entry| {
+                let name = entry.file_name().to_string_lossy().to_string();
+                crate::background_task::boot_id::is_valid_boot_id(&name)
+                    && entry.path().is_dir()
+                    && std::fs::read_dir(entry.path())
+                        .into_iter()
+                        .flatten()
+                        .flatten()
+                        .any(|e| e.file_name().to_string_lossy().starts_with("trace."))
+            });
         assert!(
-            wrote_trace_file,
-            "from_env should wire DIAL9_TRACE_DIR so trace segments land in <dir>"
+            has_namespace_dir,
+            "from_env should wire DIAL9_TRACE_DIR so trace segments land in <dir>/<boot_id>/"
         );
     }
 

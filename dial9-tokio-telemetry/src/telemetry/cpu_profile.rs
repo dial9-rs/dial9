@@ -1,8 +1,9 @@
 //! CPU profiling integration: merges perf stack traces into the telemetry stream.
 //!
 //! When enabled, a process-wide `PerfSampler` captures CPU stack traces at a
-//! configurable frequency. The flush thread drains raw samples; the caller
-//! (EventWriter) maps OS thread IDs to worker IDs via SharedState.thread_roles.
+//! configurable frequency. The flush thread drains raw samples and tags each
+//! with its OS `tid`; worker attribution is left to analysis, which maps tid to
+//! worker via park/unpark events. This keeps the profiler runtime-agnostic.
 
 use crate::telemetry::buffer::record_encodable_event;
 use crate::telemetry::events::{CpuSampleData, CpuSampleSource, ThreadName};
@@ -187,19 +188,11 @@ impl SchedProfiler {
 
 impl Source for CpuProfiler {
     fn flush(&mut self, ctx: &FlushContext<'_>) {
-        let resolve = |tid: u32| -> WorkerId {
-            match ctx.thread_roles.get(&tid) {
-                Some(crate::telemetry::events::ThreadRole::Worker(id)) => WorkerId::from(*id),
-                Some(crate::telemetry::events::ThreadRole::Blocking) => WorkerId::BLOCKING,
-                None => WorkerId::UNKNOWN,
-            }
-        };
-
         self.drain(|raw, thread_name| {
-            let worker_id = resolve(raw.tid);
+            // worker_id is left UNKNOWN; analysis attributes the sample by `tid`.
             let data = CpuSampleData {
                 timestamp_nanos: raw.timestamp_nanos,
-                worker_id,
+                worker_id: WorkerId::UNKNOWN,
                 tid: raw.tid,
                 source: raw.source,
                 callchain: raw.callchain,
@@ -217,18 +210,11 @@ impl Source for CpuProfiler {
 
 impl Source for SchedProfiler {
     fn flush(&mut self, ctx: &FlushContext<'_>) {
-        let resolve = |tid: u32| -> WorkerId {
-            match ctx.thread_roles.get(&tid) {
-                Some(crate::telemetry::events::ThreadRole::Worker(id)) => WorkerId::from(*id),
-                Some(crate::telemetry::events::ThreadRole::Blocking) => WorkerId::BLOCKING,
-                None => WorkerId::UNKNOWN,
-            }
-        };
-
         self.drain(|raw| {
+            // worker_id left UNKNOWN; attributed by `tid` at analysis (see CpuProfiler::flush).
             let data = CpuSampleData {
                 timestamp_nanos: raw.timestamp_nanos,
-                worker_id: resolve(raw.tid),
+                worker_id: WorkerId::UNKNOWN,
                 tid: raw.tid,
                 source: raw.source,
                 callchain: raw.callchain,

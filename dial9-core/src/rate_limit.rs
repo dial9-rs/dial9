@@ -6,12 +6,13 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 #[doc(hidden)]
-pub(crate) fn time_since_epoch() -> Duration {
+pub fn time_since_epoch() -> Duration {
     static EPOCH: OnceLock<Instant> = OnceLock::new();
     Instant::now().duration_since(*EPOCH.get_or_init(Instant::now))
 }
 
 /// Evaluate `$call` at most once every `$interval` per call site.
+#[macro_export]
 macro_rules! rate_limited {
     ($interval:expr, $call:expr) => {{
         use std::sync::atomic::{AtomicU64, Ordering};
@@ -34,4 +35,4 @@ macro_rules! rate_limited {
     }};
 }
 
-pub(crate) use rate_limited;
+pub use crate::rate_limited;

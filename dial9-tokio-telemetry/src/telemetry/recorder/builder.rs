@@ -770,7 +770,9 @@ pub(super) fn assemble_processors(
             }
             processors.push(Box::new(crate::background_task::GzipCompressor));
             if is_disk {
-                processors.push(Box::new(crate::background_task::WriteBackProcessor));
+                processors.push(Box::new(
+                    crate::background_task::WriteBackProcessor::default(),
+                ));
             }
         }
         #[cfg(feature = "worker-s3")]
