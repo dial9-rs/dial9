@@ -1506,6 +1506,7 @@ name = "dial9-core"
 version = "0.4.0-alpha.1"
 dependencies = [
  "crossbeam-queue",
+ "dial9-trace-format",
  "libc",
  "shuttle",
 ]

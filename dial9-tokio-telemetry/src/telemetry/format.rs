@@ -347,27 +347,9 @@ pub struct WakeEventEvent {
     pub target_worker: u8,
 }
 
-#[derive(TraceEvent)]
-#[traceevent(wire_slot)]
-pub(crate) struct SegmentMetadataEvent {
-    #[traceevent(timestamp)]
-    pub timestamp_ns: u64,
-    pub entries: Vec<(String, String)>,
-}
-
-/// Clock-correlation anchor. `timestamp_ns` (monotonic) and `realtime_ns`
-/// (nanoseconds since Unix epoch) are captured at the same instant via
-/// [`clock_pair`], so offline consumers can recover wall clock from the
-/// monotonic event stream.
-///
-/// [`clock_pair`]: crate::telemetry::events::clock_pair
-#[derive(TraceEvent)]
-#[traceevent(wire_slot)]
-pub(crate) struct ClockSyncEvent {
-    #[traceevent(timestamp)]
-    pub timestamp_ns: u64,
-    pub realtime_ns: u64,
-}
+// These two framing events are emitted by the bus writer itself, so they live
+// in dial9-core. Re-exported here so existing call sites stay unchanged.
+pub(crate) use dial9_core::format::{ClockSyncEvent, SegmentMetadataEvent};
 
 // ── dial9-trace-format: decode ──────────────────────────────────────────────
 // Decode via `Dial9Event` in `analysis_events.rs` using `Decoder::for_each_event`.

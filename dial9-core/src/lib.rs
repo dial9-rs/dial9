@@ -1,5 +1,7 @@
 /// Monotonic/realtime clock readings, the trace time base.
 pub mod clock;
+/// Wire-format events emitted by the bus itself.
+pub mod format;
 /// Cfg-gated concurrency primitives (std / shuttle).
 ///
 /// `pub` so sibling crates share one shuttle shim, but not part of the public
