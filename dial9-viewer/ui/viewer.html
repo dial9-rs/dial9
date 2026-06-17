@@ -1283,14 +1283,18 @@
                 document.getElementById("load-demo")?.addEventListener("click", onLoadDemo);
             }
 
-            async function loadTraceFromUrl(url) {
+            // `urls` may be a single URL or a list (one per repeated `trace=`).
+            // Each component is fetched and gunzipped independently, then the raw
+            // buffers are concatenated into one trace (see fetchTraces).
+            async function loadTraceFromUrl(urls) {
+                const list = Array.isArray(urls) ? urls : [urls];
                 try {
-                    updateLoadProgress("Fetching…");
-                    const response = await fetch(url, { signal: loadAbortController?.signal });
-                    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-                    const arrayBuffer = await response.arrayBuffer();
+                    updateLoadProgress(list.length > 1 ? `Fetching ${list.length} traces…` : "Fetching…");
+                    const arrayBuffer = await TraceParser.fetchTraces(list, { signal: loadAbortController?.signal });
                     loadAbortController = null;
-                    const name = urlParams.get('svc') || url.split('/').pop()?.split('?')[0] || 'trace.bin';
+                    const name = urlParams.get('svc')
+                        || list[0].split('/').pop()?.split('?')[0]
+                        || 'trace.bin';
                     await parseAndShowTrace(arrayBuffer, name, getParseOptions());
                 } catch (err) {
                     if (err.name === 'AbortError') return;
@@ -1314,9 +1318,10 @@
                 clearRangeBtn.style.display = (startNs != null || endNs != null) ? "" : "none";
             }
 
-            // Check for URL parameter on load
+            // Check for URL parameter on load. `trace` is repeatable — each
+            // value is a separate (possibly gzipped) component to concatenate.
             const urlParams = new URLSearchParams(window.location.search);
-            const traceUrl = urlParams.get('trace');
+            const traceUrls = urlParams.getAll('trace');
 
             /** Build parseTrace options from current URL time range params. */
             function getParseOptions() {
@@ -1340,9 +1345,9 @@
                 window.history.replaceState(null, '', newUrl);
             }
 
-            if (traceUrl) {
-                showLoadingState('Loading trace…');
-                loadTraceFromUrl(traceUrl);
+            if (traceUrls.length) {
+                showLoadingState(traceUrls.length > 1 ? `Loading ${traceUrls.length} traces…` : 'Loading trace…');
+                loadTraceFromUrl(traceUrls);
             }
 
             function onLoadDemo(e) {
@@ -5214,18 +5219,19 @@
 
             function handleFgPopout() {
                 const params = new URLSearchParams(window.location.search);
-                let traceUrl = params.get("trace");
+                let traceUrls = params.getAll("trace");
                 let isBlobUrl = false;
-                if (!traceUrl && currentTraceBuffer) {
+                if (!traceUrls.length && currentTraceBuffer) {
                     const blob = new Blob([currentTraceBuffer]);
-                    traceUrl = URL.createObjectURL(blob);
+                    traceUrls = [URL.createObjectURL(blob)];
                     isBlobUrl = true;
                 }
-                if (!traceUrl) {
+                if (!traceUrls.length) {
                     showToast("popout-no-url", "Pop-out requires a loaded trace", "error", 3000);
                     return;
                 }
-                let url = `flamegraph.html?trace=${encodeURIComponent(traceUrl)}&start=${Math.round(fgSelStart)}&end=${Math.round(fgSelEnd)}`;
+                const traceQs = traceUrls.map(u => `trace=${encodeURIComponent(u)}`).join("&");
+                let url = `flamegraph.html?${traceQs}&start=${Math.round(fgSelStart)}&end=${Math.round(fgSelEnd)}`;
                 const z = fgInstance.getZoomPath();
                 if (z.worker.length > 0) url += `&worker-zoom=${encodeURIComponent(z.worker.join("\t"))}`;
                 if (z.offworker.length > 0) url += `&offworker-zoom=${encodeURIComponent(z.offworker.join("\t"))}`;

@@ -78,7 +78,9 @@
         <script>
             (async function () {
                 const params = new URLSearchParams(window.location.search);
-                const traceUrl = params.get("trace");
+                // `trace` is repeatable — each value is a separate (possibly
+                // gzipped) component to fetch and concatenate.
+                const traceUrls = params.getAll("trace");
                 const startNs = params.get("start") != null ? Number(params.get("start")) : null;
                 const endNs = params.get("end") != null ? Number(params.get("end")) : null;
 
@@ -94,18 +96,19 @@
                     errorEl.textContent = msg;
                 }
 
-                if (!traceUrl) {
+                if (!traceUrls.length) {
                     showError("No trace URL provided. Use ?trace=<url>&start=<ns>&end=<ns>");
                     return;
                 }
 
-                // Fetch trace
+                // Fetch trace(s): each component is fetched and gunzipped
+                // independently, then concatenated into one buffer.
                 let buffer;
                 try {
-                    loadingEl.textContent = "Fetching trace\u2026";
-                    const resp = await fetch(traceUrl);
-                    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-                    buffer = await resp.arrayBuffer();
+                    loadingEl.textContent = traceUrls.length > 1
+                        ? `Fetching ${traceUrls.length} traces\u2026`
+                        : "Fetching trace\u2026";
+                    buffer = await TraceParser.fetchTraces(traceUrls);
                 } catch (err) {
                     showError("Failed to fetch trace: " + err.message);
                     return;
@@ -165,7 +168,7 @@
                 const toTime = params.get("to");
                 const label = svc
                     ? svc + (host ? ` @ ${host}` : "")
-                    : (traceUrl.split("/").pop() || "trace");
+                    : (traceUrls[0].split("/").pop() || "trace");
                 const durMs = startNs != null && endNs != null
                     ? ((endNs - startNs) / 1e6).toFixed(2)
                     : null;
