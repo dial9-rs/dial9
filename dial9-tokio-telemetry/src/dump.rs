@@ -5,21 +5,29 @@
 //! operation: segments keep accumulating in the ring (memory or disk), and
 //! the pipeline only runs when the application explicitly requests a dump.
 //!
-//! ```ignore
-//! use dial9_tokio_telemetry::telemetry::TelemetryHandle;
+//! ```no_run
+//! # use dial9_tokio_telemetry::telemetry::{DiskWriter, TracedRuntime};
+//! use dial9_tokio_telemetry::telemetry::Dial9Handle;
 //!
+//! # fn main() -> std::io::Result<()> {
+//! # let path = "/tmp/trace.bin";
+//! # let writer = DiskWriter::single_file(path)?;
+//! # let mut builder = tokio::runtime::Builder::new_multi_thread();
+//! # builder.worker_threads(2).enable_all();
 //! let (runtime, _guard) = TracedRuntime::builder()
 //!     .with_trace_path(path)
-//!     .with_s3_uploader(s3_config)
+//!     .with_custom_pipeline(|p| p.gzip().write_back())
 //!     .with_trigger(|_| {})
 //!     .build_and_start(builder, writer)?;
 //!
 //! // From any thread owned by this runtime, reach the control through the
 //! // ambient handle - no need to thread it through your own state.
-//! let control = TelemetryHandle::current()
+//! let control = Dial9Handle::current()
 //!     .dump_control()
 //!     .expect("on-demand mode enabled");
 //! control.dump_current_data();
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! Both [`DumpControl::dump_current_data`](crate::dump::DumpControl::dump_current_data) and
