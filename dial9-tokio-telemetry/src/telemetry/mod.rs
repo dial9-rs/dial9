@@ -10,8 +10,8 @@ pub mod analysis;
 #[cfg(any(feature = "analysis", test))]
 pub mod analysis_events;
 pub(crate) mod buffer;
-pub(crate) mod collector;
-pub use collector::Batch;
+pub(crate) use dial9_core::collector;
+pub use dial9_core::collector::Batch;
 #[cfg(feature = "cpu-profiling")]
 pub mod cpu_profile;
 pub(crate) mod custom_events;

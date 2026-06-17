@@ -323,7 +323,7 @@ mod tests {
         writer: &mut crate::telemetry::writer::DiskWriter,
     ) {
         while let Some(batch) = collector.next() {
-            if batch.event_count > 0 {
+            if batch.event_count() > 0 {
                 writer.write_encoded_batch(&batch).unwrap();
             }
         }
@@ -915,10 +915,7 @@ mod tests {
             event: &dyn crate::telemetry::buffer::Encodable,
         ) -> std::io::Result<()> {
             let encoded_bytes = ThreadLocalBuffer::encode_single(event);
-            let batch = Batch {
-                encoded_bytes,
-                event_count: 1,
-            };
+            let batch = Batch::new(encoded_bytes, 1);
             writer.write_encoded_batch(&batch)
         }
 

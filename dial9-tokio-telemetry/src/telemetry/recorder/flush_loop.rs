@@ -77,7 +77,7 @@ pub(super) fn flush_once<M: WriterMode>(
     }
 
     while let Some(batch) = shared.collector.next() {
-        if batch.event_count > 0 {
+        if batch.event_count() > 0 {
             if let Err(e) = writer.write_encoded_batch(&batch) {
                 rate_limited!(Duration::from_secs(60), {
                     tracing::warn!("failed to transcode batch: {e}");
@@ -89,7 +89,7 @@ pub(super) fn flush_once<M: WriterMode>(
                     cpu_flush_duration,
                 };
             }
-            *events_written += batch.event_count;
+            *events_written += batch.event_count();
         }
     }
     if let Err(e) = writer.flush() {

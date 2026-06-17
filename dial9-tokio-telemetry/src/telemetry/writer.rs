@@ -817,10 +817,10 @@ impl<M: WriterMode> SegmentWriter<M> {
     pub fn write_encoded_batch(&mut self, batch: &Batch) -> std::io::Result<()> {
         self.write_metadata_if_needed()?;
         let WriterState::Active { writer: raw, .. } = &mut self.state else {
-            self.dropped_events += batch.event_count as usize;
+            self.dropped_events += batch.event_count() as usize;
             return Ok(());
         };
-        if batch.event_count > 0 {
+        if batch.event_count() > 0 {
             // Note: we do NOT advance next_rotation_time or next_drain_time
             // when the first event arrives in an empty segment, even if the
             // timers are stale. The drain state machine (Idle → EpochBumped →
@@ -831,7 +831,7 @@ impl<M: WriterMode> SegmentWriter<M> {
             // Raw-copy the thread-local batch. Each batch is self-contained
             // (starts with its own header), so the next batch's header acts as
             // the reset frame for decoders.
-            raw.write_raw(&batch.encoded_bytes)?;
+            raw.write_raw(batch.encoded_bytes())?;
             self.has_real_events = true;
             self.maybe_rotate()?;
         }
@@ -873,10 +873,7 @@ mod tests {
             cpu_time_ns: 0,
             tid: 0,
         });
-        Batch {
-            encoded_bytes: enc.into_inner(),
-            event_count: 1,
-        }
+        Batch::new(enc.into_inner(), 1)
     }
 
     fn rotating_file(base: &std::path::Path, i: u32) -> String {
@@ -1814,10 +1811,7 @@ mod tests {
         // Advance past the boundary without writing any events
         tokio::time::advance(Duration::from_secs(120)).await;
 
-        let empty_batch = Batch {
-            encoded_bytes: vec![],
-            event_count: 0,
-        };
+        let empty_batch = Batch::new(vec![], 0);
         writer.write_encoded_batch(&empty_batch).unwrap();
 
         assert_eq!(
@@ -2155,10 +2149,7 @@ mod tests {
             tid: 0,
         });
         writer
-            .write_encoded_batch(&Batch {
-                encoded_bytes: enc.into_inner(),
-                event_count: 1,
-            })
+            .write_encoded_batch(&Batch::new(enc.into_inner(), 1))
             .unwrap();
         writer.flush().unwrap();
         writer.finalize().unwrap();

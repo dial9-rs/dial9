@@ -338,10 +338,10 @@ mod tests {
             tid: 0,
         });
         writer
-            .write_encoded_batch(&crate::telemetry::collector::Batch {
-                encoded_bytes: enc.into_inner(),
-                event_count: 1,
-            })
+            .write_encoded_batch(&crate::telemetry::collector::Batch::new(
+                enc.into_inner(),
+                1,
+            ))
             .unwrap();
         writer.flush().unwrap();
 
@@ -378,10 +378,10 @@ mod tests {
             tid: 0,
         });
         writer
-            .write_encoded_batch(&crate::telemetry::collector::Batch {
-                encoded_bytes: enc.into_inner(),
-                event_count: 1,
-            })
+            .write_encoded_batch(&crate::telemetry::collector::Batch::new(
+                enc.into_inner(),
+                1,
+            ))
             .unwrap();
         writer.flush().unwrap();
 
@@ -436,10 +436,10 @@ mod tests {
             tid: 0,
         });
         writer
-            .write_encoded_batch(&crate::telemetry::collector::Batch {
-                encoded_bytes: enc.into_inner(),
-                event_count: 1,
-            })
+            .write_encoded_batch(&crate::telemetry::collector::Batch::new(
+                enc.into_inner(),
+                1,
+            ))
             .unwrap();
         writer.flush().unwrap();
 

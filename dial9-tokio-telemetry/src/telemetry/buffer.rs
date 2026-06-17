@@ -280,7 +280,7 @@ impl ThreadLocalBuffer {
     pub(crate) fn encode_single(event: &dyn Encodable) -> Vec<u8> {
         let mut buf = Self::with_batch_size(1024);
         buf.record_encodable(event);
-        buf.flush().encoded_bytes
+        buf.flush().into_encoded_bytes()
     }
 
     fn should_flush(&self) -> bool {
@@ -293,10 +293,7 @@ impl ThreadLocalBuffer {
             .encoder
             .reset_to_infallible(Vec::with_capacity(self.batch_size));
         self.event_count = 0;
-        crate::telemetry::collector::Batch {
-            encoded_bytes,
-            event_count,
-        }
+        crate::telemetry::collector::Batch::new(encoded_bytes, event_count)
     }
 
     pub(crate) fn has_pending_events(&self) -> bool {
@@ -452,7 +449,7 @@ mod tests {
         let mut buffer = ThreadLocalBuffer::new();
         buffer.record_encodable(&poll_end_event());
         let batch = buffer.flush();
-        assert!(!batch.encoded_bytes.is_empty());
+        assert!(!batch.encoded_bytes().is_empty());
         assert_eq!(buffer.event_count, 0);
     }
 

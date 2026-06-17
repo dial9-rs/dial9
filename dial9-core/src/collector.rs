@@ -34,9 +34,15 @@ impl Batch {
     pub fn event_count(&self) -> u64 {
         self.event_count
     }
+
+    /// Consume the batch, returning the encoded bytes without copying.
+    pub fn into_encoded_bytes(self) -> Vec<u8> {
+        self.encoded_bytes
+    }
 }
 
-pub(crate) struct CentralCollector {
+#[doc(hidden)]
+pub struct CentralCollector {
     queue: BoundedQueue<Batch>,
     dropped_batches: AtomicUsize,
 }
@@ -48,29 +54,29 @@ impl Default for CentralCollector {
 }
 
 impl CentralCollector {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self::with_capacity(DEFAULT_CAPACITY)
     }
 
-    pub(crate) fn with_capacity(capacity: usize) -> Self {
+    pub fn with_capacity(capacity: usize) -> Self {
         Self {
             queue: BoundedQueue::new(capacity),
             dropped_batches: AtomicUsize::new(0),
         }
     }
 
-    pub(crate) fn accept_flush(&self, batch: Batch) {
+    pub fn accept_flush(&self, batch: Batch) {
         if let Some(_evicted) = self.queue.force_push(batch) {
             self.dropped_batches.fetch_add(1, Ordering::Relaxed);
         }
     }
 
-    pub(crate) fn next(&self) -> Option<Batch> {
+    pub fn next(&self) -> Option<Batch> {
         self.queue.pop()
     }
 
     /// Returns the number of batches dropped since the last call.
-    pub(crate) fn take_dropped_batches(&self) -> usize {
+    pub fn take_dropped_batches(&self) -> usize {
         self.dropped_batches.swap(0, Ordering::Relaxed)
     }
 }

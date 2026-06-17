@@ -310,7 +310,7 @@ mod tests {
         buffer::drain_to_collector(&shared.collector);
         let mut events = Vec::new();
         while let Some(batch) = shared.collector.next() {
-            if let Ok(decoded) = decode_events(&batch.encoded_bytes) {
+            if let Ok(decoded) = decode_events(batch.encoded_bytes()) {
                 events.extend(decoded);
             }
         }

@@ -261,7 +261,7 @@ mod tests {
         ss.bump_drain_epoch();
         ss.drain_all_tl_buffers();
         let batch = ss.collector.next().expect("expected a batch after drain");
-        assert!(batch.event_count > 0);
+        assert!(batch.event_count() > 0);
     }
 
     #[test]
@@ -278,7 +278,7 @@ mod tests {
         ss.bump_drain_epoch();
         ss.drain_all_tl_buffers();
         let batch = ss.collector.next().expect("expected a batch after drain");
-        assert_eq!(batch.event_count, 2);
+        assert_eq!(batch.event_count(), 2);
     }
 
     #[test]
@@ -350,7 +350,7 @@ mod tests {
             .collector
             .next()
             .expect("intrusive drain should have flushed the live worker's event");
-        assert_eq!(batch.event_count, 1);
+        assert_eq!(batch.event_count(), 1);
 
         release_tx.send(()).unwrap();
         worker.join().unwrap();

@@ -1,5 +1,7 @@
 /// Monotonic/realtime clock readings, the trace time base.
 pub mod clock;
+/// Central ring buffer of encoded event batches awaiting write.
+pub mod collector;
 /// Wire-format events emitted by the bus itself.
 pub mod format;
 /// Cfg-gated concurrency primitives (std / shuttle).
