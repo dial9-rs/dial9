@@ -1,6 +1,7 @@
 //! Future wrappers for task instrumentation.
 
 use crate::rate_limit::rate_limited;
+use crate::telemetry::format::WakeEventEvent;
 use crate::telemetry::recorder::SharedState;
 use crate::telemetry::task_metadata::TaskId;
 use futures_util::task::{ArcWake, AtomicWaker, waker as arc_waker};
@@ -130,9 +131,13 @@ fn record_wake_event(data: &TracedWakerData) {
         } else {
             255
         };
-        let event = data
-            .shared
-            .create_wake_event(data.woken_task_id, waking_worker_u8);
+        let waker_task_id = tokio::task::try_id().map(TaskId::from).unwrap_or_default();
+        let event = WakeEventEvent {
+            timestamp_ns: crate::telemetry::events::clock_monotonic_ns(),
+            waker_task_id,
+            woken_task_id: data.woken_task_id,
+            target_worker: waking_worker_u8,
+        };
         buf.record_encodable_event(&event);
     });
 }

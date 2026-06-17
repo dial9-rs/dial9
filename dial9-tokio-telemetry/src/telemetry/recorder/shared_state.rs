@@ -4,8 +4,6 @@ use crate::primitives::sync::{Arc, Mutex};
 use crate::telemetry::buffer;
 use crate::telemetry::buffer::TlBufferHandle;
 use crate::telemetry::collector::CentralCollector;
-use crate::telemetry::format::WakeEventEvent;
-use crate::telemetry::task_metadata::TaskId;
 use std::cell::Cell;
 use std::time::Duration;
 
@@ -66,26 +64,6 @@ impl SharedState {
     /// Register a data source to be drained by the flush thread each cycle.
     pub(crate) fn push_source(&self, source: Box<dyn super::source::Source>) {
         self.sources.lock().unwrap().push(source);
-    }
-
-    fn timestamp_nanos(&self) -> u64 {
-        crate::telemetry::events::clock_monotonic_ns()
-    }
-
-    /// Create a wake event. Pragmatic exception: calls `tokio::task::try_id()`
-    /// because the wake-tracking future is inherently tokio-specific.
-    pub(crate) fn create_wake_event(
-        &self,
-        woken_task_id: TaskId,
-        waking_worker: u8,
-    ) -> WakeEventEvent {
-        let waker_task_id = tokio::task::try_id().map(TaskId::from).unwrap_or_default();
-        WakeEventEvent {
-            timestamp_ns: self.timestamp_nanos(),
-            waker_task_id,
-            woken_task_id,
-            target_worker: waking_worker,
-        }
     }
 
     /// Check whether recording is currently enabled.
