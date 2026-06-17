@@ -1,3 +1,5 @@
+/// Monotonic/realtime clock readings, the trace time base.
+pub mod clock;
 /// Cfg-gated concurrency primitives (std / shuttle).
 ///
 /// `pub` so sibling crates share one shuttle shim, but not part of the public

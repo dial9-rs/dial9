@@ -11,6 +11,7 @@ unexpected_cfgs = { level = "warn", check-cfg = ["cfg(shuttle)"] }
 
 [dependencies]
 crossbeam-queue = "0.3"
+libc = { workspace = true }
 shuttle = { version = "0.9.1", optional = true }
 
 [features]
