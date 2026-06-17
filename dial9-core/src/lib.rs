@@ -1,3 +1,5 @@
+/// Thread-local event encoding buffers and the `Encodable` trait.
+pub mod buffer;
 /// Monotonic/realtime clock readings, the trace time base.
 pub mod clock;
 /// Central ring buffer of encoded event batches awaiting write.

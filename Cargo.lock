@@ -1509,6 +1509,7 @@ dependencies = [
  "dial9-trace-format",
  "libc",
  "shuttle",
+ "tracing",
 ]
 
 [[package]]

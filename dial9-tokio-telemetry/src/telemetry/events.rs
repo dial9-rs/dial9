@@ -1,5 +1,7 @@
 #[cfg(feature = "cpu-profiling")]
-use crate::telemetry::format::WorkerId;
+use crate::telemetry::format::{CpuSampleEvent, WorkerId};
+#[cfg(feature = "cpu-profiling")]
+use dial9_core::buffer::{Encodable, ThreadLocalEncoder};
 use serde::Serialize;
 #[cfg(feature = "cpu-profiling")]
 use std::sync::Arc;
@@ -53,6 +55,26 @@ pub(crate) struct CpuSampleData {
     pub callchain: Vec<u64>,
     /// CPU the sample was taken on, if the backend could determine it.
     pub cpu: Option<u32>,
+}
+
+#[cfg(feature = "cpu-profiling")]
+impl Encodable for CpuSampleData {
+    fn encode(&self, enc: &mut ThreadLocalEncoder<'_>) {
+        let thread_name = self
+            .thread_name
+            .as_ref()
+            .map(|n| enc.intern_string(n.as_str()));
+        let callchain = enc.intern_stack_frames(&self.callchain);
+        enc.encode(&CpuSampleEvent {
+            timestamp_ns: self.timestamp_nanos,
+            worker_id: self.worker_id,
+            tid: self.tid,
+            source: self.source,
+            thread_name,
+            callchain,
+            cpu: self.cpu.map(u64::from),
+        });
+    }
 }
 
 /// Get the OS thread ID (tid) of the calling thread via `gettid()`.
@@ -232,5 +254,51 @@ mod tests {
             );
             prev = next;
         }
+    }
+}
+
+#[cfg(all(test, feature = "cpu-profiling"))]
+mod cpu_tests {
+    use crate::telemetry::analysis_events::Dial9Event;
+
+    /// Encode a single `CpuSampleData` through a real thread-local buffer
+    /// and decode it back via the `decode_events` path, asserting that
+    /// the `cpu` field round-trips.
+    fn cpu_sample_round_trip(cpu: Option<u32>) -> Dial9Event {
+        use crate::telemetry::buffer::encode_single;
+        use crate::telemetry::events::{CpuSampleData, CpuSampleSource};
+        use crate::telemetry::format::{WorkerId, decode_events};
+
+        let data = CpuSampleData {
+            timestamp_nanos: 12_345,
+            worker_id: WorkerId::from(0usize),
+            tid: 4242,
+            thread_name: None,
+            source: CpuSampleSource::CpuProfile,
+            callchain: vec![0xdead_beef, 0xcafe_babe],
+            cpu,
+        };
+        let encoded = encode_single(&data);
+        let events = decode_events(&encoded).expect("decode");
+        assert_eq!(events.len(), 1);
+        events.into_iter().next().unwrap()
+    }
+
+    #[test]
+    fn cpu_sample_event_round_trips_with_cpu() {
+        let Dial9Event::CpuSampleEvent(e) = cpu_sample_round_trip(Some(7)) else {
+            panic!("expected CpuSampleEvent");
+        };
+        assert_eq!(e.tid, 4242);
+        assert_eq!(e.cpu, Some(7));
+        assert_eq!(e.callchain, vec![0xdead_beef, 0xcafe_babe]);
+    }
+
+    #[test]
+    fn cpu_sample_event_round_trips_without_cpu() {
+        let Dial9Event::CpuSampleEvent(e) = cpu_sample_round_trip(None) else {
+            panic!("expected CpuSampleEvent");
+        };
+        assert_eq!(e.cpu, None);
     }
 }

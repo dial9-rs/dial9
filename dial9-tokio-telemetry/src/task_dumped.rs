@@ -287,3 +287,30 @@ impl Encodable for TaskDumpData<'_> {
         });
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::TaskDumpData;
+    use crate::telemetry::analysis_events::Dial9Event;
+    use crate::telemetry::buffer::encode_single;
+    use crate::telemetry::format::decode_events;
+    use crate::telemetry::task_metadata::TaskId;
+
+    #[test]
+    fn task_dump_event_round_trips() {
+        let dump = TaskDumpData {
+            timestamp_ns: 42_000,
+            task_id: TaskId::from_u32(17),
+            callchain: &[0x1111_2222, 0x3333_4444, 0x5555_6666],
+        };
+        let encoded = encode_single(&dump);
+        let events = decode_events(&encoded).expect("decode");
+        assert_eq!(events.len(), 1);
+        let Dial9Event::TaskDumpEvent(ref e) = events[0] else {
+            panic!("expected TaskDumpEvent, got {:?}", events[0]);
+        };
+        assert_eq!(e.timestamp_ns, 42_000);
+        assert_eq!(e.task_id, 17);
+        assert_eq!(e.callchain, vec![0x1111_2222, 0x3333_4444, 0x5555_6666]);
+    }
+}

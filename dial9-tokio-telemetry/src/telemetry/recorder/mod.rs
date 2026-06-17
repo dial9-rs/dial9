@@ -901,7 +901,7 @@ mod tests {
         use super::*;
         use crate::telemetry::analysis::TraceReader;
         use crate::telemetry::analysis_events::Dial9Event;
-        use crate::telemetry::buffer::ThreadLocalBuffer;
+        use crate::telemetry::buffer::encode_single;
         use crate::telemetry::collector::Batch;
         use crate::telemetry::events::{CpuSampleData, CpuSampleSource};
         use crate::telemetry::format::WorkerId;
@@ -914,7 +914,7 @@ mod tests {
             writer: &mut DiskWriter,
             event: &dyn crate::telemetry::buffer::Encodable,
         ) -> std::io::Result<()> {
-            let encoded_bytes = ThreadLocalBuffer::encode_single(event);
+            let encoded_bytes = encode_single(event);
             let batch = Batch::new(encoded_bytes, 1);
             writer.write_encoded_batch(&batch)
         }
