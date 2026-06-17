@@ -18,3 +18,5 @@ pub mod rate_limit;
 /// Geometric/Poisson sampling primitives (RNG, exponential draws).
 #[doc(hidden)]
 pub mod sampling;
+/// `Source` trait: pluggable flush-thread data sources.
+pub mod source;

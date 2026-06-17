@@ -1,11 +1,12 @@
 //! Source trait for abstracting flush-thread data sources.
 
+use crate::collector::CentralCollector;
 use crate::primitives::sync::Arc;
 use crate::primitives::sync::atomic::AtomicU64;
-use crate::telemetry::collector::CentralCollector;
 
 /// Context passed to [`Source::flush`] containing shared state needed for draining.
-pub(crate) struct FlushContext<'a> {
+#[doc(hidden)]
+pub struct FlushContext<'a> {
     pub collector: &'a Arc<CentralCollector>,
     pub drain_epoch: &'a AtomicU64,
 }
@@ -15,7 +16,8 @@ pub(crate) struct FlushContext<'a> {
 /// Implementors (e.g. `CpuProfiler`, `SchedProfiler`, `TokioRuntimesSource`)
 /// provide a `flush` method that drains pending data and records it via
 /// `record_encodable_event`.
-pub(crate) trait Source: Send {
+#[doc(hidden)]
+pub trait Source: Send {
     /// Drain pending data into the dial9 trace. Called once per flush cycle
     /// from the flush thread.
     fn flush(&mut self, ctx: &FlushContext<'_>);
