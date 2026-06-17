@@ -30,10 +30,15 @@
 //! # }
 //! ```
 //!
-//! Both [`DumpTrigger::dump_current_data`](crate::dump::DumpTrigger::dump_current_data) and
-//! [`DumpTrigger::dump_time_range`](crate::dump::DumpTrigger::dump_time_range) dispatch
-//! immediately; awaiting the returned [`DumpRun`](crate::dump::DumpRun) is optional and
-//! only retrieves the [`DumpReceipt`](crate::dump::DumpReceipt).
+//! [`DumpTrigger::dump_current_data`](crate::dump::DumpTrigger::dump_current_data) and
+//! [`DumpTrigger::dump_time_range`](crate::dump::DumpTrigger::dump_time_range) build a
+//! [`DumpRun`](crate::dump::DumpRun); the request is dispatched when that run is awaited
+//! or dropped, whichever comes first (so `.with_metadata(...)` can mutate it before it
+//! is sent). In the common temporary-statement form
+//! (`trigger.dump_current_data();`) the run drops at the end of the statement and
+//! dispatches right there; if you bind it to a variable, dispatch waits until that
+//! binding is awaited or goes out of scope. Awaiting is optional and only retrieves the
+//! [`DumpReceipt`](crate::dump::DumpReceipt).
 //! Dumps are strictly best-effort: a window wider than what the ring
 //! retained captures whatever survived, with no error and no effect on the
 //! live stream.
@@ -167,12 +172,16 @@ pub(crate) struct DumpRequest {
 
 /// Leading-edge debounce gate shared across [`DumpTrigger`] clones.
 ///
-/// Records when the last dump *dispatched* and the [`DumpId`] it was given.
-/// A request arriving within `window` of that dispatch coalesces into that
-/// id rather than starting a new dump. The window is measured from the last
-/// dispatched dump and is not extended by coalesced requests, so a burst all
-/// folds into the first dump and the effective rate is at most one dump per
-/// `window`.
+/// Records when the last accepted request was *built* and the [`DumpId`] it
+/// was given. The gate is armed in [`DumpTrigger::request`] (the coalescing
+/// decision has to be synchronous there so a folded trigger can return a
+/// [`DumpError::Coalesced`] run), not at the later drop/await that actually
+/// sends the request; the two coincide in the common temporary-statement
+/// usage. A request arriving within `window` of that instant coalesces into
+/// that id rather than starting a new dump. The window is measured from the
+/// last accepted request and is not extended by coalesced requests, so a
+/// burst all folds into the first dump and the effective rate is at most one
+/// dump per `window`.
 #[derive(Debug)]
 struct Debounce {
     window: Duration,
@@ -239,7 +248,9 @@ impl DumpTrigger {
         let id = DumpId::new();
 
         // Leading-edge debounce: a trigger within `window` of the last
-        // dispatched dump coalesces into it instead of dispatching a new one.
+        // accepted request coalesces into it instead of starting a new one.
+        // Armed here at request-build time so a folded trigger can return a
+        // `Coalesced` run synchronously (see `Debounce`).
         if let Some(debounce) = &self.debounce {
             let now = Instant::now();
             let mut last = debounce.last.lock().expect("debounce mutex poisoned");
@@ -421,6 +432,14 @@ pub struct DumpCompletion {
 }
 
 /// What a completed dump produced.
+///
+/// Best-effort: a dump where some matched segments make it through the
+/// pipeline and others fail terminally still resolves `Ok`, with
+/// [`segments_processed`](Self::segments_processed) counting only the
+/// survivors (the failures are dropped silently, exactly like a segment the
+/// ring evicted before the worker reached it). [`DumpError::Pipeline`] is
+/// reserved for total failure: every captured segment failed and nothing
+/// landed.
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct DumpReceipt {
