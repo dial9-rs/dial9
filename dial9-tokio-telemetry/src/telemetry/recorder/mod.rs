@@ -246,6 +246,7 @@ fn register_hooks(
 
 /// Attach a runtime to an existing telemetry session: register hooks, build
 /// the runtime, reserve worker IDs, and push the context.
+#[allow(clippy::too_many_arguments)]
 fn attach_runtime(
     shared: &Arc<SharedState>,
     contexts: &runtime_context::RuntimeContextRegistry,
