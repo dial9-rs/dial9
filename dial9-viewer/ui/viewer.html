@@ -1039,6 +1039,13 @@
             let currentPoiIndex = -1;
             // Task selection state
             let selectedTaskId = null;
+            // A clicked custom event: {events, timestamp, taskId, name} —
+            // draws a labeled vertical marker across all lanes and, if the
+            // event ran inside a poll, selects that task.
+            let selectedEvent = null;
+            // Timestamp of the custom event currently hovered, for a transient
+            // guide line across the lanes. Drawn on the crosshair overlay.
+            let hoverEventTs = null;
             let selectedSpanId = null; // when a span bar is clicked, highlight all polls containing this span
             let selectedSpanIds = new Set(); // includes selected span + parent chain
             // Active task count timeline: [{t, count}]
@@ -1449,6 +1456,7 @@
                     _ceColorMap.clear();
                     selectedCENames.clear();
                     cePanelHits = [];
+                    selectedEvent = null;
                     if (trace.customEvents && trace.customEvents.length > 0) {
                         const spanPrefixes = ["SpanEnter:", "SpanExit:"];
                         const spanExact = new Set(["SpanEnterEvent", "SpanExitEvent", "SpanCloseEvent"]);
@@ -1868,6 +1876,36 @@
                 return null;
             }
 
+            // Resolve the task a custom event ran on, or null if it cannot be
+            // determined. Custom events do not carry task/worker context, so we
+            // derive it from the timestamp: find the poll whose [start,end]
+            // covers ev.timestamp. If the event happens to declare a `task_id`
+            // (or `worker_id`) field, use that to pin it down precisely.
+            function taskForEvent(ev) {
+                const f = ev.fields || {};
+                if (f.task_id != null) {
+                    const t = Number(f.task_id);
+                    return Number.isFinite(t) ? t : null;
+                }
+                if (f.worker_id != null) {
+                    const wid = Number(f.worker_id);
+                    const spans = workerSpans[wid];
+                    const poll = spans && findSpanAt(spans.polls, ev.timestamp);
+                    return poll && poll.taskId ? poll.taskId : null;
+                }
+                // No hint: search every worker. Accept only an unambiguous
+                // single match; concurrent polls on different workers -> null.
+                let found = null;
+                for (const w of workerIds) {
+                    const poll = findSpanAt(workerSpans[w].polls, ev.timestamp);
+                    if (poll && poll.taskId) {
+                        if (found != null && found !== poll.taskId) return null;
+                        found = poll.taskId;
+                    }
+                }
+                return found;
+            }
+
             /**
              * Binary search for the first span whose end >= viewStart.
              * Spans must be sorted by start time.
@@ -1927,6 +1965,9 @@
                     selOverlay.style.display = "block";
                     updateSelOverlay();
                 }
+
+                // Redraw overlay lines (mouse crosshair + selected-event marker).
+                renderCrosshair();
             }
 
             function nsToX(ns, drawW) {
@@ -2629,7 +2670,24 @@
                     const w = Math.max(TICK_W, Math.min(TICK_W + Math.log2(events.length) * 2, 10));
                     const h = ph - 4;
                     const y = 2;
-                    const alpha = Math.min(0.4 + events.length * 0.15, 1.0);
+
+                    // Resolve the task for this cluster: clickable only if all
+                    // events in it map to the same single task.
+                    let taskId = null;
+                    for (const ev of events) {
+                        const t = taskForEvent(ev);
+                        if (t == null) { taskId = null; break; }
+                        if (taskId == null) taskId = t;
+                        else if (taskId !== t) { taskId = null; break; }
+                    }
+
+                    // When a task is selected, fade ticks that did not run on
+                    // it; the related ticks keep their normal color, so the
+                    // strip de-emphasizes everything unrelated to the task.
+                    let alpha = Math.min(0.4 + events.length * 0.15, 1.0);
+                    if (selectedTaskId != null && taskId !== selectedTaskId) {
+                        alpha *= 0.2;
+                    }
 
                     ctx.fillStyle = ceColor(rep.name);
                     ctx.globalAlpha = alpha;
@@ -2647,7 +2705,7 @@
 
                     // Pad hit region to at least 12px wide for easier hover targeting
                     const hitW = Math.max(w, 12);
-                    cePanelHits.push({ events, x: px - hitW / 2, y, w: hitW, h });
+                    cePanelHits.push({ events, x: px - hitW / 2, y, w: hitW, h, taskId });
                 }
                 ctx.globalAlpha = 1.0;
 
@@ -2797,6 +2855,38 @@
                 renderAll();
             });
 
+            // Build the detail HTML for a custom-event hit (single event or
+            // cluster) — name/fields/timestamp, used by the hover tooltip.
+            // Does NOT include the task line.
+            function ceBodyHtml(events) {
+                let html = "";
+                if (events.length === 1) {
+                    const ev = events[0];
+                    html = `<span class="label">Event:</span> <span class="value">${esc(ev.name)}</span>`;
+                    for (const [k, v] of Object.entries(ev.fields || {})) {
+                        html += `<br><span class="label">${esc(k)}:</span> <span class="value">${esc(formatFieldValue(v, ev.units?.[k]))}</span>`;
+                    }
+                    html += `<br><span class="label">@</span> <span class="value">${fmtTs(ev.timestamp)}</span>`;
+                } else {
+                    const nameCounts = {};
+                    for (const ev of events) nameCounts[ev.name] = (nameCounts[ev.name] || 0) + 1;
+                    const nameList = Object.entries(nameCounts)
+                        .sort((a, b) => b[1] - a[1])
+                        .slice(0, 5)
+                        .map(([n, c]) => `${esc(n)}${c > 1 ? " ×" + c : ""}`)
+                        .join(", ");
+                    html = `<span class="label">Cluster:</span> <span class="value">${events.length} events</span>`;
+                    html += `<br><span class="label">Types:</span> <span class="value">${nameList}</span>`;
+                    const first = events[0];
+                    const last = events[events.length - 1];
+                    html += `<br><span class="label">@</span> <span class="value">${fmtTs(first.timestamp)}</span>`;
+                    if (last.timestamp !== first.timestamp) {
+                        html += ` – <span class="value">${fmtTs(last.timestamp)}</span>`;
+                    }
+                }
+                return html;
+            }
+
             // Custom events panel hover tooltip
             document.getElementById("ce-panel-canvas").addEventListener("mousemove", (e) => {
                 const c = document.getElementById("ce-panel-canvas");
@@ -2813,36 +2903,12 @@
                     }
                 }
 
+                c.style.cursor = hit && hit.taskId != null ? "pointer" : "default";
+
                 if (hit) {
-                    let html = "";
-                    if (hit.events.length === 1) {
-                        const ev = hit.events[0];
-                        html = `<span class="label">Event:</span> <span class="value">${esc(ev.name)}</span>`;
-                        const entries = Object.entries(ev.fields || {});
-                        if (entries.length > 0) {
-                            for (const [k, v] of entries) {
-                                html += `<br><span class="label">${esc(k)}:</span> <span class="value">${esc(formatFieldValue(v, ev.units?.[k]))}</span>`;
-                            }
-                        }
-                        html += `<br><span class="label">@</span> <span class="value">${fmtTs(ev.timestamp)}</span>`;
-                    } else {
-                        const nameCounts = {};
-                        for (const ev of hit.events) {
-                            nameCounts[ev.name] = (nameCounts[ev.name] || 0) + 1;
-                        }
-                        const nameList = Object.entries(nameCounts)
-                            .sort((a, b) => b[1] - a[1])
-                            .slice(0, 5)
-                            .map(([n, c]) => `${esc(n)}${c > 1 ? " \u00d7" + c : ""}`)
-                            .join(", ");
-                        html = `<span class="label">Cluster:</span> <span class="value">${hit.events.length} events</span>`;
-                        html += `<br><span class="label">Types:</span> <span class="value">${nameList}</span>`;
-                        const first = hit.events[0];
-                        const last = hit.events[hit.events.length - 1];
-                        html += `<br><span class="label">@</span> <span class="value">${fmtTs(first.timestamp)}</span>`;
-                        if (last.timestamp !== first.timestamp) {
-                            html += ` \u2013 <span class="value">${fmtTs(last.timestamp)}</span>`;
-                        }
+                    let html = ceBodyHtml(hit.events);
+                    if (hit.taskId != null) {
+                        html += `<br><span class="label">Task:</span> <span class="value">0x${hit.taskId.toString(16)}</span> <span class="label">(click to select)</span>`;
                     }
                     tooltip.innerHTML = html;
                     tooltip.style.display = "block";
@@ -2851,9 +2917,66 @@
                 } else {
                     tooltip.style.display = "none";
                 }
+
+                // Guide line across the lanes at the hovered event's timestamp.
+                const newHoverTs = hit ? hit.events[0].timestamp : null;
+                if (newHoverTs !== hoverEventTs) {
+                    hoverEventTs = newHoverTs;
+                    renderCrosshair();
+                }
             });
             document.getElementById("ce-panel-canvas").addEventListener("mouseleave", () => {
                 tooltip.style.display = "none";
+                document.getElementById("ce-panel-canvas").style.cursor = "default";
+                if (hoverEventTs !== null) {
+                    hoverEventTs = null;
+                    renderCrosshair();
+                }
+            });
+
+            // Click a custom event tick to inspect it: draws a labeled vertical
+            // marker across all lanes at its timestamp and — if the event ran
+            // inside a poll — selects that task (same effect as clicking the
+            // task's poll bar). Clicking the same tick again clears everything.
+            document.getElementById("ce-panel-canvas").addEventListener("click", (e) => {
+                const c = document.getElementById("ce-panel-canvas");
+                const rect = c.getBoundingClientRect();
+                const mx = e.clientX - rect.left;
+                const my = e.clientY - rect.top;
+
+                let hit = null;
+                for (let i = cePanelHits.length - 1; i >= 0; i--) {
+                    const h = cePanelHits[i];
+                    if (mx >= h.x && mx <= h.x + h.w && my >= h.y && my <= h.y + h.h) {
+                        hit = h;
+                        break;
+                    }
+                }
+                if (!hit) return;
+
+                const ts = hit.events[0].timestamp;
+                const sameAsSelected = selectedEvent &&
+                    selectedEvent.timestamp === ts &&
+                    selectedEvent.events.length === hit.events.length;
+
+                if (sameAsSelected) {
+                    // Toggle off: clear the marker and any task it selected.
+                    if (hit.taskId != null && selectedTaskId === hit.taskId) selectedTaskId = null;
+                    selectedEvent = null;
+                } else {
+                    const name = hit.events.length === 1
+                        ? hit.events[0].name
+                        : `${hit.events.length} events`;
+                    selectedEvent = { events: hit.events, timestamp: ts, taskId: hit.taskId, name };
+                    if (hit.taskId != null) {
+                        selectedTaskId = hit.taskId;
+                        // Events do not map to a single span; clear stale span focus.
+                        selectedSpanId = null;
+                        selectedSpanIds = new Set();
+                        focusedSpanId = null;
+                    }
+                }
+                renderAll();
             });
 
             /**
@@ -3474,6 +3597,54 @@
                     ctx.moveTo(kx, 0);
                     ctx.lineTo(kx, h);
                     ctx.stroke();
+                }
+
+                const eventX = (ns) =>
+                    (lanesRect.left - mainRect.left) + LABEL_W + nsToX(ns, effectiveDrawW);
+
+                // Transient guide line for the hovered custom event.
+                if (hoverEventTs !== null && hoverEventTs >= viewStart && hoverEventTs <= viewEnd) {
+                    const hx = eventX(hoverEventTs);
+                    ctx.strokeStyle = "rgba(255,140,0,0.4)";
+                    ctx.lineWidth = 1;
+                    ctx.setLineDash([3, 3]);
+                    ctx.beginPath();
+                    ctx.moveTo(hx, 0);
+                    ctx.lineTo(hx, h);
+                    ctx.stroke();
+                    ctx.setLineDash([]);
+                }
+
+                // Persistent marker + label for the clicked custom event.
+                if (selectedEvent &&
+                    selectedEvent.timestamp >= viewStart &&
+                    selectedEvent.timestamp <= viewEnd) {
+                    const mx = eventX(selectedEvent.timestamp);
+                    ctx.strokeStyle = "rgba(255,140,0,0.9)";
+                    ctx.lineWidth = 1;
+                    ctx.setLineDash([3, 3]);
+                    ctx.beginPath();
+                    ctx.moveTo(mx, 0);
+                    ctx.lineTo(mx, h);
+                    ctx.stroke();
+                    ctx.setLineDash([]);
+
+                    // Label chip: "name @ time", kept inside the viewport.
+                    const label = `${selectedEvent.name} @ ${fmtTs(selectedEvent.timestamp)}`;
+                    ctx.font = "11px sans-serif";
+                    const tw = ctx.measureText(label).width;
+                    const padX = 5;
+                    let bx = mx + 4;
+                    if (bx + tw + padX * 2 > w) bx = mx - 4 - (tw + padX * 2);
+                    ctx.fillStyle = "rgba(40,25,0,0.92)";
+                    ctx.fillRect(bx, 2, tw + padX * 2, 16);
+                    ctx.strokeStyle = "rgba(255,140,0,0.9)";
+                    ctx.lineWidth = 1;
+                    ctx.strokeRect(bx, 2, tw + padX * 2, 16);
+                    ctx.fillStyle = "#ffcf99";
+                    ctx.textAlign = "left";
+                    ctx.textBaseline = "middle";
+                    ctx.fillText(label, bx + padX, 11);
                 }
             }
 
