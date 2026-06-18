@@ -1894,7 +1894,17 @@
             // derive it from the timestamp: find the poll whose [start,end]
             // covers ev.timestamp. If the event happens to declare a `task_id`
             // (or `worker_id`) field, use that to pin it down precisely.
+            // Cache resolved task per event object. Event objects are stable
+            // within a trace and replaced wholesale on reload, so the WeakMap
+            // self-invalidates — avoids rescanning all workers per render.
+            const _taskForEventCache = new WeakMap();
             function taskForEvent(ev) {
+                if (_taskForEventCache.has(ev)) return _taskForEventCache.get(ev);
+                const result = _resolveTaskForEvent(ev);
+                _taskForEventCache.set(ev, result);
+                return result;
+            }
+            function _resolveTaskForEvent(ev) {
                 const f = ev.fields || {};
                 if (f.task_id != null) {
                     const t = Number(f.task_id);
@@ -1922,17 +1932,21 @@
             // Resolve the specific poll a custom event landed in (the single
             // bar to highlight), or null if it cannot be pinned to one poll.
             // Returns {workerId, start, end, taskId}.
-            function pollForEvent(ev) {
+            // `preferTask` (optional) pins the search to a known task — e.g. the
+            // task a whole cluster resolved to — overriding the field-derived one.
+            function pollForEvent(ev, preferTask = null) {
                 const f = ev.fields || {};
                 if (f.worker_id != null) {
                     const wid = Number(f.worker_id);
                     const spans = workerSpans[wid];
                     const poll = spans && findSpanAt(spans.polls, ev.timestamp);
-                    return poll && poll.taskId
+                    return poll && poll.taskId && (preferTask == null || poll.taskId === preferTask)
                         ? { workerId: wid, start: poll.start, end: poll.end, taskId: poll.taskId }
                         : null;
                 }
-                const wantTask = f.task_id != null ? Number(f.task_id) : null;
+                const wantTask = preferTask != null
+                    ? preferTask
+                    : (f.task_id != null ? Number(f.task_id) : null);
                 // Search every worker; accept only an unambiguous single match.
                 let found = null;
                 for (const w of workerIds) {
@@ -2961,12 +2975,14 @@
                     }
                 }
 
-                c.style.cursor = hit && hit.taskId != null ? "pointer" : "default";
+                c.style.cursor = hit ? "pointer" : "default";
 
                 if (hit) {
                     let html = ceBodyHtml(hit.events);
                     if (hit.taskId != null) {
                         html += `<br><span class="label">Task:</span> <span class="value">0x${hit.taskId.toString(16)}</span> <span class="label">(click to select)</span>`;
+                    } else {
+                        html += `<br><span class="label">(click to inspect)</span>`;
                     }
                     tooltip.innerHTML = html;
                     tooltip.style.display = "block";
@@ -3012,9 +3028,12 @@
                 if (!hit) return;
 
                 const ts = hit.events[0].timestamp;
+                // Include x: two distinct clusters can share a timestamp and
+                // length, but never the same pixel column.
                 const sameAsSelected = selectedEvent &&
                     selectedEvent.timestamp === ts &&
-                    selectedEvent.events.length === hit.events.length;
+                    selectedEvent.events.length === hit.events.length &&
+                    selectedEvent.x === hit.x;
 
                 if (sameAsSelected) {
                     // Toggle off: clear the marker and the pinned sidebar detail.
@@ -3026,8 +3045,10 @@
                         : `${hit.events.length} events`;
                     // Pin to the single poll the event landed in rather than
                     // selecting the whole task (which would flood the lanes).
-                    const poll = pollForEvent(hit.events[0]);
-                    selectedEvent = { events: hit.events, timestamp: ts, taskId: hit.taskId, name, poll };
+                    // Prefer the cluster's resolved task so the highlighted bar
+                    // matches it even for multi-event hits.
+                    const poll = pollForEvent(hit.events[0], hit.taskId);
+                    selectedEvent = { events: hit.events, timestamp: ts, taskId: hit.taskId, name, poll, x: hit.x };
                     // Drop any prior task/span selection so the lanes show only
                     // this event's poll plus the marker line.
                     selectedTaskId = null;
