@@ -1919,6 +1919,32 @@
                 return found;
             }
 
+            // Resolve the specific poll a custom event landed in (the single
+            // bar to highlight), or null if it cannot be pinned to one poll.
+            // Returns {workerId, start, end, taskId}.
+            function pollForEvent(ev) {
+                const f = ev.fields || {};
+                if (f.worker_id != null) {
+                    const wid = Number(f.worker_id);
+                    const spans = workerSpans[wid];
+                    const poll = spans && findSpanAt(spans.polls, ev.timestamp);
+                    return poll && poll.taskId
+                        ? { workerId: wid, start: poll.start, end: poll.end, taskId: poll.taskId }
+                        : null;
+                }
+                const wantTask = f.task_id != null ? Number(f.task_id) : null;
+                // Search every worker; accept only an unambiguous single match.
+                let found = null;
+                for (const w of workerIds) {
+                    const poll = findSpanAt(workerSpans[w].polls, ev.timestamp);
+                    if (poll && poll.taskId && (wantTask == null || poll.taskId === wantTask)) {
+                        if (found != null && found.taskId !== poll.taskId) return null;
+                        found = { workerId: w, start: poll.start, end: poll.end, taskId: poll.taskId };
+                    }
+                }
+                return found;
+            }
+
             /**
              * Binary search for the first span whose end >= viewStart.
              * Spans must be sorted by start time.
@@ -2305,6 +2331,22 @@
                     ctx.lineTo(x2, bandTop + bandH);
                     ctx.stroke();
                     ctx.setLineDash([]);
+                }
+                // Highlight the single poll a clicked custom event landed in,
+                // so the event points at exactly one bar instead of lighting up
+                // every poll of a (possibly busy) task.
+                if (selectedEvent && selectedEvent.poll && selectedEvent.poll.workerId === workerId) {
+                    const p = selectedEvent.poll;
+                    if (p.end >= viewStart && p.start <= viewEnd) {
+                        const x1 = Math.max(0, nsToX(p.start, pw));
+                        const x2 = Math.min(pw, nsToX(p.end, pw));
+                        const w = Math.max(x2 - x1, 2);
+                        ctx.fillStyle = "#ffeb3b";
+                        ctx.fillRect(x1, bandTop, w, bandH);
+                        ctx.strokeStyle = "#fff";
+                        ctx.lineWidth = 1;
+                        ctx.strokeRect(x1 - 0.5, bandTop - 0.5, w + 1, bandH + 1);
+                    }
                 }
                 // Highlight current POI span
                 if (poiSpan) {
@@ -2694,11 +2736,14 @@
                         else if (taskId !== t) { taskId = null; break; }
                     }
 
-                    // When a task is selected, fade ticks that did not run on
-                    // it; the related ticks keep their normal color, so the
-                    // strip de-emphasizes everything unrelated to the task.
+                    // When a task is selected (via a poll or an event), fade
+                    // ticks that did not run on it; related ticks keep their
+                    // normal color, de-emphasizing everything unrelated.
+                    const hlTask = selectedTaskId != null
+                        ? selectedTaskId
+                        : (selectedEvent && selectedEvent.taskId != null ? selectedEvent.taskId : null);
                     let alpha = Math.min(0.4 + events.length * 0.15, 1.0);
-                    if (selectedTaskId != null && taskId !== selectedTaskId) {
+                    if (hlTask != null && taskId !== hlTask) {
                         alpha *= 0.2;
                     }
 
@@ -2972,23 +3017,23 @@
                     selectedEvent.events.length === hit.events.length;
 
                 if (sameAsSelected) {
-                    // Toggle off: clear the marker, any task it selected, and the
-                    // pinned sidebar detail.
-                    if (hit.taskId != null && selectedTaskId === hit.taskId) selectedTaskId = null;
+                    // Toggle off: clear the marker and the pinned sidebar detail.
                     selectedEvent = null;
                     hideStackPopup();
                 } else {
                     const name = hit.events.length === 1
                         ? hit.events[0].name
                         : `${hit.events.length} events`;
-                    selectedEvent = { events: hit.events, timestamp: ts, taskId: hit.taskId, name };
-                    if (hit.taskId != null) {
-                        selectedTaskId = hit.taskId;
-                        // Events do not map to a single span; clear stale span focus.
-                        selectedSpanId = null;
-                        selectedSpanIds = new Set();
-                        focusedSpanId = null;
-                    }
+                    // Pin to the single poll the event landed in rather than
+                    // selecting the whole task (which would flood the lanes).
+                    const poll = pollForEvent(hit.events[0]);
+                    selectedEvent = { events: hit.events, timestamp: ts, taskId: hit.taskId, name, poll };
+                    // Drop any prior task/span selection so the lanes show only
+                    // this event's poll plus the marker line.
+                    selectedTaskId = null;
+                    selectedSpanId = null;
+                    selectedSpanIds = new Set();
+                    focusedSpanId = null;
                     showEventDetail(hit);
                 }
                 renderAll();
