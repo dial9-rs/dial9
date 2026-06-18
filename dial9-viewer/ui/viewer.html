@@ -752,6 +752,7 @@
                 </div>
                 <div class="sidebar-tabs" id="sidebar-tabs" style="display:none">
                     <span class="tab" id="tab-poll-detail" data-tab="poll-detail" style="display:none">Poll Detail</span>
+                    <span class="tab" id="tab-event" data-tab="event" style="display:none">Event</span>
                     <span class="tab" id="tab-flamegraph" data-tab="flamegraph">Flamegraph</span>
                     <span class="tab" id="tab-blocking" data-tab="blocking">Blocking Calls</span>
                     <span class="tab" id="tab-heap" data-tab="heap" style="display:none">Heap</span>
@@ -2971,9 +2972,11 @@
                     selectedEvent.events.length === hit.events.length;
 
                 if (sameAsSelected) {
-                    // Toggle off: clear the marker and any task it selected.
+                    // Toggle off: clear the marker, any task it selected, and the
+                    // pinned sidebar detail.
                     if (hit.taskId != null && selectedTaskId === hit.taskId) selectedTaskId = null;
                     selectedEvent = null;
+                    hideStackPopup();
                 } else {
                     const name = hit.events.length === 1
                         ? hit.events[0].name
@@ -2986,6 +2989,7 @@
                         selectedSpanIds = new Set();
                         focusedSpanId = null;
                     }
+                    showEventDetail(hit);
                 }
                 renderAll();
             });
@@ -4194,6 +4198,42 @@
 
             document.getElementById("stack-sidebar-close").addEventListener("click", hideStackPopup);
 
+            // Pin a clicked custom-event (or cluster) into the sidebar so its
+            // fields stay visible — the hover tooltip vanishes on mouse-out.
+            // `hit` is a cePanelHits entry: { events, taskId, ... }.
+            function showEventDetail(hit) {
+                const sidebar = document.getElementById("stack-sidebar");
+                const title = document.getElementById("stack-sidebar-title");
+                const body = document.getElementById("stack-sidebar-body");
+                // Reclaim the flamegraph container before overwriting the body,
+                // and drop any range-selection state — event detail owns neither.
+                if (fgActive) {
+                    fgActive = false;
+                    document.getElementById("flamegraph-panel").appendChild(fgContainer);
+                }
+                schedActive = false;
+                sidebarSelStart = 0;
+                sidebarSelEnd = 0;
+                selOverlay.style.display = "none";
+
+                title.textContent = hit.events.length === 1
+                    ? hit.events[0].name
+                    : `${hit.events.length} events`;
+
+                let html = ceBodyHtml(hit.events);
+                if (hit.taskId != null) {
+                    html += `<br><span class="label">Task:</span> <span class="value">0x${hit.taskId.toString(16)}</span> <span class="label">(selected)</span>`;
+                }
+                body.innerHTML = html;
+                body.style.display = "";
+                body.style.flexDirection = "";
+
+                showSidebarTabs("event");
+                const wasHidden = sidebar.style.display !== "flex";
+                sidebar.style.display = "flex";
+                if (wasHidden && trace) requestAnimationFrame(renderAll);
+            }
+
             // ── Uninstrumented Tasks Popup ──
             function showUninstrumentedPopup(anchor) {
                 if (!trace || !trace.taskInstrumented) return;
@@ -4274,9 +4314,27 @@
                 const tabs = document.getElementById("sidebar-tabs");
                 tabs.style.display = "flex";
                 const pollDetail = tabs.querySelector("#tab-poll-detail");
+                const event = tabs.querySelector("#tab-event");
                 const flamegraph = tabs.querySelector("#tab-flamegraph");
                 const blocking = tabs.querySelector("#tab-blocking");
                 const heap = tabs.querySelector("#tab-heap");
+
+                // Event detail is standalone — no flamegraph/blocking/heap.
+                if (activeTab === "event") {
+                    event.style.display = "";
+                    pollDetail.style.display = "none";
+                    flamegraph.style.display = "none";
+                    blocking.style.display = "none";
+                    heap.style.display = "none";
+                    event.classList.add("active");
+                    pollDetail.classList.remove("active");
+                    flamegraph.classList.remove("active");
+                    blocking.classList.remove("active");
+                    heap.classList.remove("active");
+                    return;
+                }
+                event.style.display = "none";
+                event.classList.remove("active");
 
                 if (activeTab === "poll-detail") {
                     pollDetail.style.display = "";
