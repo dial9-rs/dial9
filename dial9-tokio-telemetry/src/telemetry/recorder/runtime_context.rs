@@ -1,4 +1,4 @@
-use super::shared_state::{PARKED_SCHED_WAIT, SharedState};
+use super::SharedState;
 use super::source::{FlushContext, Source};
 use crate::primitives::sync::{Arc, Mutex};
 use crate::telemetry::buffer::{Encodable, ThreadLocalEncoder, record_encodable_event};
@@ -49,6 +49,11 @@ thread_local! {
     /// Last timestamp returned by `poll_start_ts_monotonic`. Ensures strictly
     /// increasing values within a thread by bumping +1ns on ties.
     static LAST_TS: Cell<u64> = const { Cell::new(0) };
+}
+
+crate::primitives::thread_local! {
+    /// schedstat wait_time_ns captured at park time, used to compute delta on unpark.
+    static PARKED_SCHED_WAIT: Cell<u64> = const { Cell::new(0) };
 }
 
 /// Returns a strictly monotonic timestamp for this thread.

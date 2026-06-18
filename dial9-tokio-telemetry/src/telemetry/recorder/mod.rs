@@ -3,13 +3,14 @@ mod flush_loop;
 mod guard;
 mod handle;
 mod runtime_context;
-mod shared_state;
+#[cfg(all(test, shuttle))]
+mod pipeline_shuttle_tests;
+pub(crate) use dial9_core::shared_state::SharedState;
 pub(crate) use dial9_core::source;
 
 pub(crate) use runtime_context::RuntimeContext;
 pub use runtime_context::current_worker_id;
 pub(crate) use runtime_context::poll_start_ts_monotonic;
-pub(crate) use shared_state::SharedState;
 
 pub use builder::{
     BuildAndStartRuntime, HasTracePath, NoTracePath, PipelineCustom, PipelineS3, PipelineUnset,
@@ -17,7 +18,9 @@ pub use builder::{
     TracedRuntimeBuilder,
 };
 pub use guard::{TelemetryGuard, TraceRuntimeCoreBuilder};
-pub use handle::{Dial9Handle, Dial9TokioHandle, spawn};
+pub use dial9_core::handle::Dial9Handle;
+pub(crate) use handle::traced_handle;
+pub use handle::{Dial9TokioHandle, spawn};
 
 mod tokio_hooks;
 pub use tokio_hooks::TokioHooks;
@@ -30,7 +33,8 @@ use builder::PipelineConfig;
 #[cfg(test)]
 use handle::InstrumentedSpawnGuard;
 
-use handle::{CURRENT_HANDLE, INSTRUMENTED_SPAWN};
+use dial9_core::handle::{clear_tl_handle, set_tl_handle};
+use handle::INSTRUMENTED_SPAWN;
 use runtime_context::{make_poll_end, make_poll_start, make_worker_park, make_worker_unpark};
 
 use crate::primitives::sync::Arc;
@@ -40,15 +44,7 @@ use crate::telemetry::format::TaskTerminateEvent;
 use crate::telemetry::task_metadata::TaskId;
 use std::time::Duration;
 
-// ---------------------------------------------------------------------------
-// Channel-based control for the flush thread
-// ---------------------------------------------------------------------------
-
-/// Commands sent to the flush thread from Dial9Handle / TelemetryGuard.
-pub(crate) enum ControlCommand {
-    /// Flush, finalize (seal segment), then exit the thread.
-    FinalizeAndStop(crate::primitives::sync::mpsc::SyncSender<()>),
-}
+pub(crate) use dial9_core::handle::ControlCommand;
 
 /// Register a tokio hook, composing with an optional user callback.
 /// When `$user_hook` is None, registers only the dial9 closure (zero-cost).
@@ -207,9 +203,7 @@ fn register_hooks(
     register_hook!(builder, on_thread_start, tokio_hooks.on_thread_start, {
         // Install this thread's Dial9Handle so user code can call
         // `Dial9Handle::current()` from anywhere on this thread.
-        CURRENT_HANDLE.with(|cell| {
-            *cell.borrow_mut() = Some(handle_for_tl.clone());
-        });
+        set_tl_handle(handle_for_tl.clone());
 
         #[cfg(feature = "cpu-profiling")]
         {
@@ -224,9 +218,7 @@ fn register_hooks(
     });
 
     register_hook!(builder, on_thread_stop, tokio_hooks.on_thread_stop, {
-        CURRENT_HANDLE.with(|cell| {
-            *cell.borrow_mut() = None;
-        });
+        clear_tl_handle();
 
         #[cfg(feature = "cpu-profiling")]
         {
@@ -265,10 +257,8 @@ fn attach_runtime(
 
     // Install the handle on the calling thread. For current_thread runtimes,
     // this thread IS the worker (block_on runs here), so the tracing layer
-    // needs CURRENT_HANDLE to be set. Harmless for multi_thread runtimes.
-    CURRENT_HANDLE.with(|cell| {
-        *cell.borrow_mut() = Some(Dial9Handle::enabled(shared.clone(), control_tx.clone()));
-    });
+    // needs the TL handle to be set. Harmless for multi_thread runtimes.
+    set_tl_handle(Dial9Handle::enabled(shared.clone(), control_tx.clone()));
 
     // Pre-reserve a contiguous block of worker IDs and set metrics atomically.
     let metrics = runtime.handle().metrics();
@@ -1284,9 +1274,7 @@ mod tests {
 
         // Drain thread-local buffers before shutdown.
         crate::telemetry::buffer::drain_to_collector(
-            &guard
-                .handle()
-                .traced_handle()
+            &traced_handle(&guard.handle())
                 .expect("enabled handle must yield a TracedHandle")
                 .shared
                 .collector,

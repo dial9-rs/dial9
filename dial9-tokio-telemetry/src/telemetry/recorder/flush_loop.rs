@@ -8,7 +8,7 @@ use metrique::unit_of_work::metrics;
 use std::time::Duration;
 
 use super::ControlCommand;
-use super::shared_state::SharedState;
+use super::SharedState;
 
 /// Tracks the drain coordination state between the flush loop and the writer.
 ///

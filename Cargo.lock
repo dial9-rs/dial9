@@ -1508,6 +1508,8 @@ dependencies = [
  "crossbeam-queue",
  "dial9-trace-format",
  "libc",
+ "metrique",
+ "proptest",
  "shuttle",
  "tracing",
 ]

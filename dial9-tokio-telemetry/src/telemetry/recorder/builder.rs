@@ -8,8 +8,8 @@ use std::time::Duration;
 
 use super::flush_loop::run_flush_loop;
 use super::guard::{TelemetryGuard, WorkerHandle};
-use super::handle::Dial9Handle;
-use super::shared_state::SharedState;
+use super::Dial9Handle;
+use super::SharedState;
 use super::{ControlCommand, attach_runtime};
 
 /// Marker: no trace path has been set yet.

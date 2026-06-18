@@ -244,9 +244,7 @@ mod tests {
             .writer(InMemoryWriter::new(16 * 1024 * 1024).unwrap())
             .build()
             .unwrap();
-        let handle = guard
-            .handle()
-            .traced_handle()
+        let handle = crate::telemetry::recorder::traced_handle(&guard.handle())
             .expect("enabled handle yields TracedHandle");
 
         let mut future = TracedFuture::new(std::future::pending::<()>(), Some(handle));
@@ -320,9 +318,7 @@ mod tests {
         // Wake events land in the thread-local buffer (capacity 1_024), so a
         // single event will not auto-flush.  Manually drain the buffer into the
         // collector so that the guard flush below picks it up.
-        let th = guard
-            .handle()
-            .traced_handle()
+        let th = crate::telemetry::recorder::traced_handle(&guard.handle())
             .expect("enabled handle yields TracedHandle");
         buffer::drain_to_collector(&th.shared.collector);
 

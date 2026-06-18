@@ -2,9 +2,10 @@ use crate::primitives::sync::Arc;
 use crate::telemetry::buffer;
 use std::time::Duration;
 
-use super::handle::{Dial9Handle, Dial9TokioHandle};
+use super::Dial9Handle;
+use super::handle::Dial9TokioHandle;
 use super::runtime_context::RuntimeContextRegistry;
-use super::shared_state::SharedState;
+use super::SharedState;
 use super::{ControlCommand, attach_runtime};
 
 /// Holds the background worker thread and its stop signal.
@@ -96,7 +97,7 @@ impl TelemetryGuard {
     /// On a disabled guard, spawns fall through to plain `tokio::spawn` without
     /// wake tracking.
     pub fn tokio_handle(&self, runtime: &tokio::runtime::Handle) -> Dial9TokioHandle {
-        Dial9TokioHandle::for_runtime(runtime.clone(), self.handle().traced_handle())
+        Dial9TokioHandle::for_runtime(runtime.clone(), super::traced_handle(&self.handle()))
     }
 
     /// Monotonic start time of the telemetry session in nanoseconds, if
@@ -350,7 +351,7 @@ impl<'a> TraceRuntimeCoreBuilder<'a> {
             self.guard.shared(),
             self.guard.contexts(),
             self.guard.control_tx(),
-            self.guard.handle().traced_handle(),
+            super::traced_handle(&self.guard.handle()),
         ) else {
             // Disabled guard: build a plain tokio runtime and return a
             // Dial9TokioHandle that effectively short-circuits to tokio::spawn.

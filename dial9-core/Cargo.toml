@@ -13,8 +13,12 @@ unexpected_cfgs = { level = "warn", check-cfg = ["cfg(shuttle)"] }
 crossbeam-queue = "0.3"
 dial9-trace-format = { workspace = true }
 libc = { workspace = true }
+metrique = { version = "0.1.23", features = ["local-format"] }
 shuttle = { version = "0.9.1", optional = true }
 tracing = "0.1.44"
+
+[dev-dependencies]
+proptest = "1"
 
 [features]
 _shuttle = ["dep:shuttle"]
