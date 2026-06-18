@@ -1122,6 +1122,17 @@
             const taskDetailPanel = document.getElementById("task-detail");
             const clearRangeBtn = document.getElementById("btn-clear-range");
             const tooltip = document.getElementById("tooltip");
+            // Position the (already-populated, display:block) tooltip near the
+            // cursor, clamped to the viewport on both axes. Flips above the cursor
+            // when it would spill off the bottom. Call after setting innerHTML.
+            function placeTooltip(e, dy = 16) {
+                const tw = tooltip.offsetWidth, th = tooltip.offsetHeight;
+                let tx = Math.min(e.clientX + 12, window.innerWidth - tw - 8);
+                let ty = e.clientY + dy;
+                if (ty + th > window.innerHeight - 8) ty = e.clientY - th - 8;
+                tooltip.style.left = Math.max(8, tx) + "px";
+                tooltip.style.top = Math.max(8, ty) + "px";
+            }
             const timelineCanvas = document.getElementById("timeline-canvas");
             const queueCanvas = document.getElementById("queue-canvas");
             const lanesContainer = document.getElementById("lanes-container");
@@ -2776,8 +2787,7 @@
                     }
                     tooltip.innerHTML = html;
                     tooltip.style.display = "block";
-                    tooltip.style.left = Math.min(e.clientX + 12, window.innerWidth - 340) + "px";
-                    tooltip.style.top = (e.clientY + 16) + "px";
+                    placeTooltip(e);
                 } else {
                     tooltip.style.display = "none";
                 }
@@ -2914,8 +2924,7 @@
                     }
                     tooltip.innerHTML = html;
                     tooltip.style.display = "block";
-                    tooltip.style.left = Math.min(e.clientX + 12, window.innerWidth - 340) + "px";
-                    tooltip.style.top = (e.clientY + 16) + "px";
+                    placeTooltip(e);
                 } else {
                     tooltip.style.display = "none";
                 }
@@ -4920,10 +4929,7 @@
                         taskCountInfo +
                         spanInfo;
                     tooltip.style.display = "block";
-                    tooltip.style.left =
-                        Math.min(e.clientX + 12, window.innerWidth - 340) +
-                        "px";
-                    tooltip.style.top = e.clientY + 130 + "px";
+                    placeTooltip(e, 130);
                 });
             document
                 .getElementById("main-area")
