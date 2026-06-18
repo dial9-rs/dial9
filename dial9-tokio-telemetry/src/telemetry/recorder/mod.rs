@@ -2,9 +2,9 @@ mod builder;
 mod flush_loop;
 mod guard;
 mod handle;
-mod runtime_context;
 #[cfg(all(test, shuttle))]
 mod pipeline_shuttle_tests;
+mod runtime_context;
 pub(crate) use dial9_core::shared_state::SharedState;
 pub(crate) use dial9_core::source;
 
@@ -17,8 +17,8 @@ pub use builder::{
     TelemetryCore, TelemetryCoreBuilder, TelemetryRuntimeError, TracedRuntime,
     TracedRuntimeBuilder,
 };
-pub use guard::{TelemetryGuard, TraceRuntimeCoreBuilder};
 pub use dial9_core::handle::Dial9Handle;
+pub use guard::{TelemetryGuard, TraceRuntimeCoreBuilder};
 pub(crate) use handle::traced_handle;
 pub use handle::{Dial9TokioHandle, spawn};
 
@@ -96,6 +96,9 @@ fn register_hooks(
     control_tx: &crate::primitives::sync::mpsc::SyncSender<ControlCommand>,
     task_tracking_enabled: bool,
     tokio_hooks: TokioHooks,
+    #[cfg_attr(not(feature = "taskdump"), allow(unused_variables))] taskdump_config: Option<
+        crate::telemetry::task_dump_config::TaskDumpConfig,
+    >,
 ) {
     // TODO: these should rely on public APIs instead of utilizing `SharedState`
 
@@ -205,6 +208,12 @@ fn register_hooks(
         // `Dial9Handle::current()` from anywhere on this thread.
         set_tl_handle(handle_for_tl.clone());
 
+        // Install this thread's task-dump config for `TaskDumped` to read.
+        #[cfg(feature = "taskdump")]
+        if let Some(config) = taskdump_config {
+            crate::task_dumped::set_taskdump_config(config);
+        }
+
         #[cfg(feature = "cpu-profiling")]
         {
             // Sched event sampling is deferred to start_sched_sampling_if_needed(),
@@ -219,6 +228,9 @@ fn register_hooks(
 
     register_hook!(builder, on_thread_stop, tokio_hooks.on_thread_stop, {
         clear_tl_handle();
+
+        #[cfg(feature = "taskdump")]
+        crate::task_dumped::clear_taskdump_config();
 
         #[cfg(feature = "cpu-profiling")]
         {
@@ -242,6 +254,7 @@ fn attach_runtime(
     control_tx: &crate::primitives::sync::mpsc::SyncSender<ControlCommand>,
     task_tracking_enabled: bool,
     tokio_hooks: TokioHooks,
+    taskdump_config: Option<crate::telemetry::task_dump_config::TaskDumpConfig>,
 ) -> std::io::Result<tokio::runtime::Runtime> {
     let ctx = Arc::new(RuntimeContext::new(runtime_name));
     register_hooks(
@@ -251,6 +264,7 @@ fn attach_runtime(
         control_tx,
         task_tracking_enabled,
         tokio_hooks,
+        taskdump_config,
     );
 
     let runtime = builder.build()?;
@@ -482,7 +496,7 @@ mod tests {
 
     #[test]
     fn test_shared_state_no_spawn_location_fields() {
-        let _shared = SharedState::new(crate::telemetry::events::clock_monotonic_ns(), None);
+        let _shared = SharedState::new(crate::telemetry::events::clock_monotonic_ns());
     }
 
     #[test]

@@ -72,8 +72,7 @@ fn check_all_events_present(expected: &[ValidationEvent], decoded: &[ValidationE
 
 /// Every event's timestamp round-trips exactly.
 fn check_timestamps_roundtrip(expected: &[ValidationEvent], decoded: &[ValidationEvent]) {
-    let exp_by_id: HashMap<u64, u64> =
-        expected.iter().map(|e| (e.id, e.timestamp_ns)).collect();
+    let exp_by_id: HashMap<u64, u64> = expected.iter().map(|e| (e.id, e.timestamp_ns)).collect();
     for ev in decoded {
         let exp_ts = exp_by_id[&ev.id];
         assert_eq!(
@@ -102,11 +101,7 @@ impl crate::telemetry::recorder::source::Source for MockSource {
     fn flush(&mut self, ctx: &crate::telemetry::recorder::source::FlushContext<'_>) {
         let events: Vec<_> = self.pending.lock().unwrap().drain(..).collect();
         for ev in &events {
-            crate::telemetry::buffer::record_encodable_event(
-                ev,
-                ctx.collector,
-                ctx.drain_epoch,
-            );
+            crate::telemetry::buffer::record_encodable_event(ev, ctx.collector, ctx.drain_epoch);
         }
     }
 
@@ -121,10 +116,9 @@ impl crate::telemetry::recorder::source::Source for MockSource {
 // ── Test body ───────────────────────────────────────────────────────
 
 fn test_telemetry_core_pipeline() {
-    let _ts_guard =
-        metrique_timesource::set_time_source(metrique_timesource::TimeSource::custom(
-            metrique_timesource::fakes::StaticTimeSource::at_time(std::time::UNIX_EPOCH),
-        ));
+    let _ts_guard = metrique_timesource::set_time_source(metrique_timesource::TimeSource::custom(
+        metrique_timesource::fakes::StaticTimeSource::at_time(std::time::UNIX_EPOCH),
+    ));
 
     let num_threads = 3;
     let next_id = Arc::new(AtomicU64::new(0));
@@ -272,10 +266,9 @@ impl tracing::Subscriber for CountingSubscriber {
 /// Drive the pipeline with the fs armed to `fault`, returning the
 /// number of WARN/ERROR events the flush loop emitted.
 fn run_erroring_pipeline(fault: fs::FaultPolicy) -> u64 {
-    let _ts_guard =
-        metrique_timesource::set_time_source(metrique_timesource::TimeSource::custom(
-            metrique_timesource::fakes::StaticTimeSource::at_time(std::time::UNIX_EPOCH),
-        ));
+    let _ts_guard = metrique_timesource::set_time_source(metrique_timesource::TimeSource::custom(
+        metrique_timesource::fakes::StaticTimeSource::at_time(std::time::UNIX_EPOCH),
+    ));
 
     let warn_count = StdArc::new(StdAtomicU64::new(0));
     let subscriber = CountingSubscriber {
@@ -338,10 +331,9 @@ fn fs_fault_visible_across_threads() {
     std::fs::write(&path, b"x").unwrap();
 
     let _fault = fs::set_fault(fs::FaultPolicy::FailAll);
-    let observed_fault =
-        crate::primitives::thread::spawn(move || fs::remove_file(&path).is_err())
-            .join()
-            .unwrap();
+    let observed_fault = crate::primitives::thread::spawn(move || fs::remove_file(&path).is_err())
+        .join()
+        .unwrap();
 
     assert!(
         observed_fault,
@@ -385,10 +377,7 @@ fn test_telemetry_core_probabilistic_fs_faults() {
 
 #[test]
 fn determinism_check_probabilistic_fs_faults() {
-    shuttle::check_uncontrolled_nondeterminism(
-        test_telemetry_core_probabilistic_fs_faults,
-        10000,
-    );
+    shuttle::check_uncontrolled_nondeterminism(test_telemetry_core_probabilistic_fs_faults, 10000);
 }
 
 #[test]

@@ -1,11 +1,12 @@
 use crate::primitives::sync::Arc;
 use crate::telemetry::buffer;
+use crate::telemetry::task_dump_config::TaskDumpConfig;
 use std::time::Duration;
 
 use super::Dial9Handle;
+use super::SharedState;
 use super::handle::Dial9TokioHandle;
 use super::runtime_context::RuntimeContextRegistry;
-use super::SharedState;
 use super::{ControlCommand, attach_runtime};
 
 /// Holds the background worker thread and its stop signal.
@@ -39,6 +40,9 @@ struct EnabledGuard {
     flush_thread: Option<crate::primitives::thread::JoinHandle<()>>,
     worker: Option<WorkerHandle>,
     contexts: RuntimeContextRegistry,
+    /// Task-dump settings to install on runtimes attached to this session.
+    /// `None` when task dumps aren't configured.
+    taskdump_config: Option<TaskDumpConfig>,
 }
 
 impl std::fmt::Debug for TelemetryGuard {
@@ -55,6 +59,7 @@ impl TelemetryGuard {
         flush_thread: Option<crate::primitives::thread::JoinHandle<()>>,
         worker: Option<WorkerHandle>,
         contexts: RuntimeContextRegistry,
+        taskdump_config: Option<crate::telemetry::task_dump_config::TaskDumpConfig>,
     ) -> Self {
         Self {
             inner: GuardInner::Enabled(EnabledGuard {
@@ -62,6 +67,7 @@ impl TelemetryGuard {
                 flush_thread,
                 worker,
                 contexts,
+                taskdump_config,
             }),
         }
     }
@@ -132,6 +138,16 @@ impl TelemetryGuard {
     pub(crate) fn contexts(&self) -> Option<&RuntimeContextRegistry> {
         match &self.inner {
             GuardInner::Enabled(eg) => Some(&eg.contexts),
+            GuardInner::Disabled => None,
+        }
+    }
+
+    /// Task-dump settings to install on runtimes attached later.
+    pub(crate) fn taskdump_config(
+        &self,
+    ) -> Option<crate::telemetry::task_dump_config::TaskDumpConfig> {
+        match &self.inner {
+            GuardInner::Enabled(eg) => eg.taskdump_config,
             GuardInner::Disabled => None,
         }
     }
@@ -377,6 +393,7 @@ impl<'a> TraceRuntimeCoreBuilder<'a> {
             control_tx,
             self.task_tracking,
             self.tokio_hooks,
+            self.guard.taskdump_config(),
         )?;
         for source in self.custom_event_sources {
             shared.push_source(Box::new(source));

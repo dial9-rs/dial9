@@ -1,4 +1,3 @@
-use crate::primitives::sync::atomic::Ordering;
 use crate::primitives::sync::{Arc, Mutex};
 #[cfg(feature = "cpu-profiling")]
 use crate::rate_limit::rate_limited;
@@ -6,10 +5,10 @@ use crate::telemetry::writer::{Disk, SegmentWriter, WriterMode};
 use std::path::PathBuf;
 use std::time::Duration;
 
-use super::flush_loop::run_flush_loop;
-use super::guard::{TelemetryGuard, WorkerHandle};
 use super::Dial9Handle;
 use super::SharedState;
+use super::flush_loop::run_flush_loop;
+use super::guard::{TelemetryGuard, WorkerHandle};
 use super::{ControlCommand, attach_runtime};
 
 /// Marker: no trace path has been set yet.
@@ -307,6 +306,7 @@ impl<P, M, Mode: WriterMode> TracedRuntimeBuilder<P, M, Mode> {
             control_tx,
             self.task_tracking_enabled,
             self.tokio_hooks,
+            guard.taskdump_config(),
         )?;
         #[cfg(feature = "linux-socket")]
         if let Some(config) = socket_accept_queues_config {
@@ -575,6 +575,7 @@ impl<M, Mode: WriterMode> TracedRuntimeBuilder<HasTracePath, M, Mode> {
             &control_tx,
             self.task_tracking_enabled,
             self.tokio_hooks,
+            guard.taskdump_config(),
         )?;
         Ok((runtime, guard))
     }
@@ -835,14 +836,7 @@ impl TelemetryCore {
         worker_metrics_sink: Option<metrique_writer::BoxEntrySink>,
     ) -> std::io::Result<TelemetryGuard> {
         let start_mono_ns = crate::telemetry::events::clock_monotonic_ns();
-        let rng_seed = task_dump_config.as_ref().and_then(|cfg| cfg.rng_seed());
-        let shared = Arc::new(SharedState::new(start_mono_ns, rng_seed));
-        if let Some(cfg) = task_dump_config.as_ref() {
-            shared.task_dumps_enabled.store(true, Ordering::Relaxed);
-            shared
-                .task_dump_idle_threshold_ns
-                .store(cfg.idle_threshold().as_nanos() as u64, Ordering::Relaxed);
-        }
+        let shared = Arc::new(SharedState::new(start_mono_ns));
 
         // Determine the pipeline strategy from the builder fields, then
         // delegate to `assemble_processors` — the single source of truth for
@@ -1012,6 +1006,7 @@ impl TelemetryCore {
             Some(flush_thread),
             worker,
             contexts,
+            task_dump_config,
         ))
     }
 }

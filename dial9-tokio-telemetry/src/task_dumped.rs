@@ -34,19 +34,37 @@
 use crate::sampling::SplitMix64;
 use crate::telemetry::format::TaskDumpEvent;
 use crate::telemetry::recorder::SharedState;
+use crate::telemetry::task_dump_config::TaskDumpConfig;
 use crate::telemetry::task_metadata::TaskId;
 use crate::telemetry::{Encodable, ThreadLocalEncoder};
 use pin_project_lite::pin_project;
 use smallvec::SmallVec;
+use std::cell::Cell;
 use std::future::Future;
 use std::num::NonZeroU64;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 use std::task::{Context, Poll};
 
 /// Initial heap reservation for the instruction-pointer buffer on first capture.
 const FRAME_BUF_INITIAL_CAPACITY: usize = 256;
+
+crate::primitives::thread_local! {
+    /// Per-thread task-dump config, installed by the runtime's thread-start
+    /// hook and cleared on thread stop. `None` means task dumps aren't
+    /// configured for this session, so `TaskDumped` runs as a passthrough.
+    static TASKDUMP_CONFIG: Cell<Option<TaskDumpConfig>> = const { Cell::new(None) };
+}
+
+/// Install task-dump config for the current thread (runtime thread-start hook).
+pub(crate) fn set_taskdump_config(config: TaskDumpConfig) {
+    TASKDUMP_CONFIG.with(|c| c.set(Some(config)));
+}
+
+/// Clear the current thread's task-dump config (runtime thread-stop hook).
+pub(crate) fn clear_taskdump_config() {
+    TASKDUMP_CONFIG.with(|c| c.set(None));
+}
 
 // ─── TaskDumped future wrapper ──────────────────────────────────────────────
 
@@ -76,15 +94,20 @@ pin_project! {
         // capture → …). Cleared on the next poll so subsequent real wakes
         // proceed normally.
         just_captured: bool,
+        // Whether task dumps are configured for this session. Snapshotted from
+        // the per-thread config at construction, `false` makes poll a
+        // passthrough.
+        enabled: bool,
     }
 }
 
 impl<F> TaskDumped<F> {
     pub(crate) fn new(inner: F, shared: Arc<SharedState>, task_id: TaskId) -> Self {
-        let sample_mean_ns = shared.task_dump_idle_threshold_ns.load(Ordering::Relaxed);
+        let config = TASKDUMP_CONFIG.with(|c| c.get());
+        let sample_mean_ns = config.map_or(0, |c| c.idle_threshold().as_nanos() as u64);
         // When a fixed seed is configured, use it directly for deterministic
         // tests. Otherwise use task_id + timestamp for production uniqueness.
-        let seed = match shared.task_dump_rng_seed {
+        let seed = match config.and_then(|c| c.rng_seed()) {
             Some(s) => s,
             None => {
                 (task_id.to_u64()).wrapping_mul(0x517cc1b727220a95)
@@ -103,6 +126,7 @@ impl<F> TaskDumped<F> {
             sample_mean_ns,
             rng,
             just_captured: false,
+            enabled: config.is_some(),
         }
     }
 }
@@ -113,7 +137,7 @@ impl<F: Future> Future for TaskDumped<F> {
         let mut this = self.project();
         // Fast path: forward without any capture work when either task dumps
         // are disabled, or telemetry as a whole is paused.
-        if !this.shared.task_dumps_enabled.load(Ordering::Relaxed) || !this.shared.is_enabled() {
+        if !*this.enabled || !this.shared.is_enabled() {
             if this.frames.has_data() {
                 this.frames.clear();
                 *this.pending_capture_ts = None;

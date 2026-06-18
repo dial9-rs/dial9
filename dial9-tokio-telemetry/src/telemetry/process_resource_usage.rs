@@ -247,7 +247,7 @@ mod unix {
 
         #[test]
         fn source_emits_process_resource_usage_event() {
-            let shared = SharedState::new(0, None);
+            let shared = SharedState::new(0);
             let ctx = FlushContext {
                 collector: &shared.collector,
                 drain_epoch: &shared.drain_epoch,
@@ -268,7 +268,7 @@ mod unix {
 
         #[test]
         fn source_respects_sample_interval() {
-            let shared = SharedState::new(0, None);
+            let shared = SharedState::new(0);
             let ctx = FlushContext {
                 collector: &shared.collector,
                 drain_epoch: &shared.drain_epoch,

@@ -81,9 +81,7 @@ impl Dial9Handle {
     }
 
     #[doc(hidden)]
-    pub fn control_tx(
-        &self,
-    ) -> Option<&crate::primitives::sync::mpsc::SyncSender<ControlCommand>> {
+    pub fn control_tx(&self) -> Option<&crate::primitives::sync::mpsc::SyncSender<ControlCommand>> {
         self.inner.as_ref().map(|i| &i.control_tx)
     }
 

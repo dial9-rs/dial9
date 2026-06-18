@@ -160,7 +160,7 @@ mod tests {
 
     #[test]
     fn source_records_callback_events() {
-        let shared = SharedState::new(0, None);
+        let shared = SharedState::new(0);
         let ctx = FlushContext {
             collector: &shared.collector,
             drain_epoch: &shared.drain_epoch,
@@ -185,7 +185,7 @@ mod tests {
 
     #[test]
     fn source_respects_minimum_interval() {
-        let shared = SharedState::new(0, None);
+        let shared = SharedState::new(0);
         let ctx = FlushContext {
             collector: &shared.collector,
             drain_epoch: &shared.drain_epoch,
@@ -207,7 +207,7 @@ mod tests {
 
     #[test]
     fn zero_minimum_interval_does_not_throttle() {
-        let shared = SharedState::new(0, None);
+        let shared = SharedState::new(0);
         let ctx = FlushContext {
             collector: &shared.collector,
             drain_epoch: &shared.drain_epoch,

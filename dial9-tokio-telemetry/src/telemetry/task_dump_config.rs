@@ -16,7 +16,7 @@ use std::time::Duration;
 const DEFAULT_IDLE_THRESHOLD: Duration = Duration::from_millis(10);
 
 /// Configuration for task dump capture.
-#[derive(Debug, Clone, bon::Builder)]
+#[derive(Debug, Clone, Copy, bon::Builder)]
 pub struct TaskDumpConfig {
     /// Mean idle duration for Poisson sampling. On average, one
     /// task dump is emitted per this amount of cumulative idle time. Shorter

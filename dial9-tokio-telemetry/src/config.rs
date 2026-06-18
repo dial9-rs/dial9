@@ -1598,11 +1598,11 @@ mod tests {
             ["runtime.api-runtime"],
             "exactly one runtime, named from env, should surface in segment metadata"
         );
-        assert!(shared.task_dumps_enabled.load(Ordering::Relaxed));
-        assert_eq!(
-            shared.task_dump_idle_threshold_ns.load(Ordering::Relaxed),
-            25_000_000
-        );
+        let config = rt
+            .guard()
+            .taskdump_config()
+            .expect("env config should configure task dumps");
+        assert_eq!(config.idle_threshold(), Duration::from_millis(25));
     }
 
     #[cfg(unix)]

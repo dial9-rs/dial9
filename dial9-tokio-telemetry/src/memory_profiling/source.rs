@@ -300,7 +300,7 @@ mod tests {
     }
 
     fn new_shared() -> SharedState {
-        let shared = SharedState::new(0, None);
+        let shared = SharedState::new(0);
         shared.enabled.store(true, Ordering::Relaxed);
         shared
     }
