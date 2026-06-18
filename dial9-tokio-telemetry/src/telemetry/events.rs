@@ -116,7 +116,6 @@ pub(crate) fn thread_cpu_time_nanos() -> u64 {
 // Clock readings live in dial9-core; re-exported here so existing
 // `crate::telemetry::events::clock_*` call sites stay unchanged.
 pub use dial9_core::clock::clock_monotonic_ns;
-pub(crate) use dial9_core::clock::clock_pair;
 
 /// Per-thread scheduler stats from `/proc/<pid>/task/<tid>/schedstat`.
 /// Fields: run_time_ns wait_time_ns timeslices

@@ -347,8 +347,7 @@ pub struct WakeEventEvent {
     pub target_worker: u8,
 }
 
-// These two framing events are emitted by the bus writer itself, so they live
-// in dial9-core. Re-exported here so existing call sites stay unchanged.
+#[cfg(test)]
 pub(crate) use dial9_core::format::{ClockSyncEvent, SegmentMetadataEvent};
 
 // ── dial9-trace-format: decode ──────────────────────────────────────────────

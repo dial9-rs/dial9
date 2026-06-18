@@ -4,8 +4,8 @@
 //! the oldest segments are dropped until `queued_bytes <=
 //! max_total_size`. The worker pops one segment per `take_files` cycle.
 //!
-//! The shutdown handoff rides `writer_done` (Acquire/Release) plus a
-//! `Notify` for wakeups.
+//! The shutdown handoff rides `writer_done` (Acquire/Release) plus an
+//! `event-listener` `Event` for wakeups.
 
 use std::collections::VecDeque;
 use std::io::{self, Write};
@@ -13,18 +13,17 @@ use std::path::Path;
 use std::time::Duration;
 
 use bytes::Bytes;
-use tokio::sync::Notify;
-use tokio_util::sync::CancellationToken;
+use event_listener::Event;
 
-use crate::background_task::sealed::{MemorySegment, SegmentRef};
 use crate::primitives::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use crate::primitives::sync::{Arc, Mutex};
 use crate::rate_limit::rate_limited;
+use crate::sealed::{MemorySegment, SegmentRef};
 
 use super::{ActiveHandle, RemoveReason, SegmentAccounting, TakenFiles, TakenSegment};
 
 /// Active in-memory write accumulator.
-pub(crate) struct MemActiveWriter {
+pub struct MemActiveWriter {
     pub(super) buf: Vec<u8>,
 }
 
@@ -47,7 +46,7 @@ struct MemSealedSegment {
 }
 
 /// Cap on retryable-failure re-enqueues for a memory segment.
-pub(crate) const MEMORY_RETRY_BUDGET: u32 = 3;
+pub const MEMORY_RETRY_BUDGET: u32 = 3;
 
 /// Holds the deque + bookkeeping that must move together under the lock.
 struct Queue {
@@ -65,11 +64,11 @@ struct MemChannel {
     in_flight_segments: Arc<AtomicU64>,
     in_flight_bytes_peak: Arc<AtomicU64>,
     writer_done: AtomicBool,
-    notify: Notify,
+    event: Event,
 }
 
 /// In-memory segment channel.
-pub(crate) struct MemFs {
+pub struct MemFs {
     channel: Arc<MemChannel>,
 }
 
@@ -101,7 +100,7 @@ impl MemFs {
                 in_flight_segments: Arc::new(AtomicU64::new(0)),
                 in_flight_bytes_peak: Arc::new(AtomicU64::new(0)),
                 writer_done: AtomicBool::new(false),
-                notify: Notify::new(),
+                event: Event::new(),
             }),
         })
     }
@@ -159,7 +158,7 @@ impl MemFs {
             });
         }
 
-        ch.notify.notify_one();
+        ch.event.notify(usize::MAX);
         Ok(SegmentRef::Memory(MemorySegment { index, size }))
     }
 
@@ -181,7 +180,7 @@ impl MemFs {
             });
             q.bytes += size;
         }
-        ch.notify.notify_one();
+        ch.event.notify(usize::MAX);
     }
 
     pub(super) fn remove_active(&self, _path: &Path) -> io::Result<()> {
@@ -255,21 +254,21 @@ impl MemFs {
         }
     }
 
-    pub(super) async fn wait_for_more(&self, stop: &CancellationToken, _poll_interval: Duration) {
+    /// Park until the ring may have new work or the writer is done.
+    ///
+    /// Lost-wakeup safe: the listener is registered *before* re-checking the
+    /// queue/done state.
+    pub(super) async fn wait_for_wakeup(&self) {
         let ch = &self.channel;
-        // Register the notified future *before* loading writer_done so any
-        // notify_one between the run loop's earlier check and this await
-        // becomes a stored permit consumed here.
-        let notified = ch.notify.notified();
-        tokio::pin!(notified);
-        notified.as_mut().enable();
-        if ch.writer_done.load(Ordering::Acquire) {
+        let listener = ch.event.listen();
+        if self.has_pending() || ch.writer_done.load(Ordering::Acquire) {
             return;
         }
-        tokio::select! {
-            _ = stop.cancelled() => {}
-            _ = &mut notified => {}
-        }
+        listener.await;
+    }
+
+    fn has_pending(&self) -> bool {
+        !self.channel.queue.lock().unwrap().segments.is_empty()
     }
 
     pub(super) fn writer_done(&self) -> bool {
@@ -278,7 +277,7 @@ impl MemFs {
 
     pub(super) fn mark_writer_done(&self) {
         self.channel.writer_done.store(true, Ordering::Release);
-        self.channel.notify.notify_one();
+        self.channel.event.notify(usize::MAX);
     }
 }
 

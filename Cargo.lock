@@ -1505,12 +1505,19 @@ dependencies = [
 name = "dial9-core"
 version = "0.4.0-alpha.1"
 dependencies = [
+ "assert2",
+ "bon",
+ "bytes",
  "crossbeam-queue",
  "dial9-trace-format",
+ "event-listener",
  "libc",
  "metrique",
+ "metrique-timesource",
  "proptest",
  "shuttle",
+ "tempfile",
+ "tokio",
  "tracing",
 ]
 

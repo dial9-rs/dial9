@@ -23,7 +23,7 @@ pub(crate) mod recorder;
 pub(crate) mod socket_accept_queues;
 pub mod task_dump_config;
 pub(crate) mod task_metadata;
-pub(crate) mod writer;
+pub(crate) use dial9_core::writer;
 
 pub use crate::traced::TracedFuture;
 pub use custom_events::{CustomEventsConfig, CustomEventsContext};

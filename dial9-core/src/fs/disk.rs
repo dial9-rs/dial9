@@ -9,18 +9,18 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::background_task::sealed::{
-    SealedSegment, SegmentArtifact, SegmentRef, find_sealed_segments, parse_segment_artifact,
-};
 use crate::primitives::fs;
 use crate::primitives::sync::Mutex;
 use crate::primitives::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use crate::rate_limit::rate_limited;
+use crate::sealed::{
+    SealedSegment, SegmentArtifact, SegmentRef, find_sealed_segments, parse_segment_artifact,
+};
 
 use super::{ActiveHandle, DiscoveredArtifacts, RemoveReason, TakenFiles, TakenSegment};
 
 /// Disk-backed filesystem state.
-pub(crate) struct DiskFs {
+pub struct DiskFs {
     dir: PathBuf,
     stem: String,
     /// Claimed segment index -> uncompressed size in bytes. Dedup so each
@@ -132,17 +132,6 @@ impl DiskFs {
     /// next `take_files` scan.
     pub(super) fn mark_writer_done(&self) {
         self.writer_done.store(true, Ordering::Release);
-    }
-
-    pub(super) async fn wait_for_more(
-        &self,
-        stop: &tokio_util::sync::CancellationToken,
-        poll_interval: Duration,
-    ) {
-        tokio::select! {
-            _ = stop.cancelled() => {}
-            _ = tokio::time::sleep(poll_interval) => {}
-        }
     }
 
     pub(super) fn take_files(&self) -> TakenFiles {
@@ -367,7 +356,7 @@ fn empty_taken_files(segments_dropped: u64) -> TakenFiles {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::background_task::fs::Fs;
+    use crate::fs::Fs;
     use assert2::check;
 
     #[test]

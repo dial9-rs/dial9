@@ -1,13 +1,13 @@
 pub(crate) mod boot_id;
 #[cfg(feature = "worker-s3")]
 pub(crate) mod connection;
-pub(crate) mod fs;
+pub(crate) use dial9_core::fs;
 pub mod instance_metadata;
-mod payload;
+pub(crate) use dial9_core::payload;
 pub(crate) mod pipeline_metrics;
 #[cfg(feature = "worker-s3")]
 pub mod s3;
-pub(crate) mod sealed;
+pub(crate) use dial9_core::sealed;
 #[cfg(test)]
 pub(crate) mod testutil;
 
@@ -809,7 +809,31 @@ impl WorkerLoop {
                 }
             }
 
-            self.fs.wait_for_more(&self.stop, self.poll_interval).await;
+            Self::wait_for_more(&self.fs, &self.stop, self.poll_interval).await;
+        }
+    }
+
+    /// Park until new segments may be available or we're told to stop.
+    ///
+    /// Disk polls on `poll_interval`, memory awaits the ring's wakeup via [`Fs::wait_for_wakeup`].
+    ///
+    /// Borrows only `fs` and `stop` (both `Sync`) rather than `&self`, so the
+    /// `run()` future stays `Send` (`WorkerLoop` holds non-`Sync` processors).
+    async fn wait_for_more(
+        fs: &Fs,
+        stop: &tokio_util::sync::CancellationToken,
+        poll_interval: Duration,
+    ) {
+        if fs.is_disk() {
+            tokio::select! {
+                _ = stop.cancelled() => {}
+                _ = tokio::time::sleep(poll_interval) => {}
+            }
+        } else {
+            tokio::select! {
+                _ = stop.cancelled() => {}
+                _ = fs.wait_for_wakeup() => {}
+            }
         }
     }
 
@@ -2753,5 +2777,115 @@ mod worker_pipeline_tests {
         let snap = fs.take_files();
         check!(snap.in_flight_bytes == 0);
         check!(snap.in_flight_segments == 0);
+    }
+
+    // --- End-to-end memory writer → worker pipeline ---
+    // These drive the real `InMemoryWriter` (which lives in dial9-core) through
+    // the worker loop, so they stay here on the telemetry side where the worker
+    // and the `Dial9Event` decoder live.
+
+    /// Encode a single park event into a self-contained batch (header + event),
+    /// matching the format produced by ThreadLocalBuffer.
+    fn mem_test_batch() -> crate::telemetry::collector::Batch {
+        use crate::telemetry::format::{WorkerId, WorkerParkEvent};
+        use dial9_trace_format::encoder::Encoder;
+        let mut enc = Encoder::new_to(Vec::new()).unwrap();
+        enc.write_infallible(&WorkerParkEvent {
+            timestamp_ns: 1000,
+            worker_id: WorkerId::from(0usize),
+            local_queue: 2,
+            cpu_time_ns: 0,
+            tid: 0,
+        });
+        crate::telemetry::collector::Batch::new(enc.into_inner(), 1)
+    }
+
+    /// Drive a memory writer through the real worker pipeline and return the
+    /// captured per-segment payloads. Exercises the full mechanism: write ->
+    /// Fs::Mem seal -> ring -> finalize (mark_writer_done) -> WorkerLoop::run
+    /// drain-to-empty -> processor.
+    async fn run_mem_e2e(
+        mut writer: crate::telemetry::writer::InMemoryWriter,
+        events: usize,
+    ) -> Vec<Vec<u8>> {
+        let fs = writer.fs_handle().expect("memory writer exposes its Fs");
+        for _ in 0..events {
+            writer.write_encoded_batch(&mem_test_batch()).unwrap();
+        }
+        // Seals the active segment onto the ring and signals writer_done.
+        writer.finalize().unwrap();
+
+        let (capture, captured) = super::testutil::CapturingProcessor::new();
+        // stop is never cancelled: the loop exits via writer_done only.
+        let stop = tokio_util::sync::CancellationToken::new();
+        let mut worker = WorkerLoop::new(
+            fs,
+            Duration::from_millis(5),
+            vec![Box::new(capture)],
+            stop,
+            metrique_writer::sink::DevNullSink::boxed(),
+        );
+        worker.run().await;
+
+        let segments = captured.lock().unwrap();
+        segments.clone()
+    }
+
+    /// Count decoded payload events across `segments`, dropping the per-segment
+    /// metadata/clock-sync framing the writer emits.
+    fn count_payload_events(segments: &[Vec<u8>]) -> usize {
+        use crate::telemetry::analysis_events::Dial9Event;
+
+        super::testutil::decode_captured(segments)
+            .into_iter()
+            .filter(|e| {
+                !matches!(
+                    e,
+                    Dial9Event::SegmentMetadataEvent(..) | Dial9Event::ClockSyncEvent(..)
+                )
+            })
+            .count()
+    }
+
+    #[tokio::test]
+    async fn mem_writer_e2e_delivers_all_events() {
+        const EVENTS: usize = 25;
+
+        let segments = run_mem_e2e(
+            crate::telemetry::writer::InMemoryWriter::new(1 << 20).unwrap(),
+            EVENTS,
+        )
+        .await;
+
+        check!(!segments.is_empty(), "worker captured no segments");
+        check!(
+            count_payload_events(&segments) == EVENTS,
+            "every written event must reach the processor"
+        );
+    }
+
+    /// Same as `mem_writer_e2e_delivers_all_events`, but a tiny `max_segment_size`
+    /// forces several rotations so the worker delivers multiple sealed segments.
+    #[tokio::test]
+    async fn mem_writer_e2e_delivers_all_events_across_rotations() {
+        const EVENTS: usize = 60;
+
+        // Huge ring (nothing evicts) + tiny segments (rotate every few batches).
+        let writer = crate::telemetry::writer::InMemoryWriter::builder()
+            .max_total_size(16 * 1024 * 1024)
+            .max_segment_size(256)
+            .build()
+            .unwrap();
+        let segments = run_mem_e2e(writer, EVENTS).await;
+
+        check!(
+            segments.len() >= 2,
+            "tiny segments must force rotation, got {} segment(s)",
+            segments.len()
+        );
+        check!(
+            count_payload_events(&segments) == EVENTS,
+            "every event across all rotated segments must reach the processor"
+        );
     }
 }
