@@ -1621,6 +1621,7 @@ dependencies = [
  "aws-sdk-s3",
  "axum",
  "axum-extra",
+ "bon",
  "clap",
  "flate2",
  "futures",
@@ -1638,6 +1639,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "urlencoding",
+ "uuid",
 ]
 
 [[package]]
