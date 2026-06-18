@@ -1,8 +1,4 @@
 //! Wire-format events emitted by the bus itself.
-//!
-//! Source-specific events (queue, cpu, memory, ...) live with their sources,
-//! not here — the bus only constructs the two framing events below.
-
 use dial9_trace_format::TraceEvent;
 
 /// Segment metadata as key/value entries, written when a segment is sealed.
