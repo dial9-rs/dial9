@@ -281,10 +281,14 @@
 
     <script src="heatmap.js"></script>
     <script>
-    // ── ?trace= passthrough: redirect to viewer ──
+    // ── ?trace= passthrough: redirect to viewer (preserving all params,
+    //    including repeated `trace=` components) ──
     (function() {
-        const t = new URLSearchParams(window.location.search).get('trace');
-        if (t) { window.location.replace('viewer.html?trace=' + encodeURIComponent(t)); return; }
+        const qs = window.location.search;
+        if (new URLSearchParams(qs).has('trace')) {
+            window.location.replace('viewer.html' + qs);
+            return;
+        }
     })();
 
     // ── Demo trace button ──
