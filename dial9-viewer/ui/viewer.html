@@ -1188,6 +1188,7 @@
             /** Clear UI state tied to the current trace so it doesn't leak into the next one. */
             function resetTraceState({ clearUrlRange } = {}) {
                 selectedTaskId = null;
+                selectedEvent = null;
                 hoveredWakerTaskId = null;
                 hideStackPopup();
                 taskDetailPanel.style.display = "none";
@@ -2801,6 +2802,7 @@
                 const rect = c.getBoundingClientRect();
                 const mx = e.clientX - rect.left;
                 const my = e.clientY - rect.top;
+                selectedEvent = null; // clear selected-event marker
 
                 const bucket = findBucketAtXY(mx, my);
 
@@ -3976,6 +3978,8 @@
                 const lanesRect = lanesContainer.getBoundingClientRect();
                 if (e.clientY < lanesRect.top || e.clientY > lanesRect.bottom ||
                     e.clientX < lanesRect.left || e.clientX > lanesRect.right) return;
+                // Any click in the lanes clears the selected-event marker.
+                selectedEvent = null;
                 const mouseX = e.clientX - lanesRect.left - LABEL_W;
                 const mouseY = e.clientY - lanesRect.top;
                 const drawW = lanesRect.width - LABEL_W;
