@@ -190,8 +190,12 @@ fn nothing_uploads_until_dump_then_manifest_indexes_it() {
     guard.graceful_shutdown(Duration::from_secs(1)).unwrap();
 }
 
-/// A look-forward window keeps the dump open and captures segments sealed
-/// after the trigger; the receipt resolves only after the deadline.
+/// A look-forward window keeps the dump open and captures a segment sealed
+/// *after* the trigger, while the dump is open. Resolution is driven by
+/// shutdown (not the wall-clock deadline) so the test is deterministic: we
+/// confirm a real mid-window seal with `wait_for_sealed_segment`, then shut
+/// down to resolve. (The wall-clock deadline behavior is covered separately by
+/// `lookforward_dump_resolves_after_deadline`.)
 #[test]
 fn lookforward_dump_captures_post_trigger_segments() {
     let s3_root = tempfile::tempdir().unwrap();
@@ -200,7 +204,17 @@ fn lookforward_dump_captures_post_trigger_segments() {
     std::fs::create_dir(s3_root.path().join("test-bucket")).unwrap();
 
     let client = fake_s3_client(s3_root.path());
-    let writer = DiskWriter::new(&trace_path, 512, 50 * 1024).unwrap();
+    // Short rotation period (and a small size threshold) so the tiny workload
+    // seals a segment within a few ms, letting `wait_for_sealed_segment` return
+    // promptly. The defaults (512-byte threshold, 60s period) could leave the
+    // tiny workload's bytes in an unsealed active segment.
+    let writer = DiskWriter::builder()
+        .base_path(&trace_path)
+        .max_file_size(64)
+        .max_total_size(50 * 1024)
+        .rotation_period(Duration::from_millis(200))
+        .build()
+        .unwrap();
 
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.worker_threads(1).enable_all();
@@ -217,21 +231,23 @@ fn lookforward_dump_captures_post_trigger_segments() {
     let trigger = guard.handle().dump_trigger().expect("trigger wired");
 
     // Trigger before producing anything; the forward window collects the
-    // segments the workload seals.
-    let lookforward = Duration::from_secs(5);
+    // segments the workload seals. The window is effectively unbounded (1h) so
+    // the deadline never races — shutdown resolves the dump instead.
     let fut = trigger
-        .dump_time_range(Duration::from_secs(1), lookforward)
+        .dump_time_range(Duration::from_secs(1), Duration::from_secs(3600))
         .into_future();
-    let triggered = Instant::now();
 
     run_workload(&runtime);
+    // Confirm a segment actually sealed while the dump was open, so capture is
+    // a real mid-window seal rather than a shutdown-only truncation.
+    wait_for_sealed_segment(trace_dir.path());
+
+    // Resolve via shutdown rather than the wall-clock deadline.
+    drop(runtime);
+    guard.graceful_shutdown(Duration::from_secs(2)).unwrap();
 
     let check_rt = assertion_runtime();
     let receipt = check_rt.block_on(fut).unwrap();
-    assert!(
-        triggered.elapsed() >= lookforward,
-        "receipt resolves only after the forward deadline"
-    );
     assert!(receipt.segments_processed >= 1, "forward window captured");
 
     let manifest: serde_json::Value = check_rt.block_on(async {
@@ -252,6 +268,45 @@ fn lookforward_dump_captures_post_trigger_segments() {
     assert_eq!(
         manifest["segments"].as_array().unwrap().len(),
         receipt.segments_processed
+    );
+}
+
+/// A look-forward dump resolves only after its wall-clock deadline elapses
+/// (here a short 300ms window). This isolates the deadline-timing behavior from
+/// segment capture, so there is no seal race: the worker resolves the forward
+/// dump at its deadline regardless of how many segments sealed.
+#[test]
+fn lookforward_dump_resolves_after_deadline() {
+    let trace_dir = tempfile::tempdir().unwrap();
+    let trace_path = trace_dir.path().join("trace.bin");
+
+    let writer = DiskWriter::new(&trace_path, 512, 50 * 1024).unwrap();
+
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.worker_threads(1).enable_all();
+
+    let (runtime, guard) = TracedRuntime::builder()
+        .with_trace_path(&trace_path)
+        .with_custom_pipeline(|p| p.gzip().write_back())
+        .with_worker_poll_interval(Duration::from_millis(50))
+        .with_dump_trigger(|_| {})
+        .build_and_start(builder, writer)
+        .unwrap();
+
+    let trigger = guard.handle().dump_trigger().expect("trigger wired");
+
+    let lookforward = Duration::from_millis(300);
+    let fut = trigger
+        .dump_time_range(Duration::from_secs(1), lookforward)
+        .into_future();
+    let triggered = Instant::now();
+
+    assertion_runtime()
+        .block_on(fut)
+        .expect("forward dump resolves Ok at its deadline");
+    assert!(
+        triggered.elapsed() >= lookforward,
+        "receipt resolves only after the forward deadline"
     );
 
     drop(runtime);
