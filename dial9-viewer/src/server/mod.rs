@@ -53,6 +53,7 @@ pub struct AppState {
     pub allow_byo_creds: bool,
     /// Optional plumbing for ephemeral S3 client construction (test injection
     /// of the in-process fake; `None` in production → default HTTPS connector).
+    #[doc(hidden)]
     pub ephemeral_s3: Option<EphemeralS3Config>,
 }
 
@@ -84,6 +85,7 @@ impl AppState {
     }
 
     /// Inject ephemeral-S3 plumbing (test seam; production leaves this unset).
+    #[doc(hidden)]
     pub fn with_ephemeral_s3(mut self, cfg: EphemeralS3Config) -> Self {
         self.ephemeral_s3 = Some(cfg);
         self

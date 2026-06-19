@@ -126,6 +126,10 @@ where
 /// clients. In production this is `None` and clients use the default HTTPS
 /// connector. Tests inject the in-process `s3s` HTTP client plus an endpoint
 /// override so the header → ephemeral-client → fake-S3 path is exercisable.
+///
+/// This is a test seam, not part of the public API surface — it is `pub` only
+/// so integration tests in another crate can construct it.
+#[doc(hidden)]
 #[derive(Clone)]
 pub struct EphemeralS3Config {
     /// Shared HTTP client/connector reused across ephemeral clients.
@@ -141,6 +145,16 @@ pub struct EphemeralS3Config {
 /// one. S3 routes bucket operations regardless once the bucket region is known,
 /// but a concrete region is required to build the client.
 const DEFAULT_REGION: &str = "us-east-1";
+
+/// Per-attempt timeout: how long a single HTTP attempt may take before the SDK
+/// gives up on it (and possibly retries).
+const OPERATION_ATTEMPT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Overall operation timeout: the wall-clock budget for an entire S3 call,
+/// including all retries. Bounds how long a request to a wrong region, a
+/// black-holed endpoint, or unresponsive S3 can hang the viewer's request
+/// handler.
+const OPERATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// S3-backed storage using the AWS SDK.
 pub struct S3Backend {
@@ -182,9 +196,14 @@ pub fn build_credentialed_client(
     ephemeral: &Option<EphemeralS3Config>,
 ) -> aws_sdk_s3::Client {
     let region = region.unwrap_or(DEFAULT_REGION).to_string();
+    let timeouts = aws_sdk_s3::config::timeout::TimeoutConfig::builder()
+        .operation_attempt_timeout(OPERATION_ATTEMPT_TIMEOUT)
+        .operation_timeout(OPERATION_TIMEOUT)
+        .build();
     let mut cfg = aws_sdk_s3::config::Builder::new()
         .behavior_version(aws_sdk_s3::config::BehaviorVersion::latest())
         .credentials_provider(credentials)
+        .timeout_config(timeouts)
         .region(aws_sdk_s3::config::Region::new(region));
 
     if let Some(e) = ephemeral {
@@ -208,6 +227,7 @@ impl StorageBackend for S3Backend {
             const MAX_BUCKETS: usize = 200;
             let mut pages = self.client.list_buckets().into_paginator().send();
             let mut names = Vec::new();
+            let mut truncated = false;
             'pages: while let Some(page) = pages.next().await {
                 let page = page.map_err(|e| classify_s3_error(&e))?;
                 for b in page.buckets() {
@@ -215,9 +235,16 @@ impl StorageBackend for S3Backend {
                         names.push(name.to_string());
                     }
                     if names.len() >= MAX_BUCKETS {
+                        truncated = true;
                         break 'pages;
                     }
                 }
+            }
+            if truncated {
+                tracing::warn!(
+                    max = MAX_BUCKETS,
+                    "bucket listing truncated at cap; some buckets are not shown"
+                );
             }
             names.sort();
             Ok(names)
@@ -242,6 +269,7 @@ impl StorageBackend for S3Backend {
                 .send();
 
             let mut objects = Vec::new();
+            let mut truncated = false;
             'pages: while let Some(page) = pages.next().await {
                 let page = page.map_err(|e| classify_s3_error(&e))?;
                 for obj in page.contents() {
@@ -253,9 +281,18 @@ impl StorageBackend for S3Backend {
                         });
                     }
                     if objects.len() >= MAX_RESULTS {
+                        truncated = true;
                         break 'pages;
                     }
                 }
+            }
+            if truncated {
+                tracing::warn!(
+                    bucket = %bucket,
+                    prefix = %prefix,
+                    max = MAX_RESULTS,
+                    "object listing truncated at cap; some objects are not shown"
+                );
             }
 
             Ok(objects)
@@ -270,6 +307,10 @@ impl StorageBackend for S3Backend {
         let bucket = bucket.to_string();
         let prefix = prefix.to_string();
         Box::pin(async move {
+            // Bound the number of child prefixes returned, mirroring the caps on
+            // the other listings, so a directory with an unbounded fan-out can't
+            // produce an enormous response.
+            const MAX_PREFIXES: usize = 1000;
             // Common prefixes count against MaxKeys per response, so a directory
             // with more than one page of children must be paginated or it would
             // silently truncate.
@@ -283,13 +324,26 @@ impl StorageBackend for S3Backend {
                 .send();
 
             let mut prefixes = Vec::new();
-            while let Some(page) = pages.next().await {
+            let mut truncated = false;
+            'pages: while let Some(page) = pages.next().await {
                 let page = page.map_err(|e| classify_s3_error(&e))?;
                 for cp in page.common_prefixes() {
                     if let Some(p) = cp.prefix() {
                         prefixes.push(p.to_string());
                     }
+                    if prefixes.len() >= MAX_PREFIXES {
+                        truncated = true;
+                        break 'pages;
+                    }
                 }
+            }
+            if truncated {
+                tracing::warn!(
+                    bucket = %bucket,
+                    prefix = %prefix,
+                    max = MAX_PREFIXES,
+                    "prefix listing truncated at cap; some child prefixes are not shown"
+                );
             }
             Ok(prefixes)
         })

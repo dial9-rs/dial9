@@ -11,7 +11,7 @@ pub fn storage_error_response(err: StorageError) -> (StatusCode, String) {
     match err {
         StorageError::Unauthorized => (StatusCode::UNAUTHORIZED, err.to_string()),
         StorageError::AccountNotSignedUp => (StatusCode::FORBIDDEN, err.to_string()),
-        StorageError::NotFound(_) => (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
+        StorageError::NotFound(_) => (StatusCode::NOT_FOUND, err.to_string()),
         StorageError::Other(_) => (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
     }
 }

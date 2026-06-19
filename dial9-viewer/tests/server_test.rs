@@ -730,7 +730,7 @@ async fn config_reports_credential_support() {
         .json()
         .await
         .unwrap();
-    check!(resp["supports_credentials"] == true);
+    check!(resp["supports_byo_credentials"] == true);
 }
 
 #[tokio::test]
@@ -748,7 +748,7 @@ async fn config_reports_no_credential_support_by_default() {
         .json()
         .await
         .unwrap();
-    check!(resp["supports_credentials"] == false);
+    check!(resp["supports_byo_credentials"] == false);
 }
 
 // --- local backend tests ---
@@ -849,7 +849,7 @@ async fn local_trace_not_found() {
         .send()
         .await
         .unwrap();
-    check!(resp.status().as_u16() == 500);
+    check!(resp.status().as_u16() == 404);
 }
 
 #[tokio::test]

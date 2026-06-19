@@ -174,6 +174,13 @@
         // Persist the resolved region for subsequent requests.
         store({ ...get(), region: result.region });
       }
+      // Intentionally do NOT clear the stored credentials when the check fails.
+      // A failed check is often bucket-specific (wrong bucket name, or no access
+      // to *this* bucket) while the credentials are perfectly valid for others —
+      // and the UI lets the user pick a different bucket from the picker after
+      // Apply. Wiping creds on the first failed bucket check would break that
+      // flow. The caller gets `result.ok === false` and decides what to do
+      // (re-pick a bucket, or call `clear()`).
       return result;
     } catch (e) {
       return { ok: false, region: null, error: String(e && e.message || e) };

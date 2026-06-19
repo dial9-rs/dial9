@@ -2,6 +2,12 @@
 //! auto-detect the target bucket's region in a single round-trip, so the UI can
 //! confirm credentials on "Apply" and then send a resolved region on every
 //! later request.
+//!
+//! This is `POST`, not `GET`, because it is an action (it triggers a
+//! side-effecting `HeadBucket` network call to validate credentials) rather
+//! than a cacheable resource read. `POST` keeps the validation result from
+//! being cached by browsers or intermediaries — important when the answer
+//! depends on per-request credential headers.
 
 use axum::Json;
 use axum::extract::{Query, State};
@@ -71,6 +77,12 @@ pub async fn check_credentials(
     match client.head_bucket().bucket(&bucket).send().await {
         Ok(resp) => Ok(Json(CheckResponse {
             ok: true,
+            // Prefer S3's reported bucket region; fall back to the
+            // caller-supplied region. The fallback is safe: `temp` came from
+            // `MaybeCreds`, whose region was already run through
+            // `is_valid_region` in `parse_cred_headers` (an invalid region is
+            // rejected as `CredError::InvalidRegion` before reaching here), so
+            // it is either `None` or a syntactically valid region name.
             region: resp.bucket_region().map(|r| r.to_string()).or(temp.region),
             error: None,
         })),

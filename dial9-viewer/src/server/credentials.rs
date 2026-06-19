@@ -86,19 +86,46 @@ impl CredError {
     }
 }
 
-/// Whether `region` is a syntactically valid AWS region name: lowercase
-/// alphanumerics and hyphens, 1–40 chars (e.g. `us-east-1`, `ap-southeast-2`).
+/// Whether `region` is a syntactically valid AWS region name: hyphen-separated
+/// runs of lowercase alphanumerics, starting with a letter and ending with an
+/// alphanumeric, ≤40 chars (e.g. `us-east-1`, `ap-southeast-2`, `us-gov-west-1`).
 ///
-/// This is a defense-in-depth charset check, not an existence check — the
+/// This is a defense-in-depth syntactic check, not an existence check — the
 /// region is interpolated into the S3 endpoint host (`s3.{region}.amazonaws.com`
-/// under the default resolver), so we reject anything outside the region
-/// charset rather than relying on the SDK's endpoint rules to sanitize it.
+/// under the default resolver), so we reject anything outside the region shape
+/// rather than relying on the SDK's endpoint rules to sanitize it. (There is no
+/// standalone smithy region validator we can call — region validation lives
+/// inside endpoint resolution, not as a public function.) Beyond the charset we
+/// require a leading letter, a non-hyphen final character, and no consecutive
+/// hyphens, so degenerate inputs like `-`, `us--east-`, or `us-east-` are
+/// rejected.
 fn is_valid_region(region: &str) -> bool {
-    !region.is_empty()
-        && region.len() <= 40
-        && region
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+    if region.is_empty() || region.len() > 40 {
+        return false;
+    }
+    let bytes = region.as_bytes();
+    // Must start with a lowercase letter and end with a lowercase alphanumeric.
+    if !bytes[0].is_ascii_lowercase() {
+        return false;
+    }
+    if !bytes[bytes.len() - 1].is_ascii_alphanumeric() {
+        return false;
+    }
+    // Body: only lowercase alphanumerics and single (non-consecutive) hyphens.
+    let mut prev_hyphen = false;
+    for &b in bytes {
+        if b == b'-' {
+            if prev_hyphen {
+                return false;
+            }
+            prev_hyphen = true;
+        } else if b.is_ascii_lowercase() || b.is_ascii_digit() {
+            prev_hyphen = false;
+        } else {
+            return false;
+        }
+    }
+    true
 }
 
 /// Infallible extractor over the `x-dial9-aws-*` headers.
@@ -251,12 +278,21 @@ mod tests {
         // Uppercase, dots, slashes, spaces, and other host-significant ASCII
         // characters are rejected before reaching endpoint resolution.
         // (Non-ASCII bytes are caught even earlier as `Malformed` by `to_str`.)
+        //
+        // Also rejects degenerate shapes that pass a pure charset check but are
+        // not valid region names: a bare/leading/trailing hyphen, consecutive
+        // hyphens, and a leading digit.
         for region in [
             "US-EAST-1",
             "evil.com",
             "us-east-1/../foo",
             "us east 1",
             "us_east_1",
+            "-",
+            "-us-east-1",
+            "us-east-",
+            "us--east-1",
+            "1-east-1",
         ] {
             let h = headers(&[
                 (HEADER_ACCESS_KEY_ID, "AKIA"),

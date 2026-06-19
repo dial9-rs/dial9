@@ -657,7 +657,7 @@
             serverHasPrefix = true;
             updateSearchReady();
         }
-        if (config.supports_credentials) initCredsUi();
+        if (config.supports_byo_credentials) initCredsUi();
         discoverPrefixes().then(autoSearch);
     }).catch(() => { discoverPrefixes().then(autoSearch); });
 
