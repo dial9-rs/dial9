@@ -558,11 +558,28 @@ impl<M, Mode: WriterMode> TracedRuntimeBuilder<HasTracePath, M, Mode> {
         let custom_event_sources = self.custom_event_sources;
         let dump_trigger = self.dump_trigger;
 
+        // When the writer is namespaced, the S3 keys and the embedded segment
+        // metadata must use the same boot_id as the on-disk `{boot_id}/`
+        // directory, so a local segment and its upload share one identity.
+        let mut pipeline = self.pipeline;
+        let mut segment_metadata = self.segment_metadata;
+        if let Some(boot_id) = writer.boot_id() {
+            #[cfg(feature = "worker-s3")]
+            if let PipelineConfig::S3(uploader) = &mut pipeline {
+                uploader.set_boot_id(boot_id);
+            }
+            for (key, value) in &mut segment_metadata {
+                if key == "boot_id" {
+                    *value = boot_id.to_owned();
+                }
+            }
+        }
+
         let processors = assemble_processors(
             #[cfg(feature = "cpu-profiling")]
             self.cpu_profiling_config.is_some(),
             Mode::IS_DISK,
-            self.pipeline,
+            pipeline,
         );
 
         let core_builder = TelemetryCore::builder()
@@ -580,7 +597,7 @@ impl<M, Mode: WriterMode> TracedRuntimeBuilder<HasTracePath, M, Mode> {
             .maybe_worker_metrics_sink(self.worker_metrics_sink)
             .maybe_trigger(self.trigger_rx)
             .processors(processors)
-            .segment_metadata(self.segment_metadata);
+            .segment_metadata(segment_metadata);
 
         #[cfg(feature = "cpu-profiling")]
         let core_builder = core_builder

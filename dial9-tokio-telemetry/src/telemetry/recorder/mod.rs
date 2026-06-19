@@ -1544,11 +1544,9 @@ mod tests {
         }
 
         fn cfg(boot_id: &str) -> S3Config {
-            S3Config::builder()
-                .bucket("b")
-                .service_name("s")
-                .boot_id(boot_id)
-                .build()
+            let mut c = S3Config::builder().bucket("b").service_name("s").build();
+            c.set_boot_id(boot_id);
+            c
         }
 
         // Order A: client set after the uploader — already worked.
@@ -1597,12 +1595,13 @@ mod tests {
 
         #[cfg(feature = "worker-s3")]
         fn s3_cfg() -> crate::background_task::s3::S3Config {
-            crate::background_task::s3::S3Config::builder()
+            let mut c = crate::background_task::s3::S3Config::builder()
                 .bucket("test-bucket")
                 .service_name("checkout-api")
                 .instance_path("us-east-1/i-0abc123")
-                .boot_id("test-boot")
-                .build()
+                .build();
+            c.set_boot_id("test-boot");
+            c
         }
 
         #[cfg(feature = "worker-s3")]
@@ -1622,11 +1621,11 @@ mod tests {
         #[cfg(feature = "worker-s3")]
         #[test]
         fn s3_preset_replace_overwrites_metadata() {
-            let cfg2 = crate::background_task::s3::S3Config::builder()
+            let mut cfg2 = crate::background_task::s3::S3Config::builder()
                 .bucket("other-bucket")
                 .service_name("other-svc")
-                .boot_id("other-boot")
                 .build();
+            cfg2.set_boot_id("other-boot");
             let builder = TracedRuntime::builder()
                 .with_s3_uploader::<Disk>(s3_cfg())
                 .with_s3_uploader(cfg2);
