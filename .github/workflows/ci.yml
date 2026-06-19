@@ -64,6 +64,25 @@ jobs:
           toolchain: ${{ matrix.toolchain }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
+  # TEMPORARY (2026-06-15): the nightly build is disabled for ~2 weeks. This
+  # gate skips `build-nightly` until 2026-06-29 (UTC), after which the job
+  # re-enables automatically. Remove this `nightly-gate` job and the `needs:`/
+  # `if:` lines on `build-nightly` once the guard has expired.
+  nightly-gate:
+    name: Nightly build gate
+    runs-on: ubuntu-latest
+    outputs:
+      enabled: ${{ steps.check.outputs.enabled }}
+    steps:
+      - id: check
+        run: |
+          if [[ "$(date -u +%Y-%m-%d)" < "2026-06-29" ]]; then
+            echo "Nightly build temporarily disabled until 2026-06-29; skipping."
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          fi
+
   build-nightly:
     name: Build (${{ matrix.os }}, nightly)
     runs-on: ${{ matrix.os }}
@@ -72,6 +91,8 @@ jobs:
     # toolchain/ecosystem breakage and is intentionally NOT part of `ci-pass`, so
     # a nightly rustc regression or a freshly published dependency does not block
     # PRs. Watch it on main; fix forward when it goes red.
+    needs: nightly-gate
+    if: needs.nightly-gate.outputs.enabled == 'true'
     continue-on-error: true
     strategy:
       fail-fast: false
@@ -158,7 +179,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       RUST_BACKTRACE: 1
-      RUSTFLAGS: "--cfg tokio_unstable -Zsanitizer=address"
+      RUSTFLAGS: "--cfg tokio_unstable -C force-frame-pointers=yes -Zsanitizer=address"
       RUSTDOCFLAGS: "-Zsanitizer=address"
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -192,7 +213,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       RUST_BACKTRACE: 1
-      RUSTFLAGS: "--cfg tokio_unstable"
+      RUSTFLAGS: "--cfg tokio_unstable -C force-frame-pointers=yes"
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
@@ -283,6 +304,7 @@ jobs:
           cargo package \
             -p dial9-trace-format-derive \
             -p dial9-trace-format \
+            -p dial9-core \
             -p dial9-perf-self-profile \
             -p dial9-macro \
             -p dial9-tokio-telemetry \

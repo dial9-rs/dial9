@@ -370,6 +370,11 @@ fn collect_files(
                 collect_files(root, &canonical, prefix, out, depth + 1, visited)?;
             }
         } else if canonical.is_file() {
+            let file_name = entry.file_name();
+            let file_name_str = file_name.to_string_lossy();
+            if file_name_str.starts_with('.') {
+                continue;
+            }
             let key = path
                 .strip_prefix(root)
                 .unwrap_or(&path)

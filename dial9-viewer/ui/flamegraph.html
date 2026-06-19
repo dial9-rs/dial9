@@ -78,7 +78,9 @@
         <script>
             (async function () {
                 const params = new URLSearchParams(window.location.search);
-                const traceUrl = params.get("trace");
+                // `trace` is repeatable — each value is a separate (possibly
+                // gzipped) component to fetch and concatenate.
+                const traceUrls = params.getAll("trace");
                 const startNs = params.get("start") != null ? Number(params.get("start")) : null;
                 const endNs = params.get("end") != null ? Number(params.get("end")) : null;
 
@@ -94,18 +96,19 @@
                     errorEl.textContent = msg;
                 }
 
-                if (!traceUrl) {
+                if (!traceUrls.length) {
                     showError("No trace URL provided. Use ?trace=<url>&start=<ns>&end=<ns>");
                     return;
                 }
 
-                // Fetch trace
+                // Fetch trace(s): each component is fetched and gunzipped
+                // independently, then concatenated into one buffer.
                 let buffer;
                 try {
-                    loadingEl.textContent = "Fetching trace\u2026";
-                    const resp = await fetch(traceUrl);
-                    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-                    buffer = await resp.arrayBuffer();
+                    loadingEl.textContent = traceUrls.length > 1
+                        ? `Fetching ${traceUrls.length} traces\u2026`
+                        : "Fetching trace\u2026";
+                    buffer = await TraceParser.fetchTraces(traceUrls);
                 } catch (err) {
                     showError("Failed to fetch trace: " + err.message);
                     return;
@@ -156,17 +159,27 @@
                     }
                 }
 
-                // Update title
-                const name = traceUrl.split("/").pop() || "trace";
+                // Update title. Prefer the structured svc/host metadata passed
+                // by the S3 browser; otherwise fall back to the trace filename.
+                const svc = params.get("svc");
+                const host = params.get("host");
+                const segs = params.get("segs");
+                const fromTime = params.get("from");
+                const toTime = params.get("to");
+                const label = svc
+                    ? svc + (host ? ` @ ${host}` : "")
+                    : (traceUrls[0].split("/").pop() || "trace");
                 const durMs = startNs != null && endNs != null
                     ? ((endNs - startNs) / 1e6).toFixed(2)
                     : null;
-                document.title = `Flamegraph \u2014 ${name}` + (durMs ? ` (${durMs}ms)` : "");
-                titleEl.textContent = "Flamegraph";
-                statsEl.textContent =
-                    `${allSamples.length} samples` +
-                    (durMs ? ` \u00b7 ${durMs}ms selected` : "") +
-                    (timeRangeMatched ? "" : " (full trace \u2014 selected region could not be reproduced)");
+                document.title = `Flamegraph \u2014 ${label}` + (durMs ? ` (${durMs}ms)` : "");
+                titleEl.textContent = `Flamegraph \u2014 ${label}`;
+                const titleBits = [`${allSamples.length} samples`];
+                if (segs) titleBits.push(`${segs} segment${segs !== "1" ? "s" : ""}`);
+                if (fromTime) titleBits.push(toTime && toTime !== fromTime ? `${fromTime} \u2192 ${toTime}` : fromTime);
+                if (durMs) titleBits.push(`${durMs}ms selected`);
+                if (!timeRangeMatched) titleBits.push("full trace \u2014 selected region could not be reproduced");
+                statsEl.textContent = titleBits.join(" \u00b7 ");
 
                 loadingEl.classList.add("hidden");
                 containerEl.style.display = "flex";

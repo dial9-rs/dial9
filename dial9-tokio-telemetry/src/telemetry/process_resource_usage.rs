@@ -194,7 +194,6 @@ mod unix {
         use crate::telemetry::buffer;
         use crate::telemetry::recorder::SharedState;
         use serde::Deserialize;
-        use std::collections::HashMap;
 
         #[derive(Debug, Deserialize)]
         #[serde(tag = "event")]
@@ -249,11 +248,9 @@ mod unix {
         #[test]
         fn source_emits_process_resource_usage_event() {
             let shared = SharedState::new(0, None);
-            let thread_roles = HashMap::new();
             let ctx = FlushContext {
                 collector: &shared.collector,
                 drain_epoch: &shared.drain_epoch,
-                thread_roles: &thread_roles,
             };
             let mut source = ProcessResourceUsageSource::new(ProcessResourceUsageConfig::default());
 
@@ -272,11 +269,9 @@ mod unix {
         #[test]
         fn source_respects_sample_interval() {
             let shared = SharedState::new(0, None);
-            let thread_roles = HashMap::new();
             let ctx = FlushContext {
                 collector: &shared.collector,
                 drain_epoch: &shared.drain_epoch,
-                thread_roles: &thread_roles,
             };
             let config = ProcessResourceUsageConfig::builder()
                 .sample_interval(Duration::from_secs(60))

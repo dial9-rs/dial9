@@ -84,6 +84,28 @@ pub fn decode_all<T: DeserializeOwned>(segments: &[Vec<u8>]) -> Vec<T> {
     events
 }
 
+/// Reconstruct `tid -> worker` from park/unpark events. CPU samples carry only
+/// a `tid`, so tests that assert on a sample's worker resolve it through this
+/// map, the same way analysis does.
+pub fn tid_to_worker(
+    events: &[dial9_tokio_telemetry::telemetry::analysis_events::Dial9Event],
+) -> std::collections::HashMap<u32, dial9_tokio_telemetry::telemetry::analysis_events::WorkerId> {
+    use dial9_tokio_telemetry::telemetry::analysis_events::Dial9Event;
+    let mut m = std::collections::HashMap::new();
+    for e in events {
+        match e {
+            Dial9Event::WorkerParkEvent(p) => {
+                m.insert(p.tid, p.worker_id);
+            }
+            Dial9Event::WorkerUnparkEvent(p) => {
+                m.insert(p.tid, p.worker_id);
+            }
+            _ => {}
+        }
+    }
+    m
+}
+
 /// Read a trace file from disk and decode all events as `T`.
 pub fn decode_file<T: DeserializeOwned>(path: &Path) -> Vec<T> {
     let data = std::fs::read(path).expect("read trace file");

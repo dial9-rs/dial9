@@ -161,11 +161,9 @@ mod tests {
     #[test]
     fn source_records_callback_events() {
         let shared = SharedState::new(0, None);
-        let thread_roles = std::collections::HashMap::new();
         let ctx = FlushContext {
             collector: &shared.collector,
             drain_epoch: &shared.drain_epoch,
-            thread_roles: &thread_roles,
         };
         let mut source = CustomEventsSource::new(CustomEventsConfig::default(), |ctx| {
             ctx.record_event(TestEvent {
@@ -188,11 +186,9 @@ mod tests {
     #[test]
     fn source_respects_minimum_interval() {
         let shared = SharedState::new(0, None);
-        let thread_roles = std::collections::HashMap::new();
         let ctx = FlushContext {
             collector: &shared.collector,
             drain_epoch: &shared.drain_epoch,
-            thread_roles: &thread_roles,
         };
         let calls = std::sync::Arc::new(AtomicUsize::new(0));
         let callback_calls = calls.clone();
@@ -212,11 +208,9 @@ mod tests {
     #[test]
     fn zero_minimum_interval_does_not_throttle() {
         let shared = SharedState::new(0, None);
-        let thread_roles = std::collections::HashMap::new();
         let ctx = FlushContext {
             collector: &shared.collector,
             drain_epoch: &shared.drain_epoch,
-            thread_roles: &thread_roles,
         };
         let calls = std::sync::Arc::new(AtomicUsize::new(0));
         let callback_calls = calls.clone();

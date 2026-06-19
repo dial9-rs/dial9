@@ -13,9 +13,7 @@ pub mod background_task;
 #[cfg(feature = "memory-profiling")]
 pub mod memory_profiling;
 pub(crate) mod metrics;
-pub(crate) mod primitives;
-pub(crate) mod rate_limit;
-pub(crate) mod sampling;
+pub(crate) use dial9_core::{primitives, rate_limit, sampling};
 #[cfg(feature = "taskdump")]
 pub(crate) mod task_dumped;
 /// Core telemetry types, recording, and trace I/O.
@@ -28,13 +26,6 @@ pub(crate) mod unwind;
 #[cfg_attr(docsrs, doc(cfg(feature = "tracing-layer")))]
 /// Tracing subscriber layer for emitting span events into dial9 traces.
 pub mod tracing_layer;
-
-/// Original positional-argument config API for the
-/// `#[dial9_tokio_telemetry::main]` macro. The fluent builder re-exported
-/// at the crate root (see [`Dial9Config::builder`]) is a more ergonomic alternative.
-/// We encourage you to switch to [`Dial9Config::builder`].
-#[path = "legacy_config.rs"]
-pub mod config;
 
 #[path = "config.rs"]
 mod current_config;

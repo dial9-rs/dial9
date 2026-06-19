@@ -87,24 +87,34 @@ fn eviction_cleans_up_processed_gz_segments() {
         "expected no unprocessed .bin files after graceful shutdown, found: {bin_files:?}"
     );
 
-    // The writer's eviction budget is ~4 segments (max_total_size / max_file_size).
+    // Coarse leak detection. This e2e test's unique job is to prove the *real*
+    // pipeline doesn't leak: the background worker gzip-renames each sealed
+    // `.bin` segment to `.bin.gz`, and eviction must then delete those renamed
+    // files.
+    //
+    // We deliberately do NOT assert an exact on-disk byte budget here. Real
+    // CPU-profile segment sizes and gzip ratios are nondeterministic, and
+    // eviction always retains the most-recent segment — which can itself exceed
+    // the entire budget (a single logical unit can be larger than
+    // `max_file_size`, and gzip framing overhead on incompressible data can
+    // push a segment above its uncompressed size). Asserting compressed bytes
+    // `<= max_total_size` flaked in CI for exactly these reasons. The precise
+    // eviction/budget contract — including the keep-most-recent floor and the
+    // `.bin` -> `.bin.gz` cleanup — is covered deterministically by the writer
+    // unit tests: `test_rotating_writer_eviction`,
+    // `test_eviction_removes_gz_variant`, and
+    // `test_eviction_keeps_most_recent_segment_when_over_budget`.
+    //
+    // The qualitative invariant a leak *would* violate is that disk usage stays
+    // bounded and does not grow with the amount produced. The workload above
+    // generated far more than `max_total_size` of trace data across many
+    // rotations; if eviction failed to remove renamed `.bin.gz` files they
+    // would accumulate one per rotation (dozens), rather than the handful the
+    // budget allows.
     assert!(
         gz_files.len() <= max_number_files as usize,
-        "expected less or equal than max number of gz files {}",
+        "retained {} .bin.gz files (eviction budget is ~{max_number_files} \
+         segments) — processed segments are leaking. Files: {gz_files:?}",
         gz_files.len()
-    );
-
-    // Compute total size of .gz files on disk.
-    let total_gz_bytes: u64 = gz_files
-        .iter()
-        .map(|p| std::fs::metadata(p).unwrap().len())
-        .sum();
-
-    // The total compressed size on disk must be smaller or equal to the max total size
-    assert!(
-        total_gz_bytes <= max_total_size,
-        "total .bin.gz size on disk ({total_gz_bytes} bytes) exceeds the configured \
-         budget ({max_total_size} bytes) — processed segments are leaking. \
-         Files: {gz_files:?}"
     );
 }

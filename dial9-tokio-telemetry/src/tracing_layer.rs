@@ -56,7 +56,7 @@
 //! comparable to the cost of a single poll event, so the layer is suitable
 //! for production use with appropriate span filtering.
 
-use crate::telemetry::{TelemetryHandle, clock_monotonic_ns, current_worker_id};
+use crate::telemetry::{Dial9Handle, clock_monotonic_ns, current_worker_id};
 use dial9_trace_format::TraceEvent;
 use dial9_trace_format::encoder::Schema;
 use dial9_trace_format::schema::FieldDef;
@@ -244,7 +244,7 @@ where
     S: tracing::Subscriber + for<'a> LookupSpan<'a>,
 {
     fn on_new_span(&self, attrs: &span::Attributes<'_>, id: &span::Id, ctx: Context<'_, S>) {
-        if !TelemetryHandle::current().is_enabled() {
+        if !Dial9Handle::current().is_enabled() {
             return;
         }
         let mut field_values = Vec::new();
@@ -264,7 +264,7 @@ where
     }
 
     fn on_record(&self, id: &span::Id, values: &span::Record<'_>, ctx: Context<'_, S>) {
-        if !TelemetryHandle::current().is_enabled() {
+        if !Dial9Handle::current().is_enabled() {
             return;
         }
         if let Some(span) = ctx.span(id) {
@@ -278,7 +278,7 @@ where
     }
 
     fn on_enter(&self, id: &span::Id, ctx: Context<'_, S>) {
-        let handle = TelemetryHandle::current();
+        let handle = Dial9Handle::current();
         if !handle.is_enabled() {
             return;
         }
@@ -324,7 +324,7 @@ where
     }
 
     fn on_exit(&self, id: &span::Id, ctx: Context<'_, S>) {
-        let handle = TelemetryHandle::current();
+        let handle = Dial9Handle::current();
         if !handle.is_enabled() {
             return;
         }
@@ -358,7 +358,7 @@ where
     }
 
     fn on_close(&self, id: span::Id, _ctx: Context<'_, S>) {
-        let Some(handle) = TelemetryHandle::try_current() else {
+        let Some(handle) = Dial9Handle::try_current() else {
             return;
         };
 

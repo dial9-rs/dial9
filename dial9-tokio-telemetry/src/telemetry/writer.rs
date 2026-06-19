@@ -178,6 +178,8 @@ pub struct SegmentWriter<Mode: WriterMode = Disk> {
     next_drain_time: Instant,
     /// Unified filesystem/channel abstraction.
     fs: Arc<Fs>,
+    boot_id: Option<String>,
+    _namespace_lock: Option<std::fs::File>,
     _mode: PhantomData<Mode>,
 }
 
@@ -295,12 +297,19 @@ impl SegmentWriter<Disk> {
             drain_interval,
             next_drain_time: now + drain_interval,
             fs,
+            boot_id: None,
+            _namespace_lock: None,
             _mode: PhantomData,
         };
         // Enforce the budget immediately so artifacts from prior writer
         // lifetimes don't push us over the cap before we even rotate once.
         writer.evict_oldest()?;
         Ok(writer)
+    }
+
+    pub(crate) fn set_namespace(&mut self, boot_id: String, lock: std::fs::File) {
+        self.boot_id = Some(boot_id);
+        self._namespace_lock = Some(lock);
     }
 
     /// Create a writer that writes to a single file with no rotation or eviction.
@@ -334,6 +343,8 @@ impl SegmentWriter<Disk> {
             drain_interval: DEFAULT_DRAIN_INTERVAL,
             next_drain_time: now + DEFAULT_DRAIN_INTERVAL,
             fs,
+            boot_id: None,
+            _namespace_lock: None,
             _mode: PhantomData,
         })
     }
@@ -446,6 +457,8 @@ impl SegmentWriter<Memory> {
             drain_interval,
             next_drain_time: now + drain_interval,
             fs,
+            boot_id: None,
+            _namespace_lock: None,
             _mode: PhantomData,
         })
     }
@@ -455,6 +468,23 @@ impl<M: WriterMode> SegmentWriter<M> {
     /// The base path used for trace segment files.
     pub fn base_path(&self) -> &Path {
         &self.base_path
+    }
+
+    /// Per-process boot identifier, if namespace isolation is active. This is
+    /// the name of the [`trace_dir`](Self::trace_dir) subdirectory.
+    pub fn boot_id(&self) -> Option<&str> {
+        self.boot_id.as_deref()
+    }
+
+    /// Directory this writer's trace segments live in. When namespace
+    /// isolation is active this is the per-process `{configured_dir}/{boot_id}/`
+    /// subdirectory; otherwise it is the configured directory directly. Use
+    /// this to locate the segment files on disk.
+    pub fn trace_dir(&self) -> &Path {
+        self.base_path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."))
     }
 
     /// The path of the currently active (being-written) segment file.
@@ -1615,6 +1645,56 @@ mod tests {
 
         // The .bin.gz file should have been cleaned up by eviction.
         assert!(!seg0_gz.exists(), "trace.0.bin.gz should have been evicted");
+    }
+
+    /// Eviction must never drop below the most-recent segment, even when that
+    /// single segment alone exceeds `max_total_size`. In that case it retains
+    /// the segment on disk (so on-disk usage legitimately exceeds the budget)
+    /// and signals "stop writing" by transitioning to `Finished`.
+    ///
+    /// This is the floor that makes an end-to-end `on-disk bytes <=
+    /// max_total_size` assertion unsound — see `tests/writeback_no_leaked_gz.rs`.
+    #[test]
+    fn test_eviction_keeps_most_recent_segment_when_over_budget() {
+        let dir = TempDir::new().unwrap();
+        let base = dir.path().join("trace");
+        let one_event = single_event_file_size();
+        // No rotation (huge per-file size) so the single active segment is the
+        // only one; a budget smaller than one segment forces the floor.
+        let max_file_size = u64::MAX;
+        let max_total_size = one_event / 2;
+        assert!(
+            max_total_size < one_event,
+            "test setup: budget must be smaller than a single segment"
+        );
+        let mut writer = DiskWriter::new(&base, max_file_size, max_total_size).unwrap();
+
+        writer.write_encoded_batch(&test_batch()).unwrap();
+        // The lone active segment already exceeds the total budget.
+        assert!(
+            writer.total_size() > max_total_size,
+            "single segment ({}) should exceed budget ({max_total_size})",
+            writer.total_size()
+        );
+
+        // Eviction has no closed segments to drop and must NOT delete the
+        // current (most-recent) segment. It signals "stop" instead.
+        writer.evict_oldest().unwrap();
+
+        assert!(
+            matches!(writer.state, WriterState::Finished),
+            "writer should stop once even the most-recent segment exceeds budget"
+        );
+        // The most-recent segment is retained on disk despite exceeding the
+        // budget — eviction never drops below one segment.
+        assert!(
+            std::path::Path::new(&writer.current_active_path()).exists(),
+            "the most-recent segment must not be evicted"
+        );
+        assert!(
+            total_disk_usage(dir.path()) > max_total_size,
+            "retained segment is expected to push on-disk usage over the budget"
+        );
     }
 
     // ---- Time-based rotation tests ----

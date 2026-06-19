@@ -1,15 +1,20 @@
 use super::shared_state::{PARKED_SCHED_WAIT, SharedState};
-use crate::telemetry::buffer::{Encodable, ThreadLocalEncoder};
-use crate::telemetry::events::SchedStat;
+use super::source::{FlushContext, Source};
+use crate::primitives::sync::{Arc, Mutex};
+use crate::telemetry::buffer::{Encodable, ThreadLocalEncoder, record_encodable_event};
+use crate::telemetry::events::{SchedStat, clock_monotonic_ns};
 use crate::telemetry::format::{
-    PollEndEvent, PollStartEvent, TaskSpawnEvent, WorkerId, WorkerParkEvent, WorkerUnparkEvent,
+    PollEndEvent, PollStartEvent, QueueSampleEvent, TaskSpawnEvent, WorkerId, WorkerParkEvent,
+    WorkerUnparkEvent,
 };
 use crate::telemetry::task_metadata::TaskId;
+use metrique_timesource::{Instant, time_source};
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::num::NonZeroU64;
 use std::sync::OnceLock;
 use std::sync::RwLock;
+use std::time::Duration;
 use tokio::runtime::RuntimeMetrics;
 
 /// Per-runtime state captured at hook registration time.
@@ -71,6 +76,65 @@ pub(crate) fn poll_start_ts_monotonic() -> u64 {
     })
 }
 
+/// Shared list of all attached runtimes.
+pub(crate) type RuntimeContextRegistry = Arc<Mutex<Vec<Arc<RuntimeContext>>>>;
+
+/// Flush-thread [`Source`] over all tokio runtimes. Each cycle it samples the
+/// summed global queue depth across runtimes and contributes each runtime's
+/// runtime->worker segment metadata.
+pub(crate) struct TokioRuntimesSource {
+    contexts: RuntimeContextRegistry,
+    last_sample: Instant,
+    sample_interval: Duration,
+}
+
+impl TokioRuntimesSource {
+    pub(crate) fn new(contexts: RuntimeContextRegistry) -> Self {
+        Self {
+            contexts,
+            last_sample: time_source().instant(),
+            sample_interval: Duration::from_millis(10),
+        }
+    }
+}
+
+impl Source for TokioRuntimesSource {
+    fn flush(&mut self, ctx: &FlushContext<'_>) {
+        if self.last_sample.elapsed() < self.sample_interval {
+            return;
+        }
+        self.last_sample = time_source().instant();
+        let total_global_queue: usize = {
+            let contexts = self.contexts.lock().unwrap();
+            if contexts.is_empty() {
+                return;
+            }
+            contexts.iter().map(|c| c.global_queue_depth()).sum()
+        };
+        record_encodable_event(
+            &QueueSampleEvent {
+                timestamp_ns: clock_monotonic_ns(),
+                global_queue: total_global_queue as u8,
+            },
+            ctx.collector,
+            ctx.drain_epoch,
+        );
+    }
+
+    fn name(&self) -> &'static str {
+        "tokio_runtimes"
+    }
+
+    fn segment_metadata(&self) -> Vec<(String, String)> {
+        self.contexts
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|c| c.metadata_entry())
+            .collect()
+    }
+}
+
 impl RuntimeContext {
     pub(crate) fn new(runtime_name: Option<String>) -> Self {
         Self {
@@ -125,7 +189,7 @@ impl RuntimeContext {
 
         register_worker_if_needed(self, local_index, global_id);
         #[cfg(feature = "cpu-profiling")]
-        register_tid_if_needed(global_id, shared);
+        start_sched_sampling_if_needed(shared);
         #[cfg(not(feature = "cpu-profiling"))]
         let _ = shared;
 
@@ -146,17 +210,11 @@ fn register_worker_if_needed(ctx: &RuntimeContext, local_index: usize, global_id
     });
 }
 
-/// Register the current thread's OS tid for CPU profiling (once per thread).
-/// Also starts sched event sampling for this worker thread.
+/// Start sched event sampling for this worker thread (once per thread).
 #[cfg(feature = "cpu-profiling")]
-fn register_tid_if_needed(global_id: u64, shared: &SharedState) {
+fn start_sched_sampling_if_needed(shared: &SharedState) {
     TID_REGISTERED.with(|cell| {
         if !cell.get() {
-            let os_tid = crate::telemetry::events::current_tid();
-            shared.thread_roles.lock().unwrap().insert(
-                os_tid,
-                crate::telemetry::events::ThreadRole::Worker(global_id as usize),
-            );
             // Start sched event sampling for this worker thread. Deferred from
             // on_thread_start so that only worker threads (not blocking pool
             // threads) open perf fds.

@@ -49,6 +49,43 @@
   }
 
   /**
+   * Fetch one or more trace URLs, gunzip each component individually, and
+   * concatenate them into a single ArrayBuffer.
+   *
+   * The `trace` query parameter is repeatable: each component is fetched
+   * independently and may be gzipped on its own (unlike `/api/trace`, which
+   * gunzips server-side before serving). We therefore ungzip every component
+   * here, then concatenate the raw bytes. The trace decoder treats a
+   * concatenated stream as multiple segments — a mid-stream `TRC\0` header
+   * resets the frame parser — so the combined buffer parses as one trace.
+   *
+   * @param {string|string[]} urls one URL or a list of URLs (order preserved)
+   * @param {{signal?: AbortSignal}} [opts]
+   * @returns {Promise<ArrayBuffer>}
+   */
+  async function fetchTraces(urls, opts = {}) {
+    const list = Array.isArray(urls) ? urls : [urls];
+    const parts = await Promise.all(
+      list.map(async (url) => {
+        const resp = await fetch(url, { signal: opts.signal });
+        if (!resp.ok) throw new Error(`HTTP ${resp.status} fetching ${url}`);
+        const raw = await maybeGunzip(await resp.arrayBuffer());
+        return raw instanceof ArrayBuffer ? new Uint8Array(raw) : raw;
+      })
+    );
+    if (parts.length === 1) return parts[0].buffer;
+    let total = 0;
+    for (const p of parts) total += p.length;
+    const out = new Uint8Array(total);
+    let off = 0;
+    for (const p of parts) {
+      out.set(p, off);
+      off += p.length;
+    }
+    return out.buffer;
+  }
+
+  /**
    * @typedef {{
    *   eventType: number,
    *   timestamp: number,
@@ -86,6 +123,10 @@
    *   magic: "D9TF",
    *   version: number,
    *   events: TraceEvent[],
+   *   minTs: number|null,
+   *   maxTs: number|null,
+   *   recordMinTs: number|null,
+   *   recordMaxTs: number|null,
    *   truncated: boolean,
    *   hasCpuTime: boolean,
    *   hasSchedWait: boolean,
@@ -308,6 +349,7 @@
     const maxEvents = (options && options.maxEvents != null) ? options.maxEvents : MAX_EVENTS;
     const startTime = (options && options.startTime != null) ? options.startTime : 0;
     const endTime = (options && options.endTime != null) ? options.endTime : Infinity;
+    const hasTimeFilter = startTime > 0 || endTime < Infinity;
     const onProgress = (options && options.onParseProgress) || null;
     const YIELD_BYTES = 100 * 1024; // yield to browser every 100KB
     const TD = getTraceDecoder();
@@ -353,6 +395,17 @@
       "SegmentMetadataEvent",
       "ClockSyncEvent",
     ]);
+    const TRACE_BOUND_EXCLUDED_FRAMES = new Set([
+      "SymbolTableEntry",
+      "SegmentMetadataEvent",
+      "ClockSyncEvent",
+    ]);
+    let recordMinTs = Infinity, recordMaxTs = -Infinity;
+    function includeRecordTimestamp(t) {
+      if (t == null) return;
+      if (t < recordMinTs) recordMinTs = t;
+      if (t > recordMaxTs) recordMaxTs = t;
+    }
 
     let lastYieldPos = 0;
     let frame;
@@ -384,6 +437,9 @@
       // (uncapped frames like symbols/metadata are always processed)
       const inTimeRange = ts >= startTime && ts <= endTime;
       if (!inTimeRange && !UNCAPPED_FRAMES.has(frame.name)) continue;
+      if (inTimeRange && !TRACE_BOUND_EXCLUDED_FRAMES.has(frame.name)) {
+        includeRecordTimestamp(ts);
+      }
 
       switch (frame.name) {
         case "PollStartEvent": {
@@ -662,9 +718,7 @@
       const a0 = clockSyncAnchors[0];
       clockOffsetNs = a0.realtimeNs - a0.monotonicNs;
     }
-    const hasTimeFilter = startTime > 0 || endTime < Infinity;
-
-    // Compute timestamp bounds from events (safe for large arrays)
+    // Keep the historical event-only bounds for runtime analysis consumers.
     let evMinTs = Infinity, evMaxTs = -Infinity;
     for (let i = 0; i < events.length; i++) {
       const t = events[i].timestamp;
@@ -676,6 +730,14 @@
     // tid fields, detect block-in-place gaps, and rewrite cpuSamples.workerId.
     // See ADR-0001 (worker_id derived at analysis) and ADR-0002 (block-in-place
     // gap is unknowable).
+    //
+    // Samples are attributed by tid: resolve each through the tid -> worker map.
+    // Leave the wire value untouched when the tid is unmapped, so legacy traces
+    // (park/unpark without a tid) keep their pre-resolved worker id.
+    for (const sample of cpuSamples) {
+      const w = tidToWorker.get(sample.tid);
+      if (w !== undefined) sample.workerId = w;
+    }
     const blockInPlaceGaps = deriveBlockInPlaceGaps(events, cpuSamples);
 
     return {
@@ -684,6 +746,8 @@
       events,
       minTs: events.length > 0 ? evMinTs : null,
       maxTs: events.length > 0 ? evMaxTs : null,
+      recordMinTs: recordMinTs < Infinity ? recordMinTs : null,
+      recordMaxTs: recordMaxTs > -Infinity ? recordMaxTs : null,
       truncated: events.length >= maxEvents,
       timeFiltered: hasTimeFilter,
       filterStartTime: hasTimeFilter ? startTime : null,
@@ -1076,6 +1140,7 @@
       OFF_WORKER_WORKER_ID,
       parseTrace,
       parseOne,
+      fetchTraces,
       formatFrame,
       symbolizeChain,
       deduplicateSamples,
@@ -1086,6 +1151,7 @@
       EVENT_TYPES,
       OFF_WORKER_WORKER_ID,
       parseTrace,
+      fetchTraces,
       formatFrame,
       symbolizeChain,
       deduplicateSamples,

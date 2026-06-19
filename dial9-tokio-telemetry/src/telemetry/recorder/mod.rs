@@ -17,7 +17,7 @@ pub use builder::{
     TracedRuntimeBuilder,
 };
 pub use guard::{TelemetryGuard, TraceRuntimeCoreBuilder};
-pub use handle::{RuntimeTelemetryHandle, TelemetryHandle, spawn};
+pub use handle::{Dial9Handle, Dial9TokioHandle, spawn};
 
 mod tokio_hooks;
 pub use tokio_hooks::TokioHooks;
@@ -44,7 +44,7 @@ use std::time::Duration;
 // Channel-based control for the flush thread
 // ---------------------------------------------------------------------------
 
-/// Commands sent to the flush thread from TelemetryHandle / TelemetryGuard.
+/// Commands sent to the flush thread from Dial9Handle / TelemetryGuard.
 pub(crate) enum ControlCommand {
     /// Flush, finalize (seal segment), then exit the thread.
     FinalizeAndStop(crate::primitives::sync::mpsc::SyncSender<()>),
@@ -200,32 +200,20 @@ fn register_hooks(
     // Unified on_thread_start / on_thread_stop. Tokio only stores one
     // callback per hook, so any feature-gated work must live here rather
     // than registering its own hook.
-    let handle_for_tl = TelemetryHandle::enabled(shared.clone(), control_tx.clone());
-    #[cfg(feature = "cpu-profiling")]
-    let s_start = shared.clone();
+    let handle_for_tl = Dial9Handle::enabled(shared.clone(), control_tx.clone());
     #[cfg(feature = "cpu-profiling")]
     let s_stop = shared.clone();
 
     register_hook!(builder, on_thread_start, tokio_hooks.on_thread_start, {
-        // Install this thread's TelemetryHandle so user code can call
-        // `TelemetryHandle::current()` from anywhere on this thread.
+        // Install this thread's Dial9Handle so user code can call
+        // `Dial9Handle::current()` from anywhere on this thread.
         CURRENT_HANDLE.with(|cell| {
             *cell.borrow_mut() = Some(handle_for_tl.clone());
         });
 
         #[cfg(feature = "cpu-profiling")]
         {
-            // Register as Blocking initially; worker threads will
-            // overwrite this to Worker(i) in resolve_worker_id.
-            // NOTE: `tokio::runtime::worker_index()` will always return `None` at this point
-            // so we can't utilize that here.
-            let tid = crate::telemetry::events::current_tid();
-            s_start
-                .thread_roles
-                .lock()
-                .unwrap()
-                .insert(tid, crate::telemetry::events::ThreadRole::Blocking);
-            // Sched event sampling is deferred to register_tid_if_needed(),
+            // Sched event sampling is deferred to start_sched_sampling_if_needed(),
             // which runs only for worker threads on their first poll/park.
             // This avoids opening perf fds for blocking pool threads.
 
@@ -242,8 +230,6 @@ fn register_hooks(
 
         #[cfg(feature = "cpu-profiling")]
         {
-            let tid = crate::telemetry::events::current_tid();
-            s_stop.thread_roles.lock().unwrap().remove(&tid);
             if let Ok(mut sources) = s_stop.sources.lock() {
                 for source in sources.iter_mut() {
                     source.on_thread_stop();
@@ -258,6 +244,7 @@ fn register_hooks(
 /// the runtime, reserve worker IDs, and push the context.
 fn attach_runtime(
     shared: &Arc<SharedState>,
+    contexts: &runtime_context::RuntimeContextRegistry,
     mut builder: tokio::runtime::Builder,
     runtime_name: Option<String>,
     control_tx: &crate::primitives::sync::mpsc::SyncSender<ControlCommand>,
@@ -280,7 +267,7 @@ fn attach_runtime(
     // this thread IS the worker (block_on runs here), so the tracing layer
     // needs CURRENT_HANDLE to be set. Harmless for multi_thread runtimes.
     CURRENT_HANDLE.with(|cell| {
-        *cell.borrow_mut() = Some(TelemetryHandle::enabled(shared.clone(), control_tx.clone()));
+        *cell.borrow_mut() = Some(Dial9Handle::enabled(shared.clone(), control_tx.clone()));
     });
 
     // Pre-reserve a contiguous block of worker IDs and set metrics atomically.
@@ -309,7 +296,7 @@ fn attach_runtime(
         }
     }
 
-    shared.contexts.lock().unwrap().push(ctx);
+    contexts.lock().unwrap().push(ctx);
 
     Ok(runtime)
 }
@@ -436,8 +423,16 @@ mod tests {
         assert!(guard.is_enabled());
         assert!(guard.shared().unwrap().is_enabled());
         assert!(
-            guard.shared().unwrap().contexts.lock().unwrap().is_empty(),
-            "disabled Tokio instrumentation should not register runtime contexts"
+            !guard
+                .shared()
+                .unwrap()
+                .sources
+                .lock()
+                .unwrap()
+                .iter()
+                .flat_map(|s| s.segment_metadata())
+                .any(|(k, _)| k.starts_with("runtime.")),
+            "disabled Tokio instrumentation should not produce runtime metadata"
         );
 
         runtime.block_on(async {
@@ -451,8 +446,16 @@ mod tests {
         });
 
         assert!(
-            guard.shared().unwrap().contexts.lock().unwrap().is_empty(),
-            "disabled Tokio instrumentation should not register runtime contexts after running work"
+            !guard
+                .shared()
+                .unwrap()
+                .sources
+                .lock()
+                .unwrap()
+                .iter()
+                .flat_map(|s| s.segment_metadata())
+                .any(|(k, _)| k.starts_with("runtime.")),
+            "disabled Tokio instrumentation should not produce runtime metadata after running work"
         );
         assert_eq!(
             hook_calls.load(Ordering::Relaxed),
@@ -503,7 +506,7 @@ mod tests {
         // Guard methods should be safe no-ops
         guard.enable();
         guard.disable();
-        let handle = guard.handle();
+        let handle = guard.tokio_handle(runtime.handle());
         let _start = guard.start_time();
 
         // Runtime should work normally, including handle.spawn
@@ -852,8 +855,8 @@ mod tests {
             .build_and_attach_to_telemetry(builder_b, &guard)
             .unwrap();
 
-        // Use handle.spawn on runtime B to get wake-tracked wrapping → wake events.
-        let handle = guard.handle();
+        // Spawn on runtime B with wake-tracked wrapping → wake events.
+        let handle = guard.tokio_handle(runtime_b.handle());
         runtime_b.block_on(async {
             let mut handles = Vec::new();
             for _ in 0..50 {
@@ -1444,7 +1447,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------
-    // Always-present TelemetryGuard / inert TelemetryHandle (Phase 3)
+    // Always-present TelemetryGuard / inert Dial9Handle (Phase 3)
     // ---------------------------------------------------------------
 
     /// Off-runtime callers should get a usable, inert handle rather
@@ -1453,7 +1456,7 @@ mod tests {
     fn telemetry_handle_current_off_runtime_returns_inert_handle() {
         // We're on the test thread, which is not owned by any dial9
         // runtime. `current()` used to panic here.
-        let handle = TelemetryHandle::current();
+        let handle = Dial9Handle::current();
         assert!(
             !handle.is_enabled(),
             "off-runtime current() must return an inert handle"
@@ -1463,11 +1466,11 @@ mod tests {
         handle.disable();
     }
 
-    /// `TelemetryHandle::disabled` is the explicit constructor for an
+    /// `Dial9Handle::disabled` is the explicit constructor for an
     /// inert handle.
     #[test]
     fn telemetry_handle_disabled_constructor_is_inert() {
-        let handle = TelemetryHandle::disabled();
+        let handle = Dial9Handle::disabled();
         assert!(!handle.is_enabled());
     }
 
@@ -1480,7 +1483,7 @@ mod tests {
             .enable_all()
             .build()
             .unwrap();
-        let handle = TelemetryHandle::disabled();
+        let handle = Dial9TokioHandle::disabled();
         let result = runtime.block_on(async move {
             handle
                 .spawn(async { 17u32 })

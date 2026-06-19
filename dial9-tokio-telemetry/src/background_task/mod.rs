@@ -1,3 +1,4 @@
+pub(crate) mod boot_id;
 #[cfg(feature = "worker-s3")]
 pub(crate) mod connection;
 pub(crate) mod fs;
@@ -417,7 +418,19 @@ impl PipelineBuilder<Disk> {
     /// been gzipped earlier in the pipeline, the file is written with a
     /// `.gz` suffix and the original sealed segment is removed.
     pub fn write_back(mut self) -> Self {
-        self.processors.push(Box::new(WriteBackProcessor));
+        self.processors
+            .push(Box::new(WriteBackProcessor::default()));
+        self
+    }
+
+    /// Write the current payload bytes to a specific directory instead of
+    /// back alongside the original segment. The file name is preserved;
+    /// when the payload has been gzipped, a `.gz` suffix is appended.
+    /// The original sealed segment is removed after a successful write.
+    pub fn write_back_to(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.processors.push(Box::new(WriteBackProcessor {
+            dir: Some(dir.into()),
+        }));
         self
     }
 }
@@ -648,8 +661,12 @@ impl SegmentProcessor for SymbolizeProcessor {
 /// Writes the current payload bytes back to disk. If a
 /// `write_back_extension` metadata key is present, the bytes are written to
 /// `{original}{extension}` and the original segment file is removed.
+/// When `dir` is set, the file is written to that directory instead of
+/// alongside the original.
 #[derive(Debug, Default)]
-pub(crate) struct WriteBackProcessor;
+pub(crate) struct WriteBackProcessor {
+    dir: Option<PathBuf>,
+}
 
 impl SegmentProcessor for WriteBackProcessor {
     fn name(&self) -> &'static str {
@@ -660,6 +677,7 @@ impl SegmentProcessor for WriteBackProcessor {
         &mut self,
         data: SegmentData,
     ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>> {
+        let output_dir = self.dir.clone();
         Box::pin(async move {
             let original_path = match data.segment.disk_path() {
                 Some(p) => p.to_owned(),
@@ -673,18 +691,25 @@ impl SegmentProcessor for WriteBackProcessor {
                     ));
                 }
             };
+            let base_path = match &output_dir {
+                Some(dir) => dir.join(original_path.file_name().unwrap_or_default()),
+                None => original_path.clone(),
+            };
             let dest_path = match data.metadata.get("write_back_extension") {
                 Some(ext) => {
-                    let mut p = original_path.as_os_str().to_owned();
+                    let mut p = base_path.as_os_str().to_owned();
                     p.push(ext);
                     std::path::PathBuf::from(p)
                 }
-                None => original_path.clone(),
+                None => base_path,
             };
             let payload = data.payload.clone();
             let write_dest = dest_path.clone();
             let result = tokio::task::spawn_blocking(move || {
                 use std::io::{BufWriter, Write};
+                if let Some(parent) = write_dest.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
                 let mut f = BufWriter::new(std::fs::File::create(&write_dest)?);
                 for chunk in payload.chunks() {
                     f.write_all(chunk)?;
@@ -695,7 +720,7 @@ impl SegmentProcessor for WriteBackProcessor {
             match result {
                 Ok(Ok(())) => {
                     if dest_path != original_path {
-                        // Remove the original .bin now that .bin.gz exists.
+                        // Remove the original .bin now that the output exists elsewhere.
                         // If the writer already evicted it, clean up the dest
                         // file we just wrote so it doesn't leak on disk.
                         match std::fs::remove_file(&original_path) {
@@ -728,6 +753,8 @@ impl SegmentProcessor for WriteBackProcessor {
     }
 }
 
+// ---------------------------------------------------------------------------
+// WorkerLoop — the async state machine
 // ---------------------------------------------------------------------------
 // WorkerLoop — the async state machine
 // ---------------------------------------------------------------------------
@@ -2075,7 +2102,7 @@ mod worker_pipeline_tests {
             accounting: None,
         };
 
-        let mut processor = WriteBackProcessor;
+        let mut processor = WriteBackProcessor::default();
         let result = processor.process(data).await;
         check!(result.is_ok());
 
@@ -2121,7 +2148,7 @@ mod worker_pipeline_tests {
             accounting: None,
         };
 
-        let mut processor = WriteBackProcessor;
+        let mut processor = WriteBackProcessor::default();
         let result = processor.process(data).await;
         check!(result.is_ok());
 
@@ -2140,8 +2167,10 @@ mod worker_pipeline_tests {
         let stop = tokio_util::sync::CancellationToken::new();
         stop.cancel();
 
-        let processors: Vec<Box<dyn SegmentProcessor>> =
-            vec![Box::new(GzipCompressor), Box::new(WriteBackProcessor)];
+        let processors: Vec<Box<dyn SegmentProcessor>> = vec![
+            Box::new(GzipCompressor),
+            Box::new(WriteBackProcessor::default()),
+        ];
 
         let mut worker = WorkerLoop::new(
             fs_for(dir.path()),

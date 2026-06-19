@@ -332,7 +332,10 @@ fn thread_name_attribution_for_external_and_blocking_threads() {
         "expected blocking thread name starting with 'test-traced-run', got: {blocking_name:?} [{unique_defs:?}]"
     );
 
-    // ── Verify CpuSamples exist for both tids with expected worker ids ────────────────────────────
+    // ── Verify CpuSamples exist for both tids ────────────────────────────
+    // Samples carry `WorkerId::UNKNOWN` and are identified by `tid`; external
+    // and blocking-pool threads have no worker id to attribute to, so the
+    // assertions match on tid alone.
     let ext_samples: Vec<_> = events
         .iter()
         .filter(|e| {
@@ -349,7 +352,7 @@ fn thread_name_attribution_for_external_and_blocking_threads() {
         .iter()
         .filter(|e| {
             matches!(e, Dial9Event::CpuSampleEvent(s)
-            if s.tid == blocking_tid && s.worker_id == WorkerId::BLOCKING)
+            if s.tid == blocking_tid && s.worker_id == WorkerId::UNKNOWN)
         })
         .collect();
     assert!(

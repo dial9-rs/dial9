@@ -20,7 +20,7 @@ mod bmf;
 #[cfg(target_os = "linux")]
 use dial9_tokio_telemetry::telemetry::cpu_profile::CpuProfilingConfig;
 use dial9_tokio_telemetry::telemetry::{
-    DiskWriter, InMemoryWriter, TelemetryGuard, TelemetryHandle, TracedRuntime,
+    Dial9TokioHandle, DiskWriter, InMemoryWriter, TelemetryGuard, TracedRuntime,
 };
 use hdrhistogram::Histogram;
 use std::sync::Arc;
@@ -35,7 +35,7 @@ const WARMUP_SECS: u64 = 3;
 
 // ── Echo server (runs on the traced runtime) ─────────────────────────────────
 
-async fn echo_server(listener: TcpListener, handle: Option<TelemetryHandle>) {
+async fn echo_server(listener: TcpListener, handle: Option<Dial9TokioHandle>) {
     loop {
         let (mut sock, _) = match listener.accept().await {
             Ok(c) => c,
@@ -135,7 +135,9 @@ fn run_bench(mode: &str, duration_secs: u64) -> BenchResult {
     let port = server_rt.block_on(async {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        let handle = guard.as_ref().map(|g| g.handle());
+        let handle = guard
+            .as_ref()
+            .map(|g| g.tokio_handle(&tokio::runtime::Handle::current()));
         tokio::spawn(echo_server(listener, handle));
         port
     });

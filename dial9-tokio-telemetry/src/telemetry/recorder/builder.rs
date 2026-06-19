@@ -1,5 +1,5 @@
-use crate::primitives::sync::Arc;
 use crate::primitives::sync::atomic::Ordering;
+use crate::primitives::sync::{Arc, Mutex};
 #[cfg(feature = "cpu-profiling")]
 use crate::rate_limit::rate_limited;
 use crate::telemetry::writer::{Disk, SegmentWriter, WriterMode};
@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use super::flush_loop::run_flush_loop;
 use super::guard::{TelemetryGuard, WorkerHandle};
-use super::handle::TelemetryHandle;
+use super::handle::Dial9Handle;
 use super::shared_state::SharedState;
 use super::{ControlCommand, attach_runtime};
 
@@ -60,6 +60,8 @@ pub struct TracedRuntimeBuilder<P = NoTracePath, M = PipelineUnset, Mode: Writer
     #[cfg(feature = "cpu-profiling")]
     pub(super) sched_event_config: Option<crate::telemetry::cpu_profile::SchedEventConfig>,
     pub(super) process_resource_usage_config: Option<crate::telemetry::ProcessResourceUsageConfig>,
+    #[cfg(feature = "linux-socket")]
+    pub(super) socket_accept_queues_config: Option<crate::telemetry::SocketAcceptQueuesConfig>,
     pub(super) custom_event_sources: Vec<crate::telemetry::custom_events::CustomEventsSource>,
     pub(super) pipeline: PipelineConfig,
     /// Static segment metadata to inject into every rotated segment's
@@ -180,6 +182,34 @@ impl<P, M, Mode: WriterMode> TracedRuntimeBuilder<P, M, Mode> {
         self
     }
 
+    /// Enable TCP listener accept queue snapshots sampled from Linux sock_diag.
+    ///
+    /// # Performance
+    ///
+    /// Full scans can be expensive because they walk `/proc/self/fd` to find this
+    /// process's listeners. The cost grows with the number of open file descriptors
+    /// in this process, including accepted sockets, open files, pipes, and similar
+    /// handles.
+    ///
+    /// To avoid that cost on every sample, this source caches the classification of
+    /// TCP listeners visible in the current network namespace. While that listener
+    /// set is stable, samples do not need a full file descriptor scan and should be
+    /// cheap.
+    ///
+    /// # Reliability
+    ///
+    /// Listeners classified as foreign are cached as foreign. If such a listener is
+    /// later transferred into this process with `SCM_RIGHTS`, it will not be tracked
+    /// while it keeps the same kernel socket identity.
+    #[cfg(feature = "linux-socket")]
+    pub fn with_socket_accept_queues(
+        mut self,
+        config: crate::telemetry::SocketAcceptQueuesConfig,
+    ) -> Self {
+        self.socket_accept_queues_config = Some(config);
+        self
+    }
+
     /// Register a custom event callback.
     ///
     /// The callback runs during flush cycles while telemetry is enabled.
@@ -246,15 +276,23 @@ impl<P, M, Mode: WriterMode> TracedRuntimeBuilder<P, M, Mode> {
         mut builder: tokio::runtime::Builder,
         guard: &TelemetryGuard,
     ) -> std::io::Result<tokio::runtime::Runtime> {
-        let (Some(shared), Some(control_tx)) = (guard.shared(), guard.control_tx()) else {
+        let (Some(shared), Some(contexts), Some(control_tx)) =
+            (guard.shared(), guard.contexts(), guard.control_tx())
+        else {
             // Disabled guard: produce a plain tokio runtime with no
             // telemetry hooks so attaching still works gracefully.
             return builder.build();
         };
         let custom_event_sources = self.custom_event_sources;
+        #[cfg(feature = "linux-socket")]
+        let socket_accept_queues_config = self.socket_accept_queues_config;
 
         if !self.tokio_instrumentation_enabled {
             let runtime = builder.build()?;
+            #[cfg(feature = "linux-socket")]
+            if let Some(config) = socket_accept_queues_config {
+                push_socket_accept_queues_source(shared, config);
+            }
             for source in custom_event_sources {
                 shared.push_source(Box::new(source));
             }
@@ -263,12 +301,17 @@ impl<P, M, Mode: WriterMode> TracedRuntimeBuilder<P, M, Mode> {
 
         let runtime = attach_runtime(
             shared,
+            contexts,
             builder,
             self.runtime_name,
             control_tx,
             self.task_tracking_enabled,
             self.tokio_hooks,
         )?;
+        #[cfg(feature = "linux-socket")]
+        if let Some(config) = socket_accept_queues_config {
+            push_socket_accept_queues_source(shared, config);
+        }
         for source in custom_event_sources {
             shared.push_source(Box::new(source));
         }
@@ -290,6 +333,8 @@ impl<P, M, Mode: WriterMode> TracedRuntimeBuilder<P, M, Mode> {
             #[cfg(feature = "cpu-profiling")]
             sched_event_config: self.sched_event_config,
             process_resource_usage_config: self.process_resource_usage_config,
+            #[cfg(feature = "linux-socket")]
+            socket_accept_queues_config: self.socket_accept_queues_config,
             custom_event_sources: self.custom_event_sources,
             pipeline: self.pipeline,
             segment_metadata: self.segment_metadata,
@@ -482,7 +527,13 @@ impl<M, Mode: WriterMode> TracedRuntimeBuilder<HasTracePath, M, Mode> {
             .writer(writer)
             .maybe_trace_path(self.trace_path)
             .maybe_task_dump_config(self.task_dump_config)
-            .maybe_process_resource_usage(self.process_resource_usage_config)
+            .maybe_process_resource_usage(self.process_resource_usage_config);
+
+        #[cfg(feature = "linux-socket")]
+        let core_builder =
+            core_builder.maybe_socket_accept_queues(self.socket_accept_queues_config);
+
+        let core_builder = core_builder
             .maybe_worker_poll_interval(self.worker_poll_interval)
             .maybe_worker_metrics_sink(self.worker_metrics_sink)
             .processors(processors)
@@ -513,8 +564,12 @@ impl<M, Mode: WriterMode> TracedRuntimeBuilder<HasTracePath, M, Mode> {
         let shared = guard
             .shared()
             .expect("TelemetryCore::builder().build() always returns an enabled guard");
+        let contexts = guard
+            .contexts()
+            .expect("TelemetryCore::builder().build() always returns an enabled guard");
         let runtime = attach_runtime(
             shared,
+            contexts,
             builder,
             self.runtime_name,
             &control_tx,
@@ -669,7 +724,9 @@ pub(super) fn assemble_processors(
             }
             processors.push(Box::new(crate::background_task::GzipCompressor));
             if is_disk {
-                processors.push(Box::new(crate::background_task::WriteBackProcessor));
+                processors.push(Box::new(
+                    crate::background_task::WriteBackProcessor::default(),
+                ));
             }
         }
         #[cfg(feature = "worker-s3")]
@@ -686,6 +743,23 @@ pub(super) fn assemble_processors(
         }
     }
     processors
+}
+
+#[cfg(feature = "linux-socket")]
+fn push_socket_accept_queues_source(
+    shared: &Arc<SharedState>,
+    config: crate::telemetry::SocketAcceptQueuesConfig,
+) {
+    #[cfg(target_os = "linux")]
+    shared.push_source(Box::new(
+        crate::telemetry::socket_accept_queues::SocketAcceptQueuesSource::new(config),
+    ));
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = config;
+        tracing::warn!("socket accept queues enabled but sock_diag is only available on Linux");
+    }
 }
 
 /// Entry point for creating a telemetry session decoupled from any tokio runtime.
@@ -752,6 +826,9 @@ impl TelemetryCore {
         sched_events: Option<crate::telemetry::cpu_profile::SchedEventConfig>,
         /// Enable process resource usage sampled from `getrusage(RUSAGE_SELF)`.
         process_resource_usage: Option<crate::telemetry::ProcessResourceUsageConfig>,
+        /// Enable TCP listener accept queue snapshots sampled from Linux sock_diag.
+        #[cfg(feature = "linux-socket")]
+        socket_accept_queues: Option<crate::telemetry::SocketAcceptQueuesConfig>,
         /// How often the background worker polls for sealed segments.
         worker_poll_interval: Option<Duration>,
         /// Metrics sink for the flush/worker threads.
@@ -810,6 +887,12 @@ impl TelemetryCore {
             writer.update_segment_metadata(segment_metadata);
         }
 
+        let contexts: super::runtime_context::RuntimeContextRegistry =
+            Arc::new(Mutex::new(Vec::new()));
+        shared.push_source(Box::new(super::runtime_context::TokioRuntimesSource::new(
+            contexts.clone(),
+        )));
+
         if let Some(config) = process_resource_usage {
             #[cfg(unix)]
             shared.push_source(Box::new(
@@ -821,6 +904,13 @@ impl TelemetryCore {
                 tracing::warn!(
                     "process resource usage enabled but getrusage is not available on this platform"
                 );
+            }
+        }
+
+        #[cfg(feature = "linux-socket")]
+        {
+            if let Some(config) = socket_accept_queues {
+                push_socket_accept_queues_source(&shared, config);
             }
         }
 
@@ -844,7 +934,7 @@ impl TelemetryCore {
             }
         }
 
-        // Channel for TelemetryHandle/Guard → flush thread communication.
+        // Channel for Dial9Handle/Guard → flush thread communication.
         let (control_tx, control_rx) =
             crate::primitives::sync::mpsc::sync_channel::<ControlCommand>(1);
 
@@ -918,9 +1008,10 @@ impl TelemetryCore {
         }
 
         Ok(TelemetryGuard::enabled(
-            TelemetryHandle::enabled(shared, control_tx),
+            Dial9Handle::enabled(shared, control_tx),
             Some(flush_thread),
             worker,
+            contexts,
         ))
     }
 }
@@ -978,6 +1069,11 @@ impl<M: WriterMode, S: telemetry_core_builder::State> TelemetryCoreBuilder<M, S>
 pub struct TracedRuntime {
     pub(crate) runtime: tokio::runtime::Runtime,
     pub(crate) guard: TelemetryGuard,
+    /// Graceful-shutdown timeout carried from the [`crate::Dial9Config`].
+    /// Consumed by [`graceful_shutdown`](TracedRuntime::graceful_shutdown)
+    /// (used by the `#[dial9_tokio_telemetry::main]` macro). `None` skips the
+    /// implicit drain.
+    pub(crate) graceful_shutdown_timeout: Option<Duration>,
 }
 
 impl TracedRuntime {
@@ -995,6 +1091,8 @@ impl TracedRuntime {
             #[cfg(feature = "cpu-profiling")]
             sched_event_config: None,
             process_resource_usage_config: None,
+            #[cfg(feature = "linux-socket")]
+            socket_accept_queues_config: None,
             custom_event_sources: Vec::new(),
             pipeline: PipelineConfig::Unset,
             segment_metadata: Vec::new(),
@@ -1116,12 +1214,9 @@ impl TracedRuntime {
     /// [`TelemetryGuard::graceful_shutdown`] before the runtime drops.
     ///
     /// Generic over any input that converts into a [`TracedRuntime`]: in
-    /// practice that means either the fluent
-    /// [`crate::Dial9Config`] (returned by
-    /// [`Dial9Config::builder`](crate::Dial9Config::builder)) or the
-    /// deprecated positional [`crate::config::Dial9Config`]. The generic
-    /// shape is what keeps the macro source-compatible across these
-    /// input types.
+    /// practice that means the fluent [`crate::Dial9Config`] (returned by
+    /// [`Dial9Config::builder`](crate::Dial9Config::builder)). The generic
+    /// shape is what keeps the macro source-compatible across input types.
     ///
     /// # Panics
     ///
@@ -1159,10 +1254,9 @@ impl TracedRuntime {
     /// Fallible counterpart to [`new`](Self::new).
     ///
     /// Returns the conversion error directly: when constructing from
-    /// [`crate::Dial9Config`] that's a [`TelemetryRuntimeError`]; when
-    /// constructing from the deprecated [`crate::config::Dial9Config`]
-    /// it's a [`std::io::Error`]. Use this when you want to handle
-    /// runtime construction failure rather than panic.
+    /// [`crate::Dial9Config`] that's a [`TelemetryRuntimeError`]. Use this
+    /// when you want to handle runtime construction failure rather than
+    /// panic.
     ///
     /// ```no_run
     /// use dial9_tokio_telemetry::{Dial9Config, TracedRuntime};
@@ -1198,16 +1292,17 @@ impl TracedRuntime {
 
     /// Run `fut` to completion on the runtime.
     ///
-    /// The future is always spawned through the guard's
-    /// [`TelemetryHandle`]. On an enabled guard this records poll and
-    /// wake events; on a disabled guard the handle's `spawn` falls
-    /// through to plain [`tokio::spawn`].
+    /// The future is always spawned through a
+    /// [`Dial9TokioHandle`](super::handle::Dial9TokioHandle) bound to this
+    /// runtime. On an enabled guard this records poll and wake events; on
+    /// a disabled guard the handle's `spawn` falls through to plain
+    /// [`tokio::spawn`].
     pub fn block_on<F>(&self, fut: F) -> F::Output
     where
         F: std::future::Future + Send + 'static,
         F::Output: Send + 'static,
     {
-        let handle = self.guard.handle();
+        let handle = self.guard.tokio_handle(self.runtime.handle());
         self.runtime.block_on(async move {
             match handle.spawn(fut).await {
                 Ok(output) => output,
@@ -1216,29 +1311,65 @@ impl TracedRuntime {
             }
         })
     }
+
+    /// Drop the runtime and perform the configured graceful shutdown.
+    ///
+    /// This is what `#[dial9_tokio_telemetry::main]` calls after the body
+    /// completes. It:
+    ///
+    /// 1. drops the tokio runtime so worker threads exit and flush their
+    ///    thread-local telemetry buffers, then
+    /// 2. if a graceful-shutdown timeout was configured on the
+    ///    [`crate::Dial9Config`] (the default is 1s; `None` when disabled via
+    ///    [`disable_graceful_shutdown`](crate::DiskConfigBuilder::disable_graceful_shutdown)),
+    ///    calls [`TelemetryGuard::graceful_shutdown`] with that timeout to
+    ///    drain the background worker.
+    ///
+    /// Typically paired with [`block_on`](Self::block_on):
+    ///
+    /// ```no_run
+    /// # use dial9_tokio_telemetry::{Dial9Config, TracedRuntime};
+    /// # let cfg = Dial9Config::builder().on_disk_buffer("trace.bin").max_total_size(1 << 20).build()?;
+    /// let rt = TracedRuntime::new(cfg);
+    /// let out = rt.block_on(async { /* ... */ });
+    /// rt.graceful_shutdown();
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    ///
+    /// The drain is best-effort: any error returned by
+    /// [`TelemetryGuard::graceful_shutdown`] is logged at `error!` and
+    /// otherwise ignored. When you need the deadline at a call site, the
+    /// configured value is available via the original [`crate::Dial9Config`];
+    /// the low-level [`TelemetryGuard::graceful_shutdown`] also takes an
+    /// explicit timeout.
+    pub fn graceful_shutdown(self) {
+        let Self {
+            runtime,
+            guard,
+            graceful_shutdown_timeout,
+        } = self;
+        // Drop the runtime first so Tokio worker threads exit and flush their
+        // thread-local buffers into the collector before the guard drains the
+        // background worker.
+        drop(runtime);
+        if let Some(timeout) = graceful_shutdown_timeout
+            && let Err(e) = guard.graceful_shutdown(timeout)
+        {
+            tracing::error!(target: "dial9_telemetry", error = %e, "dial9 graceful shutdown failed");
+        }
+    }
 }
 
 impl TryFrom<crate::Dial9Config> for TracedRuntime {
     type Error = TelemetryRuntimeError;
 
     fn try_from(config: crate::Dial9Config) -> Result<Self, Self::Error> {
-        let (runtime, guard) = try_assemble_dial9_config(config.0)?;
-        Ok(Self { runtime, guard })
-    }
-}
-
-/// Bridge for the deprecated positional config API at
-/// [`crate::config::Dial9Config`] so that it remains compatible with
-/// [`TracedRuntime::new`] (and therefore the
-/// `#[dial9_tokio_telemetry::main]` macro).
-impl TryFrom<crate::config::Dial9Config> for TracedRuntime {
-    type Error = std::io::Error;
-
-    fn try_from(config: crate::config::Dial9Config) -> Result<Self, Self::Error> {
-        let (runtime, guard) = config.build()?;
+        let graceful_shutdown_timeout = config.graceful_shutdown_timeout;
+        let (runtime, guard) = try_assemble_dial9_config(config.inner)?;
         Ok(Self {
             runtime,
-            guard: guard.unwrap_or_else(TelemetryGuard::disabled),
+            guard,
+            graceful_shutdown_timeout,
         })
     }
 }

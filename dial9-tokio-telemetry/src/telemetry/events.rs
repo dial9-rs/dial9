@@ -4,15 +4,6 @@ use serde::Serialize;
 #[cfg(feature = "cpu-profiling")]
 use std::sync::Arc;
 
-/// Role of a thread known to the telemetry system.
-#[derive(Debug, Clone, Copy)]
-pub(crate) enum ThreadRole {
-    /// A tokio worker thread with the given index.
-    Worker(usize),
-    /// A thread in tokio's blocking pool.
-    Blocking,
-}
-
 /// What triggered a CPU sample.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum CpuSampleSource {

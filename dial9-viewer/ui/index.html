@@ -5,6 +5,11 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>dial9 Trace Browser</title>
     <style>
+        :root {
+            /* Width of the heatmap host-label column. Read from JS (see LABEL_W)
+               so the timeline axis ticks line up with the canvas left edge. */
+            --heatmap-label-w: 220px;
+        }
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace;
@@ -74,6 +79,57 @@
         .host-card .svc { color: #7ec8e3; font-size: 0.85em; margin-bottom: 2px; }
         .host-card .hostname { font-size: 1em; font-weight: 600; }
         .host-card .meta { font-size: 0.8em; color: #888; margin-top: 6px; }
+
+        /* Density heatmap timeline */
+        #heatmap-view { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+        #heatmap-hint {
+            padding: 8px 20px; font-size: 0.8em; color: #888;
+            border-bottom: 1px solid #222; display: flex; gap: 16px; align-items: center; flex-wrap: wrap;
+        }
+        #heatmap-hint .legend { display: inline-flex; align-items: center; gap: 6px; }
+        #heatmap-reset-zoom { padding: 2px 10px; font-size: 0.95em; }
+        #heatmap-hint .legend .bar {
+            width: 90px; height: 10px; border-radius: 2px;
+            background: linear-gradient(to right, #2a2a5a, #6c63ff, #ff6b6b, #ffd93d);
+        }
+        #heatmap-hint .legend .gap-swatch {
+            width: 16px; height: 12px; border-radius: 2px;
+            border-left: 1px solid rgba(150,150,190,0.6); border-right: 1px solid rgba(150,150,190,0.6);
+            background-color: #15152a;
+            background-image: repeating-linear-gradient(-45deg,
+                rgba(120,120,160,0.35) 0 1px, transparent 1px 6px);
+        }
+        #heatmap-body { flex: 1; overflow: auto; display: flex; min-height: 0; }
+        #heatmap-labels { flex-shrink: 0; width: var(--heatmap-label-w); border-right: 2px solid #3a3a5e; }
+        #heatmap-labels .row {
+            height: 26px; line-height: 26px; padding: 0 8px;
+            font-size: 0.78em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+            border-bottom: 1px solid #2a2a4a; color: #cfcfe6;
+        }
+        #heatmap-labels .row:nth-child(odd) { background: #20203e; }
+        #heatmap-labels .row:nth-child(even) { background: #191932; }
+        #heatmap-labels .row.sel { background: #2f2f6a; }
+        #heatmap-labels .row .svc { color: #7ec8e3; }
+        #heatmap-labels .row .boot { color: #00e5ff; font-size: 0.85em; }
+        #heatmap-plot { flex: 1; position: relative; min-width: 0; }
+        #heatmap-canvas { display: block; width: 100%; cursor: crosshair; }
+        #heatmap-sel {
+            position: absolute; top: 0; pointer-events: none; display: none;
+            background: rgba(108,99,255,0.22); border: 1px solid #6c63ff;
+        }
+        /* Zoom rubber-band: cyan, left/right edges only, to read as a time cut. */
+        #heatmap-sel.zoom {
+            background: rgba(0,229,255,0.12);
+            border: none; border-left: 1px solid #00e5ff; border-right: 1px solid #00e5ff;
+        }
+        #heatmap-axis {
+            flex-shrink: 0; height: 22px; position: relative;
+            border-top: 1px solid #222; font-size: 0.72em; color: #888;
+        }
+        #heatmap-axis .tick { position: absolute; top: 3px; transform: translateX(-50%); white-space: nowrap; }
+        #heatmap-axis .tick::before {
+            content: ''; position: absolute; top: -3px; left: 50%; width: 1px; height: 4px; background: #444;
+        }
 
         /* Segment list */
         .segment-panel { padding: 12px 20px; flex: 1; overflow-y: auto; }
@@ -146,13 +202,28 @@
     </div>
 
     <div class="main-area" id="main-area">
-        <!-- Browse mode: status / host grid / segment list -->
+        <!-- Browse mode: status / density heatmap timeline -->
         <div id="browse-view">
             <div class="status" id="browse-status">
                 Select a time range and click Search to find traces.
             </div>
-            <div class="host-grid" id="host-grid" style="display:none"></div>
-            <div class="segment-panel" id="segment-panel" style="display:none"></div>
+            <div id="heatmap-view" style="display:none">
+                <div id="heatmap-hint">
+                    <span>Drag to select a window, then open or profile it. <b>⌥ Option+drag</b> to zoom, double-click to reset.</span>
+                    <span class="legend">low <span class="bar"></span> high data density</span>
+                    <span class="legend"><span class="gap-swatch"></span> gap (no data)</span>
+                    <span style="color:#00e5ff">▏ boot change</span>
+                    <button id="heatmap-reset-zoom" style="display:none" onclick="resetHeatmapZoom()">Reset zoom</button>
+                </div>
+                <div id="heatmap-body">
+                    <div id="heatmap-labels"></div>
+                    <div id="heatmap-plot">
+                        <canvas id="heatmap-canvas"></canvas>
+                        <div id="heatmap-sel"></div>
+                    </div>
+                </div>
+                <div id="heatmap-axis"></div>
+            </div>
         </div>
 
         <!-- Raw search mode (hidden by default) -->
@@ -186,11 +257,17 @@
     </div>
 
     <div class="actions" id="actions-bar">
-        <button onclick="rawSelectAll(true)">Select All</button>
-        <button onclick="rawSelectAll(false)">Deselect All</button>
+        <span id="raw-actions" style="display:none;gap:8px">
+            <button onclick="rawSelectAll(true)">Select All</button>
+            <button onclick="rawSelectAll(false)">Deselect All</button>
+        </span>
         <button class="primary" id="view-btn" onclick="viewSelected()" disabled>
             View Selected in Trace Viewer
         </button>
+        <button id="cpu-btn" onclick="viewCpuProfile()" disabled title="Open a CPU flamegraph of the selected segments">
+            🔥 Flamegraph
+        </button>
+        <span id="selection-warn" style="color:#ff6b6b;font-size:0.8em"></span>
         <span class="count" id="selection-count"></span>
     </div>
 
@@ -203,11 +280,16 @@
     </footer>
 
     <script src="prefix_detect.js"></script>
+    <script src="heatmap.js"></script>
     <script>
-    // ── ?trace= passthrough: redirect to viewer ──
+    // ── ?trace= passthrough: redirect to viewer (preserving all params,
+    //    including repeated `trace=` components) ──
     (function() {
-        const t = new URLSearchParams(window.location.search).get('trace');
-        if (t) { window.location.replace('viewer.html?trace=' + encodeURIComponent(t)); return; }
+        const qs = window.location.search;
+        if (new URLSearchParams(qs).has('trace')) {
+            window.location.replace('viewer.html' + qs);
+            return;
+        }
     })();
 
     // ── Demo trace button ──
@@ -231,15 +313,21 @@
     // ── State ──
     let useLocalTz = false;
     let allObjects = [];       // all objects from time-range search
-    let hostGroups = {};       // { "service/host": [objects] }
-    let selectedHost = null;   // currently selected host key
+    let heatmapSegments = [];  // normalized segments for the timeline
+    let heatmapRows = [];      // groupByHost(heatmapSegments)
+    let heatmapDomain = null;  // { tMin, tMax } currently displayed (may be zoomed)
+    let heatmapFullDomain = null; // full data extent; restored on zoom reset
+    let heatmapCols = [];      // per-row Float64Array of bytes-per-column
+    let heatmapColMax = 0;     // global max column value (for normalization)
+    let heatmapSelection = null; // { keys:[], bytes, t0, t1 }
     let rawObjects = [];       // raw search results
     let currentTab = 'browse';
 
+    const ROW_H = 26;          // px height of each host row in the heatmap
+
     const bucketInput = document.getElementById('bucket-input');
     const browseStatus = document.getElementById('browse-status');
-    const hostGrid = document.getElementById('host-grid');
-    const segmentPanel = document.getElementById('segment-panel');
+    const heatmapView = document.getElementById('heatmap-view');
 
     // ── Init: load config ──
     const params = new URLSearchParams(window.location.search);
@@ -267,11 +355,22 @@
             serverHasPrefix = true;
             updateSearchReady();
         }
-        discoverPrefixes();
-    }).catch(() => { discoverPrefixes(); });
+        discoverPrefixes().then(autoSearch);
+    }).catch(() => { discoverPrefixes().then(autoSearch); });
 
     // Default to last 1 hour
     setQuickRange(1);
+
+    // On page load, automatically run the last-1hr search so the heatmap is
+    // populated without an extra click.
+    let autoSearched = false;
+    function autoSearch() {
+        if (autoSearched) return;
+        autoSearched = true;
+        if (bucketInput.value.trim() && !document.getElementById('search-btn').disabled) {
+            doTimeRangeSearch();
+        }
+    }
 
     // ── Auto-discover prefixes ──
     async function discoverPrefixes() {
@@ -349,8 +448,7 @@
 
         // Re-render current view
         if (currentTab === 'browse') {
-            if (selectedHost) showSegments(selectedHost);
-            else if (Object.keys(hostGroups).length) renderHostGrid();
+            if (heatmapRows.length) renderHeatmap();
         } else {
             renderRawTable(rawObjects);
         }
@@ -498,6 +596,9 @@
         document.getElementById('tab-raw').classList.toggle('active', tab === 'raw');
         document.getElementById('browse-view').style.display = tab === 'browse' ? '' : 'none';
         document.getElementById('raw-view').style.display = tab === 'raw' ? '' : 'none';
+        // Raw mode has Select All/Deselect; browse mode has the CPU Profiling button.
+        document.getElementById('raw-actions').style.display = tab === 'raw' ? 'flex' : 'none';
+        document.getElementById('cpu-btn').style.display = tab === 'browse' ? '' : 'none';
         updateSelectionCount();
     }
 
@@ -536,9 +637,8 @@
         browseStatus.textContent = `Searching ${prefixes.length} hour(s)…`;
         browseStatus.className = 'status';
         browseStatus.style.display = '';
-        hostGrid.style.display = 'none';
-        segmentPanel.style.display = 'none';
-        selectedHost = null;
+        heatmapView.style.display = 'none';
+        setHeatmapSelection(null);
 
         try {
             // Fire parallel queries for each hour prefix
@@ -568,7 +668,8 @@
 
             if (allObjects.length === 0) {
                 browseStatus.className = 'status';
-                hostGroups = {};
+                heatmapRows = [];
+                heatmapView.style.display = 'none';
                 // Show sample keys to help the user understand the bucket layout
                 try {
                     const sampleResp = await fetch(`/api/search?bucket=${encodeURIComponent(bucket)}&q=`);
@@ -585,135 +686,490 @@
                 return;
             }
 
-            // Group by service/host[/boot]. A new boot_id indicates a
-            // separate process run — keeping runs distinct prevents
-            // segment-index duplicates when a service restarts.
-            hostGroups = {};
-            for (const obj of allObjects) {
+            // Build normalized segments for the density timeline. A segment's
+            // wall-clock span is [trace-start epoch, last_modified]; bytes are
+            // spread uniformly across it when rendering density.
+            heatmapSegments = allObjects.map(obj => {
                 const p = parseKey(obj.key);
-                const groupKey = p.bootId
-                    ? p.service + '/' + p.host + '/' + p.bootId
-                    : p.service + '/' + p.host;
-                if (!hostGroups[groupKey]) hostGroups[groupKey] = { service: p.service, host: p.host, bootId: p.bootId, objects: [] };
-                hostGroups[groupKey].objects.push(obj);
-            }
+                const start = p.epoch;
+                const end = obj.last_modified
+                    ? new Date(obj.last_modified).getTime() / 1000
+                    : start;
+                return {
+                    key: obj.key, size: obj.size, start, end,
+                    service: p.service, host: p.host, bootId: p.bootId,
+                };
+            }).filter(s => s.start > 0);
+
+            heatmapRows = groupByHost(heatmapSegments);
 
             browseStatus.style.display = 'none';
-            renderHostGrid();
+            renderHeatmap();
         } catch (err) {
             browseStatus.textContent = 'Error: ' + err.message;
             browseStatus.className = 'status error';
         }
     }
 
-    // ── Host grid ──
-    function renderHostGrid() {
-        hostGrid.innerHTML = '';
-        hostGrid.style.display = '';
-        segmentPanel.style.display = 'none';
-        selectedHost = null;
+    // ── Density heatmap timeline ──
+    // Read the label-column width from the --heatmap-label-w CSS custom property
+    // so the JS axis layout and the CSS column width share a single source.
+    const LABEL_W = parseFloat(
+        getComputedStyle(document.documentElement).getPropertyValue('--heatmap-label-w')
+    ) || 220;
 
-        const groups = Object.values(hostGroups).sort((a, b) =>
-            ((a.service + a.host + (a.bootId || '')).localeCompare(b.service + b.host + (b.bootId || ''))));
+    function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+    function timeToX(t, tMin, tMax, W) { return (t - tMin) / (tMax - tMin) * W; }
+    function xToTime(x, tMin, tMax, W) { return tMin + (x / W) * (tMax - tMin); }
 
-        for (const g of groups) {
-            const epochs = g.objects.map(o => parseKey(o.key).epoch).filter(e => e > 0);
-            const minEpoch = epochs.length ? Math.min(...epochs) : 0;
-            const endTimes = g.objects.map(o => o.last_modified ? new Date(o.last_modified).getTime() / 1000 : 0).filter(e => e > 0);
-            const maxEnd = endTimes.length ? Math.max(...endTimes) : 0;
-            const totalSize = g.objects.reduce((s, o) => s + o.size, 0);
+    function fmtTick(epoch) {
+        const d = new Date(epoch * 1000);
+        const pad = n => String(n).padStart(2, '0');
+        return useLocalTz
+            ? pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds())
+            : pad(d.getUTCHours()) + ':' + pad(d.getUTCMinutes()) + ':' + pad(d.getUTCSeconds());
+    }
 
-            const bootLine = g.bootId ? `<div class="meta" style="font-size:0.75em;color:#7a7ab0">boot ${esc(g.bootId)}</div>` : '';
-            const card = document.createElement('div');
-            card.className = 'host-card';
-            card.innerHTML = `
-                <div class="svc">${esc(g.service)}</div>
-                <div class="hostname">${esc(g.host)}</div>
-                ${bootLine}
-                <div class="meta">
-                    ${g.objects.length} segment${g.objects.length !== 1 ? 's' : ''} · ${formatSize(totalSize)}<br>
-                    ${formatEpoch(minEpoch)}${maxEnd ? ' → ' + formatEpoch(maxEnd) : ''}
-                </div>
-            `;
-            const gk = g.bootId ? g.service + '/' + g.host + '/' + g.bootId : g.service + '/' + g.host;
-            card.addEventListener('click', () => showSegments(gk));
-            hostGrid.appendChild(card);
+    // Precomputed 256-entry density color ramp. Building a color string per
+    // pixel column was the hot path in drawHeatmapCanvas; quantizing to 256
+    // buckets lets us reuse strings (and, with run-length coalescing, collapse
+    // adjacent equal-color columns into a single fillRect).
+    let densityPalette = null;
+    function densityPaletteColor(norm) {
+        if (!densityPalette) {
+            densityPalette = new Array(256);
+            for (let i = 0; i < 256; i++) densityPalette[i] = densityColor(i / 255);
+        }
+        const idx = norm >= 1 ? 255 : (norm <= 0 ? 0 : (norm * 255) | 0);
+        return densityPalette[idx];
+    }
+
+    function renderHeatmap() {
+        setHeatmapSelection(null);
+        const labels = document.getElementById('heatmap-labels');
+        labels.innerHTML = '';
+
+        if (!heatmapRows.length) {
+            heatmapView.style.display = 'none';
+            browseStatus.style.display = '';
+            browseStatus.className = 'status';
+            browseStatus.textContent = 'No traces found in this time range.';
+            return;
+        }
+        browseStatus.style.display = 'none';
+        heatmapView.style.display = '';
+
+        // Domain = data extent across all segments.
+        let tMin = Infinity, tMax = -Infinity;
+        for (const s of heatmapSegments) {
+            const span = segmentSpan(s);
+            if (span.start < tMin) tMin = span.start;
+            if (span.end > tMax) tMax = span.end;
+        }
+        if (!(tMax > tMin)) tMax = tMin + 1;
+        heatmapFullDomain = { tMin, tMax };
+        heatmapDomain = { tMin, tMax };
+        updateZoomResetBtn();
+
+        // Precompute per-row density inputs once (reused across zoom/resize
+        // redraws): segments tiled so upload-lag overlaps don't double-count,
+        // plus the genuine coverage gaps between them.
+        for (const row of heatmapRows) {
+            row.tiled = tileSegments(row.segments);
+            row.gaps = segmentGaps(row.segments);
+        }
+
+        // Host labels (one row per service/host; boot count annotated).
+        for (const row of heatmapRows) {
+            const boots = bootTransitions(row.segments);
+            const div = document.createElement('div');
+            div.className = 'row';
+            const bootNote = boots.length
+                ? ` <span class="boot" title="boot id changes ${boots.length} time(s) in this window">▏${boots.length + 1} boots</span>`
+                : '';
+            div.innerHTML = `<span class="svc">${esc(row.service)}</span> / ${esc(row.host)}${bootNote}`;
+            div.title = row.label;
+            labels.appendChild(div);
+        }
+
+        drawHeatmapCanvas();
+    }
+
+    function drawHeatmapCanvas() {
+        if (!heatmapDomain || !heatmapRows.length) return;
+        const plot = document.getElementById('heatmap-plot');
+        const canvas = document.getElementById('heatmap-canvas');
+        const W = Math.max(50, Math.floor(plot.clientWidth));
+        const H = heatmapRows.length * ROW_H;
+        const dpr = window.devicePixelRatio || 1;
+        canvas.width = Math.floor(W * dpr);
+        canvas.height = Math.floor(H * dpr);
+        canvas.style.width = W + 'px';
+        canvas.style.height = H + 'px';
+        const ctx = canvas.getContext('2d');
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        ctx.clearRect(0, 0, W, H);
+
+        const { tMin, tMax } = heatmapDomain;
+
+        // Pass 1: per-row density columns + global max (for normalization).
+        // Uses tiled segments (ends clamped to the next start) so upload-lag
+        // overlaps at segment seams don't double-count into a bright artifact.
+        heatmapCols = heatmapRows.map(r => accumulateDensity(r.tiled || r.segments, tMin, tMax, W));
+        heatmapColMax = 0;
+        for (const cols of heatmapCols) {
+            for (let i = 0; i < cols.length; i++) {
+                if (cols[i] > heatmapColMax) heatmapColMax = cols[i];
+            }
+        }
+
+        // Pass 2: draw each row's strip, then boot-change markers on top.
+        for (let r = 0; r < heatmapRows.length; r++) {
+            const cols = heatmapCols[r];
+            const y = r * ROW_H;
+            // Alternating base background so empty rows stay visually distinct.
+            ctx.fillStyle = (r % 2) ? '#20203e' : '#191932';
+            ctx.fillRect(0, y, W, ROW_H);
+            // Paint density as coalesced runs of identical color (a precomputed
+            // palette + run-length merge keeps this fast even with many rows;
+            // empty columns fall through to the base background above).
+            let runStart = -1;
+            let runColor = null;
+            for (let x = 0; x < W; x++) {
+                const norm = heatmapColMax > 0 ? cols[x] / heatmapColMax : 0;
+                const color = norm > 0 ? densityPaletteColor(norm) : null;
+                if (color !== runColor) {
+                    if (runColor !== null) {
+                        ctx.fillStyle = runColor;
+                        ctx.fillRect(runStart, y, x - runStart, ROW_H);
+                    }
+                    runColor = color;
+                    runStart = x;
+                }
+            }
+            if (runColor !== null) {
+                ctx.fillStyle = runColor;
+                ctx.fillRect(runStart, y, W - runStart, ROW_H);
+            }
+            // Coverage gaps: a host that stopped reporting leaves a real hole
+            // between segments (vs. the seamless rotation overlaps the tiling
+            // removed). Mark each with a faint hatched band plus thin edge ticks
+            // so it reads as "no data here", distinct from low-but-present
+            // density. Sub-pixel gaps still get a 1px tick so they're not lost.
+            for (const g of (heatmapRows[r].gaps || [])) {
+                const gx0 = timeToX(Math.max(g.start, tMin), tMin, tMax, W);
+                const gx1 = timeToX(Math.min(g.end, tMax), tMin, tMax, W);
+                if (gx1 < 0 || gx0 > W) continue;
+                const lo = Math.max(0, gx0), hi = Math.min(W, gx1);
+                const gw = Math.max(1, hi - lo);
+                ctx.save();
+                ctx.beginPath();
+                ctx.rect(lo, y + 1, gw, ROW_H - 2);
+                ctx.clip();
+                ctx.fillStyle = '#15152a';
+                ctx.fillRect(lo, y + 1, gw, ROW_H - 2);
+                // Diagonal hatch.
+                ctx.strokeStyle = 'rgba(120,120,160,0.35)';
+                ctx.lineWidth = 1;
+                ctx.beginPath();
+                for (let hx = lo - ROW_H; hx < hi + ROW_H; hx += 6) {
+                    ctx.moveTo(hx, y + ROW_H);
+                    ctx.lineTo(hx + ROW_H, y);
+                }
+                ctx.stroke();
+                ctx.restore();
+                // Edge ticks frame the hole so even a 1px gap stays visible.
+                ctx.fillStyle = 'rgba(150,150,190,0.6)';
+                ctx.fillRect(Math.round(lo), y + 1, 1, ROW_H - 2);
+                if (hi - lo > 2) ctx.fillRect(Math.round(hi) - 1, y + 1, 1, ROW_H - 2);
+            }
+            // Boot-change dividers: a consistent dashed cyan line so they read
+            // as boundaries, never as a data spike.
+            ctx.save();
+            ctx.strokeStyle = '#00e5ff';
+            ctx.lineWidth = 1;
+            ctx.setLineDash([4, 3]);
+            for (const b of bootTransitions(heatmapRows[r].segments)) {
+                const bx = Math.round(timeToX(b.time, tMin, tMax, W)) + 0.5;
+                ctx.beginPath();
+                ctx.moveTo(bx, y + 1);
+                ctx.lineTo(bx, y + ROW_H - 1);
+                ctx.stroke();
+            }
+            ctx.restore();
+            // Row separator.
+            ctx.fillStyle = '#3a3a5e';
+            ctx.fillRect(0, y + ROW_H - 1, W, 1);
+        }
+
+        drawHeatmapAxis(W);
+    }
+
+    function drawHeatmapAxis(W) {
+        const axis = document.getElementById('heatmap-axis');
+        axis.innerHTML = '';
+        const { tMin, tMax } = heatmapDomain;
+        const n = clamp(Math.floor(W / 130), 2, 8);
+        for (let i = 0; i <= n; i++) {
+            const frac = i / n;
+            const tick = document.createElement('div');
+            tick.className = 'tick';
+            tick.style.left = (LABEL_W + frac * W) + 'px';
+            tick.textContent = fmtTick(tMin + frac * (tMax - tMin));
+            axis.appendChild(tick);
         }
     }
 
-    // ── Segment list for a selected host ──
-    function showSegments(groupKey) {
-        selectedHost = groupKey;
-        hostGrid.style.display = 'none';
-        segmentPanel.style.display = '';
+    // ── Region selection / zoom on the heatmap ──
+    // Plain drag selects a region (to open or profile); Option/Alt+drag zooms
+    // the time axis to the dragged span; double-click resets the zoom.
+    (function setupHeatmapInteraction() {
+        const plot = document.getElementById('heatmap-plot');
+        const sel = document.getElementById('heatmap-sel');
+        let dragging = false, zooming = false, startX = 0, startY = 0;
 
-        const g = hostGroups[groupKey];
-        if (!g) return;
-
-        // Sort segments by epoch
-        const sorted = [...g.objects].sort((a, b) => parseKey(a.key).epoch - parseKey(b.key).epoch);
-
-        segmentPanel.innerHTML = `
-            <span class="back-link" onclick="renderHostGrid()">← Back to hosts</span>
-            <h3>${esc(g.service)} / ${esc(g.host)}${g.bootId ? ' <span style="color:#7a7ab0;font-weight:400;font-size:0.85em">(boot ' + esc(g.bootId) + ')</span>' : ''}</h3>
-            <div style="margin-bottom:8px;display:flex;gap:8px;align-items:center">
-                <button onclick="segSelectAll(true)">Select All</button>
-                <button onclick="segSelectAll(false)">Deselect All</button>
-                <button class="primary" onclick="viewSelected()" id="seg-view-btn">
-                    View Selected in Trace Viewer
-                </button>
-                <span class="count" id="seg-count"></span>
-            </div>
-            <table>
-                <thead>
-                    <tr>
-                        <th style="width:30px"><input type="checkbox" id="seg-select-all" checked /></th>
-                        <th>Trace Start</th>
-                        <th>Seg #</th>
-                        <th>Size</th>
-                        <th>Uploaded</th>
-                    </tr>
-                </thead>
-                <tbody id="seg-body"></tbody>
-            </table>
-        `;
-
-        const tbody = document.getElementById('seg-body');
-        for (const obj of sorted) {
-            const p = parseKey(obj.key);
-            const tr = document.createElement('tr');
-            tr.innerHTML = `
-                <td><input type="checkbox" class="seg-cb" data-key="${esc(obj.key)}" checked /></td>
-                <td>${esc(p.traceStart)}</td>
-                <td>${esc(p.segIndex)}</td>
-                <td class="size">${formatSize(obj.size)}</td>
-                <td class="date">${formatDate(obj.last_modified)}</td>
-            `;
-            tr.querySelector('.seg-cb').addEventListener('change', updateSegCount);
-            tbody.appendChild(tr);
+        function localXY(e) {
+            const rect = plot.getBoundingClientRect();
+            const H = heatmapRows.length * ROW_H;
+            // Clamp x to the canvas width (what the time<->x helpers map against),
+            // not the plot's bounding rect, so the far-right edge lines up exactly.
+            const canvas = document.getElementById('heatmap-canvas');
+            const W = canvas.clientWidth || rect.width;
+            return {
+                x: clamp(e.clientX - rect.left, 0, W),
+                y: clamp(e.clientY - rect.top, 0, H),
+            };
         }
 
-        document.getElementById('seg-select-all').addEventListener('change', (e) => {
-            segSelectAll(e.target.checked);
+        plot.addEventListener('mousedown', (e) => {
+            if (!heatmapRows.length) return;
+            dragging = true;
+            zooming = e.altKey;
+            const { x, y } = localXY(e);
+            startX = x; startY = y;
+            const H = heatmapRows.length * ROW_H;
+            sel.classList.toggle('zoom', zooming);
+            sel.style.display = 'block';
+            sel.style.left = x + 'px'; sel.style.width = '0px';
+            // A zoom drag is purely horizontal, so its rubber-band spans all rows.
+            sel.style.top = (zooming ? 0 : y) + 'px';
+            sel.style.height = (zooming ? H : 0) + 'px';
+            e.preventDefault();
         });
-        updateSegCount();
+        window.addEventListener('mousemove', (e) => {
+            if (!dragging) return;
+            const { x, y } = localXY(e);
+            const l = Math.min(x, startX), r = Math.max(x, startX);
+            sel.style.left = l + 'px'; sel.style.width = (r - l) + 'px';
+            if (!zooming) {
+                const t = Math.min(y, startY), b = Math.max(y, startY);
+                sel.style.top = t + 'px'; sel.style.height = (b - t) + 'px';
+            }
+        });
+        window.addEventListener('mouseup', (e) => {
+            if (!dragging) return;
+            dragging = false;
+            sel.classList.remove('zoom');
+            const { x, y } = localXY(e);
+            if (zooming) {
+                zooming = false;
+                sel.style.display = 'none'; // rubber-band was transient
+                zoomToX(Math.min(x, startX), Math.max(x, startX));
+                return;
+            }
+            const dx = Math.abs(x - startX), dy = Math.abs(y - startY);
+            if (dx < 4 && dy < 4) {
+                selectSegmentAt(startX, startY); // treat as a click
+            } else {
+                finalizeSelection(Math.min(x, startX), Math.max(x, startX), Math.min(y, startY), Math.max(y, startY));
+            }
+        });
+        // Double-click anywhere on the plot resets to the full time range.
+        plot.addEventListener('dblclick', () => resetHeatmapZoom());
+    })();
+
+    // Zoom the displayed time domain to the pixel range [x0, x1]. Ignores drags
+    // too narrow to be intentional. The whole heatmap is re-rendered against the
+    // new domain (density re-normalizes to the visible window, so a region that
+    // looked flat when zoomed out reveals its internal structure).
+    function zoomToX(x0, x1) {
+        if (!heatmapDomain || x1 - x0 < 4) return;
+        const canvas = document.getElementById('heatmap-canvas');
+        const W = canvas.clientWidth || parseFloat(canvas.style.width) || 1;
+        const { tMin, tMax } = heatmapDomain;
+        let t0 = xToTime(x0, tMin, tMax, W);
+        let t1 = xToTime(x1, tMin, tMax, W);
+        if (!(t1 > t0)) return;
+        heatmapDomain = { tMin: t0, tMax: t1 };
+        setHeatmapSelection(null);
+        drawHeatmapCanvas();
+        updateZoomResetBtn();
     }
 
-    function segSelectAll(checked) {
-        document.querySelectorAll('.seg-cb').forEach(cb => { cb.checked = checked; });
-        const sa = document.getElementById('seg-select-all');
-        if (sa) sa.checked = checked;
-        updateSegCount();
+    // Restore the full data extent (no-op if not currently zoomed).
+    function resetHeatmapZoom() {
+        if (!heatmapFullDomain) return;
+        const { tMin, tMax } = heatmapFullDomain;
+        if (heatmapDomain && heatmapDomain.tMin === tMin && heatmapDomain.tMax === tMax) return;
+        heatmapDomain = { tMin, tMax };
+        setHeatmapSelection(null);
+        drawHeatmapCanvas();
+        updateZoomResetBtn();
     }
 
-    function updateSegCount() {
-        const keys = getSegSelectedKeys();
-        const el = document.getElementById('seg-count');
-        if (el) el.textContent = keys.length ? `${keys.length} selected` : '';
+    // Show the "Reset zoom" control only while a sub-range is displayed.
+    function updateZoomResetBtn() {
+        const btn = document.getElementById('heatmap-reset-zoom');
+        if (!btn) return;
+        const zoomed = heatmapFullDomain && heatmapDomain &&
+            (heatmapDomain.tMin !== heatmapFullDomain.tMin ||
+             heatmapDomain.tMax !== heatmapFullDomain.tMax);
+        btn.style.display = zoomed ? '' : 'none';
     }
 
-    function getSegSelectedKeys() {
-        return Array.from(document.querySelectorAll('.seg-cb:checked')).map(cb => cb.dataset.key);
+    // Position the persistent selection rectangle over whole rows [r0,r1] and
+    // the time span [t0,t1], so it is clear which rows/time the selection covers.
+    function showSelRect(t0, t1, r0, r1) {
+        const canvas = document.getElementById('heatmap-canvas');
+        const sel = document.getElementById('heatmap-sel');
+        const W = canvas.clientWidth || parseFloat(canvas.style.width) || 1;
+        const { tMin, tMax } = heatmapDomain;
+        const x0 = timeToX(t0, tMin, tMax, W);
+        const x1 = timeToX(t1, tMin, tMax, W);
+        sel.style.display = 'block';
+        sel.style.left = x0 + 'px';
+        sel.style.width = Math.max(2, x1 - x0) + 'px';
+        sel.style.top = (r0 * ROW_H) + 'px';
+        sel.style.height = ((r1 - r0 + 1) * ROW_H) + 'px';
+    }
+
+    // Single-click: select the one segment under the cursor (the trace file
+    // whose wall-clock span contains that time on that host row).
+    function selectSegmentAt(x, y) {
+        if (!heatmapDomain) return;
+        const r = Math.floor(y / ROW_H);
+        if (r < 0 || r >= heatmapRows.length) { setHeatmapSelection(null); return; }
+        const canvas = document.getElementById('heatmap-canvas');
+        const W = canvas.clientWidth || parseFloat(canvas.style.width) || 1;
+        const { tMin, tMax } = heatmapDomain;
+        const t = xToTime(x, tMin, tMax, W);
+        const hits = segmentsOverlapping(heatmapRows[r].segments, t, t);
+        if (!hits.length) { setHeatmapSelection(null); return; }
+        // If multiple segments cover the instant, prefer the one whose start is
+        // nearest (most specific) to the click.
+        hits.sort((a, b) => Math.abs(a.start - t) - Math.abs(b.start - t));
+        const seg = hits[0];
+        const span = segmentSpan(seg);
+        setHeatmapSelection({ keys: [seg.key], bytes: seg.size, t0: span.start, t1: span.end, rows: [r, r] });
+    }
+
+    function finalizeSelection(x0, x1, y0, y1) {
+        if (!heatmapDomain || x1 - x0 < 3) { setHeatmapSelection(null); return; }
+        const canvas = document.getElementById('heatmap-canvas');
+        const W = canvas.clientWidth || parseFloat(canvas.style.width) || 1;
+        const { tMin, tMax } = heatmapDomain;
+        const dragT0 = xToTime(x0, tMin, tMax, W);
+        const dragT1 = xToTime(x1, tMin, tMax, W);
+        let r0 = Math.max(0, Math.floor(y0 / ROW_H));
+        let r1 = Math.min(heatmapRows.length - 1, Math.floor((y1 - 0.001) / ROW_H));
+        const segs = [];
+        for (let r = r0; r <= r1; r++) {
+            for (const s of segmentsOverlapping(heatmapRows[r].segments, dragT0, dragT1)) segs.push(s);
+        }
+        if (!segs.length) { setHeatmapSelection(null); return; }
+        // Opening fetches WHOLE segment files (S3 cannot return a sub-range and
+        // the viewer shows each file's full extent), so snap the selection to
+        // the actual [min start, max end] of those files. The box then honestly
+        // reflects the time range that will open rather than the raw drag.
+        let t0 = Infinity, t1 = -Infinity;
+        for (const s of segs) {
+            const span = segmentSpan(s);
+            if (span.start < t0) t0 = span.start;
+            if (span.end > t1) t1 = span.end;
+        }
+        setHeatmapSelection({ keys: segs.map(s => s.key), bytes: totalBytes(segs), t0, t1, rows: [r0, r1] });
+    }
+
+    function setHeatmapSelection(s) {
+        heatmapSelection = s;
+        const heatSel = document.getElementById('heatmap-sel');
+        // Highlight the selected host-label rows.
+        const labelRows = document.querySelectorAll('#heatmap-labels .row');
+        labelRows.forEach((el, i) => {
+            const inSel = s && s.rows && i >= s.rows[0] && i <= s.rows[1];
+            el.classList.toggle('sel', !!inSel);
+        });
+        if (!s || !s.keys.length) {
+            if (heatSel) heatSel.style.display = 'none';
+        } else if (s.rows) {
+            showSelRect(s.t0, s.t1, s.rows[0], s.rows[1]);
+        }
+        if (currentTab === 'browse') updateSelectionCount();
+    }
+
+    // Redraw the canvas (and re-measure width) on window resize.
+    let resizeTimer = null;
+    window.addEventListener('resize', () => {
+        if (currentTab !== 'browse' || !heatmapRows.length) return;
+        clearTimeout(resizeTimer);
+        resizeTimer = setTimeout(() => {
+            drawHeatmapCanvas();
+            if (heatmapSelection && heatmapSelection.rows) {
+                showSelRect(heatmapSelection.t0, heatmapSelection.t1,
+                    heatmapSelection.rows[0], heatmapSelection.rows[1]);
+            }
+        }, 100);
+    });
+
+    // Clicking anywhere outside the timeline and the actions bar clears the
+    // current selection. (Clicks inside the plot are handled by its own
+    // mousedown/up; clicks on the action buttons must preserve the selection.)
+    document.addEventListener('click', (e) => {
+        if (currentTab !== 'browse' || !heatmapSelection) return;
+        if (e.target.closest('#heatmap-view') || e.target.closest('#actions-bar')) return;
+        setHeatmapSelection(null);
+    });
+
+    // Structured title metadata (svc / host / time window / segment count)
+    // derived from a set of selected keys. Both the trace viewer and the
+    // flamegraph render this in their header, so it lives in one helper.
+    function traceTitleParams(keys) {
+        const parsed = keys.map(k => parseKey(k));
+        const services = [...new Set(parsed.map(p => p.service).filter(Boolean))];
+        const hosts = [...new Set(parsed.map(p => p.host).filter(Boolean))];
+        const epochs = parsed.map(p => p.epoch).filter(e => e > 0).sort((a, b) => a - b);
+        const params = new URLSearchParams();
+        if (services.length) params.set('svc', services.join(', '));
+        if (hosts.length === 1) params.set('host', hosts[0]);
+        if (epochs.length >= 2) {
+            params.set('from', formatEpoch(epochs[0]));
+            params.set('to', formatEpoch(epochs[epochs.length - 1]));
+        } else if (epochs.length === 1) {
+            params.set('from', formatEpoch(epochs[0]));
+        }
+        params.set('segs', String(keys.length));
+        return params;
+    }
+
+    // CPU Profiling button: open a flamegraph of the selected segments. The
+    // flamegraph view builds from the trace's CpuSampleEvents (and resolves
+    // symbols from SymbolTableEntry), ignoring all other event types, so we
+    // serve the full trace via /api/trace — no server-side event filtering is
+    // needed for a working flamegraph. The selection is already size-capped.
+    function viewCpuProfile() {
+        if (!heatmapSelection || !heatmapSelection.keys.length) return;
+        const bucket = bucketInput.value.trim();
+        if (!bucket) { alert('Bucket is required'); return; }
+        const keys = heatmapSelection.keys;
+        const params = new URLSearchParams();
+        params.set('bucket', bucket);
+        for (const key of keys) {
+            params.append('keys', key);
+        }
+        const traceUrl = '/api/trace?' + params.toString();
+        const fgParams = traceTitleParams(keys);
+        fgParams.set('trace', traceUrl);
+        window.open('flamegraph.html?' + fgParams.toString(), '_blank');
     }
 
     // ── Raw search mode ──
@@ -807,19 +1263,45 @@
 
     // ── Selection & view ──
     function getSelectedKeys() {
-        // In browse mode with segments showing, use seg checkboxes
-        if (currentTab === 'browse' && selectedHost) {
-            return getSegSelectedKeys();
+        // Browse mode: keys come from the heatmap region selection.
+        if (currentTab === 'browse') {
+            return heatmapSelection ? heatmapSelection.keys : [];
         }
-        // In raw mode, use raw checkboxes
+        // Raw mode: use raw checkboxes.
         return Array.from(document.querySelectorAll('.raw-cb:checked')).map(cb => cb.dataset.key);
     }
 
     function updateSelectionCount() {
+        const viewBtn = document.getElementById('view-btn');
+        const cpuBtn = document.getElementById('cpu-btn');
+        const warn = document.getElementById('selection-warn');
+        const count = document.getElementById('selection-count');
+
+        if (currentTab === 'browse') {
+            const sel = heatmapSelection;
+            if (!sel || !sel.keys.length) {
+                viewBtn.disabled = true;
+                cpuBtn.disabled = true;
+                warn.textContent = '';
+                count.textContent = '';
+                return;
+            }
+            const over = sel.bytes > MAX_OPEN_BYTES;
+            viewBtn.disabled = over;
+            cpuBtn.disabled = over;
+            warn.textContent = over
+                ? `Too large to open (${formatSize(sel.bytes)} > 100 MB) — narrow your selection.`
+                : '';
+            const win = sel.t0 && sel.t1 ? ` · ${fmtTick(sel.t0)}–${fmtTick(sel.t1)}` : '';
+            count.textContent = `${sel.keys.length} segment${sel.keys.length !== 1 ? 's' : ''} · ${formatSize(sel.bytes)}${win}`;
+            return;
+        }
+
+        // Raw mode
         const keys = getSelectedKeys();
-        const el = document.getElementById('selection-count');
-        el.textContent = keys.length ? `${keys.length} selected` : '';
-        document.getElementById('view-btn').disabled = keys.length === 0;
+        warn.textContent = '';
+        count.textContent = keys.length ? `${keys.length} selected` : '';
+        viewBtn.disabled = keys.length === 0;
     }
 
     function viewSelected() {
@@ -830,22 +1312,9 @@
         const keysParams = keys.map(k => `keys=${encodeURIComponent(k)}`).join('&');
         const traceUrl = `/api/trace?bucket=${encodeURIComponent(bucket)}&${keysParams}`;
 
-        // Pass structured metadata for the viewer title
-        const parsed = keys.map(k => parseKey(k));
-        const services = [...new Set(parsed.map(p => p.service).filter(Boolean))];
-        const hosts = [...new Set(parsed.map(p => p.host).filter(Boolean))];
-        const epochs = parsed.map(p => p.epoch).filter(e => e > 0).sort((a, b) => a - b);
-        const titleParams = new URLSearchParams();
+        // Pass structured metadata for the viewer title.
+        const titleParams = traceTitleParams(keys);
         titleParams.set('trace', traceUrl);
-        if (services.length) titleParams.set('svc', services.join(', '));
-        if (hosts.length === 1) titleParams.set('host', hosts[0]);
-        if (epochs.length >= 2) {
-            titleParams.set('from', formatEpoch(epochs[0]));
-            titleParams.set('to', formatEpoch(epochs[epochs.length - 1]));
-        } else if (epochs.length === 1) {
-            titleParams.set('from', formatEpoch(epochs[0]));
-        }
-        titleParams.set('segs', String(keys.length));
 
         window.open(`viewer.html?${titleParams.toString()}`, '_blank');
     }

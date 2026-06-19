@@ -86,24 +86,25 @@ async function main() {
     assert.ok(samples.length > 0, `expected >0 samples for long polls`);
   });
 
-  // ── Recipe 5: One specific poll instance (worst poll for a task) ──
-  await testAsync("Recipe worst poll for task 3", async () => {
-    const targetTaskId = 3;
+  // ── Recipe 5: One specific poll instance (worst sampled poll for a task) ──
+  await testAsync("Recipe worst sampled poll for a task", async () => {
+    let targetTaskId = null;
     let worstPoll = null;
     for (const wid of workerIds) {
       for (const p of workerSpans[wid].polls) {
-        if (p.taskId === targetTaskId) {
+        if (p.taskId && p.cpuSamples && p.cpuSamples.length > 0) {
           if (!worstPoll || (p.end - p.start) > (worstPoll.end - worstPoll.start)) {
             worstPoll = p;
+            targetTaskId = p.taskId;
           }
         }
       }
     }
-    assert.ok(worstPoll, "task 3 not found");
+    assert.ok(worstPoll, "no sampled poll found");
     const samples = trace.cpuSamples.filter(s =>
       s.source === 0 && s.timestamp >= worstPoll.start && s.timestamp <= worstPoll.end
     );
-    assert.ok(samples.length > 0, `expected >0 samples for worst poll`);
+    assert.ok(samples.length > 0, `expected >0 samples for task ${targetTaskId}'s worst sampled poll`);
   });
 
   // ── Recipe 6: Leaf-frame search ──

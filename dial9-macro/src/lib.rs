@@ -96,7 +96,9 @@ fn expand_main(args: MainArgs, input: ItemFn) -> Result<TokenStream2, syn::Error
         #(#attrs)*
         #vis fn #name() #ret {
             let __dial9_rt = ::dial9_tokio_telemetry::TracedRuntime::new(#config_call);
-            __dial9_rt.block_on(async move { #(#body_stmts)* })
+            let __dial9_out = __dial9_rt.block_on(async move { #(#body_stmts)* });
+            __dial9_rt.graceful_shutdown();
+            __dial9_out
         }
     })
 }
@@ -110,7 +112,7 @@ fn expand_main(args: MainArgs, input: ItemFn) -> Result<TokenStream2, syn::Error
 /// `runtime.block_on(...)` is invisible to the telemetry hooks.
 ///
 /// To spawn sub-tasks with wake-event tracking from anywhere inside the
-/// body, call `TelemetryHandle::current()` — the handle is installed on
+/// body, call `Dial9TokioHandle::current()` — the handle is installed on
 /// every runtime-owned thread by `on_thread_start`.
 ///
 /// # Arguments
@@ -126,18 +128,42 @@ fn expand_main(args: MainArgs, input: ItemFn) -> Result<TokenStream2, syn::Error
 ///       `Dial9Config` type, but writer-I/O failures are logged at `error!`
 ///       and downgraded to a disabled config that still preserves your
 ///       `with_tokio` configurators.
-///     - The deprecated positional `dial9_tokio_telemetry::config::Dial9Config`,
-///       kept compatible via a bridge impl.
 ///
 ///   Use `.enabled(false)` to run without telemetry while keeping your
 ///   `with_tokio` configurators.
+///
+/// # Graceful shutdown
+///
+/// After the async body returns, the macro drops the runtime (so Tokio worker
+/// threads exit and flush their thread-local buffers) and then performs a
+/// graceful shutdown of the telemetry guard, draining the background worker so
+/// the final segment is symbolized, compressed, and uploaded before the process
+/// exits. The deadline defaults to 1 second and is configurable on the config
+/// builder:
+///
+/// ```rust,ignore
+/// Dial9Config::builder()
+///     .on_disk_buffer("/tmp/trace.bin")
+///     .max_total_size(16 * 1024 * 1024)
+///     .graceful_shutdown(std::time::Duration::from_secs(5)) // custom deadline
+///     // .disable_graceful_shutdown()                       // or opt out entirely
+///     .build()
+/// ```
+///
+/// The low-level `TracedRuntime` API is unaffected — there you call
+/// `TelemetryGuard::graceful_shutdown` yourself.
+///
+/// The implicit drain only runs when the body returns normally. If the body
+/// panics, the panic propagates and the guard's `Drop` still flushes and seals
+/// the final segment, but the background worker is not drained — so a panicking
+/// program may not symbolize or upload its last segment.
 ///
 /// # Examples
 ///
 /// Using a named function:
 ///
 /// ```rust,ignore
-/// use dial9_tokio_telemetry::{main, Dial9Config, telemetry::TelemetryHandle};
+/// use dial9_tokio_telemetry::{main, Dial9Config, telemetry::Dial9TokioHandle};
 ///
 /// fn my_config() -> Dial9Config {
 ///     Dial9Config::builder()
@@ -150,7 +176,7 @@ fn expand_main(args: MainArgs, input: ItemFn) -> Result<TokenStream2, syn::Error
 ///
 /// #[dial9_tokio_telemetry::main(config = my_config)]
 /// async fn main() {
-///     let handle = TelemetryHandle::current();
+///     let handle = Dial9TokioHandle::current();
 ///     handle
 ///         .spawn(async { /* instrumented sub-task */ })
 ///         .await

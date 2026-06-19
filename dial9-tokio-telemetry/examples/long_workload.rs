@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use dial9_tokio_telemetry::Dial9Config;
-use dial9_tokio_telemetry::telemetry::TelemetryHandle;
+use dial9_tokio_telemetry::telemetry::Dial9TokioHandle;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
@@ -26,7 +26,7 @@ async fn cpu_work(iterations: u64) -> u64 {
 }
 
 async fn echo_server(listener: TcpListener) {
-    let handle = TelemetryHandle::current();
+    let handle = Dial9TokioHandle::current();
     loop {
         let (mut socket, _) = listener.accept().await.unwrap();
         handle.spawn(async move {
@@ -72,7 +72,7 @@ async fn chatty_client(port: u16, id: usize) {
 }
 
 async fn background_cpu_bursts() {
-    let handle = TelemetryHandle::current();
+    let handle = Dial9TokioHandle::current();
     loop {
         for _ in 0..20 {
             handle.spawn(async { cpu_work(100_000).await });
@@ -99,7 +99,7 @@ async fn main() {
 
     println!("Running workload for {}s...", duration_secs);
 
-    let handle = TelemetryHandle::current();
+    let handle = Dial9TokioHandle::current();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
 
