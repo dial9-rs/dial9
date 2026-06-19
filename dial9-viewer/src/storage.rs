@@ -13,6 +13,13 @@ pub struct ObjectInfo {
 
 /// Abstraction over trace storage (S3, local FS, etc.)
 pub trait StorageBackend: Send + Sync {
+    /// List the buckets the current credentials can see. Lets the viewer offer
+    /// a bucket picker instead of requiring the user to know the name. Backends
+    /// without a bucket concept (local FS) return an empty list.
+    fn list_buckets(
+        &self,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, StorageError>> + Send + '_>>;
+
     fn list_objects(
         &self,
         bucket: &str,
@@ -36,6 +43,16 @@ pub trait StorageBackend: Send + Sync {
 #[derive(Debug)]
 pub enum StorageError {
     NotFound(String),
+    /// The credentials were rejected by S3 (bad keys, wrong region, expired
+    /// token, access denied). Kept distinct from [`StorageError::Other`] so the
+    /// HTTP layer can return a generic 401 without echoing the underlying SDK
+    /// message — which can contain the access key id.
+    Unauthorized,
+    /// The AWS account behind the credentials is not signed up for / opted in
+    /// to S3 in this region. Almost always means the request was signed by the
+    /// *wrong* identity (e.g. the server's ambient credentials instead of the
+    /// pasted ones), so the message points the user there.
+    AccountNotSignedUp,
     Other(String),
 }
 
@@ -43,12 +60,87 @@ impl std::fmt::Display for StorageError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             StorageError::NotFound(msg) => write!(f, "not found: {msg}"),
+            StorageError::Unauthorized => {
+                write!(
+                    f,
+                    "credentials rejected by S3 (check keys, region, or expiry)"
+                )
+            }
+            StorageError::AccountNotSignedUp => {
+                write!(
+                    f,
+                    "the AWS account used for this request is not signed up for S3 — \
+                     this usually means the request was signed with the wrong identity. \
+                     Make sure you clicked Apply after pasting your credentials."
+                )
+            }
             StorageError::Other(msg) => write!(f, "{msg}"),
         }
     }
 }
 
 impl std::error::Error for StorageError {}
+
+/// Map an S3 SDK error to a [`StorageError`], collapsing all
+/// authentication/authorization failures to [`StorageError::Unauthorized`] so
+/// the secret, token, and access key id are never reflected to the client.
+///
+/// Uses the structured error code (via `ProvideErrorMetadata`) rather than
+/// string matching, plus the HTTP status as a backstop.
+fn classify_s3_error<E, R>(err: &aws_sdk_s3::error::SdkError<E, R>) -> StorageError
+where
+    E: std::error::Error + aws_sdk_s3::error::ProvideErrorMetadata + 'static,
+    R: std::fmt::Debug,
+{
+    use aws_sdk_s3::error::ProvideErrorMetadata;
+    match err.code() {
+        Some(
+            "InvalidAccessKeyId"
+            | "SignatureDoesNotMatch"
+            | "ExpiredToken"
+            | "ExpiredTokenException"
+            | "InvalidToken"
+            | "AccessDenied"
+            | "AccessDeniedException"
+            | "UnrecognizedClientException"
+            | "InvalidClientTokenId"
+            | "AuthorizationHeaderMalformed",
+        ) => StorageError::Unauthorized,
+        // Account-level: the credentials are valid but the account isn't signed
+        // up for S3 in this region — typically the wrong identity signed it.
+        Some("NotSignedUp" | "OptInRequired") => StorageError::AccountNotSignedUp,
+        // Unmapped error: keep the full SDK detail in the server log (it can
+        // embed the access key id, region, and endpoint — server-eyes only) and
+        // hand the client a generic message rather than reflecting it back.
+        _ => {
+            tracing::warn!(
+                error = %aws_sdk_s3::error::DisplayErrorContext(err),
+                "unclassified S3 error"
+            );
+            StorageError::Other("could not complete the S3 request".to_string())
+        }
+    }
+}
+
+/// Optional plumbing for building ephemeral (bring-your-own-credentials) S3
+/// clients. In production this is `None` and clients use the default HTTPS
+/// connector. Tests inject the in-process `s3s` HTTP client plus an endpoint
+/// override so the header → ephemeral-client → fake-S3 path is exercisable.
+#[derive(Clone)]
+pub struct EphemeralS3Config {
+    /// Shared HTTP client/connector reused across ephemeral clients.
+    pub http_client: aws_sdk_s3::config::SharedHttpClient,
+    /// Endpoint override (test-only — never wired to user input; that would be
+    /// an SSRF vector).
+    pub endpoint_url: Option<String>,
+    /// Path-style addressing — required by the `s3s` fake, never for real S3.
+    pub force_path_style: bool,
+}
+
+/// Default region used when the user did not supply (and we could not detect)
+/// one. S3 routes bucket operations regardless once the bucket region is known,
+/// but a concrete region is required to build the client.
+const DEFAULT_REGION: &str = "us-east-1";
 
 /// S3-backed storage using the AWS SDK.
 pub struct S3Backend {
@@ -67,9 +159,75 @@ impl S3Backend {
     pub fn from_client(client: aws_sdk_s3::Client) -> Self {
         Self { client }
     }
+
+    /// Build an ephemeral backend from user-supplied credentials.
+    ///
+    /// The credentials are passed as a concrete value, which acts as a *static*
+    /// credential provider: it can never fall back to the server's IMDS/env
+    /// identity. That is the core security property of bring-your-own-creds.
+    pub fn from_credentials(
+        credentials: aws_sdk_s3::config::Credentials,
+        region: Option<&str>,
+        ephemeral: &Option<EphemeralS3Config>,
+    ) -> Self {
+        Self::from_client(build_credentialed_client(credentials, region, ephemeral))
+    }
+}
+
+/// Construct an `aws_sdk_s3::Client` from explicit credentials. Shared by the
+/// ephemeral backend and the `/api/credentials/check` validation handler.
+pub fn build_credentialed_client(
+    credentials: aws_sdk_s3::config::Credentials,
+    region: Option<&str>,
+    ephemeral: &Option<EphemeralS3Config>,
+) -> aws_sdk_s3::Client {
+    let region = region.unwrap_or(DEFAULT_REGION).to_string();
+    let mut cfg = aws_sdk_s3::config::Builder::new()
+        .behavior_version(aws_sdk_s3::config::BehaviorVersion::latest())
+        .credentials_provider(credentials)
+        .region(aws_sdk_s3::config::Region::new(region));
+
+    if let Some(e) = ephemeral {
+        cfg = cfg.http_client(e.http_client.clone());
+        if let Some(url) = &e.endpoint_url {
+            cfg = cfg.endpoint_url(url);
+        }
+        if e.force_path_style {
+            cfg = cfg.force_path_style(true);
+        }
+    }
+
+    aws_sdk_s3::Client::from_conf(cfg.build())
 }
 
 impl StorageBackend for S3Backend {
+    fn list_buckets(
+        &self,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, StorageError>> + Send + '_>> {
+        Box::pin(async move {
+            let mut names = Vec::new();
+            let mut continuation: Option<String> = None;
+            loop {
+                let mut req = self.client.list_buckets();
+                if let Some(token) = continuation.take() {
+                    req = req.continuation_token(token);
+                }
+                let resp = req.send().await.map_err(|e| classify_s3_error(&e))?;
+                for b in resp.buckets() {
+                    if let Some(name) = b.name() {
+                        names.push(name.to_string());
+                    }
+                }
+                match resp.continuation_token() {
+                    Some(token) if !token.is_empty() => continuation = Some(token.to_string()),
+                    _ => break,
+                }
+            }
+            names.sort();
+            Ok(names)
+        })
+    }
+
     fn list_objects(
         &self,
         bucket: &str,
@@ -92,10 +250,7 @@ impl StorageBackend for S3Backend {
                     req = req.continuation_token(token);
                 }
 
-                let resp = req.send().await.map_err(|e| {
-                    use aws_sdk_s3::error::DisplayErrorContext;
-                    StorageError::Other(format!("{}", DisplayErrorContext(&e)))
-                })?;
+                let resp = req.send().await.map_err(|e| classify_s3_error(&e))?;
 
                 for obj in resp.contents() {
                     if let Some(key) = obj.key() {
@@ -139,10 +294,7 @@ impl StorageBackend for S3Backend {
                 .delimiter("/")
                 .send()
                 .await
-                .map_err(|e| {
-                    use aws_sdk_s3::error::DisplayErrorContext;
-                    StorageError::Other(format!("{}", DisplayErrorContext(&e)))
-                })?;
+                .map_err(|e| classify_s3_error(&e))?;
 
             Ok(resp
                 .common_prefixes()
@@ -168,14 +320,17 @@ impl StorageBackend for S3Backend {
                 .send()
                 .await
                 .map_err(|e| {
-                    use aws_sdk_s3::error::DisplayErrorContext;
                     use aws_sdk_s3::operation::get_object::GetObjectError;
 
+                    // Classify before unwrapping the service error so auth
+                    // failures (which arrive as the redirect/4xx service error)
+                    // collapse to Unauthorized rather than leaking the message.
+                    let classified = classify_s3_error(&e);
                     match e.into_service_error() {
                         GetObjectError::NoSuchKey(_) => {
                             StorageError::NotFound(format!("{bucket}/{key}"))
                         }
-                        other => StorageError::Other(format!("{}", DisplayErrorContext(&other))),
+                        _ => classified,
                     }
                 })?;
 
@@ -209,6 +364,14 @@ impl LocalBackend {
 }
 
 impl StorageBackend for LocalBackend {
+    fn list_buckets(
+        &self,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, StorageError>> + Send + '_>> {
+        // Local mode has no bucket concept; the synthetic "local" bucket is
+        // wired in by the caller.
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
     fn list_objects(
         &self,
         _bucket: &str,

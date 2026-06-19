@@ -791,6 +791,7 @@
 
         <script src="decode.js"></script>
         <script src="trace_parser.js"></script>
+        <script src="creds.js"></script>
         <script src="trace_analysis.js"></script>
         <script src="format.js"></script>
         <script src="flamegraph.js"></script>
@@ -1290,7 +1291,14 @@
                 const list = Array.isArray(urls) ? urls : [urls];
                 try {
                     updateLoadProgress(list.length > 1 ? `Fetching ${list.length} traces…` : "Fetching…");
-                    const arrayBuffer = await TraceParser.fetchTraces(list, { signal: loadAbortController?.signal });
+                    // Attach bring-your-own-credentials headers if present. A
+                    // tab opened directly (not from the browser page) has no
+                    // inherited credentials — see the catch below.
+                    const credHeaders = window.Dial9Creds ? Dial9Creds.headers() : {};
+                    const arrayBuffer = await TraceParser.fetchTraces(list, {
+                        signal: loadAbortController?.signal,
+                        headers: credHeaders,
+                    });
                     loadAbortController = null;
                     const name = urlParams.get('svc')
                         || list[0].split('/').pop()?.split('?')[0]
@@ -1298,7 +1306,15 @@
                     await parseAndShowTrace(arrayBuffer, name, getParseOptions());
                 } catch (err) {
                     if (err.name === 'AbortError') return;
-                    alert("Error loading trace from URL: " + err.message);
+                    if (/HTTP 401/.test(err.message) && window.Dial9Creds && !Dial9Creds.has()) {
+                        alert(
+                            "This trace requires AWS credentials. Open it from the " +
+                            "dial9 home page after applying your credentials, or this " +
+                            "tab won't have them."
+                        );
+                    } else {
+                        alert("Error loading trace from URL: " + err.message);
+                    }
                     resetDropZone();
                 }
             }
