@@ -1597,10 +1597,7 @@
                 unmatchedSpans = [];
                 spanMaxDepth = 0;
                 _spanDurCache = null;
-                focusedSpanId = null;
-                selectedSpanId = null;
-                selectedSpanIds = new Set();
-                selectedTaskId = null;
+                clearSpanTaskSelection();
                 if (trace.customEvents && trace.customEvents.length > 0) {
                     const spanResult2 = buildSpanData(trace.customEvents);
                     allSpans = spanResult2.allSpans;
@@ -2838,8 +2835,7 @@
                     const name = meta?.spanName || focusedSpan?.spanName || "Span";
                     let html = `<div style="color:#ccc;margin-bottom:3px">${esc(name)}</div>`;
                     for (const [k, v] of Object.entries(fields)) {
-                        const val = formatFieldValue(v);
-                        html += `<div class="kv-row"><span class="kv-key">${esc(k)}:</span><span class="kv-val" title="${esc(val)}">${esc(val)}</span><button class="kv-copy" data-val="${esc(val)}">⎘</button></div>`;
+                        html += kvRow(k, formatFieldValue(v));
                     }
                     label.innerHTML = html;
                 } else {
@@ -2981,19 +2977,13 @@
                         }
                     } else {
                         // Cluster tooltip
-                        const nameCounts = {};
+                        const nameList = topNames(spans, s => s.spanName);
                         let minDur = Infinity, maxDur = 0;
                         for (const s of spans) {
-                            nameCounts[s.spanName] = (nameCounts[s.spanName] || 0) + 1;
                             const d = s.end - s.start;
                             if (d < minDur) minDur = d;
                             if (d > maxDur) maxDur = d;
                         }
-                        const nameList = Object.entries(nameCounts)
-                            .sort((a, b) => b[1] - a[1])
-                            .slice(0, 5)
-                            .map(([n, c]) => `${esc(n)}${c > 1 ? " ×" + c : ""}`)
-                            .join(", ");
                         html = `<span class="label">Cluster:</span> <span class="value">${spans.length} spans</span>`;
                         html += `<br><span class="label">Names:</span> <span class="value">${nameList}</span>`;
                         html += `<br><span class="label">Duration:</span> <span class="value">${formatHumanDuration(minDur)} – ${formatHumanDuration(maxDur)}</span>`;
@@ -3010,14 +3000,7 @@
             });
 
             // Copy button handler for span field values
-            document.getElementById("span-panel-label").addEventListener("click", (e) => {
-                const btn = e.target.closest(".kv-copy");
-                if (btn) {
-                    navigator.clipboard.writeText(btn.dataset.val);
-                    btn.textContent = "✓";
-                    setTimeout(() => { btn.textContent = "⎘"; }, 800);
-                }
-            });
+            document.getElementById("span-panel-label").addEventListener("click", copyFromKvButton);
 
             // Span panel click: pick representative from cluster, focus to reveal children
             document.getElementById("span-panel-canvas").addEventListener("click", (e) => {
@@ -3033,10 +3016,7 @@
                     const hit = bucket.representative;
                     // Toggle focus: clicking same span clears focus
                     if (hit.spanId === focusedSpanId) {
-                        focusedSpanId = null;
-                        selectedSpanId = null;
-                        selectedSpanIds = new Set();
-                        selectedTaskId = null;
+                        clearSpanTaskSelection();
                     } else {
                         focusedSpanId = hit.spanId;
                         selectedSpanId = hit.spanId;
@@ -3072,10 +3052,7 @@
                     }
                 } else {
                     // Click empty area: clear focus and selection
-                    focusedSpanId = null;
-                    selectedSpanId = null;
-                    selectedSpanIds = new Set();
-                    selectedTaskId = null;
+                    clearSpanTaskSelection();
                 }
                 renderAll();
             });
@@ -3083,6 +3060,22 @@
             // Build the detail HTML for a custom-event hit (single event or
             // cluster) — name/fields/timestamp, used by the hover tooltip.
             // Does NOT include the task line.
+
+            // Tally `nameOf(item)` across items, most-frequent first, top `limit`,
+            // joined "name ×N". Names are escaped — output goes straight into HTML.
+            function topNames(items, nameOf, limit = 5) {
+                const counts = {};
+                for (const it of items) {
+                    const n = nameOf(it);
+                    counts[n] = (counts[n] || 0) + 1;
+                }
+                return Object.entries(counts)
+                    .sort((a, b) => b[1] - a[1])
+                    .slice(0, limit)
+                    .map(([n, c]) => `${esc(n)}${c > 1 ? " ×" + c : ""}`)
+                    .join(", ");
+            }
+
             function ceBodyHtml(events) {
                 let html = "";
                 if (events.length === 1) {
@@ -3093,13 +3086,7 @@
                     }
                     html += `<br><span class="label">@</span> <span class="value">${fmtTs(ev.timestamp)}</span>`;
                 } else {
-                    const nameCounts = {};
-                    for (const ev of events) nameCounts[ev.name] = (nameCounts[ev.name] || 0) + 1;
-                    const nameList = Object.entries(nameCounts)
-                        .sort((a, b) => b[1] - a[1])
-                        .slice(0, 5)
-                        .map(([n, c]) => `${esc(n)}${c > 1 ? " ×" + c : ""}`)
-                        .join(", ");
+                    const nameList = topNames(events, ev => ev.name);
                     html = `<span class="label">Cluster:</span> <span class="value">${events.length} events</span>`;
                     html += `<br><span class="label">Types:</span> <span class="value">${nameList}</span>`;
                     const first = events[0];
@@ -3112,11 +3099,16 @@
                 return html;
             }
 
+            // The key + value spans shared by every k/v row.
+            function kvKeyVal(key, val) {
+                return `<span class="kv-key">${esc(key)}:</span>` +
+                    `<span class="kv-val" title="${esc(val)}">${esc(val)}</span>`;
+            }
+
             // One styled k/v row with a copy button — same visual language as
             // the span metadata panel. `copyVal` defaults to the displayed val.
             function kvRow(key, val, copyVal = val) {
-                return `<div class="kv-row"><span class="kv-key">${esc(key)}:</span>` +
-                    `<span class="kv-val" title="${esc(val)}">${esc(val)}</span>` +
+                return `<div class="kv-row">${kvKeyVal(key, val)}` +
                     `<button class="kv-copy" data-val="${esc(copyVal)}">⎘</button></div>`;
             }
 
@@ -3124,11 +3116,21 @@
             // other events sharing this field value. `corrVal` is the raw value to
             // match on (the displayed `val` may be formatted).
             function kvRowCorrelate(key, val, corrVal) {
-                return `<div class="kv-row"><span class="kv-key">${esc(key)}:</span>` +
-                    `<span class="kv-val" title="${esc(val)}">${esc(val)}</span>` +
+                return `<div class="kv-row">${kvKeyVal(key, val)}` +
                     `<button class="kv-corr" data-corr-key="${esc(key)}" data-corr-val="${esc(corrVal)}" ` +
                     `title="Find events with ${esc(key)}=${esc(corrVal)}">↔</button>` +
                     `<button class="kv-copy" data-val="${esc(val)}">⎘</button></div>`;
+            }
+
+            // Shared kv-copy click behavior: copy the button's data-val, flash ✓,
+            // revert. Returns true if a copy button was the click target.
+            function copyFromKvButton(e) {
+                const btn = e.target.closest(".kv-copy");
+                if (!btn) return false;
+                navigator.clipboard.writeText(btn.dataset.val);
+                btn.textContent = "✓";
+                setTimeout(() => { btn.textContent = "⎘"; }, 800);
+                return true;
             }
 
             // Rich detail HTML for the pinned Event sidebar — kv-rows with copy
@@ -3149,13 +3151,7 @@
                     }
                     html += kvRow("@", fmtTs(ev.timestamp));
                 } else {
-                    const nameCounts = {};
-                    for (const ev of events) nameCounts[ev.name] = (nameCounts[ev.name] || 0) + 1;
-                    const nameList = Object.entries(nameCounts)
-                        .sort((a, b) => b[1] - a[1])
-                        .slice(0, 5)
-                        .map(([n, c]) => `${n}${c > 1 ? " ×" + c : ""}`)
-                        .join(", ");
+                    const nameList = topNames(events, ev => ev.name);
                     const first = events[0];
                     const last = events[events.length - 1];
                     html += kvRow("Cluster", `${events.length} events`);
@@ -3185,37 +3181,33 @@
                     .sort((a, b) => (a.depth - b.depth) || (a.start - b.start));
             }
 
+            // Custom events matching `pred`, sorted by time. [] when none loaded.
+            function customEventsWhere(pred) {
+                if (!trace || !trace.customEvents) return [];
+                return trace.customEvents.filter(pred).sort((a, b) => a.timestamp - b.timestamp);
+            }
+
             // Custom events resolving to the same task, sorted by time (incl. self).
             function eventsForTask(taskId) {
-                if (taskId == null || !trace || !trace.customEvents) return [];
-                return trace.customEvents
-                    .filter(e => taskForEvent(e) === taskId)
-                    .sort((a, b) => a.timestamp - b.timestamp);
+                if (taskId == null) return [];
+                return customEventsWhere(e => taskForEvent(e) === taskId);
             }
 
             // Occurrences of the same event name, sorted by time (incl. self).
             function eventsOfType(name) {
-                if (!trace || !trace.customEvents) return [];
-                return trace.customEvents
-                    .filter(e => e.name === name)
-                    .sort((a, b) => a.timestamp - b.timestamp);
+                return customEventsWhere(e => e.name === name);
             }
 
             // Custom events whose timestamp falls inside a span, sorted by time.
             function eventsInSpan(span) {
-                if (!span || !trace || !trace.customEvents) return [];
-                return trace.customEvents
-                    .filter(e => e.timestamp >= span.start && e.timestamp <= span.end)
-                    .sort((a, b) => a.timestamp - b.timestamp);
+                if (!span) return [];
+                return customEventsWhere(e => e.timestamp >= span.start && e.timestamp <= span.end);
             }
 
             // Custom events sharing a field value, sorted by time.
             function eventsWithField(key, val) {
-                if (!trace || !trace.customEvents) return [];
                 const target = String(val);
-                return trace.customEvents
-                    .filter(e => e.fields && String(e.fields[key]) === target)
-                    .sort((a, b) => a.timestamp - b.timestamp);
+                return customEventsWhere(e => e.fields && String(e.fields[key]) === target);
             }
 
             // Build the Related tab body for a single event and (re)populate the
@@ -3368,16 +3360,21 @@
                 viewEnd = Math.min(maxTs, start + d);
             }
 
+            // Drop all span/task selection state (leaves the event marker alone).
+            function clearSpanTaskSelection() {
+                selectedTaskId = null;
+                selectedSpanId = null;
+                selectedSpanIds = new Set();
+                focusedSpanId = null;
+            }
+
             // Navigate to a custom event: re-pin its detail, move the marker, and
             // center the timeline on it (same selection as clicking its tick).
             function navigateToEvent(ev) {
                 const taskId = taskForEvent(ev);
                 const poll = pollForEvent(ev, taskId);
                 selectedEvent = { events: [ev], timestamp: ev.timestamp, taskId, name: ev.name, poll, x: null };
-                selectedTaskId = null;
-                selectedSpanId = null;
-                selectedSpanIds = new Set();
-                focusedSpanId = null;
+                clearSpanTaskSelection();
                 centerViewOn(ev.timestamp);
                 showEventDetail({ events: [ev], taskId });
                 renderAll();
@@ -3483,10 +3480,7 @@
                     selectedEvent = { events: hit.events, timestamp: ts, taskId: hit.taskId, name, poll, x: hit.x };
                     // Drop any prior task/span selection so the lanes show only
                     // this event's poll plus the marker line.
-                    selectedTaskId = null;
-                    selectedSpanId = null;
-                    selectedSpanIds = new Set();
-                    focusedSpanId = null;
+                    clearSpanTaskSelection();
                     showEventDetail(hit);
                 }
                 renderAll();
@@ -4575,10 +4569,7 @@
                 // both the task and the span focus (a single un-click).
                 const togglingOff = found && found === selectedTaskId;
                 if (togglingOff) {
-                    selectedTaskId = null;
-                    selectedSpanId = null;
-                    selectedSpanIds = new Set();
-                    focusedSpanId = null;
+                    clearSpanTaskSelection();
                 } else {
                     selectedTaskId = found || null;
                     selectedSpanId = newFocusedSpanId;
@@ -4699,21 +4690,12 @@
             // Copy button handler for kv values in the sidebar (event detail).
             // Delegated on the stable container so it survives re-renders.
             document.getElementById("stack-sidebar-body").addEventListener("click", (e) => {
-                const btn = e.target.closest(".kv-copy");
-                if (btn) {
-                    navigator.clipboard.writeText(btn.dataset.val);
-                    btn.textContent = "✓";
-                    setTimeout(() => { btn.textContent = "⎘"; }, 800);
-                    return;
-                }
+                if (copyFromKvButton(e)) return;
                 // Field "↔": correlate by this field value in the Related tab.
                 const corr = e.target.closest(".kv-corr");
                 if (corr) {
                     correlateField = { key: corr.dataset.corrKey, val: corr.dataset.corrVal };
-                    if (selectedEventRef) {
-                        document.getElementById("stack-sidebar-body").innerHTML = relatedHtml(selectedEventRef);
-                        showSidebarTabs("related");
-                    }
+                    renderEventTab("related");
                     return;
                 }
                 // Related tab: toggle a section's collapsed state.
@@ -4918,19 +4900,24 @@
                 heap.classList.toggle("active", activeTab === "heap");
             }
 
+            // Render one event-family tab ("event" | "related") into the sidebar
+            // body and activate it. No-op if the required selection is absent.
+            function renderEventTab(which) {
+                const body = document.getElementById("stack-sidebar-body");
+                if (which === "related") {
+                    if (!selectedEventRef) return;
+                    body.innerHTML = relatedHtml(selectedEventRef);
+                } else {
+                    if (!selectedEvent) return;
+                    body.innerHTML = eventDetailHtml(selectedEvent.events, selectedEvent.taskId);
+                }
+                showSidebarTabs(which);
+            }
+
             // Event family tabs swap the sidebar-body content between the
             // event detail and its derived "Related" view.
-            document.getElementById("tab-event").addEventListener("click", () => {
-                if (!selectedEvent) return;
-                document.getElementById("stack-sidebar-body").innerHTML =
-                    eventDetailHtml(selectedEvent.events, selectedEvent.taskId);
-                showSidebarTabs("event");
-            });
-            document.getElementById("tab-related").addEventListener("click", () => {
-                if (!selectedEventRef) return;
-                document.getElementById("stack-sidebar-body").innerHTML = relatedHtml(selectedEventRef);
-                showSidebarTabs("related");
-            });
+            document.getElementById("tab-event").addEventListener("click", () => renderEventTab("event"));
+            document.getElementById("tab-related").addEventListener("click", () => renderEventTab("related"));
 
             document.getElementById("tab-flamegraph").addEventListener("click", () => {
                 if (fgActive) return; // already showing
