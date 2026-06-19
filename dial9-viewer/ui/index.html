@@ -72,7 +72,17 @@
         .creds-status { font-size: 0.8em; }
         .creds-status.ok { color: #6ee7a0; }
         .creds-status.error { color: #ff6b6b; }
-        #creds-btn.active { background: #6c63ff; border-color: #6c63ff; color: #fff; }
+        #creds-btn.active { background: #2a2a4a; border-color: #6ee7a0; color: #ccc; }
+        /* The label is a <span>, so `header span { color }` would otherwise win;
+           inherit the button's own text color instead. */
+        #creds-btn-label { color: inherit; }
+        /* The 🔑 emoji's tall glyph box inflates the line box (and so the button
+           height) vs the text-only TZ button. Constrain the emoji to a zero-height
+           inline-block so it can't grow the line box; both buttons then share the
+           same default line-height and match in height. */
+        .creds-btn-icon {
+            display: inline-block; line-height: 0; vertical-align: middle; font-size: 0.95em;
+        }
         .creds-buckets { display: flex; flex-wrap: wrap; gap: 6px; max-height: 120px; overflow-y: auto; }
         .creds-buckets button { font-size: 0.8em; padding: 4px 10px; }
         .creds-buckets button.match { border-color: #6c63ff; color: #c7c2ff; }
@@ -201,7 +211,7 @@
         <span>search &amp; view traces from S3</span>
         <span class="spacer"></span>
         <button id="creds-btn" style="display:none" title="Use your own temporary AWS credentials">
-            🔑 <span id="creds-btn-label">AWS Credentials</span>
+            <span class="creds-btn-icon">🔑</span> <span id="creds-btn-label">AWS Credentials</span>
         </button>
         <button id="tz-btn" title="Toggle between UTC and local timezone">TZ: UTC</button>
     </header>
@@ -571,8 +581,15 @@
         document.getElementById('creds-clear').addEventListener('click', () => {
             Dial9Creds.clear();
             akid.value = secret.value = token.value = region.value = '';
+            // The selected bucket belonged to the now-removed identity; drop it
+            // so a later search can't query a foreign bucket as the server's
+            // ambient identity (which would 500/leak).
+            bucketInput.value = '';
             bucketsBox.innerHTML = '';
             bucketsRow.style.display = 'none';
+            // The heatmap was built from the now-removed identity's bucket; wipe
+            // it so stale results don't linger after the credentials are gone.
+            resetBrowsePane();
             setStatus('Credentials cleared', null);
         });
 
@@ -581,16 +598,20 @@
         // re-run the current search so results reflect the new credentials.
         window.addEventListener('dial9:credentials-changed', () => {
             refresh();
-            if (autoSearched) reRunCurrentSearch();
+            // Only re-run when credentials are now present. This event also fires
+            // on Clear, where re-running would query the last-selected bucket with
+            // no credentials (the server's ambient identity) and fail.
+            if (autoSearched && Dial9Creds.has()) reRunCurrentSearch();
         });
 
         refresh();
 
-        // Returning user: credentials already in sessionStorage. Show the panel
-        // and re-list their buckets so they can pick one (the stored bucket, if
-        // any, belongs to a different identity and isn't trusted here).
+        // Returning user: credentials already in sessionStorage. Keep the panel
+        // closed (the green button signals creds are active) but re-list their
+        // buckets in the background so the picker is ready when they open it
+        // (the stored bucket, if any, belongs to a different identity and isn't
+        // trusted here).
         if (Dial9Creds.has()) {
-            togglePanel(true);
             loadBuckets();
         }
     }
@@ -1276,6 +1297,23 @@
     }
 
     // Restore the full data extent (no-op if not currently zoomed).
+    // Wipe the browse pane back to its initial empty state. Used when
+    // credentials are cleared: the heatmap belongs to the now-removed identity's
+    // bucket, so it must not linger.
+    function resetBrowsePane() {
+        heatmapSegments = [];
+        heatmapRows = [];
+        heatmapDomain = null;
+        heatmapFullDomain = null;
+        heatmapCols = [];
+        heatmapColMax = 0;
+        setHeatmapSelection(null);
+        heatmapView.style.display = 'none';
+        browseStatus.style.display = '';
+        browseStatus.className = 'status';
+        browseStatus.textContent = 'Select a time range and click Search to find traces.';
+    }
+
     function resetHeatmapZoom() {
         if (!heatmapFullDomain) return;
         const { tMin, tMax } = heatmapFullDomain;

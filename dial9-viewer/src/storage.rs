@@ -205,13 +205,17 @@ impl StorageBackend for S3Backend {
         &self,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, StorageError>> + Send + '_>> {
         Box::pin(async move {
+            const MAX_BUCKETS: usize = 200;
             let mut pages = self.client.list_buckets().into_paginator().send();
             let mut names = Vec::new();
-            while let Some(page) = pages.next().await {
+            'pages: while let Some(page) = pages.next().await {
                 let page = page.map_err(|e| classify_s3_error(&e))?;
                 for b in page.buckets() {
                     if let Some(name) = b.name() {
                         names.push(name.to_string());
+                    }
+                    if names.len() >= MAX_BUCKETS {
+                        break 'pages;
                     }
                 }
             }
