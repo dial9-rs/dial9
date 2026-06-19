@@ -436,6 +436,112 @@
                 background: #333;
                 color: #fff;
             }
+            /* Same k/v + copy look as the span metadata, reused for the
+               pinned Event detail. Wider panel, so values wrap freely. */
+            #stack-sidebar .sidebar-body .kv-row {
+                display: flex;
+                align-items: baseline;
+                gap: 4px;
+                margin-top: 3px;
+                line-height: 1.4;
+            }
+            #stack-sidebar .sidebar-body .kv-key {
+                color: #888;
+                flex-shrink: 0;
+            }
+            #stack-sidebar .sidebar-body .kv-val {
+                color: #ccc;
+                flex: 1;
+                min-width: 0;
+                word-break: break-word;
+            }
+            #stack-sidebar .sidebar-body .kv-copy,
+            #stack-sidebar .sidebar-body .kv-corr {
+                background: none;
+                border: 1px solid #555;
+                color: #aaa;
+                font-size: 0.8em;
+                padding: 0 3px;
+                cursor: pointer;
+                border-radius: 2px;
+                flex-shrink: 0;
+            }
+            #stack-sidebar .sidebar-body .kv-corr {
+                border-color: #6c63ff;
+                color: #b9b4ff;
+            }
+            #stack-sidebar .sidebar-body .kv-copy:hover,
+            #stack-sidebar .sidebar-body .kv-corr:hover {
+                background: #333;
+                color: #fff;
+            }
+            /* Related tab: sectioned, clickable rows that navigate the view. */
+            #stack-sidebar .sidebar-body .related-section {
+                color: #6c63ff;
+                font-weight: 600;
+                margin: 12px 0 4px;
+                font-size: 0.95em;
+                cursor: pointer;
+                user-select: none;
+            }
+            #stack-sidebar .sidebar-body .related-loadmore {
+                color: #6c63ff;
+                cursor: pointer;
+                font-size: 0.85em;
+                padding: 2px 0;
+            }
+            #stack-sidebar .sidebar-body .related-loadmore:hover {
+                text-decoration: underline;
+            }
+            #stack-sidebar .sidebar-body .related-section:first-child {
+                margin-top: 0;
+            }
+            #stack-sidebar .sidebar-body .related-row {
+                display: flex;
+                align-items: baseline;
+                gap: 6px;
+                padding: 3px 6px;
+                margin: 0 -6px;
+                border-radius: 3px;
+                cursor: pointer;
+                white-space: nowrap;
+                overflow: hidden;
+                text-overflow: ellipsis;
+            }
+            #stack-sidebar .sidebar-body .related-row:hover {
+                background: #262640;
+            }
+            #stack-sidebar .sidebar-body .related-row .r-name {
+                color: #ccc;
+                overflow: hidden;
+                text-overflow: ellipsis;
+            }
+            #stack-sidebar .sidebar-body .related-row .r-time,
+            #stack-sidebar .sidebar-body .related-row .r-delta {
+                color: #888;
+                flex-shrink: 0;
+                margin-left: auto;
+                font-size: 0.85em;
+            }
+            /* The selected event itself: an anchor, not a navigable target. */
+            #stack-sidebar .sidebar-body .related-row.r-self {
+                cursor: default;
+                border-left: 2px solid #6c63ff;
+                background: #1e1e38;
+            }
+            #stack-sidebar .sidebar-body .related-row.r-self:hover {
+                background: #1e1e38;
+            }
+            #stack-sidebar .sidebar-body .related-row.r-self .r-name {
+                color: #b9b4ff;
+            }
+            #stack-sidebar .sidebar-body .related-empty,
+            #stack-sidebar .sidebar-body .related-more {
+                color: #777;
+                font-style: italic;
+                padding: 2px 0;
+                font-size: 0.85em;
+            }
             #span-panel canvas {
                 width: 100%;
                 height: 100%;
@@ -766,6 +872,7 @@
                 <div class="sidebar-tabs" id="sidebar-tabs" style="display:none">
                     <span class="tab" id="tab-poll-detail" data-tab="poll-detail" style="display:none">Poll Detail</span>
                     <span class="tab" id="tab-event" data-tab="event" style="display:none">Event</span>
+                    <span class="tab" id="tab-related" data-tab="related" style="display:none">Related</span>
                     <span class="tab" id="tab-flamegraph" data-tab="flamegraph">Flamegraph</span>
                     <span class="tab" id="tab-blocking" data-tab="blocking">Blocking Calls</span>
                     <span class="tab" id="tab-heap" data-tab="heap" style="display:none">Heap</span>
@@ -1038,6 +1145,18 @@
                 if (useAbsoluteTime) return fmtWallClock(ns);
                 return fmtDuration(ns - minTs);
             }
+            // Signed offset from the selected event, for Related-tab rows.
+            function fmtDelta(ns) {
+                if (ns === 0) return "0";
+                const sign = ns < 0 ? "-" : "+";
+                const v = Math.abs(ns);
+                let s;
+                if (v >= 1e9) s = (v / 1e9).toFixed(2) + "s";
+                else if (v >= 1e6) s = (v / 1e6).toFixed(2) + "ms";
+                else if (v >= 1e3) s = (v / 1e3).toFixed(1) + "µs";
+                else s = v.toFixed(0) + "ns";
+                return sign + s;
+            }
             // View window in nanoseconds
             let viewStart = 0,
                 viewEnd = 0;
@@ -1057,6 +1176,22 @@
             // draws a labeled vertical marker across all lanes and, if the
             // event ran inside a poll, selects that task.
             let selectedEvent = null;
+            // The single event whose detail is pinned, for the "Related" tab.
+            // Null for cluster pins (Related is single-event only).
+            let selectedEventRef = null;
+            // Active field correlation for the Related tab: {key, val} set when a
+            // field value is clicked in the Event tab; null hides the bucket.
+            let correlateField = null;
+            // Related-tab section title -> collapsed bool. A view preference that
+            // persists across selections; cleared only on trace reset.
+            let relatedCollapsed = {};
+            // Related-tab section title -> {before, after}: extra rows revealed past
+            // the initial window via "load more". Position-specific, so reset per
+            // selection.
+            let relatedExpand = {};
+            // Flat list backing the Related tab rows: [{kind:'span'|'event', ref}]
+            // indexed by data-idx, so row clicks resolve to objects without re-filtering.
+            let relatedItems = [];
             // Timestamp of the custom event currently hovered, for a transient
             // guide line across the lanes. Drawn on the crosshair overlay.
             let hoverEventTs = null;
@@ -1214,6 +1349,11 @@
             function resetTraceState({ clearUrlRange } = {}) {
                 selectedTaskId = null;
                 selectedEvent = null;
+                selectedEventRef = null;
+                correlateField = null;
+                relatedCollapsed = {};
+                relatedExpand = {};
+                relatedItems = [];
                 hoveredWakerTaskId = null;
                 hideStackPopup();
                 taskDetailPanel.style.display = "none";
@@ -2972,6 +3112,285 @@
                 return html;
             }
 
+            // One styled k/v row with a copy button — same visual language as
+            // the span metadata panel. `copyVal` defaults to the displayed val.
+            function kvRow(key, val, copyVal = val) {
+                return `<div class="kv-row"><span class="kv-key">${esc(key)}:</span>` +
+                    `<span class="kv-val" title="${esc(val)}">${esc(val)}</span>` +
+                    `<button class="kv-copy" data-val="${esc(copyVal)}">⎘</button></div>`;
+            }
+
+            // Like kvRow, plus a "↔" button that opens the Related tab filtered to
+            // other events sharing this field value. `corrVal` is the raw value to
+            // match on (the displayed `val` may be formatted).
+            function kvRowCorrelate(key, val, corrVal) {
+                return `<div class="kv-row"><span class="kv-key">${esc(key)}:</span>` +
+                    `<span class="kv-val" title="${esc(val)}">${esc(val)}</span>` +
+                    `<button class="kv-corr" data-corr-key="${esc(key)}" data-corr-val="${esc(corrVal)}" ` +
+                    `title="Find events with ${esc(key)}=${esc(corrVal)}">↔</button>` +
+                    `<button class="kv-copy" data-val="${esc(val)}">⎘</button></div>`;
+            }
+
+            // Rich detail HTML for the pinned Event sidebar — kv-rows with copy
+            // buttons, unified with the span metadata look. The event name lives
+            // in the sidebar title, so it is not repeated here.
+            function eventDetailHtml(events, taskId) {
+                let html = "";
+                if (events.length === 1) {
+                    const ev = events[0];
+                    for (const [k, v] of Object.entries(ev.fields || {})) {
+                        const corrVal = String(v);
+                        const display = formatFieldValue(v, ev.units?.[k]);
+                        // Only offer correlation when another event shares the value;
+                        // a value unique to this event leads nowhere.
+                        html += eventsWithField(k, corrVal).length > 1
+                            ? kvRowCorrelate(k, display, corrVal)
+                            : kvRow(k, display);
+                    }
+                    html += kvRow("@", fmtTs(ev.timestamp));
+                } else {
+                    const nameCounts = {};
+                    for (const ev of events) nameCounts[ev.name] = (nameCounts[ev.name] || 0) + 1;
+                    const nameList = Object.entries(nameCounts)
+                        .sort((a, b) => b[1] - a[1])
+                        .slice(0, 5)
+                        .map(([n, c]) => `${n}${c > 1 ? " ×" + c : ""}`)
+                        .join(", ");
+                    const first = events[0];
+                    const last = events[events.length - 1];
+                    html += kvRow("Cluster", `${events.length} events`);
+                    html += kvRow("Types", nameList);
+                    const range = last.timestamp !== first.timestamp
+                        ? `${fmtTs(first.timestamp)} – ${fmtTs(last.timestamp)}`
+                        : fmtTs(first.timestamp);
+                    html += kvRow("@", range);
+                }
+                if (taskId != null) {
+                    const hex = "0x" + taskId.toString(16);
+                    html += kvRow("Task", `${hex} (selected)`, hex);
+                }
+                return html;
+            }
+
+            // Related event buckets show a small window around the selected event,
+            // grown on demand via "load more" (per section, per direction).
+            const RELATED_INITIAL = 5;
+            const RELATED_STEP = 25;
+
+            // Spans whose [start,end] covers ts, outermost first — the enclosing
+            // hierarchy at the event's timestamp (spans nest via parentSpanId).
+            function spansAtTime(ts) {
+                return allSpans
+                    .filter(s => s.start <= ts && s.end >= ts)
+                    .sort((a, b) => (a.depth - b.depth) || (a.start - b.start));
+            }
+
+            // Custom events resolving to the same task, sorted by time (incl. self).
+            function eventsForTask(taskId) {
+                if (taskId == null || !trace || !trace.customEvents) return [];
+                return trace.customEvents
+                    .filter(e => taskForEvent(e) === taskId)
+                    .sort((a, b) => a.timestamp - b.timestamp);
+            }
+
+            // Occurrences of the same event name, sorted by time (incl. self).
+            function eventsOfType(name) {
+                if (!trace || !trace.customEvents) return [];
+                return trace.customEvents
+                    .filter(e => e.name === name)
+                    .sort((a, b) => a.timestamp - b.timestamp);
+            }
+
+            // Custom events whose timestamp falls inside a span, sorted by time.
+            function eventsInSpan(span) {
+                if (!span || !trace || !trace.customEvents) return [];
+                return trace.customEvents
+                    .filter(e => e.timestamp >= span.start && e.timestamp <= span.end)
+                    .sort((a, b) => a.timestamp - b.timestamp);
+            }
+
+            // Custom events sharing a field value, sorted by time.
+            function eventsWithField(key, val) {
+                if (!trace || !trace.customEvents) return [];
+                const target = String(val);
+                return trace.customEvents
+                    .filter(e => e.fields && String(e.fields[key]) === target)
+                    .sort((a, b) => a.timestamp - b.timestamp);
+            }
+
+            // Build the Related tab body for a single event and (re)populate the
+            // `relatedItems` index that row clicks resolve against.
+            function relatedHtml(ev) {
+                relatedItems = [];
+                if (!ev) return `<div class="related-empty">No event selected.</div>`;
+
+                const taskId = taskForEvent(ev);
+                const spans = spansAtTime(ev.timestamp);
+                const innerSpan = spans.length ? spans[spans.length - 1] : null;
+
+                const empty = `<div class="related-empty">none</div>`;
+
+                // Collapsible section: clickable header (caret reflects collapsed
+                // state) plus a body wrapper. `inner` is the section's row HTML;
+                // it is still built when collapsed, just hidden, so relatedItems
+                // indices stay stable across toggles.
+                // `collapseByDefault` applies only until the user toggles the
+                // section: relatedCollapsed holds explicit choices (tri-state —
+                // undefined means "use the default"), so empty sections start
+                // collapsed but a user who opens one keeps it open across renders.
+                const wrap = (title, count, inner, collapseByDefault) => {
+                    const explicit = relatedCollapsed[title];
+                    const collapsed = explicit === undefined ? !!collapseByDefault : explicit;
+                    const caret = collapsed ? "▶" : "▼";
+                    const head = `<div class="related-section" data-rel-toggle="${esc(title)}" data-rel-collapsed="${collapsed ? 1 : 0}">` +
+                        `${caret} ${esc(title)}${count != null ? ` (${count})` : ""}</div>`;
+                    const body = `<div class="related-body"${collapsed ? ' style="display:none"' : ""}>${inner}</div>`;
+                    return head + body;
+                };
+
+                // One event row. The selected event renders as a non-navigable
+                // anchor; everything else registers in relatedItems for click-nav.
+                const eventRow = (e, labelText) => {
+                    const self = e === ev;
+                    const name = labelText != null ? labelText : e.name;
+                    const delta = `<span class="r-delta">${fmtDelta(e.timestamp - ev.timestamp)}</span>`;
+                    if (self) {
+                        return `<div class="related-row r-self">` +
+                            `<span class="r-name">${esc(name)} (this event)</span>${delta}</div>`;
+                    }
+                    const idx = relatedItems.length;
+                    relatedItems.push({ kind: "event", ref: e });
+                    return `<div class="related-row" data-idx="${idx}">` +
+                        `<span class="r-name">${esc(name)}</span>${delta}</div>`;
+                };
+
+                // Clickable "load more" affordance for one end of a section.
+                const loadMore = (title, dir, hidden) => {
+                    const n = Math.min(RELATED_STEP, hidden);
+                    const arrow = dir === "before" ? "↑" : "↓";
+                    const word = dir === "before" ? "earlier" : "later";
+                    return `<div class="related-loadmore" data-rel-section="${esc(title)}" data-rel-dir="${dir}">` +
+                        `${arrow} load ${n} more ${word} (${hidden} hidden)</div>`;
+                };
+
+                // A self-anchored event section: a small window around the selected
+                // event, grown per direction via load-more. `label` derives the row
+                // text per event (defaults to the event name).
+                const eventSection = (title, sorted, label) => {
+                    if (sorted.length === 0) return wrap(title, 0, empty, true);
+                    const n = sorted.length;
+                    const anchorRaw = sorted.indexOf(ev);
+                    const anchorIdx = anchorRaw < 0 ? 0 : anchorRaw;
+                    // Nothing beyond the current event itself -> collapse by default.
+                    const collapseByDefault = anchorRaw >= 0 && n === 1;
+                    const st = relatedExpand[title] || { before: 0, after: 0 };
+                    const beforeShown = Math.min(anchorIdx, RELATED_INITIAL + st.before);
+                    const afterShown = Math.min(n - 1 - anchorIdx, RELATED_INITIAL + st.after);
+                    const start = anchorIdx - beforeShown;
+                    const end = anchorIdx + afterShown + 1;
+                    let inner = "";
+                    if (start > 0) inner += loadMore(title, "before", start);
+                    for (const e of sorted.slice(start, end)) inner += eventRow(e, label ? label(e) : null);
+                    if (n - end > 0) inner += loadMore(title, "after", n - end);
+                    return wrap(title, n, inner, collapseByDefault);
+                };
+
+                let html = "";
+
+                // Field correlation, at the top — but only when the click actually
+                // links this event to others (more than the event itself).
+                if (correlateField) {
+                    const { key, val } = correlateField;
+                    const matches = eventsWithField(key, val);
+                    if (matches.length > 1) {
+                        html += eventSection(`Same ${key}=${val}`, matches);
+                    }
+                }
+
+                // Enclosing spans: outermost first, indented by nesting depth.
+                if (spans.length === 0) {
+                    html += wrap("Enclosing spans", 0, empty, true);
+                } else {
+                    const minDepth = Math.min(...spans.map(s => s.depth));
+                    let inner = "";
+                    for (const s of spans) {
+                        const idx = relatedItems.length;
+                        relatedItems.push({ kind: "span", ref: s.spanId });
+                        const pad = 6 + (s.depth - minDepth) * 12;
+                        const nm = esc(s.spanName || ("span " + s.spanId));
+                        inner += `<div class="related-row" data-idx="${idx}" style="padding-left:${pad}px">` +
+                            `<span class="r-name">${nm}</span><span class="r-time">${fmtTs(s.start)}</span></div>`;
+                    }
+                    html += wrap("Enclosing spans", spans.length, inner);
+                }
+
+                // Same span: events inside the innermost enclosing span.
+                if (innerSpan) {
+                    html += eventSection("Same span", eventsInSpan(innerSpan));
+                }
+
+                // Same task.
+                if (taskId == null) {
+                    html += wrap("Same task", null, `<div class="related-empty">task unresolved</div>`, true);
+                } else {
+                    html += eventSection("Same task", eventsForTask(taskId));
+                }
+
+                // Same type: rows share the name, so label by resolved task instead.
+                html += eventSection("Same type", eventsOfType(ev.name), e => {
+                    const t = taskForEvent(e);
+                    return t != null ? "task 0x" + t.toString(16) : e.name;
+                });
+
+                return html;
+            }
+
+            // Re-render the Related tab in place, preserving scroll position.
+            // Used by collapse toggles and load-more, which both rebuild the body.
+            function rerenderRelated() {
+                if (!selectedEventRef) return;
+                const body = document.getElementById("stack-sidebar-body");
+                const top = body.scrollTop;
+                body.innerHTML = relatedHtml(selectedEventRef);
+                body.scrollTop = top;
+            }
+
+            // Center the timeline view on a timestamp, keeping the current zoom.
+            // Width `d` is preserved: the whole window is slid into range, not
+            // each edge clamped independently — otherwise repeated centering near
+            // a trace edge ratchets the window narrower on every call.
+            function centerViewOn(ts) {
+                const d = viewEnd - viewStart;
+                let start = ts - d * 0.3;
+                if (start + d > maxTs) start = maxTs - d;
+                if (start < minTs) start = minTs;
+                viewStart = start;
+                viewEnd = Math.min(maxTs, start + d);
+            }
+
+            // Navigate to a custom event: re-pin its detail, move the marker, and
+            // center the timeline on it (same selection as clicking its tick).
+            function navigateToEvent(ev) {
+                const taskId = taskForEvent(ev);
+                const poll = pollForEvent(ev, taskId);
+                selectedEvent = { events: [ev], timestamp: ev.timestamp, taskId, name: ev.name, poll, x: null };
+                selectedTaskId = null;
+                selectedSpanId = null;
+                selectedSpanIds = new Set();
+                focusedSpanId = null;
+                centerViewOn(ev.timestamp);
+                showEventDetail({ events: [ev], taskId });
+                renderAll();
+            }
+
+            // Navigate to a span: focus it in the span panel and center the view.
+            function navigateToSpan(spanId) {
+                const s = spansById.get(spanId);
+                focusedSpanId = spanId;
+                if (s) centerViewOn((s.start + s.end) / 2);
+                renderAll();
+            }
+
             // Custom events panel hover tooltip
             document.getElementById("ce-panel-canvas").addEventListener("mousemove", (e) => {
                 const c = document.getElementById("ce-panel-canvas");
@@ -4277,6 +4696,56 @@
 
             document.getElementById("stack-sidebar-close").addEventListener("click", hideStackPopup);
 
+            // Copy button handler for kv values in the sidebar (event detail).
+            // Delegated on the stable container so it survives re-renders.
+            document.getElementById("stack-sidebar-body").addEventListener("click", (e) => {
+                const btn = e.target.closest(".kv-copy");
+                if (btn) {
+                    navigator.clipboard.writeText(btn.dataset.val);
+                    btn.textContent = "✓";
+                    setTimeout(() => { btn.textContent = "⎘"; }, 800);
+                    return;
+                }
+                // Field "↔": correlate by this field value in the Related tab.
+                const corr = e.target.closest(".kv-corr");
+                if (corr) {
+                    correlateField = { key: corr.dataset.corrKey, val: corr.dataset.corrVal };
+                    if (selectedEventRef) {
+                        document.getElementById("stack-sidebar-body").innerHTML = relatedHtml(selectedEventRef);
+                        showSidebarTabs("related");
+                    }
+                    return;
+                }
+                // Related tab: toggle a section's collapsed state.
+                const tog = e.target.closest(".related-section[data-rel-toggle]");
+                if (tog) {
+                    const k = tog.dataset.relToggle;
+                    // Flip the currently-rendered state, so the first click on a
+                    // default-collapsed (empty) section reliably opens it.
+                    relatedCollapsed[k] = tog.dataset.relCollapsed !== "1";
+                    rerenderRelated();
+                    return;
+                }
+                // Related tab: reveal more rows on one end of a section.
+                const more = e.target.closest(".related-loadmore");
+                if (more) {
+                    const k = more.dataset.relSection, d = more.dataset.relDir;
+                    const st = relatedExpand[k] || { before: 0, after: 0 };
+                    st[d] += RELATED_STEP;
+                    relatedExpand[k] = st;
+                    rerenderRelated();
+                    return;
+                }
+                // Related tab: clicking a row navigates to that span/event.
+                const row = e.target.closest(".related-row");
+                if (row) {
+                    const item = relatedItems[Number(row.dataset.idx)];
+                    if (!item) return;
+                    if (item.kind === "span") navigateToSpan(item.ref);
+                    else navigateToEvent(item.ref);
+                }
+            });
+
             // Pin a clicked custom-event (or cluster) into the sidebar so its
             // fields stay visible — the hover tooltip vanishes on mouse-out.
             // `hit` is a cePanelHits entry: { events, taskId, ... }.
@@ -4299,11 +4768,14 @@
                     ? hit.events[0].name
                     : `${hit.events.length} events`;
 
-                let html = ceBodyHtml(hit.events);
-                if (hit.taskId != null) {
-                    html += `<br><span class="label">Task:</span> <span class="value">0x${hit.taskId.toString(16)}</span> <span class="label">(selected)</span>`;
-                }
-                body.innerHTML = html;
+                // Related tab is single-event only; clusters are ambiguous.
+                selectedEventRef = hit.events.length === 1 ? hit.events[0] : null;
+                // A new selection drops any stale field correlation and the
+                // position-specific "load more" expansion counts.
+                correlateField = null;
+                relatedExpand = {};
+
+                body.innerHTML = eventDetailHtml(hit.events, hit.taskId);
                 body.style.display = "";
                 body.style.flexDirection = "";
 
@@ -4394,18 +4866,22 @@
                 tabs.style.display = "flex";
                 const pollDetail = tabs.querySelector("#tab-poll-detail");
                 const event = tabs.querySelector("#tab-event");
+                const related = tabs.querySelector("#tab-related");
                 const flamegraph = tabs.querySelector("#tab-flamegraph");
                 const blocking = tabs.querySelector("#tab-blocking");
                 const heap = tabs.querySelector("#tab-heap");
 
-                // Event detail is standalone — no flamegraph/blocking/heap.
-                if (activeTab === "event") {
+                // Event family (event | related) is standalone — no others.
+                // Related only appears for a single-event selection.
+                if (activeTab === "event" || activeTab === "related") {
                     event.style.display = "";
+                    related.style.display = selectedEventRef ? "" : "none";
                     pollDetail.style.display = "none";
                     flamegraph.style.display = "none";
                     blocking.style.display = "none";
                     heap.style.display = "none";
-                    event.classList.add("active");
+                    event.classList.toggle("active", activeTab === "event");
+                    related.classList.toggle("active", activeTab === "related");
                     pollDetail.classList.remove("active");
                     flamegraph.classList.remove("active");
                     blocking.classList.remove("active");
@@ -4414,6 +4890,8 @@
                 }
                 event.style.display = "none";
                 event.classList.remove("active");
+                related.style.display = "none";
+                related.classList.remove("active");
 
                 if (activeTab === "poll-detail") {
                     pollDetail.style.display = "";
@@ -4438,6 +4916,20 @@
                 blocking.classList.toggle("active", activeTab === "blocking");
                 heap.classList.toggle("active", activeTab === "heap");
             }
+
+            // Event family tabs swap the sidebar-body content between the
+            // event detail and its derived "Related" view.
+            document.getElementById("tab-event").addEventListener("click", () => {
+                if (!selectedEvent) return;
+                document.getElementById("stack-sidebar-body").innerHTML =
+                    eventDetailHtml(selectedEvent.events, selectedEvent.taskId);
+                showSidebarTabs("event");
+            });
+            document.getElementById("tab-related").addEventListener("click", () => {
+                if (!selectedEventRef) return;
+                document.getElementById("stack-sidebar-body").innerHTML = relatedHtml(selectedEventRef);
+                showSidebarTabs("related");
+            });
 
             document.getElementById("tab-flamegraph").addEventListener("click", () => {
                 if (fgActive) return; // already showing
