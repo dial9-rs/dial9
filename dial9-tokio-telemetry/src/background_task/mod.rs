@@ -3652,8 +3652,15 @@ mod triggered_worker_tests {
         seal_mem(&fs, 0, now_epoch());
 
         let receipt = fut.await.unwrap();
-        // The receipt only resolves after the forward deadline.
-        check!(started.elapsed() >= Duration::from_secs(5));
+        // Resolves only after the forward deadline. Production anchors the
+        // deadline to the trigger's wall-clock time (`SystemTime`, see
+        // `ActiveDump::register`), then maps it onto the tokio timer; under
+        // `start_paused` the virtual clock does not advance during the (real)
+        // pickup latency, so the measured elapsed can land a few ms under the
+        // nominal 5s. Allow a small tolerance for that clock-mixing skew — the
+        // point is the dump waited ~the forward window, not that it resolved
+        // immediately or only at shutdown.
+        check!(started.elapsed() >= Duration::from_secs(5) - Duration::from_millis(100));
         check!(receipt.segments_processed == 1);
         check!(captured.lock().unwrap().len() == 1);
 

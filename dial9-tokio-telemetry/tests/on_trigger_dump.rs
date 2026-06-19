@@ -68,6 +68,52 @@ fn wait_for_sealed_segment(trace_dir: &std::path::Path) {
     }
 }
 
+/// Block until the worker has uploaded at least one captured segment to S3 (any
+/// key under `traces/` other than the `traces/dumps/` manifest), driving more
+/// workload each iteration so segments keep sealing. Uploaded objects persist,
+/// so this is race-free; polling the trace dir is not, because the local
+/// segment file is deleted immediately after a successful upload (the worker is
+/// actively consuming while a dump window is open).
+fn wait_for_uploaded_segment(
+    runtime: &tokio::runtime::Runtime,
+    client: &aws_sdk_s3::Client,
+    bucket: &str,
+) {
+    let poll_rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        // Keep producing trace data so segments keep sealing into the ring.
+        run_workload(runtime);
+        let found = poll_rt.block_on(async {
+            client
+                .list_objects_v2()
+                .bucket(bucket)
+                .prefix("traces/")
+                .send()
+                .await
+                .map(|r| {
+                    r.contents
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter_map(|o| o.key)
+                        .any(|k| !k.starts_with("traces/dumps/"))
+                })
+                .unwrap_or(false)
+        });
+        if found {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no segment uploaded within 30s; dump did not capture mid-window"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 /// The headline behavior: nothing uploads until the dump, then the dump
 /// uploads the buffered segments, tags them with `dump-id`, and writes a
 /// manifest listing exactly the produced keys.
@@ -247,10 +293,11 @@ fn lookforward_dump_captures_post_trigger_segments() {
         .dump_time_range(Duration::from_secs(1), Duration::from_secs(3600))
         .into_future();
 
-    run_workload(&runtime);
-    // Confirm a segment actually sealed while the dump was open, so capture is
-    // a real mid-window seal rather than a shutdown-only truncation.
-    wait_for_sealed_segment(trace_dir.path());
+    // Confirm a segment was actually captured + uploaded while the dump was
+    // open (a real mid-window capture, not a shutdown-only truncation). The
+    // local `.bin` is deleted right after upload, so polling the trace dir
+    // races the worker; the uploaded S3 object persists, so poll that instead.
+    wait_for_uploaded_segment(&runtime, &client, "test-bucket");
 
     // Resolve via shutdown rather than the wall-clock deadline.
     drop(runtime);
@@ -306,10 +353,10 @@ fn lookforward_dump_resolves_after_deadline() {
     let trigger = guard.handle().dump_trigger().expect("trigger wired");
 
     let lookforward = Duration::from_millis(300);
+    let triggered = Instant::now();
     let fut = trigger
         .dump_time_range(Duration::from_secs(1), lookforward)
         .into_future();
-    let triggered = Instant::now();
 
     assertion_runtime()
         .block_on(fut)
