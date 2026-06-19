@@ -275,6 +275,12 @@ fn attach_runtime(
     // needs the TL handle to be set. Harmless for multi_thread runtimes.
     set_tl_handle(Dial9Handle::enabled(shared.clone(), control_tx.clone()));
 
+    // Same for the task-dump config: on_thread_start skips this thread.
+    #[cfg(feature = "taskdump")]
+    if let Some(config) = taskdump_config {
+        crate::task_dumped::set_taskdump_config(config);
+    }
+
     // Pre-reserve a contiguous block of worker IDs and set metrics atomically.
     let metrics = runtime.handle().metrics();
     let num_workers = metrics.num_workers() as u64;

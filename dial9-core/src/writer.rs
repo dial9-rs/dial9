@@ -866,11 +866,9 @@ mod tests {
     use std::io::Read;
     use tempfile::TempDir;
 
-    /// A minimal data event for exercising the writer. Distinct from the bus's
+    /// A minimal data event for exercising the writer, distinct from the bus's
     /// own framing events (`ClockSyncEvent`/`SegmentMetadataEvent`) so the
-    /// decode helper can tell real events from the per-segment framing. The
-    /// runtime event structs (`WorkerParkEvent`, ...) live in
-    /// dial9-tokio-telemetry, so the writer's own tests use this stand-in.
+    /// decode helper can tell real events from the per-segment framing.
     #[derive(TraceEvent)]
     #[traceevent(wire_slot)]
     struct TestEvent {
@@ -879,9 +877,7 @@ mod tests {
         value: u64,
     }
 
-    /// Decoded view of a trace, without the analysis-side `Dial9Event`
-    /// (which lives in dial9-tokio-telemetry). Events are classified by frame
-    /// name via the registry.
+    /// Decoded view of a trace, classified by frame name via the registry.
     #[derive(Debug)]
     enum Decoded {
         ClockSync {

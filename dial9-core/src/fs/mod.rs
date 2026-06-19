@@ -305,15 +305,12 @@ impl Fs {
         matches!(self, Fs::Disk(_))
     }
 
-    /// Wait until the memory ring may have new work. Runtime-agnostic — awaits
-    /// an `event-listener` notification, never a tokio primitive — so the
-    /// worker composes it with its own cancellation token and the disk poll
-    /// timer. Lost-wakeup safe: returns immediately if work is already pending
-    /// or the writer is done.
+    /// Wait until the memory ring may have new work, returning immediately if
+    /// work is already pending or the writer is done.
     ///
-    /// Only meaningful for the memory backend; the disk backend returns
-    /// immediately (the worker polls it on an interval instead, gated by
-    /// [`is_disk`](Self::is_disk)).
+    /// Only meaningful for the memory backend. The disk backend has no push
+    /// notification and returns immediately; drive it by polling on an interval
+    /// (gated by [`is_disk`](Self::is_disk)).
     pub async fn wait_for_wakeup(&self) {
         match self {
             Fs::Disk(_) => {}
