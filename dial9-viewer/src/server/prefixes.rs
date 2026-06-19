@@ -4,6 +4,8 @@ use axum::http::StatusCode;
 use serde::Deserialize;
 
 use crate::server::AppState;
+use crate::server::credentials::MaybeCreds;
+use crate::server::error::storage_error_response;
 
 #[derive(Deserialize)]
 pub struct PrefixParams {
@@ -13,8 +15,11 @@ pub struct PrefixParams {
 
 pub async fn list_prefixes(
     State(state): State<AppState>,
+    creds: MaybeCreds,
     Query(params): Query<PrefixParams>,
 ) -> Result<Json<Vec<String>>, (StatusCode, String)> {
+    let backend = state.resolve(creds)?;
+
     let bucket = params
         .bucket
         .or(state.default_bucket.clone())
@@ -22,11 +27,10 @@ pub async fn list_prefixes(
 
     let prefix = params.prefix.unwrap_or_default();
 
-    let prefixes = state
-        .backend
+    let prefixes = backend
         .list_prefixes(&bucket, &prefix)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(storage_error_response)?;
 
     Ok(Json(prefixes))
 }
