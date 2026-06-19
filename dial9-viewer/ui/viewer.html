@@ -6,6 +6,19 @@
         <title>dial9 Trace Viewer</title>
         <link rel="stylesheet" href="flamegraph.css" />
         <style>
+            /* Stacking layers (low -> high). Only the tiers that must agree on
+               who paints over whom live here; the rest of the app's z-indexes
+               are local and self-contained. */
+            :root {
+                --z-overlay: 10;  /* crosshair + selected-event dashed marker (full-main-area canvas) */
+                --z-legend: 20;   /* legend / filter bars — must stay above the marker */
+            }
+            /* Lift the legend bars onto the --z-legend layer. position:relative is
+               required: a static element can't out-stack the positioned overlay. */
+            #span-legend, #ce-legend {
+                position: relative;
+                z-index: var(--z-legend);
+            }
             * {
                 margin: 0;
                 padding: 0;
@@ -674,7 +687,7 @@
             <div id="viewer-body">
             <div id="main-area" tabindex="0" role="application" aria-label="Trace timeline">
                 <div id="selection-overlay"></div>
-                <canvas id="crosshair-overlay" style="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:10"></canvas>
+                <canvas id="crosshair-overlay" style="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:var(--z-overlay)"></canvas>
                 <div id="timeline-header">
                     <canvas id="timeline-canvas"></canvas>
                     <div id="toast-container" style="position:absolute;top:0;bottom:0;left:0;display:flex;align-items:center;gap:8px;z-index:60;pointer-events:none"></div>
