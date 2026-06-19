@@ -18,6 +18,7 @@ event-listener = "5"
 libc = { workspace = true }
 metrique = { version = "0.1.23", features = ["local-format"] }
 metrique-timesource = "0.1"
+metrique-writer = "0.1"
 shuttle = { version = "0.9.1", optional = true }
 tracing = "0.1.44"
 

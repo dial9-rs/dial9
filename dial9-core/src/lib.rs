@@ -4,6 +4,9 @@ pub mod buffer;
 pub mod clock;
 /// Central ring buffer of encoded event batches awaiting write.
 pub mod collector;
+/// Flush-thread loop.
+#[doc(hidden)]
+pub mod flush_loop;
 /// Wire-format events emitted by the bus itself.
 pub mod format;
 /// Writer↔worker filesystem/channel abstraction for trace segments.

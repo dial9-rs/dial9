@@ -1,5 +1,5 @@
 mod builder;
-mod flush_loop;
+pub(crate) use dial9_core::flush_loop;
 mod guard;
 mod handle;
 #[cfg(all(test, shuttle))]
@@ -24,8 +24,6 @@ pub use handle::{Dial9TokioHandle, spawn};
 
 mod tokio_hooks;
 pub use tokio_hooks::TokioHooks;
-
-pub(crate) use flush_loop::FlushStats;
 
 // Re-exports for internal test access
 #[cfg(test)]
