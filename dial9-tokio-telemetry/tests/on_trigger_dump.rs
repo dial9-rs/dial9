@@ -79,7 +79,17 @@ fn nothing_uploads_until_dump_then_manifest_indexes_it() {
     std::fs::create_dir(s3_root.path().join("test-bucket")).unwrap();
 
     let client = fake_s3_client(s3_root.path());
-    let writer = DiskWriter::new(&trace_path, 512, 50 * 1024).unwrap();
+    // Small size threshold + short rotation period so the tiny workload seals a
+    // segment within a few hundred ms; the default 60s rotation period could
+    // leave the workload's bytes in an unsealed active segment, capturing zero
+    // segments on slow CI.
+    let writer = DiskWriter::builder()
+        .base_path(&trace_path)
+        .max_file_size(64)
+        .max_total_size(50 * 1024)
+        .rotation_period(Duration::from_millis(200))
+        .build()
+        .unwrap();
 
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.worker_threads(1).enable_all();
@@ -320,7 +330,17 @@ fn off_s3_pipeline_dumps_without_manifest() {
     let trace_dir = tempfile::tempdir().unwrap();
     let trace_path = trace_dir.path().join("trace.bin");
 
-    let writer = DiskWriter::new(&trace_path, 512, 50 * 1024).unwrap();
+    // Small size threshold + short rotation period so the tiny workload seals a
+    // segment within a few hundred ms; the default 60s rotation period could
+    // leave the workload's bytes in an unsealed active segment, capturing zero
+    // segments on slow CI.
+    let writer = DiskWriter::builder()
+        .base_path(&trace_path)
+        .max_file_size(64)
+        .max_total_size(50 * 1024)
+        .rotation_period(Duration::from_millis(200))
+        .build()
+        .unwrap();
 
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.worker_threads(1).enable_all();
