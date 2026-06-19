@@ -205,22 +205,14 @@ impl StorageBackend for S3Backend {
         &self,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, StorageError>> + Send + '_>> {
         Box::pin(async move {
+            let mut pages = self.client.list_buckets().into_paginator().send();
             let mut names = Vec::new();
-            let mut continuation: Option<String> = None;
-            loop {
-                let mut req = self.client.list_buckets();
-                if let Some(token) = continuation.take() {
-                    req = req.continuation_token(token);
-                }
-                let resp = req.send().await.map_err(|e| classify_s3_error(&e))?;
-                for b in resp.buckets() {
+            while let Some(page) = pages.next().await {
+                let page = page.map_err(|e| classify_s3_error(&e))?;
+                for b in page.buckets() {
                     if let Some(name) = b.name() {
                         names.push(name.to_string());
                     }
-                }
-                match resp.continuation_token() {
-                    Some(token) if !token.is_empty() => continuation = Some(token.to_string()),
-                    _ => break,
                 }
             }
             names.sort();
@@ -237,22 +229,18 @@ impl StorageBackend for S3Backend {
         let prefix = prefix.to_string();
         Box::pin(async move {
             const MAX_RESULTS: usize = 1000;
+            let mut pages = self
+                .client
+                .list_objects_v2()
+                .bucket(&bucket)
+                .prefix(&prefix)
+                .into_paginator()
+                .send();
+
             let mut objects = Vec::new();
-            let mut continuation: Option<String> = None;
-
-            loop {
-                let mut req = self
-                    .client
-                    .list_objects_v2()
-                    .bucket(&bucket)
-                    .prefix(&prefix);
-                if let Some(token) = continuation.take() {
-                    req = req.continuation_token(token);
-                }
-
-                let resp = req.send().await.map_err(|e| classify_s3_error(&e))?;
-
-                for obj in resp.contents() {
+            'pages: while let Some(page) = pages.next().await {
+                let page = page.map_err(|e| classify_s3_error(&e))?;
+                for obj in page.contents() {
                     if let Some(key) = obj.key() {
                         objects.push(ObjectInfo {
                             key: key.to_string(),
@@ -260,17 +248,9 @@ impl StorageBackend for S3Backend {
                             last_modified: obj.last_modified().map(|t| t.to_string()),
                         });
                     }
-                }
-
-                if objects.len() >= MAX_RESULTS {
-                    objects.truncate(MAX_RESULTS);
-                    break;
-                }
-
-                if resp.is_truncated() == Some(true) {
-                    continuation = resp.next_continuation_token().map(|s| s.to_string());
-                } else {
-                    break;
+                    if objects.len() >= MAX_RESULTS {
+                        break 'pages;
+                    }
                 }
             }
 
@@ -286,21 +266,28 @@ impl StorageBackend for S3Backend {
         let bucket = bucket.to_string();
         let prefix = prefix.to_string();
         Box::pin(async move {
-            let resp = self
+            // Common prefixes count against MaxKeys per response, so a directory
+            // with more than one page of children must be paginated or it would
+            // silently truncate.
+            let mut pages = self
                 .client
                 .list_objects_v2()
                 .bucket(&bucket)
                 .prefix(&prefix)
                 .delimiter("/")
-                .send()
-                .await
-                .map_err(|e| classify_s3_error(&e))?;
+                .into_paginator()
+                .send();
 
-            Ok(resp
-                .common_prefixes()
-                .iter()
-                .filter_map(|cp| cp.prefix().map(|s| s.to_string()))
-                .collect())
+            let mut prefixes = Vec::new();
+            while let Some(page) = pages.next().await {
+                let page = page.map_err(|e| classify_s3_error(&e))?;
+                for cp in page.common_prefixes() {
+                    if let Some(p) = cp.prefix() {
+                        prefixes.push(p.to_string());
+                    }
+                }
+            }
+            Ok(prefixes)
         })
     }
 
@@ -564,6 +551,83 @@ fn collect_files(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Build an `S3Backend` whose HTTP layer replays the given canned responses
+    /// in order, so multi-page pagination can be tested without a live S3 (the
+    /// `s3s-fs` fake never emits a continuation token, so it can't drive page 2).
+    fn replay_backend(
+        responses: Vec<&str>,
+    ) -> (
+        S3Backend,
+        aws_smithy_http_client::test_util::StaticReplayClient,
+    ) {
+        use aws_smithy_http_client::test_util::{ReplayEvent, StaticReplayClient};
+        use aws_smithy_types::body::SdkBody;
+
+        let events = responses
+            .into_iter()
+            .map(|body| {
+                ReplayEvent::new(
+                    http::Request::builder()
+                        .uri("https://s3.amazonaws.com/")
+                        .body(SdkBody::empty())
+                        .unwrap(),
+                    http::Response::builder()
+                        .status(200)
+                        .body(SdkBody::from(body))
+                        .unwrap(),
+                )
+            })
+            .collect();
+        let http_client = StaticReplayClient::new(events);
+        let cfg = aws_sdk_s3::config::Builder::new()
+            .behavior_version(aws_sdk_s3::config::BehaviorVersion::latest())
+            .credentials_provider(aws_sdk_s3::config::Credentials::new(
+                "test", "test", None, None, "test",
+            ))
+            .region(aws_sdk_s3::config::Region::new("us-east-1"))
+            .http_client(http_client.clone())
+            .build();
+        (
+            S3Backend::from_client(aws_sdk_s3::Client::from_conf(cfg)),
+            http_client,
+        )
+    }
+
+    #[tokio::test]
+    async fn list_prefixes_follows_continuation_token() {
+        // Page 1 is truncated and carries a NextContinuationToken; page 2 is the
+        // final page. The fix must follow the token and merge both pages — the
+        // old single-shot code would drop `c/`.
+        let page1 = r#"<?xml version="1.0" encoding="UTF-8"?>
+            <ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+              <Name>bucket</Name><Prefix></Prefix><Delimiter>/</Delimiter>
+              <IsTruncated>true</IsTruncated>
+              <NextContinuationToken>TOKEN_A</NextContinuationToken>
+              <CommonPrefixes><Prefix>a/</Prefix></CommonPrefixes>
+              <CommonPrefixes><Prefix>b/</Prefix></CommonPrefixes>
+            </ListBucketResult>"#;
+        let page2 = r#"<?xml version="1.0" encoding="UTF-8"?>
+            <ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+              <Name>bucket</Name><Prefix></Prefix><Delimiter>/</Delimiter>
+              <IsTruncated>false</IsTruncated>
+              <CommonPrefixes><Prefix>c/</Prefix></CommonPrefixes>
+            </ListBucketResult>"#;
+
+        let (backend, http_client) = replay_backend(vec![page1, page2]);
+        let prefixes = backend.list_prefixes("bucket", "").await.unwrap();
+        assert_eq!(prefixes, vec!["a/", "b/", "c/"]);
+
+        // Two HTTP calls were made, and the second carried the continuation token
+        // from the first — proving pagination actually happened.
+        let requests = http_client.actual_requests().collect::<Vec<_>>();
+        assert_eq!(requests.len(), 2, "expected two list calls");
+        assert!(
+            requests[1].uri().contains("continuation-token=TOKEN_A"),
+            "second request must carry the continuation token, got: {}",
+            requests[1].uri()
+        );
+    }
 
     #[test]
     fn collect_files_caps_entries_visited() {
