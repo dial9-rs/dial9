@@ -4782,6 +4782,7 @@
                 showSidebarTabs("event");
                 const wasHidden = sidebar.style.display !== "flex";
                 sidebar.style.display = "flex";
+                if (wasHidden) narrowSidebarForEvent();
                 if (wasHidden && trace) requestAnimationFrame(renderAll);
             }
 
@@ -5706,6 +5707,13 @@
             function widenSidebarForFlamegraph() {
                 const sidebar = document.getElementById("stack-sidebar");
                 sidebar.style.width = Math.round(window.innerWidth * FLAMEGRAPH_DEFAULT_VW) + "px";
+            }
+
+            // Event detail is compact (k/v rows); open it narrow rather than the
+            // ~640px CSS default. Only on a fresh open, so manual resizes persist.
+            const EVENT_DEFAULT_WIDTH = 350;
+            function narrowSidebarForEvent() {
+                document.getElementById("stack-sidebar").style.width = EVENT_DEFAULT_WIDTH + "px";
             }
 
             // Used by `showTaskDumpStack`, `showIdleTimeFlamegraph`, and any
