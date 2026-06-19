@@ -6,6 +6,19 @@
         <title>dial9 Trace Viewer</title>
         <link rel="stylesheet" href="flamegraph.css" />
         <style>
+            /* Stacking layers (low -> high). Only the tiers that must agree on
+               who paints over whom live here; the rest of the app's z-indexes
+               are local and self-contained. */
+            :root {
+                --z-overlay: 10;  /* crosshair + selected-event dashed marker (full-main-area canvas) */
+                --z-legend: 20;   /* legend / filter bars — must stay above the marker */
+            }
+            /* Lift the legend bars onto the --z-legend layer. position:relative is
+               required: a static element can't out-stack the positioned overlay. */
+            #span-legend, #ce-legend {
+                position: relative;
+                z-index: var(--z-legend);
+            }
             * {
                 margin: 0;
                 padding: 0;
@@ -423,6 +436,112 @@
                 background: #333;
                 color: #fff;
             }
+            /* Same k/v + copy look as the span metadata, reused for the
+               pinned Event detail. Wider panel, so values wrap freely. */
+            #stack-sidebar .sidebar-body .kv-row {
+                display: flex;
+                align-items: baseline;
+                gap: 4px;
+                margin-top: 3px;
+                line-height: 1.4;
+            }
+            #stack-sidebar .sidebar-body .kv-key {
+                color: #888;
+                flex-shrink: 0;
+            }
+            #stack-sidebar .sidebar-body .kv-val {
+                color: #ccc;
+                flex: 1;
+                min-width: 0;
+                word-break: break-word;
+            }
+            #stack-sidebar .sidebar-body .kv-copy,
+            #stack-sidebar .sidebar-body .kv-corr {
+                background: none;
+                border: 1px solid #555;
+                color: #aaa;
+                font-size: 0.8em;
+                padding: 0 3px;
+                cursor: pointer;
+                border-radius: 2px;
+                flex-shrink: 0;
+            }
+            #stack-sidebar .sidebar-body .kv-corr {
+                border-color: #6c63ff;
+                color: #b9b4ff;
+            }
+            #stack-sidebar .sidebar-body .kv-copy:hover,
+            #stack-sidebar .sidebar-body .kv-corr:hover {
+                background: #333;
+                color: #fff;
+            }
+            /* Related tab: sectioned, clickable rows that navigate the view. */
+            #stack-sidebar .sidebar-body .related-section {
+                color: #6c63ff;
+                font-weight: 600;
+                margin: 12px 0 4px;
+                font-size: 0.95em;
+                cursor: pointer;
+                user-select: none;
+            }
+            #stack-sidebar .sidebar-body .related-loadmore {
+                color: #6c63ff;
+                cursor: pointer;
+                font-size: 0.85em;
+                padding: 2px 0;
+            }
+            #stack-sidebar .sidebar-body .related-loadmore:hover {
+                text-decoration: underline;
+            }
+            #stack-sidebar .sidebar-body .related-section:first-child {
+                margin-top: 0;
+            }
+            #stack-sidebar .sidebar-body .related-row {
+                display: flex;
+                align-items: baseline;
+                gap: 6px;
+                padding: 3px 6px;
+                margin: 0 -6px;
+                border-radius: 3px;
+                cursor: pointer;
+                white-space: nowrap;
+                overflow: hidden;
+                text-overflow: ellipsis;
+            }
+            #stack-sidebar .sidebar-body .related-row:hover {
+                background: #262640;
+            }
+            #stack-sidebar .sidebar-body .related-row .r-name {
+                color: #ccc;
+                overflow: hidden;
+                text-overflow: ellipsis;
+            }
+            #stack-sidebar .sidebar-body .related-row .r-time,
+            #stack-sidebar .sidebar-body .related-row .r-delta {
+                color: #888;
+                flex-shrink: 0;
+                margin-left: auto;
+                font-size: 0.85em;
+            }
+            /* The selected event itself: an anchor, not a navigable target. */
+            #stack-sidebar .sidebar-body .related-row.r-self {
+                cursor: default;
+                border-left: 2px solid #6c63ff;
+                background: #1e1e38;
+            }
+            #stack-sidebar .sidebar-body .related-row.r-self:hover {
+                background: #1e1e38;
+            }
+            #stack-sidebar .sidebar-body .related-row.r-self .r-name {
+                color: #b9b4ff;
+            }
+            #stack-sidebar .sidebar-body .related-empty,
+            #stack-sidebar .sidebar-body .related-more {
+                color: #777;
+                font-style: italic;
+                padding: 2px 0;
+                font-size: 0.85em;
+            }
             #span-panel canvas {
                 width: 100%;
                 height: 100%;
@@ -674,7 +793,7 @@
             <div id="viewer-body">
             <div id="main-area" tabindex="0" role="application" aria-label="Trace timeline">
                 <div id="selection-overlay"></div>
-                <canvas id="crosshair-overlay" style="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:10"></canvas>
+                <canvas id="crosshair-overlay" style="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:var(--z-overlay)"></canvas>
                 <div id="timeline-header">
                     <canvas id="timeline-canvas"></canvas>
                     <div id="toast-container" style="position:absolute;top:0;bottom:0;left:0;display:flex;align-items:center;gap:8px;z-index:60;pointer-events:none"></div>
@@ -752,6 +871,8 @@
                 </div>
                 <div class="sidebar-tabs" id="sidebar-tabs" style="display:none">
                     <span class="tab" id="tab-poll-detail" data-tab="poll-detail" style="display:none">Poll Detail</span>
+                    <span class="tab" id="tab-event" data-tab="event" style="display:none">Event</span>
+                    <span class="tab" id="tab-related" data-tab="related" style="display:none">Related</span>
                     <span class="tab" id="tab-flamegraph" data-tab="flamegraph">Flamegraph</span>
                     <span class="tab" id="tab-blocking" data-tab="blocking">Blocking Calls</span>
                     <span class="tab" id="tab-heap" data-tab="heap" style="display:none">Heap</span>
@@ -1025,6 +1146,18 @@
                 if (useAbsoluteTime) return fmtWallClock(ns);
                 return fmtDuration(ns - minTs);
             }
+            // Signed offset from the selected event, for Related-tab rows.
+            function fmtDelta(ns) {
+                if (ns === 0) return "0";
+                const sign = ns < 0 ? "-" : "+";
+                const v = Math.abs(ns);
+                let s;
+                if (v >= 1e9) s = (v / 1e9).toFixed(2) + "s";
+                else if (v >= 1e6) s = (v / 1e6).toFixed(2) + "ms";
+                else if (v >= 1e3) s = (v / 1e3).toFixed(1) + "µs";
+                else s = v.toFixed(0) + "ns";
+                return sign + s;
+            }
             // View window in nanoseconds
             let viewStart = 0,
                 viewEnd = 0;
@@ -1040,6 +1173,29 @@
             let currentPoiIndex = -1;
             // Task selection state
             let selectedTaskId = null;
+            // A clicked custom event: {events, timestamp, taskId, name} —
+            // draws a labeled vertical marker across all lanes and, if the
+            // event ran inside a poll, selects that task.
+            let selectedEvent = null;
+            // The single event whose detail is pinned, for the "Related" tab.
+            // Null for cluster pins (Related is single-event only).
+            let selectedEventRef = null;
+            // Active field correlation for the Related tab: {key, val} set when a
+            // field value is clicked in the Event tab; null hides the bucket.
+            let correlateField = null;
+            // Related-tab section title -> collapsed bool. A view preference that
+            // persists across selections; cleared only on trace reset.
+            let relatedCollapsed = {};
+            // Related-tab section title -> {before, after}: extra rows revealed past
+            // the initial window via "load more". Position-specific, so reset per
+            // selection.
+            let relatedExpand = {};
+            // Flat list backing the Related tab rows: [{kind:'span'|'event', ref}]
+            // indexed by data-idx, so row clicks resolve to objects without re-filtering.
+            let relatedItems = [];
+            // Timestamp of the custom event currently hovered, for a transient
+            // guide line across the lanes. Drawn on the crosshair overlay.
+            let hoverEventTs = null;
             let selectedSpanId = null; // when a span bar is clicked, highlight all polls containing this span
             let selectedSpanIds = new Set(); // includes selected span + parent chain
             // Active task count timeline: [{t, count}]
@@ -1116,6 +1272,17 @@
             const taskDetailPanel = document.getElementById("task-detail");
             const clearRangeBtn = document.getElementById("btn-clear-range");
             const tooltip = document.getElementById("tooltip");
+            // Position the (already-populated, display:block) tooltip near the
+            // cursor, clamped to the viewport on both axes. Flips above the cursor
+            // when it would spill off the bottom. Call after setting innerHTML.
+            function placeTooltip(e, dy = 16) {
+                const tw = tooltip.offsetWidth, th = tooltip.offsetHeight;
+                let tx = Math.min(e.clientX + 12, window.innerWidth - tw - 8);
+                let ty = e.clientY + dy;
+                if (ty + th > window.innerHeight - 8) ty = e.clientY - th - 8;
+                tooltip.style.left = Math.max(8, tx) + "px";
+                tooltip.style.top = Math.max(8, ty) + "px";
+            }
             const timelineCanvas = document.getElementById("timeline-canvas");
             const queueCanvas = document.getElementById("queue-canvas");
             const lanesContainer = document.getElementById("lanes-container");
@@ -1182,6 +1349,12 @@
             /** Clear UI state tied to the current trace so it doesn't leak into the next one. */
             function resetTraceState({ clearUrlRange } = {}) {
                 selectedTaskId = null;
+                selectedEvent = null;
+                selectedEventRef = null;
+                correlateField = null;
+                relatedCollapsed = {};
+                relatedExpand = {};
+                relatedItems = [];
                 hoveredWakerTaskId = null;
                 hideStackPopup();
                 taskDetailPanel.style.display = "none";
@@ -1440,10 +1613,7 @@
                 unmatchedSpans = [];
                 spanMaxDepth = 0;
                 _spanDurCache = null;
-                focusedSpanId = null;
-                selectedSpanId = null;
-                selectedSpanIds = new Set();
-                selectedTaskId = null;
+                clearSpanTaskSelection();
                 if (trace.customEvents && trace.customEvents.length > 0) {
                     const spanResult2 = buildSpanData(trace.customEvents);
                     allSpans = spanResult2.allSpans;
@@ -1465,6 +1635,7 @@
                     _ceColorMap.clear();
                     selectedCENames.clear();
                     cePanelHits = [];
+                    selectedEvent = null;
                     if (trace.customEvents && trace.customEvents.length > 0) {
                         const spanPrefixes = ["SpanEnter:", "SpanExit:"];
                         const spanExact = new Set(["SpanEnterEvent", "SpanExitEvent", "SpanCloseEvent"]);
@@ -1884,6 +2055,76 @@
                 return null;
             }
 
+            // Resolve the task a custom event ran on, or null if it cannot be
+            // determined. Custom events do not carry task/worker context, so we
+            // derive it from the timestamp: find the poll whose [start,end]
+            // covers ev.timestamp. If the event happens to declare a `task_id`
+            // (or `worker_id`) field, use that to pin it down precisely.
+            // Cache resolved task per event object. Event objects are stable
+            // within a trace and replaced wholesale on reload, so the WeakMap
+            // self-invalidates — avoids rescanning all workers per render.
+            const _taskForEventCache = new WeakMap();
+            function taskForEvent(ev) {
+                if (_taskForEventCache.has(ev)) return _taskForEventCache.get(ev);
+                const result = _resolveTaskForEvent(ev);
+                _taskForEventCache.set(ev, result);
+                return result;
+            }
+            function _resolveTaskForEvent(ev) {
+                const f = ev.fields || {};
+                if (f.task_id != null) {
+                    const t = Number(f.task_id);
+                    return Number.isFinite(t) ? t : null;
+                }
+                if (f.worker_id != null) {
+                    const wid = Number(f.worker_id);
+                    const spans = workerSpans[wid];
+                    const poll = spans && findSpanAt(spans.polls, ev.timestamp);
+                    return poll && poll.taskId ? poll.taskId : null;
+                }
+                // No hint: search every worker. Accept only an unambiguous
+                // single match; concurrent polls on different workers -> null.
+                let found = null;
+                for (const w of workerIds) {
+                    const poll = findSpanAt(workerSpans[w].polls, ev.timestamp);
+                    if (poll && poll.taskId) {
+                        if (found != null && found !== poll.taskId) return null;
+                        found = poll.taskId;
+                    }
+                }
+                return found;
+            }
+
+            // Resolve the specific poll a custom event landed in (the single
+            // bar to highlight), or null if it cannot be pinned to one poll.
+            // Returns {workerId, start, end, taskId}.
+            // `preferTask` (optional) pins the search to a known task — e.g. the
+            // task a whole cluster resolved to — overriding the field-derived one.
+            function pollForEvent(ev, preferTask = null) {
+                const f = ev.fields || {};
+                if (f.worker_id != null) {
+                    const wid = Number(f.worker_id);
+                    const spans = workerSpans[wid];
+                    const poll = spans && findSpanAt(spans.polls, ev.timestamp);
+                    return poll && poll.taskId && (preferTask == null || poll.taskId === preferTask)
+                        ? { workerId: wid, start: poll.start, end: poll.end, taskId: poll.taskId }
+                        : null;
+                }
+                const wantTask = preferTask != null
+                    ? preferTask
+                    : (f.task_id != null ? Number(f.task_id) : null);
+                // Search every worker; accept only an unambiguous single match.
+                let found = null;
+                for (const w of workerIds) {
+                    const poll = findSpanAt(workerSpans[w].polls, ev.timestamp);
+                    if (poll && poll.taskId && (wantTask == null || poll.taskId === wantTask)) {
+                        if (found != null && found.taskId !== poll.taskId) return null;
+                        found = { workerId: w, start: poll.start, end: poll.end, taskId: poll.taskId };
+                    }
+                }
+                return found;
+            }
+
             /**
              * Binary search for the first span whose end >= viewStart.
              * Spans must be sorted by start time.
@@ -1943,6 +2184,9 @@
                     selOverlay.style.display = "block";
                     updateSelOverlay();
                 }
+
+                // Redraw overlay lines (mouse crosshair + selected-event marker).
+                renderCrosshair();
             }
 
             function nsToX(ns, drawW) {
@@ -2268,6 +2512,22 @@
                     ctx.stroke();
                     ctx.setLineDash([]);
                 }
+                // Highlight the single poll a clicked custom event landed in,
+                // so the event points at exactly one bar instead of lighting up
+                // every poll of a (possibly busy) task.
+                if (selectedEvent && selectedEvent.poll && selectedEvent.poll.workerId === workerId) {
+                    const p = selectedEvent.poll;
+                    if (p.end >= viewStart && p.start <= viewEnd) {
+                        const x1 = Math.max(0, nsToX(p.start, pw));
+                        const x2 = Math.min(pw, nsToX(p.end, pw));
+                        const w = Math.max(x2 - x1, 2);
+                        ctx.fillStyle = "#ffeb3b";
+                        ctx.fillRect(x1, bandTop, w, bandH);
+                        ctx.strokeStyle = "#fff";
+                        ctx.lineWidth = 1;
+                        ctx.strokeRect(x1 - 0.5, bandTop - 0.5, w + 1, bandH + 1);
+                    }
+                }
                 // Highlight current POI span
                 if (poiSpan) {
                     for (let i = pollStart; i < spans.polls.length; i++) {
@@ -2591,8 +2851,7 @@
                     const name = meta?.spanName || focusedSpan?.spanName || "Span";
                     let html = `<div style="color:#ccc;margin-bottom:3px">${esc(name)}</div>`;
                     for (const [k, v] of Object.entries(fields)) {
-                        const val = formatFieldValue(v);
-                        html += `<div class="kv-row"><span class="kv-key">${esc(k)}:</span><span class="kv-val" title="${esc(val)}">${esc(val)}</span><button class="kv-copy" data-val="${esc(val)}">⎘</button></div>`;
+                        html += kvRow(k, formatFieldValue(v));
                     }
                     label.innerHTML = html;
                 } else {
@@ -2645,7 +2904,27 @@
                     const w = Math.max(TICK_W, Math.min(TICK_W + Math.log2(events.length) * 2, 10));
                     const h = ph - 4;
                     const y = 2;
-                    const alpha = Math.min(0.4 + events.length * 0.15, 1.0);
+
+                    // Resolve the task for this cluster: clickable only if all
+                    // events in it map to the same single task.
+                    let taskId = null;
+                    for (const ev of events) {
+                        const t = taskForEvent(ev);
+                        if (t == null) { taskId = null; break; }
+                        if (taskId == null) taskId = t;
+                        else if (taskId !== t) { taskId = null; break; }
+                    }
+
+                    // When a task is selected (via a poll or an event), fade
+                    // ticks that did not run on it; related ticks keep their
+                    // normal color, de-emphasizing everything unrelated.
+                    const hlTask = selectedTaskId != null
+                        ? selectedTaskId
+                        : (selectedEvent && selectedEvent.taskId != null ? selectedEvent.taskId : null);
+                    let alpha = Math.min(0.4 + events.length * 0.15, 1.0);
+                    if (hlTask != null && taskId !== hlTask) {
+                        alpha *= 0.2;
+                    }
 
                     ctx.fillStyle = ceColor(rep.name);
                     ctx.globalAlpha = alpha;
@@ -2663,7 +2942,7 @@
 
                     // Pad hit region to at least 12px wide for easier hover targeting
                     const hitW = Math.max(w, 12);
-                    cePanelHits.push({ events, x: px - hitW / 2, y, w: hitW, h });
+                    cePanelHits.push({ events, x: px - hitW / 2, y, w: hitW, h, taskId });
                 }
                 ctx.globalAlpha = 1.0;
 
@@ -2714,27 +2993,20 @@
                         }
                     } else {
                         // Cluster tooltip
-                        const nameCounts = {};
+                        const nameList = topNames(spans, s => s.spanName);
                         let minDur = Infinity, maxDur = 0;
                         for (const s of spans) {
-                            nameCounts[s.spanName] = (nameCounts[s.spanName] || 0) + 1;
                             const d = s.end - s.start;
                             if (d < minDur) minDur = d;
                             if (d > maxDur) maxDur = d;
                         }
-                        const nameList = Object.entries(nameCounts)
-                            .sort((a, b) => b[1] - a[1])
-                            .slice(0, 5)
-                            .map(([n, c]) => `${esc(n)}${c > 1 ? " ×" + c : ""}`)
-                            .join(", ");
                         html = `<span class="label">Cluster:</span> <span class="value">${spans.length} spans</span>`;
                         html += `<br><span class="label">Names:</span> <span class="value">${nameList}</span>`;
                         html += `<br><span class="label">Duration:</span> <span class="value">${formatHumanDuration(minDur)} – ${formatHumanDuration(maxDur)}</span>`;
                     }
                     tooltip.innerHTML = html;
                     tooltip.style.display = "block";
-                    tooltip.style.left = Math.min(e.clientX + 12, window.innerWidth - 340) + "px";
-                    tooltip.style.top = (e.clientY + 16) + "px";
+                    placeTooltip(e);
                 } else {
                     tooltip.style.display = "none";
                 }
@@ -2744,14 +3016,7 @@
             });
 
             // Copy button handler for span field values
-            document.getElementById("span-panel-label").addEventListener("click", (e) => {
-                const btn = e.target.closest(".kv-copy");
-                if (btn) {
-                    navigator.clipboard.writeText(btn.dataset.val);
-                    btn.textContent = "✓";
-                    setTimeout(() => { btn.textContent = "⎘"; }, 800);
-                }
-            });
+            document.getElementById("span-panel-label").addEventListener("click", copyFromKvButton);
 
             // Span panel click: pick representative from cluster, focus to reveal children
             document.getElementById("span-panel-canvas").addEventListener("click", (e) => {
@@ -2759,6 +3024,7 @@
                 const rect = c.getBoundingClientRect();
                 const mx = e.clientX - rect.left;
                 const my = e.clientY - rect.top;
+                selectedEvent = null; // clear selected-event marker
 
                 const bucket = findBucketAtXY(mx, my);
 
@@ -2766,10 +3032,7 @@
                     const hit = bucket.representative;
                     // Toggle focus: clicking same span clears focus
                     if (hit.spanId === focusedSpanId) {
-                        focusedSpanId = null;
-                        selectedSpanId = null;
-                        selectedSpanIds = new Set();
-                        selectedTaskId = null;
+                        clearSpanTaskSelection();
                     } else {
                         focusedSpanId = hit.spanId;
                         selectedSpanId = hit.spanId;
@@ -2805,13 +3068,341 @@
                     }
                 } else {
                     // Click empty area: clear focus and selection
-                    focusedSpanId = null;
-                    selectedSpanId = null;
-                    selectedSpanIds = new Set();
-                    selectedTaskId = null;
+                    clearSpanTaskSelection();
                 }
                 renderAll();
             });
+
+            // Build the detail HTML for a custom-event hit (single event or
+            // cluster) — name/fields/timestamp, used by the hover tooltip.
+            // Does NOT include the task line.
+
+            // Tally `nameOf(item)` across items, most-frequent first, top `limit`,
+            // joined "name ×N". Names are escaped — output goes straight into HTML.
+            function topNames(items, nameOf, limit = 5) {
+                const counts = {};
+                for (const it of items) {
+                    const n = nameOf(it);
+                    counts[n] = (counts[n] || 0) + 1;
+                }
+                return Object.entries(counts)
+                    .sort((a, b) => b[1] - a[1])
+                    .slice(0, limit)
+                    .map(([n, c]) => `${esc(n)}${c > 1 ? " ×" + c : ""}`)
+                    .join(", ");
+            }
+
+            function ceBodyHtml(events) {
+                let html = "";
+                if (events.length === 1) {
+                    const ev = events[0];
+                    html = `<span class="label">Event:</span> <span class="value">${esc(ev.name)}</span>`;
+                    for (const [k, v] of Object.entries(ev.fields || {})) {
+                        html += `<br><span class="label">${esc(k)}:</span> <span class="value">${esc(formatFieldValue(v, ev.units?.[k]))}</span>`;
+                    }
+                    html += `<br><span class="label">@</span> <span class="value">${fmtTs(ev.timestamp)}</span>`;
+                } else {
+                    const nameList = topNames(events, ev => ev.name);
+                    html = `<span class="label">Cluster:</span> <span class="value">${events.length} events</span>`;
+                    html += `<br><span class="label">Types:</span> <span class="value">${nameList}</span>`;
+                    const first = events[0];
+                    const last = events[events.length - 1];
+                    html += `<br><span class="label">@</span> <span class="value">${fmtTs(first.timestamp)}</span>`;
+                    if (last.timestamp !== first.timestamp) {
+                        html += ` – <span class="value">${fmtTs(last.timestamp)}</span>`;
+                    }
+                }
+                return html;
+            }
+
+            // The key + value spans shared by every k/v row.
+            function kvKeyVal(key, val) {
+                return `<span class="kv-key">${esc(key)}:</span>` +
+                    `<span class="kv-val" title="${esc(val)}">${esc(val)}</span>`;
+            }
+
+            // One styled k/v row with a copy button — same visual language as
+            // the span metadata panel. `copyVal` defaults to the displayed val.
+            function kvRow(key, val, copyVal = val) {
+                return `<div class="kv-row">${kvKeyVal(key, val)}` +
+                    `<button class="kv-copy" data-val="${esc(copyVal)}">⎘</button></div>`;
+            }
+
+            // Like kvRow, plus a "↔" button that opens the Related tab filtered to
+            // other events sharing this field value. `corrVal` is the raw value to
+            // match on (the displayed `val` may be formatted).
+            function kvRowCorrelate(key, val, corrVal) {
+                return `<div class="kv-row">${kvKeyVal(key, val)}` +
+                    `<button class="kv-corr" data-corr-key="${esc(key)}" data-corr-val="${esc(corrVal)}" ` +
+                    `title="Find events with ${esc(key)}=${esc(corrVal)}">↔</button>` +
+                    `<button class="kv-copy" data-val="${esc(val)}">⎘</button></div>`;
+            }
+
+            // Shared kv-copy click behavior: copy the button's data-val, flash ✓,
+            // revert. Returns true if a copy button was the click target.
+            function copyFromKvButton(e) {
+                const btn = e.target.closest(".kv-copy");
+                if (!btn) return false;
+                navigator.clipboard.writeText(btn.dataset.val);
+                btn.textContent = "✓";
+                setTimeout(() => { btn.textContent = "⎘"; }, 800);
+                return true;
+            }
+
+            // Rich detail HTML for the pinned Event sidebar — kv-rows with copy
+            // buttons, unified with the span metadata look. The event name lives
+            // in the sidebar title, so it is not repeated here.
+            function eventDetailHtml(events, taskId) {
+                let html = "";
+                if (events.length === 1) {
+                    const ev = events[0];
+                    for (const [k, v] of Object.entries(ev.fields || {})) {
+                        const corrVal = String(v);
+                        const display = formatFieldValue(v, ev.units?.[k]);
+                        // Only offer correlation when another event shares the value;
+                        // a value unique to this event leads nowhere.
+                        html += eventsWithField(k, corrVal).length > 1
+                            ? kvRowCorrelate(k, display, corrVal)
+                            : kvRow(k, display);
+                    }
+                    html += kvRow("@", fmtTs(ev.timestamp));
+                } else {
+                    const nameList = topNames(events, ev => ev.name);
+                    const first = events[0];
+                    const last = events[events.length - 1];
+                    html += kvRow("Cluster", `${events.length} events`);
+                    html += kvRow("Types", nameList);
+                    const range = last.timestamp !== first.timestamp
+                        ? `${fmtTs(first.timestamp)} – ${fmtTs(last.timestamp)}`
+                        : fmtTs(first.timestamp);
+                    html += kvRow("@", range);
+                }
+                if (taskId != null) {
+                    const hex = "0x" + taskId.toString(16);
+                    html += kvRow("Task", `${hex} (selected)`, hex);
+                }
+                return html;
+            }
+
+            // Related event buckets show a small window around the selected event,
+            // grown on demand via "load more" (per section, per direction).
+            const RELATED_INITIAL = 5;
+            const RELATED_STEP = 25;
+
+            // Spans whose [start,end] covers ts, outermost first — the enclosing
+            // hierarchy at the event's timestamp (spans nest via parentSpanId).
+            function spansAtTime(ts) {
+                return allSpans
+                    .filter(s => s.start <= ts && s.end >= ts)
+                    .sort((a, b) => (a.depth - b.depth) || (a.start - b.start));
+            }
+
+            // Custom events matching `pred`, sorted by time. [] when none loaded.
+            function customEventsWhere(pred) {
+                if (!trace || !trace.customEvents) return [];
+                return trace.customEvents.filter(pred).sort((a, b) => a.timestamp - b.timestamp);
+            }
+
+            // Custom events resolving to the same task, sorted by time (incl. self).
+            function eventsForTask(taskId) {
+                if (taskId == null) return [];
+                return customEventsWhere(e => taskForEvent(e) === taskId);
+            }
+
+            // Occurrences of the same event name, sorted by time (incl. self).
+            function eventsOfType(name) {
+                return customEventsWhere(e => e.name === name);
+            }
+
+            // Custom events whose timestamp falls inside a span, sorted by time.
+            function eventsInSpan(span) {
+                if (!span) return [];
+                return customEventsWhere(e => e.timestamp >= span.start && e.timestamp <= span.end);
+            }
+
+            // Custom events sharing a field value, sorted by time.
+            function eventsWithField(key, val) {
+                const target = String(val);
+                return customEventsWhere(e => e.fields && String(e.fields[key]) === target);
+            }
+
+            // Build the Related tab body for a single event and (re)populate the
+            // `relatedItems` index that row clicks resolve against.
+            function relatedHtml(ev) {
+                relatedItems = [];
+                if (!ev) return `<div class="related-empty">No event selected.</div>`;
+
+                const taskId = taskForEvent(ev);
+                const spans = spansAtTime(ev.timestamp);
+                const innerSpan = spans.length ? spans[spans.length - 1] : null;
+
+                const empty = `<div class="related-empty">none</div>`;
+
+                // Collapsible section: clickable header (caret reflects collapsed
+                // state) plus a body wrapper. `inner` is the section's row HTML;
+                // it is still built when collapsed, just hidden, so relatedItems
+                // indices stay stable across toggles.
+                // `collapseByDefault` applies only until the user toggles the
+                // section: relatedCollapsed holds explicit choices (tri-state —
+                // undefined means "use the default"), so empty sections start
+                // collapsed but a user who opens one keeps it open across renders.
+                const wrap = (title, count, inner, collapseByDefault) => {
+                    const explicit = relatedCollapsed[title];
+                    const collapsed = explicit === undefined ? !!collapseByDefault : explicit;
+                    const caret = collapsed ? "▶" : "▼";
+                    const head = `<div class="related-section" data-rel-toggle="${esc(title)}" data-rel-collapsed="${collapsed ? 1 : 0}">` +
+                        `${caret} ${esc(title)}${count != null ? ` (${count})` : ""}</div>`;
+                    const body = `<div class="related-body"${collapsed ? ' style="display:none"' : ""}>${inner}</div>`;
+                    return head + body;
+                };
+
+                // One event row. The selected event renders as a non-navigable
+                // anchor; everything else registers in relatedItems for click-nav.
+                const eventRow = (e, labelText) => {
+                    const self = e === ev;
+                    const name = labelText != null ? labelText : e.name;
+                    const delta = `<span class="r-delta">${fmtDelta(e.timestamp - ev.timestamp)}</span>`;
+                    if (self) {
+                        return `<div class="related-row r-self">` +
+                            `<span class="r-name">${esc(name)} (this event)</span>${delta}</div>`;
+                    }
+                    const idx = relatedItems.length;
+                    relatedItems.push({ kind: "event", ref: e });
+                    return `<div class="related-row" data-idx="${idx}">` +
+                        `<span class="r-name">${esc(name)}</span>${delta}</div>`;
+                };
+
+                // Clickable "load more" affordance for one end of a section.
+                const loadMore = (title, dir, hidden) => {
+                    const n = Math.min(RELATED_STEP, hidden);
+                    const arrow = dir === "before" ? "↑" : "↓";
+                    const word = dir === "before" ? "earlier" : "later";
+                    return `<div class="related-loadmore" data-rel-section="${esc(title)}" data-rel-dir="${dir}">` +
+                        `${arrow} load ${n} more ${word} (${hidden} hidden)</div>`;
+                };
+
+                // A self-anchored event section: a small window around the selected
+                // event, grown per direction via load-more. `label` derives the row
+                // text per event (defaults to the event name).
+                const eventSection = (title, sorted, label) => {
+                    if (sorted.length === 0) return wrap(title, 0, empty, true);
+                    const n = sorted.length;
+                    const anchorRaw = sorted.indexOf(ev);
+                    const anchorIdx = anchorRaw < 0 ? 0 : anchorRaw;
+                    // Nothing beyond the current event itself -> collapse by default.
+                    const collapseByDefault = anchorRaw >= 0 && n === 1;
+                    const st = relatedExpand[title] || { before: 0, after: 0 };
+                    const beforeShown = Math.min(anchorIdx, RELATED_INITIAL + st.before);
+                    const afterShown = Math.min(n - 1 - anchorIdx, RELATED_INITIAL + st.after);
+                    const start = anchorIdx - beforeShown;
+                    const end = anchorIdx + afterShown + 1;
+                    let inner = "";
+                    if (start > 0) inner += loadMore(title, "before", start);
+                    for (const e of sorted.slice(start, end)) inner += eventRow(e, label ? label(e) : null);
+                    if (n - end > 0) inner += loadMore(title, "after", n - end);
+                    return wrap(title, n, inner, collapseByDefault);
+                };
+
+                let html = "";
+
+                // Field correlation, at the top — but only when the click actually
+                // links this event to others (more than the event itself).
+                if (correlateField) {
+                    const { key, val } = correlateField;
+                    const matches = eventsWithField(key, val);
+                    if (matches.length > 1) {
+                        html += eventSection(`Same ${key}=${val}`, matches);
+                    }
+                }
+
+                // Enclosing spans: outermost first, indented by nesting depth.
+                if (spans.length === 0) {
+                    html += wrap("Enclosing spans", 0, empty, true);
+                } else {
+                    const minDepth = Math.min(...spans.map(s => s.depth));
+                    let inner = "";
+                    for (const s of spans) {
+                        const idx = relatedItems.length;
+                        relatedItems.push({ kind: "span", ref: s.spanId });
+                        const pad = 6 + (s.depth - minDepth) * 12;
+                        const nm = esc(s.spanName || ("span " + s.spanId));
+                        inner += `<div class="related-row" data-idx="${idx}" style="padding-left:${pad}px">` +
+                            `<span class="r-name">${nm}</span><span class="r-time">${fmtTs(s.start)}</span></div>`;
+                    }
+                    html += wrap("Enclosing spans", spans.length, inner);
+                }
+
+                // Same span: events inside the innermost enclosing span.
+                if (innerSpan) {
+                    html += eventSection("Same span", eventsInSpan(innerSpan));
+                }
+
+                // Same task.
+                if (taskId == null) {
+                    html += wrap("Same task", null, `<div class="related-empty">task unresolved</div>`, true);
+                } else {
+                    html += eventSection("Same task", eventsForTask(taskId));
+                }
+
+                // Same type: rows share the name, so label by resolved task instead.
+                html += eventSection("Same type", eventsOfType(ev.name), e => {
+                    const t = taskForEvent(e);
+                    return t != null ? "task 0x" + t.toString(16) : e.name;
+                });
+
+                return html;
+            }
+
+            // Re-render the Related tab in place, preserving scroll position.
+            // Used by collapse toggles and load-more, which both rebuild the body.
+            function rerenderRelated() {
+                if (!selectedEventRef) return;
+                const body = document.getElementById("stack-sidebar-body");
+                const top = body.scrollTop;
+                body.innerHTML = relatedHtml(selectedEventRef);
+                body.scrollTop = top;
+            }
+
+            // Center the timeline view on a timestamp, keeping the current zoom.
+            // Width `d` is preserved: the whole window is slid into range, not
+            // each edge clamped independently — otherwise repeated centering near
+            // a trace edge ratchets the window narrower on every call.
+            function centerViewOn(ts) {
+                const d = viewEnd - viewStart;
+                let start = ts - d * 0.3;
+                if (start + d > maxTs) start = maxTs - d;
+                if (start < minTs) start = minTs;
+                viewStart = start;
+                viewEnd = Math.min(maxTs, start + d);
+            }
+
+            // Drop all span/task selection state (leaves the event marker alone).
+            function clearSpanTaskSelection() {
+                selectedTaskId = null;
+                selectedSpanId = null;
+                selectedSpanIds = new Set();
+                focusedSpanId = null;
+            }
+
+            // Navigate to a custom event: re-pin its detail, move the marker, and
+            // center the timeline on it (same selection as clicking its tick).
+            function navigateToEvent(ev) {
+                const taskId = taskForEvent(ev);
+                const poll = pollForEvent(ev, taskId);
+                selectedEvent = { events: [ev], timestamp: ev.timestamp, taskId, name: ev.name, poll, x: null };
+                clearSpanTaskSelection();
+                centerViewOn(ev.timestamp);
+                showEventDetail({ events: [ev], taskId });
+                renderAll();
+            }
+
+            // Navigate to a span: focus it in the span panel and center the view.
+            function navigateToSpan(spanId) {
+                const s = spansById.get(spanId);
+                focusedSpanId = spanId;
+                if (s) centerViewOn((s.start + s.end) / 2);
+                renderAll();
+            }
 
             // Custom events panel hover tooltip
             document.getElementById("ce-panel-canvas").addEventListener("mousemove", (e) => {
@@ -2829,47 +3420,86 @@
                     }
                 }
 
+                c.style.cursor = hit ? "pointer" : "default";
+
                 if (hit) {
-                    let html = "";
-                    if (hit.events.length === 1) {
-                        const ev = hit.events[0];
-                        html = `<span class="label">Event:</span> <span class="value">${esc(ev.name)}</span>`;
-                        const entries = Object.entries(ev.fields || {});
-                        if (entries.length > 0) {
-                            for (const [k, v] of entries) {
-                                html += `<br><span class="label">${esc(k)}:</span> <span class="value">${esc(formatFieldValue(v, ev.units?.[k]))}</span>`;
-                            }
-                        }
-                        html += `<br><span class="label">@</span> <span class="value">${fmtTs(ev.timestamp)}</span>`;
+                    let html = ceBodyHtml(hit.events);
+                    if (hit.taskId != null) {
+                        html += `<br><span class="label">Task:</span> <span class="value">0x${hit.taskId.toString(16)}</span> <span class="label">(click to select)</span>`;
                     } else {
-                        const nameCounts = {};
-                        for (const ev of hit.events) {
-                            nameCounts[ev.name] = (nameCounts[ev.name] || 0) + 1;
-                        }
-                        const nameList = Object.entries(nameCounts)
-                            .sort((a, b) => b[1] - a[1])
-                            .slice(0, 5)
-                            .map(([n, c]) => `${esc(n)}${c > 1 ? " \u00d7" + c : ""}`)
-                            .join(", ");
-                        html = `<span class="label">Cluster:</span> <span class="value">${hit.events.length} events</span>`;
-                        html += `<br><span class="label">Types:</span> <span class="value">${nameList}</span>`;
-                        const first = hit.events[0];
-                        const last = hit.events[hit.events.length - 1];
-                        html += `<br><span class="label">@</span> <span class="value">${fmtTs(first.timestamp)}</span>`;
-                        if (last.timestamp !== first.timestamp) {
-                            html += ` \u2013 <span class="value">${fmtTs(last.timestamp)}</span>`;
-                        }
+                        html += `<br><span class="label">(click to inspect)</span>`;
                     }
                     tooltip.innerHTML = html;
                     tooltip.style.display = "block";
-                    tooltip.style.left = Math.min(e.clientX + 12, window.innerWidth - 340) + "px";
-                    tooltip.style.top = (e.clientY + 16) + "px";
+                    placeTooltip(e);
                 } else {
                     tooltip.style.display = "none";
+                }
+
+                // Guide line across the lanes at the hovered event's timestamp.
+                const newHoverTs = hit ? hit.events[0].timestamp : null;
+                if (newHoverTs !== hoverEventTs) {
+                    hoverEventTs = newHoverTs;
+                    renderCrosshair();
                 }
             });
             document.getElementById("ce-panel-canvas").addEventListener("mouseleave", () => {
                 tooltip.style.display = "none";
+                document.getElementById("ce-panel-canvas").style.cursor = "default";
+                if (hoverEventTs !== null) {
+                    hoverEventTs = null;
+                    renderCrosshair();
+                }
+            });
+
+            // Click a custom event tick to inspect it: draws a labeled vertical
+            // marker across all lanes at its timestamp and — if the event ran
+            // inside a poll — selects that task (same effect as clicking the
+            // task's poll bar). Clicking the same tick again clears everything.
+            document.getElementById("ce-panel-canvas").addEventListener("click", (e) => {
+                const c = document.getElementById("ce-panel-canvas");
+                const rect = c.getBoundingClientRect();
+                const mx = e.clientX - rect.left;
+                const my = e.clientY - rect.top;
+
+                let hit = null;
+                for (let i = cePanelHits.length - 1; i >= 0; i--) {
+                    const h = cePanelHits[i];
+                    if (mx >= h.x && mx <= h.x + h.w && my >= h.y && my <= h.y + h.h) {
+                        hit = h;
+                        break;
+                    }
+                }
+                if (!hit) return;
+
+                const ts = hit.events[0].timestamp;
+                // Include x: two distinct clusters can share a timestamp and
+                // length, but never the same pixel column.
+                const sameAsSelected = selectedEvent &&
+                    selectedEvent.timestamp === ts &&
+                    selectedEvent.events.length === hit.events.length &&
+                    selectedEvent.x === hit.x;
+
+                if (sameAsSelected) {
+                    // Toggle off: clear the marker and the pinned sidebar detail.
+                    selectedEvent = null;
+                    hideStackPopup();
+                } else {
+                    const name = hit.events.length === 1
+                        ? hit.events[0].name
+                        : `${hit.events.length} events`;
+                    // Pin to the single poll the event landed in rather than
+                    // selecting the whole task (which would flood the lanes).
+                    // Prefer the cluster's resolved task so the highlighted bar
+                    // matches it even for multi-event hits.
+                    const poll = pollForEvent(hit.events[0], hit.taskId);
+                    selectedEvent = { events: hit.events, timestamp: ts, taskId: hit.taskId, name, poll, x: hit.x };
+                    // Drop any prior task/span selection so the lanes show only
+                    // this event's poll plus the marker line.
+                    clearSpanTaskSelection();
+                    showEventDetail(hit);
+                }
+                renderAll();
             });
 
             /**
@@ -3491,6 +4121,54 @@
                     ctx.lineTo(kx, h);
                     ctx.stroke();
                 }
+
+                const eventX = (ns) =>
+                    (lanesRect.left - mainRect.left) + LABEL_W + nsToX(ns, effectiveDrawW);
+
+                // Transient guide line for the hovered custom event.
+                if (hoverEventTs !== null && hoverEventTs >= viewStart && hoverEventTs <= viewEnd) {
+                    const hx = eventX(hoverEventTs);
+                    ctx.strokeStyle = "rgba(255,140,0,0.4)";
+                    ctx.lineWidth = 1;
+                    ctx.setLineDash([3, 3]);
+                    ctx.beginPath();
+                    ctx.moveTo(hx, 0);
+                    ctx.lineTo(hx, h);
+                    ctx.stroke();
+                    ctx.setLineDash([]);
+                }
+
+                // Persistent marker + label for the clicked custom event.
+                if (selectedEvent &&
+                    selectedEvent.timestamp >= viewStart &&
+                    selectedEvent.timestamp <= viewEnd) {
+                    const mx = eventX(selectedEvent.timestamp);
+                    ctx.strokeStyle = "rgba(255,140,0,0.9)";
+                    ctx.lineWidth = 1;
+                    ctx.setLineDash([3, 3]);
+                    ctx.beginPath();
+                    ctx.moveTo(mx, 0);
+                    ctx.lineTo(mx, h);
+                    ctx.stroke();
+                    ctx.setLineDash([]);
+
+                    // Label chip: "name @ time", kept inside the viewport.
+                    const label = `${selectedEvent.name} @ ${fmtTs(selectedEvent.timestamp)}`;
+                    ctx.font = "11px sans-serif";
+                    const tw = ctx.measureText(label).width;
+                    const padX = 5;
+                    let bx = mx + 4;
+                    if (bx + tw + padX * 2 > w) bx = mx - 4 - (tw + padX * 2);
+                    ctx.fillStyle = "rgba(40,25,0,0.92)";
+                    ctx.fillRect(bx, 2, tw + padX * 2, 16);
+                    ctx.strokeStyle = "rgba(255,140,0,0.9)";
+                    ctx.lineWidth = 1;
+                    ctx.strokeRect(bx, 2, tw + padX * 2, 16);
+                    ctx.fillStyle = "#ffcf99";
+                    ctx.textAlign = "left";
+                    ctx.textBaseline = "middle";
+                    ctx.fillText(label, bx + padX, 11);
+                }
             }
 
             // ──  Pan ──
@@ -3821,6 +4499,8 @@
                 const lanesRect = lanesContainer.getBoundingClientRect();
                 if (e.clientY < lanesRect.top || e.clientY > lanesRect.bottom ||
                     e.clientX < lanesRect.left || e.clientX > lanesRect.right) return;
+                // Any click in the lanes clears the selected-event marker.
+                selectedEvent = null;
                 const mouseX = e.clientX - lanesRect.left - LABEL_W;
                 const mouseY = e.clientY - lanesRect.top;
                 const drawW = lanesRect.width - LABEL_W;
@@ -3905,10 +4585,7 @@
                 // both the task and the span focus (a single un-click).
                 const togglingOff = found && found === selectedTaskId;
                 if (togglingOff) {
-                    selectedTaskId = null;
-                    selectedSpanId = null;
-                    selectedSpanIds = new Set();
-                    focusedSpanId = null;
+                    clearSpanTaskSelection();
                 } else {
                     selectedTaskId = found || null;
                     selectedSpanId = newFocusedSpanId;
@@ -4026,6 +4703,87 @@
 
             document.getElementById("stack-sidebar-close").addEventListener("click", hideStackPopup);
 
+            // Copy button handler for kv values in the sidebar (event detail).
+            // Delegated on the stable container so it survives re-renders.
+            document.getElementById("stack-sidebar-body").addEventListener("click", (e) => {
+                if (copyFromKvButton(e)) return;
+                // Field "↔": correlate by this field value in the Related tab.
+                const corr = e.target.closest(".kv-corr");
+                if (corr) {
+                    correlateField = { key: corr.dataset.corrKey, val: corr.dataset.corrVal };
+                    renderEventTab("related");
+                    return;
+                }
+                // Related tab: toggle a section's collapsed state.
+                const tog = e.target.closest(".related-section[data-rel-toggle]");
+                if (tog) {
+                    const k = tog.dataset.relToggle;
+                    // Flip the currently-rendered state, so the first click on a
+                    // default-collapsed (empty) section reliably opens it.
+                    relatedCollapsed[k] = tog.dataset.relCollapsed !== "1";
+                    rerenderRelated();
+                    return;
+                }
+                // Related tab: reveal more rows on one end of a section.
+                const more = e.target.closest(".related-loadmore");
+                if (more) {
+                    const k = more.dataset.relSection, d = more.dataset.relDir;
+                    const st = relatedExpand[k] || { before: 0, after: 0 };
+                    st[d] += RELATED_STEP;
+                    relatedExpand[k] = st;
+                    rerenderRelated();
+                    return;
+                }
+                // Related tab: clicking a row navigates to that span/event.
+                const row = e.target.closest(".related-row");
+                if (row) {
+                    const item = relatedItems[Number(row.dataset.idx)];
+                    if (!item) return;
+                    if (item.kind === "span") navigateToSpan(item.ref);
+                    else navigateToEvent(item.ref);
+                }
+            });
+
+            // Pin a clicked custom-event (or cluster) into the sidebar so its
+            // fields stay visible — the hover tooltip vanishes on mouse-out.
+            // `hit` is a cePanelHits entry: { events, taskId, ... }.
+            function showEventDetail(hit) {
+                const sidebar = document.getElementById("stack-sidebar");
+                const title = document.getElementById("stack-sidebar-title");
+                const body = document.getElementById("stack-sidebar-body");
+                // Reclaim the flamegraph container before overwriting the body,
+                // and drop any range-selection state — event detail owns neither.
+                if (fgActive) {
+                    fgActive = false;
+                    document.getElementById("flamegraph-panel").appendChild(fgContainer);
+                }
+                schedActive = false;
+                sidebarSelStart = 0;
+                sidebarSelEnd = 0;
+                selOverlay.style.display = "none";
+
+                title.textContent = hit.events.length === 1
+                    ? hit.events[0].name
+                    : `${hit.events.length} events`;
+
+                // Related tab is single-event only; clusters are ambiguous.
+                selectedEventRef = hit.events.length === 1 ? hit.events[0] : null;
+                // A new selection drops any stale field correlation and the
+                // position-specific "load more" expansion counts.
+                correlateField = null;
+                relatedExpand = {};
+
+                body.innerHTML = eventDetailHtml(hit.events, hit.taskId);
+                body.style.display = "";
+                body.style.flexDirection = "";
+
+                showSidebarTabs("event");
+                const wasHidden = sidebar.style.display !== "flex";
+                sidebar.style.display = "flex";
+                if (wasHidden) narrowSidebarForEvent();
+                if (wasHidden && trace) requestAnimationFrame(renderAll);
+            }
+
             // ── Uninstrumented Tasks Popup ──
             function showUninstrumentedPopup(anchor) {
                 if (!trace || !trace.taskInstrumented) return;
@@ -4106,9 +4864,33 @@
                 const tabs = document.getElementById("sidebar-tabs");
                 tabs.style.display = "flex";
                 const pollDetail = tabs.querySelector("#tab-poll-detail");
+                const event = tabs.querySelector("#tab-event");
+                const related = tabs.querySelector("#tab-related");
                 const flamegraph = tabs.querySelector("#tab-flamegraph");
                 const blocking = tabs.querySelector("#tab-blocking");
                 const heap = tabs.querySelector("#tab-heap");
+
+                // Event family (event | related) is standalone — no others.
+                // Related only appears for a single-event selection.
+                if (activeTab === "event" || activeTab === "related") {
+                    event.style.display = "";
+                    related.style.display = selectedEventRef ? "" : "none";
+                    pollDetail.style.display = "none";
+                    flamegraph.style.display = "none";
+                    blocking.style.display = "none";
+                    heap.style.display = "none";
+                    event.classList.toggle("active", activeTab === "event");
+                    related.classList.toggle("active", activeTab === "related");
+                    pollDetail.classList.remove("active");
+                    flamegraph.classList.remove("active");
+                    blocking.classList.remove("active");
+                    heap.classList.remove("active");
+                    return;
+                }
+                event.style.display = "none";
+                event.classList.remove("active");
+                related.style.display = "none";
+                related.classList.remove("active");
 
                 if (activeTab === "poll-detail") {
                     pollDetail.style.display = "";
@@ -4133,6 +4915,25 @@
                 blocking.classList.toggle("active", activeTab === "blocking");
                 heap.classList.toggle("active", activeTab === "heap");
             }
+
+            // Render one event-family tab ("event" | "related") into the sidebar
+            // body and activate it. No-op if the required selection is absent.
+            function renderEventTab(which) {
+                const body = document.getElementById("stack-sidebar-body");
+                if (which === "related") {
+                    if (!selectedEventRef) return;
+                    body.innerHTML = relatedHtml(selectedEventRef);
+                } else {
+                    if (!selectedEvent) return;
+                    body.innerHTML = eventDetailHtml(selectedEvent.events, selectedEvent.taskId);
+                }
+                showSidebarTabs(which);
+            }
+
+            // Event family tabs swap the sidebar-body content between the
+            // event detail and its derived "Related" view.
+            document.getElementById("tab-event").addEventListener("click", () => renderEventTab("event"));
+            document.getElementById("tab-related").addEventListener("click", () => renderEventTab("related"));
 
             document.getElementById("tab-flamegraph").addEventListener("click", () => {
                 if (fgActive) return; // already showing
@@ -4761,10 +5562,7 @@
                         taskCountInfo +
                         spanInfo;
                     tooltip.style.display = "block";
-                    tooltip.style.left =
-                        Math.min(e.clientX + 12, window.innerWidth - 340) +
-                        "px";
-                    tooltip.style.top = e.clientY + 130 + "px";
+                    placeTooltip(e, 130);
                 });
             document
                 .getElementById("main-area")
@@ -4912,6 +5710,13 @@
             function widenSidebarForFlamegraph() {
                 const sidebar = document.getElementById("stack-sidebar");
                 sidebar.style.width = Math.round(window.innerWidth * FLAMEGRAPH_DEFAULT_VW) + "px";
+            }
+
+            // Event detail is compact (k/v rows); open it narrow rather than the
+            // ~640px CSS default. Only on a fresh open, so manual resizes persist.
+            const EVENT_DEFAULT_WIDTH = 350;
+            function narrowSidebarForEvent() {
+                document.getElementById("stack-sidebar").style.width = EVENT_DEFAULT_WIDTH + "px";
             }
 
             // Used by `showTaskDumpStack`, `showIdleTimeFlamegraph`, and any

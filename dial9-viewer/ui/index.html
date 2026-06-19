@@ -360,6 +360,7 @@
     </footer>
 
     <script src="creds.js"></script>
+    <script src="prefix_detect.js"></script>
     <script src="heatmap.js"></script>
     <script>
     // ── ?trace= passthrough: redirect to viewer (preserving all params,
@@ -696,6 +697,17 @@
                 updateSearchReady();
                 return;
             }
+            // Issue #471: when the root children are all date partitions
+            // (YYYY-MM-DD/), the bucket has no key prefix — the trace data
+            // starts directly at the date layer. Don't offer the dates as
+            // prefix suggestions; the correct prefix is empty.
+            if (!serverHasPrefix && isDateLayer(prefixes)) {
+                prefixInput.value = '';
+                prefixInput.placeholder = '(no prefix — dates at root)';
+                serverHasPrefix = false;
+                updateSearchReady();
+                return;
+            }
             // If there's exactly one prefix and the input is empty, auto-select it
             if (prefixes.length === 1 && !prefixInput.value) {
                 prefixInput.value = prefixes[0].replace(/\/$/, '');
@@ -747,6 +759,8 @@
     });
 
     // ── Helpers ──
+    // isDateLayer / lastSegment live in prefix_detect.js (loaded above).
+
     function esc(s) {
         const d = document.createElement('div');
         d.textContent = s;
