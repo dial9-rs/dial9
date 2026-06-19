@@ -857,8 +857,17 @@ fn dump_trigger_uploads_segments_and_writes_manifest() {
     std::fs::create_dir(s3_root.path().join("dump-bucket")).unwrap();
     let client = fake_s3_client(s3_root.path());
 
-    // Small segments so the workload seals a few into the ring quickly.
-    let writer = DiskWriter::new(&trace_path, 512, 50 * 1024).unwrap();
+    // Small size threshold + short rotation period so the tiny workload seals a
+    // segment within a few hundred ms; the default 60s rotation period could
+    // leave the workload's bytes in an unsealed active segment past the poll
+    // window, processing zero segments on slow CI.
+    let writer = DiskWriter::builder()
+        .base_path(&trace_path)
+        .max_file_size(64)
+        .max_total_size(50 * 1024)
+        .rotation_period(Duration::from_millis(200))
+        .build()
+        .unwrap();
 
     let s3_config = S3Config::builder()
         .bucket("dump-bucket")
