@@ -167,23 +167,19 @@ impl<T: dial9_trace_format::TraceEvent + 'static> Encodable for T {
 /// Tracks the last drain epoch at which a particular thread-local buffer
 /// was flushed. The flush thread reads this (relaxed) to skip buffers
 /// that have self-flushed recently, avoiding contention with busy workers.
-// doc-hidden pub (not pub(crate)) because SharedState in dial9-tokio-telemetry
-// drives the intrusive drain across the crate boundary. Tightens to pub(crate)
-// once SharedState moves into core.
-#[doc(hidden)]
 #[derive(Clone)]
-pub struct FlushEpoch(Arc<AtomicU64>);
+pub(crate) struct FlushEpoch(Arc<AtomicU64>);
 
 impl FlushEpoch {
     pub(crate) fn new() -> Self {
         Self(Arc::new(AtomicU64::new(0)))
     }
 
-    pub fn store(&self, epoch: u64) {
+    pub(crate) fn store(&self, epoch: u64) {
         self.0.store(epoch, Ordering::Relaxed);
     }
 
-    pub fn load(&self) -> u64 {
+    pub(crate) fn load(&self) -> u64 {
         self.0.load(Ordering::Relaxed)
     }
 }
@@ -301,8 +297,8 @@ impl Drop for ThreadLocalBuffer {
 /// thread can intrusively drain idle/silent buffers.
 #[doc(hidden)]
 pub struct TlBufferHandle {
-    pub buffer: Weak<Mutex<ThreadLocalBuffer>>,
-    pub flush_epoch: FlushEpoch,
+    pub(crate) buffer: Weak<Mutex<ThreadLocalBuffer>>,
+    pub(crate) flush_epoch: FlushEpoch,
 }
 
 crate::primitives::thread_local! {

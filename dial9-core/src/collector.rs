@@ -9,6 +9,7 @@ use crate::primitives::sync::atomic::{AtomicUsize, Ordering};
 const DEFAULT_CAPACITY: usize = 1024;
 
 /// A batch of encoded trace events ready for writing.
+#[doc(hidden)]
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct Batch {
