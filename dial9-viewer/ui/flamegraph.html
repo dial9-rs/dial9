@@ -102,16 +102,26 @@
                     return;
                 }
 
-                // Fetch trace(s): each component is fetched and gunzipped
-                // independently, then concatenated into one buffer.
-                let buffer;
+                // Load the trace. For a single URL we STREAM: download and
+                // decode overlap, hiding most of the parse time behind the
+                // download. For multiple repeated `trace=` components we fall
+                // back to the buffered fetch+concatenate path (each component is
+                // fetched and gunzipped independently, then concatenated).
+                const credHeaders = window.Dial9Creds ? Dial9Creds.headers() : {};
+                let trace;
                 try {
-                    loadingEl.textContent = traceUrls.length > 1
-                        ? `Fetching ${traceUrls.length} traces\u2026`
-                        : "Fetching trace\u2026";
-                    // Attach bring-your-own-credentials headers if present.
-                    const credHeaders = window.Dial9Creds ? Dial9Creds.headers() : {};
-                    buffer = await TraceParser.fetchTraces(traceUrls, { headers: credHeaders });
+                    if (traceUrls.length === 1 && TraceParser.canStreamDecode()) {
+                        loadingEl.textContent = "Loading trace\u2026";
+                        const stream = await TraceParser.fetchTraceStream(traceUrls[0], { headers: credHeaders });
+                        trace = await TraceParser.parseTraceStream(stream);
+                    } else {
+                        loadingEl.textContent = traceUrls.length > 1
+                            ? `Fetching ${traceUrls.length} traces\u2026`
+                            : "Fetching trace\u2026";
+                        const buffer = await TraceParser.fetchTraces(traceUrls, { headers: credHeaders });
+                        loadingEl.textContent = "Parsing trace\u2026";
+                        trace = await TraceParser.parseTrace(buffer);
+                    }
                 } catch (err) {
                     if (/HTTP 401/.test(err.message) && window.Dial9Creds && !Dial9Creds.has()) {
                         showError(
@@ -119,18 +129,8 @@
                             "home page after applying your credentials."
                         );
                     } else {
-                        showError("Failed to fetch trace: " + err.message);
+                        showError("Failed to load trace: " + err.message);
                     }
-                    return;
-                }
-
-                // Parse trace
-                let trace;
-                try {
-                    loadingEl.textContent = "Parsing trace\u2026";
-                    trace = await TraceParser.parseTrace(buffer);
-                } catch (err) {
-                    showError("Failed to parse trace: " + err.message);
                     return;
                 }
 
