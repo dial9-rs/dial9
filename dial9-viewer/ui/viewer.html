@@ -1376,34 +1376,83 @@
                 showLoadingState(label);
             }
 
+            /** Build the standard onParseProgress callback for the spinner. */
+            function makeParseProgress() {
+                return ({ bytesRead, totalBytes, eventCount }) => {
+                    const pct = totalBytes ? (((bytesRead / totalBytes) * 100) | 0) : 0;
+                    updateLoadProgress(`Parsing: ${pct}% · ${(eventCount / 1000) | 0}k events`);
+                };
+            }
+
+            /** Finish loading: analyze the parsed trace, retain the buffer for
+             *  in-memory re-parse (Set/Clear Range), and show the viewer. */
+            function showParsedTrace(parsed, buffer, name) {
+                trace = parsed;
+                updateLoadProgress(`Analyzing ${trace.events.length.toLocaleString()} events…`);
+                if (!processTrace()) {
+                    resetDropZone();
+                    return;
+                }
+                currentTraceBuffer = buffer;
+                currentTraceName = name;
+                showViewer(name);
+                if (trace.events.length === 0 && hasCpuProfileSamples(trace.cpuSamples)) {
+                    requestAnimationFrame(() => showFlamegraph(minTs, maxTs));
+                }
+            }
+
             /** Parse an already-fetched buffer and show the viewer. */
             async function parseAndShowTrace(buffer, name, opts = {}) {
                 try {
-                    const fullOpts = {
-                        ...opts,
-                        onParseProgress: ({ bytesRead, totalBytes, eventCount }) => {
-                            const pct = ((bytesRead / totalBytes) * 100) | 0;
-                            updateLoadProgress(`Parsing: ${pct}% · ${(eventCount / 1000) | 0}k events`);
-                        },
-                    };
+                    const fullOpts = { ...opts, onParseProgress: makeParseProgress() };
                     updateLoadProgress("Decompressing…");
-                    trace = await parseTrace(buffer, fullOpts);
-                    updateLoadProgress(`Analyzing ${trace.events.length.toLocaleString()} events…`);
+                    const parsed = await parseTrace(buffer, fullOpts);
                     await new Promise((r) => setTimeout(r, 0));
-                    if (!processTrace()) {
-                        resetDropZone();
-                        return;
-                    }
-                    currentTraceBuffer = buffer;
-                    currentTraceName = name;
-                    showViewer(name);
-                    if (trace.events.length === 0 && hasCpuProfileSamples(trace.cpuSamples)) {
-                        requestAnimationFrame(() => showFlamegraph(minTs, maxTs));
-                    }
+                    showParsedTrace(parsed, buffer, name);
                 } catch (err) {
                     if (err.name === "AbortError") return;
                     alert("Error: " + err.message);
                     resetDropZone();
+                }
+            }
+
+            /**
+             * Stream a single trace URL: decode chunks as they download so parse
+             * time overlaps the download (~max(download, parse) instead of their
+             * sum). We capture the gunzipped chunks while parsing so the full
+             * buffer is still available afterwards for in-memory Set/Clear-Range
+             * re-parsing (which never re-fetches).
+             */
+            async function streamAndShowTrace(url, name, opts = {}) {
+                try {
+                    const credHeaders = window.Dial9Creds ? Dial9Creds.headers() : {};
+                    const stream = await TraceParser.fetchTraceStream(url, {
+                        signal: loadAbortController?.signal,
+                        headers: credHeaders,
+                    });
+                    const captured = [];
+                    const capturing = {
+                        async *[Symbol.asyncIterator]() {
+                            for await (const chunk of stream) {
+                                captured.push(chunk);
+                                yield chunk;
+                            }
+                        },
+                    };
+                    const fullOpts = { ...opts, onParseProgress: makeParseProgress() };
+                    const parsed = await TraceParser.parseTraceStream(capturing, fullOpts);
+                    loadAbortController = null;
+                    // Reassemble the full buffer from the captured chunks.
+                    let total = 0;
+                    for (const c of captured) total += c.length;
+                    const buffer = new Uint8Array(total);
+                    let off = 0;
+                    for (const c of captured) { buffer.set(c, off); off += c.length; }
+                    await new Promise((r) => setTimeout(r, 0));
+                    showParsedTrace(parsed, buffer.buffer, name);
+                } catch (err) {
+                    if (err.name === "AbortError") return;
+                    throw err;
                 }
             }
 
@@ -1458,11 +1507,23 @@
             }
 
             // `urls` may be a single URL or a list (one per repeated `trace=`).
-            // Each component is fetched and gunzipped independently, then the raw
-            // buffers are concatenated into one trace (see fetchTraces).
+            // For a single URL we STREAM: download and decode overlap, so the
+            // spinner advances during the download and total load time is about
+            // max(download, parse) rather than their sum. For multiple repeated
+            // `trace=` components we fall back to the buffered fetch+concatenate
+            // path (each component is fetched and gunzipped independently, then
+            // the raw buffers are concatenated into one trace; see fetchTraces).
             async function loadTraceFromUrl(urls) {
                 const list = Array.isArray(urls) ? urls : [urls];
                 try {
+                    const name = urlParams.get('svc')
+                        || list[0].split('/').pop()?.split('?')[0]
+                        || 'trace.bin';
+                    if (list.length === 1 && TraceParser.canStreamDecode()) {
+                        updateLoadProgress("Loading…");
+                        await streamAndShowTrace(list[0], name, getParseOptions());
+                        return;
+                    }
                     updateLoadProgress(list.length > 1 ? `Fetching ${list.length} traces…` : "Fetching…");
                     // Attach bring-your-own-credentials headers if present. A
                     // tab opened directly (not from the browser page) has no
@@ -1473,9 +1534,6 @@
                         headers: credHeaders,
                     });
                     loadAbortController = null;
-                    const name = urlParams.get('svc')
-                        || list[0].split('/').pop()?.split('?')[0]
-                        || 'trace.bin';
                     await parseAndShowTrace(arrayBuffer, name, getParseOptions());
                 } catch (err) {
                     if (err.name === 'AbortError') return;
