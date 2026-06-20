@@ -74,11 +74,12 @@
    * concatenate them into a single ArrayBuffer.
    *
    * The `trace` query parameter is repeatable: each component is fetched
-   * independently and may be gzipped on its own (unlike `/api/trace`, which
-   * gunzips server-side before serving). We therefore ungzip every component
-   * here, then concatenate the raw bytes. The trace decoder treats a
-   * concatenated stream as multiple segments — a mid-stream `TRC\0` header
-   * resets the frame parser — so the combined buffer parses as one trace.
+   * independently (in parallel) and may be gzipped on its own — the S3 browser
+   * points each at `/api/object`, which serves one file's raw, still-gzipped
+   * bytes. We therefore ungzip every component here, then concatenate the raw
+   * bytes. The trace decoder treats a concatenated stream as multiple segments
+   * — a mid-stream `TRC\0` header resets the frame parser — so the combined
+   * buffer parses as one trace.
    *
    * @param {string|string[]} urls one URL or a list of URLs (order preserved)
    * @param {{signal?: AbortSignal, headers?: Object}} [opts] `headers` is
