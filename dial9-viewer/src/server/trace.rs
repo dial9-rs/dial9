@@ -15,6 +15,49 @@ use crate::server::error::storage_error_response;
 const MAX_KEYS: usize = 100;
 
 #[derive(Deserialize)]
+pub struct ObjectParams {
+    /// A single S3 key (e.g. ?key=2026-04-09/.../123-0.bin.gz)
+    pub key: String,
+    pub bucket: Option<String>,
+}
+
+/// `GET /api/object?bucket=&key=` — stream a single object's bytes verbatim.
+///
+/// Unlike [`get_trace`], this does NOT decompress: a `.bin.gz` object is served
+/// still-gzipped. The viewer fetches one `trace=/api/object?…` component per
+/// file in parallel and gunzips each client-side (see `fetchTraces` in
+/// `trace_parser.js`). Keeping the bytes compressed on the wire is the whole
+/// point — far less network transfer than the old server-side-merged response.
+pub async fn get_object(
+    State(state): State<AppState>,
+    creds: MaybeCreds,
+    Query(params): Query<ObjectParams>,
+) -> Result<Response, (StatusCode, String)> {
+    let backend = state.resolve(creds)?;
+
+    let bucket = params
+        .bucket
+        .or(state.default_bucket.clone())
+        .ok_or((StatusCode::BAD_REQUEST, "bucket is required".to_string()))?;
+
+    let key = params.key;
+    if key.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "key is required".to_string()));
+    }
+
+    let data = backend
+        .get_object(&bucket, &key)
+        .await
+        .map_err(storage_error_response)?;
+
+    Ok(Response::builder()
+        .header("content-type", "application/octet-stream")
+        .body(Body::from(data))
+        .unwrap()
+        .into_response())
+}
+
+#[derive(Deserialize)]
 pub struct TraceParams {
     /// S3 keys (repeated query param: ?keys=a&keys=b)
     #[serde(default)]
@@ -22,6 +65,15 @@ pub struct TraceParams {
     pub bucket: Option<String>,
 }
 
+/// `GET /api/trace?bucket=&keys=a&keys=b` — fetch every key, gunzip each, and
+/// concatenate into one uncompressed response.
+///
+/// DEPRECATED: scheduled for removal. The viewer no longer links here; it now
+/// emits one `trace=/api/object?…` component per file and lets the browser
+/// download them in parallel and gunzip client-side ([`get_object`]). This
+/// endpoint forces the backend to decompress and buffer the whole merged trace,
+/// which transfers far more bytes. It remains only for out-of-tree callers (the
+/// `dial9-trace-loading` skill); new code should use `/api/object`.
 pub async fn get_trace(
     State(state): State<AppState>,
     creds: MaybeCreds,

@@ -6,8 +6,8 @@ the assets are served from disk by `../src/bin/dev_server.rs`.
 
 Key files:
 
-- `index.html` — landing page / S3 browser. Builds `/api/trace` URLs and opens
-  the viewer or flamegraph.
+- `index.html` — landing page / S3 browser. Emits one `trace=/api/object?…`
+  component per selected file and opens the viewer or flamegraph.
 - `viewer.html` — main trace viewer.
 - `flamegraph.html` — standalone CPU-profile flamegraph view.
 - `decode.js` — low-level binary trace-frame decoder (`TraceDecoder`).
@@ -17,12 +17,26 @@ Key files:
 ## The `trace=` query parameter
 
 `trace=` is **repeatable**. Each value is fetched independently and may be
-individually gzipped (unlike `/api/trace`, which gunzips server-side before
-returning a single response). `TraceParser.fetchTraces()` fetches every
-component, runs each through `maybeGunzip`, and concatenates the raw bytes.
-The decoder treats a concatenated stream as multiple segments — a mid-stream
+individually gzipped. `TraceParser.fetchTraces()` fetches every component (in
+parallel), runs each through `maybeGunzip`, and concatenates the raw bytes. The
+decoder treats a concatenated stream as multiple segments — a mid-stream
 `TRC\0` header resets the frame parser — so the combined buffer parses as one
 trace. Read all values with `params.getAll('trace')`, never `params.get`.
+
+For S3-backed traces, `index.html` points each `trace=` at
+`/api/object?bucket=&key=`, which serves one file's raw (still-gzipped) bytes.
+The browser thus downloads the files in parallel and decompresses them
+client-side — far less network transfer than a single merged response.
+
+### `/api/trace` (deprecated)
+
+`GET /api/trace?bucket=&keys=a&keys=b` fetches every key, gunzips each
+server-side, and returns one concatenated **uncompressed** blob. This is
+**deprecated and slated for removal**: it transfers far more bytes (the merged,
+decompressed trace) and serializes the work on the backend. The UI no longer
+links to it; it remains only for out-of-tree callers (e.g. the
+`dial9-trace-loading` skill). New code should fetch individual objects via
+`/api/object` and let `fetchTraces` merge them.
 
 ## Tests — IMPORTANT for agents
 
