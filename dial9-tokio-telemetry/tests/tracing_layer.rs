@@ -4,7 +4,7 @@
 // (thread-local) instead.
 
 use dial9_tokio_telemetry::telemetry::{DiskWriter, TracedRuntime};
-use dial9_tokio_telemetry::tracing_layer::Dial9TokioLayer;
+use dial9_tokio_telemetry::tracing_layer::Dial9TracingLayer;
 use dial9_trace_format::types::FieldValueRef;
 use std::collections::HashSet;
 use std::sync::{Arc, Barrier};
@@ -131,7 +131,7 @@ fn span_events_appear_in_trace() {
     let writer = DiskWriter::single_file(&trace_path).unwrap();
     let (runtime, guard) = TracedRuntime::build_and_start(builder, writer).unwrap();
 
-    let subscriber = tracing_subscriber::registry().with(Dial9TokioLayer::new());
+    let subscriber = tracing_subscriber::registry().with(Dial9TracingLayer::new());
     tracing::subscriber::set_global_default(subscriber).expect("failed to set global subscriber");
 
     runtime.block_on(async {
@@ -321,7 +321,7 @@ fn span_events_appear_in_trace() {
 /// Verify the layer silently skips when no Dial9Handle is present.
 #[test]
 fn no_telemetry_handle_does_not_panic() {
-    let subscriber = tracing_subscriber::registry().with(Dial9TokioLayer::new());
+    let subscriber = tracing_subscriber::registry().with(Dial9TracingLayer::new());
     let _guard = tracing::subscriber::set_default(subscriber);
 
     // This runs on a plain thread with no dial9 runtime, so no Dial9Handle.
@@ -345,7 +345,7 @@ fn span_events_on_current_thread_runtime() {
     let writer = DiskWriter::single_file(&trace_path).unwrap();
     let (runtime, guard) = TracedRuntime::build_and_start(builder, writer).unwrap();
 
-    let subscriber = tracing_subscriber::registry().with(Dial9TokioLayer::new());
+    let subscriber = tracing_subscriber::registry().with(Dial9TracingLayer::new());
     let _sub_guard = tracing::subscriber::set_default(subscriber);
 
     runtime.block_on(async {

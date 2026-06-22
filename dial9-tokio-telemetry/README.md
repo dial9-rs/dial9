@@ -391,15 +391,15 @@ Without liveset tracking, the profiler adds negligible overhead. With liveset tr
 dial9-tokio-telemetry = { version = "0.3", features = ["tracing-layer"] }
 ```
 
-**Use tracing_subscriber to connect the `Dial9TokioLayer`:**
+**Use tracing_subscriber to connect the `Dial9TracingLayer`:**
 ```rust
-use dial9_tokio_telemetry::tracing_layer::Dial9TokioLayer;
+use dial9_tokio_telemetry::tracing_layer::Dial9TracingLayer;
 use tracing_subscriber::prelude::*;
 
 tracing_subscriber::registry()
     .with(tracing_subscriber::fmt::layer())
     .with(
-        Dial9TokioLayer::new().with_filter(
+        Dial9TracingLayer::new().with_filter(
             tracing_subscriber::filter::Targets::new()
                 .with_target("my_app", tracing::Level::TRACE)
                 .with_default(tracing::Level::ERROR),

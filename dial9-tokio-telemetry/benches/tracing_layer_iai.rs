@@ -2,7 +2,7 @@
 //!
 //! Two groups, each with baseline / depth 1·3·5 / with_fields:
 //! - `tracing_only`: spans with registry subscriber (no dial9 encoding)
-//! - `with_dial9`: spans with `Dial9TokioLayer` (full encoding path)
+//! - `with_dial9`: spans with `Dial9TracingLayer` (full encoding path)
 //!
 //! Multi-thread contention scaling is in `tracing_layer_bench.rs`.
 //!
@@ -19,7 +19,7 @@
 fn main() {}
 
 use dial9_tokio_telemetry::telemetry::{InMemoryWriter, TelemetryGuard, TracedRuntime};
-use dial9_tokio_telemetry::tracing_layer::Dial9TokioLayer;
+use dial9_tokio_telemetry::tracing_layer::Dial9TracingLayer;
 use iai_callgrind::{library_benchmark, library_benchmark_group, main};
 use std::hint::black_box;
 use tokio::runtime::Runtime;
@@ -53,7 +53,7 @@ fn setup_with_dial9() -> Harness {
         .build_and_start(builder, InMemoryWriter::new(16 * 1024 * 1024).unwrap())
         .unwrap();
     let _sub_guard = tracing::subscriber::set_default(
-        tracing_subscriber::registry().with(Dial9TokioLayer::new()),
+        tracing_subscriber::registry().with(Dial9TracingLayer::new()),
     );
     Harness {
         runtime,
