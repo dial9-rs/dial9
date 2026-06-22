@@ -27,6 +27,12 @@ pub struct ObjectInfo {
 /// The chunk error type is [`std::io::Error`] so the stream composes directly
 /// with [`axum::body::Body::from_stream`] (whose error bound is
 /// `Into<BoxError>`).
+///
+/// `#[non_exhaustive]`: adding a field later (e.g. `content_type`) must not be a
+/// breaking change for out-of-crate `StorageBackend` implementors. It is only
+/// ever constructed inside this crate, where struct-literal construction still
+/// works.
+#[non_exhaustive]
 pub struct ObjectStream {
     /// The object's bytes, chunk by chunk, as they arrive from the backend.
     pub stream: Pin<Box<dyn Stream<Item = Result<Bytes, std::io::Error>> + Send>>,
