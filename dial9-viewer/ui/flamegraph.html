@@ -73,6 +73,7 @@
 
         <script src="decode.js"></script>
         <script src="trace_parser.js"></script>
+        <script src="creds.js"></script>
         <script src="trace_analysis.js"></script>
         <script src="flamegraph.js"></script>
         <script>
@@ -108,9 +109,18 @@
                     loadingEl.textContent = traceUrls.length > 1
                         ? `Fetching ${traceUrls.length} traces\u2026`
                         : "Fetching trace\u2026";
-                    buffer = await TraceParser.fetchTraces(traceUrls);
+                    // Attach bring-your-own-credentials headers if present.
+                    const credHeaders = window.Dial9Creds ? Dial9Creds.headers() : {};
+                    buffer = await TraceParser.fetchTraces(traceUrls, { headers: credHeaders });
                 } catch (err) {
-                    showError("Failed to fetch trace: " + err.message);
+                    if (/HTTP 401/.test(err.message) && window.Dial9Creds && !Dial9Creds.has()) {
+                        showError(
+                            "This trace requires AWS credentials. Open it from the dial9 " +
+                            "home page after applying your credentials."
+                        );
+                    } else {
+                        showError("Failed to fetch trace: " + err.message);
+                    }
                     return;
                 }
 

@@ -9,6 +9,12 @@ use std::sync::Arc;
 struct FakeBackend;
 
 impl StorageBackend for FakeBackend {
+    fn list_buckets(
+        &self,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, StorageError>> + Send + '_>> {
+        Box::pin(async { Ok(vec![]) })
+    }
+
     fn list_objects(
         &self,
         _bucket: &str,
@@ -35,23 +41,78 @@ impl StorageBackend for FakeBackend {
 }
 
 fn fake_s3_client(fs_root: &std::path::Path) -> aws_sdk_s3::Client {
-    let fs = s3s_fs::FileSystem::new(fs_root).unwrap();
-    let mut builder = s3s::service::S3ServiceBuilder::new(fs);
-    builder.set_auth(s3s::auth::SimpleAuth::from_single("test", "test"));
-    let s3_service = builder.build();
-    let s3_client: s3s_aws::Client = s3_service.into();
-
     let s3_config = aws_sdk_s3::Config::builder()
         .behavior_version_latest()
         .credentials_provider(aws_sdk_s3::config::Credentials::new(
             "test", "test", None, None, "test",
         ))
         .region(aws_sdk_s3::config::Region::new("us-east-1"))
-        .http_client(s3_client)
+        .http_client(fake_s3_http_client(fs_root))
         .force_path_style(true)
         .build();
 
     aws_sdk_s3::Client::from_conf(s3_config)
+}
+
+/// Build the s3s-backed HTTP client (without wrapping it in an `aws_sdk_s3`
+/// client). Used both by [`fake_s3_client`] and by the ephemeral
+/// bring-your-own-credentials path, which needs to inject this connector into
+/// `EphemeralS3Config`.
+fn fake_s3_http_client(fs_root: &std::path::Path) -> aws_sdk_s3::config::SharedHttpClient {
+    let fs = s3s_fs::FileSystem::new(fs_root).unwrap();
+    let mut builder = s3s::service::S3ServiceBuilder::new(fs);
+    builder.set_auth(s3s::auth::SimpleAuth::from_single("test", "test"));
+    let s3_service = builder.build();
+    let s3_client: s3s_aws::Client = s3_service.into();
+    aws_sdk_s3::config::SharedHttpClient::new(s3_client)
+}
+
+/// An `EphemeralS3Config` pointed at the s3s fake, so the header → ephemeral
+/// client → fake-S3 path can be exercised in tests.
+fn fake_ephemeral_config(fs_root: &std::path::Path) -> dial9_viewer::storage::EphemeralS3Config {
+    dial9_viewer::storage::EphemeralS3Config {
+        http_client: fake_s3_http_client(fs_root),
+        // s3s ignores the host, but an endpoint is required so the SDK doesn't
+        // try to resolve real S3 DNS.
+        endpoint_url: Some("http://localhost:0".to_string()),
+        force_path_style: true,
+    }
+}
+
+/// A backend that always errors — used to prove a request was served by the
+/// header-supplied ephemeral backend and NOT the server's default backend.
+struct ErroringBackend;
+
+impl StorageBackend for ErroringBackend {
+    fn list_buckets(
+        &self,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, StorageError>> + Send + '_>> {
+        Box::pin(async { Err(StorageError::Other("default backend used".into())) })
+    }
+
+    fn list_objects(
+        &self,
+        _bucket: &str,
+        _prefix: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<ObjectInfo>, StorageError>> + Send + '_>> {
+        Box::pin(async { Err(StorageError::Other("default backend used".into())) })
+    }
+
+    fn list_prefixes(
+        &self,
+        _bucket: &str,
+        _prefix: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, StorageError>> + Send + '_>> {
+        Box::pin(async { Err(StorageError::Other("default backend used".into())) })
+    }
+
+    fn get_object(
+        &self,
+        _bucket: &str,
+        _key: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, StorageError>> + Send + '_>> {
+        Box::pin(async { Err(StorageError::Other("default backend used".into())) })
+    }
 }
 
 async fn start_server(state: AppState) -> String {
@@ -479,6 +540,217 @@ async fn trace_serves_large_decompressed_segment() {
     check!(body.len() == big_data.len());
 }
 
+// --- bring-your-own-credentials tests ---
+
+const H_AKID: &str = "x-dial9-aws-access-key-id";
+const H_SECRET: &str = "x-dial9-aws-secret-access-key";
+const H_REGION: &str = "x-dial9-aws-region";
+
+/// Set up a BYO server: the default backend always errors, so any successful
+/// data response must have been served by the header-supplied ephemeral
+/// backend pointed at the s3s fake.
+async fn setup_byo_test(bucket: &str) -> (aws_sdk_s3::Client, String, tempfile::TempDir) {
+    let s3_root = tempfile::tempdir().unwrap();
+    std::fs::create_dir(s3_root.path().join(bucket)).unwrap();
+
+    let upload_client = fake_s3_client(s3_root.path());
+
+    let state = AppState::new(Arc::new(ErroringBackend), Some(bucket.to_string()), None)
+        .with_byo_creds(true)
+        .with_ephemeral_s3(fake_ephemeral_config(s3_root.path()));
+    let base = start_server(state).await;
+    (upload_client, base, s3_root)
+}
+
+#[tokio::test]
+async fn byo_credentials_serve_search_from_headers() {
+    let (s3, base, _dir) = setup_byo_test("byo-bucket").await;
+    let client = reqwest::Client::new();
+
+    put_object(
+        &s3,
+        "byo-bucket",
+        "traces/2026-04-09/seg.bin.gz",
+        &gzip_bytes(b"x"),
+    )
+    .await;
+
+    // With credentials → served by the ephemeral backend (the s3s fake).
+    let resp = client
+        .get(format!("{base}/api/search?q=traces/&bucket=byo-bucket"))
+        .header(H_AKID, "test")
+        .header(H_SECRET, "test")
+        .header(H_REGION, "us-east-1")
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() == 200);
+    let body: Vec<ObjectInfo> = resp.json().await.unwrap();
+    check!(body.len() == 1);
+    check!(body[0].key == "traces/2026-04-09/seg.bin.gz");
+}
+
+#[tokio::test]
+async fn byo_credentials_serve_trace_from_headers() {
+    let (s3, base, _dir) = setup_byo_test("byo-bucket").await;
+    let client = reqwest::Client::new();
+
+    let data = b"TRACE_BYTES";
+    put_object(&s3, "byo-bucket", "seg.bin.gz", &gzip_bytes(data)).await;
+
+    let resp = client
+        .get(format!(
+            "{base}/api/trace?keys=seg.bin.gz&bucket=byo-bucket"
+        ))
+        .header(H_AKID, "test")
+        .header(H_SECRET, "test")
+        .header(H_REGION, "us-east-1")
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() == 200);
+    let body = resp.bytes().await.unwrap();
+    check!(body.as_ref() == data);
+}
+
+#[tokio::test]
+async fn byo_credentials_list_buckets_from_headers() {
+    // The s3s fake exposes buckets that exist as directories under its root.
+    let (s3, base, dir) = setup_byo_test("byo-bucket").await;
+    // Create a second bucket so the listing returns more than one.
+    std::fs::create_dir(dir.path().join("dial9-traces")).unwrap();
+    // Touch the fake so the dir is recognized as a bucket (PutObject creates it
+    // lazily otherwise); upload into both.
+    put_object(&s3, "byo-bucket", "x", b"x").await;
+
+    let resp = client_list_buckets(&base).await;
+    check!(resp.status().as_u16() == 200);
+    let names: Vec<String> = resp.json().await.unwrap();
+    check!(names.contains(&"byo-bucket".to_string()));
+    check!(names.contains(&"dial9-traces".to_string()));
+}
+
+#[tokio::test]
+async fn credentials_check_succeeds_for_existing_bucket() {
+    // HeadBucket against the s3s fake succeeds for a bucket that exists, so the
+    // check endpoint reports ok:true. (The wrong-credentials → ok:false path is
+    // validated live against real S3; s3s does not enforce sigv4 the same way.)
+    let (_s3, base, _dir) = setup_byo_test("byo-bucket").await;
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/api/credentials/check?bucket=byo-bucket"))
+        .header(H_AKID, "test")
+        .header(H_SECRET, "test")
+        .header(H_REGION, "us-east-1")
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() == 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    check!(body["ok"] == true);
+}
+
+#[tokio::test]
+async fn credentials_check_requires_credentials() {
+    // No headers → the check endpoint reports the missing-credentials 400.
+    let (_s3, base, _dir) = setup_byo_test("byo-bucket").await;
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/api/credentials/check?bucket=byo-bucket"))
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() == 400);
+}
+
+#[tokio::test]
+async fn list_buckets_without_credentials_uses_default_backend() {
+    // No headers → the (erroring) default backend, not the ephemeral path.
+    let (_s3, base, _dir) = setup_byo_test("byo-bucket").await;
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("{base}/api/buckets"))
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() == 500);
+}
+
+/// GET /api/buckets with the s3s test credentials in headers.
+async fn client_list_buckets(base: &str) -> reqwest::Response {
+    reqwest::Client::new()
+        .get(format!("{base}/api/buckets"))
+        .header(H_AKID, "test")
+        .header(H_SECRET, "test")
+        .header(H_REGION, "us-east-1")
+        .send()
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn without_credentials_falls_back_to_default_backend() {
+    // No headers → the (erroring) default backend is used. Proves credentials
+    // are genuinely optional AND that the default path is still taken.
+    let (_s3, base, _dir) = setup_byo_test("byo-bucket").await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .get(format!("{base}/api/search?q=traces/&bucket=byo-bucket"))
+        .send()
+        .await
+        .unwrap();
+    // ErroringBackend → 500, not a 200 from the ephemeral path.
+    check!(resp.status().as_u16() == 500);
+}
+
+#[tokio::test]
+async fn incomplete_credentials_rejected_with_400() {
+    let (_s3, base, _dir) = setup_byo_test("byo-bucket").await;
+    let client = reqwest::Client::new();
+
+    // Access key id without a secret → 400, never a silent fallback.
+    let resp = client
+        .get(format!("{base}/api/search?q=traces/&bucket=byo-bucket"))
+        .header(H_AKID, "test")
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() == 400);
+}
+
+#[tokio::test]
+async fn config_reports_credential_support() {
+    let (_s3, base, _dir) = setup_byo_test("byo-bucket").await;
+    let client = reqwest::Client::new();
+
+    let resp: serde_json::Value = client
+        .get(format!("{base}/api/config"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    check!(resp["supports_byo_credentials"] == true);
+}
+
+#[tokio::test]
+async fn config_reports_no_credential_support_by_default() {
+    // A plain (non-BYO) server should not advertise credential support.
+    let state = AppState::new(Arc::new(FakeBackend), Some("b".into()), None);
+    let base = start_server(state).await;
+    let client = reqwest::Client::new();
+
+    let resp: serde_json::Value = client
+        .get(format!("{base}/api/config"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    check!(resp["supports_byo_credentials"] == false);
+}
+
 // --- local backend tests ---
 
 fn setup_local_dir() -> tempfile::TempDir {
@@ -577,7 +849,7 @@ async fn local_trace_not_found() {
         .send()
         .await
         .unwrap();
-    check!(resp.status().as_u16() == 500);
+    check!(resp.status().as_u16() == 404);
 }
 
 #[tokio::test]

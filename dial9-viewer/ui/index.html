@@ -52,6 +52,42 @@
         .status { padding: 40px; text-align: center; color: #666; font-size: 0.9em; }
         .status.error { color: #ff6b6b; }
 
+        /* Bring-your-own-credentials panel */
+        #creds-panel {
+            padding: 12px 20px; background: #1e2746;
+            border-bottom: 1px solid #333; flex-shrink: 0;
+            display: flex; flex-direction: column; gap: 8px;
+        }
+        #creds-panel .creds-row {
+            display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+        }
+        #creds-panel label { font-size: 0.8em; color: #888; }
+        #creds-panel input {
+            background: #2a2a4a; border: 1px solid #444; color: #e0e0e0;
+            padding: 6px 10px; border-radius: 4px; font-size: 0.85em; font-family: inherit;
+        }
+        #creds-panel strong { font-size: 0.9em; color: #e0e0e0; }
+        #creds-panel .creds-hint { font-size: 0.75em; color: #888; }
+        #creds-panel .spacer { flex: 1; }
+        .creds-status { font-size: 0.8em; }
+        .creds-status.ok { color: #6ee7a0; }
+        .creds-status.error { color: #ff6b6b; }
+        #creds-btn.active { background: #2a2a4a; border-color: #6ee7a0; color: #ccc; }
+        /* The label is a <span>, so `header span { color }` would otherwise win;
+           inherit the button's own text color instead. */
+        #creds-btn-label { color: inherit; }
+        /* The 🔑 emoji's tall glyph box inflates the line box (and so the button
+           height) vs the text-only TZ button. Constrain the emoji to a zero-height
+           inline-block so it can't grow the line box; both buttons then share the
+           same default line-height and match in height. */
+        .creds-btn-icon {
+            display: inline-block; line-height: 0; vertical-align: middle; font-size: 0.95em;
+        }
+        .creds-buckets { display: flex; flex-wrap: wrap; gap: 6px; max-height: 120px; overflow-y: auto; }
+        .creds-buckets button { font-size: 0.8em; padding: 4px 10px; }
+        .creds-buckets button.match { border-color: #6c63ff; color: #c7c2ff; }
+        .creds-buckets button.selected { background: #6c63ff; border-color: #6c63ff; color: #fff; }
+
         /* Tab bar */
         .tab-bar {
             display: flex; gap: 0; border-bottom: 1px solid #333;
@@ -174,8 +210,52 @@
         <h1>dial9 Trace Browser</h1>
         <span>search &amp; view traces from S3</span>
         <span class="spacer"></span>
+        <button id="creds-btn" style="display:none" title="Use your own temporary AWS credentials">
+            <span class="creds-btn-icon">🔑</span> <span id="creds-btn-label">AWS Credentials</span>
+        </button>
         <button id="tz-btn" title="Toggle between UTC and local timezone">TZ: UTC</button>
     </header>
+
+    <!-- Bring-your-own-credentials panel. Hidden unless the server reports
+         support (S3 backends). Credentials are kept in sessionStorage and sent
+         as x-dial9-aws-* headers; they never leave this origin. -->
+    <div id="creds-panel" style="display:none">
+        <div class="creds-row">
+            <strong>Your AWS credentials</strong>
+            <span class="creds-hint">temporary, scoped credentials recommended — sent to this backend to call S3 on your behalf</span>
+            <span class="spacer"></span>
+            <button id="creds-close" title="Close">✕</button>
+        </div>
+        <div class="creds-row" style="align-items:flex-start">
+            <label style="padding-top:6px">Paste JSON</label>
+            <textarea id="creds-paste" rows="2" spellcheck="false" autocomplete="off"
+                placeholder="Paste an STS / Isengard credentials JSON blob here to fill the fields below"
+                style="flex:1;min-width:320px;resize:vertical;background:#2a2a4a;border:1px solid #444;color:#e0e0e0;padding:6px 10px;border-radius:4px;font-size:0.8em;font-family:ui-monospace,Menlo,monospace"></textarea>
+            <button id="creds-paste-fill" title="Extract credentials from the pasted JSON">Fill fields</button>
+        </div>
+        <div class="creds-row">
+            <label>Access key ID</label>
+            <input type="text" id="creds-akid" autocomplete="off" spellcheck="false" style="width:200px" />
+            <label>Secret access key</label>
+            <input type="password" id="creds-secret" autocomplete="off" style="width:220px" />
+        </div>
+        <div class="creds-row">
+            <label>Session token</label>
+            <input type="password" id="creds-token" autocomplete="off" placeholder="(for temporary creds)" style="width:320px" />
+            <label>Region</label>
+            <input type="text" id="creds-region" autocomplete="off" placeholder="auto-detect" style="width:120px" />
+        </div>
+        <div class="creds-row">
+            <button class="primary" id="creds-apply">Apply</button>
+            <button id="creds-clear">Clear</button>
+            <span id="creds-status" class="creds-status"></span>
+        </div>
+        <!-- Bucket picker, populated from GET /api/buckets after Apply. -->
+        <div class="creds-row" id="creds-buckets-row" style="display:none;align-items:flex-start">
+            <label style="padding-top:6px">Bucket</label>
+            <div id="creds-buckets" class="creds-buckets"></div>
+        </div>
+    </div>
 
     <div class="controls">
         <label>Bucket:</label>
@@ -279,6 +359,8 @@
         <span style="color:#555;font-size:0.8em;margin-left:auto">drop a .bin file to open viewer</span>
     </footer>
 
+    <script src="creds.js"></script>
+    <script src="prefix_detect.js"></script>
     <script src="heatmap.js"></script>
     <script>
     // ── ?trace= passthrough: redirect to viewer (preserving all params,
@@ -328,6 +410,222 @@
     const browseStatus = document.getElementById('browse-status');
     const heatmapView = document.getElementById('heatmap-view');
 
+    // Wrapper around fetch that attaches the bring-your-own-credentials headers
+    // (if any are set) to every /api/* request. No-op when no creds are stored.
+    function apiFetch(url, opts = {}) {
+        const credHeaders = window.Dial9Creds ? Dial9Creds.headers() : {};
+        return fetch(url, { ...opts, headers: { ...(opts.headers || {}), ...credHeaders } });
+    }
+
+    // ── Bring-your-own-credentials panel ──
+    // Only wired up when the server reports support (S3 backends). The panel and
+    // the scripting API (window.Dial9Creds.set) share this exact apply path, so
+    // an injected userscript and a human exercise identical logic.
+    function initCredsUi() {
+        const btn = document.getElementById('creds-btn');
+        const btnLabel = document.getElementById('creds-btn-label');
+        const panel = document.getElementById('creds-panel');
+        const akid = document.getElementById('creds-akid');
+        const secret = document.getElementById('creds-secret');
+        const token = document.getElementById('creds-token');
+        const region = document.getElementById('creds-region');
+        const statusEl = document.getElementById('creds-status');
+
+        btn.style.display = '';
+
+        function setStatus(msg, kind) {
+            statusEl.textContent = msg || '';
+            statusEl.className = 'creds-status' + (kind ? ' ' + kind : '');
+        }
+
+        // Reflect stored-credential state in the header button and panel inputs.
+        function refresh() {
+            const stored = Dial9Creds.get();
+            const active = Dial9Creds.has();
+            btn.classList.toggle('active', active);
+            btnLabel.textContent = active ? 'AWS Credentials ✓' : 'AWS Credentials';
+            if (stored) {
+                akid.value = stored.accessKeyId || '';
+                secret.value = stored.secretAccessKey || '';
+                token.value = stored.sessionToken || '';
+                region.value = stored.region || '';
+            }
+        }
+
+        function togglePanel(show) {
+            panel.style.display = (show ?? panel.style.display === 'none') ? '' : 'none';
+        }
+
+        btn.addEventListener('click', () => togglePanel());
+        document.getElementById('creds-close').addEventListener('click', () => togglePanel(false));
+
+        // Paste box: extract credentials from an STS / Isengard JSON blob into
+        // the individual fields, then let the user review and click Apply.
+        const pasteBox = document.getElementById('creds-paste');
+        function fillFromPaste() {
+            const text = pasteBox.value.trim();
+            if (!text) { setStatus('Paste a credentials JSON blob first', 'error'); return; }
+            let parsed;
+            try {
+                parsed = Dial9Creds.parse(text);
+            } catch (e) {
+                setStatus('Could not parse: ' + e.message, 'error');
+                return;
+            }
+            akid.value = parsed.accessKeyId || '';
+            secret.value = parsed.secretAccessKey || '';
+            token.value = parsed.sessionToken || '';
+            if (parsed.region) region.value = parsed.region;
+            // Don't leave the raw secret/token sitting in the textarea.
+            pasteBox.value = '';
+            setStatus('Filled from pasted JSON — review and click Apply', 'ok');
+        }
+        document.getElementById('creds-paste-fill').addEventListener('click', fillFromPaste);
+
+        const bucketsRow = document.getElementById('creds-buckets-row');
+        const bucketsBox = document.getElementById('creds-buckets');
+
+        // Render the bucket picker. Buckets whose name contains "dial9" are
+        // surfaced first and highlighted, since those are the trace buckets.
+        function renderBucketPicker(names) {
+            bucketsBox.innerHTML = '';
+            bucketsRow.style.display = '';
+
+            // Only trace buckets are relevant — hard-filter to names containing
+            // "dial9" and hide everything else.
+            const isMatch = (n) => n.toLowerCase().includes('dial9');
+            const matches = names.filter(isMatch).sort((a, b) => a.localeCompare(b));
+
+            if (!matches.length) {
+                bucketsBox.textContent = names.length
+                    ? 'No dial9 trace buckets visible to these credentials.'
+                    : 'No buckets visible to these credentials.';
+                return;
+            }
+
+            for (const name of matches) {
+                const b = document.createElement('button');
+                b.textContent = name;
+                b.classList.add('match');
+                b.addEventListener('click', () => selectBucket(name, b));
+                bucketsBox.appendChild(b);
+            }
+
+            // Auto-select when there's exactly one dial9 bucket — the common case.
+            if (matches.length === 1) {
+                selectBucket(matches[0], bucketsBox.firstChild);
+            }
+        }
+
+        // Choose a bucket: fill the bucket field, detect its region via
+        // /api/credentials/check, then run the search.
+        async function selectBucket(name, el) {
+            [...bucketsBox.children].forEach(c => c.classList.remove('selected'));
+            if (el) el.classList.add('selected');
+            bucketInput.value = name;
+            setStatus(`Detecting region for ${name}…`, null);
+            const result = await Dial9Creds.check(name);
+            if (result.ok) {
+                if (result.region) {
+                    region.value = result.region;
+                    // Persist the resolved region so it rides on every request.
+                    Dial9Creds.set({
+                        accessKeyId: akid.value,
+                        secretAccessKey: secret.value,
+                        sessionToken: token.value,
+                        region: result.region,
+                    });
+                }
+                setStatus(`Using ${name}${result.region ? ` · region ${result.region}` : ''}`, 'ok');
+                discoverPrefixes().then(() => reRunCurrentSearch());
+            } else {
+                setStatus(`Cannot use ${name}: ${result.error || 'unknown error'}`, 'error');
+            }
+        }
+
+        document.getElementById('creds-apply').addEventListener('click', async () => {
+            if (!akid.value.trim() || !secret.value.trim()) {
+                setStatus('Access key ID and secret are required', 'error');
+                return;
+            }
+            // Zero out any previously-selected bucket: it (and the server's
+            // default bucket) belong to a different identity than these
+            // credentials. The user re-picks from their own buckets below.
+            bucketInput.value = '';
+            // Store the credentials (no region detection yet — we don't have a
+            // bucket). Then list the buckets these credentials can see; this both
+            // validates the credentials and powers the picker.
+            await Dial9Creds.set({
+                accessKeyId: akid.value,
+                secretAccessKey: secret.value,
+                sessionToken: token.value,
+                region: region.value,
+                autoDetectRegion: false,
+            });
+            await loadBuckets();
+        });
+
+        // List the buckets the stored credentials can see and render the picker.
+        // Used by Apply and on page load when credentials are already present.
+        async function loadBuckets() {
+            setStatus('Listing buckets…', null);
+            try {
+                const buckets = await Dial9Creds.listBuckets();
+                setStatus(`${buckets.length} bucket(s) — pick one below`, 'ok');
+                renderBucketPicker(buckets);
+            } catch (e) {
+                setStatus('Rejected: ' + e.message, 'error');
+                bucketsRow.style.display = 'none';
+            }
+        }
+
+        document.getElementById('creds-clear').addEventListener('click', () => {
+            Dial9Creds.clear();
+            akid.value = secret.value = token.value = region.value = '';
+            // The selected bucket belonged to the now-removed identity; drop it
+            // so a later search can't query a foreign bucket as the server's
+            // ambient identity (which would 500/leak).
+            bucketInput.value = '';
+            bucketsBox.innerHTML = '';
+            bucketsRow.style.display = 'none';
+            // The heatmap was built from the now-removed identity's bucket; wipe
+            // it so stale results don't linger after the credentials are gone.
+            resetBrowsePane();
+            setStatus('Credentials cleared', null);
+        });
+
+        // React to programmatic changes (e.g. an injected userscript calling
+        // Dial9Creds.set) as well as the panel's own actions: refresh the UI and
+        // re-run the current search so results reflect the new credentials.
+        window.addEventListener('dial9:credentials-changed', () => {
+            refresh();
+            // Only re-run when credentials are now present. This event also fires
+            // on Clear, where re-running would query the last-selected bucket with
+            // no credentials (the server's ambient identity) and fail.
+            if (autoSearched && Dial9Creds.has()) reRunCurrentSearch();
+        });
+
+        refresh();
+
+        // Returning user: credentials already in sessionStorage. Keep the panel
+        // closed (the green button signals creds are active) but re-list their
+        // buckets in the background so the picker is ready when they open it
+        // (the stored bucket, if any, belongs to a different identity and isn't
+        // trusted here).
+        if (Dial9Creds.has()) {
+            loadBuckets();
+        }
+    }
+
+    // Re-run whichever search the user last triggered (browse or raw).
+    function reRunCurrentSearch() {
+        if (currentTab === 'raw') {
+            if (document.getElementById('raw-search-input').value.trim()) doRawSearch();
+        } else if (bucketInput.value.trim()) {
+            doTimeRangeSearch();
+        }
+    }
+
     // ── Init: load config ──
     const params = new URLSearchParams(window.location.search);
     if (params.get('bucket')) bucketInput.value = params.get('bucket');
@@ -348,12 +646,19 @@
         }
         return r.json();
     }).then(config => {
-        if (!bucketInput.value && config.default_bucket) bucketInput.value = config.default_bucket;
+        // The server's default bucket belongs to the server's identity. Don't
+        // prefill it when the user has brought their own credentials — that
+        // bucket isn't theirs; they pick from their own buckets instead.
+        const usingByoCreds = window.Dial9Creds && Dial9Creds.has();
+        if (!bucketInput.value && config.default_bucket && !usingByoCreds) {
+            bucketInput.value = config.default_bucket;
+        }
         if (config.default_prefix) {
             prefixInput.value = config.default_prefix;
             serverHasPrefix = true;
             updateSearchReady();
         }
+        if (config.supports_byo_credentials) initCredsUi();
         discoverPrefixes().then(autoSearch);
     }).catch(() => { discoverPrefixes().then(autoSearch); });
 
@@ -376,7 +681,7 @@
         const bucket = bucketInput.value.trim();
         if (!bucket) { prefixInput.placeholder = 'e.g. traces'; updateSearchReady(); return; }
         try {
-            const resp = await fetch(`/api/prefixes?bucket=${encodeURIComponent(bucket)}`);
+            const resp = await apiFetch(`/api/prefixes?bucket=${encodeURIComponent(bucket)}`);
             if (!resp.ok) {
                 const body = await resp.text().catch(() => '');
                 console.warn(`prefix discovery failed: HTTP ${resp.status}${body ? ': ' + body : ''}`);
@@ -389,6 +694,17 @@
             suggestions.innerHTML = '';
             if (prefixes.length === 0) {
                 prefixInput.placeholder = '(none found)';
+                updateSearchReady();
+                return;
+            }
+            // Issue #471: when the root children are all date partitions
+            // (YYYY-MM-DD/), the bucket has no key prefix — the trace data
+            // starts directly at the date layer. Don't offer the dates as
+            // prefix suggestions; the correct prefix is empty.
+            if (!serverHasPrefix && isDateLayer(prefixes)) {
+                prefixInput.value = '';
+                prefixInput.placeholder = '(no prefix — dates at root)';
+                serverHasPrefix = false;
                 updateSearchReady();
                 return;
             }
@@ -443,6 +759,8 @@
     });
 
     // ── Helpers ──
+    // isDateLayer / lastSegment live in prefix_detect.js (loaded above).
+
     function esc(s) {
         const d = document.createElement('div');
         d.textContent = s;
@@ -630,7 +948,7 @@
             // Fire parallel queries for each hour prefix
             const fetches = prefixes.map(p => {
                 const url = `/api/search?bucket=${encodeURIComponent(bucket)}&q=${encodeURIComponent(p)}`;
-                return fetch(url).then(async r => {
+                return apiFetch(url).then(async r => {
                     if (!r.ok) {
                         const body = await r.text().catch(() => '');
                         throw new Error(`HTTP ${r.status}${body ? ': ' + body : ''}`);
@@ -658,7 +976,7 @@
                 heatmapView.style.display = 'none';
                 // Show sample keys to help the user understand the bucket layout
                 try {
-                    const sampleResp = await fetch(`/api/search?bucket=${encodeURIComponent(bucket)}&q=`);
+                    const sampleResp = await apiFetch(`/api/search?bucket=${encodeURIComponent(bucket)}&q=`);
                     const samples = sampleResp.ok ? await sampleResp.json() : [];
                     if (samples.length > 0) {
                         browseStatus.innerHTML = 'No traces found in this time range. Sample keys in this bucket:<br>' +
@@ -993,6 +1311,23 @@
     }
 
     // Restore the full data extent (no-op if not currently zoomed).
+    // Wipe the browse pane back to its initial empty state. Used when
+    // credentials are cleared: the heatmap belongs to the now-removed identity's
+    // bucket, so it must not linger.
+    function resetBrowsePane() {
+        heatmapSegments = [];
+        heatmapRows = [];
+        heatmapDomain = null;
+        heatmapFullDomain = null;
+        heatmapCols = [];
+        heatmapColMax = 0;
+        setHeatmapSelection(null);
+        heatmapView.style.display = 'none';
+        browseStatus.style.display = '';
+        browseStatus.className = 'status';
+        browseStatus.textContent = 'Select a time range and click Search to find traces.';
+    }
+
     function resetHeatmapZoom() {
         if (!heatmapFullDomain) return;
         const { tMin, tMax } = heatmapFullDomain;
@@ -1173,7 +1508,7 @@
         document.getElementById('raw-table').style.display = 'none';
 
         try {
-            const resp = await fetch(url);
+            const resp = await apiFetch(url);
             if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${await resp.text()}`);
             rawObjects = await resp.json();
             renderRawTable(rawObjects);
