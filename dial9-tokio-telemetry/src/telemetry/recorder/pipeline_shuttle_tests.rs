@@ -168,7 +168,7 @@ fn test_telemetry_core_pipeline() {
                     // Randomly choose: emit via handle (TL buffer path)
                     // or via mock source (flush-thread path).
                     if rng.gen_range(0u32..2) == 0 {
-                        h.record_encodable_event(&ev);
+                        h.record_event(ev);
                     } else {
                         source_pending.lock().unwrap().push(ev);
                     }
@@ -306,7 +306,7 @@ fn run_erroring_pipeline(fault: fs::FaultPolicy) -> u64 {
                         };
                         // Errors are expected; whether the event is
                         // recorded or dropped is not asserted here.
-                        h.record_encodable_event(&ev);
+                        h.record_event(ev);
                     }
                 })
             })
