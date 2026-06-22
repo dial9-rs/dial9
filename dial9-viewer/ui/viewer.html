@@ -1381,8 +1381,17 @@
             /** Build the standard onParseProgress callback for the spinner. */
             function makeParseProgress() {
                 return ({ bytesRead, totalBytes, eventCount }) => {
-                    const pct = totalBytes ? (((bytesRead / totalBytes) * 100) | 0) : 0;
-                    updateLoadProgress(`Parsing: ${pct}% · ${(eventCount / 1000) | 0}k events`);
+                    const events = `${(eventCount / 1000) | 0}k events`;
+                    // Streaming reports totalBytes=null (the full size isn't known
+                    // until the stream ends), so show MB decoded instead of a
+                    // bogus percentage. The buffered path knows the total.
+                    if (totalBytes) {
+                        const pct = ((bytesRead / totalBytes) * 100) | 0;
+                        updateLoadProgress(`Parsing: ${pct}% · ${events}`);
+                    } else {
+                        const mb = (bytesRead / (1024 * 1024)).toFixed(1);
+                        updateLoadProgress(`Parsing: ${mb} MB · ${events}`);
+                    }
                 };
             }
 

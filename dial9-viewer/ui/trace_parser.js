@@ -956,8 +956,9 @@
    *
    * @param {AsyncIterable<Uint8Array>} chunks raw trace bytes (post-gunzip)
    * @param {Object} [options] same options as {@link parseTrace}, plus
-   *   `onParseProgress({bytesRead, totalBytes, eventCount})` (totalBytes is the
-   *   bytes received so far — unknown until the stream ends).
+   *   `onParseProgress({bytesRead, totalBytes, eventCount})`. `totalBytes` is
+   *   `null` here — when streaming we don't know the trace's full size until the
+   *   stream ends, so callers must not compute a percentage from it.
    * @returns {Promise<ParsedTrace>}
    */
   async function parseTraceStream(chunks, options) {
@@ -1094,7 +1095,11 @@
       if (onProgress) {
         onProgress({
           bytesRead: consumedBytes,
-          totalBytes: consumedBytes + acc.length,
+          // Total is unknown while streaming (we haven't seen the whole trace),
+          // so report null rather than `consumedBytes + acc.length` — `acc` is
+          // just the small undrained tail, which would peg any percentage at
+          // ~99% the entire time.
+          totalBytes: null,
           eventCount: state.events.length,
         });
         // Yield so the browser can paint the spinner, but only once at least
@@ -1117,7 +1122,7 @@
       if (onProgress) {
         onProgress({
           bytesRead: consumedBytes,
-          totalBytes: consumedBytes + acc.length,
+          totalBytes: null, // unknown while streaming — see note above
           eventCount: state.events.length,
         });
       }
