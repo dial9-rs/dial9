@@ -1397,9 +1397,16 @@
 
             /** Finish loading: analyze the parsed trace, retain the buffer for
              *  in-memory re-parse (Set/Clear Range), and show the viewer. */
-            function showParsedTrace(parsed, buffer, name) {
+            async function showParsedTrace(parsed, buffer, name) {
                 trace = parsed;
                 updateLoadProgress(`Analyzing ${trace.events.length.toLocaleString()} events…`);
+                // processTrace() runs synchronously and hogs the main thread for
+                // a couple of seconds on a large trace. Yield for a paint frame
+                // first (double rAF: the callback after the next paint) so the
+                // browser actually renders the "Analyzing…" label before the
+                // blocking work starts — otherwise the label is set but never
+                // shown, and the spinner appears stuck on the last parse line.
+                await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
                 if (!processTrace()) {
                     resetDropZone();
                     return;
@@ -1452,8 +1459,7 @@
                     updateLoadProgress("Decompressing…");
                     const parsed = await parseTrace(buffer, fullOpts);
                     if (loadPerf) loadPerf.parseDoneMs = performance.now();
-                    await new Promise((r) => setTimeout(r, 0));
-                    showParsedTrace(parsed, buffer, name);
+                    await showParsedTrace(parsed, buffer, name);
                 } catch (err) {
                     if (err.name === "AbortError") return;
                     alert("Error: " + err.message);
@@ -1497,8 +1503,7 @@
                     const buffer = new Uint8Array(total);
                     let off = 0;
                     for (const c of captured) { buffer.set(c, off); off += c.length; }
-                    await new Promise((r) => setTimeout(r, 0));
-                    showParsedTrace(parsed, buffer.buffer, name);
+                    await showParsedTrace(parsed, buffer.buffer, name);
                 } catch (err) {
                     if (err.name === "AbortError") return;
                     throw err;
