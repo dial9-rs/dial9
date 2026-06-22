@@ -1393,6 +1393,13 @@
                     resetDropZone();
                     return;
                 }
+                // Trace is rendering: freeze the wall-clock timer. Log the final
+                // elapsed time for easy copy/paste measurement.
+                if (loadStartTime != null) {
+                    const secs = ((performance.now() - loadStartTime) / 1000).toFixed(1);
+                    console.log(`loaded in ${secs}s (events=${trace.events.length})`);
+                }
+                stopLoadTimer();
                 currentTraceBuffer = buffer;
                 currentTraceName = name;
                 showViewer(name);
@@ -1467,12 +1474,46 @@
 
             let loadAbortController = null;
 
+            // Live wall-clock "time to load" timer. Starts the instant a load
+            // begins (showLoadingState, the single earliest point common to
+            // every spinner-showing path: URL stream, multi-URL buffered, file
+            // drop, demo, and re-parse) and ticks up visibly until the trace
+            // renders, so the user can watch elapsed time alongside the event
+            // counter during the download+parse stall. It won't tick during a
+            // long synchronous drain (the main thread is busy) — that's
+            // acceptable and actually informative.
+            let loadStartTime = null;
+            let loadTimerInterval = null;
+
+            /** Render the elapsed-time span; safe to call repeatedly. */
+            function renderLoadElapsed() {
+                const el = document.getElementById("load-elapsed");
+                if (el && loadStartTime != null) {
+                    const secs = (performance.now() - loadStartTime) / 1000;
+                    el.textContent = ` · ${secs.toFixed(1)}s`;
+                }
+            }
+
+            /** Begin the wall-clock timer for the current load (idempotent). */
+            function startLoadTimer() {
+                loadStartTime = performance.now();
+                if (loadTimerInterval) clearInterval(loadTimerInterval);
+                loadTimerInterval = setInterval(renderLoadElapsed, 100);
+            }
+
+            /** Stop and clear the timer so it never leaks or keeps ticking. */
+            function stopLoadTimer() {
+                if (loadTimerInterval) { clearInterval(loadTimerInterval); loadTimerInterval = null; }
+                loadStartTime = null;
+            }
+
             function showLoadingState(label) {
                 loadAbortController = new AbortController();
+                startLoadTimer();
                 dropZone.innerHTML = '';
                 const wrap = document.createElement("div");
                 wrap.style.textAlign = "center";
-                wrap.innerHTML = `<div class="loading-spinner"></div><div style="margin-bottom:8px">${esc(label)}</div><div class="loading-progress" id="load-progress"></div>`;
+                wrap.innerHTML = `<div class="loading-spinner"></div><div style="margin-bottom:8px">${esc(label)}</div><div class="loading-progress"><span id="load-progress"></span><span id="load-elapsed"></span></div>`;
                 const btn = document.createElement("button");
                 btn.textContent = "← Back";
                 btn.style.cssText = "background:#2a2a4a;border:1px solid #444;color:#ccc;padding:6px 16px;border-radius:4px;cursor:pointer;font-size:0.9em;margin-top:12px";
@@ -1480,6 +1521,7 @@
                 wrap.appendChild(btn);
                 wrap.insertAdjacentHTML("beforeend", '<div style="margin-top:8px;font-size:0.8em;color:#666">or press Escape</div>');
                 dropZone.appendChild(wrap);
+                renderLoadElapsed();
             }
 
             function updateLoadProgress(text) {
@@ -1488,11 +1530,18 @@
             }
 
             function cancelLoad() {
+                stopLoadTimer();
                 if (loadAbortController) { loadAbortController.abort(); loadAbortController = null; }
                 resetDropZone();
             }
 
             function resetDropZone() {
+                // Single chokepoint for every load-end-without-render path:
+                // cancelLoad, the catch blocks in parseAndShowTrace /
+                // loadTraceFromUrl, the processTrace-failed early return, and
+                // the Back/reset button. Stop the timer here so it never leaks
+                // or keeps ticking after a load ends. Idempotent.
+                stopLoadTimer();
                 dropZone.innerHTML = `
                     <div>
                         <div style="font-size: 2em; margin-bottom: 12px">📊</div>
