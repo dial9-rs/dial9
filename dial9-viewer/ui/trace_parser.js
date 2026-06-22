@@ -964,6 +964,22 @@
     const TD = getTraceDecoder();
     const state = createParseState(options);
 
+    // Coalesce incoming chunks before draining. The browser's
+    // DecompressionStream("gzip") emits tiny ~16KB chunks (measured: ~708
+    // chunks of median/max 16384 bytes for the 10.27MB demo trace). Draining
+    // on every chunk pays a full-tail grow() copy + decode setup ~708 times,
+    // which dominates parse time (~66-78% overhead vs the whole-buffer
+    // baseline). Waiting until ≥256KB of undrained bytes have accumulated
+    // collapses those ~708 grow+drain cycles into ~40 and brings streaming back
+    // to/below the whole-buffer baseline. The 5-byte header is still decoded as
+    // soon as it arrives so a tiny trace (well under 256KB) still parses.
+    const MIN_DRAIN_BYTES = 256 * 1024;
+    // Yield a macrotask (setTimeout(0)) to the browser on this byte cadence
+    // rather than once per chunk, mirroring parseTraceBuffer's YIELD_BYTES.
+    // onProgress still fires on every batch drain so the spinner counter stays
+    // current; only the (relatively expensive) repaint yield is throttled.
+    const YIELD_BYTES = 100 * 1024; // yield to browser every ~100KB decoded
+
     // Unconsumed-tail accumulator. The decoder reads pooled strings/stacks via
     // its `stringPool`/`stackPool` maps (resolved values are copied into the
     // maps), and event field reads only touch the current frame's bytes — never
@@ -1019,17 +1035,13 @@
       }
     }
 
-    for await (const rawChunk of chunks) {
-      const chunk = rawChunk instanceof Uint8Array
-        ? rawChunk
-        : new Uint8Array(rawChunk);
-      if (chunk.length === 0) continue;
-      sawAnyBytes = true;
-      grow(chunk);
-
+    // Decode the header (once ≥5 bytes are buffered) and then drain every
+    // complete frame currently in `acc`. Shared by the batched in-loop path and
+    // the final end-of-stream flush so both go through identical logic.
+    function drainBatch() {
       if (!headerDecoded) {
         // Need at least the 5-byte header before any frames. Wait for more.
-        if (acc.length < 5) continue;
+        if (acc.length < 5) return;
         dec = new TD(acc);
         dec.enableStreaming();
         if (!dec.decodeHeader()) throw new Error("Invalid trace header");
@@ -1041,8 +1053,27 @@
         dec.setBuffer(acc);
         dec.rewindToStart();
       }
-
       drainComplete();
+    }
+
+    let lastYieldPos = 0; // consumedBytes at the last macrotask yield
+    for await (const rawChunk of chunks) {
+      const chunk = rawChunk instanceof Uint8Array
+        ? rawChunk
+        : new Uint8Array(rawChunk);
+      if (chunk.length === 0) continue;
+      sawAnyBytes = true;
+      grow(chunk);
+
+      // Batch tiny chunks: keep accumulating until the undrained tail reaches
+      // MIN_DRAIN_BYTES, then drain once. `acc` only ever holds bytes that have
+      // NOT yet been consumed (drainComplete drops the consumed prefix), so its
+      // length is exactly the pending-but-undrained count. The header is the
+      // one exception — decode it as soon as ≥5 bytes exist so small traces
+      // don't stall waiting for a 256KB batch.
+      if (acc.length < MIN_DRAIN_BYTES && headerDecoded) continue;
+
+      drainBatch();
 
       if (onProgress) {
         onProgress({
@@ -1050,8 +1081,26 @@
           totalBytes: consumedBytes + acc.length,
           eventCount: state.events.length,
         });
-        // Yield so the browser can paint the spinner between chunks.
-        await new Promise((r) => setTimeout(r, 0));
+        // Yield so the browser can paint the spinner, but only on the coarse
+        // YIELD_BYTES cadence — not once per (tiny) chunk, whose macrotask
+        // round-trips were a large part of the streaming overhead.
+        if (consumedBytes - lastYieldPos >= YIELD_BYTES) {
+          lastYieldPos = consumedBytes;
+          await new Promise((r) => setTimeout(r, 0));
+        }
+      }
+    }
+
+    // Drain the final partial batch: bytes that arrived after the last
+    // MIN_DRAIN_BYTES drain (or, for a sub-256KB trace, the only batch).
+    if (acc.length > 0 || (sawAnyBytes && !headerDecoded)) {
+      drainBatch();
+      if (onProgress) {
+        onProgress({
+          bytesRead: consumedBytes,
+          totalBytes: consumedBytes + acc.length,
+          eventCount: state.events.length,
+        });
       }
     }
 
