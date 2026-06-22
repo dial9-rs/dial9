@@ -26,6 +26,7 @@ required-features = ["dev-server"]
 [dependencies]
 axum = "0.8"
 axum-extra = { version = "0.10", features = ["query"] }
+bytes = "1"
 clap = { version = "4", features = ["derive"] }
 flate2 = "1"
 futures = "0.3"

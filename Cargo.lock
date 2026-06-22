@@ -1692,6 +1692,7 @@ dependencies = [
  "aws-smithy-types",
  "axum",
  "axum-extra",
+ "bytes",
  "clap",
  "flate2",
  "futures",

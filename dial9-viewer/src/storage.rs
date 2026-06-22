@@ -1,3 +1,5 @@
+use bytes::Bytes;
+use futures::Stream;
 use serde::{Deserialize, Serialize};
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -9,6 +11,35 @@ pub struct ObjectInfo {
     pub key: String,
     pub size: i64,
     pub last_modified: Option<String>,
+}
+
+/// A handle to an object's bytes that can be streamed to the client as they
+/// arrive, rather than buffered in full first.
+///
+/// This exists to remove the time-to-first-byte (TTFB) stall on `/api/object`:
+/// the old buffered path called `ByteStream::collect()`, which pulled the entire
+/// object out of S3 into a `Vec<u8>` before a single byte could be written to
+/// the browser (measured ~2s TTFB on real traces). With a streamed body, bytes
+/// flow to the browser as S3 delivers them, so the server↔S3 download overlaps
+/// with the browser↔server transfer (and the browser's incremental
+/// gunzip+decode in `fetchTraceStream`).
+///
+/// The chunk error type is [`std::io::Error`] so the stream composes directly
+/// with [`axum::body::Body::from_stream`] (whose error bound is
+/// `Into<BoxError>`).
+///
+/// `#[non_exhaustive]`: adding a field later (e.g. `content_type`) must not be a
+/// breaking change for out-of-crate `StorageBackend` implementors. It is only
+/// ever constructed inside this crate, where struct-literal construction still
+/// works.
+#[non_exhaustive]
+pub struct ObjectStream {
+    /// The object's bytes, chunk by chunk, as they arrive from the backend.
+    pub stream: Pin<Box<dyn Stream<Item = Result<Bytes, std::io::Error>> + Send>>,
+    /// The object's total size, if known up front (S3 returns `Content-Length`
+    /// on `GetObject`). Forwarded as the response `content-length` header so the
+    /// browser can show real download progress.
+    pub content_length: Option<i64>,
 }
 
 /// Abstraction over trace storage (S3, local FS, etc.)
@@ -38,6 +69,39 @@ pub trait StorageBackend: Send + Sync {
         bucket: &str,
         key: &str,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, StorageError>> + Send + '_>>;
+
+    /// Like [`get_object`](StorageBackend::get_object), but returns the body as a
+    /// stream so the HTTP layer can forward bytes to the client as they arrive
+    /// instead of buffering the whole object first. See [`ObjectStream`] for the
+    /// TTFB rationale.
+    ///
+    /// Setup errors (object not found, auth failure, etc.) surface from the
+    /// returned future *before* any body streams — so the HTTP layer can still
+    /// map them to a 404/401/403 status. Errors encountered mid-stream (after
+    /// the status line and headers have already been sent) arrive as
+    /// `Err(io::Error)` items on the stream and can no longer change the status.
+    ///
+    /// The default implementation buffers via `get_object` and wraps the result
+    /// in a single-chunk stream. This is correct (just not incremental) and is
+    /// the right behavior for backends with no TTFB problem — e.g. local file
+    /// reads — so [`LocalBackend`] and test backends need no override.
+    fn get_object_stream(
+        &self,
+        bucket: &str,
+        key: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<ObjectStream, StorageError>> + Send + '_>> {
+        let bucket = bucket.to_string();
+        let key = key.to_string();
+        Box::pin(async move {
+            let data = self.get_object(&bucket, &key).await?;
+            let content_length = Some(data.len() as i64);
+            let stream = futures::stream::once(async move { Ok(Bytes::from(data)) });
+            Ok(ObjectStream {
+                stream: Box::pin(stream),
+                content_length,
+            })
+        })
+    }
 }
 
 #[derive(Debug)]
@@ -386,6 +450,63 @@ impl StorageBackend for S3Backend {
                 .map_err(|e| StorageError::Other(e.to_string()))?;
 
             Ok(bytes.to_vec())
+        })
+    }
+
+    /// Stream the object body straight from S3 instead of buffering it. The
+    /// `GetObject` request (and thus NoSuchKey / auth / not-found classification)
+    /// still completes synchronously in the returned future, so the HTTP layer
+    /// gets the right status before any body streams. The body is then handed
+    /// back as a chunk stream — we do NOT call `.collect()`.
+    fn get_object_stream(
+        &self,
+        bucket: &str,
+        key: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<ObjectStream, StorageError>> + Send + '_>> {
+        let bucket = bucket.to_string();
+        let key = key.to_string();
+        Box::pin(async move {
+            let resp = self
+                .client
+                .get_object()
+                .bucket(&bucket)
+                .key(&key)
+                .send()
+                .await
+                .map_err(|e| {
+                    use aws_sdk_s3::operation::get_object::GetObjectError;
+
+                    // Classify before unwrapping the service error so auth
+                    // failures (which arrive as the redirect/4xx service error)
+                    // collapse to Unauthorized rather than leaking the message.
+                    let classified = classify_s3_error(&e);
+                    match e.into_service_error() {
+                        GetObjectError::NoSuchKey(_) => {
+                            StorageError::NotFound(format!("{bucket}/{key}"))
+                        }
+                        _ => classified,
+                    }
+                })?;
+
+            let content_length = resp.content_length();
+
+            // Drive the body via the always-public `ByteStream::next()` (the
+            // `Stream` impl on `ByteStream` itself is feature-gated/private in
+            // this SDK). `unfold` yields one chunk per poll, mapping the SDK
+            // chunk error into `io::Error` so the stream composes with
+            // `Body::from_stream`. No `.collect()` — bytes flow as they arrive.
+            let stream = futures::stream::unfold(resp.body, |mut body| async move {
+                match body.next().await {
+                    Some(Ok(chunk)) => Some((Ok(chunk), body)),
+                    Some(Err(e)) => Some((Err(std::io::Error::other(e)), body)),
+                    None => None,
+                }
+            });
+
+            Ok(ObjectStream {
+                stream: Box::pin(stream),
+                content_length,
+            })
         })
     }
 }
