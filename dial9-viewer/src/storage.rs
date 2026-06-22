@@ -13,6 +13,13 @@ pub struct ObjectInfo {
 
 /// Abstraction over trace storage (S3, local FS, etc.)
 pub trait StorageBackend: Send + Sync {
+    /// List the buckets the current credentials can see. Lets the viewer offer
+    /// a bucket picker instead of requiring the user to know the name. Backends
+    /// without a bucket concept (local FS) return an empty list.
+    fn list_buckets(
+        &self,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, StorageError>> + Send + '_>>;
+
     fn list_objects(
         &self,
         bucket: &str,
@@ -36,6 +43,16 @@ pub trait StorageBackend: Send + Sync {
 #[derive(Debug)]
 pub enum StorageError {
     NotFound(String),
+    /// The credentials were rejected by S3 (bad keys, wrong region, expired
+    /// token, access denied). Kept distinct from [`StorageError::Other`] so the
+    /// HTTP layer can return a generic 401 without echoing the underlying SDK
+    /// message — which can contain the access key id.
+    Unauthorized,
+    /// The AWS account behind the credentials is not signed up for / opted in
+    /// to S3 in this region. Almost always means the request was signed by the
+    /// *wrong* identity (e.g. the server's ambient credentials instead of the
+    /// pasted ones), so the message points the user there.
+    AccountNotSignedUp,
     Other(String),
 }
 
@@ -43,12 +60,101 @@ impl std::fmt::Display for StorageError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             StorageError::NotFound(msg) => write!(f, "not found: {msg}"),
+            StorageError::Unauthorized => {
+                write!(
+                    f,
+                    "credentials rejected by S3 (check keys, region, or expiry)"
+                )
+            }
+            StorageError::AccountNotSignedUp => {
+                write!(
+                    f,
+                    "the AWS account used for this request is not signed up for S3 — \
+                     this usually means the request was signed with the wrong identity. \
+                     Make sure you clicked Apply after pasting your credentials."
+                )
+            }
             StorageError::Other(msg) => write!(f, "{msg}"),
         }
     }
 }
 
 impl std::error::Error for StorageError {}
+
+/// Map an S3 SDK error to a [`StorageError`], collapsing all
+/// authentication/authorization failures to [`StorageError::Unauthorized`] so
+/// the secret, token, and access key id are never reflected to the client.
+///
+/// Uses the structured error code (via `ProvideErrorMetadata`) rather than
+/// string matching, plus the HTTP status as a backstop.
+fn classify_s3_error<E, R>(err: &aws_sdk_s3::error::SdkError<E, R>) -> StorageError
+where
+    E: std::error::Error + aws_sdk_s3::error::ProvideErrorMetadata + 'static,
+    R: std::fmt::Debug,
+{
+    use aws_sdk_s3::error::ProvideErrorMetadata;
+    match err.code() {
+        Some(
+            "InvalidAccessKeyId"
+            | "SignatureDoesNotMatch"
+            | "ExpiredToken"
+            | "ExpiredTokenException"
+            | "InvalidToken"
+            | "AccessDenied"
+            | "AccessDeniedException"
+            | "UnrecognizedClientException"
+            | "InvalidClientTokenId"
+            | "AuthorizationHeaderMalformed",
+        ) => StorageError::Unauthorized,
+        // Account-level: the credentials are valid but the account isn't signed
+        // up for S3 in this region — typically the wrong identity signed it.
+        Some("NotSignedUp" | "OptInRequired") => StorageError::AccountNotSignedUp,
+        // Unmapped error: keep the full SDK detail in the server log (it can
+        // embed the access key id, region, and endpoint — server-eyes only) and
+        // hand the client a generic message rather than reflecting it back.
+        _ => {
+            tracing::warn!(
+                error = %aws_sdk_s3::error::DisplayErrorContext(err),
+                "unclassified S3 error"
+            );
+            StorageError::Other("could not complete the S3 request".to_string())
+        }
+    }
+}
+
+/// Optional plumbing for building ephemeral (bring-your-own-credentials) S3
+/// clients. In production this is `None` and clients use the default HTTPS
+/// connector. Tests inject the in-process `s3s` HTTP client plus an endpoint
+/// override so the header → ephemeral-client → fake-S3 path is exercisable.
+///
+/// This is a test seam, not part of the public API surface — it is `pub` only
+/// so integration tests in another crate can construct it.
+#[doc(hidden)]
+#[derive(Clone)]
+pub struct EphemeralS3Config {
+    /// Shared HTTP client/connector reused across ephemeral clients.
+    pub http_client: aws_sdk_s3::config::SharedHttpClient,
+    /// Endpoint override (test-only — never wired to user input; that would be
+    /// an SSRF vector).
+    pub endpoint_url: Option<String>,
+    /// Path-style addressing — required by the `s3s` fake, never for real S3.
+    pub force_path_style: bool,
+}
+
+/// Default region used when the user did not supply (and we could not detect)
+/// one. S3 routes bucket operations regardless once the bucket region is known,
+/// but a concrete region is required to build the client.
+const DEFAULT_REGION: &str = "us-east-1";
+
+/// Per-attempt timeout: how long a single HTTP attempt may take before the SDK
+/// gives up on it (and possibly retries).
+const OPERATION_ATTEMPT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Overall operation timeout: the wall-clock budget for an entire S3 call,
+/// including all retries. Bounds how long a request to a wrong region, a
+/// black-holed endpoint, or unresponsive S3 can hang the viewer's request
+/// handler.
+const OPERATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// S3-backed storage using the AWS SDK.
 pub struct S3Backend {
@@ -67,9 +173,84 @@ impl S3Backend {
     pub fn from_client(client: aws_sdk_s3::Client) -> Self {
         Self { client }
     }
+
+    /// Build an ephemeral backend from user-supplied credentials.
+    ///
+    /// The credentials are passed as a concrete value, which acts as a *static*
+    /// credential provider: it can never fall back to the server's IMDS/env
+    /// identity. That is the core security property of bring-your-own-creds.
+    pub fn from_credentials(
+        credentials: aws_sdk_s3::config::Credentials,
+        region: Option<&str>,
+        ephemeral: &Option<EphemeralS3Config>,
+    ) -> Self {
+        Self::from_client(build_credentialed_client(credentials, region, ephemeral))
+    }
+}
+
+/// Construct an `aws_sdk_s3::Client` from explicit credentials. Shared by the
+/// ephemeral backend and the `/api/credentials/check` validation handler.
+pub fn build_credentialed_client(
+    credentials: aws_sdk_s3::config::Credentials,
+    region: Option<&str>,
+    ephemeral: &Option<EphemeralS3Config>,
+) -> aws_sdk_s3::Client {
+    let region = region.unwrap_or(DEFAULT_REGION).to_string();
+    let timeouts = aws_sdk_s3::config::timeout::TimeoutConfig::builder()
+        .operation_attempt_timeout(OPERATION_ATTEMPT_TIMEOUT)
+        .operation_timeout(OPERATION_TIMEOUT)
+        .build();
+    let mut cfg = aws_sdk_s3::config::Builder::new()
+        .behavior_version(aws_sdk_s3::config::BehaviorVersion::latest())
+        .credentials_provider(credentials)
+        .timeout_config(timeouts)
+        .region(aws_sdk_s3::config::Region::new(region));
+
+    if let Some(e) = ephemeral {
+        cfg = cfg.http_client(e.http_client.clone());
+        if let Some(url) = &e.endpoint_url {
+            cfg = cfg.endpoint_url(url);
+        }
+        if e.force_path_style {
+            cfg = cfg.force_path_style(true);
+        }
+    }
+
+    aws_sdk_s3::Client::from_conf(cfg.build())
 }
 
 impl StorageBackend for S3Backend {
+    fn list_buckets(
+        &self,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, StorageError>> + Send + '_>> {
+        Box::pin(async move {
+            const MAX_BUCKETS: usize = 200;
+            let mut pages = self.client.list_buckets().into_paginator().send();
+            let mut names = Vec::new();
+            let mut truncated = false;
+            'pages: while let Some(page) = pages.next().await {
+                let page = page.map_err(|e| classify_s3_error(&e))?;
+                for b in page.buckets() {
+                    if let Some(name) = b.name() {
+                        names.push(name.to_string());
+                    }
+                    if names.len() >= MAX_BUCKETS {
+                        truncated = true;
+                        break 'pages;
+                    }
+                }
+            }
+            if truncated {
+                tracing::warn!(
+                    max = MAX_BUCKETS,
+                    "bucket listing truncated at cap; some buckets are not shown"
+                );
+            }
+            names.sort();
+            Ok(names)
+        })
+    }
+
     fn list_objects(
         &self,
         bucket: &str,
@@ -79,25 +260,19 @@ impl StorageBackend for S3Backend {
         let prefix = prefix.to_string();
         Box::pin(async move {
             const MAX_RESULTS: usize = 1000;
+            let mut pages = self
+                .client
+                .list_objects_v2()
+                .bucket(&bucket)
+                .prefix(&prefix)
+                .into_paginator()
+                .send();
+
             let mut objects = Vec::new();
-            let mut continuation: Option<String> = None;
-
-            loop {
-                let mut req = self
-                    .client
-                    .list_objects_v2()
-                    .bucket(&bucket)
-                    .prefix(&prefix);
-                if let Some(token) = continuation.take() {
-                    req = req.continuation_token(token);
-                }
-
-                let resp = req.send().await.map_err(|e| {
-                    use aws_sdk_s3::error::DisplayErrorContext;
-                    StorageError::Other(format!("{}", DisplayErrorContext(&e)))
-                })?;
-
-                for obj in resp.contents() {
+            let mut truncated = false;
+            'pages: while let Some(page) = pages.next().await {
+                let page = page.map_err(|e| classify_s3_error(&e))?;
+                for obj in page.contents() {
                     if let Some(key) = obj.key() {
                         objects.push(ObjectInfo {
                             key: key.to_string(),
@@ -105,18 +280,19 @@ impl StorageBackend for S3Backend {
                             last_modified: obj.last_modified().map(|t| t.to_string()),
                         });
                     }
+                    if objects.len() >= MAX_RESULTS {
+                        truncated = true;
+                        break 'pages;
+                    }
                 }
-
-                if objects.len() >= MAX_RESULTS {
-                    objects.truncate(MAX_RESULTS);
-                    break;
-                }
-
-                if resp.is_truncated() == Some(true) {
-                    continuation = resp.next_continuation_token().map(|s| s.to_string());
-                } else {
-                    break;
-                }
+            }
+            if truncated {
+                tracing::warn!(
+                    bucket = %bucket,
+                    prefix = %prefix,
+                    max = MAX_RESULTS,
+                    "object listing truncated at cap; some objects are not shown"
+                );
             }
 
             Ok(objects)
@@ -131,24 +307,45 @@ impl StorageBackend for S3Backend {
         let bucket = bucket.to_string();
         let prefix = prefix.to_string();
         Box::pin(async move {
-            let resp = self
+            // Bound the number of child prefixes returned, mirroring the caps on
+            // the other listings, so a directory with an unbounded fan-out can't
+            // produce an enormous response.
+            const MAX_PREFIXES: usize = 1000;
+            // Common prefixes count against MaxKeys per response, so a directory
+            // with more than one page of children must be paginated or it would
+            // silently truncate.
+            let mut pages = self
                 .client
                 .list_objects_v2()
                 .bucket(&bucket)
                 .prefix(&prefix)
                 .delimiter("/")
-                .send()
-                .await
-                .map_err(|e| {
-                    use aws_sdk_s3::error::DisplayErrorContext;
-                    StorageError::Other(format!("{}", DisplayErrorContext(&e)))
-                })?;
+                .into_paginator()
+                .send();
 
-            Ok(resp
-                .common_prefixes()
-                .iter()
-                .filter_map(|cp| cp.prefix().map(|s| s.to_string()))
-                .collect())
+            let mut prefixes = Vec::new();
+            let mut truncated = false;
+            'pages: while let Some(page) = pages.next().await {
+                let page = page.map_err(|e| classify_s3_error(&e))?;
+                for cp in page.common_prefixes() {
+                    if let Some(p) = cp.prefix() {
+                        prefixes.push(p.to_string());
+                    }
+                    if prefixes.len() >= MAX_PREFIXES {
+                        truncated = true;
+                        break 'pages;
+                    }
+                }
+            }
+            if truncated {
+                tracing::warn!(
+                    bucket = %bucket,
+                    prefix = %prefix,
+                    max = MAX_PREFIXES,
+                    "prefix listing truncated at cap; some child prefixes are not shown"
+                );
+            }
+            Ok(prefixes)
         })
     }
 
@@ -168,14 +365,17 @@ impl StorageBackend for S3Backend {
                 .send()
                 .await
                 .map_err(|e| {
-                    use aws_sdk_s3::error::DisplayErrorContext;
                     use aws_sdk_s3::operation::get_object::GetObjectError;
 
+                    // Classify before unwrapping the service error so auth
+                    // failures (which arrive as the redirect/4xx service error)
+                    // collapse to Unauthorized rather than leaking the message.
+                    let classified = classify_s3_error(&e);
                     match e.into_service_error() {
                         GetObjectError::NoSuchKey(_) => {
                             StorageError::NotFound(format!("{bucket}/{key}"))
                         }
-                        other => StorageError::Other(format!("{}", DisplayErrorContext(&other))),
+                        _ => classified,
                     }
                 })?;
 
@@ -209,6 +409,14 @@ impl LocalBackend {
 }
 
 impl StorageBackend for LocalBackend {
+    fn list_buckets(
+        &self,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, StorageError>> + Send + '_>> {
+        // Local mode has no bucket concept; the synthetic "local" bucket is
+        // wired in by the caller.
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
     fn list_objects(
         &self,
         _bucket: &str,
@@ -401,6 +609,83 @@ fn collect_files(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Build an `S3Backend` whose HTTP layer replays the given canned responses
+    /// in order, so multi-page pagination can be tested without a live S3 (the
+    /// `s3s-fs` fake never emits a continuation token, so it can't drive page 2).
+    fn replay_backend(
+        responses: Vec<&str>,
+    ) -> (
+        S3Backend,
+        aws_smithy_http_client::test_util::StaticReplayClient,
+    ) {
+        use aws_smithy_http_client::test_util::{ReplayEvent, StaticReplayClient};
+        use aws_smithy_types::body::SdkBody;
+
+        let events = responses
+            .into_iter()
+            .map(|body| {
+                ReplayEvent::new(
+                    http::Request::builder()
+                        .uri("https://s3.amazonaws.com/")
+                        .body(SdkBody::empty())
+                        .unwrap(),
+                    http::Response::builder()
+                        .status(200)
+                        .body(SdkBody::from(body))
+                        .unwrap(),
+                )
+            })
+            .collect();
+        let http_client = StaticReplayClient::new(events);
+        let cfg = aws_sdk_s3::config::Builder::new()
+            .behavior_version(aws_sdk_s3::config::BehaviorVersion::latest())
+            .credentials_provider(aws_sdk_s3::config::Credentials::new(
+                "test", "test", None, None, "test",
+            ))
+            .region(aws_sdk_s3::config::Region::new("us-east-1"))
+            .http_client(http_client.clone())
+            .build();
+        (
+            S3Backend::from_client(aws_sdk_s3::Client::from_conf(cfg)),
+            http_client,
+        )
+    }
+
+    #[tokio::test]
+    async fn list_prefixes_follows_continuation_token() {
+        // Page 1 is truncated and carries a NextContinuationToken; page 2 is the
+        // final page. The fix must follow the token and merge both pages — the
+        // old single-shot code would drop `c/`.
+        let page1 = r#"<?xml version="1.0" encoding="UTF-8"?>
+            <ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+              <Name>bucket</Name><Prefix></Prefix><Delimiter>/</Delimiter>
+              <IsTruncated>true</IsTruncated>
+              <NextContinuationToken>TOKEN_A</NextContinuationToken>
+              <CommonPrefixes><Prefix>a/</Prefix></CommonPrefixes>
+              <CommonPrefixes><Prefix>b/</Prefix></CommonPrefixes>
+            </ListBucketResult>"#;
+        let page2 = r#"<?xml version="1.0" encoding="UTF-8"?>
+            <ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+              <Name>bucket</Name><Prefix></Prefix><Delimiter>/</Delimiter>
+              <IsTruncated>false</IsTruncated>
+              <CommonPrefixes><Prefix>c/</Prefix></CommonPrefixes>
+            </ListBucketResult>"#;
+
+        let (backend, http_client) = replay_backend(vec![page1, page2]);
+        let prefixes = backend.list_prefixes("bucket", "").await.unwrap();
+        assert_eq!(prefixes, vec!["a/", "b/", "c/"]);
+
+        // Two HTTP calls were made, and the second carried the continuation token
+        // from the first — proving pagination actually happened.
+        let requests = http_client.actual_requests().collect::<Vec<_>>();
+        assert_eq!(requests.len(), 2, "expected two list calls");
+        assert!(
+            requests[1].uri().contains("continuation-token=TOKEN_A"),
+            "second request must carry the continuation token, got: {}",
+            requests[1].uri()
+        );
+    }
 
     #[test]
     fn collect_files_caps_entries_visited() {

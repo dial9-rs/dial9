@@ -9,6 +9,8 @@ use serde::Deserialize;
 use std::io::Read;
 
 use crate::server::AppState;
+use crate::server::credentials::MaybeCreds;
+use crate::server::error::storage_error_response;
 
 const MAX_KEYS: usize = 100;
 
@@ -22,8 +24,11 @@ pub struct TraceParams {
 
 pub async fn get_trace(
     State(state): State<AppState>,
+    creds: MaybeCreds,
     Query(params): Query<TraceParams>,
 ) -> Result<Response, (StatusCode, String)> {
+    let backend = state.resolve(creds)?;
+
     let bucket = params
         .bucket
         .or(state.default_bucket.clone())
@@ -45,14 +50,12 @@ pub async fn get_trace(
         ));
     }
 
-    let fetches = keys
-        .iter()
-        .map(|key| state.backend.get_object(&bucket, key));
+    let fetches = keys.iter().map(|key| backend.get_object(&bucket, key));
     let results = join_all(fetches).await;
 
     let mut combined = Vec::new();
     for result in results {
-        let data = result.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        let data = result.map_err(storage_error_response)?;
         let raw = maybe_gunzip(&data);
         combined.extend_from_slice(&raw);
     }

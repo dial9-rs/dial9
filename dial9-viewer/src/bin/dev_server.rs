@@ -15,11 +15,18 @@ async fn main() -> anyhow::Result<()> {
     let bucket = "demo-traces";
     std::fs::create_dir(s3_root.path().join(bucket))?;
 
-    let fs = s3s_fs::FileSystem::new(s3_root.path()).map_err(|e| anyhow::anyhow!("{e:?}"))?;
-    let mut builder = s3s::service::S3ServiceBuilder::new(fs);
-    builder.set_auth(s3s::auth::SimpleAuth::from_single("test", "test"));
-    let s3_service = builder.build();
-    let s3_client: s3s_aws::Client = s3_service.into();
+    // Build an s3s-backed HTTP client over the fake FS. `s3s_aws::Client` isn't
+    // Clone, so make a second one (sharing the same FS root) for the
+    // bring-your-own-credentials ephemeral path below.
+    let make_s3s_http_client = || -> anyhow::Result<s3s_aws::Client> {
+        let fs = s3s_fs::FileSystem::new(s3_root.path()).map_err(|e| anyhow::anyhow!("{e:?}"))?;
+        let mut builder = s3s::service::S3ServiceBuilder::new(fs);
+        builder.set_auth(s3s::auth::SimpleAuth::from_single("test", "test"));
+        Ok(builder.build().into())
+    };
+
+    let s3_client = make_s3s_http_client()?;
+    let http_client = aws_sdk_s3::config::SharedHttpClient::new(make_s3s_http_client()?);
 
     let s3_config = aws_sdk_s3::Config::builder()
         .behavior_version_latest()
@@ -75,13 +82,22 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // Start the viewer with the s3s-backed S3Backend
+    // Start the viewer with the s3s-backed S3Backend. Enable bring-your-own
+    // credentials (pointed at the same s3s fake) so the credentials panel can be
+    // exercised end-to-end: use access key id `test`, secret `test`, region
+    // `us-east-1`.
     let backend = dial9_viewer::storage::S3Backend::from_client(client);
     let state = dial9_viewer::server::AppState::new(
         std::sync::Arc::new(backend),
         Some(bucket.to_string()),
         Some("traces".to_string()),
-    );
+    )
+    .with_byo_creds(true)
+    .with_ephemeral_s3(dial9_viewer::storage::EphemeralS3Config {
+        http_client,
+        endpoint_url: Some("http://localhost:0".to_string()),
+        force_path_style: true,
+    });
 
     let ui_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("ui");
     let state = state.with_dev_ui_dir(ui_dir);

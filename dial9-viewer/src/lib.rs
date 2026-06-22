@@ -10,25 +10,28 @@ use std::path::PathBuf;
 async fn detect_bucket_region(bucket: &str) -> Option<String> {
     let config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
     let client = aws_sdk_s3::Client::new(&config);
-    match client.head_bucket().bucket(bucket).send().await {
-        Ok(resp) => resp.bucket_region().map(|r| r.to_string()),
-        Err(err) => {
-            let raw = err.raw_response();
-            raw.and_then(|r| {
-                r.headers()
-                    .get("x-amz-bucket-region")
-                    .map(|v| v.to_string())
-            })
-        }
-    }
+    server::region_from_head_bucket(&client, bucket).await
+}
+
+/// Configuration for the `serve` subcommand, assembled from CLI args.
+pub(crate) struct ServeConfig {
+    pub port: u16,
+    pub bucket: Option<String>,
+    pub prefix: Option<String>,
+    pub local_dir: Option<PathBuf>,
+    pub dev: bool,
+    pub enable_upload: bool,
 }
 
 pub(crate) async fn serve(
-    port: u16,
-    bucket: Option<String>,
-    prefix: Option<String>,
-    local_dir: Option<PathBuf>,
-    dev: bool,
+    ServeConfig {
+        port,
+        bucket,
+        prefix,
+        local_dir,
+        dev,
+        enable_upload,
+    }: ServeConfig,
 ) -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -55,19 +58,20 @@ pub(crate) async fn serve(
         None
     };
 
-    let app_state = if let Some(dir) = &local_dir {
+    // Build the base state per backend. `allow_byo` is true for every S3
+    // backend — users may always optionally supply their own credentials; it is
+    // false only in local-dir mode, where the data is local and credentials are
+    // meaningless.
+    let (mut app_state, allow_byo) = if let Some(dir) = &local_dir {
         let dir = std::fs::canonicalize(dir)?;
         tracing::info!(path = %dir.display(), "serving traces from local directory");
         let backend = storage::LocalBackend::new(&dir);
-        let mut state = server::AppState::new(
+        let state = server::AppState::new(
             std::sync::Arc::new(backend),
             Some("local".into()),
             prefix.clone(),
         );
-        if let Some(d) = dev_ui_dir {
-            state = state.with_dev_ui_dir(d);
-        }
-        state
+        (state, false)
     } else if let Some(bucket_name) = &bucket {
         if let Some(region) = detect_bucket_region(bucket_name).await {
             tracing::info!(%region, bucket = %bucket_name, "detected bucket region");
@@ -77,31 +81,33 @@ pub(crate) async fn serve(
                 .await;
             let client = aws_sdk_s3::Client::new(&config);
             let backend = storage::S3Backend::from_client(client);
-            let mut state =
+            let state =
                 server::AppState::new(std::sync::Arc::new(backend), bucket.clone(), prefix.clone());
-            if let Some(d) = dev_ui_dir {
-                state = state.with_dev_ui_dir(d);
-            }
-            state
+            (state, true)
         } else {
             tracing::warn!(bucket = %bucket_name, "could not detect bucket region, using default");
             let backend = storage::S3Backend::from_env().await;
-            let mut state =
+            let state =
                 server::AppState::new(std::sync::Arc::new(backend), bucket.clone(), prefix.clone());
-            if let Some(d) = dev_ui_dir {
-                state = state.with_dev_ui_dir(d);
-            }
-            state
+            (state, true)
         }
     } else {
         let backend = storage::S3Backend::from_env().await;
-        let mut state =
+        let state =
             server::AppState::new(std::sync::Arc::new(backend), bucket.clone(), prefix.clone());
-        if let Some(d) = dev_ui_dir {
-            state = state.with_dev_ui_dir(d);
-        }
-        state
+        (state, true)
     };
+
+    app_state = app_state.with_byo_creds(allow_byo);
+    if let Some(d) = dev_ui_dir {
+        app_state = app_state.with_dev_ui_dir(d);
+    }
+    if enable_upload {
+        tracing::info!(
+            "trace-upload feature enabled (POST /api/upload); no auth — trusted network only"
+        );
+        app_state = app_state.with_uploads(server::UploadLimits::default());
+    }
 
     let app = server::router(app_state);
 

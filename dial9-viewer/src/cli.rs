@@ -47,6 +47,12 @@ enum Commands {
         /// Dev mode: serve UI files from disk for faster iteration
         #[arg(long)]
         dev: bool,
+
+        /// Enable the temporary trace-upload feature: lets another site POST a
+        /// trace (`POST /api/upload`) and have the viewer serve it back once.
+        /// Off by default; there is no auth, so only enable on a trusted network.
+        #[arg(long)]
+        enable_upload: bool,
     },
     /// Tools for working with agent-generated HTML reports
     Report {
@@ -140,8 +146,17 @@ pub async fn run() -> anyhow::Result<()> {
             prefix,
             local_dir,
             dev,
+            enable_upload,
         } => {
-            return crate::serve(port, bucket, prefix, local_dir, dev).await;
+            return crate::serve(crate::ServeConfig {
+                port,
+                bucket,
+                prefix,
+                local_dir,
+                dev,
+                enable_upload,
+            })
+            .await;
         }
         Commands::Report { action } => match action {
             ReportAction::Serve { path, port } => {

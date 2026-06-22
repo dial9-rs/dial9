@@ -49,6 +49,27 @@
   }
 
   /**
+   * Whether `url` resolves to the same origin as the current page.
+   *
+   * Security-critical: credential headers (see `fetchTraces`) must never be
+   * attached to a cross-origin request, or a crafted `?trace=https://attacker/`
+   * link would exfiltrate the user's AWS credentials. Off-browser (Node tests),
+   * there is no origin concept, so we treat everything as same-origin — the
+   * exfiltration risk only exists in the browser.
+   *
+   * Conservative on failure: an unparseable URL is treated as cross-origin so
+   * headers are withheld rather than sent.
+   */
+  function isSameOrigin(url) {
+    if (typeof location === "undefined" || !location.origin) return true;
+    try {
+      return new URL(url, location.href).origin === location.origin;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
    * Fetch one or more trace URLs, gunzip each component individually, and
    * concatenate them into a single ArrayBuffer.
    *
@@ -60,14 +81,24 @@
    * resets the frame parser — so the combined buffer parses as one trace.
    *
    * @param {string|string[]} urls one URL or a list of URLs (order preserved)
-   * @param {{signal?: AbortSignal}} [opts]
+   * @param {{signal?: AbortSignal, headers?: Object}} [opts] `headers` is
+   *   attached to every request (e.g. bring-your-own-credentials headers). This
+   *   module stays storage-agnostic — the caller supplies the headers.
    * @returns {Promise<ArrayBuffer>}
    */
   async function fetchTraces(urls, opts = {}) {
     const list = Array.isArray(urls) ? urls : [urls];
     const parts = await Promise.all(
       list.map(async (url) => {
-        const resp = await fetch(url, { signal: opts.signal });
+        // Only attach credential headers to same-origin requests. A
+        // cross-origin `trace=` URL (e.g. a presigned S3 link, or an
+        // attacker-crafted one) is fetched WITHOUT them, so the user's AWS
+        // credentials can never be sent to a foreign host.
+        const headers = isSameOrigin(url) ? opts.headers : undefined;
+        const resp = await fetch(url, {
+          signal: opts.signal,
+          headers,
+        });
         if (!resp.ok) throw new Error(`HTTP ${resp.status} fetching ${url}`);
         const raw = await maybeGunzip(await resp.arrayBuffer());
         return raw instanceof ArrayBuffer ? new Uint8Array(raw) : raw;
