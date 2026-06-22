@@ -38,6 +38,16 @@ impl StorageBackend for FakeBackend {
     ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, StorageError>> + Send + '_>> {
         Box::pin(async { Err(StorageError::NotFound("fake".into())) })
     }
+
+    fn put_object(
+        &self,
+        _bucket: &str,
+        _key: &str,
+        _body: Vec<u8>,
+        _content_type: Option<&str>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), StorageError>> + Send + '_>> {
+        Box::pin(async { Ok(()) })
+    }
 }
 
 fn fake_s3_client(fs_root: &std::path::Path) -> aws_sdk_s3::Client {
@@ -111,6 +121,16 @@ impl StorageBackend for ErroringBackend {
         _bucket: &str,
         _key: &str,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, StorageError>> + Send + '_>> {
+        Box::pin(async { Err(StorageError::Other("default backend used".into())) })
+    }
+
+    fn put_object(
+        &self,
+        _bucket: &str,
+        _key: &str,
+        _body: Vec<u8>,
+        _content_type: Option<&str>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), StorageError>> + Send + '_>> {
         Box::pin(async { Err(StorageError::Other("default backend used".into())) })
     }
 }
@@ -1256,6 +1276,128 @@ async fn upload_supports_cors() {
         .unwrap();
     check!(posted.status().as_u16() == 200);
     check!(posted.headers().contains_key("access-control-allow-origin"));
+}
+
+// --- share endpoint tests ---
+
+#[tokio::test]
+async fn share_round_trips() {
+    let (_s3, base, _dir) = setup_s3_test("test-bucket", Some("test-bucket".into()), None).await;
+    let client = reqwest::Client::new();
+
+    // POST a trace to create a share
+    let resp = client
+        .post(format!("{base}/api/shared"))
+        .body(TRACE_MAGIC_BYTES.to_vec())
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() == 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let token = body["token"].as_str().unwrap();
+    check!(token.len() == 32);
+    check!(body["viewer_url"].as_str().unwrap().contains(token));
+
+    // GET the shared trace back
+    let fetched = client
+        .get(format!("{base}/api/shared/{token}"))
+        .send()
+        .await
+        .unwrap();
+    check!(fetched.status().as_u16() == 200);
+    let bytes = fetched.bytes().await.unwrap();
+    check!(bytes.as_ref() == TRACE_MAGIC_BYTES);
+}
+
+#[tokio::test]
+async fn share_rejects_invalid_body() {
+    let (_s3, base, _dir) = setup_s3_test("test-bucket", Some("test-bucket".into()), None).await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .post(format!("{base}/api/shared"))
+        .body(b"not a trace".to_vec())
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() == 400);
+}
+
+#[tokio::test]
+async fn share_returns_404_without_bucket() {
+    let state = AppState::new(Arc::new(FakeBackend), None, None);
+    let base = start_server(state).await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .post(format!("{base}/api/shared"))
+        .body(TRACE_MAGIC_BYTES.to_vec())
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() == 404);
+}
+
+#[tokio::test]
+async fn share_get_rejects_invalid_token() {
+    let (_s3, base, _dir) = setup_s3_test("test-bucket", Some("test-bucket".into()), None).await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .get(format!("{base}/api/shared/INVALID"))
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() == 400);
+}
+
+#[tokio::test]
+async fn share_get_returns_404_for_missing_token() {
+    let (_s3, base, _dir) = setup_s3_test("test-bucket", Some("test-bucket".into()), None).await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .get(format!(
+            "{base}/api/shared/00000000000000000000000000000000"
+        ))
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() == 404);
+}
+
+#[tokio::test]
+async fn config_reports_sharing_support() {
+    let state = AppState::new(Arc::new(FakeBackend), Some("bucket".into()), None);
+    let base = start_server(state).await;
+    let client = reqwest::Client::new();
+
+    let resp: serde_json::Value = client
+        .get(format!("{base}/api/config"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    check!(resp["supports_sharing"] == true);
+}
+
+#[tokio::test]
+async fn config_reports_no_sharing_without_bucket() {
+    let state = AppState::new(Arc::new(FakeBackend), None, None);
+    let base = start_server(state).await;
+    let client = reqwest::Client::new();
+
+    let resp: serde_json::Value = client
+        .get(format!("{base}/api/config"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    check!(resp["supports_sharing"] == false);
 }
 
 #[cfg(test)]

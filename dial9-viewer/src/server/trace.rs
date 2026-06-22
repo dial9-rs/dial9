@@ -68,7 +68,7 @@ pub async fn get_trace(
         .into_response())
 }
 
-fn maybe_gunzip(data: &[u8]) -> Vec<u8> {
+pub(super) fn maybe_gunzip(data: &[u8]) -> Vec<u8> {
     if data.len() >= 2 && data[0] == 0x1f && data[1] == 0x8b {
         let mut decoder = GzDecoder::new(data);
         let mut decompressed = Vec::new();

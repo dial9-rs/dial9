@@ -16,6 +16,7 @@ pub mod credentials;
 mod error;
 mod prefixes;
 mod search;
+mod share;
 mod trace;
 mod upload;
 
@@ -216,6 +217,11 @@ fn api_router(state: AppState) -> Router {
         .route("/upload", axum::routing::post(upload::upload_trace))
         .layer(DefaultBodyLimit::max(upload_body_limit));
 
+    // The share route also needs a large body limit (traces can be big).
+    let share_route = Router::new()
+        .route("/shared", axum::routing::post(share::create_shared))
+        .layer(DefaultBodyLimit::max(upload_body_limit));
+
     Router::new()
         .route("/config", axum::routing::get(config::get_config))
         .route("/buckets", axum::routing::get(buckets::list_buckets))
@@ -225,9 +231,11 @@ fn api_router(state: AppState) -> Router {
         )
         .route("/prefixes", axum::routing::get(prefixes::list_prefixes))
         .route("/search", axum::routing::get(search::search))
+        .route("/shared/{token}", axum::routing::get(share::get_shared))
         .route("/trace", axum::routing::get(trace::get_trace))
         .route("/uploaded/{id}", axum::routing::get(upload::get_uploaded))
         .merge(upload_route)
+        .merge(share_route)
         // Permissive CORS so a page on another origin can POST a trace and read
         // it back via fetch(); also answers the OPTIONS preflight automatically.
         .layer(CorsLayer::permissive())

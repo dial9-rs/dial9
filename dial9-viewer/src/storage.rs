@@ -38,6 +38,16 @@ pub trait StorageBackend: Send + Sync {
         bucket: &str,
         key: &str,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, StorageError>> + Send + '_>>;
+
+    /// Write an object to storage. Used by the shareable-link feature to copy
+    /// traces into the server's configured bucket.
+    fn put_object(
+        &self,
+        bucket: &str,
+        key: &str,
+        body: Vec<u8>,
+        content_type: Option<&str>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), StorageError>> + Send + '_>>;
 }
 
 #[derive(Debug)]
@@ -388,6 +398,31 @@ impl StorageBackend for S3Backend {
             Ok(bytes.to_vec())
         })
     }
+
+    fn put_object(
+        &self,
+        bucket: &str,
+        key: &str,
+        body: Vec<u8>,
+        content_type: Option<&str>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), StorageError>> + Send + '_>> {
+        let bucket = bucket.to_string();
+        let key = key.to_string();
+        let content_type = content_type.map(|s| s.to_string());
+        Box::pin(async move {
+            let mut req = self
+                .client
+                .put_object()
+                .bucket(&bucket)
+                .key(&key)
+                .body(aws_sdk_s3::primitives::ByteStream::from(body));
+            if let Some(ct) = &content_type {
+                req = req.content_type(ct);
+            }
+            req.send().await.map_err(|e| classify_s3_error(&e))?;
+            Ok(())
+        })
+    }
 }
 
 /// Local filesystem storage backend. Serves trace files from a directory.
@@ -517,6 +552,20 @@ impl StorageBackend for LocalBackend {
             })
             .await
             .map_err(|e| StorageError::Other(e.to_string()))?
+        })
+    }
+
+    fn put_object(
+        &self,
+        _bucket: &str,
+        _key: &str,
+        _body: Vec<u8>,
+        _content_type: Option<&str>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), StorageError>> + Send + '_>> {
+        Box::pin(async {
+            Err(StorageError::Other(
+                "put_object not supported in local mode".into(),
+            ))
         })
     }
 }

@@ -634,6 +634,31 @@ dial9 serve --local-dir /tmp/my_traces
 dial9 serve --bucket my-trace-bucket
 ```
 
+### Shareable links
+
+When serving from an S3 bucket (`--bucket`), the viewer's toolbar shows a **Share** button. Clicking it uploads the current trace to the server's bucket under the `shared/` prefix with a random 128-bit token as the key, and copies a shareable URL to your clipboard. Anyone with the link can open the trace — no credentials required.
+
+```
+https://your-viewer-host/viewer.html?shared=<token>
+```
+
+This works regardless of how the trace was loaded — from the server's bucket, from a bring-your-own-credentials bucket, or via local drag-and-drop.
+
+**S3 lifecycle management:** Shared traces are stored at `shared/<token>.bin.gz` in the configured bucket. We recommend setting an [S3 lifecycle rule](https://docs.aws.amazon.com/AmazonS3/latest/userguide/object-lifecycle-mgmt.html) on the `shared/` prefix to expire objects after a suitable period (e.g., 30 days):
+
+```json
+{
+  "Rules": [{
+    "ID": "expire-shared-traces",
+    "Filter": { "Prefix": "shared/" },
+    "Status": "Enabled",
+    "Expiration": { "Days": 30 }
+  }]
+}
+```
+
+Sharing is not available in `--local-dir` mode.
+
 ### Agent toolkit
 
 `dial9` also ships skill documentation and JS analysis modules for scripted trace analysis.

@@ -782,6 +782,7 @@
                     <button id="btn-uninstrumented-info" style="display:none;background:#1e2050;border-color:#6c63ff;color:#d0ccff;white-space:nowrap" title="Some tasks lack wake tracking — click for details">ⓘ Blind spawns</button>
                     <button id="btn-set-range" title="Set time range filter (reloads with only events in range)">Set Range</button>
                     <button id="btn-clear-range" title="Clear time range filter" style="display:none">Clear Range</button>
+                    <button id="btn-share" style="display:none;background:#1a2a2a;border-color:#4dd0e1;color:#b2ebf2;white-space:nowrap" title="Create a shareable link to this trace">🔗 Share</button>
                     <button id="btn-reset">New File</button>
                 </div>
                 <div class="toolbar-row" id="toolbar-row-view">
@@ -1534,7 +1535,11 @@
                 window.history.replaceState(null, '', newUrl);
             }
 
-            if (traceUrls.length) {
+            const sharedToken = urlParams.get('shared');
+            if (sharedToken) {
+                showLoadingState('Loading shared trace…');
+                loadTraceFromUrl(`/api/shared/${encodeURIComponent(sharedToken)}`);
+            } else if (traceUrls.length) {
                 showLoadingState(traceUrls.length > 1 ? `Loading ${traceUrls.length} traces…` : 'Loading trace…');
                 loadTraceFromUrl(traceUrls);
             }
@@ -1546,6 +1551,40 @@
                 loadTraceFromUrl("demo-trace.bin");
             }
             document.getElementById("load-demo")?.addEventListener("click", onLoadDemo);
+
+            // ── Shareable links ──
+            let sharingSupported = false;
+            fetch('/api/config').then(r => r.ok ? r.json() : null).then(cfg => {
+                if (cfg && cfg.supports_sharing) sharingSupported = true;
+            }).catch(() => {});
+
+            const shareBtn = document.getElementById('btn-share');
+            shareBtn.addEventListener('click', async () => {
+                if (!currentTraceBuffer) return;
+                shareBtn.disabled = true;
+                shareBtn.textContent = '⏳ Sharing…';
+                try {
+                    const resp = await fetch('/api/shared', {
+                        method: 'POST',
+                        headers: { 'content-type': 'application/octet-stream' },
+                        body: currentTraceBuffer,
+                    });
+                    if (!resp.ok) {
+                        const msg = await resp.text();
+                        throw new Error(`HTTP ${resp.status}: ${msg}`);
+                    }
+                    const data = await resp.json();
+                    const shareUrl = location.origin + data.viewer_url;
+                    await navigator.clipboard.writeText(shareUrl);
+                    shareBtn.textContent = '✓ Link copied!';
+                    setTimeout(() => { shareBtn.textContent = '🔗 Share'; }, 2000);
+                } catch (err) {
+                    alert('Share failed: ' + err.message);
+                    shareBtn.textContent = '🔗 Share';
+                } finally {
+                    shareBtn.disabled = false;
+                }
+            });
 
             function processTrace() {
                 const evts = trace.events;
@@ -1699,6 +1738,7 @@
             function showViewer(filename) {
                 dropZone.style.display = "none";
                 viewer.style.display = "flex";
+                if (sharingSupported) shareBtn.style.display = '';
 
                 // Build the info block: structured metadata if available, else filename
                 const infoEl = document.querySelector('#toolbar .tb-info');

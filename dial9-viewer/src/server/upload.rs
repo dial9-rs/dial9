@@ -24,10 +24,26 @@ use serde::Serialize;
 use crate::server::AppState;
 
 /// gzip magic (RFC 1952): a gzipped trace starts with these two bytes.
-const GZIP_MAGIC: [u8; 2] = [0x1f, 0x8b];
+pub(super) const GZIP_MAGIC: [u8; 2] = [0x1f, 0x8b];
 /// Trace-format magic `TRC\0` (see `dial9-trace-format` `codec::MAGIC`). A raw,
 /// uncompressed trace starts with these four bytes.
-const TRACE_MAGIC: [u8; 4] = [0x54, 0x52, 0x43, 0x00];
+pub(super) const TRACE_MAGIC: [u8; 4] = [0x54, 0x52, 0x43, 0x00];
+
+/// Validate that `body` looks like a trace file (gzipped or raw).
+pub(super) fn validate_trace_body(body: &[u8]) -> Result<(), (StatusCode, String)> {
+    if body.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "empty body".to_string()));
+    }
+    let is_gzip = body.starts_with(&GZIP_MAGIC);
+    let is_trace = body.starts_with(&TRACE_MAGIC);
+    if !is_gzip && !is_trace {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "body is not a trace: expected gzip or 'TRC\\0' magic".to_string(),
+        ));
+    }
+    Ok(())
+}
 
 /// Caps on the in-memory upload store. Defaults are sized for a viewer host with
 /// a few GiB of headroom; tests construct small limits to exercise the reject
@@ -188,18 +204,7 @@ pub async fn upload_trace(
     State(state): State<AppState>,
     body: Bytes,
 ) -> Result<Response, (StatusCode, String)> {
-    if body.is_empty() {
-        return Err((StatusCode::BAD_REQUEST, "empty body".to_string()));
-    }
-
-    let is_gzip = body.starts_with(&GZIP_MAGIC);
-    let is_trace = body.starts_with(&TRACE_MAGIC);
-    if !is_gzip && !is_trace {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "body is not a trace: expected gzip or 'TRC\\0' magic".to_string(),
-        ));
-    }
+    validate_trace_body(&body)?;
 
     // Routes are only mounted when uploads are enabled, so this is always
     // `Some` in practice; treat a missing store as the feature being off.
