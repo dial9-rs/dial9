@@ -262,13 +262,12 @@ impl ThreadLocalBuffer {
         crate::collector::Batch::new(encoded_bytes, event_count)
     }
 
-    pub fn has_pending_events(&self) -> bool {
+    pub(crate) fn has_pending_events(&self) -> bool {
         self.event_count > 0
     }
 }
 
 /// Encode a single event into a self-contained batch (header + event).
-/// Used by tests that need to write individual events through the batch API.
 #[doc(hidden)]
 pub fn encode_single(event: &dyn Encodable) -> Vec<u8> {
     let mut buf = ThreadLocalBuffer::with_batch_size(1024);
@@ -325,12 +324,7 @@ pub fn drain_to_collector(collector: &CentralCollector) {
     });
 }
 
-/// Record a user-defined event into the thread-local trace buffer.
-///
-/// Like `record_event` but accepts any [`Encodable`] type, including
-/// user-defined `#[derive(TraceEvent)]` structs.
-#[doc(hidden)]
-pub fn record_encodable_event(
+pub(crate) fn record_encodable_event(
     event: &dyn Encodable,
     collector: &Arc<CentralCollector>,
     drain_epoch: &AtomicU64,
@@ -338,13 +332,7 @@ pub fn record_encodable_event(
     with_encoder(|enc| event.encode(enc), collector, drain_epoch)
 }
 
-/// Run a closure with access to the thread-local encoder.
-///
-/// This is the low-level primitive behind `record_event` and
-/// [`record_encodable_event`]. Use it when you need to encode directly
-/// (e.g., dynamic schemas) without an intermediate [`Encodable`] struct.
-#[doc(hidden)]
-pub fn with_encoder(
+pub(crate) fn with_encoder(
     f: impl FnOnce(&mut ThreadLocalEncoder<'_>),
     collector: &Arc<CentralCollector>,
     drain_epoch: &AtomicU64,

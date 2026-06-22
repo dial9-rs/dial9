@@ -1,7 +1,7 @@
 use super::SharedState;
 use super::source::{FlushContext, Source};
 use crate::primitives::sync::{Arc, Mutex};
-use crate::telemetry::buffer::{Encodable, ThreadLocalEncoder, record_encodable_event};
+use crate::telemetry::buffer::{Encodable, ThreadLocalEncoder};
 use crate::telemetry::events::{SchedStat, clock_monotonic_ns};
 use crate::telemetry::format::{
     PollEndEvent, PollStartEvent, QueueSampleEvent, TaskSpawnEvent, WorkerId, WorkerParkEvent,
@@ -116,14 +116,10 @@ impl Source for TokioRuntimesSource {
             }
             contexts.iter().map(|c| c.global_queue_depth()).sum()
         };
-        record_encodable_event(
-            &QueueSampleEvent {
-                timestamp_ns: clock_monotonic_ns(),
-                global_queue: total_global_queue as u8,
-            },
-            ctx.collector,
-            ctx.drain_epoch,
-        );
+        ctx.record_event(&QueueSampleEvent {
+            timestamp_ns: clock_monotonic_ns(),
+            global_queue: total_global_queue as u8,
+        });
     }
 
     fn name(&self) -> &'static str {

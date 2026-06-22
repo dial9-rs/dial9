@@ -319,7 +319,7 @@ mod tests {
     use crate::telemetry::writer::InMemoryWriter;
     use std::panic::Location;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicU64, AtomicUsize};
+    use std::sync::atomic::AtomicUsize;
 
     /// In-memory capture budget for runtime tests.
     const CAPTURE_SIZE: u64 = 16 * 1024 * 1024;
@@ -559,8 +559,7 @@ mod tests {
             .build()
             .unwrap();
         let mut ew = writer;
-        let collector = Arc::new(CentralCollector::new());
-        let drain_epoch = AtomicU64::new(0);
+        let shared = crate::telemetry::recorder::SharedState::new(0);
 
         let locations = [
             location_a, location_b, location_a, location_b, location_a, location_b,
@@ -568,37 +567,29 @@ mod tests {
         for (i, loc) in locations.iter().enumerate() {
             let task_id = crate::telemetry::task_metadata::TaskId::from_u32(i as u32);
             let ts = (i as u64 + 1) * 1000;
-            buffer::with_encoder(
-                |enc| {
-                    let spawn_loc = enc.intern_location(loc);
-                    enc.encode(&crate::telemetry::format::TaskSpawnEvent {
-                        timestamp_ns: ts,
-                        task_id,
-                        spawn_loc,
-                        instrumented: true,
-                    });
-                },
-                &collector,
-                &drain_epoch,
-            );
-            buffer::with_encoder(
-                |enc| {
-                    let spawn_loc = enc.intern_location(loc);
-                    enc.encode(&crate::telemetry::format::PollStartEvent {
-                        timestamp_ns: ts,
-                        worker_id: WorkerId::from(0usize),
-                        local_queue: 0,
-                        task_id,
-                        spawn_loc,
-                    });
-                },
-                &collector,
-                &drain_epoch,
-            );
+            shared.flush_context().with_encoder(|enc| {
+                let spawn_loc = enc.intern_location(loc);
+                enc.encode(&crate::telemetry::format::TaskSpawnEvent {
+                    timestamp_ns: ts,
+                    task_id,
+                    spawn_loc,
+                    instrumented: true,
+                });
+            });
+            shared.flush_context().with_encoder(|enc| {
+                let spawn_loc = enc.intern_location(loc);
+                enc.encode(&crate::telemetry::format::PollStartEvent {
+                    timestamp_ns: ts,
+                    worker_id: WorkerId::from(0usize),
+                    local_queue: 0,
+                    task_id,
+                    spawn_loc,
+                });
+            });
             // Drain after each iteration to produce separate small batches
             // that trigger file rotation (max_file_size is 100 bytes).
-            buffer::drain_to_collector(&collector);
-            drain_collector_to_writer(&collector, &mut ew);
+            buffer::drain_to_collector(&shared.collector);
+            drain_collector_to_writer(&shared.collector, &mut ew);
         }
         ew.flush().unwrap();
         ew.finalize().unwrap();

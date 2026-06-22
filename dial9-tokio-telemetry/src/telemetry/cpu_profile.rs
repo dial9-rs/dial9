@@ -5,7 +5,6 @@
 //! with its OS `tid`; worker attribution is left to analysis, which maps tid to
 //! worker via park/unpark events. This keeps the profiler runtime-agnostic.
 
-use crate::telemetry::buffer::record_encodable_event;
 use crate::telemetry::events::{CpuSampleData, CpuSampleSource, ThreadName};
 use crate::telemetry::format::WorkerId;
 use crate::telemetry::recorder::source::{FlushContext, Source};
@@ -199,7 +198,7 @@ impl Source for CpuProfiler {
                 thread_name: thread_name.cloned(),
                 cpu: raw.cpu,
             };
-            record_encodable_event(&data, ctx.collector, ctx.drain_epoch);
+            ctx.record_event(&data);
         });
     }
 
@@ -221,7 +220,7 @@ impl Source for SchedProfiler {
                 thread_name: None,
                 cpu: raw.cpu,
             };
-            record_encodable_event(&data, ctx.collector, ctx.drain_epoch);
+            ctx.record_event(&data);
         });
     }
 

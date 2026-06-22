@@ -4,7 +4,6 @@
 use crate::memory_profiling::profiler::Liveset;
 use crate::memory_profiling::ring::{RawAlloc, RawFree, RingBuffers};
 use crate::primitives::sync::Arc;
-use crate::telemetry::buffer::with_encoder;
 use crate::telemetry::events::clock_monotonic_ns;
 use crate::telemetry::format::{AllocEvent, FreeEvent, MemoryProfileOverflowEvent};
 use crate::telemetry::recorder::source::{FlushContext, Source};
@@ -76,20 +75,16 @@ impl MemoryProfileSource {
             frames,
             ..
         } = a;
-        with_encoder(
-            |enc| {
-                let callchain = enc.intern_stack_frames(&frames[..frame_count]);
-                enc.encode(&AllocEvent {
-                    timestamp_ns: ts_ns,
-                    tid,
-                    size,
-                    addr,
-                    callchain,
-                });
-            },
-            ctx.collector,
-            ctx.drain_epoch,
-        );
+        ctx.with_encoder(|enc| {
+            let callchain = enc.intern_stack_frames(&frames[..frame_count]);
+            enc.encode(&AllocEvent {
+                timestamp_ns: ts_ns,
+                tid,
+                size,
+                addr,
+                callchain,
+            });
+        });
     }
 
     fn handle_free(&mut self, f: RawFree, ctx: &FlushContext<'_>) {
@@ -121,19 +116,15 @@ impl MemoryProfileSource {
             (f.size, f.alloc_ts_ns)
         };
 
-        with_encoder(
-            |enc| {
-                enc.encode(&FreeEvent {
-                    timestamp_ns: f.ts_ns,
-                    tid: f.tid,
-                    addr: f.addr,
-                    size,
-                    alloc_timestamp_ns: alloc_ts_ns,
-                });
-            },
-            ctx.collector,
-            ctx.drain_epoch,
-        );
+        ctx.with_encoder(|enc| {
+            enc.encode(&FreeEvent {
+                timestamp_ns: f.ts_ns,
+                tid: f.tid,
+                addr: f.addr,
+                size,
+                alloc_timestamp_ns: alloc_ts_ns,
+            });
+        });
     }
 }
 
@@ -190,17 +181,13 @@ impl Source for MemoryProfileSource {
         let delta_allocs = current_dropped_allocs.saturating_sub(self.prev_dropped_allocs);
         let delta_frees = current_dropped_frees.saturating_sub(self.prev_dropped_frees);
         if delta_allocs > 0 || delta_frees > 0 {
-            with_encoder(
-                |enc| {
-                    enc.encode(&MemoryProfileOverflowEvent {
-                        timestamp_ns: clock_monotonic_ns(),
-                        dropped_allocs: delta_allocs,
-                        dropped_frees: delta_frees,
-                    });
-                },
-                ctx.collector,
-                ctx.drain_epoch,
-            );
+            ctx.with_encoder(|enc| {
+                enc.encode(&MemoryProfileOverflowEvent {
+                    timestamp_ns: clock_monotonic_ns(),
+                    dropped_allocs: delta_allocs,
+                    dropped_frees: delta_frees,
+                });
+            });
             self.prev_dropped_allocs = current_dropped_allocs;
             self.prev_dropped_frees = current_dropped_frees;
         }

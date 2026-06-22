@@ -134,18 +134,10 @@ impl Dial9Handle {
     /// `#[derive(TraceEvent)]`) works directly. No-op on a disabled handle or
     /// when recording is paused.
     pub fn record_event(&self, event: impl Encodable) {
-        self.record_encodable_event(&event);
-    }
-
-    /// Record a user-defined [`Encodable`] event.
-    ///
-    /// No-op on a disabled handle or when recording is paused.
-    #[doc(hidden)]
-    pub fn record_encodable_event(&self, event: &dyn Encodable) {
         if let Some(inner) = &self.inner {
             inner
                 .shared
-                .if_enabled(|buf| buf.record_encodable_event(event));
+                .if_enabled(|buf| buf.record_encodable_event(&event));
         }
     }
 

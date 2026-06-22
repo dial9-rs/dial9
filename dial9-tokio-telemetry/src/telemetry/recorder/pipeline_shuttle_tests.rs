@@ -101,7 +101,7 @@ impl crate::telemetry::recorder::source::Source for MockSource {
     fn flush(&mut self, ctx: &crate::telemetry::recorder::source::FlushContext<'_>) {
         let events: Vec<_> = self.pending.lock().unwrap().drain(..).collect();
         for ev in &events {
-            crate::telemetry::buffer::record_encodable_event(ev, ctx.collector, ctx.drain_epoch);
+            ctx.record_event(ev);
         }
     }
 

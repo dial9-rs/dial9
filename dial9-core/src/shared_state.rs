@@ -158,17 +158,20 @@ impl SharedState {
 
     /// Drain data sources and write their events into the collector.
     pub fn flush_sources(&self) {
-        use crate::source::FlushContext;
-
-        let ctx = FlushContext {
-            collector: &self.collector,
-            drain_epoch: &self.drain_epoch,
-        };
-
+        let ctx = self.flush_context();
         let mut sources = self.sources.lock().unwrap();
         for source in sources.iter_mut() {
             source.flush(&ctx);
         }
+    }
+
+    /// Build a [`FlushContext`] for this state.
+    ///
+    /// Used by `flush_sources` and by tests that construct a ctx directly.
+    ///
+    /// [`FlushContext`]: crate::source::FlushContext
+    pub fn flush_context(&self) -> crate::source::FlushContext<'_> {
+        crate::source::FlushContext::new(&self.collector, &self.drain_epoch)
     }
 }
 
