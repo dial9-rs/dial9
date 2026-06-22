@@ -491,6 +491,30 @@ async fn object_serves_uncompressed_bytes() {
     check!(body.as_ref() == data);
 }
 
+/// A large object must stream back byte-for-byte intact. Because the handler
+/// now uses `Body::from_stream` instead of buffering, this exercises the
+/// multi-chunk path: the s3s fake delivers the body in several `ByteStream`
+/// chunks and they must reassemble exactly. Kept to a few MB so it stays cheap.
+#[tokio::test]
+async fn object_streams_large_object_intact() {
+    let (s3, base, _dir) = setup_s3_test("obj-bucket", Some("obj-bucket".into()), None).await;
+    let client = reqwest::Client::new();
+
+    // 4MB of non-trivial bytes so a single read can't accidentally satisfy it.
+    let big: Vec<u8> = (0..4 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
+    put_object(&s3, "obj-bucket", "big.bin", &big).await;
+
+    let resp = client
+        .get(format!("{base}/api/object?key=big.bin"))
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() == 200);
+    let body = resp.bytes().await.unwrap();
+    check!(body.len() == big.len());
+    check!(body.as_ref() == big.as_slice());
+}
+
 #[tokio::test]
 async fn object_requires_key() {
     let state = AppState::new(Arc::new(FakeBackend), Some("test-bucket".into()), None);

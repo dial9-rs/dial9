@@ -4,6 +4,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum_extra::extract::Query;
 use flate2::read::GzDecoder;
+use futures::TryStreamExt;
 use futures::future::join_all;
 use serde::Deserialize;
 use std::io::Read;
@@ -28,6 +29,18 @@ pub struct ObjectParams {
 /// file in parallel and gunzips each client-side (see `fetchTraces` in
 /// `trace_parser.js`). Keeping the bytes compressed on the wire is the whole
 /// point — far less network transfer than the old server-side-merged response.
+///
+/// The body is streamed straight from the backend (see
+/// [`StorageBackend::get_object_stream`]) rather than buffered: bytes reach the
+/// browser as S3 delivers them, removing the ~2s time-to-first-byte stall the
+/// old `collect()`-then-send path imposed.
+///
+/// IMPORTANT: we deliberately do NOT set `content-encoding: gzip` even though
+/// the object is gzip-compressed. We serve the raw gzip bytes opaquely and the
+/// browser gunzips them itself via `DecompressionStream` in `fetchTraceStream`.
+/// Setting `content-encoding: gzip` would make the browser transparently
+/// decompress the body, and the client-side decoder would then double-handle
+/// (or fail on) already-decompressed bytes.
 pub async fn get_object(
     State(state): State<AppState>,
     creds: MaybeCreds,
@@ -45,14 +58,32 @@ pub async fn get_object(
         return Err((StatusCode::BAD_REQUEST, "key is required".to_string()));
     }
 
-    let data = backend
-        .get_object(&bucket, &key)
+    // Setup errors (not found / auth) surface here, before any body streams, so
+    // they still map to the right status. Mid-stream errors (below) cannot.
+    let object = backend
+        .get_object_stream(&bucket, &key)
         .await
         .map_err(storage_error_response)?;
 
-    Ok(Response::builder()
-        .header("content-type", "application/octet-stream")
-        .body(Body::from(data))
+    // Log a chunk error rather than dropping it: once streaming has begun the
+    // status line is already sent, so this is the only signal that the response
+    // was truncated. Per-request (not in a loop), so a plain warn! is fine.
+    let body_stream = object.stream.inspect_err(move |e| {
+        tracing::warn!(
+            bucket = %bucket,
+            key = %key,
+            error = %e,
+            "error mid-stream while serving /api/object; response is truncated"
+        );
+    });
+
+    let mut builder = Response::builder().header("content-type", "application/octet-stream");
+    if let Some(len) = object.content_length {
+        builder = builder.header("content-length", len);
+    }
+
+    Ok(builder
+        .body(Body::from_stream(body_stream))
         .unwrap()
         .into_response())
 }
