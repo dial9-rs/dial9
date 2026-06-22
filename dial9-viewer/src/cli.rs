@@ -53,6 +53,13 @@ enum Commands {
         /// Off by default; there is no auth, so only enable on a trusted network.
         #[arg(long)]
         enable_upload: bool,
+
+        /// Enable shareable links: lets the viewer `POST /api/shared` to copy
+        /// a trace to the server's bucket under `shared/<token>.bin.gz` and
+        /// produce a link anyone can open. Requires `--bucket`. Off by default;
+        /// there is no auth on the write path — enable on a trusted network.
+        #[arg(long)]
+        enable_sharing: bool,
     },
     /// Tools for working with agent-generated HTML reports
     Report {
@@ -147,6 +154,7 @@ pub async fn run() -> anyhow::Result<()> {
             local_dir,
             dev,
             enable_upload,
+            enable_sharing,
         } => {
             return crate::serve(crate::ServeConfig {
                 port,
@@ -155,6 +163,7 @@ pub async fn run() -> anyhow::Result<()> {
                 local_dir,
                 dev,
                 enable_upload,
+                enable_sharing,
             })
             .await;
         }

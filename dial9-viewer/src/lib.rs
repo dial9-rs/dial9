@@ -21,6 +21,7 @@ pub(crate) struct ServeConfig {
     pub local_dir: Option<PathBuf>,
     pub dev: bool,
     pub enable_upload: bool,
+    pub enable_sharing: bool,
 }
 
 pub(crate) async fn serve(
@@ -31,6 +32,7 @@ pub(crate) async fn serve(
         local_dir,
         dev,
         enable_upload,
+        enable_sharing,
     }: ServeConfig,
 ) -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -107,6 +109,16 @@ pub(crate) async fn serve(
             "trace-upload feature enabled (POST /api/upload); no auth — trusted network only"
         );
         app_state = app_state.with_uploads(server::UploadLimits::default());
+    }
+    if enable_sharing {
+        if app_state.default_bucket.is_some() {
+            tracing::info!(
+                "sharing feature enabled (POST /api/shared); no auth — trusted network only"
+            );
+            app_state = app_state.with_sharing(true);
+        } else {
+            tracing::warn!("--enable-sharing ignored: requires --bucket");
+        }
     }
 
     let app = server::router(app_state);

@@ -19,6 +19,6 @@ pub async fn get_config(State(state): State<AppState>) -> Json<ConfigResponse> {
         default_bucket: state.default_bucket.clone(),
         default_prefix: state.default_prefix.clone(),
         supports_byo_credentials: state.allow_byo_creds,
-        supports_sharing: state.default_bucket.is_some(),
+        supports_sharing: state.sharing_enabled,
     })
 }

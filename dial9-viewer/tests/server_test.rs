@@ -301,6 +301,23 @@ async fn setup_s3_test(
     (upload_client, base, s3_root)
 }
 
+/// Like `setup_s3_test` but with sharing enabled.
+async fn setup_s3_test_with_sharing(
+    bucket: &str,
+    default_bucket: Option<String>,
+    default_prefix: Option<String>,
+) -> (aws_sdk_s3::Client, String, tempfile::TempDir) {
+    let s3_root = tempfile::tempdir().unwrap();
+    std::fs::create_dir(s3_root.path().join(bucket)).unwrap();
+
+    let upload_client = fake_s3_client(s3_root.path());
+    let backend = S3Backend::from_client(fake_s3_client(s3_root.path()));
+
+    let state = AppState::new(Arc::new(backend), default_bucket, default_prefix).with_sharing(true);
+    let base = start_server(state).await;
+    (upload_client, base, s3_root)
+}
+
 #[tokio::test]
 async fn prefixes_discovers_top_level_prefixes() {
     let (s3, base, _dir) = setup_s3_test("test-bucket", Some("test-bucket".into()), None).await;
@@ -1282,7 +1299,8 @@ async fn upload_supports_cors() {
 
 #[tokio::test]
 async fn share_round_trips() {
-    let (_s3, base, _dir) = setup_s3_test("test-bucket", Some("test-bucket".into()), None).await;
+    let (_s3, base, _dir) =
+        setup_s3_test_with_sharing("test-bucket", Some("test-bucket".into()), None).await;
     let client = reqwest::Client::new();
 
     // POST a trace to create a share
@@ -1311,7 +1329,8 @@ async fn share_round_trips() {
 
 #[tokio::test]
 async fn share_rejects_invalid_body() {
-    let (_s3, base, _dir) = setup_s3_test("test-bucket", Some("test-bucket".into()), None).await;
+    let (_s3, base, _dir) =
+        setup_s3_test_with_sharing("test-bucket", Some("test-bucket".into()), None).await;
     let client = reqwest::Client::new();
 
     let resp = client
@@ -1368,7 +1387,8 @@ async fn share_get_returns_404_for_missing_token() {
 
 #[tokio::test]
 async fn config_reports_sharing_support() {
-    let state = AppState::new(Arc::new(FakeBackend), Some("bucket".into()), None);
+    let state =
+        AppState::new(Arc::new(FakeBackend), Some("bucket".into()), None).with_sharing(true);
     let base = start_server(state).await;
     let client = reqwest::Client::new();
 

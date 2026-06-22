@@ -2,7 +2,8 @@
 //!
 //! `POST /api/shared` — upload the current trace buffer to the server's
 //! configured S3 bucket under `shared/<token>.bin.gz`, returning a shareable
-//! link whose security relies on the token's unguessability (128-bit UUID v4).
+//! link whose security relies on the token's unguessability (UUID v4, 122 bits
+//! of entropy).
 //!
 //! `GET /api/shared/{token}` — retrieve a previously shared trace. No
 //! credentials are required from the requester; the server fetches the object
@@ -34,6 +35,10 @@ pub async fn create_shared(
     State(state): State<AppState>,
     body: Bytes,
 ) -> Result<Response, (StatusCode, String)> {
+    if !state.sharing_enabled {
+        return Err((StatusCode::NOT_FOUND, "sharing not enabled".to_string()));
+    }
+
     validate_trace_body(&body)?;
 
     let bucket = state.default_bucket.as_ref().ok_or((
@@ -44,17 +49,22 @@ pub async fn create_shared(
     let token = uuid::Uuid::new_v4().simple().to_string();
     let key = format!("shared/{token}.bin.gz");
 
-    // Gzip the body for storage efficiency.
-    let compressed = gzip_bytes(&body).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("compression failed: {e}"),
-        )
-    })?;
+    // Store gzipped. If the body is already gzipped, store verbatim to avoid
+    // double-compression; otherwise gzip it for storage efficiency.
+    let stored = if body.starts_with(&super::upload::GZIP_MAGIC) {
+        body.to_vec()
+    } else {
+        gzip_bytes(&body).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("compression failed: {e}"),
+            )
+        })?
+    };
 
     state
         .backend
-        .put_object(bucket, &key, compressed, Some("application/gzip"))
+        .put_object(bucket, &key, stored, Some("application/gzip"))
         .await
         .map_err(storage_error_response)?;
 
@@ -95,7 +105,7 @@ pub async fn get_shared(
         .header("content-type", "application/octet-stream")
         .header("content-disposition", "attachment; filename=\"trace.bin\"")
         .body(Body::from(raw))
-        .unwrap()
+        .expect("static headers and owned body are always valid")
         .into_response())
 }
 

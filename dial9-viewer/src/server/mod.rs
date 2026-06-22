@@ -60,6 +60,9 @@ pub struct AppState {
     /// whether handlers honor `x-dial9-aws-*` headers. True for S3 backends,
     /// false for `--local-dir` (the data is local; credentials are meaningless).
     pub allow_byo_creds: bool,
+    /// Whether shareable links are enabled (`--enable-sharing`). When false,
+    /// `POST /api/shared` returns 404.
+    pub sharing_enabled: bool,
     /// Optional plumbing for ephemeral S3 client construction (test injection
     /// of the in-process fake; `None` in production → default HTTPS connector).
     #[doc(hidden)]
@@ -79,6 +82,7 @@ impl AppState {
             dev_ui_dir: None,
             uploads: None,
             allow_byo_creds: false,
+            sharing_enabled: false,
             ephemeral_s3: None,
         }
     }
@@ -98,6 +102,12 @@ impl AppState {
     /// Enable the bring-your-own-credentials path (S3 backends only).
     pub fn with_byo_creds(mut self, allow: bool) -> Self {
         self.allow_byo_creds = allow;
+        self
+    }
+
+    /// Enable shareable links (requires a configured bucket).
+    pub fn with_sharing(mut self, enabled: bool) -> Self {
+        self.sharing_enabled = enabled;
         self
     }
 

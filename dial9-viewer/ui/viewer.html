@@ -1555,7 +1555,11 @@
             // ── Shareable links ──
             let sharingSupported = false;
             fetch('/api/config').then(r => r.ok ? r.json() : null).then(cfg => {
-                if (cfg && cfg.supports_sharing) sharingSupported = true;
+                if (cfg && cfg.supports_sharing) {
+                    sharingSupported = true;
+                    // If trace already loaded before config resolved, show button now.
+                    if (currentTraceBuffer) shareBtn.style.display = '';
+                }
             }).catch(() => {});
 
             const shareBtn = document.getElementById('btn-share');
@@ -1575,8 +1579,14 @@
                     }
                     const data = await resp.json();
                     const shareUrl = location.origin + data.viewer_url;
-                    await navigator.clipboard.writeText(shareUrl);
-                    shareBtn.textContent = '✓ Link copied!';
+                    try {
+                        await navigator.clipboard.writeText(shareUrl);
+                        shareBtn.textContent = '✓ Link copied!';
+                    } catch {
+                        // Clipboard API unavailable (plain HTTP) — show URL in prompt
+                        prompt('Shareable link (copy manually):', shareUrl);
+                        shareBtn.textContent = '🔗 Share';
+                    }
                     setTimeout(() => { shareBtn.textContent = '🔗 Share'; }, 2000);
                 } catch (err) {
                     alert('Share failed: ' + err.message);
