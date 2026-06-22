@@ -34,6 +34,8 @@ pub mod sampling;
 /// Sealed-segment detection and references for the worker pipeline.
 #[doc(hidden)]
 pub mod sealed;
+/// Runtime-agnostic recording session (handle + flush thread lifecycle).
+pub mod session;
 /// Runtime-agnostic recording state shared across threads.
 pub mod shared_state;
 /// `Source` trait: pluggable flush-thread data sources.
