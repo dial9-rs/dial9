@@ -91,7 +91,7 @@ impl SharedState {
     /// intrusive drain only needs to lock truly idle/silent buffers.
     ///
     /// Returns per-cycle counters so the flush thread can emit metrics.
-    pub fn drain_all_tl_buffers(&self) -> TlDrainStats {
+    pub(crate) fn drain_all_tl_buffers(&self) -> TlDrainStats {
         let mut stats = TlDrainStats::default();
         let epoch = self.drain_epoch.load(Ordering::Relaxed);
 

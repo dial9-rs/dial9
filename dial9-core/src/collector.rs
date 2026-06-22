@@ -36,6 +36,11 @@ impl Batch {
         self.event_count
     }
 
+    /// Whether this batch contains no events.
+    pub fn is_empty(&self) -> bool {
+        self.event_count == 0
+    }
+
     /// Consume the batch, returning the encoded bytes without copying.
     pub fn into_encoded_bytes(self) -> Vec<u8> {
         self.encoded_bytes

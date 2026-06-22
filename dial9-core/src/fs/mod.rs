@@ -189,6 +189,7 @@ impl TakenSegment {
 }
 
 /// Per-cycle snapshot returned by `Fs::take_files`.
+#[non_exhaustive]
 pub struct TakenFiles {
     pub segments: Vec<TakenSegment>,
     /// Segments still in the memory ring after this cycle's pop. `None` on disk.

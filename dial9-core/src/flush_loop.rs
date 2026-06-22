@@ -64,7 +64,7 @@ fn flush_once<M: WriterMode>(
     }
 
     while let Some(batch) = shared.collector.next() {
-        if batch.event_count() > 0 {
+        if !batch.is_empty() {
             if let Err(e) = writer.write_encoded_batch(&batch) {
                 rate_limited!(Duration::from_secs(60), {
                     tracing::warn!("failed to transcode batch: {e}");
@@ -96,7 +96,7 @@ fn flush_once<M: WriterMode>(
 pub fn run_flush_loop<M: WriterMode>(
     control_rx: crate::primitives::sync::mpsc::Receiver<ControlCommand>,
     shared: &SharedState,
-    flush_metrics_sink: &metrique_writer::BoxEntrySink,
+    flush_metrics_sink: &metrique::writer::BoxEntrySink,
     mut writer: SegmentWriter<M>,
 ) {
     // Drain the flush thread's own TL buffer every ~1s (200 × 5ms)

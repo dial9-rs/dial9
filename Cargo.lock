@@ -1514,7 +1514,6 @@ dependencies = [
  "libc",
  "metrique",
  "metrique-timesource",
- "metrique-writer",
  "proptest",
  "shuttle",
  "tempfile",

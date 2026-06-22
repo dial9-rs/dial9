@@ -10,10 +10,9 @@ use std::time::Duration;
 /// their top-level metrics without duplication.
 ///
 /// [`SharedState::drain_all_tl_buffers`]: crate::shared_state::SharedState::drain_all_tl_buffers
-#[doc(hidden)]
 #[metrics(subfield)]
 #[derive(Debug, Default)]
-pub struct TlDrainStats {
+pub(crate) struct TlDrainStats {
     /// Buffers that we locked cross-thread and had pending events.
     pub buffers_flushed: u64,
     /// Buffers that we locked cross-thread (superset of `buffers_flushed`;

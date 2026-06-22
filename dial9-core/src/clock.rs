@@ -50,7 +50,7 @@ pub fn clock_realtime_ns() -> u64 {
 /// Snapshot `(monotonic_ns, realtime_ns)` as close together as possible.
 /// Reads M₁ -> R -> M₂ and pairs `R` with the midpoint of M₁ and M₂ so
 /// the correlation error is half the `clock_gettime` interval.
-pub fn clock_pair() -> (u64, u64) {
+pub(crate) fn clock_pair() -> (u64, u64) {
     let m1 = clock_monotonic_ns();
     let r = clock_realtime_ns();
     let m2 = clock_monotonic_ns();
