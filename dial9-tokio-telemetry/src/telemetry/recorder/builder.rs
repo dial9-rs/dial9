@@ -1,7 +1,11 @@
 #[cfg(feature = "cpu-profiling")]
+use dial9_perf_self_profile::CpuProfiler;
+#[cfg(feature = "cpu-profiling")]
 use dial9_perf_self_profile::CpuProfilingConfig;
 #[cfg(feature = "cpu-profiling")]
 use dial9_perf_self_profile::SchedEventConfig;
+#[cfg(feature = "cpu-profiling")]
+use dial9_perf_self_profile::SchedProfiler;
 
 use crate::primitives::sync::{Arc, Mutex};
 #[cfg(feature = "cpu-profiling")]

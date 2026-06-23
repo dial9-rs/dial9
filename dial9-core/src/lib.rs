@@ -15,7 +15,7 @@ pub mod fs;
 /// Cloneable handle for recording events and controlling telemetry.
 pub mod handle;
 /// Operational metrics for the core flush path.
-pub mod metrics;
+pub(crate) mod metrics;
 /// Segment payload buffer threaded through the worker pipeline.
 #[doc(hidden)]
 pub mod payload;

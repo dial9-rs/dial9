@@ -152,7 +152,7 @@ impl SharedState {
     /// flush-loop tick (~5 ms) before [`drain_all_tl_buffers`] to give
     /// workers a grace period, minimising contention on the intrusive
     /// drain path.
-    pub fn bump_drain_epoch(&self) {
+    pub(crate) fn bump_drain_epoch(&self) {
         self.drain_epoch.fetch_add(1, Ordering::Relaxed);
     }
 

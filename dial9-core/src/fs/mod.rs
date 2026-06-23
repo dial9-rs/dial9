@@ -31,7 +31,7 @@ pub(crate) const PIPELINE_RESERVE_SEGMENTS: u64 = 2;
 
 /// Retained trace artifacts found at writer construction.
 #[derive(Debug, Default)]
-pub struct DiscoveredArtifacts {
+pub(crate) struct DiscoveredArtifacts {
     pub closed_files: VecDeque<(SegmentRef, u64)>,
     pub next_active_index: u32,
 }
@@ -241,7 +241,7 @@ impl Fs {
 
     /// Scan for trace artifacts left by previous writer lifetimes.
     /// Memory: default (no restart story).
-    pub fn discover_existing(&self) -> io::Result<DiscoveredArtifacts> {
+    pub(crate) fn discover_existing(&self) -> io::Result<DiscoveredArtifacts> {
         match self {
             Fs::Disk(d) => d.discover_existing(),
             Fs::Mem(_) => Ok(DiscoveredArtifacts::default()),

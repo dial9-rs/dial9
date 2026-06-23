@@ -714,18 +714,15 @@ impl<M: WriterMode> SegmentWriter<M> {
         }
     }
 
-    #[doc(hidden)]
-    pub fn write_current_segment_metadata(&mut self) -> std::io::Result<()> {
+    pub(crate) fn write_current_segment_metadata(&mut self) -> std::io::Result<()> {
         self.write_metadata_if_needed()
     }
 
-    #[doc(hidden)]
-    pub fn should_drain(&self) -> bool {
+    pub(crate) fn should_drain(&self) -> bool {
         self.has_real_events && time_source().instant().as_std() >= self.next_drain_time
     }
 
-    #[doc(hidden)]
-    pub fn drained(&mut self) -> std::io::Result<bool> {
+    pub(crate) fn drained(&mut self) -> std::io::Result<bool> {
         if !self.has_real_events {
             return Ok(false);
         }

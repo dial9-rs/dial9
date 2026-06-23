@@ -171,6 +171,6 @@ pub fn clear_tl_handle() {
 
 /// Return the [`Dial9Handle`] for the current thread, or an inert handle if
 /// no dial9 runtime has claimed it. Equivalent to [`Dial9Handle::current`].
-pub fn current_handle() -> Dial9Handle {
+pub(crate) fn current_handle() -> Dial9Handle {
     Dial9Handle::current()
 }

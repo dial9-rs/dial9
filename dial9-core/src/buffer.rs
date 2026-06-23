@@ -187,8 +187,7 @@ impl FlushEpoch {
 /// Default maximum encoded batch size before flushing (~1MB).
 const DEFAULT_BATCH_SIZE: usize = 1023 * 1024;
 
-#[doc(hidden)]
-pub struct ThreadLocalBuffer {
+pub(crate) struct ThreadLocalBuffer {
     encoder: Encoder<Vec<u8>>,
     event_count: usize,
     batch_size: usize,
@@ -253,7 +252,7 @@ impl ThreadLocalBuffer {
         self.encoder.bytes_written() as usize >= self.batch_size
     }
 
-    pub fn flush(&mut self) -> crate::collector::Batch {
+    pub(crate) fn flush(&mut self) -> crate::collector::Batch {
         let event_count = self.event_count as u64;
         let encoded_bytes = self
             .encoder
@@ -294,8 +293,7 @@ impl Drop for ThreadLocalBuffer {
 
 /// A handle to a thread-local buffer, held by `SharedState` so the flush
 /// thread can intrusively drain idle/silent buffers.
-#[doc(hidden)]
-pub struct TlBufferHandle {
+pub(crate) struct TlBufferHandle {
     pub(crate) buffer: Weak<Mutex<ThreadLocalBuffer>>,
     pub(crate) flush_epoch: FlushEpoch,
 }
