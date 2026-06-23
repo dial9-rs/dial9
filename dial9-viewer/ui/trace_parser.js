@@ -955,8 +955,9 @@
    *
    * @param {AsyncIterable<Uint8Array>} chunks raw trace bytes (post-gunzip)
    * @param {Object} [options] same options as {@link parseTrace}, plus
-   *   `onParseProgress({bytesRead, totalBytes, eventCount})` (totalBytes is the
-   *   bytes received so far — unknown until the stream ends).
+   *   `onParseProgress({bytesRead, totalBytes, eventCount})`. `totalBytes` is
+   *   `null` here — when streaming we don't know the trace's full size until the
+   *   stream ends, so callers must not compute a percentage from it.
    * @returns {Promise<ParsedTrace>}
    */
   async function parseTraceStream(chunks, options) {
@@ -974,11 +975,21 @@
     // to/below the whole-buffer baseline. The 5-byte header is still decoded as
     // soon as it arrives so a tiny trace (well under 256KB) still parses.
     const MIN_DRAIN_BYTES = 256 * 1024;
-    // Yield a macrotask (setTimeout(0)) to the browser on this byte cadence
-    // rather than once per chunk, mirroring parseTraceBuffer's YIELD_BYTES.
-    // onProgress still fires on every batch drain so the spinner counter stays
-    // current; only the (relatively expensive) repaint yield is throttled.
-    const YIELD_BYTES = 100 * 1024; // yield to browser every ~100KB decoded
+    // Yield a macrotask (setTimeout(0)) to the browser on a wall-clock cadence
+    // rather than per-chunk or per-byte. KEY FACT: the `for await` over `chunks`
+    // already awaits each decompressed chunk, so the network read +
+    // DecompressionStream pump make progress on their own — the macrotask yield
+    // does NOT drive download/parse overlap. Its ONLY purpose is to hand the
+    // main thread back to the browser so it can repaint the spinner. Each yield
+    // therefore permits (roughly) one repaint, and a byte cadence fired ~100
+    // times for a 10MB trace — ~100 paints during an ~8s parse. Throttling by
+    // elapsed wall-clock time instead caps paints to a few per second
+    // regardless of trace size, with zero effect on overlap or decode output.
+    // We don't drop the yield entirely: the spinner must still tick a few
+    // times/sec so the user sees progress. onProgress still fires on EVERY
+    // batch drain (cheap) so the event/byte counters stay current; only the
+    // (relatively expensive) repaint yield is rate-limited.
+    const PAINT_INTERVAL_MS = 200; // at most ~5 repaint yields per second
 
     // Unconsumed-tail accumulator. The decoder reads pooled strings/stacks via
     // its `stringPool`/`stackPool` maps (resolved values are copied into the
@@ -1056,7 +1067,12 @@
       drainComplete();
     }
 
-    let lastYieldPos = 0; // consumedBytes at the last macrotask yield
+    // Wall-clock source that works in browser and Node. Node 16+ exposes a
+    // global `performance`, but guard anyway in case it's absent.
+    const nowMs = (typeof performance !== "undefined" && performance.now)
+      ? () => performance.now()
+      : () => Date.now();
+    let lastYieldMs = nowMs(); // wall-clock time of the last macrotask yield
     for await (const rawChunk of chunks) {
       const chunk = rawChunk instanceof Uint8Array
         ? rawChunk
@@ -1078,14 +1094,21 @@
       if (onProgress) {
         onProgress({
           bytesRead: consumedBytes,
-          totalBytes: consumedBytes + acc.length,
+          // Total is unknown while streaming (we haven't seen the whole trace),
+          // so report null rather than `consumedBytes + acc.length` — `acc` is
+          // just the small undrained tail, which would peg any percentage at
+          // ~99% the entire time.
+          totalBytes: null,
           eventCount: state.events.length,
         });
-        // Yield so the browser can paint the spinner, but only on the coarse
-        // YIELD_BYTES cadence — not once per (tiny) chunk, whose macrotask
-        // round-trips were a large part of the streaming overhead.
-        if (consumedBytes - lastYieldPos >= YIELD_BYTES) {
-          lastYieldPos = consumedBytes;
+        // Yield so the browser can paint the spinner, but only once at least
+        // PAINT_INTERVAL_MS of wall-clock time has elapsed since the last
+        // yield — not once per (tiny) chunk and not on a byte cadence. Because
+        // the `for await` above already pumps the network/decompression, this
+        // throttle reduces repaints without slowing download/parse overlap.
+        const t = nowMs();
+        if (t - lastYieldMs >= PAINT_INTERVAL_MS) {
+          lastYieldMs = t;
           await new Promise((r) => setTimeout(r, 0));
         }
       }
@@ -1098,7 +1121,7 @@
       if (onProgress) {
         onProgress({
           bytesRead: consumedBytes,
-          totalBytes: consumedBytes + acc.length,
+          totalBytes: null, // unknown while streaming — see note above
           eventCount: state.events.length,
         });
       }
