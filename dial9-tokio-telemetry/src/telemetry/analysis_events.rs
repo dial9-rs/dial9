@@ -188,6 +188,7 @@ pub struct CpuSampleEvent {
     /// Timestamp in nanoseconds (monotonic).
     pub timestamp_ns: u64,
     /// Worker thread index.
+    #[deprecated(note = "worker_id is always 0; you must infer this from `tid` + other events")]
     pub worker_id: WorkerId,
     /// OS thread ID.
     pub tid: u32,
@@ -690,7 +691,6 @@ mod tests {
             panic!("expected CpuSampleEvent, got {:?}", events[7]);
         };
         assert_eq!(e.timestamp_ns, 7_000_000);
-        assert_eq!(e.worker_id, WorkerId(0));
         assert_eq!(e.tid, 9999);
         assert_eq!(e.source, CpuSampleSource::CpuProfile);
         assert_eq!(e.thread_name.as_deref(), Some("tokio-runtime-worker"));
