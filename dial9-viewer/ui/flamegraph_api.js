@@ -101,6 +101,57 @@ function nextMaxFiles(currentFolded, opts) {
   return Math.min(cap, Math.max(min, target));
 }
 
+// --- Data-driven toolbar facet options ---------------------------------------
+//
+// The `/api/flamegraph` response carries a `metadata` block describing which
+// facets actually have data in the scope (`sources_present`,
+// `thread_classes_present`, `host_names`). These helpers turn those backend
+// facts into `<option>` descriptors `{ value, label }` so the toolbar offers
+// only real dimensions instead of a hard-coded option list. Pure + exported so
+// they're unit-testable without a DOM.
+
+// Source selector options. `present` is the backend's `sources_present`
+// (e.g. ["cpu", "sched"]). We always keep the canonical order cpu → sched, and
+// only add an explicit "All" choice when more than one source exists (with one
+// source, "All" and that source are identical). Falls back to just "cpu" when
+// the backend reports nothing (older responses / empty scope).
+function sourceFacetOptions(present) {
+  const have = Array.isArray(present) ? present : [];
+  const opts = [];
+  if (have.includes("cpu")) opts.push({ value: "cpu", label: "CPU" });
+  if (have.includes("sched")) opts.push({ value: "sched", label: "Sched" });
+  if (opts.length === 0) opts.push({ value: "cpu", label: "CPU" });
+  if (opts.length > 1) opts.push({ value: "all", label: "All" });
+  return opts;
+}
+
+// Thread-class selector options. `present` is the backend's
+// `thread_classes_present` (e.g. ["off-worker", "worker"]). An explicit "All"
+// (value "") leads, then only the classes that have data. When the backend
+// reports nothing we still offer the full set so the control is never empty.
+function threadFacetOptions(present) {
+  const have = Array.isArray(present) ? present : [];
+  const opts = [{ value: "", label: "All" }];
+  const known = have.length ? have : ["worker", "off-worker"];
+  if (known.includes("worker")) opts.push({ value: "worker", label: "Worker" });
+  if (known.includes("off-worker")) {
+    opts.push({ value: "off-worker", label: "Off-worker" });
+  }
+  return opts;
+}
+
+// Host selector options. `hostNames` is the backend's `host_names` (the hosts
+// present in the scope). The leading "All" (value "") re-applies the original
+// scope host set; each named option narrows to that single host. The "All"
+// label carries the count so the user knows how many hosts the scope spans.
+function hostFacetOptions(hostNames) {
+  const names = Array.isArray(hostNames) ? hostNames.slice() : [];
+  const allLabel = names.length > 1 ? `All (${names.length} hosts)` : "All";
+  const opts = [{ value: "", label: allLabel }];
+  for (const h of names) opts.push({ value: h, label: h });
+  return opts;
+}
+
 if (typeof module !== "undefined" && module.exports) {
   module.exports = {
     formatCoverageBadge,
@@ -110,5 +161,8 @@ if (typeof module !== "undefined" && module.exports) {
     nextMaxFiles,
     nsToPickerUtc,
     pickerUtcToNs,
+    sourceFacetOptions,
+    threadFacetOptions,
+    hostFacetOptions,
   };
 }

@@ -109,6 +109,35 @@ pub struct FlamegraphMetadata {
     pub min_timestamp_ns: Option<i64>,
     /// Max timestamp in the result (epoch nanoseconds)
     pub max_timestamp_ns: Option<i64>,
+    /// Available facets for this scope, used to build the flamegraph toolbar
+    /// data-driven (offer only dimensions that have data) rather than from a
+    /// hard-coded option list. All additive — old clients ignore them.
+    ///
+    /// Host names present in the scope (sorted).
+    pub host_names: Vec<String>,
+    /// Sample sources present (`"cpu"` / `"sched"`, sorted).
+    pub sources_present: Vec<String>,
+    /// Worker-attribution classes present (`"worker"` / `"off-worker"`, sorted).
+    pub thread_classes_present: Vec<String>,
+    /// The resolved scope the server queried, echoed so the UI's header can
+    /// render the current selection without re-deriving it from the URL.
+    pub scope: ScopeEcho,
+}
+
+/// The resolved query scope echoed back to the UI (the selection the server
+/// actually applied), so the header reflects backend truth rather than URL
+/// params the client guessed at.
+#[derive(Serialize)]
+pub struct ScopeEcho {
+    pub service: Option<String>,
+    /// The host filter the query was scoped to (empty = all hosts).
+    pub hosts: Vec<String>,
+    pub start_ns: Option<i64>,
+    pub end_ns: Option<i64>,
+    /// The active source selector (`"cpu"` / `"sched"` / `"all"`).
+    pub source: String,
+    /// The active thread-class selector (`""` = all / `"worker"` / `"off-worker"`).
+    pub thread_class: String,
 }
 
 /// Build a flamegraph tree from (stack_id, count) pairs and a stacks dictionary.
@@ -540,6 +569,21 @@ async fn run_refinement_loop(
 
     let tree = build_flamegraph_tree(&result.stack_counts, &result.stacks_dict);
 
+    // Echo the normalized selectors so the UI header reflects what the server
+    // actually applied (derived through the same mapping `sample_filter` uses).
+    let scope_source = match params.source.as_deref() {
+        Some("sched") => "sched",
+        Some("all") => "all",
+        _ => "cpu",
+    }
+    .to_string();
+    let scope_thread = match params.thread_class.as_deref() {
+        Some("worker") => "worker",
+        Some("off-worker") => "off-worker",
+        _ => "",
+    }
+    .to_string();
+
     Ok(Json(FlamegraphResponse {
         tree,
         total_samples: result.total_samples,
@@ -553,6 +597,17 @@ async fn run_refinement_loop(
             },
             min_timestamp_ns: result.min_ts,
             max_timestamp_ns: result.max_ts,
+            host_names: result.host_names,
+            sources_present: result.sources_present,
+            thread_classes_present: result.thread_classes_present,
+            scope: ScopeEcho {
+                service: params.service.clone(),
+                hosts: params.host.clone(),
+                start_ns: params.start_ns,
+                end_ns: params.end_ns,
+                source: scope_source,
+                thread_class: scope_thread,
+            },
         },
     }))
 }

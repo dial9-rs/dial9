@@ -552,6 +552,73 @@ pub(crate) struct AggResult {
     pub hosts: usize,
     pub min_ts: Option<i64>,
     pub max_ts: Option<i64>,
+    /// Facets available in this scope's time window, recorded **independent of
+    /// the counting filter** (see [`Facets`]). These drive the data-driven
+    /// flamegraph toolbar: the UI offers only the dimensions that actually have
+    /// data, rather than a hard-coded option list.
+    ///
+    /// Host names present in the scope (sorted), regardless of the
+    /// source/thread filter. Empty if no `host` column is present.
+    pub host_names: Vec<String>,
+    /// Sample sources present in the scope (`"cpu"` / `"sched"`, sorted),
+    /// regardless of the active source filter.
+    pub sources_present: Vec<String>,
+    /// Worker-attribution classes present in the scope (`"worker"` /
+    /// `"off-worker"`, sorted), regardless of the active thread filter.
+    pub thread_classes_present: Vec<String>,
+}
+
+/// Available-facet accumulator, populated as part-files are read.
+///
+/// Unlike the counting accumulators (`counts`, `total_samples`), facet presence
+/// is recorded **before** the source/thread filter is applied — it only honors
+/// the time-range filter. This is deliberate: the toolbar must offer every
+/// dimension that has data *in the window*, not just the dimension currently
+/// selected. Otherwise switching the Source selector to `sched` would make
+/// `cpu` vanish from the options (and vice-versa).
+#[derive(Default)]
+struct Facets {
+    /// Distinct host names present in the window, recorded regardless of the
+    /// source/thread filter — drives the toolbar's host selector.
+    hosts: HashSet<String>,
+    /// Distinct host names that passed the *counting* filter — drives the
+    /// `hosts` count badge ("N hosts" of the displayed tree).
+    matched_hosts: HashSet<String>,
+    /// Distinct wire source values seen (`SOURCE_CPU_PROFILE` / `SOURCE_SCHED_EVENT`).
+    sources: HashSet<u8>,
+    /// Whether any on-runtime (worker-attributed) sample was seen.
+    saw_worker: bool,
+    /// Whether any off-runtime sample was seen.
+    saw_off_worker: bool,
+}
+
+impl Facets {
+    /// Sorted source labels present (`"cpu"` before `"sched"`).
+    fn source_labels(&self) -> Vec<String> {
+        let mut v: Vec<String> = self
+            .sources
+            .iter()
+            .filter_map(|s| match *s {
+                SOURCE_CPU_PROFILE => Some("cpu".to_string()),
+                SOURCE_SCHED_EVENT => Some("sched".to_string()),
+                _ => None,
+            })
+            .collect();
+        v.sort();
+        v
+    }
+
+    /// Sorted thread-class labels present (`"off-worker"` before `"worker"`).
+    fn thread_labels(&self) -> Vec<String> {
+        let mut v = Vec::new();
+        if self.saw_off_worker {
+            v.push("off-worker".to_string());
+        }
+        if self.saw_worker {
+            v.push("worker".to_string());
+        }
+        v
+    }
 }
 
 /// Aggregate the given folded part-files (by their source keys) into stack_id
@@ -573,7 +640,7 @@ pub(crate) async fn aggregate(
 ) -> anyhow::Result<AggResult> {
     let mut counts: HashMap<[u8; 16], u64> = HashMap::new();
     let mut dict: HashMap<Vec<u8>, Vec<String>> = HashMap::new();
-    let mut hosts: HashSet<String> = HashSet::new();
+    let mut facets = Facets::default();
     let mut total_samples = 0usize;
     let mut min_ts: Option<i64> = None;
     let mut max_ts: Option<i64> = None;
@@ -597,7 +664,7 @@ pub(crate) async fn aggregate(
             &data,
             filter,
             &mut counts,
-            &mut hosts,
+            &mut facets,
             &mut total_samples,
             &mut min_ts,
             &mut max_ts,
@@ -610,13 +677,25 @@ pub(crate) async fn aggregate(
     let stack_counts: Vec<(Vec<u8>, u64)> =
         counts.into_iter().map(|(k, v)| (k.to_vec(), v)).collect();
 
+    // `host_names` is the in-window facet set (any source/thread); fall back to
+    // the counted hosts if no separate facet hosts were recorded.
+    let mut host_names: Vec<String> = if facets.hosts.is_empty() {
+        facets.matched_hosts.iter().cloned().collect()
+    } else {
+        facets.hosts.iter().cloned().collect()
+    };
+    host_names.sort();
+
     Ok(AggResult {
         stack_counts,
         stacks_dict: dict,
         total_samples,
-        hosts: hosts.len().max(1),
+        hosts: facets.matched_hosts.len().max(1),
         min_ts,
         max_ts,
+        host_names,
+        sources_present: facets.source_labels(),
+        thread_classes_present: facets.thread_labels(),
     })
 }
 
@@ -624,7 +703,7 @@ fn read_samples_part(
     data: &[u8],
     filter: SampleFilter,
     counts: &mut HashMap<[u8; 16], u64>,
-    hosts: &mut HashSet<String>,
+    facets: &mut Facets,
     total_samples: &mut usize,
     min_ts: &mut Option<i64>,
     max_ts: &mut Option<i64>,
@@ -659,16 +738,11 @@ fn read_samples_part(
             .and_then(|c| c.as_any().downcast_ref::<arrow::array::UInt32Array>());
 
         for i in 0..batch.num_rows() {
-            // Apply the source + thread filters. Default (CpuProfile, all
-            // threads) matches the viewer's on-CPU flamegraph. Both sources and
-            // both worker classes are stored; this only decides what this query
-            // counts. A missing column degrades safely (see above).
             let source = source_arr.map_or(SOURCE_CPU_PROFILE, |a| a.value(i));
             let worker_present = worker_arr.is_none_or(|a| !a.is_null(i));
-            if !filter.includes(source, worker_present) {
-                continue;
-            }
-            // Time range filter: skip samples outside [start_ns, end_ns).
+
+            // Time range filter: applies to BOTH counting and facet presence, so
+            // a sample outside [start_ns, end_ns) contributes to neither.
             if let Some(ts) = ts_arr {
                 let v = ts.value(i);
                 if filter.start_ns.is_some_and(|start| v < start) {
@@ -677,6 +751,31 @@ fn read_samples_part(
                 if filter.end_ns.is_some_and(|end| v >= end) {
                     continue;
                 }
+            }
+
+            // Record available facets BEFORE the source/thread filter: the
+            // toolbar must offer every dimension present in the window, not just
+            // the currently-selected one (else picking `source=sched` would make
+            // `cpu` disappear from the options). A missing column degrades
+            // safely — `source` defaults to on-CPU, `worker_id` to present.
+            facets.sources.insert(source);
+            if worker_present {
+                facets.saw_worker = true;
+            } else {
+                facets.saw_off_worker = true;
+            }
+            if let Some(h) = host_arr
+                && !h.is_null(i)
+            {
+                facets.hosts.insert(h.value(i).to_string());
+            }
+
+            // Counting filter: source + thread. Default (CpuProfile, all
+            // threads) matches the viewer's on-CPU flamegraph. Both sources and
+            // both worker classes are stored; this only decides what this query
+            // counts.
+            if !filter.includes(source, worker_present) {
+                continue;
             }
             let mut id = [0u8; 16];
             id.copy_from_slice(stack_arr.value(i));
@@ -690,7 +789,7 @@ fn read_samples_part(
             if let Some(h) = host_arr
                 && !h.is_null(i)
             {
-                hosts.insert(h.value(i).to_string());
+                facets.matched_hosts.insert(h.value(i).to_string());
             }
         }
     }

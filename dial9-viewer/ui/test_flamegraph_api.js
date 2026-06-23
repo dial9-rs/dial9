@@ -19,6 +19,9 @@ const {
   nextMaxFiles,
   nsToPickerUtc,
   pickerUtcToNs,
+  sourceFacetOptions,
+  threadFacetOptions,
+  hostFacetOptions,
 } = require("./flamegraph_api.js");
 
 let passed = 0;
@@ -173,6 +176,109 @@ for (const ns of [
     `round-trip identity for ${ns}`,
   );
 }
+
+// ── Data-driven facet options ──
+function assertDeepEq(actual, expected, desc) {
+  if (JSON.stringify(actual) === JSON.stringify(expected)) {
+    console.log(`✓ ${desc}`);
+    passed++;
+  } else {
+    console.log(
+      `✗ ${desc}\n    expected: ${JSON.stringify(expected)}\n    actual:   ${JSON.stringify(actual)}`,
+    );
+    failed++;
+  }
+}
+
+// sourceFacetOptions: only present sources, "All" only when >1.
+assertDeepEq(
+  sourceFacetOptions(["cpu", "sched"]),
+  [
+    { value: "cpu", label: "CPU" },
+    { value: "sched", label: "Sched" },
+    { value: "all", label: "All" },
+  ],
+  "both sources present -> CPU, Sched, All",
+);
+assertDeepEq(
+  sourceFacetOptions(["cpu"]),
+  [{ value: "cpu", label: "CPU" }],
+  "single source present -> no All option",
+);
+assertDeepEq(
+  sourceFacetOptions(["sched"]),
+  [{ value: "sched", label: "Sched" }],
+  "only sched present -> Sched only",
+);
+assertDeepEq(
+  sourceFacetOptions([]),
+  [{ value: "cpu", label: "CPU" }],
+  "empty/absent facets fall back to CPU",
+);
+assertDeepEq(
+  sourceFacetOptions(undefined),
+  [{ value: "cpu", label: "CPU" }],
+  "undefined facets fall back to CPU",
+);
+// Canonical order regardless of input order.
+assertDeepEq(
+  sourceFacetOptions(["sched", "cpu"]),
+  [
+    { value: "cpu", label: "CPU" },
+    { value: "sched", label: "Sched" },
+    { value: "all", label: "All" },
+  ],
+  "source order is canonical (cpu before sched)",
+);
+
+// threadFacetOptions: leading All, then only present classes.
+assertDeepEq(
+  threadFacetOptions(["worker", "off-worker"]),
+  [
+    { value: "", label: "All" },
+    { value: "worker", label: "Worker" },
+    { value: "off-worker", label: "Off-worker" },
+  ],
+  "both thread classes -> All, Worker, Off-worker",
+);
+assertDeepEq(
+  threadFacetOptions(["worker"]),
+  [
+    { value: "", label: "All" },
+    { value: "worker", label: "Worker" },
+  ],
+  "only worker present -> All, Worker",
+);
+assertDeepEq(
+  threadFacetOptions([]),
+  [
+    { value: "", label: "All" },
+    { value: "worker", label: "Worker" },
+    { value: "off-worker", label: "Off-worker" },
+  ],
+  "empty facets fall back to full thread set",
+);
+
+// hostFacetOptions: leading All (with count when >1), then each host.
+assertDeepEq(
+  hostFacetOptions(["host-a", "host-b", "host-c"]),
+  [
+    { value: "", label: "All (3 hosts)" },
+    { value: "host-a", label: "host-a" },
+    { value: "host-b", label: "host-b" },
+    { value: "host-c", label: "host-c" },
+  ],
+  "multiple hosts -> All (N hosts) + each host",
+);
+assertDeepEq(
+  hostFacetOptions(["host-a"]),
+  [
+    { value: "", label: "All" },
+    { value: "host-a", label: "host-a" },
+  ],
+  "single host -> plain All + the host",
+);
+assertDeepEq(hostFacetOptions([]), [{ value: "", label: "All" }], "no hosts -> just All");
 
 // ── Summary ──
 console.log(`\n${passed} passed, ${failed} failed`);

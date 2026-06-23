@@ -102,70 +102,65 @@
                 // --- API mode: fetch pre-built flamegraph tree from server ---
                 const apiMode = params.get("api") === "1";
                 if (apiMode) {
-                    // --- Filter toolbar ---
+                    // --- Filter toolbar (data-driven) ---
+                    // The facet controls (Thread / Source / Host) are NOT
+                    // hard-coded: they're built from the backend's reported
+                    // `metadata` facets on the first response (see renderFacets),
+                    // so the toolbar offers only dimensions that actually have
+                    // data. The time pickers and action buttons are intrinsic, so
+                    // they stay static.
+                    const ctlStyle = "background:#1a1a2e;color:#e0e0e0;border:1px solid #444;padding:2px 6px;border-radius:3px";
+                    const btnStyle = "border:1px solid #444;padding:4px 14px;border-radius:3px;cursor:pointer;font-weight:600";
                     const toolbar = document.createElement("div");
                     toolbar.style.cssText = "display:flex;align-items:center;gap:12px;padding:6px 12px;background:#16213e;border-bottom:1px solid #333;font-size:0.8em;flex-shrink:0;flex-wrap:wrap;";
                     toolbar.innerHTML = `
-                        <label style="color:#e0e0e0">Thread: <select id="f-thread" style="background:#1a1a2e;color:#e0e0e0;border:1px solid #444;padding:2px 6px;border-radius:3px">
-                            <option value="">All</option><option value="worker">Worker</option><option value="off-worker">Off-worker</option>
-                        </select></label>
-                        <label style="color:#e0e0e0">Source: <select id="f-source" style="background:#1a1a2e;color:#e0e0e0;border:1px solid #444;padding:2px 6px;border-radius:3px">
-                            <option value="cpu">CPU</option><option value="sched">Sched</option><option value="all">All</option>
-                        </select></label>
-                        <label style="color:#e0e0e0">From: <input id="f-start" type="datetime-local" step="1" style="background:#1a1a2e;color:#e0e0e0;border:1px solid #444;padding:2px 6px;border-radius:3px"></label>
-                        <label style="color:#e0e0e0">To: <input id="f-end" type="datetime-local" step="1" style="background:#1a1a2e;color:#e0e0e0;border:1px solid #444;padding:2px 6px;border-radius:3px"></label>
+                        <span id="f-facets" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap"></span>
+                        <label style="color:#e0e0e0">From: <input id="f-start" type="datetime-local" step="1" style="${ctlStyle}"></label>
+                        <label style="color:#e0e0e0">To: <input id="f-end" type="datetime-local" step="1" style="${ctlStyle}"></label>
                         <button id="f-apply" style="background:#6c63ff;color:#fff;border:none;padding:4px 14px;border-radius:3px;cursor:pointer;font-weight:600">Apply</button>
-                        <button id="f-more" style="background:#2a2a4a;color:#e0e0e0;border:1px solid #444;padding:4px 14px;border-radius:3px;cursor:pointer;font-weight:600">Fetch more</button>
-                        <button id="f-stop" style="background:#2a2a4a;color:#e0e0e0;border:1px solid #444;padding:4px 14px;border-radius:3px;cursor:pointer;font-weight:600;opacity:0.4;cursor:not-allowed" disabled>Stop refining</button>
+                        <button id="f-more" style="background:#2a2a4a;color:#e0e0e0;${btnStyle}">Fetch more</button>
+                        <button id="f-stop" style="background:#2a2a4a;color:#e0e0e0;${btnStyle};opacity:0.4;cursor:not-allowed" disabled>Stop refining</button>
                     `;
                     document.querySelector(".fg-page-header").after(toolbar);
 
-                    const fThread = document.getElementById("f-thread");
-                    const fSource = document.getElementById("f-source");
                     const fStart = document.getElementById("f-start");
                     const fEnd = document.getElementById("f-end");
-                    fThread.value = params.get("thread_class") || "";
-                    // Source defaults to "cpu" (the on-CPU view), matching the
-                    // backend default and the viewer's default flamegraph.
-                    fSource.value = params.get("source") || "cpu";
-                    // Initialize datetime from URL ns params. The picker shows
-                    // UTC wall-clock (S3 trace keys are bucketed in UTC). The
-                    // read (ns -> picker) and write (picker -> ns) sides MUST be
-                    // symmetric: both treat the picker value as UTC. See the
-                    // unit-tested reference impl `nsToPickerUtc`/`pickerUtcToNs`
-                    // in flamegraph_api.js (test_flamegraph_api.js).
-                    function nsToDatetime(ns) {
-                        if (ns == null || ns === "") return "";
-                        return new Date(Number(ns) / 1e6).toISOString().slice(0, 19);
-                    }
-                    if (params.get("start_ns")) {
-                        fStart.value = nsToDatetime(params.get("start_ns"));
-                    }
-                    if (params.get("end_ns")) {
-                        fEnd.value = nsToDatetime(params.get("end_ns"));
-                    }
 
-                    function datetimeToNs(val) {
-                        if (!val) return null;
-                        // `+ "Z"`: parse the picker value as UTC, symmetric with
-                        // nsToDatetime above. A bare datetime-local string is
-                        // parsed as *local* time by `new Date(...)`, which shifts
-                        // the query by the viewer's UTC offset and makes the
-                        // backend list prefixes in the wrong hour (the future, in
-                        // a negative-offset zone like US-Eastern).
-                        return Math.floor(new Date(val + "Z").getTime() * 1e6).toString();
-                    }
+                    // The original scope host set from the URL (the heatmap box
+                    // selection). "All" in the host selector re-applies this set;
+                    // a named host narrows to one. Kept separate from the live
+                    // selection so "All" never broadens past the original scope.
+                    const originalHosts = params.getAll("host");
+
+                    // Single source of truth for the query. Seeded from the URL,
+                    // mutated by the facet controls, read by buildApiUrl /
+                    // updateBrowserUrl. Deliberately decoupled from the DOM so the
+                    // first poll can fire before the (data-driven) facet selects
+                    // even exist.
+                    const filterState = {
+                        thread: params.get("thread_class") || "",
+                        // Source defaults to "cpu" (the on-CPU view), matching the
+                        // backend default and the viewer's default flamegraph.
+                        source: params.get("source") || "cpu",
+                        hosts: originalHosts.slice(),
+                    };
+
+                    // Initialize datetime pickers from URL ns params. The picker
+                    // shows UTC wall-clock (S3 trace keys are bucketed in UTC).
+                    // The read (ns -> picker) and write (picker -> ns) sides MUST
+                    // be symmetric: both treat the picker value as UTC. See the
+                    // unit-tested nsToPickerUtc / pickerUtcToNs in
+                    // flamegraph_api.js (test_flamegraph_api.js).
+                    if (params.get("start_ns")) fStart.value = nsToPickerUtc(params.get("start_ns"));
+                    if (params.get("end_ns")) fEnd.value = nsToPickerUtc(params.get("end_ns"));
 
                     // `max_files` ceiling override, raised by the "Fetch more"
                     // button. null = let the backend pick its own ceiling.
                     let maxFiles = params.get("max_files") ? Number(params.get("max_files")) : null;
 
-                    // Scope dimensions passed from the S3 browser's selection:
-                    // a service and a repeatable host set (the box's hosts).
-                    // These define WHICH files the server-side loop samples.
+                    // Scope dimensions that define WHICH files the server-side
+                    // loop samples (the box's service; hosts live in filterState).
                     const scopeService = params.get("service");
-                    const scopeHosts = params.getAll("host");
-
                     const scopeBucket = params.get("bucket");
                     const scopePrefix = params.get("prefix");
 
@@ -175,11 +170,11 @@
                         if (scopeBucket) u.searchParams.set("bucket", scopeBucket);
                         if (scopePrefix) u.searchParams.set("prefix", scopePrefix);
                         if (scopeService) u.searchParams.set("service", scopeService);
-                        for (const h of scopeHosts) u.searchParams.append("host", h);
-                        if (fThread.value) u.searchParams.set("thread_class", fThread.value);
-                        if (fSource.value) u.searchParams.set("source", fSource.value);
-                        const startNs = datetimeToNs(fStart.value);
-                        const endNs = datetimeToNs(fEnd.value);
+                        for (const h of filterState.hosts) u.searchParams.append("host", h);
+                        if (filterState.thread) u.searchParams.set("thread_class", filterState.thread);
+                        if (filterState.source) u.searchParams.set("source", filterState.source);
+                        const startNs = pickerUtcToNs(fStart.value);
+                        const endNs = pickerUtcToNs(fEnd.value);
                         if (startNs) u.searchParams.set("start_ns", startNs);
                         if (endNs) u.searchParams.set("end_ns", endNs);
                         if (maxFiles != null) u.searchParams.set("max_files", String(maxFiles));
@@ -196,14 +191,120 @@
                         p.set("api", "1");
                         if (params.get("data_dir")) p.set("data_dir", params.get("data_dir"));
                         if (scopeService) p.set("service", scopeService);
-                        for (const h of scopeHosts) p.append("host", h);
-                        if (fThread.value) p.set("thread_class", fThread.value);
-                        if (fSource.value) p.set("source", fSource.value);
-                        const startNs = datetimeToNs(fStart.value);
-                        const endNs = datetimeToNs(fEnd.value);
+                        for (const h of filterState.hosts) p.append("host", h);
+                        if (filterState.thread) p.set("thread_class", filterState.thread);
+                        if (filterState.source) p.set("source", filterState.source);
+                        const startNs = pickerUtcToNs(fStart.value);
+                        const endNs = pickerUtcToNs(fEnd.value);
                         if (startNs) p.set("start_ns", startNs);
                         if (endNs) p.set("end_ns", endNs);
                         history.pushState(null, "", window.location.pathname + "?" + p.toString());
+                    }
+
+                    // Build the data-driven facet controls from the backend's
+                    // reported metadata facets. Called on every response, but only
+                    // rebuilds when the *available* facet set changes (the
+                    // facets are recorded independent of the active filter, so
+                    // they stay stable as the user flips selectors). The guard
+                    // also avoids clobbering a <select> mid-interaction. Each
+                    // control writes back to filterState and re-applies.
+                    // Accumulated available facets. The backend's facet metadata
+                    // is scoped to the *current* query, so narrowing one
+                    // dimension collapses the others (picking a single host makes
+                    // that response report only that host, only its sources,
+                    // etc.). We union every response's facets into
+                    // monotonically-growing sets, so a control never loses an
+                    // option it once offered — otherwise selecting a host would
+                    // make the host selector vanish and you could never get back
+                    // to "All". Seeded with the original scope hosts so the
+                    // selector is correct even before the first response.
+                    const availSources = new Set();
+                    const availThreads = new Set();
+                    const availHosts = new Set(originalHosts);
+                    let renderedFacetKey = null;
+                    function renderFacets(meta) {
+                        for (const s of meta.sources_present || []) availSources.add(s);
+                        for (const t of meta.thread_classes_present || []) availThreads.add(t);
+                        for (const h of meta.host_names || []) availHosts.add(h);
+                        const sources = [...availSources].sort();
+                        const threads = [...availThreads].sort();
+                        const hostNames = [...availHosts].sort();
+                        // Rebuild only when the available set grows (monotonic), so
+                        // a steady-state selection doesn't clobber an open <select>.
+                        const key = JSON.stringify([sources, threads, hostNames]);
+                        if (key === renderedFacetKey) return;
+                        renderedFacetKey = key;
+
+                        const container = document.getElementById("f-facets");
+                        container.innerHTML = "";
+
+                        function addSelect(labelText, options, selected, onChange) {
+                            const label = document.createElement("label");
+                            label.style.color = "#e0e0e0";
+                            label.appendChild(document.createTextNode(labelText + " "));
+                            const sel = document.createElement("select");
+                            sel.style.cssText = ctlStyle;
+                            for (const opt of options) {
+                                const o = document.createElement("option");
+                                o.value = opt.value;
+                                o.textContent = opt.label;
+                                if (opt.value === selected) o.selected = true;
+                                sel.appendChild(o);
+                            }
+                            sel.addEventListener("change", () => onChange(sel.value));
+                            label.appendChild(sel);
+                            container.appendChild(label);
+                        }
+
+                        // A facet change is a new scope: reset depth, push URL,
+                        // restart the poll loop.
+                        function applyFacetChange() {
+                            maxFiles = null;
+                            updateBrowserUrl();
+                            startPolling();
+                        }
+
+                        addSelect("Thread:", threadFacetOptions(threads), filterState.thread, (v) => {
+                            filterState.thread = v;
+                            applyFacetChange();
+                        });
+                        addSelect("Source:", sourceFacetOptions(sources), filterState.source, (v) => {
+                            filterState.source = v;
+                            applyFacetChange();
+                        });
+                        // Host selector only when the scope spans >1 host; with a
+                        // single host there's nothing to narrow to. "All"
+                        // re-applies the original scope set. Driven by the
+                        // accumulated host set so picking one host doesn't hide
+                        // the control (which would strand you on that host).
+                        if (hostNames.length > 1) {
+                            const selectedHost = filterState.hosts.length === 1 ? filterState.hosts[0] : "";
+                            addSelect("Host:", hostFacetOptions(hostNames), selectedHost, (v) => {
+                                filterState.hosts = v ? [v] : originalHosts.slice();
+                                applyFacetChange();
+                            });
+                        }
+                    }
+
+                    // Render the scope summary in the page header from the
+                    // backend's resolved scope + facets (service · host(s) ·
+                    // time range), so the header reflects backend truth rather
+                    // than URL params the client guessed at.
+                    function renderScopeHeader(meta) {
+                        const bits = [];
+                        const hostNames = meta.host_names || [];
+                        if (hostNames.length === 1) bits.push(hostNames[0]);
+                        else if (hostNames.length > 1) bits.push(`${hostNames.length} hosts`);
+                        if (meta.min_timestamp_ns && meta.max_timestamp_ns) {
+                            const from = new Date(meta.min_timestamp_ns / 1e6).toISOString().slice(0, 19) + "Z";
+                            const to = new Date(meta.max_timestamp_ns / 1e6).toISOString().slice(11, 19) + "Z";
+                            bits.push(`${from} \u2192 ${to}`);
+                        }
+                        const svc = meta.service || "aggregated";
+                        document.title = `Flamegraph \u2014 ${svc}`;
+                        titleEl.textContent = bits.length
+                            ? `Flamegraph \u2014 ${svc} \u00b7 ${bits.join(" \u00b7 ")}`
+                            : `Flamegraph \u2014 ${svc}`;
                     }
 
                     function toFgTree(node) {
@@ -274,8 +375,11 @@
                         if (token !== pollToken) return; // superseded while fetching
 
                         const meta = resp.metadata;
-                        document.title = `Flamegraph \u2014 ${meta.service || "aggregated"}`;
-                        titleEl.textContent = document.title;
+                        // Header scope summary + filter controls are both built
+                        // from the backend's reported metadata (data-driven),
+                        // not hard-coded HTML.
+                        renderScopeHeader(meta);
+                        renderFacets(meta);
 
                         // First successful response hides the loading overlay;
                         // subsequent polls refine in-place without it.

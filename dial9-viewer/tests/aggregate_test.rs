@@ -279,6 +279,103 @@ async fn flamegraph_thread_and_source_filters_apply() {
     );
 }
 
+/// Fetch the raw `/api/flamegraph` response body (the `Resp` parser drops the
+/// metadata; this test needs the facet arrays verbatim).
+async fn fetch_body(client: &reqwest::Client, base: &str, query: &str) -> String {
+    let url = format!("{base}/api/flamegraph?{query}");
+    let r = client.get(&url).send().await.unwrap();
+    assert!(
+        r.status().is_success(),
+        "request {url} failed: {}",
+        r.status()
+    );
+    r.text().await.unwrap()
+}
+
+/// Extract a top-level JSON string-array field (`"key":["a","b"]`) from a body.
+/// A small hand parser keeps the test independent of deserializing the deeply
+/// nested `tree`.
+fn extract_str_array(json: &str, key: &str) -> Vec<String> {
+    let i = json
+        .find(key)
+        .unwrap_or_else(|| panic!("{key} present in {json}"))
+        + key.len();
+    let rest = &json[i..];
+    let open = rest.find('[').expect("array open");
+    let close = rest[open..].find(']').expect("array close") + open;
+    rest[open + 1..close]
+        .split(',')
+        .filter_map(|s| {
+            let s = s.trim().trim_matches('"');
+            (!s.is_empty()).then(|| s.to_string())
+        })
+        .collect()
+}
+
+/// The response metadata advertises the *available* facets for the scope —
+/// host names, sources present, and thread classes present — recorded
+/// independent of the active counting filter. This is what makes the flamegraph
+/// toolbar data-driven: even when querying `source=cpu`, the response must still
+/// report that `sched` data exists so the UI can offer it.
+#[tokio::test]
+async fn flamegraph_metadata_reports_available_facets() {
+    let fs = tempfile::tempdir().unwrap();
+    std::fs::create_dir(fs.path().join("src-bucket")).unwrap();
+    std::fs::create_dir(fs.path().join("out-bucket")).unwrap();
+
+    let uploader = fake_s3_client(fs.path());
+    let body = demo_trace_gz();
+    let key = segment_key("2026-04-09", "1910", "shale", "host-a", 1_744_224_000, 0);
+    put(&uploader, "src-bucket", &key, body).await;
+
+    let base = start_agg_server(fs.path(), "src-bucket", "out-bucket", 60).await;
+    let http = reqwest::Client::new();
+
+    // Fold the segment, then read it back filtered to the on-CPU view.
+    let _ = poll(&http, &base, "service=shale&source=all").await;
+    let json = fetch_body(&http, &base, "service=shale&source=cpu").await;
+
+    // Host facet: the host parsed from the key path.
+    assert_eq!(
+        extract_str_array(&json, "\"host_names\":"),
+        vec!["host-a".to_string()],
+        "host_names reports the scope's host"
+    );
+
+    // Sources present is independent of the `source=cpu` counting filter: the
+    // demo trace has BOTH CpuProfile and SchedEvent samples in the window.
+    let sources = extract_str_array(&json, "\"sources_present\":");
+    assert!(
+        sources.contains(&"cpu".to_string()) && sources.contains(&"sched".to_string()),
+        "sources_present must list both sources regardless of the source filter, got {sources:?}"
+    );
+
+    // Likewise both worker classes are present in the demo trace.
+    let threads = extract_str_array(&json, "\"thread_classes_present\":");
+    assert!(
+        threads.contains(&"worker".to_string()) && threads.contains(&"off-worker".to_string()),
+        "thread_classes_present must list both classes, got {threads:?}"
+    );
+
+    // The resolved scope echoes the normalized selectors back to the UI. Scope
+    // through the `"scope":` object so the assertions don't collide with the
+    // top-level `hosts` count or `service` fields.
+    let scope = &json[json.find("\"scope\":").expect("scope present")..];
+    assert_eq!(
+        extract_str_array(scope, "\"hosts\":"),
+        Vec::<String>::new(),
+        "scope.hosts empty when no host filter was requested"
+    );
+    assert!(
+        scope.contains("\"source\":\"cpu\""),
+        "scope echoes the active source selector"
+    );
+    assert!(
+        scope.contains("\"thread_class\":\"\""),
+        "scope echoes the (empty) thread-class selector"
+    );
+}
+
 /// The headline Goal-1 test: the full refinement flow over fake S3.
 ///
 /// - The first (read-only) poll folds nothing and returns an empty tree.
