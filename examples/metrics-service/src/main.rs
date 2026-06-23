@@ -14,7 +14,7 @@ use dial9_tokio_telemetry::memory_profiling::{
 #[cfg(target_os = "linux")]
 use dial9_tokio_telemetry::telemetry::SocketAcceptQueuesConfig;
 #[cfg(target_os = "linux")]
-use dial9_tokio_telemetry::telemetry::cpu_profile::{CpuProfilingConfig, SchedEventConfig};
+use dial9_tokio_telemetry::telemetry::{CpuProfilingConfig, SchedEventConfig};
 use dial9_tokio_telemetry::telemetry::{
     Dial9TokioHandle, DiskWriter, ProcessResourceUsageConfig, TaskDumpConfig, TracedRuntime,
 };
