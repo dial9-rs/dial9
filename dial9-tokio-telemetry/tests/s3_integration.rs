@@ -1,10 +1,12 @@
 //! Integration tests: in-process worker lifecycle and end-to-end S3 upload.
 #![cfg(feature = "worker-s3")]
 
+mod common;
 mod fake_s3;
 
 use aws_config::Region;
 use aws_sdk_s3::Client;
+use common::{fast_sealing_writer, wait_for_sealed_segment};
 use dial9_tokio_telemetry::background_task::s3::S3Config;
 use dial9_tokio_telemetry::telemetry::{DiskWriter, TracedRuntime};
 use fake_s3::{
@@ -857,17 +859,7 @@ fn dump_trigger_uploads_segments_and_writes_manifest() {
     std::fs::create_dir(s3_root.path().join("dump-bucket")).unwrap();
     let client = fake_s3_client(s3_root.path());
 
-    // Small size threshold + short rotation period so the tiny workload seals a
-    // segment within a few hundred ms; the default 60s rotation period could
-    // leave the workload's bytes in an unsealed active segment past the poll
-    // window, processing zero segments on slow CI.
-    let writer = DiskWriter::builder()
-        .base_path(&trace_path)
-        .max_file_size(64)
-        .max_total_size(50 * 1024)
-        .rotation_period(Duration::from_millis(200))
-        .build()
-        .unwrap();
+    let writer = fast_sealing_writer(&trace_path);
 
     let s3_config = S3Config::builder()
         .bucket("dump-bucket")
@@ -891,16 +883,6 @@ fn dump_trigger_uploads_segments_and_writes_manifest() {
         .unwrap();
 
     let trigger = guard.handle().dump_trigger().expect("trigger wired");
-
-    let count_sealed = || {
-        std::fs::read_dir(trace_dir.path())
-            .map(|rd| {
-                rd.flatten()
-                    .filter(|e| e.file_name().to_string_lossy().ends_with(".bin"))
-                    .count()
-            })
-            .unwrap_or(0)
-    };
 
     // Before any dump, triggered mode must not have uploaded anything.
     let list_rt = tokio::runtime::Builder::new_current_thread()
@@ -929,20 +911,12 @@ fn dump_trigger_uploads_segments_and_writes_manifest() {
         "triggered mode must not upload until a dump is requested"
     );
 
+    // A triggered worker parks until a dump is requested, so a confirmed-sealed
+    // segment persists and the unbounded `dump_current_data` window is
+    // guaranteed to match it.
+    wait_for_sealed_segment(&runtime, trace_dir.path());
+
     let receipt = runtime.block_on(async {
-        let mut handles = Vec::new();
-        for _ in 0..200 {
-            handles.push(tokio::spawn(async { tokio::task::yield_now().await }));
-        }
-        for h in handles {
-            let _ = h.await;
-        }
-        for _ in 0..200 {
-            if count_sealed() > 0 {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
         trigger
             .dump_current_data()
             .with_metadata("reason", "test")

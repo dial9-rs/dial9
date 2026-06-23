@@ -1,5 +1,8 @@
 //! Builder wiring for on-trigger pipeline runs.
 
+mod common;
+
+use common::{fast_sealing_writer, wait_for_sealed_segment};
 use dial9_tokio_telemetry::background_task::s3::S3Config;
 use dial9_tokio_telemetry::dump::DumpError;
 use dial9_tokio_telemetry::telemetry::{Disk, DiskWriter, TracedRuntime};
@@ -62,17 +65,7 @@ fn concurrent_dumps_both_resolve_with_distinct_ids() {
     let dir = tempfile::tempdir().unwrap();
     let trace_path = dir.path().join("trace.bin");
 
-    // Small size threshold + short rotation period so the tiny workload seals a
-    // segment within a few hundred ms; the default 60s rotation period could
-    // leave the workload's bytes in an unsealed active segment, capturing zero
-    // segments on slow CI.
-    let writer = DiskWriter::builder()
-        .base_path(&trace_path)
-        .max_file_size(64)
-        .max_total_size(50 * 1024)
-        .rotation_period(Duration::from_millis(200))
-        .build()
-        .unwrap();
+    let writer = fast_sealing_writer(&trace_path);
 
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.worker_threads(2).enable_all();
@@ -87,33 +80,11 @@ fn concurrent_dumps_both_resolve_with_distinct_ids() {
 
     let trigger = guard.handle().dump_trigger().expect("trigger wired");
 
-    // Count sealed segments in the ring (`*.bin`; the active file is `.active`).
-    let count_sealed = || {
-        std::fs::read_dir(dir.path())
-            .map(|rd| {
-                rd.flatten()
-                    .filter(|e| e.file_name().to_string_lossy().ends_with(".bin"))
-                    .count()
-            })
-            .unwrap_or(0)
-    };
+    // A triggered worker parks until a dump is requested, so a confirmed-sealed
+    // segment persists in the ring for the concurrent dumps to capture.
+    wait_for_sealed_segment(&runtime, dir.path());
 
     let (first, second) = runtime.block_on(async {
-        // Generate trace data; the pipeline stays parked until we dump.
-        let mut handles = Vec::new();
-        for _ in 0..200 {
-            handles.push(tokio::spawn(async { tokio::task::yield_now().await }));
-        }
-        for h in handles {
-            let _ = h.await;
-        }
-        // Wait until at least one segment has sealed into the ring.
-        for _ in 0..200 {
-            if count_sealed() > 0 {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
         // Fire two dumps concurrently.
         tokio::join!(
             trigger.dump_current_data().with_metadata("reason", "a"),

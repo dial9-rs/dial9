@@ -3,11 +3,13 @@
 //! `dump-id` tagging and a per-dump manifest.
 #![cfg(feature = "worker-s3")]
 
+mod common;
 mod fake_s3;
 
+use common::{drive_workload, fast_sealing_writer, wait_for_sealed_segment};
 use dial9_tokio_telemetry::background_task::s3::S3Config;
 use dial9_tokio_telemetry::telemetry::{DiskWriter, TracedRuntime};
-use fake_s3::fake_s3_client;
+use fake_s3::{fake_s3_client, wait_for_uploaded_segment};
 use std::future::IntoFuture;
 use std::time::{Duration, Instant};
 
@@ -29,91 +31,6 @@ fn assertion_runtime() -> tokio::runtime::Runtime {
         .unwrap()
 }
 
-/// Generate enough events to rotate several segments.
-fn run_workload(runtime: &tokio::runtime::Runtime) {
-    runtime.block_on(async {
-        let mut handles = Vec::new();
-        for _ in 0..50 {
-            handles.push(tokio::spawn(async {
-                tokio::task::yield_now().await;
-            }));
-        }
-        for h in handles {
-            let _ = h.await;
-        }
-    });
-}
-
-/// Block until the flush thread has sealed at least one segment
-/// (`trace.<n>.bin` on disk), so a look-back dump has something to capture.
-fn wait_for_sealed_segment(trace_dir: &std::path::Path) {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        let sealed = std::fs::read_dir(trace_dir)
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .any(|e| {
-                let name = e.file_name();
-                let name = name.to_string_lossy();
-                name.ends_with(".bin") && !name.ends_with("trace.bin")
-            });
-        if sealed {
-            return;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "no segment sealed within 10s; cannot exercise look-back dump"
-        );
-        std::thread::sleep(Duration::from_millis(50));
-    }
-}
-
-/// Block until the worker has uploaded at least one captured segment to S3 (any
-/// key under `traces/` other than the `traces/dumps/` manifest), driving more
-/// workload each iteration so segments keep sealing. Uploaded objects persist,
-/// so this is race-free; polling the trace dir is not, because the local
-/// segment file is deleted immediately after a successful upload (the worker is
-/// actively consuming while a dump window is open).
-fn wait_for_uploaded_segment(
-    runtime: &tokio::runtime::Runtime,
-    client: &aws_sdk_s3::Client,
-    bucket: &str,
-) {
-    let poll_rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(30);
-    loop {
-        // Keep producing trace data so segments keep sealing into the ring.
-        run_workload(runtime);
-        let found = poll_rt.block_on(async {
-            client
-                .list_objects_v2()
-                .bucket(bucket)
-                .prefix("traces/")
-                .send()
-                .await
-                .map(|r| {
-                    r.contents
-                        .unwrap_or_default()
-                        .into_iter()
-                        .filter_map(|o| o.key)
-                        .any(|k| !k.starts_with("traces/dumps/"))
-                })
-                .unwrap_or(false)
-        });
-        if found {
-            return;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "no segment uploaded within 30s; dump did not capture mid-window"
-        );
-        std::thread::sleep(Duration::from_millis(50));
-    }
-}
-
 /// The headline behavior: nothing uploads until the dump, then the dump
 /// uploads the buffered segments, tags them with `dump-id`, and writes a
 /// manifest listing exactly the produced keys.
@@ -125,17 +42,7 @@ fn nothing_uploads_until_dump_then_manifest_indexes_it() {
     std::fs::create_dir(s3_root.path().join("test-bucket")).unwrap();
 
     let client = fake_s3_client(s3_root.path());
-    // Small size threshold + short rotation period so the tiny workload seals a
-    // segment within a few hundred ms; the default 60s rotation period could
-    // leave the workload's bytes in an unsealed active segment, capturing zero
-    // segments on slow CI.
-    let writer = DiskWriter::builder()
-        .base_path(&trace_path)
-        .max_file_size(64)
-        .max_total_size(50 * 1024)
-        .rotation_period(Duration::from_millis(200))
-        .build()
-        .unwrap();
+    let writer = fast_sealing_writer(&trace_path);
 
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.worker_threads(1).enable_all();
@@ -151,8 +58,7 @@ fn nothing_uploads_until_dump_then_manifest_indexes_it() {
 
     let trigger = guard.handle().dump_trigger().expect("trigger wired");
 
-    run_workload(&runtime);
-    wait_for_sealed_segment(trace_dir.path());
+    wait_for_sealed_segment(&runtime, trace_dir.path());
     // Plenty of poll intervals: a continuous-mode worker would have
     // uploaded by now.
     std::thread::sleep(Duration::from_millis(400));
@@ -260,17 +166,7 @@ fn lookforward_dump_captures_post_trigger_segments() {
     std::fs::create_dir(s3_root.path().join("test-bucket")).unwrap();
 
     let client = fake_s3_client(s3_root.path());
-    // Short rotation period (and a small size threshold) so the tiny workload
-    // seals a segment within a few ms, letting `wait_for_sealed_segment` return
-    // promptly. The defaults (512-byte threshold, 60s period) could leave the
-    // tiny workload's bytes in an unsealed active segment.
-    let writer = DiskWriter::builder()
-        .base_path(&trace_path)
-        .max_file_size(64)
-        .max_total_size(50 * 1024)
-        .rotation_period(Duration::from_millis(200))
-        .build()
-        .unwrap();
+    let writer = fast_sealing_writer(&trace_path);
 
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.worker_threads(1).enable_all();
@@ -377,17 +273,7 @@ fn off_s3_pipeline_dumps_without_manifest() {
     let trace_dir = tempfile::tempdir().unwrap();
     let trace_path = trace_dir.path().join("trace.bin");
 
-    // Small size threshold + short rotation period so the tiny workload seals a
-    // segment within a few hundred ms; the default 60s rotation period could
-    // leave the workload's bytes in an unsealed active segment, capturing zero
-    // segments on slow CI.
-    let writer = DiskWriter::builder()
-        .base_path(&trace_path)
-        .max_file_size(64)
-        .max_total_size(50 * 1024)
-        .rotation_period(Duration::from_millis(200))
-        .build()
-        .unwrap();
+    let writer = fast_sealing_writer(&trace_path);
 
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.worker_threads(1).enable_all();
@@ -402,8 +288,7 @@ fn off_s3_pipeline_dumps_without_manifest() {
 
     let trigger = guard.handle().dump_trigger().expect("trigger wired");
 
-    run_workload(&runtime);
-    wait_for_sealed_segment(trace_dir.path());
+    wait_for_sealed_segment(&runtime, trace_dir.path());
 
     let check_rt = assertion_runtime();
     let receipt = check_rt
@@ -454,7 +339,7 @@ fn shutdown_truncates_open_lookforward_dump() {
     let fut = trigger
         .dump_time_range(Duration::from_secs(1), Duration::from_secs(3600))
         .into_future();
-    run_workload(&runtime);
+    drive_workload(&runtime);
 
     drop(runtime);
     guard.graceful_shutdown(Duration::from_secs(2)).unwrap();
