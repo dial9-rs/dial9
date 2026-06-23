@@ -96,6 +96,13 @@
                 border-radius: 50%;
                 animation: spin 0.8s linear infinite;
                 margin: 0 auto 12px;
+                /* Promote to its own compositor layer so the rotation keeps
+                   running on the compositor thread while the main thread is
+                   blocked (the multi-second synchronous processTrace() crunch
+                   and the coarse parse yields). Without this the spinner
+                   animates on the main thread and visibly freezes/stutters
+                   during load, even though the load itself is short. */
+                will-change: transform;
             }
             .loading-progress {
                 font-size: 0.85em;
@@ -1060,13 +1067,26 @@
             // fade the non-selected polls into the background. Compute the
             // heatmap color and multiply each channel by ~0.4 so the hue is
             // preserved but the bar visually recedes.
+            //
+            // The dim transform depends only on the (quantized, ≤24 distinct)
+            // input color, so memoize by that color string. This runs once per
+            // NON-selected poll per render — millions of times when a task is
+            // selected on a large trace — so the parseInt×3 + hex reassembly
+            // was a measurable chunk of click latency. Cache collapses it to a
+            // Map lookup after the first poll of each bucket.
+            const _dimColorCache = new Map();
             function pollColorDim(startNs, endNs) {
                 const c = TraceAnalysis.pollHeatmapColorQuantized(endNs - startNs);
-                const r = Math.round(parseInt(c.slice(1, 3), 16) * 0.4);
-                const g = Math.round(parseInt(c.slice(3, 5), 16) * 0.4);
-                const b = Math.round(parseInt(c.slice(5, 7), 16) * 0.4);
-                const hex2 = (n) => n.toString(16).padStart(2, "0");
-                return "#" + hex2(r) + hex2(g) + hex2(b);
+                let dim = _dimColorCache.get(c);
+                if (dim === undefined) {
+                    const r = Math.round(parseInt(c.slice(1, 3), 16) * 0.4);
+                    const g = Math.round(parseInt(c.slice(3, 5), 16) * 0.4);
+                    const b = Math.round(parseInt(c.slice(5, 7), 16) * 0.4);
+                    const hex2 = (n) => n.toString(16).padStart(2, "0");
+                    dim = "#" + hex2(r) + hex2(g) + hex2(b);
+                    _dimColorCache.set(c, dim);
+                }
+                return dim;
             }
 
             // ── State ──
@@ -1511,6 +1531,8 @@
             // value is a separate (possibly gzipped) component to concatenate.
             const urlParams = new URLSearchParams(window.location.search);
             const traceUrls = urlParams.getAll('trace');
+            // Render profiler: ?prof=1 (or window.D9PROF=1 from the console).
+            if (urlParams.get('prof') === '1') window.D9PROF = 1;
 
             /** Build parseTrace options from current URL time range params. */
             function getParseOptions() {
@@ -1898,7 +1920,17 @@
 
                 showToast("shift-drag-hint", "⇧ Shift+drag to select a region", "info", 0, true);
                 showToast("option-drag-hint", "⌥ Option+drag to zoom", "info", 0, true);
-                requestAnimationFrame(renderAll);
+                // Render synchronously, NOT via requestAnimationFrame. We just
+                // set the viewer to display:flex above; renderAll() reads
+                // getBoundingClientRect() first, which forces a synchronous
+                // reflow, so the lane canvases have correct widths immediately —
+                // no paint frame is needed to settle layout. Drawing here, in
+                // the same task that revealed the viewer, means the browser's
+                // next paint shows the fully-rendered trace. Deferring to a rAF
+                // instead left one frame where the viewer was visible but the
+                // canvases were still blank — the "empty view flash" between the
+                // spinner and the trace.
+                renderAll();
             }
 
             function updatePointsOfInterest({ autoJump = false } = {}) {
@@ -2144,7 +2176,31 @@
                 return lo;
             }
 
+            // Lightweight render profiler. Enable from the console with
+            // `window.D9PROF = 1` (or `?prof=1`), then interact; each renderAll
+            // prints a per-phase breakdown so a slow click is self-diagnosing
+            // instead of guessed at. Costs nothing when disabled.
+            function _profNow() { return (window.D9PROF ? performance.now() : 0); }
+            function _profMark(acc, label, t0) {
+                if (!window.D9PROF) return t0;
+                const t1 = performance.now();
+                acc.push([label, t1 - t0]);
+                return t1;
+            }
+
+            // Per-pass accumulators for renderLane, summed across all lanes.
+            // Reset each renderAll, printed at the end when D9PROF is on.
+            let _laneProf = null;
+            function _lp(label, t0) {
+                if (!_laneProf) return t0;
+                const t1 = performance.now();
+                _laneProf.t[label] = (_laneProf.t[label] || 0) + (t1 - t0);
+                return t1;
+            }
+
             function renderAll() {
+                const prof = window.D9PROF ? [] : null;
+                _laneProf = window.D9PROF ? { t: {}, polls: 0, fillRects: 0 } : null;
                 const rect = lanesContainer.getBoundingClientRect();
                 const drawW = rect.width - LABEL_W;
                 if (drawW <= 0) return;
@@ -2152,6 +2208,7 @@
                 // Scrollbar width: difference between container and its usable content area
                 const scrollbarW = lanesContainer.offsetWidth - lanesContainer.clientWidth;
 
+                let _t = _profNow();
                 // First pass: calculate max visible queue across all workers
                 window.visibleQueueRanges = {};
                 let maxVisibleQ = 1;
@@ -2165,13 +2222,32 @@
                     }
                 }
                 window.sharedVisibleMaxQ = maxVisibleQ;
+                if (prof) _t = _profMark(prof, "queueMax", _t);
 
                 renderTimeline(drawW - scrollbarW);
+                if (prof) _t = _profMark(prof, "timeline", _t);
                 for (const w of workerIds) renderLane(w, drawW);
+                if (prof) _t = _profMark(prof, `lanes(${workerIds.length})`, _t);
                 renderSpanPanel(scrollbarW);
+                if (prof) _t = _profMark(prof, `spanPanel(allSpans=${allSpans.length})`, _t);
                 renderCustomEventsPanel(scrollbarW);
+                if (prof) _t = _profMark(prof, `customEvents(${genericCustomEvents.length})`, _t);
                 renderTaskDetail(scrollbarW);
+                if (prof) _t = _profMark(prof, "taskDetail", _t);
                 renderQueueChart(drawW, scrollbarW);
+                if (prof) {
+                    _t = _profMark(prof, "queueChart", _t);
+                    const total = prof.reduce((s, [, ms]) => s + ms, 0);
+                    prof.sort((a, b) => b[1] - a[1]);
+                    console.log(`[renderAll] total=${total.toFixed(1)}ms  ` +
+                        prof.map(([l, ms]) => `${l}=${ms.toFixed(1)}`).join("  "));
+                    if (_laneProf) {
+                        const passes = Object.entries(_laneProf.t).sort((a, b) => b[1] - a[1]);
+                        console.log(`  [lanes] polls=${_laneProf.polls} fillRects=${_laneProf.fillRects}  ` +
+                            passes.map(([l, ms]) => `${l}=${ms.toFixed(1)}`).join("  "));
+                    }
+                }
+                _laneProf = null;
 
                 // Keep the selection overlay in sync when sidebar is open
                 if (sidebarSelStart && sidebarSelEnd &&
@@ -2187,6 +2263,20 @@
 
                 // Redraw overlay lines (mouse crosshair + selected-event marker).
                 renderCrosshair();
+            }
+
+            // Coalesced renderAll: collapses multiple requests within one frame
+            // into a single render. Use this for high-frequency event handlers
+            // (mousemove hover, pan) so a burst of events can't queue a backlog
+            // of full renders — which, on a large trace, froze the UI as each
+            // multi-hundred-ms render ran back to back.
+            let _renderRafId = 0;
+            function scheduleRenderAll() {
+                if (_renderRafId) return;
+                _renderRafId = requestAnimationFrame(() => {
+                    _renderRafId = 0;
+                    renderAll();
+                });
             }
 
             function nsToX(ns, drawW) {
@@ -2320,6 +2410,7 @@
              * internal offset) rather than the flex layout used here.
              */
             function renderLane(workerId, drawW) {
+                let _tl = _profNow();
                 const c = laneCanvases[workerId];
                 if (!c) {
                     console.error(`No canvas for worker ${workerId}`);
@@ -2337,6 +2428,9 @@
                 ctx.scale(dpr, dpr);
 
                 const spans = workerSpans[workerId];
+                // Weight fn for pixel-LOD downsampling: longest span wins a
+                // pixel column (it visually dominates when zoomed out).
+                const _spanDur = (s) => s.end - s.start;
                 // Block-in-place gaps for this worker (rendered as overlays).
                 const workerGaps = (trace.blockInPlaceGaps || [])
                     .filter(g => g.workerId === workerId)
@@ -2347,12 +2441,16 @@
                 ctx.fillStyle = "#1a1e2a";
                 ctx.fillRect(0, 0, pw, ph);
 
-                // Color-code active periods by scheduling ratio (v5+ only)
+                // Color-code active periods by scheduling ratio (v5+ only).
+                // Pixel-LOD: when zoomed out there can be millions of active
+                // periods over ~1500px; draw one representative (the longest
+                // starting in each pixel column) instead of one fillRect each.
                 if (trace.hasCpuTime) {
                     const startIdx = findFirstVisible(spans.actives, viewStart);
-                    for (let i = startIdx; i < spans.actives.length; i++) {
-                        const s = spans.actives[i];
-                        if (s.start > viewEnd) break;
+                    const reps = TraceAnalysis.pixelDownsampleSpans(
+                        spans.actives, startIdx, viewStart, viewEnd, pw, _spanDur);
+                    if (_laneProf) _laneProf.fillRects += reps.length;
+                    for (const s of reps) {
                         const x1 = Math.max(0, nsToX(s.start, pw));
                         const x2 = Math.min(pw, nsToX(s.end, pw));
                         const w = Math.max(x2 - x1, 1);
@@ -2388,11 +2486,14 @@
                 }
 
                 // Draw park spans — split into normal park (muted) and scheduling delay (bright red)
+                // Pixel-LOD: one representative park per pixel column (longest
+                // wins) so a worker that parked millions of times stays cheap.
                 {
                 const parkStart = findFirstVisible(spans.parks, viewStart);
-                for (let i = parkStart; i < spans.parks.length; i++) {
-                    const s = spans.parks[i];
-                    if (s.start > viewEnd) break;
+                const parkReps = TraceAnalysis.pixelDownsampleSpans(
+                    spans.parks, parkStart, viewStart, viewEnd, pw, _spanDur);
+                if (_laneProf) _laneProf.fillRects += parkReps.length;
+                for (const s of parkReps) {
                     const x1 = Math.max(0, nsToX(s.start, pw));
                     const x2 = Math.min(pw, nsToX(s.end, pw));
                     const w = Math.max(x2 - x1, 1);
@@ -2432,6 +2533,7 @@
                     }
                 }
                 } // end parks block
+                _tl = _lp("setup+bg+parks", _tl);
 
                 // Draw poll spans (solid blue bars, center band)
                 // When a task is selected, draw in two passes: dim first, selected on top
@@ -2439,64 +2541,51 @@
                     bandH = 20;
                 const poiSpan = (currentPoiIndex >= 0) ? pointsOfInterest[currentPoiIndex].span : null;
                 const pollStart = findFirstVisible(spans.polls, viewStart);
-                const nsPerPx = (viewEnd - viewStart) / pw;
+                // Pixel-LOD downsample THEN coalesce. Fully zoomed out there
+                // are ~millions of polls over ~1500px; drawing one fillRect per
+                // poll was ~99.9% overdraw (measured: ~1.6M fillRects, ~1s/
+                // render). pixelDownsampleSpans keeps one representative per
+                // pixel column (the longest poll starting there), so we draw
+                // ≤ pw bars. The coalescer then merges adjacent same-color
+                // representatives. When a task is selected, bias the weight so
+                // its polls always win their column (otherwise a short selected
+                // poll sharing a pixel with a longer one would vanish).
+                const pollWeight = selectedTaskId
+                    ? (s) => (s.taskId === selectedTaskId ? Infinity : s.end - s.start)
+                    : _spanDur;
+                const pollReps = TraceAnalysis.pixelDownsampleSpans(
+                    spans.polls, pollStart, viewStart, viewEnd, pw, pollWeight);
+                if (_laneProf) _laneProf.polls += pollReps.length;
+                // Coalesce adjacent same-color representatives into one fillRect
+                // per contiguous run. `color(s)` returns the fill, or null to
+                // skip (skipped reps don't break neighboring runs).
+                const drawCoalesced = (color) => {
+                    const merge = TraceAnalysis.makeBarCoalescer((x, w, fill) => {
+                        ctx.fillStyle = fill;
+                        ctx.fillRect(x, bandTop, w, bandH);
+                        if (_laneProf) _laneProf.fillRects++;
+                    });
+                    for (const s of pollReps) {
+                        const fill = color(s);
+                        if (fill == null) continue;
+                        const x1 = Math.max(0, nsToX(s.start, pw));
+                        const x2 = Math.min(pw, nsToX(s.end, pw));
+                        merge.push(x1, x2, fill);
+                    }
+                    merge.flush();
+                };
+                let _tp = _profNow();
                 if (selectedTaskId) {
-                    for (let i = pollStart; i < spans.polls.length; i++) {
-                        const s = spans.polls[i];
-                        if (s.start > viewEnd) break;
-                        if (s.taskId === selectedTaskId) continue;
-                        const x1 = Math.max(0, nsToX(s.start, pw));
-                        const x2 = Math.min(pw, nsToX(s.end, pw));
-                        ctx.fillStyle = pollColorDim(s.start, s.end);
-                        ctx.fillRect(x1, bandTop, Math.max(x2 - x1, 1), bandH);
-                    }
-                    ctx.fillStyle = "#ffeb3b";
-                    for (let i = pollStart; i < spans.polls.length; i++) {
-                        const s = spans.polls[i];
-                        if (s.start > viewEnd) break;
-                        if (s.taskId !== selectedTaskId) continue;
-                        const x1 = Math.max(0, nsToX(s.start, pw));
-                        const x2 = Math.min(pw, nsToX(s.end, pw));
-                        ctx.fillRect(x1, bandTop, Math.max(x2 - x1, 1), bandH);
-                    }
-                } else if (nsPerPx > 5000) {
-                    // LOD: when zoomed out, bucket polls by pixel and draw worst-case color
-                    // Each pixel bucket tracks the max poll duration seen
-                    let prevPx = -2, prevColor = null, runStart = -1;
-                    for (let i = pollStart; i < spans.polls.length; i++) {
-                        const s = spans.polls[i];
-                        if (s.start > viewEnd) break;
-                        const x1 = Math.max(0, nsToX(s.start, pw)) | 0;
-                        const x2 = Math.min(pw, nsToX(s.end, pw)) | 0;
-                        const color = pollColor(s.start, s.end);
-                        if (x1 <= prevPx + 1 && color === prevColor) {
-                            // Extend current run
-                            prevPx = Math.max(prevPx, x2);
-                        } else {
-                            // Flush previous run
-                            if (prevColor) {
-                                ctx.fillStyle = prevColor;
-                                ctx.fillRect(runStart, bandTop, Math.max(prevPx - runStart, 1), bandH);
-                            }
-                            runStart = x1;
-                            prevPx = Math.max(x1, x2);
-                            prevColor = color;
-                        }
-                    }
-                    if (prevColor) {
-                        ctx.fillStyle = prevColor;
-                        ctx.fillRect(runStart, bandTop, Math.max(prevPx - runStart, 1), bandH);
-                    }
+                    // Dim pass: every non-selected poll. Highlight pass: the
+                    // selected task's polls on top, in a single solid color.
+                    drawCoalesced((s) =>
+                        s.taskId === selectedTaskId ? null : pollColorDim(s.start, s.end));
+                    drawCoalesced((s) =>
+                        s.taskId === selectedTaskId ? "#ffeb3b" : null);
                 } else {
-                    for (let i = pollStart; i < spans.polls.length; i++) {
-                        const s = spans.polls[i];
-                        if (s.start > viewEnd) break;
-                        const x1 = Math.max(0, nsToX(s.start, pw));
-                        const x2 = Math.min(pw, nsToX(s.end, pw));
-                        ctx.fillStyle = pollColor(s.start, s.end);
-                        ctx.fillRect(x1, bandTop, Math.max(x2 - x1, 1), bandH);
-                    }
+                    drawCoalesced((s) => pollColor(s.start, s.end));
                 }
+                _tp = _lp("pollDraw", _tp);
                 // Mark open-ended polls with a dashed right edge (block_in_place)
                 for (let i = pollStart; i < spans.polls.length; i++) {
                     const s = spans.polls[i];
@@ -2545,6 +2634,7 @@
                     }
                 }
 
+                _tp = _lp("openEnded+poiEtc", _tp);
                 // Mark CPU sample positions with ticks below the poll band
                 ctx.fillStyle = "#ce93d8";
                 {
@@ -2563,6 +2653,7 @@
                     }
                 }
 
+                _tp = _lp("cpuTicks", _tp);
                 // Mark polls that have sched events with red triangles below the poll band
                 for (let i = pollStart; i < spans.polls.length; i++) {
                     const s = spans.polls[i];
@@ -2632,6 +2723,7 @@
                     }
                 }
 
+                _tp = _lp("schedTris+highlights", _tp);
                 // Overlay local queue depth as a step chart in the bottom portion
                 const samples = workerQueueSamples[workerId];
                 if (samples && samples.length) {
@@ -2679,6 +2771,7 @@
                     ctx.stroke();
                 }
 
+                _tp = _lp("queueStep", _tp);
                 // Separator line between poll band and queue area
                 ctx.strokeStyle = "#333";
                 ctx.lineWidth = 0.5;
@@ -3624,34 +3717,13 @@
                 ctx.font = "9px monospace";
                 ctx.textAlign = "center";
 
-                // For each poll, find the most recent wake before it to show wake→poll delay
-                const pollWakes = []; // parallel to polls: {wake, effectiveWake} or null
-                for (let pi = 0; pi < polls.length; pi++) {
-                    const s = polls[pi];
-                    let best = null;
-                    if (wakes.length) {
-                        let lo = 0, hi = wakes.length - 1, bi = -1;
-                        while (lo <= hi) {
-                            const mid = (lo + hi) >> 1;
-                            if (wakes[mid].timestamp <= s.start) { bi = mid; lo = mid + 1; }
-                            else hi = mid - 1;
-                        }
-                        if (bi >= 0) {
-                            const w = wakes[bi];
-                            // If wake arrived during an earlier poll, effective wait starts at that poll's end
-                            let effectiveWake = w.timestamp;
-                            for (let j = 0; j < pi; j++) {
-                                if (w.timestamp >= polls[j].start && w.timestamp <= polls[j].end) {
-                                    effectiveWake = polls[j].end;
-                                    break;
-                                }
-                            }
-                            const delay = s.start - effectiveWake;
-                            if (delay >= 0 && delay < 1e9) best = { wake: w, effectiveWake };
-                        }
-                    }
-                    pollWakes.push(best);
-                }
+                // For each poll, find the most recent wake before it to show
+                // wake→poll delay. `polls` is sorted by start and a task's polls
+                // never overlap, so the "did the wake land in an earlier poll?"
+                // lookup is a binary search inside computePollWakes — O(P·logP)
+                // rather than the O(P²) a per-poll linear scan over earlier
+                // polls costs for a task polled millions of times.
+                const pollWakes = TraceAnalysis.computePollWakes(polls, wakes);
 
                 // Draw wake→poll scheduling delay regions
                 taskDetailWakeRegions = [];
@@ -3765,24 +3837,60 @@
                     }
                 }
 
-                // Draw poll spans
-                for (const s of polls) {
-                    if (s.end < viewStart || s.start > viewEnd) continue;
-                    const x1 = LABEL_W + Math.max(0, nsToX(s.start, drawW));
-                    const x2 = LABEL_W + Math.min(drawW, nsToX(s.end, drawW));
-                    const w = Math.max(x2 - x1, 1);
-                    ctx.fillStyle = "#4fc3f7";
-                    ctx.fillRect(x1, bandTop, w, bandH);
-                    if (w > 35) {
-                        ctx.fillStyle = "#000";
-                        ctx.fillText(fmtDur(s.end - s.start), x1 + w / 2, bandTop + bandH / 2 + 3);
+                // Draw poll spans. `polls` is sorted by start and non-overlapping.
+                const pollStartIdx = findFirstVisible(polls, viewStart);
+                // Count how many polls are actually visible (cheap: bounded by
+                // the early break). If there are more polls than pixels, drawing
+                // one ≥1px bar each would inflate sub-pixel polls and swallow the
+                // idle gaps between them, painting a solid band that looks like
+                // one long continuous poll even for a mostly-idle task. In that
+                // regime, render a per-pixel COVERAGE histogram instead: opacity
+                // = fraction of the pixel's time spent polling. Busy → solid,
+                // sparse → faint, which is the honest density view.
+                let visiblePolls = 0;
+                for (let i = pollStartIdx; i < polls.length; i++) {
+                    if (polls[i].start > viewEnd) break;
+                    visiblePolls++;
+                }
+                if (visiblePolls > drawW) {
+                    const cov = TraceAnalysis.pixelCoverage(polls, pollStartIdx, viewStart, viewEnd, Math.ceil(drawW));
+                    for (let px = 0; px < cov.length; px++) {
+                        const c = cov[px];
+                        if (c <= 0) continue;
+                        // Map coverage→opacity but keep a visible floor so a
+                        // single sub-pixel poll still registers faintly.
+                        ctx.globalAlpha = Math.min(1, 0.15 + c * 0.85);
+                        ctx.fillStyle = "#4fc3f7";
+                        ctx.fillRect(LABEL_W + px, bandTop, 1, bandH);
                     }
-                    // Hit region for polling section
+                    ctx.globalAlpha = 1;
+                    // One coarse hit region for the whole band (per-poll detail
+                    // isn't meaningful at this density; zoom in for it).
                     taskDetailHitRegions.push({
-                        x1, x2, y1: bandTop, y2: bandTop + bandH,
+                        x1: LABEL_W, x2: LABEL_W + drawW, y1: bandTop, y2: bandTop + bandH,
                         type: "polling",
-                        detail: `Polling — actively executing for ${fmtDur(s.end - s.start)}`,
+                        detail: `Polling — ${visiblePolls.toLocaleString()} polls in view (zoom in for per-poll detail)`,
                     });
+                } else {
+                    for (let i = pollStartIdx; i < polls.length; i++) {
+                        const s = polls[i];
+                        if (s.start > viewEnd) break;
+                        const x1 = LABEL_W + Math.max(0, nsToX(s.start, drawW));
+                        const x2 = LABEL_W + Math.min(drawW, nsToX(s.end, drawW));
+                        const w = Math.max(x2 - x1, 1);
+                        ctx.fillStyle = "#4fc3f7";
+                        ctx.fillRect(x1, bandTop, w, bandH);
+                        if (w > 35) {
+                            ctx.fillStyle = "#000";
+                            ctx.fillText(fmtDur(s.end - s.start), x1 + w / 2, bandTop + bandH / 2 + 3);
+                        }
+                        // Hit region for polling section
+                        taskDetailHitRegions.push({
+                            x1, x2, y1: bandTop, y2: bandTop + bandH,
+                            type: "polling",
+                            detail: `Polling — actively executing for ${fmtDur(s.end - s.start)}`,
+                        });
+                    }
                 }
 
                 // Draw idle gaps between consecutive polls (where no wake→poll delay is shown)
@@ -4444,7 +4552,7 @@
                 }
                 viewStart = Math.max(minTs, newStart);
                 viewEnd = Math.min(maxTs, newEnd);
-                renderAll();
+                scheduleRenderAll();
             });
             window.addEventListener("mouseup", () => {
                 if (regionSelecting) {
@@ -5589,7 +5697,7 @@
                 if (found !== hoveredWakerTaskId) {
                     hoveredWakerTaskId = found;
                     document.getElementById("task-detail").style.cursor = found ? "pointer" : "";
-                    renderAll();
+                    scheduleRenderAll();
                 }
 
                 // Show status for polling/scheduled/idle sections
@@ -5611,7 +5719,7 @@
                 document.getElementById("task-detail-status").textContent = "";
                 if (hoveredWakerTaskId) {
                     hoveredWakerTaskId = null;
-                    renderAll();
+                    scheduleRenderAll();
                 }
             });
             document.getElementById("task-detail").addEventListener("click", (e) => {
