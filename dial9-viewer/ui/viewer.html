@@ -2556,14 +2556,30 @@
                 // are ~millions of polls over ~1500px; drawing one fillRect per
                 // poll was ~99.9% overdraw (measured: ~1.6M fillRects, ~1s/
                 // render). pixelDownsampleSpans keeps one representative per
-                // pixel column (the longest poll starting there), so we draw
-                // ≤ pw bars. The coalescer then merges adjacent same-color
-                // representatives. When a task is selected, bias the weight so
-                // its polls always win their column (otherwise a short selected
-                // poll sharing a pixel with a longer one would vanish).
+                // pixel column, so we draw ≤ pw bars; the coalescer then merges
+                // adjacent same-color representatives.
+                //
+                // Representative choice matters for COLOR here: the poll
+                // heatmap ramps navy→cyan→orange→red with duration, so a
+                // longest-wins weight (what the active/park lanes use) would
+                // pick the single slowest poll in each column — and the max of
+                // many samples sits near the top of the range, painting dense
+                // columns almost entirely red. The pre-LOD code drew every poll
+                // in start order, so the LAST poll painted in a pixel won its
+                // color: an unbiased sample, not the worst case. We reproduce
+                // that by weighting on `s.start` (polls are start-sorted, so the
+                // latest starter in a column wins). When a task is selected we
+                // instead force its polls to win their column (`Infinity`) so a
+                // short selected poll sharing a pixel with an unselected one
+                // can't vanish — that highlight pass is a single solid color, so
+                // it has no red-bias concern. This is per-column, not per-poll:
+                // if two selected polls land in the same column only the first
+                // survives, which is visually harmless (the column still reads
+                // selected, and wide selected polls draw full-width from their
+                // real start→end geometry below).
                 const pollWeight = selectedTaskId
-                    ? (s) => (s.taskId === selectedTaskId ? Infinity : s.end - s.start)
-                    : _spanDur;
+                    ? (s) => (s.taskId === selectedTaskId ? Infinity : s.start)
+                    : (s) => s.start;
                 const pollReps = TraceAnalysis.pixelDownsampleSpans(
                     spans.polls, pollStart, viewStart, viewEnd, pw, pollWeight);
                 if (_laneProf) _laneProf.polls += pollReps.length;
