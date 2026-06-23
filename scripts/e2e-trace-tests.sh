@@ -44,6 +44,9 @@ node dial9-viewer/ui/test_task_lifecycle.js
 echo "--- Checking trace analysis ---"
 node dial9-viewer/ui/test_trace_analysis.js
 
+echo "--- Checking trace property oracle (Rust decode parity reference) ---"
+node dial9-viewer/ui/test_trace_properties.js
+
 echo "--- Checking multi-component trace fetch (repeatable trace=) ---"
 node dial9-viewer/ui/test_fetch_traces.js
 
@@ -53,7 +56,13 @@ node dial9-viewer/ui/test_creds.js
 echo "--- Checking skills snippets ---"
 node dial9-viewer/ui/test_all_skills_snippets.js
 
+echo "--- Checking flamegraph API refinement helpers ---"
+node dial9-viewer/ui/test_flamegraph_api.js
+
 echo "--- Checking prefix detection ---"
 node dial9-viewer/ui/test_prefix_detection.js
+
+echo "--- Checking enclosing spans (per-worker) ---"
+node dial9-viewer/ui/test_enclosing_spans.js
 
 echo "All E2E trace checks passed."

@@ -34,7 +34,7 @@ serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
 rust-embed = { version = "8", features = ["mime-guess"] }
 mime_guess = "2"
-tower-http = { version = "0.6", features = ["fs"] }
+tower-http = { version = "0.6", features = ["fs", "cors"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 aws-config = { version = "1", features = ["behavior-version-latest"] }
@@ -44,6 +44,16 @@ s3s = { version = "0.13.0", optional = true }
 s3s-fs = { version = "0.13.0", optional = true }
 s3s-aws = { version = "0.13.0", optional = true }
 tempfile = { version = "3", optional = true }
+
+# Aggregator dependencies
+dial9-trace-format = { workspace = true, features = ["serde-deserialize"] }
+arrow = { version = "54", default-features = false }
+parquet = { version = "54", default-features = false, features = ["arrow", "flate2", "snap"] }
+blake3 = "1"
+bytes = "1"
+lasso = "0.7"
+rustc-hash = "2"
+dial9-core.workspace = true
 
 [dev-dependencies]
 assert2 = { workspace = true }
@@ -56,3 +66,9 @@ urlencoding = "2"
 aws-smithy-http-client = { version = "1", features = ["test-util"] }
 aws-smithy-types = "1"
 http = "1"
+
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "decode_bench"
+harness = false

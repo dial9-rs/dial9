@@ -107,7 +107,7 @@ poll (or a busy runtime) was actually delaying other tasks.
 
 ### 5. Inner spans of the dominant poll
 
-If the app installed the tracing layer (`Dial9TokioLayer`), the `tracing` spans
+If the app installed the tracing layer (`Dial9TracingLayer`), the `tracing` spans
 that executed inside the longest poll, by name. Tells you *what code* ran inside a
 long poll even without reading CPU stacks.
 

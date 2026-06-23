@@ -4,9 +4,10 @@
 // (thread-local) instead.
 
 use dial9_tokio_telemetry::telemetry::{DiskWriter, TracedRuntime};
-use dial9_tokio_telemetry::tracing_layer::Dial9TokioLayer;
+use dial9_tokio_telemetry::tracing_layer::Dial9TracingLayer;
 use dial9_trace_format::types::FieldValueRef;
 use std::collections::HashSet;
+use std::sync::{Arc, Barrier};
 use std::time::Duration;
 use tracing_subscriber::prelude::*;
 
@@ -130,7 +131,7 @@ fn span_events_appear_in_trace() {
     let writer = DiskWriter::single_file(&trace_path).unwrap();
     let (runtime, guard) = TracedRuntime::build_and_start(builder, writer).unwrap();
 
-    let subscriber = tracing_subscriber::registry().with(Dial9TokioLayer::new());
+    let subscriber = tracing_subscriber::registry().with(Dial9TracingLayer::new());
     tracing::subscriber::set_global_default(subscriber).expect("failed to set global subscriber");
 
     runtime.block_on(async {
@@ -141,8 +142,11 @@ fn span_events_appear_in_trace() {
             let _enter = span.enter();
         }
 
-        #[tracing::instrument(fields(user_id = 42))]
-        async fn handle_request() {
+        #[tracing::instrument(fields(user_id = 42), skip(barrier))]
+        async fn handle_request(barrier: Option<Arc<Barrier>>) {
+            if let Some(b) = barrier {
+                b.wait();
+            }
             inner_op("redis").await;
             inner_op("redis").await;
         }
@@ -152,10 +156,15 @@ fn span_events_appear_in_trace() {
             tokio::task::yield_now().await;
         }
 
-        // Spawn across multiple workers for concurrency coverage
+        // Spawn across multiple workers for concurrency coverage. Two of the
+        // tasks share a blocking Barrier so they are guaranteed to run on two
+        // distinct workers (see handle_request), making the multi-worker
+        // assertion deterministic rather than dependent on scheduler placement.
+        let barrier = Arc::new(Barrier::new(2));
         let mut handles = Vec::new();
-        for _ in 0..10 {
-            handles.push(tokio::spawn(handle_request()));
+        for i in 0..10 {
+            let b = (i < 2).then(|| Arc::clone(&barrier));
+            handles.push(tokio::spawn(handle_request(b)));
         }
         for h in handles {
             h.await.unwrap();
@@ -312,7 +321,7 @@ fn span_events_appear_in_trace() {
 /// Verify the layer silently skips when no Dial9Handle is present.
 #[test]
 fn no_telemetry_handle_does_not_panic() {
-    let subscriber = tracing_subscriber::registry().with(Dial9TokioLayer::new());
+    let subscriber = tracing_subscriber::registry().with(Dial9TracingLayer::new());
     let _guard = tracing::subscriber::set_default(subscriber);
 
     // This runs on a plain thread with no dial9 runtime, so no Dial9Handle.
@@ -336,7 +345,7 @@ fn span_events_on_current_thread_runtime() {
     let writer = DiskWriter::single_file(&trace_path).unwrap();
     let (runtime, guard) = TracedRuntime::build_and_start(builder, writer).unwrap();
 
-    let subscriber = tracing_subscriber::registry().with(Dial9TokioLayer::new());
+    let subscriber = tracing_subscriber::registry().with(Dial9TracingLayer::new());
     let _sub_guard = tracing::subscriber::set_default(subscriber);
 
     runtime.block_on(async {

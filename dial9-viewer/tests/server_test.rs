@@ -23,6 +23,14 @@ impl StorageBackend for FakeBackend {
         Box::pin(async { Ok(vec![]) })
     }
 
+    fn list_objects_all(
+        &self,
+        _bucket: &str,
+        _prefix: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<ObjectInfo>, StorageError>> + Send + '_>> {
+        Box::pin(async { Ok(vec![]) })
+    }
+
     fn list_prefixes(
         &self,
         _bucket: &str,
@@ -37,6 +45,15 @@ impl StorageBackend for FakeBackend {
         _key: &str,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, StorageError>> + Send + '_>> {
         Box::pin(async { Err(StorageError::NotFound("fake".into())) })
+    }
+
+    fn put_object(
+        &self,
+        _bucket: &str,
+        _key: &str,
+        _data: Vec<u8>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), StorageError>> + Send + '_>> {
+        Box::pin(async { Ok(()) })
     }
 }
 
@@ -98,6 +115,14 @@ impl StorageBackend for ErroringBackend {
         Box::pin(async { Err(StorageError::Other("default backend used".into())) })
     }
 
+    fn list_objects_all(
+        &self,
+        _bucket: &str,
+        _prefix: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<ObjectInfo>, StorageError>> + Send + '_>> {
+        Box::pin(async { Err(StorageError::Other("default backend used".into())) })
+    }
+
     fn list_prefixes(
         &self,
         _bucket: &str,
@@ -111,6 +136,15 @@ impl StorageBackend for ErroringBackend {
         _bucket: &str,
         _key: &str,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, StorageError>> + Send + '_>> {
+        Box::pin(async { Err(StorageError::Other("default backend used".into())) })
+    }
+
+    fn put_object(
+        &self,
+        _bucket: &str,
+        _key: &str,
+        _data: Vec<u8>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), StorageError>> + Send + '_>> {
         Box::pin(async { Err(StorageError::Other("default backend used".into())) })
     }
 }
@@ -556,7 +590,7 @@ async fn setup_byo_test(bucket: &str) -> (aws_sdk_s3::Client, String, tempfile::
     let upload_client = fake_s3_client(s3_root.path());
 
     let state = AppState::new(Arc::new(ErroringBackend), Some(bucket.to_string()), None)
-        .with_byo_creds(true)
+        .with_s3_source(true)
         .with_ephemeral_s3(fake_ephemeral_config(s3_root.path()));
     let base = start_server(state).await;
     (upload_client, base, s3_root)

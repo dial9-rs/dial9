@@ -919,7 +919,7 @@
         <script src="panel_layout.js"></script>
         <script>
             const { EVENT_TYPES: ET, parseTrace, formatFrame, symbolizeChain, deduplicateSamples } = TraceParser;
-            const { buildWorkerSpans, attachCpuSamples, buildActiveTaskTimeline, computeSchedulingDelays, filterPointsOfInterest, buildSpanData, collectDescendants, selectSpanRenderSet, computeSpanLayout, getTraceTimeRange, hasCpuProfileSamples } = TraceAnalysis;
+            const { buildWorkerSpans, attachCpuSamples, buildActiveTaskTimeline, computeSchedulingDelays, filterPointsOfInterest, buildSpanData, collectDescendants, selectSpanRenderSet, enclosingSpans, computeSpanLayout, getTraceTimeRange, hasCpuProfileSamples } = TraceAnalysis;
 
             function esc(s) {
                 return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -3189,14 +3189,6 @@
             const RELATED_INITIAL = 5;
             const RELATED_STEP = 25;
 
-            // Spans whose [start,end] covers ts, outermost first — the enclosing
-            // hierarchy at the event's timestamp (spans nest via parentSpanId).
-            function spansAtTime(ts) {
-                return allSpans
-                    .filter(s => s.start <= ts && s.end >= ts)
-                    .sort((a, b) => (a.depth - b.depth) || (a.start - b.start));
-            }
-
             // Custom events matching `pred`, sorted by time. [] when none loaded.
             function customEventsWhere(pred) {
                 if (!trace || !trace.customEvents) return [];
@@ -3233,7 +3225,7 @@
                 if (!ev) return `<div class="related-empty">No event selected.</div>`;
 
                 const taskId = taskForEvent(ev);
-                const spans = spansAtTime(ev.timestamp);
+                const spans = enclosingSpans(allSpans, ev);
                 const innerSpan = spans.length ? spans[spans.length - 1] : null;
 
                 const empty = `<div class="related-empty">none</div>`;

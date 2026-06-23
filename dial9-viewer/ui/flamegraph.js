@@ -817,7 +817,21 @@
       if (stack.length > 0) renderAll();
     }
 
-    return { setData, resize, destroy, handleEscape, isZoomed, getZoomPath, zoomToPath };
+    function setTreeDirect(tree, totalCount) {
+      // For API mode: set a pre-built tree directly (no worker/off-worker split)
+      workerTree = tree;
+      offworkerTree = null;
+      workerZoomStack = [];
+      offworkerZoomStack = [];
+      workerLabel.textContent = `All threads \u2014 ${totalCount.toLocaleString()} samples`;
+      offworkerLabel.textContent = "";
+      offworkerCanvas.style.display = "none";
+      offworkerLabel.style.display = "none";
+      spawnFilter.style.display = "none";
+      renderAll();
+    }
+
+    return { setData, setTreeDirect, resize, destroy, handleEscape, isZoomed, getZoomPath, zoomToPath };
   }
 
   const fgExports = { createFlamegraph: createFlamegraph, filterCpuSamples: filterCpuSamples };

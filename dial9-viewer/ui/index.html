@@ -347,6 +347,9 @@
         <button id="cpu-btn" onclick="viewCpuProfile()" disabled title="Open a CPU flamegraph of the selected segments">
             🔥 Flamegraph
         </button>
+        <button id="health-btn" onclick="viewHealth()" disabled title="Open runtime health view for the selected scope">
+            ⚡ Health
+        </button>
         <span id="selection-warn" style="color:#ff6b6b;font-size:0.8em"></span>
         <span class="count" id="selection-count"></span>
     </div>
@@ -403,6 +406,7 @@
     let heatmapSelection = null; // { keys:[], bytes, t0, t1 }
     let rawObjects = [];       // raw search results
     let currentTab = 'browse';
+    let aggregationEnabled = false; // server runs demand-driven aggregation
 
     const ROW_H = 26;          // px height of each host row in the heatmap
 
@@ -658,6 +662,9 @@
             serverHasPrefix = true;
             updateSearchReady();
         }
+        // When the server runs demand-driven aggregation, the flamegraph button
+        // drives the sampled server-side loop instead of decoding raw traces.
+        aggregationEnabled = !!config.aggregation_enabled;
         if (config.supports_byo_credentials) initCredsUi();
         discoverPrefixes().then(autoSearch);
     }).catch(() => { discoverPrefixes().then(autoSearch); });
@@ -846,6 +853,17 @@
         return { service: '', host: key, bootId: '', epoch: 0, segIndex: '', get traceStart() { return ''; } };
     }
 
+    function extractPrefix(key) {
+        const parts = key.split('/');
+        const dateRe = /^\d{4}-\d{2}-\d{2}$/;
+        for (let i = 0; i < parts.length; i++) {
+            if (dateRe.test(parts[i])) {
+                return parts.slice(0, i).join('/');
+            }
+        }
+        return '';
+    }
+
     function toLocalDatetime(d) {
         const pad = n => String(n).padStart(2, '0');
         return d.getFullYear() + '-' + pad(d.getMonth()+1) + '-' + pad(d.getDate()) +
@@ -903,6 +921,7 @@
         // Raw mode has Select All/Deselect; browse mode has the CPU Profiling button.
         document.getElementById('raw-actions').style.display = tab === 'raw' ? 'flex' : 'none';
         document.getElementById('cpu-btn').style.display = tab === 'browse' ? '' : 'none';
+        document.getElementById('health-btn').style.display = tab === 'browse' ? '' : 'none';
         updateSelectionCount();
     }
 
@@ -1482,6 +1501,39 @@
         const bucket = bucketInput.value.trim();
         if (!bucket) { alert('Bucket is required'); return; }
         const keys = heatmapSelection.keys;
+
+        // Demand-driven mode: drive the sampled server-side refinement loop over
+        // the selection's host/time BOX (not these exact files). The loop lists
+        // the matching segments, samples a representative subset in a
+        // deterministic order, and progressively refines — so a large 24h
+        // selection starts showing a flamegraph immediately.
+        if (aggregationEnabled) {
+            const parsed = keys.map(k => parseKey(k));
+            const services = [...new Set(parsed.map(p => p.service).filter(Boolean))];
+            const hosts = [...new Set(parsed.map(p => p.host).filter(Boolean))];
+            const fgParams = new URLSearchParams();
+            fgParams.set('api', '1');
+            // Pass the bucket so the flamegraph endpoint knows which bucket to
+            // aggregate from (required for bring-your-own-credentials mode).
+            if (bucket) fgParams.set('bucket', bucket);
+            // Extract the key prefix from the first selected key (everything
+            // before the date segment). This is authoritative regardless of
+            // whether the prefix came from the server or the user's input.
+            const pfx = extractPrefix(keys[0]);
+            if (pfx) fgParams.set('prefix', pfx);
+            // The loop's Scope takes a single service; a box almost always spans
+            // one service. If several, pass the first and let host-set + time do
+            // the narrowing (rare; revisit if multi-service boxes matter).
+            if (services.length) fgParams.set('service', services[0]);
+            for (const h of hosts) fgParams.append('host', h); // repeatable host set
+            // Selection times are epoch SECONDS; the loop wants epoch ns.
+            if (heatmapSelection.t0 != null) fgParams.set('start_ns', String(Math.round(heatmapSelection.t0 * 1e9)));
+            if (heatmapSelection.t1 != null) fgParams.set('end_ns', String(Math.round(heatmapSelection.t1 * 1e9)));
+            window.open('flamegraph.html?' + fgParams.toString(), '_blank');
+            return;
+        }
+
+        // Exact mode: stream the selected raw traces and decode client-side.
         const params = new URLSearchParams();
         params.set('bucket', bucket);
         for (const key of keys) {
@@ -1491,6 +1543,25 @@
         const fgParams = traceTitleParams(keys);
         fgParams.set('trace', traceUrl);
         window.open('flamegraph.html?' + fgParams.toString(), '_blank');
+    }
+
+    function viewHealth() {
+        if (!heatmapSelection || !heatmapSelection.keys.length) return;
+        const bucket = bucketInput.value.trim();
+        if (!bucket) { alert('Bucket is required'); return; }
+        const keys = heatmapSelection.keys;
+        const parsed = keys.map(k => parseKey(k));
+        const services = [...new Set(parsed.map(p => p.service).filter(Boolean))];
+        const hosts = [...new Set(parsed.map(p => p.host).filter(Boolean))];
+        const hp = new URLSearchParams();
+        if (bucket) hp.set('bucket', bucket);
+        const pfx = extractPrefix(keys[0]);
+        if (pfx) hp.set('prefix', pfx);
+        if (services.length) hp.set('service', services[0]);
+        for (const h of hosts) hp.append('host', h);
+        if (heatmapSelection.t0 != null) hp.set('start_ns', String(Math.round(heatmapSelection.t0 * 1e9)));
+        if (heatmapSelection.t1 != null) hp.set('end_ns', String(Math.round(heatmapSelection.t1 * 1e9)));
+        window.open('health.html?' + hp.toString(), '_blank');
     }
 
     // ── Raw search mode ──
@@ -1595,6 +1666,7 @@
     function updateSelectionCount() {
         const viewBtn = document.getElementById('view-btn');
         const cpuBtn = document.getElementById('cpu-btn');
+        const healthBtn = document.getElementById('health-btn');
         const warn = document.getElementById('selection-warn');
         const count = document.getElementById('selection-count');
 
@@ -1603,14 +1675,16 @@
             if (!sel || !sel.keys.length) {
                 viewBtn.disabled = true;
                 cpuBtn.disabled = true;
+                healthBtn.disabled = true;
                 warn.textContent = '';
                 count.textContent = '';
                 return;
             }
             const over = sel.bytes > MAX_OPEN_BYTES;
             viewBtn.disabled = over;
-            cpuBtn.disabled = over;
-            warn.textContent = over
+            cpuBtn.disabled = over && !aggregationEnabled;
+            healthBtn.disabled = !aggregationEnabled;
+            warn.textContent = over && !aggregationEnabled
                 ? `Too large to open (${formatSize(sel.bytes)} > 100 MB) — narrow your selection.`
                 : '';
             const win = sel.t0 && sel.t1 ? ` · ${fmtTick(sel.t0)}–${fmtTick(sel.t1)}` : '';

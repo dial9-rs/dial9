@@ -71,6 +71,8 @@
         <div id="loading">Loading trace&hellip;</div>
         <div id="error"></div>
 
+        <script src="format.js"></script>
+        <script src="flamegraph_api.js"></script>
         <script src="decode.js"></script>
         <script src="trace_parser.js"></script>
         <script src="creds.js"></script>
@@ -97,8 +99,278 @@
                     errorEl.textContent = msg;
                 }
 
+                // --- API mode: fetch pre-built flamegraph tree from server ---
+                const apiMode = params.get("api") === "1";
+                if (apiMode) {
+                    // --- Filter toolbar ---
+                    const toolbar = document.createElement("div");
+                    toolbar.style.cssText = "display:flex;align-items:center;gap:12px;padding:6px 12px;background:#16213e;border-bottom:1px solid #333;font-size:0.8em;flex-shrink:0;flex-wrap:wrap;";
+                    toolbar.innerHTML = `
+                        <label style="color:#e0e0e0">Thread: <select id="f-thread" style="background:#1a1a2e;color:#e0e0e0;border:1px solid #444;padding:2px 6px;border-radius:3px">
+                            <option value="">All</option><option value="worker">Worker</option><option value="off-worker">Off-worker</option>
+                        </select></label>
+                        <label style="color:#e0e0e0">Source: <select id="f-source" style="background:#1a1a2e;color:#e0e0e0;border:1px solid #444;padding:2px 6px;border-radius:3px">
+                            <option value="cpu">CPU</option><option value="sched">Sched</option><option value="all">All</option>
+                        </select></label>
+                        <label style="color:#e0e0e0">From: <input id="f-start" type="datetime-local" step="1" style="background:#1a1a2e;color:#e0e0e0;border:1px solid #444;padding:2px 6px;border-radius:3px"></label>
+                        <label style="color:#e0e0e0">To: <input id="f-end" type="datetime-local" step="1" style="background:#1a1a2e;color:#e0e0e0;border:1px solid #444;padding:2px 6px;border-radius:3px"></label>
+                        <button id="f-apply" style="background:#6c63ff;color:#fff;border:none;padding:4px 14px;border-radius:3px;cursor:pointer;font-weight:600">Apply</button>
+                        <button id="f-more" style="background:#2a2a4a;color:#e0e0e0;border:1px solid #444;padding:4px 14px;border-radius:3px;cursor:pointer;font-weight:600">Fetch more</button>
+                        <button id="f-stop" style="background:#2a2a4a;color:#e0e0e0;border:1px solid #444;padding:4px 14px;border-radius:3px;cursor:pointer;font-weight:600;opacity:0.4;cursor:not-allowed" disabled>Stop refining</button>
+                    `;
+                    document.querySelector(".fg-page-header").after(toolbar);
+
+                    const fThread = document.getElementById("f-thread");
+                    const fSource = document.getElementById("f-source");
+                    const fStart = document.getElementById("f-start");
+                    const fEnd = document.getElementById("f-end");
+                    fThread.value = params.get("thread_class") || "";
+                    // Source defaults to "cpu" (the on-CPU view), matching the
+                    // backend default and the viewer's default flamegraph.
+                    fSource.value = params.get("source") || "cpu";
+                    // Initialize datetime from URL ns params. The picker shows
+                    // UTC wall-clock (S3 trace keys are bucketed in UTC). The
+                    // read (ns -> picker) and write (picker -> ns) sides MUST be
+                    // symmetric: both treat the picker value as UTC. See the
+                    // unit-tested reference impl `nsToPickerUtc`/`pickerUtcToNs`
+                    // in flamegraph_api.js (test_flamegraph_api.js).
+                    function nsToDatetime(ns) {
+                        if (ns == null || ns === "") return "";
+                        return new Date(Number(ns) / 1e6).toISOString().slice(0, 19);
+                    }
+                    if (params.get("start_ns")) {
+                        fStart.value = nsToDatetime(params.get("start_ns"));
+                    }
+                    if (params.get("end_ns")) {
+                        fEnd.value = nsToDatetime(params.get("end_ns"));
+                    }
+
+                    function datetimeToNs(val) {
+                        if (!val) return null;
+                        // `+ "Z"`: parse the picker value as UTC, symmetric with
+                        // nsToDatetime above. A bare datetime-local string is
+                        // parsed as *local* time by `new Date(...)`, which shifts
+                        // the query by the viewer's UTC offset and makes the
+                        // backend list prefixes in the wrong hour (the future, in
+                        // a negative-offset zone like US-Eastern).
+                        return Math.floor(new Date(val + "Z").getTime() * 1e6).toString();
+                    }
+
+                    // `max_files` ceiling override, raised by the "Fetch more"
+                    // button. null = let the backend pick its own ceiling.
+                    let maxFiles = params.get("max_files") ? Number(params.get("max_files")) : null;
+
+                    // Scope dimensions passed from the S3 browser's selection:
+                    // a service and a repeatable host set (the box's hosts).
+                    // These define WHICH files the server-side loop samples.
+                    const scopeService = params.get("service");
+                    const scopeHosts = params.getAll("host");
+
+                    const scopeBucket = params.get("bucket");
+                    const scopePrefix = params.get("prefix");
+
+                    function buildApiUrl(refine) {
+                        const u = new URL("/api/flamegraph", window.location.origin);
+                        if (params.get("data_dir")) u.searchParams.set("data_dir", params.get("data_dir"));
+                        if (scopeBucket) u.searchParams.set("bucket", scopeBucket);
+                        if (scopePrefix) u.searchParams.set("prefix", scopePrefix);
+                        if (scopeService) u.searchParams.set("service", scopeService);
+                        for (const h of scopeHosts) u.searchParams.append("host", h);
+                        if (fThread.value) u.searchParams.set("thread_class", fThread.value);
+                        if (fSource.value) u.searchParams.set("source", fSource.value);
+                        const startNs = datetimeToNs(fStart.value);
+                        const endNs = datetimeToNs(fEnd.value);
+                        if (startNs) u.searchParams.set("start_ns", startNs);
+                        if (endNs) u.searchParams.set("end_ns", endNs);
+                        if (maxFiles != null) u.searchParams.set("max_files", String(maxFiles));
+                        // The first poll is read-only (instant: serves whatever is
+                        // already folded). Only refining polls fold new files.
+                        // The backend's `refine` is a serde bool, so send the
+                        // literal "true" (not "1").
+                        if (refine) u.searchParams.set("refine", "true");
+                        return u;
+                    }
+
+                    function updateBrowserUrl() {
+                        const p = new URLSearchParams();
+                        p.set("api", "1");
+                        if (params.get("data_dir")) p.set("data_dir", params.get("data_dir"));
+                        if (scopeService) p.set("service", scopeService);
+                        for (const h of scopeHosts) p.append("host", h);
+                        if (fThread.value) p.set("thread_class", fThread.value);
+                        if (fSource.value) p.set("source", fSource.value);
+                        const startNs = datetimeToNs(fStart.value);
+                        const endNs = datetimeToNs(fEnd.value);
+                        if (startNs) p.set("start_ns", startNs);
+                        if (endNs) p.set("end_ns", endNs);
+                        history.pushState(null, "", window.location.pathname + "?" + p.toString());
+                    }
+
+                    function toFgTree(node) {
+                        const m = new Map();
+                        for (const child of (node.children || [])) {
+                            m.set(child.name, toFgTree(child));
+                        }
+                        return { name: node.name, count: node.count, self: node.self, children: m };
+                    }
+
+                    const fg = FlamegraphRenderer.createFlamegraph(containerEl);
+
+                    // Build the base stats string ("N samples \u00b7 M hosts \u00b7 \u2026")
+                    // from the response metadata, shared by every poll.
+                    function baseStats(resp) {
+                        const meta = resp.metadata;
+                        const bits = [`${resp.total_samples.toLocaleString()} samples`];
+                        if (meta.hosts > 1) bits.push(`${meta.hosts} hosts`);
+                        if (meta.min_timestamp_ns && meta.max_timestamp_ns) {
+                            const from = new Date(meta.min_timestamp_ns / 1e6);
+                            const to = new Date(meta.max_timestamp_ns / 1e6);
+                            const dur = formatHumanDuration(meta.max_timestamp_ns - meta.min_timestamp_ns);
+                            bits.push(`${from.toISOString().slice(11,19)} \u2192 ${to.toISOString().slice(11,19)} (${dur})`);
+                        }
+                        return bits.join(" \u00b7 ");
+                    }
+
+                    // Poll-loop state. `pollToken` lets us cancel an in-flight
+                    // loop when the filters change or "Fetch more"/"Stop" is
+                    // clicked: each loop captures the token and bails if it no
+                    // longer matches the current one.
+                    const POLL_INTERVAL_MS = 800;
+                    let pollToken = 0;
+                    let pollTimer = null;
+                    let prevCoverage = null;
+                    // Per-poll coverage gains (percentage points), newest last.
+                    // Drives the auto-stop heuristic (shouldAutoStopRefining).
+                    let coverageDeltas = [];
+                    const stopBtn = document.getElementById("f-stop");
+
+                    function setRefiningUi(active) {
+                        stopBtn.disabled = !active;
+                        stopBtn.style.opacity = active ? "1" : "0.4";
+                        stopBtn.style.cursor = active ? "pointer" : "not-allowed";
+                    }
+
+                    function stopPolling() {
+                        pollToken++;
+                        if (pollTimer != null) { clearTimeout(pollTimer); pollTimer = null; }
+                        setRefiningUi(false);
+                    }
+
+                    // `refine` is false on the first poll for a scope (read-only:
+                    // the server returns whatever is already folded, instantly),
+                    // then true to fold a batch each subsequent poll.
+                    async function poll(token, refine) {
+                        let resp;
+                        try {
+                            const credHeaders = window.Dial9Creds ? Dial9Creds.headers() : {};
+                            resp = await fetch(buildApiUrl(refine), { headers: credHeaders });
+                            if (!resp.ok) throw new Error(await resp.text());
+                            resp = await resp.json();
+                        } catch (err) {
+                            if (token !== pollToken) return; // superseded
+                            showError("Failed to load flamegraph: " + err.message);
+                            return;
+                        }
+                        if (token !== pollToken) return; // superseded while fetching
+
+                        const meta = resp.metadata;
+                        document.title = `Flamegraph \u2014 ${meta.service || "aggregated"}`;
+                        titleEl.textContent = document.title;
+
+                        // First successful response hides the loading overlay;
+                        // subsequent polls refine in-place without it.
+                        loadingEl.classList.add("hidden");
+                        containerEl.style.display = "flex";
+                        fg.setTreeDirect(toFgTree(resp.tree), resp.tree.count);
+
+                        const cov = resp.coverage;
+                        if (cov == null) {
+                            // Older / local-dir mode: no coverage, single fetch only.
+                            statsEl.textContent = baseStats(resp);
+                            stopPolling();
+                            return;
+                        }
+
+                        // Track per-poll coverage gain (skip the read-only first
+                        // poll, which establishes the baseline rather than refining).
+                        if (refine && prevCoverage != null) {
+                            coverageDeltas.push(coveragePercent(cov) - coveragePercent(prevCoverage));
+                        }
+                        const frozen = isCoverageFrozen(prevCoverage, cov);
+                        const plateaued = shouldAutoStopRefining(coverageDeltas);
+                        prevCoverage = cov;
+
+                        let badge = baseStats(resp) + " \u00b7 " + formatCoverageBadge(cov);
+
+                        // Stop when the server can't fold more (frozen) or coverage
+                        // has plateaued (diminishing returns over recent polls).
+                        if (refine && (frozen || plateaued)) {
+                            statsEl.textContent = badge + (frozen
+                                ? " \u00b7 sampling complete"
+                                : " \u00b7 refined (plateaued)");
+                            stopPolling();
+                            return;
+                        }
+                        statsEl.textContent = badge + " \u00b7 refining\u2026";
+
+                        // Subsequent polls refine. Schedule the next one.
+                        setRefiningUi(true);
+                        pollTimer = setTimeout(() => {
+                            if (token === pollToken) poll(token, true);
+                        }, POLL_INTERVAL_MS);
+                    }
+
+                    // (Re)start the poll loop from scratch: cancels any in-flight
+                    // loop, resets freeze tracking, and shows the loading overlay.
+                    // The first poll is read-only (instant); refinement kicks in
+                    // on the polls that follow.
+                    function startPolling() {
+                        stopPolling();
+                        prevCoverage = null;
+                        coverageDeltas = [];
+                        loadingEl.classList.remove("hidden");
+                        loadingEl.textContent = "Loading aggregated flamegraph\u2026";
+                        containerEl.style.display = "none";
+                        errorEl.style.display = "none";
+                        const token = pollToken;
+                        poll(token, false);
+                    }
+
+                    document.getElementById("f-apply").addEventListener("click", () => {
+                        // New filters invalidate the current scope; reset depth.
+                        maxFiles = null;
+                        updateBrowserUrl();
+                        startPolling();
+                    });
+
+                    document.getElementById("f-more").addEventListener("click", () => {
+                        // Request deeper sampling for the current scope: raise the
+                        // ceiling to ~4x the files folded so far, then resume
+                        // refining (reset the plateau tracker so it doesn't
+                        // immediately auto-stop on the prior history).
+                        const folded = prevCoverage ? prevCoverage.files_folded : 0;
+                        maxFiles = nextMaxFiles(folded);
+                        coverageDeltas = [];
+                        stopPolling();
+                        const token = pollToken;
+                        poll(token, true);
+                    });
+
+                    stopBtn.addEventListener("click", () => {
+                        // Manual stop: freeze at the current coverage.
+                        const badge = statsEl.textContent.replace(/ \u00b7 refining\u2026$/, "");
+                        stopPolling();
+                        statsEl.textContent = badge + " \u00b7 stopped";
+                    });
+
+                    startPolling();
+                    window.addEventListener("resize", () => fg.resize());
+                    window.addEventListener("keydown", (e) => { if (e.key === "Escape") fg.handleEscape(); });
+                    return;
+                }
+
                 if (!traceUrls.length) {
-                    showError("No trace URL provided. Use ?trace=<url>&start=<ns>&end=<ns>");
+                    showError("No trace URL provided. Use ?trace=<url>&start=<ns>&end=<ns> or ?api=1&data_dir=...");
                     return;
                 }
 

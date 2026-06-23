@@ -6,12 +6,15 @@ use axum::response::{IntoResponse, Response};
 use rust_embed::Embed;
 use std::path::PathBuf;
 use std::sync::Arc;
+use tower_http::cors::CorsLayer;
 
 mod buckets;
 mod check;
 mod config;
 pub mod credentials;
 mod error;
+pub mod flamegraph;
+pub mod health;
 mod prefixes;
 mod search;
 mod trace;
@@ -47,14 +50,41 @@ pub struct AppState {
     pub default_prefix: Option<String>,
     /// When set, serve UI files from disk instead of embedded assets.
     pub dev_ui_dir: Option<PathBuf>,
-    /// Whether the UI should offer the bring-your-own-credentials panel and
-    /// whether handlers honor `x-dial9-aws-*` headers. True for S3 backends,
-    /// false for `--local-dir` (the data is local; credentials are meaningless).
-    pub allow_byo_creds: bool,
+    /// When set, `/api/flamegraph` runs the demand-driven refinement loop
+    /// against these backends instead of reading a pre-aggregated local dir.
+    pub agg: Option<crate::ingest::aggregate::AggContext>,
+    /// Whether the served data source is S3 (as opposed to a local directory).
+    /// This single fact drives three behaviors: the UI offers the
+    /// bring-your-own-credentials panel, handlers honor `x-dial9-aws-*` headers
+    /// in [`Self::resolve`], and on-demand aggregation is possible (any S3
+    /// bucket can run the `/api/flamegraph` refinement loop). It is `false` only
+    /// for `--local-dir` and local-source aggregation, where the data is local
+    /// and credentials are meaningless.
+    pub source_is_s3: bool,
     /// Optional plumbing for ephemeral S3 client construction (test injection
     /// of the in-process fake; `None` in production → default HTTPS connector).
     #[doc(hidden)]
     pub ephemeral_s3: Option<EphemeralS3Config>,
+    /// Output prefix for BYOC aggregation. Defaults to "flamegraph-data".
+    pub agg_output_prefix: String,
+    /// Output bucket for BYOC aggregation. `None` means write the aggregated
+    /// part-files back into the source bucket (the query-param `bucket`). Set it
+    /// (via `--agg-output-bucket`) when the source bucket is read-only, so the
+    /// output lands in a separate writable bucket.
+    pub agg_output_bucket: Option<String>,
+    /// Region-aware backend for [`Self::agg_output_bucket`], built once at
+    /// startup (the output bucket name is known then, so no per-request region
+    /// detection). Writes to the output bucket use the server's ambient identity
+    /// — the operator controls that bucket via `--agg-output-bucket`. `None`
+    /// when no output bucket override is configured; the BYOC path then writes
+    /// to the source bucket through the request's own (BYOC or ambient) backend.
+    pub agg_output_backend: Option<Arc<dyn StorageBackend>>,
+    /// Segment duration (seconds) for BYOC aggregation scope padding.
+    pub agg_segment_secs: i64,
+    /// Process-global concurrency limits for the demand-driven fold pipeline,
+    /// shared across all in-flight `/api/flamegraph` requests so total fold work
+    /// is bounded application-wide (see [`FoldLimits`]).
+    pub fold_limits: crate::ingest::aggregate::FoldLimits,
 }
 
 impl AppState {
@@ -68,8 +98,14 @@ impl AppState {
             default_bucket,
             default_prefix,
             dev_ui_dir: None,
-            allow_byo_creds: false,
+            agg: None,
+            source_is_s3: false,
             ephemeral_s3: None,
+            agg_output_prefix: "flamegraph-data".to_string(),
+            agg_output_bucket: None,
+            agg_output_backend: None,
+            agg_segment_secs: crate::ingest::aggregate::DEFAULT_SEGMENT_DURATION_SECS,
+            fold_limits: crate::ingest::aggregate::FoldLimits::default(),
         }
     }
 
@@ -78,9 +114,16 @@ impl AppState {
         self
     }
 
-    /// Enable the bring-your-own-credentials path (S3 backends only).
-    pub fn with_byo_creds(mut self, allow: bool) -> Self {
-        self.allow_byo_creds = allow;
+    pub fn with_agg(mut self, agg: crate::ingest::aggregate::AggContext) -> Self {
+        self.agg = Some(agg);
+        self
+    }
+
+    /// Mark the data source as S3, which enables the bring-your-own-credentials
+    /// path and on-demand aggregation. Leave unset (the default) for local-dir
+    /// sources, where credentials are meaningless.
+    pub fn with_s3_source(mut self, is_s3: bool) -> Self {
+        self.source_is_s3 = is_s3;
         self
     }
 
@@ -88,6 +131,29 @@ impl AppState {
     #[doc(hidden)]
     pub fn with_ephemeral_s3(mut self, cfg: EphemeralS3Config) -> Self {
         self.ephemeral_s3 = Some(cfg);
+        self
+    }
+
+    pub fn with_agg_output_prefix(mut self, prefix: String) -> Self {
+        self.agg_output_prefix = prefix;
+        self
+    }
+
+    /// Set the output bucket for BYOC aggregation, paired with the region-aware
+    /// backend that writes to it. Pass `None` to keep the default of writing
+    /// back into the source bucket through the request's own backend.
+    pub fn with_agg_output_bucket(
+        mut self,
+        bucket: Option<String>,
+        backend: Option<Arc<dyn StorageBackend>>,
+    ) -> Self {
+        self.agg_output_bucket = bucket;
+        self.agg_output_backend = backend;
+        self
+    }
+
+    pub fn with_agg_segment_secs(mut self, secs: i64) -> Self {
+        self.agg_segment_secs = secs;
         self
     }
 
@@ -113,7 +179,7 @@ impl AppState {
         };
 
         match parsed {
-            Some(temp) if self.allow_byo_creds => {
+            Some(temp) if self.source_is_s3 => {
                 // Log which identity served the request (akid prefix only — never
                 // the secret/token) so it's unambiguous whether the user's pasted
                 // credentials or the server's ambient identity made the S3 call.
@@ -136,7 +202,7 @@ impl AppState {
                 // No credential headers reached the backend. On a BYO-capable
                 // server this means we fall back to the server's ambient identity
                 // — the usual cause of a "wrong account" error.
-                if self.allow_byo_creds {
+                if self.source_is_s3 {
                     tracing::info!(
                         "no x-dial9-aws-* credentials on request; using server's default identity"
                     );
@@ -191,5 +257,13 @@ fn api_router(state: AppState) -> Router {
         .route("/prefixes", axum::routing::get(prefixes::list_prefixes))
         .route("/search", axum::routing::get(search::search))
         .route("/trace", axum::routing::get(trace::get_trace))
+        .route(
+            "/flamegraph",
+            axum::routing::get(flamegraph::get_flamegraph),
+        )
+        .route("/health", axum::routing::get(health::get_health))
+        // Permissive CORS so a page on another origin can read responses via
+        // fetch(); also answers the OPTIONS preflight automatically.
+        .layer(CorsLayer::permissive())
         .with_state(state)
 }

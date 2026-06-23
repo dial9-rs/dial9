@@ -218,7 +218,7 @@ traceWakeChain(taskId, spans.wakesByTask, trace.taskSpawnLocs);
 
 ## Span duration percentiles by name
 
-Requires `Dial9TokioLayer` in the subscriber.
+Requires `Dial9TracingLayer` in the subscriber.
 
 ```javascript
 const { analyzeTraces } = require('./analyze.js');
