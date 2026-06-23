@@ -220,7 +220,7 @@ const fgData = buildFgData(workerSamples, trace.callframeSymbols);
 
 ## buildSpanData(customEvents)
 
-Pairs `SpanEnter`/`SpanExit` custom events into complete span objects. Requires the `tracing-layer` feature on `dial9-tokio-telemetry` and `Dial9TokioLayer` in the subscriber.
+Pairs `SpanEnter`/`SpanExit` custom events into complete span objects. Requires the `tracing-layer` feature on `dial9-tokio-telemetry` and `Dial9TracingLayer` in the subscriber.
 
 ```javascript
 const { allSpans, spanMeta, maxDepth, childrenByParent } = buildSpanData(trace.customEvents);

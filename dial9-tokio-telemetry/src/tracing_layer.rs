@@ -5,11 +5,11 @@
 //! # Usage
 //!
 //! ```ignore
-//! use dial9_tokio_telemetry::tracing_layer::Dial9TokioLayer;
+//! use dial9_tokio_telemetry::tracing_layer::Dial9TracingLayer;
 //! use tracing_subscriber::prelude::*;
 //!
 //! tracing_subscriber::registry()
-//!     .with(Dial9TokioLayer::new())
+//!     .with(Dial9TracingLayer::new())
 //!     .init();
 //! ```
 //!
@@ -29,13 +29,13 @@
 //! unaffected while controlling trace volume:
 //!
 //! ```ignore
-//! use dial9_tokio_telemetry::tracing_layer::Dial9TokioLayer;
+//! use dial9_tokio_telemetry::tracing_layer::Dial9TracingLayer;
 //! use tracing_subscriber::prelude::*;
 //!
 //! tracing_subscriber::registry()
 //!     .with(tracing_subscriber::fmt::layer())
 //!     .with(
-//!         Dial9TokioLayer::new().with_filter(
+//!         Dial9TracingLayer::new().with_filter(
 //!             tracing_subscriber::filter::Targets::new()
 //!                 .with_target("my_app", tracing::Level::DEBUG)
 //!                 .with_default(tracing::Level::WARN),
@@ -190,24 +190,24 @@ impl FieldVisitor<'_> {
 /// # Setup
 ///
 /// ```ignore
-/// use dial9_tokio_telemetry::tracing_layer::Dial9TokioLayer;
+/// use dial9_tokio_telemetry::tracing_layer::Dial9TracingLayer;
 /// use tracing_subscriber::prelude::*;
 ///
 /// tracing_subscriber::registry()
-///     .with(Dial9TokioLayer::new())
+///     .with(Dial9TracingLayer::new())
 ///     .init();
 /// ```
-pub struct Dial9TokioLayer {
+pub struct Dial9TracingLayer {
     schemas: Mutex<HashMap<Identifier, CallsiteSchemas>>,
 }
 
-impl fmt::Debug for Dial9TokioLayer {
+impl fmt::Debug for Dial9TracingLayer {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Dial9TokioLayer").finish_non_exhaustive()
+        f.debug_struct("Dial9TracingLayer").finish_non_exhaustive()
     }
 }
 
-impl Dial9TokioLayer {
+impl Dial9TracingLayer {
     /// Create a new layer.
     pub fn new() -> Self {
         Self {
@@ -225,7 +225,7 @@ impl Dial9TokioLayer {
     }
 }
 
-impl Default for Dial9TokioLayer {
+impl Default for Dial9TracingLayer {
     fn default() -> Self {
         Self::new()
     }
@@ -239,7 +239,7 @@ fn field_value<'a>(fields: &'a [(&str, String)], name: &str) -> Option<&'a str> 
         .map(|(_, v)| v.as_str())
 }
 
-impl<S> Layer<S> for Dial9TokioLayer
+impl<S> Layer<S> for Dial9TracingLayer
 where
     S: tracing::Subscriber + for<'a> LookupSpan<'a>,
 {

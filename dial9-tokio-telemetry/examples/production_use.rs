@@ -110,7 +110,7 @@
 //! To get the most use out of dial9, you need application-specific events in your traces to make sense of your data. The best way to do this is to emit some sort
 //! of request id into your dial9 traces. There are a couple of ways to do this:
 //!
-//! 1. Use the `Dial9TokioLayer`, which is a tracing layer that allows dial9 to capture your tracing spans directly. Typically, you will
+//! 1. Use the `Dial9TracingLayer`, which is a tracing layer that allows dial9 to capture your tracing spans directly. Typically, you will
 //!    select a narrow set of top-level spans to track.
 //! 2. Emit an event when your request starts and when your request stops. Because these should _normally_ always be on the same Tokio Task, we can
 //!    correlate post-hoc to figure exactly which polls belonged to which requests.

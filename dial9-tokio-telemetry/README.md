@@ -110,6 +110,14 @@ CPU profiling knobs (`cpu-profiling` feature required):
 | `DIAL9_CPU_SAMPLE_HZ` | `99` | CPU sampling frequency in Hz. |
 | `DIAL9_SCHEDULE_PROFILE_ENABLED` | `true` on Linux with `cpu-profiling`, `false` otherwise | Enable per-worker scheduler event capture. Requires the [CPU profiling setup](#cpu-profiling-linux-only). |
 
+Memory profiling knobs (`memory-profiling` feature required; your binary must still install `Dial9Allocator` as its `#[global_allocator]`):
+
+| Name | Default | Meaning |
+| --- | --- | --- |
+| `DIAL9_MEMORY_PROFILE_ENABLED` | `false` | Enable memory allocation sampling. |
+| `DIAL9_MEMORY_SAMPLE_RATE_BYTES` | `524288` | Mean bytes between sampled allocations. |
+| `DIAL9_MEMORY_TRACK_LIVESET` | `false` | Track frees for leak detection. |
+
 Process resource usage knobs:
 
 | Name | Default | Meaning |
@@ -381,7 +389,7 @@ When `track_liveset(true)` is set, dial9 records every deallocation so it can de
 
 Without liveset tracking, the profiler adds negligible overhead. With liveset tracking, the ~200 ns per free is the dominant cost — budget accordingly for allocation-heavy services.
 
-> **Note:** Memory profiling is not yet configurable via `Dial9Config::from_env()`. Use the programmatic API shown above. See [#457](https://github.com/dial9-rs/dial9-tokio-telemetry/issues/457) for tracking.
+`Dial9Config::from_env()` can install the profiler when `DIAL9_MEMORY_PROFILE_ENABLED=true`, but your binary must still declare `Dial9Allocator` as shown above so allocations pass through dial9's hook.
 
 ### Tracing span events (opt-in)
 
@@ -391,15 +399,15 @@ Without liveset tracking, the profiler adds negligible overhead. With liveset tr
 dial9-tokio-telemetry = { version = "0.3", features = ["tracing-layer"] }
 ```
 
-**Use tracing_subscriber to connect the `Dial9TokioLayer`:**
+**Use tracing_subscriber to connect the `Dial9TracingLayer`:**
 ```rust
-use dial9_tokio_telemetry::tracing_layer::Dial9TokioLayer;
+use dial9_tokio_telemetry::tracing_layer::Dial9TracingLayer;
 use tracing_subscriber::prelude::*;
 
 tracing_subscriber::registry()
     .with(tracing_subscriber::fmt::layer())
     .with(
-        Dial9TokioLayer::new().with_filter(
+        Dial9TracingLayer::new().with_filter(
             tracing_subscriber::filter::Targets::new()
                 .with_target("my_app", tracing::Level::TRACE)
                 .with_default(tracing::Level::ERROR),

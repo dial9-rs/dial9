@@ -925,6 +925,35 @@
   }
 
   /**
+   * Spans actively executing on the event's worker at its timestamp, outermost
+   * first — the nested enclosing stack. Enclosure is per-worker: time overlap
+   * alone does not enclose. A span's [start, end] is the min/max across all of
+   * its per-worker segments, so the envelope of a span polled on another worker
+   * can span the event without ever executing on it. Matching the actual
+   * per-worker `segments` avoids that, and on a single worker entered spans are
+   * strictly nested, so the matches form the enclosing chain directly. Events
+   * with no worker context (e.g. process-wide resource samples from the flush
+   * thread, or custom events that do not set worker_id) are enclosed by nothing
+   * and return [].
+   * @param {Array} allSpans spans from buildSpanData (each with `segments` and `depth`)
+   * @param {{timestamp: number, fields: Object}} ev
+   * @returns {Array} enclosing spans, outermost (lowest depth) first
+   */
+  function enclosingSpans(allSpans, ev) {
+    const f = (ev && ev.fields) || {};
+    if (f.worker_id == null) return [];
+    
+    const wid = Number(f.worker_id);
+    if (!Number.isFinite(wid)) return [];
+
+    const ts = ev.timestamp;
+    return allSpans
+      .filter(s => s.segments.some(
+        seg => seg.workerId === wid && seg.start <= ts && seg.end >= ts))
+      .sort((a, b) => (a.depth - b.depth) || (a.start - b.start));
+  }
+
+  /**
    * Compute span panel layout with duration-based y and pixel-grid clustering.
    * @param {{ spans: Array, viewStart: number, viewEnd: number, drawW: number, panelH: number, clusterXPx: number, barH: number }} opts
    * @returns {{ buckets: Array<{spans: Array, representative: Object, x1: number, x2: number, y: number, h: number}> }}
@@ -1153,6 +1182,7 @@
     buildSpanData,
     collectDescendants,
     selectSpanRenderSet,
+    enclosingSpans,
     computeSpanLayout,
     analyzeAllocations,
     pollHeatmapColor,

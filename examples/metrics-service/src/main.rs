@@ -18,7 +18,7 @@ use dial9_tokio_telemetry::telemetry::cpu_profile::{CpuProfilingConfig, SchedEve
 use dial9_tokio_telemetry::telemetry::{
     Dial9TokioHandle, DiskWriter, ProcessResourceUsageConfig, TaskDumpConfig, TracedRuntime,
 };
-use dial9_tokio_telemetry::tracing_layer::Dial9TokioLayer;
+use dial9_tokio_telemetry::tracing_layer::Dial9TracingLayer;
 use tokio::runtime::Builder;
 use tokio_util::sync::CancellationToken;
 
@@ -166,7 +166,7 @@ fn main() -> std::io::Result<()> {
                 ),
         )
         .with(
-            Dial9TokioLayer::new().with_filter(
+            Dial9TracingLayer::new().with_filter(
                 tracing_subscriber::filter::Targets::new()
                     .with_target("metrics_service", tracing::Level::TRACE)
                     .with_default(tracing::Level::ERROR),
