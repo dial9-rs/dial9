@@ -4,8 +4,8 @@
 //! the oldest segments are dropped until `queued_bytes <=
 //! max_total_size`. The worker pops one segment per `take_files` cycle.
 //!
-//! The shutdown handoff rides `writer_done` (Acquire/Release) plus an
-//! `event-listener` `Event` for wakeups.
+//! The shutdown handoff rides `writer_done` (Acquire/Release) plus a
+//! `tokio::sync::Notify` for wakeups.
 
 use std::collections::VecDeque;
 use std::io::{self, Write};
@@ -13,7 +13,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use bytes::Bytes;
-use event_listener::Event;
+use tokio::sync::Notify;
 
 use crate::primitives::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use crate::primitives::sync::{Arc, Mutex};
@@ -64,7 +64,7 @@ struct MemChannel {
     in_flight_segments: Arc<AtomicU64>,
     in_flight_bytes_peak: Arc<AtomicU64>,
     writer_done: AtomicBool,
-    event: Event,
+    notify: Notify,
 }
 
 /// In-memory segment channel.
@@ -100,7 +100,7 @@ impl MemFs {
                 in_flight_segments: Arc::new(AtomicU64::new(0)),
                 in_flight_bytes_peak: Arc::new(AtomicU64::new(0)),
                 writer_done: AtomicBool::new(false),
-                event: Event::new(),
+                notify: Notify::new(),
             }),
         })
     }
@@ -158,7 +158,7 @@ impl MemFs {
             });
         }
 
-        ch.event.notify(usize::MAX);
+        ch.notify.notify_one();
         Ok(SegmentRef::Memory(MemorySegment { index, size }))
     }
 
@@ -180,7 +180,7 @@ impl MemFs {
             });
             q.bytes += size;
         }
-        ch.event.notify(usize::MAX);
+        ch.notify.notify_one();
     }
 
     pub(super) fn remove_active(&self, _path: &Path) -> io::Result<()> {
@@ -256,15 +256,18 @@ impl MemFs {
 
     /// Park until the ring may have new work or the writer is done.
     ///
-    /// Lost-wakeup safe: the listener is registered *before* re-checking the
-    /// queue/done state.
+    /// Lost-wakeup safe: `enable()` registers the waiter *before* the
+    /// condition check, so a concurrent `notify_one()` between registration
+    /// and `.await` is not missed.
     pub(super) async fn wait_for_wakeup(&self) {
         let ch = &self.channel;
-        let listener = ch.event.listen();
+        let notified = ch.notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
         if self.has_pending() || ch.writer_done.load(Ordering::Acquire) {
             return;
         }
-        listener.await;
+        notified.await;
     }
 
     fn has_pending(&self) -> bool {
@@ -277,7 +280,7 @@ impl MemFs {
 
     pub(super) fn mark_writer_done(&self) {
         self.channel.writer_done.store(true, Ordering::Release);
-        self.channel.event.notify(usize::MAX);
+        self.channel.notify.notify_one();
     }
 }
 
