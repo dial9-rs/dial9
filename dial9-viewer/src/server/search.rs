@@ -4,6 +4,8 @@ use axum::http::StatusCode;
 use serde::Deserialize;
 
 use crate::server::AppState;
+use crate::server::credentials::MaybeCreds;
+use crate::server::error::storage_error_response;
 use crate::storage::ObjectInfo;
 
 #[derive(Deserialize)]
@@ -15,8 +17,11 @@ pub struct SearchParams {
 
 pub async fn search(
     State(state): State<AppState>,
+    creds: MaybeCreds,
     Query(params): Query<SearchParams>,
 ) -> Result<Json<Vec<ObjectInfo>>, (StatusCode, String)> {
+    let backend = state.resolve(creds)?;
+
     let bucket = params
         .bucket
         .or(state.default_bucket.clone())
@@ -29,11 +34,10 @@ pub async fn search(
         (None, None) => String::new(),
     };
 
-    let objects = state
-        .backend
+    let objects = backend
         .list_objects(&bucket, &prefix)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(storage_error_response)?;
 
     Ok(Json(objects))
 }
