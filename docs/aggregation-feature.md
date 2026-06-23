@@ -20,24 +20,23 @@ whole window, so we deliberately never fold all of it.
 
 ## The pivot
 
-The original pipeline was **batch**: a `dial9 ingest` job decoded every trace
-segment under a prefix into a Parquet `samples` table up front, and the viewer
-queried whatever had been pre-aggregated.
+The original *design* was **batch**: decode every trace segment under a prefix
+into a Parquet `samples` table up front, and have the viewer query whatever had
+been pre-aggregated.
 
-The feature replaces that with **demand-driven, progressively-refined
+The shipped feature is instead **demand-driven, progressively-refined
 sampling**, driven by the query itself:
 
-| | Batch (old) | Demand-driven (now) |
+| | Batch (original design) | Demand-driven (shipped) |
 |---|---|---|
 | When aggregation happens | Ahead of time, whole window | At query time, a few files per poll |
-| How much | Everything | A representative sample, capped (~10%) |
-| First result | After the whole batch | After ~3 files (sub-second) |
+| How much | Everything | A representative sample, capped (~5%) |
+| First result | After the whole batch | After the baseline (4 files), sub-second |
 | Completeness signal | None | `coverage` on every response |
 | `samples` table | Same schema — one row per CPU sample, drilled into at query time. Now populated *incrementally and partially* instead of batch-filled. |
 
-The batch `dial9 ingest` command still exists as an **optional cache-warmer**
-(it reuses the same fold primitive) but is no longer on the viewer's critical
-path.
+There is **no `dial9 ingest` batch command** — aggregation happens only inside
+the `/api/flamegraph` refinement loop. Nothing pre-aggregates ahead of a query.
 
 ## How it works
 
@@ -53,8 +52,9 @@ A **fold** decodes one source file's CPU samples and writes them as a
 deterministically-named Parquet part-file:
 
 ```
-{output_prefix}/v{SAMPLES_FORMAT_VERSION}/samples/service=…/date=…/host=…/{blake3(source_key)}.parquet
-{output_prefix}/v{SAMPLES_FORMAT_VERSION}/dict/stacks/{blake3(source_key)}.parquet
+{output_prefix}/v{SAMPLES_FORMAT_VERSION}/bucket={source_bucket}/samples/service=…/date=…/host=…/{blake3(source_key)}.parquet
+{output_prefix}/v{SAMPLES_FORMAT_VERSION}/bucket={source_bucket}/dict/stacks/{blake3(source_key)}.parquet
+{output_prefix}/v{SAMPLES_FORMAT_VERSION}/bucket={source_bucket}/polls/{blake3(source_key)}.parquet
 ```
 
 The part-file's **existence is the record that the file is folded** — there is
@@ -71,8 +71,8 @@ Each `GET /api/flamegraph` request:
 2. **Folded set** — lists the output `samples/` tree (the record of what's
    already folded).
 3. **Fold a bounded budget** of not-yet-folded files in order — the
-   *baseline floor* (3) on the first poll, a *refine batch* (8) afterward —
-   stopping at the *sampling cap*.
+   *baseline floor* (4) on the first refining poll, a *refine batch* (12)
+   afterward — stopping at the *sampling cap*.
 4. **Aggregate** the folded-in-scope part-files in memory (sum `stack_id`
    counts, merge dicts) and return the flamegraph tree plus a `coverage` block.
 
@@ -84,14 +84,14 @@ re-folding is safe by idempotency. The client polls until coverage freezes.
 Every demand-driven response carries:
 
 ```json
-"coverage": { "files_matched": 480, "files_folded": 12, "samples_folded": 41203 }
+"coverage": { "files_matched": 480, "files_folded": 12, "samples_folded": 41203, "total_bytes": 1788000000 }
 ```
 
 rendered as e.g. `12 / 480 files (2.5%) · 41,203 samples`. Folding plateaus at
-the **sampling cap** = `min(10% × files_matched, 300 files)` — the fraction
-keeps small scopes sensible; the absolute ceiling stops a fleet-day scope from
-chasing 10% of tens of thousands of files. A "Fetch more" button raises the
-ceiling for a scope on demand (`max_files`).
+the **sampling cap** = `min(max(5% × files_matched, baseline 4), 100 files)` —
+the fraction keeps small scopes sensible; the absolute ceiling (100) stops a
+fleet-day scope from chasing 5% of tens of thousands of files. A "Fetch more"
+button raises the ceiling for a scope on demand (`max_files`).
 
 Coverage v1 is *file coverage*. Per-node statistical confidence intervals (the
 literal "how accurate is this sample") are a planned later addition.
@@ -99,13 +99,16 @@ literal "how accurate is this sample") are a planned later addition.
 ## Storage layout
 
 ```
-{output_prefix}/v{SAMPLES_FORMAT_VERSION}/
-  samples/service={svc}/date={YYYY-MM-DD}/host={host}/{hash}.parquet   ← one row per CPU sample
-  dict/stacks/{hash}.parquet                                           ← stack_id → frame names
+{output_prefix}/v{SAMPLES_FORMAT_VERSION}/bucket={source_bucket}/
+  samples/service={svc}/date={YYYY-MM-DD}/host={host}/{hash}.parquet  ← one row per sample
+  dict/stacks/{hash}.parquet                                          ← stack_id → frame names
+  polls/{hash}.parquet                                                ← poll spans (for /tokio-stats)
 ```
 
 Hive-partitioned paths make the folded-set LIST scope-prunable and give
-partition pruning on the query side; the content hash is only the leaf.
+partition pruning on the query side; the content hash is only the leaf. The
+output is also namespaced by `bucket={source_bucket}` so bring-your-own-creds
+sources fold into isolated, independently prunable/GC-able trees.
 
 Two independent version knobs, deliberately in opposite places:
 - **`ORDER_VERSION`** (= 1) lives *only* in the order-key hash input. Bump it to
@@ -133,12 +136,16 @@ falls back to reading a pre-aggregated local dir (the old behavior).
 Response: `{ tree, total_samples, coverage?, metadata }`. `coverage` is present
 only in demand-driven mode.
 
-### `GET /api/flamegraph/drill`
-Breakdown of one `stack_id` by a dimension (`host`, `metadata.version`, …).
+### `GET /tokio-stats`
+Same scope/refinement machinery, but reads the `polls/` part-files and returns
+per-spawn-location poll statistics (durations + worst exemplars per poll class).
 
 ### `GET /api/config`
 Now advertises `aggregation_enabled: bool` so the client knows whether the
 flamegraph button should drive the sampled loop or the exact client-side path.
+
+> A per-node **drill-down endpoint** (breakdown of one `stack_id` by `host`,
+> `metadata.version`, …) does **not** exist yet — see "Known gaps" below.
 
 ## UI integration
 
@@ -165,7 +172,7 @@ dial9 serve --bucket <raw-traces> --agg \
 ```
 
 `--agg-segment-secs` (default 60) sets the segment-duration pad for the time
-filter. The optional batch warmer is still `dial9 ingest …`.
+filter.
 
 **Demo:** `./scripts/demo-aggregation.sh` seeds synthetic segments across hosts
 and minutes, starts the server in demand-driven mode, and prints coverage
@@ -176,11 +183,12 @@ climbing from the baseline to the cap. `--serve` leaves it up for the browser.
 
 ```
 dial9-viewer/src/ingest/aggregate.rs   ← core: order key, scope→matched-set, fold_one,
-                                          in-memory aggregate, coverage, versioned paths
-dial9-viewer/src/ingest/decode.rs      ← raw trace bytes → resolved CPU samples + stacks
-dial9-viewer/src/ingest/parquet_writer.rs ← write samples / stacks part-files
-dial9-viewer/src/ingest/mod.rs         ← legacy batch ingest (optional warmer)
-dial9-viewer/src/server/flamegraph.rs  ← /api/flamegraph refinement loop + /drill
+                                          folded-set LIST, in-memory aggregate, coverage, versioned paths
+dial9-viewer/src/ingest/decode.rs      ← raw trace bytes → resolved CPU samples + stacks + polls
+dial9-viewer/src/ingest/parquet_writer.rs ← write samples / stacks / polls part-files
+dial9-viewer/src/ingest/mod.rs         ← module wiring for the aggregation building blocks
+dial9-viewer/src/server/flamegraph.rs  ← /api/flamegraph refinement loop + in-memory aggregate
+dial9-viewer/src/server/tokio_stats.rs ← /tokio-stats (poll stats from polls/)
 dial9-viewer/src/server/config.rs      ← aggregation_enabled flag
 dial9-viewer/src/{cli,lib}.rs          ← serve --agg / --agg-source-dir wiring
 dial9-viewer/ui/{index,flamegraph}.html, flamegraph_api.js ← button + poll loop + coverage UI
@@ -191,7 +199,7 @@ dial9-viewer/tests/aggregate_test.rs   ← end-to-end flow over simulated S3 (s3
 
 `tests/aggregate_test.rs` drives the real HTTP endpoint against a simulated S3
 (s3s), proving:
-- baseline floor folds K=3 and returns a real tree on the first poll;
+- baseline floor folds K=4 and returns a real tree on the first refining poll;
 - coverage climbs across polls and **plateaus at the cap below 100%**;
 - re-folding is idempotent (no duplicate part-files; stable counts);
 - "Fetch more" raises the cap;
@@ -201,6 +209,9 @@ dial9-viewer/tests/aggregate_test.rs   ← end-to-end flow over simulated S3 (s3
 
 ## Known gaps / deferred
 
+- **Drill-down endpoint** — a route returning a per-dimension breakdown
+  (`host`, `metadata.version`, time bucket, …) for a clicked `stack_id`. Not
+  built; the tree is currently refiltered rather than broken down server-side.
 - **Per-node confidence intervals** — the statistically rigorous "how accurate"
   signal. v1 ships file coverage only.
 - **Per-file histogram memoization** — a poll currently re-aggregates the

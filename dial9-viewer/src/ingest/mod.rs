@@ -7,4 +7,4 @@
 
 pub mod aggregate;
 pub mod decode;
-pub mod parquet_writer;
+pub(crate) mod parquet_writer;

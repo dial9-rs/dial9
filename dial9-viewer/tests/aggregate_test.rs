@@ -292,26 +292,6 @@ async fn fetch_body(client: &reqwest::Client, base: &str, query: &str) -> String
     r.text().await.unwrap()
 }
 
-/// Extract a top-level JSON string-array field (`"key":["a","b"]`) from a body.
-/// A small hand parser keeps the test independent of deserializing the deeply
-/// nested `tree`.
-fn extract_str_array(json: &str, key: &str) -> Vec<String> {
-    let i = json
-        .find(key)
-        .unwrap_or_else(|| panic!("{key} present in {json}"))
-        + key.len();
-    let rest = &json[i..];
-    let open = rest.find('[').expect("array open");
-    let close = rest[open..].find(']').expect("array close") + open;
-    rest[open + 1..close]
-        .split(',')
-        .filter_map(|s| {
-            let s = s.trim().trim_matches('"');
-            (!s.is_empty()).then(|| s.to_string())
-        })
-        .collect()
-}
-
 /// The response metadata advertises the *available* facets for the scope —
 /// host names, sources present, and thread classes present — recorded
 /// independent of the active counting filter. This is what makes the flamegraph
@@ -335,15 +315,14 @@ async fn flamegraph_metadata_reports_available_facets() {
     let _ = poll(&http, &base, "service=shale&source=all").await;
     let json = fetch_body(&http, &base, "service=shale&source=cpu").await;
 
-    // Parse the metadata (not the deeply-nested tree) from the response.
-    // Extract the "metadata" object to avoid recursion limit on the tree.
-    let meta_start = json.find("\"metadata\":").expect("metadata present") + "\"metadata\":".len();
-    // The metadata object is the last field before the closing }, so just parse from there.
-    // Actually, extract facets from the raw JSON string.
+    // Parse the facets out of the raw JSON string (avoids a recursion limit on
+    // the deeply-nested `tree` field).
     let facet_values = |name: &str| -> Vec<String> {
         // Find the facet with this name in the facets array
         let search = format!("\"name\":\"{name}\"");
-        let Some(pos) = json.find(&search) else { return vec![] };
+        let Some(pos) = json.find(&search) else {
+            return vec![];
+        };
         // Find "values": after this position
         let rest = &json[pos..];
         let vals_start = rest.find("\"values\":").unwrap() + "\"values\":".len();

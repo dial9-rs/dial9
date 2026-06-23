@@ -362,7 +362,22 @@ impl StorageBackend for S3Backend {
                 }
 
                 if resp.is_truncated() == Some(true) {
-                    continuation = resp.next_continuation_token().map(|s| s.to_string());
+                    match resp.next_continuation_token() {
+                        Some(token) => continuation = Some(token.to_string()),
+                        None => {
+                            // S3 says there's more but gave us no token to fetch
+                            // it. Re-issuing the same request would loop forever,
+                            // so stop here with what we have rather than spin.
+                            tracing::warn!(
+                                bucket = %bucket,
+                                prefix = %prefix,
+                                returned = objects.len(),
+                                "list_objects_all: response truncated but no continuation token; \
+                                 returning partial listing"
+                            );
+                            break;
+                        }
+                    }
                 } else {
                     break;
                 }
@@ -769,8 +784,9 @@ fn collect_files(
 /// [`LocalBackend::list_objects_all`] for ingest, which must see the whole tree.
 ///
 /// This mirrors S3 `list_objects_all` semantics: it returns *every* matching
-/// object (including the ingest output `.parquet` files under `_manifest/`,
-/// `samples/`, `dict/`), so callers like `load_skip_set` can find the manifest.
+/// object (including the aggregation output `.parquet` files under `samples/`,
+/// `dict/`, and `polls/`), so callers like the folded-set listing
+/// ([`crate::ingest::aggregate::list_folded_leaves`]) see the whole output tree.
 /// Trace-file selection (the `.bin` / `.bin.gz` extension filter) is the
 /// caller's responsibility — the ingest lister applies it. Honors the same
 /// path-escape safety (canonical paths must stay within `root`) and skipped

@@ -1,9 +1,11 @@
-//! End-to-end tests for the decode pipeline.
+//! Integration coverage for the decode pipeline's public API.
 //!
-//! Verifies:
-//! 1. Worker_id inference from tid↔WorkerPark/WorkerUnpark correlation
-//! 2. Timestamp ordering within the output
-//! 3. Deterministic stack_id computation
+//! Most decode behavior (worker_id inference, deterministic stack_ids, stack
+//! dictionary integrity, wall-clock conversion) is covered by the unit tests in
+//! `src/ingest/decode.rs`. This file keeps the one assertion that is *not*
+//! covered there — that the wall-clock timestamp span of a single demo trace is
+//! bounded — and doubles as a smoke test that `decode_samples` stays reachable
+//! through the crate's public API.
 
 use dial9_viewer::ingest::decode::decode_samples;
 
@@ -13,30 +15,6 @@ fn load_demo_trace() -> Vec<u8> {
     let mut buf = Vec::new();
     std::io::Read::read_to_end(&mut dec, &mut buf).unwrap();
     buf
-}
-
-#[test]
-fn worker_id_inferred_from_park_unpark_correlation() {
-    let data = load_demo_trace();
-    let (samples, _, _) = decode_samples(&data, "test").unwrap();
-
-    let worker_count = samples.iter().filter(|s| s.worker_id.is_some()).count();
-    let non_worker_count = samples.iter().filter(|s| s.worker_id.is_none()).count();
-
-    // The demo trace has multiple worker threads that park/unpark.
-    // We must infer worker_id for a significant portion of CPU samples.
-    assert!(
-        worker_count > 0,
-        "no samples were classified as worker threads; \
-         tid→worker inference from park/unpark is broken"
-    );
-
-    eprintln!(
-        "worker_id inference: {} worker, {} non-worker out of {} total samples",
-        worker_count,
-        non_worker_count,
-        samples.len()
-    );
 }
 
 #[test]
@@ -58,33 +36,4 @@ fn output_timestamps_are_wall_clock() {
         "timestamp span too large: {} ns",
         max_ts - min_ts
     );
-}
-
-#[test]
-fn stack_ids_are_deterministic() {
-    let data = load_demo_trace();
-    let (s1, d1, _) = decode_samples(&data, "test").unwrap();
-    let (s2, d2, _) = decode_samples(&data, "test").unwrap();
-
-    assert_eq!(s1.len(), s2.len());
-    assert_eq!(d1.len(), d2.len());
-    for (a, b) in s1.iter().zip(s2.iter()) {
-        assert_eq!(a.stack_id, b.stack_id);
-        assert_eq!(a.timestamp_ns, b.timestamp_ns);
-        assert_eq!(a.worker_id, b.worker_id);
-        assert_eq!(a.source, b.source);
-    }
-}
-
-#[test]
-fn every_sample_has_stack_in_dictionary() {
-    let data = load_demo_trace();
-    let (samples, stacks, _) = decode_samples(&data, "demo-trace.bin").unwrap();
-
-    for (i, sample) in samples.iter().enumerate() {
-        assert!(
-            stacks.contains_key(&sample.stack_id),
-            "sample {i} has stack_id not found in dictionary"
-        );
-    }
 }

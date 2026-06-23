@@ -190,49 +190,7 @@ pub fn write_polls<W: Write + Send>(writer: W, polls: &[ResolvedPoll]) -> anyhow
     Ok(())
 }
 
-/// Write manifest entries to a Parquet file.
-pub fn write_manifest<W: Write + Send>(writer: W, entries: &[ManifestEntry]) -> anyhow::Result<()> {
-    let schema = manifest_schema();
-    let props = WriterProperties::builder().build();
-    let mut arrow_writer = ArrowWriter::try_new(writer, schema.clone(), Some(props))?;
-
-    let n = entries.len();
-    let mut key_builder = StringBuilder::with_capacity(n, 128 * n);
-    let mut etag_builder = StringBuilder::with_capacity(n, 64 * n);
-    let mut run_id_builder = StringBuilder::with_capacity(n, 26 * n);
-    let mut ingested_at_builder = arrow::array::Int64Builder::with_capacity(n);
-
-    for entry in entries {
-        key_builder.append_value(&entry.source_key);
-        etag_builder.append_value(&entry.source_etag);
-        run_id_builder.append_value(&entry.run_id);
-        ingested_at_builder.append_value(entry.ingested_at_ms);
-    }
-
-    let batch = RecordBatch::try_new(
-        schema,
-        vec![
-            Arc::new(key_builder.finish()) as ArrayRef,
-            Arc::new(etag_builder.finish()) as ArrayRef,
-            Arc::new(run_id_builder.finish()) as ArrayRef,
-            Arc::new(ingested_at_builder.finish()) as ArrayRef,
-        ],
-    )?;
-
-    arrow_writer.write(&batch)?;
-    arrow_writer.close()?;
-    Ok(())
-}
-
-#[derive(Debug, Clone)]
-pub struct ManifestEntry {
-    pub source_key: String,
-    pub source_etag: String,
-    pub run_id: String,
-    pub ingested_at_ms: i64,
-}
-
-pub fn samples_schema() -> Arc<Schema> {
+fn samples_schema() -> Arc<Schema> {
     Arc::new(Schema::new(vec![
         Field::new("timestamp_ns", DataType::Int64, false),
         Field::new("stack_id", DataType::FixedSizeBinary(16), false),
@@ -268,7 +226,7 @@ pub fn samples_schema() -> Arc<Schema> {
     ]))
 }
 
-pub fn stacks_schema() -> Arc<Schema> {
+fn stacks_schema() -> Arc<Schema> {
     Arc::new(Schema::new(vec![
         Field::new("stack_id", DataType::FixedSizeBinary(16), false),
         Field::new(
@@ -279,16 +237,7 @@ pub fn stacks_schema() -> Arc<Schema> {
     ]))
 }
 
-pub fn manifest_schema() -> Arc<Schema> {
-    Arc::new(Schema::new(vec![
-        Field::new("source_key", DataType::Utf8, false),
-        Field::new("source_etag", DataType::Utf8, false),
-        Field::new("run_id", DataType::Utf8, false),
-        Field::new("ingested_at", DataType::Int64, false),
-    ]))
-}
-
-pub fn polls_schema() -> Arc<Schema> {
+fn polls_schema() -> Arc<Schema> {
     Arc::new(Schema::new(vec![
         Field::new("start_ns", DataType::Int64, false),
         Field::new("end_ns", DataType::Int64, false),

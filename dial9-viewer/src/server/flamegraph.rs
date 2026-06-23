@@ -10,7 +10,7 @@ use std::sync::Arc;
 use tokio::task::JoinSet;
 
 use crate::ingest::aggregate::{
-    self, AggContext, Coverage, FacetResult, SampleFilter, Scope, FACETS,
+    self, AggContext, Coverage, FACETS, FacetResult, SampleFilter, Scope,
 };
 use crate::server::AppState;
 use crate::server::credentials::MaybeCreds;
@@ -136,7 +136,7 @@ pub struct ScopeEcho {
 }
 
 /// Build a flamegraph tree from (stack_id, count) pairs and a stacks dictionary.
-pub fn build_flamegraph_tree(
+fn build_flamegraph_tree(
     stack_counts: &[(Vec<u8>, u64)],
     stacks_dict: &HashMap<Vec<u8>, Vec<String>>,
 ) -> FlamegraphNode {
@@ -292,12 +292,21 @@ fn sample_filter(params: &FlamegraphParams) -> SampleFilter {
     for def in FACETS {
         let value = match def.name {
             "source" => {
-                let raw = params.source.clone().unwrap_or_else(|| def.default_filter.to_string());
+                let raw = params
+                    .source
+                    .clone()
+                    .unwrap_or_else(|| def.default_filter.to_string());
                 // "all" = no constraint on source.
                 if raw == "all" { String::new() } else { raw }
             }
-            "thread_class" => params.thread_class.clone().unwrap_or_else(|| def.default_filter.to_string()),
-            "spawn_location" => params.spawn_location.clone().unwrap_or_else(|| def.default_filter.to_string()),
+            "thread_class" => params
+                .thread_class
+                .clone()
+                .unwrap_or_else(|| def.default_filter.to_string()),
+            "spawn_location" => params
+                .spawn_location
+                .clone()
+                .unwrap_or_else(|| def.default_filter.to_string()),
             "host" => {
                 // Host filtering is handled via the scope (multi-value), not
                 // a single facet filter. Leave empty = no constraint.

@@ -11,12 +11,12 @@ use tower_http::cors::CorsLayer;
 mod buckets;
 mod check;
 mod config;
-pub mod credentials;
+pub(crate) mod credentials;
 mod error;
-pub mod flamegraph;
-pub mod tokio_stats;
+pub(crate) mod flamegraph;
 mod prefixes;
 mod search;
+pub(crate) mod tokio_stats;
 mod trace;
 
 use credentials::{CredError, MaybeCreds};
@@ -27,7 +27,10 @@ use credentials::{CredError, MaybeCreds};
 ///
 /// Shared by startup region detection ([`crate::serve`]) and the
 /// `/api/credentials/check` endpoint.
-pub async fn region_from_head_bucket(client: &aws_sdk_s3::Client, bucket: &str) -> Option<String> {
+pub(crate) async fn region_from_head_bucket(
+    client: &aws_sdk_s3::Client,
+    bucket: &str,
+) -> Option<String> {
     match client.head_bucket().bucket(bucket).send().await {
         Ok(resp) => resp.bucket_region().map(|r| r.to_string()),
         Err(err) => err.raw_response().and_then(|r| {
@@ -84,7 +87,7 @@ pub struct AppState {
     /// Process-global concurrency limits for the demand-driven fold pipeline,
     /// shared across all in-flight `/api/flamegraph` requests so total fold work
     /// is bounded application-wide (see [`FoldLimits`]).
-    pub fold_limits: crate::ingest::aggregate::FoldLimits,
+    pub(crate) fold_limits: crate::ingest::aggregate::FoldLimits,
 }
 
 impl AppState {
@@ -261,7 +264,10 @@ fn api_router(state: AppState) -> Router {
             "/flamegraph",
             axum::routing::get(flamegraph::get_flamegraph),
         )
-        .route("/tokio-stats", axum::routing::get(tokio_stats::get_tokio_stats))
+        .route(
+            "/tokio-stats",
+            axum::routing::get(tokio_stats::get_tokio_stats),
+        )
         // Permissive CORS so a page on another origin can read responses via
         // fetch(); also answers the OPTIONS preflight automatically.
         .layer(CorsLayer::permissive())

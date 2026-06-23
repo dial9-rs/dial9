@@ -114,6 +114,9 @@ pub struct ResolvedSample {
 }
 
 /// A reconstructed poll span: one invocation of `Future::poll` on a task.
+///
+/// Public because it is the third element of [`DecodeResult`], the return type
+/// of the public [`decode_samples`].
 #[derive(Debug, Clone)]
 pub struct ResolvedPoll {
     pub start_ns: u64,
@@ -131,10 +134,16 @@ pub struct ResolvedPoll {
     pub date: String,
 }
 
-/// Parse the source key path into (date, service, host).
-/// Expected format: `{date}/{HHMM}/{service}/{host}/{boot_id}/{file}`
-/// or `s3://bucket/{date}/{HHMM}/{service}/{host}/{boot_id}/{file}`
-pub fn parse_source_key(key: &str) -> (String, String, String) {
+/// Parse `(date, service, host)` from a source key, anchored on the
+/// `YYYY-MM-DD` date component so a leading prefix (e.g. `traces/`) does not
+/// shift the positions. Layout: `…/{date}/{HHMM}/{service}/{host}/{boot}/{file}`.
+///
+/// This MUST stay in lockstep with `aggregate::parse_scope_fields`: the scope
+/// filter (which decides *which* files to fold and how the output path is
+/// partitioned) uses the date-anchored parse, so the `host`/`service`/`date`
+/// columns embedded in the Parquet here have to agree with it. A fixed-index
+/// parse silently produced wrong columns for any prefixed key.
+fn parse_source_key(key: &str) -> (String, String, String) {
     // Strip s3://bucket/ prefix if present
     let path = if let Some(rest) = key.strip_prefix("s3://") {
         rest.split_once('/').map_or(rest, |(_, p)| p)
@@ -142,10 +151,29 @@ pub fn parse_source_key(key: &str) -> (String, String, String) {
         key
     };
     let parts: Vec<&str> = path.split('/').collect();
-    let date = parts.first().unwrap_or(&"").to_string();
-    let service = parts.get(2).unwrap_or(&"").to_string();
-    let host = parts.get(3).unwrap_or(&"").to_string();
-    (date, service, host)
+    if let Some(anchor) = parts.iter().position(|p| is_date(p)) {
+        let date = parts.get(anchor).copied().unwrap_or("").to_string();
+        let service = parts.get(anchor + 2).copied().unwrap_or("").to_string();
+        let host = parts.get(anchor + 3).copied().unwrap_or("").to_string();
+        (date, service, host)
+    } else {
+        // No date anchor — fall back to the legacy fixed-index parse.
+        let date = parts.first().copied().unwrap_or("").to_string();
+        let service = parts.get(2).copied().unwrap_or("").to_string();
+        let host = parts.get(3).copied().unwrap_or("").to_string();
+        (date, service, host)
+    }
+}
+
+/// True if `s` is a `YYYY-MM-DD` date component.
+fn is_date(s: &str) -> bool {
+    let b = s.as_bytes();
+    b.len() == 10
+        && b[4] == b'-'
+        && b[7] == b'-'
+        && b[..4].iter().all(u8::is_ascii_digit)
+        && b[5..7].iter().all(u8::is_ascii_digit)
+        && b[8..].iter().all(u8::is_ascii_digit)
 }
 
 /// Extract CPU samples from raw (already gunzipped) trace bytes.
@@ -444,7 +472,11 @@ pub fn decode_samples(data: &[u8], source_key: &str) -> anyhow::Result<DecodeRes
             ResolvedPoll {
                 start_ns: wall_start,
                 end_ns: wall_end,
-                duration_ns: wall_end - wall_start,
+                // Polls are closed in sorted-timestamp order, so end >= start
+                // holds in practice; saturate defensively so a corrupt or
+                // clock-skewed segment can't underflow (panic in debug, wrap in
+                // release) instead of just yielding a zero-length poll.
+                duration_ns: wall_end.saturating_sub(wall_start),
                 worker_id: worker_id as u32,
                 task_id,
                 spawn_loc: spawn_loc.clone(),
@@ -498,6 +530,43 @@ fn find_enclosing_poll(
 mod tests {
     use super::*;
 
+    #[test]
+    fn parse_source_key_is_date_anchored() {
+        // Unprefixed: {date}/{HHMM}/{service}/{host}/{boot}/{file}
+        assert_eq!(
+            parse_source_key("2026-06-19/1300/svc/host-a/boot/0-0.bin.gz"),
+            (
+                "2026-06-19".to_string(),
+                "svc".to_string(),
+                "host-a".to_string()
+            )
+        );
+        // Prefixed with `traces/` — a fixed-index parse would return
+        // ("traces", "1300", "svc"); the date anchor keeps it correct.
+        assert_eq!(
+            parse_source_key("traces/2026-06-19/1300/svc/host-a/boot/0-0.bin.gz"),
+            (
+                "2026-06-19".to_string(),
+                "svc".to_string(),
+                "host-a".to_string()
+            )
+        );
+        // s3:// URI with a prefix is stripped and still date-anchored.
+        assert_eq!(
+            parse_source_key("s3://bucket/traces/2026-06-19/1300/svc/host-a/boot/0-0.bin.gz"),
+            (
+                "2026-06-19".to_string(),
+                "svc".to_string(),
+                "host-a".to_string()
+            )
+        );
+        // No date component — legacy fixed-index fallback.
+        assert_eq!(
+            parse_source_key("a/b/c/d"),
+            ("a".to_string(), "c".to_string(), "d".to_string())
+        );
+    }
+
     fn load_demo_trace() -> Vec<u8> {
         let data =
             std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/ui/demo-trace.bin")).unwrap();
@@ -516,6 +585,9 @@ mod tests {
         assert_eq!(d1.len(), d2.len());
         for (a, b) in s1.iter().zip(s2.iter()) {
             assert_eq!(a.stack_id, b.stack_id);
+            assert_eq!(a.timestamp_ns, b.timestamp_ns);
+            assert_eq!(a.worker_id, b.worker_id);
+            assert_eq!(a.source, b.source);
         }
     }
 

@@ -1,0 +1,422 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Tokio Stats</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0d1117; color: #e0e0e0; padding: 20px; }
+  h1 { margin-bottom: 12px; font-size: 1.4em; }
+  .periods { display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px; }
+  .period-row { display: flex; gap: 8px; align-items: center; padding: 8px 10px; background: #161b22; border-radius: 6px; flex-wrap: wrap; }
+  .period-row label { font-size: 0.85em; }
+  .period-row input { background: #1a1a2e; color: #e0e0e0; border: 1px solid #444; padding: 4px 10px; border-radius: 3px; }
+  .period-row .tag { font-weight: 700; font-size: 0.85em; padding: 2px 8px; border-radius: 3px; margin-right: 4px; }
+  .toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 16px; }
+  .toolbar button { cursor: pointer; font-weight: 600; background: #6c63ff; color: #fff; border: none; padding: 4px 14px; border-radius: 3px; }
+  .toolbar button.secondary { background: #2a2a4a; color: #e0e0e0; border: 1px solid #444; }
+  .threshold-row { display: flex; align-items: center; gap: 8px; }
+  .threshold-row input[type=range] { width: 180px; }
+  .summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-bottom: 20px; }
+  .card { background: #161b22; border-radius: 6px; padding: 14px; text-align: center; }
+  .card .value { font-size: 1.6em; font-weight: 700; }
+  .card .label { font-size: 0.75em; color: #8b949e; margin-top: 4px; }
+  .card.bad .value { color: #f85149; }
+  .card.warn .value { color: #d29922; }
+  .card.good .value { color: #3fb950; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.85em; }
+  th, td { padding: 8px 10px; text-align: left; border-bottom: 1px solid #21262d; }
+  th { background: #161b22; color: #8b949e; font-weight: 600; position: sticky; top: 0; }
+  tr:hover { background: #1c2128; }
+  .off-cpu { color: #f85149; font-weight: 600; }
+  .on-cpu { color: #d29922; }
+  .status { margin: 10px 0; font-size: 0.9em; color: #8b949e; }
+  .error { color: #f85149; }
+  a { color: #58a6ff; text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .delta-bad { color: #f85149; }
+  .delta-good { color: #3fb950; }
+  .delta-neutral { color: #8b949e; }
+  .view-tab { display: inline-block; padding: 6px 16px; cursor: pointer; border-radius: 4px 4px 0 0; font-size: 0.85em; font-weight: 600; background: #161b22; color: #8b949e; border: 1px solid #21262d; border-bottom: none; margin-right: 2px; }
+  .view-tab.active { background: #0d1117; color: #e0e0e0; border-color: #444; }
+</style>
+</head>
+<body>
+<script src="creds.js"></script>
+<h1>⚡ Tokio Stats</h1>
+<div id="periods" class="periods"></div>
+<div class="toolbar">
+  <button id="btn-add" class="secondary">+ Add period</button>
+  <button id="btn-load">Load</button>
+  <div class="threshold-row">
+    <label>Threshold:</label>
+    <input id="threshold-slider" type="range" min="-1" max="3" step="0.1" value="0">
+    <span id="threshold-label">1ms</span>
+  </div>
+  <label style="font-size:0.85em"><input type="checkbox" id="utc-toggle" checked> UTC</label>
+</div>
+<div id="status" class="status"></div>
+<div id="view-tabs" style="display:none;margin-bottom:12px"></div>
+<div id="summary" class="summary" style="display:none"></div>
+<div id="table-container" style="max-height:70vh;overflow-y:auto"></div>
+
+<script>
+(function() {
+  const params = new URLSearchParams(window.location.search);
+  const COLORS = ["#58a6ff", "#d2a8ff", "#7ee787", "#ffa657"];
+
+  // Periods: each has {start, end, label, data (cached response)}
+  let periods = [];
+  let periodIdCounter = 0;
+
+  function isUtc() { return document.getElementById("utc-toggle").checked; }
+
+  function nsToDatetime(ns) {
+    if (!ns) return "";
+    const d = new Date(Number(ns) / 1e6);
+    if (isUtc()) return d.toISOString().slice(0, 19);
+    return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 19);
+  }
+  function datetimeToNs(val) {
+    if (!val) return null;
+    const ms = isUtc() ? new Date(val + "Z").getTime() : new Date(val).getTime();
+    return String(Math.floor(ms * 1e6));
+  }
+  function formatDuration(ns) {
+    if (ns >= 1e9) return (ns / 1e9).toFixed(2) + "s";
+    if (ns >= 1e6) return (ns / 1e6).toFixed(2) + "ms";
+    if (ns >= 1e3) return (ns / 1e3).toFixed(0) + "µs";
+    return ns + "ns";
+  }
+
+  function addPeriod(startNs, endNs) {
+    const id = periodIdCounter++;
+    periods.push({ id, startNs: startNs || null, endNs: endNs || null, data: null });
+    renderPeriods();
+    syncUrl();
+  }
+
+  function removePeriod(id) {
+    periods = periods.filter(p => p.id !== id);
+    renderPeriods();
+    syncUrl();
+    renderFromCache();
+  }
+
+  function renderPeriods() {
+    const container = document.getElementById("periods");
+    container.innerHTML = periods.map((p, i) => `
+      <div class="period-row">
+        <span class="tag" style="background:${COLORS[i % COLORS.length]}33;color:${COLORS[i % COLORS.length]}">P${i + 1}</span>
+        <label>From: <input type="datetime-local" step="1" value="${nsToDatetime(p.startNs)}" onchange="updatePeriod(${p.id},'start',this.value)"></label>
+        <label>To: <input type="datetime-local" step="1" value="${nsToDatetime(p.endNs)}" onchange="updatePeriod(${p.id},'end',this.value)"></label>
+        ${periods.length > 1 ? `<button class="secondary" onclick="removePeriod(${p.id})" style="padding:2px 8px;font-size:0.8em">✕</button>` : ""}
+      </div>
+    `).join("");
+  }
+  window.updatePeriod = function(id, field, val) {
+    const p = periods.find(x => x.id === id);
+    if (p) {
+      const ns = datetimeToNs(val);
+      if (field === "start") p.startNs = ns; else p.endNs = ns;
+    }
+    syncUrl();
+  };
+  window.removePeriod = removePeriod;
+
+  // Initialize with URL params — supports multiple periods via p1_start_ns/p1_end_ns, p2_start_ns/p2_end_ns, ...
+  // Falls back to start_ns/end_ns for single-period backward compat.
+  let foundPeriods = false;
+  for (let i = 1; i <= 10; i++) {
+    const s = params.get(`p${i}_start_ns`);
+    const e = params.get(`p${i}_end_ns`);
+    if (s || e) { addPeriod(s, e); foundPeriods = true; }
+  }
+  if (!foundPeriods) addPeriod(params.get("start_ns"), params.get("end_ns"));
+
+  function syncUrl() {
+    const u = new URLSearchParams();
+    for (const k of ["bucket", "prefix", "service"]) { if (params.get(k)) u.set(k, params.get(k)); }
+    for (const h of params.getAll("host")) u.append("host", h);
+    periods.forEach((p, i) => {
+      if (p.startNs) u.set(`p${i+1}_start_ns`, p.startNs);
+      if (p.endNs) u.set(`p${i+1}_end_ns`, p.endNs);
+    });
+    history.replaceState(null, "", "?" + u.toString());
+  }
+
+  // Threshold slider
+  const slider = document.getElementById("threshold-slider");
+  const threshLabel = document.getElementById("threshold-label");
+  function thresholdNs() { return Math.pow(10, parseFloat(slider.value)) * 1e6; }
+  function updateThreshLabel() { threshLabel.textContent = formatDuration(thresholdNs()); }
+  slider.addEventListener("input", () => { updateThreshLabel(); renderFromCache(); });
+  updateThreshLabel();
+
+  function exemplarLink(ex, data) {
+    if (!ex || !ex.start_ns) return "";
+    const bucket = (data && data.bucket) || params.get("bucket") || "";
+    const traceUrl = `/api/trace?bucket=${encodeURIComponent(bucket)}&keys=${encodeURIComponent(ex.source_key)}`;
+    const p = new URLSearchParams();
+    p.set("trace", traceUrl);
+    p.set("start_ns", String(ex.start_ns));
+    p.set("end_ns", String(ex.end_ns));
+    return `viewer.html?${p.toString()}`;
+  }
+
+  function computeStats(data, threshNs) {
+    if (!data) return null;
+    const timeMinutes = data.time_span_ns / 60e9;
+    let totalLong = 0, totalOffCpu = 0, totalOnCpu = 0;
+    const byLoc = {};
+    for (const loc of data.by_spawn_loc) {
+      let long = 0, offCpu = 0, onCpu = 0, mixed = 0;
+      for (let i = 0; i < loc.durations_ns.length; i++) {
+        if (loc.durations_ns[i] >= threshNs) {
+          long++;
+          const c = loc.classes[i];
+          if (c === 0) offCpu++;
+          else if (c === 1) onCpu++;
+          else if (c === 2) mixed++;
+          // c === 3 is "unknown" (too short to classify) — counted in long but not bucketed
+        }
+      }
+      totalLong += long; totalOffCpu += offCpu; totalOnCpu += onCpu;
+      const above = loc.durations_ns.filter(d => d >= threshNs);
+      const n = above.length;
+      byLoc[loc.spawn_loc] = {
+        long, offCpu, onCpu, mixed,
+        rate: timeMinutes > 0 ? long / timeMinutes : 0,
+        p50: n > 0 ? above[Math.floor(n * 0.5)] : 0,
+        p99: n > 0 ? above[Math.floor(n * 0.01)] : 0,
+        max: n > 0 ? above[0] : 0,
+        exemplars: loc.exemplars, // [off_cpu, on_cpu, mixed, unknown]
+      };
+    }
+    return { totalLong, totalOffCpu, totalOnCpu, timeMinutes, byLoc,
+             rate: timeMinutes > 0 ? totalLong / timeMinutes : 0, total_polls: data.total_polls };
+  }
+
+  let activeTab = "diff"; // "diff" or "p0", "p1", ...
+
+  function renderTabs() {
+    const tabsEl = document.getElementById("view-tabs");
+    const stats = periods.map(p => computeStats(p.data, thresholdNs()));
+    const loaded = stats.filter(s => s).length;
+    if (loaded <= 1) { tabsEl.style.display = "none"; return; }
+    tabsEl.style.display = "";
+    const tabs = [{id: "diff", label: "⚡ Diff"}];
+    periods.forEach((p, i) => { if (stats[i]) tabs.push({id: `p${i}`, label: `P${i+1} Detail`}); });
+    tabsEl.innerHTML = tabs.map(t =>
+      `<span class="view-tab ${t.id === activeTab ? 'active' : ''}" onclick="setTab('${t.id}')">${t.label}</span>`
+    ).join("");
+  }
+  window.setTab = function(tab) { activeTab = tab; renderFromCache(); };
+
+  function renderFromCache() {
+    const threshNs = thresholdNs();
+    const stats = periods.map(p => computeStats(p.data, threshNs));
+    if (stats.every(s => !s)) return;
+
+    const sumEl = document.getElementById("summary");
+    const tableEl = document.getElementById("table-container");
+    sumEl.style.display = "";
+    renderTabs();
+
+    const multi = periods.length > 1 && stats.filter(s => s).length > 1;
+
+    // If viewing a specific period's detail, render single-period view.
+    if (multi && activeTab.startsWith("p")) {
+      const idx = parseInt(activeTab.slice(1));
+      const s = stats[idx];
+      const data = periods[idx].data;
+      if (!s) { tableEl.innerHTML = "<p>Not loaded yet.</p>"; return; }
+      renderSinglePeriod(s, data, threshNs, sumEl, tableEl);
+      return;
+    }
+
+    if (!multi) {
+      const s = stats.find(x => x);
+      const data = periods.find(p => p.data).data;
+      if (!s) return;
+      renderSinglePeriod(s, data, threshNs, sumEl, tableEl);
+      return;
+    }
+
+    // ── Diff view ──
+    renderDiffView(stats, threshNs, sumEl, tableEl);
+  }
+
+  function exLink(exemplar, data) {
+    if (!exemplar) return null;
+    return exemplarLink(exemplar, data);
+  }
+
+  function linkedStat(count, exemplar, data, cls) {
+    if (!count) return "";
+    const url = exLink(exemplar, data);
+    if (url) return `<a href="#" class="${cls}" onclick="openExemplar(this);return false" data-url="${url.replace(/"/g,'&quot;')}">${count}</a>`;
+    return `<span class="${cls}">${count}</span>`;
+  }
+
+  function renderSinglePeriod(s, data, threshNs, sumEl, tableEl) {
+    sumEl.innerHTML = `
+      <div class="card"><div class="value">${s.total_polls.toLocaleString()}</div><div class="label">Total Polls</div></div>
+      <div class="card ${s.totalLong > 0 ? 'warn' : 'good'}"><div class="value">${s.totalLong.toLocaleString()}</div><div class="label">Long (>${formatDuration(threshNs)})</div></div>
+      <div class="card ${s.totalLong > 0 ? 'warn' : 'good'}"><div class="value">${s.rate.toFixed(1)}/min</div><div class="label">Rate</div></div>
+      <div class="card ${s.totalOffCpu > 0 ? 'bad' : 'good'}"><div class="value">${s.totalOffCpu.toLocaleString()}</div><div class="label">Off-CPU (blocked)</div></div>
+      <div class="card on-cpu"><div class="value">${s.totalOnCpu.toLocaleString()}</div><div class="label">On-CPU (compute)</div></div>
+    `;
+    const rows = Object.entries(s.byLoc)
+      .filter(([, v]) => v.long > 0)
+      .sort(([, a], [, b]) => b.rate - a.rate);
+    if (!rows.length) { tableEl.innerHTML = "<p style='margin-top:10px'>No polls exceed the threshold.</p>"; return; }
+    let html = `<table><thead><tr>
+      <th>Spawn Location</th><th>Long</th><th>/min</th>
+      <th>Off-CPU 🔴</th><th>On-CPU 🟡</th>
+      <th>P50</th><th>P99</th><th>Max</th>
+    </tr></thead><tbody>`;
+    for (const [loc, v] of rows) {
+      html += `<tr>
+        <td><code>${loc}</code></td>
+        <td>${v.long}</td><td>${v.rate.toFixed(1)}</td>
+        <td>${linkedStat(v.offCpu, v.exemplars && v.exemplars[0], data, "off-cpu")}</td>
+        <td>${linkedStat(v.onCpu, v.exemplars && v.exemplars[1], data, "on-cpu")}</td>
+        <td>${formatDuration(v.p50)}</td><td>${formatDuration(v.p99)}</td><td>${formatDuration(v.max)}</td>
+      </tr>`;
+    }
+    html += "</tbody></table>";
+    tableEl.innerHTML = html;
+  }
+
+  function renderDiffView(stats, threshNs, sumEl, tableEl) {
+    const first = stats[0], last = stats[stats.length - 1];
+    const rateDelta = last.rate - first.rate;
+    const ratePct = first.rate > 0 ? ((rateDelta / first.rate) * 100).toFixed(0) : (last.rate > 0 ? "+∞" : "0");
+    const offFirst = first.timeMinutes > 0 ? (first.totalOffCpu / first.timeMinutes) : 0;
+    const offLast = last.timeMinutes > 0 ? (last.totalOffCpu / last.timeMinutes) : 0;
+    const offDelta = offLast - offFirst;
+
+    const arrow = rateDelta > 0 ? "↑" : rateDelta < 0 ? "↓" : "→";
+    const cls = rateDelta > 0.5 ? "bad" : rateDelta < -0.5 ? "good" : "";
+    const offCls = offDelta > 0.1 ? "bad" : offDelta < -0.1 ? "good" : "";
+
+    sumEl.innerHTML = `
+      <div class="card ${cls}"><div class="value">${first.rate.toFixed(1)} ${arrow} ${last.rate.toFixed(1)}/min</div><div class="label">Long poll rate (${ratePct > 0 ? "+" : ""}${ratePct}%)</div></div>
+      <div class="card ${offCls}"><div class="value">${offFirst.toFixed(1)} → ${offLast.toFixed(1)}/min</div><div class="label">Off-CPU rate</div></div>
+      <div class="card"><div class="value">${first.total_polls.toLocaleString()}</div><div class="label">P1 polls</div></div>
+      <div class="card"><div class="value">${last.total_polls.toLocaleString()}</div><div class="label">P${periods.length} polls</div></div>
+    `;
+
+    const allLocs = new Set();
+    for (const s of stats) { if (s) for (const k of Object.keys(s.byLoc)) allLocs.add(k); }
+
+    const diffs = [...allLocs].map(loc => {
+      const f = first.byLoc[loc];
+      const l = last.byLoc[loc];
+      const fRate = f ? f.rate : 0;
+      const lRate = l ? l.rate : 0;
+      return { loc, fRate, lRate, delta: lRate - fRate, first: f, last: l };
+    }).filter(d => d.fRate > 0 || d.lRate > 0);
+
+    const regressions = diffs.filter(d => d.delta > 0.1).sort((a, b) => b.delta - a.delta);
+    const improvements = diffs.filter(d => d.delta < -0.1).sort((a, b) => a.delta - b.delta);
+    const newOffenders = diffs.filter(d => d.fRate === 0 && d.lRate > 0).sort((a, b) => b.lRate - a.lRate);
+
+    let html = "";
+    if (regressions.length) {
+      html += `<h3 style="margin:16px 0 8px;color:#f85149">⬆ Regressions (${regressions.length})</h3>`;
+      html += diffTable(regressions, "delta-bad");
+    }
+    if (newOffenders.length) {
+      html += `<h3 style="margin:16px 0 8px;color:#f85149">🆕 New offenders (${newOffenders.length})</h3>`;
+      html += diffTable(newOffenders, "delta-bad");
+    }
+    if (improvements.length) {
+      html += `<h3 style="margin:16px 0 8px;color:#3fb950">⬇ Improvements (${improvements.length})</h3>`;
+      html += diffTable(improvements, "delta-good");
+    }
+    if (!regressions.length && !improvements.length && !newOffenders.length) {
+      html = "<p style='margin-top:10px'>No significant changes between periods.</p>";
+    }
+    tableEl.innerHTML = html;
+  }
+
+  function diffTable(rows, cls) {
+    let html = `<table><thead><tr><th>Spawn Location</th><th>P1 /min</th><th>P${periods.length} /min</th><th>Δ /min</th><th>Δ%</th></tr></thead><tbody>`;
+    for (const d of rows) {
+      const pct = d.fRate > 0 ? ((d.delta / d.fRate) * 100).toFixed(0) : "new";
+      html += `<tr>
+        <td><code>${d.loc}</code></td>
+        <td>${d.fRate.toFixed(1)}</td>
+        <td>${d.lRate.toFixed(1)}</td>
+        <td class="${cls}">${d.delta > 0 ? "+" : ""}${d.delta.toFixed(1)}</td>
+        <td class="${cls}">${typeof pct === "string" ? pct : (d.delta > 0 ? "+" : "") + pct + "%"}</td>
+      </tr>`;
+    }
+    html += "</tbody></table>";
+    return html;
+  }
+
+  async function loadPeriod(period) {
+    let refine = false;
+    let prevFolded = -1;
+    while (true) {
+      const u = new URL("/api/tokio-stats", window.location.origin);
+      if (params.get("bucket")) u.searchParams.set("bucket", params.get("bucket"));
+      if (params.get("prefix")) u.searchParams.set("prefix", params.get("prefix"));
+      if (params.get("service")) u.searchParams.set("service", params.get("service"));
+      for (const h of params.getAll("host")) u.searchParams.append("host", h);
+      const startNs = period.startNs;
+      const endNs = period.endNs;
+      if (startNs) u.searchParams.set("start_ns", startNs);
+      if (endNs) u.searchParams.set("end_ns", endNs);
+      if (refine) u.searchParams.set("refine", "true");
+
+      const credHeaders = window.Dial9Creds ? Dial9Creds.headers() : {};
+      const resp = await fetch(u, { headers: credHeaders });
+      if (!resp.ok) throw new Error(await resp.text());
+      const data = await resp.json();
+      period.data = data;
+      renderFromCache();
+      const cov = data.coverage;
+      if (!cov || cov.files_folded >= cov.files_matched || cov.files_folded === prevFolded) break;
+      prevFolded = cov.files_folded;
+      refine = true;
+      await new Promise(r => setTimeout(r, 300));
+    }
+  }
+
+  async function loadAll() {
+    const statusEl = document.getElementById("status");
+    statusEl.textContent = "Loading…";
+    statusEl.className = "status";
+    try {
+      // Load all periods in parallel.
+      await Promise.all(periods.map((p, i) => loadPeriod(p, i)));
+      statusEl.textContent = "Complete";
+    } catch (e) {
+      statusEl.textContent = "Error: " + e.message;
+      statusEl.className = "status error";
+    }
+  }
+
+  document.getElementById("utc-toggle").addEventListener("change", renderPeriods);
+  document.getElementById("btn-load").addEventListener("click", loadAll);
+  document.getElementById("btn-add").addEventListener("click", () => {
+    const last = periods[periods.length - 1];
+    if (last.startNs && last.endNs) {
+      const span = Number(last.endNs) - Number(last.startNs);
+      addPeriod(String(Number(last.startNs) - span), last.startNs);
+    } else {
+      addPeriod(null, null);
+    }
+  });
+
+  window.openExemplar = function(el) { window.open(el.dataset.url, '_blank'); };
+
+  if (params.get("start_ns") || params.get("bucket")) loadAll();
+})();
+</script>
+</body>
+</html>

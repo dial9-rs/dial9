@@ -213,7 +213,6 @@ fn is_trace_segment(key: &str) -> bool {
     (key.ends_with(".bin.gz") || key.ends_with(".bin"))
         && !key.contains("/samples/")
         && !key.contains("/dict/")
-        && !key.contains("/_manifest/")
 }
 
 /// Filter a raw source listing down to the files a [`Scope`] selects, then sort
@@ -300,7 +299,7 @@ fn full_source_key(source_is_local: bool, source_bucket: &str, key: &str) -> Str
 /// Part-file writes (small, network-bound) run ungated: they are cheap relative
 /// to the fetch and we don't want to hold a CPU permit across their I/O.
 #[derive(Clone)]
-pub struct FoldLimits {
+pub(crate) struct FoldLimits {
     /// Bounds concurrent source fetches (network-bound).
     pub fetch: Arc<Semaphore>,
     /// Bounds concurrent decode/encode work (CPU-bound).
@@ -310,7 +309,7 @@ pub struct FoldLimits {
 impl FoldLimits {
     /// Construct with explicit permit counts. Each is clamped to at least 1 so a
     /// zero never deadlocks the pipeline.
-    pub fn new(fetch_permits: usize, cpu_permits: usize) -> Self {
+    pub(crate) fn new(fetch_permits: usize, cpu_permits: usize) -> Self {
         Self {
             fetch: Arc::new(Semaphore::new(fetch_permits.max(1))),
             cpu: Arc::new(Semaphore::new(cpu_permits.max(1))),
@@ -319,7 +318,7 @@ impl FoldLimits {
 
     /// Default sizing derived from available CPU parallelism: fetch at 2×
     /// parallelism (network-bound, mostly waiting), CPU at 1× parallelism.
-    pub fn from_available_parallelism() -> Self {
+    pub(crate) fn from_available_parallelism() -> Self {
         let par = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(4);
@@ -457,7 +456,20 @@ pub(crate) async fn list_folded_leaves(
     let objects = output
         .list_objects_all(output_bucket, &prefix)
         .await
-        .unwrap_or_default();
+        .unwrap_or_else(|e| {
+            // Treating an error as "nothing folded" makes the refinement loop
+            // re-fold files it already processed, wasting the whole budget on
+            // redundant work. We can't cheaply propagate (callers expect a set),
+            // but we must not swallow it silently.
+            tracing::warn!(
+                bucket = %output_bucket,
+                prefix = %prefix,
+                error = %e,
+                "list_folded_leaves: failed to list folded set; treating as empty \
+                 (already-folded files may be re-folded this round)"
+            );
+            Vec::new()
+        });
     objects
         .iter()
         .filter_map(|o| {
@@ -469,7 +481,7 @@ pub(crate) async fn list_folded_leaves(
 
 /// How much of a scope has been folded so far. Reported on every query.
 #[derive(Debug, Clone, serde::Serialize)]
-pub struct Coverage {
+pub(crate) struct Coverage {
     pub files_matched: usize,
     pub files_folded: usize,
     pub samples_folded: usize,
@@ -569,7 +581,7 @@ pub(crate) const FACETS: &[FacetDef] = &[
 
 /// One facet's response: name + label + sorted distinct values.
 #[derive(Debug, Clone, serde::Serialize)]
-pub struct FacetResult {
+pub(crate) struct FacetResult {
     pub name: &'static str,
     pub label: &'static str,
     pub values: Vec<String>,
@@ -825,18 +837,39 @@ fn resolve_facet_col<'a>(
     def: &FacetDef,
 ) -> ResolvedFacetCol<'a> {
     match &def.kind {
-        FacetKind::MappedU8 { column, map, absent_value } => {
-            let arr = batch.column_by_name(column)
+        FacetKind::MappedU8 {
+            column,
+            map,
+            absent_value,
+        } => {
+            let arr = batch
+                .column_by_name(column)
                 .and_then(|c| c.as_any().downcast_ref::<arrow::array::UInt8Array>());
-            ResolvedFacetCol::MappedU8 { arr, map, absent_value }
+            ResolvedFacetCol::MappedU8 {
+                arr,
+                map,
+                absent_value,
+            }
         }
-        FacetKind::NullDerived { column, present_label, absent_label, missing_column_label } => {
-            let arr = batch.column_by_name(column)
+        FacetKind::NullDerived {
+            column,
+            present_label,
+            absent_label,
+            missing_column_label,
+        } => {
+            let arr = batch
+                .column_by_name(column)
                 .and_then(|c| c.as_any().downcast_ref::<arrow::array::UInt32Array>());
-            ResolvedFacetCol::NullDerived { arr, present_label, absent_label, missing_column_label }
+            ResolvedFacetCol::NullDerived {
+                arr,
+                present_label,
+                absent_label,
+                missing_column_label,
+            }
         }
         FacetKind::DirectString { column } => {
-            let arr = batch.column_by_name(column)
+            let arr = batch
+                .column_by_name(column)
                 .and_then(|c| c.as_any().downcast_ref::<arrow::array::StringArray>());
             ResolvedFacetCol::DirectString { arr }
         }
@@ -845,7 +878,11 @@ fn resolve_facet_col<'a>(
 
 fn extract_facet_value(col: &ResolvedFacetCol, i: usize) -> Option<String> {
     match col {
-        ResolvedFacetCol::MappedU8 { arr, map, absent_value } => {
+        ResolvedFacetCol::MappedU8 {
+            arr,
+            map,
+            absent_value,
+        } => {
             let label = match arr {
                 Some(a) => {
                     let v = a.value(i);
@@ -853,11 +890,26 @@ fn extract_facet_value(col: &ResolvedFacetCol, i: usize) -> Option<String> {
                 }
                 None => absent_value,
             };
-            if label.is_empty() { None } else { Some(label.to_string()) }
+            if label.is_empty() {
+                None
+            } else {
+                Some(label.to_string())
+            }
         }
-        ResolvedFacetCol::NullDerived { arr, present_label, absent_label, missing_column_label } => {
+        ResolvedFacetCol::NullDerived {
+            arr,
+            present_label,
+            absent_label,
+            missing_column_label,
+        } => {
             let label = match arr {
-                Some(a) => if a.is_null(i) { absent_label } else { present_label },
+                Some(a) => {
+                    if a.is_null(i) {
+                        absent_label
+                    } else {
+                        present_label
+                    }
+                }
                 None => missing_column_label,
             };
             Some(label.to_string())
