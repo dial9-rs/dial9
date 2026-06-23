@@ -45,6 +45,7 @@ pub fn write_samples<W: Write + Send>(
     let mut service_builder = StringBuilder::with_capacity(n, 32 * n);
     let mut date_builder = StringBuilder::with_capacity(n, 10 * n);
     let mut poll_duration_builder = arrow::array::Int64Builder::with_capacity(n);
+    let mut spawn_location_builder = StringBuilder::with_capacity(n, 64 * n);
 
     // Metadata map: keys and values builders
     let map_keys_builder = StringBuilder::new();
@@ -61,6 +62,7 @@ pub fn write_samples<W: Write + Send>(
         service_builder.append_value(&sample.service);
         date_builder.append_value(&sample.date);
         poll_duration_builder.append_option(sample.poll_duration_ns.map(|d| d as i64));
+        spawn_location_builder.append_option(sample.spawn_location.as_deref());
 
         // Append metadata map for this row
         map_builder.keys().append_value("source_key");
@@ -84,6 +86,7 @@ pub fn write_samples<W: Write + Send>(
             Arc::new(service_builder.finish()) as ArrayRef,
             Arc::new(date_builder.finish()) as ArrayRef,
             Arc::new(poll_duration_builder.finish()) as ArrayRef,
+            Arc::new(spawn_location_builder.finish()) as ArrayRef,
             Arc::new(map_builder.finish()) as ArrayRef,
         ],
     )?;
@@ -242,6 +245,8 @@ pub fn samples_schema() -> Arc<Schema> {
         Field::new("date", DataType::Utf8, false),
         // Nullable: null = sample not inside a poll (off-worker or between polls).
         Field::new("poll_duration_ns", DataType::Int64, true),
+        // Nullable: null = sample not inside a poll or task has no spawn location.
+        Field::new("spawn_location", DataType::Utf8, true),
         Field::new(
             "metadata",
             DataType::Map(
@@ -315,6 +320,7 @@ mod tests {
             service: "shale".to_string(),
             date: "2026-06-19".to_string(),
             poll_duration_ns: Some(5_000_000),
+            spawn_location: Some("src/main.rs:42".to_string()),
         }];
         let metadata = HashMap::from([("version".to_string(), "1.0".to_string())]);
 

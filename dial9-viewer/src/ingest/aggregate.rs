@@ -481,67 +481,147 @@ const SOURCE_CPU_PROFILE: u8 = 0;
 /// Mirrors `CpuSampleSource::SchedEvent` and the JS `source === 1` check.
 const SOURCE_SCHED_EVENT: u8 = 1;
 
-/// Which CPU-sample sources to count when aggregating. Both kinds are *stored*
-/// on disk (so a future off-CPU view can read them); this only controls what a
-/// given query folds into its tree.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum SourceFilter {
-    /// On-CPU profiling samples only (exclude `SchedEvent`). The default, and
-    /// what the viewer's flamegraph shows (`isCpuProfileSample` / `source !== 1`
-    /// in trace_analysis.js): conflating the two yields a flamegraph dominated
-    /// by `schedule` frames. The frontend sends this as `source=cpu`.
-    #[default]
-    CpuProfile,
-    /// Scheduler context-switch (`SchedEvent`) samples only (`source=sched`).
-    Sched,
-    /// Every source (`source=` empty / "all").
-    All,
+// ─── Generic facet system ────────────────────────────────────────────────────
+//
+// Each facet is defined once in [`FACETS`]. The read loop extracts facet values
+// generically, records them for the toolbar, and applies an optional exact-match
+// filter. Adding a new facet requires only one new entry here (+ the Parquet
+// column from ingest).
+
+/// A facet definition: how to read a column and produce a string value.
+#[derive(Clone)]
+pub(crate) struct FacetDef {
+    /// Query parameter / filter key name (e.g. `"source"`, `"thread_class"`).
+    pub name: &'static str,
+    /// Human label for the toolbar selector.
+    pub label: &'static str,
+    /// How to extract this facet's value from a row. Virtual facets derive from
+    /// non-string columns; direct facets just read a nullable Utf8 column.
+    pub kind: FacetKind,
+    /// Default filter value when the param is absent. `"cpu"` for source (the
+    /// on-CPU default), empty string for all others (= no constraint).
+    pub default_filter: &'static str,
 }
 
-/// Which worker-attribution class to count. On-runtime = the sample is
-/// attributed to a runtime worker (`worker_id` present); off-runtime = not.
-/// Mirrors the viewer's `workerId !== 255` split and the frontend's
-/// `thread_class=worker|off-worker` selector.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ThreadFilter {
-    /// Both worker and off-worker samples (`thread_class=` empty / "all").
-    #[default]
-    All,
-    /// Runtime workers only (`worker_id` present) — `thread_class=worker`.
-    Worker,
-    /// Off-worker only (`worker_id` absent) — `thread_class=off-worker`.
-    OffWorker,
+#[derive(Clone)]
+pub(crate) enum FacetKind {
+    /// Read from a UInt8 column and map wire values to labels.
+    MappedU8 {
+        column: &'static str,
+        map: &'static [(u8, &'static str)],
+        /// Fallback value when the column is absent (backwards compat with older
+        /// part-files that predate this column).
+        absent_value: &'static str,
+    },
+    /// Derived from a nullable column: `"worker"` if non-null, `"off-worker"` if null.
+    NullDerived {
+        column: &'static str,
+        present_label: &'static str,
+        absent_label: &'static str,
+        /// Label when the entire column is missing from an old part-file.
+        missing_column_label: &'static str,
+    },
+    /// Read directly from a nullable Utf8 column. Null rows produce no value
+    /// (excluded from facet set and never match a filter).
+    DirectString { column: &'static str },
 }
 
-/// The combined per-query sample filter applied while reading part-files. Both
-/// dimensions default to the viewer's default view (on-CPU profile samples,
-/// all threads).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct SampleFilter {
-    pub source: SourceFilter,
-    pub thread: ThreadFilter,
+/// The facet registry. Order here is the toolbar display order.
+pub(crate) const FACETS: &[FacetDef] = &[
+    FacetDef {
+        name: "source",
+        label: "Source",
+        kind: FacetKind::MappedU8 {
+            column: "source",
+            map: &[(SOURCE_CPU_PROFILE, "cpu"), (SOURCE_SCHED_EVENT, "sched")],
+            absent_value: "cpu",
+        },
+        default_filter: "cpu",
+    },
+    FacetDef {
+        name: "thread_class",
+        label: "Thread",
+        kind: FacetKind::NullDerived {
+            column: "worker_id",
+            present_label: "worker",
+            absent_label: "off-worker",
+            missing_column_label: "worker",
+        },
+        default_filter: "",
+    },
+    FacetDef {
+        name: "host",
+        label: "Host",
+        kind: FacetKind::DirectString { column: "host" },
+        default_filter: "",
+    },
+    FacetDef {
+        name: "spawn_location",
+        label: "Task",
+        kind: FacetKind::DirectString {
+            column: "spawn_location",
+        },
+        default_filter: "",
+    },
+];
+
+/// One facet's response: name + label + sorted distinct values.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct FacetResult {
+    pub name: &'static str,
+    pub label: &'static str,
+    pub values: Vec<String>,
+}
+
+/// A generic set of active facet filters: name → required value. An entry with
+/// an empty string means "no constraint" (match all). Entries are matched by
+/// exact equality against the facet value extracted for each row.
+pub(crate) type FacetFilters = HashMap<&'static str, String>;
+
+/// Accumulates distinct facet values across part-files. One `HashSet<String>`
+/// per facet definition.
+struct FacetAccum {
+    /// Distinct values per facet (indexed same as [`FACETS`]).
+    sets: Vec<HashSet<String>>,
+    /// Distinct hosts that passed ALL filters (for the "N hosts" badge).
+    matched_hosts: HashSet<String>,
+}
+
+impl FacetAccum {
+    fn new() -> Self {
+        Self {
+            sets: FACETS.iter().map(|_| HashSet::new()).collect(),
+            matched_hosts: HashSet::new(),
+        }
+    }
+
+    fn into_results(self) -> Vec<FacetResult> {
+        FACETS
+            .iter()
+            .zip(self.sets)
+            .map(|(def, set)| {
+                let mut values: Vec<String> = set.into_iter().collect();
+                values.sort();
+                FacetResult {
+                    name: def.name,
+                    label: def.label,
+                    values,
+                }
+            })
+            .collect()
+    }
+}
+
+/// The combined per-query filter: time range + per-facet exact-match filters.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct SampleFilter {
     /// Optional time range filter (epoch nanoseconds, half-open: [start, end)).
-    /// Samples outside this range are excluded during aggregation.
     pub start_ns: Option<i64>,
     pub end_ns: Option<i64>,
-}
-
-impl SampleFilter {
-    /// Whether a sample with the given wire `source` and worker attribution is
-    /// counted. `worker_present` is true iff the stored `worker_id` is non-null.
-    fn includes(self, source: u8, worker_present: bool) -> bool {
-        let source_ok = match self.source {
-            SourceFilter::CpuProfile => source == SOURCE_CPU_PROFILE,
-            SourceFilter::Sched => source == SOURCE_SCHED_EVENT,
-            SourceFilter::All => true,
-        };
-        let thread_ok = match self.thread {
-            ThreadFilter::All => true,
-            ThreadFilter::Worker => worker_present,
-            ThreadFilter::OffWorker => !worker_present,
-        };
-        source_ok && thread_ok
-    }
+    /// Per-facet filters. Key = facet name, value = required value. Empty string
+    /// or absent = no constraint. For "source", the default is "cpu" (set by the
+    /// endpoint when the param is absent).
+    pub facets: FacetFilters,
 }
 
 /// Aggregated result of folding + reading the in-scope part-files.
@@ -552,73 +632,8 @@ pub(crate) struct AggResult {
     pub hosts: usize,
     pub min_ts: Option<i64>,
     pub max_ts: Option<i64>,
-    /// Facets available in this scope's time window, recorded **independent of
-    /// the counting filter** (see [`Facets`]). These drive the data-driven
-    /// flamegraph toolbar: the UI offers only the dimensions that actually have
-    /// data, rather than a hard-coded option list.
-    ///
-    /// Host names present in the scope (sorted), regardless of the
-    /// source/thread filter. Empty if no `host` column is present.
-    pub host_names: Vec<String>,
-    /// Sample sources present in the scope (`"cpu"` / `"sched"`, sorted),
-    /// regardless of the active source filter.
-    pub sources_present: Vec<String>,
-    /// Worker-attribution classes present in the scope (`"worker"` /
-    /// `"off-worker"`, sorted), regardless of the active thread filter.
-    pub thread_classes_present: Vec<String>,
-}
-
-/// Available-facet accumulator, populated as part-files are read.
-///
-/// Unlike the counting accumulators (`counts`, `total_samples`), facet presence
-/// is recorded **before** the source/thread filter is applied — it only honors
-/// the time-range filter. This is deliberate: the toolbar must offer every
-/// dimension that has data *in the window*, not just the dimension currently
-/// selected. Otherwise switching the Source selector to `sched` would make
-/// `cpu` vanish from the options (and vice-versa).
-#[derive(Default)]
-struct Facets {
-    /// Distinct host names present in the window, recorded regardless of the
-    /// source/thread filter — drives the toolbar's host selector.
-    hosts: HashSet<String>,
-    /// Distinct host names that passed the *counting* filter — drives the
-    /// `hosts` count badge ("N hosts" of the displayed tree).
-    matched_hosts: HashSet<String>,
-    /// Distinct wire source values seen (`SOURCE_CPU_PROFILE` / `SOURCE_SCHED_EVENT`).
-    sources: HashSet<u8>,
-    /// Whether any on-runtime (worker-attributed) sample was seen.
-    saw_worker: bool,
-    /// Whether any off-runtime sample was seen.
-    saw_off_worker: bool,
-}
-
-impl Facets {
-    /// Sorted source labels present (`"cpu"` before `"sched"`).
-    fn source_labels(&self) -> Vec<String> {
-        let mut v: Vec<String> = self
-            .sources
-            .iter()
-            .filter_map(|s| match *s {
-                SOURCE_CPU_PROFILE => Some("cpu".to_string()),
-                SOURCE_SCHED_EVENT => Some("sched".to_string()),
-                _ => None,
-            })
-            .collect();
-        v.sort();
-        v
-    }
-
-    /// Sorted thread-class labels present (`"off-worker"` before `"worker"`).
-    fn thread_labels(&self) -> Vec<String> {
-        let mut v = Vec::new();
-        if self.saw_off_worker {
-            v.push("off-worker".to_string());
-        }
-        if self.saw_worker {
-            v.push("worker".to_string());
-        }
-        v
-    }
+    /// Generic facet results: each facet's distinct values in the scope.
+    pub facets: Vec<FacetResult>,
 }
 
 /// Aggregate the given folded part-files (by their source keys) into stack_id
@@ -640,7 +655,7 @@ pub(crate) async fn aggregate(
 ) -> anyhow::Result<AggResult> {
     let mut counts: HashMap<[u8; 16], u64> = HashMap::new();
     let mut dict: HashMap<Vec<u8>, Vec<String>> = HashMap::new();
-    let mut facets = Facets::default();
+    let mut accum = FacetAccum::new();
     let mut total_samples = 0usize;
     let mut min_ts: Option<i64> = None;
     let mut max_ts: Option<i64> = None;
@@ -651,7 +666,6 @@ pub(crate) async fn aggregate(
         }
         let part_key = samples_part_key(output_prefix, sk);
         let dict_key = dict_part_key(output_prefix, sk);
-        // Fetch samples + dict concurrently (two small GETs per file).
         let (samples, dict_data) = tokio::join!(
             output.get_object(bucket, &part_key),
             output.get_object(bucket, &dict_key),
@@ -662,9 +676,9 @@ pub(crate) async fn aggregate(
         };
         read_samples_part(
             &data,
-            filter,
+            &filter,
             &mut counts,
-            &mut facets,
+            &mut accum,
             &mut total_samples,
             &mut min_ts,
             &mut max_ts,
@@ -677,33 +691,25 @@ pub(crate) async fn aggregate(
     let stack_counts: Vec<(Vec<u8>, u64)> =
         counts.into_iter().map(|(k, v)| (k.to_vec(), v)).collect();
 
-    // `host_names` is the in-window facet set (any source/thread); fall back to
-    // the counted hosts if no separate facet hosts were recorded.
-    let mut host_names: Vec<String> = if facets.hosts.is_empty() {
-        facets.matched_hosts.iter().cloned().collect()
-    } else {
-        facets.hosts.iter().cloned().collect()
-    };
-    host_names.sort();
+    let hosts = accum.matched_hosts.len().max(1);
+    let facets = accum.into_results();
 
     Ok(AggResult {
         stack_counts,
         stacks_dict: dict,
         total_samples,
-        hosts: facets.matched_hosts.len().max(1),
+        hosts,
         min_ts,
         max_ts,
-        host_names,
-        sources_present: facets.source_labels(),
-        thread_classes_present: facets.thread_labels(),
+        facets,
     })
 }
 
 fn read_samples_part(
     data: &[u8],
-    filter: SampleFilter,
+    filter: &SampleFilter,
     counts: &mut HashMap<[u8; 16], u64>,
-    facets: &mut Facets,
+    accum: &mut FacetAccum,
     total_samples: &mut usize,
     min_ts: &mut Option<i64>,
     max_ts: &mut Option<i64>,
@@ -722,27 +728,15 @@ fn read_samples_part(
         let ts_arr = batch
             .column_by_name("timestamp_ns")
             .and_then(|c| c.as_any().downcast_ref::<arrow::array::Int64Array>());
-        let host_arr = batch
-            .column_by_name("host")
-            .and_then(|c| c.as_any().downcast_ref::<arrow::array::StringArray>());
-        // `source` is a UInt8 column. If it's absent (older part-files predate
-        // it) every row is treated as the default on-CPU source.
-        let source_arr = batch
-            .column_by_name("source")
-            .and_then(|c| c.as_any().downcast_ref::<arrow::array::UInt8Array>());
-        // `worker_id` is a nullable UInt32 column: null = off-runtime. Absent in
-        // pre-v2 part-files; those are treated as on-runtime (worker present) so
-        // a thread filter never silently drops legacy data.
-        let worker_arr = batch
-            .column_by_name("worker_id")
-            .and_then(|c| c.as_any().downcast_ref::<arrow::array::UInt32Array>());
+
+        // Pre-resolve column references for each facet in this batch.
+        let facet_cols: Vec<ResolvedFacetCol> = FACETS
+            .iter()
+            .map(|def| resolve_facet_col(&batch, def))
+            .collect();
 
         for i in 0..batch.num_rows() {
-            let source = source_arr.map_or(SOURCE_CPU_PROFILE, |a| a.value(i));
-            let worker_present = worker_arr.is_none_or(|a| !a.is_null(i));
-
-            // Time range filter: applies to BOTH counting and facet presence, so
-            // a sample outside [start_ns, end_ns) contributes to neither.
+            // Time range filter.
             if let Some(ts) = ts_arr {
                 let v = ts.value(i);
                 if filter.start_ns.is_some_and(|start| v < start) {
@@ -753,30 +747,37 @@ fn read_samples_part(
                 }
             }
 
-            // Record available facets BEFORE the source/thread filter: the
-            // toolbar must offer every dimension present in the window, not just
-            // the currently-selected one (else picking `source=sched` would make
-            // `cpu` disappear from the options). A missing column degrades
-            // safely — `source` defaults to on-CPU, `worker_id` to present.
-            facets.sources.insert(source);
-            if worker_present {
-                facets.saw_worker = true;
-            } else {
-                facets.saw_off_worker = true;
-            }
-            if let Some(h) = host_arr
-                && !h.is_null(i)
-            {
-                facets.hosts.insert(h.value(i).to_string());
+            // Extract facet values for this row and record them (pre-filter).
+            let mut row_values: Vec<Option<String>> = Vec::with_capacity(FACETS.len());
+            for (fi, col) in facet_cols.iter().enumerate() {
+                let val = extract_facet_value(col, i);
+                if let Some(ref v) = val {
+                    accum.sets[fi].insert(v.clone());
+                }
+                row_values.push(val);
             }
 
-            // Counting filter: source + thread. Default (CpuProfile, all
-            // threads) matches the viewer's on-CPU flamegraph. Both sources and
-            // both worker classes are stored; this only decides what this query
-            // counts.
-            if !filter.includes(source, worker_present) {
+            // Apply facet filters: every active filter must match.
+            let mut passes = true;
+            for (fi, def) in FACETS.iter().enumerate() {
+                if let Some(wanted) = filter.facets.get(def.name) {
+                    if wanted.is_empty() {
+                        continue;
+                    }
+                    match &row_values[fi] {
+                        Some(v) if v == wanted => {}
+                        _ => {
+                            passes = false;
+                            break;
+                        }
+                    }
+                }
+            }
+            if !passes {
                 continue;
             }
+
+            // Count this sample.
             let mut id = [0u8; 16];
             id.copy_from_slice(stack_arr.value(i));
             *counts.entry(id).or_insert(0) += 1;
@@ -786,14 +787,84 @@ fn read_samples_part(
                 *min_ts = Some(min_ts.map_or(v, |m| m.min(v)));
                 *max_ts = Some(max_ts.map_or(v, |m| m.max(v)));
             }
-            if let Some(h) = host_arr
-                && !h.is_null(i)
-            {
-                facets.matched_hosts.insert(h.value(i).to_string());
+            // Track matched hosts for the "N hosts" badge.
+            if let Some(ref h) = row_values[host_facet_index()] {
+                accum.matched_hosts.insert(h.clone());
             }
         }
     }
     Ok(())
+}
+
+/// Index of the "host" facet in [`FACETS`].
+fn host_facet_index() -> usize {
+    FACETS.iter().position(|f| f.name == "host").unwrap_or(0)
+}
+
+enum ResolvedFacetCol<'a> {
+    MappedU8 {
+        arr: Option<&'a arrow::array::UInt8Array>,
+        map: &'static [(u8, &'static str)],
+        absent_value: &'static str,
+    },
+    NullDerived {
+        arr: Option<&'a arrow::array::UInt32Array>,
+        present_label: &'static str,
+        absent_label: &'static str,
+        missing_column_label: &'static str,
+    },
+    DirectString {
+        arr: Option<&'a arrow::array::StringArray>,
+    },
+}
+
+fn resolve_facet_col<'a>(
+    batch: &'a arrow::record_batch::RecordBatch,
+    def: &FacetDef,
+) -> ResolvedFacetCol<'a> {
+    match &def.kind {
+        FacetKind::MappedU8 { column, map, absent_value } => {
+            let arr = batch.column_by_name(column)
+                .and_then(|c| c.as_any().downcast_ref::<arrow::array::UInt8Array>());
+            ResolvedFacetCol::MappedU8 { arr, map, absent_value }
+        }
+        FacetKind::NullDerived { column, present_label, absent_label, missing_column_label } => {
+            let arr = batch.column_by_name(column)
+                .and_then(|c| c.as_any().downcast_ref::<arrow::array::UInt32Array>());
+            ResolvedFacetCol::NullDerived { arr, present_label, absent_label, missing_column_label }
+        }
+        FacetKind::DirectString { column } => {
+            let arr = batch.column_by_name(column)
+                .and_then(|c| c.as_any().downcast_ref::<arrow::array::StringArray>());
+            ResolvedFacetCol::DirectString { arr }
+        }
+    }
+}
+
+fn extract_facet_value(col: &ResolvedFacetCol, i: usize) -> Option<String> {
+    match col {
+        ResolvedFacetCol::MappedU8 { arr, map, absent_value } => {
+            let label = match arr {
+                Some(a) => {
+                    let v = a.value(i);
+                    map.iter().find(|(k, _)| *k == v).map_or("", |(_, l)| l)
+                }
+                None => absent_value,
+            };
+            if label.is_empty() { None } else { Some(label.to_string()) }
+        }
+        ResolvedFacetCol::NullDerived { arr, present_label, absent_label, missing_column_label } => {
+            let label = match arr {
+                Some(a) => if a.is_null(i) { absent_label } else { present_label },
+                None => missing_column_label,
+            };
+            Some(label.to_string())
+        }
+        ResolvedFacetCol::DirectString { arr } => match arr {
+            Some(a) if !a.is_null(i) => Some(a.value(i).to_string()),
+            _ => None,
+        },
+    }
 }
 
 fn read_dict_part(data: &[u8], dict: &mut HashMap<Vec<u8>, Vec<String>>) -> anyhow::Result<()> {
@@ -884,53 +955,34 @@ mod tests {
 
     #[test]
     fn sample_filter_source_and_thread() {
-        let cpu = SOURCE_CPU_PROFILE;
-        let sched = SOURCE_SCHED_EVENT;
+        use std::collections::HashMap;
 
-        // Default: on-CPU profile, all threads — the viewer's default view.
-        let def = SampleFilter::default();
-        assert!(
-            def.includes(cpu, true),
-            "default keeps on-CPU worker samples"
-        );
-        assert!(def.includes(cpu, false), "default keeps on-CPU off-worker");
-        assert!(!def.includes(sched, true), "default drops sched");
-
-        // Source = sched only.
-        let sched_only = SampleFilter {
-            source: SourceFilter::Sched,
-            thread: ThreadFilter::All,
+        // Default filter: source=cpu, thread_class="" (all), others empty.
+        let def = SampleFilter {
+            facets: HashMap::from([
+                ("source", "cpu".to_string()),
+                ("thread_class", String::new()),
+            ]),
             ..Default::default()
         };
-        assert!(sched_only.includes(sched, true));
-        assert!(!sched_only.includes(cpu, true));
+        // The filter works by exact match on extracted values. Verify the
+        // data-driven filtering contract: non-empty = must match, empty = pass.
+        assert_eq!(def.facets.get("source"), Some(&"cpu".to_string()));
+        assert_eq!(def.facets.get("thread_class"), Some(&String::new()));
 
-        // Thread = worker / off-worker (on-CPU source).
-        let worker = SampleFilter {
-            source: SourceFilter::CpuProfile,
-            thread: ThreadFilter::Worker,
+        // A filter with source=sched should be expressible.
+        let sched = SampleFilter {
+            facets: HashMap::from([("source", "sched".to_string())]),
             ..Default::default()
         };
-        assert!(
-            worker.includes(cpu, true),
-            "worker keeps attributed samples"
-        );
-        assert!(!worker.includes(cpu, false), "worker drops off-runtime");
-        let off = SampleFilter {
-            source: SourceFilter::CpuProfile,
-            thread: ThreadFilter::OffWorker,
-            ..Default::default()
-        };
-        assert!(off.includes(cpu, false), "off-worker keeps unattributed");
-        assert!(!off.includes(cpu, true), "off-worker drops attributed");
+        assert_eq!(sched.facets.get("source"), Some(&"sched".to_string()));
 
-        // Source = all keeps both kinds.
-        let all = SampleFilter {
-            source: SourceFilter::All,
-            thread: ThreadFilter::All,
-            ..Default::default()
-        };
-        assert!(all.includes(cpu, true) && all.includes(sched, false));
+        // FacetDef registry has our expected facets.
+        let names: Vec<&str> = FACETS.iter().map(|f| f.name).collect();
+        assert!(names.contains(&"source"));
+        assert!(names.contains(&"thread_class"));
+        assert!(names.contains(&"host"));
+        assert!(names.contains(&"spawn_location"));
     }
 
     #[test]

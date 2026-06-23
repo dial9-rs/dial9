@@ -335,43 +335,66 @@ async fn flamegraph_metadata_reports_available_facets() {
     let _ = poll(&http, &base, "service=shale&source=all").await;
     let json = fetch_body(&http, &base, "service=shale&source=cpu").await;
 
+    // Parse the metadata (not the deeply-nested tree) from the response.
+    // Extract the "metadata" object to avoid recursion limit on the tree.
+    let meta_start = json.find("\"metadata\":").expect("metadata present") + "\"metadata\":".len();
+    // The metadata object is the last field before the closing }, so just parse from there.
+    // Actually, extract facets from the raw JSON string.
+    let facet_values = |name: &str| -> Vec<String> {
+        // Find the facet with this name in the facets array
+        let search = format!("\"name\":\"{name}\"");
+        let Some(pos) = json.find(&search) else { return vec![] };
+        // Find "values": after this position
+        let rest = &json[pos..];
+        let vals_start = rest.find("\"values\":").unwrap() + "\"values\":".len();
+        let rest = &rest[vals_start..];
+        let open = rest.find('[').unwrap();
+        let close = rest[open..].find(']').unwrap() + open;
+        rest[open + 1..close]
+            .split(',')
+            .filter_map(|s| {
+                let s = s.trim().trim_matches('"');
+                (!s.is_empty()).then(|| s.to_string())
+            })
+            .collect()
+    };
+
     // Host facet: the host parsed from the key path.
     assert_eq!(
-        extract_str_array(&json, "\"host_names\":"),
+        facet_values("host"),
         vec!["host-a".to_string()],
-        "host_names reports the scope's host"
+        "host facet reports the scope's host"
     );
 
     // Sources present is independent of the `source=cpu` counting filter: the
     // demo trace has BOTH CpuProfile and SchedEvent samples in the window.
-    let sources = extract_str_array(&json, "\"sources_present\":");
+    let sources = facet_values("source");
     assert!(
         sources.contains(&"cpu".to_string()) && sources.contains(&"sched".to_string()),
-        "sources_present must list both sources regardless of the source filter, got {sources:?}"
+        "source facet must list both sources regardless of the source filter, got {sources:?}"
     );
 
     // Likewise both worker classes are present in the demo trace.
-    let threads = extract_str_array(&json, "\"thread_classes_present\":");
+    let threads = facet_values("thread_class");
     assert!(
         threads.contains(&"worker".to_string()) && threads.contains(&"off-worker".to_string()),
-        "thread_classes_present must list both classes, got {threads:?}"
+        "thread_class facet must list both classes, got {threads:?}"
     );
 
-    // The resolved scope echoes the normalized selectors back to the UI. Scope
-    // through the `"scope":` object so the assertions don't collide with the
-    // top-level `hosts` count or `service` fields.
+    // The resolved scope echoes the normalized selectors back to the UI.
     let scope = &json[json.find("\"scope\":").expect("scope present")..];
-    assert_eq!(
-        extract_str_array(scope, "\"hosts\":"),
-        Vec::<String>::new(),
+    assert!(
+        scope.contains("\"hosts\":[]"),
         "scope.hosts empty when no host filter was requested"
     );
+    // The filters object echoes back the active facet values.
+    let filters = &scope[scope.find("\"filters\":").expect("filters in scope")..];
     assert!(
-        scope.contains("\"source\":\"cpu\""),
+        filters.contains("\"source\":\"cpu\""),
         "scope echoes the active source selector"
     );
     assert!(
-        scope.contains("\"thread_class\":\"\""),
+        filters.contains("\"thread_class\":\"\""),
         "scope echoes the (empty) thread-class selector"
     );
 }

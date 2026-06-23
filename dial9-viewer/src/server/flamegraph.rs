@@ -10,7 +10,7 @@ use std::sync::Arc;
 use tokio::task::JoinSet;
 
 use crate::ingest::aggregate::{
-    self, AggContext, Coverage, SampleFilter, Scope, SourceFilter, ThreadFilter,
+    self, AggContext, Coverage, FacetResult, SampleFilter, Scope, FACETS,
 };
 use crate::server::AppState;
 use crate::server::credentials::MaybeCreds;
@@ -71,6 +71,10 @@ pub struct FlamegraphParams {
     /// (scheduler context switches), or empty/absent for all. Sent by the
     /// flamegraph UI's "Source" selector.
     pub source: Option<String>,
+    /// Spawn location filter: exact match on the task's spawn location string.
+    /// Only samples attributed to a poll with this spawn location are counted.
+    /// Sent by the flamegraph UI's "Spawn location" selector.
+    pub spawn_location: Option<String>,
     /// Whether this poll may fold new source files. The UI's first poll for a
     /// scope omits this (or sets it false) so the response is instant — it just
     /// aggregates whatever is already folded. Subsequent polls set `refine=1` to
@@ -109,16 +113,9 @@ pub struct FlamegraphMetadata {
     pub min_timestamp_ns: Option<i64>,
     /// Max timestamp in the result (epoch nanoseconds)
     pub max_timestamp_ns: Option<i64>,
-    /// Available facets for this scope, used to build the flamegraph toolbar
-    /// data-driven (offer only dimensions that have data) rather than from a
-    /// hard-coded option list. All additive — old clients ignore them.
-    ///
-    /// Host names present in the scope (sorted).
-    pub host_names: Vec<String>,
-    /// Sample sources present (`"cpu"` / `"sched"`, sorted).
-    pub sources_present: Vec<String>,
-    /// Worker-attribution classes present (`"worker"` / `"off-worker"`, sorted).
-    pub thread_classes_present: Vec<String>,
+    /// Generic facets array: each entry has name, label, and sorted values.
+    /// The UI renders the toolbar entirely from this array.
+    pub facets: Vec<FacetResult>,
     /// The resolved scope the server queried, echoed so the UI's header can
     /// render the current selection without re-deriving it from the URL.
     pub scope: ScopeEcho,
@@ -134,10 +131,8 @@ pub struct ScopeEcho {
     pub hosts: Vec<String>,
     pub start_ns: Option<i64>,
     pub end_ns: Option<i64>,
-    /// The active source selector (`"cpu"` / `"sched"` / `"all"`).
-    pub source: String,
-    /// The active thread-class selector (`""` = all / `"worker"` / `"off-worker"`).
-    pub thread_class: String,
+    /// Active facet filter values (facet name → selected value, empty = all).
+    pub filters: HashMap<String, String>,
 }
 
 /// Build a flamegraph tree from (stack_id, count) pairs and a stacks dictionary.
@@ -289,30 +284,33 @@ fn scope_from_params(params: &FlamegraphParams) -> Scope {
     }
 }
 
-/// Translate the UI's `thread_class` / `source` selectors into a [`SampleFilter`].
-///
-/// Defaults match the viewer's default flamegraph view: on-CPU profile samples
-/// (`SchedEvent` excluded), all worker classes. An empty or unrecognized value
-/// is treated as "no constraint on that dimension" — except `source`, whose
-/// absence means the on-CPU default (NOT "all"), since the UI omits the param
-/// for both its "CPU" and "All" choices and the on-CPU view is the sane default.
+/// Build a [`SampleFilter`] from the query params. Maps named params to the
+/// generic facet filter system. For each facet in [`FACETS`], looks up the
+/// matching query param; uses the facet's `default_filter` when absent.
 fn sample_filter(params: &FlamegraphParams) -> SampleFilter {
-    let thread = match params.thread_class.as_deref() {
-        Some("worker") => ThreadFilter::Worker,
-        Some("off-worker") => ThreadFilter::OffWorker,
-        _ => ThreadFilter::All,
-    };
-    let source = match params.source.as_deref() {
-        Some("sched") => SourceFilter::Sched,
-        Some("all") => SourceFilter::All,
-        // "cpu", empty, or absent → the on-CPU default.
-        _ => SourceFilter::CpuProfile,
-    };
+    let mut facets = HashMap::new();
+    for def in FACETS {
+        let value = match def.name {
+            "source" => {
+                let raw = params.source.clone().unwrap_or_else(|| def.default_filter.to_string());
+                // "all" = no constraint on source.
+                if raw == "all" { String::new() } else { raw }
+            }
+            "thread_class" => params.thread_class.clone().unwrap_or_else(|| def.default_filter.to_string()),
+            "spawn_location" => params.spawn_location.clone().unwrap_or_else(|| def.default_filter.to_string()),
+            "host" => {
+                // Host filtering is handled via the scope (multi-value), not
+                // a single facet filter. Leave empty = no constraint.
+                String::new()
+            }
+            _ => def.default_filter.to_string(),
+        };
+        facets.insert(def.name, value);
+    }
     SampleFilter {
-        source,
-        thread,
         start_ns: params.start_ns,
         end_ns: params.end_ns,
+        facets,
     }
 }
 
@@ -569,20 +567,13 @@ async fn run_refinement_loop(
 
     let tree = build_flamegraph_tree(&result.stack_counts, &result.stacks_dict);
 
-    // Echo the normalized selectors so the UI header reflects what the server
-    // actually applied (derived through the same mapping `sample_filter` uses).
-    let scope_source = match params.source.as_deref() {
-        Some("sched") => "sched",
-        Some("all") => "all",
-        _ => "cpu",
-    }
-    .to_string();
-    let scope_thread = match params.thread_class.as_deref() {
-        Some("worker") => "worker",
-        Some("off-worker") => "off-worker",
-        _ => "",
-    }
-    .to_string();
+    // Build the active filters echo from the SampleFilter we actually applied.
+    let active_filter = sample_filter(params);
+    let filters: HashMap<String, String> = active_filter
+        .facets
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.clone()))
+        .collect();
 
     Ok(Json(FlamegraphResponse {
         tree,
@@ -597,16 +588,13 @@ async fn run_refinement_loop(
             },
             min_timestamp_ns: result.min_ts,
             max_timestamp_ns: result.max_ts,
-            host_names: result.host_names,
-            sources_present: result.sources_present,
-            thread_classes_present: result.thread_classes_present,
+            facets: result.facets,
             scope: ScopeEcho {
                 service: params.service.clone(),
                 hosts: params.host.clone(),
                 start_ns: params.start_ns,
                 end_ns: params.end_ns,
-                source: scope_source,
-                thread_class: scope_thread,
+                filters,
             },
         },
     }))

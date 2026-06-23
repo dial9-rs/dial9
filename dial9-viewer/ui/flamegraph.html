@@ -138,10 +138,10 @@
                     // first poll can fire before the (data-driven) facet selects
                     // even exist.
                     const filterState = {
-                        thread: params.get("thread_class") || "",
-                        // Source defaults to "cpu" (the on-CPU view), matching the
-                        // backend default and the viewer's default flamegraph.
+                        // Source defaults to "cpu" (the on-CPU view).
                         source: params.get("source") || "cpu",
+                        thread_class: params.get("thread_class") || "",
+                        spawn_location: params.get("spawn_location") || "",
                         hosts: originalHosts.slice(),
                     };
 
@@ -171,8 +171,11 @@
                         if (scopePrefix) u.searchParams.set("prefix", scopePrefix);
                         if (scopeService) u.searchParams.set("service", scopeService);
                         for (const h of filterState.hosts) u.searchParams.append("host", h);
-                        if (filterState.thread) u.searchParams.set("thread_class", filterState.thread);
-                        if (filterState.source) u.searchParams.set("source", filterState.source);
+                        // Send all non-empty facet filters as query params.
+                        for (const [k, v] of Object.entries(filterState)) {
+                            if (k === "hosts" || !v) continue;
+                            u.searchParams.set(k, v);
+                        }
                         const startNs = pickerUtcToNs(fStart.value);
                         const endNs = pickerUtcToNs(fEnd.value);
                         if (startNs) u.searchParams.set("start_ns", startNs);
@@ -192,8 +195,10 @@
                         if (params.get("data_dir")) p.set("data_dir", params.get("data_dir"));
                         if (scopeService) p.set("service", scopeService);
                         for (const h of filterState.hosts) p.append("host", h);
-                        if (filterState.thread) p.set("thread_class", filterState.thread);
-                        if (filterState.source) p.set("source", filterState.source);
+                        for (const [k, v] of Object.entries(filterState)) {
+                            if (k === "hosts" || !v) continue;
+                            p.set(k, v);
+                        }
                         const startNs = pickerUtcToNs(fStart.value);
                         const endNs = pickerUtcToNs(fEnd.value);
                         if (startNs) p.set("start_ns", startNs);
@@ -218,20 +223,22 @@
                     // make the host selector vanish and you could never get back
                     // to "All". Seeded with the original scope hosts so the
                     // selector is correct even before the first response.
-                    const availSources = new Set();
-                    const availThreads = new Set();
-                    const availHosts = new Set(originalHosts);
+                    const availFacets = {};
                     let renderedFacetKey = null;
                     function renderFacets(meta) {
-                        for (const s of meta.sources_present || []) availSources.add(s);
-                        for (const t of meta.thread_classes_present || []) availThreads.add(t);
-                        for (const h of meta.host_names || []) availHosts.add(h);
-                        const sources = [...availSources].sort();
-                        const threads = [...availThreads].sort();
-                        const hostNames = [...availHosts].sort();
-                        // Rebuild only when the available set grows (monotonic), so
-                        // a steady-state selection doesn't clobber an open <select>.
-                        const key = JSON.stringify([sources, threads, hostNames]);
+                        // Accumulate from generic facets array.
+                        for (const f of meta.facets || []) {
+                            if (!availFacets[f.name]) availFacets[f.name] = {label: f.label, values: new Set()};
+                            for (const v of f.values) availFacets[f.name].values.add(v);
+                        }
+                        // Seed host facet from original scope hosts.
+                        if (availFacets["host"]) {
+                            for (const h of originalHosts) availFacets["host"].values.add(h);
+                        }
+
+                        const key = JSON.stringify(Object.fromEntries(
+                            Object.entries(availFacets).map(([k, v]) => [k, [...v.values].sort()])
+                        ));
                         if (key === renderedFacetKey) return;
                         renderedFacetKey = key;
 
@@ -256,31 +263,30 @@
                             container.appendChild(label);
                         }
 
-                        // A facet change is a new scope: reset depth, push URL,
-                        // restart the poll loop.
                         function applyFacetChange() {
                             maxFiles = null;
                             updateBrowserUrl();
                             startPolling();
                         }
 
-                        addSelect("Thread:", threadFacetOptions(threads), filterState.thread, (v) => {
-                            filterState.thread = v;
-                            applyFacetChange();
-                        });
-                        addSelect("Source:", sourceFacetOptions(sources), filterState.source, (v) => {
-                            filterState.source = v;
-                            applyFacetChange();
-                        });
-                        // Host selector only when the scope spans >1 host; with a
-                        // single host there's nothing to narrow to. "All"
-                        // re-applies the original scope set. Driven by the
-                        // accumulated host set so picking one host doesn't hide
-                        // the control (which would strand you on that host).
-                        if (hostNames.length > 1) {
-                            const selectedHost = filterState.hosts.length === 1 ? filterState.hosts[0] : "";
-                            addSelect("Host:", hostFacetOptions(hostNames), selectedHost, (v) => {
-                                filterState.hosts = v ? [v] : originalHosts.slice();
+                        // Render each facet generically.
+                        for (const [name, {label, values}] of Object.entries(availFacets)) {
+                            const sorted = [...values].sort();
+                            if (name === "host") {
+                                if (sorted.length > 1) {
+                                    const selectedHost = filterState.hosts.length === 1 ? filterState.hosts[0] : "";
+                                    addSelect(label + ":", hostFacetOptions(sorted), selectedHost, (v) => {
+                                        filterState.hosts = v ? [v] : originalHosts.slice();
+                                        applyFacetChange();
+                                    });
+                                }
+                                continue;
+                            }
+                            if (sorted.length <= 1) continue;
+                            const opts = [{value: "", label: "All"}, ...sorted.map(v => ({value: v, label: v}))];
+                            const current = filterState[name] || "";
+                            addSelect(label + ":", opts, current, (v) => {
+                                filterState[name] = v;
                                 applyFacetChange();
                             });
                         }

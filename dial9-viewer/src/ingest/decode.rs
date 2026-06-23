@@ -107,6 +107,10 @@ pub struct ResolvedSample {
     /// Duration of the enclosing poll span (ns), or `None` if the sample didn't
     /// land inside a poll (off-worker, between polls, etc.).
     pub poll_duration_ns: Option<u64>,
+    /// The spawn location of the task that was being polled when this sample
+    /// fired, or `None` if the sample didn't land inside a poll or the task
+    /// has no recorded spawn location.
+    pub spawn_location: Option<String>,
 }
 
 /// A reconstructed poll span: one invocation of `Future::poll` on a task.
@@ -348,7 +352,7 @@ pub fn decode_samples(data: &[u8], source_key: &str) -> anyhow::Result<DecodeRes
                 };
 
                 // Find the enclosing poll for this sample (if on a worker).
-                let poll_duration_ns = if let Some(w) = worker_id {
+                let (poll_duration_ns, spawn_location) = if let Some(w) = worker_id {
                     find_enclosing_poll(
                         &polls,
                         &polls_by_worker,
@@ -358,7 +362,7 @@ pub fn decode_samples(data: &[u8], source_key: &str) -> anyhow::Result<DecodeRes
                         s.source as u8,
                     )
                 } else {
-                    None
+                    (None, None)
                 };
 
                 let stack_id = if let Some(&cached) = stack_cache.get(&s.callchain) {
@@ -417,6 +421,7 @@ pub fn decode_samples(data: &[u8], source_key: &str) -> anyhow::Result<DecodeRes
                     service: parsed_service.clone(),
                     date: parsed_date.clone(),
                     poll_duration_ns,
+                    spawn_location,
                 });
             }
         }
@@ -456,7 +461,7 @@ pub fn decode_samples(data: &[u8], source_key: &str) -> anyhow::Result<DecodeRes
 }
 
 /// Find the poll enclosing a sample on a given worker. Returns the poll
-/// duration in ns if found, and increments the poll's sample count.
+/// duration in ns and spawn location if found, and increments the poll's sample count.
 fn find_enclosing_poll(
     polls: &[(u64, u64, u64, u64, Option<String>)],
     polls_by_worker: &FxHashMap<u64, Vec<usize>>,
@@ -464,26 +469,28 @@ fn find_enclosing_poll(
     sample_ts: u64,
     poll_sample_counts: &mut [(u32, u32)],
     source: u8,
-) -> Option<u64> {
-    let indices = polls_by_worker.get(&worker_id)?;
+) -> (Option<u64>, Option<String>) {
+    let Some(indices) = polls_by_worker.get(&worker_id) else {
+        return (None, None);
+    };
     // Binary search for the last poll starting <= sample_ts.
     let pos = indices.partition_point(|&i| polls[i].0 <= sample_ts);
     if pos == 0 {
-        return None;
+        return (None, None);
     }
     let poll_idx = indices[pos - 1];
-    let (start, end, _, _, _) = &polls[poll_idx];
+    let (start, end, _, _, ref spawn_loc) = polls[poll_idx];
     // Check sample is within [start, end).
-    if sample_ts >= *start && sample_ts < *end {
+    if sample_ts >= start && sample_ts < end {
         let duration = end - start;
         if source == 0 {
             poll_sample_counts[poll_idx].0 += 1;
         } else {
             poll_sample_counts[poll_idx].1 += 1;
         }
-        Some(duration)
+        (Some(duration), spawn_loc.clone())
     } else {
-        None
+        (None, None)
     }
 }
 
