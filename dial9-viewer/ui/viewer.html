@@ -1235,6 +1235,11 @@
             // Span data from custom events (SpanEnterEvent/SpanExitEvent)
             let allSpans = []; // [{start, end, spanId, spanName, fields, parentSpanId, depth, segments: [{start, end, workerId}], activeNs}]
             let spansById = new Map(); // spanId → entry in allSpans (for O(1) ancestor walks)
+            // spanId → ALL spans with that id. Span ids are recycled (see
+            // testBuildSpanDataRecycledId), so a single id can map to multiple
+            // distinct span intervals; the highlight loop must light up every
+            // instance, which spansById (last-wins) cannot do.
+            let spansByIdAll = new Map();
             let spanMeta = new Map(); // spanId → {spanName, fields, parentSpanId}
             let childrenByParent = new Map(); // parentSpanId|null → [childSpanId, ...]
             let spanMaxDepth = 0;
@@ -1630,6 +1635,7 @@
                 // inherit stale state from a previously-loaded trace.
                 allSpans = [];
                 spansById = new Map();
+                spansByIdAll = new Map();
                 spanMeta = new Map();
                 childrenByParent = new Map();
                 unmatchedSpans = [];
@@ -1646,7 +1652,12 @@
                     // Build spanId → span index for O(1) ancestor walks
                     // (used by the lane-click handler and anywhere else that
                     // needs to navigate by parentSpanId).
-                    for (const s of allSpans) spansById.set(s.spanId, s);
+                    for (const s of allSpans) {
+                        spansById.set(s.spanId, s);
+                        let bucket = spansByIdAll.get(s.spanId);
+                        if (!bucket) { bucket = []; spansByIdAll.set(s.spanId, bucket); }
+                        bucket.push(s);
+                    }
                     const totalSegs = allSpans.reduce((s, sp) => s + sp.segments.length, 0);
                     console.log(`Span events: ${allSpans.length} spans (${totalSegs} segments), ${spanMeta.size} unique span IDs, maxDepth=${spanMaxDepth}, ${unmatchedSpans.length} unmatched`);
                 }
@@ -2685,19 +2696,31 @@
                     }
                 }
 
-                // Highlight polls containing the selected span
+                // Highlight polls containing the selected span. Iterate the
+                // (tiny: focused span + ancestors) selectedSpanIds set and look
+                // each up via spansById, rather than scanning the whole
+                // allSpans array. renderLane runs once per worker, so the old
+                // per-lane allSpans scan was O(workers × allSpans) per render —
+                // hundreds of millions of iterations on a multi-million-span
+                // trace, which made clicking a poll take seconds. This is
+                // O(workers × selectedSpanIds) instead.
                 if (selectedSpanIds.size > 0) {
-                    for (const s of allSpans) {
-                        if (!selectedSpanIds.has(s.spanId)) continue;
-                        for (const seg of s.segments) {
-                            if (seg.workerId !== workerId) continue;
-                            const poll = findSpanAt(spans.polls, seg.start);
-                            if (poll) {
-                                const x1 = Math.max(0, nsToX(poll.start, pw));
-                                const x2 = Math.min(pw, nsToX(poll.end, pw));
-                                ctx.strokeStyle = "#ffeb3b";
-                                ctx.lineWidth = 2;
-                                ctx.strokeRect(x1, bandTop, Math.max(x2 - x1, 4), bandH);
+                    for (const spanId of selectedSpanIds) {
+                        // Recycled ids: highlight every span instance sharing
+                        // this id, matching the old full-allSpans scan exactly.
+                        const matches = spansByIdAll.get(spanId);
+                        if (!matches) continue;
+                        for (const s of matches) {
+                            for (const seg of s.segments) {
+                                if (seg.workerId !== workerId) continue;
+                                const poll = findSpanAt(spans.polls, seg.start);
+                                if (poll) {
+                                    const x1 = Math.max(0, nsToX(poll.start, pw));
+                                    const x2 = Math.min(pw, nsToX(poll.end, pw));
+                                    ctx.strokeStyle = "#ffeb3b";
+                                    ctx.lineWidth = 2;
+                                    ctx.strokeRect(x1, bandTop, Math.max(x2 - x1, 4), bandH);
+                                }
                             }
                         }
                     }
