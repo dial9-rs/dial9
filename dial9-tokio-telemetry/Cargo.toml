@@ -69,7 +69,7 @@ dial9-core = { workspace = true }
 
 [features]
 analysis = []
-cpu-profiling = ["dep:dial9-perf-self-profile"]
+cpu-profiling = ["dep:dial9-perf-self-profile", "dial9-perf-self-profile/dial9-source"]
 linux-socket = [
     "dep:netlink-packet-core",
     "dep:netlink-packet-sock-diag",

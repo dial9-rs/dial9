@@ -1,5 +1,3 @@
-use crate::telemetry::events::CpuSampleSource;
-
 use crate::telemetry::task_metadata::TaskId;
 use dial9_trace_format::types::{EventEncoder, FieldType};
 use dial9_trace_format::{InternedStackFrames, InternedString, TraceEvent, TraceField};
@@ -51,15 +49,6 @@ impl TraceField for TaskId {
     }
     fn encode<W: Write>(&self, enc: &mut EventEncoder<'_, W>) -> io::Result<()> {
         enc.write_u64(self.0)
-    }
-}
-
-impl TraceField for CpuSampleSource {
-    fn field_type() -> FieldType {
-        FieldType::U8
-    }
-    fn encode<W: Write>(&self, enc: &mut EventEncoder<'_, W>) -> io::Result<()> {
-        enc.write_u8(*self as u8)
     }
 }
 
@@ -225,23 +214,6 @@ pub(crate) struct TaskTerminateEvent {
     #[traceevent(timestamp)]
     pub timestamp_ns: u64,
     pub task_id: TaskId,
-}
-
-#[derive(TraceEvent)]
-#[traceevent(wire_slot)]
-pub(crate) struct CpuSampleEvent {
-    #[traceevent(timestamp)]
-    pub timestamp_ns: u64,
-    pub worker_id: WorkerId,
-    pub tid: u32,
-    pub source: CpuSampleSource,
-    pub thread_name: Option<InternedString>,
-    pub callchain: InternedStackFrames,
-    /// CPU the sample was taken on, if the backend could determine it.
-    ///
-    /// Widened to `u64` on the wire so the field encodes as `OptionalVarint`:
-    /// 1 byte when absent, typically 2 bytes (tag + small-varint) when present.
-    pub cpu: Option<u64>,
 }
 
 /// Wire-format event for a task dump: async backtrace captured at a yield point

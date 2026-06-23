@@ -652,7 +652,7 @@ fn apply_runtime_env<M>(
 
     #[cfg(feature = "cpu-profiling")]
     {
-        use crate::telemetry::cpu_profile::{CpuProfilingConfig, SchedEventConfig};
+        use dial9_perf_self_profile::{CpuProfilingConfig, SchedEventConfig};
 
         if config.cpu_profile_enabled {
             let cpu_config = match config.cpu_sample_hz {

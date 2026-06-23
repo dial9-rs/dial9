@@ -315,8 +315,8 @@ mod tests {
     use super::*;
     use crate::background_task::testutil::{CapturingProcessor, decode_captured};
     use crate::telemetry::buffer;
-    use crate::telemetry::collector::CentralCollector;
     use crate::telemetry::writer::InMemoryWriter;
+    use dial9_core::collector::CentralCollector;
     use std::panic::Location;
     use std::sync::Arc;
     use std::sync::atomic::AtomicUsize;
@@ -899,12 +899,11 @@ mod tests {
     #[cfg(all(feature = "cpu-profiling", feature = "analysis"))]
     mod rotation_proptest {
         use super::*;
+        use crate::telemetry::Batch;
         use crate::telemetry::analysis::TraceReader;
         use crate::telemetry::analysis_events::Dial9Event;
         use crate::telemetry::buffer::encode_single;
-        use crate::telemetry::collector::Batch;
-        use crate::telemetry::events::{CpuSampleData, CpuSampleSource};
-        use crate::telemetry::format::WorkerId;
+        use crate::telemetry::format::{WorkerId, WorkerParkEvent};
         use crate::telemetry::task_metadata::TaskId;
         use crate::telemetry::writer::DiskWriter;
         use proptest::prelude::*;
@@ -921,34 +920,22 @@ mod tests {
 
         #[derive(Debug, Clone)]
         enum FlushOp {
-            CpuSample {
-                worker_id: WorkerId,
-                tid: u32,
-                callchain: Vec<u64>,
-            },
-            PollStart {
-                location_idx: usize,
-            },
+            OtherEvent { worker_id: WorkerId, tid: u32 },
+            PollStart { location_idx: usize },
         }
 
         fn arb_flush_op() -> impl Strategy<Value = FlushOp> {
             prop_oneof![
-                (
-                    prop::bool::ANY,
-                    0u32..4,
-                    prop::collection::vec(0u64..8, 0..3),
-                )
-                    .prop_map(|(is_worker, tid, callchain)| {
-                        FlushOp::CpuSample {
-                            worker_id: if is_worker {
-                                WorkerId::from(0usize)
-                            } else {
-                                WorkerId::UNKNOWN
-                            },
-                            tid,
-                            callchain,
-                        }
-                    }),
+                (prop::bool::ANY, 0u32..4,).prop_map(|(is_worker, tid)| {
+                    FlushOp::OtherEvent {
+                        worker_id: if is_worker {
+                            WorkerId::from(0usize)
+                        } else {
+                            WorkerId::UNKNOWN
+                        },
+                        tid,
+                    }
+                }),
                 (0usize..3).prop_map(|idx| FlushOp::PollStart { location_idx: idx }),
             ]
         }
@@ -963,7 +950,7 @@ mod tests {
             (
                 prop::collection::vec(arb_flush_op(), 0..12).prop_map(|ops| {
                     ops.into_iter()
-                        .filter(|o| matches!(o, FlushOp::CpuSample { .. }))
+                        .filter(|o| matches!(o, FlushOp::OtherEvent { .. }))
                         .collect()
                 }),
                 prop::collection::vec(arb_flush_op(), 0..12).prop_map(|ops| {
@@ -983,23 +970,19 @@ mod tests {
             expected_raw: &mut usize,
         ) {
             for op in &round.cpu_ops {
-                if let FlushOp::CpuSample {
-                    worker_id,
-                    tid,
-                    callchain,
-                } = op
-                {
-                    let data = CpuSampleData {
-                        timestamp_nanos: *timestamp,
-                        worker_id: *worker_id,
-                        tid: *tid,
-                        source: CpuSampleSource::CpuProfile,
-                        thread_name: None,
-                        callchain: callchain.clone(),
-                        cpu: None,
-                    };
+                if let FlushOp::OtherEvent { worker_id, tid } = op {
+                    write_raw_event(
+                        &mut *ew,
+                        &WorkerParkEvent {
+                            timestamp_ns: *timestamp,
+                            worker_id: *worker_id,
+                            local_queue: 0,
+                            cpu_time_ns: 0,
+                            tid: *tid,
+                        },
+                    )
+                    .unwrap();
                     *timestamp += 1;
-                    write_raw_event(&mut *ew, &data).unwrap();
                 }
             }
 
@@ -1043,15 +1026,8 @@ mod tests {
                     .unwrap_or_else(|e| panic!("failed to open {path_str}: {e}"));
 
                 for ev in &reader.all_events {
-                    match ev {
-                        Dial9Event::PollStartEvent(_) => {
-                            total_raw += 1;
-                        }
-                        Dial9Event::CpuSampleEvent(..) => {
-                            // Callchain addresses are raw; symbolization
-                            // happens in the background worker now.
-                        }
-                        _ => {}
+                    if matches!(ev, Dial9Event::PollStartEvent(_)) {
+                        total_raw += 1;
                     }
                 }
             }
@@ -1738,8 +1714,8 @@ mod tests {
     #[cfg(feature = "cpu-profiling")]
     #[test]
     fn telemetry_core_builder_cpu_profiling_auto_wires_processors() {
-        use crate::telemetry::cpu_profile::CpuProfilingConfig;
         use crate::telemetry::writer::DiskWriter;
+        use dial9_perf_self_profile::CpuProfilingConfig;
 
         let dir = tempfile::tempdir().unwrap();
         let trace_path = dir.path().join("trace.bin");

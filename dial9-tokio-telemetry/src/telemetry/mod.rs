@@ -10,10 +10,7 @@ pub mod analysis;
 #[cfg(any(feature = "analysis", test))]
 pub mod analysis_events;
 pub(crate) use dial9_core::buffer;
-pub(crate) use dial9_core::collector;
 pub use dial9_core::collector::Batch;
-#[cfg(feature = "cpu-profiling")]
-pub mod cpu_profile;
 pub(crate) mod custom_events;
 pub(crate) mod events;
 pub(crate) mod format;
@@ -28,7 +25,11 @@ pub(crate) use dial9_core::writer;
 pub use crate::traced::TracedFuture;
 pub use custom_events::{CustomEventsConfig, CustomEventsContext};
 pub use dial9_core::buffer::{Encodable, ThreadLocalEncoder};
-pub use events::{CpuSampleSource, clock_monotonic_ns};
+#[cfg(feature = "cpu-profiling")]
+pub use dial9_perf_self_profile::{
+    CpuProfiler, CpuProfilingConfig, CpuSampleSource, SchedEventConfig, SchedProfiler,
+};
+pub use events::clock_monotonic_ns;
 pub use format::{
     AllocEvent, FreeEvent, PollEndEvent, PollStartEvent, ProcessResourceUsageEvent, TaskSpawnEvent,
     WakeEventEvent, WorkerId, WorkerParkEvent, WorkerUnparkEvent,

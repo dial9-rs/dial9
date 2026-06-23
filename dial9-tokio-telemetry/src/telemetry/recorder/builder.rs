@@ -1,3 +1,8 @@
+#[cfg(feature = "cpu-profiling")]
+use dial9_perf_self_profile::CpuProfilingConfig;
+#[cfg(feature = "cpu-profiling")]
+use dial9_perf_self_profile::SchedEventConfig;
+
 use crate::primitives::sync::{Arc, Mutex};
 #[cfg(feature = "cpu-profiling")]
 use crate::rate_limit::rate_limited;
@@ -55,9 +60,9 @@ pub struct TracedRuntimeBuilder<P = NoTracePath, M = PipelineUnset, Mode: Writer
     pub(super) trace_path: Option<PathBuf>,
     pub(super) runtime_name: Option<String>,
     #[cfg(feature = "cpu-profiling")]
-    pub(super) cpu_profiling_config: Option<crate::telemetry::cpu_profile::CpuProfilingConfig>,
+    pub(super) cpu_profiling_config: Option<CpuProfilingConfig>,
     #[cfg(feature = "cpu-profiling")]
-    pub(super) sched_event_config: Option<crate::telemetry::cpu_profile::SchedEventConfig>,
+    pub(super) sched_event_config: Option<SchedEventConfig>,
     pub(super) process_resource_usage_config: Option<crate::telemetry::ProcessResourceUsageConfig>,
     #[cfg(feature = "linux-socket")]
     pub(super) socket_accept_queues_config: Option<crate::telemetry::SocketAcceptQueuesConfig>,
@@ -154,20 +159,14 @@ impl<P, M, Mode: WriterMode> TracedRuntimeBuilder<P, M, Mode> {
 
     /// Enable CPU profiling with the given configuration (Linux only).
     #[cfg(feature = "cpu-profiling")]
-    pub fn with_cpu_profiling(
-        mut self,
-        config: crate::telemetry::cpu_profile::CpuProfilingConfig,
-    ) -> Self {
+    pub fn with_cpu_profiling(mut self, config: CpuProfilingConfig) -> Self {
         self.cpu_profiling_config = Some(config);
         self
     }
 
     /// Enable per-worker scheduler event capture (Linux only).
     #[cfg(feature = "cpu-profiling")]
-    pub fn with_sched_events(
-        mut self,
-        config: crate::telemetry::cpu_profile::SchedEventConfig,
-    ) -> Self {
+    pub fn with_sched_events(mut self, config: SchedEventConfig) -> Self {
         self.sched_event_config = Some(config);
         self
     }
@@ -821,10 +820,10 @@ impl TelemetryCore {
         task_dump_config: Option<crate::telemetry::task_dump_config::TaskDumpConfig>,
         /// Enable CPU profiling (Linux only).
         #[cfg(feature = "cpu-profiling")]
-        cpu_profiling: Option<crate::telemetry::cpu_profile::CpuProfilingConfig>,
+        cpu_profiling: Option<CpuProfilingConfig>,
         /// Enable scheduler event capture (Linux only).
         #[cfg(feature = "cpu-profiling")]
-        sched_events: Option<crate::telemetry::cpu_profile::SchedEventConfig>,
+        sched_events: Option<SchedEventConfig>,
         /// Enable process resource usage sampled from `getrusage(RUSAGE_SELF)`.
         process_resource_usage: Option<crate::telemetry::ProcessResourceUsageConfig>,
         /// Enable TCP listener accept queue snapshots sampled from Linux sock_diag.
@@ -911,7 +910,7 @@ impl TelemetryCore {
         #[cfg(feature = "cpu-profiling")]
         {
             if let Some(ref config) = cpu_profiling {
-                match crate::telemetry::cpu_profile::CpuProfiler::start(config.clone()) {
+                match CpuProfiler::start(config.clone()) {
                     Ok(sampler) => shared.push_source(Box::new(sampler)),
                     Err(e) => rate_limited!(Duration::from_secs(60), {
                         tracing::warn!("failed to start CPU profiler: {e}");
@@ -919,7 +918,7 @@ impl TelemetryCore {
                 }
             }
             if let Some(sched_cfg) = sched_events {
-                match crate::telemetry::cpu_profile::SchedProfiler::new(sched_cfg) {
+                match SchedProfiler::new(sched_cfg) {
                     Ok(sched) => shared.push_source(Box::new(sched)),
                     Err(e) => rate_limited!(Duration::from_secs(60), {
                         tracing::warn!("failed to start scheduler event profiler: {e}");

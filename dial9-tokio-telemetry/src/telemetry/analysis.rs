@@ -755,7 +755,7 @@ mod tests {
         let raw_path = dir.path().join("trace.bin");
 
         let mut writer = DiskWriter::single_file(&raw_path).unwrap();
-        let batch = crate::telemetry::collector::Batch::new(
+        let batch = crate::telemetry::Batch::new(
             encode_single(&WorkerParkEvent {
                 timestamp_ns: 1_000,
                 worker_id: crate::telemetry::format::WorkerId::from(7usize),

@@ -2786,7 +2786,7 @@ mod worker_pipeline_tests {
 
     /// Encode a single park event into a self-contained batch (header + event),
     /// matching the format produced by ThreadLocalBuffer.
-    fn mem_test_batch() -> crate::telemetry::collector::Batch {
+    fn mem_test_batch() -> crate::telemetry::Batch {
         use crate::telemetry::format::{WorkerId, WorkerParkEvent};
         use dial9_trace_format::encoder::Encoder;
         let mut enc = Encoder::new_to(Vec::new()).unwrap();
@@ -2797,7 +2797,7 @@ mod worker_pipeline_tests {
             cpu_time_ns: 0,
             tid: 0,
         });
-        crate::telemetry::collector::Batch::new(enc.into_inner(), 1)
+        crate::telemetry::Batch::new(enc.into_inner(), 1)
     }
 
     /// Drive a memory writer through the real worker pipeline and return the
