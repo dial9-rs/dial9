@@ -128,6 +128,24 @@
   }
 
   /**
+   * Wrap an already-buffered `Uint8Array` in the minimal subset of the
+   * `ReadableStreamDefaultReader` interface that {@link fetchTraceStream} uses
+   * (`read()` / `cancel()`). Yields the whole buffer in one chunk, then EOF.
+   * Used only as a fallback when a `fetch` response has no streamable `body`.
+   */
+  function oneShotReader(bytes) {
+    let done = false;
+    return {
+      async read() {
+        if (done) return { value: undefined, done: true };
+        done = true;
+        return { value: bytes, done: false };
+      },
+      async cancel() { done = true; },
+    };
+  }
+
+  /**
    * Fetch a single trace URL and return an async iterable of raw (gunzipped, if
    * the body was gzipped) `Uint8Array` chunks. Pair with
    * {@link parseTraceStream} so download and decode overlap.
@@ -147,7 +165,15 @@
     const resp = await fetch(url, { signal: opts.signal, headers });
     if (!resp.ok) throw new Error(`HTTP ${resp.status} fetching ${url}`);
 
-    const reader = resp.body.getReader();
+    // Some runtimes hand back an ok response with no readable `body` stream
+    // even though canStreamDecode() reported support (e.g. certain cached or
+    // synthesized responses). Rather than throwing a bare TypeError on
+    // `null.getReader()`, buffer the whole body and adapt it to the same
+    // reader interface so the gzip-sniff + DecompressionStream path below is
+    // identical — we just lose the download/parse overlap for this response.
+    const reader = resp.body
+      ? resp.body.getReader()
+      : oneShotReader(new Uint8Array(await resp.arrayBuffer()));
     // Read the first non-empty chunk to sniff the gzip magic.
     let first = null;
     for (;;) {

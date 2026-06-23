@@ -18,7 +18,7 @@ const fs = require("fs");
 const path = require("path");
 const zlib = require("zlib");
 const { assert, testAsync, summarize } = require("./test_harness.js");
-const { parseTrace, parseTraceStream } = require("./trace_parser.js");
+const { parseTrace, parseTraceStream, fetchTraceStream } = require("./trace_parser.js");
 
 // Yield an async iterable of fixed-size Uint8Array chunks over `bytes`.
 function chunked(bytes, size) {
@@ -251,6 +251,33 @@ async function main() {
     const streamFiltered = canonical(await parseTraceStream(chunked(raw, 333), opts));
     assert.deepStrictEqual(streamFiltered, refFiltered);
   });
+
+  // ── Test: fetchTraceStream falls back gracefully when the ok response has
+  //    no streamable `body` (e.g. cached/synthesized responses). It must still
+  //    gunzip + decode to the same ParsedTrace instead of throwing on
+  //    `null.getReader()`. We mock fetch to return a body-less response that
+  //    only exposes arrayBuffer(), for both gzipped and raw bodies. ──
+  for (const [label, body] of [["gzipped", zlib.gzipSync(Buffer.from(raw))], ["raw", raw]]) {
+    await testAsync(`fetchTraceStream falls back when response has no body (${label})`, async () => {
+      const u8 = Uint8Array.from(body);
+      const original = global.fetch;
+      global.fetch = async () => ({
+        ok: true,
+        status: 200,
+        body: null, // no streamable body → exercise the arrayBuffer() fallback
+        async arrayBuffer() {
+          return u8.buffer.slice(u8.byteOffset, u8.byteOffset + u8.byteLength);
+        },
+      });
+      try {
+        const stream = await fetchTraceStream("/no-body");
+        const got = canonical(await parseTraceStream(stream));
+        assert.deepStrictEqual(got, refCanon);
+      } finally {
+        global.fetch = original;
+      }
+    });
+  }
 
   summarize();
 }
