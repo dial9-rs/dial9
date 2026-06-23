@@ -137,7 +137,7 @@ fn polls_part_key(output_prefix: &str, source_key: &str) -> String {
     )
 }
 
-/// Public accessor for the polls part-key, used by the health endpoint.
+/// Public accessor for the polls part-key, used by the tokio-stats endpoint.
 pub(crate) fn polls_part_key_pub(output_prefix: &str, source_key: &str) -> String {
     polls_part_key(output_prefix, source_key)
 }
@@ -473,6 +473,8 @@ pub struct Coverage {
     pub files_matched: usize,
     pub files_folded: usize,
     pub samples_folded: usize,
+    /// Total bytes of all matched source files in the scope.
+    pub total_bytes: u64,
 }
 
 /// Wire value of the `CpuProfile` CPU-sample source (periodic on-CPU sample).
@@ -933,6 +935,26 @@ pub(crate) fn ordered_full_keys(
             (o.key, full)
         })
         .collect()
+}
+
+/// Like [`ordered_full_keys`] but also returns the total bytes of all matched files.
+pub(crate) fn ordered_full_keys_with_size(
+    objects: Vec<ObjectInfo>,
+    scope: &Scope,
+    segment_duration_secs: i64,
+    source_is_local: bool,
+    source_bucket: &str,
+) -> (Vec<(String, String)>, u64) {
+    let matched = matched_and_ordered(objects, scope, segment_duration_secs);
+    let total_bytes: u64 = matched.iter().map(|o| o.size.max(0) as u64).sum();
+    let keys = matched
+        .into_iter()
+        .map(|o| {
+            let full = full_source_key(source_is_local, source_bucket, &o.key);
+            (o.key, full)
+        })
+        .collect();
+    (keys, total_bytes)
 }
 
 /// Shared `Arc`-friendly handle bundle the server uses to run the refinement

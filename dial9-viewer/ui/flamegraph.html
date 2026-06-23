@@ -46,8 +46,17 @@
                 flex: 1;
                 color: #888;
                 font-size: 1.1em;
+                gap: 0.6em;
             }
             #loading.hidden { display: none; }
+            .spinner {
+                width: 1.2em; height: 1.2em;
+                border: 2px solid #444;
+                border-top-color: #aaa;
+                border-radius: 50%;
+                animation: spin 0.8s linear infinite;
+            }
+            @keyframes spin { to { transform: rotate(360deg); } }
 
             /* Error */
             #error {
@@ -68,7 +77,7 @@
             <span class="fg-stats" id="fg-stats"></span>
         </div>
         <div id="fg-container"></div>
-        <div id="loading">Loading trace&hellip;</div>
+        <div id="loading"><div class="spinner"></div>Loading trace&hellip;</div>
         <div id="error"></div>
 
         <script src="format.js"></script>
@@ -118,8 +127,8 @@
                         <label style="color:#e0e0e0">From: <input id="f-start" type="datetime-local" step="1" style="${ctlStyle}"></label>
                         <label style="color:#e0e0e0">To: <input id="f-end" type="datetime-local" step="1" style="${ctlStyle}"></label>
                         <button id="f-apply" style="background:#6c63ff;color:#fff;border:none;padding:4px 14px;border-radius:3px;cursor:pointer;font-weight:600">Apply</button>
-                        <button id="f-more" style="background:#2a2a4a;color:#e0e0e0;${btnStyle}">Fetch more</button>
-                        <button id="f-stop" style="background:#2a2a4a;color:#e0e0e0;${btnStyle};opacity:0.4;cursor:not-allowed" disabled>Stop refining</button>
+                        <button id="f-more" style="background:#2a2a4a;color:#e0e0e0;${btnStyle}">Refine more</button>
+                        <button id="f-stop" style="background:#2a2a4a;color:#e0e0e0;${btnStyle};opacity:0.4;cursor:not-allowed" disabled>Stop</button>
                     `;
                     document.querySelector(".fg-page-header").after(toolbar);
 
@@ -154,7 +163,7 @@
                     if (params.get("start_ns")) fStart.value = nsToPickerUtc(params.get("start_ns"));
                     if (params.get("end_ns")) fEnd.value = nsToPickerUtc(params.get("end_ns"));
 
-                    // `max_files` ceiling override, raised by the "Fetch more"
+                    // `max_files` ceiling override, raised by the "Refine more"
                     // button. null = let the backend pick its own ceiling.
                     let maxFiles = params.get("max_files") ? Number(params.get("max_files")) : null;
 
@@ -193,6 +202,8 @@
                         const p = new URLSearchParams();
                         p.set("api", "1");
                         if (params.get("data_dir")) p.set("data_dir", params.get("data_dir"));
+                        if (scopeBucket) p.set("bucket", scopeBucket);
+                        if (scopePrefix) p.set("prefix", scopePrefix);
                         if (scopeService) p.set("service", scopeService);
                         for (const h of filterState.hosts) p.append("host", h);
                         for (const [k, v] of Object.entries(filterState)) {
@@ -350,11 +361,17 @@
                     // Drives the auto-stop heuristic (shouldAutoStopRefining).
                     let coverageDeltas = [];
                     const stopBtn = document.getElementById("f-stop");
+                    const moreBtn = document.getElementById("f-more");
 
                     function setRefiningUi(active) {
+                        // Stop button: enabled only while refining.
                         stopBtn.disabled = !active;
                         stopBtn.style.opacity = active ? "1" : "0.4";
                         stopBtn.style.cursor = active ? "pointer" : "not-allowed";
+                        // Fetch-more button: enabled only when idle (not refining).
+                        moreBtn.disabled = active;
+                        moreBtn.style.opacity = active ? "0.4" : "1";
+                        moreBtn.style.cursor = active ? "not-allowed" : "pointer";
                     }
 
                     function stopPolling() {
@@ -415,13 +432,11 @@
                         // Stop when the server can't fold more (frozen) or coverage
                         // has plateaued (diminishing returns over recent polls).
                         if (refine && (frozen || plateaued)) {
-                            statsEl.textContent = badge + (frozen
-                                ? " \u00b7 sampling complete"
-                                : " \u00b7 refined (plateaued)");
+                            statsEl.textContent = badge + " \u00b7 refined";
                             stopPolling();
                             return;
                         }
-                        statsEl.textContent = badge + " \u00b7 refining\u2026";
+                        statsEl.innerHTML = badge + ' \u00b7 <span class="spinner" style="width:0.9em;height:0.9em;display:inline-block;vertical-align:middle"></span> refining\u2026';
 
                         // Subsequent polls refine. Schedule the next one.
                         setRefiningUi(true);
@@ -438,8 +453,9 @@
                         stopPolling();
                         prevCoverage = null;
                         coverageDeltas = [];
+                        setRefiningUi(true);
                         loadingEl.classList.remove("hidden");
-                        loadingEl.textContent = "Loading aggregated flamegraph\u2026";
+                        loadingEl.innerHTML = '<div class="spinner"></div>Loading aggregated flamegraph\u2026';
                         containerEl.style.display = "none";
                         errorEl.style.display = "none";
                         const token = pollToken;
@@ -462,6 +478,10 @@
                         maxFiles = nextMaxFiles(folded);
                         coverageDeltas = [];
                         stopPolling();
+                        setRefiningUi(true);
+                        // Show the refining spinner immediately in the stats bar.
+                        statsEl.innerHTML = statsEl.textContent.replace(/ \u00b7 (?:refined|stopped)$/, "")
+                            + ' \u00b7 <span class="spinner" style="width:0.9em;height:0.9em;display:inline-block;vertical-align:middle"></span> refining\u2026';
                         const token = pollToken;
                         poll(token, true);
                     });
@@ -488,9 +508,9 @@
                 // independently, then concatenated into one buffer.
                 let buffer;
                 try {
-                    loadingEl.textContent = traceUrls.length > 1
+                    loadingEl.innerHTML = '<div class="spinner"></div>' + (traceUrls.length > 1
                         ? `Fetching ${traceUrls.length} traces\u2026`
-                        : "Fetching trace\u2026";
+                        : "Fetching trace\u2026");
                     // Attach bring-your-own-credentials headers if present.
                     const credHeaders = window.Dial9Creds ? Dial9Creds.headers() : {};
                     buffer = await TraceParser.fetchTraces(traceUrls, { headers: credHeaders });
@@ -509,7 +529,7 @@
                 // Parse trace
                 let trace;
                 try {
-                    loadingEl.textContent = "Parsing trace\u2026";
+                    loadingEl.innerHTML = '<div class="spinner"></div>Parsing trace\u2026';
                     trace = await TraceParser.parseTrace(buffer);
                 } catch (err) {
                     showError("Failed to parse trace: " + err.message);
@@ -518,7 +538,7 @@
 
                 // Process: build worker spans and attach CPU samples for spawnLoc
                 try {
-                    loadingEl.textContent = "Analyzing\u2026";
+                    loadingEl.innerHTML = '<div class="spinner"></div>Analyzing\u2026';
                     const evts = trace.events;
                     const wSet = new Set();
                     const ET = TraceParser.EVENT_TYPES;

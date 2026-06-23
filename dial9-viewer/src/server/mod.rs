@@ -14,7 +14,7 @@ mod config;
 pub mod credentials;
 mod error;
 pub mod flamegraph;
-pub mod health;
+pub mod tokio_stats;
 mod prefixes;
 mod search;
 mod trace;
@@ -261,7 +261,7 @@ fn api_router(state: AppState) -> Router {
             "/flamegraph",
             axum::routing::get(flamegraph::get_flamegraph),
         )
-        .route("/health", axum::routing::get(health::get_health))
+        .route("/tokio-stats", axum::routing::get(tokio_stats::get_tokio_stats))
         // Permissive CORS so a page on another origin can read responses via
         // fetch(); also answers the OPTIONS preflight automatically.
         .layer(CorsLayer::permissive())

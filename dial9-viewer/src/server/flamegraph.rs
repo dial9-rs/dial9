@@ -380,7 +380,7 @@ async fn run_refinement_loop(
         .await;
     let raw_objects: Vec<ObjectInfo> = per_prefix.into_iter().flatten().collect();
     let total_listed = raw_objects.len();
-    let ordered = aggregate::ordered_full_keys(
+    let (ordered, total_bytes) = aggregate::ordered_full_keys_with_size(
         raw_objects,
         &scope,
         agg.segment_duration_secs,
@@ -549,6 +549,7 @@ async fn run_refinement_loop(
         files_matched,
         files_folded,
         samples_folded: result.total_samples,
+        total_bytes,
     };
 
     let pct = if files_matched > 0 {

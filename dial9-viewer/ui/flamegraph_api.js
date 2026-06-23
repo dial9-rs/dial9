@@ -22,11 +22,19 @@ function formatCoverageBadge(coverage) {
   const matched = Number(coverage.files_matched) || 0;
   const folded = Number(coverage.files_folded) || 0;
   const samples = Number(coverage.samples_folded) || 0;
+  const totalBytes = Number(coverage.total_bytes) || 0;
   const pct = matched > 0 ? (folded / matched) * 100 : 0;
-  return (
-    `${folded.toLocaleString()} / ${matched.toLocaleString()} files ` +
-    `(${pct.toFixed(1)}%) · ${samples.toLocaleString()} samples`
-  );
+  let s = `${folded.toLocaleString()} / ${matched.toLocaleString()} files ` +
+    `(${pct.toFixed(1)}%) · ${samples.toLocaleString()} samples`;
+  if (totalBytes > 0) s += ` · ${formatBytes(totalBytes)}`;
+  return s;
+}
+
+function formatBytes(bytes) {
+  if (bytes < 1024) return bytes + " B";
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB";
+  if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + " MB";
+  return (bytes / (1024 * 1024 * 1024)).toFixed(1) + " GB";
 }
 
 // Coverage is "frozen" when files_folded does not increase between two

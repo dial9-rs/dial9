@@ -347,8 +347,8 @@
         <button id="cpu-btn" onclick="viewCpuProfile()" disabled title="Open a CPU flamegraph of the selected segments">
             🔥 Flamegraph
         </button>
-        <button id="health-btn" onclick="viewHealth()" disabled title="Open runtime health view for the selected scope">
-            ⚡ Health
+        <button id="health-btn" onclick="viewTokioStats()" disabled title="Open Tokio stats view for the selected scope">
+            ⚡ Tokio Stats
         </button>
         <span id="selection-warn" style="color:#ff6b6b;font-size:0.8em"></span>
         <span class="count" id="selection-count"></span>
@@ -1545,7 +1545,7 @@
         window.open('flamegraph.html?' + fgParams.toString(), '_blank');
     }
 
-    function viewHealth() {
+    function viewTokioStats() {
         if (!heatmapSelection || !heatmapSelection.keys.length) return;
         const bucket = bucketInput.value.trim();
         if (!bucket) { alert('Bucket is required'); return; }
@@ -1561,7 +1561,7 @@
         for (const h of hosts) hp.append('host', h);
         if (heatmapSelection.t0 != null) hp.set('start_ns', String(Math.round(heatmapSelection.t0 * 1e9)));
         if (heatmapSelection.t1 != null) hp.set('end_ns', String(Math.round(heatmapSelection.t1 * 1e9)));
-        window.open('health.html?' + hp.toString(), '_blank');
+        window.open('tokio_stats.html?' + hp.toString(), '_blank');
     }
 
     // ── Raw search mode ──
