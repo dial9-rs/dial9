@@ -13,12 +13,25 @@ async fn detect_bucket_region(bucket: &str) -> Option<String> {
     server::region_from_head_bucket(&client, bucket).await
 }
 
+/// Configuration for the `serve` subcommand, assembled from CLI args.
+pub(crate) struct ServeConfig {
+    pub port: u16,
+    pub bucket: Option<String>,
+    pub prefix: Option<String>,
+    pub local_dir: Option<PathBuf>,
+    pub dev: bool,
+    pub enable_upload: bool,
+}
+
 pub(crate) async fn serve(
-    port: u16,
-    bucket: Option<String>,
-    prefix: Option<String>,
-    local_dir: Option<PathBuf>,
-    dev: bool,
+    ServeConfig {
+        port,
+        bucket,
+        prefix,
+        local_dir,
+        dev,
+        enable_upload,
+    }: ServeConfig,
 ) -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -88,6 +101,12 @@ pub(crate) async fn serve(
     app_state = app_state.with_byo_creds(allow_byo);
     if let Some(d) = dev_ui_dir {
         app_state = app_state.with_dev_ui_dir(d);
+    }
+    if enable_upload {
+        tracing::info!(
+            "trace-upload feature enabled (POST /api/upload); no auth — trusted network only"
+        );
+        app_state = app_state.with_uploads(server::UploadLimits::default());
     }
 
     let app = server::router(app_state);

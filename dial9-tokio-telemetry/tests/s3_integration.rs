@@ -1,10 +1,12 @@
 //! Integration tests: in-process worker lifecycle and end-to-end S3 upload.
 #![cfg(feature = "worker-s3")]
 
+mod common;
 mod fake_s3;
 
 use aws_config::Region;
 use aws_sdk_s3::Client;
+use common::{fast_sealing_writer, wait_for_sealed_segment};
 use dial9_tokio_telemetry::background_task::s3::S3Config;
 use dial9_tokio_telemetry::telemetry::{DiskWriter, TracedRuntime};
 use fake_s3::{
@@ -841,5 +843,140 @@ fn permanently_broken_s3_produces_failure_metrics() {
         "all {} entries should be failures when S3 is permanently broken, but {} succeeded",
         pipeline_entries.len(),
         pipeline_entries.len() - failures,
+    );
+}
+
+/// Triggered mode against S3: the pipeline stays parked until a dump is
+/// requested, then uploads the captured segments and writes a per-dump
+/// manifest at `{prefix}/dumps/{dump_id}.json`. Mirrors the continuous-upload
+/// `end_to_end_trace_to_s3_roundtrip` but on the on-demand path.
+#[test]
+fn dump_trigger_uploads_segments_and_writes_manifest() {
+    let s3_root = tempfile::tempdir().unwrap();
+    let trace_dir = tempfile::tempdir().unwrap();
+    let trace_path = trace_dir.path().join("trace.bin");
+
+    std::fs::create_dir(s3_root.path().join("dump-bucket")).unwrap();
+    let client = fake_s3_client(s3_root.path());
+
+    let writer = fast_sealing_writer(&trace_path);
+
+    let s3_config = S3Config::builder()
+        .bucket("dump-bucket")
+        .prefix("traces")
+        .service_name("dump-svc")
+        .instance_path("test-host")
+        .boot_id("dump-boot")
+        .region("us-east-1")
+        .build();
+
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.worker_threads(2).enable_all();
+
+    let (runtime, guard) = TracedRuntime::builder()
+        .with_trace_path(&trace_path)
+        .with_s3_uploader(s3_config.clone())
+        .with_s3_client(client.clone())
+        .with_dump_trigger(|_| {})
+        .with_worker_poll_interval(Duration::from_millis(50))
+        .build_and_start(builder, writer)
+        .unwrap();
+
+    let trigger = guard.handle().dump_trigger().expect("trigger wired");
+
+    // Before any dump, triggered mode must not have uploaded anything.
+    let list_rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let list_keys = |prefix: &str| {
+        let prefix = prefix.to_string();
+        list_rt.block_on(async {
+            let resp = client
+                .list_objects_v2()
+                .bucket("dump-bucket")
+                .prefix(&prefix)
+                .send()
+                .await
+                .unwrap();
+            resp.contents
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|o| o.key)
+                .collect::<Vec<_>>()
+        })
+    };
+    assert!(
+        list_keys("traces/").is_empty(),
+        "triggered mode must not upload until a dump is requested"
+    );
+
+    // A triggered worker parks until a dump is requested, so a confirmed-sealed
+    // segment persists and the unbounded `dump_current_data` window is
+    // guaranteed to match it.
+    wait_for_sealed_segment(&runtime, trace_dir.path());
+
+    let receipt = runtime.block_on(async {
+        trigger
+            .dump_current_data()
+            .with_metadata("reason", "test")
+            .await
+            .expect("dump resolves")
+    });
+
+    assert!(
+        receipt.segments_processed > 0,
+        "dump should capture at least one sealed segment"
+    );
+    let dump_id = receipt.dump_id.to_string();
+    let expected_manifest = format!("traces/dumps/{dump_id}.json");
+    assert_eq!(
+        receipt.manifest_key.as_deref(),
+        Some(expected_manifest.as_str()),
+        "receipt names the manifest key"
+    );
+
+    drop(runtime);
+    guard
+        .graceful_shutdown(Duration::from_secs(5))
+        .expect("clean shutdown");
+
+    // The manifest object exists and lists the produced segment keys.
+    let manifest_bytes = list_rt.block_on(async {
+        client
+            .get_object()
+            .bucket("dump-bucket")
+            .key(&expected_manifest)
+            .send()
+            .await
+            .expect("manifest object exists")
+            .body
+            .collect()
+            .await
+            .unwrap()
+            .into_bytes()
+    });
+    let manifest: serde_json::Value = serde_json::from_slice(&manifest_bytes).unwrap();
+    assert_eq!(manifest["dump_id"], dump_id);
+    let segments = manifest["segments"].as_array().expect("segments array");
+    assert!(!segments.is_empty(), "manifest lists at least one segment");
+
+    // A listed segment object carries the dump-id as user metadata.
+    let first_segment = segments[0].as_str().unwrap().to_string();
+    let meta = list_rt.block_on(async {
+        client
+            .head_object()
+            .bucket("dump-bucket")
+            .key(&first_segment)
+            .send()
+            .await
+            .expect("segment object exists")
+            .metadata
+            .unwrap_or_default()
+    });
+    assert_eq!(
+        meta.get("dump-id").map(String::as_str),
+        Some(dump_id.as_str()),
+        "captured segment is tagged with the dump id"
     );
 }
