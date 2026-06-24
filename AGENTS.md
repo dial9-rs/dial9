@@ -86,7 +86,7 @@ Unguarded logging in loops causes log spam that degrades observability and can i
 
 ## Formatting and linting
 
-- For Rust code changes, run `cargo fmt --check` and `cargo clippy --all-targets --all-features`. Report if you did not run them.
+- For Rust code changes, run `cargo fmt --check` and clippy. On Linux, run `cargo clippy --all-targets --all-features`. On non-Linux targets, run `cargo clippy --all-targets --features __nonlinux_all_features` instead. Report if you did not run them.
 - **Preserve doc comments and inline comments.** When reviewing your diff, verify you have not accidentally deleted documentation comments (`///`, `//!`), inline explanatory comments (`//`), or module-level docs. Refactors that move code must carry all associated comments with it.
 
 ## Demo Trace

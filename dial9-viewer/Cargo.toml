@@ -26,6 +26,7 @@ required-features = ["dev-server"]
 [dependencies]
 axum = "0.8"
 axum-extra = { version = "0.10", features = ["query"] }
+bytes = "1"
 clap = { version = "4", features = ["derive"] }
 flate2 = "1"
 futures = "0.3"
@@ -52,7 +53,6 @@ dial9-trace-format = { workspace = true, features = ["serde-deserialize"] }
 arrow = { version = "54", default-features = false }
 parquet = { version = "54", default-features = false, features = ["arrow", "flate2", "snap"] }
 blake3 = "1"
-bytes = "1"
 lasso = "0.7"
 rustc-hash = "2"
 dial9-core.workspace = true

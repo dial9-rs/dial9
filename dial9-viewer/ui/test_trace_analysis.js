@@ -20,6 +20,10 @@ const {
   getTraceTimeRange,
   hasCpuProfileSamples,
   analyzeAllocations,
+  makeBarCoalescer,
+  computePollWakes,
+  pixelDownsampleSpans,
+  pixelCoverage,
 } = require("./trace_analysis.js");
 
 async function main() {
@@ -745,7 +749,23 @@ async function main() {
     const beta = allSpans.find(s => s.spanName === "beta");
     if (!alpha || !beta) fail("Missing alpha or beta span");
     if (alpha.start !== 1000 || beta.start !== 2000) fail("Span intervals not distinct");
-    pass("Recycled span IDs produce separate intervals");
+    // The viewer's per-lane highlight loop relies on grouping allSpans by
+    // spanId into a multimap (spansByIdAll) and lighting up EVERY instance —
+    // not a single last-wins entry. Assert that recycled id 1 indeed yields
+    // two grouped instances, so the highlight stays correct under recycling.
+    const byId = new Map();
+    for (const s of allSpans) {
+      let b = byId.get(s.spanId);
+      if (!b) { b = []; byId.set(s.spanId, b); }
+      b.push(s);
+    }
+    // spanId is keyed exactly as stored on the span objects (a string here),
+    // the same value the viewer puts in selectedSpanIds — so the multimap key
+    // is alpha.spanId, not a numeric literal.
+    if ((byId.get(alpha.spanId) || []).length !== 2)
+      fail(`Expected id ${JSON.stringify(alpha.spanId)} to group 2 recycled spans, got ${(byId.get(alpha.spanId) || []).length}`);
+    if (alpha.spanId !== beta.spanId) fail("Recycled spans should share the same spanId key");
+    pass("Recycled span IDs produce separate intervals (and group by id)");
   }
 
   function testBuildSpanDataPerCallsiteSchema() {
@@ -1168,6 +1188,351 @@ async function main() {
 
   console.log("\nblock-in-place active-span suppression:");
   testBlockInPlaceActiveSpanSuppression();
+
+  console.log("\ncomputePollWakes:");
+  testPollWakesMatchesBruteForce();
+  testPollWakesNoWakes();
+  testPollWakesMidPollBump();
+  testPollWakesSharedBoundary();
+
+  // Reference O(P^2) implementation — the original viewer loop, kept here to
+  // prove the binary-search version produces identical results.
+  function pollWakesBruteForce(polls, wakes) {
+    const out = [];
+    for (let pi = 0; pi < polls.length; pi++) {
+      const s = polls[pi];
+      let best = null;
+      if (wakes.length) {
+        let lo = 0, hi = wakes.length - 1, bi = -1;
+        while (lo <= hi) {
+          const mid = (lo + hi) >> 1;
+          if (wakes[mid].timestamp <= s.start) { bi = mid; lo = mid + 1; }
+          else hi = mid - 1;
+        }
+        if (bi >= 0) {
+          const w = wakes[bi];
+          let effectiveWake = w.timestamp;
+          for (let j = 0; j < pi; j++) {
+            if (w.timestamp >= polls[j].start && w.timestamp <= polls[j].end) {
+              effectiveWake = polls[j].end;
+              break;
+            }
+          }
+          const delay = s.start - effectiveWake;
+          if (delay >= 0 && delay < 1e9) best = { wake: w, effectiveWake };
+        }
+      }
+      out.push(best);
+    }
+    return out;
+  }
+
+  function testPollWakesMatchesBruteForce() {
+    // Deterministic pseudo-random non-overlapping polls + scattered wakes.
+    const polls = [];
+    let t = 0;
+    let seed = 12345;
+    const rnd = () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+    for (let i = 0; i < 400; i++) {
+      const gap = Math.floor(rnd() * 50);
+      const dur = 1 + Math.floor(rnd() * 80);
+      const start = t + gap;
+      polls.push({ start, end: start + dur });
+      t = start + dur;
+    }
+    const wakes = [];
+    for (let i = 0; i < 600; i++) {
+      wakes.push({ timestamp: Math.floor(rnd() * t), wakerTaskId: i });
+    }
+    // Deliberately seed wakes EXACTLY on poll boundaries (poll.start, which for
+    // a zero-gap poll equals the previous poll's end). This is the case where a
+    // wake is contained by two adjacent polls and where the binary-search and
+    // O(P^2) versions can disagree on which poll "owns" it — so the comparison
+    // below actually exercises the first-match tie-break, not just interiors.
+    for (let i = 0; i < polls.length; i += 7) {
+      wakes.push({ timestamp: polls[i].start, wakerTaskId: 1000 + i });
+      wakes.push({ timestamp: polls[i].end, wakerTaskId: 2000 + i });
+    }
+    wakes.sort((a, b) => a.timestamp - b.timestamp);
+
+    const fast = computePollWakes(polls, wakes);
+    const slow = pollWakesBruteForce(polls, wakes);
+    if (fast.length !== slow.length) fail(`pollWakes: length mismatch ${fast.length} vs ${slow.length}`);
+    for (let i = 0; i < slow.length; i++) {
+      const a = fast[i], b = slow[i];
+      if ((a == null) !== (b == null)) fail(`pollWakes[${i}]: null mismatch`);
+      if (a && b) {
+        if (a.effectiveWake !== b.effectiveWake)
+          fail(`pollWakes[${i}]: effectiveWake ${a.effectiveWake} vs ${b.effectiveWake}`);
+        if (a.wake.wakerTaskId !== b.wake.wakerTaskId)
+          fail(`pollWakes[${i}]: wake mismatch`);
+      }
+    }
+    pass("binary-search computePollWakes matches O(P^2) reference (400 polls, 600 wakes)");
+  }
+
+  function testPollWakesNoWakes() {
+    const polls = [{ start: 0, end: 10 }, { start: 20, end: 30 }];
+    const out = computePollWakes(polls, []);
+    if (out.length !== 2 || out[0] !== null || out[1] !== null)
+      fail("pollWakes: empty wakes should yield all-null");
+    pass("no wakes yields all-null result");
+  }
+
+  function testPollWakesMidPollBump() {
+    // Wake at t=5 lands inside poll[0] [0,10]; poll[1] starts at 20.
+    // effectiveWake for poll[1] must bump to poll[0].end (10), not 5.
+    const polls = [{ start: 0, end: 10 }, { start: 20, end: 30 }];
+    const wakes = [{ timestamp: 5, wakerTaskId: 99 }];
+    const out = computePollWakes(polls, wakes);
+    // poll[0]: wake at 5 <= start 0? no — rightmost wake <= 0 is none → null.
+    if (out[0] !== null) fail("pollWakes: poll[0] should have no qualifying wake");
+    if (!out[1] || out[1].effectiveWake !== 10)
+      fail(`pollWakes: poll[1] effectiveWake should bump to 10, got ${out[1] && out[1].effectiveWake}`);
+    pass("wake landing mid-earlier-poll bumps effectiveWake to that poll's end");
+  }
+
+  function testPollWakesSharedBoundary() {
+    // A wake landing on a shared poll boundary (poll0.end == poll1.start == t)
+    // is contained by BOTH adjacent polls. The original O(P^2) loop took the
+    // FIRST (lowest-index) match, so effectiveWake = poll0.end == t (no bump).
+    // The binary search finds the rightmost poll with start <= t (poll1), so it
+    // must walk left to poll0 to stay faithful. Without that walk it would
+    // wrongly report poll1.end.
+    const polls = [{ start: 0, end: 10 }, { start: 10, end: 20 }, { start: 30, end: 40 }];
+    const wakes = [{ timestamp: 10, wakerTaskId: 7 }];
+    const out = computePollWakes(polls, wakes);
+    if (!out[2] || out[2].effectiveWake !== 10)
+      fail(`pollWakes: shared-boundary effectiveWake should be 10 (first match), got ${out[2] && out[2].effectiveWake}`);
+
+    // Zero-width poll chain all touching t=10: lowest-index match is poll0.
+    const chain = [{ start: 0, end: 10 }, { start: 10, end: 10 }, { start: 10, end: 20 }, { start: 30, end: 40 }];
+    const cout = computePollWakes(chain, wakes);
+    if (!cout[3] || cout[3].effectiveWake !== 10)
+      fail(`pollWakes: boundary-chain effectiveWake should be 10, got ${cout[3] && cout[3].effectiveWake}`);
+    pass("wake on a shared poll boundary matches first-match (lowest-index) semantics");
+  }
+
+  console.log("\npixelDownsampleSpans:");
+  const _dur = (s) => s.end - s.start;
+  function ffvByStart(spans, vs) {
+    let lo = 0, hi = spans.length - 1;
+    while (lo <= hi) { const m = (lo + hi) >> 1; if (spans[m].end < vs) lo = m + 1; else hi = m - 1; }
+    return lo;
+  }
+  testDownsampleBoundsOutputByPixels();
+  testDownsampleKeepsLongestPerColumn();
+  testDownsamplePassThroughWhenSparse();
+  testDownsampleStartIdxAndBreak();
+  testDownsampleEmpty();
+
+  function testDownsampleBoundsOutputByPixels() {
+    // 100k spans over a 200px lane → at most 200 representatives.
+    const spans = [];
+    for (let i = 0; i < 100000; i++) spans.push({ start: i, end: i + 1 });
+    const reps = pixelDownsampleSpans(spans, 0, 0, 100000, 200, _dur);
+    if (reps.length > 200) fail(`downsample: expected ≤200 reps, got ${reps.length}`);
+    if (reps.length < 1) fail("downsample: expected some reps");
+    pass(`100k spans over 200px → ${reps.length} reps (≤200)`);
+  }
+
+  function testDownsampleKeepsLongestPerColumn() {
+    // Three spans in the same pixel column; the longest must be the rep.
+    // viewDur=1000 over pw=10 → 100ns per pixel. All three start in [0,100).
+    const spans = [
+      { start: 0,  end: 5,  id: "a" },
+      { start: 10, end: 90, id: "b" }, // longest
+      { start: 20, end: 25, id: "c" },
+    ];
+    const reps = pixelDownsampleSpans(spans, 0, 0, 1000, 10, _dur);
+    if (reps.length !== 1) fail(`downsample: expected 1 rep in column, got ${reps.length}`);
+    if (reps[0].id !== "b") fail(`downsample: expected longest 'b', got '${reps[0].id}'`);
+    pass("longest span wins its pixel column");
+  }
+
+  function testDownsamplePassThroughWhenSparse() {
+    // Spans already spread > 1px apart: all survive, order preserved.
+    const spans = [
+      { start: 0,   end: 10 },
+      { start: 500, end: 510 },
+      { start: 999, end: 1000 },
+    ];
+    const reps = pixelDownsampleSpans(spans, 0, 0, 1000, 1000, _dur);
+    if (reps.length !== 3) fail(`downsample: expected 3 reps when sparse, got ${reps.length}`);
+    if (reps[0].start !== 0 || reps[2].start !== 999) fail("downsample: order/identity not preserved");
+    pass("sparse spans pass through unchanged");
+  }
+
+  function testDownsampleStartIdxAndBreak() {
+    // startIdx skips earlier spans; iteration breaks past viewEnd.
+    const spans = [];
+    for (let i = 0; i < 1000; i++) spans.push({ start: i * 10, end: i * 10 + 5 });
+    // view [2000, 3000]; binary-search start, downsample over wide pw so no merging.
+    const startIdx = ffvByStart(spans, 2000);
+    const reps = pixelDownsampleSpans(spans, startIdx, 2000, 3000, 100000, _dur);
+    for (const r of reps) {
+      if (r.start > 3000) fail(`downsample: rep past viewEnd (${r.start})`);
+      if (r.end < 2000) fail(`downsample: rep before viewStart (${r.end})`);
+    }
+    if (reps.length < 1) fail("downsample: expected reps in window");
+    pass("respects startIdx and breaks past viewEnd");
+  }
+
+  function testDownsampleEmpty() {
+    if (pixelDownsampleSpans([], 0, 0, 1000, 100, _dur).length !== 0) fail("downsample: empty in → empty out");
+    if (pixelDownsampleSpans([{start:0,end:1}], 0, 0, 0, 100, _dur).length !== 0) fail("downsample: zero viewDur → empty");
+    if (pixelDownsampleSpans([{start:0,end:1}], 0, 0, 1000, 0, _dur).length !== 0) fail("downsample: zero pw → empty");
+    pass("empty / degenerate inputs yield no reps");
+  }
+
+  console.log("\npixelCoverage:");
+  testCoverageFullColumn();
+  testCoverageHalf();
+  testCoverageSparseStaysSparse();
+  testCoverageSpanAcrossColumns();
+  testCoverageClampedToView();
+  testCoverageDegenerate();
+
+  function approx(a, b, eps) { return Math.abs(a - b) <= (eps || 1e-9); }
+
+  function testCoverageFullColumn() {
+    // One span exactly filling the whole view → every column ≈ 1.
+    const cov = pixelCoverage([{ start: 0, end: 100 }], 0, 0, 100, 10);
+    for (let i = 0; i < cov.length; i++)
+      if (!approx(cov[i], 1)) fail(`coverage: col ${i} expected ~1, got ${cov[i]}`);
+    pass("span filling the view → all columns fully covered");
+  }
+
+  function testCoverageHalf() {
+    // 100ns view over 10px = 10ns/px. A span covering [0,50) fills cols 0-4,
+    // leaves cols 5-9 empty.
+    const cov = pixelCoverage([{ start: 0, end: 50 }], 0, 0, 100, 10);
+    for (let i = 0; i < 5; i++) if (!approx(cov[i], 1)) fail(`coverage: col ${i} expected ~1, got ${cov[i]}`);
+    for (let i = 5; i < 10; i++) if (!approx(cov[i], 0)) fail(`coverage: col ${i} expected 0, got ${cov[i]}`);
+    pass("half-covered view → half the columns full, half empty");
+  }
+
+  function testCoverageSparseStaysSparse() {
+    // 10 tiny polls (1ns each) scattered across a 1000ns view at 10px.
+    // Each column is 100ns wide; total covered time per column ≪ 1 → faint,
+    // NOT solid. This is the misleading-solid-band case the helper fixes.
+    const polls = [];
+    for (let i = 0; i < 10; i++) polls.push({ start: i * 100, end: i * 100 + 1 });
+    const cov = pixelCoverage(polls, 0, 0, 1000, 10);
+    for (let i = 0; i < cov.length; i++) {
+      if (cov[i] > 0.05) fail(`coverage: sparse col ${i} should be faint, got ${cov[i]}`);
+      if (cov[i] <= 0) fail(`coverage: sparse col ${i} should be > 0 (one poll present)`);
+    }
+    pass("sparse polls produce faint (≪1) coverage, not a solid band");
+  }
+
+  function testCoverageSpanAcrossColumns() {
+    // Span [5,25) over 100ns/10px (10ns/col): col0 covered [5,10)=0.5,
+    // col1 fully [10,20)=1.0, col2 [20,25)=0.5.
+    const cov = pixelCoverage([{ start: 5, end: 25 }], 0, 0, 100, 10);
+    if (!approx(cov[0], 0.5)) fail(`coverage: col0 expected 0.5, got ${cov[0]}`);
+    if (!approx(cov[1], 1.0)) fail(`coverage: col1 expected 1.0, got ${cov[1]}`);
+    if (!approx(cov[2], 0.5)) fail(`coverage: col2 expected 0.5, got ${cov[2]}`);
+    for (let i = 3; i < 10; i++) if (!approx(cov[i], 0)) fail(`coverage: col ${i} expected 0`);
+    pass("span straddling columns splits coverage proportionally");
+  }
+
+  function testCoverageClampedToView() {
+    // Span extends beyond both edges; only the in-view portion counts and
+    // no value exceeds 1.
+    const cov = pixelCoverage([{ start: -1000, end: 1000 }], 0, 0, 100, 10);
+    for (let i = 0; i < cov.length; i++) {
+      if (cov[i] > 1) fail(`coverage: col ${i} exceeds 1 (${cov[i]})`);
+      if (!approx(cov[i], 1)) fail(`coverage: col ${i} expected ~1, got ${cov[i]}`);
+    }
+    pass("spans wider than the view clamp to ≤1 per column");
+  }
+
+  function testCoverageDegenerate() {
+    if (pixelCoverage([], 0, 0, 100, 10).some(v => v !== 0)) fail("coverage: empty → all zero");
+    if (pixelCoverage([{start:0,end:1}], 0, 0, 0, 10).length !== 0 &&
+        pixelCoverage([{start:0,end:1}], 0, 0, 0, 10).some(v => v !== 0)) fail("coverage: zero viewDur");
+    if (pixelCoverage([{start:0,end:1}], 0, 0, 100, 0).length !== 0) fail("coverage: zero pw → empty");
+    pass("degenerate inputs yield empty/zero coverage");
+  }
+
+  console.log("\nmakeBarCoalescer:");
+  testCoalescerMergesSubPixelRun();
+  testCoalescerBreaksOnColorChange();
+  testCoalescerBreaksOnGap();
+  testCoalescerMinWidth();
+  testCoalescerEmpty();
+  testCoalescerExtendsRunRightEdge();
+
+  function collectRuns(pushFn, minWidth) {
+    const runs = [];
+    const c = makeBarCoalescer((x, w, color) => runs.push({ x, w, color }), minWidth);
+    pushFn(c);
+    c.flush();
+    return runs;
+  }
+
+  function testCoalescerMergesSubPixelRun() {
+    // 50 same-color sub-pixel bars all landing in [10, 11) must collapse to
+    // a single fillRect, not 50 of them.
+    const runs = collectRuns((c) => {
+      for (let i = 0; i < 50; i++) c.push(10, 10.2, "#abc");
+    });
+    if (runs.length !== 1) fail(`coalescer: expected 1 run, got ${runs.length}`);
+    if (runs[0].color !== "#abc") fail("coalescer: wrong color");
+    pass("sub-pixel same-color burst collapses to one rect");
+  }
+
+  function testCoalescerBreaksOnColorChange() {
+    const runs = collectRuns((c) => {
+      c.push(0, 5, "#aaa");
+      c.push(5, 10, "#bbb");
+      c.push(10, 15, "#aaa");
+    });
+    if (runs.length !== 3) fail(`coalescer: expected 3 runs on color change, got ${runs.length}`);
+    if (runs.map(r => r.color).join() !== "#aaa,#bbb,#aaa")
+      fail("coalescer: colors out of order");
+    pass("adjacent bars of different colors stay separate");
+  }
+
+  function testCoalescerBreaksOnGap() {
+    // Same color but a >1px gap between them must NOT merge.
+    const runs = collectRuns((c) => {
+      c.push(0, 5, "#aaa");
+      c.push(20, 25, "#aaa");
+    });
+    if (runs.length !== 2) fail(`coalescer: expected 2 runs across gap, got ${runs.length}`);
+    pass("same-color bars separated by a gap stay separate");
+  }
+
+  function testCoalescerMinWidth() {
+    const runs = collectRuns((c) => c.push(10, 10, "#aaa")); // zero-width bar
+    if (runs.length !== 1) fail("coalescer: expected 1 run");
+    if (runs[0].w !== 1) fail(`coalescer: expected min width 1, got ${runs[0].w}`);
+    const wide = collectRuns((c) => c.push(10, 10, "#aaa"), 3);
+    if (wide[0].w !== 3) fail(`coalescer: expected min width 3, got ${wide[0].w}`);
+    pass("min width enforced for sub-pixel runs");
+  }
+
+  function testCoalescerEmpty() {
+    const runs = collectRuns(() => {});
+    if (runs.length !== 0) fail(`coalescer: expected 0 runs, got ${runs.length}`);
+    pass("no pushes emits nothing");
+  }
+
+  function testCoalescerExtendsRunRightEdge() {
+    // Overlapping/adjacent same-color bars extend the run; the emitted rect
+    // spans the union [0, 30).
+    const runs = collectRuns((c) => {
+      c.push(0, 10, "#aaa");
+      c.push(8, 20, "#aaa");
+      c.push(20, 30, "#aaa");
+    });
+    if (runs.length !== 1) fail(`coalescer: expected 1 merged run, got ${runs.length}`);
+    if (runs[0].x !== 0 || runs[0].w !== 30)
+      fail(`coalescer: expected x=0 w=30, got x=${runs[0].x} w=${runs[0].w}`);
+    pass("contiguous same-color bars merge to their union");
+  }
 
   console.log("\nanalyzeAllocations:");
   testAnalyzeAllocationsEmpty();

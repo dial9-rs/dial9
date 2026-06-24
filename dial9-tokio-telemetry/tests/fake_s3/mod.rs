@@ -2,6 +2,10 @@
 //!
 //! Provides in-process S3 clients backed by `s3s-fs` with optional
 //! region enforcement, flaky injection, and hanging behavior.
+//!
+//! Each integration test binary compiles this module independently and uses
+//! only the helpers it needs, so unused-helper warnings are expected here.
+#![allow(dead_code)]
 
 /// Create an `aws_sdk_s3::Client` backed by s3s-fs (in-memory fake S3).
 pub fn fake_s3_client(fs_root: &std::path::Path) -> aws_sdk_s3::Client {
@@ -417,4 +421,60 @@ pub fn fake_s3_client_always_failing(fs_root: &std::path::Path) -> aws_sdk_s3::C
         .build();
 
     aws_sdk_s3::Client::from_conf(s3_config)
+}
+
+/// Block until the worker has uploaded at least one captured segment to S3 (any
+/// key under `traces/` other than the `traces/dumps/` manifest), driving more
+/// workload each iteration so segments keep sealing. Uploaded objects persist,
+/// so this is race-free; polling the trace dir is not, because the local
+/// segment file is deleted immediately after a successful upload (the worker is
+/// actively consuming while a dump window is open). Panics on timeout.
+pub fn wait_for_uploaded_segment(
+    runtime: &tokio::runtime::Runtime,
+    client: &aws_sdk_s3::Client,
+    bucket: &str,
+) {
+    use std::time::{Duration, Instant};
+
+    let poll_rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        // Keep producing trace data so segments keep sealing into the ring.
+        runtime.block_on(async {
+            let mut handles = Vec::new();
+            for _ in 0..200 {
+                handles.push(tokio::spawn(async { tokio::task::yield_now().await }));
+            }
+            for h in handles {
+                let _ = h.await;
+            }
+        });
+        let found = poll_rt.block_on(async {
+            client
+                .list_objects_v2()
+                .bucket(bucket)
+                .prefix("traces/")
+                .send()
+                .await
+                .map(|r| {
+                    r.contents
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter_map(|o| o.key)
+                        .any(|k| !k.starts_with("traces/dumps/"))
+                })
+                .unwrap_or(false)
+        });
+        if found {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no segment uploaded within 30s; dump did not capture mid-window"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }

@@ -43,7 +43,7 @@ pub struct PipelineCustom;
 pub(super) enum PipelineConfig {
     Unset,
     #[cfg(feature = "worker-s3")]
-    S3(crate::background_task::S3PipelineUploader),
+    S3(Box<crate::background_task::S3PipelineUploader>),
     Custom(Vec<Box<dyn crate::background_task::SegmentProcessor>>),
 }
 
@@ -70,6 +70,11 @@ pub struct TracedRuntimeBuilder<P = NoTracePath, M = PipelineUnset, Mode: Writer
     pub(super) segment_metadata: Vec<(String, String)>,
     pub(super) worker_poll_interval: Option<Duration>,
     pub(super) worker_metrics_sink: Option<metrique_writer::BoxEntrySink>,
+    pub(super) trigger_rx: Option<crate::dump::DumpRx>,
+    /// Sending half of the trigger channel minted by [`with_dump_trigger`]. Stashed
+    /// into [`SharedState`] at build time so it is reachable via
+    /// [`Dial9Handle::dump_trigger`](crate::telemetry::Dial9Handle::dump_trigger).
+    pub(super) dump_trigger: Option<crate::dump::DumpTrigger>,
 
     pub(super) tokio_hooks: super::TokioHooks,
     pub(super) _marker: std::marker::PhantomData<(P, M, Mode)>,
@@ -246,6 +251,40 @@ impl<P, M, Mode: WriterMode> TracedRuntimeBuilder<P, M, Mode> {
         self
     }
 
+    /// Flip the background worker into on-demand operation.
+    ///
+    /// Sealed segments keep accumulating in the ring (memory or disk), but
+    /// the configured pipeline only runs when a dump is requested. Retrieve
+    /// the [`DumpTrigger`](crate::dump::DumpTrigger) from any thread owned by
+    /// this runtime via
+    /// [`Dial9Handle::dump_trigger`](crate::telemetry::Dial9Handle::dump_trigger);
+    /// no need to thread it through your own state. Orthogonal to pipeline
+    /// selection: whichever pipeline you would have wired for continuous mode,
+    /// you keep. Without this call the worker processes segments continuously,
+    /// as today.
+    ///
+    /// Pass `|_| {}` for the default, or configure coalescing with
+    /// [`DumpTriggerConfig::debounce`](crate::dump::DumpTriggerConfig::debounce), e.g.
+    /// `with_dump_trigger(|t| t.debounce(window))`.
+    ///
+    /// If no pipeline is configured the worker never spawns and every dump
+    /// request resolves with
+    /// [`DumpError::WorkerStopped`](crate::dump::DumpError::WorkerStopped).
+    pub fn with_dump_trigger<F>(mut self, configure: F) -> Self
+    where
+        F: FnOnce(&mut crate::dump::DumpTriggerConfig),
+    {
+        let mut config = crate::dump::DumpTriggerConfig::new();
+        configure(&mut config);
+        let (mut trigger, rx) = crate::dump::channel();
+        if let Some(window) = config.debounce_window() {
+            trigger = trigger.with_debounce(window);
+        }
+        self.trigger_rx = Some(rx);
+        self.dump_trigger = Some(trigger);
+        self
+    }
+
     /// Configure user-provided callbacks to run alongside dial9's internal
     /// Tokio runtime hooks. dial9's logic always runs first, then the user
     /// callbacks fire in registration order.
@@ -340,6 +379,8 @@ impl<P, M, Mode: WriterMode> TracedRuntimeBuilder<P, M, Mode> {
             segment_metadata: self.segment_metadata,
             worker_poll_interval: self.worker_poll_interval,
             worker_metrics_sink: self.worker_metrics_sink,
+            trigger_rx: self.trigger_rx,
+            dump_trigger: self.dump_trigger,
             tokio_hooks: self.tokio_hooks,
             _marker: std::marker::PhantomData,
         }
@@ -370,8 +411,8 @@ impl<P> TracedRuntimeBuilder<P, PipelineUnset> {
             .as_metadata()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
-        self.pipeline = PipelineConfig::S3(crate::background_task::S3PipelineUploader::new(
-            config, None,
+        self.pipeline = PipelineConfig::S3(Box::new(
+            crate::background_task::S3PipelineUploader::new(config, None),
         ));
         self.into_state()
     }
@@ -447,8 +488,8 @@ impl<P, Mode: WriterMode> TracedRuntimeBuilder<P, PipelineS3, Mode> {
             PipelineConfig::S3(uploader) => uploader.take_client(),
             _ => None,
         };
-        self.pipeline = PipelineConfig::S3(crate::background_task::S3PipelineUploader::new(
-            config, carried,
+        self.pipeline = PipelineConfig::S3(Box::new(
+            crate::background_task::S3PipelineUploader::new(config, carried),
         ));
         self
     }
@@ -515,6 +556,7 @@ impl<M, Mode: WriterMode> TracedRuntimeBuilder<HasTracePath, M, Mode> {
         }
 
         let custom_event_sources = self.custom_event_sources;
+        let dump_trigger = self.dump_trigger;
 
         let processors = assemble_processors(
             #[cfg(feature = "cpu-profiling")]
@@ -536,6 +578,7 @@ impl<M, Mode: WriterMode> TracedRuntimeBuilder<HasTracePath, M, Mode> {
         let core_builder = core_builder
             .maybe_worker_poll_interval(self.worker_poll_interval)
             .maybe_worker_metrics_sink(self.worker_metrics_sink)
+            .maybe_trigger(self.trigger_rx)
             .processors(processors)
             .segment_metadata(self.segment_metadata);
 
@@ -549,6 +592,9 @@ impl<M, Mode: WriterMode> TracedRuntimeBuilder<HasTracePath, M, Mode> {
         if let Some(shared) = guard.shared() {
             for source in custom_event_sources {
                 shared.push_source(Box::new(source));
+            }
+            if let Some(trigger) = dump_trigger {
+                shared.set_dump_trigger(trigger);
             }
         }
 
@@ -736,7 +782,7 @@ pub(super) fn assemble_processors(
                 processors.push(Box::new(crate::background_task::SymbolizeProcessor::new()));
             }
             processors.push(Box::new(crate::background_task::GzipCompressor));
-            processors.push(Box::new(uploader));
+            processors.push(uploader);
         }
         PipelineConfig::Custom(user) => {
             processors.extend(user);
@@ -833,6 +879,10 @@ impl TelemetryCore {
         worker_poll_interval: Option<Duration>,
         /// Metrics sink for the flush/worker threads.
         worker_metrics_sink: Option<metrique_writer::BoxEntrySink>,
+        /// Trigger receiver flipping the background worker into on-demand
+        /// operation; see [`crate::dump`]. `None` keeps continuous mode.
+        #[builder(setters(vis = "pub(crate)"))]
+        trigger: Option<crate::dump::DumpRx>,
     ) -> std::io::Result<TelemetryGuard> {
         let start_mono_ns = crate::telemetry::events::clock_monotonic_ns();
         let rng_seed = task_dump_config.as_ref().and_then(|cfg| cfg.rng_seed());
@@ -862,9 +912,9 @@ impl TelemetryCore {
                         .map(|(k, v)| (k.to_string(), v.to_string()))
                         .collect();
                 }
-                PipelineConfig::S3(crate::background_task::S3PipelineUploader::new(
+                PipelineConfig::S3(Box::new(crate::background_task::S3PipelineUploader::new(
                     config, s3_client,
-                ))
+                )))
             } else {
                 PipelineConfig::Unset
             }
@@ -977,12 +1027,14 @@ impl TelemetryCore {
                     .poll_interval(poll_interval)
                     .processors(processors)
                     .metrics_sink(metrics_sink)
+                    .maybe_trigger(trigger)
                     .build()
             } else {
                 crate::background_task::BackgroundTaskConfig::builder()
                     .poll_interval(poll_interval)
                     .processors(processors)
                     .metrics_sink(metrics_sink)
+                    .maybe_trigger(trigger)
                     .build()
             };
             Some((config, fs))
@@ -1100,6 +1152,8 @@ impl TracedRuntime {
             segment_metadata: Vec::new(),
             worker_poll_interval: None,
             worker_metrics_sink: None,
+            trigger_rx: None,
+            dump_trigger: None,
             tokio_hooks: super::TokioHooks::default(),
             _marker: std::marker::PhantomData,
         }

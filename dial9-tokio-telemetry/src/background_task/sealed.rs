@@ -97,7 +97,19 @@ pub(crate) fn creation_epoch_secs(data: &[u8], path: &Path) -> (u64, bool) {
             });
         }
     }
-    let secs = fs::metadata(path)
+    (mtime_or_now_secs(path), false)
+}
+
+/// Best-effort seal epoch for a disk segment: the file's mtime (the last
+/// write before seal), falling back to now. Together with
+/// [`creation_epoch_secs`] it gives the span the triggered worker matches
+/// against dump windows.
+pub(crate) fn seal_epoch_secs(path: &Path) -> u64 {
+    mtime_or_now_secs(path)
+}
+
+fn mtime_or_now_secs(path: &Path) -> u64 {
+    fs::metadata(path)
         .and_then(|m| m.modified())
         .ok()
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
@@ -107,8 +119,7 @@ pub(crate) fn creation_epoch_secs(data: &[u8], path: &Path) -> (u64, bool) {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs()
-        });
-    (secs, false)
+        })
 }
 
 /// Legacy epoch-vs-monotonic discriminator for ambiguous
