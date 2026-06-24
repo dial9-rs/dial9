@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0-alpha.2](https://github.com/dial9-rs/dial9/compare/dial9-tokio-telemetry-v0.4.0-alpha.1...dial9-tokio-telemetry-v0.4.0-alpha.2) - 2026-06-24
+
+### Added
+
+- dial9::main now enables graceful_shutdown ([#527](https://github.com/dial9-rs/dial9/pull/527))
+- *(config)* [**breaking**] in-memory support for dial9 main macro ([#490](https://github.com/dial9-rs/dial9/pull/490))
+- [**breaking**] replace `TelemetryEvent` and Rust decode side with new serde-based approach ([#485](https://github.com/dial9-rs/dial9/pull/485))
+- *(viewer)* Make custom events clickable to inspect ([#552](https://github.com/dial9-rs/dial9/pull/552))
+- socket accept queues source ([#506](https://github.com/dial9-rs/dial9/pull/506))
+- add dial9-s3-analysis agent skill ([#491](https://github.com/dial9-rs/dial9/pull/491))
+
+### Fixed
+
+- *(viewer)* scope enclosing spans to event's worker ([#559](https://github.com/dial9-rs/dial9/pull/559))
+- *(analysis)* O(P²) sched-delay scan + idle-vs-blocking off-CPU split ([#508](https://github.com/dial9-rs/dial9/pull/508))
+- merge CPU sample groups by full stack, not just leaf frame ([#484](https://github.com/dial9-rs/dial9/pull/484))
+
+### Other
+
+- [**breaking**] collapse handles into Dial9Handle / Dial9TokioHandle ([#535](https://github.com/dial9-rs/dial9/pull/535))
+- *(config)* Remove legacy positional config ([#538](https://github.com/dial9-rs/dial9/pull/538))
+- Support conventional unit suffixes for viewer ([#516](https://github.com/dial9-rs/dial9/pull/516))
+- Cache the symbolizer across segments ([#462](https://github.com/dial9-rs/dial9/pull/462)) ([#465](https://github.com/dial9-rs/dial9/pull/465))
+- Add dial9-html-report skill: agent-authored HTML trace reports ([#488](https://github.com/dial9-rs/dial9/pull/488))
+- Improve Wire ID Resolution ([#487](https://github.com/dial9-rs/dial9/pull/487))
+- *(tracing-layer)* [**breaking**] rename Dial9TokioLayer to Dial9TracingLayer ([#563](https://github.com/dial9-rs/dial9/pull/563))
+- Add POST route to upload then serve a trace ([#553](https://github.com/dial9-rs/dial9/pull/553))
+- Add support for bring-your-own-credentials ([#556](https://github.com/dial9-rs/dial9/pull/556))
+- detect buckets with no prefix (date partitions at root) ([#526](https://github.com/dial9-rs/dial9/pull/526))
+- Make trace= viewer param repeatable, ungzipping each component ([#546](https://github.com/dial9-rs/dial9/pull/546))
+- Per-process boot_id namespace isolation for shared trace directories ([#534](https://github.com/dial9-rs/dial9/pull/534))
+- improve s3 browser ([#528](https://github.com/dial9-rs/dial9/pull/528))
+- drop thread_roles from FlushContext / Source ([#539](https://github.com/dial9-rs/dial9/pull/539))
+- Allow for out-of-order tasks and add trace integrity stress test ([#524](https://github.com/dial9-rs/dial9/pull/524))
+- Improve dial9 skills for diagnosing long polls ([#517](https://github.com/dial9-rs/dial9/pull/517))
+- Simplify path handling in dial9-viewer build script ([#518](https://github.com/dial9-rs/dial9/pull/518))
+- build.rs: Generate relative skill includes ([#515](https://github.com/dial9-rs/dial9/pull/515))
+- analysis improvements ([#497](https://github.com/dial9-rs/dial9/pull/497))
+
 ### Added
 
 - In-memory writer (`InMemoryWriter`): run the trace pipeline with no filesystem dependency, encoded segments are held in process memory and shipped by the existing processor pipeline ([#435](https://github.com/dial9-rs/dial9/pull/435))
