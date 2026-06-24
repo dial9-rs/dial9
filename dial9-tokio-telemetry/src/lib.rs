@@ -10,6 +10,8 @@
 
 /// Background worker pipeline for processing sealed trace segments.
 pub mod background_task;
+/// On-trigger pipeline runs: dump triggers, receipts, and ids.
+pub mod dump;
 #[cfg(feature = "memory-profiling")]
 pub mod memory_profiling;
 pub(crate) mod metrics;

@@ -84,7 +84,7 @@ async function main() {
     try {
       const fromFile = await first(demoPath);
       const fromDir = await first(dir);
-      const keys = ["magic", "events", "cpuSamples", "taskSpawnTimes", "callframeSymbols", "customEvents"];
+      const keys = ["magic", "events", "cpuSamples", "taskSpawnTimes", "callframeSymbols", "customEvents", "segmentMetadata"];
       for (const k of keys) {
         assert(k in fromFile && k in fromDir, `unified: both have '${k}'`);
       }
@@ -109,6 +109,7 @@ async function main() {
       assert(warm.length === 2, "cache hit: 2 traces");
       assert(warm[0].events.length > 0, "cache hit: has events");
       assert(warm[0].taskSpawnTimes instanceof Map, "cache hit: Maps reconstructed");
+      assert(warm[0].segmentMetadata instanceof Map, "cache hit: segmentMetadata is Map");
     } finally {
       cleanup(dir);
     }

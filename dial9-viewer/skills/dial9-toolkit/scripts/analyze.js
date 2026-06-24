@@ -931,6 +931,7 @@ async function parseWorkerMain(traceFile, cachePath) {
     callframeSymbols: mapToEntries(trace.callframeSymbols),
     threadNames: mapToEntries(trace.threadNames),
     runtimeWorkers: mapToEntries(trace.runtimeWorkers),
+    segmentMetadata: mapToEntries(trace.segmentMetadata),
     taskDumps: mapToEntries(trace.taskDumps),
     clockSyncAnchors: trace.clockSyncAnchors, clockOffsetNs: trace.clockOffsetNs,
     blockInPlaceGaps: trace.blockInPlaceGaps || [],
@@ -963,7 +964,7 @@ function loadCacheFile(cachePath) {
     const rec = JSON.parse(line);
     switch (rec.t) {
       case 'm': raw = rec.d;
-        for (const k of ['spawnLocations','taskSpawnLocs','taskSpawnTimes','taskTerminateTimes','callframeSymbols','threadNames','runtimeWorkers','taskDumps'])
+        for (const k of ['spawnLocations','taskSpawnLocs','taskSpawnTimes','taskTerminateTimes','callframeSymbols','threadNames','runtimeWorkers','segmentMetadata','taskDumps'])
           if (raw[k]) raw[k] = new Map(raw[k]);
         break;
       case 'e': events.push(rec.d); break;
@@ -974,6 +975,7 @@ function loadCacheFile(cachePath) {
     }
   }
   raw.events = events; raw.cpuSamples = cpuSamples; raw.customEvents = customEvents;
+  if (!raw.segmentMetadata) raw.segmentMetadata = new Map();
   raw.allocEvents = allocEvents; raw.freeEvents = freeEvents;
   return raw;
 }
