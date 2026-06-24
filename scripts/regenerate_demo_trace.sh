@@ -73,7 +73,9 @@ if command -v node >/dev/null 2>&1; then
     PROPS_TMP="$(mktemp)"
     node "$PROPS_SCRIPT" "$DEMO_DEST" > "$PROPS_TMP"
     # by_source["1"] is the SchedEvent count; >0 means a real perf capture.
-    SCHED_COUNT="$(node -e 'const p=require(process.argv[1]); process.stdout.write(String((p.by_source&&p.by_source["1"])||0))' "$PROPS_TMP")"
+    # Read the temp file via fs.readFileSync (NOT require) — the mktemp path has
+    # no .json suffix, so require() would parse it as CommonJS and choke on JSON.
+    SCHED_COUNT="$(node -e 'const fs=require("fs"); const p=JSON.parse(fs.readFileSync(process.argv[1],"utf8")); process.stdout.write(String((p.by_source&&p.by_source["1"])||0))' "$PROPS_TMP")"
     if [ "$SCHED_COUNT" -gt 0 ]; then
         mv "$PROPS_TMP" "$PROPS_DEST"
         echo "✓ Property fixture regenerated ($SCHED_COUNT sched samples): $PROPS_DEST"
