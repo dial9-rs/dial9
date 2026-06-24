@@ -444,6 +444,118 @@ async fn trace_handles_uncompressed_data() {
     check!(body.as_ref() == data);
 }
 
+// --- /api/object (raw single-object passthrough) tests ---
+
+/// The defining property of /api/object: it serves a `.bin.gz` object's bytes
+/// VERBATIM, still gzipped — it must NOT decompress (that's the browser's job
+/// via fetchTraces). Contrast with /api/trace, which gunzips server-side.
+#[tokio::test]
+async fn object_serves_raw_gzipped_bytes() {
+    let (s3, base, _dir) = setup_s3_test("obj-bucket", Some("obj-bucket".into()), None).await;
+    let client = reqwest::Client::new();
+
+    let plaintext = b"DECOMPRESSED_TRACE_BODY";
+    let gzipped = gzip_bytes(plaintext);
+    put_object(&s3, "obj-bucket", "seg.bin.gz", &gzipped).await;
+
+    let resp = client
+        .get(format!("{base}/api/object?key=seg.bin.gz"))
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() == 200);
+    let body = resp.bytes().await.unwrap();
+    // Bytes are the raw gzip stream, NOT the decompressed plaintext.
+    check!(body.as_ref() == gzipped.as_slice());
+    check!(body.as_ref() != plaintext.as_slice());
+    // Sanity: a gzip stream starts with the 0x1f 0x8b magic.
+    check!(body.len() >= 2 && body[0] == 0x1f && body[1] == 0x8b);
+}
+
+/// An uncompressed object is returned verbatim too.
+#[tokio::test]
+async fn object_serves_uncompressed_bytes() {
+    let (s3, base, _dir) = setup_s3_test("obj-bucket", Some("obj-bucket".into()), None).await;
+    let client = reqwest::Client::new();
+
+    let data = b"raw uncompressed object";
+    put_object(&s3, "obj-bucket", "raw.bin", data).await;
+
+    let resp = client
+        .get(format!("{base}/api/object?key=raw.bin"))
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() == 200);
+    let body = resp.bytes().await.unwrap();
+    check!(body.as_ref() == data);
+}
+
+/// A large object must stream back byte-for-byte intact. Because the handler
+/// now uses `Body::from_stream` instead of buffering, this exercises the
+/// multi-chunk path: the s3s fake delivers the body in several `ByteStream`
+/// chunks and they must reassemble exactly. Kept to a few MB so it stays cheap.
+#[tokio::test]
+async fn object_streams_large_object_intact() {
+    let (s3, base, _dir) = setup_s3_test("obj-bucket", Some("obj-bucket".into()), None).await;
+    let client = reqwest::Client::new();
+
+    // 4MB of non-trivial bytes so a single read can't accidentally satisfy it.
+    let big: Vec<u8> = (0..4 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
+    put_object(&s3, "obj-bucket", "big.bin", &big).await;
+
+    let resp = client
+        .get(format!("{base}/api/object?key=big.bin"))
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() == 200);
+    let body = resp.bytes().await.unwrap();
+    check!(body.len() == big.len());
+    check!(body.as_ref() == big.as_slice());
+}
+
+#[tokio::test]
+async fn object_requires_key() {
+    let state = AppState::new(Arc::new(FakeBackend), Some("test-bucket".into()), None);
+    let base = start_server(state).await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .get(format!("{base}/api/object?key=&bucket=test-bucket"))
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() == 400);
+}
+
+/// BYO credentials: /api/object must be served by the header-supplied ephemeral
+/// backend (the s3s fake), not the erroring default backend.
+#[tokio::test]
+async fn byo_credentials_serve_object_from_headers() {
+    let (s3, base, _dir) = setup_byo_test("byo-bucket").await;
+    let client = reqwest::Client::new();
+
+    let data = b"BYO_OBJECT_BYTES";
+    let gzipped = gzip_bytes(data);
+    put_object(&s3, "byo-bucket", "seg.bin.gz", &gzipped).await;
+
+    let resp = client
+        .get(format!(
+            "{base}/api/object?key=seg.bin.gz&bucket=byo-bucket"
+        ))
+        .header(H_AKID, "test")
+        .header(H_SECRET, "test")
+        .header(H_REGION, "us-east-1")
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() == 200);
+    let body = resp.bytes().await.unwrap();
+    // Served raw (still gzipped) by the ephemeral backend.
+    check!(body.as_ref() == gzipped.as_slice());
+}
+
 /// Full end-to-end smoke test: simulates the browser flow.
 /// 1. Upload gzipped trace segments to fake S3
 /// 2. Search for them via /api/search
@@ -850,6 +962,55 @@ async fn local_trace_not_found() {
         .await
         .unwrap();
     check!(resp.status().as_u16() == 404);
+}
+
+/// /api/object on the local backend serves the file's raw (gzipped) bytes
+/// without decompressing.
+#[tokio::test]
+async fn local_object_serves_raw_bytes() {
+    let dir = setup_local_dir();
+    let base = start_server(local_state(dir.path())).await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .get(format!(
+            "{base}/api/object?key=2026-04-09/1910/svc/host/123-0.bin.gz"
+        ))
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() == 200);
+    let body = resp.bytes().await.unwrap();
+    // The on-disk file is gzip(b"trace seg 0"); served verbatim.
+    check!(body.as_ref() == gzip_bytes(b"trace seg 0").as_slice());
+}
+
+#[tokio::test]
+async fn local_object_not_found() {
+    let dir = setup_local_dir();
+    let base = start_server(local_state(dir.path())).await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .get(format!("{base}/api/object?key=nonexistent.bin"))
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() == 404);
+}
+
+#[tokio::test]
+async fn local_object_path_traversal_rejected() {
+    let dir = setup_local_dir();
+    let base = start_server(local_state(dir.path())).await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .get(format!("{base}/api/object?key=../../../etc/passwd"))
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() != 200);
 }
 
 #[tokio::test]

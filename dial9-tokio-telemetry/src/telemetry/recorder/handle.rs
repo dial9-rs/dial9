@@ -87,6 +87,19 @@ impl Dial9Handle {
         self.inner.as_ref().map(|i| &i.control_tx)
     }
 
+    /// On-demand dump trigger for this runtime's telemetry session.
+    ///
+    /// Returns `None` on a disabled handle (see [`disabled`](Self::disabled))
+    /// and when the runtime was built without
+    /// [`with_dump_trigger`](crate::telemetry::TracedRuntimeBuilder::with_dump_trigger).
+    /// The returned [`DumpTrigger`](crate::dump::DumpTrigger) is cheap to clone
+    /// and every clone shares the configured debounce gate.
+    pub fn dump_trigger(&self) -> Option<crate::dump::DumpTrigger> {
+        self.inner
+            .as_ref()
+            .and_then(|i| i.shared.dump_trigger().cloned())
+    }
+
     /// Return the [`Dial9Handle`] for the current thread.
     ///
     /// On threads owned by a dial9 runtime (workers and blocking

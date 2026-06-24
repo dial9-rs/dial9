@@ -21,7 +21,14 @@ use crate::primitives::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use crate::primitives::sync::{Arc, Mutex};
 use crate::rate_limit::rate_limited;
 
-use super::{ActiveHandle, RemoveReason, SegmentAccounting, TakenFiles, TakenSegment};
+use super::{ActiveHandle, EpochWindow, RemoveReason, SegmentAccounting, TakenFiles, TakenSegment};
+
+fn now_epoch_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
 
 /// Active in-memory write accumulator.
 pub(crate) struct MemActiveWriter {
@@ -44,6 +51,12 @@ struct MemSealedSegment {
     /// 0 for a fresh seal, incremented each time the worker re-enqueues
     /// after a retryable failure.
     retry_count: u32,
+    /// Creation epoch parsed from the segment header at seal time, used by
+    /// the triggered worker's windowed pop.
+    epoch_secs: u64,
+    /// Wall-clock epoch when the segment sealed; together with
+    /// `epoch_secs` it gives the span the windowed pop matches against.
+    seal_secs: u64,
 }
 
 /// Cap on retryable-failure re-enqueues for a memory segment.
@@ -123,6 +136,9 @@ impl MemFs {
         };
         let bytes = Bytes::from(writer.buf); // zero-copy Vec → Bytes
         let size = bytes.len() as u64;
+        let (epoch_secs, _) =
+            crate::background_task::sealed::creation_epoch_secs(&bytes, _active_path);
+        let seal_secs = now_epoch_secs();
         let ch = &self.channel;
 
         let (evicted, first_idx, last_idx) = {
@@ -145,6 +161,8 @@ impl MemFs {
                 index,
                 bytes,
                 retry_count: 0,
+                epoch_secs,
+                seal_secs,
             });
             q.bytes += size;
             (evicted, first, last)
@@ -167,9 +185,16 @@ impl MemFs {
 
     /// Re-enqueue `bytes` for re-dispense on the next `take_files` cycle.
     ///
-    /// `attempt` is the new retry count this segment carries.
+    /// `attempt` is the new retry count this segment carries; `epochs` is
+    /// the `(creation, seal)` pair the slot originally carried.
     /// Pushed to the front so a single failing segment cycles back ahead of fresh work.
-    pub(super) fn release_for_retry(&self, index: u32, bytes: Bytes, attempt: u32) {
+    pub(super) fn release_for_retry(
+        &self,
+        index: u32,
+        bytes: Bytes,
+        attempt: u32,
+        epochs: (u64, u64),
+    ) {
         let size = bytes.len() as u64;
         let ch = &self.channel;
         {
@@ -178,6 +203,8 @@ impl MemFs {
                 index,
                 bytes,
                 retry_count: attempt,
+                epoch_secs: epochs.0,
+                seal_secs: epochs.1,
             });
             q.bytes += size;
         }
@@ -189,6 +216,19 @@ impl MemFs {
     }
 
     pub(super) fn take_files(&self) -> TakenFiles {
+        self.take_files_inner(None)
+    }
+
+    /// Windowed pop for the triggered worker: the oldest slot whose
+    /// `[creation, seal]` span overlaps one of `windows`. Non-matching
+    /// slots stay in the ring (history is preserved for later dumps); still
+    /// at most one segment per call so the in-flight memory bound is
+    /// unchanged.
+    pub(super) fn take_files_matching(&self, windows: &[EpochWindow]) -> TakenFiles {
+        self.take_files_inner(Some(windows))
+    }
+
+    fn take_files_inner(&self, windows: Option<&[EpochWindow]>) -> TakenFiles {
         let ch = &self.channel;
 
         // Floor peak at current in-flight, this cycle's pop seeds the next.
@@ -201,7 +241,14 @@ impl MemFs {
         // the queue state we sampled.
         let (popped, queued_segments, queued_bytes, segments_dropped) = {
             let mut q = ch.queue.lock().unwrap();
-            let popped = q.segments.pop_front();
+            let popped = match windows {
+                None => q.segments.pop_front(),
+                Some(ws) => q
+                    .segments
+                    .iter()
+                    .position(|s| ws.iter().any(|w| w.overlaps(s.epoch_secs, s.seal_secs)))
+                    .and_then(|i| q.segments.remove(i)),
+            };
             if let Some(s) = &popped {
                 q.bytes -= s.bytes.len() as u64;
             }
@@ -242,6 +289,7 @@ impl MemFs {
             slot.bytes,
             accounting,
             slot.retry_count,
+            (slot.epoch_secs, slot.seal_secs),
         );
 
         TakenFiles {
@@ -274,6 +322,16 @@ impl MemFs {
 
     pub(super) fn writer_done(&self) -> bool {
         self.channel.writer_done.load(Ordering::Acquire)
+    }
+
+    /// Test-only: override the seal epoch of a queued slot so tests can
+    /// simulate segments sealed in the past.
+    #[cfg(test)]
+    pub(super) fn set_seal_secs_for_test(&self, index: u32, seal_secs: u64) {
+        let mut q = self.channel.queue.lock().unwrap();
+        for s in q.segments.iter_mut().filter(|s| s.index == index) {
+            s.seal_secs = seal_secs;
+        }
     }
 
     pub(super) fn mark_writer_done(&self) {

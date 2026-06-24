@@ -1472,24 +1472,34 @@
         return params;
     }
 
+    // Build one viewer `trace=` component per selected key, each pointing at
+    // /api/object (which serves that single file's raw, still-gzipped bytes).
+    // The viewer and flamegraph read all repeated `trace=` params, download
+    // them in parallel, and gunzip + concatenate client-side (see fetchTraces
+    // in trace_parser.js). This replaced a single /api/trace URL that forced
+    // the backend to fetch every file, gunzip them, and merge into one large
+    // uncompressed response — far more bytes over the wire and much slower.
+    function objectTraceUrls(bucket, keys) {
+        return keys.map(key => {
+            const p = new URLSearchParams();
+            p.set('bucket', bucket);
+            p.set('key', key);
+            return '/api/object?' + p.toString();
+        });
+    }
+
     // CPU Profiling button: open a flamegraph of the selected segments. The
     // flamegraph view builds from the trace's CpuSampleEvents (and resolves
     // symbols from SymbolTableEntry), ignoring all other event types, so we
-    // serve the full trace via /api/trace — no server-side event filtering is
-    // needed for a working flamegraph. The selection is already size-capped.
+    // serve each whole file — no server-side event filtering is needed for a
+    // working flamegraph. The selection is already size-capped.
     function viewCpuProfile() {
         if (!heatmapSelection || !heatmapSelection.keys.length) return;
         const bucket = bucketInput.value.trim();
         if (!bucket) { alert('Bucket is required'); return; }
         const keys = heatmapSelection.keys;
-        const params = new URLSearchParams();
-        params.set('bucket', bucket);
-        for (const key of keys) {
-            params.append('keys', key);
-        }
-        const traceUrl = '/api/trace?' + params.toString();
         const fgParams = traceTitleParams(keys);
-        fgParams.set('trace', traceUrl);
+        for (const url of objectTraceUrls(bucket, keys)) fgParams.append('trace', url);
         window.open('flamegraph.html?' + fgParams.toString(), '_blank');
     }
 
@@ -1630,12 +1640,11 @@
         if (keys.length === 0) return;
 
         const bucket = bucketInput.value.trim();
-        const keysParams = keys.map(k => `keys=${encodeURIComponent(k)}`).join('&');
-        const traceUrl = `/api/trace?bucket=${encodeURIComponent(bucket)}&${keysParams}`;
 
-        // Pass structured metadata for the viewer title.
+        // Pass structured metadata for the viewer title, plus one trace=
+        // component per file (downloaded in parallel + gunzipped client-side).
         const titleParams = traceTitleParams(keys);
-        titleParams.set('trace', traceUrl);
+        for (const url of objectTraceUrls(bucket, keys)) titleParams.append('trace', url);
 
         window.open(`viewer.html?${titleParams.toString()}`, '_blank');
     }

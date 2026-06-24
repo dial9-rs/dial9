@@ -1,16 +1,87 @@
 #![allow(dead_code)]
 use dial9_tokio_telemetry::background_task::{ProcessError, SegmentData, SegmentProcessor};
-use dial9_tokio_telemetry::telemetry::InMemoryWriter;
+use dial9_tokio_telemetry::telemetry::{DiskWriter, InMemoryWriter};
 use dial9_trace_format::decoder::Decoder;
 use serde::de::DeserializeOwned;
 use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 /// Total in-memory byte budget for capture tests. Large enough that a test's
 /// events fit without the ring dropping the oldest segment.
 pub const CAPTURE_BUFFER_SIZE: u64 = 16 * 1024 * 1024;
+
+/// Wall-clock cap for the seal/upload polling loops in dump tests.
+pub const SEAL_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
+/// Sleep between polls while waiting for a segment to seal.
+pub const SEAL_POLL_INTERVAL: Duration = Duration::from_millis(50);
+/// Trivial tasks spawned per workload burst; enough to seal a 64-byte segment.
+pub const WORKLOAD_BURST: usize = 200;
+
+/// A [`DiskWriter`] tuned to seal a segment within a few hundred ms under a tiny
+/// workload: the small size threshold seals by bytes almost immediately, and the
+/// short rotation period is a time-based backstop. The default 60s rotation +
+/// larger size threshold could leave a tiny workload's bytes in an unsealed
+/// active segment, capturing zero segments on slow CI.
+pub fn fast_sealing_writer(trace_path: &Path) -> DiskWriter {
+    DiskWriter::builder()
+        .base_path(trace_path)
+        .max_file_size(64)
+        .max_total_size(50 * 1024)
+        .rotation_period(Duration::from_millis(200))
+        .build()
+        .expect("fixed sizes are valid")
+}
+
+/// Spawn a burst of trivial tasks to generate trace events. Run repeatedly from
+/// a polling loop: one burst can fail to seal on a starved runner.
+pub fn drive_workload(runtime: &tokio::runtime::Runtime) {
+    runtime.block_on(async {
+        let mut handles = Vec::with_capacity(WORKLOAD_BURST);
+        for _ in 0..WORKLOAD_BURST {
+            handles.push(tokio::spawn(async { tokio::task::yield_now().await }));
+        }
+        for h in handles {
+            let _ = h.await;
+        }
+    });
+}
+
+/// Drive trace workload until the flush thread has sealed at least one segment
+/// (`trace.<n>.bin` on disk), so a look-back dump has something to capture.
+///
+/// Re-driving each iteration (rather than relying on a single prior burst) is
+/// what makes capture deterministic: a triggered worker parks until a dump is
+/// requested, so a confirmed-sealed segment persists in the ring and the
+/// subsequent `dump_current_data` is guaranteed to match it. Panics on timeout
+/// so a starved runner fails loudly instead of triggering against an empty ring.
+pub fn wait_for_sealed_segment(runtime: &tokio::runtime::Runtime, trace_dir: &Path) {
+    let deadline = Instant::now() + SEAL_WAIT_TIMEOUT;
+    loop {
+        // Keep producing trace data so segments keep sealing into the ring.
+        drive_workload(runtime);
+        let sealed = std::fs::read_dir(trace_dir)
+            .expect("read trace dir")
+            .filter_map(|e| e.ok())
+            .any(|e| {
+                let name = e.file_name();
+                let name = name.to_string_lossy();
+                // Sealed segments are `trace.<n>.bin`; the active file ends in
+                // `.bin.active` and the base `trace.bin` is never a segment.
+                name.ends_with(".bin") && !name.ends_with("trace.bin")
+            });
+        if sealed {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no segment sealed within {SEAL_WAIT_TIMEOUT:?}; cannot exercise look-back dump"
+        );
+        std::thread::sleep(SEAL_POLL_INTERVAL);
+    }
+}
 
 /// Fixed-size in-memory writer for tests that run a telemetry runtime but don't
 /// read the trace back.
