@@ -9,6 +9,9 @@
 //! You may need:
 //!   echo 2 | sudo tee /proc/sys/kernel/perf_event_paranoid
 
+// Example prints the deprecated `CpuSampleEvent::worker_id` for illustration.
+#![allow(deprecated)]
+
 use dial9_tokio_telemetry::telemetry::{
     DiskWriter, TracedRuntime,
     analysis_events::{CpuSampleSource, Dial9Event, WorkerId},
