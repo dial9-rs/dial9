@@ -616,6 +616,22 @@
   }
 
   /**
+   * Deterministic warm (red/orange) color for a frame, hashed from its name.
+   * Shared by the on-screen canvas (flamegraph.js) and the SVG export
+   * (flamegraph_export.js) so an exported graph matches what the user sees.
+   * @param {string} name frame name
+   * @returns {string} an `hsl(...)` color string
+   */
+  function flamegraphColor(name) {
+    let h = 0;
+    for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) | 0;
+    const hue = 10 + (Math.abs(h) % 40);
+    const sat = 60 + (Math.abs(h >> 8) % 30);
+    const lit = 40 + (Math.abs(h >> 16) % 15);
+    return `hsl(${hue},${sat}%,${lit}%)`;
+  }
+
+  /**
    * Build a flamegraph tree from CPU samples with reversed callchains.
    * @param {import('./trace_parser.js').CpuSample[]} samples
    * @param {Map} callframeSymbols
@@ -1174,6 +1190,7 @@
     buildActiveTaskTimeline,
     computeSchedulingDelays,
     filterPointsOfInterest,
+    flamegraphColor,
     buildFlamegraphTree,
     flattenFlamegraph,
     buildFgData,

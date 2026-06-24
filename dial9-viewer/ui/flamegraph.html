@@ -75,6 +75,7 @@
         <script src="trace_parser.js"></script>
         <script src="creds.js"></script>
         <script src="trace_analysis.js"></script>
+        <script src="flamegraph_export.js"></script>
         <script src="flamegraph.js"></script>
         <script>
             (async function () {
@@ -206,7 +207,7 @@
                 }
 
                 const fg = FlamegraphRenderer.createFlamegraph(containerEl, updateUrlZoom);
-                fg.setData(allSamples, trace.callframeSymbols);
+                fg.setData(allSamples, trace.callframeSymbols, { exportTitle: `Flamegraph — ${label}` });
 
                 // Restore zoom from URL (only if time range filter succeeded, otherwise tree differs)
                 if (timeRangeMatched) {

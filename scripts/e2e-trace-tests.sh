@@ -59,4 +59,7 @@ node dial9-viewer/ui/test_prefix_detection.js
 echo "--- Checking enclosing spans (per-worker) ---"
 node dial9-viewer/ui/test_enclosing_spans.js
 
+echo "--- Checking flamegraph export (folded + SVG) ---"
+node dial9-viewer/ui/test_flamegraph_export.js
+
 echo "All E2E trace checks passed."

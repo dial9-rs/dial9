@@ -915,6 +915,7 @@
         <script src="creds.js"></script>
         <script src="trace_analysis.js"></script>
         <script src="format.js"></script>
+        <script src="flamegraph_export.js"></script>
         <script src="flamegraph.js"></script>
         <script src="panel_layout.js"></script>
         <script>
@@ -5737,7 +5738,11 @@
                 if (wasHidden) widenSidebarForFlamegraph();
                 if (wasHidden && trace) requestAnimationFrame(renderAll);
                 requestAnimationFrame(() => {
-                    fgInstance.setData(samples, trace.callframeSymbols, fgOpts);
+                    // fgOpts may carry its own exportTitle/exportFormatValue (e.g. heap
+                    // views); fall back to the sidebar `title` only when it doesn't.
+                    const exportOpts = Object.assign({}, fgOpts);
+                    if (exportOpts.exportTitle == null) exportOpts.exportTitle = title;
+                    fgInstance.setData(samples, trace.callframeSymbols, exportOpts);
                     fgInstance.resize();
                 });
             }
@@ -5887,6 +5892,12 @@
                     return {
                         workerLabel: mode === "bytes" ? "Worker thread allocations (by bytes)" : "Worker thread allocations (by count)",
                         offworkerLabel: mode === "bytes" ? "Non-worker thread allocations (by bytes)" : "Non-worker thread allocations (by count)",
+                        exportTitle: `Heap flamegraph (${mode === "bytes" ? "by bytes" : "by count"})${durStr}`,
+                        // Heap weights are bytes (or alloc counts), not CPU samples, so
+                        // the exported SVG must label them the same way the canvas does.
+                        exportFormatValue: mode === "bytes"
+                            ? (count) => `~${fmtB(count)}`
+                            : (count) => `~${Math.round(count).toLocaleString()} allocs`,
                         formatCount(count, total, self, treeNode) {
                             const pct = ((count / total) * 100).toFixed(1);
                             if (mode === "bytes") {
@@ -6022,7 +6033,9 @@
 
                 // Give the container a frame to get its layout, then render
                 requestAnimationFrame(() => {
-                    fgInstance.setData(samples, trace.callframeSymbols);
+                    fgInstance.setData(samples, trace.callframeSymbols, {
+                        exportTitle: `CPU flamegraph — ${durMs}ms selected`,
+                    });
                     fgInstance.resize();
                 });
 
