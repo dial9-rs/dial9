@@ -86,6 +86,14 @@ impl SegmentMetadata {
     /// Merge incoming entries with existing ones. Incoming entries take priority
     /// on key conflict; existing entries with keys not in the incoming set are preserved.
     /// Returns `true` if the resulting entries differ from the previous state.
+    ///
+    /// The "unchanged -> no rewrite" detection (`merged == self.entries`) is a
+    /// positional `Vec` compare. A source re-emitting the same entries is only
+    /// deduped to a no-op if it emits them in a stable order across calls, so
+    /// every `Source::segment_metadata` MUST produce a deterministic order. A
+    /// nondeterministic iteration order (e.g. iterating a `HashMap`) would
+    /// reorder `merged`, fail this compare, and rewrite segment metadata on
+    /// every change-cycle.
     fn merge(&mut self, entries: impl Iterator<Item = (String, String)>) -> bool {
         let mut merged: Vec<(String, String)> = entries.collect();
         for (k, v) in &self.entries {
@@ -698,12 +706,16 @@ impl<M: WriterMode> SegmentWriter<M> {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) fn segment_metadata(&self) -> &[(String, String)] {
         &self.segment_metadata.entries
     }
 
     /// Merge the segment metadata entries written into the next rotated segment.
-    pub fn update_segment_metadata(&mut self, entries: Vec<(String, String)>) {
+    ///
+    /// Accepts any iterator so callers can drain a reused buffer (retaining its
+    /// capacity) instead of handing over an owned `Vec`. A `Vec` still works.
+    pub fn update_segment_metadata(&mut self, entries: impl IntoIterator<Item = (String, String)>) {
         if self.segment_metadata.merge(entries.into_iter()) {
             match &mut self.state {
                 WriterState::Active { need_metadata, .. } => *need_metadata = true,

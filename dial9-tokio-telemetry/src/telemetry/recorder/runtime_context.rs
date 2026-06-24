@@ -86,6 +86,10 @@ pub(crate) struct TokioRuntimesSource {
     contexts: RuntimeContextRegistry,
     last_sample: Instant,
     sample_interval: Duration,
+    /// Fingerprint of the metadata emitted on the last `segment_metadata` call,
+    /// used to skip the rebuild when nothing changed. See `segment_metadata` for
+    /// what it is and why it is sufficient. `0` means "nothing emitted yet".
+    last_fingerprint: usize,
 }
 
 impl TokioRuntimesSource {
@@ -94,6 +98,7 @@ impl TokioRuntimesSource {
             contexts,
             last_sample: time_source().instant(),
             sample_interval: Duration::from_millis(10),
+            last_fingerprint: 0,
         }
     }
 }
@@ -125,13 +130,32 @@ impl Source for TokioRuntimesSource {
         "tokio_runtimes"
     }
 
-    fn segment_metadata(&self) -> Vec<(String, String)> {
-        self.contexts
-            .lock()
-            .unwrap()
-            .iter()
-            .filter_map(|c| c.metadata_entry())
-            .collect()
+    fn segment_metadata(&mut self, out: &mut Vec<(String, String)>) -> bool {
+        // Self-detected change: there is no external signal to keep in sync, so
+        // a new caller that mutates runtime/worker metadata cannot forget to
+        // announce it. The fingerprint is the runtime count plus the total
+        // number of registered workers across all runtimes. Both only ever grow
+        // (runtimes and workers are added, never removed) and each worker's
+        // global id is fixed once assigned, so an unchanged fingerprint means
+        // unchanged metadata. Cheap — a few uncontended read locks and no
+        // allocation — so it runs every flush cycle.
+        let contexts = self.contexts.lock().unwrap();
+        let fingerprint = contexts.len()
+            + contexts
+                .iter()
+                .map(|c| c.worker_ids.read().unwrap().len())
+                .sum::<usize>();
+        if fingerprint == self.last_fingerprint {
+            return false;
+        }
+        self.last_fingerprint = fingerprint;
+        let before = out.len();
+        out.extend(contexts.iter().filter_map(|c| c.metadata_entry()));
+        // The writer's merge is additive, so emitting the full current snapshot
+        // on each change is correct. A fingerprint bump from an unnamed runtime
+        // gaining a worker appends nothing here (no entry to emit), so report
+        // whether anything was actually appended.
+        out.len() != before
     }
 }
 
@@ -198,6 +222,9 @@ impl RuntimeContext {
 }
 
 /// Record worker_index → global_id in the context's map (once per thread).
+///
+/// No need to announce the metadata change: `TokioRuntimesSource` detects the
+/// new worker from the worker count on its next flush.
 fn register_worker_if_needed(ctx: &RuntimeContext, local_index: usize, global_id: u64) {
     WORKER_REGISTERED.with(|cell| {
         if !cell.get() {
@@ -362,5 +389,50 @@ pub(super) fn make_worker_unpark(ctx: &RuntimeContext, shared: &SharedState) -> 
         cpu_time_ns: cpu_time_nanos,
         sched_wait_ns: sched_wait_delta_nanos,
         tid: crate::telemetry::events::current_tid(),
+    }
+}
+
+#[cfg(all(test, not(shuttle)))]
+mod tests {
+    use super::*;
+
+    /// Push a named runtime context with a single resolved worker into `contexts`.
+    fn push_named_runtime(contexts: &RuntimeContextRegistry, name: &str, worker_id: u64) {
+        let ctx = Arc::new(RuntimeContext::new(Some(name.to_string())));
+        ctx.worker_ids.write().unwrap().insert(0, worker_id);
+        contexts.lock().unwrap().push(ctx);
+    }
+
+    #[test]
+    fn segment_metadata_only_rebuilds_after_a_change() {
+        // The source detects change from the runtime / worker counts itself —
+        // there is no external signal for a caller to forget to bump.
+        let contexts: RuntimeContextRegistry = Arc::new(Mutex::new(Vec::new()));
+        let mut source = TokioRuntimesSource::new(contexts.clone());
+
+        // Empty registry: nothing to append, so it reports no change.
+        let mut out = Vec::new();
+        assert!(!source.segment_metadata(&mut out));
+        assert!(out.is_empty());
+
+        // Register a runtime: the count grows, so the source rebuilds.
+        push_named_runtime(&contexts, "main", 0);
+
+        out.clear();
+        assert!(source.segment_metadata(&mut out));
+        assert_eq!(out, vec![("runtime.main".to_string(), "0".to_string())]);
+
+        // No further change: the source must not rebuild or append.
+        out.clear();
+        assert!(!source.segment_metadata(&mut out));
+        assert!(out.is_empty());
+
+        // A second runtime grows the count again and is picked up.
+        push_named_runtime(&contexts, "io", 1);
+
+        out.clear();
+        assert!(source.segment_metadata(&mut out));
+        assert!(out.contains(&("runtime.main".to_string(), "0".to_string())));
+        assert!(out.contains(&("runtime.io".to_string(), "1".to_string())));
     }
 }

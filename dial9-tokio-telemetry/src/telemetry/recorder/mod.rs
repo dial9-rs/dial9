@@ -298,6 +298,10 @@ fn attach_runtime(
 
     contexts.lock().unwrap().push(ctx);
 
+    // No need to announce the metadata change: `TokioRuntimesSource` detects the
+    // new runtime (and its eagerly-populated workers) from the runtime/worker
+    // counts on its next flush.
+
     Ok(runtime)
 }
 
@@ -422,16 +426,10 @@ mod tests {
 
         assert!(guard.is_enabled());
         assert!(guard.shared().unwrap().is_enabled());
+        let runtime_meta =
+            source::collect_segment_metadata(&mut guard.shared().unwrap().sources.lock().unwrap());
         assert!(
-            !guard
-                .shared()
-                .unwrap()
-                .sources
-                .lock()
-                .unwrap()
-                .iter()
-                .flat_map(|s| s.segment_metadata())
-                .any(|(k, _)| k.starts_with("runtime.")),
+            !runtime_meta.iter().any(|(k, _)| k.starts_with("runtime.")),
             "disabled Tokio instrumentation should not produce runtime metadata"
         );
 
@@ -445,16 +443,10 @@ mod tests {
             }
         });
 
+        let runtime_meta =
+            source::collect_segment_metadata(&mut guard.shared().unwrap().sources.lock().unwrap());
         assert!(
-            !guard
-                .shared()
-                .unwrap()
-                .sources
-                .lock()
-                .unwrap()
-                .iter()
-                .flat_map(|s| s.segment_metadata())
-                .any(|(k, _)| k.starts_with("runtime.")),
+            !runtime_meta.iter().any(|(k, _)| k.starts_with("runtime.")),
             "disabled Tokio instrumentation should not produce runtime metadata after running work"
         );
         assert_eq!(
@@ -829,6 +821,87 @@ mod tests {
             has_both,
             "expected segment metadata to contain runtime.main=0,1 and runtime.io=2,3, \
              got: {all_metadata:?}"
+        );
+    }
+
+    /// A runtime attached *after* the first flush cycle must still land in a
+    /// later segment's metadata. This guards `TokioRuntimesSource`'s self-detected
+    /// change path: the first flush emits the initial snapshot, and a runtime
+    /// that appears afterwards is only re-emitted if the source notices its
+    /// worker/runtime count grew. If that detection regressed, `runtime.second`
+    /// would never re-emit and this test goes red.
+    ///
+    /// Both runtimes are `current_thread` so the timing is deterministic: A is
+    /// driven once and then quiesces, B is never driven (its workers are eagerly
+    /// populated at attach time, so its metadata is complete regardless).
+    #[test]
+    fn runtime_attached_after_first_flush_propagates_metadata() {
+        use crate::telemetry::analysis_events::Dial9Event;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let trace_path = dir.path().join("trace.bin");
+
+        let writer = crate::telemetry::writer::DiskWriter::builder()
+            .base_path(&trace_path)
+            .max_file_size(1024 * 1024)
+            .max_total_size(10 * 1024 * 1024)
+            .build()
+            .unwrap();
+
+        let builder_a = tokio::runtime::Builder::new_current_thread();
+        let (runtime_a, guard) = TracedRuntime::builder()
+            .with_runtime_name("first")
+            .with_trace_path(trace_path.to_str().unwrap())
+            .build_and_start(builder_a, writer)
+            .unwrap();
+
+        // Run work on A, then let a flush cycle emit the initial snapshot and
+        // write a segment with runtime.first but no runtime.second yet.
+        runtime_a.block_on(async {
+            tokio::task::yield_now().await;
+        });
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        // Attach B *after* that first flush. Its workers are eagerly populated
+        // at attach time, so its metadata is complete without driving it.
+        let builder_b = tokio::runtime::Builder::new_current_thread();
+        let runtime_b = TracedRuntime::builder()
+            .with_runtime_name("second")
+            .build_and_attach_to_telemetry(builder_b, &guard)
+            .unwrap();
+
+        // Let the post-first-flush change propagate into a rotated segment.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        drop(runtime_a);
+        drop(runtime_b);
+        let _ = guard.graceful_shutdown(std::time::Duration::from_secs(1));
+
+        let mut saw_second = false;
+        let mut files: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|ext| ext == "bin"))
+            .collect();
+        files.sort();
+        for file in &files {
+            let data = std::fs::read(file).unwrap();
+            let events = crate::telemetry::format::decode_events(&data).unwrap();
+            for event in &events {
+                if let Dial9Event::SegmentMetadataEvent(meta) = event {
+                    if meta.entries.keys().any(|k| k == "runtime.second") {
+                        saw_second = true;
+                    }
+                }
+            }
+        }
+
+        assert!(
+            saw_second,
+            "runtime attached after the first flush should appear in a later \
+             segment's metadata; missing runtime.second means TokioRuntimesSource \
+             failed to self-detect the new runtime"
         );
     }
 
