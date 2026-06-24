@@ -17,6 +17,15 @@
 //     (no visual filtering) so no data is lost for downstream tools.
 //
 // Pure functions only — no DOM, no globals — so they run under node for tests.
+//
+// The embedded interactive script (embeddedScript function) and the surrounding
+// SVG structure are derived from flamegraph.pl by Brendan Gregg, licensed under
+// the CDDL 1.0:
+//   Copyright 2016 Netflix, Inc.
+//   Copyright 2011 Joyent, Inc. All rights reserved.
+//   Copyright 2011 Brendan Gregg. All rights reserved.
+//   https://github.com/brendangregg/FlameGraph
+//   License: CDDL-1.0 (see THIRD_PARTY_LICENSES)
 
 (function (exports) {
   "use strict";
@@ -145,6 +154,9 @@
   // with the literals above (xpad=10, fontsize=12, fontwidth=0.59, inverted=0).
   // Behavior is intentionally identical: click=zoom, mouseover=details,
   // Ctrl-F=search, Ctrl-I=ignorecase, Reset Zoom, and URL state restore.
+  //
+  // Derived from flamegraph.pl, © Netflix/Joyent/Brendan Gregg, licensed under
+  // CDDL-1.0. See the file header and THIRD_PARTY_LICENSES for the full notice.
   function embeddedScript() {
     return [
       '"use strict";',
@@ -457,8 +469,11 @@
       `<svg version="1.1" width="${W}" height="${H}" onload="init(evt)" viewBox="0 0 ${W} ${H}" ` +
         'xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">'
     );
-    out.push("<!-- Flame graph stack visualization. Exported by dial9. " +
-      "Structure & script ported from https://github.com/brendangregg/FlameGraph -->");
+    out.push("<!-- Flame graph stack visualization. Exported by dial9. -->");
+    out.push("<!-- Structure & embedded script derived from flamegraph.pl, " +
+      "https://github.com/brendangregg/FlameGraph -->");
+    out.push("<!-- Copyright 2016 Netflix, Inc.; Copyright 2011 Joyent, Inc.; " +
+      "Copyright 2011 Brendan Gregg. Licensed under CDDL-1.0. -->");
     out.push("<defs>");
     out.push('<linearGradient id="background" y1="0" y2="1" x1="0" x2="0">');
     out.push(`<stop stop-color="${BG1}" offset="5%"/>`);
