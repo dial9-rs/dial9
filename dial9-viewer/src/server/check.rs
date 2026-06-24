@@ -38,7 +38,7 @@ pub async fn check_credentials(
     creds: MaybeCreds,
     Query(params): Query<CheckParams>,
 ) -> Result<Json<CheckResponse>, (StatusCode, String)> {
-    if !state.source_is_s3 {
+    if !state.allow_byo_creds {
         return Err((
             StatusCode::BAD_REQUEST,
             "this server does not accept user credentials".to_string(),

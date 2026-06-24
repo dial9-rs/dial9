@@ -98,7 +98,7 @@ async fn start_byoc_server(
     // and, when no output override is set, writes the output.
     let request_backend = Arc::new(S3Backend::from_client(fake_s3_client(fs_root)));
     let mut state = AppState::new(request_backend, Some(source_bucket.into()), None)
-        .with_s3_source(true)
+        .with_byo_creds(true)
         .with_agg_segment_secs(segment_secs);
     if let Some(out) = output_bucket {
         let out_backend: Arc<dyn dial9_viewer::storage::StorageBackend> =

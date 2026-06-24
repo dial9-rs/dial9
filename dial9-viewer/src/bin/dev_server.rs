@@ -92,7 +92,7 @@ async fn main() -> anyhow::Result<()> {
         Some(bucket.to_string()),
         Some("traces".to_string()),
     )
-    .with_s3_source(true)
+    .with_byo_creds(true)
     .with_ephemeral_s3(dial9_viewer::storage::EphemeralS3Config {
         http_client,
         endpoint_url: Some("http://localhost:0".to_string()),

@@ -1,5 +1,5 @@
 use assert2::check;
-use dial9_viewer::server::{AppState, router};
+use dial9_viewer::server::{AppState, UploadLimits, router};
 use dial9_viewer::storage::{LocalBackend, ObjectInfo, S3Backend, StorageBackend, StorageError};
 use std::future::Future;
 use std::pin::Pin;
@@ -590,7 +590,7 @@ async fn setup_byo_test(bucket: &str) -> (aws_sdk_s3::Client, String, tempfile::
     let upload_client = fake_s3_client(s3_root.path());
 
     let state = AppState::new(Arc::new(ErroringBackend), Some(bucket.to_string()), None)
-        .with_s3_source(true)
+        .with_byo_creds(true)
         .with_ephemeral_s3(fake_ephemeral_config(s3_root.path()));
     let base = start_server(state).await;
     (upload_client, base, s3_root)
@@ -1013,6 +1013,283 @@ async fn local_path_traversal_rejected() {
         .unwrap();
     // Should fail — either not found or error, but not 200
     check!(resp.status().as_u16() != 200);
+}
+
+// --- trace upload tests ---
+
+/// A minimal but valid trace prefix: the `TRC\0` magic the upload validator
+/// looks for. The bytes after it don't matter for the upload path (the viewer
+/// decodes client-side), so we just need recognizable content to round-trip.
+const TRACE_MAGIC_BYTES: &[u8] = b"TRC\0sample-trace-bytes";
+
+/// An `AppState` with the (opt-in) upload feature enabled at default caps.
+fn upload_state() -> AppState {
+    AppState::new(Arc::new(FakeBackend), None, None).with_uploads(UploadLimits::default())
+}
+
+/// Uploads are opt-in: without `.with_uploads(...)` (i.e. no `--enable-upload`),
+/// the upload routes are not registered and both endpoints 404.
+#[tokio::test]
+async fn upload_disabled_by_default() {
+    let state = AppState::new(Arc::new(FakeBackend), None, None);
+    let base = start_server(state).await;
+    let client = reqwest::Client::new();
+
+    let post = client
+        .post(format!("{base}/api/upload"))
+        .body(TRACE_MAGIC_BYTES.to_vec())
+        .send()
+        .await
+        .unwrap();
+    check!(post.status().as_u16() == 404);
+
+    let get = client
+        .get(format!("{base}/api/uploaded/anything"))
+        .send()
+        .await
+        .unwrap();
+    check!(get.status().as_u16() == 404);
+}
+
+/// POST a trace, then GET it back via the returned `trace_url`. The bytes must
+/// survive verbatim.
+#[tokio::test]
+async fn upload_round_trips() {
+    let base = start_server(upload_state()).await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .post(format!("{base}/api/upload"))
+        .body(TRACE_MAGIC_BYTES.to_vec())
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() == 200);
+
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let trace_url = body["trace_url"].as_str().unwrap();
+    check!(body["id"].as_str().is_some());
+    check!(trace_url.starts_with("/api/uploaded/"));
+    // viewer_url points the viewer at the trace via the existing ?trace= param.
+    check!(
+        body["viewer_url"]
+            .as_str()
+            .unwrap()
+            .starts_with("/viewer.html?trace=%2Fapi%2Fuploaded%2F")
+    );
+
+    let trace_resp = client
+        .get(format!("{base}{trace_url}"))
+        .send()
+        .await
+        .unwrap();
+    check!(trace_resp.status().as_u16() == 200);
+    let fetched = trace_resp.bytes().await.unwrap();
+    check!(fetched.as_ref() == TRACE_MAGIC_BYTES);
+}
+
+/// The second GET of an uploaded trace 404s — uploads are single-use.
+#[tokio::test]
+async fn upload_is_single_use() {
+    let base = start_server(upload_state()).await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .post(format!("{base}/api/upload"))
+        .body(TRACE_MAGIC_BYTES.to_vec())
+        .send()
+        .await
+        .unwrap();
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let trace_url = body["trace_url"].as_str().unwrap().to_string();
+
+    let first = client
+        .get(format!("{base}{trace_url}"))
+        .send()
+        .await
+        .unwrap();
+    check!(first.status().as_u16() == 200);
+
+    let second = client
+        .get(format!("{base}{trace_url}"))
+        .send()
+        .await
+        .unwrap();
+    check!(second.status().as_u16() == 404);
+}
+
+/// GET of an id that was never uploaded 404s.
+#[tokio::test]
+async fn uploaded_unknown_id_not_found() {
+    let base = start_server(upload_state()).await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .get(format!("{base}/api/uploaded/does-not-exist"))
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() == 404);
+}
+
+/// Empty bodies and bytes lacking the gzip/`TRC\0` magic are rejected with 400.
+#[tokio::test]
+async fn upload_rejects_invalid_bodies() {
+    let base = start_server(upload_state()).await;
+    let client = reqwest::Client::new();
+
+    let empty = client
+        .post(format!("{base}/api/upload"))
+        .body(Vec::<u8>::new())
+        .send()
+        .await
+        .unwrap();
+    check!(empty.status().as_u16() == 400);
+
+    let junk = client
+        .post(format!("{base}/api/upload"))
+        .body(b"not a trace at all".to_vec())
+        .send()
+        .await
+        .unwrap();
+    check!(junk.status().as_u16() == 400);
+}
+
+/// A gzipped body is accepted (matches how traces are stored on the wire).
+#[tokio::test]
+async fn upload_accepts_gzipped_body() {
+    let base = start_server(upload_state()).await;
+    let client = reqwest::Client::new();
+
+    let gz = gzip_bytes(b"TRC\0whatever");
+    let resp = client
+        .post(format!("{base}/api/upload"))
+        .body(gz.clone())
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() == 200);
+
+    // Stored verbatim: the bytes come back gzipped, the viewer gunzips client-side.
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let trace_url = body["trace_url"].as_str().unwrap();
+    let fetched = client
+        .get(format!("{base}{trace_url}"))
+        .send()
+        .await
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
+    check!(fetched.as_ref() == gz.as_slice());
+}
+
+/// A body larger than the per-upload limit is rejected by the body-limit layer
+/// (413 Payload Too Large).
+#[tokio::test]
+async fn upload_rejects_oversized_body() {
+    let limits = UploadLimits::builder().max_upload_bytes(64).build();
+    let state = AppState::new(Arc::new(FakeBackend), None, None).with_uploads(limits);
+    let base = start_server(state).await;
+    let client = reqwest::Client::new();
+
+    let mut big = b"TRC\0".to_vec();
+    big.resize(256, 0);
+    let resp = client
+        .post(format!("{base}/api/upload"))
+        .body(big)
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() == 413);
+}
+
+/// Once the count cap is reached, further uploads are rejected with 507.
+#[tokio::test]
+async fn upload_rejects_when_full() {
+    let limits = UploadLimits::builder().max_uploads(1).build();
+    let state = AppState::new(Arc::new(FakeBackend), None, None).with_uploads(limits);
+    let base = start_server(state).await;
+    let client = reqwest::Client::new();
+
+    let first = client
+        .post(format!("{base}/api/upload"))
+        .body(TRACE_MAGIC_BYTES.to_vec())
+        .send()
+        .await
+        .unwrap();
+    check!(first.status().as_u16() == 200);
+
+    let second = client
+        .post(format!("{base}/api/upload"))
+        .body(TRACE_MAGIC_BYTES.to_vec())
+        .send()
+        .await
+        .unwrap();
+    check!(second.status().as_u16() == 507);
+}
+
+/// Once the total-bytes cap is reached, further uploads are rejected with 507
+/// (exercises the byte cap over HTTP, distinct from the count cap above).
+#[tokio::test]
+async fn upload_rejects_when_total_bytes_full() {
+    // Big enough per-upload limit to accept one body, but a tiny total budget
+    // so the second body tips it over.
+    let limits = UploadLimits::builder()
+        .max_total_bytes(TRACE_MAGIC_BYTES.len())
+        .build();
+    let state = AppState::new(Arc::new(FakeBackend), None, None).with_uploads(limits);
+    let base = start_server(state).await;
+    let client = reqwest::Client::new();
+
+    let first = client
+        .post(format!("{base}/api/upload"))
+        .body(TRACE_MAGIC_BYTES.to_vec())
+        .send()
+        .await
+        .unwrap();
+    check!(first.status().as_u16() == 200);
+
+    // Without fetching the first (which would free its bytes), the second 507s.
+    let second = client
+        .post(format!("{base}/api/upload"))
+        .body(TRACE_MAGIC_BYTES.to_vec())
+        .send()
+        .await
+        .unwrap();
+    check!(second.status().as_u16() == 507);
+}
+
+/// A cross-origin preflight (OPTIONS) is answered with permissive CORS headers,
+/// and the actual POST response carries `access-control-allow-origin`.
+#[tokio::test]
+async fn upload_supports_cors() {
+    let base = start_server(upload_state()).await;
+    let client = reqwest::Client::new();
+
+    let preflight = client
+        .request(reqwest::Method::OPTIONS, format!("{base}/api/upload"))
+        .header("Origin", "https://example.com")
+        .header("Access-Control-Request-Method", "POST")
+        .send()
+        .await
+        .unwrap();
+    check!(preflight.status().is_success());
+    check!(
+        preflight
+            .headers()
+            .contains_key("access-control-allow-origin")
+    );
+
+    let posted = client
+        .post(format!("{base}/api/upload"))
+        .header("Origin", "https://example.com")
+        .body(TRACE_MAGIC_BYTES.to_vec())
+        .send()
+        .await
+        .unwrap();
+    check!(posted.status().as_u16() == 200);
+    check!(posted.headers().contains_key("access-control-allow-origin"));
 }
 
 #[cfg(test)]

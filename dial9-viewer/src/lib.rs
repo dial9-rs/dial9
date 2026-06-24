@@ -35,6 +35,9 @@ pub(crate) struct ServeConfig {
     pub agg_output_prefix: String,
     /// Raw-trace segment duration (seconds) for the scope time-filter pad.
     pub agg_segment_secs: i64,
+    /// Enable the temporary trace-upload feature (`POST /api/upload`). Off by
+    /// default; there is no auth, so only enable on a trusted network.
+    pub enable_upload: bool,
 }
 
 /// Build an [`S3Backend`] for `bucket`, pinned to the bucket's region when it
@@ -66,6 +69,7 @@ pub(crate) async fn serve(
         agg_output_bucket,
         agg_output_prefix,
         agg_segment_secs,
+        enable_upload,
     }: ServeConfig,
 ) -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -153,7 +157,7 @@ pub(crate) async fn serve(
     // Build the base state per backend. `source_is_s3` is true for every S3
     // backend; it is false only in local-dir mode (and local-source
     // aggregation), where the data is local. It drives BYO credentials, the
-    // creds panel, and on-demand aggregation (see `AppState::source_is_s3`).
+    // creds panel, and on-demand aggregation (see `AppState::allow_byo_creds`).
     let (mut app_state, source_is_s3) = if let Some(agg) = &agg {
         // Demand-driven mode: browse endpoints read the raw segments from the
         // same source backend, and `/api/flamegraph` runs the refinement loop.
@@ -223,12 +227,18 @@ pub(crate) async fn serve(
         };
 
     app_state = app_state
-        .with_s3_source(source_is_s3)
+        .with_byo_creds(source_is_s3)
         .with_agg_output_prefix(agg_output_prefix_for_state)
         .with_agg_output_bucket(agg_output_bucket, agg_output_backend)
         .with_agg_segment_secs(agg_segment_secs);
     if let Some(d) = dev_ui_dir {
         app_state = app_state.with_dev_ui_dir(d);
+    }
+    if enable_upload {
+        tracing::info!(
+            "trace-upload feature enabled (POST /api/upload); no auth — trusted network only"
+        );
+        app_state = app_state.with_uploads(server::UploadLimits::default());
     }
 
     let app = server::router(app_state);

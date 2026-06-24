@@ -77,6 +77,12 @@ enum Commands {
         /// filter so boundary files are not dropped.
         #[arg(long, default_value_t = crate::ingest::aggregate::DEFAULT_SEGMENT_DURATION_SECS)]
         agg_segment_secs: i64,
+
+        /// Enable the temporary trace-upload feature: lets another site POST a
+        /// trace (`POST /api/upload`) and have the viewer serve it back once.
+        /// Off by default; there is no auth, so only enable on a trusted network.
+        #[arg(long)]
+        enable_upload: bool,
     },
     /// Tools for working with agent-generated HTML reports
     Report {
@@ -176,6 +182,7 @@ pub async fn run() -> anyhow::Result<()> {
             agg_output_bucket,
             agg_output_prefix,
             agg_segment_secs,
+            enable_upload,
         } => {
             return crate::serve(crate::ServeConfig {
                 port,
@@ -189,6 +196,7 @@ pub async fn run() -> anyhow::Result<()> {
                 agg_output_bucket,
                 agg_output_prefix,
                 agg_segment_secs,
+                enable_upload,
             })
             .await;
         }

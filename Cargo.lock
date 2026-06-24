@@ -1917,6 +1917,7 @@ dependencies = [
  "axum",
  "axum-extra",
  "blake3",
+ "bon",
  "bytes",
  "clap",
  "criterion",
@@ -1942,6 +1943,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "urlencoding",
+ "uuid",
 ]
 
 [[package]]

@@ -23,8 +23,8 @@ pub async fn get_config(State(state): State<AppState>) -> Json<ConfigResponse> {
         // On-demand aggregation runs either when the server was started with a
         // server-side `AggContext`, or against any S3 source (any bucket can
         // drive the `/api/flamegraph` refinement loop).
-        aggregation_enabled: state.agg.is_some() || state.source_is_s3,
+        aggregation_enabled: state.agg.is_some() || state.allow_byo_creds,
         // The credentials panel is only meaningful for an S3 source.
-        supports_byo_credentials: state.source_is_s3,
+        supports_byo_credentials: state.allow_byo_creds,
     })
 }
