@@ -137,11 +137,6 @@ fn polls_part_key(output_prefix: &str, source_key: &str) -> String {
     )
 }
 
-/// Public accessor for the polls part-key, used by the tokio-stats endpoint.
-pub(crate) fn polls_part_key_pub(output_prefix: &str, source_key: &str) -> String {
-    polls_part_key(output_prefix, source_key)
-}
-
 /// The `samples/` prefix for one source bucket under the versioned root — the
 /// folded-set LIST target. Pruned to a single source bucket.
 fn samples_prefix(output_prefix: &str, source_bucket: &str) -> String {
@@ -719,6 +714,44 @@ pub(crate) async fn aggregate(
     })
 }
 
+/// Concurrency for polls part-file GETs. A GET is a single round-trip with a
+/// small body (one file's polls), so this can run wide.
+const POLLS_READ_CONCURRENCY: usize = 24;
+
+/// Fetch the `polls/` part-file bytes for each folded source key in
+/// `source_keys`, concurrently. Returns `(raw_source_key, polls_bytes)` for the
+/// keys whose part-file is both folded and present; not-yet-folded or missing
+/// ones are skipped. The caller decodes the Parquet itself (the polls schema is
+/// the tokio-stats endpoint's concern, not the aggregator's), so the part-key
+/// path scheme stays private to this module.
+pub(crate) async fn read_polls_parts(
+    output: &dyn StorageBackend,
+    bucket: &str,
+    output_prefix: &str,
+    source_keys: &[(String, String)],
+    folded: &HashSet<String>,
+) -> Vec<(String, Vec<u8>)> {
+    use futures::stream::StreamExt;
+    let fetches: Vec<(String, String)> = source_keys
+        .iter()
+        .filter(|(_, full)| folded.contains(&part_leaf_of(full)))
+        .map(|(raw, full)| (raw.clone(), polls_part_key(output_prefix, full)))
+        .collect();
+
+    futures::stream::iter(fetches)
+        .map(|(raw_key, polls_key)| async move {
+            output
+                .get_object(bucket, &polls_key)
+                .await
+                .ok()
+                .map(|data| (raw_key, data))
+        })
+        .buffer_unordered(POLLS_READ_CONCURRENCY)
+        .filter_map(|x| async { x })
+        .collect()
+        .await
+}
+
 fn read_samples_part(
     data: &[u8],
     filter: &SampleFilter,
@@ -971,25 +1004,9 @@ fn maybe_gunzip(data: &[u8]) -> Vec<u8> {
     }
 }
 
-/// Convenience: the ordered matched-set keys (full source keys) for a scope,
-/// given a raw source listing. Used by the refinement loop.
-pub(crate) fn ordered_full_keys(
-    objects: Vec<ObjectInfo>,
-    scope: &Scope,
-    segment_duration_secs: i64,
-    source_is_local: bool,
-    source_bucket: &str,
-) -> Vec<(String, String)> {
-    matched_and_ordered(objects, scope, segment_duration_secs)
-        .into_iter()
-        .map(|o| {
-            let full = full_source_key(source_is_local, source_bucket, &o.key);
-            (o.key, full)
-        })
-        .collect()
-}
-
-/// Like [`ordered_full_keys`] but also returns the total bytes of all matched files.
+/// The ordered matched-set keys (as `(raw_key, full_key)` pairs) for a scope,
+/// given a raw source listing, plus the total bytes of all matched files (for
+/// the coverage block). Used by the refinement loop.
 pub(crate) fn ordered_full_keys_with_size(
     objects: Vec<ObjectInfo>,
     scope: &Scope,

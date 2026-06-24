@@ -182,13 +182,14 @@ climbing from the baseline to the cap. `--serve` leaves it up for the browser.
 ## Where the code lives
 
 ```
-dial9-viewer/src/ingest/aggregate.rs   ← core: order key, scope→matched-set, fold_one,
+dial9-viewer/src/ingest/aggregate.rs   ← kit of parts: order key, scope→matched-set, fold_one,
                                           folded-set LIST, in-memory aggregate, coverage, versioned paths
+dial9-viewer/src/ingest/refine.rs      ← refinement loop (list→scope→cap→fold→coverage), shared by all endpoints
 dial9-viewer/src/ingest/decode.rs      ← raw trace bytes → resolved CPU samples + stacks + polls
 dial9-viewer/src/ingest/parquet_writer.rs ← write samples / stacks / polls part-files
 dial9-viewer/src/ingest/mod.rs         ← module wiring for the aggregation building blocks
-dial9-viewer/src/server/flamegraph.rs  ← /api/flamegraph refinement loop + in-memory aggregate
-dial9-viewer/src/server/tokio_stats.rs ← /tokio-stats (poll stats from polls/)
+dial9-viewer/src/server/flamegraph.rs  ← /api/flamegraph: refine() → aggregate samples/ → tree
+dial9-viewer/src/server/tokio_stats.rs ← /tokio-stats: refine() → read polls/ → poll stats
 dial9-viewer/src/server/config.rs      ← aggregation_enabled flag
 dial9-viewer/src/{cli,lib}.rs          ← serve --agg / --agg-source-dir wiring
 dial9-viewer/ui/{index,flamegraph}.html, flamegraph_api.js ← button + poll loop + coverage UI

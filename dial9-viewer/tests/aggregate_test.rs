@@ -34,6 +34,49 @@ fn demo_trace_gz() -> Vec<u8> {
     std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/ui/demo-trace.bin")).unwrap()
 }
 
+/// Expected per-filter sample counts for the demo trace, read from the JS
+/// oracle's committed property fixture rather than hardcoded.
+///
+/// Regenerating the demo trace regenerates this fixture in the same step (see
+/// `scripts/regenerate_demo_trace.sh`), so these expectations track the trace
+/// automatically instead of silently going stale. Using the *JS*-derived
+/// fixture as the expected values for the *Rust* aggregation path is sound
+/// because `parser_parity_test` independently pins the two decoders to identical
+/// `total_samples` / `by_source` / `on_off_by_source` values — so any divergence
+/// fails there with a readable diff, not here with a mystery count.
+struct DemoCounts {
+    /// Every sample (CpuProfile + SchedEvent) — the `source=all` view.
+    total: usize,
+    /// CpuProfile samples (source 0) — the default / `source=cpu` view.
+    cpu: usize,
+    /// SchedEvent samples (source 1) — the `source=sched` view.
+    sched: usize,
+    /// On-runtime CpuProfile samples — the `thread_class=worker` view.
+    cpu_on: usize,
+    /// Off-runtime CpuProfile samples — the `thread_class=off-worker` view.
+    cpu_off: usize,
+}
+
+fn demo_counts() -> DemoCounts {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/demo-trace.properties.json"
+    );
+    let bytes = std::fs::read(path).expect("demo-trace.properties.json fixture present");
+    let v: serde_json::Value = serde_json::from_slice(&bytes).expect("fixture is valid JSON");
+    let count = |x: &serde_json::Value| -> usize {
+        x.as_u64()
+            .expect("property count is a non-negative integer") as usize
+    };
+    DemoCounts {
+        total: count(&v["total_samples"]),
+        cpu: count(&v["by_source"]["0"]),
+        sched: count(&v["by_source"]["1"]),
+        cpu_on: count(&v["on_off_by_source"]["0"]["on"]),
+        cpu_off: count(&v["on_off_by_source"]["0"]["off"]),
+    }
+}
+
 async fn put(client: &aws_sdk_s3::Client, bucket: &str, key: &str, data: Vec<u8>) {
     client
         .put_object()
@@ -217,8 +260,10 @@ async fn seed_fleet(client: &aws_sdk_s3::Client, bucket: &str, body: &[u8]) -> u
 /// (the on/off split "worked in the viewer but not the pure flamegraph view").
 ///
 /// Expected counts come from the JS reference oracle on the demo trace
-/// (`tests/fixtures/demo-trace.properties.json`): 189 CpuProfile (188 worker / 1
-/// off), 8782 SchedEvent, 8971 total.
+/// (`tests/fixtures/demo-trace.properties.json`), read via [`demo_counts`] so
+/// they track the trace through a regen rather than being hardcoded here. At the
+/// time of writing the demo trace has 189 CpuProfile (188 worker / 1 off), 8782
+/// SchedEvent, 8971 total.
 #[tokio::test]
 async fn flamegraph_thread_and_source_filters_apply() {
     let fs = tempfile::tempdir().unwrap();
@@ -234,6 +279,7 @@ async fn flamegraph_thread_and_source_filters_apply() {
 
     let base = start_agg_server(fs.path(), "src-bucket", "out-bucket", 60).await;
     let http = reqwest::Client::new();
+    let want = demo_counts();
 
     // Fold the one file (refining poll), then aggregate read-only per filter.
     let folded = poll(&http, &base, "service=shale&source=all").await;
@@ -244,23 +290,32 @@ async fn flamegraph_thread_and_source_filters_apply() {
     );
 
     // source=all → every sample (CpuProfile + SchedEvent).
-    assert_eq!(folded.total_samples, 8971, "source=all counts every sample");
+    assert_eq!(
+        folded.total_samples, want.total,
+        "source=all counts every sample"
+    );
 
     // Default (no source param) → on-CPU profile only, matching the viewer.
     let def = poll_readonly(&http, &base, "service=shale").await;
-    assert_eq!(def.total_samples, 189, "default view = CpuProfile only");
+    assert_eq!(
+        def.total_samples, want.cpu,
+        "default view = CpuProfile only"
+    );
 
     // source=cpu is the same as the default.
     let cpu = poll_readonly(&http, &base, "service=shale&source=cpu").await;
-    assert_eq!(cpu.total_samples, 189, "source=cpu = CpuProfile only");
+    assert_eq!(cpu.total_samples, want.cpu, "source=cpu = CpuProfile only");
 
     // source=sched → the scheduler context-switch series.
     let sched = poll_readonly(&http, &base, "service=shale&source=sched").await;
-    assert_eq!(sched.total_samples, 8782, "source=sched = SchedEvent only");
+    assert_eq!(
+        sched.total_samples, want.sched,
+        "source=sched = SchedEvent only"
+    );
 
     // thread_class=worker over the on-CPU source → on-runtime CpuProfile samples.
     let worker = poll_readonly(&http, &base, "service=shale&source=cpu&thread_class=worker").await;
-    assert_eq!(worker.total_samples, 188, "CpuProfile on-runtime");
+    assert_eq!(worker.total_samples, want.cpu_on, "CpuProfile on-runtime");
 
     // thread_class=off-worker over the on-CPU source → the off-runtime sample.
     let off = poll_readonly(
@@ -269,7 +324,7 @@ async fn flamegraph_thread_and_source_filters_apply() {
         "service=shale&source=cpu&thread_class=off-worker",
     )
     .await;
-    assert_eq!(off.total_samples, 1, "CpuProfile off-runtime");
+    assert_eq!(off.total_samples, want.cpu_off, "CpuProfile off-runtime");
 
     // The split is exhaustive: worker + off-worker == all CpuProfile samples.
     assert_eq!(

@@ -173,6 +173,68 @@ impl AppState {
         self
     }
 
+    /// Build a per-request [`AggContext`] for the bring-your-own-credentials
+    /// path (`?bucket=…`), or reuse the server-configured one.
+    ///
+    /// When `bucket` is `Some`, the request targets the user's own bucket:
+    /// resolve a backend from any supplied credentials, scope the source listing
+    /// to `prefix` (falling back to the server default), and route output to the
+    /// configured `--agg-output-bucket` (through its own region-aware backend) or
+    /// else back into the source bucket. When `bucket` is `None`, fall back to
+    /// the server's `--agg` context if one is configured.
+    ///
+    /// Returns `None` only when no `bucket` is given *and* the server has no
+    /// `--agg` context — the caller maps that to 404. This is the single place
+    /// the BYOC context is assembled, shared by `/api/flamegraph` and
+    /// `/tokio-stats`.
+    ///
+    /// [`AggContext`]: crate::ingest::aggregate::AggContext
+    pub(crate) fn agg_context_for(
+        &self,
+        bucket: Option<&str>,
+        prefix: Option<&str>,
+        creds: MaybeCreds,
+    ) -> Result<Option<crate::ingest::aggregate::AggContext>, (StatusCode, String)> {
+        use crate::ingest::aggregate::AggContext;
+        if let Some(bucket) = bucket {
+            let backend = self.resolve(creds)?;
+            let source_prefix = prefix
+                .map(str::to_string)
+                .or_else(|| self.default_prefix.clone())
+                .unwrap_or_default();
+            // Output may target a different, writable bucket than the (often
+            // read-only) source. When `--agg-output-bucket` is configured we
+            // write there through its own region-aware backend; otherwise we
+            // write back into the source bucket through the request's backend.
+            let (output_bucket, output) = match (&self.agg_output_bucket, &self.agg_output_backend)
+            {
+                (Some(out_bucket), Some(out_backend)) => {
+                    (out_bucket.clone(), Arc::clone(out_backend))
+                }
+                _ => (bucket.to_string(), Arc::clone(&backend)),
+            };
+            tracing::info!(
+                %bucket,
+                %output_bucket,
+                resolved_source_prefix = %source_prefix,
+                output_prefix = %self.agg_output_prefix,
+                "agg: BYOC context"
+            );
+            Ok(Some(AggContext {
+                source: backend,
+                output,
+                source_bucket: bucket.to_string(),
+                source_is_local: false,
+                output_bucket,
+                output_prefix: self.agg_output_prefix.clone(),
+                source_prefixes: vec![source_prefix],
+                segment_duration_secs: self.agg_segment_secs,
+            }))
+        } else {
+            Ok(self.agg.clone())
+        }
+    }
+
     /// Pick the storage backend for a request given any supplied credentials.
     ///
     /// Bringing credentials is always optional:

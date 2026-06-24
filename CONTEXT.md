@@ -51,8 +51,8 @@ The query control flow, realized as **stateless per-poll folding**: each
 request folds a bounded budget of not-yet-folded [[source-file]]s (in
 [[order-key]] order) into the [[samples-table]], then aggregates over the
 folded set in scope and returns the tree plus a [[coverage]] block. The
-budget is the [[baseline-floor]] (default 3) when nothing is folded yet,
-and a larger refine-batch on later polls. The client re-polls; coverage
+budget is the [[baseline-floor]] (default 4) when nothing is folded yet,
+and a larger refine-batch (12) on later polls. The client re-polls; coverage
 climbs each poll until the [[sampling-cap]], then freezes. No background
 tasks and no coordination — folding happens only during a poll (so it
 stops when polling stops), and re-folding is safe by idempotency.
@@ -87,22 +87,24 @@ scope-pruned LIST of the partitioned `samples/` tree). Coverage is their
 intersection.
 
 **Baseline floor**:
-The number of [[source-file]]s (in [[order-key]] order) a query blocks on
-before returning its first tree. Default **3**, configurable. Small
-because each file is ~37–50 MB; the [[coverage]] label, not a large floor,
-is what keeps users from over-trusting an early tree. The
-[[refinement-loop]] fills in the rest. Moot if a preload warmer is enabled.
+The number of [[source-file]]s (in [[order-key]] order) a query folds on
+its first *refining* poll, before returning a tree. Default **4**,
+configurable. Small because each file is ~37–50 MB; the [[coverage]]
+label, not a large floor, is what keeps users from over-trusting an early
+tree. The [[refinement-loop]] fills in the rest. Moot if a preload warmer
+is enabled.
 _Avoid_: baseline sample count (it's files, not samples).
 
 **Sampling cap**:
 The point at which the [[refinement-loop]] stops folding a scope's tail:
-`min(percentage × files_matched, absolute_ceiling)`, defaults **10%** and
-**~300 files**, both backend-configurable. The percentage keeps small
-scopes sensible; the absolute ceiling stops a fleet-day scope from
-chasing 10% of tens of thousands of files (which would re-create the batch
-job). Past the cap, polls return the capped tree with [[coverage]] frozen.
-A user-facing "fetch more" raises the ceiling for that scope on demand.
-Background folding also stops when polling stops (refine-while-watched).
+`min(percentage × files_matched, absolute_ceiling)`, floored at the
+[[baseline-floor]]. Defaults **5%** and **100 files**, both
+backend-configurable. The percentage keeps small scopes sensible; the
+absolute ceiling stops a fleet-day scope from chasing 5% of tens of
+thousands of files (which would re-create the batch job). Past the cap,
+polls return the capped tree with [[coverage]] frozen. A user-facing
+"fetch more" raises the ceiling for that scope on demand. Background
+folding also stops when polling stops (refine-while-watched).
 _Avoid_: completion target (we deliberately never reach 100%).
 
 **Scope**:

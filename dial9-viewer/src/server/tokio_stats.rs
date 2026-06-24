@@ -8,15 +8,13 @@ use axum::http::StatusCode;
 use axum_extra::extract::Query as QueryExtra;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::Arc;
 
-use crate::ingest::aggregate::{self, AggContext, Scope};
+use crate::ingest::aggregate::{self, Scope};
+use crate::ingest::refine::{self, RefineOpts};
 use crate::server::AppState;
 use crate::server::credentials::MaybeCreds;
-use crate::storage::ObjectInfo;
 
 use arrow::array::Array;
-use futures::stream::StreamExt;
 
 /// Floor: only send polls longer than this to the client (saves bandwidth).
 const DURATION_FLOOR_NS: i64 = 100_000; // 100µs
@@ -75,30 +73,9 @@ pub async fn get_tokio_stats(
     creds: MaybeCreds,
     QueryExtra(params): QueryExtra<TokioStatsParams>,
 ) -> Result<Json<TokioStatsResponse>, (StatusCode, String)> {
-    let agg = if let Some(bucket) = &params.bucket {
-        let backend = state.resolve(creds)?;
-        let source_prefix = params
-            .prefix
-            .clone()
-            .or_else(|| state.default_prefix.clone())
-            .unwrap_or_default();
-        let (output_bucket, output) = match (&state.agg_output_bucket, &state.agg_output_backend) {
-            (Some(out_bucket), Some(out_backend)) => (out_bucket.clone(), Arc::clone(out_backend)),
-            _ => (bucket.clone(), Arc::clone(&backend)),
-        };
-        AggContext {
-            source: backend,
-            output,
-            source_bucket: bucket.clone(),
-            source_is_local: false,
-            output_bucket,
-            output_prefix: state.agg_output_prefix.clone(),
-            source_prefixes: vec![source_prefix],
-            segment_duration_secs: state.agg_segment_secs,
-        }
-    } else if let Some(agg) = &state.agg {
-        agg.clone()
-    } else {
+    let Some(agg) =
+        state.agg_context_for(params.bucket.as_deref(), params.prefix.as_deref(), creds)?
+    else {
         return Err((
             StatusCode::NOT_FOUND,
             "tokio-stats requires aggregation (start with --agg or supply a bucket)".to_string(),
@@ -123,154 +100,30 @@ pub async fn get_tokio_stats(
         "tokio-stats: starting"
     );
 
-    // List + scope-filter (same as flamegraph).
-    let listing_prefixes =
-        crate::server::flamegraph::time_scoped_prefixes(&agg.source_prefixes, &scope);
-    tracing::info!(listing_prefixes = ?listing_prefixes, "tokio-stats: listing prefixes");
-
-    let per_prefix: Vec<Vec<ObjectInfo>> = futures::stream::iter(listing_prefixes)
-        .map(|prefix| {
-            let agg = &agg;
-            async move {
-                agg.source
-                    .list_objects_all(&agg.source_bucket, &prefix)
-                    .await
-                    .unwrap_or_else(|e| {
-                        tracing::warn!(
-                            bucket = %agg.source_bucket,
-                            prefix = %prefix,
-                            error = %e,
-                            "tokio-stats: failed to list source prefix; skipping it"
-                        );
-                        Vec::new()
-                    })
-            }
-        })
-        .buffer_unordered(24)
-        .collect()
-        .await;
-    let raw_objects: Vec<ObjectInfo> = per_prefix.into_iter().flatten().collect();
-    let total_listed = raw_objects.len();
-    let ordered = aggregate::ordered_full_keys(
-        raw_objects,
-        &scope,
-        agg.segment_duration_secs,
-        agg.source_is_local,
-        &agg.source_bucket,
-    );
-    let files_matched = ordered.len();
-    tracing::info!(
-        total_listed,
-        files_matched,
-        sample_matched = ?ordered.iter().take(3).map(|(k, _)| k.as_str()).collect::<Vec<_>>(),
-        "tokio-stats: scope filter result"
-    );
-
-    if ordered.is_empty() {
+    // Run the shared refinement loop: list + scope-filter, cap, and fold a
+    // bounded batch (identical policy to flamegraph). tokio-stats reads only the
+    // `polls/` part-files, so it does not "fetch more"; the default cap applies.
+    let opts = RefineOpts {
+        refine: params.refine,
+        max_files: None,
+    };
+    let Some(refined) = refine::refine(&agg, &scope, opts, &state.fold_limits).await else {
         return Err((
             StatusCode::NOT_FOUND,
-            format!(
-                "no source files match this scope (listed {} objects)",
-                total_listed
-            ),
+            "no source files match this scope".to_string(),
         ));
-    }
+    };
 
-    // Folded set + progressive refinement (identical to flamegraph).
-    let mut folded = aggregate::list_folded_leaves(
+    // Read the polls part-files for the folded-in-cap files concurrently, then
+    // accumulate the long polls per spawn location.
+    let polls_data = aggregate::read_polls_parts(
         &*agg.output,
         &agg.output_bucket,
         &agg.output_prefix,
-        &agg.source_bucket,
+        &refined.capped,
+        refined.folded(),
     )
     .await;
-
-    const BASELINE_FILES: usize = 4;
-    const REFINE_BATCH_FILES: usize = 12;
-    let cap = ordered.len().min(100);
-    let capped: Vec<&(String, String)> = ordered.iter().take(cap).collect();
-    let already_folded_in_cap = capped
-        .iter()
-        .filter(|(_, full)| folded.contains(&aggregate::part_leaf_of(full)))
-        .count();
-
-    tracing::info!(
-        files_matched,
-        cap,
-        already_folded = already_folded_in_cap,
-        refine = params.refine,
-        "tokio-stats: refinement state"
-    );
-
-    if params.refine {
-        let budget = if already_folded_in_cap == 0 {
-            BASELINE_FILES
-        } else {
-            REFINE_BATCH_FILES
-        };
-        let room = cap.saturating_sub(already_folded_in_cap);
-        let budget = budget.min(room);
-
-        if budget > 0 {
-            let to_fold: Vec<(String, String)> = capped
-                .iter()
-                .filter(|(_, full)| !folded.contains(&aggregate::part_leaf_of(full)))
-                .take(budget)
-                .map(|kv| (*kv).clone())
-                .collect();
-
-            let agg_arc = Arc::new(agg.clone());
-            let limits = state.fold_limits.clone();
-            let mut tasks: tokio::task::JoinSet<Option<String>> = tokio::task::JoinSet::new();
-            for (raw_key, full_key) in to_fold {
-                let a = Arc::clone(&agg_arc);
-                let l = limits.clone();
-                tasks.spawn(async move {
-                    match aggregate::fold_one(&a, &raw_key, &l).await {
-                        Ok(()) => Some(aggregate::part_leaf_of(&full_key)),
-                        Err(e) => {
-                            tracing::warn!(key = %raw_key, error = %e, "tokio-stats: fold failed");
-                            None
-                        }
-                    }
-                });
-            }
-            while let Some(joined) = tasks.join_next().await {
-                if let Ok(Some(leaf)) = joined {
-                    folded.insert(leaf);
-                }
-            }
-        }
-    }
-
-    // Read polls part-files concurrently.
-    let polls_fetches: Vec<(String, String)> = capped
-        .iter()
-        .filter(|(_, full)| folded.contains(&aggregate::part_leaf_of(full)))
-        .map(|(raw, full)| {
-            (
-                raw.clone(),
-                aggregate::polls_part_key_pub(&agg.output_prefix, full),
-            )
-        })
-        .collect();
-
-    let polls_data: Vec<(String, Vec<u8>)> = futures::stream::iter(polls_fetches)
-        .map(|(raw_key, polls_key)| {
-            let output = &agg.output;
-            let bucket = &agg.output_bucket;
-            async move {
-                output
-                    .get_object(bucket, &polls_key)
-                    .await
-                    .ok()
-                    .map(|data| (raw_key, data))
-            }
-        })
-        .buffer_unordered(24)
-        .filter_map(|x| async { x })
-        .collect()
-        .await;
 
     let mut acc = TokioStatsAccum::default();
     let files_read = polls_data.len();
@@ -278,10 +131,8 @@ pub async fn get_tokio_stats(
         read_polls_part(data, &scope, raw_key, &mut acc)?;
     }
 
-    let files_folded = capped
-        .iter()
-        .filter(|(_, full)| folded.contains(&aggregate::part_leaf_of(full)))
-        .count();
+    let files_matched = refined.files_matched;
+    let files_folded = refined.files_folded();
 
     let notable_polls: usize = acc.by_loc.values().map(|la| la.durations.len()).sum();
     tracing::info!(
@@ -327,10 +178,11 @@ pub async fn get_tokio_stats(
         bucket: agg.source_bucket.clone(),
         by_spawn_loc,
         coverage: Some(aggregate::Coverage {
-            files_matched: ordered.len(),
+            files_matched,
             files_folded,
+            // tokio-stats counts files read, not samples, as its "folded" unit.
             samples_folded: files_read,
-            total_bytes: 0,
+            total_bytes: refined.total_bytes,
         }),
     }))
 }

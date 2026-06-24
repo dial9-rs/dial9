@@ -126,7 +126,7 @@ One row per reconstructed poll span, used by the `/tokio-stats` endpoint.
 ## How a query aggregates
 
 There is **no SQL engine** (no DataFusion): aggregation is a small in-memory
-fold in `server/flamegraph.rs`. For each folded, in-scope `samples/` part-file
+fold in `ingest/aggregate.rs::aggregate`. For each folded, in-scope `samples/` part-file
 the server reads the Arrow batch, applies the active filters (`source`,
 `thread_class`, `spawn_location`, and any facet selection), sums counts per
 `stack_id`, and merges the matching `dict/stacks/` entries. The summed
@@ -231,8 +231,9 @@ exemplars per poll class).
 
 ## Refinement Loop
 
-Aggregation is driven by the query, in
-`server/flamegraph.rs::run_refinement_loop`. Each `GET /api/flamegraph` poll:
+Aggregation is driven by the query. The loop itself lives in
+`ingest/refine.rs::refine` — one function shared by every demand-driven
+endpoint, so `/api/flamegraph` and `/tokio-stats` cannot drift apart. Each poll:
 
 1. **List the matched set** — list the source scope, filter to the [scope]'s
    service/host/time (interval-overlap on the filename `epoch`, padded by the
@@ -240,13 +241,18 @@ Aggregation is driven by the query, in
 2. **List the folded set** — list the output `samples/` tree (the record of
    what's already folded; **no manifest**).
 3. **Fold a bounded budget** of not-yet-folded files in order (a baseline on the
-   first poll, a larger refine-batch afterwards), stopping at the sampling cap.
-   A *fold* is: fetch + gunzip → decode with `dial9-trace-format::Decoder` →
-   resolve `callchain` to frame names → `stack_id = BLAKE3(frames)[:16]` →
-   write a partitioned samples part-file (empty if zero samples), a stacks-dict
-   part-file, and a polls part-file, all named `{blake3(source_key)}`.
-4. **Aggregate** the folded-in-scope part-files in memory (sum `stack_id`
-   counts, merge dicts) → flamegraph tree + a `coverage` block.
+   first refining poll, a larger refine-batch afterwards), stopping at the
+   sampling cap. A *fold* is: fetch + gunzip → decode with
+   `dial9-trace-format::Decoder` → resolve `callchain` to frame names →
+   `stack_id = BLAKE3(frames)[:16]` → write a partitioned samples part-file
+   (empty if zero samples), a stacks-dict part-file, and a polls part-file, all
+   named `{blake3(source_key)}`.
+
+`refine` returns the capped, ordered file set plus the folded set and coverage
+denominators; the *endpoint* then reads its own part-files over that set:
+`/api/flamegraph` aggregates the `samples/` part-files into a tree, `/tokio-stats`
+reads the `polls/` part-files into poll stats. Both attach the same `coverage`
+block.
 
 Stateless and idempotent: folding happens only during a poll (so it stops when
 the client stops polling), and re-folding a file writes the same keys. The
@@ -273,14 +279,16 @@ All in `dial9-viewer` (produces the `dial9` binary):
 dial9-viewer/src/
   ingest/
     mod.rs              — module wiring for the aggregation building blocks
-    aggregate.rs        — DEMAND-DRIVEN CORE: order key, scope→matched set,
-                          fold_one, folded-set LIST, in-memory aggregate,
-                          coverage, versioned/partitioned paths
+    aggregate.rs        — KIT OF PARTS: order key, scope→matched set, fold_one,
+                          folded-set LIST, in-memory aggregate of samples/polls
+                          part-files, coverage, versioned/partitioned paths
+    refine.rs           — REFINEMENT LOOP: list→scope→cap→fold→coverage,
+                          shared by every demand-driven endpoint
     decode.rs           — trace bytes → (Vec<ResolvedSample>, stacks dict, Vec<ResolvedPoll>)
     parquet_writer.rs   — write the samples / stacks-dict / polls part-files
   server/
-    flamegraph.rs       — /api/flamegraph (refinement loop) + in-memory aggregate
-    tokio_stats.rs      — /tokio-stats (per-spawn-location poll stats from polls/)
+    flamegraph.rs       — /api/flamegraph: refine() → aggregate samples/ → tree
+    tokio_stats.rs      — /tokio-stats: refine() → read polls/ → per-spawn stats
   storage.rs            — StorageBackend over S3 / local FS / simulated S3 (tests)
   cli.rs                — `serve [--agg | --agg-source-dir …]`, `report`, `agents`
 tests/

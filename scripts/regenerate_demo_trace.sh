@@ -53,9 +53,29 @@ rm -f $TRACE_GZ_GLOB
 echo "Demo trace size:"
 ls -lh "$DEMO_DEST"
 
+# Regenerate the JS property fixture from the new trace. This fixture is the
+# committed oracle that both `parser_parity_test` (offline fallback) and the
+# `aggregate_test` per-filter expectations read, so it MUST be refreshed in the
+# same step as the trace — otherwise a regen silently rots both.
+PROPS_DEST="$REPO_ROOT/dial9-viewer/tests/fixtures/demo-trace.properties.json"
+PROPS_SCRIPT="$REPO_ROOT/dial9-viewer/ui/trace_properties.js"
+if command -v node >/dev/null 2>&1; then
+    echo "Regenerating property fixture..."
+    node "$PROPS_SCRIPT" "$DEMO_DEST" > "$PROPS_DEST"
+    echo "✓ Property fixture regenerated: $PROPS_DEST"
+    PROPS_HINT="  git add dial9-viewer/tests/fixtures/demo-trace.properties.json"
+else
+    echo "WARNING: node not found — could NOT regenerate the property fixture." >&2
+    echo "         demo-trace.properties.json is now STALE relative to the trace." >&2
+    echo "         Run this once node is available:" >&2
+    echo "           node $PROPS_SCRIPT $DEMO_DEST > $PROPS_DEST" >&2
+    PROPS_HINT="  # then: node dial9-viewer/ui/trace_properties.js dial9-viewer/ui/demo-trace.bin > dial9-viewer/tests/fixtures/demo-trace.properties.json"
+fi
+
 echo ""
 echo "✓ Demo trace regenerated successfully!"
 echo ""
 echo "To commit:"
 echo "  git add dial9-viewer/ui/demo-trace.bin"
+echo "$PROPS_HINT"
 echo "  git commit -m 'Regenerate demo trace'"
