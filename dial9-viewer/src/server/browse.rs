@@ -1,21 +1,4 @@
-//! `GET /api/browse` — time-range trace discovery with server-side fan-out.
-//!
-//! The browser used to compute one *hour*-level S3 prefix per hour in the
-//! window and fire a `/api/search` per hour itself. Two problems followed:
-//!
-//! 1. An hour prefix (`{date}/{HH}`) matches all 60 minutes of the hour. Over a
-//!    busy bucket spanning many hosts, a single hour blew past the listing cap
-//!    and silently dropped traces — data went missing in the UI with no signal.
-//! 2. The fan-out lived in the browser, so finer prefixes would have meant many
-//!    more browser round-trips.
-//!
-//! This endpoint moves the fan-out server-side: the browser sends the window
-//! once, the server enumerates finer time prefixes (10-minute buckets, or
-//! 1-minute buckets for a sub-10-minute focus window), lists them in parallel
-//! with a bounded concurrency, paginates each up to a high cap, and returns the
-//! merged objects plus a single `truncated` flag so the UI can warn when a
-//! result was capped.
-
+//! `browse` finds all trace files for a given timerange / filter set
 use axum::Json;
 use axum::extract::{Query, State};
 use axum::http::StatusCode;

@@ -16,7 +16,6 @@ mod config;
 pub mod credentials;
 mod error;
 mod prefixes;
-mod search;
 mod trace;
 mod upload;
 
@@ -225,12 +224,8 @@ fn api_router(state: AppState) -> Router {
             axum::routing::post(check::check_credentials),
         )
         .route("/prefixes", axum::routing::get(prefixes::list_prefixes))
-        .route("/search", axum::routing::get(search::search))
         .route("/browse", axum::routing::get(browse::browse))
         .route("/object", axum::routing::get(trace::get_object))
-        // DEPRECATED (slated for removal): superseded by /object, which serves a
-        // single object's raw bytes so the browser merges/gunzips client-side.
-        .route("/trace", axum::routing::get(trace::get_trace))
         .route("/uploaded/{id}", axum::routing::get(upload::get_uploaded))
         .merge(upload_route)
         // Permissive CORS so a page on another origin can POST a trace and read
