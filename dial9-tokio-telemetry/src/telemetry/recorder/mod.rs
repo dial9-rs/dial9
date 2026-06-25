@@ -889,10 +889,10 @@ mod tests {
             let data = std::fs::read(file).unwrap();
             let events = crate::telemetry::format::decode_events(&data).unwrap();
             for event in &events {
-                if let Dial9Event::SegmentMetadataEvent(meta) = event {
-                    if meta.entries.keys().any(|k| k == "runtime.second") {
-                        saw_second = true;
-                    }
+                if let Dial9Event::SegmentMetadataEvent(meta) = event
+                    && meta.entries.keys().any(|k| k == "runtime.second")
+                {
+                    saw_second = true;
                 }
             }
         }
