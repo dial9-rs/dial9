@@ -1504,6 +1504,31 @@ async fn share_rejects_invalid_body() {
 }
 
 #[tokio::test]
+async fn share_rejects_body_over_size_cap() {
+    // Configure a tiny per-share cap so we can exercise the limit without
+    // buffering a multi-hundred-MiB body.
+    let s3_root = tempfile::tempdir().unwrap();
+    std::fs::create_dir(s3_root.path().join("test-bucket")).unwrap();
+    let backend = S3Backend::from_client(fake_s3_client(s3_root.path()));
+    let state = AppState::new(Arc::new(backend), Some("test-bucket".into()), None)
+        .with_sharing(true)
+        .with_max_shared_trace_bytes(16);
+    let base = start_server(state).await;
+    let client = reqwest::Client::new();
+
+    // A valid trace (passes the magic-byte check) but over the 16-byte cap.
+    let mut body = TRACE_MAGIC_BYTES.to_vec();
+    body.extend_from_slice(&[0u8; 64]);
+    let resp = client
+        .post(format!("{base}/api/shared"))
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() == 413);
+}
+
+#[tokio::test]
 async fn share_returns_404_without_bucket() {
     let state = AppState::new(Arc::new(FakeBackend), None, None);
     let base = start_server(state).await;
@@ -1520,7 +1545,8 @@ async fn share_returns_404_without_bucket() {
 
 #[tokio::test]
 async fn share_get_rejects_invalid_token() {
-    let (_s3, base, _dir) = setup_s3_test("test-bucket", Some("test-bucket".into()), None).await;
+    let (_s3, base, _dir) =
+        setup_s3_test_with_sharing("test-bucket", Some("test-bucket".into()), None).await;
     let client = reqwest::Client::new();
 
     let resp = client
@@ -1533,6 +1559,24 @@ async fn share_get_rejects_invalid_token() {
 
 #[tokio::test]
 async fn share_get_returns_404_for_missing_token() {
+    let (_s3, base, _dir) =
+        setup_s3_test_with_sharing("test-bucket", Some("test-bucket".into()), None).await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .get(format!(
+            "{base}/api/shared/00000000000000000000000000000000"
+        ))
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() == 404);
+}
+
+#[tokio::test]
+async fn share_get_returns_404_when_sharing_disabled() {
+    // Sharing not enabled: the GET endpoint is gated off in lockstep with the
+    // POST endpoint, even for a well-formed token.
     let (_s3, base, _dir) = setup_s3_test("test-bucket", Some("test-bucket".into()), None).await;
     let client = reqwest::Client::new();
 

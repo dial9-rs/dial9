@@ -63,6 +63,10 @@ pub struct AppState {
     /// Whether shareable links are enabled (`--enable-sharing`). When false,
     /// `POST /api/shared` returns 404.
     pub sharing_enabled: bool,
+    /// Hard cap on the size of a single shared trace, in bytes. Bounds the
+    /// otherwise-unquota'd `POST /api/shared` write path so a caller can't fill
+    /// the bucket. Defaults to [`share::MAX_SHARED_TRACE_BYTES`].
+    pub max_shared_trace_bytes: usize,
     /// Optional plumbing for ephemeral S3 client construction (test injection
     /// of the in-process fake; `None` in production → default HTTPS connector).
     #[doc(hidden)]
@@ -83,6 +87,7 @@ impl AppState {
             uploads: None,
             allow_byo_creds: false,
             sharing_enabled: false,
+            max_shared_trace_bytes: share::MAX_SHARED_TRACE_BYTES,
             ephemeral_s3: None,
         }
     }
@@ -108,6 +113,12 @@ impl AppState {
     /// Enable shareable links (requires a configured bucket).
     pub fn with_sharing(mut self, enabled: bool) -> Self {
         self.sharing_enabled = enabled;
+        self
+    }
+
+    /// Override the per-share size cap (default [`share::MAX_SHARED_TRACE_BYTES`]).
+    pub fn with_max_shared_trace_bytes(mut self, max_bytes: usize) -> Self {
+        self.max_shared_trace_bytes = max_bytes;
         self
     }
 
@@ -227,10 +238,12 @@ fn api_router(state: AppState) -> Router {
         .route("/upload", axum::routing::post(upload::upload_trace))
         .layer(DefaultBodyLimit::max(upload_body_limit));
 
-    // The share route also needs a large body limit (traces can be big).
+    // The share route also needs a large body limit (traces can be big), but it
+    // is capped independently of the upload feature so a single share can't fill
+    // the bucket. The handler re-checks the same cap as the source of truth.
     let share_route = Router::new()
         .route("/shared", axum::routing::post(share::create_shared))
-        .layer(DefaultBodyLimit::max(upload_body_limit));
+        .layer(DefaultBodyLimit::max(state.max_shared_trace_bytes));
 
     Router::new()
         .route("/config", axum::routing::get(config::get_config))

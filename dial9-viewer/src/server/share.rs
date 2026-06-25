@@ -23,6 +23,15 @@ use crate::server::error::storage_error_response;
 use crate::server::trace::maybe_gunzip;
 use crate::server::upload::validate_trace_body;
 
+/// Hard cap on the size of a single shared trace, in bytes (256 MiB).
+///
+/// Shared traces are written to S3 with no eviction, count quota, or TTL, so an
+/// unbounded `put_object` would let a caller fill the bucket. This bounds a
+/// single share; it is enforced both as the route's `DefaultBodyLimit` (rejects
+/// before buffering the whole body) and in the handler (source of truth, so the
+/// cap holds regardless of how the route is wired).
+pub(super) const MAX_SHARED_TRACE_BYTES: usize = 256 * 1024 * 1024;
+
 #[derive(Serialize)]
 struct ShareResponse {
     token: String,
@@ -40,6 +49,17 @@ pub async fn create_shared(
     }
 
     validate_trace_body(&body)?;
+
+    // Hard size cap. The route's body limit also enforces this (and rejects
+    // before fully buffering), but check here too so the handler that owns the
+    // limit is the source of truth.
+    let max_bytes = state.max_shared_trace_bytes;
+    if body.len() > max_bytes {
+        return Err((
+            StatusCode::PAYLOAD_TOO_LARGE,
+            format!("trace exceeds the {max_bytes}-byte share limit"),
+        ));
+    }
 
     let bucket = state.default_bucket.as_ref().ok_or((
         StatusCode::NOT_FOUND,
@@ -83,6 +103,10 @@ pub async fn get_shared(
     State(state): State<AppState>,
     Path(token): Path<String>,
 ) -> Result<Response, (StatusCode, String)> {
+    if !state.sharing_enabled {
+        return Err((StatusCode::NOT_FOUND, "sharing not enabled".to_string()));
+    }
+
     if !is_valid_token(&token) {
         return Err((StatusCode::BAD_REQUEST, "invalid token".to_string()));
     }
