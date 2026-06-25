@@ -1,6 +1,8 @@
 use assert2::check;
 use dial9_viewer::server::{AppState, UploadLimits, router};
-use dial9_viewer::storage::{LocalBackend, ObjectInfo, S3Backend, StorageBackend, StorageError};
+use dial9_viewer::storage::{
+    ListPage, LocalBackend, ObjectInfo, S3Backend, StorageBackend, StorageError,
+};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -19,8 +21,14 @@ impl StorageBackend for FakeBackend {
         &self,
         _bucket: &str,
         _prefix: &str,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<ObjectInfo>, StorageError>> + Send + '_>> {
-        Box::pin(async { Ok(vec![]) })
+        _cap: usize,
+    ) -> Pin<Box<dyn Future<Output = Result<ListPage, StorageError>> + Send + '_>> {
+        Box::pin(async {
+            Ok(ListPage {
+                objects: vec![],
+                truncated: false,
+            })
+        })
     }
 
     fn list_prefixes(
@@ -94,7 +102,8 @@ impl StorageBackend for ErroringBackend {
         &self,
         _bucket: &str,
         _prefix: &str,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<ObjectInfo>, StorageError>> + Send + '_>> {
+        _cap: usize,
+    ) -> Pin<Box<dyn Future<Output = Result<ListPage, StorageError>> + Send + '_>> {
         Box::pin(async { Err(StorageError::Other("default backend used".into())) })
     }
 
@@ -627,6 +636,171 @@ async fn e2e_search_then_view() {
     let has_seg2 = body_slice.windows(seg2.len()).any(|w| w == seg2.as_slice());
     check!(has_seg1);
     check!(has_seg2);
+}
+
+/// `/api/browse` must fan a window out across the finer time buckets that
+/// cover it and merge the results. This is the fix for the silent-truncation
+/// bug: the browser used to query one *hour* prefix per hour, overflowing the
+/// listing cap on busy hours. Here three segments land in two different
+/// 10-minute buckets (1910 and 1925) within the same window; a single browse
+/// call must return all three.
+#[tokio::test]
+async fn browse_fans_out_across_time_buckets() {
+    let (s3, base, _dir) = setup_s3_test("traces-bucket", Some("traces-bucket".into()), None).await;
+    let client = reqwest::Client::new();
+
+    // 2026-04-09 19:10:00Z .. 19:25:00Z — keys use {date}/{HHMM}/...
+    put_object(
+        &s3,
+        "traces-bucket",
+        "2026-04-09/1910/svc/hostA/1000-0.bin.gz",
+        &gzip_bytes(b"a"),
+    )
+    .await;
+    put_object(
+        &s3,
+        "traces-bucket",
+        "2026-04-09/1912/svc/hostB/1001-0.bin.gz",
+        &gzip_bytes(b"b"),
+    )
+    .await;
+    put_object(
+        &s3,
+        "traces-bucket",
+        "2026-04-09/1925/svc/hostC/1002-0.bin.gz",
+        &gzip_bytes(b"c"),
+    )
+    .await;
+    // Outside the window — must NOT be returned.
+    put_object(
+        &s3,
+        "traces-bucket",
+        "2026-04-09/2010/svc/hostD/1003-0.bin.gz",
+        &gzip_bytes(b"d"),
+    )
+    .await;
+
+    // 19:08:00Z .. 19:30:00Z (epoch seconds). Spans the 1910 and 1920 ten-minute
+    // buckets; the 20:10 segment is an hour later and excluded.
+    let from = 1_775_761_680; // 2026-04-09T19:08:00Z
+    let to = from + 22 * 60; // 19:30:00Z
+    let resp = client
+        .get(format!(
+            "{base}/api/browse?bucket=traces-bucket&from={from}&to={to}"
+        ))
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() == 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let objects = body["objects"].as_array().unwrap();
+    check!(objects.len() == 3);
+    check!(body["truncated"] == false);
+    let keys: Vec<&str> = objects.iter().map(|o| o["key"].as_str().unwrap()).collect();
+    check!(keys.iter().any(|k| k.contains("1910")));
+    check!(keys.iter().any(|k| k.contains("1912")));
+    check!(keys.iter().any(|k| k.contains("1925")));
+    check!(!keys.iter().any(|k| k.contains("2010")));
+}
+
+/// `/api/browse` combines the server's default prefix with the request's
+/// `prefix` param, the same way `/api/search` combines `q`.
+#[tokio::test]
+async fn browse_honors_default_and_request_prefix() {
+    let (s3, base, _dir) = setup_s3_test(
+        "test-bucket",
+        Some("test-bucket".into()),
+        Some("root".into()),
+    )
+    .await;
+    let client = reqwest::Client::new();
+
+    put_object(
+        &s3,
+        "test-bucket",
+        "root/team-a/2026-04-09/1910/svc/host/1000-0.bin.gz",
+        &gzip_bytes(b"a"),
+    )
+    .await;
+    // Different sub-prefix under the same default — must be excluded by `prefix`.
+    put_object(
+        &s3,
+        "test-bucket",
+        "root/team-b/2026-04-09/1910/svc/host/1000-0.bin.gz",
+        &gzip_bytes(b"b"),
+    )
+    .await;
+
+    let from = 1_775_761_680; // 19:08:00Z
+    let to = from + 22 * 60;
+    let resp = client
+        .get(format!(
+            "{base}/api/browse?bucket=test-bucket&prefix=team-a&from={from}&to={to}"
+        ))
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() == 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let objects = body["objects"].as_array().unwrap();
+    check!(objects.len() == 1);
+    check!(objects[0]["key"].as_str().unwrap().contains("team-a"));
+}
+
+/// A focus window under 10 minutes drops to minute-granularity prefixes. A
+/// 4-char `HHMM` prefix is exact, so a segment in an adjacent minute outside
+/// the window is not even listed.
+#[tokio::test]
+async fn browse_uses_minute_granularity_for_short_window() {
+    let (s3, base, _dir) = setup_s3_test("traces-bucket", Some("traces-bucket".into()), None).await;
+    let client = reqwest::Client::new();
+
+    put_object(
+        &s3,
+        "traces-bucket",
+        "2026-04-09/1910/svc/host/1000-0.bin.gz",
+        &gzip_bytes(b"a"),
+    )
+    .await;
+    put_object(
+        &s3,
+        "traces-bucket",
+        "2026-04-09/1911/svc/host/1001-0.bin.gz",
+        &gzip_bytes(b"b"),
+    )
+    .await;
+
+    // 19:10:00Z .. 19:10:30Z — a 30s window, well under the 10-minute threshold.
+    let from = 1_775_761_680 + 2 * 60; // 19:10:00Z
+    let to = from + 30; // 19:10:30Z
+    let resp = client
+        .get(format!(
+            "{base}/api/browse?bucket=traces-bucket&from={from}&to={to}"
+        ))
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() == 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let objects = body["objects"].as_array().unwrap();
+    // Only the 1910 minute bucket is scanned; 1911 is never listed.
+    check!(objects.len() == 1);
+    check!(objects[0]["key"].as_str().unwrap().contains("1910"));
+}
+
+/// `/api/browse` rejects a window where `to` precedes `from`.
+#[tokio::test]
+async fn browse_rejects_inverted_range() {
+    let state = AppState::new(Arc::new(FakeBackend), Some("b".into()), None);
+    let base = start_server(state).await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .get(format!("{base}/api/browse?from=2000&to=1000"))
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() == 400);
 }
 
 /// Regression test: a compressed segment that decompresses to >50MB must be

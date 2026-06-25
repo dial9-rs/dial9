@@ -1683,7 +1683,7 @@ dependencies = [
 
 [[package]]
 name = "dial9-viewer"
-version = "0.3.13"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "assert2",
@@ -1708,6 +1708,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "time",
  "tokio",
  "tower-http",
  "tracing",

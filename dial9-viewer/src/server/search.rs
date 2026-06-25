@@ -8,6 +8,11 @@ use crate::server::credentials::MaybeCreds;
 use crate::server::error::storage_error_response;
 use crate::storage::ObjectInfo;
 
+/// Object cap for a single raw-search prefix listing. The Browse-mode fan-out
+/// (`/api/browse`) uses a much higher cap across many finer prefixes; this is
+/// the cap for the single-prefix raw search.
+const SEARCH_CAP: usize = 1000;
+
 #[derive(Deserialize)]
 pub struct SearchParams {
     /// Search query — used as S3 prefix in MVP
@@ -34,10 +39,10 @@ pub async fn search(
         (None, None) => String::new(),
     };
 
-    let objects = backend
-        .list_objects(&bucket, &prefix)
+    let page = backend
+        .list_objects(&bucket, &prefix, SEARCH_CAP)
         .await
         .map_err(storage_error_response)?;
 
-    Ok(Json(objects))
+    Ok(Json(page.objects))
 }

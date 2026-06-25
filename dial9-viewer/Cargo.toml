@@ -1,6 +1,6 @@
 [package]
 name = "dial9-viewer"
-version = "0.3.13"
+version = "0.4.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -39,6 +39,7 @@ tower-http = { version = "0.6", features = ["fs", "cors"] }
 uuid = { version = "1", features = ["v4"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+time = "0.3"
 aws-config = { version = "1", features = ["behavior-version-latest"] }
 aws-sdk-s3 = { version = "1", default-features = false, features = ["behavior-version-latest", "default-https-client", "http-1x", "rt-tokio", "sigv4a"] }
 anyhow = "1"

@@ -51,6 +51,12 @@
         .main-area { flex: 1; overflow-y: auto; padding: 0; display: flex; flex-direction: column; }
         .status { padding: 40px; text-align: center; color: #666; font-size: 0.9em; }
         .status.error { color: #ff6b6b; }
+        /* Truncation / partial-results warning banner (Browse mode). */
+        .warning-banner {
+            margin: 10px 20px 0; padding: 8px 12px; border-radius: 4px;
+            background: #3a2e12; border: 1px solid #b8860b; color: #ffd479;
+            font-size: 0.85em; line-height: 1.4;
+        }
 
         /* Bring-your-own-credentials panel */
         #creds-panel {
@@ -284,6 +290,7 @@
     <div class="main-area" id="main-area">
         <!-- Browse mode: status / density heatmap timeline -->
         <div id="browse-view">
+            <div class="warning-banner" id="browse-warning" style="display:none"></div>
             <div class="status" id="browse-status">
                 Select a time range and click Search to find traces.
             </div>
@@ -409,6 +416,19 @@
     const bucketInput = document.getElementById('bucket-input');
     const browseStatus = document.getElementById('browse-status');
     const heatmapView = document.getElementById('heatmap-view');
+
+    // Show or clear the Browse-mode truncation banner. `null`/empty hides it.
+    function setBrowseWarning(msg) {
+        const el = document.getElementById('browse-warning');
+        if (!el) return;
+        if (msg) {
+            el.textContent = '⚠ ' + msg;
+            el.style.display = '';
+        } else {
+            el.textContent = '';
+            el.style.display = 'none';
+        }
+    }
 
     // Wrapper around fetch that attaches the bring-your-own-credentials headers
     // (if any are set) to every /api/* request. No-op when no creds are stored.
@@ -906,23 +926,15 @@
         updateSelectionCount();
     }
 
-    // ── Generate hour-level prefixes for a time range ──
-    function hourPrefixes(from, to) {
-        const prefixes = [];
-        // Start at the beginning of `from`'s hour (UTC — S3 keys use UTC)
-        const cur = new Date(from);
-        cur.setUTCMinutes(0, 0, 0);
-        while (cur <= to) {
-            const pad = n => String(n).padStart(2, '0');
-            const dateStr = cur.getUTCFullYear() + '-' + pad(cur.getUTCMonth()+1) + '-' + pad(cur.getUTCDate());
-            const hourStr = pad(cur.getUTCHours());
-            prefixes.push(dateStr + '/' + hourStr);
-            cur.setTime(cur.getTime() + 3600 * 1000);
-        }
-        return prefixes;
-    }
-
     // ── Time-range search (Browse mode) ──
+    //
+    // The server owns the S3 prefix fan-out (GET /api/browse): it enumerates the
+    // time buckets covering [from, to] — 10-minute buckets, or 1-minute buckets
+    // for a focus window under 10 minutes — lists them in parallel, paginates
+    // each up to 10k, and returns the merged objects plus a `truncated` flag.
+    // The browser issues a single request instead of one query per hour, and the
+    // finer buckets keep any one list well under the cap. `truncated` surfaces a
+    // banner so a capped result is never mistaken for missing data.
     async function doTimeRangeSearch() {
         const bucket = bucketInput.value.trim();
         if (!bucket) { alert('Bucket is required'); return; }
@@ -933,35 +945,34 @@
 
         const from = pickerToDate(fromStr);
         const to = pickerToDate(toStr);
+        const fromEpoch = Math.floor(from.getTime() / 1000);
+        const toEpoch = Math.floor(to.getTime() / 1000);
+        // When the server has its own prefix it owns prefixing; otherwise pass
+        // the user-entered key prefix. The server combines it with any default.
         const keyPrefix = !serverHasPrefix ? prefixInput.value.trim() : '';
-        const prefixes = hourPrefixes(from, to).map(
-            p => keyPrefix ? keyPrefix + '/' + p : p
-        );
 
-        browseStatus.textContent = `Searching ${prefixes.length} hour(s)…`;
+        browseStatus.textContent = 'Searching…';
         browseStatus.className = 'status';
         browseStatus.style.display = '';
+        setBrowseWarning(null);
         heatmapView.style.display = 'none';
         setHeatmapSelection(null);
 
         try {
-            // Fire parallel queries for each hour prefix
-            const fetches = prefixes.map(p => {
-                const url = `/api/search?bucket=${encodeURIComponent(bucket)}&q=${encodeURIComponent(p)}`;
-                return apiFetch(url).then(async r => {
-                    if (!r.ok) {
-                        const body = await r.text().catch(() => '');
-                        throw new Error(`HTTP ${r.status}${body ? ': ' + body : ''}`);
-                    }
-                    return r.json();
-                });
-            });
-            const results = await Promise.all(fetches);
-            allObjects = results.flat();
+            let url = `/api/browse?bucket=${encodeURIComponent(bucket)}` +
+                `&from=${fromEpoch}&to=${toEpoch}`;
+            if (keyPrefix) url += `&prefix=${encodeURIComponent(keyPrefix)}`;
+            const resp = await apiFetch(url);
+            if (!resp.ok) {
+                const body = await resp.text().catch(() => '');
+                throw new Error(`HTTP ${resp.status}${body ? ': ' + body : ''}`);
+            }
+            const result = await resp.json();
+            allObjects = result.objects || [];
 
-            // Filter to objects whose epoch falls within the actual range
-            const fromEpoch = from.getTime() / 1000;
-            const toEpoch = to.getTime() / 1000;
+            // The server lists whole time buckets, so the first/last bucket can
+            // include objects just outside the requested window. Trim to the
+            // actual range. (fromEpoch/toEpoch are the same values sent above.)
             allObjects = allObjects.filter(obj => {
                 const p = parseKey(obj.key);
                 if (!p.epoch) return true; // keep if we can't parse
@@ -969,6 +980,12 @@
                 const end = obj.last_modified ? new Date(obj.last_modified).getTime() / 1000 : p.epoch;
                 return p.epoch <= toEpoch && end >= fromEpoch;
             });
+
+            // Surface a capped result so it's never mistaken for missing data.
+            setBrowseWarning(result.truncated
+                ? 'Some traces were omitted: this time range exceeded the listing limit. ' +
+                  'Narrow the window or focus on a shorter span to see everything.'
+                : null);
 
             if (allObjects.length === 0) {
                 browseStatus.className = 'status';

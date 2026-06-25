@@ -13,6 +13,24 @@ pub struct ObjectInfo {
     pub last_modified: Option<String>,
 }
 
+/// A bounded page of object listings, plus whether the cap was reached.
+///
+/// `truncated` is the signal the old listing path lacked: when a prefix fans
+/// out to more objects than the cap, the listing stops early and the caller
+/// (and ultimately the UI) needs to know data is missing rather than silently
+/// showing a partial result.
+///
+/// This is the return type of [`StorageBackend::list_objects`], so it is
+/// deliberately *not* `#[non_exhaustive]` — out-of-crate backends must be able
+/// to construct it. Adding a field is therefore a breaking change.
+#[derive(Debug, Clone)]
+pub struct ListPage {
+    pub objects: Vec<ObjectInfo>,
+    /// True if the listing stopped at the requested cap and more objects exist
+    /// that were not returned.
+    pub truncated: bool,
+}
+
 /// A handle to an object's bytes that can be streamed to the client as they
 /// arrive, rather than buffered in full first.
 ///
@@ -51,11 +69,18 @@ pub trait StorageBackend: Send + Sync {
         &self,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, StorageError>> + Send + '_>>;
 
+    /// List objects under `prefix`, paginating up to `cap` results.
+    ///
+    /// Returns the objects plus whether the listing was truncated at `cap` —
+    /// the signal a caller needs so a partial result is never mistaken for a
+    /// complete one. `/api/browse` fans many prefixes out at a high cap and
+    /// surfaces the flag as a UI warning; `/api/search` uses a smaller cap.
     fn list_objects(
         &self,
         bucket: &str,
         prefix: &str,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<ObjectInfo>, StorageError>> + Send + '_>>;
+        cap: usize,
+    ) -> Pin<Box<dyn Future<Output = Result<ListPage, StorageError>> + Send + '_>>;
 
     /// List immediate child prefixes under `prefix` using delimiter-based listing.
     fn list_prefixes(
@@ -250,6 +275,53 @@ impl S3Backend {
     ) -> Self {
         Self::from_client(build_credentialed_client(credentials, region, ephemeral))
     }
+
+    /// Paginate `ListObjectsV2` under `prefix`, accumulating up to `cap` objects
+    /// and reporting whether more existed beyond the cap. The cap is a backstop
+    /// against a prefix with unbounded fan-out producing an enormous response.
+    async fn list_objects_paginated(
+        &self,
+        bucket: &str,
+        prefix: &str,
+        cap: usize,
+    ) -> Result<ListPage, StorageError> {
+        let mut pages = self
+            .client
+            .list_objects_v2()
+            .bucket(bucket)
+            .prefix(prefix)
+            .into_paginator()
+            .send();
+
+        let mut objects = Vec::new();
+        let mut truncated = false;
+        'pages: while let Some(page) = pages.next().await {
+            let page = page.map_err(|e| classify_s3_error(&e))?;
+            for obj in page.contents() {
+                if objects.len() >= cap {
+                    truncated = true;
+                    break 'pages;
+                }
+                if let Some(key) = obj.key() {
+                    objects.push(ObjectInfo {
+                        key: key.to_string(),
+                        size: obj.size().unwrap_or(0),
+                        last_modified: obj.last_modified().map(|t| t.to_string()),
+                    });
+                }
+            }
+        }
+        if truncated {
+            tracing::warn!(
+                bucket = %bucket,
+                prefix = %prefix,
+                cap,
+                "object listing truncated at cap; some objects are not shown"
+            );
+        }
+
+        Ok(ListPage { objects, truncated })
+    }
 }
 
 /// Construct an `aws_sdk_s3::Client` from explicit credentials. Shared by the
@@ -319,48 +391,11 @@ impl StorageBackend for S3Backend {
         &self,
         bucket: &str,
         prefix: &str,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<ObjectInfo>, StorageError>> + Send + '_>> {
+        cap: usize,
+    ) -> Pin<Box<dyn Future<Output = Result<ListPage, StorageError>> + Send + '_>> {
         let bucket = bucket.to_string();
         let prefix = prefix.to_string();
-        Box::pin(async move {
-            const MAX_RESULTS: usize = 1000;
-            let mut pages = self
-                .client
-                .list_objects_v2()
-                .bucket(&bucket)
-                .prefix(&prefix)
-                .into_paginator()
-                .send();
-
-            let mut objects = Vec::new();
-            let mut truncated = false;
-            'pages: while let Some(page) = pages.next().await {
-                let page = page.map_err(|e| classify_s3_error(&e))?;
-                for obj in page.contents() {
-                    if let Some(key) = obj.key() {
-                        objects.push(ObjectInfo {
-                            key: key.to_string(),
-                            size: obj.size().unwrap_or(0),
-                            last_modified: obj.last_modified().map(|t| t.to_string()),
-                        });
-                    }
-                    if objects.len() >= MAX_RESULTS {
-                        truncated = true;
-                        break 'pages;
-                    }
-                }
-            }
-            if truncated {
-                tracing::warn!(
-                    bucket = %bucket,
-                    prefix = %prefix,
-                    max = MAX_RESULTS,
-                    "object listing truncated at cap; some objects are not shown"
-                );
-            }
-
-            Ok(objects)
-        })
+        Box::pin(async move { self.list_objects_paginated(&bucket, &prefix, cap).await })
     }
 
     fn list_prefixes(
@@ -542,16 +577,22 @@ impl StorageBackend for LocalBackend {
         &self,
         _bucket: &str,
         prefix: &str,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<ObjectInfo>, StorageError>> + Send + '_>> {
+        cap: usize,
+    ) -> Pin<Box<dyn Future<Output = Result<ListPage, StorageError>> + Send + '_>> {
         let prefix = prefix.to_string();
         Box::pin(async move {
             let root = self.root.clone();
             let prefix2 = prefix.clone();
             tokio::task::spawn_blocking(move || {
                 let mut objects = Vec::new();
+                // `collect_files` enforces its own local-FS-safety bounds
+                // (`MAX_COLLECT_FILES`); the `cap` is applied on top so the
+                // contract holds for any caller-chosen limit.
                 collect_files(&root, &root, &prefix2, &mut objects, 0, &mut 0)?;
                 objects.sort_by(|a, b| a.key.cmp(&b.key));
-                Ok(objects)
+                let truncated = objects.len() > cap;
+                objects.truncate(cap);
+                Ok(ListPage { objects, truncated })
             })
             .await
             .map_err(|e| StorageError::Other(e.to_string()))?

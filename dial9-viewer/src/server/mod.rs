@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tower_http::cors::CorsLayer;
 
+mod browse;
 mod buckets;
 mod check;
 mod config;
@@ -225,6 +226,7 @@ fn api_router(state: AppState) -> Router {
         )
         .route("/prefixes", axum::routing::get(prefixes::list_prefixes))
         .route("/search", axum::routing::get(search::search))
+        .route("/browse", axum::routing::get(browse::browse))
         .route("/object", axum::routing::get(trace::get_object))
         // DEPRECATED (slated for removal): superseded by /object, which serves a
         // single object's raw bytes so the browser merges/gunzips client-side.
