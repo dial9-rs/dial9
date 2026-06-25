@@ -35,8 +35,7 @@ const MINUTE_GRANULARITY_THRESHOLD_SECS: i64 = 600;
 pub struct BrowseParams {
     pub bucket: Option<String>,
     /// Optional key prefix (the portion before the date), e.g. `traces`. When
-    /// omitted the server's default prefix (if any) is used. Combined with the
-    /// default prefix exactly as `/api/search` combines `q`.
+    /// omitted the server's default prefix (if any) is used.
     pub prefix: Option<String>,
     /// Inclusive start of the window, unix seconds.
     pub from: i64,
@@ -81,8 +80,7 @@ pub async fn browse(
         ));
     }
 
-    // Combine the user's key prefix with the server's default prefix, mirroring
-    // how `/api/search` combines `q`.
+    // Combine the user's key prefix with the server's default prefix.
     let key_prefix = params
         .prefix
         .as_deref()

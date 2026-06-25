@@ -74,7 +74,7 @@ pub trait StorageBackend: Send + Sync {
     /// Returns the objects plus whether the listing was truncated at `cap` —
     /// the signal a caller needs so a partial result is never mistaken for a
     /// complete one. `/api/browse` fans many prefixes out at a high cap and
-    /// surfaces the flag as a UI warning; `/api/search` uses a smaller cap.
+    /// surfaces the flag as a UI warning.
     fn list_objects(
         &self,
         bucket: &str,

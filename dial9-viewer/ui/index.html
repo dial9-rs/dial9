@@ -993,8 +993,8 @@
                 heatmapView.style.display = 'none';
                 // Show sample keys to help the user understand the bucket layout
                 try {
-                    const sampleResp = await apiFetch(`/api/search?bucket=${encodeURIComponent(bucket)}&q=`);
-                    const samples = sampleResp.ok ? await sampleResp.json() : [];
+                    const sampleResp = await apiFetch(`/api/browse?bucket=${encodeURIComponent(bucket)}&from=0&to=${Math.floor(Date.now()/1000)}`);
+                    const samples = sampleResp.ok ? (await sampleResp.json()).objects : [];
                     if (samples.length > 0) {
                         browseStatus.innerHTML = 'No traces found in this time range. Sample keys in this bucket:<br>' +
                             samples.slice(0, 5).map(o => `<code style="color:#7ec8e3;font-size:0.85em">${esc(o.key)}</code>`).join('<br>');
@@ -1526,7 +1526,7 @@
         if (!bucket) { alert('Bucket is required'); return; }
 
         const q = document.getElementById('raw-search-input').value.trim();
-        const url = `/api/search?bucket=${encodeURIComponent(bucket)}&q=${encodeURIComponent(q)}`;
+        const url = `/api/browse?bucket=${encodeURIComponent(bucket)}&prefix=${encodeURIComponent(q)}&from=0&to=${Math.floor(Date.now()/1000)}`;
 
         const rawStatus = document.getElementById('raw-status');
         rawStatus.textContent = 'Searching…';
@@ -1537,7 +1537,7 @@
         try {
             const resp = await apiFetch(url);
             if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${await resp.text()}`);
-            rawObjects = await resp.json();
+            rawObjects = (await resp.json()).objects;
             renderRawTable(rawObjects);
         } catch (err) {
             rawStatus.textContent = 'Error: ' + err.message;
@@ -1560,8 +1560,8 @@
             rawTable.style.display = 'none';
             try {
                 const bucket = bucketInput.value.trim();
-                const sampleResp = await fetch(`/api/search?bucket=${encodeURIComponent(bucket)}&q=`);
-                const samples = sampleResp.ok ? await sampleResp.json() : [];
+                const sampleResp = await fetch(`/api/browse?bucket=${encodeURIComponent(bucket)}&from=0&to=${Math.floor(Date.now()/1000)}`);
+                const samples = sampleResp.ok ? (await sampleResp.json()).objects : [];
                 if (samples.length > 0) {
                     rawStatus.innerHTML = 'No results found. Sample keys in this bucket:<br>' +
                         samples.slice(0, 5).map(o => `<code style="color:#7ec8e3;font-size:0.85em">${esc(o.key)}</code>`).join('<br>');
