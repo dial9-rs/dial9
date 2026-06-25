@@ -58,6 +58,10 @@ const DIAL9_VERSION_KEY: &str = "dial9.dial9-tokio-telemetry.version";
 /// Compile-time value for `DIAL9_VERSION_KEY`.
 const DIAL9_VERSION_VALUE: &str = env!("CARGO_PKG_VERSION");
 
+/// Segment-metadata key carrying the logical CPU capacity available to the
+/// process. Populated by default when the platform can report it.
+const PROCESS_AVAILABLE_PARALLELISM_KEY: &str = "process.available_parallelism";
+
 #[derive(Clone)]
 struct SegmentMetadata {
     entries: Vec<(String, String)>,
@@ -65,12 +69,20 @@ struct SegmentMetadata {
 
 impl Default for SegmentMetadata {
     fn default() -> Self {
-        Self {
-            entries: vec![(
-                DIAL9_VERSION_KEY.to_string(),
-                DIAL9_VERSION_VALUE.to_string(),
-            )],
+        let mut entries = vec![(
+            DIAL9_VERSION_KEY.to_string(),
+            DIAL9_VERSION_VALUE.to_string(),
+        )];
+        match std::thread::available_parallelism() {
+            Ok(parallelism) => entries.push((
+                PROCESS_AVAILABLE_PARALLELISM_KEY.to_string(),
+                parallelism.get().to_string(),
+            )),
+            Err(e) => rate_limited!(Duration::from_secs(60), {
+                tracing::warn!("failed to read process available parallelism: {e}");
+            }),
         }
+        Self { entries }
     }
 }
 
@@ -2399,6 +2411,39 @@ mod tests {
         );
     }
 
+    /// The process's available logical CPU capacity is embedded in every
+    /// segment's metadata when the platform can report it.
+    #[test]
+    fn test_available_parallelism_in_segment_metadata() {
+        let expected = std::thread::available_parallelism().map(|n| n.get().to_string());
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("trace.bin");
+        let mut writer = DiskWriter::single_file(&path).unwrap();
+        writer.write_encoded_batch(&test_batch()).unwrap();
+        writer.flush().unwrap();
+        writer.finalize().unwrap();
+
+        let sealed = dir.path().join("trace.0.bin");
+        let all = decode_all(&std::fs::read(&sealed).unwrap());
+        let value = all.iter().find_map(|e| match e {
+            Decoded::SegmentMetadata { entries, .. } => {
+                entries.get(PROCESS_AVAILABLE_PARALLELISM_KEY).cloned()
+            }
+            _ => None,
+        });
+        match expected {
+            Ok(expected) => assert_eq!(
+                value.as_deref(),
+                Some(expected.as_str()),
+                "expected process.available_parallelism entry matching std::thread::available_parallelism()"
+            ),
+            Err(_) => assert!(
+                value.is_none(),
+                "process.available_parallelism should be omitted when available_parallelism() fails"
+            ),
+        }
+    }
+
     /// User-supplied `dial9.dial9-tokio-telemetry.version` entries win over the built-in default,
     /// both at builder time and via `update_segment_metadata`.
     #[test]
@@ -2692,5 +2737,129 @@ mod tests {
             .max_segment_size(seg)
             .build()
             .expect("3× segment must be accepted");
+    }
+
+    /// End-to-end writer -> worker tests: drive a memory writer through the
+    /// real worker pipeline and assert every written event reaches a processor.
+    #[cfg(feature = "pipeline")]
+    mod mem_e2e_tests {
+        use super::*;
+        use crate::pipeline::{ProcessError, SegmentData, SegmentProcessor};
+        use crate::worker::WorkerLoop;
+        use std::future::Future;
+        use std::pin::Pin;
+        use std::sync::{Arc, Mutex};
+        use std::time::Duration;
+
+        /// Captures each processed segment's payload bytes.
+        struct CapturingProcessor {
+            segments: Arc<Mutex<Vec<Vec<u8>>>>,
+        }
+
+        impl CapturingProcessor {
+            fn new() -> (Self, Arc<Mutex<Vec<Vec<u8>>>>) {
+                let segments = Arc::new(Mutex::new(Vec::new()));
+                (
+                    Self {
+                        segments: segments.clone(),
+                    },
+                    segments,
+                )
+            }
+        }
+
+        impl SegmentProcessor for CapturingProcessor {
+            fn name(&self) -> &'static str {
+                "Capture"
+            }
+            fn process(
+                &mut self,
+                data: SegmentData,
+            ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>>
+            {
+                self.segments
+                    .lock()
+                    .unwrap()
+                    .push(data.payload().clone().into_vec());
+                Box::pin(async move { Ok(data) })
+            }
+        }
+
+        /// Exercises the full seam: write -> Fs::Mem seal -> ring -> finalize
+        /// (mark_writer_done) -> WorkerLoop::run drain-to-empty -> processor.
+        async fn run_mem_e2e(mut writer: InMemoryWriter, events: usize) -> Vec<Vec<u8>> {
+            let fs = writer.fs_handle().expect("memory writer exposes its Fs");
+            for _ in 0..events {
+                writer.write_encoded_batch(&test_batch()).unwrap();
+            }
+            // Seals the active segment onto the ring and signals writer_done.
+            writer.finalize().unwrap();
+
+            let (capture, captured) = CapturingProcessor::new();
+            // stop is never cancelled: the loop exits via writer_done only.
+            let stop = tokio_util::sync::CancellationToken::new();
+            let mut worker = WorkerLoop::new(
+                fs,
+                Duration::from_millis(5),
+                vec![Box::new(capture)],
+                stop,
+                metrique_writer::sink::DevNullSink::boxed(),
+                None,
+            );
+            worker.run().await;
+
+            let segments = captured.lock().unwrap();
+            segments.clone()
+        }
+
+        /// Count decoded payload events across `segments`, dropping the
+        /// per-segment metadata/clock-sync framing the writer emits.
+        fn count_payload_events(segments: &[Vec<u8>]) -> usize {
+            segments
+                .iter()
+                .flat_map(|s| decode_all(s))
+                .filter(|e| matches!(e, Decoded::Data { .. }))
+                .count()
+        }
+
+        #[tokio::test]
+        async fn mem_writer_e2e_delivers_all_events() {
+            const EVENTS: usize = 25;
+
+            let segments = run_mem_e2e(InMemoryWriter::new(1 << 20).unwrap(), EVENTS).await;
+
+            assert!(!segments.is_empty(), "worker captured no segments");
+            assert_eq!(
+                count_payload_events(&segments),
+                EVENTS,
+                "every written event must reach the processor"
+            );
+        }
+
+        /// Same, but a tiny `max_segment_size` forces several rotations so the
+        /// worker delivers multiple sealed segments.
+        #[tokio::test]
+        async fn mem_writer_e2e_delivers_all_events_across_rotations() {
+            const EVENTS: usize = 60;
+
+            // Huge ring (nothing evicts) + tiny segments (rotate every few batches).
+            let writer = InMemoryWriter::builder()
+                .max_total_size(16 * 1024 * 1024)
+                .max_segment_size(256)
+                .build()
+                .unwrap();
+            let segments = run_mem_e2e(writer, EVENTS).await;
+
+            assert!(
+                segments.len() >= 2,
+                "tiny segments must force rotation, got {} segment(s)",
+                segments.len()
+            );
+            assert_eq!(
+                count_payload_events(&segments),
+                EVENTS,
+                "every event across all rotated segments must reach the processor"
+            );
+        }
     }
 }

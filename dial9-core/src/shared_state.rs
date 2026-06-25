@@ -33,6 +33,10 @@ pub struct SharedState {
     tl_buffers: Mutex<Vec<TlBufferHandle>>,
     /// Data sources (CPU profiler, sched profiler, etc.) that the flush thread drains.
     pub sources: Mutex<Vec<Box<dyn crate::source::Source>>>,
+    /// On-demand dump trigger, set once at build time when the runtime is
+    /// built with `with_dump_trigger`. Reached by application code through
+    /// [`Dial9Handle::dump_trigger`](super::handle::Dial9Handle::dump_trigger).
+    dump_trigger: std::sync::OnceLock<crate::dump::DumpTrigger>,
 }
 
 impl SharedState {
@@ -45,12 +49,26 @@ impl SharedState {
             drain_epoch: AtomicU64::new(0),
             tl_buffers: Mutex::new(Vec::new()),
             sources: Mutex::new(Vec::new()),
+            dump_trigger: std::sync::OnceLock::new(),
         }
     }
 
     /// Register a data source to be drained by the flush thread each cycle.
     pub fn push_source(&self, source: Box<dyn crate::source::Source>) {
         self.sources.lock().unwrap().push(source);
+    }
+
+    /// Install the on-demand dump trigger. Set once at build time by the
+    /// facade builder; later calls are ignored. `pub` so the facade (a
+    /// sibling crate) can wire the trigger in.
+    pub fn set_dump_trigger(&self, trigger: crate::dump::DumpTrigger) {
+        let _ = self.dump_trigger.set(trigger);
+    }
+
+    /// The on-demand dump trigger, or `None` when the runtime was built
+    /// without `with_dump_trigger`.
+    pub(crate) fn dump_trigger(&self) -> Option<&crate::dump::DumpTrigger> {
+        self.dump_trigger.get()
     }
 
     /// Check whether recording is currently enabled.

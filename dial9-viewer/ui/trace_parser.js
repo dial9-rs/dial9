@@ -74,11 +74,12 @@
    * concatenate them into a single ArrayBuffer.
    *
    * The `trace` query parameter is repeatable: each component is fetched
-   * independently and may be gzipped on its own (unlike `/api/trace`, which
-   * gunzips server-side before serving). We therefore ungzip every component
-   * here, then concatenate the raw bytes. The trace decoder treats a
-   * concatenated stream as multiple segments — a mid-stream `TRC\0` header
-   * resets the frame parser — so the combined buffer parses as one trace.
+   * independently (in parallel) and may be gzipped on its own — the S3 browser
+   * points each at `/api/object`, which serves one file's raw, still-gzipped
+   * bytes. We therefore ungzip every component here, then concatenate the raw
+   * bytes. The trace decoder treats a concatenated stream as multiple segments
+   * — a mid-stream `TRC\0` header resets the frame parser — so the combined
+   * buffer parses as one trace.
    *
    * @param {string|string[]} urls one URL or a list of URLs (order preserved)
    * @param {{signal?: AbortSignal, headers?: Object}} [opts] `headers` is
@@ -114,6 +115,112 @@
       off += p.length;
     }
     return out.buffer;
+  }
+
+  /**
+   * Whether the current runtime can stream a `fetch` response body and gunzip
+   * it incrementally. Node test runtimes (and older browsers) lack a real
+   * streaming `response.body` or `DecompressionStream`; callers fall back to
+   * the buffered `fetchTraces` + `parseTraceBuffer` path there.
+   */
+  function canStreamDecode() {
+    return typeof ReadableStream !== "undefined" &&
+      typeof DecompressionStream !== "undefined";
+  }
+
+  /**
+   * Wrap an already-buffered `Uint8Array` in the minimal subset of the
+   * `ReadableStreamDefaultReader` interface that {@link fetchTraceStream} uses
+   * (`read()` / `cancel()`). Yields the whole buffer in one chunk, then EOF.
+   * Used only as a fallback when a `fetch` response has no streamable `body`.
+   */
+  function oneShotReader(bytes) {
+    let done = false;
+    return {
+      async read() {
+        if (done) return { value: undefined, done: true };
+        done = true;
+        return { value: bytes, done: false };
+      },
+      async cancel() { done = true; },
+    };
+  }
+
+  /**
+   * Fetch a single trace URL and return an async iterable of raw (gunzipped, if
+   * the body was gzipped) `Uint8Array` chunks. Pair with
+   * {@link parseTraceStream} so download and decode overlap.
+   *
+   * We peek the first chunk's first two bytes for the gzip magic (1f 8b). If
+   * present, the remaining body is piped through `DecompressionStream("gzip")`
+   * after re-feeding the peeked chunk; otherwise chunks pass through raw.
+   * `headers` follow the same same-origin credential-withholding rule as
+   * {@link fetchTraces}.
+   *
+   * @param {string} url single trace URL
+   * @param {{signal?: AbortSignal, headers?: Object}} [opts]
+   * @returns {Promise<AsyncIterable<Uint8Array>>}
+   */
+  async function fetchTraceStream(url, opts = {}) {
+    const headers = isSameOrigin(url) ? opts.headers : undefined;
+    const resp = await fetch(url, { signal: opts.signal, headers });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status} fetching ${url}`);
+
+    // Some runtimes hand back an ok response with no readable `body` stream
+    // even though canStreamDecode() reported support (e.g. certain cached or
+    // synthesized responses). Rather than throwing a bare TypeError on
+    // `null.getReader()`, buffer the whole body and adapt it to the same
+    // reader interface so the gzip-sniff + DecompressionStream path below is
+    // identical — we just lose the download/parse overlap for this response.
+    const reader = resp.body
+      ? resp.body.getReader()
+      : oneShotReader(new Uint8Array(await resp.arrayBuffer()));
+    // Read the first non-empty chunk to sniff the gzip magic.
+    let first = null;
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      if (value && value.byteLength > 0) {
+        first = value instanceof Uint8Array ? value : new Uint8Array(value);
+        break;
+      }
+    }
+
+    const isGzip = first != null && first.length >= 2 &&
+      first[0] === 0x1f && first[1] === 0x8b;
+
+    // A ReadableStream that re-emits the peeked first chunk then drains the
+    // rest of the body reader.
+    const rawStream = new ReadableStream({
+      start(controller) {
+        if (first != null) controller.enqueue(first);
+      },
+      async pull(controller) {
+        const { value, done } = await reader.read();
+        if (done) { controller.close(); return; }
+        if (value && value.byteLength > 0) controller.enqueue(value);
+      },
+      cancel(reason) { return reader.cancel(reason); },
+    });
+
+    const byteStream = isGzip
+      ? rawStream.pipeThrough(new DecompressionStream("gzip"))
+      : rawStream;
+
+    return {
+      [Symbol.asyncIterator]() {
+        const r = byteStream.getReader();
+        return {
+          async next() {
+            const { value, done } = await r.read();
+            if (done) return { done: true, value: undefined };
+            const u8 = value instanceof Uint8Array ? value : new Uint8Array(value);
+            return { done: false, value: u8 };
+          },
+          async return() { await r.cancel(); return { done: true, value: undefined }; },
+        };
+      },
+    };
   }
 
   /**
@@ -171,6 +278,7 @@
    *   callframeSymbols: Map<string, SymbolFrame|SymbolFrame[]>,
    *   threadNames: Map<number, string>,
    *   runtimeWorkers: Map<string, number[]>,
+   *   segmentMetadata: Map<string, string>,
    * }} ParsedTrace
    */
 
@@ -374,105 +482,122 @@
     return iterable;
   }
 
-  /** @private Parse a binary trace buffer. */
-  async function parseTraceBuffer(buffer, options) {
-    buffer = await maybeGunzip(buffer);
+  const UNCAPPED_FRAMES = new Set([
+    "TaskSpawnEvent",
+    "TaskTerminateEvent",
+    "CpuSampleEvent",
+    "TaskDumpEvent",
+    "SymbolTableEntry",
+    "SegmentMetadataEvent",
+    "ClockSyncEvent",
+  ]);
+  const TRACE_BOUND_EXCLUDED_FRAMES = new Set([
+    "SymbolTableEntry",
+    "SegmentMetadataEvent",
+    "ClockSyncEvent",
+  ]);
+  // Legacy classifier: epoch ns are ~1e18, monotonic ns are much smaller.
+  // 2020 is a practical floor that separates those ranges.
+  const LEGACY_EPOCH_FLOOR_MS = 1_577_836_800_000; // 2020-01-01
+
+  /**
+   * @private Build the mutable accumulator that {@link processFrame} fills and
+   * {@link finalizeParse} drains. Shared by the whole-buffer
+   * ({@link parseTraceBuffer}) and streaming ({@link parseTraceStream}) paths
+   * so there is exactly one copy of the frame-handling and post-processing
+   * logic. Returns the same `ParsedTrace` for the same concatenated bytes
+   * regardless of how those bytes were chunked.
+   */
+  function createParseState(options) {
     const maxEvents = (options && options.maxEvents != null) ? options.maxEvents : MAX_EVENTS;
     const startTime = (options && options.startTime != null) ? options.startTime : 0;
     const endTime = (options && options.endTime != null) ? options.endTime : Infinity;
     const hasTimeFilter = startTime > 0 || endTime < Infinity;
-    const onProgress = (options && options.onParseProgress) || null;
-    const YIELD_BYTES = 100 * 1024; // yield to browser every 100KB
-    const TD = getTraceDecoder();
-    const dec = new TD(
-      buffer instanceof ArrayBuffer ? new Uint8Array(buffer) : buffer
-    );
-    if (!dec.decodeHeader()) throw new Error("Invalid trace header");
-    const totalBytes = dec.byteLength;
+    return {
+      maxEvents, startTime, endTime, hasTimeFilter,
+      events: [],
+      spawnLocations: new Map(),
+      taskSpawnLocs: new Map(),
+      taskSpawnTimes: new Map(),
+      taskTerminateTimes: new Map(),
+      taskInstrumented: new Map(), // taskId -> bool (true if spawned via TelemetryHandle::spawn)
+      callframeSymbols: new Map(),
+      cpuSamples: [],
+      allocEvents: [],
+      freeEvents: [],
+      memoryOverflows: [],
+      threadNames: new Map(),
+      tidToWorker: new Map(), // tid → workerId (stable mapping from park/unpark events)
+      runtimeWorkers: new Map(), // runtime name → [workerId, ...]
+      segmentMetadata: new Map(), // latest segment metadata key → value
+      taskDumps: new Map(), // taskId → [{timestamp, callchain}] sorted by timestamp
+      customEvents: [], // unrecognized event types: {name, timestamp, fields}
+      // { monotonicNs, realtimeNs } anchors used to recover wall clock.
+      clockSyncAnchors: [],
+      legacySegmentMetaWallNs: null,
+      // Smallest monotonic ts seen across all event frames.
+      // Used as the monotonic timestamp for the legacy synthesized anchor.
+      minMonoTs: null,
+      recordMinTs: Infinity,
+      recordMaxTs: -Infinity,
+    };
+  }
 
-    const events = [];
-    const spawnLocations = new Map();
-    const taskSpawnLocs = new Map();
-    const taskSpawnTimes = new Map();
-    const taskTerminateTimes = new Map();
-    const taskInstrumented = new Map(); // taskId -> bool (true if spawned via TelemetryHandle::spawn)
-    const callframeSymbols = new Map();
-    const cpuSamples = [];
-    const allocEvents = [];
-    const freeEvents = [];
-    const memoryOverflows = [];
-    const threadNames = new Map();
-    const tidToWorker = new Map(); // tid → workerId (stable mapping from park/unpark events)
-    const runtimeWorkers = new Map(); // runtime name → [workerId, ...]
-    const taskDumps = new Map(); // taskId → [{timestamp, callchain}] sorted by timestamp
-    const customEvents = []; // unrecognized event types: {name, timestamp, fields}
-    // { monotonicNs, realtimeNs } anchors used to recover wall clock.
-    const clockSyncAnchors = [];
-    // Legacy classifier: epoch ns are ~1e18, monotonic ns are much smaller.
-    // 2020 is a practical floor that separates those ranges.
-    const LEGACY_EPOCH_FLOOR_MS = 1_577_836_800_000; // 2020-01-01
-    let legacySegmentMetaWallNs = null;
-    // Smallest monotonic ts seen across all event frames.
-    // Used as the monotonic timestamp for the legacy synthesized anchor.
-    let minMonoTs = null;
-
-    const capped = () => events.length >= maxEvents;
-    const UNCAPPED_FRAMES = new Set([
-      "TaskSpawnEvent",
-      "TaskTerminateEvent",
-      "CpuSampleEvent",
-      "TaskDumpEvent",
-      "SymbolTableEntry",
-      "SegmentMetadataEvent",
-      "ClockSyncEvent",
-    ]);
-    const TRACE_BOUND_EXCLUDED_FRAMES = new Set([
-      "SymbolTableEntry",
-      "SegmentMetadataEvent",
-      "ClockSyncEvent",
-    ]);
-    let recordMinTs = Infinity, recordMaxTs = -Infinity;
-    function includeRecordTimestamp(t) {
-      if (t == null) return;
-      if (t < recordMinTs) recordMinTs = t;
-      if (t > recordMaxTs) recordMaxTs = t;
+  /**
+   * @private Handle a single decoded frame, mutating `state`. `dec` is the
+   * decoder the frame came from (used only to read a custom event's schema
+   * units). This is the single shared switch body — do not duplicate it.
+   */
+  function processFrame(frame, state, dec) {
+    const { startTime, endTime } = state;
+    if (frame.type !== "event") return;
+    const v = frame.values;
+    const ts = num(frame.timestamp_ns);
+    // Track smallest monotonic ts for legacy anchor synthesis.
+    // Skip SegmentMetadata (legacy wall clock) and SymbolTableEntry.
+    if (
+      ts != null &&
+      frame.name !== "SegmentMetadataEvent" &&
+      frame.name !== "SymbolTableEntry" &&
+      (state.minMonoTs == null || ts < state.minMonoTs)
+    ) {
+      state.minMonoTs = ts;
     }
 
-    let lastYieldPos = 0;
-    let frame;
-    while ((frame = dec.nextFrame()) !== null) {
-      // Yield to browser periodically so spinner can update
-      if (onProgress && dec.position - lastYieldPos >= YIELD_BYTES) {
-        lastYieldPos = dec.position;
-        onProgress({ bytesRead: dec.position, totalBytes, eventCount: events.length });
-        await new Promise((r) => setTimeout(r, 0));
+    const capped = state.events.length >= state.maxEvents;
+    if (capped && !UNCAPPED_FRAMES.has(frame.name)) return;
+
+    // Time range filtering: skip events outside the requested range
+    // (uncapped frames like symbols/metadata are always processed)
+    const inTimeRange = ts >= startTime && ts <= endTime;
+    if (!inTimeRange && !UNCAPPED_FRAMES.has(frame.name)) return;
+    if (inTimeRange && !TRACE_BOUND_EXCLUDED_FRAMES.has(frame.name)) {
+      if (ts != null) {
+        if (ts < state.recordMinTs) state.recordMinTs = ts;
+        if (ts > state.recordMaxTs) state.recordMaxTs = ts;
       }
+    }
 
-      if (frame.type !== "event") continue;
-      const v = frame.values;
-      const ts = num(frame.timestamp_ns);
-      // Track smallest monotonic ts for legacy anchor synthesis.
-      // Skip SegmentMetadata (legacy wall clock) and SymbolTableEntry.
-      if (
-        ts != null &&
-        frame.name !== "SegmentMetadataEvent" &&
-        frame.name !== "SymbolTableEntry" &&
-        (minMonoTs == null || ts < minMonoTs)
-      ) {
-        minMonoTs = ts;
-      }
+    const events = state.events;
+    const spawnLocations = state.spawnLocations;
+    const taskSpawnLocs = state.taskSpawnLocs;
+    const taskSpawnTimes = state.taskSpawnTimes;
+    const taskTerminateTimes = state.taskTerminateTimes;
+    const taskInstrumented = state.taskInstrumented;
+    const callframeSymbols = state.callframeSymbols;
+    const cpuSamples = state.cpuSamples;
+    const allocEvents = state.allocEvents;
+    const freeEvents = state.freeEvents;
+    const memoryOverflows = state.memoryOverflows;
+    const threadNames = state.threadNames;
+    const tidToWorker = state.tidToWorker;
+    const runtimeWorkers = state.runtimeWorkers;
+    const segmentMetadata = state.segmentMetadata;
+    const taskDumps = state.taskDumps;
+    const customEvents = state.customEvents;
+    const clockSyncAnchors = state.clockSyncAnchors;
 
-      if (capped() && !UNCAPPED_FRAMES.has(frame.name)) continue;
-
-      // Time range filtering: skip events outside the requested range
-      // (uncapped frames like symbols/metadata are always processed)
-      const inTimeRange = ts >= startTime && ts <= endTime;
-      if (!inTimeRange && !UNCAPPED_FRAMES.has(frame.name)) continue;
-      if (inTimeRange && !TRACE_BOUND_EXCLUDED_FRAMES.has(frame.name)) {
-        includeRecordTimestamp(ts);
-      }
-
-      switch (frame.name) {
+    switch (frame.name) {
         case "PollStartEvent": {
           const spawnLoc = v.spawn_loc || null;
           if (spawnLoc) spawnLocations.set(spawnLoc, spawnLoc);
@@ -660,17 +785,19 @@
         case "SegmentMetadataEvent": {
           // If this looks epoch-scale, treat it as legacy wall clock.
           if (
-            legacySegmentMetaWallNs == null &&
+            state.legacySegmentMetaWallNs == null &&
             ts != null &&
             ts / 1e6 >= LEGACY_EPOCH_FLOOR_MS
           ) {
-            legacySegmentMetaWallNs = ts;
+            state.legacySegmentMetaWallNs = ts;
           }
           const entries = v.entries || {};
           for (const [key, val] of Object.entries(entries)) {
+            const value = String(val);
+            segmentMetadata.set(key, value);
             if (key.startsWith("runtime.")) {
               const name = key.slice("runtime.".length);
-              const ids = val
+              const ids = value
                 .split(",")
                 .map(Number)
                 .filter((n) => !isNaN(n));
@@ -717,19 +844,33 @@
           }
           break;
         }
-      }
     }
+  }
+
+  /**
+   * @private Run the post-frame-loop passes (clock anchors, tid→worker
+   * resolution, block-in-place gaps) and assemble the final `ParsedTrace`.
+   * Identical for the whole-buffer and streaming paths. `version` is read from
+   * the decoder after the last frame.
+   */
+  function finalizeParse(state, version) {
+    const {
+      events, spawnLocations, taskSpawnLocs, taskSpawnTimes, taskTerminateTimes,
+      taskInstrumented, callframeSymbols, cpuSamples, allocEvents, freeEvents,
+      memoryOverflows, threadNames, tidToWorker, runtimeWorkers, segmentMetadata, taskDumps,
+      customEvents, clockSyncAnchors, maxEvents, startTime, endTime, hasTimeFilter,
+    } = state;
 
     // Legacy fallback: synthesize an anchor from legacy SegmentMetadata wall
     // time + earliest monotonic event timestamp. This is best-effort only.
     if (
       clockSyncAnchors.length === 0 &&
-      legacySegmentMetaWallNs != null &&
-      minMonoTs != null
+      state.legacySegmentMetaWallNs != null &&
+      state.minMonoTs != null
     ) {
       clockSyncAnchors.push({
-        monotonicNs: minMonoTs,
-        realtimeNs: legacySegmentMetaWallNs,
+        monotonicNs: state.minMonoTs,
+        realtimeNs: state.legacySegmentMetaWallNs,
       });
     }
 
@@ -773,12 +914,12 @@
 
     return {
       magic: "D9TF",
-      version: dec.version,
+      version,
       events,
       minTs: events.length > 0 ? evMinTs : null,
       maxTs: events.length > 0 ? evMaxTs : null,
-      recordMinTs: recordMinTs < Infinity ? recordMinTs : null,
-      recordMaxTs: recordMaxTs > -Infinity ? recordMaxTs : null,
+      recordMinTs: state.recordMinTs < Infinity ? state.recordMinTs : null,
+      recordMaxTs: state.recordMaxTs > -Infinity ? state.recordMaxTs : null,
       truncated: events.length >= maxEvents,
       timeFiltered: hasTimeFilter,
       filterStartTime: hasTimeFilter ? startTime : null,
@@ -799,12 +940,234 @@
       tidToWorker,
       taskTerminateTimes,
       runtimeWorkers,
+      segmentMetadata,
       customEvents,
       taskDumps,
       clockSyncAnchors,
       clockOffsetNs,
       blockInPlaceGaps,
     };
+  }
+
+  /** @private Parse a binary trace buffer. */
+  async function parseTraceBuffer(buffer, options) {
+    buffer = await maybeGunzip(buffer);
+    const onProgress = (options && options.onParseProgress) || null;
+    const YIELD_BYTES = 100 * 1024; // yield to browser every 100KB
+    const TD = getTraceDecoder();
+    const dec = new TD(
+      buffer instanceof ArrayBuffer ? new Uint8Array(buffer) : buffer
+    );
+    if (!dec.decodeHeader()) throw new Error("Invalid trace header");
+    const totalBytes = dec.byteLength;
+    const state = createParseState(options);
+
+    let lastYieldPos = 0;
+    let frame;
+    while ((frame = dec.nextFrame()) !== null) {
+      // Yield to browser periodically so spinner can update
+      if (onProgress && dec.position - lastYieldPos >= YIELD_BYTES) {
+        lastYieldPos = dec.position;
+        onProgress({ bytesRead: dec.position, totalBytes, eventCount: state.events.length });
+        await new Promise((r) => setTimeout(r, 0));
+      }
+      processFrame(frame, state, dec);
+    }
+
+    return finalizeParse(state, dec.version);
+  }
+
+  /**
+   * Parse a trace from an async stream of raw (already-gunzipped) byte chunks.
+   * Decoding overlaps with the network download: each chunk is appended to a
+   * growable buffer, and all *complete* frames it newly exposes are drained
+   * immediately; an incomplete trailing frame is rolled back and re-attempted
+   * once the next chunk arrives. The same {@link processFrame} /
+   * {@link finalizeParse} logic runs as for {@link parseTraceBuffer}, so the
+   * result is byte-for-byte identical to parsing the concatenated buffer.
+   *
+   * @param {AsyncIterable<Uint8Array>} chunks raw trace bytes (post-gunzip)
+   * @param {Object} [options] same options as {@link parseTrace}, plus
+   *   `onParseProgress({bytesRead, totalBytes, eventCount})`. `totalBytes` is
+   *   `null` here — when streaming we don't know the trace's full size until the
+   *   stream ends, so callers must not compute a percentage from it.
+   * @returns {Promise<ParsedTrace>}
+   */
+  async function parseTraceStream(chunks, options) {
+    const onProgress = (options && options.onParseProgress) || null;
+    const TD = getTraceDecoder();
+    const state = createParseState(options);
+
+    // Coalesce incoming chunks before draining. The browser's
+    // DecompressionStream("gzip") emits tiny ~16KB chunks (measured: ~708
+    // chunks of median/max 16384 bytes for the 10.27MB demo trace). Draining
+    // on every chunk pays a full-tail grow() copy + decode setup ~708 times,
+    // which dominates parse time (~66-78% overhead vs the whole-buffer
+    // baseline). Waiting until ≥256KB of undrained bytes have accumulated
+    // collapses those ~708 grow+drain cycles into ~40 and brings streaming back
+    // to/below the whole-buffer baseline. The 5-byte header is still decoded as
+    // soon as it arrives so a tiny trace (well under 256KB) still parses.
+    const MIN_DRAIN_BYTES = 256 * 1024;
+    // Yield a macrotask (setTimeout(0)) to the browser on a wall-clock cadence
+    // rather than per-chunk or per-byte. KEY FACT: the `for await` over `chunks`
+    // already awaits each decompressed chunk, so the network read +
+    // DecompressionStream pump make progress on their own — the macrotask yield
+    // does NOT drive download/parse overlap. Its ONLY purpose is to hand the
+    // main thread back to the browser so it can repaint the spinner. Each yield
+    // therefore permits (roughly) one repaint, and a byte cadence fired ~100
+    // times for a 10MB trace — ~100 paints during an ~8s parse. Throttling by
+    // elapsed wall-clock time instead caps paints to a few per second
+    // regardless of trace size, with zero effect on overlap or decode output.
+    // We don't drop the yield entirely: the spinner must still tick a few
+    // times/sec so the user sees progress. onProgress still fires on EVERY
+    // batch drain (cheap) so the event/byte counters stay current; only the
+    // (relatively expensive) repaint yield is rate-limited.
+    const PAINT_INTERVAL_MS = 200; // at most ~5 repaint yields per second
+
+    // Unconsumed-tail accumulator. The decoder reads pooled strings/stacks via
+    // its `stringPool`/`stackPool` maps (resolved values are copied into the
+    // maps), and event field reads only touch the current frame's bytes — never
+    // earlier offsets. So once a frame is fully decoded its bytes are dead, and
+    // we can drop the consumed prefix after each drain. That keeps `acc`
+    // bounded by (largest single frame + one chunk) and makes appends O(tail)
+    // instead of O(total) — avoiding O(n²) blow-up on many small chunks.
+    let acc = new Uint8Array(0);
+    let dec = null;
+    let headerDecoded = false;
+    let sawAnyBytes = false;
+    let consumedBytes = 0; // total bytes already decoded (for progress only)
+
+    function grow(chunk) {
+      if (chunk.length === 0) return;
+      // Always copy into a buffer sized EXACTLY to the accumulated bytes.
+      // Aliasing an incoming chunk (which may be a `subarray` view into a
+      // larger underlying ArrayBuffer) is unsafe: the field decoders build
+      // `new Uint8Array(view.buffer, …, len)` directly on the underlying
+      // buffer, bypassing the DataView's length bound, and would happily read
+      // bytes that lie past the logical end of the stream-so-far. Keeping
+      // `acc.buffer.byteLength === acc.length` makes such over-reads throw
+      // RangeError (→ needMoreBytes), which is exactly the incomplete-frame
+      // signal the streaming loop relies on.
+      const next = new Uint8Array(acc.length + chunk.length);
+      next.set(acc, 0);
+      next.set(chunk, acc.length);
+      acc = next;
+    }
+
+    // Drain every complete frame currently in `acc`, then drop the consumed
+    // prefix so the accumulator holds only the (incomplete) trailing frame.
+    function drainComplete() {
+      for (;;) {
+        const snap = dec.snapshot();
+        const frame = dec.nextFrame();
+        if (frame === null) {
+          if (dec.needMoreBytes) {
+            // Partial frame at the tail: undo any positional advance so the
+            // re-wrapped decoder re-attempts this frame from the same offset.
+            dec.restore(snap);
+          }
+          break;
+        }
+        processFrame(frame, state, dec);
+      }
+      // Drop everything the decoder has already consumed. `dec.position` points
+      // at the start of the incomplete trailing frame (or end-of-buffer).
+      const keepFrom = dec.position;
+      if (keepFrom > 0) {
+        consumedBytes += keepFrom;
+        acc = acc.slice(keepFrom);
+      }
+    }
+
+    // Decode the header (once ≥5 bytes are buffered) and then drain every
+    // complete frame currently in `acc`. Shared by the batched in-loop path and
+    // the final end-of-stream flush so both go through identical logic.
+    function drainBatch() {
+      if (!headerDecoded) {
+        // Need at least the 5-byte header before any frames. Wait for more.
+        if (acc.length < 5) return;
+        dec = new TD(acc);
+        dec.enableStreaming();
+        if (!dec.decodeHeader()) throw new Error("Invalid trace header");
+        headerDecoded = true;
+      } else {
+        // Re-wrap the decoder over the grown tail, rebasing its position to 0
+        // (the consumed prefix was dropped by the previous drainComplete()).
+        // Accumulated state (schemas, pools, timestamp base) is preserved.
+        dec.setBuffer(acc);
+        dec.rewindToStart();
+      }
+      drainComplete();
+    }
+
+    // Wall-clock source that works in browser and Node. Node 16+ exposes a
+    // global `performance`, but guard anyway in case it's absent.
+    const nowMs = (typeof performance !== "undefined" && performance.now)
+      ? () => performance.now()
+      : () => Date.now();
+    let lastYieldMs = nowMs(); // wall-clock time of the last macrotask yield
+    for await (const rawChunk of chunks) {
+      const chunk = rawChunk instanceof Uint8Array
+        ? rawChunk
+        : new Uint8Array(rawChunk);
+      if (chunk.length === 0) continue;
+      sawAnyBytes = true;
+      grow(chunk);
+
+      // Batch tiny chunks: keep accumulating until the undrained tail reaches
+      // MIN_DRAIN_BYTES, then drain once. `acc` only ever holds bytes that have
+      // NOT yet been consumed (drainComplete drops the consumed prefix), so its
+      // length is exactly the pending-but-undrained count. The header is the
+      // one exception — decode it as soon as ≥5 bytes exist so small traces
+      // don't stall waiting for a 256KB batch.
+      if (acc.length < MIN_DRAIN_BYTES && headerDecoded) continue;
+
+      drainBatch();
+
+      if (onProgress) {
+        onProgress({
+          bytesRead: consumedBytes,
+          // Total is unknown while streaming (we haven't seen the whole trace),
+          // so report null rather than `consumedBytes + acc.length` — `acc` is
+          // just the small undrained tail, which would peg any percentage at
+          // ~99% the entire time.
+          totalBytes: null,
+          eventCount: state.events.length,
+        });
+        // Yield so the browser can paint the spinner, but only once at least
+        // PAINT_INTERVAL_MS of wall-clock time has elapsed since the last
+        // yield — not once per (tiny) chunk and not on a byte cadence. Because
+        // the `for await` above already pumps the network/decompression, this
+        // throttle reduces repaints without slowing download/parse overlap.
+        const t = nowMs();
+        if (t - lastYieldMs >= PAINT_INTERVAL_MS) {
+          lastYieldMs = t;
+          await new Promise((r) => setTimeout(r, 0));
+        }
+      }
+    }
+
+    // Drain the final partial batch: bytes that arrived after the last
+    // MIN_DRAIN_BYTES drain (or, for a sub-256KB trace, the only batch).
+    if (acc.length > 0 || (sawAnyBytes && !headerDecoded)) {
+      drainBatch();
+      if (onProgress) {
+        onProgress({
+          bytesRead: consumedBytes,
+          totalBytes: null, // unknown while streaming — see note above
+          eventCount: state.events.length,
+        });
+      }
+    }
+
+    if (!sawAnyBytes || !headerDecoded) {
+      throw new Error("Invalid trace header");
+    }
+
+    // Stream ended. Any bytes still pending are a genuinely truncated tail
+    // (the file ended mid-frame) — finalize with whatever we decoded, matching
+    // the whole-buffer decoder's graceful EOF behavior.
+    return finalizeParse(state, dec.version);
   }
 
   // ── Directory parsing (Node-only) ──
@@ -852,6 +1215,7 @@
           if (raw.callframeSymbols) raw.callframeSymbols = entriesToMap(raw.callframeSymbols);
           if (raw.threadNames) raw.threadNames = entriesToMap(raw.threadNames);
           if (raw.runtimeWorkers) raw.runtimeWorkers = entriesToMap(raw.runtimeWorkers);
+          if (raw.segmentMetadata) raw.segmentMetadata = entriesToMap(raw.segmentMetadata);
           if (raw.taskDumps) raw.taskDumps = entriesToMap(raw.taskDumps);
           break;
         case 'e': events.push(rec.d); break;
@@ -864,6 +1228,7 @@
     }
     raw.events = events;
     raw.cpuSamples = cpuSamples;
+    if (!raw.segmentMetadata) raw.segmentMetadata = new Map();
     raw.customEvents = customEvents;
     raw.allocEvents = allocEvents;
     raw.freeEvents = freeEvents;
@@ -1170,8 +1535,11 @@
       EVENT_TYPES,
       OFF_WORKER_WORKER_ID,
       parseTrace,
+      parseTraceStream,
       parseOne,
       fetchTraces,
+      fetchTraceStream,
+      canStreamDecode,
       formatFrame,
       symbolizeChain,
       deduplicateSamples,
@@ -1182,7 +1550,10 @@
       EVENT_TYPES,
       OFF_WORKER_WORKER_ID,
       parseTrace,
+      parseTraceStream,
       fetchTraces,
+      fetchTraceStream,
+      canStreamDecode,
       formatFrame,
       symbolizeChain,
       deduplicateSamples,

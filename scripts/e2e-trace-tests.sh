@@ -47,6 +47,9 @@ node dial9-viewer/ui/test_trace_analysis.js
 echo "--- Checking multi-component trace fetch (repeatable trace=) ---"
 node dial9-viewer/ui/test_fetch_traces.js
 
+echo "--- Checking streaming trace decode (parseTraceStream) ---"
+node dial9-viewer/ui/test_stream_parse.js
+
 echo "--- Checking bring-your-own-credentials store ---"
 node dial9-viewer/ui/test_creds.js
 
@@ -58,5 +61,8 @@ node dial9-viewer/ui/test_prefix_detection.js
 
 echo "--- Checking enclosing spans (per-worker) ---"
 node dial9-viewer/ui/test_enclosing_spans.js
+
+echo "--- Checking flamegraph export (folded + SVG) ---"
+node dial9-viewer/ui/test_flamegraph_export.js
 
 echo "All E2E trace checks passed."

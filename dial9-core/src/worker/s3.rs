@@ -180,6 +180,79 @@ impl S3Config {
             None => suffix,
         }
     }
+
+    /// Key of the per-dump manifest object: `{prefix}/dumps/{dump_id}.json`.
+    pub(crate) fn manifest_key(&self, dump_id: &str) -> String {
+        match &self.prefix {
+            Some(p) => format!("{p}/dumps/{dump_id}.json"),
+            None => format!("dumps/{dump_id}.json"),
+        }
+    }
+}
+
+/// JSON document written at `{prefix}/dumps/{dump_id}.json` when a dump
+/// completes: the index answering "which trace objects belong to this
+/// dump?" in a single GET. Its presence doubles as the cross-process
+/// completion signal.
+#[derive(Debug, serde::Serialize)]
+pub(crate) struct DumpManifest {
+    pub(crate) dump_id: String,
+    pub(crate) triggered_at: String,
+    pub(crate) time_range: [String; 2],
+    pub(crate) segments_processed: usize,
+    pub(crate) metadata: std::collections::BTreeMap<String, String>,
+    pub(crate) segments: Vec<String>,
+}
+
+impl DumpManifest {
+    pub(crate) fn new(completion: &crate::dump::DumpCompletion, segments: Vec<String>) -> Self {
+        Self {
+            dump_id: completion.dump_id.to_string(),
+            triggered_at: rfc3339(completion.triggered_at),
+            time_range: [
+                rfc3339(completion.time_range.0),
+                rfc3339(completion.time_range.1),
+            ],
+            segments_processed: completion.segments_processed,
+            metadata: completion
+                .metadata
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+            segments,
+        }
+    }
+}
+
+fn rfc3339(t: std::time::SystemTime) -> String {
+    time::OffsetDateTime::from(t)
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_else(|_| "invalid-timestamp".to_string())
+}
+
+/// S3 user-metadata keys ride HTTP headers; only pass caller keys that are
+/// trivially valid and do not collide with the fixed per-object fields.
+fn valid_user_metadata_key(key: &str) -> bool {
+    const RESERVED: &[&str] = &[
+        "service",
+        "boot-id",
+        "segment-index",
+        "start-time",
+        "host",
+        "dump-id",
+    ];
+    !key.is_empty()
+        && key.len() <= 128
+        && key
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
+        && !RESERVED.contains(&key)
+}
+
+/// Values ride HTTP headers too; a non-ASCII or oversized value would fail
+/// the whole trace-object PUT, so a bad caller pair is skipped instead.
+fn valid_user_metadata_value(value: &str) -> bool {
+    value.len() <= 256 && value.bytes().all(|b| (0x20..=0x7e).contains(&b))
 }
 
 /// Convert epoch seconds to `YYYY-MM-DD/HHMM` string for S3 key bucketing.
@@ -253,7 +326,7 @@ impl S3Uploader {
             "application/octet-stream"
         };
 
-        let handle = aws_sdk_s3_transfer_manager::operation::upload::UploadInput::builder()
+        let mut input = aws_sdk_s3_transfer_manager::operation::upload::UploadInput::builder()
             .bucket(&self.config.bucket)
             .key(&key)
             .content_type(content_type)
@@ -267,7 +340,32 @@ impl S3Uploader {
                     .map(|s| s.as_str())
                     .unwrap_or("0"),
             )
-            .metadata("host", self.config.instance_path.as_str())
+            .metadata("host", self.config.instance_path.as_str());
+
+        // Triggered dumps: tag the object with every dump it belongs to
+        // (comma-joined), plus caller correlation pairs with the `dump.`
+        // namespace stripped.
+        if let Some(dump_ids) = metadata.get("dump_id") {
+            input = input.metadata("dump-id", dump_ids);
+            for (k, v) in metadata {
+                if let Some(stripped) = k.strip_prefix("dump.") {
+                    let header_key = stripped.to_ascii_lowercase();
+                    if valid_user_metadata_key(&header_key) && valid_user_metadata_value(v) {
+                        input = input.metadata(header_key, v);
+                    } else {
+                        rate_limited!(Duration::from_secs(60), {
+                            tracing::warn!(
+                                target: "dial9_worker",
+                                key = %stripped,
+                                "dump metadata pair not valid as S3 user metadata, skipping"
+                            );
+                        });
+                    }
+                }
+            }
+        }
+
+        let handle = input
             .body(payload.into_bytes().into())
             .initiate_with(&self.client)?;
 
@@ -286,6 +384,27 @@ impl S3Uploader {
 
         Ok(key)
     }
+
+    /// Key the manifest for `dump_id` would be written at.
+    pub(crate) fn manifest_key(&self, dump_id: &str) -> String {
+        self.config.manifest_key(dump_id)
+    }
+
+    /// PUT a dump manifest. Small JSON object, no local file involved.
+    pub(crate) async fn upload_manifest(
+        &self,
+        key: &str,
+        body: Vec<u8>,
+    ) -> Result<(), ProcessErrorKind> {
+        let handle = aws_sdk_s3_transfer_manager::operation::upload::UploadInput::builder()
+            .bucket(&self.config.bucket)
+            .key(key)
+            .content_type("application/json")
+            .body(bytes::Bytes::from(body).into())
+            .initiate_with(&self.client)?;
+        handle.join().await?;
+        Ok(())
+    }
 }
 
 // === S3 pipeline processor ===
@@ -296,6 +415,11 @@ impl S3Uploader {
 #[cfg(feature = "pipeline-s3")]
 pub struct S3PipelineUploader {
     state: S3UploaderState,
+    /// Triggered mode: object keys written per dump id, accumulated while
+    /// the dump is open and flushed into its manifest at `finalize_dump`.
+    /// A key appears under several ids when forward windows overlap.
+    /// `pub(crate)` so the finalize tests can seed and inspect it.
+    pub(crate) dump_keys: HashMap<String, Vec<String>>,
 }
 
 #[cfg(feature = "pipeline-s3")]
@@ -326,6 +450,7 @@ impl S3PipelineUploader {
     pub fn new(s3_config: S3Config, client: Option<aws_sdk_s3::Client>) -> Self {
         Self {
             state: S3UploaderState::Pending { s3_config, client },
+            dump_keys: HashMap::new(),
         }
     }
 
@@ -362,6 +487,7 @@ impl S3PipelineUploader {
                 uploader,
                 circuit_breaker,
             },
+            dump_keys: HashMap::new(),
         }
     }
 
@@ -459,6 +585,16 @@ impl SegmentProcessor for S3PipelineUploader {
             {
                 Ok(key) => {
                     circuit_breaker.on_success();
+                    // Triggered dumps: remember the key under every dump id
+                    // the segment belongs to, for that dump's manifest.
+                    if let Some(dump_ids) = data.metadata().get("dump_id") {
+                        for id in dump_ids.split(',').filter(|id| !id.is_empty()) {
+                            self.dump_keys
+                                .entry(id.to_string())
+                                .or_default()
+                                .push(key.clone());
+                        }
+                    }
                     rate_limited!(Duration::from_secs(10), {
                         tracing::info!(target: "dial9_worker", "uploaded {key}");
                     });
@@ -474,6 +610,76 @@ impl SegmentProcessor for S3PipelineUploader {
                         });
                     }
                     Err(ProcessError::new(data, kind))
+                }
+            }
+        })
+    }
+
+    fn finalize_dump(
+        &mut self,
+        completion: &crate::dump::DumpCompletion,
+    ) -> Pin<Box<dyn Future<Output = Option<String>> + Send + '_>> {
+        // Always take the entry so per-dump state clears even when no
+        // manifest gets written. An empty dump still gets an
+        // (empty-segments) manifest: its presence is the cross-process
+        // completion signal, so it is only written for dumps that
+        // completed (a failed dump resolves `Err` and leaves no manifest).
+        let segments = self
+            .dump_keys
+            .remove(&completion.dump_id.to_string())
+            .unwrap_or_default();
+        if completion.failed {
+            return Box::pin(std::future::ready(None));
+        }
+        let manifest = DumpManifest::new(completion, segments);
+        Box::pin(async move {
+            // The manifest may be the first object of the run (e.g. an
+            // empty dump before any segment upload): lazily initialize
+            // exactly like `process()` does.
+            if let S3UploaderState::Pending { s3_config, client } = &self.state {
+                let cfg = s3_config.clone();
+                let cli = client.clone();
+                let (uploader, circuit_breaker) = Self::initialize(cfg, cli).await;
+                self.state = S3UploaderState::Ready {
+                    uploader,
+                    circuit_breaker,
+                };
+            }
+            let S3UploaderState::Ready {
+                uploader,
+                circuit_breaker,
+            } = &mut self.state
+            else {
+                return None;
+            };
+            if !circuit_breaker.should_attempt() {
+                rate_limited!(Duration::from_secs(60), {
+                    tracing::warn!(target: "dial9_worker", dump_id = %manifest.dump_id, "circuit breaker open, skipping dump manifest");
+                });
+                return None;
+            }
+            let body = match serde_json::to_vec(&manifest) {
+                Ok(body) => body,
+                Err(e) => {
+                    rate_limited!(Duration::from_secs(60), {
+                        tracing::warn!(target: "dial9_worker", error = %e, "failed to serialize dump manifest");
+                    });
+                    return None;
+                }
+            };
+            let key = uploader.manifest_key(&manifest.dump_id);
+            // Best-effort: a failed manifest PUT never fails the receipt.
+            match uploader.upload_manifest(&key, body).await {
+                Ok(()) => {
+                    circuit_breaker.on_success();
+                    Some(key)
+                }
+                Err(e) => {
+                    circuit_breaker.on_failure();
+                    rate_limited!(Duration::from_secs(60), {
+                        tracing::warn!(target: "dial9_worker", error = %e, dump_id = %manifest.dump_id, "failed to write dump manifest");
+                    });
+                    None
                 }
             }
         })
@@ -869,6 +1075,103 @@ mod tests {
         check!(meta.get("segment-index").unwrap() == "3");
         check!(meta.get("start-time").unwrap() == "1741209000");
         check!(meta.get("host").unwrap() == "us-east-1/i-0abc123");
+        // No dump tagging in continuous mode.
+        check!(!meta.contains_key("dump-id"));
+    }
+
+    #[tokio::test]
+    async fn upload_attaches_dump_id_and_stripped_dump_pairs() {
+        let s3_root = tempfile::tempdir().unwrap();
+        let local_dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(s3_root.path().join("test-bucket")).unwrap();
+
+        let client = fake_s3_client(s3_root.path());
+        let raw_s3_client = fake_raw_s3_client(s3_root.path());
+        let uploader = S3Uploader::new(client, make_config());
+
+        let segment_path = local_dir.path().join("trace.4.bin");
+        std::fs::write(&segment_path, b"trace data").unwrap();
+        let segment = make_segment(&segment_path, 4);
+
+        let mut metadata = make_metadata(1741209000);
+        metadata.insert("dump_id".into(), "01ABC,01DEF".into());
+        metadata.insert("dump.reason".into(), "idle-ratio-drop".into());
+        metadata.insert("dump.Incident ID!".into(), "i-99".into()); // invalid key: skipped
+        metadata.insert("dump.host".into(), "spoofed".into()); // reserved: skipped
+        metadata.insert("dump.note".into(), "caf\u{e9}".into()); // non-ASCII value: skipped
+
+        let compressed = gzip_compress_file_sync(&segment_path).unwrap();
+        let key = uploader
+            .upload_and_delete(&segment, Payload::from_vec(compressed), &metadata)
+            .await
+            .unwrap();
+
+        let head = raw_s3_client
+            .head_object()
+            .bucket("test-bucket")
+            .key(&key)
+            .send()
+            .await
+            .unwrap();
+        let meta = head.metadata().unwrap();
+        check!(meta.get("dump-id").unwrap() == "01ABC,01DEF");
+        check!(meta.get("reason").unwrap() == "idle-ratio-drop");
+        check!(!meta.contains_key("incident id!"));
+        check!(!meta.contains_key("note"), "non-ASCII value skipped");
+        // Reserved fixed field never overridden by caller pairs.
+        check!(meta.get("host").unwrap() == "us-east-1/i-0abc123");
+    }
+
+    #[test]
+    fn manifest_key_layout() {
+        let with_prefix = make_config();
+        check!(with_prefix.manifest_key("01ABC") == "traces/dumps/01ABC.json");
+
+        let no_prefix = S3Config::builder()
+            .bucket("b")
+            .service_name("s")
+            .instance_path("i")
+            .boot_id("boot")
+            .build();
+        check!(no_prefix.manifest_key("01ABC") == "dumps/01ABC.json");
+    }
+
+    #[test]
+    fn dump_manifest_serializes_doc_shape() {
+        use std::time::{Duration, UNIX_EPOCH};
+
+        let (trigger, mut rx) = crate::dump::channel();
+        trigger
+            .dump_current_data()
+            .with_metadata("reason", "idle-ratio-drop");
+        let req = rx.rx.try_recv().unwrap();
+
+        let completion = crate::dump::DumpCompletion {
+            dump_id: req.id,
+            triggered_at: UNIX_EPOCH + Duration::from_secs(1741209000),
+            time_range: (
+                UNIX_EPOCH + Duration::from_secs(1741208700),
+                UNIX_EPOCH + Duration::from_secs(1741209300),
+            ),
+            segments_processed: 2,
+            metadata: req.metadata,
+            failed: false,
+        };
+        let manifest = DumpManifest::new(
+            &completion,
+            vec!["traces/a.bin.gz".into(), "traces/b.bin.gz".into()],
+        );
+        let value = serde_json::to_value(&manifest).unwrap();
+
+        check!(value["dump_id"] == serde_json::json!(req.id.to_string()));
+        check!(value["triggered_at"] == serde_json::json!("2025-03-05T21:10:00Z"));
+        check!(
+            value["time_range"]
+                == serde_json::json!(["2025-03-05T21:05:00Z", "2025-03-05T21:15:00Z"])
+        );
+        check!(value["segments_processed"] == serde_json::json!(2));
+        check!(value["metadata"] == serde_json::json!({"reason": "idle-ratio-drop"}));
+        check!(value["segments"] == serde_json::json!(["traces/a.bin.gz", "traces/b.bin.gz"]));
     }
 
     #[tokio::test]

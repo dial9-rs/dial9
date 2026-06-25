@@ -1,8 +1,8 @@
 // panel_layout.js — shared time-panel layout math.
 //
 // Every time-based panel in the viewer (timeline, worker lanes, span panel,
-// task detail, queue chart) must agree on the horizontal layout so their time
-// axes line up vertically:
+// custom events, CPU usage, task detail, queue chart) must agree on the
+// horizontal layout so their time axes line up vertically:
 //
 //   ┌──────────────┬──────────────────────────────┬────────┐
 //   │  label area  │       draw area              │ scroll │

@@ -10,6 +10,8 @@
 
 /// Background worker pipeline for processing sealed trace segments.
 pub mod background_task;
+/// On-trigger pipeline runs: dump triggers, receipts, and ids.
+pub use dial9_core::dump;
 #[cfg(feature = "memory-profiling")]
 pub mod memory_profiling;
 pub(crate) use dial9_core::{primitives, rate_limit, sampling};

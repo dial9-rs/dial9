@@ -22,6 +22,8 @@ pub mod buffer;
 pub mod clock;
 /// Central ring buffer of encoded event batches awaiting write.
 pub mod collector;
+/// On-demand pipeline runs: trigger, request channel, and dump receipts.
+pub mod dump;
 /// Flush-thread loop. Driven by `CoreSession`; not public API.
 pub(crate) mod flush_loop;
 /// Wire-format events emitted by the bus itself.

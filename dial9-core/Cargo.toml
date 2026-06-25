@@ -13,6 +13,7 @@ unexpected_cfgs = { level = "warn", check-cfg = ["cfg(shuttle)"] }
 bon = "3"
 bytes = "1"
 crossbeam-queue = "0.3"
+ulid = "1"
 dial9-trace-format = { workspace = true }
 libc = { workspace = true }
 tokio = { version = "1", features = ["sync"], default-features = false }
@@ -36,6 +37,8 @@ aws-sdk-s3 = { version = "1", default-features = false, optional = true, feature
 aws-config = { version = "1", optional = true, default-features = false }
 time = { version = "0.3", features = ["formatting", "macros"], optional = true }
 hostname = { version = "0.4", optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
 
 [dev-dependencies]
 assert2 = { workspace = true }
@@ -75,4 +78,6 @@ pipeline-s3 = [
     "dep:aws-config",
     "dep:time",
     "dep:hostname",
+    "dep:serde",
+    "dep:serde_json",
 ]

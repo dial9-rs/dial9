@@ -145,6 +145,23 @@ pub trait SegmentProcessor: Send {
         &mut self,
         data: SegmentData,
     ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>>;
+
+    /// Called once per finished dump in triggered mode (see
+    /// [`crate::dump`]), in pipeline order, so stages can flush any
+    /// per-dump state they accumulated. Return the S3 key of a manifest
+    /// written for this dump, or `None`; the last `Some` across the
+    /// pipeline lands on [`DumpReceipt::manifest_key`](crate::dump::DumpReceipt::manifest_key).
+    ///
+    /// Default: no-op returning `None`. Never called in continuous mode.
+    /// The same panic-safety contract as [`process()`](Self::process)
+    /// applies.
+    fn finalize_dump(
+        &mut self,
+        completion: &crate::dump::DumpCompletion,
+    ) -> Pin<Box<dyn Future<Output = Option<String>> + Send + '_>> {
+        let _ = completion;
+        Box::pin(std::future::ready(None))
+    }
 }
 
 /// Error returned by a [`SegmentProcessor`].
@@ -176,6 +193,11 @@ impl ProcessError {
     /// Recover the carried [`SegmentData`].
     pub fn into_data(self) -> SegmentData {
         self.data
+    }
+
+    /// Recover both the carried [`SegmentData`] and the failure kind.
+    pub fn into_parts(self) -> (SegmentData, ProcessErrorKind) {
+        (self.data, self.kind)
     }
 }
 
