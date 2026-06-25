@@ -1,8 +1,6 @@
 use assert2::check;
 use dial9_viewer::server::{AppState, UploadLimits, router};
-use dial9_viewer::storage::{
-    ListPage, LocalBackend, S3Backend, StorageBackend, StorageError,
-};
+use dial9_viewer::storage::{ListPage, LocalBackend, S3Backend, StorageBackend, StorageError};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -646,7 +644,9 @@ async fn without_credentials_falls_back_to_default_backend() {
     let client = reqwest::Client::new();
 
     let resp = client
-        .get(format!("{base}/api/browse?prefix=traces/&bucket=byo-bucket&from=0&to=9999999999"))
+        .get(format!(
+            "{base}/api/browse?prefix=traces/&bucket=byo-bucket&from=0&to=9999999999"
+        ))
         .send()
         .await
         .unwrap();
@@ -661,7 +661,9 @@ async fn incomplete_credentials_rejected_with_400() {
 
     // Access key id without a secret → 400, never a silent fallback.
     let resp = client
-        .get(format!("{base}/api/browse?prefix=traces/&bucket=byo-bucket&from=0&to=9999999999"))
+        .get(format!(
+            "{base}/api/browse?prefix=traces/&bucket=byo-bucket&from=0&to=9999999999"
+        ))
         .header(H_AKID, "test")
         .send()
         .await

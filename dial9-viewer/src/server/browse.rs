@@ -55,7 +55,10 @@ pub struct BrowseResponse {
 /// Granularity of the time prefixes scanned in S3.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Granularity {
+    /// `{date}/{HH}` — a full hour.
+    Hour,
     /// `{date}/{HH}{minute/10}` — a 10-minute bucket (matches `HHM0`..=`HHM9`).
+    #[cfg_attr(not(test), allow(dead_code))]
     TenMinute,
     /// `{date}/{HHMM}` — a single minute.
     Minute,
@@ -97,7 +100,7 @@ pub async fn browse(
     let gran = if window < MINUTE_GRANULARITY_THRESHOLD_SECS {
         Granularity::Minute
     } else {
-        Granularity::TenMinute
+        Granularity::Hour
     };
 
     let (prefixes, range_truncated) = time_prefixes(&base, params.from, params.to, gran);
@@ -113,7 +116,7 @@ pub async fn browse(
     // The prefixes are disjoint key-spaces (each is a distinct time bucket), so
     // no object can appear under two of them — no dedup needed.
     let results: Vec<Result<crate::storage::ListPage, StorageError>> =
-        futures::stream::iter(prefixes)
+        futures::stream::iter(prefixes.clone())
             .map(|p| {
                 let backend = backend.clone();
                 let bucket = bucket.clone();
@@ -125,10 +128,49 @@ pub async fn browse(
 
     let mut objects = Vec::new();
     let mut truncated = range_truncated;
-    for result in results {
+
+    // Collect overflowed hour-level prefixes for refinement.
+    let mut overflow_prefixes = Vec::new();
+    for (i, result) in results.into_iter().enumerate() {
         let page = result.map_err(storage_error_response)?;
-        truncated |= page.truncated;
-        objects.extend(page.objects);
+        if page.truncated && gran == Granularity::Hour {
+            overflow_prefixes.push(prefixes[i].clone());
+        } else {
+            truncated |= page.truncated;
+            objects.extend(page.objects);
+        }
+    }
+
+    // Retry overflowed hour-level prefixes at 10-minute granularity.
+    if !overflow_prefixes.is_empty() {
+        // Expand each overflowed hour prefix into its 6 ten-minute sub-prefixes.
+        let refined: Vec<String> = overflow_prefixes
+            .iter()
+            .flat_map(|p| (0..6).map(move |d| format!("{p}{d}")))
+            .collect();
+
+        tracing::info!(
+            refined_prefixes = refined.len(),
+            overflowed_hours = overflow_prefixes.len(),
+            "browse refining overflowed hours at 10-minute granularity"
+        );
+
+        let refined_results: Vec<Result<crate::storage::ListPage, StorageError>> =
+            futures::stream::iter(refined)
+                .map(|p| {
+                    let backend = backend.clone();
+                    let bucket = bucket.clone();
+                    async move { backend.list_objects(&bucket, &p, PER_PREFIX_CAP).await }
+                })
+                .buffer_unordered(LIST_CONCURRENCY)
+                .collect()
+                .await;
+
+        for result in refined_results {
+            let page = result.map_err(storage_error_response)?;
+            truncated |= page.truncated;
+            objects.extend(page.objects);
+        }
     }
 
     Ok(Json(BrowseResponse { objects, truncated }))
@@ -143,6 +185,7 @@ pub async fn browse(
 /// [`MAX_PREFIXES`].
 fn time_prefixes(base: &str, from: i64, to: i64, gran: Granularity) -> (Vec<String>, bool) {
     let step = match gran {
+        Granularity::Hour => 3600,
         Granularity::TenMinute => 600,
         Granularity::Minute => 60,
     };
@@ -177,6 +220,7 @@ fn bucket_prefix(epoch: i64, gran: Granularity) -> Option<String> {
         dt.day()
     );
     let time = match gran {
+        Granularity::Hour => format!("{:02}", dt.hour()),
         // Minute is always a multiple of 10 after alignment, so `minute / 10`
         // is the single tens digit (0..=5): e.g. 19:10 → `191`, 19:50 → `195`.
         Granularity::TenMinute => format!("{:02}{}", dt.hour(), dt.minute() / 10),
@@ -216,6 +260,25 @@ mod tests {
                 "traces/2026-06-09/191",
                 "traces/2026-06-09/192",
                 "traces/2026-06-09/193",
+            ]
+        );
+    }
+
+    /// Hour granularity emits the 2-char `HH` prefix per hour.
+    #[test]
+    fn hour_prefixes_cover_range() {
+        let from = OffsetDateTime::from_unix_timestamp(1_781_032_200).unwrap(); // 19:10
+        let to = from.unix_timestamp() + 3 * 3600; // 22:10
+        let (prefixes, truncated) =
+            time_prefixes("traces", from.unix_timestamp(), to, Granularity::Hour);
+        assert!(!truncated);
+        assert_eq!(
+            prefixes,
+            vec![
+                "traces/2026-06-09/19",
+                "traces/2026-06-09/20",
+                "traces/2026-06-09/21",
+                "traces/2026-06-09/22",
             ]
         );
     }

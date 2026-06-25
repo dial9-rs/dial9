@@ -993,7 +993,7 @@
                 heatmapView.style.display = 'none';
                 // Show sample keys to help the user understand the bucket layout
                 try {
-                    const sampleResp = await apiFetch(`/api/browse?bucket=${encodeURIComponent(bucket)}&from=0&to=${Math.floor(Date.now()/1000)}`);
+                    const sampleResp = await apiFetch(`/api/browse?bucket=${encodeURIComponent(bucket)}&from=${Math.floor(Date.now()/1000) - 86400}&to=${Math.floor(Date.now()/1000)}`);
                     const samples = sampleResp.ok ? (await sampleResp.json()).objects : [];
                     if (samples.length > 0) {
                         browseStatus.innerHTML = 'No traces found in this time range. Sample keys in this bucket:<br>' +
@@ -1526,7 +1526,7 @@
         if (!bucket) { alert('Bucket is required'); return; }
 
         const q = document.getElementById('raw-search-input').value.trim();
-        const url = `/api/browse?bucket=${encodeURIComponent(bucket)}&prefix=${encodeURIComponent(q)}&from=0&to=${Math.floor(Date.now()/1000)}`;
+        const url = `/api/browse?bucket=${encodeURIComponent(bucket)}&prefix=${encodeURIComponent(q)}&from=${Math.floor(Date.now()/1000) - 30*86400}&to=${Math.floor(Date.now()/1000)}`;
 
         const rawStatus = document.getElementById('raw-status');
         rawStatus.textContent = 'Searching…';
@@ -1560,7 +1560,7 @@
             rawTable.style.display = 'none';
             try {
                 const bucket = bucketInput.value.trim();
-                const sampleResp = await fetch(`/api/browse?bucket=${encodeURIComponent(bucket)}&from=0&to=${Math.floor(Date.now()/1000)}`);
+                const sampleResp = await fetch(`/api/browse?bucket=${encodeURIComponent(bucket)}&from=${Math.floor(Date.now()/1000) - 86400}&to=${Math.floor(Date.now()/1000)}`);
                 const samples = sampleResp.ok ? (await sampleResp.json()).objects : [];
                 if (samples.length > 0) {
                     rawStatus.innerHTML = 'No results found. Sample keys in this bucket:<br>' +
