@@ -1466,7 +1466,7 @@ async fn share_round_trips() {
 
     // POST a trace to create a share
     let resp = client
-        .post(format!("{base}/api/shared"))
+        .post(format!("{base}/api/share"))
         .body(TRACE_MAGIC_BYTES.to_vec())
         .send()
         .await
@@ -1479,7 +1479,7 @@ async fn share_round_trips() {
 
     // GET the shared trace back
     let fetched = client
-        .get(format!("{base}/api/shared/{token}"))
+        .get(format!("{base}/api/share/{token}"))
         .send()
         .await
         .unwrap();
@@ -1495,7 +1495,7 @@ async fn share_rejects_invalid_body() {
     let client = reqwest::Client::new();
 
     let resp = client
-        .post(format!("{base}/api/shared"))
+        .post(format!("{base}/api/share"))
         .body(b"not a trace".to_vec())
         .send()
         .await
@@ -1520,7 +1520,7 @@ async fn share_rejects_body_over_size_cap() {
     let mut body = TRACE_MAGIC_BYTES.to_vec();
     body.extend_from_slice(&[0u8; 64]);
     let resp = client
-        .post(format!("{base}/api/shared"))
+        .post(format!("{base}/api/share"))
         .body(body)
         .send()
         .await
@@ -1535,7 +1535,7 @@ async fn share_returns_404_without_bucket() {
     let client = reqwest::Client::new();
 
     let resp = client
-        .post(format!("{base}/api/shared"))
+        .post(format!("{base}/api/share"))
         .body(TRACE_MAGIC_BYTES.to_vec())
         .send()
         .await
@@ -1550,7 +1550,7 @@ async fn share_get_rejects_invalid_token() {
     let client = reqwest::Client::new();
 
     let resp = client
-        .get(format!("{base}/api/shared/INVALID"))
+        .get(format!("{base}/api/share/INVALID"))
         .send()
         .await
         .unwrap();
@@ -1564,9 +1564,7 @@ async fn share_get_returns_404_for_missing_token() {
     let client = reqwest::Client::new();
 
     let resp = client
-        .get(format!(
-            "{base}/api/shared/00000000000000000000000000000000"
-        ))
+        .get(format!("{base}/api/share/00000000000000000000000000000000"))
         .send()
         .await
         .unwrap();
@@ -1581,9 +1579,7 @@ async fn share_get_returns_404_when_sharing_disabled() {
     let client = reqwest::Client::new();
 
     let resp = client
-        .get(format!(
-            "{base}/api/shared/00000000000000000000000000000000"
-        ))
+        .get(format!("{base}/api/share/00000000000000000000000000000000"))
         .send()
         .await
         .unwrap();

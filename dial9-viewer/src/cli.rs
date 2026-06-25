@@ -54,7 +54,7 @@ enum Commands {
         #[arg(long)]
         enable_upload: bool,
 
-        /// Enable shareable links: lets the viewer `POST /api/shared` to copy
+        /// Enable shareable links: lets the viewer `POST /api/share` to copy
         /// a trace to the server's bucket under `shared/<token>.bin.gz` and
         /// produce a link anyone can open. Requires `--bucket`. Off by default;
         /// there is no auth on the write path — enable on a trusted network.

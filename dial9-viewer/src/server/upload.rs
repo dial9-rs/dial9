@@ -45,6 +45,12 @@ pub(super) fn validate_trace_body(body: &[u8]) -> Result<(), (StatusCode, String
     Ok(())
 }
 
+/// Default maximum size of a single uploaded (or shared) trace: 256 MiB.
+///
+/// This is the single source of truth for the per-trace size cap used by both
+/// the upload and share paths.
+pub const DEFAULT_MAX_UPLOAD_BYTES: usize = 256 * 1024 * 1024;
+
 /// Caps on the in-memory upload store. Defaults are sized for a viewer host with
 /// a few GiB of headroom; tests construct small limits to exercise the reject
 /// paths cheaply.
@@ -54,7 +60,7 @@ pub(super) fn validate_trace_body(body: &[u8]) -> Result<(), (StatusCode, String
 #[derive(Debug, Clone, Copy, bon::Builder)]
 pub struct UploadLimits {
     /// Maximum size of a single uploaded trace (default 256 MiB).
-    #[builder(default = 256 * 1024 * 1024)]
+    #[builder(default = DEFAULT_MAX_UPLOAD_BYTES)]
     max_upload_bytes: usize,
     /// Maximum total bytes held across all live uploads (default 1 GiB).
     #[builder(default = 1024 * 1024 * 1024)]

@@ -8,7 +8,14 @@ pub use report_serve::report_serve_router;
 use std::path::PathBuf;
 
 async fn detect_bucket_region(bucket: &str) -> Option<String> {
-    let config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
+    // HeadBucket needs *some* region to construct the S3 endpoint, even though
+    // the response header will tell us the real region. Use us-east-1 as a
+    // probe region — S3 global endpoint lives there and will redirect with
+    // `x-amz-bucket-region` for buckets in other regions.
+    let config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+        .region(aws_sdk_s3::config::Region::new("us-east-1"))
+        .load()
+        .await;
     let client = aws_sdk_s3::Client::new(&config);
     server::region_from_head_bucket(&client, bucket).await
 }
@@ -113,9 +120,29 @@ pub(crate) async fn serve(
     if enable_sharing {
         if app_state.default_bucket.is_some() {
             tracing::info!(
-                "sharing feature enabled (POST /api/shared); no auth — trusted network only"
+                "sharing feature enabled (POST /api/share); no auth — trusted network only"
             );
             app_state = app_state.with_sharing(true);
+
+            // Smoke-test: verify the ambient credentials can write to the bucket.
+            let bucket_name = app_state.default_bucket.as_deref().unwrap();
+            let check_key = "dial9-smoketest/check-writable";
+            match app_state
+                .backend
+                .put_object(bucket_name, check_key, b"ok".to_vec(), None)
+                .await
+            {
+                Ok(()) => {
+                    tracing::info!(bucket = %bucket_name, "bucket write check passed");
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        bucket = %bucket_name,
+                        error = %e,
+                        "bucket write check failed — sharing may not work"
+                    );
+                }
+            }
         } else {
             tracing::warn!("--enable-sharing ignored: requires --bucket");
         }

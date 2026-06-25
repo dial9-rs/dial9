@@ -7,7 +7,22 @@ use axum::http::StatusCode;
 ///
 /// Authorization failures collapse to a generic `401` so the underlying SDK
 /// message — which can echo the access key id — never reaches the client.
+/// All errors are logged server-side so operators can diagnose failures.
 pub fn storage_error_response(err: StorageError) -> (StatusCode, String) {
+    match &err {
+        StorageError::Unauthorized => {
+            tracing::warn!("storage request failed: unauthorized");
+        }
+        StorageError::AccountNotSignedUp => {
+            tracing::warn!("storage request failed: account not signed up");
+        }
+        StorageError::NotFound(key) => {
+            tracing::debug!(key, "storage request failed: not found");
+        }
+        StorageError::Other(msg) => {
+            tracing::error!(error = %msg, "storage request failed");
+        }
+    }
     match err {
         StorageError::Unauthorized => (StatusCode::UNAUTHORIZED, err.to_string()),
         StorageError::AccountNotSignedUp => (StatusCode::FORBIDDEN, err.to_string()),

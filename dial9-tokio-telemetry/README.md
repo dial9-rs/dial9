@@ -647,7 +647,7 @@ dial9 serve --bucket my-trace-bucket
 When serving from an S3 bucket (`--bucket`) with `--enable-sharing`, the viewer's toolbar shows a **Share** button. Clicking it uploads the current trace to the server's bucket under the `shared/` prefix with a random 122-bit token as the key, and copies a shareable URL to your clipboard. Anyone with the link can open the trace — no credentials required.
 
 ```
-https://your-viewer-host/viewer.html?shared=<token>
+https://your-viewer-host/viewer.html?share=<token>
 ```
 
 This works regardless of how the trace was loaded — from the server's bucket, from a bring-your-own-credentials bucket, or via local drag-and-drop.

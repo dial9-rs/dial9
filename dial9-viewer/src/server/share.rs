@@ -1,11 +1,11 @@
 //! Shareable link endpoints.
 //!
-//! `POST /api/shared` — upload the current trace buffer to the server's
+//! `POST /api/share` — upload the current trace buffer to the server's
 //! configured S3 bucket under `shared/<token>.bin.gz`, returning a shareable
 //! link whose security relies on the token's unguessability (UUID v4, 122 bits
 //! of entropy).
 //!
-//! `GET /api/shared/{token}` — retrieve a previously shared trace. No
+//! `GET /api/share/{token}` — retrieve a previously shared trace. No
 //! credentials are required from the requester; the server fetches the object
 //! using its own ambient identity.
 
@@ -23,14 +23,12 @@ use crate::server::error::storage_error_response;
 use crate::server::trace::maybe_gunzip;
 use crate::server::upload::validate_trace_body;
 
-/// Hard cap on the size of a single shared trace, in bytes (256 MiB).
+/// Hard cap on the size of a single shared trace, in bytes.
 ///
-/// Shared traces are written to S3 with no eviction, count quota, or TTL, so an
-/// unbounded `put_object` would let a caller fill the bucket. This bounds a
-/// single share; it is enforced both as the route's `DefaultBodyLimit` (rejects
-/// before buffering the whole body) and in the handler (source of truth, so the
-/// cap holds regardless of how the route is wired).
-pub(super) const MAX_SHARED_TRACE_BYTES: usize = 256 * 1024 * 1024;
+/// Defaults to [`UploadLimits::DEFAULT_MAX_UPLOAD_BYTES`] — the same limit used
+/// for uploads so there is one consistent cap for inbound traces regardless of
+/// whether they arrive via the upload or share path.
+pub(super) const MAX_SHARED_TRACE_BYTES: usize = super::upload::DEFAULT_MAX_UPLOAD_BYTES;
 
 #[derive(Serialize)]
 struct ShareResponse {
@@ -39,9 +37,34 @@ struct ShareResponse {
     viewer_url: String,
 }
 
-/// `POST /api/shared` — store the request body as a shared trace in S3.
+/// `POST /api/share` — store the request body as a shared trace in S3.
+///
+/// The token is generated server-side. For optimistic clients that want the URL
+/// before the upload finishes, use `POST /api/share/{token}` instead.
 pub async fn create_shared(
     State(state): State<AppState>,
+    body: Bytes,
+) -> Result<Response, (StatusCode, String)> {
+    let token = uuid::Uuid::new_v4().simple().to_string();
+    do_share(state, token, body).await
+}
+
+/// `POST /api/share/{token}` — store with a client-provided token, so the
+/// client can show the permalink before the upload completes.
+pub async fn create_shared_with_token(
+    State(state): State<AppState>,
+    Path(token): Path<String>,
+    body: Bytes,
+) -> Result<Response, (StatusCode, String)> {
+    if !is_valid_token(&token) {
+        return Err((StatusCode::BAD_REQUEST, "invalid token".to_string()));
+    }
+    do_share(state, token, body).await
+}
+
+async fn do_share(
+    state: AppState,
+    token: String,
     body: Bytes,
 ) -> Result<Response, (StatusCode, String)> {
     if !state.sharing_enabled {
@@ -66,7 +89,6 @@ pub async fn create_shared(
         "sharing not available: no bucket configured".to_string(),
     ))?;
 
-    let token = uuid::Uuid::new_v4().simple().to_string();
     let key = format!("shared/{token}.bin.gz");
 
     // Store gzipped. If the body is already gzipped, store verbatim to avoid
@@ -91,14 +113,14 @@ pub async fn create_shared(
     tracing::info!(%token, bytes = body.len(), "created shared trace");
 
     let resp = ShareResponse {
-        trace_url: format!("/api/shared/{token}"),
-        viewer_url: format!("/viewer.html?shared={token}"),
+        trace_url: format!("/api/share/{token}"),
+        viewer_url: format!("/viewer.html?share={token}"),
         token,
     };
     Ok((StatusCode::OK, axum::Json(resp)).into_response())
 }
 
-/// `GET /api/shared/{token}` — serve a previously shared trace.
+/// `GET /api/share/{token}` — serve a previously shared trace.
 pub async fn get_shared(
     State(state): State<AppState>,
     Path(token): Path<String>,

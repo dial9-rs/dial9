@@ -61,10 +61,10 @@ pub struct AppState {
     /// false for `--local-dir` (the data is local; credentials are meaningless).
     pub allow_byo_creds: bool,
     /// Whether shareable links are enabled (`--enable-sharing`). When false,
-    /// `POST /api/shared` returns 404.
+    /// `POST /api/share` returns 404.
     pub sharing_enabled: bool,
     /// Hard cap on the size of a single shared trace, in bytes. Bounds the
-    /// otherwise-unquota'd `POST /api/shared` write path so a caller can't fill
+    /// otherwise-unquota'd `POST /api/share` write path so a caller can't fill
     /// the bucket. Defaults to [`share::MAX_SHARED_TRACE_BYTES`].
     pub max_shared_trace_bytes: usize,
     /// Optional plumbing for ephemeral S3 client construction (test injection
@@ -242,7 +242,11 @@ fn api_router(state: AppState) -> Router {
     // is capped independently of the upload feature so a single share can't fill
     // the bucket. The handler re-checks the same cap as the source of truth.
     let share_route = Router::new()
-        .route("/shared", axum::routing::post(share::create_shared))
+        .route("/share", axum::routing::post(share::create_shared))
+        .route(
+            "/share/{token}",
+            axum::routing::get(share::get_shared).post(share::create_shared_with_token),
+        )
         .layer(DefaultBodyLimit::max(state.max_shared_trace_bytes));
 
     Router::new()
@@ -254,7 +258,6 @@ fn api_router(state: AppState) -> Router {
         )
         .route("/prefixes", axum::routing::get(prefixes::list_prefixes))
         .route("/search", axum::routing::get(search::search))
-        .route("/shared/{token}", axum::routing::get(share::get_shared))
         .route("/object", axum::routing::get(trace::get_object))
         // DEPRECATED (slated for removal): superseded by /object, which serves a
         // single object's raw bytes so the browser merges/gunzips client-side.

@@ -841,7 +841,7 @@
                     <button id="btn-parse-perf" style="display:none;background:#1e2050;border-color:#6c63ff;color:#d0ccff;white-space:nowrap" title="Show the dial9 fetch &amp; parse time breakdown for this load">⏱ Parse perf</button>
                     <button id="btn-set-range" title="Set time range filter (reloads with only events in range)">Set Range</button>
                     <button id="btn-clear-range" title="Clear time range filter" style="display:none">Clear Range</button>
-                    <button id="btn-share" style="display:none;background:#1a2a2a;border-color:#4dd0e1;color:#b2ebf2;white-space:nowrap" title="Create a shareable link to this trace">🔗 Share</button>
+                    <button id="btn-share" style="display:none;background:#1a2a2a;border-color:#4dd0e1;color:#b2ebf2;white-space:nowrap" title="Create a shareable link to this trace">🔗 Create Permalink</button>
                     <button id="btn-reset">New File</button>
                 </div>
                 <div class="toolbar-row" id="toolbar-row-view">
@@ -1902,10 +1902,10 @@
                 window.history.replaceState(null, '', newUrl);
             }
 
-            const sharedToken = urlParams.get('shared');
+            const sharedToken = urlParams.get('share');
             if (sharedToken) {
                 showLoadingState('Loading shared trace…');
-                loadTraceFromUrl(`/api/shared/${encodeURIComponent(sharedToken)}`);
+                loadTraceFromUrl(`/api/share/${encodeURIComponent(sharedToken)}`);
             } else if (traceUrls.length) {
                 showLoadingState(traceUrls.length > 1 ? `Loading ${traceUrls.length} traces…` : 'Loading trace…');
                 loadTraceFromUrl(traceUrls);
@@ -1932,10 +1932,21 @@
             const shareBtn = document.getElementById('btn-share');
             shareBtn.addEventListener('click', async () => {
                 if (!currentTraceBuffer) return;
+                // Generate token client-side so we can show the link immediately.
+                const token = crypto.randomUUID().replace(/-/g, '');
+                const shareUrl = location.origin + `/viewer.html?share=${token}`;
+
+                // Show the link immediately (optimistic) and copy to clipboard.
                 shareBtn.disabled = true;
-                shareBtn.textContent = '⏳ Sharing…';
+                shareBtn.textContent = '⏳ Uploading…';
                 try {
-                    const resp = await fetch('/api/shared', {
+                    await navigator.clipboard.writeText(shareUrl);
+                } catch { /* clipboard unavailable — link is still shown below */ }
+                showPermalink(shareUrl);
+
+                // Upload in background with the pre-determined token.
+                try {
+                    const resp = await fetch(`/api/share/${token}`, {
                         method: 'POST',
                         headers: { 'content-type': 'application/octet-stream' },
                         body: currentTraceBuffer,
@@ -1944,24 +1955,32 @@
                         const msg = await resp.text();
                         throw new Error(`HTTP ${resp.status}: ${msg}`);
                     }
-                    const data = await resp.json();
-                    const shareUrl = location.origin + data.viewer_url;
-                    try {
-                        await navigator.clipboard.writeText(shareUrl);
-                        shareBtn.textContent = '✓ Link copied!';
-                    } catch {
-                        // Clipboard API unavailable (plain HTTP) — show URL in prompt
-                        prompt('Shareable link (copy manually):', shareUrl);
-                        shareBtn.textContent = '🔗 Share';
-                    }
-                    setTimeout(() => { shareBtn.textContent = '🔗 Share'; }, 2000);
+                    shareBtn.textContent = '🔗 Create Permalink';
                 } catch (err) {
-                    alert('Share failed: ' + err.message);
-                    shareBtn.textContent = '🔗 Share';
+                    shareBtn.textContent = '🔗 Create Permalink';
+                    showPermalink(shareUrl, `Upload failed: ${err.message}`);
                 } finally {
                     shareBtn.disabled = false;
                 }
             });
+
+            /** Show/update the persistent permalink bar below the toolbar. */
+            function showPermalink(url, error) {
+                let bar = document.getElementById('permalink-bar');
+                if (!bar) {
+                    bar = document.createElement('div');
+                    bar.id = 'permalink-bar';
+                    bar.style.cssText = 'padding:4px 12px;background:#0d2626;border-bottom:1px solid #1a3a3a;font-size:13px;display:flex;align-items:center;gap:8px;';
+                    // Insert after the toolbar
+                    const toolbar = document.getElementById('toolbar');
+                    toolbar.parentNode.insertBefore(bar, toolbar.nextSibling);
+                }
+                if (error) {
+                    bar.innerHTML = `<span style="color:#ef5350">⚠ ${error}</span> <a href="${url}" style="color:#4dd0e1;text-decoration:underline">${url}</a>`;
+                } else {
+                    bar.innerHTML = `<span style="color:#a5d6a7">🔗 Permalink:</span> <a href="${url}" style="color:#4dd0e1;text-decoration:underline">${url}</a> <span style="color:#888">(copied to clipboard)</span>`;
+                }
+            }
 
             function processTrace() {
                 const evts = trace.events;
