@@ -18,11 +18,18 @@ const MAX_KEYS: usize = 100;
 #[derive(Deserialize)]
 pub struct ObjectParams {
     /// A single S3 key (e.g. ?key=2026-04-09/.../123-0.bin.gz)
+    #[serde(default)]
     pub key: String,
     pub bucket: Option<String>,
+    /// A share token — resolves to the server's bucket at `shared/{token}.bin.gz`.
+    /// Uses the server's ambient credentials (not BYO).
+    pub share: Option<String>,
 }
 
 /// `GET /api/object?bucket=&key=` — stream a single object's bytes verbatim.
+///
+/// Also supports `?share=<token>` to serve a previously shared trace using the
+/// server's ambient credentials and default bucket.
 ///
 /// Unlike [`get_trace`], this does NOT decompress: a `.bin.gz` object is served
 /// still-gzipped. The viewer fetches one `trace=/api/object?…` component per
@@ -46,17 +53,32 @@ pub async fn get_object(
     creds: MaybeCreds,
     Query(params): Query<ObjectParams>,
 ) -> Result<Response, (StatusCode, String)> {
-    let backend = state.resolve(creds)?;
-
-    let bucket = params
-        .bucket
-        .or(state.default_bucket.clone())
-        .ok_or((StatusCode::BAD_REQUEST, "bucket is required".to_string()))?;
-
-    let key = params.key;
-    if key.is_empty() {
-        return Err((StatusCode::BAD_REQUEST, "key is required".to_string()));
-    }
+    // Share mode: resolve token to a fixed bucket/key using server's own backend.
+    let (backend, bucket, key) = if let Some(token) = &params.share {
+        if !super::share::is_valid_token(token) {
+            return Err((StatusCode::BAD_REQUEST, "invalid share token".to_string()));
+        }
+        if !state.sharing_enabled {
+            return Err((StatusCode::NOT_FOUND, "sharing not enabled".to_string()));
+        }
+        let bucket = state.default_bucket.clone().ok_or((
+            StatusCode::NOT_FOUND,
+            "sharing not available: no bucket configured".to_string(),
+        ))?;
+        let key = format!("shared/{token}.bin.gz");
+        (state.backend.clone(), bucket, key)
+    } else {
+        let backend = state.resolve(creds)?;
+        let bucket = params
+            .bucket
+            .or(state.default_bucket.clone())
+            .ok_or((StatusCode::BAD_REQUEST, "bucket is required".to_string()))?;
+        let key = params.key;
+        if key.is_empty() {
+            return Err((StatusCode::BAD_REQUEST, "key is required".to_string()));
+        }
+        (backend, bucket, key)
+    };
 
     // Setup errors (not found / auth) surface here, before any body streams, so
     // they still map to the right status. Mid-stream errors (below) cannot.

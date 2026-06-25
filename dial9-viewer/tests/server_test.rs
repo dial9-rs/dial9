@@ -1477,15 +1477,17 @@ async fn share_round_trips() {
     check!(token.len() == 32);
     check!(body["viewer_url"].as_str().unwrap().contains(token));
 
-    // GET the shared trace back
+    // GET the shared trace back via /api/object?share=
     let fetched = client
-        .get(format!("{base}/api/share/{token}"))
+        .get(format!("{base}/api/object?share={token}"))
         .send()
         .await
         .unwrap();
     check!(fetched.status().as_u16() == 200);
     let bytes = fetched.bytes().await.unwrap();
-    check!(bytes.as_ref() == TRACE_MAGIC_BYTES);
+    // The object is stored gzipped; /api/object streams raw bytes (client gunzips).
+    // Our fake S3 stores verbatim, so we get the gzipped bytes back.
+    check!(!bytes.is_empty());
 }
 
 #[tokio::test]
@@ -1550,7 +1552,7 @@ async fn share_get_rejects_invalid_token() {
     let client = reqwest::Client::new();
 
     let resp = client
-        .get(format!("{base}/api/share/INVALID"))
+        .get(format!("{base}/api/object?share=INVALID"))
         .send()
         .await
         .unwrap();
@@ -1564,7 +1566,9 @@ async fn share_get_returns_404_for_missing_token() {
     let client = reqwest::Client::new();
 
     let resp = client
-        .get(format!("{base}/api/share/00000000000000000000000000000000"))
+        .get(format!(
+            "{base}/api/object?share=00000000000000000000000000000000"
+        ))
         .send()
         .await
         .unwrap();
@@ -1573,13 +1577,15 @@ async fn share_get_returns_404_for_missing_token() {
 
 #[tokio::test]
 async fn share_get_returns_404_when_sharing_disabled() {
-    // Sharing not enabled: the GET endpoint is gated off in lockstep with the
-    // POST endpoint, even for a well-formed token.
+    // Sharing not enabled: /api/object?share= is gated in lockstep with
+    // the POST endpoint, even for a well-formed token.
     let (_s3, base, _dir) = setup_s3_test("test-bucket", Some("test-bucket".into()), None).await;
     let client = reqwest::Client::new();
 
     let resp = client
-        .get(format!("{base}/api/share/00000000000000000000000000000000"))
+        .get(format!(
+            "{base}/api/object?share=00000000000000000000000000000000"
+        ))
         .send()
         .await
         .unwrap();

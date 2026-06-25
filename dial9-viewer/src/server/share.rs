@@ -5,11 +5,9 @@
 //! link whose security relies on the token's unguessability (UUID v4, 122 bits
 //! of entropy).
 //!
-//! `GET /api/share/{token}` — retrieve a previously shared trace. No
-//! credentials are required from the requester; the server fetches the object
-//! using its own ambient identity.
+//! Retrieval is handled by `/api/object?share=<token>` (see `trace.rs`).
 
-use axum::body::{Body, Bytes};
+use axum::body::Bytes;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -20,7 +18,6 @@ use std::io::Write;
 
 use crate::server::AppState;
 use crate::server::error::storage_error_response;
-use crate::server::trace::maybe_gunzip;
 use crate::server::upload::validate_trace_body;
 
 /// Hard cap on the size of a single shared trace, in bytes.
@@ -113,50 +110,15 @@ async fn do_share(
     tracing::info!(%token, bytes = body.len(), "created shared trace");
 
     let resp = ShareResponse {
-        trace_url: format!("/api/share/{token}"),
+        trace_url: format!("/api/object?share={token}"),
         viewer_url: format!("/viewer.html?share={token}"),
         token,
     };
     Ok((StatusCode::OK, axum::Json(resp)).into_response())
 }
 
-/// `GET /api/share/{token}` — serve a previously shared trace.
-pub async fn get_shared(
-    State(state): State<AppState>,
-    Path(token): Path<String>,
-) -> Result<Response, (StatusCode, String)> {
-    if !state.sharing_enabled {
-        return Err((StatusCode::NOT_FOUND, "sharing not enabled".to_string()));
-    }
-
-    if !is_valid_token(&token) {
-        return Err((StatusCode::BAD_REQUEST, "invalid token".to_string()));
-    }
-
-    let bucket = state.default_bucket.as_ref().ok_or((
-        StatusCode::NOT_FOUND,
-        "sharing not available: no bucket configured".to_string(),
-    ))?;
-
-    let key = format!("shared/{token}.bin.gz");
-    let data = state
-        .backend
-        .get_object(bucket, &key)
-        .await
-        .map_err(storage_error_response)?;
-
-    let raw = maybe_gunzip(&data);
-
-    Ok(Response::builder()
-        .header("content-type", "application/octet-stream")
-        .header("content-disposition", "attachment; filename=\"trace.bin\"")
-        .body(Body::from(raw))
-        .expect("static headers and owned body are always valid")
-        .into_response())
-}
-
 /// A valid token is exactly 32 lowercase hex characters (UUID v4 simple form).
-fn is_valid_token(token: &str) -> bool {
+pub(crate) fn is_valid_token(token: &str) -> bool {
     token.len() == 32
         && token
             .bytes()

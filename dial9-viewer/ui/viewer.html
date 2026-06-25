@@ -1905,7 +1905,7 @@
             const sharedToken = urlParams.get('share');
             if (sharedToken) {
                 showLoadingState('Loading shared trace…');
-                loadTraceFromUrl(`/api/share/${encodeURIComponent(sharedToken)}`);
+                loadTraceFromUrl(`/api/object?share=${encodeURIComponent(sharedToken)}`);
             } else if (traceUrls.length) {
                 showLoadingState(traceUrls.length > 1 ? `Loading ${traceUrls.length} traces…` : 'Loading trace…');
                 loadTraceFromUrl(traceUrls);

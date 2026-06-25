@@ -245,7 +245,7 @@ fn api_router(state: AppState) -> Router {
         .route("/share", axum::routing::post(share::create_shared))
         .route(
             "/share/{token}",
-            axum::routing::get(share::get_shared).post(share::create_shared_with_token),
+            axum::routing::post(share::create_shared_with_token),
         )
         .layer(DefaultBodyLimit::max(state.max_shared_trace_bytes));
 
