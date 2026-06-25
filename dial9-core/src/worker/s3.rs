@@ -289,7 +289,7 @@ pub(crate) fn gzip_compress_file_sync(path: &std::path::Path) -> std::io::Result
 }
 
 /// Uploads sealed trace segments to S3.
-pub struct S3Uploader {
+pub(crate) struct S3Uploader {
     client: Client,
     config: S3Config,
 }
@@ -302,7 +302,7 @@ impl std::fmt::Debug for S3Uploader {
 
 impl S3Uploader {
     /// Create a new uploader with the given transfer manager client and config.
-    pub fn new(client: Client, config: S3Config) -> Self {
+    pub(crate) fn new(client: Client, config: S3Config) -> Self {
         Self { client, config }
     }
 
@@ -481,7 +481,10 @@ impl S3PipelineUploader {
     /// Construct an uploader directly in the `Ready` state. Test-only —
     /// production code goes through [`new`](Self::new) and lazy init.
     #[cfg(test)]
-    pub fn from_ready(uploader: S3Uploader, circuit_breaker: connection::CircuitBreaker) -> Self {
+    pub(crate) fn from_ready(
+        uploader: S3Uploader,
+        circuit_breaker: connection::CircuitBreaker,
+    ) -> Self {
         Self {
             state: S3UploaderState::Ready {
                 uploader,

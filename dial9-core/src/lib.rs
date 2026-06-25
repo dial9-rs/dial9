@@ -23,6 +23,7 @@ pub mod clock;
 /// Central ring buffer of encoded event batches awaiting write.
 pub mod collector;
 /// On-demand pipeline runs: trigger, request channel, and dump receipts.
+#[cfg(feature = "pipeline")]
 pub mod dump;
 /// Flush-thread loop. Driven by `CoreSession`; not public API.
 pub(crate) mod flush_loop;
@@ -36,8 +37,10 @@ pub mod handle;
 /// Operational metrics for the core flush path.
 pub(crate) mod metrics;
 /// Segment payload buffer. `Payload` is part of the public API via [`pipeline`].
+#[cfg(feature = "pipeline")]
 pub(crate) mod payload;
 /// `SegmentProcessor` trait and the data threaded through the pipeline.
+#[cfg(feature = "pipeline")]
 pub mod pipeline;
 /// Cfg-gated concurrency primitives (std / shuttle).
 ///

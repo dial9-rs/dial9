@@ -10,19 +10,25 @@ use std::collections::VecDeque;
 use std::io::{self, Write};
 use std::path::Path;
 
-use bytes::Bytes;
-
-use crate::payload::Payload;
 use crate::primitives::fs;
 use crate::primitives::sync::Arc;
+use crate::sealed::SegmentRef;
+
+#[cfg(feature = "pipeline")]
+use crate::payload::Payload;
+#[cfg(feature = "pipeline")]
 use crate::primitives::sync::atomic::{AtomicU64, Ordering};
-use crate::sealed::{MemorySegment, SealedSegment, SegmentRef};
+#[cfg(feature = "pipeline")]
+use crate::sealed::{MemorySegment, SealedSegment};
+#[cfg(feature = "pipeline")]
+use bytes::Bytes;
 
 mod disk;
 mod mem;
 
 use disk::DiskFs;
-pub use mem::MEMORY_RETRY_BUDGET;
+#[cfg(feature = "pipeline")]
+pub(crate) use mem::MEMORY_RETRY_BUDGET;
 use mem::{MemActiveWriter, MemFs};
 
 /// Segments reserved outside the ring so `max_total_size` cap includes them.
@@ -36,16 +42,18 @@ pub(crate) struct DiscoveredArtifacts {
     pub next_active_index: u32,
 }
 
-pub enum RemoveReason {
+pub(crate) enum RemoveReason {
     /// Writer-side backpressure shed. Counts toward `dropped_segments`.
     Eviction,
     /// Worker cleanup after terminal pipeline failure.
+    #[cfg(feature = "pipeline")]
     Terminal,
 }
 
 /// In-flight byte accounting for memory-backed segments. `size` is the
 /// last payload length the worker reported via [`adjust`](Self::adjust);
 /// drop returns that to the atomic.
+#[cfg(feature = "pipeline")]
 #[derive(Debug)]
 pub struct SegmentAccounting {
     #[doc(hidden)]
@@ -55,6 +63,7 @@ pub struct SegmentAccounting {
     pub(crate) size: u64,
 }
 
+#[cfg(feature = "pipeline")]
 impl SegmentAccounting {
     /// Re-balance `in_flight_bytes` after a processor mutated the payload.
     pub fn adjust(&mut self, new_size: u64) {
@@ -79,6 +88,7 @@ impl SegmentAccounting {
     }
 }
 
+#[cfg(feature = "pipeline")]
 impl Drop for SegmentAccounting {
     fn drop(&mut self) {
         let prev_bytes = self.in_flight_bytes.fetch_sub(self.size, Ordering::AcqRel);
@@ -96,7 +106,7 @@ impl Drop for SegmentAccounting {
 }
 
 /// Active-segment write handle.
-pub enum ActiveHandle {
+pub(crate) enum ActiveHandle {
     Disk(fs::File),
     Mem(MemActiveWriter),
 }
@@ -117,6 +127,7 @@ impl Write for ActiveHandle {
 }
 
 /// Memory-only state attached to a `TakenSegment`.
+#[cfg(feature = "pipeline")]
 pub(crate) struct MemoryPayload {
     pub(crate) bytes: Bytes,
     pub(crate) accounting: SegmentAccounting,
@@ -128,11 +139,13 @@ pub(crate) struct MemoryPayload {
 
 /// A claim returned by `Fs::take_files`. Memory comes with payload in hand,
 /// disk loads lazily on `load()` so peak in-flight memory stays at one segment.
+#[cfg(feature = "pipeline")]
 pub struct TakenSegment {
     pub seg_ref: SegmentRef,
     pre_loaded: Option<MemoryPayload>,
 }
 
+#[cfg(feature = "pipeline")]
 impl TakenSegment {
     pub(crate) fn disk(seg: SealedSegment) -> Self {
         Self {
@@ -200,6 +213,7 @@ impl TakenSegment {
 }
 
 /// Per-cycle snapshot returned by `Fs::take_files`.
+#[cfg(feature = "pipeline")]
 #[non_exhaustive]
 pub struct TakenFiles {
     pub segments: Vec<TakenSegment>,
@@ -221,6 +235,7 @@ pub struct TakenFiles {
 /// A segment matches when its `[creation, seal]` span overlaps the window,
 /// so a segment that started before the window but holds in-window data is
 /// still captured.
+#[cfg(feature = "pipeline")]
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct EpochWindow {
     /// `None`: unbounded look-back (`dump_current_data`).
@@ -228,6 +243,7 @@ pub(crate) struct EpochWindow {
     pub(crate) end_secs: u64,
 }
 
+#[cfg(feature = "pipeline")]
 impl EpochWindow {
     pub(crate) fn overlaps(&self, start_secs: u64, seal_secs: u64) -> bool {
         start_secs <= self.end_secs && self.start_secs.is_none_or(|s| seal_secs >= s)
@@ -242,19 +258,22 @@ pub enum Fs {
 
 impl Fs {
     /// Create a new active-segment write handle.
-    pub fn create_segment(&self, path: &Path) -> io::Result<ActiveHandle> {
+    pub(crate) fn create_segment(&self, path: &Path) -> io::Result<ActiveHandle> {
         match self {
             Fs::Disk(d) => d.create_segment(path),
             Fs::Mem(m) => m.create_segment(path),
         }
     }
 
-    pub fn new_disk(base_path: &Path) -> Arc<Self> {
+    pub(crate) fn new_disk(base_path: &Path) -> Arc<Self> {
         Arc::new(Fs::Disk(DiskFs::from_base_path(base_path)))
     }
 
     /// Ring budget = `max_total_size - PIPELINE_RESERVE_SEGMENTS * max_segment_size`.
-    pub fn new_in_memory(max_total_size: u64, max_segment_size: u64) -> io::Result<Arc<Self>> {
+    pub(crate) fn new_in_memory(
+        max_total_size: u64,
+        max_segment_size: u64,
+    ) -> io::Result<Arc<Self>> {
         let reserve = PIPELINE_RESERVE_SEGMENTS.saturating_mul(max_segment_size);
         let ring_budget = max_total_size.checked_sub(reserve).ok_or_else(|| {
             io::Error::new(
@@ -284,7 +303,7 @@ impl Fs {
     ///
     /// Returns `Err(NotFound)` when the active file was removed externally
     /// (disk only). Caller should abandon and start fresh.
-    pub fn seal(
+    pub(crate) fn seal(
         &self,
         active_handle: ActiveHandle,
         active_path: &Path,
@@ -301,7 +320,7 @@ impl Fs {
     /// Disk: unlinks the file plus any extension-renamed siblings, drops the
     /// claim entry, bumps `dropped_segments` when `reason == Eviction`.
     /// Memory: no-op (bytes already left the ring on pop).
-    pub fn remove_sealed(&self, seg: &SegmentRef, reason: RemoveReason) {
+    pub(crate) fn remove_sealed(&self, seg: &SegmentRef, reason: RemoveReason) {
         match self {
             Fs::Disk(d) => d.remove_sealed(seg, reason),
             Fs::Mem(m) => m.remove_sealed(seg, reason),
@@ -309,7 +328,7 @@ impl Fs {
     }
 
     /// Discard an active-segment handle without sealing.
-    pub fn remove_active(&self, path: &Path) -> io::Result<()> {
+    pub(crate) fn remove_active(&self, path: &Path) -> io::Result<()> {
         match self {
             Fs::Disk(d) => d.remove_active(path),
             Fs::Mem(m) => m.remove_active(path),
@@ -321,6 +340,7 @@ impl Fs {
     /// Each segment is dispensed at most once (claim-set dedup for disk,
     /// pop-once for memory). Memory mode pops at most one segment per call to
     /// bound peak in-flight memory to one segment regardless of backlog.
+    #[cfg(feature = "pipeline")]
     pub fn take_files(&self) -> TakenFiles {
         match self {
             Fs::Disk(d) => d.take_files(),
@@ -331,7 +351,8 @@ impl Fs {
     /// True for the disk backend, which the worker drains by polling on an
     /// interval. False for memory, which the worker drains by awaiting
     /// [`wait_for_wakeup`](Self::wait_for_wakeup).
-    pub fn is_disk(&self) -> bool {
+    #[cfg(feature = "pipeline")]
+    pub(crate) fn is_disk(&self) -> bool {
         matches!(self, Fs::Disk(_))
     }
 
@@ -344,6 +365,7 @@ impl Fs {
     /// place (still at most one segment per call). Disk: returns all new
     /// claims; the worker filters after reading the header and releases
     /// unmatched claims.
+    #[cfg(feature = "pipeline")]
     pub(crate) fn take_files_matching(&self, windows: &[EpochWindow]) -> TakenFiles {
         match self {
             Fs::Disk(d) => d.take_files(),
@@ -357,7 +379,8 @@ impl Fs {
     /// Only meaningful for the memory backend. The disk backend has no push
     /// notification and returns immediately; drive it by polling on an interval
     /// (gated by [`is_disk`](Self::is_disk)).
-    pub async fn wait_for_wakeup(&self) {
+    #[cfg(feature = "pipeline")]
+    pub(crate) async fn wait_for_wakeup(&self) {
         match self {
             Fs::Disk(_) => {}
             Fs::Mem(m) => m.wait_for_wakeup().await,
@@ -365,7 +388,8 @@ impl Fs {
     }
 
     /// Returns `true` once `DiskWriter::finalize` has run.
-    pub fn writer_done(&self) -> bool {
+    #[cfg(feature = "pipeline")]
+    pub(crate) fn writer_done(&self) -> bool {
         match self {
             Fs::Disk(d) => d.writer_done(),
             Fs::Mem(m) => m.writer_done(),
@@ -374,7 +398,7 @@ impl Fs {
 
     /// Signal that the writer has sealed its final segment. Memory also
     /// wakes a parked worker.
-    pub fn mark_writer_done(&self) {
+    pub(crate) fn mark_writer_done(&self) {
         match self {
             Fs::Disk(d) => d.mark_writer_done(),
             Fs::Mem(m) => m.mark_writer_done(),
@@ -387,7 +411,8 @@ impl Fs {
     /// Disk: drops the claim entry.
     /// Memory: no-op. Memory retry goes through [`Self::release_for_retry`]
     /// which carries the bytes back into the ring.
-    pub fn release_claim(&self, seg: &SegmentRef) {
+    #[cfg(feature = "pipeline")]
+    pub(crate) fn release_claim(&self, seg: &SegmentRef) {
         match self {
             Fs::Disk(d) => d.release_claim(seg.index()),
             Fs::Mem(_) => {}
@@ -400,6 +425,7 @@ impl Fs {
     /// pushes. `epochs` is the `(creation, seal)` pair the slot originally
     /// carried. Disk segments do not use this path, they retry via
     /// [`Self::release_claim`] + directory rescan.
+    #[cfg(feature = "pipeline")]
     pub(crate) fn release_for_retry(
         &self,
         seg: &SegmentRef,
@@ -417,13 +443,14 @@ impl Fs {
     /// segment at once (disk claims the whole backlog; memory pops one slot
     /// per call). The triggered worker uses this to decide if a pass that
     /// ended on a retry still covered all other matching work.
+    #[cfg(feature = "pipeline")]
     pub(crate) fn take_is_exhaustive(&self) -> bool {
         matches!(self, Fs::Disk(_))
     }
 
     /// Test-only: override the seal epoch of a queued memory slot so tests
     /// can simulate segments sealed in the past.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "pipeline"))]
     pub(crate) fn set_seal_secs_for_test(&self, index: u32, seal_secs: u64) {
         match self {
             Fs::Mem(m) => m.set_seal_secs_for_test(index, seal_secs),
@@ -432,7 +459,7 @@ impl Fs {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "pipeline"))]
 mod tests {
     use super::*;
     use assert2::check;

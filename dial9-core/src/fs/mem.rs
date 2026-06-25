@@ -20,7 +20,9 @@ use crate::primitives::sync::{Arc, Mutex};
 use crate::rate_limit::rate_limited;
 use crate::sealed::{MemorySegment, SegmentRef};
 
-use super::{ActiveHandle, EpochWindow, RemoveReason, SegmentAccounting, TakenFiles, TakenSegment};
+use super::{ActiveHandle, RemoveReason};
+#[cfg(feature = "pipeline")]
+use super::{EpochWindow, SegmentAccounting, TakenFiles, TakenSegment};
 
 fn now_epoch_secs() -> u64 {
     std::time::SystemTime::now()
@@ -30,7 +32,7 @@ fn now_epoch_secs() -> u64 {
 }
 
 /// Active in-memory write accumulator.
-pub struct MemActiveWriter {
+pub(crate) struct MemActiveWriter {
     pub(super) buf: Vec<u8>,
 }
 
@@ -49,17 +51,21 @@ struct MemSealedSegment {
     bytes: Bytes,
     /// 0 for a fresh seal, incremented each time the worker re-enqueues
     /// after a retryable failure.
+    #[cfg_attr(not(feature = "pipeline"), allow(dead_code))]
     retry_count: u32,
     /// Creation epoch parsed from the segment header at seal time, used by
     /// the triggered worker's windowed pop.
+    #[cfg_attr(not(feature = "pipeline"), allow(dead_code))]
     epoch_secs: u64,
     /// Wall-clock epoch when the segment sealed; together with
     /// `epoch_secs` it gives the span the windowed pop matches against.
+    #[cfg_attr(not(feature = "pipeline"), allow(dead_code))]
     seal_secs: u64,
 }
 
 /// Cap on retryable-failure re-enqueues for a memory segment.
-pub const MEMORY_RETRY_BUDGET: u32 = 3;
+#[cfg(feature = "pipeline")]
+pub(crate) const MEMORY_RETRY_BUDGET: u32 = 3;
 
 /// Holds the deque + bookkeeping that must move together under the lock.
 struct Queue {
@@ -73,9 +79,13 @@ struct Queue {
 struct MemChannel {
     max_total_size: u64,
     queue: Mutex<Queue>,
+    #[cfg_attr(not(feature = "pipeline"), allow(dead_code))]
     in_flight_bytes: Arc<AtomicU64>,
+    #[cfg_attr(not(feature = "pipeline"), allow(dead_code))]
     in_flight_segments: Arc<AtomicU64>,
+    #[cfg_attr(not(feature = "pipeline"), allow(dead_code))]
     in_flight_bytes_peak: Arc<AtomicU64>,
+    #[cfg_attr(not(feature = "pipeline"), allow(dead_code))]
     writer_done: AtomicBool,
     notify: Notify,
 }
@@ -186,6 +196,7 @@ impl MemFs {
     /// `attempt` is the new retry count this segment carries; `epochs` is
     /// the `(creation, seal)` pair the slot originally carried.
     /// Pushed to the front so a single failing segment cycles back ahead of fresh work.
+    #[cfg(feature = "pipeline")]
     pub(super) fn release_for_retry(
         &self,
         index: u32,
@@ -213,6 +224,7 @@ impl MemFs {
         Ok(())
     }
 
+    #[cfg(feature = "pipeline")]
     pub(super) fn take_files(&self) -> TakenFiles {
         self.take_files_inner(None)
     }
@@ -222,10 +234,12 @@ impl MemFs {
     /// slots stay in the ring (history is preserved for later dumps); still
     /// at most one segment per call so the in-flight memory bound is
     /// unchanged.
+    #[cfg(feature = "pipeline")]
     pub(super) fn take_files_matching(&self, windows: &[EpochWindow]) -> TakenFiles {
         self.take_files_inner(Some(windows))
     }
 
+    #[cfg(feature = "pipeline")]
     fn take_files_inner(&self, windows: Option<&[EpochWindow]>) -> TakenFiles {
         let ch = &self.channel;
 
@@ -306,6 +320,7 @@ impl MemFs {
     /// Lost-wakeup safe: `enable()` registers the waiter *before* the
     /// condition check, so a concurrent `notify_one()` between registration
     /// and `.await` is not missed.
+    #[cfg(feature = "pipeline")]
     pub(super) async fn wait_for_wakeup(&self) {
         let ch = &self.channel;
         let notified = ch.notify.notified();
@@ -317,17 +332,19 @@ impl MemFs {
         notified.await;
     }
 
+    #[cfg(feature = "pipeline")]
     fn has_pending(&self) -> bool {
         !self.channel.queue.lock().unwrap().segments.is_empty()
     }
 
+    #[cfg(feature = "pipeline")]
     pub(super) fn writer_done(&self) -> bool {
         self.channel.writer_done.load(Ordering::Acquire)
     }
 
     /// Test-only: override the seal epoch of a queued slot so tests can
     /// simulate segments sealed in the past.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "pipeline"))]
     pub(super) fn set_seal_secs_for_test(&self, index: u32, seal_secs: u64) {
         let mut q = self.channel.queue.lock().unwrap();
         for s in q.segments.iter_mut().filter(|s| s.index == index) {
@@ -341,7 +358,7 @@ impl MemFs {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "pipeline"))]
 mod tests {
     use super::*;
     use assert2::check;

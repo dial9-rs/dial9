@@ -1489,6 +1489,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "pipeline")]
     fn test_single_file_sealed_segment_discoverable_by_worker() {
         use crate::sealed::find_sealed_segments;
 

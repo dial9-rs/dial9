@@ -4,7 +4,9 @@
 //! dispenses each sealed file at most once per `DiskFs` instance, plus
 //! eviction accounting for the writer's byte-budget shedding.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+#[cfg(feature = "pipeline")]
+use std::collections::HashSet;
+use std::collections::{BTreeMap, HashMap};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -13,11 +15,13 @@ use crate::primitives::fs;
 use crate::primitives::sync::Mutex;
 use crate::primitives::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use crate::rate_limit::rate_limited;
-use crate::sealed::{
-    SealedSegment, SegmentArtifact, SegmentRef, find_sealed_segments, parse_segment_artifact,
-};
+#[cfg(feature = "pipeline")]
+use crate::sealed::find_sealed_segments;
+use crate::sealed::{SealedSegment, SegmentArtifact, SegmentRef, parse_segment_artifact};
 
-use super::{ActiveHandle, DiscoveredArtifacts, RemoveReason, TakenFiles, TakenSegment};
+use super::{ActiveHandle, DiscoveredArtifacts, RemoveReason};
+#[cfg(feature = "pipeline")]
+use super::{TakenFiles, TakenSegment};
 
 /// Disk-backed filesystem state.
 pub struct DiskFs {
@@ -26,7 +30,12 @@ pub struct DiskFs {
     /// Claimed segment index -> uncompressed size in bytes. Dedup so each
     /// sealed file is dispensed at most once per `DiskFs` instance.
     claimed: Mutex<HashMap<u32, u64>>,
+    // Read only by the worker's `take_files`, but the producer-side writes
+    // (eviction bump, done flag) are always compiled, so these are dead only
+    // in a bare, no-`pipeline` build.
+    #[cfg_attr(not(feature = "pipeline"), allow(dead_code))]
     dropped: AtomicU64,
+    #[cfg_attr(not(feature = "pipeline"), allow(dead_code))]
     writer_done: AtomicBool,
 }
 
@@ -118,10 +127,12 @@ impl DiskFs {
     }
 
     /// Reclaim a previously dispensed segment so the next scan re-dispenses it.
+    #[cfg(feature = "pipeline")]
     pub(super) fn release_claim(&self, index: u32) {
         self.claimed.lock().unwrap().remove(&index);
     }
 
+    #[cfg(feature = "pipeline")]
     pub(super) fn writer_done(&self) -> bool {
         self.writer_done.load(Ordering::Acquire)
     }
@@ -134,6 +145,7 @@ impl DiskFs {
         self.writer_done.store(true, Ordering::Release);
     }
 
+    #[cfg(feature = "pipeline")]
     pub(super) fn take_files(&self) -> TakenFiles {
         let on_disk = match find_sealed_segments(&self.dir, &self.stem) {
             Ok(s) => s,
@@ -340,6 +352,7 @@ fn strip_active_suffix(path: &Path) -> PathBuf {
     }
 }
 
+#[cfg(feature = "pipeline")]
 fn empty_taken_files(segments_dropped: u64) -> TakenFiles {
     TakenFiles {
         segments: vec![],
@@ -353,7 +366,8 @@ fn empty_taken_files(segments_dropped: u64) -> TakenFiles {
     }
 }
 
-#[cfg(test)]
+// The disk backend tests exercise the worker-facing take/claim path.
+#[cfg(all(test, feature = "pipeline"))]
 mod tests {
     use super::*;
     use crate::fs::Fs;

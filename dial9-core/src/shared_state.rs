@@ -36,6 +36,7 @@ pub struct SharedState {
     /// On-demand dump trigger, set once at build time when the runtime is
     /// built with `with_dump_trigger`. Reached by application code through
     /// [`Dial9Handle::dump_trigger`](super::handle::Dial9Handle::dump_trigger).
+    #[cfg(feature = "pipeline")]
     dump_trigger: std::sync::OnceLock<crate::dump::DumpTrigger>,
 }
 
@@ -49,6 +50,7 @@ impl SharedState {
             drain_epoch: AtomicU64::new(0),
             tl_buffers: Mutex::new(Vec::new()),
             sources: Mutex::new(Vec::new()),
+            #[cfg(feature = "pipeline")]
             dump_trigger: std::sync::OnceLock::new(),
         }
     }
@@ -61,12 +63,14 @@ impl SharedState {
     /// Install the on-demand dump trigger. Set once at build time by the
     /// facade builder; later calls are ignored. `pub` so the facade (a
     /// sibling crate) can wire the trigger in.
+    #[cfg(feature = "pipeline")]
     pub fn set_dump_trigger(&self, trigger: crate::dump::DumpTrigger) {
         let _ = self.dump_trigger.set(trigger);
     }
 
     /// The on-demand dump trigger, or `None` when the runtime was built
     /// without `with_dump_trigger`.
+    #[cfg(feature = "pipeline")]
     pub(crate) fn dump_trigger(&self) -> Option<&crate::dump::DumpTrigger> {
         self.dump_trigger.get()
     }

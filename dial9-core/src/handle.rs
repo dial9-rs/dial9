@@ -91,6 +91,7 @@ impl Dial9Handle {
     /// and when the runtime was built without a dump trigger
     /// (`with_dump_trigger`). The returned [`DumpTrigger`](crate::dump::DumpTrigger)
     /// is cheap to clone and every clone shares the configured debounce gate.
+    #[cfg(feature = "pipeline")]
     pub fn dump_trigger(&self) -> Option<crate::dump::DumpTrigger> {
         self.inner
             .as_ref()

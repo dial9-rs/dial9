@@ -18,11 +18,13 @@ pub struct SealedSegment {
 
 impl SealedSegment {
     /// Path to the sealed segment file on disk.
+    #[cfg_attr(not(feature = "pipeline"), allow(dead_code))]
     pub fn path(&self) -> &Path {
         &self.path
     }
 
     /// Segment index (e.g. `3` for `trace.3.bin`).
+    #[cfg_attr(not(feature = "pipeline"), allow(dead_code))]
     pub fn index(&self) -> u32 {
         self.index
     }
@@ -39,11 +41,13 @@ pub struct MemorySegment {
 
 impl MemorySegment {
     /// Segment index.
+    #[cfg_attr(not(feature = "pipeline"), allow(dead_code))]
     pub fn index(&self) -> u32 {
         self.index
     }
 
     /// Encoded segment size in bytes.
+    #[cfg_attr(not(feature = "pipeline"), allow(dead_code))]
     pub fn size(&self) -> u64 {
         self.size
     }
@@ -111,6 +115,7 @@ pub fn creation_epoch_secs(data: &[u8], path: &Path) -> (u64, bool) {
 /// write before seal), falling back to now. Together with
 /// [`creation_epoch_secs`] it gives the span the triggered worker matches
 /// against dump windows.
+#[cfg(feature = "pipeline")]
 pub(crate) fn seal_epoch_secs(path: &Path) -> u64 {
     mtime_or_now_secs(path)
 }
@@ -227,6 +232,7 @@ impl std::fmt::Display for ParseTimestampError {
 /// Matches files named `{stem}.{index}.bin` where `stem` matches the
 /// given base path's file stem. Ignores `.active` files and any files
 /// that don't match the expected naming pattern.
+#[cfg(feature = "pipeline")]
 pub fn find_sealed_segments(dir: &Path, stem: &str) -> std::io::Result<Vec<SealedSegment>> {
     let mut segments = Vec::new();
     for entry in fs::read_dir(dir)? {
@@ -276,13 +282,15 @@ pub(crate) fn parse_segment_artifact(file_name: &str, stem: &str) -> Option<Segm
 
 /// Parse segment index from a filename like `trace.3.bin`.
 /// Returns `None` if the filename doesn't match `{stem}.{index}.bin`.
+#[cfg(feature = "pipeline")]
 fn parse_segment_index(file_name: &str, stem: &str) -> Option<u32> {
     let rest = file_name.strip_prefix(stem)?.strip_prefix('.')?;
     let index_str = rest.strip_suffix(".bin")?;
     index_str.parse().ok()
 }
 
-#[cfg(test)]
+// These tests cover the worker-facing segment-discovery path.
+#[cfg(all(test, feature = "pipeline"))]
 mod tests {
     use super::*;
     use crate::format::{ClockSyncEvent, SegmentMetadataEvent};
@@ -467,6 +475,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "pipeline")]
     fn parse_segment_index_valid() {
         check!(parse_segment_index("trace.0.bin", "trace") == Some(0));
         check!(parse_segment_index("trace.42.bin", "trace") == Some(42));
@@ -474,6 +483,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "pipeline")]
     fn parse_segment_index_invalid() {
         check!(parse_segment_index("trace.0.bin.active", "trace") == None);
         check!(parse_segment_index("trace.bin", "trace") == None);
