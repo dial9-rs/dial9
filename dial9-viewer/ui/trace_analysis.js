@@ -26,10 +26,21 @@
     return cpuSamples.some(isCpuProfileSample);
   }
 
-  function getTraceTimeRange(events, cpuSamples) {
+  const PROCESS_RESOURCE_USAGE_EVENT = "ProcessResourceUsageEvent";
+
+  function getTraceTimeRange(events, cpuSamples, customEvents) {
+    const cpuProfileTimestamps = cpuSamples
+      .filter(isCpuProfileSample)
+      .map((s) => s.timestamp);
+    const processResourceUsageTimestamps = (customEvents || [])
+      .filter((e) => e.name === PROCESS_RESOURCE_USAGE_EVENT)
+      .map((e) => e.timestamp)
+      .filter((t) => Number.isFinite(t));
     const timestamps = events.length
       ? events.map((e) => e.timestamp)
-      : cpuSamples.filter(isCpuProfileSample).map((s) => s.timestamp);
+      : cpuProfileTimestamps.length
+        ? cpuProfileTimestamps
+        : processResourceUsageTimestamps;
     if (!timestamps.length) return null;
 
     let minTs = timestamps[0];
@@ -40,6 +51,100 @@
     }
     if (maxTs === minTs) maxTs = minTs + 1;
     return { minTs, maxTs, durationNs: maxTs - minTs };
+  }
+
+  function numericField(value) {
+    if (value == null || value === "") return null;
+    const n = Number(value);
+    return Number.isFinite(n) ? n : null;
+  }
+
+  function processResourceUsageSample(ev) {
+    const fields = ev.fields || {};
+    const t = numericField(ev.timestamp);
+    const userCpuNs = numericField(fields.user_cpu_ns);
+    const systemCpuNs = numericField(fields.system_cpu_ns);
+    if (
+      t == null ||
+      userCpuNs == null ||
+      systemCpuNs == null ||
+      userCpuNs < 0 ||
+      systemCpuNs < 0
+    ) {
+      return null;
+    }
+    return {
+      t,
+      event: ev,
+      userCpuNs,
+      systemCpuNs,
+      cpuTimeNs: userCpuNs + systemCpuNs,
+    };
+  }
+
+  function buildProcessCpuUsageSeries(customEvents, availableParallelism) {
+    const capacity = numericField(availableParallelism);
+    const normalizedCapacity = capacity != null && capacity > 0 ? capacity : null;
+    const samples = [];
+    for (const ev of customEvents || []) {
+      if (ev.name !== PROCESS_RESOURCE_USAGE_EVENT) continue;
+      const sample = processResourceUsageSample(ev);
+      if (sample) samples.push(sample);
+    }
+    samples.sort((a, b) => a.t - b.t);
+
+    const intervals = [];
+    let maxCores = 0;
+    let totalWallNs = 0;
+    let totalCpuNs = 0;
+
+    for (let i = 1; i < samples.length; i++) {
+      const prev = samples[i - 1];
+      const cur = samples[i];
+      const wallDeltaNs = cur.t - prev.t;
+      const userDeltaNs = cur.userCpuNs - prev.userCpuNs;
+      const systemDeltaNs = cur.systemCpuNs - prev.systemCpuNs;
+      const cpuDeltaNs = userDeltaNs + systemDeltaNs;
+      if (
+        !(wallDeltaNs > 0) ||
+        userDeltaNs < 0 ||
+        systemDeltaNs < 0 ||
+        cpuDeltaNs < 0
+      ) {
+        continue;
+      }
+      const cores = cpuDeltaNs / wallDeltaNs;
+      if (!Number.isFinite(cores)) continue;
+      const totalPercent = normalizedCapacity != null
+        ? Math.min(100, (cores / normalizedCapacity) * 100)
+        : null;
+      intervals.push({
+        start: prev.t,
+        end: cur.t,
+        t: cur.t,
+        wallDeltaNs,
+        userDeltaNs,
+        systemDeltaNs,
+        cpuDeltaNs,
+        startCpuTimeNs: prev.cpuTimeNs,
+        endCpuTimeNs: cur.cpuTimeNs,
+        cores,
+        totalPercent,
+        startSample: prev,
+        endSample: cur,
+      });
+      if (cores > maxCores) maxCores = cores;
+      totalWallNs += wallDeltaNs;
+      totalCpuNs += cpuDeltaNs;
+    }
+
+    return {
+      samples,
+      intervals,
+      availableParallelism: normalizedCapacity,
+      maxCores,
+      avgCores: totalWallNs > 0 ? totalCpuNs / totalWallNs : 0,
+    };
   }
 
   // ── Poll color heatmap ────────────────────────────────────────────────
@@ -113,6 +218,14 @@
   // into a single fillRect; with 16 quantization bins per decade-spanning
   // log scale, runs of "approximately equal" polls still fold into one
   // rectangle, which keeps zoomed-out rendering fast.
+  // Per-bin color cache, keyed by `${NBINS}:${bin}`. The quantized color
+  // depends ONLY on the bin index (≤ NBINS distinct values), but computing it
+  // is expensive: log10 + pow + 5-stop interpolation + 3× hex formatting. This
+  // function is called once PER POLL PER RENDER (millions of times on a large
+  // trace), so without caching the formatting/interpolation dominated frame
+  // time (~1.2s for 3.5M polls — measured). Caching collapses that to one
+  // log10 + a multiply + an array lookup per poll.
+  const _quantColorCache = new Map();
   function pollHeatmapColorQuantized(durationNs, bins) {
     const NBINS = bins || 24;
     const stops = POLL_HEATMAP_STOPS;
@@ -125,9 +238,186 @@
     if (lg > maxLg) lg = maxLg;
     const t = (lg - minLg) / (maxLg - minLg);
     const bin = Math.min(NBINS - 1, Math.floor(t * NBINS));
-    const lgBin = minLg + (bin / (NBINS - 1)) * (maxLg - minLg);
-    const dBin = Math.pow(10, lgBin);
-    return pollHeatmapColor(dBin);
+    const key = NBINS * 1000 + bin; // small int key; NBINS is tiny
+    let color = _quantColorCache.get(key);
+    if (color === undefined) {
+      const lgBin = minLg + (bin / (NBINS - 1)) * (maxLg - minLg);
+      const dBin = Math.pow(10, lgBin);
+      color = pollHeatmapColor(dBin);
+      _quantColorCache.set(key, color);
+    }
+    return color;
+  }
+
+  /**
+   * Stateful merger that collapses adjacent same-color pixel-space bars (and
+   * bursts of sub-pixel bars) into one rectangle per contiguous run.
+   *
+   * The viewer draws one bar per poll. A busy worker can have thousands of
+   * polls landing in the same handful of pixel columns; emitting a separate
+   * (min-width-1px) fillRect for each repaints the same column over and over,
+   * which is pure overdraw — invisible to the user but expensive on the main
+   * thread (this dominated the "drawing animation frames" cost). Folding them
+   * into per-run rectangles makes draw cost scale with visible pixels, not
+   * poll count. pollColor() is quantized so approximately-equal polls share a
+   * color string and fold together.
+   *
+   * Returned as a {push, flush} pair (rather than a whole-array loop) so the
+   * caller keeps its own iteration control — the binary-searched start index
+   * and the early `break` once past the view's right edge, both of which keep
+   * zoomed-in panning O(visible) instead of O(all polls).
+   *
+   * Bars MUST be pushed in ascending x1 order. A new run starts when a bar's
+   * color differs from the current run OR it begins more than one pixel past
+   * the current run's right edge (a real gap). Within a run the right edge is
+   * extended; the emitted width is `max(right - left, minWidth)` so a run made
+   * only of sub-pixel bars is still at least `minWidth` wide. Call `flush()`
+   * once after the last `push` to emit the final run.
+   *
+   * @param {function} emit      (left, width, color) -> void; called per run.
+   * @param {number} [minWidth]  Minimum rendered width per run (default 1).
+   */
+  function makeBarCoalescer(emit, minWidth) {
+    const minW = minWidth || 1;
+    let runStart = 0, runEnd = -2, runColor = null;
+    return {
+      push(x1, x2, color) {
+        // Continue the current run only if same color AND the new bar starts
+        // within 1px of the run's right edge (no visible gap between them).
+        if (color === runColor && x1 <= runEnd + 1) {
+          if (x2 > runEnd) runEnd = x2;
+        } else {
+          if (runColor !== null) {
+            emit(runStart, Math.max(runEnd - runStart, minW), runColor);
+          }
+          runStart = x1;
+          runEnd = x2;
+          runColor = color;
+        }
+      },
+      flush() {
+        if (runColor !== null) {
+          emit(runStart, Math.max(runEnd - runStart, minW), runColor);
+          runColor = null;
+        }
+      },
+    };
+  }
+
+  /**
+   * Pixel-level LOD downsampling for a sorted span array.
+   *
+   * Fully zoomed out, a worker lane can have millions of spans (polls, parks,
+   * active periods) mapping onto ~1500 pixels. Drawing one fillRect per span is
+   * ~99.9% overdraw — invisible but multi-second (measured: ~2M fillRects,
+   * ~1.5s/render). This returns at most ONE representative span per pixel
+   * column: the span with the largest `weight` (e.g. longest duration) whose
+   * START falls in that column. The caller then draws each representative with
+   * its own real geometry and color, exactly as it drew every span before —
+   * just over ≤ pw representatives instead of millions.
+   *
+   * Why "longest starting in this column" is the right representative: a long
+   * span visually dominates its pixel (and the ones it covers), which is what a
+   * profiler view should surface when zoomed out. A span starts in exactly one
+   * column, so the representative count is ≤ (visible columns) ≤ pw. Long spans
+   * keep their true width because the caller draws span.start→span.end.
+   *
+   * Spans MUST be sorted ascending by `start`. Iteration starts at `startIdx`
+   * (from findFirstVisible) and breaks once a span starts past `viewEnd`, so
+   * the scan is O(visible spans) and the OUTPUT is O(pixels).
+   *
+   * @param {Array} spans          sorted-by-start span array
+   * @param {number} startIdx      first index to consider (findFirstVisible)
+   * @param {number} viewStart     ns at left edge
+   * @param {number} viewEnd       ns at right edge
+   * @param {number} pw            pixel width of the lane
+   * @param {function} weightOf    span -> number (larger wins the pixel column)
+   * @returns {Array} representative spans (subset of `spans`, still sorted)
+   */
+  function pixelDownsampleSpans(spans, startIdx, viewStart, viewEnd, pw, weightOf) {
+    const out = [];
+    if (pw <= 0 || viewEnd <= viewStart) return out;
+    const span2px = pw / (viewEnd - viewStart);
+    let curPx = -1, bestSpan = null, bestW = -Infinity;
+    for (let i = startIdx; i < spans.length; i++) {
+      const s = spans[i];
+      if (s.start > viewEnd) break;
+      let px = ((s.start - viewStart) * span2px) | 0;
+      if (px < 0) px = 0;
+      else if (px >= pw) px = pw - 1;
+      if (px !== curPx) {
+        if (bestSpan !== null) out.push(bestSpan);
+        curPx = px;
+        bestSpan = s;
+        bestW = weightOf(s);
+      } else {
+        const wgt = weightOf(s);
+        if (wgt > bestW) { bestW = wgt; bestSpan = s; }
+      }
+    }
+    if (bestSpan !== null) out.push(bestSpan);
+    return out;
+  }
+
+  /**
+   * Per-pixel coverage histogram for a sorted, non-overlapping span array.
+   *
+   * Drawing each span at a 1px-minimum width (and dropping sub-pixel gaps)
+   * makes a sparse, mostly-idle timeline look like one solid continuous bar
+   * when zoomed out: thousands of tiny polls each inflate to a full pixel and
+   * abut, while the gaps between them vanish. This instead computes, for each
+   * of `pw` pixel columns, the FRACTION of that column's wall-clock time
+   * actually covered by spans (0..1). The caller maps coverage→opacity so a
+   * busy column reads solid and a 5%-busy column reads faint — an honest
+   * density view rather than a misleading solid block.
+   *
+   * Spans MUST be sorted ascending by `start` and be non-overlapping (a single
+   * task's polls satisfy this). A span straddling column boundaries is split
+   * across columns proportionally. Returns a Float64Array of length `pw` with
+   * values in [0, 1]. Scan is O(visible spans + pw).
+   *
+   * @param {Array<{start:number,end:number}>} spans  sorted, non-overlapping
+   * @param {number} startIdx   first index to consider (findFirstVisible)
+   * @param {number} viewStart  ns at left edge
+   * @param {number} viewEnd    ns at right edge
+   * @param {number} pw         pixel width
+   * @returns {Float64Array} coverage per pixel column, each in [0,1]
+   */
+  function pixelCoverage(spans, startIdx, viewStart, viewEnd, pw) {
+    const cov = new Float64Array(pw > 0 ? pw : 0);
+    if (pw <= 0 || viewEnd <= viewStart) return cov;
+    const nsPerPx = (viewEnd - viewStart) / pw;
+    for (let i = startIdx; i < spans.length; i++) {
+      const s = spans[i];
+      if (s.start > viewEnd) break;
+      if (s.end < viewStart) continue;
+      // Clamp the span to the visible window.
+      const a = s.start < viewStart ? viewStart : s.start;
+      const b = s.end > viewEnd ? viewEnd : s.end;
+      if (b <= a) continue;
+      // Pixel columns this clamped span touches.
+      let pxA = ((a - viewStart) / nsPerPx) | 0;
+      let pxB = ((b - viewStart) / nsPerPx) | 0;
+      if (pxA < 0) pxA = 0;
+      if (pxB >= pw) pxB = pw - 1;
+      if (pxA === pxB) {
+        // Whole span inside one column: add its time fraction of the column.
+        cov[pxA] += (b - a) / nsPerPx;
+      } else {
+        // First (partial) column.
+        const firstColEnd = viewStart + (pxA + 1) * nsPerPx;
+        cov[pxA] += (firstColEnd - a) / nsPerPx;
+        // Fully-covered middle columns.
+        for (let p = pxA + 1; p < pxB; p++) cov[p] += 1;
+        // Last (partial) column.
+        const lastColStart = viewStart + pxB * nsPerPx;
+        cov[pxB] += (b - lastColStart) / nsPerPx;
+      }
+    }
+    // Floating-point accumulation can nudge a fully-covered column slightly
+    // over 1; clamp so callers can treat the value as an opacity directly.
+    for (let p = 0; p < pw; p++) if (cov[p] > 1) cov[p] = 1;
+    return cov;
   }
 
   /**
@@ -509,6 +799,70 @@
   }
 
   /**
+   * For each poll of a selected task, find the most recent wake at or before
+   * the poll's start, plus the "effective wake" time used to measure the
+   * wake→poll scheduling delay.
+   *
+   * If that wake actually arrived while an EARLIER poll of the same task was
+   * still running (the task was woken again mid-poll), the wait doesn't begin
+   * until that earlier poll ends — so `effectiveWake` is bumped to that poll's
+   * `end`.
+   *
+   * `polls` MUST be the task's polls sorted ascending by `start`; a single
+   * task is polled on one worker at a time, so they are non-overlapping.
+   * `wakes` MUST be sorted ascending by `timestamp`. Both lookups are binary
+   * searches, so the whole pass is O(P·logP + P·logW) — NOT the O(P²) that a
+   * per-poll linear scan over earlier polls costs for a task polled millions
+   * of times. (This mirrors the binary-search fix in computeSchedulingDelays.)
+   *
+   * @param {Array<{start:number,end:number}>} polls  task polls, sorted by start
+   * @param {Array<{timestamp:number}>} wakes          task wakes, sorted by timestamp
+   * @returns {Array<{wake:Object, effectiveWake:number}|null>} parallel to `polls`
+   */
+  function computePollWakes(polls, wakes) {
+    const result = new Array(polls.length).fill(null);
+    if (!wakes || wakes.length === 0) return result;
+    for (let pi = 0; pi < polls.length; pi++) {
+      const s = polls[pi];
+      // Rightmost wake at or before this poll's start.
+      let lo = 0, hi = wakes.length - 1, bi = -1;
+      while (lo <= hi) {
+        const mid = (lo + hi) >> 1;
+        if (wakes[mid].timestamp <= s.start) { bi = mid; lo = mid + 1; }
+        else hi = mid - 1;
+      }
+      if (bi < 0) continue;
+      const wake = wakes[bi];
+      let effectiveWake = wake.timestamp;
+      // Did that wake land inside an EARLIER poll (index < pi)? The original
+      // O(P^2) loop scanned earlier polls and took the FIRST (lowest-index) one
+      // containing the wake. Binary search the rightmost poll whose
+      // start <= wake.timestamp — the only candidates that can contain it are
+      // that poll and its immediate predecessors (polls are non-overlapping and
+      // sorted, so their `end`s are non-decreasing; an earlier poll contains the
+      // wake only at an exact shared boundary, end == wake == next.start). Walk
+      // left across that contiguous boundary run to the lowest-index member so
+      // the result matches the original "first match wins" semantics exactly
+      // (which, at such a boundary, yields effectiveWake == wake.timestamp — no
+      // bump — rather than the later poll's end). The walk spans only a tiny
+      // boundary chain, so the pass stays O(P·logP + P·logW) overall.
+      let plo = 0, phi = pi - 1, pbest = -1;
+      while (plo <= phi) {
+        const pmid = (plo + phi) >> 1;
+        if (polls[pmid].start <= wake.timestamp) { pbest = pmid; plo = pmid + 1; }
+        else phi = pmid - 1;
+      }
+      if (pbest >= 0 && wake.timestamp <= polls[pbest].end) {
+        while (pbest > 0 && polls[pbest - 1].end >= wake.timestamp) pbest--;
+        effectiveWake = polls[pbest].end;
+      }
+      const delay = s.start - effectiveWake;
+      if (delay >= 0 && delay < 1e9) result[pi] = { wake, effectiveWake };
+    }
+    return result;
+  }
+
+  /**
    * Filter and sort points of interest from worker spans and scheduling delays.
    * @param {string} filterType - "sched" | "long-poll" | "cpu-sampled" | "wake-delay"
    * @param {Object} workerSpans
@@ -613,6 +967,22 @@
       points.sort((a, b) => a.time - b.time);
     }
     return points;
+  }
+
+  /**
+   * Deterministic warm (red/orange) color for a frame, hashed from its name.
+   * Shared by the on-screen canvas (flamegraph.js) and the SVG export
+   * (flamegraph_export.js) so an exported graph matches what the user sees.
+   * @param {string} name frame name
+   * @returns {string} an `hsl(...)` color string
+   */
+  function flamegraphColor(name) {
+    let h = 0;
+    for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) | 0;
+    const hue = 10 + (Math.abs(h) % 40);
+    const sat = 60 + (Math.abs(h >> 8) % 30);
+    const lit = 40 + (Math.abs(h >> 16) % 15);
+    return `hsl(${hue},${sat}%,${lit}%)`;
   }
 
   /**
@@ -925,6 +1295,35 @@
   }
 
   /**
+   * Spans actively executing on the event's worker at its timestamp, outermost
+   * first — the nested enclosing stack. Enclosure is per-worker: time overlap
+   * alone does not enclose. A span's [start, end] is the min/max across all of
+   * its per-worker segments, so the envelope of a span polled on another worker
+   * can span the event without ever executing on it. Matching the actual
+   * per-worker `segments` avoids that, and on a single worker entered spans are
+   * strictly nested, so the matches form the enclosing chain directly. Events
+   * with no worker context (e.g. process-wide resource samples from the flush
+   * thread, or custom events that do not set worker_id) are enclosed by nothing
+   * and return [].
+   * @param {Array} allSpans spans from buildSpanData (each with `segments` and `depth`)
+   * @param {{timestamp: number, fields: Object}} ev
+   * @returns {Array} enclosing spans, outermost (lowest depth) first
+   */
+  function enclosingSpans(allSpans, ev) {
+    const f = (ev && ev.fields) || {};
+    if (f.worker_id == null) return [];
+    
+    const wid = Number(f.worker_id);
+    if (!Number.isFinite(wid)) return [];
+
+    const ts = ev.timestamp;
+    return allSpans
+      .filter(s => s.segments.some(
+        seg => seg.workerId === wid && seg.start <= ts && seg.end >= ts))
+      .sort((a, b) => (a.depth - b.depth) || (a.start - b.start));
+  }
+
+  /**
    * Compute span panel layout with duration-based y and pixel-grid clustering.
    * @param {{ spans: Array, viewStart: number, viewEnd: number, drawW: number, panelH: number, clusterXPx: number, barH: number }} opts
    * @returns {{ buckets: Array<{spans: Array, representative: Object, x1: number, x2: number, y: number, h: number}> }}
@@ -1144,19 +1543,26 @@
     attachCpuSamples,
     buildActiveTaskTimeline,
     computeSchedulingDelays,
+    computePollWakes,
     filterPointsOfInterest,
+    flamegraphColor,
     buildFlamegraphTree,
     flattenFlamegraph,
     buildFgData,
     getTraceTimeRange,
     hasCpuProfileSamples,
+    buildProcessCpuUsageSeries,
     buildSpanData,
     collectDescendants,
     selectSpanRenderSet,
+    enclosingSpans,
     computeSpanLayout,
     analyzeAllocations,
     pollHeatmapColor,
     pollHeatmapColorQuantized,
+    makeBarCoalescer,
+    pixelDownsampleSpans,
+    pixelCoverage,
   };
 
   if (typeof module !== "undefined" && module.exports) {

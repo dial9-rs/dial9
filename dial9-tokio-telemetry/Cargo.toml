@@ -16,7 +16,10 @@ rustc-args = ["--cfg", "tokio_unstable", "-C", "force-frame-pointers=yes"]
 all-features = true
 
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(shuttle)", "cfg(iai_enabled)"] }
+unexpected_cfgs = { level = "warn", check-cfg = [
+    "cfg(shuttle)",
+    "cfg(iai_enabled)",
+] }
 
 [dependencies]
 tokio = { version = "1.52.0", features = [
@@ -43,7 +46,10 @@ smallvec = "1"
 bytes = "1"
 dial9-perf-self-profile = { workspace = true, optional = true }
 scc = { version = "2", optional = true }
-dial9-trace-format = { workspace = true, features = ["serde", "serde-deserialize"] }
+dial9-trace-format = { workspace = true, features = [
+    "serde",
+    "serde-deserialize",
+] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3", optional = true, default-features = false, features = [
     "registry",
@@ -65,6 +71,7 @@ metrique = { version = "0.1.23", features = ["local-format"] }
 metrique-timesource = "0.1"
 dial9-macro = { workspace = true }
 shuttle = { version = "0.9.1", optional = true }
+ulid = "1"
 dial9-core = { workspace = true }
 
 [features]

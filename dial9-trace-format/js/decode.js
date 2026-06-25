@@ -130,6 +130,68 @@ class TraceDecoder {
     this.stackPool = new Map();
     this.version = 0;
     this._timestampBaseNs = 0n;
+    // Streaming mode. When false (default, whole-buffer decode), a frame that
+    // runs off the end of the buffer is a truncated tail: `nextFrame()` stops
+    // gracefully at EOF. When true, the same condition means "the buffer holds
+    // only a partial frame; more bytes are coming" — `nextFrame()` returns null
+    // WITHOUT consuming the partial frame and sets `needMoreBytes`, so the
+    // streaming caller can roll back, append more bytes, and retry.
+    this._streaming = false;
+    // Set by `nextFrame()` (streaming mode only) when it returned null because
+    // the trailing bytes are an incomplete frame rather than a real EOF.
+    this.needMoreBytes = false;
+  }
+
+  /**
+   * Enable streaming mode (see the `_streaming` field). In this mode a frame
+   * that runs past the end of the accumulated buffer is treated as incomplete
+   * (more bytes coming) rather than as a truncated EOF tail.
+   */
+  enableStreaming() {
+    this._streaming = true;
+  }
+
+  /**
+   * Replace the underlying buffer with a (typically longer) one that shares the
+   * same already-decoded prefix, preserving decode position and accumulated
+   * decoder state (schemas, pools, timestamp base, version). Used by the
+   * streaming parser to grow the readable window as chunks arrive without
+   * re-decoding what was already produced.
+   */
+  setBuffer(buffer) {
+    const ab = buffer instanceof ArrayBuffer ? buffer : buffer.buffer;
+    const off = buffer.byteOffset || 0;
+    const len = buffer.byteLength;
+    this._view = new DataView(ab, off, len);
+  }
+
+  /**
+   * Snapshot the positional decode state so the streaming caller can roll back
+   * after an incomplete frame. Only `_pos` and `_timestampBaseNs` are mutated
+   * mid-frame: schema/pool maps are updated with idempotent `.set()` calls
+   * (re-decoding the same frame overwrites with identical values), but the
+   * timestamp base is ADDITIVE — re-decoding a delta-encoded event without a
+   * rollback would double-apply the delta. See `_decodeEvent`.
+   */
+  snapshot() {
+    return { pos: this._pos, timestampBaseNs: this._timestampBaseNs };
+  }
+
+  /** Restore a snapshot produced by `snapshot()`. */
+  restore(snap) {
+    this._pos = snap.pos;
+    this._timestampBaseNs = snap.timestampBaseNs;
+  }
+
+  /**
+   * Reset the read position to the start of the current buffer WITHOUT
+   * touching accumulated decoder state (schemas, pools, timestamp base,
+   * version). Used by the streaming parser after it drops the consumed prefix
+   * and re-wraps the decoder over the unconsumed tail (which now starts at
+   * offset 0). See `setBuffer`.
+   */
+  rewindToStart() {
+    this._pos = 0;
   }
 
   decodeHeader() {
@@ -142,11 +204,21 @@ class TraceDecoder {
   }
 
   nextFrame() {
+    this.needMoreBytes = false;
     if (this._pos >= this._view.byteLength) return null;
     try {
       const tag = this._view.getUint8(this._pos);
       // Mid-stream header = reset frame (concatenated thread-local batch)
-      if (tag === MAGIC[0] && this._pos + 5 <= this._view.byteLength) {
+      if (tag === MAGIC[0]) {
+        if (this._pos + 5 > this._view.byteLength) {
+          // A would-be header straddles the end of the buffer. We can't tell
+          // yet whether it's a real header or a coincidental 0x54 frame tag
+          // until more bytes arrive. In streaming mode, ask for them; in
+          // whole-buffer mode this is a truncated tail.
+          if (this._streaming) { this.needMoreBytes = true; return null; }
+          this._pos = this._view.byteLength;
+          return null;
+        }
         let isHeader = true;
         for (let i = 1; i < 4; i++) {
           if (this._view.getUint8(this._pos + i) !== MAGIC[i]) { isHeader = false; break; }
@@ -178,6 +250,13 @@ class TraceDecoder {
       }
     } catch (e) {
       if (e instanceof RangeError) {
+        if (this._streaming) {
+          // The buffer holds only part of this frame; more bytes are coming.
+          // Leave `_pos` untouched — the streaming caller rolls back via the
+          // snapshot it took before this call — and ask for more data.
+          this.needMoreBytes = true;
+          return null;
+        }
         // Truncated frame at end of segment; stop gracefully.
         this._pos = this._view.byteLength;
         return null;

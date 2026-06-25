@@ -96,6 +96,13 @@
                 border-radius: 50%;
                 animation: spin 0.8s linear infinite;
                 margin: 0 auto 12px;
+                /* Promote to its own compositor layer so the rotation keeps
+                   running on the compositor thread while the main thread is
+                   blocked (the multi-second synchronous processTrace() crunch
+                   and the coarse parse yields). Without this the spinner
+                   animates on the main thread and visibly freezes/stutters
+                   during load, even though the load itself is short. */
+                will-change: transform;
             }
             .loading-progress {
                 font-size: 0.85em;
@@ -389,6 +396,35 @@
                 position: relative;
                 overflow: hidden;
             }
+            .foldable-panel.is-collapsed {
+                height: 24px !important;
+                cursor: pointer;
+            }
+            .foldable-panel.is-collapsed canvas {
+                display: none !important;
+            }
+            .foldable-panel .chart-label {
+                cursor: pointer;
+                user-select: none;
+            }
+            .foldable-panel .chart-label::before {
+                content: "▼";
+                color: #6c63ff;
+                display: inline-block;
+                font-size: 0.85em;
+                margin-right: 7px;
+                transform: translateY(-1px);
+            }
+            .foldable-panel.is-collapsed .chart-label::before {
+                content: "▶";
+            }
+            .foldable-panel.is-collapsed .chart-label {
+                max-height: 18px !important;
+                overflow: hidden !important;
+            }
+            .foldable-panel.is-collapsed .panel-expanded-label {
+                display: none !important;
+            }
             #span-panel .chart-label {
                 position: absolute;
                 top: 4px;
@@ -565,6 +601,28 @@
                 z-index: 2;
             }
             #custom-events-panel canvas {
+                width: 100%;
+                height: 100%;
+                display: block;
+            }
+            #cpu-panel {
+                display: none;
+                height: 92px;
+                background: #111b2e;
+                border-top: 1px solid #333;
+                flex-shrink: 0;
+                position: relative;
+                overflow: hidden;
+            }
+            #cpu-panel .chart-label {
+                position: absolute;
+                top: 4px;
+                left: 8px;
+                font-size: 0.75em;
+                color: #888;
+                z-index: 2;
+            }
+            #cpu-panel canvas {
                 width: 100%;
                 height: 100%;
                 display: block;
@@ -780,6 +838,7 @@
                     <button id="btn-cpu-flamegraph" style="display:none;background:#2a1a2a;border-color:#b388ff;color:#d0bcff;white-space:nowrap" title="Show a CPU flamegraph for the whole trace">🔥 Flamegraph</button>
                     <button id="btn-heap-flamegraph" style="display:none;background:#1a2a1a;border-color:#4caf50;color:#81c784;white-space:nowrap" title="Show heap allocation flamegraph">🔥 Heap</button>
                     <button id="btn-uninstrumented-info" style="display:none;background:#1e2050;border-color:#6c63ff;color:#d0ccff;white-space:nowrap" title="Some tasks lack wake tracking — click for details">ⓘ Blind spawns</button>
+                    <button id="btn-parse-perf" style="display:none;background:#1e2050;border-color:#6c63ff;color:#d0ccff;white-space:nowrap" title="Show the dial9 fetch &amp; parse time breakdown for this load">⏱ Parse perf</button>
                     <button id="btn-set-range" title="Set time range filter (reloads with only events in range)">Set Range</button>
                     <button id="btn-clear-range" title="Clear time range filter" style="display:none">Clear Range</button>
                     <button id="btn-share" style="display:none;background:#1a2a2a;border-color:#4dd0e1;color:#b2ebf2;white-space:nowrap" title="Create a shareable link to this trace">🔗 Share</button>
@@ -830,7 +889,7 @@
                     <button id="btn-span-clear-names" style="font-size:0.8em;display:none">✕ Clear</button>
                     <span id="span-legend-items"></span>
                 </div>
-                <div id="span-panel">
+                <div id="span-panel" class="foldable-panel is-collapsed" data-panel-key="spans">
                     <div class="chart-label" id="span-panel-label">Spans</div>
                     <span id="span-panel-info" style="position:absolute;top:4px;right:12px;font-size:0.75em;color:#aaa;z-index:2;pointer-events:none"></span>
                     <canvas id="span-panel-canvas"></canvas>
@@ -839,22 +898,25 @@
                     <button id="btn-ce-clear-names" style="font-size:0.8em;display:none">✕ Clear</button>
                     <span id="ce-legend-items"></span>
                 </div>
-                <div id="custom-events-panel" style="display:none">
+                <div id="custom-events-panel" class="foldable-panel is-collapsed" data-panel-key="events" style="display:none">
                     <div class="chart-label" id="ce-panel-label">Events</div>
                     <span id="ce-panel-info" style="position:absolute;top:4px;right:12px;font-size:0.75em;color:#aaa;z-index:2;pointer-events:none"></span>
                     <canvas id="ce-panel-canvas"></canvas>
+                </div>
+                <div id="cpu-panel" class="foldable-panel is-collapsed" data-panel-key="cpu" style="display:none">
+                    <div class="chart-label" id="cpu-panel-label">CPU Usage</div>
+                    <span id="cpu-panel-info" style="position:absolute;top:4px;right:12px;font-size:0.75em;color:#aaa;z-index:2;pointer-events:none"></span>
+                    <canvas id="cpu-panel-canvas"></canvas>
                 </div>
                 <div id="task-detail">
                     <span class="chart-label" id="task-detail-label">Task Detail</span>
                     <span id="task-detail-status" style="position:absolute;top:4px;right:12px;font-size:0.75em;color:#aaa;z-index:2"></span>
                     <canvas id="task-detail-canvas"></canvas>
                 </div>
-                <div id="queue-chart" tabindex="0" aria-label="Queue depth chart">
-                    <span class="chart-label" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
-                        <span style="font-weight:600">Queue Depth</span>
-                        <span style="display:flex;align-items:center;gap:4px"><span style="width:12px;height:8px;background:rgba(79,195,247,0.5);border:1px solid #4fc3f7;display:inline-block"></span>Global</span>
-                        <span style="display:flex;align-items:center;gap:4px"><span style="width:12px;height:2px;background:#ff8a65;display:inline-block"></span>Max local</span>
-                        <span style="display:flex;align-items:center;gap:4px"><span style="width:12px;height:2px;background:#81c784;display:inline-block"></span>Active tasks</span>
+                <div id="queue-chart" class="foldable-panel is-collapsed" data-panel-key="queue" tabindex="0" aria-label="Queue depth chart">
+                    <span class="chart-label" style="font-weight:600;white-space:nowrap">Queue Depth<span class="panel-expanded-label" style="display:inline-flex;align-items:center;gap:4px;margin-left:10px;font-weight:400"><span style="width:12px;height:8px;background:rgba(79,195,247,0.5);border:1px solid #4fc3f7;display:inline-block"></span>Global</span>
+                        <span class="panel-expanded-label" style="display:inline-flex;align-items:center;gap:4px;margin-left:10px;font-weight:400"><span style="width:12px;height:2px;background:#ff8a65;display:inline-block"></span>Max local</span>
+                        <span class="panel-expanded-label" style="display:inline-flex;align-items:center;gap:4px;margin-left:10px;font-weight:400"><span style="width:12px;height:2px;background:#81c784;display:inline-block"></span>Active tasks</span>
                     </span>
                     <div id="info-panel"></div>
                     <canvas id="queue-canvas"></canvas>
@@ -863,6 +925,7 @@
                     <div id="fg-container" style="flex:1;display:flex;flex-direction:column;overflow:hidden"></div>
                 </div>
                 <div id="uninstrumented-popup" style="display:none;position:fixed;background:#1a1a2e;border:1px solid #6c63ff;border-radius:8px;padding:12px 16px;z-index:200;max-width:700px;max-height:400px;overflow-y:auto;font-size:0.82em;line-height:1.6;box-shadow:0 4px 20px rgba(0,0,0,0.5);font-family:monospace"></div>
+                <div id="parse-perf-popup" style="display:none;position:fixed;background:#1a1a2e;border:1px solid #6c63ff;border-radius:8px;padding:12px 16px;z-index:200;max-width:420px;max-height:400px;overflow-y:auto;font-size:0.82em;line-height:1.7;box-shadow:0 4px 20px rgba(0,0,0,0.5);font-family:monospace"></div>
             </div>
             <div id="stack-sidebar">
                 <div class="sidebar-resize" id="sidebar-resize-handle"></div>
@@ -916,11 +979,12 @@
         <script src="creds.js"></script>
         <script src="trace_analysis.js"></script>
         <script src="format.js"></script>
+        <script src="flamegraph_export.js"></script>
         <script src="flamegraph.js"></script>
         <script src="panel_layout.js"></script>
         <script>
             const { EVENT_TYPES: ET, parseTrace, formatFrame, symbolizeChain, deduplicateSamples } = TraceParser;
-            const { buildWorkerSpans, attachCpuSamples, buildActiveTaskTimeline, computeSchedulingDelays, filterPointsOfInterest, buildSpanData, collectDescendants, selectSpanRenderSet, computeSpanLayout, getTraceTimeRange, hasCpuProfileSamples } = TraceAnalysis;
+            const { buildWorkerSpans, attachCpuSamples, buildActiveTaskTimeline, computeSchedulingDelays, filterPointsOfInterest, buildSpanData, collectDescendants, selectSpanRenderSet, enclosingSpans, computeSpanLayout, getTraceTimeRange, hasCpuProfileSamples, buildProcessCpuUsageSeries } = TraceAnalysis;
 
             function esc(s) {
                 return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -1061,13 +1125,26 @@
             // fade the non-selected polls into the background. Compute the
             // heatmap color and multiply each channel by ~0.4 so the hue is
             // preserved but the bar visually recedes.
+            //
+            // The dim transform depends only on the (quantized, ≤24 distinct)
+            // input color, so memoize by that color string. This runs once per
+            // NON-selected poll per render — millions of times when a task is
+            // selected on a large trace — so the parseInt×3 + hex reassembly
+            // was a measurable chunk of click latency. Cache collapses it to a
+            // Map lookup after the first poll of each bucket.
+            const _dimColorCache = new Map();
             function pollColorDim(startNs, endNs) {
                 const c = TraceAnalysis.pollHeatmapColorQuantized(endNs - startNs);
-                const r = Math.round(parseInt(c.slice(1, 3), 16) * 0.4);
-                const g = Math.round(parseInt(c.slice(3, 5), 16) * 0.4);
-                const b = Math.round(parseInt(c.slice(5, 7), 16) * 0.4);
-                const hex2 = (n) => n.toString(16).padStart(2, "0");
-                return "#" + hex2(r) + hex2(g) + hex2(b);
+                let dim = _dimColorCache.get(c);
+                if (dim === undefined) {
+                    const r = Math.round(parseInt(c.slice(1, 3), 16) * 0.4);
+                    const g = Math.round(parseInt(c.slice(3, 5), 16) * 0.4);
+                    const b = Math.round(parseInt(c.slice(5, 7), 16) * 0.4);
+                    const hex2 = (n) => n.toString(16).padStart(2, "0");
+                    dim = "#" + hex2(r) + hex2(g) + hex2(b);
+                    _dimColorCache.set(c, dim);
+                }
+                return dim;
             }
 
             // ── State ──
@@ -1168,7 +1245,17 @@
             let queueSamples = [];
             // Per-worker local queue samples
             let workerQueueSamples = {};
+            // All local queue samples merged into one sorted timeline, built once at load time.
+            // Each entry: { t, w, local }. Used by renderQueueChart to avoid per-frame work.
+            let mergedLocalSamples = [];
             let maxLocalQueue = 1;
+            let processCpuUsage = {
+                samples: [],
+                intervals: [],
+                availableParallelism: null,
+                maxCores: 0,
+                avgCores: 0,
+            };
             // Points of interest for navigation
             let pointsOfInterest = [];
             let currentPoiIndex = -1;
@@ -1216,6 +1303,11 @@
             // Span data from custom events (SpanEnterEvent/SpanExitEvent)
             let allSpans = []; // [{start, end, spanId, spanName, fields, parentSpanId, depth, segments: [{start, end, workerId}], activeNs}]
             let spansById = new Map(); // spanId → entry in allSpans (for O(1) ancestor walks)
+            // spanId → ALL spans with that id. Span ids are recycled (see
+            // testBuildSpanDataRecycledId), so a single id can map to multiple
+            // distinct span intervals; the highlight loop must light up every
+            // instance, which spansById (last-wins) cannot do.
+            let spansByIdAll = new Map();
             let spanMeta = new Map(); // spanId → {spanName, fields, parentSpanId}
             let childrenByParent = new Map(); // parentSpanId|null → [childSpanId, ...]
             let spanMaxDepth = 0;
@@ -1248,6 +1340,7 @@
             //   • Timeline header  (renderTimeline)
             //   • Worker lanes     (renderLane)           — uses DOM flex instead of canvas offset
             //   • Span panel       (renderSpanPanel)
+            //   • CPU panel        (renderProcessCpuPanel)
             //   • Task detail      (renderTaskDetail)
             //   • Queue chart      (renderQueueChart)
             //
@@ -1273,6 +1366,84 @@
             const taskDetailPanel = document.getElementById("task-detail");
             const clearRangeBtn = document.getElementById("btn-clear-range");
             const tooltip = document.getElementById("tooltip");
+
+            const FOLDABLE_PANEL_KEYS = ["spans", "events", "cpu", "queue"];
+            const PANEL_COLLAPSE_STORAGE_PREFIX = "dial9.viewer.panelCollapsed.";
+            const viewerStorageFallback = new Map();
+
+            function viewerStorageGet(key) {
+                try {
+                    return localStorage.getItem(key);
+                } catch {
+                    return viewerStorageFallback.has(key) ? viewerStorageFallback.get(key) : null;
+                }
+            }
+
+            function viewerStorageSet(key, value) {
+                const stringValue = String(value);
+                try {
+                    localStorage.setItem(key, stringValue);
+                } catch {
+                    viewerStorageFallback.set(key, stringValue);
+                }
+            }
+
+            function panelCollapseStorageKey(key) {
+                return PANEL_COLLAPSE_STORAGE_PREFIX + key;
+            }
+
+            function isPanelCollapsed(key) {
+                return viewerStorageGet(panelCollapseStorageKey(key)) !== "expanded";
+            }
+
+            function syncFoldablePanel(key) {
+                const panel = document.querySelector(`[data-panel-key="${key}"]`);
+                if (!panel) return;
+                const collapsed = isPanelCollapsed(key);
+                panel.classList.toggle("is-collapsed", collapsed);
+                const label = panel.querySelector(".chart-label");
+                if (label) label.setAttribute("aria-expanded", collapsed ? "false" : "true");
+
+                if (key === "spans") {
+                    document.getElementById("span-legend").style.display =
+                        !collapsed && panel.style.display !== "none" && allSpans.length > 0 ? "block" : "none";
+                } else if (key === "events") {
+                    document.getElementById("ce-legend").style.display =
+                        !collapsed && panel.style.display !== "none" && genericCustomEvents.length > 0 ? "block" : "none";
+                }
+            }
+
+            function syncFoldablePanels() {
+                for (const key of FOLDABLE_PANEL_KEYS) syncFoldablePanel(key);
+            }
+
+            function setPanelCollapsed(key, collapsed, { redraw = true } = {}) {
+                viewerStorageSet(panelCollapseStorageKey(key), collapsed ? "collapsed" : "expanded");
+                syncFoldablePanel(key);
+                if (redraw) renderAll();
+            }
+
+            for (const panel of document.querySelectorAll(".foldable-panel")) {
+                const key = panel.dataset.panelKey;
+                const label = panel.querySelector(".chart-label");
+                if (label) {
+                    label.setAttribute("role", "button");
+                    label.setAttribute("tabindex", "0");
+                    label.addEventListener("keydown", (e) => {
+                        if (e.key !== "Enter" && e.key !== " ") return;
+                        e.preventDefault();
+                        setPanelCollapsed(key, !isPanelCollapsed(key));
+                    });
+                }
+                panel.addEventListener("click", (e) => {
+                    if (e.target.closest(".kv-copy")) return;
+                    if (!isPanelCollapsed(key) && !e.target.closest(".chart-label")) return;
+                    e.stopPropagation();
+                    setPanelCollapsed(key, !isPanelCollapsed(key));
+                });
+            }
+            syncFoldablePanels();
+
             // Position the (already-populated, display:block) tooltip near the
             // cursor, clamped to the viewport on both axes. Flips above the cursor
             // when it would spill off the bottom. Call after setting innerHTML.
@@ -1357,8 +1528,10 @@
                 relatedExpand = {};
                 relatedItems = [];
                 hoveredWakerTaskId = null;
+                processCpuUsage = { samples: [], intervals: [], availableParallelism: null, maxCores: 0, avgCores: 0 };
                 hideStackPopup();
                 taskDetailPanel.style.display = "none";
+                document.getElementById("cpu-panel").style.display = "none";
                 schedPanelTimeRange = null;
 
                 // Default: clear the URL range only when replacing a visible
@@ -1377,34 +1550,135 @@
                 showLoadingState(label);
             }
 
+            /** Build the standard onParseProgress callback for the spinner. */
+            function makeParseProgress() {
+                return ({ bytesRead, totalBytes, eventCount }) => {
+                    const events = `${(eventCount / 1000) | 0}k events`;
+                    // Streaming reports totalBytes=null (the full size isn't known
+                    // until the stream ends), so show MB decoded instead of a
+                    // bogus percentage. The buffered path knows the total.
+                    if (totalBytes) {
+                        const pct = ((bytesRead / totalBytes) * 100) | 0;
+                        updateLoadProgress(`Parsing: ${pct}% · ${events}`);
+                    } else {
+                        const mb = (bytesRead / (1024 * 1024)).toFixed(1);
+                        updateLoadProgress(`Parsing: ${mb} MB · ${events}`);
+                    }
+                };
+            }
+
+            /** Finish loading: analyze the parsed trace, retain the buffer for
+             *  in-memory re-parse (Set/Clear Range), and show the viewer. */
+            async function showParsedTrace(parsed, buffer, name) {
+                trace = parsed;
+                updateLoadProgress(`Analyzing ${trace.events.length.toLocaleString()} events…`);
+                // processTrace() runs synchronously and hogs the main thread for
+                // a couple of seconds on a large trace. Yield for a paint frame
+                // first (double rAF: the callback after the next paint) so the
+                // browser actually renders the "Analyzing…" label before the
+                // blocking work starts — otherwise the label is set but never
+                // shown, and the spinner appears stuck on the last parse line.
+                await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+                if (!processTrace()) {
+                    resetDropZone();
+                    return;
+                }
+                // Trace is rendering: freeze the wall-clock timer. Log the final
+                // elapsed time for easy copy/paste measurement.
+                if (loadStartTime != null) {
+                    const secs = ((performance.now() - loadStartTime) / 1000).toFixed(1);
+                    console.log(`loaded in ${secs}s (events=${trace.events.length})`);
+                }
+                stopLoadTimer();
+                currentTraceBuffer = buffer;
+                currentTraceName = name;
+                showViewer(name);
+                // Record the TOTAL load time including the analysis+render phase
+                // that just ran in showViewer. The live `loadStartTime` timer was
+                // already frozen above (before analysis), so we measure here from
+                // the recorded loadPerf.startMs. A double requestAnimationFrame
+                // defers until after the browser has laid out and painted the
+                // first frame, so totalMs reflects "once the render completes"
+                // rather than just "JS returned". Then refine the inline stats
+                // suffix (showViewer wrote it provisionally / without a total).
+                if (loadPerf) {
+                    loadPerf.events = trace.events.length;
+                    // Best-effort decompressed size. The streaming path passes the
+                    // reassembled gunzipped buffer (exact). The buffered/local/
+                    // reparse paths pass the input buffer fed to the parser.
+                    const buf = buffer;
+                    if (buf != null) {
+                        loadPerf.bytes = buf.byteLength != null
+                            ? buf.byteLength
+                            : (buf.length != null ? buf.length : null);
+                    }
+                    const perf = loadPerf; // capture in case a new load starts
+                    requestAnimationFrame(() => requestAnimationFrame(() => {
+                        if (perf.startMs == null) return;
+                        perf.totalMs = performance.now() - perf.startMs;
+                        updateInlineLoadTime(perf);
+                    }));
+                }
+                if (trace.events.length === 0 && hasCpuProfileSamples(trace.cpuSamples)) {
+                    requestAnimationFrame(() => showFlamegraph(minTs, maxTs));
+                }
+            }
+
             /** Parse an already-fetched buffer and show the viewer. */
             async function parseAndShowTrace(buffer, name, opts = {}) {
                 try {
-                    const fullOpts = {
-                        ...opts,
-                        onParseProgress: ({ bytesRead, totalBytes, eventCount }) => {
-                            const pct = ((bytesRead / totalBytes) * 100) | 0;
-                            updateLoadProgress(`Parsing: ${pct}% · ${(eventCount / 1000) | 0}k events`);
-                        },
-                    };
+                    const fullOpts = { ...opts, onParseProgress: makeParseProgress() };
                     updateLoadProgress("Decompressing…");
-                    trace = await parseTrace(buffer, fullOpts);
-                    updateLoadProgress(`Analyzing ${trace.events.length.toLocaleString()} events…`);
-                    await new Promise((r) => setTimeout(r, 0));
-                    if (!processTrace()) {
-                        resetDropZone();
-                        return;
-                    }
-                    currentTraceBuffer = buffer;
-                    currentTraceName = name;
-                    showViewer(name);
-                    if (trace.events.length === 0 && hasCpuProfileSamples(trace.cpuSamples)) {
-                        requestAnimationFrame(() => showFlamegraph(minTs, maxTs));
-                    }
+                    const parsed = await parseTrace(buffer, fullOpts);
+                    if (loadPerf) loadPerf.parseDoneMs = performance.now();
+                    await showParsedTrace(parsed, buffer, name);
                 } catch (err) {
                     if (err.name === "AbortError") return;
                     alert("Error: " + err.message);
                     resetDropZone();
+                }
+            }
+
+            /**
+             * Stream a single trace URL: decode chunks as they download so parse
+             * time overlaps the download (~max(download, parse) instead of their
+             * sum). We capture the gunzipped chunks while parsing so the full
+             * buffer is still available afterwards for in-memory Set/Clear-Range
+             * re-parsing (which never re-fetches).
+             */
+            async function streamAndShowTrace(url, name, opts = {}) {
+                try {
+                    const credHeaders = window.Dial9Creds ? Dial9Creds.headers() : {};
+                    const stream = await TraceParser.fetchTraceStream(url, {
+                        signal: loadAbortController?.signal,
+                        headers: credHeaders,
+                    });
+                    const captured = [];
+                    const capturing = {
+                        async *[Symbol.asyncIterator]() {
+                            for await (const chunk of stream) {
+                                captured.push(chunk);
+                                yield chunk;
+                            }
+                        },
+                    };
+                    const fullOpts = { ...opts, onParseProgress: makeParseProgress() };
+                    if (loadPerf) loadPerf.mode = "stream";
+                    const parsed = await TraceParser.parseTraceStream(capturing, fullOpts);
+                    // Streaming fuses fetch+parse, so there is no separate fetch
+                    // mark — parseDoneMs covers the combined fetch+parse phase.
+                    if (loadPerf) loadPerf.parseDoneMs = performance.now();
+                    loadAbortController = null;
+                    // Reassemble the full buffer from the captured chunks.
+                    let total = 0;
+                    for (const c of captured) total += c.length;
+                    const buffer = new Uint8Array(total);
+                    let off = 0;
+                    for (const c of captured) { buffer.set(c, off); off += c.length; }
+                    await showParsedTrace(parsed, buffer.buffer, name);
+                } catch (err) {
+                    if (err.name === "AbortError") return;
+                    throw err;
                 }
             }
 
@@ -1419,12 +1693,79 @@
 
             let loadAbortController = null;
 
+            // Live wall-clock "time to load" timer. Starts the instant a load
+            // begins (showLoadingState, the single earliest point common to
+            // every spinner-showing path: URL stream, multi-URL buffered, file
+            // drop, demo, and re-parse) and ticks up visibly until the trace
+            // renders, so the user can watch elapsed time alongside the event
+            // counter during the download+parse stall. It won't tick during a
+            // long synchronous drain (the main thread is busy) — that's
+            // acceptable and actually informative.
+            let loadStartTime = null;
+            let loadTimerInterval = null;
+
+            // Phase-timing record for the current/last load, captured across
+            // ALL load paths (single-URL stream, multi-URL buffered, local file
+            // drop, demo, and in-memory re-parse). All marks use
+            // performance.now() (ms). Unlike the live `loadStartTime` (which is
+            // frozen when the spinner is replaced, BEFORE analysis+render),
+            // `totalMs` here is recorded after showViewer via a double rAF so
+            // it INCLUDES the analysis+render phase. Fields:
+            //   startMs     - load began (showLoadingState)
+            //   fetchDoneMs - buffered fetch returned (buffered mode only)
+            //   parseDoneMs - parsing finished (all modes)
+            //   totalMs     - start → render-complete (set in double-rAF)
+            //   mode        - 'stream' | 'buffered' | 'local' | 'reparse'
+            //   events      - decoded event count
+            //   bytes       - decompressed buffer length (if known)
+            let loadPerf = null;
+
+            /** Render the elapsed-time span; safe to call repeatedly. */
+            function renderLoadElapsed() {
+                const el = document.getElementById("load-elapsed");
+                if (el && loadStartTime != null) {
+                    const secs = (performance.now() - loadStartTime) / 1000;
+                    el.textContent = ` · ${secs.toFixed(1)}s`;
+                }
+            }
+
+            /** Begin the wall-clock timer for the current load (idempotent). */
+            function startLoadTimer() {
+                loadStartTime = performance.now();
+                if (loadTimerInterval) clearInterval(loadTimerInterval);
+                // 250ms (4x/sec) keeps the elapsed display readable while
+                // repainting less often than the previous 100ms (10x/sec),
+                // matching the coarser paint cadence in parseTraceStream.
+                loadTimerInterval = setInterval(renderLoadElapsed, 250);
+            }
+
+            /** Stop and clear the timer so it never leaks or keeps ticking. */
+            function stopLoadTimer() {
+                if (loadTimerInterval) { clearInterval(loadTimerInterval); loadTimerInterval = null; }
+                loadStartTime = null;
+            }
+
             function showLoadingState(label) {
                 loadAbortController = new AbortController();
+                startLoadTimer();
+                // Reset the phase-timing record at the single earliest point
+                // common to every load path. `mode` defaults to 'local' (file
+                // drop / demo-from-blob have no network fetch); the URL paths
+                // overwrite it with 'stream'/'buffered', and reparseWithRange
+                // with 'reparse'.
+                loadPerf = {
+                    startMs: performance.now(),
+                    fetchDoneMs: null,
+                    parseDoneMs: null,
+                    totalMs: null,
+                    mode: "local",
+                    events: null,
+                    bytes: null,
+                };
                 dropZone.innerHTML = '';
                 const wrap = document.createElement("div");
                 wrap.style.textAlign = "center";
-                wrap.innerHTML = `<div class="loading-spinner"></div><div style="margin-bottom:8px">${esc(label)}</div><div class="loading-progress" id="load-progress"></div>`;
+                wrap.innerHTML = `<div class="loading-spinner"></div><div style="margin-bottom:8px">${esc(label)}</div><div class="loading-progress"><span id="load-progress"></span><span id="load-elapsed"></span></div>`;
                 const btn = document.createElement("button");
                 btn.textContent = "← Back";
                 btn.style.cssText = "background:#2a2a4a;border:1px solid #444;color:#ccc;padding:6px 16px;border-radius:4px;cursor:pointer;font-size:0.9em;margin-top:12px";
@@ -1432,6 +1773,7 @@
                 wrap.appendChild(btn);
                 wrap.insertAdjacentHTML("beforeend", '<div style="margin-top:8px;font-size:0.8em;color:#666">or press Escape</div>');
                 dropZone.appendChild(wrap);
+                renderLoadElapsed();
             }
 
             function updateLoadProgress(text) {
@@ -1440,11 +1782,18 @@
             }
 
             function cancelLoad() {
+                stopLoadTimer();
                 if (loadAbortController) { loadAbortController.abort(); loadAbortController = null; }
                 resetDropZone();
             }
 
             function resetDropZone() {
+                // Single chokepoint for every load-end-without-render path:
+                // cancelLoad, the catch blocks in parseAndShowTrace /
+                // loadTraceFromUrl, the processTrace-failed early return, and
+                // the Back/reset button. Stop the timer here so it never leaks
+                // or keeps ticking after a load ends. Idempotent.
+                stopLoadTimer();
                 dropZone.innerHTML = `
                     <div>
                         <div style="font-size: 2em; margin-bottom: 12px">📊</div>
@@ -1459,11 +1808,23 @@
             }
 
             // `urls` may be a single URL or a list (one per repeated `trace=`).
-            // Each component is fetched and gunzipped independently, then the raw
-            // buffers are concatenated into one trace (see fetchTraces).
+            // For a single URL we STREAM: download and decode overlap, so the
+            // spinner advances during the download and total load time is about
+            // max(download, parse) rather than their sum. For multiple repeated
+            // `trace=` components we fall back to the buffered fetch+concatenate
+            // path (each component is fetched and gunzipped independently, then
+            // the raw buffers are concatenated into one trace; see fetchTraces).
             async function loadTraceFromUrl(urls) {
                 const list = Array.isArray(urls) ? urls : [urls];
                 try {
+                    const name = urlParams.get('svc')
+                        || list[0].split('/').pop()?.split('?')[0]
+                        || 'trace.bin';
+                    if (list.length === 1 && TraceParser.canStreamDecode()) {
+                        updateLoadProgress("Loading…");
+                        await streamAndShowTrace(list[0], name, getParseOptions());
+                        return;
+                    }
                     updateLoadProgress(list.length > 1 ? `Fetching ${list.length} traces…` : "Fetching…");
                     // Attach bring-your-own-credentials headers if present. A
                     // tab opened directly (not from the browser page) has no
@@ -1473,10 +1834,10 @@
                         signal: loadAbortController?.signal,
                         headers: credHeaders,
                     });
+                    // Buffered mode fetches the whole trace before parsing, so
+                    // fetch and parse are separate phases (unlike streaming).
+                    if (loadPerf) { loadPerf.mode = "buffered"; loadPerf.fetchDoneMs = performance.now(); }
                     loadAbortController = null;
-                    const name = urlParams.get('svc')
-                        || list[0].split('/').pop()?.split('?')[0]
-                        || 'trace.bin';
                     await parseAndShowTrace(arrayBuffer, name, getParseOptions());
                 } catch (err) {
                     if (err.name === 'AbortError') return;
@@ -1499,6 +1860,10 @@
                 updateUrlTimeRange(startNs, endNs);
                 resetTraceState({ clearUrlRange: false });
                 enterLoadingView(`Loading ${currentTraceName}…`);
+                // In-memory re-parse: no network fetch, parse straight from the
+                // retained buffer. enterLoadingView reset loadPerf to 'local';
+                // tag it 'reparse' so the perf panel reflects what happened.
+                if (loadPerf) loadPerf.mode = "reparse";
 
                 const opts = {};
                 if (startNs != null) opts.startTime = startNs;
@@ -1512,6 +1877,8 @@
             // value is a separate (possibly gzipped) component to concatenate.
             const urlParams = new URLSearchParams(window.location.search);
             const traceUrls = urlParams.getAll('trace');
+            // Render profiler: ?prof=1 (or window.D9PROF=1 from the console).
+            if (urlParams.get('prof') === '1') window.D9PROF = 1;
 
             /** Build parseTrace options from current URL time range params. */
             function getParseOptions() {
@@ -1598,9 +1965,9 @@
 
             function processTrace() {
                 const evts = trace.events;
-                const timeRange = getTraceTimeRange(evts, trace.cpuSamples);
+                const timeRange = getTraceTimeRange(evts, trace.cpuSamples, trace.customEvents);
                 if (!timeRange) {
-                    alert("No runtime events or CPU profile samples in trace");
+                    alert("No runtime events, CPU profile samples, or process resource usage samples in trace");
                     return false;
                 }
 
@@ -1640,6 +2007,25 @@
                 workerQueueSamples = spanResult.workerQueueSamples;
                 maxLocalQueue = spanResult.maxLocalQueue;
 
+                // Build merged timeline once — k-way merge of already-sorted per-worker arrays.
+                // renderQueueChart binary-searches into this instead of rebuilding per frame.
+                {
+                    const cursors = workerIds
+                        .filter(w => workerQueueSamples[w]?.length)
+                        .map(w => ({ w, samples: workerQueueSamples[w], idx: 0 }));
+                    mergedLocalSamples = [];
+                    while (true) {
+                        let best = null;
+                        for (const c of cursors) {
+                            if (c.idx >= c.samples.length) continue;
+                            if (best === null || c.samples[c.idx].t < best.samples[best.idx].t) best = c;
+                        }
+                        if (best === null) break;
+                        const s = best.samples[best.idx++];
+                        mergedLocalSamples.push({ t: s.t, w: best.w, local: s.local });
+                    }
+                }
+
                 // Build active task count timeline from TaskSpawn/TaskTerminate
                 const atResult = buildActiveTaskTimeline(trace.taskSpawnTimes, trace.taskTerminateTimes);
                 activeTaskSamples = atResult.activeTaskSamples;
@@ -1652,11 +2038,23 @@
                 schedDelays = computeSchedulingDelays(workerSpans, workerIds, wakesByTask);
                 console.log(`Found ${Object.keys(wakesByTask).length} tasks with wake events, ${schedDelays.length} scheduling delays`);
 
+                const availableParallelism = trace.segmentMetadata?.get("process.available_parallelism") ?? null;
+                processCpuUsage = buildProcessCpuUsageSeries(trace.customEvents || [], availableParallelism);
+                const cpuPanel = document.getElementById("cpu-panel");
+                cpuPanel.style.display = processCpuUsage.intervals.length > 0 ? "block" : "none";
+                if (processCpuUsage.intervals.length > 0) {
+                    const cap = processCpuUsage.availableParallelism != null
+                        ? `, available_parallelism=${processCpuUsage.availableParallelism}`
+                        : ", available_parallelism=unknown";
+                    console.log(`Process CPU usage: ${processCpuUsage.intervals.length} intervals${cap}`);
+                }
+
                 // Build span data from custom events.  Reset span state
                 // unconditionally here so a trace with no spans doesn't
                 // inherit stale state from a previously-loaded trace.
                 allSpans = [];
                 spansById = new Map();
+                spansByIdAll = new Map();
                 spanMeta = new Map();
                 childrenByParent = new Map();
                 unmatchedSpans = [];
@@ -1673,7 +2071,12 @@
                     // Build spanId → span index for O(1) ancestor walks
                     // (used by the lane-click handler and anywhere else that
                     // needs to navigate by parentSpanId).
-                    for (const s of allSpans) spansById.set(s.spanId, s);
+                    for (const s of allSpans) {
+                        spansById.set(s.spanId, s);
+                        let bucket = spansByIdAll.get(s.spanId);
+                        if (!bucket) { bucket = []; spansByIdAll.set(s.spanId, bucket); }
+                        bucket.push(s);
+                    }
                     const totalSegs = allSpans.reduce((s, sp) => s + sp.segments.length, 0);
                     console.log(`Span events: ${allSpans.length} spans (${totalSegs} segments), ${spanMeta.size} unique span IDs, maxDepth=${spanMaxDepth}, ${unmatchedSpans.length} unmatched`);
                 }
@@ -1741,6 +2144,7 @@
                         cePanel.style.display = "none";
                     }
                 }
+                syncFoldablePanels();
 
                 return true;
             }
@@ -1761,6 +2165,16 @@
                 const truncNote = trace.truncated ? " (truncated)" : "";
                 const filterNote = trace.timeFiltered ? " (time-filtered)" : "";
                 const statsText = `${trace.events.length.toLocaleString()} events · ${workerIds.length} workers · ${durStr}${truncNote}${filterNote}`;
+                // The total load time is finalized after this function returns
+                // (double-rAF in showParsedTrace), so we emit an empty suffix
+                // span here and updateInlineLoadTime() fills it in once known.
+                // If a prior load already recorded a total (e.g. a fast cached
+                // re-show), seed it immediately. Two layouts: svc-metadata
+                // (inside a .tb-meta/.key) and filename (inside .stats).
+                const loadSuffix = (loadPerf && loadPerf.totalMs != null)
+                    ? ` · loaded in ${fmtSecs(loadPerf.totalMs)}`
+                    : "";
+                const suffixSpan = `<span class="load-time-suffix">${loadSuffix}</span>`;
 
                 if (svc) {
                     // Structured metadata from browser
@@ -1773,10 +2187,10 @@
                         timeLine += `</span>`;
                         lines.push(timeLine);
                     }
-                    lines.push(`<span class="key">${statsText}</span>`);
+                    lines.push(`<span class="key">${statsText}${suffixSpan}</span>`);
                     infoEl.innerHTML = lines.map(l => `<div class="tb-meta">${l}</div>`).join('');
                 } else {
-                    infoEl.innerHTML = `<span class="filename">${esc(filename)}</span><span class="stats">${statsText}</span>`;
+                    infoEl.innerHTML = `<span class="filename">${esc(filename)}</span><span class="stats">${statsText}${suffixSpan}</span>`;
                 }
 
                 buildLanes();
@@ -1910,6 +2324,7 @@
                         });
                     }
                 }
+                syncFoldablePanels();
                 // Show/hide sched panel button based on whether sched events exist
                 let hasSchedEvents = false;
                 for (const w of workerIds) {
@@ -1946,9 +2361,26 @@
                     btnCpu.textContent = `🔥 Flamegraph (${trace.cpuSamples.length})`;
                 }
 
+                // Parse-perf button: shown after every successful load. The
+                // breakdown (loadPerf) is filled by showParsedTrace; even before
+                // totalMs is finalized in the double-rAF, the panel falls back to
+                // a provisional total so a click always shows something useful.
+                const btnPerf = document.getElementById("btn-parse-perf");
+                if (btnPerf) btnPerf.style.display = loadPerf ? "" : "none";
+
                 showToast("shift-drag-hint", "⇧ Shift+drag to select a region", "info", 0, true);
                 showToast("option-drag-hint", "⌥ Option+drag to zoom", "info", 0, true);
-                requestAnimationFrame(renderAll);
+                // Render synchronously, NOT via requestAnimationFrame. We just
+                // set the viewer to display:flex above; renderAll() reads
+                // getBoundingClientRect() first, which forces a synchronous
+                // reflow, so the lane canvases have correct widths immediately —
+                // no paint frame is needed to settle layout. Drawing here, in
+                // the same task that revealed the viewer, means the browser's
+                // next paint shows the fully-rendered trace. Deferring to a rAF
+                // instead left one frame where the viewer was visible but the
+                // canvases were still blank — the "empty view flash" between the
+                // spinner and the trace.
+                renderAll();
             }
 
             function updatePointsOfInterest({ autoJump = false } = {}) {
@@ -2194,7 +2626,31 @@
                 return lo;
             }
 
+            // Lightweight render profiler. Enable from the console with
+            // `window.D9PROF = 1` (or `?prof=1`), then interact; each renderAll
+            // prints a per-phase breakdown so a slow click is self-diagnosing
+            // instead of guessed at. Costs nothing when disabled.
+            function _profNow() { return (window.D9PROF ? performance.now() : 0); }
+            function _profMark(acc, label, t0) {
+                if (!window.D9PROF) return t0;
+                const t1 = performance.now();
+                acc.push([label, t1 - t0]);
+                return t1;
+            }
+
+            // Per-pass accumulators for renderLane, summed across all lanes.
+            // Reset each renderAll, printed at the end when D9PROF is on.
+            let _laneProf = null;
+            function _lp(label, t0) {
+                if (!_laneProf) return t0;
+                const t1 = performance.now();
+                _laneProf.t[label] = (_laneProf.t[label] || 0) + (t1 - t0);
+                return t1;
+            }
+
             function renderAll() {
+                const prof = window.D9PROF ? [] : null;
+                _laneProf = window.D9PROF ? { t: {}, polls: 0, fillRects: 0 } : null;
                 const rect = lanesContainer.getBoundingClientRect();
                 const drawW = rect.width - LABEL_W;
                 if (drawW <= 0) return;
@@ -2202,6 +2658,7 @@
                 // Scrollbar width: difference between container and its usable content area
                 const scrollbarW = lanesContainer.offsetWidth - lanesContainer.clientWidth;
 
+                let _t = _profNow();
                 // First pass: calculate max visible queue across all workers
                 window.visibleQueueRanges = {};
                 let maxVisibleQ = 1;
@@ -2215,13 +2672,34 @@
                     }
                 }
                 window.sharedVisibleMaxQ = maxVisibleQ;
+                if (prof) _t = _profMark(prof, "queueMax", _t);
 
+                syncFoldablePanels();
                 renderTimeline(drawW - scrollbarW);
+                if (prof) _t = _profMark(prof, "timeline", _t);
                 for (const w of workerIds) renderLane(w, drawW);
+                if (prof) _t = _profMark(prof, `lanes(${workerIds.length})`, _t);
                 renderSpanPanel(scrollbarW);
+                if (prof) _t = _profMark(prof, `spanPanel(allSpans=${allSpans.length})`, _t);
                 renderCustomEventsPanel(scrollbarW);
+                renderProcessCpuPanel(scrollbarW);
+                if (prof) _t = _profMark(prof, `customEvents(${genericCustomEvents.length})`, _t);
                 renderTaskDetail(scrollbarW);
+                if (prof) _t = _profMark(prof, "taskDetail", _t);
                 renderQueueChart(drawW, scrollbarW);
+                if (prof) {
+                    _t = _profMark(prof, "queueChart", _t);
+                    const total = prof.reduce((s, [, ms]) => s + ms, 0);
+                    prof.sort((a, b) => b[1] - a[1]);
+                    console.log(`[renderAll] total=${total.toFixed(1)}ms  ` +
+                        prof.map(([l, ms]) => `${l}=${ms.toFixed(1)}`).join("  "));
+                    if (_laneProf) {
+                        const passes = Object.entries(_laneProf.t).sort((a, b) => b[1] - a[1]);
+                        console.log(`  [lanes] polls=${_laneProf.polls} fillRects=${_laneProf.fillRects}  ` +
+                            passes.map(([l, ms]) => `${l}=${ms.toFixed(1)}`).join("  "));
+                    }
+                }
+                _laneProf = null;
 
                 // Keep the selection overlay in sync when sidebar is open
                 if (sidebarSelStart && sidebarSelEnd &&
@@ -2237,6 +2715,20 @@
 
                 // Redraw overlay lines (mouse crosshair + selected-event marker).
                 renderCrosshair();
+            }
+
+            // Coalesced renderAll: collapses multiple requests within one frame
+            // into a single render. Use this for high-frequency event handlers
+            // (mousemove hover, pan) so a burst of events can't queue a backlog
+            // of full renders — which, on a large trace, froze the UI as each
+            // multi-hundred-ms render ran back to back.
+            let _renderRafId = 0;
+            function scheduleRenderAll() {
+                if (_renderRafId) return;
+                _renderRafId = requestAnimationFrame(() => {
+                    _renderRafId = 0;
+                    renderAll();
+                });
             }
 
             function nsToX(ns, drawW) {
@@ -2370,6 +2862,7 @@
              * internal offset) rather than the flex layout used here.
              */
             function renderLane(workerId, drawW) {
+                let _tl = _profNow();
                 const c = laneCanvases[workerId];
                 if (!c) {
                     console.error(`No canvas for worker ${workerId}`);
@@ -2387,6 +2880,9 @@
                 ctx.scale(dpr, dpr);
 
                 const spans = workerSpans[workerId];
+                // Weight fn for pixel-LOD downsampling: longest span wins a
+                // pixel column (it visually dominates when zoomed out).
+                const _spanDur = (s) => s.end - s.start;
                 // Block-in-place gaps for this worker (rendered as overlays).
                 const workerGaps = (trace.blockInPlaceGaps || [])
                     .filter(g => g.workerId === workerId)
@@ -2397,12 +2893,16 @@
                 ctx.fillStyle = "#1a1e2a";
                 ctx.fillRect(0, 0, pw, ph);
 
-                // Color-code active periods by scheduling ratio (v5+ only)
+                // Color-code active periods by scheduling ratio (v5+ only).
+                // Pixel-LOD: when zoomed out there can be millions of active
+                // periods over ~1500px; draw one representative (the longest
+                // starting in each pixel column) instead of one fillRect each.
                 if (trace.hasCpuTime) {
                     const startIdx = findFirstVisible(spans.actives, viewStart);
-                    for (let i = startIdx; i < spans.actives.length; i++) {
-                        const s = spans.actives[i];
-                        if (s.start > viewEnd) break;
+                    const reps = TraceAnalysis.pixelDownsampleSpans(
+                        spans.actives, startIdx, viewStart, viewEnd, pw, _spanDur);
+                    if (_laneProf) _laneProf.fillRects += reps.length;
+                    for (const s of reps) {
                         const x1 = Math.max(0, nsToX(s.start, pw));
                         const x2 = Math.min(pw, nsToX(s.end, pw));
                         const w = Math.max(x2 - x1, 1);
@@ -2438,11 +2938,14 @@
                 }
 
                 // Draw park spans — split into normal park (muted) and scheduling delay (bright red)
+                // Pixel-LOD: one representative park per pixel column (longest
+                // wins) so a worker that parked millions of times stays cheap.
                 {
                 const parkStart = findFirstVisible(spans.parks, viewStart);
-                for (let i = parkStart; i < spans.parks.length; i++) {
-                    const s = spans.parks[i];
-                    if (s.start > viewEnd) break;
+                const parkReps = TraceAnalysis.pixelDownsampleSpans(
+                    spans.parks, parkStart, viewStart, viewEnd, pw, _spanDur);
+                if (_laneProf) _laneProf.fillRects += parkReps.length;
+                for (const s of parkReps) {
                     const x1 = Math.max(0, nsToX(s.start, pw));
                     const x2 = Math.min(pw, nsToX(s.end, pw));
                     const w = Math.max(x2 - x1, 1);
@@ -2482,6 +2985,7 @@
                     }
                 }
                 } // end parks block
+                _tl = _lp("setup+bg+parks", _tl);
 
                 // Draw poll spans (solid blue bars, center band)
                 // When a task is selected, draw in two passes: dim first, selected on top
@@ -2489,64 +2993,67 @@
                     bandH = 20;
                 const poiSpan = (currentPoiIndex >= 0) ? pointsOfInterest[currentPoiIndex].span : null;
                 const pollStart = findFirstVisible(spans.polls, viewStart);
-                const nsPerPx = (viewEnd - viewStart) / pw;
+                // Pixel-LOD downsample THEN coalesce. Fully zoomed out there
+                // are ~millions of polls over ~1500px; drawing one fillRect per
+                // poll was ~99.9% overdraw (measured: ~1.6M fillRects, ~1s/
+                // render). pixelDownsampleSpans keeps one representative per
+                // pixel column, so we draw ≤ pw bars; the coalescer then merges
+                // adjacent same-color representatives.
+                //
+                // Representative choice matters for COLOR here: the poll
+                // heatmap ramps navy→cyan→orange→red with duration, so a
+                // longest-wins weight (what the active/park lanes use) would
+                // pick the single slowest poll in each column — and the max of
+                // many samples sits near the top of the range, painting dense
+                // columns almost entirely red. The pre-LOD code drew every poll
+                // in start order, so the LAST poll painted in a pixel won its
+                // color: an unbiased sample, not the worst case. We reproduce
+                // that by weighting on `s.start` (polls are start-sorted, so the
+                // latest starter in a column wins). When a task is selected we
+                // instead force its polls to win their column (`Infinity`) so a
+                // short selected poll sharing a pixel with an unselected one
+                // can't vanish — that highlight pass is a single solid color, so
+                // it has no red-bias concern. This is per-column, not per-poll:
+                // if two selected polls land in the same column only the first
+                // survives, which is visually harmless (the column still reads
+                // selected, and wide selected polls draw full-width from their
+                // real start→end geometry below).
+                const pollWeight = selectedTaskId
+                    ? (s) => (s.taskId === selectedTaskId ? Infinity : s.start)
+                    : (s) => s.start;
+                const pollReps = TraceAnalysis.pixelDownsampleSpans(
+                    spans.polls, pollStart, viewStart, viewEnd, pw, pollWeight);
+                if (_laneProf) _laneProf.polls += pollReps.length;
+                // Coalesce adjacent same-color representatives into one fillRect
+                // per contiguous run. `color(s)` returns the fill, or null to
+                // skip (skipped reps don't break neighboring runs).
+                const drawCoalesced = (color) => {
+                    const merge = TraceAnalysis.makeBarCoalescer((x, w, fill) => {
+                        ctx.fillStyle = fill;
+                        ctx.fillRect(x, bandTop, w, bandH);
+                        if (_laneProf) _laneProf.fillRects++;
+                    });
+                    for (const s of pollReps) {
+                        const fill = color(s);
+                        if (fill == null) continue;
+                        const x1 = Math.max(0, nsToX(s.start, pw));
+                        const x2 = Math.min(pw, nsToX(s.end, pw));
+                        merge.push(x1, x2, fill);
+                    }
+                    merge.flush();
+                };
+                let _tp = _profNow();
                 if (selectedTaskId) {
-                    for (let i = pollStart; i < spans.polls.length; i++) {
-                        const s = spans.polls[i];
-                        if (s.start > viewEnd) break;
-                        if (s.taskId === selectedTaskId) continue;
-                        const x1 = Math.max(0, nsToX(s.start, pw));
-                        const x2 = Math.min(pw, nsToX(s.end, pw));
-                        ctx.fillStyle = pollColorDim(s.start, s.end);
-                        ctx.fillRect(x1, bandTop, Math.max(x2 - x1, 1), bandH);
-                    }
-                    ctx.fillStyle = "#ffeb3b";
-                    for (let i = pollStart; i < spans.polls.length; i++) {
-                        const s = spans.polls[i];
-                        if (s.start > viewEnd) break;
-                        if (s.taskId !== selectedTaskId) continue;
-                        const x1 = Math.max(0, nsToX(s.start, pw));
-                        const x2 = Math.min(pw, nsToX(s.end, pw));
-                        ctx.fillRect(x1, bandTop, Math.max(x2 - x1, 1), bandH);
-                    }
-                } else if (nsPerPx > 5000) {
-                    // LOD: when zoomed out, bucket polls by pixel and draw worst-case color
-                    // Each pixel bucket tracks the max poll duration seen
-                    let prevPx = -2, prevColor = null, runStart = -1;
-                    for (let i = pollStart; i < spans.polls.length; i++) {
-                        const s = spans.polls[i];
-                        if (s.start > viewEnd) break;
-                        const x1 = Math.max(0, nsToX(s.start, pw)) | 0;
-                        const x2 = Math.min(pw, nsToX(s.end, pw)) | 0;
-                        const color = pollColor(s.start, s.end);
-                        if (x1 <= prevPx + 1 && color === prevColor) {
-                            // Extend current run
-                            prevPx = Math.max(prevPx, x2);
-                        } else {
-                            // Flush previous run
-                            if (prevColor) {
-                                ctx.fillStyle = prevColor;
-                                ctx.fillRect(runStart, bandTop, Math.max(prevPx - runStart, 1), bandH);
-                            }
-                            runStart = x1;
-                            prevPx = Math.max(x1, x2);
-                            prevColor = color;
-                        }
-                    }
-                    if (prevColor) {
-                        ctx.fillStyle = prevColor;
-                        ctx.fillRect(runStart, bandTop, Math.max(prevPx - runStart, 1), bandH);
-                    }
+                    // Dim pass: every non-selected poll. Highlight pass: the
+                    // selected task's polls on top, in a single solid color.
+                    drawCoalesced((s) =>
+                        s.taskId === selectedTaskId ? null : pollColorDim(s.start, s.end));
+                    drawCoalesced((s) =>
+                        s.taskId === selectedTaskId ? "#ffeb3b" : null);
                 } else {
-                    for (let i = pollStart; i < spans.polls.length; i++) {
-                        const s = spans.polls[i];
-                        if (s.start > viewEnd) break;
-                        const x1 = Math.max(0, nsToX(s.start, pw));
-                        const x2 = Math.min(pw, nsToX(s.end, pw));
-                        ctx.fillStyle = pollColor(s.start, s.end);
-                        ctx.fillRect(x1, bandTop, Math.max(x2 - x1, 1), bandH);
-                    }
+                    drawCoalesced((s) => pollColor(s.start, s.end));
                 }
+                _tp = _lp("pollDraw", _tp);
                 // Mark open-ended polls with a dashed right edge (block_in_place)
                 for (let i = pollStart; i < spans.polls.length; i++) {
                     const s = spans.polls[i];
@@ -2595,6 +3102,7 @@
                     }
                 }
 
+                _tp = _lp("openEnded+poiEtc", _tp);
                 // Mark CPU sample positions with ticks below the poll band
                 ctx.fillStyle = "#ce93d8";
                 {
@@ -2613,6 +3121,7 @@
                     }
                 }
 
+                _tp = _lp("cpuTicks", _tp);
                 // Mark polls that have sched events with red triangles below the poll band
                 for (let i = pollStart; i < spans.polls.length; i++) {
                     const s = spans.polls[i];
@@ -2644,19 +3153,31 @@
                     }
                 }
 
-                // Highlight polls containing the selected span
+                // Highlight polls containing the selected span. Iterate the
+                // (tiny: focused span + ancestors) selectedSpanIds set and look
+                // each up via spansById, rather than scanning the whole
+                // allSpans array. renderLane runs once per worker, so the old
+                // per-lane allSpans scan was O(workers × allSpans) per render —
+                // hundreds of millions of iterations on a multi-million-span
+                // trace, which made clicking a poll take seconds. This is
+                // O(workers × selectedSpanIds) instead.
                 if (selectedSpanIds.size > 0) {
-                    for (const s of allSpans) {
-                        if (!selectedSpanIds.has(s.spanId)) continue;
-                        for (const seg of s.segments) {
-                            if (seg.workerId !== workerId) continue;
-                            const poll = findSpanAt(spans.polls, seg.start);
-                            if (poll) {
-                                const x1 = Math.max(0, nsToX(poll.start, pw));
-                                const x2 = Math.min(pw, nsToX(poll.end, pw));
-                                ctx.strokeStyle = "#ffeb3b";
-                                ctx.lineWidth = 2;
-                                ctx.strokeRect(x1, bandTop, Math.max(x2 - x1, 4), bandH);
+                    for (const spanId of selectedSpanIds) {
+                        // Recycled ids: highlight every span instance sharing
+                        // this id, matching the old full-allSpans scan exactly.
+                        const matches = spansByIdAll.get(spanId);
+                        if (!matches) continue;
+                        for (const s of matches) {
+                            for (const seg of s.segments) {
+                                if (seg.workerId !== workerId) continue;
+                                const poll = findSpanAt(spans.polls, seg.start);
+                                if (poll) {
+                                    const x1 = Math.max(0, nsToX(poll.start, pw));
+                                    const x2 = Math.min(pw, nsToX(poll.end, pw));
+                                    ctx.strokeStyle = "#ffeb3b";
+                                    ctx.lineWidth = 2;
+                                    ctx.strokeRect(x1, bandTop, Math.max(x2 - x1, 4), bandH);
+                                }
                             }
                         }
                     }
@@ -2682,6 +3203,7 @@
                     }
                 }
 
+                _tp = _lp("schedTris+highlights", _tp);
                 // Overlay local queue depth as a step chart in the bottom portion
                 const samples = workerQueueSamples[workerId];
                 if (samples && samples.length) {
@@ -2729,6 +3251,7 @@
                     ctx.stroke();
                 }
 
+                _tp = _lp("queueStep", _tp);
                 // Separator line between poll band and queue area
                 ctx.strokeStyle = "#333";
                 ctx.lineWidth = 0.5;
@@ -2743,11 +3266,31 @@
             // Span panel layout: [{spans, representative, x1, x2, y, h}] — set by renderSpanPanel, used by hit testing
             let spanPanelHits = [];
 
+            function updateSpanPanelLabel() {
+                const label = document.getElementById("span-panel-label");
+                if (focusedSpanId != null) {
+                    const meta = spanMeta.get(focusedSpanId);
+                    const focusedSpan = allSpans.find(s => s.spanId === focusedSpanId);
+                    const fields = focusedSpan?.fields || meta?.fields || {};
+                    const name = meta?.spanName || focusedSpan?.spanName || "Span";
+                    let html = `<div style="color:#ccc;margin-bottom:3px">${esc(name)}</div>`;
+                    for (const [k, v] of Object.entries(fields)) {
+                        html += kvRow(k, formatFieldValue(v));
+                    }
+                    label.innerHTML = html;
+                } else {
+                    label.textContent = "Spans";
+                }
+            }
+
             function renderSpanPanel(scrollbarW) {
                 const panel = document.getElementById("span-panel");
                 if (panel.style.display === "none") return;
                 const c = document.getElementById("span-panel-canvas");
                 const ph = 120;
+                const info = document.getElementById("span-panel-info");
+                spanPanelHits = [];
+                updateSpanPanelLabel();
 
                 // Shared time-panel layout: keeps the draw area aligned with
                 // the worker lanes and task detail.  See TIME-PANEL LAYOUT
@@ -2758,11 +3301,10 @@
                 // label are obscured by design (confirmed in design review).
                 const layout = timePanelLayout(panel, scrollbarW);
                 const { pw, drawW, nsToPanelX, nsToPanelXClamped } = layout;
-                const ctx = layout.resizeCanvas(c, ph);
-                ctx.clearRect(0, 0, pw, ph);
-                spanPanelHits = [];
-
-                if (drawW <= 0) return;
+                if (drawW <= 0) {
+                    info.textContent = "";
+                    return;
+                }
 
                 // 1. Filter to visible + matching spans
                 const visibleSpans = [];
@@ -2773,6 +3315,10 @@
                 }
 
                 if (visibleSpans.length === 0) {
+                    info.textContent = "";
+                    if (isPanelCollapsed("spans")) return;
+                    const ctx = layout.resizeCanvas(c, ph);
+                    ctx.clearRect(0, 0, pw, ph);
                     ctx.fillStyle = "#555";
                     ctx.font = "12px sans-serif";
                     ctx.fillText("No spans in view" + (spanFilter ? ` (filter: "${spanFilter}")` : ""), LABEL_W + 10, 60);
@@ -2787,6 +3333,10 @@
                 });
 
                 if (renderSet.length === 0) {
+                    info.textContent = "0 spans · 0 clusters";
+                    if (isPanelCollapsed("spans")) return;
+                    const ctx = layout.resizeCanvas(c, ph);
+                    ctx.clearRect(0, 0, pw, ph);
                     ctx.fillStyle = "#555";
                     ctx.font = "12px sans-serif";
                     ctx.fillText("No root spans in view", LABEL_W + 10, 60);
@@ -2805,6 +3355,13 @@
                     clusterXPx: CLUSTER_X,
                     barH: BAR_H,
                 });
+
+                const focusNote = focusedSpanId != null ? " (focused)" : "";
+                info.textContent = `${renderSet.length} spans · ${spanLayout.buckets.length} clusters${focusNote}`;
+                if (isPanelCollapsed("spans")) return;
+
+                const ctx = layout.resizeCanvas(c, ph);
+                ctx.clearRect(0, 0, pw, ph);
 
                 // When focused: pin parent at top, children packed right below
                 if (focusedSpanId != null) {
@@ -2887,26 +3444,6 @@
                         ctx.fillText(formatHumanDuration(dur), LABEL_W + 2, y - 2);
                     }
                 }
-
-                const info = document.getElementById("span-panel-info");
-                const focusNote = focusedSpanId != null ? " (focused)" : "";
-                info.textContent = `${renderSet.length} spans · ${spanLayout.buckets.length} clusters${focusNote}`;
-
-                // Update left label: show focused span's fields or default "Spans"
-                const label = document.getElementById("span-panel-label");
-                if (focusedSpanId != null) {
-                    const meta = spanMeta.get(focusedSpanId);
-                    const focusedSpan = allSpans.find(s => s.spanId === focusedSpanId);
-                    const fields = focusedSpan?.fields || meta?.fields || {};
-                    const name = meta?.spanName || focusedSpan?.spanName || "Span";
-                    let html = `<div style="color:#ccc;margin-bottom:3px">${esc(name)}</div>`;
-                    for (const [k, v] of Object.entries(fields)) {
-                        html += kvRow(k, formatFieldValue(v));
-                    }
-                    label.innerHTML = html;
-                } else {
-                    label.textContent = "Spans";
-                }
             }
 
             function renderCustomEventsPanel(scrollbarW) {
@@ -2914,14 +3451,15 @@
                 if (panel.style.display === "none") return;
                 const c = document.getElementById("ce-panel-canvas");
                 const ph = 40;
+                const info = document.getElementById("ce-panel-info");
+                cePanelHits = [];
 
                 const layout = timePanelLayout(panel, scrollbarW);
                 const { pw, drawW, nsToPanelX, nsToPanelXClamped } = layout;
-                const ctx = layout.resizeCanvas(c, ph);
-                ctx.clearRect(0, 0, pw, ph);
-                cePanelHits = [];
-
-                if (drawW <= 0) return;
+                if (drawW <= 0) {
+                    info.textContent = "";
+                    return;
+                }
 
                 // Filter to visible events matching name selection
                 const visible = [];
@@ -2932,10 +3470,13 @@
                 }
 
                 if (visible.length === 0) {
+                    info.textContent = "";
+                    if (isPanelCollapsed("events")) return;
+                    const ctx = layout.resizeCanvas(c, ph);
+                    ctx.clearRect(0, 0, pw, ph);
                     ctx.fillStyle = "#555";
                     ctx.font = "12px sans-serif";
                     ctx.fillText(genericCustomEvents.length === 0 ? "No custom events" : "No events in view", LABEL_W + 10, 24);
-                    document.getElementById("ce-panel-info").textContent = "";
                     return;
                 }
 
@@ -2948,6 +3489,12 @@
                     if (!bucket) { bucket = []; buckets.set(px, bucket); }
                     bucket.push(ev);
                 }
+
+                info.textContent = `${visible.length} events · ${buckets.size} markers`;
+                if (isPanelCollapsed("events")) return;
+
+                const ctx = layout.resizeCanvas(c, ph);
+                ctx.clearRect(0, 0, pw, ph);
 
                 for (const [px, events] of buckets) {
                     const rep = events[0];
@@ -2995,8 +3542,140 @@
                     cePanelHits.push({ events, x: px - hitW / 2, y, w: hitW, h, taskId });
                 }
                 ctx.globalAlpha = 1.0;
+            }
 
-                document.getElementById("ce-panel-info").textContent = `${visible.length} events · ${buckets.size} markers`;
+            function fmtCpuCores(value) {
+                if (!Number.isFinite(value)) return "-";
+                return value
+                    .toFixed(value >= 10 ? 1 : 2)
+                    .replace(/(\.\d*?)0+$/, "$1")
+                    .replace(/\.$/, "");
+            }
+
+            function fmtCpuPercent(value) {
+                if (!Number.isFinite(value)) return "-";
+                return `${value.toFixed(1)}%`;
+            }
+
+            function visibleCpuStats() {
+                let maxCores = 0;
+                let totalOverlapNs = 0;
+                let weightedCoresNs = 0;
+                for (const interval of processCpuUsage.intervals) {
+                    if (interval.end < viewStart) continue;
+                    if (interval.start > viewEnd) break;
+                    const overlap = Math.min(interval.end, viewEnd) - Math.max(interval.start, viewStart);
+                    if (!(overlap > 0)) continue;
+                    if (interval.cores > maxCores) maxCores = interval.cores;
+                    totalOverlapNs += overlap;
+                    weightedCoresNs += interval.cores * overlap;
+                }
+                const avgCores = totalOverlapNs > 0 ? weightedCoresNs / totalOverlapNs : 0;
+                return { avgCores, maxCores };
+            }
+
+            function renderProcessCpuPanel(scrollbarW) {
+                const panel = document.getElementById("cpu-panel");
+                if (panel.style.display === "none") return;
+                const c = document.getElementById("cpu-panel-canvas");
+                const ph = 92;
+                const stats = visibleCpuStats();
+                const capacity = processCpuUsage.availableParallelism;
+                const avgPct = capacity != null ? Math.min(100, (stats.avgCores / capacity) * 100) : null;
+                const pctText = avgPct != null ? ` · avg ${fmtCpuPercent(avgPct)}` : "";
+                document.getElementById("cpu-panel-info").textContent =
+                    `avg ${fmtCpuCores(stats.avgCores)} cores${pctText} · max ${fmtCpuCores(stats.maxCores)}`;
+                if (isPanelCollapsed("cpu")) return;
+
+                const layout = timePanelLayout(panel, scrollbarW);
+                const { pw, drawW, nsToPanelXClamped } = layout;
+                const ctx = layout.resizeCanvas(c, ph);
+                ctx.clearRect(0, 0, pw, ph);
+                ctx.fillStyle = "#111b2e";
+                ctx.fillRect(0, 0, pw, ph);
+                if (drawW <= 0) return;
+
+                const scaleMax = Math.max(1, stats.maxCores, capacity || 0);
+                const chartTop = 20;
+                const chartH = ph - 28;
+
+                ctx.fillStyle = "#667";
+                ctx.font = "10px monospace";
+                ctx.textAlign = "right";
+                ctx.fillText(fmtCpuCores(scaleMax), LABEL_W - 6, chartTop + 9);
+                ctx.fillText("0", LABEL_W - 6, chartTop + chartH);
+
+                ctx.strokeStyle = "rgba(255,255,255,0.07)";
+                ctx.lineWidth = 1;
+                for (let i = 1; i <= 3; i++) {
+                    const y = chartTop + (chartH * i) / 4;
+                    ctx.beginPath();
+                    ctx.moveTo(LABEL_W, y);
+                    ctx.lineTo(LABEL_W + drawW, y);
+                    ctx.stroke();
+                }
+
+                if (capacity != null) {
+                    const capY = chartTop + chartH - (capacity / scaleMax) * chartH;
+                    ctx.strokeStyle = "rgba(255,207,153,0.65)";
+                    ctx.setLineDash([4, 3]);
+                    ctx.beginPath();
+                    ctx.moveTo(LABEL_W, capY);
+                    ctx.lineTo(LABEL_W + drawW, capY);
+                    ctx.stroke();
+                    ctx.setLineDash([]);
+                    ctx.fillStyle = "#ffcf99";
+                    ctx.textAlign = "left";
+                    ctx.fillText(`${fmtCpuCores(capacity)} core capacity`, LABEL_W + 6, Math.max(12, capY - 4));
+                }
+
+                for (const interval of processCpuUsage.intervals) {
+                    if (interval.end < viewStart) continue;
+                    if (interval.start > viewEnd) break;
+                    const x1 = nsToPanelXClamped(interval.start);
+                    const x2 = nsToPanelXClamped(interval.end);
+                    const w = Math.max(1, x2 - x1);
+                    const y = chartTop + chartH - (interval.cores / scaleMax) * chartH;
+                    const h = chartTop + chartH - y;
+                    const load = capacity != null
+                        ? Math.min(1, interval.cores / capacity)
+                        : Math.min(1, interval.cores / scaleMax);
+                    const r = Math.round(79 + 176 * load);
+                    const g = Math.round(195 - 80 * load);
+                    const b = Math.round(247 - 150 * load);
+                    ctx.fillStyle = `rgba(${r}, ${g}, ${b}, 0.42)`;
+                    ctx.fillRect(x1, y, w, h);
+                    ctx.strokeStyle = `rgba(${r}, ${g}, ${b}, 0.9)`;
+                    ctx.beginPath();
+                    ctx.moveTo(x1, y);
+                    ctx.lineTo(x1 + w, y);
+                    ctx.stroke();
+                }
+
+            }
+
+            function findProcessCpuIntervalAt(ns) {
+                const intervals = processCpuUsage.intervals;
+                let lo = 0, hi = intervals.length - 1;
+                while (lo <= hi) {
+                    const mid = (lo + hi) >> 1;
+                    const interval = intervals[mid];
+                    if (ns < interval.start) hi = mid - 1;
+                    else if (ns > interval.end) lo = mid + 1;
+                    else return interval;
+                }
+                return null;
+            }
+
+            function cpuIntervalTooltipHtml(interval) {
+                const capacity = processCpuUsage.availableParallelism;
+                let html = `<span class="label">Window:</span> <span class="value">${formatHumanDuration(interval.wallDeltaNs)}</span>`;
+                html += `<br><span class="label">CPU time:</span> <span class="value">${formatHumanDuration(interval.cpuDeltaNs)}</span>`;
+                html += `<br><span class="label">Cores:</span> <span class="value">${fmtCpuCores(interval.cores)}</span>`;
+                if (capacity != null) {
+                    html += `<br><span class="label">Total CPU:</span> <span class="value">${fmtCpuPercent(interval.totalPercent)}</span>`;
+                }
+                return html;
             }
 
             // Find the bucket at a given (x, y) position in the span panel canvas
@@ -3239,14 +3918,6 @@
             const RELATED_INITIAL = 5;
             const RELATED_STEP = 25;
 
-            // Spans whose [start,end] covers ts, outermost first — the enclosing
-            // hierarchy at the event's timestamp (spans nest via parentSpanId).
-            function spansAtTime(ts) {
-                return allSpans
-                    .filter(s => s.start <= ts && s.end >= ts)
-                    .sort((a, b) => (a.depth - b.depth) || (a.start - b.start));
-            }
-
             // Custom events matching `pred`, sorted by time. [] when none loaded.
             function customEventsWhere(pred) {
                 if (!trace || !trace.customEvents) return [];
@@ -3283,7 +3954,7 @@
                 if (!ev) return `<div class="related-empty">No event selected.</div>`;
 
                 const taskId = taskForEvent(ev);
-                const spans = spansAtTime(ev.timestamp);
+                const spans = enclosingSpans(allSpans, ev);
                 const innerSpan = spans.length ? spans[spans.length - 1] : null;
 
                 const empty = `<div class="related-empty">none</div>`;
@@ -3552,6 +4223,36 @@
                 renderAll();
             });
 
+            document.getElementById("cpu-panel-canvas").addEventListener("mousemove", (e) => {
+                const c = document.getElementById("cpu-panel-canvas");
+                const panel = document.getElementById("cpu-panel");
+                const rect = c.getBoundingClientRect();
+                const mx = e.clientX - rect.left;
+                const scrollbarW = lanesContainer.offsetWidth - lanesContainer.clientWidth;
+                const layout = timePanelLayout(panel, scrollbarW);
+
+                let hit = null;
+                if (mx >= LABEL_W && mx <= LABEL_W + layout.drawW) {
+                    const ns = layout.panelXToNs(mx);
+                    mouseNs = ns;
+                    hit = findProcessCpuIntervalAt(ns);
+                }
+
+                c.style.cursor = hit ? "crosshair" : "default";
+                if (hit) {
+                    tooltip.innerHTML = cpuIntervalTooltipHtml(hit);
+                    tooltip.style.display = "block";
+                    placeTooltip(e);
+                } else {
+                    tooltip.style.display = "none";
+                }
+
+            });
+            document.getElementById("cpu-panel-canvas").addEventListener("mouseleave", () => {
+                tooltip.style.display = "none";
+                document.getElementById("cpu-panel-canvas").style.cursor = "default";
+            });
+
             /**
              * Render the per-task detail panel (polls, wake→poll delays,
              * lifespan) for the currently selected task.
@@ -3674,34 +4375,13 @@
                 ctx.font = "9px monospace";
                 ctx.textAlign = "center";
 
-                // For each poll, find the most recent wake before it to show wake→poll delay
-                const pollWakes = []; // parallel to polls: {wake, effectiveWake} or null
-                for (let pi = 0; pi < polls.length; pi++) {
-                    const s = polls[pi];
-                    let best = null;
-                    if (wakes.length) {
-                        let lo = 0, hi = wakes.length - 1, bi = -1;
-                        while (lo <= hi) {
-                            const mid = (lo + hi) >> 1;
-                            if (wakes[mid].timestamp <= s.start) { bi = mid; lo = mid + 1; }
-                            else hi = mid - 1;
-                        }
-                        if (bi >= 0) {
-                            const w = wakes[bi];
-                            // If wake arrived during an earlier poll, effective wait starts at that poll's end
-                            let effectiveWake = w.timestamp;
-                            for (let j = 0; j < pi; j++) {
-                                if (w.timestamp >= polls[j].start && w.timestamp <= polls[j].end) {
-                                    effectiveWake = polls[j].end;
-                                    break;
-                                }
-                            }
-                            const delay = s.start - effectiveWake;
-                            if (delay >= 0 && delay < 1e9) best = { wake: w, effectiveWake };
-                        }
-                    }
-                    pollWakes.push(best);
-                }
+                // For each poll, find the most recent wake before it to show
+                // wake→poll delay. `polls` is sorted by start and a task's polls
+                // never overlap, so the "did the wake land in an earlier poll?"
+                // lookup is a binary search inside computePollWakes — O(P·logP)
+                // rather than the O(P²) a per-poll linear scan over earlier
+                // polls costs for a task polled millions of times.
+                const pollWakes = TraceAnalysis.computePollWakes(polls, wakes);
 
                 // Draw wake→poll scheduling delay regions
                 taskDetailWakeRegions = [];
@@ -3815,24 +4495,60 @@
                     }
                 }
 
-                // Draw poll spans
-                for (const s of polls) {
-                    if (s.end < viewStart || s.start > viewEnd) continue;
-                    const x1 = LABEL_W + Math.max(0, nsToX(s.start, drawW));
-                    const x2 = LABEL_W + Math.min(drawW, nsToX(s.end, drawW));
-                    const w = Math.max(x2 - x1, 1);
-                    ctx.fillStyle = "#4fc3f7";
-                    ctx.fillRect(x1, bandTop, w, bandH);
-                    if (w > 35) {
-                        ctx.fillStyle = "#000";
-                        ctx.fillText(fmtDur(s.end - s.start), x1 + w / 2, bandTop + bandH / 2 + 3);
+                // Draw poll spans. `polls` is sorted by start and non-overlapping.
+                const pollStartIdx = findFirstVisible(polls, viewStart);
+                // Count how many polls are actually visible (cheap: bounded by
+                // the early break). If there are more polls than pixels, drawing
+                // one ≥1px bar each would inflate sub-pixel polls and swallow the
+                // idle gaps between them, painting a solid band that looks like
+                // one long continuous poll even for a mostly-idle task. In that
+                // regime, render a per-pixel COVERAGE histogram instead: opacity
+                // = fraction of the pixel's time spent polling. Busy → solid,
+                // sparse → faint, which is the honest density view.
+                let visiblePolls = 0;
+                for (let i = pollStartIdx; i < polls.length; i++) {
+                    if (polls[i].start > viewEnd) break;
+                    visiblePolls++;
+                }
+                if (visiblePolls > drawW) {
+                    const cov = TraceAnalysis.pixelCoverage(polls, pollStartIdx, viewStart, viewEnd, Math.ceil(drawW));
+                    for (let px = 0; px < cov.length; px++) {
+                        const c = cov[px];
+                        if (c <= 0) continue;
+                        // Map coverage→opacity but keep a visible floor so a
+                        // single sub-pixel poll still registers faintly.
+                        ctx.globalAlpha = Math.min(1, 0.15 + c * 0.85);
+                        ctx.fillStyle = "#4fc3f7";
+                        ctx.fillRect(LABEL_W + px, bandTop, 1, bandH);
                     }
-                    // Hit region for polling section
+                    ctx.globalAlpha = 1;
+                    // One coarse hit region for the whole band (per-poll detail
+                    // isn't meaningful at this density; zoom in for it).
                     taskDetailHitRegions.push({
-                        x1, x2, y1: bandTop, y2: bandTop + bandH,
+                        x1: LABEL_W, x2: LABEL_W + drawW, y1: bandTop, y2: bandTop + bandH,
                         type: "polling",
-                        detail: `Polling — actively executing for ${fmtDur(s.end - s.start)}`,
+                        detail: `Polling — ${visiblePolls.toLocaleString()} polls in view (zoom in for per-poll detail)`,
                     });
+                } else {
+                    for (let i = pollStartIdx; i < polls.length; i++) {
+                        const s = polls[i];
+                        if (s.start > viewEnd) break;
+                        const x1 = LABEL_W + Math.max(0, nsToX(s.start, drawW));
+                        const x2 = LABEL_W + Math.min(drawW, nsToX(s.end, drawW));
+                        const w = Math.max(x2 - x1, 1);
+                        ctx.fillStyle = "#4fc3f7";
+                        ctx.fillRect(x1, bandTop, w, bandH);
+                        if (w > 35) {
+                            ctx.fillStyle = "#000";
+                            ctx.fillText(fmtDur(s.end - s.start), x1 + w / 2, bandTop + bandH / 2 + 3);
+                        }
+                        // Hit region for polling section
+                        taskDetailHitRegions.push({
+                            x1, x2, y1: bandTop, y2: bandTop + bandH,
+                            type: "polling",
+                            detail: `Polling — actively executing for ${fmtDur(s.end - s.start)}`,
+                        });
+                    }
                 }
 
                 // Draw idle gaps between consecutive polls (where no wake→poll delay is shown)
@@ -3914,6 +4630,7 @@
             function renderQueueChart(drawW, scrollbarW) {
                 const c = queueCanvas;
                 const parent = c.parentElement;
+                if (isPanelCollapsed("queue")) return;
                 const dpr = devicePixelRatio || 1;
                 const pw = parent.clientWidth,
                     ph = parent.clientHeight;
@@ -3958,36 +4675,27 @@
                         if (s.global > b.maxGlobal) b.maxGlobal = s.global;
                     }
                 }
-                // Build sorted timeline of all local queue changes
-                const allLocalSamples = [];
-                for (const w of workerIds) {
-                    const wSamples = workerQueueSamples[w] || [];
-                    if (wSamples.length === 0) continue;
-                    const startIdx = Math.max(0, lowerBound(wSamples, viewStart) - 1);
-                    for (let i = startIdx; i < wSamples.length; i++) {
-                        const s = wSamples[i];
-                        if (s.t > viewEnd) break;
-                        if (s.t >= viewStart) {
-                            allLocalSamples.push({ t: s.t, w, local: s.local });
-                        }
-                    }
-                }
-                allLocalSamples.sort((a, b) => a.t - b.t);
-
-                // Single pass: maintain per-worker state and compute max for each bucket
+                // Single pass over pre-merged sorted timeline (built once at load time).
+                // Start one sample before viewStart to seed workerState correctly.
                 const workerState = {};
                 for (const w of workerIds) workerState[w] = 0;
-                let sampleIdx = 0;
+                // Seed workerState from the sample just before viewStart so the first bucket
+                // has correct per-worker values even if no samples fall inside the view window.
+                const mergeStart = Math.max(0, lowerBound(mergedLocalSamples, viewStart) - 1);
+                for (let i = mergeStart; i < mergedLocalSamples.length; i++) {
+                    const s = mergedLocalSamples[i];
+                    if (s.t >= viewStart) break;
+                    workerState[s.w] = s.local;
+                }
+                let sampleIdx = Math.max(mergeStart, lowerBound(mergedLocalSamples, viewStart));
 
                 for (let bi = 0; bi < numBuckets; bi++) {
                     const bucketEnd = viewStart + ((bi + 1) / numBuckets) * viewDur;
 
-                    // Apply all samples up to this bucket's end
-                    while (sampleIdx < allLocalSamples.length && allLocalSamples[sampleIdx].t < bucketEnd) {
-                        const s = allLocalSamples[sampleIdx];
+                    while (sampleIdx < mergedLocalSamples.length && mergedLocalSamples[sampleIdx].t < bucketEnd) {
+                        const s = mergedLocalSamples[sampleIdx++];
                         workerState[s.w] = s.local;
                         buckets[bi].hasData = true;
-                        sampleIdx++;
                     }
 
                     // Max across all workers
@@ -4232,6 +4940,9 @@
             });
             document.getElementById("btn-uninstrumented-info").addEventListener("click", (e) => {
                 showUninstrumentedPopup(e.target);
+            });
+            document.getElementById("btn-parse-perf").addEventListener("click", (e) => {
+                showParsePerfPopup(e.currentTarget);
             });
             document.getElementById("btn-prev-poi").addEventListener("click", () => {
                 if (currentPoiIndex > 0) jumpToPoi(currentPoiIndex - 1);
@@ -4494,7 +5205,7 @@
                 }
                 viewStart = Math.max(minTs, newStart);
                 viewEnd = Math.min(maxTs, newEnd);
-                renderAll();
+                scheduleRenderAll();
             });
             window.addEventListener("mouseup", () => {
                 if (regionSelecting) {
@@ -4905,6 +5616,143 @@
                 const popup = document.getElementById("uninstrumented-popup");
                 const btn = document.getElementById("btn-uninstrumented-info");
                 if (popup.style.display !== "none" && !popup.contains(e.target) && e.target !== btn) {
+                    popup.style.display = "none";
+                }
+            });
+
+            // ── Parse-performance breakdown (fetch & parse timing) ──
+
+            /** Format milliseconds as seconds to 1 decimal, e.g. 8200 → "8.2 s". */
+            function fmtSecs(ms) {
+                return (ms / 1000).toFixed(1) + " s";
+            }
+
+            /** Update (or refine) the ` · loaded in X.Xs` suffix on the inline
+             *  stats line. Resilient to both info-block layouts because the
+             *  suffix lives in a dedicated `.load-time-suffix` span that
+             *  showViewer always emits. Pass the specific perf record to write
+             *  (defaults to the current `loadPerf`); the double-rAF caller
+             *  passes its captured record so a freshly-started load can't
+             *  clobber it. No-op if the element or total is absent. */
+            function updateInlineLoadTime(perf = loadPerf) {
+                if (!perf || perf.totalMs == null) return;
+                const el = document.querySelector("#toolbar .tb-info .load-time-suffix");
+                if (el) el.textContent = ` · loaded in ${fmtSecs(perf.totalMs)}`;
+            }
+
+            /** Show the fetch & parse breakdown popup, mirroring the
+             *  uninstrumented-popup pattern (fixed div anchored under the
+             *  button, toggle-off if open, close button + click-outside). */
+            function showParsePerfPopup(anchor) {
+                const popup = document.getElementById("parse-perf-popup");
+                if (!popup) return;
+                // Toggle off if already visible.
+                if (popup.style.display !== "none") {
+                    popup.style.display = "none";
+                    return;
+                }
+                if (!loadPerf) return;
+                const p = loadPerf;
+                // totalMs is finalized in the double-rAF after showViewer. If the
+                // popup is opened before that fires, fall back to a provisional
+                // total measured now (still includes analysis+render).
+                const totalMs = p.totalMs != null
+                    ? p.totalMs
+                    : (p.startMs != null ? performance.now() - p.startMs : null);
+
+                const rows = [];
+                if (totalMs != null) rows.push(["Total", fmtSecs(totalMs)]);
+
+                if (p.mode === "stream") {
+                    // Fetch+parse are fused/overlapped in streamed mode.
+                    if (p.parseDoneMs != null && p.startMs != null) {
+                        rows.push(["Fetch + parse (streamed, overlapped)",
+                            fmtSecs(p.parseDoneMs - p.startMs)]);
+                    }
+                } else if (p.mode === "buffered") {
+                    if (p.fetchDoneMs != null && p.startMs != null) {
+                        rows.push(["Fetch", fmtSecs(p.fetchDoneMs - p.startMs)]);
+                    }
+                    if (p.parseDoneMs != null && p.fetchDoneMs != null) {
+                        rows.push(["Parse", fmtSecs(p.parseDoneMs - p.fetchDoneMs)]);
+                    }
+                } else {
+                    // 'local' (file drop / demo blob) or 'reparse': no fetch,
+                    // parse straight from an in-memory buffer.
+                    if (p.parseDoneMs != null && p.startMs != null) {
+                        rows.push(["Parse", fmtSecs(p.parseDoneMs - p.startMs)]);
+                    }
+                }
+
+                // Analysis + render = everything after parse finished. Only
+                // meaningful once the total is known (i.e. after render).
+                if (totalMs != null && p.parseDoneMs != null && p.startMs != null) {
+                    const analysisMs = totalMs - (p.parseDoneMs - p.startMs);
+                    rows.push(["Analysis + render", fmtSecs(analysisMs)]);
+                }
+
+                // Optional throughput. fetch+parse wall-clock is the most
+                // meaningful denominator (it's where the bytes/events flow).
+                let throughput = "";
+                if (p.parseDoneMs != null && p.startMs != null) {
+                    const fetchParseSec = (p.parseDoneMs - p.startMs) / 1000;
+                    if (fetchParseSec > 0) {
+                        const parts = [];
+                        if (p.events != null) {
+                            parts.push(`${Math.round(p.events / fetchParseSec).toLocaleString()} events/s`);
+                        }
+                        if (p.bytes != null) {
+                            const mbps = (p.bytes / (1024 * 1024)) / fetchParseSec;
+                            parts.push(`${mbps.toFixed(1)} MB/s`);
+                        }
+                        if (parts.length) throughput = parts.join(" · ");
+                    }
+                }
+
+                const modeLabel = {
+                    stream: "streamed (single URL)",
+                    buffered: "buffered (multi-URL)",
+                    local: "local file",
+                    reparse: "in-memory re-parse",
+                }[p.mode] || p.mode;
+
+                let html = `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">`;
+                html += `<span style="color:#6c63ff;font-weight:600">⏱ Load breakdown</span>`;
+                html += `<span id="parse-perf-popup-close" style="cursor:pointer;color:#888;padding:0 4px">&times;</span>`;
+                html += `</div>`;
+                html += `<div style="color:#888;margin-bottom:8px">Mode: <span style="color:#d0ccff">${esc(modeLabel)}</span></div>`;
+                for (const [label, val] of rows) {
+                    html += `<div style="display:flex;justify-content:space-between;gap:16px">`;
+                    html += `<span style="color:#ccc">${esc(label)}</span>`;
+                    html += `<span style="color:#d0ccff;font-weight:600">${esc(val)}</span>`;
+                    html += `</div>`;
+                }
+                if (throughput) {
+                    html += `<div style="margin-top:8px;color:#888">${esc(throughput)}</div>`;
+                }
+                if (p.mode === "stream") {
+                    html += `<div style="margin-top:8px;color:#777;font-size:0.9em">In streamed mode the download and parse run concurrently, so the two cannot be split — the figure is the combined wall-clock time.</div>`;
+                }
+
+                popup.innerHTML = html;
+
+                // Position below the button (mirror showUninstrumentedPopup).
+                const rect = anchor.getBoundingClientRect();
+                popup.style.top = (rect.bottom + 4) + "px";
+                popup.style.right = (window.innerWidth - rect.right) + "px";
+                popup.style.left = "auto";
+                popup.style.display = "block";
+
+                document.getElementById("parse-perf-popup-close").addEventListener("click", () => {
+                    popup.style.display = "none";
+                });
+            }
+
+            // Close the parse-perf popup when clicking outside it.
+            document.addEventListener("click", (e) => {
+                const popup = document.getElementById("parse-perf-popup");
+                const btn = document.getElementById("btn-parse-perf");
+                if (popup && popup.style.display !== "none" && !popup.contains(e.target) && e.target !== btn) {
                     popup.style.display = "none";
                 }
             });
@@ -5334,6 +6182,8 @@
                         clearToasts();
                         if (document.getElementById("uninstrumented-popup").style.display !== "none") {
                             document.getElementById("uninstrumented-popup").style.display = "none";
+                        } else if (document.getElementById("parse-perf-popup").style.display !== "none") {
+                            document.getElementById("parse-perf-popup").style.display = "none";
                         } else if (document.getElementById("stack-sidebar").style.display === "flex") {
                             // If flamegraph is in the sidebar, let it handle Escape first
                             if (fgActive && fgInstance.handleEscape()) {
@@ -5432,6 +6282,13 @@
                     }
                     // Custom events panel also owns its own tooltip.
                     if (e.target.closest && e.target.closest("#custom-events-panel")) {
+                        mouseNs = eventToTimelineNs(e.clientX);
+                        lanesContainer.style.cursor = "";
+                        scheduleCrosshairRedraw();
+                        return;
+                    }
+                    // CPU panel owns its interval tooltip.
+                    if (e.target.closest && e.target.closest("#cpu-panel")) {
                         mouseNs = eventToTimelineNs(e.clientX);
                         lanesContainer.style.cursor = "";
                         scheduleCrosshairRedraw();
@@ -5639,7 +6496,7 @@
                 if (found !== hoveredWakerTaskId) {
                     hoveredWakerTaskId = found;
                     document.getElementById("task-detail").style.cursor = found ? "pointer" : "";
-                    renderAll();
+                    scheduleRenderAll();
                 }
 
                 // Show status for polling/scheduled/idle sections
@@ -5661,7 +6518,7 @@
                 document.getElementById("task-detail-status").textContent = "";
                 if (hoveredWakerTaskId) {
                     hoveredWakerTaskId = null;
-                    renderAll();
+                    scheduleRenderAll();
                 }
             });
             document.getElementById("task-detail").addEventListener("click", (e) => {
@@ -5795,7 +6652,11 @@
                 if (wasHidden) widenSidebarForFlamegraph();
                 if (wasHidden && trace) requestAnimationFrame(renderAll);
                 requestAnimationFrame(() => {
-                    fgInstance.setData(samples, trace.callframeSymbols, fgOpts);
+                    // fgOpts may carry its own exportTitle/exportFormatValue (e.g. heap
+                    // views); fall back to the sidebar `title` only when it doesn't.
+                    const exportOpts = Object.assign({}, fgOpts);
+                    if (exportOpts.exportTitle == null) exportOpts.exportTitle = title;
+                    fgInstance.setData(samples, trace.callframeSymbols, exportOpts);
                     fgInstance.resize();
                 });
             }
@@ -5945,6 +6806,12 @@
                     return {
                         workerLabel: mode === "bytes" ? "Worker thread allocations (by bytes)" : "Worker thread allocations (by count)",
                         offworkerLabel: mode === "bytes" ? "Non-worker thread allocations (by bytes)" : "Non-worker thread allocations (by count)",
+                        exportTitle: `Heap flamegraph (${mode === "bytes" ? "by bytes" : "by count"})${durStr}`,
+                        // Heap weights are bytes (or alloc counts), not CPU samples, so
+                        // the exported SVG must label them the same way the canvas does.
+                        exportFormatValue: mode === "bytes"
+                            ? (count) => `~${fmtB(count)}`
+                            : (count) => `~${Math.round(count).toLocaleString()} allocs`,
                         formatCount(count, total, self, treeNode) {
                             const pct = ((count / total) * 100).toFixed(1);
                             if (mode === "bytes") {
@@ -6080,7 +6947,9 @@
 
                 // Give the container a frame to get its layout, then render
                 requestAnimationFrame(() => {
-                    fgInstance.setData(samples, trace.callframeSymbols);
+                    fgInstance.setData(samples, trace.callframeSymbols, {
+                        exportTitle: `CPU flamegraph — ${durMs}ms selected`,
+                    });
                     fgInstance.resize();
                 });
 
@@ -6116,6 +6985,7 @@
             let qcDragging = false, qcDragStartX = 0, qcDragStartNs = 0, qcDragEndNs = 0, qcDragMoved = false;
 
             document.getElementById("queue-chart").addEventListener("mousedown", (e) => {
+                if (isPanelCollapsed("queue")) return;
                 if (!trace || !activeTaskSamples.length) return;
                 qcDragging = true;
                 qcDragMoved = false;
