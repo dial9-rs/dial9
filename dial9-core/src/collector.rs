@@ -8,13 +8,14 @@ use crate::primitives::sync::atomic::{AtomicUsize, Ordering};
 /// 5ms so in practice the queue rarely has more than a handful of entries.
 const DEFAULT_CAPACITY: usize = 1024;
 
+crate::test_util_pub! {
 /// A batch of encoded trace events ready for writing.
-#[doc(hidden)]
 #[derive(Debug)]
 #[non_exhaustive]
-pub struct Batch {
+struct Batch {
     pub(crate) encoded_bytes: Vec<u8>,
     pub(crate) event_count: u64,
+}
 }
 
 impl Batch {
@@ -42,15 +43,18 @@ impl Batch {
     }
 
     /// Consume the batch, returning the encoded bytes without copying.
+    #[cfg_attr(not(feature = "test-util"), allow(dead_code))]
     pub fn into_encoded_bytes(self) -> Vec<u8> {
         self.encoded_bytes
     }
 }
 
-#[doc(hidden)]
-pub struct CentralCollector {
+crate::test_util_pub! {
+/// Ring buffer of encoded batches awaiting write by the flush thread.
+struct CentralCollector {
     queue: BoundedQueue<Batch>,
     dropped_batches: AtomicUsize,
+}
 }
 
 impl Default for CentralCollector {

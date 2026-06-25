@@ -3,14 +3,18 @@
 //! Uploads processed segment bytes to S3 using the transfer manager.
 //! Deletes local files only after confirmed upload.
 
-use crate::background_task::ProcessErrorKind;
-use crate::background_task::instance_metadata::InstanceIdentity;
-use crate::background_task::sealed::SegmentRef;
+use super::connection;
+use crate::boot_id::generate_boot_id as default_boot_id;
+use crate::pipeline::{ProcessError, ProcessErrorKind, SegmentData, SegmentProcessor};
+use crate::rate_limit::rate_limited;
+use crate::sealed::SegmentRef;
+use crate::worker::instance_metadata::InstanceIdentity;
 use aws_sdk_s3_transfer_manager::Client;
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
-
-use crate::background_task::boot_id::generate_boot_id as default_boot_id;
+use std::time::Duration;
 
 /// Metadata about a sealed trace segment, passed to custom key functions.
 #[derive(Debug, Clone, Default)]
@@ -107,7 +111,9 @@ impl S3Config {
         &self.bucket
     }
 
-    pub(crate) fn as_metadata(&self) -> impl Iterator<Item = (&str, &str)> {
+    /// The configured fields as `(key, value)` pairs, for attaching as S3
+    /// object metadata or for inspection.
+    pub fn as_metadata(&self) -> impl Iterator<Item = (&str, &str)> {
         [
             ("bucket", self.bucket.as_str()),
             ("service_name", self.service_name.as_str()),
@@ -233,7 +239,7 @@ impl S3Uploader {
     pub(crate) async fn upload_and_delete(
         &self,
         segment: &SegmentRef,
-        payload: super::Payload,
+        payload: crate::payload::Payload,
         metadata: &HashMap<String, String>,
     ) -> Result<String, ProcessErrorKind> {
         let key = self.config.object_key(segment, metadata);
@@ -282,11 +288,239 @@ impl S3Uploader {
     }
 }
 
+// === S3 pipeline processor ===
+
+/// S3 uploader processor. Construction is synchronous — the AWS client and
+/// bucket region are resolved lazily on the first `process()` call, inside
+/// the worker's tokio runtime.
+#[cfg(feature = "pipeline-s3")]
+pub struct S3PipelineUploader {
+    state: S3UploaderState,
+}
+
+#[cfg(feature = "pipeline-s3")]
+enum S3UploaderState {
+    Pending {
+        s3_config: S3Config,
+        client: Option<aws_sdk_s3::Client>,
+    },
+    Ready {
+        uploader: S3Uploader,
+        circuit_breaker: connection::CircuitBreaker,
+    },
+}
+
+#[cfg(feature = "pipeline-s3")]
+impl std::fmt::Debug for S3PipelineUploader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("S3PipelineUploader").finish_non_exhaustive()
+    }
+}
+
+#[cfg(feature = "pipeline-s3")]
+impl S3PipelineUploader {
+    /// Create a new uploader from an [`S3Config`](S3Config) and an
+    /// optional pre-built S3 client. If `client` is `None`, the default
+    /// AWS configuration chain is used. Region detection and transfer
+    /// manager construction are deferred to the first `process()` call.
+    pub fn new(s3_config: S3Config, client: Option<aws_sdk_s3::Client>) -> Self {
+        Self {
+            state: S3UploaderState::Pending { s3_config, client },
+        }
+    }
+
+    /// Set (or override) the pre-built S3 client. Must be called before the
+    /// uploader has been initialized (i.e. before the first segment has been
+    /// processed);
+    /// Note: the only caller is the builder, which runs before the
+    /// worker is spawned, so reaching the `Ready` arm is a programmer error.
+    pub fn set_client(&mut self, client: aws_sdk_s3::Client) {
+        match &mut self.state {
+            S3UploaderState::Pending { client: slot, .. } => *slot = Some(client),
+            S3UploaderState::Ready { .. } => {
+                unreachable!("set_client called after uploader initialization")
+            }
+        }
+    }
+
+    /// Take any previously-stashed client out of a `Pending` uploader so it
+    /// can be carried into a replacement. Returns `None` once the uploader
+    /// has been initialized.
+    pub fn take_client(&mut self) -> Option<aws_sdk_s3::Client> {
+        match &mut self.state {
+            S3UploaderState::Pending { client, .. } => client.take(),
+            S3UploaderState::Ready { .. } => None,
+        }
+    }
+
+    /// Construct an uploader directly in the `Ready` state. Test-only —
+    /// production code goes through [`new`](Self::new) and lazy init.
+    #[cfg(test)]
+    pub fn from_ready(uploader: S3Uploader, circuit_breaker: connection::CircuitBreaker) -> Self {
+        Self {
+            state: S3UploaderState::Ready {
+                uploader,
+                circuit_breaker,
+            },
+        }
+    }
+
+    async fn initialize(
+        s3_config: S3Config,
+        client: Option<aws_sdk_s3::Client>,
+    ) -> (S3Uploader, connection::CircuitBreaker) {
+        let bootstrap_client = match client {
+            Some(c) => c,
+            None => {
+                let sdk_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+                    .load()
+                    .await;
+                aws_sdk_s3::Client::new(&sdk_config)
+            }
+        };
+
+        let region = match s3_config.region() {
+            Some(r) => r.to_owned(),
+            None => detect_bucket_region(&bootstrap_client, s3_config.bucket()).await,
+        };
+        tracing::info!(target: "dial9_worker", bucket = %s3_config.bucket(), %region, "resolved bucket region");
+
+        // Rebuild the client with the correct region.
+        let corrected_conf = bootstrap_client
+            .config()
+            .to_builder()
+            .region(aws_sdk_s3::config::Region::new(region))
+            .build();
+        let corrected_client = aws_sdk_s3::Client::from_conf(corrected_conf);
+
+        let tm_client = aws_sdk_s3_transfer_manager::Client::new(
+            aws_sdk_s3_transfer_manager::Config::builder()
+                .client(corrected_client)
+                .build(),
+        );
+
+        (
+            S3Uploader::new(tm_client, s3_config),
+            connection::CircuitBreaker::new(),
+        )
+    }
+}
+
+#[cfg(feature = "pipeline-s3")]
+impl SegmentProcessor for S3PipelineUploader {
+    fn name(&self) -> &'static str {
+        "S3Upload"
+    }
+
+    fn process(
+        &mut self,
+        mut data: SegmentData,
+    ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>> {
+        Box::pin(async move {
+            // Lazy init: clone the config + client and run `initialize`
+            // without mutating `self.state`. If the init future panics or
+            // is cancelled mid-await, the worker's outer `catch_unwind`
+            // recovers and `self.state` stays `Pending`, so the next
+            // segment will retry. Mutating before the await would leave
+            // the uploader stuck in a transient state forever.
+            if let S3UploaderState::Pending { s3_config, client } = &self.state {
+                let cfg = s3_config.clone();
+                let cli = client.clone();
+                let (uploader, circuit_breaker) = Self::initialize(cfg, cli).await;
+                self.state = S3UploaderState::Ready {
+                    uploader,
+                    circuit_breaker,
+                };
+            }
+            let S3UploaderState::Ready {
+                uploader,
+                circuit_breaker,
+            } = &mut self.state
+            else {
+                // unreachable: we just transitioned above and the state
+                // doesn't otherwise revert. Fall through with an error so
+                // a future refactor doesn't silently break.
+                return Err(ProcessError::io(
+                    data,
+                    std::io::Error::other("S3 uploader in unexpected state"),
+                ));
+            };
+            if !circuit_breaker.should_attempt() {
+                tracing::debug!(target: "dial9_worker", segment = %data.segment(), "circuit breaker open, skipping upload");
+                return Err(ProcessError::new(
+                    data,
+                    ProcessErrorKind::transfer(Box::from("circuit breaker open"), true),
+                ));
+            }
+            let payload = data.take_payload();
+            match uploader
+                .upload_and_delete(data.segment(), payload, data.metadata())
+                .await
+            {
+                Ok(key) => {
+                    circuit_breaker.on_success();
+                    rate_limited!(Duration::from_secs(10), {
+                        tracing::info!(target: "dial9_worker", "uploaded {key}");
+                    });
+                    Ok(data)
+                }
+                Err(kind) => {
+                    if kind.already_deleted() {
+                        tracing::debug!(target: "dial9_worker", segment = %data.segment(), "segment already evicted, skipping");
+                    } else {
+                        circuit_breaker.on_failure();
+                        rate_limited!(Duration::from_secs(60), {
+                            tracing::warn!(target: "dial9_worker", error = %kind, "upload failed");
+                        });
+                    }
+                    Err(ProcessError::new(data, kind))
+                }
+            }
+        })
+    }
+}
+
+/// Detect the region of an S3 bucket via HeadBucket.
+#[cfg(feature = "pipeline-s3")]
+async fn detect_bucket_region(client: &aws_sdk_s3::Client, bucket: &str) -> String {
+    match client.head_bucket().bucket(bucket).send().await {
+        Ok(resp) => {
+            let region = resp.bucket_region().unwrap_or("us-east-1");
+            if resp.bucket_region().is_none() {
+                tracing::warn!(
+                    target: "dial9_worker",
+                    %bucket,
+                    "HeadBucket succeeded but returned no region, falling back to us-east-1"
+                );
+            }
+            region.to_owned()
+        }
+        Err(e) => {
+            let from_header = e
+                .raw_response()
+                .and_then(|r| r.headers().get("x-amz-bucket-region"))
+                .map(|v| v.to_owned());
+            match from_header {
+                Some(r) => r,
+                None => {
+                    tracing::warn!(
+                        target: "dial9_worker",
+                        %bucket,
+                        error = ?e,
+                        "failed to detect bucket region, falling back to us-east-1"
+                    );
+                    "us-east-1".to_owned()
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::super::Payload;
     use super::*;
-    use crate::background_task::sealed::{SealedSegment, SegmentRef};
+    use crate::payload::Payload;
+    use crate::sealed::{SealedSegment, SegmentRef};
     use assert2::check;
     use flate2::read::GzDecoder;
     use std::io::Read;

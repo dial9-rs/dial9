@@ -1,6 +1,6 @@
 //! Operational metrics published via metrique.
 
-use crate::background_task::pipeline_metrics::{MetriqueResult, PipelineMetrics};
+use crate::worker::pipeline_metrics::{MetriqueResult, PipelineMetrics};
 use metrique::timers::Timer;
 use metrique::unit::{Byte, Millisecond};
 use metrique::unit_of_work::metrics;

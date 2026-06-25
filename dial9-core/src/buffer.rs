@@ -243,6 +243,8 @@ impl ThreadLocalBuffer {
         }
     }
 
+    // Only reached via `encode_single` (test-util) and core's own tests.
+    #[cfg_attr(not(feature = "test-util"), allow(dead_code))]
     fn record_encodable(&mut self, event: &dyn Encodable) {
         event.encode(&mut self.thread_local_encoder());
         self.event_count += 1;
@@ -266,12 +268,13 @@ impl ThreadLocalBuffer {
     }
 }
 
+crate::test_util_pub! {
 /// Encode a single event into a self-contained batch (header + event).
-#[doc(hidden)]
-pub fn encode_single(event: &dyn Encodable) -> Vec<u8> {
+fn encode_single(event: &dyn Encodable) -> Vec<u8> {
     let mut buf = ThreadLocalBuffer::with_batch_size(1024);
     buf.record_encodable(event);
     buf.flush().into_encoded_bytes()
+}
 }
 
 impl Drop for ThreadLocalBuffer {
@@ -302,10 +305,10 @@ crate::primitives::thread_local! {
     static BUFFER: Arc<Mutex<ThreadLocalBuffer>> = Arc::new(Mutex::new(ThreadLocalBuffer::new()));
 }
 
+crate::test_util_pub! {
 /// Drain the current thread's buffer into `collector`, even if not full.
 /// Used at shutdown and before flush cycles to avoid losing events.
-#[doc(hidden)]
-pub fn drain_to_collector(collector: &CentralCollector) {
+fn drain_to_collector(collector: &CentralCollector) {
     BUFFER.with(|buf| {
         let mut buf = match buf.lock() {
             Ok(guard) => guard,
@@ -320,6 +323,7 @@ pub fn drain_to_collector(collector: &CentralCollector) {
             collector.accept_flush(buf.flush());
         }
     });
+}
 }
 
 pub(crate) fn record_encodable_event(

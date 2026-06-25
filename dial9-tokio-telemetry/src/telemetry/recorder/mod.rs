@@ -1,5 +1,4 @@
 mod builder;
-pub(crate) use dial9_core::flush_loop;
 mod guard;
 mod handle;
 #[cfg(all(test, shuttle))]

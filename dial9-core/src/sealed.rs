@@ -88,6 +88,9 @@ impl std::fmt::Display for SegmentRef {
 /// Segment creation time as epoch seconds, parsed from the first clock
 /// anchor in the trace. Returns `(secs, true)` on a successful parse, or
 /// falls back to file mtime / current time with `(secs, false)`.
+// Segment-timestamp helpers below serve the worker pipeline (and tests);
+// unused in the bare bus build.
+#[cfg_attr(not(feature = "pipeline"), allow(dead_code))]
 pub fn creation_epoch_secs(data: &[u8], path: &Path) -> (u64, bool) {
     match parse_segment_timestamp(data) {
         Ok(ts) => return (ts / 1_000_000_000, true),
@@ -124,10 +127,12 @@ pub fn creation_epoch_secs(data: &[u8], path: &Path) -> (u64, bool) {
 /// of continuous runtime to reach that range.
 ///
 /// Keep in sync with `LEGACY_EPOCH_NS_FLOOR` in `dial9-viewer/ui/trace_parser.js`.
+#[cfg_attr(not(feature = "pipeline"), allow(dead_code))]
 pub(crate) const LEGACY_EPOCH_NS_FLOOR: u64 = 1_577_836_800_000_000_000;
 
 /// Parse wall-clock creation time from the first `ClockSyncEvent`,
 /// or from a legacy `SegmentMetadataEvent.timestamp_ns` that predates clock-sync support.
+#[cfg_attr(not(feature = "pipeline"), allow(dead_code))]
 fn parse_segment_timestamp(data: &[u8]) -> Result<u64, ParseTimestampError> {
     use dial9_trace_format::decoder::{DecodedFrameRef, Decoder};
     use dial9_trace_format::types::FieldValueRef;
@@ -177,6 +182,7 @@ fn parse_segment_timestamp(data: &[u8]) -> Result<u64, ParseTimestampError> {
 }
 
 #[derive(Debug)]
+#[cfg_attr(not(feature = "pipeline"), allow(dead_code))]
 enum ParseTimestampError {
     InvalidHeader,
     UnknownTypeId(u16),

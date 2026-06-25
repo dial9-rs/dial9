@@ -16,9 +16,9 @@ use std::time::Duration;
 
 use super::Dial9Handle;
 use super::SharedState;
-use super::flush_loop::run_flush_loop;
 use super::guard::{TelemetryGuard, WorkerHandle};
 use super::{ControlCommand, attach_runtime};
+use dial9_core::session::CoreSession;
 
 /// Marker: no trace path has been set yet.
 #[derive(Debug)]
@@ -939,24 +939,22 @@ impl TelemetryCore {
             .clone()
             .unwrap_or_else(metrique_writer::sink::DevNullSink::boxed);
 
-        let flush_thread = {
-            let shared = shared.clone();
-            crate::primitives::thread::spawn_named("dial9-flush", move || {
-                #[cfg(target_os = "linux")]
-                // SAFETY: nice() is a simple syscall with no memory safety
-                // implications. Increasing the nice value (lowering priority)
-                // is always permitted for unprivileged processes.
-                unsafe {
-                    let _ = libc::nice(10);
-                }
-
+        // Core owns the flush thread; inject the cpu-profiler thread
+        // registration (telemetry/perf-specific) via the thread-init hook.
+        let core_session = CoreSession::start(
+            Dial9Handle::enabled(shared, control_tx),
+            writer,
+            control_rx,
+            flush_metrics_sink,
+            || {
                 #[cfg(feature = "cpu-profiling")]
                 let _ = dial9_perf_self_profile::register_current_thread();
-                run_flush_loop(control_rx, &shared, &flush_metrics_sink, writer);
-                #[cfg(feature = "cpu-profiling")]
-                dial9_perf_self_profile::unregister_current_thread();
-            })
-        };
+                move || {
+                    #[cfg(feature = "cpu-profiling")]
+                    dial9_perf_self_profile::unregister_current_thread();
+                }
+            },
+        );
 
         // Spawn the background worker when we have a filesystem backend
         // (disk or memory via `writer_fs`) and at least one processor.
@@ -1005,8 +1003,7 @@ impl TelemetryCore {
         }
 
         Ok(TelemetryGuard::enabled(
-            Dial9Handle::enabled(shared, control_tx),
-            Some(flush_thread),
+            core_session,
             worker,
             contexts,
             task_dump_config,

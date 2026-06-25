@@ -1,5 +1,7 @@
+use crate::flush_loop::run_flush_loop;
 use crate::handle::{ControlCommand, Dial9Handle};
 use crate::primitives::{sync::mpsc, thread::JoinHandle};
+use crate::writer::{SegmentWriter, WriterMode};
 
 /// Owns a recording session: the [`Dial9Handle`] and the flush thread.
 ///
@@ -20,6 +22,43 @@ impl CoreSession {
             handle,
             flush_thread,
         }
+    }
+
+    /// Start a session: spawn the flush thread that drains the bus into
+    /// `writer`, and own its lifecycle.
+    ///
+    /// `thread_init` runs once on the flush thread before the loop and returns
+    /// a teardown closure run after it — use it to register/unregister the
+    /// thread with a runtime's profiler. `handle` must be enabled.
+    pub fn start<M, Init, Teardown>(
+        handle: Dial9Handle,
+        writer: SegmentWriter<M>,
+        control_rx: mpsc::Receiver<ControlCommand>,
+        flush_metrics_sink: metrique::writer::BoxEntrySink,
+        thread_init: Init,
+    ) -> Self
+    where
+        M: WriterMode + Send + 'static,
+        Init: FnOnce() -> Teardown + Send + 'static,
+        Teardown: FnOnce(),
+    {
+        let shared = handle
+            .shared()
+            .expect("CoreSession::start requires an enabled handle")
+            .clone();
+        let flush_thread = crate::primitives::thread::spawn_named("dial9-flush", move || {
+            // The flush thread is latency-tolerant; lower its priority.
+            #[cfg(target_os = "linux")]
+            // SAFETY: nice() is a simple syscall with no memory-safety
+            // implications; lowering priority is always permitted unprivileged.
+            unsafe {
+                let _ = libc::nice(10);
+            }
+            let teardown = thread_init();
+            run_flush_loop(control_rx, &shared, &flush_metrics_sink, writer);
+            teardown();
+        });
+        Self::new(handle, Some(flush_thread))
     }
 
     /// The recording handle for this session.

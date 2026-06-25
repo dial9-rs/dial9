@@ -55,15 +55,14 @@ impl std::fmt::Debug for TelemetryGuard {
 
 impl TelemetryGuard {
     pub(crate) fn enabled(
-        handle: Dial9Handle,
-        flush_thread: Option<crate::primitives::thread::JoinHandle<()>>,
+        core_session: CoreSession,
         worker: Option<WorkerHandle>,
         contexts: RuntimeContextRegistry,
         taskdump_config: Option<crate::telemetry::task_dump_config::TaskDumpConfig>,
     ) -> Self {
         Self {
             inner: GuardInner::Enabled(EnabledGuard {
-                core_session: CoreSession::new(handle, flush_thread),
+                core_session,
                 worker,
                 contexts,
                 taskdump_config,

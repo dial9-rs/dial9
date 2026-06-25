@@ -10,7 +10,10 @@ pub mod analysis;
 #[cfg(any(feature = "analysis", test))]
 pub mod analysis_events;
 pub(crate) use dial9_core::buffer;
-pub use dial9_core::collector::Batch;
+// `Batch` is a core recording internal (test-util). Tests reach it here; the
+// writer bench imports it straight from `dial9_core`.
+#[cfg(test)]
+pub(crate) use dial9_core::collector::Batch;
 pub(crate) mod custom_events;
 pub(crate) mod events;
 pub(crate) mod format;

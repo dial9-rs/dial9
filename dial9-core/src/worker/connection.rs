@@ -12,7 +12,7 @@ const MAX_BACKOFF: Duration = Duration::from_secs(300); // 5 minutes
 
 /// Circuit breaker for S3 upload attempts.
 #[derive(Debug, Default, PartialEq, Eq)]
-pub(crate) enum CircuitBreaker {
+pub enum CircuitBreaker {
     /// S3 is reachable. Normal upload + delete.
     #[default]
     Closed,

@@ -815,8 +815,11 @@ impl<M: WriterMode> SegmentWriter<M> {
         Ok(())
     }
 
+    // `pub(crate)` in production: the flush loop drives it. `pub` under
+    // `test-util` so sibling-crate tests/benches can write pre-encoded batches.
+    crate::test_util_pub! {
     /// Transcode an encoded batch into the active segment.
-    pub fn write_encoded_batch(&mut self, batch: &Batch) -> std::io::Result<()> {
+    fn write_encoded_batch(&mut self, batch: &Batch) -> std::io::Result<()> {
         self.write_metadata_if_needed()?;
         let WriterState::Active { writer: raw, .. } = &mut self.state else {
             self.dropped_events += batch.event_count() as usize;
@@ -838,6 +841,7 @@ impl<M: WriterMode> SegmentWriter<M> {
             self.maybe_rotate()?;
         }
         Ok(())
+    }
     }
 }
 

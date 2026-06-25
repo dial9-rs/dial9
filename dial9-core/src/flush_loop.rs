@@ -91,9 +91,8 @@ fn flush_once<M: WriterMode>(
     }
 }
 
-/// The flush thread main loop. Extracted so `TelemetryCore::builder` stays readable.
-#[doc(hidden)]
-pub fn run_flush_loop<M: WriterMode>(
+/// The flush thread main loop. Driven by [`CoreSession::start`](crate::session::CoreSession::start).
+pub(crate) fn run_flush_loop<M: WriterMode>(
     control_rx: crate::primitives::sync::mpsc::Receiver<ControlCommand>,
     shared: &SharedState,
     flush_metrics_sink: &metrique::writer::BoxEntrySink,
