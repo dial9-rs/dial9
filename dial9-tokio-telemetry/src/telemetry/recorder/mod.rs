@@ -824,18 +824,22 @@ mod tests {
         );
     }
 
-    /// A runtime attached *after* the first flush cycle must still land in a
-    /// later segment's metadata. This guards `TokioRuntimesSource`'s self-detected
-    /// change path: the first flush emits the initial snapshot, and a runtime
-    /// that appears afterwards is only re-emitted if the source notices its
-    /// worker/runtime count grew. If that detection regressed, `runtime.second`
-    /// would never re-emit and this test goes red.
+    /// End-to-end: a runtime attached to an existing telemetry session has its
+    /// self-detected segment metadata (the runtime→worker mapping) written into
+    /// a sealed segment that decodes back. Exercises the full wiring:
+    /// `attach → TokioRuntimesSource::segment_metadata → writer → encode → decode`.
     ///
-    /// Both runtimes are `current_thread` so the timing is deterministic: A is
-    /// driven once and then quiesces, B is never driven (its workers are eagerly
-    /// populated at attach time, so its metadata is complete regardless).
+    /// Fully deterministic, with no `sleep`: the only synchronization is
+    /// `graceful_shutdown`, which blocks until the flush thread runs its final
+    /// source poll, writes the segment metadata, and seals the segment. Both
+    /// runtimes' workers are eagerly populated at attach time, so the metadata
+    /// is complete regardless of how (or whether) each runtime is driven.
+    ///
+    /// The narrower "re-emit only after the runtime/worker count actually grows"
+    /// logic is unit-tested deterministically in
+    /// `runtime_context::tests::segment_metadata_only_rebuilds_after_a_change`.
     #[test]
-    fn runtime_attached_after_first_flush_propagates_metadata() {
+    fn attached_runtime_metadata_reaches_sealed_segment() {
         use crate::telemetry::analysis_events::Dial9Event;
 
         let dir = tempfile::TempDir::new().unwrap();
@@ -851,32 +855,41 @@ mod tests {
         let builder_a = tokio::runtime::Builder::new_current_thread();
         let (runtime_a, guard) = TracedRuntime::builder()
             .with_runtime_name("first")
+            .with_task_tracking(true)
             .with_trace_path(trace_path.to_str().unwrap())
             .build_and_start(builder_a, writer)
             .unwrap();
 
-        // Run work on A, then let a flush cycle emit the initial snapshot and
-        // write a segment with runtime.first but no runtime.second yet.
+        // Drive a little real work so the final segment is sealed rather than
+        // discarded: `finalize()` removes a segment that holds only header +
+        // metadata (no real events). Spawning a tracked task emits real events
+        // synchronously — no timing wait.
         runtime_a.block_on(async {
-            tokio::task::yield_now().await;
+            tokio::spawn(async {
+                tokio::task::yield_now().await;
+            })
+            .await
+            .unwrap();
         });
-        std::thread::sleep(std::time::Duration::from_millis(50));
 
-        // Attach B *after* that first flush. Its workers are eagerly populated
-        // at attach time, so its metadata is complete without driving it.
+        // Attach B to the same session. Its workers are eagerly populated at
+        // attach time, so its metadata is complete without ever driving it.
         let builder_b = tokio::runtime::Builder::new_current_thread();
         let runtime_b = TracedRuntime::builder()
             .with_runtime_name("second")
             .build_and_attach_to_telemetry(builder_b, &guard)
             .unwrap();
 
-        // Let the post-first-flush change propagate into a rotated segment.
-        std::thread::sleep(std::time::Duration::from_millis(50));
-
         drop(runtime_a);
         drop(runtime_b);
-        let _ = guard.graceful_shutdown(std::time::Duration::from_secs(1));
+        // Blocks until the flush thread polls every source one final time, writes
+        // the segment metadata, and seals the segment, so both runtimes are
+        // guaranteed to be in the sealed trace once this returns.
+        guard
+            .graceful_shutdown(std::time::Duration::from_secs(1))
+            .unwrap();
 
+        let mut saw_first = false;
         let mut saw_second = false;
         let mut files: Vec<_> = std::fs::read_dir(dir.path())
             .unwrap()
@@ -889,19 +902,26 @@ mod tests {
             let data = std::fs::read(file).unwrap();
             let events = crate::telemetry::format::decode_events(&data).unwrap();
             for event in &events {
-                if let Dial9Event::SegmentMetadataEvent(meta) = event
-                    && meta.entries.keys().any(|k| k == "runtime.second")
-                {
-                    saw_second = true;
+                if let Dial9Event::SegmentMetadataEvent(meta) = event {
+                    if meta.entries.keys().any(|k| k == "runtime.first") {
+                        saw_first = true;
+                    }
+                    if meta.entries.keys().any(|k| k == "runtime.second") {
+                        saw_second = true;
+                    }
                 }
             }
         }
 
         assert!(
+            saw_first,
+            "the initial runtime should appear in segment metadata"
+        );
+        assert!(
             saw_second,
-            "runtime attached after the first flush should appear in a later \
-             segment's metadata; missing runtime.second means TokioRuntimesSource \
-             failed to self-detect the new runtime"
+            "an attached runtime should appear in a sealed segment's metadata; \
+             missing runtime.second means TokioRuntimesSource failed to \
+             self-detect the new runtime"
         );
     }
 
