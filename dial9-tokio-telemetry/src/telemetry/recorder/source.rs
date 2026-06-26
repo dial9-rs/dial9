@@ -34,14 +34,13 @@ pub(crate) trait Source: Send {
     fn on_thread_stop(&mut self) {}
 
     /// Append this source's segment-metadata entries to `out` **iff** they have
-    /// changed since the last call, returning `true` when something was appended.
+    /// changed since the last call.
     ///
-    /// Returning `false` appends nothing and lets the flush loop skip the merge,
-    /// so steady-state cycles (where no source has new metadata) allocate
-    /// nothing. The default reports a source with no metadata.
-    fn segment_metadata(&mut self, out: &mut Vec<(String, String)>) -> bool {
+    /// Appending nothing on an unchanged cycle is what lets the flush loop skip
+    /// the merge (it merges only when `out` is non-empty), so steady-state
+    /// cycles allocate nothing. The default reports a source with no metadata.
+    fn segment_metadata(&mut self, out: &mut Vec<(String, String)>) {
         let _ = out;
-        false
     }
 }
 

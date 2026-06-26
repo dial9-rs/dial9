@@ -214,18 +214,16 @@ impl Source for MemoryProfileSource {
         "memory"
     }
 
-    fn segment_metadata(&mut self, out: &mut Vec<(String, String)>) -> bool {
+    fn segment_metadata(&mut self, out: &mut Vec<(String, String)>) {
         // Metadata is fixed at construction, so it only needs to be emitted
         // once: the writer keeps it in its merged cache and re-emits it on
         // every rotation. No need to observe the shared metadata-change counter
         // (unlike `TokioRuntimesSource`, whose entries grow over time).
         if self.emitted {
-            return false;
+            return;
         }
-        let before = out.len();
         out.extend(self.metadata.iter().cloned());
         self.emitted = true;
-        out.len() != before
     }
 }
 
@@ -657,7 +655,7 @@ mod tests {
         let rings = rings(16, 16);
         let mut source = make_source(Arc::clone(&rings), false, 1024 * 1024);
         let mut meta = Vec::new();
-        assert!(source.segment_metadata(&mut meta));
+        source.segment_metadata(&mut meta);
         assert_eq!(
             meta,
             vec![(
@@ -665,9 +663,9 @@ mod tests {
                 "1048576".to_string()
             )]
         );
-        // Fixed metadata: a second call reports no change and appends nothing.
+        // Fixed metadata: a second call appends nothing.
         let mut meta2 = Vec::new();
-        assert!(!source.segment_metadata(&mut meta2));
+        source.segment_metadata(&mut meta2);
         assert!(meta2.is_empty());
     }
 

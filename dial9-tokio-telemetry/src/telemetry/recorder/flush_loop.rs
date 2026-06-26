@@ -154,16 +154,13 @@ pub(super) fn run_flush_loop<M: WriterMode>(
         // last cycle, so the next rotated segment stays self-describing without
         // doing any work when nothing changed.
         source_entries.clear();
-        let mut metadata_changed = false;
         {
             let mut sources = shared.sources.lock().unwrap();
             for source in sources.iter_mut() {
-                // Bitwise `|=`, not `||`: every source must be polled so each
-                // observes and consumes its own change, regardless of order.
-                metadata_changed |= source.segment_metadata(&mut source_entries);
+                source.segment_metadata(&mut source_entries);
             }
         }
-        if metadata_changed {
+        if !source_entries.is_empty() {
             // Drain rather than move out, so `source_entries` keeps its capacity
             // for the next change cycle.
             writer.update_segment_metadata(source_entries.drain(..));
