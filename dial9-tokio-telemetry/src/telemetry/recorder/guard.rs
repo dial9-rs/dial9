@@ -6,9 +6,9 @@ use dial9_core::session::CoreSession;
 
 use super::Dial9Handle;
 use super::SharedState;
+use super::attach_runtime;
 use super::handle::Dial9TokioHandle;
 use super::runtime_context::RuntimeContextRegistry;
-use super::{ControlCommand, attach_runtime};
 
 /// Holds the background worker thread and its stop signal.
 pub(crate) struct WorkerHandle {
@@ -150,11 +150,9 @@ impl TelemetryGuard {
         }
     }
 
-    pub(crate) fn control_tx(
-        &self,
-    ) -> Option<&crate::primitives::sync::mpsc::SyncSender<ControlCommand>> {
+    pub(crate) fn session_handle(&self) -> Option<&Dial9Handle> {
         match &self.inner {
-            GuardInner::Enabled(eg) => eg.core_session.handle().control_tx(),
+            GuardInner::Enabled(eg) => Some(eg.core_session.handle()),
             GuardInner::Disabled => None,
         }
     }
@@ -344,10 +342,10 @@ impl<'a> TraceRuntimeCoreBuilder<'a> {
         self,
         mut builder: tokio::runtime::Builder,
     ) -> std::io::Result<(tokio::runtime::Runtime, Dial9TokioHandle)> {
-        let (Some(shared), Some(contexts), Some(control_tx), Some(traced)) = (
+        let (Some(shared), Some(contexts), Some(session_handle), Some(traced)) = (
             self.guard.shared(),
             self.guard.contexts(),
-            self.guard.control_tx(),
+            self.guard.session_handle(),
             super::traced_handle(&self.guard.handle()),
         ) else {
             // Disabled guard: build a plain tokio runtime and return a
@@ -371,7 +369,7 @@ impl<'a> TraceRuntimeCoreBuilder<'a> {
             contexts,
             builder,
             Some(self.name),
-            control_tx,
+            session_handle,
             self.task_tracking,
             self.tokio_hooks,
             self.guard.taskdump_config(),

@@ -41,8 +41,6 @@ use crate::telemetry::format::TaskTerminateEvent;
 use crate::telemetry::task_metadata::TaskId;
 use std::time::Duration;
 
-pub(crate) use dial9_core::handle::ControlCommand;
-
 /// Register a tokio hook, composing with an optional user callback.
 /// When `$user_hook` is None, registers only the dial9 closure (zero-cost).
 /// When Some, registers a closure that runs dial9 logic first, then the user callbacks.
@@ -90,7 +88,7 @@ fn register_hooks(
     builder: &mut tokio::runtime::Builder,
     ctx: &Arc<RuntimeContext>,
     shared: &Arc<SharedState>,
-    control_tx: &crate::primitives::sync::mpsc::SyncSender<ControlCommand>,
+    handle: &Dial9Handle,
     task_tracking_enabled: bool,
     tokio_hooks: TokioHooks,
     #[cfg_attr(not(feature = "taskdump"), allow(unused_variables))] taskdump_config: Option<
@@ -196,7 +194,7 @@ fn register_hooks(
     // Unified on_thread_start / on_thread_stop. Tokio only stores one
     // callback per hook, so any feature-gated work must live here rather
     // than registering its own hook.
-    let handle_for_tl = Dial9Handle::enabled(shared.clone(), control_tx.clone());
+    let handle_for_tl = handle.clone();
     #[cfg(feature = "cpu-profiling")]
     let s_stop = shared.clone();
 
@@ -249,7 +247,7 @@ fn attach_runtime(
     contexts: &runtime_context::RuntimeContextRegistry,
     mut builder: tokio::runtime::Builder,
     runtime_name: Option<String>,
-    control_tx: &crate::primitives::sync::mpsc::SyncSender<ControlCommand>,
+    handle: &Dial9Handle,
     task_tracking_enabled: bool,
     tokio_hooks: TokioHooks,
     taskdump_config: Option<crate::telemetry::task_dump_config::TaskDumpConfig>,
@@ -259,7 +257,7 @@ fn attach_runtime(
         &mut builder,
         &ctx,
         shared,
-        control_tx,
+        handle,
         task_tracking_enabled,
         tokio_hooks,
         taskdump_config,
@@ -270,7 +268,7 @@ fn attach_runtime(
     // Install the handle on the calling thread. For current_thread runtimes,
     // this thread IS the worker (block_on runs here), so the tracing layer
     // needs the TL handle to be set. Harmless for multi_thread runtimes.
-    set_tl_handle(Dial9Handle::enabled(shared.clone(), control_tx.clone()));
+    set_tl_handle(handle.clone());
 
     // Same for the task-dump config: on_thread_start skips this thread.
     #[cfg(feature = "taskdump")]

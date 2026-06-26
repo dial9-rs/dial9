@@ -14,10 +14,9 @@ use crate::telemetry::writer::{Disk, SegmentWriter, WriterMode};
 use std::path::PathBuf;
 use std::time::Duration;
 
-use super::Dial9Handle;
 use super::SharedState;
+use super::attach_runtime;
 use super::guard::{TelemetryGuard, WorkerHandle};
-use super::{ControlCommand, attach_runtime};
 use dial9_core::session::CoreSession;
 
 /// Marker: no trace path has been set yet.
@@ -317,8 +316,8 @@ impl<P, M, Mode: WriterMode> TracedRuntimeBuilder<P, M, Mode> {
         mut builder: tokio::runtime::Builder,
         guard: &TelemetryGuard,
     ) -> std::io::Result<tokio::runtime::Runtime> {
-        let (Some(shared), Some(contexts), Some(control_tx)) =
-            (guard.shared(), guard.contexts(), guard.control_tx())
+        let (Some(shared), Some(contexts), Some(handle)) =
+            (guard.shared(), guard.contexts(), guard.session_handle())
         else {
             // Disabled guard: produce a plain tokio runtime with no
             // telemetry hooks so attaching still works gracefully.
@@ -345,7 +344,7 @@ impl<P, M, Mode: WriterMode> TracedRuntimeBuilder<P, M, Mode> {
             contexts,
             builder,
             self.runtime_name,
-            control_tx,
+            handle,
             self.task_tracking_enabled,
             self.tokio_hooks,
             guard.taskdump_config(),
@@ -623,8 +622,8 @@ impl<M, Mode: WriterMode> TracedRuntimeBuilder<HasTracePath, M, Mode> {
             return Ok((runtime, guard));
         }
 
-        let control_tx = guard
-            .control_tx()
+        let handle = guard
+            .session_handle()
             .expect("TelemetryCore::builder().build() always returns an enabled guard")
             .clone();
         let shared = guard
@@ -638,7 +637,7 @@ impl<M, Mode: WriterMode> TracedRuntimeBuilder<HasTracePath, M, Mode> {
             contexts,
             builder,
             self.runtime_name,
-            &control_tx,
+            &handle,
             self.task_tracking_enabled,
             self.tokio_hooks,
             guard.taskdump_config(),
@@ -998,30 +997,20 @@ impl TelemetryCore {
             }
         }
 
-        // Channel for Dial9Handle/Guard → flush thread communication.
-        let (control_tx, control_rx) =
-            crate::primitives::sync::mpsc::sync_channel::<ControlCommand>(1);
-
         let flush_metrics_sink = worker_metrics_sink
             .clone()
             .unwrap_or_else(metrique_writer::sink::DevNullSink::boxed);
 
-        // Core owns the flush thread; inject the cpu-profiler thread
-        // registration (telemetry/perf-specific) via the thread-init hook.
-        let core_session = CoreSession::start(
-            Dial9Handle::enabled(shared, control_tx),
-            writer,
-            control_rx,
-            flush_metrics_sink,
-            || {
+        // Core owns the flush thread (and its control channel); inject the
+        // cpu-profiler thread registration (perf-specific) via the thread-init hook.
+        let core_session = CoreSession::start(shared, writer, flush_metrics_sink, || {
+            #[cfg(feature = "cpu-profiling")]
+            let _ = dial9_perf_self_profile::register_current_thread();
+            move || {
                 #[cfg(feature = "cpu-profiling")]
-                let _ = dial9_perf_self_profile::register_current_thread();
-                move || {
-                    #[cfg(feature = "cpu-profiling")]
-                    dial9_perf_self_profile::unregister_current_thread();
-                }
-            },
-        );
+                dial9_perf_self_profile::unregister_current_thread();
+            }
+        });
 
         // Spawn the background worker when we have a filesystem backend
         // (disk or memory via `writer_fs`) and at least one processor.

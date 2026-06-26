@@ -10,9 +10,8 @@ crate::primitives::thread_local! {
     static CURRENT_HANDLE: RefCell<Option<Dial9Handle>> = const { RefCell::new(None) };
 }
 
-/// Commands sent to the flush thread from the handle / guard.
-#[doc(hidden)]
-pub enum ControlCommand {
+/// Commands sent to the flush thread by [`CoreSession`](crate::session::CoreSession).
+pub(crate) enum ControlCommand {
     /// Flush, finalize (seal segment), then exit the thread.
     FinalizeAndStop(crate::primitives::sync::mpsc::SyncSender<()>),
 }
@@ -49,8 +48,10 @@ impl std::fmt::Debug for Dial9Handle {
 }
 
 impl Dial9Handle {
-    #[doc(hidden)]
-    pub fn enabled(
+    /// Build an enabled handle wired to a flush thread's control sender.
+    /// [`CoreSession::start`](crate::session::CoreSession::start) mints the channel
+    /// and owns the matching receiver.
+    pub(crate) fn enabled(
         shared: Arc<SharedState>,
         control_tx: crate::primitives::sync::mpsc::SyncSender<ControlCommand>,
     ) -> Self {
@@ -80,8 +81,9 @@ impl Dial9Handle {
         self.inner.as_ref().map(|i| &i.shared)
     }
 
-    #[doc(hidden)]
-    pub fn control_tx(&self) -> Option<&crate::primitives::sync::mpsc::SyncSender<ControlCommand>> {
+    pub(crate) fn control_tx(
+        &self,
+    ) -> Option<&crate::primitives::sync::mpsc::SyncSender<ControlCommand>> {
         self.inner.as_ref().map(|i| &i.control_tx)
     }
 

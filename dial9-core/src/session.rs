@@ -1,6 +1,8 @@
 use crate::flush_loop::run_flush_loop;
 use crate::handle::{ControlCommand, Dial9Handle};
+use crate::primitives::sync::Arc;
 use crate::primitives::{sync::mpsc, thread::JoinHandle};
+use crate::shared_state::SharedState;
 use crate::writer::{SegmentWriter, WriterMode};
 
 /// Owns a recording session: the [`Dial9Handle`] and the flush thread.
@@ -24,16 +26,18 @@ impl CoreSession {
         }
     }
 
-    /// Start a session: spawn the flush thread that drains the bus into
-    /// `writer`, and own its lifecycle.
+    /// Start a session over `shared`: build the recording [`Dial9Handle`], spawn
+    /// the flush thread that drains the bus into `writer`, and own its lifecycle.
+    ///
+    /// The flush-thread control channel is created and owned internally; reach
+    /// the handle via [`handle`](Self::handle).
     ///
     /// `thread_init` runs once on the flush thread before the loop and returns
     /// a teardown closure run after it — use it to register/unregister the
-    /// thread with a runtime's profiler. `handle` must be enabled.
+    /// thread with a runtime's profiler.
     pub fn start<M, Init, Teardown>(
-        handle: Dial9Handle,
+        shared: Arc<SharedState>,
         writer: SegmentWriter<M>,
-        control_rx: mpsc::Receiver<ControlCommand>,
         flush_metrics_sink: metrique::writer::BoxEntrySink,
         thread_init: Init,
     ) -> Self
@@ -42,10 +46,8 @@ impl CoreSession {
         Init: FnOnce() -> Teardown + Send + 'static,
         Teardown: FnOnce(),
     {
-        let shared = handle
-            .shared()
-            .expect("CoreSession::start requires an enabled handle")
-            .clone();
+        let (control_tx, control_rx) = mpsc::sync_channel(1);
+        let handle = Dial9Handle::enabled(shared.clone(), control_tx);
         let flush_thread = crate::primitives::thread::spawn_named("dial9-flush", move || {
             // The flush thread is latency-tolerant; lower its priority.
             #[cfg(target_os = "linux")]
