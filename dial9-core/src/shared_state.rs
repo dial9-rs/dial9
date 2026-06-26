@@ -7,8 +7,6 @@ use crate::primitives::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// Runtime-agnostic core recording state.
-///
-/// No tokio imports. All runtime-specific logic lives in `RuntimeContext`.
 #[doc(hidden)]
 pub struct SharedState {
     pub enabled: AtomicBool,

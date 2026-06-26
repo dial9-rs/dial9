@@ -76,7 +76,9 @@ impl Dial9Handle {
         self.inner.is_some()
     }
 
-    #[doc(hidden)]
+    /// Access this handle's [`SharedState`].
+    ///
+    /// You can use it to subscribe new sources via [`push_source`](SharedState::push_source)
     pub fn shared(&self) -> Option<&Arc<SharedState>> {
         self.inner.as_ref().map(|i| &i.shared)
     }

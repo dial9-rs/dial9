@@ -319,7 +319,9 @@ impl SegmentWriter<Disk> {
         Ok(writer)
     }
 
-    #[doc(hidden)]
+    /// Set the namespace for this writer:
+    /// - `boot_id`: The boot id for the namespace.
+    /// - `lock`: The lock file for the namespace.
     pub fn set_namespace(&mut self, boot_id: String, lock: std::fs::File) {
         self.boot_id = Some(boot_id);
         self._namespace_lock = Some(lock);
@@ -711,8 +713,7 @@ impl<M: WriterMode> SegmentWriter<M> {
         Ok(())
     }
 
-    #[doc(hidden)]
-    pub fn segment_metadata(&self) -> &[(String, String)] {
+    pub(crate) fn segment_metadata(&self) -> &[(String, String)] {
         &self.segment_metadata.entries
     }
 
