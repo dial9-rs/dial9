@@ -85,7 +85,6 @@ struct MemChannel {
     in_flight_segments: Arc<AtomicU64>,
     #[cfg_attr(not(feature = "pipeline"), allow(dead_code))]
     in_flight_bytes_peak: Arc<AtomicU64>,
-    #[cfg_attr(not(feature = "pipeline"), allow(dead_code))]
     writer_done: AtomicBool,
     notify: Notify,
 }

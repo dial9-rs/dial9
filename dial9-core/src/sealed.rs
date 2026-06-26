@@ -10,21 +10,18 @@ use crate::primitives::fs;
 /// A sealed trace segment ready for processing (disk-backed).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SealedSegment {
-    #[doc(hidden)]
-    pub path: PathBuf,
-    #[doc(hidden)]
-    pub index: u32,
+    pub(crate) path: PathBuf,
+    pub(crate) index: u32,
 }
 
+#[cfg(feature = "pipeline")]
 impl SealedSegment {
     /// Path to the sealed segment file on disk.
-    #[cfg_attr(not(feature = "pipeline"), allow(dead_code))]
     pub fn path(&self) -> &Path {
         &self.path
     }
 
     /// Segment index (e.g. `3` for `trace.3.bin`).
-    #[cfg_attr(not(feature = "pipeline"), allow(dead_code))]
     pub fn index(&self) -> u32 {
         self.index
     }
@@ -33,21 +30,18 @@ impl SealedSegment {
 /// A sealed trace segment backed by in-process memory.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemorySegment {
-    #[doc(hidden)]
-    pub index: u32,
-    #[doc(hidden)]
-    pub size: u64,
+    pub(crate) index: u32,
+    pub(crate) size: u64,
 }
 
+#[cfg(feature = "pipeline")]
 impl MemorySegment {
     /// Segment index.
-    #[cfg_attr(not(feature = "pipeline"), allow(dead_code))]
     pub fn index(&self) -> u32 {
         self.index
     }
 
     /// Encoded segment size in bytes.
-    #[cfg_attr(not(feature = "pipeline"), allow(dead_code))]
     pub fn size(&self) -> u64 {
         self.size
     }
@@ -92,9 +86,6 @@ impl std::fmt::Display for SegmentRef {
 /// Segment creation time as epoch seconds, parsed from the first clock
 /// anchor in the trace. Returns `(secs, true)` on a successful parse, or
 /// falls back to file mtime / current time with `(secs, false)`.
-// Segment-timestamp helpers below serve the worker pipeline (and tests);
-// unused in the bare bus build.
-#[cfg_attr(not(feature = "pipeline"), allow(dead_code))]
 pub fn creation_epoch_secs(data: &[u8], path: &Path) -> (u64, bool) {
     match parse_segment_timestamp(data) {
         Ok(ts) => return (ts / 1_000_000_000, true),
@@ -143,12 +134,10 @@ fn mtime_or_now_secs(path: &Path) -> u64 {
 /// of continuous runtime to reach that range.
 ///
 /// Keep in sync with `LEGACY_EPOCH_NS_FLOOR` in `dial9-viewer/ui/trace_parser.js`.
-#[cfg_attr(not(feature = "pipeline"), allow(dead_code))]
 pub(crate) const LEGACY_EPOCH_NS_FLOOR: u64 = 1_577_836_800_000_000_000;
 
 /// Parse wall-clock creation time from the first `ClockSyncEvent`,
 /// or from a legacy `SegmentMetadataEvent.timestamp_ns` that predates clock-sync support.
-#[cfg_attr(not(feature = "pipeline"), allow(dead_code))]
 fn parse_segment_timestamp(data: &[u8]) -> Result<u64, ParseTimestampError> {
     use dial9_trace_format::decoder::{DecodedFrameRef, Decoder};
     use dial9_trace_format::types::FieldValueRef;
@@ -198,7 +187,6 @@ fn parse_segment_timestamp(data: &[u8]) -> Result<u64, ParseTimestampError> {
 }
 
 #[derive(Debug)]
-#[cfg_attr(not(feature = "pipeline"), allow(dead_code))]
 enum ParseTimestampError {
     InvalidHeader,
     UnknownTypeId(u16),

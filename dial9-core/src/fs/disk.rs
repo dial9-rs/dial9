@@ -30,12 +30,7 @@ pub struct DiskFs {
     /// Claimed segment index -> uncompressed size in bytes. Dedup so each
     /// sealed file is dispensed at most once per `DiskFs` instance.
     claimed: Mutex<HashMap<u32, u64>>,
-    // Read only by the worker's `take_files`, but the producer-side writes
-    // (eviction bump, done flag) are always compiled, so these are dead only
-    // in a bare, no-`pipeline` build.
-    #[cfg_attr(not(feature = "pipeline"), allow(dead_code))]
     dropped: AtomicU64,
-    #[cfg_attr(not(feature = "pipeline"), allow(dead_code))]
     writer_done: AtomicBool,
 }
 
