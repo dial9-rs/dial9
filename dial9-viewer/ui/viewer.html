@@ -1244,6 +1244,9 @@
             let queueSamples = [];
             // Per-worker local queue samples
             let workerQueueSamples = {};
+            // All local queue samples merged into one sorted timeline, built once at load time.
+            // Each entry: { t, w, local }. Used by renderQueueChart to avoid per-frame work.
+            let mergedLocalSamples = [];
             let maxLocalQueue = 1;
             let processCpuUsage = {
                 samples: [],
@@ -1954,6 +1957,25 @@
                 // Per-worker local queue samples (already extracted by buildWorkerSpans)
                 workerQueueSamples = spanResult.workerQueueSamples;
                 maxLocalQueue = spanResult.maxLocalQueue;
+
+                // Build merged timeline once — k-way merge of already-sorted per-worker arrays.
+                // renderQueueChart binary-searches into this instead of rebuilding per frame.
+                {
+                    const cursors = workerIds
+                        .filter(w => workerQueueSamples[w]?.length)
+                        .map(w => ({ w, samples: workerQueueSamples[w], idx: 0 }));
+                    mergedLocalSamples = [];
+                    while (true) {
+                        let best = null;
+                        for (const c of cursors) {
+                            if (c.idx >= c.samples.length) continue;
+                            if (best === null || c.samples[c.idx].t < best.samples[best.idx].t) best = c;
+                        }
+                        if (best === null) break;
+                        const s = best.samples[best.idx++];
+                        mergedLocalSamples.push({ t: s.t, w: best.w, local: s.local });
+                    }
+                }
 
                 // Build active task count timeline from TaskSpawn/TaskTerminate
                 const atResult = buildActiveTaskTimeline(trace.taskSpawnTimes, trace.taskTerminateTimes);
@@ -4603,36 +4625,27 @@
                         if (s.global > b.maxGlobal) b.maxGlobal = s.global;
                     }
                 }
-                // Build sorted timeline of all local queue changes
-                const allLocalSamples = [];
-                for (const w of workerIds) {
-                    const wSamples = workerQueueSamples[w] || [];
-                    if (wSamples.length === 0) continue;
-                    const startIdx = Math.max(0, lowerBound(wSamples, viewStart) - 1);
-                    for (let i = startIdx; i < wSamples.length; i++) {
-                        const s = wSamples[i];
-                        if (s.t > viewEnd) break;
-                        if (s.t >= viewStart) {
-                            allLocalSamples.push({ t: s.t, w, local: s.local });
-                        }
-                    }
-                }
-                allLocalSamples.sort((a, b) => a.t - b.t);
-
-                // Single pass: maintain per-worker state and compute max for each bucket
+                // Single pass over pre-merged sorted timeline (built once at load time).
+                // Start one sample before viewStart to seed workerState correctly.
                 const workerState = {};
                 for (const w of workerIds) workerState[w] = 0;
-                let sampleIdx = 0;
+                // Seed workerState from the sample just before viewStart so the first bucket
+                // has correct per-worker values even if no samples fall inside the view window.
+                const mergeStart = Math.max(0, lowerBound(mergedLocalSamples, viewStart) - 1);
+                for (let i = mergeStart; i < mergedLocalSamples.length; i++) {
+                    const s = mergedLocalSamples[i];
+                    if (s.t >= viewStart) break;
+                    workerState[s.w] = s.local;
+                }
+                let sampleIdx = Math.max(mergeStart, lowerBound(mergedLocalSamples, viewStart));
 
                 for (let bi = 0; bi < numBuckets; bi++) {
                     const bucketEnd = viewStart + ((bi + 1) / numBuckets) * viewDur;
 
-                    // Apply all samples up to this bucket's end
-                    while (sampleIdx < allLocalSamples.length && allLocalSamples[sampleIdx].t < bucketEnd) {
-                        const s = allLocalSamples[sampleIdx];
+                    while (sampleIdx < mergedLocalSamples.length && mergedLocalSamples[sampleIdx].t < bucketEnd) {
+                        const s = mergedLocalSamples[sampleIdx++];
                         workerState[s.w] = s.local;
                         buckets[bi].hasData = true;
-                        sampleIdx++;
                     }
 
                     // Max across all workers

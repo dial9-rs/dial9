@@ -255,7 +255,6 @@ fn main() -> std::io::Result<()> {
                     .to_string_lossy()
                     .to_string(),
             )
-            .boot_id(uuid::Uuid::new_v4().to_string())
             .maybe_region(args.s3_region.as_ref())
             .build();
 

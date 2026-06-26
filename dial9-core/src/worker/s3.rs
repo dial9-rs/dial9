@@ -49,11 +49,10 @@ where
 
 /// Configuration for S3 uploads.
 ///
-/// Only `bucket` and `service_name` are required. The remaining fields have
-/// sensible defaults:
+/// Only `bucket` and `service_name` are required. The remaining builder fields
+/// have sensible defaults:
 ///
 /// - `instance_path`: system hostname
-/// - `boot_id`: `{4 alpha derived from timestamp}-{pid}` (unique per process start)
 /// - `prefix`: none (keys start at the time bucket)
 /// - `region`: auto-detected via `HeadBucket`
 /// - `key_fn`: built-in time-first layout
@@ -77,13 +76,17 @@ pub struct S3Config {
     /// Instance identifier for S3 key paths. Defaults to the system hostname.
     #[builder(into, default = InstanceIdentity::from_hostname())]
     instance_path: InstanceIdentity,
-    /// Identifies this process lifetime. Included as both S3 object
-    /// metadata and in the default key path. A new value each application
-    /// start disambiguates segments (and segment indices) from different
-    /// runs of the same service on the same host.
+    /// Identifies this process lifetime. Included as both S3 object metadata
+    /// and in the default key path so segments (and segment indices) from
+    /// different runs of the same service on the same host don't collide.
     ///
-    /// Defaults to 4 random lowercase alpha characters.
-    #[builder(default = default_boot_id())]
+    /// Not a builder field: when telemetry is configured through the managed
+    /// `Dial9Config` path the runtime injects the same
+    /// boot_id it uses for the on-disk `{boot_id}/` namespace directory (via
+    /// [`set_boot_id`](Self::set_boot_id)), so a local trace segment and its S3
+    /// key share one identity. Defaults to a fresh `{4-alpha}-{pid}` when no
+    /// namespace is in play.
+    #[builder(skip = default_boot_id())]
     boot_id: String,
     /// Optional key prefix. When `None`, keys start at the time bucket.
     prefix: Option<String>,
@@ -109,6 +112,12 @@ impl S3Config {
     /// The S3 bucket name.
     pub(crate) fn bucket(&self) -> &str {
         &self.bucket
+    }
+
+    /// Override the boot_id so S3 keys match the on-disk namespace directory.
+    /// Called cross-crate by the runtime builder when the writer is namespaced.
+    pub fn set_boot_id(&mut self, boot_id: impl Into<String>) {
+        self.boot_id = boot_id.into();
     }
 
     /// The configured fields as `(key, value)` pairs, for attaching as S3
@@ -478,6 +487,15 @@ impl S3PipelineUploader {
         }
     }
 
+    /// Override the pending config's boot_id so S3 keys use the on-disk
+    /// namespace identity. The builder calls this before the worker spawns, so
+    /// the `Ready` arm is unreachable in practice; a no-op there keeps it safe.
+    pub fn set_boot_id(&mut self, boot_id: impl Into<String>) {
+        if let S3UploaderState::Pending { s3_config, .. } = &mut self.state {
+            s3_config.set_boot_id(boot_id);
+        }
+    }
+
     /// Construct an uploader directly in the `Ready` state. Test-only —
     /// production code goes through [`new`](Self::new) and lazy init.
     #[cfg(test)]
@@ -744,14 +762,22 @@ mod tests {
         encoder.finish()
     }
 
+    /// Build a config with a fixed boot_id for deterministic key assertions.
+    fn with_boot_id(mut config: S3Config, boot_id: &str) -> S3Config {
+        config.set_boot_id(boot_id);
+        config
+    }
+
     fn make_config() -> S3Config {
-        S3Config::builder()
-            .bucket("test-bucket")
-            .prefix("traces")
-            .service_name("checkout-api")
-            .instance_path("us-east-1/i-0abc123")
-            .boot_id("test-boot-id")
-            .build()
+        with_boot_id(
+            S3Config::builder()
+                .bucket("test-bucket")
+                .prefix("traces")
+                .service_name("checkout-api")
+                .instance_path("us-east-1/i-0abc123")
+                .build(),
+            "test-boot-id",
+        )
     }
 
     fn make_segment(path: impl Into<PathBuf>, index: u32) -> SegmentRef {
@@ -831,12 +857,14 @@ mod tests {
 
     #[test]
     fn object_key_empty_prefix() {
-        let config = S3Config::builder()
-            .bucket("my-traces")
-            .service_name("checkout-api")
-            .instance_path("us-east-1/i-0abc123")
-            .boot_id("test-boot-id")
-            .build();
+        let config = with_boot_id(
+            S3Config::builder()
+                .bucket("my-traces")
+                .service_name("checkout-api")
+                .instance_path("us-east-1/i-0abc123")
+                .build(),
+            "test-boot-id",
+        );
         let segment = make_segment("/tmp/trace.0.bin", 0);
         let metadata = make_metadata(1741209000);
         let key = config.object_key(&segment, &metadata);
@@ -870,7 +898,6 @@ mod tests {
             .bucket("test-bucket")
             .service_name("svc")
             .instance_path("host")
-            .boot_id("bid")
             .key_fn(|segment: &SegmentInfo| {
                 format!("custom/{}-{}.bin.gz", segment.epoch_secs, segment.index)
             })
@@ -932,7 +959,6 @@ mod tests {
             .bucket("bucket")
             .service_name("svc")
             .instance_path("path")
-            .boot_id("bid")
             .build();
         let segment = make_segment("/tmp/trace.0.bin", 0);
         let metadata = make_metadata(1741209000);
@@ -1043,13 +1069,15 @@ mod tests {
         let client = fake_s3_client(s3_root.path());
         let raw_s3_client = fake_raw_s3_client(s3_root.path());
 
-        let config = S3Config::builder()
-            .bucket("test-bucket")
-            .prefix("traces")
-            .service_name("checkout-api")
-            .instance_path("us-east-1/i-0abc123")
-            .boot_id("a3f7c2d1-dead-beef-1234-567890abcdef")
-            .build();
+        let config = with_boot_id(
+            S3Config::builder()
+                .bucket("test-bucket")
+                .prefix("traces")
+                .service_name("checkout-api")
+                .instance_path("us-east-1/i-0abc123")
+                .build(),
+            "a3f7c2d1-dead-beef-1234-567890abcdef",
+        );
         let uploader = S3Uploader::new(client, config);
 
         let segment_path = local_dir.path().join("trace.3.bin");
@@ -1134,7 +1162,6 @@ mod tests {
             .bucket("b")
             .service_name("s")
             .instance_path("i")
-            .boot_id("boot")
             .build();
         check!(no_prefix.manifest_key("01ABC") == "dumps/01ABC.json");
     }

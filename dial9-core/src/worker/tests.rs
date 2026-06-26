@@ -80,7 +80,6 @@ mod worker_s3_tests {
             .bucket("test-bucket")
             .service_name("test")
             .instance_path("test")
-            .boot_id("test")
             .region("us-east-1")
             .build();
 
@@ -161,7 +160,6 @@ mod worker_s3_tests {
             .bucket("test")
             .service_name("test")
             .instance_path("test")
-            .boot_id("test")
             .region("us-east-1")
             .build();
         let sdk_config = aws_sdk_s3::Config::builder()
@@ -560,7 +558,6 @@ mod worker_pipeline_tests {
             .bucket("test-bucket")
             .service_name("test")
             .instance_path("test")
-            .boot_id("test")
             .region("us-east-1")
             .build();
         FlakyHarness {
@@ -597,7 +594,6 @@ mod worker_pipeline_tests {
             .bucket("test-bucket")
             .service_name("test")
             .instance_path("test")
-            .boot_id("test")
             .region("us-east-1")
             .build();
         (s3::S3Uploader::new(tm_client, s3_config), s3_root)
@@ -2297,7 +2293,6 @@ mod finalize_dump_tests {
             .bucket("b")
             .service_name("s")
             .instance_path("i")
-            .boot_id("boot")
             .build();
         let mut uploader = S3PipelineUploader::new(config, None);
 
@@ -2415,7 +2410,6 @@ mod s3_dump_manifest_tests {
             .prefix("traces")
             .service_name("test")
             .instance_path("test")
-            .boot_id("test")
             .region("us-east-1")
             .build();
         let uploader = s3::S3Uploader::new(fake_tm_client(root), config);

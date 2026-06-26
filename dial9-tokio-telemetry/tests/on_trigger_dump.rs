@@ -19,7 +19,6 @@ fn test_s3_config() -> S3Config {
         .prefix("traces")
         .service_name("test-svc")
         .instance_path("us-east-1/test-host")
-        .boot_id("test-boot-id")
         .region("us-east-1")
         .build()
 }
