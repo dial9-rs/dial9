@@ -177,6 +177,12 @@ fn parse_scope_fields(key: &str) -> (String, String, String) {
     }
 }
 
+/// The host path component of a source key (empty when the key has no host
+/// segment). Used to count distinct hosts for the coverage's fleet-spread badge.
+pub(crate) fn host_of(key: &str) -> String {
+    parse_scope_fields(key).2
+}
+
 /// Parse the file start time (epoch SECONDS) from the filename `{ts}-{i}.bin.gz`.
 fn parse_epoch_secs(key: &str) -> Option<i64> {
     let file = key.rsplit('/').next()?;
@@ -482,6 +488,12 @@ pub(crate) struct Coverage {
     pub samples_folded: usize,
     /// Total bytes of all matched source files in the scope.
     pub total_bytes: u64,
+    /// Distinct hosts across the matched set (the scope's fleet breadth).
+    pub hosts_matched: usize,
+    /// Distinct hosts among the folded files (how much of that breadth the
+    /// current sample actually spans), so the UI can show fleet-representativeness
+    /// e.g. "8 / 40 hosts".
+    pub hosts_folded: usize,
 }
 
 /// Wire value of the `CpuProfile` CPU-sample source (periodic on-CPU sample).
@@ -684,7 +696,7 @@ pub(crate) async fn aggregate(
             Err(_) => continue,
         };
         read_samples_part(
-            &data,
+            data,
             &filter,
             &mut counts,
             &mut accum,
@@ -693,7 +705,7 @@ pub(crate) async fn aggregate(
             &mut max_ts,
         )?;
         if let Ok(dict_data) = dict_data {
-            read_dict_part(&dict_data, &mut dict)?;
+            read_dict_part(dict_data, &mut dict)?;
         }
     }
 
@@ -753,7 +765,7 @@ pub(crate) async fn read_polls_parts(
 }
 
 fn read_samples_part(
-    data: &[u8],
+    data: Vec<u8>,
     filter: &SampleFilter,
     counts: &mut HashMap<[u8; 16], u64>,
     accum: &mut FacetAccum,
@@ -761,8 +773,10 @@ fn read_samples_part(
     min_ts: &mut Option<i64>,
     max_ts: &mut Option<i64>,
 ) -> anyhow::Result<()> {
+    // `Bytes::from(Vec<u8>)` reuses the allocation (no copy); threading the
+    // owned buffer in from the caller avoids the round-trip through `&[u8]`.
     let reader = ::parquet::arrow::arrow_reader::ParquetRecordBatchReader::try_new(
-        bytes::Bytes::from(data.to_vec()),
+        bytes::Bytes::from(data),
         4096,
     )?;
     for batch in reader {
@@ -843,9 +857,14 @@ fn read_samples_part(
     Ok(())
 }
 
-/// Index of the "host" facet in [`FACETS`].
+/// Index of the "host" facet in [`FACETS`]. A missing "host" facet is a
+/// developer error (the facet table is a compile-time constant), so this panics
+/// rather than silently picking the wrong column.
 fn host_facet_index() -> usize {
-    FACETS.iter().position(|f| f.name == "host").unwrap_or(0)
+    FACETS
+        .iter()
+        .position(|f| f.name == "host")
+        .expect("FACETS must define a \"host\" facet")
 }
 
 enum ResolvedFacetCol<'a> {
@@ -954,12 +973,14 @@ fn extract_facet_value(col: &ResolvedFacetCol, i: usize) -> Option<String> {
     }
 }
 
-fn read_dict_part(data: &[u8], dict: &mut HashMap<Vec<u8>, Vec<String>>) -> anyhow::Result<()> {
+fn read_dict_part(data: Vec<u8>, dict: &mut HashMap<Vec<u8>, Vec<String>>) -> anyhow::Result<()> {
+    // `Bytes::from(Vec<u8>)` reuses the allocation (no copy).
     let reader = ::parquet::arrow::arrow_reader::ParquetRecordBatchReader::try_new(
-        bytes::Bytes::from(data.to_vec()),
+        bytes::Bytes::from(data),
         4096,
     )?;
-    for batch in reader.flatten() {
+    for batch in reader {
+        let batch = batch?;
         let stack_arr = batch.column_by_name("stack_id").and_then(|c| {
             c.as_any()
                 .downcast_ref::<arrow::array::FixedSizeBinaryArray>()

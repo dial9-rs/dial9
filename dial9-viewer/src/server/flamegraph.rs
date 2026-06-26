@@ -28,6 +28,8 @@ pub struct FlamegraphParams {
     /// End timestamp in nanoseconds (inclusive)
     pub end_ns: Option<i64>,
     /// "Fetch more": raise the absolute sampling-cap ceiling for this scope.
+    /// Clamped server-side to a hard ceiling (see `sampling_cap`), so a crafted
+    /// request can't drive an unbounded fold.
     pub max_files: Option<usize>,
     /// S3 bucket override (used with bring-your-own-credentials).
     pub bucket: Option<String>,
@@ -149,9 +151,12 @@ impl TrieNode {
     }
 
     fn get_or_insert_child(&mut self, name: String) -> &mut TrieNode {
+        // `or_insert_with_key` clones the name only when a new node is inserted;
+        // on the hot path (child already present) it's just a move into the
+        // lookup with no allocation.
         self.children
-            .entry(name.clone())
-            .or_insert_with(|| TrieNode::new(name))
+            .entry(name)
+            .or_insert_with_key(|name| TrieNode::new(name.clone()))
     }
 
     fn into_response(self) -> FlamegraphNode {
@@ -296,6 +301,8 @@ async fn flamegraph_response(
         files_folded,
         samples_folded: result.total_samples,
         total_bytes: refined.total_bytes,
+        hosts_matched: refined.hosts_matched,
+        hosts_folded: refined.hosts_folded(),
     };
 
     let pct = (files_folded as f64 / files_matched as f64) * 100.0;

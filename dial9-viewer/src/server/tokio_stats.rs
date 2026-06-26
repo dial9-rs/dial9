@@ -183,6 +183,8 @@ pub async fn get_tokio_stats(
             // tokio-stats counts files read, not samples, as its "folded" unit.
             samples_folded: files_read,
             total_bytes: refined.total_bytes,
+            hosts_matched: refined.hosts_matched,
+            hosts_folded: refined.hosts_folded(),
         }),
     }))
 }

@@ -16,16 +16,29 @@
 //   { files_matched: 480, files_folded: 12, samples_folded: 41203 }
 //     -> "12 / 480 files (2.5%) · 41,203 samples"
 //
+//   { files_matched: 480, files_folded: 12, samples_folded: 41203,
+//     hosts_matched: 40, hosts_folded: 8 }
+//     -> "12 / 480 files (2.5%) · 8 / 40 hosts · 41,203 samples"
+//
 // percent = files_folded / files_matched * 100. Guards against a zero/missing
-// denominator so we never render "NaN%".
+// denominator so we never render "NaN%". The host fraction tells the user how
+// much of the scope's fleet breadth the current sample spans; it is omitted
+// when the backend reports no hosts (older responses) or a single-host scope
+// (where "1 / 1 hosts" carries no information).
 function formatCoverageBadge(coverage) {
   const matched = Number(coverage.files_matched) || 0;
   const folded = Number(coverage.files_folded) || 0;
   const samples = Number(coverage.samples_folded) || 0;
   const totalBytes = Number(coverage.total_bytes) || 0;
+  const hostsMatched = Number(coverage.hosts_matched) || 0;
+  const hostsFolded = Number(coverage.hosts_folded) || 0;
   const pct = matched > 0 ? (folded / matched) * 100 : 0;
   let s = `${folded.toLocaleString()} / ${matched.toLocaleString()} files ` +
-    `(${pct.toFixed(1)}%) · ${samples.toLocaleString()} samples`;
+    `(${pct.toFixed(1)}%)`;
+  if (hostsMatched > 1) {
+    s += ` · ${hostsFolded.toLocaleString()} / ${hostsMatched.toLocaleString()} hosts`;
+  }
+  s += ` · ${samples.toLocaleString()} samples`;
   if (totalBytes > 0) s += ` · ${formatBytes(totalBytes)}`;
   return s;
 }

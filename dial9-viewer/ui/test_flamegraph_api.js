@@ -60,6 +60,28 @@ assertEq(
   "1 / 3 files (33.3%) · 7 samples",
   "rounds percent to one decimal",
 );
+assertEq(
+  formatCoverageBadge({
+    files_matched: 480,
+    files_folded: 12,
+    samples_folded: 41203,
+    hosts_matched: 40,
+    hosts_folded: 8,
+  }),
+  "12 / 480 files (2.5%) · 8 / 40 hosts · 41,203 samples",
+  "host spread shown when scope spans multiple hosts",
+);
+assertEq(
+  formatCoverageBadge({
+    files_matched: 5,
+    files_folded: 2,
+    samples_folded: 99,
+    hosts_matched: 1,
+    hosts_folded: 1,
+  }),
+  "2 / 5 files (40.0%) · 99 samples",
+  "single-host scope omits the uninformative host fraction",
+);
 
 // ── isCoverageFrozen ──
 assertEq(

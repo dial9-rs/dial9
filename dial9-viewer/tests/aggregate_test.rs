@@ -172,6 +172,8 @@ struct Coverage {
     files_matched: usize,
     files_folded: usize,
     samples_folded: usize,
+    hosts_matched: usize,
+    hosts_folded: usize,
 }
 
 /// Poll the refinement endpoint in REFINING mode (`refine=true`): each call
@@ -233,6 +235,8 @@ fn extract_coverage(json: &str) -> Option<Coverage> {
         files_matched: extract_usize(rest, "\"files_matched\":")?,
         files_folded: extract_usize(rest, "\"files_folded\":")?,
         samples_folded: extract_usize(rest, "\"samples_folded\":")?,
+        hosts_matched: extract_usize(rest, "\"hosts_matched\":")?,
+        hosts_folded: extract_usize(rest, "\"hosts_folded\":")?,
     })
 }
 
@@ -792,10 +796,23 @@ async fn multi_host_scope_matches_union() {
 
     // Two hosts → 10 files (5 each); host-c/host-d excluded.
     let r = poll(&http, &base, "service=shale&host=host-a&host=host-b").await;
+    let cov = r.coverage.unwrap();
     assert_eq!(
-        r.coverage.unwrap().files_matched,
-        10,
+        cov.files_matched, 10,
         "host set {{a,b}} → union of 10 files"
+    );
+    assert_eq!(
+        cov.hosts_matched, 2,
+        "host set {{a,b}} → 2 distinct hosts in the matched set"
+    );
+    // The folded sample spans a subset of the matched fleet (exact count is
+    // order-dependent, so assert the invariant rather than a fixed number).
+    assert!(
+        cov.files_folded > 0 && (1..=cov.hosts_matched).contains(&cov.hosts_folded),
+        "hosts_folded ({}) within 1..={} once files are folded ({})",
+        cov.hosts_folded,
+        cov.hosts_matched,
+        cov.files_folded,
     );
 
     // Three hosts → 15.
@@ -805,7 +822,9 @@ async fn multi_host_scope_matches_union() {
         "service=shale&host=host-a&host=host-b&host=host-c",
     )
     .await;
-    assert_eq!(r3.coverage.unwrap().files_matched, 15);
+    let cov3 = r3.coverage.unwrap();
+    assert_eq!(cov3.files_matched, 15);
+    assert_eq!(cov3.hosts_matched, 3, "3 hosts in the matched set");
 }
 
 /// `/api/config` advertises `aggregation_enabled: true` when the server runs

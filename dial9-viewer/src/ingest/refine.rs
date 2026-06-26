@@ -47,6 +47,13 @@ const LIST_CONCURRENCY: usize = 24;
 const CAP_FRACTION: f64 = 0.05;
 const CAP_MAX_FILES: usize = 100;
 
+/// Hard ceiling on a client-supplied `max_files` ("Fetch more") override. The
+/// override is otherwise unbounded by the request, so without this an arbitrary
+/// value could drive a single scope to fold thousands of ~37–50 MB files. The
+/// "Fetch more" button steps up gradually, so this is reached only by a crafted
+/// request; it bounds the worst case rather than the normal flow.
+const CAP_MAX_FILES_OVERRIDE: usize = 2000;
+
 /// Per-poll inputs to [`refine`] that are not derived from the [`Scope`].
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct RefineOpts {
@@ -84,6 +91,9 @@ pub(crate) struct Refined {
     pub files_matched: usize,
     /// Total bytes of the matched set (for the coverage block).
     pub total_bytes: u64,
+    /// Distinct hosts across the full matched set (the scope's fleet breadth, for
+    /// the coverage block's fleet-representativeness badge).
+    pub hosts_matched: usize,
 }
 
 impl Refined {
@@ -109,6 +119,17 @@ impl Refined {
             .iter()
             .filter(|(_, full)| self.is_folded(full))
             .count()
+    }
+
+    /// Distinct hosts among the folded capped files — how much of the scope's
+    /// fleet breadth the current sample actually spans.
+    pub fn hosts_folded(&self) -> usize {
+        self.capped
+            .iter()
+            .filter(|(_, full)| self.is_folded(full))
+            .map(|(_, full)| aggregate::host_of(full))
+            .collect::<HashSet<_>>()
+            .len()
     }
 }
 
@@ -175,9 +196,17 @@ pub(crate) async fn refine(
         &agg.source_bucket,
     );
     let files_matched = ordered.len();
+    // Fleet breadth of the matched set: distinct hosts across every matched file
+    // (not just the capped prefix), so coverage can report sample-vs-fleet spread.
+    let hosts_matched = ordered
+        .iter()
+        .map(|(_, full)| aggregate::host_of(full))
+        .collect::<HashSet<_>>()
+        .len();
     tracing::info!(
         total_listed,
         files_matched,
+        hosts_matched,
         sample_matched = ?ordered.iter().take(3).map(|(k, _)| k.as_str()).collect::<Vec<_>>(),
         "refine: scope filter result"
     );
@@ -305,6 +334,7 @@ pub(crate) async fn refine(
         folded,
         files_matched,
         total_bytes,
+        hosts_matched,
     })
 }
 
@@ -314,14 +344,15 @@ pub(crate) async fn refine(
 /// small scopes sensible; the absolute ceiling stops a huge scope from chasing a
 /// proportionally huge sample. "Fetch more" passes an explicit `max_files`
 /// target that *replaces* the default cap for this scope (clamped to the matched
-/// set), letting the user deliberately sample deeper than the default.
+/// set and the [`CAP_MAX_FILES_OVERRIDE`] hard ceiling), letting the user
+/// deliberately sample deeper than the default.
 ///
 /// Either way the result is floored at the baseline (so the first poll can
 /// always return a tree) and clamped to the matched set (can't fold more files
 /// than exist).
 fn sampling_cap(files_matched: usize, max_files_override: Option<usize>) -> usize {
     let target = match max_files_override {
-        Some(explicit) => explicit,
+        Some(explicit) => explicit.min(CAP_MAX_FILES_OVERRIDE),
         None => {
             let by_fraction = (files_matched as f64 * CAP_FRACTION).ceil() as usize;
             by_fraction.min(CAP_MAX_FILES)
@@ -455,6 +486,12 @@ mod tests {
             sampling_cap(10, Some(50)),
             10,
             "override clamped to matched"
+        );
+        // A huge override is bounded by the hard ceiling, not the matched set.
+        assert_eq!(
+            sampling_cap(1_000_000, Some(999_999)),
+            CAP_MAX_FILES_OVERRIDE,
+            "override clamped to hard ceiling"
         );
     }
 

@@ -84,10 +84,12 @@ re-folding is safe by idempotency. The client polls until coverage freezes.
 Every demand-driven response carries:
 
 ```json
-"coverage": { "files_matched": 480, "files_folded": 12, "samples_folded": 41203, "total_bytes": 1788000000 }
+"coverage": { "files_matched": 480, "files_folded": 12, "samples_folded": 41203, "total_bytes": 1788000000, "hosts_matched": 40, "hosts_folded": 8 }
 ```
 
-rendered as e.g. `12 / 480 files (2.5%) · 41,203 samples`. Folding plateaus at
+rendered as e.g. `12 / 480 files (2.5%) · 8 / 40 hosts · 41,203 samples` (the
+host fraction shows how much of the scope's fleet breadth the sample spans, and
+is dropped for single-host scopes). Folding plateaus at
 the **sampling cap** = `min(max(5% × files_matched, baseline 4), 100 files)` —
 the fraction keeps small scopes sensible; the absolute ceiling (100) stops a
 fleet-day scope from chasing 5% of tens of thousands of files. A "Fetch more"
@@ -114,7 +116,7 @@ Two independent version knobs, deliberately in opposite places:
 - **`ORDER_VERSION`** (= 1) lives *only* in the order-key hash input. Bump it to
   change the fetch-order permutation; persisted samples are order-independent
   and survive untouched.
-- **`SAMPLES_FORMAT_VERSION`** (= 1) lives *only* in the output path. Bump it
+- **`SAMPLES_FORMAT_VERSION`** (= 3) lives *only* in the output path. Bump it
   when changing *what* we persist; reads/writes then target a fresh empty tree
   that repopulates lazily on demand — no backfill job. The old tree is abandoned
   and GC'd out-of-band.
