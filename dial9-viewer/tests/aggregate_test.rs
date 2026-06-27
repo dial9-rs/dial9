@@ -4,6 +4,9 @@
 //! the whole flow" coverage: folding, ordering, coverage reporting, the
 //! sampling cap, idempotency, zero-sample files, and scope filtering.
 
+use dial9_trace_format::encoder::Encoder;
+use dial9_trace_format::schema::FieldDef;
+use dial9_trace_format::types::{FieldType, FieldValue};
 use dial9_viewer::ingest::aggregate::AggContext;
 use dial9_viewer::server::{AppState, router};
 use dial9_viewer::storage::S3Backend;
@@ -28,23 +31,11 @@ fn fake_s3_client(fs_root: &std::path::Path) -> aws_sdk_s3::Client {
     aws_sdk_s3::Client::from_conf(s3_config)
 }
 
-/// The demo trace, already gzipped on disk — used as the body of every
-/// synthetic source segment (it decodes to a known set of CPU samples).
-fn demo_trace_gz() -> Vec<u8> {
-    std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/ui/demo-trace.bin")).unwrap()
-}
-
-/// Expected per-filter sample counts for the demo trace, read from the JS
-/// oracle's committed property fixture rather than hardcoded.
-///
-/// Regenerating the demo trace regenerates this fixture in the same step (see
-/// `scripts/regenerate_demo_trace.sh`), so these expectations track the trace
-/// automatically instead of silently going stale. Using the *JS*-derived
-/// fixture as the expected values for the *Rust* aggregation path is sound
-/// because `parser_parity_test` independently pins the two decoders to identical
-/// `total_samples` / `by_source` / `on_off_by_source` values — so any divergence
-/// fails there with a readable diff, not here with a mystery count.
-struct DemoCounts {
+/// Known per-filter sample counts embedded in [`mini_trace`], returned alongside
+/// the bytes so the test expectations can never drift from the trace the tests
+/// actually fold.
+#[derive(Clone, Copy)]
+struct MiniCounts {
     /// Every sample (CpuProfile + SchedEvent) — the `source=all` view.
     total: usize,
     /// CpuProfile samples (source 0) — the default / `source=cpu` view.
@@ -57,24 +48,118 @@ struct DemoCounts {
     cpu_off: usize,
 }
 
-fn demo_counts() -> DemoCounts {
-    let path = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/demo-trace.properties.json"
-    );
-    let bytes = std::fs::read(path).expect("demo-trace.properties.json fixture present");
-    let v: serde_json::Value = serde_json::from_slice(&bytes).expect("fixture is valid JSON");
-    let count = |x: &serde_json::Value| -> usize {
-        x.as_u64()
-            .expect("property count is a non-negative integer") as usize
-    };
-    DemoCounts {
-        total: count(&v["total_samples"]),
-        cpu: count(&v["by_source"]["0"]),
-        sched: count(&v["by_source"]["1"]),
-        cpu_on: count(&v["on_off_by_source"]["0"]["on"]),
-        cpu_off: count(&v["on_off_by_source"]["0"]["off"]),
+/// Build a tiny, deterministic trace segment used as the body of every synthetic
+/// source segment, and return its gzipped bytes together with the exact sample
+/// counts it contains.
+///
+/// We synthesize the trace in-process (via the trace-format encoder) rather than
+/// folding the committed `demo-trace.bin`, for two reasons:
+///
+/// 1. **No drift.** `demo-trace.bin` is owned and periodically regenerated on
+///    `main` (and its JS property fixture is only refreshed on a perf-capable
+///    host — see `scripts/regenerate_demo_trace.sh`). A PR that merges `main`
+///    therefore pairs `main`'s freshly regenerated trace with this branch's
+///    pinned expectations, breaking these exact-count assertions for reasons
+///    unrelated to the change. A code-defined trace can't drift.
+/// 2. **Speed.** Each fold gunzip+decode+parquet-encodes the whole body; a ~9
+///    sample trace folds in microseconds where the 3 MB demo trace took ~tens of
+///    seconds across the volume tests.
+///
+/// The trace deliberately exercises every facet the tests assert: both sources
+/// (CpuProfile=0, SchedEvent=1), both thread classes (on-worker via tids bound to
+/// a worker by park events, plus one off-worker CpuProfile sample on an unbound
+/// tid), and multi-frame callchains so the flamegraph tree is non-trivial.
+fn mini_trace() -> (Vec<u8>, MiniCounts) {
+    let mut enc = Encoder::new();
+    // Only the fields `decode_samples` reads are declared; the decoder matches
+    // fields by name and ignores the rest of the producer's wider schema.
+    let park = enc
+        .register_schema(
+            "WorkerParkEvent",
+            vec![
+                FieldDef::new("worker_id", FieldType::Varint),
+                FieldDef::new("tid", FieldType::Varint),
+            ],
+        )
+        .unwrap();
+    let cpu = enc
+        .register_schema(
+            "CpuSampleEvent",
+            vec![
+                FieldDef::new("tid", FieldType::Varint),
+                FieldDef::new("source", FieldType::Varint),
+                FieldDef::new("callchain", FieldType::StackFrames),
+            ],
+        )
+        .unwrap();
+
+    // Bind tid 100 -> worker 0 and tid 101 -> worker 1. Samples on these tids are
+    // "on-runtime"; samples on any other tid are "off-worker".
+    for (ts, worker, tid) in [(10u64, 0u64, 100u64), (11, 1, 101)] {
+        enc.write_event(
+            &park,
+            &[
+                FieldValue::Varint(ts),
+                FieldValue::Varint(worker),
+                FieldValue::Varint(tid),
+            ],
+        )
+        .unwrap();
     }
+
+    // (timestamp, tid, source, callchain). Sources: 0 = CpuProfile, 1 = SchedEvent.
+    let events: &[(u64, u64, u64, &[u64])] = &[
+        // 5 on-worker CpuProfile samples.
+        (100, 100, 0, &[0x1000, 0x2000, 0x3000]),
+        (101, 100, 0, &[0x1000, 0x2000, 0x4000]),
+        (102, 101, 0, &[0x1000, 0x5000]),
+        (103, 101, 0, &[0x1000, 0x5000, 0x6000]),
+        (104, 100, 0, &[0x7000, 0x8000]),
+        // 1 off-worker CpuProfile sample (tid 999 is never bound to a worker).
+        (105, 999, 0, &[0x1000, 0x2000, 0x3000]),
+        // 3 on-worker SchedEvent samples.
+        (106, 100, 1, &[0x1000, 0x2000]),
+        (107, 101, 1, &[0x1000, 0x5000]),
+        (108, 100, 1, &[0x9000, 0xa000]),
+    ];
+    for &(ts, tid, source, frames) in events {
+        enc.write_event(
+            &cpu,
+            &[
+                FieldValue::Varint(ts),
+                FieldValue::Varint(tid),
+                FieldValue::Varint(source),
+                FieldValue::StackFrames(frames.to_vec().into()),
+            ],
+        )
+        .unwrap();
+    }
+
+    let raw = enc.finish();
+    // Gzip it: source segments are `.bin.gz`, and the fold path gunzips before
+    // decoding (`maybe_gunzip`), so this exercises the real code path.
+    let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    std::io::Write::write_all(&mut gz, &raw).unwrap();
+    let bytes = gz.finish().unwrap();
+
+    let counts = MiniCounts {
+        total: 9,
+        cpu: 6,
+        sched: 3,
+        cpu_on: 5,
+        cpu_off: 1,
+    };
+    (bytes, counts)
+}
+
+/// Gzipped bytes of the synthetic trace segment (the body of every seeded file).
+fn mini_trace_gz() -> Vec<u8> {
+    mini_trace().0
+}
+
+/// Expected per-filter sample counts for [`mini_trace_gz`].
+fn mini_counts() -> MiniCounts {
+    mini_trace().1
 }
 
 async fn put(client: &aws_sdk_s3::Client, bucket: &str, key: &str, data: Vec<u8>) {
@@ -263,11 +348,10 @@ async fn seed_fleet(client: &aws_sdk_s3::Client, bucket: &str, body: &[u8]) -> u
 /// regression test for the bug where the filter selectors were silently ignored
 /// (the on/off split "worked in the viewer but not the pure flamegraph view").
 ///
-/// Expected counts come from the JS reference oracle on the demo trace
-/// (`tests/fixtures/demo-trace.properties.json`), read via [`demo_counts`] so
-/// they track the trace through a regen rather than being hardcoded here. At the
-/// time of writing the demo trace has 189 CpuProfile (188 worker / 1 off), 8782
-/// SchedEvent, 8971 total.
+/// Expected counts come from [`mini_counts`], which are embedded in the
+/// synthetic trace ([`mini_trace`]) the test folds — so they can never drift
+/// from the trace. The trace has 6 CpuProfile (5 worker / 1 off), 3 SchedEvent,
+/// 9 total.
 #[tokio::test]
 async fn flamegraph_thread_and_source_filters_apply() {
     let fs = tempfile::tempdir().unwrap();
@@ -275,7 +359,7 @@ async fn flamegraph_thread_and_source_filters_apply() {
     std::fs::create_dir(fs.path().join("out-bucket")).unwrap();
 
     let uploader = fake_s3_client(fs.path());
-    let body = demo_trace_gz();
+    let body = mini_trace_gz();
     // A single segment so every sample comes from one folded file: the totals
     // are then exactly the per-filter counts, not a multiple.
     let key = segment_key("2026-04-09", "1910", "shale", "host-a", 1_744_224_000, 0);
@@ -283,7 +367,7 @@ async fn flamegraph_thread_and_source_filters_apply() {
 
     let base = start_agg_server(fs.path(), "src-bucket", "out-bucket", 60).await;
     let http = reqwest::Client::new();
-    let want = demo_counts();
+    let want = mini_counts();
 
     // Fold the one file (refining poll), then aggregate read-only per filter.
     let folded = poll(&http, &base, "service=shale&source=all").await;
@@ -363,7 +447,7 @@ async fn flamegraph_metadata_reports_available_facets() {
     std::fs::create_dir(fs.path().join("out-bucket")).unwrap();
 
     let uploader = fake_s3_client(fs.path());
-    let body = demo_trace_gz();
+    let body = mini_trace_gz();
     let key = segment_key("2026-04-09", "1910", "shale", "host-a", 1_744_224_000, 0);
     put(&uploader, "src-bucket", &key, body).await;
 
@@ -451,7 +535,7 @@ async fn refinement_loop_folds_progressively_and_caps() {
     std::fs::create_dir(fs.path().join("out-bucket")).unwrap();
 
     let uploader = fake_s3_client(fs.path());
-    let body = demo_trace_gz();
+    let body = mini_trace_gz();
     let total = seed_fleet(&uploader, "src-bucket", &body).await;
     assert_eq!(total, 20, "4 hosts × 5 minutes");
 
@@ -516,7 +600,7 @@ async fn refinement_climbs_then_plateaus_below_full() {
     std::fs::create_dir(fs.path().join("src-bucket")).unwrap();
     std::fs::create_dir(fs.path().join("out-bucket")).unwrap();
     let uploader = fake_s3_client(fs.path());
-    let body = demo_trace_gz();
+    let body = mini_trace_gz();
 
     // 100 segments → cap = ceil(0.05 * 100) = 5 files.
     let mut n = 0;
@@ -589,7 +673,7 @@ async fn folded_outside_cap_does_not_starve_budget() {
     std::fs::create_dir(fs.path().join("src-bucket")).unwrap();
     std::fs::create_dir(fs.path().join("out-bucket")).unwrap();
     let uploader = fake_s3_client(fs.path());
-    let body = demo_trace_gz();
+    let body = mini_trace_gz();
 
     // 100 segments across 10 hosts × 10 minutes. Fleet cap = ceil(0.05×100) = 5.
     let mut n = 0;
@@ -657,7 +741,7 @@ async fn fetch_more_raises_the_cap() {
     std::fs::create_dir(fs.path().join("src-bucket")).unwrap();
     std::fs::create_dir(fs.path().join("out-bucket")).unwrap();
     let uploader = fake_s3_client(fs.path());
-    let body = demo_trace_gz();
+    let body = mini_trace_gz();
     // 40 files → default cap = max(ceil(0.05 × 40), 4) = max(2, 4) = 4 (the
     // baseline floor wins). Kept small: each fold is a full demo-trace decode,
     // so we prove the override with few folds.
@@ -716,7 +800,7 @@ async fn refold_is_idempotent_no_duplicate_part_files() {
     std::fs::create_dir(fs.path().join("src-bucket")).unwrap();
     std::fs::create_dir(fs.path().join("out-bucket")).unwrap();
     let uploader = fake_s3_client(fs.path());
-    let body = demo_trace_gz();
+    let body = mini_trace_gz();
     seed_fleet(&uploader, "src-bucket", &body).await;
 
     let base = start_agg_server(fs.path(), "src-bucket", "out-bucket", 60).await;
@@ -760,7 +844,7 @@ async fn scope_filters_matched_set() {
     std::fs::create_dir(fs.path().join("src-bucket")).unwrap();
     std::fs::create_dir(fs.path().join("out-bucket")).unwrap();
     let uploader = fake_s3_client(fs.path());
-    let body = demo_trace_gz();
+    let body = mini_trace_gz();
     seed_fleet(&uploader, "src-bucket", &body).await; // 4 hosts × 5 minutes = 20
 
     let base = start_agg_server(fs.path(), "src-bucket", "out-bucket", 60).await;
@@ -788,7 +872,7 @@ async fn multi_host_scope_matches_union() {
     std::fs::create_dir(fs.path().join("src-bucket")).unwrap();
     std::fs::create_dir(fs.path().join("out-bucket")).unwrap();
     let uploader = fake_s3_client(fs.path());
-    let body = demo_trace_gz();
+    let body = mini_trace_gz();
     seed_fleet(&uploader, "src-bucket", &body).await; // host-a..d × 5 min = 20
 
     let base = start_agg_server(fs.path(), "src-bucket", "out-bucket", 60).await;
@@ -877,7 +961,7 @@ async fn byoc_writes_output_to_configured_bucket_not_source() {
     std::fs::create_dir(fs.path().join("out-bucket")).unwrap();
 
     let uploader = fake_s3_client(fs.path());
-    let body = demo_trace_gz();
+    let body = mini_trace_gz();
     seed_fleet(&uploader, "src-bucket", &body).await; // 20 segments
 
     let base = start_byoc_server(fs.path(), "src-bucket", Some("out-bucket"), 60).await;
@@ -913,7 +997,7 @@ async fn byoc_without_output_bucket_writes_to_source() {
     std::fs::create_dir(fs.path().join("src-bucket")).unwrap();
 
     let uploader = fake_s3_client(fs.path());
-    let body = demo_trace_gz();
+    let body = mini_trace_gz();
     seed_fleet(&uploader, "src-bucket", &body).await;
 
     let base = start_byoc_server(fs.path(), "src-bucket", None, 60).await;
