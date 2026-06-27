@@ -396,6 +396,35 @@
                 position: relative;
                 overflow: hidden;
             }
+            .foldable-panel.is-collapsed {
+                height: 24px !important;
+                cursor: pointer;
+            }
+            .foldable-panel.is-collapsed canvas {
+                display: none !important;
+            }
+            .foldable-panel .chart-label {
+                cursor: pointer;
+                user-select: none;
+            }
+            .foldable-panel .chart-label::before {
+                content: "▼";
+                color: #6c63ff;
+                display: inline-block;
+                font-size: 0.85em;
+                margin-right: 7px;
+                transform: translateY(-1px);
+            }
+            .foldable-panel.is-collapsed .chart-label::before {
+                content: "▶";
+            }
+            .foldable-panel.is-collapsed .chart-label {
+                max-height: 18px !important;
+                overflow: hidden !important;
+            }
+            .foldable-panel.is-collapsed .panel-expanded-label {
+                display: none !important;
+            }
             #span-panel .chart-label {
                 position: absolute;
                 top: 4px;
@@ -572,6 +601,28 @@
                 z-index: 2;
             }
             #custom-events-panel canvas {
+                width: 100%;
+                height: 100%;
+                display: block;
+            }
+            #cpu-panel {
+                display: none;
+                height: 92px;
+                background: #111b2e;
+                border-top: 1px solid #333;
+                flex-shrink: 0;
+                position: relative;
+                overflow: hidden;
+            }
+            #cpu-panel .chart-label {
+                position: absolute;
+                top: 4px;
+                left: 8px;
+                font-size: 0.75em;
+                color: #888;
+                z-index: 2;
+            }
+            #cpu-panel canvas {
                 width: 100%;
                 height: 100%;
                 display: block;
@@ -837,7 +888,7 @@
                     <button id="btn-span-clear-names" style="font-size:0.8em;display:none">✕ Clear</button>
                     <span id="span-legend-items"></span>
                 </div>
-                <div id="span-panel">
+                <div id="span-panel" class="foldable-panel is-collapsed" data-panel-key="spans">
                     <div class="chart-label" id="span-panel-label">Spans</div>
                     <span id="span-panel-info" style="position:absolute;top:4px;right:12px;font-size:0.75em;color:#aaa;z-index:2;pointer-events:none"></span>
                     <canvas id="span-panel-canvas"></canvas>
@@ -846,22 +897,25 @@
                     <button id="btn-ce-clear-names" style="font-size:0.8em;display:none">✕ Clear</button>
                     <span id="ce-legend-items"></span>
                 </div>
-                <div id="custom-events-panel" style="display:none">
+                <div id="custom-events-panel" class="foldable-panel is-collapsed" data-panel-key="events" style="display:none">
                     <div class="chart-label" id="ce-panel-label">Events</div>
                     <span id="ce-panel-info" style="position:absolute;top:4px;right:12px;font-size:0.75em;color:#aaa;z-index:2;pointer-events:none"></span>
                     <canvas id="ce-panel-canvas"></canvas>
+                </div>
+                <div id="cpu-panel" class="foldable-panel is-collapsed" data-panel-key="cpu" style="display:none">
+                    <div class="chart-label" id="cpu-panel-label">CPU Usage</div>
+                    <span id="cpu-panel-info" style="position:absolute;top:4px;right:12px;font-size:0.75em;color:#aaa;z-index:2;pointer-events:none"></span>
+                    <canvas id="cpu-panel-canvas"></canvas>
                 </div>
                 <div id="task-detail">
                     <span class="chart-label" id="task-detail-label">Task Detail</span>
                     <span id="task-detail-status" style="position:absolute;top:4px;right:12px;font-size:0.75em;color:#aaa;z-index:2"></span>
                     <canvas id="task-detail-canvas"></canvas>
                 </div>
-                <div id="queue-chart" tabindex="0" aria-label="Queue depth chart">
-                    <span class="chart-label" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
-                        <span style="font-weight:600">Queue Depth</span>
-                        <span style="display:flex;align-items:center;gap:4px"><span style="width:12px;height:8px;background:rgba(79,195,247,0.5);border:1px solid #4fc3f7;display:inline-block"></span>Global</span>
-                        <span style="display:flex;align-items:center;gap:4px"><span style="width:12px;height:2px;background:#ff8a65;display:inline-block"></span>Max local</span>
-                        <span style="display:flex;align-items:center;gap:4px"><span style="width:12px;height:2px;background:#81c784;display:inline-block"></span>Active tasks</span>
+                <div id="queue-chart" class="foldable-panel is-collapsed" data-panel-key="queue" tabindex="0" aria-label="Queue depth chart">
+                    <span class="chart-label" style="font-weight:600;white-space:nowrap">Queue Depth<span class="panel-expanded-label" style="display:inline-flex;align-items:center;gap:4px;margin-left:10px;font-weight:400"><span style="width:12px;height:8px;background:rgba(79,195,247,0.5);border:1px solid #4fc3f7;display:inline-block"></span>Global</span>
+                        <span class="panel-expanded-label" style="display:inline-flex;align-items:center;gap:4px;margin-left:10px;font-weight:400"><span style="width:12px;height:2px;background:#ff8a65;display:inline-block"></span>Max local</span>
+                        <span class="panel-expanded-label" style="display:inline-flex;align-items:center;gap:4px;margin-left:10px;font-weight:400"><span style="width:12px;height:2px;background:#81c784;display:inline-block"></span>Active tasks</span>
                     </span>
                     <div id="info-panel"></div>
                     <canvas id="queue-canvas"></canvas>
@@ -924,11 +978,12 @@
         <script src="creds.js"></script>
         <script src="trace_analysis.js"></script>
         <script src="format.js"></script>
+        <script src="flamegraph_export.js"></script>
         <script src="flamegraph.js"></script>
         <script src="panel_layout.js"></script>
         <script>
             const { EVENT_TYPES: ET, parseTrace, formatFrame, symbolizeChain, deduplicateSamples } = TraceParser;
-            const { buildWorkerSpans, attachCpuSamples, buildActiveTaskTimeline, computeSchedulingDelays, filterPointsOfInterest, buildSpanData, collectDescendants, selectSpanRenderSet, enclosingSpans, computeSpanLayout, getTraceTimeRange, hasCpuProfileSamples } = TraceAnalysis;
+            const { buildWorkerSpans, attachCpuSamples, buildActiveTaskTimeline, computeSchedulingDelays, filterPointsOfInterest, buildSpanData, collectDescendants, selectSpanRenderSet, enclosingSpans, computeSpanLayout, getTraceTimeRange, hasCpuProfileSamples, buildProcessCpuUsageSeries } = TraceAnalysis;
 
             function esc(s) {
                 return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -1189,7 +1244,17 @@
             let queueSamples = [];
             // Per-worker local queue samples
             let workerQueueSamples = {};
+            // All local queue samples merged into one sorted timeline, built once at load time.
+            // Each entry: { t, w, local }. Used by renderQueueChart to avoid per-frame work.
+            let mergedLocalSamples = [];
             let maxLocalQueue = 1;
+            let processCpuUsage = {
+                samples: [],
+                intervals: [],
+                availableParallelism: null,
+                maxCores: 0,
+                avgCores: 0,
+            };
             // Points of interest for navigation
             let pointsOfInterest = [];
             let currentPoiIndex = -1;
@@ -1274,6 +1339,7 @@
             //   • Timeline header  (renderTimeline)
             //   • Worker lanes     (renderLane)           — uses DOM flex instead of canvas offset
             //   • Span panel       (renderSpanPanel)
+            //   • CPU panel        (renderProcessCpuPanel)
             //   • Task detail      (renderTaskDetail)
             //   • Queue chart      (renderQueueChart)
             //
@@ -1299,6 +1365,84 @@
             const taskDetailPanel = document.getElementById("task-detail");
             const clearRangeBtn = document.getElementById("btn-clear-range");
             const tooltip = document.getElementById("tooltip");
+
+            const FOLDABLE_PANEL_KEYS = ["spans", "events", "cpu", "queue"];
+            const PANEL_COLLAPSE_STORAGE_PREFIX = "dial9.viewer.panelCollapsed.";
+            const viewerStorageFallback = new Map();
+
+            function viewerStorageGet(key) {
+                try {
+                    return localStorage.getItem(key);
+                } catch {
+                    return viewerStorageFallback.has(key) ? viewerStorageFallback.get(key) : null;
+                }
+            }
+
+            function viewerStorageSet(key, value) {
+                const stringValue = String(value);
+                try {
+                    localStorage.setItem(key, stringValue);
+                } catch {
+                    viewerStorageFallback.set(key, stringValue);
+                }
+            }
+
+            function panelCollapseStorageKey(key) {
+                return PANEL_COLLAPSE_STORAGE_PREFIX + key;
+            }
+
+            function isPanelCollapsed(key) {
+                return viewerStorageGet(panelCollapseStorageKey(key)) !== "expanded";
+            }
+
+            function syncFoldablePanel(key) {
+                const panel = document.querySelector(`[data-panel-key="${key}"]`);
+                if (!panel) return;
+                const collapsed = isPanelCollapsed(key);
+                panel.classList.toggle("is-collapsed", collapsed);
+                const label = panel.querySelector(".chart-label");
+                if (label) label.setAttribute("aria-expanded", collapsed ? "false" : "true");
+
+                if (key === "spans") {
+                    document.getElementById("span-legend").style.display =
+                        !collapsed && panel.style.display !== "none" && allSpans.length > 0 ? "block" : "none";
+                } else if (key === "events") {
+                    document.getElementById("ce-legend").style.display =
+                        !collapsed && panel.style.display !== "none" && genericCustomEvents.length > 0 ? "block" : "none";
+                }
+            }
+
+            function syncFoldablePanels() {
+                for (const key of FOLDABLE_PANEL_KEYS) syncFoldablePanel(key);
+            }
+
+            function setPanelCollapsed(key, collapsed, { redraw = true } = {}) {
+                viewerStorageSet(panelCollapseStorageKey(key), collapsed ? "collapsed" : "expanded");
+                syncFoldablePanel(key);
+                if (redraw) renderAll();
+            }
+
+            for (const panel of document.querySelectorAll(".foldable-panel")) {
+                const key = panel.dataset.panelKey;
+                const label = panel.querySelector(".chart-label");
+                if (label) {
+                    label.setAttribute("role", "button");
+                    label.setAttribute("tabindex", "0");
+                    label.addEventListener("keydown", (e) => {
+                        if (e.key !== "Enter" && e.key !== " ") return;
+                        e.preventDefault();
+                        setPanelCollapsed(key, !isPanelCollapsed(key));
+                    });
+                }
+                panel.addEventListener("click", (e) => {
+                    if (e.target.closest(".kv-copy")) return;
+                    if (!isPanelCollapsed(key) && !e.target.closest(".chart-label")) return;
+                    e.stopPropagation();
+                    setPanelCollapsed(key, !isPanelCollapsed(key));
+                });
+            }
+            syncFoldablePanels();
+
             // Position the (already-populated, display:block) tooltip near the
             // cursor, clamped to the viewport on both axes. Flips above the cursor
             // when it would spill off the bottom. Call after setting innerHTML.
@@ -1383,8 +1527,10 @@
                 relatedExpand = {};
                 relatedItems = [];
                 hoveredWakerTaskId = null;
+                processCpuUsage = { samples: [], intervals: [], availableParallelism: null, maxCores: 0, avgCores: 0 };
                 hideStackPopup();
                 taskDetailPanel.style.display = "none";
+                document.getElementById("cpu-panel").style.display = "none";
                 schedPanelTimeRange = null;
 
                 // Default: clear the URL range only when replacing a visible
@@ -1770,9 +1916,9 @@
 
             function processTrace() {
                 const evts = trace.events;
-                const timeRange = getTraceTimeRange(evts, trace.cpuSamples);
+                const timeRange = getTraceTimeRange(evts, trace.cpuSamples, trace.customEvents);
                 if (!timeRange) {
-                    alert("No runtime events or CPU profile samples in trace");
+                    alert("No runtime events, CPU profile samples, or process resource usage samples in trace");
                     return false;
                 }
 
@@ -1812,6 +1958,25 @@
                 workerQueueSamples = spanResult.workerQueueSamples;
                 maxLocalQueue = spanResult.maxLocalQueue;
 
+                // Build merged timeline once — k-way merge of already-sorted per-worker arrays.
+                // renderQueueChart binary-searches into this instead of rebuilding per frame.
+                {
+                    const cursors = workerIds
+                        .filter(w => workerQueueSamples[w]?.length)
+                        .map(w => ({ w, samples: workerQueueSamples[w], idx: 0 }));
+                    mergedLocalSamples = [];
+                    while (true) {
+                        let best = null;
+                        for (const c of cursors) {
+                            if (c.idx >= c.samples.length) continue;
+                            if (best === null || c.samples[c.idx].t < best.samples[best.idx].t) best = c;
+                        }
+                        if (best === null) break;
+                        const s = best.samples[best.idx++];
+                        mergedLocalSamples.push({ t: s.t, w: best.w, local: s.local });
+                    }
+                }
+
                 // Build active task count timeline from TaskSpawn/TaskTerminate
                 const atResult = buildActiveTaskTimeline(trace.taskSpawnTimes, trace.taskTerminateTimes);
                 activeTaskSamples = atResult.activeTaskSamples;
@@ -1823,6 +1988,17 @@
 
                 schedDelays = computeSchedulingDelays(workerSpans, workerIds, wakesByTask);
                 console.log(`Found ${Object.keys(wakesByTask).length} tasks with wake events, ${schedDelays.length} scheduling delays`);
+
+                const availableParallelism = trace.segmentMetadata?.get("process.available_parallelism") ?? null;
+                processCpuUsage = buildProcessCpuUsageSeries(trace.customEvents || [], availableParallelism);
+                const cpuPanel = document.getElementById("cpu-panel");
+                cpuPanel.style.display = processCpuUsage.intervals.length > 0 ? "block" : "none";
+                if (processCpuUsage.intervals.length > 0) {
+                    const cap = processCpuUsage.availableParallelism != null
+                        ? `, available_parallelism=${processCpuUsage.availableParallelism}`
+                        : ", available_parallelism=unknown";
+                    console.log(`Process CPU usage: ${processCpuUsage.intervals.length} intervals${cap}`);
+                }
 
                 // Build span data from custom events.  Reset span state
                 // unconditionally here so a trace with no spans doesn't
@@ -1919,6 +2095,7 @@
                         cePanel.style.display = "none";
                     }
                 }
+                syncFoldablePanels();
 
                 return true;
             }
@@ -2097,6 +2274,7 @@
                         });
                     }
                 }
+                syncFoldablePanels();
                 // Show/hide sched panel button based on whether sched events exist
                 let hasSchedEvents = false;
                 for (const w of workerIds) {
@@ -2446,6 +2624,7 @@
                 window.sharedVisibleMaxQ = maxVisibleQ;
                 if (prof) _t = _profMark(prof, "queueMax", _t);
 
+                syncFoldablePanels();
                 renderTimeline(drawW - scrollbarW);
                 if (prof) _t = _profMark(prof, "timeline", _t);
                 for (const w of workerIds) renderLane(w, drawW);
@@ -2453,6 +2632,7 @@
                 renderSpanPanel(scrollbarW);
                 if (prof) _t = _profMark(prof, `spanPanel(allSpans=${allSpans.length})`, _t);
                 renderCustomEventsPanel(scrollbarW);
+                renderProcessCpuPanel(scrollbarW);
                 if (prof) _t = _profMark(prof, `customEvents(${genericCustomEvents.length})`, _t);
                 renderTaskDetail(scrollbarW);
                 if (prof) _t = _profMark(prof, "taskDetail", _t);
@@ -3036,11 +3216,31 @@
             // Span panel layout: [{spans, representative, x1, x2, y, h}] — set by renderSpanPanel, used by hit testing
             let spanPanelHits = [];
 
+            function updateSpanPanelLabel() {
+                const label = document.getElementById("span-panel-label");
+                if (focusedSpanId != null) {
+                    const meta = spanMeta.get(focusedSpanId);
+                    const focusedSpan = allSpans.find(s => s.spanId === focusedSpanId);
+                    const fields = focusedSpan?.fields || meta?.fields || {};
+                    const name = meta?.spanName || focusedSpan?.spanName || "Span";
+                    let html = `<div style="color:#ccc;margin-bottom:3px">${esc(name)}</div>`;
+                    for (const [k, v] of Object.entries(fields)) {
+                        html += kvRow(k, formatFieldValue(v));
+                    }
+                    label.innerHTML = html;
+                } else {
+                    label.textContent = "Spans";
+                }
+            }
+
             function renderSpanPanel(scrollbarW) {
                 const panel = document.getElementById("span-panel");
                 if (panel.style.display === "none") return;
                 const c = document.getElementById("span-panel-canvas");
                 const ph = 120;
+                const info = document.getElementById("span-panel-info");
+                spanPanelHits = [];
+                updateSpanPanelLabel();
 
                 // Shared time-panel layout: keeps the draw area aligned with
                 // the worker lanes and task detail.  See TIME-PANEL LAYOUT
@@ -3051,11 +3251,10 @@
                 // label are obscured by design (confirmed in design review).
                 const layout = timePanelLayout(panel, scrollbarW);
                 const { pw, drawW, nsToPanelX, nsToPanelXClamped } = layout;
-                const ctx = layout.resizeCanvas(c, ph);
-                ctx.clearRect(0, 0, pw, ph);
-                spanPanelHits = [];
-
-                if (drawW <= 0) return;
+                if (drawW <= 0) {
+                    info.textContent = "";
+                    return;
+                }
 
                 // 1. Filter to visible + matching spans
                 const visibleSpans = [];
@@ -3066,6 +3265,10 @@
                 }
 
                 if (visibleSpans.length === 0) {
+                    info.textContent = "";
+                    if (isPanelCollapsed("spans")) return;
+                    const ctx = layout.resizeCanvas(c, ph);
+                    ctx.clearRect(0, 0, pw, ph);
                     ctx.fillStyle = "#555";
                     ctx.font = "12px sans-serif";
                     ctx.fillText("No spans in view" + (spanFilter ? ` (filter: "${spanFilter}")` : ""), LABEL_W + 10, 60);
@@ -3080,6 +3283,10 @@
                 });
 
                 if (renderSet.length === 0) {
+                    info.textContent = "0 spans · 0 clusters";
+                    if (isPanelCollapsed("spans")) return;
+                    const ctx = layout.resizeCanvas(c, ph);
+                    ctx.clearRect(0, 0, pw, ph);
                     ctx.fillStyle = "#555";
                     ctx.font = "12px sans-serif";
                     ctx.fillText("No root spans in view", LABEL_W + 10, 60);
@@ -3098,6 +3305,13 @@
                     clusterXPx: CLUSTER_X,
                     barH: BAR_H,
                 });
+
+                const focusNote = focusedSpanId != null ? " (focused)" : "";
+                info.textContent = `${renderSet.length} spans · ${spanLayout.buckets.length} clusters${focusNote}`;
+                if (isPanelCollapsed("spans")) return;
+
+                const ctx = layout.resizeCanvas(c, ph);
+                ctx.clearRect(0, 0, pw, ph);
 
                 // When focused: pin parent at top, children packed right below
                 if (focusedSpanId != null) {
@@ -3180,26 +3394,6 @@
                         ctx.fillText(formatHumanDuration(dur), LABEL_W + 2, y - 2);
                     }
                 }
-
-                const info = document.getElementById("span-panel-info");
-                const focusNote = focusedSpanId != null ? " (focused)" : "";
-                info.textContent = `${renderSet.length} spans · ${spanLayout.buckets.length} clusters${focusNote}`;
-
-                // Update left label: show focused span's fields or default "Spans"
-                const label = document.getElementById("span-panel-label");
-                if (focusedSpanId != null) {
-                    const meta = spanMeta.get(focusedSpanId);
-                    const focusedSpan = allSpans.find(s => s.spanId === focusedSpanId);
-                    const fields = focusedSpan?.fields || meta?.fields || {};
-                    const name = meta?.spanName || focusedSpan?.spanName || "Span";
-                    let html = `<div style="color:#ccc;margin-bottom:3px">${esc(name)}</div>`;
-                    for (const [k, v] of Object.entries(fields)) {
-                        html += kvRow(k, formatFieldValue(v));
-                    }
-                    label.innerHTML = html;
-                } else {
-                    label.textContent = "Spans";
-                }
             }
 
             function renderCustomEventsPanel(scrollbarW) {
@@ -3207,14 +3401,15 @@
                 if (panel.style.display === "none") return;
                 const c = document.getElementById("ce-panel-canvas");
                 const ph = 40;
+                const info = document.getElementById("ce-panel-info");
+                cePanelHits = [];
 
                 const layout = timePanelLayout(panel, scrollbarW);
                 const { pw, drawW, nsToPanelX, nsToPanelXClamped } = layout;
-                const ctx = layout.resizeCanvas(c, ph);
-                ctx.clearRect(0, 0, pw, ph);
-                cePanelHits = [];
-
-                if (drawW <= 0) return;
+                if (drawW <= 0) {
+                    info.textContent = "";
+                    return;
+                }
 
                 // Filter to visible events matching name selection
                 const visible = [];
@@ -3225,10 +3420,13 @@
                 }
 
                 if (visible.length === 0) {
+                    info.textContent = "";
+                    if (isPanelCollapsed("events")) return;
+                    const ctx = layout.resizeCanvas(c, ph);
+                    ctx.clearRect(0, 0, pw, ph);
                     ctx.fillStyle = "#555";
                     ctx.font = "12px sans-serif";
                     ctx.fillText(genericCustomEvents.length === 0 ? "No custom events" : "No events in view", LABEL_W + 10, 24);
-                    document.getElementById("ce-panel-info").textContent = "";
                     return;
                 }
 
@@ -3241,6 +3439,12 @@
                     if (!bucket) { bucket = []; buckets.set(px, bucket); }
                     bucket.push(ev);
                 }
+
+                info.textContent = `${visible.length} events · ${buckets.size} markers`;
+                if (isPanelCollapsed("events")) return;
+
+                const ctx = layout.resizeCanvas(c, ph);
+                ctx.clearRect(0, 0, pw, ph);
 
                 for (const [px, events] of buckets) {
                     const rep = events[0];
@@ -3288,8 +3492,140 @@
                     cePanelHits.push({ events, x: px - hitW / 2, y, w: hitW, h, taskId });
                 }
                 ctx.globalAlpha = 1.0;
+            }
 
-                document.getElementById("ce-panel-info").textContent = `${visible.length} events · ${buckets.size} markers`;
+            function fmtCpuCores(value) {
+                if (!Number.isFinite(value)) return "-";
+                return value
+                    .toFixed(value >= 10 ? 1 : 2)
+                    .replace(/(\.\d*?)0+$/, "$1")
+                    .replace(/\.$/, "");
+            }
+
+            function fmtCpuPercent(value) {
+                if (!Number.isFinite(value)) return "-";
+                return `${value.toFixed(1)}%`;
+            }
+
+            function visibleCpuStats() {
+                let maxCores = 0;
+                let totalOverlapNs = 0;
+                let weightedCoresNs = 0;
+                for (const interval of processCpuUsage.intervals) {
+                    if (interval.end < viewStart) continue;
+                    if (interval.start > viewEnd) break;
+                    const overlap = Math.min(interval.end, viewEnd) - Math.max(interval.start, viewStart);
+                    if (!(overlap > 0)) continue;
+                    if (interval.cores > maxCores) maxCores = interval.cores;
+                    totalOverlapNs += overlap;
+                    weightedCoresNs += interval.cores * overlap;
+                }
+                const avgCores = totalOverlapNs > 0 ? weightedCoresNs / totalOverlapNs : 0;
+                return { avgCores, maxCores };
+            }
+
+            function renderProcessCpuPanel(scrollbarW) {
+                const panel = document.getElementById("cpu-panel");
+                if (panel.style.display === "none") return;
+                const c = document.getElementById("cpu-panel-canvas");
+                const ph = 92;
+                const stats = visibleCpuStats();
+                const capacity = processCpuUsage.availableParallelism;
+                const avgPct = capacity != null ? Math.min(100, (stats.avgCores / capacity) * 100) : null;
+                const pctText = avgPct != null ? ` · avg ${fmtCpuPercent(avgPct)}` : "";
+                document.getElementById("cpu-panel-info").textContent =
+                    `avg ${fmtCpuCores(stats.avgCores)} cores${pctText} · max ${fmtCpuCores(stats.maxCores)}`;
+                if (isPanelCollapsed("cpu")) return;
+
+                const layout = timePanelLayout(panel, scrollbarW);
+                const { pw, drawW, nsToPanelXClamped } = layout;
+                const ctx = layout.resizeCanvas(c, ph);
+                ctx.clearRect(0, 0, pw, ph);
+                ctx.fillStyle = "#111b2e";
+                ctx.fillRect(0, 0, pw, ph);
+                if (drawW <= 0) return;
+
+                const scaleMax = Math.max(1, stats.maxCores, capacity || 0);
+                const chartTop = 20;
+                const chartH = ph - 28;
+
+                ctx.fillStyle = "#667";
+                ctx.font = "10px monospace";
+                ctx.textAlign = "right";
+                ctx.fillText(fmtCpuCores(scaleMax), LABEL_W - 6, chartTop + 9);
+                ctx.fillText("0", LABEL_W - 6, chartTop + chartH);
+
+                ctx.strokeStyle = "rgba(255,255,255,0.07)";
+                ctx.lineWidth = 1;
+                for (let i = 1; i <= 3; i++) {
+                    const y = chartTop + (chartH * i) / 4;
+                    ctx.beginPath();
+                    ctx.moveTo(LABEL_W, y);
+                    ctx.lineTo(LABEL_W + drawW, y);
+                    ctx.stroke();
+                }
+
+                if (capacity != null) {
+                    const capY = chartTop + chartH - (capacity / scaleMax) * chartH;
+                    ctx.strokeStyle = "rgba(255,207,153,0.65)";
+                    ctx.setLineDash([4, 3]);
+                    ctx.beginPath();
+                    ctx.moveTo(LABEL_W, capY);
+                    ctx.lineTo(LABEL_W + drawW, capY);
+                    ctx.stroke();
+                    ctx.setLineDash([]);
+                    ctx.fillStyle = "#ffcf99";
+                    ctx.textAlign = "left";
+                    ctx.fillText(`${fmtCpuCores(capacity)} core capacity`, LABEL_W + 6, Math.max(12, capY - 4));
+                }
+
+                for (const interval of processCpuUsage.intervals) {
+                    if (interval.end < viewStart) continue;
+                    if (interval.start > viewEnd) break;
+                    const x1 = nsToPanelXClamped(interval.start);
+                    const x2 = nsToPanelXClamped(interval.end);
+                    const w = Math.max(1, x2 - x1);
+                    const y = chartTop + chartH - (interval.cores / scaleMax) * chartH;
+                    const h = chartTop + chartH - y;
+                    const load = capacity != null
+                        ? Math.min(1, interval.cores / capacity)
+                        : Math.min(1, interval.cores / scaleMax);
+                    const r = Math.round(79 + 176 * load);
+                    const g = Math.round(195 - 80 * load);
+                    const b = Math.round(247 - 150 * load);
+                    ctx.fillStyle = `rgba(${r}, ${g}, ${b}, 0.42)`;
+                    ctx.fillRect(x1, y, w, h);
+                    ctx.strokeStyle = `rgba(${r}, ${g}, ${b}, 0.9)`;
+                    ctx.beginPath();
+                    ctx.moveTo(x1, y);
+                    ctx.lineTo(x1 + w, y);
+                    ctx.stroke();
+                }
+
+            }
+
+            function findProcessCpuIntervalAt(ns) {
+                const intervals = processCpuUsage.intervals;
+                let lo = 0, hi = intervals.length - 1;
+                while (lo <= hi) {
+                    const mid = (lo + hi) >> 1;
+                    const interval = intervals[mid];
+                    if (ns < interval.start) hi = mid - 1;
+                    else if (ns > interval.end) lo = mid + 1;
+                    else return interval;
+                }
+                return null;
+            }
+
+            function cpuIntervalTooltipHtml(interval) {
+                const capacity = processCpuUsage.availableParallelism;
+                let html = `<span class="label">Window:</span> <span class="value">${formatHumanDuration(interval.wallDeltaNs)}</span>`;
+                html += `<br><span class="label">CPU time:</span> <span class="value">${formatHumanDuration(interval.cpuDeltaNs)}</span>`;
+                html += `<br><span class="label">Cores:</span> <span class="value">${fmtCpuCores(interval.cores)}</span>`;
+                if (capacity != null) {
+                    html += `<br><span class="label">Total CPU:</span> <span class="value">${fmtCpuPercent(interval.totalPercent)}</span>`;
+                }
+                return html;
             }
 
             // Find the bucket at a given (x, y) position in the span panel canvas
@@ -3837,6 +4173,36 @@
                 renderAll();
             });
 
+            document.getElementById("cpu-panel-canvas").addEventListener("mousemove", (e) => {
+                const c = document.getElementById("cpu-panel-canvas");
+                const panel = document.getElementById("cpu-panel");
+                const rect = c.getBoundingClientRect();
+                const mx = e.clientX - rect.left;
+                const scrollbarW = lanesContainer.offsetWidth - lanesContainer.clientWidth;
+                const layout = timePanelLayout(panel, scrollbarW);
+
+                let hit = null;
+                if (mx >= LABEL_W && mx <= LABEL_W + layout.drawW) {
+                    const ns = layout.panelXToNs(mx);
+                    mouseNs = ns;
+                    hit = findProcessCpuIntervalAt(ns);
+                }
+
+                c.style.cursor = hit ? "crosshair" : "default";
+                if (hit) {
+                    tooltip.innerHTML = cpuIntervalTooltipHtml(hit);
+                    tooltip.style.display = "block";
+                    placeTooltip(e);
+                } else {
+                    tooltip.style.display = "none";
+                }
+
+            });
+            document.getElementById("cpu-panel-canvas").addEventListener("mouseleave", () => {
+                tooltip.style.display = "none";
+                document.getElementById("cpu-panel-canvas").style.cursor = "default";
+            });
+
             /**
              * Render the per-task detail panel (polls, wake→poll delays,
              * lifespan) for the currently selected task.
@@ -4214,6 +4580,7 @@
             function renderQueueChart(drawW, scrollbarW) {
                 const c = queueCanvas;
                 const parent = c.parentElement;
+                if (isPanelCollapsed("queue")) return;
                 const dpr = devicePixelRatio || 1;
                 const pw = parent.clientWidth,
                     ph = parent.clientHeight;
@@ -4258,36 +4625,27 @@
                         if (s.global > b.maxGlobal) b.maxGlobal = s.global;
                     }
                 }
-                // Build sorted timeline of all local queue changes
-                const allLocalSamples = [];
-                for (const w of workerIds) {
-                    const wSamples = workerQueueSamples[w] || [];
-                    if (wSamples.length === 0) continue;
-                    const startIdx = Math.max(0, lowerBound(wSamples, viewStart) - 1);
-                    for (let i = startIdx; i < wSamples.length; i++) {
-                        const s = wSamples[i];
-                        if (s.t > viewEnd) break;
-                        if (s.t >= viewStart) {
-                            allLocalSamples.push({ t: s.t, w, local: s.local });
-                        }
-                    }
-                }
-                allLocalSamples.sort((a, b) => a.t - b.t);
-
-                // Single pass: maintain per-worker state and compute max for each bucket
+                // Single pass over pre-merged sorted timeline (built once at load time).
+                // Start one sample before viewStart to seed workerState correctly.
                 const workerState = {};
                 for (const w of workerIds) workerState[w] = 0;
-                let sampleIdx = 0;
+                // Seed workerState from the sample just before viewStart so the first bucket
+                // has correct per-worker values even if no samples fall inside the view window.
+                const mergeStart = Math.max(0, lowerBound(mergedLocalSamples, viewStart) - 1);
+                for (let i = mergeStart; i < mergedLocalSamples.length; i++) {
+                    const s = mergedLocalSamples[i];
+                    if (s.t >= viewStart) break;
+                    workerState[s.w] = s.local;
+                }
+                let sampleIdx = Math.max(mergeStart, lowerBound(mergedLocalSamples, viewStart));
 
                 for (let bi = 0; bi < numBuckets; bi++) {
                     const bucketEnd = viewStart + ((bi + 1) / numBuckets) * viewDur;
 
-                    // Apply all samples up to this bucket's end
-                    while (sampleIdx < allLocalSamples.length && allLocalSamples[sampleIdx].t < bucketEnd) {
-                        const s = allLocalSamples[sampleIdx];
+                    while (sampleIdx < mergedLocalSamples.length && mergedLocalSamples[sampleIdx].t < bucketEnd) {
+                        const s = mergedLocalSamples[sampleIdx++];
                         workerState[s.w] = s.local;
                         buckets[bi].hasData = true;
-                        sampleIdx++;
                     }
 
                     // Max across all workers
@@ -5879,6 +6237,13 @@
                         scheduleCrosshairRedraw();
                         return;
                     }
+                    // CPU panel owns its interval tooltip.
+                    if (e.target.closest && e.target.closest("#cpu-panel")) {
+                        mouseNs = eventToTimelineNs(e.clientX);
+                        lanesContainer.style.cursor = "";
+                        scheduleCrosshairRedraw();
+                        return;
+                    }
                     const rect = lanesContainer.getBoundingClientRect();
                     const mouseX = e.clientX - rect.left - LABEL_W;
                     const mouseY = e.clientY - rect.top;
@@ -6237,7 +6602,11 @@
                 if (wasHidden) widenSidebarForFlamegraph();
                 if (wasHidden && trace) requestAnimationFrame(renderAll);
                 requestAnimationFrame(() => {
-                    fgInstance.setData(samples, trace.callframeSymbols, fgOpts);
+                    // fgOpts may carry its own exportTitle/exportFormatValue (e.g. heap
+                    // views); fall back to the sidebar `title` only when it doesn't.
+                    const exportOpts = Object.assign({}, fgOpts);
+                    if (exportOpts.exportTitle == null) exportOpts.exportTitle = title;
+                    fgInstance.setData(samples, trace.callframeSymbols, exportOpts);
                     fgInstance.resize();
                 });
             }
@@ -6387,6 +6756,12 @@
                     return {
                         workerLabel: mode === "bytes" ? "Worker thread allocations (by bytes)" : "Worker thread allocations (by count)",
                         offworkerLabel: mode === "bytes" ? "Non-worker thread allocations (by bytes)" : "Non-worker thread allocations (by count)",
+                        exportTitle: `Heap flamegraph (${mode === "bytes" ? "by bytes" : "by count"})${durStr}`,
+                        // Heap weights are bytes (or alloc counts), not CPU samples, so
+                        // the exported SVG must label them the same way the canvas does.
+                        exportFormatValue: mode === "bytes"
+                            ? (count) => `~${fmtB(count)}`
+                            : (count) => `~${Math.round(count).toLocaleString()} allocs`,
                         formatCount(count, total, self, treeNode) {
                             const pct = ((count / total) * 100).toFixed(1);
                             if (mode === "bytes") {
@@ -6522,7 +6897,9 @@
 
                 // Give the container a frame to get its layout, then render
                 requestAnimationFrame(() => {
-                    fgInstance.setData(samples, trace.callframeSymbols);
+                    fgInstance.setData(samples, trace.callframeSymbols, {
+                        exportTitle: `CPU flamegraph — ${durMs}ms selected`,
+                    });
                     fgInstance.resize();
                 });
 
@@ -6558,6 +6935,7 @@
             let qcDragging = false, qcDragStartX = 0, qcDragStartNs = 0, qcDragEndNs = 0, qcDragMoved = false;
 
             document.getElementById("queue-chart").addEventListener("mousedown", (e) => {
+                if (isPanelCollapsed("queue")) return;
                 if (!trace || !activeTaskSamples.length) return;
                 qcDragging = true;
                 qcDragMoved = false;

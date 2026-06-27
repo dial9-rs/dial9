@@ -25,7 +25,6 @@ fn dummy_s3(s3_root: &std::path::Path) -> (S3Config, aws_sdk_s3::Client) {
         .bucket("dummy-bucket")
         .service_name("test")
         .instance_path("test")
-        .boot_id("test")
         .region("us-east-1")
         .build();
     (s3_config, fake_s3_client(s3_root))
@@ -117,7 +116,6 @@ fn end_to_end_trace_to_s3_roundtrip() {
         .prefix("traces")
         .service_name("test-svc")
         .instance_path("us-east-1/test-host")
-        .boot_id("test-boot-id")
         .region("us-east-1")
         .build();
 
@@ -296,7 +294,6 @@ fn region_auto_detection_corrects_wrong_client_region() {
         .prefix("traces")
         .service_name("test-svc")
         .instance_path("test-host")
-        .boot_id("test-boot-id")
         .build();
 
     let mut builder = tokio::runtime::Builder::new_multi_thread();
@@ -409,7 +406,6 @@ fn stress_test_all_segments_uploaded_and_valid() {
         .prefix("traces")
         .service_name("stress-svc")
         .instance_path("test-host")
-        .boot_id("stress-boot")
         .region("us-east-1")
         .build();
 
@@ -623,7 +619,6 @@ fn graceful_shutdown_completes_when_s3_hangs() {
         .prefix("traces")
         .service_name("test-svc")
         .instance_path("test-host")
-        .boot_id("test-boot")
         .region("us-east-1")
         .build();
 
@@ -694,7 +689,6 @@ fn stress_test_with_s3_failures() {
         .prefix("traces")
         .service_name("flaky-svc")
         .instance_path("test-host")
-        .boot_id("flaky-boot")
         .region("us-east-1")
         .build();
 
@@ -777,7 +771,6 @@ fn permanently_broken_s3_produces_failure_metrics() {
         .prefix("traces")
         .service_name("test-svc")
         .instance_path("test-host")
-        .boot_id("test-boot")
         .region("us-east-1")
         .build();
 
@@ -866,7 +859,6 @@ fn dump_trigger_uploads_segments_and_writes_manifest() {
         .prefix("traces")
         .service_name("dump-svc")
         .instance_path("test-host")
-        .boot_id("dump-boot")
         .region("us-east-1")
         .build();
 

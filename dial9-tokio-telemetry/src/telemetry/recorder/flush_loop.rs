@@ -118,9 +118,11 @@ pub(super) fn run_flush_loop<M: WriterMode>(
     const SELF_DRAIN_INTERVAL: u64 = 200;
     let mut events_written: u64 = 0;
 
-    // Snapshot the user-provided segment metadata so we can
-    // merge it with per-source entries on each flush cycle.
-    let static_metadata = writer.segment_metadata().to_vec();
+    // Reused across cycles: drained (not moved) into the writer on change, so it
+    // keeps its capacity and steady-state flushes allocate nothing. The
+    // user-provided metadata is already held by the writer and re-emitted on
+    // rotation, so it never needs re-merging here.
+    let mut source_entries: Vec<(String, String)> = Vec::new();
 
     let mut drain_state = DrainState::Idle;
 
@@ -147,20 +149,21 @@ pub(super) fn run_flush_loop<M: WriterMode>(
             continue;
         }
 
-        // Merge user-provided metadata with per-source metadata (including
-        // per-runtime worker mappings) so the next rotated segment is fully
-        // self-describing.
-        let source_entries: Vec<(String, String)> = shared
-            .sources
-            .lock()
-            .unwrap()
-            .iter()
-            .flat_map(|s| s.segment_metadata())
-            .collect();
+        // Collect per-source metadata (per-runtime worker mappings, memory
+        // sample rate, etc.) only from sources that report a change since the
+        // last cycle, so the next rotated segment stays self-describing without
+        // doing any work when nothing changed.
+        source_entries.clear();
+        {
+            let mut sources = shared.sources.lock().unwrap();
+            for source in sources.iter_mut() {
+                source.segment_metadata(&mut source_entries);
+            }
+        }
         if !source_entries.is_empty() {
-            let mut merged = static_metadata.clone();
-            merged.extend(source_entries);
-            writer.update_segment_metadata(merged);
+            // Drain rather than move out, so `source_entries` keeps its capacity
+            // for the next change cycle.
+            writer.update_segment_metadata(source_entries.drain(..));
         }
 
         cycle_count += 1;

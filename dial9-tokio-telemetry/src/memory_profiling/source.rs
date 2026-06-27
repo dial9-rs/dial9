@@ -35,11 +35,14 @@ pub(crate) struct MemoryProfileSource {
     prev_dropped_allocs: u64,
     /// Previous snapshot of `RingBuffers::dropped_frees` for delta computation.
     prev_dropped_frees: u64,
-    /// Precomputed segment metadata, returned (cloned) on every flush
-    /// cycle. Cached in `new()` so the `segment_metadata()` hot path —
-    /// called from the flush loop every ~5 ms — does not allocate fresh
-    /// `String`s per cycle.
+    /// Precomputed segment metadata. Fixed at construction and never changes,
+    /// so it is appended on the first flush and otherwise left in the writer's
+    /// merged cache, which re-emits it on every rotation (the writer's merge
+    /// preserves this key on later tokio-only metadata updates).
     metadata: Vec<(String, String)>,
+    /// Whether `metadata` has been appended yet. The fixed metadata is emitted
+    /// once on the first flush; later flushes report no change.
+    emitted: bool,
 }
 
 impl MemoryProfileSource {
@@ -63,6 +66,7 @@ impl MemoryProfileSource {
                 "memory.sample_rate_bytes".to_string(),
                 sample_rate_bytes.to_string(),
             )],
+            emitted: false,
         }
     }
 
@@ -210,12 +214,16 @@ impl Source for MemoryProfileSource {
         "memory"
     }
 
-    fn segment_metadata(&self) -> Vec<(String, String)> {
-        // Cached in `new()`. Cloned on every flush cycle (a tiny vec —
-        // typically one entry — so the clone cost is dwarfed by the
-        // surrounding lock acquisitions in the flush loop). Was previously
-        // rebuilding two `String`s per cycle; see PR #442 review.
-        self.metadata.clone()
+    fn segment_metadata(&mut self, out: &mut Vec<(String, String)>) {
+        // Metadata is fixed at construction, so it only needs to be emitted
+        // once: the writer keeps it in its merged cache and re-emits it on
+        // every rotation. No need to observe the shared metadata-change counter
+        // (unlike `TokioRuntimesSource`, whose entries grow over time).
+        if self.emitted {
+            return;
+        }
+        out.extend(self.metadata.iter().cloned());
+        self.emitted = true;
     }
 }
 
@@ -645,8 +653,9 @@ mod tests {
     fn segment_metadata_contains_sample_rate_bytes() {
         use crate::telemetry::recorder::source::Source;
         let rings = rings(16, 16);
-        let source = make_source(Arc::clone(&rings), false, 1024 * 1024);
-        let meta = source.segment_metadata();
+        let mut source = make_source(Arc::clone(&rings), false, 1024 * 1024);
+        let mut meta = Vec::new();
+        source.segment_metadata(&mut meta);
         assert_eq!(
             meta,
             vec![(
@@ -654,6 +663,10 @@ mod tests {
                 "1048576".to_string()
             )]
         );
+        // Fixed metadata: a second call appends nothing.
+        let mut meta2 = Vec::new();
+        source.segment_metadata(&mut meta2);
+        assert!(meta2.is_empty());
     }
 
     /// Happy-path shutdown drain: the producer pushed an addr-only flagged

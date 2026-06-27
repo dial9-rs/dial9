@@ -130,3 +130,79 @@ fn gc_enabled_reclaims_dead_peer() {
         "dead peer dir must be reclaimed when gc_dead_namespaces is true"
     );
 }
+
+/// The S3 uploader's boot_id must match the on-disk namespace directory, so a
+/// local segment and its upload share one identity. We can't reach S3 from a
+/// unit test, but the same boot_id is embedded in every sealed segment's
+/// `SegmentMetadata`, so decoding it and comparing to the directory name
+/// proves the injection end to end.
+#[cfg(all(unix, feature = "worker-s3"))]
+#[test]
+fn s3_boot_id_matches_namespace_dir() {
+    use std::collections::HashMap;
+
+    use dial9_tokio_telemetry::background_task::s3::S3Config;
+    use dial9_trace_format::decoder::Decoder;
+
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = Dial9Config::builder()
+        .on_disk_buffer(dir.path().join("trace.bin"))
+        .max_total_size(4 * 1024 * 1024)
+        .with_runtime(|r| {
+            r.with_s3_uploader::<dial9_tokio_telemetry::telemetry::Disk>(
+                S3Config::builder()
+                    .bucket("test-bucket")
+                    .service_name("test-svc")
+                    .build(),
+            )
+        })
+        .build()
+        .expect("config should build");
+    let rt = TracedRuntime::try_new(cfg).expect("runtime should build");
+    rt.block_on(async {
+        tokio::task::yield_now().await;
+    });
+    drop(rt);
+
+    let boot_dir = boot_id_dirs(dir.path())
+        .into_iter()
+        .next()
+        .expect("a boot_id namespace dir");
+    let boot_id = boot_dir.file_name().unwrap().to_str().unwrap();
+
+    let sealed = std::fs::read_dir(&boot_dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .find(|p| p.extension().is_some_and(|e| e == "bin"))
+        .expect("a sealed .bin segment");
+
+    let data = std::fs::read(&sealed).unwrap();
+    let mut dec = Decoder::new(&data).unwrap();
+
+    #[derive(serde::Deserialize)]
+    #[serde(tag = "event")]
+    enum Event {
+        SegmentMetadataEvent {
+            entries: HashMap<String, String>,
+        },
+        #[serde(other)]
+        Other,
+    }
+
+    let mut boot_ids = Vec::new();
+    dec.for_each_event(|raw| {
+        if let Event::SegmentMetadataEvent { entries } = raw.deserialize().expect("deserialize")
+            && let Some(b) = entries.get("boot_id")
+        {
+            boot_ids.push(b.clone());
+        }
+    })
+    .unwrap();
+
+    assert!(!boot_ids.is_empty(), "expected a boot_id metadata entry");
+    assert!(
+        boot_ids.iter().all(|b| b == boot_id),
+        "segment boot_id metadata {boot_ids:?} must match namespace dir {boot_id:?}"
+    );
+}

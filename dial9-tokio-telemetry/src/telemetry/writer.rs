@@ -58,6 +58,10 @@ const DIAL9_VERSION_KEY: &str = "dial9.dial9-tokio-telemetry.version";
 /// Compile-time value for `DIAL9_VERSION_KEY`.
 const DIAL9_VERSION_VALUE: &str = env!("CARGO_PKG_VERSION");
 
+/// Segment-metadata key carrying the logical CPU capacity available to the
+/// process. Populated by default when the platform can report it.
+const PROCESS_AVAILABLE_PARALLELISM_KEY: &str = "process.available_parallelism";
+
 #[derive(Clone)]
 struct SegmentMetadata {
     entries: Vec<(String, String)>,
@@ -65,12 +69,20 @@ struct SegmentMetadata {
 
 impl Default for SegmentMetadata {
     fn default() -> Self {
-        Self {
-            entries: vec![(
-                DIAL9_VERSION_KEY.to_string(),
-                DIAL9_VERSION_VALUE.to_string(),
-            )],
+        let mut entries = vec![(
+            DIAL9_VERSION_KEY.to_string(),
+            DIAL9_VERSION_VALUE.to_string(),
+        )];
+        match std::thread::available_parallelism() {
+            Ok(parallelism) => entries.push((
+                PROCESS_AVAILABLE_PARALLELISM_KEY.to_string(),
+                parallelism.get().to_string(),
+            )),
+            Err(e) => rate_limited!(Duration::from_secs(60), {
+                tracing::warn!("failed to read process available parallelism: {e}");
+            }),
         }
+        Self { entries }
     }
 }
 
@@ -86,6 +98,14 @@ impl SegmentMetadata {
     /// Merge incoming entries with existing ones. Incoming entries take priority
     /// on key conflict; existing entries with keys not in the incoming set are preserved.
     /// Returns `true` if the resulting entries differ from the previous state.
+    ///
+    /// The "unchanged -> no rewrite" detection (`merged == self.entries`) is a
+    /// positional `Vec` compare. A source re-emitting the same entries is only
+    /// deduped to a no-op if it emits them in a stable order across calls, so
+    /// every `Source::segment_metadata` MUST produce a deterministic order. A
+    /// nondeterministic iteration order (e.g. iterating a `HashMap`) would
+    /// reorder `merged`, fail this compare, and rewrite segment metadata on
+    /// every change-cycle.
     fn merge(&mut self, entries: impl Iterator<Item = (String, String)>) -> bool {
         let mut merged: Vec<(String, String)> = entries.collect();
         for (k, v) in &self.entries {
@@ -698,12 +718,16 @@ impl<M: WriterMode> SegmentWriter<M> {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) fn segment_metadata(&self) -> &[(String, String)] {
         &self.segment_metadata.entries
     }
 
     /// Merge the segment metadata entries written into the next rotated segment.
-    pub fn update_segment_metadata(&mut self, entries: Vec<(String, String)>) {
+    ///
+    /// Accepts any iterator so callers can drain a reused buffer (retaining its
+    /// capacity) instead of handing over an owned `Vec`. A `Vec` still works.
+    pub fn update_segment_metadata(&mut self, entries: impl IntoIterator<Item = (String, String)>) {
         if self.segment_metadata.merge(entries.into_iter()) {
             match &mut self.state {
                 WriterState::Active { need_metadata, .. } => *need_metadata = true,
@@ -1595,8 +1619,8 @@ mod tests {
             .filter(|e| matches!(e, Dial9Event::WorkerParkEvent(..)))
             .count();
         assert_eq!(park_count, 1);
-        // Metadata should be present and carry only the built-in dial9.dial9-tokio-telemetry.version entry
-        // (no user-supplied entries via single_file()).
+        // Metadata should be present and carry built-in entries even without
+        // user-supplied entries via single_file().
         let metadata: Vec<_> = all_events
             .iter()
             .filter_map(|e| match e {
@@ -2348,6 +2372,39 @@ mod tests {
             Some(env!("CARGO_PKG_VERSION")),
             "expected dial9.dial9-tokio-telemetry.version entry matching CARGO_PKG_VERSION"
         );
+    }
+
+    /// The process's available logical CPU capacity is embedded in every
+    /// segment's metadata when the platform can report it.
+    #[test]
+    fn test_available_parallelism_in_segment_metadata() {
+        let expected = std::thread::available_parallelism().map(|n| n.get().to_string());
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("trace.bin");
+        let mut writer = DiskWriter::single_file(&path).unwrap();
+        writer.write_encoded_batch(&test_batch()).unwrap();
+        writer.flush().unwrap();
+        writer.finalize().unwrap();
+
+        let sealed = dir.path().join("trace.0.bin");
+        let all = format::decode_events(&std::fs::read(&sealed).unwrap()).unwrap();
+        let value = all.iter().find_map(|e| match e {
+            Dial9Event::SegmentMetadataEvent(meta) => {
+                meta.entries.get(PROCESS_AVAILABLE_PARALLELISM_KEY).cloned()
+            }
+            _ => None,
+        });
+        match expected {
+            Ok(expected) => assert_eq!(
+                value.as_deref(),
+                Some(expected.as_str()),
+                "expected process.available_parallelism entry matching std::thread::available_parallelism()"
+            ),
+            Err(_) => assert!(
+                value.is_none(),
+                "process.available_parallelism should be omitted when available_parallelism() fails"
+            ),
+        }
     }
 
     /// User-supplied `dial9.dial9-tokio-telemetry.version` entries win over the built-in default,

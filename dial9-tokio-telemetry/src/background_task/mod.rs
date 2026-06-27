@@ -1575,6 +1575,15 @@ impl S3PipelineUploader {
         }
     }
 
+    /// Override the pending config's boot_id so S3 keys use the on-disk
+    /// namespace identity. The builder calls this before the worker spawns, so
+    /// the `Ready` arm is unreachable in practice; a no-op there keeps it safe.
+    pub(crate) fn set_boot_id(&mut self, boot_id: impl Into<String>) {
+        if let S3UploaderState::Pending { s3_config, .. } = &mut self.state {
+            s3_config.set_boot_id(boot_id);
+        }
+    }
+
     /// Construct an uploader directly in the `Ready` state. Test-only —
     /// production code goes through [`new`](Self::new) and lazy init.
     #[cfg(test)]
@@ -1905,7 +1914,6 @@ mod tests {
             .bucket("test-bucket")
             .service_name("test")
             .instance_path("test")
-            .boot_id("test")
             .region("us-east-1")
             .build();
 
@@ -2002,7 +2010,6 @@ mod tests {
             .bucket("test")
             .service_name("test")
             .instance_path("test")
-            .boot_id("test")
             .region("us-east-1")
             .build();
         let sdk_config = aws_sdk_s3::Config::builder()
@@ -2389,7 +2396,6 @@ mod worker_pipeline_tests {
             .bucket("test-bucket")
             .service_name("test")
             .instance_path("test")
-            .boot_id("test")
             .region("us-east-1")
             .build();
         FlakyHarness {
@@ -2426,7 +2432,6 @@ mod worker_pipeline_tests {
             .bucket("test-bucket")
             .service_name("test")
             .instance_path("test")
-            .boot_id("test")
             .region("us-east-1")
             .build();
         (s3::S3Uploader::new(tm_client, s3_config), s3_root)
@@ -4083,7 +4088,6 @@ mod finalize_dump_tests {
             .bucket("b")
             .service_name("s")
             .instance_path("i")
-            .boot_id("boot")
             .build();
         let mut uploader = S3PipelineUploader::new(config, None);
 
@@ -4195,7 +4199,6 @@ mod s3_dump_manifest_tests {
             .prefix("traces")
             .service_name("test")
             .instance_path("test")
-            .boot_id("test")
             .region("us-east-1")
             .build();
         let uploader = s3::S3Uploader::new(fake_tm_client(root), config);

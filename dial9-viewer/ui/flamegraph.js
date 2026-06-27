@@ -11,16 +11,30 @@
     );
   }
 
+  function getExport() {
+    if (typeof require !== "undefined") return require("./flamegraph_export.js");
+    if (typeof FlamegraphExport !== "undefined") return FlamegraphExport;
+    return null; // export is optional; UI degrades gracefully if not loaded
+  }
+
   const buildFlamegraphTree = getAnalysis().buildFlamegraphTree;
+  // Shared with the SVG export (flamegraph_export.js) via trace_analysis.js so
+  // the exported graph's colors match the on-screen canvas.
+  const flamegraphColor = getAnalysis().flamegraphColor;
   const FG_ROW_H = 18;
 
-  function flamegraphColor(name) {
-    let h = 0;
-    for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) | 0;
-    const hue = 10 + (Math.abs(h) % 40);
-    const sat = 60 + (Math.abs(h >> 8) % 30);
-    const lit = 40 + (Math.abs(h >> 16) % 15);
-    return `hsl(${hue},${sat}%,${lit}%)`;
+  // Trigger a browser download of `content` (string) as `filename`.
+  function downloadFile(filename, content, mime) {
+    const blob = new Blob([content], { type: mime || "application/octet-stream" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    // Revoke on the next tick so the click has been dispatched.
+    setTimeout(() => URL.revokeObjectURL(url), 0);
   }
 
   // Like flattenFlamegraph in trace_analysis.js but attaches treeNode refs
@@ -135,6 +149,14 @@
       '<span class="fg-search-clear" title="Clear search">\u00d7</span>' +
       '<span class="fg-search-stats"></span>' +
       '<select class="fg-spawn-filter"></select>' +
+      '<span class="fg-export-wrap">' +
+      '<button type="button" class="fg-export-btn" title="Export this flamegraph" ' +
+      'aria-haspopup="menu" aria-expanded="false" disabled>\u2b07 Export</button>' +
+      '<div class="fg-export-menu" role="menu" style="display:none">' +
+      '<button type="button" role="menuitem" class="fg-export-svg">Interactive SVG (.svg)</button>' +
+      '<button type="button" role="menuitem" class="fg-export-folded">Folded stacks (.txt)</button>' +
+      '</div>' +
+      '</span>' +
       '<span class="fg-help-btn" tabindex="0" role="button" title="Keyboard shortcuts">\u2139\ufe0f</span>';
     container.appendChild(searchBar);
 
@@ -142,6 +164,10 @@
     const searchClear = searchBar.querySelector(".fg-search-clear");
     const searchStats = searchBar.querySelector(".fg-search-stats");
     const spawnFilter = searchBar.querySelector(".fg-spawn-filter");
+    const exportBtn = searchBar.querySelector(".fg-export-btn");
+    const exportMenu = searchBar.querySelector(".fg-export-menu");
+    const exportSvgBtn = searchBar.querySelector(".fg-export-svg");
+    const exportFoldedBtn = searchBar.querySelector(".fg-export-folded");
     const helpBtn = searchBar.querySelector(".fg-help-btn");
 
     const helpOverlay = document.createElement("div");
@@ -163,11 +189,88 @@
     container.appendChild(helpOverlay);
 
     helpBtn.addEventListener("click", function () {
+      closeExportMenu(); // don't leave two popups open at once
       helpOverlay.style.display = helpOverlay.style.display === "none" ? "flex" : "none";
     });
     helpOverlay.addEventListener("click", function (e) {
       if (e.target === helpOverlay) helpOverlay.style.display = "none";
     });
+
+    // ── Export: turn the rendered tree into a downloadable artifact ──
+    // The export reflects the CURRENT view — the active spawn-location filter
+    // (workerTree/offworkerTree are rebuilt by applySpawnFilter) — but always
+    // the full (un-zoomed) trees, since an exported file should stand alone.
+    let exportTitle = "dial9 flamegraph";
+    // Formats a node's weight for SVG hover text. Defaults to CPU samples; the
+    // heap views override it via setData so bytes/allocs render correctly.
+    let exportFormatValue = null;
+
+    // Resolve the (optional) export module once. It is statically loaded by
+    // every page that uses the flamegraph, so absence means a build/wiring bug;
+    // we warn once and disable the control rather than failing silently.
+    const FE = getExport();
+    if (!FE) {
+      console.warn("flamegraph: export module (flamegraph_export.js) not loaded; export disabled");
+      const wrap = searchBar.querySelector(".fg-export-wrap");
+      if (wrap) wrap.style.display = "none";
+    }
+
+    function exportPanels() {
+      const panels = [];
+      if (workerTree) panels.push({ label: workerLabelPrefix, tree: workerTree });
+      if (offworkerTree) panels.push({ label: offworkerLabelPrefix, tree: offworkerTree });
+      return panels;
+    }
+
+    function hasExportableData() {
+      return (workerTree && workerTree.count > 0) || (offworkerTree && offworkerTree.count > 0);
+    }
+
+    function closeExportMenu() {
+      if (!exportMenu) return;
+      exportMenu.style.display = "none";
+      exportBtn.setAttribute("aria-expanded", "false");
+    }
+
+    if (FE) {
+      exportBtn.addEventListener("click", function (e) {
+        e.stopPropagation();
+        if (!hasExportableData()) return;
+        const open = exportMenu.style.display !== "none";
+        exportMenu.style.display = open ? "none" : "block";
+        exportBtn.setAttribute("aria-expanded", open ? "false" : "true");
+      });
+
+      exportSvgBtn.addEventListener("click", function () {
+        const svg = FE.treeToInteractiveSvg(exportPanels(), {
+          title: exportTitle,
+          formatValue: exportFormatValue,
+        });
+        downloadFile(FE.filenameStem(exportTitle) + ".svg", svg, "image/svg+xml");
+        closeExportMenu();
+      });
+
+      exportFoldedBtn.addEventListener("click", function () {
+        // One folded file per panel section is awkward to consume; concatenate
+        // with a comment header per section so a single file round-trips. Skip
+        // panels whose folded output is empty so we never emit a dangling
+        // header (and so the join doesn't insert a blank section).
+        const folded = exportPanels()
+          .map((p) => ({ label: p.label, body: FE.treeToFolded(p.tree) }))
+          .filter((s) => s.body.length > 0)
+          .map((s) => "# " + s.label + "\n" + s.body)
+          .join("\n");
+        downloadFile(FE.filenameStem(exportTitle) + ".folded.txt", folded, "text/plain");
+        closeExportMenu();
+      });
+
+      // Close the menu on any outside click. Named so destroy() can detach it.
+      document.addEventListener("click", onExportOutsideClick);
+    }
+
+    function onExportOutsideClick(e) {
+      if (!searchBar.contains(e.target)) closeExportMenu();
+    }
 
     searchClear.style.display = "none";
     searchClear.addEventListener("click", function () {
@@ -644,6 +747,10 @@
         unpinTooltip();
         return true;
       }
+      if (exportMenu && exportMenu.style.display !== "none") {
+        closeExportMenu();
+        return true;
+      }
       if (helpOverlay.style.display !== "none") {
         helpOverlay.style.display = "none";
         return true;
@@ -686,6 +793,14 @@
       offworkerLabel.textContent =
         `${offworkerLabelPrefix} \u2014 ${offworkerSamples.length} samples`;
 
+      // Export is only meaningful when there is something rendered. Always
+      // close the menu: the trees were just rebuilt, so a menu left open would
+      // refer to the previous (filtered) dataset.
+      const canExport = hasExportableData();
+      exportBtn.disabled = !canExport;
+      exportBtn.title = canExport ? "Export this flamegraph" : "No samples to export";
+      closeExportMenu();
+
       renderAll();
     }
 
@@ -701,6 +816,8 @@
       formatCount = (opts && opts.formatCount) || null;
       workerLabelPrefix = (opts && opts.workerLabel) || "Worker threads";
       offworkerLabelPrefix = (opts && opts.offworkerLabel) || "Off-worker (sampler thread)";
+      exportTitle = (opts && opts.exportTitle) || "dial9 flamegraph";
+      exportFormatValue = (opts && opts.exportFormatValue) || null;
 
       // Build spawn location dropdown
       const locCounts = new Map();
@@ -730,6 +847,7 @@
     function destroy() {
       document.removeEventListener("keydown", onKeyDown);
       document.removeEventListener("click", onDocClick);
+      document.removeEventListener("click", onExportOutsideClick);
       workerCanvas.removeEventListener("mousemove", onWorkerMove);
       offworkerCanvas.removeEventListener("mousemove", onOffworkerMove);
       workerCanvas.removeEventListener("mouseleave", canvasMouseLeave);

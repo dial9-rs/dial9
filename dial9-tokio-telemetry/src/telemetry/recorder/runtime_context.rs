@@ -86,6 +86,10 @@ pub(crate) struct TokioRuntimesSource {
     contexts: RuntimeContextRegistry,
     last_sample: Instant,
     sample_interval: Duration,
+    /// Fingerprint of the metadata emitted on the last `segment_metadata` call,
+    /// used to skip the rebuild when nothing changed. See `segment_metadata` for
+    /// what it is and why it is sufficient. `0` means "nothing emitted yet".
+    last_fingerprint: usize,
 }
 
 impl TokioRuntimesSource {
@@ -94,6 +98,7 @@ impl TokioRuntimesSource {
             contexts,
             last_sample: time_source().instant(),
             sample_interval: Duration::from_millis(10),
+            last_fingerprint: 0,
         }
     }
 }
@@ -125,13 +130,28 @@ impl Source for TokioRuntimesSource {
         "tokio_runtimes"
     }
 
-    fn segment_metadata(&self) -> Vec<(String, String)> {
-        self.contexts
-            .lock()
-            .unwrap()
-            .iter()
-            .filter_map(|c| c.metadata_entry())
-            .collect()
+    fn segment_metadata(&mut self, out: &mut Vec<(String, String)>) {
+        // Self-detected change: there is no external signal to keep in sync, so
+        // a new caller that mutates runtime/worker metadata cannot forget to
+        // announce it. The fingerprint is the runtime count plus the total
+        // number of registered workers across all runtimes. Both only ever grow
+        // (runtimes and workers are added, never removed) and each worker's
+        // global id is fixed once assigned, so an unchanged fingerprint means
+        // unchanged metadata. Cheap — a few uncontended read locks and no
+        // allocation — so it runs every flush cycle.
+        let contexts = self.contexts.lock().unwrap();
+        let fingerprint = contexts.len()
+            + contexts
+                .iter()
+                .map(|c| c.worker_ids.read().unwrap().len())
+                .sum::<usize>();
+        if fingerprint == self.last_fingerprint {
+            return;
+        }
+        self.last_fingerprint = fingerprint;
+        // The writer's merge is additive, so emitting the full current snapshot
+        // on each change is correct. A fingerprint bump from an unnamed runtime
+        out.extend(contexts.iter().filter_map(|c| c.metadata_entry()));
     }
 }
 
@@ -198,6 +218,9 @@ impl RuntimeContext {
 }
 
 /// Record worker_index → global_id in the context's map (once per thread).
+///
+/// No need to announce the metadata change: `TokioRuntimesSource` detects the
+/// new worker from the worker count on its next flush.
 fn register_worker_if_needed(ctx: &RuntimeContext, local_index: usize, global_id: u64) {
     WORKER_REGISTERED.with(|cell| {
         if !cell.get() {
@@ -362,5 +385,156 @@ pub(super) fn make_worker_unpark(ctx: &RuntimeContext, shared: &SharedState) -> 
         cpu_time_ns: cpu_time_nanos,
         sched_wait_ns: sched_wait_delta_nanos,
         tid: crate::telemetry::events::current_tid(),
+    }
+}
+
+#[cfg(all(test, not(shuttle)))]
+mod tests {
+    use super::*;
+
+    /// Push a named runtime context with a single resolved worker into `contexts`.
+    fn push_named_runtime(contexts: &RuntimeContextRegistry, name: &str, worker_id: u64) {
+        let ctx = Arc::new(RuntimeContext::new(Some(name.to_string())));
+        ctx.worker_ids.write().unwrap().insert(0, worker_id);
+        contexts.lock().unwrap().push(ctx);
+    }
+
+    #[test]
+    fn segment_metadata_only_rebuilds_after_a_change() {
+        // The source detects change from the runtime / worker counts itself —
+        // there is no external signal for a caller to forget to bump.
+        let contexts: RuntimeContextRegistry = Arc::new(Mutex::new(Vec::new()));
+        let mut source = TokioRuntimesSource::new(contexts.clone());
+
+        // Empty registry: nothing to append.
+        let mut out = Vec::new();
+        source.segment_metadata(&mut out);
+        assert!(out.is_empty());
+
+        // Register a runtime: the count grows, so the source rebuilds.
+        push_named_runtime(&contexts, "main", 0);
+
+        out.clear();
+        source.segment_metadata(&mut out);
+        assert_eq!(out, vec![("runtime.main".to_string(), "0".to_string())]);
+
+        // No further change: the source must not rebuild or append.
+        out.clear();
+        source.segment_metadata(&mut out);
+        assert!(out.is_empty());
+
+        // A second runtime grows the count again and is picked up.
+        push_named_runtime(&contexts, "io", 1);
+
+        out.clear();
+        source.segment_metadata(&mut out);
+        assert!(out.contains(&("runtime.main".to_string(), "0".to_string())));
+        assert!(out.contains(&("runtime.io".to_string(), "1".to_string())));
+    }
+
+    mod steady_state_alloc {
+        use super::*;
+        use std::alloc::{GlobalAlloc, Layout, System};
+        use std::cell::Cell;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        thread_local! {
+            /// Only the measuring thread tallies, so the rest of the parallel
+            /// unit-test suite running under this allocator is unaffected.
+            static ARMED: Cell<bool> = const { Cell::new(false) };
+        }
+        static ALLOCS: AtomicUsize = AtomicUsize::new(0);
+
+        /// Passthrough allocator that counts allocations made by the current
+        /// thread while armed. Compiled only into the lib unit-test binary
+        /// (`#[cfg(all(test, not(shuttle)))]`), and inert (pure System
+        /// passthrough) for every test that does not arm it.
+        struct CountingAllocator;
+        unsafe impl GlobalAlloc for CountingAllocator {
+            unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+                if ARMED.with(Cell::get) {
+                    ALLOCS.fetch_add(1, Ordering::Relaxed);
+                }
+                unsafe { System.alloc(layout) }
+            }
+            unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+                unsafe { System.dealloc(ptr, layout) }
+            }
+            unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+                if ARMED.with(Cell::get) {
+                    ALLOCS.fetch_add(1, Ordering::Relaxed);
+                }
+                unsafe { System.realloc(ptr, layout, new_size) }
+            }
+            unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+                if ARMED.with(Cell::get) {
+                    ALLOCS.fetch_add(1, Ordering::Relaxed);
+                }
+                unsafe { System.alloc_zeroed(layout) }
+            }
+        }
+
+        #[global_allocator]
+        static GLOBAL: CountingAllocator = CountingAllocator;
+
+        /// Count allocations made on this thread while running `f`.
+        fn count_allocs(f: impl FnOnce()) -> usize {
+            ALLOCS.store(0, Ordering::Relaxed);
+            ARMED.with(|a| a.set(true));
+            f();
+            ARMED.with(|a| a.set(false));
+            ALLOCS.load(Ordering::Relaxed)
+        }
+
+        /// The exact per-cycle metadata block from `flush_loop::run_flush_loop`:
+        /// clear the reused buffer, poll every source, and (when non-empty)
+        /// drain it into the writer. Steady-state cycles leave it empty.
+        fn flush_cycle(
+            sources: &Mutex<Vec<Box<dyn Source>>>,
+            source_entries: &mut Vec<(String, String)>,
+        ) {
+            source_entries.clear();
+            {
+                let mut sources = sources.lock().unwrap();
+                for source in sources.iter_mut() {
+                    source.segment_metadata(source_entries);
+                }
+            }
+            if !source_entries.is_empty() {
+                // Stand-in for `writer.update_segment_metadata(source_entries.drain(..))`:
+                // drains so the buffer keeps its capacity, like the flush loop.
+                source_entries.drain(..).for_each(drop);
+            }
+        }
+
+        /// Regression guard for the zero-alloc invariant the flush loop relies
+        /// on: once every source has emitted its (unchanged) metadata, repeated
+        /// flush cycles must allocate nothing. Breaks if a source starts
+        /// rebuilding its metadata every cycle, the change-detection is dropped,
+        /// or the reused buffer is moved (losing capacity) instead of drained.
+        #[test]
+        fn steady_state_metadata_cycles_do_not_allocate() {
+            let contexts: RuntimeContextRegistry = Arc::new(Mutex::new(Vec::new()));
+            push_named_runtime(&contexts, "main", 0);
+            push_named_runtime(&contexts, "io", 1);
+            let sources: Mutex<Vec<Box<dyn Source>>> =
+                Mutex::new(vec![Box::new(TokioRuntimesSource::new(contexts))]);
+            let mut source_entries: Vec<(String, String)> = Vec::new();
+
+            // Prime: the first cycle emits and sizes the buffer (this allocates).
+            flush_cycle(&sources, &mut source_entries);
+
+            // Steady state: nothing changed, so further cycles must not allocate.
+            let allocs = count_allocs(|| {
+                for _ in 0..1000 {
+                    flush_cycle(&sources, &mut source_entries);
+                }
+            });
+            assert_eq!(
+                allocs, 0,
+                "steady-state flush cycles must not allocate; a source is \
+                 rebuilding metadata or the reused buffer lost its capacity"
+            );
+        }
     }
 }

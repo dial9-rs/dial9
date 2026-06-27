@@ -33,9 +33,25 @@ pub(crate) trait Source: Send {
     /// to stop tracking the current thread.
     fn on_thread_stop(&mut self) {}
 
-    /// Key-value entries this source contributes to segment metadata.
-    /// Merged into the next rotated segment each flush cycle.
-    fn segment_metadata(&self) -> Vec<(String, String)> {
-        Vec::new()
+    /// Append this source's segment-metadata entries to `out` **iff** they have
+    /// changed since the last call.
+    ///
+    /// Appending nothing on an unchanged cycle is what lets the flush loop skip
+    /// the merge (it merges only when `out` is non-empty), so steady-state
+    /// cycles allocate nothing. The default reports a source with no metadata.
+    fn segment_metadata(&mut self, out: &mut Vec<(String, String)>) {
+        let _ = out;
     }
+}
+
+/// Collect current segment metadata from every source by calling the
+/// change-aware [`Source::segment_metadata`] once each. A freshly-built source
+/// reports its metadata on the first call, so this yields the full set.
+#[cfg(test)]
+pub(crate) fn collect_segment_metadata(sources: &mut [Box<dyn Source>]) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for source in sources.iter_mut() {
+        source.segment_metadata(&mut out);
+    }
+    out
 }

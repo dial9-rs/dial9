@@ -26,10 +26,21 @@
     return cpuSamples.some(isCpuProfileSample);
   }
 
-  function getTraceTimeRange(events, cpuSamples) {
+  const PROCESS_RESOURCE_USAGE_EVENT = "ProcessResourceUsageEvent";
+
+  function getTraceTimeRange(events, cpuSamples, customEvents) {
+    const cpuProfileTimestamps = cpuSamples
+      .filter(isCpuProfileSample)
+      .map((s) => s.timestamp);
+    const processResourceUsageTimestamps = (customEvents || [])
+      .filter((e) => e.name === PROCESS_RESOURCE_USAGE_EVENT)
+      .map((e) => e.timestamp)
+      .filter((t) => Number.isFinite(t));
     const timestamps = events.length
       ? events.map((e) => e.timestamp)
-      : cpuSamples.filter(isCpuProfileSample).map((s) => s.timestamp);
+      : cpuProfileTimestamps.length
+        ? cpuProfileTimestamps
+        : processResourceUsageTimestamps;
     if (!timestamps.length) return null;
 
     let minTs = timestamps[0];
@@ -40,6 +51,100 @@
     }
     if (maxTs === minTs) maxTs = minTs + 1;
     return { minTs, maxTs, durationNs: maxTs - minTs };
+  }
+
+  function numericField(value) {
+    if (value == null || value === "") return null;
+    const n = Number(value);
+    return Number.isFinite(n) ? n : null;
+  }
+
+  function processResourceUsageSample(ev) {
+    const fields = ev.fields || {};
+    const t = numericField(ev.timestamp);
+    const userCpuNs = numericField(fields.user_cpu_ns);
+    const systemCpuNs = numericField(fields.system_cpu_ns);
+    if (
+      t == null ||
+      userCpuNs == null ||
+      systemCpuNs == null ||
+      userCpuNs < 0 ||
+      systemCpuNs < 0
+    ) {
+      return null;
+    }
+    return {
+      t,
+      event: ev,
+      userCpuNs,
+      systemCpuNs,
+      cpuTimeNs: userCpuNs + systemCpuNs,
+    };
+  }
+
+  function buildProcessCpuUsageSeries(customEvents, availableParallelism) {
+    const capacity = numericField(availableParallelism);
+    const normalizedCapacity = capacity != null && capacity > 0 ? capacity : null;
+    const samples = [];
+    for (const ev of customEvents || []) {
+      if (ev.name !== PROCESS_RESOURCE_USAGE_EVENT) continue;
+      const sample = processResourceUsageSample(ev);
+      if (sample) samples.push(sample);
+    }
+    samples.sort((a, b) => a.t - b.t);
+
+    const intervals = [];
+    let maxCores = 0;
+    let totalWallNs = 0;
+    let totalCpuNs = 0;
+
+    for (let i = 1; i < samples.length; i++) {
+      const prev = samples[i - 1];
+      const cur = samples[i];
+      const wallDeltaNs = cur.t - prev.t;
+      const userDeltaNs = cur.userCpuNs - prev.userCpuNs;
+      const systemDeltaNs = cur.systemCpuNs - prev.systemCpuNs;
+      const cpuDeltaNs = userDeltaNs + systemDeltaNs;
+      if (
+        !(wallDeltaNs > 0) ||
+        userDeltaNs < 0 ||
+        systemDeltaNs < 0 ||
+        cpuDeltaNs < 0
+      ) {
+        continue;
+      }
+      const cores = cpuDeltaNs / wallDeltaNs;
+      if (!Number.isFinite(cores)) continue;
+      const totalPercent = normalizedCapacity != null
+        ? Math.min(100, (cores / normalizedCapacity) * 100)
+        : null;
+      intervals.push({
+        start: prev.t,
+        end: cur.t,
+        t: cur.t,
+        wallDeltaNs,
+        userDeltaNs,
+        systemDeltaNs,
+        cpuDeltaNs,
+        startCpuTimeNs: prev.cpuTimeNs,
+        endCpuTimeNs: cur.cpuTimeNs,
+        cores,
+        totalPercent,
+        startSample: prev,
+        endSample: cur,
+      });
+      if (cores > maxCores) maxCores = cores;
+      totalWallNs += wallDeltaNs;
+      totalCpuNs += cpuDeltaNs;
+    }
+
+    return {
+      samples,
+      intervals,
+      availableParallelism: normalizedCapacity,
+      maxCores,
+      avgCores: totalWallNs > 0 ? totalCpuNs / totalWallNs : 0,
+    };
   }
 
   // ── Poll color heatmap ────────────────────────────────────────────────
@@ -865,6 +970,22 @@
   }
 
   /**
+   * Deterministic warm (red/orange) color for a frame, hashed from its name.
+   * Shared by the on-screen canvas (flamegraph.js) and the SVG export
+   * (flamegraph_export.js) so an exported graph matches what the user sees.
+   * @param {string} name frame name
+   * @returns {string} an `hsl(...)` color string
+   */
+  function flamegraphColor(name) {
+    let h = 0;
+    for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) | 0;
+    const hue = 10 + (Math.abs(h) % 40);
+    const sat = 60 + (Math.abs(h >> 8) % 30);
+    const lit = 40 + (Math.abs(h >> 16) % 15);
+    return `hsl(${hue},${sat}%,${lit}%)`;
+  }
+
+  /**
    * Build a flamegraph tree from CPU samples with reversed callchains.
    * @param {import('./trace_parser.js').CpuSample[]} samples
    * @param {Map} callframeSymbols
@@ -1424,11 +1545,13 @@
     computeSchedulingDelays,
     computePollWakes,
     filterPointsOfInterest,
+    flamegraphColor,
     buildFlamegraphTree,
     flattenFlamegraph,
     buildFgData,
     getTraceTimeRange,
     hasCpuProfileSamples,
+    buildProcessCpuUsageSeries,
     buildSpanData,
     collectDescendants,
     selectSpanRenderSet,
