@@ -1,0 +1,45 @@
+[package]
+name = "dial9-util"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = true
+description = "Ad-hoc span instrumentation (futures, guards, tower middleware) for dial9-tokio-telemetry"
+keywords = ["tokio", "telemetry", "tracing", "spans"]
+categories = ["asynchronous", "development-tools::profiling"]
+
+[dependencies]
+dial9-tokio-telemetry = { workspace = true }
+dial9-trace-format = { workspace = true }
+pin-project-lite = "0.2"
+tower-layer = { version = "0.3", optional = true }
+tower-service = { version = "0.3", optional = true }
+
+[features]
+## Tower middleware (`span::Dial9SpanLayer`) that instruments each request
+## future as a span.
+tower-layer = ["dep:tower-layer", "dep:tower-service"]
+
+[dev-dependencies]
+# The round-trip tests build a traced runtime and read the trace back, which
+# needs the `analysis` feature. Enabling it only here keeps it out of the
+# production build of the library.
+dial9-tokio-telemetry = { workspace = true, features = ["analysis"] }
+dial9-trace-format = { workspace = true, features = ["serde-deserialize"] }
+tokio = { version = "1.52.0", features = [
+    "rt",
+    "rt-multi-thread",
+    "macros",
+    "time",
+    "test-util",
+] }
+tempfile = "3"
+criterion = "0.5"
+
+[[bench]]
+name = "span_encode_bench"
+harness = false
+
+[[example]]
+name = "instrument_future"

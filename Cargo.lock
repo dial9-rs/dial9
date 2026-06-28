@@ -1904,6 +1904,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "dial9-util"
+version = "0.1.0"
+dependencies = [
+ "criterion",
+ "dial9-tokio-telemetry",
+ "dial9-trace-format",
+ "pin-project-lite",
+ "tempfile",
+ "tokio",
+ "tower-layer",
+ "tower-service",
+]
+
+[[package]]
 name = "dial9-viewer"
 version = "0.4.0"
 dependencies = [

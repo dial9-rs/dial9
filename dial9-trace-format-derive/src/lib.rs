@@ -13,7 +13,6 @@ const SUPPORTED_UNITS: &[&str] = &["ns", "us", "ms", "s", "bytes"];
 
 fn derive_trace_event_impl(input: DeriveInput) -> Result<proc_macro2::TokenStream, syn::Error> {
     let name = &input.ident;
-    let name_str = name.to_string();
 
     let fields = match &input.data {
         Data::Struct(data) => match &data.fields {
@@ -23,20 +22,38 @@ fn derive_trace_event_impl(input: DeriveInput) -> Result<proc_macro2::TokenStrea
         _ => panic!("TraceEvent can only be derived for structs"),
     };
 
-    // Parse struct-level #[traceevent(wire_slot)]: opt this type into the
-    // encoder's inline fast path (a global slot doubling as wire id). Off by
-    // default.
+    // Parse struct-level attributes:
+    // - `wire_slot`: opt this type into the encoder's inline fast path (a global
+    //   slot doubling as wire id). Off by default.
+    // - `name = <expr>`: override the wire event name (defaults to the struct
+    //   name). Accepts any `&'static str` expression, not just a string literal,
+    //   so callers can build a per-call-site-unique name, e.g.
+    //   `concat!("SpanEnter:", file!(), ":", line!())`. Used to give generated
+    //   structs a name the viewer recognizes (e.g. `"SpanEnter:..."`).
     let mut wire_slot = false;
+    let mut name_override: Option<syn::Expr> = None;
     for attr in &input.attrs {
         if attr.path().is_ident("traceevent") {
             let _ = attr.parse_nested_meta(|meta| {
                 if meta.path.is_ident("wire_slot") {
                     wire_slot = true;
+                } else if meta.path.is_ident("name") {
+                    name_override = Some(meta.value()?.parse::<syn::Expr>()?);
                 }
                 Ok(())
             });
         }
     }
+    // The wire event name expression returned by `event_name()`: either the
+    // `name = ...` override (evaluated at the override's call site, so builtins
+    // like `file!()`/`line!()` resolve there) or the struct name as a literal.
+    let event_name_expr = match &name_override {
+        Some(expr) => quote! { #expr },
+        None => {
+            let name_str = name.to_string();
+            quote! { #name_str }
+        }
+    };
 
     // Find the field marked with #[traceevent(timestamp)]
     let mut timestamp_field_name = None;
@@ -172,7 +189,7 @@ fn derive_trace_event_impl(input: DeriveInput) -> Result<proc_macro2::TokenStrea
 
     Ok(quote! {
         impl ::dial9_trace_format::TraceEvent for #name {
-            fn event_name() -> &'static str { #name_str }
+            fn event_name() -> &'static str { #event_name_expr }
             #type_slot_impl
             fn field_defs() -> Vec<::dial9_trace_format::schema::FieldDef> {
                 vec![#(#field_def_tokens),*]
@@ -196,6 +213,12 @@ fn derive_trace_event_impl(input: DeriveInput) -> Result<proc_macro2::TokenStrea
 ///   header, not as a regular field.
 /// - `#[traceevent(wire_slot)]` (struct): opts the type into the encoder's
 ///   inline fast path by claiming a static wire-ID slot.
+/// - `#[traceevent(name = <expr>)]` (struct): overrides the wire event name
+///   (defaults to the struct name). Accepts any `&'static str` expression, not
+///   just a string literal, so callers can build a per-call-site-unique name —
+///   e.g. `concat!("SpanEnter:", file!(), ":", line!())`. Useful for generated
+///   structs that need a name the viewer recognizes (e.g. `"SpanEnter:..."`),
+///   which cannot be a valid Rust identifier.
 /// - `#[traceevent(unit = "...")]` (field): attaches a `unit` schema
 ///   annotation so viewers render the field in that unit. Supported values:
 ///   `"ns"`, `"us"`, `"ms"`, `"s"`, `"bytes"`. Any other value is a compile

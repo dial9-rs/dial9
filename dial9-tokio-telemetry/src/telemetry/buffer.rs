@@ -83,6 +83,10 @@ impl ThreadLocalEncoder<'_> {
     /// ]);
     /// ```
     // TODO(GH-XXX): replace with a version that takes timestamp as a separate parameter
+    // Currently only the `tracing-layer` feature's subscriber writes dynamic
+    // schemas through this primitive; without it the method has no in-crate
+    // caller.
+    #[cfg_attr(not(feature = "tracing-layer"), allow(dead_code))]
     pub(crate) fn write_event(
         &mut self,
         schema: &dial9_trace_format::encoder::Schema,
