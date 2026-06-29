@@ -5,30 +5,8 @@
 //! operation: segments keep accumulating in the ring (memory or disk), and
 //! the pipeline only runs when the application explicitly requests a dump.
 //!
-//! ```ignore
-//! # use dial9_tokio_telemetry::telemetry::{DiskWriter, TracedRuntime};
-//! use dial9_tokio_telemetry::telemetry::Dial9Handle;
-//!
-//! # fn main() -> std::io::Result<()> {
-//! # let path = "/tmp/trace.bin";
-//! # let writer = DiskWriter::single_file(path)?;
-//! # let mut builder = tokio::runtime::Builder::new_multi_thread();
-//! # builder.worker_threads(2).enable_all();
-//! let (runtime, _guard) = TracedRuntime::builder()
-//!     .with_trace_path(path)
-//!     .with_custom_pipeline(|p| p.gzip().write_back())
-//!     .with_dump_trigger(|_| {})
-//!     .build_and_start(builder, writer)?;
-//!
-//! // From any thread owned by this runtime, reach the trigger through the
-//! // ambient handle - no need to thread it through your own state.
-//! let trigger = Dial9Handle::current()
-//!     .dump_trigger()
-//!     .expect("on-demand mode enabled");
-//! trigger.dump_current_data();
-//! # Ok(())
-//! # }
-//! ```
+//! A runtime wires a trigger at build time and reaches it through the ambient
+//! handle. See `with_dump_trigger` on the runtime builder for a worked example.
 //!
 //! [`DumpTrigger::dump_current_data`](crate::dump::DumpTrigger::dump_current_data) and
 //! [`DumpTrigger::dump_time_range`](crate::dump::DumpTrigger::dump_time_range) build a

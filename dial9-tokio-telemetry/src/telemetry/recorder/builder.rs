@@ -271,6 +271,30 @@ impl<P, M, Mode: WriterMode> TracedRuntimeBuilder<P, M, Mode> {
     /// If no pipeline is configured the worker never spawns and every dump
     /// request resolves with
     /// [`DumpError::WorkerStopped`](crate::dump::DumpError::WorkerStopped).
+    ///
+    /// ```no_run
+    /// # use dial9_tokio_telemetry::telemetry::{DiskWriter, TracedRuntime};
+    /// use dial9_tokio_telemetry::telemetry::Dial9Handle;
+    /// # fn main() -> std::io::Result<()> {
+    /// # let path = "/tmp/trace.bin";
+    /// # let writer = DiskWriter::single_file(path)?;
+    /// # let mut builder = tokio::runtime::Builder::new_multi_thread();
+    /// # builder.worker_threads(2).enable_all();
+    /// let (runtime, _guard) = TracedRuntime::builder()
+    ///     .with_trace_path(path)
+    ///     .with_custom_pipeline(|p| p.gzip().write_back())
+    ///     .with_dump_trigger(|_| {})
+    ///     .build_and_start(builder, writer)?;
+    ///
+    /// // From any thread owned by this runtime, reach the trigger through the
+    /// // ambient handle, no need to thread it through your own state.
+    /// let trigger = Dial9Handle::current()
+    ///     .dump_trigger()
+    ///     .expect("on-demand mode enabled");
+    /// trigger.dump_current_data();
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn with_dump_trigger<F>(mut self, configure: F) -> Self
     where
         F: FnOnce(&mut crate::dump::DumpTriggerConfig),

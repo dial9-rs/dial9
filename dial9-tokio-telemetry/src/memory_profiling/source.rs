@@ -303,7 +303,7 @@ mod tests {
     fn flush_and_collect(shared: &SharedState) -> Vec<Dial9Event> {
         shared.flush_sources();
         let mut events = Vec::new();
-        for bytes in test_util::drain_encoded_batches(&shared) {
+        for bytes in test_util::drain_encoded_batches(shared) {
             if let Ok(decoded) = decode_events(&bytes) {
                 events.extend(decoded);
             }
