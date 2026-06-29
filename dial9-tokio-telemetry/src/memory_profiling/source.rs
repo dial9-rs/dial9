@@ -219,7 +219,6 @@ mod tests {
     use super::*;
     use crate::memory_profiling::ring::{DEFAULT_MAX_FRAMES, RawAlloc, RawFree, RingBuffers};
     use crate::primitives::sync::Arc;
-    use crate::primitives::sync::atomic::Ordering;
     use crate::telemetry::analysis_events::Dial9Event;
     use crate::telemetry::format::decode_events;
     use crate::telemetry::recorder::SharedState;
