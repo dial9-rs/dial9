@@ -227,11 +227,11 @@ fn register_hooks(
 
         #[cfg(feature = "cpu-profiling")]
         {
-            if let Ok(mut sources) = s_stop.sources.lock() {
+            s_stop.with_sources_mut(|sources| {
                 for source in sources.iter_mut() {
                     source.on_thread_stop();
                 }
-            }
+            });
             dial9_perf_self_profile::unregister_current_thread();
         }
     });
@@ -277,9 +277,7 @@ fn attach_runtime(
     // Pre-reserve a contiguous block of worker IDs and set metrics atomically.
     let metrics = runtime.handle().metrics();
     let num_workers = metrics.num_workers() as u64;
-    let base = shared
-        .next_worker_id
-        .fetch_add(num_workers, Ordering::Relaxed);
+    let base = shared.reserve_worker_ids(num_workers);
     ctx.metrics_and_base
         .set((metrics, base))
         .unwrap_or_else(|_| {
@@ -415,8 +413,11 @@ mod tests {
 
         assert!(guard.is_enabled());
         assert!(guard.shared().unwrap().is_enabled());
-        let runtime_meta =
-            source::collect_segment_metadata(&mut guard.shared().unwrap().sources.lock().unwrap());
+        let runtime_meta = guard
+            .shared()
+            .unwrap()
+            .with_sources_mut(source::collect_segment_metadata)
+            .unwrap();
         assert!(
             !runtime_meta.iter().any(|(k, _)| k.starts_with("runtime.")),
             "disabled Tokio instrumentation should not produce runtime metadata"
@@ -432,8 +433,11 @@ mod tests {
             }
         });
 
-        let runtime_meta =
-            source::collect_segment_metadata(&mut guard.shared().unwrap().sources.lock().unwrap());
+        let runtime_meta = guard
+            .shared()
+            .unwrap()
+            .with_sources_mut(source::collect_segment_metadata)
+            .unwrap();
         assert!(
             !runtime_meta.iter().any(|(k, _)| k.starts_with("runtime.")),
             "disabled Tokio instrumentation should not produce runtime metadata after running work"

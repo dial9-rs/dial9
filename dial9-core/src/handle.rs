@@ -128,20 +128,14 @@ impl Dial9Handle {
     /// Enable telemetry recording. No-op on a disabled handle.
     pub fn enable(&self) {
         if let Some(inner) = &self.inner {
-            inner
-                .shared
-                .enabled
-                .store(true, crate::primitives::sync::atomic::Ordering::Relaxed);
+            inner.shared.enable();
         }
     }
 
     /// Disable telemetry recording. No-op on a disabled handle.
     pub fn disable(&self) {
         if let Some(inner) = &self.inner {
-            inner
-                .shared
-                .enabled
-                .store(false, crate::primitives::sync::atomic::Ordering::Relaxed);
+            inner.shared.disable();
         }
     }
 

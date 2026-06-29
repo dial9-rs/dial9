@@ -242,7 +242,7 @@ fn start_sched_sampling_if_needed(shared: &SharedState) {
             // Start sched event sampling for this worker thread. Deferred from
             // on_thread_start so that only worker threads (not blocking pool
             // threads) open perf fds.
-            if let Ok(mut sources) = shared.sources.lock() {
+            shared.with_sources_mut(|sources| {
                 for source in sources.iter_mut() {
                     if let Err(e) = source.on_worker_thread_start() {
                         tracing::warn!(
@@ -251,7 +251,7 @@ fn start_sched_sampling_if_needed(shared: &SharedState) {
                         );
                     }
                 }
-            }
+            });
             cell.set(true);
         }
     });

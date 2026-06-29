@@ -9,22 +9,22 @@ use std::time::Duration;
 /// Runtime-agnostic core recording state.
 #[doc(hidden)]
 pub struct SharedState {
-    pub enabled: AtomicBool,
+    pub(crate) enabled: AtomicBool,
     pub(crate) collector: Arc<CentralCollector>,
     /// Absolute `CLOCK_MONOTONIC` nanosecond timestamp captured at trace start.
-    pub start_time_ns: u64,
+    pub(crate) start_time_ns: u64,
     /// Global worker ID counter. Each runtime reserves a contiguous block
     /// via `fetch_add(num_workers)` so worker IDs don't collide.
-    pub next_worker_id: AtomicU64,
+    pub(crate) next_worker_id: AtomicU64,
     /// Epoch counter bumped by the flush thread every ~30s. Thread-local
     /// buffers stamp this value on each self-flush so the flush thread can
     /// skip busy workers when draining.
-    pub drain_epoch: AtomicU64,
+    pub(crate) drain_epoch: AtomicU64,
     /// Weak handles to all registered thread-local buffers. The flush thread
     /// uses these to intrusively drain idle/silent buffers.
     tl_buffers: Mutex<Vec<TlBufferHandle>>,
     /// Data sources (CPU profiler, sched profiler, etc.) that the flush thread drains.
-    pub sources: Mutex<Vec<Box<dyn crate::source::Source>>>,
+    pub(crate) sources: Mutex<Vec<Box<dyn crate::source::Source>>>,
     /// On-demand dump trigger, set once at build time when the runtime is
     /// built with `with_dump_trigger`. Reached by application code through
     /// [`Dial9Handle::dump_trigger`](super::handle::Dial9Handle::dump_trigger).
@@ -50,6 +50,35 @@ impl SharedState {
     /// Register a data source to be drained by the flush thread each cycle.
     pub fn push_source(&self, source: Box<dyn crate::source::Source>) {
         self.sources.lock().unwrap().push(source);
+    }
+
+    /// Run `f` against the registered sources. Returns `None` if the lock is
+    /// poisoned. Used to drive the per-thread source lifecycle hooks.
+    pub fn with_sources_mut<R>(
+        &self,
+        f: impl FnOnce(&mut [Box<dyn crate::source::Source>]) -> R,
+    ) -> Option<R> {
+        self.sources.lock().ok().map(|mut sources| f(&mut sources))
+    }
+
+    /// Trace-start `CLOCK_MONOTONIC` timestamp.
+    pub fn start_time_ns(&self) -> u64 {
+        self.start_time_ns
+    }
+
+    /// Reserve a contiguous block of `count` worker IDs, returning the first.
+    pub fn reserve_worker_ids(&self, count: u64) -> u64 {
+        self.next_worker_id.fetch_add(count, Ordering::Relaxed)
+    }
+
+    /// Turn recording on.
+    pub fn enable(&self) {
+        self.enabled.store(true, Ordering::Relaxed);
+    }
+
+    /// Turn recording off.
+    pub fn disable(&self) {
+        self.enabled.store(false, Ordering::Relaxed);
     }
 
     /// Install the on-demand dump trigger. Set once at build time by the

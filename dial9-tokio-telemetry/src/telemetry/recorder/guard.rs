@@ -107,7 +107,7 @@ impl TelemetryGuard {
     /// Monotonic start time of the telemetry session in nanoseconds, if
     /// telemetry is enabled.
     pub fn start_time(&self) -> Option<u64> {
-        self.shared().map(|s| s.start_time_ns)
+        self.shared().map(|s| s.start_time_ns())
     }
 
     /// Enable telemetry recording. No-op on a disabled guard.

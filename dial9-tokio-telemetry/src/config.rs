@@ -1729,9 +1729,9 @@ mod tests {
         let cfg = Dial9Config::from_env_source(&env);
         let rt = TracedRuntime::try_new(cfg).expect("runtime should build");
         let shared = rt.guard().shared().expect("telemetry should be enabled");
-        let runtime_meta = crate::telemetry::recorder::source::collect_segment_metadata(
-            &mut shared.sources.lock().unwrap(),
-        );
+        let runtime_meta = shared
+            .with_sources_mut(crate::telemetry::recorder::source::collect_segment_metadata)
+            .unwrap();
         let runtime_keys: Vec<&str> = runtime_meta
             .iter()
             .map(|(k, _)| k.as_str())
@@ -1758,12 +1758,12 @@ mod tests {
         let cfg = Dial9Config::from_env_source(&env);
         let rt = TracedRuntime::try_new(cfg).expect("runtime should build");
         let shared = rt.guard().shared().expect("telemetry should be enabled");
-        let sources = shared.sources.lock().unwrap();
-
         assert!(
-            sources
-                .iter()
-                .any(|source| source.name() == "process_resource_usage"),
+            shared
+                .with_sources_mut(|sources| {
+                    sources.iter().any(|s| s.name() == "process_resource_usage")
+                })
+                .unwrap(),
             "from_env should enable process resource usage by default on Unix"
         );
     }
@@ -1777,12 +1777,12 @@ mod tests {
         let cfg = Dial9Config::from_env_source(&env);
         let rt = TracedRuntime::try_new(cfg).expect("runtime should build");
         let shared = rt.guard().shared().expect("telemetry should be enabled");
-        let sources = shared.sources.lock().unwrap();
-
         assert!(
-            sources
-                .iter()
-                .all(|source| source.name() != "process_resource_usage"),
+            shared
+                .with_sources_mut(|sources| {
+                    sources.iter().all(|s| s.name() != "process_resource_usage")
+                })
+                .unwrap(),
             "explicit env opt-out should disable process resource usage"
         );
     }
@@ -1796,12 +1796,12 @@ mod tests {
         let cfg = Dial9Config::from_env_source(&env);
         let rt = TracedRuntime::try_new(cfg).expect("runtime should build");
         let shared = rt.guard().shared().expect("telemetry should be enabled");
-        let sources = shared.sources.lock().unwrap();
-
         assert!(
-            sources
-                .iter()
-                .all(|source| source.name() != "socket_accept_queues"),
+            shared
+                .with_sources_mut(|sources| {
+                    sources.iter().all(|s| s.name() != "socket_accept_queues")
+                })
+                .unwrap(),
             "from_env should leave socket accept queues disabled by default"
         );
     }
@@ -1815,12 +1815,12 @@ mod tests {
         let cfg = Dial9Config::from_env_source(&env);
         let rt = TracedRuntime::try_new(cfg).expect("runtime should build");
         let shared = rt.guard().shared().expect("telemetry should be enabled");
-        let sources = shared.sources.lock().unwrap();
-
         assert!(
-            sources
-                .iter()
-                .any(|source| source.name() == "socket_accept_queues"),
+            shared
+                .with_sources_mut(|sources| {
+                    sources.iter().any(|s| s.name() == "socket_accept_queues")
+                })
+                .unwrap(),
             "explicit env opt-in should enable socket accept queues"
         );
     }
@@ -1834,9 +1834,9 @@ mod tests {
         let rt = TracedRuntime::try_new(cfg).expect("runtime should build");
         assert!(rt.guard().is_enabled(), "telemetry should remain enabled");
         let shared = rt.guard().shared().expect("telemetry should be enabled");
-        let runtime_meta = crate::telemetry::recorder::source::collect_segment_metadata(
-            &mut shared.sources.lock().unwrap(),
-        );
+        let runtime_meta = shared
+            .with_sources_mut(crate::telemetry::recorder::source::collect_segment_metadata)
+            .unwrap();
         assert!(
             !runtime_meta.iter().any(|(k, _)| k.starts_with("runtime.")),
             "no Tokio runtime metadata should be present when Tokio instrumentation is disabled"
