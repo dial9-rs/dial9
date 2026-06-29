@@ -85,6 +85,7 @@
         <script src="decode.js"></script>
         <script src="trace_parser.js"></script>
         <script src="creds.js"></script>
+        <script src="trace_scope.js"></script>
         <script src="trace_analysis.js"></script>
         <script src="flamegraph_export.js"></script>
         <script src="flamegraph.js"></script>
@@ -92,8 +93,11 @@
             (async function () {
                 const params = new URLSearchParams(window.location.search);
                 // `trace` is repeatable — each value is a separate (possibly
-                // gzipped) component to fetch and concatenate.
-                const traceUrls = params.getAll("trace");
+                // gzipped) component to fetch and concatenate. A `s_*` scope
+                // (bucket/prefix/service/host-set + window) is the compact,
+                // stateless form the S3 browser emits for large exact-mode
+                // selections; it's resolved to trace= URLs just below.
+                let traceUrls = params.getAll("trace");
                 const startNs = params.get("start") != null ? Number(params.get("start")) : null;
                 const endNs = params.get("end") != null ? Number(params.get("end")) : null;
 
@@ -498,6 +502,28 @@
                     window.addEventListener("resize", () => fg.resize());
                     window.addEventListener("keydown", (e) => { if (e.key === "Escape") fg.handleEscape(); });
                     return;
+                }
+
+                // Exact mode with a scope instead of inline trace= params:
+                // re-list the scope's files (credentialed, same headers as the
+                // trace fetch below) and load them through the same path.
+                if (!traceUrls.length) {
+                    const scope = Dial9TraceScope.readScope(params);
+                    if (scope) {
+                        try {
+                            loadingEl.textContent = "Resolving trace selection…";
+                            const fetchJson = async (u) => {
+                                const h = window.Dial9Creds ? Dial9Creds.headers() : {};
+                                const r = await fetch(u, { headers: h });
+                                if (!r.ok) throw new Error(`HTTP ${r.status}`);
+                                return r.json();
+                            };
+                            traceUrls = await Dial9TraceScope.resolveScope(scope, fetchJson);
+                        } catch (err) {
+                            showError("Failed to resolve trace selection: " + err.message);
+                            return;
+                        }
+                    }
                 }
 
                 if (!traceUrls.length) {
