@@ -864,6 +864,32 @@ async function main() {
     pass("Per-callsite schema with typed fields parsed correctly");
   }
 
+  function testBuildSpanDataDerivedStructSchema() {
+    // Hand-written `#[derive(TraceEvent)]` span structs cannot put ':' in their
+    // wire name (it's a Rust identifier), so they use the "SpanEnter__"/
+    // "SpanExit__" prefix instead. The viewer must classify these as spans too.
+    const customEvents = [
+      { name: "SpanEnter__DemoOp", timestamp: 1000, fields: { worker_id: 0, span_id: 1, parent_span_id: null, span_name: "request", operation: "GET /widgets", detail: "request #0" } },
+      { name: "SpanEnter__DemoOp", timestamp: 1100, fields: { worker_id: 0, span_id: 2, parent_span_id: 1, span_name: "db_query", operation: "SELECT widgets", detail: "query for request #0" } },
+      { name: "SpanExit__DemoOp",  timestamp: 1200, fields: { worker_id: 0, span_id: 2, span_name: "db_query" } },
+      { name: "SpanExit__DemoOp",  timestamp: 1300, fields: { worker_id: 0, span_id: 1, span_name: "request" } },
+    ];
+    const { allSpans, maxDepth } = buildSpanData(customEvents);
+    if (allSpans.length !== 2) fail(`Expected 2 spans, got ${allSpans.length}`);
+    const req = allSpans.find(s => s.spanName === "request");
+    const q = allSpans.find(s => s.spanName === "db_query");
+    if (!req || !q) fail("Missing request or db_query span");
+    // Both an interned (operation) and an inline (detail) user field should
+    // surface; base fields should not.
+    if (req.fields.operation !== "GET /widgets") fail(`Expected operation='GET /widgets', got '${req.fields.operation}'`);
+    if (req.fields.detail !== "request #0") fail(`Expected detail='request #0', got '${req.fields.detail}'`);
+    if (req.fields.span_name) fail("span_name should not be in user fields");
+    // Nesting via parent_span_id must be reconstructed.
+    if (q.parentSpanId !== "1") fail(`Expected db_query parent '1', got '${q.parentSpanId}'`);
+    if (maxDepth !== 1) fail(`Expected maxDepth=1, got ${maxDepth}`);
+    pass("Derived-struct span schema (SpanEnter__/SpanExit__) parsed correctly");
+  }
+
   function testBuildSpanDataUnmatched() {
     const customEvents = [
       { name: "SpanEnter:app::a:f:1", timestamp: 1000, fields: { worker_id: 0, span_id: 1, parent_span_id: null, span_name: "a" } },
@@ -1252,6 +1278,7 @@ async function main() {
   testBuildSpanDataCycleDetection();
   testBuildSpanDataRecycledId();
   testBuildSpanDataPerCallsiteSchema();
+  testBuildSpanDataDerivedStructSchema();
   testBuildSpanDataUnmatched();
   testBuildSpanDataChildrenIndex();
   testBuildSpanDataMultiplePolls();

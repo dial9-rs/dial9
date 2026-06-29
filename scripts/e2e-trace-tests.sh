@@ -68,6 +68,9 @@ node dial9-viewer/ui/test_prefix_detection.js
 echo "--- Checking enclosing spans (per-worker) ---"
 node dial9-viewer/ui/test_enclosing_spans.js
 
+echo "--- Checking custom span structs (SpanEnter__/SpanExit__ e2e) ---"
+node dial9-viewer/ui/test_custom_spans.js
+
 echo "--- Checking flamegraph export (folded + SVG) ---"
 node dial9-viewer/ui/test_flamegraph_export.js
 

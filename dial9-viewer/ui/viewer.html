@@ -2040,7 +2040,10 @@
                     cePanelHits = [];
                     selectedEvent = null;
                     if (trace.customEvents && trace.customEvents.length > 0) {
-                        const spanPrefixes = ["SpanEnter:", "SpanExit:"];
+                        // Keep in sync with buildSpanData's span-name classification
+                        // (trace_analysis.js): "__"-prefixed names come from
+                        // hand-written #[derive(TraceEvent)] span structs.
+                        const spanPrefixes = ["SpanEnter:", "SpanExit:", "SpanEnter__", "SpanExit__", "SpanClose__"];
                         const spanExact = new Set(["SpanEnterEvent", "SpanExitEvent", "SpanCloseEvent"]);
                         for (const ev of trace.customEvents) {
                             if (spanExact.has(ev.name)) continue;
