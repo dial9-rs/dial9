@@ -1,13 +1,10 @@
 //! Tests for the segment-processing worker and its built-in processors.
 
-#[cfg(all(test, feature = "pipeline-s3"))]
+#[cfg(test)]
 mod worker_s3_tests {
     use crate::fs::Fs;
     use crate::pipeline::{ProcessError, SegmentData, SegmentProcessor};
-    use crate::sealed;
-    use crate::worker::connection;
     use crate::worker::processors::GzipCompressor;
-    use crate::worker::s3::{self, S3PipelineUploader};
     use crate::worker::{BackgroundTaskConfig, DEFAULT_POLL_INTERVAL, WorkerLoop};
     use assert2::check;
     use std::future::Future;
@@ -17,101 +14,35 @@ mod worker_s3_tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
-    /// Deps that record whether on_failure was called by proxying through
-    /// a real S3Uploader-like upload path.
-    struct NotFoundTestDeps {
-        circuit_breaker: connection::CircuitBreaker,
-    }
-
-    impl NotFoundTestDeps {
-        fn new() -> Self {
-            Self {
-                circuit_breaker: connection::CircuitBreaker::new(),
-            }
-        }
-
-        /// Simulate the upload logic from S3PipelineUploader::process
-        async fn upload_segment(&mut self, segment: &sealed::SealedSegment) {
-            if !self.circuit_breaker.should_attempt() {
-                return;
-            }
-            // Attempt to read the file (like the worker would)
-            match tokio::fs::read(&segment.path).await {
-                Ok(_) => self.circuit_breaker.on_success(),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    // Should skip, not degrade
-                }
-                Err(_) => self.circuit_breaker.on_failure(),
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn evicted_file_does_not_trip_circuit_breaker() {
-        let dir = tempfile::tempdir().unwrap();
-        // Create a segment that doesn't exist on disk (simulates eviction)
-        let missing = sealed::SealedSegment {
-            path: dir.path().join("trace.0.bin"),
-            index: 0,
-        };
-
-        let mut deps = NotFoundTestDeps::new();
-        deps.upload_segment(&missing).await;
-
-        check!(deps.circuit_breaker == connection::CircuitBreaker::Closed);
-    }
-
     // --- Review finding #1: compressed_size metric is non-zero after pipeline ---
 
-    /// After a successful pipeline run (gzip + upload), the CompressedSize
-    /// metric must reflect the actual compressed byte count, not 0.
+    /// After a successful pipeline run (gzip + a terminal stage), the
+    /// CompressedSize metric must reflect the actual compressed byte count,
+    /// not 0.
     #[tokio::test]
     async fn compressed_size_metric_is_nonzero_after_pipeline() {
         use metrique_writer::AnyEntrySink;
         use metrique_writer::test_util::Inspector;
 
-        let s3_root = tempfile::tempdir().unwrap();
-        std::fs::create_dir(s3_root.path().join("test-bucket")).unwrap();
-
         let data = vec![42u8; 4096];
 
-        // Build a real pipeline: GzipCompressor → S3PipelineUploader
-        let s3_config = s3::S3Config::builder()
-            .bucket("test-bucket")
-            .service_name("test")
-            .instance_path("test")
-            .region("us-east-1")
-            .build();
+        /// Terminal stage that accepts whatever the gzip stage produced.
+        struct AcceptTerminal;
+        impl SegmentProcessor for AcceptTerminal {
+            fn name(&self) -> &'static str {
+                "AcceptTerminal"
+            }
+            fn process(
+                &mut self,
+                data: SegmentData,
+            ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>>
+            {
+                Box::pin(async move { Ok(data) })
+            }
+        }
 
-        let fs = s3s_fs::FileSystem::new(s3_root.path()).unwrap();
-        let mut builder = s3s::service::S3ServiceBuilder::new(fs);
-        builder.set_auth(s3s::auth::SimpleAuth::from_single("test", "test"));
-        let s3_service = builder.build();
-        let s3_client: s3s_aws::Client = s3_service.into();
-        let s3_sdk_config = aws_sdk_s3::Config::builder()
-            .behavior_version_latest()
-            .credentials_provider(aws_sdk_s3::config::Credentials::new(
-                "test", "test", None, None, "test",
-            ))
-            .region(aws_sdk_s3::config::Region::new("us-east-1"))
-            .http_client(s3_client)
-            .force_path_style(true)
-            .build();
-        let sdk_client = aws_sdk_s3::Client::from_conf(s3_sdk_config);
-        let tm_client = aws_sdk_s3_transfer_manager::Client::new(
-            aws_sdk_s3_transfer_manager::Config::builder()
-                .client(sdk_client)
-                .build(),
-        );
-
-        let uploader = s3::S3Uploader::new(tm_client, s3_config);
-        let processors: Vec<Box<dyn SegmentProcessor>> = vec![
-            Box::new(GzipCompressor),
-            Box::new(S3PipelineUploader::from_ready(
-                uploader,
-                connection::CircuitBreaker::new(),
-            )),
-        ];
+        let processors: Vec<Box<dyn SegmentProcessor>> =
+            vec![Box::new(GzipCompressor), Box::new(AcceptTerminal)];
 
         // Seal a compressible segment and run the real worker over it,
         // capturing the per-segment metrics it emits.
@@ -148,37 +79,6 @@ mod worker_s3_tests {
             "CompressedSize should be non-zero, got {}",
             compressed
         );
-    }
-
-    /// `set_client` is only valid while the uploader is `Pending`. Calling it
-    /// on a `Ready` uploader indicates an internal misuse and must panic
-    /// rather than silently drop the new client.
-    #[test]
-    #[should_panic(expected = "set_client called after uploader initialization")]
-    fn set_client_after_ready_panics() {
-        let s3_config = s3::S3Config::builder()
-            .bucket("test")
-            .service_name("test")
-            .instance_path("test")
-            .region("us-east-1")
-            .build();
-        let sdk_config = aws_sdk_s3::Config::builder()
-            .behavior_version_latest()
-            .credentials_provider(aws_sdk_s3::config::Credentials::new(
-                "test", "test", None, None, "test",
-            ))
-            .region(aws_sdk_s3::config::Region::new("us-east-1"))
-            .build();
-        let sdk_client = aws_sdk_s3::Client::from_conf(sdk_config);
-        let tm_client = aws_sdk_s3_transfer_manager::Client::new(
-            aws_sdk_s3_transfer_manager::Config::builder()
-                .client(sdk_client.clone())
-                .build(),
-        );
-        let uploader = s3::S3Uploader::new(tm_client, s3_config);
-        let mut pipeline_uploader =
-            S3PipelineUploader::from_ready(uploader, connection::CircuitBreaker::new());
-        pipeline_uploader.set_client(sdk_client);
     }
 
     // --- Review finding #10: uncompressed_size should use bytes.len() ---
@@ -388,16 +288,14 @@ mod trace_stem_tests {
     }
 }
 
-#[cfg(all(test, feature = "pipeline-s3"))]
+#[cfg(test)]
 mod worker_pipeline_tests {
     use crate::fs::Fs;
     use crate::payload::Payload;
     use crate::pipeline::{ProcessError, ProcessErrorKind, SegmentData, SegmentProcessor};
     use crate::sealed;
     use crate::worker::WorkerLoop;
-    use crate::worker::connection;
     use crate::worker::processors::{GzipCompressor, WriteBackProcessor};
-    use crate::worker::s3::{self, S3PipelineUploader};
     use assert2::check;
     use std::collections::HashMap;
     use std::future::Future;
@@ -414,202 +312,37 @@ mod worker_pipeline_tests {
         Duration::from_secs(1)
     }
 
-    /// s3s wrapper where every upload returns 500 InternalError.
-    struct AlwaysFailS3<S>(S);
-
-    #[async_trait::async_trait]
-    impl<S: s3s::S3 + Send + Sync> s3s::S3 for AlwaysFailS3<S> {
-        async fn put_object(
-            &self,
-            _req: s3s::S3Request<s3s::dto::PutObjectInput>,
-        ) -> s3s::S3Result<s3s::S3Response<s3s::dto::PutObjectOutput>> {
-            Err(s3s::S3Error::with_message(
-                s3s::S3ErrorCode::InternalError,
-                "injected 500",
-            ))
+    /// Stage that always fails with a retryable transfer error, standing in
+    /// for any upload processor that hit a transient failure.
+    struct RetryableFail;
+    impl SegmentProcessor for RetryableFail {
+        fn name(&self) -> &'static str {
+            "RetryableFail"
         }
-        async fn create_multipart_upload(
-            &self,
-            _req: s3s::S3Request<s3s::dto::CreateMultipartUploadInput>,
-        ) -> s3s::S3Result<s3s::S3Response<s3s::dto::CreateMultipartUploadOutput>> {
-            Err(s3s::S3Error::with_message(
-                s3s::S3ErrorCode::InternalError,
-                "injected 500",
-            ))
-        }
-        async fn upload_part(
-            &self,
-            _req: s3s::S3Request<s3s::dto::UploadPartInput>,
-        ) -> s3s::S3Result<s3s::S3Response<s3s::dto::UploadPartOutput>> {
-            Err(s3s::S3Error::with_message(
-                s3s::S3ErrorCode::InternalError,
-                "injected 500",
-            ))
-        }
-        async fn complete_multipart_upload(
-            &self,
-            _req: s3s::S3Request<s3s::dto::CompleteMultipartUploadInput>,
-        ) -> s3s::S3Result<s3s::S3Response<s3s::dto::CompleteMultipartUploadOutput>> {
-            Err(s3s::S3Error::with_message(
-                s3s::S3ErrorCode::InternalError,
-                "injected 500",
-            ))
+        fn process(
+            &mut self,
+            data: SegmentData,
+        ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>> {
+            Box::pin(async move {
+                Err(ProcessError::new(
+                    data,
+                    ProcessErrorKind::transfer(Box::from("injected"), true),
+                ))
+            })
         }
     }
 
-    /// s3s wrapper that fails the first `fail_n` writes with 500, then
-    /// delegates to the inner backend.
-    struct FlakyS3<S> {
-        inner: S,
-        remaining_failures: Arc<std::sync::atomic::AtomicU32>,
-    }
-
-    impl<S> FlakyS3<S> {
-        fn should_fail(&self) -> bool {
-            use std::sync::atomic::Ordering;
-            let prev = self.remaining_failures.load(Ordering::SeqCst);
-            if prev == 0 {
-                return false;
-            }
-            self.remaining_failures
-                .compare_exchange(prev, prev - 1, Ordering::SeqCst, Ordering::SeqCst)
-                .is_ok()
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl<S: s3s::S3 + Send + Sync> s3s::S3 for FlakyS3<S> {
-        async fn put_object(
-            &self,
-            req: s3s::S3Request<s3s::dto::PutObjectInput>,
-        ) -> s3s::S3Result<s3s::S3Response<s3s::dto::PutObjectOutput>> {
-            if self.should_fail() {
-                return Err(s3s::S3Error::with_message(
-                    s3s::S3ErrorCode::InternalError,
-                    "injected 500",
-                ));
-            }
-            self.inner.put_object(req).await
-        }
-    }
-
-    struct FlakyHarness {
-        uploader: s3::S3Uploader,
-        fail_counter: Arc<std::sync::atomic::AtomicU32>,
-        s3_root: tempfile::TempDir,
-    }
-
-    /// Read the single object out of the fake S3 bucket. Panics if there
-    /// isn't exactly one. Used to assert uploaded bytes survived retries.
-    fn read_only_object(s3_root: &std::path::Path) -> Vec<u8> {
-        fn walk(p: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
-            let Ok(rd) = std::fs::read_dir(p) else { return };
-            for entry in rd.flatten() {
-                let path = entry.path();
-                if path.is_dir() {
-                    walk(&path, out);
-                } else if path.is_file()
-                    && path
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .is_some_and(|n| !n.ends_with(".s3s-fs"))
-                {
-                    out.push(path);
-                }
-            }
-        }
-        let mut found = Vec::new();
-        walk(&s3_root.join("test-bucket"), &mut found);
-        assert_eq!(found.len(), 1, "expected exactly one object, got {found:?}");
-        std::fs::read(&found[0]).unwrap()
-    }
-
-    fn flaky_s3_harness(fail_n: u32) -> FlakyHarness {
-        let s3_root = tempfile::tempdir().unwrap();
-        std::fs::create_dir(s3_root.path().join("test-bucket")).unwrap();
-        let fail_counter = Arc::new(std::sync::atomic::AtomicU32::new(fail_n));
-
-        let fs = s3s_fs::FileSystem::new(s3_root.path()).unwrap();
-        let flaky = FlakyS3 {
-            inner: fs,
-            remaining_failures: Arc::clone(&fail_counter),
-        };
-        let mut svc = s3s::service::S3ServiceBuilder::new(flaky);
-        svc.set_auth(s3s::auth::SimpleAuth::from_single("test", "test"));
-        let s3_client: s3s_aws::Client = svc.build().into();
-
-        let sdk_config = aws_sdk_s3::Config::builder()
-            .behavior_version_latest()
-            .credentials_provider(aws_sdk_s3::config::Credentials::new(
-                "test", "test", None, None, "test",
-            ))
-            .region(aws_sdk_s3::config::Region::new("us-east-1"))
-            // Disable SDK-internal retries so each worker attempt = 1 PUT.
-            .retry_config(aws_sdk_s3::config::retry::RetryConfig::disabled())
-            .http_client(s3_client)
-            .force_path_style(true)
-            .build();
-        let tm_client = aws_sdk_s3_transfer_manager::Client::new(
-            aws_sdk_s3_transfer_manager::Config::builder()
-                .client(aws_sdk_s3::Client::from_conf(sdk_config))
-                .build(),
-        );
-        let s3_config = s3::S3Config::builder()
-            .bucket("test-bucket")
-            .service_name("test")
-            .instance_path("test")
-            .region("us-east-1")
-            .build();
-        FlakyHarness {
-            uploader: s3::S3Uploader::new(tm_client, s3_config),
-            fail_counter,
-            s3_root,
-        }
-    }
-
-    fn always_failing_s3_uploader() -> (s3::S3Uploader, tempfile::TempDir) {
-        let s3_root = tempfile::tempdir().unwrap();
-        let fs = s3s_fs::FileSystem::new(s3_root.path()).unwrap();
-        let failing = AlwaysFailS3(fs);
-        let mut builder = s3s::service::S3ServiceBuilder::new(failing);
-        builder.set_auth(s3s::auth::SimpleAuth::from_single("test", "test"));
-        let s3_service = builder.build();
-        let s3_client: s3s_aws::Client = s3_service.into();
-        let s3_sdk_config = aws_sdk_s3::Config::builder()
-            .behavior_version_latest()
-            .credentials_provider(aws_sdk_s3::config::Credentials::new(
-                "test", "test", None, None, "test",
-            ))
-            .region(aws_sdk_s3::config::Region::new("us-east-1"))
-            .http_client(s3_client)
-            .force_path_style(true)
-            .build();
-        let sdk_client = aws_sdk_s3::Client::from_conf(s3_sdk_config);
-        let tm_client = aws_sdk_s3_transfer_manager::Client::new(
-            aws_sdk_s3_transfer_manager::Config::builder()
-                .client(sdk_client)
-                .build(),
-        );
-        let s3_config = s3::S3Config::builder()
-            .bucket("test-bucket")
-            .service_name("test")
-            .instance_path("test")
-            .region("us-east-1")
-            .build();
-        (s3::S3Uploader::new(tm_client, s3_config), s3_root)
-    }
-
-    /// A segment that fails with a transient S3 error (500) is kept on disk for retry.
+    /// A retryable error keeps the segment on disk for a later attempt. (The
+    /// real S3 transient-failure and circuit-breaker-open paths both surface
+    /// as a retryable transfer error; they're covered against real S3 in
+    /// `dial9-s3`.)
     #[tokio::test]
     async fn failed_segment_kept_on_transient_error() {
         let dir = tempfile::tempdir().unwrap();
         let seg_path = dir.path().join("trace.0.bin");
         std::fs::write(&seg_path, b"bad data").unwrap();
 
-        let (uploader, _s3_root) = always_failing_s3_uploader();
-        let processors: Vec<Box<dyn SegmentProcessor>> = vec![Box::new(
-            S3PipelineUploader::from_ready(uploader, connection::CircuitBreaker::new()),
-        )];
+        let processors: Vec<Box<dyn SegmentProcessor>> = vec![Box::new(RetryableFail)];
 
         let stop = tokio_util::sync::CancellationToken::new();
         let mut worker = WorkerLoop::new(
@@ -624,38 +357,7 @@ mod worker_pipeline_tests {
 
         check!(
             seg_path.exists(),
-            "segment should be kept on disk after transient S3 error"
-        );
-    }
-
-    /// A circuit-breaker-open error keeps the segment on disk.
-    #[tokio::test]
-    async fn circuit_breaker_open_keeps_segment() {
-        let dir = tempfile::tempdir().unwrap();
-        let seg_path = dir.path().join("trace.0.bin");
-        std::fs::write(&seg_path, b"trace data").unwrap();
-
-        let (uploader, _s3_root) = always_failing_s3_uploader();
-        let mut cb = connection::CircuitBreaker::new();
-        // Trip the circuit breaker so it refuses attempts.
-        cb.on_failure();
-        let processors: Vec<Box<dyn SegmentProcessor>> =
-            vec![Box::new(S3PipelineUploader::from_ready(uploader, cb))];
-
-        let stop = tokio_util::sync::CancellationToken::new();
-        let mut worker = WorkerLoop::new(
-            fs_for(dir.path()),
-            default_poll(),
-            processors,
-            stop,
-            metrique_writer::sink::DevNullSink::boxed(),
-            None,
-        );
-        worker.process_open_segments().await;
-
-        check!(
-            seg_path.exists(),
-            "segment should be kept when circuit breaker is open"
+            "segment should be kept on disk after a retryable error"
         );
     }
 
@@ -1395,57 +1097,6 @@ mod worker_pipeline_tests {
         check!(snap.in_flight_segments == 0);
     }
 
-    #[tokio::test(flavor = "current_thread")]
-    async fn mem_e2e_real_s3_pipeline_recovers_within_budget() {
-        use std::io::Write;
-        use std::sync::atomic::Ordering;
-
-        let FlakyHarness {
-            uploader,
-            fail_counter,
-            s3_root,
-        } = flaky_s3_harness(2);
-        // > CB initial backoff (1s) so CB reopens between retries. CB
-        // doubles per failure; budget=3 fits 1s+2s within the 15s cap below.
-        let poll_interval = Duration::from_millis(1100);
-
-        let payload = b"segment-payload-bytes";
-        let fs = Fs::new_in_memory(64 * 1024, 1024).unwrap();
-        let mut h = fs.create_segment(Path::new("x")).unwrap();
-        h.write_all(payload).unwrap();
-        fs.seal(h, Path::new("x"), 0).unwrap();
-        fs.mark_writer_done();
-
-        let stop = tokio_util::sync::CancellationToken::new();
-        let mut worker = WorkerLoop::new(
-            Arc::clone(&fs),
-            poll_interval,
-            vec![Box::new(S3PipelineUploader::from_ready(
-                uploader,
-                connection::CircuitBreaker::new(),
-            ))],
-            stop,
-            metrique_writer::sink::DevNullSink::boxed(),
-            None,
-        );
-        tokio::time::timeout(Duration::from_secs(15), worker.run())
-            .await
-            .expect("worker hung");
-
-        check!(
-            fail_counter.load(Ordering::SeqCst) == 0,
-            "all injected failures consumed",
-        );
-        let uploaded = read_only_object(s3_root.path());
-        check!(
-            uploaded == payload,
-            "uploaded body must match seal'd bytes (snapshot survived retries)",
-        );
-        let snap = fs.take_files();
-        check!(snap.in_flight_bytes == 0);
-        check!(snap.in_flight_segments == 0);
-    }
-
     /// Captures each sealed segment's payload bytes, one `Vec<u8>` per segment.
     struct CapturingProcessor {
         segments: Arc<std::sync::Mutex<Vec<Vec<u8>>>>,
@@ -2103,20 +1754,18 @@ mod triggered_worker_tests {
     }
 }
 
-#[cfg(all(test, feature = "pipeline-s3"))]
+#[cfg(test)]
 mod finalize_dump_tests {
     use super::triggered_test_support::*;
     use crate::dump::{self, DumpCompletion, DumpId};
     use crate::fs::Fs;
     use crate::pipeline::{ProcessError, SegmentData, SegmentProcessor};
-    use crate::worker::s3::{self, S3PipelineUploader};
     use assert2::check;
     use std::future::Future;
     use std::io;
     use std::pin::Pin;
     use std::sync::Arc;
     use std::sync::Mutex;
-    use std::time::SystemTime;
 
     type SeenCompletions = Arc<Mutex<Vec<(DumpId, usize, Vec<(String, String)>, bool)>>>;
 
@@ -2284,41 +1933,6 @@ mod finalize_dump_tests {
         worker.await.unwrap();
     }
 
-    /// The S3 stage clears per-dump state but writes no manifest for a
-    /// failed dump (manifest presence means successful completion).
-    #[cfg(feature = "pipeline-s3")]
-    #[tokio::test]
-    async fn s3_finalize_skips_manifest_for_failed_dump() {
-        let config = s3::S3Config::builder()
-            .bucket("b")
-            .service_name("s")
-            .instance_path("i")
-            .build();
-        let mut uploader = S3PipelineUploader::new(config, None);
-
-        let (trigger, mut rx) = dump::channel();
-        trigger.dump_current_data();
-        let req = rx.rx.try_recv().unwrap();
-        uploader
-            .dump_keys
-            .insert(req.id.to_string(), vec!["traces/x.bin.gz".into()]);
-
-        let completion = crate::dump::DumpCompletion {
-            dump_id: req.id,
-            triggered_at: SystemTime::now(),
-            time_range: (SystemTime::now(), SystemTime::now()),
-            segments_processed: 0,
-            metadata: Vec::new(),
-            failed: true,
-        };
-        let key = uploader.finalize_dump(&completion).await;
-        check!(key.is_none());
-        check!(
-            uploader.dump_keys.is_empty(),
-            "per-dump state still cleared"
-        );
-    }
-
     #[tokio::test(start_paused = true)]
     async fn finalize_runs_for_empty_dump() {
         let fs = Fs::new_in_memory(64 * 1024, 1024).unwrap();
@@ -2362,187 +1976,6 @@ mod finalize_dump_tests {
         let receipt = trigger.dump_current_data().await.unwrap();
         check!(receipt.segments_processed == 1);
         check!(receipt.manifest_key.is_none());
-
-        stop.cancel();
-        worker.await.unwrap();
-    }
-}
-
-#[cfg(all(test, feature = "pipeline-s3"))]
-mod s3_dump_manifest_tests {
-    use super::triggered_test_support::*;
-    use crate::dump;
-    use crate::fs::Fs;
-    use crate::worker::connection;
-    use crate::worker::processors::GzipCompressor;
-    use crate::worker::s3::{self, S3PipelineUploader};
-    use assert2::check;
-    use std::path::Path;
-    use std::sync::Arc;
-    use std::time::Duration;
-
-    fn fake_tm_client(fs_root: &Path) -> aws_sdk_s3_transfer_manager::Client {
-        let fs = s3s_fs::FileSystem::new(fs_root).unwrap();
-        let mut builder = s3s::service::S3ServiceBuilder::new(fs);
-        builder.set_auth(s3s::auth::SimpleAuth::from_single("test", "test"));
-        let s3_service = builder.build();
-        let s3_client: s3s_aws::Client = s3_service.into();
-        let s3_config = aws_sdk_s3::Config::builder()
-            .behavior_version_latest()
-            .credentials_provider(aws_sdk_s3::config::Credentials::new(
-                "test", "test", None, None, "test",
-            ))
-            .region(aws_sdk_s3::config::Region::new("us-east-1"))
-            .http_client(s3_client)
-            .force_path_style(true)
-            .build();
-        let sdk_client = aws_sdk_s3::Client::from_conf(s3_config);
-        aws_sdk_s3_transfer_manager::Client::new(
-            aws_sdk_s3_transfer_manager::Config::builder()
-                .client(sdk_client)
-                .build(),
-        )
-    }
-
-    fn s3_uploader_for(root: &Path) -> S3PipelineUploader {
-        let config = s3::S3Config::builder()
-            .bucket("test-bucket")
-            .prefix("traces")
-            .service_name("test")
-            .instance_path("test")
-            .region("us-east-1")
-            .build();
-        let uploader = s3::S3Uploader::new(fake_tm_client(root), config);
-        S3PipelineUploader::from_ready(uploader, connection::CircuitBreaker::new())
-    }
-
-    fn read_manifest(root: &Path, key: &str) -> serde_json::Value {
-        let path = root.join("test-bucket").join(key);
-        let bytes = std::fs::read(&path)
-            .unwrap_or_else(|e| panic!("manifest at {} unreadable: {e}", path.display()));
-        serde_json::from_slice(&bytes).unwrap()
-    }
-
-    #[tokio::test]
-    async fn dump_writes_manifest_listing_uploaded_keys() {
-        let s3_root = tempfile::tempdir().unwrap();
-        std::fs::create_dir(s3_root.path().join("test-bucket")).unwrap();
-
-        let fs = Fs::new_in_memory(64 * 1024, 1024).unwrap();
-        let (trigger, rx) = dump::channel();
-        seal_mem(&fs, 0, now_epoch());
-        seal_mem(&fs, 1, now_epoch());
-
-        let stop = tokio_util::sync::CancellationToken::new();
-        let worker = spawn_worker(
-            Arc::clone(&fs),
-            vec![
-                Box::new(GzipCompressor),
-                Box::new(s3_uploader_for(s3_root.path())),
-            ],
-            rx,
-            stop.clone(),
-        );
-
-        let receipt = trigger
-            .dump_current_data()
-            .with_metadata("reason", "test")
-            .await
-            .unwrap();
-
-        let manifest_key = receipt
-            .manifest_key
-            .clone()
-            .expect("S3 pipeline writes a manifest");
-        check!(
-            manifest_key == format!("traces/dumps/{}.json", receipt.dump_id),
-            "manifest key layout"
-        );
-
-        let manifest = read_manifest(s3_root.path(), &manifest_key);
-        check!(manifest["dump_id"] == serde_json::json!(receipt.dump_id.to_string()));
-        check!(manifest["segments_processed"] == serde_json::json!(2));
-        check!(manifest["metadata"]["reason"] == serde_json::json!("test"));
-        let segments = manifest["segments"].as_array().unwrap();
-        check!(segments.len() == 2);
-        for key in segments {
-            let key = key.as_str().unwrap();
-            check!(
-                s3_root.path().join("test-bucket").join(key).exists(),
-                "manifest lists a real object: {key}"
-            );
-        }
-
-        stop.cancel();
-        worker.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn overlapping_dumps_fan_out_shared_key_to_both_manifests() {
-        let s3_root = tempfile::tempdir().unwrap();
-        std::fs::create_dir(s3_root.path().join("test-bucket")).unwrap();
-
-        let fs = Fs::new_in_memory(64 * 1024, 1024).unwrap();
-        let (trigger, rx) = dump::channel();
-
-        let stop = tokio_util::sync::CancellationToken::new();
-        let worker = spawn_worker(
-            Arc::clone(&fs),
-            vec![
-                Box::new(GzipCompressor),
-                Box::new(s3_uploader_for(s3_root.path())),
-            ],
-            rx,
-            stop.clone(),
-        );
-
-        let fut_a = std::future::IntoFuture::into_future(
-            trigger.dump_time_range(Duration::from_secs(60), Duration::from_secs(1)),
-        );
-        let fut_b = std::future::IntoFuture::into_future(
-            trigger.dump_time_range(Duration::from_secs(60), Duration::from_secs(1)),
-        );
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        seal_mem(&fs, 0, now_epoch());
-
-        let (receipt_a, receipt_b) = tokio::join!(fut_a, fut_b);
-        let receipt_a = receipt_a.unwrap();
-        let receipt_b = receipt_b.unwrap();
-
-        let manifest_a = read_manifest(s3_root.path(), receipt_a.manifest_key.as_ref().unwrap());
-        let manifest_b = read_manifest(s3_root.path(), receipt_b.manifest_key.as_ref().unwrap());
-        let segs_a = manifest_a["segments"].as_array().unwrap();
-        let segs_b = manifest_b["segments"].as_array().unwrap();
-        check!(segs_a.len() == 1);
-        check!(segs_a == segs_b, "the shared key appears in both manifests");
-
-        stop.cancel();
-        worker.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn empty_dump_still_writes_manifest_as_completion_signal() {
-        let s3_root = tempfile::tempdir().unwrap();
-        std::fs::create_dir(s3_root.path().join("test-bucket")).unwrap();
-
-        let fs = Fs::new_in_memory(64 * 1024, 1024).unwrap();
-        let (trigger, rx) = dump::channel();
-
-        let stop = tokio_util::sync::CancellationToken::new();
-        let worker = spawn_worker(
-            Arc::clone(&fs),
-            vec![
-                Box::new(GzipCompressor),
-                Box::new(s3_uploader_for(s3_root.path())),
-            ],
-            rx,
-            stop.clone(),
-        );
-
-        let receipt = trigger.dump_current_data().await.unwrap();
-        check!(receipt.segments_processed == 0);
-        let manifest = read_manifest(s3_root.path(), receipt.manifest_key.as_ref().unwrap());
-        check!(manifest["segments"] == serde_json::json!([]));
 
         stop.cancel();
         worker.await.unwrap();

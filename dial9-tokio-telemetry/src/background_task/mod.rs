@@ -13,11 +13,11 @@ use {crate::rate_limit::rate_limited, std::future::Future, std::pin::Pin, std::t
 pub use dial9_core::pipeline::{ProcessError, ProcessErrorKind, SegmentData, SegmentProcessor};
 pub use dial9_core::worker::BackgroundTaskConfig;
 pub(crate) use dial9_core::worker::processors::{GzipCompressor, WriteBackProcessor};
-#[cfg(feature = "worker-s3")]
-pub use dial9_core::worker::s3;
-#[cfg(feature = "worker-s3")]
-pub(crate) use dial9_core::worker::s3::S3PipelineUploader;
 pub(crate) use dial9_core::worker::{DEFAULT_POLL_INTERVAL, spawn};
+#[cfg(feature = "worker-s3")]
+pub use dial9_s3::s3;
+#[cfg(feature = "worker-s3")]
+pub(crate) use dial9_s3::s3::S3PipelineUploader;
 
 /// Closure-scoped builder for assembling a custom processor pipeline.
 ///

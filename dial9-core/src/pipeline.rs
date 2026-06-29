@@ -106,7 +106,7 @@ impl SegmentData {
 
     /// In-flight accounting, for tests that assert the worker re-balances
     /// counters between pipeline stages.
-    #[cfg(all(test, feature = "pipeline-s3"))]
+    #[cfg(test)]
     pub(crate) fn accounting(&self) -> Option<&SegmentAccounting> {
         self.accounting.as_ref()
     }
@@ -270,21 +270,6 @@ impl std::error::Error for ProcessError {
 impl From<std::io::Error> for ProcessErrorKind {
     fn from(e: std::io::Error) -> Self {
         Self::Io(e)
-    }
-}
-
-#[cfg(feature = "pipeline-s3")]
-impl From<aws_sdk_s3_transfer_manager::error::Error> for ProcessErrorKind {
-    fn from(e: aws_sdk_s3_transfer_manager::error::Error) -> Self {
-        use aws_sdk_s3_transfer_manager::error::ErrorKind;
-        let retryable = matches!(
-            e.kind(),
-            ErrorKind::IOError
-                | ErrorKind::RuntimeError
-                | ErrorKind::ChildOperationFailed
-                | ErrorKind::ChunkFailed(_)
-        );
-        Self::transfer(Box::new(e), retryable)
     }
 }
 

@@ -18,6 +18,14 @@ pub struct SealedSegment {
     pub(crate) index: u32,
 }
 
+#[cfg(all(feature = "test-util", feature = "pipeline"))]
+impl SealedSegment {
+    /// Build a disk segment directly.
+    pub(crate) fn new_for_test(path: PathBuf, index: u32) -> Self {
+        Self { path, index }
+    }
+}
+
 #[cfg(feature = "pipeline")]
 impl SealedSegment {
     /// Path to the sealed segment file on disk.

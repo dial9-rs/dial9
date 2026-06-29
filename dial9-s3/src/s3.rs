@@ -3,18 +3,34 @@
 //! Uploads processed segment bytes to S3 using the transfer manager.
 //! Deletes local files only after confirmed upload.
 
-use super::connection;
-use crate::boot_id::generate_boot_id as default_boot_id;
-use crate::pipeline::{ProcessError, ProcessErrorKind, SegmentData, SegmentProcessor};
-use crate::rate_limit::rate_limited;
-use crate::sealed::SegmentRef;
-use crate::worker::instance_metadata::InstanceIdentity;
+use crate::connection;
+pub use crate::instance_metadata::InstanceIdentity;
 use aws_sdk_s3_transfer_manager::Client;
+use dial9_core::boot_id::generate_boot_id as default_boot_id;
+use dial9_core::pipeline::{
+    ProcessError, ProcessErrorKind, SegmentData, SegmentProcessor, SegmentRef,
+};
+use dial9_core::rate_limited;
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
+
+/// Classify a transfer-manager error's retryability and wrap it as a
+/// [`ProcessErrorKind::transfer`]. A free fn rather than `impl From` because the
+/// orphan rule forbids implementing a foreign trait for a foreign type here.
+fn transfer_error_kind(e: aws_sdk_s3_transfer_manager::error::Error) -> ProcessErrorKind {
+    use aws_sdk_s3_transfer_manager::error::ErrorKind;
+    let retryable = matches!(
+        e.kind(),
+        ErrorKind::IOError
+            | ErrorKind::RuntimeError
+            | ErrorKind::ChildOperationFailed
+            | ErrorKind::ChunkFailed(_)
+    );
+    ProcessErrorKind::transfer(Box::new(e), retryable)
+}
 
 /// Metadata about a sealed trace segment, passed to custom key functions.
 #[derive(Debug, Clone, Default)]
@@ -214,7 +230,10 @@ pub(crate) struct DumpManifest {
 }
 
 impl DumpManifest {
-    pub(crate) fn new(completion: &crate::dump::DumpCompletion, segments: Vec<String>) -> Self {
+    pub(crate) fn new(
+        completion: &dial9_core::dump::DumpCompletion,
+        segments: Vec<String>,
+    ) -> Self {
         Self {
             dump_id: completion.dump_id.to_string(),
             triggered_at: rfc3339(completion.triggered_at),
@@ -321,7 +340,7 @@ impl S3Uploader {
     pub(crate) async fn upload_and_delete(
         &self,
         segment: &SegmentRef,
-        payload: crate::payload::Payload,
+        payload: dial9_core::pipeline::Payload,
         metadata: &HashMap<String, String>,
     ) -> Result<String, ProcessErrorKind> {
         let key = self.config.object_key(segment, metadata);
@@ -376,9 +395,10 @@ impl S3Uploader {
 
         let handle = input
             .body(payload.into_bytes().into())
-            .initiate_with(&self.client)?;
+            .initiate_with(&self.client)
+            .map_err(transfer_error_kind)?;
 
-        handle.join().await?;
+        handle.join().await.map_err(transfer_error_kind)?;
 
         // Remove local files if disk-backed (memory segments are gone once popped).
         if let Some(path) = segment.disk_path() {
@@ -410,8 +430,9 @@ impl S3Uploader {
             .key(key)
             .content_type("application/json")
             .body(bytes::Bytes::from(body).into())
-            .initiate_with(&self.client)?;
-        handle.join().await?;
+            .initiate_with(&self.client)
+            .map_err(transfer_error_kind)?;
+        handle.join().await.map_err(transfer_error_kind)?;
         Ok(())
     }
 }
@@ -421,7 +442,6 @@ impl S3Uploader {
 /// S3 uploader processor. Construction is synchronous — the AWS client and
 /// bucket region are resolved lazily on the first `process()` call, inside
 /// the worker's tokio runtime.
-#[cfg(feature = "pipeline-s3")]
 pub struct S3PipelineUploader {
     state: S3UploaderState,
     /// Triggered mode: object keys written per dump id, accumulated while
@@ -431,7 +451,6 @@ pub struct S3PipelineUploader {
     pub(crate) dump_keys: HashMap<String, Vec<String>>,
 }
 
-#[cfg(feature = "pipeline-s3")]
 enum S3UploaderState {
     Pending {
         s3_config: S3Config,
@@ -443,14 +462,12 @@ enum S3UploaderState {
     },
 }
 
-#[cfg(feature = "pipeline-s3")]
 impl std::fmt::Debug for S3PipelineUploader {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("S3PipelineUploader").finish_non_exhaustive()
     }
 }
 
-#[cfg(feature = "pipeline-s3")]
 impl S3PipelineUploader {
     /// Create a new uploader from an [`S3Config`](S3Config) and an
     /// optional pre-built S3 client. If `client` is `None`, the default
@@ -553,7 +570,6 @@ impl S3PipelineUploader {
     }
 }
 
-#[cfg(feature = "pipeline-s3")]
 impl SegmentProcessor for S3PipelineUploader {
     fn name(&self) -> &'static str {
         "S3Upload"
@@ -638,7 +654,7 @@ impl SegmentProcessor for S3PipelineUploader {
 
     fn finalize_dump(
         &mut self,
-        completion: &crate::dump::DumpCompletion,
+        completion: &dial9_core::dump::DumpCompletion,
     ) -> Pin<Box<dyn Future<Output = Option<String>> + Send + '_>> {
         // Always take the entry so per-dump state clears even when no
         // manifest gets written. An empty dump still gets an
@@ -708,7 +724,6 @@ impl SegmentProcessor for S3PipelineUploader {
 }
 
 /// Detect the region of an S3 bucket via HeadBucket.
-#[cfg(feature = "pipeline-s3")]
 async fn detect_bucket_region(client: &aws_sdk_s3::Client, bucket: &str) -> String {
     match client.head_bucket().bucket(bucket).send().await {
         Ok(resp) => {
@@ -746,9 +761,9 @@ async fn detect_bucket_region(client: &aws_sdk_s3::Client, bucket: &str) -> Stri
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::payload::Payload;
-    use crate::sealed::{SealedSegment, SegmentRef};
     use assert2::check;
+    use dial9_core::pipeline::Payload;
+    use dial9_core::pipeline::SegmentRef;
     use flate2::read::GzDecoder;
     use std::io::Read;
     use std::path::PathBuf;
@@ -781,10 +796,7 @@ mod tests {
     }
 
     fn make_segment(path: impl Into<PathBuf>, index: u32) -> SegmentRef {
-        SegmentRef::Disk(SealedSegment {
-            path: path.into(),
-            index,
-        })
+        dial9_core::test_util::disk_segment(path, index)
     }
 
     fn make_metadata(epoch_secs: u64) -> HashMap<String, String> {
@@ -1170,30 +1182,25 @@ mod tests {
     fn dump_manifest_serializes_doc_shape() {
         use std::time::{Duration, UNIX_EPOCH};
 
-        let (trigger, mut rx) = crate::dump::channel();
-        trigger
-            .dump_current_data()
-            .with_metadata("reason", "idle-ratio-drop");
-        let req = rx.rx.try_recv().unwrap();
-
-        let completion = crate::dump::DumpCompletion {
-            dump_id: req.id,
-            triggered_at: UNIX_EPOCH + Duration::from_secs(1741209000),
-            time_range: (
+        let dump_id = dial9_core::test_util::new_dump_id();
+        let completion = dial9_core::test_util::new_dump_completion(
+            dump_id,
+            UNIX_EPOCH + Duration::from_secs(1741209000),
+            (
                 UNIX_EPOCH + Duration::from_secs(1741208700),
                 UNIX_EPOCH + Duration::from_secs(1741209300),
             ),
-            segments_processed: 2,
-            metadata: req.metadata,
-            failed: false,
-        };
+            2,
+            vec![("reason".into(), "idle-ratio-drop".into())],
+            false,
+        );
         let manifest = DumpManifest::new(
             &completion,
             vec!["traces/a.bin.gz".into(), "traces/b.bin.gz".into()],
         );
         let value = serde_json::to_value(&manifest).unwrap();
 
-        check!(value["dump_id"] == serde_json::json!(req.id.to_string()));
+        check!(value["dump_id"] == serde_json::json!(dump_id.to_string()));
         check!(value["triggered_at"] == serde_json::json!("2025-03-05T21:10:00Z"));
         check!(
             value["time_range"]
@@ -1253,5 +1260,408 @@ mod tests {
         let metadata = HashMap::from([("epoch_secs".into(), "not-a-number".into())]);
         let key = config.object_key(&segment, &metadata);
         check!(key.contains("1970-01-01/0000"));
+    }
+}
+
+/// Worker-integration tests: drive a real `S3PipelineUploader` through the
+/// pipeline against an s3s-fs fake S3, via the `dial9_core::test_util`
+/// helpers (the worker internals are not exposed cross-crate).
+#[cfg(test)]
+mod worker_integration_tests {
+    use super::{S3PipelineUploader, S3Uploader};
+    use crate::connection::CircuitBreaker;
+    use crate::s3;
+    use assert2::check;
+    use dial9_core::pipeline::SegmentProcessor;
+    use dial9_core::worker::processors::GzipCompressor;
+    use std::path::Path;
+    use std::sync::Arc;
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
+
+    // === Unit tests (no worker) ===
+
+    /// A NotFound read (an evicted segment) must not degrade the circuit
+    /// breaker: only a genuine transfer error opens it.
+    #[tokio::test]
+    async fn evicted_file_does_not_trip_circuit_breaker() {
+        let dir = tempfile::tempdir().unwrap();
+        // A path that does not exist on disk (simulates eviction).
+        let missing = dir.path().join("trace.0.bin");
+
+        let mut cb = CircuitBreaker::new();
+        // Mirror the upload skip logic: a NotFound read is skipped, not a
+        // failure; any other error degrades the breaker.
+        if cb.should_attempt() {
+            match tokio::fs::read(&missing).await {
+                Ok(_) => cb.on_success(),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(_) => cb.on_failure(),
+            }
+        }
+
+        check!(cb == CircuitBreaker::Closed);
+    }
+
+    /// `set_client` is only valid while the uploader is `Pending`. Calling it
+    /// on a `Ready` uploader indicates internal misuse and must panic rather
+    /// than silently drop the new client.
+    #[test]
+    #[should_panic(expected = "set_client called after uploader initialization")]
+    fn set_client_after_ready_panics() {
+        let s3_config = s3::S3Config::builder()
+            .bucket("test")
+            .service_name("test")
+            .instance_path("test")
+            .region("us-east-1")
+            .build();
+        let sdk_config = aws_sdk_s3::Config::builder()
+            .behavior_version_latest()
+            .credentials_provider(aws_sdk_s3::config::Credentials::new(
+                "test", "test", None, None, "test",
+            ))
+            .region(aws_sdk_s3::config::Region::new("us-east-1"))
+            .build();
+        let sdk_client = aws_sdk_s3::Client::from_conf(sdk_config);
+        let tm_client = aws_sdk_s3_transfer_manager::Client::new(
+            aws_sdk_s3_transfer_manager::Config::builder()
+                .client(sdk_client.clone())
+                .build(),
+        );
+        let uploader = S3Uploader::new(tm_client, s3_config);
+        let mut pipeline_uploader = S3PipelineUploader::from_ready(uploader, CircuitBreaker::new());
+        pipeline_uploader.set_client(sdk_client);
+    }
+
+    /// The S3 stage clears per-dump state but writes no manifest for a
+    /// failed dump (manifest presence means successful completion).
+    #[tokio::test]
+    async fn s3_finalize_skips_manifest_for_failed_dump() {
+        let config = s3::S3Config::builder()
+            .bucket("b")
+            .service_name("s")
+            .instance_path("i")
+            .build();
+        let mut uploader = S3PipelineUploader::new(config, None);
+
+        let dump_id = dial9_core::test_util::new_dump_id();
+        uploader
+            .dump_keys
+            .insert(dump_id.to_string(), vec!["traces/x.bin.gz".into()]);
+
+        let now = std::time::SystemTime::now();
+        let completion = dial9_core::test_util::new_dump_completion(
+            dump_id,
+            now,
+            (now, now),
+            0,
+            Vec::new(),
+            true,
+        );
+        let key = uploader.finalize_dump(&completion).await;
+        check!(key.is_none());
+        check!(
+            uploader.dump_keys.is_empty(),
+            "per-dump state still cleared"
+        );
+    }
+
+    // === Worker-integration tests (real S3 via s3s-fs, driven through dial9_core::test_util) ===
+
+    fn fake_tm_client(fs_root: &Path) -> aws_sdk_s3_transfer_manager::Client {
+        let fs = s3s_fs::FileSystem::new(fs_root).unwrap();
+        let mut builder = s3s::service::S3ServiceBuilder::new(fs);
+        builder.set_auth(s3s::auth::SimpleAuth::from_single("test", "test"));
+        let s3_service = builder.build();
+        let s3_client: s3s_aws::Client = s3_service.into();
+        let s3_config = aws_sdk_s3::Config::builder()
+            .behavior_version_latest()
+            .credentials_provider(aws_sdk_s3::config::Credentials::new(
+                "test", "test", None, None, "test",
+            ))
+            .region(aws_sdk_s3::config::Region::new("us-east-1"))
+            .http_client(s3_client)
+            .force_path_style(true)
+            .build();
+        let sdk_client = aws_sdk_s3::Client::from_conf(s3_config);
+        aws_sdk_s3_transfer_manager::Client::new(
+            aws_sdk_s3_transfer_manager::Config::builder()
+                .client(sdk_client)
+                .build(),
+        )
+    }
+
+    fn s3_uploader_for(root: &Path) -> S3PipelineUploader {
+        let config = s3::S3Config::builder()
+            .bucket("test-bucket")
+            .prefix("traces")
+            .service_name("test")
+            .instance_path("test")
+            .region("us-east-1")
+            .build();
+        let uploader = S3Uploader::new(fake_tm_client(root), config);
+        S3PipelineUploader::from_ready(uploader, CircuitBreaker::new())
+    }
+
+    fn read_manifest(root: &Path, key: &str) -> serde_json::Value {
+        let path = root.join("test-bucket").join(key);
+        let bytes = std::fs::read(&path)
+            .unwrap_or_else(|e| panic!("manifest at {} unreadable: {e}", path.display()));
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    fn now_epoch() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    }
+
+    #[tokio::test]
+    async fn dump_writes_manifest_listing_uploaded_keys() {
+        let s3_root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(s3_root.path().join("test-bucket")).unwrap();
+
+        let pipeline = dial9_core::test_util::spawn_triggered_pipeline(vec![
+            Box::new(GzipCompressor),
+            Box::new(s3_uploader_for(s3_root.path())),
+        ]);
+        pipeline.seal(0, now_epoch());
+        pipeline.seal(1, now_epoch());
+
+        let receipt = pipeline
+            .trigger
+            .dump_current_data()
+            .with_metadata("reason", "test")
+            .await
+            .unwrap();
+
+        let manifest_key = receipt
+            .manifest_key
+            .clone()
+            .expect("S3 pipeline writes a manifest");
+        check!(
+            manifest_key == format!("traces/dumps/{}.json", receipt.dump_id),
+            "manifest key layout"
+        );
+
+        let manifest = read_manifest(s3_root.path(), &manifest_key);
+        check!(manifest["dump_id"] == serde_json::json!(receipt.dump_id.to_string()));
+        check!(manifest["segments_processed"] == serde_json::json!(2));
+        check!(manifest["metadata"]["reason"] == serde_json::json!("test"));
+        let segments = manifest["segments"].as_array().unwrap();
+        check!(segments.len() == 2);
+        for key in segments {
+            let key = key.as_str().unwrap();
+            check!(
+                s3_root.path().join("test-bucket").join(key).exists(),
+                "manifest lists a real object: {key}"
+            );
+        }
+
+        pipeline.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn overlapping_dumps_fan_out_shared_key_to_both_manifests() {
+        let s3_root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(s3_root.path().join("test-bucket")).unwrap();
+
+        let pipeline = dial9_core::test_util::spawn_triggered_pipeline(vec![
+            Box::new(GzipCompressor),
+            Box::new(s3_uploader_for(s3_root.path())),
+        ]);
+
+        let fut_a = std::future::IntoFuture::into_future(
+            pipeline
+                .trigger
+                .dump_time_range(Duration::from_secs(60), Duration::from_secs(1)),
+        );
+        let fut_b = std::future::IntoFuture::into_future(
+            pipeline
+                .trigger
+                .dump_time_range(Duration::from_secs(60), Duration::from_secs(1)),
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        pipeline.seal(0, now_epoch());
+
+        let (receipt_a, receipt_b) = tokio::join!(fut_a, fut_b);
+        let receipt_a = receipt_a.unwrap();
+        let receipt_b = receipt_b.unwrap();
+
+        let manifest_a = read_manifest(s3_root.path(), receipt_a.manifest_key.as_ref().unwrap());
+        let manifest_b = read_manifest(s3_root.path(), receipt_b.manifest_key.as_ref().unwrap());
+        let segs_a = manifest_a["segments"].as_array().unwrap();
+        let segs_b = manifest_b["segments"].as_array().unwrap();
+        check!(segs_a.len() == 1);
+        check!(segs_a == segs_b, "the shared key appears in both manifests");
+
+        pipeline.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn empty_dump_still_writes_manifest_as_completion_signal() {
+        let s3_root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(s3_root.path().join("test-bucket")).unwrap();
+
+        let pipeline = dial9_core::test_util::spawn_triggered_pipeline(vec![
+            Box::new(GzipCompressor),
+            Box::new(s3_uploader_for(s3_root.path())),
+        ]);
+
+        let receipt = pipeline.trigger.dump_current_data().await.unwrap();
+        check!(receipt.segments_processed == 0);
+        let manifest = read_manifest(s3_root.path(), receipt.manifest_key.as_ref().unwrap());
+        check!(manifest["segments"] == serde_json::json!([]));
+
+        pipeline.shutdown().await;
+    }
+
+    // === Flaky-retry end-to-end recovery ===
+
+    /// s3s wrapper that fails the first `fail_n` writes with 500, then
+    /// delegates to the inner backend.
+    struct FlakyS3<S> {
+        inner: S,
+        remaining_failures: Arc<std::sync::atomic::AtomicU32>,
+    }
+
+    impl<S> FlakyS3<S> {
+        fn should_fail(&self) -> bool {
+            let prev = self.remaining_failures.load(Ordering::SeqCst);
+            if prev == 0 {
+                return false;
+            }
+            self.remaining_failures
+                .compare_exchange(prev, prev - 1, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl<S: s3s::S3 + Send + Sync> s3s::S3 for FlakyS3<S> {
+        async fn put_object(
+            &self,
+            req: s3s::S3Request<s3s::dto::PutObjectInput>,
+        ) -> s3s::S3Result<s3s::S3Response<s3s::dto::PutObjectOutput>> {
+            if self.should_fail() {
+                return Err(s3s::S3Error::with_message(
+                    s3s::S3ErrorCode::InternalError,
+                    "injected 500",
+                ));
+            }
+            self.inner.put_object(req).await
+        }
+    }
+
+    struct FlakyHarness {
+        uploader: S3Uploader,
+        fail_counter: Arc<std::sync::atomic::AtomicU32>,
+        s3_root: tempfile::TempDir,
+    }
+
+    /// Read the single object out of the fake S3 bucket. Panics if there
+    /// isn't exactly one. Used to assert uploaded bytes survived retries.
+    fn read_only_object(s3_root: &Path) -> Vec<u8> {
+        fn walk(p: &Path, out: &mut Vec<std::path::PathBuf>) {
+            let Ok(rd) = std::fs::read_dir(p) else { return };
+            for entry in rd.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(&path, out);
+                } else if path.is_file()
+                    && path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|n| !n.ends_with(".s3s-fs"))
+                {
+                    out.push(path);
+                }
+            }
+        }
+        let mut found = Vec::new();
+        walk(&s3_root.join("test-bucket"), &mut found);
+        assert_eq!(found.len(), 1, "expected exactly one object, got {found:?}");
+        std::fs::read(&found[0]).unwrap()
+    }
+
+    fn flaky_s3_harness(fail_n: u32) -> FlakyHarness {
+        let s3_root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(s3_root.path().join("test-bucket")).unwrap();
+        let fail_counter = Arc::new(std::sync::atomic::AtomicU32::new(fail_n));
+
+        let fs = s3s_fs::FileSystem::new(s3_root.path()).unwrap();
+        let flaky = FlakyS3 {
+            inner: fs,
+            remaining_failures: Arc::clone(&fail_counter),
+        };
+        let mut svc = s3s::service::S3ServiceBuilder::new(flaky);
+        svc.set_auth(s3s::auth::SimpleAuth::from_single("test", "test"));
+        let s3_client: s3s_aws::Client = svc.build().into();
+
+        let sdk_config = aws_sdk_s3::Config::builder()
+            .behavior_version_latest()
+            .credentials_provider(aws_sdk_s3::config::Credentials::new(
+                "test", "test", None, None, "test",
+            ))
+            .region(aws_sdk_s3::config::Region::new("us-east-1"))
+            // Disable SDK-internal retries so each worker attempt = 1 PUT.
+            .retry_config(aws_sdk_s3::config::retry::RetryConfig::disabled())
+            .http_client(s3_client)
+            .force_path_style(true)
+            .build();
+        let tm_client = aws_sdk_s3_transfer_manager::Client::new(
+            aws_sdk_s3_transfer_manager::Config::builder()
+                .client(aws_sdk_s3::Client::from_conf(sdk_config))
+                .build(),
+        );
+        let s3_config = s3::S3Config::builder()
+            .bucket("test-bucket")
+            .service_name("test")
+            .instance_path("test")
+            .region("us-east-1")
+            .build();
+        FlakyHarness {
+            uploader: S3Uploader::new(tm_client, s3_config),
+            fail_counter,
+            s3_root,
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mem_e2e_real_s3_pipeline_recovers_within_budget() {
+        let FlakyHarness {
+            uploader,
+            fail_counter,
+            s3_root,
+        } = flaky_s3_harness(2);
+        // > CB initial backoff (1s) so CB reopens between retries. CB
+        // doubles per failure; budget=3 fits 1s+2s within the 15s cap below.
+        let poll_interval = Duration::from_millis(1100);
+
+        let payload = b"segment-payload-bytes".to_vec();
+        let uploader_stage = S3PipelineUploader::from_ready(uploader, CircuitBreaker::new());
+
+        tokio::time::timeout(
+            Duration::from_secs(15),
+            dial9_core::test_util::run_pipeline_continuous(
+                vec![payload.clone()],
+                vec![Box::new(uploader_stage)],
+                poll_interval,
+            ),
+        )
+        .await
+        .expect("worker hung")
+        .expect("pipeline run failed");
+
+        check!(
+            fail_counter.load(Ordering::SeqCst) == 0,
+            "all injected failures consumed",
+        );
+        let uploaded = read_only_object(s3_root.path());
+        check!(
+            uploaded == payload,
+            "uploaded body must match seal'd bytes (snapshot survived retries)",
+        );
     }
 }

@@ -9,18 +9,10 @@
 //! Behind the `pipeline` feature: the worker builds a tokio runtime to drive
 //! the async processors. Core's default build stays runtime-agnostic without it.
 
-/// S3 upload circuit breaker.
-#[cfg(feature = "pipeline-s3")]
-pub(crate) mod connection;
-#[cfg(feature = "pipeline-s3")]
-pub(crate) mod instance_metadata;
 pub(crate) mod metrics;
 pub(crate) mod pipeline_metrics;
 /// Built-in segment processors (gzip, write-back).
 pub mod processors;
-/// Built-in S3 upload processor.
-#[cfg(feature = "pipeline-s3")]
-pub mod s3;
 
 use crate::dump::{DumpError, DumpReceipt, DumpRequest, Lookback};
 use crate::fs::{EpochWindow, Fs, RemoveReason, TakenFiles, TakenSegment};
@@ -602,7 +594,7 @@ impl WorkerLoop {
 
     // Prod drains via the `run()` shutdown loop (stop/writer_done ->
     // drain-to-empty). This forces one synchronous drain cycle for unit tests.
-    #[cfg(all(test, feature = "pipeline-s3"))]
+    #[cfg(test)]
     async fn process_open_segments(&mut self) -> bool {
         let taken = self.fs.take_files();
         let found = !taken.segments.is_empty();
