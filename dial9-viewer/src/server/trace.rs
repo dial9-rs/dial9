@@ -3,17 +3,12 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum_extra::extract::Query;
-use flate2::read::GzDecoder;
 use futures::TryStreamExt;
-use futures::future::join_all;
 use serde::Deserialize;
-use std::io::Read;
 
 use crate::server::AppState;
 use crate::server::credentials::MaybeCreds;
 use crate::server::error::storage_error_response;
-
-const MAX_KEYS: usize = 100;
 
 #[derive(Deserialize)]
 pub struct ObjectParams {
@@ -86,86 +81,4 @@ pub async fn get_object(
         .body(Body::from_stream(body_stream))
         .unwrap()
         .into_response())
-}
-
-#[derive(Deserialize)]
-pub struct TraceParams {
-    /// S3 keys (repeated query param: ?keys=a&keys=b)
-    #[serde(default)]
-    pub keys: Vec<String>,
-    pub bucket: Option<String>,
-}
-
-/// `GET /api/trace?bucket=&keys=a&keys=b` — fetch every key, gunzip each, and
-/// concatenate into one uncompressed response.
-///
-/// DEPRECATED: scheduled for removal. The viewer no longer links here; it now
-/// emits one `trace=/api/object?…` component per file and lets the browser
-/// download them in parallel and gunzip client-side ([`get_object`]). This
-/// endpoint forces the backend to decompress and buffer the whole merged trace,
-/// which transfers far more bytes. It remains only for out-of-tree callers (the
-/// `dial9-trace-loading` skill); new code should use `/api/object`.
-pub async fn get_trace(
-    State(state): State<AppState>,
-    creds: MaybeCreds,
-    Query(params): Query<TraceParams>,
-) -> Result<Response, (StatusCode, String)> {
-    let backend = state.resolve(creds)?;
-
-    let bucket = params
-        .bucket
-        .or(state.default_bucket.clone())
-        .ok_or((StatusCode::BAD_REQUEST, "bucket is required".to_string()))?;
-
-    let keys: Vec<&str> = params
-        .keys
-        .iter()
-        .map(|k| k.as_str())
-        .filter(|k| !k.is_empty())
-        .collect();
-    if keys.is_empty() {
-        return Err((StatusCode::BAD_REQUEST, "keys is required".to_string()));
-    }
-    if keys.len() > MAX_KEYS {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            format!("too many keys (max {MAX_KEYS})"),
-        ));
-    }
-
-    let fetches = keys.iter().map(|key| backend.get_object(&bucket, key));
-    let results = join_all(fetches).await;
-
-    let mut combined = Vec::new();
-    for result in results {
-        let data = result.map_err(storage_error_response)?;
-        let raw = maybe_gunzip(&data);
-        combined.extend_from_slice(&raw);
-    }
-
-    Ok(Response::builder()
-        .header("content-type", "application/octet-stream")
-        .header("content-disposition", "attachment; filename=\"trace.bin\"")
-        .body(Body::from(combined))
-        .unwrap()
-        .into_response())
-}
-
-fn maybe_gunzip(data: &[u8]) -> Vec<u8> {
-    if data.len() >= 2 && data[0] == 0x1f && data[1] == 0x8b {
-        let mut decoder = GzDecoder::new(data);
-        let mut decompressed = Vec::new();
-        match decoder.read_to_end(&mut decompressed) {
-            Ok(_) => decompressed,
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    "gzip header detected but decompression failed, returning raw bytes"
-                );
-                data.to_vec()
-            }
-        }
-    } else {
-        data.to_vec()
-    }
 }

@@ -1,4 +1,5 @@
 pub mod cli;
+pub mod ingest;
 pub mod report_serve;
 pub mod server;
 pub mod storage;
@@ -20,7 +21,39 @@ pub(crate) struct ServeConfig {
     pub prefix: Option<String>,
     pub local_dir: Option<PathBuf>,
     pub dev: bool,
+    /// Enable demand-driven aggregation against the S3 `bucket`/`prefix` source.
+    pub agg: bool,
+    /// When set, enable demand-driven aggregation reading raw segments from
+    /// this local directory (local equivalent of `agg`).
+    pub agg_source_dir: Option<PathBuf>,
+    /// Where the on-demand aggregator writes its Parquet output (local).
+    /// Defaults to `<agg_source_dir>/flamegraph-data`.
+    pub agg_output_dir: Option<PathBuf>,
+    /// Output S3 bucket for aggregator part-files. Defaults to the source bucket.
+    pub agg_output_bucket: Option<String>,
+    /// Output S3 key prefix for aggregator part-files.
+    pub agg_output_prefix: String,
+    /// Raw-trace segment duration (seconds) for the scope time-filter pad.
+    pub agg_segment_secs: i64,
+    /// Enable the temporary trace-upload feature (`POST /api/upload`). Off by
+    /// default; there is no auth, so only enable on a trusted network.
     pub enable_upload: bool,
+}
+
+/// Build an [`S3Backend`] for `bucket`, pinned to the bucket's region when it
+/// can be detected (so cross-region buckets work), else the default chain.
+async fn s3_backend_for(bucket: &str) -> storage::S3Backend {
+    if let Some(region) = detect_bucket_region(bucket).await {
+        tracing::info!(%region, %bucket, "detected bucket region");
+        let config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+            .region(aws_sdk_s3::config::Region::new(region))
+            .load()
+            .await;
+        storage::S3Backend::from_client(aws_sdk_s3::Client::new(&config))
+    } else {
+        tracing::warn!(%bucket, "could not detect bucket region, using default");
+        storage::S3Backend::from_env().await
+    }
 }
 
 pub(crate) async fn serve(
@@ -30,6 +63,12 @@ pub(crate) async fn serve(
         prefix,
         local_dir,
         dev,
+        agg,
+        agg_source_dir,
+        agg_output_dir,
+        agg_output_bucket,
+        agg_output_prefix,
+        agg_segment_secs,
         enable_upload,
     }: ServeConfig,
 ) -> anyhow::Result<()> {
@@ -39,6 +78,63 @@ pub(crate) async fn serve(
                 .unwrap_or_else(|_| "dial9_viewer=info".parse().unwrap()),
         )
         .init();
+
+    // Build the demand-driven aggregation context if requested. Two sources:
+    //   - `agg_source_dir` (local): source + output are LocalBackends.
+    //   - `agg` + `bucket` (S3): source is the served bucket/prefix; output is a
+    //     (possibly different) bucket. Both go through region-aware S3 clients.
+    use crate::ingest::aggregate::AggContext;
+    let agg_output_prefix_for_state = agg_output_prefix.clone();
+    let agg = if let Some(src_dir) = &agg_source_dir {
+        let src_dir = std::fs::canonicalize(src_dir)?;
+        let out_dir = agg_output_dir.unwrap_or_else(|| src_dir.join("flamegraph-data"));
+        std::fs::create_dir_all(&out_dir)?;
+        let out_dir = std::fs::canonicalize(&out_dir)?;
+        tracing::info!(
+            source = %src_dir.display(),
+            output = %out_dir.display(),
+            "demand-driven aggregation enabled (local)"
+        );
+        Some(AggContext {
+            source: std::sync::Arc::new(storage::LocalBackend::new(&src_dir)),
+            output: std::sync::Arc::new(storage::LocalBackend::new(&out_dir)),
+            source_bucket: "local".to_string(),
+            source_is_local: true,
+            output_bucket: "local".to_string(),
+            output_prefix: ".".to_string(),
+            source_prefixes: vec![String::new()],
+            segment_duration_secs: agg_segment_secs,
+        })
+    } else if agg {
+        let Some(src_bucket) = bucket.clone() else {
+            anyhow::bail!("--agg requires --bucket (the S3 source of raw traces)");
+        };
+        let out_bucket = agg_output_bucket
+            .clone()
+            .unwrap_or_else(|| src_bucket.clone());
+        let source = std::sync::Arc::new(s3_backend_for(&src_bucket).await);
+        // Output may be a different bucket/account/region → its own client.
+        let output = std::sync::Arc::new(s3_backend_for(&out_bucket).await);
+        tracing::info!(
+            source_bucket = %src_bucket,
+            output_bucket = %out_bucket,
+            output_prefix = %agg_output_prefix,
+            "demand-driven aggregation enabled (S3)"
+        );
+        Some(AggContext {
+            source,
+            output,
+            source_bucket: src_bucket,
+            source_is_local: false,
+            output_bucket: out_bucket,
+            output_prefix: agg_output_prefix,
+            // The served `prefix` (if any) scopes the raw-segment listing.
+            source_prefixes: vec![prefix.clone().unwrap_or_default()],
+            segment_duration_secs: agg_segment_secs,
+        })
+    } else {
+        None
+    };
 
     let dev_ui_dir = if dev {
         let candidates = [PathBuf::from("ui"), PathBuf::from("dial9-viewer/ui")];
@@ -58,11 +154,25 @@ pub(crate) async fn serve(
         None
     };
 
-    // Build the base state per backend. `allow_byo` is true for every S3
-    // backend — users may always optionally supply their own credentials; it is
-    // false only in local-dir mode, where the data is local and credentials are
-    // meaningless.
-    let (mut app_state, allow_byo) = if let Some(dir) = &local_dir {
+    // Build the base state per backend. `source_is_s3` is true for every S3
+    // backend; it is false only in local-dir mode (and local-source
+    // aggregation), where the data is local. It drives BYO credentials, the
+    // creds panel, and on-demand aggregation (see `AppState::allow_byo_creds`).
+    let (mut app_state, source_is_s3) = if let Some(agg) = &agg {
+        // Demand-driven mode: browse endpoints read the raw segments from the
+        // same source backend, and `/api/flamegraph` runs the refinement loop.
+        // The browse default bucket is the agg source bucket ("local" for a
+        // local source, the real bucket for S3). An S3 source supports BYO
+        // credentials; a local-directory source does not.
+        let source_is_s3 = !agg.source_is_local;
+        let state = server::AppState::new(
+            std::sync::Arc::clone(&agg.source),
+            Some(agg.source_bucket.clone()),
+            prefix.clone(),
+        )
+        .with_agg(agg.clone());
+        (state, source_is_s3)
+    } else if let Some(dir) = &local_dir {
         let dir = std::fs::canonicalize(dir)?;
         tracing::info!(path = %dir.display(), "serving traces from local directory");
         let backend = storage::LocalBackend::new(&dir);
@@ -98,7 +208,29 @@ pub(crate) async fn serve(
         (state, true)
     };
 
-    app_state = app_state.with_byo_creds(allow_byo);
+    // When an output bucket is configured, build its region-aware backend once
+    // (ambient identity — the operator owns this bucket) and hand both to the
+    // state. The `/api/flamegraph` BYOC path writes aggregated part-files here
+    // instead of back into the (often read-only) source bucket. Without this,
+    // aggregation against a read-only source fails with S3 AccessDenied on the
+    // first PutObject.
+    let agg_output_backend: Option<std::sync::Arc<dyn storage::StorageBackend>> =
+        match &agg_output_bucket {
+            Some(out_bucket) => {
+                tracing::info!(
+                    %out_bucket,
+                    "aggregation output bucket configured (writes go here, not the source)"
+                );
+                Some(std::sync::Arc::new(s3_backend_for(out_bucket).await))
+            }
+            None => None,
+        };
+
+    app_state = app_state
+        .with_byo_creds(source_is_s3)
+        .with_agg_output_prefix(agg_output_prefix_for_state)
+        .with_agg_output_bucket(agg_output_bucket, agg_output_backend)
+        .with_agg_segment_secs(agg_segment_secs);
     if let Some(d) = dev_ui_dir {
         app_state = app_state.with_dev_ui_dir(d);
     }

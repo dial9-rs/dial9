@@ -1729,13 +1729,9 @@ mod tests {
         let cfg = Dial9Config::from_env_source(&env);
         let rt = TracedRuntime::try_new(cfg).expect("runtime should build");
         let shared = rt.guard().shared().expect("telemetry should be enabled");
-        let runtime_meta: Vec<(String, String)> = shared
-            .sources
-            .lock()
-            .unwrap()
-            .iter()
-            .flat_map(|s| s.segment_metadata())
-            .collect();
+        let runtime_meta = crate::telemetry::recorder::source::collect_segment_metadata(
+            &mut shared.sources.lock().unwrap(),
+        );
         let runtime_keys: Vec<&str> = runtime_meta
             .iter()
             .map(|(k, _)| k.as_str())
@@ -1837,16 +1833,12 @@ mod tests {
         let cfg = Dial9Config::from_env_source(&env);
         let rt = TracedRuntime::try_new(cfg).expect("runtime should build");
         assert!(rt.guard().is_enabled(), "telemetry should remain enabled");
+        let shared = rt.guard().shared().expect("telemetry should be enabled");
+        let runtime_meta = crate::telemetry::recorder::source::collect_segment_metadata(
+            &mut shared.sources.lock().unwrap(),
+        );
         assert!(
-            !rt.guard()
-                .shared()
-                .expect("telemetry should be enabled")
-                .sources
-                .lock()
-                .unwrap()
-                .iter()
-                .flat_map(|s| s.segment_metadata())
-                .any(|(k, _)| k.starts_with("runtime.")),
+            !runtime_meta.iter().any(|(k, _)| k.starts_with("runtime.")),
             "no Tokio runtime metadata should be present when Tokio instrumentation is disabled"
         );
         assert!(

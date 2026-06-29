@@ -1,6 +1,8 @@
 use assert2::check;
 use dial9_viewer::server::{AppState, UploadLimits, router};
-use dial9_viewer::storage::{LocalBackend, ObjectInfo, S3Backend, StorageBackend, StorageError};
+use dial9_viewer::storage::{
+    ListPage, LocalBackend, ObjectInfo, S3Backend, StorageBackend, StorageError,
+};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -16,6 +18,20 @@ impl StorageBackend for FakeBackend {
     }
 
     fn list_objects(
+        &self,
+        _bucket: &str,
+        _prefix: &str,
+        _cap: usize,
+    ) -> Pin<Box<dyn Future<Output = Result<ListPage, StorageError>> + Send + '_>> {
+        Box::pin(async {
+            Ok(ListPage {
+                objects: vec![],
+                truncated: false,
+            })
+        })
+    }
+
+    fn list_objects_all(
         &self,
         _bucket: &str,
         _prefix: &str,
@@ -37,6 +53,15 @@ impl StorageBackend for FakeBackend {
         _key: &str,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, StorageError>> + Send + '_>> {
         Box::pin(async { Err(StorageError::NotFound("fake".into())) })
+    }
+
+    fn put_object(
+        &self,
+        _bucket: &str,
+        _key: &str,
+        _data: Vec<u8>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), StorageError>> + Send + '_>> {
+        Box::pin(async { Ok(()) })
     }
 }
 
@@ -94,6 +119,15 @@ impl StorageBackend for ErroringBackend {
         &self,
         _bucket: &str,
         _prefix: &str,
+        _cap: usize,
+    ) -> Pin<Box<dyn Future<Output = Result<ListPage, StorageError>> + Send + '_>> {
+        Box::pin(async { Err(StorageError::Other("default backend used".into())) })
+    }
+
+    fn list_objects_all(
+        &self,
+        _bucket: &str,
+        _prefix: &str,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<ObjectInfo>, StorageError>> + Send + '_>> {
         Box::pin(async { Err(StorageError::Other("default backend used".into())) })
     }
@@ -111,6 +145,15 @@ impl StorageBackend for ErroringBackend {
         _bucket: &str,
         _key: &str,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, StorageError>> + Send + '_>> {
+        Box::pin(async { Err(StorageError::Other("default backend used".into())) })
+    }
+
+    fn put_object(
+        &self,
+        _bucket: &str,
+        _key: &str,
+        _data: Vec<u8>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), StorageError>> + Send + '_>> {
         Box::pin(async { Err(StorageError::Other("default backend used".into())) })
     }
 }
@@ -152,50 +195,6 @@ async fn serves_static_files() {
     check!(resp.status().as_u16() == 200);
     let body = resp.text().await.unwrap();
     check!(body.contains("Trace Viewer"));
-}
-
-#[tokio::test]
-async fn search_requires_bucket() {
-    let state = AppState::new(Arc::new(FakeBackend), None, None);
-    let base = start_server(state).await;
-    let client = reqwest::Client::new();
-
-    let resp = client
-        .get(format!("{base}/api/search"))
-        .send()
-        .await
-        .unwrap();
-    check!(resp.status().as_u16() == 400);
-}
-
-#[tokio::test]
-async fn search_uses_default_bucket() {
-    let state = AppState::new(Arc::new(FakeBackend), Some("my-bucket".into()), None);
-    let base = start_server(state).await;
-    let client = reqwest::Client::new();
-
-    let resp = client
-        .get(format!("{base}/api/search"))
-        .send()
-        .await
-        .unwrap();
-    check!(resp.status().as_u16() == 200);
-    let body: Vec<ObjectInfo> = resp.json().await.unwrap();
-    check!(body.is_empty());
-}
-
-#[tokio::test]
-async fn trace_requires_keys() {
-    let state = AppState::new(Arc::new(FakeBackend), Some("test-bucket".into()), None);
-    let base = start_server(state).await;
-    let client = reqwest::Client::new();
-
-    let resp = client
-        .get(format!("{base}/api/trace?keys=&bucket=test-bucket"))
-        .send()
-        .await
-        .unwrap();
-    check!(resp.status().as_u16() == 400);
 }
 
 #[tokio::test]
@@ -301,154 +300,11 @@ async fn prefixes_discovers_top_level_prefixes() {
     check!(resp.contains(&"logs/".to_string()));
 }
 
-#[tokio::test]
-async fn search_returns_objects_from_s3() {
-    let (s3, base, _dir) = setup_s3_test("test-bucket", None, None).await;
-    let client = reqwest::Client::new();
-
-    put_object(
-        &s3,
-        "test-bucket",
-        "traces/2026-04-09/1910/svc/host/123-0.bin.gz",
-        &gzip_bytes(b"trace data 1"),
-    )
-    .await;
-    put_object(
-        &s3,
-        "test-bucket",
-        "traces/2026-04-09/1910/svc/host/123-1.bin.gz",
-        &gzip_bytes(b"trace data 2"),
-    )
-    .await;
-    put_object(
-        &s3,
-        "test-bucket",
-        "traces/2026-04-09/1920/svc/host/456-0.bin.gz",
-        &gzip_bytes(b"other data"),
-    )
-    .await;
-
-    // Search with prefix matching the 1910 time bucket
-    let resp = client
-        .get(format!(
-            "{base}/api/search?q=traces/2026-04-09/1910/&bucket=test-bucket"
-        ))
-        .send()
-        .await
-        .unwrap();
-    check!(resp.status().as_u16() == 200);
-    let body: Vec<ObjectInfo> = resp.json().await.unwrap();
-    check!(body.len() == 2);
-    check!(body[0].key.contains("1910"));
-    check!(body[1].key.contains("1910"));
-
-    // Search with broader prefix returns all 3
-    let resp = client
-        .get(format!(
-            "{base}/api/search?q=traces/2026-04-09/&bucket=test-bucket"
-        ))
-        .send()
-        .await
-        .unwrap();
-    let body: Vec<ObjectInfo> = resp.json().await.unwrap();
-    check!(body.len() == 3);
-}
-
-#[tokio::test]
-async fn search_with_default_prefix() {
-    let (s3, base, _dir) = setup_s3_test(
-        "test-bucket",
-        Some("test-bucket".into()),
-        Some("my-prefix".into()),
-    )
-    .await;
-    let client = reqwest::Client::new();
-
-    put_object(
-        &s3,
-        "test-bucket",
-        "my-prefix/2026-04-09/1910/svc/host/123-0.bin.gz",
-        b"data",
-    )
-    .await;
-
-    let resp = client
-        .get(format!("{base}/api/search?q=2026-04-09/"))
-        .send()
-        .await
-        .unwrap();
-    check!(resp.status().as_u16() == 200);
-    let body: Vec<ObjectInfo> = resp.json().await.unwrap();
-    check!(body.len() == 1);
-    check!(body[0].key.contains("my-prefix"));
-}
-
-#[tokio::test]
-async fn trace_fetches_and_concatenates() {
-    let (s3, base, _dir) = setup_s3_test("test-bucket", Some("test-bucket".into()), None).await;
-    let client = reqwest::Client::new();
-
-    let trace1 = b"TRACE_SEGMENT_1_DATA";
-    let trace2 = b"TRACE_SEGMENT_2_DATA";
-
-    put_object(&s3, "test-bucket", "seg1.bin.gz", &gzip_bytes(trace1)).await;
-    put_object(&s3, "test-bucket", "seg2.bin.gz", &gzip_bytes(trace2)).await;
-
-    let resp = client
-        .get(format!(
-            "{base}/api/trace?keys=seg1.bin.gz&keys=seg2.bin.gz"
-        ))
-        .send()
-        .await
-        .unwrap();
-    check!(resp.status().as_u16() == 200);
-
-    let body = resp.bytes().await.unwrap();
-    let expected: Vec<u8> = [trace1.as_slice(), trace2.as_slice()].concat();
-    check!(body.as_ref() == expected.as_slice());
-}
-
-#[tokio::test]
-async fn trace_single_key() {
-    let (s3, base, _dir) = setup_s3_test("trace-bucket", Some("trace-bucket".into()), None).await;
-    let client = reqwest::Client::new();
-
-    let data = b"single segment data";
-    put_object(&s3, "trace-bucket", "key.bin.gz", &gzip_bytes(data)).await;
-
-    let resp = client
-        .get(format!("{base}/api/trace?keys=key.bin.gz"))
-        .send()
-        .await
-        .unwrap();
-    check!(resp.status().as_u16() == 200);
-    let body = resp.bytes().await.unwrap();
-    check!(body.as_ref() == data);
-}
-
-#[tokio::test]
-async fn trace_handles_uncompressed_data() {
-    let (s3, base, _dir) = setup_s3_test("trace-bucket", Some("trace-bucket".into()), None).await;
-    let client = reqwest::Client::new();
-
-    let data = b"raw uncompressed trace";
-    put_object(&s3, "trace-bucket", "raw.bin", data).await;
-
-    let resp = client
-        .get(format!("{base}/api/trace?keys=raw.bin"))
-        .send()
-        .await
-        .unwrap();
-    check!(resp.status().as_u16() == 200);
-    let body = resp.bytes().await.unwrap();
-    check!(body.as_ref() == data);
-}
-
 // --- /api/object (raw single-object passthrough) tests ---
 
 /// The defining property of /api/object: it serves a `.bin.gz` object's bytes
 /// VERBATIM, still gzipped — it must NOT decompress (that's the browser's job
-/// via fetchTraces). Contrast with /api/trace, which gunzips server-side.
+/// via fetchTraces).
 #[tokio::test]
 async fn object_serves_raw_gzipped_bytes() {
     let (s3, base, _dir) = setup_s3_test("obj-bucket", Some("obj-bucket".into()), None).await;
@@ -556,100 +412,169 @@ async fn byo_credentials_serve_object_from_headers() {
     check!(body.as_ref() == gzipped.as_slice());
 }
 
-/// Full end-to-end smoke test: simulates the browser flow.
-/// 1. Upload gzipped trace segments to fake S3
-/// 2. Search for them via /api/search
-/// 3. Pick keys from the search results
-/// 4. Fetch concatenated trace via /api/trace
-/// 5. Verify the concatenated output matches the original data
+/// `/api/browse` must fan a window out across the finer time buckets that
+/// cover it and merge the results. This is the fix for the silent-truncation
+/// bug: the browser used to query one *hour* prefix per hour, overflowing the
+/// listing cap on busy hours. Here three segments land in two different
+/// 10-minute buckets (1910 and 1925) within the same window; a single browse
+/// call must return all three.
 #[tokio::test]
-async fn e2e_search_then_view() {
+async fn browse_fans_out_across_time_buckets() {
     let (s3, base, _dir) = setup_s3_test("traces-bucket", Some("traces-bucket".into()), None).await;
     let client = reqwest::Client::new();
 
-    // Simulate two trace segments from the same time bucket
-    let seg1 = b"SEGMENT_ONE_BINARY_DATA_HERE";
-    let seg2 = b"SEGMENT_TWO_BINARY_DATA_HERE";
-
+    // 2026-04-09 19:10:00Z .. 19:25:00Z — keys use {date}/{HHMM}/...
     put_object(
         &s3,
         "traces-bucket",
-        "2026-04-09/1910/checkout-api/us-east-1/host1/1000-0.bin.gz",
-        &gzip_bytes(seg1),
+        "2026-04-09/1910/svc/hostA/1000-0.bin.gz",
+        &gzip_bytes(b"a"),
     )
     .await;
     put_object(
         &s3,
         "traces-bucket",
-        "2026-04-09/1910/checkout-api/us-east-1/host1/1000-1.bin.gz",
-        &gzip_bytes(seg2),
+        "2026-04-09/1912/svc/hostB/1001-0.bin.gz",
+        &gzip_bytes(b"b"),
+    )
+    .await;
+    put_object(
+        &s3,
+        "traces-bucket",
+        "2026-04-09/1925/svc/hostC/1002-0.bin.gz",
+        &gzip_bytes(b"c"),
+    )
+    .await;
+    // Outside the window — must NOT be returned.
+    put_object(
+        &s3,
+        "traces-bucket",
+        "2026-04-09/2010/svc/hostD/1003-0.bin.gz",
+        &gzip_bytes(b"d"),
     )
     .await;
 
-    // Step 1: Search — like the browser would
-    let search_resp: Vec<ObjectInfo> = client
-        .get(format!(
-            "{base}/api/search?q=2026-04-09/1910/checkout-api/&bucket=traces-bucket"
-        ))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-
-    check!(search_resp.len() == 2);
-
-    // Step 2: Build the trace URL from search results — like the browser's viewSelected()
-    let keys: Vec<&str> = search_resp.iter().map(|o| o.key.as_str()).collect();
-    let keys_param: String = keys
-        .iter()
-        .map(|k| format!("keys={}", urlencoding::encode(k)))
-        .collect::<Vec<_>>()
-        .join("&");
-
-    let trace_resp = client
-        .get(format!(
-            "{base}/api/trace?{keys_param}&bucket=traces-bucket",
-        ))
-        .send()
-        .await
-        .unwrap();
-
-    check!(trace_resp.status().as_u16() == 200);
-    let body = trace_resp.bytes().await.unwrap();
-
-    // The concatenated output should be seg1 + seg2 (order depends on S3 listing)
-    check!(body.len() == seg1.len() + seg2.len());
-    // Both segments should be present
-    let body_slice = body.as_ref();
-    let has_seg1 = body_slice.windows(seg1.len()).any(|w| w == seg1.as_slice());
-    let has_seg2 = body_slice.windows(seg2.len()).any(|w| w == seg2.as_slice());
-    check!(has_seg1);
-    check!(has_seg2);
-}
-
-/// Regression test: a compressed segment that decompresses to >50MB must be
-/// served successfully. Previously, the server truncated at 50MB during
-/// decompression (overshooting by up to 8KB) and then rejected the result
-/// with HTTP 413 because it exceeded the same 50MB limit.
-#[tokio::test]
-async fn trace_serves_large_decompressed_segment() {
-    let (s3, base, _dir) = setup_s3_test("big-bucket", Some("big-bucket".into()), None).await;
-    let client = reqwest::Client::new();
-
-    // 60MB of data — compresses well, decompresses to >50MB
-    let big_data = vec![0xABu8; 60 * 1024 * 1024];
-    put_object(&s3, "big-bucket", "big.bin.gz", &gzip_bytes(&big_data)).await;
-
+    // 19:08:00Z .. 19:30:00Z (epoch seconds). Spans the 1910 and 1920 ten-minute
+    // buckets; the 20:10 segment is an hour later and excluded.
+    let from = 1_775_761_680; // 2026-04-09T19:08:00Z
+    let to = from + 22 * 60; // 19:30:00Z
     let resp = client
-        .get(format!("{base}/api/trace?keys=big.bin.gz"))
+        .get(format!(
+            "{base}/api/browse?bucket=traces-bucket&from={from}&to={to}"
+        ))
         .send()
         .await
         .unwrap();
     check!(resp.status().as_u16() == 200);
-    let body = resp.bytes().await.unwrap();
-    check!(body.len() == big_data.len());
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let objects = body["objects"].as_array().unwrap();
+    check!(objects.len() == 3);
+    check!(body["truncated"] == false);
+    let keys: Vec<&str> = objects.iter().map(|o| o["key"].as_str().unwrap()).collect();
+    check!(keys.iter().any(|k| k.contains("1910")));
+    check!(keys.iter().any(|k| k.contains("1912")));
+    check!(keys.iter().any(|k| k.contains("1925")));
+    check!(!keys.iter().any(|k| k.contains("2010")));
+}
+
+/// `/api/browse` combines the server's default prefix with the request's
+/// `prefix` param.
+#[tokio::test]
+async fn browse_honors_default_and_request_prefix() {
+    let (s3, base, _dir) = setup_s3_test(
+        "test-bucket",
+        Some("test-bucket".into()),
+        Some("root".into()),
+    )
+    .await;
+    let client = reqwest::Client::new();
+
+    put_object(
+        &s3,
+        "test-bucket",
+        "root/team-a/2026-04-09/1910/svc/host/1000-0.bin.gz",
+        &gzip_bytes(b"a"),
+    )
+    .await;
+    // Different sub-prefix under the same default — must be excluded by `prefix`.
+    put_object(
+        &s3,
+        "test-bucket",
+        "root/team-b/2026-04-09/1910/svc/host/1000-0.bin.gz",
+        &gzip_bytes(b"b"),
+    )
+    .await;
+
+    let from = 1_775_761_680; // 19:08:00Z
+    let to = from + 22 * 60;
+    let resp = client
+        .get(format!(
+            "{base}/api/browse?bucket=test-bucket&prefix=team-a&from={from}&to={to}"
+        ))
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() == 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let objects = body["objects"].as_array().unwrap();
+    check!(objects.len() == 1);
+    check!(objects[0]["key"].as_str().unwrap().contains("team-a"));
+}
+
+/// A focus window under 10 minutes drops to minute-granularity prefixes. A
+/// 4-char `HHMM` prefix is exact, so a segment in an adjacent minute outside
+/// the window is not even listed.
+#[tokio::test]
+async fn browse_uses_minute_granularity_for_short_window() {
+    let (s3, base, _dir) = setup_s3_test("traces-bucket", Some("traces-bucket".into()), None).await;
+    let client = reqwest::Client::new();
+
+    put_object(
+        &s3,
+        "traces-bucket",
+        "2026-04-09/1910/svc/host/1000-0.bin.gz",
+        &gzip_bytes(b"a"),
+    )
+    .await;
+    put_object(
+        &s3,
+        "traces-bucket",
+        "2026-04-09/1911/svc/host/1001-0.bin.gz",
+        &gzip_bytes(b"b"),
+    )
+    .await;
+
+    // 19:10:00Z .. 19:10:30Z — a 30s window, well under the 10-minute threshold.
+    let from = 1_775_761_680 + 2 * 60; // 19:10:00Z
+    let to = from + 30; // 19:10:30Z
+    let resp = client
+        .get(format!(
+            "{base}/api/browse?bucket=traces-bucket&from={from}&to={to}"
+        ))
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() == 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let objects = body["objects"].as_array().unwrap();
+    // Only the 1910 minute bucket is scanned; 1911 is never listed.
+    check!(objects.len() == 1);
+    check!(objects[0]["key"].as_str().unwrap().contains("1910"));
+}
+
+/// `/api/browse` rejects a window where `to` precedes `from`.
+#[tokio::test]
+async fn browse_rejects_inverted_range() {
+    let state = AppState::new(Arc::new(FakeBackend), Some("b".into()), None);
+    let base = start_server(state).await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .get(format!("{base}/api/browse?from=2000&to=1000"))
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() == 400);
 }
 
 // --- bring-your-own-credentials tests ---
@@ -672,57 +597,6 @@ async fn setup_byo_test(bucket: &str) -> (aws_sdk_s3::Client, String, tempfile::
         .with_ephemeral_s3(fake_ephemeral_config(s3_root.path()));
     let base = start_server(state).await;
     (upload_client, base, s3_root)
-}
-
-#[tokio::test]
-async fn byo_credentials_serve_search_from_headers() {
-    let (s3, base, _dir) = setup_byo_test("byo-bucket").await;
-    let client = reqwest::Client::new();
-
-    put_object(
-        &s3,
-        "byo-bucket",
-        "traces/2026-04-09/seg.bin.gz",
-        &gzip_bytes(b"x"),
-    )
-    .await;
-
-    // With credentials → served by the ephemeral backend (the s3s fake).
-    let resp = client
-        .get(format!("{base}/api/search?q=traces/&bucket=byo-bucket"))
-        .header(H_AKID, "test")
-        .header(H_SECRET, "test")
-        .header(H_REGION, "us-east-1")
-        .send()
-        .await
-        .unwrap();
-    check!(resp.status().as_u16() == 200);
-    let body: Vec<ObjectInfo> = resp.json().await.unwrap();
-    check!(body.len() == 1);
-    check!(body[0].key == "traces/2026-04-09/seg.bin.gz");
-}
-
-#[tokio::test]
-async fn byo_credentials_serve_trace_from_headers() {
-    let (s3, base, _dir) = setup_byo_test("byo-bucket").await;
-    let client = reqwest::Client::new();
-
-    let data = b"TRACE_BYTES";
-    put_object(&s3, "byo-bucket", "seg.bin.gz", &gzip_bytes(data)).await;
-
-    let resp = client
-        .get(format!(
-            "{base}/api/trace?keys=seg.bin.gz&bucket=byo-bucket"
-        ))
-        .header(H_AKID, "test")
-        .header(H_SECRET, "test")
-        .header(H_REGION, "us-east-1")
-        .send()
-        .await
-        .unwrap();
-    check!(resp.status().as_u16() == 200);
-    let body = resp.bytes().await.unwrap();
-    check!(body.as_ref() == data);
 }
 
 #[tokio::test]
@@ -806,7 +680,9 @@ async fn without_credentials_falls_back_to_default_backend() {
     let client = reqwest::Client::new();
 
     let resp = client
-        .get(format!("{base}/api/search?q=traces/&bucket=byo-bucket"))
+        .get(format!(
+            "{base}/api/browse?prefix=traces/&bucket=byo-bucket&from=0&to=9999999999"
+        ))
         .send()
         .await
         .unwrap();
@@ -821,7 +697,9 @@ async fn incomplete_credentials_rejected_with_400() {
 
     // Access key id without a secret → 400, never a silent fallback.
     let resp = client
-        .get(format!("{base}/api/search?q=traces/&bucket=byo-bucket"))
+        .get(format!(
+            "{base}/api/browse?prefix=traces/&bucket=byo-bucket&from=0&to=9999999999"
+        ))
         .header(H_AKID, "test")
         .send()
         .await
@@ -884,84 +762,6 @@ fn setup_local_dir() -> tempfile::TempDir {
 
 fn local_state(dir: &std::path::Path) -> AppState {
     AppState::new(Arc::new(LocalBackend::new(dir)), Some("local".into()), None)
-}
-
-#[tokio::test]
-async fn local_search_lists_all_files() {
-    let dir = setup_local_dir();
-    let base = start_server(local_state(dir.path())).await;
-    let client = reqwest::Client::new();
-
-    let resp: Vec<ObjectInfo> = client
-        .get(format!("{base}/api/search"))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    check!(resp.len() == 3);
-}
-
-#[tokio::test]
-async fn local_search_filters_by_prefix() {
-    let dir = setup_local_dir();
-    let base = start_server(local_state(dir.path())).await;
-    let client = reqwest::Client::new();
-
-    let resp: Vec<ObjectInfo> = client
-        .get(format!("{base}/api/search?q=2026-04-09/1910/"))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    check!(resp.len() == 2);
-    for obj in &resp {
-        check!(obj.key.contains("1910"));
-    }
-}
-
-#[tokio::test]
-async fn local_trace_fetches_and_decompresses() {
-    let dir = setup_local_dir();
-    let base = start_server(local_state(dir.path())).await;
-    let client = reqwest::Client::new();
-
-    let resp = client
-        .get(format!(
-            "{base}/api/trace?keys=2026-04-09/1910/svc/host/123-0.bin.gz&keys=2026-04-09/1910/svc/host/123-1.bin.gz"
-        ))
-        .send()
-        .await
-        .unwrap();
-    check!(resp.status().as_u16() == 200);
-    let body = resp.bytes().await.unwrap();
-    // Both segments decompressed and concatenated
-    let body_slice = body.as_ref();
-    let has_seg0 = body_slice
-        .windows(b"trace seg 0".len())
-        .any(|w| w == b"trace seg 0");
-    let has_seg1 = body_slice
-        .windows(b"trace seg 1".len())
-        .any(|w| w == b"trace seg 1");
-    check!(has_seg0);
-    check!(has_seg1);
-}
-
-#[tokio::test]
-async fn local_trace_not_found() {
-    let dir = setup_local_dir();
-    let base = start_server(local_state(dir.path())).await;
-    let client = reqwest::Client::new();
-
-    let resp = client
-        .get(format!("{base}/api/trace?keys=nonexistent.bin"))
-        .send()
-        .await
-        .unwrap();
-    check!(resp.status().as_u16() == 404);
 }
 
 /// /api/object on the local backend serves the file's raw (gzipped) bytes
@@ -1041,105 +841,6 @@ async fn local_prefixes_lists_subdirs() {
         .unwrap();
     check!(resp.contains(&"2026-04-09/1910/".to_string()));
     check!(resp.contains(&"2026-04-09/1920/".to_string()));
-}
-
-#[tokio::test]
-async fn local_e2e_search_then_view() {
-    let dir = setup_local_dir();
-    let base = start_server(local_state(dir.path())).await;
-    let client = reqwest::Client::new();
-
-    // Search for segments in the 1910 time bucket
-    let search_resp: Vec<ObjectInfo> = client
-        .get(format!("{base}/api/search?q=2026-04-09/1910/"))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    check!(search_resp.len() == 2);
-
-    // Build trace URL from search results
-    let keys_param: String = search_resp
-        .iter()
-        .map(|o| format!("keys={}", urlencoding::encode(&o.key)))
-        .collect::<Vec<_>>()
-        .join("&");
-
-    let trace_resp = client
-        .get(format!("{base}/api/trace?{keys_param}"))
-        .send()
-        .await
-        .unwrap();
-    check!(trace_resp.status().as_u16() == 200);
-
-    let body = trace_resp.bytes().await.unwrap();
-    // Both segments present (decompressed)
-    let body_slice = body.as_ref();
-    let has_seg0 = body_slice
-        .windows(b"trace seg 0".len())
-        .any(|w| w == b"trace seg 0");
-    let has_seg1 = body_slice
-        .windows(b"trace seg 1".len())
-        .any(|w| w == b"trace seg 1");
-    check!(has_seg0);
-    check!(has_seg1);
-}
-
-#[tokio::test]
-async fn local_search_empty_dir() {
-    let dir = tempfile::tempdir().unwrap();
-    let base = start_server(local_state(dir.path())).await;
-    let client = reqwest::Client::new();
-
-    let resp: Vec<ObjectInfo> = client
-        .get(format!("{base}/api/search"))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    check!(resp.is_empty());
-}
-
-#[tokio::test]
-async fn local_search_returns_file_sizes() {
-    let dir = tempfile::tempdir().unwrap();
-    let data = b"hello world";
-    std::fs::write(dir.path().join("test.bin"), data).unwrap();
-
-    let base = start_server(local_state(dir.path())).await;
-    let client = reqwest::Client::new();
-
-    let resp: Vec<ObjectInfo> = client
-        .get(format!("{base}/api/search"))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    check!(resp.len() == 1);
-    check!(resp[0].key == "test.bin");
-    check!(resp[0].size == data.len() as i64);
-}
-
-#[tokio::test]
-async fn local_path_traversal_rejected() {
-    let dir = setup_local_dir();
-    let base = start_server(local_state(dir.path())).await;
-    let client = reqwest::Client::new();
-
-    // Attempt to escape root via ../
-    let resp = client
-        .get(format!("{base}/api/trace?keys=../../../etc/passwd"))
-        .send()
-        .await
-        .unwrap();
-    // Should fail — either not found or error, but not 200
-    check!(resp.status().as_u16() != 200);
 }
 
 // --- trace upload tests ---

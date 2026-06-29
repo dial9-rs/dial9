@@ -13,6 +13,24 @@ pub struct ObjectInfo {
     pub last_modified: Option<String>,
 }
 
+/// A bounded page of object listings, plus whether the cap was reached.
+///
+/// `truncated` is the signal the old listing path lacked: when a prefix fans
+/// out to more objects than the cap, the listing stops early and the caller
+/// (and ultimately the UI) needs to know data is missing rather than silently
+/// showing a partial result.
+///
+/// This is the return type of [`StorageBackend::list_objects`], so it is
+/// deliberately *not* `#[non_exhaustive]` — out-of-crate backends must be able
+/// to construct it. Adding a field is therefore a breaking change.
+#[derive(Debug, Clone)]
+pub struct ListPage {
+    pub objects: Vec<ObjectInfo>,
+    /// True if the listing stopped at the requested cap and more objects exist
+    /// that were not returned.
+    pub truncated: bool,
+}
+
 /// A handle to an object's bytes that can be streamed to the client as they
 /// arrive, rather than buffered in full first.
 ///
@@ -51,7 +69,25 @@ pub trait StorageBackend: Send + Sync {
         &self,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, StorageError>> + Send + '_>>;
 
+    /// List objects under `prefix`, paginating up to `cap` results.
+    ///
+    /// Returns the objects plus whether the listing was truncated at `cap` —
+    /// the signal a caller needs so a partial result is never mistaken for a
+    /// complete one. `/api/browse` fans many prefixes out at a high cap and
+    /// surfaces the flag as a UI warning.
     fn list_objects(
+        &self,
+        bucket: &str,
+        prefix: &str,
+        cap: usize,
+    ) -> Pin<Box<dyn Future<Output = Result<ListPage, StorageError>> + Send + '_>>;
+
+    /// List ALL objects under `prefix`, following pagination to exhaustion and
+    /// without the cap that [`list_objects`] applies. Used by the ingest
+    /// pipeline, which must discover every segment in a 24h window.
+    ///
+    /// [`list_objects`]: StorageBackend::list_objects
+    fn list_objects_all(
         &self,
         bucket: &str,
         prefix: &str,
@@ -69,6 +105,16 @@ pub trait StorageBackend: Send + Sync {
         bucket: &str,
         key: &str,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, StorageError>> + Send + '_>>;
+
+    /// Put an object. Routes the write through this backend (S3 or local FS),
+    /// so ingest output can target a different bucket/account/region than the
+    /// source.
+    fn put_object(
+        &self,
+        bucket: &str,
+        key: &str,
+        data: Vec<u8>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), StorageError>> + Send + '_>>;
 
     /// Like [`get_object`](StorageBackend::get_object), but returns the body as a
     /// stream so the HTTP layer can forward bytes to the client as they arrive
@@ -228,9 +274,7 @@ pub struct S3Backend {
 impl S3Backend {
     pub async fn from_env() -> Self {
         let config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
-        Self {
-            client: aws_sdk_s3::Client::new(&config),
-        }
+        Self::from_client(aws_sdk_s3::Client::new(&config))
     }
 
     /// Create from an existing S3 client (useful for testing with s3s).
@@ -249,6 +293,53 @@ impl S3Backend {
         ephemeral: &Option<EphemeralS3Config>,
     ) -> Self {
         Self::from_client(build_credentialed_client(credentials, region, ephemeral))
+    }
+
+    /// Paginate `ListObjectsV2` under `prefix`, accumulating up to `cap` objects
+    /// and reporting whether more existed beyond the cap. The cap is a backstop
+    /// against a prefix with unbounded fan-out producing an enormous response.
+    async fn list_objects_paginated(
+        &self,
+        bucket: &str,
+        prefix: &str,
+        cap: usize,
+    ) -> Result<ListPage, StorageError> {
+        let mut pages = self
+            .client
+            .list_objects_v2()
+            .bucket(bucket)
+            .prefix(prefix)
+            .into_paginator()
+            .send();
+
+        let mut objects = Vec::new();
+        let mut truncated = false;
+        'pages: while let Some(page) = pages.next().await {
+            let page = page.map_err(|e| classify_s3_error(&e))?;
+            for obj in page.contents() {
+                if objects.len() >= cap {
+                    truncated = true;
+                    break 'pages;
+                }
+                if let Some(key) = obj.key() {
+                    objects.push(ObjectInfo {
+                        key: key.to_string(),
+                        size: obj.size().unwrap_or(0),
+                        last_modified: obj.last_modified().map(|t| t.to_string()),
+                    });
+                }
+            }
+        }
+        if truncated {
+            tracing::warn!(
+                bucket = %bucket,
+                prefix = %prefix,
+                cap,
+                "object listing truncated at cap; some objects are not shown"
+            );
+        }
+
+        Ok(ListPage { objects, truncated })
     }
 }
 
@@ -319,24 +410,42 @@ impl StorageBackend for S3Backend {
         &self,
         bucket: &str,
         prefix: &str,
+        cap: usize,
+    ) -> Pin<Box<dyn Future<Output = Result<ListPage, StorageError>> + Send + '_>> {
+        let bucket = bucket.to_string();
+        let prefix = prefix.to_string();
+        Box::pin(async move { self.list_objects_paginated(&bucket, &prefix, cap).await })
+    }
+
+    fn list_objects_all(
+        &self,
+        bucket: &str,
+        prefix: &str,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<ObjectInfo>, StorageError>> + Send + '_>> {
         let bucket = bucket.to_string();
         let prefix = prefix.to_string();
         Box::pin(async move {
-            const MAX_RESULTS: usize = 1000;
-            let mut pages = self
-                .client
-                .list_objects_v2()
-                .bucket(&bucket)
-                .prefix(&prefix)
-                .into_paginator()
-                .send();
-
+            // Same pagination loop as `list_objects`, but with NO cap: follow
+            // continuation tokens to exhaustion so ingest sees every object.
             let mut objects = Vec::new();
-            let mut truncated = false;
-            'pages: while let Some(page) = pages.next().await {
-                let page = page.map_err(|e| classify_s3_error(&e))?;
-                for obj in page.contents() {
+            let mut continuation: Option<String> = None;
+
+            loop {
+                let mut req = self
+                    .client
+                    .list_objects_v2()
+                    .bucket(&bucket)
+                    .prefix(&prefix);
+                if let Some(token) = continuation.take() {
+                    req = req.continuation_token(token);
+                }
+
+                let resp = req.send().await.map_err(|e| {
+                    use aws_sdk_s3::error::DisplayErrorContext;
+                    StorageError::Other(format!("{}", DisplayErrorContext(&e)))
+                })?;
+
+                for obj in resp.contents() {
                     if let Some(key) = obj.key() {
                         objects.push(ObjectInfo {
                             key: key.to_string(),
@@ -344,19 +453,28 @@ impl StorageBackend for S3Backend {
                             last_modified: obj.last_modified().map(|t| t.to_string()),
                         });
                     }
-                    if objects.len() >= MAX_RESULTS {
-                        truncated = true;
-                        break 'pages;
-                    }
                 }
-            }
-            if truncated {
-                tracing::warn!(
-                    bucket = %bucket,
-                    prefix = %prefix,
-                    max = MAX_RESULTS,
-                    "object listing truncated at cap; some objects are not shown"
-                );
+
+                if resp.is_truncated() == Some(true) {
+                    match resp.next_continuation_token() {
+                        Some(token) => continuation = Some(token.to_string()),
+                        None => {
+                            // S3 says there's more but gave us no token to fetch
+                            // it. Re-issuing the same request would loop forever,
+                            // so stop here with what we have rather than spin.
+                            tracing::warn!(
+                                bucket = %bucket,
+                                prefix = %prefix,
+                                returned = objects.len(),
+                                "list_objects_all: response truncated but no continuation token; \
+                                 returning partial listing"
+                            );
+                            break;
+                        }
+                    }
+                } else {
+                    break;
+                }
             }
 
             Ok(objects)
@@ -421,6 +539,13 @@ impl StorageBackend for S3Backend {
         let bucket = bucket.to_string();
         let key = key.to_string();
         Box::pin(async move {
+            // A single GET per object. Object-level concurrency comes from the
+            // ingest work-queue (N workers each downloading one object), which
+            // benchmarked ~2.4x faster than routing these ~37MB trace segments
+            // through the transfer manager's multipart path (the part split +
+            // reassembly overhead dominated, and a shared transfer-manager
+            // instance throttled all workers to a flat wall time regardless of
+            // worker count).
             let resp = self
                 .client
                 .get_object()
@@ -450,6 +575,30 @@ impl StorageBackend for S3Backend {
                 .map_err(|e| StorageError::Other(e.to_string()))?;
 
             Ok(bytes.to_vec())
+        })
+    }
+
+    fn put_object(
+        &self,
+        bucket: &str,
+        key: &str,
+        data: Vec<u8>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), StorageError>> + Send + '_>> {
+        let bucket = bucket.to_string();
+        let key = key.to_string();
+        Box::pin(async move {
+            self.client
+                .put_object()
+                .bucket(&bucket)
+                .key(&key)
+                .body(aws_sdk_s3::primitives::ByteStream::from(data))
+                .send()
+                .await
+                .map_err(|e| {
+                    use aws_sdk_s3::error::DisplayErrorContext;
+                    StorageError::Other(format!("{}", DisplayErrorContext(&e)))
+                })?;
+            Ok(())
         })
     }
 
@@ -542,14 +691,41 @@ impl StorageBackend for LocalBackend {
         &self,
         _bucket: &str,
         prefix: &str,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<ObjectInfo>, StorageError>> + Send + '_>> {
+        cap: usize,
+    ) -> Pin<Box<dyn Future<Output = Result<ListPage, StorageError>> + Send + '_>> {
         let prefix = prefix.to_string();
         Box::pin(async move {
             let root = self.root.clone();
             let prefix2 = prefix.clone();
             tokio::task::spawn_blocking(move || {
                 let mut objects = Vec::new();
+                // `collect_files` enforces its own local-FS-safety bounds
+                // (`MAX_COLLECT_FILES`); the `cap` is applied on top so the
+                // contract holds for any caller-chosen limit.
                 collect_files(&root, &root, &prefix2, &mut objects, 0, &mut 0)?;
+                objects.sort_by(|a, b| a.key.cmp(&b.key));
+                let truncated = objects.len() > cap;
+                objects.truncate(cap);
+                Ok(ListPage { objects, truncated })
+            })
+            .await
+            .map_err(|e| StorageError::Other(e.to_string()))?
+        })
+    }
+
+    fn list_objects_all(
+        &self,
+        _bucket: &str,
+        prefix: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<ObjectInfo>, StorageError>> + Send + '_>> {
+        let prefix = prefix.to_string();
+        Box::pin(async move {
+            let root = self.root.clone();
+            tokio::task::spawn_blocking(move || {
+                // Uncapped recursive walk: ingest needs every segment, unlike
+                // the UI listing which caps via `collect_files`.
+                let mut objects = Vec::new();
+                collect_files_uncapped(&root, &root, &prefix, &mut objects)?;
                 objects.sort_by(|a, b| a.key.cmp(&b.key));
                 Ok(objects)
             })
@@ -640,6 +816,39 @@ impl StorageBackend for LocalBackend {
             .map_err(|e| StorageError::Other(e.to_string()))?
         })
     }
+
+    fn put_object(
+        &self,
+        _bucket: &str,
+        key: &str,
+        data: Vec<u8>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), StorageError>> + Send + '_>> {
+        let root = self.root.clone();
+        let key = key.to_string();
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || {
+                let path = root.join(&key);
+                // Reject keys that escape the root once their parent dirs are
+                // resolved (mirrors the safety check used elsewhere here).
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent)
+                        .map_err(|e| StorageError::Other(e.to_string()))?;
+                    let canonical_parent = parent
+                        .canonicalize()
+                        .map_err(|e| StorageError::Other(e.to_string()))?;
+                    if !canonical_parent.starts_with(&root) {
+                        return Err(StorageError::Other(
+                            "path escapes root directory".to_string(),
+                        ));
+                    }
+                }
+                std::fs::write(&path, data).map_err(|e| StorageError::Other(e.to_string()))?;
+                Ok(())
+            })
+            .await
+            .map_err(|e| StorageError::Other(e.to_string()))?
+        })
+    }
 }
 
 /// Maximum directory depth to recurse into when listing local files.
@@ -704,6 +913,70 @@ fn collect_files(
             if file_name_str.starts_with('.') {
                 continue;
             }
+            let key = path
+                .strip_prefix(root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .into_owned();
+            if key.starts_with(prefix) {
+                let meta = std::fs::metadata(&canonical)
+                    .map_err(|e| StorageError::Other(e.to_string()))?;
+                out.push(ObjectInfo {
+                    key,
+                    size: meta.len() as i64,
+                    last_modified: meta.modified().ok().and_then(|t| {
+                        t.duration_since(std::time::UNIX_EPOCH)
+                            .ok()
+                            .map(|d| d.as_secs().to_string())
+                    }),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Recursively collect ALL files under `root` whose key starts with `prefix`,
+/// with NO file-count or entries-visited caps. Used by
+/// [`LocalBackend::list_objects_all`] for ingest, which must see the whole tree.
+///
+/// This mirrors S3 `list_objects_all` semantics: it returns *every* matching
+/// object (including the aggregation output `.parquet` files under `samples/`,
+/// `dict/`, and `polls/`), so callers like the folded-set listing
+/// ([`crate::ingest::aggregate::list_folded_leaves`]) see the whole output tree.
+/// Trace-file selection (the `.bin` / `.bin.gz` extension filter) is the
+/// caller's responsibility — the ingest lister applies it. Honors the same
+/// path-escape safety (canonical paths must stay within `root`) and skipped
+/// directories (`.`, `target`, `node_modules`) as [`collect_files`].
+fn collect_files_uncapped(
+    root: &Path,
+    dir: &Path,
+    prefix: &str,
+    out: &mut Vec<ObjectInfo>,
+) -> Result<(), StorageError> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            return Err(StorageError::Other("permission denied".into()));
+        }
+        Err(e) => return Err(StorageError::Other(e.to_string())),
+    };
+    for entry in entries {
+        let entry = entry.map_err(|e| StorageError::Other(e.to_string()))?;
+        let path = entry.path();
+        // Resolve symlinks and verify the target stays within root.
+        let canonical = match path.canonicalize() {
+            Ok(c) if c.starts_with(root) => c,
+            _ => continue,
+        };
+        if canonical.is_dir() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if !is_skipped_dir(&name) {
+                collect_files_uncapped(root, &canonical, prefix, out)?;
+            }
+        } else if canonical.is_file() {
             let key = path
                 .strip_prefix(root)
                 .unwrap_or(&path)

@@ -5,6 +5,123 @@ docs, issues, and PRs. If a term you need isn't here, either it's not yet
 resolved (raise it) or you're inventing language the project doesn't use
 (reconsider).
 
+## Aggregation pipeline
+
+**Source file**:
+One immutable raw trace segment in S3
+(`…/{date}/{HHMM}/{service}/{host}/{boot}/{ts}-{i}.bin.gz`). The atomic
+unit of incremental aggregation work: ordered, fetched, decoded, and
+folded into the `samples` table one at a time. Identified by its
+`source_key`.
+_Avoid_: segment (ambiguous with trace-format segments), object.
+
+**Samples table**:
+The facts table. One row per raw CPU sample (`timestamp_ns`, `stack_id`,
+`thread_class`, `source`, `host`, …), stored as partitioned Parquet.
+Aggregated (`GROUP BY stack_id`) at query time, never pre-folded — it
+retains per-sample detail so the viewer can drill into any dimension. It
+is populated *incrementally and partially* by demand-driven aggregation,
+not batch-filled up front.
+_Avoid_: facts table (use "samples table"), histogram store.
+
+**Order key**:
+`BLAKE3(ORDER_VERSION ++ source_key)`, ascending. A deterministic
+pseudo-random total order over the [[source-file]] set that is uniform
+across host and time, so the first K files are a representative spread of
+the scope rather than one host's earliest minutes. Recomputed at query
+time; produces no persisted artifact. "First K" is relative to the set a
+query matches, so it shifts as new files land.
+_Avoid_: shuffle, sort order.
+
+**ORDER_VERSION**:
+A baked constant in the hash input of the [[order-key]]. Bump it to change
+the *scheduling* permutation. Lives **only** in the hash input — never in
+an output path — because the samples cache is order-independent and must
+survive a version bump untouched.
+
+**SAMPLES_FORMAT_VERSION**:
+A baked constant in the **output key path**
+(`{output_prefix}/v{N}/samples/…`). Bump it when changing *what we
+persist* and we want a deliberate recompute. The bump points reads/writes
+at a fresh empty tree; files repopulate lazily on demand (no backfill
+job). The old tree is abandoned and GC'd out-of-band.
+
+**Refinement loop**:
+The query control flow, realized as **stateless per-poll folding**: each
+request folds a bounded budget of not-yet-folded [[source-file]]s (in
+[[order-key]] order) into the [[samples-table]], then aggregates over the
+folded set in scope and returns the tree plus a [[coverage]] block. The
+budget is the [[baseline-floor]] (default 4) when nothing is folded yet,
+and a larger refine-batch (12) on later polls. The client re-polls; coverage
+climbs each poll until the [[sampling-cap]], then freezes. No background
+tasks and no coordination — folding happens only during a poll (so it
+stops when polling stops), and re-folding is safe by idempotency.
+(Deferred optimization: memoize each file's immutable `{stack_id→count}`
+histogram so a poll sums per-file maps instead of re-scanning all rows.)
+_Avoid_: streaming, job handle, background daemon (deferred alternatives).
+
+**Coverage**:
+How much of a query's matched scope has been folded so far, reported on
+every [[refinement-loop]] response so users know how complete the view is.
+v1 = file coverage: `{ files_matched, files_folded, samples_folded }`,
+shown as e.g. "12 / 480 files (2.5%)". The literal statistical accuracy
+(per-node confidence intervals that tighten as files fold) is a planned
+later addition, not v1.
+_Avoid_: progress, accuracy (reserve "accuracy" for the future per-node CIs).
+
+**Fold**:
+Decode one [[source-file]] and write its CPU samples as a deterministically
+named part-file
+(`samples/service=…/date=…/host=…/{blake3(source_key)}.parquet`). A
+zero-sample file still writes an empty part-file. The part-file's
+*existence* is the record that the file is folded — there is no manifest
+and no skip-set (see ADR-0003). Re-folding writes the same key, so it is
+idempotent.
+_Avoid_: ingest (reserve for the optional out-of-scope warmer), process.
+
+**Matched set / Folded set**:
+**Matched set** = the [[source-file]]s a query's scope selects (a LIST of
+the source prefixes); the [[coverage]] denominator and the [[order-key]]
+input. **Folded set** = those already written to `samples` (a
+scope-pruned LIST of the partitioned `samples/` tree). Coverage is their
+intersection.
+
+**Baseline floor**:
+The number of [[source-file]]s (in [[order-key]] order) a query folds on
+its first *refining* poll, before returning a tree. Default **4**,
+configurable. Small because each file is ~37–50 MB; the [[coverage]]
+label, not a large floor, is what keeps users from over-trusting an early
+tree. The [[refinement-loop]] fills in the rest. Moot if a preload warmer
+is enabled.
+_Avoid_: baseline sample count (it's files, not samples).
+
+**Sampling cap**:
+The point at which the [[refinement-loop]] stops folding a scope's tail:
+`min(percentage × files_matched, absolute_ceiling)`, floored at the
+[[baseline-floor]]. Defaults **5%** and **100 files**, both
+backend-configurable. The percentage keeps small scopes sensible; the
+absolute ceiling stops a fleet-day scope from chasing 5% of tens of
+thousands of files (which would re-create the batch job). Past the cap,
+polls return the capped tree with [[coverage]] frozen. A user-facing
+"fetch more" raises the ceiling for that scope on demand. Background
+folding also stops when polling stops (refine-while-watched).
+_Avoid_: completion target (we deliberately never reach 100%).
+
+**Scope**:
+A query's selection: a time range (minute precision), a service, and a
+**host set** (the heatmap box can span many hosts → `host=` is repeatable;
+empty = all hosts, each entry an exact match). Translated to the
+[[matched-set]] in two stages: (1) a coarse S3 prefix prune over the
+`{date}/{HHMM}/` rotation buckets the window spans, widened by one bucket
+each side; (2) an in-memory interval-overlap filter on each file's filename
+`epoch` (padded by the known raw-trace segment duration), plus the
+service/host-set filter. Time/`HHMM` is high in the key so it prunes by
+prefix; service/host is below it so it is an in-memory filter. The S3
+browser's 🔥 button builds a scope from the heatmap selection's hosts +
+`[t0,t1]` and drives the [[refinement-loop]] when the server advertises
+`aggregation_enabled` via `/api/config`.
+_Avoid_: query (use "scope" for the selection, "query" for the request).
+
 ## Worker attribution
 
 A **worker** is a tokio runtime thread with a stable `WorkerId`. A worker

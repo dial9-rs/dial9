@@ -160,9 +160,9 @@ const groups = deduplicateSamples(trace.cpuSamples, trace.callframeSymbols);
 Start the viewer (`dial9-viewer --bucket BUCKET`, default port 3000), then fetch traces:
 
 ```javascript
-// List traces matching a prefix
-const resp = await fetch('http://localhost:3000/api/search?bucket=BUCKET&q=2026-04-09/19');
-const objects = await resp.json(); // [{key, size, last_modified}, ...]
+// List traces in a time range
+const resp = await fetch('http://localhost:3000/api/browse?bucket=BUCKET&prefix=2026-04-09/19&from=0&to=' + Math.floor(Date.now()/1000));
+const objects = (await resp.json()).objects; // [{key, size, last_modified}, ...]
 
 // Single file: fetch and parse one trace. /api/object serves the file's raw
 // (still-gzipped) bytes; parseTrace decompresses transparently.
@@ -186,10 +186,6 @@ for await (const trace of parseTrace(dir)) {
   // analyze each trace
 }
 ```
-
-> **Note:** `GET /api/trace?bucket=&keys=a&keys=b` (server-side gunzip +
-> concatenate) still exists but is **deprecated and slated for removal**. Prefer
-> `/api/object` (one file per request, raw bytes), which transfers far less data.
 
 ## Merging multiple trace files
 

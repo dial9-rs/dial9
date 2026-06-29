@@ -704,6 +704,7 @@ pub fn detect_sampled_polls(events: &[Dial9Event]) -> Vec<SampledPoll> {
             // Attribute by tid. The wire `worker_id` is the fallback for legacy
             // traces whose park/unpark lack a `tid`, so the map is empty; current
             // traces set it to `UNKNOWN`, leaving non-worker samples unattributed.
+            #[allow(deprecated)] // legacy-trace fallback: old traces still carry worker_id
             let wid = tid_to_worker.get(&e.tid).copied().unwrap_or(e.worker_id);
             let start_idx = polls.partition_point(|p| p.worker_id < wid);
             let end_idx = polls.partition_point(|p| p.worker_id <= wid);
@@ -737,6 +738,10 @@ pub fn detect_sampled_polls(events: &[Dial9Event]) -> Vec<SampledPoll> {
 
 #[cfg(test)]
 mod tests {
+    // These tests intentionally read the deprecated `CpuSampleEvent::worker_id`
+    // to exercise the legacy-trace attribution fallback and the producer's
+    // `UNKNOWN` sentinel; consumers infer attribution from tid + park/unpark.
+    #![allow(deprecated)]
     use super::*;
     use crate::telemetry::analysis_events::*;
     use dial9_trace_format::InternedString;

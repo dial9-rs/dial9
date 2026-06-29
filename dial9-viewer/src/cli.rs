@@ -48,6 +48,36 @@ enum Commands {
         #[arg(long)]
         dev: bool,
 
+        /// Enable demand-driven aggregation against the S3 `--bucket`/`--prefix`
+        /// source: the flamegraph button folds raw trace segments on demand and
+        /// progressively refines. (For a local source, use `--agg-source-dir`.)
+        #[arg(long)]
+        agg: bool,
+
+        /// Enable demand-driven aggregation reading raw segments from this local
+        /// directory (the local equivalent of `--agg` over S3).
+        #[arg(long, conflicts_with = "bucket")]
+        agg_source_dir: Option<PathBuf>,
+
+        /// Where the on-demand aggregator writes (and re-reads) its Parquet
+        /// part-files (local). Defaults to `<agg_source_dir>/flamegraph-data`.
+        #[arg(long)]
+        agg_output_dir: Option<PathBuf>,
+
+        /// Output S3 bucket for the aggregator's Parquet part-files. Defaults to
+        /// the source `--bucket`. May target a different bucket/account/region.
+        #[arg(long)]
+        agg_output_bucket: Option<String>,
+
+        /// Output S3 key prefix for the aggregator's Parquet part-files.
+        #[arg(long, default_value = "flamegraph-data")]
+        agg_output_prefix: String,
+
+        /// Raw-trace segment duration (seconds), used to pad the scope time
+        /// filter so boundary files are not dropped.
+        #[arg(long, default_value_t = crate::ingest::aggregate::DEFAULT_SEGMENT_DURATION_SECS)]
+        agg_segment_secs: i64,
+
         /// Enable the temporary trace-upload feature: lets another site POST a
         /// trace (`POST /api/upload`) and have the viewer serve it back once.
         /// Off by default; there is no auth, so only enable on a trusted network.
@@ -146,6 +176,12 @@ pub async fn run() -> anyhow::Result<()> {
             prefix,
             local_dir,
             dev,
+            agg,
+            agg_source_dir,
+            agg_output_dir,
+            agg_output_bucket,
+            agg_output_prefix,
+            agg_segment_secs,
             enable_upload,
         } => {
             return crate::serve(crate::ServeConfig {
@@ -154,6 +190,12 @@ pub async fn run() -> anyhow::Result<()> {
                 prefix,
                 local_dir,
                 dev,
+                agg,
+                agg_source_dir,
+                agg_output_dir,
+                agg_output_bucket,
+                agg_output_prefix,
+                agg_segment_secs,
                 enable_upload,
             })
             .await;

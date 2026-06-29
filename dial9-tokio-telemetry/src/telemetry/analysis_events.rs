@@ -188,6 +188,7 @@ pub struct CpuSampleEvent {
     /// Timestamp in nanoseconds (monotonic).
     pub timestamp_ns: u64,
     /// Worker thread index.
+    #[deprecated(note = "worker_id is always 0; you must infer this from `tid` + other events")]
     pub worker_id: WorkerId,
     /// OS thread ID.
     pub tid: u32,

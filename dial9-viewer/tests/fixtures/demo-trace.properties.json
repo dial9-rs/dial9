@@ -1,0 +1,76 @@
+{
+  "universe": "callchain_nonempty",
+  "total_samples": 8993,
+  "by_source": {
+    "0": 147,
+    "1": 8846
+  },
+  "on_off_all": {
+    "on_runtime": 8993,
+    "off_runtime": 0
+  },
+  "on_off_by_source": {
+    "0": {
+      "on": 147,
+      "off": 0
+    },
+    "1": {
+      "on": 8846,
+      "off": 0
+    }
+  },
+  "worker_set": [
+    0,
+    1
+  ],
+  "cpu_profile": {
+    "count": 147,
+    "distinct_stacks": 116,
+    "stack_sig_digest": "a9a7f7ccc3890e67",
+    "ts_count": 147,
+    "ts_span_ns": 3637993460,
+    "ts_delta_digest": "f23bfcd1eaa71887",
+    "top_stacks": [
+      {
+        "count": 8,
+        "depth": 129,
+        "leaf": "_Unwind_Find_FDE"
+      },
+      {
+        "count": 6,
+        "depth": 129,
+        "leaf": "0xffff9ba4de60"
+      },
+      {
+        "count": 4,
+        "depth": 122,
+        "leaf": "0xffff9ba4c97c"
+      },
+      {
+        "count": 4,
+        "depth": 129,
+        "leaf": "0xffff9b87d200"
+      },
+      {
+        "count": 3,
+        "depth": 129,
+        "leaf": "0xffff9ba4de8c"
+      },
+      {
+        "count": 3,
+        "depth": 59,
+        "leaf": "0xffff9babd2f8"
+      },
+      {
+        "count": 3,
+        "depth": 122,
+        "leaf": "_Unwind_Find_FDE"
+      },
+      {
+        "count": 2,
+        "depth": 122,
+        "leaf": "0xffff9ba4de54"
+      }
+    ]
+  }
+}

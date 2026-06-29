@@ -42,6 +42,9 @@
 //!   ...
 //!   start_thread
 
+// Example prints the deprecated `CpuSampleEvent::worker_id` for illustration.
+#![allow(deprecated)]
+
 use dial9_tokio_telemetry::telemetry::analysis_events::{CpuSampleSource, Dial9Event};
 use dial9_tokio_telemetry::telemetry::{DiskWriter, SchedEventConfig, TracedRuntime};
 use dial9_trace_format::decoder::Decoder;

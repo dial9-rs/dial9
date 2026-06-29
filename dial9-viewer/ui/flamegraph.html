@@ -46,8 +46,17 @@
                 flex: 1;
                 color: #888;
                 font-size: 1.1em;
+                gap: 0.6em;
             }
             #loading.hidden { display: none; }
+            .spinner {
+                width: 1.2em; height: 1.2em;
+                border: 2px solid #444;
+                border-top-color: #aaa;
+                border-radius: 50%;
+                animation: spin 0.8s linear infinite;
+            }
+            @keyframes spin { to { transform: rotate(360deg); } }
 
             /* Error */
             #error {
@@ -68,9 +77,11 @@
             <span class="fg-stats" id="fg-stats"></span>
         </div>
         <div id="fg-container"></div>
-        <div id="loading">Loading trace&hellip;</div>
+        <div id="loading"><div class="spinner"></div>Loading trace&hellip;</div>
         <div id="error"></div>
 
+        <script src="format.js"></script>
+        <script src="flamegraph_api.js"></script>
         <script src="decode.js"></script>
         <script src="trace_parser.js"></script>
         <script src="creds.js"></script>
@@ -98,8 +109,399 @@
                     errorEl.textContent = msg;
                 }
 
+                // --- API mode: fetch pre-built flamegraph tree from server ---
+                const apiMode = params.get("api") === "1";
+                if (apiMode) {
+                    // --- Filter toolbar (data-driven) ---
+                    // The facet controls (Thread / Source / Host) are NOT
+                    // hard-coded: they're built from the backend's reported
+                    // `metadata` facets on the first response (see renderFacets),
+                    // so the toolbar offers only dimensions that actually have
+                    // data. The time pickers and action buttons are intrinsic, so
+                    // they stay static.
+                    const ctlStyle = "background:#1a1a2e;color:#e0e0e0;border:1px solid #444;padding:2px 6px;border-radius:3px";
+                    const btnStyle = "border:1px solid #444;padding:4px 14px;border-radius:3px;cursor:pointer;font-weight:600";
+                    const toolbar = document.createElement("div");
+                    toolbar.style.cssText = "display:flex;align-items:center;gap:12px;padding:6px 12px;background:#16213e;border-bottom:1px solid #333;font-size:0.8em;flex-shrink:0;flex-wrap:wrap;";
+                    toolbar.innerHTML = `
+                        <span id="f-facets" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap"></span>
+                        <label style="color:#e0e0e0">From: <input id="f-start" type="datetime-local" step="1" style="${ctlStyle}"></label>
+                        <label style="color:#e0e0e0">To: <input id="f-end" type="datetime-local" step="1" style="${ctlStyle}"></label>
+                        <button id="f-apply" style="background:#6c63ff;color:#fff;border:none;padding:4px 14px;border-radius:3px;cursor:pointer;font-weight:600">Apply</button>
+                        <button id="f-more" style="background:#2a2a4a;color:#e0e0e0;${btnStyle}">Refine more</button>
+                        <button id="f-stop" style="background:#2a2a4a;color:#e0e0e0;${btnStyle};opacity:0.4;cursor:not-allowed" disabled>Stop</button>
+                    `;
+                    document.querySelector(".fg-page-header").after(toolbar);
+
+                    const fStart = document.getElementById("f-start");
+                    const fEnd = document.getElementById("f-end");
+
+                    // The original scope host set from the URL (the heatmap box
+                    // selection). "All" in the host selector re-applies this set;
+                    // a named host narrows to one. Kept separate from the live
+                    // selection so "All" never broadens past the original scope.
+                    const originalHosts = params.getAll("host");
+
+                    // Single source of truth for the query. Seeded from the URL,
+                    // mutated by the facet controls, read by buildApiUrl /
+                    // updateBrowserUrl. Deliberately decoupled from the DOM so the
+                    // first poll can fire before the (data-driven) facet selects
+                    // even exist.
+                    const filterState = {
+                        // Source defaults to "cpu" (the on-CPU view).
+                        source: params.get("source") || "cpu",
+                        thread_class: params.get("thread_class") || "",
+                        spawn_location: params.get("spawn_location") || "",
+                        hosts: originalHosts.slice(),
+                    };
+
+                    // Initialize datetime pickers from URL ns params. The picker
+                    // shows UTC wall-clock (S3 trace keys are bucketed in UTC).
+                    // The read (ns -> picker) and write (picker -> ns) sides MUST
+                    // be symmetric: both treat the picker value as UTC. See the
+                    // unit-tested nsToPickerUtc / pickerUtcToNs in
+                    // flamegraph_api.js (test_flamegraph_api.js).
+                    if (params.get("start_ns")) fStart.value = nsToPickerUtc(params.get("start_ns"));
+                    if (params.get("end_ns")) fEnd.value = nsToPickerUtc(params.get("end_ns"));
+
+                    // `max_files` ceiling override, raised by the "Refine more"
+                    // button. null = let the backend pick its own ceiling.
+                    let maxFiles = params.get("max_files") ? Number(params.get("max_files")) : null;
+
+                    // Scope dimensions that define WHICH files the server-side
+                    // loop samples (the box's service; hosts live in filterState).
+                    const scopeService = params.get("service");
+                    const scopeBucket = params.get("bucket");
+                    const scopePrefix = params.get("prefix");
+
+                    function buildApiUrl(refine) {
+                        const u = new URL("/api/flamegraph", window.location.origin);
+                        if (params.get("data_dir")) u.searchParams.set("data_dir", params.get("data_dir"));
+                        if (scopeBucket) u.searchParams.set("bucket", scopeBucket);
+                        if (scopePrefix) u.searchParams.set("prefix", scopePrefix);
+                        if (scopeService) u.searchParams.set("service", scopeService);
+                        for (const h of filterState.hosts) u.searchParams.append("host", h);
+                        // Send all non-empty facet filters as query params.
+                        for (const [k, v] of Object.entries(filterState)) {
+                            if (k === "hosts" || !v) continue;
+                            u.searchParams.set(k, v);
+                        }
+                        const startNs = pickerUtcToNs(fStart.value);
+                        const endNs = pickerUtcToNs(fEnd.value);
+                        if (startNs) u.searchParams.set("start_ns", startNs);
+                        if (endNs) u.searchParams.set("end_ns", endNs);
+                        if (maxFiles != null) u.searchParams.set("max_files", String(maxFiles));
+                        // The first poll is read-only (instant: serves whatever is
+                        // already folded). Only refining polls fold new files.
+                        // The backend's `refine` is a serde bool, so send the
+                        // literal "true" (not "1").
+                        if (refine) u.searchParams.set("refine", "true");
+                        return u;
+                    }
+
+                    function updateBrowserUrl() {
+                        const p = new URLSearchParams();
+                        p.set("api", "1");
+                        if (params.get("data_dir")) p.set("data_dir", params.get("data_dir"));
+                        if (scopeBucket) p.set("bucket", scopeBucket);
+                        if (scopePrefix) p.set("prefix", scopePrefix);
+                        if (scopeService) p.set("service", scopeService);
+                        for (const h of filterState.hosts) p.append("host", h);
+                        for (const [k, v] of Object.entries(filterState)) {
+                            if (k === "hosts" || !v) continue;
+                            p.set(k, v);
+                        }
+                        const startNs = pickerUtcToNs(fStart.value);
+                        const endNs = pickerUtcToNs(fEnd.value);
+                        if (startNs) p.set("start_ns", startNs);
+                        if (endNs) p.set("end_ns", endNs);
+                        history.pushState(null, "", window.location.pathname + "?" + p.toString());
+                    }
+
+                    // Build the data-driven facet controls from the backend's
+                    // reported metadata facets. Called on every response, but only
+                    // rebuilds when the *available* facet set changes (the
+                    // facets are recorded independent of the active filter, so
+                    // they stay stable as the user flips selectors). The guard
+                    // also avoids clobbering a <select> mid-interaction. Each
+                    // control writes back to filterState and re-applies.
+                    // Accumulated available facets. The backend's facet metadata
+                    // is scoped to the *current* query, so narrowing one
+                    // dimension collapses the others (picking a single host makes
+                    // that response report only that host, only its sources,
+                    // etc.). We union every response's facets into
+                    // monotonically-growing sets, so a control never loses an
+                    // option it once offered — otherwise selecting a host would
+                    // make the host selector vanish and you could never get back
+                    // to "All". Seeded with the original scope hosts so the
+                    // selector is correct even before the first response.
+                    const availFacets = {};
+                    let renderedFacetKey = null;
+                    function renderFacets(meta) {
+                        // Accumulate from generic facets array.
+                        for (const f of meta.facets || []) {
+                            if (!availFacets[f.name]) availFacets[f.name] = {label: f.label, values: new Set()};
+                            for (const v of f.values) availFacets[f.name].values.add(v);
+                        }
+                        // Seed host facet from original scope hosts.
+                        if (availFacets["host"]) {
+                            for (const h of originalHosts) availFacets["host"].values.add(h);
+                        }
+
+                        const key = JSON.stringify(Object.fromEntries(
+                            Object.entries(availFacets).map(([k, v]) => [k, [...v.values].sort()])
+                        ));
+                        if (key === renderedFacetKey) return;
+                        renderedFacetKey = key;
+
+                        const container = document.getElementById("f-facets");
+                        container.innerHTML = "";
+
+                        function addSelect(labelText, options, selected, onChange) {
+                            const label = document.createElement("label");
+                            label.style.color = "#e0e0e0";
+                            label.appendChild(document.createTextNode(labelText + " "));
+                            const sel = document.createElement("select");
+                            sel.style.cssText = ctlStyle;
+                            for (const opt of options) {
+                                const o = document.createElement("option");
+                                o.value = opt.value;
+                                o.textContent = opt.label;
+                                if (opt.value === selected) o.selected = true;
+                                sel.appendChild(o);
+                            }
+                            sel.addEventListener("change", () => onChange(sel.value));
+                            label.appendChild(sel);
+                            container.appendChild(label);
+                        }
+
+                        function applyFacetChange() {
+                            maxFiles = null;
+                            updateBrowserUrl();
+                            startPolling();
+                        }
+
+                        // Render each facet generically.
+                        for (const [name, {label, values}] of Object.entries(availFacets)) {
+                            const sorted = [...values].sort();
+                            if (name === "host") {
+                                if (sorted.length > 1) {
+                                    const selectedHost = filterState.hosts.length === 1 ? filterState.hosts[0] : "";
+                                    addSelect(label + ":", hostFacetOptions(sorted), selectedHost, (v) => {
+                                        filterState.hosts = v ? [v] : originalHosts.slice();
+                                        applyFacetChange();
+                                    });
+                                }
+                                continue;
+                            }
+                            if (sorted.length <= 1) continue;
+                            const opts = [{value: "", label: "All"}, ...sorted.map(v => ({value: v, label: v}))];
+                            const current = filterState[name] || "";
+                            addSelect(label + ":", opts, current, (v) => {
+                                filterState[name] = v;
+                                applyFacetChange();
+                            });
+                        }
+                    }
+
+                    // Render the scope summary in the page header from the
+                    // backend's resolved scope + facets (service · host(s) ·
+                    // time range), so the header reflects backend truth rather
+                    // than URL params the client guessed at.
+                    function renderScopeHeader(meta) {
+                        const bits = [];
+                        const hostNames = meta.host_names || [];
+                        if (hostNames.length === 1) bits.push(hostNames[0]);
+                        else if (hostNames.length > 1) bits.push(`${hostNames.length} hosts`);
+                        if (meta.min_timestamp_ns && meta.max_timestamp_ns) {
+                            const from = new Date(meta.min_timestamp_ns / 1e6).toISOString().slice(0, 19) + "Z";
+                            const to = new Date(meta.max_timestamp_ns / 1e6).toISOString().slice(11, 19) + "Z";
+                            bits.push(`${from} \u2192 ${to}`);
+                        }
+                        const svc = meta.service || "aggregated";
+                        document.title = `Flamegraph \u2014 ${svc}`;
+                        titleEl.textContent = bits.length
+                            ? `Flamegraph \u2014 ${svc} \u00b7 ${bits.join(" \u00b7 ")}`
+                            : `Flamegraph \u2014 ${svc}`;
+                    }
+
+                    function toFgTree(node) {
+                        const m = new Map();
+                        for (const child of (node.children || [])) {
+                            m.set(child.name, toFgTree(child));
+                        }
+                        return { name: node.name, count: node.count, self: node.self, children: m };
+                    }
+
+                    const fg = FlamegraphRenderer.createFlamegraph(containerEl);
+
+                    // Build the base stats string ("N samples \u00b7 M hosts \u00b7 \u2026")
+                    // from the response metadata, shared by every poll.
+                    function baseStats(resp) {
+                        const meta = resp.metadata;
+                        const bits = [`${resp.total_samples.toLocaleString()} samples`];
+                        if (meta.hosts > 1) bits.push(`${meta.hosts} hosts`);
+                        if (meta.min_timestamp_ns && meta.max_timestamp_ns) {
+                            const from = new Date(meta.min_timestamp_ns / 1e6);
+                            const to = new Date(meta.max_timestamp_ns / 1e6);
+                            const dur = formatHumanDuration(meta.max_timestamp_ns - meta.min_timestamp_ns);
+                            bits.push(`${from.toISOString().slice(11,19)} \u2192 ${to.toISOString().slice(11,19)} (${dur})`);
+                        }
+                        return bits.join(" \u00b7 ");
+                    }
+
+                    // Poll-loop state. `pollToken` lets us cancel an in-flight
+                    // loop when the filters change or "Fetch more"/"Stop" is
+                    // clicked: each loop captures the token and bails if it no
+                    // longer matches the current one.
+                    const POLL_INTERVAL_MS = 800;
+                    let pollToken = 0;
+                    let pollTimer = null;
+                    let prevCoverage = null;
+                    // Per-poll coverage gains (percentage points), newest last.
+                    // Drives the auto-stop heuristic (shouldAutoStopRefining).
+                    let coverageDeltas = [];
+                    const stopBtn = document.getElementById("f-stop");
+                    const moreBtn = document.getElementById("f-more");
+
+                    function setRefiningUi(active) {
+                        // Stop button: enabled only while refining.
+                        stopBtn.disabled = !active;
+                        stopBtn.style.opacity = active ? "1" : "0.4";
+                        stopBtn.style.cursor = active ? "pointer" : "not-allowed";
+                        // Fetch-more button: enabled only when idle (not refining).
+                        moreBtn.disabled = active;
+                        moreBtn.style.opacity = active ? "0.4" : "1";
+                        moreBtn.style.cursor = active ? "not-allowed" : "pointer";
+                    }
+
+                    function stopPolling() {
+                        pollToken++;
+                        if (pollTimer != null) { clearTimeout(pollTimer); pollTimer = null; }
+                        setRefiningUi(false);
+                    }
+
+                    // `refine` is false on the first poll for a scope (read-only:
+                    // the server returns whatever is already folded, instantly),
+                    // then true to fold a batch each subsequent poll.
+                    async function poll(token, refine) {
+                        let resp;
+                        try {
+                            const credHeaders = window.Dial9Creds ? Dial9Creds.headers() : {};
+                            resp = await fetch(buildApiUrl(refine), { headers: credHeaders });
+                            if (!resp.ok) throw new Error(await resp.text());
+                            resp = await resp.json();
+                        } catch (err) {
+                            if (token !== pollToken) return; // superseded
+                            showError("Failed to load flamegraph: " + err.message);
+                            return;
+                        }
+                        if (token !== pollToken) return; // superseded while fetching
+
+                        const meta = resp.metadata;
+                        // Header scope summary + filter controls are both built
+                        // from the backend's reported metadata (data-driven),
+                        // not hard-coded HTML.
+                        renderScopeHeader(meta);
+                        renderFacets(meta);
+
+                        // First successful response hides the loading overlay;
+                        // subsequent polls refine in-place without it.
+                        loadingEl.classList.add("hidden");
+                        containerEl.style.display = "flex";
+                        fg.setTreeDirect(toFgTree(resp.tree), resp.tree.count);
+
+                        const cov = resp.coverage;
+                        if (cov == null) {
+                            // Older / local-dir mode: no coverage, single fetch only.
+                            statsEl.textContent = baseStats(resp);
+                            stopPolling();
+                            return;
+                        }
+
+                        // Track per-poll coverage gain (skip the read-only first
+                        // poll, which establishes the baseline rather than refining).
+                        if (refine && prevCoverage != null) {
+                            coverageDeltas.push(coveragePercent(cov) - coveragePercent(prevCoverage));
+                        }
+                        const frozen = isCoverageFrozen(prevCoverage, cov);
+                        const plateaued = shouldAutoStopRefining(coverageDeltas);
+                        prevCoverage = cov;
+
+                        let badge = baseStats(resp) + " \u00b7 " + formatCoverageBadge(cov);
+
+                        // Stop when the server can't fold more (frozen) or coverage
+                        // has plateaued (diminishing returns over recent polls).
+                        if (refine && (frozen || plateaued)) {
+                            statsEl.textContent = badge + " \u00b7 refined";
+                            stopPolling();
+                            return;
+                        }
+                        statsEl.innerHTML = badge + ' \u00b7 <span class="spinner" style="width:0.9em;height:0.9em;display:inline-block;vertical-align:middle"></span> refining\u2026';
+
+                        // Subsequent polls refine. Schedule the next one.
+                        setRefiningUi(true);
+                        pollTimer = setTimeout(() => {
+                            if (token === pollToken) poll(token, true);
+                        }, POLL_INTERVAL_MS);
+                    }
+
+                    // (Re)start the poll loop from scratch: cancels any in-flight
+                    // loop, resets freeze tracking, and shows the loading overlay.
+                    // The first poll is read-only (instant); refinement kicks in
+                    // on the polls that follow.
+                    function startPolling() {
+                        stopPolling();
+                        prevCoverage = null;
+                        coverageDeltas = [];
+                        setRefiningUi(true);
+                        loadingEl.classList.remove("hidden");
+                        loadingEl.innerHTML = '<div class="spinner"></div>Loading aggregated flamegraph\u2026';
+                        containerEl.style.display = "none";
+                        errorEl.style.display = "none";
+                        const token = pollToken;
+                        poll(token, false);
+                    }
+
+                    document.getElementById("f-apply").addEventListener("click", () => {
+                        // New filters invalidate the current scope; reset depth.
+                        maxFiles = null;
+                        updateBrowserUrl();
+                        startPolling();
+                    });
+
+                    document.getElementById("f-more").addEventListener("click", () => {
+                        // Request deeper sampling for the current scope: raise the
+                        // ceiling to ~4x the files folded so far, then resume
+                        // refining (reset the plateau tracker so it doesn't
+                        // immediately auto-stop on the prior history).
+                        const folded = prevCoverage ? prevCoverage.files_folded : 0;
+                        maxFiles = nextMaxFiles(folded);
+                        coverageDeltas = [];
+                        stopPolling();
+                        setRefiningUi(true);
+                        // Show the refining spinner immediately in the stats bar.
+                        statsEl.innerHTML = statsEl.textContent.replace(/ \u00b7 (?:refined|stopped)$/, "")
+                            + ' \u00b7 <span class="spinner" style="width:0.9em;height:0.9em;display:inline-block;vertical-align:middle"></span> refining\u2026';
+                        const token = pollToken;
+                        poll(token, true);
+                    });
+
+                    stopBtn.addEventListener("click", () => {
+                        // Manual stop: freeze at the current coverage.
+                        const badge = statsEl.textContent.replace(/ \u00b7 refining\u2026$/, "");
+                        stopPolling();
+                        statsEl.textContent = badge + " \u00b7 stopped";
+                    });
+
+                    startPolling();
+                    window.addEventListener("resize", () => fg.resize());
+                    window.addEventListener("keydown", (e) => { if (e.key === "Escape") fg.handleEscape(); });
+                    return;
+                }
+
                 if (!traceUrls.length) {
-                    showError("No trace URL provided. Use ?trace=<url>&start=<ns>&end=<ns>");
+                    showError("No trace URL provided. Use ?trace=<url>&start=<ns>&end=<ns> or ?api=1&data_dir=...");
                     return;
                 }
 
@@ -137,7 +539,7 @@
 
                 // Process: build worker spans and attach CPU samples for spawnLoc
                 try {
-                    loadingEl.textContent = "Analyzing\u2026";
+                    loadingEl.innerHTML = '<div class="spinner"></div>Analyzing\u2026';
                     const evts = trace.events;
                     const wSet = new Set();
                     const ET = TraceParser.EVENT_TYPES;

@@ -343,3 +343,62 @@ impl Source for SchedProfiler {
         "sched"
     }
 }
+
+#[cfg(test)]
+mod cpu_sample_round_trip_tests {
+    use super::{CpuSampleEvent, CpuSampleSource, WORKER_ID_UNKNOWN};
+    use dial9_trace_format::decoder::{DecodedFrame, Decoder};
+    use dial9_trace_format::encoder::Encoder;
+    use dial9_trace_format::types::FieldValue;
+
+    /// Encode a `CpuSampleEvent` with the given `cpu` and decode it back to the
+    /// event frame's `(timestamp, field values)`.
+    fn round_trip(cpu: Option<u64>) -> (Option<u64>, Vec<FieldValue>) {
+        let mut enc = Encoder::new();
+        let thread_name = enc.intern_string("tokio-runtime-worker").unwrap();
+        let callchain = enc
+            .intern_stack_frames(&[0xdead_beef, 0xcafe_babe])
+            .unwrap();
+        enc.write(&CpuSampleEvent {
+            timestamp_ns: 7_000_000,
+            worker_id: WORKER_ID_UNKNOWN,
+            tid: 9999,
+            source: CpuSampleSource::CpuProfile,
+            thread_name: Some(thread_name),
+            callchain,
+            cpu,
+        })
+        .unwrap();
+        let bytes = enc.finish();
+
+        Decoder::new(&bytes)
+            .unwrap()
+            .decode_all()
+            .into_iter()
+            .find_map(|frame| match frame {
+                DecodedFrame::Event {
+                    timestamp_ns,
+                    values,
+                    ..
+                } => Some((timestamp_ns, values)),
+                _ => None,
+            })
+            .expect("event frame")
+    }
+
+    #[test]
+    fn cpu_sample_event_round_trips_with_cpu() {
+        let (timestamp_ns, values) = round_trip(Some(3));
+        assert_eq!(timestamp_ns, Some(7_000_000));
+        assert_eq!(values[1], FieldValue::Varint(9999)); // tid
+        // `cpu` is the last field; `Some(3)` encodes as an OptionalVarint.
+        assert_eq!(*values.last().unwrap(), FieldValue::Varint(3));
+    }
+
+    #[test]
+    fn cpu_sample_event_round_trips_without_cpu() {
+        let (_timestamp_ns, values) = round_trip(None);
+        // An absent `cpu` decodes as `FieldValue::None`.
+        assert_eq!(*values.last().unwrap(), FieldValue::None);
+    }
+}

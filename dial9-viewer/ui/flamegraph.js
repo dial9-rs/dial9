@@ -935,7 +935,30 @@
       if (stack.length > 0) renderAll();
     }
 
-    return { setData, resize, destroy, handleEscape, isZoomed, getZoomPath, zoomToPath };
+    function setTreeDirect(tree, totalCount) {
+      // For API mode: set a pre-built tree directly (no worker/off-worker split)
+      // Preserve the current zoom by finding the same node in the new tree.
+      const prevTarget = workerZoomStack.length > 0
+          ? workerZoomStack[workerZoomStack.length - 1].name
+          : null;
+      workerTree = tree;
+      offworkerTree = null;
+      offworkerZoomStack = [];
+      // Re-resolve: find the zoom target by name in the new tree via DFS.
+      workerZoomStack = [];
+      if (prevTarget) {
+        const path = findNodePath(workerTree, prevTarget);
+        if (path) workerZoomStack = path;
+      }
+      workerLabel.textContent = `All threads \u2014 ${totalCount.toLocaleString()} samples`;
+      offworkerLabel.textContent = "";
+      offworkerCanvas.style.display = "none";
+      offworkerLabel.style.display = "none";
+      spawnFilter.style.display = "none";
+      renderAll();
+    }
+
+    return { setData, setTreeDirect, resize, destroy, handleEscape, isZoomed, getZoomPath, zoomToPath };
   }
 
   const fgExports = { createFlamegraph: createFlamegraph, filterCpuSamples: filterCpuSamples };

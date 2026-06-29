@@ -82,10 +82,10 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // Start the viewer with the s3s-backed S3Backend. Enable bring-your-own
-    // credentials (pointed at the same s3s fake) so the credentials panel can be
-    // exercised end-to-end: use access key id `test`, secret `test`, region
-    // `us-east-1`.
+    // Start the viewer with the s3s-backed S3Backend. Marking the source as S3
+    // enables bring-your-own credentials (pointed at the same s3s fake) so the
+    // credentials panel can be exercised end-to-end: use access key id `test`,
+    // secret `test`, region `us-east-1`.
     let backend = dial9_viewer::storage::S3Backend::from_client(client);
     let state = dial9_viewer::server::AppState::new(
         std::sync::Arc::new(backend),

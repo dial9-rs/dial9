@@ -13,6 +13,10 @@
 //! corresponding PollEnd) contains the burn window.
 
 #![cfg(all(feature = "cpu-profiling", target_os = "linux"))]
+// This test intentionally inspects the deprecated `CpuSampleEvent::worker_id`
+// to assert the producer still writes the `UNKNOWN` sentinel for unattributed
+// samples (consumers must infer attribution from tid + park/unpark instead).
+#![allow(deprecated)]
 
 mod common;
 

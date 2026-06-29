@@ -302,6 +302,10 @@ fn attach_runtime(
 
     contexts.lock().unwrap().push(ctx);
 
+    // No need to announce the metadata change: `TokioRuntimesSource` detects the
+    // new runtime (and its eagerly-populated workers) from the runtime/worker
+    // counts on its next flush.
+
     Ok(runtime)
 }
 
@@ -411,16 +415,10 @@ mod tests {
 
         assert!(guard.is_enabled());
         assert!(guard.shared().unwrap().is_enabled());
+        let runtime_meta =
+            source::collect_segment_metadata(&mut guard.shared().unwrap().sources.lock().unwrap());
         assert!(
-            !guard
-                .shared()
-                .unwrap()
-                .sources
-                .lock()
-                .unwrap()
-                .iter()
-                .flat_map(|s| s.segment_metadata())
-                .any(|(k, _)| k.starts_with("runtime.")),
+            !runtime_meta.iter().any(|(k, _)| k.starts_with("runtime.")),
             "disabled Tokio instrumentation should not produce runtime metadata"
         );
 
@@ -434,16 +432,10 @@ mod tests {
             }
         });
 
+        let runtime_meta =
+            source::collect_segment_metadata(&mut guard.shared().unwrap().sources.lock().unwrap());
         assert!(
-            !guard
-                .shared()
-                .unwrap()
-                .sources
-                .lock()
-                .unwrap()
-                .iter()
-                .flat_map(|s| s.segment_metadata())
-                .any(|(k, _)| k.starts_with("runtime.")),
+            !runtime_meta.iter().any(|(k, _)| k.starts_with("runtime.")),
             "disabled Tokio instrumentation should not produce runtime metadata after running work"
         );
         assert_eq!(
@@ -808,6 +800,107 @@ mod tests {
             has_both,
             "expected segment metadata to contain runtime.main=0,1 and runtime.io=2,3, \
              got: {all_metadata:?}"
+        );
+    }
+
+    /// End-to-end: a runtime attached to an existing telemetry session has its
+    /// self-detected segment metadata (the runtime→worker mapping) written into
+    /// a sealed segment that decodes back. Exercises the full wiring:
+    /// `attach → TokioRuntimesSource::segment_metadata → writer → encode → decode`.
+    ///
+    /// Fully deterministic, with no `sleep`: the only synchronization is
+    /// `graceful_shutdown`, which blocks until the flush thread runs its final
+    /// source poll, writes the segment metadata, and seals the segment. Both
+    /// runtimes' workers are eagerly populated at attach time, so the metadata
+    /// is complete regardless of how (or whether) each runtime is driven.
+    ///
+    /// The narrower "re-emit only after the runtime/worker count actually grows"
+    /// logic is unit-tested deterministically in
+    /// `runtime_context::tests::segment_metadata_only_rebuilds_after_a_change`.
+    #[test]
+    fn attached_runtime_metadata_reaches_sealed_segment() {
+        use crate::telemetry::analysis_events::Dial9Event;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let trace_path = dir.path().join("trace.bin");
+
+        let writer = crate::telemetry::writer::DiskWriter::builder()
+            .base_path(&trace_path)
+            .max_file_size(1024 * 1024)
+            .max_total_size(10 * 1024 * 1024)
+            .build()
+            .unwrap();
+
+        let builder_a = tokio::runtime::Builder::new_current_thread();
+        let (runtime_a, guard) = TracedRuntime::builder()
+            .with_runtime_name("first")
+            .with_task_tracking(true)
+            .with_trace_path(trace_path.to_str().unwrap())
+            .build_and_start(builder_a, writer)
+            .unwrap();
+
+        // Drive a little real work so the final segment is sealed rather than
+        // discarded: `finalize()` removes a segment that holds only header +
+        // metadata (no real events). Spawning a tracked task emits real events
+        // synchronously — no timing wait.
+        runtime_a.block_on(async {
+            tokio::spawn(async {
+                tokio::task::yield_now().await;
+            })
+            .await
+            .unwrap();
+        });
+
+        // Attach B to the same session. Its workers are eagerly populated at
+        // attach time, so its metadata is complete without ever driving it.
+        let builder_b = tokio::runtime::Builder::new_current_thread();
+        let runtime_b = TracedRuntime::builder()
+            .with_runtime_name("second")
+            .build_and_attach_to_telemetry(builder_b, &guard)
+            .unwrap();
+
+        drop(runtime_a);
+        drop(runtime_b);
+        // Blocks until the flush thread polls every source one final time, writes
+        // the segment metadata, and seals the segment, so both runtimes are
+        // guaranteed to be in the sealed trace once this returns.
+        guard
+            .graceful_shutdown(std::time::Duration::from_secs(1))
+            .unwrap();
+
+        let mut saw_first = false;
+        let mut saw_second = false;
+        let mut files: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|ext| ext == "bin"))
+            .collect();
+        files.sort();
+        for file in &files {
+            let data = std::fs::read(file).unwrap();
+            let events = crate::telemetry::format::decode_events(&data).unwrap();
+            for event in &events {
+                if let Dial9Event::SegmentMetadataEvent(meta) = event {
+                    if meta.entries.keys().any(|k| k == "runtime.first") {
+                        saw_first = true;
+                    }
+                    if meta.entries.keys().any(|k| k == "runtime.second") {
+                        saw_second = true;
+                    }
+                }
+            }
+        }
+
+        assert!(
+            saw_first,
+            "the initial runtime should appear in segment metadata"
+        );
+        assert!(
+            saw_second,
+            "an attached runtime should appear in a sealed segment's metadata; \
+             missing runtime.second means TokioRuntimesSource failed to \
+             self-detect the new runtime"
         );
     }
 

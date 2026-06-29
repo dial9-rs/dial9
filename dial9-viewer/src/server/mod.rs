@@ -9,13 +9,15 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tower_http::cors::CorsLayer;
 
+mod browse;
 mod buckets;
 mod check;
 mod config;
-pub mod credentials;
+pub(crate) mod credentials;
 mod error;
+pub(crate) mod flamegraph;
 mod prefixes;
-mod search;
+pub(crate) mod tokio_stats;
 mod trace;
 mod upload;
 
@@ -29,7 +31,10 @@ use credentials::{CredError, MaybeCreds};
 ///
 /// Shared by startup region detection ([`crate::serve`]) and the
 /// `/api/credentials/check` endpoint.
-pub async fn region_from_head_bucket(client: &aws_sdk_s3::Client, bucket: &str) -> Option<String> {
+pub(crate) async fn region_from_head_bucket(
+    client: &aws_sdk_s3::Client,
+    bucket: &str,
+) -> Option<String> {
     match client.head_bucket().bucket(bucket).send().await {
         Ok(resp) => resp.bucket_region().map(|r| r.to_string()),
         Err(err) => err.raw_response().and_then(|r| {
@@ -52,17 +57,42 @@ pub struct AppState {
     pub default_prefix: Option<String>,
     /// When set, serve UI files from disk instead of embedded assets.
     pub dev_ui_dir: Option<PathBuf>,
+    /// When set, `/api/flamegraph` runs the demand-driven refinement loop
+    /// against these backends instead of reading a pre-aggregated local dir.
+    pub agg: Option<crate::ingest::aggregate::AggContext>,
     /// In-memory store of temporary, POSTed traces. `None` (the default) means
     /// the trace-upload feature is disabled and its routes are not registered.
     pub uploads: Option<Arc<UploadStore>>,
     /// Whether the UI should offer the bring-your-own-credentials panel and
     /// whether handlers honor `x-dial9-aws-*` headers. True for S3 backends,
-    /// false for `--local-dir` (the data is local; credentials are meaningless).
+    /// false for `--local-dir`. This same flag also gates on-demand
+    /// aggregation: any S3 bucket can run the `/api/flamegraph` refinement loop,
+    /// but a local-directory source cannot.
     pub allow_byo_creds: bool,
     /// Optional plumbing for ephemeral S3 client construction (test injection
     /// of the in-process fake; `None` in production → default HTTPS connector).
     #[doc(hidden)]
     pub ephemeral_s3: Option<EphemeralS3Config>,
+    /// Output prefix for BYOC aggregation. Defaults to "flamegraph-data".
+    pub agg_output_prefix: String,
+    /// Output bucket for BYOC aggregation. `None` means write the aggregated
+    /// part-files back into the source bucket (the query-param `bucket`). Set it
+    /// (via `--agg-output-bucket`) when the source bucket is read-only, so the
+    /// output lands in a separate writable bucket.
+    pub agg_output_bucket: Option<String>,
+    /// Region-aware backend for [`Self::agg_output_bucket`], built once at
+    /// startup (the output bucket name is known then, so no per-request region
+    /// detection). Writes to the output bucket use the server's ambient identity
+    /// — the operator controls that bucket via `--agg-output-bucket`. `None`
+    /// when no output bucket override is configured; the BYOC path then writes
+    /// to the source bucket through the request's own (BYOC or ambient) backend.
+    pub agg_output_backend: Option<Arc<dyn StorageBackend>>,
+    /// Segment duration (seconds) for BYOC aggregation scope padding.
+    pub agg_segment_secs: i64,
+    /// Process-global concurrency limits for the demand-driven fold pipeline,
+    /// shared across all in-flight `/api/flamegraph` requests so total fold work
+    /// is bounded application-wide (see [`FoldLimits`]).
+    pub(crate) fold_limits: crate::ingest::aggregate::FoldLimits,
 }
 
 impl AppState {
@@ -76,14 +106,25 @@ impl AppState {
             default_bucket,
             default_prefix,
             dev_ui_dir: None,
+            agg: None,
             uploads: None,
             allow_byo_creds: false,
             ephemeral_s3: None,
+            agg_output_prefix: "flamegraph-data".to_string(),
+            agg_output_bucket: None,
+            agg_output_backend: None,
+            agg_segment_secs: crate::ingest::aggregate::DEFAULT_SEGMENT_DURATION_SECS,
+            fold_limits: crate::ingest::aggregate::FoldLimits::default(),
         }
     }
 
     pub fn with_dev_ui_dir(mut self, dir: PathBuf) -> Self {
         self.dev_ui_dir = Some(dir);
+        self
+    }
+
+    pub fn with_agg(mut self, agg: crate::ingest::aggregate::AggContext) -> Self {
+        self.agg = Some(agg);
         self
     }
 
@@ -94,7 +135,9 @@ impl AppState {
         self
     }
 
-    /// Enable the bring-your-own-credentials path (S3 backends only).
+    /// Enable the bring-your-own-credentials path (S3 backends only). This also
+    /// enables on-demand aggregation; leave unset (the default) for local-dir
+    /// sources, where credentials are meaningless and aggregation is local.
     pub fn with_byo_creds(mut self, allow: bool) -> Self {
         self.allow_byo_creds = allow;
         self
@@ -105,6 +148,91 @@ impl AppState {
     pub fn with_ephemeral_s3(mut self, cfg: EphemeralS3Config) -> Self {
         self.ephemeral_s3 = Some(cfg);
         self
+    }
+
+    pub fn with_agg_output_prefix(mut self, prefix: String) -> Self {
+        self.agg_output_prefix = prefix;
+        self
+    }
+
+    /// Set the output bucket for BYOC aggregation, paired with the region-aware
+    /// backend that writes to it. Pass `None` to keep the default of writing
+    /// back into the source bucket through the request's own backend.
+    pub fn with_agg_output_bucket(
+        mut self,
+        bucket: Option<String>,
+        backend: Option<Arc<dyn StorageBackend>>,
+    ) -> Self {
+        self.agg_output_bucket = bucket;
+        self.agg_output_backend = backend;
+        self
+    }
+
+    pub fn with_agg_segment_secs(mut self, secs: i64) -> Self {
+        self.agg_segment_secs = secs;
+        self
+    }
+
+    /// Build a per-request [`AggContext`] for the bring-your-own-credentials
+    /// path (`?bucket=…`), or reuse the server-configured one.
+    ///
+    /// When `bucket` is `Some`, the request targets the user's own bucket:
+    /// resolve a backend from any supplied credentials, scope the source listing
+    /// to `prefix` (falling back to the server default), and route output to the
+    /// configured `--agg-output-bucket` (through its own region-aware backend) or
+    /// else back into the source bucket. When `bucket` is `None`, fall back to
+    /// the server's `--agg` context if one is configured.
+    ///
+    /// Returns `None` only when no `bucket` is given *and* the server has no
+    /// `--agg` context — the caller maps that to 404. This is the single place
+    /// the BYOC context is assembled, shared by `/api/flamegraph` and
+    /// `/tokio-stats`.
+    ///
+    /// [`AggContext`]: crate::ingest::aggregate::AggContext
+    pub(crate) fn agg_context_for(
+        &self,
+        bucket: Option<&str>,
+        prefix: Option<&str>,
+        creds: MaybeCreds,
+    ) -> Result<Option<crate::ingest::aggregate::AggContext>, (StatusCode, String)> {
+        use crate::ingest::aggregate::AggContext;
+        if let Some(bucket) = bucket {
+            let backend = self.resolve(creds)?;
+            let source_prefix = prefix
+                .map(str::to_string)
+                .or_else(|| self.default_prefix.clone())
+                .unwrap_or_default();
+            // Output may target a different, writable bucket than the (often
+            // read-only) source. When `--agg-output-bucket` is configured we
+            // write there through its own region-aware backend; otherwise we
+            // write back into the source bucket through the request's backend.
+            let (output_bucket, output) = match (&self.agg_output_bucket, &self.agg_output_backend)
+            {
+                (Some(out_bucket), Some(out_backend)) => {
+                    (out_bucket.clone(), Arc::clone(out_backend))
+                }
+                _ => (bucket.to_string(), Arc::clone(&backend)),
+            };
+            tracing::info!(
+                %bucket,
+                %output_bucket,
+                resolved_source_prefix = %source_prefix,
+                output_prefix = %self.agg_output_prefix,
+                "agg: BYOC context"
+            );
+            Ok(Some(AggContext {
+                source: backend,
+                output,
+                source_bucket: bucket.to_string(),
+                source_is_local: false,
+                output_bucket,
+                output_prefix: self.agg_output_prefix.clone(),
+                source_prefixes: vec![source_prefix],
+                segment_duration_secs: self.agg_segment_secs,
+            }))
+        } else {
+            Ok(self.agg.clone())
+        }
     }
 
     /// Pick the storage backend for a request given any supplied credentials.
@@ -224,11 +352,16 @@ fn api_router(state: AppState) -> Router {
             axum::routing::post(check::check_credentials),
         )
         .route("/prefixes", axum::routing::get(prefixes::list_prefixes))
-        .route("/search", axum::routing::get(search::search))
+        .route("/browse", axum::routing::get(browse::browse))
         .route("/object", axum::routing::get(trace::get_object))
-        // DEPRECATED (slated for removal): superseded by /object, which serves a
-        // single object's raw bytes so the browser merges/gunzips client-side.
-        .route("/trace", axum::routing::get(trace::get_trace))
+        .route(
+            "/flamegraph",
+            axum::routing::get(flamegraph::get_flamegraph),
+        )
+        .route(
+            "/tokio-stats",
+            axum::routing::get(tokio_stats::get_tokio_stats),
+        )
         .route("/uploaded/{id}", axum::routing::get(upload::get_uploaded))
         .merge(upload_route)
         // Permissive CORS so a page on another origin can POST a trace and read
