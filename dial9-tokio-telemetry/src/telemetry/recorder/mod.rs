@@ -33,7 +33,6 @@ use handle::INSTRUMENTED_SPAWN;
 use runtime_context::{make_poll_end, make_poll_start, make_worker_park, make_worker_unpark};
 
 use crate::primitives::sync::Arc;
-use crate::primitives::sync::atomic::Ordering;
 use crate::rate_limit::rate_limited;
 use crate::telemetry::format::TaskTerminateEvent;
 use crate::telemetry::task_metadata::TaskId;
@@ -315,7 +314,7 @@ mod tests {
     use dial9_core::test_util;
     use std::panic::Location;
     use std::sync::Arc;
-    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// In-memory capture budget for runtime tests.
     const CAPTURE_SIZE: u64 = 16 * 1024 * 1024;
