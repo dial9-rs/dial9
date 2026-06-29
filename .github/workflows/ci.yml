@@ -306,6 +306,7 @@ jobs:
             -p dial9-trace-format-derive \
             -p dial9-trace-format \
             -p dial9-core \
+            -p dial9-utils \
             -p dial9-perf-self-profile \
             -p dial9-macro \
             -p dial9-tokio-telemetry \
