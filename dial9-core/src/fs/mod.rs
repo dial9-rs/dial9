@@ -65,7 +65,7 @@ pub(crate) struct SegmentAccounting {
 #[cfg(feature = "pipeline")]
 impl SegmentAccounting {
     /// Re-balance `in_flight_bytes` after a processor mutated the payload.
-    pub fn adjust(&mut self, new_size: u64) {
+    pub(crate) fn adjust(&mut self, new_size: u64) {
         if new_size == self.size {
             return;
         }
@@ -173,12 +173,12 @@ impl TakenSegment {
 
     /// Cheap clone of the original seal'd bytes, for memory
     /// retry re-enqueue. `None` for disk (retry re-reads the file).
-    pub fn original_bytes(&self) -> Option<Bytes> {
+    pub(crate) fn original_bytes(&self) -> Option<Bytes> {
         self.pre_loaded.as_ref().map(|m| m.bytes.clone())
     }
 
     /// Re-enqueue count this dispense carries. `None` for disk.
-    pub fn retry_count(&self) -> Option<u32> {
+    pub(crate) fn retry_count(&self) -> Option<u32> {
         self.pre_loaded.as_ref().map(|m| m.retry_count)
     }
 
@@ -191,7 +191,7 @@ impl TakenSegment {
     /// Load the segment payload.
     /// - disk: reads the file (`Err(NotFound)` if it vanished between scan and load).
     /// - memory: zero-copy `Bytes`.
-    pub fn load(self) -> io::Result<(SegmentRef, Payload, Option<SegmentAccounting>)> {
+    pub(crate) fn load(self) -> io::Result<(SegmentRef, Payload, Option<SegmentAccounting>)> {
         match self.pre_loaded {
             Some(MemoryPayload {
                 bytes, accounting, ..
@@ -339,7 +339,7 @@ impl Fs {
     /// pop-once for memory). Memory mode pops at most one segment per call to
     /// bound peak in-flight memory to one segment regardless of backlog.
     #[cfg(feature = "pipeline")]
-    pub fn take_files(&self) -> TakenFiles {
+    pub(crate) fn take_files(&self) -> TakenFiles {
         match self {
             Fs::Disk(d) => d.take_files(),
             Fs::Mem(m) => m.take_files(),

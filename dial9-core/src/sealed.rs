@@ -3,6 +3,10 @@
 //! Finds `.bin` files produced by `DiskWriter` rename-on-seal,
 //! ignoring `.active` files that are still being written.
 
+// The segment types here are the public pipeline API, exposed via the
+// `pipeline` module's re-export. Without that feature they stay crate-internal.
+#![cfg_attr(not(feature = "pipeline"), allow(unreachable_pub))]
+
 use std::path::{Path, PathBuf};
 
 use crate::primitives::fs;
@@ -86,7 +90,7 @@ impl std::fmt::Display for SegmentRef {
 /// Segment creation time as epoch seconds, parsed from the first clock
 /// anchor in the trace. Returns `(secs, true)` on a successful parse, or
 /// falls back to file mtime / current time with `(secs, false)`.
-pub fn creation_epoch_secs(data: &[u8], path: &Path) -> (u64, bool) {
+pub(crate) fn creation_epoch_secs(data: &[u8], path: &Path) -> (u64, bool) {
     match parse_segment_timestamp(data) {
         Ok(ts) => return (ts / 1_000_000_000, true),
         Err(e) => {
@@ -221,7 +225,7 @@ impl std::fmt::Display for ParseTimestampError {
 /// given base path's file stem. Ignores `.active` files and any files
 /// that don't match the expected naming pattern.
 #[cfg(feature = "pipeline")]
-pub fn find_sealed_segments(dir: &Path, stem: &str) -> std::io::Result<Vec<SealedSegment>> {
+pub(crate) fn find_sealed_segments(dir: &Path, stem: &str) -> std::io::Result<Vec<SealedSegment>> {
     let mut segments = Vec::new();
     for entry in fs::read_dir(dir)? {
         let entry = entry?;

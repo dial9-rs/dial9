@@ -19,33 +19,40 @@ struct Batch {
 }
 
 impl Batch {
+    crate::test_util_pub! {
     /// Create a new batch from encoded bytes and an event count.
-    pub fn new(encoded_bytes: Vec<u8>, event_count: u64) -> Self {
+    fn new(encoded_bytes: Vec<u8>, event_count: u64) -> Self {
         Self {
             encoded_bytes,
             event_count,
         }
     }
-
-    /// The encoded trace bytes for this batch.
-    pub fn encoded_bytes(&self) -> &[u8] {
-        &self.encoded_bytes
     }
 
+    crate::test_util_pub! {
+    /// The encoded trace bytes for this batch.
+    fn encoded_bytes(&self) -> &[u8] {
+        &self.encoded_bytes
+    }
+    }
+
+    crate::test_util_pub! {
     /// Number of events in this batch.
-    pub fn event_count(&self) -> u64 {
+    fn event_count(&self) -> u64 {
         self.event_count
+    }
     }
 
     /// Whether this batch contains no events.
-    pub fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.event_count == 0
     }
 
+    crate::test_util_pub! {
     /// Consume the batch, returning the encoded bytes without copying.
-    #[cfg_attr(not(feature = "test-util"), allow(dead_code))]
-    pub fn into_encoded_bytes(self) -> Vec<u8> {
+    fn into_encoded_bytes(self) -> Vec<u8> {
         self.encoded_bytes
+    }
     }
 }
 
@@ -64,29 +71,31 @@ impl Default for CentralCollector {
 }
 
 impl CentralCollector {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::with_capacity(DEFAULT_CAPACITY)
     }
 
-    pub fn with_capacity(capacity: usize) -> Self {
+    pub(crate) fn with_capacity(capacity: usize) -> Self {
         Self {
             queue: BoundedQueue::new(capacity),
             dropped_batches: AtomicUsize::new(0),
         }
     }
 
-    pub fn accept_flush(&self, batch: Batch) {
+    pub(crate) fn accept_flush(&self, batch: Batch) {
         if let Some(_evicted) = self.queue.force_push(batch) {
             self.dropped_batches.fetch_add(1, Ordering::Relaxed);
         }
     }
 
-    pub fn next(&self) -> Option<Batch> {
+    crate::test_util_pub! {
+    fn next(&self) -> Option<Batch> {
         self.queue.pop()
+    }
     }
 
     /// Returns the number of batches dropped since the last call.
-    pub fn take_dropped_batches(&self) -> usize {
+    pub(crate) fn take_dropped_batches(&self) -> usize {
         self.dropped_batches.swap(0, Ordering::Relaxed)
     }
 }

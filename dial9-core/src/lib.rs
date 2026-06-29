@@ -1,3 +1,7 @@
+//! dial9 recording core: the event bus, recording session, and trace writer.
+
+#![warn(unreachable_pub)]
+
 /// Declares an item `pub` under the `test-util` feature and `pub(crate)`
 /// otherwise. Lets sibling-crate tests reach internals (batches, the collector,
 /// raw encode/drain helpers) without putting them on the production public API.

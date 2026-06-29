@@ -200,11 +200,10 @@ where
     ))
 }
 
-crate::test_util_pub! {
 /// Consumer side of the bus: drains sealed segments and runs each through the
 /// configured [`SegmentProcessor`] pipeline. Built and driven by
-/// [`run_background_task`]; `pub` only under `test-util` for cross-crate tests.
-struct WorkerLoop {
+/// [`run_background_task`].
+pub(crate) struct WorkerLoop {
     fs: Arc<Fs>,
     poll_interval: Duration,
     processors: Vec<Box<dyn SegmentProcessor>>,
@@ -221,7 +220,6 @@ struct WorkerLoop {
     /// segment is processed or removed, and each matching pass prunes
     /// entries for files no longer on disk (writer-evicted).
     epoch_cache: HashMap<u32, (u64, u64)>,
-}
 }
 
 /// A dump registered with the triggered worker, accumulating receipt state
@@ -374,7 +372,7 @@ fn record_dump_error(dumps: &mut [ActiveDump], matched: &[usize], kind: ProcessE
 }
 
 impl WorkerLoop {
-    pub fn new(
+    pub(crate) fn new(
         fs: Arc<Fs>,
         poll_interval: Duration,
         processors: Vec<Box<dyn SegmentProcessor>>,
@@ -393,7 +391,7 @@ impl WorkerLoop {
         }
     }
 
-    pub async fn run(&mut self) {
+    pub(crate) async fn run(&mut self) {
         match self.trigger.take() {
             None => self.run_continuous().await,
             Some(rx) => self.run_triggered(rx).await,
