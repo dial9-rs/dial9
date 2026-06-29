@@ -127,7 +127,7 @@ impl BackgroundTaskConfig {
 ///
 /// Creates a single-threaded tokio runtime for async processors (e.g. S3 upload).
 /// The worker is a "good citizen": it will lose data rather than disrupt the application.
-pub fn run_background_task(
+pub(crate) fn run_background_task(
     mut config: BackgroundTaskConfig,
     shutdown: tokio::sync::oneshot::Receiver<Duration>,
     fs: Arc<Fs>,
@@ -169,6 +169,35 @@ pub fn run_background_task(
         }
     });
     tracing::info!(target: "dial9_worker", "worker stopped");
+}
+
+/// Spawn the segment-processing worker on a dedicated thread, draining
+/// `writer`'s sealed segments through `config`'s processor pipeline. Returns the
+/// thread handle, or `None` when `writer` has no filesystem backend.
+/// `thread_init` runs on the worker thread before the loop and returns
+/// a teardown closure run after it (e.g. profiler register/unregister).
+///
+/// Owns the fs handoff so callers never touch the writer's storage backend.
+pub fn spawn<M, Init, Teardown>(
+    writer: &crate::writer::SegmentWriter<M>,
+    config: BackgroundTaskConfig,
+    shutdown: tokio::sync::oneshot::Receiver<Duration>,
+    thread_init: Init,
+) -> Option<crate::primitives::thread::JoinHandle<()>>
+where
+    M: crate::writer::WriterMode,
+    Init: FnOnce() -> Teardown + Send + 'static,
+    Teardown: FnOnce(),
+{
+    let fs = writer.fs_handle()?;
+    Some(crate::primitives::thread::spawn_named(
+        "dial9-worker",
+        move || {
+            let teardown = thread_init();
+            run_background_task(config, shutdown, fs);
+            teardown();
+        },
+    ))
 }
 
 crate::test_util_pub! {

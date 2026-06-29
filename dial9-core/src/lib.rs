@@ -30,8 +30,7 @@ pub(crate) mod flush_loop;
 /// Wire-format events emitted by the bus itself.
 pub mod format;
 /// Writer↔worker filesystem/channel abstraction for trace segments.
-#[doc(hidden)]
-pub mod fs;
+pub(crate) mod fs;
 /// Cloneable handle for recording events and controlling telemetry.
 pub mod handle;
 /// Operational metrics for the core flush path.
@@ -67,3 +66,6 @@ pub mod source;
 pub mod worker;
 /// Rotating trace-segment writer.
 pub mod writer;
+
+#[cfg(all(test, shuttle))]
+mod pipeline_shuttle_tests;

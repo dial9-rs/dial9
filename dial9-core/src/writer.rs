@@ -700,8 +700,10 @@ impl<M: WriterMode> SegmentWriter<M> {
 }
 
 impl<M: WriterMode> SegmentWriter<M> {
-    #[doc(hidden)]
-    pub fn fs_handle(&self) -> Option<Arc<Fs>> {
+    /// The filesystem backend, handed to the worker so it can drain sealed
+    /// segments. Only needed when the pipeline worker is compiled in.
+    #[cfg(feature = "pipeline")]
+    pub(crate) fn fs_handle(&self) -> Option<Arc<Fs>> {
         Some(Arc::clone(&self.fs))
     }
 

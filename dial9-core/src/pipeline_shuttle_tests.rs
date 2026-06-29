@@ -1,11 +1,22 @@
+//! Shuttle round-trip + error-injection tests for the core pipeline:
+//! writer -> flush thread -> sealed segment -> drain, plus the flush loop's
+//! rate-limited error handling under fs faults. No tokio, no telemetry sources.
+
+use crate::clock::clock_monotonic_ns;
 use crate::primitives::fs;
 use crate::primitives::sync::atomic::{AtomicU64, Ordering};
 use crate::primitives::sync::{Arc, Mutex};
-use crate::telemetry::recorder::TelemetryCore;
-use crate::telemetry::writer::{DiskWriter, InMemoryWriter};
+use crate::session::CoreSession;
+use crate::shared_state::SharedState;
+use crate::source::{FlushContext, Source};
+use crate::writer::{DiskWriter, InMemoryWriter};
 use dial9_trace_format::TraceEvent;
 use shuttle::rand::Rng;
 use std::collections::HashMap;
+
+fn dev_null_sink() -> metrique::writer::BoxEntrySink {
+    metrique::writer::sink::DevNullSink::boxed()
+}
 
 // ── Event definition ────────────────────────────────────────────────
 
@@ -97,8 +108,8 @@ impl MockSource {
     }
 }
 
-impl crate::telemetry::recorder::source::Source for MockSource {
-    fn flush(&mut self, ctx: &crate::telemetry::recorder::source::FlushContext<'_>) {
+impl Source for MockSource {
+    fn flush(&mut self, ctx: &FlushContext<'_>) {
         let events: Vec<_> = self.pending.lock().unwrap().drain(..).collect();
         for ev in &events {
             ctx.record_event(ev);
@@ -115,7 +126,7 @@ impl crate::telemetry::recorder::source::Source for MockSource {
 
 // ── Test body ───────────────────────────────────────────────────────
 
-fn test_telemetry_core_pipeline() {
+fn test_core_pipeline() {
     let _ts_guard = metrique_timesource::set_time_source(metrique_timesource::TimeSource::custom(
         metrique_timesource::fakes::StaticTimeSource::at_time(std::time::UNIX_EPOCH),
     ));
@@ -135,13 +146,11 @@ fn test_telemetry_core_pipeline() {
     // Mock source: worker threads push events here, flush thread drains them.
     let source_pending: Arc<Mutex<Vec<ValidationEvent>>> = Arc::new(Mutex::new(Vec::new()));
 
-    let guard = TelemetryCore::builder().writer(writer).build().unwrap();
-    guard
-        .shared()
-        .unwrap()
-        .push_source(Box::new(MockSource::new(source_pending.clone())));
-    guard.enable();
-    let handle = guard.handle();
+    let shared = Arc::new(SharedState::new(clock_monotonic_ns()));
+    shared.push_source(Box::new(MockSource::new(source_pending.clone())));
+    let mut session = CoreSession::start(shared, writer, dev_null_sink(), || || {});
+    session.handle().enable();
+    let handle = session.handle().clone();
 
     let expected: Arc<Mutex<Vec<ValidationEvent>>> = Arc::new(Mutex::new(Vec::new()));
     let writers: Vec<_> = (0..num_threads)
@@ -180,7 +189,8 @@ fn test_telemetry_core_pipeline() {
     for w in writers {
         w.join().unwrap();
     }
-    drop(guard);
+    // Final flush + seal the last segment, then join the flush thread.
+    session.stop_flush_thread();
 
     // Drain the in-memory ring (memory pops one sealed segment per call).
     let mut all_decoded: Vec<ValidationEvent> = Vec::new();
@@ -203,12 +213,12 @@ fn test_telemetry_core_pipeline() {
 
 #[test]
 fn determinism_check() {
-    shuttle::check_uncontrolled_nondeterminism(test_telemetry_core_pipeline, 10000);
+    shuttle::check_uncontrolled_nondeterminism(test_core_pipeline, 10000);
 }
 
 #[test]
 fn pct_real_pipeline() {
-    shuttle::check_pct(test_telemetry_core_pipeline, 10000, 3);
+    shuttle::check_pct(test_core_pipeline, 10000, 3);
 }
 
 // ── Error injection ─────────────────────────────────────────────────
@@ -282,9 +292,10 @@ fn run_erroring_pipeline(fault: fs::FaultPolicy) -> u64 {
         let dir = tempfile::tempdir().unwrap();
         let writer = DiskWriter::single_file(dir.path().join("trace.bin")).unwrap();
         let _fault = fs::set_fault(fault);
-        let guard = TelemetryCore::builder().writer(writer).build().unwrap();
-        guard.enable();
-        let handle = guard.handle();
+        let shared = Arc::new(SharedState::new(clock_monotonic_ns()));
+        let mut session = CoreSession::start(shared, writer, dev_null_sink(), || || {});
+        session.handle().enable();
+        let handle = session.handle().clone();
 
         let writers: Vec<_> = (0..num_threads)
             .map(|thread_id| {
@@ -315,9 +326,9 @@ fn run_erroring_pipeline(fault: fs::FaultPolicy) -> u64 {
         for w in writers {
             w.join().unwrap();
         }
-        // Dropping the guard triggers the shutdown/finalize path,
-        // which should also be rate-limited if it logs on error.
-        drop(guard);
+        // The shutdown/finalize path runs a final flush + seal, which should
+        // also be rate-limited if it logs on error.
+        session.stop_flush_thread();
     });
 
     warn_count.load(StdOrdering::Relaxed)
@@ -346,7 +357,7 @@ fn determinism_check_fs_fault_visible() {
     shuttle::check_uncontrolled_nondeterminism(fs_fault_visible_across_threads, 100);
 }
 
-fn test_telemetry_core_erroring_pipeline() {
+fn test_core_erroring_pipeline() {
     let total = run_erroring_pipeline(fs::FaultPolicy::FailAll);
     assert!(
         total <= 10,
@@ -358,15 +369,15 @@ fn test_telemetry_core_erroring_pipeline() {
 
 #[test]
 fn determinism_check_erroring() {
-    shuttle::check_uncontrolled_nondeterminism(test_telemetry_core_erroring_pipeline, 10000);
+    shuttle::check_uncontrolled_nondeterminism(test_core_erroring_pipeline, 10000);
 }
 
 #[test]
 fn pct_erroring_pipeline() {
-    shuttle::check_pct(test_telemetry_core_erroring_pipeline, 10000, 3);
+    shuttle::check_pct(test_core_erroring_pipeline, 10000, 3);
 }
 
-fn test_telemetry_core_probabilistic_fs_faults() {
+fn test_core_probabilistic_fs_faults() {
     let total = run_erroring_pipeline(fs::FaultPolicy::FailProb(0.5));
     assert!(
         total <= 10,
@@ -377,10 +388,10 @@ fn test_telemetry_core_probabilistic_fs_faults() {
 
 #[test]
 fn determinism_check_probabilistic_fs_faults() {
-    shuttle::check_uncontrolled_nondeterminism(test_telemetry_core_probabilistic_fs_faults, 10000);
+    shuttle::check_uncontrolled_nondeterminism(test_core_probabilistic_fs_faults, 10000);
 }
 
 #[test]
 fn pct_probabilistic_fs_faults() {
-    shuttle::check_pct(test_telemetry_core_probabilistic_fs_faults, 10000, 3);
+    shuttle::check_pct(test_core_probabilistic_fs_faults, 10000, 3);
 }

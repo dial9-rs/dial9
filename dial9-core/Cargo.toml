@@ -43,12 +43,15 @@ serde_json = { version = "1", optional = true }
 [dev-dependencies]
 assert2 = { workspace = true }
 async-trait = "0.1.89"
+dial9-trace-format = { workspace = true, features = ["serde-deserialize"] }
 metrique-timesource = { version = "0.1", features = [
     "custom-timesource",
     "tokio",
+    "test-util",
 ] }
 metrique-writer = { version = "0.1", features = ["test-util"] }
 proptest = "1"
+serde = { version = "1", features = ["derive"] }
 tempfile = "3"
 tokio = { version = "1.52.0", features = ["rt", "macros", "time", "test-util"] }
 s3s = "0.13.0"

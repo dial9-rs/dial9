@@ -38,7 +38,7 @@ pub struct SegmentData {
 impl SegmentData {
     /// Build segment data for the pipeline. Called by the driver after loading
     /// a sealed segment.
-    pub fn new(
+    pub(crate) fn new(
         segment: SegmentRef,
         payload: Payload,
         metadata: HashMap<String, String>,

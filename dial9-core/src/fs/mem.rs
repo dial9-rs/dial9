@@ -90,7 +90,7 @@ struct MemChannel {
 }
 
 /// In-memory segment channel.
-pub struct MemFs {
+pub(crate) struct MemFs {
     channel: Arc<MemChannel>,
 }
 

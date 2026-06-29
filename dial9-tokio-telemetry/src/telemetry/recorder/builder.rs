@@ -937,7 +937,6 @@ impl TelemetryCore {
 
         #[allow(unused_mut)]
         let mut writer = writer;
-        let writer_fs = writer.fs_handle();
 
         let processors = assemble_processors(
             #[cfg(feature = "cpu-profiling")]
@@ -997,31 +996,18 @@ impl TelemetryCore {
             }
         }
 
-        let flush_metrics_sink = worker_metrics_sink
-            .clone()
-            .unwrap_or_else(metrique_writer::sink::DevNullSink::boxed);
-
-        // Core owns the flush thread (and its control channel); inject the
-        // cpu-profiler thread registration (perf-specific) via the thread-init hook.
-        let core_session = CoreSession::start(shared, writer, flush_metrics_sink, || {
-            #[cfg(feature = "cpu-profiling")]
-            let _ = dial9_perf_self_profile::register_current_thread();
-            move || {
-                #[cfg(feature = "cpu-profiling")]
-                dial9_perf_self_profile::unregister_current_thread();
-            }
-        });
-
-        // Spawn the background worker when we have a filesystem backend
-        // (disk or memory via `writer_fs`) and at least one processor.
-        let worker_config = if processors.is_empty() {
-            None
-        } else if let Some(fs) = writer_fs {
+        // Spawn the background worker before the writer moves into the flush
+        // thread. `worker::spawn` owns the writer->worker fs handoff and returns
+        // `None` when there's no filesystem backend, build a config only when
+        // there are processors to run.
+        #[allow(unused_mut)]
+        let mut worker = None;
+        if !processors.is_empty() {
             let poll_interval =
                 worker_poll_interval.unwrap_or(crate::background_task::DEFAULT_POLL_INTERVAL);
-            let metrics_sink =
-                worker_metrics_sink.unwrap_or_else(metrique_writer::sink::DevNullSink::boxed);
-
+            let metrics_sink = worker_metrics_sink
+                .clone()
+                .unwrap_or_else(metrique_writer::sink::DevNullSink::boxed);
             let config = if let Some(tp) = trace_path {
                 crate::background_task::BackgroundTaskConfig::builder()
                     .trace_path(tp)
@@ -1038,27 +1024,34 @@ impl TelemetryCore {
                     .maybe_trigger(trigger)
                     .build()
             };
-            Some((config, fs))
-        } else {
-            None
-        };
-
-        #[allow(unused_mut)]
-        let mut worker = None;
-        if let Some((config, fs)) = worker_config {
             let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
-            let wt = crate::primitives::thread::spawn_named("dial9-worker", move || {
+            let wt = crate::background_task::spawn(&writer, config, shutdown_rx, || {
                 #[cfg(feature = "cpu-profiling")]
                 let _ = dial9_perf_self_profile::register_current_thread();
-                crate::background_task::run_background_task(config, shutdown_rx, fs);
+                move || {
+                    #[cfg(feature = "cpu-profiling")]
+                    dial9_perf_self_profile::unregister_current_thread();
+                }
+            });
+            if let Some(wt) = wt {
+                worker = Some(WorkerHandle {
+                    shutdown: Some(shutdown_tx),
+                    thread: Some(wt),
+                });
+            }
+        }
+
+        // Inject the cpu-profiler thread registration (perf-specific) via the thread-init hook.
+        let flush_metrics_sink =
+            worker_metrics_sink.unwrap_or_else(metrique_writer::sink::DevNullSink::boxed);
+        let core_session = CoreSession::start(shared, writer, flush_metrics_sink, || {
+            #[cfg(feature = "cpu-profiling")]
+            let _ = dial9_perf_self_profile::register_current_thread();
+            move || {
                 #[cfg(feature = "cpu-profiling")]
                 dial9_perf_self_profile::unregister_current_thread();
-            });
-            worker = Some(WorkerHandle {
-                shutdown: Some(shutdown_tx),
-                thread: Some(wt),
-            });
-        }
+            }
+        });
 
         Ok(TelemetryGuard::enabled(
             core_session,

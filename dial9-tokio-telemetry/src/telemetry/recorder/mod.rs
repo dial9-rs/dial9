@@ -1,8 +1,6 @@
 mod builder;
 mod guard;
 mod handle;
-#[cfg(all(test, shuttle))]
-mod pipeline_shuttle_tests;
 mod runtime_context;
 pub(crate) use dial9_core::shared_state::SharedState;
 pub(crate) use dial9_core::source;

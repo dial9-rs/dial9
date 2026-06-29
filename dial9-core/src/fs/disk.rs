@@ -24,7 +24,7 @@ use super::{ActiveHandle, DiscoveredArtifacts, RemoveReason};
 use super::{TakenFiles, TakenSegment};
 
 /// Disk-backed filesystem state.
-pub struct DiskFs {
+pub(crate) struct DiskFs {
     dir: PathBuf,
     stem: String,
     /// Claimed segment index -> uncompressed size in bytes. Dedup so each

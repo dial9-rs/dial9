@@ -55,9 +55,8 @@ pub(crate) enum RemoveReason {
 /// drop returns that to the atomic.
 #[cfg(feature = "pipeline")]
 #[derive(Debug)]
-pub struct SegmentAccounting {
-    #[doc(hidden)]
-    pub in_flight_bytes: Arc<AtomicU64>,
+pub(crate) struct SegmentAccounting {
+    pub(crate) in_flight_bytes: Arc<AtomicU64>,
     pub(crate) in_flight_segments: Arc<AtomicU64>,
     pub(crate) in_flight_bytes_peak: Arc<AtomicU64>,
     pub(crate) size: u64,
@@ -140,8 +139,8 @@ pub(crate) struct MemoryPayload {
 /// A claim returned by `Fs::take_files`. Memory comes with payload in hand,
 /// disk loads lazily on `load()` so peak in-flight memory stays at one segment.
 #[cfg(feature = "pipeline")]
-pub struct TakenSegment {
-    pub seg_ref: SegmentRef,
+pub(crate) struct TakenSegment {
+    pub(crate) seg_ref: SegmentRef,
     pre_loaded: Option<MemoryPayload>,
 }
 
@@ -214,20 +213,19 @@ impl TakenSegment {
 
 /// Per-cycle snapshot returned by `Fs::take_files`.
 #[cfg(feature = "pipeline")]
-#[non_exhaustive]
-pub struct TakenFiles {
-    pub segments: Vec<TakenSegment>,
+pub(crate) struct TakenFiles {
+    pub(crate) segments: Vec<TakenSegment>,
     /// Segments still in the memory ring after this cycle's pop. `None` on disk.
-    pub queued_segments: Option<u64>,
+    pub(crate) queued_segments: Option<u64>,
     /// Encoded bytes still in the memory ring after this cycle's pop. `None` on disk.
-    pub queued_bytes: Option<u64>,
-    pub in_flight_segments: u64,
-    pub in_flight_bytes: u64,
+    pub(crate) queued_bytes: Option<u64>,
+    pub(crate) in_flight_segments: u64,
+    pub(crate) in_flight_bytes: u64,
     /// High-water of total in-flight bytes observed during the prior
     /// cycle. `None` on disk (no per-stage tracking).
-    pub in_flight_bytes_peak: Option<u64>,
+    pub(crate) in_flight_bytes_peak: Option<u64>,
     /// Segments evicted during this cycle (per-cycle delta).
-    pub segments_dropped: u64,
+    pub(crate) segments_dropped: u64,
 }
 
 /// Closed epoch window a triggered dump matches segments against.
@@ -251,7 +249,7 @@ impl EpochWindow {
 }
 
 /// Unified filesystem abstraction covering the writer↔worker seam.
-pub enum Fs {
+pub(crate) enum Fs {
     Disk(DiskFs),
     Mem(MemFs),
 }
