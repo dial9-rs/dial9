@@ -10,12 +10,6 @@ use std::time::Duration;
 #[doc(hidden)]
 pub struct SharedState {
     pub enabled: AtomicBool,
-    // `CentralCollector` is a crate internal, so the field is `pub(crate)` in
-    // production and `pub` only under `test-util` (sibling-crate tests drain it
-    // directly). In-crate access (flush context) is unaffected.
-    #[cfg(feature = "test-util")]
-    pub collector: Arc<CentralCollector>,
-    #[cfg(not(feature = "test-util"))]
     pub(crate) collector: Arc<CentralCollector>,
     /// Absolute `CLOCK_MONOTONIC` nanosecond timestamp captured at trace start.
     pub start_time_ns: u64,

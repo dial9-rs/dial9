@@ -59,12 +59,15 @@ pub mod rate_limit;
 pub mod sampling;
 /// Sealed-segment detection. The segment types are public via [`pipeline`].
 pub(crate) mod sealed;
-/// Runtime-agnostic recording session (handle + flush thread lifecycle).
+/// Runtime-agnostic recording session.
 pub mod session;
 /// Runtime-agnostic recording state shared across threads.
 pub mod shared_state;
 /// `Source` trait: pluggable flush-thread data sources.
 pub mod source;
+/// Test-only record/drain/write helpers.
+#[cfg(feature = "test-util")]
+pub mod test_util;
 /// Segment-processing worker: runs a `SegmentProcessor` pipeline over sealed segments.
 #[cfg(feature = "pipeline")]
 pub mod worker;

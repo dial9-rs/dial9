@@ -309,29 +309,14 @@ fn attach_runtime(
 mod tests {
     use super::*;
     use crate::background_task::testutil::{CapturingProcessor, decode_captured};
-    use crate::telemetry::buffer;
     use crate::telemetry::writer::InMemoryWriter;
-    use dial9_core::collector::CentralCollector;
+    use dial9_core::test_util;
     use std::panic::Location;
     use std::sync::Arc;
     use std::sync::atomic::AtomicUsize;
 
     /// In-memory capture budget for runtime tests.
     const CAPTURE_SIZE: u64 = 16 * 1024 * 1024;
-
-    /// Drain all pending batches from a `CentralCollector` into a writer.
-    /// Call `buffer::drain_to_collector` first to flush the thread-local buffer.
-    #[cfg(feature = "analysis")]
-    fn drain_collector_to_writer(
-        collector: &CentralCollector,
-        writer: &mut crate::telemetry::writer::DiskWriter,
-    ) {
-        while let Some(batch) = collector.next() {
-            if batch.event_count() > 0 {
-                writer.write_encoded_batch(&batch).unwrap();
-            }
-        }
-    }
 
     /// Nested `InstrumentedSpawnGuard`s must compose: inner drop must not
     /// clear the outer scope. Counter, not flag.
@@ -583,8 +568,7 @@ mod tests {
             });
             // Drain after each iteration to produce separate small batches
             // that trigger file rotation (max_file_size is 100 bytes).
-            buffer::drain_to_collector(&shared.collector);
-            drain_collector_to_writer(&shared.collector, &mut ew);
+            test_util::drain_into(&shared, &mut ew).unwrap();
         }
         ew.flush().unwrap();
         ew.finalize().unwrap();
@@ -894,10 +878,8 @@ mod tests {
     #[cfg(all(feature = "cpu-profiling", feature = "analysis"))]
     mod rotation_proptest {
         use super::*;
-        use crate::telemetry::Batch;
         use crate::telemetry::analysis::TraceReader;
         use crate::telemetry::analysis_events::Dial9Event;
-        use crate::telemetry::buffer::encode_single;
         use crate::telemetry::format::{WorkerId, WorkerParkEvent};
         use crate::telemetry::task_metadata::TaskId;
         use crate::telemetry::writer::DiskWriter;
@@ -908,9 +890,7 @@ mod tests {
             writer: &mut DiskWriter,
             event: &dyn crate::telemetry::buffer::Encodable,
         ) -> std::io::Result<()> {
-            let encoded_bytes = encode_single(event);
-            let batch = Batch::new(encoded_bytes, 1);
-            writer.write_encoded_batch(&batch)
+            test_util::write_event(writer, event)
         }
 
         #[derive(Debug, Clone)]
@@ -1254,11 +1234,10 @@ mod tests {
         });
 
         // Drain thread-local buffers before shutdown.
-        crate::telemetry::buffer::drain_to_collector(
+        test_util::drain_thread_local(
             &traced_handle(&guard.handle())
                 .expect("enabled handle must yield a TracedHandle")
-                .shared
-                .collector,
+                .shared,
         );
 
         drop(runtime);

@@ -305,10 +305,9 @@ crate::primitives::thread_local! {
     static BUFFER: Arc<Mutex<ThreadLocalBuffer>> = Arc::new(Mutex::new(ThreadLocalBuffer::new()));
 }
 
-crate::test_util_pub! {
 /// Drain the current thread's buffer into `collector`, even if not full.
 /// Used at shutdown and before flush cycles to avoid losing events.
-fn drain_to_collector(collector: &CentralCollector) {
+pub(crate) fn drain_to_collector(collector: &CentralCollector) {
     BUFFER.with(|buf| {
         let mut buf = match buf.lock() {
             Ok(guard) => guard,
@@ -323,7 +322,6 @@ fn drain_to_collector(collector: &CentralCollector) {
             collector.accept_flush(buf.flush());
         }
     });
-}
 }
 
 pub(crate) fn record_encodable_event(

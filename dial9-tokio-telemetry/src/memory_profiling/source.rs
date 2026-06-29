@@ -213,9 +213,9 @@ mod tests {
     use crate::primitives::sync::Arc;
     use crate::primitives::sync::atomic::Ordering;
     use crate::telemetry::analysis_events::Dial9Event;
-    use crate::telemetry::buffer;
     use crate::telemetry::format::decode_events;
     use crate::telemetry::recorder::SharedState;
+    use dial9_core::test_util;
 
     fn make_raw_alloc(addr: u64, size: u64, ts_ns: u64) -> RawAlloc {
         let mut frames = [0u64; DEFAULT_MAX_FRAMES];
@@ -294,10 +294,9 @@ mod tests {
 
     fn flush_and_collect(shared: &SharedState) -> Vec<Dial9Event> {
         shared.flush_sources();
-        buffer::drain_to_collector(&shared.collector);
         let mut events = Vec::new();
-        while let Some(batch) = shared.collector.next() {
-            if let Ok(decoded) = decode_events(batch.encoded_bytes()) {
+        for bytes in test_util::drain_encoded_batches(&shared) {
+            if let Ok(decoded) = decode_events(&bytes) {
                 events.extend(decoded);
             }
         }

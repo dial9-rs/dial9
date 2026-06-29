@@ -228,10 +228,10 @@ impl<F: Future> Future for WakeTraced<F> {
 mod tests {
     use super::*;
     use crate::telemetry::analysis_events::Dial9Event;
-    use crate::telemetry::buffer;
     use crate::telemetry::recorder::{TelemetryCore, TracedRuntime};
     use crate::telemetry::task_metadata::UNKNOWN_TASK_ID;
     use crate::telemetry::writer::{DiskWriter, InMemoryWriter};
+    use dial9_core::test_util;
     use futures_util::task::noop_waker;
     use std::pin::Pin;
     use std::sync::{Arc, Mutex};
@@ -320,7 +320,7 @@ mod tests {
         // collector so that the guard flush below picks it up.
         let th = crate::telemetry::recorder::traced_handle(&guard.handle())
             .expect("enabled handle yields TracedHandle");
-        buffer::drain_to_collector(&th.shared.collector);
+        test_util::drain_thread_local(&th.shared);
 
         // Dropping the guard stops the background flush thread, joins it, then
         // performs a final flush: collector → DiskWriter → trace file.

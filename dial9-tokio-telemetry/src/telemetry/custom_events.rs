@@ -119,8 +119,8 @@ impl Source for CustomEventsSource {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::telemetry::buffer;
     use crate::telemetry::recorder::SharedState;
+    use dial9_core::test_util;
     use dial9_trace_format::TraceEvent;
     use dial9_trace_format::decoder::Decoder;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -165,10 +165,10 @@ mod tests {
         });
 
         source.flush(&ctx);
-        buffer::drain_to_collector(&shared.collector);
-
-        let batch = shared.collector.next().expect("source should emit a batch");
-        let events = decode_test_events(batch.encoded_bytes());
+        let events: Vec<_> = test_util::drain_encoded_batches(&shared)
+            .iter()
+            .flat_map(|b| decode_test_events(b))
+            .collect();
 
         assert_eq!(events.len(), 1);
         assert!(events[0].timestamp_ns > 0);

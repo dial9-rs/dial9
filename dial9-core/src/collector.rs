@@ -36,11 +36,9 @@ impl Batch {
     }
     }
 
-    crate::test_util_pub! {
     /// Number of events in this batch.
-    fn event_count(&self) -> u64 {
+    pub(crate) fn event_count(&self) -> u64 {
         self.event_count
-    }
     }
 
     /// Whether this batch contains no events.
@@ -48,20 +46,16 @@ impl Batch {
         self.event_count == 0
     }
 
-    crate::test_util_pub! {
     /// Consume the batch, returning the encoded bytes without copying.
-    fn into_encoded_bytes(self) -> Vec<u8> {
+    pub(crate) fn into_encoded_bytes(self) -> Vec<u8> {
         self.encoded_bytes
-    }
     }
 }
 
-crate::test_util_pub! {
 /// Ring buffer of encoded batches awaiting write by the flush thread.
-struct CentralCollector {
+pub(crate) struct CentralCollector {
     queue: BoundedQueue<Batch>,
     dropped_batches: AtomicUsize,
-}
 }
 
 impl Default for CentralCollector {
@@ -88,10 +82,8 @@ impl CentralCollector {
         }
     }
 
-    crate::test_util_pub! {
-    fn next(&self) -> Option<Batch> {
+    pub(crate) fn next(&self) -> Option<Batch> {
         self.queue.pop()
-    }
     }
 
     /// Returns the number of batches dropped since the last call.

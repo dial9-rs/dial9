@@ -190,8 +190,8 @@ mod unix {
     #[cfg(test)]
     mod tests {
         use super::*;
-        use crate::telemetry::buffer;
         use crate::telemetry::recorder::SharedState;
+        use dial9_core::test_util;
         use serde::Deserialize;
 
         #[derive(Debug, Deserialize)]
@@ -251,10 +251,10 @@ mod unix {
             let mut source = ProcessResourceUsageSource::new(ProcessResourceUsageConfig::default());
 
             source.flush(&ctx);
-            buffer::drain_to_collector(&shared.collector);
-
-            let batch = shared.collector.next().expect("source should emit a batch");
-            let events = decode_process_resource_usage_events(batch.encoded_bytes());
+            let events: Vec<_> = test_util::drain_encoded_batches(&shared)
+                .iter()
+                .flat_map(|b| decode_process_resource_usage_events(b))
+                .collect();
 
             assert_eq!(events.len(), 1);
             let event = &events[0];
@@ -273,10 +273,10 @@ mod unix {
 
             source.flush(&ctx);
             source.flush(&ctx);
-            buffer::drain_to_collector(&shared.collector);
-
-            let batch = shared.collector.next().expect("source should emit a batch");
-            let events = decode_process_resource_usage_events(batch.encoded_bytes());
+            let events: Vec<_> = test_util::drain_encoded_batches(&shared)
+                .iter()
+                .flat_map(|b| decode_process_resource_usage_events(b))
+                .collect();
 
             assert_eq!(events.len(), 1);
         }

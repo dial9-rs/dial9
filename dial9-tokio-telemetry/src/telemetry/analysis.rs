@@ -744,9 +744,9 @@ mod tests {
 
     #[test]
     fn trace_reader_reads_gzip_trace_files() {
-        use crate::telemetry::buffer::encode_single;
         use crate::telemetry::format::WorkerParkEvent;
         use crate::telemetry::writer::DiskWriter;
+        use dial9_core::test_util;
         use flate2::Compression;
         use flate2::write::GzEncoder;
         use std::io::Write;
@@ -755,17 +755,17 @@ mod tests {
         let raw_path = dir.path().join("trace.bin");
 
         let mut writer = DiskWriter::single_file(&raw_path).unwrap();
-        let batch = crate::telemetry::Batch::new(
-            encode_single(&WorkerParkEvent {
+        test_util::write_event(
+            &mut writer,
+            &WorkerParkEvent {
                 timestamp_ns: 1_000,
                 worker_id: crate::telemetry::format::WorkerId::from(7usize),
                 local_queue: 3,
                 cpu_time_ns: 11,
                 tid: 0,
-            }),
-            1,
-        );
-        writer.write_encoded_batch(&batch).unwrap();
+            },
+        )
+        .unwrap();
         writer.flush().unwrap();
         let active = writer.current_active_path().to_owned();
         drop(writer);
