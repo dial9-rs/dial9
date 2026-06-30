@@ -6,28 +6,15 @@
 // CloudFront's 8192-byte request-URI cap, and re-resolves in any browser so
 // deep links stay portable.
 
-const fs = require("fs");
-const path = require("path");
-const vm = require("vm");
 const { test, testAsync, summarize, assert } = require("./test_harness.js");
 const scope = require("./trace_scope.js");
 
 const CLOUDFRONT_URI_LIMIT = 8192;
 
-// Extract index.html's own parseKey the same way test_parse_key.js does, so we
-// can assert the trace_scope.js copy stays behaviorally identical. parseKey is
-// duplicated (index.html's table reads extra getters trace_scope doesn't need),
-// and a silent drift between the two would make a deep link resolve a different
-// file set than the browser selected — this test is the guard against that.
-function indexHtmlParseKey() {
-  const html = fs.readFileSync(path.join(__dirname, "index.html"), "utf8");
-  const m = html.match(/function parseKey\([\s\S]*?\n    \}\n/);
-  if (!m) throw new Error("could not locate parseKey() in index.html");
-  const sandbox = { parseKey: null, formatEpoch: () => "" };
-  vm.createContext(sandbox);
-  vm.runInContext(m[0] + "\nthis.parseKey = parseKey;", sandbox);
-  return sandbox.parseKey;
-}
+// trace_scope.js is the single source of truth for parseKey/extractPrefix; the
+// page scripts (index.html / viewer.html / flamegraph.html) delegate to it, so
+// these tests are the canonical coverage for both layouts (they absorbed the
+// old standalone test_parse_key.js fixtures).
 
 // A realistic key in the boot_id layout.
 function key(host, epoch, i) {
@@ -57,23 +44,26 @@ test("extractPrefix returns everything before the date", () => {
   assert.strictEqual(scope.extractPrefix("2026-06-29/1915/svc/h/b/1-1.bin.gz"), "");
 });
 
-test("parseKey stays in parity with index.html's copy", () => {
-  const ref = indexHtmlParseKey();
-  const fixtures = [
-    "traces/2026-04-09/1910/checkout-api/us-east-1/abcd-123213/1744224000-3.bin.gz",
-    "2026-04-09/1910/checkout-api/us-east-1/xyzw-asdfasdf/1744224000-0.bin.gz",
-    "traces/2026-04-09/1910/checkout-api/host1/1744224000-2.bin.gz",
-    "traces/2026-04-09/1910/checkout-api/us-east-1/i-0abc123/1744224000-0.bin.gz",
-  ];
-  for (const k of fixtures) {
-    const a = scope.parseKey(k);
-    const b = ref(k);
-    assert.strictEqual(a.service, b.service, `service for ${k}`);
-    assert.strictEqual(a.host, b.host, `host for ${k}`);
-    assert.strictEqual(a.bootId, b.bootId, `bootId for ${k}`);
-    assert.strictEqual(a.epoch, b.epoch, `epoch for ${k}`);
-    assert.strictEqual(a.segIndex, b.segIndex, `segIndex for ${k}`);
-  }
+test("parseKey: new layout with prefix (full field set)", () => {
+  const p = scope.parseKey("traces/2026-04-09/1910/checkout-api/us-east-1/abcd-123213/1744224000-3.bin.gz");
+  assert.strictEqual(p.service, "checkout-api");
+  assert.strictEqual(p.host, "us-east-1");
+  assert.strictEqual(p.bootId, "abcd-123213");
+  assert.strictEqual(p.epoch, 1744224000);
+  assert.strictEqual(p.segIndex, "3");
+});
+
+test("parseKey: legacy layout (no boot_id) keeps bootId empty", () => {
+  const p = scope.parseKey("traces/2026-04-09/1910/checkout-api/host1/1744224000-2.bin.gz");
+  assert.strictEqual(p.service, "checkout-api");
+  assert.strictEqual(p.host, "host1");
+  assert.strictEqual(p.bootId, "");
+  assert.strictEqual(p.segIndex, "2");
+});
+
+test("parseKey: compound instance path is best-effort, never throws", () => {
+  const p = scope.parseKey("traces/2026-04-09/1910/checkout-api/us-east-1/i-0abc123/1744224000-0.bin.gz");
+  assert.ok(p && typeof p === "object");
 });
 
 // --- encode / read round-trip ----------------------------------------------
@@ -107,6 +97,38 @@ test("encodeScope preserves unrelated base params and namespaces its own", () =>
   // No collision with the viewer's own host/from/to params.
   assert.strictEqual(p.get("host"), null);
   assert.strictEqual(p.get("from"), null);
+});
+
+test("encodeAggregationParams emits the un-namespaced names + ns window", () => {
+  const s = {
+    bucket: "bkt",
+    prefix: "traces",
+    service: "shale",
+    hosts: ["h1", "h2"],
+    from: 1782760000, // epoch SECONDS
+    to: 1782760800,
+  };
+  const base = new URLSearchParams();
+  base.set("api", "1"); // caller-supplied (flamegraph demand-driven mode)
+  const p = new URLSearchParams(scope.encodeAggregationParams(base, s));
+  assert.strictEqual(p.get("api"), "1", "base params preserved");
+  assert.strictEqual(p.get("bucket"), "bkt");
+  assert.strictEqual(p.get("prefix"), "traces");
+  assert.strictEqual(p.get("service"), "shale");
+  assert.deepStrictEqual(p.getAll("host"), ["h1", "h2"], "repeatable host set");
+  // Window converts seconds -> nanoseconds for the aggregation endpoints.
+  assert.strictEqual(p.get("start_ns"), "1782760000000000000");
+  assert.strictEqual(p.get("end_ns"), "1782760800000000000");
+  // Aggregation params are NOT namespaced (they go straight to the server).
+  assert.strictEqual(p.get("s_bucket"), null);
+});
+
+test("encodeAggregationParams omits an empty service (all services in box)", () => {
+  // A multi-service box leaves service unset (scopeFromKeys sets service='').
+  const s = { bucket: "b", prefix: "", service: "", hosts: ["h1"], from: 1, to: 2 };
+  const p = new URLSearchParams(scope.encodeAggregationParams(new URLSearchParams(), s));
+  assert.strictEqual(p.get("service"), null, "no service filter when scope spans many");
+  assert.deepStrictEqual(p.getAll("host"), ["h1"]);
 });
 
 // --- the actual bug: a fleet-wide selection stays short --------------------

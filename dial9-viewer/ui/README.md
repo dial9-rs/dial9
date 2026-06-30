@@ -55,6 +55,18 @@ Re-listing means a scope opened later may pick up files that landed in the
 window since it was shared. For a finished trace that is nil; it is the trade
 for a portable, length-safe link.
 
+`trace_scope.js` owns the **Scope** concept end-to-end: `parseKey` /
+`extractPrefix` (the single source of truth — `index.html` delegates to them),
+`scopeFromKeys` (derive a scope from a selection), and two sibling encoders for
+its two URL dialects. `encodeScope` writes the namespaced `s_*` form above (it
+rides in the viewer page URL alongside unrelated `host`/`from`/`to`/`start`/`end`
+params). `encodeAggregationParams` writes the **un-namespaced** form the server
+aggregation endpoints expect — `bucket`/`prefix`/`service`/repeatable `host`,
+window as `start_ns`/`end_ns` in **nanoseconds** — used by the demand-driven
+flamegraph (`?api=1`) and `/api/tokio-stats`. A box spanning more than one
+service sends *no* service filter (all services in the box), consistent across
+exact and aggregation modes.
+
 ### `/api/trace` (deprecated)
 
 `GET /api/trace?bucket=&keys=a&keys=b` fetches every key, gunzips each

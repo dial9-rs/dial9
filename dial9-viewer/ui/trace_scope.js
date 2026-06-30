@@ -176,6 +176,26 @@
     return { query: base.toString(), hostsDropped: (scope.hosts || []).length > 0 };
   }
 
+  // Encode a scope into the *aggregation* param vocabulary onto a copy of
+  // `baseParams` (left unmutated): the un-namespaced `bucket`/`prefix`/`service`/
+  // repeatable `host` names the `/api/flamegraph` refinement loop and the
+  // `/api/tokio-stats` endpoint expect, with the window as `start_ns`/`end_ns`
+  // in NANOSECONDS (the scope's `from`/`to` are epoch seconds). These URLs go
+  // straight to a server endpoint and carry no unrelated page params, so unlike
+  // encodeScope there is no `s_*` namespacing and no host-set length guard (the
+  // aggregation loop samples a representative subset, so a wide box is cheap by
+  // design — it never needs to list every file the way exact mode does).
+  function encodeAggregationParams(baseParams, scope) {
+    const out = new URLSearchParams(baseParams ? baseParams.toString() : "");
+    if (scope.bucket) out.set("bucket", scope.bucket);
+    if (scope.prefix) out.set("prefix", scope.prefix);
+    if (scope.service) out.set("service", scope.service);
+    for (const h of scope.hosts || []) out.append("host", h);
+    if (scope.from != null) out.set("start_ns", String(Math.round(scope.from * 1e9)));
+    if (scope.to != null) out.set("end_ns", String(Math.round(scope.to * 1e9)));
+    return out.toString();
+  }
+
   // Read a scope back from URL params, or null if no scope is present. A scope
   // requires at least the time window (from/to); the host set may be empty.
   function readScope(params) {
@@ -236,6 +256,7 @@
   exports.objectTraceUrls = objectTraceUrls;
   exports.scopeFromKeys = scopeFromKeys;
   exports.encodeScope = encodeScope;
+  exports.encodeAggregationParams = encodeAggregationParams;
   exports.readScope = readScope;
   exports.hasScope = hasScope;
   exports.resolveScope = resolveScope;

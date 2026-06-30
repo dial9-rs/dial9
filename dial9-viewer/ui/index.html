@@ -900,71 +900,13 @@
         return formatDate(new Date(epoch * 1000).toISOString());
     }
 
-    function parseKey(key) {
-        // Default layout (as of issue #225):
-        //   {prefix}/{YYYY-MM-DD}/{HHMM}/{service}/{instance}/{boot_id}/{epoch}-{index}.bin[.gz]
-        // Legacy layout (pre-#225):
-        //   {prefix}/{YYYY-MM-DD}/{HHMM}/{service}/{instance}/{epoch}-{index}.bin[.gz]
-        // We find the date-shaped segment and count components between it
-        // and the filename to distinguish. Custom instance paths containing
-        // slashes will fall back to best-effort positional parsing.
-        const parts = key.split('/');
-        const dateRe = /^\d{4}-\d{2}-\d{2}$/;
-        let dateIdx = -1;
-        for (let i = parts.length - 1; i >= 0; i--) {
-            if (dateRe.test(parts[i])) { dateIdx = i; break; }
-        }
-        const file = parts[parts.length - 1];
-        const match = file.match(/^(\d+)-(\d+)\.bin/);
-        let epoch = 0, segIndex = '';
-        if (match) {
-            epoch = parseInt(match[1], 10);
-            segIndex = match[2];
-        }
-        if (dateIdx >= 0) {
-            const below = parts.length - 1 - dateIdx; // count after date, not including date itself
-            if (below === 5) {
-                return {
-                    service: parts[dateIdx + 2],
-                    host: parts[dateIdx + 3],
-                    bootId: parts[dateIdx + 4],
-                    epoch, segIndex,
-                    get traceStart() { return formatEpoch(epoch); },
-                };
-            }
-            if (below === 4) {
-                return {
-                    service: parts[dateIdx + 2],
-                    host: parts[dateIdx + 3],
-                    bootId: '',
-                    epoch, segIndex,
-                    get traceStart() { return formatEpoch(epoch); },
-                };
-            }
-        }
-        // Fallback — positional, best-effort.
-        if (parts.length >= 5) {
-            return {
-                service: parts[parts.length - 3],
-                host: parts[parts.length - 2],
-                bootId: '',
-                epoch, segIndex,
-                get traceStart() { return formatEpoch(epoch); },
-            };
-        }
-        return { service: '', host: key, bootId: '', epoch: 0, segIndex: '', get traceStart() { return ''; } };
-    }
-
-    function extractPrefix(key) {
-        const parts = key.split('/');
-        const dateRe = /^\d{4}-\d{2}-\d{2}$/;
-        for (let i = 0; i < parts.length; i++) {
-            if (dateRe.test(parts[i])) {
-                return parts.slice(0, i).join('/');
-            }
-        }
-        return '';
-    }
+    // Parsing an S3 trace key into {service, host, bootId, epoch, segIndex} and
+    // pulling the key prefix are owned by trace_scope.js (the single source of
+    // truth, shared with viewer.html / flamegraph.html and the Node tests). The
+    // table's "Trace Start" column formats `epoch` at its call site via
+    // formatEpoch — that presentation concern stays here, not in the module.
+    const parseKey = (key) => Dial9TraceScope.parseKey(key);
+    const extractPrefix = (key) => Dial9TraceScope.extractPrefix(key);
 
     function toLocalDatetime(d) {
         const pad = n => String(n).padStart(2, '0');
@@ -1598,22 +1540,6 @@
         return params;
     }
 
-    // Build one viewer `trace=` component per selected key, each pointing at
-    // /api/object (which serves that single file's raw, still-gzipped bytes).
-    // The viewer and flamegraph read all repeated `trace=` params, download
-    // them in parallel, and gunzip + concatenate client-side (see fetchTraces
-    // in trace_parser.js). This replaced a single /api/trace URL that forced
-    // the backend to fetch every file, gunzip them, and merge into one large
-    // uncompressed response — far more bytes over the wire and much slower.
-    function objectTraceUrls(bucket, keys) {
-        return keys.map(key => {
-            const p = new URLSearchParams();
-            p.set('bucket', bucket);
-            p.set('key', key);
-            return '/api/object?' + p.toString();
-        });
-    }
-
     // CPU Profiling button: open a flamegraph of the selected segments. The
     // flamegraph view builds from the trace's CpuSampleEvents (and resolves
     // symbols from SymbolTableEntry), ignoring all other event types, so we
@@ -1630,28 +1556,19 @@
         // deterministic order, and progressively refines — so a large 24h
         // selection starts showing a flamegraph immediately.
         if (aggregationEnabled) {
-            const parsed = keys.map(k => parseKey(k));
-            const services = [...new Set(parsed.map(p => p.service).filter(Boolean))];
-            const hosts = [...new Set(parsed.map(p => p.host).filter(Boolean))];
-            const fgParams = new URLSearchParams();
-            fgParams.set('api', '1');
-            // Pass the bucket so the flamegraph endpoint knows which bucket to
-            // aggregate from (required for bring-your-own-credentials mode).
-            if (bucket) fgParams.set('bucket', bucket);
-            // Extract the key prefix from the first selected key (everything
-            // before the date segment). This is authoritative regardless of
-            // whether the prefix came from the server or the user's input.
-            const pfx = extractPrefix(keys[0]);
-            if (pfx) fgParams.set('prefix', pfx);
-            // The loop's Scope takes a single service; a box almost always spans
-            // one service. If several, pass the first and let host-set + time do
-            // the narrowing (rare; revisit if multi-service boxes matter).
-            if (services.length) fgParams.set('service', services[0]);
-            for (const h of hosts) fgParams.append('host', h); // repeatable host set
-            // Selection times are epoch SECONDS; the loop wants epoch ns.
-            if (heatmapSelection.t0 != null) fgParams.set('start_ns', String(Math.round(heatmapSelection.t0 * 1e9)));
-            if (heatmapSelection.t1 != null) fgParams.set('end_ns', String(Math.round(heatmapSelection.t1 * 1e9)));
-            window.open('flamegraph.html?' + fgParams.toString(), '_blank');
+            // The refinement loop drives off the selection's host/time BOX, not
+            // these exact files, so it takes the same scope the exact path does
+            // — just encoded in the aggregation param vocabulary (un-namespaced
+            // host/service, window as start_ns/end_ns). encodeAggregationParams
+            // owns that encoding; `api=1` selects the demand-driven path.
+            // (A box spanning >1 service sends no service filter — all services
+            // in the box — matching exact mode, rather than the old "first
+            // service wins" which silently dropped the others.)
+            const scope = Dial9TraceScope.scopeFromKeys(bucket, keys, heatmapSelection.t0, heatmapSelection.t1);
+            const base = new URLSearchParams();
+            base.set('api', '1');
+            const qs = Dial9TraceScope.encodeAggregationParams(base, scope);
+            window.open('flamegraph.html?' + qs, '_blank');
             return;
         }
 
@@ -1684,18 +1601,11 @@
         const bucket = bucketInput.value.trim();
         if (!bucket) { alert('Bucket is required'); return; }
         const keys = heatmapSelection.keys;
-        const parsed = keys.map(k => parseKey(k));
-        const services = [...new Set(parsed.map(p => p.service).filter(Boolean))];
-        const hosts = [...new Set(parsed.map(p => p.host).filter(Boolean))];
-        const hp = new URLSearchParams();
-        if (bucket) hp.set('bucket', bucket);
-        const pfx = extractPrefix(keys[0]);
-        if (pfx) hp.set('prefix', pfx);
-        if (services.length) hp.set('service', services[0]);
-        for (const h of hosts) hp.append('host', h);
-        if (heatmapSelection.t0 != null) hp.set('start_ns', String(Math.round(heatmapSelection.t0 * 1e9)));
-        if (heatmapSelection.t1 != null) hp.set('end_ns', String(Math.round(heatmapSelection.t1 * 1e9)));
-        window.open('tokio_stats.html?' + hp.toString(), '_blank');
+        // Same scope the aggregation flamegraph uses, same param vocabulary —
+        // /api/tokio-stats reads bucket/prefix/service/host + start_ns/end_ns.
+        const scope = Dial9TraceScope.scopeFromKeys(bucket, keys, heatmapSelection.t0, heatmapSelection.t1);
+        const qs = Dial9TraceScope.encodeAggregationParams(new URLSearchParams(), scope);
+        window.open('tokio_stats.html?' + qs, '_blank');
     }
 
     // ── Raw search mode ──
@@ -1766,7 +1676,7 @@
                 <td class="service">${esc(p.service)}</td>
                 <td class="host">${esc(p.host)}</td>
                 <td class="host">${esc(p.bootId || '')}</td>
-                <td>${esc(p.traceStart)}</td>
+                <td>${esc(formatEpoch(p.epoch))}</td>
                 <td>${esc(p.segIndex)}</td>
                 <td class="size">${formatSize(row.size)}</td>
                 <td class="date">${formatDate(row.last_modified)}</td>
