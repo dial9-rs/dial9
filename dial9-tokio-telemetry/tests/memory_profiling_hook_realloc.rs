@@ -51,7 +51,7 @@ fn hook_realloc_emits_alloc_and_free_when_liveset_on() {
         .unwrap();
 
     let handle = guard.handle();
-    let _mem_guard = MemoryProfiler::from_config(
+    MemoryProfiler::from_config(
         MemoryProfilingConfig::builder()
             .sample_rate_bytes(64)
             .track_liveset(true)

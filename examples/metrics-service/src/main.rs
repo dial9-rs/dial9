@@ -267,19 +267,15 @@ fn main() -> std::io::Result<()> {
     guard.enable();
     let handle = guard.tokio_handle(runtime.handle());
 
-    let _mem_guard = if args.no_memory_profiling {
-        None
-    } else {
+    if !args.no_memory_profiling {
         let config = MemoryProfilingConfig::builder()
             .sample_rate_bytes(args.alloc_sample_rate_bytes)
             .track_liveset(!args.no_track_liveset)
             .build();
-        Some(
-            MemoryProfiler::from_config(config)
-                .install_into(&guard.handle())
-                .expect("failed to install memory profiler"),
-        )
-    };
+        MemoryProfiler::from_config(config)
+            .install_into(&guard.handle())
+            .expect("failed to install memory profiler");
+    }
 
     // Wrap the body in a spawned task so the root future is instrumented.
     // Inside, Dial9TokioHandle::current() is available on every worker thread.

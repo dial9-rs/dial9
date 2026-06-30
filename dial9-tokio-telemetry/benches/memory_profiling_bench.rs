@@ -118,7 +118,7 @@ fn install_profiler() {
         .rng_seed(42)
         .build();
 
-    let _mem_guard = MemoryProfiler::from_config(cfg)
+    MemoryProfiler::from_config(cfg)
         .install_into(&handle)
         .expect("profiler install should succeed in bench");
 

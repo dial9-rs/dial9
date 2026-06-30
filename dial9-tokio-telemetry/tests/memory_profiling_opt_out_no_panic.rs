@@ -65,7 +65,7 @@ fn opt_out_prevents_tls_teardown_panic() {
         .unwrap();
 
     let handle = guard.handle();
-    let _mem_guard = MemoryProfiler::from_config(
+    MemoryProfiler::from_config(
         MemoryProfilingConfig::builder()
             .sample_rate_bytes(64) // sample aggressively
             .track_liveset(true)

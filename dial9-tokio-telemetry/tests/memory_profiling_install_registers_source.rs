@@ -24,7 +24,7 @@ fn install_registers_source_with_recorder() {
         .unwrap();
 
     let handle = guard.handle();
-    let _mem_guard = MemoryProfiler::with_defaults()
+    MemoryProfiler::with_defaults()
         .install_into(&handle)
         .expect("install should succeed");
 

@@ -130,6 +130,7 @@ mod tests {
     #[test]
     #[cfg(any(target_os = "linux", target_os = "android"))]
     fn test_schedstat_fd_closed_on_thread_exit() {
+        use super::SchedStat;
         fn fd_target(fd: std::os::fd::RawFd) -> Option<std::path::PathBuf> {
             std::fs::read_link(format!("/proc/self/fd/{fd}")).ok()
         }

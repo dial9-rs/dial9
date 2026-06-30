@@ -41,7 +41,7 @@ fn overflow_event_emitted_when_ring_overflows() {
 
     let handle = guard.handle();
     // Use a tiny ring (capacity 4) so it overflows easily under allocation pressure.
-    let _mem_guard = MemoryProfiler::from_config(
+    MemoryProfiler::from_config(
         MemoryProfilingConfig::builder()
             .sample_rate_bytes(1) // sample every allocation
             .ring_capacity(4)

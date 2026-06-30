@@ -16,7 +16,7 @@ fn second_install_returns_already_installed() {
         .unwrap();
 
     let handle = guard.handle();
-    let _mem_guard = MemoryProfiler::with_defaults()
+    MemoryProfiler::with_defaults()
         .install_into(&handle)
         .expect("first install should succeed");
 

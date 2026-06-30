@@ -20,7 +20,7 @@ fn install_publishes_active_inner() {
         .unwrap();
 
     let handle = guard.handle();
-    let _mem_guard = MemoryProfiler::from_config(
+    MemoryProfiler::from_config(
         MemoryProfilingConfig::builder()
             .sample_rate_bytes(256 * 1024)
             .rng_seed(42)

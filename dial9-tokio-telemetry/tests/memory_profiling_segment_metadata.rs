@@ -31,7 +31,7 @@ fn memory_sample_rate_appears_in_segment_metadata() {
         .unwrap();
 
     let handle = guard.handle();
-    let _mem_guard = MemoryProfiler::from_config(
+    MemoryProfiler::from_config(
         MemoryProfilingConfig::builder()
             .sample_rate_bytes(2048)
             .rng_seed(42)

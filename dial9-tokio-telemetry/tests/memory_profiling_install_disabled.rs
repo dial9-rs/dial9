@@ -7,7 +7,7 @@ use dial9_tokio_telemetry::telemetry::Dial9Handle;
 #[test]
 fn install_with_disabled_handle_is_noop() {
     let handle = Dial9Handle::disabled();
-    let _guard = MemoryProfiler::from_config(MemoryProfilingConfig::default())
+    MemoryProfiler::from_config(MemoryProfilingConfig::default())
         .install_into(&handle)
         .expect("install with disabled handle should succeed");
     // ACTIVE should NOT be set — disabled handle short-circuits.
@@ -18,10 +18,10 @@ fn install_with_disabled_handle_does_not_prevent_future_install() {
     // A disabled-handle install doesn't consume the OnceLock slot,
     // so a second disabled-handle install also succeeds.
     let handle = Dial9Handle::disabled();
-    let _g1 = MemoryProfiler::with_defaults()
+    MemoryProfiler::with_defaults()
         .install_into(&handle)
         .expect("first disabled install should succeed");
-    let _g2 = MemoryProfiler::with_defaults()
+    MemoryProfiler::with_defaults()
         .install_into(&handle)
         .expect("second disabled install should also succeed");
 }

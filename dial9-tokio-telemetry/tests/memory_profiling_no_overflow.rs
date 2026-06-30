@@ -42,7 +42,7 @@ fn no_overflow_event_when_ring_has_capacity() {
         .unwrap();
 
     let handle = guard.handle();
-    let _mem_guard = MemoryProfiler::from_config(
+    MemoryProfiler::from_config(
         MemoryProfilingConfig::builder()
             .sample_rate_bytes(512 * 1024)
             .ring_capacity(4096)
