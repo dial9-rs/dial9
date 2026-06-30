@@ -89,6 +89,15 @@
     return ns + "ns";
   }
 
+  function escapeHtml(s) {
+    return String(s)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+
   function addPeriod(startNs, endNs) {
     const id = periodIdCounter++;
     periods.push({ id, startNs: startNs || null, endNs: endNs || null, data: null });
@@ -278,7 +287,7 @@
     </tr></thead><tbody>`;
     for (const [loc, v] of rows) {
       html += `<tr>
-        <td><code>${loc}</code></td>
+        <td><code>${escapeHtml(loc)}</code></td>
         <td>${v.long}</td><td>${v.rate.toFixed(1)}</td>
         <td>${linkedStat(v.offCpu, v.exemplars && v.exemplars[0], data, "off-cpu")}</td>
         <td>${linkedStat(v.onCpu, v.exemplars && v.exemplars[1], data, "on-cpu")}</td>
@@ -347,7 +356,7 @@
     for (const d of rows) {
       const pct = d.fRate > 0 ? ((d.delta / d.fRate) * 100).toFixed(0) : "new";
       html += `<tr>
-        <td><code>${d.loc}</code></td>
+        <td><code>${escapeHtml(d.loc)}</code></td>
         <td>${d.fRate.toFixed(1)}</td>
         <td>${d.lRate.toFixed(1)}</td>
         <td class="${cls}">${d.delta > 0 ? "+" : ""}${d.delta.toFixed(1)}</td>
