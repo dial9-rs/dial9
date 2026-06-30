@@ -1,5 +1,3 @@
-use crate::telemetry::events::CpuSampleSource;
-
 use crate::telemetry::task_metadata::TaskId;
 use dial9_trace_format::types::{EventEncoder, FieldType};
 use dial9_trace_format::{InternedStackFrames, InternedString, TraceEvent, TraceField};
@@ -51,15 +49,6 @@ impl TraceField for TaskId {
     }
     fn encode<W: Write>(&self, enc: &mut EventEncoder<'_, W>) -> io::Result<()> {
         enc.write_u64(self.0)
-    }
-}
-
-impl TraceField for CpuSampleSource {
-    fn field_type() -> FieldType {
-        FieldType::U8
-    }
-    fn encode<W: Write>(&self, enc: &mut EventEncoder<'_, W>) -> io::Result<()> {
-        enc.write_u8(*self as u8)
     }
 }
 
@@ -227,23 +216,6 @@ pub(crate) struct TaskTerminateEvent {
     pub task_id: TaskId,
 }
 
-#[derive(TraceEvent)]
-#[traceevent(wire_slot)]
-pub(crate) struct CpuSampleEvent {
-    #[traceevent(timestamp)]
-    pub timestamp_ns: u64,
-    pub worker_id: WorkerId,
-    pub tid: u32,
-    pub source: CpuSampleSource,
-    pub thread_name: Option<InternedString>,
-    pub callchain: InternedStackFrames,
-    /// CPU the sample was taken on, if the backend could determine it.
-    ///
-    /// Widened to `u64` on the wire so the field encodes as `OptionalVarint`:
-    /// 1 byte when absent, typically 2 bytes (tag + small-varint) when present.
-    pub cpu: Option<u64>,
-}
-
 /// Wire-format event for a task dump: async backtrace captured at a yield point
 /// after the task stayed idle past the configured threshold.
 #[derive(TraceEvent)]
@@ -347,27 +319,8 @@ pub struct WakeEventEvent {
     pub target_worker: u8,
 }
 
-#[derive(TraceEvent)]
-#[traceevent(wire_slot)]
-pub(crate) struct SegmentMetadataEvent {
-    #[traceevent(timestamp)]
-    pub timestamp_ns: u64,
-    pub entries: Vec<(String, String)>,
-}
-
-/// Clock-correlation anchor. `timestamp_ns` (monotonic) and `realtime_ns`
-/// (nanoseconds since Unix epoch) are captured at the same instant via
-/// [`clock_pair`], so offline consumers can recover wall clock from the
-/// monotonic event stream.
-///
-/// [`clock_pair`]: crate::telemetry::events::clock_pair
-#[derive(TraceEvent)]
-#[traceevent(wire_slot)]
-pub(crate) struct ClockSyncEvent {
-    #[traceevent(timestamp)]
-    pub timestamp_ns: u64,
-    pub realtime_ns: u64,
-}
+#[cfg(test)]
+pub(crate) use dial9_core::format::{ClockSyncEvent, SegmentMetadataEvent};
 
 // ── dial9-trace-format: decode ──────────────────────────────────────────────
 // Decode via `Dial9Event` in `analysis_events.rs` using `Decoder::for_each_event`.

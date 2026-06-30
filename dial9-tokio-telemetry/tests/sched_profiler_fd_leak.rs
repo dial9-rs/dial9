@@ -9,8 +9,8 @@
 
 #![cfg(all(feature = "cpu-profiling", target_os = "linux"))]
 
+use dial9_tokio_telemetry::telemetry::SchedEventConfig;
 use dial9_tokio_telemetry::telemetry::TracedRuntime;
-use dial9_tokio_telemetry::telemetry::cpu_profile::SchedEventConfig;
 
 mod common;
 use std::sync::Mutex;

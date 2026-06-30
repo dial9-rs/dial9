@@ -275,7 +275,7 @@ rustflags = ["--cfg", "tokio_unstable", "-C", "force-frame-pointers=yes"]
 
 ```rust,ignore
 use dial9_tokio_telemetry::Dial9Config;
-use dial9_tokio_telemetry::telemetry::cpu_profile::{CpuProfilingConfig, SchedEventConfig};
+use dial9_tokio_telemetry::telemetry::{CpuProfilingConfig, SchedEventConfig};
 Dial9Config::builder()
     // ...
     .with_runtime(|r| {
@@ -291,7 +291,7 @@ To use dial9 as a CPU profiler without installing Tokio runtime hooks, keep
 telemetry enabled and disable only Tokio instrumentation:
 
 ```rust,ignore
-use dial9_tokio_telemetry::telemetry::cpu_profile::CpuProfilingConfig;
+use dial9_tokio_telemetry::telemetry::CpuProfilingConfig;
 use dial9_tokio_telemetry::telemetry::TracedRuntime;
 
 let (runtime, guard) = TracedRuntime::builder()

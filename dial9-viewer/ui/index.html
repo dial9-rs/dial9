@@ -371,6 +371,7 @@
 
     <script src="creds.js"></script>
     <script src="prefix_detect.js"></script>
+    <script src="url_state.js"></script>
     <script src="heatmap.js"></script>
     <script>
     // ── ?trace= passthrough: redirect to viewer (preserving all params,
@@ -414,6 +415,8 @@
     let rawObjects = [];       // raw search results
     let currentTab = 'browse';
     let aggregationEnabled = false; // server runs demand-driven aggregation
+    let currentQuickRange = null;   // hours, when a "Last Nhr" quick range is active
+                                    // (null once the user edits the range manually)
 
     const ROW_H = 26;          // px height of each host row in the heatmap
 
@@ -547,6 +550,7 @@
             [...bucketsBox.children].forEach(c => c.classList.remove('selected'));
             if (el) el.classList.add('selected');
             bucketInput.value = name;
+            syncUrl();
             setStatus(`Detecting region for ${name}…`, null);
             const result = await Dial9Creds.check(name);
             if (result.ok) {
@@ -576,6 +580,7 @@
             // default bucket) belong to a different identity than these
             // credentials. The user re-picks from their own buckets below.
             bucketInput.value = '';
+            syncUrl();
             // Store the credentials (no region detection yet — we don't have a
             // bucket). Then list the buckets these credentials can see; this both
             // validates the credentials and powers the picker.
@@ -610,6 +615,7 @@
             // so a later search can't query a foreign bucket as the server's
             // ambient identity (which would 500/leak).
             bucketInput.value = '';
+            syncUrl();
             bucketsBox.innerHTML = '';
             bucketsRow.style.display = 'none';
             // The heatmap was built from the now-removed identity's bucket; wipe
@@ -650,18 +656,82 @@
         }
     }
 
-    // ── Init: load config ──
-    const params = new URLSearchParams(window.location.search);
-    if (params.get('bucket')) bucketInput.value = params.get('bucket');
-
+    // ── Init: restore state from the URL ──
+    //
+    // Every state-changing action mirrors the page state into the query string
+    // via syncUrl(), so a link reproduces the same bucket, prefix, tab, time
+    // window, timezone, and raw query. Restore that saved state here on load.
     const prefixInput = document.getElementById('prefix-input');
+    const rawSearchInput = document.getElementById('raw-search-input');
     let serverHasPrefix = false;
 
     function updateSearchReady() {
         const waitingForPrefix = serverHasPrefix && prefixInput.value.trim() === '';
         document.getElementById('search-btn').disabled = waitingForPrefix;
     }
-    prefixInput.addEventListener('input', updateSearchReady);
+    prefixInput.addEventListener('input', () => { updateSearchReady(); syncUrl(); });
+    rawSearchInput.addEventListener('input', syncUrl);
+
+    // While restoring state from the URL on load, syncUrl() is suppressed: the
+    // intermediate restore steps (tab switch, range set) would otherwise each
+    // rewrite the URL and could drop fields not yet restored. We sync once at
+    // the end of restore instead.
+    let restoring = false;
+
+    // Mirror the current DOM state into the URL, replacing the history entry so
+    // a stream of actions doesn't stack up Back-button steps. A quick range is
+    // stored relative (`last=N`) so the link keeps meaning "the last N hours
+    // from now"; a manually-edited range is stored as precise epoch-second
+    // `from`/`to` so it reproduces exactly regardless of the viewer's TZ toggle.
+    function syncUrl() {
+        if (restoring) return;
+        const state = {
+            bucket: bucketInput.value.trim(),
+            prefix: prefixInput.value.trim(),
+            tab: currentTab,
+            tz: useLocalTz ? 'local' : 'utc',
+            q: rawSearchInput.value.trim(),
+        };
+        if (currentQuickRange) {
+            state.last = currentQuickRange;
+        } else {
+            const fromDate = pickerToDate(document.getElementById('range-from').value);
+            const toDate = pickerToDate(document.getElementById('range-to').value);
+            if (fromDate) state.from = Math.floor(fromDate.getTime() / 1000);
+            if (toDate) state.to = Math.floor(toDate.getTime() / 1000);
+        }
+        const qs = Dial9UrlState.serialize(state);
+        history.replaceState(null, '', qs ? '?' + qs : window.location.pathname);
+    }
+
+    // Restore saved state. Timezone first: the range pickers format in the
+    // active TZ, so it must be set before any date is written below.
+    const urlState = Dial9UrlState.parse(window.location.search);
+    restoring = true;
+    if (urlState.tz === 'local') {
+        useLocalTz = true;
+        document.getElementById('tz-btn').textContent = 'TZ: Local';
+    }
+    if (urlState.bucket) bucketInput.value = urlState.bucket;
+    if (urlState.prefix) prefixInput.value = urlState.prefix;
+    if (urlState.q) rawSearchInput.value = urlState.q;
+    if (urlState.tab === 'raw') switchTab('raw');
+
+    // Restore the time range. A relative `last=N` re-anchors to now (so a shared
+    // link always shows the last N hours); a precise `from`/`to` is restored
+    // verbatim; otherwise fall back to the last-1hr default.
+    if (urlState.last) {
+        setQuickRange(urlState.last);
+    } else if (urlState.from != null && urlState.to != null) {
+        document.getElementById('range-from').value = dateToPickerStr(new Date(urlState.from * 1000));
+        document.getElementById('range-to').value = dateToPickerStr(new Date(urlState.to * 1000));
+    } else {
+        setQuickRange(1);
+    }
+    restoring = false;
+    // Normalize the URL once: collapses any malformed/duplicate params from the
+    // incoming link into the canonical serialization.
+    syncUrl();
 
     fetch('/api/config').then(async r => {
         if (!r.ok) {
@@ -678,7 +748,7 @@
             bucketInput.value = config.default_bucket;
         }
         if (config.default_prefix) {
-            prefixInput.value = config.default_prefix;
+            if (!prefixInput.value) prefixInput.value = config.default_prefix;
             serverHasPrefix = true;
             updateSearchReady();
         }
@@ -686,11 +756,14 @@
         // drives the sampled server-side loop instead of decoding raw traces.
         aggregationEnabled = !!config.aggregation_enabled;
         if (config.supports_byo_credentials) initCredsUi();
+        // Server defaults (bucket/prefix) were filled programmatically above;
+        // reflect them in the URL so the link is complete.
+        syncUrl();
         discoverPrefixes().then(autoSearch);
     }).catch(() => { discoverPrefixes().then(autoSearch); });
 
-    // Default to last 1 hour
-    setQuickRange(1);
+    // The initial time range is restored from the URL (or defaulted to last
+    // 1hr) in the state-restore block above, before /api/config resolves.
 
     // On page load, automatically run the last-1hr search so the heatmap is
     // populated without an extra click.
@@ -733,11 +806,13 @@
                 prefixInput.placeholder = '(no prefix — dates at root)';
                 serverHasPrefix = false;
                 updateSearchReady();
+                syncUrl();
                 return;
             }
             // If there's exactly one prefix and the input is empty, auto-select it
             if (prefixes.length === 1 && !prefixInput.value) {
                 prefixInput.value = prefixes[0].replace(/\/$/, '');
+                syncUrl();
             }
             prefixInput.placeholder = 'e.g. traces';
             for (const p of prefixes) {
@@ -750,6 +825,7 @@
                     suggestions.querySelectorAll('button').forEach(b => b.classList.remove('active'));
                     btn.classList.add('active');
                     updateSearchReady();
+                    syncUrl();
                 });
                 if (prefixInput.value === label) btn.classList.add('active');
                 suggestions.appendChild(btn);
@@ -761,8 +837,11 @@
         }
     }
 
-    // Re-discover when bucket changes
-    bucketInput.addEventListener('change', discoverPrefixes);
+    // Re-discover when bucket changes (on commit), and keep the URL in sync as
+    // the user types. Prefix discovery hits the server, so only run it on the
+    // less-frequent `change`; mirror to the URL on every keystroke.
+    bucketInput.addEventListener('change', () => { discoverPrefixes(); syncUrl(); });
+    bucketInput.addEventListener('input', syncUrl);
 
     // ── Timezone toggle ──
     document.getElementById('tz-btn').addEventListener('click', () => {
@@ -783,6 +862,7 @@
         } else {
             renderRawTable(rawObjects);
         }
+        syncUrl();
     });
 
     // ── Helpers ──
@@ -915,21 +995,28 @@
         const from = new Date(now.getTime() - hours * 3600 * 1000);
         document.getElementById('range-from').value = dateToPickerStr(from);
         document.getElementById('range-to').value = dateToPickerStr(now);
+        // Remember the relative window so the URL stays relative ("last N hours
+        // from now") rather than freezing these computed timestamps.
+        currentQuickRange = hours;
         // Highlight the selected quick button
         document.querySelectorAll('.quick-btns button').forEach(b => b.classList.remove('selected'));
         const labels = {'1': 'Last 1hr', '3': 'Last 3hr', '24': 'Last 24hr'};
         document.querySelectorAll('.quick-btns button').forEach(b => {
             if (b.textContent === labels[hours]) b.classList.add('selected');
         });
+        syncUrl();
     }
 
-    // Clear quick-button highlight when user manually edits the range
-    document.getElementById('range-from').addEventListener('input', () => {
+    // A manual edit turns the range into a precise/custom window: clear the
+    // quick-button highlight and the relative marker so the URL records exact
+    // timestamps instead.
+    function clearQuickRange() {
+        currentQuickRange = null;
         document.querySelectorAll('.quick-btns button').forEach(b => b.classList.remove('selected'));
-    });
-    document.getElementById('range-to').addEventListener('input', () => {
-        document.querySelectorAll('.quick-btns button').forEach(b => b.classList.remove('selected'));
-    });
+        syncUrl();
+    }
+    document.getElementById('range-from').addEventListener('input', clearQuickRange);
+    document.getElementById('range-to').addEventListener('input', clearQuickRange);
 
     // ── Tab switching ──
     function switchTab(tab) {
@@ -943,6 +1030,7 @@
         document.getElementById('cpu-btn').style.display = tab === 'browse' ? '' : 'none';
         document.getElementById('health-btn').style.display = tab === 'browse' ? '' : 'none';
         updateSelectionCount();
+        syncUrl();
     }
 
     // ── Time-range search (Browse mode) ──

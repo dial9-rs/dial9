@@ -4,7 +4,6 @@
 use crate::memory_profiling::profiler::Liveset;
 use crate::memory_profiling::ring::{RawAlloc, RawFree, RingBuffers};
 use crate::primitives::sync::Arc;
-use crate::telemetry::buffer::with_encoder;
 use crate::telemetry::events::clock_monotonic_ns;
 use crate::telemetry::format::{AllocEvent, FreeEvent, MemoryProfileOverflowEvent};
 use crate::telemetry::recorder::source::{FlushContext, Source};
@@ -80,20 +79,16 @@ impl MemoryProfileSource {
             frames,
             ..
         } = a;
-        with_encoder(
-            |enc| {
-                let callchain = enc.intern_stack_frames(&frames[..frame_count]);
-                enc.encode(&AllocEvent {
-                    timestamp_ns: ts_ns,
-                    tid,
-                    size,
-                    addr,
-                    callchain,
-                });
-            },
-            ctx.collector,
-            ctx.drain_epoch,
-        );
+        ctx.with_encoder(|enc| {
+            let callchain = enc.intern_stack_frames(&frames[..frame_count]);
+            enc.encode(&AllocEvent {
+                timestamp_ns: ts_ns,
+                tid,
+                size,
+                addr,
+                callchain,
+            });
+        });
     }
 
     fn handle_free(&mut self, f: RawFree, ctx: &FlushContext<'_>) {
@@ -125,19 +120,15 @@ impl MemoryProfileSource {
             (f.size, f.alloc_ts_ns)
         };
 
-        with_encoder(
-            |enc| {
-                enc.encode(&FreeEvent {
-                    timestamp_ns: f.ts_ns,
-                    tid: f.tid,
-                    addr: f.addr,
-                    size,
-                    alloc_timestamp_ns: alloc_ts_ns,
-                });
-            },
-            ctx.collector,
-            ctx.drain_epoch,
-        );
+        ctx.with_encoder(|enc| {
+            enc.encode(&FreeEvent {
+                timestamp_ns: f.ts_ns,
+                tid: f.tid,
+                addr: f.addr,
+                size,
+                alloc_timestamp_ns: alloc_ts_ns,
+            });
+        });
     }
 }
 
@@ -194,17 +185,13 @@ impl Source for MemoryProfileSource {
         let delta_allocs = current_dropped_allocs.saturating_sub(self.prev_dropped_allocs);
         let delta_frees = current_dropped_frees.saturating_sub(self.prev_dropped_frees);
         if delta_allocs > 0 || delta_frees > 0 {
-            with_encoder(
-                |enc| {
-                    enc.encode(&MemoryProfileOverflowEvent {
-                        timestamp_ns: clock_monotonic_ns(),
-                        dropped_allocs: delta_allocs,
-                        dropped_frees: delta_frees,
-                    });
-                },
-                ctx.collector,
-                ctx.drain_epoch,
-            );
+            ctx.with_encoder(|enc| {
+                enc.encode(&MemoryProfileOverflowEvent {
+                    timestamp_ns: clock_monotonic_ns(),
+                    dropped_allocs: delta_allocs,
+                    dropped_frees: delta_frees,
+                });
+            });
             self.prev_dropped_allocs = current_dropped_allocs;
             self.prev_dropped_frees = current_dropped_frees;
         }
@@ -232,11 +219,10 @@ mod tests {
     use super::*;
     use crate::memory_profiling::ring::{DEFAULT_MAX_FRAMES, RawAlloc, RawFree, RingBuffers};
     use crate::primitives::sync::Arc;
-    use crate::primitives::sync::atomic::Ordering;
     use crate::telemetry::analysis_events::Dial9Event;
-    use crate::telemetry::buffer;
     use crate::telemetry::format::decode_events;
     use crate::telemetry::recorder::SharedState;
+    use dial9_core::test_util;
 
     fn make_raw_alloc(addr: u64, size: u64, ts_ns: u64) -> RawAlloc {
         let mut frames = [0u64; DEFAULT_MAX_FRAMES];
@@ -308,17 +294,16 @@ mod tests {
     }
 
     fn new_shared() -> SharedState {
-        let shared = SharedState::new(0, None);
-        shared.enabled.store(true, Ordering::Relaxed);
+        let shared = SharedState::new(0);
+        shared.enable();
         shared
     }
 
     fn flush_and_collect(shared: &SharedState) -> Vec<Dial9Event> {
         shared.flush_sources();
-        buffer::drain_to_collector(&shared.collector);
         let mut events = Vec::new();
-        while let Some(batch) = shared.collector.next() {
-            if let Ok(decoded) = decode_events(&batch.encoded_bytes) {
+        for bytes in test_util::drain_encoded_batches(shared) {
+            if let Ok(decoded) = decode_events(&bytes) {
                 events.extend(decoded);
             }
         }

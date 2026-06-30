@@ -5,30 +5,8 @@
 //! operation: segments keep accumulating in the ring (memory or disk), and
 //! the pipeline only runs when the application explicitly requests a dump.
 //!
-//! ```no_run
-//! # use dial9_tokio_telemetry::telemetry::{DiskWriter, TracedRuntime};
-//! use dial9_tokio_telemetry::telemetry::Dial9Handle;
-//!
-//! # fn main() -> std::io::Result<()> {
-//! # let path = "/tmp/trace.bin";
-//! # let writer = DiskWriter::single_file(path)?;
-//! # let mut builder = tokio::runtime::Builder::new_multi_thread();
-//! # builder.worker_threads(2).enable_all();
-//! let (runtime, _guard) = TracedRuntime::builder()
-//!     .with_trace_path(path)
-//!     .with_custom_pipeline(|p| p.gzip().write_back())
-//!     .with_dump_trigger(|_| {})
-//!     .build_and_start(builder, writer)?;
-//!
-//! // From any thread owned by this runtime, reach the trigger through the
-//! // ambient handle - no need to thread it through your own state.
-//! let trigger = Dial9Handle::current()
-//!     .dump_trigger()
-//!     .expect("on-demand mode enabled");
-//! trigger.dump_current_data();
-//! # Ok(())
-//! # }
-//! ```
+//! A runtime wires a trigger at build time and reaches it through the ambient
+//! handle. See `with_dump_trigger` on the runtime builder for a worked example.
 //!
 //! [`DumpTrigger::dump_current_data`](crate::dump::DumpTrigger::dump_current_data) and
 //! [`DumpTrigger::dump_time_range`](crate::dump::DumpTrigger::dump_time_range) build a
@@ -57,7 +35,7 @@
 //! within the debounce window after a dump dispatched resolve
 //! [`DumpError::Coalesced`], naming the dump they folded into instead of
 //! starting a new one. The gate lives on the trigger stored in the session,
-//! so every [`dump_trigger`](crate::telemetry::Dial9Handle::dump_trigger)
+//! so every [`dump_trigger`](crate::handle::Dial9Handle::dump_trigger)
 //! clone shares it. (A *cooldown* that rejects extra triggers outright,
 //! rather than folding them, is a possible future addition.)
 
@@ -69,25 +47,25 @@ use std::time::{Duration, Instant, SystemTime};
 
 use tokio::sync::{mpsc, oneshot};
 
-use crate::background_task::ProcessErrorKind;
+use crate::pipeline::ProcessErrorKind;
 
 /// Mint a dump trigger + receiver pair. The builder wires the receiver into
 /// the worker and stashes the trigger in the session so it can be reached via
-/// [`Dial9Handle::dump_trigger`](crate::telemetry::Dial9Handle::dump_trigger).
-pub(crate) fn channel() -> (DumpTrigger, DumpRx) {
+/// [`Dial9Handle::dump_trigger`](crate::handle::Dial9Handle::dump_trigger).
+pub fn channel() -> (DumpTrigger, DumpRx) {
     let (tx, rx) = mpsc::unbounded_channel();
     (DumpTrigger { tx, debounce: None }, DumpRx { rx })
 }
 
 /// On-demand dump configuration, passed to
-/// [`with_dump_trigger`](crate::telemetry::TracedRuntimeBuilder::with_dump_trigger).
+/// `with_dump_trigger`.
 ///
 /// Flips the worker from continuous processing into on-demand operation:
 /// segments keep accumulating in the ring and the pipeline only runs when the
 /// application requests a dump. Configure coalescing with
 /// [`debounce`](Self::debounce); the resulting [`DumpTrigger`] is then reached
-/// through any [`Dial9Handle`](crate::telemetry::Dial9Handle) for the runtime
-/// via [`dump_trigger`](crate::telemetry::Dial9Handle::dump_trigger).
+/// through any [`Dial9Handle`](crate::handle::Dial9Handle) for the runtime
+/// via [`dump_trigger`](crate::handle::Dial9Handle::dump_trigger).
 #[derive(Debug, Default, Clone)]
 pub struct DumpTriggerConfig {
     debounce: Option<Duration>,
@@ -105,14 +83,14 @@ impl DumpTriggerConfig {
     /// arriving within `window` of that dispatch resolves
     /// [`DumpError::Coalesced`] (naming the dump it folded into) without
     /// starting a new dump. The gate is shared by every
-    /// [`dump_trigger`](crate::telemetry::Dial9Handle::dump_trigger) clone,
+    /// [`dump_trigger`](crate::handle::Dial9Handle::dump_trigger) clone,
     /// so the effective rate is at most one dump per `window` across all
     /// callers.
     pub fn debounce(&mut self, window: Duration) {
         self.debounce = Some(window);
     }
 
-    pub(crate) fn debounce_window(&self) -> Option<Duration> {
+    pub fn debounce_window(&self) -> Option<Duration> {
         self.debounce
     }
 }
@@ -191,7 +169,7 @@ struct Debounce {
 /// Sending half of the trigger channel.
 ///
 /// Cloneable; reach it from any thread owned by the runtime via
-/// [`Dial9Handle::dump_trigger`](crate::telemetry::Dial9Handle::dump_trigger)
+/// [`Dial9Handle::dump_trigger`](crate::handle::Dial9Handle::dump_trigger)
 /// and hand it to whatever subsystem decides when to dump (an idle-ratio
 /// watcher, a panic hook, a `/dump` HTTP handler, ...). Every clone shares the
 /// debounce gate configured by [`DumpTriggerConfig::debounce`].
@@ -208,14 +186,14 @@ impl DumpTrigger {
     /// Coalesce duplicate triggers within `window` into a single dump.
     ///
     /// Applied once at build time from [`DumpTriggerConfig::debounce`]; every
-    /// [`dump_trigger`](crate::telemetry::Dial9Handle::dump_trigger) clone
+    /// [`dump_trigger`](crate::handle::Dial9Handle::dump_trigger) clone
     /// then shares one gate. The first trigger in a quiet period dispatches
     /// normally; any trigger arriving within `window` of that dispatch resolves
     /// [`DumpError::Coalesced`] (naming the dump it folded into) without
     /// starting a new dump. Useful when a single source - a watcher that
     /// re-trips every poll, a hot path that dumps per slow request - would
     /// otherwise fire a burst of near-identical dumps.
-    pub(crate) fn with_debounce(mut self, window: Duration) -> Self {
+    pub fn with_debounce(mut self, window: Duration) -> Self {
         self.debounce = Some(Arc::new(Debounce {
             window,
             last: Mutex::new(None),
@@ -281,7 +259,7 @@ impl DumpTrigger {
 
 /// Receiving half of the trigger channel; the builder wires it into the worker.
 #[derive(Debug)]
-pub(crate) struct DumpRx {
+pub struct DumpRx {
     pub(crate) rx: mpsc::UnboundedReceiver<DumpRequest>,
 }
 
@@ -408,7 +386,7 @@ impl Future for DumpFuture {
 }
 
 /// Worker → pipeline-stage signal that a dump finished; passed to
-/// [`SegmentProcessor::finalize_dump`](crate::background_task::SegmentProcessor::finalize_dump)
+/// [`SegmentProcessor::finalize_dump`](crate::pipeline::SegmentProcessor::finalize_dump)
 /// so stages can flush per-dump state (the S3 stage writes the dump's
 /// manifest from it).
 #[derive(Debug)]

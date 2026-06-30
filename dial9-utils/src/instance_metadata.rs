@@ -19,7 +19,7 @@ impl From<&str> for InstanceIdentity {
 
 impl InstanceIdentity {
     /// Auto-detect identity from the system hostname.
-    pub fn from_hostname() -> Self {
+    pub(crate) fn from_hostname() -> Self {
         let hostname = hostname::get()
             .ok()
             .and_then(|h| h.into_string().ok())
@@ -28,7 +28,7 @@ impl InstanceIdentity {
     }
 
     /// The identity string.
-    pub fn as_str(&self) -> &str {
+    pub(crate) fn as_str(&self) -> &str {
         &self.0
     }
 }

@@ -71,12 +71,12 @@ metrique = { version = "0.1.23", features = ["local-format"] }
 metrique-timesource = "0.1"
 dial9-macro = { workspace = true }
 shuttle = { version = "0.9.1", optional = true }
-ulid = "1"
-dial9-core = { workspace = true }
+dial9-core = { workspace = true, features = ["pipeline"] }
+dial9-utils = { workspace = true, optional = true }
 
 [features]
 analysis = []
-cpu-profiling = ["dep:dial9-perf-self-profile"]
+cpu-profiling = ["dep:dial9-perf-self-profile", "dial9-perf-self-profile/dial9-source"]
 linux-socket = [
     "dep:netlink-packet-core",
     "dep:netlink-packet-sock-diag",
@@ -97,6 +97,7 @@ tracing-layer = ["dep:tracing-subscriber"]
 ## Sampled memory allocation profiling via ring buffers.
 memory-profiling = ["dep:dial9-perf-self-profile", "dep:scc"]
 worker-s3 = [
+    "dep:dial9-utils",
     "dep:aws-sdk-s3-transfer-manager",
     "dep:aws-sdk-s3",
     "dep:aws-config",
@@ -126,6 +127,7 @@ dial9-tokio-telemetry = { path = ".", features = [
 # Tests use the serde-based decoder API. Enabling the feature only here keeps
 # it out of the production build of the library.
 dial9-trace-format = { workspace = true, features = ["serde-deserialize"] }
+dial9-core = { workspace = true, features = ["test-util"] }
 assert2 = { workspace = true }
 criterion = "0.5"
 clap = { version = "4", features = ["derive", "env"] }

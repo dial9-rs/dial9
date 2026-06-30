@@ -1,7 +1,7 @@
-use super::shared_state::{PARKED_SCHED_WAIT, SharedState};
+use super::SharedState;
 use super::source::{FlushContext, Source};
 use crate::primitives::sync::{Arc, Mutex};
-use crate::telemetry::buffer::{Encodable, ThreadLocalEncoder, record_encodable_event};
+use crate::telemetry::buffer::{Encodable, ThreadLocalEncoder};
 use crate::telemetry::events::{SchedStat, clock_monotonic_ns};
 use crate::telemetry::format::{
     PollEndEvent, PollStartEvent, QueueSampleEvent, TaskSpawnEvent, WorkerId, WorkerParkEvent,
@@ -49,6 +49,11 @@ thread_local! {
     /// Last timestamp returned by `poll_start_ts_monotonic`. Ensures strictly
     /// increasing values within a thread by bumping +1ns on ties.
     static LAST_TS: Cell<u64> = const { Cell::new(0) };
+}
+
+crate::primitives::thread_local! {
+    /// schedstat wait_time_ns captured at park time, used to compute delta on unpark.
+    static PARKED_SCHED_WAIT: Cell<u64> = const { Cell::new(0) };
 }
 
 /// Returns a strictly monotonic timestamp for this thread.
@@ -116,14 +121,10 @@ impl Source for TokioRuntimesSource {
             }
             contexts.iter().map(|c| c.global_queue_depth()).sum()
         };
-        record_encodable_event(
-            &QueueSampleEvent {
-                timestamp_ns: clock_monotonic_ns(),
-                global_queue: total_global_queue as u8,
-            },
-            ctx.collector,
-            ctx.drain_epoch,
-        );
+        ctx.record_event(&QueueSampleEvent {
+            timestamp_ns: clock_monotonic_ns(),
+            global_queue: total_global_queue as u8,
+        });
     }
 
     fn name(&self) -> &'static str {
@@ -241,7 +242,7 @@ fn start_sched_sampling_if_needed(shared: &SharedState) {
             // Start sched event sampling for this worker thread. Deferred from
             // on_thread_start so that only worker threads (not blocking pool
             // threads) open perf fds.
-            if let Ok(mut sources) = shared.sources.lock() {
+            shared.with_sources_mut(|sources| {
                 for source in sources.iter_mut() {
                     if let Err(e) = source.on_worker_thread_start() {
                         tracing::warn!(
@@ -250,7 +251,7 @@ fn start_sched_sampling_if_needed(shared: &SharedState) {
                         );
                     }
                 }
-            }
+            });
             cell.set(true);
         }
     });

@@ -1,14 +1,11 @@
-use crate::metrics::{FlushMetrics, Operation, TlDrainMetrics};
+use crate::buffer;
+use crate::handle::ControlCommand;
+use crate::metrics::{FlushMetrics, FlushStats, Operation, TlDrainMetrics};
 use crate::rate_limit::rate_limited;
-use crate::telemetry::buffer;
-use crate::telemetry::writer::{SegmentWriter, WriterMode};
+use crate::shared_state::SharedState;
+use crate::writer::{SegmentWriter, WriterMode};
 use metrique::timers::Timer;
-use metrique::unit::Microsecond;
-use metrique::unit_of_work::metrics;
 use std::time::Duration;
-
-use super::ControlCommand;
-use super::shared_state::SharedState;
 
 /// Tracks the drain coordination state between the flush loop and the writer.
 ///
@@ -23,7 +20,7 @@ use super::shared_state::SharedState;
 /// fires every cycle (since we haven't drained yet), forever deferring the
 /// actual drain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum DrainState {
+enum DrainState {
     /// Normal operation — poll `should_drain()` each cycle.
     Idle,
     /// The writer reported drain due and we bumped the drain epoch.
@@ -31,20 +28,10 @@ pub(super) enum DrainState {
     EpochBumped,
 }
 
-/// Stats returned by flush for metrics publishing.
-#[metrics(subfield, rename_all = "PascalCase")]
-#[derive(Debug)]
-pub(crate) struct FlushStats {
-    pub event_count: u64,
-    pub dropped_batches: u64,
-    #[metrics(unit = Microsecond)]
-    pub cpu_flush_duration: Duration,
-}
-
 /// Perform one flush cycle: drain CPU profilers, drain the collector, write
 /// events to disk, and flush the writer. This is the only code path that
 /// touches the writer, and it runs exclusively on the flush thread.
-pub(super) fn flush_once<M: WriterMode>(
+fn flush_once<M: WriterMode>(
     writer: &mut SegmentWriter<M>,
     events_written: &mut u64,
     shared: &SharedState,
@@ -77,7 +64,7 @@ pub(super) fn flush_once<M: WriterMode>(
     }
 
     while let Some(batch) = shared.collector.next() {
-        if batch.event_count > 0 {
+        if !batch.is_empty() {
             if let Err(e) = writer.write_encoded_batch(&batch) {
                 rate_limited!(Duration::from_secs(60), {
                     tracing::warn!("failed to transcode batch: {e}");
@@ -89,7 +76,7 @@ pub(super) fn flush_once<M: WriterMode>(
                     cpu_flush_duration,
                 };
             }
-            *events_written += batch.event_count;
+            *events_written += batch.event_count();
         }
     }
     if let Err(e) = writer.flush() {
@@ -104,11 +91,11 @@ pub(super) fn flush_once<M: WriterMode>(
     }
 }
 
-/// The flush thread main loop. Extracted so `TelemetryCore::builder` stays readable.
-pub(super) fn run_flush_loop<M: WriterMode>(
+/// The flush thread main loop. Driven by [`CoreSession::start`](crate::session::CoreSession::start).
+pub(crate) fn run_flush_loop<M: WriterMode>(
     control_rx: crate::primitives::sync::mpsc::Receiver<ControlCommand>,
     shared: &SharedState,
-    flush_metrics_sink: &metrique_writer::BoxEntrySink,
+    flush_metrics_sink: &metrique::writer::BoxEntrySink,
     mut writer: SegmentWriter<M>,
 ) {
     // Drain the flush thread's own TL buffer every ~1s (200 × 5ms)

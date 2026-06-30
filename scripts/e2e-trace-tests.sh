@@ -56,6 +56,9 @@ node dial9-viewer/ui/test_stream_parse.js
 echo "--- Checking bring-your-own-credentials store ---"
 node dial9-viewer/ui/test_creds.js
 
+echo "--- Checking landing-page URL state (serialize/parse) ---"
+node dial9-viewer/ui/test_url_state.js
+
 echo "--- Checking skills snippets ---"
 node dial9-viewer/ui/test_all_skills_snippets.js
 

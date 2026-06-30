@@ -10,8 +10,56 @@ description = "Telemetry event bus for dial9"
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(shuttle)"] }
 
 [dependencies]
+bon = "3"
+bytes = "1"
 crossbeam-queue = "0.3"
+ulid = "1"
+dial9-trace-format = { workspace = true }
+libc = { workspace = true }
+tokio = { version = "1", features = ["sync"], default-features = false }
+tokio-util = { version = "0.7", optional = true }
+futures-util = { version = "0.3", default-features = false, features = [
+    "alloc",
+    "std",
+], optional = true }
+flate2 = { version = "1", optional = true }
+metrique = "0.1.23"
+metrique-timesource = "0.1"
 shuttle = { version = "0.9.1", optional = true }
+tracing = "0.1.44"
+
+[dev-dependencies]
+assert2 = { workspace = true }
+dial9-trace-format = { workspace = true, features = ["serde-deserialize"] }
+metrique-timesource = { version = "0.1", features = [
+    "custom-timesource",
+    "tokio",
+    "test-util",
+] }
+metrique-writer = { version = "0.1", features = ["test-util"] }
+proptest = "1"
+serde = { version = "1", features = ["derive"] }
+tempfile = "3"
+tokio = { version = "1.52.0", features = [
+    "rt",
+    "rt-multi-thread",
+    "macros",
+    "time",
+    "test-util",
+] }
 
 [features]
-_shuttle = ["dep:shuttle"]
+_shuttle = ["dep:shuttle", "pipeline"]
+## Exposes recording internals (`Batch`, `CentralCollector`, `encode_single`,
+## `drain_to_collector`) as `pub` for sibling-crate tests.
+test-util = []
+## The segment-processing pipeline runner: a background worker that drives a
+## `SegmentProcessor` chain over sealed segments. Pulls a tokio runtime.
+pipeline = [
+    "tokio/rt",
+    "tokio/time",
+    "tokio/macros",
+    "dep:tokio-util",
+    "dep:futures-util",
+    "dep:flate2",
+]

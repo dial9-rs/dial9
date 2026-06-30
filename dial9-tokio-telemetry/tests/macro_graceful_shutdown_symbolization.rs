@@ -11,7 +11,7 @@
 #![cfg(all(feature = "cpu-profiling", target_os = "linux"))]
 
 use dial9_tokio_telemetry::Dial9Config;
-use dial9_tokio_telemetry::telemetry::cpu_profile::CpuProfilingConfig;
+use dial9_tokio_telemetry::telemetry::CpuProfilingConfig;
 use dial9_trace_format::decoder::Decoder;
 use flate2::read::GzDecoder;
 use std::io::Read;

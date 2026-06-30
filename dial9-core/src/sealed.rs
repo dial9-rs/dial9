@@ -3,6 +3,10 @@
 //! Finds `.bin` files produced by `DiskWriter` rename-on-seal,
 //! ignoring `.active` files that are still being written.
 
+// The segment types here are the public pipeline API, exposed via the
+// `pipeline` module's re-export. Without that feature they stay crate-internal.
+#![cfg_attr(not(feature = "pipeline"), allow(unreachable_pub))]
+
 use std::path::{Path, PathBuf};
 
 use crate::primitives::fs;
@@ -14,6 +18,15 @@ pub struct SealedSegment {
     pub(crate) index: u32,
 }
 
+#[cfg(all(feature = "test-util", feature = "pipeline"))]
+impl SealedSegment {
+    /// Build a disk segment directly.
+    pub(crate) fn new_for_test(path: PathBuf, index: u32) -> Self {
+        Self { path, index }
+    }
+}
+
+#[cfg(feature = "pipeline")]
 impl SealedSegment {
     /// Path to the sealed segment file on disk.
     pub fn path(&self) -> &Path {
@@ -33,6 +46,7 @@ pub struct MemorySegment {
     pub(crate) size: u64,
 }
 
+#[cfg(feature = "pipeline")]
 impl MemorySegment {
     /// Segment index.
     pub fn index(&self) -> u32 {
@@ -64,7 +78,7 @@ impl SegmentRef {
     }
 
     /// Returns the on-disk path for disk-backed segments.
-    pub(crate) fn disk_path(&self) -> Option<&Path> {
+    pub fn disk_path(&self) -> Option<&Path> {
         match self {
             SegmentRef::Disk(s) => Some(&s.path),
             SegmentRef::Memory(_) => None,
@@ -104,6 +118,7 @@ pub(crate) fn creation_epoch_secs(data: &[u8], path: &Path) -> (u64, bool) {
 /// write before seal), falling back to now. Together with
 /// [`creation_epoch_secs`] it gives the span the triggered worker matches
 /// against dump windows.
+#[cfg(feature = "pipeline")]
 pub(crate) fn seal_epoch_secs(path: &Path) -> u64 {
     mtime_or_now_secs(path)
 }
@@ -217,6 +232,7 @@ impl std::fmt::Display for ParseTimestampError {
 /// Matches files named `{stem}.{index}.bin` where `stem` matches the
 /// given base path's file stem. Ignores `.active` files and any files
 /// that don't match the expected naming pattern.
+#[cfg(feature = "pipeline")]
 pub(crate) fn find_sealed_segments(dir: &Path, stem: &str) -> std::io::Result<Vec<SealedSegment>> {
     let mut segments = Vec::new();
     for entry in fs::read_dir(dir)? {
@@ -266,16 +282,20 @@ pub(crate) fn parse_segment_artifact(file_name: &str, stem: &str) -> Option<Segm
 
 /// Parse segment index from a filename like `trace.3.bin`.
 /// Returns `None` if the filename doesn't match `{stem}.{index}.bin`.
+#[cfg(feature = "pipeline")]
 fn parse_segment_index(file_name: &str, stem: &str) -> Option<u32> {
     let rest = file_name.strip_prefix(stem)?.strip_prefix('.')?;
     let index_str = rest.strip_suffix(".bin")?;
     index_str.parse().ok()
 }
 
-#[cfg(test)]
+// These tests cover the worker-facing segment-discovery path.
+#[cfg(all(test, feature = "pipeline"))]
 mod tests {
     use super::*;
+    use crate::format::{ClockSyncEvent, SegmentMetadataEvent};
     use assert2::check;
+    use dial9_trace_format::encoder::Encoder;
     use std::fs::File;
     use tempfile::TempDir;
 
@@ -328,86 +348,45 @@ mod tests {
         check!(segments.is_empty());
     }
 
+    /// Build a single-`ClockSyncEvent` trace carrying `realtime_ns` and parse it
+    /// back. Mirrors the anchor the writer emits at the start of every segment.
     #[test]
     fn test_parse_segment_timestamp() {
-        use crate::telemetry::format::WorkerParkEvent;
-        use crate::telemetry::writer::DiskWriter;
-        use dial9_trace_format::encoder::Encoder;
-        use tempfile::TempDir;
-
-        let dir = TempDir::new().unwrap();
-        let base = dir.path().join("trace");
-
-        let mut writer = DiskWriter::single_file(&base).unwrap();
-
-        let mut enc = Encoder::new_to(Vec::new()).unwrap();
-        enc.write_infallible(&WorkerParkEvent {
-            timestamp_ns: 1000000000,
-            worker_id: crate::telemetry::format::WorkerId::from(0usize),
-            local_queue: 0,
-            cpu_time_ns: 0,
-            tid: 0,
-        });
-        writer
-            .write_encoded_batch(&crate::telemetry::collector::Batch {
-                encoded_bytes: enc.into_inner(),
-                event_count: 1,
-            })
-            .unwrap();
-        writer.flush().unwrap();
-
-        let data = std::fs::read(writer.current_active_path()).unwrap();
-        let timestamp_nanos = parse_segment_timestamp(&data).unwrap();
-
         let now_nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos() as u64;
-        let diff = now_nanos.abs_diff(timestamp_nanos);
+        let mut enc = Encoder::new_to(Vec::new()).unwrap();
+        enc.write(&ClockSyncEvent {
+            timestamp_ns: 1_000_000_000,
+            realtime_ns: now_nanos,
+        })
+        .unwrap();
+        let data = enc.into_inner();
 
-        check!(diff < 60_000_000_000);
+        let parsed = parse_segment_timestamp(&data).unwrap();
+        check!(parsed == now_nanos);
     }
 
     #[test]
     fn test_creation_epoch_secs_uses_parsed_timestamp() {
-        use crate::telemetry::format::WorkerParkEvent;
-        use crate::telemetry::writer::DiskWriter;
-        use dial9_trace_format::encoder::Encoder;
-        use tempfile::TempDir;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap();
+        let mut enc = Encoder::new_to(Vec::new()).unwrap();
+        enc.write(&ClockSyncEvent {
+            timestamp_ns: 1_000_000_000,
+            realtime_ns: now.as_nanos() as u64,
+        })
+        .unwrap();
+        let data = enc.into_inner();
 
         let dir = TempDir::new().unwrap();
-        let base = dir.path().join("trace");
-
-        let mut writer = DiskWriter::single_file(&base).unwrap();
-
-        let mut enc = Encoder::new_to(Vec::new()).unwrap();
-        enc.write_infallible(&WorkerParkEvent {
-            timestamp_ns: 1000000000,
-            worker_id: crate::telemetry::format::WorkerId::from(0usize),
-            local_queue: 0,
-            cpu_time_ns: 0,
-            tid: 0,
-        });
-        writer
-            .write_encoded_batch(&crate::telemetry::collector::Batch {
-                encoded_bytes: enc.into_inner(),
-                event_count: 1,
-            })
-            .unwrap();
-        writer.flush().unwrap();
-
-        let active = writer.current_active_path().to_owned();
-        let data = std::fs::read(&active).unwrap();
-        let (epoch_secs, header_valid) = creation_epoch_secs(&data, &active);
+        // Header parse succeeds, so the path is never stat'd.
+        let path = dir.path().join("trace.0.bin");
+        let (epoch_secs, header_valid) = creation_epoch_secs(&data, &path);
         check!(header_valid);
-        let expected_secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-
-        let diff = expected_secs.abs_diff(epoch_secs);
-
-        check!(diff < 60);
+        check!(epoch_secs == now.as_secs());
     }
 
     #[test]
@@ -427,59 +406,15 @@ mod tests {
         check!(now.abs_diff(epoch_secs) < 60);
     }
 
-    #[test]
-    fn test_parse_segment_timestamp_no_metadata() {
-        use crate::telemetry::format::WorkerParkEvent;
-        use crate::telemetry::writer::DiskWriter;
-        use dial9_trace_format::encoder::Encoder;
-
-        let dir = TempDir::new().unwrap();
-        let base = dir.path().join("trace");
-
-        // Don't call set_segment_metadata — writer should still write one automatically
-        let mut writer = DiskWriter::single_file(&base).unwrap();
-        let mut enc = Encoder::new_to(Vec::new()).unwrap();
-        enc.write_infallible(&WorkerParkEvent {
-            timestamp_ns: 1_000_000_000,
-            worker_id: crate::telemetry::format::WorkerId::from(0usize),
-            local_queue: 0,
-            cpu_time_ns: 0,
-            tid: 0,
-        });
-        writer
-            .write_encoded_batch(&crate::telemetry::collector::Batch {
-                encoded_bytes: enc.into_inner(),
-                event_count: 1,
-            })
-            .unwrap();
-        writer.flush().unwrap();
-
-        let data = std::fs::read(writer.current_active_path()).unwrap();
-        let ts = parse_segment_timestamp(&data).unwrap();
-        let now_nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos() as u64;
-        check!(now_nanos.abs_diff(ts) < 60_000_000_000);
-    }
-
+    /// A legacy pre-clock-sync trace: wall clock lives in
+    /// `SegmentMetadataEvent.timestamp_ns`, no `ClockSyncEvent`.
     fn legacy_segment_metadata_trace(timestamp_ns: u64) -> Vec<u8> {
-        use crate::telemetry::format::{SegmentMetadataEvent, WorkerParkEvent};
-        use dial9_trace_format::encoder::Encoder;
-
         let mut enc = Encoder::new_to(Vec::new()).unwrap();
         enc.write(&SegmentMetadataEvent {
             timestamp_ns,
             entries: vec![("k".into(), "v".into())],
         })
         .unwrap();
-        enc.write_infallible(&WorkerParkEvent {
-            timestamp_ns: 1_000_000_000,
-            worker_id: crate::telemetry::format::WorkerId::from(0usize),
-            local_queue: 0,
-            cpu_time_ns: 0,
-            tid: 0,
-        });
         enc.into_inner()
     }
 
@@ -540,6 +475,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "pipeline")]
     fn parse_segment_index_valid() {
         check!(parse_segment_index("trace.0.bin", "trace") == Some(0));
         check!(parse_segment_index("trace.42.bin", "trace") == Some(42));
@@ -547,6 +483,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "pipeline")]
     fn parse_segment_index_invalid() {
         check!(parse_segment_index("trace.0.bin.active", "trace") == None);
         check!(parse_segment_index("trace.bin", "trace") == None);

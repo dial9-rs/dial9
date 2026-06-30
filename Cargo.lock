@@ -1797,8 +1797,25 @@ dependencies = [
 name = "dial9-core"
 version = "0.4.0-alpha.1"
 dependencies = [
+ "assert2",
+ "bon",
+ "bytes",
  "crossbeam-queue",
+ "dial9-trace-format",
+ "flate2",
+ "futures-util",
+ "libc",
+ "metrique",
+ "metrique-timesource",
+ "metrique-writer",
+ "proptest",
+ "serde",
  "shuttle",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "ulid",
 ]
 
 [[package]]
@@ -1820,6 +1837,7 @@ dependencies = [
  "bytes",
  "criterion",
  "crossbeam-utils",
+ "dial9-core",
  "dial9-trace-format",
  "libc",
  "perf-event-data",
@@ -1847,6 +1865,7 @@ dependencies = [
  "dial9-perf-self-profile",
  "dial9-tokio-telemetry",
  "dial9-trace-format",
+ "dial9-utils",
  "flate2",
  "futures-util",
  "hdrhistogram",
@@ -1876,7 +1895,6 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-subscriber",
- "ulid",
 ]
 
 [[package]]
@@ -1901,6 +1919,31 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "dial9-utils"
+version = "0.4.0-alpha.1"
+dependencies = [
+ "assert2",
+ "async-trait",
+ "aws-config",
+ "aws-sdk-s3",
+ "aws-sdk-s3-transfer-manager",
+ "bon",
+ "bytes",
+ "dial9-core",
+ "flate2",
+ "hostname",
+ "s3s",
+ "s3s-aws",
+ "s3s-fs",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "time",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

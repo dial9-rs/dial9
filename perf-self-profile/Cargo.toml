@@ -13,9 +13,12 @@ all-features = true
 
 [features]
 __internal-bench = []
+## Enables the `Source` trait implementations for `CpuProfiler` and `SchedProfiler`.
+dial9-source = ["dep:dial9-core"]
 
 [dependencies]
 bytes = "1"
+dial9-core = { workspace = true, optional = true }
 dial9-trace-format = { workspace = true }
 tracing = "0.1.44"
 

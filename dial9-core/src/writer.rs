@@ -1,12 +1,12 @@
 use dial9_trace_format::encoder::{Encoder, RawEncoder};
 
-use crate::background_task::fs::{ActiveHandle, Fs, RemoveReason};
-use crate::background_task::sealed::SegmentRef;
+use crate::clock::clock_pair;
+use crate::collector::Batch;
+use crate::format::{ClockSyncEvent, SegmentMetadataEvent};
+use crate::fs::{ActiveHandle, Fs, RemoveReason};
 use crate::primitives::fs;
 use crate::rate_limit::rate_limited;
-use crate::telemetry::collector::Batch;
-use crate::telemetry::events::clock_pair;
-use crate::telemetry::format::{ClockSyncEvent, SegmentMetadataEvent};
+use crate::sealed::SegmentRef;
 use std::collections::VecDeque;
 use std::io::BufWriter;
 use std::marker::PhantomData;
@@ -327,7 +327,10 @@ impl SegmentWriter<Disk> {
         Ok(writer)
     }
 
-    pub(crate) fn set_namespace(&mut self, boot_id: String, lock: std::fs::File) {
+    /// Set the namespace for this writer:
+    /// - `boot_id`: The boot id for the namespace.
+    /// - `lock`: The lock file for the namespace.
+    pub fn set_namespace(&mut self, boot_id: String, lock: std::fs::File) {
         self.boot_id = Some(boot_id);
         self._namespace_lock = Some(lock);
     }
@@ -438,15 +441,14 @@ impl SegmentWriter<Memory> {
         }
         // The active buffer and the worker's in-flight segment live outside the ring, so the ring needs
         // room for at least one sealed segment on top of that reserve.
-        let min_total = (crate::background_task::fs::PIPELINE_RESERVE_SEGMENTS + 1)
-            .saturating_mul(max_segment_size);
+        let min_total = (crate::fs::PIPELINE_RESERVE_SEGMENTS + 1).saturating_mul(max_segment_size);
         if max_total_size < min_total {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 format!(
                     "max_total_size ({max_total_size}) must be >= {min_total} \
                      ({} × max_segment_size: 1 active + 1 in-flight + 1 ring slot)",
-                    crate::background_task::fs::PIPELINE_RESERVE_SEGMENTS + 1
+                    crate::fs::PIPELINE_RESERVE_SEGMENTS + 1
                 ),
             ));
         }
@@ -706,6 +708,9 @@ impl<M: WriterMode> SegmentWriter<M> {
 }
 
 impl<M: WriterMode> SegmentWriter<M> {
+    /// The filesystem backend, handed to the worker so it can drain sealed
+    /// segments. Only needed when the pipeline worker is compiled in.
+    #[cfg(feature = "pipeline")]
     pub(crate) fn fs_handle(&self) -> Option<Arc<Fs>> {
         Some(Arc::clone(&self.fs))
     }
@@ -837,14 +842,17 @@ impl<M: WriterMode> SegmentWriter<M> {
         Ok(())
     }
 
+    // `pub(crate)` in production: the flush loop drives it. `pub` under
+    // `test-util` so sibling-crate tests/benches can write pre-encoded batches.
+    crate::test_util_pub! {
     /// Transcode an encoded batch into the active segment.
-    pub fn write_encoded_batch(&mut self, batch: &Batch) -> std::io::Result<()> {
+    fn write_encoded_batch(&mut self, batch: &Batch) -> std::io::Result<()> {
         self.write_metadata_if_needed()?;
         let WriterState::Active { writer: raw, .. } = &mut self.state else {
-            self.dropped_events += batch.event_count as usize;
+            self.dropped_events += batch.event_count() as usize;
             return Ok(());
         };
-        if batch.event_count > 0 {
+        if batch.event_count() > 0 {
             // Note: we do NOT advance next_rotation_time or next_drain_time
             // when the first event arrives in an empty segment, even if the
             // timers are stale. The drain state machine (Idle → EpochBumped →
@@ -855,11 +863,12 @@ impl<M: WriterMode> SegmentWriter<M> {
             // Raw-copy the thread-local batch. Each batch is self-contained
             // (starts with its own header), so the next batch's header acts as
             // the reset frame for decoders.
-            raw.write_raw(&batch.encoded_bytes)?;
+            raw.write_raw(batch.encoded_bytes())?;
             self.has_real_events = true;
             self.maybe_rotate()?;
         }
         Ok(())
+    }
     }
 }
 
@@ -880,45 +889,107 @@ impl<M: WriterMode> Drop for SegmentWriter<M> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::telemetry::analysis_events::Dial9Event;
-    use crate::telemetry::format;
-    use crate::telemetry::format::WorkerParkEvent;
+    use dial9_trace_format::TraceEvent;
+    use std::collections::HashMap;
     use std::io::Read;
     use tempfile::TempDir;
 
-    /// Encode a single park event into a self-contained batch (header + event),
+    /// A minimal data event for exercising the writer, distinct from the bus's
+    /// own framing events (`ClockSyncEvent`/`SegmentMetadataEvent`) so the
+    /// decode helper can tell real events from the per-segment framing.
+    #[derive(TraceEvent)]
+    #[traceevent(wire_slot)]
+    struct TestEvent {
+        #[traceevent(timestamp)]
+        timestamp_ns: u64,
+        value: u64,
+    }
+
+    /// Decoded view of a trace, classified by frame name via the registry.
+    #[derive(Debug)]
+    enum Decoded {
+        ClockSync {
+            timestamp_ns: u64,
+            realtime_ns: u64,
+        },
+        SegmentMetadata {
+            timestamp_ns: u64,
+            entries: HashMap<String, String>,
+        },
+        Data {
+            timestamp_ns: u64,
+        },
+    }
+
+    fn decode_all(data: &[u8]) -> Vec<Decoded> {
+        use dial9_trace_format::decoder::{DecodedFrameRef, Decoder};
+        use dial9_trace_format::types::FieldValueRef;
+
+        let mut dec = Decoder::new(data).expect("valid trace header");
+        let mut out = Vec::new();
+        while let Some(frame) = dec.next_frame_ref().expect("decode frame") {
+            let DecodedFrameRef::Event {
+                type_id,
+                timestamp_ns,
+                values,
+            } = frame
+            else {
+                continue;
+            };
+            let ts = timestamp_ns.unwrap_or(0);
+            let name = dec.registry().get(type_id).map(|s| s.name());
+            match name {
+                Some("ClockSyncEvent") => {
+                    let realtime_ns = match values.first() {
+                        Some(FieldValueRef::Varint(v)) => *v,
+                        other => panic!("ClockSyncEvent realtime_ns: {other:?}"),
+                    };
+                    out.push(Decoded::ClockSync {
+                        timestamp_ns: ts,
+                        realtime_ns,
+                    });
+                }
+                Some("SegmentMetadataEvent") => {
+                    let entries = match values.first() {
+                        Some(FieldValueRef::StringMap(m)) => m
+                            .iter()
+                            .map(|(k, v)| (k.to_string(), v.to_string()))
+                            .collect(),
+                        other => panic!("SegmentMetadataEvent entries: {other:?}"),
+                    };
+                    out.push(Decoded::SegmentMetadata {
+                        timestamp_ns: ts,
+                        entries,
+                    });
+                }
+                _ => out.push(Decoded::Data { timestamp_ns: ts }),
+            }
+        }
+        out
+    }
+
+    /// Encode a single event into a self-contained batch (header + event),
     /// matching the format produced by ThreadLocalBuffer.
     fn test_batch() -> Batch {
         let mut enc = Encoder::new_to(Vec::new()).unwrap();
-        enc.write_infallible(&WorkerParkEvent {
+        enc.write(&TestEvent {
             timestamp_ns: 1000,
-            worker_id: crate::telemetry::format::WorkerId::from(0usize),
-            local_queue: 2,
-            cpu_time_ns: 0,
-            tid: 0,
-        });
-        Batch {
-            encoded_bytes: enc.into_inner(),
-            event_count: 1,
-        }
+            value: 0,
+        })
+        .unwrap();
+        Batch::new(enc.into_inner(), 1)
     }
 
     fn rotating_file(base: &std::path::Path, i: u32) -> String {
         format!("{}.{}.bin", base.display(), i)
     }
 
-    /// Read all non-metadata events from a trace file.
-    fn read_trace_events(path: &str) -> Vec<Dial9Event> {
+    /// Read all data (non-framing) events from a trace file.
+    fn read_trace_events(path: &str) -> Vec<Decoded> {
         let data = std::fs::read(path).unwrap();
-        format::decode_events(&data)
-            .unwrap()
+        decode_all(&data)
             .into_iter()
-            .filter(|e| {
-                !matches!(
-                    e,
-                    Dial9Event::SegmentMetadataEvent(..) | Dial9Event::ClockSyncEvent(..)
-                )
-            })
+            .filter(|e| matches!(e, Decoded::Data { .. }))
             .collect()
     }
 
@@ -1433,8 +1504,9 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "pipeline")]
     fn test_single_file_sealed_segment_discoverable_by_worker() {
-        use crate::background_task::sealed::find_sealed_segments;
+        use crate::sealed::find_sealed_segments;
 
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("trace.bin");
@@ -1470,13 +1542,11 @@ mod tests {
         writer.flush().unwrap();
         writer.finalize().unwrap();
 
-        let all_events =
-            format::decode_events(&std::fs::read(format!("{}.0.bin", base.display())).unwrap())
-                .unwrap();
+        let all_events = decode_all(&std::fs::read(format!("{}.0.bin", base.display())).unwrap());
         let metadata: Vec<_> = all_events
             .iter()
             .filter_map(|e| match e {
-                Dial9Event::SegmentMetadataEvent(meta) => Some(meta.entries.clone()),
+                Decoded::SegmentMetadata { entries, .. } => Some(entries.clone()),
                 _ => None,
             })
             .collect();
@@ -1528,10 +1598,10 @@ mod tests {
         assert!(files.len() >= 2, "expected at least 2 files from rotation");
 
         for file in &files {
-            let all_events = format::decode_events(&std::fs::read(file).unwrap()).unwrap();
+            let all_events = decode_all(&std::fs::read(file).unwrap());
             let has_metadata = all_events.iter().any(|e| match e {
-                Dial9Event::SegmentMetadataEvent(meta) => {
-                    meta.entries.get("k").map(String::as_str) == Some("v")
+                Decoded::SegmentMetadata { entries, .. } => {
+                    entries.get("k").map(String::as_str) == Some("v")
                 }
                 _ => false,
             });
@@ -1577,11 +1647,11 @@ mod tests {
         // First segment was constructed before update_dynamic_metadata, so
         // it only has static metadata. Rotated segments have both.
         for file in &files[1..] {
-            let all_events = format::decode_events(&std::fs::read(file).unwrap()).unwrap();
+            let all_events = decode_all(&std::fs::read(file).unwrap());
             let meta: Vec<_> = all_events
                 .iter()
                 .filter_map(|e| match e {
-                    Dial9Event::SegmentMetadataEvent(meta) => Some(meta.entries.clone()),
+                    Decoded::SegmentMetadata { entries, .. } => Some(entries.clone()),
                     _ => None,
                 })
                 .collect();
@@ -1612,19 +1682,18 @@ mod tests {
         writer.write_encoded_batch(&test_batch()).unwrap();
         writer.flush().unwrap();
 
-        let all_events =
-            format::decode_events(&std::fs::read(writer.current_active_path()).unwrap()).unwrap();
-        let park_count = all_events
+        let all_events = decode_all(&std::fs::read(writer.current_active_path()).unwrap());
+        let data_count = all_events
             .iter()
-            .filter(|e| matches!(e, Dial9Event::WorkerParkEvent(..)))
+            .filter(|e| matches!(e, Decoded::Data { .. }))
             .count();
-        assert_eq!(park_count, 1);
-        // Metadata should be present and carry built-in entries even without
-        // user-supplied entries via single_file().
+        assert_eq!(data_count, 1);
+        // Metadata should be present and carry only the built-in dial9.dial9-tokio-telemetry.version entry
+        // (no user-supplied entries via single_file()).
         let metadata: Vec<_> = all_events
             .iter()
             .filter_map(|e| match e {
-                Dial9Event::SegmentMetadataEvent(meta) => Some(&meta.entries),
+                Decoded::SegmentMetadata { entries, .. } => Some(entries),
                 _ => None,
             })
             .collect();
@@ -1838,10 +1907,7 @@ mod tests {
         // Advance past the boundary without writing any events
         tokio::time::advance(Duration::from_secs(120)).await;
 
-        let empty_batch = Batch {
-            encoded_bytes: vec![],
-            event_count: 0,
-        };
+        let empty_batch = Batch::new(vec![], 0);
         writer.write_encoded_batch(&empty_batch).unwrap();
 
         assert_eq!(
@@ -2007,7 +2073,7 @@ mod tests {
 
     #[test]
     fn test_clock_sync_precedes_first_data_event() {
-        use crate::background_task::sealed::LEGACY_EPOCH_NS_FLOOR;
+        use crate::sealed::LEGACY_EPOCH_NS_FLOOR;
 
         let dir = TempDir::new().unwrap();
         let base = dir.path().join("trace");
@@ -2022,28 +2088,23 @@ mod tests {
         writer.finalize().unwrap();
 
         let data = std::fs::read(rotating_file(&base, 0)).unwrap();
-        let all = format::decode_events(&data).unwrap();
+        let all = decode_all(&data);
 
         // ClockSync must precede the first data event so a streaming
         // decoder never sees a data timestamp without an anchor.
         let first_data_idx = all
             .iter()
-            .position(|e| {
-                !matches!(
-                    e,
-                    Dial9Event::SegmentMetadataEvent(..) | Dial9Event::ClockSyncEvent(..)
-                )
-            })
+            .position(|e| matches!(e, Decoded::Data { .. }))
             .expect("expected at least one data event");
         let first_clock_sync_idx = all
             .iter()
-            .position(|e| matches!(e, Dial9Event::ClockSyncEvent(..)))
+            .position(|e| matches!(e, Decoded::ClockSync { .. }))
             .expect("expected a ClockSyncEvent in the file");
         assert!(first_clock_sync_idx < first_data_idx);
 
         match &all[first_clock_sync_idx] {
-            Dial9Event::ClockSyncEvent(e) => {
-                assert!(e.realtime_ns >= LEGACY_EPOCH_NS_FLOOR);
+            Decoded::ClockSync { realtime_ns, .. } => {
+                assert!(*realtime_ns >= LEGACY_EPOCH_NS_FLOOR);
             }
             _ => unreachable!(),
         }
@@ -2051,7 +2112,7 @@ mod tests {
 
     #[test]
     fn test_segment_metadata_timestamp_is_monotonic_scale() {
-        use crate::background_task::sealed::LEGACY_EPOCH_NS_FLOOR;
+        use crate::sealed::LEGACY_EPOCH_NS_FLOOR;
 
         let dir = TempDir::new().unwrap();
         let base = dir.path().join("trace");
@@ -2066,14 +2127,14 @@ mod tests {
         writer.finalize().unwrap();
 
         let data = std::fs::read(rotating_file(&base, 0)).unwrap();
-        let all = format::decode_events(&data).unwrap();
+        let all = decode_all(&data);
 
         // SegmentMetadata.timestamp_ns should remain monotonic-scale,
         // not epoch wall-clock.
         let seg_ts = all
             .iter()
             .find_map(|e| match e {
-                Dial9Event::SegmentMetadataEvent(m) => Some(m.timestamp_ns),
+                Decoded::SegmentMetadata { timestamp_ns, .. } => Some(*timestamp_ns),
                 _ => None,
             })
             .expect("SegmentMetadata");
@@ -2111,10 +2172,8 @@ mod tests {
         assert!(files.len() >= 2, "expected at least 2 files from rotation");
 
         for file in &files {
-            let all = format::decode_events(&std::fs::read(file).unwrap()).unwrap();
-            let has_clock_sync = all
-                .iter()
-                .any(|e| matches!(e, Dial9Event::ClockSyncEvent(..)));
+            let all = decode_all(&std::fs::read(file).unwrap());
+            let has_clock_sync = all.iter().any(|e| matches!(e, Decoded::ClockSync { .. }));
             assert!(
                 has_clock_sync,
                 "{}: expected ClockSyncEvent",
@@ -2123,7 +2182,7 @@ mod tests {
         }
     }
 
-    /// A hand-built legacy-shaped buffer (SegmentMetadata + WorkerPark,
+    /// A hand-built legacy-shaped buffer (SegmentMetadata + data event,
     /// no ClockSyncEvent) must still round-trip through the decoder.
     #[test]
     fn test_legacy_trace_without_clock_sync_still_decodes() {
@@ -2133,24 +2192,20 @@ mod tests {
             entries: vec![("k".into(), "v".into())],
         })
         .unwrap();
-        enc.write_infallible(&WorkerParkEvent {
+        enc.write(&TestEvent {
             timestamp_ns: 1000,
-            worker_id: crate::telemetry::format::WorkerId::from(0usize),
-            local_queue: 0,
-            cpu_time_ns: 0,
-            tid: 0,
-        });
+            value: 0,
+        })
+        .unwrap();
         let buf = enc.into_inner();
 
-        let all = format::decode_events(&buf).unwrap();
+        let all = decode_all(&buf);
         assert!(
-            all.iter()
-                .any(|e| matches!(e, Dial9Event::WorkerParkEvent(..))),
-            "expected WorkerPark to decode"
+            all.iter().any(|e| matches!(e, Decoded::Data { .. })),
+            "expected data event to decode"
         );
         assert!(
-            !all.iter()
-                .any(|e| matches!(e, Dial9Event::ClockSyncEvent(..))),
+            !all.iter().any(|e| matches!(e, Decoded::ClockSync { .. })),
             "legacy trace must not contain ClockSync"
         );
     }
@@ -2169,40 +2224,38 @@ mod tests {
             .unwrap();
 
         // Use a real monotonic reading so reconstruction lands near now.
-        let park_ts = crate::telemetry::events::clock_monotonic_ns();
+        let park_ts = crate::clock::clock_monotonic_ns();
         let mut enc = Encoder::new_to(Vec::new()).unwrap();
-        enc.write_infallible(&WorkerParkEvent {
+        enc.write(&TestEvent {
             timestamp_ns: park_ts,
-            worker_id: crate::telemetry::format::WorkerId::from(0usize),
-            local_queue: 0,
-            cpu_time_ns: 0,
-            tid: 0,
-        });
+            value: 0,
+        })
+        .unwrap();
         writer
-            .write_encoded_batch(&Batch {
-                encoded_bytes: enc.into_inner(),
-                event_count: 1,
-            })
+            .write_encoded_batch(&Batch::new(enc.into_inner(), 1))
             .unwrap();
         writer.flush().unwrap();
         writer.finalize().unwrap();
 
-        let all = format::decode_events(&std::fs::read(rotating_file(&base, 0)).unwrap()).unwrap();
+        let all = decode_all(&std::fs::read(rotating_file(&base, 0)).unwrap());
 
         let (sync_mono, sync_real) = all
             .iter()
             .find_map(|e| match e {
-                Dial9Event::ClockSyncEvent(c) => Some((c.timestamp_ns, c.realtime_ns)),
+                Decoded::ClockSync {
+                    timestamp_ns,
+                    realtime_ns,
+                } => Some((*timestamp_ns, *realtime_ns)),
                 _ => None,
             })
             .expect("ClockSync");
         let park_from_file = all
             .iter()
             .find_map(|e| match e {
-                Dial9Event::WorkerParkEvent(p) => Some(p.timestamp_ns),
+                Decoded::Data { timestamp_ns } => Some(*timestamp_ns),
                 _ => None,
             })
-            .expect("WorkerPark");
+            .expect("data event");
 
         let offset = sync_real as i128 - sync_mono as i128;
         let reconstructed_wall_ns = park_from_file as i128 + offset;
@@ -2235,11 +2288,11 @@ mod tests {
         writer.flush().unwrap();
         writer.finalize().unwrap();
 
-        let all = format::decode_events(&std::fs::read(rotating_file(&base, 0)).unwrap()).unwrap();
+        let all = decode_all(&std::fs::read(rotating_file(&base, 0)).unwrap());
         let metadata: Vec<_> = all
             .iter()
             .filter_map(|e| match e {
-                Dial9Event::SegmentMetadataEvent(meta) => Some(meta.entries.clone()),
+                Decoded::SegmentMetadata { entries, .. } => Some(entries.clone()),
                 _ => None,
             })
             .collect();
@@ -2296,11 +2349,11 @@ mod tests {
 
         // Rotated segments should contain both S3 and runtime metadata
         for file in &files[1..] {
-            let all = format::decode_events(&std::fs::read(file).unwrap()).unwrap();
+            let all = decode_all(&std::fs::read(file).unwrap());
             let meta: Vec<_> = all
                 .iter()
                 .filter_map(|e| match e {
-                    Dial9Event::SegmentMetadataEvent(meta) => Some(meta.entries.clone()),
+                    Decoded::SegmentMetadata { entries, .. } => Some(entries.clone()),
                     _ => None,
                 })
                 .collect();
@@ -2338,10 +2391,10 @@ mod tests {
         writer.flush().unwrap();
         writer.finalize().unwrap();
 
-        let all = format::decode_events(&std::fs::read(rotating_file(&base, 0)).unwrap()).unwrap();
+        let all = decode_all(&std::fs::read(rotating_file(&base, 0)).unwrap());
         let metadata_count = all
             .iter()
-            .filter(|e| matches!(e, Dial9Event::SegmentMetadataEvent(..)))
+            .filter(|e| matches!(e, Decoded::SegmentMetadata { .. }))
             .count();
         assert_eq!(
             metadata_count, 1,
@@ -2349,7 +2402,7 @@ mod tests {
         );
     }
 
-    /// The crates.io version of `dial9-tokio-telemetry` is embedded in every
+    /// The crates.io version of the writer's crate is embedded in every
     /// segment's metadata under `dial9.dial9-tokio-telemetry.version`. Regression test for
     /// https://github.com/dial9-rs/dial9/issues/423.
     #[test]
@@ -2362,9 +2415,9 @@ mod tests {
         writer.finalize().unwrap();
 
         let sealed = dir.path().join("trace.0.bin");
-        let all = format::decode_events(&std::fs::read(&sealed).unwrap()).unwrap();
+        let all = decode_all(&std::fs::read(&sealed).unwrap());
         let version_value = all.iter().find_map(|e| match e {
-            Dial9Event::SegmentMetadataEvent(meta) => meta.entries.get(DIAL9_VERSION_KEY).cloned(),
+            Decoded::SegmentMetadata { entries, .. } => entries.get(DIAL9_VERSION_KEY).cloned(),
             _ => None,
         });
         assert_eq!(
@@ -2387,10 +2440,10 @@ mod tests {
         writer.finalize().unwrap();
 
         let sealed = dir.path().join("trace.0.bin");
-        let all = format::decode_events(&std::fs::read(&sealed).unwrap()).unwrap();
+        let all = decode_all(&std::fs::read(&sealed).unwrap());
         let value = all.iter().find_map(|e| match e {
-            Dial9Event::SegmentMetadataEvent(meta) => {
-                meta.entries.get(PROCESS_AVAILABLE_PARALLELISM_KEY).cloned()
+            Decoded::SegmentMetadata { entries, .. } => {
+                entries.get(PROCESS_AVAILABLE_PARALLELISM_KEY).cloned()
             }
             _ => None,
         });
@@ -2430,12 +2483,11 @@ mod tests {
         writer.finalize().unwrap();
 
         let read_version = |idx: u32| -> String {
-            let all =
-                format::decode_events(&std::fs::read(rotating_file(&base, idx)).unwrap()).unwrap();
+            let all = decode_all(&std::fs::read(rotating_file(&base, idx)).unwrap());
             all.iter()
                 .find_map(|e| match e {
-                    Dial9Event::SegmentMetadataEvent(meta) => {
-                        meta.entries.get(DIAL9_VERSION_KEY).cloned()
+                    Decoded::SegmentMetadata { entries, .. } => {
+                        entries.get(DIAL9_VERSION_KEY).cloned()
                     }
                     _ => None,
                 })
@@ -2661,7 +2713,6 @@ mod tests {
 
     #[test]
     fn in_memory_builder_wires_custom_options() {
-        use crate::telemetry::InMemoryWriter;
         let writer = InMemoryWriter::builder()
             .max_total_size(8 * 1024 * 1024)
             .max_segment_size(64 * 1024)
@@ -2704,91 +2755,127 @@ mod tests {
             .expect("3× segment must be accepted");
     }
 
-    /// Drive a memory writer through the real worker pipeline and return the
-    /// captured per-segment payloads. Exercises the full seam: write ->
-    /// Fs::Mem seal -> ring -> finalize (mark_writer_done) -> WorkerLoop::run
-    /// drain-to-empty -> processor.
-    async fn run_mem_e2e(mut writer: InMemoryWriter, events: usize) -> Vec<Vec<u8>> {
-        use crate::background_task::WorkerLoop;
-        use crate::background_task::testutil::CapturingProcessor;
+    /// End-to-end writer -> worker tests: drive a memory writer through the
+    /// real worker pipeline and assert every written event reaches a processor.
+    #[cfg(feature = "pipeline")]
+    mod mem_e2e_tests {
+        use super::*;
+        use crate::pipeline::{ProcessError, SegmentData, SegmentProcessor};
+        use crate::worker::WorkerLoop;
+        use std::future::Future;
+        use std::pin::Pin;
+        use std::sync::{Arc, Mutex};
+        use std::time::Duration;
 
-        let fs = writer.fs_handle().expect("memory writer exposes its Fs");
-        for _ in 0..events {
-            writer.write_encoded_batch(&test_batch()).unwrap();
+        /// Captures each processed segment's payload bytes.
+        struct CapturingProcessor {
+            segments: Arc<Mutex<Vec<Vec<u8>>>>,
         }
-        // Seals the active segment onto the ring and signals writer_done.
-        writer.finalize().unwrap();
 
-        let (capture, captured) = CapturingProcessor::new();
-        // stop is never cancelled: the loop exits via writer_done only.
-        let stop = tokio_util::sync::CancellationToken::new();
-        let mut worker = WorkerLoop::new(
-            fs,
-            Duration::from_millis(5),
-            vec![Box::new(capture)],
-            stop,
-            metrique_writer::sink::DevNullSink::boxed(),
-            None,
-        );
-        worker.run().await;
-
-        let segments = captured.lock().unwrap();
-        segments.clone()
-    }
-
-    /// Count decoded payload events across `segments`, dropping the per-segment
-    /// metadata/clock-sync framing the writer emits.
-    fn count_payload_events(segments: &[Vec<u8>]) -> usize {
-        use crate::telemetry::analysis_events::Dial9Event;
-
-        crate::background_task::testutil::decode_captured(segments)
-            .into_iter()
-            .filter(|e| {
-                !matches!(
-                    e,
-                    Dial9Event::SegmentMetadataEvent(..) | Dial9Event::ClockSyncEvent(..)
+        impl CapturingProcessor {
+            fn new() -> (Self, Arc<Mutex<Vec<Vec<u8>>>>) {
+                let segments = Arc::new(Mutex::new(Vec::new()));
+                (
+                    Self {
+                        segments: segments.clone(),
+                    },
+                    segments,
                 )
-            })
-            .count()
-    }
+            }
+        }
 
-    #[tokio::test]
-    async fn mem_writer_e2e_delivers_all_events() {
-        const EVENTS: usize = 25;
+        impl SegmentProcessor for CapturingProcessor {
+            fn name(&self) -> &'static str {
+                "Capture"
+            }
+            fn process(
+                &mut self,
+                data: SegmentData,
+            ) -> Pin<Box<dyn Future<Output = Result<SegmentData, ProcessError>> + Send + '_>>
+            {
+                self.segments
+                    .lock()
+                    .unwrap()
+                    .push(data.payload().clone().into_vec());
+                Box::pin(async move { Ok(data) })
+            }
+        }
 
-        let segments = run_mem_e2e(InMemoryWriter::new(1 << 20).unwrap(), EVENTS).await;
+        /// Exercises the full seam: write -> Fs::Mem seal -> ring -> finalize
+        /// (mark_writer_done) -> WorkerLoop::run drain-to-empty -> processor.
+        async fn run_mem_e2e(mut writer: InMemoryWriter, events: usize) -> Vec<Vec<u8>> {
+            let fs = writer.fs_handle().expect("memory writer exposes its Fs");
+            for _ in 0..events {
+                writer.write_encoded_batch(&test_batch()).unwrap();
+            }
+            // Seals the active segment onto the ring and signals writer_done.
+            writer.finalize().unwrap();
 
-        assert!(!segments.is_empty(), "worker captured no segments");
-        assert_eq!(
-            count_payload_events(&segments),
-            EVENTS,
-            "every written event must reach the processor"
-        );
-    }
+            let (capture, captured) = CapturingProcessor::new();
+            // stop is never cancelled: the loop exits via writer_done only.
+            let stop = tokio_util::sync::CancellationToken::new();
+            let mut worker = WorkerLoop::new(
+                fs,
+                Duration::from_millis(5),
+                vec![Box::new(capture)],
+                stop,
+                metrique_writer::sink::DevNullSink::boxed(),
+                None,
+            );
+            worker.run().await;
 
-    /// Same as `mem_writer_e2e_delivers_all_events`, but a tiny `max_segment_size` forces several rotations so the
-    /// worker delivers multiple sealed segments.
-    #[tokio::test]
-    async fn mem_writer_e2e_delivers_all_events_across_rotations() {
-        const EVENTS: usize = 60;
+            let segments = captured.lock().unwrap();
+            segments.clone()
+        }
 
-        // Huge ring (nothing evicts) + tiny segments (rotate every few batches).
-        let writer = InMemoryWriter::builder()
-            .max_total_size(16 * 1024 * 1024)
-            .max_segment_size(256)
-            .build()
-            .unwrap();
-        let segments = run_mem_e2e(writer, EVENTS).await;
+        /// Count decoded payload events across `segments`, dropping the
+        /// per-segment metadata/clock-sync framing the writer emits.
+        fn count_payload_events(segments: &[Vec<u8>]) -> usize {
+            segments
+                .iter()
+                .flat_map(|s| decode_all(s))
+                .filter(|e| matches!(e, Decoded::Data { .. }))
+                .count()
+        }
 
-        assert!(
-            segments.len() >= 2,
-            "tiny segments must force rotation, got {} segment(s)",
-            segments.len()
-        );
-        assert_eq!(
-            count_payload_events(&segments),
-            EVENTS,
-            "every event across all rotated segments must reach the processor"
-        );
+        #[tokio::test]
+        async fn mem_writer_e2e_delivers_all_events() {
+            const EVENTS: usize = 25;
+
+            let segments = run_mem_e2e(InMemoryWriter::new(1 << 20).unwrap(), EVENTS).await;
+
+            assert!(!segments.is_empty(), "worker captured no segments");
+            assert_eq!(
+                count_payload_events(&segments),
+                EVENTS,
+                "every written event must reach the processor"
+            );
+        }
+
+        /// Same, but a tiny `max_segment_size` forces several rotations so the
+        /// worker delivers multiple sealed segments.
+        #[tokio::test]
+        async fn mem_writer_e2e_delivers_all_events_across_rotations() {
+            const EVENTS: usize = 60;
+
+            // Huge ring (nothing evicts) + tiny segments (rotate every few batches).
+            let writer = InMemoryWriter::builder()
+                .max_total_size(16 * 1024 * 1024)
+                .max_segment_size(256)
+                .build()
+                .unwrap();
+            let segments = run_mem_e2e(writer, EVENTS).await;
+
+            assert!(
+                segments.len() >= 2,
+                "tiny segments must force rotation, got {} segment(s)",
+                segments.len()
+            );
+            assert_eq!(
+                count_payload_events(&segments),
+                EVENTS,
+                "every event across all rotated segments must reach the processor"
+            );
+        }
     }
 }
