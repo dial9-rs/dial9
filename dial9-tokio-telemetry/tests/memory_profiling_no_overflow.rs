@@ -6,14 +6,14 @@ mod common;
 
 use common::{CAPTURE_BUFFER_SIZE, capture_processor, decode_all};
 use dial9_tokio_telemetry::memory_profiling::{
-    MemoryProfiler, MemoryProfilingConfig, SamplingAllocator,
+    Dial9Allocator, MemoryProfiler, MemoryProfilingConfig,
 };
 use dial9_tokio_telemetry::telemetry::{InMemoryWriter, TracedRuntime};
 use serde::Deserialize;
 use std::time::Duration;
 
 #[global_allocator]
-static ALLOC: SamplingAllocator = SamplingAllocator::system();
+static ALLOC: Dial9Allocator = Dial9Allocator::system();
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "event")]
@@ -42,14 +42,14 @@ fn no_overflow_event_when_ring_has_capacity() {
         .unwrap();
 
     let handle = guard.handle();
-    MemoryProfiler::from_config(
+    let _mem_guard = MemoryProfiler::from_config(
         MemoryProfilingConfig::builder()
             .sample_rate_bytes(512 * 1024)
             .ring_capacity(4096)
             .rng_seed(42)
             .build(),
     )
-    .install_into(&handle)
+    .install(handle)
     .expect("install should succeed");
 
     runtime.block_on(async {

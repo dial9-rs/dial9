@@ -1139,6 +1139,8 @@ impl<M: WriterMode, S: telemetry_core_builder::State> TelemetryCoreBuilder<M, S>
 pub struct TracedRuntime {
     pub(crate) runtime: tokio::runtime::Runtime,
     pub(crate) guard: TelemetryGuard,
+    #[cfg(feature = "memory-profiling")]
+    pub(crate) memory_profiler_guard: Option<crate::memory_profiling::MemoryProfilerGuard>,
     /// Graceful-shutdown timeout carried from the [`crate::Dial9Config`].
     /// Consumed by [`graceful_shutdown`](TracedRuntime::graceful_shutdown)
     /// (used by the `#[dial9_tokio_telemetry::main]` macro). `None` skips the
@@ -1275,20 +1277,22 @@ fn try_assemble_dial9_config(
     }
 }
 
-/// Install the memory profiler and register its `Source` with the session.
-/// The `MemorySampler` is owned by the source, which `SharedState` keeps alive for the session.
 #[cfg(feature = "memory-profiling")]
 fn install_memory_profiler(
     config: Option<crate::memory_profiling::MemoryProfilingConfig>,
     guard: &TelemetryGuard,
-) {
-    let Some(config) = config else {
-        return;
-    };
-    if let Err(e) =
-        crate::memory_profiling::MemoryProfiler::from_config(config).install_into(&guard.handle())
-    {
-        tracing::warn!(target: "dial9_telemetry", "failed to install memory profiler: {e}");
+) -> Option<crate::memory_profiling::MemoryProfilerGuard> {
+    let config = config?;
+    if !guard.is_enabled() {
+        return None;
+    }
+
+    match crate::memory_profiling::MemoryProfiler::from_config(config).install(guard.handle()) {
+        Ok(memory_guard) => Some(memory_guard),
+        Err(e) => {
+            tracing::warn!(target: "dial9_telemetry", "failed to install memory profiler: {e}");
+            None
+        }
     }
 }
 
@@ -1435,6 +1439,8 @@ impl TracedRuntime {
         let Self {
             runtime,
             guard,
+            #[cfg(feature = "memory-profiling")]
+                memory_profiler_guard: _memory_profiler_guard,
             graceful_shutdown_timeout,
         } = self;
         // Drop the runtime first so Tokio worker threads exit and flush their
@@ -1458,10 +1464,12 @@ impl TryFrom<crate::Dial9Config> for TracedRuntime {
         let graceful_shutdown_timeout = config.graceful_shutdown_timeout;
         let (runtime, guard) = try_assemble_dial9_config(config.inner)?;
         #[cfg(feature = "memory-profiling")]
-        install_memory_profiler(memory_profiling_config, &guard);
+        let memory_profiler_guard = install_memory_profiler(memory_profiling_config, &guard);
         Ok(Self {
             runtime,
             guard,
+            #[cfg(feature = "memory-profiling")]
+            memory_profiler_guard,
             graceful_shutdown_timeout,
         })
     }

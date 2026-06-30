@@ -96,7 +96,6 @@ tracing-layer = ["dep:tracing-subscriber"]
 memory-profiling = [
     "dep:dial9-perf-self-profile",
     "dial9-perf-self-profile/memory-profiling",
-    "dial9-perf-self-profile/dial9-source",
 ]
 worker-s3 = [
     "dep:dial9-utils",

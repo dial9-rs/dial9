@@ -7,14 +7,14 @@ mod common;
 
 use common::{CAPTURE_BUFFER_SIZE, capture_processor, decode_all};
 use dial9_tokio_telemetry::memory_profiling::{
-    MemoryProfiler, MemoryProfilingConfig, SamplingAllocator,
+    Dial9Allocator, MemoryProfiler, MemoryProfilingConfig,
 };
 use dial9_tokio_telemetry::telemetry::analysis_events::Dial9Event;
 use dial9_tokio_telemetry::telemetry::{InMemoryWriter, TracedRuntime};
 use std::time::Duration;
 
 #[global_allocator]
-static ALLOC: SamplingAllocator = SamplingAllocator::system();
+static ALLOC: Dial9Allocator = Dial9Allocator::system();
 
 #[test]
 fn hook_captures_sampled_allocations() {
@@ -28,13 +28,13 @@ fn hook_captures_sampled_allocations() {
         .unwrap();
 
     let handle = guard.handle();
-    MemoryProfiler::from_config(
+    let _mem_guard = MemoryProfiler::from_config(
         MemoryProfilingConfig::builder()
             .sample_rate_bytes(1024)
             .rng_seed(42)
             .build(),
     )
-    .install_into(&handle)
+    .install(handle)
     .expect("install should succeed");
 
     runtime.block_on(async {

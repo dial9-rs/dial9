@@ -7,7 +7,7 @@ mod common;
 
 use common::{CAPTURE_BUFFER_SIZE, capture_processor, decode_all};
 use dial9_tokio_telemetry::memory_profiling::{
-    MemoryProfiler, MemoryProfilingConfig, SamplingAllocator,
+    Dial9Allocator, MemoryProfiler, MemoryProfilingConfig,
 };
 use dial9_tokio_telemetry::telemetry::analysis_events::Dial9Event;
 use dial9_tokio_telemetry::telemetry::{InMemoryWriter, TracedRuntime};
@@ -36,8 +36,7 @@ unsafe impl GlobalAlloc for CountingAllocator {
 }
 
 #[global_allocator]
-static ALLOC: SamplingAllocator<CountingAllocator> =
-    SamplingAllocator::new(CountingAllocator::new());
+static ALLOC: Dial9Allocator<CountingAllocator> = Dial9Allocator::new(CountingAllocator::new());
 
 #[test]
 fn hook_realloc_emits_alloc_and_free_when_liveset_on() {
@@ -51,14 +50,14 @@ fn hook_realloc_emits_alloc_and_free_when_liveset_on() {
         .unwrap();
 
     let handle = guard.handle();
-    MemoryProfiler::from_config(
+    let _mem_guard = MemoryProfiler::from_config(
         MemoryProfilingConfig::builder()
             .sample_rate_bytes(64)
             .track_liveset(true)
             .rng_seed(42)
             .build(),
     )
-    .install_into(&handle)
+    .install(handle)
     .expect("install should succeed");
 
     runtime.block_on(async {

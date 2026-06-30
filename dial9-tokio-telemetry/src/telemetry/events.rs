@@ -1,17 +1,4 @@
-/// Get the OS thread ID (tid) of the calling thread via `gettid()`.
-#[cfg(any(target_os = "linux", target_os = "android"))]
-pub(crate) fn current_tid() -> u32 {
-    unsafe { libc::syscall(libc::SYS_gettid) as u32 }
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "android")))]
-pub(crate) fn current_tid() -> u32 {
-    // No gettid on non-Linux; use a thread-local counter as a unique ID.
-    use std::sync::atomic::{AtomicU32, Ordering};
-    static NEXT: AtomicU32 = AtomicU32::new(1);
-    thread_local! { static TID: u32 = NEXT.fetch_add(1, Ordering::Relaxed); }
-    TID.with(|t| *t)
-}
+pub(crate) use dial9_core::thread::current_tid;
 
 /// Read the calling thread's CPU time via `CLOCK_THREAD_CPUTIME_ID`.
 /// This is a vDSO call on Linux (~20-40ns), no actual syscall.

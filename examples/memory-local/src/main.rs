@@ -1,6 +1,6 @@
 //! Minimal dial9 + memory profiling example.
 //!
-//! Sets `SamplingAllocator` as the global allocator, enables memory profiling
+//! Sets `Dial9Allocator` as the global allocator, enables memory profiling
 //! on the running dial9 session, does some allocating work, and writes a trace
 //! with `AllocEvent`s to disk.
 //!
@@ -8,7 +8,7 @@
 
 use dial9_tokio_telemetry::Dial9Config;
 use dial9_tokio_telemetry::memory_profiling::{
-    MemoryProfiler, MemoryProfilingConfig, SamplingAllocator,
+    Dial9Allocator, MemoryProfiler, MemoryProfilingConfig,
 };
 use dial9_tokio_telemetry::telemetry::{Dial9Handle, Dial9TokioHandle};
 use std::time::Duration;
@@ -17,7 +17,7 @@ const TRACE_DIR: &str = "/tmp/memory-local-traces";
 
 // Route every allocation through the sampling allocator.
 #[global_allocator]
-static ALLOC: SamplingAllocator = SamplingAllocator::system();
+static ALLOC: Dial9Allocator = Dial9Allocator::system();
 
 async fn allocate_some() {
     let mut buffers: Vec<Vec<u8>> = Vec::new();
@@ -42,13 +42,13 @@ fn my_config() -> Dial9Config {
 
 #[dial9_tokio_telemetry::main(config = my_config)]
 async fn main() {
-    MemoryProfiler::from_config(
+    let _guard = MemoryProfiler::from_config(
         MemoryProfilingConfig::builder()
             .sample_rate_bytes(16 * 1024) // sample often so the demo has events
             .track_liveset(true) // also record frees, for leak views
             .build(),
     )
-    .install_into(&Dial9Handle::current())
+    .install(Dial9Handle::current())
     .expect("install memory profiler");
 
     let handle = Dial9TokioHandle::current();

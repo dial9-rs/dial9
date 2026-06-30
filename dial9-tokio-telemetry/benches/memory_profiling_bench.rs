@@ -1,7 +1,7 @@
 //! Integration benchmark for memory profiling.
 //!
-//! Measures the overhead of the SamplingAllocator hook path by calling
-//! GlobalAlloc methods directly on a SamplingAllocator<System> instance.
+//! Measures the overhead of the Dial9Allocator hook path by calling
+//! GlobalAlloc methods directly on a Dial9Allocator<System> instance.
 //!
 //! Usage: `cargo bench -p dial9-tokio-telemetry --features memory-profiling \
 //!     --bench memory_profiling_bench`
@@ -22,11 +22,11 @@
 //!   BENCH_CONFIG=sampling_with_liveset cargo bench --bench memory_profiling_bench --features memory-profiling
 
 use criterion::{Criterion, Throughput};
-use dial9_tokio_telemetry::memory_profiling::SamplingAllocator;
+use dial9_tokio_telemetry::memory_profiling::Dial9Allocator;
 use std::alloc::{GlobalAlloc, Layout};
 
 fn bench_tight_alloc(c: &mut Criterion) {
-    let allocator = SamplingAllocator::system();
+    let allocator = Dial9Allocator::system();
     let layout = Layout::from_size_align(64, 8).unwrap();
 
     let mut group = c.benchmark_group("tight_alloc");
@@ -43,7 +43,7 @@ fn bench_tight_alloc(c: &mut Criterion) {
 }
 
 fn bench_realloc_growth(c: &mut Criterion) {
-    let allocator = SamplingAllocator::system();
+    let allocator = Dial9Allocator::system();
 
     let mut group = c.benchmark_group("realloc_growth");
     // Total bytes touched: 64+128+256+512+1024+2048+4096 = 8128
@@ -72,7 +72,7 @@ fn bench_realloc_growth(c: &mut Criterion) {
 }
 
 fn bench_mixed_sizes(c: &mut Criterion) {
-    let allocator = SamplingAllocator::system();
+    let allocator = Dial9Allocator::system();
     let sizes: &[usize] = &[8, 64, 256, 1024, 64, 16, 8192, 32, 512, 4096];
     let total_bytes: u64 = sizes.iter().map(|&s| s as u64).sum();
 
@@ -118,8 +118,8 @@ fn install_profiler() {
         .rng_seed(42)
         .build();
 
-    MemoryProfiler::from_config(cfg)
-        .install_into(&handle)
+    let _mem_guard = MemoryProfiler::from_config(cfg)
+        .install(handle)
         .expect("profiler install should succeed in bench");
 
     // Leak everything to keep the profiler alive for the process.

@@ -8,7 +8,7 @@
 //! would panic. With OPT_OUT, they bail out cleanly.
 
 use dial9_tokio_telemetry::memory_profiling::{
-    MemoryProfiler, MemoryProfilingConfig, SamplingAllocator,
+    Dial9Allocator, MemoryProfiler, MemoryProfilingConfig,
 };
 use dial9_tokio_telemetry::telemetry::{InMemoryWriter, TracedRuntime};
 use std::cell::RefCell;
@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 #[global_allocator]
-static ALLOC: SamplingAllocator = SamplingAllocator::system();
+static ALLOC: Dial9Allocator = Dial9Allocator::system();
 
 static PANICS: AtomicU64 = AtomicU64::new(0);
 
@@ -65,14 +65,14 @@ fn opt_out_prevents_tls_teardown_panic() {
         .unwrap();
 
     let handle = guard.handle();
-    MemoryProfiler::from_config(
+    let _mem_guard = MemoryProfiler::from_config(
         MemoryProfilingConfig::builder()
             .sample_rate_bytes(64) // sample aggressively
             .track_liveset(true)
             .rng_seed(42)
             .build(),
     )
-    .install_into(&handle)
+    .install(handle)
     .expect("install should succeed");
 
     const N_THREADS: usize = 16;

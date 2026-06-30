@@ -1,5 +1,5 @@
 #![deny(clippy::arithmetic_side_effects)]
-//! Allocator hook — the hot path called from `SamplingAllocator::alloc`/etc.
+//! Allocator hook — the hot path called from `Dial9Allocator::alloc`/etc.
 //!
 //! # Soundness contract
 //!
@@ -29,11 +29,11 @@
 //!
 //! See design §6 (Reentrancy) for the full argument.
 
-use crate::memory_profiling::clock::clock_monotonic_ns;
 use crate::memory_profiling::profiler::MemoryProfilerInner;
 use crate::memory_profiling::ring::{DEFAULT_MAX_FRAMES, RawAlloc, RawFree};
-use crate::memory_profiling::sampling::SplitMix64;
-use crate::memory_profiling::tid::current_tid;
+use dial9_core::clock::clock_monotonic_ns;
+use dial9_core::sampling::SplitMix64;
+use dial9_core::thread::current_tid;
 
 /// Per-thread sampling state. Held in TLS so each thread reads/writes
 /// its own counter and PRNG without synchronization (design §1).
@@ -111,7 +111,7 @@ fn next_gap(rng: &mut SplitMix64, sample_rate_bytes: u64) -> i64 {
     i64::try_from(rng.draw_exponential(sample_rate_bytes)).unwrap_or(i64::MAX)
 }
 
-/// Allocator hook: called from `SamplingAllocator::alloc` after the inner
+/// Allocator hook: called from `Dial9Allocator::alloc` after the inner
 /// allocation succeeds (`ptr` is non-null).
 ///
 /// SAFETY: must be allocation-free — see module docs.
@@ -348,8 +348,9 @@ mod tests {
     use super::*;
     use crate::memory_profiling::profiler::MemoryProfilerInner;
     use crate::memory_profiling::ring::RingBuffers;
-    use crate::memory_profiling::sampling::SplitMix64;
     use crate::unwinder::Unwinder;
+    use dial9_core::handle::Dial9Handle;
+    use dial9_core::sampling::SplitMix64;
     use std::sync::Arc;
 
     /// Reset this thread's sampling state to a deterministic seed.
@@ -399,6 +400,7 @@ mod tests {
         let rings = Arc::new(RingBuffers::new(ring_capacity, ring_capacity));
         MemoryProfilerInner {
             unwinder,
+            handle: Dial9Handle::disabled(),
             rings,
             sample_rate_bytes,
             liveset: None,
@@ -715,6 +717,7 @@ mod tests {
         ));
         MemoryProfilerInner {
             unwinder,
+            handle: Dial9Handle::disabled(),
             rings,
             sample_rate_bytes,
             liveset: Some(liveset),

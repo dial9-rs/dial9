@@ -9,7 +9,7 @@ use std::time::Duration;
 use aws_config::BehaviorVersion;
 use clap::Parser;
 use dial9_tokio_telemetry::memory_profiling::{
-    MemoryProfiler, MemoryProfilingConfig, SamplingAllocator,
+    Dial9Allocator, MemoryProfiler, MemoryProfilingConfig,
 };
 #[cfg(target_os = "linux")]
 use dial9_tokio_telemetry::telemetry::SocketAcceptQueuesConfig;
@@ -29,7 +29,7 @@ use metrique::writer::format::FormatExt;
 use metrique::writer::sink::FlushImmediatelyBuilder;
 
 #[global_allocator]
-static ALLOC: SamplingAllocator = SamplingAllocator::system();
+static ALLOC: Dial9Allocator = Dial9Allocator::system();
 
 #[derive(Parser)]
 #[command(about = "Metrics service with DynamoDB persistence and telemetry")]
@@ -267,15 +267,19 @@ fn main() -> std::io::Result<()> {
     guard.enable();
     let handle = guard.tokio_handle(runtime.handle());
 
-    if !args.no_memory_profiling {
+    let _mem_guard = if args.no_memory_profiling {
+        None
+    } else {
         let config = MemoryProfilingConfig::builder()
             .sample_rate_bytes(args.alloc_sample_rate_bytes)
             .track_liveset(!args.no_track_liveset)
             .build();
-        MemoryProfiler::from_config(config)
-            .install_into(&guard.handle())
-            .expect("failed to install memory profiler");
-    }
+        Some(
+            MemoryProfiler::from_config(config)
+                .install(guard.handle())
+                .expect("failed to install memory profiler"),
+        )
+    };
 
     // Wrap the body in a spawned task so the root future is instrumented.
     // Inside, Dial9TokioHandle::current() is available on every worker thread.

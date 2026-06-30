@@ -14,11 +14,10 @@ all-features = true
 [features]
 __internal-bench = []
 ## Enables the dial9 `Source` integration for the profilers (`CpuProfiler`,
-## `SchedProfiler`, and the memory profiler when `memory-profiling` is on).
+## `SchedProfiler`, the memory profiler).
 dial9-source = ["dep:dial9-core"]
-## Standalone sampled memory allocation profiler.
-## Add `dial9-source` to feed it into a dial9 trace.
-memory-profiling = ["dep:scc", "dep:crossbeam-queue", "dep:bon"]
+## Sampled memory allocation profiler. Feeds a dial9 trace via a `Source`.
+memory-profiling = ["dial9-source", "dep:scc", "dep:crossbeam-queue", "dep:bon"]
 ## Allow constructing the public wire-event structs (`AllocEvent`/`FreeEvent`)
 ## outside this crate. Off by default keeps them `#[non_exhaustive]`.
 unstable-events = []

@@ -788,7 +788,7 @@ impl Dial9Config {
     /// | `DIAL9_SCHEDULE_PROFILE_ENABLED` | `true` on Linux with `cpu-profiling`, `false` otherwise | Enable per-worker scheduler event capture. Requires the [CPU profiling setup](https://github.com/dial9-rs/dial9/blob/HEAD/dial9-tokio-telemetry/README.md#cpu-profiling-linux-only). |
     ///
     /// Supported memory profiling variables (`memory-profiling` feature required;
-    /// applications must still install [`SamplingAllocator`](crate::memory_profiling::SamplingAllocator)
+    /// applications must still install [`Dial9Allocator`](crate::memory_profiling::Dial9Allocator)
     /// as their `#[global_allocator]`):
     ///
     /// | Variable | Default | Meaning |

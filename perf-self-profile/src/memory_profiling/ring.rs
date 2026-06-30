@@ -2,7 +2,8 @@
 //! Two lock-free MPMC queues — one for sampled allocations, one for frees.
 
 use crossbeam_queue::ArrayQueue;
-use std::sync::atomic::{AtomicU64, Ordering};
+use dial9_core::primitives::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 
 /// Default maximum frames captured per allocation. 128 × 8 B = 1 KiB stack budget.
 pub(crate) const DEFAULT_MAX_FRAMES: usize = 128;
