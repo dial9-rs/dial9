@@ -11,10 +11,11 @@ detection.
 
 The hot path on the allocating thread is **bare bones**: sample decision,
 stack capture, push a fixed-size POD record into a process-global lock-free
-queue. A dedicated **consolidator thread** drains the queue and turns each
-record into the corresponding trace event. This keeps the allocator hook
-allocator-quiet by construction and lets the consolidator use ordinary
-`HashMap`/encoder machinery without re-entering the hook.
+queue. A `MemorySampler` drains the queue and yields each record as a
+`MemorySample`; the dial9 integration turns those into trace events. This
+keeps the allocator hook allocator-quiet by construction and lets the
+consumer use ordinary `HashMap`/encoder machinery without re-entering the
+hook.
 
 The design mirrors jemalloc's and Go's allocation profilers: **geometric
 (Poisson) sampling** keyed on allocation size. The expected sampling rate
@@ -37,12 +38,13 @@ allocator internals (bin sizes, arena stats) — for that, use jemalloc's
   allocation hot paths can be attributed to specific tasks or poll ranges.
 - Optional live-set tracking for leak detection. Off by default — it
   adds an extra ring push per dealloc and a per-sample lookup on the
-  consolidator side.
+  consumer side.
 - No symbolication on the hot path. Addresses flow through the existing
   background `SymbolizeProcessor`.
-- **Install-once, captured handle.** `MemoryProfiler::install(handle)`
-  sets a process-global static that the allocator reads. The captured
-  handle routes all sampled events through the central recorder.
+- **Install-once.** `MemoryProfiler::install()` sets a process-global
+  static that the allocator reads and returns a `MemorySampler` to drain.
+  Usable standalone; the `dial9-source` integration routes drained samples
+  through the central recorder.
 - **Instruments all threads**, not just tokio workers — allocations on
   tokio workers, blocking pool, user OS threads, and library-spawned
   threads are all recorded identically.
@@ -158,13 +160,13 @@ overhead.
 force a read-modify-write across threads on every allocation; TLS gives
 each thread its own state with a plain load/store.
 
-**Reuse the existing `SplitMix64` and `draw_exponential` from
-`task_dumped.rs`**, extracted into a shared `pub(crate)` module
-(e.g. `dial9-tokio-telemetry/src/sampling.rs`). The shape is identical —
-only the unit changes (`bytes` instead of `nanoseconds`). Shared API:
+**A small `SplitMix64` lives in `perf-self-profile`'s `memory_profiling`
+module** (`sampling.rs`), so the base profiler needs no `dial9-core`. It
+is the same generator dial9-core uses for the task-dump sampler; only the
+unit changes (`bytes` instead of `nanoseconds`). API:
 
 ```rust
-// dial9-tokio-telemetry/src/sampling.rs
+// perf-self-profile/src/memory_profiling/sampling.rs
 pub(crate) struct SplitMix64(u64);
 
 impl SplitMix64 {
@@ -555,9 +557,12 @@ For deallocs (liveset on):
 
 No mutex. No encoder. No hashmap. No `Vec::with_capacity`.
 
-### Consolidator (flush thread)
+### Draining (`MemorySampler`)
 
-The flush thread drains both queues every 5 ms via the `Source` trait.
+`MemorySampler::drain` merges both queues by timestamp and yields a
+`MemorySample` per record. In the dial9 path the `MemoryProfileSource`
+runs it on the flush thread every 5 ms (via the `Source` trait) and
+encodes each sample; standalone callers drain it directly.
 **Drain order: merge by timestamp** — peek both queues, pop whichever has
 the older timestamp, repeat. This handles in-place realloc correctly
 (free-of-old at T₁ must be processed before alloc-of-new at T₂ for the
@@ -566,7 +571,7 @@ same address).
 For each `RawAlloc`:
 1. Intern the stack via the flush thread's `ThreadLocalEncoder`.
 2. Encode an `AllocEvent` into the trace.
-3. If liveset is on, insert into the consolidator's `HashMap<usize, LivesetEntry>`.
+3. If liveset is on, insert into the consumer's `HashMap<usize, LivesetEntry>`.
 
 For each `RawFree`:
 1. Look up `addr` in the liveset `HashMap`. Hit → emit `FreeEvent`. Miss → ignore.
@@ -623,98 +628,88 @@ frame-pointer unwinder.
 
 ---
 
-## 6. Configuration — static install, captured handle
+## 6. Install and drain
 
 `MemoryProfiler::install()` sets a process-global static that the
 `SamplingAllocator` reads on every allocation. Installation happens
-**exactly once per process** and takes a `TelemetryHandle` captured
-at install time.
+**exactly once per process** and returns a `MemorySampler`: the consumer
+side of the two queues. No `dial9-core` is required for this path.
 
-### Shape
+### Standalone
 
 ```rust
-use dial9_tokio_telemetry::memory_profiling::{
-    SamplingAllocator, MemoryProfiler,
+use dial9_perf_self_profile::memory_profiling::{
+    SamplingAllocator, MemoryProfiler, MemorySample,
 };
 
 #[global_allocator]
 static ALLOC: SamplingAllocator = SamplingAllocator::system();
 
-fn main() {
-    let guard = TelemetryCore::builder()
-        .writer(writer)
-        .trace_path("/tmp/trace.bin")
-        .build()?;
-    guard.enable();
+let mut sampler = MemoryProfiler::with_defaults().install()?;
 
-    // Memory profile timestamps always come from `clock_monotonic_ns()`
-    // (~25 ns vDSO call per sampled allocation). Globally monotonic, so
-    // cross-thread comparisons in the liveset's shutdown-drain race
-    // detector (§7) are sound.
-    let _mem = MemoryProfiler::builder()
-        .sample_rate_bytes(512 * 1024)
-        .track_liveset(true)
-        .install(guard.handle())?;
-
-    let (rt, _) = guard.trace_runtime("main").build(rt_builder)?;
-    rt.block_on(async { /* ... */ });
-}
+// On a cadence, pull what was captured:
+sampler.drain(|s| match s {
+    MemorySample::Alloc(a) => { /* a.tid, a.size, a.addr, a.callchain */ }
+    MemorySample::Free(f) => { /* f.size, f.alloc_timestamp_ns */ }
+    _ => {}
+});
 ```
 
-Between the global allocator static and `install()`, every allocation
-takes the unset-`OnceLock` fast path: one `Acquire` load + null check
-(~1 ns), not set → skip.
+Sample timestamps come from `clock_monotonic_ns()` (~25 ns vDSO call),
+globally monotonic so the liveset shutdown-drain race detector (§7) is
+sound. There is no opt-out.
 
-### Why capture the handle
+### Into a dial9 trace
 
-There's one global allocator, allocations come from everywhere, and we
-want *all* of them to land in the same trace. A single captured handle
-achieves that — no `TelemetryHandle::current()` TLS lookup on the hot
-path.
-
-### `MemoryProfiler::install()` flow
+With the `dial9-source` feature, `install_into(&handle)` installs the
+profiler and registers a `MemoryProfileSource` that drains the sampler on
+the flush thread, encoding each sample as an `AllocEvent`/`FreeEvent`.
+`dial9-tokio-telemetry` calls this for you when `memory-profiling` is on,
+so most users never touch the sampler directly.
 
 ```rust
-static ACTIVE: OnceLock<MemoryProfilerState> = OnceLock::new();
+MemoryProfiler::from_config(config).install_into(&guard.handle())?;
+```
+
+Before `install()`, every allocation takes the unset-`OnceLock` fast
+path: one `Acquire` load + null check (~1 ns), not set so skip.
+
+### `install()` flow
+
+```rust
+static ACTIVE: OnceLock<MemoryProfilerInner> = OnceLock::new();
 
 impl MemoryProfiler {
-    pub fn install(
-        self,
-        handle: TelemetryHandle,
-    ) -> Result<MemoryProfilerGuard, InstallError> {
+    pub fn install(self) -> Result<MemorySampler, InstallError> {
         let unwinder = Unwinder::install().map_err(InstallError::Unwinder)?;
-        let alloc_ring = Arc::new(ArrayQueue::new(self.config.ring_capacity));
-        let free_ring = Arc::new(ArrayQueue::new(self.config.ring_capacity * 8));
-
-        let state = MemoryProfilerState {
-            unwinder,
-            config: self.config.clone(),
-            alloc_ring: alloc_ring.clone(),
-            free_ring: free_ring.clone(),
-        };
+        let rings = Arc::new(RingBuffers::new(
+            self.config.ring_capacity(),
+            self.config.ring_capacity() * 8,
+        ));
+        let liveset = self
+            .config
+            .track_liveset()
+            .then(|| Arc::new(Liveset::default()));
 
         ACTIVE
-            .set(state)
+            .set(MemoryProfilerInner {
+                unwinder,
+                rings: rings.clone(),
+                liveset: liveset.clone(),
+                // sample_rate_bytes, rng_seed
+            })
             .map_err(|_| InstallError::AlreadyInstalled)?;
 
-        handle.register_source(MemoryProfileSource {
-            alloc_ring,
-            free_ring,
-            liveset: self.config.track_liveset.then(HashMap::new),
-        });
-
-        Ok(MemoryProfilerGuard { _private: () })
+        Ok(MemorySampler { rings, liveset /* .. */ })
     }
 }
 ```
 
-The state lives in `OnceLock` and is never reclaimed — in-flight hook
-calls may be reading it at any moment on any thread. Cost is ~100 bytes
-plus the ring allocations. The `OnceLock` encodes the "write once, read
-many, never reclaim" invariant in the type system.
-
-If `install()` is called with a disabled handle, the `OnceLock` is not
-set — no wasted sampling work.
+`ACTIVE` holds the producer side and is never reclaimed: in-flight hook
+calls may be reading it on any thread. The returned `MemorySampler` holds
+the consumer-side `Arc`s, so dropping it stops draining without touching
+the hot path. The dial9 `install_into` skips install on a disabled
+handle, leaving `ACTIVE` unset.
 
 ### Hot path
 
@@ -722,8 +717,8 @@ set — no wasted sampling work.
 fn alloc(&self, layout: Layout) -> *mut u8 {
     let ptr = unsafe { self.0.alloc(layout) };
     if !ptr.is_null() {
-        if let Some(state) = ACTIVE.get() {
-            hook::on_alloc(state, ptr, layout.size());
+        if let Some(inner) = ACTIVE.get() {
+            hook::on_alloc(inner, ptr, layout.size());
         }
     }
     ptr
@@ -735,34 +730,20 @@ fn alloc(&self, layout: Layout) -> *mut u8 {
 ```rust
 #[derive(Debug, Clone)]
 pub struct MemoryProfilingConfig {
-    sample_rate_bytes: u64,                 // default 512 KiB
-    track_liveset: bool,                    // default false
-    max_liveset_entries: Option<usize>,     // default None (unbounded)
-    rng_seed: Option<u64>,                  // test-only deterministic seeding
-    ring_capacity: usize,                   // default 4096 slots
+    sample_rate_bytes: u64,   // default 512 KiB
+    track_liveset: bool,      // default false
+    rng_seed: Option<u64>,    // test-only deterministic seeding
+    ring_capacity: usize,     // default 4096 slots
 }
 ```
-
-Memory profile events always carry `clock_monotonic_ns()` timestamps —
-~25 ns vDSO call, globally monotonic across threads. There is no
-opt-out: the `timestamp_mode` knob and `TimestampMode` enum that earlier
-revisions exposed have been removed. The cost (~25 ns × ~2K
-samples/sec = ~50 µs/sec at default rate) is dominated by the stack
-capture in the same critical section, and per-thread monotonic
-alternatives leak into a soundness hole in the liveset's shutdown-drain
-race detector (§7).
 
 Built via `#[bon::builder]` as with other dial9 configs.
 
 ### Graceful shutdown
 
-On graceful shutdown, the flush thread runs one final drain cycle.
-For applications that need the absolute last batch of events on disk:
-
-```rust
-guard.handle().flush_memory_profile()?;  // synchronous drain
-guard.graceful_shutdown(Duration::from_secs(5))?;
-```
+In the dial9 path the source drains on the flush thread, so the final
+flush cycle on shutdown carries the last samples to the trace. Standalone
+callers drain the sampler themselves before exiting.
 
 ---
 
@@ -785,11 +766,11 @@ the liveset. On every `dealloc`, the hook checks whether the address is in
 the liveset:
 
 - **Hit:** remove the entry, push a `RawFree` with denormalized `size` and
-  `alloc_ts_ns` into the free queue. The consolidator emits `FreeEvent`
+  `alloc_ts_ns` into the free queue. The consumer emits `FreeEvent`
   directly — no second lookup needed.
 - **Miss (~99.9% of deallocs):** the address was never sampled. No queue
   push, no contention. This is the key performance win: the old design
-  pushed every dealloc into the free queue and filtered on the consolidator,
+  pushed every dealloc into the free queue and filtered on the consumer,
   causing ~84% CPU in the profiler under contention.
 
 ### OPT_OUT TLS sentinel
@@ -827,8 +808,8 @@ key already exists. Address space is recycled by the OS allocator, so a
 stale entry can land on `on_alloc`'s insert in two cases:
 
 1. **Shutdown skip** (see "Shutdown drain" below): the matching dealloc
-   pushed a flagged `RawFree` and the consolidator hasn't drained yet, OR
-   the race-check on the consolidator detected an overlap and left the
+   pushed a flagged `RawFree` and the consumer hasn't drained yet, OR
+   the race-check on the consumer detected an overlap and left the
    entry in place.
 2. **Queue overflow:** the matching dealloc's `RawFree` was dropped because
    the free queue was full (`MemoryProfileOverflowEvent` was emitted).
@@ -863,10 +844,10 @@ remove/insert pattern had between the two calls. Concurrent readers
 either see the old `(size, ts_ns)` or the new one — never `None` — so a
 concurrent `peek_with` from `on_dealloc` can't miss the entry mid-update.
 
-### Shutdown drain (consolidator-side cleanup)
+### Shutdown drain (consumer-side cleanup)
 
 The OPT_OUT sentinel forbids the *producer* from touching the liveset
-during teardown, but the *consolidator* runs on a different thread with
+during teardown, but the *consumer* runs on a different thread with
 its own healthy `sdd` TLS. We exploit this asymmetry to recover the dying
 thread's `FreeEvent`s and bound liveset growth across thread churn.
 
@@ -884,8 +865,8 @@ Protocol:
    The push is allocation-free and only touches the queue's CAS
    tail-slot — no `scc`, no `sdd`.
 
-2. **Consolidator (`MemoryProfileSource::handle_free`):** for shutdown-
-   flagged frees, do the lookup here:
+2. **Consumer (`MemorySampler::drain`):** for shutdown-flagged frees, do
+   the lookup here:
    ```rust
    let Some((size, alloc_ts_ns)) = liveset.peek_with(&f.addr, |_, v| *v) else {
        return; // already cleaned, or never sampled
@@ -898,7 +879,7 @@ Protocol:
    ```
 
 3. **Race window.** Between the producer's push (at `f.ts_ns`) and the
-   consolidator's drain (~5 ms later), a *live* thread may have freed
+   consumer's drain (~5 ms later), a *live* thread may have freed
    some unrelated sampled alloc at the same address and `on_alloc` may
    have re-keyed the entry to a new allocation. The
    `alloc_ts_ns >= f.ts_ns` check identifies this case: the new
@@ -955,12 +936,12 @@ entries → ~1.3 MiB.
 
 ### Performance
 
-| Metric | Old (consolidator-side) | New (producer-side scc) |
+| Metric | Old (consumer-side) | New (producer-side scc) |
 |--------|------------------------|------------------------|
 | 8-thread ops/s | 1.79 M | 13.9 M |
 | Profiler CPU share | 84.2% | 10.6% |
 | Unsampled dealloc cost | ~9.3 ns (queue push) | ~20 ns (HashIndex miss) |
-| Sampled dealloc cost | ~9.3 ns + consolidator lookup | ~25 ns (peek + remove + push) |
+| Sampled dealloc cost | ~9.3 ns + consumer lookup | ~25 ns (peek + remove + push) |
 
 The throughput improvement comes from eliminating 99.9% of queue pushes.
 Single-threaded per-op cost is higher (due to epoch-based reclamation
@@ -997,7 +978,7 @@ At 2K samples/sec: ~2.5 ms/sec of CPU per core (0.25%).
 ### Integration benchmark
 
 The implementation ships with a benchmark exercising the full
-`SamplingAllocator → ring → consolidator → trace` pipeline:
+`SamplingAllocator → ring → consumer → trace` pipeline:
 - High-frequency small allocations (`Box::new(T)` loops)
 - Realloc growth (`Vec::push` loops)
 - Mixed sizes across the sample-rate boundary

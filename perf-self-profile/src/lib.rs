@@ -42,7 +42,7 @@
 //! With the `memory-profiling` feature, the `memory_profiling` module adds a
 //! sampled allocation profiler: set `SamplingAllocator` as the global allocator,
 //! call `MemoryProfiler::install()`, and drain captured allocations with
-//! `MemorySampler::drain`. 
+//! `MemorySampler::drain`.
 //! The `dial9-source` feature adds the integration that feeds it into a dial9 trace.
 //!
 //! ```ignore

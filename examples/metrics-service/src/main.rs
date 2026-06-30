@@ -9,7 +9,7 @@ use std::time::Duration;
 use aws_config::BehaviorVersion;
 use clap::Parser;
 use dial9_tokio_telemetry::memory_profiling::{
-    SamplingAllocator, MemoryProfiler, MemoryProfilingConfig,
+    MemoryProfiler, MemoryProfilingConfig, SamplingAllocator,
 };
 #[cfg(target_os = "linux")]
 use dial9_tokio_telemetry::telemetry::SocketAcceptQueuesConfig;
