@@ -6,14 +6,14 @@ mod common;
 
 use common::{CAPTURE_BUFFER_SIZE, capture_processor, decode_all};
 use dial9_tokio_telemetry::memory_profiling::{
-    Dial9Allocator, MemoryProfiler, MemoryProfilingConfig,
+    MemoryProfiler, MemoryProfilingConfig, SamplingAllocator,
 };
 use dial9_tokio_telemetry::telemetry::{InMemoryWriter, TracedRuntime};
 use serde::Deserialize;
 use std::time::Duration;
 
 #[global_allocator]
-static ALLOC: Dial9Allocator = Dial9Allocator::system();
+static ALLOC: SamplingAllocator = SamplingAllocator::system();
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "event")]
@@ -48,7 +48,7 @@ fn overflow_event_emitted_when_ring_overflows() {
             .rng_seed(42)
             .build(),
     )
-    .install(handle)
+    .install_into(&handle)
     .expect("install should succeed");
 
     // Generate enough allocations to overflow the tiny ring.

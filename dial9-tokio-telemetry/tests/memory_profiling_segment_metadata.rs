@@ -7,14 +7,14 @@ mod common;
 
 use common::decode_file;
 use dial9_tokio_telemetry::memory_profiling::{
-    Dial9Allocator, MemoryProfiler, MemoryProfilingConfig,
+    MemoryProfiler, MemoryProfilingConfig, SamplingAllocator,
 };
 use dial9_tokio_telemetry::telemetry::analysis_events::Dial9Event;
 use dial9_tokio_telemetry::telemetry::{DiskWriter, TracedRuntime};
 use std::time::Duration;
 
 #[global_allocator]
-static ALLOC: Dial9Allocator = Dial9Allocator::system();
+static ALLOC: SamplingAllocator = SamplingAllocator::system();
 
 #[test]
 fn memory_sample_rate_appears_in_segment_metadata() {
@@ -37,7 +37,7 @@ fn memory_sample_rate_appears_in_segment_metadata() {
             .rng_seed(42)
             .build(),
     )
-    .install(handle)
+    .install_into(&handle)
     .expect("install should succeed");
 
     runtime.block_on(async {

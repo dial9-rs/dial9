@@ -25,7 +25,7 @@ fn install_registers_source_with_recorder() {
 
     let handle = guard.handle();
     let _mem_guard = MemoryProfiler::with_defaults()
-        .install(handle)
+        .install_into(&handle)
         .expect("install should succeed");
 
     // Push a synthetic alloc into the queue.

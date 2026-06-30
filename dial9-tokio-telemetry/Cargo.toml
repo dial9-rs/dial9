@@ -93,7 +93,11 @@ _shuttle = [
 taskdump = ["tokio/taskdump"]
 tracing-layer = ["dep:tracing-subscriber"]
 ## Sampled memory allocation profiling via ring buffers.
-memory-profiling = ["dep:dial9-perf-self-profile", "dial9-perf-self-profile/memory-source"]
+memory-profiling = [
+    "dep:dial9-perf-self-profile",
+    "dial9-perf-self-profile/memory-profiling",
+    "dial9-perf-self-profile/dial9-source",
+]
 worker-s3 = [
     "dep:dial9-utils",
     "dep:aws-sdk-s3-transfer-manager",

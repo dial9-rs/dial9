@@ -9,7 +9,7 @@ use std::time::Duration;
 use aws_config::BehaviorVersion;
 use clap::Parser;
 use dial9_tokio_telemetry::memory_profiling::{
-    Dial9Allocator, MemoryProfiler, MemoryProfilingConfig,
+    SamplingAllocator, MemoryProfiler, MemoryProfilingConfig,
 };
 #[cfg(target_os = "linux")]
 use dial9_tokio_telemetry::telemetry::SocketAcceptQueuesConfig;
@@ -29,7 +29,7 @@ use metrique::writer::format::FormatExt;
 use metrique::writer::sink::FlushImmediatelyBuilder;
 
 #[global_allocator]
-static ALLOC: Dial9Allocator = Dial9Allocator::system();
+static ALLOC: SamplingAllocator = SamplingAllocator::system();
 
 #[derive(Parser)]
 #[command(about = "Metrics service with DynamoDB persistence and telemetry")]
@@ -276,7 +276,7 @@ fn main() -> std::io::Result<()> {
             .build();
         Some(
             MemoryProfiler::from_config(config)
-                .install(guard.handle())
+                .install_into(&guard.handle())
                 .expect("failed to install memory profiler"),
         )
     };

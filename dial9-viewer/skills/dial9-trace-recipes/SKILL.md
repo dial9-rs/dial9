@@ -619,7 +619,8 @@ for await (const trace of parseTrace('/path/to/traces/')) {
   // Strip dial9 allocator hook frames (always the top 2 frames)
   const HOOK_PATTERNS = [
     'memory_profiling::hook::on_alloc',
-    'memory_profiling::allocator::Dial9Allocator',
+    'memory_profiling::allocator::SamplingAllocator',
+    'memory_profiling::allocator::Dial9Allocator', // 0.3.x traces
     '__rustc::__rust_alloc',
     '__rustc::__rust_realloc',
   ];

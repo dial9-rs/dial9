@@ -2,7 +2,7 @@
 
 ## Overview
 
-Add sampled allocation profiling to dial9. A `Dial9Allocator<A>` wraps any
+Add sampled allocation profiling to dial9. A `SamplingAllocator<A>` wraps any
 `GlobalAlloc` (default `System`) and emits `AllocEvent` / `FreeEvent` events
 into the trace on sampled allocations. Stacks are captured via the frame
 pointer unwinder already used for CPU profiling. The viewer and analysis
@@ -443,22 +443,22 @@ attribution. The viewer shows these in a "blocking" or "unknown" lane.
 
 ---
 
-## 4. `Dial9Allocator<A>`
+## 4. `SamplingAllocator<A>`
 
 Generic wrapper, default `A = System`:
 
 ```rust
-pub struct Dial9Allocator<A = std::alloc::System>(A);
+pub struct SamplingAllocator<A = std::alloc::System>(A);
 
-impl Dial9Allocator {
+impl SamplingAllocator {
     pub const fn system() -> Self { Self(std::alloc::System) }
 }
 
-impl<A: GlobalAlloc> Dial9Allocator<A> {
+impl<A: GlobalAlloc> SamplingAllocator<A> {
     pub const fn new(inner: A) -> Self { Self(inner) }
 }
 
-unsafe impl<A: GlobalAlloc> GlobalAlloc for Dial9Allocator<A> {
+unsafe impl<A: GlobalAlloc> GlobalAlloc for SamplingAllocator<A> {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let ptr = unsafe { self.0.alloc(layout) };
         if !ptr.is_null() {
@@ -493,12 +493,12 @@ User code:
 ```rust
 // Common case: system allocator.
 #[global_allocator]
-static ALLOC: Dial9Allocator = Dial9Allocator::system();
+static ALLOC: SamplingAllocator = SamplingAllocator::system();
 
 // Wrapping a custom allocator:
 #[global_allocator]
-static ALLOC: Dial9Allocator<tikv_jemallocator::Jemalloc> =
-    Dial9Allocator::new(tikv_jemallocator::Jemalloc);
+static ALLOC: SamplingAllocator<tikv_jemallocator::Jemalloc> =
+    SamplingAllocator::new(tikv_jemallocator::Jemalloc);
 ```
 
 The wrapper is zero-cost when memory profiling isn't installed (see §6).
@@ -626,7 +626,7 @@ frame-pointer unwinder.
 ## 6. Configuration — static install, captured handle
 
 `MemoryProfiler::install()` sets a process-global static that the
-`Dial9Allocator` reads on every allocation. Installation happens
+`SamplingAllocator` reads on every allocation. Installation happens
 **exactly once per process** and takes a `TelemetryHandle` captured
 at install time.
 
@@ -634,11 +634,11 @@ at install time.
 
 ```rust
 use dial9_tokio_telemetry::memory_profiling::{
-    Dial9Allocator, MemoryProfiler,
+    SamplingAllocator, MemoryProfiler,
 };
 
 #[global_allocator]
-static ALLOC: Dial9Allocator = Dial9Allocator::system();
+static ALLOC: SamplingAllocator = SamplingAllocator::system();
 
 fn main() {
     let guard = TelemetryCore::builder()
@@ -997,7 +997,7 @@ At 2K samples/sec: ~2.5 ms/sec of CPU per core (0.25%).
 ### Integration benchmark
 
 The implementation ships with a benchmark exercising the full
-`Dial9Allocator → ring → consolidator → trace` pipeline:
+`SamplingAllocator → ring → consolidator → trace` pipeline:
 - High-frequency small allocations (`Box::new(T)` loops)
 - Realloc growth (`Vec::push` loops)
 - Mixed sizes across the sample-rate boundary

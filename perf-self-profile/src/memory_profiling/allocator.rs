@@ -1,4 +1,4 @@
-//! `Dial9Allocator<A>` — a `GlobalAlloc` wrapper that feeds dial9's memory
+//! `SamplingAllocator<A>` — a `GlobalAlloc` wrapper that feeds dial9's memory
 //! profiler.
 
 use std::alloc::{GlobalAlloc, Layout};
@@ -11,8 +11,8 @@ use std::alloc::{GlobalAlloc, Layout};
 /// the hook only intercepts allocations that route through the global
 /// allocator slot.
 ///
-/// Defaults to wrapping `std::alloc::System`. Use `Dial9Allocator::system()`
-/// (no turbofish) for the common case, or `Dial9Allocator::new(inner)` to
+/// Defaults to wrapping `std::alloc::System`. Use `SamplingAllocator::system()`
+/// (no turbofish) for the common case, or `SamplingAllocator::new(inner)` to
 /// wrap a custom allocator like `tikv_jemallocator::Jemalloc` or
 /// `mimalloc::MiMalloc`.
 ///
@@ -21,21 +21,21 @@ use std::alloc::{GlobalAlloc, Layout};
 /// Wrap the system allocator:
 ///
 /// ```no_run
-/// use dial9_perf_self_profile::memory_profiling::Dial9Allocator;
+/// use dial9_perf_self_profile::memory_profiling::SamplingAllocator;
 ///
 /// #[global_allocator]
-/// static ALLOC: Dial9Allocator = Dial9Allocator::system();
+/// static ALLOC: SamplingAllocator = SamplingAllocator::system();
 /// # fn main() {}
 /// ```
 ///
 /// Wrap a custom allocator:
 ///
 /// ```ignore
-/// use dial9_perf_self_profile::memory_profiling::Dial9Allocator;
+/// use dial9_perf_self_profile::memory_profiling::SamplingAllocator;
 ///
 /// #[global_allocator]
-/// static ALLOC: Dial9Allocator<tikv_jemallocator::Jemalloc> =
-///     Dial9Allocator::new(tikv_jemallocator::Jemalloc);
+/// static ALLOC: SamplingAllocator<tikv_jemallocator::Jemalloc> =
+///     SamplingAllocator::new(tikv_jemallocator::Jemalloc);
 /// ```
 ///
 /// # Cost
@@ -46,9 +46,9 @@ use std::alloc::{GlobalAlloc, Layout};
 /// fast path (~5 ns). The remaining ~0.1% of sampled allocations pay
 /// ~1 µs for stack capture and event emission.
 #[derive(Debug)]
-pub struct Dial9Allocator<A = std::alloc::System>(A);
+pub struct SamplingAllocator<A = std::alloc::System>(A);
 
-impl Dial9Allocator {
+impl SamplingAllocator {
     /// Wrap the system allocator.
     ///
     /// Use this when you don't need a custom inner allocator (i.e. you
@@ -58,7 +58,7 @@ impl Dial9Allocator {
     }
 }
 
-impl<A: GlobalAlloc> Dial9Allocator<A> {
+impl<A: GlobalAlloc> SamplingAllocator<A> {
     /// Wrap a custom inner allocator (e.g. jemalloc, mimalloc).
     pub const fn new(inner: A) -> Self {
         Self(inner)
@@ -69,7 +69,7 @@ impl<A: GlobalAlloc> Dial9Allocator<A> {
 // each method is exactly the same as the inner allocator's. The hook
 // invocations are allocation-free by construction — see
 // [`crate::memory_profiling::hook`] module docs and design §6.
-unsafe impl<A: GlobalAlloc> GlobalAlloc for Dial9Allocator<A> {
+unsafe impl<A: GlobalAlloc> GlobalAlloc for SamplingAllocator<A> {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         // SAFETY: `layout` validity contract forwarded to the inner allocator.
         let ptr = unsafe { self.0.alloc(layout) };
@@ -140,13 +140,13 @@ mod tests {
     use std::alloc::{GlobalAlloc, Layout};
 
     #[test]
-    fn dial9_allocator_default_constructible() {
-        let _: Dial9Allocator = Dial9Allocator::system();
+    fn sampling_allocator_default_constructible() {
+        let _: SamplingAllocator = SamplingAllocator::system();
     }
 
     #[test]
-    fn dial9_allocator_alloc_dealloc_roundtrip() {
-        let allocator = Dial9Allocator::system();
+    fn sampling_allocator_alloc_dealloc_roundtrip() {
+        let allocator = SamplingAllocator::system();
         let layout = Layout::from_size_align(1024, 8).unwrap();
         // SAFETY: layout is valid; we own the returned pointer.
         let ptr = unsafe { allocator.alloc(layout) };
@@ -158,8 +158,8 @@ mod tests {
     }
 
     #[test]
-    fn dial9_allocator_alloc_zeroed_returns_zero() {
-        let allocator = Dial9Allocator::system();
+    fn sampling_allocator_alloc_zeroed_returns_zero() {
+        let allocator = SamplingAllocator::system();
         let layout = Layout::from_size_align(1024, 8).unwrap();
         // SAFETY: layout is valid.
         let ptr = unsafe { allocator.alloc_zeroed(layout) };
@@ -174,8 +174,8 @@ mod tests {
     }
 
     #[test]
-    fn dial9_allocator_realloc_grows() {
-        let allocator = Dial9Allocator::system();
+    fn sampling_allocator_realloc_grows() {
+        let allocator = SamplingAllocator::system();
         let layout = Layout::from_size_align(64, 8).unwrap();
         // SAFETY: layout is valid.
         let ptr = unsafe { allocator.alloc(layout) };
@@ -198,8 +198,8 @@ mod tests {
     }
 
     #[test]
-    fn dial9_allocator_with_custom_inner_compiles() {
-        let allocator = Dial9Allocator::new(std::alloc::System);
+    fn sampling_allocator_with_custom_inner_compiles() {
+        let allocator = SamplingAllocator::new(std::alloc::System);
         let layout = Layout::from_size_align(128, 8).unwrap();
         // SAFETY: layout is valid.
         let ptr = unsafe { allocator.alloc(layout) };

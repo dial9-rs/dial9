@@ -36,6 +36,33 @@
 //!     println!("ip={:#x} callchain={} frames", sample.ip, sample.callchain.len());
 //! });
 //! ```
+//!
+//! ## Memory profiling
+//!
+//! With the `memory-profiling` feature, the `memory_profiling` module adds a
+//! sampled allocation profiler: set `SamplingAllocator` as the global allocator,
+//! call `MemoryProfiler::install()`, and drain captured allocations with
+//! `MemorySampler::drain`. 
+//! The `dial9-source` feature adds the integration that feeds it into a dial9 trace.
+//!
+//! ```ignore
+//! use dial9_perf_self_profile::memory_profiling::{
+//!     SamplingAllocator, MemoryProfiler, MemorySample,
+//! };
+//!
+//! #[global_allocator]
+//! static ALLOC: SamplingAllocator = SamplingAllocator::system();
+//!
+//! // Install once; the returned sampler is your handle.
+//! let mut sampler = MemoryProfiler::with_defaults().install().unwrap();
+//!
+//! // Later, on a cadence, pull what was captured:
+//! sampler.drain(|s| match s {
+//!     MemorySample::Alloc(a) => println!("{} bytes, {} frames", a.size, a.callchain.len()),
+//!     MemorySample::Free(f) => println!("freed {} bytes", f.size),
+//!     _ => {}
+//! });
+//! ```
 
 pub mod offline_symbolize;
 mod rate_limit;
@@ -48,7 +75,7 @@ pub mod unwinder;
 #[cfg(feature = "dial9-source")]
 pub mod cpu_source;
 
-#[cfg(feature = "memory-source")]
+#[cfg(feature = "memory-profiling")]
 pub mod memory_profiling;
 
 pub use offline_symbolize::SymbolTableEntry;
@@ -98,10 +125,13 @@ pub use cpu_source::{
     CpuProfiler, CpuProfilingConfig, CpuSampleSource, SchedEventConfig, SchedProfiler,
 };
 
-#[cfg(feature = "memory-source")]
+#[cfg(all(feature = "memory-profiling", feature = "dial9-source"))]
+pub use memory_profiling::{AllocEvent, FreeEvent, MemoryProfileSource};
+#[cfg(feature = "memory-profiling")]
 pub use memory_profiling::{
-    AllocEvent, DEFAULT_RING_CAPACITY, DEFAULT_SAMPLE_RATE_BYTES, Dial9Allocator, FreeEvent,
-    InstallError, MemoryProfiler, MemoryProfilerGuard, MemoryProfilingConfig, is_installed,
+    AllocSample, DEFAULT_RING_CAPACITY, DEFAULT_SAMPLE_RATE_BYTES, DroppedSamples, FreeSample,
+    InstallError, MemoryProfiler, MemoryProfilingConfig, MemorySample, MemorySampler,
+    SamplingAllocator, is_installed,
 };
 
 /// Internal module exposed only for benchmarks. Not part of the public API.

@@ -26,7 +26,7 @@ fn install_publishes_active_inner() {
             .rng_seed(42)
             .build(),
     )
-    .install(handle)
+    .install_into(&handle)
     .expect("install should succeed");
 
     assert!(is_installed(), "should be installed after install()");

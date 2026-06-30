@@ -127,8 +127,6 @@ impl SchedStat {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     #[cfg(any(target_os = "linux", target_os = "android"))]
     fn test_schedstat_fd_closed_on_thread_exit() {

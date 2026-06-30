@@ -110,7 +110,7 @@ CPU profiling knobs (`cpu-profiling` feature required):
 | `DIAL9_CPU_SAMPLE_HZ` | `99` | CPU sampling frequency in Hz. |
 | `DIAL9_SCHEDULE_PROFILE_ENABLED` | `true` on Linux with `cpu-profiling`, `false` otherwise | Enable per-worker scheduler event capture. Requires the [CPU profiling setup](#cpu-profiling-linux-only). |
 
-Memory profiling knobs (`memory-profiling` feature required; your binary must still install `Dial9Allocator` as its `#[global_allocator]`):
+Memory profiling knobs (`memory-profiling` feature required; your binary must still install `SamplingAllocator` as its `#[global_allocator]`):
 
 | Name | Default | Meaning |
 | --- | --- | --- |
@@ -344,18 +344,18 @@ dial9-tokio-telemetry = { version = "0.3", features = ["memory-profiling"] }
 
 ```rust,no_run
 use dial9_tokio_telemetry::memory_profiling::{
-    Dial9Allocator, MemoryProfiler, MemoryProfilingConfig,
+    SamplingAllocator, MemoryProfiler, MemoryProfilingConfig,
 };
 use dial9_tokio_telemetry::telemetry::Dial9Handle;
 
 // Install as the global allocator. Zero-cost passthrough until
-// MemoryProfiler::install() is called.
+// the memory profiler is installed.
 #[global_allocator]
-static ALLOC: Dial9Allocator = Dial9Allocator::system();
+static ALLOC: SamplingAllocator = SamplingAllocator::system();
 
 // If you already use jemalloc or mimalloc, wrap it instead:
-// static ALLOC: Dial9Allocator<tikv_jemallocator::Jemalloc> =
-//     Dial9Allocator::new(tikv_jemallocator::Jemalloc);
+// static ALLOC: SamplingAllocator<tikv_jemallocator::Jemalloc> =
+//     SamplingAllocator::new(tikv_jemallocator::Jemalloc);
 
 # fn example(handle: Dial9Handle) {
 let config = MemoryProfilingConfig::builder()
@@ -363,8 +363,8 @@ let config = MemoryProfilingConfig::builder()
     .track_liveset(true)            // track frees for leak detection
     .build();
 
-let _guard = MemoryProfiler::from_config(config)
-    .install(handle)
+MemoryProfiler::from_config(config)
+    .install_into(&handle)
     .expect("failed to install memory profiler");
 # }
 # fn main() {}
@@ -389,7 +389,7 @@ When `track_liveset(true)` is set, dial9 records every deallocation so it can de
 
 Without liveset tracking, the profiler adds negligible overhead. With liveset tracking, the ~200 ns per free is the dominant cost — budget accordingly for allocation-heavy services.
 
-`Dial9Config::from_env()` can install the profiler when `DIAL9_MEMORY_PROFILE_ENABLED=true`, but your binary must still declare `Dial9Allocator` as shown above so allocations pass through dial9's hook.
+`Dial9Config::from_env()` can install the profiler when `DIAL9_MEMORY_PROFILE_ENABLED=true`, but your binary must still declare `SamplingAllocator` as shown above so allocations pass through dial9's hook.
 
 ### Tracing span events (opt-in)
 

@@ -17,11 +17,11 @@ fn second_install_returns_already_installed() {
 
     let handle = guard.handle();
     let _mem_guard = MemoryProfiler::with_defaults()
-        .install(handle.clone())
+        .install_into(&handle)
         .expect("first install should succeed");
 
     let err = MemoryProfiler::with_defaults()
-        .install(handle)
+        .install_into(&handle)
         .expect_err("second install should fail");
 
     assert!(
