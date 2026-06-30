@@ -28,6 +28,10 @@ pub struct TokioStatsParams {
     pub host: Vec<String>,
     pub start_ns: Option<i64>,
     pub end_ns: Option<i64>,
+    /// "Load more": raise the absolute sampling-cap ceiling for this scope.
+    /// Clamped server-side to a hard ceiling (see `sampling_cap`), so a crafted
+    /// request can't drive an unbounded fold.
+    pub max_files: Option<usize>,
     #[serde(default)]
     pub refine: bool,
 }
@@ -102,10 +106,11 @@ pub async fn get_tokio_stats(
 
     // Run the shared refinement loop: list + scope-filter, cap, and fold a
     // bounded batch (identical policy to flamegraph). tokio-stats reads only the
-    // `polls/` part-files, so it does not "fetch more"; the default cap applies.
+    // `polls/` part-files; "Load more" raises the sampling cap so a deeper
+    // sample can be folded across subsequent polls.
     let opts = RefineOpts {
         refine: params.refine,
-        max_files: None,
+        max_files: params.max_files,
     };
     let Some(refined) = refine::refine(&agg, &scope, opts, &state.fold_limits).await else {
         return Err((

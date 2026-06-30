@@ -43,11 +43,14 @@
 </head>
 <body>
 <script src="creds.js"></script>
+<script src="flamegraph_api.js"></script>
+<script src="tokio_stats_api.js"></script>
 <h1>⚡ Tokio Stats</h1>
 <div id="periods" class="periods"></div>
 <div class="toolbar">
   <button id="btn-add" class="secondary">+ Add period</button>
   <button id="btn-load">Load</button>
+  <button id="btn-more" class="secondary" style="display:none">Load more</button>
   <div class="threshold-row">
     <label>Threshold:</label>
     <input id="threshold-slider" type="range" min="-1" max="3" step="0.1" value="0">
@@ -68,6 +71,12 @@
   // Periods: each has {start, end, label, data (cached response)}
   let periods = [];
   let periodIdCounter = 0;
+
+  // `max_files` ceiling override, raised by the "Load more" button. null lets
+  // the backend pick its own (default) sampling cap. Seeded from the URL so a
+  // deep-sampled view is shareable / survives reload.
+  let maxFiles = params.get("max_files") ? Number(params.get("max_files")) : null;
+  let loading = false;
 
   function isUtc() { return document.getElementById("utc-toggle").checked; }
 
@@ -142,6 +151,7 @@
       if (p.startNs) u.set(`p${i+1}_start_ns`, p.startNs);
       if (p.endNs) u.set(`p${i+1}_end_ns`, p.endNs);
     });
+    if (maxFiles != null) u.set("max_files", String(maxFiles));
     history.replaceState(null, "", "?" + u.toString());
   }
 
@@ -155,13 +165,16 @@
 
   function exemplarLink(ex, data) {
     if (!ex || !ex.start_ns) return "";
-    const bucket = (data && data.bucket) || params.get("bucket") || "";
-    const traceUrl = `/api/trace?bucket=${encodeURIComponent(bucket)}&keys=${encodeURIComponent(ex.source_key)}`;
-    const p = new URLSearchParams();
-    p.set("trace", traceUrl);
-    p.set("start_ns", String(ex.start_ns));
-    p.set("end_ns", String(ex.end_ns));
-    return `viewer.html?${p.toString()}`;
+    // We intentionally do not forward the exemplar's [start_ns, end_ns] window:
+    // the viewer treats those as a hard parse filter and a single poll's window
+    // is far too narrow — it would drop every surrounding event and load empty.
+    // Link to the whole segment instead. See exemplarViewerUrl.
+    return exemplarViewerUrl({
+      bucket: (data && data.bucket) || params.get("bucket") || "",
+      sourceKey: ex.source_key,
+      svc: params.get("service") || undefined,
+      host: ex.host || undefined,
+    });
   }
 
   function computeStats(data, threshNs) {
@@ -358,9 +371,36 @@
     return html;
   }
 
+  // Render the refinement status line from each period's coverage block, plus
+  // a per-period "refining…" marker while its poll loop is still folding.
+  function renderStatus(prefix) {
+    const statusEl = document.getElementById("status");
+    statusEl.className = "status";
+    const parts = [];
+    periods.forEach((p, i) => {
+      if (!p.data) return;
+      const badge = formatTokioCoverage(p.data.coverage, p.data.total_polls);
+      if (!badge) return;
+      const label = periods.length > 1 ? `P${i + 1}: ` : "";
+      parts.push(label + badge + (p.refining ? " · refining…" : ""));
+    });
+    const head = prefix ? prefix : "";
+    statusEl.textContent = [head, ...parts].filter(Boolean).join(periods.length > 1 ? "  |  " : " · ");
+    updateMoreButton();
+  }
+
+  // Show "Load more" only when idle and at least one loaded period still has
+  // matched files left to fold beyond the current sampling cap.
+  function updateMoreButton() {
+    const btn = document.getElementById("btn-more");
+    const canMore = !loading && periods.some(p => p.data && canRefineMore(p.data.coverage));
+    btn.style.display = canMore ? "" : "none";
+  }
+
   async function loadPeriod(period) {
     let refine = false;
     let prevFolded = -1;
+    period.refining = true;
     while (true) {
       const u = new URL("/api/tokio-stats", window.location.origin);
       if (params.get("bucket")) u.searchParams.set("bucket", params.get("bucket"));
@@ -371,6 +411,7 @@
       const endNs = period.endNs;
       if (startNs) u.searchParams.set("start_ns", startNs);
       if (endNs) u.searchParams.set("end_ns", endNs);
+      if (maxFiles != null) u.searchParams.set("max_files", String(maxFiles));
       if (refine) u.searchParams.set("refine", "true");
 
       const credHeaders = window.Dial9Creds ? Dial9Creds.headers() : {};
@@ -383,26 +424,51 @@
       if (!cov || cov.files_folded >= cov.files_matched || cov.files_folded === prevFolded) break;
       prevFolded = cov.files_folded;
       refine = true;
+      renderStatus("Refining…");
       await new Promise(r => setTimeout(r, 300));
     }
+    period.refining = false;
   }
 
   async function loadAll() {
-    const statusEl = document.getElementById("status");
-    statusEl.textContent = "Loading…";
-    statusEl.className = "status";
+    loading = true;
+    updateMoreButton();
+    renderStatus("Loading…");
     try {
       // Load all periods in parallel.
-      await Promise.all(periods.map((p, i) => loadPeriod(p, i)));
-      statusEl.textContent = "Complete";
+      await Promise.all(periods.map((p) => loadPeriod(p)));
+      loading = false;
+      renderStatus("");
     } catch (e) {
+      loading = false;
+      const statusEl = document.getElementById("status");
       statusEl.textContent = "Error: " + e.message;
       statusEl.className = "status error";
     }
   }
 
   document.getElementById("utc-toggle").addEventListener("change", renderPeriods);
-  document.getElementById("btn-load").addEventListener("click", loadAll);
+  document.getElementById("btn-load").addEventListener("click", () => {
+    // A manual reload drops any "Load more" deepening and returns to the
+    // sampling cap the page was opened with (the URL's max_files, or default).
+    maxFiles = params.get("max_files") ? Number(params.get("max_files")) : null;
+    syncUrl();
+    loadAll();
+  });
+
+  // "Load more": raise the sampling-cap ceiling to ~4x the deepest sample
+  // folded across the loaded periods, then re-run the refinement loop so each
+  // period folds further into its matched set.
+  document.getElementById("btn-more").addEventListener("click", () => {
+    if (loading) return;
+    const folded = periods.reduce(
+      (m, p) => Math.max(m, p.data && p.data.coverage ? Number(p.data.coverage.files_folded) || 0 : 0),
+      0,
+    );
+    maxFiles = nextMaxFiles(folded);
+    syncUrl();
+    loadAll();
+  });
   document.getElementById("btn-add").addEventListener("click", () => {
     const last = periods[periods.length - 1];
     if (last.startNs && last.endNs) {
