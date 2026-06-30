@@ -609,7 +609,10 @@
                 }
 
                 const fg = FlamegraphRenderer.createFlamegraph(containerEl, updateUrlZoom);
-                fg.setData(allSamples, trace.callframeSymbols, { exportTitle: `Flamegraph — ${label}` });
+                fg.setData(allSamples, trace.callframeSymbols, {
+                    exportTitle: `Flamegraph — ${label}`,
+                    runtimeWorkers: trace.runtimeWorkers,
+                });
 
                 // Restore zoom from URL (only if time range filter succeeded, otherwise tree differs)
                 if (timeRangeMatched) {
