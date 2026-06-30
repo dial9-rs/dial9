@@ -3219,6 +3219,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "memory-local"
+version = "0.1.0"
+dependencies = [
+ "dial9-tokio-telemetry",
+ "tokio",
+]
+
+[[package]]
 name = "metrics"
 version = "0.24.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
