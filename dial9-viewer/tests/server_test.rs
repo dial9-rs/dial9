@@ -1353,6 +1353,49 @@ async fn config_reports_assume_role_support() {
     check!(resp2["supports_assume_role"] == false);
 }
 
+#[tokio::test]
+async fn credentials_check_succeeds_via_assumed_role() {
+    // /api/credentials/check has its own assume path; exercise it. The fake
+    // assumer mints the s3s creds, HeadBucket against the fake succeeds → ok.
+    let (base, _dir, assumed) = setup_assume_role_test("byo-bucket").await;
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/api/credentials/check?bucket=byo-bucket"))
+        .header(H_ROLE_ARN, "arn:aws:iam::123456789012:role/dial9-reader")
+        .header(H_REGION, "us-east-1")
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() == 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    check!(body["ok"] == true);
+    // The check actually went through the assume path, not BYOC.
+    check!(assumed.lock().unwrap().len() == 1);
+}
+
+#[tokio::test]
+async fn credentials_check_assume_role_failure_maps_to_401() {
+    // check shares AppState::assume, so an STS failure here is a 401 with no
+    // account/SDK leak — same policy as the data path.
+    let s3_root = tempfile::tempdir().unwrap();
+    std::fs::create_dir(s3_root.path().join("byo-bucket")).unwrap();
+    let state = AppState::new(Arc::new(ErroringBackend), Some("byo-bucket".into()), None)
+        .with_byo_creds(true)
+        .with_ephemeral_s3(fake_ephemeral_config(s3_root.path()))
+        .with_role_assumer(Arc::new(FailingRoleAssumer));
+    let base = start_server(state).await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/api/credentials/check?bucket=byo-bucket"))
+        .header(H_ROLE_ARN, "arn:aws:iam::123456789012:role/dial9-reader")
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() == 401);
+    let body = resp.text().await.unwrap();
+    check!(!body.contains("123456789012"));
+    check!(!body.contains("access denied (fake)"));
+}
+
 #[cfg(test)]
 mod skills_unpack_tests {
     use std::path::Path;

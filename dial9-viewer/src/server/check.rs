@@ -46,27 +46,13 @@ pub async fn check_credentials(
     }
 
     // Resolve the request's named identity to concrete credentials: BYOC keys
-    // are used directly; a role ARN is assumed first (so the check validates the
-    // same identity a later data request would use).
+    // are used directly; a role ARN is assumed first (via the shared
+    // `AppState::assume`, so this validates the same identity — and applies the
+    // same error policy — as a later data request would).
     let temp = match creds.0 {
         Ok(CredSource::Static(temp)) => temp,
         Ok(CredSource::AssumeRole { role_arn, region }) => {
-            let Some(assumer) = &state.role_assumer else {
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    "this server does not support assume-role credentials".to_string(),
-                ));
-            };
-            assumer
-                .assume_role(&role_arn, region.as_deref())
-                .await
-                .map_err(|e| {
-                    tracing::warn!(role_arn = %role_arn.as_str(), error = %e, "assume-role failed");
-                    (
-                        StatusCode::UNAUTHORIZED,
-                        "could not assume the requested role".to_string(),
-                    )
-                })?
+            state.assume(&role_arn, region.as_deref()).await?
         }
         Ok(CredSource::Default) => {
             return Err((
@@ -107,7 +93,7 @@ pub async fn check_credentials(
             // Prefer S3's reported bucket region; fall back to the
             // caller-supplied region. The fallback is safe: `temp` came from
             // `MaybeCreds`, whose region was already run through
-            // `is_valid_region` in `parse_cred_headers` (an invalid region is
+            // `is_valid_region` in `parse_cred_inputs` (an invalid region is
             // rejected as `CredError::InvalidRegion` before reaching here), so
             // it is either `None` or a syntactically valid region name.
             region: resp.bucket_region().map(|r| r.to_string()).or(temp.region),

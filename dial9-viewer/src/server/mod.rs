@@ -289,29 +289,7 @@ impl AppState {
                 Ok(self.ephemeral_backend(temp))
             }
             CredSource::AssumeRole { role_arn, region } if self.allow_byo_creds => {
-                // The assume-role path requires an assumer (the server's own
-                // identity). When none is wired the feature is off here — refuse
-                // rather than silently falling back to the ambient backend, which
-                // would read the *wrong* account under the user's nose.
-                let Some(assumer) = &self.role_assumer else {
-                    return Err((
-                        StatusCode::BAD_REQUEST,
-                        "this server does not support assume-role credentials".to_string(),
-                    ));
-                };
-                tracing::info!(role_arn = %role_arn.as_str(), "assuming role for request");
-                let temp = assumer
-                    .assume_role(&role_arn, region.as_deref())
-                    .await
-                    .map_err(|e| {
-                        // Log the concrete cause server-side; the client gets a
-                        // generic 401 that never echoes the role/account/SDK text.
-                        tracing::warn!(role_arn = %role_arn.as_str(), error = %e, "assume-role failed");
-                        (
-                            StatusCode::UNAUTHORIZED,
-                            "could not assume the requested role".to_string(),
-                        )
-                    })?;
+                let temp = self.assume(&role_arn, region.as_deref()).await?;
                 self.log_chosen_identity(&temp, "assumed-role credentials");
                 Ok(self.ephemeral_backend(temp))
             }
@@ -329,6 +307,35 @@ impl AppState {
                 Ok(self.backend.clone())
             }
         }
+    }
+
+    /// Assume `role_arn` (with the server's own identity) and return the minted
+    /// credentials. Shared by `resolve` and the `/api/credentials/check` handler
+    /// so the single assume-and-map-to-error policy can't drift between them:
+    ///
+    /// - no assumer wired → 400 (the feature is off here; never silently fall
+    ///   back to the ambient identity, which would read the *wrong* account).
+    /// - STS failure → 401 with a generic body; the concrete cause (which can
+    ///   name the role/account) is logged server-side, never reflected.
+    pub(crate) async fn assume(
+        &self,
+        role_arn: &credentials::RoleArn,
+        region: Option<&str>,
+    ) -> Result<credentials::TempCredentials, (StatusCode, String)> {
+        let Some(assumer) = &self.role_assumer else {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "this server does not support assume-role credentials".to_string(),
+            ));
+        };
+        tracing::info!(role_arn = %role_arn.as_str(), "assuming role for request");
+        assumer.assume_role(role_arn, region).await.map_err(|e| {
+            tracing::warn!(role_arn = %role_arn.as_str(), error = %e, "assume-role failed");
+            (
+                StatusCode::UNAUTHORIZED,
+                "could not assume the requested role".to_string(),
+            )
+        })
     }
 
     /// Build an ephemeral S3 backend from temporary credentials (shared by the

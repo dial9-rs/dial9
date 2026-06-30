@@ -180,6 +180,12 @@ impl CredError {
 /// is the authority on whether the role exists and is assumable; we only keep
 /// obviously-malformed input out of the SDK call.
 fn is_valid_role_arn(arn: &str) -> bool {
+    // Bound the input before parsing — AWS caps an ARN at 2048 chars, and this
+    // keeps a pathological header/query value out of the SDK (mirrors the ≤40
+    // cap on region).
+    if arn.is_empty() || arn.len() > 2048 {
+        return false;
+    }
     // arn : partition : service : region : account : resource
     // IAM ARNs put nothing in the region field and `iam` in the service field.
     let parts: Vec<&str> = arn.splitn(6, ':').collect();
@@ -392,10 +398,10 @@ pub fn parse_cred_inputs(
 /// [`crate::storage::EphemeralS3Config`] injects the S3 connector).
 pub trait RoleAssumer: Send + Sync {
     /// Assume `role_arn` and return temporary credentials. `region`, when set,
-    /// is forwarded as the resulting credentials' region (the STS call itself is
-    /// global). Errors are opaque: the resolve path maps any failure to a 401 so
-    /// the SDK message — which can name the role/account — is never reflected to
-    /// the client (it is logged server-side instead).
+    /// pins both the STS endpoint used to assume the role and the region carried
+    /// on the resulting credentials. Errors are opaque: the resolve path maps any
+    /// failure to a 401 so the SDK message — which can name the role/account — is
+    /// never reflected to the client (it is logged server-side instead).
     fn assume_role<'a>(
         &'a self,
         role_arn: &'a RoleArn,
@@ -718,6 +724,13 @@ mod tests {
         ] {
             assert!(!is_valid_role_arn(arn), "expected {arn:?} to be rejected");
         }
+    }
+
+    #[test]
+    fn overlong_role_arn_rejected() {
+        // A role name past the 2048-char ARN cap is rejected before the SDK.
+        let arn = format!("arn:aws:iam::123456789012:role/{}", "a".repeat(2048));
+        assert!(!is_valid_role_arn(&arn));
     }
 
     // --- query-param (linkable) assume-role parsing ---
