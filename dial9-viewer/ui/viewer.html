@@ -1639,19 +1639,28 @@
             }
 
             /**
-             * Stream a single trace URL: decode chunks as they download so parse
-             * time overlaps the download (~max(download, parse) instead of their
-             * sum). We capture the gunzipped chunks while parsing so the full
-             * buffer is still available afterwards for in-memory Set/Clear-Range
-             * re-parsing (which never re-fetches).
+             * Stream one OR MORE trace URLs: decode chunks as they download so
+             * parse time overlaps the download (~max(download, parse) instead of
+             * their sum). For multiple URLs the fetches run concurrently and the
+             * components stream in back-to-back, in order, as one logical trace —
+             * so parsing the first segment overlaps the in-flight downloads of the
+             * rest (issue #595). We capture the gunzipped chunks while parsing so
+             * the full buffer is still available afterwards for in-memory
+             * Set/Clear-Range re-parsing (which never re-fetches).
              */
-            async function streamAndShowTrace(url, name, opts = {}) {
+            async function streamAndShowTrace(urls, name, opts = {}) {
+                const list = Array.isArray(urls) ? urls : [urls];
                 try {
                     const credHeaders = window.Dial9Creds ? Dial9Creds.headers() : {};
-                    const stream = await TraceParser.fetchTraceStream(url, {
-                        signal: loadAbortController?.signal,
-                        headers: credHeaders,
-                    });
+                    const stream = list.length === 1
+                        ? await TraceParser.fetchTraceStream(list[0], {
+                            signal: loadAbortController?.signal,
+                            headers: credHeaders,
+                        })
+                        : TraceParser.fetchTracesStream(list, {
+                            signal: loadAbortController?.signal,
+                            headers: credHeaders,
+                        });
                     const captured = [];
                     const capturing = {
                         async *[Symbol.asyncIterator]() {
@@ -1807,21 +1816,25 @@
             }
 
             // `urls` may be a single URL or a list (one per repeated `trace=`).
-            // For a single URL we STREAM: download and decode overlap, so the
-            // spinner advances during the download and total load time is about
-            // max(download, parse) rather than their sum. For multiple repeated
-            // `trace=` components we fall back to the buffered fetch+concatenate
-            // path (each component is fetched and gunzipped independently, then
-            // the raw buffers are concatenated into one trace; see fetchTraces).
+            // We STREAM whenever the runtime supports it (single OR multiple
+            // URLs): download and decode overlap, so the spinner advances during
+            // the download and total load time is about max(download, parse)
+            // rather than their sum. For multiple components the fetches run
+            // concurrently and stream in back-to-back as one trace, so parsing
+            // the first segment overlaps the others' downloads (issue #595). Only
+            // when streaming is unavailable (no DecompressionStream, e.g. some
+            // Node test runtimes) do we fall back to the buffered fetch+
+            // concatenate path (each component fetched and gunzipped
+            // independently, then concatenated into one trace; see fetchTraces).
             async function loadTraceFromUrl(urls) {
                 const list = Array.isArray(urls) ? urls : [urls];
                 try {
                     const name = urlParams.get('svc')
                         || list[0].split('/').pop()?.split('?')[0]
                         || 'trace.bin';
-                    if (list.length === 1 && TraceParser.canStreamDecode()) {
-                        updateLoadProgress("Loading…");
-                        await streamAndShowTrace(list[0], name, getParseOptions());
+                    if (TraceParser.canStreamDecode()) {
+                        updateLoadProgress(list.length > 1 ? `Loading ${list.length} traces…` : "Loading…");
+                        await streamAndShowTrace(list, name, getParseOptions());
                         return;
                     }
                     updateLoadProgress(list.length > 1 ? `Fetching ${list.length} traces…` : "Fetching…");

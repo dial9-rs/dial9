@@ -1599,9 +1599,11 @@
     // Build one viewer `trace=` component per selected key, each pointing at
     // /api/object (which serves that single file's raw, still-gzipped bytes).
     // The viewer and flamegraph read all repeated `trace=` params, download
-    // them in parallel, and gunzip + concatenate client-side (see fetchTraces
-    // in trace_parser.js). This replaced a single /api/trace URL that forced
-    // the backend to fetch every file, gunzip them, and merge into one large
+    // them in parallel, and gunzip + decode client-side — streaming the
+    // components back-to-back into one parse when supported (fetchTracesStream),
+    // or buffering+concatenating as a fallback (fetchTraces); both in
+    // trace_parser.js. This replaced a single /api/trace URL that forced the
+    // backend to fetch every file, gunzip them, and merge into one large
     // uncompressed response — far more bytes over the wire and much slower.
     function objectTraceUrls(bucket, keys) {
         return keys.map(key => {
@@ -1799,7 +1801,7 @@
             cpuBtn.disabled = over && !aggregationEnabled;
             healthBtn.disabled = !aggregationEnabled;
             warn.textContent = over && !aggregationEnabled
-                ? `Too large to open (${formatSize(sel.bytes)} > 100 MB) — narrow your selection.`
+                ? `Too large to open (${formatSize(sel.bytes)} > ${formatSize(MAX_OPEN_BYTES)}) — narrow your selection.`
                 : '';
             const win = sel.t0 && sel.t1 ? ` · ${fmtTick(sel.t0)}–${fmtTick(sel.t1)}` : '';
             count.textContent = `${sel.keys.length} segment${sel.keys.length !== 1 ? 's' : ''} · ${formatSize(sel.bytes)}${win}`;

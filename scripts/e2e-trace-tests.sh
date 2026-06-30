@@ -53,6 +53,9 @@ node dial9-viewer/ui/test_fetch_traces.js
 echo "--- Checking streaming trace decode (parseTraceStream) ---"
 node dial9-viewer/ui/test_stream_parse.js
 
+echo "--- Checking buffered parser paint-yield throttle (#595) ---"
+node dial9-viewer/ui/test_parse_yield_throttle.js
+
 echo "--- Checking bring-your-own-credentials store ---"
 node dial9-viewer/ui/test_creds.js
 

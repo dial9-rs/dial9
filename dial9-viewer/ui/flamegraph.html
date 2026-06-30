@@ -505,17 +505,25 @@
                     return;
                 }
 
-                // Load the trace. For a single URL we STREAM: download and
-                // decode overlap, hiding most of the parse time behind the
-                // download. For multiple repeated `trace=` components we fall
-                // back to the buffered fetch+concatenate path (each component is
-                // fetched and gunzipped independently, then concatenated).
+                // Load the trace. We STREAM whenever the runtime supports it
+                // (single OR multiple URLs): download and decode overlap, hiding
+                // most of the parse time behind the download. For multiple
+                // components the fetches run concurrently and stream in
+                // back-to-back as one trace, so parsing the first overlaps the
+                // others' downloads (issue #595). Only when streaming is
+                // unavailable do we fall back to the buffered fetch+concatenate
+                // path (each component fetched and gunzipped independently, then
+                // concatenated).
                 const credHeaders = window.Dial9Creds ? Dial9Creds.headers() : {};
                 let trace;
                 try {
-                    if (traceUrls.length === 1 && TraceParser.canStreamDecode()) {
-                        loadingEl.textContent = "Loading trace\u2026";
-                        const stream = await TraceParser.fetchTraceStream(traceUrls[0], { headers: credHeaders });
+                    if (TraceParser.canStreamDecode()) {
+                        loadingEl.textContent = traceUrls.length > 1
+                            ? `Loading ${traceUrls.length} traces\u2026`
+                            : "Loading trace\u2026";
+                        const stream = traceUrls.length === 1
+                            ? await TraceParser.fetchTraceStream(traceUrls[0], { headers: credHeaders })
+                            : TraceParser.fetchTracesStream(traceUrls, { headers: credHeaders });
                         trace = await TraceParser.parseTraceStream(stream);
                     } else {
                         loadingEl.textContent = traceUrls.length > 1
