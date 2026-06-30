@@ -231,6 +231,15 @@ pub(crate) async fn serve(
         .with_agg_output_prefix(agg_output_prefix_for_state)
         .with_agg_output_bucket(agg_output_bucket, agg_output_backend)
         .with_agg_segment_secs(agg_segment_secs);
+    // For an S3 source, also offer the assume-role path: a request may name a
+    // role ARN and the viewer assumes it with its own (ambient) identity via
+    // STS. Same gate as BYOC — both require an S3 source; this additionally
+    // relies on the server having an ambient identity allowed to assume the
+    // target role. A local-dir source has no S3 and gets neither.
+    if source_is_s3 {
+        let assumer = server::credentials::StsRoleAssumer::from_env().await;
+        app_state = app_state.with_role_assumer(std::sync::Arc::new(assumer));
+    }
     if let Some(d) = dev_ui_dir {
         app_state = app_state.with_dev_ui_dir(d);
     }

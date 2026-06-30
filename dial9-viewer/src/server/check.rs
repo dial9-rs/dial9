@@ -15,7 +15,7 @@ use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
 
 use crate::server::AppState;
-use crate::server::credentials::{CredError, MaybeCreds};
+use crate::server::credentials::{CredError, CredSource, MaybeCreds};
 use crate::storage::build_credentialed_client;
 
 #[derive(Deserialize)]
@@ -45,15 +45,42 @@ pub async fn check_credentials(
         ));
     }
 
+    // Resolve the request's named identity to concrete credentials: BYOC keys
+    // are used directly; a role ARN is assumed first (so the check validates the
+    // same identity a later data request would use).
     let temp = match creds.0 {
-        Ok(Some(temp)) => temp,
-        Ok(None) => {
+        Ok(CredSource::Static(temp)) => temp,
+        Ok(CredSource::AssumeRole { role_arn, region }) => {
+            let Some(assumer) = &state.role_assumer else {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "this server does not support assume-role credentials".to_string(),
+                ));
+            };
+            assumer
+                .assume_role(&role_arn, region.as_deref())
+                .await
+                .map_err(|e| {
+                    tracing::warn!(role_arn = %role_arn.as_str(), error = %e, "assume-role failed");
+                    (
+                        StatusCode::UNAUTHORIZED,
+                        "could not assume the requested role".to_string(),
+                    )
+                })?
+        }
+        Ok(CredSource::Default) => {
             return Err((
                 StatusCode::BAD_REQUEST,
-                "credentials required: supply x-dial9-aws-* headers".to_string(),
+                "credentials required: supply x-dial9-aws-* headers or a role ARN".to_string(),
             ));
         }
-        Err(e @ (CredError::Incomplete | CredError::Malformed | CredError::InvalidRegion)) => {
+        Err(
+            e @ (CredError::Incomplete
+            | CredError::Malformed
+            | CredError::InvalidRegion
+            | CredError::ConflictingCredentials
+            | CredError::InvalidRoleArn),
+        ) => {
             return Err((StatusCode::BAD_REQUEST, e.message().to_string()));
         }
     };
