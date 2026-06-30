@@ -2,6 +2,7 @@
 //! Tokio runtime stats — long polls classified as on-CPU vs off-CPU,
 //! grouped by spawn location. Supports progressive refinement (same as flamegraph).
 
+use axum::Extension;
 use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -13,6 +14,7 @@ use crate::ingest::aggregate::{self, Scope};
 use crate::ingest::refine::{self, RefineOpts};
 use crate::server::AppState;
 use crate::server::credentials::MaybeCreds;
+use crate::server::metrics::OperationMetrics;
 
 use arrow::array::Array;
 
@@ -72,7 +74,7 @@ pub async fn get_tokio_stats(
     State(state): State<AppState>,
     creds: MaybeCreds,
     QueryExtra(params): QueryExtra<TokioStatsParams>,
-) -> Result<Json<TokioStatsResponse>, (StatusCode, String)> {
+) -> Result<(Extension<OperationMetrics>, Json<TokioStatsResponse>), (StatusCode, String)> {
     let Some(agg) =
         state.agg_context_for(params.bucket.as_deref(), params.prefix.as_deref(), creds)?
     else {
@@ -172,21 +174,32 @@ pub async fn get_tokio_stats(
     // Sort by number of notable polls (above floor) descending.
     by_spawn_loc.sort_by_key(|l| std::cmp::Reverse(l.durations_ns.len()));
 
-    Ok(Json(TokioStatsResponse {
-        time_span_ns,
-        total_polls: acc.total_polls,
-        bucket: agg.source_bucket.clone(),
-        by_spawn_loc,
-        coverage: Some(aggregate::Coverage {
-            files_matched,
-            files_folded,
-            // tokio-stats counts files read, not samples, as its "folded" unit.
-            samples_folded: files_read,
-            total_bytes: refined.total_bytes,
-            hosts_matched: refined.hosts_matched,
-            hosts_folded: refined.hosts_folded(),
+    // Operation-specific metrics: coverage plus the notable-poll count, the
+    // signal this endpoint exists to surface.
+    let op = OperationMetrics::tokio_stats(
+        files_matched as u32,
+        files_folded as u32,
+        notable_polls as u64,
+    );
+
+    Ok((
+        Extension(op),
+        Json(TokioStatsResponse {
+            time_span_ns,
+            total_polls: acc.total_polls,
+            bucket: agg.source_bucket.clone(),
+            by_spawn_loc,
+            coverage: Some(aggregate::Coverage {
+                files_matched,
+                files_folded,
+                // tokio-stats counts files read, not samples, as its "folded" unit.
+                samples_folded: files_read,
+                total_bytes: refined.total_bytes,
+                hosts_matched: refined.hosts_matched,
+                hosts_folded: refined.hosts_folded(),
+            }),
         }),
-    }))
+    ))
 }
 
 // ─── Internal types ──────────────────────────────────────────────────────────

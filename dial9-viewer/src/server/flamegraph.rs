@@ -1,5 +1,6 @@
 //! `/api/flamegraph` endpoint: query aggregated Parquet data and return a flamegraph tree.
 
+use axum::Extension;
 use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -13,6 +14,7 @@ use crate::ingest::aggregate::{
 use crate::ingest::refine::{self, RefineOpts};
 use crate::server::AppState;
 use crate::server::credentials::MaybeCreds;
+use crate::server::metrics::OperationMetrics;
 
 #[derive(Deserialize)]
 pub struct FlamegraphParams {
@@ -195,7 +197,7 @@ pub async fn get_flamegraph(
     // `axum_extra`'s Query supports repeated keys (`host=a&host=b`), which the
     // stock `serde_urlencoded`-based extractor does not.
     QueryExtra(params): QueryExtra<FlamegraphParams>,
-) -> Result<Json<FlamegraphResponse>, (StatusCode, String)> {
+) -> Result<(Extension<OperationMetrics>, Json<FlamegraphResponse>), (StatusCode, String)> {
     let Some(agg) =
         state.agg_context_for(params.bucket.as_deref(), params.prefix.as_deref(), creds)?
     else {
@@ -265,7 +267,7 @@ async fn flamegraph_response(
     agg: &AggContext,
     params: &FlamegraphParams,
     limits: &aggregate::FoldLimits,
-) -> Result<Json<FlamegraphResponse>, (StatusCode, String)> {
+) -> Result<(Extension<OperationMetrics>, Json<FlamegraphResponse>), (StatusCode, String)> {
     let scope = scope_from_params(params);
     let opts = RefineOpts {
         refine: params.refine,
@@ -325,29 +327,40 @@ async fn flamegraph_response(
         .map(|(k, v)| (k.to_string(), v.clone()))
         .collect();
 
-    Ok(Json(FlamegraphResponse {
-        tree,
-        total_samples: result.total_samples,
-        coverage: Some(coverage),
-        metadata: FlamegraphMetadata {
-            service: params.service.clone(),
-            hosts: result.hosts,
-            time_range: match (&params.from, &params.to) {
-                (Some(f), Some(t)) => Some(format!("{f}–{t}")),
-                _ => None,
-            },
-            min_timestamp_ns: result.min_ts,
-            max_timestamp_ns: result.max_ts,
-            facets: result.facets,
-            scope: ScopeEcho {
+    // Operation-specific metrics: coverage (folded/matched) makes a degraded
+    // low-coverage 200 visible, which the status code alone can't show.
+    let op = OperationMetrics::flamegraph(
+        files_matched as u32,
+        files_folded as u32,
+        result.total_samples as u64,
+    );
+
+    Ok((
+        Extension(op),
+        Json(FlamegraphResponse {
+            tree,
+            total_samples: result.total_samples,
+            coverage: Some(coverage),
+            metadata: FlamegraphMetadata {
                 service: params.service.clone(),
-                hosts: params.host.clone(),
-                start_ns: params.start_ns,
-                end_ns: params.end_ns,
-                filters,
+                hosts: result.hosts,
+                time_range: match (&params.from, &params.to) {
+                    (Some(f), Some(t)) => Some(format!("{f}–{t}")),
+                    _ => None,
+                },
+                min_timestamp_ns: result.min_ts,
+                max_timestamp_ns: result.max_ts,
+                facets: result.facets,
+                scope: ScopeEcho {
+                    service: params.service.clone(),
+                    hosts: params.host.clone(),
+                    start_ns: params.start_ns,
+                    end_ns: params.end_ns,
+                    filters,
+                },
             },
-        },
-    }))
+        }),
+    ))
 }
 
 #[cfg(test)]
