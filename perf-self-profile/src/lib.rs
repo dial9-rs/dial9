@@ -48,6 +48,9 @@ pub mod unwinder;
 #[cfg(feature = "dial9-source")]
 pub mod cpu_source;
 
+#[cfg(feature = "memory-source")]
+pub mod memory_profiling;
+
 pub use offline_symbolize::SymbolTableEntry;
 pub use sampler::{EventSource, Sample, SamplerConfig, SamplingMode};
 pub use symbolize::{CodeInfo, MapsEntry, SymbolInfo};
@@ -93,6 +96,12 @@ pub use sys::{resolve_symbol_with_maps, resolve_symbols_with_maps};
 #[cfg(feature = "dial9-source")]
 pub use cpu_source::{
     CpuProfiler, CpuProfilingConfig, CpuSampleSource, SchedEventConfig, SchedProfiler,
+};
+
+#[cfg(feature = "memory-source")]
+pub use memory_profiling::{
+    AllocEvent, DEFAULT_RING_CAPACITY, DEFAULT_SAMPLE_RATE_BYTES, Dial9Allocator, FreeEvent,
+    InstallError, MemoryProfiler, MemoryProfilerGuard, MemoryProfilingConfig, is_installed,
 };
 
 /// Internal module exposed only for benchmarks. Not part of the public API.

@@ -23,18 +23,21 @@
 //! at default capacities the alloc queue is ~4 MiB and the free queue is
 //! ~1 MiB (8× the slot count of the alloc queue, but each slot is ~32× smaller).
 //!
-//! Gated behind the `memory-profiling` cargo feature.
+//! Gated behind the `memory-source` cargo feature.
 
 mod allocator;
 mod config;
+mod events;
 mod hook;
 mod opt_out;
 mod profiler;
 mod ring;
 mod source;
+mod tid;
 
 pub use allocator::Dial9Allocator;
 pub use config::{DEFAULT_RING_CAPACITY, DEFAULT_SAMPLE_RATE_BYTES, MemoryProfilingConfig};
-#[cfg(feature = "analysis")]
+pub use events::{AllocEvent, FreeEvent};
+#[cfg(feature = "test-util")]
 pub use profiler::push_test_alloc;
 pub use profiler::{InstallError, MemoryProfiler, MemoryProfilerGuard, is_installed};

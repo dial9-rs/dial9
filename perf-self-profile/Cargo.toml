@@ -15,11 +15,21 @@ all-features = true
 __internal-bench = []
 ## Enables the `Source` trait implementations for `CpuProfiler` and `SchedProfiler`.
 dial9-source = ["dep:dial9-core"]
+## Sampled memory allocation profiling (allocator hook + consolidator `Source`).
+memory-source = ["dial9-source", "dep:scc", "dep:crossbeam-queue", "dep:bon"]
+## Allow constructing the public wire-event structs (`AllocEvent`/`FreeEvent`)
+## outside this crate. Off by default keeps them `#[non_exhaustive]`.
+unstable-events = []
+## Test-only helpers.
+test-util = []
 
 [dependencies]
+bon = { version = "3", optional = true }
 bytes = "1"
+crossbeam-queue = { version = "0.3", optional = true }
 dial9-core = { workspace = true, optional = true }
 dial9-trace-format = { workspace = true }
+scc = { version = "2", optional = true }
 tracing = "0.1.44"
 
 [target.'cfg(target_os = "linux")'.dependencies]
@@ -31,6 +41,9 @@ perf-event-open-sys2 = "5.0.6"
 
 [dev-dependencies]
 criterion = "0.5"
+dial9-core = { workspace = true, features = ["test-util"] }
+dial9-trace-format = { workspace = true, features = ["serde-deserialize"] }
+serde_json = "1"
 
 [[bench]]
 name = "unwind"
