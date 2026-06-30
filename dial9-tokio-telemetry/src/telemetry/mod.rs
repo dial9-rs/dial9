@@ -9,11 +9,7 @@ pub mod analysis;
 /// Decode-side companion structs for built-in trace events.
 #[cfg(any(feature = "analysis", test))]
 pub mod analysis_events;
-pub(crate) mod buffer;
-pub(crate) mod collector;
-pub use collector::Batch;
-#[cfg(feature = "cpu-profiling")]
-pub mod cpu_profile;
+pub(crate) use dial9_core::buffer;
 pub(crate) mod custom_events;
 pub(crate) mod events;
 pub(crate) mod format;
@@ -23,12 +19,16 @@ pub(crate) mod recorder;
 pub(crate) mod socket_accept_queues;
 pub mod task_dump_config;
 pub(crate) mod task_metadata;
-pub(crate) mod writer;
+pub(crate) use dial9_core::writer;
 
 pub use crate::traced::TracedFuture;
-pub use buffer::{Encodable, ThreadLocalEncoder};
 pub use custom_events::{CustomEventsConfig, CustomEventsContext};
-pub use events::{CpuSampleSource, clock_monotonic_ns};
+pub use dial9_core::buffer::{Encodable, ThreadLocalEncoder};
+#[cfg(feature = "cpu-profiling")]
+pub use dial9_perf_self_profile::{
+    CpuProfiler, CpuProfilingConfig, CpuSampleSource, SchedEventConfig, SchedProfiler,
+};
+pub use events::clock_monotonic_ns;
 pub use format::{
     AllocEvent, FreeEvent, PollEndEvent, PollStartEvent, ProcessResourceUsageEvent, TaskSpawnEvent,
     WakeEventEvent, WorkerId, WorkerParkEvent, WorkerUnparkEvent,

@@ -13,9 +13,8 @@
 #![allow(deprecated)]
 
 use dial9_tokio_telemetry::telemetry::{
-    DiskWriter, TracedRuntime,
+    CpuProfilingConfig, DiskWriter, TracedRuntime,
     analysis_events::{CpuSampleSource, Dial9Event, WorkerId},
-    cpu_profile::CpuProfilingConfig,
 };
 use dial9_trace_format::decoder::Decoder;
 use std::time::Duration;

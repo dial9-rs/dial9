@@ -1,60 +1,3 @@
-#[cfg(feature = "cpu-profiling")]
-use crate::telemetry::format::WorkerId;
-use serde::Serialize;
-#[cfg(feature = "cpu-profiling")]
-use std::sync::Arc;
-
-/// What triggered a CPU sample.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-pub enum CpuSampleSource {
-    /// Periodic CPU profiling sample (frequency-based).
-    CpuProfile = 0,
-    /// Context switch captured by per-thread sched event tracking.
-    SchedEvent = 1,
-}
-
-impl CpuSampleSource {
-    /// Decode from a raw `u8` wire value.
-    pub fn from_u8(v: u8) -> Self {
-        match v {
-            1 => Self::SchedEvent,
-            _ => Self::CpuProfile,
-        }
-    }
-}
-
-#[cfg(feature = "cpu-profiling")]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct ThreadName(Arc<str>);
-
-#[cfg(feature = "cpu-profiling")]
-impl ThreadName {
-    pub(crate) fn new(name: String) -> Self {
-        Self(name.into())
-    }
-
-    pub(crate) fn as_str(&self) -> &str {
-        self.0.as_ref()
-    }
-}
-
-/// Data for a CPU stack trace sample. Implements `Encodable` so samples can
-/// be written directly into the thread-local trace buffer without an
-/// intermediate enum. Interning of `thread_name` and `callchain` happens in
-/// the `Encodable::encode` impl.
-#[cfg(feature = "cpu-profiling")]
-#[derive(Debug, Clone)]
-pub(crate) struct CpuSampleData {
-    pub timestamp_nanos: u64,
-    pub worker_id: WorkerId,
-    pub tid: u32,
-    pub thread_name: Option<ThreadName>,
-    pub source: CpuSampleSource,
-    pub callchain: Vec<u64>,
-    /// CPU the sample was taken on, if the backend could determine it.
-    pub cpu: Option<u32>,
-}
-
 /// Get the OS thread ID (tid) of the calling thread via `gettid()`.
 #[cfg(any(target_os = "linux", target_os = "android"))]
 pub(crate) fn current_tid() -> u32 {
@@ -91,69 +34,9 @@ pub(crate) fn thread_cpu_time_nanos() -> u64 {
     0
 }
 
-/// Read monotonic time in nanoseconds for trace timestamps.
-pub fn clock_monotonic_ns() -> u64 {
-    clock_monotonic_ns_impl()
-}
-
-#[cfg(unix)]
-fn clock_monotonic_ns_impl() -> u64 {
-    clock_gettime_ns(MONOTONIC_CLOCK_ID)
-}
-
-// Matches Rust's Darwin `Instant` backend on Apple platforms.
-#[cfg(all(unix, target_vendor = "apple"))]
-const MONOTONIC_CLOCK_ID: libc::clockid_t = libc::CLOCK_UPTIME_RAW;
-
-// Matches Rust's Unix `Instant` backend on non-Apple platforms.
-#[cfg(all(unix, not(target_vendor = "apple")))]
-const MONOTONIC_CLOCK_ID: libc::clockid_t = libc::CLOCK_MONOTONIC;
-
-#[cfg(unix)]
-fn clock_gettime_ns(clock_id: libc::clockid_t) -> u64 {
-    let mut ts = libc::timespec {
-        tv_sec: 0,
-        tv_nsec: 0,
-    };
-    unsafe {
-        libc::clock_gettime(clock_id, &mut ts);
-    }
-    ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64
-}
-
-#[cfg(not(unix))]
-fn clock_monotonic_ns_impl() -> u64 {
-    use std::sync::OnceLock;
-    use std::time::Instant;
-    static EPOCH: OnceLock<Instant> = OnceLock::new();
-    (EPOCH.get_or_init(Instant::now).elapsed().as_nanos() as u64).saturating_add(1)
-}
-
-/// `CLOCK_REALTIME` in nanoseconds since the Unix epoch.
-#[cfg(unix)]
-pub(crate) fn clock_realtime_ns() -> u64 {
-    clock_gettime_ns(libc::CLOCK_REALTIME)
-}
-
-#[cfg(not(unix))]
-pub(crate) fn clock_realtime_ns() -> u64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock should not be before the unix epoch")
-        .as_nanos() as u64
-}
-
-/// Snapshot `(monotonic_ns, realtime_ns)` as close together as possible.
-/// Reads M₁ -> R -> M₂ and pairs `R` with the midpoint of M₁ and M₂ so
-/// the correlation error is half the `clock_gettime` interval.
-pub(crate) fn clock_pair() -> (u64, u64) {
-    let m1 = clock_monotonic_ns();
-    let r = clock_realtime_ns();
-    let m2 = clock_monotonic_ns();
-    let mono = m1 + m2.saturating_sub(m1) / 2;
-    (mono, r)
-}
+// Clock readings live in dial9-core; re-exported here so existing
+// `crate::telemetry::events::clock_*` call sites stay unchanged.
+pub use dial9_core::clock::clock_monotonic_ns;
 
 /// Per-thread scheduler stats from `/proc/<pid>/task/<tid>/schedstat`.
 /// Fields: run_time_ns wait_time_ns timeslices

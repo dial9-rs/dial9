@@ -10,8 +10,8 @@ use dial9_tokio_telemetry::telemetry::analysis_events::{CpuSampleSource, Dial9Ev
 
 #[test]
 fn sched_events_capture_context_switches() {
+    use dial9_tokio_telemetry::telemetry::SchedEventConfig;
     use dial9_tokio_telemetry::telemetry::TracedRuntime;
-    use dial9_tokio_telemetry::telemetry::cpu_profile::SchedEventConfig;
     use std::time::Duration;
 
     let (capture, batches) = capture_processor();
@@ -80,8 +80,8 @@ fn sched_events_capture_context_switches() {
 /// threads in the same run, so the ~10x relationship holds deterministically.
 #[test]
 fn sched_events_sampling_reduces_count() {
+    use dial9_tokio_telemetry::telemetry::SchedEventConfig;
     use dial9_tokio_telemetry::telemetry::TracedRuntime;
-    use dial9_tokio_telemetry::telemetry::cpu_profile::SchedEventConfig;
     use std::collections::HashSet;
     use std::time::Duration;
 

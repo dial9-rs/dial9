@@ -34,19 +34,39 @@
 use crate::sampling::SplitMix64;
 use crate::telemetry::format::TaskDumpEvent;
 use crate::telemetry::recorder::SharedState;
+use crate::telemetry::task_dump_config::TaskDumpConfig;
 use crate::telemetry::task_metadata::TaskId;
 use crate::telemetry::{Encodable, ThreadLocalEncoder};
 use pin_project_lite::pin_project;
 use smallvec::SmallVec;
+use std::cell::Cell;
 use std::future::Future;
 use std::num::NonZeroU64;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 use std::task::{Context, Poll};
 
 /// Initial heap reservation for the instruction-pointer buffer on first capture.
 const FRAME_BUF_INITIAL_CAPACITY: usize = 256;
+
+crate::primitives::thread_local! {
+    /// This session's task-dump config for the current thread. Installed on
+    /// every runtime-owned thread: worker thread-start, plus the block_on
+    /// thread in `attach_runtime` (which thread-start doesn't fire for on a
+    /// current-thread runtime), and cleared on thread stop.
+    /// `None` means task dumps aren't configured, so `TaskDumped` runs as a passthrough.
+    static TASKDUMP_CONFIG: Cell<Option<TaskDumpConfig>> = const { Cell::new(None) };
+}
+
+/// Install task-dump config for the current thread (runtime thread-start hook).
+pub(crate) fn set_taskdump_config(config: TaskDumpConfig) {
+    TASKDUMP_CONFIG.with(|c| c.set(Some(config)));
+}
+
+/// Clear the current thread's task-dump config (runtime thread-stop hook).
+pub(crate) fn clear_taskdump_config() {
+    TASKDUMP_CONFIG.with(|c| c.set(None));
+}
 
 // ─── TaskDumped future wrapper ──────────────────────────────────────────────
 
@@ -76,33 +96,28 @@ pin_project! {
         // capture → …). Cleared on the next poll so subsequent real wakes
         // proceed normally.
         just_captured: bool,
+        // Whether task dumps are configured for this session. `None` until the
+        // first poll reads the per-thread config. The wrapping thread may lack
+        // it (e.g. an explicit handle spawned from elsewhere), but the polling
+        // thread always has it. `Some(false)` makes poll a passthrough.
+        enabled: Option<bool>,
     }
 }
 
 impl<F> TaskDumped<F> {
     pub(crate) fn new(inner: F, shared: Arc<SharedState>, task_id: TaskId) -> Self {
-        let sample_mean_ns = shared.task_dump_idle_threshold_ns.load(Ordering::Relaxed);
-        // When a fixed seed is configured, use it directly for deterministic
-        // tests. Otherwise use task_id + timestamp for production uniqueness.
-        let seed = match shared.task_dump_rng_seed {
-            Some(s) => s,
-            None => {
-                (task_id.to_u64()).wrapping_mul(0x517cc1b727220a95)
-                    ^ crate::telemetry::events::clock_monotonic_ns()
-            }
-        };
-        let mut rng = SplitMix64::new(seed);
-        let next_sample_ns = rng.draw_exponential(sample_mean_ns) as i64;
+        // Config is read lazily on the first poll.
         Self {
             inner,
             shared,
             task_id,
             frames: FrameBuf::new(),
             pending_capture_ts: None,
-            next_sample_ns,
-            sample_mean_ns,
-            rng,
+            next_sample_ns: 0,
+            sample_mean_ns: 0,
+            rng: SplitMix64::new(0),
             just_captured: false,
+            enabled: None,
         }
     }
 }
@@ -111,9 +126,34 @@ impl<F: Future> Future for TaskDumped<F> {
     type Output = F::Output;
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<F::Output> {
         let mut this = self.project();
+
+        // Read this session's task-dump config on the first poll. Wrapping can
+        // happen on a thread without the config, but a task always polls on a
+        // runtime-owned thread, which has it.
+        let enabled = match *this.enabled {
+            Some(e) => e,
+            None => {
+                let config = TASKDUMP_CONFIG.with(|c| c.get());
+                if let Some(cfg) = config {
+                    *this.sample_mean_ns = cfg.idle_threshold().as_nanos() as u64;
+                    // Fixed seed for deterministic tests; otherwise derive from
+                    // task_id + time for production uniqueness.
+                    let seed = cfg.rng_seed().unwrap_or_else(|| {
+                        this.task_id.to_u64().wrapping_mul(0x517cc1b727220a95)
+                            ^ crate::telemetry::events::clock_monotonic_ns()
+                    });
+                    *this.rng = SplitMix64::new(seed);
+                    *this.next_sample_ns = this.rng.draw_exponential(*this.sample_mean_ns) as i64;
+                }
+                let e = config.is_some();
+                *this.enabled = Some(e);
+                e
+            }
+        };
+
         // Fast path: forward without any capture work when either task dumps
         // are disabled, or telemetry as a whole is paused.
-        if !this.shared.task_dumps_enabled.load(Ordering::Relaxed) || !this.shared.is_enabled() {
+        if !enabled || !this.shared.is_enabled() {
             if this.frames.has_data() {
                 this.frames.clear();
                 *this.pending_capture_ts = None;
@@ -285,5 +325,32 @@ impl Encodable for TaskDumpData<'_> {
             task_id: self.task_id,
             callchain: interned_callchain,
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TaskDumpData;
+    use crate::telemetry::analysis_events::Dial9Event;
+    use crate::telemetry::buffer::encode_single;
+    use crate::telemetry::format::decode_events;
+    use crate::telemetry::task_metadata::TaskId;
+
+    #[test]
+    fn task_dump_event_round_trips() {
+        let dump = TaskDumpData {
+            timestamp_ns: 42_000,
+            task_id: TaskId::from_u32(17),
+            callchain: &[0x1111_2222, 0x3333_4444, 0x5555_6666],
+        };
+        let encoded = encode_single(&dump);
+        let events = decode_events(&encoded).expect("decode");
+        assert_eq!(events.len(), 1);
+        let Dial9Event::TaskDumpEvent(ref e) = events[0] else {
+            panic!("expected TaskDumpEvent, got {:?}", events[0]);
+        };
+        assert_eq!(e.timestamp_ns, 42_000);
+        assert_eq!(e.task_id, 17);
+        assert_eq!(e.callchain, vec![0x1111_2222, 0x3333_4444, 0x5555_6666]);
     }
 }

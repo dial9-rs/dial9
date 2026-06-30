@@ -6,13 +6,9 @@
 //!
 //! Each buffer is wrapped in `Arc<Mutex<…>>` so the flush thread can intrusively
 //! drain idle/silent threads via [`TlBufferHandle`]s registered in `SharedState`.
+use crate::collector::CentralCollector;
 use crate::primitives::sync::atomic::{AtomicU64, Ordering};
 use crate::primitives::sync::{Arc, Mutex, Weak};
-use crate::telemetry::collector::CentralCollector;
-#[cfg(feature = "cpu-profiling")]
-use crate::telemetry::events::CpuSampleData;
-#[cfg(feature = "cpu-profiling")]
-use crate::telemetry::format::CpuSampleEvent;
 use dial9_trace_format::encoder::{Encoder, FxHashMap};
 use dial9_trace_format::{InternedStackFrames, InternedString};
 use std::panic::Location;
@@ -83,7 +79,8 @@ impl ThreadLocalEncoder<'_> {
     /// ]);
     /// ```
     // TODO(GH-XXX): replace with a version that takes timestamp as a separate parameter
-    pub(crate) fn write_event(
+    #[doc(hidden)]
+    pub fn write_event(
         &mut self,
         schema: &dial9_trace_format::encoder::Schema,
         values: &[dial9_trace_format::types::FieldValue],
@@ -94,10 +91,8 @@ impl ThreadLocalEncoder<'_> {
     }
 
     /// Intern a `&'static Location` (caching the `to_string()` result).
-    pub(crate) fn intern_location(
-        &mut self,
-        location: &'static Location<'static>,
-    ) -> InternedString {
+    #[doc(hidden)]
+    pub fn intern_location(&mut self, location: &'static Location<'static>) -> InternedString {
         let s = self
             .location_cache
             .entry(location)
@@ -112,7 +107,7 @@ impl ThreadLocalEncoder<'_> {
 ///
 /// Any type implementing [`TraceEvent`](dial9_trace_format::TraceEvent) automatically
 /// implements `Encodable` via a blanket impl, so you can pass it directly to
-/// [`Dial9Handle::record_event`](crate::telemetry::Dial9Handle::record_event):
+/// `Dial9Handle::record_event`:
 ///
 /// ```ignore
 /// #[derive(TraceEvent)]
@@ -164,26 +159,6 @@ pub trait Encodable {
 impl<T: dial9_trace_format::TraceEvent + 'static> Encodable for T {
     fn encode(&self, encoder: &mut ThreadLocalEncoder<'_>) {
         encoder.encode(self);
-    }
-}
-
-#[cfg(feature = "cpu-profiling")]
-impl Encodable for CpuSampleData {
-    fn encode(&self, enc: &mut ThreadLocalEncoder<'_>) {
-        let thread_name = self
-            .thread_name
-            .as_ref()
-            .map(|n| enc.intern_string(n.as_str()));
-        let callchain = enc.intern_stack_frames(&self.callchain);
-        enc.encode(&CpuSampleEvent {
-            timestamp_ns: self.timestamp_nanos,
-            worker_id: self.worker_id,
-            tid: self.tid,
-            source: self.source,
-            thread_name,
-            callchain,
-            cpu: self.cpu.map(u64::from),
-        });
     }
 }
 
@@ -268,40 +243,38 @@ impl ThreadLocalBuffer {
         }
     }
 
-    #[cfg(test)]
+    // Only reached via `encode_single` (test-util) and core's own tests.
+    #[cfg_attr(not(feature = "test-util"), allow(dead_code))]
     fn record_encodable(&mut self, event: &dyn Encodable) {
         event.encode(&mut self.thread_local_encoder());
         self.event_count += 1;
-    }
-
-    /// Encode a single event into a self-contained batch (header + event).
-    /// Used by tests that need to write individual events through the batch API.
-    #[cfg(test)]
-    pub(crate) fn encode_single(event: &dyn Encodable) -> Vec<u8> {
-        let mut buf = Self::with_batch_size(1024);
-        buf.record_encodable(event);
-        buf.flush().encoded_bytes
     }
 
     fn should_flush(&self) -> bool {
         self.encoder.bytes_written() as usize >= self.batch_size
     }
 
-    pub(crate) fn flush(&mut self) -> crate::telemetry::collector::Batch {
+    pub(crate) fn flush(&mut self) -> crate::collector::Batch {
         let event_count = self.event_count as u64;
         let encoded_bytes = self
             .encoder
             .reset_to_infallible(Vec::with_capacity(self.batch_size));
         self.event_count = 0;
-        crate::telemetry::collector::Batch {
-            encoded_bytes,
-            event_count,
-        }
+        crate::collector::Batch::new(encoded_bytes, event_count)
     }
 
     pub(crate) fn has_pending_events(&self) -> bool {
         self.event_count > 0
     }
+}
+
+crate::test_util_pub! {
+/// Encode a single event into a self-contained batch (header + event).
+fn encode_single(event: &dyn Encodable) -> Vec<u8> {
+    let mut buf = ThreadLocalBuffer::with_batch_size(1024);
+    buf.record_encodable(event);
+    buf.flush().into_encoded_bytes()
+}
 }
 
 impl Drop for ThreadLocalBuffer {
@@ -351,10 +324,6 @@ pub(crate) fn drain_to_collector(collector: &CentralCollector) {
     });
 }
 
-/// Record a user-defined event into the thread-local trace buffer.
-///
-/// Like [`record_event`] but accepts any [`Encodable`] type, including
-/// user-defined `#[derive(TraceEvent)]` structs.
 pub(crate) fn record_encodable_event(
     event: &dyn Encodable,
     collector: &Arc<CentralCollector>,
@@ -363,11 +332,6 @@ pub(crate) fn record_encodable_event(
     with_encoder(|enc| event.encode(enc), collector, drain_epoch)
 }
 
-/// Run a closure with access to the thread-local encoder.
-///
-/// This is the low-level primitive behind [`record_event`] and
-/// [`record_encodable_event`]. Use it when you need to encode directly
-/// (e.g., dynamic schemas) without an intermediate [`Encodable`] struct.
 pub(crate) fn with_encoder(
     f: impl FnOnce(&mut ThreadLocalEncoder<'_>),
     collector: &Arc<CentralCollector>,
@@ -405,12 +369,11 @@ pub(crate) fn with_encoder(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::telemetry::format::PollEndEvent;
 
-    fn poll_end_event() -> PollEndEvent {
-        PollEndEvent {
+    fn sample_event() -> crate::format::ClockSyncEvent {
+        crate::format::ClockSyncEvent {
             timestamp_ns: 1000,
-            worker_id: crate::telemetry::format::WorkerId::from(0usize),
+            realtime_ns: 2000,
         }
     }
 
@@ -424,7 +387,7 @@ mod tests {
     #[test]
     fn test_record_event() {
         let mut buffer = ThreadLocalBuffer::new();
-        buffer.record_encodable(&poll_end_event());
+        buffer.record_encodable(&sample_event());
         assert_eq!(buffer.event_count, 1);
         assert!(buffer.encoder.bytes_written() > 0);
     }
@@ -434,7 +397,7 @@ mod tests {
         // Use a tiny batch size so a single event triggers flush.
         let mut buffer = ThreadLocalBuffer::with_batch_size(1);
         assert!(!buffer.should_flush());
-        buffer.record_encodable(&poll_end_event());
+        buffer.record_encodable(&sample_event());
         assert!(buffer.should_flush());
     }
 
@@ -442,7 +405,7 @@ mod tests {
     fn test_should_flush_default_batch_size() {
         let mut buffer = ThreadLocalBuffer::new();
         assert!(!buffer.should_flush());
-        buffer.record_encodable(&poll_end_event());
+        buffer.record_encodable(&sample_event());
         // A single small event should not exceed 1 MB.
         assert!(!buffer.should_flush());
     }
@@ -450,9 +413,9 @@ mod tests {
     #[test]
     fn test_flush() {
         let mut buffer = ThreadLocalBuffer::new();
-        buffer.record_encodable(&poll_end_event());
+        buffer.record_encodable(&sample_event());
         let batch = buffer.flush();
-        assert!(!batch.encoded_bytes.is_empty());
+        assert!(!batch.encoded_bytes().is_empty());
         assert_eq!(buffer.event_count, 0);
     }
 
@@ -484,7 +447,7 @@ mod tests {
         // logic directly: flush + stamp.
         let mut buffer = ThreadLocalBuffer::with_batch_size(1);
         buffer.set_collector(&collector);
-        buffer.record_encodable(&poll_end_event());
+        buffer.record_encodable(&sample_event());
         assert!(buffer.should_flush());
         buffer
             .flush_epoch
@@ -500,85 +463,12 @@ mod tests {
         // Write an event from a different thread.
         let handle = std::thread::spawn(move || {
             let mut guard = buf_clone.lock().unwrap();
-            guard.record_encodable(&poll_end_event());
+            guard.record_encodable(&sample_event());
             assert_eq!(guard.event_count, 1);
         });
         handle.join().unwrap();
         // Main thread can also access it.
         let guard = buf.lock().unwrap();
         assert_eq!(guard.event_count, 1);
-    }
-
-    #[cfg(feature = "taskdump")]
-    mod task_dump_tests {
-        use super::ThreadLocalBuffer;
-        use crate::task_dumped::TaskDumpData;
-        use crate::telemetry::analysis_events::Dial9Event;
-        use crate::telemetry::format::decode_events;
-        use crate::telemetry::task_metadata::TaskId;
-
-        #[test]
-        fn task_dump_event_round_trips() {
-            let dump = TaskDumpData {
-                timestamp_ns: 42_000,
-                task_id: TaskId::from_u32(17),
-                callchain: &[0x1111_2222, 0x3333_4444, 0x5555_6666],
-            };
-            let encoded = ThreadLocalBuffer::encode_single(&dump);
-            let events = decode_events(&encoded).expect("decode");
-            assert_eq!(events.len(), 1);
-            let Dial9Event::TaskDumpEvent(ref e) = events[0] else {
-                panic!("expected TaskDumpEvent, got {:?}", events[0]);
-            };
-            assert_eq!(e.timestamp_ns, 42_000);
-            assert_eq!(e.task_id, 17);
-            assert_eq!(e.callchain, vec![0x1111_2222, 0x3333_4444, 0x5555_6666]);
-        }
-    }
-
-    #[cfg(feature = "cpu-profiling")]
-    mod cpu_tests {
-        use super::ThreadLocalBuffer;
-        use crate::telemetry::analysis_events::Dial9Event;
-
-        /// Encode a single `CpuSampleData` through a real thread-local buffer
-        /// and decode it back via the `decode_events` path, asserting that
-        /// the `cpu` field round-trips.
-        fn cpu_sample_round_trip(cpu: Option<u32>) -> Dial9Event {
-            use crate::telemetry::events::{CpuSampleData, CpuSampleSource};
-            use crate::telemetry::format::{WorkerId, decode_events};
-
-            let data = CpuSampleData {
-                timestamp_nanos: 12_345,
-                worker_id: WorkerId::from(0usize),
-                tid: 4242,
-                thread_name: None,
-                source: CpuSampleSource::CpuProfile,
-                callchain: vec![0xdead_beef, 0xcafe_babe],
-                cpu,
-            };
-            let encoded = ThreadLocalBuffer::encode_single(&data);
-            let events = decode_events(&encoded).expect("decode");
-            assert_eq!(events.len(), 1);
-            events.into_iter().next().unwrap()
-        }
-
-        #[test]
-        fn cpu_sample_event_round_trips_with_cpu() {
-            let Dial9Event::CpuSampleEvent(e) = cpu_sample_round_trip(Some(7)) else {
-                panic!("expected CpuSampleEvent");
-            };
-            assert_eq!(e.tid, 4242);
-            assert_eq!(e.cpu, Some(7));
-            assert_eq!(e.callchain, vec![0xdead_beef, 0xcafe_babe]);
-        }
-
-        #[test]
-        fn cpu_sample_event_round_trips_without_cpu() {
-            let Dial9Event::CpuSampleEvent(e) = cpu_sample_round_trip(None) else {
-                panic!("expected CpuSampleEvent");
-            };
-            assert_eq!(e.cpu, None);
-        }
     }
 }

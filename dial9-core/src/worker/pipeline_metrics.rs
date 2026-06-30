@@ -1,6 +1,6 @@
 //! Per-stage pipeline metrics using the MultiFlex pattern.
 //!
-//! Each [`SegmentProcessor`](super::SegmentProcessor) stage gets its own
+//! Each [`SegmentProcessor`](crate::pipeline::SegmentProcessor) stage gets its own
 //! [`StageMetrics`] (timer + success flag). When the entry is written,
 //! each stage's metrics are prefixed with the stage name, producing keys
 //! like `Gzip.Time`, `Gzip.Success`, `S3Upload.Time`, etc.
@@ -8,8 +8,8 @@
 use metrique::timers::Timer;
 use metrique::unit::Millisecond;
 use metrique::unit_of_work::metrics;
+use metrique::writer::{EntryWriter, Value};
 use metrique::{CloseValue, CloseValueRef, InflectableEntry, NameStyle};
-use metrique_writer::{EntryWriter, Value};
 use std::borrow::Cow;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -143,7 +143,7 @@ impl<'a, 'b, W: EntryWriter<'a>> EntryWriter<'a> for PrefixWriter<'b, W> {
             .value(format!("{}{}", self.prefix, name.into()), value);
     }
 
-    fn config(&mut self, config: &'a dyn metrique_writer::EntryConfig) {
+    fn config(&mut self, config: &'a dyn metrique::writer::EntryConfig) {
         self.writer.config(config);
     }
 }
@@ -225,7 +225,7 @@ mod tests {
     /// so you can see what the metric output looks like end-to-end.
     #[test]
     fn show_full_segment_metrics() {
-        use crate::metrics::{Operation, SegmentProcessMetrics};
+        use crate::worker::metrics::{Operation, SegmentProcessMetrics};
         use metrique::timers::Timer;
 
         let mut pipeline = PipelineMetrics::default();

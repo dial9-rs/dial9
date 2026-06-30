@@ -1,4 +1,12 @@
-use crate::primitives::sync::atomic::Ordering;
+#[cfg(feature = "cpu-profiling")]
+use dial9_perf_self_profile::CpuProfiler;
+#[cfg(feature = "cpu-profiling")]
+use dial9_perf_self_profile::CpuProfilingConfig;
+#[cfg(feature = "cpu-profiling")]
+use dial9_perf_self_profile::SchedEventConfig;
+#[cfg(feature = "cpu-profiling")]
+use dial9_perf_self_profile::SchedProfiler;
+
 use crate::primitives::sync::{Arc, Mutex};
 #[cfg(feature = "cpu-profiling")]
 use crate::rate_limit::rate_limited;
@@ -6,11 +14,10 @@ use crate::telemetry::writer::{Disk, SegmentWriter, WriterMode};
 use std::path::PathBuf;
 use std::time::Duration;
 
-use super::flush_loop::run_flush_loop;
+use super::SharedState;
+use super::attach_runtime;
 use super::guard::{TelemetryGuard, WorkerHandle};
-use super::handle::Dial9Handle;
-use super::shared_state::SharedState;
-use super::{ControlCommand, attach_runtime};
+use dial9_core::session::CoreSession;
 
 /// Marker: no trace path has been set yet.
 #[derive(Debug)]
@@ -56,9 +63,9 @@ pub struct TracedRuntimeBuilder<P = NoTracePath, M = PipelineUnset, Mode: Writer
     pub(super) trace_path: Option<PathBuf>,
     pub(super) runtime_name: Option<String>,
     #[cfg(feature = "cpu-profiling")]
-    pub(super) cpu_profiling_config: Option<crate::telemetry::cpu_profile::CpuProfilingConfig>,
+    pub(super) cpu_profiling_config: Option<CpuProfilingConfig>,
     #[cfg(feature = "cpu-profiling")]
-    pub(super) sched_event_config: Option<crate::telemetry::cpu_profile::SchedEventConfig>,
+    pub(super) sched_event_config: Option<SchedEventConfig>,
     pub(super) process_resource_usage_config: Option<crate::telemetry::ProcessResourceUsageConfig>,
     #[cfg(feature = "linux-socket")]
     pub(super) socket_accept_queues_config: Option<crate::telemetry::SocketAcceptQueuesConfig>,
@@ -160,20 +167,14 @@ impl<P, M, Mode: WriterMode> TracedRuntimeBuilder<P, M, Mode> {
 
     /// Enable CPU profiling with the given configuration (Linux only).
     #[cfg(feature = "cpu-profiling")]
-    pub fn with_cpu_profiling(
-        mut self,
-        config: crate::telemetry::cpu_profile::CpuProfilingConfig,
-    ) -> Self {
+    pub fn with_cpu_profiling(mut self, config: CpuProfilingConfig) -> Self {
         self.cpu_profiling_config = Some(config);
         self
     }
 
     /// Enable per-worker scheduler event capture (Linux only).
     #[cfg(feature = "cpu-profiling")]
-    pub fn with_sched_events(
-        mut self,
-        config: crate::telemetry::cpu_profile::SchedEventConfig,
-    ) -> Self {
+    pub fn with_sched_events(mut self, config: SchedEventConfig) -> Self {
         self.sched_event_config = Some(config);
         self
     }
@@ -270,6 +271,30 @@ impl<P, M, Mode: WriterMode> TracedRuntimeBuilder<P, M, Mode> {
     /// If no pipeline is configured the worker never spawns and every dump
     /// request resolves with
     /// [`DumpError::WorkerStopped`](crate::dump::DumpError::WorkerStopped).
+    ///
+    /// ```no_run
+    /// # use dial9_tokio_telemetry::telemetry::{DiskWriter, TracedRuntime};
+    /// use dial9_tokio_telemetry::telemetry::Dial9Handle;
+    /// # fn main() -> std::io::Result<()> {
+    /// # let path = "/tmp/trace.bin";
+    /// # let writer = DiskWriter::single_file(path)?;
+    /// # let mut builder = tokio::runtime::Builder::new_multi_thread();
+    /// # builder.worker_threads(2).enable_all();
+    /// let (runtime, _guard) = TracedRuntime::builder()
+    ///     .with_trace_path(path)
+    ///     .with_custom_pipeline(|p| p.gzip().write_back())
+    ///     .with_dump_trigger(|_| {})
+    ///     .build_and_start(builder, writer)?;
+    ///
+    /// // From any thread owned by this runtime, reach the trigger through the
+    /// // ambient handle, no need to thread it through your own state.
+    /// let trigger = Dial9Handle::current()
+    ///     .dump_trigger()
+    ///     .expect("on-demand mode enabled");
+    /// trigger.dump_current_data();
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn with_dump_trigger<F>(mut self, configure: F) -> Self
     where
         F: FnOnce(&mut crate::dump::DumpTriggerConfig),
@@ -315,8 +340,8 @@ impl<P, M, Mode: WriterMode> TracedRuntimeBuilder<P, M, Mode> {
         mut builder: tokio::runtime::Builder,
         guard: &TelemetryGuard,
     ) -> std::io::Result<tokio::runtime::Runtime> {
-        let (Some(shared), Some(contexts), Some(control_tx)) =
-            (guard.shared(), guard.contexts(), guard.control_tx())
+        let (Some(shared), Some(contexts), Some(handle)) =
+            (guard.shared(), guard.contexts(), guard.session_handle())
         else {
             // Disabled guard: produce a plain tokio runtime with no
             // telemetry hooks so attaching still works gracefully.
@@ -343,9 +368,10 @@ impl<P, M, Mode: WriterMode> TracedRuntimeBuilder<P, M, Mode> {
             contexts,
             builder,
             self.runtime_name,
-            control_tx,
+            handle,
             self.task_tracking_enabled,
             self.tokio_hooks,
+            guard.taskdump_config(),
         )?;
         #[cfg(feature = "linux-socket")]
         if let Some(config) = socket_accept_queues_config {
@@ -620,8 +646,8 @@ impl<M, Mode: WriterMode> TracedRuntimeBuilder<HasTracePath, M, Mode> {
             return Ok((runtime, guard));
         }
 
-        let control_tx = guard
-            .control_tx()
+        let handle = guard
+            .session_handle()
             .expect("TelemetryCore::builder().build() always returns an enabled guard")
             .clone();
         let shared = guard
@@ -635,9 +661,10 @@ impl<M, Mode: WriterMode> TracedRuntimeBuilder<HasTracePath, M, Mode> {
             contexts,
             builder,
             self.runtime_name,
-            &control_tx,
+            &handle,
             self.task_tracking_enabled,
             self.tokio_hooks,
+            guard.taskdump_config(),
         )?;
         Ok((runtime, guard))
     }
@@ -883,10 +910,10 @@ impl TelemetryCore {
         task_dump_config: Option<crate::telemetry::task_dump_config::TaskDumpConfig>,
         /// Enable CPU profiling (Linux only).
         #[cfg(feature = "cpu-profiling")]
-        cpu_profiling: Option<crate::telemetry::cpu_profile::CpuProfilingConfig>,
+        cpu_profiling: Option<CpuProfilingConfig>,
         /// Enable scheduler event capture (Linux only).
         #[cfg(feature = "cpu-profiling")]
-        sched_events: Option<crate::telemetry::cpu_profile::SchedEventConfig>,
+        sched_events: Option<SchedEventConfig>,
         /// Enable process resource usage sampled from `getrusage(RUSAGE_SELF)`.
         process_resource_usage: Option<crate::telemetry::ProcessResourceUsageConfig>,
         /// Enable TCP listener accept queue snapshots sampled from Linux sock_diag.
@@ -902,14 +929,7 @@ impl TelemetryCore {
         trigger: Option<crate::dump::DumpRx>,
     ) -> std::io::Result<TelemetryGuard> {
         let start_mono_ns = crate::telemetry::events::clock_monotonic_ns();
-        let rng_seed = task_dump_config.as_ref().and_then(|cfg| cfg.rng_seed());
-        let shared = Arc::new(SharedState::new(start_mono_ns, rng_seed));
-        if let Some(cfg) = task_dump_config.as_ref() {
-            shared.task_dumps_enabled.store(true, Ordering::Relaxed);
-            shared
-                .task_dump_idle_threshold_ns
-                .store(cfg.idle_threshold().as_nanos() as u64, Ordering::Relaxed);
-        }
+        let shared = Arc::new(SharedState::new(start_mono_ns));
 
         // Determine the pipeline strategy from the builder fields, then
         // delegate to `assemble_processors` — the single source of truth for
@@ -941,7 +961,6 @@ impl TelemetryCore {
 
         #[allow(unused_mut)]
         let mut writer = writer;
-        let writer_fs = writer.fs_handle();
 
         let processors = assemble_processors(
             #[cfg(feature = "cpu-profiling")]
@@ -984,7 +1003,7 @@ impl TelemetryCore {
         #[cfg(feature = "cpu-profiling")]
         {
             if let Some(ref config) = cpu_profiling {
-                match crate::telemetry::cpu_profile::CpuProfiler::start(config.clone()) {
+                match CpuProfiler::start(config.clone()) {
                     Ok(sampler) => shared.push_source(Box::new(sampler)),
                     Err(e) => rate_limited!(Duration::from_secs(60), {
                         tracing::warn!("failed to start CPU profiler: {e}");
@@ -992,7 +1011,7 @@ impl TelemetryCore {
                 }
             }
             if let Some(sched_cfg) = sched_events {
-                match crate::telemetry::cpu_profile::SchedProfiler::new(sched_cfg) {
+                match SchedProfiler::new(sched_cfg) {
                     Ok(sched) => shared.push_source(Box::new(sched)),
                     Err(e) => rate_limited!(Duration::from_secs(60), {
                         tracing::warn!("failed to start scheduler event profiler: {e}");
@@ -1001,43 +1020,18 @@ impl TelemetryCore {
             }
         }
 
-        // Channel for Dial9Handle/Guard → flush thread communication.
-        let (control_tx, control_rx) =
-            crate::primitives::sync::mpsc::sync_channel::<ControlCommand>(1);
-
-        let flush_metrics_sink = worker_metrics_sink
-            .clone()
-            .unwrap_or_else(metrique_writer::sink::DevNullSink::boxed);
-
-        let flush_thread = {
-            let shared = shared.clone();
-            crate::primitives::thread::spawn_named("dial9-flush", move || {
-                #[cfg(target_os = "linux")]
-                // SAFETY: nice() is a simple syscall with no memory safety
-                // implications. Increasing the nice value (lowering priority)
-                // is always permitted for unprivileged processes.
-                unsafe {
-                    let _ = libc::nice(10);
-                }
-
-                #[cfg(feature = "cpu-profiling")]
-                let _ = dial9_perf_self_profile::register_current_thread();
-                run_flush_loop(control_rx, &shared, &flush_metrics_sink, writer);
-                #[cfg(feature = "cpu-profiling")]
-                dial9_perf_self_profile::unregister_current_thread();
-            })
-        };
-
-        // Spawn the background worker when we have a filesystem backend
-        // (disk or memory via `writer_fs`) and at least one processor.
-        let worker_config = if processors.is_empty() {
-            None
-        } else if let Some(fs) = writer_fs {
+        // Spawn the background worker before the writer moves into the flush
+        // thread. `worker::spawn` owns the writer->worker fs handoff and returns
+        // `None` when there's no filesystem backend, build a config only when
+        // there are processors to run.
+        #[allow(unused_mut)]
+        let mut worker = None;
+        if !processors.is_empty() {
             let poll_interval =
                 worker_poll_interval.unwrap_or(crate::background_task::DEFAULT_POLL_INTERVAL);
-            let metrics_sink =
-                worker_metrics_sink.unwrap_or_else(metrique_writer::sink::DevNullSink::boxed);
-
+            let metrics_sink = worker_metrics_sink
+                .clone()
+                .unwrap_or_else(metrique_writer::sink::DevNullSink::boxed);
             let config = if let Some(tp) = trace_path {
                 crate::background_task::BackgroundTaskConfig::builder()
                     .trace_path(tp)
@@ -1054,33 +1048,40 @@ impl TelemetryCore {
                     .maybe_trigger(trigger)
                     .build()
             };
-            Some((config, fs))
-        } else {
-            None
-        };
-
-        #[allow(unused_mut)]
-        let mut worker = None;
-        if let Some((config, fs)) = worker_config {
             let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
-            let wt = crate::primitives::thread::spawn_named("dial9-worker", move || {
+            let wt = crate::background_task::spawn(&writer, config, shutdown_rx, || {
                 #[cfg(feature = "cpu-profiling")]
                 let _ = dial9_perf_self_profile::register_current_thread();
-                crate::background_task::run_background_task(config, shutdown_rx, fs);
-                #[cfg(feature = "cpu-profiling")]
-                dial9_perf_self_profile::unregister_current_thread();
+                move || {
+                    #[cfg(feature = "cpu-profiling")]
+                    dial9_perf_self_profile::unregister_current_thread();
+                }
             });
-            worker = Some(WorkerHandle {
-                shutdown: Some(shutdown_tx),
-                thread: Some(wt),
-            });
+            if let Some(wt) = wt {
+                worker = Some(WorkerHandle {
+                    shutdown: Some(shutdown_tx),
+                    thread: Some(wt),
+                });
+            }
         }
 
+        // Inject the cpu-profiler thread registration (perf-specific) via the thread-init hook.
+        let flush_metrics_sink =
+            worker_metrics_sink.unwrap_or_else(metrique_writer::sink::DevNullSink::boxed);
+        let core_session = CoreSession::start(shared, writer, flush_metrics_sink, || {
+            #[cfg(feature = "cpu-profiling")]
+            let _ = dial9_perf_self_profile::register_current_thread();
+            move || {
+                #[cfg(feature = "cpu-profiling")]
+                dial9_perf_self_profile::unregister_current_thread();
+            }
+        });
+
         Ok(TelemetryGuard::enabled(
-            Dial9Handle::enabled(shared, control_tx),
-            Some(flush_thread),
+            core_session,
             worker,
             contexts,
+            task_dump_config,
         ))
     }
 }

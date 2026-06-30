@@ -32,7 +32,6 @@ impl ProcessResourceUsageConfig {
 mod unix {
     use super::ProcessResourceUsageConfig;
     use crate::rate_limit::rate_limited;
-    use crate::telemetry::buffer::record_encodable_event;
     use crate::telemetry::events::clock_monotonic_ns;
     use crate::telemetry::format::ProcessResourceUsageEvent;
     use crate::telemetry::recorder::source::{FlushContext, Source};
@@ -87,7 +86,7 @@ mod unix {
             match read_process_resource_usage() {
                 Ok(snapshot) => {
                     let event = snapshot.into_event(clock_monotonic_ns());
-                    record_encodable_event(&event, ctx.collector, ctx.drain_epoch);
+                    ctx.record_event(&event);
                 }
                 Err(e) => rate_limited!(Duration::from_secs(60), {
                     tracing::warn!("failed to read process resource usage via getrusage: {e}");
@@ -191,8 +190,8 @@ mod unix {
     #[cfg(test)]
     mod tests {
         use super::*;
-        use crate::telemetry::buffer;
         use crate::telemetry::recorder::SharedState;
+        use dial9_core::test_util;
         use serde::Deserialize;
 
         #[derive(Debug, Deserialize)]
@@ -247,18 +246,15 @@ mod unix {
 
         #[test]
         fn source_emits_process_resource_usage_event() {
-            let shared = SharedState::new(0, None);
-            let ctx = FlushContext {
-                collector: &shared.collector,
-                drain_epoch: &shared.drain_epoch,
-            };
+            let shared = SharedState::new(0);
+            let ctx = shared.flush_context();
             let mut source = ProcessResourceUsageSource::new(ProcessResourceUsageConfig::default());
 
             source.flush(&ctx);
-            buffer::drain_to_collector(&shared.collector);
-
-            let batch = shared.collector.next().expect("source should emit a batch");
-            let events = decode_process_resource_usage_events(batch.encoded_bytes());
+            let events: Vec<_> = test_util::drain_encoded_batches(&shared)
+                .iter()
+                .flat_map(|b| decode_process_resource_usage_events(b))
+                .collect();
 
             assert_eq!(events.len(), 1);
             let event = &events[0];
@@ -268,11 +264,8 @@ mod unix {
 
         #[test]
         fn source_respects_sample_interval() {
-            let shared = SharedState::new(0, None);
-            let ctx = FlushContext {
-                collector: &shared.collector,
-                drain_epoch: &shared.drain_epoch,
-            };
+            let shared = SharedState::new(0);
+            let ctx = shared.flush_context();
             let config = ProcessResourceUsageConfig::builder()
                 .sample_interval(Duration::from_secs(60))
                 .build();
@@ -280,10 +273,10 @@ mod unix {
 
             source.flush(&ctx);
             source.flush(&ctx);
-            buffer::drain_to_collector(&shared.collector);
-
-            let batch = shared.collector.next().expect("source should emit a batch");
-            let events = decode_process_resource_usage_events(batch.encoded_bytes());
+            let events: Vec<_> = test_util::drain_encoded_batches(&shared)
+                .iter()
+                .flat_map(|b| decode_process_resource_usage_events(b))
+                .collect();
 
             assert_eq!(events.len(), 1);
         }

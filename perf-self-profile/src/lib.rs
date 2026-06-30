@@ -45,6 +45,9 @@ mod sys;
 pub mod tracepoint;
 pub mod unwinder;
 
+#[cfg(feature = "dial9-source")]
+pub mod cpu_source;
+
 pub use offline_symbolize::SymbolTableEntry;
 pub use sampler::{EventSource, Sample, SamplerConfig, SamplingMode};
 pub use symbolize::{CodeInfo, MapsEntry, SymbolInfo};
@@ -86,6 +89,11 @@ pub fn unregister_current_thread() {
 // blazesym-dependent APIs
 #[cfg(target_os = "linux")]
 pub use sys::{resolve_symbol_with_maps, resolve_symbols_with_maps};
+
+#[cfg(feature = "dial9-source")]
+pub use cpu_source::{
+    CpuProfiler, CpuProfilingConfig, CpuSampleSource, SchedEventConfig, SchedProfiler,
+};
 
 /// Internal module exposed only for benchmarks. Not part of the public API.
 #[cfg(all(target_os = "linux", feature = "__internal-bench"))]

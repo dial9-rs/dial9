@@ -511,23 +511,7 @@ mod tests {
         })
         .unwrap();
 
-        // 8. CpuSampleEvent
-        let thread_name = enc.intern_string("tokio-runtime-worker").unwrap();
-        let callchain = enc
-            .intern_stack_frames(&[0xdead_beef, 0xcafe_babe])
-            .unwrap();
-        enc.write(&format::CpuSampleEvent {
-            timestamp_ns: 7_000_000,
-            worker_id: format::WorkerId::from(0u8),
-            tid: 9999,
-            source: crate::telemetry::events::CpuSampleSource::CpuProfile,
-            thread_name: Some(thread_name),
-            callchain,
-            cpu: Some(3),
-        })
-        .unwrap();
-
-        // 9. TaskDumpEvent
+        // 8. TaskDumpEvent
         let dump_chain = enc.intern_stack_frames(&[0x1111, 0x2222, 0x3333]).unwrap();
         enc.write(&format::TaskDumpEvent {
             timestamp_ns: 8_000_000,
@@ -623,7 +607,7 @@ mod tests {
         })
         .expect("decode");
 
-        assert_eq!(events.len(), 16);
+        assert_eq!(events.len(), 15);
 
         // 1. PollStartEvent
         let Dial9Event::PollStartEvent(ref e) = events[0] else {
@@ -686,53 +670,42 @@ mod tests {
         assert_eq!(e.timestamp_ns, 6_000_000);
         assert_eq!(e.task_id, 200);
 
-        // 8. CpuSampleEvent
-        let Dial9Event::CpuSampleEvent(ref e) = events[7] else {
-            panic!("expected CpuSampleEvent, got {:?}", events[7]);
-        };
-        assert_eq!(e.timestamp_ns, 7_000_000);
-        assert_eq!(e.tid, 9999);
-        assert_eq!(e.source, CpuSampleSource::CpuProfile);
-        assert_eq!(e.thread_name.as_deref(), Some("tokio-runtime-worker"));
-        assert_eq!(e.callchain, vec![0xdead_beef, 0xcafe_babe]);
-        assert_eq!(e.cpu, Some(3));
-
-        // 9. TaskDumpEvent
-        let Dial9Event::TaskDumpEvent(ref e) = events[8] else {
-            panic!("expected TaskDumpEvent, got {:?}", events[8]);
+        // 8. TaskDumpEvent
+        let Dial9Event::TaskDumpEvent(ref e) = events[7] else {
+            panic!("expected TaskDumpEvent, got {:?}", events[7]);
         };
         assert_eq!(e.timestamp_ns, 8_000_000);
         assert_eq!(e.task_id, 100);
         assert_eq!(e.callchain, vec![0x1111, 0x2222, 0x3333]);
 
-        // 10. WakeEvent
-        let Dial9Event::WakeEvent(ref e) = events[9] else {
-            panic!("expected WakeEvent, got {:?}", events[9]);
+        // 9. WakeEvent
+        let Dial9Event::WakeEvent(ref e) = events[8] else {
+            panic!("expected WakeEvent, got {:?}", events[8]);
         };
         assert_eq!(e.timestamp_ns, 9_000_000);
         assert_eq!(e.waker_task_id, 100);
         assert_eq!(e.woken_task_id, 200);
         assert_eq!(e.target_worker, 1);
 
-        // 11. SegmentMetadataEvent
-        let Dial9Event::SegmentMetadataEvent(ref e) = events[10] else {
-            panic!("expected SegmentMetadataEvent, got {:?}", events[10]);
+        // 10. SegmentMetadataEvent
+        let Dial9Event::SegmentMetadataEvent(ref e) = events[9] else {
+            panic!("expected SegmentMetadataEvent, got {:?}", events[9]);
         };
         assert_eq!(e.timestamp_ns, 10_000_000);
         assert_eq!(e.entries.get("runtime").unwrap(), "main");
         assert_eq!(e.entries.get("version").unwrap(), "0.3.11");
         assert_eq!(e.entries.len(), 2);
 
-        // 12. ClockSyncEvent
-        let Dial9Event::ClockSyncEvent(ref e) = events[11] else {
-            panic!("expected ClockSyncEvent, got {:?}", events[11]);
+        // 11. ClockSyncEvent
+        let Dial9Event::ClockSyncEvent(ref e) = events[10] else {
+            panic!("expected ClockSyncEvent, got {:?}", events[10]);
         };
         assert_eq!(e.timestamp_ns, 11_000_000);
         assert_eq!(e.realtime_ns, 1_700_000_000_000_000_000);
 
-        // 13. AllocEvent
-        let Dial9Event::AllocEvent(ref e) = events[12] else {
-            panic!("expected AllocEvent, got {:?}", events[12]);
+        // 12. AllocEvent
+        let Dial9Event::AllocEvent(ref e) = events[11] else {
+            panic!("expected AllocEvent, got {:?}", events[11]);
         };
         assert_eq!(e.timestamp_ns, 12_000_000);
         assert_eq!(e.tid, 5555);
@@ -740,9 +713,9 @@ mod tests {
         assert_eq!(e.addr, 0x7fff_0000_1000);
         assert_eq!(e.callchain, vec![0xaaaa, 0xbbbb]);
 
-        // 14. FreeEvent
-        let Dial9Event::FreeEvent(ref e) = events[13] else {
-            panic!("expected FreeEvent, got {:?}", events[13]);
+        // 13. FreeEvent
+        let Dial9Event::FreeEvent(ref e) = events[12] else {
+            panic!("expected FreeEvent, got {:?}", events[12]);
         };
         assert_eq!(e.timestamp_ns, 13_000_000);
         assert_eq!(e.tid, 5555);
@@ -750,9 +723,9 @@ mod tests {
         assert_eq!(e.size, 1024);
         assert_eq!(e.alloc_timestamp_ns, 12_000_000);
 
-        // 15. ProcessResourceUsageEvent
-        let Dial9Event::ProcessResourceUsageEvent(ref e) = events[14] else {
-            panic!("expected ProcessResourceUsageEvent, got {:?}", events[14]);
+        // 14. ProcessResourceUsageEvent
+        let Dial9Event::ProcessResourceUsageEvent(ref e) = events[13] else {
+            panic!("expected ProcessResourceUsageEvent, got {:?}", events[13]);
         };
         assert_eq!(e.timestamp_ns, 14_000_000);
         assert_eq!(e.user_cpu_ns, 1_000_000);
@@ -765,9 +738,9 @@ mod tests {
         assert_eq!(e.voluntary_context_switches, 4);
         assert_eq!(e.involuntary_context_switches, 5);
 
-        // 16. TcpAcceptQueueEvent
-        let Dial9Event::TcpAcceptQueueEvent(ref e) = events[15] else {
-            panic!("expected TcpAcceptQueueEvent, got {:?}", events[15]);
+        // 15. TcpAcceptQueueEvent
+        let Dial9Event::TcpAcceptQueueEvent(ref e) = events[14] else {
+            panic!("expected TcpAcceptQueueEvent, got {:?}", events[14]);
         };
         assert_eq!(e.timestamp_ns, 15_000_000);
         assert_eq!(e.socket_cookie, 67890);
@@ -807,37 +780,5 @@ mod tests {
 
         assert_eq!(events.len(), 1);
         assert!(matches!(events[0], Dial9Event::Other));
-    }
-
-    #[test]
-    fn optional_fields_decode_as_none() {
-        let mut enc = Encoder::new();
-
-        let callchain = enc.intern_stack_frames(&[0x1234]).unwrap();
-        enc.write(&format::CpuSampleEvent {
-            timestamp_ns: 1_000_000,
-            worker_id: format::WorkerId::from(0u8),
-            tid: 1111,
-            source: crate::telemetry::events::CpuSampleSource::CpuProfile,
-            thread_name: None,
-            callchain,
-            cpu: None,
-        })
-        .unwrap();
-
-        let bytes = enc.finish();
-        let mut dec = Decoder::new(&bytes).expect("valid header");
-        let mut events: Vec<Dial9Event> = Vec::new();
-        dec.for_each_event(|raw| {
-            events.push(raw.deserialize().expect("deserialize"));
-        })
-        .expect("decode");
-
-        assert_eq!(events.len(), 1);
-        let Dial9Event::CpuSampleEvent(ref e) = events[0] else {
-            panic!("expected CpuSampleEvent, got {:?}", events[0]);
-        };
-        assert_eq!(e.thread_name, None);
-        assert_eq!(e.cpu, None);
     }
 }

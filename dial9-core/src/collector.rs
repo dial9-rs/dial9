@@ -8,34 +8,51 @@ use crate::primitives::sync::atomic::{AtomicUsize, Ordering};
 /// 5ms so in practice the queue rarely has more than a handful of entries.
 const DEFAULT_CAPACITY: usize = 1024;
 
+crate::test_util_pub! {
 /// A batch of encoded trace events ready for writing.
 #[derive(Debug)]
 #[non_exhaustive]
-pub struct Batch {
+struct Batch {
     pub(crate) encoded_bytes: Vec<u8>,
     pub(crate) event_count: u64,
 }
+}
 
 impl Batch {
+    crate::test_util_pub! {
     /// Create a new batch from encoded bytes and an event count.
-    pub fn new(encoded_bytes: Vec<u8>, event_count: u64) -> Self {
+    fn new(encoded_bytes: Vec<u8>, event_count: u64) -> Self {
         Self {
             encoded_bytes,
             event_count,
         }
     }
+    }
 
+    crate::test_util_pub! {
     /// The encoded trace bytes for this batch.
-    pub fn encoded_bytes(&self) -> &[u8] {
+    fn encoded_bytes(&self) -> &[u8] {
         &self.encoded_bytes
+    }
     }
 
     /// Number of events in this batch.
-    pub fn event_count(&self) -> u64 {
+    pub(crate) fn event_count(&self) -> u64 {
         self.event_count
+    }
+
+    /// Whether this batch contains no events.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.event_count == 0
+    }
+
+    /// Consume the batch, returning the encoded bytes without copying.
+    pub(crate) fn into_encoded_bytes(self) -> Vec<u8> {
+        self.encoded_bytes
     }
 }
 
+/// Ring buffer of encoded batches awaiting write by the flush thread.
 pub(crate) struct CentralCollector {
     queue: BoundedQueue<Batch>,
     dropped_batches: AtomicUsize,

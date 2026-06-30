@@ -5,7 +5,7 @@
 //! back to disk with gzip compression.
 #![cfg(all(feature = "cpu-profiling", target_os = "linux"))]
 
-use dial9_tokio_telemetry::telemetry::cpu_profile::CpuProfilingConfig;
+use dial9_tokio_telemetry::telemetry::CpuProfilingConfig;
 use dial9_tokio_telemetry::telemetry::{DiskWriter, TracedRuntime};
 use dial9_trace_format::decoder::Decoder;
 use flate2::read::GzDecoder;

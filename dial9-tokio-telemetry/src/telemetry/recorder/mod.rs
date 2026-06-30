@@ -1,28 +1,26 @@
 mod builder;
-mod flush_loop;
 mod guard;
 mod handle;
 mod runtime_context;
-mod shared_state;
-pub(crate) mod source;
+pub(crate) use dial9_core::shared_state::SharedState;
+pub(crate) use dial9_core::source;
 
 pub(crate) use runtime_context::RuntimeContext;
 pub use runtime_context::current_worker_id;
 pub(crate) use runtime_context::poll_start_ts_monotonic;
-pub(crate) use shared_state::SharedState;
 
 pub use builder::{
     BuildAndStartRuntime, HasTracePath, NoTracePath, PipelineCustom, PipelineS3, PipelineUnset,
     TelemetryCore, TelemetryCoreBuilder, TelemetryRuntimeError, TracedRuntime,
     TracedRuntimeBuilder,
 };
+pub use dial9_core::handle::Dial9Handle;
 pub use guard::{TelemetryGuard, TraceRuntimeCoreBuilder};
-pub use handle::{Dial9Handle, Dial9TokioHandle, spawn};
+pub(crate) use handle::traced_handle;
+pub use handle::{Dial9TokioHandle, spawn};
 
 mod tokio_hooks;
 pub use tokio_hooks::TokioHooks;
-
-pub(crate) use flush_loop::FlushStats;
 
 // Re-exports for internal test access
 #[cfg(test)]
@@ -30,25 +28,15 @@ use builder::PipelineConfig;
 #[cfg(test)]
 use handle::InstrumentedSpawnGuard;
 
-use handle::{CURRENT_HANDLE, INSTRUMENTED_SPAWN};
+use dial9_core::handle::{clear_tl_handle, set_tl_handle};
+use handle::INSTRUMENTED_SPAWN;
 use runtime_context::{make_poll_end, make_poll_start, make_worker_park, make_worker_unpark};
 
 use crate::primitives::sync::Arc;
-use crate::primitives::sync::atomic::Ordering;
 use crate::rate_limit::rate_limited;
 use crate::telemetry::format::TaskTerminateEvent;
 use crate::telemetry::task_metadata::TaskId;
 use std::time::Duration;
-
-// ---------------------------------------------------------------------------
-// Channel-based control for the flush thread
-// ---------------------------------------------------------------------------
-
-/// Commands sent to the flush thread from Dial9Handle / TelemetryGuard.
-pub(crate) enum ControlCommand {
-    /// Flush, finalize (seal segment), then exit the thread.
-    FinalizeAndStop(crate::primitives::sync::mpsc::SyncSender<()>),
-}
 
 /// Register a tokio hook, composing with an optional user callback.
 /// When `$user_hook` is None, registers only the dial9 closure (zero-cost).
@@ -97,9 +85,12 @@ fn register_hooks(
     builder: &mut tokio::runtime::Builder,
     ctx: &Arc<RuntimeContext>,
     shared: &Arc<SharedState>,
-    control_tx: &crate::primitives::sync::mpsc::SyncSender<ControlCommand>,
+    handle: &Dial9Handle,
     task_tracking_enabled: bool,
     tokio_hooks: TokioHooks,
+    #[cfg_attr(not(feature = "taskdump"), allow(unused_variables))] taskdump_config: Option<
+        crate::telemetry::task_dump_config::TaskDumpConfig,
+    >,
 ) {
     // TODO: these should rely on public APIs instead of utilizing `SharedState`
 
@@ -200,16 +191,20 @@ fn register_hooks(
     // Unified on_thread_start / on_thread_stop. Tokio only stores one
     // callback per hook, so any feature-gated work must live here rather
     // than registering its own hook.
-    let handle_for_tl = Dial9Handle::enabled(shared.clone(), control_tx.clone());
+    let handle_for_tl = handle.clone();
     #[cfg(feature = "cpu-profiling")]
     let s_stop = shared.clone();
 
     register_hook!(builder, on_thread_start, tokio_hooks.on_thread_start, {
         // Install this thread's Dial9Handle so user code can call
         // `Dial9Handle::current()` from anywhere on this thread.
-        CURRENT_HANDLE.with(|cell| {
-            *cell.borrow_mut() = Some(handle_for_tl.clone());
-        });
+        set_tl_handle(handle_for_tl.clone());
+
+        // Install this thread's task-dump config for `TaskDumped` to read.
+        #[cfg(feature = "taskdump")]
+        if let Some(config) = taskdump_config {
+            crate::task_dumped::set_taskdump_config(config);
+        }
 
         #[cfg(feature = "cpu-profiling")]
         {
@@ -224,17 +219,18 @@ fn register_hooks(
     });
 
     register_hook!(builder, on_thread_stop, tokio_hooks.on_thread_stop, {
-        CURRENT_HANDLE.with(|cell| {
-            *cell.borrow_mut() = None;
-        });
+        clear_tl_handle();
+
+        #[cfg(feature = "taskdump")]
+        crate::task_dumped::clear_taskdump_config();
 
         #[cfg(feature = "cpu-profiling")]
         {
-            if let Ok(mut sources) = s_stop.sources.lock() {
+            s_stop.with_sources_mut(|sources| {
                 for source in sources.iter_mut() {
                     source.on_thread_stop();
                 }
-            }
+            });
             dial9_perf_self_profile::unregister_current_thread();
         }
     });
@@ -242,40 +238,45 @@ fn register_hooks(
 
 /// Attach a runtime to an existing telemetry session: register hooks, build
 /// the runtime, reserve worker IDs, and push the context.
+#[allow(clippy::too_many_arguments)]
 fn attach_runtime(
     shared: &Arc<SharedState>,
     contexts: &runtime_context::RuntimeContextRegistry,
     mut builder: tokio::runtime::Builder,
     runtime_name: Option<String>,
-    control_tx: &crate::primitives::sync::mpsc::SyncSender<ControlCommand>,
+    handle: &Dial9Handle,
     task_tracking_enabled: bool,
     tokio_hooks: TokioHooks,
+    taskdump_config: Option<crate::telemetry::task_dump_config::TaskDumpConfig>,
 ) -> std::io::Result<tokio::runtime::Runtime> {
     let ctx = Arc::new(RuntimeContext::new(runtime_name));
     register_hooks(
         &mut builder,
         &ctx,
         shared,
-        control_tx,
+        handle,
         task_tracking_enabled,
         tokio_hooks,
+        taskdump_config,
     );
 
     let runtime = builder.build()?;
 
     // Install the handle on the calling thread. For current_thread runtimes,
     // this thread IS the worker (block_on runs here), so the tracing layer
-    // needs CURRENT_HANDLE to be set. Harmless for multi_thread runtimes.
-    CURRENT_HANDLE.with(|cell| {
-        *cell.borrow_mut() = Some(Dial9Handle::enabled(shared.clone(), control_tx.clone()));
-    });
+    // needs the TL handle to be set. Harmless for multi_thread runtimes.
+    set_tl_handle(handle.clone());
+
+    // Same for the task-dump config: on_thread_start skips this thread.
+    #[cfg(feature = "taskdump")]
+    if let Some(config) = taskdump_config {
+        crate::task_dumped::set_taskdump_config(config);
+    }
 
     // Pre-reserve a contiguous block of worker IDs and set metrics atomically.
     let metrics = runtime.handle().metrics();
     let num_workers = metrics.num_workers() as u64;
-    let base = shared
-        .next_worker_id
-        .fetch_add(num_workers, Ordering::Relaxed);
+    let base = shared.reserve_worker_ids(num_workers);
     ctx.metrics_and_base
         .set((metrics, base))
         .unwrap_or_else(|_| {
@@ -309,29 +310,14 @@ fn attach_runtime(
 mod tests {
     use super::*;
     use crate::background_task::testutil::{CapturingProcessor, decode_captured};
-    use crate::telemetry::buffer;
-    use crate::telemetry::collector::CentralCollector;
     use crate::telemetry::writer::InMemoryWriter;
+    use dial9_core::test_util;
     use std::panic::Location;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicU64, AtomicUsize};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// In-memory capture budget for runtime tests.
     const CAPTURE_SIZE: u64 = 16 * 1024 * 1024;
-
-    /// Drain all pending batches from a `CentralCollector` into a writer.
-    /// Call `buffer::drain_to_collector` first to flush the thread-local buffer.
-    #[cfg(feature = "analysis")]
-    fn drain_collector_to_writer(
-        collector: &CentralCollector,
-        writer: &mut crate::telemetry::writer::DiskWriter,
-    ) {
-        while let Some(batch) = collector.next() {
-            if batch.event_count > 0 {
-                writer.write_encoded_batch(&batch).unwrap();
-            }
-        }
-    }
 
     /// Nested `InstrumentedSpawnGuard`s must compose: inner drop must not
     /// clear the outer scope. Counter, not flag.
@@ -426,8 +412,11 @@ mod tests {
 
         assert!(guard.is_enabled());
         assert!(guard.shared().unwrap().is_enabled());
-        let runtime_meta =
-            source::collect_segment_metadata(&mut guard.shared().unwrap().sources.lock().unwrap());
+        let runtime_meta = guard
+            .shared()
+            .unwrap()
+            .with_sources_mut(source::collect_segment_metadata)
+            .unwrap();
         assert!(
             !runtime_meta.iter().any(|(k, _)| k.starts_with("runtime.")),
             "disabled Tokio instrumentation should not produce runtime metadata"
@@ -443,8 +432,11 @@ mod tests {
             }
         });
 
-        let runtime_meta =
-            source::collect_segment_metadata(&mut guard.shared().unwrap().sources.lock().unwrap());
+        let runtime_meta = guard
+            .shared()
+            .unwrap()
+            .with_sources_mut(source::collect_segment_metadata)
+            .unwrap();
         assert!(
             !runtime_meta.iter().any(|(k, _)| k.starts_with("runtime.")),
             "disabled Tokio instrumentation should not produce runtime metadata after running work"
@@ -484,7 +476,7 @@ mod tests {
 
     #[test]
     fn test_shared_state_no_spawn_location_fields() {
-        let _shared = SharedState::new(crate::telemetry::events::clock_monotonic_ns(), None);
+        let _shared = SharedState::new(crate::telemetry::events::clock_monotonic_ns());
     }
 
     #[test]
@@ -542,8 +534,7 @@ mod tests {
             .build()
             .unwrap();
         let mut ew = writer;
-        let collector = Arc::new(CentralCollector::new());
-        let drain_epoch = AtomicU64::new(0);
+        let shared = crate::telemetry::recorder::SharedState::new(0);
 
         let locations = [
             location_a, location_b, location_a, location_b, location_a, location_b,
@@ -551,37 +542,28 @@ mod tests {
         for (i, loc) in locations.iter().enumerate() {
             let task_id = crate::telemetry::task_metadata::TaskId::from_u32(i as u32);
             let ts = (i as u64 + 1) * 1000;
-            buffer::with_encoder(
-                |enc| {
-                    let spawn_loc = enc.intern_location(loc);
-                    enc.encode(&crate::telemetry::format::TaskSpawnEvent {
-                        timestamp_ns: ts,
-                        task_id,
-                        spawn_loc,
-                        instrumented: true,
-                    });
-                },
-                &collector,
-                &drain_epoch,
-            );
-            buffer::with_encoder(
-                |enc| {
-                    let spawn_loc = enc.intern_location(loc);
-                    enc.encode(&crate::telemetry::format::PollStartEvent {
-                        timestamp_ns: ts,
-                        worker_id: WorkerId::from(0usize),
-                        local_queue: 0,
-                        task_id,
-                        spawn_loc,
-                    });
-                },
-                &collector,
-                &drain_epoch,
-            );
+            shared.flush_context().with_encoder(|enc| {
+                let spawn_loc = enc.intern_location(loc);
+                enc.encode(&crate::telemetry::format::TaskSpawnEvent {
+                    timestamp_ns: ts,
+                    task_id,
+                    spawn_loc,
+                    instrumented: true,
+                });
+            });
+            shared.flush_context().with_encoder(|enc| {
+                let spawn_loc = enc.intern_location(loc);
+                enc.encode(&crate::telemetry::format::PollStartEvent {
+                    timestamp_ns: ts,
+                    worker_id: WorkerId::from(0usize),
+                    local_queue: 0,
+                    task_id,
+                    spawn_loc,
+                });
+            });
             // Drain after each iteration to produce separate small batches
             // that trigger file rotation (max_file_size is 100 bytes).
-            buffer::drain_to_collector(&collector);
-            drain_collector_to_writer(&collector, &mut ew);
+            test_util::drain_into(&shared, &mut ew).unwrap();
         }
         ew.flush().unwrap();
         ew.finalize().unwrap();
@@ -994,10 +976,7 @@ mod tests {
         use super::*;
         use crate::telemetry::analysis::TraceReader;
         use crate::telemetry::analysis_events::Dial9Event;
-        use crate::telemetry::buffer::ThreadLocalBuffer;
-        use crate::telemetry::collector::Batch;
-        use crate::telemetry::events::{CpuSampleData, CpuSampleSource};
-        use crate::telemetry::format::WorkerId;
+        use crate::telemetry::format::{WorkerId, WorkerParkEvent};
         use crate::telemetry::task_metadata::TaskId;
         use crate::telemetry::writer::DiskWriter;
         use proptest::prelude::*;
@@ -1007,44 +986,27 @@ mod tests {
             writer: &mut DiskWriter,
             event: &dyn crate::telemetry::buffer::Encodable,
         ) -> std::io::Result<()> {
-            let encoded_bytes = ThreadLocalBuffer::encode_single(event);
-            let batch = Batch {
-                encoded_bytes,
-                event_count: 1,
-            };
-            writer.write_encoded_batch(&batch)
+            test_util::write_event(writer, event)
         }
 
         #[derive(Debug, Clone)]
         enum FlushOp {
-            CpuSample {
-                worker_id: WorkerId,
-                tid: u32,
-                callchain: Vec<u64>,
-            },
-            PollStart {
-                location_idx: usize,
-            },
+            OtherEvent { worker_id: WorkerId, tid: u32 },
+            PollStart { location_idx: usize },
         }
 
         fn arb_flush_op() -> impl Strategy<Value = FlushOp> {
             prop_oneof![
-                (
-                    prop::bool::ANY,
-                    0u32..4,
-                    prop::collection::vec(0u64..8, 0..3),
-                )
-                    .prop_map(|(is_worker, tid, callchain)| {
-                        FlushOp::CpuSample {
-                            worker_id: if is_worker {
-                                WorkerId::from(0usize)
-                            } else {
-                                WorkerId::UNKNOWN
-                            },
-                            tid,
-                            callchain,
-                        }
-                    }),
+                (prop::bool::ANY, 0u32..4,).prop_map(|(is_worker, tid)| {
+                    FlushOp::OtherEvent {
+                        worker_id: if is_worker {
+                            WorkerId::from(0usize)
+                        } else {
+                            WorkerId::UNKNOWN
+                        },
+                        tid,
+                    }
+                }),
                 (0usize..3).prop_map(|idx| FlushOp::PollStart { location_idx: idx }),
             ]
         }
@@ -1059,7 +1021,7 @@ mod tests {
             (
                 prop::collection::vec(arb_flush_op(), 0..12).prop_map(|ops| {
                     ops.into_iter()
-                        .filter(|o| matches!(o, FlushOp::CpuSample { .. }))
+                        .filter(|o| matches!(o, FlushOp::OtherEvent { .. }))
                         .collect()
                 }),
                 prop::collection::vec(arb_flush_op(), 0..12).prop_map(|ops| {
@@ -1079,23 +1041,19 @@ mod tests {
             expected_raw: &mut usize,
         ) {
             for op in &round.cpu_ops {
-                if let FlushOp::CpuSample {
-                    worker_id,
-                    tid,
-                    callchain,
-                } = op
-                {
-                    let data = CpuSampleData {
-                        timestamp_nanos: *timestamp,
-                        worker_id: *worker_id,
-                        tid: *tid,
-                        source: CpuSampleSource::CpuProfile,
-                        thread_name: None,
-                        callchain: callchain.clone(),
-                        cpu: None,
-                    };
+                if let FlushOp::OtherEvent { worker_id, tid } = op {
+                    write_raw_event(
+                        &mut *ew,
+                        &WorkerParkEvent {
+                            timestamp_ns: *timestamp,
+                            worker_id: *worker_id,
+                            local_queue: 0,
+                            cpu_time_ns: 0,
+                            tid: *tid,
+                        },
+                    )
+                    .unwrap();
                     *timestamp += 1;
-                    write_raw_event(&mut *ew, &data).unwrap();
                 }
             }
 
@@ -1139,15 +1097,8 @@ mod tests {
                     .unwrap_or_else(|e| panic!("failed to open {path_str}: {e}"));
 
                 for ev in &reader.all_events {
-                    match ev {
-                        Dial9Event::PollStartEvent(_) => {
-                            total_raw += 1;
-                        }
-                        Dial9Event::CpuSampleEvent(..) => {
-                            // Callchain addresses are raw; symbolization
-                            // happens in the background worker now.
-                        }
-                        _ => {}
+                    if matches!(ev, Dial9Event::PollStartEvent(_)) {
+                        total_raw += 1;
                     }
                 }
             }
@@ -1379,13 +1330,10 @@ mod tests {
         });
 
         // Drain thread-local buffers before shutdown.
-        crate::telemetry::buffer::drain_to_collector(
-            &guard
-                .handle()
-                .traced_handle()
+        test_util::drain_thread_local(
+            &traced_handle(&guard.handle())
                 .expect("enabled handle must yield a TracedHandle")
-                .shared
-                .collector,
+                .shared,
         );
 
         drop(runtime);
@@ -1835,8 +1783,8 @@ mod tests {
     #[cfg(feature = "cpu-profiling")]
     #[test]
     fn telemetry_core_builder_cpu_profiling_auto_wires_processors() {
-        use crate::telemetry::cpu_profile::CpuProfilingConfig;
         use crate::telemetry::writer::DiskWriter;
+        use dial9_perf_self_profile::CpuProfilingConfig;
 
         let dir = tempfile::tempdir().unwrap();
         let trace_path = dir.path().join("trace.bin");

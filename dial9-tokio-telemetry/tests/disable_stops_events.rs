@@ -118,7 +118,7 @@ fn disable_stops_all_event_production() {
 #[test]
 #[cfg(all(feature = "cpu-profiling", target_os = "linux"))]
 fn disable_stops_cpu_sample_production() {
-    use dial9_tokio_telemetry::telemetry::cpu_profile::CpuProfilingConfig;
+    use dial9_tokio_telemetry::telemetry::CpuProfilingConfig;
 
     let dir = tempfile::tempdir().unwrap();
     let trace_path = dir.path().join("trace.bin");

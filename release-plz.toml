@@ -23,6 +23,8 @@ name = "dial9-tokio-telemetry"
 changelog_update = true
 changelog_path = "CHANGELOG.md"
 changelog_include = [
+    "dial9-core",
+    "dial9-utils",
     "dial9-macro",
     "dial9-perf-self-profile",
     "dial9-trace-format",
@@ -30,6 +32,14 @@ changelog_include = [
     "dial9-viewer",
     "dial9",
 ]
+
+[[package]]
+name = "dial9-core"
+changelog_update = false
+
+[[package]]
+name = "dial9-utils"
+changelog_update = false
 
 [[package]]
 name = "dial9-macro"

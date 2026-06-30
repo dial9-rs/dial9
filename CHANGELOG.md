@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - In-memory writer (`InMemoryWriter`): run the trace pipeline with no filesystem dependency, encoded segments are held in process memory and shipped by the existing processor pipeline ([#435](https://github.com/dial9-rs/dial9/pull/435))
 - `#[dial9_tokio_telemetry::main]` now performs an implicit graceful shutdown after the async body returns: it drops the runtime and drains the background worker so the final segment is symbolized, compressed, and uploaded. Configure the deadline with `Dial9Config::builder()...graceful_shutdown(Duration)` (default 1s) or skip it with `.disable_graceful_shutdown()`. The low-level `TracedRuntime` API is unchanged — call `TelemetryGuard::graceful_shutdown` yourself ([#479](https://github.com/dial9-rs/dial9/issues/479))
+- `SegmentProcessor::finalize_dump`: custom processors can flush per-dump state when an on-demand dump completes ([#549](https://github.com/dial9-rs/dial9/pull/549))
+- `ProcessError::into_parts`: destructure a processing error into its kind and the carried segment data ([#549](https://github.com/dial9-rs/dial9/pull/549))
 
 ### Changed
 
@@ -20,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Breaking:** collapsed the handle types into `Dial9Handle` (record/control, runtime-agnostic) and `Dial9TokioHandle` (spawn only). `TelemetryHandle` and `RuntimeTelemetryHandle` are removed ([#535](https://github.com/dial9-rs/dial9/pull/535))
 - **Breaking:** recording is now a method: `record_event(event, &handle)` becomes `handle.record_event(event)` ([#535](https://github.com/dial9-rs/dial9/pull/535))
 - **Breaking:** `guard.handle()` now returns `Dial9Handle` (record/control). To spawn instrumented tasks use `Dial9TokioHandle::current()`, `guard.tokio_handle(&runtime)`, or the handle from `trace_runtime().build()` ([#535](https://github.com/dial9-rs/dial9/pull/535))
+- **Breaking:** `boot_id` is no longer an `S3Config` builder field. The runtime injects the on-disk namespace `boot_id` into the S3 config at build time, so a local trace segment and its S3 key share one identity. An `S3Config` built outside the managed `Dial9Config` path falls back to a fresh `{4-alpha}-{pid}` ([#566](https://github.com/dial9-rs/dial9/pull/566))
 
 ## [0.3.13](https://github.com/dial9-rs/dial9/compare/dial9-tokio-telemetry-v0.3.12...dial9-tokio-telemetry-v0.3.13) - 2026-05-29
 
