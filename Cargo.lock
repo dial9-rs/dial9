@@ -1970,6 +1970,8 @@ dependencies = [
  "futures",
  "http 1.4.0",
  "lasso",
+ "metrique",
+ "metrique-writer",
  "mime_guess",
  "parquet",
  "reqwest",
@@ -1983,6 +1985,7 @@ dependencies = [
  "tempfile",
  "time",
  "tokio",
+ "tower",
  "tower-http",
  "tracing",
  "tracing-subscriber",
@@ -2029,6 +2032,12 @@ dependencies = [
  "quote",
  "syn",
 ]
+
+[[package]]
+name = "dtoa"
+version = "1.0.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4c3cf4824e2d5f025c7b531afcb2325364084a16806f6d47fbc1f5fbd9960590"
 
 [[package]]
 name = "dunce"
@@ -2502,6 +2511,15 @@ checksum = "1f7685beb53fc20efc2605f32f5d51e9ba18b8ef237961d1760169d2290d3bee"
 dependencies = [
  "outref",
  "vsimd",
+]
+
+[[package]]
+name = "histogram"
+version = "0.11.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "099d45a031296a7a40e01137b56c0c552f2a545568ef6058e47d674046def0db"
+dependencies = [
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -3286,10 +3304,12 @@ dependencies = [
  "jiff",
  "metrique-core",
  "metrique-macro",
+ "metrique-metricsrs",
  "metrique-service-metrics",
  "metrique-timesource",
  "metrique-writer",
  "metrique-writer-core",
+ "metrique-writer-format-emf",
  "metrique-writer-macro",
  "ryu",
  "serde_json",
@@ -3317,6 +3337,24 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "metrique-metricsrs"
+version = "0.1.24"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1f94ae3e46e520e5cb2cce779a7d472fbf08d95a58ded8cea0d1cdafd2402ac9"
+dependencies = [
+ "derive-where",
+ "futures",
+ "histogram",
+ "metrique-timesource",
+ "metrique-writer",
+ "metrique-writer-core",
+ "pin-project",
+ "tokio",
+ "tokio-util",
+ "tracing",
 ]
 
 [[package]]
@@ -3370,6 +3408,26 @@ dependencies = [
  "serde",
  "smallvec",
  "tokio",
+]
+
+[[package]]
+name = "metrique-writer-format-emf"
+version = "0.1.22"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "59fca512de7ed9e29644950426fe3810016fb8f8e478a779fffc33d45b9e9b4e"
+dependencies = [
+ "bit-set",
+ "dtoa",
+ "hashbrown 0.16.1",
+ "itertools 0.14.0",
+ "itoa",
+ "metrique-writer",
+ "metrique-writer-core",
+ "rand 0.9.4",
+ "serde",
+ "serde_json",
+ "smallvec",
+ "tracing",
 ]
 
 [[package]]
@@ -3787,6 +3845,26 @@ checksum = "d9c25955321465255e437600b54296983fab1feac2cd0c38958adeb26dbae49e"
 dependencies = [
  "libc",
  "memoffset",
+]
+
+[[package]]
+name = "pin-project"
+version = "1.1.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2466b2336ed02bcdca6b294417127b90ec92038d1d5c4fbeac971a922e0e0924"
+dependencies = [
+ "pin-project-internal",
+]
+
+[[package]]
+name = "pin-project-internal"
+version = "1.1.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c96395f0a926bc13b1c17622aaddda1ecb55d49c8f1bf9777e4d877800a43f8b"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]
@@ -5296,6 +5374,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tracing-serde"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "704b1aeb7be0d0a84fc9828cae51dab5970fee5088f83d1dd7ee6f6246fc6ff1"
+dependencies = [
+ "serde",
+ "tracing-core",
+]
+
+[[package]]
 name = "tracing-subscriber"
 version = "0.3.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5305,12 +5393,15 @@ dependencies = [
  "nu-ansi-term",
  "once_cell",
  "regex-automata",
+ "serde",
+ "serde_json",
  "sharded-slab",
  "smallvec",
  "thread_local",
  "tracing",
  "tracing-core",
  "tracing-log",
+ "tracing-serde",
 ]
 
 [[package]]

@@ -89,7 +89,7 @@ pub async fn get_tokio_stats(
         hosts: params.host.clone(),
     };
 
-    tracing::info!(
+    tracing::debug!(
         source_bucket = %agg.source_bucket,
         source_prefixes = ?agg.source_prefixes,
         service = scope.service.as_deref().unwrap_or("(all)"),
@@ -135,7 +135,7 @@ pub async fn get_tokio_stats(
     let files_folded = refined.files_folded();
 
     let notable_polls: usize = acc.by_loc.values().map(|la| la.durations.len()).sum();
-    tracing::info!(
+    tracing::debug!(
         files_read,
         files_folded,
         files_matched,

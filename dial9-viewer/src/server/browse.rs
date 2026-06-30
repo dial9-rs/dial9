@@ -105,7 +105,9 @@ pub async fn browse(
 
     let (prefixes, range_truncated) = time_prefixes(&base, params.from, params.to, gran);
 
-    tracing::info!(
+    // Per-request operational detail — the request-rate/latency signal lives in
+    // the per-request EMF metrics now, so keep this at debug to avoid log spam.
+    tracing::debug!(
         bucket = %bucket,
         prefixes = prefixes.len(),
         granularity = ?gran,
@@ -156,7 +158,7 @@ pub async fn browse(
             .flat_map(|p| (0..6).map(move |d| format!("{p}{d}")))
             .collect();
 
-        tracing::info!(
+        tracing::debug!(
             refined_prefixes = refined.len(),
             overflowed_hours = overflow_prefixes.len(),
             "browse refining overflowed hours at 10-minute granularity"

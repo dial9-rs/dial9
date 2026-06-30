@@ -306,7 +306,8 @@ async fn flamegraph_response(
     };
 
     let pct = (files_folded as f64 / files_matched as f64) * 100.0;
-    tracing::info!(
+    // Per-request coverage detail; request-level signal is in EMF metrics now.
+    tracing::debug!(
         files_folded,
         files_matched,
         coverage_pct = format!("{pct:.1}"),
