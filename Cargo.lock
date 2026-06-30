@@ -1955,7 +1955,7 @@ dependencies = [
  "assert2",
  "aws-config",
  "aws-sdk-s3",
- "aws-sdk-sts",
+ "aws-smithy-async",
  "aws-smithy-http-client",
  "aws-smithy-types",
  "axum",

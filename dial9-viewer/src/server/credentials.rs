@@ -418,26 +418,30 @@ impl std::fmt::Display for AssumeRoleError {
 }
 impl std::error::Error for AssumeRoleError {}
 
-/// Production [`RoleAssumer`]: calls `sts:AssumeRole` with the process's ambient
-/// identity (instance/task role). Built once at startup from the default config
-/// so the STS client and its credential cache are reused across requests.
+/// Production [`RoleAssumer`]: mints credentials via [`AssumeRoleProvider`],
+/// which assumes the role with the process's ambient identity (instance/task
+/// role). Holds the ambient [`SdkConfig`] and builds a provider per request, so
+/// the role ARN can vary per request.
+///
+/// Building a fresh provider each call forgoes [`AssumeRoleProvider`]'s
+/// credential caching across requests — fine while reads are infrequent. When
+/// that matters, cache `SharedCredentialsProvider`s here keyed by (ARN, region)
+/// and reuse them: each then caches and refreshes its own credentials.
 pub struct StsRoleAssumer {
-    client: aws_sdk_sts::Client,
+    config: aws_config::SdkConfig,
 }
 
 impl StsRoleAssumer {
     /// Build from the ambient AWS config (the server's own identity is what does
     /// the assuming).
     pub async fn from_env() -> Self {
-        let config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
-        Self {
-            client: aws_sdk_sts::Client::new(&config),
-        }
+        Self::from_config(aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await)
     }
 
-    /// Build from an existing STS client (test seam / custom config).
-    pub fn from_client(client: aws_sdk_sts::Client) -> Self {
-        Self { client }
+    /// Build from an explicit [`SdkConfig`] (test seam / custom base credentials
+    /// + STS endpoint).
+    pub fn from_config(config: aws_config::SdkConfig) -> Self {
+        Self { config }
     }
 }
 
@@ -449,24 +453,25 @@ impl RoleAssumer for StsRoleAssumer {
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Result<TempCredentials, AssumeRoleError>> + Send + 'a>,
     > {
+        use aws_sdk_s3::config::ProvideCredentials;
         Box::pin(async move {
-            let out = self
-                .client
-                .assume_role()
-                .role_arn(role_arn.as_str())
-                .role_session_name(ASSUME_ROLE_SESSION_NAME)
-                .send()
+            let mut builder = aws_config::sts::AssumeRoleProvider::builder(role_arn.as_str())
+                .configure(&self.config)
+                .session_name(ASSUME_ROLE_SESSION_NAME);
+            if let Some(region) = region {
+                builder = builder.region(aws_sdk_s3::config::Region::new(region.to_string()));
+            }
+            let provider = builder.build().await;
+
+            let creds = provider
+                .provide_credentials()
                 .await
                 .map_err(|e| AssumeRoleError(format!("{e}")))?;
 
-            let c = out
-                .credentials()
-                .ok_or_else(|| AssumeRoleError("STS returned no credentials".to_string()))?;
-
             Ok(TempCredentials::new(
-                c.access_key_id(),
-                c.secret_access_key(),
-                Some(c.session_token().to_string()),
+                creds.access_key_id(),
+                creds.secret_access_key(),
+                creds.session_token().map(str::to_string),
                 region.map(str::to_string),
             ))
         })
@@ -820,5 +825,62 @@ mod tests {
             }
             other => panic!("expected AssumeRole, got {other:?}"),
         }
+    }
+
+    // --- StsRoleAssumer over the real AssumeRoleProvider (replayed STS) ---
+
+    /// Drive the production [`StsRoleAssumer`] against a replayed STS response to
+    /// prove the [`AssumeRoleProvider`] wiring (region, credential extraction)
+    /// yields the assumed credentials — without a network call. The canned XML
+    /// shape mirrors aws-config's own AssumeRoleProvider tests.
+    #[tokio::test]
+    async fn sts_role_assumer_mints_assumed_credentials() {
+        use aws_smithy_http_client::test_util::{ReplayEvent, StaticReplayClient};
+        use aws_smithy_types::body::SdkBody;
+
+        let http_client = StaticReplayClient::new(vec![ReplayEvent::new(
+            http::Request::new(SdkBody::from("assume-role request")),
+            http::Response::builder()
+                .status(200)
+                .body(SdkBody::from(
+                    "<AssumeRoleResponse xmlns=\"https://sts.amazonaws.com/doc/2011-06-15/\">\
+                       <AssumeRoleResult><Credentials>\
+                         <AccessKeyId>ASIAASSUMED</AccessKeyId>\
+                         <SecretAccessKey>assumed-secret</SecretAccessKey>\
+                         <SessionToken>assumed-token</SessionToken>\
+                         <Expiration>2030-01-01T00:00:00Z</Expiration>\
+                       </Credentials></AssumeRoleResult>\
+                     </AssumeRoleResponse>",
+                ))
+                .unwrap(),
+        )]);
+
+        // Base config: static base credentials + the replay HTTP client, so the
+        // provider's STS call is served from the canned response above. A time
+        // source and sleep impl are required — AssumeRoleProvider uses them for
+        // its credential-caching layer (production gets them from load_defaults).
+        let config = aws_config::SdkConfig::builder()
+            .behavior_version(aws_config::BehaviorVersion::latest())
+            .credentials_provider(aws_sdk_s3::config::SharedCredentialsProvider::new(
+                Credentials::new("base", "base", None, None, "test"),
+            ))
+            .region(aws_sdk_s3::config::Region::new("us-east-1"))
+            .time_source(aws_smithy_async::time::SystemTimeSource::new())
+            .sleep_impl(aws_smithy_async::rt::sleep::TokioSleep::new())
+            .http_client(http_client)
+            .build();
+
+        let assumer = StsRoleAssumer::from_config(config);
+        let arn = RoleArn("arn:aws:iam::123456789012:role/dial9-reader".to_string());
+        let temp = assumer
+            .assume_role(&arn, Some("us-west-2"))
+            .await
+            .expect("assume-role should succeed against the replayed response");
+
+        assert_eq!(temp.credentials.access_key_id(), "ASIAASSUMED");
+        assert_eq!(temp.credentials.secret_access_key(), "assumed-secret");
+        assert_eq!(temp.credentials.session_token(), Some("assumed-token"));
+        // Region is forwarded from the request, not the base config.
+        assert_eq!(temp.region.as_deref(), Some("us-west-2"));
     }
 }
