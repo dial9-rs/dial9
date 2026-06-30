@@ -1226,6 +1226,43 @@ async fn assume_role_lists_bucket_via_assumed_creds() {
 }
 
 #[tokio::test]
+async fn assume_role_via_query_params_is_linkable() {
+    // The whole point of the query-param path: a plain GET URL (no headers) with
+    // ?aws_role_arn=…&aws_region=… reads through the assumed role. reqwest's
+    // .query() percent-encodes the ARN's colons/slashes for us.
+    let (base, _dir, assumed) = setup_assume_role_test("byo-bucket").await;
+    let resp = reqwest::Client::new()
+        .get(format!("{base}/api/buckets"))
+        .query(&[
+            (
+                "aws_role_arn",
+                "arn:aws:iam::123456789012:role/dial9-reader",
+            ),
+            ("aws_region", "us-east-1"),
+        ])
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() == 200);
+    let names: Vec<String> = resp.json().await.unwrap();
+    check!(names.contains(&"byo-bucket".to_string()));
+    let assumed = assumed.lock().unwrap();
+    check!(assumed.as_slice() == ["arn:aws:iam::123456789012:role/dial9-reader"]);
+}
+
+#[tokio::test]
+async fn invalid_role_arn_in_query_is_400() {
+    let (base, _dir, _assumed) = setup_assume_role_test("byo-bucket").await;
+    let resp = reqwest::Client::new()
+        .get(format!("{base}/api/buckets"))
+        .query(&[("aws_role_arn", "not-an-arn")])
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() == 400);
+}
+
+#[tokio::test]
 async fn assume_role_without_assumer_is_rejected() {
     // BYO enabled but NO assumer wired → a role-arn request is a 400 (feature
     // off here), not a silent fallback to the ambient/default backend.

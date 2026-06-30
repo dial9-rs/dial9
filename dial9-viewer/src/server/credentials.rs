@@ -32,6 +32,18 @@ pub const HEADER_REGION: &str = "x-dial9-aws-region";
 /// optional region via the shared [`HEADER_REGION`].
 pub const HEADER_ROLE_ARN: &str = "x-dial9-aws-role-arn";
 
+/// Query-parameter names for the assume-role path, so a read is **linkable**:
+/// `?aws_role_arn=…&aws_region=…` names a role to assume (and the region to
+/// reach the bucket in). A role ARN grants nothing on its own — the server's
+/// own identity must be allowed to assume it — so it is safe to put in a URL,
+/// exactly as the existing deep-link design carries `cl_acct`/`cl_role`.
+///
+/// Only the assume-role path is exposed via query params; the BYOC static keys
+/// (secret/token) are header-only and MUST NOT be linkable, because a URL is
+/// shareable/logged/cached and a secret access key in one is a credential leak.
+pub const QUERY_ROLE_ARN: &str = "aws_role_arn";
+pub const QUERY_REGION: &str = "aws_region";
+
 /// STS session name attached to the assume-role call, so reads through this
 /// path are attributable in the target account's CloudTrail.
 pub const ASSUME_ROLE_SESSION_NAME: &str = "dial9-viewer";
@@ -92,8 +104,8 @@ impl RoleArn {
 }
 
 /// How a request asked us to authenticate its S3 access. Exactly one variant is
-/// chosen per request; the two credentialed variants are mutually exclusive at
-/// the header level (see [`parse_cred_headers`]).
+/// chosen per request; the two credentialed variants are mutually exclusive
+/// (see [`parse_cred_inputs`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CredSource {
     /// No credential headers — use the server's default (ambient) backend.
@@ -239,31 +251,74 @@ fn is_valid_region(region: &str) -> bool {
     true
 }
 
-/// Infallible extractor over the `x-dial9-aws-*` headers, yielding a
-/// [`CredSource`] (or a [`CredError`] the handler maps to 400):
+/// Infallible extractor over the request's credential inputs, yielding a
+/// [`CredSource`] (or a [`CredError`] the handler maps to 400). Two transports
+/// feed it:
 ///
-/// - no credential headers                 → `Ok(CredSource::Default)`
-/// - access-key-id + secret (+token)        → `Ok(CredSource::Static(..))`
-/// - role-arn                               → `Ok(CredSource::AssumeRole { .. })`
-/// - exactly one of akid/secret             → `Err(Incomplete)`
-/// - BYOC keys AND a role-arn together      → `Err(ConflictingCredentials)`
+///   - **headers** (`x-dial9-aws-*`): the full BYOC keys, session token, region,
+///     and/or a role ARN.
+///   - **query params** (`?aws_role_arn=…&aws_region=…`): the assume-role path
+///     ONLY, so a role-based read is linkable. Static secret keys are never read
+///     from the query string — a URL is shareable/logged and a secret in one is
+///     a leak.
 ///
-/// The extractor is deliberately pure header-parsing and state-agnostic; the
-/// decision of *what backend to build* (and the STS call for the assume-role
-/// variant) lives in `AppState::resolve` where the server config is available.
+/// Resolution (see [`parse_cred_inputs`]):
+///
+/// - nothing supplied                          → `Ok(CredSource::Default)`
+/// - akid + secret (+token) in headers          → `Ok(CredSource::Static(..))`
+/// - role-arn (header or query)                 → `Ok(CredSource::AssumeRole)`
+/// - exactly one of akid/secret                 → `Err(Incomplete)`
+/// - BYOC keys AND any role-arn                  → `Err(ConflictingCredentials)`
+/// - a role-arn in BOTH header and query         → `Err(ConflictingCredentials)`
+///
+/// The extractor is deliberately pure parsing and state-agnostic; the decision
+/// of *what backend to build* (and the STS call for the assume-role variant)
+/// lives in `AppState::resolve` where the server config is available.
 pub struct MaybeCreds(pub Result<CredSource, CredError>);
 
 impl<S: Send + Sync> FromRequestParts<S> for MaybeCreds {
     type Rejection = Infallible;
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Infallible> {
-        Ok(MaybeCreds(parse_cred_headers(&parts.headers)))
+        Ok(MaybeCreds(parse_cred_inputs(
+            &parts.headers,
+            parts.uri.query(),
+        )))
     }
 }
 
-/// Pull a [`CredSource`] out of a header map. Split from the extractor so it can
-/// be unit-tested without constructing a request.
-pub fn parse_cred_headers(headers: &axum::http::HeaderMap) -> Result<CredSource, CredError> {
+/// The assume-role inputs pulled from the query string: a role ARN and/or a
+/// region. Region alone is meaningless (it pins an S3 client that has no
+/// non-default credentials), so it only takes effect alongside a role ARN.
+struct QueryCreds {
+    role_arn: Option<String>,
+    region: Option<String>,
+}
+
+/// Parse the assume-role query params (`aws_role_arn`, `aws_region`) out of a
+/// raw query string. Unknown params are ignored (the data endpoints carry their
+/// own `bucket`/`prefix`/etc.). Empty values are treated as absent.
+fn parse_query_creds(query: Option<&str>) -> QueryCreds {
+    let mut role_arn = None;
+    let mut region = None;
+    if let Some(q) = query {
+        for (k, v) in form_urlencoded::parse(q.as_bytes()) {
+            match k.as_ref() {
+                QUERY_ROLE_ARN if !v.is_empty() => role_arn = Some(v.into_owned()),
+                QUERY_REGION if !v.is_empty() => region = Some(v.into_owned()),
+                _ => {}
+            }
+        }
+    }
+    QueryCreds { role_arn, region }
+}
+
+/// Pull a [`CredSource`] from the request's headers and query string. Split from
+/// the extractor so it can be unit-tested without constructing a request.
+pub fn parse_cred_inputs(
+    headers: &axum::http::HeaderMap,
+    query: Option<&str>,
+) -> Result<CredSource, CredError> {
     let get = |name: &str| -> Result<Option<String>, CredError> {
         match headers.get(name) {
             None => Ok(None),
@@ -277,10 +332,26 @@ pub fn parse_cred_headers(headers: &axum::http::HeaderMap) -> Result<CredSource,
     let access_key_id = get(HEADER_ACCESS_KEY_ID)?;
     let secret_access_key = get(HEADER_SECRET_ACCESS_KEY)?;
     let session_token = get(HEADER_SESSION_TOKEN)?;
-    let role_arn = get(HEADER_ROLE_ARN)?.filter(|s| !s.is_empty());
-    // An empty region header is treated as absent; a non-empty one must be a
-    // valid AWS region name (it ends up in the S3 endpoint host).
-    let region = match get(HEADER_REGION)?.filter(|s| !s.is_empty()) {
+    let header_role_arn = get(HEADER_ROLE_ARN)?.filter(|s| !s.is_empty());
+    let header_region = get(HEADER_REGION)?.filter(|s| !s.is_empty());
+
+    let QueryCreds {
+        role_arn: query_role_arn,
+        region: query_region,
+    } = parse_query_creds(query);
+
+    // A role ARN may arrive via header OR query, never both — two different
+    // sources naming a role is ambiguous, same as mixing BYOC with a role.
+    let role_arn = match (header_role_arn, query_role_arn) {
+        (Some(_), Some(_)) => return Err(CredError::ConflictingCredentials),
+        (Some(a), None) | (None, Some(a)) => Some(a),
+        (None, None) => None,
+    };
+
+    // Region may come from either transport; the header wins when both are set
+    // (it travels with the explicit BYOC headers). Validate wherever it lands —
+    // it is interpolated into the S3 endpoint host.
+    let region = match header_region.or(query_region) {
         Some(r) if !is_valid_region(&r) => return Err(CredError::InvalidRegion),
         other => other,
     };
@@ -413,6 +484,12 @@ mod tests {
             h.insert(*k, v.parse().unwrap());
         }
         h
+    }
+
+    /// Header-only parse helper: the many header tests below predate query
+    /// params and exercise that path with no query string.
+    fn parse_cred_headers(headers: &HeaderMap) -> Result<CredSource, CredError> {
+        parse_cred_inputs(headers, None)
     }
 
     /// Unwrap a parsed `CredSource::Static`, panicking on any other variant.
@@ -635,6 +712,113 @@ mod tests {
             "arn:evil:iam::123456789012:role/r",  // unknown partition
         ] {
             assert!(!is_valid_role_arn(arn), "expected {arn:?} to be rejected");
+        }
+    }
+
+    // --- query-param (linkable) assume-role parsing ---
+
+    #[test]
+    fn role_arn_from_query_parses_to_assume_role() {
+        let q = "aws_role_arn=arn%3Aaws%3Aiam%3A%3A123456789012%3Arole%2Fdial9-reader\
+                 &aws_region=us-west-2&bucket=traces";
+        match parse_cred_inputs(&HeaderMap::new(), Some(q)).unwrap() {
+            CredSource::AssumeRole { role_arn, region } => {
+                assert_eq!(
+                    role_arn.as_str(),
+                    "arn:aws:iam::123456789012:role/dial9-reader"
+                );
+                assert_eq!(region.as_deref(), Some("us-west-2"));
+            }
+            other => panic!("expected AssumeRole, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unrelated_query_params_ignored() {
+        // The data endpoints carry bucket/prefix/etc.; with no cred params the
+        // source is Default.
+        let q = "bucket=traces&prefix=dial9-traces&tz=UTC";
+        assert_eq!(
+            parse_cred_inputs(&HeaderMap::new(), Some(q)).unwrap(),
+            CredSource::Default
+        );
+    }
+
+    #[test]
+    fn invalid_role_arn_from_query_rejected() {
+        let q = "aws_role_arn=not-an-arn";
+        assert!(matches!(
+            parse_cred_inputs(&HeaderMap::new(), Some(q)),
+            Err(CredError::InvalidRoleArn)
+        ));
+    }
+
+    #[test]
+    fn invalid_region_from_query_rejected() {
+        let q = "aws_role_arn=arn%3Aaws%3Aiam%3A%3A123456789012%3Arole%2Fr&aws_region=US-EAST-1";
+        assert!(matches!(
+            parse_cred_inputs(&HeaderMap::new(), Some(q)),
+            Err(CredError::InvalidRegion)
+        ));
+    }
+
+    #[test]
+    fn role_arn_in_both_header_and_query_conflicts() {
+        // Two sources naming a role is ambiguous — refuse rather than pick one.
+        let h = headers(&[(HEADER_ROLE_ARN, "arn:aws:iam::123456789012:role/h")]);
+        let q = "aws_role_arn=arn%3Aaws%3Aiam%3A%3A123456789012%3Arole%2Fq";
+        assert!(matches!(
+            parse_cred_inputs(&h, Some(q)),
+            Err(CredError::ConflictingCredentials)
+        ));
+    }
+
+    #[test]
+    fn byoc_headers_with_query_role_arn_conflict() {
+        // Query role ARN is still mutually exclusive with header BYOC keys.
+        let h = headers(&[
+            (HEADER_ACCESS_KEY_ID, "AKIA"),
+            (HEADER_SECRET_ACCESS_KEY, "secret"),
+        ]);
+        let q = "aws_role_arn=arn%3Aaws%3Aiam%3A%3A123456789012%3Arole%2Fr";
+        assert!(matches!(
+            parse_cred_inputs(&h, Some(q)),
+            Err(CredError::ConflictingCredentials)
+        ));
+    }
+
+    #[test]
+    fn header_role_arn_still_works_with_other_query_params() {
+        // A header role ARN coexists with non-credential query params (bucket).
+        let h = headers(&[(HEADER_ROLE_ARN, "arn:aws:iam::123456789012:role/r")]);
+        match parse_cred_inputs(&h, Some("bucket=traces")).unwrap() {
+            CredSource::AssumeRole { role_arn, .. } => {
+                assert_eq!(role_arn.as_str(), "arn:aws:iam::123456789012:role/r");
+            }
+            other => panic!("expected AssumeRole, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn query_region_alone_is_default() {
+        // Region without a role ARN is meaningless — no credentialed source.
+        assert_eq!(
+            parse_cred_inputs(&HeaderMap::new(), Some("aws_region=us-east-1")).unwrap(),
+            CredSource::Default
+        );
+    }
+
+    #[test]
+    fn header_region_wins_over_query_region() {
+        let h = headers(&[
+            (HEADER_ROLE_ARN, "arn:aws:iam::123456789012:role/r"),
+            (HEADER_REGION, "eu-west-1"),
+        ]);
+        match parse_cred_inputs(&h, Some("aws_region=us-east-1")).unwrap() {
+            CredSource::AssumeRole { region, .. } => {
+                assert_eq!(region.as_deref(), Some("eu-west-1"));
+            }
+            other => panic!("expected AssumeRole, got {other:?}"),
         }
     }
 }
