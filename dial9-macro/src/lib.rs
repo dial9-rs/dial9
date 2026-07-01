@@ -14,14 +14,14 @@ struct MainArgs {
 }
 
 const MISSING_CONFIG_HELP: &str = "missing required `config` argument, e.g.\n  \
-                           #[dial9_tokio_telemetry::main(config = my_config_fn)]\n\
+                           #[dial9::main(config = my_config_fn)]\n\
                            or with an inline closure:\n  \
-                           #[dial9_tokio_telemetry::main(config = || Dial9Config::builder().on_disk_buffer(...).max_total_size(...).build().unwrap())]";
+                           #[dial9::main(config = || Dial9Config::builder().on_disk_buffer(...).max_total_size(...).build().unwrap())]";
 
 const CONFIG_MUST_BE_ZERO_ARG_HELP: &str = "`config` must be a zero-argument function path or a zero-argument closure, e.g.\n  \
-                           #[dial9_tokio_telemetry::main(config = my_config_fn)]\n\
+                           #[dial9::main(config = my_config_fn)]\n\
                            or with an inline closure:\n  \
-                           #[dial9_tokio_telemetry::main(config = || Dial9Config::builder().on_disk_buffer(...).max_total_size(...).build().unwrap())]";
+                           #[dial9::main(config = || Dial9Config::builder().on_disk_buffer(...).max_total_size(...).build().unwrap())]";
 impl Parse for MainArgs {
     fn parse(input: ParseStream) -> syn::Result<Self> {
         if input.is_empty() {
@@ -64,21 +64,21 @@ fn expand_main(args: MainArgs, input: ItemFn) -> Result<TokenStream2, syn::Error
     if !input.sig.inputs.is_empty() {
         return Err(syn::Error::new_spanned(
             &input.sig.inputs,
-            "#[dial9_tokio_telemetry::main] does not support function arguments",
+            "#[dial9::main] does not support function arguments",
         ));
     }
 
     if !input.sig.generics.params.is_empty() {
         return Err(syn::Error::new_spanned(
             &input.sig.generics,
-            "#[dial9_tokio_telemetry::main] does not support generics",
+            "#[dial9::main] does not support generics",
         ));
     }
 
     if input.sig.generics.where_clause.is_some() {
         return Err(syn::Error::new_spanned(
             &input.sig.generics.where_clause,
-            "#[dial9_tokio_telemetry::main] does not support where clauses",
+            "#[dial9::main] does not support where clauses",
         ));
     }
 
@@ -95,7 +95,7 @@ fn expand_main(args: MainArgs, input: ItemFn) -> Result<TokenStream2, syn::Error
     Ok(quote! {
         #(#attrs)*
         #vis fn #name() #ret {
-            let __dial9_rt = ::dial9_tokio_telemetry::TracedRuntime::new(#config_call);
+            let __dial9_rt = ::dial9::TracedRuntime::new(#config_call);
             let __dial9_out = __dial9_rt.block_on(async move { #(#body_stmts)* });
             __dial9_rt.graceful_shutdown();
             __dial9_out
@@ -163,7 +163,7 @@ fn expand_main(args: MainArgs, input: ItemFn) -> Result<TokenStream2, syn::Error
 /// Using a named function:
 ///
 /// ```rust,ignore
-/// use dial9_tokio_telemetry::{main, Dial9Config, telemetry::Dial9TokioHandle};
+/// use dial9::{main, Dial9Config, telemetry::Dial9TokioHandle};
 ///
 /// fn my_config() -> Dial9Config {
 ///     Dial9Config::builder()
@@ -174,7 +174,7 @@ fn expand_main(args: MainArgs, input: ItemFn) -> Result<TokenStream2, syn::Error
 ///         .expect("config build failed")
 /// }
 ///
-/// #[dial9_tokio_telemetry::main(config = my_config)]
+/// #[dial9::main(config = my_config)]
 /// async fn main() {
 ///     let handle = Dial9TokioHandle::current();
 ///     handle
@@ -187,7 +187,7 @@ fn expand_main(args: MainArgs, input: ItemFn) -> Result<TokenStream2, syn::Error
 /// Using an inline closure:
 ///
 /// ```rust,ignore
-/// #[dial9_tokio_telemetry::main(config = || {
+/// #[dial9::main(config = || {
 ///     Dial9Config::builder()
 ///         .on_disk_buffer("/tmp/trace.bin")
 ///         .max_file_size(1024 * 1024)
@@ -204,7 +204,7 @@ fn expand_main(args: MainArgs, input: ItemFn) -> Result<TokenStream2, syn::Error
 /// runtime if writer setup fails):
 ///
 /// ```rust,ignore
-/// #[dial9_tokio_telemetry::main(config = || {
+/// #[dial9::main(config = || {
 ///     Dial9Config::builder()
 ///         .on_disk_buffer("/tmp/trace.bin")
 ///         .max_file_size(1024 * 1024)
@@ -220,7 +220,7 @@ fn expand_main(args: MainArgs, input: ItemFn) -> Result<TokenStream2, syn::Error
 /// dial9 off via a feature flag or env var without removing the macro):
 ///
 /// ```rust,ignore
-/// #[dial9_tokio_telemetry::main(config = || {
+/// #[dial9::main(config = || {
 ///     Dial9Config::builder()
 ///         .on_disk_buffer("/tmp/trace.bin")
 ///         .enabled(false)
@@ -235,7 +235,7 @@ fn expand_main(args: MainArgs, input: ItemFn) -> Result<TokenStream2, syn::Error
 /// In-memory writer (no telemetry on disk), select it with `.in_memory_buffer()`.
 ///
 /// ```rust,ignore
-/// #[dial9_tokio_telemetry::main(config = || {
+/// #[dial9::main(config = || {
 ///     Dial9Config::builder()
 ///         .in_memory_buffer()
 ///         .max_total_size(16 * 1024 * 1024)

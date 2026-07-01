@@ -1,6 +1,6 @@
 //! Minimal example: add dial9 telemetry to an async app.
 //!
-//! The `#[dial9_tokio_telemetry::main]` macro replaces `#[tokio::main]`.
+//! The `#[dial9::main]` macro replaces `#[tokio::main]`.
 //! It builds the Tokio runtime from a config function and spawns the body as
 //! an instrumented task so top-level code is visible in traces.
 //!
@@ -12,8 +12,8 @@
 
 use std::time::Duration;
 
-use dial9_tokio_telemetry::Dial9Config;
-use dial9_tokio_telemetry::telemetry::Dial9TokioHandle;
+use dial9::Dial9Config;
+use dial9::telemetry::Dial9TokioHandle;
 
 async fn cpu_work(iterations: u64) -> u64 {
     let mut result = 0u64;
@@ -39,7 +39,7 @@ async fn mixed_task(id: usize) {
     println!("Task {id} completed");
 }
 
-#[dial9_tokio_telemetry::main(config = || {
+#[dial9::main(config = || {
     Dial9Config::builder()
         .on_disk_buffer("simple_workload_trace.bin")
         .max_file_size(64 * 1024 * 1024)

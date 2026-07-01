@@ -1,4 +1,4 @@
-//! Unified configuration for the `#[dial9_tokio_telemetry::main]` macro.
+//! Unified configuration for the `#[dial9::main]` macro.
 //!
 //! Start with [`Dial9Config::builder()`] and pick a writer mode:
 //! [`on_disk_buffer`](Dial9ConfigBuilder::on_disk_buffer) for disk or
@@ -132,7 +132,7 @@ impl std::error::Error for Dial9ConfigBuilderError {
 pub struct Dial9Config {
     pub(crate) inner: Inner,
     pub(crate) memory_profiling_config: Option<EnvMemoryProfilingConfig>,
-    /// Graceful-shutdown timeout applied by the `#[dial9_tokio_telemetry::main]`
+    /// Graceful-shutdown timeout applied by the `#[dial9::main]`
     /// macro after the async body completes. `Some(timeout)` drains the
     /// background worker with that deadline; `None` skips the implicit drain
     /// (the guard's `Drop` still flushes and seals the final segment).
@@ -141,7 +141,7 @@ pub struct Dial9Config {
     pub(crate) graceful_shutdown_timeout: Option<Duration>,
 }
 
-/// Default graceful-shutdown timeout used by the `#[dial9_tokio_telemetry::main]`
+/// Default graceful-shutdown timeout used by the `#[dial9::main]`
 /// macro when the user does not override it.
 pub(crate) const DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 
@@ -1104,14 +1104,14 @@ macro_rules! with_tokio_doc {
 /// Doc text shared by both modes' `graceful_shutdown`.
 macro_rules! graceful_shutdown_doc {
     () => {
-        "Set the graceful-shutdown timeout applied by `#[dial9_tokio_telemetry::main]`.\n\nAfter the async body returns, the macro drops the runtime (so Tokio worker threads exit and flush their thread-local buffers) and then calls [`TelemetryGuard::graceful_shutdown`](crate::telemetry::TelemetryGuard::graceful_shutdown) with this timeout, draining the background worker (symbolize, compress, upload) before the process exits.\n\nDefaults to 1 second. Call [`disable_graceful_shutdown`](Self::disable_graceful_shutdown) to skip the implicit drain. Has no effect on the low-level [`TracedRuntime`](crate::TracedRuntime) API, where you call `graceful_shutdown` yourself."
+        "Set the graceful-shutdown timeout applied by `#[dial9::main]`.\n\nAfter the async body returns, the macro drops the runtime (so Tokio worker threads exit and flush their thread-local buffers) and then calls [`TelemetryGuard::graceful_shutdown`](crate::telemetry::TelemetryGuard::graceful_shutdown) with this timeout, draining the background worker (symbolize, compress, upload) before the process exits.\n\nDefaults to 1 second. Call [`disable_graceful_shutdown`](Self::disable_graceful_shutdown) to skip the implicit drain. Has no effect on the low-level [`TracedRuntime`](crate::TracedRuntime) API, where you call `graceful_shutdown` yourself."
     };
 }
 
 /// Doc text shared by both modes' `disable_graceful_shutdown`.
 macro_rules! disable_graceful_shutdown_doc {
     () => {
-        "Skip the implicit graceful shutdown performed by `#[dial9_tokio_telemetry::main]`.\n\nWith graceful shutdown disabled the guard's `Drop` still flushes and seals the final segment, but the background worker is not drained (it exits without finishing symbolization/compression/upload of the last segment). The inverse of [`graceful_shutdown`](Self::graceful_shutdown)."
+        "Skip the implicit graceful shutdown performed by `#[dial9::main]`.\n\nWith graceful shutdown disabled the guard's `Drop` still flushes and seals the final segment, but the background worker is not drained (it exits without finishing symbolization/compression/upload of the last segment). The inverse of [`graceful_shutdown`](Self::graceful_shutdown)."
     };
 }
 

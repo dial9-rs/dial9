@@ -8,8 +8,8 @@
 
 use std::time::Duration;
 
-use dial9_tokio_telemetry::Dial9Config;
-use dial9_tokio_telemetry::telemetry::Dial9TokioHandle;
+use dial9::Dial9Config;
+use dial9::telemetry::Dial9TokioHandle;
 
 fn my_config() -> Dial9Config {
     Dial9Config::builder()
@@ -23,7 +23,7 @@ fn my_config() -> Dial9Config {
         .build_or_disabled()
 }
 
-#[dial9_tokio_telemetry::main(config = my_config)]
+#[dial9::main(config = my_config)]
 async fn main() {
     println!("Running workload with 48 workers...");
 

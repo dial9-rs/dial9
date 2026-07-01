@@ -26,6 +26,7 @@ required-features = ["cli"]
 dial9-core = { workspace = true }
 dial9-perf-self-profile = { workspace = true, optional = true }
 dial9-tokio-telemetry = { version = "0.4.0-alpha.1", path = "../dial9-tokio-telemetry", optional = true }
+dial9-macro = { workspace = true, optional = true }
 
 dial9-viewer = { version = "0.4.0", path = "../dial9-viewer", optional = true }
 anyhow = { version = "1", optional = true }
@@ -42,7 +43,7 @@ pipeline = ["dial9-core/pipeline"]
 
 ## Tokio runtime integration: `#[dial9::main]`, `TracedRuntime`, `spawn`,
 ## `Dial9TokioHandle`, `Dial9Config`, and the Tokio event sources.
-tokio = ["dep:dial9-tokio-telemetry", "pipeline"]
+tokio = ["dep:dial9-tokio-telemetry", "dep:dial9-macro", "pipeline"]
 
 ## CPU and scheduler profiling as a standalone `Source`. Auto-wires into the Tokio
 ## runtime when the `tokio` feature is also on.
@@ -77,3 +78,75 @@ taskdump = ["tokio", "dial9-tokio-telemetry/taskdump"]
 
 ## TCP accept-queue depth sampling (Linux only).
 linux-socket = ["tokio", "dial9-tokio-telemetry/linux-socket"]
+
+[dev-dependencies]
+dial9 = { path = ".", features = [
+    "tokio",
+    "analysis",
+    "memory-profiling",
+    "tracing-layer",
+    "unstable-events",
+    "worker-s3",
+] }
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "macros",
+    "net",
+    "io-util",
+    "time",
+    "test-util",
+] }
+tempfile = "3"
+flate2 = "1"
+clap = { version = "4", features = ["derive", "env"] }
+metrique = { version = "0.1.23", features = ["local-format"] }
+metrique-writer = "0.1"
+dial9-trace-format = { workspace = true, features = ["serde-deserialize"] }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+dial9 = { path = ".", features = [
+    "tokio",
+    "cpu-profiling",
+    "memory-profiling",
+    "worker-s3",
+    "analysis",
+    "taskdump",
+    "tracing-layer",
+    "linux-socket",
+] }
+
+[[example]]
+name = "simple_workload"
+required-features = ["tokio"]
+
+[[example]]
+name = "many_workers"
+required-features = ["tokio"]
+
+[[example]]
+name = "conditionally_enable"
+required-features = ["tokio"]
+
+[[example]]
+name = "custom_pipeline"
+required-features = ["tokio"]
+
+[[example]]
+name = "long_workload"
+required-features = ["tokio"]
+
+[[example]]
+name = "realistic_workload"
+required-features = ["tokio"]
+
+[[example]]
+name = "on_trigger_dump"
+required-features = ["tokio"]
+
+[[example]]
+name = "on_trigger_dump_windows"
+required-features = ["tokio"]
+
+[[example]]
+name = "production_use"
+required-features = ["tokio", "cpu-profiling", "worker-s3"]

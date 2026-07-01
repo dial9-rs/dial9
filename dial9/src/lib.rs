@@ -31,6 +31,9 @@ pub fn record_event(event: impl Encodable) {
 pub use dial9_core::{dump, pipeline, worker};
 
 // Tokio runtime integration.
+/// Instrument an async `main` with dial9 telemetry. Replaces `#[tokio::main]`.
+#[cfg(feature = "tokio")]
+pub use dial9_macro::main;
 #[cfg(feature = "tokio")]
 pub use dial9_tokio_telemetry::{
     Dial9Config, Dial9ConfigBuilder, Dial9ConfigBuilderError, DiskConfigBuilder,

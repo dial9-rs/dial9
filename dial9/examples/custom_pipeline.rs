@@ -31,9 +31,9 @@ use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
 
-use dial9_tokio_telemetry::Dial9Config;
-use dial9_tokio_telemetry::background_task::{ProcessError, SegmentData, SegmentProcessor};
-use dial9_tokio_telemetry::telemetry::Dial9TokioHandle;
+use dial9::Dial9Config;
+use dial9::background_task::{ProcessError, SegmentData, SegmentProcessor};
+use dial9::telemetry::Dial9TokioHandle;
 
 const TRACE_DIR: &str = "/tmp/dial9-custom-pipeline";
 
@@ -181,7 +181,7 @@ async fn worker_task(id: usize) {
     }
 }
 
-#[dial9_tokio_telemetry::main(config = || {
+#[dial9::main(config = || {
     let _ = std::fs::create_dir_all(TRACE_DIR);
     let base_path = format!("{TRACE_DIR}/trace.bin");
 

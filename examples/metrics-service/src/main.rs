@@ -8,17 +8,15 @@ use std::time::Duration;
 
 use aws_config::BehaviorVersion;
 use clap::Parser;
-use dial9_tokio_telemetry::memory_profiling::{
-    Dial9Allocator, MemoryProfiler, MemoryProfilingConfig,
-};
+use dial9::memory_profiling::{Dial9Allocator, MemoryProfiler, MemoryProfilingConfig};
 #[cfg(target_os = "linux")]
-use dial9_tokio_telemetry::telemetry::SocketAcceptQueuesConfig;
+use dial9::telemetry::SocketAcceptQueuesConfig;
 #[cfg(target_os = "linux")]
-use dial9_tokio_telemetry::telemetry::{CpuProfilingConfig, SchedEventConfig};
-use dial9_tokio_telemetry::telemetry::{
+use dial9::telemetry::{CpuProfilingConfig, SchedEventConfig};
+use dial9::telemetry::{
     Dial9TokioHandle, DiskWriter, ProcessResourceUsageConfig, TaskDumpConfig, TracedRuntime,
 };
-use dial9_tokio_telemetry::tracing_layer::Dial9TracingLayer;
+use dial9::tracing_layer::Dial9TracingLayer;
 use tokio::runtime::Builder;
 use tokio_util::sync::CancellationToken;
 
@@ -243,7 +241,7 @@ fn main() -> std::io::Result<()> {
         .with_socket_accept_queues(SocketAcceptQueuesConfig::default());
 
     let (runtime, guard) = if let Some(bucket) = &args.s3_bucket {
-        use dial9_tokio_telemetry::background_task::s3::S3Config;
+        use dial9::background_task::s3::S3Config;
 
         let s3_config = S3Config::builder()
             .bucket(bucket)

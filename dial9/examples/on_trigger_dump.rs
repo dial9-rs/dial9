@@ -32,9 +32,9 @@
 
 use std::time::Duration;
 
-use dial9_tokio_telemetry::Dial9Config;
-use dial9_tokio_telemetry::dump::DumpError;
-use dial9_tokio_telemetry::telemetry::{Dial9Handle, Dial9TokioHandle};
+use dial9::Dial9Config;
+use dial9::dump::DumpError;
+use dial9::telemetry::{Dial9Handle, Dial9TokioHandle};
 
 const TRACE_DIR: &str = "/tmp/dial9-on-trigger-dump";
 
@@ -49,7 +49,7 @@ fn sealed_segments() -> usize {
         .unwrap_or(0)
 }
 
-#[dial9_tokio_telemetry::main(config = || {
+#[dial9::main(config = || {
     let _ = std::fs::remove_dir_all(TRACE_DIR);
     let _ = std::fs::create_dir_all(TRACE_DIR);
     let trace_path = format!("{TRACE_DIR}/trace.bin");

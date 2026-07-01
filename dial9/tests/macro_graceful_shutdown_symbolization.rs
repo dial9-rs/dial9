@@ -1,4 +1,4 @@
-//! Integration test: the `#[dial9_tokio_telemetry::main]` macro's implicit
+//! Integration test: the `#[dial9::main]` macro's implicit
 //! graceful shutdown drains the background worker, which symbolizes the trace.
 //!
 //! Before the implicit graceful shutdown, a macro-based program never drained
@@ -10,8 +10,8 @@
 //! `graceful_shutdown` itself: `run_workload()` is the only call.
 #![cfg(all(feature = "cpu-profiling", target_os = "linux"))]
 
-use dial9_tokio_telemetry::Dial9Config;
-use dial9_tokio_telemetry::telemetry::CpuProfilingConfig;
+use dial9::Dial9Config;
+use dial9::telemetry::CpuProfilingConfig;
 use dial9_trace_format::decoder::Decoder;
 use flate2::read::GzDecoder;
 use std::io::Read;
@@ -60,7 +60,7 @@ fn burn_cpu_work() {
     }
 }
 
-#[dial9_tokio_telemetry::main(config = macro_test_config)]
+#[dial9::main(config = macro_test_config)]
 async fn run_workload() {
     let mut handles = Vec::new();
     for _ in 0..4 {

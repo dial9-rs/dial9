@@ -10,14 +10,14 @@
 //!
 //! ### Enabling and disabling
 //!
-//! - Setting [`.enabled(false)`](dial9_tokio_telemetry::DiskConfigBuilder::enabled) on the config builder produces a
+//! - Setting [`.enabled(false)`](dial9::DiskConfigBuilder::enabled) on the config builder produces a
 //!   pass-through config: the `#[main]` macro builds a plain, unmodified tokio runtime with zero dial9 overhead.
-//!   [`Dial9TokioHandle::current()`](dial9_tokio_telemetry::telemetry::Dial9TokioHandle::current) returns an inert
+//!   [`Dial9TokioHandle::current()`](dial9::telemetry::Dial9TokioHandle::current) returns an inert
 //!   handle, and `handle.spawn` falls through to `tokio::spawn`, so application code does not need branches.
 //! - Alternatively, you can install dial9 but leave recording disabled at runtime via the handle's
-//!   [`disable()`](dial9_tokio_telemetry::telemetry::Dial9Handle::disable). The runtime hooks are installed
+//!   [`disable()`](dial9::telemetry::Dial9Handle::disable). The runtime hooks are installed
 //!   but all event writes are no-ops behind a relaxed atomic read. This has slightly more overhead than
-//!   [`.enabled(false)`](dial9_tokio_telemetry::DiskConfigBuilder::enabled) but lets a background task flip
+//!   [`.enabled(false)`](dial9::DiskConfigBuilder::enabled) but lets a background task flip
 //!   recording on from dynamic configuration later. It is a larger surface area of code, so it is higher risk.
 //!
 //! > Note! dial9 must be created _before_ your async runtime. dial9 relies on installing itself into the runtime
@@ -53,7 +53,7 @@
 //! Dial9 emits operational metrics about its own internals via a pluggable
 //! [`metrique_writer::BoxEntrySink`]. These tell you how the trace pipeline
 //! is performing (not application metrics). Wire up a sink with
-//! [`TracedRuntimeBuilder::with_worker_metrics_sink`](dial9_tokio_telemetry::telemetry::recorder::TracedRuntimeBuilder::with_worker_metrics_sink)
+//! [`TracedRuntimeBuilder::with_worker_metrics_sink`](dial9::telemetry::recorder::TracedRuntimeBuilder::with_worker_metrics_sink)
 //! or via `.with_runtime(|r| ...)` on the `Dial9Config` builder.
 //! If no sink is provided, metrics are discarded.
 //!
@@ -138,7 +138,7 @@
 //! duration, etc.) is caught by `clap` and exits with a diagnostic, as it
 //! would for any misconfigured CLI tool. Invalid _dial9_ configuration
 //! (writer I/O failure, unwritable trace directory, etc.) is handled
-//! lazily by [`dial9_tokio_telemetry::Dial9ConfigBuilder::build_or_disabled`]: the builder logs
+//! lazily by [`dial9::Dial9ConfigBuilder::build_or_disabled`]: the builder logs
 //! the error and falls back to a plain tokio runtime with telemetry
 //! disabled. A bad trace config must never take down prod.
 //!
@@ -166,10 +166,8 @@
 use std::time::Duration;
 
 use clap::Parser;
-use dial9_tokio_telemetry::Dial9Config;
-use dial9_tokio_telemetry::telemetry::{
-    Dial9TokioHandle, HasTracePath, PipelineUnset, TracedRuntimeBuilder,
-};
+use dial9::Dial9Config;
+use dial9::telemetry::{Dial9TokioHandle, HasTracePath, PipelineUnset, TracedRuntimeBuilder};
 use metrique::local::{LocalFormat, OutputStyle};
 use metrique::writer::format::FormatExt;
 use metrique::writer::sink::FlushImmediatelyBuilder;
@@ -248,7 +246,7 @@ fn configure_runtime_common(
     r = r
         .with_task_tracking(true)
         .with_worker_metrics_sink(metrics_sink);
-    use dial9_tokio_telemetry::telemetry::{CpuProfilingConfig, SchedEventConfig};
+    use dial9::telemetry::{CpuProfilingConfig, SchedEventConfig};
     if cpu_profile_enabled {
         r = r.with_cpu_profiling(CpuProfilingConfig::default().frequency_hz(cpu_sample_hz));
     }
@@ -309,7 +307,7 @@ fn configure_dial9(opts: &Dial9Opts) -> Dial9Config {
 
     #[cfg(feature = "worker-s3")]
     if let (Some(bucket), Some(service_name)) = (s3_bucket, s3_service) {
-        use dial9_tokio_telemetry::background_task::s3::S3Config;
+        use dial9::background_task::s3::S3Config;
         let s3 = S3Config::builder()
             .bucket(bucket)
             .service_name(service_name)
@@ -383,7 +381,7 @@ async fn workload_task(id: usize) {
     }
 }
 
-#[dial9_tokio_telemetry::main(config = my_config)]
+#[dial9::main(config = my_config)]
 async fn main() {
     let handle = Dial9TokioHandle::current();
     let tasks: Vec<_> = (0..100).map(|i| handle.spawn(workload_task(i))).collect();

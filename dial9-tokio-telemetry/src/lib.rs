@@ -40,5 +40,4 @@ pub use current_config::{
     Dial9Config, Dial9ConfigBuilder, Dial9ConfigBuilderError, DiskConfigBuilder,
     MemoryConfigBuilder, ValidationError,
 };
-pub use dial9_macro::main;
 pub use telemetry::{TelemetryRuntimeError, TracedFuture, TracedRuntime, spawn};

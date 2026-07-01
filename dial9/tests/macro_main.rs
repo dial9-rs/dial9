@@ -13,7 +13,7 @@ fn tmp_base_path() -> PathBuf {
 mod fluent_builder {
     use std::panic::{AssertUnwindSafe, catch_unwind};
 
-    use dial9_tokio_telemetry::Dial9Config;
+    use dial9::Dial9Config;
 
     use super::tmp_base_path;
 
@@ -37,7 +37,7 @@ mod fluent_builder {
             .expect("disabled build should succeed")
     }
 
-    #[dial9_tokio_telemetry::main(config = test_config)]
+    #[dial9::main(config = test_config)]
     async fn runs_async_body() {
         tokio::time::sleep(std::time::Duration::from_millis(1)).await;
     }
@@ -47,7 +47,7 @@ mod fluent_builder {
         runs_async_body();
     }
 
-    #[dial9_tokio_telemetry::main(config = || {
+    #[dial9::main(config = || {
         Dial9Config::builder()
             .on_disk_buffer(tmp_base_path())
             .max_file_size(1024 * 1024)
@@ -64,7 +64,7 @@ mod fluent_builder {
         runs_with_inline_closure();
     }
 
-    #[dial9_tokio_telemetry::main(config = move || {
+    #[dial9::main(config = move || {
         let path = tmp_base_path();
         Dial9Config::builder()
             .on_disk_buffer(path)
@@ -82,7 +82,7 @@ mod fluent_builder {
         runs_with_move_closure();
     }
 
-    #[dial9_tokio_telemetry::main(config = test_config)]
+    #[dial9::main(config = test_config)]
     async fn with_return_type() -> Result<i32, Box<dyn std::error::Error + Send + Sync>> {
         let val = tokio::spawn(async { 42 }).await?;
         Ok(val)
@@ -94,11 +94,11 @@ mod fluent_builder {
         assert_eq!(result.unwrap(), 42);
     }
 
-    #[dial9_tokio_telemetry::main(config = test_config)]
+    #[dial9::main(config = test_config)]
     async fn with_nested_spawn() -> i32 {
         // `Dial9TokioHandle::current()` is populated by `on_thread_start` on
         // every runtime-owned thread — use it to spawn instrumented sub-tasks.
-        let handle = dial9_tokio_telemetry::telemetry::Dial9TokioHandle::current();
+        let handle = dial9::telemetry::Dial9TokioHandle::current();
         let sub = handle.spawn(async { 7 + 3 });
         sub.await.unwrap()
     }
@@ -111,7 +111,7 @@ mod fluent_builder {
 
     // --- Error propagation ---
 
-    #[dial9_tokio_telemetry::main(config = test_config)]
+    #[dial9::main(config = test_config)]
     async fn body_returns_err() -> Result<(), String> {
         Err("something went wrong".into())
     }
@@ -122,7 +122,7 @@ mod fluent_builder {
         assert_eq!(result.unwrap_err(), "something went wrong");
     }
 
-    #[dial9_tokio_telemetry::main(config = test_config)]
+    #[dial9::main(config = test_config)]
     async fn body_returns_custom_err() -> Result<i32, std::io::Error> {
         Err(std::io::Error::new(std::io::ErrorKind::NotFound, "missing"))
     }
@@ -137,7 +137,7 @@ mod fluent_builder {
 
     // --- Panic propagation ---
 
-    #[dial9_tokio_telemetry::main(config = test_config)]
+    #[dial9::main(config = test_config)]
     async fn body_panics_with_str() {
         panic!("boom");
     }
@@ -152,7 +152,7 @@ mod fluent_builder {
         assert_eq!(*msg, "boom");
     }
 
-    #[dial9_tokio_telemetry::main(config = test_config)]
+    #[dial9::main(config = test_config)]
     #[allow(clippy::unnecessary_literal_unwrap)]
     async fn body_panics_with_format() {
         let x: Option<i32> = None;
@@ -181,7 +181,7 @@ mod fluent_builder {
             .expect("disabled build should succeed")
     }
 
-    #[dial9_tokio_telemetry::main(config = disabled_config)]
+    #[dial9::main(config = disabled_config)]
     async fn runs_without_telemetry() -> i32 {
         tokio::spawn(async { 123 }).await.unwrap()
     }
@@ -192,7 +192,7 @@ mod fluent_builder {
         assert_eq!(result, 123);
     }
 
-    #[dial9_tokio_telemetry::main(config = disabled_config_default)]
+    #[dial9::main(config = disabled_config_default)]
     async fn disabled_default_runs() -> i32 {
         tokio::spawn(async { 99 }).await.unwrap()
     }
@@ -202,7 +202,7 @@ mod fluent_builder {
         assert_eq!(disabled_default_runs(), 99);
     }
 
-    #[dial9_tokio_telemetry::main(config = disabled_config)]
+    #[dial9::main(config = disabled_config)]
     async fn disabled_with_return_type() -> Result<i32, Box<dyn std::error::Error + Send + Sync>> {
         let val = tokio::spawn(async { 42 }).await?;
         Ok(val)
@@ -213,10 +213,10 @@ mod fluent_builder {
         assert_eq!(disabled_with_return_type().unwrap(), 42);
     }
 
-    #[dial9_tokio_telemetry::main(config = disabled_config)]
+    #[dial9::main(config = disabled_config)]
     async fn disabled_no_telemetry_handle() -> bool {
         // The current handle should be inert when telemetry is disabled.
-        !dial9_tokio_telemetry::telemetry::Dial9Handle::current().is_enabled()
+        !dial9::telemetry::Dial9Handle::current().is_enabled()
     }
 
     #[test]
@@ -224,7 +224,7 @@ mod fluent_builder {
         assert!(disabled_no_telemetry_handle());
     }
 
-    #[dial9_tokio_telemetry::main(config = disabled_config)]
+    #[dial9::main(config = disabled_config)]
     async fn disabled_timers_work() {
         tokio::time::sleep(std::time::Duration::from_millis(1)).await;
     }
@@ -234,7 +234,7 @@ mod fluent_builder {
         disabled_timers_work();
     }
 
-    #[dial9_tokio_telemetry::main(config = disabled_config)]
+    #[dial9::main(config = disabled_config)]
     async fn disabled_nested_spawn() -> i32 {
         let inner = tokio::spawn(async { tokio::spawn(async { 7 + 3 }).await.unwrap() });
         inner.await.unwrap()
@@ -251,9 +251,9 @@ mod in_memory {
     use std::future::Future;
     use std::pin::Pin;
 
-    use dial9_tokio_telemetry::Dial9Config;
-    use dial9_tokio_telemetry::background_task::{ProcessError, SegmentData, SegmentProcessor};
-    use dial9_tokio_telemetry::telemetry::{Dial9Handle, Dial9TokioHandle};
+    use dial9::Dial9Config;
+    use dial9::background_task::{ProcessError, SegmentData, SegmentProcessor};
+    use dial9::telemetry::{Dial9Handle, Dial9TokioHandle};
 
     /// Stand-in delivery processor: forwards each segment unchanged.
     #[derive(Debug, Default)]
@@ -281,7 +281,7 @@ mod in_memory {
             .expect("in-memory config build failed")
     }
 
-    #[dial9_tokio_telemetry::main(config = memory_config)]
+    #[dial9::main(config = memory_config)]
     async fn runs_with_memory_writer() -> bool {
         let sub = Dial9TokioHandle::current().spawn(async { 7 + 3 });
         assert_eq!(sub.await.unwrap(), 10);
@@ -306,8 +306,8 @@ mod in_memory {
 mod fluent_builder_fallback {
     use std::path::PathBuf;
 
-    use dial9_tokio_telemetry::Dial9Config;
-    use dial9_tokio_telemetry::telemetry::Dial9Handle;
+    use dial9::Dial9Config;
+    use dial9::telemetry::Dial9Handle;
 
     use super::tmp_base_path;
 
@@ -331,7 +331,7 @@ mod fluent_builder_fallback {
             .build_or_disabled()
     }
 
-    #[dial9_tokio_telemetry::main(config = fallback_config)]
+    #[dial9::main(config = fallback_config)]
     async fn fallback_runs_async_body() -> bool {
         tokio::time::sleep(std::time::Duration::from_millis(1)).await;
         Dial9Handle::current().is_enabled()
@@ -346,7 +346,7 @@ mod fluent_builder_fallback {
         );
     }
 
-    #[dial9_tokio_telemetry::main(config = cascading_fallback_config)]
+    #[dial9::main(config = cascading_fallback_config)]
     async fn cascade_runs_async_body() -> bool {
         let result = tokio::spawn(async { 21 + 21 }).await.unwrap();
         assert_eq!(result, 42);

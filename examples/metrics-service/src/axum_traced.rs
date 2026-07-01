@@ -5,7 +5,7 @@ use std::{convert::Infallible, fmt::Debug, future::Future, io, marker::PhantomDa
 
 use axum::serve::Listener;
 use axum_core::{body::Body, extract::Request, response::Response};
-use dial9_tokio_telemetry::telemetry::{
+use dial9::telemetry::{
     Dial9Handle, Dial9TokioHandle, Encodable, ThreadLocalEncoder, clock_monotonic_ns,
 };
 use dial9_trace_format::{InternedString, TraceEvent};

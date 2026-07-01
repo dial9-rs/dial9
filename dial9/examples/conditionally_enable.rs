@@ -17,8 +17,8 @@
 
 use std::time::Duration;
 
-use dial9_tokio_telemetry::Dial9Config;
-use dial9_tokio_telemetry::telemetry::{Dial9Handle, Dial9TokioHandle};
+use dial9::Dial9Config;
+use dial9::telemetry::{Dial9Handle, Dial9TokioHandle};
 
 fn my_config() -> Dial9Config {
     Dial9Config::builder()
@@ -53,7 +53,7 @@ async fn mixed_task(id: usize) {
     println!("Task {id} completed");
 }
 
-#[dial9_tokio_telemetry::main(config = my_config)]
+#[dial9::main(config = my_config)]
 async fn main() {
     let handle = Dial9TokioHandle::current();
     let telemetry_enabled = Dial9Handle::current().is_enabled();

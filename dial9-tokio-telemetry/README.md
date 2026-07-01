@@ -36,8 +36,8 @@ rustflags = [
 ]
 ```
 
-```rust,no_run
-use dial9_tokio_telemetry::{main, Dial9Config, telemetry::Dial9TokioHandle};
+```rust,ignore
+use dial9::{main, Dial9Config, telemetry::Dial9TokioHandle};
 
 fn my_config() -> Dial9Config {
     Dial9Config::builder()
@@ -50,7 +50,7 @@ fn my_config() -> Dial9Config {
         .build_or_disabled() // or use build() to handle config failures explicitly
 }
 
-#[dial9_tokio_telemetry::main(config = my_config)] // inline config function is also supported
+#[dial9::main(config = my_config)] // inline config function is also supported
 async fn main() {
     let handle = Dial9TokioHandle::current();
     handle
@@ -62,14 +62,14 @@ async fn main() {
 
 For zero-code configuration in production, use `Dial9Config::from_env()`:
 
-```rust,no_run
-use dial9_tokio_telemetry::{main, Dial9Config, telemetry::Dial9TokioHandle};
+```rust,ignore
+use dial9::{main, Dial9Config, telemetry::Dial9TokioHandle};
 
 fn my_config() -> Dial9Config {
     Dial9Config::from_env()
 }
 
-#[dial9_tokio_telemetry::main(config = my_config)]
+#[dial9::main(config = my_config)]
 async fn main() {
     let handle = Dial9TokioHandle::current();
     handle.spawn(async { /* wake events tracked when enabled */ }).await.unwrap();
@@ -168,7 +168,7 @@ dial9 is fundamentally a central buffer that can collect data from different sou
 1. The wake event, when your future was _ready_ to run vs. when Tokio actually started running it.
 2. A "task dump", a stack trace of what your future was doing when it went idle.
 
-`dial9` can instrument a single runtime by using `TracedRuntime` or by using the `dial9_tokio_telemetry::main` macro.
+`dial9` can instrument a single runtime by using `TracedRuntime` or by using the `dial9::main` macro.
 
 ```rust
 # #[cfg(feature = "worker-s3")]
@@ -441,7 +441,7 @@ fn my_config() -> Dial9Config {
         .build_or_disabled()
 }
 
-#[dial9_tokio_telemetry::main(config = my_config)]
+#[dial9::main(config = my_config)]
 async fn main() { /* ... */ }
 # }
 # fn main() {}
@@ -554,7 +554,7 @@ dial9-tokio-telemetry = { version = "0.3", features = ["worker-s3"] }
 **Create the S3 bucket**: Ensure your application has `s3:PutObject` and `s3:ListBucket` permissions to the bucket.
 
 **Set `with_s3_uploader`:**
-```rust,no_run
+```rust,ignore
 # #[cfg(feature = "worker-s3")]
 # mod inner {
 use dial9_tokio_telemetry::Dial9Config;
@@ -576,7 +576,7 @@ fn my_config() -> Dial9Config {
         .build_or_disabled()
 }
 
-#[dial9_tokio_telemetry::main(config = my_config)]
+#[dial9::main(config = my_config)]
 async fn main() {
     // your async code here
 }
@@ -585,7 +585,7 @@ async fn main() {
 # fn main() {}
 ```
 
-When you use `#[dial9_tokio_telemetry::main]`, this shutdown drain happens
+When you use `#[dial9::main]`, this shutdown drain happens
 automatically once `main` returns: the macro drops the runtime and then calls
 `graceful_shutdown` with a 1s deadline so the final segment is uploaded. Tune it
 with `.graceful_shutdown(Duration)` on the config builder, or turn it off with

@@ -4,7 +4,7 @@ version = "0.3.7"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Proc-macro crate that provides the dial9_tokio_telemetry::main attribute macro"
+description = "Proc-macro crate that provides the dial9::main attribute macro"
 
 [lib]
 proc-macro = true

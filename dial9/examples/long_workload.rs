@@ -1,7 +1,7 @@
 use std::time::Duration;
 
-use dial9_tokio_telemetry::Dial9Config;
-use dial9_tokio_telemetry::telemetry::Dial9TokioHandle;
+use dial9::Dial9Config;
+use dial9::telemetry::Dial9TokioHandle;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
@@ -90,7 +90,7 @@ async fn periodic_yielder() {
     }
 }
 
-#[dial9_tokio_telemetry::main(config = my_config)]
+#[dial9::main(config = my_config)]
 async fn main() {
     let duration_secs = std::env::args()
         .nth(1)

@@ -1127,7 +1127,7 @@ impl<M: WriterMode, S: telemetry_core_builder::State> TelemetryCoreBuilder<M, S>
 /// Construct one of two ways:
 ///
 /// - **High-level**: from a [`crate::Dial9Config`] via [`TracedRuntime::new`]
-///   (panicking, used by the `#[dial9_tokio_telemetry::main]` macro) or
+///   (panicking, used by the `#[dial9::main]` macro) or
 ///   [`TracedRuntime::try_new`] (fallible).
 /// - **Low-level**: via [`TracedRuntime::builder`] →
 ///   [`build_and_start`](TracedRuntimeBuilder::build_and_start) for direct
@@ -1143,7 +1143,7 @@ pub struct TracedRuntime {
     pub(crate) memory_profiler_guard: Option<crate::memory_profiling::MemoryProfilerGuard>,
     /// Graceful-shutdown timeout carried from the [`crate::Dial9Config`].
     /// Consumed by [`graceful_shutdown`](TracedRuntime::graceful_shutdown)
-    /// (used by the `#[dial9_tokio_telemetry::main]` macro). `None` skips the
+    /// (used by the `#[dial9::main]` macro). `None` skips the
     /// implicit drain.
     pub(crate) graceful_shutdown_timeout: Option<Duration>,
 }
@@ -1299,7 +1299,7 @@ fn install_memory_profiler(
 impl TracedRuntime {
     /// Build a [`TracedRuntime`] from a config, panicking with the
     /// underlying error on failure. Used by the
-    /// `#[dial9_tokio_telemetry::main]` macro.
+    /// `#[dial9::main]` macro.
     ///
     /// Reach for this directly when the macro doesn't fit — e.g. when an
     /// application owns multiple tokio runtimes, when you need to control
@@ -1407,7 +1407,7 @@ impl TracedRuntime {
 
     /// Drop the runtime and perform the configured graceful shutdown.
     ///
-    /// This is what `#[dial9_tokio_telemetry::main]` calls after the body
+    /// This is what `#[dial9::main]` calls after the body
     /// completes. It:
     ///
     /// 1. drops the tokio runtime so worker threads exit and flush their
