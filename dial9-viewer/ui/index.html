@@ -1740,7 +1740,9 @@
 
     function clearDiff() { diffA = null; diffB = null; renderDiffTray(); }
 
-    function swapDiff() { const t = diffA; diffA = diffB; diffB = t; renderDiffTray(); }
+    // Swap only when both sides are set; swapping a lone side would leave A
+    // empty with B populated, violating the "fill A first" invariant.
+    function swapDiff() { if (!diffA || !diffB) return; const t = diffA; diffA = diffB; diffB = t; renderDiffTray(); }
 
     // Remove one side. Clearing A promotes B to A so there is never a B-without-A
     // hole (the codec fills A first).

@@ -764,9 +764,11 @@
                             btn.textContent = "Copied!";
                         } catch (e) {
                             // Clipboard API unavailable (insecure context): fall
-                            // back to a prompt so the user can copy manually.
-                            window.prompt("Copy this link:", url);
-                            btn.textContent = "Copied!";
+                            // back to a prompt so the user can copy manually. The
+                            // prompt returns null if the user cancels — only
+                            // claim success when they didn't.
+                            const res = window.prompt("Copy this link:", url);
+                            btn.textContent = res !== null ? "Copied!" : orig;
                         }
                         setTimeout(() => { btn.textContent = orig; }, 1500);
                     });

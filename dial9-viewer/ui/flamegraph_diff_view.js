@@ -529,13 +529,16 @@
       return { stop() { token.cancelled = true; } };
     }
 
-    const sideA = startSide("a", scopeA, statusA);
-    const sideB = startSide("b", scopeB, statusB);
+    // `let` (not `const`): repollSide replaces the handle so destroy() always
+    // stops the *current* loop, and a second re-prompt cancels the prior
+    // re-poll rather than leaving two loops running for the same side.
+    let sideA = startSide("a", scopeA, statusA);
+    let sideB = startSide("b", scopeB, statusB);
 
     // Kick a re-poll for one side (used after the user supplies B's creds).
     function repollSide(side) {
-      if (side === "a") { sideA.stop(); startSide("a", scopeA, statusA); }
-      else { sideB.stop(); startSide("b", scopeB, statusB); }
+      if (side === "a") { sideA.stop(); sideA = startSide("a", scopeA, statusA); }
+      else { sideB.stop(); sideB = startSide("b", scopeB, statusB); }
     }
 
     updateStats();
