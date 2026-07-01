@@ -4,17 +4,40 @@ use crate::primitives::sync::Arc;
 use crate::primitives::{sync::mpsc, thread::JoinHandle};
 use crate::shared_state::SharedState;
 use crate::writer::{SegmentWriter, WriterMode};
+use std::time::Duration;
 
-/// Owns a recording session: the [`Dial9Handle`] and the flush thread.
+/// The background worker thread and its stop signal.
 ///
-/// Create one with [`CoreSession::new`], then call [`stop_flush_thread`] to
-/// flush remaining events, seal the final trace segment, and join the flush
-/// thread before tearing down any higher-level runtime state.
+/// Present only when a segment-processing pipeline is configured.
+#[cfg(feature = "pipeline")]
+pub struct WorkerHandle {
+    shutdown: Option<tokio::sync::oneshot::Sender<Duration>>,
+    thread: Option<JoinHandle<()>>,
+}
+
+#[cfg(feature = "pipeline")]
+impl WorkerHandle {
+    /// Wrap the worker's shutdown sender and join handle.
+    pub fn new(shutdown: tokio::sync::oneshot::Sender<Duration>, thread: JoinHandle<()>) -> Self {
+        Self {
+            shutdown: Some(shutdown),
+            thread: Some(thread),
+        }
+    }
+}
+
+/// Owns a recording session: the [`Dial9Handle`], the flush thread, and (with
+/// the `pipeline` feature) the background worker.
 ///
-/// [`stop_flush_thread`]: CoreSession::stop_flush_thread
+/// This is an RAII guard: dropping it flushes remaining events, seals the final
+/// segment, and stops the worker. For a bounded drain of the background worker
+/// (symbolize, compress, upload) call [`graceful_shutdown`](Self::graceful_shutdown)
+/// instead.
 pub struct CoreSession {
     handle: Dial9Handle,
     flush_thread: Option<JoinHandle<()>>,
+    #[cfg(feature = "pipeline")]
+    worker: Option<WorkerHandle>,
 }
 
 impl CoreSession {
@@ -23,6 +46,8 @@ impl CoreSession {
         Self {
             handle,
             flush_thread,
+            #[cfg(feature = "pipeline")]
+            worker: None,
         }
     }
 
@@ -72,6 +97,33 @@ impl CoreSession {
         &self.handle
     }
 
+    /// Attach the background worker to this session, so its lifecycle is tied
+    /// to the session's (drained on `graceful_shutdown`, stopped on drop).
+    #[cfg(feature = "pipeline")]
+    pub fn attach_worker(&mut self, worker: WorkerHandle) {
+        self.worker = Some(worker);
+    }
+
+    /// The shared recording state.
+    pub fn shared(&self) -> Option<&Arc<SharedState>> {
+        self.handle.shared()
+    }
+
+    /// Monotonic start time of the session in nanoseconds.
+    pub fn start_time(&self) -> Option<u64> {
+        self.shared().map(|s| s.start_time_ns())
+    }
+
+    /// Enable recording.
+    pub fn enable(&self) {
+        self.handle.enable();
+    }
+
+    /// Disable recording.
+    pub fn disable(&self) {
+        self.handle.disable();
+    }
+
     /// Flush remaining events, seal the final segment, and join the flush thread.
     ///
     /// Call this before dropping any runtime state that owns worker threads, so
@@ -93,6 +145,51 @@ impl CoreSession {
         }
         if let Some(t) = self.flush_thread.take() {
             let _ = t.join();
+        }
+    }
+
+    /// Flush remaining events, seal the final segment, and (with `pipeline`)
+    /// wait for the background worker to drain within `timeout`.
+    ///
+    /// Call this after any runtime that owns worker threads has been dropped, so
+    /// their thread-local buffers have already been flushed. Consumes the
+    /// session so `Drop` becomes a no-op.
+    pub fn graceful_shutdown(mut self, timeout: Duration) -> std::io::Result<()> {
+        // `timeout` only bounds the worker drain, which exists under `pipeline`.
+        #[cfg(not(feature = "pipeline"))]
+        let _ = timeout;
+
+        // 1. Flush + finalize the last segment.
+        self.stop_flush_thread();
+
+        // 2. Signal the worker to drain, then join it.
+        #[cfg(feature = "pipeline")]
+        if let Some(w) = &mut self.worker {
+            if let Some(tx) = w.shutdown.take() {
+                let _ = tx.send(timeout);
+            }
+            if let Some(t) = w.thread.take()
+                && let Err(e) = t.join()
+            {
+                tracing::error!(target: "dial9", panic = ?e, "worker thread panicked during shutdown");
+            }
+        }
+
+        Ok(())
+    }
+}
+
+impl Drop for CoreSession {
+    fn drop(&mut self) {
+        // 1. Flush + finalize. Idempotent, so a prior graceful_shutdown/stop is fine.
+        self.stop_flush_thread();
+
+        // 2. Hard shutdown: drop the sender without sending — the worker sees a
+        // closed channel and exits without draining. For a graceful drain, call
+        // graceful_shutdown() instead.
+        #[cfg(feature = "pipeline")]
+        if let Some(w) = &mut self.worker {
+            w.shutdown.take();
         }
     }
 }

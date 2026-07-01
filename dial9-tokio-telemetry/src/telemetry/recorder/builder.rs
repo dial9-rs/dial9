@@ -1058,15 +1058,12 @@ impl TelemetryCore {
                 }
             });
             if let Some(wt) = wt {
-                worker = Some(WorkerHandle {
-                    shutdown: Some(shutdown_tx),
-                    thread: Some(wt),
-                });
+                worker = Some(WorkerHandle::new(shutdown_tx, wt));
             }
         }
 
         // Inject the cpu-profiler thread registration (perf-specific) via the thread-init hook.
-        let core_session = CoreSession::start(shared, writer, worker_metrics_sink, || {
+        let mut core_session = CoreSession::start(shared, writer, worker_metrics_sink, || {
             #[cfg(feature = "cpu-profiling")]
             let _ = dial9_perf_self_profile::register_current_thread();
             move || {
@@ -1074,10 +1071,12 @@ impl TelemetryCore {
                 dial9_perf_self_profile::unregister_current_thread();
             }
         });
+        if let Some(worker) = worker {
+            core_session.attach_worker(worker);
+        }
 
         Ok(TelemetryGuard::enabled(
             core_session,
-            worker,
             contexts,
             task_dump_config,
         ))

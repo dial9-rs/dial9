@@ -3,18 +3,13 @@ use crate::telemetry::task_dump_config::TaskDumpConfig;
 use std::time::Duration;
 
 use dial9_core::session::CoreSession;
+pub(crate) use dial9_core::session::WorkerHandle;
 
 use super::Dial9Handle;
 use super::SharedState;
 use super::attach_runtime;
 use super::handle::Dial9TokioHandle;
 use super::runtime_context::RuntimeContextRegistry;
-
-/// Holds the background worker thread and its stop signal.
-pub(crate) struct WorkerHandle {
-    pub(super) shutdown: Option<tokio::sync::oneshot::Sender<Duration>>,
-    pub(super) thread: Option<crate::primitives::thread::JoinHandle<()>>,
-}
 
 /// RAII guard returned by [`TracedRuntimeBuilder::build`](super::builder::TracedRuntimeBuilder::build).
 ///
@@ -27,18 +22,21 @@ pub(crate) struct WorkerHandle {
 /// is a successful no-op.
 ///
 /// Use [`is_enabled`](Self::is_enabled) to distinguish the two modes.
+///
+/// This wraps the runtime-agnostic [`CoreSession`] (flush thread + worker
+/// lifecycle) and adds the Tokio-specific state: the attached-runtime registry
+/// and task-dump settings.
 pub struct TelemetryGuard {
-    inner: GuardInner,
+    /// The recording session. `None` when telemetry is disabled; also taken by
+    /// [`graceful_shutdown`](Self::graceful_shutdown) so it can consume the
+    /// session despite this type's `Drop`. `Some` for every non-consuming method
+    /// on an enabled guard.
+    session: Option<CoreSession>,
+    /// Tokio-specific state, present only when telemetry is enabled.
+    tokio: Option<TokioState>,
 }
 
-enum GuardInner {
-    Enabled(EnabledGuard),
-    Disabled,
-}
-
-struct EnabledGuard {
-    core_session: CoreSession,
-    worker: Option<WorkerHandle>,
+struct TokioState {
     contexts: RuntimeContextRegistry,
     /// Task-dump settings to install on runtimes attached to this session.
     /// `None` when task dumps aren't configured.
@@ -55,15 +53,13 @@ impl std::fmt::Debug for TelemetryGuard {
 
 impl TelemetryGuard {
     pub(crate) fn enabled(
-        core_session: CoreSession,
-        worker: Option<WorkerHandle>,
+        session: CoreSession,
         contexts: RuntimeContextRegistry,
         taskdump_config: Option<crate::telemetry::task_dump_config::TaskDumpConfig>,
     ) -> Self {
         Self {
-            inner: GuardInner::Enabled(EnabledGuard {
-                core_session,
-                worker,
+            session: Some(session),
+            tokio: Some(TokioState {
                 contexts,
                 taskdump_config,
             }),
@@ -72,7 +68,8 @@ impl TelemetryGuard {
 
     pub(crate) fn disabled() -> Self {
         Self {
-            inner: GuardInner::Disabled,
+            session: None,
+            tokio: None,
         }
     }
 
@@ -81,7 +78,7 @@ impl TelemetryGuard {
     /// Returns `false` for guards created by `enabled(false)` configs
     /// or by lenient configs that downgraded after a build failure.
     pub fn is_enabled(&self) -> bool {
-        matches!(self.inner, GuardInner::Enabled(_))
+        self.session.is_some()
     }
 
     /// Get a cloneable handle for controlling telemetry.
@@ -89,10 +86,9 @@ impl TelemetryGuard {
     /// On a disabled guard this returns an inert handle whose methods
     /// are all no-ops — see [`Dial9Handle::disabled`].
     pub fn handle(&self) -> Dial9Handle {
-        match &self.inner {
-            GuardInner::Enabled(eg) => eg.core_session.handle().clone(),
-            GuardInner::Disabled => Dial9Handle::disabled(),
-        }
+        self.session
+            .as_ref()
+            .map_or_else(Dial9Handle::disabled, |s| s.handle().clone())
     }
 
     /// Get a [`Dial9TokioHandle`] for spawning instrumented tasks on `runtime`,
@@ -107,54 +103,42 @@ impl TelemetryGuard {
     /// Monotonic start time of the telemetry session in nanoseconds, if
     /// telemetry is enabled.
     pub fn start_time(&self) -> Option<u64> {
-        self.shared().map(|s| s.start_time_ns())
+        self.session.as_ref().and_then(|s| s.start_time())
     }
 
     /// Enable telemetry recording. No-op on a disabled guard.
     pub fn enable(&self) {
-        if let GuardInner::Enabled(eg) = &self.inner {
-            eg.core_session.handle().enable();
+        if let Some(s) = &self.session {
+            s.enable();
         }
     }
 
     /// Disable telemetry recording. No-op on a disabled guard.
     pub fn disable(&self) {
-        if let GuardInner::Enabled(eg) = &self.inner {
-            eg.core_session.handle().disable();
+        if let Some(s) = &self.session {
+            s.disable();
         }
     }
 
     /// Access the shared state for reuse by additional runtimes.
     pub(crate) fn shared(&self) -> Option<&Arc<SharedState>> {
-        match &self.inner {
-            GuardInner::Enabled(eg) => eg.core_session.handle().shared(),
-            GuardInner::Disabled => None,
-        }
+        self.session.as_ref().and_then(|s| s.shared())
     }
 
     /// Registry of attached runtimes, so additional runtimes can register.
     pub(crate) fn contexts(&self) -> Option<&RuntimeContextRegistry> {
-        match &self.inner {
-            GuardInner::Enabled(eg) => Some(&eg.contexts),
-            GuardInner::Disabled => None,
-        }
+        self.tokio.as_ref().map(|t| &t.contexts)
     }
 
     /// Task-dump settings to install on runtimes attached later.
     pub(crate) fn taskdump_config(
         &self,
     ) -> Option<crate::telemetry::task_dump_config::TaskDumpConfig> {
-        match &self.inner {
-            GuardInner::Enabled(eg) => eg.taskdump_config,
-            GuardInner::Disabled => None,
-        }
+        self.tokio.as_ref().and_then(|t| t.taskdump_config)
     }
 
     pub(crate) fn session_handle(&self) -> Option<&Dial9Handle> {
-        match &self.inner {
-            GuardInner::Enabled(eg) => Some(eg.core_session.handle()),
-            GuardInner::Disabled => None,
-        }
+        self.session.as_ref().map(|s| s.handle())
     }
 
     /// Attach a tokio runtime to this telemetry session.
@@ -190,14 +174,6 @@ impl TelemetryGuard {
         }
     }
 
-    /// Flush remaining events, seal the final segment, and join the flush thread.
-    /// No-op when telemetry is disabled.
-    fn stop_flush_thread(&mut self) {
-        if let GuardInner::Enabled(eg) = &mut self.inner {
-            eg.core_session.stop_flush_thread();
-        }
-    }
-
     /// Flush remaining events, seal the final segment, and wait for the
     /// background worker to drain (symbolize, compress, upload to S3).
     ///
@@ -224,45 +200,11 @@ impl TelemetryGuard {
     ///
     /// Consumes the guard so `Drop` becomes a no-op.
     pub fn graceful_shutdown(mut self, timeout: Duration) -> Result<(), std::io::Error> {
-        tracing::debug!(target: "dial9_telemetry", "graceful_shutdown starting");
-
-        // 1. Stop flush thread (flushes + finalizes the last segment).
-        // No-op when disabled.
-        self.stop_flush_thread();
-        tracing::debug!(target: "dial9_telemetry", "flush thread joined, segment sealed");
-
-        // 2. Signal worker to drain with the given timeout and wait
-        if let GuardInner::Enabled(eg) = &mut self.inner
-            && let Some(ref mut w) = eg.worker
-        {
-            tracing::debug!(target: "dial9_telemetry", timeout_secs = timeout.as_secs(), "waiting for worker drain");
-            if let Some(tx) = w.shutdown.take() {
-                let _ = tx.send(timeout);
-            }
-            if let Some(t) = w.thread.take()
-                && let Err(e) = t.join()
-            {
-                tracing::error!(target: "dial9_telemetry", panic = ?e, "worker thread panicked during shutdown");
-            }
-            tracing::debug!(target: "dial9_telemetry", "worker finished");
-        }
-
-        Ok(())
-    }
-}
-
-impl Drop for TelemetryGuard {
-    fn drop(&mut self) {
-        // 1. Stop the flush thread (flushes + finalizes). No-op when disabled.
-        self.stop_flush_thread();
-
-        // 2. Hard shutdown: drop the sender without sending — worker sees
-        // RecvError and exits without draining. No need to join the thread.
-        // For graceful drain, use graceful_shutdown() instead.
-        if let GuardInner::Enabled(eg) = &mut self.inner
-            && let Some(ref mut w) = eg.worker
-        {
-            w.shutdown.take();
+        // Take the session so its own `Drop` (hard shutdown) becomes a no-op and
+        // dropping `self` afterward doesn't double-shutdown.
+        match self.session.take() {
+            Some(session) => session.graceful_shutdown(timeout),
+            None => Ok(()),
         }
     }
 }
