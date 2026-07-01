@@ -129,9 +129,7 @@ dial9-tokio-telemetry = { path = ".", features = [
 dial9-trace-format = { workspace = true, features = ["serde-deserialize"] }
 dial9-core = { workspace = true, features = ["test-util"] }
 dial9-perf-self-profile = { workspace = true, features = ["test-util"] }
-assert2 = { workspace = true }
 criterion = "0.5"
-clap = { version = "4", features = ["derive", "env"] }
 hdrhistogram = "7"
 metrique-timesource = { version = "0.1", features = [
     "custom-timesource",
@@ -190,46 +188,6 @@ required-features = ["memory-profiling"]
 name = "pipeline_heap_bench"
 harness = false
 required-features = ["cpu-profiling"]
-
-[[example]]
-name = "block_in_place_workload"
-required-features = ["cpu-profiling"]
-
-[[example]]
-name = "blocking_sleep"
-required-features = ["cpu-profiling"]
-
-[[example]]
-name = "cpu_profile_workload"
-required-features = ["cpu-profiling", "analysis"]
-
-[[example]]
-name = "s3_stress_test"
-required-features = ["worker-s3"]
-
-[[example]]
-name = "analyze_trace"
-required-features = ["analysis"]
-
-[[example]]
-name = "trace_to_jsonl"
-required-features = ["analysis"]
-
-[[example]]
-name = "kernel_sched_events"
-required-features = ["cpu-profiling", "analysis"]
-
-[[example]]
-name = "generate_diagnostic_traces"
-required-features = ["cpu-profiling"]
-
-[[example]]
-name = "thread_per_core"
-required-features = ["analysis"]
-
-[[example]]
-name = "tracing_sleep"
-required-features = ["tracing-layer"]
 
 [[bench]]
 name = "tracing_layer_bench"

@@ -16,8 +16,8 @@ use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
 
-use dial9_tokio_telemetry::background_task::{ProcessError, SegmentData, SegmentProcessor};
-use dial9_tokio_telemetry::telemetry::{Dial9TokioHandle, InMemoryWriter, TracedRuntime};
+use dial9::background_task::{ProcessError, SegmentData, SegmentProcessor};
+use dial9::telemetry::{Dial9TokioHandle, InMemoryWriter, TracedRuntime};
 
 /// Stand-in delivery processor. Inspects each segment, forwards unchanged.
 /// Replace with a real uploader in production.

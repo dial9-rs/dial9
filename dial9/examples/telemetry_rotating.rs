@@ -9,7 +9,7 @@
 //! After running, inspect the trace files:
 //!   cargo run --example analyze_trace -- /tmp/telemetry_rotating/trace.0.bin
 
-use dial9_tokio_telemetry::telemetry::{DiskWriter, TracedRuntime};
+use dial9::telemetry::{DiskWriter, TracedRuntime};
 use std::time::Duration;
 
 fn main() -> std::io::Result<()> {

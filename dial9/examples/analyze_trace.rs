@@ -3,7 +3,7 @@
 //! Usage:
 //!   cargo run --example analyze_trace --features analysis -- <trace_file>
 
-use dial9_tokio_telemetry::telemetry::analysis_events::{Dial9Event, WorkerId};
+use dial9::telemetry::analysis_events::{Dial9Event, WorkerId};
 use dial9_trace_format::decoder::Decoder;
 use std::collections::HashMap;
 use std::env;

@@ -1789,6 +1789,8 @@ name = "dial9"
 version = "0.4.0-alpha.1"
 dependencies = [
  "anyhow",
+ "aws-config",
+ "aws-sdk-s3",
  "clap",
  "dial9",
  "dial9-core",
@@ -1798,10 +1800,14 @@ dependencies = [
  "dial9-trace-format",
  "dial9-viewer",
  "flate2",
+ "hostname",
  "metrique",
  "metrique-writer",
+ "serde_json",
  "tempfile",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -1865,14 +1871,12 @@ name = "dial9-tokio-telemetry"
 version = "0.4.0-alpha.1"
 dependencies = [
  "arc-swap",
- "assert2",
  "async-trait",
  "aws-config",
  "aws-sdk-s3",
  "aws-sdk-s3-transfer-manager",
  "bon",
  "bytes",
- "clap",
  "criterion",
  "dial9-core",
  "dial9-perf-self-profile",

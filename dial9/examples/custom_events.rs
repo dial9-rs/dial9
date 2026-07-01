@@ -9,7 +9,7 @@
 //! cargo run --example custom_events --features analysis
 //! ```
 
-use dial9_tokio_telemetry::telemetry::{
+use dial9::telemetry::{
     DiskWriter, Encodable, ThreadLocalEncoder, TracedRuntime, clock_monotonic_ns,
 };
 use dial9_trace_format::{InternedString, TraceEvent};

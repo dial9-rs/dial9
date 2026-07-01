@@ -101,6 +101,18 @@ flate2 = "1"
 clap = { version = "4", features = ["derive", "env"] }
 metrique = { version = "0.1.23", features = ["local-format"] }
 metrique-writer = "0.1"
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+hostname = "0.4"
+aws-sdk-s3 = { version = "1", default-features = false, features = [
+    "behavior-version-latest",
+    "default-https-client",
+    "http-1x",
+    "rt-tokio",
+    "sigv4a",
+] }
+aws-config = { version = "1", features = ["behavior-version-latest"] }
 dial9-trace-format = { workspace = true, features = ["serde-deserialize"] }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
@@ -150,3 +162,63 @@ required-features = ["tokio"]
 [[example]]
 name = "production_use"
 required-features = ["tokio", "cpu-profiling", "worker-s3"]
+
+[[example]]
+name = "multi_runtime"
+required-features = ["tokio"]
+
+[[example]]
+name = "custom_events"
+required-features = ["tokio"]
+
+[[example]]
+name = "in_memory_pipeline"
+required-features = ["tokio"]
+
+[[example]]
+name = "telemetry_rotating"
+required-features = ["tokio"]
+
+[[example]]
+name = "test_hooks"
+required-features = ["tokio"]
+
+[[example]]
+name = "analyze_trace"
+required-features = ["analysis"]
+
+[[example]]
+name = "trace_to_jsonl"
+required-features = ["analysis"]
+
+[[example]]
+name = "thread_per_core"
+required-features = ["analysis"]
+
+[[example]]
+name = "s3_stress_test"
+required-features = ["worker-s3"]
+
+[[example]]
+name = "tracing_sleep"
+required-features = ["tracing-layer"]
+
+[[example]]
+name = "block_in_place_workload"
+required-features = ["tokio", "cpu-profiling"]
+
+[[example]]
+name = "blocking_sleep"
+required-features = ["tokio", "cpu-profiling"]
+
+[[example]]
+name = "generate_diagnostic_traces"
+required-features = ["tokio", "cpu-profiling"]
+
+[[example]]
+name = "cpu_profile_workload"
+required-features = ["tokio", "cpu-profiling", "analysis"]
+
+[[example]]
+name = "kernel_sched_events"
+required-features = ["tokio", "cpu-profiling", "analysis"]

@@ -7,7 +7,7 @@
 //!
 //! Produces: `block_in_place_trace.bin` in the current directory.
 
-use dial9_tokio_telemetry::telemetry::{DiskWriter, TracedRuntime};
+use dial9::telemetry::{DiskWriter, TracedRuntime};
 use std::time::Duration;
 
 /// CPU-intensive work that shows up in CPU profiles.

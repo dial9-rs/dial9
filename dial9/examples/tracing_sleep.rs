@@ -1,7 +1,7 @@
 //! Demonstrates tracing spans across async sleep boundaries.
 //! Each span is polled multiple times (producing multiple segments in the viewer).
-use dial9_tokio_telemetry::telemetry::{DiskWriter, TracedRuntime};
-use dial9_tokio_telemetry::tracing_layer::Dial9TracingLayer;
+use dial9::telemetry::{DiskWriter, TracedRuntime};
+use dial9::tracing_layer::Dial9TracingLayer;
 use std::time::Duration;
 use tracing_subscriber::prelude::*;
 

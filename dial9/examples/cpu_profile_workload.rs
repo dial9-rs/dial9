@@ -12,7 +12,7 @@
 // Example prints the deprecated `CpuSampleEvent::worker_id` for illustration.
 #![allow(deprecated)]
 
-use dial9_tokio_telemetry::telemetry::{
+use dial9::telemetry::{
     CpuProfilingConfig, DiskWriter, TracedRuntime,
     analysis_events::{CpuSampleSource, Dial9Event, WorkerId},
 };

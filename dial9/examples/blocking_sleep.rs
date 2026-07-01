@@ -1,4 +1,4 @@
-use dial9_tokio_telemetry::telemetry::{DiskWriter, TracedRuntime};
+use dial9::telemetry::{DiskWriter, TracedRuntime};
 use std::time::Duration;
 
 async fn blocking_task(id: usize) {

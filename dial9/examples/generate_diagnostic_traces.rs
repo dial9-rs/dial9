@@ -11,7 +11,7 @@
 //! Note: "missing frame pointers" and "missing debug symbols" require building
 //! with different RUSTFLAGS, so they are handled by the shell script wrapper.
 
-use dial9_tokio_telemetry::telemetry::{
+use dial9::telemetry::{
     CpuProfilingConfig, Dial9TokioHandle, DiskWriter, SchedEventConfig, TracedRuntime,
 };
 use std::path::PathBuf;
