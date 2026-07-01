@@ -357,8 +357,30 @@
         <button id="health-btn" onclick="viewTokioStats()" disabled title="Open Tokio stats view for the selected scope">
             ⚡ Tokio Stats
         </button>
+        <button id="diff-add-btn" onclick="addToDiff()" disabled title="Capture this selection as one side (A, then B) of a differential comparison">
+            ➕ Add to diff
+        </button>
         <span id="selection-warn" style="color:#ff6b6b;font-size:0.8em"></span>
         <span class="count" id="selection-count"></span>
+    </div>
+
+    <!-- Differential comparison tray: appears once a side has been captured via
+         "Add to diff". A (left) and B (right) are independent aggregate scopes;
+         when both are set the user launches a diff in either viz. -->
+    <div id="diff-tray" style="display:none;margin:0 20px 12px;padding:10px 14px;background:#161b2e;border:1px solid #6c63ff;border-radius:8px;font-size:0.85em">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
+            <b style="color:#c7c2ff">Diff</b>
+            <span style="color:#8b949e">blue = heavier in A · red = heavier in B</span>
+            <span style="flex:1"></span>
+            <button onclick="swapDiff()" class="ghost" style="background:#2a2a44;color:#e0e0e0;border:1px solid #444;padding:3px 10px;border-radius:3px;cursor:pointer" title="Swap A and B">⇄ Swap</button>
+            <button onclick="clearDiff()" class="ghost" style="background:#2a2a44;color:#e0e0e0;border:1px solid #444;padding:3px 10px;border-radius:3px;cursor:pointer" title="Clear both sides">Clear</button>
+        </div>
+        <div id="diff-sides" style="display:grid;grid-template-columns:1fr 1fr;gap:10px"></div>
+        <div id="diff-launch" style="display:none;margin-top:10px;align-items:center;gap:8px">
+            <span style="color:#8b949e">Compare in:</span>
+            <button onclick="launchDiff('flamegraph')" style="background:#6c63ff;color:#fff;border:none;padding:4px 14px;border-radius:3px;cursor:pointer;font-weight:600">🔥 Flamegraph</button>
+            <button onclick="launchDiff('tokio')" style="background:#6c63ff;color:#fff;border:none;padding:4px 14px;border-radius:3px;cursor:pointer;font-weight:600">⚡ Tokio Stats</button>
+        </div>
     </div>
 
     <footer id="footer-drop"
@@ -370,6 +392,8 @@
     </footer>
 
     <script src="creds.js"></script>
+    <script src="format.js"></script>
+    <script src="flamegraph_diff.js"></script>
     <script src="prefix_detect.js"></script>
     <script src="url_state.js"></script>
     <script src="heatmap.js"></script>
@@ -1612,6 +1636,37 @@
         });
     }
 
+    // Build the aggregate SCOPE (bucket/prefix/service/host-set/time window) for
+    // the current heatmap selection, as a URLSearchParams. This is the single
+    // source of truth shared by the flamegraph button, the tokio-stats button,
+    // and the A/B diff capture — so all three agree on how a box maps to a
+    // scope. Returns null if there is no usable selection. Does NOT set `api`
+    // (that flag is flamegraph-specific and added by the caller).
+    function selectionScope() {
+        if (!heatmapSelection || !heatmapSelection.keys.length) return null;
+        const bucket = bucketInput.value.trim();
+        if (!bucket) return null;
+        const keys = heatmapSelection.keys;
+        const parsed = keys.map(k => parseKey(k));
+        const services = [...new Set(parsed.map(p => p.service).filter(Boolean))];
+        const hosts = [...new Set(parsed.map(p => p.host).filter(Boolean))];
+        const p = new URLSearchParams();
+        p.set('bucket', bucket);
+        // Extract the key prefix from the first selected key (everything before
+        // the date segment). Authoritative regardless of whether the prefix came
+        // from the server or the user's input.
+        const pfx = extractPrefix(keys[0]);
+        if (pfx) p.set('prefix', pfx);
+        // The loop's Scope takes a single service; a box almost always spans one
+        // service. If several, pass the first and let host-set + time narrow it.
+        if (services.length) p.set('service', services[0]);
+        for (const h of hosts) p.append('host', h); // repeatable host set
+        // Selection times are epoch SECONDS; the loops want epoch ns.
+        if (heatmapSelection.t0 != null) p.set('start_ns', String(Math.round(heatmapSelection.t0 * 1e9)));
+        if (heatmapSelection.t1 != null) p.set('end_ns', String(Math.round(heatmapSelection.t1 * 1e9)));
+        return p;
+    }
+
     // CPU Profiling button: open a flamegraph of the selected segments. The
     // flamegraph view builds from the trace's CpuSampleEvents (and resolves
     // symbols from SymbolTableEntry), ignoring all other event types, so we
@@ -1628,27 +1683,8 @@
         // deterministic order, and progressively refines — so a large 24h
         // selection starts showing a flamegraph immediately.
         if (aggregationEnabled) {
-            const parsed = keys.map(k => parseKey(k));
-            const services = [...new Set(parsed.map(p => p.service).filter(Boolean))];
-            const hosts = [...new Set(parsed.map(p => p.host).filter(Boolean))];
-            const fgParams = new URLSearchParams();
+            const fgParams = selectionScope();
             fgParams.set('api', '1');
-            // Pass the bucket so the flamegraph endpoint knows which bucket to
-            // aggregate from (required for bring-your-own-credentials mode).
-            if (bucket) fgParams.set('bucket', bucket);
-            // Extract the key prefix from the first selected key (everything
-            // before the date segment). This is authoritative regardless of
-            // whether the prefix came from the server or the user's input.
-            const pfx = extractPrefix(keys[0]);
-            if (pfx) fgParams.set('prefix', pfx);
-            // The loop's Scope takes a single service; a box almost always spans
-            // one service. If several, pass the first and let host-set + time do
-            // the narrowing (rare; revisit if multi-service boxes matter).
-            if (services.length) fgParams.set('service', services[0]);
-            for (const h of hosts) fgParams.append('host', h); // repeatable host set
-            // Selection times are epoch SECONDS; the loop wants epoch ns.
-            if (heatmapSelection.t0 != null) fgParams.set('start_ns', String(Math.round(heatmapSelection.t0 * 1e9)));
-            if (heatmapSelection.t1 != null) fgParams.set('end_ns', String(Math.round(heatmapSelection.t1 * 1e9)));
             window.open('flamegraph.html?' + fgParams.toString(), '_blank');
             return;
         }
@@ -1660,23 +1696,112 @@
     }
 
     function viewTokioStats() {
-        if (!heatmapSelection || !heatmapSelection.keys.length) return;
-        const bucket = bucketInput.value.trim();
-        if (!bucket) { alert('Bucket is required'); return; }
-        const keys = heatmapSelection.keys;
-        const parsed = keys.map(k => parseKey(k));
-        const services = [...new Set(parsed.map(p => p.service).filter(Boolean))];
-        const hosts = [...new Set(parsed.map(p => p.host).filter(Boolean))];
-        const hp = new URLSearchParams();
-        if (bucket) hp.set('bucket', bucket);
-        const pfx = extractPrefix(keys[0]);
-        if (pfx) hp.set('prefix', pfx);
-        if (services.length) hp.set('service', services[0]);
-        for (const h of hosts) hp.append('host', h);
-        if (heatmapSelection.t0 != null) hp.set('start_ns', String(Math.round(heatmapSelection.t0 * 1e9)));
-        if (heatmapSelection.t1 != null) hp.set('end_ns', String(Math.round(heatmapSelection.t1 * 1e9)));
+        const hp = selectionScope();
+        if (!hp) { if (!bucketInput.value.trim()) alert('Bucket is required'); return; }
         window.open('tokio_stats.html?' + hp.toString(), '_blank');
     }
+
+    // ── Differential comparison (A/B) ──
+    // Two captured scopes, each a URLSearchParams from selectionScope(). Launched
+    // into either viz via the shared FlamegraphDiff scope-link codec
+    // (?diff=1&a=<b64>&b=<b64>), which both flamegraph.html and tokio_stats.html
+    // consume. Held in memory only; nothing is persisted.
+    let diffA = null;
+    let diffB = null;
+
+    // One-line human summary of a captured scope, for the tray's A/B rows.
+    function summarizeDiffScope(scope) {
+        if (!scope) return '—';
+        const bits = [];
+        const svc = scope.get('service');
+        if (svc) bits.push(svc);
+        const hosts = scope.getAll('host');
+        if (hosts.length === 1) bits.push(hosts[0]);
+        else if (hosts.length > 1) bits.push(hosts.length + ' hosts');
+        const s = scope.get('start_ns'), e = scope.get('end_ns');
+        if (s && e) {
+            const from = new Date(Number(s) / 1e6).toISOString().slice(5, 16).replace('T', ' ');
+            bits.push(from + ' UTC · ' + formatHumanDuration(Number(e) - Number(s)));
+        }
+        const bkt = scope.get('bucket');
+        if (bkt) bits.push(bkt);
+        return bits.join(' · ') || '(empty scope)';
+    }
+
+    function addToDiff() {
+        const scope = selectionScope();
+        if (!scope) { if (!bucketInput.value.trim()) alert('Bucket is required'); return; }
+        // Fill A first, then B; once both are set a further add replaces B (the
+        // most recent), so the user can keep re-picking the comparison side.
+        if (!diffA) diffA = scope;
+        else diffB = scope;
+        renderDiffTray();
+    }
+
+    function clearDiff() { diffA = null; diffB = null; renderDiffTray(); }
+
+    function swapDiff() { const t = diffA; diffA = diffB; diffB = t; renderDiffTray(); }
+
+    // Remove one side. Clearing A promotes B to A so there is never a B-without-A
+    // hole (the codec fills A first).
+    function clearDiffSide(side) {
+        if (side === 'a') { diffA = diffB; diffB = null; }
+        else diffB = null;
+        renderDiffTray();
+    }
+    window.clearDiffSide = clearDiffSide;
+
+    function renderDiffTray() {
+        const tray = document.getElementById('diff-tray');
+        const sides = document.getElementById('diff-sides');
+        const launch = document.getElementById('diff-launch');
+        if (!diffA && !diffB) { tray.style.display = 'none'; return; }
+        tray.style.display = '';
+        function sideCell(label, scope, chipBg, chipFg, sideKey) {
+            const set = !!scope;
+            return `<div style="background:#14142a;border:1px solid ${set ? chipFg : '#333'};border-radius:6px;padding:8px 10px;min-width:0">
+                <div style="display:flex;align-items:center;gap:8px">
+                    <span style="font-size:0.72em;font-weight:700;padding:2px 8px;border-radius:10px;background:${chipBg};color:${chipFg}">${label}</span>
+                    ${set ? `<span style="flex:1"></span><button onclick="clearDiffSide('${sideKey}')" title="Remove ${label}" style="background:none;border:none;color:#888;cursor:pointer;font-size:1em">✕</button>` : ''}
+                </div>
+                <div style="color:#ccc;margin-top:6px;overflow-wrap:anywhere">${set ? escapeHtmlIdx(summarizeDiffScope(scope)) : '<span style="color:#666">select a region and click "Add to diff"</span>'}</div>
+            </div>`;
+        }
+        sides.innerHTML =
+            sideCell('A · left', diffA, '#1e3050', '#9ec1ff', 'a') +
+            sideCell('B · right', diffB, '#4a221c', '#ffb3a0', 'b');
+        launch.style.display = (diffA && diffB) ? 'flex' : 'none';
+    }
+
+    // Launch the captured A/B diff in the chosen viz. Uses the shared scope-link
+    // codec so flamegraph and tokio-stats receive the SAME two-independent-scope
+    // encoding — the unified diff-handling seam between the two views.
+    function launchDiff(kind) {
+        if (!diffA || !diffB) return;
+        // Flamegraph scopes carry the client-only `api=1` flag; tokio-stats does
+        // not use it. Add it per-side only for the flamegraph target so each side
+        // hits /api/flamegraph in aggregate mode.
+        function scopeFor(base) {
+            if (kind !== 'flamegraph') return base;
+            const s = new URLSearchParams(base.toString());
+            s.set('api', '1');
+            return s;
+        }
+        const search = FlamegraphDiff.diffSearch(scopeFor(diffA), scopeFor(diffB));
+        const page = kind === 'tokio' ? 'tokio_stats.html' : 'flamegraph.html';
+        window.open(page + '?' + search, '_blank');
+    }
+
+    // Local HTML-escape (index.html has no shared escape helper in this scope).
+    function escapeHtmlIdx(s) {
+        return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    }
+
+    window.addToDiff = addToDiff;
+    window.clearDiff = clearDiff;
+    window.swapDiff = swapDiff;
+    window.launchDiff = launchDiff;
 
     // ── Raw search mode ──
     async function doRawSearch() {
@@ -1781,6 +1906,7 @@
         const viewBtn = document.getElementById('view-btn');
         const cpuBtn = document.getElementById('cpu-btn');
         const healthBtn = document.getElementById('health-btn');
+        const diffAddBtn = document.getElementById('diff-add-btn');
         const warn = document.getElementById('selection-warn');
         const count = document.getElementById('selection-count');
 
@@ -1790,6 +1916,7 @@
                 viewBtn.disabled = true;
                 cpuBtn.disabled = true;
                 healthBtn.disabled = true;
+                diffAddBtn.disabled = true;
                 warn.textContent = '';
                 count.textContent = '';
                 return;
@@ -1798,6 +1925,9 @@
             viewBtn.disabled = over;
             cpuBtn.disabled = over && !aggregationEnabled;
             healthBtn.disabled = !aggregationEnabled;
+            // Diff is an aggregate-only feature (both flamegraph and tokio-stats
+            // diffs run the server-side refinement loop per side).
+            diffAddBtn.disabled = !aggregationEnabled;
             warn.textContent = over && !aggregationEnabled
                 ? `Too large to open (${formatSize(sel.bytes)} > 100 MB) — narrow your selection.`
                 : '';
@@ -1806,11 +1936,13 @@
             return;
         }
 
-        // Raw mode
+        // Raw mode: diff (like flamegraph/tokio-stats) is driven by a heatmap
+        // box, so it is unavailable here.
         const keys = getSelectedKeys();
         warn.textContent = '';
         count.textContent = keys.length ? `${keys.length} selected` : '';
         viewBtn.disabled = keys.length === 0;
+        diffAddBtn.disabled = true;
     }
 
     function viewSelected() {
