@@ -1786,11 +1786,13 @@ dependencies = [
 
 [[package]]
 name = "dial9"
-version = "0.3.13"
+version = "0.4.0-alpha.1"
 dependencies = [
  "anyhow",
+ "dial9-core",
+ "dial9-perf-self-profile",
+ "dial9-tokio-telemetry",
  "dial9-viewer",
- "tokio",
 ]
 
 [[package]]

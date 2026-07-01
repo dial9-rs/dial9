@@ -124,6 +124,15 @@ enum AgentsAction {
     },
 }
 
+/// Build a Tokio runtime and run the CLI. For binaries that don't set up their
+/// own runtime (e.g. the `dial9` binary).
+pub fn run_blocking() -> anyhow::Result<()> {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(run())
+}
+
 /// Run the CLI. Call this from your binary's `main()`.
 pub async fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();

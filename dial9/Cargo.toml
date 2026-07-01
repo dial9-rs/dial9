@@ -1,10 +1,16 @@
 [package]
 name = "dial9"
-version = "0.3.13"
+version = "0.4.0-alpha.1"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "CLI for dial9-tokio-telemetry: trace viewer, analysis toolkit, and agent skills"
+readme = "README.md"
+description = "Low-overhead async runtime telemetry: event recording, Tokio integration, CPU/memory profiling, and a trace viewer CLI"
+keywords = ["tokio", "telemetry", "profiling", "tracing"]
+categories = ["asynchronous", "development-tools::profiling"]
+
+[package.metadata.docs.rs]
+all-features = true
 
 [package.metadata.binstall]
 pkg-url = "{ repo }/releases/download/dial9-viewer-v{ version }/dial9-viewer-{ target }-v{ version }{ archive-suffix }"
@@ -14,8 +20,60 @@ bin-dir = "dial9{ binary-ext }"
 [[bin]]
 name = "dial9"
 path = "src/main.rs"
+required-features = ["cli"]
 
 [dependencies]
-anyhow = "1"
-dial9-viewer = { version = "0.4.0", path = "../dial9-viewer" }
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+dial9-core = { workspace = true }
+dial9-perf-self-profile = { workspace = true, optional = true }
+dial9-tokio-telemetry = { version = "0.4.0-alpha.1", path = "../dial9-tokio-telemetry", optional = true }
+
+dial9-viewer = { version = "0.4.0", path = "../dial9-viewer", optional = true }
+anyhow = { version = "1", optional = true }
+
+[features]
+default = ["cli"]
+
+## The `dial9` viewer/analysis binary (`dial9 serve`, `dial9 agents`).
+cli = ["dep:dial9-viewer", "dep:anyhow"]
+
+## Background segment-processing pipeline (worker, processors, on-demand dumps).
+## Pulls a Tokio runtime for the worker, but not the runtime *integration*.
+pipeline = ["dial9-core/pipeline"]
+
+## Tokio runtime integration: `#[dial9::main]`, `TracedRuntime`, `spawn`,
+## `Dial9TokioHandle`, `Dial9Config`, and the Tokio event sources.
+tokio = ["dep:dial9-tokio-telemetry", "pipeline"]
+
+## CPU and scheduler profiling as a standalone `Source`. Auto-wires into the Tokio
+## runtime when the `tokio` feature is also on.
+cpu-profiling = [
+    "dep:dial9-perf-self-profile",
+    "dial9-perf-self-profile/dial9-source",
+    "dial9-tokio-telemetry?/cpu-profiling",
+]
+
+## Sampled memory allocation profiling as a standalone `Source`.
+memory-profiling = [
+    "dep:dial9-perf-self-profile",
+    "dial9-perf-self-profile/memory-profiling",
+    "dial9-perf-self-profile/dial9-source",
+    "dial9-tokio-telemetry?/memory-profiling",
+]
+
+## Removes `#[non_exhaustive]` from profiling event structs. Unstable.
+unstable-events = ["dial9-perf-self-profile?/unstable-events"]
+
+## Tracing-subscriber layer emitting span events into dial9 traces.
+tracing-layer = ["tokio", "dial9-tokio-telemetry/tracing-layer"]
+
+## Trace file reading + analysis toolkit (offline decode).
+analysis = ["tokio", "dial9-tokio-telemetry/analysis"]
+
+## S3 upload pipeline stage.
+worker-s3 = ["tokio", "dial9-tokio-telemetry/worker-s3"]
+
+## Async backtraces at Tokio yield points (Linux only).
+taskdump = ["tokio", "dial9-tokio-telemetry/taskdump"]
+
+## TCP accept-queue depth sampling (Linux only).
+linux-socket = ["tokio", "dial9-tokio-telemetry/linux-socket"]
