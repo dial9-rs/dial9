@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Diff view — isolation harness</title>
+<link rel="stylesheet" href="flamegraph.css" />
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    background: #1a1a2e; color: #e0e0e0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    font-size: 14px; display: flex; flex-direction: column; overflow: hidden;
+  }
+  .harness-bar {
+    flex-shrink: 0; padding: 6px 12px; background: #0d0d1a; border-bottom: 1px solid #444;
+    display: flex; gap: 10px; align-items: center; font-size: 0.82em; flex-wrap: wrap;
+  }
+  .harness-bar b { color: #ffd54a; }
+  .harness-bar button { background: #2a2a44; color: #e0e0e0; border: 1px solid #444; padding: 3px 10px; border-radius: 3px; cursor: pointer; font-weight: 600; }
+  .harness-bar button.on { background: #6c63ff; border-color: #6c63ff; }
+  .harness-bar input { background: #2a2a4a; border: 1px solid #444; color: #e0e0e0; padding: 3px 8px; border-radius: 3px; width: 360px; font-family: monospace; font-size: 0.9em; }
+  #diag { color: #9ec1ff; font-family: monospace; }
+  #host { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-height: 0; }
+</style>
+</head>
+<body>
+<div class="harness-bar">
+  <b>DIFF ISOLATION HARNESS</b>
+  <button id="m-shallow" class="on">Synthetic (shallow)</button>
+  <button id="m-deep">Synthetic (deep/wide)</button>
+  <button id="m-live">Live (paste diff URL →)</button>
+  <input id="live-url" placeholder="paste a diff URL: .../flamegraph.html?diff=1&a=…&b=…  (uses your browser creds)" />
+  <button id="reload">Render</button>
+</div>
+<div id="diag">—</div>
+<div id="host"></div>
+
+<!-- Real modules, exactly as flamegraph.html loads them -->
+<script src="format.js"></script>
+<script src="flamegraph_api.js"></script>
+<script src="flamegraph_diff.js"></script>
+<script src="flamegraph_diff_view.js"></script>
+<script src="creds.js"></script>
+<script>
+(function () {
+  const diag = document.getElementById("diag");
+  const host = document.getElementById("host");
+  let view = null;
+  let mode = "shallow";
+
+  // ── Synthetic shallow tree: obvious diff colors ──
+  function shallowResp(side) {
+    function tree(total, w) {
+      const kids = Object.entries(w).map(([name, c]) =>
+        name === "db_query"
+          ? { name, count: c, self: 0, children: [{ name: "tcp_read", count: c, self: c }] }
+          : { name, count: c, self: c });
+      return { name: "(all)", count: total, self: 0,
+        children: [{ name: "handle_request", count: total, self: 0, children: kids }] };
+    }
+    return side === "a"
+      ? { tree: tree(1000, { parse_json: 500, db_query: 300, serialize: 200 }), total_samples: 1000,
+          coverage: { files_matched: 40, files_folded: 40, samples_folded: 1000 }, metadata: { service: "shale", hosts: 6 } }
+      : { tree: tree(2000, { parse_json: 200, db_query: 600, serialize: 1000, new_in_b: 200 }), total_samples: 2000,
+          coverage: { files_matched: 50, files_folded: 50, samples_folded: 2000 }, metadata: { service: "shale", hosts: 6 } };
+  }
+
+  // ── Synthetic deep/wide tree: mimics a prod flamegraph (deep recursion,
+  // many siblings) so layout/scale bugs surface. Side B perturbs weights. ──
+  function deepResp(side) {
+    const mul = side === "b" ? 1.7 : 1.0;
+    let nodeId = 0;
+    function build(depth, weight) {
+      nodeId++;
+      const n = { name: "frame_" + (nodeId % 40) + "_d" + depth, count: Math.round(weight), self: 0, children: [] };
+      if (depth >= 18 || weight < 4) { n.self = n.count; return n; }
+      // 2-4 children splitting the weight, skewed.
+      const k = 2 + (nodeId % 3);
+      let remaining = weight;
+      for (let i = 0; i < k; i++) {
+        const frac = i === 0 ? 0.55 : (0.45 / (k - 1));
+        const cw = weight * frac * (side === "b" && (nodeId % 5 === 0) ? mul : 1);
+        if (cw < 2) continue;
+        n.children.push(build(depth + 1, cw));
+        remaining -= cw;
+      }
+      n.self = Math.max(0, Math.round(remaining));
+      return n;
+    }
+    const total = side === "b" ? 34000 : 20000;
+    const root = { name: "(all)", count: total, self: 0, children: [build(1, total)] };
+    return { tree: root, total_samples: total,
+      coverage: { files_matched: 200, files_folded: 200, samples_folded: total }, metadata: { service: "shale", hosts: 6 } };
+  }
+
+  function installSyntheticFetch(respFor) {
+    window.fetch = async function (url) {
+      const u = new URL(url, location.origin);
+      const isB = u.searchParams.get("host") === "beta";
+      const r = respFor(isB ? "b" : "a");
+      return { ok: true, status: 200, async json() { return r; }, async text() { return ""; } };
+    };
+    window.Dial9Creds = window.Dial9Creds || { headers: () => ({}) };
+  }
+
+  function reportLayout() {
+    requestAnimationFrame(() => {
+      // Frames are now canvas-drawn (no per-frame DOM), so report the canvas
+      // sizes instead of counting frame divs.
+      const canvases = host.querySelectorAll(".fgd-graph canvas");
+      diag.textContent =
+        "panels=" + canvases.length +
+        " · canvas CSS sizes=[" +
+        [...canvases].map((c) => c.style.width + "×" + c.style.height).join(", ") + "]" +
+        " · backing px=[" + [...canvases].map((c) => c.width + "×" + c.height).join(", ") + "]";
+    });
+  }
+
+  function run() {
+    if (view && view.destroy) view.destroy();
+    host.innerHTML = "";
+    diag.textContent = "rendering (" + mode + ")…";
+
+    let scopeA, scopeB, headersFor;
+    if (mode === "live") {
+      const raw = document.getElementById("live-url").value.trim();
+      let parsed;
+      try {
+        const u = new URL(raw, location.origin);
+        parsed = FlamegraphDiff.parseDiff(u.searchParams);
+        if (!parsed) throw new Error("not a diff URL (need diff=1&a=…&b=…)");
+      } catch (e) { diag.textContent = "bad URL: " + e.message; return; }
+      scopeA = parsed.a; scopeB = parsed.b;
+      // Use the real browser creds (whatever you applied on the home page).
+      headersFor = function () { return window.Dial9Creds ? Dial9Creds.headers() : {}; };
+      // Do NOT stub fetch in live mode — hit the real server.
+    } else {
+      installSyntheticFetch(mode === "deep" ? deepResp : shallowResp);
+      scopeA = new URLSearchParams("api=1&bucket=b&service=shale&source=cpu&host=alpha");
+      scopeB = new URLSearchParams("api=1&bucket=b&service=shale&host=beta");
+      headersFor = function () { return {}; };
+    }
+
+    try {
+      view = FlamegraphDiffView.createDiffView(host, {
+        scopeA, scopeB, headersFor,
+        onSideError: function (s, e) { diag.textContent = "side " + s + " ERROR: " + (e && e.message); console.error("side", s, e); },
+      });
+      reportLayout();
+      setTimeout(reportLayout, 1200); // after a poll cycle
+    } catch (e) {
+      diag.textContent = "createDiffView THREW: " + e.message;
+      console.error(e);
+    }
+  }
+
+  function setMode(m) {
+    mode = m;
+    for (const id of ["m-shallow", "m-deep", "m-live"]) document.getElementById(id).classList.remove("on");
+    document.getElementById("m-" + m).classList.add("on");
+    run();
+  }
+  document.getElementById("m-shallow").addEventListener("click", () => setMode("shallow"));
+  document.getElementById("m-deep").addEventListener("click", () => setMode("deep"));
+  document.getElementById("m-live").addEventListener("click", () => setMode("live"));
+  document.getElementById("reload").addEventListener("click", run);
+  run();
+})();
+</script>
+</body>
+</html>
