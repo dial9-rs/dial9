@@ -1802,7 +1802,6 @@ dependencies = [
  "flate2",
  "hostname",
  "metrique",
- "metrique-writer",
  "serde_json",
  "tempfile",
  "tokio",

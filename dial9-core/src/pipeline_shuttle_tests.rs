@@ -14,10 +14,6 @@ use dial9_trace_format::TraceEvent;
 use shuttle::rand::Rng;
 use std::collections::HashMap;
 
-fn dev_null_sink() -> metrique::writer::BoxEntrySink {
-    metrique::writer::sink::DevNullSink::boxed()
-}
-
 // ── Event definition ────────────────────────────────────────────────
 
 /// Custom event for round-trip validation. Each event carries a
@@ -148,7 +144,7 @@ fn test_core_pipeline() {
 
     let shared = Arc::new(SharedState::new(clock_monotonic_ns()));
     shared.push_source(Box::new(MockSource::new(source_pending.clone())));
-    let mut session = CoreSession::start(shared, writer, dev_null_sink(), || || {});
+    let mut session = CoreSession::start(shared, writer, None, || || {});
     session.handle().enable();
     let handle = session.handle().clone();
 
@@ -293,7 +289,7 @@ fn run_erroring_pipeline(fault: fs::FaultPolicy) -> u64 {
         let writer = DiskWriter::single_file(dir.path().join("trace.bin")).unwrap();
         let _fault = fs::set_fault(fault);
         let shared = Arc::new(SharedState::new(clock_monotonic_ns()));
-        let mut session = CoreSession::start(shared, writer, dev_null_sink(), || || {});
+        let mut session = CoreSession::start(shared, writer, None, || || {});
         session.handle().enable();
         let handle = session.handle().clone();
 

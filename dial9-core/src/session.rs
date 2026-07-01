@@ -35,10 +35,12 @@ impl CoreSession {
     /// `thread_init` runs once on the flush thread before the loop and returns
     /// a teardown closure run after it — use it to register/unregister the
     /// thread with a runtime's profiler.
+    ///
+    /// Pass `None` for `flush_metrics_sink` to discard flush metrics.
     pub fn start<M, Init, Teardown>(
         shared: Arc<SharedState>,
         writer: SegmentWriter<M>,
-        flush_metrics_sink: metrique::writer::BoxEntrySink,
+        flush_metrics_sink: Option<metrique::writer::BoxEntrySink>,
         thread_init: Init,
     ) -> Self
     where
@@ -48,6 +50,8 @@ impl CoreSession {
     {
         let (control_tx, control_rx) = mpsc::sync_channel(1);
         let handle = Dial9Handle::enabled(shared.clone(), control_tx);
+        let flush_metrics_sink =
+            flush_metrics_sink.unwrap_or_else(metrique::writer::sink::DevNullSink::boxed);
         let flush_thread = crate::primitives::thread::spawn_named("dial9-flush", move || {
             // The flush thread is latency-tolerant; lower its priority.
             #[cfg(target_os = "linux")]

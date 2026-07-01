@@ -51,7 +51,7 @@
 //! ### Metrics
 //!
 //! Dial9 emits operational metrics about its own internals via a pluggable
-//! [`metrique_writer::BoxEntrySink`]. These tell you how the trace pipeline
+//! [`metrique::writer::BoxEntrySink`]. These tell you how the trace pipeline
 //! is performing (not application metrics). Wire up a sink with
 //! [`TracedRuntimeBuilder::with_worker_metrics_sink`](dial9::telemetry::recorder::TracedRuntimeBuilder::with_worker_metrics_sink)
 //! or via `.with_runtime(|r| ...)` on the `Dial9Config` builder.
@@ -97,7 +97,7 @@
 //! ```
 //!
 //! In a test or local-dev scenario you can use the test utilities from
-//! `metrique_writer::test_util` to capture and inspect entries programmatically.
+//! `metrique::writer::test_util` to capture and inspect entries programmatically.
 //!
 //! The rest of this example shows an opinionated way to wire dial9
 //! so it can be enabled and tuned with CLI flags or environment variables
@@ -229,7 +229,7 @@ impl Dial9Opts {
 /// Emit dial9 operational metrics (Flush, TlDrain, ProcessSegment) to stderr.
 /// In production, you would typically pass the `ServiceMetrics` sink that
 /// your application already uses.
-fn stderr_metrics_sink() -> metrique_writer::BoxEntrySink {
+fn stderr_metrics_sink() -> metrique::writer::BoxEntrySink {
     FlushImmediatelyBuilder::new().build_boxed(
         LocalFormat::new(OutputStyle::Pretty).output_to_makewriter(|| std::io::stderr().lock()),
     )
@@ -238,7 +238,7 @@ fn stderr_metrics_sink() -> metrique_writer::BoxEntrySink {
 #[cfg(feature = "cpu-profiling")]
 fn configure_runtime_common(
     mut r: TracedRuntimeBuilder<HasTracePath, PipelineUnset>,
-    metrics_sink: metrique_writer::BoxEntrySink,
+    metrics_sink: metrique::writer::BoxEntrySink,
     cpu_profile_enabled: bool,
     schedule_profile_enabled: bool,
     cpu_sample_hz: u64,
@@ -259,7 +259,7 @@ fn configure_runtime_common(
 #[cfg(not(feature = "cpu-profiling"))]
 fn configure_runtime_common(
     r: TracedRuntimeBuilder<HasTracePath, PipelineUnset>,
-    metrics_sink: metrique_writer::BoxEntrySink,
+    metrics_sink: metrique::writer::BoxEntrySink,
 ) -> TracedRuntimeBuilder<HasTracePath, PipelineUnset> {
     r.with_task_tracking(true)
         .with_worker_metrics_sink(metrics_sink)

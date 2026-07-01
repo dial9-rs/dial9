@@ -76,7 +76,7 @@ pub struct TracedRuntimeBuilder<P = NoTracePath, M = PipelineUnset, Mode: Writer
     /// so traces stay self-describing.
     pub(super) segment_metadata: Vec<(String, String)>,
     pub(super) worker_poll_interval: Option<Duration>,
-    pub(super) worker_metrics_sink: Option<metrique_writer::BoxEntrySink>,
+    pub(super) worker_metrics_sink: Option<metrique::writer::BoxEntrySink>,
     pub(super) trigger_rx: Option<crate::dump::DumpRx>,
     /// Sending half of the trigger channel minted by [`with_dump_trigger`]. Stashed
     /// into [`SharedState`] at build time so it is reachable via
@@ -247,7 +247,7 @@ impl<P, M, Mode: WriterMode> TracedRuntimeBuilder<P, M, Mode> {
     }
 
     /// Set a metrics sink for the background worker.
-    pub fn with_worker_metrics_sink(mut self, sink: metrique_writer::BoxEntrySink) -> Self {
+    pub fn with_worker_metrics_sink(mut self, sink: metrique::writer::BoxEntrySink) -> Self {
         self.worker_metrics_sink = Some(sink);
         self
     }
@@ -922,7 +922,7 @@ impl TelemetryCore {
         /// How often the background worker polls for sealed segments.
         worker_poll_interval: Option<Duration>,
         /// Metrics sink for the flush/worker threads.
-        worker_metrics_sink: Option<metrique_writer::BoxEntrySink>,
+        worker_metrics_sink: Option<metrique::writer::BoxEntrySink>,
         /// Trigger receiver flipping the background worker into on-demand
         /// operation; see [`crate::dump`]. `None` keeps continuous mode.
         #[builder(setters(vis = "pub(crate)"))]
@@ -1031,7 +1031,7 @@ impl TelemetryCore {
                 worker_poll_interval.unwrap_or(crate::background_task::DEFAULT_POLL_INTERVAL);
             let metrics_sink = worker_metrics_sink
                 .clone()
-                .unwrap_or_else(metrique_writer::sink::DevNullSink::boxed);
+                .unwrap_or_else(metrique::writer::sink::DevNullSink::boxed);
             let config = if let Some(tp) = trace_path {
                 crate::background_task::BackgroundTaskConfig::builder()
                     .trace_path(tp)
@@ -1066,9 +1066,7 @@ impl TelemetryCore {
         }
 
         // Inject the cpu-profiler thread registration (perf-specific) via the thread-init hook.
-        let flush_metrics_sink =
-            worker_metrics_sink.unwrap_or_else(metrique_writer::sink::DevNullSink::boxed);
-        let core_session = CoreSession::start(shared, writer, flush_metrics_sink, || {
+        let core_session = CoreSession::start(shared, writer, worker_metrics_sink, || {
             #[cfg(feature = "cpu-profiling")]
             let _ = dial9_perf_self_profile::register_current_thread();
             move || {
