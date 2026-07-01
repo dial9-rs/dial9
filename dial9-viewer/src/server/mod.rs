@@ -13,7 +13,7 @@ mod browse;
 mod buckets;
 mod check;
 mod config;
-pub(crate) mod credentials;
+pub mod credentials;
 mod error;
 pub(crate) mod flamegraph;
 mod prefixes;
@@ -23,7 +23,7 @@ mod upload;
 
 pub use upload::{UploadLimits, UploadStore};
 
-use credentials::{CredError, MaybeCreds};
+use credentials::{CredError, CredSource, MaybeCreds};
 
 /// Detect a bucket's region via `HeadBucket`, reading `bucket_region()` on
 /// success and the `x-amz-bucket-region` response header on the redirect error
@@ -73,6 +73,12 @@ pub struct AppState {
     /// of the in-process fake; `None` in production → default HTTPS connector).
     #[doc(hidden)]
     pub ephemeral_s3: Option<EphemeralS3Config>,
+    /// Mints credentials for the assume-role path (`x-dial9-aws-role-arn`). When
+    /// `None`, role-arn requests are refused (the server has no identity wired to
+    /// do the assuming); production sets the STS-backed assumer, tests inject a
+    /// fake. Independent of `allow_byo_creds` so a deployment can offer one path,
+    /// both, or neither.
+    pub role_assumer: Option<Arc<dyn credentials::RoleAssumer>>,
     /// Output prefix for BYOC aggregation. Defaults to "flamegraph-data".
     pub agg_output_prefix: String,
     /// Output bucket for BYOC aggregation. `None` means write the aggregated
@@ -110,6 +116,7 @@ impl AppState {
             uploads: None,
             allow_byo_creds: false,
             ephemeral_s3: None,
+            role_assumer: None,
             agg_output_prefix: "flamegraph-data".to_string(),
             agg_output_bucket: None,
             agg_output_backend: None,
@@ -147,6 +154,14 @@ impl AppState {
     #[doc(hidden)]
     pub fn with_ephemeral_s3(mut self, cfg: EphemeralS3Config) -> Self {
         self.ephemeral_s3 = Some(cfg);
+        self
+    }
+
+    /// Enable the assume-role credential path with the given assumer. Production
+    /// passes an [`crate::server::credentials::StsRoleAssumer`]; tests inject a
+    /// fake. Without this, `x-dial9-aws-role-arn` requests are refused.
+    pub fn with_role_assumer(mut self, assumer: Arc<dyn credentials::RoleAssumer>) -> Self {
+        self.role_assumer = Some(assumer);
         self
     }
 
@@ -189,7 +204,7 @@ impl AppState {
     /// `/tokio-stats`.
     ///
     /// [`AggContext`]: crate::ingest::aggregate::AggContext
-    pub(crate) fn agg_context_for(
+    pub(crate) async fn agg_context_for(
         &self,
         bucket: Option<&str>,
         prefix: Option<&str>,
@@ -197,7 +212,7 @@ impl AppState {
     ) -> Result<Option<crate::ingest::aggregate::AggContext>, (StatusCode, String)> {
         use crate::ingest::aggregate::AggContext;
         if let Some(bucket) = bucket {
-            let backend = self.resolve(creds)?;
+            let backend = self.resolve(creds).await?;
             let source_prefix = prefix
                 .map(str::to_string)
                 .or_else(|| self.default_prefix.clone())
@@ -235,48 +250,52 @@ impl AppState {
         }
     }
 
-    /// Pick the storage backend for a request given any supplied credentials.
+    /// Pick the storage backend for a request given its credential source.
     ///
-    /// Bringing credentials is always optional:
-    /// - incomplete/malformed credentials → 400
-    /// - credentials present (and BYO enabled) → ephemeral S3 backend built
-    ///   from those credentials
-    /// - no credentials → the server's default backend
+    /// Supplying credentials is always optional, and the two credentialed
+    /// transports are alternatives (the extractor already rejected supplying
+    /// both):
+    /// - malformed/incomplete/conflicting headers → 400
+    /// - [`CredSource::Static`] (and BYO enabled) → ephemeral S3 backend signed
+    ///   with the user's keys directly
+    /// - [`CredSource::AssumeRole`] (and an assumer wired) → assume the role with
+    ///   the server's own identity via STS, then build the ephemeral backend from
+    ///   the minted credentials
+    /// - [`CredSource::Default`] → the server's default backend
     ///
     /// When BYO is disabled (local-dir mode) any supplied credentials are
-    /// ignored and the default backend is used.
-    pub fn resolve(
+    /// ignored and the default backend is used. A role-arn request against a
+    /// server with no assumer wired is a 400 (the feature is off here).
+    pub async fn resolve(
         &self,
         creds: MaybeCreds,
     ) -> Result<Arc<dyn StorageBackend>, (StatusCode, String)> {
         let parsed = match creds.0 {
             Ok(parsed) => parsed,
-            Err(e @ (CredError::Incomplete | CredError::Malformed | CredError::InvalidRegion)) => {
+            Err(
+                e @ (CredError::Incomplete
+                | CredError::Malformed
+                | CredError::InvalidRegion
+                | CredError::ConflictingCredentials
+                | CredError::InvalidRoleArn),
+            ) => {
                 return Err((StatusCode::BAD_REQUEST, e.message().to_string()));
             }
         };
 
         match parsed {
-            Some(temp) if self.allow_byo_creds => {
-                // Log which identity served the request (akid prefix only — never
-                // the secret/token) so it's unambiguous whether the user's pasted
-                // credentials or the server's ambient identity made the S3 call.
-                let akid = temp.credentials.access_key_id();
-                let akid_prefix: String = akid.chars().take(8).collect();
-                tracing::info!(
-                    akid_prefix = %akid_prefix,
-                    region = temp.region.as_deref().unwrap_or("(default)"),
-                    "using bring-your-own credentials for request"
-                );
-                Ok(Arc::new(S3Backend::from_credentials(
-                    temp.credentials,
-                    temp.region.as_deref(),
-                    &self.ephemeral_s3,
-                )))
+            CredSource::Static(temp) if self.allow_byo_creds => {
+                self.log_chosen_identity(&temp, "bring-your-own credentials");
+                Ok(self.ephemeral_backend(temp))
+            }
+            CredSource::AssumeRole { role_arn, region } if self.allow_byo_creds => {
+                let temp = self.assume(&role_arn, region.as_deref()).await?;
+                self.log_chosen_identity(&temp, "assumed-role credentials");
+                Ok(self.ephemeral_backend(temp))
             }
             // BYO disabled (local-dir) — credentials are meaningless here.
-            Some(_) => Ok(self.backend.clone()),
-            None => {
+            CredSource::Static(_) | CredSource::AssumeRole { .. } => Ok(self.backend.clone()),
+            CredSource::Default => {
                 // No credential headers reached the backend. On a BYO-capable
                 // server this means we fall back to the server's ambient identity
                 // — the usual cause of a "wrong account" error.
@@ -288,6 +307,58 @@ impl AppState {
                 Ok(self.backend.clone())
             }
         }
+    }
+
+    /// Assume `role_arn` (with the server's own identity) and return the minted
+    /// credentials. Shared by `resolve` and the `/api/credentials/check` handler
+    /// so the single assume-and-map-to-error policy can't drift between them:
+    ///
+    /// - no assumer wired → 400 (the feature is off here; never silently fall
+    ///   back to the ambient identity, which would read the *wrong* account).
+    /// - STS failure → 401 with a generic body; the concrete cause (which can
+    ///   name the role/account) is logged server-side, never reflected.
+    pub(crate) async fn assume(
+        &self,
+        role_arn: &credentials::RoleArn,
+        region: Option<&str>,
+    ) -> Result<credentials::TempCredentials, (StatusCode, String)> {
+        let Some(assumer) = &self.role_assumer else {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "this server does not support assume-role credentials".to_string(),
+            ));
+        };
+        tracing::info!(role_arn = %role_arn.as_str(), "assuming role for request");
+        assumer.assume_role(role_arn, region).await.map_err(|e| {
+            tracing::warn!(role_arn = %role_arn.as_str(), error = %e, "assume-role failed");
+            (
+                StatusCode::UNAUTHORIZED,
+                "could not assume the requested role".to_string(),
+            )
+        })
+    }
+
+    /// Build an ephemeral S3 backend from temporary credentials (shared by the
+    /// BYOC and assume-role paths — both end here once they hold creds).
+    fn ephemeral_backend(&self, temp: credentials::TempCredentials) -> Arc<dyn StorageBackend> {
+        Arc::new(S3Backend::from_credentials(
+            temp.credentials,
+            temp.region.as_deref(),
+            &self.ephemeral_s3,
+        ))
+    }
+
+    /// Log which identity served the request — the access-key-id PREFIX only,
+    /// never the secret/token — so it is unambiguous in the logs whether the
+    /// user's keys, an assumed role, or the server's ambient identity made the
+    /// S3 call.
+    fn log_chosen_identity(&self, temp: &credentials::TempCredentials, via: &str) {
+        let akid_prefix: String = temp.credentials.access_key_id().chars().take(8).collect();
+        tracing::info!(
+            akid_prefix = %akid_prefix,
+            region = temp.region.as_deref().unwrap_or("(default)"),
+            "using {via} for request"
+        );
     }
 }
 

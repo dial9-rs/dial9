@@ -672,6 +672,37 @@
                 position: relative;
                 display: flex;
             }
+            /* Per-runtime header above the runtime's worker lanes. Only shown
+               when a trace has more than one runtime. Click to collapse. */
+            .runtime-header {
+                display: flex;
+                align-items: center;
+                gap: 8px;
+                height: 24px;
+                padding-left: 8px;
+                background: #0f1830;
+                border-top: 1px solid #2a3a5e;
+                border-bottom: 1px solid #2a3a5e;
+                color: #cdd8f0;
+                font-size: 0.78em;
+                font-weight: 600;
+                cursor: pointer;
+                user-select: none;
+                position: sticky;
+                top: 0;
+                z-index: 3;
+            }
+            .runtime-header:hover { background: #16213e; }
+            .runtime-header .rt-toggle {
+                display: inline-block;
+                width: 1em;
+                text-align: center;
+                color: #8aa0c8;
+            }
+            .runtime-header .rt-count {
+                color: #7587a8;
+                font-weight: 400;
+            }
             .lane-label {
                 width: 100px;
                 flex-shrink: 0;
@@ -983,7 +1014,7 @@
         <script src="panel_layout.js"></script>
         <script>
             const { EVENT_TYPES: ET, parseTrace, formatFrame, symbolizeChain, deduplicateSamples } = TraceParser;
-            const { buildWorkerSpans, attachCpuSamples, buildActiveTaskTimeline, computeSchedulingDelays, filterPointsOfInterest, buildSpanData, collectDescendants, selectSpanRenderSet, enclosingSpans, computeSpanLayout, getTraceTimeRange, hasCpuProfileSamples, buildProcessCpuUsageSeries } = TraceAnalysis;
+            const { buildWorkerSpans, attachCpuSamples, buildActiveTaskTimeline, computeSchedulingDelays, filterPointsOfInterest, buildSpanData, collectDescendants, selectSpanRenderSet, enclosingSpans, computeSpanLayout, getTraceTimeRange, hasCpuProfileSamples, buildProcessCpuUsageSeries, computeRuntimeGroups } = TraceAnalysis;
 
             function esc(s) {
                 return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -1149,6 +1180,12 @@
             // ── State ──
             let trace = null;
             let workerIds = [];
+            // Runtime grouping: ordered [{name, workerIds, inferred}] computed
+            // from runtime.<name> segment metadata (the inferred "main" block
+            // covers workers no named runtime claims). `collapsedRuntimes`
+            // holds the names of runtimes whose lanes are currently hidden.
+            let runtimeGroups = [];
+            let collapsedRuntimes = new Set();
             let minTs = 0,
                 maxTs = 0,
                 durationNs = 0;
@@ -1639,19 +1676,28 @@
             }
 
             /**
-             * Stream a single trace URL: decode chunks as they download so parse
-             * time overlaps the download (~max(download, parse) instead of their
-             * sum). We capture the gunzipped chunks while parsing so the full
-             * buffer is still available afterwards for in-memory Set/Clear-Range
-             * re-parsing (which never re-fetches).
+             * Stream one OR MORE trace URLs: decode chunks as they download so
+             * parse time overlaps the download (~max(download, parse) instead of
+             * their sum). For multiple URLs the fetches run concurrently and the
+             * components stream in back-to-back, in order, as one logical trace —
+             * so parsing the first segment overlaps the in-flight downloads of the
+             * rest (issue #595). We capture the gunzipped chunks while parsing so
+             * the full buffer is still available afterwards for in-memory
+             * Set/Clear-Range re-parsing (which never re-fetches).
              */
-            async function streamAndShowTrace(url, name, opts = {}) {
+            async function streamAndShowTrace(urls, name, opts = {}) {
+                const list = Array.isArray(urls) ? urls : [urls];
                 try {
                     const credHeaders = window.Dial9Creds ? Dial9Creds.headers() : {};
-                    const stream = await TraceParser.fetchTraceStream(url, {
-                        signal: loadAbortController?.signal,
-                        headers: credHeaders,
-                    });
+                    const stream = list.length === 1
+                        ? await TraceParser.fetchTraceStream(list[0], {
+                            signal: loadAbortController?.signal,
+                            headers: credHeaders,
+                        })
+                        : TraceParser.fetchTracesStream(list, {
+                            signal: loadAbortController?.signal,
+                            headers: credHeaders,
+                        });
                     const captured = [];
                     const capturing = {
                         async *[Symbol.asyncIterator]() {
@@ -1807,21 +1853,25 @@
             }
 
             // `urls` may be a single URL or a list (one per repeated `trace=`).
-            // For a single URL we STREAM: download and decode overlap, so the
-            // spinner advances during the download and total load time is about
-            // max(download, parse) rather than their sum. For multiple repeated
-            // `trace=` components we fall back to the buffered fetch+concatenate
-            // path (each component is fetched and gunzipped independently, then
-            // the raw buffers are concatenated into one trace; see fetchTraces).
+            // We STREAM whenever the runtime supports it (single OR multiple
+            // URLs): download and decode overlap, so the spinner advances during
+            // the download and total load time is about max(download, parse)
+            // rather than their sum. For multiple components the fetches run
+            // concurrently and stream in back-to-back as one trace, so parsing
+            // the first segment overlaps the others' downloads (issue #595). Only
+            // when streaming is unavailable (no DecompressionStream, e.g. some
+            // Node test runtimes) do we fall back to the buffered fetch+
+            // concatenate path (each component fetched and gunzipped
+            // independently, then concatenated into one trace; see fetchTraces).
             async function loadTraceFromUrl(urls) {
                 const list = Array.isArray(urls) ? urls : [urls];
                 try {
                     const name = urlParams.get('svc')
                         || list[0].split('/').pop()?.split('?')[0]
                         || 'trace.bin';
-                    if (list.length === 1 && TraceParser.canStreamDecode()) {
-                        updateLoadProgress("Loading…");
-                        await streamAndShowTrace(list[0], name, getParseOptions());
+                    if (TraceParser.canStreamDecode()) {
+                        updateLoadProgress(list.length > 1 ? `Loading ${list.length} traces…` : "Loading…");
+                        await streamAndShowTrace(list, name, getParseOptions());
                         return;
                     }
                     updateLoadProgress(list.length > 1 ? `Fetching ${list.length} traces…` : "Fetching…");
@@ -1927,6 +1977,20 @@
                     if (e.eventType !== ET.QueueSample && e.eventType !== ET.WakeEvent) wSet.add(e.workerId);
                 });
                 workerIds = [...wSet].sort((a, b) => a - b);
+
+                // Group workers by runtime (named runtimes from segment
+                // metadata; the rest fall into the inferred "main" runtime).
+                // Order the flat lane list to match the group order so the
+                // group headers sit directly above their lanes.
+                runtimeGroups = computeRuntimeGroups(workerIds, trace.runtimeWorkers);
+                workerIds = runtimeGroups.flatMap((g) => g.workerIds);
+                // Drop collapse state for runtimes that no longer exist so it
+                // doesn't leak across trace loads. Names that survive (e.g. a
+                // same-trace time-range reparse) keep their collapsed state.
+                const liveRuntimes = new Set(runtimeGroups.map((g) => g.name));
+                for (const name of collapsedRuntimes) {
+                    if (!liveRuntimes.has(name)) collapsedRuntimes.delete(name);
+                }
 
                 minTs = timeRange.minTs;
                 maxTs = timeRange.maxTs;
@@ -2247,8 +2311,7 @@
                             const viewDur = Math.max(spanDur * 10, 1e6);
                             viewStart = Math.max(minTs, s.start - viewDur * 0.3);
                             viewEnd = Math.min(maxTs, viewStart + viewDur);
-                            const laneIdx = workerIds.indexOf(s.workerId);
-                            if (laneIdx >= 0) lanesContainer.scrollTop = laneIdx * LANE_H;
+                            scrollToWorkerLane(s.workerId);
                             // Highlight the navigated span
                             selectedSpanId = s.spanId;
                             selectedSpanIds = new Set([s.spanId]);
@@ -2386,36 +2449,112 @@
                 }
 
                 // Scroll to worker lane
-                const laneIdx = workerIds.indexOf(poi.worker);
-                if (laneIdx >= 0) {
-                    const scrollTop = laneIdx * LANE_H;
-                    lanesContainer.scrollTop = scrollTop;
-                }
+                scrollToWorkerLane(poi.worker);
 
                 updatePoiCounter();
                 renderAll();
             }
 
             // ── Lane DOM ──
+            //
+            // Builds one lane per worker, grouped under a collapsible header
+            // per runtime. With a single runtime we skip the headers entirely
+            // so the common case looks unchanged. Each lane carries its
+            // worker id in `data-worker` so hit-testing resolves the worker
+            // from DOM geometry rather than assuming uniform row heights
+            // (collapsed runtimes and headers break the index×LANE_H mapping).
             function buildLanes() {
                 lanesContainer.innerHTML = "";
                 laneCanvases = {};
-                for (const w of workerIds) {
-                    const lane = document.createElement("div");
-                    lane.className = "lane";
-                    const label = document.createElement("div");
-                    label.className = "lane-label";
-                    label.textContent = `Worker ${w}`;
-                    const content = document.createElement("div");
-                    content.className = "lane-content";
-                    const canvas = document.createElement("canvas");
-                    canvas.id = `worker-${w}-canvas`;
-                    content.appendChild(canvas);
-                    lane.appendChild(label);
-                    lane.appendChild(content);
-                    lanesContainer.appendChild(lane);
-                    laneCanvases[w] = canvas;
+                const showHeaders = runtimeGroups.length > 1;
+                for (const group of runtimeGroups) {
+                    const collapsed = collapsedRuntimes.has(group.name);
+                    if (showHeaders) {
+                        const header = document.createElement("div");
+                        header.className = "runtime-header";
+                        header.dataset.runtime = group.name;
+                        const n = group.workerIds.length;
+                        header.innerHTML =
+                            `<span class="rt-toggle">${collapsed ? "▸" : "▾"}</span>` +
+                            `<span class="rt-name"></span>` +
+                            `<span class="rt-count">${n} worker${n === 1 ? "" : "s"}</span>`;
+                        // Set the runtime name as text (avoid HTML injection).
+                        header.querySelector(".rt-name").textContent =
+                            group.inferred ? `${group.name} runtime` : `runtime: ${group.name}`;
+                        lanesContainer.appendChild(header);
+                    }
+                    if (collapsed) continue;
+                    for (const w of group.workerIds) {
+                        const lane = document.createElement("div");
+                        lane.className = "lane";
+                        lane.dataset.worker = w;
+                        const label = document.createElement("div");
+                        label.className = "lane-label";
+                        label.textContent = `Worker ${w}`;
+                        const content = document.createElement("div");
+                        content.className = "lane-content";
+                        const canvas = document.createElement("canvas");
+                        canvas.id = `worker-${w}-canvas`;
+                        content.appendChild(canvas);
+                        lane.appendChild(label);
+                        lane.appendChild(content);
+                        lanesContainer.appendChild(lane);
+                        laneCanvases[w] = canvas;
+                    }
                 }
+            }
+
+            // Toggle a runtime's collapsed state, rebuild lanes, and re-render.
+            function toggleRuntimeCollapsed(name) {
+                if (collapsedRuntimes.has(name)) collapsedRuntimes.delete(name);
+                else collapsedRuntimes.add(name);
+                buildLanes();
+                renderAll();
+            }
+
+            // Resolve the worker id under a vertical mouse position inside the
+            // lanes container, using DOM geometry (robust to runtime headers
+            // and collapsed runtimes). Returns null if the point is not over a
+            // worker lane (e.g. over a header or empty space).
+            function workerAtClientY(clientY) {
+                // Fast path: with a single runtime there are no headers and
+                // nothing can be collapsed, so lanes are uniform LANE_H rows in
+                // workerIds order — resolve by arithmetic. This keeps the
+                // high-frequency hover path O(1) (one rect read, no per-lane DOM
+                // scan) for the common single-runtime case.
+                if (runtimeGroups.length <= 1) {
+                    const top = lanesContainer.getBoundingClientRect().top;
+                    const idx = Math.floor(
+                        (clientY - top + lanesContainer.scrollTop) / LANE_H,
+                    );
+                    if (idx < 0 || idx >= workerIds.length) return null;
+                    return workerIds[idx];
+                }
+                // Grouped layout: runtime headers and collapsed runtimes break
+                // the uniform-row assumption, so resolve from DOM geometry.
+                const lanes = lanesContainer.querySelectorAll(".lane");
+                for (const lane of lanes) {
+                    const r = lane.getBoundingClientRect();
+                    if (clientY >= r.top && clientY < r.bottom) {
+                        const w = Number(lane.dataset.worker);
+                        return Number.isNaN(w) ? null : w;
+                    }
+                }
+                return null;
+            }
+
+            // Scroll the lanes container so the given worker's lane is at the
+            // top of the viewport. If the worker's runtime is collapsed, expand
+            // it first so a navigation target (POI, span jump, sched jump) is
+            // actually revealed rather than silently scrolling to nothing.
+            function scrollToWorkerLane(workerId) {
+                const group = runtimeGroups.find((g) => g.workerIds.includes(workerId));
+                if (group && collapsedRuntimes.has(group.name)) {
+                    collapsedRuntimes.delete(group.name);
+                    buildLanes();
+                }
+                const lane = lanesContainer.querySelector(`.lane[data-worker="${workerId}"]`);
+                if (lane) lanesContainer.scrollTop = lane.offsetTop;
             }
 
             // ── Rendering ──
@@ -2627,8 +2766,11 @@
                 syncFoldablePanels();
                 renderTimeline(drawW - scrollbarW);
                 if (prof) _t = _profMark(prof, "timeline", _t);
-                for (const w of workerIds) renderLane(w, drawW);
-                if (prof) _t = _profMark(prof, `lanes(${workerIds.length})`, _t);
+                // Only render lanes that have a canvas: workers in a collapsed
+                // runtime have no lane DOM, so skip them.
+                const visibleWorkers = workerIds.filter((w) => laneCanvases[w]);
+                for (const w of visibleWorkers) renderLane(w, drawW);
+                if (prof) _t = _profMark(prof, `lanes(${visibleWorkers.length})`, _t);
                 renderSpanPanel(scrollbarW);
                 if (prof) _t = _profMark(prof, `spanPanel(allSpans=${allSpans.length})`, _t);
                 renderCustomEventsPanel(scrollbarW);
@@ -5210,18 +5352,22 @@
                 const lanesRect = lanesContainer.getBoundingClientRect();
                 if (e.clientY < lanesRect.top || e.clientY > lanesRect.bottom ||
                     e.clientX < lanesRect.left || e.clientX > lanesRect.right) return;
+                // Click on a runtime header toggles that runtime's lanes
+                // (handled before clearing selection so the toggle is
+                // non-destructive to the current task/event selection).
+                const header = e.target.closest(".runtime-header");
+                if (header) { toggleRuntimeCollapsed(header.dataset.runtime); return; }
+
                 // Any click in the lanes clears the selected-event marker.
                 selectedEvent = null;
                 const mouseX = e.clientX - lanesRect.left - LABEL_W;
-                const mouseY = e.clientY - lanesRect.top;
                 const drawW = lanesRect.width - LABEL_W;
                 if (mouseX < 0 || mouseX > drawW) { selectedTaskId = null; renderAll(); return; }
 
                 const ns = viewStart + (mouseX / drawW) * (viewEnd - viewStart);
-                const laneIdx = Math.floor((mouseY + lanesContainer.scrollTop) / LANE_H);
-                if (laneIdx < 0 || laneIdx >= workerIds.length) { selectedTaskId = null; renderAll(); return; }
+                const w = workerAtClientY(e.clientY);
+                if (w == null) { selectedTaskId = null; renderAll(); return; }
 
-                const w = workerIds[laneIdx];
                 const spans = workerSpans[w];
                 let found = null;
                 let foundSpan = null;
@@ -6051,8 +6197,7 @@
                         viewEnd = Math.min(maxTs, viewStart + pad);
                         hideStackPopup();
                         // Scroll to worker lane
-                        const laneIdx = workerIds.indexOf(w);
-                        if (laneIdx >= 0) lanesContainer.scrollTop = laneIdx * LANE_H;
+                        scrollToWorkerLane(w);
                         renderAll();
                     });
                 });
@@ -6246,7 +6391,6 @@
                     }
                     const rect = lanesContainer.getBoundingClientRect();
                     const mouseX = e.clientX - rect.left - LABEL_W;
-                    const mouseY = e.clientY - rect.top;
                     const drawW = rect.width - LABEL_W;
                     if (mouseX < 0 || mouseX > drawW) {
                         tooltip.style.display = "none";
@@ -6262,16 +6406,13 @@
                     // Throttle crosshair redraw with RAF
                     scheduleCrosshairRedraw();
 
-                    const laneIdx = Math.floor(
-                        (mouseY + lanesContainer.scrollTop) / LANE_H,
-                    );
-                    if (laneIdx < 0 || laneIdx >= workerIds.length) {
+                    const w = workerAtClientY(e.clientY);
+                    if (w == null) {
                         tooltip.style.display = "none";
                         lanesContainer.style.cursor = "";
                         return;
                     }
 
-                    const w = workerIds[laneIdx];
                     const spans = workerSpans[w];
 
                     // Determine worker state at this point in time
@@ -6899,6 +7040,7 @@
                 requestAnimationFrame(() => {
                     fgInstance.setData(samples, trace.callframeSymbols, {
                         exportTitle: `CPU flamegraph — ${durMs}ms selected`,
+                        runtimeWorkers: trace.runtimeWorkers,
                     });
                     fgInstance.resize();
                 });

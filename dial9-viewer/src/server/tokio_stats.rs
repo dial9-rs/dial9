@@ -73,8 +73,9 @@ pub async fn get_tokio_stats(
     creds: MaybeCreds,
     QueryExtra(params): QueryExtra<TokioStatsParams>,
 ) -> Result<Json<TokioStatsResponse>, (StatusCode, String)> {
-    let Some(agg) =
-        state.agg_context_for(params.bucket.as_deref(), params.prefix.as_deref(), creds)?
+    let Some(agg) = state
+        .agg_context_for(params.bucket.as_deref(), params.prefix.as_deref(), creds)
+        .await?
     else {
         return Err((
             StatusCode::NOT_FOUND,
