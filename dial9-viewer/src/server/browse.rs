@@ -115,6 +115,13 @@ pub async fn browse(
     // Fan the per-prefix list calls out concurrently (bounded), then merge.
     // The prefixes are disjoint key-spaces (each is a distinct time bucket), so
     // no object can appear under two of them — no dedup needed.
+    //
+    // `buffered` (not `buffer_unordered`): we correlate each result with its
+    // prefix below by position (`prefixes[i]`) to collect overflowed prefixes,
+    // so the result order must match the input order. `buffer_unordered` yields
+    // in completion order and would misattribute overflows to the wrong prefix.
+    // Since we `collect` every result before proceeding, ordering costs no
+    // throughput here.
     let results: Vec<Result<crate::storage::ListPage, StorageError>> =
         futures::stream::iter(prefixes.clone())
             .map(|p| {
@@ -122,7 +129,7 @@ pub async fn browse(
                 let bucket = bucket.clone();
                 async move { backend.list_objects(&bucket, &p, PER_PREFIX_CAP).await }
             })
-            .buffer_unordered(LIST_CONCURRENCY)
+            .buffered(LIST_CONCURRENCY)
             .collect()
             .await;
 

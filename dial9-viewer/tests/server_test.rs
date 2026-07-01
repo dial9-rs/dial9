@@ -577,6 +577,168 @@ async fn browse_rejects_inverted_range() {
     check!(resp.status().as_u16() == 400);
 }
 
+/// Regression test for the browse fan-out misattribution bug.
+///
+/// The overflow-collection loop correlates each per-prefix list result with its
+/// prefix by input position (`prefixes[i]`). The fan-out previously used
+/// `buffer_unordered`, which yields results in *completion* order, not input
+/// order. When a later prefix's list completed first, its overflow was
+/// attributed to the *wrong* prefix: the overflowed prefix was never refined,
+/// so its objects silently vanished, while a perfectly fine prefix got
+/// needlessly refined. The fix is `buffered`, which preserves input order.
+///
+/// [`ReorderingBackend`] forces a deterministic completion order that differs
+/// from input order: the second prefix (`…/20`) overflows and completes first;
+/// the first prefix (`…/19`) is gated on a oneshot and only completes after.
+/// Under the bug the overflow is attributed to `…/19`, so `…/20`'s refined
+/// object (under `…/201`) is lost; under the fix it is present.
+struct ReorderingBackend {
+    /// Fires when the "fast" second prefix finishes, releasing the slow first.
+    release_tx: std::sync::Mutex<Option<futures::channel::oneshot::Sender<()>>>,
+    release_rx: std::sync::Mutex<Option<futures::channel::oneshot::Receiver<()>>>,
+}
+
+fn obj_info(key: &str) -> ObjectInfo {
+    ObjectInfo {
+        key: key.to_string(),
+        size: 1,
+        last_modified: None,
+    }
+}
+
+impl StorageBackend for ReorderingBackend {
+    fn list_buckets(
+        &self,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, StorageError>> + Send + '_>> {
+        Box::pin(async { Ok(vec![]) })
+    }
+
+    fn list_objects(
+        &self,
+        _bucket: &str,
+        prefix: &str,
+        _cap: usize,
+    ) -> Pin<Box<dyn Future<Output = Result<ListPage, StorageError>> + Send + '_>> {
+        match prefix {
+            // Second input prefix: overflows at hour granularity and completes
+            // first, releasing the gated first prefix on its way out.
+            "2026-04-09/20" => {
+                let tx = self.release_tx.lock().unwrap().take();
+                Box::pin(async move {
+                    if let Some(tx) = tx {
+                        let _ = tx.send(());
+                    }
+                    Ok(ListPage {
+                        objects: vec![],
+                        truncated: true,
+                    })
+                })
+            }
+            // First input prefix: gated so it only completes after the second,
+            // making completion order the reverse of input order.
+            "2026-04-09/19" => {
+                let rx = self.release_rx.lock().unwrap().take();
+                Box::pin(async move {
+                    if let Some(rx) = rx {
+                        let _ = rx.await;
+                    }
+                    Ok(ListPage {
+                        objects: vec![obj_info("2026-04-09/19/svc/host/1000-0.bin.gz")],
+                        truncated: false,
+                    })
+                })
+            }
+            // Refinement of the *correct* overflowed prefix (`…/20`) hits its
+            // ten-minute sub-prefixes; the object lives under `…/201`.
+            "2026-04-09/201" => Box::pin(async {
+                Ok(ListPage {
+                    objects: vec![obj_info("2026-04-09/201/svc/host/2000-0.bin.gz")],
+                    truncated: false,
+                })
+            }),
+            _ => Box::pin(async {
+                Ok(ListPage {
+                    objects: vec![],
+                    truncated: false,
+                })
+            }),
+        }
+    }
+
+    fn list_objects_all(
+        &self,
+        _bucket: &str,
+        _prefix: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<ObjectInfo>, StorageError>> + Send + '_>> {
+        Box::pin(async { Ok(vec![]) })
+    }
+
+    fn list_prefixes(
+        &self,
+        _bucket: &str,
+        _prefix: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, StorageError>> + Send + '_>> {
+        Box::pin(async { Ok(vec![]) })
+    }
+
+    fn get_object(
+        &self,
+        _bucket: &str,
+        _key: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, StorageError>> + Send + '_>> {
+        Box::pin(async { Err(StorageError::NotFound("fake".into())) })
+    }
+
+    fn put_object(
+        &self,
+        _bucket: &str,
+        _key: &str,
+        _data: Vec<u8>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), StorageError>> + Send + '_>> {
+        Box::pin(async { Ok(()) })
+    }
+}
+
+#[tokio::test]
+async fn browse_overflow_attribution_survives_out_of_order_completion() {
+    let (tx, rx) = futures::channel::oneshot::channel();
+    let backend = ReorderingBackend {
+        release_tx: std::sync::Mutex::new(Some(tx)),
+        release_rx: std::sync::Mutex::new(Some(rx)),
+    };
+    let state = AppState::new(Arc::new(backend), Some("traces-bucket".into()), None);
+    let base = start_server(state).await;
+    let client = reqwest::Client::new();
+
+    // 2026-04-09 19:00:00Z .. 20:30:00Z — a 90-minute window, so hour
+    // granularity, producing prefixes [`…/19`, `…/20`].
+    let from = 1_775_761_200; // 2026-04-09T19:00:00Z
+    let to = from + 90 * 60; // 20:30:00Z
+    let resp = client
+        .get(format!(
+            "{base}/api/browse?bucket=traces-bucket&from={from}&to={to}"
+        ))
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() == 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let keys: Vec<&str> = body["objects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|o| o["key"].as_str().unwrap())
+        .collect();
+
+    // The direct (non-overflowed) `…/19` object, and the refined `…/20` object.
+    // Under the old `buffer_unordered`, the overflow was misattributed to `…/19`
+    // and `…/201` was never listed, so this object would be missing.
+    check!(keys.iter().any(|k| k.contains("2026-04-09/19/")));
+    check!(keys.iter().any(|k| k.contains("2026-04-09/201/")));
+    check!(keys.len() == 2);
+    check!(body["truncated"] == false);
+}
+
 // --- bring-your-own-credentials tests ---
 
 const H_AKID: &str = "x-dial9-aws-access-key-id";

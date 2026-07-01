@@ -12,6 +12,7 @@ members = [
     "perf-self-profile",
     "examples/metrics-service",
     "examples/simple-local",
+    "examples/memory-local",
 ]
 exclude = [
     "dial9-trace-format/fuzz",

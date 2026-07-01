@@ -158,21 +158,20 @@ overhead.
 force a read-modify-write across threads on every allocation; TLS gives
 each thread its own state with a plain load/store.
 
-**Reuse the existing `SplitMix64` and `draw_exponential` from
-`task_dumped.rs`**, extracted into a shared `pub(crate)` module
-(e.g. `dial9-tokio-telemetry/src/sampling.rs`). The shape is identical —
-only the unit changes (`bytes` instead of `nanoseconds`). Shared API:
+**Reuse `dial9_core::sampling::SplitMix64` and `draw_exponential`** (shared
+with the CPU/task-dump samplers). The shape is identical — only the unit
+changes (`bytes` instead of `nanoseconds`). API:
 
 ```rust
-// dial9-tokio-telemetry/src/sampling.rs
-pub(crate) struct SplitMix64(u64);
+// dial9-core/src/sampling.rs
+pub struct SplitMix64(u64);
 
 impl SplitMix64 {
-    pub(crate) fn new(seed: u64) -> Self;
-    pub(crate) fn next_u64(&mut self) -> u64;
+    pub fn new(seed: u64) -> Self;
+    pub fn next_u64(&mut self) -> u64;
     /// Draw from exponential distribution with the given mean.
     /// Always returns at least 1 to avoid immediate re-trigger.
-    pub(crate) fn draw_exponential(&mut self, mean: u64) -> i64;
+    pub fn draw_exponential(&mut self, mean: u64) -> i64;
 }
 ```
 
