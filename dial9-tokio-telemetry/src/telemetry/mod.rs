@@ -10,7 +10,7 @@ pub mod analysis;
 #[cfg(any(feature = "analysis", test))]
 pub mod analysis_events;
 pub(crate) use dial9_core::buffer;
-pub(crate) mod custom_events;
+pub(crate) use dial9_core::custom_events;
 pub(crate) mod events;
 pub(crate) mod format;
 pub(crate) mod recorder;

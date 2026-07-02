@@ -1,14 +1,14 @@
 //! User-provided custom event callbacks.
 
-use crate::telemetry::buffer::Encodable;
-use crate::telemetry::events::clock_monotonic_ns;
-use crate::telemetry::recorder::source::{FlushContext, Source};
+use crate::buffer::Encodable;
+use crate::clock::clock_monotonic_ns;
+use crate::source::{FlushContext, Source};
 use std::time::{Duration, Instant};
 
 /// Configuration for custom event callbacks.
 ///
-/// Built via `CustomEventsConfig::builder()...build()` and enabled with
-/// [`TracedRuntimeBuilder::with_custom_events`](crate::telemetry::TracedRuntimeBuilder::with_custom_events).
+/// Build via `CustomEventsConfig::builder()...build()`, then plug the
+/// [`CustomEventsSource`] into a session.
 #[derive(Debug, Clone, bon::Builder)]
 pub struct CustomEventsConfig {
     /// Minimum time between callback invocations.
@@ -66,7 +66,8 @@ impl CustomEventsContext<'_> {
 
 type CustomEventsCallback = Box<dyn for<'a> FnMut(&mut CustomEventsContext<'a>) + Send + 'static>;
 
-pub(crate) struct CustomEventsSource {
+/// Flush-thread source that runs a user callback each cycle to record custom events.
+pub struct CustomEventsSource {
     config: CustomEventsConfig,
     callback: CustomEventsCallback,
     last_run: Option<Instant>,
@@ -82,7 +83,8 @@ impl std::fmt::Debug for CustomEventsSource {
 }
 
 impl CustomEventsSource {
-    pub(crate) fn new<F>(config: CustomEventsConfig, callback: F) -> Self
+    /// Build a source that invokes `callback` at the config's interval.
+    pub fn new<F>(config: CustomEventsConfig, callback: F) -> Self
     where
         F: for<'a> FnMut(&mut CustomEventsContext<'a>) + Send + 'static,
     {
@@ -119,8 +121,7 @@ impl Source for CustomEventsSource {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::telemetry::recorder::SharedState;
-    use dial9_core::test_util;
+    use crate::shared_state::SharedState;
     use dial9_trace_format::TraceEvent;
     use dial9_trace_format::decoder::Decoder;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -130,6 +131,16 @@ mod tests {
         #[traceevent(timestamp)]
         timestamp_ns: u64,
         value: u64,
+    }
+
+    /// Drain everything recorded in `shared` into raw encoded-segment bytes.
+    fn drain_encoded(shared: &SharedState) -> Vec<Vec<u8>> {
+        crate::buffer::drain_to_collector(&shared.collector);
+        let mut out = Vec::new();
+        while let Some(batch) = shared.collector.next() {
+            out.push(batch.into_encoded_bytes());
+        }
+        out
     }
 
     fn decode_test_events(bytes: &[u8]) -> Vec<TestEvent> {
@@ -165,7 +176,7 @@ mod tests {
         });
 
         source.flush(&ctx);
-        let events: Vec<_> = test_util::drain_encoded_batches(&shared)
+        let events: Vec<_> = drain_encoded(&shared)
             .iter()
             .flat_map(|b| decode_test_events(b))
             .collect();

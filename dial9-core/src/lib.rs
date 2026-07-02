@@ -26,6 +26,8 @@ pub mod buffer;
 pub mod clock;
 /// Central ring buffer of encoded event batches awaiting write.
 pub mod collector;
+/// User-provided custom events.
+pub mod custom_events;
 /// On-demand pipeline runs: trigger, request channel, and dump receipts.
 #[cfg(feature = "pipeline")]
 pub mod dump;
