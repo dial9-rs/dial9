@@ -51,6 +51,18 @@ pub use dial9_perf_self_profile::{
 #[cfg(feature = "memory-profiling")]
 pub use dial9_perf_self_profile::{AllocEvent, FreeEvent, memory_profiling};
 
+// Process resource usage source.
+#[cfg(all(feature = "process-resource", unix))]
+pub use dial9_perf_self_profile::ProcessResourceUsageSource;
+#[cfg(feature = "process-resource")]
+pub use dial9_perf_self_profile::{ProcessResourceUsageConfig, ProcessResourceUsageEvent};
+
+// Socket accept-queue source.
+#[cfg(all(feature = "linux-socket", target_os = "linux"))]
+pub use dial9_perf_self_profile::SocketAcceptQueuesSource;
+#[cfg(feature = "linux-socket")]
+pub use dial9_perf_self_profile::{SocketAcceptQueuesConfig, TcpAcceptQueueEvent};
+
 // Tracing-subscriber layer.
 #[cfg(feature = "tracing-layer")]
 pub use dial9_tokio_telemetry::tracing_layer;

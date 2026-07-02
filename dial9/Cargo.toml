@@ -61,6 +61,14 @@ memory-profiling = [
     "dial9-tokio-telemetry?/memory-profiling",
 ]
 
+## Process resource usage (`getrusage`) as a standalone `Source` (unix).
+## Auto-wires into the Tokio runtime when the `tokio` feature is also on.
+process-resource = [
+    "dep:dial9-perf-self-profile",
+    "dial9-perf-self-profile/process-resource",
+    "dial9-tokio-telemetry?/process-resource",
+]
+
 ## Removes `#[non_exhaustive]` from profiling event structs. Unstable.
 unstable-events = ["dial9-perf-self-profile?/unstable-events"]
 
@@ -76,14 +84,21 @@ worker-s3 = ["tokio", "dial9-tokio-telemetry/worker-s3"]
 ## Async backtraces at Tokio yield points (Linux only).
 taskdump = ["tokio", "dial9-tokio-telemetry/taskdump"]
 
-## TCP accept-queue depth sampling (Linux only).
-linux-socket = ["tokio", "dial9-tokio-telemetry/linux-socket"]
+## TCP accept-queue depth sampling as a standalone `Source` (Linux only).
+## Auto-wires into the Tokio runtime when the `tokio` feature is also on.
+linux-socket = [
+    "dep:dial9-perf-self-profile",
+    "dial9-perf-self-profile/linux-socket",
+    "dial9-tokio-telemetry?/linux-socket",
+]
 
 [dev-dependencies]
 dial9 = { path = ".", features = [
     "tokio",
     "analysis",
     "memory-profiling",
+    "process-resource",
+    "linux-socket",
     "tracing-layer",
     "unstable-events",
     "worker-s3",

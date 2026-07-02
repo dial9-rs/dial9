@@ -65,6 +65,12 @@ pub mod unwinder;
 #[cfg(feature = "dial9-source")]
 pub mod cpu_source;
 
+#[cfg(feature = "process-resource")]
+pub mod process_resource;
+
+#[cfg(feature = "linux-socket")]
+pub mod socket_accept_queues;
+
 #[cfg(feature = "memory-profiling")]
 pub mod memory_profiling;
 
@@ -114,6 +120,16 @@ pub use sys::{resolve_symbol_with_maps, resolve_symbols_with_maps};
 pub use cpu_source::{
     CpuProfiler, CpuProfilingConfig, CpuSampleSource, SchedEventConfig, SchedProfiler,
 };
+
+#[cfg(all(feature = "process-resource", unix))]
+pub use process_resource::ProcessResourceUsageSource;
+#[cfg(feature = "process-resource")]
+pub use process_resource::{ProcessResourceUsageConfig, ProcessResourceUsageEvent};
+
+#[cfg(all(feature = "linux-socket", target_os = "linux"))]
+pub use socket_accept_queues::SocketAcceptQueuesSource;
+#[cfg(feature = "linux-socket")]
+pub use socket_accept_queues::{SocketAcceptQueuesConfig, TcpAcceptQueueEvent};
 
 #[cfg(feature = "memory-profiling")]
 pub use memory_profiling::{

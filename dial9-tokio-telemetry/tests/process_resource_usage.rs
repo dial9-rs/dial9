@@ -1,13 +1,11 @@
+#![cfg(all(unix, feature = "process-resource"))]
+
 mod common;
 
-#[cfg(unix)]
 use common::{CAPTURE_BUFFER_SIZE, capture_processor, decode_all};
-#[cfg(unix)]
 use dial9_tokio_telemetry::telemetry::analysis_events::Dial9Event;
-#[cfg(unix)]
 use dial9_tokio_telemetry::telemetry::{InMemoryWriter, ProcessResourceUsageConfig, TracedRuntime};
 
-#[cfg(unix)]
 #[test]
 fn traced_runtime_records_process_resource_usage() {
     let (capture, batches) = capture_processor();
@@ -43,7 +41,6 @@ fn traced_runtime_records_process_resource_usage() {
     assert!(metrics[0].max_rss_bytes > 0);
 }
 
-#[cfg(unix)]
 #[test]
 fn traced_runtime_does_not_record_process_resource_usage_by_default() {
     let (capture, batches) = capture_processor();

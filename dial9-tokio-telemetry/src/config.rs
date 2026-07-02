@@ -272,7 +272,7 @@ const DEFAULT_SCHEDULE_PROFILE_ENABLED: bool =
     cfg!(all(target_os = "linux", feature = "cpu-profiling"));
 const DEFAULT_MEMORY_PROFILE_ENABLED: bool = false;
 const DEFAULT_TASK_DUMP_ENABLED: bool = false;
-const DEFAULT_PROCESS_RESOURCE_USAGE_ENABLED: bool = cfg!(unix);
+const DEFAULT_PROCESS_RESOURCE_USAGE_ENABLED: bool = cfg!(all(unix, feature = "process-resource"));
 
 const BYTES_PER_MIB: u64 = 1024 * 1024;
 
@@ -408,6 +408,7 @@ struct RuntimeEnvConfig {
     task_dump_enabled: bool,
     task_dump_idle_threshold: Option<Duration>,
     process_resource_usage_enabled: bool,
+    #[cfg_attr(not(feature = "process-resource"), allow(dead_code))]
     process_resource_usage_sample_interval: Option<Duration>,
     socket_accept_queues_enabled: Option<bool>,
     #[cfg_attr(not(feature = "linux-socket"), allow(dead_code))]
@@ -659,6 +660,7 @@ fn apply_runtime_env<M>(
         runtime = runtime.with_task_dumps(task_dump_config);
     }
 
+    #[cfg(feature = "process-resource")]
     if config.process_resource_usage_enabled {
         let process_resource_usage_config = match config.process_resource_usage_sample_interval {
             Some(interval) => crate::telemetry::ProcessResourceUsageConfig::builder()
@@ -667,6 +669,13 @@ fn apply_runtime_env<M>(
             None => crate::telemetry::ProcessResourceUsageConfig::default(),
         };
         runtime = runtime.with_process_resource_usage(process_resource_usage_config);
+    }
+
+    #[cfg(not(feature = "process-resource"))]
+    if config.process_resource_usage_enabled {
+        warn(format_args!(
+            "dial9: process resource usage requested but `process-resource` feature is not enabled; ignoring"
+        ));
     }
 
     #[cfg(feature = "linux-socket")]
@@ -1749,7 +1758,7 @@ mod tests {
         assert_eq!(config.idle_threshold(), Duration::from_millis(25));
     }
 
-    #[cfg(unix)]
+    #[cfg(all(unix, feature = "process-resource"))]
     #[test]
     fn env_config_enables_process_resource_usage_by_default_on_unix() {
         let dir = tempfile::tempdir().expect("temporary trace directory should be created");
@@ -1768,7 +1777,7 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(all(unix, feature = "process-resource"))]
     #[test]
     fn env_config_can_disable_process_resource_usage() {
         let dir = tempfile::tempdir().expect("temporary trace directory should be created");

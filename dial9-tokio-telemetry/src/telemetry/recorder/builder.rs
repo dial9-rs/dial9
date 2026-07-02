@@ -66,6 +66,7 @@ pub struct TracedRuntimeBuilder<P = NoTracePath, M = PipelineUnset, Mode: Writer
     pub(super) cpu_profiling_config: Option<CpuProfilingConfig>,
     #[cfg(feature = "cpu-profiling")]
     pub(super) sched_event_config: Option<SchedEventConfig>,
+    #[cfg(feature = "process-resource")]
     pub(super) process_resource_usage_config: Option<crate::telemetry::ProcessResourceUsageConfig>,
     #[cfg(feature = "linux-socket")]
     pub(super) socket_accept_queues_config: Option<crate::telemetry::SocketAcceptQueuesConfig>,
@@ -180,6 +181,7 @@ impl<P, M, Mode: WriterMode> TracedRuntimeBuilder<P, M, Mode> {
     }
 
     /// Enable process resource usage sampled from `getrusage(RUSAGE_SELF)`.
+    #[cfg(feature = "process-resource")]
     pub fn with_process_resource_usage(
         mut self,
         config: crate::telemetry::ProcessResourceUsageConfig,
@@ -397,6 +399,7 @@ impl<P, M, Mode: WriterMode> TracedRuntimeBuilder<P, M, Mode> {
             cpu_profiling_config: self.cpu_profiling_config,
             #[cfg(feature = "cpu-profiling")]
             sched_event_config: self.sched_event_config,
+            #[cfg(feature = "process-resource")]
             process_resource_usage_config: self.process_resource_usage_config,
             #[cfg(feature = "linux-socket")]
             socket_accept_queues_config: self.socket_accept_queues_config,
@@ -611,8 +614,11 @@ impl<M, Mode: WriterMode> TracedRuntimeBuilder<HasTracePath, M, Mode> {
         let core_builder = TelemetryCore::builder()
             .writer(writer)
             .maybe_trace_path(self.trace_path)
-            .maybe_task_dump_config(self.task_dump_config)
-            .maybe_process_resource_usage(self.process_resource_usage_config);
+            .maybe_task_dump_config(self.task_dump_config);
+
+        #[cfg(feature = "process-resource")]
+        let core_builder =
+            core_builder.maybe_process_resource_usage(self.process_resource_usage_config);
 
         #[cfg(feature = "linux-socket")]
         let core_builder =
@@ -842,12 +848,12 @@ fn push_socket_accept_queues_source(
 ) {
     #[cfg(target_os = "linux")]
     shared.push_source(Box::new(
-        crate::telemetry::socket_accept_queues::SocketAcceptQueuesSource::new(config),
+        dial9_perf_self_profile::SocketAcceptQueuesSource::new(config),
     ));
 
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = config;
+        let _ = (shared, config);
         tracing::warn!("socket accept queues enabled but sock_diag is only available on Linux");
     }
 }
@@ -915,6 +921,7 @@ impl TelemetryCore {
         #[cfg(feature = "cpu-profiling")]
         sched_events: Option<SchedEventConfig>,
         /// Enable process resource usage sampled from `getrusage(RUSAGE_SELF)`.
+        #[cfg(feature = "process-resource")]
         process_resource_usage: Option<crate::telemetry::ProcessResourceUsageConfig>,
         /// Enable TCP listener accept queue snapshots sampled from Linux sock_diag.
         #[cfg(feature = "linux-socket")]
@@ -979,10 +986,11 @@ impl TelemetryCore {
             contexts.clone(),
         )));
 
+        #[cfg(feature = "process-resource")]
         if let Some(config) = process_resource_usage {
             #[cfg(unix)]
             shared.push_source(Box::new(
-                crate::telemetry::process_resource_usage::ProcessResourceUsageSource::new(config),
+                dial9_perf_self_profile::ProcessResourceUsageSource::new(config),
             ));
             #[cfg(not(unix))]
             {
@@ -1159,6 +1167,7 @@ impl TracedRuntime {
             cpu_profiling_config: None,
             #[cfg(feature = "cpu-profiling")]
             sched_event_config: None,
+            #[cfg(feature = "process-resource")]
             process_resource_usage_config: None,
             #[cfg(feature = "linux-socket")]
             socket_accept_queues_config: None,

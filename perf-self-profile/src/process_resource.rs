@@ -1,13 +1,45 @@
-//! Process resource usage sampled from the operating system.
+//! Process resource usage sampled from `getrusage(RUSAGE_SELF)`, exposed as a
+//! dial9 [`Source`](dial9_core::source::Source).
 
 use std::time::Duration;
 
 const DEFAULT_SAMPLE_INTERVAL: Duration = Duration::from_millis(100);
 
+/// Wire-format event for process resource usage sampled from `getrusage(RUSAGE_SELF)`.
+#[derive(Debug, dial9_trace_format::TraceEvent)]
+#[traceevent(wire_slot)]
+#[cfg_attr(not(feature = "unstable-events"), non_exhaustive)]
+pub struct ProcessResourceUsageEvent {
+    /// Monotonic timestamp in nanoseconds.
+    #[traceevent(timestamp)]
+    pub timestamp_ns: u64,
+    /// Cumulative user CPU time used by this process.
+    #[traceevent(unit = "ns")]
+    pub user_cpu_ns: u64,
+    /// Cumulative system CPU time used by this process.
+    #[traceevent(unit = "ns")]
+    pub system_cpu_ns: u64,
+    /// Maximum resident set size in bytes.
+    #[traceevent(unit = "bytes")]
+    pub max_rss_bytes: u64,
+    /// Page faults serviced without disk I/O.
+    pub minor_faults: u64,
+    /// Page faults serviced with disk I/O.
+    pub major_faults: u64,
+    /// Block input operations performed by the process.
+    pub block_input_ops: u64,
+    /// Block output operations performed by the process.
+    pub block_output_ops: u64,
+    /// Voluntary context switches performed by the process.
+    pub voluntary_context_switches: u64,
+    /// Involuntary context switches performed by the process.
+    pub involuntary_context_switches: u64,
+}
+
 /// Configuration for process resource usage sampling.
 ///
-/// Built via `ProcessResourceUsageConfig::builder()...build()` and enabled with
-/// [`TracedRuntimeBuilder::with_process_resource_usage`](crate::telemetry::TracedRuntimeBuilder::with_process_resource_usage).
+/// Build via `ProcessResourceUsageConfig::builder()...build()`, then plug the
+/// [`ProcessResourceUsageSource`] into a dial9 session.
 #[derive(Debug, Clone, bon::Builder)]
 pub struct ProcessResourceUsageConfig {
     /// Minimum time between samples.
@@ -30,11 +62,10 @@ impl ProcessResourceUsageConfig {
 
 #[cfg(unix)]
 mod unix {
-    use super::ProcessResourceUsageConfig;
+    use super::{ProcessResourceUsageConfig, ProcessResourceUsageEvent};
     use crate::rate_limit::rate_limited;
-    use crate::telemetry::events::clock_monotonic_ns;
-    use crate::telemetry::format::ProcessResourceUsageEvent;
-    use crate::telemetry::recorder::source::{FlushContext, Source};
+    use dial9_core::clock::clock_monotonic_ns;
+    use dial9_core::source::{FlushContext, Source};
     use std::io;
     use std::mem::MaybeUninit;
     use std::time::{Duration, Instant};
@@ -46,7 +77,7 @@ mod unix {
 
     /// Flush-thread source that samples process `getrusage(RUSAGE_SELF)`.
     #[derive(Debug)]
-    pub(crate) struct ProcessResourceUsageSource {
+    pub struct ProcessResourceUsageSource {
         config: ProcessResourceUsageConfig,
         last_sample: Option<Instant>,
     }
@@ -65,7 +96,8 @@ mod unix {
     }
 
     impl ProcessResourceUsageSource {
-        pub(crate) fn new(config: ProcessResourceUsageConfig) -> Self {
+        /// Build a source that samples at the config's interval.
+        pub fn new(config: ProcessResourceUsageConfig) -> Self {
             Self {
                 config,
                 last_sample: None,
@@ -187,10 +219,10 @@ mod unix {
         })
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "test-util"))]
     mod tests {
         use super::*;
-        use crate::telemetry::recorder::SharedState;
+        use dial9_core::shared_state::SharedState;
         use dial9_core::test_util;
         use serde::Deserialize;
 
@@ -284,7 +316,7 @@ mod unix {
 }
 
 #[cfg(unix)]
-pub(crate) use unix::ProcessResourceUsageSource;
+pub use unix::ProcessResourceUsageSource;
 
 #[cfg(test)]
 mod tests {
@@ -295,6 +327,26 @@ mod tests {
         assert_eq!(
             ProcessResourceUsageConfig::default().sample_interval(),
             DEFAULT_SAMPLE_INTERVAL
+        );
+    }
+
+    #[test]
+    fn process_resource_usage_unit_annotations() {
+        use dial9_trace_format::TraceEvent;
+        let entry = ProcessResourceUsageEvent::schema_entry();
+        let units: Vec<(&str, &str)> = entry
+            .annotations()
+            .iter()
+            .filter(|a| a.key() == "unit")
+            .map(|a| (entry.fields()[a.field_index() as usize].name(), a.value()))
+            .collect();
+        assert_eq!(
+            units,
+            vec![
+                ("user_cpu_ns", "ns"),
+                ("system_cpu_ns", "ns"),
+                ("max_rss_bytes", "bytes"),
+            ]
         );
     }
 }

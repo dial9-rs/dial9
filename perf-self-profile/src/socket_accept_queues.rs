@@ -1,13 +1,38 @@
-//! Socket accept queue snapshots sampled from Linux sock_diag.
+//! TCP listener accept queue snapshots sampled from Linux sock_diag, exposed as
+//! a dial9 [`Source`](dial9_core::source::Source).
 
 use std::time::Duration;
 
 const DEFAULT_SAMPLE_INTERVAL: Duration = Duration::from_millis(400);
 
+/// Wire-format event for a TCP listener accept queue snapshot.
+#[derive(Debug, dial9_trace_format::TraceEvent)]
+#[traceevent(wire_slot)]
+#[cfg_attr(not(feature = "unstable-events"), non_exhaustive)]
+pub struct TcpAcceptQueueEvent {
+    /// Monotonic timestamp in nanoseconds.
+    #[traceevent(timestamp)]
+    pub timestamp_ns: u64,
+    /// Linux socket cookie reported by sock_diag.
+    pub socket_cookie: u64,
+    /// Linux socket inode reported by sock_diag.
+    pub socket_inode: u64,
+    /// IP version for `local_addr`: 4 or 6.
+    pub ip_version: u8,
+    /// Local listener address.
+    pub local_addr: String,
+    /// Local listener port.
+    pub local_port: u16,
+    /// Completed connections waiting to be accepted.
+    pub pending_connections: u32,
+    /// Effective accept backlog limit.
+    pub backlog_limit: u32,
+}
+
 /// Configuration for socket accept queue sampling.
 ///
-/// Built via `SocketAcceptQueuesConfig::builder()...build()` and enabled with
-/// [`TracedRuntimeBuilder::with_socket_accept_queues`](crate::telemetry::TracedRuntimeBuilder::with_socket_accept_queues).
+/// Build via `SocketAcceptQueuesConfig::builder()...build()`, then plug the
+/// [`SocketAcceptQueuesSource`] into a dial9 session.
 ///
 /// # Performance
 ///
@@ -61,11 +86,10 @@ mod tests {
 
 #[cfg(target_os = "linux")]
 mod linux {
-    use super::SocketAcceptQueuesConfig;
+    use super::{SocketAcceptQueuesConfig, TcpAcceptQueueEvent};
     use crate::rate_limit::rate_limited;
-    use crate::telemetry::events::clock_monotonic_ns;
-    use crate::telemetry::format::TcpAcceptQueueEvent;
-    use crate::telemetry::recorder::source::{FlushContext, Source};
+    use dial9_core::clock::clock_monotonic_ns;
+    use dial9_core::source::{FlushContext, Source};
     use netlink_packet_core::{
         NLM_F_DUMP, NLM_F_REQUEST, NetlinkBuffer, NetlinkMessage, NetlinkPayload,
     };
@@ -86,7 +110,7 @@ mod linux {
     ///
     /// See [issue #501](https://github.com/dial9-rs/dial9/issues/501) for details.
     #[derive(Debug)]
-    pub(crate) struct SocketAcceptQueuesSource {
+    pub struct SocketAcceptQueuesSource {
         config: SocketAcceptQueuesConfig,
         last_sample: Option<Instant>,
         cache: SocketAcceptQueueCache,
@@ -115,7 +139,7 @@ mod linux {
     }
 
     impl SocketAcceptQueuesSource {
-        pub(crate) fn new(config: SocketAcceptQueuesConfig) -> Self {
+        pub fn new(config: SocketAcceptQueuesConfig) -> Self {
             Self {
                 config,
                 last_sample: None,
@@ -630,4 +654,4 @@ mod linux {
 }
 
 #[cfg(target_os = "linux")]
-pub(crate) use linux::SocketAcceptQueuesSource;
+pub use linux::SocketAcceptQueuesSource;
