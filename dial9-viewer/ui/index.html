@@ -512,34 +512,69 @@
         const bucketsRow = document.getElementById('creds-buckets-row');
         const bucketsBox = document.getElementById('creds-buckets');
 
-        // Render the bucket picker. Buckets whose name contains "dial9" are
-        // surfaced first and highlighted, since those are the trace buckets.
+        // Whether the picker is showing every visible bucket or just the dial9
+        // trace buckets. Defaults to the filtered view; the "Show all" toggle
+        // flips it. Retained across re-renders (e.g. re-listing on reload).
+        let showAllBuckets = false;
+        // The last full bucket list from /api/buckets, so the toggle can
+        // re-render without another list call.
+        let lastBucketNames = [];
+
+        // Buckets whose name contains "dial9" are the trace buckets — surfaced
+        // by default. Everything else is hidden unless "Show all" is on.
+        const isTraceBucket = (n) => n.toLowerCase().includes('dial9');
+
+        // Render the bucket picker from the last listing. Shows the dial9 trace
+        // buckets by default, or every visible bucket when "Show all" is on. A
+        // toggle button lets the user switch (some deployments don't put "dial9"
+        // in the bucket name, so the filtered view can hide the real bucket).
         function renderBucketPicker(names) {
+            if (names) lastBucketNames = names;
+            names = lastBucketNames;
             bucketsBox.innerHTML = '';
             bucketsRow.style.display = '';
 
-            // Only trace buckets are relevant — hard-filter to names containing
-            // "dial9" and hide everything else.
-            const isMatch = (n) => n.toLowerCase().includes('dial9');
-            const matches = names.filter(isMatch).sort((a, b) => a.localeCompare(b));
+            const all = [...names].sort((a, b) => a.localeCompare(b));
+            const matches = all.filter(isTraceBucket);
+            const shown = showAllBuckets ? all : matches;
 
-            if (!matches.length) {
+            // A toggle to switch between the filtered (dial9-only) and full list.
+            // Only useful when the two differ — i.e. there are non-dial9 buckets.
+            function appendToggle() {
+                if (all.length === matches.length) return;
+                const t = document.createElement('button');
+                t.textContent = showAllBuckets
+                    ? `Show dial9 only (${matches.length})`
+                    : `Show all (${all.length})`;
+                t.style.cssText = 'font-style:italic;opacity:0.85';
+                t.addEventListener('click', () => {
+                    showAllBuckets = !showAllBuckets;
+                    renderBucketPicker();
+                });
+                bucketsBox.appendChild(t);
+            }
+
+            if (!shown.length) {
                 bucketsBox.textContent = names.length
                     ? 'No dial9 trace buckets visible to these credentials.'
                     : 'No buckets visible to these credentials.';
+                appendToggle();
                 return;
             }
 
-            for (const name of matches) {
+            for (const name of shown) {
                 const b = document.createElement('button');
                 b.textContent = name;
-                b.classList.add('match');
+                // Highlight the trace buckets even within the full list.
+                if (isTraceBucket(name)) b.classList.add('match');
                 b.addEventListener('click', () => selectBucket(name, b));
                 bucketsBox.appendChild(b);
             }
+            appendToggle();
 
-            // Auto-select when there's exactly one dial9 bucket — the common case.
-            if (matches.length === 1) {
+            // Auto-select when there's exactly one dial9 bucket — the common
+            // case — but not in the "show all" view, where the user is browsing.
+            if (!showAllBuckets && matches.length === 1) {
                 selectBucket(matches[0], bucketsBox.firstChild);
             }
         }
@@ -556,13 +591,16 @@
             if (result.ok) {
                 if (result.region) {
                     region.value = result.region;
-                    // Persist the resolved region so it rides on every request.
+                    // Persist the resolved region so it rides on every request,
+                    // then mirror it into the URL (aws_region) so a shared link
+                    // reproduces the cross-region bucket.
                     Dial9Creds.set({
                         accessKeyId: akid.value,
                         secretAccessKey: secret.value,
                         sessionToken: token.value,
                         region: result.region,
                     });
+                    syncUrl();
                 }
                 setStatus(`Using ${name}${result.region ? ` · region ${result.region}` : ''}`, 'ok');
                 discoverPrefixes().then(() => reRunCurrentSearch());
@@ -685,8 +723,14 @@
     // `from`/`to` so it reproduces exactly regardless of the viewer's TZ toggle.
     function syncUrl() {
         if (restoring) return;
+        // The bucket's region rides in the URL (as aws_region) so a cross-region
+        // bucket is reproducible from a shared link. The credentials store is the
+        // source of truth — it's where region detection lands — and the secret
+        // keys themselves are header-only, never serialized here.
+        const storedCreds = window.Dial9Creds ? Dial9Creds.get() : null;
         const state = {
             bucket: bucketInput.value.trim(),
+            region: (storedCreds && storedCreds.region) || '',
             prefix: prefixInput.value.trim(),
             tab: currentTab,
             tz: useLocalTz ? 'local' : 'utc',
@@ -716,6 +760,21 @@
     if (urlState.prefix) prefixInput.value = urlState.prefix;
     if (urlState.q) rawSearchInput.value = urlState.q;
     if (urlState.tab === 'raw') switchTab('raw');
+
+    // A shared link can pin the bucket's region (aws_region). Fold it into the
+    // stored credentials so every subsequent request carries it as the region
+    // header — this is what lets a cross-region bucket link load without a fresh
+    // detection round trip. Prefill the panel field too so it's visible. Only
+    // meaningful when credentials are present (region is header-only there); on
+    // the ambient path the server uses its own configured region.
+    if (urlState.region && window.Dial9Creds) {
+        const regionField = document.getElementById('creds-region');
+        if (regionField && !regionField.value) regionField.value = urlState.region;
+        const stored = Dial9Creds.get();
+        if (stored && stored.accessKeyId && stored.region !== urlState.region) {
+            Dial9Creds.set({ ...stored, region: urlState.region, autoDetectRegion: false });
+        }
+    }
 
     // Restore the time range. A relative `last=N` re-anchors to now (so a shared
     // link always shows the last N hours); a precise `from`/`to` is restored
@@ -759,7 +818,13 @@
         // Server defaults (bucket/prefix) were filled programmatically above;
         // reflect them in the URL so the link is complete.
         syncUrl();
-        discoverPrefixes().then(autoSearch);
+        // If we're restoring a bucket with credentials but no region pinned in
+        // the URL (aws_region already seeds the store during restore above),
+        // detect it before discovery/search so the first signed call lands on
+        // the right regional endpoint. A pinned region makes this a fast no-op.
+        detectRegionForBucket(bucketInput.value.trim())
+            .then(() => discoverPrefixes())
+            .then(autoSearch);
     }).catch(() => { discoverPrefixes().then(autoSearch); });
 
     // The initial time range is restored from the URL (or defaulted to last
@@ -773,6 +838,37 @@
         autoSearched = true;
         if (bucketInput.value.trim() && !document.getElementById('search-btn').disabled) {
             doTimeRangeSearch();
+        }
+    }
+
+    // ── Region auto-detection ──
+    // A bring-your-own-credentials request signs S3 for the region carried in
+    // the stored credentials. If that region doesn't match the bucket's, S3
+    // rejects the read with a redirect (surfaced by the backend as 421 "wrong
+    // region"). Before hitting any data endpoint for a NEW bucket, resolve its
+    // real region via /api/credentials/check (a region-agnostic HeadBucket that
+    // returns the true region even from the wrong endpoint) and persist it, so
+    // every later request — and the shared URL — carries the right region.
+    //
+    // No-op without credentials: the ambient path uses the server's own
+    // configured region, and the check endpoint requires credentials anyway.
+    async function detectRegionForBucket(bucket) {
+        if (!bucket || !window.Dial9Creds || !Dial9Creds.has()) return;
+        try {
+            const result = await Dial9Creds.check(bucket);
+            if (result.ok && result.region) {
+                const stored = Dial9Creds.get();
+                if (stored && stored.region !== result.region) {
+                    // Persist without a second round trip (region is known now).
+                    Dial9Creds.set({ ...stored, region: result.region, autoDetectRegion: false });
+                    const regionField = document.getElementById('creds-region');
+                    if (regionField) regionField.value = result.region;
+                    syncUrl();
+                }
+            }
+        } catch {
+            // Best-effort: on failure, leave the prior region in place — the data
+            // request will surface the actual error (e.g. the 421 wrong-region).
         }
     }
 
@@ -840,7 +936,16 @@
     // Re-discover when bucket changes (on commit), and keep the URL in sync as
     // the user types. Prefix discovery hits the server, so only run it on the
     // less-frequent `change`; mirror to the URL on every keystroke.
-    bucketInput.addEventListener('change', () => { discoverPrefixes(); syncUrl(); });
+    //
+    // Detect the (possibly cross-region) bucket's region FIRST: prefix discovery
+    // is itself a signed S3 call, so it would hit the wrong regional endpoint if
+    // the stored region is stale from a previous bucket. This is the manual-entry
+    // counterpart to the picker's selectBucket() region detection.
+    bucketInput.addEventListener('change', async () => {
+        await detectRegionForBucket(bucketInput.value.trim());
+        discoverPrefixes();
+        syncUrl();
+    });
     bucketInput.addEventListener('input', syncUrl);
 
     // ── Timezone toggle ──

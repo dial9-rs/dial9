@@ -266,6 +266,16 @@ impl AppState {
     /// When BYO is disabled (local-dir mode) any supplied credentials are
     /// ignored and the default backend is used. A role-arn request against a
     /// server with no assumer wired is a 400 (the feature is off here).
+    ///
+    /// The ephemeral client is pinned to the region carried on the request (the
+    /// `x-dial9-aws-region` header or `aws_region` query param). A cross-region
+    /// bucket therefore requires the correct region to ride along — the UI
+    /// detects it once via `/api/credentials/check` and then keeps it in the
+    /// stored credentials and the URL, so every subsequent request carries it.
+    /// A request that reaches the wrong regional endpoint fails with
+    /// [`StorageError::WrongRegion`] rather than an opaque error.
+    ///
+    /// [`StorageError::WrongRegion`]: crate::storage::StorageError::WrongRegion
     pub async fn resolve(
         &self,
         creds: MaybeCreds,
