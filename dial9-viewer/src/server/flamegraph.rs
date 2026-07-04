@@ -204,8 +204,9 @@ pub async fn get_flamegraph(
     // stock `serde_urlencoded`-based extractor does not.
     QueryExtra(params): QueryExtra<FlamegraphParams>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, (StatusCode, String)> {
-    let Some(agg) =
-        state.agg_context_for(params.bucket.as_deref(), params.prefix.as_deref(), creds)?
+    let Some(agg) = state
+        .agg_context_for(params.bucket.as_deref(), params.prefix.as_deref(), creds)
+        .await?
     else {
         return Err((
             StatusCode::NOT_FOUND,

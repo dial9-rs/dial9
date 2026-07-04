@@ -27,6 +27,7 @@
 
 mod allocator;
 mod config;
+mod events;
 mod hook;
 mod opt_out;
 mod profiler;
@@ -35,6 +36,7 @@ mod source;
 
 pub use allocator::Dial9Allocator;
 pub use config::{DEFAULT_RING_CAPACITY, DEFAULT_SAMPLE_RATE_BYTES, MemoryProfilingConfig};
-#[cfg(feature = "analysis")]
+pub use events::{AllocEvent, FreeEvent};
+#[cfg(feature = "test-util")]
 pub use profiler::push_test_alloc;
 pub use profiler::{InstallError, MemoryProfiler, MemoryProfilerGuard, is_installed};

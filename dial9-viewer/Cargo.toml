@@ -37,6 +37,7 @@ rust-embed = { version = "8", features = ["mime-guess"] }
 mime_guess = "2"
 tower-http = { version = "0.6", features = ["fs", "cors"] }
 uuid = { version = "1", features = ["v4"] }
+form_urlencoded = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 time = "0.3"
@@ -68,6 +69,7 @@ tempfile = "3"
 urlencoding = "2"
 aws-smithy-http-client = { version = "1", features = ["test-util"] }
 aws-smithy-types = "1"
+aws-smithy-async = { version = "1", features = ["rt-tokio"] }
 http = "1"
 
 criterion = { version = "0.5", features = ["html_reports"] }

@@ -204,7 +204,7 @@ function seg(o) {
 }
 
 // ── constants ──
-ok(MAX_OPEN_BYTES === 100 * 1024 * 1024, "MAX_OPEN_BYTES is 100 MiB");
+ok(MAX_OPEN_BYTES === 200 * 1024 * 1024, "MAX_OPEN_BYTES is 200 MiB");
 
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed === 0 ? 0 : 1);

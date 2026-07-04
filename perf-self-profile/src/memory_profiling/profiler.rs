@@ -2,12 +2,12 @@
 
 use crate::memory_profiling::config::MemoryProfilingConfig;
 use crate::memory_profiling::ring::RingBuffers;
-#[cfg(feature = "analysis")]
+#[cfg(feature = "test-util")]
 use crate::memory_profiling::ring::{DEFAULT_MAX_FRAMES, RawAlloc};
 
 use crate::memory_profiling::source::MemoryProfileSource;
-use crate::telemetry::recorder::Dial9Handle;
-use dial9_perf_self_profile::unwinder::Unwinder;
+use crate::unwinder::Unwinder;
+use dial9_core::handle::Dial9Handle;
 use std::sync::{Arc, OnceLock};
 
 /// Producer-side liveset: maps allocation address → `(size, timestamp_ns)`.
@@ -79,8 +79,7 @@ pub fn is_installed() -> bool {
 ///
 /// Returns `false` if the profiler is not installed or the queue is full.
 /// Intended for integration tests that verify the source→trace pipeline.
-#[cfg(feature = "analysis")]
-#[doc(hidden)]
+#[cfg(feature = "test-util")]
 pub fn push_test_alloc(addr: u64, size: u64, ts_ns: u64) -> bool {
     let Some(inner) = ACTIVE.get() else {
         return false;
@@ -89,7 +88,7 @@ pub fn push_test_alloc(addr: u64, size: u64, ts_ns: u64) -> bool {
     frames[0] = 0xDEAD;
     frames[1] = 0xBEEF;
     let raw = RawAlloc {
-        tid: crate::telemetry::events::current_tid(),
+        tid: dial9_core::thread::current_tid(),
         size,
         addr,
         ts_ns,

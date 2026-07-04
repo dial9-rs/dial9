@@ -17,11 +17,24 @@ Key files:
 ## The `trace=` query parameter
 
 `trace=` is **repeatable**. Each value is fetched independently and may be
-individually gzipped. `TraceParser.fetchTraces()` fetches every component (in
-parallel), runs each through `maybeGunzip`, and concatenates the raw bytes. The
-decoder treats a concatenated stream as multiple segments — a mid-stream
-`TRC\0` header resets the frame parser — so the combined buffer parses as one
-trace. Read all values with `params.getAll('trace')`, never `params.get`.
+individually gzipped. The decoder treats a concatenated stream as multiple
+segments — a mid-stream `TRC\0` header resets the frame parser — so N components
+parse as one trace. Read all values with `params.getAll('trace')`, never
+`params.get`.
+
+The viewer and flamegraph **stream** the components whenever the runtime
+supports it (`DecompressionStream` + a readable `fetch` body):
+`TraceParser.fetchTracesStream()` dispatches every component's `fetch()` up
+front (so downloads run concurrently) and yields their gunzipped chunks
+back-to-back, in order, into a single `parseTraceStream`. Parsing the first
+segment then overlaps the in-flight downloads of the rest, so total load time is
+~`max(download, parse)` instead of `download_all + parse` — the same win the
+single-URL path already had, now for N components too (issue #595).
+
+`TraceParser.fetchTraces()` is the non-streaming fallback (no
+`DecompressionStream`, e.g. some Node test runtimes): it awaits every component
+in parallel, runs each through `maybeGunzip`, concatenates the raw bytes, and
+hands the whole buffer to `parseTrace`. Same bytes, but no fetch/parse overlap.
 
 For S3-backed traces, `index.html` points each `trace=` at
 `/api/object?bucket=&key=`, which serves one file's raw (still-gzipped) bytes.

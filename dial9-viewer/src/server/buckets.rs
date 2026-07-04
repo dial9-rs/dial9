@@ -14,7 +14,7 @@ pub async fn list_buckets(
     State(state): State<AppState>,
     creds: MaybeCreds,
 ) -> Result<Json<Vec<String>>, (StatusCode, String)> {
-    let backend = state.resolve(creds)?;
+    let backend = state.resolve(creds).await?;
     let buckets = backend
         .list_buckets()
         .await

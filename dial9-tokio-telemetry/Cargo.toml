@@ -33,7 +33,6 @@ tokio = { version = "1.52.0", features = [
 ] }
 tokio-util = "0.7"
 arc-swap = "1"
-crossbeam-queue = "0.3"
 libc.workspace = true
 futures-util = { version = "0.3", default-features = false, features = [
     "alloc",
@@ -45,7 +44,6 @@ serde_json = "1"
 smallvec = "1"
 bytes = "1"
 dial9-perf-self-profile = { workspace = true, optional = true }
-scc = { version = "2", optional = true }
 dial9-trace-format = { workspace = true, features = [
     "serde",
     "serde-deserialize",
@@ -95,7 +93,10 @@ _shuttle = [
 taskdump = ["tokio/taskdump"]
 tracing-layer = ["dep:tracing-subscriber"]
 ## Sampled memory allocation profiling via ring buffers.
-memory-profiling = ["dep:dial9-perf-self-profile", "dep:scc"]
+memory-profiling = [
+    "dep:dial9-perf-self-profile",
+    "dial9-perf-self-profile/memory-profiling",
+]
 worker-s3 = [
     "dep:dial9-utils",
     "dep:aws-sdk-s3-transfer-manager",
@@ -105,7 +106,7 @@ worker-s3 = [
 ]
 ## Removes #[non_exhaustive] from event structs so downstream crates can
 ## construct them directly. Unstable: no semver guarantees on new fields.
-unstable-events = []
+unstable-events = ["dial9-perf-self-profile?/unstable-events"]
 ## All features except platform-specific ones (taskdump). Used in CI for non-Linux targets.
 __nonlinux_all_features = [
     "analysis",
@@ -128,6 +129,7 @@ dial9-tokio-telemetry = { path = ".", features = [
 # it out of the production build of the library.
 dial9-trace-format = { workspace = true, features = ["serde-deserialize"] }
 dial9-core = { workspace = true, features = ["test-util"] }
+dial9-perf-self-profile = { workspace = true, features = ["test-util"] }
 assert2 = { workspace = true }
 criterion = "0.5"
 clap = { version = "4", features = ["derive", "env"] }

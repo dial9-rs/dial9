@@ -15,7 +15,7 @@ use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
 
 use crate::server::AppState;
-use crate::server::credentials::{CredError, MaybeCreds};
+use crate::server::credentials::{CredError, CredSource, MaybeCreds};
 use crate::storage::build_credentialed_client;
 
 #[derive(Deserialize)]
@@ -45,15 +45,28 @@ pub async fn check_credentials(
         ));
     }
 
+    // Resolve the request's named identity to concrete credentials: BYOC keys
+    // are used directly; a role ARN is assumed first (via the shared
+    // `AppState::assume`, so this validates the same identity — and applies the
+    // same error policy — as a later data request would).
     let temp = match creds.0 {
-        Ok(Some(temp)) => temp,
-        Ok(None) => {
+        Ok(CredSource::Static(temp)) => temp,
+        Ok(CredSource::AssumeRole { role_arn, region }) => {
+            state.assume(&role_arn, region.as_deref()).await?
+        }
+        Ok(CredSource::Default) => {
             return Err((
                 StatusCode::BAD_REQUEST,
-                "credentials required: supply x-dial9-aws-* headers".to_string(),
+                "credentials required: supply x-dial9-aws-* headers or a role ARN".to_string(),
             ));
         }
-        Err(e @ (CredError::Incomplete | CredError::Malformed | CredError::InvalidRegion)) => {
+        Err(
+            e @ (CredError::Incomplete
+            | CredError::Malformed
+            | CredError::InvalidRegion
+            | CredError::ConflictingCredentials
+            | CredError::InvalidRoleArn),
+        ) => {
             return Err((StatusCode::BAD_REQUEST, e.message().to_string()));
         }
     };
@@ -80,7 +93,7 @@ pub async fn check_credentials(
             // Prefer S3's reported bucket region; fall back to the
             // caller-supplied region. The fallback is safe: `temp` came from
             // `MaybeCreds`, whose region was already run through
-            // `is_valid_region` in `parse_cred_headers` (an invalid region is
+            // `is_valid_region` in `parse_cred_inputs` (an invalid region is
             // rejected as `CredError::InvalidRegion` before reaching here), so
             // it is either `None` or a syntactically valid region name.
             region: resp.bucket_region().map(|r| r.to_string()).or(temp.region),
