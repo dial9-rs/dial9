@@ -546,28 +546,7 @@ mod tests {
         })
         .unwrap();
 
-        // 13. AllocEvent
-        let alloc_chain = enc.intern_stack_frames(&[0xaaaa, 0xbbbb]).unwrap();
-        enc.write(&format::AllocEvent {
-            timestamp_ns: 12_000_000,
-            tid: 5555,
-            size: 1024,
-            addr: 0x7fff_0000_1000,
-            callchain: alloc_chain,
-        })
-        .unwrap();
-
-        // 14. FreeEvent
-        enc.write(&format::FreeEvent {
-            timestamp_ns: 13_000_000,
-            tid: 5555,
-            addr: 0x7fff_0000_1000,
-            size: 1024,
-            alloc_timestamp_ns: 12_000_000,
-        })
-        .unwrap();
-
-        // 15. ProcessResourceUsageEvent
+        // 13. ProcessResourceUsageEvent
         enc.write(&format::ProcessResourceUsageEvent {
             timestamp_ns: 14_000_000,
             user_cpu_ns: 1_000_000,
@@ -582,7 +561,7 @@ mod tests {
         })
         .unwrap();
 
-        // 16. TcpAcceptQueueEvent
+        // 14. TcpAcceptQueueEvent
         enc.write(&format::TcpAcceptQueueEvent {
             timestamp_ns: 15_000_000,
             socket_cookie: 67890,
@@ -607,7 +586,7 @@ mod tests {
         })
         .expect("decode");
 
-        assert_eq!(events.len(), 15);
+        assert_eq!(events.len(), 13);
 
         // 1. PollStartEvent
         let Dial9Event::PollStartEvent(ref e) = events[0] else {
@@ -703,29 +682,9 @@ mod tests {
         assert_eq!(e.timestamp_ns, 11_000_000);
         assert_eq!(e.realtime_ns, 1_700_000_000_000_000_000);
 
-        // 12. AllocEvent
-        let Dial9Event::AllocEvent(ref e) = events[11] else {
-            panic!("expected AllocEvent, got {:?}", events[11]);
-        };
-        assert_eq!(e.timestamp_ns, 12_000_000);
-        assert_eq!(e.tid, 5555);
-        assert_eq!(e.size, 1024);
-        assert_eq!(e.addr, 0x7fff_0000_1000);
-        assert_eq!(e.callchain, vec![0xaaaa, 0xbbbb]);
-
-        // 13. FreeEvent
-        let Dial9Event::FreeEvent(ref e) = events[12] else {
-            panic!("expected FreeEvent, got {:?}", events[12]);
-        };
-        assert_eq!(e.timestamp_ns, 13_000_000);
-        assert_eq!(e.tid, 5555);
-        assert_eq!(e.addr, 0x7fff_0000_1000);
-        assert_eq!(e.size, 1024);
-        assert_eq!(e.alloc_timestamp_ns, 12_000_000);
-
-        // 14. ProcessResourceUsageEvent
-        let Dial9Event::ProcessResourceUsageEvent(ref e) = events[13] else {
-            panic!("expected ProcessResourceUsageEvent, got {:?}", events[13]);
+        // 12. ProcessResourceUsageEvent
+        let Dial9Event::ProcessResourceUsageEvent(ref e) = events[11] else {
+            panic!("expected ProcessResourceUsageEvent, got {:?}", events[11]);
         };
         assert_eq!(e.timestamp_ns, 14_000_000);
         assert_eq!(e.user_cpu_ns, 1_000_000);
@@ -738,9 +697,9 @@ mod tests {
         assert_eq!(e.voluntary_context_switches, 4);
         assert_eq!(e.involuntary_context_switches, 5);
 
-        // 15. TcpAcceptQueueEvent
-        let Dial9Event::TcpAcceptQueueEvent(ref e) = events[14] else {
-            panic!("expected TcpAcceptQueueEvent, got {:?}", events[14]);
+        // 13. TcpAcceptQueueEvent
+        let Dial9Event::TcpAcceptQueueEvent(ref e) = events[12] else {
+            panic!("expected TcpAcceptQueueEvent, got {:?}", events[12]);
         };
         assert_eq!(e.timestamp_ns, 15_000_000);
         assert_eq!(e.socket_cookie, 67890);
@@ -750,6 +709,56 @@ mod tests {
         assert_eq!(e.local_port, 8080);
         assert_eq!(e.pending_connections, 3);
         assert_eq!(e.backlog_limit, 128);
+    }
+
+    #[test]
+    #[cfg(all(feature = "memory-profiling", feature = "unstable-events"))]
+    fn memory_events_decode_to_dial9event() {
+        let mut enc = Encoder::new();
+        let alloc_chain = enc.intern_stack_frames(&[0xaaaa, 0xbbbb]).unwrap();
+        enc.write(&dial9_perf_self_profile::AllocEvent {
+            timestamp_ns: 12_000_000,
+            tid: 5555,
+            size: 1024,
+            addr: 0x7fff_0000_1000,
+            callchain: alloc_chain,
+        })
+        .unwrap();
+        enc.write(&dial9_perf_self_profile::FreeEvent {
+            timestamp_ns: 13_000_000,
+            tid: 5555,
+            addr: 0x7fff_0000_1000,
+            size: 1024,
+            alloc_timestamp_ns: 12_000_000,
+        })
+        .unwrap();
+
+        let bytes = enc.finish();
+        let mut dec = Decoder::new(&bytes).expect("valid header");
+        let mut events: Vec<Dial9Event> = Vec::new();
+        dec.for_each_event(|raw| {
+            events.push(raw.deserialize().expect("deserialize"));
+        })
+        .expect("decode");
+        assert_eq!(events.len(), 2);
+
+        let Dial9Event::AllocEvent(ref a) = events[0] else {
+            panic!("expected AllocEvent, got {:?}", events[0]);
+        };
+        assert_eq!(a.timestamp_ns, 12_000_000);
+        assert_eq!(a.tid, 5555);
+        assert_eq!(a.size, 1024);
+        assert_eq!(a.addr, 0x7fff_0000_1000);
+        assert_eq!(a.callchain, vec![0xaaaa, 0xbbbb]);
+
+        let Dial9Event::FreeEvent(ref f) = events[1] else {
+            panic!("expected FreeEvent, got {:?}", events[1]);
+        };
+        assert_eq!(f.timestamp_ns, 13_000_000);
+        assert_eq!(f.tid, 5555);
+        assert_eq!(f.addr, 0x7fff_0000_1000);
+        assert_eq!(f.size, 1024);
+        assert_eq!(f.alloc_timestamp_ns, 12_000_000);
     }
 
     #[test]

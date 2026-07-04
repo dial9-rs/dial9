@@ -13,9 +13,8 @@ process.env.TZ = "America/New_York"; // UTC-4 (DST) / UTC-5
 
 const {
   formatCoverageBadge,
-  isCoverageFrozen,
+  foldErrorNotice,
   coveragePercent,
-  shouldAutoStopRefining,
   nextMaxFiles,
   nsToPickerUtc,
   pickerUtcToNs,
@@ -83,26 +82,33 @@ assertEq(
   "single-host scope omits the uninformative host fraction",
 );
 
-// ── isCoverageFrozen ──
+// ── foldErrorNotice ──
 assertEq(
-  isCoverageFrozen(null, { files_folded: 5 }),
-  false,
-  "first poll (no previous) is never frozen",
+  foldErrorNotice({ files_matched: 100, files_folded: 0, fold_errors: 0 }),
+  null,
+  "no fold errors -> no notice",
 );
 assertEq(
-  isCoverageFrozen({ files_folded: 5 }, { files_folded: 8 }),
-  false,
-  "progress (folded increased) is not frozen",
+  foldErrorNotice({ fold_errors: 0 }),
+  null,
+  "zero fold errors -> null even without a sample",
+);
+assertEq(foldErrorNotice(null), null, "null coverage -> null");
+assertEq(foldErrorNotice(undefined), null, "missing coverage -> null");
+assertEq(
+  foldErrorNotice({ fold_errors: 15, fold_error_sample: "1782-4879.bin.gz: AccessDenied" }),
+  "⚠ 15 files failed to fold — 1782-4879.bin.gz: AccessDenied",
+  "count + sample message",
 );
 assertEq(
-  isCoverageFrozen({ files_folded: 8 }, { files_folded: 8 }),
-  true,
-  "no increase is frozen",
+  foldErrorNotice({ fold_errors: 1, fold_error_sample: "x.bin.gz: boom" }),
+  "⚠ 1 file failed to fold — x.bin.gz: boom",
+  "singular noun for one error",
 );
 assertEq(
-  isCoverageFrozen({ files_folded: 8 }, { files_folded: 7 }),
-  true,
-  "decrease is frozen (defensive)",
+  foldErrorNotice({ fold_errors: 3 }),
+  "⚠ 3 files failed to fold",
+  "count without a sample message still renders",
 );
 
 // ── nextMaxFiles ──
@@ -122,48 +128,6 @@ assertEq(
 );
 assertEq(coveragePercent({ files_matched: 0, files_folded: 0 }), 0, "zero denom -> 0");
 assertEq(coveragePercent(null), 0, "null coverage -> 0");
-
-// ── shouldAutoStopRefining ──
-assertEq(
-  shouldAutoStopRefining([]),
-  false,
-  "no history -> keep refining",
-);
-assertEq(
-  shouldAutoStopRefining([5, 4]),
-  false,
-  "fewer than patience(3) samples -> keep going",
-);
-assertEq(
-  shouldAutoStopRefining([5, 4, 3]),
-  false,
-  "recent gains still large -> keep going",
-);
-assertEq(
-  shouldAutoStopRefining([0.1, 0.2, 0.05]),
-  true,
-  "3 consecutive sub-0.5pp gains -> stop",
-);
-assertEq(
-  shouldAutoStopRefining([5, 0.1, 0.2, 0.3]),
-  true,
-  "only the most recent `patience` matter (early spike ignored once it settles)",
-);
-assertEq(
-  shouldAutoStopRefining([0.1, 0.1, 5, 0.1, 0.2]),
-  false,
-  "a large gain within the recent window prevents stopping",
-);
-assertEq(
-  shouldAutoStopRefining([0.1, 0.1, 1.0]),
-  false,
-  "a large most-recent gain prevents stopping",
-);
-assertEq(
-  shouldAutoStopRefining([2, 2], { minDeltaPct: 5, patience: 2 }),
-  true,
-  "custom thresholds: both gains below 5pp -> stop",
-);
 
 // ── nsToPickerUtc / pickerUtcToNs (timezone round-trip) ──
 // 1782155999000000000 ns = 2026-06-22 19:19:59 UTC.

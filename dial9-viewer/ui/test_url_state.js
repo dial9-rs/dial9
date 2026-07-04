@@ -30,6 +30,13 @@ test("parse: decodes percent-encoded values", () => {
   assert.strictEqual(s.prefix, "a/b c");
 });
 
+test("parse: reads aws_region into region", () => {
+  const s = UrlState.parse("?bucket=b&aws_region=us-west-2");
+  assert.strictEqual(s.region, "us-west-2");
+  // An absent region stays unset (falls back to detection / default).
+  assert.strictEqual(UrlState.parse("?bucket=b").region, undefined);
+});
+
 test("parse: tab only accepts known values", () => {
   assert.strictEqual(UrlState.parse("?tab=raw").tab, "raw");
   assert.strictEqual(UrlState.parse("?tab=browse").tab, "browse");
@@ -113,6 +120,15 @@ test("serialize: ignores non-positive 'last'", () => {
   assert.strictEqual(qs, "from=1000&to=2000");
 });
 
+test("serialize: writes region as aws_region", () => {
+  assert.strictEqual(
+    UrlState.serialize({ bucket: "b", region: "eu-central-1" }),
+    "bucket=b&aws_region=eu-central-1"
+  );
+  // Empty region is omitted (the ambient/default path needs no region).
+  assert.strictEqual(UrlState.serialize({ bucket: "b", region: "" }), "bucket=b");
+});
+
 test("serialize: stable key order", () => {
   const qs = UrlState.serialize({
     q: "x",
@@ -121,9 +137,13 @@ test("serialize: stable key order", () => {
     tz: "local",
     tab: "raw",
     prefix: "p",
+    region: "us-west-2",
     bucket: "b",
   });
-  assert.strictEqual(qs, "bucket=b&prefix=p&tab=raw&tz=local&from=1000&to=2000&q=x");
+  assert.strictEqual(
+    qs,
+    "bucket=b&aws_region=us-west-2&prefix=p&tab=raw&tz=local&from=1000&to=2000&q=x"
+  );
 });
 
 test("serialize: percent-encodes values", () => {
@@ -150,6 +170,12 @@ test("round-trip: precise window in raw tab, local tz", () => {
     to: 1700003600,
     q: "2026-04-09/1910",
   };
+  const back = UrlState.parse("?" + UrlState.serialize(state));
+  assert.deepStrictEqual(back, state);
+});
+
+test("round-trip: cross-region bucket carries aws_region", () => {
+  const state = { bucket: "b", region: "ap-southeast-2", prefix: "traces", last: 1 };
   const back = UrlState.parse("?" + UrlState.serialize(state));
   assert.deepStrictEqual(back, state);
 });

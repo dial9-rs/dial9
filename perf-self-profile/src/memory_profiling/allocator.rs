@@ -21,7 +21,7 @@ use std::alloc::{GlobalAlloc, Layout};
 /// Wrap the system allocator:
 ///
 /// ```no_run
-/// use dial9_tokio_telemetry::memory_profiling::Dial9Allocator;
+/// use dial9_perf_self_profile::memory_profiling::Dial9Allocator;
 ///
 /// #[global_allocator]
 /// static ALLOC: Dial9Allocator = Dial9Allocator::system();
@@ -31,7 +31,7 @@ use std::alloc::{GlobalAlloc, Layout};
 /// Wrap a custom allocator:
 ///
 /// ```ignore
-/// use dial9_tokio_telemetry::memory_profiling::Dial9Allocator;
+/// use dial9_perf_self_profile::memory_profiling::Dial9Allocator;
 ///
 /// #[global_allocator]
 /// static ALLOC: Dial9Allocator<tikv_jemallocator::Jemalloc> =

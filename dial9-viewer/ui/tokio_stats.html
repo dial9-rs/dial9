@@ -45,6 +45,8 @@
 <script src="creds.js"></script>
 <script src="format.js"></script>
 <script src="flamegraph_diff.js"></script>
+<script src="sse.js"></script>
+<script src="flamegraph_api.js"></script>
 <h1>⚡ Tokio Stats</h1>
 <div id="periods" class="periods"></div>
 <div class="toolbar">
@@ -454,42 +456,79 @@
     return html;
   }
 
-  async function loadPeriod(period) {
-    let refine = false;
-    let prevFolded = -1;
-    while (true) {
-      const u = new URL("/api/tokio-stats", window.location.origin);
-      // effectiveScope resolves the right scope per side: in diff mode each
-      // period carries its own independent bucket/prefix/service/host scope; in
-      // normal mode it falls back to the shared top-level params. It also folds
-      // in the (editable) time window, so we just copy its keys onto the URL.
-      const scope = effectiveScope(period);
-      for (const [k, v] of scope) u.searchParams.append(k, v);
-      if (refine) u.searchParams.set("refine", "true");
+  // Stream cancellation: each loadAll() run gets a monotonic token + an
+  // AbortController. A new run (Load clicked again) aborts the prior run's
+  // in-flight SSE streams and its callbacks bail via the token guard — otherwise
+  // a superseded stream's events could overwrite the current render, and its
+  // server-side folding would keep running (holding fold permits) until the cap.
+  let loadToken = 0;
+  let loadAbort = null;
 
-      const credHeaders = window.Dial9Creds ? Dial9Creds.headers() : {};
-      const resp = await fetch(u, { headers: credHeaders });
-      if (!resp.ok) throw new Error(await resp.text());
-      const data = await resp.json();
-      period.data = data;
-      renderFromCache();
-      const cov = data.coverage;
-      if (!cov || cov.files_folded >= cov.files_matched || cov.files_folded === prevFolded) break;
-      prevFolded = cov.files_folded;
-      refine = true;
-      await new Promise(r => setTimeout(r, 300));
+  // Load one period over the SSE stream. The server emits the already-folded
+  // snapshot first, then a fresh full snapshot per newly-folded file, and closes
+  // at the sampling cap. We re-render from cache on every event. Resolves when
+  // the stream closes (or is aborted); rejects only on a genuine error.
+  function loadPeriod(period, token, signal) {
+    const u = new URL("/api/tokio-stats", window.location.origin);
+    // effectiveScope resolves the right scope per side: in diff mode each
+    // period carries its own independent bucket/prefix/service/host scope; in
+    // normal mode it falls back to the shared top-level params. It also folds
+    // in the (editable) time window, so we just copy its keys onto the URL.
+    for (const [k, v] of effectiveScope(period)) u.searchParams.append(k, v);
+
+    const credHeaders = window.Dial9Creds ? Dial9Creds.headers() : {};
+    return new Promise((resolve, reject) => {
+      Dial9Sse.openSse(u, {
+        headers: credHeaders,
+        signal,
+        onEvent: (data) => {
+          if (token !== loadToken) return; // superseded by a newer load
+          period.data = data;
+          renderFromCache();
+        },
+        onClose: resolve,
+        onError: reject,
+        // openSse calls NEITHER onClose nor onError when aborted, so settle via
+        // its returned promise too (it resolves on close, abort, or after
+        // onError) — otherwise every superseded load's Promise.all would hang
+        // forever. Settling twice is a harmless no-op.
+      }).then(resolve);
+    });
+  }
+
+  // Scan loaded periods for a fold-error notice (e.g. unwritable output bucket).
+  // Returns the first non-null notice, or null if every period folded cleanly.
+  function foldErrorAcrossPeriods() {
+    for (const p of periods) {
+      const notice = p.data && foldErrorNotice(p.data.coverage);
+      if (notice) return notice;
     }
+    return null;
   }
 
   async function loadAll() {
     const statusEl = document.getElementById("status");
+    // Cancel any in-flight load, then start a fresh one under a new token.
+    if (loadAbort) loadAbort.abort();
+    loadAbort = new AbortController();
+    const token = ++loadToken;
+    const signal = loadAbort.signal;
     statusEl.textContent = "Loading…";
     statusEl.className = "status";
     try {
-      // Load all periods in parallel.
-      await Promise.all(periods.map((p, i) => loadPeriod(p, i)));
-      statusEl.textContent = "Complete";
+      // Stream all periods in parallel; each resolves when its stream closes.
+      await Promise.all(periods.map((p) => loadPeriod(p, token, signal)));
+      if (token !== loadToken) return; // superseded while awaiting
+      // Surface fold failures instead of a silent "Complete" over an empty table.
+      const notice = foldErrorAcrossPeriods();
+      if (notice) {
+        statusEl.textContent = notice;
+        statusEl.className = "status error";
+      } else {
+        statusEl.textContent = "Complete";
+      }
     } catch (e) {
+      if (token !== loadToken) return; // superseded; ignore its error
       statusEl.textContent = "Error: " + e.message;
       statusEl.className = "status error";
     }

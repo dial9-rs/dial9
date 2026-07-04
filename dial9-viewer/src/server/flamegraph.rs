@@ -1,16 +1,29 @@
-//! `/api/flamegraph` endpoint: query aggregated Parquet data and return a flamegraph tree.
+//! `/api/flamegraph` endpoint: stream an aggregated flamegraph tree over
+//! Server-Sent Events, refining as source files fold.
+//!
+//! One request holds the connection open: it [resolves](refine::resolve) the
+//! scope, emits the already-folded snapshot immediately, then folds up to the
+//! [sampling cap](refine) and pushes a fresh full-tree snapshot as each file
+//! lands, closing when the cap is reached. Each SSE `data:` frame is one
+//! [`FlamegraphResponse`] JSON object — the same shape the UI rendered per poll
+//! before — so the client just re-renders on every event.
 
-use axum::Json;
+use std::collections::{HashMap, HashSet};
+use std::convert::Infallible;
+use std::sync::Arc;
+
 use axum::extract::State;
 use axum::http::StatusCode;
+use axum::response::sse::{Event, KeepAlive, Sse};
 use axum_extra::extract::Query as QueryExtra;
+use futures::stream::{self, Stream, StreamExt};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 use crate::ingest::aggregate::{
-    self, AggContext, Coverage, FACETS, FacetResult, SampleFilter, Scope,
+    self, AggContext, AggSnapshot, Coverage, FACETS, FacetResult, FlamegraphAccum, SampleFilter,
+    Scope,
 };
-use crate::ingest::refine::{self, RefineOpts};
+use crate::ingest::refine::{self, FoldErrors, FoldOutcome, RefineOpts, Resolved};
 use crate::server::AppState;
 use crate::server::credentials::MaybeCreds;
 
@@ -47,13 +60,6 @@ pub struct FlamegraphParams {
     /// Only samples attributed to a poll with this spawn location are counted.
     /// Sent by the flamegraph UI's "Spawn location" selector.
     pub spawn_location: Option<String>,
-    /// Whether this poll may fold new source files. The UI's first poll for a
-    /// scope omits this (or sets it false) so the response is instant — it just
-    /// aggregates whatever is already folded. Subsequent polls set `refine=1` to
-    /// fold a batch and progressively refine. Defaults to false so a bare reload
-    /// of a previously-loaded scope returns its existing tree without folding.
-    #[serde(default)]
-    pub refine: bool,
 }
 
 #[derive(Serialize)]
@@ -177,12 +183,14 @@ impl TrieNode {
     }
 }
 
-/// Handler for GET /api/flamegraph.
+/// Handler for GET /api/flamegraph — a Server-Sent Events stream.
 ///
-/// Runs the demand-driven [refinement loop](crate::ingest::refine::refine): fold
-/// a bounded budget of source files in [order key] order, aggregate over the
-/// folded-in-scope set, and return the tree plus a [`Coverage`] block. The
-/// client re-polls to refine.
+/// [Resolves](refine::resolve) the scope, primes an incremental
+/// [`FlamegraphAccum`] over the already-folded set, and emits an initial
+/// snapshot. Then it folds the not-yet-folded capped files in [order key] order
+/// (up to the [sampling cap](refine)), pushing a fresh full-tree SSE event as
+/// each file lands, and closes when the work-list drains. The client re-renders
+/// on every event; there is no re-polling.
 ///
 /// The aggregation context comes from [`AppState::agg_context_for`]: a `bucket`
 /// param builds a per-request bring-your-own-credentials context; otherwise the
@@ -195,9 +203,10 @@ pub async fn get_flamegraph(
     // `axum_extra`'s Query supports repeated keys (`host=a&host=b`), which the
     // stock `serde_urlencoded`-based extractor does not.
     QueryExtra(params): QueryExtra<FlamegraphParams>,
-) -> Result<Json<FlamegraphResponse>, (StatusCode, String)> {
-    let Some(agg) =
-        state.agg_context_for(params.bucket.as_deref(), params.prefix.as_deref(), creds)?
+) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, (StatusCode, String)> {
+    let Some(agg) = state
+        .agg_context_for(params.bucket.as_deref(), params.prefix.as_deref(), creds)
+        .await?
     else {
         return Err((
             StatusCode::NOT_FOUND,
@@ -205,7 +214,23 @@ pub async fn get_flamegraph(
                 .to_string(),
         ));
     };
-    flamegraph_response(&agg, &params, &state.fold_limits).await
+
+    let scope = scope_from_params(&params);
+    let opts = RefineOpts {
+        max_files: params.max_files,
+    };
+
+    // Resolve up front so a scope with no matching files still maps to 404
+    // (rather than opening an empty stream). Folding happens lazily in the stream.
+    let Some(resolved) = refine::resolve(&agg, &scope, opts).await else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            "no source files match this scope".to_string(),
+        ));
+    };
+
+    let stream = flamegraph_stream(agg, resolved, &params, state.fold_limits.clone());
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
 
 /// Build the [`Scope`] from query params.
@@ -257,96 +282,213 @@ fn sample_filter(params: &FlamegraphParams) -> SampleFilter {
     }
 }
 
-/// Build the `/api/flamegraph` response for one demand-driven poll: run the
-/// shared [refinement loop](refine::refine) to resolve + fold the capped set,
-/// aggregate the samples part-files over it, and shape the flamegraph tree +
-/// [`Coverage`].
-async fn flamegraph_response(
-    agg: &AggContext,
+/// Immutable per-request context threaded through the stream: the resolved
+/// scope, the fixed sample filter, and the params fields needed to shape each
+/// event's metadata. Holding an `Arc<AggContext>` lets both the read-back GETs
+/// and the fold tasks share it without re-cloning per file.
+struct StreamCtx {
+    agg: Arc<AggContext>,
+    resolved: Resolved,
+    filter: SampleFilter,
+    service: Option<String>,
+    hosts: Vec<String>,
+    from: Option<String>,
+    to: Option<String>,
+    start_ns: Option<i64>,
+    end_ns: Option<i64>,
+}
+
+/// The mutable state carried through the folding phase: the incremental
+/// accumulator, the growing folded-leaf set, and the running fold-error tally.
+/// Boxed inside [`Phase`] so the enum isn't dominated by this variant's size.
+struct FoldState {
+    accum: FlamegraphAccum,
+    folded: HashSet<String>,
+    /// Files whose fold failed this stream, and the most recent error message —
+    /// surfaced in the coverage block so a systematic failure isn't silent.
+    errors: FoldErrors,
+}
+
+/// Phase of the SSE fold state machine driven by [`flamegraph_stream`]'s
+/// `unfold`. `Start` primes and emits the already-folded snapshot; `Folding`
+/// pulls one folded file at a time, merges it, and emits a refined snapshot.
+enum Phase {
+    Start,
+    Folding(Box<FoldState>),
+}
+
+/// Build the SSE event stream for one flamegraph request.
+///
+/// The first `unfold` step primes an accumulator over the already-folded set and
+/// emits an instant snapshot (like the old read-only first poll). Each later step
+/// pulls one file off [`fold_stream`], reads + merges its part-files, and emits a
+/// refined snapshot, closing when the work-list drains. Dropping the returned
+/// stream (client disconnect) drops the fold stream, cancelling in-flight folds.
+fn flamegraph_stream(
+    agg: AggContext,
+    resolved: Resolved,
     params: &FlamegraphParams,
-    limits: &aggregate::FoldLimits,
-) -> Result<Json<FlamegraphResponse>, (StatusCode, String)> {
-    let scope = scope_from_params(params);
-    let opts = RefineOpts {
-        refine: params.refine,
-        max_files: params.max_files,
-    };
+    limits: aggregate::FoldLimits,
+    // All borrowed data is cloned out of `params` into `StreamCtx` before the
+    // stream is built, so the returned stream captures no borrows (`use<>`).
+) -> impl Stream<Item = Result<Event, Infallible>> + use<> {
+    let agg = Arc::new(agg);
+    let ctx = Arc::new(StreamCtx {
+        agg: Arc::clone(&agg),
+        filter: sample_filter(params),
+        service: params.service.clone(),
+        hosts: params.host.clone(),
+        from: params.from.clone(),
+        to: params.to.clone(),
+        start_ns: params.start_ns,
+        end_ns: params.end_ns,
+        resolved,
+    });
 
-    let Some(refined) = refine::refine(agg, &scope, opts, limits).await else {
-        return Err((
-            StatusCode::NOT_FOUND,
-            "no source files match this scope".to_string(),
-        ));
-    };
+    // `Box::pin` so the fold stream is `Unpin` and we can `.next()` it inside the
+    // `unfold` step. Bounded concurrency comes from the shared `FoldLimits`.
+    let folds = Box::pin(refine::fold_stream(
+        agg,
+        limits,
+        ctx.resolved.unfolded_capped(),
+    ));
 
-    // Aggregate over the capped prefix (not every folded file): this keeps
-    // `samples_folded` and `files_folded` consistent even when a prior "fetch
-    // more" left more files folded in this scope than the current cap.
-    let filter = sample_filter(params);
-    let result = aggregate::aggregate(
-        &*agg.output,
-        &agg.output_bucket,
-        &agg.output_prefix,
-        &refined.capped_full_keys(),
-        refined.folded(),
-        filter.clone(),
+    stream::unfold(
+        (ctx, folds, Phase::Start),
+        |(ctx, mut folds, phase)| async move {
+            match phase {
+                Phase::Start => {
+                    // Prime the accumulator over the already-folded set, concurrently.
+                    let seed = aggregate::fetch_folded_sample_parts(
+                        &*ctx.agg.output,
+                        &ctx.agg.output_bucket,
+                        &ctx.agg.output_prefix,
+                        &ctx.resolved.capped_full_keys(),
+                        ctx.resolved.folded(),
+                    )
+                    .await;
+                    let mut accum = FlamegraphAccum::new(ctx.filter.clone());
+                    for (samples, dict) in seed {
+                        if let Err(e) = accum.merge(samples, dict) {
+                            rate_limited_warn("flamegraph: seed merge failed", &e);
+                        }
+                    }
+                    let folded = ctx.resolved.folded().clone();
+                    let errors = FoldErrors::default();
+                    let event = snapshot_event(&ctx, &accum, &folded, &errors);
+                    let state = Box::new(FoldState {
+                        accum,
+                        folded,
+                        errors,
+                    });
+                    Some((Ok(event), (ctx, folds, Phase::Folding(state))))
+                }
+                Phase::Folding(mut state) => {
+                    // Pull the next fold outcome; `None` = work-list drained → close.
+                    match folds.next().await? {
+                        FoldOutcome::Folded(f) => {
+                            if let Some((samples, dict)) = aggregate::fetch_sample_parts(
+                                &*ctx.agg.output,
+                                &ctx.agg.output_bucket,
+                                &ctx.agg.output_prefix,
+                                &f.full_key,
+                            )
+                            .await
+                                && let Err(e) = state.accum.merge(samples, dict)
+                            {
+                                rate_limited_warn("flamegraph: merge failed", &e);
+                            }
+                            state.folded.insert(aggregate::part_leaf_of(&f.full_key));
+                        }
+                        FoldOutcome::Failed { raw_key, error } => {
+                            // Count it and carry a sample message so the client can
+                            // show that folding is failing (e.g. unwritable output).
+                            state.errors.record(&raw_key, &error);
+                        }
+                    }
+                    let event = snapshot_event(&ctx, &state.accum, &state.folded, &state.errors);
+                    Some((Ok(event), (ctx, folds, Phase::Folding(state))))
+                }
+            }
+        },
     )
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+}
 
-    let files_matched = refined.files_matched;
-    let files_folded = refined.files_folded();
+/// Rate-limited warn for the per-file merge path (reachable once per folded file
+/// on a large scope), so a systematic decode failure can't spam the log.
+fn rate_limited_warn(msg: &str, err: &anyhow::Error) {
+    use dial9_core::rate_limited;
+    rate_limited!(std::time::Duration::from_secs(60), {
+        tracing::warn!("{msg}: {err}");
+    });
+}
+
+/// Build one SSE `data:` event from the accumulator's current snapshot and the
+/// coverage implied by `folded` (a growing superset of the resolved folded set)
+/// plus the running fold-error tally.
+fn snapshot_event(
+    ctx: &StreamCtx,
+    accum: &FlamegraphAccum,
+    folded: &HashSet<String>,
+    errors: &FoldErrors,
+) -> Event {
+    let snap = accum.snapshot();
+    let files_matched = ctx.resolved.files_matched;
+    let files_folded = ctx.resolved.files_folded_in(folded);
     let coverage = Coverage {
         files_matched,
         files_folded,
-        samples_folded: result.total_samples,
-        total_bytes: refined.total_bytes,
-        hosts_matched: refined.hosts_matched,
-        hosts_folded: refined.hosts_folded(),
+        samples_folded: snap.total_samples,
+        total_bytes: ctx.resolved.total_bytes,
+        hosts_matched: ctx.resolved.hosts_matched,
+        hosts_folded: ctx.resolved.folded_hosts(folded),
+        fold_errors: errors.count,
+        fold_error_sample: errors.sample.clone(),
     };
+    let resp = build_response(ctx, &snap, coverage);
+    // `json_data` only fails if the value can't serialize; our response always
+    // can, so fall back to an empty comment event rather than propagating.
+    Event::default().json_data(&resp).unwrap_or_else(|e| {
+        rate_limited_warn("flamegraph: event serialize failed", &anyhow::anyhow!(e));
+        Event::default().comment("serialize error")
+    })
+}
 
-    let pct = (files_folded as f64 / files_matched as f64) * 100.0;
-    tracing::info!(
-        files_folded,
-        files_matched,
-        coverage_pct = format!("{pct:.1}"),
-        samples = result.total_samples,
-        hosts = result.hosts,
-        "flamegraph: returning tree ({files_folded}/{files_matched} files, {pct:.1}%)"
-    );
-
-    let tree = build_flamegraph_tree(&result.stack_counts, &result.stacks_dict);
+/// Shape a [`FlamegraphResponse`] from an [`AggSnapshot`] + [`Coverage`].
+fn build_response(ctx: &StreamCtx, snap: &AggSnapshot, coverage: Coverage) -> FlamegraphResponse {
+    let tree = build_flamegraph_tree(&snap.stack_counts, snap.stacks_dict);
 
     // Echo the active filter values back to the UI (facet name → selected value).
-    let filters: HashMap<String, String> = filter
+    let filters: HashMap<String, String> = ctx
+        .filter
         .facets
         .iter()
         .map(|(k, v)| (k.to_string(), v.clone()))
         .collect();
 
-    Ok(Json(FlamegraphResponse {
+    FlamegraphResponse {
         tree,
-        total_samples: result.total_samples,
+        total_samples: snap.total_samples,
         coverage: Some(coverage),
         metadata: FlamegraphMetadata {
-            service: params.service.clone(),
-            hosts: result.hosts,
-            time_range: match (&params.from, &params.to) {
+            service: ctx.service.clone(),
+            hosts: snap.hosts,
+            time_range: match (&ctx.from, &ctx.to) {
                 (Some(f), Some(t)) => Some(format!("{f}–{t}")),
                 _ => None,
             },
-            min_timestamp_ns: result.min_ts,
-            max_timestamp_ns: result.max_ts,
-            facets: result.facets,
+            min_timestamp_ns: snap.min_ts,
+            max_timestamp_ns: snap.max_ts,
+            facets: snap.facets.clone(),
             scope: ScopeEcho {
-                service: params.service.clone(),
-                hosts: params.host.clone(),
-                start_ns: params.start_ns,
-                end_ns: params.end_ns,
+                service: ctx.service.clone(),
+                hosts: ctx.hosts.clone(),
+                start_ns: ctx.start_ns,
+                end_ns: ctx.end_ns,
                 filters,
             },
         },
-    }))
+    }
 }
 
 #[cfg(test)]

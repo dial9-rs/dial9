@@ -1,16 +1,24 @@
-//! `/api/tokio-stats` endpoint: read aggregated polls Parquet data and return
-//! Tokio runtime stats — long polls classified as on-CPU vs off-CPU,
-//! grouped by spawn location. Supports progressive refinement (same as flamegraph).
+//! `/api/tokio-stats` endpoint: stream aggregated polls Parquet data as
+//! Server-Sent Events — long polls classified as on-CPU vs off-CPU, grouped by
+//! spawn location, refining as source files fold (same engine as flamegraph).
+//!
+//! One request holds the connection open: it [resolves](refine::resolve) the
+//! scope, emits the already-folded snapshot, then folds up to the sampling cap
+//! and pushes a fresh [`TokioStatsResponse`] SSE event as each file lands.
 
-use axum::Json;
+use std::convert::Infallible;
+use std::sync::Arc;
+
 use axum::extract::State;
 use axum::http::StatusCode;
+use axum::response::sse::{Event, KeepAlive, Sse};
 use axum_extra::extract::Query as QueryExtra;
+use futures::stream::{self, Stream, StreamExt};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::ingest::aggregate::{self, Scope};
-use crate::ingest::refine::{self, RefineOpts};
+use crate::ingest::refine::{self, FoldErrors, FoldOutcome, RefineOpts, Resolved};
 use crate::server::AppState;
 use crate::server::credentials::MaybeCreds;
 
@@ -28,8 +36,6 @@ pub struct TokioStatsParams {
     pub host: Vec<String>,
     pub start_ns: Option<i64>,
     pub end_ns: Option<i64>,
-    #[serde(default)]
-    pub refine: bool,
 }
 
 #[derive(Serialize)]
@@ -67,14 +73,22 @@ pub struct PollExemplar {
     pub source_key: String,
 }
 
-/// Handler for GET /api/tokio-stats.
+/// Handler for GET /api/tokio-stats — a Server-Sent Events stream.
+///
+/// [Resolves](refine::resolve) the scope, reads the already-folded `polls/`
+/// part-files into an accumulator, and emits an initial snapshot. Then it folds
+/// the not-yet-folded capped files (up to the sampling cap), reading + merging
+/// each file's polls as it lands and emitting a fresh [`TokioStatsResponse`]
+/// event, closing when the work-list drains. tokio-stats does not "fetch more",
+/// so the default cap always applies.
 pub async fn get_tokio_stats(
     State(state): State<AppState>,
     creds: MaybeCreds,
     QueryExtra(params): QueryExtra<TokioStatsParams>,
-) -> Result<Json<TokioStatsResponse>, (StatusCode, String)> {
-    let Some(agg) =
-        state.agg_context_for(params.bucket.as_deref(), params.prefix.as_deref(), creds)?
+) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, (StatusCode, String)> {
+    let Some(agg) = state
+        .agg_context_for(params.bucket.as_deref(), params.prefix.as_deref(), creds)
+        .await?
     else {
         return Err((
             StatusCode::NOT_FOUND,
@@ -96,97 +110,213 @@ pub async fn get_tokio_stats(
         hosts = ?scope.hosts,
         start_ns = ?scope.start_ns,
         end_ns = ?scope.end_ns,
-        refine = params.refine,
         "tokio-stats: starting"
     );
 
-    // Run the shared refinement loop: list + scope-filter, cap, and fold a
-    // bounded batch (identical policy to flamegraph). tokio-stats reads only the
-    // `polls/` part-files, so it does not "fetch more"; the default cap applies.
-    let opts = RefineOpts {
-        refine: params.refine,
-        max_files: None,
-    };
-    let Some(refined) = refine::refine(&agg, &scope, opts, &state.fold_limits).await else {
+    // Resolve up front so an empty scope maps to 404 rather than an empty stream.
+    let Some(resolved) = refine::resolve(&agg, &scope, RefineOpts { max_files: None }).await else {
         return Err((
             StatusCode::NOT_FOUND,
             "no source files match this scope".to_string(),
         ));
     };
 
-    // Read the polls part-files for the folded-in-cap files concurrently, then
-    // accumulate the long polls per spawn location.
-    let polls_data = aggregate::read_polls_parts(
-        &*agg.output,
-        &agg.output_bucket,
-        &agg.output_prefix,
-        &refined.capped,
-        refined.folded(),
+    let stream = tokio_stats_stream(agg, resolved, scope, state.fold_limits.clone());
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+}
+
+/// Immutable per-request context threaded through the tokio-stats SSE stream.
+struct StreamCtx {
+    agg: Arc<crate::ingest::aggregate::AggContext>,
+    resolved: Resolved,
+    scope: Scope,
+    source_bucket: String,
+}
+
+/// Phase of the tokio-stats SSE state machine (see [`crate::server::flamegraph`]
+/// for the mirror-image flamegraph version). `Start` reads + accumulates the
+/// already-folded polls; `Folding` pulls one folded file at a time.
+enum Phase {
+    Start,
+    Folding {
+        acc: TokioStatsAccum,
+        folded: HashSet<String>,
+        errors: FoldErrors,
+    },
+}
+
+/// Build the SSE event stream for one tokio-stats request. Mirrors
+/// [`crate::server::flamegraph`]'s `flamegraph_stream`, but reads `polls/`
+/// part-files into a [`TokioStatsAccum`] instead of samples.
+fn tokio_stats_stream(
+    agg: crate::ingest::aggregate::AggContext,
+    resolved: Resolved,
+    scope: Scope,
+    limits: aggregate::FoldLimits,
+) -> impl Stream<Item = Result<Event, Infallible>> + use<> {
+    let agg = Arc::new(agg);
+    let ctx = Arc::new(StreamCtx {
+        agg: Arc::clone(&agg),
+        source_bucket: agg.source_bucket.clone(),
+        scope,
+        resolved,
+    });
+
+    let folds = Box::pin(refine::fold_stream(
+        agg,
+        limits,
+        ctx.resolved.unfolded_capped(),
+    ));
+
+    stream::unfold(
+        (ctx, folds, Phase::Start),
+        |(ctx, mut folds, phase)| async move {
+            match phase {
+                Phase::Start => {
+                    // Read the already-folded polls part-files concurrently.
+                    let polls_data = aggregate::read_polls_parts(
+                        &*ctx.agg.output,
+                        &ctx.agg.output_bucket,
+                        &ctx.agg.output_prefix,
+                        &ctx.resolved.capped,
+                        ctx.resolved.folded(),
+                    )
+                    .await;
+                    let mut acc = TokioStatsAccum::default();
+                    for (raw_key, data) in &polls_data {
+                        read_polls_part_lossy(data, &ctx.scope, raw_key, &mut acc);
+                    }
+                    let folded = ctx.resolved.folded().clone();
+                    let errors = FoldErrors::default();
+                    let event = snapshot_event(&ctx, &acc, &folded, &errors);
+                    Some((
+                        Ok(event),
+                        (
+                            ctx,
+                            folds,
+                            Phase::Folding {
+                                acc,
+                                folded,
+                                errors,
+                            },
+                        ),
+                    ))
+                }
+                Phase::Folding {
+                    mut acc,
+                    mut folded,
+                    mut errors,
+                } => {
+                    match folds.next().await? {
+                        FoldOutcome::Folded(f) => {
+                            if let Some(data) = aggregate::fetch_polls_part(
+                                &*ctx.agg.output,
+                                &ctx.agg.output_bucket,
+                                &ctx.agg.output_prefix,
+                                &f.full_key,
+                            )
+                            .await
+                            {
+                                read_polls_part_lossy(&data, &ctx.scope, &f.raw_key, &mut acc);
+                            }
+                            folded.insert(aggregate::part_leaf_of(&f.full_key));
+                        }
+                        FoldOutcome::Failed { raw_key, error } => {
+                            errors.record(&raw_key, &error);
+                        }
+                    }
+                    let event = snapshot_event(&ctx, &acc, &folded, &errors);
+                    Some((
+                        Ok(event),
+                        (
+                            ctx,
+                            folds,
+                            Phase::Folding {
+                                acc,
+                                folded,
+                                errors,
+                            },
+                        ),
+                    ))
+                }
+            }
+        },
     )
-    .await;
+}
 
-    let mut acc = TokioStatsAccum::default();
-    let files_read = polls_data.len();
-    for (raw_key, data) in &polls_data {
-        read_polls_part(data, &scope, raw_key, &mut acc)?;
+/// Merge one polls part-file into `acc`, logging (rate-limited) and skipping on a
+/// decode error rather than aborting the whole stream — one corrupt part-file
+/// shouldn't kill an otherwise-good refinement.
+fn read_polls_part_lossy(data: &[u8], scope: &Scope, source_key: &str, acc: &mut TokioStatsAccum) {
+    use dial9_core::rate_limited;
+    if let Err((_, e)) = read_polls_part(data, scope, source_key, acc) {
+        rate_limited!(std::time::Duration::from_secs(60), {
+            tracing::warn!(key = %source_key, error = %e, "tokio-stats: failed to read polls part");
+        });
     }
+}
 
-    let files_matched = refined.files_matched;
-    let files_folded = refined.files_folded();
-
-    let notable_polls: usize = acc.by_loc.values().map(|la| la.durations.len()).sum();
-    tracing::info!(
-        files_read,
-        files_folded,
-        files_matched,
-        total_polls = acc.total_polls,
-        notable_polls,
-        spawn_locs = acc.by_loc.len(),
-        "tokio-stats: returning ({files_folded}/{files_matched} files, {notable_polls} polls above floor)"
-    );
-
-    // Compute time span.
+/// Build one SSE event from the accumulator's current state and the coverage
+/// implied by `folded` (a growing superset of the resolved folded set) plus the
+/// running fold-error tally. Snapshots without consuming the accumulator so the
+/// stream can keep folding.
+fn snapshot_event(
+    ctx: &StreamCtx,
+    acc: &TokioStatsAccum,
+    folded: &HashSet<String>,
+    errors: &FoldErrors,
+) -> Event {
     let time_span_ns = match (acc.min_ts, acc.max_ts) {
         (Some(min), Some(max)) => (max - min).max(1),
         _ => 1,
     };
 
-    // Build response: per-spawn-loc with durations sorted descending.
+    // Per-spawn-loc with durations sorted descending. Built from borrowed state
+    // (clone the per-loc vecs) so repeated snapshots don't consume the accumulator.
     let mut by_spawn_loc: Vec<SpawnLocStats> = acc
         .by_loc
-        .into_iter()
-        .map(|(loc, mut la)| {
-            la.durations
-                .sort_unstable_by_key(|&(d, _)| std::cmp::Reverse(d));
-            let durations_ns = la.durations.iter().map(|(d, _)| *d).collect();
-            let classes = la.durations.iter().map(|(_, c)| *c).collect();
+        .iter()
+        .map(|(loc, la)| {
+            let mut durs = la.durations.clone();
+            durs.sort_unstable_by_key(|&(d, _)| std::cmp::Reverse(d));
+            let durations_ns = durs.iter().map(|(d, _)| *d).collect();
+            let classes = durs.iter().map(|(_, c)| *c).collect();
             SpawnLocStats {
-                spawn_loc: loc,
+                spawn_loc: loc.clone(),
                 total_polls: la.total,
                 durations_ns,
                 classes,
-                exemplars: la.worst_by_class,
+                exemplars: la.worst_by_class.clone(),
             }
         })
         .collect();
-    // Sort by number of notable polls (above floor) descending.
     by_spawn_loc.sort_by_key(|l| std::cmp::Reverse(l.durations_ns.len()));
 
-    Ok(Json(TokioStatsResponse {
+    let files_folded = ctx.resolved.files_folded_in(folded);
+    let resp = TokioStatsResponse {
         time_span_ns,
         total_polls: acc.total_polls,
-        bucket: agg.source_bucket.clone(),
+        bucket: ctx.source_bucket.clone(),
         by_spawn_loc,
         coverage: Some(aggregate::Coverage {
-            files_matched,
+            files_matched: ctx.resolved.files_matched,
             files_folded,
-            // tokio-stats counts files read, not samples, as its "folded" unit.
-            samples_folded: files_read,
-            total_bytes: refined.total_bytes,
-            hosts_matched: refined.hosts_matched,
-            hosts_folded: refined.hosts_folded(),
+            // tokio-stats counts folded files, not samples, as its "folded" unit.
+            samples_folded: files_folded,
+            total_bytes: ctx.resolved.total_bytes,
+            hosts_matched: ctx.resolved.hosts_matched,
+            hosts_folded: ctx.resolved.folded_hosts(folded),
+            fold_errors: errors.count,
+            fold_error_sample: errors.sample.clone(),
         }),
-    }))
+    };
+    Event::default().json_data(&resp).unwrap_or_else(|e| {
+        use dial9_core::rate_limited;
+        rate_limited!(std::time::Duration::from_secs(60), {
+            tracing::warn!(error = %e, "tokio-stats: event serialize failed");
+        });
+        Event::default().comment("serialize error")
+    })
 }
 
 // ─── Internal types ──────────────────────────────────────────────────────────

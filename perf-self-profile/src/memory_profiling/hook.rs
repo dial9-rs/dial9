@@ -31,8 +31,9 @@
 
 use crate::memory_profiling::profiler::MemoryProfilerInner;
 use crate::memory_profiling::ring::{DEFAULT_MAX_FRAMES, RawAlloc, RawFree};
-use crate::sampling::SplitMix64;
-use crate::telemetry::events::{clock_monotonic_ns, current_tid};
+use dial9_core::clock::clock_monotonic_ns;
+use dial9_core::sampling::SplitMix64;
+use dial9_core::thread::current_tid;
 
 /// Per-thread sampling state. Held in TLS so each thread reads/writes
 /// its own counter and PRNG without synchronization (design §1).
@@ -347,9 +348,9 @@ mod tests {
     use super::*;
     use crate::memory_profiling::profiler::MemoryProfilerInner;
     use crate::memory_profiling::ring::RingBuffers;
-    use crate::sampling::SplitMix64;
-    use crate::telemetry::recorder::Dial9Handle;
-    use dial9_perf_self_profile::unwinder::Unwinder;
+    use crate::unwinder::Unwinder;
+    use dial9_core::handle::Dial9Handle;
+    use dial9_core::sampling::SplitMix64;
     use std::sync::Arc;
 
     /// Reset this thread's sampling state to a deterministic seed.

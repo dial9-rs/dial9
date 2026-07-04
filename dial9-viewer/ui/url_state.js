@@ -7,8 +7,12 @@
 // (loaded via require). Keep this dependency-free so both contexts can use it.
 //
 // State shape (all fields optional):
-//   { bucket, prefix, tab, tz, last, from, to, q }
+//   { bucket, region, prefix, tab, tz, last, from, to, q }
 //     bucket : S3 bucket name (string)
+//     region : S3 region the bucket lives in (string) — serialized as
+//              `aws_region`. Carried so a cross-region bucket is signed for the
+//              right endpoint and a shared link reproduces it (the region is not
+//              a secret; the credentials are header-only and never in the URL).
 //     prefix : user-entered key prefix (string)
 //     tab    : 'browse' | 'raw'   (default 'browse' — omitted from URL)
 //     tz     : 'utc' | 'local'    (default 'utc'    — omitted from URL)
@@ -33,6 +37,11 @@
 
     const bucket = p.get("bucket");
     if (bucket) out.bucket = bucket;
+
+    // `aws_region` matches the query param the backend already reads for the
+    // assume-role path, so one name means the same thing everywhere.
+    const region = p.get("aws_region");
+    if (region) out.region = region;
 
     const prefix = p.get("prefix");
     if (prefix) out.prefix = prefix;
@@ -71,6 +80,7 @@
     const p = new URLSearchParams();
 
     if (s.bucket) p.set("bucket", s.bucket);
+    if (s.region) p.set("aws_region", s.region);
     if (s.prefix) p.set("prefix", s.prefix);
     // 'browse' is the default tab, so only the non-default 'raw' is recorded.
     if (s.tab === "raw") p.set("tab", s.tab);

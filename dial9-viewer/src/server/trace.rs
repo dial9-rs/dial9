@@ -41,7 +41,7 @@ pub async fn get_object(
     creds: MaybeCreds,
     Query(params): Query<ObjectParams>,
 ) -> Result<Response, (StatusCode, String)> {
-    let backend = state.resolve(creds)?;
+    let backend = state.resolve(creds).await?;
 
     let bucket = params
         .bucket

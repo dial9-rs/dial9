@@ -68,6 +68,8 @@ pub mod source;
 /// Test-only record/drain/write helpers.
 #[cfg(feature = "test-util")]
 pub mod test_util;
+/// Thread identity helpers.
+pub mod thread;
 /// Segment-processing worker: runs a `SegmentProcessor` pipeline over sealed segments.
 #[cfg(feature = "pipeline")]
 pub mod worker;

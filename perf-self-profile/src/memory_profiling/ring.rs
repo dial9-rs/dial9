@@ -1,8 +1,8 @@
 #![deny(clippy::arithmetic_side_effects)]
 //! Two lock-free MPMC queues — one for sampled allocations, one for frees.
 
-use crate::primitives::sync::atomic::AtomicU64;
 use crossbeam_queue::ArrayQueue;
+use dial9_core::primitives::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 
 /// Default maximum frames captured per allocation. 128 × 8 B = 1 KiB stack budget.
