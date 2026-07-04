@@ -5,11 +5,12 @@
 // its own self-normalized flamegraph; boxes are colored by relative hotness
 // (blue = heavier in A, red = heavier in B) identically in both panels.
 //
-// This module owns the DOM and the per-side refinement loops. All the
-// value-level logic — tree merge, color, per-side layout, zoom-path lookup — is
-// the DOM-free, unit-tested core in flamegraph_diff.js. The two captures refine
-// independently (each to its own coverage plateau), and the merged tree is
-// re-rendered whenever either side produces a new tree.
+// This module owns the DOM and the per-side SSE streams. All the value-level
+// logic — tree merge, color, per-side layout, zoom-path lookup — is the
+// DOM-free, unit-tested core in flamegraph_diff.js. Each side opens its own
+// `/api/flamegraph` stream (the server folds to its sampling cap and closes;
+// see sse.js), and the merged tree is re-rendered whenever either side pushes
+// a new snapshot.
 //
 // Browser-only (no Node export): the testable pieces live in flamegraph_diff.js.
 
@@ -22,16 +23,18 @@
   function getApi() {
     if (typeof require !== "undefined") return require("./flamegraph_api.js");
     return {
-      isCoverageFrozen: window.isCoverageFrozen,
-      shouldAutoStopRefining: window.shouldAutoStopRefining,
-      coveragePercent: window.coveragePercent,
       formatCoverageBadge: window.formatCoverageBadge,
+      foldErrorNotice: window.foldErrorNotice,
     };
+  }
+  function getSse() {
+    if (typeof require !== "undefined") return require("./sse.js");
+    if (typeof Dial9Sse !== "undefined") return Dial9Sse;
+    throw new Error("Dial9Sse not found. Load sse.js first.");
   }
 
   const D = getDiff();
   const ROW = 18; // px per depth level
-  const POLL_INTERVAL_MS = 800;
   // Server flamegraph endpoint keys; the rest of a scope (e.g. the client-only
   // `api` flag) is not forwarded.
   const SERVER_KEYS = [
@@ -39,9 +42,10 @@
     "thread_class", "source", "spawn_location", "start_ns", "end_ns", "max_files",
   ];
 
-  // Build the `/api/flamegraph` URL for one side from its scope params.
-  // `origin` defaults to the page origin in the browser; tests pass it in.
-  function apiUrlFor(scope, refine, origin) {
+  // Build the `/api/flamegraph` URL for one side from its scope params. The
+  // endpoint is an SSE stream (the server owns refinement — no client `refine`
+  // flag). `origin` defaults to the page origin in the browser; tests pass it in.
+  function apiUrlFor(scope, origin) {
     const base = origin || (typeof window !== "undefined" ? window.location.origin : "http://localhost");
     const u = new URL("/api/flamegraph", base);
     for (const k of SERVER_KEYS) {
@@ -49,7 +53,6 @@
       if (v != null && v !== "") u.searchParams.set(k, v);
     }
     for (const h of scope.getAll("host")) u.searchParams.append("host", h);
-    if (refine) u.searchParams.set("refine", "true");
     return u;
   }
 
@@ -472,70 +475,53 @@
       }
     }
 
-    // ── Per-side refinement loop ──
-    // Mirrors the api-mode poll loop in flamegraph.html, one instance per side.
-    // Each refines to its own plateau independently; a new tree on either side
-    // triggers a re-merge + re-render.
+    // ── Per-side SSE stream ──
+    // One stream per side: the server emits the already-folded snapshot, then a
+    // fresh full snapshot per newly-folded file, and closes at its sampling cap
+    // (it owns the stop condition — no client polling or plateau detection). A
+    // new tree on either side triggers a re-merge + re-render.
     function startSide(side, scope, status) {
-      let prevCoverage = null;
-      const coverageDeltas = [];
-      let token = { cancelled: false };
+      const sse = getSse();
+      const ctl = new AbortController();
 
-      async function poll(refine) {
-        let resp;
-        try {
-          resp = await fetch(apiUrlFor(scope, refine), { headers: headersFor(side) });
-          if (!resp.ok) {
-            const body = await resp.text();
-            const err = new Error(body || ("HTTP " + resp.status));
-            err.status = resp.status;
-            throw err;
+      sse.openSse(apiUrlFor(scope), {
+        headers: headersFor(side),
+        signal: ctl.signal,
+        onEvent: (resp) => {
+          if (side === "a") treeA = resp.tree; else treeB = resp.tree;
+          status.total = resp.total_samples || (resp.tree && resp.tree.count) || 0;
+          status.meta = resp.metadata || null;
+          const cov = resp.coverage;
+          if (cov != null) {
+            status.badge = api.formatCoverageBadge(cov) + " · refining…";
+            // Surface fold failures (e.g. an unwritable output bucket) instead
+            // of letting a side silently render an empty or shallow tree.
+            const notice = api.foldErrorNotice(cov);
+            if (notice) status.badge += " · " + notice;
+          } else {
+            status.badge = "";
           }
-          resp = await resp.json();
-        } catch (e) {
-          if (token.cancelled) return;
-          onSideError(side, e);
-          return;
-        }
-        if (token.cancelled) return;
-
-        if (side === "a") treeA = resp.tree; else treeB = resp.tree;
-        status.total = resp.total_samples || (resp.tree && resp.tree.count) || 0;
-        status.meta = resp.metadata || null;
-        const cov = resp.coverage;
-        if (cov != null) {
-          if (refine && prevCoverage != null) {
-            coverageDeltas.push(api.coveragePercent(cov) - api.coveragePercent(prevCoverage));
-          }
-          status.badge = api.formatCoverageBadge(cov);
-          const frozen = api.isCoverageFrozen(prevCoverage, cov);
-          const plateaued = api.shouldAutoStopRefining(coverageDeltas);
-          prevCoverage = cov;
-          if (refine && (frozen || plateaued)) {
-            status.badge += frozen ? " · complete" : " · plateaued";
-            updateStats();
-            render();
-            return;
-          }
-          status.badge += " · refining…";
-        }
-        updateStats();
-        render();
-        if (cov != null) {
-          setTimeout(() => { if (!token.cancelled) poll(true); }, POLL_INTERVAL_MS);
-        }
-      }
-      poll(false);
-      return { stop() { token.cancelled = true; } };
+          updateStats();
+          render();
+        },
+        onClose: () => {
+          // Server folded this side to its cap and closed the stream.
+          status.badge = status.badge.replace(" · refining…", " · refined");
+          updateStats();
+        },
+        onError: (e) => onSideError(side, e),
+      });
+      return { stop() { ctl.abort(); } };
     }
 
     // `let` (not `const`): repollSide replaces the handle so destroy() always
-    // stops the *current* loop, and a second re-prompt cancels the prior
-    // re-poll rather than leaving two loops running for the same side.
+    // aborts the *current* stream, and a second re-prompt cancels the prior
+    // retry rather than leaving two streams open for the same side.
     let sideA = startSide("a", scopeA, statusA);
     let sideB = startSide("b", scopeB, statusB);
 
-    // Kick a re-poll for one side (used after the user supplies B's creds).
+    // Abort and reopen one side's stream (used after the user supplies B's
+    // creds). Already-folded files are re-served instantly, so a retry is cheap.
     function repollSide(side) {
       if (side === "a") { sideA.stop(); sideA = startSide("a", scopeA, statusA); }
       else { sideB.stop(); sideB = startSide("b", scopeB, statusB); }

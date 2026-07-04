@@ -100,7 +100,11 @@ async function openSse(url, opts = {}) {
   }
   if (!resp.ok) {
     const body = await resp.text().catch(() => "");
-    if (onError) onError(new Error(`HTTP ${resp.status}${body ? ": " + body : ""}`));
+    const err = new Error(`HTTP ${resp.status}${body ? ": " + body : ""}`);
+    // Callers branch on the status (e.g. the diff view re-prompts for
+    // credentials on 401/403), so carry it structurally, not just in the text.
+    err.status = resp.status;
+    if (onError) onError(err);
     return;
   }
   if (!resp.body || !resp.body.getReader) {

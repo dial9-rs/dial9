@@ -319,15 +319,14 @@ assert(parseDiff(new URLSearchParams("diff=1&a=" + encodeScope("bucket=x") + "&b
   const scope = new URLSearchParams(
     "api=1&bucket=b&prefix=traces/svc&service=svc&host=h1&host=h2&source=cpu&start_ns=100&max_files=64",
   );
-  const u = V.apiUrlFor(scope, true, "https://viewer.example.com");
+  const u = V.apiUrlFor(scope, "https://viewer.example.com");
   assertEq(u.pathname, "/api/flamegraph", "apiUrlFor targets /api/flamegraph");
   assertEq(u.searchParams.get("bucket"), "b", "apiUrlFor forwards bucket");
   assertEq(u.searchParams.get("max_files"), "64", "apiUrlFor forwards max_files");
   assertEq(u.searchParams.getAll("host").join(","), "h1,h2", "apiUrlFor forwards repeatable hosts");
-  assertEq(u.searchParams.get("refine"), "true", "apiUrlFor adds refine=true when refining");
   assertEq(u.searchParams.get("api"), null, "apiUrlFor does NOT forward the client-only api flag");
-  const u2 = V.apiUrlFor(scope, false, "https://viewer.example.com");
-  assertEq(u2.searchParams.get("refine"), null, "first (read-only) poll omits refine");
+  assertEq(u.searchParams.get("refine"), null,
+    "no refine param — the endpoint is an SSE stream and the server owns refinement");
 
   assertEq(V.scopeLabel(new URLSearchParams("service=svc&host=h1"), "A"), "svc @ h1", "label: single host");
   assertEq(V.scopeLabel(new URLSearchParams("service=svc"), "A"), "svc", "label: no host");
