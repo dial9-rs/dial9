@@ -53,6 +53,9 @@ node dial9-viewer/ui/test_fetch_traces.js
 echo "--- Checking streaming trace decode (parseTraceStream) ---"
 node dial9-viewer/ui/test_stream_parse.js
 
+echo "--- Checking buffered parser paint-yield throttle (#595) ---"
+node dial9-viewer/ui/test_parse_yield_throttle.js
+
 echo "--- Checking bring-your-own-credentials store ---"
 node dial9-viewer/ui/test_creds.js
 
@@ -73,5 +76,8 @@ node dial9-viewer/ui/test_enclosing_spans.js
 
 echo "--- Checking flamegraph export (folded + SVG) ---"
 node dial9-viewer/ui/test_flamegraph_export.js
+
+echo "--- Checking runtime grouping (multi-runtime lanes) ---"
+node dial9-viewer/ui/test_runtime_groups.js
 
 echo "All E2E trace checks passed."

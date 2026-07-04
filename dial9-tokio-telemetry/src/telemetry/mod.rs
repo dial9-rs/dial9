@@ -24,14 +24,16 @@ pub(crate) use dial9_core::writer;
 pub use crate::traced::TracedFuture;
 pub use custom_events::{CustomEventsConfig, CustomEventsContext};
 pub use dial9_core::buffer::{Encodable, ThreadLocalEncoder};
+#[cfg(feature = "memory-profiling")]
+pub use dial9_perf_self_profile::{AllocEvent, FreeEvent};
 #[cfg(feature = "cpu-profiling")]
 pub use dial9_perf_self_profile::{
     CpuProfiler, CpuProfilingConfig, CpuSampleSource, SchedEventConfig, SchedProfiler,
 };
 pub use events::clock_monotonic_ns;
 pub use format::{
-    AllocEvent, FreeEvent, PollEndEvent, PollStartEvent, ProcessResourceUsageEvent, TaskSpawnEvent,
-    WakeEventEvent, WorkerId, WorkerParkEvent, WorkerUnparkEvent,
+    PollEndEvent, PollStartEvent, ProcessResourceUsageEvent, TaskSpawnEvent, WakeEventEvent,
+    WorkerId, WorkerParkEvent, WorkerUnparkEvent,
 };
 pub use process_resource_usage::ProcessResourceUsageConfig;
 pub use recorder::{

@@ -73,7 +73,7 @@ pub async fn browse(
     creds: MaybeCreds,
     Query(params): Query<BrowseParams>,
 ) -> Result<BrowseOk, (StatusCode, String)> {
-    let backend = state.resolve(creds)?;
+    let backend = state.resolve(creds).await?;
 
     let bucket = params
         .bucket

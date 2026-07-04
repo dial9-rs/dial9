@@ -163,6 +163,13 @@ pub enum StorageError {
     /// *wrong* identity (e.g. the server's ambient credentials instead of the
     /// pasted ones), so the message points the user there.
     AccountNotSignedUp,
+    /// The bucket lives in a different S3 region than the request was signed
+    /// for (S3 `PermanentRedirect` / HTTP 301), and the correct region could
+    /// not be resolved. Kept distinct from [`StorageError::Other`] so the HTTP
+    /// layer returns a clear, actionable "wrong region" message instead of an
+    /// opaque 500 — this is the failure the viewer's per-bucket region
+    /// auto-detection exists to prevent.
+    WrongRegion,
     Other(String),
 }
 
@@ -182,6 +189,14 @@ impl std::fmt::Display for StorageError {
                     "the AWS account used for this request is not signed up for S3 — \
                      this usually means the request was signed with the wrong identity. \
                      Make sure you clicked Apply after pasting your credentials."
+                )
+            }
+            StorageError::WrongRegion => {
+                write!(
+                    f,
+                    "this bucket is in a different AWS region than the request was \
+                     signed for. Set the region (or pick the bucket so its region is \
+                     detected automatically) and try again."
                 )
             }
             StorageError::Other(msg) => write!(f, "{msg}"),
@@ -219,6 +234,11 @@ where
         // Account-level: the credentials are valid but the account isn't signed
         // up for S3 in this region — typically the wrong identity signed it.
         Some("NotSignedUp" | "OptInRequired") => StorageError::AccountNotSignedUp,
+        // Region mismatch: the bucket lives in another region than the client
+        // was built for, so S3 refuses with `PermanentRedirect` (the classic
+        // form) or the generic `Redirect`. Surface a clear message rather than
+        // the opaque "unclassified S3 error" this used to fall through to.
+        Some("PermanentRedirect" | "Redirect") => StorageError::WrongRegion,
         // Unmapped error: keep the full SDK detail in the server log (it can
         // embed the access key id, region, and endpoint — server-eyes only) and
         // hand the client a generic message rather than reflecting it back.
@@ -1053,6 +1073,61 @@ mod tests {
             S3Backend::from_client(aws_sdk_s3::Client::from_conf(cfg)),
             http_client,
         )
+    }
+
+    /// Build an `S3Backend` whose HTTP layer replays a single error response
+    /// (status + body) for the next request, so the error-classification path
+    /// can be exercised without a live S3.
+    fn replay_error_backend(status: u16, body: &str) -> S3Backend {
+        use aws_smithy_http_client::test_util::{ReplayEvent, StaticReplayClient};
+        use aws_smithy_types::body::SdkBody;
+
+        let http_client = StaticReplayClient::new(vec![ReplayEvent::new(
+            http::Request::builder()
+                .uri("https://s3.amazonaws.com/")
+                .body(SdkBody::empty())
+                .unwrap(),
+            http::Response::builder()
+                .status(status)
+                .body(SdkBody::from(body))
+                .unwrap(),
+        )]);
+        let cfg = aws_sdk_s3::config::Builder::new()
+            .behavior_version(aws_sdk_s3::config::BehaviorVersion::latest())
+            .credentials_provider(aws_sdk_s3::config::Credentials::new(
+                "test", "test", None, None, "test",
+            ))
+            .region(aws_sdk_s3::config::Region::new("us-east-1"))
+            .http_client(http_client)
+            .build();
+        S3Backend::from_client(aws_sdk_s3::Client::from_conf(cfg))
+    }
+
+    /// A `PermanentRedirect` (the error S3 returns when a bucket is addressed in
+    /// the wrong region) must classify to [`StorageError::WrongRegion`], not the
+    /// opaque `Other` that produced the "unclassified S3 error" log. This is the
+    /// regression guard for the cross-region bucket bug.
+    #[tokio::test]
+    async fn permanent_redirect_classifies_as_wrong_region() {
+        // The XML S3 sends on a region mismatch (HTTP 301 + PermanentRedirect).
+        let body = r#"<?xml version="1.0" encoding="UTF-8"?>
+            <Error>
+              <Code>PermanentRedirect</Code>
+              <Message>The bucket you are attempting to access must be addressed using the specified endpoint.</Message>
+              <Endpoint>my-bucket.s3.us-west-2.amazonaws.com</Endpoint>
+            </Error>"#;
+        let backend = replay_error_backend(301, body);
+
+        let err = backend
+            .list_prefixes("my-bucket", "")
+            .await
+            .expect_err("a PermanentRedirect must surface as an error");
+        assert!(
+            matches!(err, StorageError::WrongRegion),
+            "expected WrongRegion, got {err:?}"
+        );
+        // The message points the user at the fix (set/detect the region).
+        assert!(err.to_string().contains("region"), "message: {err}");
     }
 
     #[tokio::test]

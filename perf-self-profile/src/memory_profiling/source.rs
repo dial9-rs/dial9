@@ -1,12 +1,12 @@
 #![deny(clippy::arithmetic_side_effects)]
 //! `Source` impl that drains the alloc and free queues each flush cycle.
 
+use crate::memory_profiling::events::{AllocEvent, FreeEvent, MemoryProfileOverflowEvent};
 use crate::memory_profiling::profiler::Liveset;
 use crate::memory_profiling::ring::{RawAlloc, RawFree, RingBuffers};
-use crate::primitives::sync::Arc;
-use crate::telemetry::events::clock_monotonic_ns;
-use crate::telemetry::format::{AllocEvent, FreeEvent, MemoryProfileOverflowEvent};
-use crate::telemetry::recorder::source::{FlushContext, Source};
+use dial9_core::clock::clock_monotonic_ns;
+use dial9_core::primitives::sync::Arc;
+use dial9_core::source::{FlushContext, Source};
 use std::sync::atomic::Ordering;
 
 /// Drains the alloc and free queues into the trace each flush cycle.
@@ -218,11 +218,10 @@ impl Source for MemoryProfileSource {
 mod tests {
     use super::*;
     use crate::memory_profiling::ring::{DEFAULT_MAX_FRAMES, RawAlloc, RawFree, RingBuffers};
-    use crate::primitives::sync::Arc;
-    use crate::telemetry::analysis_events::Dial9Event;
-    use crate::telemetry::format::decode_events;
-    use crate::telemetry::recorder::SharedState;
+    use dial9_core::primitives::sync::Arc;
+    use dial9_core::shared_state::SharedState;
     use dial9_core::test_util;
+    use dial9_trace_format::decoder::Decoder;
 
     fn make_raw_alloc(addr: u64, size: u64, ts_ns: u64) -> RawAlloc {
         let mut frames = [0u64; DEFAULT_MAX_FRAMES];
@@ -299,15 +298,52 @@ mod tests {
         shared
     }
 
-    fn flush_and_collect(shared: &SharedState) -> Vec<Dial9Event> {
+    /// Flush all sources and decode every emitted event frame into a JSON
+    /// value. Each value carries an `event` type-name tag plus its fields,
+    /// which the assertions below read by name. Decoding via the on-wire
+    /// schema (not a compiled-in `Dial9Event`) keeps these tests inside
+    /// perf-self-profile with no dependency on the telemetry decoder.
+    fn flush_and_collect(shared: &SharedState) -> Vec<serde_json::Value> {
         shared.flush_sources();
         let mut events = Vec::new();
         for bytes in test_util::drain_encoded_batches(shared) {
-            if let Ok(decoded) = decode_events(&bytes) {
-                events.extend(decoded);
-            }
+            let Some(mut dec) = Decoder::new(&bytes) else {
+                continue;
+            };
+            dec.for_each_event(|raw| {
+                if let Ok(v) = raw.deserialize::<serde_json::Value>() {
+                    events.push(v);
+                }
+            })
+            .ok();
         }
         events
+    }
+
+    /// The `event` type-name tag the decoder writes for each frame.
+    fn kind(v: &serde_json::Value) -> &str {
+        v["event"].as_str().unwrap_or_default()
+    }
+
+    /// Read a named `u64` field, panicking with context if it is absent.
+    fn field(v: &serde_json::Value, name: &str) -> u64 {
+        v[name]
+            .as_u64()
+            .unwrap_or_else(|| panic!("missing u64 field {name} in {v}"))
+    }
+
+    /// The decoded `callchain` field as raw frame addresses.
+    fn callchain(v: &serde_json::Value) -> Vec<u64> {
+        v["callchain"]
+            .as_array()
+            .expect("callchain array")
+            .iter()
+            .map(|x| x.as_u64().expect("frame u64"))
+            .collect()
+    }
+
+    fn of_kind<'a>(events: &'a [serde_json::Value], k: &str) -> Vec<&'a serde_json::Value> {
+        events.iter().filter(|v| kind(v) == k).collect()
     }
 
     #[test]
@@ -322,21 +358,14 @@ mod tests {
         shared.push_source(Box::new(make_source(Arc::clone(&rings), false, 512 * 1024)));
 
         let events = flush_and_collect(&shared);
-        let allocs: Vec<_> = events
-            .iter()
-            .filter(|e| matches!(e, Dial9Event::AllocEvent(..)))
-            .collect();
+        let allocs = of_kind(&events, "AllocEvent");
         assert_eq!(allocs.len(), 1);
-        match &allocs[0] {
-            Dial9Event::AllocEvent(e) => {
-                assert_eq!(e.timestamp_ns, 100);
-                assert_eq!(e.tid, 1);
-                assert_eq!(e.size, 4096);
-                assert_eq!(e.addr, 0x1000);
-                assert_eq!(e.callchain, &[0xAAAA, 0xBBBB, 0xCCCC]);
-            }
-            _ => unreachable!(),
-        }
+        let a = allocs[0];
+        assert_eq!(field(a, "timestamp_ns"), 100);
+        assert_eq!(field(a, "tid"), 1);
+        assert_eq!(field(a, "size"), 4096);
+        assert_eq!(field(a, "addr"), 0x1000);
+        assert_eq!(callchain(a), vec![0xAAAA, 0xBBBB, 0xCCCC]);
     }
 
     #[test]
@@ -356,26 +385,16 @@ mod tests {
         shared.push_source(Box::new(make_source(Arc::clone(&rings), true, 512 * 1024)));
 
         let events = flush_and_collect(&shared);
-        let allocs: Vec<_> = events
-            .iter()
-            .filter(|e| matches!(e, Dial9Event::AllocEvent(..)))
-            .collect();
-        let frees: Vec<_> = events
-            .iter()
-            .filter(|e| matches!(e, Dial9Event::FreeEvent(..)))
-            .collect();
+        let allocs = of_kind(&events, "AllocEvent");
+        let frees = of_kind(&events, "FreeEvent");
         assert_eq!(allocs.len(), 1);
         assert_eq!(frees.len(), 1);
-        match &frees[0] {
-            Dial9Event::FreeEvent(e) => {
-                assert_eq!(e.timestamp_ns, 300);
-                assert_eq!(e.tid, 2);
-                assert_eq!(e.addr, 0x2000);
-                assert_eq!(e.size, 512);
-                assert_eq!(e.alloc_timestamp_ns, 200);
-            }
-            _ => unreachable!(),
-        }
+        let f = frees[0];
+        assert_eq!(field(f, "timestamp_ns"), 300);
+        assert_eq!(field(f, "tid"), 2);
+        assert_eq!(field(f, "addr"), 0x2000);
+        assert_eq!(field(f, "size"), 512);
+        assert_eq!(field(f, "alloc_timestamp_ns"), 200);
     }
 
     /// With the producer-side liveset, a RawFree only reaches the queue if the
@@ -394,19 +413,12 @@ mod tests {
         shared.push_source(Box::new(make_source(Arc::clone(&rings), true, 512 * 1024)));
 
         let events = flush_and_collect(&shared);
-        let frees: Vec<_> = events
-            .iter()
-            .filter(|e| matches!(e, Dial9Event::FreeEvent(..)))
-            .collect();
+        let frees = of_kind(&events, "FreeEvent");
         assert_eq!(frees.len(), 1);
-        match &frees[0] {
-            Dial9Event::FreeEvent(e) => {
-                assert_eq!(e.addr, 0x9999);
-                assert_eq!(e.size, 128);
-                assert_eq!(e.alloc_timestamp_ns, 100);
-            }
-            _ => unreachable!(),
-        }
+        let f = frees[0];
+        assert_eq!(field(f, "addr"), 0x9999);
+        assert_eq!(field(f, "size"), 128);
+        assert_eq!(field(f, "alloc_timestamp_ns"), 100);
     }
 
     #[test]
@@ -425,16 +437,8 @@ mod tests {
         shared.push_source(Box::new(make_source(Arc::clone(&rings), false, 512 * 1024)));
 
         let events = flush_and_collect(&shared);
-        let allocs: Vec<_> = events
-            .iter()
-            .filter(|e| matches!(e, Dial9Event::AllocEvent(..)))
-            .collect();
-        let frees: Vec<_> = events
-            .iter()
-            .filter(|e| matches!(e, Dial9Event::FreeEvent(..)))
-            .collect();
-        assert_eq!(allocs.len(), 1);
-        assert_eq!(frees.len(), 0);
+        assert_eq!(of_kind(&events, "AllocEvent").len(), 1);
+        assert_eq!(of_kind(&events, "FreeEvent").len(), 0);
     }
 
     #[test]
@@ -450,20 +454,8 @@ mod tests {
             .push(make_raw_alloc(0x4000, 256, 700))
             .ok();
         let events = flush_and_collect(&shared);
-        assert_eq!(
-            events
-                .iter()
-                .filter(|e| matches!(e, Dial9Event::AllocEvent(..)))
-                .count(),
-            1
-        );
-        assert_eq!(
-            events
-                .iter()
-                .filter(|e| matches!(e, Dial9Event::FreeEvent(..)))
-                .count(),
-            0
-        );
+        assert_eq!(of_kind(&events, "AllocEvent").len(), 1);
+        assert_eq!(of_kind(&events, "FreeEvent").len(), 0);
 
         // Second flush: the free arrives (denormalized from producer-side liveset)
         rings
@@ -471,25 +463,11 @@ mod tests {
             .push(make_raw_free(0x4000, 800, 256, 700))
             .ok();
         let events = flush_and_collect(&shared);
-        assert_eq!(
-            events
-                .iter()
-                .filter(|e| matches!(e, Dial9Event::AllocEvent(..)))
-                .count(),
-            0
-        );
-        let frees: Vec<_> = events
-            .iter()
-            .filter(|e| matches!(e, Dial9Event::FreeEvent(..)))
-            .collect();
+        assert_eq!(of_kind(&events, "AllocEvent").len(), 0);
+        let frees = of_kind(&events, "FreeEvent");
         assert_eq!(frees.len(), 1);
-        match &frees[0] {
-            Dial9Event::FreeEvent(e) => {
-                assert_eq!(e.size, 256);
-                assert_eq!(e.alloc_timestamp_ns, 700);
-            }
-            _ => unreachable!(),
-        }
+        assert_eq!(field(frees[0], "size"), 256);
+        assert_eq!(field(frees[0], "alloc_timestamp_ns"), 700);
     }
 
     /// With the producer-side liveset, address reuse is handled atomically
@@ -518,14 +496,8 @@ mod tests {
         shared.push_source(Box::new(make_source(Arc::clone(&rings), true, 512 * 1024)));
 
         let events = flush_and_collect(&shared);
-        let allocs: Vec<&Dial9Event> = events
-            .iter()
-            .filter(|e| matches!(e, Dial9Event::AllocEvent(..)))
-            .collect();
-        let frees: Vec<&Dial9Event> = events
-            .iter()
-            .filter(|e| matches!(e, Dial9Event::FreeEvent(..)))
-            .collect();
+        let allocs = of_kind(&events, "AllocEvent");
+        let frees = of_kind(&events, "FreeEvent");
         assert_eq!(allocs.len(), 2, "both allocs should be emitted");
         assert_eq!(
             frees.len(),
@@ -534,17 +506,17 @@ mod tests {
         );
 
         // The free carries denormalized data from the first alloc.
-        match frees[0] {
-            Dial9Event::FreeEvent(e) => {
-                assert_eq!(e.addr, 0x5000);
-                assert_eq!(e.size, 256, "free should report size from first alloc");
-                assert_eq!(
-                    e.alloc_timestamp_ns, 100,
-                    "free should reference timestamp of first alloc"
-                );
-            }
-            _ => unreachable!(),
-        }
+        assert_eq!(field(frees[0], "addr"), 0x5000);
+        assert_eq!(
+            field(frees[0], "size"),
+            256,
+            "free should report size from first alloc"
+        );
+        assert_eq!(
+            field(frees[0], "alloc_timestamp_ns"),
+            100,
+            "free should reference timestamp of first alloc"
+        );
 
         // Verify a second free for the second alloc also works.
         rings
@@ -552,40 +524,28 @@ mod tests {
             .push(make_raw_free(0x5000, 400, 512, 300))
             .ok();
         let events2 = flush_and_collect(&shared);
-        let frees2: Vec<_> = events2
-            .iter()
-            .filter(|e| matches!(e, Dial9Event::FreeEvent(..)))
-            .collect();
+        let frees2 = of_kind(&events2, "FreeEvent");
         assert_eq!(frees2.len(), 1, "second flush should emit one free");
-        match frees2[0] {
-            Dial9Event::FreeEvent(e) => {
-                assert_eq!(e.size, 512, "free should match second alloc size");
-                assert_eq!(
-                    e.alloc_timestamp_ns, 300,
-                    "free should reference timestamp of second alloc"
-                );
-            }
-            _ => unreachable!(),
-        }
+        assert_eq!(
+            field(frees2[0], "size"),
+            512,
+            "free should match second alloc size"
+        );
+        assert_eq!(
+            field(frees2[0], "alloc_timestamp_ns"),
+            300,
+            "free should reference timestamp of second alloc"
+        );
     }
 
-    /// Demonstrates that `poll_start_ts_monotonic` produces strictly ordered
-    /// timestamps even for events that would otherwise share a clock tick —
-    /// the scenario that occurs during a realloc (free old + alloc new at
-    /// same address). The producer-side liveset resolves address reuse
-    /// atomically, but timestamp ordering is still useful for event ordering
-    /// in the trace viewer.
+    /// Realloc ordering: alloc, free, alloc at the same address with strictly
+    /// increasing timestamps (the scenario a realloc produces). The
+    /// producer-side liveset resolves the address reuse atomically; the
+    /// consolidator emits the free carrying the first alloc's denormalized
+    /// data, then the second alloc's free carries the second alloc's data.
     #[test]
-    fn monotonic_ts_solves_realloc_ordering() {
-        use crate::telemetry::recorder::poll_start_ts_monotonic;
-
-        // Simulate a realloc: alloc, free, alloc — all at the "same instant".
-        // poll_start_ts_monotonic guarantees each gets a distinct, increasing
-        // timestamp.
-        let t1 = poll_start_ts_monotonic();
-        let t2 = poll_start_ts_monotonic();
-        let t3 = poll_start_ts_monotonic();
-        assert!(t1 < t2 && t2 < t3, "timestamps must be strictly ordered");
+    fn realloc_ordering_emits_correct_frees() {
+        let (t1, t2, t3, t4) = (100, 200, 300, 400);
 
         let rings = rings(16, 16);
         rings.alloc_queue.push(make_raw_alloc(0x6000, 256, t1)).ok();
@@ -600,43 +560,34 @@ mod tests {
         shared.push_source(Box::new(make_source(Arc::clone(&rings), true, 512 * 1024)));
         let events = flush_and_collect(&shared);
 
-        let frees: Vec<_> = events
-            .iter()
-            .filter(|e| matches!(e, Dial9Event::FreeEvent(..)))
-            .collect();
+        let frees = of_kind(&events, "FreeEvent");
         assert_eq!(frees.len(), 1);
-        match frees[0] {
-            Dial9Event::FreeEvent(e) => {
-                assert_eq!(e.size, 256, "free should match the first alloc");
-                assert_eq!(e.alloc_timestamp_ns, t1);
-            }
-            _ => unreachable!(),
-        }
+        assert_eq!(
+            field(frees[0], "size"),
+            256,
+            "free should match the first alloc"
+        );
+        assert_eq!(field(frees[0], "alloc_timestamp_ns"), t1);
 
         // Second alloc still exists — push a free for it.
-        let t4 = poll_start_ts_monotonic();
         rings
             .free_queue
             .push(make_raw_free(0x6000, t4, 512, t3))
             .ok();
         let events2 = flush_and_collect(&shared);
-        let frees2: Vec<_> = events2
-            .iter()
-            .filter(|e| matches!(e, Dial9Event::FreeEvent(..)))
-            .collect();
+        let frees2 = of_kind(&events2, "FreeEvent");
         assert_eq!(frees2.len(), 1);
-        match frees2[0] {
-            Dial9Event::FreeEvent(e) => {
-                assert_eq!(e.size, 512, "free should match second alloc size");
-                assert_eq!(e.alloc_timestamp_ns, t3);
-            }
-            _ => unreachable!(),
-        }
+        assert_eq!(
+            field(frees2[0], "size"),
+            512,
+            "free should match second alloc size"
+        );
+        assert_eq!(field(frees2[0], "alloc_timestamp_ns"), t3);
     }
 
     #[test]
     fn segment_metadata_contains_sample_rate_bytes() {
-        use crate::telemetry::recorder::source::Source;
+        use dial9_core::source::Source;
         let rings = rings(16, 16);
         let mut source = make_source(Arc::clone(&rings), false, 1024 * 1024);
         let mut meta = Vec::new();
@@ -680,21 +631,18 @@ mod tests {
         )));
 
         let events = flush_and_collect(&shared);
-        let frees: Vec<_> = events
-            .iter()
-            .filter(|e| matches!(e, Dial9Event::FreeEvent(..)))
-            .collect();
+        let frees = of_kind(&events, "FreeEvent");
         assert_eq!(frees.len(), 1, "shutdown drain must emit one FreeEvent");
-        match frees[0] {
-            Dial9Event::FreeEvent(e) => {
-                assert_eq!(e.timestamp_ns, 200, "uses producer-push ts");
-                assert_eq!(e.tid, 7, "uses producer-push tid");
-                assert_eq!(e.addr, 0xAABB);
-                assert_eq!(e.size, 4096, "from consolidator-side liveset peek");
-                assert_eq!(e.alloc_timestamp_ns, 100, "from liveset peek");
-            }
-            _ => unreachable!(),
-        }
+        let f = frees[0];
+        assert_eq!(field(f, "timestamp_ns"), 200, "uses producer-push ts");
+        assert_eq!(field(f, "tid"), 7, "uses producer-push tid");
+        assert_eq!(field(f, "addr"), 0xAABB);
+        assert_eq!(
+            field(f, "size"),
+            4096,
+            "from consolidator-side liveset peek"
+        );
+        assert_eq!(field(f, "alloc_timestamp_ns"), 100, "from liveset peek");
 
         assert!(
             liveset.peek_with(&0xAABB, |_, _| ()).is_none(),
@@ -731,12 +679,8 @@ mod tests {
         )));
 
         let events = flush_and_collect(&shared);
-        let frees: Vec<_> = events
-            .iter()
-            .filter(|e| matches!(e, Dial9Event::FreeEvent(..)))
-            .collect();
         assert_eq!(
-            frees.len(),
+            of_kind(&events, "FreeEvent").len(),
             0,
             "race must be detected and no FreeEvent emitted"
         );
@@ -770,11 +714,7 @@ mod tests {
         )));
 
         let events = flush_and_collect(&shared);
-        let frees: Vec<_> = events
-            .iter()
-            .filter(|e| matches!(e, Dial9Event::FreeEvent(..)))
-            .collect();
-        assert_eq!(frees.len(), 0);
+        assert_eq!(of_kind(&events, "FreeEvent").len(), 0);
     }
 
     /// Timestamp tie: the shutdown-flagged free has the SAME timestamp as the
@@ -803,12 +743,8 @@ mod tests {
         )));
 
         let events = flush_and_collect(&shared);
-        let frees: Vec<_> = events
-            .iter()
-            .filter(|e| matches!(e, Dial9Event::FreeEvent(..)))
-            .collect();
         assert_eq!(
-            frees.len(),
+            of_kind(&events, "FreeEvent").len(),
             0,
             "timestamp tie must be treated as a race — no FreeEvent emitted"
         );
