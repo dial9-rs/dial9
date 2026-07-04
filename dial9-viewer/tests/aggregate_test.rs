@@ -270,6 +270,123 @@ fn access_denied_on_put_client() -> aws_sdk_s3::Client {
     aws_sdk_s3::Client::from_conf(cfg)
 }
 
+/// A [`StorageBackend`] wrapper whose `put_object` fails for keys containing
+/// `fail_substr`, delegating everything else to the inner backend. Simulates a
+/// fold whose part-file writes PARTIALLY succeed — the interleaving a cancelled
+/// or partially-denied fold produces — to pin down the commit-ordering
+/// invariant: the `samples/` part (the durable "folded" record) must never land
+/// unless the dict and polls parts landed first.
+///
+/// [`StorageBackend`]: dial9_viewer::storage::StorageBackend
+struct FailingPuts {
+    inner: Arc<dyn dial9_viewer::storage::StorageBackend>,
+    fail_substr: &'static str,
+}
+
+impl dial9_viewer::storage::StorageBackend for FailingPuts {
+    fn list_buckets(
+        &self,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<Vec<String>, dial9_viewer::storage::StorageError>,
+                > + Send
+                + '_,
+        >,
+    > {
+        self.inner.list_buckets()
+    }
+
+    fn list_objects(
+        &self,
+        bucket: &str,
+        prefix: &str,
+        cap: usize,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<
+                        dial9_viewer::storage::ListPage,
+                        dial9_viewer::storage::StorageError,
+                    >,
+                > + Send
+                + '_,
+        >,
+    > {
+        self.inner.list_objects(bucket, prefix, cap)
+    }
+
+    fn list_objects_all(
+        &self,
+        bucket: &str,
+        prefix: &str,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<
+                        Vec<dial9_viewer::storage::ObjectInfo>,
+                        dial9_viewer::storage::StorageError,
+                    >,
+                > + Send
+                + '_,
+        >,
+    > {
+        self.inner.list_objects_all(bucket, prefix)
+    }
+
+    fn list_prefixes(
+        &self,
+        bucket: &str,
+        prefix: &str,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<Vec<String>, dial9_viewer::storage::StorageError>,
+                > + Send
+                + '_,
+        >,
+    > {
+        self.inner.list_prefixes(bucket, prefix)
+    }
+
+    fn get_object(
+        &self,
+        bucket: &str,
+        key: &str,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<Vec<u8>, dial9_viewer::storage::StorageError>>
+                + Send
+                + '_,
+        >,
+    > {
+        self.inner.get_object(bucket, key)
+    }
+
+    fn put_object(
+        &self,
+        bucket: &str,
+        key: &str,
+        data: Vec<u8>,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<(), dial9_viewer::storage::StorageError>>
+                + Send
+                + '_,
+        >,
+    > {
+        if key.contains(self.fail_substr) {
+            let key = key.to_string();
+            return Box::pin(async move {
+                Err(dial9_viewer::storage::StorageError::Other(format!(
+                    "simulated write failure for {key}"
+                )))
+            });
+        }
+        self.inner.put_object(bucket, key, data)
+    }
+}
+
 /// Start a server WITHOUT a server-side `AggContext`, exercising the
 /// bring-your-own-credentials `/api/flamegraph?bucket=…` path instead. The
 /// output bucket is configured separately (as `--agg-output-bucket` does), so
@@ -1170,5 +1287,49 @@ async fn fold_failures_are_reported_in_coverage() {
         last.body.contains("\"fold_error_sample\":"),
         "coverage carries a fold_error_sample message; body = {}",
         last.body
+    );
+}
+
+/// Regression for the fold commit ordering: when a fold's part-file writes only
+/// PARTIALLY succeed (here: `polls/` PUTs fail while everything else works —
+/// the same interleaving a fold task cancelled mid-write can produce, and with
+/// SSE streams a client disconnect cancels in-flight folds routinely), the file
+/// must NOT be recorded as folded. The `samples/` part is the durable folded
+/// record (`list_folded_leaves` lists it), so it must be written last: a file
+/// recorded as folded with its polls part missing would serve incomplete
+/// tokio-stats silently, forever — folded files are never re-folded.
+#[tokio::test]
+async fn partial_write_failure_does_not_commit_fold() {
+    let fs = tempfile::tempdir().unwrap();
+    std::fs::create_dir(fs.path().join("src-bucket")).unwrap();
+    std::fs::create_dir(fs.path().join("out-bucket")).unwrap();
+
+    let uploader = fake_s3_client(fs.path());
+    let body = mini_trace_gz();
+    seed_fleet(&uploader, "src-bucket", &body).await; // 20 segments → cap 4
+
+    let output = Arc::new(FailingPuts {
+        inner: Arc::new(S3Backend::from_client(fake_s3_client(fs.path()))),
+        fail_substr: "/polls/",
+    });
+    let base =
+        start_agg_server_with_output(fs.path(), "src-bucket", "out-bucket", 60, output).await;
+    let http = reqwest::Client::new();
+
+    // Every fold attempt fails at the polls write and is reported as an error.
+    let r = stream_final(&http, &base, "service=shale").await;
+    let c = r.coverage.unwrap();
+    assert_eq!(c.fold_errors, 4, "all 4 capped folds failed");
+    assert_eq!(c.files_folded, 0, "a failed fold is not counted as folded");
+
+    // The load-bearing assertion: a fresh stream must ALSO see nothing folded.
+    // If the samples part had been written before (or concurrently with) the
+    // failing polls part, the folded-set listing would now claim these files
+    // are folded — committing them with their polls data missing forever.
+    let again = stream(&http, &base, "service=shale").await;
+    let c0 = again[0].coverage.as_ref().unwrap();
+    assert_eq!(
+        c0.files_folded, 0,
+        "no samples part may exist after a partial write failure (samples must be written last)"
     );
 }

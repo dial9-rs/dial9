@@ -322,16 +322,6 @@ pub(crate) fn fold_stream(
     limits: FoldLimits,
     to_fold: Vec<(String, String)>,
 ) -> impl Stream<Item = FoldOutcome> {
-    async_stream_via_joinset(agg, limits, to_fold)
-}
-
-/// Implementation of [`fold_stream`], written with `async_stream`-free plumbing:
-/// spawn every fold onto a `JoinSet` and surface each outcome as it joins.
-fn async_stream_via_joinset(
-    agg: Arc<AggContext>,
-    limits: FoldLimits,
-    to_fold: Vec<(String, String)>,
-) -> impl Stream<Item = FoldOutcome> {
     // Spawn one task per file up front; the `FoldLimits` semaphores throttle the
     // fetch and CPU stages, so the work-list runs at a bounded concurrency
     // regardless of its length. Each task returns the file's fold outcome.
