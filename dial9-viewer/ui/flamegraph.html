@@ -446,7 +446,13 @@
                             },
                             onError: (err) => {
                                 if (token !== streamToken) return;
-                                if (!gotEvent) showError("Failed to load flamegraph: " + err.message);
+                                if (!gotEvent) {
+                                    showError("Failed to load flamegraph: " + err.message);
+                                } else {
+                                    // Mid-stream drop: keep the rendered tree but
+                                    // clear the (would-be-eternal) spinner.
+                                    statsEl.textContent = lastBadge + " · interrupted";
+                                }
                                 setRefiningUi(false);
                             },
                         });

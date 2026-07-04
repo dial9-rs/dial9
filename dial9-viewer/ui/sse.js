@@ -85,8 +85,9 @@ function parseFrame(frame) {
 //     onClose(),          // called when the server closes the stream cleanly
 //   })
 //
-// Returns a promise that resolves when the stream ends (close or abort) and
-// rejects only on a genuine error. Aborting via `signal` resolves quietly.
+// Returns a promise that resolves when the stream ends for any reason — clean
+// close (after onClose), abort via `signal` (quietly: neither onClose nor
+// onError fires), or error (after onError). It never rejects.
 async function openSse(url, opts = {}) {
   const { headers, signal, onEvent, onError, onClose } = opts;
   let resp;

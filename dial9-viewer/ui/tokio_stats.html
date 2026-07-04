@@ -402,7 +402,11 @@
         },
         onClose: resolve,
         onError: reject,
-      });
+        // openSse calls NEITHER onClose nor onError when aborted, so settle via
+        // its returned promise too (it resolves on close, abort, or after
+        // onError) — otherwise every superseded load's Promise.all would hang
+        // forever. Settling twice is a harmless no-op.
+      }).then(resolve);
     });
   }
 
