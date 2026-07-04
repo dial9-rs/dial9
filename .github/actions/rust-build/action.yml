@@ -12,6 +12,26 @@ inputs:
 runs:
     using: "composite"
     steps:
+        - name: Free up disk space
+          if: runner.os == 'Linux'
+          shell: bash
+          run: |
+              # `cargo test --all-targets --all-features` with frame pointers +
+              # debug info produces enough artifacts to exhaust the ~14 GB free
+              # on GitHub-hosted Linux runners (rustc-LLVM ERROR: No space left
+              # on device). Reclaim ~30 GB of preinstalled toolchains we never
+              # use before the toolchain install and cache restore run.
+              echo "Disk before cleanup:"
+              df -h /
+              sudo rm -rf \
+                  /usr/share/dotnet \
+                  /usr/local/lib/android \
+                  /opt/ghc \
+                  /usr/local/.ghcup \
+                  /opt/hostedtoolcache/CodeQL
+              sudo docker image prune --all --force || true
+              echo "Disk after cleanup:"
+              df -h /
         - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
           with:
               toolchain: ${{ inputs.toolchain }}

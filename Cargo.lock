@@ -123,9 +123,9 @@ dependencies = [
 
 [[package]]
 name = "anyhow"
-version = "1.0.102"
+version = "1.0.103"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
+checksum = "2a4385e2e34eb35d6b3efe798b9eb88096925d87726c0798709bf56d9ed84af3"
 
 [[package]]
 name = "arc-swap"
@@ -1797,8 +1797,25 @@ dependencies = [
 name = "dial9-core"
 version = "0.4.0-alpha.1"
 dependencies = [
+ "assert2",
+ "bon",
+ "bytes",
  "crossbeam-queue",
+ "dial9-trace-format",
+ "flate2",
+ "futures-util",
+ "libc",
+ "metrique",
+ "metrique-timesource",
+ "metrique-writer",
+ "proptest",
+ "serde",
  "shuttle",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "ulid",
 ]
 
 [[package]]
@@ -1817,13 +1834,18 @@ name = "dial9-perf-self-profile"
 version = "0.4.4"
 dependencies = [
  "blazesym",
+ "bon",
  "bytes",
  "criterion",
+ "crossbeam-queue",
  "crossbeam-utils",
+ "dial9-core",
  "dial9-trace-format",
  "libc",
  "perf-event-data",
  "perf-event-open-sys2",
+ "scc",
+ "serde_json",
  "tracing",
 ]
 
@@ -1841,12 +1863,12 @@ dependencies = [
  "bytes",
  "clap",
  "criterion",
- "crossbeam-queue",
  "dial9-core",
  "dial9-macro",
  "dial9-perf-self-profile",
  "dial9-tokio-telemetry",
  "dial9-trace-format",
+ "dial9-utils",
  "flate2",
  "futures-util",
  "hdrhistogram",
@@ -1865,7 +1887,6 @@ dependencies = [
  "s3s",
  "s3s-aws",
  "s3s-fs",
- "scc",
  "serde",
  "serde_json",
  "shuttle",
@@ -1876,7 +1897,6 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-subscriber",
- "ulid",
 ]
 
 [[package]]
@@ -1904,6 +1924,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "dial9-utils"
+version = "0.4.0-alpha.1"
+dependencies = [
+ "assert2",
+ "async-trait",
+ "aws-config",
+ "aws-sdk-s3",
+ "aws-sdk-s3-transfer-manager",
+ "bon",
+ "bytes",
+ "dial9-core",
+ "flate2",
+ "hostname",
+ "s3s",
+ "s3s-aws",
+ "s3s-fs",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "time",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "dial9-viewer"
 version = "0.4.0"
 dependencies = [
@@ -1912,6 +1957,7 @@ dependencies = [
  "assert2",
  "aws-config",
  "aws-sdk-s3",
+ "aws-smithy-async",
  "aws-smithy-http-client",
  "aws-smithy-types",
  "axum",
@@ -1924,6 +1970,7 @@ dependencies = [
  "dial9-core",
  "dial9-trace-format",
  "flate2",
+ "form_urlencoded",
  "futures",
  "http 1.4.0",
  "lasso",
@@ -3171,6 +3218,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "488016bfae457b036d996092f6cb448677611ce4449e970ceaf42695203f218a"
 dependencies = [
  "autocfg",
+]
+
+[[package]]
+name = "memory-local"
+version = "0.1.0"
+dependencies = [
+ "dial9-tokio-telemetry",
+ "tokio",
 ]
 
 [[package]]

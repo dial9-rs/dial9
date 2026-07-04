@@ -1,0 +1,493 @@
+//! Sealed-file detection for the worker pipeline.
+//!
+//! Finds `.bin` files produced by `DiskWriter` rename-on-seal,
+//! ignoring `.active` files that are still being written.
+
+// The segment types here are the public pipeline API, exposed via the
+// `pipeline` module's re-export. Without that feature they stay crate-internal.
+#![cfg_attr(not(feature = "pipeline"), allow(unreachable_pub))]
+
+use std::path::{Path, PathBuf};
+
+use crate::primitives::fs;
+
+/// A sealed trace segment ready for processing (disk-backed).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SealedSegment {
+    pub(crate) path: PathBuf,
+    pub(crate) index: u32,
+}
+
+#[cfg(all(feature = "test-util", feature = "pipeline"))]
+impl SealedSegment {
+    /// Build a disk segment directly.
+    pub(crate) fn new_for_test(path: PathBuf, index: u32) -> Self {
+        Self { path, index }
+    }
+}
+
+#[cfg(feature = "pipeline")]
+impl SealedSegment {
+    /// Path to the sealed segment file on disk.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Segment index (e.g. `3` for `trace.3.bin`).
+    pub fn index(&self) -> u32 {
+        self.index
+    }
+}
+
+/// A sealed trace segment backed by in-process memory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemorySegment {
+    pub(crate) index: u32,
+    pub(crate) size: u64,
+}
+
+#[cfg(feature = "pipeline")]
+impl MemorySegment {
+    /// Segment index.
+    pub fn index(&self) -> u32 {
+        self.index
+    }
+
+    /// Encoded segment size in bytes.
+    pub fn size(&self) -> u64 {
+        self.size
+    }
+}
+
+/// A sealed trace segment, either disk-backed or memory-backed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SegmentRef {
+    /// On-disk segment file
+    Disk(SealedSegment),
+    /// In-process segment
+    Memory(MemorySegment),
+}
+
+impl SegmentRef {
+    /// Segment index.
+    pub fn index(&self) -> u32 {
+        match self {
+            SegmentRef::Disk(s) => s.index,
+            SegmentRef::Memory(m) => m.index,
+        }
+    }
+
+    /// Returns the on-disk path for disk-backed segments.
+    pub fn disk_path(&self) -> Option<&Path> {
+        match self {
+            SegmentRef::Disk(s) => Some(&s.path),
+            SegmentRef::Memory(_) => None,
+        }
+    }
+}
+
+impl std::fmt::Display for SegmentRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SegmentRef::Disk(s) => write!(f, "{}", s.path.display()),
+            SegmentRef::Memory(m) => write!(f, "mem://{}", m.index),
+        }
+    }
+}
+
+/// Segment creation time as epoch seconds, parsed from the first clock
+/// anchor in the trace. Returns `(secs, true)` on a successful parse, or
+/// falls back to file mtime / current time with `(secs, false)`.
+pub(crate) fn creation_epoch_secs(data: &[u8], path: &Path) -> (u64, bool) {
+    match parse_segment_timestamp(data) {
+        Ok(ts) => return (ts / 1_000_000_000, true),
+        Err(e) => {
+            crate::rate_limit::rate_limited!(std::time::Duration::from_secs(60), {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %e,
+                    "failed to parse segment timestamp, falling back to mtime"
+                );
+            });
+        }
+    }
+    (mtime_or_now_secs(path), false)
+}
+
+/// Best-effort seal epoch for a disk segment: the file's mtime (the last
+/// write before seal), falling back to now. Together with
+/// [`creation_epoch_secs`] it gives the span the triggered worker matches
+/// against dump windows.
+#[cfg(feature = "pipeline")]
+pub(crate) fn seal_epoch_secs(path: &Path) -> u64 {
+    mtime_or_now_secs(path)
+}
+
+fn mtime_or_now_secs(path: &Path) -> u64 {
+    fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or_else(|| {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs()
+        })
+}
+
+/// Legacy epoch-vs-monotonic discriminator for ambiguous
+/// `SegmentMetadataEvent.timestamp_ns` values.
+///
+/// Pre-clock-sync traces may store epoch nanoseconds there, while new traces
+/// use monotonic nanoseconds. Epoch timestamps are ~1e18, while monotonic uptime is much smaller.
+/// So we use `2020-01-01` ns as a floor, monotonic would need decades
+/// of continuous runtime to reach that range.
+///
+/// Keep in sync with `LEGACY_EPOCH_NS_FLOOR` in `dial9-viewer/ui/trace_parser.js`.
+pub(crate) const LEGACY_EPOCH_NS_FLOOR: u64 = 1_577_836_800_000_000_000;
+
+/// Parse wall-clock creation time from the first `ClockSyncEvent`,
+/// or from a legacy `SegmentMetadataEvent.timestamp_ns` that predates clock-sync support.
+fn parse_segment_timestamp(data: &[u8]) -> Result<u64, ParseTimestampError> {
+    use dial9_trace_format::decoder::{DecodedFrameRef, Decoder};
+    use dial9_trace_format::types::FieldValueRef;
+
+    let mut dec = Decoder::new(data).ok_or(ParseTimestampError::InvalidHeader)?;
+    let mut events_seen = 0;
+    let mut legacy_fallback: Option<u64> = None;
+    loop {
+        match dec.next_frame_ref() {
+            Ok(Some(DecodedFrameRef::Event {
+                type_id,
+                timestamp_ns,
+                values,
+                ..
+            })) => {
+                events_seen += 1;
+                let name = dec
+                    .registry()
+                    .get(type_id)
+                    .map(|s| s.name())
+                    .ok_or(ParseTimestampError::UnknownTypeId(type_id.0))?;
+                if name == "ClockSyncEvent" {
+                    return match values.first() {
+                        Some(FieldValueRef::Varint(v)) => Ok(*v),
+                        _ => Err(ParseTimestampError::MissingRealtimeField),
+                    };
+                }
+                if name == "SegmentMetadataEvent"
+                    && let Some(ts) = timestamp_ns
+                    && ts >= LEGACY_EPOCH_NS_FLOOR
+                {
+                    legacy_fallback = Some(ts);
+                }
+                if events_seen >= 10 {
+                    return legacy_fallback.ok_or(ParseTimestampError::NoAnchorInFirst10Events);
+                }
+            }
+            Ok(Some(_)) => {} // schema/pool frame, keep going
+            Ok(None) => {
+                return legacy_fallback.ok_or(ParseTimestampError::EndOfStream { events_seen });
+            }
+            Err(e) => {
+                return Err(ParseTimestampError::DecodeError(e.to_string()));
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+enum ParseTimestampError {
+    InvalidHeader,
+    UnknownTypeId(u16),
+    MissingRealtimeField,
+    NoAnchorInFirst10Events,
+    EndOfStream { events_seen: u32 },
+    DecodeError(String),
+}
+
+impl std::fmt::Display for ParseTimestampError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidHeader => write!(f, "invalid trace header"),
+            Self::UnknownTypeId(id) => write!(f, "unknown type_id {id} not in registry"),
+            Self::MissingRealtimeField => write!(f, "ClockSyncEvent had no realtime_ns field"),
+            Self::NoAnchorInFirst10Events => write!(
+                f,
+                "no ClockSyncEvent or legacy wall-clock SegmentMetadataEvent in first 10 events"
+            ),
+            Self::EndOfStream { events_seen } => write!(
+                f,
+                "end of stream after {events_seen} events without a clock anchor"
+            ),
+            Self::DecodeError(e) => write!(f, "decode error: {e}"),
+        }
+    }
+}
+
+/// Find sealed `.bin` segments in `dir`, sorted oldest-first by index.
+///
+/// Matches files named `{stem}.{index}.bin` where `stem` matches the
+/// given base path's file stem. Ignores `.active` files and any files
+/// that don't match the expected naming pattern.
+#[cfg(feature = "pipeline")]
+pub(crate) fn find_sealed_segments(dir: &Path, stem: &str) -> std::io::Result<Vec<SealedSegment>> {
+    let mut segments = Vec::new();
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().is_none_or(|ext| ext != "bin") {
+            continue;
+        }
+        // Guard against .bin.active being misread — those have extension "active"
+        // so the check above already excludes them, but be explicit.
+        let file_name = match path.file_name().and_then(|n| n.to_str()) {
+            Some(n) => n,
+            None => continue,
+        };
+        if let Some(index) = parse_segment_index(file_name, stem) {
+            segments.push(SealedSegment { path, index });
+        }
+    }
+    segments.sort_by_key(|s| s.index);
+    Ok(segments)
+}
+
+/// Trace-segment artifact found in the trace directory: a retained segment
+/// (`.bin` or write-back sibling like `.bin.gz`) or a stale `.bin.active`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SegmentArtifact {
+    Retained { index: u32 },
+    Active,
+}
+
+/// Classify a filename against the `{stem}.{index}.bin*` family.
+pub(crate) fn parse_segment_artifact(file_name: &str, stem: &str) -> Option<SegmentArtifact> {
+    let rest = file_name.strip_prefix(stem)?.strip_prefix('.')?;
+    if let Some(idx) = rest.strip_suffix(".bin.active")
+        && idx.parse::<u32>().is_ok()
+    {
+        return Some(SegmentArtifact::Active);
+    }
+    let (index, suffix) = rest.split_once(".bin")?;
+    if !suffix.is_empty() && !suffix.starts_with('.') {
+        return None;
+    }
+    Some(SegmentArtifact::Retained {
+        index: index.parse().ok()?,
+    })
+}
+
+/// Parse segment index from a filename like `trace.3.bin`.
+/// Returns `None` if the filename doesn't match `{stem}.{index}.bin`.
+#[cfg(feature = "pipeline")]
+fn parse_segment_index(file_name: &str, stem: &str) -> Option<u32> {
+    let rest = file_name.strip_prefix(stem)?.strip_prefix('.')?;
+    let index_str = rest.strip_suffix(".bin")?;
+    index_str.parse().ok()
+}
+
+// These tests cover the worker-facing segment-discovery path.
+#[cfg(all(test, feature = "pipeline"))]
+mod tests {
+    use super::*;
+    use crate::format::{ClockSyncEvent, SegmentMetadataEvent};
+    use assert2::check;
+    use dial9_trace_format::encoder::Encoder;
+    use std::fs::File;
+    use tempfile::TempDir;
+
+    fn touch(dir: &Path, name: &str) {
+        File::create(dir.join(name)).unwrap();
+    }
+
+    #[test]
+    fn finds_sealed_ignores_active() {
+        let dir = TempDir::new().unwrap();
+        touch(dir.path(), "trace.0.bin");
+        touch(dir.path(), "trace.1.bin");
+        touch(dir.path(), "trace.2.bin.active");
+
+        let segments = find_sealed_segments(dir.path(), "trace").unwrap();
+        check!(segments.len() == 2);
+        check!(segments[0].index == 0);
+        check!(segments[1].index == 1);
+    }
+
+    #[test]
+    fn sorted_oldest_first() {
+        let dir = TempDir::new().unwrap();
+        touch(dir.path(), "trace.5.bin");
+        touch(dir.path(), "trace.2.bin");
+        touch(dir.path(), "trace.9.bin");
+
+        let segments = find_sealed_segments(dir.path(), "trace").unwrap();
+        let indices: Vec<u32> = segments.iter().map(|s| s.index).collect();
+        check!(indices == [2, 5, 9]);
+    }
+
+    #[test]
+    fn ignores_unrelated_files() {
+        let dir = TempDir::new().unwrap();
+        touch(dir.path(), "trace.0.bin");
+        touch(dir.path(), "other.0.bin");
+        touch(dir.path(), "trace.txt");
+        touch(dir.path(), "readme.md");
+
+        let segments = find_sealed_segments(dir.path(), "trace").unwrap();
+        check!(segments.len() == 1);
+        check!(segments[0].index == 0);
+    }
+
+    #[test]
+    fn empty_directory() {
+        let dir = TempDir::new().unwrap();
+        let segments = find_sealed_segments(dir.path(), "trace").unwrap();
+        check!(segments.is_empty());
+    }
+
+    /// Build a single-`ClockSyncEvent` trace carrying `realtime_ns` and parse it
+    /// back. Mirrors the anchor the writer emits at the start of every segment.
+    #[test]
+    fn test_parse_segment_timestamp() {
+        let now_nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64;
+        let mut enc = Encoder::new_to(Vec::new()).unwrap();
+        enc.write(&ClockSyncEvent {
+            timestamp_ns: 1_000_000_000,
+            realtime_ns: now_nanos,
+        })
+        .unwrap();
+        let data = enc.into_inner();
+
+        let parsed = parse_segment_timestamp(&data).unwrap();
+        check!(parsed == now_nanos);
+    }
+
+    #[test]
+    fn test_creation_epoch_secs_uses_parsed_timestamp() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap();
+        let mut enc = Encoder::new_to(Vec::new()).unwrap();
+        enc.write(&ClockSyncEvent {
+            timestamp_ns: 1_000_000_000,
+            realtime_ns: now.as_nanos() as u64,
+        })
+        .unwrap();
+        let data = enc.into_inner();
+
+        let dir = TempDir::new().unwrap();
+        // Header parse succeeds, so the path is never stat'd.
+        let path = dir.path().join("trace.0.bin");
+        let (epoch_secs, header_valid) = creation_epoch_secs(&data, &path);
+        check!(header_valid);
+        check!(epoch_secs == now.as_secs());
+    }
+
+    #[test]
+    fn test_creation_epoch_secs_invalid_data_falls_back() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("trace.0.bin");
+        std::fs::write(&path, b"not a valid trace").unwrap();
+
+        let data = std::fs::read(&path).unwrap();
+        let (epoch_secs, header_valid) = creation_epoch_secs(&data, &path);
+        check!(!header_valid);
+        // Should fall back to mtime, which should be recent
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        check!(now.abs_diff(epoch_secs) < 60);
+    }
+
+    /// A legacy pre-clock-sync trace: wall clock lives in
+    /// `SegmentMetadataEvent.timestamp_ns`, no `ClockSyncEvent`.
+    fn legacy_segment_metadata_trace(timestamp_ns: u64) -> Vec<u8> {
+        let mut enc = Encoder::new_to(Vec::new()).unwrap();
+        enc.write(&SegmentMetadataEvent {
+            timestamp_ns,
+            entries: vec![("k".into(), "v".into())],
+        })
+        .unwrap();
+        enc.into_inner()
+    }
+
+    /// Legacy pre-clock-sync files stored wall clock in `SegmentMetadataEvent.timestamp_ns`,
+    /// parser fallback should recover it.
+    #[test]
+    fn test_parse_segment_timestamp_legacy_segment_metadata_fallback() {
+        // 2024-06-01T00:00:00Z: comfortably epoch-scale.
+        const LEGACY_WALL_NS: u64 = 1_717_200_000_000_000_000;
+        let data = legacy_segment_metadata_trace(LEGACY_WALL_NS);
+
+        let parsed = parse_segment_timestamp(&data).unwrap();
+        check!(parsed == LEGACY_WALL_NS);
+    }
+
+    #[test]
+    fn test_creation_epoch_secs_uses_legacy_segment_metadata_fallback() {
+        const LEGACY_WALL_NS: u64 = 1_717_200_000_000_000_000;
+        let data = legacy_segment_metadata_trace(LEGACY_WALL_NS);
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("legacy.0.bin");
+        std::fs::write(&path, &data).unwrap();
+        let (epoch_secs, header_valid) = creation_epoch_secs(&data, &path);
+        check!(header_valid);
+        check!(epoch_secs == LEGACY_WALL_NS / 1_000_000_000);
+    }
+
+    /// A small (monotonic-looking) SegmentMeta.timestamp_ns must NOT be
+    /// mistaken for a legacy wall-clock value.
+    #[test]
+    fn test_parse_segment_timestamp_monotonic_segment_metadata_is_not_legacy() {
+        let data = legacy_segment_metadata_trace(12_345);
+
+        let result = parse_segment_timestamp(&data);
+        check!(matches!(
+            result,
+            Err(ParseTimestampError::EndOfStream { .. })
+                | Err(ParseTimestampError::NoAnchorInFirst10Events)
+        ));
+    }
+
+    #[test]
+    fn parse_segment_artifact_classifies_family() {
+        check!(
+            parse_segment_artifact("trace.0.bin", "trace")
+                == Some(SegmentArtifact::Retained { index: 0 })
+        );
+        check!(
+            parse_segment_artifact("trace.42.bin.gz", "trace")
+                == Some(SegmentArtifact::Retained { index: 42 })
+        );
+        check!(
+            parse_segment_artifact("trace.5.bin.active", "trace") == Some(SegmentArtifact::Active)
+        );
+        check!(parse_segment_artifact("trace.bin", "trace").is_none());
+        check!(parse_segment_artifact("other.0.bin", "trace").is_none());
+        check!(parse_segment_artifact("trace.0.binx", "trace").is_none());
+    }
+
+    #[test]
+    #[cfg(feature = "pipeline")]
+    fn parse_segment_index_valid() {
+        check!(parse_segment_index("trace.0.bin", "trace") == Some(0));
+        check!(parse_segment_index("trace.42.bin", "trace") == Some(42));
+        check!(parse_segment_index("my-app.100.bin", "my-app") == Some(100));
+    }
+
+    #[test]
+    #[cfg(feature = "pipeline")]
+    fn parse_segment_index_invalid() {
+        check!(parse_segment_index("trace.0.bin.active", "trace") == None);
+        check!(parse_segment_index("trace.bin", "trace") == None);
+        check!(parse_segment_index("other.0.bin", "trace") == None);
+        check!(parse_segment_index("trace.abc.bin", "trace") == None);
+    }
+}

@@ -18,7 +18,7 @@ pub async fn list_prefixes(
     creds: MaybeCreds,
     Query(params): Query<PrefixParams>,
 ) -> Result<Json<Vec<String>>, (StatusCode, String)> {
-    let backend = state.resolve(creds)?;
+    let backend = state.resolve(creds).await?;
 
     let bucket = params
         .bucket

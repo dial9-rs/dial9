@@ -17,9 +17,10 @@
 #[cfg(not(iai_enabled))]
 fn main() {}
 
+use dial9_core::collector::Batch;
 use dial9_tokio_telemetry::telemetry::{
-    Batch, DiskWriter, PollEndEvent, PollStartEvent, TaskId, TaskSpawnEvent, WakeEventEvent,
-    WorkerId, WorkerParkEvent, WorkerUnparkEvent,
+    DiskWriter, PollEndEvent, PollStartEvent, TaskId, TaskSpawnEvent, WakeEventEvent, WorkerId,
+    WorkerParkEvent, WorkerUnparkEvent,
 };
 use dial9_trace_format::encoder::Encoder;
 use iai_callgrind::{library_benchmark, library_benchmark_group, main};

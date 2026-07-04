@@ -1,9 +1,6 @@
 //! User-provided custom event callbacks.
 
-use crate::primitives::sync::Arc;
-use crate::primitives::sync::atomic::AtomicU64;
-use crate::telemetry::buffer::{Encodable, record_encodable_event};
-use crate::telemetry::collector::CentralCollector;
+use crate::telemetry::buffer::Encodable;
 use crate::telemetry::events::clock_monotonic_ns;
 use crate::telemetry::recorder::source::{FlushContext, Source};
 use std::time::{Duration, Instant};
@@ -43,8 +40,7 @@ impl CustomEventsConfig {
 /// Use [`record_event`](Self::record_event) to emit user-defined
 /// [`Encodable`] events into the trace.
 pub struct CustomEventsContext<'a> {
-    collector: &'a Arc<CentralCollector>,
-    drain_epoch: &'a AtomicU64,
+    flush_ctx: &'a FlushContext<'a>,
     timestamp_ns: u64,
 }
 
@@ -64,7 +60,7 @@ impl CustomEventsContext<'_> {
 
     /// Record a user-defined event into the trace.
     pub fn record_event(&mut self, event: impl Encodable) {
-        record_encodable_event(&event, self.collector, self.drain_epoch);
+        self.flush_ctx.record_event(&event);
     }
 }
 
@@ -109,8 +105,7 @@ impl Source for CustomEventsSource {
         self.last_run = Some(now);
 
         let mut custom_ctx = CustomEventsContext {
-            collector: ctx.collector,
-            drain_epoch: ctx.drain_epoch,
+            flush_ctx: ctx,
             timestamp_ns: clock_monotonic_ns(),
         };
         (self.callback)(&mut custom_ctx);
@@ -124,8 +119,8 @@ impl Source for CustomEventsSource {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::telemetry::buffer;
     use crate::telemetry::recorder::SharedState;
+    use dial9_core::test_util;
     use dial9_trace_format::TraceEvent;
     use dial9_trace_format::decoder::Decoder;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -160,11 +155,8 @@ mod tests {
 
     #[test]
     fn source_records_callback_events() {
-        let shared = SharedState::new(0, None);
-        let ctx = FlushContext {
-            collector: &shared.collector,
-            drain_epoch: &shared.drain_epoch,
-        };
+        let shared = SharedState::new(0);
+        let ctx = shared.flush_context();
         let mut source = CustomEventsSource::new(CustomEventsConfig::default(), |ctx| {
             ctx.record_event(TestEvent {
                 timestamp_ns: ctx.timestamp_ns(),
@@ -173,10 +165,10 @@ mod tests {
         });
 
         source.flush(&ctx);
-        buffer::drain_to_collector(&shared.collector);
-
-        let batch = shared.collector.next().expect("source should emit a batch");
-        let events = decode_test_events(batch.encoded_bytes());
+        let events: Vec<_> = test_util::drain_encoded_batches(&shared)
+            .iter()
+            .flat_map(|b| decode_test_events(b))
+            .collect();
 
         assert_eq!(events.len(), 1);
         assert!(events[0].timestamp_ns > 0);
@@ -185,11 +177,8 @@ mod tests {
 
     #[test]
     fn source_respects_minimum_interval() {
-        let shared = SharedState::new(0, None);
-        let ctx = FlushContext {
-            collector: &shared.collector,
-            drain_epoch: &shared.drain_epoch,
-        };
+        let shared = SharedState::new(0);
+        let ctx = shared.flush_context();
         let calls = std::sync::Arc::new(AtomicUsize::new(0));
         let callback_calls = calls.clone();
         let config = CustomEventsConfig::builder()
@@ -207,11 +196,8 @@ mod tests {
 
     #[test]
     fn zero_minimum_interval_does_not_throttle() {
-        let shared = SharedState::new(0, None);
-        let ctx = FlushContext {
-            collector: &shared.collector,
-            drain_epoch: &shared.drain_epoch,
-        };
+        let shared = SharedState::new(0);
+        let ctx = shared.flush_context();
         let calls = std::sync::Arc::new(AtomicUsize::new(0));
         let callback_calls = calls.clone();
         let mut source = CustomEventsSource::new(CustomEventsConfig::default(), move |_ctx| {

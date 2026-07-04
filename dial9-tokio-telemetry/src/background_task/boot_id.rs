@@ -3,32 +3,16 @@
 //! Each process writes to `{trace_dir}/{boot_id}/` so background workers
 //! never cross-process. Liveness is tracked via `flock(LOCK_EX)` on
 //! `{boot_id}/.lock`; dead peers are GC'd at startup.
+//!
+//! The `boot_id` identity format is shared with the S3 keys, so it lives in
+//! `dial9-core` ([`generate_boot_id`]); the namespace setup/GC orchestration
+//! stays here on the telemetry side.
 
 use std::io;
 use std::path::{Path, PathBuf};
 
 use crate::primitives::fs;
-
-/// Generate a boot identifier of the form `{4-alpha}-{pid}` (e.g. `qmxz-481`).
-///
-/// The 4 letters are derived from the current system-time nanoseconds and the
-/// pid makes it unique among live processes. Also used by the S3 uploader as
-/// `S3Config`'s default `boot_id`, so both the on-disk namespace and S3 keys
-/// share one identity format.
-pub(crate) fn generate_boot_id() -> String {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let mut v = nanos as u64;
-    let mut s = String::with_capacity(10);
-    for _ in 0..4 {
-        s.push((b'a' + (v % 26) as u8) as char);
-        v /= 26;
-    }
-    s.push_str(&format!("-{}", std::process::id()));
-    s
-}
+use dial9_core::boot_id::generate_boot_id;
 
 /// Matches `^[a-z]{4}-[0-9]+$`.
 pub(crate) fn is_valid_boot_id(name: &str) -> bool {
@@ -252,17 +236,6 @@ pub(crate) fn setup_namespace(base_path: &Path, gc: bool) -> io::Result<Namespac
 mod tests {
     use super::*;
     use tempfile::TempDir;
-
-    #[test]
-    fn generate_boot_id_matches_pattern() {
-        let id = generate_boot_id();
-        assert!(is_valid_boot_id(&id), "boot_id {id:?} should match pattern");
-        let (alpha, pid) = id.split_once('-').unwrap();
-        assert_eq!(alpha.len(), 4);
-        assert!(alpha.chars().all(|c| c.is_ascii_lowercase()));
-        assert!(!pid.is_empty());
-        assert!(pid.chars().all(|c| c.is_ascii_digit()));
-    }
 
     #[test]
     fn is_valid_boot_id_accepts_valid() {

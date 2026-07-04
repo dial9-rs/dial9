@@ -27,9 +27,9 @@ use dial9_tokio_telemetry::telemetry::analysis_events::{CpuSampleSource, Dial9Ev
 #[test]
 fn cpu_sample_timestamps_align_with_wall_clock() {
     let _ = tracing_subscriber::fmt::try_init();
+    use dial9_tokio_telemetry::telemetry::CpuProfilingConfig;
     use dial9_tokio_telemetry::telemetry::TracedRuntime;
     use dial9_tokio_telemetry::telemetry::clock_monotonic_ns;
-    use dial9_tokio_telemetry::telemetry::cpu_profile::CpuProfilingConfig;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
@@ -254,8 +254,8 @@ fn burn_cpu(duration: std::time::Duration) {
 #[test]
 fn thread_name_attribution_for_external_and_blocking_threads() {
     let _ = tracing_subscriber::fmt::try_init();
+    use dial9_tokio_telemetry::telemetry::CpuProfilingConfig;
     use dial9_tokio_telemetry::telemetry::TracedRuntime;
-    use dial9_tokio_telemetry::telemetry::cpu_profile::CpuProfilingConfig;
     use std::time::Duration;
 
     let (capture, batches) = capture_processor();

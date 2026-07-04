@@ -63,7 +63,6 @@ mod tests {
 mod linux {
     use super::SocketAcceptQueuesConfig;
     use crate::rate_limit::rate_limited;
-    use crate::telemetry::buffer::record_encodable_event;
     use crate::telemetry::events::clock_monotonic_ns;
     use crate::telemetry::format::TcpAcceptQueueEvent;
     use crate::telemetry::recorder::source::{FlushContext, Source};
@@ -146,11 +145,7 @@ mod linux {
                 Ok(snapshots) => {
                     let timestamp_ns = clock_monotonic_ns();
                     for snapshot in snapshots {
-                        record_encodable_event(
-                            &snapshot.into_event(timestamp_ns),
-                            ctx.collector,
-                            ctx.drain_epoch,
-                        );
+                        ctx.record_event(&snapshot.into_event(timestamp_ns));
                     }
                 }
                 Err(e) => rate_limited!(Duration::from_secs(60), {
