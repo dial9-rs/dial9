@@ -408,10 +408,11 @@
     }
     searchInput.addEventListener("input", applySearch);
     resetBtn.addEventListener("click", () => { zoomPath = [rootName()]; render(); });
-    window.addEventListener("resize", render);
-    window.addEventListener("keydown", (e) => {
+    const onKeydown = (e) => {
       if (e.key === "Escape") { zoomPath = [rootName()]; render(); }
-    });
+    };
+    window.addEventListener("resize", render);
+    window.addEventListener("keydown", onKeydown);
 
     // ── Header stats ──
     // The "sampled window" for a side is its actual time span: prefer the
@@ -596,6 +597,8 @@
       destroy() {
         sideA.stop();
         sideB.stop();
+        window.removeEventListener("resize", render);
+        window.removeEventListener("keydown", onKeydown);
         if (tip.parentNode) tip.parentNode.removeChild(tip);
       },
       repollSide,

@@ -192,7 +192,7 @@ function nodeAtPath(root, path) {
 // AWS credentials are NEVER part of a scope link.
 //
 // `params` is a URLSearchParams (or anything with get/getAll). Returns a fresh
-// URLSearchParams containing only the whitelisted scope keys that are present.
+// URLSearchParams containing only the allowlisted scope keys that are present.
 const SCOPE_KEYS_SINGLE = [
   "api",
   "data_dir",
