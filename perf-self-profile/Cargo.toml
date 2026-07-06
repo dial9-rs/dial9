@@ -34,6 +34,9 @@ linux-socket = [
 ## `ProcessResourceUsageEvent`, `TcpAcceptQueueEvent`) outside this crate. Off by
 ## default keeps them `#[non_exhaustive]`.
 unstable-events = []
+## Offline symbolization as a `SegmentProcessor`. Pulls dial9-core's pipeline
+## traits and a minimal Tokio runtime for the `spawn_blocking` handoff.
+symbolize-processor = ["dep:dial9-core", "dial9-core/pipeline", "dep:tokio"]
 ## Test-only helpers.
 test-util = []
 
@@ -44,6 +47,7 @@ crossbeam-queue = { version = "0.3", optional = true }
 dial9-core = { workspace = true, optional = true }
 dial9-trace-format = { workspace = true }
 scc = { version = "2", optional = true }
+tokio = { version = "1", features = ["rt"], optional = true, default-features = false }
 tracing = "0.1.44"
 
 [target.'cfg(target_os = "linux")'.dependencies]

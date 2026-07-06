@@ -53,6 +53,11 @@ pub use dial9_perf_self_profile::{
     CpuProfiler, CpuProfilingConfig, CpuSampleSource, SchedEventConfig, SchedProfiler,
 };
 
+// Offline symbolization processor for the segment pipeline. Needs both the CPU
+// profiler (to produce stack frames) and the pipeline (to run the processor).
+#[cfg(all(feature = "cpu-profiling", feature = "pipeline"))]
+pub use dial9_perf_self_profile::SymbolizeProcessor;
+
 // Memory profiling.
 #[cfg(feature = "memory-profiling")]
 pub use dial9_perf_self_profile::{AllocEvent, FreeEvent, memory_profiling};

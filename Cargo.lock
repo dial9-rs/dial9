@@ -1868,6 +1868,7 @@ dependencies = [
  "scc",
  "serde",
  "serde_json",
+ "tokio",
  "tracing",
 ]
 

@@ -74,6 +74,9 @@ pub mod socket_accept_queues;
 #[cfg(feature = "memory-profiling")]
 pub mod memory_profiling;
 
+#[cfg(feature = "symbolize-processor")]
+pub mod symbolize_processor;
+
 pub use offline_symbolize::SymbolTableEntry;
 pub use sampler::{EventSource, Sample, SamplerConfig, SamplingMode};
 pub use symbolize::{CodeInfo, MapsEntry, SymbolInfo};
@@ -136,6 +139,9 @@ pub use memory_profiling::{
     AllocEvent, DEFAULT_RING_CAPACITY, DEFAULT_SAMPLE_RATE_BYTES, Dial9Allocator, FreeEvent,
     InstallError, MemoryProfiler, MemoryProfilerGuard, MemoryProfilingConfig, is_installed,
 };
+
+#[cfg(feature = "symbolize-processor")]
+pub use symbolize_processor::SymbolizeProcessor;
 
 /// Internal module exposed only for benchmarks. Not part of the public API.
 #[cfg(all(target_os = "linux", feature = "__internal-bench"))]

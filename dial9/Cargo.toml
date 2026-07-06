@@ -47,7 +47,13 @@ cli = ["dep:dial9-viewer", "dep:anyhow"]
 
 ## Background segment-processing pipeline (worker, processors, on-demand dumps).
 ## Pulls a Tokio runtime for the worker, but not the runtime *integration*.
-pipeline = ["dial9-core/pipeline"]
+## The `?/` forward enables perf's symbolize processor only when a perf source
+## (e.g. `cpu-profiling`) is already present, so the `SymbolizeProcessor`
+## re-export exists exactly when both `pipeline` and `cpu-profiling` are on.
+pipeline = [
+    "dial9-core/pipeline",
+    "dial9-perf-self-profile?/symbolize-processor",
+]
 
 ## Tokio runtime integration: `#[dial9::main]`, `TracedRuntime`, `spawn`,
 ## `Dial9TokioHandle`, `Dial9Config`, and the Tokio event sources.
