@@ -350,6 +350,17 @@ assert(parseDiff(new URLSearchParams("diff=1&a=" + encodeScope("bucket=x") + "&b
   assertEq(u.searchParams.get("refine"), null,
     "no refine param — the endpoint is an SSE stream and the server owns refinement");
 
+  // The diff view drives the per-side sampling cap itself (small initial fold,
+  // raised by "Load more"): an explicit maxFiles arg overrides the scope's own
+  // max_files, and a scope with none gets exactly the override.
+  const uOverride = V.apiUrlFor(scope, "https://viewer.example.com", 8);
+  assertEq(uOverride.searchParams.get("max_files"), "8", "apiUrlFor maxFiles arg overrides the scope's max_files");
+  const scopeNoMax = new URLSearchParams("bucket=b&service=svc");
+  assertEq(V.apiUrlFor(scopeNoMax, "https://viewer.example.com").searchParams.get("max_files"), null,
+    "no maxFiles arg and no scope max_files -> none set (server default)");
+  assertEq(V.apiUrlFor(scopeNoMax, "https://viewer.example.com", 8).searchParams.get("max_files"), "8",
+    "maxFiles arg sets the cap even when the scope carries none");
+
   assertEq(V.scopeLabel(new URLSearchParams("service=svc&host=h1"), "A"), "svc @ h1", "label: single host");
   assertEq(V.scopeLabel(new URLSearchParams("service=svc"), "A"), "svc", "label: no host");
   assertEq(V.scopeLabel(new URLSearchParams("service=svc&host=a&host=b&host=c"), "A"), "svc @ 3 hosts", "label: host count");

@@ -25,6 +25,7 @@
     return {
       formatCoverageBadge: window.formatCoverageBadge,
       foldErrorNotice: window.foldErrorNotice,
+      nextMaxFiles: window.nextMaxFiles,
     };
   }
   function getSse() {
@@ -35,6 +36,15 @@
 
   const D = getDiff();
   const ROW = 18; // px per depth level
+  // Initial per-side `max_files` cap for a diff view. The diff opens TWO streams
+  // at once, so each side folding to the server's *default* cap (up to ~100
+  // files × ~40–50 MB) means ~200 concurrent large GETs — enough to saturate a
+  // Fargate task's egress and blow the 30s per-GET S3 timeout. Start each side
+  // small for a fast first paint bounded well under that, then let "Load more"
+  // raise the cap on demand (same progressive-refinement model as the single
+  // flamegraph's "Refine more"). A scope that already carries an explicit
+  // `max_files` (e.g. a copy-link into a deeper sample) overrides this.
+  const DIFF_INITIAL_MAX_FILES = 8;
   // Server flamegraph endpoint keys; the rest of a scope (e.g. the client-only
   // `api` flag) is not forwarded.
   const SERVER_KEYS = [
@@ -45,7 +55,10 @@
   // Build the `/api/flamegraph` URL for one side from its scope params. The
   // endpoint is an SSE stream (the server owns refinement — no client `refine`
   // flag). `origin` defaults to the page origin in the browser; tests pass it in.
-  function apiUrlFor(scope, origin) {
+  // `maxFiles`, when set, overrides the scope's own `max_files` — the diff view
+  // drives the per-side sampling cap itself (small initial fold, raised by
+  // "Load more").
+  function apiUrlFor(scope, origin, maxFiles) {
     const base = origin || (typeof window !== "undefined" ? window.location.origin : "http://localhost");
     const u = new URL("/api/flamegraph", base);
     for (const k of SERVER_KEYS) {
@@ -53,6 +66,7 @@
       if (v != null && v !== "") u.searchParams.set(k, v);
     }
     for (const h of scope.getAll("host")) u.searchParams.append("host", h);
+    if (maxFiles != null) u.searchParams.set("max_files", String(maxFiles));
     return u;
   }
 
@@ -92,12 +106,14 @@
     header.innerHTML =
       '<input class="fgd-search" placeholder="highlight frames (regex)…" />' +
       '<button class="fgd-reset">Reset zoom</button>' +
+      '<button class="fgd-more" title="Fold more source files on both sides for a deeper sample" style="display:none">Load more data</button>' +
       '<span class="fgd-hotness" title="Overall sampling rate difference. Colors normalize this away (shape vs shape); this is the absolute volume signal."></span>' +
       '<div class="fgd-legend"><span class="fgd-leg-a"></span>' +
       '<span class="fgd-bar"></span><span class="fgd-leg-b"></span></div>';
     container.appendChild(header);
     const searchInput = header.querySelector(".fgd-search");
     const resetBtn = header.querySelector(".fgd-reset");
+    const moreBtn = header.querySelector(".fgd-more");
     const hotnessEl = header.querySelector(".fgd-hotness");
     header.querySelector(".fgd-leg-a").textContent = "◀ heavier in " + labelA;
     header.querySelector(".fgd-leg-b").textContent = "heavier in " + labelB + " ▶";
@@ -144,8 +160,18 @@
     let merged = D.mergeTrees(null, null);
     let zoomPath = ["(all)"];
     const SEP = String.fromCharCode(31);
-    const statusA = { total: 0, badge: "", meta: null };
-    const statusB = { total: 0, badge: "", meta: null };
+    // `coverage` is the last-seen coverage block (files_folded/files_matched),
+    // used to decide whether "Load more" can still deepen the sample and to
+    // compute the next cap. `refining` tracks whether the side's stream is still
+    // open, so the button is hidden while a fold is in flight.
+    const statusA = { total: 0, badge: "", meta: null, coverage: null, refining: true };
+    const statusB = { total: 0, badge: "", meta: null, coverage: null, refining: true };
+    // Per-side sampling cap. Both sides share one cap so the two panels stay at a
+    // comparable sampling depth. Starts small (a diff opens two streams at once —
+    // see DIFF_INITIAL_MAX_FILES) unless a side's scope carries an explicit
+    // `max_files`; "Load more" raises it. null would mean the server default.
+    const scopeMax = Number(scopeA.get("max_files")) || Number(scopeB.get("max_files")) || 0;
+    let maxFiles = scopeMax > 0 ? scopeMax : DIFF_INITIAL_MAX_FILES;
     // Cached per-side layouts ({ boxes, maxDepth }); recomputed only on
     // data/zoom/resize, NOT on hover. Each box is augmented with a stable
     // `key` (path join) and precomputed `color` so repaint is pure drawing.
@@ -475,16 +501,33 @@
       }
     }
 
+    // Show "Load more data" once BOTH sides are idle (streams closed) and at
+    // least one still has matched files left to fold beyond the current cap. The
+    // button raises the shared cap and repolls both sides; already-folded files
+    // are re-served instantly, so only the newly-uncapped tail actually folds.
+    function updateMoreButton() {
+      const busy = statusA.refining || statusB.refining;
+      const canMore = !busy && [statusA, statusB].some((s) => {
+        const c = s.coverage;
+        return c && (Number(c.files_folded) || 0) < (Number(c.files_matched) || 0);
+      });
+      moreBtn.style.display = canMore ? "" : "none";
+    }
+
     // ── Per-side SSE stream ──
     // One stream per side: the server emits the already-folded snapshot, then a
     // fresh full snapshot per newly-folded file, and closes at its sampling cap
     // (it owns the stop condition — no client polling or plateau detection). A
-    // new tree on either side triggers a re-merge + re-render.
+    // new tree on either side triggers a re-merge + re-render. The cap is the
+    // shared client-driven `maxFiles` (small initial fold, raised by "Load
+    // more") rather than the server default.
     function startSide(side, scope, status) {
       const sse = getSse();
       const ctl = new AbortController();
+      status.refining = true;
+      updateMoreButton();
 
-      sse.openSse(apiUrlFor(scope), {
+      sse.openSse(apiUrlFor(scope, undefined, maxFiles), {
         headers: headersFor(side),
         signal: ctl.signal,
         onEvent: (resp) => {
@@ -492,6 +535,7 @@
           status.total = resp.total_samples || (resp.tree && resp.tree.count) || 0;
           status.meta = resp.metadata || null;
           const cov = resp.coverage;
+          status.coverage = cov || null;
           if (cov != null) {
             status.badge = api.formatCoverageBadge(cov) + " · refining…";
             // Surface fold failures (e.g. an unwritable output bucket) instead
@@ -506,10 +550,16 @@
         },
         onClose: () => {
           // Server folded this side to its cap and closed the stream.
+          status.refining = false;
           status.badge = status.badge.replace(" · refining…", " · refined");
           updateStats();
+          updateMoreButton();
         },
-        onError: (e) => onSideError(side, e),
+        onError: (e) => {
+          status.refining = false;
+          updateMoreButton();
+          onSideError(side, e);
+        },
       });
       return { stop() { ctl.abort(); } };
     }
@@ -521,11 +571,27 @@
     let sideB = startSide("b", scopeB, statusB);
 
     // Abort and reopen one side's stream (used after the user supplies B's
-    // creds). Already-folded files are re-served instantly, so a retry is cheap.
+    // creds, and by "Load more" after raising the cap). Already-folded files are
+    // re-served instantly, so a repoll only pays for the newly-uncapped tail.
     function repollSide(side) {
       if (side === "a") { sideA.stop(); sideA = startSide("a", scopeA, statusA); }
       else { sideB.stop(); sideB = startSide("b", scopeB, statusB); }
     }
+
+    // "Load more data": raise the shared cap to ~4× the deepest fold so far
+    // (nextMaxFiles, the same step-up the single flamegraph uses), then repoll
+    // both sides so each folds further into its matched set.
+    moreBtn.addEventListener("click", () => {
+      if (statusA.refining || statusB.refining) return;
+      const deepest = Math.max(
+        (statusA.coverage && Number(statusA.coverage.files_folded)) || 0,
+        (statusB.coverage && Number(statusB.coverage.files_folded)) || 0,
+        maxFiles,
+      );
+      maxFiles = api.nextMaxFiles(deepest);
+      repollSide("a");
+      repollSide("b");
+    });
 
     updateStats();
     render();
