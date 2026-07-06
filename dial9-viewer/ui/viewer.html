@@ -1007,6 +1007,7 @@
         <script src="decode.js"></script>
         <script src="trace_parser.js"></script>
         <script src="creds.js"></script>
+        <script src="trace_scope.js"></script>
         <script src="trace_analysis.js"></script>
         <script src="format.js"></script>
         <script src="flamegraph_export.js"></script>
@@ -1924,10 +1925,51 @@
 
             // Check for URL parameter on load. `trace` is repeatable — each
             // value is a separate (possibly gzipped) component to concatenate.
+            // A `s_*` scope (bucket/prefix/service/host-set + window) is the
+            // compact, stateless alternative the S3 browser emits for large
+            // selections; loadTraceFromScope re-lists its files below.
             const urlParams = new URLSearchParams(window.location.search);
             const traceUrls = urlParams.getAll('trace');
             // Render profiler: ?prof=1 (or window.D9PROF=1 from the console).
             if (urlParams.get('prof') === '1') window.D9PROF = 1;
+
+            // Credentialed JSON fetch for scope resolution: same BYO-credentials
+            // headers loadTraceFromUrl attaches, so /api/browse runs under the
+            // user's creds (BYOC) or the task's ambient identity (no creds).
+            async function fetchJsonWithCreds(url) {
+                const headers = window.Dial9Creds ? Dial9Creds.headers() : {};
+                const resp = await fetch(url, { headers });
+                if (!resp.ok) {
+                    const body = await resp.text().catch(() => '');
+                    throw new Error(`HTTP ${resp.status}${body ? ': ' + body : ''}`);
+                }
+                return resp.json();
+            }
+
+            // Resolve a scope to its trace component URLs, then load them through
+            // the same path the inline trace= list uses.
+            async function loadTraceFromScope(scope) {
+                try {
+                    const urls = await Dial9TraceScope.resolveScope(scope, fetchJsonWithCreds);
+                    if (!urls.length) {
+                        alert('No traces found for this selection’s time range and hosts. They may have expired (S3 lifecycle).');
+                        resetDropZone();
+                        return;
+                    }
+                    await loadTraceFromUrl(urls);
+                } catch (err) {
+                    if (/HTTP 401/.test(err.message) && window.Dial9Creds && !Dial9Creds.has()) {
+                        alert(
+                            'This trace requires AWS credentials. Open it from the ' +
+                            'dial9 home page after applying your credentials, or this ' +
+                            "tab won't have them."
+                        );
+                    } else {
+                        alert('Error resolving trace selection: ' + err.message);
+                    }
+                    resetDropZone();
+                }
+            }
 
             /** Build parseTrace options from current URL time range params. */
             function getParseOptions() {
@@ -1951,9 +1993,13 @@
                 window.history.replaceState(null, '', newUrl);
             }
 
+            const urlScope = Dial9TraceScope.readScope(urlParams);
             if (traceUrls.length) {
                 showLoadingState(traceUrls.length > 1 ? `Loading ${traceUrls.length} traces…` : 'Loading trace…');
                 loadTraceFromUrl(traceUrls);
+            } else if (urlScope) {
+                showLoadingState('Loading trace selection…');
+                loadTraceFromScope(urlScope);
             }
 
             function onLoadDemo(e) {
@@ -7051,6 +7097,26 @@
 
             function handleFgPopout() {
                 const params = new URLSearchParams(window.location.search);
+
+                // Time range + zoom ride inline (always small).
+                const base = new URLSearchParams();
+                base.set("start", String(Math.round(fgSelStart)));
+                base.set("end", String(Math.round(fgSelEnd)));
+                const z = fgInstance.getZoomPath();
+                if (z.worker.length > 0) base.set("worker-zoom", z.worker.join("\t"));
+                if (z.offworker.length > 0) base.set("offworker-zoom", z.offworker.join("\t"));
+
+                // Prefer carrying this viewer's own scope through to the
+                // flamegraph (short + stateless, so it can't overflow the URI
+                // cap). Fall back to inline trace= params, then to a tab-bound
+                // blob URL for a locally-loaded trace with no source URLs.
+                const scope = Dial9TraceScope.readScope(params);
+                if (scope) {
+                    const { query } = Dial9TraceScope.encodeScope(base, scope);
+                    window.open(`flamegraph.html?${query}`, "_blank");
+                    return;
+                }
+
                 let traceUrls = params.getAll("trace");
                 let isBlobUrl = false;
                 if (!traceUrls.length && currentTraceBuffer) {
@@ -7062,12 +7128,8 @@
                     showToast("popout-no-url", "Pop-out requires a loaded trace", "error", 3000);
                     return;
                 }
-                const traceQs = traceUrls.map(u => `trace=${encodeURIComponent(u)}`).join("&");
-                let url = `flamegraph.html?${traceQs}&start=${Math.round(fgSelStart)}&end=${Math.round(fgSelEnd)}`;
-                const z = fgInstance.getZoomPath();
-                if (z.worker.length > 0) url += `&worker-zoom=${encodeURIComponent(z.worker.join("\t"))}`;
-                if (z.offworker.length > 0) url += `&offworker-zoom=${encodeURIComponent(z.offworker.join("\t"))}`;
-                window.open(url, "_blank");
+                for (const u of traceUrls) base.append("trace", u);
+                window.open(`flamegraph.html?${base.toString()}`, "_blank");
                 if (isBlobUrl) {
                     showToast("popout-blob", "Pop-out linked to this tab \u2014 keep it open", "info", 5000);
                 }
