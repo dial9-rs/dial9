@@ -24,6 +24,9 @@
     secretAccessKey: "x-dial9-aws-secret-access-key",
     sessionToken: "x-dial9-aws-session-token",
     region: "x-dial9-aws-region",
+    // Assume-role path: name a role for the server to assume with its own
+    // identity, instead of supplying static keys. Alternative to the four above.
+    roleArn: "x-dial9-aws-role-arn",
   };
 
   // Resolve a storage backend. In the browser this is sessionStorage (creds die
@@ -57,15 +60,20 @@
     }
   }
 
-  /** True if a (at least partially) usable credential set is stored. */
+  /**
+   * True if a usable credential set is stored. That is either a static
+   * bring-your-own key pair, OR an assume-role ARN — both let the backend reach
+   * S3 on the user's behalf, so both count as "credentials are active" for the
+   * UI (green button, region header, re-run on change).
+   */
   function has() {
     const c = get();
-    return !!(c && c.accessKeyId && c.secretAccessKey);
+    return !!(c && ((c.accessKeyId && c.secretAccessKey) || c.roleArn));
   }
 
   /** Persist credentials and notify listeners. Returns the stored object.
    *
-   * @param {{accessKeyId, secretAccessKey, sessionToken?, region?}} creds
+   * @param {{accessKeyId?, secretAccessKey?, sessionToken?, region?, roleArn?}} creds
    */
   function store(creds) {
     const clean = {
@@ -73,6 +81,7 @@
       secretAccessKey: (creds.secretAccessKey || "").trim(),
       sessionToken: (creds.sessionToken || "").trim() || undefined,
       region: (creds.region || "").trim() || undefined,
+      roleArn: (creds.roleArn || "").trim() || undefined,
     };
     storage().setItem(STORAGE_KEY, JSON.stringify(clean));
     notifyChanged();
@@ -135,6 +144,49 @@
       );
     }
     return { accessKeyId, secretAccessKey, sessionToken, region };
+  }
+
+  /**
+   * Syntactic check that `arn` names a single IAM role, mirroring the server's
+   * `is_valid_role_arn` (src/server/credentials.rs) so the UI rejects a
+   * malformed value up front instead of round-tripping to a 400. Shape:
+   * `arn:{aws|aws-cn|aws-us-gov}:iam::{12-digit account}:role/{name}` (or
+   * `role/{path}/{name}`), name non-empty and wildcard-free.
+   */
+  function isValidRoleArn(arn) {
+    if (!arn || arn.length > 2048) return false;
+    // arn : partition : service : region : account : resource
+    const parts = arn.split(":");
+    if (parts.length < 6) return false;
+    const [prefix, partition, service, region, account] = parts;
+    const resource = parts.slice(5).join(":");
+    if (prefix !== "arn") return false;
+    if (!["aws", "aws-cn", "aws-us-gov"].includes(partition)) return false;
+    if (service !== "iam" || region !== "") return false;
+    if (!/^[0-9]{12}$/.test(account)) return false;
+    if (!resource.startsWith("role/")) return false;
+    const rest = resource.slice("role/".length);
+    return rest.length > 0 && !rest.includes("*") && !rest.includes("?");
+  }
+
+  /**
+   * Store an assume-role ARN as the active credential (the linkable
+   * `?aws_role_arn=…` path). Clears any static BYOC keys so the two transports
+   * never coexist — the server rejects both together (`ConflictingCredentials`).
+   * An optional `region` pins the S3 endpoint, exactly like the BYOC region.
+   *
+   * Throws on a malformed ARN so a bad link fails loudly rather than silently
+   * falling back to the server's default identity. Returns the stored object.
+   *
+   * @param {string} roleArn IAM role ARN the server should assume
+   * @param {{region?: string}} [opts]
+   */
+  function setRoleArn(roleArn, opts = {}) {
+    const arn = (roleArn || "").trim();
+    if (!isValidRoleArn(arn)) {
+      throw new Error(`invalid role ARN: ${roleArn}`);
+    }
+    return store({ roleArn: arn, region: opts.region });
   }
 
   /**
@@ -236,17 +288,36 @@
    * Build the `x-dial9-aws-*` request headers from the stored credentials.
    * Returns an empty object when nothing is stored (so it can be spread into any
    * fetch unconditionally). Token/region keys are omitted when unset.
+   *
+   * Two mutually-exclusive transports (the server rejects both at once with
+   * `ConflictingCredentials`):
+   *  - static BYOC keys → the four `access-key-id`/`secret-access-key`/
+   *    `session-token`/`region` headers;
+   *  - an assume-role ARN → the single `role-arn` header (+ optional `region`).
+   * Static keys win when both happen to be stored, since a full key set is the
+   * more specific intent; the region rides along either way.
    */
   function headers() {
     const c = get();
-    if (!c || !c.accessKeyId || !c.secretAccessKey) return {};
-    const h = {
-      [H.accessKeyId]: c.accessKeyId,
-      [H.secretAccessKey]: c.secretAccessKey,
-    };
-    if (c.sessionToken) h[H.sessionToken] = c.sessionToken;
-    if (c.region) h[H.region] = c.region;
-    return h;
+    if (!c) return {};
+
+    if (c.accessKeyId && c.secretAccessKey) {
+      const h = {
+        [H.accessKeyId]: c.accessKeyId,
+        [H.secretAccessKey]: c.secretAccessKey,
+      };
+      if (c.sessionToken) h[H.sessionToken] = c.sessionToken;
+      if (c.region) h[H.region] = c.region;
+      return h;
+    }
+
+    if (c.roleArn) {
+      const h = { [H.roleArn]: c.roleArn };
+      if (c.region) h[H.region] = c.region;
+      return h;
+    }
+
+    return {};
   }
 
   /** Fire a `dial9:credentials-changed` event so the UI can refresh. */
@@ -260,6 +331,8 @@
     get,
     has,
     set,
+    setRoleArn,
+    isValidRoleArn,
     parse,
     check,
     listBuckets,

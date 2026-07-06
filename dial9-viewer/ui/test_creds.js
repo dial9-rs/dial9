@@ -26,6 +26,9 @@ const H_AKID = "x-dial9-aws-access-key-id";
 const H_SECRET = "x-dial9-aws-secret-access-key";
 const H_TOKEN = "x-dial9-aws-session-token";
 const H_REGION = "x-dial9-aws-region";
+const H_ROLE_ARN = "x-dial9-aws-role-arn";
+
+const VALID_ARN = "arn:aws:iam::123456789012:role/dial9-reader";
 
 async function main() {
 
@@ -94,6 +97,70 @@ await testAsync("set() rejects when a required field is missing", async () => {
 await testAsync("clear() removes stored credentials", async () => {
   freshStore();
   await Dial9Creds.set({ accessKeyId: "AKIA", secretAccessKey: "secret" });
+  assert.strictEqual(Dial9Creds.has(), true);
+  Dial9Creds.clear();
+  assert.strictEqual(Dial9Creds.has(), false);
+  assert.deepStrictEqual(Dial9Creds.headers(), {});
+});
+
+// ── assume-role transport (setRoleArn / role-arn header) ──
+
+test("setRoleArn() stores the ARN and emits the role-arn header", () => {
+  freshStore();
+  Dial9Creds.setRoleArn(VALID_ARN);
+  assert.strictEqual(Dial9Creds.has(), true);
+  assert.deepStrictEqual(Dial9Creds.headers(), { [H_ROLE_ARN]: VALID_ARN });
+});
+
+test("setRoleArn() carries an optional region alongside the ARN", () => {
+  freshStore();
+  Dial9Creds.setRoleArn(VALID_ARN, { region: "us-west-2" });
+  assert.deepStrictEqual(Dial9Creds.headers(), {
+    [H_ROLE_ARN]: VALID_ARN,
+    [H_REGION]: "us-west-2",
+  });
+});
+
+test("setRoleArn() rejects a malformed ARN", () => {
+  freshStore();
+  assert.throws(() => Dial9Creds.setRoleArn("not-an-arn"), /invalid role ARN/);
+  // A rejected ARN must not leave anything stored.
+  assert.strictEqual(Dial9Creds.has(), false);
+});
+
+test("headers(): static BYOC keys win over a stored role ARN (never both)", () => {
+  // The server rejects a request carrying both transports
+  // (ConflictingCredentials), so headers() must emit exactly one. A full key set
+  // is the more specific intent, so it wins. Seed a store holding both directly
+  // to prove the guard.
+  const s = fakeStorage();
+  Dial9Creds._setStorage(s);
+  s.setItem(
+    "dial9.aws-credentials",
+    JSON.stringify({ accessKeyId: "AK", secretAccessKey: "SK", roleArn: VALID_ARN })
+  );
+  const h = Dial9Creds.headers();
+  assert.strictEqual(h[H_AKID], "AK");
+  assert.strictEqual(h[H_SECRET], "SK");
+  assert.ok(!(H_ROLE_ARN in h), "role-arn header omitted when static keys present");
+});
+
+test("isValidRoleArn() mirrors the server's shape check", () => {
+  assert.ok(Dial9Creds.isValidRoleArn(VALID_ARN));
+  assert.ok(Dial9Creds.isValidRoleArn("arn:aws:iam::123456789012:role/path/to/reader"));
+  assert.ok(Dial9Creds.isValidRoleArn("arn:aws-us-gov:iam::123456789012:role/r"));
+  // Rejections: wrong service, a region field, short account, wildcard, non-role.
+  assert.ok(!Dial9Creds.isValidRoleArn("arn:aws:sts::123456789012:role/r"));
+  assert.ok(!Dial9Creds.isValidRoleArn("arn:aws:iam:us-east-1:123456789012:role/r"));
+  assert.ok(!Dial9Creds.isValidRoleArn("arn:aws:iam::12345:role/r"));
+  assert.ok(!Dial9Creds.isValidRoleArn("arn:aws:iam::123456789012:role/*"));
+  assert.ok(!Dial9Creds.isValidRoleArn("arn:aws:iam::123456789012:user/u"));
+  assert.ok(!Dial9Creds.isValidRoleArn(""));
+});
+
+test("clear() removes a stored role ARN too", () => {
+  freshStore();
+  Dial9Creds.setRoleArn(VALID_ARN);
   assert.strictEqual(Dial9Creds.has(), true);
   Dial9Creds.clear();
   assert.strictEqual(Dial9Creds.has(), false);

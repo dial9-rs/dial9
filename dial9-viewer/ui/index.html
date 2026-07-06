@@ -757,6 +757,10 @@
         const state = {
             bucket: bucketInput.value.trim(),
             region: (storedCreds && storedCreds.region) || '',
+            // Keep the assume-role ARN in the URL so the read stays shareable
+            // (it's not a secret; static BYOC keys are never serialized). The
+            // store is the source of truth — echo whatever it holds.
+            roleArn: (storedCreds && storedCreds.roleArn) || '',
             prefix: prefixInput.value.trim(),
             tab: currentTab,
             tz: useLocalTz ? 'local' : 'utc',
@@ -787,12 +791,29 @@
     if (urlState.q) rawSearchInput.value = urlState.q;
     if (urlState.tab === 'raw') switchTab('raw');
 
+    // A shared link can carry an assume-role ARN (aws_role_arn): "read these
+    // traces as this role". Fold it into the credentials store as the
+    // assume-role transport, so every subsequent /api/* request carries the
+    // x-dial9-aws-role-arn header and the server assumes it with its own
+    // identity. A role ARN grants nothing on its own, which is why it is safe in
+    // a link. An invalid ARN throws (Dial9Creds.setRoleArn validates the shape);
+    // surface it rather than silently falling back to the server's identity.
+    if (urlState.roleArn && window.Dial9Creds) {
+        try {
+            Dial9Creds.setRoleArn(urlState.roleArn, { region: urlState.region });
+        } catch (e) {
+            console.warn('ignoring invalid aws_role_arn in URL:', e && e.message || e);
+        }
+    }
+
     // A shared link can pin the bucket's region (aws_region). Fold it into the
     // stored credentials so every subsequent request carries it as the region
     // header — this is what lets a cross-region bucket link load without a fresh
     // detection round trip. Prefill the panel field too so it's visible. Only
     // meaningful when credentials are present (region is header-only there); on
-    // the ambient path the server uses its own configured region.
+    // the ambient path the server uses its own configured region. (The
+    // assume-role branch above already stored the region alongside the ARN; this
+    // covers the static-BYOC case and is a no-op when the ARN path ran.)
     if (urlState.region && window.Dial9Creds) {
         const regionField = document.getElementById('creds-region');
         if (regionField && !regionField.value) regionField.value = urlState.region;

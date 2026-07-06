@@ -37,6 +37,37 @@ test("parse: reads aws_region into region", () => {
   assert.strictEqual(UrlState.parse("?bucket=b").region, undefined);
 });
 
+test("parse: reads aws_role_arn into roleArn", () => {
+  const arn = "arn:aws:iam::123456789012:role/dial9-reader";
+  const s = UrlState.parse("?bucket=b&aws_role_arn=" + encodeURIComponent(arn));
+  assert.strictEqual(s.roleArn, arn);
+  // An absent role ARN stays unset (ambient / static-BYOC path).
+  assert.strictEqual(UrlState.parse("?bucket=b").roleArn, undefined);
+});
+
+test("serialize: writes roleArn as aws_role_arn", () => {
+  const arn = "arn:aws:iam::123456789012:role/dial9-reader";
+  const qs = UrlState.serialize({ bucket: "b", region: "us-west-2", roleArn: arn });
+  assert.strictEqual(
+    qs,
+    "bucket=b&aws_region=us-west-2&aws_role_arn=" + encodeURIComponent(arn)
+  );
+  // Empty roleArn is omitted (static-BYOC / ambient path carries none).
+  assert.strictEqual(UrlState.serialize({ bucket: "b", roleArn: "" }), "bucket=b");
+});
+
+test("round-trip: assume-role link carries aws_role_arn", () => {
+  const state = {
+    bucket: "b",
+    region: "us-east-1",
+    roleArn: "arn:aws:iam::123456789012:role/dial9-reader",
+    prefix: "dial9-traces",
+    last: 1,
+  };
+  const back = UrlState.parse("?" + UrlState.serialize(state));
+  assert.deepStrictEqual(back, state);
+});
+
 test("parse: tab only accepts known values", () => {
   assert.strictEqual(UrlState.parse("?tab=raw").tab, "raw");
   assert.strictEqual(UrlState.parse("?tab=browse").tab, "browse");
