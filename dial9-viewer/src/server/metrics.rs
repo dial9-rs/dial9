@@ -1,7 +1,9 @@
 //! Per-request operational metrics, published via metrique.
 //!
 //! One [`RequestMetrics`] entry is emitted for every HTTP request that reaches
-//! the API router (see [`record_request_metrics`]). //! ## Dimensions
+//! the API router (see [`record_request_metrics`]).
+//!
+//! ## Dimensions
 //!
 //! Metrics are emitted with two EMF dimension sets:
 //!
