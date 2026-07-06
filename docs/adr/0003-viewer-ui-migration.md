@@ -152,6 +152,19 @@ re-verified before cataloging). Full findings: `04-ux-findings.md`. Decisions:
 - UX changes are deliberate contract amendments and get the same parity-gate
   treatment as everything else (section 7).
 
+### 10. Large traces: segment-windowed loading
+
+Traces reach ~100 MB/min in S3; all-at-once loading cannot survive that (heap
+is ~10x raw; the 100 MB cap and issues #421/#523 are the symptom). Decision:
+two-tier pipeline - overview renders from S3 listing metadata + the EXISTING
+server Parquet aggregates (`/api/tokio-stats`, `/api/flamegraph`) with zero raw
+downloads; raw segments (independently parseable, verified) lazy-load for the
+viewport window with +/-1-segment boundary prefetch and LRU eviction under a
+resident budget. Frozen core untouched; byte-range requests rejected (gzipped
+whole-file segments). The 100 MB open cap is replaced by the resident-window
+budget; lifting it is the acceptance test. Full design: `02-architecture.md`
+section 2.8, NFR N19.
+
 ## Consequences
 
 - The repo gains a JS toolchain (vite, vitest, typescript as dev dependencies), two CI jobs, a release-pipeline build stage, and a documented Node requirement for UI contributors; end users are unaffected.

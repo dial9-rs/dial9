@@ -33,7 +33,14 @@ beat them but must not regress them.
   invariant across timeline/lanes/panels holds pixel-exact (02 A13,
   `panel_layout.js`).
 - **N5. Input caps.** The 100 MB open cap (`MAX_OPEN_BYTES`) and its disable+warn
-  behavior remain (01 H4).
+  behavior remain (01 H4) until the segment-windowed pipeline (2.8) replaces it
+  with the resident-window budget (N19).
+- **N19. Scale by windowing, not refusal.** Traces at ~100 MB/min scale are
+  navigable end to end: overview renders from listing metadata + server
+  aggregates with zero raw downloads; raw segments load lazily for the
+  viewport window with +/-1-segment boundary prefetch and LRU eviction under a
+  resident budget (~100-150 MB raw, ~10x that parsed). Whole-range analyses
+  on partial data are explicitly badged, never silently wrong. See 2.8.
 
 ### Size and dependencies
 
@@ -265,6 +272,85 @@ HTML script today:
 Where a drawing-math utility's implementation lives in the frozen core (e.g.
 `pixelDownsampleSpans`), `lib/canvas` re-exports it typed through this same
 boundary rather than importing the core itself.
+
+### 2.8 Large-trace data pipeline (segment-windowed loading)
+
+Traces reach ~100 MB/min in S3; parsed heap is ~10x raw (03 F4), so
+all-at-once loading tops out around one minute of data (hence the 100 MB cap,
+#421, #523). Replacement: a two-tier model built on three verified properties
+of the existing system:
+
+- Segments are independently parseable: a mid-stream `TRC\0` header resets
+  schemas/string pools/timestamp base (`trace_parser.js:252`), so every S3
+  object is a self-contained decode unit.
+- The segment is the atomic transfer unit: already time-partitioned in S3
+  (`.../{date}/{HHMM}/.../{epoch}-{index}.bin.gz`), whole-file gzipped, and
+  `/api/object` has no Range support - so byte-range loading is rejected, and
+  per-segment time extents come free from listing metadata (the index heatmap
+  already does this).
+- A server-side aggregation tier already exists: `ingest/aggregate` folds raw
+  segments into Parquet (per-poll rollups, stack dictionaries, CPU samples
+  partitioned by service/date/host), queried by `/api/tokio-stats` and
+  `/api/flamegraph` with progressive refinement (`refine=1`).
+
+**Tier 1 - overview (no raw bytes).** The minimap, cold-open density strip,
+and any zoomed-out view beyond the resident window render from cheap sources:
+S3 listing metadata (segment extents + sizes) and the Parquet aggregate
+endpoints. Opening a multi-hour trace shows a navigable overview immediately,
+before any raw segment downloads.
+
+**Tier 2 - detail (lazy segment window).** The store gains a `segments` slice:
+a map from segment key to state (`listed -> fetching -> parsed -> evicted`)
+plus per-segment time extent. The viewport drives it:
+
+- Need set = segments overlapping `[viewStart, viewEnd]`; fetch + parse the
+  missing ones (in the Web Worker, section 1 N-notes), render as they arrive.
+- Prefetch = +/-1 segment beyond both edges (the boundary preload), fetched at
+  idle priority so panning feels instant crossing a boundary.
+- Eviction = LRU by distance from the viewport once the resident budget is
+  exceeded; evicted segments fall back to tier-1 rendering. Parsed-window
+  invariants (min/max ts, worker set) are retained so lanes/axes stay stable.
+- Analyses that are inherently whole-range (flamegraph over a selection wider
+  than the resident window, cross-segment task follows) either scope to the
+  resident window with an explicit "partial data" badge or delegate to the
+  server aggregate endpoints - never silently wrong.
+
+**Budget (N19).** Resident raw bytes capped at a store constant (~100-150 MB
+raw, ~10x that parsed) - a window limit, not a load-time rejection. The 100 MB
+open cap and its "refuse to open" warnings (01 H4) are replaced by it.
+
+Placement: the segment-window machinery is `lib/trace/segments.ts` + the
+`segments` store slice; `load.ts` becomes its bootstrap (list, fetch initial
+window); tier-1 sources go through `lib/trace/aggregates.ts` (typed client for
+the existing endpoints). The frozen core is untouched - it already parses
+segments independently; the new code only decides WHICH segments to hand it.
+
+**Hard edges (each is a production bug if skipped):**
+
+- Stale-fetch cancellation: viewport jumps abort in-flight fetches and make
+  worker parse jobs discardable (AbortController); without it, queued stale
+  work recreates the #523 hang inside the new design.
+- Boundary-truncated polls: a poll spanning a window edge (PollStart resident,
+  PollEnd evicted/unfetched) renders as explicitly truncated - the existing
+  open-ended-poll marker (features/02 G5) extended to window edges - never as
+  a long-poll false positive. ADR-0002 gap detection assumes park/unpark
+  continuity and must treat window edges like trace edges.
+- Two-level cache: eviction drops PARSED data (the 10x cost) but retains raw
+  gzipped bytes under a separate larger budget; re-entering a window re-parses
+  (~33 MB/s) instead of re-downloading - kills S3 GET churn on pan-back.
+- Aggregate coverage: the Parquet pipeline can lag or miss hosts (the API
+  exposes `Coverage`); tier 1 degrades to listing-metadata density and never
+  blocks on aggregates.
+- Feedback + hysteresis: per-segment fetch/parse progress surfaces in the
+  status bar; eviction triggers below the hard budget since GC lags eviction.
+
+Non-goal: live/appending traces (follow mode) - explicitly out of scope for
+the migration.
+
+Sequencing: the store/segment machinery lands with the viewer.html migration
+slices (it IS the new load pipeline); tier-1 aggregate rendering can land
+earlier as it only touches new code. Full lazy windows are the enabling
+mechanism for ever lifting the 100 MB cap - lifting it is the acceptance test.
 
 ## 3. Build, test, and CI pipeline
 
