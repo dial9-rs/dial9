@@ -39,10 +39,38 @@ const BASELINE_FILES: usize = 4;
 const LIST_CONCURRENCY: usize = 24;
 
 /// Default sampling cap: stop folding a scope's tail at
-/// `min(CAP_FRACTION × files_matched, CAP_MAX_FILES)`. Tuned low so a scope
-/// plateaus quickly; "Fetch more" raises it on demand for deeper sampling.
+/// `min(CAP_FRACTION × files_matched, `[`default_cap_max`]`)`. Tuned low so a
+/// scope plateaus quickly and returns a first tree fast; "Fetch more" raises it
+/// on demand for deeper sampling.
 const CAP_FRACTION: f64 = 0.05;
-const CAP_MAX_FILES: usize = 100;
+
+/// The default cap ceiling scales with the fold pipeline's concurrency so the
+/// first fold saturates the box roughly once and returns immediately, rather
+/// than folding a large fixed batch that hammers network egress — on a small
+/// task, concurrent ~37–50 MB source GETs beyond what the egress can sustain
+/// blow the 30s S3 operation timeout. The pipeline fetches at ~2× parallelism
+/// (network-bound; see [`FoldLimits`]), so a ceiling near that folds about one
+/// fetch wave. Because folds stream back per file, the user sees the first tree
+/// as soon as one file lands regardless — a small default just stops the tail
+/// early and leaves the rest to "Fetch more".
+const CAP_FILES_PER_CORE: usize = 2;
+
+/// Clamp the parallelism-derived default cap ([`default_cap_max`]) to a sane
+/// range: never trivially small on a 1–2 core box, never unbounded on a
+/// many-core one.
+const CAP_MAX_FILES_MIN: usize = 8;
+const CAP_MAX_FILES_MAX: usize = 100;
+
+/// Parallelism-derived default ceiling for the [sampling cap](sampling_cap):
+/// `(cores × `[`CAP_FILES_PER_CORE`]`)` clamped to
+/// `[`[`CAP_MAX_FILES_MIN`]`, `[`CAP_MAX_FILES_MAX`]`]`. Falls back to 4 cores
+/// when the platform can't report parallelism.
+fn default_cap_max() -> usize {
+    let cores = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+    (cores * CAP_FILES_PER_CORE).clamp(CAP_MAX_FILES_MIN, CAP_MAX_FILES_MAX)
+}
 
 /// Hard ceiling on a client-supplied `max_files` ("Fetch more") override. The
 /// override is otherwise unbounded by the request, so without this an arbitrary
@@ -372,12 +400,13 @@ pub(crate) fn fold_stream(
 
 /// How many files a scope may fold before plateauing.
 ///
-/// Default: `min(CAP_FRACTION × matched, CAP_MAX_FILES)` — the fraction keeps
-/// small scopes sensible; the absolute ceiling stops a huge scope from chasing a
-/// proportionally huge sample. "Fetch more" passes an explicit `max_files`
-/// target that *replaces* the default cap for this scope (clamped to the matched
-/// set and the [`CAP_MAX_FILES_OVERRIDE`] hard ceiling), letting the user
-/// deliberately sample deeper than the default.
+/// Default: `min(CAP_FRACTION × matched, `[`default_cap_max`]`)` — the fraction
+/// keeps small scopes sensible; the parallelism-derived ceiling stops a huge
+/// scope from chasing a proportionally huge sample and keeps the first fold to
+/// about one fetch wave (so it returns fast without saturating egress). "Fetch
+/// more" passes an explicit `max_files` target that *replaces* the default cap
+/// for this scope (clamped to the matched set and the [`CAP_MAX_FILES_OVERRIDE`]
+/// hard ceiling), letting the user deliberately sample deeper than the default.
 ///
 /// Either way the result is floored at the baseline (so even a tiny scope folds
 /// a non-trivial sample) and clamped to the matched set (can't fold more files
@@ -387,7 +416,7 @@ fn sampling_cap(files_matched: usize, max_files_override: Option<usize>) -> usiz
         Some(explicit) => explicit.min(CAP_MAX_FILES_OVERRIDE),
         None => {
             let by_fraction = (files_matched as f64 * CAP_FRACTION).ceil() as usize;
-            by_fraction.min(CAP_MAX_FILES)
+            by_fraction.min(default_cap_max())
         }
     };
     target.max(BASELINE_FILES).min(files_matched)
@@ -503,8 +532,15 @@ mod tests {
         assert_eq!(sampling_cap(20, None), 4, "max(ceil(0.05*20), 4) = 4");
         // Larger scope: the 5% fraction exceeds the baseline.
         assert_eq!(sampling_cap(100, None), 5, "ceil(0.05*100) = 5");
-        // The absolute ceiling caps a huge scope.
-        assert_eq!(sampling_cap(100_000, None), CAP_MAX_FILES);
+        // The parallelism-derived ceiling caps a huge scope. It's machine-
+        // dependent (cores × 2, clamped), so assert against it rather than a
+        // literal, and assert the clamp bounds directly.
+        assert_eq!(sampling_cap(100_000, None), default_cap_max());
+        let cap_max = default_cap_max();
+        assert!(
+            (CAP_MAX_FILES_MIN..=CAP_MAX_FILES_MAX).contains(&cap_max),
+            "default cap ceiling stays within its clamp: {cap_max}"
+        );
         // Can't fold more files than exist.
         assert_eq!(sampling_cap(3, None), 3, "clamped to matched set");
         // "Fetch more" replaces the default but is still floored + clamped.
