@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0-alpha.2](https://github.com/dial9-rs/dial9/compare/dial9-tokio-telemetry-v0.4.0-alpha.1...dial9-tokio-telemetry-v0.4.0-alpha.2) - 2026-07-06
+
+### Added
+
+- dial9::main now enables graceful_shutdown ([#527](https://github.com/dial9-rs/dial9/pull/527))
+- *(config)* [**breaking**] in-memory support for dial9 main macro ([#490](https://github.com/dial9-rs/dial9/pull/490))
+- [**breaking**] replace `TelemetryEvent` and Rust decode side with new serde-based approach ([#485](https://github.com/dial9-rs/dial9/pull/485))
+
+### Fixed
+
+- Avoid truncation when rendering the s3 browser view ([#582](https://github.com/dial9-rs/dial9/pull/582))
+
+### Other
+
+- move memory profiling to dial9-perf-self-profile ([#591](https://github.com/dial9-rs/dial9/pull/591))
+- move event bus to dial9-core ([#549](https://github.com/dial9-rs/dial9/pull/549))
+- setup dial9-core ([#540](https://github.com/dial9-rs/dial9/pull/540))
+- *(deps)* bump s3s crates to 0.14.1 to pull in patched quick-xml ([#611](https://github.com/dial9-rs/dial9/pull/611))
+- [**breaking**] collapse handles into Dial9Handle / Dial9TokioHandle ([#535](https://github.com/dial9-rs/dial9/pull/535))
+- *(config)* Remove legacy positional config ([#538](https://github.com/dial9-rs/dial9/pull/538))
+- overlap trace download and parse (streaming decode + load-timing UX) ([#568](https://github.com/dial9-rs/dial9/pull/568))
+- Support conventional unit suffixes for viewer ([#516](https://github.com/dial9-rs/dial9/pull/516))
+- Cache the symbolizer across segments ([#462](https://github.com/dial9-rs/dial9/pull/462)) ([#465](https://github.com/dial9-rs/dial9/pull/465))
+- Add dial9-html-report skill: agent-authored HTML trace reports ([#488](https://github.com/dial9-rs/dial9/pull/488))
+- Improve Wire ID Resolution ([#487](https://github.com/dial9-rs/dial9/pull/487))
+
 ### Added
 
 - In-memory writer (`InMemoryWriter`): run the trace pipeline with no filesystem dependency, encoded segments are held in process memory and shipped by the existing processor pipeline ([#435](https://github.com/dial9-rs/dial9/pull/435))
