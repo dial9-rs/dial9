@@ -56,6 +56,8 @@ pub mod primitives;
 /// Per-call-site rate limiting for log lines.
 #[doc(hidden)]
 pub mod rate_limit;
+/// Runtime-agnostic recording-session builder.
+pub mod recorder;
 /// Geometric/Poisson sampling primitives (RNG, exponential draws).
 #[doc(hidden)]
 pub mod sampling;

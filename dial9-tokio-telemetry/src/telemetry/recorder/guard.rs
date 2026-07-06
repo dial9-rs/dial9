@@ -3,7 +3,6 @@ use crate::telemetry::task_dump_config::TaskDumpConfig;
 use std::time::Duration;
 
 use dial9_core::session::CoreSession;
-pub(crate) use dial9_core::session::WorkerHandle;
 
 use super::Dial9Handle;
 use super::SharedState;
@@ -106,6 +105,11 @@ impl TelemetryGuard {
         self.session.as_ref().and_then(|s| s.start_time())
     }
 
+    /// The underlying recording session. `None` when telemetry is disabled.
+    pub fn session(&self) -> Option<&CoreSession> {
+        self.session.as_ref()
+    }
+
     /// Enable telemetry recording. No-op on a disabled guard.
     pub fn enable(&self) {
         if let Some(s) = &self.session {
@@ -130,10 +134,8 @@ impl TelemetryGuard {
         self.tokio.as_ref().map(|t| &t.contexts)
     }
 
-    /// Task-dump settings to install on runtimes attached later.
-    pub(crate) fn taskdump_config(
-        &self,
-    ) -> Option<crate::telemetry::task_dump_config::TaskDumpConfig> {
+    /// The configured task-dump settings, if enabled.
+    pub fn taskdump_config(&self) -> Option<crate::telemetry::task_dump_config::TaskDumpConfig> {
         self.tokio.as_ref().and_then(|t| t.taskdump_config)
     }
 

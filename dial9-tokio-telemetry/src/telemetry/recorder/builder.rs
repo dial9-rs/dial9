@@ -16,8 +16,7 @@ use std::time::Duration;
 
 use super::SharedState;
 use super::attach_runtime;
-use super::guard::{TelemetryGuard, WorkerHandle};
-use dial9_core::session::CoreSession;
+use super::guard::TelemetryGuard;
 
 /// Marker: no trace path has been set yet.
 #[derive(Debug)]
@@ -730,7 +729,7 @@ impl<P, Mode: WriterMode> TracedRuntimeBuilder<P, PipelineS3, Mode> {
 }
 
 /// Crate-internal: re-unifies `build_and_start` across the pipeline-marker
-/// states so the `#[main]` macro / [`crate::Dial9Config`] path can stay generic
+/// states so the `#[main]` macro / `dial9::Dial9Config` path can stay generic
 /// over the marker `N`. The public build methods are split per state (to infer
 /// `Mode` only on the safe no-pipeline state); this trait lets the erased macro
 /// path call a single method regardless of marker.
@@ -935,12 +934,11 @@ impl TelemetryCore {
         #[builder(setters(vis = "pub(crate)"))]
         trigger: Option<crate::dump::DumpRx>,
     ) -> std::io::Result<TelemetryGuard> {
-        let start_mono_ns = crate::telemetry::events::clock_monotonic_ns();
-        let shared = Arc::new(SharedState::new(start_mono_ns));
-
         // Determine the pipeline strategy from the builder fields, then
         // delegate to `assemble_processors` — the single source of truth for
-        // which processors are used in each configuration.
+        // which processors are used in each configuration. The `Custom`
+        // pass-through means a list pre-assembled by `build_inner` is not
+        // re-symbolized.
         #[allow(unused_mut)]
         let mut segment_metadata = segment_metadata;
 
@@ -966,9 +964,6 @@ impl TelemetryCore {
             PipelineConfig::Unset
         };
 
-        #[allow(unused_mut)]
-        let mut writer = writer;
-
         let processors = assemble_processors(
             #[cfg(feature = "cpu-profiling")]
             cpu_profiling.is_some(),
@@ -976,22 +971,47 @@ impl TelemetryCore {
             pipeline,
         );
 
-        if !segment_metadata.is_empty() {
-            writer.update_segment_metadata(segment_metadata);
-        }
-
+        // The Tokio runtime-context source carries the runtime name into segment
+        // metadata, `contexts` is retained so the guard can attach runtimes.
         let contexts: super::runtime_context::RuntimeContextRegistry =
             Arc::new(Mutex::new(Vec::new()));
-        shared.push_source(Box::new(super::runtime_context::TokioRuntimesSource::new(
-            contexts.clone(),
-        )));
+
+        //  Setup a recorder and feed it the Tokio-specific source, the assembled pipeline,
+        // and the perf thread-registration hook.
+        #[allow(unused_mut)]
+        let mut builder = dial9_core::recorder::recorder(writer)
+            .source(super::runtime_context::TokioRuntimesSource::new(
+                contexts.clone(),
+            ))
+            .segment_metadata(segment_metadata)
+            .processors(processors)
+            .worker_trace_path(trace_path)
+            .on_recording_thread_start(|| {
+                #[cfg(feature = "cpu-profiling")]
+                let _ = dial9_perf_self_profile::register_current_thread();
+                move || {
+                    #[cfg(feature = "cpu-profiling")]
+                    dial9_perf_self_profile::unregister_current_thread();
+                }
+            });
+        if let Some(sink) = worker_metrics_sink {
+            builder = builder.metrics_sink(sink);
+        }
+        if let Some(interval) = worker_poll_interval {
+            builder = builder.worker_poll_interval(interval);
+        }
+        if let Some(trigger) = trigger {
+            builder = builder.trigger(trigger);
+        }
 
         #[cfg(feature = "process-resource")]
         if let Some(config) = process_resource_usage {
             #[cfg(unix)]
-            shared.push_source(Box::new(
-                dial9_perf_self_profile::ProcessResourceUsageSource::new(config),
-            ));
+            {
+                builder = builder.source(dial9_perf_self_profile::ProcessResourceUsageSource::new(
+                    config,
+                ));
+            }
             #[cfg(not(unix))]
             {
                 let _ = config;
@@ -1002,17 +1022,27 @@ impl TelemetryCore {
         }
 
         #[cfg(feature = "linux-socket")]
-        {
-            if let Some(config) = socket_accept_queues {
-                push_socket_accept_queues_source(&shared, config);
+        if let Some(config) = socket_accept_queues {
+            #[cfg(target_os = "linux")]
+            {
+                builder = builder.source(dial9_perf_self_profile::SocketAcceptQueuesSource::new(
+                    config,
+                ));
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                let _ = config;
+                tracing::warn!(
+                    "socket accept queues enabled but sock_diag is only available on Linux"
+                );
             }
         }
 
         #[cfg(feature = "cpu-profiling")]
         {
-            if let Some(ref config) = cpu_profiling {
-                match CpuProfiler::start(config.clone()) {
-                    Ok(sampler) => shared.push_source(Box::new(sampler)),
+            if let Some(config) = cpu_profiling {
+                match CpuProfiler::start(config) {
+                    Ok(sampler) => builder = builder.source(sampler),
                     Err(e) => rate_limited!(Duration::from_secs(60), {
                         tracing::warn!("failed to start CPU profiler: {e}");
                     }),
@@ -1020,7 +1050,7 @@ impl TelemetryCore {
             }
             if let Some(sched_cfg) = sched_events {
                 match SchedProfiler::new(sched_cfg) {
-                    Ok(sched) => shared.push_source(Box::new(sched)),
+                    Ok(sched) => builder = builder.source(sched),
                     Err(e) => rate_limited!(Duration::from_secs(60), {
                         tracing::warn!("failed to start scheduler event profiler: {e}");
                     }),
@@ -1028,60 +1058,7 @@ impl TelemetryCore {
             }
         }
 
-        // Spawn the background worker before the writer moves into the flush
-        // thread. `worker::spawn` owns the writer->worker fs handoff and returns
-        // `None` when there's no filesystem backend, build a config only when
-        // there are processors to run.
-        #[allow(unused_mut)]
-        let mut worker = None;
-        if !processors.is_empty() {
-            let poll_interval =
-                worker_poll_interval.unwrap_or(crate::background_task::DEFAULT_POLL_INTERVAL);
-            let metrics_sink = worker_metrics_sink
-                .clone()
-                .unwrap_or_else(metrique::writer::sink::DevNullSink::boxed);
-            let config = if let Some(tp) = trace_path {
-                crate::background_task::BackgroundTaskConfig::builder()
-                    .trace_path(tp)
-                    .poll_interval(poll_interval)
-                    .processors(processors)
-                    .metrics_sink(metrics_sink)
-                    .maybe_trigger(trigger)
-                    .build()
-            } else {
-                crate::background_task::BackgroundTaskConfig::builder()
-                    .poll_interval(poll_interval)
-                    .processors(processors)
-                    .metrics_sink(metrics_sink)
-                    .maybe_trigger(trigger)
-                    .build()
-            };
-            let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
-            let wt = crate::background_task::spawn(&writer, config, shutdown_rx, || {
-                #[cfg(feature = "cpu-profiling")]
-                let _ = dial9_perf_self_profile::register_current_thread();
-                move || {
-                    #[cfg(feature = "cpu-profiling")]
-                    dial9_perf_self_profile::unregister_current_thread();
-                }
-            });
-            if let Some(wt) = wt {
-                worker = Some(WorkerHandle::new(shutdown_tx, wt));
-            }
-        }
-
-        // Inject the cpu-profiler thread registration (perf-specific) via the thread-init hook.
-        let mut core_session = CoreSession::start(shared, writer, worker_metrics_sink, || {
-            #[cfg(feature = "cpu-profiling")]
-            let _ = dial9_perf_self_profile::register_current_thread();
-            move || {
-                #[cfg(feature = "cpu-profiling")]
-                dial9_perf_self_profile::unregister_current_thread();
-            }
-        });
-        if let Some(worker) = worker {
-            core_session.attach_worker(worker);
-        }
+        let core_session = builder.build();
 
         Ok(TelemetryGuard::enabled(
             core_session,
@@ -1131,7 +1108,7 @@ impl<M: WriterMode, S: telemetry_core_builder::State> TelemetryCoreBuilder<M, S>
 ///
 /// Construct one of two ways:
 ///
-/// - **High-level**: from a [`crate::Dial9Config`] via [`TracedRuntime::new`]
+/// - **High-level**: from a `dial9::Dial9Config` via [`TracedRuntime::new`]
 ///   (panicking, used by the `#[dial9::main]` macro) or
 ///   [`TracedRuntime::try_new`] (fallible).
 /// - **Low-level**: via [`TracedRuntime::builder`] →
@@ -1146,7 +1123,7 @@ pub struct TracedRuntime {
     pub(crate) guard: TelemetryGuard,
     #[cfg(feature = "memory-profiling")]
     pub(crate) memory_profiler_guard: Option<crate::memory_profiling::MemoryProfilerGuard>,
-    /// Graceful-shutdown timeout carried from the [`crate::Dial9Config`].
+    /// Graceful-shutdown timeout carried from the `dial9::Dial9Config`.
     /// Consumed by [`graceful_shutdown`](TracedRuntime::graceful_shutdown)
     /// (used by the `#[dial9::main]` macro). `None` skips the
     /// implicit drain.
@@ -1214,93 +1191,8 @@ impl TracedRuntime {
 }
 
 // ---------------------------------------------------------------------------
-// High-level construction: TracedRuntime::new / try_new from Dial9Config
+// High-level construction: TracedRuntime::new / try_new
 // ---------------------------------------------------------------------------
-
-/// Errors produced while constructing a [`TracedRuntime`] from a
-/// [`crate::Dial9Config`].
-///
-/// Writer-transport I/O has already been validated by the config builder's
-/// strict `build`, so the only remaining failure modes here come from the
-/// tokio runtime builder and the telemetry background worker startup.
-#[derive(Debug)]
-#[non_exhaustive]
-pub enum TelemetryRuntimeError {
-    /// Failure from [`tokio::runtime::Builder::build`].
-    TokioRuntimeBuilder(std::io::Error),
-    /// Failure from telemetry core setup (traced runtime + background worker).
-    TelemetryCore(std::io::Error),
-}
-
-impl std::fmt::Display for TelemetryRuntimeError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            TelemetryRuntimeError::TokioRuntimeBuilder(e) => {
-                write!(f, "tokio runtime builder: {e}")
-            }
-            TelemetryRuntimeError::TelemetryCore(e) => write!(f, "telemetry core: {e}"),
-        }
-    }
-}
-
-impl std::error::Error for TelemetryRuntimeError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            TelemetryRuntimeError::TokioRuntimeBuilder(e)
-            | TelemetryRuntimeError::TelemetryCore(e) => Some(e),
-        }
-    }
-}
-
-/// Drive a [`crate::current_config::Inner`] to a tokio runtime + guard.
-///
-/// `Inner::Enabled` carries a `runtime_builder` that already owns its
-/// writer, so this only materializes the tokio builder and starts it.
-/// `Inner::Disabled` produces a plain tokio runtime paired with a disabled [`TelemetryGuard`].
-fn try_assemble_dial9_config(
-    inner: crate::current_config::Inner,
-) -> Result<(tokio::runtime::Runtime, TelemetryGuard), TelemetryRuntimeError> {
-    use crate::current_config::{Inner, materialize_tokio_builder};
-
-    match inner {
-        Inner::Enabled {
-            tokio_configurators,
-            runtime_builder,
-        } => {
-            let tokio_builder = materialize_tokio_builder(&tokio_configurators);
-            let (runtime, guard) =
-                runtime_builder(tokio_builder).map_err(TelemetryRuntimeError::TelemetryCore)?;
-            Ok((runtime, guard))
-        }
-        Inner::Disabled {
-            tokio_configurators,
-        } => {
-            let runtime = materialize_tokio_builder(&tokio_configurators)
-                .build()
-                .map_err(TelemetryRuntimeError::TokioRuntimeBuilder)?;
-            Ok((runtime, TelemetryGuard::disabled()))
-        }
-    }
-}
-
-#[cfg(feature = "memory-profiling")]
-fn install_memory_profiler(
-    config: Option<crate::memory_profiling::MemoryProfilingConfig>,
-    guard: &TelemetryGuard,
-) -> Option<crate::memory_profiling::MemoryProfilerGuard> {
-    let config = config?;
-    if !guard.is_enabled() {
-        return None;
-    }
-
-    match crate::memory_profiling::MemoryProfiler::from_config(config).install(guard.handle()) {
-        Ok(memory_guard) => Some(memory_guard),
-        Err(e) => {
-            tracing::warn!(target: "dial9_telemetry", "failed to install memory profiler: {e}");
-            None
-        }
-    }
-}
 
 impl TracedRuntime {
     /// Build a [`TracedRuntime`] from a config, panicking with the
@@ -1313,8 +1205,8 @@ impl TracedRuntime {
     /// [`TelemetryGuard::graceful_shutdown`] before the runtime drops.
     ///
     /// Generic over any input that converts into a [`TracedRuntime`]: in
-    /// practice that means the fluent [`crate::Dial9Config`] (returned by
-    /// [`Dial9Config::builder`](crate::Dial9Config::builder)). The generic
+    /// practice that means the fluent `dial9::Dial9Config` (returned by
+    /// `dial9::Dial9Config::builder`). The generic
     /// shape is what keeps the macro source-compatible across input types.
     ///
     /// # Panics
@@ -1322,24 +1214,15 @@ impl TracedRuntime {
     /// Panics if the underlying conversion fails — i.e. if the tokio
     /// runtime cannot be built or the telemetry background worker fails
     /// to start. When constructing from the fluent
-    /// [`crate::Dial9Config`], writer-transport I/O has already been
+    /// `dial9::Dial9Config`, writer-transport I/O has already been
     /// validated by the config builder's strict `build`, so the only
     /// remaining failure modes are tokio-builder and telemetry-core
     /// startup I/O.
     ///
     /// For fallible construction, use [`try_new`](Self::try_new).
     ///
-    /// ```no_run
-    /// use dial9_tokio_telemetry::{Dial9Config, TracedRuntime};
-    /// let cfg = Dial9Config::builder()
-    ///     .on_disk_buffer("trace.bin")
-    ///     .max_file_size(64 * 1024 * 1024)
-    ///     .max_total_size(1024 * 1024 * 1024)
-    ///     .build()?;
-    /// let rt = TracedRuntime::new(cfg);
-    /// rt.block_on(async { /* ... */ });
-    /// # Ok::<(), Box<dyn std::error::Error>>(())
-    /// ```
+    /// The runnable example lives with the config that produces the input —
+    /// see `dial9::Dial9Config` and `#[dial9::main]`.
     pub fn new<C>(config: C) -> Self
     where
         C: TryInto<TracedRuntime>,
@@ -1353,21 +1236,9 @@ impl TracedRuntime {
     /// Fallible counterpart to [`new`](Self::new).
     ///
     /// Returns the conversion error directly: when constructing from
-    /// [`crate::Dial9Config`] that's a [`TelemetryRuntimeError`]. Use this
+    /// `dial9::Dial9Config` that's a `dial9::TelemetryRuntimeError`. Use this
     /// when you want to handle runtime construction failure rather than
     /// panic.
-    ///
-    /// ```no_run
-    /// use dial9_tokio_telemetry::{Dial9Config, TracedRuntime};
-    /// let cfg = Dial9Config::builder()
-    ///     .on_disk_buffer("trace.bin")
-    ///     .max_file_size(64 * 1024 * 1024)
-    ///     .max_total_size(1024 * 1024 * 1024)
-    ///     .build()?;
-    /// let rt = TracedRuntime::try_new(cfg)?;
-    /// rt.block_on(async { /* ... */ });
-    /// # Ok::<(), Box<dyn std::error::Error>>(())
-    /// ```
     pub fn try_new<C>(config: C) -> Result<Self, <C as TryInto<TracedRuntime>>::Error>
     where
         C: TryInto<TracedRuntime>,
@@ -1419,26 +1290,19 @@ impl TracedRuntime {
     /// 1. drops the tokio runtime so worker threads exit and flush their
     ///    thread-local telemetry buffers, then
     /// 2. if a graceful-shutdown timeout was configured on the
-    ///    [`crate::Dial9Config`] (the default is 1s; `None` when disabled via
-    ///    [`disable_graceful_shutdown`](crate::DiskConfigBuilder::disable_graceful_shutdown)),
+    ///    `dial9::Dial9Config` (the default is 1s; `None` when disabled via
+    ///    `dial9::DiskConfigBuilder::disable_graceful_shutdown`),
     ///    calls [`TelemetryGuard::graceful_shutdown`] with that timeout to
     ///    drain the background worker.
     ///
-    /// Typically paired with [`block_on`](Self::block_on):
-    ///
-    /// ```no_run
-    /// # use dial9_tokio_telemetry::{Dial9Config, TracedRuntime};
-    /// # let cfg = Dial9Config::builder().on_disk_buffer("trace.bin").max_total_size(1 << 20).build()?;
-    /// let rt = TracedRuntime::new(cfg);
-    /// let out = rt.block_on(async { /* ... */ });
-    /// rt.graceful_shutdown();
-    /// # Ok::<(), Box<dyn std::error::Error>>(())
-    /// ```
+    /// Typically paired with [`block_on`](Self::block_on): build the runtime
+    /// from a `dial9::Dial9Config`, run the body with `block_on`, then call
+    /// `graceful_shutdown`.
     ///
     /// The drain is best-effort: any error returned by
     /// [`TelemetryGuard::graceful_shutdown`] is logged at `error!` and
     /// otherwise ignored. When you need the deadline at a call site, the
-    /// configured value is available via the original [`crate::Dial9Config`];
+    /// configured value is available via the original `dial9::Dial9Config`;
     /// the low-level [`TelemetryGuard::graceful_shutdown`] also takes an
     /// explicit timeout.
     pub fn graceful_shutdown(self) {
@@ -1459,24 +1323,25 @@ impl TracedRuntime {
             tracing::error!(target: "dial9_telemetry", error = %e, "dial9 graceful shutdown failed");
         }
     }
-}
 
-impl TryFrom<crate::Dial9Config> for TracedRuntime {
-    type Error = TelemetryRuntimeError;
-
-    fn try_from(config: crate::Dial9Config) -> Result<Self, Self::Error> {
-        #[cfg(feature = "memory-profiling")]
-        let memory_profiling_config = config.memory_profiling_config;
-        let graceful_shutdown_timeout = config.graceful_shutdown_timeout;
-        let (runtime, guard) = try_assemble_dial9_config(config.inner)?;
-        #[cfg(feature = "memory-profiling")]
-        let memory_profiler_guard = install_memory_profiler(memory_profiling_config, &guard);
-        Ok(Self {
+    /// Assemble a [`TracedRuntime`] from already-built parts.
+    ///
+    /// Prefer [`new`](Self::new) / [`try_new`](Self::try_new) for the
+    /// usual high-level construction.
+    pub fn from_parts(
+        runtime: tokio::runtime::Runtime,
+        guard: TelemetryGuard,
+        graceful_shutdown_timeout: Option<Duration>,
+        #[cfg(feature = "memory-profiling")] memory_profiler_guard: Option<
+            crate::memory_profiling::MemoryProfilerGuard,
+        >,
+    ) -> Self {
+        Self {
             runtime,
             guard,
             #[cfg(feature = "memory-profiling")]
             memory_profiler_guard,
             graceful_shutdown_timeout,
-        })
+        }
     }
 }

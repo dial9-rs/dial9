@@ -4,7 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
-use dial9_tokio_telemetry::{Dial9Config, TracedRuntime};
+use dial9::{Dial9Config, TracedRuntime};
 
 /// Names a directory entry that looks like a boot_id (`{4-alpha}-{pid}`).
 fn is_boot_id_dir(path: &Path) -> bool {
@@ -141,7 +141,7 @@ fn gc_enabled_reclaims_dead_peer() {
 fn s3_boot_id_matches_namespace_dir() {
     use std::collections::HashMap;
 
-    use dial9_tokio_telemetry::background_task::s3::S3Config;
+    use dial9::background_task::s3::S3Config;
     use dial9_trace_format::decoder::Decoder;
 
     let dir = tempfile::tempdir().unwrap();
@@ -149,7 +149,7 @@ fn s3_boot_id_matches_namespace_dir() {
         .on_disk_buffer(dir.path().join("trace.bin"))
         .max_total_size(4 * 1024 * 1024)
         .with_runtime(|r| {
-            r.with_s3_uploader::<dial9_tokio_telemetry::telemetry::Disk>(
+            r.with_s3_uploader::<dial9::telemetry::Disk>(
                 S3Config::builder()
                     .bucket("test-bucket")
                     .service_name("test-svc")

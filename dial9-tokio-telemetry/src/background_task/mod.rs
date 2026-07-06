@@ -1,4 +1,3 @@
-pub(crate) mod boot_id;
 #[cfg(test)]
 pub(crate) mod testutil;
 
@@ -13,7 +12,6 @@ use {crate::rate_limit::rate_limited, std::future::Future, std::pin::Pin, std::t
 pub use dial9_core::pipeline::{ProcessError, ProcessErrorKind, SegmentData, SegmentProcessor};
 pub use dial9_core::worker::BackgroundTaskConfig;
 pub(crate) use dial9_core::worker::processors::{GzipCompressor, WriteBackProcessor};
-pub(crate) use dial9_core::worker::{DEFAULT_POLL_INTERVAL, spawn};
 #[cfg(feature = "worker-s3")]
 pub use dial9_utils::s3;
 #[cfg(feature = "worker-s3")]

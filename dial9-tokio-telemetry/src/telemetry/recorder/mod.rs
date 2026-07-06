@@ -11,8 +11,7 @@ pub(crate) use runtime_context::poll_start_ts_monotonic;
 
 pub use builder::{
     BuildAndStartRuntime, HasTracePath, NoTracePath, PipelineCustom, PipelineS3, PipelineUnset,
-    TelemetryCore, TelemetryCoreBuilder, TelemetryRuntimeError, TracedRuntime,
-    TracedRuntimeBuilder,
+    TelemetryCore, TelemetryCoreBuilder, TracedRuntime, TracedRuntimeBuilder,
 };
 pub use dial9_core::handle::Dial9Handle;
 pub use guard::{TelemetryGuard, TraceRuntimeCoreBuilder};
@@ -1405,89 +1404,6 @@ mod tests {
     }
 
     // ---------------------------------------------------------------
-    // High-level construction tests (TracedRuntime::new / try_new)
-    // ---------------------------------------------------------------
-
-    fn dial9_config_tmp_base_path() -> std::path::PathBuf {
-        let dir = tempfile::tempdir().expect("tempdir");
-        // Leak the TempDir so it isn't deleted while the test runs.
-        let path = dir.path().join("trace.bin");
-        std::mem::forget(dir);
-        path
-    }
-
-    #[test]
-    fn try_new_enabled_path_returns_value_and_exposes_guard() {
-        let cfg = crate::Dial9Config::builder()
-            .on_disk_buffer(dial9_config_tmp_base_path())
-            .max_file_size(1024 * 1024)
-            .max_total_size(4 * 1024 * 1024)
-            .build()
-            .expect("strict build should succeed");
-        let rt = TracedRuntime::try_new(cfg).expect("runtime should build");
-        assert!(
-            rt.guard().is_enabled(),
-            "enabled config must install a live guard"
-        );
-        // Smoke-test the runtime accessor — exists and is usable.
-        let _ = rt.runtime().handle();
-        let value = rt.block_on(async { 5u32 });
-        assert_eq!(value, 5);
-    }
-
-    #[test]
-    fn try_new_disabled_path_returns_value_no_guard() {
-        let cfg = crate::Dial9Config::builder()
-            .on_disk_buffer(dial9_config_tmp_base_path())
-            .enabled(false)
-            .build()
-            .expect("disabled build should succeed");
-        let rt = TracedRuntime::try_new(cfg).expect("disabled runtime should build");
-        assert!(
-            !rt.guard().is_enabled(),
-            "disabled config must yield an inert guard"
-        );
-        let value = rt.block_on(async { 11u32 });
-        assert_eq!(value, 11);
-    }
-
-    #[test]
-    fn new_returns_runtime_for_valid_disabled_config() {
-        // Happy-path counterpart to the strict-I/O panic story: when the
-        // config is valid `TracedRuntime::new` returns a usable runtime
-        // without panicking. The matching panic path is covered by hand at
-        // the type level — `new` is a thin wrapper around `try_into()` that
-        // calls `unwrap_or_else(|e| panic!(...))`, and the surrounding
-        // tests assert that the inner `TelemetryRuntimeError` formats
-        // through `Display` correctly.
-        let cfg = crate::Dial9Config::builder()
-            .on_disk_buffer(dial9_config_tmp_base_path())
-            .enabled(false)
-            .build()
-            .expect("disabled build should succeed");
-        let rt = TracedRuntime::new(cfg);
-        let value = rt.block_on(async { 13u32 });
-        assert_eq!(value, 13);
-    }
-
-    #[test]
-    fn telemetry_runtime_error_display_and_source_chain() {
-        let inner = std::io::Error::other("boom");
-        let err = TelemetryRuntimeError::TelemetryCore(inner);
-        let display = format!("{err}");
-        assert!(
-            display.contains("telemetry core:"),
-            "Display should label the variant, got: {display}"
-        );
-        assert!(
-            display.contains("boom"),
-            "Display should include the inner io::Error message, got: {display}"
-        );
-        let source = std::error::Error::source(&err);
-        assert!(source.is_some(), "source() must return the inner io::Error");
-    }
-
-    // ---------------------------------------------------------------
     // Always-present TelemetryGuard / inert Dial9Handle (Phase 3)
     // ---------------------------------------------------------------
 
@@ -1543,29 +1459,6 @@ mod tests {
         guard
             .graceful_shutdown(std::time::Duration::from_secs(1))
             .expect("graceful_shutdown on disabled guard must be Ok(())");
-    }
-
-    /// The guard returned from a disabled `Dial9Config` is always
-    /// present, exposes an inert handle, and reports `is_enabled() ==
-    /// false`.
-    #[test]
-    fn disabled_dial9_config_yields_inert_guard() {
-        let cfg = crate::Dial9Config::builder()
-            .on_disk_buffer(dial9_config_tmp_base_path())
-            .enabled(false)
-            .build()
-            .expect("disabled build should succeed");
-        let rt = TracedRuntime::try_new(cfg).expect("disabled runtime should build");
-
-        let guard = rt.guard();
-        assert!(!guard.is_enabled());
-        let handle = guard.handle();
-        assert!(!handle.is_enabled());
-        // start_time is None on a disabled guard.
-        assert!(guard.start_time().is_none());
-        // The runtime still works end-to-end.
-        let value = rt.block_on(async { 21u32 });
-        assert_eq!(value, 21);
     }
 
     #[cfg(feature = "worker-s3")]

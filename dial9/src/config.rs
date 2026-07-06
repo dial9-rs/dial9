@@ -28,16 +28,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::telemetry::recorder::{
+use dial9_core::writer::{Disk, DiskWriter, InMemoryWriter, Memory, SegmentWriter, WriterMode};
+use dial9_tokio_telemetry::telemetry::{
     BuildAndStartRuntime, HasTracePath, PipelineUnset, TelemetryGuard, TracedRuntime,
     TracedRuntimeBuilder,
 };
-use crate::telemetry::writer::{
-    Disk, DiskWriter, InMemoryWriter, Memory, SegmentWriter, WriterMode,
-};
 
 #[cfg(feature = "memory-profiling")]
-type EnvMemoryProfilingConfig = crate::memory_profiling::MemoryProfilingConfig;
+type EnvMemoryProfilingConfig = dial9_perf_self_profile::memory_profiling::MemoryProfilingConfig;
 #[cfg(not(feature = "memory-profiling"))]
 type EnvMemoryProfilingConfig = ();
 
@@ -652,10 +650,10 @@ fn apply_runtime_env<M>(
 
     if config.task_dump_enabled {
         let task_dump_config = match config.task_dump_idle_threshold {
-            Some(threshold) => crate::telemetry::TaskDumpConfig::builder()
+            Some(threshold) => dial9_tokio_telemetry::telemetry::TaskDumpConfig::builder()
                 .idle_threshold(threshold)
                 .build(),
-            None => crate::telemetry::TaskDumpConfig::default(),
+            None => dial9_tokio_telemetry::telemetry::TaskDumpConfig::default(),
         };
         runtime = runtime.with_task_dumps(task_dump_config);
     }
@@ -663,10 +661,10 @@ fn apply_runtime_env<M>(
     #[cfg(feature = "process-resource")]
     if config.process_resource_usage_enabled {
         let process_resource_usage_config = match config.process_resource_usage_sample_interval {
-            Some(interval) => crate::telemetry::ProcessResourceUsageConfig::builder()
+            Some(interval) => dial9_perf_self_profile::ProcessResourceUsageConfig::builder()
                 .sample_interval(interval)
                 .build(),
-            None => crate::telemetry::ProcessResourceUsageConfig::default(),
+            None => dial9_perf_self_profile::ProcessResourceUsageConfig::default(),
         };
         runtime = runtime.with_process_resource_usage(process_resource_usage_config);
     }
@@ -681,10 +679,10 @@ fn apply_runtime_env<M>(
     #[cfg(feature = "linux-socket")]
     if config.socket_accept_queues_enabled == Some(true) {
         let socket_accept_queues_config = match config.socket_accept_queues_sample_interval {
-            Some(interval) => crate::telemetry::SocketAcceptQueuesConfig::builder()
+            Some(interval) => dial9_perf_self_profile::SocketAcceptQueuesConfig::builder()
                 .sample_interval(interval)
                 .build(),
-            None => crate::telemetry::SocketAcceptQueuesConfig::default(),
+            None => dial9_perf_self_profile::SocketAcceptQueuesConfig::default(),
         };
         runtime = runtime.with_socket_accept_queues(socket_accept_queues_config);
     }
@@ -725,16 +723,18 @@ fn apply_runtime_env<M>(
 #[cfg(feature = "memory-profiling")]
 fn build_memory_profiling_config(
     config: ResolvedMemoryProfilingConfig,
-) -> crate::memory_profiling::MemoryProfilingConfig {
-    crate::memory_profiling::MemoryProfilingConfig::builder()
+) -> dial9_perf_self_profile::memory_profiling::MemoryProfilingConfig {
+    dial9_perf_self_profile::memory_profiling::MemoryProfilingConfig::builder()
         .maybe_sample_rate_bytes(config.sample_rate_bytes)
         .maybe_track_liveset(config.track_liveset)
         .build()
 }
 
 #[cfg(feature = "worker-s3")]
-fn build_s3_config(config: ResolvedS3Config) -> crate::background_task::s3::S3Config {
-    crate::background_task::s3::S3Config::builder()
+fn build_s3_config(
+    config: ResolvedS3Config,
+) -> dial9_tokio_telemetry::background_task::s3::S3Config {
+    dial9_tokio_telemetry::background_task::s3::S3Config::builder()
         .bucket(config.bucket)
         .service_name(config.service_name.unwrap_or_else(default_service_name))
         .prefix(config.prefix)
@@ -1011,9 +1011,8 @@ impl Dial9Config {
             })
         })?;
 
-        let namespace =
-            crate::background_task::boot_id::setup_namespace(&base_path, gc_dead_namespaces)
-                .map_err(Dial9ConfigBuilderError::Io)?;
+        let namespace = dial9_core::boot_id::setup_namespace(&base_path, gc_dead_namespaces)
+            .map_err(Dial9ConfigBuilderError::Io)?;
 
         let mut writer = DiskWriter::builder()
             .base_path(namespace.trace_path.clone())
@@ -1294,19 +1293,128 @@ fn downgrade_on_err(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Dial9Config -> TracedRuntime conversion
+// ---------------------------------------------------------------------------
+
+/// Errors produced while constructing a [`TracedRuntime`] from a
+/// [`Dial9Config`].
+///
+/// Writer-transport I/O has already been validated by the config builder's
+/// strict `build`, so the only remaining failure modes here come from the
+/// tokio runtime builder and the telemetry background worker startup.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum TelemetryRuntimeError {
+    /// Failure from [`tokio::runtime::Builder::build`].
+    TokioRuntimeBuilder(std::io::Error),
+    /// Failure from telemetry core setup (traced runtime + background worker).
+    TelemetryCore(std::io::Error),
+}
+
+impl std::fmt::Display for TelemetryRuntimeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TelemetryRuntimeError::TokioRuntimeBuilder(e) => {
+                write!(f, "tokio runtime builder: {e}")
+            }
+            TelemetryRuntimeError::TelemetryCore(e) => write!(f, "telemetry core: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for TelemetryRuntimeError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            TelemetryRuntimeError::TokioRuntimeBuilder(e)
+            | TelemetryRuntimeError::TelemetryCore(e) => Some(e),
+        }
+    }
+}
+
+/// Drive an [`Inner`] to a tokio runtime + guard.
+///
+/// `Inner::Enabled` carries a `runtime_builder` that already owns its writer,
+/// so this only materializes the tokio builder and starts it.
+/// `Inner::Disabled` produces a plain tokio runtime paired with a disabled
+/// [`TelemetryGuard`].
+fn try_assemble_dial9_config(
+    inner: Inner,
+) -> Result<(tokio::runtime::Runtime, TelemetryGuard), TelemetryRuntimeError> {
+    match inner {
+        Inner::Enabled {
+            tokio_configurators,
+            runtime_builder,
+        } => {
+            let tokio_builder = materialize_tokio_builder(&tokio_configurators);
+            let (runtime, guard) =
+                runtime_builder(tokio_builder).map_err(TelemetryRuntimeError::TelemetryCore)?;
+            Ok((runtime, guard))
+        }
+        Inner::Disabled {
+            tokio_configurators,
+        } => {
+            let tokio_builder = materialize_tokio_builder(&tokio_configurators);
+            TracedRuntime::build_disabled(tokio_builder)
+                .map_err(TelemetryRuntimeError::TokioRuntimeBuilder)
+        }
+    }
+}
+
+#[cfg(feature = "memory-profiling")]
+fn install_memory_profiler(
+    config: Option<dial9_perf_self_profile::memory_profiling::MemoryProfilingConfig>,
+    guard: &TelemetryGuard,
+) -> Option<dial9_perf_self_profile::memory_profiling::MemoryProfilerGuard> {
+    let config = config?;
+    if !guard.is_enabled() {
+        return None;
+    }
+
+    match dial9_perf_self_profile::memory_profiling::MemoryProfiler::from_config(config)
+        .install(guard.handle())
+    {
+        Ok(memory_guard) => Some(memory_guard),
+        Err(e) => {
+            tracing::warn!(target: "dial9_telemetry", "failed to install memory profiler: {e}");
+            None
+        }
+    }
+}
+
+impl TryFrom<Dial9Config> for TracedRuntime {
+    type Error = TelemetryRuntimeError;
+
+    fn try_from(config: Dial9Config) -> Result<Self, Self::Error> {
+        #[cfg(feature = "memory-profiling")]
+        let memory_profiling_config = config.memory_profiling_config;
+        let graceful_shutdown_timeout = config.graceful_shutdown_timeout;
+        let (runtime, guard) = try_assemble_dial9_config(config.inner)?;
+        #[cfg(feature = "memory-profiling")]
+        let memory_profiler_guard = install_memory_profiler(memory_profiling_config, &guard);
+        Ok(TracedRuntime::from_parts(
+            runtime,
+            guard,
+            graceful_shutdown_timeout,
+            #[cfg(feature = "memory-profiling")]
+            memory_profiler_guard,
+        ))
+    }
+}
+
 /// Compile-fail assertions for the no-mix gating.
 ///
 /// `max_file_size` is disk-only, rejected on the memory builder:
 ///
 /// ```compile_fail
-/// use dial9_tokio_telemetry::Dial9Config;
+/// use dial9::Dial9Config;
 /// let _ = Dial9Config::builder().in_memory_buffer().max_file_size(1024);
 /// ```
 ///
 /// `write_back()` exists only for the disk writer:
 ///
 /// ```compile_fail
-/// use dial9_tokio_telemetry::Dial9Config;
+/// use dial9::Dial9Config;
 /// let _ = Dial9Config::builder()
 ///     .in_memory_buffer()
 ///     .max_total_size(16 * 1024 * 1024)
@@ -1335,10 +1443,48 @@ mod tests {
         path
     }
 
-    /// A path under a directory that does not exist; DiskWriter::build()
-    /// will fail to create the trace file there.
+    /// A base path whose parent is a regular file, so creating the trace
+    /// directory fails with `NotADirectory`. Stays unwritable even for root (a
+    /// nonexistent dir wouldn't, since root just creates it), which the
+    /// I/O-failure tests rely on.
     fn unwritable_base_path() -> PathBuf {
-        PathBuf::from("/this/dir/does/not/exist/dial9_test_trace.bin")
+        let dir = tempfile::tempdir().expect("tempdir");
+        let blocker = dir.path().join("not-a-dir");
+        std::fs::write(&blocker, b"x").expect("write blocker file");
+        // Leak the TempDir so the blocker file outlives the test.
+        std::mem::forget(dir);
+        blocker.join("trace.bin")
+    }
+
+    /// Names of the sources installed on the runtime's session, reached through
+    /// the public `guard().session()` accessor.
+    fn source_names(rt: &TracedRuntime) -> Vec<String> {
+        use crate::Source;
+        rt.guard()
+            .session()
+            .expect("enabled session")
+            .shared()
+            .expect("enabled session")
+            .with_sources_mut(|sources| sources.iter().map(|s| s.name().to_string()).collect())
+            .expect("sources lock")
+    }
+
+    /// Segment metadata contributed by the runtime's sources.
+    fn segment_metadata(rt: &TracedRuntime) -> Vec<(String, String)> {
+        use crate::Source;
+        rt.guard()
+            .session()
+            .expect("enabled session")
+            .shared()
+            .expect("enabled session")
+            .with_sources_mut(|sources| {
+                let mut out = Vec::new();
+                for source in sources.iter_mut() {
+                    source.segment_metadata(&mut out);
+                }
+                out
+            })
+            .expect("sources lock")
     }
 
     #[derive(Default)]
@@ -1713,7 +1859,7 @@ mod tests {
             .filter_map(Result::ok)
             .any(|entry| {
                 let name = entry.file_name().to_string_lossy().to_string();
-                crate::background_task::boot_id::is_valid_boot_id(&name)
+                dial9_core::boot_id::is_valid_boot_id(&name)
                     && entry.path().is_dir()
                     && std::fs::read_dir(entry.path())
                         .into_iter()
@@ -1737,10 +1883,7 @@ mod tests {
 
         let cfg = Dial9Config::from_env_source(&env);
         let rt = TracedRuntime::try_new(cfg).expect("runtime should build");
-        let shared = rt.guard().shared().expect("telemetry should be enabled");
-        let runtime_meta = shared
-            .with_sources_mut(crate::telemetry::recorder::source::collect_segment_metadata)
-            .unwrap();
+        let runtime_meta = segment_metadata(&rt);
         let runtime_keys: Vec<&str> = runtime_meta
             .iter()
             .map(|(k, _)| k.as_str())
@@ -1751,11 +1894,11 @@ mod tests {
             ["runtime.api-runtime"],
             "exactly one runtime, named from env, should surface in segment metadata"
         );
-        let config = rt
-            .guard()
-            .taskdump_config()
-            .expect("env config should configure task dumps");
-        assert_eq!(config.idle_threshold(), Duration::from_millis(25));
+        assert_eq!(
+            rt.guard().taskdump_config().map(|c| c.idle_threshold()),
+            Some(Duration::from_millis(25)),
+            "env config should configure task dumps"
+        );
     }
 
     #[cfg(all(unix, feature = "process-resource"))]
@@ -1766,13 +1909,10 @@ mod tests {
 
         let cfg = Dial9Config::from_env_source(&env);
         let rt = TracedRuntime::try_new(cfg).expect("runtime should build");
-        let shared = rt.guard().shared().expect("telemetry should be enabled");
         assert!(
-            shared
-                .with_sources_mut(|sources| {
-                    sources.iter().any(|s| s.name() == "process_resource_usage")
-                })
-                .unwrap(),
+            source_names(&rt)
+                .iter()
+                .any(|name| name == "process_resource_usage"),
             "from_env should enable process resource usage by default on Unix"
         );
     }
@@ -1785,13 +1925,10 @@ mod tests {
 
         let cfg = Dial9Config::from_env_source(&env);
         let rt = TracedRuntime::try_new(cfg).expect("runtime should build");
-        let shared = rt.guard().shared().expect("telemetry should be enabled");
         assert!(
-            shared
-                .with_sources_mut(|sources| {
-                    sources.iter().all(|s| s.name() != "process_resource_usage")
-                })
-                .unwrap(),
+            source_names(&rt)
+                .iter()
+                .all(|name| name != "process_resource_usage"),
             "explicit env opt-out should disable process resource usage"
         );
     }
@@ -1804,13 +1941,10 @@ mod tests {
 
         let cfg = Dial9Config::from_env_source(&env);
         let rt = TracedRuntime::try_new(cfg).expect("runtime should build");
-        let shared = rt.guard().shared().expect("telemetry should be enabled");
         assert!(
-            shared
-                .with_sources_mut(|sources| {
-                    sources.iter().all(|s| s.name() != "socket_accept_queues")
-                })
-                .unwrap(),
+            source_names(&rt)
+                .iter()
+                .all(|name| name != "socket_accept_queues"),
             "from_env should leave socket accept queues disabled by default"
         );
     }
@@ -1823,13 +1957,10 @@ mod tests {
 
         let cfg = Dial9Config::from_env_source(&env);
         let rt = TracedRuntime::try_new(cfg).expect("runtime should build");
-        let shared = rt.guard().shared().expect("telemetry should be enabled");
         assert!(
-            shared
-                .with_sources_mut(|sources| {
-                    sources.iter().any(|s| s.name() == "socket_accept_queues")
-                })
-                .unwrap(),
+            source_names(&rt)
+                .iter()
+                .any(|name| name == "socket_accept_queues"),
             "explicit env opt-in should enable socket accept queues"
         );
     }
@@ -1842,16 +1973,13 @@ mod tests {
         let cfg = Dial9Config::from_env_source(&env);
         let rt = TracedRuntime::try_new(cfg).expect("runtime should build");
         assert!(rt.guard().is_enabled(), "telemetry should remain enabled");
-        let shared = rt.guard().shared().expect("telemetry should be enabled");
-        let runtime_meta = shared
-            .with_sources_mut(crate::telemetry::recorder::source::collect_segment_metadata)
-            .unwrap();
+        let runtime_meta = segment_metadata(&rt);
         assert!(
             !runtime_meta.iter().any(|(k, _)| k.starts_with("runtime.")),
             "no Tokio runtime metadata should be present when Tokio instrumentation is disabled"
         );
         assert!(
-            !rt.block_on(async { crate::telemetry::Dial9Handle::current().is_enabled() }),
+            !rt.block_on(async { crate::current_handle().is_enabled() }),
             "Dial9Handle::current() should remain inert without Tokio hooks"
         );
     }
@@ -1924,7 +2052,7 @@ mod tests {
 
     #[test]
     fn in_memory_with_runtime_pipeline_runs_and_builds_enabled() {
-        use crate::background_task::{ProcessError, SegmentData, SegmentProcessor};
+        use dial9_core::pipeline::{ProcessError, SegmentData, SegmentProcessor};
         use std::future::Future;
         use std::pin::Pin;
 
@@ -2311,17 +2439,18 @@ mod tests {
             .graceful_shutdown(Duration::from_millis(250))
             .build()
             .expect("build should succeed");
-        let rt = TracedRuntime::try_new(cfg).expect("runtime should build");
         assert_eq!(
-            rt.graceful_shutdown_timeout,
+            cfg.graceful_shutdown_timeout,
             Some(Duration::from_millis(250)),
-            "the configured timeout must flow into the TracedRuntime"
+            "the configured timeout is carried on the config"
         );
+        // The build must still succeed
+        let _rt = TracedRuntime::try_new(cfg).expect("runtime should build");
     }
 
     #[test]
     fn graceful_shutdown_drains_worker_after_block_on() {
-        use crate::background_task::{ProcessError, SegmentData, SegmentProcessor};
+        use dial9_core::pipeline::{ProcessError, SegmentData, SegmentProcessor};
         use std::future::Future;
         use std::pin::Pin;
 
@@ -2374,5 +2503,97 @@ mod tests {
         let rt = TracedRuntime::try_new(cfg).expect("disabled runtime should build");
         assert_eq!(rt.block_on(async { 5u32 }), 5);
         rt.graceful_shutdown();
+    }
+
+    // ---------------------------------------------------------------
+    // High-level construction (TracedRuntime::new / try_new / TryFrom)
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn try_new_enabled_path_returns_value_and_exposes_guard() {
+        let cfg = Dial9Config::builder()
+            .on_disk_buffer(tmp_base_path())
+            .max_file_size(1024 * 1024)
+            .max_total_size(4 * 1024 * 1024)
+            .build()
+            .expect("strict build should succeed");
+        let rt = TracedRuntime::try_new(cfg).expect("runtime should build");
+        assert!(
+            rt.guard().is_enabled(),
+            "enabled config must install a live guard"
+        );
+        // Smoke-test the runtime accessor — exists and is usable.
+        let _ = rt.runtime().handle();
+        let value = rt.block_on(async { 5u32 });
+        assert_eq!(value, 5);
+    }
+
+    #[test]
+    fn try_new_disabled_path_returns_value_no_guard() {
+        let cfg = Dial9Config::builder()
+            .on_disk_buffer(tmp_base_path())
+            .enabled(false)
+            .build()
+            .expect("disabled build should succeed");
+        let rt = TracedRuntime::try_new(cfg).expect("disabled runtime should build");
+        assert!(
+            !rt.guard().is_enabled(),
+            "disabled config must yield an inert guard"
+        );
+        let value = rt.block_on(async { 11u32 });
+        assert_eq!(value, 11);
+    }
+
+    #[test]
+    fn new_returns_runtime_for_valid_disabled_config() {
+        // Happy-path counterpart to the strict-I/O panic story: a valid config
+        // makes `TracedRuntime::new` return a usable runtime without panicking.
+        // `new` is a thin wrapper around `try_into()` that panics on error; the
+        // sibling test asserts the inner `TelemetryRuntimeError` `Display`.
+        let cfg = Dial9Config::builder()
+            .on_disk_buffer(tmp_base_path())
+            .enabled(false)
+            .build()
+            .expect("disabled build should succeed");
+        let rt = TracedRuntime::new(cfg);
+        let value = rt.block_on(async { 13u32 });
+        assert_eq!(value, 13);
+    }
+
+    #[test]
+    fn telemetry_runtime_error_display_and_source_chain() {
+        let inner = std::io::Error::other("boom");
+        let err = TelemetryRuntimeError::TelemetryCore(inner);
+        let display = format!("{err}");
+        assert!(
+            display.contains("telemetry core:"),
+            "Display should label the variant, got: {display}"
+        );
+        assert!(
+            display.contains("boom"),
+            "Display should include the inner io::Error message, got: {display}"
+        );
+        let source = std::error::Error::source(&err);
+        assert!(source.is_some(), "source() must return the inner io::Error");
+    }
+
+    #[test]
+    fn disabled_dial9_config_yields_inert_guard() {
+        let cfg = Dial9Config::builder()
+            .on_disk_buffer(tmp_base_path())
+            .enabled(false)
+            .build()
+            .expect("disabled build should succeed");
+        let rt = TracedRuntime::try_new(cfg).expect("disabled runtime should build");
+
+        let guard = rt.guard();
+        assert!(!guard.is_enabled());
+        let handle = guard.handle();
+        assert!(!handle.is_enabled());
+        // start_time is None on a disabled guard.
+        assert!(guard.start_time().is_none());
+        // The runtime still works end-to-end.
+        let value = rt.block_on(async { 21u32 });
+        assert_eq!(value, 21);
     }
 }

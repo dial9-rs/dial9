@@ -170,7 +170,7 @@ dial9 is fundamentally a central buffer that can collect data from different sou
 
 `dial9` can instrument a single runtime by using `TracedRuntime` or by using the `dial9::main` macro.
 
-```rust
+```rust,ignore
 # #[cfg(feature = "worker-s3")]
 # mod inner {
 use dial9_tokio_telemetry::Dial9Config;

@@ -1,11 +1,12 @@
 //! The main crate for dial9 telemetry.
 //!
-//! Most applications want the `tokio` feature: `#[dial9::main]`, [`TracedRuntime`],
-//! [`spawn`], and the `Dial9Config` builders. Library authors who only need to
+//! Most applications want the `tokio` feature: `#[dial9::main]`, `TracedRuntime`,
+//! `spawn`, and the `Dial9Config` builders. Library authors who only need to
 //! record events into a trace can use the always-available core API
-//! ([`Dial9Handle`], [`record_event`], [`Source`]) without pulling in Tokio.
+//! ([`recorder`](fn@recorder), [`Dial9Handle`], [`record_event`], [`Source`])
+//! without pulling in Tokio.
 //!
-//! Profiling ([`cpu-profiling`], [`memory-profiling`]), the tracing-subscriber
+//! Profiling (`cpu-profiling`, `memory-profiling`), the tracing-subscriber
 //! layer, and S3 upload are behind feature gates. The viewer CLI ships in the
 //! `dial9` binary (the `cli` feature, on by default).
 
@@ -13,6 +14,7 @@
 pub use dial9_core::buffer::{self, Encodable, ThreadLocalEncoder};
 pub use dial9_core::clock::{self, clock_monotonic_ns};
 pub use dial9_core::handle::{self, Dial9Handle, clear_tl_handle, current_handle, set_tl_handle};
+pub use dial9_core::recorder::{self, RecorderBuilder, recorder};
 pub use dial9_core::session::{self, CoreSession};
 pub use dial9_core::source::{self, FlushContext, Source};
 pub use dial9_core::writer::{
@@ -35,10 +37,14 @@ pub use dial9_core::{dump, pipeline, worker};
 #[cfg(feature = "tokio")]
 pub use dial9_macro::main;
 #[cfg(feature = "tokio")]
-pub use dial9_tokio_telemetry::{
+pub use dial9_tokio_telemetry::{TracedFuture, TracedRuntime, background_task, spawn, telemetry};
+
+#[cfg(feature = "tokio")]
+mod config;
+#[cfg(feature = "tokio")]
+pub use config::{
     Dial9Config, Dial9ConfigBuilder, Dial9ConfigBuilderError, DiskConfigBuilder,
-    MemoryConfigBuilder, TelemetryRuntimeError, TracedFuture, TracedRuntime, ValidationError,
-    background_task, spawn, telemetry,
+    MemoryConfigBuilder, TelemetryRuntimeError, ValidationError,
 };
 
 // CPU and scheduler profiling.
