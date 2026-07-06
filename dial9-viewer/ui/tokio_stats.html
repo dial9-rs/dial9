@@ -580,6 +580,12 @@
     } catch (e) {
       if (token !== loadToken) return; // superseded; ignore its error
       loading = false;
+      // One period's stream failed. Abort the siblings still in flight —
+      // otherwise Promise.all has already rejected but their SSE streams stay
+      // open, and per the note above the server keeps folding source files
+      // (holding fold permits) until each hits the cap. Only the next
+      // loadAll() would otherwise cancel them.
+      if (loadAbort) loadAbort.abort();
       statusEl.textContent = "Error: " + e.message;
       statusEl.className = "status error";
     }
