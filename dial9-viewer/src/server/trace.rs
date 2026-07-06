@@ -60,10 +60,18 @@ pub async fn get_object(
         .await
         .map_err(storage_error_response)?;
 
+    // Stream-scoped metric: emitted when the body stream is dropped (normal end
+    // or truncation). Moved into the `inspect_err` closure below so it lives as
+    // long as the stream; the closure flips `truncated_mid_stream` on error.
+    // This is a *separate* entry from the per-request metric because the outcome
+    // is only known after the 200 headers are already sent.
+    let mut stream_metrics = crate::server::metrics::ObjectStreamMetrics::arm("/api/object");
+
     // Log a chunk error rather than dropping it: once streaming has begun the
     // status line is already sent, so this is the only signal that the response
     // was truncated. Per-request (not in a loop), so a plain warn! is fine.
     let body_stream = object.stream.inspect_err(move |e| {
+        stream_metrics.truncated_mid_stream = 1;
         tracing::warn!(
             bucket = %bucket,
             key = %key,

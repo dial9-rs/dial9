@@ -9,8 +9,8 @@ pub struct ConfigResponse {
     pub default_bucket: Option<String>,
     pub default_prefix: Option<String>,
     /// True when the server runs demand-driven aggregation, so the client's
-    /// flamegraph button should drive the sampled `/api/flamegraph?api=1` loop
-    /// (scope-based) instead of streaming raw traces for client-side decode.
+    /// flamegraph button should open the sampled `/api/flamegraph?api=1` SSE
+    /// stream (scope-based) instead of streaming raw traces for client-side decode.
     pub aggregation_enabled: bool,
     /// Whether the UI should offer the bring-your-own-credentials panel.
     pub supports_byo_credentials: bool,

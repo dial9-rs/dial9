@@ -76,15 +76,20 @@
             <span class="fg-title" id="fg-title">Flamegraph</span>
             <span class="fg-stats" id="fg-stats"></span>
         </div>
+        <div id="fold-warning" style="display:none;padding:6px 12px;background:#3a1a1a;color:#ffb3b3;border-bottom:1px solid #5a2a2a;font-size:0.8em;flex-shrink:0;font-family:monospace;white-space:pre-wrap;word-break:break-word;"></div>
         <div id="fg-container"></div>
         <div id="loading"><div class="spinner"></div>Loading trace&hellip;</div>
         <div id="error"></div>
 
         <script src="format.js"></script>
         <script src="flamegraph_api.js"></script>
+        <script src="sse.js"></script>
+        <script src="flamegraph_diff.js"></script>
+        <script src="flamegraph_diff_view.js"></script>
         <script src="decode.js"></script>
         <script src="trace_parser.js"></script>
         <script src="creds.js"></script>
+        <script src="trace_scope.js"></script>
         <script src="trace_analysis.js"></script>
         <script src="flamegraph_export.js"></script>
         <script src="flamegraph.js"></script>
@@ -92,8 +97,11 @@
             (async function () {
                 const params = new URLSearchParams(window.location.search);
                 // `trace` is repeatable — each value is a separate (possibly
-                // gzipped) component to fetch and concatenate.
-                const traceUrls = params.getAll("trace");
+                // gzipped) component to fetch and concatenate. A `s_*` scope
+                // (bucket/prefix/service/host-set + window) is the compact,
+                // stateless form the S3 browser emits for large exact-mode
+                // selections; it's resolved to trace= URLs just below.
+                let traceUrls = params.getAll("trace");
                 const startNs = params.get("start") != null ? Number(params.get("start")) : null;
                 const endNs = params.get("end") != null ? Number(params.get("end")) : null;
 
@@ -102,6 +110,7 @@
                 const containerEl = document.getElementById("fg-container");
                 const titleEl = document.getElementById("fg-title");
                 const statsEl = document.getElementById("fg-stats");
+                const foldWarnEl = document.getElementById("fold-warning");
 
                 function showError(msg) {
                     loadingEl.classList.add("hidden");
@@ -109,9 +118,236 @@
                     errorEl.textContent = msg;
                 }
 
+                // --- Diff mode: two-sided differential flamegraph (?diff=1) ---
+                // Side A (left) and side B (right) are independent aggregate
+                // scopes (each a base64url'd query in `a=`/`b=`). Both default to
+                // this tab's session credentials; if side B comes from a
+                // different account/bucket and 401/403s, we prompt for B's
+                // credentials and hold them IN MEMORY only (never in the URL,
+                // never in sessionStorage).
+                const diffParsed = FlamegraphDiff.parseDiff(params);
+                if (diffParsed) {
+                    document.title = "Flamegraph diff";
+                    titleEl.textContent = "Flamegraph diff";
+                    loadingEl.classList.add("hidden");
+                    containerEl.style.display = "flex";
+
+                    // Per-side credentials. `a`/`b` default to the shared
+                    // session creds; `credsB` overrides B once supplied.
+                    let credsB = null; // {accessKeyId, secretAccessKey, sessionToken?, region?}
+                    function sessionHeaders() {
+                        return window.Dial9Creds ? Dial9Creds.headers() : {};
+                    }
+                    function credsToHeaders(c) {
+                        const h = {
+                            "x-dial9-aws-access-key-id": c.accessKeyId,
+                            "x-dial9-aws-secret-access-key": c.secretAccessKey,
+                        };
+                        if (c.sessionToken) h["x-dial9-aws-session-token"] = c.sessionToken;
+                        if (c.region) h["x-dial9-aws-region"] = c.region;
+                        return h;
+                    }
+                    function headersFor(side) {
+                        if (side === "b" && credsB) return credsToHeaders(credsB);
+                        return sessionHeaders();
+                    }
+
+                    let view = null;
+                    let bCredsPrompted = false;
+                    function onSideError(side, err) {
+                        const auth = err && (err.status === 401 || err.status === 403);
+                        if (side === "b" && auth && !bCredsPrompted) {
+                            bCredsPrompted = true;
+                            promptForBCreds(err.message);
+                            return;
+                        }
+                        statsEl.textContent =
+                            "Side " + side.toUpperCase() + " failed: " + (err && err.message || err);
+                    }
+
+                    // In-memory creds prompt for side B. Reuses Dial9Creds.parse()
+                    // to accept the same pasted blobs as the home page (STS JSON
+                    // or flat JSON), and validates them against B's bucket via
+                    // /api/credentials/check — which both confirms access and
+                    // resolves B's region (B is typically in a different region,
+                    // and the region is needed for the S3 endpoint host). Creds
+                    // are held in memory for this tab only.
+                    const bBucket = diffParsed.b.get("bucket");
+                    async function checkBCreds(creds) {
+                        // POST the candidate creds as headers (without storing
+                        // them) so the server can HeadBucket B's bucket.
+                        const url = "/api/credentials/check" +
+                            (bBucket ? "?bucket=" + encodeURIComponent(bBucket) : "");
+                        const resp = await fetch(url, { method: "POST", headers: credsToHeaders(creds) });
+                        if (!resp.ok) return { ok: false, error: await resp.text().catch(() => "check failed") };
+                        return await resp.json();
+                    }
+                    function promptForBCreds(reason) {
+                        const back = document.createElement("div");
+                        back.className = "fgd-dialog-backdrop";
+                        back.innerHTML =
+                            '<div class="fgd-dialog">' +
+                            '<h3>Side B needs credentials</h3>' +
+                            '<p>The B capture is in a different account or bucket (<code>' +
+                            (bBucket ? bBucket.replace(/[<>&]/g, "") : "?") + '</code>). ' +
+                            'Paste temporary AWS credentials for it (JSON). They are kept ' +
+                            'in memory for this tab only — never stored, never put in the URL.</p>' +
+                            '<textarea rows="6" placeholder=\'{"accessKeyId":"...","secretAccessKey":"...","sessionToken":"..."}\'></textarea>' +
+                            '<div class="fgd-err"></div>' +
+                            '<div class="fgd-dialog-row"><button class="fgd-apply">Apply &amp; retry B</button>' +
+                            '<button class="ghost fgd-cancel">Cancel</button></div>' +
+                            '</div>';
+                        document.body.appendChild(back);
+                        const ta = back.querySelector("textarea");
+                        const errEl = back.querySelector(".fgd-err");
+                        const applyBtn = back.querySelector(".fgd-apply");
+                        if (reason) errEl.textContent = reason;
+                        ta.focus();
+                        back.querySelector(".fgd-cancel").addEventListener("click", () => back.remove());
+                        applyBtn.addEventListener("click", async () => {
+                            let parsed;
+                            try {
+                                parsed = Dial9Creds.parse(ta.value);
+                            } catch (e) {
+                                errEl.textContent = "Could not parse: " + e.message;
+                                return;
+                            }
+                            applyBtn.disabled = true;
+                            errEl.textContent = "Checking credentials…";
+                            const result = await checkBCreds(parsed);
+                            if (!result.ok) {
+                                applyBtn.disabled = false;
+                                errEl.textContent = "Rejected: " + (result.error || "could not access bucket");
+                                return;
+                            }
+                            // Carry the detected region so the listing hits the
+                            // right regional endpoint.
+                            if (result.region && !parsed.region) parsed.region = result.region;
+                            credsB = parsed;
+                            back.remove();
+                            bCredsPrompted = false;
+                            if (view) view.repollSide("b");
+                        });
+                    }
+
+                    view = FlamegraphDiffView.createDiffView(containerEl, {
+                        scopeA: diffParsed.a,
+                        scopeB: diffParsed.b,
+                        headersFor: headersFor,
+                        onSideError: onSideError,
+                    });
+                    statsEl.textContent = "A (left) vs B (right) · blue = heavier in A, red = heavier in B";
+                    return;
+                }
+
                 // --- API mode: fetch pre-built flamegraph tree from server ---
                 const apiMode = params.get("api") === "1";
                 if (apiMode) {
+                    // One-line human summary of a scope (service · N hosts · time
+                    // window), for the diff dialog's A/B preview rows.
+                    function summarizeScope(scope) {
+                        if (!scope) return "—";
+                        const bits = [];
+                        const svc = scope.get("service");
+                        if (svc) bits.push(svc);
+                        const hosts = scope.getAll("host");
+                        if (hosts.length === 1) bits.push("1 host");
+                        else if (hosts.length > 1) bits.push(hosts.length + " hosts");
+                        const tc = scope.get("thread_class");
+                        if (tc) bits.push(tc);
+                        const src = scope.get("source");
+                        if (src && src !== "cpu") bits.push(src);
+                        const s = scope.get("start_ns"), e = scope.get("end_ns");
+                        if (s && e) {
+                            const from = new Date(Number(s) / 1e6).toISOString().slice(5, 16).replace("T", " ");
+                            const dur = formatHumanDuration(Number(e) - Number(s));
+                            bits.push(from + " UTC · " + dur);
+                        }
+                        const bkt = scope.get("bucket");
+                        if (bkt) bits.push(bkt);
+                        return bits.join(" · ") || "(empty scope)";
+                    }
+
+                    // Diff-setup dialog: this tab is one side; the user pastes a
+                    // "Copy link" URL for the other. `thisScope` is this tab's
+                    // current scope (URLSearchParams). A (left, blue) defaults to
+                    // this tab, B (right, red) to the pasted link; Swap flips them.
+                    function openDiffDialog(thisScope) {
+                        let otherScope = null; // parsed from the paste, or null
+                        let thisIsA = true;
+
+                        const back = document.createElement("div");
+                        back.className = "fgd-dialog-backdrop";
+                        back.innerHTML =
+                            '<div class="fgd-dialog fgd-diff-dialog">' +
+                            '<h3>Compare against another flamegraph</h3>' +
+                            '<p>Paste another aggregate flamegraph\'s <b>Copy link</b> URL. ' +
+                            'The two are shown side by side — left vs right.</p>' +
+                            '<label>Other flamegraph link</label>' +
+                            '<textarea class="fgd-other" rows="2" placeholder="https://…/flamegraph.html?api=1&bucket=…"></textarea>' +
+                            '<div class="fgd-ab">' +
+                            '  <div class="fgd-ab-side"><span class="fgd-chip fgd-chip-a">A · left</span>' +
+                            '    <span class="fgd-ab-src" data-side="a"></span>' +
+                            '    <div class="fgd-ab-sum" data-side="a"></div></div>' +
+                            '  <button class="ghost fgd-swap" title="Swap which capture is A vs B">⇄ Swap</button>' +
+                            '  <div class="fgd-ab-side"><span class="fgd-chip fgd-chip-b">B · right</span>' +
+                            '    <span class="fgd-ab-src" data-side="b"></span>' +
+                            '    <div class="fgd-ab-sum" data-side="b"></div></div>' +
+                            '</div>' +
+                            '<div class="fgd-err"></div>' +
+                            '<div class="fgd-dialog-row">' +
+                            '<button class="fgd-compare">Compare</button>' +
+                            '<button class="ghost fgd-cancel">Cancel</button></div>' +
+                            '</div>';
+                        document.body.appendChild(back);
+                        const ta = back.querySelector(".fgd-other");
+                        const errEl = back.querySelector(".fgd-err");
+                        const srcA = back.querySelector('.fgd-ab-src[data-side="a"]');
+                        const srcB = back.querySelector('.fgd-ab-src[data-side="b"]');
+                        const sumA = back.querySelector('.fgd-ab-sum[data-side="a"]');
+                        const sumB = back.querySelector('.fgd-ab-sum[data-side="b"]');
+                        ta.focus();
+
+                        // Re-parse the paste (cheap) and refresh the A/B preview.
+                        function refresh() {
+                            const raw = ta.value.trim();
+                            otherScope = null;
+                            if (raw) {
+                                try {
+                                    const u = new URL(raw, window.location.origin);
+                                    if (u.searchParams.get("api") !== "1") throw 0;
+                                    const s = FlamegraphDiff.fullScopeQuery(u.searchParams);
+                                    if (s.get("bucket") || s.get("data_dir")) otherScope = s;
+                                } catch (e) { /* leave null; preview shows placeholder */ }
+                            }
+                            const thisSum = summarizeScope(thisScope);
+                            const otherSum = otherScope ? summarizeScope(otherScope)
+                                : (raw ? "⚠ not a valid Copy link" : "paste a link above");
+                            srcA.textContent = thisIsA ? "this tab" : "pasted link";
+                            srcB.textContent = thisIsA ? "pasted link" : "this tab";
+                            sumA.textContent = thisIsA ? thisSum : otherSum;
+                            sumB.textContent = thisIsA ? otherSum : thisSum;
+                        }
+                        refresh();
+                        ta.addEventListener("input", refresh);
+                        back.querySelector(".fgd-swap").addEventListener("click", () => { thisIsA = !thisIsA; refresh(); });
+                        back.querySelector(".fgd-cancel").addEventListener("click", () => back.remove());
+                        back.addEventListener("click", (e) => { if (e.target === back) back.remove(); });
+                        back.querySelector(".fgd-compare").addEventListener("click", () => {
+                            if (!otherScope) {
+                                errEl.textContent = ta.value.trim()
+                                    ? "That link isn't an aggregate flamegraph Copy link (needs api=1 and a bucket)."
+                                    : "Paste the other flamegraph's Copy link first.";
+                                return;
+                            }
+                            const scopeA = thisIsA ? thisScope : otherScope;
+                            const scopeB = thisIsA ? otherScope : thisScope;
+                            const search = FlamegraphDiff.diffSearch(scopeA, scopeB);
+                            window.open(window.location.pathname + "?" + search, "_blank");
+                            back.remove();
+                        });
+                    }
+
                     // --- Filter toolbar (data-driven) ---
                     // The facet controls (Thread / Source / Host) are NOT
                     // hard-coded: they're built from the backend's reported
@@ -130,6 +366,9 @@
                         <button id="f-apply" style="background:#6c63ff;color:#fff;border:none;padding:4px 14px;border-radius:3px;cursor:pointer;font-weight:600">Apply</button>
                         <button id="f-more" style="background:#2a2a4a;color:#e0e0e0;${btnStyle}">Refine more</button>
                         <button id="f-stop" style="background:#2a2a4a;color:#e0e0e0;${btnStyle};opacity:0.4;cursor:not-allowed" disabled>Stop</button>
+                        <span style="flex:1"></span>
+                        <button id="f-copylink" title="Copy a link that re-fetches this exact scope (bucket/prefix included; no credentials)" style="background:#2a2a4a;color:#e0e0e0;border:1px solid #444;padding:4px 14px;border-radius:3px;cursor:pointer;font-weight:600">Copy link</button>
+                        <button id="f-diff" title="Compare this flamegraph against another" style="background:#2a2a4a;color:#e0e0e0;border:1px solid #444;padding:4px 14px;border-radius:3px;cursor:pointer;font-weight:600">Diff…</button>
                     `;
                     document.querySelector(".fg-page-header").after(toolbar);
 
@@ -145,7 +384,7 @@
                     // Single source of truth for the query. Seeded from the URL,
                     // mutated by the facet controls, read by buildApiUrl /
                     // updateBrowserUrl. Deliberately decoupled from the DOM so the
-                    // first poll can fire before the (data-driven) facet selects
+                    // stream can open before the (data-driven) facet selects
                     // even exist.
                     const filterState = {
                         // Source defaults to "cpu" (the on-CPU view).
@@ -174,7 +413,7 @@
                     const scopeBucket = params.get("bucket");
                     const scopePrefix = params.get("prefix");
 
-                    function buildApiUrl(refine) {
+                    function buildApiUrl() {
                         const u = new URL("/api/flamegraph", window.location.origin);
                         if (params.get("data_dir")) u.searchParams.set("data_dir", params.get("data_dir"));
                         if (scopeBucket) u.searchParams.set("bucket", scopeBucket);
@@ -191,11 +430,9 @@
                         if (startNs) u.searchParams.set("start_ns", startNs);
                         if (endNs) u.searchParams.set("end_ns", endNs);
                         if (maxFiles != null) u.searchParams.set("max_files", String(maxFiles));
-                        // The first poll is read-only (instant: serves whatever is
-                        // already folded). Only refining polls fold new files.
-                        // The backend's `refine` is a serde bool, so send the
-                        // literal "true" (not "1").
-                        if (refine) u.searchParams.set("refine", "true");
+                        // The endpoint is an SSE stream: the server emits the
+                        // already-folded snapshot first, then folds to the cap and
+                        // pushes a fresh tree per file. No client `refine` flag.
                         return u;
                     }
 
@@ -278,7 +515,7 @@
                         function applyFacetChange() {
                             maxFiles = null;
                             updateBrowserUrl();
-                            startPolling();
+                            startStreaming();
                         }
 
                         // Render each facet generically.
@@ -336,7 +573,7 @@
                     const fg = FlamegraphRenderer.createFlamegraph(containerEl);
 
                     // Build the base stats string ("N samples \u00b7 M hosts \u00b7 \u2026")
-                    // from the response metadata, shared by every poll.
+                    // from the response metadata, shared by every event.
                     function baseStats(resp) {
                         const meta = resp.metadata;
                         const bits = [`${resp.total_samples.toLocaleString()} samples`];
@@ -350,154 +587,213 @@
                         return bits.join(" \u00b7 ");
                     }
 
-                    // Poll-loop state. `pollToken` lets us cancel an in-flight
-                    // loop when the filters change or "Fetch more"/"Stop" is
-                    // clicked: each loop captures the token and bails if it no
-                    // longer matches the current one.
-                    const POLL_INTERVAL_MS = 800;
-                    let pollToken = 0;
-                    let pollTimer = null;
-                    let prevCoverage = null;
-                    // Per-poll coverage gains (percentage points), newest last.
-                    // Drives the auto-stop heuristic (shouldAutoStopRefining).
-                    let coverageDeltas = [];
+                    // Stream state. Each open stream gets an AbortController; the
+                    // next start (filters change, "Refine more") or "Stop" aborts
+                    // it. A monotonic `streamToken` guards late callbacks from a
+                    // stream that has since been superseded.
+                    let streamToken = 0;
+                    let abortCtl = null;
+                    // The last-rendered coverage badge (without the trailing status
+                    // suffix), so close/stop handlers can re-stamp it. `lastCoverage`
+                    // feeds the "Refine more" ceiling computation.
+                    let lastBadge = "";
+                    let lastCoverage = null;
+                    let gotEvent = false;
                     const stopBtn = document.getElementById("f-stop");
                     const moreBtn = document.getElementById("f-more");
 
                     function setRefiningUi(active) {
-                        // Stop button: enabled only while refining.
+                        // Stop button: enabled only while streaming.
                         stopBtn.disabled = !active;
                         stopBtn.style.opacity = active ? "1" : "0.4";
                         stopBtn.style.cursor = active ? "pointer" : "not-allowed";
-                        // Fetch-more button: enabled only when idle (not refining).
+                        // Fetch-more button: enabled only when idle (stream closed).
                         moreBtn.disabled = active;
                         moreBtn.style.opacity = active ? "0.4" : "1";
                         moreBtn.style.cursor = active ? "not-allowed" : "pointer";
                     }
 
-                    function stopPolling() {
-                        pollToken++;
-                        if (pollTimer != null) { clearTimeout(pollTimer); pollTimer = null; }
+                    function stopStreaming() {
+                        streamToken++;
+                        if (abortCtl) { abortCtl.abort(); abortCtl = null; }
                         setRefiningUi(false);
                     }
 
-                    // `refine` is false on the first poll for a scope (read-only:
-                    // the server returns whatever is already folded, instantly),
-                    // then true to fold a batch each subsequent poll.
-                    async function poll(token, refine) {
-                        let resp;
-                        try {
-                            const credHeaders = window.Dial9Creds ? Dial9Creds.headers() : {};
-                            resp = await fetch(buildApiUrl(refine), { headers: credHeaders });
-                            if (!resp.ok) throw new Error(await resp.text());
-                            resp = await resp.json();
-                        } catch (err) {
-                            if (token !== pollToken) return; // superseded
-                            showError("Failed to load flamegraph: " + err.message);
-                            return;
-                        }
-                        if (token !== pollToken) return; // superseded while fetching
-
+                    // Render one streamed snapshot (a full FlamegraphResponse).
+                    function renderEvent(resp) {
+                        gotEvent = true;
                         const meta = resp.metadata;
                         // Header scope summary + filter controls are both built
-                        // from the backend's reported metadata (data-driven),
-                        // not hard-coded HTML.
+                        // from the backend's reported metadata (data-driven).
                         renderScopeHeader(meta);
                         renderFacets(meta);
 
-                        // First successful response hides the loading overlay;
-                        // subsequent polls refine in-place without it.
+                        // First event hides the loading overlay; later events
+                        // refine in-place without it.
                         loadingEl.classList.add("hidden");
                         containerEl.style.display = "flex";
                         fg.setTreeDirect(toFgTree(resp.tree), resp.tree.count);
 
                         const cov = resp.coverage;
+                        lastCoverage = cov;
                         if (cov == null) {
-                            // Older / local-dir mode: no coverage, single fetch only.
-                            statsEl.textContent = baseStats(resp);
-                            stopPolling();
-                            return;
+                            // Local-dir / non-aggregation mode: no coverage badge.
+                            lastBadge = baseStats(resp);
+                        } else {
+                            lastBadge = baseStats(resp) + " \u00b7 " + formatCoverageBadge(cov);
                         }
+                        statsEl.innerHTML = lastBadge + ' \u00b7 <span class="spinner" style="width:0.9em;height:0.9em;display:inline-block;vertical-align:middle"></span> refining\u2026';
 
-                        // Track per-poll coverage gain (skip the read-only first
-                        // poll, which establishes the baseline rather than refining).
-                        if (refine && prevCoverage != null) {
-                            coverageDeltas.push(coveragePercent(cov) - coveragePercent(prevCoverage));
+                        // Surface fold failures (e.g. unwritable output bucket) as a
+                        // banner so a systematic failure isn't a silent empty tree.
+                        const notice = foldErrorNotice(cov);
+                        if (notice) {
+                            foldWarnEl.textContent = notice;
+                            foldWarnEl.style.display = "block";
+                        } else {
+                            foldWarnEl.style.display = "none";
                         }
-                        const frozen = isCoverageFrozen(prevCoverage, cov);
-                        const plateaued = shouldAutoStopRefining(coverageDeltas);
-                        prevCoverage = cov;
-
-                        let badge = baseStats(resp) + " \u00b7 " + formatCoverageBadge(cov);
-
-                        // Stop when the server can't fold more (frozen) or coverage
-                        // has plateaued (diminishing returns over recent polls).
-                        if (refine && (frozen || plateaued)) {
-                            statsEl.textContent = badge + " \u00b7 refined";
-                            stopPolling();
-                            return;
-                        }
-                        statsEl.innerHTML = badge + ' \u00b7 <span class="spinner" style="width:0.9em;height:0.9em;display:inline-block;vertical-align:middle"></span> refining\u2026';
-
-                        // Subsequent polls refine. Schedule the next one.
-                        setRefiningUi(true);
-                        pollTimer = setTimeout(() => {
-                            if (token === pollToken) poll(token, true);
-                        }, POLL_INTERVAL_MS);
                     }
 
-                    // (Re)start the poll loop from scratch: cancels any in-flight
-                    // loop, resets freeze tracking, and shows the loading overlay.
-                    // The first poll is read-only (instant); refinement kicks in
-                    // on the polls that follow.
-                    function startPolling() {
-                        stopPolling();
-                        prevCoverage = null;
-                        coverageDeltas = [];
+                    // (Re)start the stream from scratch: aborts any in-flight
+                    // stream and shows the loading overlay. The server emits the
+                    // already-folded snapshot immediately, then refines to the cap.
+                    function startStreaming() {
+                        stopStreaming();
                         setRefiningUi(true);
+                        gotEvent = false;
                         loadingEl.classList.remove("hidden");
                         loadingEl.innerHTML = '<div class="spinner"></div>Loading aggregated flamegraph\u2026';
                         containerEl.style.display = "none";
                         errorEl.style.display = "none";
-                        const token = pollToken;
-                        poll(token, false);
+                        foldWarnEl.style.display = "none";
+                        const token = ++streamToken;
+                        abortCtl = new AbortController();
+                        const credHeaders = window.Dial9Creds ? Dial9Creds.headers() : {};
+                        Dial9Sse.openSse(buildApiUrl(), {
+                            headers: credHeaders,
+                            signal: abortCtl.signal,
+                            onEvent: (resp) => { if (token === streamToken) renderEvent(resp); },
+                            onClose: () => {
+                                if (token !== streamToken) return;
+                                // Server folded to the cap and closed the stream.
+                                statsEl.textContent = lastBadge + (gotEvent ? " \u00b7 refined" : "");
+                                setRefiningUi(false);
+                            },
+                            onError: (err) => {
+                                if (token !== streamToken) return;
+                                if (!gotEvent) {
+                                    showError("Failed to load flamegraph: " + err.message);
+                                } else {
+                                    // Mid-stream drop: keep the rendered tree but
+                                    // clear the (would-be-eternal) spinner.
+                                    statsEl.textContent = lastBadge + " · interrupted";
+                                }
+                                setRefiningUi(false);
+                            },
+                        });
                     }
 
                     document.getElementById("f-apply").addEventListener("click", () => {
                         // New filters invalidate the current scope; reset depth.
                         maxFiles = null;
                         updateBrowserUrl();
-                        startPolling();
+                        startStreaming();
                     });
 
                     document.getElementById("f-more").addEventListener("click", () => {
                         // Request deeper sampling for the current scope: raise the
-                        // ceiling to ~4x the files folded so far, then resume
-                        // refining (reset the plateau tracker so it doesn't
-                        // immediately auto-stop on the prior history).
-                        const folded = prevCoverage ? prevCoverage.files_folded : 0;
+                        // ceiling to ~4x the files folded so far, then reopen the
+                        // stream. The server folds from where it left off (already-
+                        // folded files are served instantly) up to the new cap.
+                        const folded = lastCoverage ? lastCoverage.files_folded : 0;
                         maxFiles = nextMaxFiles(folded);
-                        coverageDeltas = [];
-                        stopPolling();
-                        setRefiningUi(true);
-                        // Show the refining spinner immediately in the stats bar.
-                        statsEl.innerHTML = statsEl.textContent.replace(/ \u00b7 (?:refined|stopped)$/, "")
-                            + ' \u00b7 <span class="spinner" style="width:0.9em;height:0.9em;display:inline-block;vertical-align:middle"></span> refining\u2026';
-                        const token = pollToken;
-                        poll(token, true);
+                        startStreaming();
                     });
 
                     stopBtn.addEventListener("click", () => {
-                        // Manual stop: freeze at the current coverage.
-                        const badge = statsEl.textContent.replace(/ \u00b7 refining\u2026$/, "");
-                        stopPolling();
-                        statsEl.textContent = badge + " \u00b7 stopped";
+                        // Manual stop: abort the stream, freeze at current coverage.
+                        stopStreaming();
+                        statsEl.textContent = lastBadge + " \u00b7 stopped";
                     });
 
-                    startPolling();
+                    // Build a COMPLETE scope query for the current view, from the
+                    // live toolbar state plus the scope vars. Unlike the address
+                    // bar (updateBrowserUrl, which drops bucket/prefix/max_files),
+                    // this carries everything needed to re-fetch the aggregate.
+                    // Credentials are never included.
+                    function currentScopeQuery() {
+                        const p = new URLSearchParams();
+                        p.set("api", "1");
+                        if (params.get("data_dir")) p.set("data_dir", params.get("data_dir"));
+                        if (scopeBucket) p.set("bucket", scopeBucket);
+                        if (scopePrefix) p.set("prefix", scopePrefix);
+                        if (scopeService) p.set("service", scopeService);
+                        for (const h of filterState.hosts) p.append("host", h);
+                        // Send all non-empty facet filters (source, thread_class,
+                        // spawn_location) — the live filterState is the source of
+                        // truth, same as buildApiUrl.
+                        for (const [k, v] of Object.entries(filterState)) {
+                            if (k === "hosts" || !v) continue;
+                            p.set(k, v);
+                        }
+                        const sNs = pickerUtcToNs(fStart.value);
+                        const eNs = pickerUtcToNs(fEnd.value);
+                        if (sNs) p.set("start_ns", sNs);
+                        if (eNs) p.set("end_ns", eNs);
+                        if (maxFiles != null) p.set("max_files", String(maxFiles));
+                        return FlamegraphDiff.fullScopeQuery(p);
+                    }
+
+                    document.getElementById("f-copylink").addEventListener("click", async () => {
+                        const url = window.location.origin + window.location.pathname +
+                            "?" + currentScopeQuery().toString();
+                        const btn = document.getElementById("f-copylink");
+                        const orig = btn.textContent;
+                        try {
+                            await navigator.clipboard.writeText(url);
+                            btn.textContent = "Copied!";
+                        } catch (e) {
+                            // Clipboard API unavailable (insecure context): fall
+                            // back to a prompt so the user can copy manually. The
+                            // prompt returns null if the user cancels — only
+                            // claim success when they didn't.
+                            const res = window.prompt("Copy this link:", url);
+                            btn.textContent = res !== null ? "Copied!" : orig;
+                        }
+                        setTimeout(() => { btn.textContent = orig; }, 1500);
+                    });
+
+                    document.getElementById("f-diff").addEventListener("click", () => {
+                        openDiffDialog(currentScopeQuery());
+                    });
+
+                    startStreaming();
                     window.addEventListener("resize", () => fg.resize());
                     window.addEventListener("keydown", (e) => { if (e.key === "Escape") fg.handleEscape(); });
                     return;
+                }
+
+                // Exact mode with a scope instead of inline trace= params:
+                // re-list the scope's files (credentialed, same headers as the
+                // trace fetch below) and load them through the same path.
+                if (!traceUrls.length) {
+                    const scope = Dial9TraceScope.readScope(params);
+                    if (scope) {
+                        try {
+                            loadingEl.textContent = "Resolving trace selection…";
+                            const fetchJson = async (u) => {
+                                const h = window.Dial9Creds ? Dial9Creds.headers() : {};
+                                const r = await fetch(u, { headers: h });
+                                if (!r.ok) throw new Error(`HTTP ${r.status}`);
+                                return r.json();
+                            };
+                            traceUrls = await Dial9TraceScope.resolveScope(scope, fetchJson);
+                        } catch (err) {
+                            showError("Failed to resolve trace selection: " + err.message);
+                            return;
+                        }
+                    }
                 }
 
                 if (!traceUrls.length) {

@@ -1,4 +1,5 @@
 //! `browse` finds all trace files for a given timerange / filter set
+use axum::Extension;
 use axum::Json;
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
@@ -9,6 +10,7 @@ use time::OffsetDateTime;
 use crate::server::AppState;
 use crate::server::credentials::MaybeCreds;
 use crate::server::error::storage_error_response;
+use crate::server::metrics::OperationMetrics;
 use crate::storage::{ObjectInfo, StorageError};
 
 /// Per-prefix object cap. A 10-minute (or minute) prefix can legitimately fan
@@ -64,11 +66,13 @@ enum Granularity {
     Minute,
 }
 
+type BrowseOk = (Extension<OperationMetrics>, Json<BrowseResponse>);
+
 pub async fn browse(
     State(state): State<AppState>,
     creds: MaybeCreds,
     Query(params): Query<BrowseParams>,
-) -> Result<Json<BrowseResponse>, (StatusCode, String)> {
+) -> Result<BrowseOk, (StatusCode, String)> {
     let backend = state.resolve(creds).await?;
 
     let bucket = params
@@ -105,7 +109,9 @@ pub async fn browse(
 
     let (prefixes, range_truncated) = time_prefixes(&base, params.from, params.to, gran);
 
-    tracing::info!(
+    // Per-request operational detail — the request-rate/latency signal lives in
+    // the per-request EMF metrics now, so keep this at debug to avoid log spam.
+    tracing::debug!(
         bucket = %bucket,
         prefixes = prefixes.len(),
         granularity = ?gran,
@@ -149,6 +155,7 @@ pub async fn browse(
     }
 
     // Retry overflowed hour-level prefixes at 10-minute granularity.
+    let refined = !overflow_prefixes.is_empty();
     if !overflow_prefixes.is_empty() {
         // Expand each overflowed hour prefix into its 6 ten-minute sub-prefixes.
         let refined: Vec<String> = overflow_prefixes
@@ -156,7 +163,7 @@ pub async fn browse(
             .flat_map(|p| (0..6).map(move |d| format!("{p}{d}")))
             .collect();
 
-        tracing::info!(
+        tracing::debug!(
             refined_prefixes = refined.len(),
             overflowed_hours = overflow_prefixes.len(),
             "browse refining overflowed hours at 10-minute granularity"
@@ -180,7 +187,10 @@ pub async fn browse(
         }
     }
 
-    Ok(Json(BrowseResponse { objects, truncated }))
+    // Operation-specific metrics: `truncated` is silent data loss behind a 200,
+    // and `prefixes_fanned_out`/`refined` show how hard the listing worked.
+    let op = OperationMetrics::browse(objects.len(), prefixes.len(), truncated, refined);
+    Ok((Extension(op), Json(BrowseResponse { objects, truncated })))
 }
 
 /// Build the date+time S3 key prefixes covering `[from, to]` (unix seconds),

@@ -16,6 +16,7 @@ mod config;
 pub mod credentials;
 mod error;
 pub(crate) mod flamegraph;
+pub(crate) mod metrics;
 mod prefixes;
 pub(crate) mod tokio_stats;
 mod trace;
@@ -310,7 +311,7 @@ impl AppState {
                 // server this means we fall back to the server's ambient identity
                 // — the usual cause of a "wrong account" error.
                 if self.allow_byo_creds {
-                    tracing::info!(
+                    tracing::debug!(
                         "no x-dial9-aws-* credentials on request; using server's default identity"
                     );
                 }
@@ -448,5 +449,9 @@ fn api_router(state: AppState) -> Router {
         // Permissive CORS so a page on another origin can POST a trace and read
         // it back via fetch(); also answers the OPTIONS preflight automatically.
         .layer(CorsLayer::permissive())
+        // Per-request metrics. Layered on the API router (not the outer one) so
+        // it sees the populated `MatchedPath` and only counts API requests, not
+        // static-asset fetches. Publishes to the global `ServiceMetrics` sink.
+        .layer(axum::middleware::from_fn(metrics::record_request_metrics))
         .with_state(state)
 }

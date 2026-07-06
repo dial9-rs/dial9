@@ -460,10 +460,13 @@ impl StorageBackend for S3Backend {
                     req = req.continuation_token(token);
                 }
 
-                let resp = req.send().await.map_err(|e| {
-                    use aws_sdk_s3::error::DisplayErrorContext;
-                    StorageError::Other(format!("{}", DisplayErrorContext(&e)))
-                })?;
+                // Classify the error like the sibling listing methods do, so an
+                // auth failure surfaces as `Unauthorized` rather than a generic
+                // `Other` that callers can't distinguish from an empty listing.
+                // This is what lets a caller (e.g. a future per-side
+                // bring-your-own-credentials prompt) tell "needs different
+                // credentials" apart from "empty window".
+                let resp = req.send().await.map_err(|e| classify_s3_error(&e))?;
 
                 for obj in resp.contents() {
                     if let Some(key) = obj.key() {
@@ -1209,6 +1212,56 @@ mod tests {
         let written = dir.path().join("a/b/c.bin");
         assert!(written.exists(), "expected file at {}", written.display());
         assert_eq!(std::fs::read(&written).unwrap(), b"hi");
+    }
+
+    /// Build a backend that replays a single response with an explicit status
+    /// and body — used to drive the SDK's error path (the success-only
+    /// `replay_backend` always returns 200).
+    fn replay_backend_status(status: u16, body: &str) -> S3Backend {
+        use aws_smithy_http_client::test_util::{ReplayEvent, StaticReplayClient};
+        use aws_smithy_types::body::SdkBody;
+        let events = vec![ReplayEvent::new(
+            http::Request::builder()
+                .uri("https://s3.amazonaws.com/")
+                .body(SdkBody::empty())
+                .unwrap(),
+            http::Response::builder()
+                .status(status)
+                .body(SdkBody::from(body))
+                .unwrap(),
+        )];
+        let http_client = StaticReplayClient::new(events);
+        let cfg = aws_sdk_s3::config::Builder::new()
+            .behavior_version(aws_sdk_s3::config::BehaviorVersion::latest())
+            .credentials_provider(aws_sdk_s3::config::Credentials::new(
+                "test", "test", None, None, "test",
+            ))
+            .region(aws_sdk_s3::config::Region::new("us-east-1"))
+            .http_client(http_client)
+            .build();
+        S3Backend::from_client(aws_sdk_s3::Client::from_conf(cfg))
+    }
+
+    #[tokio::test]
+    async fn list_objects_all_maps_auth_failure_to_unauthorized() {
+        // S3 returns 403 InvalidAccessKeyId when the credentials can't read the
+        // bucket. `list_objects_all` must classify this as `Unauthorized` (not
+        // the generic `Other`), consistent with the sibling listing methods, so
+        // callers can distinguish "needs different credentials" from "empty
+        // window".
+        let body = r#"<?xml version="1.0" encoding="UTF-8"?>
+            <Error><Code>InvalidAccessKeyId</Code>
+            <Message>The AWS Access Key Id you provided does not exist in our records.</Message>
+            </Error>"#;
+        let backend = replay_backend_status(403, body);
+        let err = backend
+            .list_objects_all("bucket", "prefix")
+            .await
+            .expect_err("auth failure must be an error");
+        assert!(
+            matches!(err, StorageError::Unauthorized),
+            "expected Unauthorized, got {err:?}"
+        );
     }
 
     #[test]
