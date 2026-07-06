@@ -12,6 +12,7 @@ use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
 use std::sync::Arc;
 
+use axum::Extension;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::sse::{Event, KeepAlive, Sse};
@@ -26,6 +27,7 @@ use crate::ingest::aggregate::{
 use crate::ingest::refine::{self, FoldErrors, FoldOutcome, RefineOpts, Resolved};
 use crate::server::AppState;
 use crate::server::credentials::MaybeCreds;
+use crate::server::metrics::OperationMetrics;
 
 #[derive(Deserialize)]
 pub struct FlamegraphParams {
@@ -203,7 +205,13 @@ pub async fn get_flamegraph(
     // `axum_extra`'s Query supports repeated keys (`host=a&host=b`), which the
     // stock `serde_urlencoded`-based extractor does not.
     QueryExtra(params): QueryExtra<FlamegraphParams>,
-) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, (StatusCode, String)> {
+) -> Result<
+    (
+        Extension<OperationMetrics>,
+        Sse<impl Stream<Item = Result<Event, Infallible>>>,
+    ),
+    (StatusCode, String),
+> {
     let Some(agg) = state
         .agg_context_for(params.bucket.as_deref(), params.prefix.as_deref(), creds)
         .await?
@@ -229,8 +237,23 @@ pub async fn get_flamegraph(
         ));
     };
 
+    // Operation-specific metrics, attached at response-head time — all the
+    // middleware can see for a streamed body (the folding happens after the
+    // headers go out). Coverage here is therefore the RESOLVE-TIME snapshot:
+    // how much of the scope was already folded when the stream opened. Samples
+    // are not known until part-files are read inside the stream, so they are
+    // reported as absent rather than a misleading zero.
+    let op = OperationMetrics::flamegraph(
+        resolved.files_matched as u32,
+        resolved.files_folded_in(resolved.folded()) as u32,
+        None,
+    );
+
     let stream = flamegraph_stream(agg, resolved, &params, state.fold_limits.clone());
-    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+    Ok((
+        Extension(op),
+        Sse::new(stream).keep_alive(KeepAlive::default()),
+    ))
 }
 
 /// Build the [`Scope`] from query params.

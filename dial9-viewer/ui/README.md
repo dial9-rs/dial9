@@ -41,6 +41,45 @@ For S3-backed traces, `index.html` points each `trace=` at
 The browser thus downloads the files in parallel and decompresses them
 client-side — far less network transfer than a single merged response.
 
+## The `s_*` scope parameters (large selections)
+
+One `trace=` per file means a large heatmap selection produces a very long URL.
+Opening the viewer/flamegraph is a navigation (a GET), so the whole list rides
+in the URL — and past ~8 KB it exceeds CloudFront's hard request-URI limit, so
+the new tab gets a **414** before it can load. For S3-backed selections the S3
+browser instead emits a compact **scope** (`trace_scope.js`):
+
+- `s_bucket`, `s_prefix`, `s_svc` — where to look
+- `s_host` — repeatable host set (empty = all hosts in the window)
+- `s_from`, `s_to` — time window, epoch seconds
+
+The viewer/flamegraph re-list the matching files from the scope via `/api/browse`
+(the same listing the S3 browser uses) and feed the resulting `/api/object` URLs
+into `fetchTraces`. A scope is bounded by *host count*, not *file count*, so it
+stays short; and because it is **stateless** (no per-browser storage), a shared
+deep link re-resolves in any browser — this is what keeps the userscript's
+"Copy deep link" feature working for large selections. A pathological host set
+that still wouldn't fit degrades to time-range-only (all hosts in the window);
+the UI warns when that happens. Consumers read a scope via
+`Dial9TraceScope.readScope(params)` and fall back to inline `trace=` for non-S3
+sources (locally-dropped files, `blob:` URLs, the demo trace).
+
+Re-listing means a scope opened later may pick up files that landed in the
+window since it was shared. For a finished trace that is nil; it is the trade
+for a portable, length-safe link.
+
+`trace_scope.js` owns the **Scope** concept end-to-end: `parseKey` /
+`extractPrefix` (the single source of truth — `index.html` delegates to them),
+`scopeFromKeys` (derive a scope from a selection), and two sibling encoders for
+its two URL dialects. `encodeScope` writes the namespaced `s_*` form above (it
+rides in the viewer page URL alongside unrelated `host`/`from`/`to`/`start`/`end`
+params). `encodeAggregationParams` writes the **un-namespaced** form the server
+aggregation endpoints expect — `bucket`/`prefix`/`service`/repeatable `host`,
+window as `start_ns`/`end_ns` in **nanoseconds** — used by the demand-driven
+flamegraph (`?api=1`) and `/api/tokio-stats`. A box spanning more than one
+service sends *no* service filter (all services in the box), consistent across
+exact and aggregation modes.
+
 ### `/api/trace` (deprecated)
 
 `GET /api/trace?bucket=&keys=a&keys=b` fetches every key, gunzips each

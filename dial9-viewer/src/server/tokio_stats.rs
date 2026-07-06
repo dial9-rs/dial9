@@ -9,6 +9,7 @@
 use std::convert::Infallible;
 use std::sync::Arc;
 
+use axum::Extension;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::sse::{Event, KeepAlive, Sse};
@@ -21,6 +22,7 @@ use crate::ingest::aggregate::{self, Scope};
 use crate::ingest::refine::{self, FoldErrors, FoldOutcome, RefineOpts, Resolved};
 use crate::server::AppState;
 use crate::server::credentials::MaybeCreds;
+use crate::server::metrics::OperationMetrics;
 
 use arrow::array::Array;
 
@@ -85,7 +87,13 @@ pub async fn get_tokio_stats(
     State(state): State<AppState>,
     creds: MaybeCreds,
     QueryExtra(params): QueryExtra<TokioStatsParams>,
-) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, (StatusCode, String)> {
+) -> Result<
+    (
+        Extension<OperationMetrics>,
+        Sse<impl Stream<Item = Result<Event, Infallible>>>,
+    ),
+    (StatusCode, String),
+> {
     let Some(agg) = state
         .agg_context_for(params.bucket.as_deref(), params.prefix.as_deref(), creds)
         .await?
@@ -103,7 +111,7 @@ pub async fn get_tokio_stats(
         hosts: params.host.clone(),
     };
 
-    tracing::info!(
+    tracing::debug!(
         source_bucket = %agg.source_bucket,
         source_prefixes = ?agg.source_prefixes,
         service = scope.service.as_deref().unwrap_or("(all)"),
@@ -121,8 +129,22 @@ pub async fn get_tokio_stats(
         ));
     };
 
+    // Operation-specific metrics, attached at response-head time — all the
+    // middleware can see for a streamed body (folding happens after the headers
+    // go out). Coverage is therefore the RESOLVE-TIME snapshot; the notable-poll
+    // count is not known until polls part-files are read inside the stream, so
+    // it is reported as absent rather than a misleading zero.
+    let op = OperationMetrics::tokio_stats(
+        resolved.files_matched as u32,
+        resolved.files_folded_in(resolved.folded()) as u32,
+        None,
+    );
+
     let stream = tokio_stats_stream(agg, resolved, scope, state.fold_limits.clone());
-    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+    Ok((
+        Extension(op),
+        Sse::new(stream).keep_alive(KeepAlive::default()),
+    ))
 }
 
 /// Immutable per-request context threaded through the tokio-stats SSE stream.
