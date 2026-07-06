@@ -36,15 +36,6 @@
 
   const D = getDiff();
   const ROW = 18; // px per depth level
-  // Initial per-side `max_files` cap for a diff view. The diff opens TWO streams
-  // at once, so each side folding to the server's *default* cap (up to ~100
-  // files × ~40–50 MB) means ~200 concurrent large GETs — enough to saturate a
-  // Fargate task's egress and blow the 30s per-GET S3 timeout. Start each side
-  // small for a fast first paint bounded well under that, then let "Load more"
-  // raise the cap on demand (same progressive-refinement model as the single
-  // flamegraph's "Refine more"). A scope that already carries an explicit
-  // `max_files` (e.g. a copy-link into a deeper sample) overrides this.
-  const DIFF_INITIAL_MAX_FILES = 8;
   // Server flamegraph endpoint keys; the rest of a scope (e.g. the client-only
   // `api` flag) is not forwarded.
   const SERVER_KEYS = [
@@ -167,11 +158,12 @@
     const statusA = { total: 0, badge: "", meta: null, coverage: null, refining: true };
     const statusB = { total: 0, badge: "", meta: null, coverage: null, refining: true };
     // Per-side sampling cap. Both sides share one cap so the two panels stay at a
-    // comparable sampling depth. Starts small (a diff opens two streams at once —
-    // see DIFF_INITIAL_MAX_FILES) unless a side's scope carries an explicit
-    // `max_files`; "Load more" raises it. null would mean the server default.
+    // comparable sampling depth. null means "let the server pick its default"
+    // (which is small + parallelism-derived, so the first fold returns fast — see
+    // sampling_cap in refine.rs); a scope carrying an explicit `max_files` (e.g. a
+    // copy-link into a deeper sample) seeds it instead. "Load more" raises it.
     const scopeMax = Number(scopeA.get("max_files")) || Number(scopeB.get("max_files")) || 0;
-    let maxFiles = scopeMax > 0 ? scopeMax : DIFF_INITIAL_MAX_FILES;
+    let maxFiles = scopeMax > 0 ? scopeMax : null;
     // Cached per-side layouts ({ boxes, maxDepth }); recomputed only on
     // data/zoom/resize, NOT on hover. Each box is augmented with a stable
     // `key` (path join) and precomputed `color` so repaint is pure drawing.
@@ -462,10 +454,14 @@
       const src = scope.get("source");
       if (src && src !== "cpu") scopeBits.push(src);
 
-      const volBits = [status.total.toLocaleString() + " samples"];
+      // The coverage badge already reports the folded sample count (with files/
+      // hosts context), so only show a standalone "N samples" when there's no
+      // badge (non-aggregation / local mode) — otherwise the count appears twice.
+      const volBits = [];
+      if (status.badge) volBits.push(status.badge);
+      else volBits.push(status.total.toLocaleString() + " samples");
       const rate = sampleRatePerMinHost(status.total, win, meta);
       if (rate != null) volBits.push(Math.round(rate).toLocaleString() + " samples/min/host");
-      if (status.badge) volBits.push(status.badge);
 
       return { scope: scopeBits.join("  ·  "), vol: volBits.join("  ·  "), rate: rate };
     }
