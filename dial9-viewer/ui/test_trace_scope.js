@@ -110,7 +110,9 @@ test("encodeAggregationParams emits the un-namespaced names + ns window", () => 
   };
   const base = new URLSearchParams();
   base.set("api", "1"); // caller-supplied (flamegraph demand-driven mode)
-  const p = new URLSearchParams(scope.encodeAggregationParams(base, s));
+  const { query, hostsDropped } = scope.encodeAggregationParams(base, s);
+  const p = new URLSearchParams(query);
+  assert.strictEqual(hostsDropped, false, "small host set fits inline");
   assert.strictEqual(p.get("api"), "1", "base params preserved");
   assert.strictEqual(p.get("bucket"), "bkt");
   assert.strictEqual(p.get("prefix"), "traces");
@@ -126,9 +128,26 @@ test("encodeAggregationParams emits the un-namespaced names + ns window", () => 
 test("encodeAggregationParams omits an empty service (all services in box)", () => {
   // A multi-service box leaves service unset (scopeFromKeys sets service='').
   const s = { bucket: "b", prefix: "", service: "", hosts: ["h1"], from: 1, to: 2 };
-  const p = new URLSearchParams(scope.encodeAggregationParams(new URLSearchParams(), s));
+  const { query } = scope.encodeAggregationParams(new URLSearchParams(), s);
+  const p = new URLSearchParams(query);
   assert.strictEqual(p.get("service"), null, "no service filter when scope spans many");
   assert.deepStrictEqual(p.getAll("host"), ["h1"]);
+});
+
+test("encodeAggregationParams degrades a pathological host set but stays URI-safe", () => {
+  // Same failure mode as encodeScope: the server caps sampling work, not URL
+  // length, so a huge fleet must not be listed inline or the aggregation
+  // flamegraph / tokio-stats link would 414. Drop the host set (empty = all
+  // hosts in window server-side) and signal it.
+  const hosts = [];
+  for (let h = 0; h < 5000; h++) hosts.push(`ip-10-2-${h}.us-west-2.compute.internal`);
+  const s = { bucket: "b", prefix: "traces", service: "shale", hosts, from: 1782760000, to: 1782760800 };
+  const { query, hostsDropped } = scope.encodeAggregationParams(new URLSearchParams(), s);
+  assert.ok(query.length <= CLOUDFRONT_URI_LIMIT, `degraded query is ${query.length} bytes, must be <= ${CLOUDFRONT_URI_LIMIT}`);
+  assert.strictEqual(hostsDropped, true, "signals the host set was dropped");
+  const p = new URLSearchParams(query);
+  assert.deepStrictEqual(p.getAll("host"), [], "degrades to all-hosts-in-window");
+  assert.strictEqual(p.get("start_ns"), "1782760000000000000", "window preserved");
 });
 
 // --- the actual bug: a fleet-wide selection stays short --------------------

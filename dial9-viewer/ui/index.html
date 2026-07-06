@@ -1684,10 +1684,14 @@
         // tokio-stats buttons exactly — same bucket/prefix/service/host +
         // start_ns/end_ns vocabulary, and the same multi-service handling (a box
         // spanning >1 service sends no service filter rather than dropping all
-        // but the first). encodeAggregationParams returns a query string; wrap it
-        // back into the URLSearchParams the diff tray works with.
+        // but the first). encodeAggregationParams returns { query, hostsDropped };
+        // wrap the query back into the URLSearchParams the diff tray works with,
+        // and warn if the host set was too large to name in the link (the capture
+        // then covers all hosts in the window).
         const scope = Dial9TraceScope.scopeFromKeys(bucket, heatmapSelection.keys, heatmapSelection.t0, heatmapSelection.t1);
-        return new URLSearchParams(Dial9TraceScope.encodeAggregationParams(new URLSearchParams(), scope));
+        const { query, hostsDropped } = Dial9TraceScope.encodeAggregationParams(new URLSearchParams(), scope);
+        if (hostsDropped) warnHostsDropped();
+        return new URLSearchParams(query);
     }
 
     // CPU Profiling button: open a flamegraph of the selected segments. The
@@ -1717,8 +1721,9 @@
             const scope = Dial9TraceScope.scopeFromKeys(bucket, keys, heatmapSelection.t0, heatmapSelection.t1);
             const base = new URLSearchParams();
             base.set('api', '1');
-            const qs = Dial9TraceScope.encodeAggregationParams(base, scope);
-            window.open('flamegraph.html?' + qs, '_blank');
+            const { query, hostsDropped } = Dial9TraceScope.encodeAggregationParams(base, scope);
+            if (hostsDropped) warnHostsDropped();
+            window.open('flamegraph.html?' + query, '_blank');
             return;
         }
 
@@ -1754,8 +1759,9 @@
         // Same scope the aggregation flamegraph uses, same param vocabulary —
         // /api/tokio-stats reads bucket/prefix/service/host + start_ns/end_ns.
         const scope = Dial9TraceScope.scopeFromKeys(bucket, keys, heatmapSelection.t0, heatmapSelection.t1);
-        const qs = Dial9TraceScope.encodeAggregationParams(new URLSearchParams(), scope);
-        window.open('tokio_stats.html?' + qs, '_blank');
+        const { query, hostsDropped } = Dial9TraceScope.encodeAggregationParams(new URLSearchParams(), scope);
+        if (hostsDropped) warnHostsDropped();
+        window.open('tokio_stats.html?' + query, '_blank');
     }
 
     // ── Differential comparison (A/B) ──

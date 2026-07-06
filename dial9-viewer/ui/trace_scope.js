@@ -187,20 +187,34 @@
   // `baseParams` (left unmutated): the un-namespaced `bucket`/`prefix`/`service`/
   // repeatable `host` names the `/api/flamegraph` refinement loop and the
   // `/api/tokio-stats` endpoint expect, with the window as `start_ns`/`end_ns`
-  // in NANOSECONDS (the scope's `from`/`to` are epoch seconds). These URLs go
-  // straight to a server endpoint and carry no unrelated page params, so unlike
-  // encodeScope there is no `s_*` namespacing and no host-set length guard (the
-  // aggregation loop samples a representative subset, so a wide box is cheap by
-  // design — it never needs to list every file the way exact mode does).
-  function encodeAggregationParams(baseParams, scope) {
-    const out = new URLSearchParams(baseParams ? baseParams.toString() : "");
-    if (scope.bucket) out.set("bucket", scope.bucket);
-    if (scope.prefix) out.set("prefix", scope.prefix);
-    if (scope.service) out.set("service", scope.service);
-    for (const h of scope.hosts || []) out.append("host", h);
-    if (scope.from != null) out.set("start_ns", String(Math.round(scope.from * 1e9)));
-    if (scope.to != null) out.set("end_ns", String(Math.round(scope.to * 1e9)));
-    return out.toString();
+  // in NANOSECONDS (the scope's `from`/`to` are epoch seconds). Unlike
+  // encodeScope there is no `s_*` namespacing (these URLs go straight to a
+  // server endpoint), but the same host-set length guard applies: the server
+  // caps *sampling* work, not URL length, so a box spanning a huge fleet would
+  // still list every host in the query and overflow CloudFront's 8192-byte cap
+  // (a 414 — the exact failure the scope design avoids). When including every
+  // host would exceed the limit the host set is dropped and the scope degrades
+  // to "all hosts in the window" (an empty `host` set already means that
+  // server-side). Returns { query, hostsDropped } so the caller can warn.
+  function encodeAggregationParams(baseParams, scope, opts) {
+    const o = opts || {};
+    const limit = o.limit != null ? o.limit : URI_SAFE_QUERY_LIMIT;
+    const base = new URLSearchParams(baseParams ? baseParams.toString() : "");
+    if (scope.bucket) base.set("bucket", scope.bucket);
+    if (scope.prefix) base.set("prefix", scope.prefix);
+    if (scope.service) base.set("service", scope.service);
+    if (scope.from != null) base.set("start_ns", String(Math.round(scope.from * 1e9)));
+    if (scope.to != null) base.set("end_ns", String(Math.round(scope.to * 1e9)));
+
+    const withHosts = new URLSearchParams(base.toString());
+    for (const h of scope.hosts || []) withHosts.append("host", h);
+    const withHostsQs = withHosts.toString();
+    if (withHostsQs.length <= limit) {
+      return { query: withHostsQs, hostsDropped: false };
+    }
+    // Pathological host set: fall back to a time-range-only scope so the URL is
+    // never oversized. The server then folds every host in the window.
+    return { query: base.toString(), hostsDropped: (scope.hosts || []).length > 0 };
   }
 
   // Read a scope back from URL params, or null if no scope is present. A scope
