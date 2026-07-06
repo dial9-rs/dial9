@@ -32,10 +32,6 @@ const SYM_TS_RESET: u64 = 4;
 const SYM_ANNOTATIONS: u64 = 5;
 const EVENT_SYM_BASE: u64 = 6;
 
-// Per-column encodings for plain varint columns (first byte of the stream).
-const MODE_PLAIN: u8 = 0;
-const MODE_DELTA: u8 = 1;
-
 #[derive(Debug)]
 pub enum Error {
     Parse(ParseError),
@@ -78,16 +74,6 @@ fn put_varint(buf: &mut Vec<u8>, mut v: u64) {
         v >>= 7;
     }
     buf.push(v as u8);
-}
-
-#[inline]
-fn varint_len(mut v: u64) -> usize {
-    let mut n = 1;
-    while v >= 0x80 {
-        v >>= 7;
-        n += 1;
-    }
-    n
 }
 
 #[inline]
@@ -257,36 +243,14 @@ fn unpack_uuid(b: &[u8]) -> Vec<u8> {
 
 // --- column model ---
 
-#[derive(Clone, Copy, PartialEq)]
-enum ColKind {
-    /// FT_VARINT column: values buffered in `vals`, encoding chosen at
-    /// assembly time (plain vs zigzag-delta).
-    VarintPlain,
-    /// span-id-like FT_VARINT column: encoded through the global id cache
-    /// at tokenization time (ordering across columns matters).
-    VarintCached,
-    /// Everything else: bytes appended to `main`/`aux` at tokenization time.
-    Other,
-}
-
+/// One column of an event field. `main` carries fixed/varint values (and
+/// blob lengths); `aux` carries blob payload bytes; `presence` carries the
+/// raw presence prefix byte for optional fields.
+#[derive(Default)]
 struct Column {
-    kind: ColKind,
     presence: Vec<u8>,
     main: Vec<u8>,
     aux: Vec<u8>,
-    vals: Vec<u64>,
-}
-
-impl Column {
-    fn new(kind: ColKind) -> Self {
-        Column {
-            kind,
-            presence: Vec::new(),
-            main: Vec::new(),
-            aux: Vec::new(),
-            vals: Vec::new(),
-        }
-    }
 }
 
 #[derive(Default)]
@@ -359,34 +323,25 @@ impl SchemaGroups {
     }
 }
 
-/// Per-type registration: parsed meta + column group + per-field column kinds.
+/// Per-type registration: parsed meta + column group + which fields go
+/// through the span-id cache.
 struct RegisteredSchema {
     meta: SchemaMeta,
     group: u16,
-    col_kinds: Vec<ColKind>,
+    cached: Vec<bool>,
 }
 
 fn register(meta: SchemaMeta, group: u16) -> RegisteredSchema {
-    let col_kinds = meta
+    let cached = meta
         .tags
         .iter()
         .zip(&meta.field_names)
-        .map(|(&tag, name)| {
-            if tag & !OPTIONAL_BIT == FT_VARINT {
-                if is_cached_field(name, tag) {
-                    ColKind::VarintCached
-                } else {
-                    ColKind::VarintPlain
-                }
-            } else {
-                ColKind::Other
-            }
-        })
+        .map(|(&tag, name)| is_cached_field(name, tag))
         .collect();
     RegisteredSchema {
         meta,
         group,
-        col_kinds,
+        cached,
     }
 }
 
@@ -442,11 +397,7 @@ fn build_streams(data: &[u8]) -> CResult<Streams> {
                     put_varint(s.ts_delta.entry(reg.group).or_default(), delta as u64);
                 }
                 for (i, &ftag) in reg.meta.tags.iter().enumerate() {
-                    let kind = reg.col_kinds[i];
-                    let col = s
-                        .columns
-                        .entry((reg.group, i as u8))
-                        .or_insert_with(|| Column::new(kind));
+                    let col = s.columns.entry((reg.group, i as u8)).or_default();
                     if ftag & OPTIONAL_BIT != 0 {
                         // Record the raw presence byte so reconstruction is
                         // byte-exact even for nonstandard nonzero prefixes.
@@ -459,10 +410,13 @@ fn build_streams(data: &[u8]) -> CResult<Streams> {
                     let val = read_val(&mut cur, ftag)?;
                     match val {
                         Val::None => {}
-                        Val::Varint(v) => match kind {
-                            ColKind::VarintCached => id_cache.encode(v, &mut col.main),
-                            _ => col.vals.push(v),
-                        },
+                        Val::Varint(v) => {
+                            if reg.cached[i] {
+                                id_cache.encode(v, &mut col.main);
+                            } else {
+                                put_varint(&mut col.main, v);
+                            }
+                        }
                         Val::I64(v) => col.main.extend_from_slice(&v.to_le_bytes()),
                         Val::F64Bits(v) => col.main.extend_from_slice(&v.to_le_bytes()),
                         Val::Bool(b) => col.main.push(b),
@@ -566,41 +520,7 @@ fn build_streams(data: &[u8]) -> CResult<Streams> {
             }
         }
     }
-    finalize_varint_columns(&mut s);
     Ok(s)
-}
-
-/// Serialize buffered varint columns, choosing plain vs zigzag-delta by raw
-/// varint size (delta must win clearly: it can obscure repeat structure that
-/// the entropy pass would otherwise find).
-fn finalize_varint_columns(s: &mut Streams) {
-    for col in s.columns.values_mut() {
-        if col.kind != ColKind::VarintPlain || col.vals.is_empty() {
-            continue;
-        }
-        let mut plain = 0usize;
-        let mut delta = 0usize;
-        let mut prev = 0u64;
-        for &v in &col.vals {
-            plain += varint_len(v);
-            delta += varint_len(zigzag(v.wrapping_sub(prev) as i64));
-            prev = v;
-        }
-        let use_delta = delta * 10 <= plain * 8;
-        col.main.reserve(1 + if use_delta { delta } else { plain });
-        col.main
-            .push(if use_delta { MODE_DELTA } else { MODE_PLAIN });
-        let mut prev = 0u64;
-        for &v in &col.vals {
-            if use_delta {
-                put_varint(&mut col.main, zigzag(v.wrapping_sub(prev) as i64));
-                prev = v;
-            } else {
-                put_varint(&mut col.main, v);
-            }
-        }
-        col.vals = Vec::new();
-    }
 }
 
 fn serialize_dir(dir: &[(u8, u16, u8, &[u8])]) -> Vec<u8> {
@@ -731,53 +651,27 @@ pub fn stream_report(data: &[u8], level: i32) -> CResult<String> {
 }
 
 /// Default zstd level for the structured stream group. Measured on the demo
-/// trace, this is the speed knob: 15 keeps total compression comfortably
-/// faster than `gzip -6`; 19 is still faster than `gzip -9`.
-pub const DEFAULT_LEVEL: i32 = 15;
+/// trace, this is the speed knob: 12 keeps total compression ~25% faster
+/// than `gzip -6` with only ~0.5% size cost over level 15; 19 is still
+/// faster than `gzip -9`.
+pub const DEFAULT_LEVEL: i32 = 12;
 
 /// Level for the entropy-bound stream group (timestamp gaps, packed UUIDs).
 /// Counterintuitively this group earns a high level: it is small (~1.4 MB)
 /// and level 19's optimal parse buys ~94 KB there for ~100 ms, a far better
-/// trade than raising the structured group's level. Overridable via
-/// D9TC_ENTROPY_LEVEL for tuning experiments.
-fn entropy_level() -> i32 {
-    std::env::var("D9TC_ENTROPY_LEVEL")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(19)
-}
+/// trade than raising the structured group's level.
+const ENTROPY_LEVEL: i32 = 19;
 
 /// Compress a raw dial9 trace. `level` is the zstd level for the structured
 /// stream group (the entropy-bound group always uses [`ENTROPY_LEVEL`]).
 pub fn compress(data: &[u8], level: i32) -> CResult<Vec<u8>> {
-    let timing = std::env::var_os("D9TC_TIMING").is_some();
-    let t0 = std::time::Instant::now();
     let streams = build_streams(data)?;
-    let t1 = std::time::Instant::now();
     let (structured, entropy) = assemble(&streams);
-    let t2 = std::time::Instant::now();
     let mut out = Vec::with_capacity(structured.len() / 3 + entropy.len() / 2 + 16);
     out.extend_from_slice(&CONTAINER_MAGIC);
     out.push(CONTAINER_VERSION);
     let a = zstd::bulk::compress(&structured, level)?;
-    let t3 = std::time::Instant::now();
-    let b = zstd::bulk::compress(&entropy, entropy_level())?;
-    let t4 = std::time::Instant::now();
-    if timing {
-        eprintln!(
-            "build {:.1}ms | assemble {:.1}ms | zstd-A({}) {} -> {} in {:.1}ms | zstd-B({}) {} -> {} in {:.1}ms",
-            (t1 - t0).as_secs_f64() * 1000.0,
-            (t2 - t1).as_secs_f64() * 1000.0,
-            level,
-            structured.len(),
-            a.len(),
-            (t3 - t2).as_secs_f64() * 1000.0,
-            entropy_level(),
-            entropy.len(),
-            b.len(),
-            (t4 - t3).as_secs_f64() * 1000.0,
-        );
-    }
+    let b = zstd::bulk::compress(&entropy, ENTROPY_LEVEL)?;
     put_varint(&mut out, a.len() as u64);
     out.extend_from_slice(&a);
     out.extend_from_slice(&b);
@@ -809,34 +703,6 @@ struct ColumnView<'a> {
     presence: Reader<'a>,
     main: Reader<'a>,
     aux: Reader<'a>,
-    /// Decoded lazily from the first byte of `main` for plain varint columns.
-    mode: Option<u8>,
-    /// Running previous value for MODE_DELTA columns.
-    prev: u64,
-}
-
-impl<'a> ColumnView<'a> {
-    /// Read the next plain-varint-column value, honoring the column mode.
-    fn next_varint(&mut self) -> CResult<u64> {
-        let mode = match self.mode {
-            Some(m) => m,
-            None => {
-                let m = self.main.byte()?;
-                self.mode = Some(m);
-                m
-            }
-        };
-        let raw = self.main.varint()?;
-        match mode {
-            MODE_PLAIN => Ok(raw),
-            MODE_DELTA => {
-                let v = self.prev.wrapping_add(unzigzag(raw) as u64);
-                self.prev = v;
-                Ok(v)
-            }
-            other => Err(Error::Corrupt(format!("unknown column mode {other}"))),
-        }
-    }
 }
 
 fn parse_blob_into<'a>(blob: &'a [u8], view: &mut StreamsView<'a>) -> CResult<()> {
@@ -1088,9 +954,10 @@ pub fn decompress(container: &[u8]) -> CResult<Vec<u8>> {
                             out.extend_from_slice(&val.to_le_bytes());
                         }
                         FT_VARINT => {
-                            let val = match reg.col_kinds[i] {
-                                ColKind::VarintCached => id_cache.decode(&mut col.main)?,
-                                _ => col.next_varint()?,
+                            let val = if reg.cached[i] {
+                                id_cache.decode(&mut col.main)?
+                            } else {
+                                col.main.varint()?
                             };
                             put_leb(&mut out, val);
                         }
