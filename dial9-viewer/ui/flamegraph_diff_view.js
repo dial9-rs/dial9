@@ -49,7 +49,7 @@
   // `maxFiles`, when set, overrides the scope's own `max_files` — the diff view
   // drives the per-side sampling cap itself (small initial fold, raised by
   // "Load more").
-  function apiUrlFor(scope, origin, maxFiles) {
+  function apiUrlFor({ scope, origin, maxFiles }) {
     const base = origin || (typeof window !== "undefined" ? window.location.origin : "http://localhost");
     const u = new URL("/api/flamegraph", base);
     for (const k of SERVER_KEYS) {
@@ -524,7 +524,7 @@
       status.refining = true;
       updateMoreButton();
 
-      sse.openSse(apiUrlFor(scope, undefined, maxFiles), {
+      sse.openSse(apiUrlFor({ scope, maxFiles }), {
         headers: headersFor(side),
         signal: ctl.signal,
         onEvent: (resp) => {

@@ -341,7 +341,7 @@ assert(parseDiff(new URLSearchParams("diff=1&a=" + encodeScope("bucket=x") + "&b
   const scope = new URLSearchParams(
     "api=1&bucket=b&prefix=traces/svc&service=svc&host=h1&host=h2&source=cpu&start_ns=100&max_files=64",
   );
-  const u = V.apiUrlFor(scope, "https://viewer.example.com");
+  const u = V.apiUrlFor({ scope, origin: "https://viewer.example.com" });
   assertEq(u.pathname, "/api/flamegraph", "apiUrlFor targets /api/flamegraph");
   assertEq(u.searchParams.get("bucket"), "b", "apiUrlFor forwards bucket");
   assertEq(u.searchParams.get("max_files"), "64", "apiUrlFor forwards max_files");
@@ -353,12 +353,12 @@ assert(parseDiff(new URLSearchParams("diff=1&a=" + encodeScope("bucket=x") + "&b
   // The diff view drives the per-side sampling cap itself (small initial fold,
   // raised by "Load more"): an explicit maxFiles arg overrides the scope's own
   // max_files, and a scope with none gets exactly the override.
-  const uOverride = V.apiUrlFor(scope, "https://viewer.example.com", 8);
+  const uOverride = V.apiUrlFor({ scope, origin: "https://viewer.example.com", maxFiles: 8 });
   assertEq(uOverride.searchParams.get("max_files"), "8", "apiUrlFor maxFiles arg overrides the scope's max_files");
   const scopeNoMax = new URLSearchParams("bucket=b&service=svc");
-  assertEq(V.apiUrlFor(scopeNoMax, "https://viewer.example.com").searchParams.get("max_files"), null,
+  assertEq(V.apiUrlFor({ scope: scopeNoMax, origin: "https://viewer.example.com" }).searchParams.get("max_files"), null,
     "no maxFiles arg and no scope max_files -> none set (server default)");
-  assertEq(V.apiUrlFor(scopeNoMax, "https://viewer.example.com", 8).searchParams.get("max_files"), "8",
+  assertEq(V.apiUrlFor({ scope: scopeNoMax, origin: "https://viewer.example.com", maxFiles: 8 }).searchParams.get("max_files"), "8",
     "maxFiles arg sets the cap even when the scope carries none");
 
   assertEq(V.scopeLabel(new URLSearchParams("service=svc&host=h1"), "A"), "svc @ h1", "label: single host");
