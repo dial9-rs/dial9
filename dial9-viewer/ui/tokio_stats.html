@@ -47,11 +47,13 @@
 <script src="flamegraph_diff.js"></script>
 <script src="sse.js"></script>
 <script src="flamegraph_api.js"></script>
+<script src="tokio_stats_api.js"></script>
 <h1>⚡ Tokio Stats</h1>
 <div id="periods" class="periods"></div>
 <div class="toolbar">
   <button id="btn-add" class="secondary">+ Add period</button>
   <button id="btn-load">Load</button>
+  <button id="btn-more" class="secondary" style="display:none">Load more</button>
   <div class="threshold-row">
     <label>Threshold:</label>
     <input id="threshold-slider" type="range" min="-1" max="3" step="0.1" value="0">
@@ -82,6 +84,12 @@
   // consumes. Seeded from the landing page's "Add to diff" tray.
   const diffParsed = (typeof FlamegraphDiff !== "undefined") ? FlamegraphDiff.parseDiff(params) : null;
   const diffMode = !!diffParsed;
+
+  // `max_files` ceiling override, raised by the "Load more" button. null lets
+  // the backend pick its own (default) sampling cap. Seeded from the URL so a
+  // deep-sampled view is shareable / survives reload.
+  let maxFiles = params.get("max_files") ? Number(params.get("max_files")) : null;
+  let loading = false;
 
   // Per-period label ("A"/"B" in diff mode, "P1"/"P2"… otherwise), used by the
   // summary cards and diff tables.
@@ -240,6 +248,7 @@
       if (p.startNs) u.set(`p${i+1}_start_ns`, p.startNs);
       if (p.endNs) u.set(`p${i+1}_end_ns`, p.endNs);
     });
+    if (maxFiles != null) u.set("max_files", String(maxFiles));
     history.replaceState(null, "", "?" + u.toString());
   }
 
@@ -253,13 +262,16 @@
 
   function exemplarLink(ex, data) {
     if (!ex || !ex.start_ns) return "";
-    const bucket = (data && data.bucket) || params.get("bucket") || "";
-    const traceUrl = `/api/trace?bucket=${encodeURIComponent(bucket)}&keys=${encodeURIComponent(ex.source_key)}`;
-    const p = new URLSearchParams();
-    p.set("trace", traceUrl);
-    p.set("start_ns", String(ex.start_ns));
-    p.set("end_ns", String(ex.end_ns));
-    return `viewer.html?${p.toString()}`;
+    // We intentionally do not forward the exemplar's [start_ns, end_ns] window:
+    // the viewer treats those as a hard parse filter and a single poll's window
+    // is far too narrow — it would drop every surrounding event and load empty.
+    // Link to the whole segment instead. See exemplarViewerUrl.
+    return exemplarViewerUrl({
+      bucket: (data && data.bucket) || params.get("bucket") || "",
+      sourceKey: ex.source_key,
+      svc: params.get("service") || undefined,
+      host: ex.host || undefined,
+    });
   }
 
   function computeStats(data, threshNs) {
@@ -456,18 +468,46 @@
     return html;
   }
 
+  // Render the refinement status line from each period's coverage block, plus
+  // a per-period "refining\u2026" marker while its stream is still folding.
+  function renderStatus(prefix) {
+    const statusEl = document.getElementById("status");
+    statusEl.className = "status";
+    const parts = [];
+    periods.forEach((p, i) => {
+      if (!p.data) return;
+      const badge = formatTokioCoverage(p.data.coverage, p.data.total_polls);
+      if (!badge) return;
+      const label = periods.length > 1 ? `P${i + 1}: ` : "";
+      parts.push(label + badge + (p.refining ? " \u00b7 refining\u2026" : ""));
+    });
+    const head = prefix ? prefix : "";
+    statusEl.textContent = [head, ...parts].filter(Boolean).join(periods.length > 1 ? "  |  " : " \u00b7 ");
+    updateMoreButton();
+  }
+
+  // Show "Load more" only when idle and at least one loaded period still has
+  // matched files left to fold beyond the current sampling cap.
+  function updateMoreButton() {
+    const btn = document.getElementById("btn-more");
+    const canMore = !loading && periods.some(p => p.data && canRefineMore(p.data.coverage));
+    btn.style.display = canMore ? "" : "none";
+  }
+
   // Stream cancellation: each loadAll() run gets a monotonic token + an
-  // AbortController. A new run (Load clicked again) aborts the prior run's
-  // in-flight SSE streams and its callbacks bail via the token guard — otherwise
-  // a superseded stream's events could overwrite the current render, and its
-  // server-side folding would keep running (holding fold permits) until the cap.
+  // AbortController. A new run (Load / Load more clicked again) aborts the
+  // prior run's in-flight SSE streams and its callbacks bail via the token
+  // guard — otherwise a superseded stream's events could overwrite the current
+  // render, and its server-side folding would keep running (holding fold
+  // permits) until the cap.
   let loadToken = 0;
   let loadAbort = null;
 
   // Load one period over the SSE stream. The server emits the already-folded
   // snapshot first, then a fresh full snapshot per newly-folded file, and closes
-  // at the sampling cap. We re-render from cache on every event. Resolves when
-  // the stream closes (or is aborted); rejects only on a genuine error.
+  // at the sampling cap (raised by "Load more" via max_files). We re-render from
+  // cache on every event. Resolves when the stream closes (or is aborted);
+  // rejects only on a genuine error.
   function loadPeriod(period, token, signal) {
     const u = new URL("/api/tokio-stats", window.location.origin);
     // effectiveScope resolves the right scope per side: in diff mode each
@@ -475,7 +515,11 @@
     // normal mode it falls back to the shared top-level params. It also folds
     // in the (editable) time window, so we just copy its keys onto the URL.
     for (const [k, v] of effectiveScope(period)) u.searchParams.append(k, v);
+    // "Load more" raises the sampling-cap ceiling for the whole load (shared
+    // across periods), so append it on top of the per-period scope.
+    if (maxFiles != null) u.searchParams.set("max_files", String(maxFiles));
 
+    period.refining = true;
     const credHeaders = window.Dial9Creds ? Dial9Creds.headers() : {};
     return new Promise((resolve, reject) => {
       Dial9Sse.openSse(u, {
@@ -485,9 +529,17 @@
           if (token !== loadToken) return; // superseded by a newer load
           period.data = data;
           renderFromCache();
+          renderStatus("");
         },
-        onClose: resolve,
-        onError: reject,
+        onClose: () => {
+          period.refining = false;
+          if (token === loadToken) renderStatus("");
+          resolve();
+        },
+        onError: (err) => {
+          period.refining = false;
+          reject(err);
+        },
         // openSse calls NEITHER onClose nor onError when aborted, so settle via
         // its returned promise too (it resolves on close, abort, or after
         // onError) — otherwise every superseded load's Promise.all would hang
@@ -513,29 +565,48 @@
     loadAbort = new AbortController();
     const token = ++loadToken;
     const signal = loadAbort.signal;
-    statusEl.textContent = "Loading…";
-    statusEl.className = "status";
+    loading = true;
+    updateMoreButton();
+    renderStatus("Loading\u2026");
     try {
       // Stream all periods in parallel; each resolves when its stream closes.
       await Promise.all(periods.map((p) => loadPeriod(p, token, signal)));
       if (token !== loadToken) return; // superseded while awaiting
-      // Surface fold failures instead of a silent "Complete" over an empty table.
+      loading = false;
+      // Surface fold failures instead of silent coverage over an empty table.
       const notice = foldErrorAcrossPeriods();
-      if (notice) {
-        statusEl.textContent = notice;
-        statusEl.className = "status error";
-      } else {
-        statusEl.textContent = "Complete";
-      }
+      renderStatus(notice || "");
+      if (notice) statusEl.className = "status error";
     } catch (e) {
       if (token !== loadToken) return; // superseded; ignore its error
+      loading = false;
       statusEl.textContent = "Error: " + e.message;
       statusEl.className = "status error";
     }
   }
 
   document.getElementById("utc-toggle").addEventListener("change", renderPeriods);
-  document.getElementById("btn-load").addEventListener("click", loadAll);
+  document.getElementById("btn-load").addEventListener("click", () => {
+    // A manual reload drops any "Load more" deepening and returns to the
+    // sampling cap the page was opened with (the URL's max_files, or default).
+    maxFiles = params.get("max_files") ? Number(params.get("max_files")) : null;
+    syncUrl();
+    loadAll();
+  });
+
+  // "Load more": raise the sampling-cap ceiling to ~4x the deepest sample
+  // folded across the loaded periods, then re-run the refinement loop so each
+  // period folds further into its matched set.
+  document.getElementById("btn-more").addEventListener("click", () => {
+    if (loading) return;
+    const folded = periods.reduce(
+      (m, p) => Math.max(m, p.data && p.data.coverage ? Number(p.data.coverage.files_folded) || 0 : 0),
+      0,
+    );
+    maxFiles = nextMaxFiles(folded);
+    syncUrl();
+    loadAll();
+  });
   document.getElementById("btn-add").addEventListener("click", () => {
     const last = periods[periods.length - 1];
     if (last.startNs && last.endNs) {

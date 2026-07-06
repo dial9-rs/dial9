@@ -1238,6 +1238,57 @@ async fn tokio_stats_streams_and_refines_to_cap() {
     assert_eq!(cf.files_folded, 4, "tokio-stats stream stops at cap=4");
 }
 
+/// tokio-stats "Load more": `max_files` raises the sampling-cap ceiling, the
+/// same as the flamegraph's fetch-more (see [`fetch_more_raises_the_cap`]).
+/// A reopened stream serves the already-folded prefix instantly, then folds
+/// deeper into the matched set up to the new cap.
+#[tokio::test]
+async fn tokio_stats_max_files_raises_the_cap() {
+    let fs = tempfile::tempdir().unwrap();
+    std::fs::create_dir(fs.path().join("src-bucket")).unwrap();
+    std::fs::create_dir(fs.path().join("out-bucket")).unwrap();
+
+    let uploader = fake_s3_client(fs.path());
+    let body = mini_trace_gz();
+    seed_fleet(&uploader, "src-bucket", &body).await; // 20 segments → default cap 4
+
+    let base = start_agg_server(fs.path(), "src-bucket", "out-bucket", 60).await;
+    let http = reqwest::Client::new();
+
+    let final_folded = |body: String| {
+        let events = parse_sse_events(&body);
+        extract_coverage(events.last().unwrap())
+            .unwrap()
+            .files_folded
+    };
+
+    // Default cap: 4.
+    let resp = http
+        .get(format!("{base}/api/tokio-stats?service=shale"))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success());
+    assert_eq!(
+        final_folded(resp.text().await.unwrap()),
+        4,
+        "default cap = max(5% of 20, baseline 4) = 4"
+    );
+
+    // Load more: max_files=12 lifts the ceiling for this scope.
+    let resp = http
+        .get(format!("{base}/api/tokio-stats?service=shale&max_files=12"))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success());
+    assert_eq!(
+        final_folded(resp.text().await.unwrap()),
+        12,
+        "max_files lifts the tokio-stats cap to 12"
+    );
+}
+
 /// Regression: when folds FAIL (here: the aggregation OUTPUT client returns 403
 /// AccessDenied on every `PutObject`, the analogue of a read-only output bucket),
 /// the stream must SURFACE the failures rather than silently returning an empty

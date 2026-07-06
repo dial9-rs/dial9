@@ -38,6 +38,10 @@ pub struct TokioStatsParams {
     pub host: Vec<String>,
     pub start_ns: Option<i64>,
     pub end_ns: Option<i64>,
+    /// "Load more": raise the absolute sampling-cap ceiling for this scope.
+    /// Clamped server-side to a hard ceiling (see `sampling_cap`), so a crafted
+    /// request can't drive an unbounded fold.
+    pub max_files: Option<usize>,
 }
 
 #[derive(Serialize)]
@@ -81,8 +85,8 @@ pub struct PollExemplar {
 /// part-files into an accumulator, and emits an initial snapshot. Then it folds
 /// the not-yet-folded capped files (up to the sampling cap), reading + merging
 /// each file's polls as it lands and emitting a fresh [`TokioStatsResponse`]
-/// event, closing when the work-list drains. tokio-stats does not "fetch more",
-/// so the default cap always applies.
+/// event, closing when the work-list drains. `max_files` ("Load more") raises
+/// the sampling-cap ceiling, so a reopened stream folds deeper.
 pub async fn get_tokio_stats(
     State(state): State<AppState>,
     creds: MaybeCreds,
@@ -122,7 +126,12 @@ pub async fn get_tokio_stats(
     );
 
     // Resolve up front so an empty scope maps to 404 rather than an empty stream.
-    let Some(resolved) = refine::resolve(&agg, &scope, RefineOpts { max_files: None }).await else {
+    // "Load more" raises the sampling cap, so a reopened stream folds deeper
+    // into the matched set (the already-folded prefix is served instantly).
+    let opts = RefineOpts {
+        max_files: params.max_files,
+    };
+    let Some(resolved) = refine::resolve(&agg, &scope, opts).await else {
         return Err((
             StatusCode::NOT_FOUND,
             "no source files match this scope".to_string(),
