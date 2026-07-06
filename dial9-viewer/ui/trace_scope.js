@@ -129,6 +129,13 @@
     const services = [...new Set(parsed.map((p) => p.service).filter(Boolean))];
     const hosts = [...new Set(parsed.map((p) => p.host).filter(Boolean))];
     const epochs = parsed.map((p) => p.epoch).filter((e) => e > 0);
+    // When no window is supplied (raw-mode selection), derive it from the keys'
+    // epochs. If none parse (e.g. a custom key layout the filename regex misses)
+    // there is no window to derive — return null rather than
+    // Math.min(...[])/Math.max(...[]), which are +Infinity/-Infinity and would
+    // be written into the URL as s_from=Infinity, then rejected by the i64
+    // /api/browse params (400) — a silently broken deep link.
+    if ((t0 == null || t1 == null) && !epochs.length) return null;
     const from = t0 != null ? Math.floor(t0) : Math.min(...epochs);
     const to = t1 != null ? Math.ceil(t1) : Math.max(...epochs);
     return {

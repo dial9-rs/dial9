@@ -2022,6 +2022,14 @@
         const t0 = heatmapSelection ? heatmapSelection.t0 : null;
         const t1 = heatmapSelection ? heatmapSelection.t1 : null;
         const scope = Dial9TraceScope.scopeFromKeys(bucket, keys, t0, t1);
+        // Raw mode passes no window, so scopeFromKeys derives it from the keys'
+        // epochs. It returns null when none parse (an unrecognized key layout);
+        // there is no window to build a scope from, so tell the user rather than
+        // opening a broken link.
+        if (!scope) {
+            alert('Could not derive a time range from the selected files. Their key names may use an unrecognized layout.');
+            return;
+        }
         const { query, hostsDropped } = Dial9TraceScope.encodeScope(titleParams, scope);
         if (hostsDropped) warnHostsDropped();
 

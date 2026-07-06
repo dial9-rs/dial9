@@ -177,6 +177,27 @@ test("scopeFromKeys derives service/hosts/prefix/window", () => {
   assert.strictEqual(s.to, 1782760800);
 });
 
+test("scopeFromKeys derives the window from key epochs when none is supplied", () => {
+  // Raw mode passes no window; it comes from the keys' epochs.
+  const keys = [key("h1", 1782760100, 1), key("h1", 1782760300, 2)];
+  const s = scope.scopeFromKeys("bkt", keys, null, null);
+  assert.strictEqual(s.from, 1782760100, "min epoch");
+  assert.strictEqual(s.to, 1782760300, "max epoch");
+});
+
+test("scopeFromKeys returns null when no window and no parseable epochs", () => {
+  // A key layout the filename regex misses yields epoch 0 (filtered out). With
+  // no supplied window there is nothing to derive — must return null rather
+  // than an Infinity/-Infinity window that would serialize to s_from=Infinity
+  // and 400 the /api/browse request.
+  const keys = ["custom/layout/no-epoch-here.dat"];
+  assert.strictEqual(scope.scopeFromKeys("bkt", keys, null, null), null);
+  // But an explicit window is still honored even when epochs don't parse.
+  const s = scope.scopeFromKeys("bkt", keys, 1782760000, 1782760800);
+  assert.strictEqual(s.from, 1782760000);
+  assert.strictEqual(s.to, 1782760800);
+});
+
 testAsync("resolveScope lists the window, filters to the host set, maps to /api/object", async () => {
   const s = {
     bucket: "bkt",
