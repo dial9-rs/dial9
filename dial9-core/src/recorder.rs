@@ -39,8 +39,6 @@ fn noop_thread_hook() -> RecordingThreadHook {
 /// [`build`](RecorderBuilder::build) (session starts disabled) or
 /// [`build_and_start`](RecorderBuilder::build_and_start).
 pub fn recorder<M: WriterMode>(writer: SegmentWriter<M>) -> RecorderBuilder<M> {
-    #[cfg(feature = "pipeline")]
-    let worker_trace_path = M::IS_DISK.then(|| writer.base_path().to_path_buf());
     RecorderBuilder {
         writer,
         sources: Vec::new(),
@@ -53,8 +51,6 @@ pub fn recorder<M: WriterMode>(writer: SegmentWriter<M>) -> RecorderBuilder<M> {
         worker_poll_interval: None,
         #[cfg(feature = "pipeline")]
         trigger: None,
-        #[cfg(feature = "pipeline")]
-        worker_trace_path,
     }
 }
 
@@ -72,8 +68,6 @@ pub struct RecorderBuilder<M: WriterMode = Disk> {
     worker_poll_interval: Option<std::time::Duration>,
     #[cfg(feature = "pipeline")]
     trigger: Option<crate::dump::DumpRx>,
-    #[cfg(feature = "pipeline")]
-    worker_trace_path: Option<std::path::PathBuf>,
 }
 
 impl<M: WriterMode> std::fmt::Debug for RecorderBuilder<M> {
@@ -146,7 +140,7 @@ impl<M: WriterMode> RecorderBuilder<M> {
                 .clone()
                 .unwrap_or_else(metrique::writer::sink::DevNullSink::boxed);
             let config = crate::worker::BackgroundTaskConfig::builder()
-                .maybe_trace_path(self.worker_trace_path)
+                .maybe_trace_path(M::IS_DISK.then(|| writer.base_path().to_path_buf()))
                 .poll_interval(poll)
                 .processors(self.processors)
                 .metrics_sink(metrics)
@@ -209,13 +203,6 @@ impl<M: WriterMode> RecorderBuilder<M> {
     /// [`crate::dump`]. `None` keeps continuous mode.
     pub fn trigger(mut self, trigger: crate::dump::DumpRx) -> Self {
         self.trigger = Some(trigger);
-        self
-    }
-
-    /// Override the trace path the worker reports (dir/stem for its logs).
-    /// Defaults to the writer's base path on disk, `None` for in-memory.
-    pub fn worker_trace_path(mut self, path: impl Into<Option<std::path::PathBuf>>) -> Self {
-        self.worker_trace_path = path.into();
         self
     }
 }

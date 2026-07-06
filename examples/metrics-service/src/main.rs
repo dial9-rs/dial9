@@ -207,7 +207,6 @@ fn main() -> std::io::Result<()> {
     let mut builder = Builder::new_multi_thread();
     builder.worker_threads(args.worker_threads).enable_all();
     let traced_builder = TracedRuntime::builder()
-        .with_trace_path(&args.trace_path)
         .with_task_tracking(true)
         .with_process_resource_usage(ProcessResourceUsageConfig::default());
     let traced_builder = if let Some(path) = &args.worker_metrics_path {

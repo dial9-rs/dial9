@@ -47,7 +47,6 @@ fn nothing_uploads_until_dump_then_manifest_indexes_it() {
     builder.worker_threads(1).enable_all();
 
     let (runtime, guard) = TracedRuntime::builder()
-        .with_trace_path(&trace_path)
         .with_s3_uploader(test_s3_config())
         .with_s3_client(client.clone())
         .with_worker_poll_interval(Duration::from_millis(50))
@@ -171,7 +170,6 @@ fn lookforward_dump_captures_post_trigger_segments() {
     builder.worker_threads(1).enable_all();
 
     let (runtime, guard) = TracedRuntime::builder()
-        .with_trace_path(&trace_path)
         .with_s3_uploader(test_s3_config())
         .with_s3_client(client.clone())
         .with_worker_poll_interval(Duration::from_millis(50))
@@ -238,7 +236,6 @@ fn lookforward_dump_resolves_after_deadline() {
     builder.worker_threads(1).enable_all();
 
     let (runtime, guard) = TracedRuntime::builder()
-        .with_trace_path(&trace_path)
         .with_custom_pipeline(|p| p.gzip().write_back())
         .with_worker_poll_interval(Duration::from_millis(50))
         .with_dump_trigger(|_| {})
@@ -278,7 +275,6 @@ fn off_s3_pipeline_dumps_without_manifest() {
     builder.worker_threads(1).enable_all();
 
     let (runtime, guard) = TracedRuntime::builder()
-        .with_trace_path(&trace_path)
         .with_custom_pipeline(|p| p.gzip().write_back())
         .with_worker_poll_interval(Duration::from_millis(50))
         .with_dump_trigger(|_| {})
@@ -324,7 +320,6 @@ fn shutdown_truncates_open_lookforward_dump() {
     builder.worker_threads(1).enable_all();
 
     let (runtime, guard) = TracedRuntime::builder()
-        .with_trace_path(&trace_path)
         .with_s3_uploader(test_s3_config())
         .with_s3_client(client)
         .with_worker_poll_interval(Duration::from_millis(50))

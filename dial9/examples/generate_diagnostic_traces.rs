@@ -49,7 +49,6 @@ fn generate_no_wake_events(dir: &PathBuf) {
     let (runtime, guard) = TracedRuntime::builder()
         .with_task_tracking(true)
         .with_cpu_profiling(CpuProfilingConfig::default().frequency_hz(999))
-        .with_trace_path(&trace_path)
         .with_worker_poll_interval(Duration::from_millis(50))
         .build_and_start(builder, writer)
         .unwrap();
@@ -82,7 +81,6 @@ fn generate_good_trace(dir: &PathBuf) {
         .with_task_tracking(true)
         .with_cpu_profiling(CpuProfilingConfig::default().frequency_hz(999))
         .with_sched_events(SchedEventConfig::default())
-        .with_trace_path(&trace_path)
         .with_worker_poll_interval(Duration::from_millis(50))
         .build_and_start(builder, writer)
         .unwrap();
@@ -115,7 +113,6 @@ fn generate_no_sched_events(dir: &PathBuf) {
         .with_task_tracking(true)
         .with_cpu_profiling(CpuProfilingConfig::default().frequency_hz(999))
         // Deliberately omit .with_sched_events()
-        .with_trace_path(&trace_path)
         .with_worker_poll_interval(Duration::from_millis(50))
         .build_and_start(builder, writer)
         .unwrap();

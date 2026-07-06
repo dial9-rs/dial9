@@ -10,8 +10,8 @@ pub use runtime_context::current_worker_id;
 pub(crate) use runtime_context::poll_start_ts_monotonic;
 
 pub use builder::{
-    BuildAndStartRuntime, HasTracePath, NoTracePath, PipelineCustom, PipelineS3, PipelineUnset,
-    TelemetryCore, TelemetryCoreBuilder, TracedRuntime, TracedRuntimeBuilder,
+    BuildAndStartRuntime, PipelineCustom, PipelineS3, PipelineUnset, TelemetryCore,
+    TelemetryCoreBuilder, TracedRuntime, TracedRuntimeBuilder,
 };
 pub use dial9_core::handle::Dial9Handle;
 pub use guard::{TelemetryGuard, TraceRuntimeCoreBuilder};
@@ -731,7 +731,6 @@ mod tests {
         builder_a.worker_threads(2);
         let (runtime_a, guard) = TracedRuntime::builder()
             .with_runtime_name("main")
-            .with_trace_path(trace_path.to_str().unwrap())
             .build_and_start(builder_a, writer)
             .unwrap();
 
@@ -837,7 +836,6 @@ mod tests {
         let (runtime_a, guard) = TracedRuntime::builder()
             .with_runtime_name("first")
             .with_task_tracking(true)
-            .with_trace_path(trace_path.to_str().unwrap())
             .build_and_start(builder_a, writer)
             .unwrap();
 
@@ -1523,7 +1521,7 @@ mod tests {
         use super::*;
         use crate::telemetry::writer::Disk;
 
-        fn entries<P, M>(builder: &TracedRuntimeBuilder<P, M>) -> &[(String, String)] {
+        fn entries<M>(builder: &TracedRuntimeBuilder<M>) -> &[(String, String)] {
             &builder.segment_metadata
         }
 
@@ -1655,13 +1653,10 @@ mod tests {
     fn telemetry_core_builder_s3_config_builds_successfully() {
         use crate::background_task::s3::S3Config;
 
-        let dir = tempfile::tempdir().unwrap();
-        let trace_path = dir.path().join("trace.bin");
         let s3 = S3Config::builder().bucket("b").service_name("s").build();
 
         let guard = TelemetryCore::builder()
             .writer(InMemoryWriter::new(16 * 1024 * 1024).unwrap())
-            .trace_path(&trace_path)
             .s3_config(s3)
             .build()
             .expect("TelemetryCoreBuilder with s3_config must build");
@@ -1687,7 +1682,6 @@ mod tests {
 
         let guard = TelemetryCore::builder()
             .writer(writer)
-            .trace_path(&trace_path)
             .cpu_profiling(CpuProfilingConfig::default())
             .worker_poll_interval(std::time::Duration::from_millis(50))
             .build()

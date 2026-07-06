@@ -30,8 +30,7 @@ use std::time::Duration;
 
 use dial9_core::writer::{Disk, DiskWriter, InMemoryWriter, Memory, SegmentWriter, WriterMode};
 use dial9_tokio_telemetry::telemetry::{
-    BuildAndStartRuntime, HasTracePath, PipelineUnset, TelemetryGuard, TracedRuntime,
-    TracedRuntimeBuilder,
+    BuildAndStartRuntime, PipelineUnset, TelemetryGuard, TracedRuntime, TracedRuntimeBuilder,
 };
 
 #[cfg(feature = "memory-profiling")]
@@ -205,21 +204,15 @@ pub(crate) fn materialize_tokio_builder(
 /// then fixes the `Mode`, like `build_and_start(writer)` does in the non-macro
 /// path.
 type RuntimeFinalizer<Mode> = Box<
-    dyn FnOnce(
-        TracedRuntimeBuilder<HasTracePath, PipelineUnset, Disk>,
-        SegmentWriter<Mode>,
-    ) -> RuntimeBuilderFn,
+    dyn FnOnce(TracedRuntimeBuilder<PipelineUnset, Disk>, SegmentWriter<Mode>) -> RuntimeBuilderFn,
 >;
 
 fn finalizer<F, N, Mode>(f: F) -> RuntimeFinalizer<Mode>
 where
     Mode: WriterMode,
-    F: FnOnce(
-            TracedRuntimeBuilder<HasTracePath, PipelineUnset, Disk>,
-        ) -> TracedRuntimeBuilder<HasTracePath, N, Mode>
-        + 'static,
+    F: FnOnce(TracedRuntimeBuilder<PipelineUnset, Disk>) -> TracedRuntimeBuilder<N, Mode> + 'static,
     N: Send + 'static,
-    TracedRuntimeBuilder<HasTracePath, N, Mode>: BuildAndStartRuntime<Mode>,
+    TracedRuntimeBuilder<N, Mode>: BuildAndStartRuntime<Mode>,
 {
     // Two stages. The outer closure runs at config-build time, when seed and
     // writer exist but the tokio handle does not. The inner one defers the
@@ -637,9 +630,9 @@ fn warn_not_unicode(name: &'static str) {
 }
 
 fn apply_runtime_env<M>(
-    mut runtime: TracedRuntimeBuilder<HasTracePath, M>,
+    mut runtime: TracedRuntimeBuilder<M>,
     config: RuntimeEnvConfig,
-) -> TracedRuntimeBuilder<HasTracePath, M> {
+) -> TracedRuntimeBuilder<M> {
     if let Some(name) = config.runtime_name {
         runtime = runtime.with_runtime_name(name);
     }
@@ -1022,7 +1015,7 @@ impl Dial9Config {
             .build()
             .map_err(Dial9ConfigBuilderError::Io)?;
 
-        let seed = TracedRuntime::builder().with_trace_path(namespace.trace_path.clone());
+        let seed = TracedRuntime::builder();
         writer.set_namespace(namespace.boot_id, namespace.lock);
         let runtime_builder: RuntimeBuilderFn = match runtime_finalizer {
             Some(finalize) => finalize(seed, writer),
@@ -1085,7 +1078,7 @@ impl Dial9Config {
         // memory mode is reached by `with_custom_pipeline`/`with_s3_uploader`
         // in the closure, or inferred from the `InMemoryWriter` at build when no
         // pipeline is configured (the no-pipeline `build_and_start` infers Mode).
-        let seed = TracedRuntime::builder().with_trace_path("mem");
+        let seed = TracedRuntime::builder();
         let runtime_builder: RuntimeBuilderFn = match runtime_finalizer {
             Some(finalize) => finalize(seed, writer),
             None => Box::new(move |tk| seed.build_and_start(tk, writer)),
@@ -1162,12 +1155,10 @@ impl<S: disk_config_builder::State> DiskConfigBuilder<S> {
     /// Calling this method more than once replaces the prior closure.
     pub fn with_runtime<F, N>(mut self, f: F) -> Self
     where
-        F: FnOnce(
-                TracedRuntimeBuilder<HasTracePath, PipelineUnset, Disk>,
-            ) -> TracedRuntimeBuilder<HasTracePath, N, Disk>
+        F: FnOnce(TracedRuntimeBuilder<PipelineUnset, Disk>) -> TracedRuntimeBuilder<N, Disk>
             + 'static,
         N: Send + 'static,
-        TracedRuntimeBuilder<HasTracePath, N, Disk>: BuildAndStartRuntime<Disk>,
+        TracedRuntimeBuilder<N, Disk>: BuildAndStartRuntime<Disk>,
     {
         self.runtime_finalizer = Some(finalizer(f));
         self
@@ -1205,12 +1196,10 @@ impl<S: memory_config_builder::State> MemoryConfigBuilder<S> {
     /// a compile error. Calling this more than once replaces the prior closure.
     pub fn with_runtime<F, N>(mut self, f: F) -> Self
     where
-        F: FnOnce(
-                TracedRuntimeBuilder<HasTracePath, PipelineUnset, Disk>,
-            ) -> TracedRuntimeBuilder<HasTracePath, N, Memory>
+        F: FnOnce(TracedRuntimeBuilder<PipelineUnset, Disk>) -> TracedRuntimeBuilder<N, Memory>
             + 'static,
         N: Send + 'static,
-        TracedRuntimeBuilder<HasTracePath, N, Memory>: BuildAndStartRuntime<Memory>,
+        TracedRuntimeBuilder<N, Memory>: BuildAndStartRuntime<Memory>,
     {
         self.runtime_finalizer = Some(finalizer(f));
         self

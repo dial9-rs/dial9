@@ -37,9 +37,9 @@ pub use format::{
     WorkerUnparkEvent,
 };
 pub use recorder::{
-    BuildAndStartRuntime, Dial9Handle, Dial9TokioHandle, HasTracePath, NoTracePath, PipelineCustom,
-    PipelineS3, PipelineUnset, TelemetryCore, TelemetryCoreBuilder, TelemetryGuard, TokioHooks,
-    TraceRuntimeCoreBuilder, TracedRuntime, TracedRuntimeBuilder, current_worker_id, spawn,
+    BuildAndStartRuntime, Dial9Handle, Dial9TokioHandle, PipelineCustom, PipelineS3, PipelineUnset,
+    TelemetryCore, TelemetryCoreBuilder, TelemetryGuard, TokioHooks, TraceRuntimeCoreBuilder,
+    TracedRuntime, TracedRuntimeBuilder, current_worker_id, spawn,
 };
 pub use task_dump_config::TaskDumpConfig;
 pub use task_metadata::{TaskId, UNKNOWN_TASK_ID};

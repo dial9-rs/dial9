@@ -42,7 +42,6 @@ fn background_symbolization_produces_symbol_table_entries() {
 
     let (runtime, guard) = TracedRuntime::builder()
         .with_cpu_profiling(CpuProfilingConfig::default().frequency_hz(999))
-        .with_trace_path(&trace_path)
         .with_worker_poll_interval(std::time::Duration::from_millis(50))
         .build_and_start(builder, writer)
         .unwrap();

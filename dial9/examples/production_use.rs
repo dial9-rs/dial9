@@ -167,7 +167,7 @@ use std::time::Duration;
 
 use clap::Parser;
 use dial9::Dial9Config;
-use dial9::telemetry::{Dial9TokioHandle, HasTracePath, PipelineUnset, TracedRuntimeBuilder};
+use dial9::telemetry::{Dial9TokioHandle, PipelineUnset, TracedRuntimeBuilder};
 use metrique::local::{LocalFormat, OutputStyle};
 use metrique::writer::format::FormatExt;
 use metrique::writer::sink::FlushImmediatelyBuilder;
@@ -237,12 +237,12 @@ fn stderr_metrics_sink() -> metrique::writer::BoxEntrySink {
 
 #[cfg(feature = "cpu-profiling")]
 fn configure_runtime_common(
-    mut r: TracedRuntimeBuilder<HasTracePath, PipelineUnset>,
+    mut r: TracedRuntimeBuilder<PipelineUnset>,
     metrics_sink: metrique::writer::BoxEntrySink,
     cpu_profile_enabled: bool,
     schedule_profile_enabled: bool,
     cpu_sample_hz: u64,
-) -> TracedRuntimeBuilder<HasTracePath, PipelineUnset> {
+) -> TracedRuntimeBuilder<PipelineUnset> {
     r = r
         .with_task_tracking(true)
         .with_worker_metrics_sink(metrics_sink);
@@ -258,9 +258,9 @@ fn configure_runtime_common(
 
 #[cfg(not(feature = "cpu-profiling"))]
 fn configure_runtime_common(
-    r: TracedRuntimeBuilder<HasTracePath, PipelineUnset>,
+    r: TracedRuntimeBuilder<PipelineUnset>,
     metrics_sink: metrique::writer::BoxEntrySink,
-) -> TracedRuntimeBuilder<HasTracePath, PipelineUnset> {
+) -> TracedRuntimeBuilder<PipelineUnset> {
     r.with_task_tracking(true)
         .with_worker_metrics_sink(metrics_sink)
 }

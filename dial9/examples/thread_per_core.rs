@@ -44,10 +44,7 @@ fn main() -> std::io::Result<()> {
         .build()?;
 
     // Create the telemetry session first — no runtime needed yet.
-    let guard = TelemetryCore::builder()
-        .writer(writer)
-        .trace_path(format!("{trace_dir}/trace.bin"))
-        .build()?;
+    let guard = TelemetryCore::builder().writer(writer).build()?;
     guard.enable();
 
     // Spawn one current-thread runtime per core.

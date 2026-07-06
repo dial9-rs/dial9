@@ -26,6 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Breaking:** `boot_id` is no longer an `S3Config` builder field. The runtime injects the on-disk namespace `boot_id` into the S3 config at build time, so a local trace segment and its S3 key share one identity. An `S3Config` built outside the managed `Dial9Config` path falls back to a fresh `{4-alpha}-{pid}` ([#566](https://github.com/dial9-rs/dial9/pull/566))
 - Memory profiling moved into `dial9-perf-self-profile`. The `dial9_tokio_telemetry::memory_profiling::*` paths and public API (`Dial9Allocator`, `MemoryProfiler::install`, `MemoryProfilerGuard`) are unchanged.
 - **Breaking:** `Dial9Config` (with its builders and `TelemetryRuntimeError`) moved from `dial9-tokio-telemetry` to the `dial9` facade (`dial9::Dial9Config`, behind the `tokio` feature). The config API is otherwise unchanged ([#356](https://github.com/dial9-rs/dial9/issues/356))
+- **Breaking:** the worker trace path now comes solely from the writer's base path. Removed `TracedRuntimeBuilder::with_trace_path` and the `TelemetryCore` builder's `trace_path` field; set the path once when constructing the writer (`DiskWriter`). The `NoTracePath` / `HasTracePath` type-state markers are also removed, so the builder is now `TracedRuntimeBuilder<M, Mode>` (two type parameters) ([#356](https://github.com/dial9-rs/dial9/issues/356))
 
 ## [0.3.13](https://github.com/dial9-rs/dial9/compare/dial9-tokio-telemetry-v0.3.12...dial9-tokio-telemetry-v0.3.13) - 2026-05-29
 

@@ -55,7 +55,6 @@ fn main() {
         .build()
         .unwrap();
     let (runtime, guard) = TracedRuntime::builder()
-        .with_trace_path(trace_base)
         .with_task_tracking(true)
         .with_cpu_profiling(CpuProfilingConfig::default())
         .build_and_start(builder, writer)

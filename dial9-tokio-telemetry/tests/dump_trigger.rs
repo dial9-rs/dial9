@@ -37,7 +37,6 @@ fn trigger_without_pipeline_resolves_worker_stopped() {
     let writer = DiskWriter::single_file(&trace_path).unwrap();
 
     let (runtime, guard) = TracedRuntime::builder()
-        .with_trace_path(&trace_path)
         .with_dump_trigger(|_| {})
         .build_and_start(builder, writer)
         .unwrap();
@@ -71,7 +70,6 @@ fn concurrent_dumps_both_resolve_with_distinct_ids() {
     builder.worker_threads(2).enable_all();
 
     let (runtime, guard) = TracedRuntime::builder()
-        .with_trace_path(&trace_path)
         .with_custom_pipeline::<_, Disk>(|p| p.gzip().write_back())
         .with_dump_trigger(|_| {})
         .with_worker_poll_interval(Duration::from_millis(50))

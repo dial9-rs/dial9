@@ -148,7 +148,6 @@ fn main() -> std::io::Result<()> {
 
     let (runtime, guard) = TracedRuntime::builder()
         .with_task_tracking(true)
-        .with_trace_path(&args.trace_path)
         .with_s3_uploader(s3_config)
         .with_worker_metrics_sink(metrics_sink)
         .build_and_start(builder, writer)?;

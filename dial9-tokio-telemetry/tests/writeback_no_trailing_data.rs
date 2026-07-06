@@ -21,7 +21,6 @@ fn graceful_shutdown_produces_clean_gzip_segments() {
 
     let (runtime, guard) = TracedRuntime::builder()
         .with_cpu_profiling(CpuProfilingConfig::default())
-        .with_trace_path(&trace_path)
         .with_worker_poll_interval(std::time::Duration::from_millis(50))
         .build_and_start(builder, writer)
         .unwrap();

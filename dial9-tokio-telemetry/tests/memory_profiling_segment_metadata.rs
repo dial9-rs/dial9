@@ -26,7 +26,6 @@ fn memory_sample_rate_appears_in_segment_metadata() {
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.worker_threads(1).enable_all();
     let (runtime, guard) = TracedRuntime::builder()
-        .with_trace_path(trace_path.to_str().unwrap())
         .build_and_start(builder, writer)
         .unwrap();
 

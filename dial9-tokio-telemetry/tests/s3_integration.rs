@@ -43,7 +43,6 @@ fn worker_thread_starts_and_stops_cleanly() {
     builder.worker_threads(1).enable_all();
 
     let (runtime, guard) = TracedRuntime::builder()
-        .with_trace_path(&trace_path)
         .with_s3_uploader(s3_config.clone())
         .with_s3_client(client.clone())
         .with_worker_poll_interval(std::time::Duration::from_millis(50))
@@ -71,7 +70,6 @@ fn graceful_shutdown_seals_segments() {
     builder.worker_threads(1).enable_all();
 
     let (runtime, guard) = TracedRuntime::builder()
-        .with_trace_path(&trace_path)
         .with_s3_uploader(s3_config.clone())
         .with_s3_client(client.clone())
         .with_worker_poll_interval(std::time::Duration::from_millis(50))
@@ -123,7 +121,6 @@ fn end_to_end_trace_to_s3_roundtrip() {
     builder.worker_threads(2).enable_all();
 
     let (runtime, guard) = TracedRuntime::builder()
-        .with_trace_path(&trace_path)
         .with_runtime_name("test-runtime")
         .with_s3_uploader(s3_config.clone())
         .with_s3_client(client.clone())
@@ -300,7 +297,6 @@ fn region_auto_detection_corrects_wrong_client_region() {
     builder.worker_threads(2).enable_all();
 
     let (runtime, guard) = TracedRuntime::builder()
-        .with_trace_path(&trace_path)
         .with_s3_uploader(s3_config.clone())
         .with_s3_client(client.clone())
         .with_worker_poll_interval(std::time::Duration::from_millis(50))
@@ -419,7 +415,6 @@ fn stress_test_all_segments_uploaded_and_valid() {
 
     let (runtime, guard) = TracedRuntime::builder()
         .with_task_tracking(true)
-        .with_trace_path(&trace_path)
         .with_s3_uploader(s3_config.clone())
         .with_s3_client(client.clone())
         .with_worker_poll_interval(std::time::Duration::from_millis(50))
@@ -626,7 +621,6 @@ fn graceful_shutdown_completes_when_s3_hangs() {
     builder.worker_threads(2).enable_all();
 
     let (runtime, guard) = TracedRuntime::builder()
-        .with_trace_path(&trace_path)
         .with_s3_uploader(s3_config.clone())
         .with_s3_client(client.clone())
         .with_worker_poll_interval(std::time::Duration::from_millis(50))
@@ -697,7 +691,6 @@ fn stress_test_with_s3_failures() {
 
     let (runtime, guard) = TracedRuntime::builder()
         .with_task_tracking(true)
-        .with_trace_path(&trace_path)
         .with_s3_uploader(s3_config.clone())
         .with_s3_client(client.clone())
         .with_worker_poll_interval(std::time::Duration::from_millis(50))
@@ -783,7 +776,6 @@ fn permanently_broken_s3_produces_failure_metrics() {
     builder.worker_threads(2).enable_all();
 
     let (runtime, guard) = TracedRuntime::builder()
-        .with_trace_path(&trace_path)
         .with_s3_uploader(s3_config.clone())
         .with_s3_client(client.clone())
         .with_worker_poll_interval(std::time::Duration::from_millis(50))
@@ -866,7 +858,6 @@ fn dump_trigger_uploads_segments_and_writes_manifest() {
     builder.worker_threads(2).enable_all();
 
     let (runtime, guard) = TracedRuntime::builder()
-        .with_trace_path(&trace_path)
         .with_s3_uploader(s3_config.clone())
         .with_s3_client(client.clone())
         .with_dump_trigger(|_| {})

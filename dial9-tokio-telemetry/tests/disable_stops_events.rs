@@ -223,7 +223,6 @@ fn disable_stops_segment_rotation() {
     builder.worker_threads(2).enable_all();
 
     let (runtime, guard) = TracedRuntime::builder()
-        .with_trace_path(trace_path.to_str().unwrap())
         .build_and_start(builder, writer)
         .unwrap();
 

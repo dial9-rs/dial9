@@ -210,7 +210,6 @@ fn measure(mode: Mode) -> Sample {
                     .unwrap();
                 let r = TracedRuntime::builder()
                     .with_task_tracking(true)
-                    .with_trace_path(&trace_path)
                     .with_custom_pipeline(|p| p.gzip().pipe(NoopSink))
                     .build_and_start(tk, writer)
                     .expect("build_and_start (disk)");
@@ -232,7 +231,6 @@ fn measure(mode: Mode) -> Sample {
                 let r = TracedRuntime::builder()
                     .with_task_tracking(true)
                     .with_cpu_profiling(CpuProfilingConfig::default().frequency_hz(199))
-                    .with_trace_path(&trace_path)
                     .with_custom_pipeline(|p| p.symbolize().gzip().pipe(NoopSink))
                     .build_and_start(tk, writer)
                     .expect("build_and_start (disk+cpu)");
