@@ -617,15 +617,11 @@
             if (result.ok) {
                 if (result.region) {
                     region.value = result.region;
-                    // Persist the resolved region so it rides on every request,
-                    // then mirror it into the URL (aws_region) so a shared link
-                    // reproduces the cross-region bucket.
-                    Dial9Creds.set({
-                        accessKeyId: akid.value,
-                        secretAccessKey: secret.value,
-                        sessionToken: token.value,
-                        region: result.region,
-                    });
+                    // Persist the resolved region onto whatever credential is
+                    // active (static keys or an assumed role), then mirror it
+                    // into the URL (aws_region) so a shared link reproduces the
+                    // cross-region bucket.
+                    Dial9Creds.setRegion(result.region);
                     syncUrl();
                 }
                 setStatus(`Using ${name}${result.region ? ` · region ${result.region}` : ''}`, 'ok');
@@ -811,15 +807,16 @@
     // header — this is what lets a cross-region bucket link load without a fresh
     // detection round trip. Prefill the panel field too so it's visible. Only
     // meaningful when credentials are present (region is header-only there); on
-    // the ambient path the server uses its own configured region. (The
-    // assume-role branch above already stored the region alongside the ARN; this
-    // covers the static-BYOC case and is a no-op when the ARN path ran.)
+    // the ambient path the server uses its own configured region. Applies to
+    // either transport via setRegion (a no-op when nothing is stored, and when
+    // the assume-role branch above already stored this same region alongside the
+    // ARN).
     if (urlState.region && window.Dial9Creds) {
         const regionField = document.getElementById('creds-region');
         if (regionField && !regionField.value) regionField.value = urlState.region;
         const stored = Dial9Creds.get();
-        if (stored && stored.accessKeyId && stored.region !== urlState.region) {
-            Dial9Creds.set({ ...stored, region: urlState.region, autoDetectRegion: false });
+        if (stored && stored.region !== urlState.region) {
+            Dial9Creds.setRegion(urlState.region);
         }
     }
 
@@ -907,7 +904,10 @@
                 const stored = Dial9Creds.get();
                 if (stored && stored.region !== result.region) {
                     // Persist without a second round trip (region is known now).
-                    Dial9Creds.set({ ...stored, region: result.region, autoDetectRegion: false });
+                    // setRegion keeps the active transport's kind, so this works
+                    // for an assumed-role credential too — a static-only set()
+                    // would throw here for the role path.
+                    Dial9Creds.setRegion(result.region);
                     const regionField = document.getElementById('creds-region');
                     if (regionField) regionField.value = result.region;
                     syncUrl();
