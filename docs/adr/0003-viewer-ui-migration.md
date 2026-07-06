@@ -17,6 +17,8 @@ Ground rule: lose nothing. The current functional surface is the contract. This 
 | `docs/ui-inventory/01-technical-constraints.md` | Binding constraints (H1-H5 hard, S1-S6 soft)                                                                                                   |
 | `docs/ui-inventory/02-architecture.md`          | Non-functional requirements and target architecture                                                                                            |
 | `docs/ui-inventory/03-performance-findings.md`  | Measured structural performance issues and the design rules they yield                                                                         |
+| `docs/ui-inventory/04-ux-findings.md`           | UX audit: 23 verified findings (8 structural, 8 keyboard, 7 feedback), genre-gap table, works-well list                                        |
+| `docs/ui-inventory/mocks/`                      | Runnable design mocks (3 layout concepts + interactive keyboard model); see its README                                                         |
 
 ## Decisions
 
@@ -124,6 +126,31 @@ Vitest. The migration is mechanical - harness assertions become
 The proposal is a-step one. First we create the new UI as progressively as below and we show a switch button to go the new one, but legacy remains default. Then we feel comfortable we can reverse the switch and allow users to keep using the legacy UI but new default is the migrated one. Finally we remove the legacy.
 
 Regarding the migration, will be incremental, per surface, riskiest last: pipeline proof on `flamegraph.html` (smallest),then `index.html`, then `viewer.html` by slice (trace types -> store/viewport -> low-risk chrome -> panels one at a time -> lanes and pointer interactions). Old and new coexist during the migration via a static-copy list in the Vite config (legacy pages + core files into `dist/`) that shrinks to empty; every landed change deletes the inline code it replaces, no long-lived dual implementations. Done means: the three HTML shells contain no inline script beyond the module tag, the functional contract holds, and the NFR budgets hold.
+
+### 9. UX direction
+
+Audited for internal expert users (journeys inferred from the tool's own
+diagnostic skills; three-lens judge panel over live-UI evidence; claims
+re-verified before cataloging). Full findings: `04-ux-findings.md`. Decisions:
+
+- **Priorities:** locate/share-a-moment (S2, S3) and keyboard ergonomics
+  (K1-K3) lead; the audit's headline is that the tool computes the right
+  answers but hides the surfaces that carry them.
+- **Unified keyboard model (track A, adopted):** one vocabulary across all
+  three pages - `/` search palette (tasks/spans/POIs), `n`/`p` POI stepping,
+  `g` goto-time, `f` fit, `z` zoom-undo, WASD nav, `?` help everywhere;
+  existing bindings unchanged. Interactive mock: `mocks/keyboard.html`.
+- **View state becomes shareable:** URL carries viewport/selection/POI (the
+  browser page already does this, #585); plus minimap overview strip and a
+  status bar. These ride every concept.
+- **Layout reorganization (track B, direction accepted; concept choice open):**
+  three mocked concepts - unified timeline column / triage-first rail /
+  conservative evolution (`mocks/concept-{1,2,3}.html`, hold `C` to compare
+  with the current UI). The chosen concept amends the functional contract
+  BEFORE the affected page's migration slice, so components are built once to
+  the amended spec; pure visual polish trails as a later pass.
+- UX changes are deliberate contract amendments and get the same parity-gate
+  treatment as everything else (section 7).
 
 ## Consequences
 

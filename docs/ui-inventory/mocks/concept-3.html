@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Concept 3: conservative evolution</title>
+<link rel="stylesheet" href="mock.css"></head>
+<body>
+<div class="mockbar"><b>CONCEPT 3 - Conservative evolution</b>
+  <span>same layout as today, three additions only: panels auto-expanded, minimap, status bar (no reorganization)</span>
+  <span class="key">C</span><span>hold to compare with current UI</span>
+  <span style="margin-left:auto"><a href="index.html">gallery</a> · <a href="concept-1.html">concept 1</a> · <a href="concept-2.html">concept 2</a></span>
+</div>
+
+<div class="minimap"><div class="density"></div>
+  <div class="poi" style="left:12%"></div><div class="poi" style="left:31%"></div><div class="poi" style="left:58%"></div><div class="poi" style="left:83%"></div>
+  <div class="viewport"></div><div class="label">overview strip <span class="tag-new">NEW</span> · everything else = today's UI with folds OPEN by default</div>
+</div>
+
+<!-- The real UI with all panels expanded IS this concept: real screenshot -->
+<div style="flex:1; min-height:0; overflow:hidden">
+  <img src="assets/A2-task-selected-expanded.png" style="width:100%; display:block; margin-top:-46px" alt="current UI, panels expanded, task selected">
+</div>
+
+<div class="statusbar">
+  <span class="sel">Task 0x3a selected · Esc clears</span>
+  <span>view +1.32s - +2.24s</span>
+  <span class="link">⎘ copy link to this view <span class="tag-new">URL state</span></span>
+  <span style="margin-left:auto">/ search · n/p POI · f fit · z undo zoom · g goto · ? help <span class="tag-new">unified keys</span></span>
+</div>
+
+<div class="fullshot" id="cmp" style="background-image:url(assets/J1-1-viewer-initial.png)"></div>
+<div class="compare-note">hold <b>C</b> = current UI (cold open, folds closed)</div>
+<script>
+  const cmp = document.getElementById("cmp");
+  addEventListener("keydown", e => { if (e.key.toLowerCase() === "c") cmp.style.display = "block"; });
+  addEventListener("keyup", e => { if (e.key.toLowerCase() === "c") cmp.style.display = "none"; });
+</script>
+</body></html>
