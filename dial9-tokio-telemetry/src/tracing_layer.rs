@@ -362,7 +362,7 @@ where
             return;
         };
 
-        handle.record_encodable_event(&SpanCloseEvent {
+        handle.record_event(SpanCloseEvent {
             timestamp_ns: clock_monotonic_ns(),
             span_id: id.into_u64(),
         });

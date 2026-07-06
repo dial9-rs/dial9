@@ -370,7 +370,17 @@ fn decode_and_encode(bytes: &[u8], full_key: &str) -> anyhow::Result<EncodedPart
     })
 }
 
-/// Write stage of a fold: the two (small) part-file PUTs, issued concurrently.
+/// Write stage of a fold: the (small) part-file PUTs.
+///
+/// The `samples/` part is the durable record of "this file is folded"
+/// ([`list_folded_leaves`] lists it; see ADR-0003), so it MUST be written LAST,
+/// only after the dict and polls parts have landed. Writing it concurrently
+/// would let a mid-write failure — or a cancelled fold task (the streaming
+/// endpoints abort in-flight folds whenever the client disconnects) — commit a
+/// file as folded while its dict/polls parts are missing, permanently: a folded
+/// file is never re-folded, so the gap would never heal. Orphaned dict/polls
+/// parts from the reverse interleaving are harmless — the file stays unfolded
+/// and a later re-fold idempotently overwrites the same keys.
 async fn write_parts(
     output: &dyn StorageBackend,
     output_bucket: &str,
@@ -381,14 +391,16 @@ async fn write_parts(
     let part_key = samples_part_key(output_prefix, full_key);
     let dict_key = dict_part_key(output_prefix, full_key);
     let polls_key = polls_part_key(output_prefix, full_key);
-    let (samples_res, dict_res, polls_res) = tokio::join!(
-        output.put_object(output_bucket, &part_key, encoded.samples_buf),
+    let (dict_res, polls_res) = tokio::join!(
         output.put_object(output_bucket, &dict_key, encoded.dict_buf),
         output.put_object(output_bucket, &polls_key, encoded.polls_buf),
     );
-    samples_res.map_err(|e| anyhow::anyhow!("write samples {part_key}: {e}"))?;
     dict_res.map_err(|e| anyhow::anyhow!("write dict {dict_key}: {e}"))?;
     polls_res.map_err(|e| anyhow::anyhow!("write polls {polls_key}: {e}"))?;
+    output
+        .put_object(output_bucket, &part_key, encoded.samples_buf)
+        .await
+        .map_err(|e| anyhow::anyhow!("write samples {part_key}: {e}"))?;
     Ok(())
 }
 
@@ -494,6 +506,15 @@ pub(crate) struct Coverage {
     /// current sample actually spans), so the UI can show fleet-representativeness
     /// e.g. "8 / 40 hosts".
     pub hosts_folded: usize,
+    /// Number of files whose fold FAILED this stream (fetch/decode/write error —
+    /// e.g. an unwritable output bucket → `PutObject` AccessDenied). Non-zero
+    /// means the tree may be incomplete for a reason other than the sampling cap,
+    /// so the UI surfaces it instead of showing a silent empty/partial result.
+    pub fold_errors: usize,
+    /// A representative fold error message (the most recent), for the UI to
+    /// display. `None` when `fold_errors == 0`. Truncated to keep the event small.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fold_error_sample: Option<String>,
 }
 
 /// Wire value of the `CpuProfile` CPU-sample source (periodic on-CPU sample).
@@ -616,12 +637,14 @@ impl FacetAccum {
         }
     }
 
-    fn into_results(self) -> Vec<FacetResult> {
+    /// Snapshot the accumulated facet values without consuming, so a streaming
+    /// query can produce a fresh [`FacetResult`] set after every merged file.
+    fn results(&self) -> Vec<FacetResult> {
         FACETS
             .iter()
-            .zip(self.sets)
+            .zip(&self.sets)
             .map(|(def, set)| {
-                let mut values: Vec<String> = set.into_iter().collect();
+                let mut values: Vec<String> = set.iter().cloned().collect();
                 values.sort();
                 FacetResult {
                     name: def.name,
@@ -645,85 +668,127 @@ pub(crate) struct SampleFilter {
     pub facets: FacetFilters,
 }
 
-/// Aggregated result of folding + reading the in-scope part-files.
-pub(crate) struct AggResult {
+/// A borrowed snapshot of a [`FlamegraphAccum`] at a point during streaming: the
+/// dictionary is borrowed (never cloned per emit — it grows monotonically and is
+/// the large part), while `stack_counts` and `facets` are materialized because
+/// the caller iterates them to build the tree and toolbar.
+pub(crate) struct AggSnapshot<'a> {
     pub stack_counts: Vec<(Vec<u8>, u64)>,
-    pub stacks_dict: HashMap<Vec<u8>, Vec<String>>,
+    pub stacks_dict: &'a HashMap<Vec<u8>, Vec<String>>,
     pub total_samples: usize,
     pub hosts: usize,
     pub min_ts: Option<i64>,
     pub max_ts: Option<i64>,
-    /// Generic facet results: each facet's distinct values in the scope.
+    /// Generic facet results: each facet's distinct values seen so far.
     pub facets: Vec<FacetResult>,
 }
 
-/// Aggregate the given folded part-files (by their source keys) into stack_id
-/// counts + a merged stacks dictionary, reading each part-file through the
-/// `StorageBackend`. Only `source_keys` whose part-file exists are read; missing
-/// ones (not yet folded) are skipped.
-///
-/// Each file's two GETs (samples + dict) are issued concurrently with
-/// `tokio::join!`, halving the round-trips per file. The per-file Parquet decode
-/// and HashMap merge then run serially as files are read, so the shared
-/// accumulators need no locking.
-pub(crate) async fn aggregate(
+/// Incremental flamegraph accumulator: merge folded part-files one at a time
+/// under a fixed [`SampleFilter`], so a streaming query can emit a fresh
+/// [`snapshot`](Self::snapshot) after every file rather than re-reading the whole
+/// folded set each poll. The shared accumulators live here and are merged into
+/// serially, so no locking is needed even when part-file GETs run concurrently.
+pub(crate) struct FlamegraphAccum {
+    filter: SampleFilter,
+    counts: HashMap<[u8; 16], u64>,
+    dict: HashMap<Vec<u8>, Vec<String>>,
+    facets: FacetAccum,
+    total_samples: usize,
+    min_ts: Option<i64>,
+    max_ts: Option<i64>,
+}
+
+impl FlamegraphAccum {
+    pub(crate) fn new(filter: SampleFilter) -> Self {
+        Self {
+            filter,
+            counts: HashMap::new(),
+            dict: HashMap::new(),
+            facets: FacetAccum::new(),
+            total_samples: 0,
+            min_ts: None,
+            max_ts: None,
+        }
+    }
+
+    /// Merge one folded file's samples part-file (and its optional stacks dict)
+    /// into the running totals.
+    pub(crate) fn merge(&mut self, samples: Vec<u8>, dict: Option<Vec<u8>>) -> anyhow::Result<()> {
+        read_samples_part(
+            samples,
+            &self.filter,
+            &mut self.counts,
+            &mut self.facets,
+            &mut self.total_samples,
+            &mut self.min_ts,
+            &mut self.max_ts,
+        )?;
+        if let Some(dict) = dict {
+            read_dict_part(dict, &mut self.dict)?;
+        }
+        Ok(())
+    }
+
+    /// A borrowed snapshot of the current totals for emitting one SSE event.
+    pub(crate) fn snapshot(&self) -> AggSnapshot<'_> {
+        let stack_counts: Vec<(Vec<u8>, u64)> =
+            self.counts.iter().map(|(k, v)| (k.to_vec(), *v)).collect();
+        AggSnapshot {
+            stack_counts,
+            stacks_dict: &self.dict,
+            total_samples: self.total_samples,
+            hosts: self.facets.matched_hosts.len().max(1),
+            min_ts: self.min_ts,
+            max_ts: self.max_ts,
+            facets: self.facets.results(),
+        }
+    }
+}
+
+/// Concurrency for samples/dict part-file GETs, matching [`POLLS_READ_CONCURRENCY`].
+const SAMPLES_READ_CONCURRENCY: usize = 24;
+
+/// Fetch one folded file's samples + stacks-dict part-file bytes, issuing the
+/// two GETs concurrently. Returns `None` when the samples part is missing (the
+/// file is not yet readable); the dict is optional (`None` if its GET fails).
+pub(crate) async fn fetch_sample_parts(
+    output: &dyn StorageBackend,
+    bucket: &str,
+    output_prefix: &str,
+    source_key: &str,
+) -> Option<(Vec<u8>, Option<Vec<u8>>)> {
+    let part_key = samples_part_key(output_prefix, source_key);
+    let dict_key = dict_part_key(output_prefix, source_key);
+    let (samples, dict_data) = tokio::join!(
+        output.get_object(bucket, &part_key),
+        output.get_object(bucket, &dict_key),
+    );
+    Some((samples.ok()?, dict_data.ok()))
+}
+
+/// Fetch the samples + dict part-files for every folded key in `source_keys`,
+/// concurrently (`buffer_unordered`). Used to prime a [`FlamegraphAccum`] with
+/// the already-folded set before streaming new folds. The caller merges the
+/// returned buffers serially, so the accumulator needs no locking.
+pub(crate) async fn fetch_folded_sample_parts(
     output: &dyn StorageBackend,
     bucket: &str,
     output_prefix: &str,
     source_keys: &[String],
     folded: &HashSet<String>,
-    filter: SampleFilter,
-) -> anyhow::Result<AggResult> {
-    let mut counts: HashMap<[u8; 16], u64> = HashMap::new();
-    let mut dict: HashMap<Vec<u8>, Vec<String>> = HashMap::new();
-    let mut accum = FacetAccum::new();
-    let mut total_samples = 0usize;
-    let mut min_ts: Option<i64> = None;
-    let mut max_ts: Option<i64> = None;
-
-    for sk in source_keys {
-        if !folded.contains(&part_leaf_of(sk)) {
-            continue;
-        }
-        let part_key = samples_part_key(output_prefix, sk);
-        let dict_key = dict_part_key(output_prefix, sk);
-        let (samples, dict_data) = tokio::join!(
-            output.get_object(bucket, &part_key),
-            output.get_object(bucket, &dict_key),
-        );
-        let data = match samples {
-            Ok(d) => d,
-            Err(_) => continue,
-        };
-        read_samples_part(
-            data,
-            &filter,
-            &mut counts,
-            &mut accum,
-            &mut total_samples,
-            &mut min_ts,
-            &mut max_ts,
-        )?;
-        if let Ok(dict_data) = dict_data {
-            read_dict_part(dict_data, &mut dict)?;
-        }
-    }
-
-    let stack_counts: Vec<(Vec<u8>, u64)> =
-        counts.into_iter().map(|(k, v)| (k.to_vec(), v)).collect();
-
-    let hosts = accum.matched_hosts.len().max(1);
-    let facets = accum.into_results();
-
-    Ok(AggResult {
-        stack_counts,
-        stacks_dict: dict,
-        total_samples,
-        hosts,
-        min_ts,
-        max_ts,
-        facets,
-    })
+) -> Vec<(Vec<u8>, Option<Vec<u8>>)> {
+    use futures::stream::StreamExt;
+    let keys: Vec<String> = source_keys
+        .iter()
+        .filter(|sk| folded.contains(&part_leaf_of(sk)))
+        .cloned()
+        .collect();
+    futures::stream::iter(keys)
+        .map(|sk| async move { fetch_sample_parts(output, bucket, output_prefix, &sk).await })
+        .buffer_unordered(SAMPLES_READ_CONCURRENCY)
+        .filter_map(|x| async { x })
+        .collect()
+        .await
 }
 
 /// Concurrency for polls part-file GETs. A GET is a single round-trip with a
@@ -762,6 +827,20 @@ pub(crate) async fn read_polls_parts(
         .filter_map(|x| async { x })
         .collect()
         .await
+}
+
+/// Fetch one folded file's `polls/` part-file bytes. `None` when the part is
+/// missing (not yet readable). The streaming tokio-stats path uses this to read
+/// each newly-folded file as it lands, rather than re-reading the whole folded
+/// set every poll.
+pub(crate) async fn fetch_polls_part(
+    output: &dyn StorageBackend,
+    bucket: &str,
+    output_prefix: &str,
+    full_key: &str,
+) -> Option<Vec<u8>> {
+    let polls_key = polls_part_key(output_prefix, full_key);
+    output.get_object(bucket, &polls_key).await.ok()
 }
 
 fn read_samples_part(

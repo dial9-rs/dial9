@@ -1537,9 +1537,102 @@
     };
   }
 
+  // ───────────────────────────────────────────────────────────────────
+  // Runtime grouping
+  //
+  // A trace may contain workers from several Tokio runtimes. Named runtimes
+  // are described on the wire by `runtime.<name>` segment-metadata entries
+  // (parsed into `runtimeWorkers: Map<name, [workerId, ...]>`). The default
+  // ("main") runtime is NOT named — its workers carry no metadata — so we
+  // infer it as the block of present workers that no named runtime claims.
+  //
+  // Returns an ordered list of groups: [{ name, workerIds, inferred }],
+  // sorted by lowest worker id (so the inferred main block, which is
+  // allocated first, naturally leads). Only workers that actually appear in
+  // `workerIds` are placed into groups, so the grouping always matches the
+  // lanes the viewer renders.
+  function computeRuntimeGroups(workerIds, runtimeWorkers) {
+    const present = new Set(workerIds);
+    // worker id -> named runtime that claims it (first claim wins; runtimes
+    // own disjoint, contiguous id blocks so collisions shouldn't occur).
+    const claimedBy = new Map();
+    const namedNames = new Set();
+    if (runtimeWorkers) {
+      for (const [name, ids] of runtimeWorkers) {
+        namedNames.add(name);
+        for (const id of ids) {
+          if (present.has(id) && !claimedBy.has(id)) claimedBy.set(id, name);
+        }
+      }
+    }
+
+    // The inferred default runtime. Avoid colliding with an explicit
+    // runtime that happens to be named "main".
+    let mainName = "main";
+    if (namedNames.has(mainName)) mainName = "main (untracked)";
+
+    const byName = new Map(); // name -> [workerId, ...]
+    for (const w of workerIds) {
+      const name = claimedBy.get(w) ?? mainName;
+      if (!byName.has(name)) byName.set(name, []);
+      byName.get(name).push(w);
+    }
+
+    const groups = [];
+    for (const [name, ids] of byName) {
+      ids.sort((a, b) => a - b);
+      // `mainName` is chosen to avoid `namedNames`, so the inferred default
+      // runtime is exactly the bucket whose name equals `mainName`.
+      groups.push({ name, workerIds: ids, inferred: name === mainName });
+    }
+    // Order groups by their lowest worker id for a stable, intuitive layout.
+    groups.sort((a, b) => a.workerIds[0] - b.workerIds[0]);
+    return groups;
+  }
+
+  // Build the data backing the flamegraph's runtime filter from CPU samples
+  // and the trace's runtime.<name> metadata. Returns:
+  //   { workerRuntime: Map<workerId, runtimeName>,
+  //     options: [{ name, inferred, sampleCount }] }   // one per runtime
+  // `options` is empty when the trace has a single runtime (or no runtime
+  // metadata), signalling the caller to hide the filter. Off-worker samples
+  // (workerId === offWorkerId, default 255) carry no runtime and are excluded
+  // from both the worker set and the per-runtime counts.
+  function buildRuntimeFilterData(samples, runtimeWorkers, offWorkerId) {
+    const off = offWorkerId == null ? 255 : offWorkerId;
+    const empty = { workerRuntime: new Map(), options: [] };
+    if (!runtimeWorkers) return empty;
+
+    const presentWorkers = new Set();
+    for (const s of samples) {
+      if (s.workerId !== off) presentWorkers.add(s.workerId);
+    }
+    const groups = computeRuntimeGroups([...presentWorkers], runtimeWorkers);
+    if (groups.length <= 1) return empty; // single runtime: nothing to filter
+
+    const workerRuntime = new Map();
+    const counts = new Map();
+    for (const g of groups) {
+      for (const w of g.workerIds) workerRuntime.set(w, g.name);
+      counts.set(g.name, 0);
+    }
+    for (const s of samples) {
+      const rt = workerRuntime.get(s.workerId);
+      if (rt != null) counts.set(rt, counts.get(rt) + 1);
+    }
+    const options = groups.map((g) => ({
+      name: g.name,
+      inferred: g.inferred,
+      sampleCount: counts.get(g.name),
+    }));
+    return { workerRuntime, options };
+  }
+
   // Export for both browser and Node.js
   const analysisExports = {
     buildWorkerSpans,
+    computeRuntimeGroups,
+    buildRuntimeFilterData,
     attachCpuSamples,
     buildActiveTaskTimeline,
     computeSchedulingDelays,

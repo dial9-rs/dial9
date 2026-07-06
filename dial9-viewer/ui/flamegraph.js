@@ -18,6 +18,7 @@
   }
 
   const buildFlamegraphTree = getAnalysis().buildFlamegraphTree;
+  const buildRuntimeFilterData = getAnalysis().buildRuntimeFilterData;
   // Shared with the SVG export (flamegraph_export.js) via trace_analysis.js so
   // the exported graph's colors match the on-screen canvas.
   const flamegraphColor = getAnalysis().flamegraphColor;
@@ -137,6 +138,10 @@
     let repaintQueued = false;
     let allSamples = [];
     let currentSymbols = null;
+    // Map of workerId -> runtime name, derived from the trace's runtime.<name>
+    // segment metadata. Empty when the trace has a single runtime (or none),
+    // in which case the runtime filter stays hidden.
+    let workerRuntime = new Map();
     const hitRegions = { worker: [], offworker: [] };
 
     // DOM
@@ -148,6 +153,7 @@
       (isMac ? '\u2318' : 'Ctrl') + ' + F or /)" />' +
       '<span class="fg-search-clear" title="Clear search">\u00d7</span>' +
       '<span class="fg-search-stats"></span>' +
+      '<select class="fg-runtime-filter" style="display:none"></select>' +
       '<select class="fg-spawn-filter"></select>' +
       '<span class="fg-export-wrap">' +
       '<button type="button" class="fg-export-btn" title="Export this flamegraph" ' +
@@ -164,6 +170,7 @@
     const searchClear = searchBar.querySelector(".fg-search-clear");
     const searchStats = searchBar.querySelector(".fg-search-stats");
     const spawnFilter = searchBar.querySelector(".fg-spawn-filter");
+    const runtimeFilter = searchBar.querySelector(".fg-runtime-filter");
     const exportBtn = searchBar.querySelector(".fg-export-btn");
     const exportMenu = searchBar.querySelector(".fg-export-menu");
     const exportSvgBtn = searchBar.querySelector(".fg-export-svg");
@@ -197,8 +204,8 @@
     });
 
     // ── Export: turn the rendered tree into a downloadable artifact ──
-    // The export reflects the CURRENT view — the active spawn-location filter
-    // (workerTree/offworkerTree are rebuilt by applySpawnFilter) — but always
+    // The export reflects the CURRENT view — the active spawn-location/runtime
+    // filters (workerTree/offworkerTree are rebuilt by applyFilters) — but always
     // the full (un-zoomed) trees, since an exported file should stand alone.
     let exportTitle = "dial9 flamegraph";
     // Formats a node's weight for SVG hover text. Defaults to CPU samples; the
@@ -769,11 +776,19 @@
       return false;
     }
 
-    function applySpawnFilter() {
+    function applyFilters() {
       const filterVal = spawnFilter.value;
-      const samples = filterVal
-        ? allSamples.filter((s) => (s.spawnLoc || "(unknown)") === filterVal)
-        : allSamples;
+      const runtimeVal = runtimeFilter.value;
+      let samples = allSamples;
+      if (filterVal) {
+        samples = samples.filter((s) => (s.spawnLoc || "(unknown)") === filterVal);
+      }
+      if (runtimeVal) {
+        // Off-worker samples (workerId 255) have no runtime; a runtime filter
+        // excludes them. Worker samples are kept when their worker belongs to
+        // the selected runtime.
+        samples = samples.filter((s) => workerRuntime.get(s.workerId) === runtimeVal);
+      }
 
       const workerSamples = samples.filter((s) => s.workerId !== 255);
       const offworkerSamples = samples.filter((s) => s.workerId === 255);
@@ -804,7 +819,8 @@
       renderAll();
     }
 
-    spawnFilter.addEventListener("change", applySpawnFilter);
+    spawnFilter.addEventListener("change", applyFilters);
+    runtimeFilter.addEventListener("change", applyFilters);
 
     let workerLabelPrefix = "Worker threads";
     let offworkerLabelPrefix = "Off-worker (sampler thread)";
@@ -836,7 +852,35 @@
         spawnFilter.appendChild(opt);
       }
 
-      applySpawnFilter();
+      buildRuntimeFilter(samples, opts && opts.runtimeWorkers);
+
+      applyFilters();
+    }
+
+    // Build the runtime-filter dropdown from the trace's runtime.<name>
+    // segment metadata. Only shown when the trace actually has more than one
+    // runtime; otherwise the control stays hidden (single-runtime traces look
+    // exactly as before). Mirrors the multi-runtime lane grouping in the
+    // timeline view so the two stay consistent.
+    function buildRuntimeFilter(samples, runtimeWorkers) {
+      runtimeFilter.style.display = "none";
+      runtimeFilter.value = "";
+      const data = buildRuntimeFilterData
+        ? buildRuntimeFilterData(samples, runtimeWorkers)
+        : { workerRuntime: new Map(), options: [] };
+      workerRuntime = data.workerRuntime;
+      if (data.options.length === 0) return; // single runtime: nothing to filter
+
+      runtimeFilter.innerHTML = '<option value="">All runtimes</option>';
+      for (const o of data.options) {
+        const opt = document.createElement("option");
+        opt.value = o.name;
+        const label = o.inferred ? `${o.name} runtime` : `runtime: ${o.name}`;
+        opt.textContent = `${label} (${o.sampleCount})`;
+        opt.title = label;
+        runtimeFilter.appendChild(opt);
+      }
+      runtimeFilter.style.display = "";
     }
 
     function resize() {
@@ -955,6 +999,7 @@
       offworkerCanvas.style.display = "none";
       offworkerLabel.style.display = "none";
       spawnFilter.style.display = "none";
+      runtimeFilter.style.display = "none";
       renderAll();
     }
 

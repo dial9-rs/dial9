@@ -48,6 +48,14 @@ enum Commands {
         #[arg(long)]
         dev: bool,
 
+        /// Local mode: optimize output for running on a workstation rather than
+        /// a deployed host. Logs are rendered human-readable (instead of JSON)
+        /// and per-request metrics use metrique's local format (instead of
+        /// CloudWatch EMF). The default (deployed) emits JSON logs and EMF
+        /// metrics to stdout.
+        #[arg(long)]
+        local: bool,
+
         /// Enable demand-driven aggregation against the S3 `--bucket`/`--prefix`
         /// source: the flamegraph button folds raw trace segments on demand and
         /// progressively refines. (For a local source, use `--agg-source-dir`.)
@@ -176,6 +184,7 @@ pub async fn run() -> anyhow::Result<()> {
             prefix,
             local_dir,
             dev,
+            local,
             agg,
             agg_source_dir,
             agg_output_dir,
@@ -190,6 +199,7 @@ pub async fn run() -> anyhow::Result<()> {
                 prefix,
                 local_dir,
                 dev,
+                local,
                 agg,
                 agg_source_dir,
                 agg_output_dir,

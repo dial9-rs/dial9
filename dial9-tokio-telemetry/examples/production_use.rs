@@ -248,7 +248,7 @@ fn configure_runtime_common(
     r = r
         .with_task_tracking(true)
         .with_worker_metrics_sink(metrics_sink);
-    use dial9_tokio_telemetry::telemetry::cpu_profile::{CpuProfilingConfig, SchedEventConfig};
+    use dial9_tokio_telemetry::telemetry::{CpuProfilingConfig, SchedEventConfig};
     if cpu_profile_enabled {
         r = r.with_cpu_profiling(CpuProfilingConfig::default().frequency_hz(cpu_sample_hz));
     }

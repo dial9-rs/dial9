@@ -577,6 +577,168 @@ async fn browse_rejects_inverted_range() {
     check!(resp.status().as_u16() == 400);
 }
 
+/// Regression test for the browse fan-out misattribution bug.
+///
+/// The overflow-collection loop correlates each per-prefix list result with its
+/// prefix by input position (`prefixes[i]`). The fan-out previously used
+/// `buffer_unordered`, which yields results in *completion* order, not input
+/// order. When a later prefix's list completed first, its overflow was
+/// attributed to the *wrong* prefix: the overflowed prefix was never refined,
+/// so its objects silently vanished, while a perfectly fine prefix got
+/// needlessly refined. The fix is `buffered`, which preserves input order.
+///
+/// [`ReorderingBackend`] forces a deterministic completion order that differs
+/// from input order: the second prefix (`…/20`) overflows and completes first;
+/// the first prefix (`…/19`) is gated on a oneshot and only completes after.
+/// Under the bug the overflow is attributed to `…/19`, so `…/20`'s refined
+/// object (under `…/201`) is lost; under the fix it is present.
+struct ReorderingBackend {
+    /// Fires when the "fast" second prefix finishes, releasing the slow first.
+    release_tx: std::sync::Mutex<Option<futures::channel::oneshot::Sender<()>>>,
+    release_rx: std::sync::Mutex<Option<futures::channel::oneshot::Receiver<()>>>,
+}
+
+fn obj_info(key: &str) -> ObjectInfo {
+    ObjectInfo {
+        key: key.to_string(),
+        size: 1,
+        last_modified: None,
+    }
+}
+
+impl StorageBackend for ReorderingBackend {
+    fn list_buckets(
+        &self,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, StorageError>> + Send + '_>> {
+        Box::pin(async { Ok(vec![]) })
+    }
+
+    fn list_objects(
+        &self,
+        _bucket: &str,
+        prefix: &str,
+        _cap: usize,
+    ) -> Pin<Box<dyn Future<Output = Result<ListPage, StorageError>> + Send + '_>> {
+        match prefix {
+            // Second input prefix: overflows at hour granularity and completes
+            // first, releasing the gated first prefix on its way out.
+            "2026-04-09/20" => {
+                let tx = self.release_tx.lock().unwrap().take();
+                Box::pin(async move {
+                    if let Some(tx) = tx {
+                        let _ = tx.send(());
+                    }
+                    Ok(ListPage {
+                        objects: vec![],
+                        truncated: true,
+                    })
+                })
+            }
+            // First input prefix: gated so it only completes after the second,
+            // making completion order the reverse of input order.
+            "2026-04-09/19" => {
+                let rx = self.release_rx.lock().unwrap().take();
+                Box::pin(async move {
+                    if let Some(rx) = rx {
+                        let _ = rx.await;
+                    }
+                    Ok(ListPage {
+                        objects: vec![obj_info("2026-04-09/19/svc/host/1000-0.bin.gz")],
+                        truncated: false,
+                    })
+                })
+            }
+            // Refinement of the *correct* overflowed prefix (`…/20`) hits its
+            // ten-minute sub-prefixes; the object lives under `…/201`.
+            "2026-04-09/201" => Box::pin(async {
+                Ok(ListPage {
+                    objects: vec![obj_info("2026-04-09/201/svc/host/2000-0.bin.gz")],
+                    truncated: false,
+                })
+            }),
+            _ => Box::pin(async {
+                Ok(ListPage {
+                    objects: vec![],
+                    truncated: false,
+                })
+            }),
+        }
+    }
+
+    fn list_objects_all(
+        &self,
+        _bucket: &str,
+        _prefix: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<ObjectInfo>, StorageError>> + Send + '_>> {
+        Box::pin(async { Ok(vec![]) })
+    }
+
+    fn list_prefixes(
+        &self,
+        _bucket: &str,
+        _prefix: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, StorageError>> + Send + '_>> {
+        Box::pin(async { Ok(vec![]) })
+    }
+
+    fn get_object(
+        &self,
+        _bucket: &str,
+        _key: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, StorageError>> + Send + '_>> {
+        Box::pin(async { Err(StorageError::NotFound("fake".into())) })
+    }
+
+    fn put_object(
+        &self,
+        _bucket: &str,
+        _key: &str,
+        _data: Vec<u8>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), StorageError>> + Send + '_>> {
+        Box::pin(async { Ok(()) })
+    }
+}
+
+#[tokio::test]
+async fn browse_overflow_attribution_survives_out_of_order_completion() {
+    let (tx, rx) = futures::channel::oneshot::channel();
+    let backend = ReorderingBackend {
+        release_tx: std::sync::Mutex::new(Some(tx)),
+        release_rx: std::sync::Mutex::new(Some(rx)),
+    };
+    let state = AppState::new(Arc::new(backend), Some("traces-bucket".into()), None);
+    let base = start_server(state).await;
+    let client = reqwest::Client::new();
+
+    // 2026-04-09 19:00:00Z .. 20:30:00Z — a 90-minute window, so hour
+    // granularity, producing prefixes [`…/19`, `…/20`].
+    let from = 1_775_761_200; // 2026-04-09T19:00:00Z
+    let to = from + 90 * 60; // 20:30:00Z
+    let resp = client
+        .get(format!(
+            "{base}/api/browse?bucket=traces-bucket&from={from}&to={to}"
+        ))
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() == 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let keys: Vec<&str> = body["objects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|o| o["key"].as_str().unwrap())
+        .collect();
+
+    // The direct (non-overflowed) `…/19` object, and the refined `…/20` object.
+    // Under the old `buffer_unordered`, the overflow was misattributed to `…/19`
+    // and `…/201` was never listed, so this object would be missing.
+    check!(keys.iter().any(|k| k.contains("2026-04-09/19/")));
+    check!(keys.iter().any(|k| k.contains("2026-04-09/201/")));
+    check!(keys.len() == 2);
+    check!(body["truncated"] == false);
+}
+
 // --- bring-your-own-credentials tests ---
 
 const H_AKID: &str = "x-dial9-aws-access-key-id";
@@ -1118,6 +1280,282 @@ async fn upload_supports_cors() {
         .unwrap();
     check!(posted.status().as_u16() == 200);
     check!(posted.headers().contains_key("access-control-allow-origin"));
+}
+
+// --- assume-role path tests ---
+
+const H_ROLE_ARN: &str = "x-dial9-aws-role-arn";
+
+use dial9_viewer::server::credentials::{AssumeRoleError, RoleArn, RoleAssumer, TempCredentials};
+use std::sync::Mutex;
+
+/// Fake [`RoleAssumer`] that mints the s3s fake's static "test"/"test"
+/// credentials (so the resulting ephemeral S3 client talks to the same in-process
+/// fake the BYOC tests use) WITHOUT a real STS call. Records the ARN it was asked
+/// to assume so a test can assert the header reached the assumer.
+struct FakeRoleAssumer {
+    assumed: Arc<Mutex<Vec<String>>>,
+}
+
+impl FakeRoleAssumer {
+    fn new() -> (Self, Arc<Mutex<Vec<String>>>) {
+        let assumed = Arc::new(Mutex::new(Vec::new()));
+        (
+            Self {
+                assumed: Arc::clone(&assumed),
+            },
+            assumed,
+        )
+    }
+}
+
+impl RoleAssumer for FakeRoleAssumer {
+    fn assume_role<'a>(
+        &'a self,
+        role_arn: &'a RoleArn,
+        region: Option<&'a str>,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<TempCredentials, AssumeRoleError>> + Send + 'a>,
+    > {
+        self.assumed
+            .lock()
+            .unwrap()
+            .push(role_arn.as_str().to_string());
+        let region = region.map(str::to_string);
+        Box::pin(async move {
+            // Same static creds the s3s fake's SimpleAuth accepts.
+            Ok(TempCredentials::new(
+                "test",
+                "test",
+                Some("token".into()),
+                region,
+            ))
+        })
+    }
+}
+
+/// A [`RoleAssumer`] that always fails — proves an STS failure maps to 401.
+struct FailingRoleAssumer;
+
+impl RoleAssumer for FailingRoleAssumer {
+    fn assume_role<'a>(
+        &'a self,
+        _role_arn: &'a RoleArn,
+        _region: Option<&'a str>,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<TempCredentials, AssumeRoleError>> + Send + 'a>,
+    > {
+        Box::pin(async { Err(AssumeRoleError("access denied (fake)".into())) })
+    }
+}
+
+/// BYO server with an assumer wired: the default backend errors, so a successful
+/// data response proves the assumed-role ephemeral backend served it.
+async fn setup_assume_role_test(
+    bucket: &str,
+) -> (String, tempfile::TempDir, Arc<Mutex<Vec<String>>>) {
+    let s3_root = tempfile::tempdir().unwrap();
+    std::fs::create_dir(s3_root.path().join(bucket)).unwrap();
+    let (assumer, assumed) = FakeRoleAssumer::new();
+
+    let state = AppState::new(Arc::new(ErroringBackend), Some(bucket.to_string()), None)
+        .with_byo_creds(true)
+        .with_ephemeral_s3(fake_ephemeral_config(s3_root.path()))
+        .with_role_assumer(Arc::new(assumer));
+    let base = start_server(state).await;
+    (base, s3_root, assumed)
+}
+
+#[tokio::test]
+async fn assume_role_lists_bucket_via_assumed_creds() {
+    // A role-arn request: the viewer assumes the role (fake), then lists buckets
+    // through the resulting ephemeral backend (the s3s fake). The erroring
+    // default backend would 500, so a 200 proves the assumed path served it.
+    let (base, _dir, assumed) = setup_assume_role_test("byo-bucket").await;
+    let resp = reqwest::Client::new()
+        .get(format!("{base}/api/buckets"))
+        .header(H_ROLE_ARN, "arn:aws:iam::123456789012:role/dial9-reader")
+        .header(H_REGION, "us-east-1")
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() == 200);
+    let names: Vec<String> = resp.json().await.unwrap();
+    check!(names.contains(&"byo-bucket".to_string()));
+    // The exact ARN from the header reached the assumer.
+    let assumed = assumed.lock().unwrap();
+    check!(assumed.as_slice() == ["arn:aws:iam::123456789012:role/dial9-reader"]);
+}
+
+#[tokio::test]
+async fn assume_role_via_query_params_is_linkable() {
+    // The whole point of the query-param path: a plain GET URL (no headers) with
+    // ?aws_role_arn=…&aws_region=… reads through the assumed role. reqwest's
+    // .query() percent-encodes the ARN's colons/slashes for us.
+    let (base, _dir, assumed) = setup_assume_role_test("byo-bucket").await;
+    let resp = reqwest::Client::new()
+        .get(format!("{base}/api/buckets"))
+        .query(&[
+            (
+                "aws_role_arn",
+                "arn:aws:iam::123456789012:role/dial9-reader",
+            ),
+            ("aws_region", "us-east-1"),
+        ])
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() == 200);
+    let names: Vec<String> = resp.json().await.unwrap();
+    check!(names.contains(&"byo-bucket".to_string()));
+    let assumed = assumed.lock().unwrap();
+    check!(assumed.as_slice() == ["arn:aws:iam::123456789012:role/dial9-reader"]);
+}
+
+#[tokio::test]
+async fn invalid_role_arn_in_query_is_400() {
+    let (base, _dir, _assumed) = setup_assume_role_test("byo-bucket").await;
+    let resp = reqwest::Client::new()
+        .get(format!("{base}/api/buckets"))
+        .query(&[("aws_role_arn", "not-an-arn")])
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() == 400);
+}
+
+#[tokio::test]
+async fn assume_role_without_assumer_is_rejected() {
+    // BYO enabled but NO assumer wired → a role-arn request is a 400 (feature
+    // off here), not a silent fallback to the ambient/default backend.
+    let (_s3, base, _dir) = setup_byo_test("byo-bucket").await;
+    let resp = reqwest::Client::new()
+        .get(format!("{base}/api/buckets"))
+        .header(H_ROLE_ARN, "arn:aws:iam::123456789012:role/dial9-reader")
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() == 400);
+}
+
+#[tokio::test]
+async fn assume_role_failure_maps_to_401() {
+    // STS failure → 401, and the body never echoes the role/account/SDK text.
+    let s3_root = tempfile::tempdir().unwrap();
+    std::fs::create_dir(s3_root.path().join("byo-bucket")).unwrap();
+    let state = AppState::new(Arc::new(ErroringBackend), Some("byo-bucket".into()), None)
+        .with_byo_creds(true)
+        .with_ephemeral_s3(fake_ephemeral_config(s3_root.path()))
+        .with_role_assumer(Arc::new(FailingRoleAssumer));
+    let base = start_server(state).await;
+
+    let resp = reqwest::Client::new()
+        .get(format!("{base}/api/buckets"))
+        .header(H_ROLE_ARN, "arn:aws:iam::123456789012:role/dial9-reader")
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() == 401);
+    let body = resp.text().await.unwrap();
+    check!(!body.contains("123456789012"));
+    check!(!body.contains("access denied (fake)"));
+}
+
+#[tokio::test]
+async fn byoc_and_role_arn_together_is_400() {
+    // Supplying both transports is the ambiguous combination → 400.
+    let (base, _dir, _assumed) = setup_assume_role_test("byo-bucket").await;
+    let resp = reqwest::Client::new()
+        .get(format!("{base}/api/buckets"))
+        .header(H_AKID, "test")
+        .header(H_SECRET, "test")
+        .header(H_ROLE_ARN, "arn:aws:iam::123456789012:role/dial9-reader")
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() == 400);
+}
+
+#[tokio::test]
+async fn invalid_role_arn_is_400() {
+    let (base, _dir, _assumed) = setup_assume_role_test("byo-bucket").await;
+    let resp = reqwest::Client::new()
+        .get(format!("{base}/api/buckets"))
+        .header(H_ROLE_ARN, "not-an-arn")
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() == 400);
+}
+
+#[tokio::test]
+async fn config_reports_assume_role_support() {
+    // With an assumer wired, /api/config advertises supports_assume_role: true.
+    let (base, _dir, _assumed) = setup_assume_role_test("byo-bucket").await;
+    let resp: serde_json::Value = reqwest::Client::new()
+        .get(format!("{base}/api/config"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    check!(resp["supports_assume_role"] == true);
+
+    // Without one (plain BYO), it is false.
+    let (_s3, base2, _dir2) = setup_byo_test("byo-bucket").await;
+    let resp2: serde_json::Value = reqwest::Client::new()
+        .get(format!("{base2}/api/config"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    check!(resp2["supports_assume_role"] == false);
+}
+
+#[tokio::test]
+async fn credentials_check_succeeds_via_assumed_role() {
+    // /api/credentials/check has its own assume path; exercise it. The fake
+    // assumer mints the s3s creds, HeadBucket against the fake succeeds → ok.
+    let (base, _dir, assumed) = setup_assume_role_test("byo-bucket").await;
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/api/credentials/check?bucket=byo-bucket"))
+        .header(H_ROLE_ARN, "arn:aws:iam::123456789012:role/dial9-reader")
+        .header(H_REGION, "us-east-1")
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() == 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    check!(body["ok"] == true);
+    // The check actually went through the assume path, not BYOC.
+    check!(assumed.lock().unwrap().len() == 1);
+}
+
+#[tokio::test]
+async fn credentials_check_assume_role_failure_maps_to_401() {
+    // check shares AppState::assume, so an STS failure here is a 401 with no
+    // account/SDK leak — same policy as the data path.
+    let s3_root = tempfile::tempdir().unwrap();
+    std::fs::create_dir(s3_root.path().join("byo-bucket")).unwrap();
+    let state = AppState::new(Arc::new(ErroringBackend), Some("byo-bucket".into()), None)
+        .with_byo_creds(true)
+        .with_ephemeral_s3(fake_ephemeral_config(s3_root.path()))
+        .with_role_assumer(Arc::new(FailingRoleAssumer));
+    let base = start_server(state).await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/api/credentials/check?bucket=byo-bucket"))
+        .header(H_ROLE_ARN, "arn:aws:iam::123456789012:role/dial9-reader")
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() == 401);
+    let body = resp.text().await.unwrap();
+    check!(!body.contains("123456789012"));
+    check!(!body.contains("access denied (fake)"));
 }
 
 #[cfg(test)]

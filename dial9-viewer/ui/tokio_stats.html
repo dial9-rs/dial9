@@ -43,6 +43,7 @@
 </head>
 <body>
 <script src="creds.js"></script>
+<script src="sse.js"></script>
 <script src="flamegraph_api.js"></script>
 <script src="tokio_stats_api.js"></script>
 <h1>⚡ Tokio Stats</h1>
@@ -96,6 +97,15 @@
     if (ns >= 1e6) return (ns / 1e6).toFixed(2) + "ms";
     if (ns >= 1e3) return (ns / 1e3).toFixed(0) + "µs";
     return ns + "ns";
+  }
+
+  function escapeHtml(s) {
+    return String(s)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
   }
 
   function addPeriod(startNs, endNs) {
@@ -291,7 +301,7 @@
     </tr></thead><tbody>`;
     for (const [loc, v] of rows) {
       html += `<tr>
-        <td><code>${loc}</code></td>
+        <td><code>${escapeHtml(loc)}</code></td>
         <td>${v.long}</td><td>${v.rate.toFixed(1)}</td>
         <td>${linkedStat(v.offCpu, v.exemplars && v.exemplars[0], data, "off-cpu")}</td>
         <td>${linkedStat(v.onCpu, v.exemplars && v.exemplars[1], data, "on-cpu")}</td>
@@ -360,7 +370,7 @@
     for (const d of rows) {
       const pct = d.fRate > 0 ? ((d.delta / d.fRate) * 100).toFixed(0) : "new";
       html += `<tr>
-        <td><code>${d.loc}</code></td>
+        <td><code>${escapeHtml(d.loc)}</code></td>
         <td>${d.fRate.toFixed(1)}</td>
         <td>${d.lRate.toFixed(1)}</td>
         <td class="${cls}">${d.delta > 0 ? "+" : ""}${d.delta.toFixed(1)}</td>
@@ -372,7 +382,7 @@
   }
 
   // Render the refinement status line from each period's coverage block, plus
-  // a per-period "refining…" marker while its poll loop is still folding.
+  // a per-period "refining\u2026" marker while its stream is still folding.
   function renderStatus(prefix) {
     const statusEl = document.getElementById("status");
     statusEl.className = "status";
@@ -382,10 +392,10 @@
       const badge = formatTokioCoverage(p.data.coverage, p.data.total_polls);
       if (!badge) return;
       const label = periods.length > 1 ? `P${i + 1}: ` : "";
-      parts.push(label + badge + (p.refining ? " · refining…" : ""));
+      parts.push(label + badge + (p.refining ? " \u00b7 refining\u2026" : ""));
     });
     const head = prefix ? prefix : "";
-    statusEl.textContent = [head, ...parts].filter(Boolean).join(periods.length > 1 ? "  |  " : " · ");
+    statusEl.textContent = [head, ...parts].filter(Boolean).join(periods.length > 1 ? "  |  " : " \u00b7 ");
     updateMoreButton();
   }
 
@@ -397,51 +407,91 @@
     btn.style.display = canMore ? "" : "none";
   }
 
-  async function loadPeriod(period) {
-    let refine = false;
-    let prevFolded = -1;
-    period.refining = true;
-    while (true) {
-      const u = new URL("/api/tokio-stats", window.location.origin);
-      if (params.get("bucket")) u.searchParams.set("bucket", params.get("bucket"));
-      if (params.get("prefix")) u.searchParams.set("prefix", params.get("prefix"));
-      if (params.get("service")) u.searchParams.set("service", params.get("service"));
-      for (const h of params.getAll("host")) u.searchParams.append("host", h);
-      const startNs = period.startNs;
-      const endNs = period.endNs;
-      if (startNs) u.searchParams.set("start_ns", startNs);
-      if (endNs) u.searchParams.set("end_ns", endNs);
-      if (maxFiles != null) u.searchParams.set("max_files", String(maxFiles));
-      if (refine) u.searchParams.set("refine", "true");
+  // Stream cancellation: each loadAll() run gets a monotonic token + an
+  // AbortController. A new run (Load / Load more clicked again) aborts the
+  // prior run's in-flight SSE streams and its callbacks bail via the token
+  // guard — otherwise a superseded stream's events could overwrite the current
+  // render, and its server-side folding would keep running (holding fold
+  // permits) until the cap.
+  let loadToken = 0;
+  let loadAbort = null;
 
-      const credHeaders = window.Dial9Creds ? Dial9Creds.headers() : {};
-      const resp = await fetch(u, { headers: credHeaders });
-      if (!resp.ok) throw new Error(await resp.text());
-      const data = await resp.json();
-      period.data = data;
-      renderFromCache();
-      const cov = data.coverage;
-      if (!cov || cov.files_folded >= cov.files_matched || cov.files_folded === prevFolded) break;
-      prevFolded = cov.files_folded;
-      refine = true;
-      renderStatus("Refining…");
-      await new Promise(r => setTimeout(r, 300));
+  // Load one period over the SSE stream. The server emits the already-folded
+  // snapshot first, then a fresh full snapshot per newly-folded file, and closes
+  // at the sampling cap (raised by "Load more" via max_files). We re-render from
+  // cache on every event. Resolves when the stream closes (or is aborted);
+  // rejects only on a genuine error.
+  function loadPeriod(period, token, signal) {
+    const u = new URL("/api/tokio-stats", window.location.origin);
+    if (params.get("bucket")) u.searchParams.set("bucket", params.get("bucket"));
+    if (params.get("prefix")) u.searchParams.set("prefix", params.get("prefix"));
+    if (params.get("service")) u.searchParams.set("service", params.get("service"));
+    for (const h of params.getAll("host")) u.searchParams.append("host", h);
+    if (period.startNs) u.searchParams.set("start_ns", period.startNs);
+    if (period.endNs) u.searchParams.set("end_ns", period.endNs);
+    if (maxFiles != null) u.searchParams.set("max_files", String(maxFiles));
+
+    period.refining = true;
+    const credHeaders = window.Dial9Creds ? Dial9Creds.headers() : {};
+    return new Promise((resolve, reject) => {
+      Dial9Sse.openSse(u, {
+        headers: credHeaders,
+        signal,
+        onEvent: (data) => {
+          if (token !== loadToken) return; // superseded by a newer load
+          period.data = data;
+          renderFromCache();
+          renderStatus("");
+        },
+        onClose: () => {
+          period.refining = false;
+          if (token === loadToken) renderStatus("");
+          resolve();
+        },
+        onError: (err) => {
+          period.refining = false;
+          reject(err);
+        },
+        // openSse calls NEITHER onClose nor onError when aborted, so settle via
+        // its returned promise too (it resolves on close, abort, or after
+        // onError) — otherwise every superseded load's Promise.all would hang
+        // forever. Settling twice is a harmless no-op.
+      }).then(resolve);
+    });
+  }
+
+  // Scan loaded periods for a fold-error notice (e.g. unwritable output bucket).
+  // Returns the first non-null notice, or null if every period folded cleanly.
+  function foldErrorAcrossPeriods() {
+    for (const p of periods) {
+      const notice = p.data && foldErrorNotice(p.data.coverage);
+      if (notice) return notice;
     }
-    period.refining = false;
+    return null;
   }
 
   async function loadAll() {
+    const statusEl = document.getElementById("status");
+    // Cancel any in-flight load, then start a fresh one under a new token.
+    if (loadAbort) loadAbort.abort();
+    loadAbort = new AbortController();
+    const token = ++loadToken;
+    const signal = loadAbort.signal;
     loading = true;
     updateMoreButton();
-    renderStatus("Loading…");
+    renderStatus("Loading\u2026");
     try {
-      // Load all periods in parallel.
-      await Promise.all(periods.map((p) => loadPeriod(p)));
+      // Stream all periods in parallel; each resolves when its stream closes.
+      await Promise.all(periods.map((p) => loadPeriod(p, token, signal)));
+      if (token !== loadToken) return; // superseded while awaiting
       loading = false;
-      renderStatus("");
+      // Surface fold failures instead of silent coverage over an empty table.
+      const notice = foldErrorAcrossPeriods();
+      renderStatus(notice || "");
+      if (notice) statusEl.className = "status error";
     } catch (e) {
+      if (token !== loadToken) return; // superseded; ignore its error
       loading = false;
-      const statusEl = document.getElementById("status");
       statusEl.textContent = "Error: " + e.message;
       statusEl.className = "status error";
     }

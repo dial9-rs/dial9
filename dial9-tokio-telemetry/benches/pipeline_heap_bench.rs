@@ -25,7 +25,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use dial9_tokio_telemetry::background_task::{ProcessError, SegmentData, SegmentProcessor};
-use dial9_tokio_telemetry::telemetry::cpu_profile::CpuProfilingConfig;
+use dial9_tokio_telemetry::telemetry::CpuProfilingConfig;
 use dial9_tokio_telemetry::telemetry::{
     Dial9TokioHandle, DiskWriter, InMemoryWriter, TracedRuntime,
 };

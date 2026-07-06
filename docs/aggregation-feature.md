@@ -10,9 +10,9 @@ for the longer design narrative see [`aggregator.md`](../aggregator.md).*
 Builds CPU flamegraphs over a fleet's worth of dial9 traces — a time range
 across many hosts — without aggregating every file first. You pick a scope
 (time window + hosts), and the viewer shows a flamegraph **immediately** from a
-small representative sample, then **progressively refines** it as it folds more
-files in the background of successive polls. A coverage label always tells you
-how complete the current view is.
+small representative sample, then **progressively refines** it as the server
+folds more files and streams updates over a single Server-Sent Events request. A
+coverage label always tells you how complete the current view is.
 
 The key insight: most of the information in 24h of profiling data is in the
 first few samples. A small, *representative* spread of files approximates the
@@ -29,14 +29,14 @@ sampling**, driven by the query itself:
 
 | | Batch (original design) | Demand-driven (shipped) |
 |---|---|---|
-| When aggregation happens | Ahead of time, whole window | At query time, a few files per poll |
+| When aggregation happens | Ahead of time, whole window | At query time, streamed file-by-file |
 | How much | Everything | A representative sample, capped (~5%) |
-| First result | After the whole batch | After the baseline (4 files), sub-second |
-| Completeness signal | None | `coverage` on every response |
+| First result | After the whole batch | The already-folded snapshot, immediately |
+| Completeness signal | None | `coverage` on every SSE event |
 | `samples` table | Same schema — one row per CPU sample, drilled into at query time. Now populated *incrementally and partially* instead of batch-filled. |
 
 There is **no `dial9 ingest` batch command** — aggregation happens only inside
-the `/api/flamegraph` refinement loop. Nothing pre-aggregates ahead of a query.
+the `/api/flamegraph` refinement stream. Nothing pre-aggregates ahead of a query.
 
 ## How it works
 
@@ -62,23 +62,25 @@ no manifest and no skip-set (see ADR-0003). A zero-sample file still writes an
 empty part-file, so it is never re-fetched. Re-folding writes the same key, so
 folding is **idempotent**.
 
-### 3. Refinement loop (stateless, per-poll)
-Each `GET /api/flamegraph` request:
+### 3. Refinement stream (one held-open SSE request)
+Each `GET /api/flamegraph` request (a Server-Sent Events stream):
 
-1. **Matched set** — lists the source scope, filters to the [scope]'s
+1. **Resolve** (once) — lists the source scope, filters to the [scope]'s
    service / host-set / time (interval-overlap on the filename `epoch`, padded
-   by the segment duration), and sorts by the order key.
-2. **Folded set** — lists the output `samples/` tree (the record of what's
-   already folded).
-3. **Fold a bounded budget** of not-yet-folded files in order — the
-   *baseline floor* (4) on the first refining poll, a *refine batch* (12)
-   afterward — stopping at the *sampling cap*.
-4. **Aggregate** the folded-in-scope part-files in memory (sum `stack_id`
-   counts, merge dicts) and return the flamegraph tree plus a `coverage` block.
+   by the segment duration), sorts by the order key, takes the first *sampling
+   cap* files, and lists the output `samples/` tree (the record of what's already
+   folded).
+2. **Prime + emit** — reads the already-folded part-files into an in-memory
+   accumulator and emits the first SSE event (the instant snapshot).
+3. **Fold + stream** — folds the not-yet-folded capped files concurrently under
+   the process-global `FoldLimits`; as each file lands, merges its part-file into
+   the accumulator (sum `stack_id` counts, merge dicts) and emits a fresh
+   flamegraph tree + `coverage` block. Closes the stream at the cap.
 
-It is fully stateless: folding happens only during a poll (so it stops when the
-client stops polling), there is no background task or coordination, and
-re-folding is safe by idempotency. The client polls until coverage freezes.
+Folding runs only while the request is open — the fold `JoinSet` is dropped
+(cancelling in-flight folds) when the client disconnects — there is no background
+task or coordination, and re-folding is safe by idempotency. `coverage` climbs
+monotonically until the server closes the stream at the cap.
 
 ### 4. Coverage & the cap
 Every demand-driven response carries:
@@ -124,8 +126,8 @@ Two independent version knobs, deliberately in opposite places:
 ## API
 
 ### `GET /api/flamegraph`
-Runs the refinement loop when the server is in demand-driven mode; otherwise
-falls back to reading a pre-aggregated local dir (the old behavior).
+A Server-Sent Events stream (`Content-Type: text/event-stream`) that runs the
+refinement stream, emitting one JSON snapshot per SSE event as files fold.
 
 | Param | Meaning |
 |---|---|
@@ -135,16 +137,19 @@ falls back to reading a pre-aggregated local dir (the old behavior).
 | `thread_class`, `source` | `worker`/`off-worker`, `cpu`/`sched` filters. |
 | `max_files` | "Fetch more": raise the sampling-cap ceiling for this scope. |
 
-Response: `{ tree, total_samples, coverage?, metadata }`. `coverage` is present
-only in demand-driven mode.
+Each event's `data:` payload is `{ tree, total_samples, coverage, metadata }`.
+The client reads the stream via `fetch` (not `EventSource`, which can't send the
+`x-dial9-aws-*` credential headers) — see `dial9-viewer/ui/sse.js`.
 
-### `GET /tokio-stats`
-Same scope/refinement machinery, but reads the `polls/` part-files and returns
-per-spawn-location poll statistics (durations + worst exemplars per poll class).
+### `GET /api/tokio-stats`
+Same scope/refinement machinery (also an SSE stream), but reads the `polls/`
+part-files and returns per-spawn-location poll statistics (durations + worst
+exemplars per poll class).
 
 ### `GET /api/config`
 Now advertises `aggregation_enabled: bool` so the client knows whether the
-flamegraph button should drive the sampled loop or the exact client-side path.
+flamegraph button should drive the sampled SSE stream or the exact client-side
+path.
 
 > A per-node **drill-down endpoint** (breakdown of one `stack_id` by `host`,
 > `metadata.version`, …) does **not** exist yet — see "Known gaps" below.
@@ -154,8 +159,9 @@ flamegraph button should drive the sampled loop or the exact client-side path.
 The S3 browser's 🔥 **Flamegraph** button:
 - **Demand-driven mode** (`aggregation_enabled`): builds a scope from the
   heatmap selection's host set + `[t0, t1]` and opens `flamegraph.html?api=1&…`,
-  which polls `/api/flamegraph`, renders the coverage badge, refines in place,
-  stops when coverage freezes, and offers "Fetch more".
+  which opens the `/api/flamegraph` SSE stream, renders the coverage badge,
+  refines in place on each event, marks the view "refined" when the server closes
+  the stream at the cap, and offers "Fetch more" (reopens with a higher cap).
 - **Exact mode** (no aggregation): the original path — streams the selected raw
   traces and decodes them client-side. This path is preserved and still backs
   the trace-viewer pop-out (which flamegraphs a specific already-loaded trace).
@@ -185,29 +191,33 @@ climbing from the baseline to the cap. `--serve` leaves it up for the browser.
 
 ```
 dial9-viewer/src/ingest/aggregate.rs   ← kit of parts: order key, scope→matched-set, fold_one,
-                                          folded-set LIST, in-memory aggregate, coverage, versioned paths
-dial9-viewer/src/ingest/refine.rs      ← refinement loop (list→scope→cap→fold→coverage), shared by all endpoints
+                                          folded-set LIST, incremental FlamegraphAccum, coverage, versioned paths
+dial9-viewer/src/ingest/refine.rs      ← resolve (list→scope→cap→folded) + fold_stream (streamed folds), shared by all endpoints
 dial9-viewer/src/ingest/decode.rs      ← raw trace bytes → resolved CPU samples + stacks + polls
 dial9-viewer/src/ingest/parquet_writer.rs ← write samples / stacks / polls part-files
 dial9-viewer/src/ingest/mod.rs         ← module wiring for the aggregation building blocks
-dial9-viewer/src/server/flamegraph.rs  ← /api/flamegraph: refine() → aggregate samples/ → tree
-dial9-viewer/src/server/tokio_stats.rs ← /tokio-stats: refine() → read polls/ → poll stats
+dial9-viewer/src/server/flamegraph.rs  ← /api/flamegraph SSE: resolve → fold_stream → merge samples/ → tree per event
+dial9-viewer/src/server/tokio_stats.rs ← /api/tokio-stats SSE: resolve → fold_stream → merge polls/ → poll stats per event
 dial9-viewer/src/server/config.rs      ← aggregation_enabled flag
 dial9-viewer/src/{cli,lib}.rs          ← serve --agg / --agg-source-dir wiring
-dial9-viewer/ui/{index,flamegraph}.html, flamegraph_api.js ← button + poll loop + coverage UI
-dial9-viewer/tests/aggregate_test.rs   ← end-to-end flow over simulated S3 (s3s)
+dial9-viewer/ui/sse.js                 ← fetch-based SSE reader + frame decoder (EventSource can't send cred headers)
+dial9-viewer/ui/{index,flamegraph,tokio_stats}.html, flamegraph_api.js ← button + SSE stream + coverage UI
+dial9-viewer/tests/aggregate_test.rs   ← end-to-end SSE flow over simulated S3 (s3s)
 ```
 
 ## What's tested
 
-`tests/aggregate_test.rs` drives the real HTTP endpoint against a simulated S3
-(s3s), proving:
-- baseline floor folds K=4 and returns a real tree on the first refining poll;
-- coverage climbs across polls and **plateaus at the cap below 100%**;
+`tests/aggregate_test.rs` drives the real HTTP SSE endpoints against a simulated
+S3 (s3s), proving:
+- one stream emits an already-folded snapshot first, then a real tree, folding to
+  the baseline K=4;
+- coverage climbs monotonically across SSE events and **stops at the cap below
+  100%**;
 - re-folding is idempotent (no duplicate part-files; stable counts);
 - "Fetch more" raises the cap;
 - scope filtering by host and time selects the right files;
 - a multi-host scope matches the union of those hosts' files;
+- `/api/tokio-stats` streams + refines to the cap;
 - `/api/config` reports `aggregation_enabled`.
 
 ## Known gaps / deferred
@@ -217,9 +227,11 @@ dial9-viewer/tests/aggregate_test.rs   ← end-to-end flow over simulated S3 (s3
   built; the tree is currently refiltered rather than broken down server-side.
 - **Per-node confidence intervals** — the statistically rigorous "how accurate"
   signal. v1 ships file coverage only.
-- **Per-file histogram memoization** — a poll currently re-aggregates the
-  in-scope part-files; memoizing each file's immutable `{stack_id→count}` would
-  turn a poll into "sum N small maps". Deferred optimization, not architecture.
+- **Cross-request histogram memoization** — within one stream the accumulator is
+  incremental (each fold merges once), but a *new* stream re-reads the
+  already-folded part-files to prime its accumulator. Memoizing each file's
+  immutable `{stack_id→count}` across requests would make a reopened stream "sum
+  N cached small maps". Deferred optimization, not architecture.
 - **Multi-service scopes** — the scope takes a single service; a box spanning
   several passes the first and relies on host-set/time to narrow.
 - **Live S3 smoke test** — the S3 path is covered by simulated-S3 integration

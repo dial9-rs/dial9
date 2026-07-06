@@ -4,7 +4,7 @@
 //! rewritten the segment, appending trailing garbage.
 #![cfg(all(feature = "cpu-profiling", target_os = "linux"))]
 
-use dial9_tokio_telemetry::telemetry::cpu_profile::CpuProfilingConfig;
+use dial9_tokio_telemetry::telemetry::CpuProfilingConfig;
 use dial9_tokio_telemetry::telemetry::{DiskWriter, TracedRuntime};
 use flate2::read::GzDecoder;
 use std::io::Read;

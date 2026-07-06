@@ -2,7 +2,7 @@ use bytes::Bytes;
 use futures::Stream;
 use serde::{Deserialize, Serialize};
 use std::future::Future;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::pin::Pin;
 
 /// Metadata about an object in storage.
@@ -163,6 +163,13 @@ pub enum StorageError {
     /// *wrong* identity (e.g. the server's ambient credentials instead of the
     /// pasted ones), so the message points the user there.
     AccountNotSignedUp,
+    /// The bucket lives in a different S3 region than the request was signed
+    /// for (S3 `PermanentRedirect` / HTTP 301), and the correct region could
+    /// not be resolved. Kept distinct from [`StorageError::Other`] so the HTTP
+    /// layer returns a clear, actionable "wrong region" message instead of an
+    /// opaque 500 — this is the failure the viewer's per-bucket region
+    /// auto-detection exists to prevent.
+    WrongRegion,
     Other(String),
 }
 
@@ -182,6 +189,14 @@ impl std::fmt::Display for StorageError {
                     "the AWS account used for this request is not signed up for S3 — \
                      this usually means the request was signed with the wrong identity. \
                      Make sure you clicked Apply after pasting your credentials."
+                )
+            }
+            StorageError::WrongRegion => {
+                write!(
+                    f,
+                    "this bucket is in a different AWS region than the request was \
+                     signed for. Set the region (or pick the bucket so its region is \
+                     detected automatically) and try again."
                 )
             }
             StorageError::Other(msg) => write!(f, "{msg}"),
@@ -219,6 +234,11 @@ where
         // Account-level: the credentials are valid but the account isn't signed
         // up for S3 in this region — typically the wrong identity signed it.
         Some("NotSignedUp" | "OptInRequired") => StorageError::AccountNotSignedUp,
+        // Region mismatch: the bucket lives in another region than the client
+        // was built for, so S3 refuses with `PermanentRedirect` (the classic
+        // form) or the generic `Redirect`. Surface a clear message rather than
+        // the opaque "unclassified S3 error" this used to fall through to.
+        Some("PermanentRedirect" | "Redirect") => StorageError::WrongRegion,
         // Unmapped error: keep the full SDK detail in the server log (it can
         // embed the access key id, region, and endpoint — server-eyes only) and
         // hand the client a generic message rather than reflecting it back.
@@ -828,6 +848,15 @@ impl StorageBackend for LocalBackend {
         Box::pin(async move {
             tokio::task::spawn_blocking(move || {
                 let path = root.join(&key);
+                // Reject path-traversal keys *before* creating any directories.
+                // `create_dir_all` would otherwise materialize `../` directories
+                // outside the root before the canonicalize check below could
+                // reject the write, leaving stray dirs behind.
+                if path.components().any(|c| c == Component::ParentDir) {
+                    return Err(StorageError::Other(
+                        "key contains path traversal".to_string(),
+                    ));
+                }
                 // Reject keys that escape the root once their parent dirs are
                 // resolved (mirrors the safety check used elsewhere here).
                 if let Some(parent) = path.parent() {
@@ -1046,6 +1075,61 @@ mod tests {
         )
     }
 
+    /// Build an `S3Backend` whose HTTP layer replays a single error response
+    /// (status + body) for the next request, so the error-classification path
+    /// can be exercised without a live S3.
+    fn replay_error_backend(status: u16, body: &str) -> S3Backend {
+        use aws_smithy_http_client::test_util::{ReplayEvent, StaticReplayClient};
+        use aws_smithy_types::body::SdkBody;
+
+        let http_client = StaticReplayClient::new(vec![ReplayEvent::new(
+            http::Request::builder()
+                .uri("https://s3.amazonaws.com/")
+                .body(SdkBody::empty())
+                .unwrap(),
+            http::Response::builder()
+                .status(status)
+                .body(SdkBody::from(body))
+                .unwrap(),
+        )]);
+        let cfg = aws_sdk_s3::config::Builder::new()
+            .behavior_version(aws_sdk_s3::config::BehaviorVersion::latest())
+            .credentials_provider(aws_sdk_s3::config::Credentials::new(
+                "test", "test", None, None, "test",
+            ))
+            .region(aws_sdk_s3::config::Region::new("us-east-1"))
+            .http_client(http_client)
+            .build();
+        S3Backend::from_client(aws_sdk_s3::Client::from_conf(cfg))
+    }
+
+    /// A `PermanentRedirect` (the error S3 returns when a bucket is addressed in
+    /// the wrong region) must classify to [`StorageError::WrongRegion`], not the
+    /// opaque `Other` that produced the "unclassified S3 error" log. This is the
+    /// regression guard for the cross-region bucket bug.
+    #[tokio::test]
+    async fn permanent_redirect_classifies_as_wrong_region() {
+        // The XML S3 sends on a region mismatch (HTTP 301 + PermanentRedirect).
+        let body = r#"<?xml version="1.0" encoding="UTF-8"?>
+            <Error>
+              <Code>PermanentRedirect</Code>
+              <Message>The bucket you are attempting to access must be addressed using the specified endpoint.</Message>
+              <Endpoint>my-bucket.s3.us-west-2.amazonaws.com</Endpoint>
+            </Error>"#;
+        let backend = replay_error_backend(301, body);
+
+        let err = backend
+            .list_prefixes("my-bucket", "")
+            .await
+            .expect_err("a PermanentRedirect must surface as an error");
+        assert!(
+            matches!(err, StorageError::WrongRegion),
+            "expected WrongRegion, got {err:?}"
+        );
+        // The message points the user at the fix (set/detect the region).
+        assert!(err.to_string().contains("region"), "message: {err}");
+    }
+
     #[tokio::test]
     async fn list_prefixes_follows_continuation_token() {
         // Page 1 is truncated and carries a NextContinuationToken; page 2 is the
@@ -1079,6 +1163,52 @@ mod tests {
             "second request must carry the continuation token, got: {}",
             requests[1].uri()
         );
+    }
+
+    /// A `put_object` key containing `../` must be rejected *before* any
+    /// directories are created — otherwise the traversal materializes dirs
+    /// outside the root that the later canonicalize check never cleans up.
+    #[tokio::test]
+    async fn put_object_rejects_path_traversal_without_creating_dirs() {
+        let outer = tempfile::tempdir().unwrap();
+        let root = outer.path().join("root");
+        std::fs::create_dir(&root).unwrap();
+        let backend = LocalBackend::new(&root);
+
+        let err = backend
+            .put_object("bucket", "../escape/evil.bin", b"x".to_vec())
+            .await
+            .expect_err("traversal key must be rejected");
+        match err {
+            StorageError::Other(msg) => {
+                assert!(msg.contains("path traversal"), "unexpected message: {msg}")
+            }
+            other => panic!("expected StorageError::Other, got {other:?}"),
+        }
+
+        // The traversal dir (`<outer>/escape`) must NOT have been created.
+        let escape_dir = outer.path().join("escape");
+        assert!(
+            !escape_dir.exists(),
+            "path traversal created a directory outside the root: {}",
+            escape_dir.display()
+        );
+    }
+
+    /// A normal key writes through `put_object`, creating parent dirs under root.
+    #[tokio::test]
+    async fn put_object_writes_normal_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = LocalBackend::new(dir.path());
+
+        backend
+            .put_object("bucket", "a/b/c.bin", b"hi".to_vec())
+            .await
+            .unwrap();
+
+        let written = dir.path().join("a/b/c.bin");
+        assert!(written.exists(), "expected file at {}", written.display());
+        assert_eq!(std::fs::read(&written).unwrap(), b"hi");
     }
 
     #[test]

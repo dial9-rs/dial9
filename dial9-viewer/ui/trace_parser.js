@@ -246,6 +246,88 @@
     }
 
     /**
+     * Stream MULTIPLE trace URLs as one logical trace: yield every component's
+     * raw (gunzipped) chunks back-to-back, in `urls` order. Pair with
+     * {@link parseTraceStream} — the decoder treats the concatenation as multiple
+     * segments (a mid-stream `TRC\0` header resets schemas/pools/timestamp base),
+     * so N components stream in as one trace, exactly as if they'd been
+     * downloaded, gunzipped, and concatenated by {@link fetchTraces}.
+     *
+     * Why this beats `fetchTraces` for N > 1: `fetchTraces` awaits ALL downloads,
+     * concatenates into one big buffer, THEN parses — zero fetch/parse overlap.
+     * Here every component's `fetch()` is dispatched up front (so the requests
+     * run concurrently, same as `Promise.all`), but we hand chunks to the parser
+     * as soon as the FIRST component starts arriving. Parsing segment 0 then
+     * overlaps the in-flight downloads of segments 1..N — the same
+     * ~max(download, parse) win the single-URL path already gets, now for the
+     * multi-trace case (issue #595). Components are emitted strictly in order so
+     * the result is byte-identical to the buffered concat.
+     *
+     * @param {string[]} urls one or more trace URLs (order preserved)
+     * @param {{signal?: AbortSignal, headers?: Object}} [opts]
+     * @returns {AsyncIterable<Uint8Array>}
+     */
+    function fetchTracesStream(urls, opts = {}) {
+        const list = Array.isArray(urls) ? urls : [urls];
+        // Dispatch every component's fetch up front so the network requests run
+        // concurrently (the `fetch()` inside fetchTraceStream starts on call).
+        // We hold the per-URL stream PROMISES and await them in order below, so a
+        // later component that finishes its headers first still can't jump the
+        // queue — emission stays strictly ordered.
+        //
+        // A later component can reject (e.g. HTTP 404) BEFORE we await it while
+        // an earlier one is still draining. Without a handler attached at
+        // creation time that rejection is "unhandled" until the loop reaches it,
+        // which fires Node's unhandledRejection / the browser's
+        // `unhandledrejection` event (noisy; trips error reporters). So we attach
+        // a no-op catch to each promise immediately to mark it handled; the loop
+        // below still awaits the ORIGINAL promise, so the real error surfaces
+        // (and rejects the iterator) when emission reaches that component.
+        const streamPromises = list.map((url) => {
+            const p = fetchTraceStream(url, opts);
+            p.catch(() => {});
+            return p;
+        });
+        // Cancel a not-yet-consumed component's stream so its open response body
+        // / connection closes promptly instead of lingering until GC. Fire and
+        // forget: if the fetch already failed there is nothing to cancel, and any
+        // error from cancel() itself is irrelevant to the caller.
+        function cancelUnconsumed(sp) {
+            Promise.resolve(sp)
+                .then((stream) => {
+                    const it =
+                        stream && typeof stream[Symbol.asyncIterator] === "function"
+                            ? stream[Symbol.asyncIterator]()
+                            : null;
+                    return it && typeof it.return === "function"
+                        ? it.return()
+                        : undefined;
+                })
+                .catch(() => {});
+        }
+        return {
+            async *[Symbol.asyncIterator]() {
+                let i = 0;
+                try {
+                    for (; i < streamPromises.length; i++) {
+                        const stream = await streamPromises[i];
+                        for await (const chunk of stream) yield chunk;
+                    }
+                } finally {
+                    // Early exit (a component threw, or the consumer stopped
+                    // iterating): the components AFTER the current one already had
+                    // their fetch() dispatched and may hold an open body. The
+                    // current one (i) is handled by for-await-of's own
+                    // iterator-return on break/throw; cancel the rest.
+                    for (let j = i + 1; j < streamPromises.length; j++) {
+                        cancelUnconsumed(streamPromises[j]);
+                    }
+                }
+            },
+        };
+    }
+
+    /**
      * @typedef {{
      *   eventType: number,
      *   timestamp: number,
@@ -1027,11 +1109,53 @@
         };
     }
 
+    // Both parse loops (whole-buffer and streaming) must periodically hand the
+    // main thread back to the browser so the loading spinner can repaint. A
+    // `setTimeout(0)` is clamped to ~4ms in browsers AND forces a repaint, so
+    // yielding too often — once per 100KB (whole-buffer) or once per chunk
+    // (streaming) — produces a paint storm that dominates parse time. Issue #595:
+    // the whole-buffer path (used by multi-trace `trace=` loads) yielded on a
+    // byte cadence and so painted ~100+ times and parsed much slower than the
+    // single-trace streaming path, which had already moved to this wall-clock
+    // throttle. Both paths now share ONE policy so it can't drift again.
+    const PAINT_INTERVAL_MS = 200; // at most ~5 repaint yields per second
+
+    /**
+     * @private Wall-clock throttle for the parse loops' spinner-repaint yields.
+     * `await throttle.yieldIfDue()` is a no-op until `PAINT_INTERVAL_MS` of
+     * wall-clock has elapsed since the last yield, then it yields a macrotask.
+     * Independent of trace size and chunking. Used by both {@link parseTraceBuffer}
+     * and {@link parseTraceStream}.
+     */
+    function makePaintThrottle() {
+        // Wall-clock source that works in browser and Node. Node 16+ exposes a
+        // global `performance`, but guard anyway in case it's absent.
+        const nowMs =
+            typeof performance !== "undefined" && performance.now
+                ? () => performance.now()
+                : () => Date.now();
+        let lastYieldMs = nowMs();
+        return {
+            async yieldIfDue() {
+                const t = nowMs();
+                if (t - lastYieldMs >= PAINT_INTERVAL_MS) {
+                    lastYieldMs = t;
+                    await new Promise((r) => setTimeout(r, 0));
+                }
+            },
+        };
+    }
+
     /** @private Parse a binary trace buffer. */
     async function parseTraceBuffer(buffer, options) {
         buffer = await maybeGunzip(buffer);
         const onProgress = (options && options.onParseProgress) || null;
-        const YIELD_BYTES = 100 * 1024; // yield to browser every 100KB
+        // Cheap per-frame gate. Every PROGRESS_BYTES of decoded bytes we refresh
+        // the progress counter (a cheap textContent write) and check the paint
+        // throttle. Bytes (not a clock read) are the gate so we don't touch the
+        // throttle on all ~300k frames of a large trace.
+        const PROGRESS_BYTES = 100 * 1024;
+        const paint = makePaintThrottle();
         const TD = getTraceDecoder();
         const dec = new TD(
             buffer instanceof ArrayBuffer ? new Uint8Array(buffer) : buffer,
@@ -1040,18 +1164,19 @@
         const totalBytes = dec.byteLength;
         const state = createParseState(options);
 
-        let lastYieldPos = 0;
+        let lastProgressPos = 0;
         let frame;
         while ((frame = dec.nextFrame()) !== null) {
-            // Yield to browser periodically so spinner can update
-            if (onProgress && dec.position - lastYieldPos >= YIELD_BYTES) {
-                lastYieldPos = dec.position;
+            if (onProgress && dec.position - lastProgressPos >= PROGRESS_BYTES) {
+                lastProgressPos = dec.position;
                 onProgress({
                     bytesRead: dec.position,
                     totalBytes,
                     eventCount: state.events.length,
                 });
-                await new Promise((r) => setTimeout(r, 0));
+                // Hand the main thread back so the spinner can paint, throttled
+                // to PAINT_INTERVAL_MS — not on every byte milestone.
+                await paint.yieldIfDue();
             }
             processFrame(frame, state, dec);
         }
@@ -1103,8 +1228,10 @@
         // We don't drop the yield entirely: the spinner must still tick a few
         // times/sec so the user sees progress. onProgress still fires on EVERY
         // batch drain (cheap) so the event/byte counters stay current; only the
-        // (relatively expensive) repaint yield is rate-limited.
-        const PAINT_INTERVAL_MS = 200; // at most ~5 repaint yields per second
+        // (relatively expensive) repaint yield is rate-limited. The throttle is
+        // shared with parseTraceBuffer (see makePaintThrottle) so the policy can't
+        // drift between the two paths (issue #595).
+        const paint = makePaintThrottle();
 
         // Unconsumed-tail accumulator. The decoder reads pooled strings/stacks via
         // its `stringPool`/`stackPool` maps (resolved values are copied into the
@@ -1183,13 +1310,6 @@
             drainComplete();
         }
 
-        // Wall-clock source that works in browser and Node. Node 16+ exposes a
-        // global `performance`, but guard anyway in case it's absent.
-        const nowMs =
-            typeof performance !== "undefined" && performance.now
-                ? () => performance.now()
-                : () => Date.now();
-        let lastYieldMs = nowMs(); // wall-clock time of the last macrotask yield
         for await (const rawChunk of chunks) {
             const chunk =
                 rawChunk instanceof Uint8Array
@@ -1219,16 +1339,12 @@
                     totalBytes: null,
                     eventCount: state.events.length,
                 });
-                // Yield so the browser can paint the spinner, but only once at least
-                // PAINT_INTERVAL_MS of wall-clock time has elapsed since the last
-                // yield — not once per (tiny) chunk and not on a byte cadence. Because
-                // the `for await` above already pumps the network/decompression, this
-                // throttle reduces repaints without slowing download/parse overlap.
-                const t = nowMs();
-                if (t - lastYieldMs >= PAINT_INTERVAL_MS) {
-                    lastYieldMs = t;
-                    await new Promise((r) => setTimeout(r, 0));
-                }
+                // Yield so the browser can paint the spinner, throttled to
+                // PAINT_INTERVAL_MS — not once per (tiny) chunk and not on a byte
+                // cadence. Because the `for await` above already pumps the
+                // network/decompression, this throttle reduces repaints without
+                // slowing download/parse overlap.
+                await paint.yieldIfDue();
             }
         }
 
@@ -1705,6 +1821,7 @@
             parseOne,
             fetchTraces,
             fetchTraceStream,
+            fetchTracesStream,
             canStreamDecode,
             formatFrame,
             symbolizeChain,
@@ -1719,6 +1836,7 @@
             parseTraceStream,
             fetchTraces,
             fetchTraceStream,
+            fetchTracesStream,
             canStreamDecode,
             formatFrame,
             symbolizeChain,

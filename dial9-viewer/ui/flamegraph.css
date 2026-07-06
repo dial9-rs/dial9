@@ -29,7 +29,8 @@
 }
 .fg-search-clear:hover { color: #fff; }
 .fg-search-stats { color: #888; font-size: 0.82em; }
-.fg-spawn-filter {
+.fg-spawn-filter,
+.fg-runtime-filter {
     background: #2a2a4a;
     border: 1px solid #444;
     color: #ccc;
