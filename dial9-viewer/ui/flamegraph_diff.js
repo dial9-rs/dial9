@@ -69,17 +69,24 @@ function mergeTrees(treeA, treeB) {
 // Map a node's two counts to an `rgb(...)` string. score > 0 => heavier in B
 // (red), score < 0 => heavier in A (blue), 0 => grey (rgb 207,207,207). Based
 // on each side's self-normalized fraction so differing totals need no separate
-// normalize pass. A half-sample epsilon floor (derived from each total) keeps
-// the ratio finite when a frame is present on only one side — that frame lands
-// fully saturated rather than at +/-Infinity. Scale: +/-4 octaves of the B/A
-// fraction ratio clamps to full saturation.
+// normalize pass. Scale: +/-4 octaves of the B/A fraction ratio clamps to full
+// saturation.
+//
+// A single SHARED epsilon floor keeps the ratio finite when a frame is present
+// on only one side. It must be smaller than the smallest real single-sample
+// fraction on EITHER side so a one-sided frame always tilts toward the side it
+// appears on — `0.5 / max(tA, tB)` is below both `1/tA` and `1/tB`, so it does.
+// A per-side floor (`0.5/tA` vs `0.5/tB`) is NOT comparable across sides: when
+// the totals differ wildly (e.g. a 1-sample baseline vs an 8846-sample
+// incident) the larger floor swamps the other side's real fraction, and a frame
+// unique to the bigger side colors backwards (blue — "heavier in A" — even
+// though it never appears in A).
 function diffColor(a, b, totalA, totalB) {
   const tA = totalA || 1;
   const tB = totalB || 1;
-  const epsA = 0.5 / tA;
-  const epsB = 0.5 / tB;
-  const fa = a / tA + epsA;
-  const fb = b / tB + epsB;
+  const eps = 0.5 / Math.max(tA, tB);
+  const fa = a / tA + eps;
+  const fb = b / tB + eps;
   let s = Math.log2(fb / fa) / 4; // +/-4 octaves -> +/-1
   if (s > 1) s = 1;
   else if (s < -1) s = -1;

@@ -138,6 +138,28 @@ assertEq(diffColor(0, 0, 100, 100), "rgb(207,207,207)", "absent on both sides ->
   assert(/^rgb\(\d+,\d+,\d+\)$/.test(aOnly), "A-only frame yields a valid rgb (no Infinity/NaN)");
 }
 
+// ── diffColor: one-sided frame colors toward its side even when totals differ
+//    wildly (the shared epsilon floor). Regression: a per-side floor (0.5/tA vs
+//    0.5/tB) is not comparable across sides, so a frame unique to the much
+//    larger capture used to color backwards (blue = "heavier in A" though it
+//    never appears in A). yulnr's repro: A=1 sample, B=8846. ──
+{
+  function rgb(str) {
+    const m = /rgb\((\d+),(\d+),(\d+)\)/.exec(str);
+    return { r: +m[1], g: +m[2], b: +m[3] };
+  }
+  // A tiny B-only frame (1 of 8846) against a 1-sample A total must read as
+  // heavier-in-B (red), not blue.
+  const bOnlyTiny = rgb(diffColor(0, 1, 1, 8846));
+  assert(bOnlyTiny.r > bOnlyTiny.b, "tiny B-only frame vs 1-sample A total -> red (heavier in B)");
+  // A large B-only frame at the same lopsided totals is fully-saturated red.
+  const bOnlyBig = rgb(diffColor(0, 8000, 1, 8846));
+  assert(bOnlyBig.r > bOnlyBig.b, "large B-only frame vs 1-sample A total -> red (heavier in B)");
+  // Mirror: a tiny A-only frame against a 1-sample B total reads as blue.
+  const aOnlyTiny = rgb(diffColor(1, 0, 8846, 1));
+  assert(aOnlyTiny.b > aOnlyTiny.r, "tiny A-only frame vs 1-sample B total -> blue (heavier in A)");
+}
+
 // ── diffColor: normalizes per-side, so equal FRACTIONS at unequal totals are grey ──
 // Totals large enough that the per-side epsilon floor is negligible; both sides
 // sit at 10% of their own capture despite B being 10x bigger.
