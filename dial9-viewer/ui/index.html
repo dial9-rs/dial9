@@ -441,6 +441,7 @@
     let rawObjects = [];       // raw search results
     let currentTab = 'browse';
     let aggregationEnabled = false; // server runs demand-driven aggregation
+    let localMode = false;             // true when server is local-dir (no BYO creds)
     let currentQuickRange = null;   // hours, when a "Last Nhr" quick range is active
                                     // (null once the user edits the range manually)
 
@@ -858,6 +859,7 @@
         // When the server runs demand-driven aggregation, the flamegraph button
         // drives the sampled server-side loop instead of decoding raw traces.
         aggregationEnabled = !!config.aggregation_enabled;
+        localMode = !config.supports_byo_credentials;
         if (config.supports_byo_credentials) initCredsUi();
         // Server defaults (bucket/prefix) were filled programmatically above;
         // reflect them in the URL so the link is complete.
@@ -1058,6 +1060,16 @@
     const parseKey = (key) => Dial9TraceScope.parseKey(key);
     const extractPrefix = (key) => Dial9TraceScope.extractPrefix(key);
 
+    // Parse last_modified into epoch seconds. The local backend sends numeric
+    // epoch seconds; S3 sends ISO 8601 strings. Returns 0 when absent/unparseable.
+    function epochSeconds(lastModified) {
+        if (!lastModified) return 0;
+        const n = Number(lastModified);
+        if (!isNaN(n) && n > 0) return n;
+        const ms = new Date(lastModified).getTime();
+        return isNaN(ms) ? 0 : ms / 1000;
+    }
+
     function toLocalDatetime(d) {
         const pad = n => String(n).padStart(2, '0');
         return d.getFullYear() + '-' + pad(d.getMonth()+1) + '-' + pad(d.getDate()) +
@@ -1178,7 +1190,7 @@
                 const p = parseKey(obj.key);
                 if (!p.epoch) return true; // keep if we can't parse
                 // Include if segment overlaps the range (use last_modified as end proxy)
-                const end = obj.last_modified ? new Date(obj.last_modified).getTime() / 1000 : p.epoch;
+                const end = epochSeconds(obj.last_modified) || p.epoch;
                 return p.epoch <= toEpoch && end >= fromEpoch;
             });
 
@@ -1213,10 +1225,9 @@
             // spread uniformly across it when rendering density.
             heatmapSegments = allObjects.map(obj => {
                 const p = parseKey(obj.key);
-                const start = p.epoch;
-                const end = obj.last_modified
-                    ? new Date(obj.last_modified).getTime() / 1000
-                    : start;
+                const mtime = epochSeconds(obj.last_modified);
+                const start = p.epoch || mtime;
+                const end = mtime || start;
                 return {
                     key: obj.key, size: obj.size, start, end,
                     service: p.service, host: p.host, bootId: p.bootId,
@@ -2036,6 +2047,16 @@
         if (keys.length === 0) return;
 
         const bucket = bucketInput.value.trim();
+
+        // Local mode: open traces directly by key (no scope resolution needed,
+        // and the scope can't be derived from buffer-style key names anyway).
+        if (localMode) {
+            const traceParams = keys.map(k =>
+                'trace=' + encodeURIComponent('/api/object?key=' + encodeURIComponent(k))
+            ).join('&');
+            window.open('viewer.html?' + traceParams, '_blank');
+            return;
+        }
 
         // Carry the selection as a compact *scope* (bucket/prefix/service/
         // host-set + time window) instead of one trace= component per file. The

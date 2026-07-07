@@ -1,4 +1,6 @@
 //! `browse` finds all trace files for a given timerange / filter set
+use std::sync::Arc;
+
 use axum::Extension;
 use axum::Json;
 use axum::extract::{Query, State};
@@ -11,7 +13,7 @@ use crate::server::AppState;
 use crate::server::credentials::MaybeCreds;
 use crate::server::error::storage_error_response;
 use crate::server::metrics::OperationMetrics;
-use crate::storage::{ObjectInfo, StorageError};
+use crate::storage::{ObjectInfo, StorageBackend, StorageError};
 
 /// Per-prefix object cap. A 10-minute (or minute) prefix can legitimately fan
 /// out across many hosts; 10k absorbs a very busy bucket while still bounding
@@ -101,13 +103,58 @@ pub async fn browse(
     };
 
     let window = params.to - params.from;
+
+    // Local mode: flat listing (no date-prefix fan-out).
+    if !state.allow_byo_creds {
+        return browse_local(backend, &bucket, &base).await;
+    }
+
+    browse_s3(backend, &bucket, &base, params.from, params.to, window).await
+}
+
+/// Local mode: flat listing filtered to trace segments.
+/// Called when `allow_byo_creds == false` (i.e. `--local-dir`).
+/// No time filtering — the frontend shows all results, positioned by mtime.
+async fn browse_local(
+    backend: Arc<dyn StorageBackend>,
+    bucket: &str,
+    base: &str,
+) -> Result<BrowseOk, (StatusCode, String)> {
+    let page = backend
+        .list_objects(bucket, base, PER_PREFIX_CAP)
+        .await
+        .map_err(storage_error_response)?;
+    let objects: Vec<ObjectInfo> = page
+        .objects
+        .into_iter()
+        .filter(|o| crate::ingest::aggregate::is_trace_segment(&o.key))
+        .collect();
+    let op = OperationMetrics::browse(objects.len(), 0, page.truncated, false);
+    Ok((
+        Extension(op),
+        Json(BrowseResponse {
+            objects,
+            truncated: page.truncated,
+        }),
+    ))
+}
+
+/// S3 mode: date-prefix fan-out with overflow refinement.
+async fn browse_s3(
+    backend: Arc<dyn StorageBackend>,
+    bucket: &str,
+    base: &str,
+    from: i64,
+    to: i64,
+    window: i64,
+) -> Result<BrowseOk, (StatusCode, String)> {
     let gran = if window < MINUTE_GRANULARITY_THRESHOLD_SECS {
         Granularity::Minute
     } else {
         Granularity::Hour
     };
 
-    let (prefixes, range_truncated) = time_prefixes(&base, params.from, params.to, gran);
+    let (prefixes, range_truncated) = time_prefixes(base, from, to, gran);
 
     // Per-request operational detail — the request-rate/latency signal lives in
     // the per-request EMF metrics now, so keep this at debug to avoid log spam.
@@ -132,7 +179,7 @@ pub async fn browse(
         futures::stream::iter(prefixes.clone())
             .map(|p| {
                 let backend = backend.clone();
-                let bucket = bucket.clone();
+                let bucket = bucket.to_string();
                 async move { backend.list_objects(&bucket, &p, PER_PREFIX_CAP).await }
             })
             .buffered(LIST_CONCURRENCY)
@@ -173,7 +220,7 @@ pub async fn browse(
             futures::stream::iter(refined)
                 .map(|p| {
                     let backend = backend.clone();
-                    let bucket = bucket.clone();
+                    let bucket = bucket.to_string();
                     async move { backend.list_objects(&bucket, &p, PER_PREFIX_CAP).await }
                 })
                 .buffer_unordered(LIST_CONCURRENCY)
