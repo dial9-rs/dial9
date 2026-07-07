@@ -90,7 +90,7 @@ fn sched_wait_sample_rate() -> u64 {
 /// process-global rate or a live schedstat read.
 fn advance_park_counter(counter: u64, rate: u64) -> (u64, bool) {
     let next = counter.wrapping_add(1);
-    (next, next % rate.max(1) == 0)
+    (next, next.is_multiple_of(rate.max(1)))
 }
 
 /// Returns a strictly monotonic timestamp for this thread.
