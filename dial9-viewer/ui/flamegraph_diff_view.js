@@ -39,7 +39,7 @@
   // Server flamegraph endpoint keys; the rest of a scope (e.g. the client-only
   // `api` flag) is not forwarded.
   const SERVER_KEYS = [
-    "data_dir", "bucket", "prefix", "service",
+    "data_dir", "bucket", "aws_region", "prefix", "service",
     "thread_class", "source", "spawn_location", "start_ns", "end_ns", "max_files",
   ];
 

@@ -1691,6 +1691,20 @@
     }
 
 
+    // The bucket's region, for stamping onto every link this page opens
+    // (flamegraph / tokio-stats / viewer) so the opened tab's URL is
+    // self-contained — it signs the right regional S3 endpoint without relying
+    // on having inherited a detected region from this page. Source of truth is
+    // the credentials store (where region detection lands on Apply / bucket
+    // pick); the panel's region field is the fallback. Empty string when unknown
+    // (the server then uses its default region).
+    function currentRegion() {
+        const stored = window.Dial9Creds ? Dial9Creds.get() : null;
+        if (stored && stored.region) return stored.region;
+        const field = document.getElementById('creds-region');
+        return (field && field.value.trim()) || '';
+    }
+
     // Build the aggregate SCOPE (bucket/prefix/service/host-set/time window) for
     // the current heatmap selection, as a URLSearchParams. This is the single
     // source of truth shared by the flamegraph button, the tokio-stats button,
@@ -1709,7 +1723,7 @@
         // wrap the query back into the URLSearchParams the diff tray works with,
         // and warn if the host set was too large to name in the link (the capture
         // then covers all hosts in the window).
-        const scope = Dial9TraceScope.scopeFromKeys(bucket, heatmapSelection.keys, heatmapSelection.t0, heatmapSelection.t1);
+        const scope = Dial9TraceScope.scopeFromKeys(bucket, heatmapSelection.keys, heatmapSelection.t0, heatmapSelection.t1, currentRegion());
         const { query, hostsDropped } = Dial9TraceScope.encodeAggregationParams(new URLSearchParams(), scope);
         if (hostsDropped) warnHostsDropped();
         return new URLSearchParams(query);
@@ -1739,7 +1753,7 @@
             // (A box spanning >1 service sends no service filter — all services
             // in the box — matching exact mode, rather than the old "first
             // service wins" which silently dropped the others.)
-            const scope = Dial9TraceScope.scopeFromKeys(bucket, keys, heatmapSelection.t0, heatmapSelection.t1);
+            const scope = Dial9TraceScope.scopeFromKeys(bucket, keys, heatmapSelection.t0, heatmapSelection.t1, currentRegion());
             const base = new URLSearchParams();
             base.set('api', '1');
             const { query, hostsDropped } = Dial9TraceScope.encodeAggregationParams(base, scope);
@@ -1755,7 +1769,7 @@
         // can't overflow CloudFront's 8192-byte request-URI cap and 414 the tab)
         // and stateless (so a shared deep link re-resolves in any browser).
         const fgParams = traceTitleParams(keys);
-        const scope = Dial9TraceScope.scopeFromKeys(bucket, keys, heatmapSelection.t0, heatmapSelection.t1);
+        const scope = Dial9TraceScope.scopeFromKeys(bucket, keys, heatmapSelection.t0, heatmapSelection.t1, currentRegion());
         const { query, hostsDropped } = Dial9TraceScope.encodeScope(fgParams, scope);
         if (hostsDropped) warnHostsDropped();
         window.open('flamegraph.html?' + query, '_blank');
@@ -1779,7 +1793,7 @@
         const keys = heatmapSelection.keys;
         // Same scope the aggregation flamegraph uses, same param vocabulary —
         // /api/tokio-stats reads bucket/prefix/service/host + start_ns/end_ns.
-        const scope = Dial9TraceScope.scopeFromKeys(bucket, keys, heatmapSelection.t0, heatmapSelection.t1);
+        const scope = Dial9TraceScope.scopeFromKeys(bucket, keys, heatmapSelection.t0, heatmapSelection.t1, currentRegion());
         const { query, hostsDropped } = Dial9TraceScope.encodeAggregationParams(new URLSearchParams(), scope);
         if (hostsDropped) warnHostsDropped();
         window.open('tokio_stats.html?' + query, '_blank');
@@ -2048,7 +2062,7 @@
         const titleParams = traceTitleParams(keys);
         const t0 = heatmapSelection ? heatmapSelection.t0 : null;
         const t1 = heatmapSelection ? heatmapSelection.t1 : null;
-        const scope = Dial9TraceScope.scopeFromKeys(bucket, keys, t0, t1);
+        const scope = Dial9TraceScope.scopeFromKeys(bucket, keys, t0, t1, currentRegion());
         // Raw mode passes no window, so scopeFromKeys derives it from the keys'
         // epochs. It returns null when none parse (an unrecognized key layout);
         // there is no window to build a scope from, so tell the user rather than

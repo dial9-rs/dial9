@@ -71,6 +71,18 @@
   const params = new URLSearchParams(window.location.search);
   const COLORS = ["#58a6ff", "#d2a8ff", "#7ee787", "#ffa657"];
 
+  // A shared link pins the bucket's region (`aws_region`). Fold it into the
+  // credentials store so every /api/tokio-stats request carries the
+  // x-dial9-aws-region header — same seam the home page uses on load. Region is
+  // a property of the bucket, not a secret; without it a cross-region bucket is
+  // signed for the server's default region and the listing comes back empty.
+  // No-op when no creds are stored (region is header-only).
+  const urlRegion = params.get("aws_region");
+  if (urlRegion && window.Dial9Creds) {
+    const stored = Dial9Creds.get();
+    if (stored && stored.region !== urlRegion) Dial9Creds.setRegion(urlRegion);
+  }
+
   // Periods: each has {id, startNs, endNs, data (cached response), scope?, label?}.
   // `scope` (a URLSearchParams) is set only in diff mode, where each side (A/B)
   // is a fully independent aggregate scope — bucket/prefix/service/host may all
@@ -119,7 +131,10 @@
   function effectiveScope(period) {
     const out = new URLSearchParams();
     const src = period.scope || params;
-    for (const k of ["bucket", "prefix", "service"]) {
+    // `aws_region` rides alongside the bucket so a cross-region bucket signs the
+    // right S3 endpoint (also folded into the creds header below; naming it here
+    // keeps the request self-describing and per-side correct in diff mode).
+    for (const k of ["bucket", "aws_region", "prefix", "service"]) {
       const v = src.get(k);
       if (v) out.set(k, v);
     }
@@ -242,7 +257,7 @@
       return;
     }
     const u = new URLSearchParams();
-    for (const k of ["bucket", "prefix", "service"]) { if (params.get(k)) u.set(k, params.get(k)); }
+    for (const k of ["bucket", "aws_region", "prefix", "service"]) { if (params.get(k)) u.set(k, params.get(k)); }
     for (const h of params.getAll("host")) u.append("host", h);
     periods.forEach((p, i) => {
       if (p.startNs) u.set(`p${i+1}_start_ns`, p.startNs);

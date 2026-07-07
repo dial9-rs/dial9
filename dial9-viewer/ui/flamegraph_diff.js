@@ -197,6 +197,9 @@ const SCOPE_KEYS_SINGLE = [
   "api",
   "data_dir",
   "bucket",
+  // The bucket's region (a property of the bucket, not a credential), so a
+  // scope/diff link signs the right regional S3 endpoint on its own.
+  "aws_region",
   "prefix",
   "service",
   "thread_class",

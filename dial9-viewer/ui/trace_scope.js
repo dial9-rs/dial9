@@ -33,6 +33,7 @@
   // existing `host`/`from`/`to` title params or `start`/`end` zoom params.
   const P = {
     bucket: "s_bucket",
+    region: "s_region", // AWS region the bucket lives in (see scopeFromKeys)
     prefix: "s_prefix",
     service: "s_svc",
     host: "s_host", // repeatable
@@ -123,7 +124,15 @@
   // Derive a scope from a heatmap selection's keys + [t0,t1] window (epoch
   // seconds). `hosts` is the distinct host set; a single service is assumed (a
   // box almost always spans one). Returns null when there is nothing to scope.
-  function scopeFromKeys(bucket, keys, t0, t1) {
+  //
+  // `region` is the AWS region the bucket lives in — a property of the bucket,
+  // not a credential, so it travels in the (shareable) scope alongside the
+  // bucket. Carrying it makes the opened tab's URL self-contained: a
+  // cross-region bucket (e.g. one in us-west-2) is signed for the right S3
+  // endpoint without relying on the tab having inherited a region-detection
+  // result from the page that opened it. Optional and trailing so existing
+  // callers keep working; falsy region simply isn't carried.
+  function scopeFromKeys(bucket, keys, t0, t1, region) {
     if (!keys || !keys.length) return null;
     const parsed = keys.map(parseKey);
     const services = [...new Set(parsed.map((p) => p.service).filter(Boolean))];
@@ -140,6 +149,7 @@
     const to = t1 != null ? Math.ceil(t1) : Math.max(...epochs);
     return {
       bucket: bucket || "",
+      region: region || "",
       prefix: extractPrefix(keys[0]),
       service: services.length === 1 ? services[0] : "",
       hosts,
@@ -167,6 +177,7 @@
     const limit = o.limit != null ? o.limit : URI_SAFE_QUERY_LIMIT;
     const base = new URLSearchParams(baseParams ? baseParams.toString() : "");
     if (scope.bucket) base.set(P.bucket, scope.bucket);
+    if (scope.region) base.set(P.region, scope.region);
     if (scope.prefix) base.set(P.prefix, scope.prefix);
     if (scope.service) base.set(P.service, scope.service);
     if (scope.from != null) base.set(P.from, String(scope.from));
@@ -201,6 +212,10 @@
     const limit = o.limit != null ? o.limit : URI_SAFE_QUERY_LIMIT;
     const base = new URLSearchParams(baseParams ? baseParams.toString() : "");
     if (scope.bucket) base.set("bucket", scope.bucket);
+    // The un-namespaced `aws_region` is exactly the query param the server reads
+    // for the bucket's region (credentials::QUERY_REGION), so a scope link that
+    // points straight at /api/flamegraph or /api/tokio-stats is self-contained.
+    if (scope.region) base.set("aws_region", scope.region);
     if (scope.prefix) base.set("prefix", scope.prefix);
     if (scope.service) base.set("service", scope.service);
     if (scope.from != null) base.set("start_ns", String(Math.round(scope.from * 1e9)));
@@ -225,6 +240,7 @@
     if (from == null || to == null) return null;
     return {
       bucket: params.get(P.bucket) || "",
+      region: params.get(P.region) || "",
       prefix: params.get(P.prefix) || "",
       service: params.get(P.service) || "",
       hosts: params.getAll(P.host),

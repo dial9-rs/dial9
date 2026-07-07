@@ -112,6 +112,23 @@
                 const statsEl = document.getElementById("fg-stats");
                 const foldWarnEl = document.getElementById("fold-warning");
 
+                // A shared link pins the bucket's region — as `aws_region` on an
+                // aggregate/diff link, or `s_region` inside an exact-decode scope
+                // (see trace_scope.js and credentials::QUERY_REGION). Region is a
+                // property of the bucket, not a secret. Fold it into the
+                // credentials store so every /api/* request from this tab carries
+                // the x-dial9-aws-region header, exactly like the home page does
+                // on load. Without this, a cross-region bucket (e.g. one in
+                // us-west-2) is signed for the server's default region, the S3
+                // listing comes back empty, and the flamegraph 404s with "no
+                // source files match this scope". No-op when no creds are stored
+                // (region is header-only) or no region is in the URL.
+                const urlRegion = params.get("aws_region") || params.get("s_region");
+                if (urlRegion && window.Dial9Creds) {
+                    const stored = Dial9Creds.get();
+                    if (stored && stored.region !== urlRegion) Dial9Creds.setRegion(urlRegion);
+                }
+
                 function showError(msg) {
                     loadingEl.classList.add("hidden");
                     errorEl.style.display = "flex";
@@ -412,11 +429,20 @@
                     const scopeService = params.get("service");
                     const scopeBucket = params.get("bucket");
                     const scopePrefix = params.get("prefix");
+                    // The bucket's region. Already folded into the creds store
+                    // above (so it rides as a header), but we also keep it in the
+                    // address bar and any copy/diff link so a shared URL stays
+                    // self-contained rather than depending on the tab's store.
+                    const scopeRegion = params.get("aws_region");
 
                     function buildApiUrl() {
                         const u = new URL("/api/flamegraph", window.location.origin);
                         if (params.get("data_dir")) u.searchParams.set("data_dir", params.get("data_dir"));
                         if (scopeBucket) u.searchParams.set("bucket", scopeBucket);
+                        // Region also travels as a header (Dial9Creds), but naming
+                        // it on the URL keeps the request self-describing and works
+                        // even on the ambient (no-creds) path.
+                        if (scopeRegion) u.searchParams.set("aws_region", scopeRegion);
                         if (scopePrefix) u.searchParams.set("prefix", scopePrefix);
                         if (scopeService) u.searchParams.set("service", scopeService);
                         for (const h of filterState.hosts) u.searchParams.append("host", h);
@@ -441,6 +467,7 @@
                         p.set("api", "1");
                         if (params.get("data_dir")) p.set("data_dir", params.get("data_dir"));
                         if (scopeBucket) p.set("bucket", scopeBucket);
+                        if (scopeRegion) p.set("aws_region", scopeRegion);
                         if (scopePrefix) p.set("prefix", scopePrefix);
                         if (scopeService) p.set("service", scopeService);
                         for (const h of filterState.hosts) p.append("host", h);
@@ -727,6 +754,7 @@
                         p.set("api", "1");
                         if (params.get("data_dir")) p.set("data_dir", params.get("data_dir"));
                         if (scopeBucket) p.set("bucket", scopeBucket);
+                        if (scopeRegion) p.set("aws_region", scopeRegion);
                         if (scopePrefix) p.set("prefix", scopePrefix);
                         if (scopeService) p.set("service", scopeService);
                         for (const h of filterState.hosts) p.append("host", h);

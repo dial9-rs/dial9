@@ -234,6 +234,7 @@ assertEq(
   const src = new URLSearchParams();
   src.set("api", "1");
   src.set("bucket", "my-bucket");
+  src.set("aws_region", "us-west-2");
   src.set("prefix", "traces/svc");
   src.set("service", "svc");
   src.append("host", "h1");
@@ -250,6 +251,7 @@ assertEq(
 
   const out = fullScopeQuery(src);
   assertEq(out.get("bucket"), "my-bucket", "bucket survives (fixes lossy address bar)");
+  assertEq(out.get("aws_region"), "us-west-2", "region survives (cross-region bucket link)");
   assertEq(out.get("prefix"), "traces/svc", "prefix survives");
   assertEq(out.get("max_files"), "256", "max_files survives");
   assertEq(out.getAll("host").join(","), "h1,h2", "repeatable host set survives in order");
@@ -339,11 +341,13 @@ assert(parseDiff(new URLSearchParams("diff=1&a=" + encodeScope("bucket=x") + "&b
 {
   const V = require("./flamegraph_diff_view.js");
   const scope = new URLSearchParams(
-    "api=1&bucket=b&prefix=traces/svc&service=svc&host=h1&host=h2&source=cpu&start_ns=100&max_files=64",
+    "api=1&bucket=b&aws_region=us-west-2&prefix=traces/svc&service=svc&host=h1&host=h2&source=cpu&start_ns=100&max_files=64",
   );
   const u = V.apiUrlFor({ scope, origin: "https://viewer.example.com" });
   assertEq(u.pathname, "/api/flamegraph", "apiUrlFor targets /api/flamegraph");
   assertEq(u.searchParams.get("bucket"), "b", "apiUrlFor forwards bucket");
+  assertEq(u.searchParams.get("aws_region"), "us-west-2",
+    "apiUrlFor forwards region (side B often has a cross-region bucket)");
   assertEq(u.searchParams.get("max_files"), "64", "apiUrlFor forwards max_files");
   assertEq(u.searchParams.getAll("host").join(","), "h1,h2", "apiUrlFor forwards repeatable hosts");
   assertEq(u.searchParams.get("api"), null, "apiUrlFor does NOT forward the client-only api flag");

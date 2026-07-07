@@ -1933,6 +1933,20 @@
             // Render profiler: ?prof=1 (or window.D9PROF=1 from the console).
             if (urlParams.get('prof') === '1') window.D9PROF = 1;
 
+            // A shared link pins the bucket's region — as `s_region` inside a
+            // scope, or `aws_region` on a direct link. Fold it into the
+            // credentials store so every /api/{browse,object,…} request from this
+            // tab carries the x-dial9-aws-region header (same seam the home page
+            // uses on load). Region is a property of the bucket, not a secret.
+            // Without it a cross-region bucket (e.g. one in us-west-2) is signed
+            // for the server's default region and the listing comes back empty.
+            // No-op when no creds are stored (region is header-only).
+            const urlRegion = urlParams.get('s_region') || urlParams.get('aws_region');
+            if (urlRegion && window.Dial9Creds) {
+                const stored = Dial9Creds.get();
+                if (stored && stored.region !== urlRegion) Dial9Creds.setRegion(urlRegion);
+            }
+
             // Credentialed JSON fetch for scope resolution: same BYO-credentials
             // headers loadTraceFromUrl attaches, so /api/browse runs under the
             // user's creds (BYOC) or the task's ambient identity (no creds).
