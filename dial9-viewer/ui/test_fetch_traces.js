@@ -8,7 +8,22 @@ const fs = require("fs");
 const path = require("path");
 const zlib = require("zlib");
 const { assert, testAsync, summarize } = require("./test_harness.js");
-const { fetchTraces, parseTrace } = require("./trace_parser.js");
+const { fetchTraces, fetchTracesStream, parseTrace, parseTraceStream } = require("./trace_parser.js");
+
+// Drain an async iterable of Uint8Array chunks into one contiguous Uint8Array.
+async function collectChunks(iterable) {
+  const chunks = [];
+  let total = 0;
+  for await (const c of iterable) {
+    const u8 = c instanceof Uint8Array ? c : new Uint8Array(c);
+    chunks.push(u8);
+    total += u8.length;
+  }
+  const out = new Uint8Array(total);
+  let off = 0;
+  for (const c of chunks) { out.set(c, off); off += c.length; }
+  return out;
+}
 
 // Minimal fetch() mock: maps a URL → bytes (Buffer/Uint8Array) and returns a
 // Response-like object exposing arrayBuffer(). Supports an error URL too.
@@ -154,6 +169,135 @@ async function main() {
     } finally {
       restore();
       global.location = originalLocation;
+    }
+  });
+
+  // ── fetchTracesStream: streams components back-to-back as one trace ──
+
+  // Concatenated stream is byte-identical to the buffered fetchTraces output,
+  // and parses (via parseTraceStream) to the same event count.
+  await testAsync("fetchTracesStream concatenation matches fetchTraces", async () => {
+    const restore = installFetchMock({ "/gz": gzTrace, "/raw": rawTrace });
+    try {
+      const streamed = await collectChunks(fetchTracesStream(["/gz", "/raw"]));
+      const buffered = bytesOf(await fetchTraces(["/gz", "/raw"]));
+      assert.deepStrictEqual(streamed, buffered, "streamed bytes == buffered bytes");
+
+      const parsed = await parseTraceStream(fetchTracesStream(["/gz", "/raw"]));
+      assert.strictEqual(parsed.events.length, singleEvents * 2,
+        `expected ${singleEvents * 2} events, got ${parsed.events.length}`);
+    } finally { restore(); }
+  });
+
+  // Components are emitted strictly in `urls` order even though the fetches run
+  // concurrently (a later, faster component must not jump the queue).
+  await testAsync("fetchTracesStream preserves order", async () => {
+    const a = new Uint8Array([1, 2, 3]);
+    const b = new Uint8Array([4, 5]);
+    const c = new Uint8Array([6]);
+    const restore = installFetchMock({ "/a": a, "/b": b, "/c": c });
+    try {
+      const out = await collectChunks(fetchTracesStream(["/a", "/b", "/c"]));
+      assert.deepStrictEqual(out, new Uint8Array([1, 2, 3, 4, 5, 6]));
+    } finally { restore(); }
+  });
+
+  // The whole point of #595: all component fetches are dispatched up front (so
+  // downloads run concurrently and overlap the parse), NOT one-after-another as
+  // each stream is drained. Calling fetchTracesStream must issue every fetch()
+  // synchronously, before any chunk is consumed.
+  await testAsync("fetchTracesStream dispatches all fetches concurrently", async () => {
+    const restore = installFetchMock({ "/a": rawTrace, "/b": rawTrace, "/c": rawTrace });
+    try {
+      const iterable = fetchTracesStream(["/a", "/b", "/c"]);
+      // No chunk has been consumed yet, but all three fetches should already
+      // be in flight (fetchTraceStream calls fetch() synchronously before its
+      // first await, and fetchTracesStream maps over all URLs eagerly).
+      assert.strictEqual(restore.calls.length, 3,
+        `expected 3 concurrent fetches before consuming, got ${restore.calls.length}`);
+      // Draining still works after the fact.
+      const out = await collectChunks(iterable);
+      assert.strictEqual(out.length, rawTrace.length * 3, "all three components drained");
+    } finally { restore(); }
+  });
+
+  // Credential headers follow the same same-origin rule as fetchTraces.
+  await testAsync("fetchTracesStream withholds credentials cross-origin", async () => {
+    const restore = installFetchMock({
+      "/api/object?key=seg": rawTrace,
+      "https://attacker.example/x": rawTrace,
+    });
+    const originalLocation = global.location;
+    global.location = { origin: "https://dial9.example", href: "https://dial9.example/viewer.html" };
+    try {
+      const headers = { "x-dial9-aws-access-key-id": "AKIA", "x-dial9-aws-secret-access-key": "shh" };
+      await collectChunks(fetchTracesStream(["/api/object?key=seg", "https://attacker.example/x"], { headers }));
+      const sameOrigin = restore.calls.find((c) => c.url === "/api/object?key=seg");
+      const crossOrigin = restore.calls.find((c) => c.url === "https://attacker.example/x");
+      assert.deepStrictEqual(sameOrigin.opts.headers, headers, "same-origin keeps credentials");
+      assert.strictEqual(crossOrigin.opts.headers, undefined, "cross-origin withholds credentials");
+    } finally {
+      restore();
+      global.location = originalLocation;
+    }
+  });
+
+  // A later component that fails (e.g. 404) while an earlier one is still
+  // resolving must (a) reject the iterator when emission reaches it, and (b) NOT
+  // leave a transient unhandled rejection (which fires the browser's
+  // `unhandledrejection` event / Node's unhandledRejection). The eager-dispatch
+  // design attaches a no-op catch to each fetch promise to prevent (b).
+  //
+  // The window only opens across a REAL macrotask gap: component 0 must take a
+  // timer to resolve so that, while we await it, the microtask queue drains and
+  // Node runs its unhandled-rejection check with component 1 still un-awaited.
+  // A synchronous one-shot reader would award component 1 within microtasks and
+  // mask the bug, so this uses a body whose first read resolves via setTimeout.
+  await testAsync("fetchTracesStream: late failure rejects without unhandled rejection", async () => {
+    // /slow: streams rawTrace, but its first read lands on a real timer.
+    // /late: 404s after one microtask. /slow is index 0, /late is index 1.
+    const originalFetch = global.fetch;
+    global.fetch = async (url) => {
+      if (url === "/late") {
+        return { ok: false, status: 404, async arrayBuffer() { return new ArrayBuffer(0); } };
+      }
+      let sent = false;
+      return {
+        ok: true,
+        status: 200,
+        body: {
+          getReader() {
+            return {
+              async read() {
+                if (sent) return { done: true, value: undefined };
+                sent = true;
+                await new Promise((r) => setTimeout(r, 20)); // macrotask gap
+                return { done: false, value: rawTrace };
+              },
+              async cancel() {},
+            };
+          },
+        },
+      };
+    };
+    let unhandled = 0;
+    const onUnhandled = () => { unhandled++; };
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      let threw = false;
+      try {
+        await collectChunks(fetchTracesStream(["/slow", "/late"]));
+      } catch (e) {
+        threw = true;
+        assert.ok(/404/.test(e.message), `error mentions status: ${e.message}`);
+      }
+      assert.ok(threw, "expected the iterator to reject");
+      // Let any stray microtask/macrotask-deferred rejection settle.
+      await new Promise((r) => setTimeout(r, 10));
+      assert.strictEqual(unhandled, 0, `expected 0 unhandled rejections, got ${unhandled}`);
+    } finally {
+      global.fetch = originalFetch;
+      process.removeListener("unhandledRejection", onUnhandled);
     }
   });
 

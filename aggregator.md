@@ -27,11 +27,12 @@ few samples.** You don't need to aggregate every minute of every hour — a smal
 2. **The backend orders the matched set** by `BLAKE3(ORDER_VERSION ++ source_key)`
    — deterministic, but uniform across host and time, so the first few files are
    a representative spread rather than one host's earliest minutes.
-3. **The first poll folds a baseline (a few files)** and returns a flamegraph
-   immediately, stamped with *coverage* ("4 / 480 files"). The client re-polls;
-   each poll folds a few more files and the tree refines, until coverage
-   plateaus at the *sampling cap* (default 5% of matched, ceiling 100 files).
-   It deliberately never folds the whole window. "Fetch more" raises the cap.
+3. **One request streams the refinement** over Server-Sent Events. The server
+   emits the already-folded snapshot immediately (stamped with *coverage* —
+   "4 / 480 files"), then folds the not-yet-folded files up to the *sampling cap*
+   (default 5% of matched, ceiling 100 files), pushing a fresh full tree as each
+   file lands, and closes the stream at the cap. It deliberately never folds the
+   whole window. "Fetch more" reopens the stream with a higher cap.
 4. **You drill into the tree** — filter by host, source, thread class, or spawn
    location (the toolbar is driven by the *facets* the response advertises) and
    the tree recomputes over the folded set.
@@ -159,18 +160,29 @@ clicked node) are **not yet a server endpoint** — see [Deferred](#deferred).
 │                                                                       │
 │  (no _manifest/ — the part-file's existence is the folded record)      │
 └────────────────────────┬─────────────────────────────────────────────┘
-                         │ GET /api/flamegraph (refinement loop)
+                         │ GET /api/flamegraph (SSE refinement stream)
                          ▼
 ┌──────────────────────────────────────────────────────────────────────┐
 │  dial9 serve                                                          │
-│    /api/flamegraph  → aggregated flamegraph tree + coverage + facets   │
-│    /tokio-stats     → per-spawn-location poll stats (from polls/)      │
+│    /api/flamegraph  → SSE: aggregated tree + coverage + facets, per file│
+│    /api/tokio-stats → SSE: per-spawn-location poll stats (from polls/)  │
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
 ## API Endpoints
+
+Both endpoints are **Server-Sent Event streams** (`Content-Type:
+text/event-stream`). A single request holds the connection open: the server
+emits the already-folded snapshot first, then folds the not-yet-folded files up
+to the sampling cap and pushes a fresh full snapshot (one `data:` JSON object per
+SSE event) as each file lands, closing the stream at the cap. The client
+re-renders on every event — there is no client-driven polling.
+
+Because bring-your-own-credentials rides on `x-dial9-aws-*` request headers, the
+client reads the stream via `fetch` (the native `EventSource` can't set request
+headers) — see `dial9-viewer/ui/sse.js`.
 
 ### `GET /api/flamegraph`
 
@@ -184,14 +196,13 @@ clicked node) are **not yet a server endpoint** — see [Deferred](#deferred).
 | `source` | no | `cpu` / `sched` (empty = all) |
 | `spawn_location` | no | Exact match on a task's spawn location |
 | `max_files` | no | "Fetch more": raise the sampling-cap ceiling for this scope |
-| `refine` | no | `1` to fold a batch this poll; absent/false just re-aggregates what's folded |
 | `bucket` / `prefix` | no | Source override (bring-your-own-credentials) |
 
-The available toolbar options are not hard-coded: the response advertises the
+The available toolbar options are not hard-coded: each event advertises the
 *facets* present in the scope (host, source, thread class, spawn location), and
 the UI renders the toolbar from that array.
 
-**Response:**
+**Each SSE event's `data:` payload** is one JSON object:
 
 ```json
 {
@@ -218,47 +229,47 @@ the UI renders the toolbar from that array.
 }
 ```
 
-`coverage` is present only in demand-driven mode; the client polls (with
-`refine=1`) until `files_folded` stops climbing.
+`files_folded` climbs monotonically across events until it reaches the cap, at
+which point the server closes the stream.
 
-### `GET /tokio-stats`
+### `GET /api/tokio-stats`
 
-Same scope/refinement machinery as `/api/flamegraph`, but reads the `polls/`
-part-files and returns per-spawn-location poll statistics (durations and worst
-exemplars per poll class).
+Same scope/refinement machinery as `/api/flamegraph` (also an SSE stream), but
+reads the `polls/` part-files and returns per-spawn-location poll statistics
+(durations and worst exemplars per poll class).
 
 ---
 
 ## Refinement Loop
 
-Aggregation is driven by the query. The loop itself lives in
-`ingest/refine.rs::refine` — one function shared by every demand-driven
-endpoint, so `/api/flamegraph` and `/tokio-stats` cannot drift apart. Each poll:
+Aggregation is driven by the query. The engine lives in `ingest/refine.rs`,
+split into two shared pieces so `/api/flamegraph` and `/api/tokio-stats` cannot
+drift apart:
 
-1. **List the matched set** — list the source scope, filter to the [scope]'s
-   service/host/time (interval-overlap on the filename `epoch`, padded by the
-   segment duration), and sort by the *order key*.
-2. **List the folded set** — list the output `samples/` tree (the record of
-   what's already folded; **no manifest**).
-3. **Fold a bounded budget** of not-yet-folded files in order (a baseline on the
-   first refining poll, a larger refine-batch afterwards), stopping at the
-   sampling cap. A *fold* is: fetch + gunzip → decode with
-   `dial9-trace-format::Decoder` → resolve `callchain` to frame names →
-   `stack_id = BLAKE3(frames)[:16]` → write a partitioned samples part-file
-   (empty if zero samples), a stacks-dict part-file, and a polls part-file, all
-   named `{blake3(source_key)}`.
+- **`resolve`** (once per request): list the source scope, filter to the
+  [scope]'s service/host/time (interval-overlap on the filename `epoch`, padded
+  by the segment duration), sort by the *order key*, take the first *cap* files
+  as the capped prefix, and list the folded set (the output `samples/` tree —
+  the record of what's already folded; **no manifest**).
+- **`fold_stream`** (drives the SSE stream): fold the not-yet-folded capped files
+  concurrently under the process-global `FoldLimits`, yielding each file as it
+  lands. A *fold* is: fetch + gunzip → decode with `dial9-trace-format::Decoder`
+  → resolve `callchain` to frame names → `stack_id = BLAKE3(frames)[:16]` → write
+  a partitioned samples part-file (empty if zero samples), a stacks-dict
+  part-file, and a polls part-file, all named `{blake3(source_key)}`.
 
-`refine` returns the capped, ordered file set plus the folded set and coverage
-denominators; the *endpoint* then reads its own part-files over that set:
-`/api/flamegraph` aggregates the `samples/` part-files into a tree, `/tokio-stats`
-reads the `polls/` part-files into poll stats. Both attach the same `coverage`
-block.
+The *endpoint* consumes the fold stream, incrementally merging each folded file's
+part-files into an accumulator and emitting one SSE event per file:
+`/api/flamegraph` merges `samples/` into a tree, `/api/tokio-stats` merges
+`polls/` into poll stats. Both attach the same `coverage` block. It emits the
+already-folded snapshot first (instant), then a refined snapshot per fold.
 
-Stateless and idempotent: folding happens only during a poll (so it stops when
-the client stops polling), and re-folding a file writes the same keys. The
-`coverage` block (`files_matched`, `files_folded`, `samples_folded`,
-`total_bytes`) tells the user how complete the view is; the client polls until
-it freezes.
+Stream-driven and idempotent: folding runs only while the request is open (the
+fold `JoinSet` is dropped — cancelling in-flight folds — when the client
+disconnects), and re-folding a file writes the same keys. The `coverage` block
+(`files_matched`, `files_folded`, `samples_folded`, `total_bytes`) tells the user
+how complete the view is; it climbs monotonically until the server closes the
+stream at the cap.
 
 [scope]: ./CONTEXT.md
 

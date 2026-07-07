@@ -12,6 +12,11 @@ pub fn storage_error_response(err: StorageError) -> (StatusCode, String) {
         StorageError::Unauthorized => (StatusCode::UNAUTHORIZED, err.to_string()),
         StorageError::AccountNotSignedUp => (StatusCode::FORBIDDEN, err.to_string()),
         StorageError::NotFound(_) => (StatusCode::NOT_FOUND, err.to_string()),
+        // 421 Misdirected Request: the request reached an endpoint (region) that
+        // cannot serve this bucket — semantically exact for an S3 region
+        // mismatch, and distinct from a generic 500 so the UI can surface the
+        // actionable "set the region" message.
+        StorageError::WrongRegion => (StatusCode::MISDIRECTED_REQUEST, err.to_string()),
         StorageError::Other(_) => (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
     }
 }

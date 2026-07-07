@@ -21,6 +21,10 @@ pub(crate) struct ServeConfig {
     pub prefix: Option<String>,
     pub local_dir: Option<PathBuf>,
     pub dev: bool,
+    /// Local mode: render logs human-readably (not JSON) and per-request
+    /// metrics in metrique's local format (not EMF). Defaults to off, i.e. the
+    /// deployed shape — JSON logs and EMF metrics to stdout.
+    pub local: bool,
     /// Enable demand-driven aggregation against the S3 `bucket`/`prefix` source.
     pub agg: bool,
     /// When set, enable demand-driven aggregation reading raw segments from
@@ -63,6 +67,7 @@ pub(crate) async fn serve(
         prefix,
         local_dir,
         dev,
+        local,
         agg,
         agg_source_dir,
         agg_output_dir,
@@ -72,12 +77,26 @@ pub(crate) async fn serve(
         enable_upload,
     }: ServeConfig,
 ) -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "dial9_viewer=info".parse().unwrap()),
-        )
-        .init();
+    // Logs: JSON by default (so they render cleanly in CloudWatch), human
+    // format under `--local`. Metrics follow the same split (EMF vs. local).
+    let env_filter = || {
+        tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| "dial9_viewer=info".parse().unwrap())
+    };
+    if local {
+        tracing_subscriber::fmt()
+            .with_env_filter(env_filter())
+            .init();
+    } else {
+        tracing_subscriber::fmt()
+            .json()
+            .with_env_filter(env_filter())
+            .init();
+    }
+
+    // Attach the process-global request-metrics sink for the life of the
+    // server. Held until `serve` returns; dropping flushes and detaches it.
+    let _metrics_handle = server::metrics::attach_request_metrics(local);
 
     // Build the demand-driven aggregation context if requested. Two sources:
     //   - `agg_source_dir` (local): source + output are LocalBackends.
@@ -231,6 +250,15 @@ pub(crate) async fn serve(
         .with_agg_output_prefix(agg_output_prefix_for_state)
         .with_agg_output_bucket(agg_output_bucket, agg_output_backend)
         .with_agg_segment_secs(agg_segment_secs);
+    // For an S3 source, also offer the assume-role path: a request may name a
+    // role ARN and the viewer assumes it with its own (ambient) identity via
+    // STS. Same gate as BYOC — both require an S3 source; this additionally
+    // relies on the server having an ambient identity allowed to assume the
+    // target role. A local-dir source has no S3 and gets neither.
+    if source_is_s3 {
+        let assumer = server::credentials::StsRoleAssumer::from_env().await;
+        app_state = app_state.with_role_assumer(std::sync::Arc::new(assumer));
+    }
     if let Some(d) = dev_ui_dir {
         app_state = app_state.with_dev_ui_dir(d);
     }

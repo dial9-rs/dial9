@@ -24,7 +24,7 @@
 // Maximum total bytes we allow opening in the trace viewer at once. Opening a
 // very wide time range would download hundreds of MB and overwhelm the viewer,
 // so we cap it and nudge the user toward narrow (1–2 minute) selections.
-const MAX_OPEN_BYTES = 100 * 1024 * 1024;
+const MAX_OPEN_BYTES = 200 * 1024 * 1024;
 
 // Minimum duration (seconds) attributed to a segment whose end time is unknown
 // or not strictly after its start, so a zero-width segment still renders as a

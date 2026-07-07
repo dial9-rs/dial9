@@ -1282,6 +1282,282 @@ async fn upload_supports_cors() {
     check!(posted.headers().contains_key("access-control-allow-origin"));
 }
 
+// --- assume-role path tests ---
+
+const H_ROLE_ARN: &str = "x-dial9-aws-role-arn";
+
+use dial9_viewer::server::credentials::{AssumeRoleError, RoleArn, RoleAssumer, TempCredentials};
+use std::sync::Mutex;
+
+/// Fake [`RoleAssumer`] that mints the s3s fake's static "test"/"test"
+/// credentials (so the resulting ephemeral S3 client talks to the same in-process
+/// fake the BYOC tests use) WITHOUT a real STS call. Records the ARN it was asked
+/// to assume so a test can assert the header reached the assumer.
+struct FakeRoleAssumer {
+    assumed: Arc<Mutex<Vec<String>>>,
+}
+
+impl FakeRoleAssumer {
+    fn new() -> (Self, Arc<Mutex<Vec<String>>>) {
+        let assumed = Arc::new(Mutex::new(Vec::new()));
+        (
+            Self {
+                assumed: Arc::clone(&assumed),
+            },
+            assumed,
+        )
+    }
+}
+
+impl RoleAssumer for FakeRoleAssumer {
+    fn assume_role<'a>(
+        &'a self,
+        role_arn: &'a RoleArn,
+        region: Option<&'a str>,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<TempCredentials, AssumeRoleError>> + Send + 'a>,
+    > {
+        self.assumed
+            .lock()
+            .unwrap()
+            .push(role_arn.as_str().to_string());
+        let region = region.map(str::to_string);
+        Box::pin(async move {
+            // Same static creds the s3s fake's SimpleAuth accepts.
+            Ok(TempCredentials::new(
+                "test",
+                "test",
+                Some("token".into()),
+                region,
+            ))
+        })
+    }
+}
+
+/// A [`RoleAssumer`] that always fails — proves an STS failure maps to 401.
+struct FailingRoleAssumer;
+
+impl RoleAssumer for FailingRoleAssumer {
+    fn assume_role<'a>(
+        &'a self,
+        _role_arn: &'a RoleArn,
+        _region: Option<&'a str>,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<TempCredentials, AssumeRoleError>> + Send + 'a>,
+    > {
+        Box::pin(async { Err(AssumeRoleError("access denied (fake)".into())) })
+    }
+}
+
+/// BYO server with an assumer wired: the default backend errors, so a successful
+/// data response proves the assumed-role ephemeral backend served it.
+async fn setup_assume_role_test(
+    bucket: &str,
+) -> (String, tempfile::TempDir, Arc<Mutex<Vec<String>>>) {
+    let s3_root = tempfile::tempdir().unwrap();
+    std::fs::create_dir(s3_root.path().join(bucket)).unwrap();
+    let (assumer, assumed) = FakeRoleAssumer::new();
+
+    let state = AppState::new(Arc::new(ErroringBackend), Some(bucket.to_string()), None)
+        .with_byo_creds(true)
+        .with_ephemeral_s3(fake_ephemeral_config(s3_root.path()))
+        .with_role_assumer(Arc::new(assumer));
+    let base = start_server(state).await;
+    (base, s3_root, assumed)
+}
+
+#[tokio::test]
+async fn assume_role_lists_bucket_via_assumed_creds() {
+    // A role-arn request: the viewer assumes the role (fake), then lists buckets
+    // through the resulting ephemeral backend (the s3s fake). The erroring
+    // default backend would 500, so a 200 proves the assumed path served it.
+    let (base, _dir, assumed) = setup_assume_role_test("byo-bucket").await;
+    let resp = reqwest::Client::new()
+        .get(format!("{base}/api/buckets"))
+        .header(H_ROLE_ARN, "arn:aws:iam::123456789012:role/dial9-reader")
+        .header(H_REGION, "us-east-1")
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() == 200);
+    let names: Vec<String> = resp.json().await.unwrap();
+    check!(names.contains(&"byo-bucket".to_string()));
+    // The exact ARN from the header reached the assumer.
+    let assumed = assumed.lock().unwrap();
+    check!(assumed.as_slice() == ["arn:aws:iam::123456789012:role/dial9-reader"]);
+}
+
+#[tokio::test]
+async fn assume_role_via_query_params_is_linkable() {
+    // The whole point of the query-param path: a plain GET URL (no headers) with
+    // ?aws_role_arn=…&aws_region=… reads through the assumed role. reqwest's
+    // .query() percent-encodes the ARN's colons/slashes for us.
+    let (base, _dir, assumed) = setup_assume_role_test("byo-bucket").await;
+    let resp = reqwest::Client::new()
+        .get(format!("{base}/api/buckets"))
+        .query(&[
+            (
+                "aws_role_arn",
+                "arn:aws:iam::123456789012:role/dial9-reader",
+            ),
+            ("aws_region", "us-east-1"),
+        ])
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() == 200);
+    let names: Vec<String> = resp.json().await.unwrap();
+    check!(names.contains(&"byo-bucket".to_string()));
+    let assumed = assumed.lock().unwrap();
+    check!(assumed.as_slice() == ["arn:aws:iam::123456789012:role/dial9-reader"]);
+}
+
+#[tokio::test]
+async fn invalid_role_arn_in_query_is_400() {
+    let (base, _dir, _assumed) = setup_assume_role_test("byo-bucket").await;
+    let resp = reqwest::Client::new()
+        .get(format!("{base}/api/buckets"))
+        .query(&[("aws_role_arn", "not-an-arn")])
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() == 400);
+}
+
+#[tokio::test]
+async fn assume_role_without_assumer_is_rejected() {
+    // BYO enabled but NO assumer wired → a role-arn request is a 400 (feature
+    // off here), not a silent fallback to the ambient/default backend.
+    let (_s3, base, _dir) = setup_byo_test("byo-bucket").await;
+    let resp = reqwest::Client::new()
+        .get(format!("{base}/api/buckets"))
+        .header(H_ROLE_ARN, "arn:aws:iam::123456789012:role/dial9-reader")
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() == 400);
+}
+
+#[tokio::test]
+async fn assume_role_failure_maps_to_401() {
+    // STS failure → 401, and the body never echoes the role/account/SDK text.
+    let s3_root = tempfile::tempdir().unwrap();
+    std::fs::create_dir(s3_root.path().join("byo-bucket")).unwrap();
+    let state = AppState::new(Arc::new(ErroringBackend), Some("byo-bucket".into()), None)
+        .with_byo_creds(true)
+        .with_ephemeral_s3(fake_ephemeral_config(s3_root.path()))
+        .with_role_assumer(Arc::new(FailingRoleAssumer));
+    let base = start_server(state).await;
+
+    let resp = reqwest::Client::new()
+        .get(format!("{base}/api/buckets"))
+        .header(H_ROLE_ARN, "arn:aws:iam::123456789012:role/dial9-reader")
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() == 401);
+    let body = resp.text().await.unwrap();
+    check!(!body.contains("123456789012"));
+    check!(!body.contains("access denied (fake)"));
+}
+
+#[tokio::test]
+async fn byoc_and_role_arn_together_is_400() {
+    // Supplying both transports is the ambiguous combination → 400.
+    let (base, _dir, _assumed) = setup_assume_role_test("byo-bucket").await;
+    let resp = reqwest::Client::new()
+        .get(format!("{base}/api/buckets"))
+        .header(H_AKID, "test")
+        .header(H_SECRET, "test")
+        .header(H_ROLE_ARN, "arn:aws:iam::123456789012:role/dial9-reader")
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() == 400);
+}
+
+#[tokio::test]
+async fn invalid_role_arn_is_400() {
+    let (base, _dir, _assumed) = setup_assume_role_test("byo-bucket").await;
+    let resp = reqwest::Client::new()
+        .get(format!("{base}/api/buckets"))
+        .header(H_ROLE_ARN, "not-an-arn")
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() == 400);
+}
+
+#[tokio::test]
+async fn config_reports_assume_role_support() {
+    // With an assumer wired, /api/config advertises supports_assume_role: true.
+    let (base, _dir, _assumed) = setup_assume_role_test("byo-bucket").await;
+    let resp: serde_json::Value = reqwest::Client::new()
+        .get(format!("{base}/api/config"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    check!(resp["supports_assume_role"] == true);
+
+    // Without one (plain BYO), it is false.
+    let (_s3, base2, _dir2) = setup_byo_test("byo-bucket").await;
+    let resp2: serde_json::Value = reqwest::Client::new()
+        .get(format!("{base2}/api/config"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    check!(resp2["supports_assume_role"] == false);
+}
+
+#[tokio::test]
+async fn credentials_check_succeeds_via_assumed_role() {
+    // /api/credentials/check has its own assume path; exercise it. The fake
+    // assumer mints the s3s creds, HeadBucket against the fake succeeds → ok.
+    let (base, _dir, assumed) = setup_assume_role_test("byo-bucket").await;
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/api/credentials/check?bucket=byo-bucket"))
+        .header(H_ROLE_ARN, "arn:aws:iam::123456789012:role/dial9-reader")
+        .header(H_REGION, "us-east-1")
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() == 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    check!(body["ok"] == true);
+    // The check actually went through the assume path, not BYOC.
+    check!(assumed.lock().unwrap().len() == 1);
+}
+
+#[tokio::test]
+async fn credentials_check_assume_role_failure_maps_to_401() {
+    // check shares AppState::assume, so an STS failure here is a 401 with no
+    // account/SDK leak — same policy as the data path.
+    let s3_root = tempfile::tempdir().unwrap();
+    std::fs::create_dir(s3_root.path().join("byo-bucket")).unwrap();
+    let state = AppState::new(Arc::new(ErroringBackend), Some("byo-bucket".into()), None)
+        .with_byo_creds(true)
+        .with_ephemeral_s3(fake_ephemeral_config(s3_root.path()))
+        .with_role_assumer(Arc::new(FailingRoleAssumer));
+    let base = start_server(state).await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/api/credentials/check?bucket=byo-bucket"))
+        .header(H_ROLE_ARN, "arn:aws:iam::123456789012:role/dial9-reader")
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() == 401);
+    let body = resp.text().await.unwrap();
+    check!(!body.contains("123456789012"));
+    check!(!body.contains("access denied (fake)"));
+}
+
 #[cfg(test)]
 mod skills_unpack_tests {
     use std::path::Path;

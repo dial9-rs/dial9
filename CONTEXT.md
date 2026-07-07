@@ -47,18 +47,22 @@ at a fresh empty tree; files repopulate lazily on demand (no backfill
 job). The old tree is abandoned and GC'd out-of-band.
 
 **Refinement loop**:
-The query control flow, realized as **stateless per-poll folding**: each
-request folds a bounded budget of not-yet-folded [[source-file]]s (in
-[[order-key]] order) into the [[samples-table]], then aggregates over the
-folded set in scope and returns the tree plus a [[coverage]] block. The
-budget is the [[baseline-floor]] (default 4) when nothing is folded yet,
-and a larger refine-batch (12) on later polls. The client re-polls; coverage
-climbs each poll until the [[sampling-cap]], then freezes. No background
-tasks and no coordination — folding happens only during a poll (so it
-stops when polling stops), and re-folding is safe by idempotency.
+The query control flow, realized as a **single held-open SSE stream** per
+request. The server *resolves* the scope once (list → [[order-key]] sort →
+take the first [[sampling-cap]] files → list the folded set), emits the
+already-folded snapshot immediately, then folds the not-yet-folded
+[[source-file]]s (in order) concurrently and pushes a fresh tree +
+[[coverage]] block as each file lands, closing the stream at the cap. The
+endpoint merges each folded file into an in-memory accumulator incrementally
+(one merge per file), rather than re-scanning the whole folded set per event.
+No background tasks and no coordination — folding runs only while the request
+is open (the fold `JoinSet` is dropped, cancelling in-flight folds, when the
+client disconnects), and re-folding is safe by idempotency. Coverage climbs
+monotonically until the server closes the stream at the cap.
 (Deferred optimization: memoize each file's immutable `{stack_id→count}`
-histogram so a poll sums per-file maps instead of re-scanning all rows.)
-_Avoid_: streaming, job handle, background daemon (deferred alternatives).
+histogram *across requests* so a reopened stream sums cached per-file maps.)
+_Avoid_: client re-polling, `refine=` request flag, job handle, background
+daemon (all superseded by the stream).
 
 **Coverage**:
 How much of a query's matched scope has been folded so far, reported on
@@ -87,12 +91,12 @@ scope-pruned LIST of the partitioned `samples/` tree). Coverage is their
 intersection.
 
 **Baseline floor**:
-The number of [[source-file]]s (in [[order-key]] order) a query folds on
-its first *refining* poll, before returning a tree. Default **4**,
-configurable. Small because each file is ~37–50 MB; the [[coverage]]
-label, not a large floor, is what keeps users from over-trusting an early
-tree. The [[refinement-loop]] fills in the rest. Moot if a preload warmer
-is enabled.
+The minimum number of [[source-file]]s (in [[order-key]] order) a query
+folds — the floor on the [[sampling-cap]], so even a tiny scope folds a
+non-trivial sample. Default **4**, configurable. Small because each file is
+~37–50 MB; the [[coverage]] label, not a large floor, is what keeps users
+from over-trusting an early tree. The [[refinement-loop]] streams the rest.
+Moot if a preload warmer is enabled.
 _Avoid_: baseline sample count (it's files, not samples).
 
 **Sampling cap**:
@@ -101,10 +105,11 @@ The point at which the [[refinement-loop]] stops folding a scope's tail:
 [[baseline-floor]]. Defaults **5%** and **100 files**, both
 backend-configurable. The percentage keeps small scopes sensible; the
 absolute ceiling stops a fleet-day scope from chasing 5% of tens of
-thousands of files (which would re-create the batch job). Past the cap,
-polls return the capped tree with [[coverage]] frozen. A user-facing
-"fetch more" raises the ceiling for that scope on demand. Background
-folding also stops when polling stops (refine-while-watched).
+thousands of files (which would re-create the batch job). The
+[[refinement-loop]] closes the stream once it reaches the cap. A user-facing
+"fetch more" reopens the stream with a raised ceiling for that scope on
+demand. Folding also stops early if the client disconnects
+(refine-while-watched).
 _Avoid_: completion target (we deliberately never reach 100%).
 
 **Scope**:

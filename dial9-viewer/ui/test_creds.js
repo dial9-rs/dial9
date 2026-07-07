@@ -26,6 +26,9 @@ const H_AKID = "x-dial9-aws-access-key-id";
 const H_SECRET = "x-dial9-aws-secret-access-key";
 const H_TOKEN = "x-dial9-aws-session-token";
 const H_REGION = "x-dial9-aws-region";
+const H_ROLE_ARN = "x-dial9-aws-role-arn";
+
+const VALID_ARN = "arn:aws:iam::123456789012:role/dial9-reader";
 
 async function main() {
 
@@ -94,6 +97,132 @@ await testAsync("set() rejects when a required field is missing", async () => {
 await testAsync("clear() removes stored credentials", async () => {
   freshStore();
   await Dial9Creds.set({ accessKeyId: "AKIA", secretAccessKey: "secret" });
+  assert.strictEqual(Dial9Creds.has(), true);
+  Dial9Creds.clear();
+  assert.strictEqual(Dial9Creds.has(), false);
+  assert.deepStrictEqual(Dial9Creds.headers(), {});
+});
+
+// ── assume-role transport (setRoleArn / role-arn header) ──
+
+test("setRoleArn() stores the ARN and emits the role-arn header", () => {
+  freshStore();
+  Dial9Creds.setRoleArn(VALID_ARN);
+  assert.strictEqual(Dial9Creds.has(), true);
+  assert.deepStrictEqual(Dial9Creds.headers(), { [H_ROLE_ARN]: VALID_ARN });
+});
+
+test("setRoleArn() carries an optional region alongside the ARN", () => {
+  freshStore();
+  Dial9Creds.setRoleArn(VALID_ARN, { region: "us-west-2" });
+  assert.deepStrictEqual(Dial9Creds.headers(), {
+    [H_ROLE_ARN]: VALID_ARN,
+    [H_REGION]: "us-west-2",
+  });
+});
+
+test("setRoleArn() rejects a malformed ARN", () => {
+  freshStore();
+  assert.throws(() => Dial9Creds.setRoleArn("not-an-arn"), /invalid role ARN/);
+  // A rejected ARN must not leave anything stored.
+  assert.strictEqual(Dial9Creds.has(), false);
+});
+
+test("get(): a bag carrying both transports resolves to a single static kind", () => {
+  // The server rejects a request carrying both transports
+  // (ConflictingCredentials), so the store must resolve to exactly one. classify()
+  // is the single place that invariant lives: a full key set is the more specific
+  // intent, so it wins and the role ARN is dropped. Seed a store holding both
+  // directly (the writers never produce this) to prove classify().
+  const s = fakeStorage();
+  Dial9Creds._setStorage(s);
+  s.setItem(
+    "dial9.aws-credentials",
+    JSON.stringify({ accessKeyId: "AK", secretAccessKey: "SK", roleArn: VALID_ARN })
+  );
+  const c = Dial9Creds.get();
+  assert.strictEqual(c.kind, "static");
+  assert.ok(!("roleArn" in c), "role ARN dropped when static keys present");
+  const h = Dial9Creds.headers();
+  assert.strictEqual(h[H_AKID], "AK");
+  assert.strictEqual(h[H_SECRET], "SK");
+  assert.ok(!(H_ROLE_ARN in h), "role-arn header omitted when static keys present");
+});
+
+test("get(): a legacy flat bag (no kind) is classified by the fields present", () => {
+  // sessionStorage is tab-scoped, but a tab open across the upgrade to the
+  // discriminated shape can hold a pre-kind bag. Static-only and role-only legacy
+  // bags must still classify and emit the right headers.
+  const s = fakeStorage();
+  Dial9Creds._setStorage(s);
+  s.setItem(
+    "dial9.aws-credentials",
+    JSON.stringify({ accessKeyId: "AK", secretAccessKey: "SK", region: "us-east-1" })
+  );
+  assert.strictEqual(Dial9Creds.get().kind, "static");
+  assert.deepStrictEqual(Dial9Creds.headers(), {
+    [H_AKID]: "AK",
+    [H_SECRET]: "SK",
+    [H_REGION]: "us-east-1",
+  });
+
+  s.setItem("dial9.aws-credentials", JSON.stringify({ roleArn: VALID_ARN }));
+  assert.strictEqual(Dial9Creds.get().kind, "role");
+  assert.deepStrictEqual(Dial9Creds.headers(), { [H_ROLE_ARN]: VALID_ARN });
+});
+
+// ── setRegion(): shape-agnostic region patch (both transports) ──
+
+test("setRegion() pins the region on a static credential, preserving the keys", () => {
+  freshStore();
+  Dial9Creds.set({ accessKeyId: "AK", secretAccessKey: "SK", sessionToken: "TK" });
+  Dial9Creds.setRegion("us-west-2");
+  assert.deepStrictEqual(Dial9Creds.headers(), {
+    [H_AKID]: "AK",
+    [H_SECRET]: "SK",
+    [H_TOKEN]: "TK",
+    [H_REGION]: "us-west-2",
+  });
+});
+
+test("setRegion() pins the region on an assumed-role credential (the role path)", () => {
+  // Region auto-detection persists the resolved region via setRegion. With a role
+  // credential active this must keep the role transport — the old static-only
+  // set({...stored, region}) would have thrown here.
+  freshStore();
+  Dial9Creds.setRoleArn(VALID_ARN);
+  Dial9Creds.setRegion("eu-central-1");
+  assert.deepStrictEqual(Dial9Creds.headers(), {
+    [H_ROLE_ARN]: VALID_ARN,
+    [H_REGION]: "eu-central-1",
+  });
+  // Still a role credential — no static keys crept in.
+  assert.strictEqual(Dial9Creds.get().kind, "role");
+});
+
+test("setRegion() is a no-op when nothing is stored (ambient path)", () => {
+  freshStore();
+  assert.strictEqual(Dial9Creds.setRegion("us-east-1"), null);
+  assert.strictEqual(Dial9Creds.has(), false);
+  assert.deepStrictEqual(Dial9Creds.headers(), {});
+});
+
+test("isValidRoleArn() mirrors the server's shape check", () => {
+  assert.ok(Dial9Creds.isValidRoleArn(VALID_ARN));
+  assert.ok(Dial9Creds.isValidRoleArn("arn:aws:iam::123456789012:role/path/to/reader"));
+  assert.ok(Dial9Creds.isValidRoleArn("arn:aws-us-gov:iam::123456789012:role/r"));
+  // Rejections: wrong service, a region field, short account, wildcard, non-role.
+  assert.ok(!Dial9Creds.isValidRoleArn("arn:aws:sts::123456789012:role/r"));
+  assert.ok(!Dial9Creds.isValidRoleArn("arn:aws:iam:us-east-1:123456789012:role/r"));
+  assert.ok(!Dial9Creds.isValidRoleArn("arn:aws:iam::12345:role/r"));
+  assert.ok(!Dial9Creds.isValidRoleArn("arn:aws:iam::123456789012:role/*"));
+  assert.ok(!Dial9Creds.isValidRoleArn("arn:aws:iam::123456789012:user/u"));
+  assert.ok(!Dial9Creds.isValidRoleArn(""));
+});
+
+test("clear() removes a stored role ARN too", () => {
+  freshStore();
+  Dial9Creds.setRoleArn(VALID_ARN);
   assert.strictEqual(Dial9Creds.has(), true);
   Dial9Creds.clear();
   assert.strictEqual(Dial9Creds.has(), false);

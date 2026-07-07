@@ -30,6 +30,44 @@ test("parse: decodes percent-encoded values", () => {
   assert.strictEqual(s.prefix, "a/b c");
 });
 
+test("parse: reads aws_region into region", () => {
+  const s = UrlState.parse("?bucket=b&aws_region=us-west-2");
+  assert.strictEqual(s.region, "us-west-2");
+  // An absent region stays unset (falls back to detection / default).
+  assert.strictEqual(UrlState.parse("?bucket=b").region, undefined);
+});
+
+test("parse: reads aws_role_arn into roleArn", () => {
+  const arn = "arn:aws:iam::123456789012:role/dial9-reader";
+  const s = UrlState.parse("?bucket=b&aws_role_arn=" + encodeURIComponent(arn));
+  assert.strictEqual(s.roleArn, arn);
+  // An absent role ARN stays unset (ambient / static-BYOC path).
+  assert.strictEqual(UrlState.parse("?bucket=b").roleArn, undefined);
+});
+
+test("serialize: writes roleArn as aws_role_arn", () => {
+  const arn = "arn:aws:iam::123456789012:role/dial9-reader";
+  const qs = UrlState.serialize({ bucket: "b", region: "us-west-2", roleArn: arn });
+  assert.strictEqual(
+    qs,
+    "bucket=b&aws_region=us-west-2&aws_role_arn=" + encodeURIComponent(arn)
+  );
+  // Empty roleArn is omitted (static-BYOC / ambient path carries none).
+  assert.strictEqual(UrlState.serialize({ bucket: "b", roleArn: "" }), "bucket=b");
+});
+
+test("round-trip: assume-role link carries aws_role_arn", () => {
+  const state = {
+    bucket: "b",
+    region: "us-east-1",
+    roleArn: "arn:aws:iam::123456789012:role/dial9-reader",
+    prefix: "dial9-traces",
+    last: 1,
+  };
+  const back = UrlState.parse("?" + UrlState.serialize(state));
+  assert.deepStrictEqual(back, state);
+});
+
 test("parse: tab only accepts known values", () => {
   assert.strictEqual(UrlState.parse("?tab=raw").tab, "raw");
   assert.strictEqual(UrlState.parse("?tab=browse").tab, "browse");
@@ -113,6 +151,15 @@ test("serialize: ignores non-positive 'last'", () => {
   assert.strictEqual(qs, "from=1000&to=2000");
 });
 
+test("serialize: writes region as aws_region", () => {
+  assert.strictEqual(
+    UrlState.serialize({ bucket: "b", region: "eu-central-1" }),
+    "bucket=b&aws_region=eu-central-1"
+  );
+  // Empty region is omitted (the ambient/default path needs no region).
+  assert.strictEqual(UrlState.serialize({ bucket: "b", region: "" }), "bucket=b");
+});
+
 test("serialize: stable key order", () => {
   const qs = UrlState.serialize({
     q: "x",
@@ -121,9 +168,13 @@ test("serialize: stable key order", () => {
     tz: "local",
     tab: "raw",
     prefix: "p",
+    region: "us-west-2",
     bucket: "b",
   });
-  assert.strictEqual(qs, "bucket=b&prefix=p&tab=raw&tz=local&from=1000&to=2000&q=x");
+  assert.strictEqual(
+    qs,
+    "bucket=b&aws_region=us-west-2&prefix=p&tab=raw&tz=local&from=1000&to=2000&q=x"
+  );
 });
 
 test("serialize: percent-encodes values", () => {
@@ -150,6 +201,12 @@ test("round-trip: precise window in raw tab, local tz", () => {
     to: 1700003600,
     q: "2026-04-09/1910",
   };
+  const back = UrlState.parse("?" + UrlState.serialize(state));
+  assert.deepStrictEqual(back, state);
+});
+
+test("round-trip: cross-region bucket carries aws_region", () => {
+  const state = { bucket: "b", region: "ap-southeast-2", prefix: "traces", last: 1 };
   const back = UrlState.parse("?" + UrlState.serialize(state));
   assert.deepStrictEqual(back, state);
 });
