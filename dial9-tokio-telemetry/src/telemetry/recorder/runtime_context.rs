@@ -427,17 +427,17 @@ pub(super) fn make_worker_unpark(ctx: &RuntimeContext, shared: &SharedState) -> 
     let cpu_time_nanos = crate::telemetry::events::thread_cpu_time_nanos();
     // Only read schedstat on unpark if the matching park sampled it, so the
     // delta below always pairs with a park-time reading. Reset the flag either
-    // way so a subsequent unsampled park can't reuse a stale pair.
+    // way so a subsequent unsampled park can't reuse a stale pair. Report `None`
+    // when unsampled so consumers can distinguish "not measured" from a genuine
+    // zero-wait unpark rather than diluting their averages with false zeros.
     let sampled = SCHED_SAMPLED_THIS_PARK.with(|c| c.replace(false));
     let sched_wait_delta_nanos = if sampled {
-        if let Ok(ss) = SchedStat::read_current() {
+        SchedStat::read_current().ok().map(|ss| {
             let prev = PARKED_SCHED_WAIT.with(|c| c.get());
             ss.wait_time_ns.saturating_sub(prev)
-        } else {
-            0
-        }
+        })
     } else {
-        0
+        None
     };
     WorkerUnparkEvent {
         timestamp_ns: crate::telemetry::events::clock_monotonic_ns(),
