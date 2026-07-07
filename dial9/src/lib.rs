@@ -53,6 +53,16 @@ pub use dial9_perf_self_profile::{
     CpuProfiler, CpuProfilingConfig, CpuSampleSource, SchedEventConfig, SchedProfiler,
 };
 
+// One-call `.enable_*` source sugar on the recorder builder. Available whenever a
+// perf source is compiled in.
+#[cfg(any(
+    feature = "cpu-profiling",
+    feature = "memory-profiling",
+    feature = "process-resource",
+    feature = "linux-socket"
+))]
+pub use dial9_perf_self_profile::RecorderPerfExt;
+
 // Offline symbolization processor for the segment pipeline. Needs both the CPU
 // profiler (to produce stack frames) and the pipeline (to run the processor).
 #[cfg(all(feature = "cpu-profiling", feature = "pipeline"))]
@@ -77,3 +87,15 @@ pub use dial9_perf_self_profile::{SocketAcceptQueuesConfig, TcpAcceptQueueEvent}
 // Tracing-subscriber layer.
 #[cfg(feature = "tracing-layer")]
 pub use dial9_tokio_telemetry::tracing_layer;
+
+/// Brings the extension traits into scope so the `.enable_*` source sugar is
+/// callable: `use dial9::prelude::*;`.
+pub mod prelude {
+    #[cfg(any(
+        feature = "cpu-profiling",
+        feature = "memory-profiling",
+        feature = "process-resource",
+        feature = "linux-socket"
+    ))]
+    pub use crate::RecorderPerfExt;
+}

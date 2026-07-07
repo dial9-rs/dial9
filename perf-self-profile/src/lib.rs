@@ -65,6 +65,10 @@ pub mod unwinder;
 #[cfg(feature = "dial9-source")]
 pub mod cpu_source;
 
+/// Extension trait adding `.enable_*` source sugar to the core recorder builder.
+#[cfg(feature = "dial9-source")]
+pub mod recorder_ext;
+
 #[cfg(feature = "process-resource")]
 pub mod process_resource;
 
@@ -123,6 +127,9 @@ pub use sys::{resolve_symbol_with_maps, resolve_symbols_with_maps};
 pub use cpu_source::{
     CpuProfiler, CpuProfilingConfig, CpuSampleSource, SchedEventConfig, SchedProfiler,
 };
+
+#[cfg(feature = "dial9-source")]
+pub use recorder_ext::RecorderPerfExt;
 
 #[cfg(all(feature = "process-resource", unix))]
 pub use process_resource::ProcessResourceUsageSource;
