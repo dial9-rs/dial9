@@ -239,6 +239,17 @@ where
         // form) or the generic `Redirect`. Surface a clear message rather than
         // the opaque "unclassified S3 error" this used to fall through to.
         Some("PermanentRedirect" | "Redirect") => StorageError::WrongRegion,
+        // Missing bucket/key: the user pointed at something that does not exist
+        // (typo'd bucket name, deleted object). This is a client mistake, so map
+        // it to 404 rather than letting it fall through to the `Other` arm —
+        // which logged an "unclassified S3 error" and returned a 500 `fault`,
+        // polluting the fault metric with user input. The list/prefix paths hit
+        // this via the bucket-level `NoSuchBucket`; `GetObject`'s `NoSuchKey` is
+        // additionally handled at the call site (with the bucket/key in the
+        // message), so plain code matching here is the fallback.
+        Some("NoSuchBucket" | "NoSuchKey" | "NotFound") => {
+            StorageError::NotFound("the specified bucket or object does not exist".to_string())
+        }
         // Unmapped error: keep the full SDK detail in the server log (it can
         // embed the access key id, region, and endpoint — server-eyes only) and
         // hand the client a generic message rather than reflecting it back.
@@ -1131,6 +1142,32 @@ mod tests {
         );
         // The message points the user at the fix (set/detect the region).
         assert!(err.to_string().contains("region"), "message: {err}");
+    }
+
+    /// A `NoSuchBucket` (the error S3 returns when the bucket name does not
+    /// exist — typically a user typo) must classify to [`StorageError::NotFound`]
+    /// (→ HTTP 404), not the opaque `Other` that produced an "unclassified S3
+    /// error" log and a 500 `fault`. Guards against user input polluting the
+    /// server-fault metric.
+    #[tokio::test]
+    async fn no_such_bucket_classifies_as_not_found() {
+        // The XML S3 sends when the bucket does not exist (HTTP 404).
+        let body = r#"<?xml version="1.0" encoding="UTF-8"?>
+            <Error>
+              <Code>NoSuchBucket</Code>
+              <Message>The specified bucket does not exist</Message>
+              <BucketName>test-shanks</BucketName>
+            </Error>"#;
+        let backend = replay_error_backend(404, body);
+
+        let err = backend
+            .list_prefixes("test-shanks", "")
+            .await
+            .expect_err("a NoSuchBucket must surface as an error");
+        assert!(
+            matches!(err, StorageError::NotFound(_)),
+            "expected NotFound, got {err:?}"
+        );
     }
 
     #[tokio::test]

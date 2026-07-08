@@ -29,6 +29,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Breaking:** removed `MemoryProfilerGuard`. Memory profiling now drains for the session/guard lifetime (like CPU profiling) rather than being a permanent process-wide install ([#591](https://github.com/dial9-rs/dial9/pull/591))
 - **Breaking:** renamed `Dial9Allocator` to `SamplingAllocator`, the global-allocator wrapper now lives in `dial9-perf-self-profile` and works without dial9 ([#591](https://github.com/dial9-rs/dial9/pull/591))
 
+### Fixed
+
+- Viewer: browsing a nonexistent bucket now returns HTTP 404 instead of 500. The S3 `NoSuchBucket`/`NoSuchKey` error codes were falling through to the generic error arm, which logged an "unclassified S3 error" and reported a server `fault` — so a user typo in the bucket name polluted the viewer's fault metric. They now classify as `NotFound`.
+
 ## [0.3.13](https://github.com/dial9-rs/dial9/compare/dial9-tokio-telemetry-v0.3.12...dial9-tokio-telemetry-v0.3.13) - 2026-05-29
 
 ### Added
