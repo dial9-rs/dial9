@@ -1,4 +1,4 @@
-use super::shared_state::{PARKED_SCHED_WAIT, SharedState};
+use super::shared_state::{PARK_COUNTER, PARKED_SCHED_WAIT, SCHED_SAMPLED_THIS_PARK, SharedState};
 use crate::telemetry::buffer::{Encodable, ThreadLocalEncoder};
 use crate::telemetry::events::SchedStat;
 use crate::telemetry::format::{
@@ -268,15 +268,59 @@ pub(super) fn make_poll_end(ctx: &RuntimeContext, shared: &SharedState) -> PollE
     }
 }
 
+/// How often to read `SchedStat::read_current` in the worker park/unpark path.
+///
+/// Reading `/proc/self/task/<tid>/schedstat` on every park is measurable CPU
+/// overhead, and there is no need to catch every scheduler pause: periodic
+/// sampling still surfaces scheduling latency. We therefore only read schedstat
+/// on 1-in-N parks. `N` defaults to 10 and is overridable via the
+/// `DIAL9_SCHED_WAIT_SAMPLE_RATE` environment variable (values are clamped to at
+/// least 1; `1` restores read-on-every-park).
+fn sched_wait_sample_rate() -> u64 {
+    static RATE: OnceLock<u64> = OnceLock::new();
+    *RATE.get_or_init(|| {
+        std::env::var("DIAL9_SCHED_WAIT_SAMPLE_RATE")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .unwrap_or(10)
+            .max(1)
+    })
+}
+
+/// Advance a per-thread park counter and decide whether this park should read
+/// schedstat. Samples every `rate`th park (`rate` is clamped to at least 1, so
+/// `rate == 1` samples every park). Returns the incremented counter and the
+/// sampling decision. Pure so the 1-in-N logic can be unit-tested without the
+/// process-global rate or a live schedstat read.
+fn advance_park_counter(counter: u64, rate: u64) -> (u64, bool) {
+    let next = counter.wrapping_add(1);
+    (next, next.is_multiple_of(rate.max(1)))
+}
+
 pub(super) fn make_worker_park(ctx: &RuntimeContext, shared: &SharedState) -> WorkerParkEvent {
     let resolved = ctx.resolve_worker(shared);
     let worker_local_queue_depth = resolved
         .map(|(_, idx)| ctx.local_queue_depth(idx))
         .unwrap_or(0);
     let cpu_time_nanos = crate::telemetry::events::thread_cpu_time_nanos();
-    if let Ok(ss) = SchedStat::read_current() {
-        PARKED_SCHED_WAIT.with(|c| c.set(ss.wait_time_ns));
-    }
+    // Only read schedstat on 1-in-N parks. The counter and the "sampled this
+    // park" flag are thread-local, so the matching unpark on the same worker
+    // thread reads schedstat iff park did, keeping the wait-time delta a valid
+    // park->unpark pair.
+    let sample = PARK_COUNTER.with(|c| {
+        let (next, sample) = advance_park_counter(c.get(), sched_wait_sample_rate());
+        c.set(next);
+        sample
+    });
+    let sampled = sample
+        && match SchedStat::read_current() {
+            Ok(ss) => {
+                PARKED_SCHED_WAIT.with(|c| c.set(ss.wait_time_ns));
+                true
+            }
+            Err(_) => false,
+        };
+    SCHED_SAMPLED_THIS_PARK.with(|c| c.set(sampled));
     WorkerParkEvent {
         timestamp_ns: crate::telemetry::events::clock_monotonic_ns(),
         worker_id: resolved.map(|(id, _)| id).unwrap_or(WorkerId::UNKNOWN),
@@ -292,9 +336,18 @@ pub(super) fn make_worker_unpark(ctx: &RuntimeContext, shared: &SharedState) -> 
         .map(|(_, idx)| ctx.local_queue_depth(idx))
         .unwrap_or(0);
     let cpu_time_nanos = crate::telemetry::events::thread_cpu_time_nanos();
-    let sched_wait_delta_nanos = if let Ok(ss) = SchedStat::read_current() {
-        let prev = PARKED_SCHED_WAIT.with(|c| c.get());
-        ss.wait_time_ns.saturating_sub(prev)
+    // Only read schedstat on unpark if the matching park sampled it, so the
+    // delta below always pairs with a park-time reading. Reset the flag either
+    // way so a subsequent unsampled park can't reuse a stale pair. Unsampled
+    // unparks report a wait delta of 0.
+    let sampled = SCHED_SAMPLED_THIS_PARK.with(|c| c.replace(false));
+    let sched_wait_delta_nanos = if sampled {
+        if let Ok(ss) = SchedStat::read_current() {
+            let prev = PARKED_SCHED_WAIT.with(|c| c.get());
+            ss.wait_time_ns.saturating_sub(prev)
+        } else {
+            0
+        }
     } else {
         0
     };
@@ -305,5 +358,43 @@ pub(super) fn make_worker_unpark(ctx: &RuntimeContext, shared: &SharedState) -> 
         cpu_time_ns: cpu_time_nanos,
         sched_wait_ns: sched_wait_delta_nanos,
         tid: crate::telemetry::events::current_tid(),
+    }
+}
+
+#[cfg(all(test, not(shuttle)))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn park_counter_samples_one_in_n() {
+        // rate == 1: every park samples.
+        let mut counter = 0u64;
+        for _ in 0..5 {
+            let (next, sample) = advance_park_counter(counter, 1);
+            counter = next;
+            assert!(sample);
+        }
+
+        // rate == 10 (the default): exactly one park in ten samples, and the
+        // sampled park is the 10th, not the 1st, so a burst of short parks is
+        // not over-counted.
+        counter = 0;
+        let mut sampled = 0;
+        let mut sampled_indices = Vec::new();
+        for i in 1..=30 {
+            let (next, sample) = advance_park_counter(counter, 10);
+            counter = next;
+            if sample {
+                sampled += 1;
+                sampled_indices.push(i);
+            }
+        }
+        assert_eq!(sampled, 3);
+        assert_eq!(sampled_indices, vec![10, 20, 30]);
+
+        // rate == 0 is clamped to 1 (defensive: the env parser already clamps,
+        // but the pure helper must not divide by zero).
+        let (_, sample) = advance_park_counter(0, 0);
+        assert!(sample);
     }
 }

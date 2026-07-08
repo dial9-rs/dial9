@@ -16,6 +16,15 @@ use super::RuntimeContext;
 crate::primitives::thread_local! {
     /// schedstat wait_time_ns captured at park time, used to compute delta on unpark.
     pub(super) static PARKED_SCHED_WAIT: Cell<u64> = const { Cell::new(0) };
+    /// Per-thread park counter used to sample `SchedStat::read_current`. See
+    /// [`super::runtime_context::sched_wait_sample_rate`]: schedstat is only read
+    /// on 1-in-N parks to bound the CPU cost of reading
+    /// `/proc/self/task/<tid>/schedstat`.
+    pub(super) static PARK_COUNTER: Cell<u64> = const { Cell::new(0) };
+    /// Whether the current park cycle successfully read schedstat at park time.
+    /// Unpark only computes a wait-time delta when this is `true`, guaranteeing
+    /// every reported `sched_wait_ns` comes from a matched park->unpark pair.
+    pub(super) static SCHED_SAMPLED_THIS_PARK: Cell<bool> = const { Cell::new(false) };
 }
 
 /// Runtime-agnostic core recording state.
