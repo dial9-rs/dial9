@@ -1,5 +1,3 @@
-use crate::telemetry::events::CpuSampleSource;
-
 use crate::telemetry::task_metadata::TaskId;
 use dial9_trace_format::types::{EventEncoder, FieldType};
 use dial9_trace_format::{InternedStackFrames, InternedString, TraceEvent, TraceField};
@@ -51,15 +49,6 @@ impl TraceField for TaskId {
     }
     fn encode<W: Write>(&self, enc: &mut EventEncoder<'_, W>) -> io::Result<()> {
         enc.write_u64(self.0)
-    }
-}
-
-impl TraceField for CpuSampleSource {
-    fn field_type() -> FieldType {
-        FieldType::U8
-    }
-    fn encode<W: Write>(&self, enc: &mut EventEncoder<'_, W>) -> io::Result<()> {
-        enc.write_u8(*self as u8)
     }
 }
 
@@ -227,23 +216,6 @@ pub(crate) struct TaskTerminateEvent {
     pub task_id: TaskId,
 }
 
-#[derive(TraceEvent)]
-#[traceevent(wire_slot)]
-pub(crate) struct CpuSampleEvent {
-    #[traceevent(timestamp)]
-    pub timestamp_ns: u64,
-    pub worker_id: WorkerId,
-    pub tid: u32,
-    pub source: CpuSampleSource,
-    pub thread_name: Option<InternedString>,
-    pub callchain: InternedStackFrames,
-    /// CPU the sample was taken on, if the backend could determine it.
-    ///
-    /// Widened to `u64` on the wire so the field encodes as `OptionalVarint`:
-    /// 1 byte when absent, typically 2 bytes (tag + small-varint) when present.
-    pub cpu: Option<u64>,
-}
-
 /// Wire-format event for a task dump: async backtrace captured at a yield point
 /// after the task stayed idle past the configured threshold.
 #[derive(TraceEvent)]
@@ -253,83 +225,6 @@ pub(crate) struct TaskDumpEvent {
     pub timestamp_ns: u64,
     pub task_id: TaskId,
     pub callchain: InternedStackFrames,
-}
-
-/// Wire-format event for a sampled memory allocation.
-///
-/// Emitted from the consolidator (flush thread) for allocations that tripped
-/// the geometric sampling counter. The sampling rate that produced this event
-/// lives in the segment metadata, not on each event.
-#[derive(Debug, TraceEvent)]
-#[traceevent(wire_slot)]
-#[cfg_attr(not(feature = "unstable-events"), non_exhaustive)]
-pub struct AllocEvent {
-    /// Wall-clock timestamp in nanoseconds (monotonic).
-    #[traceevent(timestamp)]
-    pub timestamp_ns: u64,
-    /// OS thread ID of the allocating thread. Same source as `WorkerParkEvent.tid`
-    /// and `CpuSampleEvent.tid`. Use this to join against worker park/unpark
-    /// history to recover worker_id when the allocation happened on a tokio
-    /// worker thread.
-    pub tid: u32,
-    /// Allocation size in bytes. The actual size requested by the allocating
-    /// code; the underlying allocator may have rounded up, but that's not
-    /// recorded here.
-    pub size: u64,
-    /// Returned pointer. Always the actual address returned by the allocator;
-    /// it is only matched against `FreeEvent.addr` when liveset tracking is
-    /// on. Consumers should not assume cross-allocation uniqueness when
-    /// liveset is off — addresses are reused freely once the slot is freed,
-    /// and without paired frees you cannot tell which "generation" of the
-    /// address a given event belongs to.
-    pub addr: u64,
-    /// Stack at the allocation site. Frame 0 is the most-recent caller.
-    pub callchain: InternedStackFrames,
-}
-
-/// Wire-format event for a deallocation paired with a previously-sampled
-/// `AllocEvent`. Only emitted when liveset tracking is on.
-///
-/// `size` and `alloc_timestamp_ns` are denormalized from the matching
-/// `AllocEvent` so the free stays analytically useful when the corresponding
-/// `AllocEvent` has been evicted by trace rotation. See design §3
-/// "Why denormalize size and alloc_timestamp_ns?" for the rationale.
-#[derive(Debug, TraceEvent)]
-#[traceevent(wire_slot)]
-#[cfg_attr(not(feature = "unstable-events"), non_exhaustive)]
-pub struct FreeEvent {
-    /// Wall-clock timestamp in nanoseconds (monotonic) of the free.
-    #[traceevent(timestamp)]
-    pub timestamp_ns: u64,
-    /// OS thread ID of the freeing thread.
-    pub tid: u32,
-    /// Pointer that was freed. Matches a previously-seen `AllocEvent.addr`.
-    pub addr: u64,
-    /// Size of the allocation being freed. Denormalized from the matching
-    /// `AllocEvent` for rotation robustness.
-    pub size: u64,
-    /// Monotonic-ns timestamp of the original `AllocEvent`. Allows leak
-    /// analysis to bucket frees by generation without needing the
-    /// `AllocEvent` in the same (unrotated) trace.
-    pub alloc_timestamp_ns: u64,
-}
-
-/// Wire-format event emitted when the memory profiler's ring buffers
-/// overflowed during a flush period. Each field is the delta (new drops
-/// since the previous flush), not a cumulative total. Only emitted when
-/// at least one counter is non-zero.
-///
-/// Dropped frees cause the liveset to retain addresses that were actually
-/// freed, producing false positives in leak analysis.
-#[derive(Debug, TraceEvent)]
-#[traceevent(wire_slot)]
-pub(crate) struct MemoryProfileOverflowEvent {
-    #[traceevent(timestamp)]
-    pub timestamp_ns: u64,
-    /// Alloc samples dropped since last flush due to alloc queue overflow.
-    pub dropped_allocs: u64,
-    /// Free samples dropped since last flush due to free queue overflow.
-    pub dropped_frees: u64,
 }
 
 /// Wire-format event for a wake notification.
@@ -347,27 +242,8 @@ pub struct WakeEventEvent {
     pub target_worker: u8,
 }
 
-#[derive(TraceEvent)]
-#[traceevent(wire_slot)]
-pub(crate) struct SegmentMetadataEvent {
-    #[traceevent(timestamp)]
-    pub timestamp_ns: u64,
-    pub entries: Vec<(String, String)>,
-}
-
-/// Clock-correlation anchor. `timestamp_ns` (monotonic) and `realtime_ns`
-/// (nanoseconds since Unix epoch) are captured at the same instant via
-/// [`clock_pair`], so offline consumers can recover wall clock from the
-/// monotonic event stream.
-///
-/// [`clock_pair`]: crate::telemetry::events::clock_pair
-#[derive(TraceEvent)]
-#[traceevent(wire_slot)]
-pub(crate) struct ClockSyncEvent {
-    #[traceevent(timestamp)]
-    pub timestamp_ns: u64,
-    pub realtime_ns: u64,
-}
+#[cfg(test)]
+pub(crate) use dial9_core::format::{ClockSyncEvent, SegmentMetadataEvent};
 
 // ── dial9-trace-format: decode ──────────────────────────────────────────────
 // Decode via `Dial9Event` in `analysis_events.rs` using `Decoder::for_each_event`.
@@ -406,9 +282,6 @@ pub(crate) fn decode_events(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::telemetry::analysis_events::Dial9Event;
-    use dial9_trace_format::decoder::Decoder;
-    use dial9_trace_format::encoder::Encoder;
 
     #[test]
     fn process_resource_usage_unit_annotations() {
@@ -428,64 +301,5 @@ mod tests {
                 ("max_rss_bytes", "bytes"),
             ]
         );
-    }
-
-    #[test]
-    fn alloc_event_round_trip() {
-        let mut enc = Encoder::new_to(Vec::new()).unwrap();
-        let callchain = enc.intern_stack_frames(&[0x1000, 0x2000, 0x3000]).unwrap();
-        enc.write_infallible(&AllocEvent {
-            timestamp_ns: 123_456_789,
-            tid: 42,
-            size: 4096,
-            addr: 0xDEAD_BEEF_CAFE,
-            callchain,
-        });
-        let buf = enc.into_inner();
-
-        let mut dec = Decoder::new(&buf).expect("valid header");
-        let mut events: Vec<Dial9Event> = Vec::new();
-        dec.for_each_event(|raw| {
-            events.push(raw.deserialize().expect("deserialize"));
-        })
-        .expect("decode");
-        assert_eq!(events.len(), 1);
-        let Dial9Event::AllocEvent(ref e) = events[0] else {
-            panic!("expected AllocEvent, got {:?}", events[0]);
-        };
-        assert_eq!(e.timestamp_ns, 123_456_789);
-        assert_eq!(e.tid, 42);
-        assert_eq!(e.size, 4096);
-        assert_eq!(e.addr, 0xDEAD_BEEF_CAFE);
-        assert_eq!(e.callchain, &[0x1000, 0x2000, 0x3000]);
-    }
-
-    #[test]
-    fn free_event_round_trip() {
-        let mut enc = Encoder::new_to(Vec::new()).unwrap();
-        enc.write_infallible(&FreeEvent {
-            timestamp_ns: 999_000_000,
-            tid: 7,
-            addr: 0xCAFE_BABE,
-            size: 2048,
-            alloc_timestamp_ns: 100_000_000,
-        });
-        let buf = enc.into_inner();
-
-        let mut dec = Decoder::new(&buf).expect("valid header");
-        let mut events: Vec<Dial9Event> = Vec::new();
-        dec.for_each_event(|raw| {
-            events.push(raw.deserialize().expect("deserialize"));
-        })
-        .expect("decode");
-        assert_eq!(events.len(), 1);
-        let Dial9Event::FreeEvent(ref e) = events[0] else {
-            panic!("expected FreeEvent, got {:?}", events[0]);
-        };
-        assert_eq!(e.timestamp_ns, 999_000_000);
-        assert_eq!(e.tid, 7);
-        assert_eq!(e.addr, 0xCAFE_BABE);
-        assert_eq!(e.size, 2048);
-        assert_eq!(e.alloc_timestamp_ns, 100_000_000);
     }
 }

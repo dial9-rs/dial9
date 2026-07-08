@@ -46,7 +46,7 @@
 #![allow(deprecated)]
 
 use dial9_tokio_telemetry::telemetry::analysis_events::{CpuSampleSource, Dial9Event};
-use dial9_tokio_telemetry::telemetry::{DiskWriter, TracedRuntime, cpu_profile::SchedEventConfig};
+use dial9_tokio_telemetry::telemetry::{DiskWriter, SchedEventConfig, TracedRuntime};
 use dial9_trace_format::decoder::Decoder;
 use std::time::Duration;
 

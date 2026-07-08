@@ -36,6 +36,23 @@
 //!     println!("ip={:#x} callchain={} frames", sample.ip, sample.callchain.len());
 //! });
 //! ```
+//!
+//! ## Memory profiling
+//!
+//! With the `memory-profiling` feature, the `memory_profiling` module adds a
+//! sampled allocation profiler: set `Dial9Allocator` as the global allocator
+//! and register it with a dial9 session via `MemoryProfiler::install`.
+//! Sampled allocations land in the trace as `AllocEvent`/`FreeEvent`.
+//!
+//! ```ignore
+//! use dial9_perf_self_profile::memory_profiling::{Dial9Allocator, MemoryProfiler};
+//!
+//! #[global_allocator]
+//! static ALLOC: Dial9Allocator = Dial9Allocator::system();
+//!
+//! // `handle` is a dial9 session handle (dial9_core::handle::Dial9Handle).
+//! MemoryProfiler::with_defaults().install(handle)?;
+//! ```
 
 pub mod offline_symbolize;
 mod rate_limit;
@@ -44,6 +61,12 @@ mod symbolize;
 mod sys;
 pub mod tracepoint;
 pub mod unwinder;
+
+#[cfg(feature = "dial9-source")]
+pub mod cpu_source;
+
+#[cfg(feature = "memory-profiling")]
+pub mod memory_profiling;
 
 pub use offline_symbolize::SymbolTableEntry;
 pub use sampler::{EventSource, Sample, SamplerConfig, SamplingMode};
@@ -86,6 +109,17 @@ pub fn unregister_current_thread() {
 // blazesym-dependent APIs
 #[cfg(target_os = "linux")]
 pub use sys::{resolve_symbol_with_maps, resolve_symbols_with_maps};
+
+#[cfg(feature = "dial9-source")]
+pub use cpu_source::{
+    CpuProfiler, CpuProfilingConfig, CpuSampleSource, SchedEventConfig, SchedProfiler,
+};
+
+#[cfg(feature = "memory-profiling")]
+pub use memory_profiling::{
+    AllocEvent, DEFAULT_RING_CAPACITY, DEFAULT_SAMPLE_RATE_BYTES, Dial9Allocator, FreeEvent,
+    InstallError, MemoryProfiler, MemoryProfilerGuard, MemoryProfilingConfig, is_installed,
+};
 
 /// Internal module exposed only for benchmarks. Not part of the public API.
 #[cfg(all(target_os = "linux", feature = "__internal-bench"))]

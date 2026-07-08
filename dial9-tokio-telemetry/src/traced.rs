@@ -1,6 +1,7 @@
 //! Future wrappers for task instrumentation.
 
 use crate::rate_limit::rate_limited;
+use crate::telemetry::format::WakeEventEvent;
 use crate::telemetry::recorder::SharedState;
 use crate::telemetry::task_metadata::TaskId;
 use futures_util::task::{ArcWake, AtomicWaker, waker as arc_waker};
@@ -130,9 +131,13 @@ fn record_wake_event(data: &TracedWakerData) {
         } else {
             255
         };
-        let event = data
-            .shared
-            .create_wake_event(data.woken_task_id, waking_worker_u8);
+        let waker_task_id = tokio::task::try_id().map(TaskId::from).unwrap_or_default();
+        let event = WakeEventEvent {
+            timestamp_ns: crate::telemetry::events::clock_monotonic_ns(),
+            waker_task_id,
+            woken_task_id: data.woken_task_id,
+            target_worker: waking_worker_u8,
+        };
         buf.record_encodable_event(&event);
     });
 }
@@ -223,10 +228,10 @@ impl<F: Future> Future for WakeTraced<F> {
 mod tests {
     use super::*;
     use crate::telemetry::analysis_events::Dial9Event;
-    use crate::telemetry::buffer;
     use crate::telemetry::recorder::{TelemetryCore, TracedRuntime};
     use crate::telemetry::task_metadata::UNKNOWN_TASK_ID;
     use crate::telemetry::writer::{DiskWriter, InMemoryWriter};
+    use dial9_core::test_util;
     use futures_util::task::noop_waker;
     use std::pin::Pin;
     use std::sync::{Arc, Mutex};
@@ -239,9 +244,7 @@ mod tests {
             .writer(InMemoryWriter::new(16 * 1024 * 1024).unwrap())
             .build()
             .unwrap();
-        let handle = guard
-            .handle()
-            .traced_handle()
+        let handle = crate::telemetry::recorder::traced_handle(&guard.handle())
             .expect("enabled handle yields TracedHandle");
 
         let mut future = TracedFuture::new(std::future::pending::<()>(), Some(handle));
@@ -315,11 +318,9 @@ mod tests {
         // Wake events land in the thread-local buffer (capacity 1_024), so a
         // single event will not auto-flush.  Manually drain the buffer into the
         // collector so that the guard flush below picks it up.
-        let th = guard
-            .handle()
-            .traced_handle()
+        let th = crate::telemetry::recorder::traced_handle(&guard.handle())
             .expect("enabled handle yields TracedHandle");
-        buffer::drain_to_collector(&th.shared.collector);
+        test_util::drain_thread_local(&th.shared);
 
         // Dropping the guard stops the background flush thread, joins it, then
         // performs a final flush: collector → DiskWriter → trace file.

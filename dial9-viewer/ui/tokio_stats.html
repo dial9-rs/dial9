@@ -43,11 +43,17 @@
 </head>
 <body>
 <script src="creds.js"></script>
+<script src="format.js"></script>
+<script src="flamegraph_diff.js"></script>
+<script src="sse.js"></script>
+<script src="flamegraph_api.js"></script>
+<script src="tokio_stats_api.js"></script>
 <h1>⚡ Tokio Stats</h1>
 <div id="periods" class="periods"></div>
 <div class="toolbar">
   <button id="btn-add" class="secondary">+ Add period</button>
   <button id="btn-load">Load</button>
+  <button id="btn-more" class="secondary" style="display:none">Load more</button>
   <div class="threshold-row">
     <label>Threshold:</label>
     <input id="threshold-slider" type="range" min="-1" max="3" step="0.1" value="0">
@@ -65,9 +71,63 @@
   const params = new URLSearchParams(window.location.search);
   const COLORS = ["#58a6ff", "#d2a8ff", "#7ee787", "#ffa657"];
 
-  // Periods: each has {start, end, label, data (cached response)}
+  // Periods: each has {id, startNs, endNs, data (cached response), scope?, label?}.
+  // `scope` (a URLSearchParams) is set only in diff mode, where each side (A/B)
+  // is a fully independent aggregate scope — bucket/prefix/service/host may all
+  // differ between sides. In the normal (single-scope) mode `scope` is absent
+  // and every period shares the top-level `params` scope, varying only in time.
   let periods = [];
   let periodIdCounter = 0;
+
+  // Diff mode: two independent scopes encoded by the shared FlamegraphDiff
+  // scope-link codec (?diff=1&a=<b64>&b=<b64>), the SAME encoding flamegraph.html
+  // consumes. Seeded from the landing page's "Add to diff" tray.
+  const diffParsed = (typeof FlamegraphDiff !== "undefined") ? FlamegraphDiff.parseDiff(params) : null;
+  const diffMode = !!diffParsed;
+
+  // `max_files` ceiling override, raised by the "Load more" button. null lets
+  // the backend pick its own (default) sampling cap. Seeded from the URL so a
+  // deep-sampled view is shareable / survives reload.
+  let maxFiles = params.get("max_files") ? Number(params.get("max_files")) : null;
+  let loading = false;
+
+  // Per-period label ("A"/"B" in diff mode, "P1"/"P2"… otherwise), used by the
+  // summary cards and diff tables.
+  function periodLabel(i) {
+    if (diffMode) return i === 0 ? "A" : "B";
+    return "P" + (i + 1);
+  }
+
+  // One-line human summary of a period's scope (service · host(s) · bucket), for
+  // the diff-mode period rows. Time is shown by the editable pickers already.
+  function scopeSummary(scope) {
+    if (!scope) return "";
+    const bits = [];
+    const svc = scope.get("service");
+    if (svc) bits.push(svc);
+    const hosts = scope.getAll("host");
+    if (hosts.length === 1) bits.push(hosts[0]);
+    else if (hosts.length > 1) bits.push(hosts.length + " hosts");
+    const bkt = scope.get("bucket");
+    if (bkt) bits.push(bkt);
+    return bits.join(" · ");
+  }
+
+  // The scope actually sent for a period: in diff mode its own captured scope
+  // (bucket/prefix/service/host) with the editable time window applied; in
+  // normal mode the shared top-level params with the period's time window.
+  function effectiveScope(period) {
+    const out = new URLSearchParams();
+    const src = period.scope || params;
+    for (const k of ["bucket", "prefix", "service"]) {
+      const v = src.get(k);
+      if (v) out.set(k, v);
+    }
+    for (const h of src.getAll("host")) out.append("host", h);
+    if (period.startNs) out.set("start_ns", period.startNs);
+    if (period.endNs) out.set("end_ns", period.endNs);
+    return out;
+  }
 
   function isUtc() { return document.getElementById("utc-toggle").checked; }
 
@@ -89,9 +149,18 @@
     return ns + "ns";
   }
 
-  function addPeriod(startNs, endNs) {
+  function escapeHtml(s) {
+    return String(s)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+
+  function addPeriod(startNs, endNs, scope) {
     const id = periodIdCounter++;
-    periods.push({ id, startNs: startNs || null, endNs: endNs || null, data: null });
+    periods.push({ id, startNs: startNs || null, endNs: endNs || null, data: null, scope: scope || null });
     renderPeriods();
     syncUrl();
   }
@@ -105,14 +174,26 @@
 
   function renderPeriods() {
     const container = document.getElementById("periods");
-    container.innerHTML = periods.map((p, i) => `
+    // In diff mode the sides come from independent captured scopes, so a period
+    // row also shows that side's scope summary and its time window is
+    // independently editable. The +Add period / ✕ remove affordances are hidden
+    // (diff mode is exactly two fixed sides, A vs B).
+    container.innerHTML = periods.map((p, i) => {
+      const scopeBit = diffMode && p.scope
+        ? `<span style="color:#8b949e;font-size:0.8em;margin-left:4px">${escapeHtml(scopeSummary(p.scope))}</span>`
+        : "";
+      const removeBtn = (!diffMode && periods.length > 1)
+        ? `<button class="secondary" onclick="removePeriod(${p.id})" style="padding:2px 8px;font-size:0.8em">✕</button>`
+        : "";
+      return `
       <div class="period-row">
-        <span class="tag" style="background:${COLORS[i % COLORS.length]}33;color:${COLORS[i % COLORS.length]}">P${i + 1}</span>
+        <span class="tag" style="background:${COLORS[i % COLORS.length]}33;color:${COLORS[i % COLORS.length]}">${periodLabel(i)}</span>
+        ${scopeBit}
         <label>From: <input type="datetime-local" step="1" value="${nsToDatetime(p.startNs)}" onchange="updatePeriod(${p.id},'start',this.value)"></label>
         <label>To: <input type="datetime-local" step="1" value="${nsToDatetime(p.endNs)}" onchange="updatePeriod(${p.id},'end',this.value)"></label>
-        ${periods.length > 1 ? `<button class="secondary" onclick="removePeriod(${p.id})" style="padding:2px 8px;font-size:0.8em">✕</button>` : ""}
-      </div>
-    `).join("");
+        ${removeBtn}
+      </div>`;
+    }).join("");
   }
   window.updatePeriod = function(id, field, val) {
     const p = periods.find(x => x.id === id);
@@ -124,17 +205,42 @@
   };
   window.removePeriod = removePeriod;
 
-  // Initialize with URL params — supports multiple periods via p1_start_ns/p1_end_ns, p2_start_ns/p2_end_ns, ...
-  // Falls back to start_ns/end_ns for single-period backward compat.
-  let foundPeriods = false;
-  for (let i = 1; i <= 10; i++) {
-    const s = params.get(`p${i}_start_ns`);
-    const e = params.get(`p${i}_end_ns`);
-    if (s || e) { addPeriod(s, e); foundPeriods = true; }
+  // Initialize periods.
+  if (diffMode) {
+    // Diff mode: exactly two sides (A, B), each its own independent scope. The
+    // time window seeds from each scope's start_ns/end_ns but stays editable.
+    addPeriod(diffParsed.a.get("start_ns"), diffParsed.a.get("end_ns"), diffParsed.a);
+    addPeriod(diffParsed.b.get("start_ns"), diffParsed.b.get("end_ns"), diffParsed.b);
+  } else {
+    // Normal mode — supports multiple periods via p1_start_ns/p1_end_ns,
+    // p2_start_ns/p2_end_ns, …; falls back to start_ns/end_ns for single-period
+    // backward compat.
+    let foundPeriods = false;
+    for (let i = 1; i <= 10; i++) {
+      const s = params.get(`p${i}_start_ns`);
+      const e = params.get(`p${i}_end_ns`);
+      if (s || e) { addPeriod(s, e); foundPeriods = true; }
+    }
+    if (!foundPeriods) addPeriod(params.get("start_ns"), params.get("end_ns"));
   }
-  if (!foundPeriods) addPeriod(params.get("start_ns"), params.get("end_ns"));
 
   function syncUrl() {
+    // Diff mode's URL is the immutable a=/b= scope-link codec; only the editable
+    // time windows change, and they live inside those encoded scopes, so we
+    // re-encode both sides rather than rewriting to the p{N}_ form.
+    if (diffMode) {
+      const a = new URLSearchParams(diffParsed.a.toString());
+      const b = new URLSearchParams(diffParsed.b.toString());
+      const applyTime = (u, p) => {
+        u.delete("start_ns"); u.delete("end_ns");
+        if (p.startNs) u.set("start_ns", p.startNs);
+        if (p.endNs) u.set("end_ns", p.endNs);
+      };
+      if (periods[0]) applyTime(a, periods[0]);
+      if (periods[1]) applyTime(b, periods[1]);
+      history.replaceState(null, "", "?" + FlamegraphDiff.diffSearch(a, b));
+      return;
+    }
     const u = new URLSearchParams();
     for (const k of ["bucket", "prefix", "service"]) { if (params.get(k)) u.set(k, params.get(k)); }
     for (const h of params.getAll("host")) u.append("host", h);
@@ -142,6 +248,7 @@
       if (p.startNs) u.set(`p${i+1}_start_ns`, p.startNs);
       if (p.endNs) u.set(`p${i+1}_end_ns`, p.endNs);
     });
+    if (maxFiles != null) u.set("max_files", String(maxFiles));
     history.replaceState(null, "", "?" + u.toString());
   }
 
@@ -155,13 +262,16 @@
 
   function exemplarLink(ex, data) {
     if (!ex || !ex.start_ns) return "";
-    const bucket = (data && data.bucket) || params.get("bucket") || "";
-    const traceUrl = `/api/trace?bucket=${encodeURIComponent(bucket)}&keys=${encodeURIComponent(ex.source_key)}`;
-    const p = new URLSearchParams();
-    p.set("trace", traceUrl);
-    p.set("start_ns", String(ex.start_ns));
-    p.set("end_ns", String(ex.end_ns));
-    return `viewer.html?${p.toString()}`;
+    // We intentionally do not forward the exemplar's [start_ns, end_ns] window:
+    // the viewer treats those as a hard parse filter and a single poll's window
+    // is far too narrow — it would drop every surrounding event and load empty.
+    // Link to the whole segment instead. See exemplarViewerUrl.
+    return exemplarViewerUrl({
+      bucket: (data && data.bucket) || params.get("bucket") || "",
+      sourceKey: ex.source_key,
+      svc: params.get("service") || undefined,
+      host: ex.host || undefined,
+    });
   }
 
   function computeStats(data, threshNs) {
@@ -206,7 +316,7 @@
     if (loaded <= 1) { tabsEl.style.display = "none"; return; }
     tabsEl.style.display = "";
     const tabs = [{id: "diff", label: "⚡ Diff"}];
-    periods.forEach((p, i) => { if (stats[i]) tabs.push({id: `p${i}`, label: `P${i+1} Detail`}); });
+    periods.forEach((p, i) => { if (stats[i]) tabs.push({id: `p${i}`, label: `${periodLabel(i)} Detail`}); });
     tabsEl.innerHTML = tabs.map(t =>
       `<span class="view-tab ${t.id === activeTab ? 'active' : ''}" onclick="setTab('${t.id}')">${t.label}</span>`
     ).join("");
@@ -278,7 +388,7 @@
     </tr></thead><tbody>`;
     for (const [loc, v] of rows) {
       html += `<tr>
-        <td><code>${loc}</code></td>
+        <td><code>${escapeHtml(loc)}</code></td>
         <td>${v.long}</td><td>${v.rate.toFixed(1)}</td>
         <td>${linkedStat(v.offCpu, v.exemplars && v.exemplars[0], data, "off-cpu")}</td>
         <td>${linkedStat(v.onCpu, v.exemplars && v.exemplars[1], data, "on-cpu")}</td>
@@ -304,8 +414,8 @@
     sumEl.innerHTML = `
       <div class="card ${cls}"><div class="value">${first.rate.toFixed(1)} ${arrow} ${last.rate.toFixed(1)}/min</div><div class="label">Long poll rate (${ratePct > 0 ? "+" : ""}${ratePct}%)</div></div>
       <div class="card ${offCls}"><div class="value">${offFirst.toFixed(1)} → ${offLast.toFixed(1)}/min</div><div class="label">Off-CPU rate</div></div>
-      <div class="card"><div class="value">${first.total_polls.toLocaleString()}</div><div class="label">P1 polls</div></div>
-      <div class="card"><div class="value">${last.total_polls.toLocaleString()}</div><div class="label">P${periods.length} polls</div></div>
+      <div class="card"><div class="value">${first.total_polls.toLocaleString()}</div><div class="label">${periodLabel(0)} polls</div></div>
+      <div class="card"><div class="value">${last.total_polls.toLocaleString()}</div><div class="label">${periodLabel(periods.length - 1)} polls</div></div>
     `;
 
     const allLocs = new Set();
@@ -343,11 +453,11 @@
   }
 
   function diffTable(rows, cls) {
-    let html = `<table><thead><tr><th>Spawn Location</th><th>P1 /min</th><th>P${periods.length} /min</th><th>Δ /min</th><th>Δ%</th></tr></thead><tbody>`;
+    let html = `<table><thead><tr><th>Spawn Location</th><th>${periodLabel(0)} /min</th><th>${periodLabel(periods.length - 1)} /min</th><th>Δ /min</th><th>Δ%</th></tr></thead><tbody>`;
     for (const d of rows) {
       const pct = d.fRate > 0 ? ((d.delta / d.fRate) * 100).toFixed(0) : "new";
       html += `<tr>
-        <td><code>${d.loc}</code></td>
+        <td><code>${escapeHtml(d.loc)}</code></td>
         <td>${d.fRate.toFixed(1)}</td>
         <td>${d.lRate.toFixed(1)}</td>
         <td class="${cls}">${d.delta > 0 ? "+" : ""}${d.delta.toFixed(1)}</td>
@@ -358,51 +468,151 @@
     return html;
   }
 
-  async function loadPeriod(period) {
-    let refine = false;
-    let prevFolded = -1;
-    while (true) {
-      const u = new URL("/api/tokio-stats", window.location.origin);
-      if (params.get("bucket")) u.searchParams.set("bucket", params.get("bucket"));
-      if (params.get("prefix")) u.searchParams.set("prefix", params.get("prefix"));
-      if (params.get("service")) u.searchParams.set("service", params.get("service"));
-      for (const h of params.getAll("host")) u.searchParams.append("host", h);
-      const startNs = period.startNs;
-      const endNs = period.endNs;
-      if (startNs) u.searchParams.set("start_ns", startNs);
-      if (endNs) u.searchParams.set("end_ns", endNs);
-      if (refine) u.searchParams.set("refine", "true");
+  // Render the refinement status line from each period's coverage block, plus
+  // a per-period "refining\u2026" marker while its stream is still folding.
+  function renderStatus(prefix) {
+    const statusEl = document.getElementById("status");
+    statusEl.className = "status";
+    const parts = [];
+    periods.forEach((p, i) => {
+      if (!p.data) return;
+      const badge = formatTokioCoverage(p.data.coverage, p.data.total_polls);
+      if (!badge) return;
+      const label = periods.length > 1 ? `P${i + 1}: ` : "";
+      parts.push(label + badge + (p.refining ? " \u00b7 refining\u2026" : ""));
+    });
+    const head = prefix ? prefix : "";
+    statusEl.textContent = [head, ...parts].filter(Boolean).join(periods.length > 1 ? "  |  " : " \u00b7 ");
+    updateMoreButton();
+  }
 
-      const credHeaders = window.Dial9Creds ? Dial9Creds.headers() : {};
-      const resp = await fetch(u, { headers: credHeaders });
-      if (!resp.ok) throw new Error(await resp.text());
-      const data = await resp.json();
-      period.data = data;
-      renderFromCache();
-      const cov = data.coverage;
-      if (!cov || cov.files_folded >= cov.files_matched || cov.files_folded === prevFolded) break;
-      prevFolded = cov.files_folded;
-      refine = true;
-      await new Promise(r => setTimeout(r, 300));
+  // Show "Load more" only when idle and at least one loaded period still has
+  // matched files left to fold beyond the current sampling cap.
+  function updateMoreButton() {
+    const btn = document.getElementById("btn-more");
+    const canMore = !loading && periods.some(p => p.data && canRefineMore(p.data.coverage));
+    btn.style.display = canMore ? "" : "none";
+  }
+
+  // Stream cancellation: each loadAll() run gets a monotonic token + an
+  // AbortController. A new run (Load / Load more clicked again) aborts the
+  // prior run's in-flight SSE streams and its callbacks bail via the token
+  // guard — otherwise a superseded stream's events could overwrite the current
+  // render, and its server-side folding would keep running (holding fold
+  // permits) until the cap.
+  let loadToken = 0;
+  let loadAbort = null;
+
+  // Load one period over the SSE stream. The server emits the already-folded
+  // snapshot first, then a fresh full snapshot per newly-folded file, and closes
+  // at the sampling cap (raised by "Load more" via max_files). We re-render from
+  // cache on every event. Resolves when the stream closes (or is aborted);
+  // rejects only on a genuine error.
+  function loadPeriod(period, token, signal) {
+    const u = new URL("/api/tokio-stats", window.location.origin);
+    // effectiveScope resolves the right scope per side: in diff mode each
+    // period carries its own independent bucket/prefix/service/host scope; in
+    // normal mode it falls back to the shared top-level params. It also folds
+    // in the (editable) time window, so we just copy its keys onto the URL.
+    for (const [k, v] of effectiveScope(period)) u.searchParams.append(k, v);
+    // "Load more" raises the sampling-cap ceiling for the whole load (shared
+    // across periods), so append it on top of the per-period scope.
+    if (maxFiles != null) u.searchParams.set("max_files", String(maxFiles));
+
+    period.refining = true;
+    const credHeaders = window.Dial9Creds ? Dial9Creds.headers() : {};
+    return new Promise((resolve, reject) => {
+      Dial9Sse.openSse(u, {
+        headers: credHeaders,
+        signal,
+        onEvent: (data) => {
+          if (token !== loadToken) return; // superseded by a newer load
+          period.data = data;
+          renderFromCache();
+          renderStatus("");
+        },
+        onClose: () => {
+          period.refining = false;
+          if (token === loadToken) renderStatus("");
+          resolve();
+        },
+        onError: (err) => {
+          period.refining = false;
+          reject(err);
+        },
+        // openSse calls NEITHER onClose nor onError when aborted, so settle via
+        // its returned promise too (it resolves on close, abort, or after
+        // onError) — otherwise every superseded load's Promise.all would hang
+        // forever. Settling twice is a harmless no-op.
+      }).then(resolve);
+    });
+  }
+
+  // Scan loaded periods for a fold-error notice (e.g. unwritable output bucket).
+  // Returns the first non-null notice, or null if every period folded cleanly.
+  function foldErrorAcrossPeriods() {
+    for (const p of periods) {
+      const notice = p.data && foldErrorNotice(p.data.coverage);
+      if (notice) return notice;
     }
+    return null;
   }
 
   async function loadAll() {
     const statusEl = document.getElementById("status");
-    statusEl.textContent = "Loading…";
-    statusEl.className = "status";
+    // Cancel any in-flight load, then start a fresh one under a new token.
+    if (loadAbort) loadAbort.abort();
+    loadAbort = new AbortController();
+    const token = ++loadToken;
+    const signal = loadAbort.signal;
+    loading = true;
+    updateMoreButton();
+    renderStatus("Loading\u2026");
     try {
-      // Load all periods in parallel.
-      await Promise.all(periods.map((p, i) => loadPeriod(p, i)));
-      statusEl.textContent = "Complete";
+      // Stream all periods in parallel; each resolves when its stream closes.
+      await Promise.all(periods.map((p) => loadPeriod(p, token, signal)));
+      if (token !== loadToken) return; // superseded while awaiting
+      loading = false;
+      // Surface fold failures instead of silent coverage over an empty table.
+      const notice = foldErrorAcrossPeriods();
+      renderStatus(notice || "");
+      if (notice) statusEl.className = "status error";
     } catch (e) {
+      if (token !== loadToken) return; // superseded; ignore its error
+      loading = false;
+      // One period's stream failed. Abort the siblings still in flight —
+      // otherwise Promise.all has already rejected but their SSE streams stay
+      // open, and per the note above the server keeps folding source files
+      // (holding fold permits) until each hits the cap. Only the next
+      // loadAll() would otherwise cancel them.
+      if (loadAbort) loadAbort.abort();
       statusEl.textContent = "Error: " + e.message;
       statusEl.className = "status error";
     }
   }
 
   document.getElementById("utc-toggle").addEventListener("change", renderPeriods);
-  document.getElementById("btn-load").addEventListener("click", loadAll);
+  document.getElementById("btn-load").addEventListener("click", () => {
+    // A manual reload drops any "Load more" deepening and returns to the
+    // sampling cap the page was opened with (the URL's max_files, or default).
+    maxFiles = params.get("max_files") ? Number(params.get("max_files")) : null;
+    syncUrl();
+    loadAll();
+  });
+
+  // "Load more": raise the sampling-cap ceiling to ~4x the deepest sample
+  // folded across the loaded periods, then re-run the refinement loop so each
+  // period folds further into its matched set.
+  document.getElementById("btn-more").addEventListener("click", () => {
+    if (loading) return;
+    const folded = periods.reduce(
+      (m, p) => Math.max(m, p.data && p.data.coverage ? Number(p.data.coverage.files_folded) || 0 : 0),
+      0,
+    );
+    maxFiles = nextMaxFiles(folded);
+    syncUrl();
+    loadAll();
+  });
   document.getElementById("btn-add").addEventListener("click", () => {
     const last = periods[periods.length - 1];
     if (last.startNs && last.endNs) {
@@ -415,7 +625,15 @@
 
   window.openExemplar = function(el) { window.open(el.dataset.url, '_blank'); };
 
-  if (params.get("start_ns") || params.get("bucket")) loadAll();
+  // Diff mode is exactly two fixed sides (A vs B) — hide the add-period control,
+  // pin the title, and auto-load immediately.
+  if (diffMode) {
+    document.getElementById("btn-add").style.display = "none";
+    document.querySelector("h1").textContent = "⚡ Tokio Stats — diff (A vs B)";
+    loadAll();
+  } else if (params.get("start_ns") || params.get("bucket")) {
+    loadAll();
+  }
 })();
 </script>
 </body>

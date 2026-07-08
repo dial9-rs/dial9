@@ -357,8 +357,30 @@
         <button id="health-btn" onclick="viewTokioStats()" disabled title="Open Tokio stats view for the selected scope">
             ⚡ Tokio Stats
         </button>
+        <button id="diff-add-btn" onclick="addToDiff()" disabled title="Capture this selection as one side (A, then B) of a differential comparison">
+            ➕ Add to diff
+        </button>
         <span id="selection-warn" style="color:#ff6b6b;font-size:0.8em"></span>
         <span class="count" id="selection-count"></span>
+    </div>
+
+    <!-- Differential comparison tray: appears once a side has been captured via
+         "Add to diff". A (left) and B (right) are independent aggregate scopes;
+         when both are set the user launches a diff in either viz. -->
+    <div id="diff-tray" style="display:none;margin:0 20px 12px;padding:10px 14px;background:#161b2e;border:1px solid #6c63ff;border-radius:8px;font-size:0.85em">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
+            <b style="color:#c7c2ff">Diff</b>
+            <span style="color:#8b949e">blue = heavier in A · red = heavier in B</span>
+            <span style="flex:1"></span>
+            <button onclick="swapDiff()" class="ghost" style="background:#2a2a44;color:#e0e0e0;border:1px solid #444;padding:3px 10px;border-radius:3px;cursor:pointer" title="Swap A and B">⇄ Swap</button>
+            <button onclick="clearDiff()" class="ghost" style="background:#2a2a44;color:#e0e0e0;border:1px solid #444;padding:3px 10px;border-radius:3px;cursor:pointer" title="Clear both sides">Clear</button>
+        </div>
+        <div id="diff-sides" style="display:grid;grid-template-columns:1fr 1fr;gap:10px"></div>
+        <div id="diff-launch" style="display:none;margin-top:10px;align-items:center;gap:8px">
+            <span style="color:#8b949e">Compare in:</span>
+            <button onclick="launchDiff('flamegraph')" style="background:#6c63ff;color:#fff;border:none;padding:4px 14px;border-radius:3px;cursor:pointer;font-weight:600">🔥 Flamegraph</button>
+            <button onclick="launchDiff('tokio')" style="background:#6c63ff;color:#fff;border:none;padding:4px 14px;border-radius:3px;cursor:pointer;font-weight:600">⚡ Tokio Stats</button>
+        </div>
     </div>
 
     <footer id="footer-drop"
@@ -370,14 +392,19 @@
     </footer>
 
     <script src="creds.js"></script>
+    <script src="format.js"></script>
+    <script src="flamegraph_diff.js"></script>
     <script src="prefix_detect.js"></script>
+    <script src="url_state.js"></script>
+    <script src="trace_scope.js"></script>
     <script src="heatmap.js"></script>
     <script>
-    // ── ?trace= passthrough: redirect to viewer (preserving all params,
-    //    including repeated `trace=` components) ──
+    // ── ?trace= / scope passthrough: redirect to viewer (preserving all
+    //    params, including repeated `trace=` components and a `s_*` scope) ──
     (function() {
         const qs = window.location.search;
-        if (new URLSearchParams(qs).has('trace')) {
+        const p = new URLSearchParams(qs);
+        if (p.has('trace') || Dial9TraceScope.hasScope(p)) {
             window.location.replace('viewer.html' + qs);
             return;
         }
@@ -414,6 +441,8 @@
     let rawObjects = [];       // raw search results
     let currentTab = 'browse';
     let aggregationEnabled = false; // server runs demand-driven aggregation
+    let currentQuickRange = null;   // hours, when a "Last Nhr" quick range is active
+                                    // (null once the user edits the range manually)
 
     const ROW_H = 26;          // px height of each host row in the heatmap
 
@@ -509,34 +538,69 @@
         const bucketsRow = document.getElementById('creds-buckets-row');
         const bucketsBox = document.getElementById('creds-buckets');
 
-        // Render the bucket picker. Buckets whose name contains "dial9" are
-        // surfaced first and highlighted, since those are the trace buckets.
+        // Whether the picker is showing every visible bucket or just the dial9
+        // trace buckets. Defaults to the filtered view; the "Show all" toggle
+        // flips it. Retained across re-renders (e.g. re-listing on reload).
+        let showAllBuckets = false;
+        // The last full bucket list from /api/buckets, so the toggle can
+        // re-render without another list call.
+        let lastBucketNames = [];
+
+        // Buckets whose name contains "dial9" are the trace buckets — surfaced
+        // by default. Everything else is hidden unless "Show all" is on.
+        const isTraceBucket = (n) => n.toLowerCase().includes('dial9');
+
+        // Render the bucket picker from the last listing. Shows the dial9 trace
+        // buckets by default, or every visible bucket when "Show all" is on. A
+        // toggle button lets the user switch (some deployments don't put "dial9"
+        // in the bucket name, so the filtered view can hide the real bucket).
         function renderBucketPicker(names) {
+            if (names) lastBucketNames = names;
+            names = lastBucketNames;
             bucketsBox.innerHTML = '';
             bucketsRow.style.display = '';
 
-            // Only trace buckets are relevant — hard-filter to names containing
-            // "dial9" and hide everything else.
-            const isMatch = (n) => n.toLowerCase().includes('dial9');
-            const matches = names.filter(isMatch).sort((a, b) => a.localeCompare(b));
+            const all = [...names].sort((a, b) => a.localeCompare(b));
+            const matches = all.filter(isTraceBucket);
+            const shown = showAllBuckets ? all : matches;
 
-            if (!matches.length) {
+            // A toggle to switch between the filtered (dial9-only) and full list.
+            // Only useful when the two differ — i.e. there are non-dial9 buckets.
+            function appendToggle() {
+                if (all.length === matches.length) return;
+                const t = document.createElement('button');
+                t.textContent = showAllBuckets
+                    ? `Show dial9 only (${matches.length})`
+                    : `Show all (${all.length})`;
+                t.style.cssText = 'font-style:italic;opacity:0.85';
+                t.addEventListener('click', () => {
+                    showAllBuckets = !showAllBuckets;
+                    renderBucketPicker();
+                });
+                bucketsBox.appendChild(t);
+            }
+
+            if (!shown.length) {
                 bucketsBox.textContent = names.length
                     ? 'No dial9 trace buckets visible to these credentials.'
                     : 'No buckets visible to these credentials.';
+                appendToggle();
                 return;
             }
 
-            for (const name of matches) {
+            for (const name of shown) {
                 const b = document.createElement('button');
                 b.textContent = name;
-                b.classList.add('match');
+                // Highlight the trace buckets even within the full list.
+                if (isTraceBucket(name)) b.classList.add('match');
                 b.addEventListener('click', () => selectBucket(name, b));
                 bucketsBox.appendChild(b);
             }
+            appendToggle();
 
-            // Auto-select when there's exactly one dial9 bucket — the common case.
-            if (matches.length === 1) {
+            // Auto-select when there's exactly one dial9 bucket — the common
+            // case — but not in the "show all" view, where the user is browsing.
+            if (!showAllBuckets && matches.length === 1) {
                 selectBucket(matches[0], bucketsBox.firstChild);
             }
         }
@@ -547,18 +611,18 @@
             [...bucketsBox.children].forEach(c => c.classList.remove('selected'));
             if (el) el.classList.add('selected');
             bucketInput.value = name;
+            syncUrl();
             setStatus(`Detecting region for ${name}…`, null);
             const result = await Dial9Creds.check(name);
             if (result.ok) {
                 if (result.region) {
                     region.value = result.region;
-                    // Persist the resolved region so it rides on every request.
-                    Dial9Creds.set({
-                        accessKeyId: akid.value,
-                        secretAccessKey: secret.value,
-                        sessionToken: token.value,
-                        region: result.region,
-                    });
+                    // Persist the resolved region onto whatever credential is
+                    // active (static keys or an assumed role), then mirror it
+                    // into the URL (aws_region) so a shared link reproduces the
+                    // cross-region bucket.
+                    Dial9Creds.setRegion(result.region);
+                    syncUrl();
                 }
                 setStatus(`Using ${name}${result.region ? ` · region ${result.region}` : ''}`, 'ok');
                 discoverPrefixes().then(() => reRunCurrentSearch());
@@ -576,6 +640,7 @@
             // default bucket) belong to a different identity than these
             // credentials. The user re-picks from their own buckets below.
             bucketInput.value = '';
+            syncUrl();
             // Store the credentials (no region detection yet — we don't have a
             // bucket). Then list the buckets these credentials can see; this both
             // validates the credentials and powers the picker.
@@ -610,6 +675,7 @@
             // so a later search can't query a foreign bucket as the server's
             // ambient identity (which would 500/leak).
             bucketInput.value = '';
+            syncUrl();
             bucketsBox.innerHTML = '';
             bucketsRow.style.display = 'none';
             // The heatmap was built from the now-removed identity's bucket; wipe
@@ -650,18 +716,125 @@
         }
     }
 
-    // ── Init: load config ──
-    const params = new URLSearchParams(window.location.search);
-    if (params.get('bucket')) bucketInput.value = params.get('bucket');
-
+    // ── Init: restore state from the URL ──
+    //
+    // Every state-changing action mirrors the page state into the query string
+    // via syncUrl(), so a link reproduces the same bucket, prefix, tab, time
+    // window, timezone, and raw query. Restore that saved state here on load.
     const prefixInput = document.getElementById('prefix-input');
+    const rawSearchInput = document.getElementById('raw-search-input');
     let serverHasPrefix = false;
 
     function updateSearchReady() {
         const waitingForPrefix = serverHasPrefix && prefixInput.value.trim() === '';
         document.getElementById('search-btn').disabled = waitingForPrefix;
     }
-    prefixInput.addEventListener('input', updateSearchReady);
+    prefixInput.addEventListener('input', () => { updateSearchReady(); syncUrl(); });
+    rawSearchInput.addEventListener('input', syncUrl);
+
+    // While restoring state from the URL on load, syncUrl() is suppressed: the
+    // intermediate restore steps (tab switch, range set) would otherwise each
+    // rewrite the URL and could drop fields not yet restored. We sync once at
+    // the end of restore instead.
+    let restoring = false;
+
+    // Mirror the current DOM state into the URL, replacing the history entry so
+    // a stream of actions doesn't stack up Back-button steps. A quick range is
+    // stored relative (`last=N`) so the link keeps meaning "the last N hours
+    // from now"; a manually-edited range is stored as precise epoch-second
+    // `from`/`to` so it reproduces exactly regardless of the viewer's TZ toggle.
+    function syncUrl() {
+        if (restoring) return;
+        // The bucket's region rides in the URL (as aws_region) so a cross-region
+        // bucket is reproducible from a shared link. The credentials store is the
+        // source of truth — it's where region detection lands — and the secret
+        // keys themselves are header-only, never serialized here.
+        const storedCreds = window.Dial9Creds ? Dial9Creds.get() : null;
+        const state = {
+            bucket: bucketInput.value.trim(),
+            region: (storedCreds && storedCreds.region) || '',
+            // Keep the assume-role ARN in the URL so the read stays shareable
+            // (it's not a secret; static BYOC keys are never serialized). The
+            // store is the source of truth — echo whatever it holds.
+            roleArn: (storedCreds && storedCreds.roleArn) || '',
+            prefix: prefixInput.value.trim(),
+            tab: currentTab,
+            tz: useLocalTz ? 'local' : 'utc',
+            q: rawSearchInput.value.trim(),
+        };
+        if (currentQuickRange) {
+            state.last = currentQuickRange;
+        } else {
+            const fromDate = pickerToDate(document.getElementById('range-from').value);
+            const toDate = pickerToDate(document.getElementById('range-to').value);
+            if (fromDate) state.from = Math.floor(fromDate.getTime() / 1000);
+            if (toDate) state.to = Math.floor(toDate.getTime() / 1000);
+        }
+        const qs = Dial9UrlState.serialize(state);
+        history.replaceState(null, '', qs ? '?' + qs : window.location.pathname);
+    }
+
+    // Restore saved state. Timezone first: the range pickers format in the
+    // active TZ, so it must be set before any date is written below.
+    const urlState = Dial9UrlState.parse(window.location.search);
+    restoring = true;
+    if (urlState.tz === 'local') {
+        useLocalTz = true;
+        document.getElementById('tz-btn').textContent = 'TZ: Local';
+    }
+    if (urlState.bucket) bucketInput.value = urlState.bucket;
+    if (urlState.prefix) prefixInput.value = urlState.prefix;
+    if (urlState.q) rawSearchInput.value = urlState.q;
+    if (urlState.tab === 'raw') switchTab('raw');
+
+    // A shared link can carry an assume-role ARN (aws_role_arn): "read these
+    // traces as this role". Fold it into the credentials store as the
+    // assume-role transport, so every subsequent /api/* request carries the
+    // x-dial9-aws-role-arn header and the server assumes it with its own
+    // identity. A role ARN grants nothing on its own, which is why it is safe in
+    // a link. An invalid ARN throws (Dial9Creds.setRoleArn validates the shape);
+    // surface it rather than silently falling back to the server's identity.
+    if (urlState.roleArn && window.Dial9Creds) {
+        try {
+            Dial9Creds.setRoleArn(urlState.roleArn, { region: urlState.region });
+        } catch (e) {
+            console.warn('ignoring invalid aws_role_arn in URL:', e && e.message || e);
+        }
+    }
+
+    // A shared link can pin the bucket's region (aws_region). Fold it into the
+    // stored credentials so every subsequent request carries it as the region
+    // header — this is what lets a cross-region bucket link load without a fresh
+    // detection round trip. Prefill the panel field too so it's visible. Only
+    // meaningful when credentials are present (region is header-only there); on
+    // the ambient path the server uses its own configured region. Applies to
+    // either transport via setRegion (a no-op when nothing is stored, and when
+    // the assume-role branch above already stored this same region alongside the
+    // ARN).
+    if (urlState.region && window.Dial9Creds) {
+        const regionField = document.getElementById('creds-region');
+        if (regionField && !regionField.value) regionField.value = urlState.region;
+        const stored = Dial9Creds.get();
+        if (stored && stored.region !== urlState.region) {
+            Dial9Creds.setRegion(urlState.region);
+        }
+    }
+
+    // Restore the time range. A relative `last=N` re-anchors to now (so a shared
+    // link always shows the last N hours); a precise `from`/`to` is restored
+    // verbatim; otherwise fall back to the last-1hr default.
+    if (urlState.last) {
+        setQuickRange(urlState.last);
+    } else if (urlState.from != null && urlState.to != null) {
+        document.getElementById('range-from').value = dateToPickerStr(new Date(urlState.from * 1000));
+        document.getElementById('range-to').value = dateToPickerStr(new Date(urlState.to * 1000));
+    } else {
+        setQuickRange(1);
+    }
+    restoring = false;
+    // Normalize the URL once: collapses any malformed/duplicate params from the
+    // incoming link into the canonical serialization.
+    syncUrl();
 
     fetch('/api/config').then(async r => {
         if (!r.ok) {
@@ -678,7 +851,7 @@
             bucketInput.value = config.default_bucket;
         }
         if (config.default_prefix) {
-            prefixInput.value = config.default_prefix;
+            if (!prefixInput.value) prefixInput.value = config.default_prefix;
             serverHasPrefix = true;
             updateSearchReady();
         }
@@ -686,11 +859,20 @@
         // drives the sampled server-side loop instead of decoding raw traces.
         aggregationEnabled = !!config.aggregation_enabled;
         if (config.supports_byo_credentials) initCredsUi();
-        discoverPrefixes().then(autoSearch);
+        // Server defaults (bucket/prefix) were filled programmatically above;
+        // reflect them in the URL so the link is complete.
+        syncUrl();
+        // If we're restoring a bucket with credentials but no region pinned in
+        // the URL (aws_region already seeds the store during restore above),
+        // detect it before discovery/search so the first signed call lands on
+        // the right regional endpoint. A pinned region makes this a fast no-op.
+        detectRegionForBucket(bucketInput.value.trim())
+            .then(() => discoverPrefixes())
+            .then(autoSearch);
     }).catch(() => { discoverPrefixes().then(autoSearch); });
 
-    // Default to last 1 hour
-    setQuickRange(1);
+    // The initial time range is restored from the URL (or defaulted to last
+    // 1hr) in the state-restore block above, before /api/config resolves.
 
     // On page load, automatically run the last-1hr search so the heatmap is
     // populated without an extra click.
@@ -700,6 +882,40 @@
         autoSearched = true;
         if (bucketInput.value.trim() && !document.getElementById('search-btn').disabled) {
             doTimeRangeSearch();
+        }
+    }
+
+    // ── Region auto-detection ──
+    // A bring-your-own-credentials request signs S3 for the region carried in
+    // the stored credentials. If that region doesn't match the bucket's, S3
+    // rejects the read with a redirect (surfaced by the backend as 421 "wrong
+    // region"). Before hitting any data endpoint for a NEW bucket, resolve its
+    // real region via /api/credentials/check (a region-agnostic HeadBucket that
+    // returns the true region even from the wrong endpoint) and persist it, so
+    // every later request — and the shared URL — carries the right region.
+    //
+    // No-op without credentials: the ambient path uses the server's own
+    // configured region, and the check endpoint requires credentials anyway.
+    async function detectRegionForBucket(bucket) {
+        if (!bucket || !window.Dial9Creds || !Dial9Creds.has()) return;
+        try {
+            const result = await Dial9Creds.check(bucket);
+            if (result.ok && result.region) {
+                const stored = Dial9Creds.get();
+                if (stored && stored.region !== result.region) {
+                    // Persist without a second round trip (region is known now).
+                    // setRegion keeps the active transport's kind, so this works
+                    // for an assumed-role credential too — a static-only set()
+                    // would throw here for the role path.
+                    Dial9Creds.setRegion(result.region);
+                    const regionField = document.getElementById('creds-region');
+                    if (regionField) regionField.value = result.region;
+                    syncUrl();
+                }
+            }
+        } catch {
+            // Best-effort: on failure, leave the prior region in place — the data
+            // request will surface the actual error (e.g. the 421 wrong-region).
         }
     }
 
@@ -733,11 +949,13 @@
                 prefixInput.placeholder = '(no prefix — dates at root)';
                 serverHasPrefix = false;
                 updateSearchReady();
+                syncUrl();
                 return;
             }
             // If there's exactly one prefix and the input is empty, auto-select it
             if (prefixes.length === 1 && !prefixInput.value) {
                 prefixInput.value = prefixes[0].replace(/\/$/, '');
+                syncUrl();
             }
             prefixInput.placeholder = 'e.g. traces';
             for (const p of prefixes) {
@@ -750,6 +968,7 @@
                     suggestions.querySelectorAll('button').forEach(b => b.classList.remove('active'));
                     btn.classList.add('active');
                     updateSearchReady();
+                    syncUrl();
                 });
                 if (prefixInput.value === label) btn.classList.add('active');
                 suggestions.appendChild(btn);
@@ -761,8 +980,20 @@
         }
     }
 
-    // Re-discover when bucket changes
-    bucketInput.addEventListener('change', discoverPrefixes);
+    // Re-discover when bucket changes (on commit), and keep the URL in sync as
+    // the user types. Prefix discovery hits the server, so only run it on the
+    // less-frequent `change`; mirror to the URL on every keystroke.
+    //
+    // Detect the (possibly cross-region) bucket's region FIRST: prefix discovery
+    // is itself a signed S3 call, so it would hit the wrong regional endpoint if
+    // the stored region is stale from a previous bucket. This is the manual-entry
+    // counterpart to the picker's selectBucket() region detection.
+    bucketInput.addEventListener('change', async () => {
+        await detectRegionForBucket(bucketInput.value.trim());
+        discoverPrefixes();
+        syncUrl();
+    });
+    bucketInput.addEventListener('input', syncUrl);
 
     // ── Timezone toggle ──
     document.getElementById('tz-btn').addEventListener('click', () => {
@@ -783,6 +1014,7 @@
         } else {
             renderRawTable(rawObjects);
         }
+        syncUrl();
     });
 
     // ── Helpers ──
@@ -818,71 +1050,13 @@
         return formatDate(new Date(epoch * 1000).toISOString());
     }
 
-    function parseKey(key) {
-        // Default layout (as of issue #225):
-        //   {prefix}/{YYYY-MM-DD}/{HHMM}/{service}/{instance}/{boot_id}/{epoch}-{index}.bin[.gz]
-        // Legacy layout (pre-#225):
-        //   {prefix}/{YYYY-MM-DD}/{HHMM}/{service}/{instance}/{epoch}-{index}.bin[.gz]
-        // We find the date-shaped segment and count components between it
-        // and the filename to distinguish. Custom instance paths containing
-        // slashes will fall back to best-effort positional parsing.
-        const parts = key.split('/');
-        const dateRe = /^\d{4}-\d{2}-\d{2}$/;
-        let dateIdx = -1;
-        for (let i = parts.length - 1; i >= 0; i--) {
-            if (dateRe.test(parts[i])) { dateIdx = i; break; }
-        }
-        const file = parts[parts.length - 1];
-        const match = file.match(/^(\d+)-(\d+)\.bin/);
-        let epoch = 0, segIndex = '';
-        if (match) {
-            epoch = parseInt(match[1], 10);
-            segIndex = match[2];
-        }
-        if (dateIdx >= 0) {
-            const below = parts.length - 1 - dateIdx; // count after date, not including date itself
-            if (below === 5) {
-                return {
-                    service: parts[dateIdx + 2],
-                    host: parts[dateIdx + 3],
-                    bootId: parts[dateIdx + 4],
-                    epoch, segIndex,
-                    get traceStart() { return formatEpoch(epoch); },
-                };
-            }
-            if (below === 4) {
-                return {
-                    service: parts[dateIdx + 2],
-                    host: parts[dateIdx + 3],
-                    bootId: '',
-                    epoch, segIndex,
-                    get traceStart() { return formatEpoch(epoch); },
-                };
-            }
-        }
-        // Fallback — positional, best-effort.
-        if (parts.length >= 5) {
-            return {
-                service: parts[parts.length - 3],
-                host: parts[parts.length - 2],
-                bootId: '',
-                epoch, segIndex,
-                get traceStart() { return formatEpoch(epoch); },
-            };
-        }
-        return { service: '', host: key, bootId: '', epoch: 0, segIndex: '', get traceStart() { return ''; } };
-    }
-
-    function extractPrefix(key) {
-        const parts = key.split('/');
-        const dateRe = /^\d{4}-\d{2}-\d{2}$/;
-        for (let i = 0; i < parts.length; i++) {
-            if (dateRe.test(parts[i])) {
-                return parts.slice(0, i).join('/');
-            }
-        }
-        return '';
-    }
+    // Parsing an S3 trace key into {service, host, bootId, epoch, segIndex} and
+    // pulling the key prefix are owned by trace_scope.js (the single source of
+    // truth, shared with viewer.html / flamegraph.html and the Node tests). The
+    // table's "Trace Start" column formats `epoch` at its call site via
+    // formatEpoch — that presentation concern stays here, not in the module.
+    const parseKey = (key) => Dial9TraceScope.parseKey(key);
+    const extractPrefix = (key) => Dial9TraceScope.extractPrefix(key);
 
     function toLocalDatetime(d) {
         const pad = n => String(n).padStart(2, '0');
@@ -915,21 +1089,28 @@
         const from = new Date(now.getTime() - hours * 3600 * 1000);
         document.getElementById('range-from').value = dateToPickerStr(from);
         document.getElementById('range-to').value = dateToPickerStr(now);
+        // Remember the relative window so the URL stays relative ("last N hours
+        // from now") rather than freezing these computed timestamps.
+        currentQuickRange = hours;
         // Highlight the selected quick button
         document.querySelectorAll('.quick-btns button').forEach(b => b.classList.remove('selected'));
         const labels = {'1': 'Last 1hr', '3': 'Last 3hr', '24': 'Last 24hr'};
         document.querySelectorAll('.quick-btns button').forEach(b => {
             if (b.textContent === labels[hours]) b.classList.add('selected');
         });
+        syncUrl();
     }
 
-    // Clear quick-button highlight when user manually edits the range
-    document.getElementById('range-from').addEventListener('input', () => {
+    // A manual edit turns the range into a precise/custom window: clear the
+    // quick-button highlight and the relative marker so the URL records exact
+    // timestamps instead.
+    function clearQuickRange() {
+        currentQuickRange = null;
         document.querySelectorAll('.quick-btns button').forEach(b => b.classList.remove('selected'));
-    });
-    document.getElementById('range-to').addEventListener('input', () => {
-        document.querySelectorAll('.quick-btns button').forEach(b => b.classList.remove('selected'));
-    });
+        syncUrl();
+    }
+    document.getElementById('range-from').addEventListener('input', clearQuickRange);
+    document.getElementById('range-to').addEventListener('input', clearQuickRange);
 
     // ── Tab switching ──
     function switchTab(tab) {
@@ -943,6 +1124,7 @@
         document.getElementById('cpu-btn').style.display = tab === 'browse' ? '' : 'none';
         document.getElementById('health-btn').style.display = tab === 'browse' ? '' : 'none';
         updateSelectionCount();
+        syncUrl();
     }
 
     // ── Time-range search (Browse mode) ──
@@ -1508,20 +1690,29 @@
         return params;
     }
 
-    // Build one viewer `trace=` component per selected key, each pointing at
-    // /api/object (which serves that single file's raw, still-gzipped bytes).
-    // The viewer and flamegraph read all repeated `trace=` params, download
-    // them in parallel, and gunzip + concatenate client-side (see fetchTraces
-    // in trace_parser.js). This replaced a single /api/trace URL that forced
-    // the backend to fetch every file, gunzip them, and merge into one large
-    // uncompressed response — far more bytes over the wire and much slower.
-    function objectTraceUrls(bucket, keys) {
-        return keys.map(key => {
-            const p = new URLSearchParams();
-            p.set('bucket', bucket);
-            p.set('key', key);
-            return '/api/object?' + p.toString();
-        });
+
+    // Build the aggregate SCOPE (bucket/prefix/service/host-set/time window) for
+    // the current heatmap selection, as a URLSearchParams. This is the single
+    // source of truth shared by the flamegraph button, the tokio-stats button,
+    // and the A/B diff capture — so all three agree on how a box maps to a
+    // scope. Returns null if there is no usable selection. Does NOT set `api`
+    // (that flag is flamegraph-specific and added by the caller).
+    function selectionScope() {
+        if (!heatmapSelection || !heatmapSelection.keys.length) return null;
+        const bucket = bucketInput.value.trim();
+        if (!bucket) return null;
+        // Delegate to the shared scope codec so this matches the flamegraph and
+        // tokio-stats buttons exactly — same bucket/prefix/service/host +
+        // start_ns/end_ns vocabulary, and the same multi-service handling (a box
+        // spanning >1 service sends no service filter rather than dropping all
+        // but the first). encodeAggregationParams returns { query, hostsDropped };
+        // wrap the query back into the URLSearchParams the diff tray works with,
+        // and warn if the host set was too large to name in the link (the capture
+        // then covers all hosts in the window).
+        const scope = Dial9TraceScope.scopeFromKeys(bucket, heatmapSelection.keys, heatmapSelection.t0, heatmapSelection.t1);
+        const { query, hostsDropped } = Dial9TraceScope.encodeAggregationParams(new URLSearchParams(), scope);
+        if (hostsDropped) warnHostsDropped();
+        return new URLSearchParams(query);
     }
 
     // CPU Profiling button: open a flamegraph of the selected segments. The
@@ -1540,35 +1731,45 @@
         // deterministic order, and progressively refines — so a large 24h
         // selection starts showing a flamegraph immediately.
         if (aggregationEnabled) {
-            const parsed = keys.map(k => parseKey(k));
-            const services = [...new Set(parsed.map(p => p.service).filter(Boolean))];
-            const hosts = [...new Set(parsed.map(p => p.host).filter(Boolean))];
-            const fgParams = new URLSearchParams();
-            fgParams.set('api', '1');
-            // Pass the bucket so the flamegraph endpoint knows which bucket to
-            // aggregate from (required for bring-your-own-credentials mode).
-            if (bucket) fgParams.set('bucket', bucket);
-            // Extract the key prefix from the first selected key (everything
-            // before the date segment). This is authoritative regardless of
-            // whether the prefix came from the server or the user's input.
-            const pfx = extractPrefix(keys[0]);
-            if (pfx) fgParams.set('prefix', pfx);
-            // The loop's Scope takes a single service; a box almost always spans
-            // one service. If several, pass the first and let host-set + time do
-            // the narrowing (rare; revisit if multi-service boxes matter).
-            if (services.length) fgParams.set('service', services[0]);
-            for (const h of hosts) fgParams.append('host', h); // repeatable host set
-            // Selection times are epoch SECONDS; the loop wants epoch ns.
-            if (heatmapSelection.t0 != null) fgParams.set('start_ns', String(Math.round(heatmapSelection.t0 * 1e9)));
-            if (heatmapSelection.t1 != null) fgParams.set('end_ns', String(Math.round(heatmapSelection.t1 * 1e9)));
-            window.open('flamegraph.html?' + fgParams.toString(), '_blank');
+            // The refinement loop drives off the selection's host/time BOX, not
+            // these exact files, so it takes the same scope the exact path does
+            // — just encoded in the aggregation param vocabulary (un-namespaced
+            // host/service, window as start_ns/end_ns). encodeAggregationParams
+            // owns that encoding; `api=1` selects the demand-driven path.
+            // (A box spanning >1 service sends no service filter — all services
+            // in the box — matching exact mode, rather than the old "first
+            // service wins" which silently dropped the others.)
+            const scope = Dial9TraceScope.scopeFromKeys(bucket, keys, heatmapSelection.t0, heatmapSelection.t1);
+            const base = new URLSearchParams();
+            base.set('api', '1');
+            const { query, hostsDropped } = Dial9TraceScope.encodeAggregationParams(base, scope);
+            if (hostsDropped) warnHostsDropped();
+            window.open('flamegraph.html?' + query, '_blank');
             return;
         }
 
-        // Exact mode: open the selected raw traces and decode client-side.
+        // Exact mode: open the selected raw traces and decode client-side. Carry
+        // the selection as a compact *scope* (bucket/prefix/service/host-set +
+        // time window) rather than one trace= component per file. The flamegraph
+        // re-lists the matching files from the scope; the URL stays short (so it
+        // can't overflow CloudFront's 8192-byte request-URI cap and 414 the tab)
+        // and stateless (so a shared deep link re-resolves in any browser).
         const fgParams = traceTitleParams(keys);
-        for (const url of objectTraceUrls(bucket, keys)) fgParams.append('trace', url);
-        window.open('flamegraph.html?' + fgParams.toString(), '_blank');
+        const scope = Dial9TraceScope.scopeFromKeys(bucket, keys, heatmapSelection.t0, heatmapSelection.t1);
+        const { query, hostsDropped } = Dial9TraceScope.encodeScope(fgParams, scope);
+        if (hostsDropped) warnHostsDropped();
+        window.open('flamegraph.html?' + query, '_blank');
+    }
+
+    // The selection spanned too many hosts to name them all in the URL, so the
+    // scope degraded to "all hosts in the time window". Warn that the opened
+    // view may be broader than the literal box selection.
+    function warnHostsDropped() {
+        alert(
+            'This selection spans too many hosts to put in the link, so the ' +
+            'opened view covers ALL hosts in the selected time window. Narrow ' +
+            'the time range or host selection for an exact match.'
+        );
     }
 
     function viewTokioStats() {
@@ -1576,19 +1777,117 @@
         const bucket = bucketInput.value.trim();
         if (!bucket) { alert('Bucket is required'); return; }
         const keys = heatmapSelection.keys;
-        const parsed = keys.map(k => parseKey(k));
-        const services = [...new Set(parsed.map(p => p.service).filter(Boolean))];
-        const hosts = [...new Set(parsed.map(p => p.host).filter(Boolean))];
-        const hp = new URLSearchParams();
-        if (bucket) hp.set('bucket', bucket);
-        const pfx = extractPrefix(keys[0]);
-        if (pfx) hp.set('prefix', pfx);
-        if (services.length) hp.set('service', services[0]);
-        for (const h of hosts) hp.append('host', h);
-        if (heatmapSelection.t0 != null) hp.set('start_ns', String(Math.round(heatmapSelection.t0 * 1e9)));
-        if (heatmapSelection.t1 != null) hp.set('end_ns', String(Math.round(heatmapSelection.t1 * 1e9)));
-        window.open('tokio_stats.html?' + hp.toString(), '_blank');
+        // Same scope the aggregation flamegraph uses, same param vocabulary —
+        // /api/tokio-stats reads bucket/prefix/service/host + start_ns/end_ns.
+        const scope = Dial9TraceScope.scopeFromKeys(bucket, keys, heatmapSelection.t0, heatmapSelection.t1);
+        const { query, hostsDropped } = Dial9TraceScope.encodeAggregationParams(new URLSearchParams(), scope);
+        if (hostsDropped) warnHostsDropped();
+        window.open('tokio_stats.html?' + query, '_blank');
     }
+
+    // ── Differential comparison (A/B) ──
+    // Two captured scopes, each a URLSearchParams from selectionScope(). Launched
+    // into either viz via the shared FlamegraphDiff scope-link codec
+    // (?diff=1&a=<b64>&b=<b64>), which both flamegraph.html and tokio_stats.html
+    // consume. Held in memory only; nothing is persisted.
+    let diffA = null;
+    let diffB = null;
+
+    // One-line human summary of a captured scope, for the tray's A/B rows.
+    function summarizeDiffScope(scope) {
+        if (!scope) return '—';
+        const bits = [];
+        const svc = scope.get('service');
+        if (svc) bits.push(svc);
+        const hosts = scope.getAll('host');
+        if (hosts.length === 1) bits.push(hosts[0]);
+        else if (hosts.length > 1) bits.push(hosts.length + ' hosts');
+        const s = scope.get('start_ns'), e = scope.get('end_ns');
+        if (s && e) {
+            const from = new Date(Number(s) / 1e6).toISOString().slice(5, 16).replace('T', ' ');
+            bits.push(from + ' UTC · ' + formatHumanDuration(Number(e) - Number(s)));
+        }
+        const bkt = scope.get('bucket');
+        if (bkt) bits.push(bkt);
+        return bits.join(' · ') || '(empty scope)';
+    }
+
+    function addToDiff() {
+        const scope = selectionScope();
+        if (!scope) { if (!bucketInput.value.trim()) alert('Bucket is required'); return; }
+        // Fill A first, then B; once both are set a further add replaces B (the
+        // most recent), so the user can keep re-picking the comparison side.
+        if (!diffA) diffA = scope;
+        else diffB = scope;
+        renderDiffTray();
+    }
+
+    function clearDiff() { diffA = null; diffB = null; renderDiffTray(); }
+
+    // Swap only when both sides are set; swapping a lone side would leave A
+    // empty with B populated, violating the "fill A first" invariant.
+    function swapDiff() { if (!diffA || !diffB) return; const t = diffA; diffA = diffB; diffB = t; renderDiffTray(); }
+
+    // Remove one side. Clearing A promotes B to A so there is never a B-without-A
+    // hole (the codec fills A first).
+    function clearDiffSide(side) {
+        if (side === 'a') { diffA = diffB; diffB = null; }
+        else diffB = null;
+        renderDiffTray();
+    }
+    window.clearDiffSide = clearDiffSide;
+
+    function renderDiffTray() {
+        const tray = document.getElementById('diff-tray');
+        const sides = document.getElementById('diff-sides');
+        const launch = document.getElementById('diff-launch');
+        if (!diffA && !diffB) { tray.style.display = 'none'; return; }
+        tray.style.display = '';
+        function sideCell(label, scope, chipBg, chipFg, sideKey) {
+            const set = !!scope;
+            return `<div style="background:#14142a;border:1px solid ${set ? chipFg : '#333'};border-radius:6px;padding:8px 10px;min-width:0">
+                <div style="display:flex;align-items:center;gap:8px">
+                    <span style="font-size:0.72em;font-weight:700;padding:2px 8px;border-radius:10px;background:${chipBg};color:${chipFg}">${label}</span>
+                    ${set ? `<span style="flex:1"></span><button onclick="clearDiffSide('${sideKey}')" title="Remove ${label}" style="background:none;border:none;color:#888;cursor:pointer;font-size:1em">✕</button>` : ''}
+                </div>
+                <div style="color:#ccc;margin-top:6px;overflow-wrap:anywhere">${set ? escapeHtmlIdx(summarizeDiffScope(scope)) : '<span style="color:#666">select a region and click "Add to diff"</span>'}</div>
+            </div>`;
+        }
+        sides.innerHTML =
+            sideCell('A · left', diffA, '#1e3050', '#9ec1ff', 'a') +
+            sideCell('B · right', diffB, '#4a221c', '#ffb3a0', 'b');
+        launch.style.display = (diffA && diffB) ? 'flex' : 'none';
+    }
+
+    // Launch the captured A/B diff in the chosen viz. Uses the shared scope-link
+    // codec so flamegraph and tokio-stats receive the SAME two-independent-scope
+    // encoding — the unified diff-handling seam between the two views.
+    function launchDiff(kind) {
+        if (!diffA || !diffB) return;
+        // Flamegraph scopes carry the client-only `api=1` flag; tokio-stats does
+        // not use it. Add it per-side only for the flamegraph target so each side
+        // hits /api/flamegraph in aggregate mode.
+        function scopeFor(base) {
+            if (kind !== 'flamegraph') return base;
+            const s = new URLSearchParams(base.toString());
+            s.set('api', '1');
+            return s;
+        }
+        const search = FlamegraphDiff.diffSearch(scopeFor(diffA), scopeFor(diffB));
+        const page = kind === 'tokio' ? 'tokio_stats.html' : 'flamegraph.html';
+        window.open(page + '?' + search, '_blank');
+    }
+
+    // Local HTML-escape (index.html has no shared escape helper in this scope).
+    function escapeHtmlIdx(s) {
+        return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    }
+
+    window.addToDiff = addToDiff;
+    window.clearDiff = clearDiff;
+    window.swapDiff = swapDiff;
+    window.launchDiff = launchDiff;
 
     // ── Raw search mode ──
     async function doRawSearch() {
@@ -1658,7 +1957,7 @@
                 <td class="service">${esc(p.service)}</td>
                 <td class="host">${esc(p.host)}</td>
                 <td class="host">${esc(p.bootId || '')}</td>
-                <td>${esc(p.traceStart)}</td>
+                <td>${esc(formatEpoch(p.epoch))}</td>
                 <td>${esc(p.segIndex)}</td>
                 <td class="size">${formatSize(row.size)}</td>
                 <td class="date">${formatDate(row.last_modified)}</td>
@@ -1693,6 +1992,7 @@
         const viewBtn = document.getElementById('view-btn');
         const cpuBtn = document.getElementById('cpu-btn');
         const healthBtn = document.getElementById('health-btn');
+        const diffAddBtn = document.getElementById('diff-add-btn');
         const warn = document.getElementById('selection-warn');
         const count = document.getElementById('selection-count');
 
@@ -1702,6 +2002,7 @@
                 viewBtn.disabled = true;
                 cpuBtn.disabled = true;
                 healthBtn.disabled = true;
+                diffAddBtn.disabled = true;
                 warn.textContent = '';
                 count.textContent = '';
                 return;
@@ -1710,19 +2011,24 @@
             viewBtn.disabled = over;
             cpuBtn.disabled = over && !aggregationEnabled;
             healthBtn.disabled = !aggregationEnabled;
+            // Diff is an aggregate-only feature (both flamegraph and tokio-stats
+            // diffs run the server-side refinement loop per side).
+            diffAddBtn.disabled = !aggregationEnabled;
             warn.textContent = over && !aggregationEnabled
-                ? `Too large to open (${formatSize(sel.bytes)} > 100 MB) — narrow your selection.`
+                ? `Too large to open (${formatSize(sel.bytes)} > ${formatSize(MAX_OPEN_BYTES)}) — narrow your selection.`
                 : '';
             const win = sel.t0 && sel.t1 ? ` · ${fmtTick(sel.t0)}–${fmtTick(sel.t1)}` : '';
             count.textContent = `${sel.keys.length} segment${sel.keys.length !== 1 ? 's' : ''} · ${formatSize(sel.bytes)}${win}`;
             return;
         }
 
-        // Raw mode
+        // Raw mode: diff (like flamegraph/tokio-stats) is driven by a heatmap
+        // box, so it is unavailable here.
         const keys = getSelectedKeys();
         warn.textContent = '';
         count.textContent = keys.length ? `${keys.length} selected` : '';
         viewBtn.disabled = keys.length === 0;
+        diffAddBtn.disabled = true;
     }
 
     function viewSelected() {
@@ -1731,12 +2037,30 @@
 
         const bucket = bucketInput.value.trim();
 
-        // Pass structured metadata for the viewer title, plus one trace=
-        // component per file (downloaded in parallel + gunzipped client-side).
+        // Carry the selection as a compact *scope* (bucket/prefix/service/
+        // host-set + time window) instead of one trace= component per file. The
+        // viewer re-lists the matching files from the scope and downloads them
+        // in parallel. This keeps the navigation URL short — one trace= per file
+        // pushed a large selection past CloudFront's 8192-byte request-URI cap,
+        // which 414'd the new tab before it could load — and stateless, so a
+        // shared deep link re-resolves in any browser. The viewer title still
+        // reads its svc/host/from/to/segs params (set by traceTitleParams).
         const titleParams = traceTitleParams(keys);
-        for (const url of objectTraceUrls(bucket, keys)) titleParams.append('trace', url);
+        const t0 = heatmapSelection ? heatmapSelection.t0 : null;
+        const t1 = heatmapSelection ? heatmapSelection.t1 : null;
+        const scope = Dial9TraceScope.scopeFromKeys(bucket, keys, t0, t1);
+        // Raw mode passes no window, so scopeFromKeys derives it from the keys'
+        // epochs. It returns null when none parse (an unrecognized key layout);
+        // there is no window to build a scope from, so tell the user rather than
+        // opening a broken link.
+        if (!scope) {
+            alert('Could not derive a time range from the selected files. Their key names may use an unrecognized layout.');
+            return;
+        }
+        const { query, hostsDropped } = Dial9TraceScope.encodeScope(titleParams, scope);
+        if (hostsDropped) warnHostsDropped();
 
-        window.open(`viewer.html?${titleParams.toString()}`, '_blank');
+        window.open(`viewer.html?${query}`, '_blank');
     }
     </script>
 </body>

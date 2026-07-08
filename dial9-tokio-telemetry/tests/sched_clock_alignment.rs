@@ -11,9 +11,9 @@ use dial9_tokio_telemetry::telemetry::analysis_events::{CpuSampleSource, Dial9Ev
 
 #[test]
 fn sched_event_timestamps_align_with_wall_clock() {
+    use dial9_tokio_telemetry::telemetry::SchedEventConfig;
     use dial9_tokio_telemetry::telemetry::TracedRuntime;
     use dial9_tokio_telemetry::telemetry::clock_monotonic_ns;
-    use dial9_tokio_telemetry::telemetry::cpu_profile::SchedEventConfig;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
