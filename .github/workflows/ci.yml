@@ -49,7 +49,7 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest]
-        toolchain: ["1.94.1", nightly]
+        toolchain: ["1.94.1"]
         # aarch64 Linux exercises arch-specific unwind asm, PAC stripping,
         # and ucontext layout that x86_64 Linux doesn't cover.
         include:
@@ -62,6 +62,50 @@ jobs:
       - uses: ./.github/actions/rust-build
         with:
           toolchain: ${{ matrix.toolchain }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+  # TEMPORARY: the nightly build is disabled while aws-runtime fails to compile
+  # on nightly rustc (E0282 type-inference regression upstream). This gate skips
+  # `build-nightly` until 2026-07-20 (UTC), after which the job re-enables
+  # automatically. Remove this `nightly-gate` job and the `needs:`/`if:` lines on
+  # `build-nightly` once the upstream issue resolves.
+  nightly-gate:
+    name: Nightly build gate
+    runs-on: ubuntu-latest
+    outputs:
+      enabled: ${{ steps.check.outputs.enabled }}
+    steps:
+      - id: check
+        run: |
+          if [[ "$(date -u +%Y-%m-%d)" < "2026-07-20" ]]; then
+            echo "Nightly build temporarily disabled until 2026-07-20; skipping."
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  build-nightly:
+    name: Build (${{ matrix.os }}, nightly)
+    runs-on: ${{ matrix.os }}
+    # Nightly builds against the LATEST dependency versions (the rust-build
+    # action deletes Cargo.lock on nightly). This is an early-warning canary for
+    # toolchain/ecosystem breakage and is intentionally NOT part of `ci-pass`, so
+    # a nightly rustc regression or a freshly published dependency does not block
+    # PRs. Watch it on main; fix forward when it goes red.
+    needs: nightly-gate
+    if: needs.nightly-gate.outputs.enabled == 'true'
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    env:
+      RUST_BACKTRACE: 1
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: ./.github/actions/rust-build
+        with:
+          toolchain: nightly
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
   feature-check:
@@ -213,7 +257,8 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
-          # Need full history so cargo-semver-checks can use origin/main as the baseline.
+          # Need full history so cargo-semver-checks can use the PR's base branch
+          # (origin/${{ github.base_ref }}) as the baseline.
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
         with:
@@ -228,14 +273,16 @@ jobs:
       - name: Check semver compliance
         env:
           RUSTFLAGS: "--cfg tokio_unstable"
-        # Compare against origin/main rather than the latest crates.io release. This
-        # surfaces only breaking changes introduced *by this PR* — accumulated breaks
-        # already on main don't relitigate on every PR. release-plz's own
-        # semver_check (at release time) is the gate that ensures a major bump
-        # before publishing.
+        # Compare against the PR's base branch rather than the latest crates.io
+        # release. This surfaces only breaking changes introduced *by this PR* —
+        # accumulated breaks already on the base don't relitigate on every PR.
+        # Using `github.base_ref` (not a hardcoded `main`) keeps this correct on
+        # release maintenance branches, whose API legitimately differs from main.
+        # release-plz's own semver_check (at release time) is the gate that
+        # ensures a major bump before publishing.
         run: |
           cargo semver-checks \
-            --baseline-rev origin/main \
+            --baseline-rev "origin/${{ github.base_ref }}" \
             -p dial9-trace-format-derive \
             -p dial9-trace-format \
             -p dial9-perf-self-profile \
