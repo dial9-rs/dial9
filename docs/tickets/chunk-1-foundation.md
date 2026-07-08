@@ -57,7 +57,13 @@ tickets in all chunks - see `verifier-findings.md` for the raw findings):
 
 Ownership summary (traceability, chunk 1):
 - features/01 (index page): T14 (all rows) + T15 (amended rows G8, C6, I2, F10-axis)
-- features/03 (flamegraph page): T13 (all rows)
+  (T01 2026-07-08: #607 already shipped the C6 show-all toggle upstream -
+  T15's C6 amendment target should be re-checked against the refreshed row)
+- features/03 (flamegraph page): T13 (all rows). T01 2026-07-08: the refresh
+  added F166-F167 and section P (aggregated `?api=1` mode, F168-F185) - "all
+  rows" now means ~185 rows incl. a second page mode, materially more than
+  the 165 drafted; see the open question in T01's HANDOFF about whether
+  section P stays in T13 or moves next to the aggregation tickets (T41)
 - features/02 (viewer page): chunk 2 (layout decided 2026-07-07); T16-T20 own
   cross-cutting mechanisms only, not page rows
 - Unowned rows after chunk 1 = features/02 A-W: expected, tracked in chunk 2
@@ -477,15 +483,18 @@ invocations documented in `ui/README.md`.
 ## T13 - Migrate flamegraph.html (pipeline proof)
 
 **Goal:** First page on the new stack, end to end: typed entry, bundle,
-parity. Smallest surface (features/03: 165 rows).
+parity. Smallest surface (features/03: ~185 rows after T01's 2026-07-08
+refresh, which added F166-F167 and section P - the #570 aggregated `?api=1`
+mode with its own toolbar/poll-loop).
 
 **Context:** inventory `features/03-flamegraph-html.md` (the contract - every
-section A-O); `02-architecture.md` 2.1/2.4 (component shapes) + section 5
+section A-P); `02-architecture.md` 2.1/2.4 (component shapes) + section 5
 (migration order rationale); ADR section 8 (staged rollout: legacy stays
 default); the page's modules `flamegraph.js`/`flamegraph_export.js` are
 frozen core - the page shell around them is what migrates.
 
-**Owns:** features/03 ALL rows (A1..O-last).
+**Owns:** features/03 ALL rows (F1..F185, sections A-P; section P ownership
+flagged for maintainer confirmation - see T01 HANDOFF open question).
 
 **Work:** `src/pages/flamegraph/` + components; convert `flamegraph.html` to
 a Vite entry served under the new-UI path (T38 routing); legacy page STAYS
