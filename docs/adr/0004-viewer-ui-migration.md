@@ -1,4 +1,4 @@
-# ADR-0003: Viewer UI migration - consolidated plan
+# ADR-0004: Viewer UI migration - consolidated plan
 
 - **Status:** pending
 - **Date:** 2026-07-02
@@ -125,6 +125,11 @@ Vitest. The migration is mechanical - harness assertions become
 
 The proposal is a-step one. First we create the new UI as progressively as below and we show a switch button to go the new one, but legacy remains default. Then we feel comfortable we can reverse the switch and allow users to keep using the legacy UI but new default is the migrated one. Finally we remove the legacy.
 
+The switch (decided 2026-07-08): always visible on BOTH versions of every
+page that has a migrated counterpart; raw - no view-state porting across the
+switch (the query string carrying the trace source is preserved, hash view
+state is not); persistent placement so it is seen all the time.
+
 Regarding the migration, will be incremental, per surface, riskiest last: pipeline proof on `flamegraph.html` (smallest),then `index.html`, then `viewer.html` by slice (trace types -> store/viewport -> low-risk chrome -> panels one at a time -> lanes and pointer interactions). Old and new coexist during the migration via a static-copy list in the Vite config (legacy pages + core files into `dist/`) that shrinks to empty; every landed change deletes the inline code it replaces, no long-lived dual implementations. Done means: the three HTML shells contain no inline script beyond the module tag, the functional contract holds, and the NFR budgets hold.
 
 ### 9. UX direction
@@ -143,12 +148,13 @@ re-verified before cataloging). Full findings: `04-ux-findings.md`. Decisions:
 - **View state becomes shareable:** URL carries viewport/selection/POI (the
   browser page already does this, #585); plus minimap overview strip and a
   status bar. These ride every concept.
-- **Layout reorganization (track B, direction accepted; concept choice open):**
-  three mocked concepts - unified timeline column / triage-first rail /
-  conservative evolution (`mocks/concept-{1,2,3}.html`, hold `C` to compare
-  with the current UI). The chosen concept amends the functional contract
-  BEFORE the affected page's migration slice, so components are built once to
-  the amended spec; pure visual polish trails as a later pass.
+- **Layout reorganization (track B, decided 2026-07-07):** unified
+  time-aligned track column + persistent inspector (concept 1) with the
+  triage issues rail (concept 2); minimap + status bar. Mocks:
+  `mocks/concept-{1,2}.html` (hold `C` inside to compare with the current
+  UI). The amended contract lands BEFORE the affected page's migration slice,
+  so components are built once to the amended spec; pure visual polish trails
+  as a later pass. Ticket partition: `docs/tickets/chunk-2-viewer.md`.
 - UX changes are deliberate contract amendments and get the same parity-gate
   treatment as everything else (section 7).
 

@@ -2,7 +2,7 @@
 
 Design companion to the feature inventories (`01..03-*.md`, the functional
 contract), the constraints (`01-technical-constraints.md`, H*/S* references), and
-the stack decision (`docs/adr/0003-viewer-ui-migration.md`: TypeScript + Vite,
+the stack decision (`docs/adr/0004-viewer-ui-migration.md`: TypeScript + Vite,
 no framework, npm allowed, dist built in CI before packaging).
 
 Functional requirements are deliberately absent: the inventories ARE the
@@ -81,7 +81,7 @@ beat them but must not regress them.
 - **N17. Chrome cannot desynchronize from state.** DOM chrome renders
   declaratively from store state (see section 2.4); there is no code path that
   mutates chrome DOM outside a state-driven render. Removes the stale-DOM bug
-  class (per R2 in ADR-0003).
+  class (per R2 in ADR-0004).
 - **N18. Dev-build assertions.** Invariants that the types cannot carry
   (time-axis alignment, downsampling column bounds, store-update ordering) are
   runtime-asserted in dev builds and compiled out of release bundles.
