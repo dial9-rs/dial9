@@ -438,3 +438,38 @@ Single shared `#tooltip` element (`display:none`, `position:fixed`, `#222244` bg
 | W10. State reset on load | `processTrace` clears all selection/filter state (`selectedTaskId`, span/event selections, `selectedCENames`, `selectedSpanNames`, span filters, `processCpuUsage`) before analyzing a new trace, preventing stale carry-over. | `viewer.html:2070-2119` |
 | W11. URL parameters | `?trace=` (load), `?start`/`?end` (time-range filter), `?prof=1` (profiler), `?svc`/`?host`/`?from`/`?to`/`?segs` (structured metadata for the info block). Range params managed without reload. | `viewer.html:1869`, `1927-1952`, `2173-2177` |
 | W12. Layout constants | `LABEL_W`=100px (gutter), `LANE_H`=60px (worker lane height); used across positioning, hit-testing, and lane auto-scroll. | `viewer.html:1394-1395` |
+
+---
+
+## 2026-07-08 refresh (drift commits #596/#600; anchor re-derivation)
+
+Method: code read + Node-level checks + local unit tests; dev-server on :3001
+for backend facts. NO browser driver this pass, so DOM verdicts are CODE-READ
+(re-derivable by the T12 row-walker). Local `node` runs (all green):
+`test_fetch_traces.js`, `test_parse_yield_throttle.js`,
+`test_runtime_groups.js`, `test_heatmap.js`.
+
+Anchor re-derivation: the file's original anchors were found to match commit
+`1f257f1` (#564), not the pre-drift tip `544afd2` (#581) - only `viewer.html`
+differs between those trees, so this affected viewer.html anchors only.
+Anchors were remapped `1f257f1 -> HEAD` from the git diff; anchors whose code
+changed, plus ALL `trace_parser.js` anchors (#582 reindented the file), were
+re-derived by hand. Spot-checks against HEAD: `esc()` 1019-1021, `LABEL_W`/
+`LANE_H` 1394-1395, `addLegend` 6646, sidebar Escape branch 6282-6287, POI
+`<select>` 853-859, `eventDetailHtml` 3976, `relatedHtml` 4044,
+`showStackPopup` 5455, `showSchedPanel` 6008, `showIdleTimeFlamegraph` 6765,
+`showHeapFlamegraph` 6825, `showFlamegraph` 6989 - all land on their cited
+functions.
+
+| Row | Verdict | Evidence / note |
+|---|---|---|
+| B8 (amended) multi-trace labels | CODE-READ | labels at `viewer.html:1873,1877`; browser load not driven. |
+| B12 (rewritten) stream-always | CODE-READ + unit-tested | `streamAndShowTrace`/`loadTraceFromUrl` read at `1678-1712,1855-1880`; `fetchTracesStream` behavior covered by `test_fetch_traces.js` (concat parity, order, concurrent dispatch, late-failure no-unhandled-rejection). |
+| B18 paint throttle | VERIFIED (unit) | `test_parse_yield_throttle.js` green; `makePaintThrottle` at `trace_parser.js:1130-1148`. |
+| G1/G13/G17/G18 (amended) | CODE-READ | grouped `buildLanes`, `workerAtClientY`, `scrollToWorkerLane` read at `2466-2558`; single-runtime rendering is the unchanged path. |
+| G21 runtime headers | NOT-TRIGGERABLE (dev data) | demo-trace.bin has ZERO named runtimes (`trace.runtimeWorkers` empty Map; `computeRuntimeGroups` -> one inferred `main` group, 2 workers - checked via Node against the parser), so headers never render locally. Grouping logic unit-tested (`test_runtime_groups.js`). |
+| G22 collapse/expand | NOT-TRIGGERABLE (dev data) | requires headers (G21); logic read at `2508-2513,5358-5359`. |
+| G23 geometry hit-testing | CODE-READ | fast path == old arithmetic (exercised by any lane hover); grouped path NOT-TRIGGERABLE locally. |
+| G24 auto-expand on nav | NOT-TRIGGERABLE (dev data) | requires a collapsed runtime; read at `2546-2558` + call sites. |
+| F10 (amended) runtime dropdown | NOT-TRIGGERABLE (dev data) | same root cause; viewer passes `runtimeWorkers` only in the CPU-flamegraph path (`7040-7044`). |
+| W5/W6 (amended) | CODE-READ | module exports confirmed by grep + unit tests above. |

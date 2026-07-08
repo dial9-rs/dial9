@@ -379,3 +379,59 @@ Notes:
 - The refinement loop's server side is `dial9-viewer/src/server/flamegraph.rs`
   (#570, assume-role support #597); scope/facet semantics are backend-owned
   and only the response contract matters to this page.
+
+---
+
+## 2026-07-08 refresh (drift commits #570/#596/#600)
+
+Method: dev-server on :3001 (`PORT=3001 cargo run -p dial9-viewer --bin
+dev-server --features dev-server`), driven with `curl` for the API contract +
+Node for parser-level facts + code read for DOM behavior. NO browser driver
+this pass: DOM-interaction verdicts are CODE-READ (weaker than driven
+verification; re-derivable by the T12 row-walker). Local `node` runs (all
+green): `test_flamegraph_api.js` (48 passed), `test_fetch_traces.js`,
+`test_parse_yield_throttle.js`, `test_runtime_groups.js`.
+
+Dev-server facts observed: `/api/config` -> `aggregation_enabled:true`.
+`GET /api/flamegraph?bucket=demo-traces&prefix=traces` (read-only first poll)
+returned instantly with an empty tree and `coverage.files_folded:0` plus the
+generic `metadata.facets` array (source/thread_class/host/spawn_location, all
+values empty pre-fold); the same URL with `refine=true` folded the demo trace
+(`total_samples:147`, coverage `1 / 1 files`, `1 / 1 hosts`,
+`total_bytes:4336378`, facets populated: source `[cpu, sched]`, thread_class
+`[worker]`, host `[local]`, spawn_location x4); a subsequent read-only poll
+returned the folded tree. The demo trace has ZERO named runtimes
+(`trace.runtimeWorkers` is an empty Map; `computeRuntimeGroups` yields one
+inferred `main` group of 2 workers), so all multi-runtime UI is not
+exercisable on this seed data.
+
+| Row | Verdict | Evidence / note |
+|---|---|---|
+| F1/F4-F6/F9 (amended, #600) | CODE-READ + unit-tested | streaming decision read at `flamegraph.html:508-535`; `fetchTracesStream` behavior covered by `test_fetch_traces.js` (concat parity, order, concurrent dispatch, late-failure). |
+| F166 multi-URL pipelined streaming | CODE-READ + unit-tested | same tests; browser load with repeated `trace=` not driven this pass. |
+| F167 runtime filter | NOT-TRIGGERABLE (dev data) | demo trace has no named runtimes -> dropdown stays hidden; `buildRuntimeFilterData` unit-tested (`test_runtime_groups.js` green); code read at `flamegraph.js:865-884,779-820`. |
+| F146/F165 (amended, #596) | CODE-READ | `setData` opts + `applyFilters` rename read at `flamegraph.js:829-857,779-820`. |
+| F168 api-mode switch | VERIFIED (API) + CODE-READ | endpoint contract walked (above); DOM short-circuit read at `flamegraph.html:113-114,500`. |
+| F169 toolbar | CODE-READ | markup built at `122-134`; not driven. |
+| F170 data-driven facets | VERIFIED (API) + CODE-READ | generic `metadata.facets` array observed empty -> populated across polls (exactly the shape `renderFacets` consumes); union/rebuild logic read at `238-305`; selects not driven. |
+| F171 UTC pickers | VERIFIED (unit) | `nsToPickerUtc`/`pickerUtcToNs` covered by `test_flamegraph_api.js`. |
+| F172 Apply | CODE-READ | `466-471`; not driven. |
+| F173 poll loop | VERIFIED (API) | read-only poll instant + empty (`files_folded:0`); `refine=true` folded (147 samples); post-refine read-only returned the folded tree. Token cancellation CODE-READ (`353-364,395,399`). |
+| F174 loading overlay (api) | CODE-READ | `408-411,453-464`. |
+| F175 scope header | CODE-READ | metadata fields (`service`, `host_names`... as `hosts`, `min/max_timestamp_ns`) observed in the response; render not driven. |
+| F176 stats + coverage badge | VERIFIED (unit + API) | badge inputs observed on the wire (incl. `total_bytes`, `hosts_matched/folded`); `formatCoverageBadge` unit-tested. |
+| F177 auto-stop | VERIFIED (unit) + API-consistent | `isCoverageFrozen`/`shouldAutoStopRefining` unit-tested; the dev seed freezes after one refine (1/1 files - a second refine cannot increase `files_folded`). |
+| F178 Refine more | CODE-READ + unit | `nextMaxFiles` unit-tested; button flow `473-488` not driven. |
+| F179 Stop | CODE-READ | `367-382,490-495`. |
+| F180 URL sync (api) | CODE-READ | `202-219`; pushState semantics read, not driven. |
+| F181 setTreeDirect | CODE-READ | `flamegraph.js:982-1005`; zoom-preservation DFS read. |
+| F182 api errors | CODE-READ | `388-398`. |
+| F183 no-coverage response | NOT-TRIGGERABLE (dev data) | dev-server always returns `coverage`; `data_dir`/legacy path read at `414-420`. |
+| F184 cred headers (api) | CODE-ONLY | header spread at `390-391`; not asserted on the wire. |
+| F185 escape/resize (api) | CODE-READ | `498-499`. |
+
+Anchor spot-checks against HEAD (beyond the rows above): `createFlamegraph`
+128, search-bar build 148-166, `onSearchInput` 520-525, clear button 282-289,
+`zoomTo` 527-533, breadcrumb 291-293/427-434, `handleEscape` 752, `resize`
+886-889, `destroy` 891-906, `getZoomPath` ~908, `zoomToPath` 959-981,
+`applyFilters` 779-820, `setTreeDirect` 982-1005 - all match the cited rows.
