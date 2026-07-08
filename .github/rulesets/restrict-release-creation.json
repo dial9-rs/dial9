@@ -1,0 +1,25 @@
+{
+  "name": "Restrict release-* creation",
+  "target": "branch",
+  "enforcement": "active",
+  "conditions": {
+    "ref_name": {
+      "exclude": [],
+      "include": [
+        "refs/heads/release-*"
+      ]
+    }
+  },
+  "rules": [
+    {
+      "type": "creation"
+    }
+  ],
+  "bypass_actors": [
+    {
+      "actor_id": 5,
+      "actor_type": "RepositoryRole",
+      "bypass_mode": "always"
+    }
+  ]
+}
