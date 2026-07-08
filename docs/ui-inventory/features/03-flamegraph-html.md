@@ -73,7 +73,7 @@ Runs after decode, before rendering (`flamegraph.html:548-581`).
 
 ## C. Page header: title and stats bar
 
-Populated once during init from URL params (`flamegraph.html:583-606`). The stats bar does not refresh on zoom.
+Populated once during init from URL params (`flamegraph.html:583-606`). The stats bar does not refresh on zoom. `[2026-07-08]` Exact mode only: in aggregated mode (`?api=1`) the title and stats are instead driven by the backend's response metadata on every poll (F175/F176, section P).
 
 | Feature | What it does | Access path | Source |
 | --- | --- | --- | --- |
@@ -292,7 +292,7 @@ Bar built at `flamegraph.js:291-293`; rendered in `renderBreadcrumb` (`flamegrap
 | Feature | What it does | Access path | Source |
 | --- | --- | --- | --- |
 | F145. Renderer creation | `createFlamegraph(containerEl, updateUrlZoom)` builds the toolbar, help overlay, breadcrumb, both canvases, and wires all listeners; the `updateUrlZoom` callback syncs zoom to the URL. | Automatic during load (`flamegraph.html:619`). | `flamegraph.js:128,147-196,306-317`; `flamegraph.html:608-617` |
-| F146. `setData` | `fg.setData(allSamples, callframeSymbols, { exportTitle })` builds worker (`workerId != 255`) and off-worker (`== 255`) trees, populates the spawn dropdown, and applies the filter to render. | Called right after creation (`flamegraph.html:210`). | `flamegraph.js:813-840,772-805` |
+| F146. `setData` | `[2026-07-08]` `fg.setData(allSamples, callframeSymbols, { exportTitle, runtimeWorkers })` builds worker (`workerId != 255`) and off-worker (`== 255`) trees, populates the spawn dropdown, builds the runtime dropdown from `opts.runtimeWorkers` (#596, F167), and applies the filters to render. | Called right after creation (`flamegraph.html:620-623`). | `flamegraph.js:829-857` (`setData`), `865-884` (`buildRuntimeFilter`), `779-820` (`applyFilters`) |
 | F147. Automatic zoom -> URL | On every zoom change, `updateUrlZoom` encodes each tree's zoom path via `fg.getZoomPath()` and calls `history.replaceState` (no reload). | Any zoom in/out. | `flamegraph.html:608-617`; `flamegraph.js:908-921` |
 | F148. `worker-zoom` param | Set to the tab-separated worker zoom path when non-empty, deleted when empty. Enables bookmarking a zoom level. | URL `?worker-zoom=a\tb\tc`. | `flamegraph.html:611-612,627-629`; `flamegraph.js:959-979` |
 | F149. `offworker-zoom` param | Same as F148 for the off-worker tree. | URL `?offworker-zoom=a\tb\tc`. | `flamegraph.html:613-614,628-630`; `flamegraph.js:959-979` |
@@ -329,4 +329,53 @@ App-wide behaviors that are not tied to a single control.
 | F162. Shared deterministic coloring | `TraceAnalysis.flamegraphColor` is the single color source for both the on-screen canvases and the exported SVG, so exports match the screen. | `trace_analysis.js:979-985`; `flamegraph_export.js:48-58` |
 | F163. RAF-batched repaint | Hover/leave highlight changes queue at most one `requestAnimationFrame` repaint (`repaintQueued`), coalescing rapid mouse events into one redraw per frame. | `flamegraph.js:651-654,667-672` |
 | F164. Persistent search + zoom state | `searchQuery` and the two zoom stacks are module-scoped and survive resize, spawn-filter changes, and each other; only explicit user actions (clear button, Escape, filter reset) mutate them. | `flamegraph.js:135,417,772-805` |
-| F165. Export reflects filter, not zoom | Exports (SVG + folded) reflect the current spawn-location filter (trees rebuilt by `applySpawnFilter`) but always emit the full, un-zoomed trees. | `flamegraph.js:206-214,225-230,814-817` |
+| F165. Export reflects filters, not zoom | Exports (SVG + folded) reflect the current spawn-location AND runtime filters (`[2026-07-08]` #596: trees rebuilt by `applyFilters`, the renamed `applySpawnFilter`) but always emit the full, un-zoomed trees. | `flamegraph.js:206-214,225-230,814-817` |
+
+---
+
+## P. Aggregated server-side mode (`?api=1`) `[2026-07-08]`
+
+NEW surface added by #570. `CONDITIONAL`: reachable from the UI only when the
+server reports `aggregation_enabled` (the S3 browser's Flamegraph button then
+builds this URL - features/01 H3); also reachable by hand-built URL. Instead of
+fetching + decoding trace bytes client-side, the page polls the server's
+demand-driven `GET /api/flamegraph` refinement loop and renders the pre-built
+tree each response carries. The whole mode lives in the bootstrap IIFE
+(`flamegraph.html:112-501`); pure helpers (coverage math, UTC picker
+conversion, facet options) live in `flamegraph_api.js` (unit-tested in
+`test_flamegraph_api.js`). All canvas-level behaviors (sections D, F, I-N:
+search, export, zoom, tooltips, breadcrumb, Escape cascade) apply unchanged to
+the rendered tree; sections A-C (exact-mode loading, analysis, header) are
+bypassed.
+
+| Feature | What it does | Access path | Source |
+| --- | --- | --- | --- |
+| F168. API-mode switch | `?api=1` short-circuits the exact-mode loader: F3's no-trace validation never runs, no client decode happens, and the bootstrap returns after wiring the poll loop. Scope comes from URL params: `data_dir` (local-dir mode) OR `bucket`/`prefix`/`service`, repeatable `host`, `start_ns`/`end_ns`, optional facet filters (`source` - default `cpu`, `thread_class`, `spawn_location`) and a `max_files` ceiling. | Open `flamegraph.html?api=1&...` (built by features/01 H3 in agg mode). | `flamegraph.html:113-114,143-175,500` |
+| F169. Filter toolbar | Injected below the page header: a data-driven facets span (F170), From/To `datetime-local` pickers (1s step), Apply, "Refine more", and Stop buttons. Present on every api-mode load. | Visible in api mode. | `flamegraph.html:122-134` |
+| F170. Data-driven facet selectors | Facet `<select>`s are built from the response `metadata.facets` (name/label/values), NOT hard-coded; rebuilt only when the available set changes (guard avoids clobbering a select mid-interaction). Values are UNIONED monotonically across responses - backend facets are scoped to the current query, so without the union narrowing one dimension would collapse the others and strand the user. Facets with <= 1 value render no control. The `host` facet is special: options via `hostFacetOptions` - "All (N hosts)" re-applies the ORIGINAL scope host set (never broadens past it), a named host narrows to one; seeded from the URL's `host` params so it is correct before the first response. Any facet change resets the `max_files` ceiling, syncs the URL, and restarts polling. | Change a toolbar select (multi-value facets only). | `flamegraph.html:221-305` (`renderFacets`); `flamegraph_api.js:168-174` (`hostFacetOptions`) |
+| F171. UTC time pickers | `start_ns`/`end_ns` URL params seed the pickers via `nsToPickerUtc`; queries read them back via `pickerUtcToNs`. Both sides deliberately treat the picker value as UTC wall-clock (S3 trace keys are bucketed in UTC); the appended `Z` on parse keeps it symmetric and timezone-independent. Unit-tested. | From/To fields in the toolbar. | `flamegraph.html:158-165,189-192`; `flamegraph_api.js:94-109`; test `test_flamegraph_api.js` |
+| F172. Apply button | Resets the `max_files` ceiling, pushes the new query onto the browser URL (F180), and restarts the poll loop from scratch (loading overlay reappears). | Toolbar -> "Apply". | `flamegraph.html:466-471` |
+| F173. Demand-driven poll loop | First poll per scope is READ-ONLY (`refine` omitted): the server instantly returns whatever is already folded. Subsequent polls send `refine=true` (literal `"true"` - the backend param is a serde bool) every 800 ms, each folding a batch of files server-side. A monotonically-bumped `pollToken` cancels superseded loops (filter change / Stop / Refine more); stale in-flight responses are dropped on arrival. | Automatic on load and after every filter change. | `flamegraph.html:353-364` (state), `177-200` (`buildApiUrl`), `384-447` (`poll`), `449-464` (`startPolling`) |
+| F174. Loading overlay (api) | Spinner + `Loading aggregated flamegraph...` until the first successful response of each (re)start; the canvas container is hidden meanwhile, so filter changes show the overlay again. Refining polls after the first update in place with no overlay. | Automatic. | `flamegraph.html:408-411,453-464` |
+| F175. Scope header from backend truth | `renderScopeHeader` sets the tab title to `Flamegraph - {service}` and the header title to service + host summary (single host name, or "N hosts") + resolved UTC time range - all from response `metadata` (falls back to `aggregated` when no service), NOT from the URL params the client guessed at. | Page header, api mode. | `flamegraph.html:307-326` |
+| F176. Stats bar + coverage badge | `baseStats` = total samples, host count (only when > 1), UTC time range + human duration (`formatHumanDuration`). When the response has `coverage`, appends `formatCoverageBadge`: `folded / matched files (pct%) [. folded / matched hosts] . N samples [. bytes]` (host fraction omitted unless hosts_matched > 1), then a state suffix: inline spinner + `refining...`, `refined` (auto-stop, F177), or `stopped` (manual, F179). | Header stats, api mode. | `flamegraph.html:338-351,431-440`; `flamegraph_api.js:28-51`; `format.js:9` (`formatHumanDuration`) |
+| F177. Auto-stop heuristics | Refining stops when coverage FREEZES (`files_folded` did not increase between consecutive refining polls - `isCoverageFrozen`) or PLATEAUS (`shouldAutoStopRefining`: 3 consecutive per-poll gains each < 0.5 percentage points, tracked in `coverageDeltas`; the read-only first poll only sets the baseline). Suffix becomes `refined`. | Automatic during refinement. | `flamegraph.html:414-439`; `flamegraph_api.js:56-88` |
+| F178. Refine more button | Enabled only while idle. Raises the `max_files` ceiling to `nextMaxFiles(files_folded)` (~4x current fold count, min 16, capped 100000), clears the plateau history so it does not instantly re-stop, and resumes refining immediately (stats spinner reappears in place). | Toolbar -> "Refine more" (after refinement stops). | `flamegraph.html:473-488`; `flamegraph_api.js:116-123` |
+| F179. Stop button | Enabled only while refining (`setRefiningUi` swaps the Stop/Refine-more enabled states as a pair). Cancels the loop and freezes the stats at the current coverage with suffix `stopped`. | Toolbar -> "Stop" (during refinement). | `flamegraph.html:367-382,490-495` |
+| F180. Browser URL sync (api) | Apply / any facet change rebuilds the full query (`api=1` + scope + facet state + picker times) and `history.pushState`s it - NOTE pushState, so Back walks the filter history (unlike exact-mode zoom's replaceState, F147). Canvas zoom is NOT URL-synced in api mode: `createFlamegraph` is called without the `updateUrlZoom` callback. | Automatic on Apply/facet change. | `flamegraph.html:202-219` (`updateBrowserUrl`), `336` |
+| F181. Direct tree render | Each response's tree is converted (`toFgTree`) and handed to `fg.setTreeDirect`: ONE panel labeled `All threads - N samples` (em-dash; no worker/off-worker split - the off-worker canvas + label are hidden), spawn AND runtime dropdowns hidden (the toolbar facets replace them), and the current zoom target is PRESERVED across refinement polls by re-resolving its frame name in the new tree via DFS (zoom does not reset as coverage grows). | Automatic per poll. | `flamegraph.html:328-334,412`; `flamegraph.js:982-1005` (`setTreeDirect`) |
+| F182. API error handling | A failed poll (HTTP error body or network failure) shows `Failed to load flamegraph: <msg>` via the standard error element; superseded polls (token mismatch) are dropped silently. There is NO api-mode analogue of the 401-credentials hint (F12). | Automatic on poll failure. | `flamegraph.html:388-398` |
+| F183. No-coverage response (legacy/local-dir) | When a response carries no `coverage` (older server / `data_dir` mode), the page renders it once with plain `baseStats` and stops - single-fetch behavior, no refinement loop. | api mode against a `data_dir`/legacy server. | `flamegraph.html:414-420` |
+| F184. Credential headers (api) | Every poll spreads `Dial9Creds.headers()` into the fetch, so BYO creds ride to `/api/flamegraph` (same-origin by construction; no `isSameOrigin` gate needed). | Automatic when creds stored. | `flamegraph.html:390-391` |
+| F185. Escape / resize wiring (api) | Same window-level wiring as exact mode: resize re-renders via `fg.resize()`; Escape runs the renderer cascade (F157) - with the api-only stages being tooltip/export/help/search/zoom exactly as in exact mode. | Resize / press Esc. | `flamegraph.html:498-499` |
+
+Notes:
+
+- `flamegraph_api.js` also exports `sourceFacetOptions` / `threadFacetOptions`
+  (`flamegraph_api.js:139-162`), but at HEAD NO page consumes them - the
+  generic facet renderer builds `All` + raw values inline and only the host
+  facet uses a helper. They are exercised solely by `test_flamegraph_api.js`.
+  Status: `CODE-ONLY` (dead-helper candidates for the redesign).
+- The refinement loop's server side is `dial9-viewer/src/server/flamegraph.rs`
+  (#570, assume-role support #597); scope/facet semantics are backend-owned
+  and only the response contract matters to this page.
