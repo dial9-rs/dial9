@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.14](https://github.com/dial9-rs/dial9/compare/dial9-tokio-telemetry-v0.3.13...dial9-tokio-telemetry-v0.3.14) - 2026-07-09
+
+### Other
+
+- Backport #619 (schedstat park/unpark sampling) to release-0.3.x ([#630](https://github.com/dial9-rs/dial9/pull/630))
+
 ## [0.3.13](https://github.com/dial9-rs/dial9/compare/dial9-tokio-telemetry-v0.3.12...dial9-tokio-telemetry-v0.3.13) - 2026-05-29
 
 ### Added
