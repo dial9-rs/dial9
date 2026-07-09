@@ -72,28 +72,95 @@ For other tests, `cargo nextest run` will run all of the normal tests.
 
 ## Doing releases
 
-Releases are human-initiated, not automatic. The process has two parts:
+Releases are human-initiated, not automatic. There are two kinds of release:
 
-### How it works
+- **Mainline releases** cut from `main` — the normal path for shipping new work.
+- **Maintenance releases** cut from a long-lived `release-*` branch (e.g.
+  `release-0.3.x`) — for backporting fixes to an older release series without
+  pulling in everything that has since landed on `main`.
 
-1. **Release PR (automatic):** On every push to `main`, the `release-pr.yml` workflow runs `release-plz release-pr`, which creates/updates a PR with version bumps and changelog entries based on [conventional commits]. This PR accumulates over time — you can merge many feature PRs before releasing.
-
-2. **Publishing (manual):** When you're ready to release, merge the release PR, then go to **Actions → "Publish release" → Run workflow** and click "Run". The `environment: release` gate requires approval before publishing proceeds.
-
-The `release.yml` workflow is authorized to publish releases to the dial9 crates via [trusted publishing]. No tokens need to be managed.
+Both use the same two-part shape (a release PR that bumps versions + updates the
+changelog, then a manual publish), and both publish to crates.io via [trusted
+publishing], so no tokens need to be managed. The differences are called out
+below.
 
 [trusted publishing]: https://rust-lang.github.io/rfcs/3691-trusted-publishing-cratesio.html
 [conventional commits]: https://www.conventionalcommits.org/en/v1.0.0/
 
-### Step by step
+### Releasing from `main`
 
-1. Merge your PRs to `main` using conventional commit messages (e.g. `feat:`, `fix:`, `feat!:` for breaking changes).
-2. The release PR will update automatically. Review the changelog and version bumps.
-3. If you need to adjust versions (e.g. force a major bump), edit `Cargo.toml` versions in the release PR before merging.
-4. **Trigger CI:** The release PR is created by `GITHUB_TOKEN`, which means GitHub won't automatically trigger CI workflows on it. Before merging, close and reopen the PR to trigger CI. Wait for the `CI Pass` check to go green.
-5. Merge the release PR.
-6. Go to Actions → "Publish release" → Run workflow → confirm.
-7. A team member approves the deployment in the `release` environment.
+1. **Release PR (automatic):** On every push to `main`, the `release-pr.yml`
+   workflow runs `release-plz release-pr`, which creates/updates a PR with
+   version bumps and changelog entries based on [conventional commits]. This PR
+   accumulates over time — you can merge many feature PRs before releasing.
+2. Review the changelog and version bumps. To force a bump (e.g. a major), edit
+   the `Cargo.toml` versions in the release PR before merging.
+3. **Trigger CI:** The release PR is created by `GITHUB_TOKEN`, so GitHub won't
+   automatically run CI on it. Before merging, close and reopen the PR to
+   trigger CI, and wait for the `CI Pass` check to go green.
+4. Merge the release PR.
+5. **Publish:** Go to **Actions → "Publish release" → Run workflow**, set
+   `release_branch` to `main`, and run. A `dial9-maintainers` member then
+   approves the deployment in the `release` environment before publishing
+   proceeds.
+
+### Releasing from a maintenance (`release-*`) branch
+
+Use this when you need to ship a fix on an older series (e.g. patch `0.3.x`
+while `main` is on `0.4.x`). The mechanics are the same, with a few
+branch-specific wrinkles.
+
+1. **Create the branch (once per series), if it doesn't exist.** Branch off the
+   latest tag of that series and push it, e.g.:
+
+   ```bash
+   git branch release-0.3.x dial9-tokio-telemetry-v0.3.13
+   git push origin release-0.3.x
+   ```
+
+   `release-*` branches are protected the same as `main` (PR review + `CI Pass`
+   required, no direct pushes), and **creating one is restricted to repo
+   admins** by a branch-protection ruleset, so no disabling of protection is
+   needed — an admin just pushes the new branch.
+
+2. **Backport your fix via a PR into the release branch.** Cherry-pick or
+   re-implement the change with `release-0.3.x` as the PR base (not `main`).
+   Keep changes API-compatible for the series where possible; `cargo-semver-checks`
+   in CI compares against the PR's base branch, so it will flag breaking changes
+   for that series specifically.
+
+3. **Generate the release PR.** The `release-pr.yml` automation only runs on
+   `main`, so for a release branch you run release-plz yourself from a checkout
+   of the branch:
+
+   ```bash
+   git checkout release-0.3.x && git pull
+   GIT_TOKEN="$(gh auth token)" release-plz release-pr --git-token "$(gh auth token)"
+   ```
+
+   This opens a version-bump/changelog PR against `release-0.3.x`. Review and
+   merge it as usual (close/reopen to trigger CI, wait for `CI Pass`).
+
+4. **Publish:** **Actions → "Publish release" → Run workflow**, set
+   `release_branch` to the release branch (e.g. `release-0.3.x`), and run. As
+   with `main`, a `dial9-maintainers` member approves the `release` environment
+   deployment.
+
+> **Why `release_branch` is an input.** `workflow_dispatch` runs the copy of a
+> workflow that lives on the dispatched ref, which would otherwise mean every
+> `release-*` branch carried (and drifted) its own copy of `release.yml`. The
+> publish workflow instead always runs from `main`'s copy and takes the target
+> branch as a required input, so the release logic has a single source of truth.
+> A `validate-branch` step rejects any input that isn't `main` or `release-*`.
+
+> **Note on `pr_branch_prefix`.** release-plz opens its release PR from an
+> ephemeral branch. `main` uses the `release-plz/` prefix and each maintenance
+> branch uses its own (e.g. `release-plz-0.3/`), configured via
+> `pr_branch_prefix` in `release-plz.toml`. Two things depend on this: the
+> prefix must **not** collide with the `release-*` protection glob (the trailing
+> slash keeps it exempt), and it must **differ per series** — release-plz closes
+> any open PR sharing its configured prefix, so a shared prefix would let a
+> `main` release run close a release branch's PR (and vice versa).
 
 ### Semver checks
 
