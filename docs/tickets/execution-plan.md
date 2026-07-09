@@ -74,8 +74,8 @@ Status values: `pending` | `in-progress(<who/branch>)` | `gates-passed` |
 
 | Ticket | Status | Branch | Notes |
 |---|---|---|---|
-| T01 | pending | - | pilot, serial |
-| T02 | pending | - | pilot, serial, after T01 |
+| T01 | gates-passed | ticket/T01-inventory-refresh | done 2026-07-08; DoD evidence in branch HANDOFF.md; push + review + merge pending (maintainer) |
+| T02 | in-progress(claude/ticket/T02-vite-mpa-scaffolding) | ticket/T02-vite-mpa-scaffolding | started 2026-07-08, branched from main (not stacked on T01 per repo no-stacked-PR rule; T02 deps: none) |
 | T03-T48 | pending | - | per waves above |
 
 ## Standing risks
