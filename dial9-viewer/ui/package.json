@@ -6,7 +6,7 @@
     "build": "vite build",
     "dev": "vite",
     "dev:embedded": "vite build --watch",
-    "test": "vitest run --passWithNoTests"
+    "test": "vitest run"
   },
   "devDependencies": {
     "@types/node": "^24.13.3",
