@@ -99,7 +99,23 @@ async fn main() -> anyhow::Result<()> {
         force_path_style: true,
     });
 
-    let ui_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("ui");
+    // Serve the BUILT UI (ui/dist) from disk, not the ui/ sources: the
+    // servable set is the vite build output (root assets such as
+    // demo-trace.bin and flamegraph.css live in ui/public/ and only appear at
+    // the served root via a build). Two dev loops (ADR-0004 section 3):
+    //   - single-server: `npm run dev:embedded` (vite build --watch) keeps
+    //     ui/dist fresh while this server serves it (edit -> refresh);
+    //   - proxy: `npm run dev` serves the UI itself with HMR and proxies
+    //     /api/* here, in which case ui/dist may legitimately be empty or
+    //     stale - hence a warning below, not an error.
+    let ui_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/dist");
+    if !ui_dir.join("index.html").exists() {
+        tracing::warn!(
+            path = %ui_dir.display(),
+            "ui/dist has no built UI - run `npm run build` or `npm run dev:embedded` in \
+             dial9-viewer/ui (or use `npm run dev` and browse the Vite server instead)"
+        );
+    }
     let state = state.with_dev_ui_dir(ui_dir);
     let app = dial9_viewer::server::router(state);
 
