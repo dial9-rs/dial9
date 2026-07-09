@@ -173,6 +173,29 @@ function totalBytes(segments) {
     return segments.reduce((sum, seg) => sum + (seg.size || 0), 0);
 }
 
+// Decide whether a document-level click should clear the current heatmap
+// selection. The browse view clears the selection on any click that lands
+// outside the timeline and the actions bar. The one exception is the synthetic
+// click the browser fires at the end of a drag: when a selection drag ends
+// outside the #heatmap-view pane, the trailing click's target is an ancestor
+// above the pane, so both `targetInHeatmap`/`targetInActions` are false and the
+// just-created selection would be wiped. `wasDrag` suppresses exactly that
+// phantom click so a drag that ends outside the pane still registers.
+//
+// Returns true only when the selection should be cleared.
+function shouldClearSelectionOnClick({
+    isBrowseTab,
+    hasSelection,
+    wasDrag,
+    targetInHeatmap,
+    targetInActions,
+}) {
+    if (!isBrowseTab || !hasSelection) return false;
+    if (wasDrag) return false; // synthetic click trailing a drag — keep selection
+    if (targetInHeatmap || targetInActions) return false;
+    return true;
+}
+
 // Map a normalized density value in [0, 1] to a CSS color. A value of 0 (no
 // data) returns the page background; positive values ramp dim-blue → purple →
 // red → yellow. A perceptual sqrt curve keeps a low baseline visible while
@@ -213,5 +236,6 @@ if (typeof module !== "undefined" && module.exports) {
         segmentsOverlapping,
         totalBytes,
         densityColor,
+        shouldClearSelectionOnClick,
     };
 }

@@ -95,4 +95,7 @@ node dial9-viewer/ui/test_flamegraph_export.js
 echo "--- Checking runtime grouping (multi-runtime lanes) ---"
 node dial9-viewer/ui/test_runtime_groups.js
 
+echo "--- Checking browse density-timeline / heatmap helpers ---"
+node dial9-viewer/ui/test_heatmap.js
+
 echo "All E2E trace checks passed."
