@@ -1,86 +1,148 @@
-# T02 HANDOFF - Vite MPA scaffolding + dist-only embed
+# HANDOFF - T03 (CI + release pipeline build stage)
 
 ## STATUS
 
-DONE - all DoD checks pass (evidence below). Asset-location gate RESOLVED by
-orchestrator ruling 2026-07-08: Option B - `demo-trace.bin` +
-`flamegraph.css` STAY at `ui/` root and ride the static-copy list; the
-`public/` move belongs to T04 (chunk-1 T02/T04 Work sections amended by the
-orchestrator).
+DONE locally. One DoD item (CI green on a real PR) is pending-CI by nature.
 
-## COMPLETED (commits on `ticket/T02-vite-mpa-scaffolding`, based on main @ 84a21e5)
+Branch: `ticket/T03-ci-release-ui-build` (base be2c009, the T02 tip).
+Worktree: `/Users/facundo/code/wye/dial9-tokio-telemetry/.claude/worktrees/agent-a1fbd73895037a4ad`
 
-- `15d8a16`: package.json + package-lock (vite 7.3.6, typescript 5.9,
-  vite-plugin-static-copy; npm audit: 0 vulnerabilities), strict tsconfig
-  (`noUncheckedIndexedAccess`, `erasableSyntaxOnly`), vite.config.ts with the
-  static-copy migration list (4 legacy pages incl. tokio_stats.html + the 12
-  root-relative scripts they reference), src/ skeleton dirs (+
-  `src/pages/dev-probe.ts` as the placeholder build input and T04's HMR
-  probe), `dist/.gitkeep` + `public/.gitkeep` (the public copy regenerates
-  dist/.gitkeep on every build so `git status` stays clean),
-  `ui/.gitignore`, rust-embed `#[folder]` -> `ui/dist/`.
-- `4ca1593`: HANDOFF (gate question, since resolved).
-- `33324a9`: vite.config.ts `legacyPageAssets` = flamegraph.css +
-  demo-trace.bin added to the copy list per the ruling.
-- (final commit): this HANDOFF update with complete evidence.
-- Deliberate: NO `"type": "module"` in package.json - `node test_*.js` must
-  keep loading the root scripts as CJS (constraint H2).
+Gate note: this worktree was originally cut from stale main (b776d27). The
+orchestrator confirmed the diagnosis and authorized
+`git switch -c ticket/T03-ci-release-ui-build be2c009` in place; verified
+`git log --oneline -2` shows be2c009 as base and `dial9-viewer/ui/package.json`
+exists before starting.
+
+## COMPLETED (commit shas)
+
+- e3c27fc build(viewer-ui): add vitest devDependency and test script
+  - `dial9-viewer/ui/package.json`: `"test": "vitest run --passWithNoTests"`,
+    vitest ^4.1.10 devDependency; lockfile updated via `npm install --save-dev vitest`.
+    No vitest config added (T10's job).
+- f17dc74 ci: add ui job (tsc, vitest, vite build); build UI before releases
+  - `.github/workflows/ci.yml`: new `ui` job (Node 24 per trace-integrity
+    precedent, npm cache keyed on `dial9-viewer/ui/package-lock.json`,
+    working-directory `dial9-viewer/ui`): `npm ci` -> `npx tsc --noEmit` ->
+    `npm run test` -> `npm run build`. `ui` added to `ci-pass` needs.
+  - `.github/workflows/release.yml`: `npm ci && npm run build`
+    (working-directory `dial9-viewer/ui`) inserted BEFORE the release-plz
+    step in `release-plz-release`, and at the start of the
+    `build-viewer-binaries` matrix job before `cargo build` (with
+    `shell: bash` there - matrix includes windows-latest). Node 24 +
+    setup-node pinned to the same sha as ci.yml. `release-pr.yml`
+    untouched per spec.
+- ea8e2c7 fix(viewer): package built ui/dist in the crate archive
+  - `dial9-viewer/Cargo.toml`: switched `exclude` to an explicit `include`
+    list. Required because cargo drops gitignored files (all of ui/dist/*
+    except .gitkeep) unless `include` is specified - the crate would have
+    shipped an EMPTY embedded UI.
+  - `dial9-viewer/ui/README.md`: "UI development requires Node" section.
+- (this commit) docs(T03): HANDOFF
 
 ## DoD EVIDENCE
 
-1. check `npm ci && npm run build` -> dist serves all FOUR pages + assets
-   byte-identical: `npx tsc --noEmit` clean; `npm run build` copies 18 items.
-   Byte-diff via two `python3 -m http.server` instances (ui/ on :3011,
-   ui/dist/ on :3012), `curl` + `cmp` on all 18 served paths
-   (index/viewer/flamegraph/tokio_stats.html, the 12 scripts,
-   flamegraph.css, demo-trace.bin): ALL IDENTICAL, FAIL=0.
-2. check cargo-only checkout compiles with empty UI: emptied `ui/dist/` to
-   `.gitkeep` only, `cargo build -p dial9-viewer` -> Finished dev profile
-   (34s). No npm involvement in build.rs (unchanged, none exists).
-3. check no `test_*.js` in the binary: PASS. `cargo build --release -p
-   dial9-viewer --features dev-server --bin dev-server` (rust-embed embeds
-   only in release; debug reads from disk at runtime), then `strings` on the
-   40 MB binary scanned for ALL 29 `test_*.js` filenames: 3 hits total, each
-   a code COMMENT inside a legitimately embedded copied file
-   (flamegraph.html:163, heatmap.js:21, panel_layout.js) - byte-identical
-   copying requires those comments; zero test files embedded. Positive
-   controls prove dist content IS embedded: "dial9 Trace Browser" x2,
-   "fg-search-bar" x2, "url_state.js" x3, "tokio_stats.html" x2,
-   "demo-trace.bin" x6.
-4. Rust gates for the mod.rs change: `cargo fmt --check` PASS; `cargo clippy
-   --all-targets --features __nonlinux_all_features` PASS for dial9-viewer
-   (zero warnings in the touched crate); `cargo nextest run
-   --stress-duration 20s` PASS: 810 tests x 2 stress iterations, 0 failed,
-   0 skipped, no flakes (32.4s test summary).
+### 1. CI green on a PR touching only ui/src, with `ui` in ci-pass needs
 
-## PRE-EXISTING FINDINGS (not fixed, per scope rules)
+PENDING-CI (not locally checkable; no push allowed from this worktree).
+Local proxies, all green:
 
-- Clippy (macOS, `__nonlinux_all_features`) reports pre-existing warnings in
-  UNTOUCHED crates: `perf-self-profile/src/rate_limit.rs` (unused macro
-  `rate_limited`, unused import, dead `time_since_epoch`) and
-  `dial9-tokio-telemetry/src/telemetry/recorder/mod.rs:10` (unused import
-  `poll_start_ts_monotonic`). Likely cfg(non-Linux) artifacts. Report-only.
+- YAML validity + needs list (ruby -ryaml):
+
+```
+.github/workflows/ci.yml OK, jobs: fmt, clippy, build, nightly-gate, build-nightly,
+  feature-check, check-docs, trace-integrity, ui, asan, ecs-sim, shuttle,
+  semver-checks, package, ci-pass
+ci-pass needs: fmt, clippy, build, feature-check, check-docs, trace-integrity,
+  ui, asan, ecs-sim, shuttle, package
+.github/workflows/release.yml OK, jobs: release-plz-release, build-viewer-binaries
+```
+
+- The exact `ui` job command sequence run locally from a clean install
+  (Node v25.9.0 local vs Node 24 in CI):
+
+```
+$ npm ci                 -> ok ("found 0 vulnerabilities")
+$ npx tsc --noEmit       -> ok (exit 0)
+$ npm run test           -> "No test files found, exiting with code 0"  (vitest 4.1.10, --passWithNoTests)
+$ npm run build          -> "vite v7.3.6 ... Copied 18 items. built in 35ms"
+```
+
+- actionlint: not installed locally, skipped.
+
+### 2. cargo package produces an archive containing ui/dist with built assets
+
+Ran after `npm run build`:
+
+```
+$ RUSTFLAGS="--cfg tokio_unstable" CARGO_TARGET_DIR=.../target cargo package \
+    --no-verify --allow-dirty \
+    -p dial9-trace-format-derive -p dial9-trace-format -p dial9-core \
+    -p dial9-utils -p dial9-perf-self-profile -p dial9-macro \
+    -p dial9-tokio-telemetry -p dial9-viewer
+    Packaged 68 files, 4.8MiB (3.6MiB compressed)
+
+$ tar -tzf target/package/dial9-viewer-0.4.0.crate | grep -c 'ui/dist/'
+20        # .gitkeep + assets/dev-probe-*.js + 4 legacy pages + 12 core js
+          # + flamegraph.css + demo-trace.bin
+$ tar -tzf target/package/dial9-viewer-0.4.0.crate | grep -c 'node_modules\|ui/test_'
+0
+```
+
+Notes on invocation:
+- The ticket's single-crate form (`cargo package -p dial9-viewer
+  --allow-dirty [--no-verify]`) fails with "no matching package named
+  `dial9-core` found ... crates.io index" - dial9-core is an unpublished
+  workspace dep, so a lone dial9-viewer package cannot resolve. This is
+  PRE-EXISTING and independent of this change; the ci.yml `package` job
+  packages all eight crates together for the same reason. I used that
+  job's crate list with --no-verify.
+- --no-verify used (full 8-crate verify build is slow locally; the ci
+  `package` job runs the full verify on every PR). As a compile check with
+  the new manifest, `cargo build -p dial9-viewer` (RUSTFLAGS
+  --cfg tokio_unstable) finished clean in 1m03s.
+- cargo package now warns "ignoring test `...` as tests/... is not
+  included" (5x) plus the pre-existing dev-server warning: those targets
+  are auto-stripped from the published manifest. Expected (see contents
+  change below).
+
+### 3. ui/README.md "UI development requires Node" note
+
+Added as a `## UI development requires Node` section in
+`dial9-viewer/ui/README.md` (commit ea8e2c7): dist/ is the served output,
+npm ci / build / test / tsc commands, Node 24 in CI, cargo-only checkout
+compiles with empty UI, end users never need Node.
+
+## CRATE ARCHIVE CONTENTS CHANGE (intentional, in-scope)
+
+Old archive (exclude-based): legacy ui sources, ~24 ui/test_*.js,
+ui/demo-trace.bin + test-traces at ui root, tests/**, serve.py - and
+ui/dist/.gitkeep ONLY (no built assets).
+New archive (include list): build.rs, src/** (dev_server.rs still
+unpublished), benches/**, skills/** + README_TELEMETRY.md (both read by
+build.rs at compile time), README.md, ui/dist/**.
+Dropped: ui sources/tests (DoD requires no ui/test_*.js), tests/** and
+serve.py (the Rust integration tests reference ui-root files that no
+longer ship, so packaging them would ship broken tests), design/,
+benchmarks/ (excluded before too).
 
 ## REMAINING
 
-None on this branch. Elsewhere:
-- Execution-plan state table flip (T02 -> gates-passed) lives on the docs
-  lineage (T01 branch / orchestrator) - not part of this branch.
+- Pending-CI: open a PR touching only `dial9-viewer/ui/src` and confirm the
+  `ui` job runs and `ci-pass` gates on it (DoD item 1). No push/PR allowed
+  from this worktree.
 
-## review: ITEMS (for the human reviewer)
+## BLOCKERS
 
-- Dependency justification per S1: exactly three dev-deps (vite, typescript,
-  vite-plugin-static-copy - the migration aid named by the ticket). No
-  runtime deps.
-- The deliberate ABSENCE of `"type": "module"` in ui/package.json (H2:
-  `node test_*.js` must keep loading root scripts as CJS).
-- The `dev-probe.ts` placeholder Vite input pattern (page tickets replace).
-- The dist/.gitkeep-via-public/.gitkeep regeneration trick.
+None.
 
-## NOTES
+## OBSERVATIONS (out of scope, not acted on)
 
-- `dev-probe.ts` emits an empty chunk warning from Vite ("Generated an empty
-  chunk: dev-probe") - expected: the module exports a constant and has no
-  side effects; page tickets replace this input.
-- Byte-diff rig: `python3 -m http.server` chosen because the dev-server
-  hardcodes its UI dir; T12 replaces this rig with real parity tooling.
+- The ci.yml `package` job still runs cargo package WITHOUT an npm build,
+  so the archive it verifies has an empty ui/dist (.gitkeep only). That is
+  exactly the H1 "cargo-only checkout compiles" property and the job
+  passes; the release path (release.yml) is the one that now builds dist
+  first. If the maintainer wants CI's packaged archive to mirror the
+  release archive byte-for-byte, that would be a follow-up.
+- fmt/clippy not run: no .rs files touched (manifest, workflows, ui
+  package metadata, README only). `cargo build -p dial9-viewer` run
+  instead per AGENTS.md JS-change guidance.
