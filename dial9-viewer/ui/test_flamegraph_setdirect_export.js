@@ -59,7 +59,10 @@ function newGraph() {
   }
 
   const prevDocument = global.document;
-  const prevNavigator = global.navigator;
+  // navigator is a getter-only global on Node 24 (CI), so plain assignment
+  // throws. Save/restore its property descriptor and stub via defineProperty
+  // so this works on both Node 18 (local) and Node 24 (CI).
+  const prevNavigatorDesc = Object.getOwnPropertyDescriptor(globalThis, "navigator");
   const prevWindow = global.window;
   const prevDpr = global.devicePixelRatio;
 
@@ -67,7 +70,11 @@ function newGraph() {
   doc.body = makeEl();
   doc.createElement = () => makeEl();
   global.document = doc;
-  global.navigator = { platform: "" };
+  Object.defineProperty(globalThis, "navigator", {
+    value: { platform: "" },
+    configurable: true,
+    writable: true,
+  });
   global.window = { innerWidth: 1600, open() { return null; } };
   global.devicePixelRatio = 1;
 
@@ -77,7 +84,11 @@ function newGraph() {
 
   // Restore globals; the renderer already captured what it needs.
   global.document = prevDocument;
-  global.navigator = prevNavigator;
+  if (prevNavigatorDesc) {
+    Object.defineProperty(globalThis, "navigator", prevNavigatorDesc);
+  } else {
+    delete globalThis.navigator;
+  }
   global.window = prevWindow;
   global.devicePixelRatio = prevDpr;
 
