@@ -109,11 +109,17 @@ links to it; it remains only for out-of-tree callers (e.g. the
 
 ## Tests — IMPORTANT for agents
 
-Tests are plain Node scripts named `test_*.js` (run with `node test_foo.js`),
-most using the shared `test_harness.js`.
+The test suite is mid-migration to Vitest (ADR-0004 section 7); both runners
+are wired in CI until the last legacy file moves:
 
-**CI does NOT auto-discover these tests.** They are listed explicitly in
-`../../scripts/e2e-trace-tests.sh`, which the `trace-integrity` job in
-`.github/workflows/ci.yml` runs. If you add a new `test_*.js`, you MUST add a
-line for it in `scripts/e2e-trace-tests.sh` or it will never run in CI — adding
-the file alone is not enough.
+- **Vitest suites** (`tests/core/**/*.test.ts` for migrated legacy suites,
+  `src/**/*.test.ts` for new TS modules) run with `npm run test` and are
+  auto-discovered — no registration needed. The `ui` job in
+  `.github/workflows/ci.yml` runs them. New tests should be written this way.
+- **Legacy suites** are plain Node scripts named `test_*.js` (run with
+  `node test_foo.js`), most using the shared `test_harness.js`.
+  **CI does NOT auto-discover these tests.** They are listed explicitly in
+  `../../scripts/e2e-trace-tests.sh`, which the `trace-integrity` job in
+  `.github/workflows/ci.yml` runs. If you add a new `test_*.js`, you MUST add a
+  line for it in `scripts/e2e-trace-tests.sh` or it will never run in CI —
+  adding the file alone is not enough.

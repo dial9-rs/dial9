@@ -56,9 +56,6 @@ node dial9-viewer/ui/test_stream_parse.js
 echo "--- Checking buffered parser paint-yield throttle (#595) ---"
 node dial9-viewer/ui/test_parse_yield_throttle.js
 
-echo "--- Checking bring-your-own-credentials store ---"
-node dial9-viewer/ui/test_creds.js
-
 echo "--- Checking landing-page URL state (serialize/parse) ---"
 node dial9-viewer/ui/test_url_state.js
 
@@ -67,9 +64,6 @@ node dial9-viewer/ui/test_all_skills_snippets.js
 
 echo "--- Checking flamegraph API refinement helpers ---"
 node dial9-viewer/ui/test_flamegraph_api.js
-
-echo "--- Checking prefix detection ---"
-node dial9-viewer/ui/test_prefix_detection.js
 
 echo "--- Checking enclosing spans (per-worker) ---"
 node dial9-viewer/ui/test_enclosing_spans.js
