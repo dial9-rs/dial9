@@ -19,6 +19,7 @@ const {
   decodeScope,
   diffSearch,
   parseDiff,
+  chooseTarget,
 } = require("./flamegraph_diff.js");
 
 let passed = 0;
@@ -334,6 +335,42 @@ assertEq(parseDiff("diff=1&a=abc"), null, "diff link missing b -> null");
 assertEq(parseDiff("diff=1"), null, "diff link missing both a and b -> null");
 assert(parseDiff(new URLSearchParams("diff=1&a=" + encodeScope("bucket=x") + "&b=" + encodeScope("bucket=y"))) != null,
   "parseDiff accepts a URLSearchParams as well as a string");
+
+// ── chooseTarget: single-scope vs captured A/B diff routing (issue #626) ──
+// The landing page's top "Flamegraph"/"Tokio Stats" buttons route through the
+// same seam as the diff tray's launch buttons, so once a full diff is captured
+// the top button opens the diff instead of a single scope.
+{
+  const diffA = fullScopeQuery(new URLSearchParams("bucket=ba&service=svc&host=h1"));
+  const diffB = fullScopeQuery(new URLSearchParams("bucket=bb&service=svc&host=h2"));
+
+  // hasDiff true -> diff link, correct page per kind, per-side api=1 for flamegraph.
+  const fg = chooseTarget("flamegraph", { hasDiff: true, diffA, diffB });
+  assertEq(fg.page, "flamegraph.html", "diff mode flamegraph -> flamegraph.html");
+  assert(fg.search.indexOf("diff=1&a=") === 0, "diff mode flamegraph search starts with diff=1&a=..");
+  assert(fg.search.indexOf("&b=") !== -1, "diff mode flamegraph search carries b=..");
+  const fgParsed = parseDiff(fg.search);
+  assertEq(fgParsed.a.get("bucket"), "ba", "diff mode flamegraph: side A scope round-trips");
+  assertEq(fgParsed.a.get("api"), "1", "diff mode flamegraph: per-side api=1 set on A");
+  assertEq(fgParsed.b.get("api"), "1", "diff mode flamegraph: per-side api=1 set on B");
+
+  const tk = chooseTarget("tokio", { hasDiff: true, diffA, diffB });
+  assertEq(tk.page, "tokio_stats.html", "diff mode tokio -> tokio_stats.html");
+  assert(tk.search.indexOf("diff=1&a=") === 0, "diff mode tokio search starts with diff=1&a=..");
+  const tkParsed = parseDiff(tk.search);
+  assertEq(tkParsed.a.get("api"), null, "diff mode tokio: no api flag (tokio-stats does not use it)");
+
+  // hasDiff false -> the caller's pre-built single-scope query, unchanged.
+  const single = chooseTarget("flamegraph", { hasDiff: false, singleQuery: "api=1&bucket=b&service=svc" });
+  assertEq(single.page, "flamegraph.html", "single mode -> flamegraph.html");
+  assertEq(single.search, "api=1&bucket=b&service=svc", "single mode passes the single-scope query through unchanged");
+  assert(parseDiff(single.search) == null, "single mode search is not a diff link");
+  assertEq(
+    chooseTarget("tokio", { hasDiff: false, singleQuery: "bucket=b&service=svc" }).page,
+    "tokio_stats.html",
+    "single mode tokio -> tokio_stats.html",
+  );
+}
 
 // ── flamegraph_diff_view: apiUrlFor / scopeLabel (DOM-free helpers) ──
 {
