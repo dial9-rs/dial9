@@ -173,6 +173,39 @@ function totalBytes(segments) {
     return segments.reduce((sum, seg) => sum + (seg.size || 0), 0);
 }
 
+// Pick "nice" axis tick times for the epoch-second range [tMin, tMax], aiming
+// for at most `targetCount` ticks. Ticks snap to human-readable intervals (1/5/
+// 10/30s, 1/2/5/10/15/30m, 1/2/3/6/12h, 1/2/7d) and are aligned to multiples of
+// the chosen step so labels land on round wall-clock times. Returns the aligned
+// tick times (ascending, within [tMin, tMax]). A degenerate range (tMax <= tMin)
+// yields a single tick at tMin so callers never divide by an empty tick set.
+function niceTimeTicks(tMin, tMax, targetCount) {
+    if (!(tMax > tMin)) return [tMin];
+    const target = targetCount > 0 ? targetCount : 1;
+    // Candidate step sizes in seconds, ascending.
+    const steps = [
+        1, 2, 5, 10, 15, 30,
+        60, 120, 300, 600, 900, 1800,
+        3600, 7200, 10800, 21600, 43200,
+        86400, 172800, 604800,
+    ];
+    // Number of step-aligned ticks that fall within [tMin, tMax].
+    const alignedCount = (s) => Math.floor(tMax / s) - Math.ceil(tMin / s) + 1;
+    // Smallest step whose aligned tick count fits within the target.
+    let step = steps[steps.length - 1];
+    for (const s of steps) {
+        if (alignedCount(s) <= target) { step = s; break; }
+    }
+    // Spans larger than the biggest candidate step still need to fit the target,
+    // so fall back to an even division rounded up to a whole second.
+    if (alignedCount(step) > target) step = Math.max(1, Math.ceil((tMax - tMin) / target));
+    const out = [];
+    const first = Math.ceil(tMin / step) * step;
+    for (let t = first; t <= tMax + 1e-9; t += step) out.push(t);
+    if (!out.length) out.push(tMin);
+    return out;
+}
+
 // Decide whether a document-level click should clear the current heatmap
 // selection. The browse view clears the selection on any click that lands
 // outside the timeline and the actions bar. The one exception is the synthetic
@@ -237,5 +270,6 @@ if (typeof module !== "undefined" && module.exports) {
         totalBytes,
         densityColor,
         shouldClearSelectionOnClick,
+        niceTimeTicks,
     };
 }
