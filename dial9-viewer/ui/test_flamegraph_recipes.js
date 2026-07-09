@@ -12,7 +12,7 @@ const { parseTrace, EVENT_TYPES } = require("./trace_parser.js");
 const TraceAnalysis = require("./trace_analysis.js");
 
 async function main() {
-  const tracePath = path.join(__dirname, "demo-trace.bin");
+  const tracePath = path.join(__dirname, "public", "demo-trace.bin");
   if (!fs.existsSync(tracePath)) {
     console.error(`demo-trace.bin not found at ${tracePath}`);
     process.exit(1);

@@ -8,7 +8,7 @@ const fs = require("fs");
 const path = require("path");
 
 const skillsDir = path.resolve(__dirname, "..", "skills");
-const demoPath = path.join(__dirname, "demo-trace.bin");
+const demoPath = path.join(__dirname, "public", "demo-trace.bin");
 
 // Parse markdown: extract ```javascript blocks with their heading
 function extractRecipes(md, filename) {

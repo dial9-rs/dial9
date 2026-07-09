@@ -228,7 +228,7 @@ test("filenameStem never produces a dotfile or punctuation-only name", () => {
 });
 
 async function main() {
-  const tracePath = path.join(__dirname, "demo-trace.bin");
+  const tracePath = path.join(__dirname, "public", "demo-trace.bin");
   if (fs.existsSync(tracePath)) {
     await testAsync("exports a real tree built from demo-trace.bin", async () => {
       const trace = await parseTrace(fs.readFileSync(tracePath));

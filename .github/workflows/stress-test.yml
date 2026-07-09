@@ -104,7 +104,7 @@ jobs:
             echo "::endgroup::"
             if [ "$rc" -ne 0 ]; then
               echo "::error::Trace integrity check failed on iteration $i — saving demo trace as an artifact for debugging"
-              cp dial9-viewer/ui/demo-trace.bin "$ARTIFACT_DIR/failing-demo-trace.bin"
+              cp dial9-viewer/ui/public/demo-trace.bin "$ARTIFACT_DIR/failing-demo-trace.bin"
               {
                 echo "iteration=$i"
                 echo "reproduce with: node dial9-viewer/ui/test_trace_integrity.js failing-demo-trace.bin"

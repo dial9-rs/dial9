@@ -22,7 +22,7 @@ REPO_ROOT="$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
 
 TRACE_PATH="$REPO_ROOT/sched-trace.bin"
-DEMO_DEST="$REPO_ROOT/dial9-viewer/ui/demo-trace.bin"
+DEMO_DEST="$REPO_ROOT/dial9-viewer/ui/public/demo-trace.bin"
 # RotatingWriter turns "sched-trace.bin" into "sched-trace.0.bin.gz", etc.
 TRACE_GZ_GLOB="$REPO_ROOT/sched-trace.*.bin.gz"
 
@@ -93,13 +93,13 @@ else
     echo "         demo-trace.properties.json may be STALE relative to the trace." >&2
     echo "         Run this once node is available, on a perf-capable host:" >&2
     echo "           node $PROPS_SCRIPT $DEMO_DEST > $PROPS_DEST" >&2
-    PROPS_HINT="  # then: node dial9-viewer/ui/trace_properties.js dial9-viewer/ui/demo-trace.bin > dial9-viewer/tests/fixtures/demo-trace.properties.json"
+    PROPS_HINT="  # then: node dial9-viewer/ui/trace_properties.js dial9-viewer/ui/public/demo-trace.bin > dial9-viewer/tests/fixtures/demo-trace.properties.json"
 fi
 
 echo ""
 echo "✓ Demo trace regenerated successfully!"
 echo ""
 echo "To commit:"
-echo "  git add dial9-viewer/ui/demo-trace.bin"
+echo "  git add dial9-viewer/ui/public/demo-trace.bin"
 echo "$PROPS_HINT"
 echo "  git commit -m 'Regenerate demo trace'"

@@ -49,7 +49,7 @@ function findTaskLifecycleInversions(
 }
 
 async function main() {
-  const tracePath = process.argv[2] || path.join(__dirname, "demo-trace.bin");
+  const tracePath = process.argv[2] || path.join(__dirname, "public", "demo-trace.bin");
 
   if (!fs.existsSync(tracePath)) {
     console.error(`Trace file not found: ${tracePath}`);

@@ -48,7 +48,8 @@ report/
 Copy viewer and its dependencies from the dial9-viewer `ui/` directory into the report folder:
 
 ```bash
-cp dial9-viewer/ui/{viewer,flamegraph}.{html,css} report/
+cp dial9-viewer/ui/{viewer,flamegraph}.html report/
+cp dial9-viewer/ui/public/flamegraph.css report/
 cp dial9-viewer/ui/{decode,trace_parser,trace_analysis,flamegraph,format,panel_layout}.js report/
 ```
 

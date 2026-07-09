@@ -118,7 +118,7 @@ async function main() {
   );
 
   // ── Demo trace + golden fixture cross-check ───────────────────────────────
-  const demoPath = path.join(__dirname, "demo-trace.bin");
+  const demoPath = path.join(__dirname, "public", "demo-trace.bin");
   if (fs.existsSync(demoPath)) {
     const demo = await computePropertiesFromFile(demoPath);
     ok(demo.by_source["0"] > 0, "demo trace has CpuProfile samples");

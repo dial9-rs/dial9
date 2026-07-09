@@ -26,7 +26,7 @@ async function collect(input, opts) {
 
 function setupDir(n) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "d9-test-dir-"));
-  const demo = path.join(__dirname, "demo-trace.bin");
+  const demo = path.join(__dirname, "public", "demo-trace.bin");
   for (let i = 0; i < n; i++) {
     fs.copyFileSync(demo, path.join(dir, `trace-${String(i).padStart(3, "0")}.bin`));
   }
@@ -35,7 +35,7 @@ function setupDir(n) {
 function cleanup(dir) { fs.rmSync(dir, { recursive: true, force: true }); }
 
 async function main() {
-  const demoPath = path.join(__dirname, "demo-trace.bin");
+  const demoPath = path.join(__dirname, "public", "demo-trace.bin");
   if (!fs.existsSync(demoPath)) { console.error("demo-trace.bin not found"); process.exit(1); }
 
   // ── Single file: async iterable yields one ParsedTrace ──

@@ -47,7 +47,7 @@ async function withInstrumentedClock(clock, fn) {
 }
 
 async function main() {
-  const tracePath = path.join(__dirname, "demo-trace.bin");
+  const tracePath = path.join(__dirname, "public", "demo-trace.bin");
   if (!fs.existsSync(tracePath)) {
     console.error(`Trace file not found: ${tracePath}`);
     process.exit(1);

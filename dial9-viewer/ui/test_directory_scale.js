@@ -26,7 +26,7 @@ function assert(cond, msg) { if (cond) pass(msg); else fail(msg); }
 
 function setupDir(n) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "d9-scale-"));
-  const demo = path.join(__dirname, "demo-trace.bin");
+  const demo = path.join(__dirname, "public", "demo-trace.bin");
   for (let i = 0; i < n; i++) {
     fs.copyFileSync(demo, path.join(dir, `seg-${String(i).padStart(4, "0")}.bin`));
   }
@@ -35,7 +35,7 @@ function setupDir(n) {
 function cleanup(dir) { fs.rmSync(dir, { recursive: true, force: true }); }
 
 async function main() {
-  if (!fs.existsSync(path.join(__dirname, "demo-trace.bin"))) {
+  if (!fs.existsSync(path.join(__dirname, "public", "demo-trace.bin"))) {
     console.error("demo-trace.bin not found"); process.exit(1);
   }
 

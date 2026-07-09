@@ -1,4 +1,4 @@
-# Regenerate dial9-viewer/ui/demo-trace.bin with no host-side Rust/AWS/Java setup.
+# Regenerate dial9-viewer/ui/public/demo-trace.bin with no host-side Rust/AWS/Java setup.
 #
 #   docker compose run --rm --build regenerate
 #   docker compose down        # tears down the DDB sidecar afterwards
@@ -59,7 +59,7 @@ services:
       AWS_DEFAULT_REGION: us-east-1
       AWS_PROFILE: local
     volumes:
-      - ./dial9-viewer/ui:/out
+      - ./dial9-viewer/ui/public:/out
     working_dir: /repo
     command:
       - bash
@@ -67,5 +67,5 @@ services:
       - |
         sysctl -w kernel.perf_event_paranoid=1 kernel.kptr_restrict=0
         scripts/regenerate_demo_trace.sh
-        install -m 0644 dial9-viewer/ui/demo-trace.bin /out/demo-trace.bin
+        install -m 0644 dial9-viewer/ui/public/demo-trace.bin /out/demo-trace.bin
         echo "Wrote /out/demo-trace.bin ($(stat -c %s /out/demo-trace.bin) bytes)"

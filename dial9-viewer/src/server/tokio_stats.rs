@@ -353,8 +353,11 @@ mod tests {
 
     #[test]
     fn test_read_polls_from_demo_trace() {
-        let data =
-            std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/ui/demo-trace.bin")).unwrap();
+        let data = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/ui/public/demo-trace.bin"
+        ))
+        .unwrap();
         let decompressed = {
             use std::io::Read;
             let mut dec = flate2::read::GzDecoder::new(data.as_slice());

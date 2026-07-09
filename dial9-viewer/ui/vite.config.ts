@@ -47,12 +47,10 @@ const legacyPageScripts = [
   "url_state.js",
 ];
 
-// Root-served assets that STAY at ui/ root (orchestrator ruling 2026-07-08,
-// recorded in docs/tickets/chunk-1-foundation.md T02): moving them to
-// public/ before T04 would break the disk-served dev loop (H5) and orphan
-// ~18 disk readers of demo-trace.bin (test_*.js, Rust tests/benches, the
-// regeneration pipeline, stress CI). T04 owns the public/ move.
-const legacyPageAssets = ["flamegraph.css", "demo-trace.bin"];
+// Root-served verbatim assets (demo-trace.bin, flamegraph.css) live in
+// public/: Vite copies public/ into the dist root unchanged (build) and
+// serves it at / (dev), so the pages' root-relative references keep working
+// in both modes with no static-copy entry.
 
 // Single-server dev loop (`npm run dev:embedded` = `vite build --watch`,
 // 02-architecture.md section 3): Rollup only rebuilds when files in its
@@ -101,9 +99,15 @@ export default defineConfig({
       targets: [
         ...legacyPages.map((f) => ({ src: f, dest: "." })),
         ...legacyPageScripts.map((f) => ({ src: f, dest: "." })),
-        ...legacyPageAssets.map((f) => ({ src: f, dest: "." })),
       ],
     }),
-    watchLegacyFiles([...legacyPages, ...legacyPageScripts, ...legacyPageAssets]),
+    // public/ is re-copied by each rebuild too, so watching its two assets
+    // keeps the dev:embedded loop alive for them as well.
+    watchLegacyFiles([
+      ...legacyPages,
+      ...legacyPageScripts,
+      "public/flamegraph.css",
+      "public/demo-trace.bin",
+    ]),
   ],
 });

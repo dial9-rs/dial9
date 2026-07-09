@@ -42,7 +42,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Seed with demo trace data — use the actual demo-trace.bin if available
     let demo_trace_path =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/demo-trace.bin");
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/public/demo-trace.bin");
 
     if demo_trace_path.exists() {
         let compressed = std::fs::read(&demo_trace_path)?;
