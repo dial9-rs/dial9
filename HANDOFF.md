@@ -116,8 +116,9 @@ names keep the original labels so failures map back to the old output.
 ## REMAINING
 
 - Full e2e-trace-tests.sh execution: pending CI (needs DDB Local; see above).
-- ~16 legacy `test_*.js` suites still unmigrated (later tickets); dual-runner
-  CI stays until the last one moves.
+- 20 legacy `test_*.js` suites still unmigrated (21 files at the ui/ root
+  minus test_harness.js; 13 of them registered in e2e-trace-tests.sh, 7 in
+  no CI - later tickets); dual-runner CI stays until the last one moves.
 
 ## BLOCKERS
 
