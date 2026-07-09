@@ -2,6 +2,12 @@
 git_release_enable = true
 changelog_update = false
 semver_check = true
+# Use a slash in the release-PR branch prefix so the ephemeral branch is
+# `release-plz/<timestamp>` instead of `release-plz-<timestamp>`. The latter
+# matches the `release-*` branch-protection rulesets (including the admins-only
+# creation restriction), which blocks release-plz from pushing its PR branch.
+# GitHub's `release-*` glob does not cross `/`, so `release-plz/...` is exempt.
+pr_branch_prefix = "release-plz/"
 pr_body = """
 {% for release in releases %}
 {% if release.title %}
