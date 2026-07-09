@@ -1,234 +1,143 @@
-# HANDOFF - T04 (Dev loops: HMR + single-server)
+# HANDOFF - T10 (Vitest infrastructure + first migration batch)
 
 ## STATUS
 
-DONE. All DoD items demonstrated headlessly; the one item that inherently
-needs a browser (observing the HMR websocket patch apply without reload) is
-recorded as pending-manual with the closest headless evidence attached.
+DONE. Vitest infra wired (config in vite.config.ts, node env), all 8 target
+suites migrated to `ui/tests/core/*.test.ts` with originals deleted in the
+same commits, e2e-trace-tests.sh trimmed of the two migrated registrations,
+all local gates green. The only pending-CI item is the FULL
+e2e-trace-tests.sh run (its demo-trace regeneration step needs DDB Local);
+all 13 remaining registered suites were run individually with plain `node`
+against the checked-in demo trace and pass.
 
-Branch: `ticket/T04-dev-loops` (base 94f2632, the T03 tip).
-Worktree: `/Users/facundo/code/wye/dial9-tokio-telemetry/.claude/worktrees/T04`
+Branch: `ticket/T10-vitest-first-batch` (base 70abaab, the T04 tip).
+Worktree: `/Users/facundo/code/wye/dial9-tokio-telemetry/.claude/worktrees/T10`
 
 ## COMPLETED (commit shas)
 
-- 8346987 feat(viewer-ui): add HMR proxy dev loop and dev:embedded watch loop
-  - `ui/package.json`: `"dev:embedded": "vite build --watch"`.
-  - `ui/vite.config.ts`: `server.proxy` `/api` -> `http://localhost:3001`;
-    inline `watchLegacyFiles` plugin registering the statically-copied legacy
-    pages/scripts via `this.addWatchFile`. Needed because verified fact:
-    vite-plugin-static-copy v3.2.0 watches NOTHING in build mode (chokidar is
-    dev-server-only; build mode copies once per build on writeBundle), and the
-    copied files are not in Rollup's module graph - without the plugin,
-    editing viewer.html under `vite build --watch` does nothing.
-- 8e163f9 refactor(viewer-ui): move demo-trace.bin and flamegraph.css to ui/public/
-  - `git mv` both into `ui/public/` (public/.gitkeep dropped - dir now has
-    committed content); `legacyPageAssets` list + T02 ruling comment removed
-    from vite.config.ts; the two assets added to the watch-plugin list
-    (verified: each rebuild re-copies public/ into dist, so the embedded
-    loop covers them).
-  - Disk readers updated (full sweep evidence below):
-    - 13 `ui/test_*.js` + `bench_parse.js`: `path.join(__dirname, "public",
-      "demo-trace.bin")`. Path constants only, zero test-logic changes (H2).
-    - Rust: `tests/decode_test.rs`, `tests/parser_parity_test.rs` (path fn +
-      the stale-fixture regen-hint string; line 340's `"demo-trace.bin"` is a
-      display name arg, not a path - left), `benches/decode_bench.rs`,
-      `src/server/tokio_stats.rs` (unit test), `src/ingest/decode.rs` (unit
-      test), `src/bin/dev_server.rs` (S3 seed path),
-      `dial9-trace-format/examples/format_comparison.rs` (3 CWD candidates).
-    - `scripts/regenerate_demo_trace.sh` (DEMO_DEST, no-node hint, git add
-      hint), `compose.yml` (header comment, `/out` volume now maps
-      `./dial9-viewer/ui/public`, install source path),
-      `.github/workflows/stress-test.yml` (artifact `cp`; the `node
-      test_trace_integrity.js` invocations pass no path / an artifact path,
-      unaffected), `dial9-viewer/benchmarks/trace-diagnosis/setup.sh`.
-    - Docs that instruct disk reads: `AGENTS.md` (manual regen steps),
-      `dial9-viewer/skills/dial9-html-report/SKILL.md` (cp lines; the
-      `{html,css}` brace expansion also referenced a never-existent
-      viewer.css - splitting into .html and public/flamegraph.css lines
-      fixes that incidentally).
-    - `aggregate_test.rs` mentions demo-trace.bin in comments with no path
-      stated - left per spec.
-  - NOT touched: `index.html` / `viewer.html` `?trace=demo-trace.bin` URL
-    refs and `<link href="flamegraph.css">` (served URLs, unchanged because
-    public/ lands at the dist/dev-server root; also page code = out of scope).
-  - Post-move sweep: `grep -rn "ui/demo-trace.bin|ui/flamegraph.css"` across
-    all tracked source/doc types -> zero hits outside ui/public paths.
-- 945649c feat(viewer): serve ui/dist from disk in dev mode
-  - `src/bin/dev_server.rs`: `with_dev_ui_dir(ui/dist)` (was raw `ui/`);
-    startup `tracing::warn!` when `dist/index.html` is missing (unbuilt).
-    Warns rather than bails: in proxy mode the dev-server is only the /api
-    backend and an empty dist is legitimate.
-  - `src/lib.rs` (`dial9 serve --dev`): candidates `ui/dist` /
-    `dial9-viewer/ui/dist` (was `ui` / `dial9-viewer/ui`), same
-    missing-index warning, bail message updated.
-- 92d1b05 docs(viewer-ui): document both dev loops; drop obsolete serve.py
-  - `ui/README.md`: "Dev loops" section (proxy + embedded commands, public/
-    asset location, dial9 serve --dev note).
-  - `dial9-viewer/serve.py` deleted. DISCREPANCY vs ticket: the spec's NOTE
-    claimed serve.py "does NOT exist in the tree today" as a verified fact,
-    but it DOES exist on this branch (tracked since 8454811, confirmed via
-    `git log -- dial9-viewer/serve.py`). The primary instruction ("delete,
-    obsolete") is unambiguous and both readings converge on "absent after
-    T04", so I deleted it rather than stopping. Nothing referenced it
-    (grep: only T03's historical HANDOFF text).
-- (this commit) docs(T04): HANDOFF
+- de238d6 test(viewer): wire Vitest config into vite.config.ts
+  - `test` key added to ui/vite.config.ts (NO separate vitest.config file,
+    per 02-architecture.md 2.1) with `/// <reference types="vitest/config" />`;
+    environment "node"; include: `tests/core/**/*.test.ts` (migrated legacy
+    suites, shared decision: core-suite colocation) + `src/**/*.test.ts`
+    (future TS modules).
+  - tsconfig.json include extended to `tests` - the same strict flags
+    (strict, noUncheckedIndexedAccess, verbatimModuleSyntax,
+    erasableSyntaxOnly) apply to test code.
+  - `@types/node` devDep added (tests import node:fs/node:vm/node:module;
+    nothing else in the project needed it before).
+- 69cfa2c migrate format, prefix_detection, poll_color (originals deleted);
+  `npm test` drops `--passWithNoTests` so an accidentally-empty include
+  pattern now fails loudly instead of passing silently.
+- 1e59d58 migrate heatmap, panel_layout (originals deleted).
+- bbbea31 migrate creds, parse_key (originals deleted). test_harness.js
+  KEPT: 8 unmigrated suites still require it.
+- f82c96f migrate time_range (original deleted).
+- d8b63cf e2e-trace-tests.sh: removed ONLY the test_creds.js and
+  test_prefix_detection.js lines (13 registered legacy suites remain);
+  ui/README.md testing section documents the dual-runner state;
+  design/architecture.md re-points its test_panel_layout.js reference.
 
-## H5 DISPOSITION (cargo-only checkout after the repoint)
+## CJS interop pattern (used consistently in all 8 suites)
 
-Behavior: on a checkout without Node, `ui/dist` contains only the committed
-`.gitkeep`. `dev-server` and `dial9 serve --dev` still start and serve /api
-normally, but UI requests 404; both now log a startup WARN naming the fix
-(`npm run build` / `npm run dev:embedded`, or browse the Vite server in
-proxy mode). Demonstrated: with `dist/index.html` moved aside, dev-server
-logged the warning and still bound (log excerpt in EVIDENCE 4).
+`createRequire(import.meta.url)` + destructure + `as`-cast to a local
+minimal type. Justification: the frozen core files assign `module.exports`
+inside an `if (typeof module !== "undefined")` guard, which cjs-module-lexer
+cannot statically analyze, so ESM named-import interop of those files under
+Vite/Vitest is unreliable. `createRequire` loads them through Node's native
+CJS loader - byte-identical module-loading semantics to the legacy
+`node test_*.js` baseline, and no Vite transform ever touches the frozen
+files (constraint H2). The `as`-cast gives the strict TS flags real types to
+check test bodies against.
 
-Why this does not violate H5: H1's accepted consequence (constraint doc,
-"or the repo documents that UI work requires Node") and ADR-0004 section 3
-("a cargo-only checkout still compiles (committed dist/.gitkeep, empty UI
-until built)") already fixed this trade in T02/T03: since the embed narrowed
-to `ui/dist`, the embedded (non-dev) UI on a cargo-only checkout is equally
-empty, and `ui/README.md` documents that UI work requires Node. H5's target
-is the dev LOOP for UI work (edit -> refresh without a cargo rebuild), which
-by H1's resolution presumes Node; cargo-only END USERS get populated dists
-from release CI. What T04 adds is that the failure mode is now explained at
-startup instead of a silently blank page. Serving raw `ui/` instead was not
-an option: after the asset move it 404s /flamegraph.css and /demo-trace.bin
-(and it stops being the servable set at all once pages migrate to built
-entries).
+Two path-dependent suites resolve files relative to the test file via
+`fileURLToPath(new URL("../../<file>", import.meta.url))`:
+- parse_key.test.ts reads index.html (extract-parseKey-via-regex + vm
+  sandbox mechanism preserved verbatim; T15 re-points it at
+  lib/trace/keys.ts when the TS port lands).
+- panel_layout.test.ts reads viewer.html (CSS padding-left invariant grep).
+- time_range.test.ts reads public/demo-trace.bin (T04 location preserved);
+  the original argv[2] trace-path override became the DIAL9_TRACE_PATH env
+  var per ADR-0004 section 7 ("trace-file-parameterized ... switch from argv
+  to an env var").
 
-## DoD EVIDENCE
+## Per-suite assertion diff (review DoD item)
 
-Ports used: Rust dev-server :3001 (spec default; :3002 once for the
-unbuilt-dist demo), Vite dev server :5173 (default). All servers killed
-after; verified no LISTEN sockets remained.
+Counts are assertion call sites (definitions excluded). "Split" = a compound
+`ok(a && b)` becoming one expect per leg - every original condition is
+preserved; none dropped.
 
-### 1. Embedded mode: serving + edit-refresh loop
+| Suite | Original | Migrated | Notes |
+|---|---|---|---|
+| test_format.js -> format.test.ts | 42 assertEq | 42 expect | 1:1, one it() per original assertEq, labels preserved |
+| test_prefix_detection.js -> prefix_detection.test.ts | 8 assert | 8 expect | 1:1; original `=== true/false` identity preserved via toBe(true/false) |
+| test_poll_color.js -> poll_color.test.ts | 7 fail sites guarding ~31 loop conditions | 9 expect statements executing 33 assertions | Same inputs/conditions; 2 compound equality chains (floor c0=c1=c2, ceiling c1=c2=c3) split into 2 expects each; loops now check every element with expect instead of early-return fail |
+| test_heatmap.js -> heatmap.test.ts | 39 ok/approx | 50 expect | 11 compound `ok(a && b [&& c])` split per leg; approx(a,b,eps) preserved exactly as \|a-b\| <= eps (expectApprox helper) |
+| test_panel_layout.js -> panel_layout.test.ts | 24 assert | 24 expect | 1:1 incl. the viewer.html CSS-grep invariant test; strictEqual -> toBe, ok(finite) -> toBe(true) |
+| test_creds.js -> creds.test.ts | 36 assert | 37 expect | +1: `get()` result null-checked before field access (TS strictness, also a real assertion). "rejects on missing field" try/catch+2 asserts merged into one `rejects.toThrow(/required/)` (still checks threw AND message). listBuckets-error compound `/401/ && /rejected/` split into 2 matches + explicit threw check |
+| test_parse_key.js -> parse_key.test.ts | 13 assertEq + 2 guards | 17 expect | 13 field checks 1:1; locate-guard -> expect not.toBeNull; compound object check (`!p \|\| typeof p !== "object"`) split into 2; +1 strengthened: extracted parseKey checked to be a function before use |
+| test_time_range.js -> time_range.test.ts | 22 fail sites | 23 expect | +1: trace-file-exists guard is now an expect instead of console.error+exit. Per-event in-range loops report offender COUNT (filter + toBe(0)) instead of bailing at the first offender - strictly stronger. EVENT_TYPES import dropped (was imported but never used in the original) |
 
-Serving from `ui/dist` via dev-server (after `npm run build`) - all
-byte-identical (curl + cmp against source files):
+Restructuring note (applies to poll_color, heatmap, creds, parse_key,
+time_range): compound conditions were split so a failure pinpoints the exact
+leg; nothing was weakened and no original condition was removed. Suite/it
+names keep the original labels so failures map back to the old output.
 
-```
-OK byte-identical: /index.html /viewer.html /flamegraph.html
-  /tokio_stats.html /decode.js /panel_layout.js        (vs ui/<file>)
-OK byte-identical: /demo-trace.bin /flamegraph.css     (vs ui/public/<file>)
-GET /api/config -> {"default_bucket":"demo-traces","default_prefix":"traces",
-  "aggregation_enabled":true,"supports_byo_credentials":true,
-  "supports_assume_role":false}
-```
+## DoD evidence
 
-(Full 18-file dist-vs-source cmp sweep also run after the build: 16 copied
-files + 2 public/ assets, zero mismatches.)
-
-Edit-refresh loop with `npm run dev:embedded` running (temporary edits,
-reverted before committing; page-HTML edits are out of scope as landed
-changes, these landed nothing):
-
-```
-append "<!-- T04-embedded-loop-demo -->" to ui/viewer.html
-  -> ~2s later curl :3001/viewer.html | grep -c marker  => 1
-git checkout ui/viewer.html
-  -> curl :3001/viewer.html | grep -c marker            => 0
-append "/* T04-embedded-css-demo */" to ui/public/flamegraph.css
-  -> curl :3001/flamegraph.css | grep -c marker         => 1
-git checkout; re-curl                                   => 0
-```
-
-Also proves the seed path: dev-server logged
-`seeded full demo trace ... size=11081465` reading from ui/public/.
-
-### 2. Proxy mode: HMR loop + /api
-
-With dev-server on :3001 and `npm run dev` on :5173:
-
-```
-GET :5173/viewer.html         -> served (legacy page from ui/ root)
-GET :5173/api/config          -> same JSON as :3001 (proxy works)
-GET :5173/demo-trace.bin      -> byte-identical to ui/public/demo-trace.bin
-GET :5173/flamegraph.css      -> byte-identical to ui/public/flamegraph.css
-```
-
-HMR headless evidence (closest possible without a browser):
-
-```
-GET :5173/src/pages/dev-probe.ts  -> "export const uiScaffoldVersion = 1;"
-edit src/pages/dev-probe.ts (1 -> 2)
-GET (2s later)                    -> "export const uiScaffoldVersion = 2;"
-revert; GET                       -> back to version 1
-```
-
-Vite served the edited module content immediately after each edit (its
-transform + module-graph invalidation path, which is what feeds HMR).
-PENDING-MANUAL: observing the websocket patch apply in a live browser tab
-without a full reload. Note the probe module is not yet referenced by any
-served page (placeholder input), so a browser observation only becomes
-meaningful with T13/T14's real page entries.
-
-### 3. `/api/*` works in both
-
-Shown above: :3001/api/config directly (embedded) and :5173/api/config
-through server.proxy (proxy mode) return identical config JSON.
-
-### 4. Unbuilt-dist behavior (H5 evidence)
-
-With dist/index.html temporarily absent, dev-server (PORT=3002) logged:
-
-```
-WARN dev_server: ui/dist has no built UI - run `npm run build` or
-  `npm run dev:embedded` in dial9-viewer/ui (or use `npm run dev` and
-  browse the Vite server instead)
-  path=.../dial9-viewer/ui/dist
-INFO dev_server: dial9-viewer dev server listening on http://localhost:3002
-```
-
-## GATES
-
-- `npm ci` -> ok; `npx tsc --noEmit` -> exit 0; `npm run build` ->
-  "Copied 16 items, built in 34ms" (was 18: the 2 assets now ship via
-  public/).
-- Affected JS suites (`node <file>`, all 13 edited test files):
-  test_all_skills_snippets, test_fetch_traces, test_directory_scale,
-  test_directory_parse, test_flamegraph_export, test_stream_parse,
-  test_slice, test_parse_yield_throttle, test_trace_properties,
-  test_trace_integrity, test_trace_analysis, test_time_range -> PASS.
-  test_flamegraph_recipes -> 1 failing case ("Recipe polls > 5ms: expected
-  >0 samples for long polls"), PRE-EXISTING: fails identically on the
-  untouched main checkout (fb81219) with the un-moved trace; data-dependent
-  on the committed demo capture, unrelated to the path change. Not fixed
-  (scope rule); flagged in OBSERVATIONS.
-- `cargo fmt --check` -> OK.
-- `cargo clippy --all-targets --features __nonlinux_all_features` (macOS) ->
-  no errors; pre-existing warnings in untouched crates only
-  (dial9-perf-self-profile rate_limit dead code x3,
-  dial9-tokio-telemetry unused import) - none in files this ticket touched.
-- `cargo nextest run` -> 810/810 passed (includes the re-pathed decode_test
-  + parser_parity_test).
-- `cargo nextest run --stress-duration 20s` -> 2 iterations, 810 passed
-  each, no flakes.
-- `cargo build -p dial9-viewer --features dev-server` -> clean.
+- `vitest run` green, all 8 suites migrated:
+  `Test Files 8 passed (8) / Tests 122 passed (122)` (~2.5s; time_range
+  dominates - 7 parses of the 3.4MB demo trace).
+- Originals deleted in the same commits as their replacements (see shas
+  above); `ls dial9-viewer/ui/test_*.js` no longer lists any of the 8.
+- `npx tsc --noEmit`: clean (strict flags cover tests/ via tsconfig include).
+- `npm run build`: dist listing IDENTICAL before/after the whole ticket
+  (19 files; diff of sorted `find dist -type f` = empty). Migrated tests are
+  not in dist and not in the embed set (rust-embed folder is `ui/dist/`).
+- `cargo build -p dial9-viewer`: green
+  (CARGO_TARGET_DIR=/Users/facundo/code/wye/dial9-tokio-telemetry/target).
+  NO Rust files touched in this ticket (diff stat vs 70abaab confirms).
+- e2e-trace-tests.sh: `bash -n` clean; the full script needs DDB Local for
+  its regenerate-demo-trace step (per its header) which is not available in
+  this environment -> full-script run is PENDING-CI (trace-integrity job).
+  Compensating local evidence: all 13 REMAINING registered suites run
+  individually with plain `node` against the checked-in
+  ui/public/demo-trace.bin - all PASS: trace_integrity, task_lifecycle,
+  trace_analysis, trace_properties, fetch_traces, stream_parse,
+  parse_yield_throttle, url_state, all_skills_snippets, flamegraph_api,
+  enclosing_spans, flamegraph_export, runtime_groups.
+- CI runs both runners, verified with NO workflow edits needed:
+  - `ui` job (.github/workflows/ci.yml:178-195): npm ci, tsc --noEmit,
+    `npm run test` (= `vitest run` now), npm run build.
+  - `trace-integrity` job (ci.yml:153, run at :176): scripts/e2e-trace-tests.sh.
+- Frozen core, unmigrated tests, the four HTML pages: untouched (index.html
+  and viewer.html are only READ by the migrated suites).
 
 ## REMAINING
 
-- Pending-manual: browser-level HMR observation (see EVIDENCE 2).
-- Not run (out of local reach): compose.yml / stress-test.yml paths execute
-  only in their Docker/CI environments; changes are path-only and mirror the
-  verified regenerate_demo_trace.sh flow.
+- Full e2e-trace-tests.sh execution: pending CI (needs DDB Local; see above).
+- ~16 legacy `test_*.js` suites still unmigrated (later tickets); dual-runner
+  CI stays until the last one moves.
 
 ## BLOCKERS
 
 None.
 
-## OBSERVATIONS (out of scope, not acted on)
+## Notes for reviewers / next tickets
 
-- Pre-existing test failure: test_flamegraph_recipes.js "Recipe polls > 5ms"
-  fails on the current committed demo-trace.bin (also on main). Likely wants
-  a demo regen on a perf-capable host or a threshold revisit.
-- Pre-existing clippy warnings on the __nonlinux_all_features set (listed in
-  GATES).
-- `vite build` deletes the committed `ui/dist/.gitkeep` from the working
-  tree (emptyOutDir) - pre-existing since T02; restored via git checkout
-  each time, never committed as deleted. A build.emptyOutDir exception
-  could stop the churn if it annoys.
-- The published crate includes `/benches/**` (decode_bench.rs) but not the
-  demo trace it reads - running benches from the crates.io archive was
-  already broken before this ticket (archive carries ui/dist only) and
-  remains so; harmless for git checkouts.
+- ci.yml:193 comment ("--passWithNoTests until T10 migrates real suites to
+  Vitest") is now stale - the flag is gone from package.json and the job
+  behaves correctly unchanged. Left untouched: the ticket scoped workflow
+  edits strictly to keeping both runners running. Whoever next touches
+  ci.yml can drop the comment line.
+- heatmap.js:21 (frozen core) still says "unit-tested in test_heatmap.js";
+  frozen files are out of scope, and the comment will be resolved when the
+  file is ported.
+- `npm run build` locally deletes the committed `ui/dist/.gitkeep` (vite
+  empties outDir; pre-existing behavior, not introduced here). Restore with
+  `git checkout -- dial9-viewer/ui/dist/.gitkeep` before committing if you
+  build locally.
+- test_parse_key regex + T15: parse_key.test.ts carries the same brittle
+  `/function parseKey\([\s\S]*?\n    \}\n/` extraction as the original; if
+  index.html's inline parseKey is ever reformatted before T15 lands, the
+  beforeAll locate-guard fails with a clear message.
