@@ -108,7 +108,9 @@ None.
 
 ## NOTES
 
-- tmp/ (linemap.py, remap_md.py) intentionally NOT committed; BASE in
-  linemap.py is now `1f257f1` (correct for features/02 re-runs only).
+- tmp/ (linemap.py, remap_md.py) committed at the maintainer's request
+  (the ticket originally said to leave them out). CAUTION: BASE in
+  linemap.py is hardcoded to `1f257f1`, which is correct for features/02
+  re-runs ONLY; features/01/03 originals were anchored at `544afd2`.
 - A dev-server may still be listening on :3001 from this session's
   verification (background task); kill it if it lingers.
