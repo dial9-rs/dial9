@@ -1010,9 +1010,19 @@
         if (fromDate) document.getElementById('range-from').value = dateToPickerStr(fromDate);
         if (toDate) document.getElementById('range-to').value = dateToPickerStr(toDate);
 
-        // Re-render current view
+        // Re-render current view. Only the axis tick labels are TZ-dependent,
+        // so redraw the canvas (which relabels the axis via fmtTick) and re-lay
+        // the selection rect instead of calling renderHeatmap(), which would
+        // clear the current selection and reset the zoom. Mirrors the resize
+        // handler below.
         if (currentTab === 'browse') {
-            if (heatmapRows.length) renderHeatmap();
+            if (heatmapRows.length) {
+                drawHeatmapCanvas();
+                if (heatmapSelection && heatmapSelection.rows) {
+                    showSelRect(heatmapSelection.t0, heatmapSelection.t1,
+                        heatmapSelection.rows[0], heatmapSelection.rows[1]);
+                }
+            }
         } else {
             renderRawTable(rawObjects);
         }
