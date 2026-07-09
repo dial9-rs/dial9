@@ -1,3 +1,4 @@
+/// <reference types="vitest/config" />
 import { defineConfig, type Plugin } from "vite";
 import { viteStaticCopy } from "vite-plugin-static-copy";
 
@@ -74,6 +75,16 @@ function watchLegacyFiles(files: string[]): Plugin {
 }
 
 export default defineConfig({
+  // Vitest, the single test runner (ADR-0004 section 7, 02-architecture.md
+  // N13). Config lives here, not in a separate vitest.config file
+  // (02-architecture.md section 2.1). Migrated legacy suites live under
+  // tests/core/ (core-suite colocation); new TS modules colocate their tests
+  // under src/. Not-yet-migrated test_*.js files at the ui/ root keep running
+  // via scripts/e2e-trace-tests.sh (dual-runner CI) until the last one moves.
+  test: {
+    environment: "node",
+    include: ["tests/core/**/*.test.ts", "src/**/*.test.ts"],
+  },
   // Proxy-mode dev loop (`npm run dev`): Vite serves the UI with HMR and
   // forwards /api/* to the Rust dev-server, launched with:
   //   PORT=3001 cargo run -p dial9-viewer --bin dev-server --features dev-server
