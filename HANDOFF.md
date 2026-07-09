@@ -2,8 +2,7 @@
 
 ## STATUS
 
-DONE pending final gate (nextest stress run in flight at last update; see
-EVIDENCE - all other DoD checks pass). Asset-location gate RESOLVED by
+DONE - all DoD checks pass (evidence below). Asset-location gate RESOLVED by
 orchestrator ruling 2026-07-08: Option B - `demo-trace.bin` +
 `flamegraph.css` STAY at `ui/` root and ride the static-copy list; the
 `public/` move belongs to T04 (chunk-1 T02/T04 Work sections amended by the
@@ -21,8 +20,9 @@ orchestrator).
   dist/.gitkeep on every build so `git status` stays clean),
   `ui/.gitignore`, rust-embed `#[folder]` -> `ui/dist/`.
 - `4ca1593`: HANDOFF (gate question, since resolved).
-- (pending commit): vite.config.ts `legacyPageAssets` = flamegraph.css +
-  demo-trace.bin added to the copy list per the ruling; this HANDOFF update.
+- `33324a9`: vite.config.ts `legacyPageAssets` = flamegraph.css +
+  demo-trace.bin added to the copy list per the ruling.
+- (final commit): this HANDOFF update with complete evidence.
 - Deliberate: NO `"type": "module"` in package.json - `node test_*.js` must
   keep loading the root scripts as CJS (constraint H2).
 
@@ -37,13 +37,21 @@ orchestrator).
 2. check cargo-only checkout compiles with empty UI: emptied `ui/dist/` to
    `.gitkeep` only, `cargo build -p dial9-viewer` -> Finished dev profile
    (34s). No npm involvement in build.rs (unchanged, none exists).
-3. check no `test_*.js` in the binary: release artifact strings scan -
-   RESULT RECORDED BELOW after the release build (rust-embed only embeds in
-   release; debug reads from disk at runtime).
+3. check no `test_*.js` in the binary: PASS. `cargo build --release -p
+   dial9-viewer --features dev-server --bin dev-server` (rust-embed embeds
+   only in release; debug reads from disk at runtime), then `strings` on the
+   40 MB binary scanned for ALL 29 `test_*.js` filenames: 3 hits total, each
+   a code COMMENT inside a legitimately embedded copied file
+   (flamegraph.html:163, heatmap.js:21, panel_layout.js) - byte-identical
+   copying requires those comments; zero test files embedded. Positive
+   controls prove dist content IS embedded: "dial9 Trace Browser" x2,
+   "fg-search-bar" x2, "url_state.js" x3, "tokio_stats.html" x2,
+   "demo-trace.bin" x6.
 4. Rust gates for the mod.rs change: `cargo fmt --check` PASS; `cargo clippy
    --all-targets --features __nonlinux_all_features` PASS for dial9-viewer
    (zero warnings in the touched crate); `cargo nextest run
-   --stress-duration 20s` in flight at last HANDOFF update.
+   --stress-duration 20s` PASS: 810 tests x 2 stress iterations, 0 failed,
+   0 skipped, no flakes (32.4s test summary).
 
 ## PRE-EXISTING FINDINGS (not fixed, per scope rules)
 
@@ -55,10 +63,19 @@ orchestrator).
 
 ## REMAINING
 
-- Record nextest + strings results below when the runs complete; flip
-  STATUS to done; final commit.
+None on this branch. Elsewhere:
 - Execution-plan state table flip (T02 -> gates-passed) lives on the docs
   lineage (T01 branch / orchestrator) - not part of this branch.
+
+## review: ITEMS (for the human reviewer)
+
+- Dependency justification per S1: exactly three dev-deps (vite, typescript,
+  vite-plugin-static-copy - the migration aid named by the ticket). No
+  runtime deps.
+- The deliberate ABSENCE of `"type": "module"` in ui/package.json (H2:
+  `node test_*.js` must keep loading root scripts as CJS).
+- The `dev-probe.ts` placeholder Vite input pattern (page tickets replace).
+- The dist/.gitkeep-via-public/.gitkeep regeneration trick.
 
 ## NOTES
 
