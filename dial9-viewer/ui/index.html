@@ -164,6 +164,18 @@
             background: rgba(0,229,255,0.12);
             border: none; border-left: 1px solid #00e5ff; border-right: 1px solid #00e5ff;
         }
+        /* Hover cursor line + time readout — follow the pointer to answer
+           "what time am I looking at?". Hidden until the pointer enters the plot. */
+        #heatmap-cursor {
+            position: absolute; top: 0; width: 1px; pointer-events: none; display: none;
+            background: rgba(230,230,255,0.55);
+        }
+        #heatmap-cursor-label {
+            position: absolute; top: 2px; pointer-events: none; display: none;
+            transform: translateX(-50%); white-space: nowrap;
+            padding: 1px 5px; border-radius: 3px; font-size: 0.72em;
+            background: rgba(20,20,40,0.92); color: #e6e6ff; border: 1px solid #3a3a5e;
+        }
         #heatmap-axis {
             flex-shrink: 0; height: 22px; position: relative;
             border-top: 1px solid #222; font-size: 0.72em; color: #888;
@@ -296,7 +308,7 @@
             </div>
             <div id="heatmap-view" style="display:none">
                 <div id="heatmap-hint">
-                    <span>Drag to select a window, then open or profile it. <b>⌥ Option+drag</b> to zoom, double-click to reset.</span>
+                    <span>Click a segment to select just one · Drag to select a window · <b>⌥ Option+drag</b> to zoom · double-click to reset.</span>
                     <span class="legend">low <span class="bar"></span> high data density</span>
                     <span class="legend"><span class="gap-swatch"></span> gap (no data)</span>
                     <span style="color:#00e5ff">▏ boot change</span>
@@ -307,6 +319,8 @@
                     <div id="heatmap-plot">
                         <canvas id="heatmap-canvas"></canvas>
                         <div id="heatmap-sel"></div>
+                        <div id="heatmap-cursor"></div>
+                        <div id="heatmap-cursor-label"></div>
                     </div>
                 </div>
                 <div id="heatmap-axis"></div>
@@ -1450,22 +1464,63 @@
             ctx.fillRect(0, y + ROW_H - 1, W, 1);
         }
 
-        drawHeatmapAxis(W);
+        // Faint full-height vertical gridlines at each axis tick, so the tick
+        // labels below project onto the strips and segment start/stop times can
+        // be read off the timeline. Drawn last so they sit above the strips.
+        const ticks = niceTimeTicks(tMin, tMax, clamp(Math.floor(W / 130), 2, 8));
+        ctx.strokeStyle = 'rgba(120,120,160,0.18)';
+        ctx.lineWidth = 1;
+        for (const t of ticks) {
+            const gx = Math.round(timeToX(t, tMin, tMax, W)) + 0.5;
+            if (gx < 0 || gx > W) continue;
+            ctx.beginPath();
+            ctx.moveTo(gx, 0);
+            ctx.lineTo(gx, H);
+            ctx.stroke();
+        }
+
+        drawHeatmapAxis(W, ticks);
     }
 
-    function drawHeatmapAxis(W) {
+    // Does the epoch-second range [tMin, tMax] cross a calendar-day boundary?
+    // Uses the active TZ mode so the date label matches the tick times.
+    function spansMultipleDays(tMin, tMax) {
+        const dayKey = (epoch) => {
+            const d = new Date(epoch * 1000);
+            return useLocalTz
+                ? d.getFullYear() + '-' + d.getMonth() + '-' + d.getDate()
+                : d.getUTCFullYear() + '-' + d.getUTCMonth() + '-' + d.getUTCDate();
+        };
+        return dayKey(tMin) !== dayKey(tMax);
+    }
+
+    // Format a tick's date (YYYY-MM-DD) in the active TZ mode.
+    function fmtTickDate(epoch) {
+        const d = new Date(epoch * 1000);
+        const pad = n => String(n).padStart(2, '0');
+        return useLocalTz
+            ? d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate())
+            : d.getUTCFullYear() + '-' + pad(d.getUTCMonth() + 1) + '-' + pad(d.getUTCDate());
+    }
+
+    function drawHeatmapAxis(W, ticks) {
         const axis = document.getElementById('heatmap-axis');
         axis.innerHTML = '';
         const { tMin, tMax } = heatmapDomain;
-        const n = clamp(Math.floor(W / 130), 2, 8);
-        for (let i = 0; i <= n; i++) {
-            const frac = i / n;
+        if (!ticks) ticks = niceTimeTicks(tMin, tMax, clamp(Math.floor(W / 130), 2, 8));
+        // Show the date on the leftmost tick, or on every tick when the visible
+        // window crosses a day boundary, so the day is never ambiguous.
+        const showDates = spansMultipleDays(tMin, tMax);
+        ticks.forEach((t, i) => {
+            const x = timeToX(t, tMin, tMax, W);
+            if (x < 0 || x > W) return;
             const tick = document.createElement('div');
             tick.className = 'tick';
-            tick.style.left = (LABEL_W + frac * W) + 'px';
-            tick.textContent = fmtTick(tMin + frac * (tMax - tMin));
+            tick.style.left = (LABEL_W + x) + 'px';
+            const withDate = showDates || i === 0;
+            tick.textContent = withDate ? fmtTickDate(t) + ' ' + fmtTick(t) : fmtTick(t);
             axis.appendChild(tick);
-        }
+        });
     }
 
     // ── Region selection / zoom on the heatmap ──
@@ -1474,7 +1529,14 @@
     (function setupHeatmapInteraction() {
         const plot = document.getElementById('heatmap-plot');
         const sel = document.getElementById('heatmap-sel');
+        const cursor = document.getElementById('heatmap-cursor');
+        const cursorLabel = document.getElementById('heatmap-cursor-label');
         let dragging = false, zooming = false, startX = 0, startY = 0;
+
+        function hideCursor() {
+            cursor.style.display = 'none';
+            cursorLabel.style.display = 'none';
+        }
 
         function localXY(e) {
             const rect = plot.getBoundingClientRect();
@@ -1535,6 +1597,29 @@
                 finalizeSelection(Math.min(x, startX), Math.max(x, startX), Math.min(y, startY), Math.max(y, startY));
             }
         });
+        // Hover readout: while NOT dragging, follow the pointer with a thin
+        // cursor line and a label showing the full timestamp under it, so the
+        // user always knows what time they're looking at. Suppressed during a
+        // drag/zoom (the rubber-band already communicates the span) and when
+        // there's no data.
+        plot.addEventListener('mousemove', (e) => {
+            if (dragging || !heatmapRows.length || !heatmapDomain) { hideCursor(); return; }
+            const { x } = localXY(e);
+            const canvas = document.getElementById('heatmap-canvas');
+            const W = canvas.clientWidth || parseFloat(canvas.style.width) || 1;
+            const { tMin, tMax } = heatmapDomain;
+            const t = xToTime(x, tMin, tMax, W);
+            const H = heatmapRows.length * ROW_H;
+            cursor.style.left = Math.round(x) + 'px';
+            cursor.style.height = H + 'px';
+            cursor.style.display = 'block';
+            cursorLabel.textContent = formatEpoch(t);
+            // Clamp the label so it never overflows the plot's right/left edge.
+            const half = cursorLabel.offsetWidth / 2;
+            cursorLabel.style.left = clamp(x, half, W - half) + 'px';
+            cursorLabel.style.display = 'block';
+        });
+        plot.addEventListener('mouseleave', hideCursor);
         // Double-click anywhere on the plot resets to the full time range.
         plot.addEventListener('dblclick', () => resetHeatmapZoom());
     })();
