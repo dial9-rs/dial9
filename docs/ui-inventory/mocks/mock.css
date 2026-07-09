@@ -1,0 +1,53 @@
+/* Shared mock chrome: real dial9-viewer palette. */
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #1a1a2e; color: #e0e0e0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
+.mockbar { background: #0d0d1a; border-bottom: 1px solid #6c63ff; padding: 6px 14px; font-size: 12px; display: flex; gap: 16px; align-items: center; flex-shrink: 0; }
+.mockbar b { color: #6c63ff; }
+.mockbar a { color: #7ec8e3; text-decoration: none; }
+.mockbar .key { background: #2a2a4a; border: 1px solid #444; border-radius: 3px; padding: 1px 6px; font-family: ui-monospace, monospace; font-size: 11px; }
+.tag-new { background: rgba(108,99,255,.25); border: 1px solid #6c63ff; color: #c7c2ff; font-size: 10px; padding: 0 5px; border-radius: 3px; vertical-align: middle; }
+.illustrative { color: #666; font-size: 10px; font-style: italic; }
+
+/* Toolbar replica */
+.toolbar { background: #16213e; border-bottom: 1px solid #333; padding: 6px 12px; display: flex; gap: 10px; align-items: center; font-size: 12px; flex-shrink: 0; }
+.toolbar .title { color: #7ec8e3; font-weight: 600; }
+.toolbar .meta { color: #888; font-size: 11px; }
+.toolbar button, .btn { background: #2a2a4a; border: 1px solid #444; color: #ccc; padding: 3px 10px; border-radius: 4px; font-size: 11px; cursor: pointer; }
+.btn-hot { border-color: #ff6b6b; color: #ff9b9b; }
+
+/* Minimap (NEW element) */
+.minimap { height: 34px; background: #12122a; border-bottom: 1px solid #3a3a5e; position: relative; flex-shrink: 0; }
+.minimap .density { position: absolute; inset: 4px 0; background: repeating-linear-gradient(90deg, #2a2a5a 0 2px, #4a3a7a 2px 3px, #2a2a5a 3px 7px, #6c63ff 7px 8px, #2a2a5a 8px 14px, #ff6b6b 14px 15px, #2a2a5a 15px 22px); opacity: .8; }
+.minimap .viewport { position: absolute; top: 0; bottom: 0; left: 32%; width: 22%; border: 1px solid #00e5ff; background: rgba(0,229,255,.10); cursor: grab; }
+.minimap .poi { position: absolute; top: 0; width: 2px; height: 8px; background: #ff6b6b; }
+.minimap .label { position: absolute; right: 6px; top: 8px; font-size: 10px; color: #556; }
+
+/* Timeline strips from real screenshots */
+.crop { background-repeat: no-repeat; background-color: #10101f; }
+.strip { border-bottom: 1px solid #2a2a4a; position: relative; }
+.strip .strip-label { position: absolute; left: 0; top: 0; bottom: 0; width: 100px; background: #16213e; border-right: 1px solid #333; display: flex; align-items: center; padding-left: 8px; font-size: 11px; color: #9ab; z-index: 2; }
+
+/* Inspector sidebar (NEW composition) */
+.inspector { width: 360px; background: #151530; border-left: 1px solid #3a3a5e; display: flex; flex-direction: column; flex-shrink: 0; }
+.inspector .tabs { display: flex; border-bottom: 1px solid #333; }
+.inspector .tabs div { padding: 7px 12px; font-size: 11px; color: #888; cursor: pointer; border-bottom: 2px solid transparent; }
+.inspector .tabs div.on { color: #6c63ff; border-bottom-color: #6c63ff; }
+.inspector .body { flex: 1; overflow: auto; padding: 10px; font-size: 12px; }
+.kv { display: flex; justify-content: space-between; padding: 3px 0; border-bottom: 1px solid #222; }
+.kv .k { color: #888; } .kv .v { color: #e0e0e0; font-family: ui-monospace, monospace; font-size: 11px; }
+
+/* Status bar (NEW element) */
+.statusbar { background: #0f0f22; border-top: 1px solid #3a3a5e; padding: 4px 12px; font-size: 11px; display: flex; gap: 18px; color: #9ab; flex-shrink: 0; }
+.statusbar .sel { color: #ffeb3b; }
+.statusbar .link { color: #7ec8e3; cursor: pointer; }
+
+/* POI / issues list */
+.poilist { font-size: 11px; width: 100%; border-collapse: collapse; }
+.poilist th { text-align: left; color: #778; padding: 4px 6px; border-bottom: 1px solid #333; position: sticky; top: 0; background: #151530; }
+.poilist td { padding: 4px 6px; border-bottom: 1px solid #222; font-family: ui-monospace, monospace; cursor: pointer; }
+.poilist tr:hover td, .poilist tr.on td { background: #26265a; }
+.dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 5px; }
+.d-red { background: #ff6b6b; } .d-org { background: #ffb74d; } .d-yel { background: #ffd93d; }
+
+.compare-note { position: fixed; bottom: 10px; right: 12px; background: rgba(13,13,26,.9); border: 1px solid #6c63ff; padding: 6px 12px; border-radius: 6px; font-size: 11px; z-index: 99; }
+.fullshot { position: fixed; inset: 0; background: #000 top left no-repeat; background-size: contain; z-index: 90; display: none; }

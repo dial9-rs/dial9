@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Track A: keyboard model (behavioral)</title>
+<link rel="stylesheet" href="mock.css">
+<style>
+  .palette { position: fixed; top: 12%; left: 50%; transform: translateX(-50%); width: 560px; background: #151530; border: 1px solid #6c63ff; border-radius: 8px; box-shadow: 0 12px 40px rgba(0,0,0,.6); display: none; z-index: 50; }
+  .palette input { width: 100%; background: #0f0f22; border: none; border-bottom: 1px solid #333; color: #e0e0e0; padding: 10px 14px; font-size: 14px; outline: none; font-family: ui-monospace, monospace; }
+  .palette .res { max-height: 300px; overflow: auto; }
+  .palette .row { padding: 7px 14px; font-size: 12px; display: flex; gap: 12px; cursor: pointer; font-family: ui-monospace, monospace; }
+  .palette .row.on { background: #26265a; }
+  .palette .row .kind { color: #778; width: 52px; }
+  .palette .row .t { color: #9ab; margin-left: auto; }
+  .toast { position: fixed; bottom: 46px; left: 50%; transform: translateX(-50%); background: rgba(13,13,26,.95); border: 1px solid #444; padding: 8px 16px; border-radius: 6px; font-size: 12px; display: none; z-index: 60; }
+  .stage { flex: 1; position: relative; overflow: hidden; }
+  .stage img { width: 100%; display: block; }
+  .hl { position: absolute; border: 2px solid #ffeb3b; background: rgba(255,235,59,.12); display: none; }
+  .helpov { position: fixed; top: 14%; left: 50%; transform: translateX(-50%); width: 540px; background: #151530; border: 1px solid #6c63ff; border-radius: 8px; box-shadow: 0 12px 40px rgba(0,0,0,.6); display: none; z-index: 70; padding: 18px 22px; font-size: 13px; }
+  .helpov h3 { color: #6c63ff; font-size: 13px; margin: 8px 0 6px; }
+  .helpov .hrow { display: flex; gap: 14px; padding: 3px 0; align-items: baseline; }
+  .helpov .hrow .key { min-width: 84px; text-align: center; }
+  .helpov .foot { color: #667; font-size: 11px; margin-top: 12px; text-align: center; }
+</style></head>
+<body>
+<div class="mockbar"><b>TRACK A - keyboard model</b>
+  <span>try it here: <span class="key">/</span> search palette · <span class="key">n</span>/<span class="key">p</span> POI step · <span class="key">g</span> goto time · <span class="key">z</span> undo zoom · <span class="key">f</span> fit · <span class="key">?</span> map</span>
+  <span style="margin-left:auto"><a href="index.html">gallery</a></span>
+</div>
+
+<div class="stage">
+  <img src="assets/A1-all-panels-expanded.png" alt="viewer">
+  <div class="hl" id="hl"></div>
+</div>
+
+<div class="statusbar"><span id="status" class="sel">nothing selected</span><span style="margin-left:auto">every action above also reachable by mouse; keys are accelerators, not the only path</span></div>
+
+<div class="palette" id="pal">
+  <input id="pq" placeholder="search tasks, spans, POIs...  (Enter jump · Shift+Enter prev · Esc close)">
+  <div class="res" id="pres"></div>
+</div>
+<div class="toast" id="toast"></div>
+
+<div class="helpov" id="helpov">
+  <h3>Keyboard (proposed unified model - same on all three pages)</h3>
+  <div class="hrow"><span class="key">/</span><span>search palette: tasks, spans, POIs (Enter jump, Esc close)</span></div>
+  <div class="hrow"><span class="key">n / p</span><span>next / previous POI (steps the worst-first worklist)</span></div>
+  <div class="hrow"><span class="key">g</span><span>go to time (absolute or +relative)</span></div>
+  <div class="hrow"><span class="key">f</span><span>fit viewport to selection (or full trace)</span></div>
+  <div class="hrow"><span class="key">z</span><span>undo last zoom (view history)</span></div>
+  <div class="hrow"><span class="key">W A S D</span><span>zoom in / pan left / zoom out / pan right (focus-tolerant)</span></div>
+  <div class="hrow"><span class="key">Esc</span><span>clear selection / close panel / cancel</span></div>
+  <div class="hrow"><span class="key">?</span><span>toggle this help</span></div>
+  <div class="foot">Press Esc or ? to close · existing bindings (arrows, Shift/Alt selection) unchanged</div>
+</div>
+
+<script>
+  const DATA = [
+    { kind: "task", name: "0x3a axum_traced.rs:243:33", t: "+0.31s", x: .31 },
+    { kind: "task", name: "0x51 hyper::proto conn", t: "+0.02s", x: .02 },
+    { kind: "poi", name: "sched delay 84ms W1", t: "+1.72s", x: .41 },
+    { kind: "poi", name: "long poll 61ms W0", t: "+2.03s", x: .49 },
+    { kind: "poi", name: "blocking call 37ms W1", t: "+0.88s", x: .21 },
+    { kind: "span", name: "handle_request", t: "+1.10s", x: .27 },
+    { kind: "span", name: "db_query users", t: "+1.31s", x: .32 },
+  ];
+  const pal = document.getElementById("pal"), pq = document.getElementById("pq"), pres = document.getElementById("pres");
+  const toast = document.getElementById("toast"), status = document.getElementById("status"), hl = document.getElementById("hl");
+  let items = [], sel = 0, poiIdx = -1, zoomStack = 0;
+  const POIS = DATA.filter(d => d.kind === "poi");
+
+  function say(msg) { toast.textContent = msg; toast.style.display = "block"; clearTimeout(say.t); say.t = setTimeout(() => toast.style.display = "none", 1600); }
+  // Map a trace-time fraction onto the screenshot's real pixel geometry.
+  // A1 screenshot natural size: 1680x1050; timeline draw area starts after the
+  // 100px label gutter; worker lanes band sits at y 150-270 (natural px).
+  const NAT_W = 1680, GUTTER = 100, DRAW_R = 1660, LANE_Y = 148, LANE_H = 124;
+  function jump(d) {
+    const img = document.querySelector(".stage img");
+    const s = img.clientWidth / NAT_W;
+    hl.style.display = "block";
+    hl.style.left = (GUTTER + d.x * (DRAW_R - GUTTER)) * s - 18 + "px";
+    hl.style.width = "36px";
+    hl.style.top = LANE_Y * s + "px";
+    hl.style.height = LANE_H * s + "px";
+    status.textContent = `${d.kind} ${d.name} @ ${d.t} selected · Esc clears`;
+  }
+  function render() {
+    pres.innerHTML = items.map((d, i) => `<div class="row ${i === sel ? "on" : ""}"><span class="kind">${d.kind}</span>${d.name}<span class="t">${d.t}</span></div>`).join("");
+  }
+  function openPal() { pal.style.display = "block"; pq.value = ""; items = DATA; sel = 0; render(); pq.focus(); }
+  function closePal() { pal.style.display = "none"; }
+
+  pq.addEventListener("input", () => { items = DATA.filter(d => (d.kind + " " + d.name).toLowerCase().includes(pq.value.toLowerCase())); sel = 0; render(); });
+  pq.addEventListener("keydown", (e) => {
+    if (e.key === "ArrowDown") { sel = Math.min(sel + 1, items.length - 1); render(); e.preventDefault(); }
+    else if (e.key === "ArrowUp") { sel = Math.max(sel - 1, 0); render(); e.preventDefault(); }
+    else if (e.key === "Enter") { if (items[sel]) { jump(items[sel]); say("jumped to " + items[sel].t + " (viewport centers, match highlighted)"); } closePal(); }
+    else if (e.key === "Escape") closePal();
+    e.stopPropagation();
+  });
+
+  addEventListener("keydown", (e) => {
+    if (pal.style.display === "block") return;
+    const k = e.key;
+    if (k === "/") { openPal(); e.preventDefault(); }
+    else if (k === "n" || k === "p") {
+      poiIdx = (poiIdx + (k === "n" ? 1 : -1) + POIS.length) % POIS.length;
+      jump(POIS[poiIdx]); say(`POI ${poiIdx + 1}/${POIS.length} · ${POIS[poiIdx].name}`);
+    }
+    else if (k === "g") { const v = prompt("go to time (s or +s):", "+1.72"); if (v) { say("viewport centered on " + v); jump({ kind: "time", name: v, t: v, x: .41 }); } }
+    else if (k === "z") { zoomStack = Math.max(0, zoomStack - 1); say("zoom undo -> depth " + zoomStack + " (view restored)"); }
+    else if (k === "f") { say("fit: viewport = selection extent (or full trace if none)"); }
+    else if (k === "?") { const h = document.getElementById("helpov"); h.style.display = h.style.display === "block" ? "none" : "block"; }
+    else if (k === "Escape") {
+      const h = document.getElementById("helpov");
+      if (h.style.display === "block") { h.style.display = "none"; return; }
+      hl.style.display = "none"; status.textContent = "nothing selected";
+    }
+  });
+</script>
+</body></html>
