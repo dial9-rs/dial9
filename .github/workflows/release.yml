@@ -5,12 +5,45 @@ permissions:
   contents: write
   id-token: write
 
+# Single, parameterized publish workflow. It always runs from `main` (so the
+# release logic has one source of truth and can't drift per release branch) and
+# releases whichever branch is passed in `release_branch`. The input is
+# required with no default, so publishing is always a deliberate choice of
+# branch (e.g. `main` or `release-0.3.x`).
+#
+# NOTE: because every run is dispatched against `main`, the `release`
+# environment's branch policy can no longer distinguish which branch is being
+# released — the "only main or release-* may publish" control lives in the
+# `validate-branch` job below. The `dial9-maintainers` approval on the `release`
+# environment still gates every publish regardless of input.
 on:
   workflow_dispatch:
+    inputs:
+      release_branch:
+        description: "Branch to release (main or a release-* branch)"
+        required: true
+        type: string
 
 jobs:
+  validate-branch:
+    name: Validate release branch
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ensure input is a releasable branch
+        env:
+          RELEASE_BRANCH: ${{ inputs.release_branch }}
+        run: |
+          case "$RELEASE_BRANCH" in
+            main | release-*)
+              echo "Releasing from '$RELEASE_BRANCH'." ;;
+            *)
+              echo "Refusing to release: '$RELEASE_BRANCH' is not 'main' or a 'release-*' branch." >&2
+              exit 1 ;;
+          esac
+
   release-plz-release:
     name: Release-plz release
+    needs: validate-branch
     runs-on: ubuntu-latest
     environment: release
     outputs:
@@ -21,6 +54,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
+          ref: ${{ inputs.release_branch }}
           fetch-depth: 0
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
@@ -68,6 +102,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
+          ref: ${{ inputs.release_branch }}
           persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
