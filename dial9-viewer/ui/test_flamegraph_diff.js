@@ -13,6 +13,11 @@ const {
   layoutSide,
   nodeAtPath,
   fullScopeQuery,
+  scopeWithHost,
+  shiftScopeTime,
+  DIFF_SHIFT_1H,
+  DIFF_SHIFT_24H,
+  DIFF_SHIFT_7D,
   b64urlEncode,
   b64urlDecode,
   encodeScope,
@@ -478,6 +483,70 @@ assert(parseDiff(new URLSearchParams("diff=1&a=" + encodeScope("bucket=x") + "&b
   assertEq(parsed.b.get("api"), "1", "side B carries api=1 (aggregate path)");
   assertEq(parsed.a.get("bucket"), "b", "shared bucket survives on A");
   assertEq(parsed.b.get("service"), "svc", "shared service survives on B");
+}
+
+// ── shiftScopeTime: earlier-window presets (issue #624) ──
+// start_ns/end_ns are ~1.78e18, far above Number.MAX_SAFE_INTEGER, so the shift
+// must use BigInt or the values corrupt. Assert exact string equality against
+// BigInt-computed expectations, that the window LENGTH is preserved, and that
+// non-time params are untouched.
+{
+  const scope = fullScopeQuery(new URLSearchParams(
+    "api=1&bucket=b&prefix=p&service=svc&host=h1&start_ns=1782155999000000000&end_ns=1782159599000000000"));
+
+  const shifted = shiftScopeTime(scope, DIFF_SHIFT_24H);
+  // 1782155999000000000 - 86400000000000 = 1782069599000000000
+  assertEq(shifted.get("start_ns"), "1782069599000000000", "-24h shifts start_ns back by exactly the delta");
+  assertEq(shifted.get("end_ns"), "1782073199000000000", "-24h shifts end_ns back by exactly the delta");
+  // Window length preserved.
+  const origLen = BigInt(scope.get("end_ns")) - BigInt(scope.get("start_ns"));
+  const newLen = BigInt(shifted.get("end_ns")) - BigInt(shifted.get("start_ns"));
+  assert(origLen === newLen, "-24h preserves the window length");
+  // Non-time params untouched.
+  assertEq(shifted.get("bucket"), "b", "shiftScopeTime leaves bucket untouched");
+  assertEq(shifted.get("service"), "svc", "shiftScopeTime leaves service untouched");
+  assertEq(shifted.get("host"), "h1", "shiftScopeTime leaves host untouched");
+
+  // -1h and -7d line up with their BigInt deltas too.
+  const s1h = shiftScopeTime(scope, DIFF_SHIFT_1H);
+  assertEq(s1h.get("start_ns"), (BigInt(scope.get("start_ns")) - DIFF_SHIFT_1H).toString(), "-1h start_ns matches BigInt delta");
+  const s7d = shiftScopeTime(scope, DIFF_SHIFT_7D);
+  assertEq(s7d.get("start_ns"), (BigInt(scope.get("start_ns")) - DIFF_SHIFT_7D).toString(), "-7d start_ns matches BigInt delta");
+
+  // No window -> returned unchanged (no start_ns/end_ns to shift).
+  const noWindow = fullScopeQuery(new URLSearchParams("api=1&bucket=b&service=svc&host=h1"));
+  const nwShifted = shiftScopeTime(noWindow, DIFF_SHIFT_24H);
+  assertEq(nwShifted.get("start_ns"), null, "no start_ns -> none introduced");
+  assertEq(nwShifted.get("end_ns"), null, "no end_ns -> none introduced");
+  assertEq(nwShifted.get("bucket"), "b", "windowless scope carries other params through");
+
+  // Input is not mutated.
+  assertEq(scope.get("start_ns"), "1782155999000000000", "shiftScopeTime does not mutate the input scope");
+}
+
+// ── scopeWithHost: same-time-different-host preset (issue #624) ──
+{
+  const scope = fullScopeQuery(new URLSearchParams(
+    "api=1&bucket=b&prefix=p&service=svc&host=h1&host=h2&start_ns=1000&end_ns=2000"));
+
+  const swapped = scopeWithHost(scope, "h3");
+  assertEq(swapped.getAll("host").join(","), "h3", "scopeWithHost replaces all hosts with exactly the chosen one");
+  assertEq(swapped.get("bucket"), "b", "scopeWithHost preserves bucket");
+  assertEq(swapped.get("prefix"), "p", "scopeWithHost preserves prefix");
+  assertEq(swapped.get("service"), "svc", "scopeWithHost preserves service");
+  assertEq(swapped.get("start_ns"), "1000", "scopeWithHost preserves start_ns");
+  assertEq(swapped.get("end_ns"), "2000", "scopeWithHost preserves end_ns");
+
+  // Input is not mutated.
+  assertEq(scope.getAll("host").join(","), "h1,h2", "scopeWithHost does not mutate the input scope");
+
+  // End-to-end through the existing codec: preset 1 builds a diff link whose
+  // side B is the chosen host at side A's window.
+  const parsed = parseDiff(diffSearch(scope, scopeWithHost(scope, "h3")));
+  assert(parsed != null, "preset 1 -> diffSearch -> parseDiff round-trips");
+  assertEq(parsed.b.get("host"), "h3", "preset 1: side B narrowed to the chosen host");
+  assertEq(parsed.b.get("start_ns"), scope.get("start_ns"), "preset 1: side B keeps side A's window (same time)");
+  assertEq(parsed.a.getAll("host").join(","), "h1,h2", "preset 1: side A scope unchanged");
 }
 
 // ── Summary ──

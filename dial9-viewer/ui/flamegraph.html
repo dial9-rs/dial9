@@ -272,17 +272,70 @@
                     // "Copy link" URL for the other. `thisScope` is this tab's
                     // current scope (URLSearchParams). A (left, blue) defaults to
                     // this tab, B (right, red) to the pasted link; Swap flips them.
+                    //
+                    // Above the paste box are one-click PRESETS (issue #624) that
+                    // derive side B from side A (thisScope) without a second tab:
+                    // "same time, different host" (a dropdown of the hosts this tab
+                    // knows about) and "same scope, earlier window" (-1h/-24h/-7d).
+                    // Each preset builds scopeB via the pure FlamegraphDiff helpers
+                    // and opens the two-sided diff directly.
                     function openDiffDialog(thisScope) {
                         let otherScope = null; // parsed from the paste, or null
                         let thisIsA = true;
 
+                        // Hosts this tab knows about, for preset 1. availFacets is
+                        // scoped to the current query, so it only lists hosts
+                        // WITHIN thisScope — if the flamegraph was launched
+                        // constrained to a single host we can't offer others (the
+                        // preset is disabled below). Union the facet's hosts with
+                        // any hosts already on the scope so a seeded-but-not-yet-
+                        // responded tab still lists them.
+                        const hostSet = new Set(thisScope.getAll("host"));
+                        const hostFacet = availFacets["host"];
+                        if (hostFacet) for (const h of hostFacet.values) hostSet.add(h);
+                        const allHosts = [...hostSet].sort();
+                        const scopeHosts = thisScope.getAll("host");
+                        // A single-host scope B target excludes the host thisScope
+                        // is already pinned to (comparing a host to itself is a
+                        // no-op); when thisScope spans multiple hosts, offer them
+                        // all as the "other" host.
+                        const otherHosts = scopeHosts.length === 1
+                            ? allHosts.filter((h) => h !== scopeHosts[0])
+                            : allHosts;
+                        const canHostPreset = otherHosts.length > 0;
+                        // Time presets need a window on thisScope to shift.
+                        const canTimePreset = !!(thisScope.get("start_ns") && thisScope.get("end_ns"));
+
                         const back = document.createElement("div");
                         back.className = "fgd-dialog-backdrop";
+                        const hostOptions = otherHosts
+                            .map((h) => '<option value="' + escFg(h) + '">' + escFg(h) + '</option>')
+                            .join("");
+                        const presetHtml =
+                            '<div class="fgd-presets">' +
+                            '<div class="fgd-preset-group">' +
+                            '<label>Same time, different host</label>' +
+                            (canHostPreset
+                                ? '<select class="fgd-preset-host"><option value="">Pick a host to compare…</option>' + hostOptions + '</select>'
+                                : '<p class="fgd-preset-note">Scope covers a single host — launch the flamegraph over multiple hosts to compare.</p>') +
+                            '</div>' +
+                            '<div class="fgd-preset-group">' +
+                            '<label>Same scope, earlier window</label>' +
+                            (canTimePreset
+                                ? '<div class="fgd-preset-btns">' +
+                                  '<button class="ghost fgd-preset" data-shift="1h">-1h</button>' +
+                                  '<button class="ghost fgd-preset" data-shift="24h">-24h</button>' +
+                                  '<button class="ghost fgd-preset" data-shift="7d">-7d</button>' +
+                                  '</div>'
+                                : '<p class="fgd-preset-note">No time window on this scope to shift.</p>') +
+                            '</div>' +
+                            '</div>';
                         back.innerHTML =
                             '<div class="fgd-dialog fgd-diff-dialog">' +
                             '<h3>Compare against another flamegraph</h3>' +
-                            '<p>Paste another aggregate flamegraph\'s <b>Copy link</b> URL. ' +
-                            'The two are shown side by side — left vs right.</p>' +
+                            '<p>Pick a preset below, or paste another aggregate flamegraph\'s ' +
+                            '<b>Copy link</b> URL. The two are shown side by side — left vs right.</p>' +
+                            presetHtml +
                             '<label>Other flamegraph link</label>' +
                             '<textarea class="fgd-other" rows="2" placeholder="https://…/flamegraph.html?api=1&bucket=…"></textarea>' +
                             '<div class="fgd-ab">' +
@@ -330,6 +383,33 @@
                         }
                         refresh();
                         ta.addEventListener("input", refresh);
+
+                        // Preset launch: build scopeB from thisScope and open the
+                        // two-sided diff (thisScope stays side A). Same window.open
+                        // path as the Compare button below.
+                        function launchPreset(scopeB) {
+                            const search = FlamegraphDiff.diffSearch(thisScope, scopeB);
+                            window.open(window.location.pathname + "?" + search, "_blank");
+                            back.remove();
+                        }
+                        const hostSel = back.querySelector(".fgd-preset-host");
+                        if (hostSel) {
+                            hostSel.addEventListener("change", () => {
+                                if (!hostSel.value) return;
+                                launchPreset(FlamegraphDiff.scopeWithHost(thisScope, hostSel.value));
+                            });
+                        }
+                        const shiftDeltas = {
+                            "1h": FlamegraphDiff.DIFF_SHIFT_1H,
+                            "24h": FlamegraphDiff.DIFF_SHIFT_24H,
+                            "7d": FlamegraphDiff.DIFF_SHIFT_7D,
+                        };
+                        for (const btn of back.querySelectorAll(".fgd-preset")) {
+                            btn.addEventListener("click", () => {
+                                launchPreset(FlamegraphDiff.shiftScopeTime(thisScope, shiftDeltas[btn.getAttribute("data-shift")]));
+                            });
+                        }
+
                         back.querySelector(".fgd-swap").addEventListener("click", () => { thisIsA = !thisIsA; refresh(); });
                         back.querySelector(".fgd-cancel").addEventListener("click", () => back.remove());
                         back.addEventListener("click", (e) => { if (e.target === back) back.remove(); });

@@ -220,6 +220,46 @@ function fullScopeQuery(params) {
   return out;
 }
 
+// ---------------------------------------------------------------------------
+// Diff presets (issue #624): derive side B from side A without a second tab
+// ---------------------------------------------------------------------------
+
+// Backward time-shift deltas for the "same scope, earlier window" presets, in
+// nanoseconds. Kept as BigInt: start_ns/end_ns are ~1.78e18, well above
+// Number.MAX_SAFE_INTEGER (~9.0e15), so Number arithmetic would silently
+// corrupt them.
+const DIFF_SHIFT_1H = 3600000000000n;
+const DIFF_SHIFT_24H = 86400000000000n;
+const DIFF_SHIFT_7D = 604800000000000n;
+
+// "Same time, different host": return a NEW URLSearchParams copy of `scope`
+// with ALL existing host params removed and a single host=<host> appended.
+// Everything else (bucket/prefix/service/start_ns/end_ns/…) is preserved. The
+// input is not mutated.
+function scopeWithHost(scope, host) {
+  const p = new URLSearchParams(scope);
+  p.delete("host");
+  p.append("host", host);
+  return p;
+}
+
+// "Same scope, earlier window": return a NEW URLSearchParams copy of `scope`
+// with start_ns/end_ns each shifted back by `deltaNs` (a BigInt or a value
+// BigInt() accepts). The window LENGTH is preserved. If the scope has no
+// start_ns/end_ns there is no window to shift, so the copy is returned
+// unchanged. Host/service/bucket are untouched. The input is not mutated.
+function shiftScopeTime(scope, deltaNs) {
+  const p = new URLSearchParams(scope);
+  const start = p.get("start_ns");
+  const end = p.get("end_ns");
+  if (start != null && end != null) {
+    const d = BigInt(deltaNs);
+    p.set("start_ns", (BigInt(start) - d).toString());
+    p.set("end_ns", (BigInt(end) - d).toString());
+  }
+  return p;
+}
+
 // base64url (no padding) of a UTF-8 string. Works in both the browser and Node.
 // Scope queries are ASCII (URLSearchParams percent-encodes the rest), but we
 // route through a UTF-8-safe path anyway so the codec is not input-fragile.
@@ -358,6 +398,11 @@ var FlamegraphDiff = {
   layoutSide,
   nodeAtPath,
   fullScopeQuery,
+  scopeWithHost,
+  shiftScopeTime,
+  DIFF_SHIFT_1H,
+  DIFF_SHIFT_24H,
+  DIFF_SHIFT_7D,
   b64urlEncode,
   b64urlDecode,
   encodeScope,

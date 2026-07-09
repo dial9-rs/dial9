@@ -342,3 +342,19 @@
 .fgd-diff-dialog .fgd-swap {
     align-self: center; white-space: nowrap; padding: 6px 10px;
 }
+
+/* Diff-setup dialog: one-click presets (issue #624) */
+.fgd-presets {
+    display: flex; flex-wrap: wrap; gap: 16px;
+    margin: 4px 0 14px; padding-bottom: 14px;
+    border-bottom: 1px solid #333;
+}
+.fgd-preset-group { flex: 1; min-width: 200px; }
+.fgd-preset-group label { margin-top: 0; }
+.fgd-preset-group select.fgd-preset-host {
+    width: 100%; background: #2a2a4a; border: 1px solid #444; color: #e0e0e0;
+    padding: 6px 8px; border-radius: 4px; font-size: 0.82em;
+}
+.fgd-preset-btns { display: flex; gap: 8px; }
+.fgd-diff-dialog button.fgd-preset { padding: 6px 12px; }
+.fgd-preset-note { color: #888; font-size: 0.78em; margin: 4px 0 0; }
