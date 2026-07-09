@@ -4,6 +4,23 @@ Static HTML/JS frontend for the trace viewer, embedded into the `dial9-viewer`
 binary via `rust-embed` and served by the server (`../src/server/`). In dev,
 the assets are served from disk by `../src/bin/dev_server.rs`.
 
+## UI development requires Node
+
+The served assets are the BUILT output in `dist/` (gitignored), not the
+sources in this directory. Working on the UI requires Node (CI uses Node 24):
+
+```bash
+npm ci            # lockfile-pinned install (never `npm install` in CI)
+npm run build     # vite build -> dist/ (what rust-embed embeds)
+npm run test      # vitest (passes with no tests until suites migrate, T10)
+npx tsc --noEmit  # typecheck
+```
+
+A cargo-only checkout still compiles (`dist/.gitkeep` keeps the folder
+present) but serves an empty UI until `npm run build` runs. End users never
+need Node: release CI builds `dist/` before publishing, so the crates.io
+archive and the prebuilt binaries carry the built assets.
+
 Key files:
 
 - `index.html` — landing page / S3 browser. Emits one `trace=/api/object?…`

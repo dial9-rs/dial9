@@ -6,7 +6,24 @@ license.workspace = true
 repository.workspace = true
 description = "CLI trace viewer and S3 browser for dial9-tokio-telemetry"
 default-run = "dial9-viewer"
-exclude = ["src/bin/dev_server.rs", "design/", "benchmarks/"]
+# The published crate must carry the BUILT viewer UI: rust-embed embeds
+# ui/dist/ at compile time, and release CI runs `npm ci && npm run build`
+# before publishing (.github/workflows/release.yml), so cargo-install users
+# never need Node (ADR-0004 section 3, constraint H1). ui/dist/* is
+# gitignored, and without an explicit `include` cargo drops gitignored files
+# from the package - so this list is load-bearing. It also keeps UI sources,
+# test_*.js, node_modules, design/, and benchmarks/ out of the archive.
+# src/bin/dev_server.rs stays unpublished (dev-only bin, as before).
+include = [
+    "/build.rs",
+    "/src/**",
+    "!/src/bin/dev_server.rs",
+    "/benches/**",
+    "/skills/**",
+    "/README.md",
+    "/README_TELEMETRY.md",
+    "/ui/dist/**",
+]
 
 [package.metadata.binstall]
 pkg-url = "{ repo }/releases/download/{ name }-v{ version }/{ name }-{ target }-v{ version }{ archive-suffix }"
