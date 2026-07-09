@@ -1,6 +1,10 @@
 [package]
 name = "dial9-tokio-telemetry"
+<<<<<<< Updated upstream
 version = "0.3.13"
+=======
+version = "0.4.0-alpha.2"
+>>>>>>> Stashed changes
 edition.workspace = true
 license.workspace = true
 repository.workspace = true

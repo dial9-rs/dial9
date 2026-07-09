@@ -1488,7 +1488,7 @@ dependencies = [
 
 [[package]]
 name = "dial9"
-version = "0.3.13"
+version = "0.3.14"
 dependencies = [
  "anyhow",
  "dial9-viewer",
@@ -1497,7 +1497,7 @@ dependencies = [
 
 [[package]]
 name = "dial9-macro"
-version = "0.3.7"
+version = "0.4.0"
 dependencies = [
  "insta",
  "prettyplease",
@@ -1522,7 +1522,11 @@ dependencies = [
 
 [[package]]
 name = "dial9-tokio-telemetry"
+<<<<<<< Updated upstream
 version = "0.3.13"
+=======
+version = "0.4.0-alpha.2"
+>>>>>>> Stashed changes
 dependencies = [
  "arc-swap",
  "assert2",
@@ -1569,7 +1573,7 @@ dependencies = [
 
 [[package]]
 name = "dial9-trace-format"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "dial9-trace-format",
  "dial9-trace-format-derive",
@@ -1582,7 +1586,7 @@ dependencies = [
 
 [[package]]
 name = "dial9-trace-format-derive"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "insta",
  "prettyplease",

@@ -53,3 +53,16 @@ s3s-fs = "0.13.0"
 s3s-aws = "0.13.0"
 tempfile = "3"
 urlencoding = "2"
+<<<<<<< Updated upstream
+=======
+aws-smithy-http-client = { version = "1", features = ["test-util"] }
+aws-smithy-types = "1"
+aws-smithy-async = { version = "1", features = ["rt-tokio"] }
+http = "1"
+
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "decode_bench"
+harness = false
+>>>>>>> Stashed changes
