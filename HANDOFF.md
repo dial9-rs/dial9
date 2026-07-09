@@ -1,86 +1,158 @@
-# T02 HANDOFF - Vite MPA scaffolding + dist-only embed
+# T05 HANDOFF - Type declarations for the frozen core
 
 ## STATUS
 
-DONE - all DoD checks pass (evidence below). Asset-location gate RESOLVED by
-orchestrator ruling 2026-07-08: Option B - `demo-trace.bin` +
-`flamegraph.css` STAY at `ui/` root and ride the static-copy list; the
-`public/` move belongs to T04 (chunk-1 T02/T04 Work sections amended by the
-orchestrator).
+DONE - all DoD checks pass (evidence below). No core .js file, test_*.js,
+or HTML page was modified. No gate was hit after the initial wrong-base
+worktree issue (resolved by the orchestrator: switched in place to
+be2c009, the T02 tip).
 
-## COMPLETED (commits on `ticket/T02-vite-mpa-scaffolding`, based on main @ 84a21e5)
+## COMPLETED (commits on `ticket/T05-core-type-declarations`, based on be2c009)
 
-- `15d8a16`: package.json + package-lock (vite 7.3.6, typescript 5.9,
-  vite-plugin-static-copy; npm audit: 0 vulnerabilities), strict tsconfig
-  (`noUncheckedIndexedAccess`, `erasableSyntaxOnly`), vite.config.ts with the
-  static-copy migration list (4 legacy pages incl. tokio_stats.html + the 12
-  root-relative scripts they reference), src/ skeleton dirs (+
-  `src/pages/dev-probe.ts` as the placeholder build input and T04's HMR
-  probe), `dist/.gitkeep` + `public/.gitkeep` (the public copy regenerates
-  dist/.gitkeep on every build so `git status` stays clean),
-  `ui/.gitignore`, rust-embed `#[folder]` -> `ui/dist/`.
-- `4ca1593`: HANDOFF (gate question, since resolved).
-- `33324a9`: vite.config.ts `legacyPageAssets` = flamegraph.css +
-  demo-trace.bin added to the copy list per the ruling.
-- (final commit): this HANDOFF update with complete evidence.
-- Deliberate: NO `"type": "module"` in package.json - `node test_*.js` must
-  keep loading the root scripts as CJS (constraint H2).
+- `674ace2`: src/types/{decode,trace_parser,format}.d.ts
+- `15971f3`: src/types/trace_analysis.d.ts
+- `f9b09ec`: src/types/{heatmap,prefix_detect,creds,panel_layout}.d.ts
+- `261217b`: src/types/{flamegraph,flamegraph_export}.d.ts + src/types/probe.ts
+- (final commit): this HANDOFF.
+
+All 10 core modules from the ticket's Owns list are declared. The
+`.gitkeep` in src/types/ was left in place (harmless; T02 artifact).
+
+## DECLARATION FORM (chosen + tradeoffs)
+
+Ambient wildcard module declarations, one .d.ts per core file in
+src/types/: `declare module "*/trace_parser.js" { ... }` etc.
+(the form suggested in the ticket's implementation notes).
+
+Why it works here:
+
+- Consumers import the core via RELATIVE paths (e.g.
+  `import { parseTrace } from "../../trace_parser.js"` from
+  src/lib/trace). TS wildcard ambient modules match relative specifiers
+  by suffix (same mechanism as Vite's `*.css` declarations), and with
+  `allowJs` off the real .js file cannot shadow the ambient declaration.
+  So ONE declaration types every import depth (src/pages, src/lib/trace,
+  src/components) without path-specific duplicates. Relative names are
+  not legal in non-wildcard ambient module declarations, so this is also
+  the only ambient form available.
+- Cross-module type reuse works by importing one wildcard module from
+  inside another's block (e.g. trace_analysis.d.ts does
+  `import type { CpuSample } from "*/trace_parser.js"`), so ParsedTrace /
+  CpuSample / FlamegraphNode exist in exactly one place.
+
+Tradeoffs T06+ should know:
+
+- The pattern matches ANY specifier ending in `/decode.js` etc.,
+  anywhere. If someone ever adds an unrelated file with a colliding
+  basename (a second `format.js` in src/, say), it would silently get
+  these types. Mitigation: core basenames are distinctive; keep it so.
+- A BARE specifier without a slash (`import "trace_parser.js"`) does NOT
+  match. All realistic imports are relative (contain a slash), so this
+  is theoretical.
+- `skipLibCheck: true` (T02 tsconfig) means the .d.ts bodies are not
+  self-checked; correctness is enforced at use sites, which is exactly
+  what probe.ts pins down (see negative check below).
+- The declarations describe the CJS-interop ESM view (named exports from
+  `module.exports`). Vite's interop provides these at runtime; `node
+  test_*.js` CJS consumers are unaffected (no core file changed).
+
+## API-SHAPE NOTES (exactness decisions)
+
+- ADR-0002 encoded explicitly:
+  - `TraceEvent.tid?: number | undefined` (park/unpark only; absent on
+    old traces -- gap detection skips them).
+  - `BlockInPlaceGap {workerId, fromTid, toTid, startNs, endNs}` on
+    `ParsedTrace.blockInPlaceGaps`, doc-commented as unknowable
+    attribution; `OFF_WORKER_WORKER_ID` sentinel documented on
+    `CpuSample.workerId`.
+  - `buildWorkerSpans(events, workerIds, maxTs, blockInPlaceGaps?)` --
+    4th param optional (flamegraph.html calls with 3 args, viewer.html
+    with 4); gap-crossing active spans are DISCARDED, so `ActiveSpan`
+    has a non-nullable `ratio` and the doc comment states the absence
+    semantics.
+  - `ParkSpan.schedWait?: number` -- the synthetic trace-end park has no
+    closing unpark, hence no schedWait (verified in buildWorkerSpans).
+- `PollSpan.openEnded?: boolean`, `cpuSamples?/schedSamples?` and
+  `CpuSample.spawnLoc?/inPoll?` are optional because attachCpuSamples
+  assigns them after the fact.
+- `ParsedTrace.minTs/maxTs/recordMinTs/recordMaxTs/clockOffsetNs/
+  filterStartTime/filterEndTime` are `number | null` (matches
+  finalizeParse and the trace-loading skill).
+- Trace-format BC (AGENTS.md): later-added wire fields are optional in
+  the types (`tid`, `CpuSample.cpu: number | null` for OptionalVarint).
+- `unknown` used only where data is genuinely dynamic, each with an
+  inline justification comment: `formatFieldValue(value: unknown)` and
+  `escapeXml(s: unknown)` (both stringify anything). Schema-driven event
+  fields use the closed `DecodedFieldValue` union from decode.d.ts
+  instead of `unknown`/`any`. Zero `any` anywhere.
+- Generics preserve caller element types where the core is shape-
+  polymorphic: `pixelDownsampleSpans<S>`, `computeSpanLayout<S>`,
+  `filterCpuSamples<S>`, `groupByHost<S>/tileSegments<S>/
+  segmentsOverlapping<S>` (index.html rows keep their `key` field).
+- `makeTimePanelLayout(pw, labelW, scrollbarW: number | undefined, ...)`
+  -- viewer.html's wrapper forwards an optional param positionally.
+- `parseTrace` is overloaded: buffer -> `Promise<ParsedTrace>`; string
+  path (Node-only) -> `AsyncIterable<ParsedTrace>`.
+- `Dial9Creds` typed as the module export; the `window.Dial9Creds`
+  userscript global is deliberately NOT declared (typed src/ code should
+  import the module; noted for T06 if a global is ever wanted).
 
 ## DoD EVIDENCE
 
-1. check `npm ci && npm run build` -> dist serves all FOUR pages + assets
-   byte-identical: `npx tsc --noEmit` clean; `npm run build` copies 18 items.
-   Byte-diff via two `python3 -m http.server` instances (ui/ on :3011,
-   ui/dist/ on :3012), `curl` + `cmp` on all 18 served paths
-   (index/viewer/flamegraph/tokio_stats.html, the 12 scripts,
-   flamegraph.css, demo-trace.bin): ALL IDENTICAL, FAIL=0.
-2. check cargo-only checkout compiles with empty UI: emptied `ui/dist/` to
-   `.gitkeep` only, `cargo build -p dial9-viewer` -> Finished dev profile
-   (34s). No npm involvement in build.rs (unchanged, none exists).
-3. check no `test_*.js` in the binary: PASS. `cargo build --release -p
-   dial9-viewer --features dev-server --bin dev-server` (rust-embed embeds
-   only in release; debug reads from disk at runtime), then `strings` on the
-   40 MB binary scanned for ALL 29 `test_*.js` filenames: 3 hits total, each
-   a code COMMENT inside a legitimately embedded copied file
-   (flamegraph.html:163, heatmap.js:21, panel_layout.js) - byte-identical
-   copying requires those comments; zero test files embedded. Positive
-   controls prove dist content IS embedded: "dial9 Trace Browser" x2,
-   "fg-search-bar" x2, "url_state.js" x3, "tokio_stats.html" x2,
-   "demo-trace.bin" x6.
-4. Rust gates for the mod.rs change: `cargo fmt --check` PASS; `cargo clippy
-   --all-targets --features __nonlinux_all_features` PASS for dial9-viewer
-   (zero warnings in the touched crate); `cargo nextest run
-   --stress-duration 20s` PASS: 810 tests x 2 stress iterations, 0 failed,
-   0 skipped, no flakes (32.4s test summary).
+1. `npx tsc --noEmit` (in dial9-viewer/ui, after `npm ci`): PASSES with
+   probe.ts importing every declared API from the real relative paths
+   (`../../<core>.js`) and using each in a type-checked position.
+2. Negative check (declarations are live, not silently `any`): a temp
+   file with `const x: number = parseTrace(new Uint8Array())` and
+   `makeTimePanelLayout(1, 2, 3)` produced
+   `error TS2322: Type 'Promise<ParsedTrace>' is not assignable to type 'number'`
+   and `error TS2554: Expected 5 arguments, but got 3.`; removed, clean
+   run confirmed again.
+3. Probe does not ship: `npm run build` output lists only the dev-probe
+   placeholder chunk + the 18 static-copied legacy files;
+   `find dist -name "*probe*"` shows no T05 probe artifact.
+4. `cargo build -p dial9-viewer` run to confirm rust-embed (ui/dist) is
+   unaffected by the new src/types files (AGENTS.md JS-only rule; no .js
+   touched, no trace-format change, so no JS tests are relevant and
+   nextest/stress are not required).
 
-## PRE-EXISTING FINDINGS (not fixed, per scope rules)
+### Module -> verified call site (declaration reviewed against each)
 
-- Clippy (macOS, `__nonlinux_all_features`) reports pre-existing warnings in
-  UNTOUCHED crates: `perf-self-profile/src/rate_limit.rs` (unused macro
-  `rate_limited`, unused import, dead `time_since_epoch`) and
-  `dial9-tokio-telemetry/src/telemetry/recorder/mod.rs:10` (unused import
-  `poll_start_ts_monotonic`). Likely cfg(non-Linux) artifacts. Report-only.
+| Module | Call site verified | Shape checked |
+|---|---|---|
+| decode.js | trace_parser.js:9-18 (getTraceDecoder), 1160-1184 (parse loop), 981 (`dec.schemas.get(typeId)?.units`) | ctor(Uint8Array), decodeHeader, nextFrame loop, position/byteLength, streaming snapshot/restore/setBuffer/rewindToStart, schemas map (no direct HTML call site: decode.js is consumed only via trace_parser.js; Node consumer test_stream_parse.js) |
+| trace_parser.js | viewer.html:1693-1882; flamegraph.html:517-534 | canStreamDecode / fetchTraceStream(url,{headers}) / fetchTracesStream(list,{headers}) / parseTraceStream(stream,opts) / fetchTraces(list,{headers}) / parseTrace(buffer); viewer.html:1016,5475,6078 formatFrame/symbolizeChain/deduplicateSamples |
+| trace_analysis.js | viewer.html:1969-2402 (getTraceTimeRange, computeRuntimeGroups, buildWorkerSpans(4-arg), buildActiveTaskTimeline, computeSchedulingDelays, buildProcessCpuUsageSeries, buildSpanData, filterPointsOfInterest with taskInstrumented), 2994/3123/4606 (pixelDownsampleSpans, makeBarCoalescer, pixelCoverage), 1084 (pollHeatmapColorQuantized), 3421/3441/4049/4476 (selectSpanRenderSet, computeSpanLayout, enclosingSpans, computePollWakes); flamegraph.html:559-561 (buildWorkerSpans 3-arg, attachCpuSamples) | all mirrored in probe.ts probeAnalysis() |
+| format.js | viewer.html:2178 (formatHumanDuration), 3370 (formatFieldValue); flamegraph.html:347 | number in -> string out; unknown value param |
+| heatmap.js | index.html:1225-1237 (segment construction + groupByHost), 1274 (densityColor), 1311-1317 (tileSegments/segmentGaps/bootTransitions), 1351 (accumulateDensity), 1425 | generic segment flows keep the `key` field |
+| prefix_detect.js | index.html:900 (isDateLayer(prefixes)) | string[] -> boolean; lastSegment string -> string |
+| creds.js | index.html:443-471 (headers/get/has, apply path); tokio_stats.html:385, flamegraph.html:390/537 (headers(), has()) | headers() spreadable Record<string,string>; set/parse/check result shapes |
+| panel_layout.js | viewer.html:2834/2868 (makeTimePanelLayout(clientWidth, LABEL_W, scrollbarW?, viewStart, viewEnd)) | undefined-able scrollbarW accepted |
+| flamegraph.js | flamegraph.html:336/412/570/619-620 (createFlamegraph, setTreeDirect(toFgTree(...), count), filterCpuSamples, onZoomChange cb); viewer.html:6702/6750/6967/7041 (setData with exportTitle/exportFormatValue/formatCount, heap pseudo-samples with weight/allocWeight) | toFgTree's minimal {name,count,self,children:Map} node satisfies FlamegraphNode |
+| flamegraph_export.js | flamegraph.js:252-270 (treeToInteractiveSvg(panels,{title,formatValue}), treeToFolded, filenameStem) -- consumed only via flamegraph.js by design, no direct HTML call site | panel {label,tree} array, null-tree panels allowed |
 
 ## REMAINING
 
-None on this branch. Elsewhere:
-- Execution-plan state table flip (T02 -> gates-passed) lives on the docs
-  lineage (T01 branch / orchestrator) - not part of this branch.
+None for T05. Out-of-scope items intentionally left:
 
-## review: ITEMS (for the human reviewer)
+- `types/trace.d.ts` app-level shapes (T06 refines on top of these).
+- `flamegraph_api.js` and `url_state.js` are NOT in T05's module list
+  (post-freeze page modules per vite.config.ts), so no declarations.
+- Window global declarations (Dial9Creds/PanelLayout/etc.) -- legacy
+  pages use globals, typed src/ should import; T06 call if needed.
 
-- Dependency justification per S1: exactly three dev-deps (vite, typescript,
-  vite-plugin-static-copy - the migration aid named by the ticket). No
-  runtime deps.
-- The deliberate ABSENCE of `"type": "module"` in ui/package.json (H2:
-  `node test_*.js` must keep loading root scripts as CJS).
-- The `dev-probe.ts` placeholder Vite input pattern (page tickets replace).
-- The dist/.gitkeep-via-public/.gitkeep regeneration trick.
+## BLOCKERS
 
-## NOTES
+None.
 
-- `dev-probe.ts` emits an empty chunk warning from Vite ("Generated an empty
-  chunk: dev-probe") - expected: the module exports a constant and has no
-  side effects; page tickets replace this input.
-- Byte-diff rig: `python3 -m http.server` chosen because the dev-server
-  hardcodes its UI dir; T12 replaces this rig with real parity tooling.
+## UNRELATED OBSERVATIONS (scope fence: not touched)
+
+- trace_analysis.js `buildWorkerSpans` has a defensive fallback
+  `openPollMeta[w] || { taskId: 0, spawnLocId: 0, spawnLoc: null }` whose
+  `spawnLocId: 0` (a number) contradicts the field's `string|null` type
+  everywhere else. Believed unreachable (openPoll/openPollMeta are set
+  together); declared `string | null`. Worth a micro-fix in the deferred
+  core-reshape batch (ADR-0004 section 6), not now.
+- The dial9-trace-analysis skill documents buildWorkerSpans' wake index
+  maps as part of its return but omits `perWorker`; the code returns it
+  and the declaration includes it.
