@@ -45,8 +45,13 @@ pub(crate) async fn region_from_head_bucket(
     }
 }
 
+// Embed ONLY the built artifact set (`npm run build` output), never sources,
+// tests, or node_modules. A cargo-only checkout still compiles: the committed
+// `ui/dist/.gitkeep` keeps the folder present (empty UI until built). Release
+// CI runs the JS build before packaging, so published crates/binaries carry a
+// populated dist. See docs/adr/0004-viewer-ui-migration.md section 3.
 #[derive(Embed)]
-#[folder = "ui/"]
+#[folder = "ui/dist/"]
 struct UiAssets;
 
 #[derive(Clone)]
