@@ -29,6 +29,14 @@ use arrow::array::Array;
 /// Floor: only send polls longer than this to the client (saves bandwidth).
 const DURATION_FLOOR_NS: i64 = 100_000; // 100µs
 
+/// Number of longest polls shipped to the client. Ported from IRIS's top-100.
+const LONG_POLL_TOP: usize = 100;
+/// Compact the long-poll buffer once it grows past this, keeping the top
+/// [`LONG_POLL_TOP`]. The 4× headroom mirrors IRIS's `analyze.rs` (buffer 400,
+/// truncate to 100) — it amortizes the sort while keeping memory bounded
+/// regardless of scope size.
+const LONG_POLL_SOFT_CAP: usize = LONG_POLL_TOP * 4;
+
 #[derive(Deserialize)]
 pub struct TokioStatsParams {
     pub bucket: Option<String>,
@@ -52,6 +60,14 @@ pub struct TokioStatsResponse {
     /// Source bucket (for constructing viewer deep links in the UI).
     pub bucket: String,
     pub by_spawn_loc: Vec<SpawnLocStats>,
+    /// Longest individual polls across the whole scope, ranked by duration — the
+    /// single futures that held a worker thread longest in one poll (these starve
+    /// other tasks on that worker). Bounded server-side to the top
+    /// [`LONG_POLL_TOP`]: `task_id` is high-cardinality, so this is a reduction,
+    /// not a per-poll axis shipped to the client. Each row carries the
+    /// coordinates to deep-link its trace segment. Ported from IRIS's
+    /// `longPolls.top` (rust-ingest `analyze.rs`).
+    pub top_long_polls: Vec<LongPoll>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub coverage: Option<aggregate::Coverage>,
 }
@@ -74,6 +90,24 @@ pub struct PollExemplar {
     pub start_ns: i64,
     pub end_ns: i64,
     pub duration_ns: i64,
+    pub host: String,
+    /// Source trace file key for constructing the viewer deep link.
+    pub source_key: String,
+}
+
+/// One long-running poll, for the top-N "Longest polls" list. Ported from IRIS's
+/// `longPolls.top` — its `(durMs, worker, taskId, spawnLoc, startMs)` tuple, plus
+/// the `host` + `source_key` dial9 needs to deep-link the poll into the viewer.
+#[derive(Serialize, Clone)]
+pub struct LongPoll {
+    pub duration_ns: i64,
+    pub worker_id: u32,
+    pub task_id: u64,
+    /// Where the future was spawned; `None` when the trace didn't record it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spawn_loc: Option<String>,
+    pub start_ns: i64,
+    pub end_ns: i64,
     pub host: String,
     /// Source trace file key for constructing the viewer deep link.
     pub source_key: String,
@@ -329,6 +363,7 @@ fn snapshot_event(
         total_polls: acc.total_polls,
         bucket: ctx.source_bucket.clone(),
         by_spawn_loc,
+        top_long_polls: acc.top_long_polls(),
         coverage: Some(aggregate::Coverage {
             files_matched: ctx.resolved.files_matched,
             files_folded,
@@ -358,6 +393,34 @@ struct TokioStatsAccum {
     min_ts: Option<i64>,
     max_ts: Option<i64>,
     by_loc: HashMap<String, LocAccum>,
+    /// Longest polls seen so far, kept bounded by [`TokioStatsAccum::push_long_poll`].
+    /// Unsorted between compactions; [`TokioStatsAccum::top_long_polls`] produces
+    /// the final ranked list.
+    long_polls: Vec<LongPoll>,
+}
+
+impl TokioStatsAccum {
+    /// Record a candidate long poll, compacting to the top [`LONG_POLL_TOP`] by
+    /// duration whenever the buffer exceeds the soft cap. Mirrors IRIS's
+    /// `analyze.rs` grow-then-truncate strategy so the buffer stays bounded no
+    /// matter how many files fold in.
+    fn push_long_poll(&mut self, poll: LongPoll) {
+        self.long_polls.push(poll);
+        if self.long_polls.len() > LONG_POLL_SOFT_CAP {
+            self.long_polls
+                .sort_unstable_by_key(|p| std::cmp::Reverse(p.duration_ns));
+            self.long_polls.truncate(LONG_POLL_TOP);
+        }
+    }
+
+    /// The final ranked top-N longest polls (descending by duration). Clones so
+    /// repeated SSE snapshots don't consume the still-growing accumulator.
+    fn top_long_polls(&self) -> Vec<LongPoll> {
+        let mut top = self.long_polls.clone();
+        top.sort_unstable_by_key(|p| std::cmp::Reverse(p.duration_ns));
+        top.truncate(LONG_POLL_TOP);
+        top
+    }
 }
 
 struct LocAccum {
@@ -432,6 +495,15 @@ fn read_polls_part(
         let host_arr = batch
             .column_by_name("host")
             .and_then(|c| c.as_any().downcast_ref::<arrow::array::StringArray>());
+        // worker_id / task_id feed the top-long-polls list. Both are already in
+        // the polls schema (parquet_writer.rs); older part-files without them
+        // just yield None here and the columns are skipped.
+        let worker_arr = batch
+            .column_by_name("worker_id")
+            .and_then(|c| c.as_any().downcast_ref::<arrow::array::UInt32Array>());
+        let task_arr = batch
+            .column_by_name("task_id")
+            .and_then(|c| c.as_any().downcast_ref::<arrow::array::UInt64Array>());
 
         let Some(duration_arr) = duration_arr else {
             continue;
@@ -487,16 +559,41 @@ fn read_polls_part(
             };
             la.durations.push((dur, class));
 
+            // Borrowed here; each consumer below owns its copy only when it
+            // actually stores the row, so a poll that is neither a new worst
+            // exemplar nor pushed (old part-file lacking worker/task) allocates
+            // nothing.
+            let host = host_arr
+                .and_then(|a| if a.is_null(i) { None } else { Some(a.value(i)) })
+                .unwrap_or("");
+
             let slot = &mut la.worst_by_class[class as usize];
             if slot.as_ref().is_none_or(|w| dur > w.duration_ns) {
                 *slot = Some(PollExemplar {
                     start_ns: start_arr.map_or(0, |a| a.value(i)),
                     end_ns: end_arr.map_or(0, |a| a.value(i)),
                     duration_ns: dur,
-                    host: host_arr
-                        .and_then(|a| if a.is_null(i) { None } else { Some(a.value(i)) })
-                        .unwrap_or("")
-                        .to_string(),
+                    host: host.to_string(),
+                    source_key: source_key.to_string(),
+                });
+            }
+
+            // Top longest polls (IRIS `longPolls.top`): a poll is only useful in
+            // this list if we can attribute it to a worker + task, so skip rows
+            // from older part-files that predate those columns rather than
+            // fabricating zeros (AGENTS.md: no plausible-default masking).
+            if let (Some(workers), Some(tasks)) = (worker_arr, task_arr) {
+                let spawn_loc = spawn_loc_arr
+                    .and_then(|a| if a.is_null(i) { None } else { Some(a.value(i)) })
+                    .map(str::to_string);
+                acc.push_long_poll(LongPoll {
+                    duration_ns: dur,
+                    worker_id: workers.value(i),
+                    task_id: tasks.value(i),
+                    spawn_loc,
+                    start_ns: start_arr.map_or(0, |a| a.value(i)),
+                    end_ns: end_arr.map_or(0, |a| a.value(i)),
+                    host: host.to_string(),
                     source_key: source_key.to_string(),
                 });
             }
@@ -542,9 +639,32 @@ mod tests {
             .filter(|la| la.worst_by_class.iter().any(|e| e.is_some()))
             .count();
         assert!(with_exemplar > 0);
+
+        // Top longest polls: populated, bounded to LONG_POLL_TOP, ranked
+        // descending by duration, and each carries the coordinates the viewer
+        // needs to deep-link the poll (source_key + host).
+        let top = acc.top_long_polls();
+        assert!(!top.is_empty(), "expected some notable long polls");
+        assert!(top.len() <= LONG_POLL_TOP);
+        assert!(
+            top.windows(2).all(|w| w[0].duration_ns >= w[1].duration_ns),
+            "top long polls must be ranked descending by duration"
+        );
+        assert!(
+            top.iter().all(|p| !p.source_key.is_empty()),
+            "each long poll must carry a source key for deep-linking"
+        );
+        assert!(
+            top[0].duration_ns >= DURATION_FLOOR_NS,
+            "long polls must clear the notable floor"
+        );
         eprintln!(
-            "tokio-stats: {} total, {} above floor, {} locs with exemplars",
-            acc.total_polls, notable, with_exemplar
+            "tokio-stats: {} total, {} above floor, {} locs with exemplars, {} long polls (worst {}ns)",
+            acc.total_polls,
+            notable,
+            with_exemplar,
+            top.len(),
+            top[0].duration_ns,
         );
     }
 }

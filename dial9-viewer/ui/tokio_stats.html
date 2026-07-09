@@ -262,15 +262,20 @@
 
   function exemplarLink(ex, data) {
     if (!ex || !ex.start_ns) return "";
-    // We intentionally do not forward the exemplar's [start_ns, end_ns] window:
-    // the viewer treats those as a hard parse filter and a single poll's window
-    // is far too narrow — it would drop every surrounding event and load empty.
-    // Link to the whole segment instead. See exemplarViewerUrl.
+    // Forward the poll's window as a NON-DESTRUCTIVE focus (focus_*), not the
+    // start/end parse filter — see exemplarViewerUrl. worker_id/task_id are
+    // present on long-poll rows (they refine the framing + highlight the task)
+    // and absent on spawn-loc exemplars, where focus_start alone still pans the
+    // view to the poll.
     return exemplarViewerUrl({
       bucket: (data && data.bucket) || params.get("bucket") || "",
       sourceKey: ex.source_key,
       svc: params.get("service") || undefined,
       host: ex.host || undefined,
+      focusStartNs: ex.start_ns,
+      focusEndNs: ex.end_ns,
+      focusWorker: ex.worker_id,
+      focusTask: ex.task_id,
     });
   }
 
@@ -396,7 +401,39 @@
       </tr>`;
     }
     html += "</tbody></table>";
+    html += renderLongPolls(data, threshNs);
     tableEl.innerHTML = html;
+  }
+
+  // "Longest polls": the single futures that held a worker thread longest in one
+  // poll — long polls starve every other task on that worker. Ported from IRIS's
+  // "Longest polls" card; the server ranks them (top_long_polls), the client
+  // filters by the threshold slider so it stays consistent with the table above.
+  // Each row deep-links its trace segment via the same exemplar path.
+  function renderLongPolls(data, threshNs) {
+    const polls = (data && data.top_long_polls) || [];
+    const rows = polls.filter(p => p.duration_ns >= threshNs).slice(0, 50);
+    if (!rows.length) return "";
+    // host column only earns its space when the scope spans more than one host.
+    const multiHost = new Set(rows.map(p => p.host || "")).size > 1;
+    let html = `<h3 style="margin:20px 0 8px">🕒 Longest polls</h3>
+      <p style="font-size:0.8em;color:#8b949e;margin-bottom:6px">Single polls that held a worker thread longest — long polls starve other tasks on that worker. Click a row to open its trace segment.</p>
+      <table><thead><tr>
+        <th>Duration</th><th>Worker</th><th>Task</th><th>Spawn Location</th>${multiHost ? "<th>Host</th>" : ""}
+      </tr></thead><tbody>`;
+    for (const p of rows) {
+      const url = exemplarLink(p, data); // p carries source_key + host, like an exemplar
+      const durCell = `<span style="color:${latencyHeat(p.duration_ns)};font-weight:600">${formatDuration(p.duration_ns)}</span>`;
+      const cells = `<td>${durCell}</td>
+        <td>w${p.worker_id}</td>
+        <td><code>${p.task_id}</code></td>
+        <td><code>${escapeHtml(p.spawn_loc || "(unknown)")}</code></td>${multiHost ? `<td>${escapeHtml(p.host || "")}</td>` : ""}`;
+      html += url
+        ? `<tr style="cursor:pointer" onclick="openExemplar(this)" data-url="${url.replace(/"/g, "&quot;")}">${cells}</tr>`
+        : `<tr>${cells}</tr>`;
+    }
+    html += "</tbody></table>";
+    return html;
   }
 
   function renderDiffView(stats, threshNs, sumEl, tableEl) {

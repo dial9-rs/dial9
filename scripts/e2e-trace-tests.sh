@@ -77,6 +77,9 @@ node dial9-viewer/ui/test_flamegraph_diff.js
 echo "--- Checking tokio-stats API helpers (exemplar link + coverage) ---"
 node dial9-viewer/ui/test_tokio_stats_api.js
 
+echo "--- Checking Tokio-stats deep-link focus timebase (wall→monotonic) ---"
+node dial9-viewer/ui/test_focus_timebase.js
+
 echo "--- Checking SSE frame decoder ---"
 node dial9-viewer/ui/test_sse.js
 

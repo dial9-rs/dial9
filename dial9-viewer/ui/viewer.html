@@ -1298,6 +1298,11 @@
             let currentPoiIndex = -1;
             // Task selection state
             let selectedTaskId = null;
+            // Pending one-shot focus request from `focus_*` URL params (a poll
+            // deep-linked from Tokio-stats). Applied after the first successful
+            // load, then cleared so a later Set/Clear-Range re-parse doesn't
+            // yank the view back to it. Null when no focus was requested.
+            let pendingFocus = null;
             // A clicked custom event: {events, timestamp, taskId, name} —
             // draws a labeled vertical marker across all lanes and, if the
             // event ran inside a poll, selects that task.
@@ -1630,6 +1635,13 @@
                 currentTraceBuffer = buffer;
                 currentTraceName = name;
                 showViewer(name);
+                // Apply a one-shot deep-link focus now that lanes exist, then
+                // consume it so a later Set/Clear-Range re-parse doesn't reapply.
+                if (pendingFocus) {
+                    const focus = pendingFocus;
+                    pendingFocus = null;
+                    focusOnWindow(focus);
+                }
                 // Record the TOTAL load time including the analysis+render phase
                 // that just ran in showViewer. The live `loadStartTime` timer was
                 // already frozen above (before analysis), so we measure here from
@@ -1991,6 +2003,21 @@
                 else params.delete('end');
                 const newUrl = window.location.pathname + '?' + params.toString();
                 window.history.replaceState(null, '', newUrl);
+            }
+
+            // One-shot focus window from `focus_*` params (Tokio-stats "Longest
+            // polls" deep link). Unlike `start`/`end` (a hard parse filter),
+            // these only pan/zoom the view after load — see focusOnWindow.
+            {
+                const fs = urlParams.get('focus_start');
+                if (fs != null) {
+                    pendingFocus = {
+                        startNs: fs,
+                        endNs: urlParams.get('focus_end'),
+                        worker: urlParams.get('focus_worker'),
+                        taskId: urlParams.get('focus_task'),
+                    };
+                }
             }
 
             const urlScope = Dial9TraceScope.readScope(urlParams);
@@ -2498,6 +2525,36 @@
                 scrollToWorkerLane(poi.worker);
 
                 updatePoiCounter();
+                renderAll();
+            }
+
+            // Focus the view on an explicit [start, end] time window (e.g. a
+            // specific poll deep-linked from the Tokio-stats "Longest polls"
+            // list). Non-destructive: like jumpToPoi it only moves the view and
+            // scrolls the lane — it does NOT re-parse to the window (that would
+            // drop every surrounding event and land on an empty page). Pads the
+            // window so the poll sits in context, optionally scrolls to its
+            // worker lane, and selects its task so the poll is highlighted.
+            function focusOnWindow({ startNs, endNs, worker, taskId }) {
+                if (startNs == null || !Number.isFinite(minTs)) return;
+                // The Tokio-stats aggregate stores poll timestamps in WALL-CLOCK
+                // ns (decode.rs adds the segment's clock offset), but the viewer's
+                // timeline (minTs/maxTs/viewStart) is RAW MONOTONIC ns. Convert
+                // back to monotonic by subtracting the same offset the aggregate
+                // applied — the trace's clock-sync offset, derived from the same
+                // segment's first ClockSyncEvent, so it round-trips. Traces with
+                // no clock sync stored raw monotonic already (offset null → 0).
+                const offset = (trace && trace.clockOffsetNs != null) ? trace.clockOffsetNs : 0;
+                const s = Number(startNs) - offset;
+                const e = (endNs != null ? Number(endNs) : Number(startNs)) - offset;
+                const span = Math.max(e - s, 0);
+                // Show ~5x the poll's span (min 1ms), poll offset ~30% from the
+                // left — same framing jumpToPoi uses for span POIs.
+                const viewDur = Math.max(span * 5, 1e6);
+                viewStart = Math.max(minTs, s - viewDur * 0.3);
+                viewEnd = Math.min(maxTs, viewStart + viewDur);
+                if (taskId != null) selectedTaskId = Number(taskId);
+                if (worker != null) scrollToWorkerLane(Number(worker));
                 renderAll();
             }
 
