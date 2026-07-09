@@ -368,9 +368,71 @@
                         <button id="f-stop" style="background:#2a2a4a;color:#e0e0e0;${btnStyle};opacity:0.4;cursor:not-allowed" disabled>Stop</button>
                         <span style="flex:1"></span>
                         <button id="f-copylink" title="Copy a link that re-fetches this exact scope (bucket/prefix included; no credentials)" style="background:#2a2a4a;color:#e0e0e0;border:1px solid #444;padding:4px 14px;border-radius:3px;cursor:pointer;font-weight:600">Copy link</button>
+                        <button id="f-adddiff" title="Capture this view (current host/filters) as one side of a diff; pick a second host/scope and add it to compare" style="background:#2a2a4a;color:#e0e0e0;border:1px solid #444;padding:4px 14px;border-radius:3px;cursor:pointer;font-weight:600">+ Add to diff</button>
                         <button id="f-diff" title="Compare this flamegraph against another" style="background:#2a2a4a;color:#e0e0e0;border:1px solid #444;padding:4px 14px;border-radius:3px;cursor:pointer;font-weight:600">Diff…</button>
                     `;
                     document.querySelector(".fg-page-header").after(toolbar);
+
+                    // In-page "Add to diff" tray. Captures two scopes (A/B) from
+                    // this page's live view — respecting the Host dropdown's
+                    // selection — and launches a two-sided diff, so a host-vs-host
+                    // comparison needs no second tab / Copy-link paste. The tray
+                    // lives OUTSIDE #f-facets (which renderFacets rebuilds on every
+                    // SSE response), so it survives facet re-renders; the capture
+                    // state (diffCapture) is held in the enclosing closure for the
+                    // same reason. Mirrors the landing page's diff tray
+                    // (index.html), reusing the shared FlamegraphDiff codec.
+                    let diffCapture = { a: null, b: null };
+                    const diffTray = document.createElement("div");
+                    diffTray.style.cssText = "display:none;align-items:center;gap:12px;padding:6px 12px;background:#14142a;border-bottom:1px solid #333;font-size:0.8em;flex-shrink:0;flex-wrap:wrap;";
+                    toolbar.after(diffTray);
+
+                    // HTML-escape scope summaries before injecting into the tray.
+                    function escFg(s) {
+                        return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;")
+                            .replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+                    }
+
+                    function renderDiffTray() {
+                        const { a, b } = diffCapture;
+                        if (!a && !b) { diffTray.style.display = "none"; return; }
+                        diffTray.style.display = "flex";
+                        function sideCell(label, scope, chipBg, chipFg, sideKey) {
+                            const set = !!scope;
+                            return `<div style="background:#1a1a2e;border:1px solid ${set ? chipFg : "#333"};border-radius:6px;padding:6px 10px;min-width:0">
+                                <div style="display:flex;align-items:center;gap:8px">
+                                    <span style="font-size:0.85em;font-weight:700;padding:2px 8px;border-radius:10px;background:${chipBg};color:${chipFg}">${label}</span>
+                                    ${set ? `<span style="flex:1"></span><button data-fgd-remove="${sideKey}" title="Remove ${label}" style="background:none;border:none;color:#888;cursor:pointer;font-size:1em">✕</button>` : ""}
+                                </div>
+                                <div style="color:#ccc;margin-top:4px;overflow-wrap:anywhere">${set ? escFg(summarizeScope(scope)) : '<span style="color:#666">pick a host/scope, then click "Add to diff"</span>'}</div>
+                            </div>`;
+                        }
+                        const ready = !!(a && b);
+                        diffTray.innerHTML =
+                            '<span style="color:#888;font-weight:600">Diff capture:</span>' +
+                            sideCell("A · left", a, "#1e3050", "#9ec1ff", "a") +
+                            sideCell("B · right", b, "#4a221c", "#ffb3a0", "b") +
+                            `<button data-fgd-swap ${ready ? "" : "disabled"} title="Swap which capture is A vs B" style="background:#2a2a4a;color:#e0e0e0;${btnStyle};opacity:${ready ? "1" : "0.4"};cursor:${ready ? "pointer" : "not-allowed"}">⇄ Swap</button>` +
+                            `<button data-fgd-open ${ready ? "" : "disabled"} title="Open a two-sided diff of A vs B" style="background:#6c63ff;color:#fff;border:none;padding:4px 14px;border-radius:3px;font-weight:600;opacity:${ready ? "1" : "0.4"};cursor:${ready ? "pointer" : "not-allowed"}">Open diff</button>` +
+                            `<button data-fgd-clear title="Clear both captured sides" style="background:#2a2a4a;color:#e0e0e0;${btnStyle}">Clear</button>`;
+                    }
+
+                    // Delegated handlers for the tray's (re-rendered) controls.
+                    diffTray.addEventListener("click", (e) => {
+                        const rm = e.target.closest("[data-fgd-remove]");
+                        if (rm) { diffCapture = FlamegraphDiff.removeDiffSide(diffCapture, rm.getAttribute("data-fgd-remove")); renderDiffTray(); return; }
+                        if (e.target.closest("[data-fgd-swap]")) { diffCapture = FlamegraphDiff.swapDiffCapture(diffCapture); renderDiffTray(); return; }
+                        if (e.target.closest("[data-fgd-clear]")) { diffCapture = { a: null, b: null }; renderDiffTray(); return; }
+                        if (e.target.closest("[data-fgd-open]")) {
+                            const { a, b } = diffCapture;
+                            if (!a || !b) return;
+                            // Both captured scopes already carry api=1
+                            // (currentScopeQuery sets it), so no per-side flag
+                            // fix-up is needed here.
+                            const search = FlamegraphDiff.diffSearch(a, b);
+                            window.open(window.location.pathname + "?" + search, "_blank");
+                        }
+                    });
 
                     const fStart = document.getElementById("f-start");
                     const fEnd = document.getElementById("f-end");
@@ -762,6 +824,15 @@
                             btn.textContent = res !== null ? "Copied!" : orig;
                         }
                         setTimeout(() => { btn.textContent = orig; }, 1500);
+                    });
+
+                    document.getElementById("f-adddiff").addEventListener("click", () => {
+                        // Capture the current view (respecting the Host dropdown's
+                        // selection — currentScopeQuery emits every filterState.hosts
+                        // entry, so a narrowed dropdown gives a single-host side and
+                        // "All" gives the full original host set) as one diff side.
+                        diffCapture = FlamegraphDiff.addDiffCapture(diffCapture, currentScopeQuery());
+                        renderDiffTray();
                     });
 
                     document.getElementById("f-diff").addEventListener("click", () => {

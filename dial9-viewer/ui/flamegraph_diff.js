@@ -310,6 +310,46 @@ function chooseTarget(kind, opts) {
   return { page: page, search: typeof single === "string" ? single : single.toString() };
 }
 
+// ---------------------------------------------------------------------------
+// Capture-tray state machine (in-page "Add to diff")
+// ---------------------------------------------------------------------------
+
+// The in-page "Add to diff" tray (flamegraph.html's aggregate toolbar, and the
+// landing page's heatmap tray) captures two scopes — A (left) and B (right) —
+// then launches a two-sided diff. State is `{ a, b }` where each side is a
+// scope (URLSearchParams) or null. These three transitions keep the invariant
+// "A fills before B" so there is never a B-without-A hole. Pure/DOM-free so the
+// tray wiring is unit-testable without a browser.
+
+// Capture one more scope: fill A first, then B; once both are set a further
+// add replaces B (the most recent), so the user can keep re-picking the
+// comparison side.
+function addDiffCapture(state, scope) {
+  const a = state && state.a ? state.a : null;
+  const b = state && state.b ? state.b : null;
+  if (!a) return { a: scope, b: b };
+  return { a: a, b: scope };
+}
+
+// Swap which capture is A vs B. Only meaningful when both sides are set;
+// swapping a lone side would move it into B and leave A empty, violating the
+// "fill A first" invariant — so it's a no-op then.
+function swapDiffCapture(state) {
+  const a = state && state.a ? state.a : null;
+  const b = state && state.b ? state.b : null;
+  if (!a || !b) return { a: a, b: b };
+  return { a: b, b: a };
+}
+
+// Remove one side. Clearing A promotes B to A so there is never a B-without-A
+// hole (the codec fills A first); clearing B just drops it.
+function removeDiffSide(state, side) {
+  const a = state && state.a ? state.a : null;
+  const b = state && state.b ? state.b : null;
+  if (side === "a") return { a: b, b: null };
+  return { a: a, b: null };
+}
+
 var FlamegraphDiff = {
   newDiffNode,
   addSide,
@@ -325,6 +365,9 @@ var FlamegraphDiff = {
   diffSearch,
   parseDiff,
   chooseTarget,
+  addDiffCapture,
+  swapDiffCapture,
+  removeDiffSide,
   SCOPE_KEYS_SINGLE,
 };
 

@@ -20,6 +20,9 @@ const {
   diffSearch,
   parseDiff,
   chooseTarget,
+  addDiffCapture,
+  swapDiffCapture,
+  removeDiffSide,
 } = require("./flamegraph_diff.js");
 
 let passed = 0;
@@ -411,6 +414,70 @@ assert(parseDiff(new URLSearchParams("diff=1&a=" + encodeScope("bucket=x") + "&b
   assertEq(V.isSearchFocusKey({ key: "f", ctrlKey: true }, false), true, "Ctrl+F focuses the search box");
   assertEq(V.isSearchFocusKey({ key: "f", metaKey: true }, false), true, "Cmd+F focuses the search box");
   assertEq(V.isSearchFocusKey({ key: "a" }, false), false, "other keys do not focus the search box");
+}
+
+// ── addDiffCapture / swapDiffCapture / removeDiffSide: tray state machine ──
+// Backs the in-page "Add to diff" tray on the flamegraph aggregate toolbar
+// (issue #646): capture fills A first, then B, then replaces B; A always fills
+// before B (no B-without-A hole).
+{
+  const sa = new URLSearchParams("api=1&bucket=b&service=svc&host=host-a");
+  const sb = new URLSearchParams("api=1&bucket=b&service=svc&host=host-b");
+  const sc = new URLSearchParams("api=1&bucket=b&service=svc&host=host-c");
+
+  let st = { a: null, b: null };
+  st = addDiffCapture(st, sa);
+  assertEq(st.a, sa, "first add fills A");
+  assertEq(st.b, null, "first add leaves B empty");
+  st = addDiffCapture(st, sb);
+  assertEq(st.a, sa, "second add keeps A");
+  assertEq(st.b, sb, "second add fills B");
+  st = addDiffCapture(st, sc);
+  assertEq(st.a, sa, "third add keeps A");
+  assertEq(st.b, sc, "third add replaces B (most recent)");
+
+  // Swap flips A/B only when both are set.
+  const sw = swapDiffCapture(st);
+  assertEq(sw.a, sc, "swap makes old B the new A");
+  assertEq(sw.b, sa, "swap makes old A the new B");
+  const swLone = swapDiffCapture({ a: sa, b: null });
+  assertEq(swLone.a, sa, "swap with a lone A is a no-op (keeps A)");
+  assertEq(swLone.b, null, "swap with a lone A leaves B empty");
+
+  // Removing A promotes B so there is never a B-without-A hole.
+  const rmA = removeDiffSide({ a: sa, b: sb }, "a");
+  assertEq(rmA.a, sb, "removing A promotes B into A");
+  assertEq(rmA.b, null, "removing A leaves B empty");
+  const rmB = removeDiffSide({ a: sa, b: sb }, "b");
+  assertEq(rmB.a, sa, "removing B keeps A");
+  assertEq(rmB.b, null, "removing B clears B");
+
+  // Inputs are not mutated in place (transitions return fresh state objects).
+  const orig = { a: sa, b: null };
+  addDiffCapture(orig, sb);
+  assertEq(orig.b, null, "addDiffCapture does not mutate the input state");
+}
+
+// ── Capture → diff round-trip for host-vs-host (issue #646) ──
+// The core of the "Add to diff" flow: capture the current view narrowed to one
+// host as side A, re-narrow to a second host and capture as side B, then open
+// the two-sided diff. Both host selections must survive the codec independently,
+// as must the shared scope (api/bucket/service).
+{
+  const scopeA = fullScopeQuery(new URLSearchParams("api=1&bucket=b&prefix=p&service=svc&host=host-a"));
+  const scopeB = fullScopeQuery(new URLSearchParams("api=1&bucket=b&prefix=p&service=svc&host=host-b"));
+
+  let st = { a: null, b: null };
+  st = addDiffCapture(st, scopeA);
+  st = addDiffCapture(st, scopeB);
+  const parsed = parseDiff(diffSearch(st.a, st.b));
+  assert(parsed != null, "capture -> diffSearch -> parseDiff round-trips");
+  assertEq(parsed.a.get("host"), "host-a", "side A narrowed to host-a survives");
+  assertEq(parsed.b.get("host"), "host-b", "side B narrowed to host-b survives");
+  assertEq(parsed.a.get("api"), "1", "side A carries api=1 (aggregate path)");
+  assertEq(parsed.b.get("api"), "1", "side B carries api=1 (aggregate path)");
+  assertEq(parsed.a.get("bucket"), "b", "shared bucket survives on A");
+  assertEq(parsed.b.get("service"), "svc", "shared service survives on B");
 }
 
 // ── Summary ──
