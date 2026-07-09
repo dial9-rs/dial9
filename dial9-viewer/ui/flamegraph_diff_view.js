@@ -71,6 +71,13 @@
     return s;
   }
 
+  // Whether a keydown should focus the highlight/search box: Ctrl/Cmd+F, or a
+  // bare "/" when the box isn't already focused (so a literal "/" can still be
+  // typed into the regex). Mirrors the single-flamegraph handler in flamegraph.js.
+  function isSearchFocusKey(e, activeIsSearch) {
+    return ((e.ctrlKey || e.metaKey) && e.key === "f") || (e.key === "/" && !activeIsSearch);
+  }
+
   // createDiffView(container, opts)
   //   opts.scopeA / opts.scopeB — URLSearchParams of each side's scope
   //   opts.headersFor(side)     — returns the credential headers for "a"/"b"
@@ -95,7 +102,7 @@
     const header = document.createElement("div");
     header.className = "fgd-header";
     header.innerHTML =
-      '<input class="fgd-search" placeholder="highlight frames (regex)…" />' +
+      '<input class="fgd-search" placeholder="highlight frames (regex)… (/)" />' +
       '<button class="fgd-reset">Reset zoom</button>' +
       '<button class="fgd-more" title="Fold more source files on both sides for a deeper sample" style="display:none">Load more data</button>' +
       '<span class="fgd-hotness" title="Overall sampling rate difference. Colors normalize this away (shape vs shape); this is the absolute volume signal."></span>' +
@@ -409,7 +416,12 @@
     searchInput.addEventListener("input", applySearch);
     resetBtn.addEventListener("click", () => { zoomPath = [rootName()]; render(); });
     const onKeydown = (e) => {
-      if (e.key === "Escape") { zoomPath = [rootName()]; render(); }
+      if (e.key === "Escape") { zoomPath = [rootName()]; render(); return; }
+      if (isSearchFocusKey(e, document.activeElement === searchInput)) {
+        e.preventDefault();
+        searchInput.focus();
+        searchInput.select();
+      }
     };
     window.addEventListener("resize", render);
     window.addEventListener("keydown", onKeydown);
@@ -606,7 +618,7 @@
     };
   }
 
-  const ex = { createDiffView, apiUrlFor, scopeLabel };
+  const ex = { createDiffView, apiUrlFor, scopeLabel, isSearchFocusKey };
   if (typeof module !== "undefined" && module.exports) module.exports = ex;
   else exports.FlamegraphDiffView = ex;
 })(typeof exports === "undefined" ? this : exports);

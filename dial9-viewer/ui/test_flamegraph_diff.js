@@ -365,6 +365,15 @@ assert(parseDiff(new URLSearchParams("diff=1&a=" + encodeScope("bucket=x") + "&b
   assertEq(V.scopeLabel(new URLSearchParams("service=svc"), "A"), "svc", "label: no host");
   assertEq(V.scopeLabel(new URLSearchParams("service=svc&host=a&host=b&host=c"), "A"), "svc @ 3 hosts", "label: host count");
   assertEq(V.scopeLabel(new URLSearchParams("host=h1"), "A"), "A @ h1", "label: no service falls back");
+
+  // isSearchFocusKey: "/" focuses the highlight box only when it isn't already
+  // focused (so a literal "/" can be typed into the regex); Ctrl/Cmd+F always
+  // focuses; other keys never do.
+  assertEq(V.isSearchFocusKey({ key: "/" }, false), true, "'/' focuses when not already in the search box");
+  assertEq(V.isSearchFocusKey({ key: "/" }, true), false, "'/' does not steal focus while typing in the search box");
+  assertEq(V.isSearchFocusKey({ key: "f", ctrlKey: true }, false), true, "Ctrl+F focuses the search box");
+  assertEq(V.isSearchFocusKey({ key: "f", metaKey: true }, false), true, "Cmd+F focuses the search box");
+  assertEq(V.isSearchFocusKey({ key: "a" }, false), false, "other keys do not focus the search box");
 }
 
 // ── Summary ──
