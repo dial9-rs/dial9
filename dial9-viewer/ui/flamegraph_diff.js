@@ -278,6 +278,38 @@ function parseDiff(search) {
   return { a: decodeScope(a), b: decodeScope(b) };
 }
 
+// ---------------------------------------------------------------------------
+// Button routing: single scope vs captured A/B diff
+// ---------------------------------------------------------------------------
+
+// Decide which page + query string a viz button should open. This is the shared
+// routing seam behind the landing page's "Flamegraph"/"Tokio Stats" buttons and
+// the diff tray's launch buttons, so all of them agree on the single-vs-diff
+// decision. `kind` is "flamegraph" or "tokio". When `hasDiff` is true (a full
+// A/B diff has been captured) the target is the two-sided diff link
+// (?diff=1&a=..&b=..) built from `diffA`/`diffB`; otherwise it is the caller's
+// pre-built single-scope `singleQuery`. Pure/DOM-free so the routing is
+// unit-testable without a browser.
+//
+// Flamegraph diff scopes carry the client-only `api=1` flag per side (each side
+// hits /api/flamegraph in aggregate mode); tokio-stats does not use it.
+function chooseTarget(kind, opts) {
+  const page = kind === "tokio" ? "tokio_stats.html" : "flamegraph.html";
+  if (opts && opts.hasDiff) {
+    const withApi = (scope) => {
+      if (kind !== "flamegraph") return scope;
+      const s = new URLSearchParams(
+        typeof scope === "string" ? scope : scope.toString(),
+      );
+      s.set("api", "1");
+      return s;
+    };
+    return { page: page, search: diffSearch(withApi(opts.diffA), withApi(opts.diffB)) };
+  }
+  const single = opts && opts.singleQuery != null ? opts.singleQuery : "";
+  return { page: page, search: typeof single === "string" ? single : single.toString() };
+}
+
 var FlamegraphDiff = {
   newDiffNode,
   addSide,
@@ -292,6 +324,7 @@ var FlamegraphDiff = {
   decodeScope,
   diffSearch,
   parseDiff,
+  chooseTarget,
   SCOPE_KEYS_SINGLE,
 };
 

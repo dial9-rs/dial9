@@ -1761,6 +1761,11 @@
     // serve each whole file — no server-side event filtering is needed for a
     // working flamegraph. The selection is already size-capped.
     function viewCpuProfile() {
+        // A full A/B diff has been captured — the top button opens the diff
+        // rather than a single-scope flamegraph (issue #626). launchDiff early-
+        // returns unless BOTH sides are set, so a partial capture still falls
+        // through to the single-scope flamegraph of the current selection.
+        if (diffA && diffB) { launchDiff('flamegraph'); return; }
         if (!heatmapSelection || !heatmapSelection.keys.length) return;
         const bucket = bucketInput.value.trim();
         if (!bucket) { alert('Bucket is required'); return; }
@@ -1813,6 +1818,9 @@
     }
 
     function viewTokioStats() {
+        // In diff mode the top button opens the A/B diff (issue #626); a partial
+        // capture falls through to a single-scope tokio-stats view.
+        if (diffA && diffB) { launchDiff('tokio'); return; }
         if (!heatmapSelection || !heatmapSelection.keys.length) return;
         const bucket = bucketInput.value.trim();
         if (!bucket) { alert('Bucket is required'); return; }
@@ -1897,6 +1905,19 @@
             sideCell('A · left', diffA, '#1e3050', '#9ec1ff', 'a') +
             sideCell('B · right', diffB, '#4a221c', '#ffb3a0', 'b');
         launch.style.display = (diffA && diffB) ? 'flex' : 'none';
+        refreshDiffModeButtons();
+    }
+
+    // Relabel the top actions-bar buttons to reflect that, in diff mode, they now
+    // open the A/B diff instead of a single-scope view (issue #626). Called from
+    // both diff-state changes (renderDiffTray) and selection changes
+    // (updateSelectionCount) so the label stays in sync in both directions.
+    function refreshDiffModeButtons() {
+        const cpuBtn = document.getElementById('cpu-btn');
+        const healthBtn = document.getElementById('health-btn');
+        const diffMode = !!(diffA && diffB);
+        if (cpuBtn) cpuBtn.textContent = diffMode ? '🔥 Flamegraph diff' : '🔥 Flamegraph';
+        if (healthBtn) healthBtn.textContent = diffMode ? '⚡ Tokio Stats diff' : '⚡ Tokio Stats';
     }
 
     // Launch the captured A/B diff in the chosen viz. Uses the shared scope-link
@@ -1904,17 +1925,9 @@
     // encoding — the unified diff-handling seam between the two views.
     function launchDiff(kind) {
         if (!diffA || !diffB) return;
-        // Flamegraph scopes carry the client-only `api=1` flag; tokio-stats does
-        // not use it. Add it per-side only for the flamegraph target so each side
-        // hits /api/flamegraph in aggregate mode.
-        function scopeFor(base) {
-            if (kind !== 'flamegraph') return base;
-            const s = new URLSearchParams(base.toString());
-            s.set('api', '1');
-            return s;
-        }
-        const search = FlamegraphDiff.diffSearch(scopeFor(diffA), scopeFor(diffB));
-        const page = kind === 'tokio' ? 'tokio_stats.html' : 'flamegraph.html';
+        // chooseTarget owns the single-vs-diff routing and the per-side `api=1`
+        // flag for the flamegraph target (tokio-stats does not use it).
+        const { page, search } = FlamegraphDiff.chooseTarget(kind, { hasDiff: true, diffA, diffB });
         window.open(page + '?' + search, '_blank');
     }
 
@@ -2035,6 +2048,10 @@
         const diffAddBtn = document.getElementById('diff-add-btn');
         const warn = document.getElementById('selection-warn');
         const count = document.getElementById('selection-count');
+
+        // Keep the top-button labels ("Flamegraph" vs "Flamegraph diff") in sync
+        // as the selection changes (issue #626).
+        refreshDiffModeButtons();
 
         if (currentTab === 'browse') {
             const sel = heatmapSelection;
