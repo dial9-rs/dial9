@@ -5,6 +5,7 @@
   "scripts": {
     "build": "vite build",
     "dev": "vite",
+    "dev:embedded": "vite build --watch",
     "test": "vitest run --passWithNoTests"
   },
   "devDependencies": {

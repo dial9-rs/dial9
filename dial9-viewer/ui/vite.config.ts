@@ -1,4 +1,4 @@
-import { defineConfig } from "vite";
+import { defineConfig, type Plugin } from "vite";
 import { viteStaticCopy } from "vite-plugin-static-copy";
 
 // T02 scaffolding config (docs/ui-inventory/02-architecture.md section 2.1,
@@ -54,7 +54,36 @@ const legacyPageScripts = [
 // regeneration pipeline, stress CI). T04 owns the public/ move.
 const legacyPageAssets = ["flamegraph.css", "demo-trace.bin"];
 
+// Single-server dev loop (`npm run dev:embedded` = `vite build --watch`,
+// 02-architecture.md section 3): Rollup only rebuilds when files in its
+// module graph change, and the statically-copied legacy files above are NOT
+// in that graph (vite-plugin-static-copy re-copies per build but watches
+// nothing in build mode). Register them as watch files so editing a legacy
+// page or script triggers a rebuild - whose writeBundle re-runs the static
+// copy into dist/ - preserving the edit-refresh loop (constraint H5).
+function watchLegacyFiles(files: string[]): Plugin {
+  return {
+    name: "dial9:watch-legacy-static-files",
+    apply: "build",
+    buildStart() {
+      for (const f of files) {
+        // Relative paths resolve against process.cwd() (= ui/ under npm
+        // scripts), matching the static-copy `src` entries above.
+        this.addWatchFile(f);
+      }
+    },
+  };
+}
+
 export default defineConfig({
+  // Proxy-mode dev loop (`npm run dev`): Vite serves the UI with HMR and
+  // forwards /api/* to the Rust dev-server, launched with:
+  //   PORT=3001 cargo run -p dial9-viewer --bin dev-server --features dev-server
+  server: {
+    proxy: {
+      "/api": "http://localhost:3001",
+    },
+  },
   build: {
     target: "es2022",
     sourcemap: false,
@@ -75,5 +104,6 @@ export default defineConfig({
         ...legacyPageAssets.map((f) => ({ src: f, dest: "." })),
       ],
     }),
+    watchLegacyFiles([...legacyPages, ...legacyPageScripts, ...legacyPageAssets]),
   ],
 });
