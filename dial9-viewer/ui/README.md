@@ -21,6 +21,45 @@ present) but serves an empty UI until `npm run build` runs. End users never
 need Node: release CI builds `dist/` before publishing, so the crates.io
 archive and the prebuilt binaries carry the built assets.
 
+## Dev loops
+
+Two ways to work on the UI (ADR-0004 section 3). Both use the Rust
+dev-server as the API backend:
+
+```bash
+PORT=3001 cargo run -p dial9-viewer --bin dev-server --features dev-server
+```
+
+**Proxy mode (primary, HMR):**
+
+```bash
+npm run dev       # Vite dev server, prints its URL (default :5173)
+```
+
+Browse the Vite URL: `/api/*` is proxied to the dev-server on :3001
+(`server.proxy` in `vite.config.ts`), edits to `src/` modules hot-reload
+in the browser, and the legacy pages/scripts are served from this
+directory as-is.
+
+**Embedded mode (single-server, edit -> refresh):**
+
+```bash
+npm run dev:embedded   # vite build --watch -> dist/
+```
+
+Browse the dev-server directly (http://localhost:3001): it serves `dist/`
+from disk, and the watch build rewrites `dist/` on every edit - including
+edits to the statically-copied legacy pages/scripts and the `public/`
+assets, which a config plugin registers as watch files. Edit, refresh,
+done. `dial9 serve --dev` serves the same `dist/` from disk (run it from
+the repo root or `dial9-viewer/`).
+
+Root-served verbatim assets (`demo-trace.bin`, `flamegraph.css`) live in
+`public/`: Vite serves `public/` at `/` in dev mode and copies it into the
+`dist/` root at build, so the pages' root-relative references keep working
+in both modes. The Node tests read the demo trace from
+`public/demo-trace.bin`.
+
 Key files:
 
 - `index.html` — landing page / S3 browser. Emits one `trace=/api/object?…`
