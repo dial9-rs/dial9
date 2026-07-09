@@ -13,6 +13,7 @@ const {
     segmentsOverlapping,
     totalBytes,
     densityColor,
+    shouldClearSelectionOnClick,
 } = require("./heatmap.js");
 
 let failed = 0;
@@ -201,6 +202,43 @@ function seg(o) {
     ok(low !== "rgb(26,26,46)", "densityColor: small positive is visible (not background)");
     ok(lum(low) < lum(mid) && lum(mid) < lum(hi), "densityColor: brighter with higher density");
     ok(densityColor(1) === "rgb(255,217,61)", "densityColor: 1 → hot yellow");
+}
+
+// ── shouldClearSelectionOnClick ──
+{
+    // The regression: a selection drag that ends outside the pane fires a
+    // synthetic click on an ancestor above #heatmap-view. That click must NOT
+    // clear the just-created selection.
+    ok(shouldClearSelectionOnClick({
+        isBrowseTab: true, hasSelection: true, wasDrag: true,
+        targetInHeatmap: false, targetInActions: false,
+    }) === false, "shouldClearSelectionOnClick: drag ending outside pane keeps selection");
+
+    // A genuine outside click (no drag) clears the selection.
+    ok(shouldClearSelectionOnClick({
+        isBrowseTab: true, hasSelection: true, wasDrag: false,
+        targetInHeatmap: false, targetInActions: false,
+    }) === true, "shouldClearSelectionOnClick: genuine outside click clears");
+
+    // Clicks inside the timeline or on the actions bar preserve the selection.
+    ok(shouldClearSelectionOnClick({
+        isBrowseTab: true, hasSelection: true, wasDrag: false,
+        targetInHeatmap: true, targetInActions: false,
+    }) === false, "shouldClearSelectionOnClick: click inside heatmap keeps selection");
+    ok(shouldClearSelectionOnClick({
+        isBrowseTab: true, hasSelection: true, wasDrag: false,
+        targetInHeatmap: false, targetInActions: true,
+    }) === false, "shouldClearSelectionOnClick: click on actions bar keeps selection");
+
+    // No-ops when not on browse tab or nothing is selected.
+    ok(shouldClearSelectionOnClick({
+        isBrowseTab: false, hasSelection: true, wasDrag: false,
+        targetInHeatmap: false, targetInActions: false,
+    }) === false, "shouldClearSelectionOnClick: not browse tab → no clear");
+    ok(shouldClearSelectionOnClick({
+        isBrowseTab: true, hasSelection: false, wasDrag: false,
+        targetInHeatmap: false, targetInActions: false,
+    }) === false, "shouldClearSelectionOnClick: no selection → no clear");
 }
 
 // ── constants ──

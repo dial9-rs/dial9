@@ -438,6 +438,11 @@
     let heatmapCols = [];      // per-row Float64Array of bytes-per-column
     let heatmapColMax = 0;     // global max column value (for normalization)
     let heatmapSelection = null; // { keys:[], bytes, t0, t1 }
+    // Set on mouseup when a heatmap interaction was a real drag (region select or
+    // zoom) rather than a click. The document-level deselect handler consumes it
+    // to ignore the synthetic click the browser fires after a drag that ends
+    // outside the pane, which would otherwise wipe the just-created selection.
+    let justDraggedOnHeatmap = false;
     let rawObjects = [];       // raw search results
     let currentTab = 'browse';
     let aggregationEnabled = false; // server runs demand-driven aggregation
@@ -1486,6 +1491,7 @@
 
         plot.addEventListener('mousedown', (e) => {
             if (!heatmapRows.length) return;
+            justDraggedOnHeatmap = false; // reset for this fresh interaction
             dragging = true;
             zooming = e.altKey;
             const { x, y } = localXY(e);
@@ -1516,6 +1522,7 @@
             const { x, y } = localXY(e);
             if (zooming) {
                 zooming = false;
+                justDraggedOnHeatmap = true; // suppress the trailing synthetic click
                 sel.style.display = 'none'; // rubber-band was transient
                 zoomToX(Math.min(x, startX), Math.max(x, startX));
                 return;
@@ -1524,6 +1531,7 @@
             if (dx < 4 && dy < 4) {
                 selectSegmentAt(startX, startY); // treat as a click
             } else {
+                justDraggedOnHeatmap = true; // suppress the trailing synthetic click
                 finalizeSelection(Math.min(x, startX), Math.max(x, startX), Math.min(y, startY), Math.max(y, startY));
             }
         });
@@ -1684,10 +1692,21 @@
     // Clicking anywhere outside the timeline and the actions bar clears the
     // current selection. (Clicks inside the plot are handled by its own
     // mousedown/up; clicks on the action buttons must preserve the selection.)
+    // A drag that ends outside the pane fires a synthetic click whose target is
+    // above #heatmap-view, so consume `justDraggedOnHeatmap` on every click to
+    // keep that phantom click from wiping the just-created selection.
     document.addEventListener('click', (e) => {
-        if (currentTab !== 'browse' || !heatmapSelection) return;
-        if (e.target.closest('#heatmap-view') || e.target.closest('#actions-bar')) return;
-        setHeatmapSelection(null);
+        const wasDrag = justDraggedOnHeatmap;
+        justDraggedOnHeatmap = false;
+        if (shouldClearSelectionOnClick({
+            isBrowseTab: currentTab === 'browse',
+            hasSelection: !!heatmapSelection,
+            wasDrag,
+            targetInHeatmap: !!e.target.closest('#heatmap-view'),
+            targetInActions: !!e.target.closest('#actions-bar'),
+        })) {
+            setHeatmapSelection(null);
+        }
     });
 
     // Structured title metadata (svc / host / time window / segment count)
