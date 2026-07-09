@@ -47,6 +47,13 @@ const legacyPageScripts = [
   "url_state.js",
 ];
 
+// Root-served assets that STAY at ui/ root (orchestrator ruling 2026-07-08,
+// recorded in docs/tickets/chunk-1-foundation.md T02): moving them to
+// public/ before T04 would break the disk-served dev loop (H5) and orphan
+// ~18 disk readers of demo-trace.bin (test_*.js, Rust tests/benches, the
+// regeneration pipeline, stress CI). T04 owns the public/ move.
+const legacyPageAssets = ["flamegraph.css", "demo-trace.bin"];
+
 export default defineConfig({
   build: {
     target: "es2022",
@@ -65,6 +72,7 @@ export default defineConfig({
       targets: [
         ...legacyPages.map((f) => ({ src: f, dest: "." })),
         ...legacyPageScripts.map((f) => ({ src: f, dest: "." })),
+        ...legacyPageAssets.map((f) => ({ src: f, dest: "." })),
       ],
     }),
   ],

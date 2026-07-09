@@ -2,8 +2,12 @@
 
 ## STATUS
 
-BLOCKED on one maintainer decision (asset location, below). Everything
-decision-independent is done and committed.
+DONE pending final gate (nextest stress run in flight at last update; see
+EVIDENCE - all other DoD checks pass). Asset-location gate RESOLVED by
+orchestrator ruling 2026-07-08: Option B - `demo-trace.bin` +
+`flamegraph.css` STAY at `ui/` root and ride the static-copy list; the
+`public/` move belongs to T04 (chunk-1 T02/T04 Work sections amended by the
+orchestrator).
 
 ## COMPLETED (commits on `ticket/T02-vite-mpa-scaffolding`, based on main @ 84a21e5)
 
@@ -16,55 +20,50 @@ decision-independent is done and committed.
   probe), `dist/.gitkeep` + `public/.gitkeep` (the public copy regenerates
   dist/.gitkeep on every build so `git status` stays clean),
   `ui/.gitignore`, rust-embed `#[folder]` -> `ui/dist/`.
-  `npx tsc --noEmit` and `npm run build` pass; dist contains the 16 copied
-  legacy files.
+- `4ca1593`: HANDOFF (gate question, since resolved).
+- (pending commit): vite.config.ts `legacyPageAssets` = flamegraph.css +
+  demo-trace.bin added to the copy list per the ruling; this HANDOFF update.
 - Deliberate: NO `"type": "module"` in package.json - `node test_*.js` must
   keep loading the root scripts as CJS (constraint H2).
 
-## BLOCKER / QUESTION (stop-on-gate)
+## DoD EVIDENCE
 
-The ticket says `demo-trace.bin` + `flamegraph.css` MOVE to `public/`
-("no plugin needed"). Two facts the ticket/DoD do not account for:
+1. check `npm ci && npm run build` -> dist serves all FOUR pages + assets
+   byte-identical: `npx tsc --noEmit` clean; `npm run build` copies 18 items.
+   Byte-diff via two `python3 -m http.server` instances (ui/ on :3011,
+   ui/dist/ on :3012), `curl` + `cmp` on all 18 served paths
+   (index/viewer/flamegraph/tokio_stats.html, the 12 scripts,
+   flamegraph.css, demo-trace.bin): ALL IDENTICAL, FAIL=0.
+2. check cargo-only checkout compiles with empty UI: emptied `ui/dist/` to
+   `.gitkeep` only, `cargo build -p dial9-viewer` -> Finished dev profile
+   (34s). No npm involvement in build.rs (unchanged, none exists).
+3. check no `test_*.js` in the binary: release artifact strings scan -
+   RESULT RECORDED BELOW after the release build (rust-embed only embeds in
+   release; debug reads from disk at runtime).
+4. Rust gates for the mod.rs change: `cargo fmt --check` PASS; `cargo clippy
+   --all-targets --features __nonlinux_all_features` PASS for dial9-viewer
+   (zero warnings in the touched crate); `cargo nextest run
+   --stress-duration 20s` in flight at last HANDOFF update.
 
-1. `dev_ui_dir` serving (`ServeDir`, src/server/mod.rs:376-380) has NO
-   fallback: dev-server/`dial9 serve --dev` serve `ui/` from disk, so moving
-   the files under `ui/public/` 404s `/flamegraph.css` and `/demo-trace.bin`
-   in dev mode until T04 repoints the dev loop at `ui/dist`.
-2. `ui/demo-trace.bin` has ~18 DISK readers that would all need updating:
-   12+ `test_*.js`/bench_parse.js (`path.join(__dirname, "demo-trace.bin")`),
-   Rust `tests/decode_test.rs`, `tests/parser_parity_test.rs`,
-   `benches/decode_bench.rs` (`CARGO_MANIFEST_DIR/ui/demo-trace.bin`),
-   `scripts/regenerate_demo_trace.sh`, `compose.yml`,
-   `.github/workflows/stress-test.yml` (CI = T03's scope), AGENTS.md
-   instructions.
+## PRE-EXISTING FINDINGS (not fixed, per scope rules)
 
-Options:
-- (A) Literal spec: move both, update all readers (touches Rust tests/bench,
-  CI workflow, regeneration pipeline; full Rust gates triggered; crosses the
-  "CI wiring is T03" scope fence).
-- (B) Deviate minimally: keep both at `ui/` root, add them to the
-  static-copy list (2 lines in vite.config.ts). Zero reader churn, dev loop
-  keeps working, served dist output byte-identical either way. The public/
-  move then lands with T04 (when the dev loop repoints) or as its own
-  atomic ticket that also moves the regeneration pipeline.
+- Clippy (macOS, `__nonlinux_all_features`) reports pre-existing warnings in
+  UNTOUCHED crates: `perf-self-profile/src/rate_limit.rs` (unused macro
+  `rate_limited`, unused import, dead `time_since_epoch`) and
+  `dial9-tokio-telemetry/src/telemetry/recorder/mod.rs:10` (unused import
+  `poll_start_ts_monotonic`). Likely cfg(non-Linux) artifacts. Report-only.
 
-Recommendation: (B) - the public/ move buys nothing today (identical dist
-output) and its real blast radius belongs in a ticket that owns it.
+## REMAINING
 
-## REMAINING (after the decision)
+- Record nextest + strings results below when the runs complete; flip
+  STATUS to done; final commit.
+- Execution-plan state table flip (T02 -> gates-passed) lives on the docs
+  lineage (T01 branch / orchestrator) - not part of this branch.
 
-1. Apply the chosen asset mechanism (A: git mv + reader updates; B: add the
-   two static-copy lines).
-2. DoD checks: byte-diff all 4 pages + every referenced asset served from
-   `ui/` vs `ui/dist/` (two static servers + curl + diff); cargo-only
-   compile with empty dist (only .gitkeep); `cargo build -p dial9-viewer`
-   then assert no `test_*.js` in the binary (strings).
-3. Rust gates for the mod.rs change: `cargo fmt --check`, clippy
-   (`--features __nonlinux_all_features` on macOS), `cargo nextest run`
-   (+ stress per AGENTS.md final verification).
-4. Update HANDOFF + execution-plan state table.
+## NOTES
 
-## EVIDENCE SO FAR
-
-- `npx tsc --noEmit`: clean. `npm run build`: 1 module transformed, 16 items
-  copied, dist listing = 4 html + 12 js + assets/dev-probe + .gitkeep.
+- `dev-probe.ts` emits an empty chunk warning from Vite ("Generated an empty
+  chunk: dev-probe") - expected: the module exports a constant and has no
+  side effects; page tickets replace this input.
+- Byte-diff rig: `python3 -m http.server` chosen because the dev-server
+  hardcodes its UI dir; T12 replaces this rig with real parity tooling.
