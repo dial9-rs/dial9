@@ -390,6 +390,18 @@
             <button onclick="clearDiff()" class="ghost" style="background:#2a2a44;color:#e0e0e0;border:1px solid #444;padding:3px 10px;border-radius:3px;cursor:pointer" title="Clear both sides">Clear</button>
         </div>
         <div id="diff-sides" style="display:grid;grid-template-columns:1fr 1fr;gap:10px"></div>
+        <!-- One-click presets to fill side B relative to side A (issue #624):
+             same window shifted back in time, or same window on a different
+             host in the browse view. Shown only when A is set and B is not. -->
+        <div id="diff-presets" style="display:none;margin-top:10px;align-items:center;gap:8px;flex-wrap:wrap">
+            <span style="color:#8b949e">Quick B:</span>
+            <button onclick="presetShiftB('1h')" class="ghost" style="background:#2a2a44;color:#e0e0e0;border:1px solid #444;padding:3px 10px;border-radius:3px;cursor:pointer" title="Side B = side A one hour earlier">−1h</button>
+            <button onclick="presetShiftB('24h')" class="ghost" style="background:#2a2a44;color:#e0e0e0;border:1px solid #444;padding:3px 10px;border-radius:3px;cursor:pointer" title="Side B = side A one day earlier">−24h</button>
+            <button onclick="presetShiftB('7d')" class="ghost" style="background:#2a2a44;color:#e0e0e0;border:1px solid #444;padding:3px 10px;border-radius:3px;cursor:pointer" title="Side B = side A one week earlier">−7d</button>
+            <select id="diff-preset-host" onchange="presetHostB(this.value)" style="background:#14142a;color:#e0e0e0;border:1px solid #444;padding:3px 8px;border-radius:3px;cursor:pointer" title="Side B = side A on a different host, same time window">
+                <option value="">same time, different host…</option>
+            </select>
+        </div>
         <div id="diff-launch" style="display:none;margin-top:10px;align-items:center;gap:8px">
             <span style="color:#8b949e">Compare in:</span>
             <button onclick="launchDiff('flamegraph')" style="background:#6c63ff;color:#fff;border:none;padding:4px 14px;border-radius:3px;cursor:pointer;font-weight:600">🔥 Flamegraph</button>
@@ -1991,8 +2003,73 @@
             sideCell('A · left', diffA, '#1e3050', '#9ec1ff', 'a') +
             sideCell('B · right', diffB, '#4a221c', '#ffb3a0', 'b');
         launch.style.display = (diffA && diffB) ? 'flex' : 'none';
+        renderDiffPresets();
         refreshDiffModeButtons();
     }
+
+    // Populate/toggle the "Quick B" presets (issue #624). They only make sense
+    // once side A is captured and side B is still empty: they derive B from A.
+    // The time-shift buttons need A to carry a window (start_ns/end_ns); the
+    // host dropdown lists every host in the current browse view except A's own.
+    function renderDiffPresets() {
+        const presets = document.getElementById('diff-presets');
+        if (!presets) return;
+        if (!diffA || diffB) { presets.style.display = 'none'; return; }
+        presets.style.display = 'flex';
+
+        // Shift presets are only meaningful with a window on side A.
+        const hasWindow = diffA.get('start_ns') != null && diffA.get('end_ns') != null;
+        for (const btn of presets.querySelectorAll('button')) {
+            btn.disabled = !hasWindow;
+            btn.style.opacity = hasWindow ? '1' : '0.4';
+            btn.style.cursor = hasWindow ? 'pointer' : 'not-allowed';
+        }
+
+        // Host dropdown: all service/host pairs in the browse window, minus the
+        // host(s) already on side A (comparing a host to itself is a no-op).
+        const sel = document.getElementById('diff-preset-host');
+        const aHosts = new Set(diffA.getAll('host'));
+        const seen = new Set();
+        const opts = ['<option value="">same time, different host…</option>'];
+        for (const row of heatmapRows) {
+            if (!row.host || aHosts.has(row.host) || seen.has(row.host)) continue;
+            seen.add(row.host);
+            const label = row.service ? row.service + ' / ' + row.host : row.host;
+            opts.push('<option value="' + escapeHtmlIdx(row.host) + '">' + escapeHtmlIdx(label) + '</option>');
+        }
+        sel.innerHTML = opts.join('');
+        // Disable the dropdown when there is no other host to pick.
+        const hasOther = opts.length > 1;
+        sel.disabled = !hasOther;
+        sel.style.opacity = hasOther ? '1' : '0.4';
+        sel.style.cursor = hasOther ? 'pointer' : 'not-allowed';
+    }
+
+    // Preset: side B = side A shifted back one hour / day / week (same window
+    // length). Reuses the shared shiftScopeTime helper AND the shared BigInt-ns
+    // shift constants so this matches the flamegraph Diff dialog exactly (#624).
+    const DIFF_SHIFTS = {
+        '1h': FlamegraphDiff.DIFF_SHIFT_1H,
+        '24h': FlamegraphDiff.DIFF_SHIFT_24H,
+        '7d': FlamegraphDiff.DIFF_SHIFT_7D,
+    };
+    function presetShiftB(which) {
+        if (!diffA || diffB) return;
+        const deltaNs = DIFF_SHIFTS[which];
+        if (deltaNs == null) return;
+        diffB = FlamegraphDiff.shiftScopeTime(diffA, deltaNs);
+        renderDiffTray();
+    }
+    window.presetShiftB = presetShiftB;
+
+    // Preset: side B = side A on a different host, same time window. Reuses the
+    // shared scopeWithHost helper (issue #624).
+    function presetHostB(host) {
+        if (!host || !diffA || diffB) return;
+        diffB = FlamegraphDiff.scopeWithHost(diffA, host);
+        renderDiffTray();
+    }
+    window.presetHostB = presetHostB;
 
     // Relabel the top actions-bar buttons to reflect that, in diff mode, they now
     // open the A/B diff instead of a single-scope view (issue #626). Called from
