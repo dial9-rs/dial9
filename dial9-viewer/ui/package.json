@@ -4,8 +4,10 @@
   "version": "0.0.0",
   "scripts": {
     "build": "vite build",
+    "check:boundary": "node scripts/check-core-imports.mjs",
     "dev": "vite",
     "dev:embedded": "vite build --watch",
+    "pretest": "npm run check:boundary",
     "test": "vitest run"
   },
   "devDependencies": {
