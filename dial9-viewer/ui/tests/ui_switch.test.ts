@@ -9,9 +9,11 @@
 // preference > default), query-string preservation including repeated trace=
 // params (N10 deep links), hash dropping (raw switch - no view-state
 // porting), the no-registered-target behavior (no redirect, no control),
-// the storage-throw fallback, and click-time target resolution against the
+// the storage-throw fallback, click-time target resolution against the
 // live location (T38-audit finding 1: the pages rewrite their query string
-// after boot). The DoD items that need a real migrated page
+// after boot), and legacy-pin storage alignment (T38-audit finding 2: the
+// pages strip the ui=legacy pin). The DoD items that need a real migrated
+// page
 // (round-trip in a browser, zoom-state isolation) are pending T13/T14 - see
 // HANDOFF.md.
 
@@ -49,6 +51,7 @@ const {
   pageForNewEntry,
   prefFromStorage,
   liveControlHref,
+  pinWouldBounce,
   NEW_UI_ENTRIES,
 } = require("../ui-switch.js") as {
   resolveUi: (
@@ -73,6 +76,11 @@ const {
     search: string,
     registry: Record<string, string>,
   ) => string | null;
+  pinWouldBounce: (
+    search: string,
+    storedPref: string | null,
+    defaultUi: "new" | "legacy",
+  ) => boolean;
   NEW_UI_ENTRIES: Record<string, string>;
 };
 
@@ -384,6 +392,52 @@ describe("click-time target resolution (T38-audit finding 1)", () => {
         REG,
       ),
     ).toBe("/flamegraph.html?trace=a&ui=legacy");
+  });
+});
+
+describe("legacy-pin storage alignment (T38-audit finding 2)", () => {
+  // Three of the four legacy pages rebuild their query string from scratch
+  // and drop the unknown `ui` param, so the ui=legacy pin cannot be relied
+  // on to survive the first in-page URL sync. When the pin is the ONLY
+  // thing keeping the visitor on legacy (pinWouldBounce), the browser layer
+  // writes "legacy" to the stored preference at boot, so a stripped pin
+  // plus a reload still resolves legacy.
+  it("detects the audit's bounce precondition: pin present, stored pref says new", () => {
+    expect(pinWouldBounce("?trace=a&ui=legacy", "new", "legacy")).toBe(true);
+  });
+  it("middle-click scenario: once storage is aligned, a stripped pin no longer bounces", () => {
+    // From the new UI, the switch is opened in a new tab (middle-click
+    // skips the click handler, so storage still says "new"). The legacy
+    // page boots pinned and stays legacy by param precedence:
+    const boot = "?trace=a&ui=legacy";
+    expect(resolveUi(boot, "new", "legacy")).toBe("legacy");
+    // Pre-fix: the page's first URL sync strips the pin; a reload then
+    // dispatches on storedPref=new straight back to the new UI:
+    expect(resolveUi("?trace=a", "new", "legacy")).toBe("new"); // the bounce
+    // The fix: the pin was load-bearing at boot, so the browser layer
+    // aligned storage to "legacy". The same pin-less reload now stays:
+    expect(pinWouldBounce(boot, "new", "legacy")).toBe(true);
+    expect(resolveUi("?trace=a", "legacy", "legacy")).toBe("legacy");
+  });
+  it("no alignment when the visitor already resolves legacy without the pin", () => {
+    // A shared ?ui=legacy link must not sticky-switch a recipient whose
+    // preference/default is already legacy (mirrors write-on-click-only).
+    expect(pinWouldBounce("?ui=legacy", null, "legacy")).toBe(false);
+    expect(pinWouldBounce("?ui=legacy&trace=a", "legacy", "legacy")).toBe(
+      false,
+    );
+    expect(pinWouldBounce("?ui=legacy", "legacy", "new")).toBe(false);
+  });
+  it("no alignment without an explicit ui=legacy pin", () => {
+    expect(pinWouldBounce("?trace=a", "new", "legacy")).toBe(false);
+    expect(pinWouldBounce("", "new", "legacy")).toBe(false);
+    expect(pinWouldBounce("?ui=new", "new", "legacy")).toBe(false);
+    expect(pinWouldBounce("?ui=shiny", "new", "legacy")).toBe(false);
+  });
+  it("post-flip: the pin is load-bearing for a no-preference visitor too", () => {
+    // After DEFAULT_UI flips to "new", a pinned visitor with no stored
+    // preference would bounce once the pin is stripped - align then too.
+    expect(pinWouldBounce("?ui=legacy", null, "new")).toBe(true);
   });
 });
 

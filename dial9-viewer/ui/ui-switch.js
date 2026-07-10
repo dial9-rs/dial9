@@ -17,6 +17,11 @@
 //   3. Otherwise stay on the legacy page and, if a new-UI entry is registered,
 //      render a small always-visible "Switch to new UI" control. When nothing
 //      is registered, NO control renders (a switch to nowhere must not exist).
+//      If the stay was forced by an explicit `?ui=legacy` pin against a
+//      preference/default of "new", the "legacy" choice is persisted to the
+//      stored preference - the legacy pages strip the pin on their first URL
+//      sync, so the pin alone cannot be trusted to survive a reload (see
+//      pinWouldBounce).
 //
 // New-UI entries live at their own dist paths (the canonical paths keep
 // serving the legacy pages via the vite.config.ts static-copy list until
@@ -213,6 +218,34 @@
     return entry ? "/" + entry + buildQuery(search, "new") : null;
   }
 
+  // Is the explicit `?ui=legacy` pin the ONLY thing keeping this visitor on
+  // the legacy UI (T38 audit finding 2)? Three of the four legacy pages
+  // rebuild their query string from scratch on their first URL sync and
+  // drop the unknown `ui` param (index, flamegraph, tokio_stats; only
+  // viewer preserves it), so the pin cannot be relied on to survive. True
+  // exactly when the same URL WITHOUT the pin would resolve "new" - i.e.
+  // when losing the pin would bounce a reload (or a copied address-bar URL
+  // in the same browser) back to the new UI against the visitor's explicit
+  // choice. The browser layer then aligns the stored preference to
+  // "legacy", making the choice survive the strip.
+  //
+  // Deliberately false when the visitor already resolves legacy without
+  // the pin: a shared `?ui=legacy` link must not sticky-switch a recipient
+  // whose preference/default is already legacy (mirroring the
+  // write-on-click-only rule for `?ui=new` links). For a recipient whose
+  // stored preference says "new" the audit weighs honoring the pinned
+  // intent above the no-sticky rule - that conflict IS the bounce case.
+  function pinWouldBounce(search, storedPref, defaultUi) {
+    var params = new URLSearchParams(search);
+    if (params.get("ui") !== "legacy") return false;
+    params.delete("ui");
+    var stripped = params.toString();
+    return (
+      resolveUi(stripped ? "?" + stripped : "", storedPref, defaultUi) ===
+      "new"
+    );
+  }
+
   // Read a preference off a localStorage-like object. Failures (private
   // mode, storage disabled) and unknown values read as "no preference" -
   // never as a default UI choice.
@@ -231,6 +264,7 @@
   exports.canonicalPageFromPath = canonicalPageFromPath;
   exports.pageForNewEntry = pageForNewEntry;
   exports.liveControlHref = liveControlHref;
+  exports.pinWouldBounce = pinWouldBounce;
   exports.prefFromStorage = prefFromStorage;
   exports.NEW_UI_ENTRIES = NEW_UI_ENTRIES;
   exports.DEFAULT_UI = DEFAULT_UI;
@@ -316,12 +350,13 @@
   }
 
   function run(side, page) {
+    var storedPref = readStoredPref();
     var result = decide({
       side: side,
       page: page,
       search: window.location.search,
       hash: window.location.hash, // dropped by decide(): raw switch
-      storedPref: readStoredPref(),
+      storedPref: storedPref,
       registry: NEW_UI_ENTRIES,
       defaultUi: DEFAULT_UI,
     });
@@ -330,6 +365,20 @@
       // pollute the back button.
       window.location.replace(result.redirect);
       return;
+    }
+    if (
+      side === "legacy" &&
+      result.control &&
+      pinWouldBounce(window.location.search, storedPref, DEFAULT_UI)
+    ) {
+      // T38 audit finding 2: this visitor is on legacy ONLY because of the
+      // explicit `?ui=legacy` pin, and the page's own URL syncs will strip
+      // it. Persist the pinned choice so the next pin-less load still
+      // resolves legacy instead of bouncing to the new UI. Gated on
+      // result.control (a registered counterpart) - without one no
+      // dispatch is possible, so a stray pin must not touch the global
+      // preference. Best-effort: see writeStoredPref.
+      writeStoredPref("legacy");
     }
     mountControl(result.control, function () {
       // T38 audit finding 1: the target is resolved from the LIVE location
