@@ -48,15 +48,42 @@ export function formatEpochStr(epoch: number, localTz: boolean): string {
   return formatDate(new Date(epoch * 1000).toISOString(), localTz);
 }
 
-/** HH:MM:SS axis/selection tick in the active TZ mode (legacy `fmtTick`).
- * Time-of-day only - the day-crossing ambiguity is a recorded finding
- * (features/01 Finding 3) whose fix is T15's, not this port's. */
-export function fmtTick(epoch: number, localTz: boolean): string {
+/** Axis/selection tick in the active TZ mode (legacy `fmtTick`): HH:MM:SS
+ * by default; with `withDate` (T15's F10-axis amendment - features/01
+ * Finding 3) the calendar date is prefixed ("YYYY-MM-DD HH:MM:SS") so
+ * ticks on a day-crossing span stay unambiguous. The selection-count
+ * readout keeps the time-only form (the amendment covers the axis only).
+ */
+export function fmtTick(epoch: number, localTz: boolean, withDate = false): string {
+  if (withDate) return formatEpochStr(epoch, localTz);
   const d = new Date(epoch * 1000);
   const pad = (n: number) => String(n).padStart(2, "0");
   return localTz
     ? pad(d.getHours()) + ":" + pad(d.getMinutes()) + ":" + pad(d.getSeconds())
     : pad(d.getUTCHours()) + ":" + pad(d.getUTCMinutes()) + ":" + pad(d.getUTCSeconds());
+}
+
+/**
+ * Whether [t0, t1] (epoch seconds) crosses a calendar-day boundary in the
+ * active TZ mode - the trigger for date-carrying axis ticks (T15, F10-axis
+ * amendment). A span strictly inside one calendar day keeps the compact
+ * legacy HH:MM:SS ticks.
+ */
+export function crossesDayBoundary(t0: number, t1: number, localTz: boolean): boolean {
+  const a = new Date(t0 * 1000);
+  const b = new Date(t1 * 1000);
+  if (localTz) {
+    return (
+      a.getFullYear() !== b.getFullYear() ||
+      a.getMonth() !== b.getMonth() ||
+      a.getDate() !== b.getDate()
+    );
+  }
+  return (
+    a.getUTCFullYear() !== b.getUTCFullYear() ||
+    a.getUTCMonth() !== b.getUTCMonth() ||
+    a.getUTCDate() !== b.getUTCDate()
+  );
 }
 
 /** datetime-local picker string in the browser's local timezone. */

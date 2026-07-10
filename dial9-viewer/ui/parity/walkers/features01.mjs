@@ -358,12 +358,24 @@ export const registry = {
     return `density canvas drawn (${painted} painted device px)`;
   },
 
-  F10: async ({ page, pageUrl }) => {
+  F10: async ({ page, pageUrl, side }) => {
     await gotoBrowserPage(page, pageUrl);
     await searchAprilWindow(page);
     const ticks = page.locator("#heatmap-axis .tick");
     const n = await ticks.count();
     expect(n >= 2, `expected >=2 axis ticks, got ${n}`);
+    if (side === "new") {
+      // T15 F10-axis amendment: the seeded segment's span (filename epoch
+      // 2025-04 -> upload time) crosses day boundaries, so ticks carry the
+      // date. Single-day spans keep the compact HH:MM:SS form.
+      for (const t of await ticks.allTextContents()) {
+        expect(
+          /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(t.trim()),
+          `tick "${t}" not date-carrying on a day-crossing span`,
+        );
+      }
+      return `${n} date-carrying ticks rendered (day-crossing span)`;
+    }
     for (const t of await ticks.allTextContents()) {
       expect(/^\d{2}:\d{2}:\d{2}$/.test(t.trim()), `tick "${t}" not HH:MM:SS`);
     }

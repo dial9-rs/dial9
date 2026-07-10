@@ -20,7 +20,7 @@ import {
 import { assertInScheduledRender } from "../../store/store.js";
 import { ROW_H } from "./actions.js";
 import type { PageCtx } from "./ctx.js";
-import { clamp, fmtTick, timeToX } from "./format.js";
+import { clamp, crossesDayBoundary, fmtTick, timeToX } from "./format.js";
 import type { HeatmapRow, TimeDomain } from "./state.js";
 import { renderStatus } from "./status-render.js";
 
@@ -206,16 +206,21 @@ export function mountBrowseView({ store, els }: PageCtx): void {
 
   // Legacy drawHeatmapAxis (index.html:1442-1455): 2 to 8 TZ-aware ticks,
   // aligned to the canvas left edge via --heatmap-label-w.
+  // T15 (F10-axis amendment, Finding 3): when the visible span crosses a
+  // calendar-day boundary, ticks carry the date ("YYYY-MM-DD HH:MM:SS") -
+  // time-only ticks across a multi-day span were ambiguous. Tick COUNT is
+  // unchanged in both modes.
   function drawAxis(W: number, domain: TimeDomain, tz: boolean): void {
     els.heatmapAxis.textContent = "";
     const { tMin, tMax } = domain;
+    const withDate = crossesDayBoundary(tMin, tMax, tz);
     const n = clamp(Math.floor(W / 130), 2, 8);
     for (let i = 0; i <= n; i++) {
       const frac = i / n;
       const tick = document.createElement("div");
       tick.className = "tick";
       tick.style.left = LABEL_W() + frac * W + "px";
-      tick.textContent = fmtTick(tMin + frac * (tMax - tMin), tz);
+      tick.textContent = fmtTick(tMin + frac * (tMax - tMin), tz, withDate);
       els.heatmapAxis.appendChild(tick);
     }
   }
