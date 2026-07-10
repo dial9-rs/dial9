@@ -138,3 +138,40 @@ export type {
   WorkerSpansResult,
   WorkerWake,
 } from "./analysis.js";
+
+// aggregates.ts - tier-1 server aggregate endpoints client (T18):
+// /api/flamegraph + /api/tokio-stats typed requests, the refine-polling
+// helper, and the coverage full/partial/none fallback signal.
+export {
+  AggregatesRequestError,
+  DEFAULT_MAX_REFINE_POLLS,
+  FLAMEGRAPH_ENDPOINT,
+  TOKIO_STATS_ENDPOINT,
+  coverageSignal,
+  fetchFlamegraph,
+  fetchTokioStats,
+  flamegraphUrl,
+  isCoverageFrozen,
+  refineUntilFrozen,
+  tokioStatsUrl,
+} from "./aggregates.js";
+export type {
+  AggregateResult,
+  AggregateScope,
+  AggregateUnavailableReason,
+  AggregatesRequestOptions,
+  ApiFlamegraphNode,
+  Coverage,
+  CoverageSignal,
+  FacetResult,
+  FetchLike,
+  FlamegraphMetadata,
+  FlamegraphQuery,
+  FlamegraphResponse,
+  PollExemplar,
+  RefineUntilFrozenOptions,
+  ScopeEcho,
+  SpawnLocStats,
+  TokioStatsQuery,
+  TokioStatsResponse,
+} from "./aggregates.js";
