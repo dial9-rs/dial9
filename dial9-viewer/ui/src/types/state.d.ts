@@ -11,7 +11,13 @@
 // verified against the viewer.html globals they replace (the ~68-global
 // inventory, docs/ui-inventory/features/02-viewer-html.md).
 
-import type { ParsedTrace, PollSpan, CustomTraceEvent, TimeRange } from "./trace.js";
+import type {
+  ParsedTrace,
+  PollSpan,
+  CustomTraceEvent,
+  SegmentEdgePolls,
+  TimeRange,
+} from "./trace.js";
 import type { TimePanelLayout } from "../../panel_layout.js";
 
 // ── Panel vocabulary ────────────────────────────────────────────────────
@@ -208,6 +214,20 @@ export interface TransientSlice {
  */
 export type SegmentLifecycle = "listed" | "fetching" | "parsed" | "evicted";
 
+/**
+ * Parse-derived invariants retained ACROSS eviction (architecture 2.8:
+ * "parsed-window invariants (min/max ts, worker set) are retained so
+ * lanes/axes stay stable"). Written when a segment first parses; never
+ * cleared while the segment stays listed.
+ */
+export interface SegmentParseInvariants {
+  /** Event-time bounds of the segment's parse; null when it had no events. */
+  minTs: number | null;
+  maxTs: number | null;
+  /** Distinct runtime worker ids observed in the segment. */
+  workerIds: readonly number[];
+}
+
 /** Per-segment state tracked by the viewport-driven window machinery. */
 export interface SegmentEntry {
   state: SegmentLifecycle;
@@ -219,6 +239,25 @@ export interface SegmentEntry {
   extent: TimeRange;
   /** Raw (gzipped) object size from the listing, bytes. */
   sizeBytes: number;
+
+  // ── T17 additive fields (all absent until first parse) ───────────────
+
+  /** The segment's own parse; present iff state === "parsed". */
+  trace?: ParsedTrace;
+  /**
+   * Decompressed (raw) byte size, learned from the first parse and
+   * RETAINED after eviction: it is the segment's resident-budget cost
+   * (N19 accounts raw bytes as the proxy for the ~10x parsed heap) and
+   * upgrades the pre-fetch gzip-size estimate for re-entry planning.
+   */
+  rawByteLength?: number;
+  /** Retained across eviction (see SegmentParseInvariants). */
+  invariants?: SegmentParseInvariants;
+  /**
+   * Boundary-poll evidence at the segment's edges (types/trace.d.ts);
+   * present iff state === "parsed" (dropped with the parse on eviction).
+   */
+  edgePolls?: SegmentEdgePolls;
 }
 
 /**

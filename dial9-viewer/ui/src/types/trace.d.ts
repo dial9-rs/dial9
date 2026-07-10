@@ -78,6 +78,109 @@ export interface TimeRange {
   endNs: number;
 }
 
+// ── Segment-window boundary polls (architecture 2.8; T17) ───────────────
+//
+// A poll can straddle a segment boundary (segment rotation is not
+// poll-aligned): its PollStart lands in one S3 object and its PollEnd in
+// the next. The frozen core, parsing one segment at a time, DISCARDS the
+// open poll at the segment's end (trace_analysis.js #194 - "segment
+// rotated mid-poll, not a long poll") and IGNORES the dangling PollEnd at
+// the next segment's start. Under segment-windowed loading these shapes
+// carry that boundary evidence through the parsed output instead:
+//
+// - When BOTH neighbors are resident, the two halves stitch back into a
+//   complete poll (StitchedBoundaryPoll).
+// - When the neighbor is beyond the resident window (evicted/unfetched),
+//   the poll surfaces explicitly truncated at the window edge
+//   (WindowEdgePoll) - the features/02 G5 open-ended marker extended to
+//   window edges, never a long-poll false positive and never silently
+//   dropped data.
+//
+// Additive only (T06 precedent): nothing in the core's PollSpan changes.
+
+/**
+ * A poll left open at a segment's END: its PollStart was parsed but no
+ * closing event (PollEnd / WorkerPark / next PollStart) followed within
+ * the segment. Extracted per segment at parse time
+ * (lib/trace/segments.ts `computeSegmentEdgePolls`).
+ */
+export interface SegmentEdgeOpenPoll {
+  workerId: number;
+  /** PollStart timestamp (trace-monotonic ns). */
+  start: number;
+  /** 0 when the trace has no task tracking (core convention). */
+  taskId: number;
+  spawnLocId: string | null;
+  spawnLoc: string | null;
+}
+
+/**
+ * A dangling poll CLOSE at a segment's START: the first poll-lifecycle
+ * event for the worker in this segment is a PollEnd, so the poll began
+ * before the segment. (A WorkerPark-first segment start is ambiguous -
+ * no poll may have been running - and is deliberately NOT captured:
+ * absence is never fabricated, ADR-0002 spirit.)
+ */
+export interface SegmentEdgeDanglingClose {
+  workerId: number;
+  /** PollEnd timestamp (trace-monotonic ns). */
+  end: number;
+}
+
+/** Both edges of one parsed segment, extracted in a single event scan. */
+export interface SegmentEdgePolls {
+  openAtEnd: readonly SegmentEdgeOpenPoll[];
+  closeAtStart: readonly SegmentEdgeDanglingClose[];
+}
+
+/**
+ * A poll truncated by a resident-window edge. `start`/`end` never extend
+ * past observed data (`end` is clamped to the segment's last event for
+ * "end"-truncated polls, `start` to the first event for "start"-truncated
+ * ones), so the span is a LOWER bound on the real poll - renderers must
+ * show the G5 truncation marker, not a duration.
+ */
+export interface WindowEdgePoll {
+  workerId: number;
+  start: number;
+  end: number;
+  /**
+   * null when the poll began before the resident window: its PollStart
+   * (the only carrier of task identity) was never parsed.
+   */
+  taskId: number | null;
+  spawnLocId: string | null;
+  spawnLoc: string | null;
+  /** Which window edge truncates this poll. */
+  truncatedAt: "start" | "end";
+  /** Always true: duration unknown, G5 marker semantics. */
+  openEnded: true;
+}
+
+/**
+ * A complete poll reconstructed across an INTERNAL boundary between two
+ * adjacent resident segments (PollStart in one, PollEnd in the next).
+ * Field-compatible with the core's PollSpan.
+ */
+export interface StitchedBoundaryPoll {
+  workerId: number;
+  start: number;
+  end: number;
+  taskId: number;
+  spawnLocId: string | null;
+  spawnLoc: string | null;
+}
+
+/**
+ * The window-level boundary-poll view derived from the segments slice
+ * (lib/trace/segments.ts `computeWindowBoundaryPolls`): recompute whenever
+ * the set of parsed segments changes (a store `derived()` fits).
+ */
+export interface WindowBoundaryPolls {
+  truncated: readonly WindowEdgePoll[];
+  stitched: readonly StitchedBoundaryPoll[];
+}
+
 // ── Kind-discriminated runtime-event union (architecture 2.6) ───────────
 //
 // The frozen core normalizes every runtime event into a flat `TraceEvent`
