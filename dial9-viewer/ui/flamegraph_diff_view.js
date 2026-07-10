@@ -39,8 +39,11 @@
   // Server flamegraph endpoint keys; the rest of a scope (e.g. the client-only
   // `api` flag) is not forwarded.
   const SERVER_KEYS = [
-    "data_dir", "bucket", "aws_region", "prefix", "service",
-    "thread_class", "source", "spawn_location", "start_ns", "end_ns", "max_files",
+    "data_dir", "bucket", "prefix", "service",
+    "thread_class", "source", "spawn_location", "start_ns", "end_ns",
+    // Poll-duration band (ns) — each side may carry its own, so A/B can be
+    // fast-vs-slow polls.
+    "min_poll_ns", "max_poll_ns", "max_files",
   ];
 
   // Build the `/api/flamegraph` URL for one side from its scope params. The
@@ -61,13 +64,18 @@
     return u;
   }
 
-  // Short human label for one side from its scope (service @ host, host count).
+  // Short human label for one side from its scope (service @ host, host count,
+  // and — when set — the poll-duration band, so a fast-vs-slow diff of the same
+  // service/host is still self-describing in the legend).
   function scopeLabel(scope, fallback) {
     const svc = scope.get("service");
     const hosts = scope.getAll("host");
     let s = svc || fallback;
     if (hosts.length === 1) s += " @ " + hosts[0];
     else if (hosts.length > 1) s += " @ " + hosts.length + " hosts";
+    const band = D.pollBandLabel &&
+      D.pollBandLabel(scope.get("min_poll_ns"), scope.get("max_poll_ns"));
+    if (band) s += " · " + band;
     return s;
   }
 

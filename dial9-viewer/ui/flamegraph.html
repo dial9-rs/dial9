@@ -83,6 +83,7 @@
 
         <script src="format.js"></script>
         <script src="flamegraph_api.js"></script>
+        <script src="flamegraph_histogram.js"></script>
         <script src="sse.js"></script>
         <script src="flamegraph_diff.js"></script>
         <script src="flamegraph_diff_view.js"></script>
@@ -280,6 +281,9 @@
                             const dur = formatHumanDuration(Number(e) - Number(s));
                             bits.push(from + " UTC · " + dur);
                         }
+                        const pollBand = FlamegraphDiff.pollBandLabel(
+                            scope.get("min_poll_ns"), scope.get("max_poll_ns"));
+                        if (pollBand) bits.push(pollBand);
                         const bkt = scope.get("bucket");
                         if (bkt) bits.push(bkt);
                         return bits.join(" · ") || "(empty scope)";
@@ -470,6 +474,92 @@
                     `;
                     document.querySelector(".fg-page-header").after(toolbar);
 
+                    // Poll-duration panel: a collapsible strip unifying the
+                    // sample-weighted histogram (drag to select a band, click to
+                    // set the fast/slow diff split) with the exact ms band inputs.
+                    // Answers "what value do I set the band to?" visually. Hidden
+                    // until a response carries a non-empty histogram. Lives outside
+                    // #f-facets so facet re-renders don't clobber it.
+                    //
+                    // Structure: a PERSISTENT header (collapse toggle, title, ms
+                    // inputs, action buttons) built once here, plus a `body` div
+                    // that renderMinimap rebuilds per response (the SVG + axis).
+                    // Keeping the inputs out of the rebuilt body means their values
+                    // (and focus) survive a re-render.
+                    const minimap = document.createElement("div");
+                    minimap.id = "f-minimap";
+                    minimap.style.cssText = "display:none;padding:6px 12px 8px;background:#141428;border-bottom:1px solid #333;flex-shrink:0;";
+
+                    // Poll-band ms inputs: created as detached elements (not in the
+                    // toolbar HTML) so the query builders can reference fPollMin /
+                    // fPollMax while the inputs actually live in the panel header.
+                    const fPollMin = document.createElement("input");
+                    const fPollMax = document.createElement("input");
+                    for (const el of [fPollMin, fPollMax]) {
+                        el.type = "number"; el.min = "0"; el.step = "0.1"; el.placeholder = "ms";
+                        el.style.cssText = ctlStyle + ";width:70px";
+                    }
+                    fPollMin.id = "f-poll-min";
+                    fPollMax.id = "f-poll-max";
+
+                    // Persistent header. `collapsed` toggles the body + histogram.
+                    let minimapCollapsed = false;
+                    const mmHeader = document.createElement("div");
+                    mmHeader.style.cssText = "display:flex;align-items:center;gap:10px;font-size:0.75em;color:#9a9ab0;flex-wrap:wrap";
+                    const mmToggle = document.createElement("button");
+                    mmToggle.style.cssText = "background:none;border:none;color:#c0c0d0;cursor:pointer;font-weight:600;font-size:1em;padding:0";
+                    const mmTitle = document.createElement("span");
+                    mmTitle.style.cssText = "font-weight:600;color:#c0c0d0";
+                    mmTitle.textContent = "Poll duration";
+                    const mmHint = document.createElement("span");
+                    mmHint.textContent = "samples per duration · drag to select a band · click to set split";
+                    mmHint.title = "Bar height = on-CPU samples whose enclosing poll fell in that duration bucket. X axis = poll duration (log scale).";
+                    const mmSpacer = document.createElement("span");
+                    mmSpacer.style.flex = "1";
+                    // Inline ms band inputs (the exact / type-in path).
+                    const mmBandLabel = document.createElement("span");
+                    mmBandLabel.style.color = "#e0e0e0";
+                    const geLabel = document.createElement("label");
+                    geLabel.style.color = "#e0e0e0";
+                    geLabel.title = "Lower bound of the poll-duration band (poll ≥ this). Poll duration is PollStart→PollEnd, not request latency.";
+                    geLabel.append("≥ ", fPollMin, " ms");
+                    const leLabel = document.createElement("label");
+                    leLabel.style.color = "#e0e0e0";
+                    leLabel.title = "Upper bound of the poll-duration band (poll ≤ this).";
+                    leLabel.append("≤ ", fPollMax, " ms");
+                    const mmApply = document.createElement("button");
+                    mmApply.id = "f-poll-apply";
+                    mmApply.textContent = "Apply band";
+                    mmApply.style.cssText = "background:#6c63ff;color:#fff;border:none;padding:2px 10px;border-radius:3px;cursor:pointer;font-weight:600";
+                    const mmFastSlow = document.createElement("button");
+                    mmFastSlow.id = "f-diff-fastslow";
+                    mmFastSlow.style.cssText = "background:#2a2a4a;color:#e0e0e0;border:1px solid #444;padding:2px 10px;border-radius:3px;cursor:pointer;font-weight:600";
+                    const mmClear = document.createElement("button");
+                    mmClear.id = "f-band-clear";
+                    mmClear.textContent = "Clear band";
+                    mmClear.title = "Clear the poll-duration band";
+                    mmClear.style.cssText = "background:#2a2a4a;color:#e0e0e0;border:1px solid #444;padding:2px 10px;border-radius:3px;cursor:pointer";
+                    mmHeader.append(mmToggle, mmTitle, mmHint, mmSpacer, geLabel, leLabel, mmApply, mmFastSlow, mmClear);
+
+                    // Rebuildable body (SVG + axis + y-hint).
+                    const mmBody = document.createElement("div");
+                    mmBody.id = "f-minimap-body";
+
+                    minimap.append(mmHeader, mmBody);
+                    toolbar.after(minimap);
+
+                    function setMinimapCollapsed(c) {
+                        minimapCollapsed = c;
+                        mmBody.style.display = c ? "none" : "block";
+                        mmHint.style.display = c ? "none" : "";
+                        mmToggle.textContent = c ? "▸ Poll duration" : "▾";
+                        // When collapsed the ▸ button carries the title; hide the
+                        // standalone title to avoid duplication.
+                        mmTitle.style.display = c ? "none" : "";
+                    }
+                    mmToggle.addEventListener("click", () => setMinimapCollapsed(!minimapCollapsed));
+                    setMinimapCollapsed(false);
+
                     // In-page "Add to diff" tray. Captures two scopes (A/B) from
                     // this page's live view — respecting the Host dropdown's
                     // selection — and launches a two-sided diff, so a host-vs-host
@@ -533,6 +623,8 @@
 
                     const fStart = document.getElementById("f-start");
                     const fEnd = document.getElementById("f-end");
+                    // fPollMin / fPollMax are created above (in the poll-duration
+                    // panel header), not fetched from the toolbar HTML.
 
                     // The original scope host set from the URL (the heatmap box
                     // selection). "All" in the host selector re-applies this set;
@@ -561,6 +653,9 @@
                     // flamegraph_api.js (test_flamegraph_api.js).
                     if (params.get("start_ns")) fStart.value = nsToPickerUtc(params.get("start_ns"));
                     if (params.get("end_ns")) fEnd.value = nsToPickerUtc(params.get("end_ns"));
+                    // Seed the poll-duration band inputs (ms) from ns URL params.
+                    if (params.get("min_poll_ns")) fPollMin.value = nsToMs(params.get("min_poll_ns"));
+                    if (params.get("max_poll_ns")) fPollMax.value = nsToMs(params.get("max_poll_ns"));
 
                     // `max_files` ceiling override, raised by the "Refine more"
                     // button. null = let the backend pick its own ceiling.
@@ -597,6 +692,10 @@
                         const endNs = pickerUtcToNs(fEnd.value);
                         if (startNs) u.searchParams.set("start_ns", startNs);
                         if (endNs) u.searchParams.set("end_ns", endNs);
+                        const minPollNs = msToNs(fPollMin.value);
+                        const maxPollNs = msToNs(fPollMax.value);
+                        if (minPollNs) u.searchParams.set("min_poll_ns", minPollNs);
+                        if (maxPollNs) u.searchParams.set("max_poll_ns", maxPollNs);
                         if (maxFiles != null) u.searchParams.set("max_files", String(maxFiles));
                         // The endpoint is an SSE stream: the server emits the
                         // already-folded snapshot first, then folds to the cap and
@@ -621,6 +720,10 @@
                         const endNs = pickerUtcToNs(fEnd.value);
                         if (startNs) p.set("start_ns", startNs);
                         if (endNs) p.set("end_ns", endNs);
+                        const minPollNs = msToNs(fPollMin.value);
+                        const maxPollNs = msToNs(fPollMax.value);
+                        if (minPollNs) p.set("min_poll_ns", minPollNs);
+                        if (maxPollNs) p.set("max_poll_ns", maxPollNs);
                         history.pushState(null, "", window.location.pathname + "?" + p.toString());
                     }
 
@@ -731,6 +834,278 @@
                             : `Flamegraph \u2014 ${svc}`;
                     }
 
+                    // Render the poll-duration histogram minimap from the
+                    // backend's sample-weighted, log₂-bucketed histogram. Bars are
+                    // brushable: dragging sets the min/max poll-ns band inputs and
+                    // re-streams. A "Diff fast⇄slow" button splits at the
+                    // sample-weighted median and opens the two-sided diff. Rebuilt
+                    // per response (the histogram grows as more files fold), but
+                    // skipped while the user is mid-drag so it doesn't fight them.
+                    const MINIMAP_H = 46; // px, bar area height
+                    let minimapDragging = false;
+                    let renderedHistKey = null;
+                    // Drag state shared with the window-level move/up listeners
+                    // (attached ONCE below, not per render, so they don't
+                    // accumulate). `minimapDrag` is null except during a brush.
+                    let minimapDrag = null;
+                    // The split (ns) for the fast/slow diff — set by clicking the
+                    // histogram, seeded to the sample-weighted median on each new
+                    // response. `splitNs` null until a histogram exists.
+                    let splitNs = null;
+                    // Latest layout, so the persistent header buttons + window drag
+                    // handlers can map pixels ↔ ns without recomputing.
+                    let mmLayout = null; // { bars, W, cols }
+                    function renderMinimap(meta) {
+                        const bars = FlamegraphHistogram.normalizeHistogram(
+                            meta.poll_duration_histogram);
+                        if (bars.length === 0) { minimap.style.display = "none"; return; }
+                        if (minimapDragging) return; // don't clobber an in-progress brush
+                        minimap.style.display = "block";
+
+                        // Seed the split to the sample-weighted median the FIRST
+                        // time we see a histogram for this scope; a user click
+                        // overrides it (and survives re-renders).
+                        const median = FlamegraphHistogram.sampleWeightedMedianNs(bars);
+                        if (splitNs == null) splitNs = median;
+
+                        // Skip a body rebuild when the bar shape + split are
+                        // unchanged (the SVG would be identical).
+                        const key = bars.map(b => `${b.lo_ns}:${b.samples}`).join(",") + "|" + splitNs +
+                            "|" + fPollMin.value + "|" + fPollMax.value;
+                        if (key === renderedHistKey && mmBody.dataset.built) { updateFastSlowLabel(); return; }
+                        renderedHistKey = key;
+                        mmBody.dataset.built = "1";
+
+                        const W = Math.max(200, mmBody.clientWidth || minimap.clientWidth - 24 || 600);
+                        const { cols, maxSamples } = FlamegraphHistogram.histogramLayout(bars, W, 2);
+                        mmLayout = { bars, W, cols };
+
+                        const NS = "http://www.w3.org/2000/svg";
+                        const svg = document.createElementNS(NS, "svg");
+                        svg.setAttribute("width", "100%");
+                        svg.setAttribute("viewBox", `0 0 ${W} ${MINIMAP_H}`);
+                        svg.setAttribute("preserveAspectRatio", "none");
+                        svg.style.cssText = "display:block;cursor:crosshair;overflow:visible";
+
+                        // Current band → shade the selected bars (vs the whole
+                        // distribution). Uses the continuous ns bounds, not bucket
+                        // membership, so a sub-bucket band shades partially-overlapping
+                        // bars too.
+                        const curMin = msToNs(fPollMin.value);
+                        const curMax = msToNs(fPollMax.value);
+                        const banded = curMin != null || curMax != null;
+                        for (const c of cols) {
+                            const inBand =
+                                (curMin == null || c.hi_ns > Number(curMin)) &&
+                                (curMax == null || c.lo_ns < Number(curMax));
+                            const rect = document.createElementNS(NS, "rect");
+                            const h = Math.max(1, c.hFrac * (MINIMAP_H - 2));
+                            rect.setAttribute("x", c.x);
+                            rect.setAttribute("y", MINIMAP_H - h);
+                            rect.setAttribute("width", c.w);
+                            rect.setAttribute("height", h);
+                            rect.setAttribute("fill", banded ? (inBand ? "#6c63ff" : "#3a3a5a") : "#6c63ff");
+                            svg.appendChild(rect);
+                        }
+
+                        // Split marker: a vertical line at splitNs (the fast/slow
+                        // boundary), positioned by log-interp of ns → px.
+                        function nsToPx(ns) {
+                            // Inverse of pxToNs: find the bar containing ns, then its
+                            // fractional log position within that bar's column.
+                            for (let i = 0; i < cols.length; i++) {
+                                const c = cols[i];
+                                if (ns < c.hi_ns || i === cols.length - 1) {
+                                    const frac = Math.log(Math.max(ns, c.lo_ns) / c.lo_ns) /
+                                        Math.log(c.hi_ns / c.lo_ns);
+                                    return c.x + Math.max(0, Math.min(1, frac)) * (W / cols.length);
+                                }
+                            }
+                            return 0;
+                        }
+                        if (splitNs != null) {
+                            const sx = nsToPx(splitNs);
+                            const line = document.createElementNS(NS, "line");
+                            line.setAttribute("x1", sx); line.setAttribute("x2", sx);
+                            line.setAttribute("y1", 0); line.setAttribute("y2", MINIMAP_H);
+                            line.setAttribute("stroke", "#ffcc55");
+                            line.setAttribute("stroke-width", "1.5");
+                            svg.appendChild(line);
+                        }
+
+                        // Brush overlay for drag-select.
+                        const brush = document.createElementNS(NS, "rect");
+                        brush.setAttribute("fill", "rgba(255,255,255,0.12)");
+                        brush.setAttribute("stroke", "#fff");
+                        brush.setAttribute("stroke-dasharray", "3 2");
+                        brush.setAttribute("y", "0");
+                        brush.setAttribute("height", MINIMAP_H);
+                        brush.style.display = "none";
+                        svg.appendChild(brush);
+
+                        function localX(clientX) {
+                            const r = svg.getBoundingClientRect();
+                            return (clientX - r.left) / r.width * W;
+                        }
+                        svg.addEventListener("mousedown", (e) => {
+                            const start = localX(e.clientX);
+                            minimapDragging = true;
+                            minimapDrag = { bars, W, brush, localX, start, moved: false };
+                            brush.setAttribute("x", start);
+                            brush.setAttribute("width", 0);
+                            brush.style.display = "block";
+                            e.preventDefault();
+                        });
+
+                        // X-axis tick labels (poll-duration units). The SVG uses
+                        // preserveAspectRatio="none" so text inside it would be
+                        // stretched; lay ticks out in an HTML row keyed by percentage
+                        // so they stay aligned at any width. Thin them (~1 per 60px).
+                        const axis = document.createElement("div");
+                        axis.style.cssText = "position:relative;height:1.2em;margin-top:2px;font-size:0.68em;color:#8a8aa0";
+                        const nBars = cols.length;
+                        const stride = Math.max(1, Math.ceil(nBars / Math.max(1, Math.floor(W / 60))));
+                        for (let i = 0; i < nBars; i++) {
+                            if (i % stride !== 0) continue;
+                            const c = cols[i];
+                            const pct = (c.x / W) * 100;
+                            const t = document.createElement("span");
+                            t.textContent = FlamegraphHistogram.fmtDurationNs(c.lo_ns);
+                            t.style.cssText = `position:absolute;left:${pct}%;white-space:nowrap;transform:translateX(-1px)`;
+                            axis.appendChild(t);
+                        }
+                        if (nBars > 0) {
+                            const last = document.createElement("span");
+                            last.textContent = FlamegraphHistogram.fmtDurationNs(cols[nBars - 1].hi_ns);
+                            last.style.cssText = "position:absolute;right:0;white-space:nowrap;color:#6a6a80";
+                            axis.appendChild(last);
+                        }
+
+                        // Y-axis hint: the peak sample count, so bar heights scale.
+                        const yhint = document.createElement("div");
+                        yhint.style.cssText = "font-size:0.66em;color:#6a6a80;margin-top:1px";
+                        yhint.textContent = `tallest bar = ${maxSamples.toLocaleString()} samples · yellow line = fast/slow split`;
+
+                        mmBody.innerHTML = "";
+                        mmBody.appendChild(svg);
+                        mmBody.appendChild(axis);
+                        mmBody.appendChild(yhint);
+
+                        // Cursor-following tooltip (native SVG <title> is slow and is
+                        // swallowed by the brush overlay). Reuse ONE body-level
+                        // element across renders so it doesn't leak.
+                        let tip = document.getElementById("f-minimap-tip");
+                        if (!tip) {
+                            tip = document.createElement("div");
+                            tip.id = "f-minimap-tip";
+                            tip.style.cssText = "position:fixed;pointer-events:none;background:#000;color:#fff;border:1px solid #555;border-radius:3px;padding:3px 7px;font-size:0.72em;white-space:nowrap;z-index:1000;display:none";
+                            document.body.appendChild(tip);
+                        }
+                        function barAtX(px) {
+                            const idx = Math.floor((px / W) * cols.length);
+                            return cols[Math.max(0, Math.min(cols.length - 1, idx))];
+                        }
+                        svg.addEventListener("mousemove", (e) => {
+                            if (minimapDragging) { tip.style.display = "none"; return; }
+                            const c = barAtX(localX(e.clientX));
+                            if (!c) { tip.style.display = "none"; return; }
+                            tip.textContent =
+                                `${FlamegraphHistogram.fmtDurationNs(c.lo_ns)}–` +
+                                `${FlamegraphHistogram.fmtDurationNs(c.hi_ns)} · ` +
+                                `${c.samples.toLocaleString()} samples`;
+                            tip.style.display = "block";
+                            tip.style.left = (e.clientX + 12) + "px";
+                            tip.style.top = (e.clientY - 28) + "px";
+                        });
+                        svg.addEventListener("mouseleave", () => { tip.style.display = "none"; });
+
+                        updateFastSlowLabel();
+                    }
+
+                    // Keep the "Diff fast vs slow polls (split @ …)" button label in
+                    // sync with the current split. Disabled until a split exists.
+                    function updateFastSlowLabel() {
+                        if (splitNs == null) {
+                            mmFastSlow.style.display = "none";
+                            return;
+                        }
+                        mmFastSlow.style.display = "";
+                        const s = FlamegraphHistogram.fmtDurationNs(splitNs);
+                        mmFastSlow.textContent = `Diff fast vs slow polls (split @ ${s})`;
+                        mmFastSlow.title =
+                            `Open a two-panel flamegraph diff: fast polls (< ${s}) on the left, ` +
+                            `slow polls (≥ ${s}) on the right. Red = where slow polls spend more time. ` +
+                            `Click the histogram to move the split (yellow line).`;
+                    }
+
+                    // Persistent header button wiring (once — the header is not
+                    // rebuilt per render).
+                    function applyPollBand() {
+                        maxFiles = null;
+                        renderedHistKey = null; // force a rebuild
+                        // Re-shade the histogram IMMEDIATELY from the bars already in
+                        // hand, so the new band's highlight appears the instant the
+                        // user releases the drag — not after the stream round-trips.
+                        // (renderMinimap keys off fPollMin/fPollMax, so it repaints
+                        // the selected bars without waiting for a response.)
+                        if (mmLayout) renderMinimap({ poll_duration_histogram: mmLayout.bars });
+                        updateBrowserUrl();
+                        startStreaming();
+                    }
+                    mmApply.addEventListener("click", applyPollBand);
+                    for (const el of [fPollMin, fPollMax]) {
+                        el.addEventListener("keydown", (e) => { if (e.key === "Enter") applyPollBand(); });
+                    }
+                    mmClear.addEventListener("click", () => {
+                        fPollMin.value = ""; fPollMax.value = "";
+                        applyPollBand();
+                    });
+                    mmFastSlow.addEventListener("click", () => {
+                        if (splitNs == null) return;
+                        // A = fast polls (< split), B = slow polls (≥ split). Each
+                        // side is a full scope query with its own band, opened in the
+                        // two-sided diff.
+                        const a = new URLSearchParams(currentScopeQuery());
+                        a.delete("min_poll_ns"); a.set("max_poll_ns", String(splitNs));
+                        const b = new URLSearchParams(currentScopeQuery());
+                        b.set("min_poll_ns", String(splitNs)); b.delete("max_poll_ns");
+                        window.open(window.location.pathname + "?" + FlamegraphDiff.diffSearch(a, b), "_blank");
+                    });
+
+                    // Window-level brush move/up, attached ONCE (renderMinimap must
+                    // not add listeners per render). Act only while a drag is armed.
+                    window.addEventListener("mousemove", (e) => {
+                        if (!minimapDragging || !minimapDrag) return;
+                        const x = minimapDrag.localX(e.clientX);
+                        if (Math.abs(x - minimapDrag.start) > 2) minimapDrag.moved = true;
+                        minimapDrag.brush.setAttribute("x", Math.min(minimapDrag.start, x));
+                        minimapDrag.brush.setAttribute("width", Math.abs(x - minimapDrag.start));
+                    });
+                    window.addEventListener("mouseup", (e) => {
+                        if (!minimapDragging || !minimapDrag) return;
+                        const d = minimapDrag;
+                        minimapDragging = false;
+                        minimapDrag = null;
+                        d.brush.style.display = "none";
+                        const endX = d.localX(e.clientX);
+                        const band = FlamegraphHistogram.brushToBand(d.bars, d.W, d.start, endX);
+                        if (band) {
+                            // A real drag → set the exact (continuous) ns band.
+                            fPollMin.value = nsToMs(String(band.min_ns));
+                            fPollMax.value = nsToMs(String(band.max_ns));
+                            applyPollBand();
+                        } else if (!d.moved) {
+                            // A click (no drag) → move the fast/slow split here. No
+                            // re-stream; just re-render the marker + button label.
+                            const ns = FlamegraphHistogram.pxToNs(d.bars, d.W, endX);
+                            if (ns != null) {
+                                splitNs = ns;
+                                renderedHistKey = null;
+                                renderMinimap({ poll_duration_histogram: d.bars });
+                            }
+                        }
+                    });
+
                     function toFgTree(node) {
                         const m = new Map();
                         for (const child of (node.children || [])) {
@@ -796,6 +1171,15 @@
                         // from the backend's reported metadata (data-driven).
                         renderScopeHeader(meta);
                         renderFacets(meta);
+                        // The minimap is a secondary aid — never let a failure in
+                        // it block the flamegraph from rendering (a thrown error
+                        // here would strand the loading spinner forever).
+                        try {
+                            renderMinimap(meta);
+                        } catch (e) {
+                            console.error("poll-duration minimap render failed:", e);
+                            minimap.style.display = "none";
+                        }
 
                         // First event hides the loading overlay; later events
                         // refine in-place without it.
@@ -911,6 +1295,10 @@
                         const eNs = pickerUtcToNs(fEnd.value);
                         if (sNs) p.set("start_ns", sNs);
                         if (eNs) p.set("end_ns", eNs);
+                        const minPollNs = msToNs(fPollMin.value);
+                        const maxPollNs = msToNs(fPollMax.value);
+                        if (minPollNs) p.set("min_poll_ns", minPollNs);
+                        if (maxPollNs) p.set("max_poll_ns", maxPollNs);
                         if (maxFiles != null) p.set("max_files", String(maxFiles));
                         return FlamegraphDiff.fullScopeQuery(p);
                     }

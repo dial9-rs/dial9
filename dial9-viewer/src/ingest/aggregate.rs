@@ -657,16 +657,88 @@ impl FacetAccum {
     }
 }
 
-/// The combined per-query filter: time range + per-facet exact-match filters.
+/// The combined per-query filter: time range + poll-duration band + per-facet
+/// exact-match filters.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct SampleFilter {
     /// Optional time range filter (epoch nanoseconds, half-open: [start, end)).
     pub start_ns: Option<i64>,
     pub end_ns: Option<i64>,
+    /// Optional poll-duration band (nanoseconds, inclusive: [min, max]). Keeps
+    /// only samples attributed to a poll whose duration falls in the band — the
+    /// "why are the slow polls slow" slice. A sample with no `poll_duration_ns`
+    /// (off-worker / between polls) is excluded whenever either bound is set,
+    /// since a poll-duration question only concerns in-poll samples.
+    ///
+    /// NOTE: this is *poll* duration (PollStart→PollEnd), not request/span
+    /// latency — the decoder does not yet capture request spans. A future
+    /// request-latency band would be a separate pair of fields, not a reuse of
+    /// these.
+    pub min_poll_ns: Option<i64>,
+    pub max_poll_ns: Option<i64>,
     /// Per-facet filters. Key = facet name, value = required value. Empty string
     /// or absent = no constraint. For "source", the default is "cpu" (set by the
     /// endpoint when the param is absent).
     pub facets: FacetFilters,
+}
+
+/// One bar of the poll-duration histogram: a log-scale duration bucket
+/// `[lo_ns, hi_ns)` and the number of samples whose enclosing poll fell in it.
+/// Sample-weighted, so bar height == the samples you'd get by selecting this
+/// band. Emitted as explicit ns ranges so the UI needs no bucketing math. The
+/// *filter* is never bucketed (`min/max_poll_ns` are exact ns); only the display
+/// histogram is, and only because we can't ship one bar per distinct duration.
+#[derive(Debug, Clone, serde::Serialize)]
+pub(crate) struct PollDurationBucket {
+    pub lo_ns: i64,
+    pub hi_ns: i64,
+    pub samples: u64,
+}
+
+/// Sub-octave subdivisions per power of two. `1` = plain log₂ (each bar 2× the
+/// last); `4` = quarter-octave (each bar ≈1.19×), 4× finer while still bounded
+/// (a fixed number of bars per decade). Bump for a finer histogram.
+const POLL_HIST_SUBDIV: u32 = 4;
+
+/// Log-scale bucket index for a positive poll duration, at [`POLL_HIST_SUBDIV`]
+/// bins per octave: `floor(SUBDIV · log₂(ns))`. `None` for non-positive input.
+/// Bucket `k` covers `[2^(k/SUBDIV), 2^((k+1)/SUBDIV)) ns` (see [`bucket_edge_ns`]).
+fn poll_bucket(ns: i64) -> Option<u32> {
+    if ns <= 0 {
+        return None;
+    }
+    // floor(log₂) is the integer part; add the fractional octave via log2 of the
+    // mantissa so sub-octave bins are uniform in log space.
+    let log2 = (ns as f64).log2();
+    Some((log2 * POLL_HIST_SUBDIV as f64).floor() as u32)
+}
+
+/// The lower ns edge of sub-octave bucket `k`: `2^(k/SUBDIV)`, rounded to a whole
+/// ns. Monotonic in `k`, so `bucket_edge_ns(k+1)` is the bar's upper edge.
+fn bucket_edge_ns(k: u32) -> i64 {
+    2f64.powf(k as f64 / POLL_HIST_SUBDIV as f64).round() as i64
+}
+
+/// Sample-weighted poll-duration histogram: sub-octave bucket index → sample
+/// count. Accumulated over rows that pass the time + facet filters but BEFORE the
+/// poll band, so the bars always describe the full distribution the band selects
+/// from.
+type PollHist = HashMap<u32, u64>;
+
+/// Convert the raw bucket map into sorted, explicit-range bars for the response.
+/// Adjacent bars share an edge (`hi_ns` of bar `k` == `lo_ns` of bar `k+1`), so
+/// a UI brush maps cleanly to a contiguous ns band.
+fn poll_hist_bars(hist: &PollHist) -> Vec<PollDurationBucket> {
+    let mut buckets: Vec<u32> = hist.keys().copied().collect();
+    buckets.sort_unstable();
+    buckets
+        .into_iter()
+        .map(|k| PollDurationBucket {
+            lo_ns: bucket_edge_ns(k),
+            hi_ns: bucket_edge_ns(k + 1),
+            samples: hist[&k],
+        })
+        .collect()
 }
 
 /// A borrowed snapshot of a [`FlamegraphAccum`] at a point during streaming: the
@@ -682,6 +754,8 @@ pub(crate) struct AggSnapshot<'a> {
     pub max_ts: Option<i64>,
     /// Generic facet results: each facet's distinct values seen so far.
     pub facets: Vec<FacetResult>,
+    /// Sample-weighted poll-duration histogram (the minimap over the band picker).
+    pub poll_duration_histogram: Vec<PollDurationBucket>,
 }
 
 /// Incremental flamegraph accumulator: merge folded part-files one at a time
@@ -697,6 +771,9 @@ pub(crate) struct FlamegraphAccum {
     total_samples: usize,
     min_ts: Option<i64>,
     max_ts: Option<i64>,
+    /// Sample-weighted poll-duration histogram, accumulated pre-band (see
+    /// [`PollHist`]).
+    poll_hist: PollHist,
 }
 
 impl FlamegraphAccum {
@@ -709,6 +786,7 @@ impl FlamegraphAccum {
             total_samples: 0,
             min_ts: None,
             max_ts: None,
+            poll_hist: HashMap::new(),
         }
     }
 
@@ -723,6 +801,7 @@ impl FlamegraphAccum {
             &mut self.total_samples,
             &mut self.min_ts,
             &mut self.max_ts,
+            &mut self.poll_hist,
         )?;
         if let Some(dict) = dict {
             read_dict_part(dict, &mut self.dict)?;
@@ -742,6 +821,7 @@ impl FlamegraphAccum {
             min_ts: self.min_ts,
             max_ts: self.max_ts,
             facets: self.facets.results(),
+            poll_duration_histogram: poll_hist_bars(&self.poll_hist),
         }
     }
 }
@@ -844,6 +924,7 @@ pub(crate) async fn fetch_polls_part(
     output.get_object(bucket, &polls_key).await.ok()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn read_samples_part(
     data: Vec<u8>,
     filter: &SampleFilter,
@@ -852,6 +933,7 @@ fn read_samples_part(
     total_samples: &mut usize,
     min_ts: &mut Option<i64>,
     max_ts: &mut Option<i64>,
+    poll_hist: &mut PollHist,
 ) -> anyhow::Result<()> {
     // `Bytes::from(Vec<u8>)` reuses the allocation (no copy); threading the
     // owned buffer in from the caller avoids the round-trip through `&[u8]`.
@@ -869,6 +951,12 @@ fn read_samples_part(
         let ts_arr = batch
             .column_by_name("timestamp_ns")
             .and_then(|c| c.as_any().downcast_ref::<arrow::array::Int64Array>());
+        // Poll-duration column, for the latency-band filter. Nullable and absent
+        // from old part-files; either case means "no poll duration for this row".
+        let poll_arr = batch
+            .column_by_name("poll_duration_ns")
+            .and_then(|c| c.as_any().downcast_ref::<arrow::array::Int64Array>());
+        let poll_band = filter.min_poll_ns.is_some() || filter.max_poll_ns.is_some();
 
         // Pre-resolve column references for each facet in this batch.
         let facet_cols: Vec<ResolvedFacetCol> = FACETS
@@ -916,6 +1004,36 @@ fn read_samples_part(
             }
             if !passes {
                 continue;
+            }
+
+            // This row passed the time + facet filters. Its enclosing-poll
+            // duration (if any) feeds two things: the pre-band histogram (so the
+            // minimap shows the full distribution the band selects from) and the
+            // band filter itself.
+            let poll_dur = poll_arr.and_then(|a| (!a.is_null(i)).then(|| a.value(i)));
+
+            // Sample-weighted poll-duration histogram, BEFORE the band filter.
+            // Off-poll rows (no duration) don't fall in any log₂ bucket, so they
+            // simply don't contribute — matching the band's exclusion of them.
+            if let Some(k) = poll_dur.and_then(poll_bucket) {
+                *poll_hist.entry(k).or_insert(0) += 1;
+            }
+
+            // Poll-duration band filter. A row with no poll duration (null column,
+            // or the column absent in an old part-file) is excluded whenever a
+            // band is set — the slice is inherently about in-poll samples.
+            if poll_band {
+                match poll_dur {
+                    Some(d) => {
+                        if filter.min_poll_ns.is_some_and(|min| d < min) {
+                            continue;
+                        }
+                        if filter.max_poll_ns.is_some_and(|max| d > max) {
+                            continue;
+                        }
+                    }
+                    None => continue,
+                }
             }
 
             // Count this sample.
@@ -1175,6 +1293,148 @@ mod tests {
         assert!(names.contains(&"thread_class"));
         assert!(names.contains(&"host"));
         assert!(names.contains(&"spawn_location"));
+    }
+
+    /// Build a one-batch samples Parquet buffer from `(stack_byte, poll_ns)`
+    /// pairs. `poll_ns == None` means the sample was not inside a poll.
+    fn samples_parquet(rows: &[(u8, Option<u64>)]) -> Vec<u8> {
+        use crate::ingest::decode::ResolvedSample;
+        use crate::ingest::parquet_writer::write_samples;
+        let samples: Vec<ResolvedSample> = rows
+            .iter()
+            .enumerate()
+            .map(|(i, (stack, poll))| ResolvedSample {
+                timestamp_ns: 1000 + i as u64,
+                stack_id: [*stack; 16],
+                worker_id: Some(1),
+                source: SOURCE_CPU_PROFILE,
+                source_key: "2026-06-19/1450/shale/myhost/boot-1/123-0.bin.gz".to_string(),
+                host: "myhost".to_string(),
+                service: "shale".to_string(),
+                date: "2026-06-19".to_string(),
+                poll_duration_ns: *poll,
+                spawn_location: Some("src/main.rs:42".to_string()),
+            })
+            .collect();
+        let mut buf = Vec::new();
+        write_samples(&mut buf, &samples, &HashMap::new()).unwrap();
+        buf
+    }
+
+    /// Total samples kept after merging `parquet` under a poll-duration band.
+    fn samples_kept(parquet: Vec<u8>, min_poll_ns: Option<i64>, max_poll_ns: Option<i64>) -> usize {
+        let filter = SampleFilter {
+            min_poll_ns,
+            max_poll_ns,
+            // source defaults to cpu in the endpoint; here match all sources so
+            // the test isolates the poll-band behavior.
+            facets: HashMap::from([("source", "cpu".to_string())]),
+            ..Default::default()
+        };
+        let mut accum = FlamegraphAccum::new(filter);
+        accum.merge(parquet, None).unwrap();
+        accum.snapshot().total_samples
+    }
+
+    #[test]
+    fn poll_band_filters_samples_by_duration() {
+        // Three in-poll samples at 0.5ms / 5ms / 50ms, plus one with no poll.
+        let rows = [
+            (1u8, Some(500_000)),
+            (2u8, Some(5_000_000)),
+            (3u8, Some(50_000_000)),
+            (4u8, None),
+        ];
+        let mk = || samples_parquet(&rows);
+
+        // No band → every row (including the null-poll one) is kept.
+        assert_eq!(samples_kept(mk(), None, None), 4);
+
+        // Lower bound only: ≥ 5ms keeps the 5ms and 50ms rows; excludes the
+        // 0.5ms row AND the null-poll row.
+        assert_eq!(samples_kept(mk(), Some(5_000_000), None), 2);
+
+        // Upper bound only: ≤ 1ms keeps just the 0.5ms row; excludes null-poll.
+        assert_eq!(samples_kept(mk(), None, Some(1_000_000)), 1);
+
+        // Band [1ms, 10ms] keeps only the 5ms row (bounds inclusive).
+        assert_eq!(samples_kept(mk(), Some(1_000_000), Some(10_000_000)), 1);
+
+        // A band that matches nothing keeps nothing (rather than erroring).
+        assert_eq!(samples_kept(mk(), Some(100_000_000), None), 0);
+    }
+
+    #[test]
+    fn poll_bucket_is_monotonic_and_subdivides_octaves() {
+        assert_eq!(poll_bucket(0), None, "0 has no bucket");
+        assert_eq!(poll_bucket(-5), None, "negative has no bucket");
+        // Sub-octave: with SUBDIV=4 an octave (2×) spans 4 buckets, so values a
+        // little apart within an octave land in DIFFERENT buckets (finer than
+        // plain log₂, which would collapse them).
+        let b1 = poll_bucket(1_000_000).unwrap();
+        let b2 = poll_bucket(1_300_000).unwrap();
+        assert!(
+            b2 > b1,
+            "1.0ms and 1.3ms fall in different sub-octave buckets"
+        );
+        assert!(b2 - b1 <= POLL_HIST_SUBDIV, "…but within one octave");
+        // Monotonic: larger duration → same-or-higher bucket.
+        assert!(poll_bucket(50_000_000).unwrap() > poll_bucket(500_000).unwrap());
+        // Bucket edges bracket the value that produced them.
+        let k = poll_bucket(500_000).unwrap();
+        assert!(bucket_edge_ns(k) <= 500_000 && 500_000 < bucket_edge_ns(k + 1));
+    }
+
+    #[test]
+    fn poll_histogram_is_sample_weighted_and_pre_band() {
+        // Two samples at ~0.5ms, one at 50ms, one off-poll. The two 0.5ms samples
+        // are close enough to share a sub-octave bucket; 50ms is far away.
+        let rows = [
+            (1u8, Some(500_000)),
+            (2u8, Some(500_001)),
+            (3u8, Some(50_000_000)),
+            (4u8, None),
+        ];
+        let hist = |min_poll_ns, max_poll_ns| {
+            let filter = SampleFilter {
+                min_poll_ns,
+                max_poll_ns,
+                facets: HashMap::from([("source", "cpu".to_string())]),
+                ..Default::default()
+            };
+            let mut accum = FlamegraphAccum::new(filter);
+            accum.merge(samples_parquet(&rows), None).unwrap();
+            accum.snapshot().poll_duration_histogram
+        };
+
+        // No band: two occupied buckets. The 0.5ms bucket holds 2 samples
+        // (weighted, not 1 poll), the 50ms bucket holds 1. The off-poll row
+        // contributes to neither. Bars are sorted ascending, edges bracket input.
+        let bars = hist(None, None);
+        assert_eq!(bars.len(), 2, "two occupied buckets");
+        assert_eq!(bars[0].samples, 2, "0.5ms bucket is sample-weighted (2)");
+        assert_eq!(bars[1].samples, 1, "50ms bucket holds the one slow sample");
+        assert!(
+            bars[0].lo_ns <= 500_000 && 500_000 < bars[0].hi_ns,
+            "fast bar brackets 0.5ms"
+        );
+        assert!(
+            bars[1].lo_ns <= 50_000_000 && 50_000_000 < bars[1].hi_ns,
+            "slow bar brackets 50ms"
+        );
+        assert!(
+            bars[0].hi_ns <= bars[1].lo_ns,
+            "bars are disjoint and ascending"
+        );
+
+        // The histogram is accumulated PRE-band: narrowing the band to the slow
+        // bucket must NOT change the bars (the minimap always shows the full
+        // distribution you're selecting from).
+        assert_eq!(
+            hist(Some(10_000_000), None).len(),
+            2,
+            "band does not shrink the histogram"
+        );
     }
 
     #[test]
