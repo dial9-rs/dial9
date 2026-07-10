@@ -30,8 +30,8 @@ const legacyPages = [
 
 // Everything the four legacy pages reference by root-relative path
 // (<script src> / <link>): the frozen core plus the post-freeze page modules
-// (url_state.js, flamegraph_api.js). Derived from the pages' actual tags;
-// re-derive with:
+// (url_state.js, flamegraph_api.js, ui-switch.js). Derived from the pages'
+// actual tags; re-derive with:
 //   grep -h 'script src=\|stylesheet' ui/{index,viewer,flamegraph,tokio_stats}.html | sort -u
 const legacyPageScripts = [
   "creds.js",
@@ -45,6 +45,9 @@ const legacyPageScripts = [
   "prefix_detect.js",
   "trace_analysis.js",
   "trace_parser.js",
+  // The dual-UI switch (T38, ADR-0004 section 8): loaded by all four legacy
+  // pages AND by future new-UI entries; plain browser JS, copied not bundled.
+  "ui-switch.js",
   "url_state.js",
 ];
 
@@ -78,12 +81,14 @@ export default defineConfig({
   // Vitest, the single test runner (ADR-0004 section 7, 02-architecture.md
   // N13). Config lives here, not in a separate vitest.config file
   // (02-architecture.md section 2.1). Migrated legacy suites live under
-  // tests/core/ (core-suite colocation); new TS modules colocate their tests
-  // under src/. Not-yet-migrated test_*.js files at the ui/ root keep running
-  // via scripts/e2e-trace-tests.sh (dual-runner CI) until the last one moves.
+  // tests/core/ (core-suite colocation); suites for non-core ui/-root scripts
+  // (e.g. ui-switch.js) live directly under tests/; new TS modules colocate
+  // their tests under src/. Not-yet-migrated test_*.js files at the ui/ root
+  // keep running via scripts/e2e-trace-tests.sh (dual-runner CI) until the
+  // last one moves.
   test: {
     environment: "node",
-    include: ["tests/core/**/*.test.ts", "src/**/*.test.ts"],
+    include: ["tests/**/*.test.ts", "src/**/*.test.ts"],
   },
   // Proxy-mode dev loop (`npm run dev`): Vite serves the UI with HMR and
   // forwards /api/* to the Rust dev-server, launched with:
