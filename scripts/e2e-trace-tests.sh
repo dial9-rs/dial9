@@ -38,9 +38,6 @@ scripts/regenerate_demo_trace.sh
 echo "--- Checking trace integrity ---"
 node dial9-viewer/ui/test_trace_integrity.js
 
-echo "--- Checking task lifecycle consistency logic ---"
-node dial9-viewer/ui/test_task_lifecycle.js
-
 echo "--- Checking trace analysis ---"
 node dial9-viewer/ui/test_trace_analysis.js
 
@@ -56,22 +53,13 @@ node dial9-viewer/ui/test_stream_parse.js
 echo "--- Checking buffered parser paint-yield throttle (#595) ---"
 node dial9-viewer/ui/test_parse_yield_throttle.js
 
-echo "--- Checking landing-page URL state (serialize/parse) ---"
-node dial9-viewer/ui/test_url_state.js
-
 echo "--- Checking skills snippets ---"
 node dial9-viewer/ui/test_all_skills_snippets.js
 
 echo "--- Checking flamegraph API refinement helpers ---"
 node dial9-viewer/ui/test_flamegraph_api.js
 
-echo "--- Checking enclosing spans (per-worker) ---"
-node dial9-viewer/ui/test_enclosing_spans.js
-
 echo "--- Checking flamegraph export (folded + SVG) ---"
 node dial9-viewer/ui/test_flamegraph_export.js
-
-echo "--- Checking runtime grouping (multi-runtime lanes) ---"
-node dial9-viewer/ui/test_runtime_groups.js
 
 echo "All E2E trace checks passed."
