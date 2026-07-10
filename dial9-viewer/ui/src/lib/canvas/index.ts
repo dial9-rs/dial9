@@ -57,3 +57,18 @@ export {
   pollHeatmapColor,
   pollHeatmapColorQuantized,
 } from "./palette.js";
+
+export {
+  MAX_OPEN_BYTES,
+  MIN_SEGMENT_SECONDS,
+  accumulateDensity,
+  bootTransitions,
+  densityColor,
+  groupByHost,
+  segmentGaps,
+  segmentSpan,
+  segmentsOverlapping,
+  tileSegments,
+  totalBytes,
+} from "./heatmap.js";
+export type { HostRow, SegmentInput } from "./heatmap.js";

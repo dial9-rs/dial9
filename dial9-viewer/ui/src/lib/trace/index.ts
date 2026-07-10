@@ -19,6 +19,9 @@ export type {
 // title.ts - shared viewer/flamegraph header metadata.
 export { traceTitleParams } from "./title.js";
 
+// prefixes.ts - S3 prefix-discovery heuristics (frozen prefix_detect.js).
+export { isDateLayer, lastSegment } from "./prefixes.js";
+
 // load.ts - load orchestration + the trace_parser.js surface.
 export {
   EVENT_TYPES,
