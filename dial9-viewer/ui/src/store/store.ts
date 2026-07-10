@@ -159,6 +159,7 @@ export function createStore<S extends { [K in keyof S]: object }>(
     const changed: ReadonlySet<SliceKey<S>> = dirty;
     dirty = new Set();
     notifyDepth += 1;
+    let completed = false;
     try {
       // Snapshot: subscribers added during dispatch join from next frame.
       for (const sub of [...subscribers]) {
@@ -172,10 +173,24 @@ export function createStore<S extends { [K in keyof S]: object }>(
         }
         if (affected) sub.fn(state, changed);
       }
+      completed = true;
     } finally {
       // A throwing subscriber aborts the rest of the frame loudly (errors
       // are not swallowed), but must not leave the N18 gate open.
       notifyDepth -= 1;
+      if (!completed) {
+        // Nor may it drop the frame's changed set for the subscribers that
+        // never ran (audit finding 3): merge it back into `dirty` (updates
+        // made before the throw may already have re-dirtied slices) and
+        // re-arm, so delivery is retried next frame. Subscribers that ran
+        // before the throw run again then; a deterministic thrower stays
+        // loud, once per frame.
+        for (const slice of changed) dirty.add(slice);
+        if (!scheduled) {
+          scheduled = true;
+          scheduler(flush);
+        }
+      }
     }
   }
 

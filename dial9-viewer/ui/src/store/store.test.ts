@@ -231,6 +231,55 @@ describe("one notification per frame (fake RAF)", () => {
   });
 });
 
+describe("throwing subscriber does not drop the frame's changed set (audit finding 3)", () => {
+  it("re-arms and retries delivery next frame, so later subscribers still hear the change", () => {
+    const raf = fakeRaf();
+    const store = createStore(testState(), { scheduler: raf.scheduler });
+    let boom = true; // throw only on the first delivery
+    store.subscribe(["a"], () => {
+      if (boom) {
+        boom = false;
+        throw new Error("subscriber boom");
+      }
+    });
+    const onA = vi.fn();
+    store.subscribe(["a"], onA);
+
+    store.update("a", { n: 1 });
+    expect(() => raf.frame()).toThrow(/subscriber boom/); // still loud
+    expect(onA).not.toHaveBeenCalled(); // frame aborted before onA
+    expect(raf.pending()).toBe(1); // but the changed set was re-armed
+
+    raf.frame(); // delivery retried: onA finally hears about "a"
+    expect(onA).toHaveBeenCalledTimes(1);
+    expect(onA).toHaveBeenCalledWith(store.getState(), new Set(["a"]));
+  });
+
+  it("merges the restored changed set with updates made before the throw (no double-arm)", () => {
+    const raf = fakeRaf();
+    const store = createStore(testState(), { scheduler: raf.scheduler });
+    let boom = true;
+    store.subscribe(["a"], () => {
+      if (boom) {
+        boom = false;
+        store.update("b", { s: "pre-throw" }); // already re-armed the tick
+        throw new Error("subscriber boom");
+      }
+    });
+    const onBoth = vi.fn();
+    store.subscribe(["a", "b"], onBoth);
+
+    store.update("a", { n: 1 });
+    expect(() => raf.frame()).toThrow(/subscriber boom/);
+    expect(raf.pending()).toBe(1); // merged into the already-armed tick
+
+    raf.frame();
+    expect(onBoth).toHaveBeenCalledTimes(1);
+    // Both the restored "a" and the mid-flush "b" arrive together.
+    expect(onBoth).toHaveBeenCalledWith(store.getState(), new Set(["a", "b"]));
+  });
+});
+
 describe("transient channel", () => {
   it("transient updates bypass full-notification subscribers (real StoreState)", () => {
     const raf = fakeRaf();
