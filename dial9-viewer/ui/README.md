@@ -109,17 +109,29 @@ links to it; it remains only for out-of-tree callers (e.g. the
 
 ## Tests — IMPORTANT for agents
 
-The test suite is mid-migration to Vitest (ADR-0004 section 7); both runners
-are wired in CI until the last legacy file moves:
+Vitest is the single test runner (ADR-0004 section 7); the legacy
+`node test_*.js` runner was retired when the last suite migrated (T11):
 
-- **Vitest suites** (`tests/core/**/*.test.ts` for migrated legacy suites,
-  `src/**/*.test.ts` for new TS modules) run with `npm run test` and are
-  auto-discovered — no registration needed. The `ui` job in
-  `.github/workflows/ci.yml` runs them. New tests should be written this way.
-- **Legacy suites** are plain Node scripts named `test_*.js` (run with
-  `node test_foo.js`), most using the shared `test_harness.js`.
-  **CI does NOT auto-discover these tests.** They are listed explicitly in
-  `../../scripts/e2e-trace-tests.sh`, which the `trace-integrity` job in
-  `.github/workflows/ci.yml` runs. If you add a new `test_*.js`, you MUST add a
-  line for it in `scripts/e2e-trace-tests.sh` or it will never run in CI —
-  adding the file alone is not enough.
+- **Vitest suites** (`tests/core/**/*.test.ts` for suites over the frozen
+  core, `src/**/*.test.ts` for new TS modules) run with `npm run test` and
+  are auto-discovered — no registration needed. The `ui` job in
+  `.github/workflows/ci.yml` runs them against the committed demo trace.
+- **Trace-dependent suites** additionally run against a freshly regenerated
+  demo trace: the `trace-integrity` CI job runs
+  `../../scripts/e2e-trace-tests.sh`, which regenerates
+  `public/demo-trace.bin` (needs DynamoDB Local) and then runs a filtered
+  `vitest run` over its `TRACE_SUITES` list. If a new suite's assertions must
+  hold against regenerated traces (not just the committed one), add it to
+  that list.
+- **Env-var overrides** (formerly argv): `D9_TRACE_FILE` points
+  `trace_integrity.test.ts` at another trace file, `DIAL9_TRACE_PATH` does
+  the same for `time_range.test.ts`, `D9_SCALE_LARGE=1` runs
+  `directory_scale.test.ts` with 200 files, and `D9_DIAGNOSTIC_TRACES`
+  points `diagnose_setup.test.ts` at generated diagnostic traces (suite
+  skips when the directory is absent; run
+  `scripts/generate_diagnostic_traces.sh` first).
+- **Exception:** `test_parser.js` stays a plain Node script at the ui/ root —
+  the Rust integration test `dial9-tokio-telemetry/tests/js_parser.rs`
+  invokes it by filename as `node test_parser.js <trace.bin>
+  <expected.jsonl>`. Do not migrate or rename it without updating that test.
+- `bench_parse.js` is a benchmark, not a test.

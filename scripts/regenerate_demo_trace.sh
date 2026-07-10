@@ -63,7 +63,7 @@ ls -lh "$DEMO_DEST"
 # environment — notably CI containers, where this script runs in the
 # e2e-trace-tests job — produces a CpuProfile-only trace with no sched events
 # and run-to-run-variable timing. Committing that degraded trace's properties
-# would (a) replace the real digests and (b) defeat `test_trace_properties.js`'s
+# would (a) replace the real digests and (b) defeat trace_properties.test.ts's
 # guard, which skips its rich cross-check precisely when the on-disk trace's
 # sample count differs from the committed fixture. So: regenerate to a temp
 # file, and promote it to the committed fixture only if it has sched events.

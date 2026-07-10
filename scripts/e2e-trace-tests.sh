@@ -3,7 +3,8 @@
 # e2e-trace-tests.sh -- End-to-end trace pipeline test
 #
 # Regenerates the demo trace against a local DynamoDB, then runs the
-# JS-based trace integrity and analysis test suites.
+# trace-dependent Vitest suites against the freshly regenerated
+# dial9-viewer/ui/public/demo-trace.bin.
 #
 #
 # Usage:
@@ -35,43 +36,35 @@ export AWS_PROFILE="${AWS_PROFILE:-fake-profile}"
 echo "--- Regenerating demo trace ---"
 scripts/regenerate_demo_trace.sh
 
-echo "--- Checking trace integrity ---"
-node dial9-viewer/ui/test_trace_integrity.js
+# The trace-dependent suites this script historically ran via `node
+# test_*.js`, migrated to Vitest by T10/T11. The full tests/core/ set already
+# runs in the `ui` CI job against the COMMITTED demo trace; this filtered
+# list is what must ALSO hold against a freshly REGENERATED trace in the DDB
+# environment. (Deliberately excluded: flamegraph_recipes.test.ts carries an
+# it.fails pinned to the committed trace's data and would invert against a
+# regenerated one; directory_parse/directory_scale/slice/etc. are
+# demo-trace-shape-independent and covered by the `ui` job.)
+TRACE_SUITES=(
+    tests/core/trace_integrity.test.ts
+    tests/core/task_lifecycle.test.ts
+    tests/core/trace_analysis.test.ts
+    tests/core/trace_properties.test.ts
+    tests/core/fetch_traces.test.ts
+    tests/core/stream_parse.test.ts
+    tests/core/parse_yield_throttle.test.ts
+    tests/core/url_state.test.ts
+    tests/core/all_skills_snippets.test.ts
+    tests/core/flamegraph_api.test.ts
+    tests/core/enclosing_spans.test.ts
+    tests/core/flamegraph_export.test.ts
+    tests/core/runtime_groups.test.ts
+)
 
-echo "--- Checking task lifecycle consistency logic ---"
-node dial9-viewer/ui/test_task_lifecycle.js
-
-echo "--- Checking trace analysis ---"
-node dial9-viewer/ui/test_trace_analysis.js
-
-echo "--- Checking trace property oracle (Rust decode parity reference) ---"
-node dial9-viewer/ui/test_trace_properties.js
-
-echo "--- Checking multi-component trace fetch (repeatable trace=) ---"
-node dial9-viewer/ui/test_fetch_traces.js
-
-echo "--- Checking streaming trace decode (parseTraceStream) ---"
-node dial9-viewer/ui/test_stream_parse.js
-
-echo "--- Checking buffered parser paint-yield throttle (#595) ---"
-node dial9-viewer/ui/test_parse_yield_throttle.js
-
-echo "--- Checking landing-page URL state (serialize/parse) ---"
-node dial9-viewer/ui/test_url_state.js
-
-echo "--- Checking skills snippets ---"
-node dial9-viewer/ui/test_all_skills_snippets.js
-
-echo "--- Checking flamegraph API refinement helpers ---"
-node dial9-viewer/ui/test_flamegraph_api.js
-
-echo "--- Checking enclosing spans (per-worker) ---"
-node dial9-viewer/ui/test_enclosing_spans.js
-
-echo "--- Checking flamegraph export (folded + SVG) ---"
-node dial9-viewer/ui/test_flamegraph_export.js
-
-echo "--- Checking runtime grouping (multi-runtime lanes) ---"
-node dial9-viewer/ui/test_runtime_groups.js
+echo "--- Running trace-dependent Vitest suites ---"
+cd dial9-viewer/ui
+if [ ! -d node_modules ]; then
+    npm ci
+fi
+npx vitest run "${TRACE_SUITES[@]}"
 
 echo "All E2E trace checks passed."

@@ -80,8 +80,12 @@ jobs:
           sudo sysctl kernel.kptr_restrict=0
       - name: Build metrics-service (release)
         run: cargo build --release -p metrics-service
+      - name: Install UI test dependencies
+        run: npm ci
+        working-directory: dial9-viewer/ui
       - name: Unit test the lifecycle-inversion logic
-        run: node dial9-viewer/ui/test_task_lifecycle.js
+        run: npx vitest run tests/core/task_lifecycle.test.ts
+        working-directory: dial9-viewer/ui
       - name: Loop demo regeneration + integrity checks
         run: |
           DURATION_MIN='${{ inputs.duration_minutes || '60' }}'
@@ -97,9 +101,10 @@ jobs:
             scripts/regenerate_demo_trace.sh
             # Capture the integrity output; on failure keep the log AND the
             # exact demo-trace.bin that the check parsed, so the flake can be
-            # reproduced offline (node dial9-viewer/ui/test_trace_integrity.js <file>).
+            # reproduced offline (from dial9-viewer/ui:
+            # D9_TRACE_FILE=<file> npx vitest run tests/core/trace_integrity.test.ts).
             rc=0
-            node dial9-viewer/ui/test_trace_integrity.js > "$ARTIFACT_DIR/integrity.log" 2>&1 || rc=$?
+            (cd dial9-viewer/ui && npx vitest run tests/core/trace_integrity.test.ts) > "$ARTIFACT_DIR/integrity.log" 2>&1 || rc=$?
             cat "$ARTIFACT_DIR/integrity.log"
             echo "::endgroup::"
             if [ "$rc" -ne 0 ]; then
@@ -107,7 +112,7 @@ jobs:
               cp dial9-viewer/ui/public/demo-trace.bin "$ARTIFACT_DIR/failing-demo-trace.bin"
               {
                 echo "iteration=$i"
-                echo "reproduce with: node dial9-viewer/ui/test_trace_integrity.js failing-demo-trace.bin"
+                echo "reproduce with (from dial9-viewer/ui): D9_TRACE_FILE=/path/to/failing-demo-trace.bin npx vitest run tests/core/trace_integrity.test.ts"
               } > "$ARTIFACT_DIR/README.txt"
               exit 1
             fi
