@@ -70,6 +70,35 @@ Key files:
 - `trace_parser.js` — higher-level parser (`parseTrace`, `fetchTraces`, …)
   built on `decode.js`. Works in both the browser and Node.
 
+## Dual-UI switch (`ui-switch.js`)
+
+During the migration (ADR-0004 section 8) every page can exist in two
+versions: the legacy one at its canonical URL and a migrated Vite entry at its
+own dist path. `ui-switch.js` (plain browser JS at the `ui/` root, shipped via
+the static-copy list; NOT frozen core) is the whole rollout mechanism:
+
+- **Routing convention:** `?ui=new` on the canonical page URL selects the new
+  version. Precedence: explicit `?ui=new`/`?ui=legacy` param > stored
+  preference (localStorage key `dial9-ui-preference`) > default (legacy until
+  the flip - a single commented line in `ui-switch.js`, `DEFAULT_UI`).
+- **Raw switch:** the query string (trace source) is preserved across every
+  switch, minus the `ui` param which the script owns; the hash (view state) is
+  always dropped. No view state ports in either direction.
+- **The control:** a small fixed bottom-right pill (`id="d9-ui-switch"`, the
+  id the T12 census asserts), always visible on BOTH versions. It only renders
+  when there is somewhere to go: a legacy page with no registered new version
+  shows nothing.
+- **Legacy pages** load it via one `<script src="ui-switch.js"></script>` line
+  in `<head>` - the only edit legacy pages ever receive.
+
+**Registering a migrated page (T13/T14/T41):** add ONE line to
+`NEW_UI_ENTRIES` in `ui-switch.js` mapping the canonical page to your entry's
+served dist path, e.g. `"flamegraph.html": "new/flamegraph.html"` (and update
+the registry expectation in `tests/ui_switch.test.ts`). Your new entry should
+load `ui-switch.js` and call `window.D9UiSwitch.mount({ side: "new" })` to
+render the "Switch to legacy UI" control (pass `page: "x.html"` if your entry
+path is not the registered value verbatim).
+
 ## The `trace=` query parameter
 
 `trace=` is **repeatable**. Each value is fetched independently and may be
