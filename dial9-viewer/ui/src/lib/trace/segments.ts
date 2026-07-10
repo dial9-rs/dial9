@@ -349,6 +349,14 @@ export interface EvictionPlanInput {
   view: TimeRange;
   budgetBytes: number;
   thresholdFraction?: number;
+  /**
+   * Estimated bytes of admitted-but-not-yet-parsed work (in-flight or
+   * about to start). The planner acts as if these bytes were already
+   * resident, so eviction happens BEFORE a new parse lands rather than
+   * after - the resident total never has to overshoot the budget while
+   * waiting for a completion-time eviction pass.
+   */
+  reservedBytes?: number;
 }
 
 export interface EvictionPlan {
@@ -377,7 +385,14 @@ export interface EvictionPlan {
  */
 export function planEviction(input: EvictionPlanInput): EvictionPlan {
   const threshold = input.thresholdFraction ?? BUDGET_EVICTION_THRESHOLD_FRACTION;
-  const trigger = evictionTriggerBytes(input.budgetBytes, threshold);
+  const reserved = input.reservedBytes ?? 0;
+  // Reservations shrink both watermarks (never below 0): the reserved
+  // bytes will land shortly, so the plan must leave room for them.
+  const trigger = Math.max(
+    0,
+    evictionTriggerBytes(input.budgetBytes, threshold) - reserved
+  );
+  const hardBudget = Math.max(0, input.budgetBytes - reserved);
   const before = input.resident.reduce((sum, r) => sum + r.rawBytes, 0);
   let total = before;
   const evict: string[] = [];
@@ -405,11 +420,11 @@ export function planEviction(input: EvictionPlanInput): EvictionPlan {
     (r) => !input.needKeys.has(r.key) && !input.prefetchKeys.has(r.key)
   );
   evictFrom(unprotected, trigger);
-  if (total > input.budgetBytes) {
+  if (total > hardBudget) {
     const prefetch = input.resident.filter((r) => input.prefetchKeys.has(r.key));
-    evictFrom(prefetch, input.budgetBytes);
+    evictFrom(prefetch, hardBudget);
   }
-  if (total > input.budgetBytes) {
+  if (total > hardBudget) {
     const viewCenter = (input.view.startNs + input.view.endNs) / 2;
     const need = input.resident
       .filter((r) => input.needKeys.has(r.key))
@@ -419,7 +434,7 @@ export function planEviction(input: EvictionPlanInput): EvictionPlan {
         return db - da || a.extent.startNs - b.extent.startNs;
       });
     for (const seg of need) {
-      if (total <= input.budgetBytes) break;
+      if (total <= hardBudget) break;
       evict.push(seg.key);
       total -= seg.rawBytes;
     }
@@ -1158,11 +1173,22 @@ export function createSegmentWindow(
     }
 
     // Eviction (2.8): fires past the trigger; need/prefetch protected up
-    // to the hard budget.
+    // to the hard budget. Admitted-but-unparsed work is RESERVED so the
+    // room is freed BEFORE those parses land - resident bytes never have
+    // to overshoot the budget waiting for a completion-time pass (the
+    // GZIP_EXPANSION_ESTIMATE is deliberately above the observed ratio so
+    // reservations over-cover; the hard clamp below is the backstop for
+    // segments that expand beyond it).
     const resident: ResidentSegment[] = [];
     for (const [key, entry] of entriesNow()) {
       if (entry.state === "parsed" && entry.rawByteLength !== undefined) {
         resident.push({ key, extent: entry.extent, rawBytes: entry.rawByteLength });
+      }
+    }
+    let reservedBytes = 0;
+    for (const key of wanted) {
+      if (entriesNow().get(key)?.state !== "parsed") {
+        reservedBytes += estimateRawBytes(key);
       }
     }
     const plan = planEviction({
@@ -1172,6 +1198,7 @@ export function createSegmentWindow(
       view: currentView,
       budgetBytes: residentBudget,
       thresholdFraction: threshold,
+      reservedBytes,
     });
     if (plan.evict.length > 0) {
       writeEntries((next) => {

@@ -329,6 +329,23 @@ describe("planEviction", () => {
     expect(plan2.residentBytesAfter).toBe(600);
   });
 
+  it("reserves estimated bytes for admitted-but-unparsed work (frees room BEFORE the parse lands)", () => {
+    const plan = planEviction({
+      resident: [resident(0, 300), resident(1, 300), resident(2, 300)],
+      needKeys: none,
+      prefetchKeys: none,
+      view,
+      budgetBytes: 1000,
+      reservedBytes: 300,
+    });
+    // 900 alone would sit exactly at the trigger; the 300-byte reservation
+    // shrinks the effective trigger to 600, so the farthest resident goes
+    // now instead of after the incoming parse overshoots.
+    expect(plan.triggered).toBe(true);
+    expect(plan.evict).toEqual([segs[0]!.key]);
+    expect(plan.residentBytesAfter).toBe(600);
+  });
+
   it("breaks distance ties deterministically (earlier extent first)", () => {
     const midView = range(segs[2]!.extent.startNs, segs[2]!.extent.endNs);
     const plan = planEviction({
