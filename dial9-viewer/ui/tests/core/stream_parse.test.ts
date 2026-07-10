@@ -206,7 +206,9 @@ async function assertStreamMatches(
   deepStrictEqual(got, ref);
 }
 
-describe("parseTraceStream", { timeout: 120_000 }, () => {
+// Generous ceiling: the byte-by-byte chunking test alone takes tens of
+// seconds, multiplied by parallel-worker contention on slow CI runners.
+describe("parseTraceStream", { timeout: 300_000 }, () => {
   // ── chunk size 1 (every single-byte boundary, maximally adversarial)
   //    over the prefix — exercises rollback at every byte offset. ──
   it("chunk size 1 (byte-by-byte) over prefix matches", async () => {

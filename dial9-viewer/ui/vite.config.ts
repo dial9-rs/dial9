@@ -85,6 +85,12 @@ export default defineConfig({
   test: {
     environment: "node",
     include: ["tests/core/**/*.test.ts", "src/**/*.test.ts"],
+    // Many suites parse the 3.4MB demo trace in beforeAll/tests; with the
+    // whole tests/core/ set running in parallel workers (and on slow CI
+    // runners), individual parses far exceed Vitest's 5s/10s defaults. These
+    // are ceilings for stragglers, not expected durations.
+    testTimeout: 120_000,
+    hookTimeout: 120_000,
   },
   // Proxy-mode dev loop (`npm run dev`): Vite serves the UI with HMR and
   // forwards /api/* to the Rust dev-server, launched with:
