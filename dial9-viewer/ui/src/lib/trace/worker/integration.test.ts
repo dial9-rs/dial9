@@ -23,6 +23,7 @@ import { gunzipSync, gzipSync } from "node:zlib";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { createStore } from "../../../store/store.js";
 import { loadTraceInWorker, parseTraceBuffer } from "../load.js";
+import { parseSegmentInWorker } from "../segments.js";
 import type { Server } from "node:http";
 import type { Store } from "../../../store/store.js";
 import type { TraceSlice } from "../../../types/state.js";
@@ -38,6 +39,7 @@ import type {
 let server: Server;
 let baseUrl: string;
 let rawTrace: Uint8Array;
+let gzTrace: Buffer;
 let direct: ParsedTrace;
 
 beforeAll(async () => {
@@ -48,7 +50,7 @@ beforeAll(async () => {
     fileBytes[0] === 0x1f && fileBytes[1] === 0x8b
       ? new Uint8Array(gunzipSync(fileBytes))
       : new Uint8Array(fileBytes);
-  const gzTrace = gzipSync(rawTrace);
+  gzTrace = gzipSync(rawTrace);
   direct = await parseTraceBuffer(rawTrace);
 
   server = createServer((req, res) => {
@@ -258,6 +260,33 @@ describe("worker path (real thread + structured clone)", () => {
       message: expect.stringMatching(/404/) as unknown,
     });
     expect(store.getState().trace.trace).toBeNull();
+    await exited;
+  }, 120_000);
+
+  // ── T17: the parse-buffer request across the real clone boundary ──────
+
+  it("parse-buffer: cached gzipped bytes parse in the thread with parity, no fetch involved", async () => {
+    const { factory, exited } = makeNodeWorker();
+    const progress: TraceWorkerProgress[] = [];
+    const job = parseSegmentInWorker(new Uint8Array(gzTrace), {
+      worker: factory,
+      onProgress: (p) => progress.push(p),
+    });
+    const result = await job.done;
+
+    // Parity: counts + spot samples (whole-object toEqual OOMs, T09 trap).
+    expect(result.trace.events.length).toBe(direct.events.length);
+    expect(result.trace.events[0]).toEqual(direct.events[0]);
+    expect(result.trace.events.at(-1)).toEqual(direct.events.at(-1));
+    expect(result.trace.minTs).toBe(direct.minTs);
+    expect(result.trace.maxTs).toBe(direct.maxTs);
+    expect(result.trace.callframeSymbols.size).toBe(direct.callframeSymbols.size);
+    // The decompressed size is what the budget accountant records.
+    expect(result.rawByteLength).toBe(rawTrace.length);
+    // Progress flowed and never claimed a fetch phase.
+    expect(progress.length).toBeGreaterThan(1);
+    expect(progress.every((p) => p.phase === "parsing")).toBe(true);
+    // Single-shot worker: the thread is gone after settle.
     await exited;
   }, 120_000);
 });

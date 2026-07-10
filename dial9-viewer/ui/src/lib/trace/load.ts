@@ -251,9 +251,11 @@ export interface WorkerTraceLoad {
  * bundles trace-worker.ts (frozen core included) into a dedicated worker
  * chunk under dist/assets. Browser-only - Node tests substitute
  * WorkerLoadOptions.worker (node has no Web Worker; see
- * worker/node-worker-entry.mjs).
+ * worker/node-worker-entry.mjs). Exported for the per-segment parse
+ * driver (segments.ts), which spawns the same worker entry per job; not
+ * re-exported through the barrel (transports are a lib/trace concern).
  */
-function defaultTraceWorkerFactory(): TraceWorkerPort {
+export function defaultTraceWorkerFactory(): TraceWorkerPort {
   const worker = new Worker(new URL("./worker/trace-worker.ts", import.meta.url), {
     type: "module",
   });

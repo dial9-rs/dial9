@@ -1,276 +1,262 @@
-# T16 HANDOFF - Web Worker load pipeline
+# T17 HANDOFF - Segment-windowed loading (tier 2 core)
 
-(Replaces the T09 HANDOFF inherited through the branch chain; T09's own
-record lives at commit 9fd0cb3.)
+(Replaces the T16 HANDOFF inherited through the branch chain; T16's own
+record lives at commit 357ac5e.)
 
 ## STATUS
 
 DONE - all DoD checks pass (evidence below). No STOP-gate hit. Scope
-fence respected: no UI, no segment windowing (T17), no frozen-core .js
-edits, no Rust code touched. The whole-trace worker path is built; T17
-window-izes it.
+fence respected: no UI/minimap, no aggregates client (T18 lives on a
+sibling branch and was NOT re-implemented), no frozen-core .js edits, no
+page HTML, no .rs touched.
 
-## COMPLETED (commits on `ticket/T16-worker-load-pipeline`, on top of 9fd0cb3)
+## COMPLETED (commits on `ticket/T17-segment-windowing`, on top of 357ac5e)
 
-- `70c87e0` stream.ts: the fetch-stream + chunk-capture + reassembly
-  mechanism extracted out of loadTraceStreamed into a leaf module (public
-  load.ts surface unchanged) so the worker body can share it without
-  importing load.ts - load.ts also hosts the orchestrator's
-  `new Worker(new URL(...))` reference, and importing it from the body
-  would put the worker entry inside its own bundle graph.
-- `52fae8c` worker/protocol.ts (types-only message contract),
-  worker/body.ts (pure pipeline: fetch INSIDE the worker, gunzip+parse,
-  capture), worker/trace-worker.ts (browser binding),
-  worker/node-worker-entry.mjs (worker_threads binding),
-  tsconfig `allowImportingTsExtensions`, worker/body.test.ts.
-- `5e4b355` load.ts loadTraceInWorker orchestrator + barrel exports +
-  load.worker.test.ts (fake-port contract tests incl. the three abort
-  observables against a real T07 store).
-- `be00eb2` worker/integration.test.ts (real worker_threads thread + real
-  http fetch + real structured-clone hop + real store);
-  src/lib/trace/package.json ({type:module} scope, see below).
-- `ad14f68` dev-probe build wiring + vite.config commonjs interop fixes
-  (the bundled-core landmines, see below) + TraceDecoder seed in
-  trace-worker.ts.
+- `a9dcf7e` worker parse-buffer request: protocol.ts grows
+  TraceWorkerParseBufferRequest (buffer CLONED in - the sender's copy is a
+  live cache entry; decompressed buffer transferred back); body.ts
+  refactor hoists shared makeReporter/startJob out of runLoad (comments
+  carried) + runParseBuffer (DecompressionStream gunzip-stream fused with
+  parse; explicit error where gzipped bytes meet a no-DS runtime - the
+  core's zlib fallback would throw a bare-require ReferenceError in a
+  browser worker); stream.ts extracts parseChunksWithCapture (public
+  surface unchanged); 4 new body tests.
+- `a39cd10` additive types: types/trace.d.ts boundary-poll vocabulary
+  (SegmentEdgePolls, WindowEdgePoll with explicit `taskId: null` for
+  left-edge crossings, StitchedBoundaryPoll, WindowBoundaryPolls);
+  types/state.d.ts SegmentEntry gains trace / rawByteLength /
+  invariants (SegmentParseInvariants, retained across eviction) /
+  edgePolls. T06 union + existing fields untouched.
+- `ab45f27` lib/trace/segments.ts (the 2.8 placement) + barrel exports +
+  load.ts exports defaultTraceWorkerFactory for the per-segment driver.
+- `fcd9507` segments.test.ts: 42 (now 43) pure-function cases + a
+  real-demo-parse anchor.
+- `1e3a29c` reservation-aware eviction (design fix found while writing
+  the DoD eviction test): planEviction gains reservedBytes so reconcile
+  frees room BEFORE an admitted parse lands; without it resident could
+  transiently overshoot the hard budget by one segment.
+- `f09e993` segments.window.test.ts (17 orchestrator/hard-edge/scenario
+  tests) + one real worker_threads parse-buffer parity case in
+  worker/integration.test.ts.
 - (final commit): this HANDOFF.
-
-## CLONEABILITY VERDICT (first work item)
-
-ParsedTrace IS structured-cloneable as-is; NO snapshot shape needed.
-Verified by parsing public/demo-trace.bin with the frozen core under Node
-and walking the full output (functions / accessor properties / class
-instances / symbol keys / typed arrays: ZERO of each), then
-structuredClone() of the whole 294,465-event parse: succeeds (~550 ms),
-Maps round-trip AS Maps (11 Maps: spawnLocations, taskSpawnLocs,
-taskSpawnTimes, taskTerminateTimes, taskInstrumented, callframeSymbols,
-threadNames, tidToWorker, runtimeWorkers, segmentMetadata, taskDumps),
-counts + spot samples equal. Custom-event field values may be bigint
-(decode.js DecodedFieldValue union) - bigint is also clone-safe. The
-features/01 parseKey getters are page code, not core output (confirmed).
-Documented in worker/protocol.ts's header; types/trace.d.ts needed no
-change (no snapshot type exists because none is needed).
 
 ## WHAT WAS BUILT
 
-### The worker path (architecture 2.7/2.8; ADR-0004 section 6 "do now")
+### Budgets (N19; shared-decisions constants, all tunable via options)
 
-- `lib/trace/worker/protocol.ts` - types-only wire contract:
-  load/abort requests; progress/done/error responses. Progress carries
-  the features/02 B load-timing fields: phase (fetching|parsing), mode
-  (stream|buffered), urlCount (B8 multi-trace labels), bytesRead,
-  totalBytes (null while streaming), eventCount (B8), startMs + elapsedMs
-  (B9). Done carries the B16 worker-measurable timing record
-  {startMs, fetchDoneMs (buffered only; null in stream mode - legacy
-  loadPerf parity), parseDoneMs, mode, events, bytes}. `totalMs` is
-  deliberately page-side (defined as start->render-complete via
-  double-rAF). CLOCK NOTE: worker performance.now() has its own
-  timeOrigin - consumers use deltas, never mix with main-thread marks.
-- `lib/trace/worker/body.ts` - the pipeline as a PURE module
-  (createWorkerBody(post)): mode selection via canStreamDecode inside the
-  worker, stream path via the shared streamTraceWithCapture, buffered
-  path via fetchTraces+parseTrace with a fetch-done mark, progress
-  forwarding (the core's per-100KB onParseProgress), one body = one load.
-  The body's AbortController aborts the in-flight fetch on an "abort"
-  request (cooperative); hard kill is the orchestrator's terminate.
-- `lib/trace/worker/trace-worker.ts` - browser binding (Vite worker
-  entry) + the TraceDecoder global seed (see landmines).
-- `lib/trace/worker/node-worker-entry.mjs` - worker_threads binding for
-  Node tests, loading body.ts via Node's NATIVE TYPE STRIPPING
-  (>= 22.18; CI runs Node 24, local v25). This is the chosen Node-shim
-  path per the ticket (browser mode would drag Playwright deps - T12's
-  turf).
-- `load.ts` gains `loadTraceInWorker(store, urls, opts)`: spawns one
-  worker per load via the Vite-detected inline
-  `new Worker(new URL("./worker/trace-worker.ts", import.meta.url),
-  { type: "module" })` (transport injectable via opts.worker for tests),
-  forwards progress, updates the store's `trace` slice on done, then
-  resolves; terminates the worker on ANY settle (no live handle after
-  success, error, or abort). Barrel exports: loadTraceInWorker +
-  TraceSliceStore/WorkerLoadOptions/WorkerLoadResult/WorkerTraceLoad +
-  the protocol's port/progress/timing types.
+RESIDENT_RAW_BUDGET_BYTES = 128 MB (sum of DECOMPRESSED sizes of parsed
+segments - the proxy for the ~10x parsed heap), RAW_GZIP_CACHE_BUDGET_BYTES
+= 256 MB, BUDGET_EVICTION_THRESHOLD_FRACTION = 0.9 (the 10% headroom is
+the hysteresis margin; GC lags eviction). GZIP_EXPANSION_ESTIMATE = 4 is
+the pre-fetch planning estimate ONLY (real sizes replace it after the
+first parse; chosen above the observed ~3.3x so reservations over-cover).
 
-### Abort semantics (decided here, as the ticket required)
+### The decision layer (pure, exhaustively tested)
 
-ONE AbortController per load, owned by the orchestrator. handle.abort()
-and the optional external opts.signal (the page's Escape/Back) both
-funnel into it. On abort: (1) post {kind:"abort"} into the worker -
-cooperative fetch cancellation; (2) port.terminate() - authoritative,
-also kills a compute-bound parse that no signal reaches; (3) reject
-`done` with DOMException("AbortError"). After settle, late worker
-messages are DROPPED: no progress callback fires, the store is never
-touched. `done` has a no-op rejection handler pre-attached so
-fire-and-forget pages never produce an unhandled rejection (awaiting
-callers still get the rejection; AbortError swallowing stays a page
-concern, B10).
+- deriveSegmentExtents: heatmap parity (features/01 F2/F4/F7 + I2):
+  filename-epoch start, last_modified end, 1s floor, tiled ends;
+  unrecognized DIRECTORY layouts still derive via the basename pattern
+  (the dev-server's 6-component key works); keys with no epoch are
+  returned in `skipped` with a reason, never guessed. Extents are
+  wall-clock ns; mapExtentToMonotonic(extent, clockOffsetNs) moves them
+  into the viewport's domain once a parse provides the offset. CLOCK
+  DOMAIN NOTE: everything handed to the orchestrator must share one
+  domain (module-header doc).
+- computeNeedSet (closed-interval overlap - touching edges count),
+  computePrefetchSet (+/-1 beyond both edges; nearest neighbors on both
+  sides when the viewport sits in a coverage gap).
+- capToBudget: admission against the trigger (the N19 window limit, not
+  a rejection - the nearest need segment is always admitted, and the
+  legacy 100/200 MB open cap has no successor check anywhere else).
+- planEviction: farthest-from-viewport first ("LRU by distance", 2.8)
+  past the 90% trigger; need/prefetch protected there; prefetch, then
+  farthest-from-center need members evicted ONLY to re-clamp under the
+  HARD budget; reservedBytes (admitted-but-unparsed estimates) shrink
+  both watermarks so eviction precedes the parse that needs the room.
+- createRawByteCache: true-LRU (access-ordered) gzip byte cache, own
+  budget, same 90% trigger; entries larger than the trigger are refused
+  (caching one would empty the cache and still not fit).
 
-### Store coupling
+### Boundary polls (the 2.8 truncation hard edge; features/02 G5)
 
-`TraceSliceStore` = { update("trace", { trace }) } - a minimal structural
-interface in load.ts, so lib/trace does not import src/store.
-Compile-time-checked that ViewerStore satisfies it
-(load.worker.test.ts). Tests drive real createStore instances with an
-injected microtask scheduler (Node has no rAF).
+Per-segment: computeSegmentEdgePolls extracts, in one scan, polls left
+open at the segment END (exactly what the core discards at trace end,
+trace_analysis.js #194) and dangling PollEnd-first closes at the START
+(what the core ignores). Park/Unpark-first starts are ambiguous and
+deliberately captured as nothing (ADR-0002 spirit: absence is never
+fabricated). Stored on the entry (edgePolls), dropped with the parse on
+eviction; segmentInvariants (minTs/maxTs/workerIds) persist eviction.
 
-### Plain-Node-runnable worker chain (the enabling constraint)
+Window-level: computeWindowBoundaryPolls walks maximal runs of
+consecutively-listed parsed segments; internal boundaries STITCH matched
+open/close pairs into complete polls; run edges with a listed-but-
+unparsed neighbor surface as WindowEdgePoll {truncatedAt, openEnded:
+true}, spans clamped to observed events (a lower bound - never a
+long-poll false positive, never rendered to the window edge). Absolute
+listing ends keep core trace-edge parity (dropped, no marker). Left-edge
+crossings carry `taskId: null` - the PollStart holding task identity was
+never parsed; renderers must treat it as explicitly unknown.
 
-node-worker-entry.mjs -> body.ts -> stream.ts + trace_parser.js runs
-under plain Node with NO bundler: every runtime import on that chain
-resolves on disk as written. Consequences, all documented in file
-headers:
-- body.ts imports `../stream.ts` with an explicit .ts extension ->
-  tsconfig gains `allowImportingTsExtensions: true` (legal because noEmit;
-  Vite/vitest resolve .ts specifiers natively). Everything else keeps the
-  .js-specifier convention; type-only imports are erased by the stripper
-  and exempt.
-- `src/lib/trace/package.json` ({type:module} + explanatory "//"): scopes
-  ESM module type for plain Node so the type-stripped chain loads without
-  MODULE_TYPELESS_PACKAGE_JSON warnings. The ui ROOT package.json stays
-  typeless ON PURPOSE (constraint H2: `node test_*.js` root scripts are
-  CJS). Vite/vitest/tsc do not consult the nested file.
+ADR-0002 note: block-in-place gap detection runs inside each segment's
+parse over that segment's events only, so window edges ARE trace edges
+for gap detection; nothing to do, documented in the module header.
 
-### Bundled-core landmines found and fixed (vite.config.ts)
+### Worker path
 
-Nothing had ever pulled the frozen core through a ROLLUP build before
-(T09: "nothing in the rollup input graph imports lib/trace"); the worker
-entry does. Two real breakages surfaced, both fixed WITHOUT touching the
-core:
+parseSegmentInWorker drives the new parse-buffer request: one worker per
+segment parse, terminated on settle, late messages dropped - T16's
+orchestration semantics reused wholesale (the persistent pool the T16
+HANDOFF anticipated was NOT needed; worker spawn is negligible next to a
+segment parse, and the TraceWorkerFactory seam keeps the pool option
+open). Bytes are CLONED into the worker (the cache entry survives); the
+decompressed buffer comes back transferred and only its byteLength is
+kept (the budget cost); gzipped input streams through DecompressionStream
+so gunzip and parse overlap.
 
-1. BUILD FAILURE: rollup's CJS interop (commonjsOptions.include) covers
-   node_modules only by default, so named ESM imports from the CJS-guard
-   core failed ("fetchTraceStream is not exported by trace_parser.js").
-   Fix: include `"*.js"` (ui root, cwd-relative) AND
-   `"../../dial9-trace-format/js/*.js"` - decode.js at the ui root is a
-   SYMLINK and Vite ids modules by realpath.
-2. RUNTIME FAILURE (bundle-only): trace_parser.js getTraceDecoder does
-   `require(path.resolve(__dirname, "decode.js"))` under Node, falling
-   back to the TraceDecoder browser global. The default commonjs
-   transform rewrites `typeof require` to a DEFINED throwing helper, so
-   the bundled worker always took the require branch and threw at first
-   parse. Fix: `ignoreDynamicRequires: true` keeps `require` a
-   genuinely-undefined bare identifier in module scope, plus
-   trace-worker.ts seeds `globalThis.TraceDecoder` from the bundled
-   decode.js before any message arrives - the same resolution order the
-   legacy <script src> pages use. Node/vitest paths run the real CJS
-   files and are unaffected.
+### The orchestrator (createSegmentWindow)
 
-VERIFIED by running the EMITTED dist/assets/trace-worker-*.js chunk under
-a worker_threads Web-Worker shim (scratch harness, not committed): full
-parse parity on the demo trace (294,465 events, Maps intact, buffer
-byte-exact, 45 progress messages, stream mode). Harness note: the chunk
-must be loaded as ESM (.mjs copy) - loading the .js under the typeless ui
-package.json makes Node CJS-load it and define `require`, which is a
-harness artifact, not bundle behavior.
-
-### Test layer map (for T12/T13 verification)
-
-- worker/body.test.ts (6): pipeline logic IN-PROCESS - stubbed fetch,
-  no thread. Stream parity vs direct parse, buffered fallback phases +
-  fetch mark (DecompressionStream stubbed out; the core's zlib fallback
-  still gunzips), wire parse options, abort-request fetch cancellation,
-  one-load-per-worker, 404 propagation.
-- load.worker.test.ts (8): orchestrator contract vs a scripted fake port
-  + real store. Message shapes, done->store->resolve->terminate ordering,
-  the three abort observables, external + pre-aborted signals, error
-  name preservation, transport error, unhandled-rejection hygiene.
-- worker/integration.test.ts (3): the REAL boundary - worker_threads
-  thread (execArgv:[] so vitest flags never leak), fetch INSIDE the
-  worker against a local http server, actual postMessage structured
-  clone, real store. Parity + progress, abort mid-parse, cross-thread
-  error propagation.
-- BROWSER-ONLY REMAINDER: the Vite `new Worker(new URL(...))` entry
-  detection/URL rewriting in a live page. The emitted chunk itself was
-  smoke-verified (above); the live-page path lands with T13's page entry
-  (T12's parity harness can drive it).
+Takes the store (SegmentsSliceStore - structural, compile-checked against
+ViewerStore), the ordered ListedSegment[] and options (fetch/parser/idle
+all injectable; urlFor defaults to identity - the key IS the URL for
+non-S3 `trace=` sources; S3 callers pass an /api/object mapping). Seeds
+every segment as "listed"; setViewport drives
+listed -> fetching -> parsed -> evicted (-> fetching ...), where
+"fetching" covers the whole in-flight job and an abort reverts to the
+pre-flight state ("evicted" iff previously parsed). Reconcile pass:
+need/prefetch -> budget admission -> stale-job aborts -> reservation-
+aware eviction -> start need jobs now, prefetch via the idle scheduler
+(callbacks re-verify the viewport before starting). Parse completions
+write the entry (trace + rawByteLength + invariants + edgePolls) and
+re-reconcile. Failures revert the entry, surface via onError (default
+console.warn), and are NOT hot-retried - the mark clears when the key
+leaves the wanted set. Keys evicted by the hard clamp are not restarted
+in the same pass (their real sizes make the next admission defer them
+honestly - no fetch/evict loop).
 
 ## DoD EVIDENCE
 
 All run in dial9-viewer/ui (npm ci done), final tree:
 
 1. `npx tsc --noEmit`: clean (exit 0).
-2. `npm run test`: pretest boundary check OK (worker/ subdir is inside
-   the allowed src/lib/trace/ prefix - no ALLOWLIST change needed), then
-   24 files / 268 tests pass (251 inherited + 17 new: body 6,
-   orchestrator 8, integration 3).
-3. DoD check "worker parity": worker/integration.test.ts parses the demo
-   trace through the real worker path and compares against a direct
-   parseTrace - counts (events, cpuSamples, customEvents, allocEvents,
-   blockInPlaceGaps, 4 Map sizes) + spot samples (first/mid/last event,
-   mid custom event, a callframeSymbols entry, minTs/maxTs,
-   hasTaskTracking) + byte-exact transferred buffer. Deliberately NOT
-   whole-object toEqual (T09's vitest trap on huge arrays).
-4. DoD check "progress": same test asserts >1 progress events, every
-   load-timing field populated on each (phase/mode/urlCount/bytesRead/
-   totalBytes-contract/eventCount/startMs/elapsedMs), live counters > 0
-   by the last message, and the done timing record's field relations.
-5. DoD check "abort mid-parse": abort issued only after parsing is
-   demonstrably mid-flight (bytesRead > 0). The three named observables:
-   (a) worker terminated - the thread's exit event is awaited (a live
-   handle would time the test out); (b) store trace slice unchanged -
-   getState().trace.trace stays null, re-checked after a 100 ms drain;
-   (c) no pending progress callbacks after abort - counted zero. Also
-   pinned transport-independently in load.worker.test.ts.
-6. `npm run build`: dist delta vs the T09-recorded 19-file listing is
-   EXACTLY +1 file: dist/assets/trace-worker-<hash>.js (29.08 kB, the
-   worker chunk with the core bundled inside - expected, it is built
-   code) and the dev-probe chunk grows (0.00 kB -> 37.80 kB) because the
-   probe now pulls the barrel through the build (see decisions). No stray
-   assets: node-worker-entry.mjs and the nested package.json do NOT enter
-   dist. Local build deletes tracked dist/.gitkeep; restored via git
-   checkout before committing (same pre-existing quirk as T06-T09).
-7. `cargo build -p dial9-viewer`: exit 0 (run because the dist listing
-   changed; rust-embed re-embeds ui/dist). No cargo nextest / stress /
-   clippy / fmt: no .rs touched, no trace-format change (AGENTS.md
-   JS-only rule). No new ui-root test_*.js, so no e2e-trace-tests.sh
-   registration (vitest auto-discovers src/**/*.test.ts).
+2. `npm run test`: pretest boundary check OK, then 26 files / 333 tests
+   pass (268 inherited + 65 new: 43 pure, 17 orchestrator, 4 body
+   parse-buffer, 1 worker_threads integration).
+3. HARD EDGE "abort on viewport jump": segments.window.test.ts pins both
+   phases - an in-flight FETCH is aborted (its AbortSignal observed
+   fired), the entry reverts to "listed", and a late transport
+   resolution reaches neither the parser nor the store; an in-flight
+   PARSE job receives abort() and its late completion never mutates the
+   store (resident stays 0). Transport-independent driver semantics
+   (abort message + terminate + AbortError + late-message drop) pinned
+   separately against a scripted port.
+4. HARD EDGE "boundary poll truncated, not long": with segments 0+1
+   parsed and 2 unfetched, the poll opening at the end of segment 1 is
+   surfaced as {truncatedAt: "end", openEnded: true} with its span
+   clamped to the segment's last observed event - and the same fixture
+   widened over segment 2 resolves it into a stitched complete poll.
+   Pure-layer tests additionally pin left-edge (taskId null) crossings,
+   absolute-listing-edge core parity, evicted-neighbor edges, unmatched-
+   evidence drops, and a real-demo-parse consistency anchor.
+5. HARD EDGE "re-entry hits raw cache not network": after eviction, re-
+   entering the window re-parses with the mock fetch count for that
+   segment still 1 (cacheHits 1, parser invoked twice); shrinking the
+   gzip cache budget until LRU eviction drops the bytes makes re-entry
+   fetch exactly once more.
+6. HARD EDGE "eviction at the 90% threshold, resident under budget":
+   pure tests pin the exact boundary (900/1000 does not trigger, 901
+   does; reservation of 300 shrinks the trigger to 600) and the order
+   (farthest first, protection tiers, hard re-clamp, deterministic
+   ties); the orchestrator test steps a 6-segment walk asserting
+   resident and peak <= budget at every step, evictions fired, and
+   evicted entries retaining invariants + learned sizes.
+7. DoD 10-SEGMENT SCENARIO (repeated-demo-style fixtures at recorded
+   sizes; real encoder fixtures arrive with T42): 10 segments x 30 MB
+   recorded raw (10 MB gzip listing), viewport walked 0 -> 9 with idle
+   prefetch, then back 9 -> 0. Measured: resident raw peaked at
+   94,371,840 B (90 MB) <= 128 MB budget, asserted <= budget after every
+   step; forward pass: 10 network fetches, 10 parses, 7 evictions;
+   after the back pass: networkFetches STILL 10 (zero re-downloads),
+   17 parses total (7 cache-hit re-parses), 14 evictions, peak unchanged
+   at 90 MB. Scaling argument: the budget accountant only ever does
+   byteLength arithmetic on recorded sizes, and the real-parse anchor
+   test drives two REAL demo-trace segments (gzipSync'd public/
+   demo-trace.bin) through the real core via the SegmentParser seam,
+   asserting the accounted rawByteLength IS the actual decompressed
+   byte length and resident equals their sum - so 30 MB recorded
+   entries behave identically to the anchored ~11 MB real ones.
+8. `npm run build`: dist listing IDENTICAL to the T16 record (20 files,
+   content-hash changes only; dev-probe chunk byte-identical). The
+   worker chunk grows 29.08 -> 30.07 kB (the parse-buffer body path).
+   segments.ts IS rollup-transformed (18 -> 19 modules through the
+   barrel) and then tree-shaken from the probe output - no page assets
+   added, but rollup-only breakage would still surface at build time.
+9. `cargo build -p dial9-viewer`: exit 0 (dist content changed;
+   rust-embed re-embeds). No cargo nextest / stress / clippy / fmt: no
+   .rs touched, no trace-format change (AGENTS.md JS-only rule). No new
+   ui-root test_*.js, so no e2e-trace-tests.sh registration (vitest
+   auto-discovers src/**/*.test.ts). Local build deletes tracked
+   dist/.gitkeep; restored via git checkout before committing (same
+   pre-existing quirk as T06-T16).
 
 ## DECISIONS A REVIEWER SHOULD SEE
 
-- dev-probe.ts re-exports loadTraceInWorker: the ONLY way `npm run
-  build` exercises the Vite worker bundling before a real page migrates
-  (the ticket's build check anticipated the worker chunk appearing).
-  Page tickets replace the probe with real entries.
-- One worker per whole-trace load, terminated on settle. T17's
-  per-segment tier will want a persistent worker (or pool) - the
-  TraceWorkerFactory seam and the pure body are built for that; only the
-  one-load guard and orchestrator lifetime need revisiting.
-- The body posts AbortError as a normal error message (no special case);
-  the orchestrator's settled-guard is what guarantees silence after
-  abort. Keeps the body dumb and the invariant in one place.
-- Progress messages are NOT throttled beyond the core's per-100KB cadence
-  (~110 msgs / 11 MB; tiny payloads). If a page ever needs coarser
-  cadence, throttle at the onProgress consumer.
-- loadPerf `mode:"local"` (file drop) and `"reparse"` stay OUTSIDE the
-  worker path for now: file-drop hands a main-thread buffer to
-  parseTraceBuffer, reparse is in-memory (reparse.ts). Moving buffer
-  parses into the worker is trivial protocol growth (a parse-buffer
-  request kind with a transferred buffer) if a page ticket wants it.
+- Reservation-aware eviction (1e3a29c) goes beyond the 2.8 text: the
+  spec's completion-time eviction alone lets resident bytes transiently
+  exceed the hard budget by one segment while the newcomer parses. The
+  DoD ("resident stays under budget") forces the stronger property, so
+  reconcile reserves estimates for admitted-but-unparsed work and evicts
+  first. The hard clamp remains the backstop for under-estimates.
+- Fetch happens on the MAIN thread (orchestrator), parse in the worker.
+  T16 moved fetch INTO the worker for whole-trace loads; here the
+  orchestrator owns the raw-gzip cache, so bytes must land main-thread
+  anyway. The parse-buffer request carries them over (cloned), keeping
+  gunzip+parse off the main thread. The T16 load path is untouched.
+- One worker per segment parse (T16 lifecycle reused) instead of the
+  persistent worker/pool the T16 HANDOFF floated: spawn cost is
+  negligible against a segment parse, and every abort/late-message
+  guarantee carries over verbatim. The factory seam keeps a pool
+  possible without protocol changes (add a jobId then).
+- "fetching" covers fetch AND parse phases (T06's 4-state lifecycle is
+  frozen; a fifth "parsing" state would be a type break). Per-phase
+  progress is observable via onProgress.
+- Truncated left-edge polls carry `taskId: null`, not 0: the core's "0 =
+  untracked" convention would silently conflate "trace has no task
+  tracking" with "the PollStart is outside the window". App-level type,
+  explicit null (AGENTS.md no-hidden-absence rule).
+- Absolute listing ends are NOT marked truncated: there is no
+  "evicted/unfetched" neighbor there (2.8's wording), and the legacy
+  whole-trace render drops those polls (#194) - marking them would be a
+  parity change owned by a page ticket if ever wanted.
+- The gzip cache stores STILL-COMPRESSED bytes (2.8's "raw gzipped
+  bytes"); parse-buffer re-gunzips on re-entry. Decompressed buffers are
+  never retained (they are not part of any budget's inventory).
 
 ## EXPECTED MERGE OVERLAPS (sibling worktrees T12/T18)
 
-- `src/lib/trace/index.ts`: T18 adds its own barrel lines (aggregates
-  client). Trivial additive merge; keep the explicit named-export style.
-- `package.json` scripts: untouched by this branch (T09's pretest note
-  still applies for T11/T12).
-- vite.config.ts: this branch adds build.commonjsOptions; T12 may touch
-  test config. Additive-block merge.
-- tsconfig.json: this branch adds allowImportingTsExtensions (+comment).
+- `src/lib/trace/index.ts`: T18 adds its aggregates-client barrel lines;
+  this branch adds the segments.ts block. Trivial additive merge; keep
+  the explicit named-export style.
+- `worker/protocol.ts` / `worker/body.ts`: T18 should not touch these;
+  if T12 does, the additions here are one request kind + one handler
+  case (additive).
+- No package.json / tsconfig / vite.config changes on this branch.
 
 ## REMAINING
 
-None for T16. Flagged for later tickets:
+None for T17. Flagged for chunk 2 (viewer integration):
 
-- T17: segment windowing on top of this path (persistent worker/pool via
-  the TraceWorkerFactory seam; stale-fetch discard already has its
-  primitive in the abort protocol).
-- T13/T14 (page entries): when a bundled PAGE parses on the main thread
-  through lib/trace, it needs the same TraceDecoder global seed the
-  worker entry has (or a shared side-effect module) - the legacy pages
-  get it from <script src> ordering, bundles do not. Also inherit the
-  worker chunk into their build output and the live-page worker
-  verification (T12 harness).
-- The barrel-through-page bundle currently duplicates the core into both
-  the page chunk and the worker chunk (~30 kB min each). Fine for the
-  probe; page tickets may want a manualChunks split if it matters.
+- Wire setViewport to a store subscription on the viewport slice, and
+  boundaryPolls()/computeWindowBoundaryPolls to a store derived() for
+  the G5-marker rendering (truncated) and lane rendering (stitched).
+- load.ts bootstrap per 2.8 ("list, fetch initial window"): call
+  /api/browse, deriveSegmentExtents, mapExtentToMonotonic after the
+  first parse, createSegmentWindow with urlFor over /api/object.
+- Tier-1 fallback rendering for "listed"/"evicted"/deferred segments
+  (T18's aggregates client + listing-metadata density) and the
+  "partial data" badge when admission defers need segments.
+- Status-bar per-segment progress from onProgress (2.8 feedback edge).
+- T42 real encoder fixtures can replace the repeated-demo fixtures in
+  the scenario test.
 
 ## BLOCKERS
 

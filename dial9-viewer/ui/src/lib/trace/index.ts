@@ -74,6 +74,53 @@ export type {
   TraceWorkerTiming,
 } from "./worker/protocol.js";
 
+// segments.ts - segment-windowed loading (tier 2, architecture 2.8):
+// budget constants (N19), extent derivation, window decision functions,
+// the raw-gzip cache, boundary-poll stitching/truncation, and the
+// viewport-driven orchestrator.
+export {
+  BUDGET_EVICTION_THRESHOLD_FRACTION,
+  GZIP_EXPANSION_ESTIMATE,
+  RAW_GZIP_CACHE_BUDGET_BYTES,
+  RESIDENT_RAW_BUDGET_BYTES,
+  capToBudget,
+  computeNeedSet,
+  computePrefetchSet,
+  computeSegmentEdgePolls,
+  computeWindowBoundaryPolls,
+  createRawByteCache,
+  createSegmentWindow,
+  deriveSegmentExtents,
+  evictionTriggerBytes,
+  extentDistance,
+  extentsOverlap,
+  mapExtentToMonotonic,
+  parseSegmentInWorker,
+  planEviction,
+  segmentInvariants,
+} from "./segments.js";
+export type {
+  AdmissionCandidate,
+  AdmissionPlan,
+  DerivedExtents,
+  EvictionPlan,
+  EvictionPlanInput,
+  ListedSegment,
+  RawByteCache,
+  ResidentSegment,
+  SegmentBytesFetcher,
+  SegmentListing,
+  SegmentParseJob,
+  SegmentParseOptions,
+  SegmentParseResult,
+  SegmentParser,
+  SegmentWindow,
+  SegmentWindowOptions,
+  SegmentWindowStats,
+  SegmentsSliceStore,
+  SkippedListing,
+} from "./segments.js";
+
 // reparse.ts - Set/Clear-Range in-memory windowed re-parse.
 export { isRangeActive, reparseWithRange } from "./reparse.js";
 export type { ReparseRange } from "./reparse.js";

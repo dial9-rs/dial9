@@ -57,6 +57,23 @@ export interface TraceWorkerLoadRequest {
 }
 
 /**
+ * Parse an already-fetched buffer (T17 segment windowing): the segment
+ * orchestrator fetches raw gzipped segment bytes on the main thread (it
+ * owns the raw-gzip byte cache, architecture 2.8 two-level cache) and
+ * hands them here for off-main-thread gunzip + parse. The bytes may still
+ * be gzipped (sniffed by magic, like the core's maybeGunzip) or raw.
+ *
+ * The buffer is CLONED, not transferred: the sender's copy is a live
+ * cache entry that must survive the parse (a transfer would detach it).
+ * The done message still transfers the decompressed buffer back.
+ */
+export interface TraceWorkerParseBufferRequest {
+  kind: "parse-buffer";
+  buffer: ArrayBuffer;
+  parse?: TraceWorkerParseOptions;
+}
+
+/**
  * Abort the in-flight load: the body aborts its internal fetch
  * controller. Best-effort fetch-level cancellation - the orchestrator's
  * authoritative cancel is port.terminate(), which also kills a
@@ -68,7 +85,10 @@ export interface TraceWorkerAbortRequest {
   kind: "abort";
 }
 
-export type TraceWorkerRequest = TraceWorkerLoadRequest | TraceWorkerAbortRequest;
+export type TraceWorkerRequest =
+  | TraceWorkerLoadRequest
+  | TraceWorkerParseBufferRequest
+  | TraceWorkerAbortRequest;
 
 /**
  * One progress update. Carries the data behind the load-timing UX rows
