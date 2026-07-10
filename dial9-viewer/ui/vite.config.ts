@@ -129,11 +129,14 @@ export default defineConfig({
       ignoreDynamicRequires: true,
     },
     rollupOptions: {
-      // No migrated page entries exist yet; this placeholder module gives
-      // `vite build` an input (and gives T04 an HMR probe target). Page
-      // tickets replace it with real HTML entries.
+      // Page entries. dev-probe is the T02/T04 placeholder module; page
+      // tickets add real HTML entries here and eventually retire it.
       input: {
         "dev-probe": "src/pages/dev-probe.ts",
+        // T14: the migrated S3 browser page, served off-root at
+        // new/index.html (registered in ui-switch.js NEW_UI_ENTRIES; the
+        // canonical /index.html keeps serving the legacy page).
+        "new-index": "new/index.html",
       },
     },
   },

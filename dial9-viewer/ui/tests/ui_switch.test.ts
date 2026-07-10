@@ -206,10 +206,11 @@ describe("hash dropping (raw switch, no view-state porting)", () => {
 });
 
 describe("no registered target (the shipped state today)", () => {
-  it("the shipped registry is empty until T13/T14/T41 register pages", () => {
-    // Not a freeze: page tickets REPLACE this expectation when they
-    // register their entry (one line there, one here).
-    expect(Object.keys(NEW_UI_ENTRIES)).toEqual([]);
+  it("the shipped registry holds exactly the migrated pages", () => {
+    // Not a freeze: page tickets EXTEND this expectation when they
+    // register their entry (one line there, one here). T14: browser page.
+    expect(NEW_UI_ENTRIES["index.html"]).toBe("new/index.html");
+    expect(Object.keys(NEW_UI_ENTRIES).sort()).toEqual(["index.html"]);
   });
   it("no redirect and no control, even with ?ui=new", () => {
     const d = decide(
