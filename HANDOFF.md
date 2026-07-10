@@ -1,118 +1,177 @@
-# T40 HANDOFF - Inventory: tokio_stats.html (features/04)
+# T42 HANDOFF - Synthetic trace fixtures (unblock NOT-TRIGGERABLE rows)
 
-(Replaces the FIX-T38 HANDOFF inherited through the branch chain; FIX-T38's
-record lives at commit b5864e5.)
+(Replaces the T40 HANDOFF inherited through the branch chain; T40's record
+lives at commit bd1503b.)
 
 ## STATUS
 
-DONE - no STOP-gate hit. Docs only (scope fence respected: no code changes
-anywhere, features/01-03 untouched, no push/PR). The dev-server started for
-the walk was killed (port 3071 verified free).
+DONE - no STOP-gate hit. All three DoD legs delivered (flipped rows walked
+green, T17 upgraded off repeated-demo, T39 large input reproducible). Scope
+fence respected: frozen JS core untouched, page HTML untouched,
+features/01-04 inventory files untouched (flipped verdicts live in the walk
+output + this HANDOFF; re-recording is T39's final gate). No push, no PRs.
+All dev-servers started during the work were killed.
 
-## COMPLETED (commits on `ticket/T40-tokio-stats-inventory`, on top of c1d923e)
+## COMPLETED (commits on `ticket/T42-synthetic-fixtures`, on top of bd1503b)
 
-- `7bcedc9` docs(viewer): add features/04 inventory for tokio_stats.html -
-  `docs/ui-inventory/features/04-tokio-stats-html.md`, 69 rows, sections A-K,
-  snapshot date 2026-07-10, full verdict table + reproduce recipe.
-- `930fea5` docs(tickets): ownership summaries updated in
-  `docs/tickets/chunk-3-post.md` (chunk-3 summary + T40 completion note +
-  T41 heads-up). Chunk-1's ownership summary does NOT reference features/04
-  (grep-checked), so per the DoD's conditional it was not edited.
+- `626f68b` feat(viewer): synthetic trace fixture generator (gen-fixtures
+  bin) - `dial9-viewer/src/bin/gen_fixtures.rs`, feature-gated behind
+  `dev-server`, excluded from the published package. Deterministic (seeded
+  jitter, fixed clock anchors; regenerating without a code change is a
+  byte-identical no-op, verified by hash diff across runs).
+- `98a4ff9` feat(viewer): dev-server fixture seeding - `DIAL9_SEED_DIR`
+  (mtime-preserving bucket-tree seed; mtimes ARE the S3 last_modified the
+  heatmap uses as segment end) + `DIAL9_DEFAULT_PREFIX` (empty = no default
+  prefix, required by D4/#471). Env-gated; default behavior unchanged.
+- `a46a297` test(viewer): committed small fixtures
+  (`dial9-viewer/ui/parity/fixtures/segments/`: window-00..09.bin.gz,
+  multi-runtime.bin.gz, manifest.json; ~120 KB total) + new vitest suite
+  `src/lib/trace/segments.fixtures.test.ts` (7 tests) + the T17 upgrade in
+  `src/lib/trace/segments.window.test.ts`. `parity/fixtures/generated/`
+  gitignored.
+- `05e2853` feat(parity): `walk-rows.mjs --fixtures` mode + fixture walker
+  registry `parity/walkers/features01.fixtures.mjs` (family preflight, exit 2
+  with generate/serve instructions when the seed is missing).
+- `69e4d93` style(viewer): rustfmt + clippy polish on gen_fixtures (fixture
+  bytes verified unchanged).
+- `b21da7e` docs(viewer): fixture-walk section in `dial9-viewer/ui/README.md`
+  "Parity gate tooling" (the parity docs location this tree uses; there is no
+  `ui/parity/README`).
 - (this commit) HANDOFF.
 
-## ROW / VERDICT COUNTS
+## FIXTURE FAMILIES PRODUCED
 
-69 rows: A (bootstrap/URL contract) 10, B (periods) 6, C (toolbar) 4,
-D (loading/refinement) 6, E (client stats) 5, F (single-period view) 4,
-G (tabs/diff) 9, H (exemplar links) 4, I (XSS #587) 3, J (backend
-`/api/tokio-stats` contract) 15, K (cross-cutting) 3.
+Generator: `cargo run --release -p dial9-viewer --features dev-server --bin
+gen-fixtures` (~3 s). Wire format: real `dial9-trace-format` encoder, same
+event/field names the runtime emits (PollStart/PollEnd/WorkerPark/
+WorkerUnpark/QueueSample/TaskSpawn/ClockSync/SegmentMetadata with
+`runtime.<name>` entries); keys conform to the #225 layout with filename
+epoch matching the date path (unlike the demo key, features/01 finding 3).
 
-Verdicts (per-row table in the doc's "2026-07-10 validation" section):
-- VERIFIED component (live curl walk / served bytes / fix-diff / T38 unit):
-  22 rows (A1, A3, A8, A10, C1, D1, D2, D3, D5, H4, I1, J1-J3, J5-J7,
-  J10-J15).
-- CODE-READ (no browser driver; re-derivable by the T12 row-walker once T41
-  registers features04 walkers): the remaining 47 rows.
-- NOT-TRIGGERABLE sub-cases recorded with reasons (all T42 fixture targets):
-  time-windowed scopes (demo-key epoch vs date-path catch-22 - BOTH window
-  directions 404, reproduced live), off-CPU class 0 (demo max poll ~1ms <
-  10ms confidence bound), cap-plateau refinement (1 matched file < baseline
-  4), multi-host/-service data, live multi-period diff, `--agg`-server gate
-  variant.
-- Status tags: 1 DEAD row (H4, see findings), rest OK/CONDITIONAL.
+1. `dial9-fixtures` bucket (browse-layout scenarios, all on 2026-04-09 so
+   the parity clock's "Last 24hr" reaches them): svc-alt/host-z (multi-
+   service row, multi-runtime content), svc-fix/boots (3 boot ids),
+   svc-fix/gap (10-minute coverage hole), svc-fix/seam (upload-lag mtime
+   overlap, size-identical segments by construction - asserted in the
+   generator), svc-fix/window (the 10-segment set, also committed).
+2. `dial9-fixtures-dates` bucket: date partitions at the bucket ROOT (#471).
+3. `dial9-fixtures-large` bucket: 8 x 28.0 MB stored-gzip segments
+   (224.1 MB listed; >200 MiB selection for H4; >=100 MB-raw set for T39).
+   Skippable via `--skip-large`.
+4. Committed small set: 10 window segments sharing one monotonic clock with
+   two planted boundary polls (adjacent seg0->seg1; seg3->seg5 with a fully
+   silent interior - the T17-audit N-segment chain) + a multi-runtime (#596)
+   segment (`runtime.journal` = workers 64..67 over an unnamed main 0..3) +
+   `manifest.json` recording every planted fact.
 
-## EVIDENCE - dev-server walk log (2026-07-10, port 3071)
+## EVIDENCE - DoD leg 1: flipped rows (fixture walk GREEN)
 
-Build + launch (post-T04 the dev-server serves ui/dist):
-`npm ci && npm run build` in dial9-viewer/ui (green, 17 items static-copied),
-then `CARGO_TARGET_DIR=<repo>/target PORT=3071 cargo run -p dial9-viewer
---bin dev-server --features dev-server`.
+Invocation (documented in ui/README.md):
 
-- `/api/config` -> `{aggregation_enabled:true, supports_byo_credentials:true,
-  supports_assume_role:false, default_bucket:"demo-traces",
-  default_prefix:"traces"}`.
-- `GET /tokio_stats.html` -> 200 text/html, 19483 bytes, byte-identical to
-  `ui/tokio_stats.html` (diff -q); `ui-switch.js` + `creds.js` 200 and
-  byte-identical.
-- Cold poll `?bucket=demo-traces&prefix=traces` -> instant
-  `{time_span_ns:1, total_polls:0, by_spawn_loc:[], coverage:{files_matched:1,
-  files_folded:0, samples_folded:0, total_bytes:4336378, hosts_matched:1,
-  hosts_folded:0}}`.
-- `&refine=true` -> `total_polls:94212`, `time_span_ns:4143811668`, folded
-  1/1 files + 1/1 hosts, 5 spawn locations (top:
-  `examples/metrics-service/src/axum_traced.rs:243:33`, 3319 notable polls).
-  Asserted on the wire with node: durations desc-sorted, all >= 100000 ns,
-  classes aligned + values {1,2,3} only, locations sorted by notable count
-  desc, one zero-notable location present, per-class exemplars with
-  host:"local" + raw source_key.
-- Warm read-only poll -> identical folded counts (frozen terminator).
-- `prefix=no-such-prefix` -> 404 `no source files match this scope`.
-- no `bucket` param -> 404 `tokio-stats requires aggregation (start with
-  --agg or supply a bucket)`.
-- `refine=1` -> 400 (strict serde bool; page always sends literal "true").
-- `service=demo-service` 200; `host=local` 200; `host=local&host=nonexistent`
-  200 (OR semantics); `host=host-0` 404 (demo key's host component is
-  `local`).
-- Time windows: `start_ns/end_ns` at the data's row timestamps (June 2026)
-  -> 404; at the key's date-path hour (2026-04-09 19:00 UTC) -> 404 (listing
-  finds the file, `scope_matches` rejects on the filename epoch 1744224000 =
-  2025-04-09). Catch-22 documented as features/01 finding 3 biting the
-  aggregate listing.
-- `GET /api/trace?...` -> 404 - confirms finding 1 (exemplar deep links dead
-  at HEAD; `/api/trace` removed by #582 (`git show 97cc9fa`) while #570's
-  page still targets it).
+```
+cargo run --release -p dial9-viewer --features dev-server --bin gen-fixtures
+DIAL9_SEED_DIR=dial9-viewer/ui/parity/fixtures/generated/s3 \
+  DIAL9_DEFAULT_PREFIX= PORT=3022 \
+  cargo run -p dial9-viewer --features dev-server --bin dev-server
+node parity/walk-rows.mjs --inventory ../../docs/ui-inventory/features/01-index-html.md \
+  --url http://localhost:3022/index.html --fixtures
+```
 
-Doc integrity: markdown tables render (pipe-balanced), anchors spot-checked
-against the tree - page anchors from the numbered read of tokio_stats.html
-(escapeHtml 93, syncUrl 147, exemplarLink 166, computeStats 177,
-renderFromCache 226, renderSinglePeriod 272, renderDiffView 302, loadPeriod
-371, auto-load 428), backend anchors re-greped (get_tokio_stats
-tokio_stats.rs:71, classify_poll 224, scope_matches aggregate.rs:236,
-time_scoped_prefixes refine.rs:381, route mod.rs:448, gate config.rs:30);
-the features/01 H6 cross-link notes the +1 line shift T38 introduced in
-index.html.
+Result: `Summary: 8 rows - 8 VERIFIED / GREEN: zero FAILED`. Rows flipped
+from recorded NOT-TRIGGERABLE to walker-VERIFIED (evidence strings from the
+run):
 
-## NOTABLE FINDINGS (detailed in the doc)
+- C7 select bucket -> region detect: "chip filled bucket, region check
+  fired, status 'Using dial9-fixtures', prefixes re-discovered".
+- D4 date-layer auto-empty (#471): "prefix auto-emptied with placeholder
+  '(no prefix - dates at root)'".
+- F5 boot-count annotation: "boots row annotated '3 boots'; single-boot
+  rows unannotated".
+- F7 seam tiling: "uniform density across the seam (ref rgb(220,105,142),
+  max channel deviation 0)" - canvas-pixel census; an untiled overlap would
+  double the second half.
+- F8 coverage-gap hatching: "no-data band across [19:05,19:15] (299/299
+  band columns), start tick + crisp end boundary (band terminus x=456),
+  density control distinct" - canvas-pixel census.
+- F9 boot-change dividers: "2 dashed cyan dividers at the boot transitions
+  (x=153,305); none on single-boot rows" - positions match the page's own
+  timeToX mapping of the planted transition times.
+- F20 truncation banner: "truncated:true; banner 'Some traces were
+  omitted...'" - the range-truncation path (99-day window > 2000 hourly
+  prefixes); needs no seeded data. The recorded dev-data verdict concerned
+  the per-prefix cap; noted in the walker.
+- H4 selection size cap (amended #570/#600): "8 segments, 224.1 MB
+  selected: View disabled; Flamegraph exempt; warning suppressed
+  (aggregation mode)".
 
-1. H4: exemplar deep links broken at HEAD (`/api/trace` removed by #582);
-   fix candidate is one line (`/api/object?bucket&key`). T41 ledger decision.
-2. D4: coverage fetched but never displayed (no refinement progress UI,
-   unlike flamegraph F174/F176-F179); silent plateau at the sampling cap.
-3. E2/H2: mixed (2) + unknown (3) classes and their exemplars are on the
-   wire but invisible in the UI.
-4. G3: diff view throws (TypeError on `first.rate`) when P1 failed to load
-   while 2+ later periods loaded. Code-read.
-5. A4/A7: URL restores at most 10 periods; sync writes all of them.
+NOT flipped, with reason: H5 (the red warning text) renders only when
+aggregation is disabled, and `aggregation_enabled = agg.is_some() ||
+allow_byo_creds` - any BYO-creds dev-server (which C7 requires) reports
+aggregation enabled. C11 (cross-region 421) remains out of reach on a
+single-region fake S3. Both stay honest NOT-TRIGGERABLE.
 
-## OPEN QUESTIONS
+Regression: the STANDARD walk against an unseeded dev-server (port 3021)
+re-ran green after the walk-rows changes: 75 rows - 42 VERIFIED /
+33 NOT-TRIGGERABLE, zero FAILED. `--fixtures` against the unseeded server
+exits 2 at preflight with generation instructions.
 
-None blocking. Two notes for the maintainer/next tickets:
-- The T40 DoD's "T12 row-walker used for validation" was satisfied in the
-  sanctioned fallback mode (hand-walk + curl in the features/01-refresh
-  style, each verdict recording its method): `ui/parity/walkers/` contains
-  only `features01.mjs`, and features/04 walkers are T41's deliverable. A
-  minimal features04 registry was considered and skipped as not-cheap: the
-  page's rows are dominated by API-contract and multi-period states the
-  walker lib has no fixtures for yet.
-- Whether to fix finding 1 (dead exemplar links) in legacy before T41, or
-  only in the migrated page, is a ledger call outside T40's docs-only fence.
+## EVIDENCE - DoD leg 2: T17 upgrade
+
+`segments.window.test.ts`'s real-parse anchor no longer serves two copies of
+the demo trace: it drives the ten distinct fixture segments through
+`createSegmentWindow` with real gz bytes + the real frozen-core parser,
+keeping the existing accounting/budget assertions (recorded rawByteLength ==
+actual decompressed size per segment, resident <= RESIDENT_RAW_BUDGET_BYTES,
+gzip cache totals) and adding end-to-end `boundaryPolls()` assertions: both
+planted polls come out stitched with task identity, zero truncated. The
+mock-based 10-segment budget scenario is untouched. New
+`segments.fixtures.test.ts` additionally pins edge extraction, the planted
+silence, the honest truncation when the silent interior is not resident, and
+#596 runtime grouping - all over real wire bytes.
+
+## EVIDENCE - DoD leg 3: T39 large input
+
+`dial9-fixtures-large`: 8 segments x 28.0 MB raw (stored gzip, listed size
+~= raw size), deterministic, scripted, NOT committed
+(`parity/fixtures/generated/` is gitignored; size policy documented in
+ui/README.md). Regeneration: the same `gen-fixtures` invocation; runtime
+~3 s release.
+
+## GATES
+
+- `npx tsc --noEmit`: clean.
+- FULL `npm run test`: 47 files passed, 1 skipped (pre-existing); 846 tests
+  passed, 1 expected-fail, 11 skipped (all pre-existing).
+- `npm run build`: green; `cargo build -p dial9-viewer`: green (rust-embed
+  picks up the tree).
+- `cargo fmt --check`: clean.
+- `cargo clippy --all-targets --features __nonlinux_all_features` (macOS
+  form): zero warnings in touched crates; PRE-EXISTING warnings reported in
+  untouched crates (dial9-perf-self-profile: unused rate_limited macro/
+  import, dead time_since_epoch; dial9-tokio-telemetry: unused
+  poll_start_ts_monotonic import/fn, unused `shared` variable, dead
+  TaskDumpEvent struct). Not fixed per the scope rule.
+  `cargo clippy -p dial9-viewer --all-targets --features dev-server`
+  (covers the gated bins): zero warnings.
+- `cargo nextest run -p dial9-viewer` (scoped sanity per ticket budget):
+  144/144 passed. NOTE: full-workspace nextest + the 20s stress run were
+  NOT run (Rust changes are dev-only bins: gen-fixtures is new, and the
+  dev_server seeding extension was exercised live end-to-end instead -
+  fixture mtimes verified through /api/browse, object GET, and the 8-row
+  walk).
+
+## OPEN QUESTIONS / NOTES FOR T39 AND SIBLINGS
+
+- The fixture walk's H4 evidence reflects the amended #570 aggregation-mode
+  contract (View disabled, Flamegraph exempt, warning suppressed). If T39
+  wants the warning-text branch (H5) walked, it needs a no-BYO-creds,
+  no-agg dev-server profile; that conflicts with C7 in the same run.
+- The fixture-walk output is written to `parity/out/fixture-walk.{json,md}`
+  (gitignored, like all parity reports); re-run the three commands above to
+  reproduce.
+- features/04's NOT-TRIGGERABLE list (multi-host/-service, off-CPU class-0
+  polls, cap-plateau refinement) now has raw material in these buckets;
+  wiring features04 walkers to them is T41's implementation-time work, not
+  done here (per ownership). Off-CPU class-0 specifically may need a
+  long-poll (>10 ms) fixture variant - a one-line cadence tweak in
+  gen_fixtures if T41 asks.
