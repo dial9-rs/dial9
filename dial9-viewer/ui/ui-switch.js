@@ -29,7 +29,9 @@
 // source; the hash (view state) is always dropped. Note the query string is
 // re-serialized through URLSearchParams, so percent-encoding may normalize
 // (values are preserved exactly; both UIs read params through the same
-// decoding APIs).
+// decoding APIs). The control's target URL is resolved from the LIVE
+// location at interaction time, never from a boot-time snapshot: the pages
+// rewrite their query string as in-page state changes (see liveControlHref).
 //
 // Assumes the UI is served at the server root (true for `dial9 serve` and
 // the dev-server): switch targets are built root-absolute.
@@ -93,6 +95,19 @@
     return qs ? "?" + qs : "";
   }
 
+  // Registered new-UI entry for a canonical page, or null when the page has
+  // no usable registration.
+  // A self-registration ("x.html" -> "x.html") would make the legacy-side
+  // dispatch redirect reload the page forever; treat it as unregistered.
+  function registeredEntry(page, registry) {
+    var entry =
+      page && Object.prototype.hasOwnProperty.call(registry, page)
+        ? registry[page]
+        : null;
+    if (entry === page) return null;
+    return entry;
+  }
+
   // The decision function: (location + storage + registry) -> what happens.
   //
   // input: {
@@ -131,13 +146,7 @@
     }
 
     // Legacy side.
-    var newEntry =
-      page && Object.prototype.hasOwnProperty.call(registry, page)
-        ? registry[page]
-        : null;
-    // A self-registration ("x.html" -> "x.html") would make the redirect
-    // below reload the page forever; treat it as unregistered.
-    if (newEntry === page) newEntry = null;
+    var newEntry = registeredEntry(page, registry);
     if (!newEntry) {
       // No migrated version registered: stay legacy, and hide the
       // affordance - a switch to nowhere must not render.
@@ -177,6 +186,33 @@
     return null;
   }
 
+  // The switch-control target resolved from the LIVE location (T38 audit
+  // finding 1). Every legacy page rewrites its query string after boot -
+  // history.replaceState/pushState of a rebuilt query (flamegraph browser
+  // scope and worker zoom, tokio_stats hosts/periods, index browse state,
+  // viewer start/end) - and the new SPA will too, so an href computed once
+  // at boot navigates with a stale query and loses the current trace/scope.
+  // The browser layer calls this at interaction time (mousedown + click)
+  // and re-assigns the anchor's href just before it is used; the control's
+  // label and direction stay boot-time, only the URL is live.
+  //
+  // The live pathname is re-resolved first (an SPA pushState may move it);
+  // bootPage - the canonical page the control was mounted for - is the
+  // fallback when the live pathname resolves to nothing. Returns the href,
+  // or null when no target resolves (the caller then keeps the previous
+  // href rather than producing a dead link).
+  function liveControlHref(side, bootPage, pathname, search, registry) {
+    var page =
+      side === "new"
+        ? pageForNewEntry(pathname, registry)
+        : canonicalPageFromPath(pathname);
+    if (!page) page = bootPage;
+    if (!page) return null;
+    if (side === "new") return "/" + page + buildQuery(search, "legacy");
+    var entry = registeredEntry(page, registry);
+    return entry ? "/" + entry + buildQuery(search, "new") : null;
+  }
+
   // Read a preference off a localStorage-like object. Failures (private
   // mode, storage disabled) and unknown values read as "no preference" -
   // never as a default UI choice.
@@ -194,6 +230,7 @@
   exports.decide = decide;
   exports.canonicalPageFromPath = canonicalPageFromPath;
   exports.pageForNewEntry = pageForNewEntry;
+  exports.liveControlHref = liveControlHref;
   exports.prefFromStorage = prefFromStorage;
   exports.NEW_UI_ENTRIES = NEW_UI_ENTRIES;
   exports.DEFAULT_UI = DEFAULT_UI;
@@ -228,7 +265,14 @@
   // bottom-right corner, above everything, visible without scrolling on both
   // UIs. Built with createElement/textContent only - no URL-derived content
   // is ever interpolated into HTML.
-  function mountControl(control) {
+  //
+  // `liveHref` re-resolves the target URL from the live location (see
+  // liveControlHref): the pages rewrite their query string after boot, so
+  // the boot-time href is refreshed just before every use. mousedown runs
+  // ahead of left- and middle-click navigation AND of the context menu
+  // (so "Copy Link Address" copies the live URL); click covers keyboard
+  // activation, which fires no mousedown.
+  function mountControl(control, liveHref) {
     if (!control) return;
     function render() {
       if (document.getElementById(CONTROL_ID)) return; // idempotent
@@ -236,10 +280,16 @@
       a.id = CONTROL_ID;
       a.textContent = control.label;
       a.href = control.href;
+      function refreshHref() {
+        var href = liveHref();
+        if (href) a.href = href;
+      }
+      a.addEventListener("mousedown", refreshHref);
       a.addEventListener("click", function () {
+        refreshHref();
         // Clicking the switch IS the preference. Navigation proceeds via
-        // the href (middle-click / copy-link work too; those skip this
-        // handler, which is fine - see writeStoredPref).
+        // the (just refreshed) href - middle-click / copy-link work too;
+        // those skip this handler, which is fine - see writeStoredPref.
         writeStoredPref(control.target);
       });
       var s = a.style;
@@ -281,7 +331,17 @@
       window.location.replace(result.redirect);
       return;
     }
-    mountControl(result.control);
+    mountControl(result.control, function () {
+      // T38 audit finding 1: the target is resolved from the LIVE location
+      // at interaction time, never from the boot-time snapshot above.
+      return liveControlHref(
+        side,
+        page,
+        window.location.pathname,
+        window.location.search,
+        NEW_UI_ENTRIES
+      );
+    });
   }
 
   // Tiny API for new-UI entries: window.D9UiSwitch.mount({ side: "new" }).

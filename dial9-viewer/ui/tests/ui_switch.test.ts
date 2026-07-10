@@ -8,8 +8,10 @@
 // Covered at the logic level: precedence order (?ui= param > stored
 // preference > default), query-string preservation including repeated trace=
 // params (N10 deep links), hash dropping (raw switch - no view-state
-// porting), the no-registered-target behavior (no redirect, no control), and
-// the storage-throw fallback. The DoD items that need a real migrated page
+// porting), the no-registered-target behavior (no redirect, no control),
+// the storage-throw fallback, and click-time target resolution against the
+// live location (T38-audit finding 1: the pages rewrite their query string
+// after boot). The DoD items that need a real migrated page
 // (round-trip in a browser, zoom-state isolation) are pending T13/T14 - see
 // HANDOFF.md.
 
@@ -46,6 +48,7 @@ const {
   canonicalPageFromPath,
   pageForNewEntry,
   prefFromStorage,
+  liveControlHref,
   NEW_UI_ENTRIES,
 } = require("../ui-switch.js") as {
   resolveUi: (
@@ -63,6 +66,13 @@ const {
   prefFromStorage: (storageLike: {
     getItem: (key: string) => string | null;
   }) => string | null;
+  liveControlHref: (
+    side: "legacy" | "new",
+    bootPage: string | null,
+    pathname: string,
+    search: string,
+    registry: Record<string, string>,
+  ) => string | null;
   NEW_UI_ENTRIES: Record<string, string>;
 };
 
@@ -286,6 +296,94 @@ describe("page resolution helpers", () => {
       "flamegraph.html",
     );
     expect(pageForNewEntry("/new/other.html", REG)).toBeNull();
+  });
+});
+
+describe("click-time target resolution (T38-audit finding 1)", () => {
+  // Every legacy page rewrites its query string after boot
+  // (history.replaceState/pushState of a rebuilt query: flamegraph browser
+  // scope and worker zoom, tokio_stats hosts/periods, index browse state,
+  // viewer start/end), so a control href computed once at boot goes stale
+  // and would navigate with the boot-time query - losing the current
+  // trace/scope. The browser layer re-resolves the href from the LIVE
+  // location on mousedown/click via liveControlHref.
+  it("legacy side: resolves from the live query after a simulated replaceState, not the boot query", () => {
+    const bootSearch = "?bucket=b&host=all";
+    const bootHref = decide(input({ search: bootSearch })).control!.href;
+    expect(bootHref).toBe("/new/flamegraph.html?bucket=b&host=all");
+    // The page narrows scope and rewrites its URL (the replaceState):
+    const liveSearch = "?bucket=b&host=h1&period=custom";
+    const href = liveControlHref(
+      "legacy",
+      "flamegraph.html",
+      "/flamegraph.html",
+      liveSearch,
+      REG,
+    );
+    expect(href).toBe("/new/flamegraph.html?bucket=b&host=h1&period=custom");
+    expect(href).not.toBe(bootHref);
+  });
+  it("new side: the live query is carried back with ui=legacy pinned", () => {
+    const href = liveControlHref(
+      "new",
+      "flamegraph.html",
+      "/new/flamegraph.html",
+      "?trace=z.bin.gz",
+      REG,
+    );
+    expect(href).toBe("/flamegraph.html?trace=z.bin.gz&ui=legacy");
+  });
+  it("re-resolves the page from the live pathname (an SPA pushState may move it)", () => {
+    const reg2 = {
+      "flamegraph.html": "new/flamegraph.html",
+      "tokio_stats.html": "new/tokio_stats.html",
+    };
+    const href = liveControlHref(
+      "legacy",
+      "flamegraph.html",
+      "/tokio_stats.html",
+      "?host=h1",
+      reg2,
+    );
+    expect(href).toBe("/new/tokio_stats.html?host=h1");
+  });
+  it("falls back to the boot page when the live pathname resolves nothing", () => {
+    const href = liveControlHref(
+      "new",
+      "flamegraph.html",
+      "/new/spa/deep/route",
+      "?trace=a",
+      REG,
+    );
+    expect(href).toBe("/flamegraph.html?trace=a&ui=legacy");
+  });
+  it("returns null when no target resolves (caller keeps the previous href)", () => {
+    expect(
+      liveControlHref("legacy", "viewer.html", "/viewer.html", "?trace=a", REG),
+    ).toBeNull();
+    expect(
+      liveControlHref("new", null, "/new/unknown.html", "", REG),
+    ).toBeNull();
+  });
+  it("owns the live ui param: stripped toward new, replaced toward legacy", () => {
+    expect(
+      liveControlHref(
+        "legacy",
+        "flamegraph.html",
+        "/flamegraph.html",
+        "?ui=legacy&trace=a",
+        REG,
+      ),
+    ).toBe("/new/flamegraph.html?trace=a");
+    expect(
+      liveControlHref(
+        "new",
+        "flamegraph.html",
+        "/new/flamegraph.html",
+        "?ui=new&trace=a",
+        REG,
+      ),
+    ).toBe("/flamegraph.html?trace=a&ui=legacy");
   });
 });
 
