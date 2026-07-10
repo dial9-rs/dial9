@@ -464,11 +464,36 @@ export const registry = {
     return "Select All -> 1 checked; Deselect All -> 0 checked";
   },
 
-  G8: async ({ page, pageUrl }) => {
-    // DEAD-CONFIRMED row: the access path producing no effect IS the
-    // expected behavior (shared verdict mapping).
+  G8: async ({ page, pageUrl, side }) => {
     await gotoBrowserPage(page, pageUrl);
     await rawSearchSeededRows(page);
+    if (side === "new") {
+      // T15 amendment: the advertised sortable columns actually sort.
+      // The dev seed yields ONE row, so reordering is not observable
+      // live; assert the click -> sort-state effect (indicator +
+      // aria-sort, toggling direction) and rows surviving the rebuild.
+      // Ordering semantics are pinned by the raw-rows.test.ts suite.
+      const th = page.locator('#raw-table th[data-sort="service"]');
+      await th.click();
+      expect(
+        (await th.getAttribute("aria-sort")) === "ascending",
+        "first header click did not sort ascending",
+      );
+      expect(
+        (await th.locator(".sort-arrow").textContent()) === "^",
+        "ascending sort indicator missing",
+      );
+      await th.click();
+      expect(
+        (await th.getAttribute("aria-sort")) === "descending",
+        "second header click did not flip to descending",
+      );
+      const rows = await page.locator("#raw-body tr").count();
+      expect(rows === 1, `rows lost across sort rebuilds (${rows})`);
+      return "Service header sorts: asc -> desc toggle with indicator; rows intact";
+    }
+    // Legacy page: DEAD-CONFIRMED - the access path producing no effect IS
+    // the expected behavior (shared verdict mapping).
     const before = await page.locator("#raw-body").innerHTML();
     await page.click('#raw-table th[data-sort="service"]');
     await page.waitForTimeout(250);

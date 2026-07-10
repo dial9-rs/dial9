@@ -25,6 +25,7 @@ import { traceTitleParams } from "../../lib/trace/title.js";
 import { apiFetch, type BrowseResponse } from "./api.js";
 import type { BrowserEls } from "./dom.js";
 import { dateToPickerStr, pickerToDate, xToTime } from "./format.js";
+import { sortRawRows, toRawRows } from "./raw-rows.js";
 import type {
   BrowseObject,
   BrowserStore,
@@ -756,17 +757,17 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
   }
 
   // Selected keys (legacy getSelectedKeys, index.html:1879-1886). Raw mode
-  // returns keys in TABLE ROW ORDER (epoch-sorted, stable) exactly as the
-  // legacy `.raw-cb:checked` DOM walk did.
+  // returns keys in TABLE ROW ORDER exactly as the legacy
+  // `.raw-cb:checked` DOM walk did - since T15's G8 amendment the row
+  // order follows the active column sort (default: epoch ascending).
   function getSelectedKeys(): string[] {
     const s = store.getState();
     if (s.ui.tab === "browse") {
       return s.browse.selection ? [...s.browse.selection.keys] : [];
     }
-    const bySortedRow = [...s.raw.objects]
-      .map((obj) => ({ key: obj.key, epoch: parseKey(obj.key).epoch }))
-      .sort((a, b) => a.epoch - b.epoch);
-    return bySortedRow.filter((r) => s.raw.selected.has(r.key)).map((r) => r.key);
+    return sortRawRows(toRawRows(s.raw.objects), s.raw.sort)
+      .map((r) => r.obj.key)
+      .filter((key) => s.raw.selected.has(key));
   }
 
   // Open the viewer on the selection (legacy viewSelected,

@@ -14,6 +14,7 @@
 
 import { createStore, type Store } from "../../store/store.js";
 import type { HostRow } from "../../lib/canvas/heatmap.js";
+import type { RawSort } from "./raw-rows.js";
 
 /** One object row from GET /api/browse (`objects[]`). */
 export interface BrowseObject {
@@ -131,6 +132,10 @@ export interface RawSlice {
   /** Keys of the checked row checkboxes (mirror of the DOM state; the
    * checkboxes themselves stay uncontrolled, as in the legacy page). */
   selected: ReadonlySet<string>;
+  /** Active column sort (T15, G8 amendment); null = the legacy default
+   * order (trace-start epoch ascending). Unlike a search/TZ rebuild, a
+   * sort rebuild PRESERVES the checkbox selection. */
+  sort: RawSort | null;
   /** Bumped when the table body must rebuild (TZ toggle re-render). */
   renderEpoch: number;
 }
@@ -210,6 +215,7 @@ export function initialBrowserState(): BrowserState {
       tableVisible: false,
       objects: [],
       selected: new Set(),
+      sort: null,
       renderEpoch: 0,
     },
     creds: {
