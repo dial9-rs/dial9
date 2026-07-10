@@ -170,6 +170,12 @@ pub enum StorageError {
     /// opaque 500 — this is the failure the viewer's per-bucket region
     /// auto-detection exists to prevent.
     WrongRegion,
+    /// The request was malformed by the client — e.g. an S3 `InvalidBucketName`
+    /// for a bucket name that violates the naming rules (bad characters, wrong
+    /// length). Kept distinct from [`StorageError::Other`] so the HTTP layer
+    /// returns a `400` with an actionable message instead of an opaque `500`
+    /// `fault`; the mistake is in the user's input, not the server.
+    BadRequest(String),
     Other(String),
 }
 
@@ -199,6 +205,7 @@ impl std::fmt::Display for StorageError {
                      detected automatically) and try again."
                 )
             }
+            StorageError::BadRequest(msg) => write!(f, "{msg}"),
             StorageError::Other(msg) => write!(f, "{msg}"),
         }
     }
@@ -249,6 +256,15 @@ where
         // message), so plain code matching here is the fallback.
         Some("NoSuchBucket" | "NoSuchKey" | "NotFound") => {
             StorageError::NotFound("the specified bucket or object does not exist".to_string())
+        }
+        // Malformed bucket name: the name itself violates S3's naming rules (bad
+        // characters, wrong length), so S3 rejects it with `InvalidBucketName`
+        // (HTTP 400) before it can look anything up. Like `NoSuchBucket` this is
+        // user input, not a server fault — but it's a *bad request*, not a
+        // missing resource, so map it to 400 rather than 404 and don't let it
+        // fall through to the `Other` arm's 500 `fault`.
+        Some("InvalidBucketName") => {
+            StorageError::BadRequest("the bucket name is not valid".to_string())
         }
         // Unmapped error: keep the full SDK detail in the server log (it can
         // embed the access key id, region, and endpoint — server-eyes only) and
@@ -1167,6 +1183,32 @@ mod tests {
         assert!(
             matches!(err, StorageError::NotFound(_)),
             "expected NotFound, got {err:?}"
+        );
+    }
+
+    /// An `InvalidBucketName` (S3's error for a syntactically invalid bucket
+    /// name, HTTP 400) must classify to [`StorageError::BadRequest`] (→ HTTP
+    /// 400), not the opaque `Other` that produced an "unclassified S3 error"
+    /// log and a 500 `fault`. Like `NoSuchBucket` it's user input, but it's a
+    /// malformed request rather than a missing resource.
+    #[tokio::test]
+    async fn invalid_bucket_name_classifies_as_bad_request() {
+        // The XML S3 sends when the bucket name violates the naming rules.
+        let body = r#"<?xml version="1.0" encoding="UTF-8"?>
+            <Error>
+              <Code>InvalidBucketName</Code>
+              <Message>The specified bucket is not valid.</Message>
+              <BucketName>Not_A_Valid_Bucket</BucketName>
+            </Error>"#;
+        let backend = replay_error_backend(400, body);
+
+        let err = backend
+            .list_prefixes("Not_A_Valid_Bucket", "")
+            .await
+            .expect_err("an InvalidBucketName must surface as an error");
+        assert!(
+            matches!(err, StorageError::BadRequest(_)),
+            "expected BadRequest, got {err:?}"
         );
     }
 
