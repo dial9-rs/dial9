@@ -27,12 +27,15 @@ import { verdictTable, summarize, writeReport, writeJson } from "./lib/report.mj
 import { launchBrowser, newPage, assertServerReady } from "./lib/browser.mjs";
 import { WalkError } from "./lib/actions.mjs";
 import { registry as features01 } from "./walkers/features01.mjs";
+import { registry as features03 } from "./walkers/features03.mjs";
 
 // Walker registries per inventory file. Each registry maps row id -> walker;
 // `fixedClock` pins the page clock to the dev seed date (required for the
-// browser page's relative time windows — see lib/browser.mjs).
+// browser page's relative time windows — see lib/browser.mjs). The
+// flamegraph page has no relative time windows, so no pinned clock.
 const REGISTRIES = {
   "01-index-html.md": { walkers: features01, fixedClock: true },
+  "03-flamegraph-html.md": { walkers: features03, fixedClock: false },
 };
 
 const WALKER_TIMEOUT_MS = 90_000;
