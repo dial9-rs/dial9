@@ -1,12 +1,12 @@
 // keys.ts tests (T09 DoD): the documented key layouts from features/01 I2
 // (#225 layout, legacy layout, positional fallback) plus the
 // unknown-layout discriminant (ADR-0004 section 1 defect fix; features/01
-// "Live validation" Finding 1). Independent of the legacy
-// tests/core/parse_key.test.ts, which pins the OLD inline behavior until
-// T15 retires it.
+// "Live validation" Finding 1). T15 amendments covered here: the unknown
+// variant carries the layout-independent filename epoch/segIndex, and
+// extractPrefix (features/01 I8) lives in this module.
 
 import { describe, expect, it } from "vitest";
-import { formatEpoch, parseKey } from "./keys.js";
+import { extractPrefix, formatEpoch, parseKey } from "./keys.js";
 
 describe("parseKey: #225 layout (date + 5 components)", () => {
   it("with prefix", () => {
@@ -100,20 +100,68 @@ describe("parseKey: unknown-layout discriminant (defect fix)", () => {
   it("the dev-server 6-segment demo key yields unknown, NOT shifted fields", () => {
     // features/01 "Live validation" Finding 1: six components after the
     // date. The legacy parser positionally shifted this to Service=host-0,
-    // Host=abcd.
+    // Host=abcd. The filename epoch/segIndex are layout-independent and
+    // still parsed (T15).
     const rawKey =
       "traces/2026-04-09/1900/demo-service/local/host-0/abcd/1744224000-0.bin.gz";
-    expect(parseKey(rawKey)).toEqual({ layout: "unknown", rawKey });
+    expect(parseKey(rawKey)).toEqual({
+      layout: "unknown",
+      rawKey,
+      epoch: 1744224000,
+      segIndex: "0",
+    });
   });
 
   it("date present with too FEW components yields unknown", () => {
     const rawKey = "traces/2026-04-09/1900/checkout-api/1744224000-0.bin.gz";
-    expect(parseKey(rawKey)).toEqual({ layout: "unknown", rawKey });
+    expect(parseKey(rawKey)).toEqual({
+      layout: "unknown",
+      rawKey,
+      epoch: 1744224000,
+      segIndex: "0",
+    });
   });
 
   it("short dateless keys yield unknown (legacy returned host=<raw key>)", () => {
     const rawKey = "some/file.bin";
-    expect(parseKey(rawKey)).toEqual({ layout: "unknown", rawKey });
+    expect(parseKey(rawKey)).toEqual({
+      layout: "unknown",
+      rawKey,
+      epoch: 0,
+      segIndex: "",
+    });
+  });
+
+  it("unknown key with a non-epoch filename carries epoch 0 / segIndex ''", () => {
+    const rawKey =
+      "traces/2026-04-09/1900/demo-service/local/host-0/abcd/oddly-named.bin";
+    expect(parseKey(rawKey)).toEqual({
+      layout: "unknown",
+      rawKey,
+      epoch: 0,
+      segIndex: "",
+    });
+  });
+});
+
+describe("extractPrefix (features/01 I8)", () => {
+  it("returns everything before the first date segment", () => {
+    expect(
+      extractPrefix("traces/2026-04-09/1900/checkout-api/host1/1744224000-0.bin.gz")
+    ).toBe("traces");
+    expect(
+      extractPrefix("a/b/2026-04-09/1900/checkout-api/host1/1744224000-0.bin.gz")
+    ).toBe("a/b");
+  });
+
+  it("returns '' when the date layer is at the root", () => {
+    expect(
+      extractPrefix("2026-04-09/1900/checkout-api/host1/1744224000-0.bin.gz")
+    ).toBe("");
+  });
+
+  it("returns '' when no date segment exists", () => {
+    expect(extractPrefix("custom/prefix/checkout-api/host9/1744224000-4.bin.gz")).toBe("");
   });
 });
 

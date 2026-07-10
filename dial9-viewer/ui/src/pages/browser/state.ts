@@ -14,6 +14,8 @@
 
 import { createStore, type Store } from "../../store/store.js";
 import type { HostRow } from "../../lib/canvas/heatmap.js";
+import { DEFAULT_BUCKET_FILTER } from "./bucket-filter.js";
+import type { RawSort } from "./raw-rows.js";
 
 /** One object row from GET /api/browse (`objects[]`). */
 export interface BrowseObject {
@@ -30,6 +32,13 @@ export interface HeatmapSegment {
   start: number;
   /** last_modified epoch seconds (upload time), or start when missing. */
   end: number;
+  /**
+   * Key-layout discriminant (T15, I2 amendment). For "unknown" segments
+   * service is "" and host carries the key's raw directory path - the
+   * grouping key and the label the browse view renders raw, instead of
+   * the legacy positionally shifted fields (Finding 1).
+   */
+  layout: "known" | "unknown";
   service: string;
   host: string;
   bootId: string;
@@ -82,6 +91,12 @@ export interface ConfigSlice {
   aggregationEnabled: boolean;
   /** Server declared a default prefix; Search waits for one (D9). */
   serverHasPrefix: boolean;
+  /** Bucket-picker filter substring in effect (T15, C6 amendment):
+   * URL override > /api/config `bucket_filter` > "dial9". "" = no filter. */
+  bucketFilter: string;
+  /** The page-URL `bucket_filter=` override (null = absent). Non-null wins
+   * over the server value and rides every URL sync (bucket-filter.ts). */
+  bucketFilterOverride: string | null;
 }
 
 /** DOM-input mirror for renders that depend on typed values (see header). */
@@ -124,6 +139,10 @@ export interface RawSlice {
   /** Keys of the checked row checkboxes (mirror of the DOM state; the
    * checkboxes themselves stay uncontrolled, as in the legacy page). */
   selected: ReadonlySet<string>;
+  /** Active column sort (T15, G8 amendment); null = the legacy default
+   * order (trace-start epoch ascending). Unlike a search/TZ rebuild, a
+   * sort rebuild PRESERVES the checkbox selection. */
+  sort: RawSort | null;
   /** Bumped when the table body must rebuild (TZ toggle re-render). */
   renderEpoch: number;
 }
@@ -169,7 +188,12 @@ export type BrowserStore = Store<BrowserState>;
 export function initialBrowserState(): BrowserState {
   return {
     ui: { tab: "browse", useLocalTz: false },
-    config: { aggregationEnabled: false, serverHasPrefix: false },
+    config: {
+      aggregationEnabled: false,
+      serverHasPrefix: false,
+      bucketFilter: DEFAULT_BUCKET_FILTER,
+      bucketFilterOverride: null,
+    },
     form: { prefix: "" },
     search: {
       quickRange: null,
@@ -203,6 +227,7 @@ export function initialBrowserState(): BrowserState {
       tableVisible: false,
       objects: [],
       selected: new Set(),
+      sort: null,
       renderEpoch: 0,
     },
     creds: {

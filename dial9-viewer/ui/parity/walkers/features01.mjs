@@ -15,10 +15,15 @@
 //   - dev-server seed: single segment at traces/2026-04-09/1900/... — hence
 //     the pinned page clock (lib/browser.mjs DEV_SEED_CLOCK) and the
 //     April-window helpers (lib/actions.mjs);
-//   - the seeded key has six post-date path components, so parseKey's
-//     positional fallback mislabels it (features/01 Finding 1): Service
-//     reads "host-0", Host reads "abcd". The walkers assert that recorded
-//     reality, not the conforming-layout labels.
+//   - the seeded key has six post-date path components — an UNKNOWN layout.
+//     On the LEGACY page the positional fallback mislabels it (features/01
+//     Finding 1): Service reads "host-0", Host reads "abcd". The MIGRATED
+//     page carries the T15 amendments (inventory "2026-07-10 T15
+//     amendments" table): unknown keys render RAW, the raw table sorts,
+//     the axis dates day-crossing spans, and the bucket filter is
+//     config-driven. Walkers for the amended rows branch on `side`
+//     (walk-rows.mjs): "new" asserts the amended contract, "legacy" the
+//     preserved pre-amendment behavior. All other walkers are side-blind.
 
 import {
   expect,
@@ -153,6 +158,50 @@ export const registry = {
     return 'status "Credentials cleared"; fields and picker wiped';
   },
 
+  C6: async ({ page, pageUrl, side }) => {
+    // Bucket picker (T15-amended row). Default filter "dial9": the seeded
+    // `demo-traces` bucket does not match, so the filtered view is empty
+    // with a "Show all (1)" toggle revealing it (#607 behavior, both
+    // pages). The MIGRATED page additionally makes the predicate
+    // config-driven: a `?bucket_filter=demo` page override surfaces
+    // demo-traces as a match directly (and auto-selects the single match).
+    await gotoBrowserPage(page, pageUrl);
+    await applyTestCreds(page);
+    const picker = page.locator("#creds-buckets");
+    expect(
+      /No dial9 trace buckets visible/.test(await picker.textContent()),
+      "default dial9 filter did not report an empty filtered view",
+    );
+    const toggle = picker.locator("button", { hasText: "Show all (1)" });
+    expect((await toggle.count()) === 1, "Show all toggle missing");
+    await toggle.click();
+    await page.waitForSelector("#creds-buckets button:has-text('demo-traces')", {
+      timeout: 5_000,
+    });
+    if (side !== "new") {
+      return 'dial9 filter empty; "Show all (1)" revealed demo-traces (toggle path)';
+    }
+    // New page only: the config-driven override. Credentials persist in
+    // sessionStorage (C9), so the reload re-lists buckets in the
+    // background; with creds active the bucket input starts EMPTY (no
+    // server-default prefill), letting the auto-select below prove itself.
+    await page.goto(`${pageUrl}?bucket_filter=demo`);
+    await page.waitForFunction(
+      () => document.getElementById("creds-btn-label")?.textContent.includes("✓"),
+      { timeout: 15_000 },
+    );
+    await page.click("#creds-btn");
+    await page.waitForSelector("#creds-buckets button.match:has-text('demo-traces')", {
+      timeout: 10_000,
+    });
+    // Exactly one match in the filtered view -> auto-select kicks in.
+    await page.waitForFunction(
+      () => document.getElementById("bucket-input").value === "demo-traces",
+      { timeout: 10_000 },
+    );
+    return "toggle path ok; ?bucket_filter=demo surfaced + auto-selected demo-traces";
+  },
+
   C8: async ({ page, pageUrl }) => {
     await gotoBrowserPage(page, pageUrl);
     await page.click("#creds-btn");
@@ -274,13 +323,24 @@ export const registry = {
   },
 
   // ── F. Browse view: density heatmap ──
-  F4: async ({ page, pageUrl }) => {
+  F4: async ({ page, pageUrl, side }) => {
     await gotoBrowserPage(page, pageUrl);
     await searchAprilWindow(page);
     const rows = page.locator("#heatmap-labels .row");
     expect((await rows.count()) === 1, "expected 1 host row for the single seeded host");
     const label = (await rows.first().textContent()).trim();
-    expect(/host-0 \/ abcd/.test(label), `row label was "${label}"`);
+    if (side === "new") {
+      // T15 I2-display amendment: the seeded key's layout is unknown, so
+      // the row groups/labels by its raw directory path - no mislabeled
+      // "service / host" split.
+      expect(
+        label === "traces/2026-04-09/1900/demo-service/local/host-0/abcd",
+        `row label was "${label}" (expected the raw directory path)`,
+      );
+    } else {
+      // Legacy page: the recorded Finding-1 mislabel is its behavior.
+      expect(/host-0 \/ abcd/.test(label), `row label was "${label}"`);
+    }
     return `1 host row "${label}"`;
   },
 
@@ -298,12 +358,24 @@ export const registry = {
     return `density canvas drawn (${painted} painted device px)`;
   },
 
-  F10: async ({ page, pageUrl }) => {
+  F10: async ({ page, pageUrl, side }) => {
     await gotoBrowserPage(page, pageUrl);
     await searchAprilWindow(page);
     const ticks = page.locator("#heatmap-axis .tick");
     const n = await ticks.count();
     expect(n >= 2, `expected >=2 axis ticks, got ${n}`);
+    if (side === "new") {
+      // T15 F10-axis amendment: the seeded segment's span (filename epoch
+      // 2025-04 -> upload time) crosses day boundaries, so ticks carry the
+      // date. Single-day spans keep the compact HH:MM:SS form.
+      for (const t of await ticks.allTextContents()) {
+        expect(
+          /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(t.trim()),
+          `tick "${t}" not date-carrying on a day-crossing span`,
+        );
+      }
+      return `${n} date-carrying ticks rendered (day-crossing span)`;
+    }
     for (const t of await ticks.allTextContents()) {
       expect(/^\d{2}:\d{2}:\d{2}$/.test(t.trim()), `tick "${t}" not HH:MM:SS`);
     }
@@ -448,11 +520,36 @@ export const registry = {
     return "Select All -> 1 checked; Deselect All -> 0 checked";
   },
 
-  G8: async ({ page, pageUrl }) => {
-    // DEAD-CONFIRMED row: the access path producing no effect IS the
-    // expected behavior (shared verdict mapping).
+  G8: async ({ page, pageUrl, side }) => {
     await gotoBrowserPage(page, pageUrl);
     await rawSearchSeededRows(page);
+    if (side === "new") {
+      // T15 amendment: the advertised sortable columns actually sort.
+      // The dev seed yields ONE row, so reordering is not observable
+      // live; assert the click -> sort-state effect (indicator +
+      // aria-sort, toggling direction) and rows surviving the rebuild.
+      // Ordering semantics are pinned by the raw-rows.test.ts suite.
+      const th = page.locator('#raw-table th[data-sort="service"]');
+      await th.click();
+      expect(
+        (await th.getAttribute("aria-sort")) === "ascending",
+        "first header click did not sort ascending",
+      );
+      expect(
+        (await th.locator(".sort-arrow").textContent()) === "^",
+        "ascending sort indicator missing",
+      );
+      await th.click();
+      expect(
+        (await th.getAttribute("aria-sort")) === "descending",
+        "second header click did not flip to descending",
+      );
+      const rows = await page.locator("#raw-body tr").count();
+      expect(rows === 1, `rows lost across sort rebuilds (${rows})`);
+      return "Service header sorts: asc -> desc toggle with indicator; rows intact";
+    }
+    // Legacy page: DEAD-CONFIRMED - the access path producing no effect IS
+    // the expected behavior (shared verdict mapping).
     const before = await page.locator("#raw-body").innerHTML();
     await page.click('#raw-table th[data-sort="service"]');
     await page.waitForTimeout(250);
@@ -491,12 +588,29 @@ export const registry = {
   },
 
   // ── I. Cross-cutting behaviors ──
-  I2: async ({ page, pageUrl }) => {
+  I2: async ({ page, pageUrl, side }) => {
     // parseKey runs on every displayed key. The seeded key has an extra
-    // path component, so the positional fallback mislabels it (Finding 1):
-    // that recorded reality is what re-derives here.
+    // path component: an UNKNOWN layout. Legacy mislabels it positionally
+    // (Finding 1); the migrated page renders it RAW (T15 amendment).
     await gotoBrowserPage(page, pageUrl);
     await rawSearchSeededRows(page);
+    if (side === "new") {
+      const rawCell = page.locator("#raw-body tr td.rawkey");
+      expect((await rawCell.count()) === 1, "raw-key cell missing for the unknown-layout key");
+      expect(
+        (await rawCell.getAttribute("colspan")) === "3",
+        "raw-key cell does not span the Service/Host/Boot columns",
+      );
+      const text = (await rawCell.textContent()).trim();
+      expect(
+        /^traces\/2026-04-09\/1900\/demo-service\/local\/host-0\/abcd\/\d+-0\.bin\.gz$/.test(text),
+        `raw-key cell was "${text}"`,
+      );
+      // The layout-independent filename epoch still fills Trace Start.
+      const traceStart = await textOf(page, "#raw-body tr td:nth-child(3)");
+      expect(/^\d{4}-\d{2}-\d{2} /.test(traceStart), `Trace Start cell was "${traceStart}"`);
+      return "unknown-layout key rendered raw (full key across Service/Host/Boot); epoch kept";
+    }
     const service = await textOf(page, "#raw-body tr td:nth-child(2)");
     const host = await textOf(page, "#raw-body tr td:nth-child(3)");
     expect(service === "host-0", `Service cell was "${service}" (expected mislabel "host-0")`);

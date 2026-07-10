@@ -8,7 +8,7 @@
 // modules must be a compile error, never a silently-omitted export.
 
 // keys.ts - S3 key parsing with the known/unknown layout discriminant.
-export { formatEpoch, parseKey } from "./keys.js";
+export { extractPrefix, formatEpoch, parseKey } from "./keys.js";
 export type {
   EpochFormatOptions,
   KnownTraceKey,

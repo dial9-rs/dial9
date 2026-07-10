@@ -20,7 +20,7 @@ import {
 import { assertInScheduledRender } from "../../store/store.js";
 import { ROW_H } from "./actions.js";
 import type { PageCtx } from "./ctx.js";
-import { clamp, fmtTick, timeToX } from "./format.js";
+import { clamp, crossesDayBoundary, fmtTick, timeToX } from "./format.js";
 import type { HeatmapRow, TimeDomain } from "./state.js";
 import { renderStatus } from "./status-render.js";
 
@@ -60,16 +60,24 @@ export function mountBrowseView({ store, els }: PageCtx): void {
 
   // Host labels (one row per service/host; boot count annotated) - legacy
   // renderHeatmap's label loop, built with createElement/textContent.
+  // T15 (I2 amendment): unknown-layout groups render their raw directory
+  // path instead of a guessed "service / host" split (Finding 1).
   function rebuildLabels(rows: readonly HeatmapRow[]): void {
     els.heatmapLabels.textContent = "";
     for (const row of rows) {
       const boots = bootTransitions(row.segments);
       const div = document.createElement("div");
       div.className = "row";
-      const svc = document.createElement("span");
-      svc.className = "svc";
-      svc.textContent = row.service;
-      div.append(svc, document.createTextNode(` / ${row.host}`));
+      if (row.segments[0]?.layout === "unknown") {
+        // Raw display: `host` carries the group's raw directory path
+        // (actions.ts unknownGroupPath); no service/host split exists.
+        div.append(document.createTextNode(row.host));
+      } else {
+        const svc = document.createElement("span");
+        svc.className = "svc";
+        svc.textContent = row.service;
+        div.append(svc, document.createTextNode(` / ${row.host}`));
+      }
       if (boots.length) {
         div.append(document.createTextNode(" "));
         const boot = document.createElement("span");
@@ -78,7 +86,9 @@ export function mountBrowseView({ store, els }: PageCtx): void {
         boot.textContent = `▏${boots.length + 1} boots`;
         div.append(boot);
       }
-      div.title = row.label;
+      // Unknown-layout rows: the frozen groupByHost label is " / <path>";
+      // the raw path alone is the honest tooltip.
+      div.title = row.segments[0]?.layout === "unknown" ? row.host : row.label;
       els.heatmapLabels.appendChild(div);
     }
   }
@@ -196,16 +206,21 @@ export function mountBrowseView({ store, els }: PageCtx): void {
 
   // Legacy drawHeatmapAxis (index.html:1442-1455): 2 to 8 TZ-aware ticks,
   // aligned to the canvas left edge via --heatmap-label-w.
+  // T15 (F10-axis amendment, Finding 3): when the visible span crosses a
+  // calendar-day boundary, ticks carry the date ("YYYY-MM-DD HH:MM:SS") -
+  // time-only ticks across a multi-day span were ambiguous. Tick COUNT is
+  // unchanged in both modes.
   function drawAxis(W: number, domain: TimeDomain, tz: boolean): void {
     els.heatmapAxis.textContent = "";
     const { tMin, tMax } = domain;
+    const withDate = crossesDayBoundary(tMin, tMax, tz);
     const n = clamp(Math.floor(W / 130), 2, 8);
     for (let i = 0; i <= n; i++) {
       const frac = i / n;
       const tick = document.createElement("div");
       tick.className = "tick";
       tick.style.left = LABEL_W() + frac * W + "px";
-      tick.textContent = fmtTick(tMin + frac * (tMax - tMin), tz);
+      tick.textContent = fmtTick(tMin + frac * (tMax - tMin), tz, withDate);
       els.heatmapAxis.appendChild(tick);
     }
   }

@@ -13,6 +13,7 @@ import "../../styles/browser.css";
 import { createActions } from "./actions.js";
 import type { ApiConfig } from "./api.js";
 import { mountActionsBar } from "./actions-bar.js";
+import { resolveBucketFilter } from "./bucket-filter.js";
 import { mountBrowseView } from "./browse-view.js";
 import { mountCredsPanel } from "./creds-panel.js";
 import type { PageCtx } from "./ctx.js";
@@ -49,6 +50,18 @@ function boot(): void {
   const store = createBrowserStore();
   const actions = createActions(store, els);
   const ctx: PageCtx = { store, els, actions };
+
+  // C6 (T15 amendment): resolve the bucket-picker filter BEFORE the URL
+  // restore below - its final syncUrl() rewrites the query string, and a
+  // `bucket_filter=` override must be captured first (actions.syncUrl then
+  // re-appends it so the override survives every history.replaceState).
+  const bucketFilter = resolveBucketFilter(window.location.search);
+  if (bucketFilter.override != null) {
+    store.update("config", {
+      bucketFilter: bucketFilter.filter,
+      bucketFilterOverride: bucketFilter.override,
+    });
+  }
 
   // Mount order matters only for the two `browse` subscribers: the painter
   // (browse-view) must rebuild the host labels before the selection overlay
@@ -148,6 +161,15 @@ function boot(): void {
       // button drives the sampled server-side loop instead of decoding raw
       // traces (#570); Tokio Stats enables on selection (H6).
       store.update("config", { aggregationEnabled: !!config.aggregation_enabled });
+      // C6 (T15): the server's bucket-picker filter applies unless the page
+      // URL pinned an override at load (which wins). Servers predating the
+      // field leave the "dial9" default in place.
+      if (
+        config.bucket_filter != null &&
+        store.getState().config.bucketFilterOverride == null
+      ) {
+        store.update("config", { bucketFilter: config.bucket_filter });
+      }
       if (config.supports_byo_credentials) credsPanel.init();
       // Server defaults (bucket/prefix) were filled programmatically above;
       // reflect them in the URL so the link is complete.

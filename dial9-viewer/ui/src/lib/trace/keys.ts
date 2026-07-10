@@ -1,7 +1,8 @@
 // lib/trace/keys.ts - S3 trace-key parsing (T09; architecture 2.7,
 // features/01 I2). Ported out of the inline `parseKey` in index.html
-// (index.html:1006-1059); the legacy inline copy stays until T15 re-points
-// its callers and retires tests/core/parse_key.test.ts.
+// (index.html:1006-1059). Since T15, the migrated browser page consumes
+// this parser directly (the T14 legacy-keys compat seam is retired) and
+// tests/core/parse_key.test.ts targets this module.
 //
 // DEFECT FIX (ADR-0004 section 1; features/01 "Live validation" Finding 1):
 // the legacy parser silently fell back to positional parsing for keys whose
@@ -33,13 +34,24 @@ export interface KnownTraceKey {
 }
 
 /**
- * A key whose directory layout is unrecognized. No field is guessed: the
- * legacy behavior of positionally shifting columns for these keys is the
- * defect this variant fixes. Callers surface the raw key instead.
+ * A key whose directory layout is unrecognized. No DIRECTORY field is
+ * guessed: the legacy behavior of positionally shifting columns for these
+ * keys is the defect this variant fixes. Callers surface the raw key
+ * instead. The FILENAME convention (`{epoch}-{index}.bin[.gz]`) is
+ * independent of the directory layout, so epoch/segIndex are still parsed
+ * when the filename matches (T15 amendment; they drive time placement and
+ * sorting, never a Service/Host/Boot label).
  */
 export interface UnknownTraceKey {
   layout: "unknown";
   rawKey: string;
+  /**
+   * Segment start (unix seconds) from the `{epoch}-{index}.bin[.gz]`
+   * filename; 0 when the filename does not match that pattern.
+   */
+  epoch: number;
+  /** Segment index from the filename; "" when the filename doesn't match. */
+  segIndex: string;
 }
 
 export type ParsedTraceKey = KnownTraceKey | UnknownTraceKey;
@@ -112,7 +124,7 @@ export function parseKey(key: string): ParsedTraceKey {
     // A date-shaped segment with an undocumented component count: the
     // legacy code shifted columns positionally here (Finding 1's demo-key
     // mislabel). Flag it instead.
-    return { layout: "unknown", rawKey: key };
+    return { layout: "unknown", rawKey: key, epoch, segIndex };
   }
   // No date-shaped segment anywhere: positional, best-effort (preserved
   // legacy behavior for custom prefix schemes).
@@ -125,7 +137,24 @@ export function parseKey(key: string): ParsedTraceKey {
       segIndex
     );
   }
-  return { layout: "unknown", rawKey: key };
+  return { layout: "unknown", rawKey: key, epoch, segIndex };
+}
+
+/**
+ * Everything before the first `YYYY-MM-DD` path segment of an S3 key - the
+ * authoritative key prefix handed to the aggregation endpoints (features/01
+ * I8, #570). "" when no date segment is found. Ported verbatim from the
+ * legacy inline `extractPrefix` (index.html:1061-1071); moved here from the
+ * browser page's T14 compat seam when T15 retired it.
+ */
+export function extractPrefix(key: string): string {
+  const parts = key.split("/");
+  for (let i = 0; i < parts.length; i++) {
+    if (DATE_RE.test(parts[i]!)) {
+      return parts.slice(0, i).join("/");
+    }
+  }
+  return "";
 }
 
 /** Formatting options shared by `formatEpoch` / `traceTitleParams`. */

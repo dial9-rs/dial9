@@ -5,6 +5,7 @@
 import { describe, expect, it } from "vitest";
 import {
   clamp,
+  crossesDayBoundary,
   dateToPickerStr,
   fmtTick,
   formatDate,
@@ -63,6 +64,35 @@ describe("formatDate / formatEpochStr", () => {
 describe("fmtTick", () => {
   it("HH:MM:SS in UTC mode", () => {
     expect(fmtTick(1744221600, false)).toBe("18:00:00");
+  });
+  it("withDate prefixes the calendar date (T15 F10-axis amendment)", () => {
+    expect(fmtTick(1744221600, false, true)).toBe("2025-04-09 18:00:00");
+  });
+  it("withDate in local mode matches formatEpochStr", () => {
+    expect(fmtTick(1744221600, true, true)).toBe(formatEpochStr(1744221600, true));
+  });
+});
+
+describe("crossesDayBoundary (T15 F10-axis amendment)", () => {
+  // 2025-04-09 00:00:00 UTC.
+  const midnight = 1744156800;
+  it("false within a single UTC day", () => {
+    expect(crossesDayBoundary(midnight + 3600, midnight + 7200, false)).toBe(false);
+    // Full day, both ends inside it.
+    expect(crossesDayBoundary(midnight, midnight + 86399, false)).toBe(false);
+  });
+  it("true across a UTC day boundary", () => {
+    expect(crossesDayBoundary(midnight + 82800, midnight + 90000, false)).toBe(true);
+  });
+  it("true across a multi-month span (the dev-seed shape, Finding 3)", () => {
+    expect(crossesDayBoundary(1744224000, 1744224000 + 400 * 86400, false)).toBe(true);
+  });
+  it("local mode compares local calendar dates", () => {
+    // One hour on either side of a LOCAL midnight always crosses.
+    const d = new Date(2026, 3, 10, 0, 0, 0); // local midnight
+    const t = Math.floor(d.getTime() / 1000);
+    expect(crossesDayBoundary(t - 3600, t + 3600, true)).toBe(true);
+    expect(crossesDayBoundary(t + 3600, t + 7200, true)).toBe(false);
   });
 });
 

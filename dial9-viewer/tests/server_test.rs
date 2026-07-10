@@ -217,6 +217,28 @@ async fn config_returns_defaults() {
         .unwrap();
     check!(resp["default_bucket"] == "my-bucket");
     check!(resp["default_prefix"] == "my-prefix");
+    // T15: the bucket-picker filter is config-driven; "dial9" is the default.
+    check!(resp["bucket_filter"] == "dial9");
+}
+
+/// `/api/config` advertises a server-configured `bucket_filter` (T15): the
+/// picker's trace-bucket predicate is no longer hardcoded client-side, so a
+/// deployment whose buckets are not named `*dial9*` can surface them.
+#[tokio::test]
+async fn config_reports_custom_bucket_filter() {
+    let state = AppState::new(Arc::new(FakeBackend), None, None).with_bucket_filter("acme-traces");
+    let base = start_server(state).await;
+    let client = reqwest::Client::new();
+
+    let resp: serde_json::Value = client
+        .get(format!("{base}/api/config"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    check!(resp["bucket_filter"] == "acme-traces");
 }
 
 #[tokio::test]
