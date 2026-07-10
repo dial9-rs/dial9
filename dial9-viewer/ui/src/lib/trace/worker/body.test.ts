@@ -235,6 +235,100 @@ describe("worker body: buffered fallback", () => {
   }, 60_000);
 });
 
+// ── parse-buffer (T17 segment windowing: parse cached bytes, no fetch) ───
+
+describe("worker body: parse-buffer", () => {
+  it("gzipped bytes: gunzip-streams + parses with parity to a direct parse", async () => {
+    const sink = makeSink();
+    const body = createWorkerBody(sink.post);
+    body.handle({
+      kind: "parse-buffer",
+      buffer: gzTrace.buffer.slice(
+        gzTrace.byteOffset,
+        gzTrace.byteOffset + gzTrace.byteLength
+      ) as ArrayBuffer,
+    });
+    await waitForSettled(sink);
+
+    expect(errorsOf(sink)).toEqual([]);
+    const done = doneOf(sink)[0]!;
+    expect(done.mode).toBe("stream");
+    // Parity (counts + spot samples, same rationale as the load tests).
+    expect(done.trace.events.length).toBe(direct.events.length);
+    expect(done.trace.events[0]).toEqual(direct.events[0]);
+    expect(done.trace.events.at(-1)).toEqual(direct.events.at(-1));
+    expect(done.trace.minTs).toBe(direct.minTs);
+    expect(done.trace.maxTs).toBe(direct.maxTs);
+    // The decompressed bytes round-trip; their length is what the T17
+    // budget accountant records as the segment's resident raw size.
+    expectBytesEqual(new Uint8Array(done.buffer), rawTrace);
+    expect(done.timing.bytes).toBe(rawTrace.length);
+    expect(done.timing.fetchDoneMs).toBeNull();
+
+    // Progress: parse-phase only (there is no fetch), urlCount pinned to 1.
+    const progress = progressOf(sink).map((m) => m.progress);
+    expect(progress.length).toBeGreaterThan(1);
+    expect(progress[0]).toMatchObject({
+      phase: "parsing",
+      mode: "stream",
+      urlCount: 1,
+      bytesRead: 0,
+      totalBytes: null,
+    });
+    expect(progress.some((p) => p.bytesRead > 0 && p.eventCount > 0)).toBe(true);
+  }, 60_000);
+
+  it("raw (non-gzipped) bytes: parses directly with the total size known up front", async () => {
+    const sink = makeSink();
+    createWorkerBody(sink.post).handle({
+      kind: "parse-buffer",
+      buffer: rawTrace.buffer.slice(
+        rawTrace.byteOffset,
+        rawTrace.byteOffset + rawTrace.byteLength
+      ) as ArrayBuffer,
+      parse: { maxEvents: 5 },
+    });
+    await waitForSettled(sink);
+    expect(errorsOf(sink)).toEqual([]);
+    const done = doneOf(sink)[0]!;
+    expect(done.mode).toBe("buffered");
+    expect(done.trace.events.length).toBe(5);
+    expect(done.trace.truncated).toBe(true);
+    expect(progressOf(sink)[0]!.progress.totalBytes).toBe(rawTrace.length);
+  }, 60_000);
+
+  it("gzipped bytes without DecompressionStream fail explicitly", async () => {
+    vi.stubGlobal("DecompressionStream", undefined);
+    const sink = makeSink();
+    createWorkerBody(sink.post).handle({
+      kind: "parse-buffer",
+      buffer: gzTrace.buffer.slice(
+        gzTrace.byteOffset,
+        gzTrace.byteOffset + gzTrace.byteLength
+      ) as ArrayBuffer,
+    });
+    await waitForSettled(sink);
+    expect(doneOf(sink)).toEqual([]);
+    expect(errorsOf(sink)[0]!.message).toMatch(/DecompressionStream/);
+  });
+
+  it("shares the one-job-per-body guard with url loads", async () => {
+    installHangingFetchMock();
+    const sink = makeSink();
+    const body = createWorkerBody(sink.post);
+    body.handle({ kind: "load", urls: ["/hang"] });
+    body.handle({
+      kind: "parse-buffer",
+      buffer: new ArrayBuffer(4),
+    });
+    const errors = errorsOf(sink);
+    expect(errors.length).toBe(1);
+    expect(errors[0]!.message).toMatch(/one load per worker/);
+    body.handle({ kind: "abort" });
+    await waitForSettled(sink);
+  });
+});
+
 // ── Abort + protocol errors ──────────────────────────────────────────────
 
 describe("worker body: abort and protocol errors", () => {

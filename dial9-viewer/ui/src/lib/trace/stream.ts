@@ -36,6 +36,39 @@ export interface StreamedParse {
 }
 
 /**
+ * Parse an async stream of raw (already-gunzipped) trace chunks while
+ * capturing them, then reassemble the captured chunks into the full raw
+ * buffer. The chunk source is the caller's concern: the URL path below
+ * feeds it fetch streams; the worker's parse-buffer path (T17 segment
+ * re-parse) feeds it a DecompressionStream over cached gzip bytes.
+ */
+export async function parseChunksWithCapture(
+  chunks: AsyncIterable<Uint8Array>,
+  parseOpts: ParseOptions
+): Promise<StreamedParse> {
+  const captured: Uint8Array[] = [];
+  const capturing: AsyncIterable<Uint8Array> = {
+    async *[Symbol.asyncIterator]() {
+      for await (const chunk of chunks) {
+        captured.push(chunk);
+        yield chunk;
+      }
+    },
+  };
+  const trace = await parseTraceStream(capturing, parseOpts);
+  // Reassemble the full buffer from the captured chunks.
+  let total = 0;
+  for (const c of captured) total += c.length;
+  const buffer = new Uint8Array(total);
+  let off = 0;
+  for (const c of captured) {
+    buffer.set(c, off);
+    off += c.length;
+  }
+  return { trace, buffer: buffer.buffer };
+}
+
+/**
  * Stream one OR MORE trace URLs: decode chunks as they download so parse
  * time overlaps the download (~max(download, parse) instead of their sum).
  * For multiple URLs the fetches run concurrently and the components stream
@@ -55,24 +88,5 @@ export async function streamTraceWithCapture(
     urls.length === 1
       ? await fetchTraceStream(urls[0]!, fetchOpts)
       : fetchTracesStream([...urls], fetchOpts);
-  const captured: Uint8Array[] = [];
-  const capturing: AsyncIterable<Uint8Array> = {
-    async *[Symbol.asyncIterator]() {
-      for await (const chunk of stream) {
-        captured.push(chunk);
-        yield chunk;
-      }
-    },
-  };
-  const trace = await parseTraceStream(capturing, parseOpts);
-  // Reassemble the full buffer from the captured chunks.
-  let total = 0;
-  for (const c of captured) total += c.length;
-  const buffer = new Uint8Array(total);
-  let off = 0;
-  for (const c of captured) {
-    buffer.set(c, off);
-    off += c.length;
-  }
-  return { trace, buffer: buffer.buffer };
+  return parseChunksWithCapture(stream, parseOpts);
 }
