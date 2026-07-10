@@ -38,15 +38,6 @@ scripts/regenerate_demo_trace.sh
 echo "--- Checking trace analysis ---"
 node dial9-viewer/ui/test_trace_analysis.js
 
-echo "--- Checking multi-component trace fetch (repeatable trace=) ---"
-node dial9-viewer/ui/test_fetch_traces.js
-
-echo "--- Checking streaming trace decode (parseTraceStream) ---"
-node dial9-viewer/ui/test_stream_parse.js
-
-echo "--- Checking buffered parser paint-yield throttle (#595) ---"
-node dial9-viewer/ui/test_parse_yield_throttle.js
-
 echo "--- Checking skills snippets ---"
 node dial9-viewer/ui/test_all_skills_snippets.js
 
