@@ -158,6 +158,11 @@ relative time windows.
 **(a) Row-walker** — drives every feature-inventory row's access path, emits
 `VERIFIED` / `FAILED` / `NOT-TRIGGERABLE` per the shared verdict mapping
 (chunk-1 tickets header). Green = zero FAILED; exit 0 only when green.
+Amended rows (T15: features/01 G8/C6/I2/F4/F10) walk PER-SIDE: the walker
+derives `side` from the URL (`/new/` = the migrated page) and those rows'
+walkers assert the amended contract on the new page and the preserved
+recorded behavior on the legacy page, so both sides gate green against the
+one inventory.
 
 ```bash
 node parity/walk-rows.mjs \
