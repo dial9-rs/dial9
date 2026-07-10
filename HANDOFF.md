@@ -1,207 +1,230 @@
-# T08 HANDOFF - lib/canvas: shared drawing utilities
+# T09 HANDOFF - lib/trace: typed boundary around the frozen core
 
-(Replaces the T07 HANDOFF inherited through the branch chain; T07's own
-record lives at commit 63a18e8.)
+(Replaces the T08 HANDOFF inherited through the branch chain; T08's own
+record lives at commit 0acc10a.)
 
 ## STATUS
 
-DONE - all DoD checks pass (evidence below). No STOP-gate hit. Utilities
-only: no components, no page wiring, no store changes, no frozen-core
-.js edits, no page HTML, no Rust touched.
+DONE - all DoD checks pass (evidence below). No STOP-gate hit. Mechanism
+only: no page wiring, no component/store changes, no frozen-core .js
+edits, no page HTML edits, no Rust touched. Segment windowing (T17) and
+worker execution (T16) untouched.
 
-Note on ticket numbering: T07's HANDOFF listed "T08: store actions /
-uiPrefs persistence" under REMAINING - that reflected its author's guess
-at the ticket map, not this ticket. This T08 is lib/canvas per the
-chunk-1 partition; store actions remain unowned by this branch.
+## COMPLETED (commits on `ticket/T09-lib-trace-boundary`, on top of 0acc10a)
 
-## COMPLETED (commits on `ticket/T08-lib-canvas`, on top of 63a18e8)
-
-- `db7cbc1` layout.ts + layout.test.ts: typed wrapper over the frozen
-  panel_layout.js; LABEL_W pinned; PanelGeometry/LaneGeometry producers.
-- `9e0254f` dpr.ts + dpr.test.ts: resize-only-on-geometry-change (F3);
-  pure planBackingStore + createCanvasSizer binding.
-- `a2c74c9` stroke.ts + stroke.test.ts: pixel-bounded, style-batched
-  stroke building (the F1 fix direction as named contracts).
-- `73c518e` downsample.ts, palette.ts, their tests, index.ts barrel.
-- `ff69b43` coverage-gap tests -> 100% stmts/branch/funcs/lines on
-  src/lib/canvas/**.
+- `dbc9085` keys.ts + keys.test.ts: parseKey ported from index.html
+  (1006-1059) with the `layout: 'known' | 'unknown'` discriminant
+  (ADR-0004 section 1 defect fix) + formatEpoch.
+- `27af934` title.ts + title.test.ts: traceTitleParams ported from
+  index.html (1686-1702).
+- `4e4edb4` load.ts + load.test.ts: loadTrace/loadTraceStreamed/
+  loadTraceBuffered/parseTraceBuffer/objectTraceUrls + the trace_parser.js
+  typed pass-through surface.
+- `3587bd7` query.ts + reparse.ts (+ tests): lane-click read helpers and
+  the Set/Clear-Range windowed re-parse.
+- `27bd5a4` analysis.ts (trace_analysis.js facade) + index.ts barrel;
+  src/lib/trace/.gitkeep removed.
+- `78292df` scripts/check-core-imports.mjs + package.json wiring
+  (check:boundary + pretest).
 - (final commit): this HANDOFF.
 
 ## WHAT WAS BUILT (and the decisions inside it)
 
-All under `dial9-viewer/ui/src/lib/canvas/`, tests colocated. The
-barrel `index.ts` is the import surface for future canvas components;
-only the modules behind it import the frozen core's drawing helpers.
+All under `dial9-viewer/ui/src/lib/trace/`, tests colocated. `index.ts`
+is the only import surface the rest of `src/` sees (explicit named
+re-exports, not `export *`, so a name collision between modules is a
+compile error instead of a silently-omitted star export).
 
-### layout.ts (architecture 2.3 N4; ADR-0004 section 5)
+### keys.ts (01 I2; ADR-0004 section 1 defect fix)
 
-- `timePanelLayout({pw, scrollbarW?, viewStart, viewEnd})` -> the frozen
-  core's TimePanelLayout with labelW pinned to the exported LABEL_W=100.
-  The wrapper deliberately has NO labelW parameter, so the historical
-  200px-gutter bug cannot be rebuilt through this API.
-- PURE, unlike viewer.html's timePanelLayout(panel, scrollbarW): callers
-  pass measured widths in, so DOM reads can batch once per frame (F3).
-  drawW <= 0 is surfaced, not masked (caller early-returns, legacy
-  contract).
-- `panelGeometry(...)` and `laneStackGeometry(workerIds, laneHeight)`
-  produce the types/state.d.ts geometry shapes; layout.ts is their
-  single producer as that file's comment mandates.
+- `parseKey(key)` -> `{ layout: "known", service, host, bootId, epoch,
+  segIndex }` for the #225 layout (date + 5 components), the legacy
+  pre-#225 layout (date + 4, bootId ""), and the dateless positional
+  fallback (>= 5 components, no date-shaped segment anywhere).
+- DEFECT FIX: a key with a date-shaped segment but an undocumented
+  component count now returns `{ layout: "unknown", rawKey }` - the
+  legacy code positionally shifted columns here (features/01 Finding 1:
+  the dev-server's 6-segment demo key showed Service=host-0, Host=abcd).
+  Short dateless keys (legacy returned `host=<raw key>`) are also
+  `unknown`. The positional fallback survives ONLY where it was
+  genuinely best-effort (no date segment at all).
+- The legacy result's lazy `traceStart` getter read the page-global
+  `useLocalTz`; parsing is now pure - pages call
+  `formatEpoch(key.epoch, { localTz })` at render time (ported from
+  index.html:988-1004, UTC default like the legacy initial state).
 
-### dpr.ts (F3: backing stores resize only on geometry change)
+### title.ts (01 I3)
 
-- Pure decision: `planBackingStore(prev, next)` - exact compare of
-  {cssWidth, cssHeight, dpr} against the last-APPLIED geometry. Never
-  reads canvas.width back (integer truncation would make fractional
-  sizes always look changed). Device size = round(css * dpr) - the
-  legacy code let the canvas setter truncate, undersizing up to 1px.
-- Thin binding: `createCanvasSizer(canvas).ensure(w, h, dpr?)` applies
-  the plan; unchanged path performs ZERO canvas writes besides an
-  absolute `setTransform(dpr,0,0,dpr,0,0)` (setTransform, not scale(),
-  so repeated calls never compound; needed because the unchanged path no
-  longer gets the implicit state reset of a width= write).
-- The unchanged path does NOT clear the canvas (a resize used to clear
-  as a side effect). Renderers must paint their full area - every legacy
-  panel starts with a background fill, so this holds; documented on
-  ensure().
-- Typed against a minimal structural `DprCanvas<Ctx>`; the test file
-  carries a compile-time proof that HTMLCanvasElement satisfies it, and
-  drives the binding with a recording stub (write-count assertions).
-- Context is fetched once and cached; getContext returning null throws
-  (no silent no-op rendering).
+- `traceTitleParams(keys, { localTz? })` -> URLSearchParams with `svc`
+  (unique services ", "-joined), `host` (single-host only; multi-host
+  drops it), `from`/`to` (min/max epoch; `from` alone for one distinct
+  epoch), `segs` (always). Unknown-layout keys contribute only to `segs`
+  - the deliberate consequence of the keys.ts defect fix (legacy fed the
+  demo key's shifted fields into the title as `svc=host-0`).
 
-### stroke.ts (F1: stroke() was 76% of pan CPU; ADR section 5 rule 1)
+### load.ts (02 B12/B14/B17 mechanism, 01 I4)
 
-- `downsampleSeriesToColumns(points, {xOf, yOf, weightOf?, x0?, drawW})`
-  -> at most one vertex per pixel column, BEFORE pathing. Representative
-  policy mirrors the core's pixelDownsampleSpans: largest `weightOf`
-  wins; default is last-in-column (step carry-out). Input must be sorted
-  ascending by xOf - out-of-order THROWS instead of garbling the line
-  (same contract the core documents but does not check). Off-view x
-  clamps into the edge columns so the legacy lowerBound-1 pre-view
-  sample keeps the line's entry height.
-- `expandSteps(vertices)`: step-function knees inserted only between
-  vertices >= 2 columns apart (sub-pixel steps skipped), bound
-  <= 2 * ceil(drawW) - still O(width). The strict one-vertex-per-column
-  guarantee (DoD) is series(); stepSeries() carries the documented 2x
-  bound for zoomed-in step charts (the queue chart's shape at sparse
-  sample counts cannot be represented under a 1x bound; both regimes
-  stay O(width), never O(samples)).
-- `makeStrokeBatcher()`: `.series()/.stepSeries()` (downsample + append
-  as a subpath), `.polyline()` (escape hatch, caller owns the bound),
-  `.tick(style, x, y1, y2)` (vertical markers deduped per pixel column,
-  first wins - the open-ended-poll dashed-edge storm becomes O(width)),
-  `.batches()` in first-use order.
-- `drawStrokeBatches(ctx, batches, styleOf)`: per style ONE
-  strokeStyle/lineWidth assignment, at most ONE setLineDash, ONE
-  beginPath, ONE stroke - however many subpaths. Dash state restored to
-  solid on return (no leakage into subsequent fills/strokes). ctx typed
-  as structural StrokePathContext -> Node-testable with a recorder.
+- `loadTrace(urls, opts)`: STREAM whenever `canStreamDecode()` (single
+  URL via fetchTraceStream, multiple via fetchTracesStream), buffered
+  fetchTraces+parseTrace fallback otherwise - the B12 selection, minus
+  the page chrome. Returns `{ trace, buffer, mode }`; `buffer` is the
+  raw gunzipped concatenation (stream path captures chunks while parsing
+  and reassembles, exactly the streamAndShowTrace mechanism) so
+  Set/Clear-Range re-parses never re-fetch (B14).
+- Options are flat (`FetchOptions & ParseOptions`) and split internally;
+  headers/signal go to fetch only, parse options to the parser only.
+- Page concerns intentionally NOT here: loading labels/timers, loadPerf
+  records, AbortError swallowing, the HTTP-401 credentials hint, alerts,
+  drop-zone resets. File-drop = `parseTraceBuffer(fileReaderResult)`;
+  demo = `loadTrace("demo-trace.bin")`. Credential header INJECTION
+  (B17, `Dial9Creds.headers()`) is a caller concern - pass `headers` in.
+- `objectTraceUrls(bucket, keys)` ported verbatim from
+  index.html:1713-1720 (01 I4).
+- Also the typed pass-through of the rest of the trace_parser.js surface
+  (EVENT_TYPES, OFF_WORKER_WORKER_ID, formatFrame, symbolizeChain,
+  deduplicateSamples, deriveBlockInPlaceGaps + types incl.
+  DecodedFieldValue from decode.js). Rule of thumb: load.ts re-exports
+  trace_parser.js, analysis.ts re-exports trace_analysis.js.
 
-### downsample.ts / palette.ts
+### reparse.ts (02 E3/E4, B14)
 
-- downsample.ts: typed re-exports of the core fill primitives
-  (pixelDownsampleSpans, makeBarCoalescer + BarCoalescer type,
-  pixelCoverage) with their sorted-input contracts in the docs. Tests
-  are wiring smoke checks only; core behavior stays covered by its own
-  suites.
-- palette.ts: re-exports pollHeatmapColor / pollHeatmapColorQuantized /
-  flamegraphColor (exact core export names; the ticket's "pollColor" is
-  NOT a core export - it is viewer.html inline lore, ported here):
-  `pollColor(startNs, endNs)` = quantized duration color (issue #450
-  bucketing contract, tested), `makeColorDimmer(factor=0.4)` = the
-  memoized channel-multiply behind pollColorDim (throws on non-#rrggbb
-  and factor outside [0,1]), `SPAN_COLORS` + `makeColorAssigner()` = the
-  stable name->color assignment behind spanColor/ceColor (one assigner
-  per namespace = the legacy two-maps behavior).
+- `reparseWithRange(buffer, { startNs?, endNs? }, opts?)`: in-memory
+  re-parse with bounds forwarded only when set (an absent bound is open,
+  not 0). `isRangeActive(range)` is the Clear-Range-visibility predicate.
+- Tests pin the core's contract for a single open edge: with an active
+  filter, `filterEndTime` surfaces as the parser's Infinity default
+  (null means "unfiltered") - callers should not assume null.
 
-## INTEROP (the ticket asked this documented)
+### query.ts (02 G13/G14)
 
-src/ modules import the frozen core with plain ESM named imports and a
-root-relative specifier, e.g.
-`import { makeTimePanelLayout } from "../../../panel_layout.js"`:
+- `findSpanAt(spans, ns)`: the poll-at-timestamp binary search
+  (viewer.html:2618-2626); non-overlapping spans sorted by start.
+- `taskAt(polls, ns)`: poll + taskId with the legacy "taskId 0 means no
+  task tracking" truthiness preserved (surfaces as null, poll returned).
+- `findContainingSpan(allSpans, workerId, ns)` + `spanAncestryAt(span,
+  byId, ns)` + `spansById(allSpans)`: the lane-click span focus walk.
+  BEHAVIOR NOTE: the legacy cycle guard watched the id SET's size, which
+  stops growing once a cycle revisits a span - a parent cycle shorter
+  than 1024 hung the page. The port counts steps (same 1024 cap,
+  `SPAN_ANCESTRY_CYCLE_LIMIT`); identical results on well-formed chains
+  (both stop after 1024 ancestor hops), but real cycles now terminate.
+- `enclosingSpans` re-exported typed from the core (it already lives
+  there).
 
-- tsc: matched by the T05 ambient wildcard declarations
-  (`declare module "*/panel_layout.js"` etc.); clean under
-  verbatimModuleSyntax because the value/type split is explicit
-  (`import type` for types).
-- Vitest: vite-node's CJS interop resolves the named exports from the
-  browser-global + CJS-guard files as-is (verified empirically before
-  building; 59 tests exercise the path).
-- Vite build: unaffected today - nothing in the rollup input graph
-  imports lib/canvas yet, so dist/ is unchanged. When a page ticket
-  first pulls the barrel in, Vite's commonjs interop bundles the core
-  file into the page chunk (the architecture 2.1 plan); the same import
-  form is the one probe.ts already uses.
-- createRequire stays a tests/core-only pattern (it would break browser
-  bundles if used in src/).
+### analysis.ts
+
+- Typed re-exports of the trace_analysis.js analysis surface: flamegraph
+  builds (buildFlamegraphTree/flattenFlamegraph/buildFgData; heap via
+  analyzeAllocations), blocking-call analysis (computeSchedulingDelays,
+  computePollWakes), task lifecycle (buildActiveTaskTimeline), worker
+  spans (buildWorkerSpans, attachCpuSamples), runtime groups, span data,
+  POIs, process CPU series, getTraceTimeRange, hasCpuProfileSamples,
+  computeSpanLayout (fence-sitter: may migrate behind lib/canvas when
+  the span-panel component lands).
+- NOT here (lib/canvas owns them per T08): pixelDownsampleSpans,
+  pixelCoverage, makeBarCoalescer, pollHeatmapColor(Quantized),
+  flamegraphColor.
+
+### scripts/check-core-imports.mjs (the boundary rule)
+
+- Plain Node (constraint S1, no new deps): fails when any file under
+  src/ outside src/lib/trace/ and src/lib/canvas/ imports a ui-root .js
+  module (static import, export-from, dynamic import(), require()).
+  Exempt: `*.d.ts` (ambient wildcard declarations, no runtime import)
+  and `src/types/probe.ts` (T05's tsc-only probe; no Vite input
+  references it, never ships).
+- Wired as `check:boundary` + `pretest` in package.json: `npm run test`
+  runs it first, and the ui CI job already runs `npm run test`
+  (.github/workflows/ci.yml `ui` job), so CI enforces the boundary WITH
+  NO WORKFLOW EDIT. Negative-tested during development: an import probe
+  in src/pages/ and a require probe in src/store/ both exit 1.
+
+## INTEROP
+
+Same pattern T08 documented: plain ESM named imports with relative
+specifiers to the core .js files (`import { parseTrace } from
+"../../../trace_parser.js"`), typed by the T05 ambient wildcards;
+`import type` for types under verbatimModuleSyntax. vite-node resolves
+the CJS-guard named exports; nothing in the rollup input graph imports
+lib/trace yet, so dist/ is unchanged.
 
 ## DoD EVIDENCE
 
 All run in dial9-viewer/ui (npm ci done):
 
 1. `npx tsc --noEmit`: clean (exit 0).
-2. `npm run test`: 15 files, 201 tests, all pass (142 inherited + 59
-   new: layout 9, dpr 14, stroke 21, downsample 3, palette 12 - counts
-   after the coverage-gap commit).
-3. DoD axes, each a named test:
-   - layout invariant: "known case: pw=1200, sb=17 -> drawW=1083, axis
-     spans [100, 1183]" + no-scrollbar case + gutter-cannot-diverge
-     invariant (layout.test.ts).
-   - stroke batcher pixel bound: seeded-random property test, 50 rounds
-     of up to 10k points at drawW 1..2000, asserts vertices
-     <= ceil(drawW) (stroke.test.ts "DoD: arbitrary random series...")
-     plus the per-style variant through makeStrokeBatcher.
-   - DPR no-op: planBackingStore identical-geometry case + binding test
-     asserting ZERO canvas writes across repeated ensure() with a
-     recording stub (dpr.test.ts "DoD: unchanged geometry...").
-4. Coverage (`npx vitest run --coverage.enabled
-   --coverage.include='src/lib/canvas/**' src/lib/canvas`):
-   100% statements (152/152), 100% branches (75/75), 100% functions
-   (26/26), 100% lines (141/141).
-5. `npm run build`: dist listing unchanged - same 19 files as T07's
+2. `npm run test`: pretest boundary check OK, then 21 files, 251 tests,
+   all pass (201 inherited + 50 new: keys 13, title 7, load 11,
+   query 12, reparse 4, analysis 3).
+3. DoD axes:
+   - keys.ts vs documented layouts (keys.test.ts): #225 layout (with and
+     without prefix), legacy layout, positional fallback, and the
+     unknown discriminant - including the exact features/01 Finding 1
+     demo key `traces/2026-04-09/1900/demo-service/local/host-0/abcd/
+     1744224000-0.bin.gz` asserted to yield `{ layout: "unknown",
+     rawKey }`, NOT shifted fields.
+   - title.ts vs features/01 I3 (title.test.ts): single-host case sets
+     `host=`, multi-host case drops it; from/to window; segs.
+   - load.ts fetch+gunzip+concat (load.test.ts): the test_fetch_traces
+     fixture pattern (in-memory gzip of public/demo-trace.bin + stubbed
+     global fetch) - raw round-trip, client-side gunzip, mixed
+     concat-in-order parsing to 2x events, header forwarding, stream vs
+     buffered byte parity, 404 rejection.
+   - Boundary check: passes on the tree; fails (exit 1) on injected
+     violations (verified for import and require forms).
+4. `npm run build`: dist listing unchanged - same 19 files as T07/T08's
    recorded listing (dev-probe chunk + 4 legacy pages + 12 legacy
-   scripts + 2 public assets). Local `vite build` deletes the tracked
-   dist/.gitkeep; restored via git checkout before committing
-   (pre-existing quirk, same as T06/T07).
-6. Not run: cargo build/nextest/clippy (no .rs touched, no trace-format
+   scripts + 2 public assets). Local build deletes tracked dist/.gitkeep;
+   restored via git checkout before committing (pre-existing quirk, same
+   as T06/T07/T08).
+5. Not run: cargo build/nextest/clippy (no .rs touched, no trace-format
    change; rust-embed embeds ui/dist, whose listing is unchanged - same
-   justification as T06/T07 per the AGENTS.md JS-only rule). No
-   test_*.js added, so no scripts/e2e-trace-tests.sh registration
-   needed (vitest CI picks the new suites up via the src/**/*.test.ts
-   include).
+   justification as T06/T07/T08 per the AGENTS.md JS-only rule). No
+   test_*.js added, so no scripts/e2e-trace-tests.sh registration needed
+   (vitest picks the new suites up via the src/**/*.test.ts include).
+   The legacy tests/core/parse_key.test.ts was NOT modified (T15 retires
+   it).
+
+## TEST NOTE (for reviewers of load.test.ts)
+
+Byte-parity assertions use Buffer.equals (memcmp) behind a small
+`expectBytesEqual` helper: vitest's `toEqual` deep-diffs typed arrays
+element-by-element and times out / OOMs the worker on the ~11 MB
+gunzipped demo trace. Do not "simplify" back to toEqual.
+
+## EXPECTED MERGE OVERLAPS (sibling worktrees T11/T12)
+
+- `package.json` "scripts": this branch adds `check:boundary` and
+  `pretest`. T11/T12 may add their own scripts (e.g. playwright) -
+  trivial additive-line merge; keep `pretest` pointing at
+  check:boundary.
+- Lockfile untouched by this branch (T07's note re T12's playwright
+  addition still applies).
 
 ## REMAINING
 
-None for T08. Intentionally left for later tickets:
+None for T09. Intentionally left for later tickets:
 
-- Canvas COMPONENTS (components/canvas/*) consuming this barrel; the
-  renderer registry mapping slices -> panels (architecture 2.3).
-- A binary-search "first visible index" helper (viewer.html's
-  lowerBound/findFirstVisible lore) - callers of pixelDownsampleSpans
-  need a startIdx; that helper reads sorted trace invariants and belongs
-  next to the derived-data caches (F5 ticket / lib/trace), not in
-  lib/canvas.
-- Trailing right-edge extension of the queue step line
-  (`ctx.lineTo(pw, lastY)` in legacy): a one-vertex caller concern via
-  polyline(); left to the queue panel component.
+- Page wiring of keys/title/load/reparse/query (index/viewer/flamegraph
+  page tickets own their rows; extractPrefix and the listing table stay
+  in index.html for its page ticket).
+- Segment windowing (`segments.ts`, `aggregates.ts`, architecture 2.8) -
+  T17; worker execution of parses - T16; both explicitly out of scope.
+- T15: re-point tests/core/parse_key.test.ts consumers at
+  lib/trace/keys.ts and retire the extract-from-index.html mechanism.
+- The binary-search "first visible index" helper (T08's note): still
+  unowned, belongs near the derived-data caches (F5) - not part of
+  2.7's file list, so not added here.
 
 ## BLOCKERS
 
 None.
 
-## NOTES FOR THE INTEGRATOR / SUCCESSORS
+## OPEN QUESTIONS (non-blocking, flagged for the integrator)
 
-- The stroke DoD bound is per series()/tick() call: series() emits
-  <= ceil(drawW) vertices per subpath, tick() <= 1 subpath per column
-  per style. polyline() is the unchecked escape hatch - reviewers should
-  treat unexplained polyline() calls in components as a smell.
-- drawStrokeBatches resets dash to solid but leaves
-  strokeStyle/lineWidth at the last style's values - callers set their
-  own state before further stroking, as all legacy code already does.
-- createCanvasSizer assumes it is the ONLY writer of its canvas's size:
-  one sizer per canvas, created once at component mount, not per frame
-  (a fresh sizer forgets the applied geometry and resizes once).
-- The unchanged-geometry path does not clear the canvas; components must
-  fully repaint (all legacy panels do - background fill first).
-- LOCKFILE: unchanged by this branch (T07's @vitest/coverage-v8 note
-  still applies against T12's playwright addition).
+- Unknown-layout keys now contribute nothing but `segs` to
+  traceTitleParams (legacy leaked shifted fields AND their
+  filename-derived epoch into `svc`/`from`). If the index page ticket
+  wants `from`/`to` for unknown keys, the epoch is filename-derived and
+  layout-independent - it could move onto the `unknown` variant later
+  (additive, non-breaking).
