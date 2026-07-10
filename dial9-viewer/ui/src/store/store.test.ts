@@ -114,6 +114,35 @@ describe("slice isolation", () => {
   });
 });
 
+describe("no in-place slice mutation (audit finding 1)", () => {
+  it("freezes initial and replaced slices in dev builds: in-place writes throw", () => {
+    const raf = fakeRaf();
+    const store = createStore(testState(), { scheduler: raf.scheduler });
+    const initial = store.getState();
+    expect(() => {
+      // @ts-expect-error slice fields are readonly through getState()
+      initial.a.n = 99;
+    }).toThrow(TypeError);
+
+    store.update("a", { n: 1 });
+    const replaced = store.getState();
+    expect(() => {
+      // @ts-expect-error slice fields stay readonly on the replaced slice
+      replaced.a.n = 99;
+    }).toThrow(TypeError);
+    expect(store.getState().a.n).toBe(1); // neither write landed
+  });
+
+  it("does not freeze slices outside dev builds (release pays nothing)", () => {
+    vi.stubEnv("DEV", false);
+    const raf = fakeRaf();
+    const store = createStore(testState(), { scheduler: raf.scheduler });
+    expect(Object.isFrozen(store.getState().a)).toBe(false);
+    store.update("a", { n: 1 });
+    expect(Object.isFrozen(store.getState().a)).toBe(false);
+  });
+});
+
 describe("one notification per frame (fake RAF)", () => {
   it("coalesces many updates across slices into one frame callback and one run per subscriber", () => {
     const raf = fakeRaf();

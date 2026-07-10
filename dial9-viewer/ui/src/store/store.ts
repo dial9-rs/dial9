@@ -8,7 +8,12 @@
 // - A patch is merged into a FRESH slice object (the slice is replaced
 //   wholesale, never mutated); the root state object keeps a stable
 //   identity for the store's lifetime. Slice identity change is the
-//   invalidation signal for derived() caches (F5).
+//   invalidation signal for derived() caches (F5). The no-mutation rule is
+//   enforced two ways (audit finding 1): the exposed state is typed
+//   one-level-deep readonly (ReadonlyState), and dev builds Object.freeze
+//   every slice so an in-place write throws instead of silently skipping
+//   dirty tracking. The freeze is gated on import.meta.env.DEV (like N18)
+//   so release builds pay nothing.
 // - The scheduler coalesces all notifications into ONE tick per frame and
 //   runs each subscriber at most once per frame (F2/N2). Subscribers
 //   declare the slices they depend on and run only when one of those
@@ -46,17 +51,27 @@ export interface StoreOptions {
 export type SliceKey<S> = Extract<keyof S, string>;
 
 /**
+ * One-level-deep readonly view of a state shape: slices cannot be
+ * reassigned AND a slice's own fields cannot be written (a plain
+ * Readonly<S> only guards the first). In-place slice mutation bypasses
+ * dirty tracking and derived() identity invalidation, so it must not
+ * typecheck (audit finding 1). Deeper interiors rely on the T06 shapes'
+ * own readonly modifiers (ReadonlySet/ReadonlyMap/readonly fields).
+ */
+export type ReadonlyState<S> = { readonly [K in keyof S]: Readonly<S[K]> };
+
+/**
  * A store subscriber. `changed` is the full set of slices that changed in
  * the flushed frame (it may include slices the subscriber did not declare).
  */
 export type Subscriber<S> = (
-  state: Readonly<S>,
+  state: ReadonlyState<S>,
   changed: ReadonlySet<SliceKey<S>>,
 ) => void;
 
 export interface Store<S> {
   /** The live state root (stable identity; slices replaced on update). */
-  getState(): Readonly<S>;
+  getState(): ReadonlyState<S>;
   /** Merge `patch` into a fresh copy of `slice` and schedule notification. */
   update<K extends SliceKey<S>>(slice: K, patch: Readonly<Partial<S[K]>>): void;
   /**
@@ -125,6 +140,15 @@ export function createStore<S extends { [K in keyof S]: object }>(
   const scheduler: FrameScheduler =
     options?.scheduler ?? ((cb) => { requestAnimationFrame(cb); });
   const state: S = { ...initial };
+  if (import.meta.env.DEV) {
+    // Dev-only (finding 1): freeze every slice so an in-place field write
+    // throws (strict mode) instead of silently desyncing subscribers and
+    // derived() caches. Slices handed to createStore are store-owned from
+    // here on, per the replace-wholesale contract above.
+    for (const key of Object.keys(state)) {
+      Object.freeze(state[key as SliceKey<S>]);
+    }
+  }
   const subscribers = new Set<SubEntry<S>>();
   let dirty = new Set<SliceKey<S>>();
   let scheduled = false;
@@ -158,7 +182,10 @@ export function createStore<S extends { [K in keyof S]: object }>(
   return {
     getState: () => state,
     update(slice, patch) {
-      state[slice] = Object.assign({}, state[slice], patch);
+      const next = Object.assign({}, state[slice], patch);
+      // Dev-only freeze of the fresh slice (finding 1; see header).
+      if (import.meta.env.DEV) Object.freeze(next);
+      state[slice] = next;
       dirty.add(slice);
       if (!scheduled) {
         scheduled = true;
