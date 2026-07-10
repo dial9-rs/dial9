@@ -33,6 +33,7 @@ import type {
   FlamegraphResponse,
 } from "../../lib/trace/index.js";
 import { createFlamegraph } from "../../lib/canvas/index.js";
+import { mountCopyLink } from "../../lib/url/index.js";
 import type { PageEls } from "./dom.js";
 import { buildApiUrl, buildBrowserQuery, seedFacetState, type ApiQueryState } from "./query.js";
 
@@ -44,6 +45,12 @@ interface AvailFacet {
 
 export function runApiMode(params: URLSearchParams, els: PageEls): void {
   const { loadingEl, errorEl, containerEl, titleEl, statsEl } = els;
+
+  // Copy-link (T19). No beforeCopy flush here: api mode has no debounced
+  // view-state sync - the URL is already current, because Apply/facet
+  // changes pushState it synchronously (F180) and canvas zoom is
+  // deliberately NOT URL-synced in this mode (legacy parity).
+  mountCopyLink(els.headerEl);
 
   // --- Filter toolbar (data-driven) ---
   // The facet controls (Thread / Source / Host) are NOT hard-coded:
