@@ -102,6 +102,17 @@ let assertViolations = 0;
  * N18 dev-build assertion: render-marked functions call this at entry.
  * Throws in dev builds when the caller is running outside a store
  * notification tick; compiled out of release bundles (import.meta.env.DEV).
+ *
+ * SCOPE LIMITATION (audit finding 4): notifyDepth is one module-level
+ * counter shared by every store and every subscriber, so this asserts
+ * "inside SOME store's notification tick", NOT "fired by the subscription
+ * that owns this render". A render invoked synchronously by an UNRELATED
+ * subscriber (or a subscriber of a different store) passes the check -
+ * exactly the scoping bypass F2's renderer-registry rule exists to
+ * prevent. N18-clean is therefore necessary but NOT sufficient evidence
+ * of correct render wiring; the renderer registry (which maps changed
+ * slices to affected canvases only) remains the authority reviewers must
+ * check.
  */
 export function assertInScheduledRender(context?: string): void {
   if (!import.meta.env.DEV) return;
