@@ -102,14 +102,22 @@
 
   // Registered new-UI entry for a canonical page, or null when the page has
   // no usable registration.
-  // A self-registration ("x.html" -> "x.html") would make the legacy-side
-  // dispatch redirect reload the page forever; treat it as unregistered.
+  // An entry that is itself a registry key would make the legacy-side
+  // dispatch loop through location.replace() with no escape - a
+  // self-registration ("x.html" -> "x.html") reloads forever, and a
+  // cross-registration cycle ("a.html" -> "b.html" -> "a.html") hops
+  // forever because buildQuery strips the `ui` param on every new-bound
+  // hop, so not even `?ui=legacy` survives into the loop (T38 audit
+  // finding 3). New-UI entries live off-root, so a legitimate entry is
+  // never a key; treat any that is as unregistered.
   function registeredEntry(page, registry) {
     var entry =
       page && Object.prototype.hasOwnProperty.call(registry, page)
         ? registry[page]
         : null;
-    if (entry === page) return null;
+    if (entry && Object.prototype.hasOwnProperty.call(registry, entry)) {
+      return null;
+    }
     return entry;
   }
 

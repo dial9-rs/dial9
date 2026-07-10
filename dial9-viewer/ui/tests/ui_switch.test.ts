@@ -11,9 +11,10 @@
 // porting), the no-registered-target behavior (no redirect, no control),
 // the storage-throw fallback, click-time target resolution against the
 // live location (T38-audit finding 1: the pages rewrite their query string
-// after boot), and legacy-pin storage alignment (T38-audit finding 2: the
-// pages strip the ui=legacy pin). The DoD items that need a real migrated
-// page
+// after boot), legacy-pin storage alignment (T38-audit finding 2: the
+// pages strip the ui=legacy pin), and the registry cycle guard plus the
+// shipped-registry acyclicity walk (T38-audit finding 3). The DoD items
+// that need a real migrated page
 // (round-trip in a browser, zoom-state isolation) are pending T13/T14 - see
 // HANDOFF.md.
 
@@ -236,6 +237,54 @@ describe("no registered target (the shipped state today)", () => {
     );
     expect(d.redirect).toBeNull();
     expect(d.control).toBeNull();
+  });
+});
+
+describe("registry cycle guard (T38-audit finding 3)", () => {
+  // A cross-registration cycle between two canonical pages would
+  // location.replace()-loop forever with no escape: buildQuery strips the
+  // ui param on every new-bound hop, so not even ?ui=legacy survives into
+  // the loop. New-UI entries live off-root, so a legitimate entry is never
+  // itself a registry key - any entry that IS one (self- or
+  // cross-registration) is a misconfiguration and must not dispatch.
+  const CYCLIC = { "a.html": "b.html", "b.html": "a.html" };
+  it("a two-page cross-registration cycle never dispatches from either node", () => {
+    for (const page of ["a.html", "b.html"]) {
+      const viaParam = decide(
+        input({ page, search: "?ui=new", registry: CYCLIC }),
+      );
+      expect(viaParam.redirect).toBeNull();
+      expect(viaParam.control).toBeNull();
+      // The pref-driven variant is the one that loops pre-fix (the param
+      // is stripped on the first hop, the stored pref keeps firing):
+      const viaPref = decide(
+        input({ page, search: "", storedPref: "new", registry: CYCLIC }),
+      );
+      expect(viaPref.redirect).toBeNull();
+      expect(viaPref.control).toBeNull();
+    }
+  });
+  it("an entry that is itself a registry key is rejected; innocent keys still dispatch", () => {
+    const chain = { "a.html": "b.html", "b.html": "new/b.html" };
+    const bad = decide(input({ page: "a.html", search: "?ui=new", registry: chain }));
+    expect(bad.redirect).toBeNull();
+    expect(bad.control).toBeNull();
+    const good = decide(input({ page: "b.html", search: "?ui=new", registry: chain }));
+    expect(good.redirect).toBe("/new/b.html");
+  });
+  it("the live href resolver applies the same guard", () => {
+    expect(
+      liveControlHref("legacy", "a.html", "/a.html", "?trace=x", CYCLIC),
+    ).toBeNull();
+  });
+  it("the shipped registry is acyclic: no entry is a registry key", () => {
+    // The registry is data; T13/T14/T41 add lines independently during
+    // the wave. Walk it: an entry that is itself a key (self- or
+    // cross-registration) could only produce a dispatch loop.
+    const keys = Object.keys(NEW_UI_ENTRIES);
+    for (const [page, entry] of Object.entries(NEW_UI_ENTRIES)) {
+      expect(keys, `entry for ${page} must not be a registry key`).not.toContain(entry);
+    }
   });
 });
 
