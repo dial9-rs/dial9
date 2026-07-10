@@ -1,230 +1,136 @@
-# T09 HANDOFF - lib/trace: typed boundary around the frozen core
+# T18 HANDOFF - lib/trace/aggregates: tier-1 aggregates client
 
-(Replaces the T08 HANDOFF inherited through the branch chain; T08's own
-record lives at commit 0acc10a.)
+(Replaces the T09 HANDOFF inherited through the branch chain; T09's own
+record lives at commit 9fd0cb3.)
 
 ## STATUS
 
-DONE - all DoD checks pass (evidence below). No STOP-gate hit. Mechanism
-only: no page wiring, no component/store changes, no frozen-core .js
-edits, no page HTML edits, no Rust touched. Segment windowing (T17) and
-worker execution (T16) untouched.
+DONE - all DoD checks pass (evidence below). No STOP-gate hit. Client
+mechanism only: no consuming UI (minimap etc. = chunk 2), no server
+changes, no .rs edits (the verified dev-server recipe made the
+"extend dev_server.rs" exploration unnecessary), no frozen-core .js
+edits. All dev-servers started for fixture capture were killed (port
+3041 verified free after each run).
 
-## COMPLETED (commits on `ticket/T09-lib-trace-boundary`, on top of 0acc10a)
+## COMPLETED (commits on `ticket/T18-aggregates-client`, on top of 9fd0cb3)
 
-- `dbc9085` keys.ts + keys.test.ts: parseKey ported from index.html
-  (1006-1059) with the `layout: 'known' | 'unknown'` discriminant
-  (ADR-0004 section 1 defect fix) + formatEpoch.
-- `27af934` title.ts + title.test.ts: traceTitleParams ported from
-  index.html (1686-1702).
-- `4e4edb4` load.ts + load.test.ts: loadTrace/loadTraceStreamed/
-  loadTraceBuffered/parseTraceBuffer/objectTraceUrls + the trace_parser.js
-  typed pass-through surface.
-- `3587bd7` query.ts + reparse.ts (+ tests): lane-click read helpers and
-  the Set/Clear-Range windowed re-parse.
-- `27bd5a4` analysis.ts (trace_analysis.js facade) + index.ts barrel;
-  src/lib/trace/.gitkeep removed.
-- `78292df` scripts/check-core-imports.mjs + package.json wiring
-  (check:boundary + pretest).
+- `4b1c4ac` fixtures: 6 recorded JSON responses + 1 real 404 text body
+  under `dial9-viewer/ui/tests/fixtures/aggregates/`.
+- `2bc905b` `src/lib/trace/aggregates.ts` + barrel exports in
+  `src/lib/trace/index.ts`: wire types for both endpoints (derived from
+  src/server/flamegraph.rs, tokio_stats.rs, src/ingest/aggregate.rs),
+  URL builders (repeatable `host=`, `refine=true` literal - serde bool,
+  never `1`; string-typed ns bounds for >2^53 precision), injectable
+  fetch, the AggregateResult union with the CoverageSignal
+  (full/partial/none), AggregatesRequestError for non-404 failures, and
+  `refineUntilFrozen`.
+- `46e6fe5` `src/lib/trace/aggregates.test.ts`: 28 vitest tests, fixture
+  recipe documented in the header.
 - (final commit): this HANDOFF.
 
-## WHAT WAS BUILT (and the decisions inside it)
+## DESIGN DECISIONS (within pre-ruled bounds)
 
-All under `dial9-viewer/ui/src/lib/trace/`, tests colocated. `index.ts`
-is the only import surface the rest of `src/` sees (explicit named
-re-exports, not `export *`, so a name collision between modules is a
-compile error instead of a silently-omitted star export).
+- Coverage signal rule (documented on `coverageSignal`):
+  no coverage block -> `full` (non-demand-driven single fetch, the
+  legacy page's interpretation at flamegraph.html:415-420);
+  `files_matched === 0 || files_folded === 0` -> `none`;
+  folded < matched on files OR hosts -> `partial`; else `full`.
+- Refine-loop termination (documented on `refineUntilFrozen`): one
+  read-only poll, then refine polls; stop when FROZEN (`files_folded`
+  did not increase between consecutive polls - mirrors
+  flamegraph_api.js:56-61 isCoverageFrozen semantics, reimplemented; the
+  page-adjacent file is NOT imported into src/) or at the CEILING
+  (default `DEFAULT_MAX_REFINE_POLLS = 30` refine polls, exported).
+  The legacy plateau heuristic (shouldAutoStopRefining) is deliberately
+  NOT implemented - noted in the doc comment as a chunk-2 consumer
+  policy (layerable via `onResult` + abort).
+- No built-in pacing (legacy page waits 800ms between polls - a UI
+  policy); consumers pace inside the `poll` closure. Documented.
+- The server tree type is exported as `ApiFlamegraphNode`: the barrel
+  already exports the frozen core's differently-shaped `FlamegraphNode`
+  (trace_analysis.js), and the barrel's explicit-named-exports rule
+  makes that collision a compile error otherwise.
+- 401/403/421/500 throw `AggregatesRequestError` (status + body); only
+  404 and flag-false are "no data" per the ticket's pre-ruling.
 
-### keys.ts (01 I2; ADR-0004 section 1 defect fix)
+## FIXTURE RECIPE (reproducible; captured 2026-07-10; also in the test header)
 
-- `parseKey(key)` -> `{ layout: "known", service, host, bootId, epoch,
-  segIndex }` for the #225 layout (date + 5 components), the legacy
-  pre-#225 layout (date + 4, bootId ""), and the dateless positional
-  fallback (>= 5 components, no date-shaped segment anywhere).
-- DEFECT FIX: a key with a date-shaped segment but an undocumented
-  component count now returns `{ layout: "unknown", rawKey }` - the
-  legacy code positionally shifted columns here (features/01 Finding 1:
-  the dev-server's 6-segment demo key showed Service=host-0, Host=abcd).
-  Short dateless keys (legacy returned `host=<raw key>`) are also
-  `unknown`. The positional fallback survives ONLY where it was
-  genuinely best-effort (no date segment at all).
-- The legacy result's lazy `traceStart` getter read the page-global
-  `useLocalTz`; parsing is now pure - pages call
-  `formatEpoch(key.epoch, { localTz })` at render time (ported from
-  index.html:988-1004, UTC default like the legacy initial state).
+The stock dev-server's aggregate endpoints are functional against its
+seeded demo bucket - no dev_server.rs changes:
 
-### title.ts (01 I3)
+    cd dial9-viewer/ui && npm run build
+    CARGO_TARGET_DIR=<repo>/target PORT=3041 \
+      cargo run -p dial9-viewer --bin dev-server --features dev-server
 
-- `traceTitleParams(keys, { localTz? })` -> URLSearchParams with `svc`
-  (unique services ", "-joined), `host` (single-host only; multi-host
-  drops it), `from`/`to` (min/max epoch; `from` alone for one distinct
-  epoch), `segs` (always). Unknown-layout keys contribute only to `segs`
-  - the deliberate consequence of the keys.ts defect fix (legacy fed the
-  demo key's shifted fields into the title as `svc=host-0`).
+Capture log (fold state is per server run; restart between endpoint
+sequences so both colds are genuinely cold):
 
-### load.ts (02 B12/B14/B17 mechanism, 01 I4)
+    curl 'http://localhost:3041/api/flamegraph?bucket=demo-traces&prefix=traces'
+      -> flamegraph-cold.json    638 B   (folded 0/1, empty tree, total_samples 0)
+    curl '...&refine=true'
+      -> flamegraph-refine.json  124906 B (folded 1/1, hosts 1/1, total_samples 147,
+                                           facets populated: source=[cpu,sched])
+    curl (read-only again)
+      -> flamegraph-warm.json    124906 B (identical folded counts -> frozen)
+    (restart server)
+    curl 'http://localhost:3041/api/tokio-stats?bucket=demo-traces&prefix=traces'
+      -> tokio-stats-cold.json   199 B   (folded 0/1, total_polls 0)
+    curl '...&refine=true'
+      -> tokio-stats-refine.json 32490 B (folded 1/1, total_polls 94212)
+    curl (read-only again)
+      -> tokio-stats-warm.json   32490 B (frozen)
+    curl '...prefix=no-such-prefix' (flamegraph)
+      -> not-found-no-match.txt  32 B    (REAL 404, text/plain,
+                                          "no source files match this scope";
+                                          tokio-stats returns the identical
+                                          status/body, verified on the wire)
 
-- `loadTrace(urls, opts)`: STREAM whenever `canStreamDecode()` (single
-  URL via fetchTraceStream, multiple via fetchTracesStream), buffered
-  fetchTraces+parseTrace fallback otherwise - the B12 selection, minus
-  the page chrome. Returns `{ trace, buffer, mode }`; `buffer` is the
-  raw gunzipped concatenation (stream path captures chunks while parsing
-  and reassembles, exactly the streamAndShowTrace mechanism) so
-  Set/Clear-Range re-parses never re-fetch (B14).
-- Options are flat (`FetchOptions & ParseOptions`) and split internally;
-  headers/signal go to fetch only, parse options to the parser only.
-- Page concerns intentionally NOT here: loading labels/timers, loadPerf
-  records, AbortError swallowing, the HTTP-401 credentials hint, alerts,
-  drop-zone resets. File-drop = `parseTraceBuffer(fileReaderResult)`;
-  demo = `loadTrace("demo-trace.bin")`. Credential header INJECTION
-  (B17, `Dial9Creds.headers()`) is a caller concern - pass `headers` in.
-- `objectTraceUrls(bucket, keys)` ported verbatim from
-  index.html:1713-1720 (01 I4).
-- Also the typed pass-through of the rest of the trace_parser.js surface
-  (EVENT_TYPES, OFF_WORKER_WORKER_ID, formatFrame, symbolizeChain,
-  deduplicateSamples, deriveBlockInPlaceGaps + types incl.
-  DecodedFieldValue from decode.js). Rule of thumb: load.ts re-exports
-  trace_parser.js, analysis.ts re-exports trace_analysis.js.
-
-### reparse.ts (02 E3/E4, B14)
-
-- `reparseWithRange(buffer, { startNs?, endNs? }, opts?)`: in-memory
-  re-parse with bounds forwarded only when set (an absent bound is open,
-  not 0). `isRangeActive(range)` is the Clear-Range-visibility predicate.
-- Tests pin the core's contract for a single open edge: with an active
-  filter, `filterEndTime` surfaces as the parser's Infinity default
-  (null means "unfiltered") - callers should not assume null.
-
-### query.ts (02 G13/G14)
-
-- `findSpanAt(spans, ns)`: the poll-at-timestamp binary search
-  (viewer.html:2618-2626); non-overlapping spans sorted by start.
-- `taskAt(polls, ns)`: poll + taskId with the legacy "taskId 0 means no
-  task tracking" truthiness preserved (surfaces as null, poll returned).
-- `findContainingSpan(allSpans, workerId, ns)` + `spanAncestryAt(span,
-  byId, ns)` + `spansById(allSpans)`: the lane-click span focus walk.
-  BEHAVIOR NOTE: the legacy cycle guard watched the id SET's size, which
-  stops growing once a cycle revisits a span - a parent cycle shorter
-  than 1024 hung the page. The port counts steps (same 1024 cap,
-  `SPAN_ANCESTRY_CYCLE_LIMIT`); identical results on well-formed chains
-  (both stop after 1024 ancestor hops), but real cycles now terminate.
-- `enclosingSpans` re-exported typed from the core (it already lives
-  there).
-
-### analysis.ts
-
-- Typed re-exports of the trace_analysis.js analysis surface: flamegraph
-  builds (buildFlamegraphTree/flattenFlamegraph/buildFgData; heap via
-  analyzeAllocations), blocking-call analysis (computeSchedulingDelays,
-  computePollWakes), task lifecycle (buildActiveTaskTimeline), worker
-  spans (buildWorkerSpans, attachCpuSamples), runtime groups, span data,
-  POIs, process CPU series, getTraceTimeRange, hasCpuProfileSamples,
-  computeSpanLayout (fence-sitter: may migrate behind lib/canvas when
-  the span-panel component lands).
-- NOT here (lib/canvas owns them per T08): pixelDownsampleSpans,
-  pixelCoverage, makeBarCoalescer, pollHeatmapColor(Quantized),
-  flamegraphColor.
-
-### scripts/check-core-imports.mjs (the boundary rule)
-
-- Plain Node (constraint S1, no new deps): fails when any file under
-  src/ outside src/lib/trace/ and src/lib/canvas/ imports a ui-root .js
-  module (static import, export-from, dynamic import(), require()).
-  Exempt: `*.d.ts` (ambient wildcard declarations, no runtime import)
-  and `src/types/probe.ts` (T05's tsc-only probe; no Vite input
-  references it, never ships).
-- Wired as `check:boundary` + `pretest` in package.json: `npm run test`
-  runs it first, and the ui CI job already runs `npm run test`
-  (.github/workflows/ci.yml `ui` job), so CI enforces the boundary WITH
-  NO WORKFLOW EDIT. Negative-tested during development: an import probe
-  in src/pages/ and a require probe in src/store/ both exit 1.
-
-## INTEROP
-
-Same pattern T08 documented: plain ESM named imports with relative
-specifiers to the core .js files (`import { parseTrace } from
-"../../../trace_parser.js"`), typed by the T05 ambient wildcards;
-`import type` for types under verbatimModuleSyntax. vite-node resolves
-the CJS-guard named exports; nothing in the rollup input graph imports
-lib/trace yet, so dist/ is unchanged.
+The no-agg-context 404 flavor is NOT producible from this dev-server
+(it always allows BYO creds, so `agg_context_for` succeeds for any
+bucket param); tests synthesize it with a stubbed fetch, shape-checked
+against the handlers' `(StatusCode::NOT_FOUND, String)` rejections
+(tokio_stats.rs:80-84, flamegraph.rs:203-208): plain-text body, 404.
 
 ## DoD EVIDENCE
 
-All run in dial9-viewer/ui (npm ci done):
-
-1. `npx tsc --noEmit`: clean (exit 0).
-2. `npm run test`: pretest boundary check OK, then 21 files, 251 tests,
-   all pass (201 inherited + 50 new: keys 13, title 7, load 11,
-   query 12, reparse 4, analysis 3).
-3. DoD axes:
-   - keys.ts vs documented layouts (keys.test.ts): #225 layout (with and
-     without prefix), legacy layout, positional fallback, and the
-     unknown discriminant - including the exact features/01 Finding 1
-     demo key `traces/2026-04-09/1900/demo-service/local/host-0/abcd/
-     1744224000-0.bin.gz` asserted to yield `{ layout: "unknown",
-     rawKey }`, NOT shifted fields.
-   - title.ts vs features/01 I3 (title.test.ts): single-host case sets
-     `host=`, multi-host case drops it; from/to window; segs.
-   - load.ts fetch+gunzip+concat (load.test.ts): the test_fetch_traces
-     fixture pattern (in-memory gzip of public/demo-trace.bin + stubbed
-     global fetch) - raw round-trip, client-side gunzip, mixed
-     concat-in-order parsing to 2x events, header forwarding, stream vs
-     buffered byte parity, 404 rejection.
-   - Boundary check: passes on the tree; fails (exit 1) on injected
-     violations (verified for import and require forms).
-4. `npm run build`: dist listing unchanged - same 19 files as T07/T08's
-   recorded listing (dev-probe chunk + 4 legacy pages + 12 legacy
-   scripts + 2 public assets). Local build deletes tracked dist/.gitkeep;
-   restored via git checkout before committing (pre-existing quirk, same
-   as T06/T07/T08).
-5. Not run: cargo build/nextest/clippy (no .rs touched, no trace-format
-   change; rust-embed embeds ui/dist, whose listing is unchanged - same
-   justification as T06/T07/T08 per the AGENTS.md JS-only rule). No
-   test_*.js added, so no scripts/e2e-trace-tests.sh registration needed
-   (vitest picks the new suites up via the src/**/*.test.ts include).
-   The legacy tests/core/parse_key.test.ts was NOT modified (T15 retires
-   it).
-
-## TEST NOTE (for reviewers of load.test.ts)
-
-Byte-parity assertions use Buffer.equals (memcmp) behind a small
-`expectBytesEqual` helper: vitest's `toEqual` deep-diffs typed arrays
-element-by-element and times out / OOMs the worker on the ~11 MB
-gunzipped demo trace. Do not "simplify" back to toEqual.
-
-## EXPECTED MERGE OVERLAPS (sibling worktrees T11/T12)
-
-- `package.json` "scripts": this branch adds `check:boundary` and
-  `pretest`. T11/T12 may add their own scripts (e.g. playwright) -
-  trivial additive-line merge; keep `pretest` pointing at
-  check:boundary.
-- Lockfile untouched by this branch (T07's note re T12's playwright
-  addition still applies).
+- `npx tsc --noEmit`: clean (exit 0).
+- `npm run test`: 22 files / 279 tests passed (includes pretest
+  boundary check: "check-core-imports: OK"). The new suite alone:
+  28/28 passed.
+- Refine-sequence check: `refineUntilFrozen` driven over the recorded
+  cold/refine/warm fixtures terminates frozen in exactly 3 requests
+  for BOTH endpoints, with refine params `[absent, true, true]` on the
+  wire and progressive signals none -> full -> full via onResult.
+- Degradation matrix (each without throwing):
+  - 404 no-agg-context (synthetic) -> unavailable(not-found), coverage
+    none, body text surfaced as `message` - both endpoints;
+  - 404 no-files-match (real recorded body) -> same shape;
+  - aggregation_enabled=false -> unavailable(disabled), coverage none,
+    fetch stub provably never invoked;
+  - partial counts (12/480 files, 8/40 hosts) -> data with coverage
+    "partial"; plus the full unit matrix for coverageSignal /
+    isCoverageFrozen (none/partial/full, frozen/not-frozen edges);
+  - 500 still throws AggregatesRequestError (status + body preserved).
+- `npm run build`: dist file listing byte-identical before/after
+  (19 files; aggregates.ts is not a Vite input - `find dist -type f`
+  diff empty). rust-embed unaffected (dist unchanged); dial9-viewer
+  compiled fine during the dev-server runs.
+- Boundary: aggregates.ts lives in `src/lib/trace/` (allowed dir);
+  check-core-imports passes; flamegraph_api.js not imported.
 
 ## REMAINING
 
-None for T09. Intentionally left for later tickets:
+None for T18.
 
-- Page wiring of keys/title/load/reparse/query (index/viewer/flamegraph
-  page tickets own their rows; extractPrefix and the listing table stay
-  in index.html for its page ticket).
-- Segment windowing (`segments.ts`, `aggregates.ts`, architecture 2.8) -
-  T17; worker execution of parses - T16; both explicitly out of scope.
-- T15: re-point tests/core/parse_key.test.ts consumers at
-  lib/trace/keys.ts and retire the extract-from-index.html mechanism.
-- The binary-search "first visible index" helper (T08's note): still
-  unowned, belongs near the derived-data caches (F5) - not part of
-  2.7's file list, so not added here.
+## BLOCKERS / NOTES FOR INTEGRATION
 
-## BLOCKERS
-
-None.
-
-## OPEN QUESTIONS (non-blocking, flagged for the integrator)
-
-- Unknown-layout keys now contribute nothing but `segs` to
-  traceTitleParams (legacy leaked shifted fields AND their
-  filename-derived epoch into `svc`/`from`). If the index page ticket
-  wants `from`/`to` for unknown keys, the epoch is filename-derived and
-  layout-independent - it could move onto the `unknown` variant later
-  (additive, non-breaking).
+- Barrel merge overlap (expected, trivial): T16 also appends a section
+  to `src/lib/trace/index.ts` in another worktree. T18's block is
+  appended at the end of the file (after the analysis.ts section).
+  Resolve by keeping both sections.
+- `Coverage`/`CoverageSignal` types live in aggregates.ts and are
+  barrel-exported; chunk-2 consumers (minimap, tokio-stats page) should
+  consume the signal, not recompute from counts.
+- tokio-stats quirk carried into the types: its `coverage.samples_folded`
+  is files READ this request (server comment, tokio_stats.rs:184),
+  documented on `TokioStatsResponse.coverage`.
