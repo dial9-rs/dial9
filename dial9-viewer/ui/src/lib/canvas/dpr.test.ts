@@ -3,7 +3,7 @@
 // pure (planBackingStore); the binding is driven with a recording stub
 // that counts every canvas write.
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, afterEach } from "vitest";
 import { createCanvasSizer, planBackingStore } from "./dpr.js";
 import type { CanvasGeometry, DprCanvas, DprTransformContext } from "./dpr.js";
 
@@ -204,5 +204,25 @@ describe("createCanvasSizer (binding)", () => {
     sizer.ensure(800, 60);
     expect(sizer.geometry()).toEqual(geom(800, 60, 1));
     expect(canvas.log).toContain("setTransform(1,0,0,1,0,0)");
+  });
+
+  describe("with a live devicePixelRatio global", () => {
+    afterEach(() => vi.unstubAllGlobals());
+
+    it("defaults dpr to devicePixelRatio (legacy `devicePixelRatio || 1`)", () => {
+      vi.stubGlobal("devicePixelRatio", 2);
+      const canvas = makeStubCanvas();
+      createCanvasSizer(canvas).ensure(800, 60);
+      expect(canvas.log).toContain("width=1600");
+      expect(canvas.log).toContain("setTransform(2,0,0,2,0,0)");
+    });
+
+    it("guards a zero devicePixelRatio back to 1", () => {
+      vi.stubGlobal("devicePixelRatio", 0);
+      const canvas = makeStubCanvas();
+      const sizer = createCanvasSizer(canvas);
+      sizer.ensure(800, 60);
+      expect(sizer.geometry()).toEqual(geom(800, 60, 1));
+    });
   });
 });

@@ -238,14 +238,37 @@ describe("makeStrokeBatcher", () => {
     expect(b.batches().get("a")!.polylines).toHaveLength(2);
   });
 
-  it("empty series contribute no subpath", () => {
+  it("empty series / empty polylines contribute no subpath", () => {
     const b = makeStrokeBatcher();
-    b.series("queue", [] as Pt[], {
-      xOf: (p) => p.t,
-      yOf: (p) => p.v,
-      drawW: 100,
-    });
+    const opts = { xOf: (p: Pt) => p.t, yOf: (p: Pt) => p.v, drawW: 100 };
+    b.series("queue", [] as Pt[], opts);
+    b.stepSeries("queue", [] as Pt[], opts);
+    b.polyline("queue", []);
     expect(b.batches().size).toBe(0);
+  });
+
+  it("stepSeries: downsamples then step-expands, staying pixel-bounded", () => {
+    const b = makeStrokeBatcher();
+    const drawW = 20;
+    // Sparse regime: 3 samples across 20 columns -> knees appear.
+    b.stepSeries(
+      "queue",
+      [
+        { t: 0, v: 10 },
+        { t: 10, v: 20 },
+        { t: 19, v: 5 },
+      ] as Pt[],
+      { xOf: (p) => p.t, yOf: (p) => p.v, drawW },
+    );
+    const [pl] = b.batches().get("queue")!.polylines;
+    expect(pl).toEqual([
+      { x: 0, y: 10 },
+      { x: 10, y: 10 }, // knee carries y=10 to the step edge
+      { x: 10, y: 20 },
+      { x: 19, y: 20 }, // knee
+      { x: 19, y: 5 },
+    ]);
+    expect(pl!.length).toBeLessThanOrEqual(2 * Math.ceil(drawW));
   });
 });
 
@@ -352,6 +375,25 @@ describe("drawStrokeBatches", () => {
       "lineTo(5,2)",
       "moveTo(8,3)",
       "lineTo(9,4)",
+      "stroke",
+    ]);
+  });
+
+  it("defaults lineWidth to 1 and skips short subpaths inside a drawable batch", () => {
+    const b = makeStrokeBatcher();
+    b.polyline("plain", [{ x: 3, y: 3 }]); // too short: skipped in-path
+    b.polyline("plain", [
+      { x: 0, y: 0 },
+      { x: 4, y: 4 },
+    ]);
+    const ctx = makeRecordingCtx();
+    drawStrokeBatches(ctx, b.batches(), () => ({ strokeStyle: "#fff" }));
+    expect(ctx.calls).toEqual([
+      "strokeStyle=#fff",
+      "lineWidth=1",
+      "beginPath",
+      "moveTo(0,0)",
+      "lineTo(4,4)",
       "stroke",
     ]);
   });
