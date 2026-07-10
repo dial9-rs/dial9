@@ -53,10 +53,10 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result, bail, ensure};
+use dial9_trace_format::InternedString;
 use dial9_trace_format::encoder::{Encoder, Schema};
 use dial9_trace_format::schema::FieldDef;
 use dial9_trace_format::types::{FieldType, FieldValue};
-use dial9_trace_format::InternedString;
 
 const NS: u64 = 1_000_000_000;
 const MS: u64 = 1_000_000;
@@ -107,9 +107,8 @@ fn main() -> Result<()> {
             other => bail!("unknown argument: {other} (try --help)"),
         }
     }
-    let out = out.unwrap_or_else(|| {
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/parity/fixtures")
-    });
+    let out =
+        out.unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/parity/fixtures"));
 
     let schemas = Schemas::new();
     let mut sizes: Vec<(String, usize)> = Vec::new();
@@ -199,9 +198,21 @@ fn fixture_epoch(h: u8, m: u8, s: u8) -> i64 {
 /// with the date/HHMM path derived FROM the epoch so they always agree
 /// (unlike the demo key, whose filename epoch mismatches its date path —
 /// features/01 finding 3).
-fn layout_key(prefix: &str, service: &str, host: &str, boot: &str, epoch_s: i64, index: u32) -> String {
+fn layout_key(
+    prefix: &str,
+    service: &str,
+    host: &str,
+    boot: &str,
+    epoch_s: i64,
+    index: u32,
+) -> String {
     let dt = time::OffsetDateTime::from_unix_timestamp(epoch_s).expect("epoch in range");
-    let date = format!("{:04}-{:02}-{:02}", dt.year(), u8::from(dt.month()), dt.day());
+    let date = format!(
+        "{:04}-{:02}-{:02}",
+        dt.year(),
+        u8::from(dt.month()),
+        dt.day()
+    );
     let hhmm = format!("{:02}{:02}", dt.hour(), dt.minute());
     let tail = format!("{date}/{hhmm}/{service}/{host}/{boot}/{epoch_s}-{index}.bin.gz");
     if prefix.is_empty() {
@@ -278,7 +289,10 @@ impl Schemas {
                     f("tid", FieldType::Varint),
                 ],
             ),
-            queue: Schema::new("QueueSampleEvent", vec![f("global_queue", FieldType::Varint)]),
+            queue: Schema::new(
+                "QueueSampleEvent",
+                vec![f("global_queue", FieldType::Varint)],
+            ),
             task_spawn: Schema::new(
                 "TaskSpawnEvent",
                 vec![
@@ -288,7 +302,10 @@ impl Schemas {
                 ],
             ),
             clock_sync: Schema::new("ClockSyncEvent", vec![f("realtime_ns", FieldType::Varint)]),
-            metadata: Schema::new("SegmentMetadataEvent", vec![f("entries", FieldType::StringMap)]),
+            metadata: Schema::new(
+                "SegmentMetadataEvent",
+                vec![f("entries", FieldType::StringMap)],
+            ),
         }
     }
 }
@@ -297,12 +314,31 @@ impl Schemas {
 
 #[derive(Clone, Copy)]
 enum Ev {
-    PollStart { worker: u64, task: u64, loc: &'static str },
-    PollEnd { worker: u64 },
-    Park { worker: u64, cpu: u64, tid: u64 },
-    Unpark { worker: u64, cpu: u64, tid: u64 },
-    Queue { depth: u64 },
-    Spawn { task: u64, loc: &'static str },
+    PollStart {
+        worker: u64,
+        task: u64,
+        loc: &'static str,
+    },
+    PollEnd {
+        worker: u64,
+    },
+    Park {
+        worker: u64,
+        cpu: u64,
+        tid: u64,
+    },
+    Unpark {
+        worker: u64,
+        cpu: u64,
+        tid: u64,
+    },
+    Queue {
+        depth: u64,
+    },
+    Spawn {
+        task: u64,
+        loc: &'static str,
+    },
 }
 
 /// A poll planted to span a segment boundary (T17): the `PollStart` is the
@@ -344,7 +380,10 @@ struct SegmentContent<'a> {
 /// (uncompressed) bytes. Events are emitted in timestamp order.
 fn build_segment(sch: &Schemas, c: &SegmentContent<'_>) -> Result<Vec<u8>> {
     let span = c.mono_end_ns - c.mono_start_ns;
-    ensure!(span > 10 * NS, "segment span too short for the activity model");
+    ensure!(
+        span > 10 * NS,
+        "segment span too short for the activity model"
+    );
     let mut seed = c.seed;
 
     // (ts, seq, ev): seq keeps construction order stable across equal ts.
@@ -359,7 +398,7 @@ fn build_segment(sch: &Schemas, c: &SegmentContent<'_>) -> Result<Vec<u8>> {
         if c.silent.contains(&w) {
             continue;
         }
-        let tid = 40_000 + w as u64;
+        let tid = 40_000 + w;
         let stagger = wi as u64 * 7 * MS;
 
         // A dangling close must be the worker's FIRST event (a park/unpark
@@ -382,7 +421,15 @@ fn build_segment(sch: &Schemas, c: &SegmentContent<'_>) -> Result<Vec<u8>> {
         };
         ensure!(t < bg_end, "worker {w}: no room for background activity");
 
-        push(&mut evs, t, Ev::Unpark { worker: w, cpu: 0, tid });
+        push(
+            &mut evs,
+            t,
+            Ev::Unpark {
+                worker: w,
+                cpu: 0,
+                tid,
+            },
+        );
         t += MS;
 
         let bg_span = bg_end - t;
@@ -398,17 +445,49 @@ fn build_segment(sch: &Schemas, c: &SegmentContent<'_>) -> Result<Vec<u8>> {
             }
             let task = w * 100 + (k as u64 % 3);
             let loc = SPAWN_LOCS[((w as usize) + k) % SPAWN_LOCS.len()];
-            push(&mut evs, start, Ev::PollStart { worker: w, task, loc });
+            push(
+                &mut evs,
+                start,
+                Ev::PollStart {
+                    worker: w,
+                    task,
+                    loc,
+                },
+            );
             push(&mut evs, end, Ev::PollEnd { worker: w });
             cpu += poll_len;
             t += period;
         }
-        push(&mut evs, bg_end, Ev::Park { worker: w, cpu, tid });
+        push(
+            &mut evs,
+            bg_end,
+            Ev::Park {
+                worker: w,
+                cpu,
+                tid,
+            },
+        );
 
         if let Some(&(_, task, loc, ts)) = open {
             // Re-enter and leave the poll open across the segment end.
-            push(&mut evs, ts.saturating_sub(50 * MS), Ev::Unpark { worker: w, cpu, tid });
-            push(&mut evs, ts, Ev::PollStart { worker: w, task, loc });
+            push(
+                &mut evs,
+                ts.saturating_sub(50 * MS),
+                Ev::Unpark {
+                    worker: w,
+                    cpu,
+                    tid,
+                },
+            );
+            push(
+                &mut evs,
+                ts,
+                Ev::PollStart {
+                    worker: w,
+                    task,
+                    loc,
+                },
+            );
         }
     }
 
@@ -446,7 +525,11 @@ struct SegmentWriter<'a> {
 
 impl<'a> SegmentWriter<'a> {
     fn new(sch: &'a Schemas) -> Self {
-        Self { enc: Encoder::new(), sch, interned: HashMap::new() }
+        Self {
+            enc: Encoder::new(),
+            sch,
+            interned: HashMap::new(),
+        }
     }
 
     fn intern(&mut self, s: &'static str) -> Result<InternedString> {
@@ -465,7 +548,13 @@ impl<'a> SegmentWriter<'a> {
                 let loc = self.intern(loc)?;
                 self.enc.write_event(
                     &self.sch.poll_start,
-                    &[Varint(ts), Varint(worker), Varint(0), Varint(task), PooledString(loc)],
+                    &[
+                        Varint(ts),
+                        Varint(worker),
+                        Varint(0),
+                        Varint(task),
+                        PooledString(loc),
+                    ],
                 )?;
             }
             Ev::PollEnd { worker } => {
@@ -475,13 +564,26 @@ impl<'a> SegmentWriter<'a> {
             Ev::Park { worker, cpu, tid } => {
                 self.enc.write_event(
                     &self.sch.park,
-                    &[Varint(ts), Varint(worker), Varint(0), Varint(cpu), Varint(tid)],
+                    &[
+                        Varint(ts),
+                        Varint(worker),
+                        Varint(0),
+                        Varint(cpu),
+                        Varint(tid),
+                    ],
                 )?;
             }
             Ev::Unpark { worker, cpu, tid } => {
                 self.enc.write_event(
                     &self.sch.unpark,
-                    &[Varint(ts), Varint(worker), Varint(0), Varint(cpu), Varint(0), Varint(tid)],
+                    &[
+                        Varint(ts),
+                        Varint(worker),
+                        Varint(0),
+                        Varint(cpu),
+                        Varint(0),
+                        Varint(tid),
+                    ],
                 )?;
             }
             Ev::Queue { depth } => {
@@ -500,8 +602,10 @@ impl<'a> SegmentWriter<'a> {
     }
 
     fn clock_sync(&mut self, mono_ns: u64, real_ns: u64) -> Result<()> {
-        self.enc
-            .write_event(&self.sch.clock_sync, &[FieldValue::Varint(mono_ns), FieldValue::Varint(real_ns)])?;
+        self.enc.write_event(
+            &self.sch.clock_sync,
+            &[FieldValue::Varint(mono_ns), FieldValue::Varint(real_ns)],
+        )?;
         Ok(())
     }
 
@@ -510,8 +614,10 @@ impl<'a> SegmentWriter<'a> {
             .iter()
             .map(|(k, v)| (k.as_bytes().to_vec(), v.as_bytes().to_vec()))
             .collect();
-        self.enc
-            .write_event(&self.sch.metadata, &[FieldValue::Varint(ts), FieldValue::StringMap(pairs)])?;
+        self.enc.write_event(
+            &self.sch.metadata,
+            &[FieldValue::Varint(ts), FieldValue::StringMap(pairs)],
+        )?;
         Ok(())
     }
 
@@ -528,7 +634,10 @@ fn gzip(raw: &[u8], level: flate2::Compression) -> Result<Vec<u8>> {
 
 fn standard_metadata(service: &str, host: &str) -> Vec<(String, String)> {
     vec![
-        ("dial9.dial9-tokio-telemetry.version".into(), "0.0.0-fixture".into()),
+        (
+            "dial9.dial9-tokio-telemetry.version".into(),
+            "0.0.0-fixture".into(),
+        ),
         ("process.available_parallelism".into(), "8".into()),
         ("service".into(), service.into()),
         ("host".into(), host.into()),
@@ -633,7 +742,14 @@ fn build_window_family(sch: &Schemas) -> Result<WindowFamily> {
             epoch_s,
             mono_start_ns: mono(i),
             mono_end_ns: mono(i + 1),
-            key: layout_key("traces", WINDOW_SERVICE, WINDOW_HOST, WINDOW_BOOT, epoch_s, 0),
+            key: layout_key(
+                "traces",
+                WINDOW_SERVICE,
+                WINDOW_HOST,
+                WINDOW_BOOT,
+                epoch_s,
+                0,
+            ),
         });
     }
 
@@ -717,7 +833,11 @@ const MULTI_RUNTIME_HOST: &str = "host-z";
 /// `journal` runtime (workers 64..67) declared via the `runtime.<name>`
 /// segment-metadata convention (`("runtime.journal", "64,65,66,67")`).
 fn build_multi_runtime_segment(sch: &Schemas) -> Result<Vec<u8>> {
-    let workers: Vec<u64> = MAIN_WORKERS.iter().chain(MULTI_RUNTIME_WORKERS.iter()).copied().collect();
+    let workers: Vec<u64> = MAIN_WORKERS
+        .iter()
+        .chain(MULTI_RUNTIME_WORKERS.iter())
+        .copied()
+        .collect();
     let mut metadata = standard_metadata(MULTI_RUNTIME_SERVICE, MULTI_RUNTIME_HOST);
     metadata.push((
         format!("runtime.{MULTI_RUNTIME_NAME}"),
@@ -757,7 +877,8 @@ fn write_seed_object(root: &Path, obj: &SeedObject) -> Result<()> {
     let parent = path.parent().context("seed object path has a parent")?;
     fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
     fs::write(&path, &obj.gz).with_context(|| format!("writing {}", path.display()))?;
-    let mtime = SystemTime::UNIX_EPOCH + Duration::from_secs(u64::try_from(obj.mtime_s).context("mtime pre-1970")?);
+    let mtime = SystemTime::UNIX_EPOCH
+        + Duration::from_secs(u64::try_from(obj.mtime_s).context("mtime pre-1970")?);
     let file = fs::OpenOptions::new()
         .append(true)
         .open(&path)
@@ -775,7 +896,12 @@ fn write_seed_object(root: &Path, obj: &SeedObject) -> Result<()> {
 /// preserves that equality in the LISTED object size, which is what the
 /// heatmap density spreads — the seam scenario's strictly uniform density
 /// (F7's observable) depends on it.
-fn build_small_layout_segment(sch: &Schemas, service: &str, host: &str, epoch_s: i64) -> Result<Vec<u8>> {
+fn build_small_layout_segment(
+    sch: &Schemas,
+    service: &str,
+    host: &str,
+    epoch_s: i64,
+) -> Result<Vec<u8>> {
     let raw = build_segment(
         sch,
         &SegmentContent {
@@ -824,7 +950,10 @@ fn browse_layout_objects(
     });
 
     // svc-fix/boots: three contiguous segments, three boot ids.
-    for (i, boot) in ["boot-fixb1", "boot-fixb2", "boot-fixb3"].iter().enumerate() {
+    for (i, boot) in ["boot-fixb1", "boot-fixb2", "boot-fixb3"]
+        .iter()
+        .enumerate()
+    {
         let epoch = fixture_epoch(19, i as u8 * 5, 0);
         out.push(SeedObject {
             bucket: BUCKET,
