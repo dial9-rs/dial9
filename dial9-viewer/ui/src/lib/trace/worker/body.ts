@@ -22,7 +22,7 @@ import {
   parseTrace,
 } from "../../../../trace_parser.js";
 import { parseChunksWithCapture, streamTraceWithCapture } from "../stream.ts";
-import type { ParsedTrace } from "../../../../trace_parser.js";
+import type { FetchOptions, ParsedTrace } from "../../../../trace_parser.js";
 import type {
   TraceWorkerLoadMode,
   TraceWorkerLoadRequest,
@@ -149,7 +149,10 @@ export function createWorkerBody(post: TraceWorkerPost): TraceWorkerBody {
       urls.length
     );
 
-    const fetchOpts = { signal: controller.signal, headers: request.headers };
+    // exactOptionalPropertyTypes: only attach headers when present, rather
+    // than stamping an explicit undefined into the optional field.
+    const fetchOpts: FetchOptions = { signal: controller.signal };
+    if (request.headers !== undefined) fetchOpts.headers = request.headers;
     if (mode === "stream") {
       // Streaming fuses fetch+parse (B12): no separate fetch mark
       // (fetchDoneMs stays null, legacy loadPerf parity), and the first

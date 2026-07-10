@@ -114,6 +114,35 @@ describe("slice isolation", () => {
   });
 });
 
+describe("no in-place slice mutation (audit finding 1)", () => {
+  it("freezes initial and replaced slices in dev builds: in-place writes throw", () => {
+    const raf = fakeRaf();
+    const store = createStore(testState(), { scheduler: raf.scheduler });
+    const initial = store.getState();
+    expect(() => {
+      // @ts-expect-error slice fields are readonly through getState()
+      initial.a.n = 99;
+    }).toThrow(TypeError);
+
+    store.update("a", { n: 1 });
+    const replaced = store.getState();
+    expect(() => {
+      // @ts-expect-error slice fields stay readonly on the replaced slice
+      replaced.a.n = 99;
+    }).toThrow(TypeError);
+    expect(store.getState().a.n).toBe(1); // neither write landed
+  });
+
+  it("does not freeze slices outside dev builds (release pays nothing)", () => {
+    vi.stubEnv("DEV", false);
+    const raf = fakeRaf();
+    const store = createStore(testState(), { scheduler: raf.scheduler });
+    expect(Object.isFrozen(store.getState().a)).toBe(false);
+    store.update("a", { n: 1 });
+    expect(Object.isFrozen(store.getState().a)).toBe(false);
+  });
+});
+
 describe("one notification per frame (fake RAF)", () => {
   it("coalesces many updates across slices into one frame callback and one run per subscriber", () => {
     const raf = fakeRaf();
@@ -202,6 +231,55 @@ describe("one notification per frame (fake RAF)", () => {
   });
 });
 
+describe("throwing subscriber does not drop the frame's changed set (audit finding 3)", () => {
+  it("re-arms and retries delivery next frame, so later subscribers still hear the change", () => {
+    const raf = fakeRaf();
+    const store = createStore(testState(), { scheduler: raf.scheduler });
+    let boom = true; // throw only on the first delivery
+    store.subscribe(["a"], () => {
+      if (boom) {
+        boom = false;
+        throw new Error("subscriber boom");
+      }
+    });
+    const onA = vi.fn();
+    store.subscribe(["a"], onA);
+
+    store.update("a", { n: 1 });
+    expect(() => raf.frame()).toThrow(/subscriber boom/); // still loud
+    expect(onA).not.toHaveBeenCalled(); // frame aborted before onA
+    expect(raf.pending()).toBe(1); // but the changed set was re-armed
+
+    raf.frame(); // delivery retried: onA finally hears about "a"
+    expect(onA).toHaveBeenCalledTimes(1);
+    expect(onA).toHaveBeenCalledWith(store.getState(), new Set(["a"]));
+  });
+
+  it("merges the restored changed set with updates made before the throw (no double-arm)", () => {
+    const raf = fakeRaf();
+    const store = createStore(testState(), { scheduler: raf.scheduler });
+    let boom = true;
+    store.subscribe(["a"], () => {
+      if (boom) {
+        boom = false;
+        store.update("b", { s: "pre-throw" }); // already re-armed the tick
+        throw new Error("subscriber boom");
+      }
+    });
+    const onBoth = vi.fn();
+    store.subscribe(["a", "b"], onBoth);
+
+    store.update("a", { n: 1 });
+    expect(() => raf.frame()).toThrow(/subscriber boom/);
+    expect(raf.pending()).toBe(1); // merged into the already-armed tick
+
+    raf.frame();
+    expect(onBoth).toHaveBeenCalledTimes(1);
+    // Both the restored "a" and the mid-flush "b" arrive together.
+    expect(onBoth).toHaveBeenCalledWith(store.getState(), new Set(["a", "b"]));
+  });
+});
+
 describe("transient channel", () => {
   it("transient updates bypass full-notification subscribers (real StoreState)", () => {
     const raf = fakeRaf();
@@ -226,11 +304,33 @@ describe("transient channel", () => {
   });
 });
 
+describe("update() rejects explicit undefined in patches (audit finding 2)", () => {
+  it("a patch may omit a field but must not set a non-optional field to undefined", () => {
+    const raf = fakeRaf();
+    const store: ViewerStore = createStore(initialViewerState(), {
+      scheduler: raf.scheduler,
+    });
+    // exactOptionalPropertyTypes (tsconfig.json): Object.assign would stamp
+    // an explicit undefined into the field, so it must not typecheck. The
+    // fix is type-level; these lines are never legal call sites.
+    // @ts-expect-error viewStart is number: explicit undefined is rejected
+    store.update("viewport", { viewStart: undefined });
+    // @ts-expect-error spanFocus is SpanFocus | null, never undefined
+    store.update("selection", { spanFocus: undefined });
+
+    // Omission (the legal way to leave a field alone) still typechecks.
+    store.update("viewport", { viewEnd: 50 });
+    raf.frame();
+    expect(store.getState().viewport.viewEnd).toBe(50);
+  });
+});
+
 describe("derived caches", () => {
   it("computes once per dependency change and is invalidated only by its deps", () => {
     const raf = fakeRaf();
     const store = createStore(testState(), { scheduler: raf.scheduler });
-    const compute = vi.fn((s: Readonly<TestState>) => s.a.n * 2);
+    // compute sees only the declared deps (Pick), not the full state.
+    const compute = vi.fn((s: Pick<TestState, "a">) => s.a.n * 2);
     const doubled = store.derived(["a"], compute);
 
     expect(doubled()).toBe(0);
@@ -245,6 +345,18 @@ describe("derived caches", () => {
     expect(doubled()).toBe(42);
     expect(doubled()).toBe(42);
     expect(compute).toHaveBeenCalledTimes(2);
+  });
+
+  it("narrows compute's argument to the declared deps (type-level, audit finding 5)", () => {
+    const raf = fakeRaf();
+    const store = createStore(testState(), { scheduler: raf.scheduler });
+    // Invalidation watches ONLY the declared deps, so an undeclared-slice
+    // read would return stale caches silently; the Pick-narrowed compute
+    // signature makes that unrepresentable.
+    // @ts-expect-error 'b' was not declared as a dep of this derived getter
+    store.derived(["a"], (s) => s.b.s);
+    const keepOfA = store.derived(["a"], (s) => s.a.keep);
+    expect(keepOfA()).toBe("k");
   });
 });
 

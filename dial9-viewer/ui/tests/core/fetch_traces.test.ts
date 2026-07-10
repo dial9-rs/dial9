@@ -65,7 +65,8 @@ async function collectChunks(iterable: AsyncIterable<Uint8Array>): Promise<Uint8
 
 interface RecordedCall {
   url: string;
-  opts?: FetchOpts;
+  /** Exactly what the mock received; explicit undefined is a real record. */
+  opts: FetchOpts | undefined;
 }
 
 interface FetchMockRestore {
