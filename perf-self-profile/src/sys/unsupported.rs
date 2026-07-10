@@ -22,6 +22,14 @@ impl PerfSampler {
         unsupported()
     }
 
+    pub(crate) fn start_perf_only(_config: SamplerConfig) -> io::Result<Self> {
+        unsupported()
+    }
+
+    pub(crate) fn start_ctimer_only(_config: SamplerConfig) -> io::Result<Self> {
+        unsupported()
+    }
+
     pub fn new_per_thread(_config: SamplerConfig) -> io::Result<Self> {
         unsupported()
     }
