@@ -16,7 +16,7 @@
 
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { gunzipSync, gzipSync } from "node:zlib";
+import { gunzipSync } from "node:zlib";
 import { describe, expect, it, vi } from "vitest";
 import { createStore } from "../../store/store.js";
 import { EVENT_TYPES } from "../../../trace_parser.js";
@@ -937,30 +937,57 @@ describe("10-segment scenario (DoD)", () => {
 });
 
 // ── Real-parse anchor: accounting tied to actual buffers ────────────────
+//
+// T42 upgrade: this anchor used to simulate a multi-segment window by
+// serving TWO COPIES of the demo trace. It now runs the generated fixture
+// set (parity/fixtures/segments/, ten REAL distinct segments sharing one
+// monotonic clock with planted boundary-spanning polls — manifest.json
+// records the planted facts). Regenerate with:
+//   cargo run --release -p dial9-viewer --features dev-server --bin gen-fixtures
 
-describe("real-parse anchor (demo trace through the real core)", () => {
-  it("accounts exactly the real decompressed sizes for two demo-trace segments", async () => {
-    const fileBytes = readFileSync(
-      fileURLToPath(new URL("../../../public/demo-trace.bin", import.meta.url))
-    );
-    const rawTrace =
-      fileBytes[0] === 0x1f && fileBytes[1] === 0x8b
-        ? new Uint8Array(gunzipSync(fileBytes))
-        : new Uint8Array(fileBytes);
-    const gzTrace = new Uint8Array(gzipSync(rawTrace));
-    const direct = await parseTraceBuffer(rawTrace);
+interface FixtureManifest {
+  segments: { file: string; key: string; monoStartNs: number; monoEndNs: number }[];
+  plantedPolls: {
+    workerId: number;
+    taskId: number;
+    spawnLoc: string;
+    startNs: number;
+    endNs: number;
+  }[];
+}
 
-    const segs = makeSegments(2, gzTrace.byteLength);
-    const store = makeStore();
-    // Real gzipped bytes; a real (main-thread) parser implementing the
-    // SegmentParser seam over the frozen core.
-    const fetchBytes: SegmentBytesFetcher = () =>
-      Promise.resolve(
-        gzTrace.buffer.slice(
-          gzTrace.byteOffset,
-          gzTrace.byteOffset + gzTrace.byteLength
-        ) as ArrayBuffer
+describe("real-parse anchor (generated fixture set through the real core)", () => {
+  const fixturesDir = new URL("../../../parity/fixtures/segments/", import.meta.url);
+  const manifest = JSON.parse(
+    readFileSync(fileURLToPath(new URL("manifest.json", fixturesDir)), "utf8")
+  ) as FixtureManifest;
+
+  it("accounts the real decompressed sizes and stitches the planted boundary polls", async () => {
+    const gzByKey = new Map<string, Uint8Array>();
+    const rawLenByKey = new Map<string, number>();
+    const segs: ListedSegment[] = manifest.segments.map((s) => {
+      const gz = new Uint8Array(
+        readFileSync(fileURLToPath(new URL(s.file, fixturesDir)))
       );
+      gzByKey.set(s.key, gz);
+      rawLenByKey.set(s.key, gunzipSync(gz).byteLength);
+      return {
+        key: s.key,
+        sizeBytes: gz.byteLength,
+        extent: range(s.monoStartNs, s.monoEndNs),
+      };
+    });
+
+    const store = makeStore();
+    // Real gzipped fixture bytes; a real (main-thread) parser implementing
+    // the SegmentParser seam over the frozen core.
+    const fetchBytes: SegmentBytesFetcher = (url) => {
+      const gz = gzByKey.get(url);
+      if (!gz) return Promise.reject(new Error(`no fixture for ${url}`));
+      return Promise.resolve(
+        gz.buffer.slice(gz.byteOffset, gz.byteOffset + gz.byteLength) as ArrayBuffer
+      );
+    };
     const realParser: SegmentParser = (bytes) => {
       const done = (async (): Promise<SegmentParseResult> => {
         const raw = gunzipSync(bytes);
@@ -976,27 +1003,54 @@ describe("real-parse anchor (demo trace through the real core)", () => {
       idle: idle.idle,
     });
 
-    win.setViewport(range(segs[0]!.extent.startNs, segs[1]!.extent.endNs));
+    // The whole set fits the budget comfortably: one full-extent viewport
+    // admits everything.
+    win.setViewport(
+      range(segs[0]!.extent.startNs, segs[segs.length - 1]!.extent.endNs)
+    );
     await vi.waitFor(
       () => {
-        expect(entryOf(store, segKey(0))!.state).toBe("parsed");
-        expect(entryOf(store, segKey(1))!.state).toBe("parsed");
+        for (const s of segs) expect(entryOf(store, s.key)!.state).toBe("parsed");
       },
       { timeout: 60_000 }
     );
 
-    for (const i of [0, 1]) {
-      const entry = entryOf(store, segKey(i))!;
-      // The recorded size IS the real decompressed byte length.
-      expect(entry.rawByteLength).toBe(rawTrace.byteLength);
-      expect(entry.trace!.events.length).toBe(direct.events.length);
-      expect(entry.invariants!.minTs).toBe(direct.minTs);
-      expect(entry.invariants!.maxTs).toBe(direct.maxTs);
+    let totalRaw = 0;
+    let totalGz = 0;
+    for (const s of segs) {
+      const entry = entryOf(store, s.key)!;
+      // The recorded size IS the real decompressed byte length (the budget
+      // accountant runs on exactly these numbers).
+      expect(entry.rawByteLength).toBe(rawLenByKey.get(s.key));
+      expect(entry.invariants!.minTs).toBeGreaterThanOrEqual(s.extent.startNs);
+      expect(entry.invariants!.maxTs).toBeLessThanOrEqual(s.extent.endNs);
       expect(entry.invariants!.workerIds.length).toBeGreaterThan(0);
       expect(entry.edgePolls).toBeDefined();
+      totalRaw += rawLenByKey.get(s.key)!;
+      totalGz += s.sizeBytes;
     }
-    expect(win.stats().residentRawBytes).toBe(2 * rawTrace.byteLength);
-    expect(win.stats().gzipCacheBytes).toBe(2 * gzTrace.byteLength);
+    expect(win.stats().residentRawBytes).toBe(totalRaw);
+    expect(win.stats().gzipCacheBytes).toBe(totalGz);
+    expect(win.stats().residentRawBytes).toBeLessThanOrEqual(
+      RESIDENT_RAW_BUDGET_BYTES
+    );
+
+    // End-to-end through the orchestrator: BOTH planted boundary polls
+    // (adjacent seg0->seg1, and seg3->seg5 across a silent interior) come
+    // out stitched, with task identity, and nothing is truncated.
+    const { stitched, truncated } = win.boundaryPolls();
+    const expected = manifest.plantedPolls.map((p) => ({
+      workerId: p.workerId,
+      start: p.startNs,
+      end: p.endNs,
+      taskId: p.taskId,
+      spawnLocId: p.spawnLoc,
+      spawnLoc: p.spawnLoc,
+    }));
+    expect(stitched).toEqual(expect.arrayContaining(expected));
+    expect(stitched.length).toBe(expected.length);
+    expect(truncated).toEqual([]);
+    win.dispose();
   }, 120_000);
 });
 
