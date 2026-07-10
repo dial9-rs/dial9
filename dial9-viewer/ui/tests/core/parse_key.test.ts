@@ -1,52 +1,29 @@
-// Verify parseKey() in index.html understands both the new boot_id layout
+// Verify the S3 trace-key parser understands both the new boot_id layout
 // and the legacy (pre-#225) layout.
 //
-// Migrated from test_parse_key.js (T10). parseKey still lives inline in the
-// legacy index.html, so this suite keeps the original extract-from-index.html
-// mechanism (regex + vm sandbox) for now; T15 re-points it at lib/trace/keys.ts
-// once the TS port of the key parser lands.
+// Migrated from test_parse_key.js (T10). Originally extracted parseKey()
+// from the legacy index.html inline script via regex + vm sandbox; T15
+// re-pointed it at the TS port, lib/trace/keys.ts, which the migrated
+// browser page consumes (closing T10's interim note). The legacy inline
+// copy still exists in index.html but is no longer under test here - the
+// typed parser is the single implementation going forward, and the legacy
+// page's recorded behavior is asserted by the parity row-walker instead.
+//
+// The typed parser returns a { layout: "known" | "unknown" } discriminated
+// union (the ADR-0004 section 1 defect fix); the original T10 cases below
+// all target documented layouts, which parse as layout: "known" with the
+// same fields the inline parser produced.
 
-import { describe, it, expect, beforeAll } from "vitest";
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
-import * as vm from "node:vm";
+import { describe, it, expect } from "vitest";
+import { parseKey } from "../../src/lib/trace/keys.js";
 
-interface ParsedKey {
-  service: string;
-  host: string;
-  bootId: string;
-  epoch: number;
-  segIndex: string;
-}
-
-type ParseKeyFn = (key: string) => ParsedKey;
-
-let parseKey: ParseKeyFn;
-
-beforeAll(() => {
-  const html = readFileSync(
-    fileURLToPath(new URL("../../index.html", import.meta.url)),
-    "utf8",
-  );
-  const m = html.match(/function parseKey\([\s\S]*?\n    \}\n/);
-  expect(m, "could not locate parseKey() in index.html").not.toBeNull();
-
-  // parseKey depends on formatEpoch/formatDate - stub them out.
-  const sandbox: { parseKey: ParseKeyFn | null; formatEpoch: () => string } = {
-    parseKey: null,
-    formatEpoch: () => "",
-  };
-  vm.createContext(sandbox);
-  vm.runInContext(m![0] + "\nthis.parseKey = parseKey;", sandbox);
-  expect(sandbox.parseKey).toBeTypeOf("function");
-  parseKey = sandbox.parseKey!;
-});
-
-describe("parseKey (extracted from index.html)", () => {
+describe("parseKey (lib/trace/keys.ts)", () => {
   it("new layout with prefix", () => {
     const p = parseKey(
       "traces/2026-04-09/1910/checkout-api/us-east-1/abcd-123213/1744224000-3.bin.gz",
     );
+    expect(p.layout, "new layout: known").toBe("known");
+    if (p.layout !== "known") return;
     expect(p.service, "new layout: service").toBe("checkout-api");
     expect(p.host, "new layout: host").toBe("us-east-1");
     expect(p.bootId, "new layout: bootId").toBe("abcd-123213");
@@ -58,6 +35,8 @@ describe("parseKey (extracted from index.html)", () => {
     const p = parseKey(
       "2026-04-09/1910/checkout-api/us-east-1/xyzw-asdfasdf/1744224000-0.bin.gz",
     );
+    expect(p.layout, "new no-prefix: known").toBe("known");
+    if (p.layout !== "known") return;
     expect(p.service, "new no-prefix: service").toBe("checkout-api");
     expect(p.host, "new no-prefix: host").toBe("us-east-1");
     expect(p.bootId, "new no-prefix: bootId").toBe("xyzw-asdfasdf");
@@ -67,6 +46,8 @@ describe("parseKey (extracted from index.html)", () => {
     const p = parseKey(
       "traces/2026-04-09/1910/checkout-api/host1/1744224000-2.bin.gz",
     );
+    expect(p.layout, "legacy: known").toBe("known");
+    if (p.layout !== "known") return;
     expect(p.service, "legacy: service").toBe("checkout-api");
     expect(p.host, "legacy: host").toBe("host1");
     expect(p.bootId, "legacy: bootId empty").toBe("");
@@ -77,12 +58,13 @@ describe("parseKey (extracted from index.html)", () => {
   it("compound-instance: returns object (best-effort)", () => {
     // Instance path with embedded slash is a best-effort legacy case -
     // cannot be reliably distinguished from the new boot_id layout on
-    // path-component count alone, so the parser falls back to the positional
-    // heuristic. We just sanity-check that parsing does not throw.
+    // path-component count alone, so it parses as the #225 layout. We just
+    // sanity-check that parsing does not throw and yields a parsed object.
     const p = parseKey(
       "traces/2026-04-09/1910/checkout-api/us-east-1/i-0abc123/1744224000-0.bin.gz",
     );
     expect(p, "compound-instance: must return object").toBeTypeOf("object");
     expect(p).not.toBeNull();
+    expect(p.layout, "compound-instance: parses as a documented layout").toBe("known");
   });
 });
