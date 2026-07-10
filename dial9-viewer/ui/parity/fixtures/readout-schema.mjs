@@ -60,6 +60,9 @@ export const READOUT_SCHEMA = {
     { id: "fg.stats", kind: "text", selector: "#fg-stats" },
     { id: "fg.searchStats", kind: "text", selector: ".fg-search-stats", optional: true },
     { id: "fg.canvases", kind: "count", selector: ".fg-canvas" },
+    // Zoom-visible readout (T19/J9): the breadcrumb trail renders the
+    // active zoom path (features/03 F138); empty when not zoomed.
+    { id: "fg.breadcrumb", kind: "text", selector: ".fg-breadcrumb", optional: true },
     { id: "url.query", kind: "urlQuery" },
   ],
 };

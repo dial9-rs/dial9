@@ -1,118 +1,150 @@
-# T40 HANDOFF - Inventory: tokio_stats.html (features/04)
+# T19 HANDOFF - Viewer URL view-state + copy-link
 
-(Replaces the FIX-T38 HANDOFF inherited through the branch chain; FIX-T38's
-record lives at commit b5864e5.)
+(Replaces the T40 HANDOFF inherited through the branch chain; T40's record
+lives at commit bd1503b.)
 
 ## STATUS
 
-DONE - no STOP-gate hit. Docs only (scope fence respected: no code changes
-anywhere, features/01-03 untouched, no push/PR). The dev-server started for
-the walk was killed (port 3071 verified free).
+COMPLETE - no STOP-gate hit. All DoD items done, all gates green, no open
+blockers. The hash-vs-query reconciliation followed the recorded default
+(legacy params untouched and mirrored; versioned hash carries the new
+unified state; hash wins per field on read) - it proved workable, no fork.
 
-## COMPLETED (commits on `ticket/T40-tokio-stats-inventory`, on top of c1d923e)
+Branch: `ticket/T19-url-view-state`, based on integrated tip 03f4626.
 
-- `7bcedc9` docs(viewer): add features/04 inventory for tokio_stats.html -
-  `docs/ui-inventory/features/04-tokio-stats-html.md`, 69 rows, sections A-K,
-  snapshot date 2026-07-10, full verdict table + reproduce recipe.
-- `930fea5` docs(tickets): ownership summaries updated in
-  `docs/tickets/chunk-3-post.md` (chunk-3 summary + T40 completion note +
-  T41 heads-up). Chunk-1's ownership summary does NOT reference features/04
-  (grep-checked), so per the DoD's conditional it was not edited.
-- (this commit) HANDOFF.
+## COMPLETED (commits)
 
-## ROW / VERDICT COUNTS
+| sha | what |
+| --- | --- |
+| a87564c | codec (`ui/src/lib/url/view-state.ts`) + legacy-param fixture (`legacy-params.fixture.ts`) + property/round-trip tests |
+| 9f09db0 | store->URL sync binding (`ui/src/lib/url/sync.ts`) + copy-link (`ui/src/lib/url/copy-link.ts`) + barrel + tests |
+| d4015e0 | flamegraph page integration (`ui/src/pages/flamegraph/view-state.ts`; exact-mode/api-mode/dom/new-html wiring) + integration tests |
+| 2a212e4 | parity: journey J9 (recorded legacy zoom-link restore) + `fg.breadcrumb` readout |
+| 33b5204 | schema doc `docs/ui-inventory/05-url-view-state.md` + ADR-0004 doc-index row + ledger entries |
 
-69 rows: A (bootstrap/URL contract) 10, B (periods) 6, C (toolbar) 4,
-D (loading/refinement) 6, E (client stats) 5, F (single-period view) 4,
-G (tabs/diff) 9, H (exemplar links) 4, I (XSS #587) 3, J (backend
-`/api/tokio-stats` contract) 15, K (cross-cutting) 3.
+## WHAT SHIPPED
 
-Verdicts (per-row table in the doc's "2026-07-10 validation" section):
-- VERIFIED component (live curl walk / served bytes / fix-diff / T38 unit):
-  22 rows (A1, A3, A8, A10, C1, D1, D2, D3, D5, H4, I1, J1-J3, J5-J7,
-  J10-J15).
-- CODE-READ (no browser driver; re-derivable by the T12 row-walker once T41
-  registers features04 walkers): the remaining 47 rows.
-- NOT-TRIGGERABLE sub-cases recorded with reasons (all T42 fixture targets):
-  time-windowed scopes (demo-key epoch vs date-path catch-22 - BOTH window
-  directions 404, reproduced live), off-CPU class 0 (demo max poll ~1ms <
-  10ms confidence bound), cap-plateau refinement (1 matched file < baseline
-  4), multi-host/-service data, live multi-period diff, `--agg`-server gate
-  variant.
-- Status tags: 1 DEAD row (H4, see findings), rest OK/CONDITIONAL.
+- Versioned URL hash codec: `#v=1&fg.w=<tab path>&fg.o=...&tm=...&tz=...`
+  (form-encoded payload; empty state = no hash at all). Tolerant reader:
+  unknown v=1 keys preserved on rewrite; invalid values dropped; foreign
+  or future-version hashes never restored from nor rewritten.
+- Store-slice -> URL sync: one debounced (150ms trailing) replaceState
+  per change burst; no-op writes skipped; host/timer/scheduler injectable
+  for Node tests. Restore-on-load bypasses the store (the frozen widget's
+  zoomToPath does not fire onZoomChange), so opening a shared link
+  produces ZERO URL writes - legacy parity, gated by J9's url.query.
+- Flamegraph page (first consumer): user zoom -> page-local store slice
+  (`fgView`) -> one write carrying BOTH the legacy `worker-zoom` /
+  `offworker-zoom` query params (exact F147-F153 semantics: address-bar
+  copies still open on the legacy page) AND the versioned hash. Read
+  precedence: hash wins per field, legacy fills gaps; F151
+  timeRangeMatched gate kept.
+- Copy-link button (`.d9-copy-link`) in the migrated page header, both
+  modes: flushes the pending debounced write, copies location.href,
+  flashes "Copied". API mode mounts it without a flush (its URL is
+  already current via F180 pushState; canvas zoom deliberately not
+  URL-synced there - legacy parity, codec stays out).
+- Time mode: `tm` (`rel`|`abs`) + `tz` (`utc`|`local`) DEFINED in the v1
+  vocabulary but unwritten - the flamegraph page has no clock-mode
+  control; the chunk-2 viewer wires them (design addition, rationale
+  documented in the schema doc).
 
-## EVIDENCE - dev-server walk log (2026-07-10, port 3071)
+## DoD EVIDENCE
 
-Build + launch (post-T04 the dev-server serves ui/dist):
-`npm ci && npm run build` in dial9-viewer/ui (green, 17 items static-copied),
-then `CARGO_TARGET_DIR=<repo>/target PORT=3071 cargo run -p dial9-viewer
---bin dev-server --features dev-server`.
+1. check: Vitest codec round-trip property test - PASS.
+   `ui/src/lib/url/view-state.test.ts`: 500 seeded-random states
+   (mulberry32; adversarial frame names incl. `& = # % + ? / \ ' " space
+   unicode`; tab excluded = the legacy wire format's own limitation),
+   decode(encode(s)) === s, encode-stability, legacy-mirror round-trip.
+   No new deps (constraint S1) - hand-rolled PRNG, no fast-check.
 
-- `/api/config` -> `{aggregation_enabled:true, supports_byo_credentials:true,
-  supports_assume_role:false, default_bucket:"demo-traces",
-  default_prefix:"traces"}`.
-- `GET /tokio_stats.html` -> 200 text/html, 19483 bytes, byte-identical to
-  `ui/tokio_stats.html` (diff -q); `ui-switch.js` + `creds.js` 200 and
-  byte-identical.
-- Cold poll `?bucket=demo-traces&prefix=traces` -> instant
-  `{time_span_ns:1, total_polls:0, by_spawn_loc:[], coverage:{files_matched:1,
-  files_folded:0, samples_folded:0, total_bytes:4336378, hosts_matched:1,
-  hosts_folded:0}}`.
-- `&refine=true` -> `total_polls:94212`, `time_span_ns:4143811668`, folded
-  1/1 files + 1/1 hosts, 5 spawn locations (top:
-  `examples/metrics-service/src/axum_traced.rs:243:33`, 3319 notable polls).
-  Asserted on the wire with node: durations desc-sorted, all >= 100000 ns,
-  classes aligned + values {1,2,3} only, locations sorted by notable count
-  desc, one zero-notable location present, per-class exemplars with
-  host:"local" + raw source_key.
-- Warm read-only poll -> identical folded counts (frozen terminator).
-- `prefix=no-such-prefix` -> 404 `no source files match this scope`.
-- no `bucket` param -> 404 `tokio-stats requires aggregation (start with
-  --agg or supply a bucket)`.
-- `refine=1` -> 400 (strict serde bool; page always sends literal "true").
-- `service=demo-service` 200; `host=local` 200; `host=local&host=nonexistent`
-  200 (OR semantics); `host=host-0` 404 (demo key's host component is
-  `local`).
-- Time windows: `start_ns/end_ns` at the data's row timestamps (June 2026)
-  -> 404; at the key's date-path hour (2026-04-09 19:00 UTC) -> 404 (listing
-  finds the file, `scope_matches` rejects on the filename epoch 1744224000 =
-  2025-04-09). Catch-22 documented as features/01 finding 3 biting the
-  aggregate listing.
-- `GET /api/trace?...` -> 404 - confirms finding 1 (exemplar deep links dead
-  at HEAD; `/api/trace` removed by #582 (`git show 97cc9fa`) while #570's
-  page still targets it).
+2. check: restore-on-load integration test on each page migrated at
+   landing time (flamegraph is the only one) - PASS, done BOTH sanctioned
+   ways, documented:
+   - vitest-level against the page module:
+     `ui/src/pages/flamegraph/view-state.test.ts` (recording fake widget:
+     legacy-only / hash-only / both-precedence / F151 gate / zero writes
+     on restore / write shape / Esc cleanup / F153 preservation / flush).
+   - parity behavioral differ (in-browser, real page + real widget):
+     journey J9 below.
 
-Doc integrity: markdown tables render (pipe-balanced), anchors spot-checked
-against the tree - page anchors from the numbered read of tokio_stats.html
-(escapeHtml 93, syncUrl 147, exemplarLink 166, computeStats 177,
-renderFromCache 226, renderSinglePeriod 272, renderDiffView 302, loadPeriod
-371, auto-load 428), backend anchors re-greped (get_tokio_stats
-tokio_stats.rs:71, classify_poll 224, scope_matches aggregate.rs:236,
-time_scoped_prefixes refine.rs:381, route mod.rs:448, gate config.rs:30);
-the features/01 H6 cross-link notes the +1 line shift T38 introduced in
-index.html.
+3. check: recorded legacy-param fixture URLs resolve identically - PASS.
+   - Fixture (the ticket's FIRST work item), recorded from reading
+     flamegraph.html + flamegraph.js + features/03 M/P into
+     `ui/src/lib/url/legacy-params.fixture.ts`:
+     - exact mode, load scope (read-only): `trace` (repeatable), `start`,
+       `end`, `svc`, `host`, `segs`, `from`, `to`;
+     - exact mode, VIEW STATE (replaceState, F147-F153): `worker-zoom`,
+       `offworker-zoom` (tab-joined frame paths; set when non-empty,
+       deleted when empty; restore gated on timeRangeMatched F151; Esc
+       clears F152; all other params preserved F153);
+     - api mode (pushState on Apply/facet change, F180): `api`,
+       `data_dir`, `bucket`, `prefix`, `service`, `host` (repeatable),
+       `start_ns`, `end_ns`, `source`, `thread_class`, `spawn_location`,
+       `max_files` - NO view-state params by design (canvas zoom not
+       URL-synced in api mode; kept that way).
+   - Behavioral differ (dev-server :3081 over built dist, per the DoD
+     recipe), J9 fixture URL recorded from the LEGACY page itself
+     (click-zoom on demo-trace, walkable prefix of the emitted path):
+     `/flamegraph.html?trace=demo-trace.bin&worker-zoom=0xffff9b8cbf1c%090xffff9b862030%09Thread%3A%3Anew%3A%3Athread_start+unix.rs%3A130`
+     Output: `== J9 (restore a shared zoom link) ... checkpoint restored:
+     identical (6 fields) ... ZERO DIFF` (legacy /flamegraph.html vs
+     migrated /new/flamegraph.html).
+   - J5 re-run legacy vs new with the copy-link mounted: `ZERO DIFF`
+     (rendered + searched checkpoints, 6 fields each).
+   - End-to-end playwright verification on the migrated page (throwaway
+     script, removed): zoom writes legacy params + v=1 hash (debounced);
+     hash-only URL restores (breadcrumb populated, URL byte-stable, no
+     write-back); copy-link copies href (clipboard === href, "Copied"
+     flash); Esc clears both params and the hash, keeps `trace`; the
+     LEGACY page loads a hash URL fine and is simply not zoomed (raw
+     ui-switch policy honored - no state porting, none attempted).
 
-## NOTABLE FINDINGS (detailed in the doc)
+4. review: schema documented for chunk-2 extension -
+   `docs/ui-inventory/05-url-view-state.md`: key registry
+   (live/defined/reserved), version + tolerant-reader rules, precedence,
+   write mechanics, ownership boundary table, extension checklist.
+   Registered in ADR-0004's doc-index table.
 
-1. H4: exemplar deep links broken at HEAD (`/api/trace` removed by #582);
-   fix candidate is one line (`/api/object?bucket&key`). T41 ledger decision.
-2. D4: coverage fetched but never displayed (no refinement progress UI,
-   unlike flamegraph F174/F176-F179); silent plateau at the sampling cap.
-3. E2/H2: mixed (2) + unknown (3) classes and their exemplars are on the
-   wire but invisible in the UI.
-4. G3: diff view throws (TypeError on `first.rate`) when P1 failed to load
-   while 2+ later periods loaded. Code-read.
-5. A4/A7: URL restores at most 10 periods; sync writes all of them.
+## GATES
 
-## OPEN QUESTIONS
+- `npx tsc --noEmit`: clean.
+- `npm run test` (FULL suite, includes the check:boundary pretest):
+  50 files passed + 1 skipped (pre-existing), 888 passed / 1 expected
+  fail / 11 skipped (pre-existing baseline). 0 unexpected failures.
+- `npm run build`: clean (dist/new/flamegraph.html + bundles + 17
+  static-copied items).
+- `cargo build -p dial9-viewer`: clean (rust-embed embed check).
+- Dev-server killed; port 3081 verified closed.
+- JS/TS-only change (no .rs touched, no trace-format change): per
+  AGENTS.md, cargo nextest/stress/clippy not required.
 
-None blocking. Two notes for the maintainer/next tickets:
-- The T40 DoD's "T12 row-walker used for validation" was satisfied in the
-  sanctioned fallback mode (hand-walk + curl in the features/01-refresh
-  style, each verdict recording its method): `ui/parity/walkers/` contains
-  only `features01.mjs`, and features/04 walkers are T41's deliverable. A
-  minimal features04 registry was considered and skipped as not-cheap: the
-  page's rows are dominated by API-contract and multi-period states the
-  walker lib has no fixtures for yet.
-- Whether to fix finding 1 (dead exemplar links) in legacy before T41, or
-  only in the migrated page, is a ledger call outside T40's docs-only fence.
+## RECONCILIATION / SCOPE FENCE
+
+- `url_state.js` and the browser page: NOT modified (T14's surface).
+  Reconciliation is documentation + codec design: url_state.js owns the
+  browser page's QUERY params (`bucket`, `aws_region`, `prefix`, `tab`,
+  `tz`, `last`, `from`, `to`, `q`); the codec owns the HASH on migrated
+  pages. The `tz` name exists in both vocabularies deliberately (same
+  values, different carrier + page - no interference). Boundary table in
+  the schema doc.
+- Frozen core untouched. The parity readout-schema/journey extension is a
+  parity-TOOL change, explicitly allowed by the schema fixture's header.
+- No chunk-2 chrome: only the minimal copy-link button the ticket owns.
+- No push, no PRs.
+
+## OPEN QUESTIONS / NOTES FOR MAINTAINER + CHUNK-2
+
+None blocking. Notes:
+- Ledger lines added (= PR sign-off items): `features/03 F147/F153
+  amended (T19)` (debounced write + hash alongside unchanged legacy
+  params) and `features/03 census +.d9-copy-link added (T19)`.
+- The J9 fixture path is demo-trace-dependent: after a demo-trace
+  regeneration, re-record it by click-zooming the legacy page and copying
+  the emitted URL (comment in parity/journeys.mjs says the same).
+- Chunk-2's status bar should replace `mountCopyLink` but keep the
+  flush-then-read contract (`ViewStateBinding.flush()` before reading
+  href).
+- Sibling coordination: T14 (browser page) may adopt the codec for any
+  NEW view state on its page; url_state.js's params stay query-based
+  as-is (schema doc, boundary table).

@@ -10,6 +10,8 @@ export interface PageEls {
   containerEl: HTMLElement;
   titleEl: HTMLElement;
   statsEl: HTMLElement;
+  /** Page header bar; page-level controls (T19 copy-link) mount here. */
+  headerEl: HTMLElement;
   /** Hide the loading indicator and show `msg` in the error element. */
   showError(msg: string): void;
 }
@@ -32,6 +34,7 @@ export function pageEls(): PageEls {
     containerEl: mustGet("fg-container"),
     titleEl: mustGet("fg-title"),
     statsEl: mustGet("fg-stats"),
+    headerEl: mustGet("fg-header"),
     showError(msg: string): void {
       loadingEl.classList.add("hidden");
       errorEl.style.display = "flex";

@@ -26,13 +26,25 @@ import {
 } from "../../lib/trace/index.js";
 import type { ParsedTrace, TraceSliceStore } from "../../lib/trace/index.js";
 import { createFlamegraph, filterCpuSamples } from "../../lib/canvas/index.js";
+import { mountCopyLink } from "../../lib/url/index.js";
 import type { PageEls } from "./dom.js";
 import { loadingLabel, resolveTraceUrls } from "./query.js";
+import { createFgUrlSync, restoreZoomFromUrl } from "./view-state.js";
 
 export async function runExactMode(
   params: URLSearchParams,
   els: PageEls
 ): Promise<void> {
+  // Copy-link (T19): mounted before the load so a share is possible even
+  // from the loading/error states. The zoom->URL sync exists only once
+  // the widget renders, hence the late-bound flush.
+  let flushUrlState: (() => void) | null = null;
+  mountCopyLink(els.headerEl, {
+    beforeCopy: () => {
+      flushUrlState?.();
+    },
+  });
+
   // `trace` is repeatable - each value is a separate (possibly gzipped)
   // component to fetch and concatenate (F1).
   const rawTraceUrls = params.getAll("trace");
@@ -176,33 +188,30 @@ export async function runExactMode(
   els.loadingEl.classList.add("hidden");
   els.containerEl.style.display = "flex";
 
-  // Zoom -> URL sync (F147-F153): replaceState of the rebuilt query,
-  // touching only the two zoom params so every other param survives.
-  function updateUrlZoom(): void {
-    const p = new URLSearchParams(window.location.search);
-    const z = fg.getZoomPath();
-    if (z.worker.length > 0) p.set("worker-zoom", z.worker.join("\t"));
-    else p.delete("worker-zoom");
-    if (z.offworker.length > 0) p.set("offworker-zoom", z.offworker.join("\t"));
-    else p.delete("offworker-zoom");
-    const newUrl = window.location.pathname + "?" + p.toString();
-    window.history.replaceState(null, "", newUrl);
-  }
+  // Zoom -> URL sync (F147-F153, amended by T19 - see the ledger): one
+  // debounced replaceState per zoom burst, still touching only the two
+  // legacy zoom params in the query (every other param survives, F153)
+  // and additionally carrying the versioned view-state hash. The lazy
+  // getZoomPath closure resolves the widget created on the next line.
+  const urlSync = createFgUrlSync(() => fg.getZoomPath());
+  flushUrlState = () => {
+    urlSync.flush();
+  };
 
-  const fg = createFlamegraph(els.containerEl, updateUrlZoom);
+  const fg = createFlamegraph(els.containerEl, urlSync.onZoomChange);
   fg.setData(allSamples, trace.callframeSymbols, {
     exportTitle: `Flamegraph \u2014 ${label}`,
     runtimeWorkers: trace.runtimeWorkers,
   });
 
   // Restore zoom from URL (only if the time-range filter succeeded,
-  // otherwise the tree differs - F151).
-  if (timeRangeMatched) {
-    const wz = params.get("worker-zoom");
-    const oz = params.get("offworker-zoom");
-    if (wz) fg.zoomToPath("worker", wz.split("\t"));
-    if (oz) fg.zoomToPath("offworker", oz.split("\t"));
-  }
+  // otherwise the tree differs - F151). Hash state wins per field over
+  // the legacy params; restoring writes nothing back (see view-state.ts).
+  restoreZoomFromUrl(
+    { search: window.location.search, hash: window.location.hash },
+    fg,
+    timeRangeMatched,
+  );
 
   // Responsive resize (F155).
   window.addEventListener("resize", () => fg.resize());
