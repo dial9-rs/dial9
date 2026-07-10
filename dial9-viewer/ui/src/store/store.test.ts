@@ -255,6 +255,27 @@ describe("transient channel", () => {
   });
 });
 
+describe("update() rejects explicit undefined in patches (audit finding 2)", () => {
+  it("a patch may omit a field but must not set a non-optional field to undefined", () => {
+    const raf = fakeRaf();
+    const store: ViewerStore = createStore(initialViewerState(), {
+      scheduler: raf.scheduler,
+    });
+    // exactOptionalPropertyTypes (tsconfig.json): Object.assign would stamp
+    // an explicit undefined into the field, so it must not typecheck. The
+    // fix is type-level; these lines are never legal call sites.
+    // @ts-expect-error viewStart is number: explicit undefined is rejected
+    store.update("viewport", { viewStart: undefined });
+    // @ts-expect-error spanFocus is SpanFocus | null, never undefined
+    store.update("selection", { spanFocus: undefined });
+
+    // Omission (the legal way to leave a field alone) still typechecks.
+    store.update("viewport", { viewEnd: 50 });
+    raf.frame();
+    expect(store.getState().viewport.viewEnd).toBe(50);
+  });
+});
+
 describe("derived caches", () => {
   it("computes once per dependency change and is invalidated only by its deps", () => {
     const raf = fakeRaf();

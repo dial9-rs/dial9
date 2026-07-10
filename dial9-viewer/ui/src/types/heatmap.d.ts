@@ -16,16 +16,21 @@ declare module "*/heatmap.js" {
    * segments carry more fields (key, ...); the generics below preserve
    * them. `service`/`host`/`bootId` come from parseKey and may be missing
    * on unknown key layouts. Times are epoch seconds.
+   *
+   * The optional fields include `| undefined` explicitly
+   * (exactOptionalPropertyTypes): the JS treats an explicitly-undefined
+   * field the same as a missing one, and index.html's normalized segments
+   * do carry explicit undefineds from parseKey.
    */
   export interface SegmentInput {
     start: number;
     /** May be missing/degenerate; segmentSpan() floors the span. */
-    end?: number | null;
+    end?: number | null | undefined;
     /** Byte size; treated as 0 when missing. */
-    size?: number | null;
-    service?: string | null;
-    host?: string | null;
-    bootId?: string | null;
+    size?: number | null | undefined;
+    service?: string | null | undefined;
+    host?: string | null | undefined;
+    bootId?: string | null | undefined;
   }
 
   /** Normalize a segment's [start, end] span in seconds (end > start). */
