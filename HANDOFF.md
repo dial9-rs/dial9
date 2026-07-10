@@ -1,150 +1,123 @@
-# T19 HANDOFF - Viewer URL view-state + copy-link
+# T48 HANDOFF - flamegraph search-count mismatch (#593)
 
-(Replaces the T40 HANDOFF inherited through the branch chain; T40's record
-lives at commit bd1503b.)
+(Replaces the T19 HANDOFF inherited through the branch chain; T19's record
+lives at commit e6b95a6.)
 
 ## STATUS
 
-COMPLETE - no STOP-gate hit. All DoD items done, all gates green, no open
-blockers. The hash-vs-query reconciliation followed the recorded default
-(legacy params untouched and mirrored; versioned hash carries the new
-unified state; hash wins per field on read) - it proved workable, no fork.
+BLOCKED-ON-MAINTAINER (semantic choice) - the expected STOP-gate for this
+ticket's analysis-first mode. Root cause is proven and measured; the fix is
+a small core-side edit, but T48 ties the choice of percentage semantic to
+the #593 issue author's expectation, which is not readable from this
+environment (GitHub access forbidden). In-repo evidence leans strongly one
+way but does not make the alternative indefensible, so no code was changed.
 
-Branch: `ticket/T19-url-view-state`, based on integrated tip 03f4626.
+Branch: `ticket/T48-search-count-mismatch`, based on integrated tip 74bab07.
 
 ## COMPLETED (commits)
 
 | sha | what |
 | --- | --- |
-| a87564c | codec (`ui/src/lib/url/view-state.ts`) + legacy-param fixture (`legacy-params.fixture.ts`) + property/round-trip tests |
-| 9f09db0 | store->URL sync binding (`ui/src/lib/url/sync.ts`) + copy-link (`ui/src/lib/url/copy-link.ts`) + barrel + tests |
-| d4015e0 | flamegraph page integration (`ui/src/pages/flamegraph/view-state.ts`; exact-mode/api-mode/dom/new-html wiring) + integration tests |
-| 2a212e4 | parity: journey J9 (recorded legacy zoom-link restore) + `fg.breadcrumb` readout |
-| 33b5204 | schema doc `docs/ui-inventory/05-url-view-state.md` + ADR-0004 doc-index row + ledger entries |
+| be77d29 | `docs/tickets/issue-closures.md` (T44's file, created): #593 entry with root cause, three-way-cross-checked measurements, both candidate semantics, maintainer decision point, DRAFT closing comment |
 
-## WHAT SHIPPED
+Analysis-only: no code gates required; doc integrity only. The measurement
+dev server (port 3121) was killed and verified down.
 
-- Versioned URL hash codec: `#v=1&fg.w=<tab path>&fg.o=...&tm=...&tz=...`
-  (form-encoded payload; empty state = no hash at all). Tolerant reader:
-  unknown v=1 keys preserved on rewrite; invalid values dropped; foreign
-  or future-version hashes never restored from nor rewritten.
-- Store-slice -> URL sync: one debounced (150ms trailing) replaceState
-  per change burst; no-op writes skipped; host/timer/scheduler injectable
-  for Node tests. Restore-on-load bypasses the store (the frozen widget's
-  zoomToPath does not fire onZoomChange), so opening a shared link
-  produces ZERO URL writes - legacy parity, gated by J9's url.query.
-- Flamegraph page (first consumer): user zoom -> page-local store slice
-  (`fgView`) -> one write carrying BOTH the legacy `worker-zoom` /
-  `offworker-zoom` query params (exact F147-F153 semantics: address-bar
-  copies still open on the legacy page) AND the versioned hash. Read
-  precedence: hash wins per field, legacy fills gaps; F151
-  timeRangeMatched gate kept.
-- Copy-link button (`.d9-copy-link`) in the migrated page header, both
-  modes: flushes the pending debounced write, copies location.href,
-  flashes "Copied". API mode mounts it without a flush (its URL is
-  already current via F180 pushState; canvas zoom deliberately not
-  URL-synced there - legacy parity, codec stays out).
-- Time mode: `tm` (`rel`|`abs`) + `tz` (`utc`|`local`) DEFINED in the v1
-  vocabulary but unwritten - the flamegraph page has no clock-mode
-  control; the chunk-2 viewer wires them (design addition, rationale
-  documented in the schema doc).
+## ROOT CAUSE
 
-## DoD EVIDENCE
+The stat and the highlight measure different things:
 
-1. check: Vitest codec round-trip property test - PASS.
-   `ui/src/lib/url/view-state.test.ts`: 500 seeded-random states
-   (mulberry32; adversarial frame names incl. `& = # % + ? / \ ' " space
-   unicode`; tab excluded = the legacy wire format's own limitation),
-   decode(encode(s)) === s, encode-stability, legacy-mirror round-trip.
-   No new deps (constraint S1) - hand-rolled PRNG, no fast-check.
+- `updateSearchStats` (`dial9-viewer/ui/flamegraph.js:485-518`) reports
+  `matchedSelf / totalSelf`; `countSearchMatches` (`:106-118`) sums
+  `node.self`, which counts only samples whose innermost (leaf) frame is
+  that node (`trace_analysis.js:1034`).
+- The highlight (`:347-363`, row F40) lights every matching frame's FULL
+  bar; bar width is `node.count / total`, the INCLUSIVE weight.
 
-2. check: restore-on-load integration test on each page migrated at
-   landing time (flamegraph is the only one) - PASS, done BOTH sanctioned
-   ways, documented:
-   - vitest-level against the page module:
-     `ui/src/pages/flamegraph/view-state.test.ts` (recording fake widget:
-     legacy-only / hash-only / both-precedence / F151 gate / zero writes
-     on restore / write shape / Esc cleanup / F153 preservation / flush).
-   - parity behavioral differ (in-browser, real page + real widget):
-     journey J9 below.
+Mid-stack frames have `self == 0`, so a query lighting most of the canvas
+reports a tiny number, and the `matchedSelf > 0` guard (`:513`) hides the
+percentage entirely when every match is mid-stack. Compounding evidence:
+the page's own SVG export embeds flamegraph.pl-style search
+(`flamegraph_export.js:378-421`, rows F79/F84) whose `Matched: X%` IS the
+highlighted-area share - the page disagrees with its own export on the same
+data. Also, "N frames" counts matching tree nodes, so it can exceed the
+sample count.
 
-3. check: recorded legacy-param fixture URLs resolve identically - PASS.
-   - Fixture (the ticket's FIRST work item), recorded from reading
-     flamegraph.html + flamegraph.js + features/03 M/P into
-     `ui/src/lib/url/legacy-params.fixture.ts`:
-     - exact mode, load scope (read-only): `trace` (repeatable), `start`,
-       `end`, `svc`, `host`, `segs`, `from`, `to`;
-     - exact mode, VIEW STATE (replaceState, F147-F153): `worker-zoom`,
-       `offworker-zoom` (tab-joined frame paths; set when non-empty,
-       deleted when empty; restore gated on timeRangeMatched F151; Esc
-       clears F152; all other params preserved F153);
-     - api mode (pushState on Apply/facet change, F180): `api`,
-       `data_dir`, `bucket`, `prefix`, `service`, `host` (repeatable),
-       `start_ns`, `end_ns`, `source`, `thread_class`, `spawn_location`,
-       `max_files` - NO view-state params by design (canvas zoom not
-       URL-synced in api mode; kept that way).
-   - Behavioral differ (dev-server :3081 over built dist, per the DoD
-     recipe), J9 fixture URL recorded from the LEGACY page itself
-     (click-zoom on demo-trace, walkable prefix of the emitted path):
-     `/flamegraph.html?trace=demo-trace.bin&worker-zoom=0xffff9b8cbf1c%090xffff9b862030%09Thread%3A%3Anew%3A%3Athread_start+unix.rs%3A130`
-     Output: `== J9 (restore a shared zoom link) ... checkpoint restored:
-     identical (6 fields) ... ZERO DIFF` (legacy /flamegraph.html vs
-     migrated /new/flamegraph.html).
-   - J5 re-run legacy vs new with the copy-link mounted: `ZERO DIFF`
-     (rendered + searched checkpoints, 6 fields each).
-   - End-to-end playwright verification on the migrated page (throwaway
-     script, removed): zoom writes legacy params + v=1 hash (debounced);
-     hash-only URL restores (breadcrumb populated, URL byte-stable, no
-     write-back); copy-link copies href (clipboard === href, "Copied"
-     flash); Esc clears both params and the hash, keeps `trace`; the
-     LEGACY page loads a hash URL fine and is simply not zoomed (raw
-     ui-switch policy honored - no state porting, none attempted).
+## EVIDENCE (measured numbers)
 
-4. review: schema documented for chunk-2 extension -
-   `docs/ui-inventory/05-url-view-state.md`: key registry
-   (live/defined/reserved), version + tolerant-reader rules, precedence,
-   write mechanics, ownership boundary table, extension checklist.
-   Registered in ADR-0004's doc-index table.
+Demo trace, 147 CPU samples (all worker-side; offworker empty). Reported
+stat read live from `.fg-search-stats` via Playwright on BOTH
+`/new/flamegraph.html?trace=demo-trace.bin` and legacy
+`/flamegraph.html?trace=demo-trace.bin` over the dev server - byte-identical
+on both generations (same core flamegraph.js). Lit-area share measured
+exactly by intercepting canvas `fillRect` during the same runs: union of
+alpha-1.0 bar x-extents / union of all bar x-extents (F40 dims non-matches
+to 0.25). Cross-checked two independent ways: headless Node replication of
+the page's tree build (union of inclusive counts of topmost matched
+frames), and the export SVG (`treeToInteractiveSvg`) driven through its
+embedded `search()` with ignorecase.
 
-## GATES
+| Query | Page stat (F38) | Lit-area (draw calls) | Export SVG `Matched:` | Tree math |
+| --- | --- | --- | --- | --- |
+| poll | 146 frames, 2.7% of samples | 100.0% | 100% | 100.0% |
+| tokio | 230 frames, 5.4% of samples | 100.0% | 100% | 100.0% |
+| axum | 32 frames (no pct) | 92.5% | 92.5% | 92.5% |
+| dispatcher | 24 frames (no pct) | 68.6% | 68.7% | 68.7% |
+| framebuf | 8 frames (no pct) | 54.4% | 54.4% | 54.4% |
+| spawn | 2 frames (no pct) | 100.0% | 100% | 100.0% |
 
-- `npx tsc --noEmit`: clean.
-- `npm run test` (FULL suite, includes the check:boundary pretest):
-  50 files passed + 1 skipped (pre-existing), 888 passed / 1 expected
-  fail / 11 skipped (pre-existing baseline). 0 unexpected failures.
-- `npm run build`: clean (dist/new/flamegraph.html + bundles + 17
-  static-copied items).
-- `cargo build -p dial9-viewer`: clean (rust-embed embed check).
-- Dev-server killed; port 3081 verified closed.
-- JS/TS-only change (no .rs touched, no trace-format change): per
-  AGENTS.md, cargo nextest/stress/clippy not required.
+(68.6 vs 68.7: canvas rounding + the sub-0.1%-width draw filter; the
+independent measurements otherwise agree exactly.)
 
-## RECONCILIATION / SCOPE FENCE
+One-line version: searching `poll` lights 100% of the canvas and reports
+"2.7% of samples"; `framebuf` lights 54.4% and reports no percentage at all.
 
-- `url_state.js` and the browser page: NOT modified (T14's surface).
-  Reconciliation is documentation + codec design: url_state.js owns the
-  browser page's QUERY params (`bucket`, `aws_region`, `prefix`, `tab`,
-  `tz`, `last`, `from`, `to`, `q`); the codec owns the HASH on migrated
-  pages. The `tz` name exists in both vocabularies deliberately (same
-  values, different carrier + page - no interference). Boundary table in
-  the schema doc.
-- Frozen core untouched. The parity readout-schema/journey extension is a
-  parity-TOOL change, explicitly allowed by the schema fixture's header.
-- No chunk-2 chrome: only the minimal copy-link button the ticket owns.
-- No push, no PRs.
+## THE QUESTION FOR THE MAINTAINER
 
-## OPEN QUESTIONS / NOTES FOR MAINTAINER + CHUNK-2
+With the #593 issue body in hand, pick the remedy (full write-up + draft
+closing comment in `docs/tickets/issue-closures.md`):
 
-None blocking. Notes:
-- Ledger lines added (= PR sign-off items): `features/03 F147/F153
-  amended (T19)` (debounced write + hash alongside unchanged legacy
-  params) and `features/03 census +.d9-copy-link added (T19)`.
-- The J9 fixture path is demo-trace-dependent: after a demo-trace
-  regeneration, re-record it by click-zooming the legacy page and copying
-  the emitted URL (comment in parity/journeys.mjs says the same).
-- Chunk-2's status bar should replace `mountCopyLink` but keep the
-  flush-then-read contract (`ViewStateBinding.flush()` before reading
-  href).
-- Sibling coordination: T14 (browser page) may adopt the codec for any
-  NEW view state on its page; url_state.js's params stay query-based
-  as-is (schema doc, boundary table).
+1. Change the math to the highlighted-area share: samples passing through
+   at least one matching frame (union of inclusive counts of topmost
+   matched frames / total). Matches the highlight, the SVG export, and
+   flamegraph.pl; "X% of samples" remains an accurate label.
+2. Keep the self-sample math but relabel ("X% self samples") and stop
+   suppressing the figure when matchedSelf == 0.
+3. Show both.
+
+Evidence leaning: (1) - it is what users see (F40), the industry
+convention, and this product's own export semantic (F79/F84). But (2) is a
+defensible cheaper remedy (self time is a real metric; only the label
+lies), so the choice is not made unilaterally per the ticket.
+
+## IMPLEMENTATION NOTES FOR THE FIX (once decided)
+
+- Sanctioned core-side edit: `countSearchMatches` / `updateSearchStats` in
+  `flamegraph.js`. BOTH page generations load this file, so both change
+  together.
+- Regression test in `dial9-viewer/ui/tests/core/` (the flamegraph
+  export/search suites show the pattern); gates: `npx tsc --noEmit`, FULL
+  `npm run test`, `npm run build`.
+- Amend rows F38/F40 in
+  `docs/ui-inventory/features/03-flamegraph-html.md` in-diff + ledger line.
+- Byte-parity implications: re-run the census/behavioral differ baselines.
+  J5's "searched" checkpoint captures `.fg-search-stats` (readout
+  `fg.searchStats`, `parity/fixtures/readout-schema.mjs:61`), so the stat
+  change must appear there as the ONLY behavioral delta; J5 must stay
+  zero-diff for non-search steps and all non-search journeys zero-diff.
+
+## OPEN QUESTIONS
+
+- The semantic choice above (blocking).
+- If option 1 is chosen: should "N frames" change too? It counts matching
+  tree nodes (146 "frames" for `poll` on a 147-sample trace; 230 for
+  `tokio`). Counting distinct matched function names, or topmost matched
+  extents, would both read saner; flag in the fix PR either way.
+
+## SCOPE FENCE
+
+- Frozen core untouched; no inventory rows amended; no ledger line (none
+  earned - analysis only, per ledger format that records row changes).
+- No push, no PRs, no GitHub access.
+- Scratch measurement scripts were not committed (methodology recorded in
+  issue-closures.md precisely enough to reproduce).
