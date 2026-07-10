@@ -1522,7 +1522,7 @@ dependencies = [
 
 [[package]]
 name = "dial9-tokio-telemetry"
-version = "0.3.13"
+version = "0.3.14"
 dependencies = [
  "arc-swap",
  "assert2",
