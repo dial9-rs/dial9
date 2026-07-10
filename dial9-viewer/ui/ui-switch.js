@@ -17,6 +17,11 @@
 //   3. Otherwise stay on the legacy page and, if a new-UI entry is registered,
 //      render a small always-visible "Switch to new UI" control. When nothing
 //      is registered, NO control renders (a switch to nowhere must not exist).
+//      If the stay was forced by an explicit `?ui=legacy` pin against a
+//      preference/default of "new", the "legacy" choice is persisted to the
+//      stored preference - the legacy pages strip the pin on their first URL
+//      sync, so the pin alone cannot be trusted to survive a reload (see
+//      pinWouldBounce).
 //
 // New-UI entries live at their own dist paths (the canonical paths keep
 // serving the legacy pages via the vite.config.ts static-copy list until
@@ -29,7 +34,9 @@
 // source; the hash (view state) is always dropped. Note the query string is
 // re-serialized through URLSearchParams, so percent-encoding may normalize
 // (values are preserved exactly; both UIs read params through the same
-// decoding APIs).
+// decoding APIs). The control's target URL is resolved from the LIVE
+// location at interaction time, never from a boot-time snapshot: the pages
+// rewrite their query string as in-page state changes (see liveControlHref).
 //
 // Assumes the UI is served at the server root (true for `dial9 serve` and
 // the dev-server): switch targets are built root-absolute.
@@ -93,6 +100,27 @@
     return qs ? "?" + qs : "";
   }
 
+  // Registered new-UI entry for a canonical page, or null when the page has
+  // no usable registration.
+  // An entry that is itself a registry key would make the legacy-side
+  // dispatch loop through location.replace() with no escape - a
+  // self-registration ("x.html" -> "x.html") reloads forever, and a
+  // cross-registration cycle ("a.html" -> "b.html" -> "a.html") hops
+  // forever because buildQuery strips the `ui` param on every new-bound
+  // hop, so not even `?ui=legacy` survives into the loop (T38 audit
+  // finding 3). New-UI entries live off-root, so a legitimate entry is
+  // never a key; treat any that is as unregistered.
+  function registeredEntry(page, registry) {
+    var entry =
+      page && Object.prototype.hasOwnProperty.call(registry, page)
+        ? registry[page]
+        : null;
+    if (entry && Object.prototype.hasOwnProperty.call(registry, entry)) {
+      return null;
+    }
+    return entry;
+  }
+
   // The decision function: (location + storage + registry) -> what happens.
   //
   // input: {
@@ -131,13 +159,7 @@
     }
 
     // Legacy side.
-    var newEntry =
-      page && Object.prototype.hasOwnProperty.call(registry, page)
-        ? registry[page]
-        : null;
-    // A self-registration ("x.html" -> "x.html") would make the redirect
-    // below reload the page forever; treat it as unregistered.
-    if (newEntry === page) newEntry = null;
+    var newEntry = registeredEntry(page, registry);
     if (!newEntry) {
       // No migrated version registered: stay legacy, and hide the
       // affordance - a switch to nowhere must not render.
@@ -177,6 +199,61 @@
     return null;
   }
 
+  // The switch-control target resolved from the LIVE location (T38 audit
+  // finding 1). Every legacy page rewrites its query string after boot -
+  // history.replaceState/pushState of a rebuilt query (flamegraph browser
+  // scope and worker zoom, tokio_stats hosts/periods, index browse state,
+  // viewer start/end) - and the new SPA will too, so an href computed once
+  // at boot navigates with a stale query and loses the current trace/scope.
+  // The browser layer calls this at interaction time (mousedown + click)
+  // and re-assigns the anchor's href just before it is used; the control's
+  // label and direction stay boot-time, only the URL is live.
+  //
+  // The live pathname is re-resolved first (an SPA pushState may move it);
+  // bootPage - the canonical page the control was mounted for - is the
+  // fallback when the live pathname resolves to nothing. Returns the href,
+  // or null when no target resolves (the caller then keeps the previous
+  // href rather than producing a dead link).
+  function liveControlHref(side, bootPage, pathname, search, registry) {
+    var page =
+      side === "new"
+        ? pageForNewEntry(pathname, registry)
+        : canonicalPageFromPath(pathname);
+    if (!page) page = bootPage;
+    if (!page) return null;
+    if (side === "new") return "/" + page + buildQuery(search, "legacy");
+    var entry = registeredEntry(page, registry);
+    return entry ? "/" + entry + buildQuery(search, "new") : null;
+  }
+
+  // Is the explicit `?ui=legacy` pin the ONLY thing keeping this visitor on
+  // the legacy UI (T38 audit finding 2)? Three of the four legacy pages
+  // rebuild their query string from scratch on their first URL sync and
+  // drop the unknown `ui` param (index, flamegraph, tokio_stats; only
+  // viewer preserves it), so the pin cannot be relied on to survive. True
+  // exactly when the same URL WITHOUT the pin would resolve "new" - i.e.
+  // when losing the pin would bounce a reload (or a copied address-bar URL
+  // in the same browser) back to the new UI against the visitor's explicit
+  // choice. The browser layer then aligns the stored preference to
+  // "legacy", making the choice survive the strip.
+  //
+  // Deliberately false when the visitor already resolves legacy without
+  // the pin: a shared `?ui=legacy` link must not sticky-switch a recipient
+  // whose preference/default is already legacy (mirroring the
+  // write-on-click-only rule for `?ui=new` links). For a recipient whose
+  // stored preference says "new" the audit weighs honoring the pinned
+  // intent above the no-sticky rule - that conflict IS the bounce case.
+  function pinWouldBounce(search, storedPref, defaultUi) {
+    var params = new URLSearchParams(search);
+    if (params.get("ui") !== "legacy") return false;
+    params.delete("ui");
+    var stripped = params.toString();
+    return (
+      resolveUi(stripped ? "?" + stripped : "", storedPref, defaultUi) ===
+      "new"
+    );
+  }
+
   // Read a preference off a localStorage-like object. Failures (private
   // mode, storage disabled) and unknown values read as "no preference" -
   // never as a default UI choice.
@@ -194,6 +271,8 @@
   exports.decide = decide;
   exports.canonicalPageFromPath = canonicalPageFromPath;
   exports.pageForNewEntry = pageForNewEntry;
+  exports.liveControlHref = liveControlHref;
+  exports.pinWouldBounce = pinWouldBounce;
   exports.prefFromStorage = prefFromStorage;
   exports.NEW_UI_ENTRIES = NEW_UI_ENTRIES;
   exports.DEFAULT_UI = DEFAULT_UI;
@@ -228,7 +307,14 @@
   // bottom-right corner, above everything, visible without scrolling on both
   // UIs. Built with createElement/textContent only - no URL-derived content
   // is ever interpolated into HTML.
-  function mountControl(control) {
+  //
+  // `liveHref` re-resolves the target URL from the live location (see
+  // liveControlHref): the pages rewrite their query string after boot, so
+  // the boot-time href is refreshed just before every use. mousedown runs
+  // ahead of left- and middle-click navigation AND of the context menu
+  // (so "Copy Link Address" copies the live URL); click covers keyboard
+  // activation, which fires no mousedown.
+  function mountControl(control, liveHref) {
     if (!control) return;
     function render() {
       if (document.getElementById(CONTROL_ID)) return; // idempotent
@@ -236,10 +322,16 @@
       a.id = CONTROL_ID;
       a.textContent = control.label;
       a.href = control.href;
+      function refreshHref() {
+        var href = liveHref();
+        if (href) a.href = href;
+      }
+      a.addEventListener("mousedown", refreshHref);
       a.addEventListener("click", function () {
+        refreshHref();
         // Clicking the switch IS the preference. Navigation proceeds via
-        // the href (middle-click / copy-link work too; those skip this
-        // handler, which is fine - see writeStoredPref).
+        // the (just refreshed) href - middle-click / copy-link work too;
+        // those skip this handler, which is fine - see writeStoredPref.
         writeStoredPref(control.target);
       });
       var s = a.style;
@@ -266,12 +358,13 @@
   }
 
   function run(side, page) {
+    var storedPref = readStoredPref();
     var result = decide({
       side: side,
       page: page,
       search: window.location.search,
       hash: window.location.hash, // dropped by decide(): raw switch
-      storedPref: readStoredPref(),
+      storedPref: storedPref,
       registry: NEW_UI_ENTRIES,
       defaultUi: DEFAULT_UI,
     });
@@ -281,7 +374,31 @@
       window.location.replace(result.redirect);
       return;
     }
-    mountControl(result.control);
+    if (
+      side === "legacy" &&
+      result.control &&
+      pinWouldBounce(window.location.search, storedPref, DEFAULT_UI)
+    ) {
+      // T38 audit finding 2: this visitor is on legacy ONLY because of the
+      // explicit `?ui=legacy` pin, and the page's own URL syncs will strip
+      // it. Persist the pinned choice so the next pin-less load still
+      // resolves legacy instead of bouncing to the new UI. Gated on
+      // result.control (a registered counterpart) - without one no
+      // dispatch is possible, so a stray pin must not touch the global
+      // preference. Best-effort: see writeStoredPref.
+      writeStoredPref("legacy");
+    }
+    mountControl(result.control, function () {
+      // T38 audit finding 1: the target is resolved from the LIVE location
+      // at interaction time, never from the boot-time snapshot above.
+      return liveControlHref(
+        side,
+        page,
+        window.location.pathname,
+        window.location.search,
+        NEW_UI_ENTRIES
+      );
+    });
   }
 
   // Tiny API for new-UI entries: window.D9UiSwitch.mount({ side: "new" }).
