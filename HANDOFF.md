@@ -1,262 +1,199 @@
-# T17 HANDOFF - Segment-windowed loading (tier 2 core)
+# FIX-T17 HANDOFF - segment-windowing audit fixes
 
-(Replaces the T16 HANDOFF inherited through the branch chain; T16's own
-record lives at commit 357ac5e.)
+(Replaces the T17 HANDOFF inherited through the branch chain; T17's own
+record lives at commit e29c258.)
+
+Branch `fix/T17-segment-stitching-budget`, based on the integrated
+chunk-1 tip 3004ca2. Authoritative spec: the adversarial audit at
+`docs/tickets/reviews/T17-audit.md` (findings 1-5; 1 and 2 BLOCKING).
 
 ## STATUS
 
-DONE - all DoD checks pass (evidence below). No STOP-gate hit. Scope
-fence respected: no UI/minimap, no aggregates client (T18 lives on a
-sibling branch and was NOT re-implemented), no frozen-core .js edits, no
-page HTML, no .rs touched.
+DONE - both blocking findings fixed, both medium findings fixed, and the
+low-severity test-coverage item covered; every audit probe is now a
+permanent, named regression test (failing-first verified for all four
+findings). All gates pass (evidence below). No STOP-gate hit: the
+N-segment stitching design raised no N19 memory conflict - retained edge
+evidence is bounded at one open + one close per worker per segment, and
+chain assembly is pure derivation with no retained buffers. Scope fence
+respected: no .rs edits, no frozen-core .js, no page HTML, no new dist
+assets, no pushes/PRs.
 
-## COMPLETED (commits on `ticket/T17-segment-windowing`, on top of 357ac5e)
+## COMPLETED (commits on top of 3004ca2)
 
-- `a9dcf7e` worker parse-buffer request: protocol.ts grows
-  TraceWorkerParseBufferRequest (buffer CLONED in - the sender's copy is a
-  live cache entry; decompressed buffer transferred back); body.ts
-  refactor hoists shared makeReporter/startJob out of runLoad (comments
-  carried) + runParseBuffer (DecompressionStream gunzip-stream fused with
-  parse; explicit error where gzipped bytes meet a no-DS runtime - the
-  core's zlib fallback would throw a bare-require ReferenceError in a
-  browser worker); stream.ts extracts parseChunksWithCapture (public
-  surface unchanged); 4 new body tests.
-- `a39cd10` additive types: types/trace.d.ts boundary-poll vocabulary
-  (SegmentEdgePolls, WindowEdgePoll with explicit `taskId: null` for
-  left-edge crossings, StitchedBoundaryPoll, WindowBoundaryPolls);
-  types/state.d.ts SegmentEntry gains trace / rawByteLength /
-  invariants (SegmentParseInvariants, retained across eviction) /
-  edgePolls. T06 union + existing fields untouched.
-- `ab45f27` lib/trace/segments.ts (the 2.8 placement) + barrel exports +
-  load.ts exports defaultTraceWorkerFactory for the per-segment driver.
-- `fcd9507` segments.test.ts: 42 (now 43) pure-function cases + a
-  real-demo-parse anchor.
-- `1e3a29c` reservation-aware eviction (design fix found while writing
-  the DoD eviction test): planEviction gains reservedBytes so reconcile
-  frees room BEFORE an admitted parse lands; without it resident could
-  transiently overshoot the hard budget by one segment.
-- `f09e993` segments.window.test.ts (17 orchestrator/hard-edge/scenario
-  tests) + one real worker_threads parse-buffer parity case in
-  worker/integration.test.ts.
-- (final commit): this HANDOFF.
+- `c02cc0b` findings 1 (BLOCKING) + 3 (medium), one coherent rewrite:
+  `computeWindowBoundaryPolls` becomes a per-worker chain walk. An open
+  poll is carried across consecutively listed segments while (a) their
+  extents are ADJACENT (finding 3: no unobserved time between them; a
+  listing hole yields truncated fragments on both sides, never a
+  fabricated complete poll) and (b) the worker is provably SILENT there
+  (via the eviction-surviving invariants worker set - a PollEnd, Park or
+  PollStart would have closed the poll). Fully-resident chains stitch
+  into ONE complete poll from k >= 2 fragments; partially-resident
+  chains surface each maximal resident stretch as an explicitly
+  truncated WindowEdgePoll - a prefix-resident chain truncates at the
+  last resident edge. edgePolls are now RETAINED across eviction (they
+  are tiny), which makes the audit's middle-only-resident variant
+  visible as a "both"-truncated poll carrying its real task identity.
+  Types additive: `WindowEdgePoll.truncatedAt` gains "both".
+- `bb97d5c` finding 2 (BLOCKING): a segment whose real decompressed size
+  exceeds the resident budget now parses exactly ONCE and moves to the
+  new terminal `"oversized"` lifecycle state (additive union member; the
+  T06 exhaustive-switch compile gate updated with it) instead of
+  spinning through force-admit -> parse -> hard-clamp-evict forever. The
+  parse is dropped at completion, so it never enters resident accounting
+  (no 2x-budget peak); rawByteLength, invariants and edgePolls are kept,
+  so lane stability and boundary-poll continuity behave exactly as
+  across an eviction. reconcile filters oversized keys from admission
+  AFTER computing geometry (an oversized need segment still contributes
+  its neighbors to prefetch geometry); startJob refuses them as defense
+  in depth. The misleading comment ("admission defers it honestly") is
+  corrected to describe the two real deferral shapes. Consumers
+  distinguish "too big for budget" (oversized) from "not yet fetched"
+  (listed) by state.
+- `f972c2a` finding 4 (medium): the admission pipeline (geometry ->
+  oversized filter -> need round -> prefetch round) is extracted into
+  `planAdmission` (pure extraction; reconcile behavior unchanged) and
+  the idle prefetch callback now re-runs ADMISSION, not just geometry -
+  a stale idle whose key was budget-deferred by the latest reconcile
+  starts nothing.
+- (final commit) this HANDOFF.
 
-## WHAT WAS BUILT
+## EVIDENCE (per finding: before -> after)
 
-### Budgets (N19; shared-decisions constants, all tunable via options)
+All runs in `dial9-viewer/ui` (npm ci done) on this branch.
 
-RESIDENT_RAW_BUDGET_BYTES = 128 MB (sum of DECOMPRESSED sizes of parsed
-segments - the proxy for the ~10x parsed heap), RAW_GZIP_CACHE_BUDGET_BYTES
-= 256 MB, BUDGET_EVICTION_THRESHOLD_FRACTION = 0.9 (the 10% headroom is
-the hysteresis margin; GC lags eviction). GZIP_EXPANSION_ESTIMATE = 4 is
-the pre-fetch planning estimate ONLY (real sizes replace it after the
-first parse; chosen above the observed ~3.3x so reservations over-cover).
+- Finding 1 (audit probe: 3-segment poll, all segments resident,
+  returned `{truncated: [], stitched: []}`): the regression tests were
+  written first and run against the unfixed tree - 5 pure failures
+  ("stitches a poll spanning 3 resident segments", "TWO silent interior
+  segments", "prefix-resident chain", "middle-only-resident",
+  extent-gap guard) plus 2 orchestrator failures (the eviction-retention
+  pin and "worker mid-poll through the only-resident segment"). After
+  `c02cc0b`: all pass; the probe fixture returns the single stitched
+  complete poll {start: 10, end: 210, taskId: 7}.
+- Finding 2 (audit probe: rawByteLength 2000 vs budget 1000 - state
+  "evicted" after EVERY setViewport, parsesStarted incrementing per
+  call, peakResidentRawBytes 2000): the three tests in "T17-audit
+  finding 2: oversized segments defer honestly" failed before the fix;
+  after `bb97d5c` the probe fixture settles at state "oversized" with
+  networkFetches 1 and parsesStarted 1 across 5 viewport ticks,
+  evictions 0, residentRawBytes 0, peakResidentRawBytes 0.
+- Finding 3 (fabricated stitch across a listing hole): "never stitches
+  across an extent gap" failed before `c02cc0b` (the fabricated
+  {start: 10, end: 310} completed poll was produced); now both
+  fragments surface truncated ("end" with task identity, "start" with
+  taskId null) and stitched is empty.
+- Finding 4 (stale idle bypasses admission): "T17-audit finding 4: a
+  stale idle callback re-runs BUDGET admission, not just geometry"
+  failed before `f972c2a` with the audit's exact waste (the
+  budget-deferred key was fetched: "expected [ ...(3) ] to not include
+  ...segKey(1)"); now zero fetch/parse for the deferred key and
+  networkFetches stays at 2.
+- Low item (the 10-segment DoD scenario pins expansion at exactly 3x,
+  blind to the finding-2/-5 class): covered by the NEW scenario
+  "10-segment walk with one oversized segment" - one 15x expander among
+  3x segments; one parse total for it across an out-and-back walk,
+  resident and peak <= budget after every step, zero re-downloads. It
+  failed before `bb97d5c` (the walk looped re-parsing the oversized
+  segment). The original DoD scenario is deliberately untouched; see
+  DECISIONS.
 
-### The decision layer (pure, exhaustively tested)
+## REGRESSION TESTS (named so the audit can find them)
 
-- deriveSegmentExtents: heatmap parity (features/01 F2/F4/F7 + I2):
-  filename-epoch start, last_modified end, 1s floor, tiled ends;
-  unrecognized DIRECTORY layouts still derive via the basename pattern
-  (the dev-server's 6-component key works); keys with no epoch are
-  returned in `skipped` with a reason, never guessed. Extents are
-  wall-clock ns; mapExtentToMonotonic(extent, clockOffsetNs) moves them
-  into the viewport's domain once a parse provides the offset. CLOCK
-  DOMAIN NOTE: everything handed to the orchestrator must share one
-  domain (module-header doc).
-- computeNeedSet (closed-interval overlap - touching edges count),
-  computePrefetchSet (+/-1 beyond both edges; nearest neighbors on both
-  sides when the viewport sits in a coverage gap).
-- capToBudget: admission against the trigger (the N19 window limit, not
-  a rejection - the nearest need segment is always admitted, and the
-  legacy 100/200 MB open cap has no successor check anywhere else).
-- planEviction: farthest-from-viewport first ("LRU by distance", 2.8)
-  past the 90% trigger; need/prefetch protected there; prefetch, then
-  farthest-from-center need members evicted ONLY to re-clamp under the
-  HARD budget; reservedBytes (admitted-but-unparsed estimates) shrink
-  both watermarks so eviction precedes the parse that needs the room.
-- createRawByteCache: true-LRU (access-ordered) gzip byte cache, own
-  budget, same 90% trigger; entries larger than the trigger are refused
-  (caching one would empty the cache and still not fit).
+In `src/lib/trace/segments.test.ts`:
+- `computeWindowBoundaryPolls: T17-audit finding 1 (N-segment stitching)`
+  (the 3-segment probe, 4-segment span, prefix-resident truncation,
+  middle-only-resident, unmatched-chain whole-drop parity)
+- `computeWindowBoundaryPolls: T17-audit finding 3 (extent-gap guard)`
+  (gap fragments; touching/tiled extents remain adjacent)
 
-### Boundary polls (the 2.8 truncation hard edge; features/02 G5)
-
-Per-segment: computeSegmentEdgePolls extracts, in one scan, polls left
-open at the segment END (exactly what the core discards at trace end,
-trace_analysis.js #194) and dangling PollEnd-first closes at the START
-(what the core ignores). Park/Unpark-first starts are ambiguous and
-deliberately captured as nothing (ADR-0002 spirit: absence is never
-fabricated). Stored on the entry (edgePolls), dropped with the parse on
-eviction; segmentInvariants (minTs/maxTs/workerIds) persist eviction.
-
-Window-level: computeWindowBoundaryPolls walks maximal runs of
-consecutively-listed parsed segments; internal boundaries STITCH matched
-open/close pairs into complete polls; run edges with a listed-but-
-unparsed neighbor surface as WindowEdgePoll {truncatedAt, openEnded:
-true}, spans clamped to observed events (a lower bound - never a
-long-poll false positive, never rendered to the window edge). Absolute
-listing ends keep core trace-edge parity (dropped, no marker). Left-edge
-crossings carry `taskId: null` - the PollStart holding task identity was
-never parsed; renderers must treat it as explicitly unknown.
-
-ADR-0002 note: block-in-place gap detection runs inside each segment's
-parse over that segment's events only, so window edges ARE trace edges
-for gap detection; nothing to do, documented in the module header.
-
-### Worker path
-
-parseSegmentInWorker drives the new parse-buffer request: one worker per
-segment parse, terminated on settle, late messages dropped - T16's
-orchestration semantics reused wholesale (the persistent pool the T16
-HANDOFF anticipated was NOT needed; worker spawn is negligible next to a
-segment parse, and the TraceWorkerFactory seam keeps the pool option
-open). Bytes are CLONED into the worker (the cache entry survives); the
-decompressed buffer comes back transferred and only its byteLength is
-kept (the budget cost); gzipped input streams through DecompressionStream
-so gunzip and parse overlap.
-
-### The orchestrator (createSegmentWindow)
-
-Takes the store (SegmentsSliceStore - structural, compile-checked against
-ViewerStore), the ordered ListedSegment[] and options (fetch/parser/idle
-all injectable; urlFor defaults to identity - the key IS the URL for
-non-S3 `trace=` sources; S3 callers pass an /api/object mapping). Seeds
-every segment as "listed"; setViewport drives
-listed -> fetching -> parsed -> evicted (-> fetching ...), where
-"fetching" covers the whole in-flight job and an abort reverts to the
-pre-flight state ("evicted" iff previously parsed). Reconcile pass:
-need/prefetch -> budget admission -> stale-job aborts -> reservation-
-aware eviction -> start need jobs now, prefetch via the idle scheduler
-(callbacks re-verify the viewport before starting). Parse completions
-write the entry (trace + rawByteLength + invariants + edgePolls) and
-re-reconcile. Failures revert the entry, surface via onError (default
-console.warn), and are NOT hot-retried - the mark clears when the key
-leaves the wanted set. Keys evicted by the hard clamp are not restarted
-in the same pass (their real sizes make the next admission defer them
-honestly - no fetch/evict loop).
-
-## DoD EVIDENCE
-
-All run in dial9-viewer/ui (npm ci done), final tree:
-
-1. `npx tsc --noEmit`: clean (exit 0).
-2. `npm run test`: pretest boundary check OK, then 26 files / 333 tests
-   pass (268 inherited + 65 new: 43 pure, 17 orchestrator, 4 body
-   parse-buffer, 1 worker_threads integration).
-3. HARD EDGE "abort on viewport jump": segments.window.test.ts pins both
-   phases - an in-flight FETCH is aborted (its AbortSignal observed
-   fired), the entry reverts to "listed", and a late transport
-   resolution reaches neither the parser nor the store; an in-flight
-   PARSE job receives abort() and its late completion never mutates the
-   store (resident stays 0). Transport-independent driver semantics
-   (abort message + terminate + AbortError + late-message drop) pinned
-   separately against a scripted port.
-4. HARD EDGE "boundary poll truncated, not long": with segments 0+1
-   parsed and 2 unfetched, the poll opening at the end of segment 1 is
-   surfaced as {truncatedAt: "end", openEnded: true} with its span
-   clamped to the segment's last observed event - and the same fixture
-   widened over segment 2 resolves it into a stitched complete poll.
-   Pure-layer tests additionally pin left-edge (taskId null) crossings,
-   absolute-listing-edge core parity, evicted-neighbor edges, unmatched-
-   evidence drops, and a real-demo-parse consistency anchor.
-5. HARD EDGE "re-entry hits raw cache not network": after eviction, re-
-   entering the window re-parses with the mock fetch count for that
-   segment still 1 (cacheHits 1, parser invoked twice); shrinking the
-   gzip cache budget until LRU eviction drops the bytes makes re-entry
-   fetch exactly once more.
-6. HARD EDGE "eviction at the 90% threshold, resident under budget":
-   pure tests pin the exact boundary (900/1000 does not trigger, 901
-   does; reservation of 300 shrinks the trigger to 600) and the order
-   (farthest first, protection tiers, hard re-clamp, deterministic
-   ties); the orchestrator test steps a 6-segment walk asserting
-   resident and peak <= budget at every step, evictions fired, and
-   evicted entries retaining invariants + learned sizes.
-7. DoD 10-SEGMENT SCENARIO (repeated-demo-style fixtures at recorded
-   sizes; real encoder fixtures arrive with T42): 10 segments x 30 MB
-   recorded raw (10 MB gzip listing), viewport walked 0 -> 9 with idle
-   prefetch, then back 9 -> 0. Measured: resident raw peaked at
-   94,371,840 B (90 MB) <= 128 MB budget, asserted <= budget after every
-   step; forward pass: 10 network fetches, 10 parses, 7 evictions;
-   after the back pass: networkFetches STILL 10 (zero re-downloads),
-   17 parses total (7 cache-hit re-parses), 14 evictions, peak unchanged
-   at 90 MB. Scaling argument: the budget accountant only ever does
-   byteLength arithmetic on recorded sizes, and the real-parse anchor
-   test drives two REAL demo-trace segments (gzipSync'd public/
-   demo-trace.bin) through the real core via the SegmentParser seam,
-   asserting the accounted rawByteLength IS the actual decompressed
-   byte length and resident equals their sum - so 30 MB recorded
-   entries behave identically to the anchored ~11 MB real ones.
-8. `npm run build`: dist listing IDENTICAL to the T16 record (20 files,
-   content-hash changes only; dev-probe chunk byte-identical). The
-   worker chunk grows 29.08 -> 30.07 kB (the parse-buffer body path).
-   segments.ts IS rollup-transformed (18 -> 19 modules through the
-   barrel) and then tree-shaken from the probe output - no page assets
-   added, but rollup-only breakage would still surface at build time.
-9. `cargo build -p dial9-viewer`: exit 0 (dist content changed;
-   rust-embed re-embeds). No cargo nextest / stress / clippy / fmt: no
-   .rs touched, no trace-format change (AGENTS.md JS-only rule). No new
-   ui-root test_*.js, so no e2e-trace-tests.sh registration (vitest
-   auto-discovers src/**/*.test.ts). Local build deletes tracked
-   dist/.gitkeep; restored via git checkout before committing (same
-   pre-existing quirk as T06-T16).
+In `src/lib/trace/segments.window.test.ts`:
+- `T17-audit finding 2: oversized segments defer honestly` (the audit
+  probe, oversized-vs-listed distinguishability, the oversized
+  10-segment scenario)
+- `T17-audit finding 1: poll continuity across evicted neighbors`
+- `T17-audit finding 4: a stale idle callback re-runs BUDGET admission,
+  not just geometry` (inside the prefetch describe)
 
 ## DECISIONS A REVIEWER SHOULD SEE
 
-- Reservation-aware eviction (1e3a29c) goes beyond the 2.8 text: the
-  spec's completion-time eviction alone lets resident bytes transiently
-  exceed the hard budget by one segment while the newcomer parses. The
-  DoD ("resident stays under budget") forces the stronger property, so
-  reconcile reserves estimates for admitted-but-unparsed work and evicts
-  first. The hard clamp remains the backstop for under-estimates.
-- Fetch happens on the MAIN thread (orchestrator), parse in the worker.
-  T16 moved fetch INTO the worker for whole-trace loads; here the
-  orchestrator owns the raw-gzip cache, so bytes must land main-thread
-  anyway. The parse-buffer request carries them over (cloned), keeping
-  gunzip+parse off the main thread. The T16 load path is untouched.
-- One worker per segment parse (T16 lifecycle reused) instead of the
-  persistent worker/pool the T16 HANDOFF floated: spawn cost is
-  negligible against a segment parse, and every abort/late-message
-  guarantee carries over verbatim. The factory seam keeps a pool
-  possible without protocol changes (add a jobId then).
-- "fetching" covers fetch AND parse phases (T06's 4-state lifecycle is
-  frozen; a fifth "parsing" state would be a type break). Per-phase
-  progress is observable via onProgress.
-- Truncated left-edge polls carry `taskId: null`, not 0: the core's "0 =
-  untracked" convention would silently conflate "trace has no task
-  tracking" with "the PollStart is outside the window". App-level type,
-  explicit null (AGENTS.md no-hidden-absence rule).
-- Absolute listing ends are NOT marked truncated: there is no
-  "evicted/unfetched" neighbor there (2.8's wording), and the legacy
-  whole-trace render drops those polls (#194) - marking them would be a
-  parity change owned by a page ticket if ever wanted.
-- The gzip cache stores STILL-COMPRESSED bytes (2.8's "raw gzipped
-  bytes"); parse-buffer re-gunzips on re-entry. Decompressed buffers are
-  never retained (they are not part of any budget's inventory).
+- STITCHED requires a fully-resident chain (open, close and every
+  interior parsed). Evidence retained on evicted/oversized entries
+  (edgePolls, invariants) informs CONTINUITY and task identity but
+  never contributes rendered spans - the audit-verified-clean
+  two-segment truncation semantics (start-in-evicted surfaces
+  truncated, never stitched) are preserved exactly.
+- Truncated spans stay clamped to RESIDENT observed events. Retained
+  neighbor evidence upgrades `taskId` from null to the real id when the
+  PollStart was ever parsed; the type doc now says null means "genuinely
+  unknown" (never parsed AND no retained evidence).
+- `truncatedAt: "both"` is the honest vocabulary for a poll provably in
+  flight through entire resident segments (start and end both beyond
+  the window). Additive union extension; no consumer exists yet (audit
+  note 6 - chunk 2 owns rendering).
+- A chain meeting a worker-ACTIVE boundary with retained edges but no
+  matching counterpart DROPS WHOLE (core #194 parity): the silence
+  proof is only as good as the wire, so a lost close must not resurrect
+  the interior stretches. Pinned by the "dropped whole" test.
+- "oversized" is entered ONLY on a learned REAL size (parse
+  completion), never on estimates: N19's first-round force-admit still
+  gives every segment its one real fetch + parse (a window limit, not a
+  load-time rejection on a guess). The residual N19 tension is
+  recorded: a single oversized need segment is honestly unavailable at
+  this budget - the tier-1 badge rendering is a chunk-2 gate (audit
+  note 7).
+- The audit offered a planEviction min-window exception as the
+  alternative finding-2 fix (keep the oversized segment resident at a
+  ~2x-budget cost). The honest-deferral option was chosen per the
+  fix-forward mandate (explicit state, distinguishable from
+  not-yet-fetched, no 2x resident peak). planEviction is untouched.
+- The low item said "loosen the fixture"; instead the original
+  10-segment DoD scenario stays byte-identical and a SIBLING scenario
+  with one oversized segment was added - the finding-2/-5 class is
+  covered without rewriting the pinned DoD record. Finding 5 proper
+  (>4x-but-still-fitting expanders can transiently overshoot before the
+  completion pass) remains the documented backstop design; the audit
+  listed 5 as LOW with "or soften the DoD claim" as an accepted outcome.
+- Assertions updated where they pinned buggy behavior (each called out
+  in its commit message): the two-level-cache test's "edgePolls
+  undefined after eviction" pinned the finding-1 defect and now pins
+  retention; `exhaustive.test.ts` grew the "oversized" switch arm - the
+  T06 compile gate working as intended on a union extension, not a
+  pinned bug.
+- The mock-parser harness gained an additive per-segment
+  `rawByteLengthFor` hook (finding 2/4 fixtures need heterogeneous
+  sizes); existing callers are unaffected.
 
-## EXPECTED MERGE OVERLAPS (sibling worktrees T12/T18)
+## GATES
 
-- `src/lib/trace/index.ts`: T18 adds its aggregates-client barrel lines;
-  this branch adds the segments.ts block. Trivial additive merge; keep
-  the explicit named-export style.
-- `worker/protocol.ts` / `worker/body.ts`: T18 should not touch these;
-  if T12 does, the additions here are one request kind + one handler
-  case (additive).
-- No package.json / tsconfig / vite.config changes on this branch.
+1. `npx tsc --noEmit`: clean (exit 0), re-verified after each commit.
+2. `npm run test` (full suite, run alone): 46 files passed, 1 skipped;
+   818 tests passed, 1 expected fail, 11 skipped; exit 0. (One earlier
+   run executed CONCURRENTLY with a targeted vitest invocation timed out
+   in tests/core/slice.test.ts at its 60s limit - pure CPU contention
+   from the double demo-trace parse; it does not reproduce in the clean
+   gate run above.)
+3. `npm run build`: dist listing UNCHANGED vs the T17 record (22 paths
+   incl. .gitkeep; worker chunk trace-worker 30.07 kB, dev-probe
+   37.80 kB). Verified stronger than required: a scratch worktree built
+   at base 3004ca2 with the same node_modules produced a dist tree that
+   is BYTE-IDENTICAL (diff -r) to this branch's - segments.ts changes
+   are tree-shaken from the probe output and the worker body is
+   untouched, so even the content hashes match.
+4. `cargo build -p dial9-viewer`: exit 0. No cargo nextest / stress /
+   clippy / fmt: no .rs touched, no trace-format change (AGENTS.md
+   JS-only rule). No new ui-root plain-script tests, so no
+   e2e-trace-tests.sh registration (vitest auto-discovers
+   src/**/*.test.ts).
 
-## REMAINING
+## REMAINING (chunk-2 obligations, now with new vocabulary)
 
-None for T17. Flagged for chunk 2 (viewer integration):
-
-- Wire setViewport to a store subscription on the viewport slice, and
-  boundaryPolls()/computeWindowBoundaryPolls to a store derived() for
-  the G5-marker rendering (truncated) and lane rendering (stitched).
-- load.ts bootstrap per 2.8 ("list, fetch initial window"): call
-  /api/browse, deriveSegmentExtents, mapExtentToMonotonic after the
-  first parse, createSegmentWindow with urlFor over /api/object.
-- Tier-1 fallback rendering for "listed"/"evicted"/deferred segments
-  (T18's aggregates client + listing-metadata density) and the
-  "partial data" badge when admission defers need segments.
-- Status-bar per-segment progress from onProgress (2.8 feedback edge).
-- T42 real encoder fixtures can replace the repeated-demo fixtures in
-  the scenario test.
+- Chunk 2 renders: the "oversized" badge + tier-1 fallback (audit
+  note 7), `truncatedAt: "both"` G5 markers, and a real consumer for
+  `boundaryPolls()` (audit note 6).
+- Future SegmentLifecycle consumers must handle "oversized"; the T06
+  exhaustive-switch gate enforces it at compile time.
 
 ## BLOCKERS
 
