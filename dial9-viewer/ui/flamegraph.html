@@ -1065,8 +1065,12 @@
                         // A = fast polls (< split), B = slow polls (≥ split). Each
                         // side is a full scope query with its own band, opened in the
                         // two-sided diff.
+                        // Server band bounds are inclusive on both ends, so the
+                        // fast side stops one ns below the split to keep the
+                        // partition disjoint (a poll of exactly `splitNs` counts
+                        // as "slow", matching the "< split" / "≥ split" labels).
                         const a = new URLSearchParams(currentScopeQuery());
-                        a.delete("min_poll_ns"); a.set("max_poll_ns", String(splitNs));
+                        a.delete("min_poll_ns"); a.set("max_poll_ns", String(splitNs - 1));
                         const b = new URLSearchParams(currentScopeQuery());
                         b.set("min_poll_ns", String(splitNs)); b.delete("max_poll_ns");
                         window.open(window.location.pathname + "?" + FlamegraphDiff.diffSearch(a, b), "_blank");
