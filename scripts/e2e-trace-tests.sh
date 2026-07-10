@@ -95,6 +95,10 @@ node dial9-viewer/ui/test_flamegraph_export.js
 echo "--- Checking flamegraph export button enablement in API mode (#625) ---"
 node dial9-viewer/ui/test_flamegraph_setdirect_export.js
 
+echo "--- Checking flamegraph inspect/butterfly + search results (#652/#653) ---"
+node dial9-viewer/ui/test_flamegraph_inspect.js
+node dial9-viewer/ui/test_flamegraph_inspect_dom.js
+
 echo "--- Checking runtime grouping (multi-runtime lanes) ---"
 node dial9-viewer/ui/test_runtime_groups.js
 
