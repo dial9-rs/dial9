@@ -1,144 +1,149 @@
-# HANDOFF - T10 (Vitest infrastructure + first migration batch)
+# HANDOFF - T12 (Parity gate tooling)
 
 ## STATUS
 
-DONE. Vitest infra wired (config in vite.config.ts, node env), all 8 target
-suites migrated to `ui/tests/core/*.test.ts` with originals deleted in the
-same commits, e2e-trace-tests.sh trimmed of the two migrated registrations,
-all local gates green. The only pending-CI item is the FULL
-e2e-trace-tests.sh run (its demo-trace regeneration step needs DDB Local);
-all 13 remaining registered suites were run individually with plain `node`
-against the checked-in demo trace and pass.
+DONE. All five verification layers (a)-(e) plus journeys J1-J8 landed and
+verified against the live legacy pages; every locally-checkable DoD item ran
+green. No open questions, no blockers.
 
-Branch: `ticket/T10-vitest-first-batch` (base 70abaab, the T04 tip).
-Worktree: `/Users/facundo/code/wye/dial9-tokio-telemetry/.claude/worktrees/T10`
+## COMPLETED (commit shas, in order)
 
-## COMPLETED (commit shas)
+- `3542bdd` layer (a) row-walker verdict gate (committed by the previous
+  session; re-verified this session, see EVIDENCE)
+- `c091fb8` journeys J1-J8 + readout schema fixture + capture/diff lib +
+  run-journey smoke runner (salvaged from the dead session's uncommitted
+  debris after verifying all 8 journeys pass)
+- `56b05ad` layer (b) affordance census dump + differ
+- `5eb3580` layer (c) behavioral differ
+- `843eefd` layer (d) axe + contrast scan
+- `99c0f8e` layer (e) perf probe + pluggable render source (+ two
+  step-executor fixes the storms surfaced, see below)
+- (this commit) ui/README.md "Parity gate tooling" invocation docs + this
+  HANDOFF
 
-- de238d6 test(viewer): wire Vitest config into vite.config.ts
-  - `test` key added to ui/vite.config.ts (NO separate vitest.config file,
-    per 02-architecture.md 2.1) with `/// <reference types="vitest/config" />`;
-    environment "node"; include: `tests/core/**/*.test.ts` (migrated legacy
-    suites, shared decision: core-suite colocation) + `src/**/*.test.ts`
-    (future TS modules).
-  - tsconfig.json include extended to `tests` - the same strict flags
-    (strict, noUncheckedIndexedAccess, verbatimModuleSyntax,
-    erasableSyntaxOnly) apply to test code.
-  - `@types/node` devDep added (tests import node:fs/node:vm/node:module;
-    nothing else in the project needed it before).
-- 69cfa2c migrate format, prefix_detection, poll_color (originals deleted);
-  `npm test` drops `--passWithNoTests` so an accidentally-empty include
-  pattern now fails loudly instead of passing silently.
-- 1e59d58 migrate heatmap, panel_layout (originals deleted).
-- bbbea31 migrate creds, parse_key (originals deleted). test_harness.js
-  KEPT: 8 unmigrated suites still require it.
-- f82c96f migrate time_range (original deleted).
-- d8b63cf e2e-trace-tests.sh: removed ONLY the test_creds.js and
-  test_prefix_detection.js lines (13 registered legacy suites remain);
-  ui/README.md testing section documents the dual-runner state;
-  design/architecture.md re-points its test_panel_layout.js reference.
+Branch: `ticket/T12-parity-tooling`, on top of merge `474d17c` (code chain +
+docs branch). NOT pushed, no PR (per dispatch rules).
 
-## CJS interop pattern (used consistently in all 8 suites)
+## WHAT EXISTS NOW (`dial9-viewer/ui/parity/`, dev-only, never in dist)
 
-`createRequire(import.meta.url)` + destructure + `as`-cast to a local
-minimal type. Justification: the frozen core files assign `module.exports`
-inside an `if (typeof module !== "undefined")` guard, which cjs-module-lexer
-cannot statically analyze, so ESM named-import interop of those files under
-Vite/Vitest is unreliable. `createRequire` loads them through Node's native
-CJS loader - byte-identical module-loading semantics to the legacy
-`node test_*.js` baseline, and no Vite transform ever touches the frozen
-files (constraint H2). The `as`-cast gives the strict TS flags real types to
-check test bodies against.
+- `walk-rows.mjs` + `walkers/features01.mjs` - layer (a); registry covers
+  features/01 (42 gated rows). Other inventories need their own walker
+  registries when their page tickets arrive (T13: features/03; chunk 2:
+  features/02).
+- `journeys.mjs` - J1-J8 from 04-ux-findings' Method as declarative step
+  lists; `lib/steps.mjs` is the step vocabulary/executor;
+  `run-journey.mjs` smoke-runs them.
+- `census.mjs` + `lib/census.mjs` - layer (b); dump (--url) or diff
+  (--a/--b, exit 0 only on ZERO diff).
+- `behavior-diff.mjs` - layer (c); same journey on two URLs, field-exact
+  readout diff per checkpoint. Readout schema fixture:
+  `fixtures/readout-schema.mjs` (owned by the parity tool).
+- `axe-scan.mjs` - layer (d); violation list in 04-ux-findings' evidence
+  shape + contrast summary; `--fail-on <impact>` gate mode.
+- `perf-probe.mjs` + `lib/render-sources.mjs` - layer (e); journey ->
+  interaction storm; records frames, long tasks, total/forced layouts
+  (trace-based, DevTools forced-reflow signal), render invocations per
+  frame via pluggable source. Only source today: documented `stub`
+  (always unavailable). CHUNK 2 MUST wire a `store` source backed by the
+  new store scheduler's devRenderAssertStats() dev hook (the hook is NOT
+  in this tree).
+- Shared plumbing: `lib/browser.mjs` (fixed 1440x900 viewport; browser-page
+  clock pinned to dev seed date 2026-04-09T21:00Z), `lib/actions.mjs`,
+  `lib/inventory.mjs` (verdict mapping), `lib/cli.mjs`, `lib/report.mjs`.
+- Invocations documented in `dial9-viewer/ui/README.md` ("Parity gate
+  tooling" section) - the DoD's documentation item.
 
-Two path-dependent suites resolve files relative to the test file via
-`fileURLToPath(new URL("../../<file>", import.meta.url))`:
-- parse_key.test.ts reads index.html (extract-parseKey-via-regex + vm
-  sandbox mechanism preserved verbatim; T15 re-points it at
-  lib/trace/keys.ts when the TS port lands).
-- panel_layout.test.ts reads viewer.html (CSS padding-left invariant grep).
-- time_range.test.ts reads public/demo-trace.bin (T04 location preserved);
-  the original argv[2] trace-path override became the DIAL9_TRACE_PATH env
-  var per ADR-0004 section 7 ("trace-file-parameterized ... switch from argv
-  to an env var").
+Fixes landed in `99c0f8e` (found by the perf storms, affect shared libs):
 
-## Per-suite assertion diff (review DoD item)
+- `lib/actions.mjs` waitBrowserBootstrap: a browse search WITH results hides
+  `#browse-status` but leaves "Searching..." as its text (index.html:1239),
+  so hidden now counts as settled. Only re-entrant loaded-waits ever hit
+  this; row-walker re-ran green after the change.
+- `lib/steps.mjs`: box() uses .first() (flamegraph page has a hidden second
+  .fg-canvas); hoverSweep takes optional fractional-y and clamps the sweep
+  line into the viewport (flamegraph canvas is ~3000px tall).
 
-Counts are assertion call sites (definitions excluded). "Split" = a compound
-`ok(a && b)` becoming one expect per leg - every original condition is
-preserved; none dropped.
+## EVIDENCE
 
-| Suite | Original | Migrated | Notes |
-|---|---|---|---|
-| test_format.js -> format.test.ts | 42 assertEq | 42 expect | 1:1, one it() per original assertEq, labels preserved |
-| test_prefix_detection.js -> prefix_detection.test.ts | 8 assert | 8 expect | 1:1; original `=== true/false` identity preserved via toBe(true/false) |
-| test_poll_color.js -> poll_color.test.ts | 7 fail sites guarding ~31 loop conditions | 9 expect statements executing 33 assertions | Same inputs/conditions; 2 compound equality chains (floor c0=c1=c2, ceiling c1=c2=c3) split into 2 expects each; loops now check every element with expect instead of early-return fail |
-| test_heatmap.js -> heatmap.test.ts | 39 ok/approx | 50 expect | 11 compound `ok(a && b [&& c])` split per leg; approx(a,b,eps) preserved exactly as \|a-b\| <= eps (expectApprox helper) |
-| test_panel_layout.js -> panel_layout.test.ts | 24 assert | 24 expect | 1:1 incl. the viewer.html CSS-grep invariant test; strictEqual -> toBe, ok(finite) -> toBe(true) |
-| test_creds.js -> creds.test.ts | 36 assert | 37 expect | +1: `get()` result null-checked before field access (TS strictness, also a real assertion). "rejects on missing field" try/catch+2 asserts merged into one `rejects.toThrow(/required/)` (still checks threw AND message). listBuckets-error compound `/401/ && /rejected/` split into 2 matches + explicit threw check |
-| test_parse_key.js -> parse_key.test.ts | 13 assertEq + 2 guards | 17 expect | 13 field checks 1:1; locate-guard -> expect not.toBeNull; compound object check (`!p \|\| typeof p !== "object"`) split into 2; +1 strengthened: extracted parseKey checked to be a function before use |
-| test_time_range.js -> time_range.test.ts | 22 fail sites | 23 expect | +1: trace-file-exists guard is now an expect instead of console.error+exit. Per-event in-range loops report offender COUNT (filter + toBe(0)) instead of bailing at the first offender - strictly stronger. EVENT_TYPES import dropped (was imported but never used in the original) |
+All against dev-server :3021 (`npm run build` first; server:
+`CARGO_TARGET_DIR=<repo>/target PORT=3021 cargo run -p dial9-viewer --bin
+dev-server --features dev-server`; readiness gate: /api/config JSON).
 
-Restructuring note (applies to poll_color, heatmap, creds, parse_key,
-time_range): compound conditions were split so a failure pinpoints the exact
-leg; nothing was weakened and no original condition was removed. Suite/it
-names keep the original labels so failures map back to the old output.
+DoD "row-walker on features/01 against the legacy page yields zero FAILED,
+recorded-VERIFIED and DEAD-CONFIRMED re-derive VERIFIED":
 
-## DoD evidence
+- `node parity/walk-rows.mjs --inventory ../../docs/ui-inventory/features/01-index-html.md --url http://localhost:3021/index.html`
+- Result: 75 rows - 42 VERIFIED, 33 NOT-TRIGGERABLE, 0 FAILED; exit 0
+  ("GREEN: zero FAILED"). Re-run AFTER the actions.mjs fix: identical.
+- Recorded-verdict -> tool-verdict distribution (from the run's JSON):
+  - 41 x recorded VERIFIED -> VERIFIED
+  - 1 x recorded DEAD-CONFIRMED (refresh) -> VERIFIED  (G8 dead sort)
+  - 7 x VERIFIED-API (refresh) -> NOT-TRIGGERABLE (listed, not gated)
+  - 10 x NOT-TRIGGERABLE (base+refresh) -> NOT-TRIGGERABLE
+  - 5 x NOT-TESTED, 4 x PARTIAL, 4 x CODE-READ (refresh), 2 x CODE-ONLY,
+    1 x NOT-OBSERVED -> NOT-TRIGGERABLE
+  - FAILED: none
+- Full verdict table: `dial9-viewer/ui/parity/out/walk-features01.md` (+
+  .json). parity/out/ is gitignored; regenerate with the command above.
 
-- `vitest run` green, all 8 suites migrated:
-  `Test Files 8 passed (8) / Tests 122 passed (122)` (~2.5s; time_range
-  dominates - 7 parses of the 3.4MB demo trace).
-- Originals deleted in the same commits as their replacements (see shas
-  above); `ls dial9-viewer/ui/test_*.js` no longer lists any of the 8.
-- `npx tsc --noEmit`: clean (strict flags cover tests/ via tsconfig include).
-- `npm run build`: dist listing IDENTICAL before/after the whole ticket
-  (19 files; diff of sorted `find dist -type f` = empty). Migrated tests are
-  not in dist and not in the embed set (rust-embed folder is `ui/dist/`).
-- `cargo build -p dial9-viewer`: green
-  (CARGO_TARGET_DIR=/Users/facundo/code/wye/dial9-tokio-telemetry/target).
-  NO Rust files touched in this ticket (diff stat vs 70abaab confirms).
-- e2e-trace-tests.sh: `bash -n` clean; the full script needs DDB Local for
-  its regenerate-demo-trace step (per its header) which is not available in
-  this environment -> full-script run is PENDING-CI (trace-integrity job).
-  Compensating local evidence: all 13 REMAINING registered suites run
-  individually with plain `node` against the checked-in
-  ui/public/demo-trace.bin - all PASS: trace_integrity, task_lifecycle,
-  trace_analysis, trace_properties, fetch_traces, stream_parse,
-  parse_yield_throttle, url_state, all_skills_snippets, flamegraph_api,
-  enclosing_spans, flamegraph_export, runtime_groups.
-- CI runs both runners, verified with NO workflow edits needed:
-  - `ui` job (.github/workflows/ci.yml:178-195): npm ci, tsc --noEmit,
-    `npm run test` (= `vitest run` now), npm run build.
-  - `trace-integrity` job (ci.yml:153, run at :176): scripts/e2e-trace-tests.sh.
-- Frozen core, unmigrated tests, the four HTML pages: untouched (index.html
-  and viewer.html are only READ by the migrated suites).
+DoD "census differ legacy-vs-legacy ZERO diff":
+
+- Same-URL diff on all three pages (index.html,
+  viewer.html?trace=demo-trace.bin, flamegraph.html?trace=demo-trace.bin):
+  "ZERO DIFF", exit 0 each.
+- Census dump of the legacy browser page: exactly 33 affordances -
+  reproduces features/01 Live-validation's recorded "33 live DOM
+  affordances" count.
+- Negative control: index vs viewer -> 70 diff entries, exit 1.
+
+DoD "behavioral differ legacy-vs-legacy ZERO diff":
+
+- `node parity/behavior-diff.mjs --a http://localhost:3021 --b http://localhost:3021`
+  (all 8 journeys, 14 checkpoints, independent contexts per run):
+  "ZERO DIFF", exit 0. Re-run after the steps.mjs fixes: identical.
+- Negative control: extra query param on B -> 1 url.query field diff, exit 1.
+
+DoD "axe scan produces the violation list format used in 04-ux-findings":
+
+- 04-ux-findings has no literal violation table; its axe evidence shape is
+  impact + rule + node count per page. The scan emits exactly that
+  (| Impact | Rule | Description | Nodes | Example target |) plus a contrast
+  summary line.
+- Legacy index page: 4 violations, 28 nodes - "serious contrast violations
+  (15 nodes)" reproduces finding F6's browser-page evidence verbatim;
+  critical label violations per F1. Viewer: contrast 8 nodes; flamegraph:
+  contrast 2 nodes (F6: "all three pages" - confirmed).
+- `--fail-on serious` on legacy index exits 1 (gate mode works).
+
+Layer (e) baseline runs (all exit 0):
+
+- viewer (journey J1 -> storm): 176 layouts, all forced, ~1.2/frame;
+  0 long tasks in storm window; render/frame "unavailable" via stub source.
+- index (J6): 28 layouts, 4 forced. flamegraph (J5): 16 layouts, 4 forced.
+
+Repo gates:
+
+- `npx tsc --noEmit` clean (tsconfig includes src/tests only; parity/ is
+  plain JS by design).
+- `npm run test`: 8 files, 122 tests passed.
+- `npm run build`: dist listing UNCHANGED vs pre-work snapshot (21 lines;
+  parity/ never enters dist).
+- `cargo build -p dial9-viewer` OK (embed check). No .rs files touched, no
+  trace-format changes -> full Rust suite/stress not required per AGENTS.md.
+- Dev-server and all Chromium instances killed at session end.
 
 ## REMAINING
 
-- Full e2e-trace-tests.sh execution: pending CI (needs DDB Local; see above).
-- 20 legacy `test_*.js` suites still unmigrated (21 files at the ui/ root
-  minus test_harness.js; 13 of them registered in e2e-trace-tests.sh, 7 in
-  no CI - later tickets); dual-runner CI stays until the last one moves.
+Nothing within T12's scope. Follow-ups owned by OTHER tickets:
+
+- CI wiring ("headless in CI, gated to UI-touching PRs" appears in T12's
+  Work text): NOT landed here - the DoD contains no CI item and every DoD
+  check is local-only; the differs need an old-vs-new page pair that first
+  exists at T13. Flagged as a PR-review question rather than guessed at.
+- Chunk 2: wire the `store` render source (devRenderAssertStats()).
+- T13/T14+: walker registries for features/03 and features/02; old-vs-new
+  census/behavior runs begin there (T13).
 
 ## BLOCKERS
 
 None.
-
-## Notes for reviewers / next tickets
-
-- ci.yml:193 comment ("--passWithNoTests until T10 migrates real suites to
-  Vitest") is now stale - the flag is gone from package.json and the job
-  behaves correctly unchanged. Left untouched: the ticket scoped workflow
-  edits strictly to keeping both runners running. Whoever next touches
-  ci.yml can drop the comment line.
-- heatmap.js:21 (frozen core) still says "unit-tested in test_heatmap.js";
-  frozen files are out of scope, and the comment will be resolved when the
-  file is ported.
-- `npm run build` locally deletes the committed `ui/dist/.gitkeep` (vite
-  empties outDir; pre-existing behavior, not introduced here). Restore with
-  `git checkout -- dial9-viewer/ui/dist/.gitkeep` before committing if you
-  build locally.
-- test_parse_key regex + T15: parse_key.test.ts carries the same brittle
-  `/function parseKey\([\s\S]*?\n    \}\n/` extraction as the original; if
-  index.html's inline parseKey is ever reformatted before T15 lands, the
-  beforeAll locate-guard fails with a clear message.
