@@ -231,6 +231,15 @@ function seg(o) {
         targetInHeatmap: false, targetInActions: true,
     }) === false, "shouldClearSelectionOnClick: click on actions bar keeps selection");
 
+    // Regression (#645/#644 interaction): the TZ toggle and credentials button
+    // live in the page <header>, which is neither the timeline nor the actions
+    // bar. Clicking header chrome must NOT clear the selection — toggling TZ
+    // only relabels the axis.
+    ok(shouldClearSelectionOnClick({
+        isBrowseTab: true, hasSelection: true, wasDrag: false,
+        targetInHeatmap: false, targetInActions: false, targetInHeader: true,
+    }) === false, "shouldClearSelectionOnClick: click in header (TZ toggle) keeps selection");
+
     // No-ops when not on browse tab or nothing is selected.
     ok(shouldClearSelectionOnClick({
         isBrowseTab: false, hasSelection: true, wasDrag: false,

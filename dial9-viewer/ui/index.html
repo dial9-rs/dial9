@@ -1789,6 +1789,7 @@
             wasDrag,
             targetInHeatmap: !!e.target.closest('#heatmap-view'),
             targetInActions: !!e.target.closest('#actions-bar'),
+            targetInHeader: !!e.target.closest('header'),
         })) {
             setHeatmapSelection(null);
         }
