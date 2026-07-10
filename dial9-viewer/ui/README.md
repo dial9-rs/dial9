@@ -166,6 +166,54 @@ node parity/walk-rows.mjs \
   [--rows A1,F12] [--json parity/out/walk.json] [--md parity/out/walk.md]
 ```
 
+**(a2) Fixture walk** (ticket T42) — the demo seed is a single segment on a
+single host/boot, so some features/01 rows are recorded `NOT-TRIGGERABLE`
+(boot transitions, seams, coverage gaps, the 200 MB cap, ...). The synthetic
+fixture generator produces what the demo cannot, and `--fixtures` walks
+exactly those rows against a fixture-seeded dev-server:
+
+```bash
+# 1. Generate (deterministic; ~4 s in release). Writes the committed small
+#    fixtures under parity/fixtures/segments/ (a no-op diff unless the
+#    generator changed) and the UNCOMMITTED seed tree under
+#    parity/fixtures/generated/s3/ (~224 MB; --skip-large omits the
+#    dial9-fixtures-large family and with it the H4 row).
+cargo run --release -p dial9-viewer --features dev-server --bin gen-fixtures
+
+# 2. Serve it (DIAL9_DEFAULT_PREFIX= empties the default prefix — the
+#    D4/#471 date-root scenario needs discovery to see the date layer).
+DIAL9_SEED_DIR=dial9-viewer/ui/parity/fixtures/generated/s3 \
+  DIAL9_DEFAULT_PREFIX= PORT=3022 \
+  cargo run -p dial9-viewer --features dev-server --bin dev-server
+
+# 3. Walk. Default row set = the fixture-backed rows; the runner preflights
+#    every fixture family the selected rows need and exits 2 with these
+#    instructions when one is missing.
+node parity/walk-rows.mjs \
+  --inventory ../../docs/ui-inventory/features/01-index-html.md \
+  --url http://localhost:3022/index.html --fixtures \
+  [--json parity/out/fixture-walk.json]
+```
+
+Fixture-backed rows (registry: `parity/walkers/features01.fixtures.mjs`;
+fixture geometry mirrors `src/bin/gen_fixtures.rs` — change them together):
+C7, D4, F5, F7, F8, F9, F20, H4. H5's warning text renders only with
+aggregation disabled, and any BYO-creds dev-server (which C7 needs) reports
+aggregation enabled — it stays `NOT-TRIGGERABLE`. Recorded inventory verdicts
+are NOT edited by the fixture walk; re-recording them is T39's final gate.
+
+The seed tree is `<dir>/<bucket>/<key...>`; file **mtimes are load-bearing**
+(they become S3 `last_modified`, the heatmap's segment end — the seam/gap
+scenarios exist entirely in mtimes), which is why the tree is regenerated
+rather than committed. Size policy: only the small fixtures under
+`parity/fixtures/segments/` (tens of KB: the 10-segment boundary-poll set +
+the multi-runtime #596 trace + `manifest.json`) are committed — the vitest
+suites (`src/lib/trace/segments.fixtures.test.ts`, the real-parse anchor in
+`segments.window.test.ts`) consume them hermetically. Everything under
+`parity/fixtures/generated/` (incl. the >200 MB large family, which is also
+T39's reproducible large-trace budget input) is gitignored and regenerable
+byte-identically.
+
 **Journeys J1-J8** (`parity/journeys.mjs`) — the eight expert journeys from
 `docs/ui-inventory/04-ux-findings.md` as declarative step lists
 (`lib/steps.mjs` is the vocabulary). Smoke-run one or all, printing the
