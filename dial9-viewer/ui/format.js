@@ -45,8 +45,7 @@ function formatHumanBytes(bytes) {
 }
 
 // Format a field value according to its schema unit annotation.
-// Unknown or missing units fall back to String(value),
-// matching how unannotated fields have always rendered.
+// Known units receive richer formatting; custom units are shown literally.
 //
 // The accepted set must stay in sync with SUPPORTED_UNITS in
 // dial9-trace-format-derive (which validates `#[traceevent(unit = "...")]`
@@ -64,10 +63,45 @@ function formatFieldValue(value, unit) {
     case "bytes":
       return formatHumanBytes(Number(value));
     default:
-      return String(value);
+      return unit ? `${String(value)} ${unit}` : String(value);
   }
 }
 
+function formatSpecNumber(value) {
+  if (!Number.isFinite(value)) return "-";
+  if (Math.abs(value) >= 100) return value.toFixed(0);
+  if (Math.abs(value) >= 10) return value.toFixed(1).replace(/\.0$/, "");
+  return value.toFixed(2).replace(/(\.\d*?)0+$/, "$1").replace(/\.$/, "");
+}
+
+function formatSpecValue(value, unit) {
+  if (value == null) return "-";
+  if (unit === "%") {
+    const n = Number(value);
+    return Number.isFinite(n) ? `${n.toFixed(1)}%` : String(value);
+  }
+  if (["ns", "us", "ms", "s", "bytes"].includes(unit)) {
+    return formatFieldValue(value, unit);
+  }
+
+  const formatted = typeof value === "number" ? formatSpecNumber(value) : String(value);
+  return unit ? `${formatted} ${unit}` : formatted;
+}
+
+function formatSpecTickValue(value, unit) {
+  if (["%", "ns", "us", "ms", "s", "bytes"].includes(unit)) {
+    return formatSpecValue(value, unit);
+  }
+  if (value == null) return "-";
+  return typeof value === "number" ? formatSpecNumber(value) : String(value);
+}
+
 if (typeof module !== "undefined" && module.exports) {
-  module.exports = { formatHumanDuration, formatHumanBytes, formatFieldValue };
+  module.exports = {
+    formatHumanDuration,
+    formatHumanBytes,
+    formatFieldValue,
+    formatSpecValue,
+    formatSpecTickValue,
+  };
 }

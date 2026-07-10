@@ -32,15 +32,14 @@
     const cpuProfileTimestamps = cpuSamples
       .filter(isCpuProfileSample)
       .map((s) => s.timestamp);
-    const processResourceUsageTimestamps = (customEvents || [])
-      .filter((e) => e.name === PROCESS_RESOURCE_USAGE_EVENT)
+    const customEventTimestamps = (customEvents || [])
       .map((e) => e.timestamp)
       .filter((t) => Number.isFinite(t));
     const timestamps = events.length
       ? events.map((e) => e.timestamp)
       : cpuProfileTimestamps.length
         ? cpuProfileTimestamps
-        : processResourceUsageTimestamps;
+        : customEventTimestamps;
     if (!timestamps.length) return null;
 
     let minTs = timestamps[0];
@@ -145,6 +144,611 @@
       maxCores,
       avgCores: totalWallNs > 0 ? totalCpuNs / totalWallNs : 0,
     };
+  }
+
+  const HARDCODED_VIEW_SPEC_BUNDLE = {
+    computed_fields: [
+      {
+        id: "process_resource_usage.cpu_time_ns",
+        source: { id: "usage", event: PROCESS_RESOURCE_USAGE_EVENT },
+        name: "cpu_time_ns",
+        expr: {
+          op: "add",
+          args: [
+            { field: "usage.user_cpu_ns" },
+            { field: "usage.system_cpu_ns" },
+          ],
+        },
+        unit: "ns",
+        metric: { kind: "counter" },
+        label: "CPU time",
+      },
+    ],
+    views: [
+      {
+        id: "process.cpu",
+        title: "CPU Usage",
+        sources: [
+          { id: "usage", event: PROCESS_RESOURCE_USAGE_EVENT },
+        ],
+        display: {
+          kind: "time_series",
+          y_min: 0,
+          guides: [
+            {
+              kind: "horizontal_line",
+              expr: { metadata: "process.available_parallelism" },
+              label: "available parallelism",
+              unit: "cores",
+            },
+          ],
+        },
+        summary: [
+          {
+            label: "avg",
+            expr: {
+              op: "aggregate",
+              fn: "duration_weighted_mean",
+              over: { series: "cores", range: "visible" },
+              value: { field: "point.value" },
+            },
+            unit: "cores",
+          },
+          {
+            label: "avg",
+            expr: {
+              op: "clamp",
+              args: [
+                {
+                  op: "mul",
+                  args: [
+                    {
+                      op: "div",
+                      args: [
+                        {
+                          op: "aggregate",
+                          fn: "duration_weighted_mean",
+                          over: { series: "cores", range: "visible" },
+                          value: { field: "point.value" },
+                        },
+                        { metadata: "process.available_parallelism" },
+                      ],
+                    },
+                    { const: 100 },
+                  ],
+                },
+                { const: 0 },
+                { const: 100 },
+              ],
+            },
+            unit: "%",
+          },
+          {
+            label: "max",
+            expr: {
+              op: "aggregate",
+              fn: "max",
+              over: { series: "cores", range: "visible" },
+              value: { field: "point.value" },
+            },
+            unit: "cores",
+          },
+        ],
+        series: [
+          {
+            id: "cores",
+            title: "CPU",
+            expr: {
+              op: "rate",
+              value: { field: "usage.cpu_time_ns" },
+              time: { field: "usage.timestamp" },
+            },
+            unit: "cores",
+            mark: "step_area",
+            metric: { kind: "gauge" },
+            window: { missing_previous: "skip", on_decrease: "skip" },
+            downsample: "max_per_pixel",
+            tooltip: [
+              { label: "Window", expr: { field: "point.wall_delta_ns" }, unit: "ns" },
+              { label: "CPU time", expr: { field: "point.value_delta_ns" }, unit: "ns" },
+              { label: "Cores", expr: { field: "point.value" } },
+              {
+                label: "Total CPU",
+                expr: {
+                  op: "clamp",
+                  args: [
+                    {
+                      op: "mul",
+                      args: [
+                        {
+                          op: "div",
+                          args: [
+                            { field: "point.value" },
+                            { metadata: "process.available_parallelism" },
+                          ],
+                        },
+                        { const: 100 },
+                      ],
+                    },
+                    { const: 0 },
+                    { const: 100 },
+                  ],
+                },
+                unit: "%",
+              },
+            ],
+          },
+        ],
+      },
+      {
+        id: "process.max_rss",
+        title: "Max RSS",
+        sources: [
+          { id: "usage", event: PROCESS_RESOURCE_USAGE_EVENT },
+        ],
+        display: { kind: "time_series", y_min: 0 },
+        series: [
+          {
+            id: "max_rss",
+            title: "Max RSS",
+            expr: { field: "usage.max_rss_bytes" },
+            unit: "bytes",
+            mark: "step_line",
+            metric: { kind: "gauge" },
+            downsample: "last_per_pixel",
+            tooltip: [
+              { label: "Max RSS", expr: { field: "point.value" }, unit: "bytes" },
+            ],
+          },
+        ],
+      },
+      {
+        id: "socket.accept_queue",
+        title: "Socket Accept Queue",
+        sources: [
+          { id: "accept", event: "TcpAcceptQueueEvent" },
+        ],
+        display: { kind: "time_series", y_min: 0, y_max: 100 },
+        series: [
+          {
+            id: "utilization",
+            title: "Accept Queue Utilization",
+            expr: {
+              op: "mul",
+              args: [
+                {
+                  op: "div",
+                  args: [
+                    { field: "accept.pending_connections" },
+                    { field: "accept.backlog_limit" },
+                  ],
+                },
+                { const: 100 },
+              ],
+            },
+            unit: "%",
+            mark: "step_line",
+            metric: { kind: "gauge" },
+            partition_by: [{ field: "accept.socket_cookie" }],
+            thresholds: [
+              { expr: 80, level: "warning" },
+              { expr: 100, level: "critical" },
+            ],
+            downsample: "max_per_pixel",
+            tooltip: [
+              { label: "Socket", expr: { field: "point.current.accept.socket_cookie" } },
+              { label: "Address", expr: { field: "point.current.accept.local_addr" } },
+              { label: "Port", expr: { field: "point.current.accept.local_port" } },
+              { label: "Pending", expr: { field: "point.current.accept.pending_connections" } },
+              { label: "Backlog", expr: { field: "point.current.accept.backlog_limit" } },
+              { label: "Utilization", expr: { field: "point.value" }, unit: "%" },
+            ],
+          },
+        ],
+      },
+    ],
+  };
+
+  function hasOwn(obj, key) {
+    return Object.prototype.hasOwnProperty.call(obj, key);
+  }
+
+  function isTraceEventRecord(value) {
+    return value && typeof value === "object" &&
+      hasOwn(value, "name") && hasOwn(value, "timestamp") && hasOwn(value, "fields");
+  }
+
+  function finiteNumber(value) {
+    const n = numericField(value);
+    return n == null ? null : n;
+  }
+
+  function metadataLookup(metadata, key) {
+    if (!metadata) return null;
+    if (metadata instanceof Map) return metadata.has(key) ? metadata.get(key) : null;
+    return hasOwn(metadata, key) ? metadata[key] : null;
+  }
+
+  function eventFieldValue(event, fieldName) {
+    if (!event) return null;
+    if (fieldName === "timestamp") return event.timestamp;
+    if (event.computed && hasOwn(event.computed, fieldName)) {
+      return event.computed[fieldName];
+    }
+    const fields = event.fields || {};
+    return hasOwn(fields, fieldName) ? fields[fieldName] : null;
+  }
+
+  function valueAtPath(value, parts, index) {
+    let cur = value;
+    for (let i = index; i < parts.length; i++) {
+      if (cur == null) return null;
+      const key = parts[i];
+      if (isTraceEventRecord(cur)) {
+        cur = eventFieldValue(cur, key);
+      } else if (typeof cur === "object" && hasOwn(cur, key)) {
+        cur = cur[key];
+      } else {
+        return null;
+      }
+    }
+    return cur;
+  }
+
+  function evaluateStringShorthand(expr, context) {
+    const metadataMatch = expr.match(/^metadata\[['"]([^'"]+)['"]\]$/);
+    if (metadataMatch) return metadataLookup(context.metadata, metadataMatch[1]);
+    if (/^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$/.test(expr)) {
+      return resolveFieldPath(expr, context);
+    }
+    return null;
+  }
+
+  function resolveFieldPath(path, context) {
+    const parts = String(path).split(".");
+    if (parts[0] === "point") return valueAtPath(context.point, parts, 1);
+
+    const current = context.current || {};
+    if (hasOwn(current, parts[0])) {
+      return valueAtPath(current[parts[0]], parts, 1);
+    }
+
+    if (context.singleSourceId && hasOwn(current, context.singleSourceId)) {
+      return valueAtPath(current[context.singleSourceId], parts, 0);
+    }
+
+    return null;
+  }
+
+  function resolveAggregateCollection(expr, context) {
+    const over = expr.over || {};
+    const series = (context.series || []).find((candidate) => candidate.spec?.id === over.series);
+    if (!series || series.groups.length !== 1) return null;
+
+    let range = null;
+    if (over.range != null) {
+      const requestedRange = context.ranges && context.ranges[over.range];
+      const start = requestedRange && finiteNumber(requestedRange.start);
+      const end = requestedRange && finiteNumber(requestedRange.end);
+      if (start == null || end == null || !(end > start)) return null;
+      range = { start, end };
+    }
+    return { points: series.groups[0].points, range };
+  }
+
+  function pointOverlapsRange(point, range) {
+    if (!range) return true;
+    const start = finiteNumber(point.start);
+    const end = finiteNumber(point.end);
+    if (start != null && end != null && end > start) {
+      return end > range.start && start < range.end;
+    }
+    const t = finiteNumber(point.t);
+    return t != null && t >= range.start && t <= range.end;
+  }
+
+  function evaluateAggregateExpression(expr, context) {
+    const collection = resolveAggregateCollection(expr, context);
+    if (!collection) return null;
+
+    let max = null;
+    let weightedSum = 0;
+    let totalWeight = 0;
+    for (const point of collection.points) {
+      if (!pointOverlapsRange(point, collection.range)) continue;
+      const value = finiteNumber(evaluateViewSpecExpression(expr.value, {
+        ...context,
+        point,
+        current: point.current || {},
+        previous: point.previous || null,
+      }));
+      if (value == null) continue;
+
+      if (expr.fn === "max") {
+        if (max == null || value > max) max = value;
+      } else if (expr.fn === "duration_weighted_mean") {
+        const start = finiteNumber(point.start);
+        const end = finiteNumber(point.end);
+        if (start == null || end == null || !(end > start)) continue;
+        const overlap = collection.range
+          ? Math.min(end, collection.range.end) - Math.max(start, collection.range.start)
+          : end - start;
+        if (!(overlap > 0)) continue;
+        weightedSum += value * overlap;
+        totalWeight += overlap;
+      } else {
+        return null;
+      }
+    }
+
+    if (expr.fn === "max") return max;
+    if (!(totalWeight > 0)) return null;
+    const mean = weightedSum / totalWeight;
+    return Number.isFinite(mean) ? mean : null;
+  }
+
+  function evaluateViewSpecExpression(expr, context) {
+    if (expr == null) return null;
+    if (typeof expr === "number" || typeof expr === "boolean") return expr;
+    if (typeof expr === "string") return evaluateStringShorthand(expr, context || {});
+    if (typeof expr !== "object") return null;
+
+    if (hasOwn(expr, "const")) return expr.const;
+    if (hasOwn(expr, "field")) return resolveFieldPath(expr.field, context || {});
+    if (hasOwn(expr, "metadata")) return metadataLookup((context || {}).metadata, expr.metadata);
+
+    const op = expr.op;
+    if (op === "rate") {
+      const rate = evaluateRateExpression(expr, context || {}, null);
+      return rate ? rate.value : null;
+    }
+    if (op === "aggregate") return evaluateAggregateExpression(expr, context || {});
+
+    const args = Array.isArray(expr.args) ? expr.args : [];
+    const values = args.map((arg) => finiteNumber(evaluateViewSpecExpression(arg, context || {})));
+    if (values.some((value) => value == null)) return null;
+
+    switch (op) {
+      case "add":
+        return values.reduce((sum, value) => sum + value, 0);
+      case "sub":
+        if (values.length === 0) return null;
+        return values.slice(1).reduce((acc, value) => acc - value, values[0]);
+      case "mul":
+        return values.reduce((product, value) => product * value, 1);
+      case "div": {
+        if (values.length === 0) return null;
+        let acc = values[0];
+        for (const value of values.slice(1)) {
+          if (value === 0) return null;
+          acc /= value;
+        }
+        return Number.isFinite(acc) ? acc : null;
+      }
+      case "min":
+        return values.length > 0 ? values.reduce((min, value) => Math.min(min, value)) : null;
+      case "max":
+        return values.length > 0 ? values.reduce((max, value) => Math.max(max, value)) : null;
+      case "sum":
+        return values.length > 0 ? values.reduce((sum, value) => sum + value, 0) : null;
+      case "avg":
+        return values.length > 0 ? values.reduce((sum, value) => sum + value, 0) / values.length : null;
+      case "clamp":
+        return values.length === 3 ? Math.min(values[2], Math.max(values[1], values[0])) : null;
+      default:
+        return null;
+    }
+  }
+
+  function evaluateRateExpression(expr, context, windowSpec) {
+    const previous = context.previous || null;
+    if (!previous) return null;
+    const previousContext = { ...context, current: previous, previous: null };
+
+    const currentValue = finiteNumber(evaluateViewSpecExpression(expr.value, context));
+    const previousValue = finiteNumber(evaluateViewSpecExpression(expr.value, previousContext));
+    const currentTime = finiteNumber(evaluateViewSpecExpression(expr.time, context));
+    const previousTime = finiteNumber(evaluateViewSpecExpression(expr.time, previousContext));
+    if (currentValue == null || previousValue == null || currentTime == null || previousTime == null) {
+      return null;
+    }
+
+    const wallDeltaNs = currentTime - previousTime;
+    const valueDelta = currentValue - previousValue;
+    if (!(wallDeltaNs > 0)) return null;
+    if (valueDelta < 0 && (!windowSpec || windowSpec.on_decrease !== "show")) return null;
+
+    const value = valueDelta / wallDeltaNs;
+    if (!Number.isFinite(value)) return null;
+    return { value, valueDelta, wallDeltaNs, currentTime, previousTime };
+  }
+
+  function getTraceEventStream(trace, source) {
+    if (!trace || !source || !source.event) return [];
+    const name = source.event;
+    if (trace.eventStreams instanceof Map) {
+      const stream = trace.eventStreams.get(name);
+      if (Array.isArray(stream)) return stream;
+      if (stream && Array.isArray(stream.events)) return stream.events;
+    }
+    if (Array.isArray(trace.allEvents)) {
+      const events = trace.allEvents.filter((ev) => ev.name === name);
+      if (events.length > 0) return events;
+    }
+    return (trace.customEvents || []).filter((ev) => ev.name === name);
+  }
+
+  function applyComputedFields(trace, bundle, diagnostics) {
+    for (const spec of bundle.computed_fields || []) {
+      const source = spec.source || null;
+      const sourceId = source && source.id;
+      const events = getTraceEventStream(trace, source);
+      if (!sourceId || events.length === 0) continue;
+
+      const collides = events.some((ev) => ev.fields && hasOwn(ev.fields, spec.name));
+      const collisionMode = spec.on_collision || "error";
+      if (collides && collisionMode !== "overwrite") {
+        diagnostics.push({
+          level: "warning",
+          id: spec.id,
+          message: `computed field ${spec.name} collides with a raw field`,
+        });
+        continue;
+      }
+
+      for (const event of events) {
+        const value = evaluateViewSpecExpression(spec.expr, {
+          current: { [sourceId]: event },
+          previous: null,
+          metadata: trace.segmentMetadata,
+          singleSourceId: sourceId,
+          point: null,
+        });
+        if (value == null) continue;
+        event.computed = event.computed || {};
+        event.computed_units = event.computed_units || {};
+        event.computed_labels = event.computed_labels || {};
+        event.computed[spec.name] = value;
+        if (spec.unit) event.computed_units[spec.name] = spec.unit;
+        if (spec.label) event.computed_labels[spec.name] = spec.label;
+      }
+    }
+  }
+
+  function partitionKeyForSeries(seriesSpec, context) {
+    const partitionBy = seriesSpec.partition_by || [];
+    if (partitionBy.length === 0) return { key: "", values: [] };
+    const values = [];
+    for (const expr of partitionBy) {
+      const value = evaluateViewSpecExpression(expr, context);
+      if (value == null) return null;
+      values.push(String(value));
+    }
+    return { key: values.join("\u0000"), values };
+  }
+
+  function buildTimeSeriesFromSpec(trace, viewSpec) {
+    const diagnostics = [];
+    if (!viewSpec || !viewSpec.display || viewSpec.display.kind !== "time_series") {
+      return { spec: viewSpec, sourceIds: [], series: [], diagnostics };
+    }
+
+    const sources = viewSpec.sources || [];
+    if (sources.length !== 1) {
+      diagnostics.push({
+        level: "warning",
+        id: viewSpec.id,
+        message: "only single-source time_series specs are implemented",
+      });
+      return { spec: viewSpec, sourceIds: sources.map((s) => s.id), series: [], diagnostics };
+    }
+
+    const source = sources[0];
+    const sourceId = source.id;
+    const events = getTraceEventStream(trace, source)
+      .filter((ev) => Number.isFinite(ev.timestamp))
+      .slice()
+      .sort((a, b) => a.timestamp - b.timestamp);
+
+    if (events.length === 0) {
+      return { spec: viewSpec, sourceIds: [sourceId], series: [], diagnostics };
+    }
+
+    const series = [];
+    for (const seriesSpec of viewSpec.series || []) {
+      const groups = new Map();
+      const previousByGroup = new Map();
+
+      for (const event of events) {
+        const baseContext = {
+          current: { [sourceId]: event },
+          previous: null,
+          metadata: trace.segmentMetadata,
+          singleSourceId: sourceId,
+          point: null,
+        };
+        const group = partitionKeyForSeries(seriesSpec, baseContext);
+        if (!group) continue;
+
+        let bucket = groups.get(group.key);
+        if (!bucket) {
+          const suffix = group.values.length > 0 ? ` ${group.values.join("/")}` : "";
+          bucket = {
+            id: group.key || seriesSpec.id,
+            key: group.key,
+            values: group.values,
+            title: `${seriesSpec.title || seriesSpec.id}${suffix}`,
+            points: [],
+          };
+          groups.set(group.key, bucket);
+        }
+
+        const previousEvent = previousByGroup.get(group.key) || null;
+        const context = {
+          ...baseContext,
+          previous: previousEvent ? { [sourceId]: previousEvent } : null,
+        };
+        let point = null;
+        if (seriesSpec.expr && seriesSpec.expr.op === "rate") {
+          const rate = evaluateRateExpression(seriesSpec.expr, context, seriesSpec.window || null);
+          if (rate) {
+            point = {
+              start: rate.previousTime,
+              end: rate.currentTime,
+              t: rate.currentTime,
+              value: rate.value,
+              value_delta: rate.valueDelta,
+              value_delta_ns: rate.valueDelta,
+              wall_delta_ns: rate.wallDeltaNs,
+              current: { [sourceId]: event },
+              previous: { [sourceId]: previousEvent },
+              group_key: group.key,
+              group_values: group.values,
+            };
+          }
+        } else {
+          const value = finiteNumber(evaluateViewSpecExpression(seriesSpec.expr, context));
+          if (value != null) {
+            point = {
+              start: event.timestamp,
+              end: event.timestamp,
+              t: event.timestamp,
+              value,
+              current: { [sourceId]: event },
+              previous: previousEvent ? { [sourceId]: previousEvent } : null,
+              group_key: group.key,
+              group_values: group.values,
+            };
+          }
+        }
+
+        if (point) bucket.points.push(point);
+        previousByGroup.set(group.key, event);
+      }
+
+      const groupList = [...groups.values()].filter((group) => group.points.length > 0);
+      for (const group of groupList) group.points.sort((a, b) => a.t - b.t);
+      if (groupList.length > 0) series.push({ spec: seriesSpec, groups: groupList });
+    }
+
+    return { spec: viewSpec, sourceIds: [sourceId], series, diagnostics };
+  }
+
+  function buildSchemaDrivenTimeSeriesViews(trace, bundle) {
+    const specBundle = bundle || HARDCODED_VIEW_SPEC_BUNDLE;
+    const diagnostics = [];
+    applyComputedFields(trace, specBundle, diagnostics);
+
+    const views = [];
+    for (const viewSpec of specBundle.views || []) {
+      if (!viewSpec.display || viewSpec.display.kind !== "time_series") continue;
+      const view = buildTimeSeriesFromSpec(trace, viewSpec);
+      diagnostics.push(...view.diagnostics);
+      if (view.series.some((series) => series.groups.some((group) => group.points.length > 0))) {
+        views.push(view);
+      }
+    }
+    return { bundle: specBundle, views, diagnostics };
   }
 
   // ── Poll color heatmap ────────────────────────────────────────────────
@@ -1659,6 +2263,11 @@
     getTraceTimeRange,
     hasCpuProfileSamples,
     buildProcessCpuUsageSeries,
+    HARDCODED_VIEW_SPEC_BUNDLE,
+    applyComputedFields,
+    buildTimeSeriesFromSpec,
+    buildSchemaDrivenTimeSeriesViews,
+    evaluateViewSpecExpression,
     buildSpanData,
     collectDescendants,
     selectSpanRenderSet,

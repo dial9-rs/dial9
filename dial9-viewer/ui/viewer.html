@@ -627,6 +627,48 @@
                 height: 100%;
                 display: block;
             }
+            .schema-time-series-panel {
+                display: none;
+                height: 92px;
+                background: #111b2e;
+                border-top: 1px solid #333;
+                flex-shrink: 0;
+                position: relative;
+                overflow: hidden;
+            }
+            .schema-time-series-panel .chart-label {
+                position: absolute;
+                top: 4px;
+                left: 8px;
+                display: inline-flex;
+                align-items: center;
+                white-space: nowrap;
+                font-size: 0.75em;
+                color: #888;
+                z-index: 2;
+            }
+            .schema-panel-legend {
+                display: inline-flex;
+                align-items: center;
+                gap: 10px;
+                margin-left: 10px;
+                font-weight: 400;
+            }
+            .schema-panel-legend-item {
+                display: inline-flex;
+                align-items: center;
+                gap: 4px;
+            }
+            .schema-panel-legend-swatch {
+                width: 12px;
+                border-top: 1px dashed;
+                display: inline-block;
+            }
+            .schema-time-series-panel canvas {
+                width: 100%;
+                height: 100%;
+                display: block;
+            }
             #task-detail .chart-label {
                 position: absolute;
                 top: 4px;
@@ -1015,7 +1057,7 @@
         <script src="panel_layout.js"></script>
         <script>
             const { EVENT_TYPES: ET, parseTrace, formatFrame, symbolizeChain, deduplicateSamples } = TraceParser;
-            const { buildWorkerSpans, attachCpuSamples, buildActiveTaskTimeline, computeSchedulingDelays, filterPointsOfInterest, buildSpanData, collectDescendants, selectSpanRenderSet, enclosingSpans, computeSpanLayout, getTraceTimeRange, hasCpuProfileSamples, buildProcessCpuUsageSeries, computeRuntimeGroups } = TraceAnalysis;
+            const { buildWorkerSpans, attachCpuSamples, buildActiveTaskTimeline, computeSchedulingDelays, filterPointsOfInterest, buildSpanData, collectDescendants, selectSpanRenderSet, enclosingSpans, computeSpanLayout, getTraceTimeRange, hasCpuProfileSamples, buildProcessCpuUsageSeries, computeRuntimeGroups, buildSchemaDrivenTimeSeriesViews, evaluateViewSpecExpression } = TraceAnalysis;
 
             function esc(s) {
                 return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -1293,6 +1335,8 @@
                 maxCores: 0,
                 avgCores: 0,
             };
+            let schemaTimeSeriesViews = [];
+            let schemaTimeSeriesPanelEls = new Map();
             // Points of interest for navigation
             let pointsOfInterest = [];
             let currentPoiIndex = -1;
@@ -1382,6 +1426,7 @@
             //   • Timeline header  (renderTimeline)
             //   • Worker lanes     (renderLane)           — uses DOM flex instead of canvas offset
             //   • Span panel       (renderSpanPanel)
+            //   • Schema panels    (renderSchemaTimeSeriesPanel)
             //   • CPU panel        (renderProcessCpuPanel)
             //   • Task detail      (renderTaskDetail)
             //   • Queue chart      (renderQueueChart)
@@ -1409,7 +1454,6 @@
             const clearRangeBtn = document.getElementById("btn-clear-range");
             const tooltip = document.getElementById("tooltip");
 
-            const FOLDABLE_PANEL_KEYS = ["spans", "events", "cpu", "queue"];
             const PANEL_COLLAPSE_STORAGE_PREFIX = "dial9.viewer.panelCollapsed.";
             const viewerStorageFallback = new Map();
 
@@ -1456,7 +1500,10 @@
             }
 
             function syncFoldablePanels() {
-                for (const key of FOLDABLE_PANEL_KEYS) syncFoldablePanel(key);
+                for (const panel of document.querySelectorAll(".foldable-panel")) {
+                    const key = panel.dataset.panelKey;
+                    if (key) syncFoldablePanel(key);
+                }
             }
 
             function setPanelCollapsed(key, collapsed, { redraw = true } = {}) {
@@ -1465,7 +1512,9 @@
                 if (redraw) renderAll();
             }
 
-            for (const panel of document.querySelectorAll(".foldable-panel")) {
+            function attachFoldablePanel(panel) {
+                if (panel.dataset.foldableBound === "1") return;
+                panel.dataset.foldableBound = "1";
                 const key = panel.dataset.panelKey;
                 const label = panel.querySelector(".chart-label");
                 if (label) {
@@ -1483,6 +1532,10 @@
                     e.stopPropagation();
                     setPanelCollapsed(key, !isPanelCollapsed(key));
                 });
+            }
+
+            for (const panel of document.querySelectorAll(".foldable-panel")) {
+                attachFoldablePanel(panel);
             }
             syncFoldablePanels();
 
@@ -1571,6 +1624,8 @@
                 relatedItems = [];
                 hoveredWakerTaskId = null;
                 processCpuUsage = { samples: [], intervals: [], availableParallelism: null, maxCores: 0, avgCores: 0 };
+                schemaTimeSeriesViews = [];
+                clearSchemaTimeSeriesPanelElements();
                 hideStackPopup();
                 taskDetailPanel.style.display = "none";
                 document.getElementById("cpu-panel").style.display = "none";
@@ -2140,15 +2195,15 @@
                 schedDelays = computeSchedulingDelays(workerSpans, workerIds, wakesByTask);
                 console.log(`Found ${Object.keys(wakesByTask).length} tasks with wake events, ${schedDelays.length} scheduling delays`);
 
-                const availableParallelism = trace.segmentMetadata?.get("process.available_parallelism") ?? null;
-                processCpuUsage = buildProcessCpuUsageSeries(trace.customEvents || [], availableParallelism);
-                const cpuPanel = document.getElementById("cpu-panel");
-                cpuPanel.style.display = processCpuUsage.intervals.length > 0 ? "block" : "none";
-                if (processCpuUsage.intervals.length > 0) {
-                    const cap = processCpuUsage.availableParallelism != null
-                        ? `, available_parallelism=${processCpuUsage.availableParallelism}`
-                        : ", available_parallelism=unknown";
-                    console.log(`Process CPU usage: ${processCpuUsage.intervals.length} intervals${cap}`);
+                document.getElementById("cpu-panel").style.display = "none";
+                const specResult = buildSchemaDrivenTimeSeriesViews(trace);
+                schemaTimeSeriesViews = specResult.views;
+                ensureSchemaTimeSeriesPanelElements();
+                if (specResult.diagnostics.length > 0) {
+                    console.warn("Schema-driven view diagnostics", specResult.diagnostics);
+                }
+                if (schemaTimeSeriesViews.length > 0) {
+                    console.log(`Schema-driven time-series views: ${schemaTimeSeriesViews.length}`);
                 }
 
                 // Build span data from custom events.  Reset span state
@@ -2677,6 +2732,58 @@
                 if (lane) lanesContainer.scrollTop = lane.offsetTop;
             }
 
+            function schemaPanelKey(view) {
+                return `spec:${view.spec.id}`;
+            }
+
+            function schemaPanelDomId(view) {
+                return `schema-panel-${view.spec.id.replace(/[^A-Za-z0-9_-]/g, "-")}`;
+            }
+
+            function clearSchemaTimeSeriesPanelElements() {
+                for (const panel of schemaTimeSeriesPanelEls.values()) panel.remove();
+                schemaTimeSeriesPanelEls.clear();
+            }
+
+            function ensureSchemaTimeSeriesPanelElements() {
+                const wanted = new Set(schemaTimeSeriesViews.map((view) => schemaPanelKey(view)));
+                for (const [key, panel] of schemaTimeSeriesPanelEls) {
+                    if (!wanted.has(key)) {
+                        panel.remove();
+                        schemaTimeSeriesPanelEls.delete(key);
+                    }
+                }
+
+                for (const view of schemaTimeSeriesViews) {
+                    const key = schemaPanelKey(view);
+                    let panel = schemaTimeSeriesPanelEls.get(key);
+                    if (!panel) {
+                        panel = document.createElement("div");
+                        panel.id = schemaPanelDomId(view);
+                        panel.className = "schema-time-series-panel foldable-panel is-collapsed";
+                        panel.dataset.panelKey = key;
+                        panel.style.display = "none";
+                        panel.innerHTML =
+                            `<div class="chart-label"><span class="schema-panel-title"></span><span class="schema-panel-legend panel-expanded-label"></span></div>` +
+                            `<span class="schema-panel-info" style="position:absolute;top:4px;right:12px;font-size:0.75em;color:#aaa;z-index:2;pointer-events:none"></span>` +
+                            `<canvas></canvas>`;
+                        const canvas = panel.querySelector("canvas");
+                        canvas.addEventListener("mousemove", (e) => handleSchemaTimeSeriesMouseMove(e, panel._schemaView));
+                        canvas.addEventListener("mouseleave", () => {
+                            tooltip.style.display = "none";
+                            canvas.style.cursor = "default";
+                        });
+                        taskDetailPanel.parentNode.insertBefore(panel, taskDetailPanel);
+                        attachFoldablePanel(panel);
+                        schemaTimeSeriesPanelEls.set(key, panel);
+                    }
+                    panel._schemaView = view;
+                    panel.querySelector(".schema-panel-title").textContent = view.spec.title || view.spec.id;
+                    panel.style.display = "block";
+                }
+                syncFoldablePanels();
+            }
+
             // ── Rendering ──
             let mouseNs = null; // Track mouse position for crosshair
             let queueChartRafId = null; // Throttle queue chart redraws
@@ -2894,8 +3001,8 @@
                 renderSpanPanel(scrollbarW);
                 if (prof) _t = _profMark(prof, `spanPanel(allSpans=${allSpans.length})`, _t);
                 renderCustomEventsPanel(scrollbarW);
-                renderProcessCpuPanel(scrollbarW);
-                if (prof) _t = _profMark(prof, `customEvents(${genericCustomEvents.length})`, _t);
+                renderSchemaTimeSeriesPanels(scrollbarW);
+                if (prof) _t = _profMark(prof, `customEvents(${genericCustomEvents.length}) schemaTimeSeries(${schemaTimeSeriesViews.length})`, _t);
                 renderTaskDetail(scrollbarW);
                 if (prof) _t = _profMark(prof, "taskDetail", _t);
                 renderQueueChart(drawW, scrollbarW);
@@ -3756,6 +3863,437 @@
                 ctx.globalAlpha = 1.0;
             }
 
+            const SPEC_SERIES_COLORS = [
+                "#4fc3f7", "#81c784", "#ffb74d", "#ba68c8", "#4db6ac", "#f06292", "#90a4ae",
+            ];
+
+            function schemaSeriesBaseColor(seriesIndex, groupIndex, seriesSpec) {
+                return seriesSpec.color || SPEC_SERIES_COLORS[(seriesIndex + groupIndex) % SPEC_SERIES_COLORS.length];
+            }
+
+            function thresholdLevelColor(level, fallback) {
+                if (level === "critical") return "#ff5252";
+                if (level === "warning") return "#ffb74d";
+                return fallback;
+            }
+
+            function thresholdColor(value, thresholds, fallback) {
+                if (!thresholds || thresholds.length === 0 || !Number.isFinite(value)) return fallback;
+                let level = null;
+                for (const threshold of thresholds) {
+                    if (value >= threshold.value) level = threshold.level;
+                }
+                return thresholdLevelColor(level, fallback);
+            }
+
+            function schemaExpressionContext(view, point = null) {
+                return {
+                    point,
+                    current: point?.current || {},
+                    previous: point?.previous || null,
+                    metadata: trace.segmentMetadata,
+                    singleSourceId: view.sourceIds.length === 1 ? view.sourceIds[0] : null,
+                    series: view.series,
+                    ranges: {
+                        visible: { start: viewStart, end: viewEnd },
+                    },
+                };
+            }
+
+            function schemaGuideValues(view) {
+                const guides = [];
+                for (const guide of view.spec.display?.guides || []) {
+                    const value = Number(evaluateViewSpecExpression(guide.expr, schemaExpressionContext(view)));
+                    if (Number.isFinite(value)) guides.push({ ...guide, value });
+                }
+                return guides;
+            }
+
+            function schemaThresholdValues(view) {
+                const thresholds = [];
+                view.series.forEach((series, seriesIndex) => {
+                    for (const threshold of series.spec.thresholds || []) {
+                        const value = Number(evaluateViewSpecExpression(
+                            threshold.expr,
+                            schemaExpressionContext(view),
+                        ));
+                        if (Number.isFinite(value)) {
+                            thresholds.push({ ...threshold, value, seriesSpec: series.spec, seriesIndex });
+                        }
+                    }
+                });
+                return thresholds.sort((a, b) => a.seriesIndex - b.seriesIndex || a.value - b.value);
+            }
+
+            function schemaYBounds(view, guides, thresholds) {
+                const display = view.spec.display || {};
+                let min = display.y_min != null ? Number(display.y_min) : 0;
+                let max = display.y_max != null ? Number(display.y_max) : 0;
+                let sawValue = display.y_max != null;
+
+                for (const series of view.series) {
+                    for (const group of series.groups) {
+                        for (let i = 0; i < group.points.length; i++) {
+                            const point = group.points[i];
+                            const segStart = point.end > point.start ? point.start : point.t;
+                            const segEnd = schemaPointEnd(group.points, i);
+                            if (segEnd < viewStart || segStart > viewEnd) continue;
+                            if (!Number.isFinite(point.value)) continue;
+                            if (!sawValue || point.value > max) max = point.value;
+                            if (display.y_min == null && point.value < min) min = point.value;
+                            sawValue = true;
+                        }
+                    }
+                }
+                for (const guide of guides) {
+                    if (!sawValue || guide.value > max) max = guide.value;
+                    if (display.y_min == null && guide.value < min) min = guide.value;
+                    sawValue = true;
+                }
+                for (const threshold of thresholds) {
+                    if (!sawValue || threshold.value > max) max = threshold.value;
+                    if (display.y_min == null && threshold.value < min) min = threshold.value;
+                    sawValue = true;
+                }
+                if (!sawValue) max = min + 1;
+                if (!(max > min)) max = min + 1;
+                return { min, max };
+            }
+
+            function schemaPointEnd(points, index) {
+                const point = points[index];
+                if (point.end > point.start) return point.end;
+                const next = points[index + 1];
+                return next ? next.t : viewEnd;
+            }
+
+            function schemaVisibleSegments(points) {
+                const segments = [];
+                for (let i = 0; i < points.length; i++) {
+                    const point = points[i];
+                    const start = point.end > point.start ? point.start : point.t;
+                    const end = schemaPointEnd(points, i);
+                    if (end < viewStart) continue;
+                    if (start > viewEnd) break;
+                    segments.push({ point, start, end });
+                }
+                return segments;
+            }
+
+            function downsampleSchemaSegments(segments, mode, drawW) {
+                if (!mode || drawW <= 0 || segments.length <= drawW * 2) return segments;
+                const buckets = new Map();
+                const span = viewEnd - viewStart || 1;
+                for (const segment of segments) {
+                    const visibleStart = Math.max(segment.start, viewStart);
+                    const visibleEnd = Math.min(segment.end, viewEnd);
+                    const mid = (visibleStart + visibleEnd) / 2;
+                    const px = Math.max(0, Math.min(Math.floor(drawW) - 1, Math.floor(((mid - viewStart) / span) * drawW)));
+                    let bucket = buckets.get(px);
+                    if (!bucket) {
+                        bucket = {
+                            px,
+                            start: segment.start,
+                            end: segment.end,
+                            last: segment,
+                            max: segment,
+                            min: segment,
+                            sum: 0,
+                            count: 0,
+                        };
+                        buckets.set(px, bucket);
+                    }
+                    if (segment.start < bucket.start) bucket.start = segment.start;
+                    if (segment.end > bucket.end) bucket.end = segment.end;
+                    if (segment.point.t >= bucket.last.point.t) bucket.last = segment;
+                    if (segment.point.value > bucket.max.point.value) bucket.max = segment;
+                    if (segment.point.value < bucket.min.point.value) bucket.min = segment;
+                    bucket.sum += segment.point.value;
+                    bucket.count++;
+                }
+
+                const out = [];
+                for (const bucket of [...buckets.values()].sort((a, b) => a.px - b.px)) {
+                    if (mode === "max_per_pixel") {
+                        out.push({ point: bucket.max.point, start: bucket.start, end: bucket.end });
+                    } else if (mode === "avg_per_pixel") {
+                        out.push({
+                            point: { ...bucket.last.point, value: bucket.sum / bucket.count },
+                            start: bucket.start,
+                            end: bucket.end,
+                        });
+                    } else if (mode === "min_max_per_pixel") {
+                        out.push({ point: bucket.min.point, start: bucket.start, end: bucket.end });
+                        if (bucket.max.point !== bucket.min.point) {
+                            out.push({ point: bucket.max.point, start: bucket.start, end: bucket.end });
+                        }
+                    } else {
+                        out.push({ point: bucket.last.point, start: bucket.start, end: bucket.end });
+                    }
+                }
+                return out;
+            }
+
+            function updateSchemaPanelLegend(panel, guides, thresholds) {
+                const items = [];
+                for (const guide of guides) {
+                    const value = formatSpecValue(guide.value, guide.unit);
+                    const text = guide.show_value === false
+                        ? guide.label || ""
+                        : guide.label ? `${guide.label} (${value})` : value;
+                    if (text) items.push({ text, color: "#ffcf99" });
+                }
+                for (const threshold of thresholds) {
+                    const label = threshold.label || threshold.level;
+                    const value = formatSpecValue(threshold.value, threshold.seriesSpec.unit);
+                    const text = label ? `${label} (${value})` : value;
+                    const fallback = schemaSeriesBaseColor(threshold.seriesIndex, 0, threshold.seriesSpec);
+                    items.push({ text, color: thresholdLevelColor(threshold.level, fallback) });
+                }
+
+                const legend = panel.querySelector(".schema-panel-legend");
+                const signature = JSON.stringify(items);
+                if (legend.dataset.signature === signature) return;
+                legend.dataset.signature = signature;
+                legend.replaceChildren();
+                for (const item of items) {
+                    const entry = document.createElement("span");
+                    entry.className = "schema-panel-legend-item";
+                    const swatch = document.createElement("span");
+                    swatch.className = "schema-panel-legend-swatch";
+                    swatch.style.borderColor = item.color;
+                    entry.appendChild(swatch);
+                    entry.appendChild(document.createTextNode(item.text));
+                    legend.appendChild(entry);
+                }
+            }
+
+            function renderSchemaTimeSeriesPanel(view, scrollbarW) {
+                const panel = schemaTimeSeriesPanelEls.get(schemaPanelKey(view));
+                if (!panel || panel.style.display === "none") return;
+
+                const ph = 92;
+                const info = panel.querySelector(".schema-panel-info");
+                const guides = schemaGuideValues(view);
+                const thresholds = schemaThresholdValues(view);
+                const yBounds = schemaYBounds(view, guides, thresholds);
+                updateSchemaPanelLegend(panel, guides, thresholds);
+                const summaries = [];
+                for (const summary of view.spec.summary || []) {
+                    const value = evaluateViewSpecExpression(summary.expr, schemaExpressionContext(view));
+                    if (value == null) continue;
+                    summaries.push(`${summary.label} ${formatSpecValue(value, summary.unit)}`);
+                }
+                let visiblePoints = 0;
+                let visibleMax = null;
+                for (const series of view.series) {
+                    for (const group of series.groups) {
+                        for (let i = 0; i < group.points.length; i++) {
+                            const point = group.points[i];
+                            const segStart = point.end > point.start ? point.start : point.t;
+                            const segEnd = schemaPointEnd(group.points, i);
+                            if (segEnd < viewStart || segStart > viewEnd) continue;
+                            visiblePoints++;
+                            if (visibleMax == null || point.value > visibleMax) visibleMax = point.value;
+                        }
+                    }
+                }
+                info.textContent = summaries.length > 0
+                    ? summaries.join(" · ")
+                    : visiblePoints > 0
+                        ? `${visiblePoints} points · max ${formatSpecValue(visibleMax, view.series[0]?.spec?.unit)}`
+                        : "No points in view";
+                if (isPanelCollapsed(schemaPanelKey(view))) return;
+
+                const layout = timePanelLayout(panel, scrollbarW);
+                const { pw, drawW, nsToPanelXClamped } = layout;
+                const canvas = panel.querySelector("canvas");
+                const ctx = layout.resizeCanvas(canvas, ph);
+                ctx.clearRect(0, 0, pw, ph);
+                ctx.fillStyle = "#111b2e";
+                ctx.fillRect(0, 0, pw, ph);
+                if (drawW <= 0) return;
+
+                const chartTop = 20;
+                const chartH = ph - 28;
+                const valueToY = (value) => chartTop + chartH - ((value - yBounds.min) / (yBounds.max - yBounds.min)) * chartH;
+
+                ctx.fillStyle = "#667";
+                ctx.font = "10px monospace";
+                ctx.textAlign = "right";
+                ctx.fillText(formatSpecTickValue(yBounds.max, view.series[0]?.spec?.unit), LABEL_W - 6, chartTop + 9);
+                ctx.fillText(formatSpecTickValue(yBounds.min, view.series[0]?.spec?.unit), LABEL_W - 6, chartTop + chartH);
+
+                ctx.strokeStyle = "rgba(255,255,255,0.07)";
+                ctx.lineWidth = 1;
+                for (let i = 1; i <= 3; i++) {
+                    const y = chartTop + (chartH * i) / 4;
+                    ctx.beginPath();
+                    ctx.moveTo(LABEL_W, y);
+                    ctx.lineTo(LABEL_W + drawW, y);
+                    ctx.stroke();
+                }
+
+                for (const threshold of thresholds) {
+                    const y = valueToY(threshold.value);
+                    const fallback = schemaSeriesBaseColor(threshold.seriesIndex, 0, threshold.seriesSpec);
+                    const color = thresholdLevelColor(threshold.level, fallback);
+                    ctx.strokeStyle = color;
+                    ctx.setLineDash([2, 3]);
+                    ctx.beginPath();
+                    ctx.moveTo(LABEL_W, y);
+                    ctx.lineTo(LABEL_W + drawW, y);
+                    ctx.stroke();
+                    ctx.setLineDash([]);
+                }
+
+                for (const guide of guides) {
+                    const y = valueToY(guide.value);
+                    ctx.strokeStyle = "rgba(255,207,153,0.65)";
+                    ctx.setLineDash([4, 3]);
+                    ctx.beginPath();
+                    ctx.moveTo(LABEL_W, y);
+                    ctx.lineTo(LABEL_W + drawW, y);
+                    ctx.stroke();
+                    ctx.setLineDash([]);
+                }
+
+                view.series.forEach((series, seriesIndex) => {
+                    const seriesSpec = series.spec;
+                    const mark = seriesSpec.mark || "line";
+                    const seriesThresholds = thresholds.filter((threshold) => threshold.seriesIndex === seriesIndex);
+                    series.groups.forEach((group, groupIndex) => {
+                        const baseColor = schemaSeriesBaseColor(seriesIndex, groupIndex, seriesSpec);
+                        const points = group.points;
+                        if (mark === "line") {
+                            ctx.strokeStyle = baseColor;
+                            ctx.lineWidth = 1.5;
+                            ctx.beginPath();
+                            let started = false;
+                            for (const point of points) {
+                                if (point.t < viewStart || point.t > viewEnd) continue;
+                                const x = nsToPanelXClamped(point.t);
+                                const y = valueToY(point.value);
+                                if (!started) { ctx.moveTo(x, y); started = true; }
+                                else ctx.lineTo(x, y);
+                            }
+                            if (started) ctx.stroke();
+                            return;
+                        }
+
+                        const segments = downsampleSchemaSegments(
+                            schemaVisibleSegments(points), seriesSpec.downsample, drawW,
+                        );
+                        for (const segment of segments) {
+                            const point = segment.point;
+                            const segStart = segment.start;
+                            const segEnd = segment.end;
+                            if (segEnd < viewStart) continue;
+                            if (segStart > viewEnd) break;
+                            const x1 = nsToPanelXClamped(segStart);
+                            const x2 = nsToPanelXClamped(segEnd);
+                            const w = Math.max(1, x2 - x1);
+                            const y = valueToY(point.value);
+                            const h = chartTop + chartH - y;
+                            const color = thresholdColor(point.value, seriesThresholds, baseColor);
+                            if (mark === "step_area") {
+                                ctx.fillStyle = color.replace(/^#([0-9a-f]{6})$/i, (_, hex) => {
+                                    const r = parseInt(hex.slice(0, 2), 16);
+                                    const g = parseInt(hex.slice(2, 4), 16);
+                                    const b = parseInt(hex.slice(4, 6), 16);
+                                    return `rgba(${r}, ${g}, ${b}, 0.38)`;
+                                });
+                                ctx.fillRect(x1, y, w, h);
+                            }
+                            ctx.strokeStyle = color;
+                            ctx.lineWidth = 1.5;
+                            ctx.beginPath();
+                            ctx.moveTo(x1, y);
+                            ctx.lineTo(x1 + w, y);
+                            ctx.stroke();
+                        }
+                    });
+                });
+            }
+
+            function renderSchemaTimeSeriesPanels(scrollbarW) {
+                for (const view of schemaTimeSeriesViews) renderSchemaTimeSeriesPanel(view, scrollbarW);
+            }
+
+            function findSchemaTimeSeriesHit(view, ns) {
+                let best = null;
+                let bestDistance = Infinity;
+                for (const series of view.series) {
+                    for (const group of series.groups) {
+                        const points = group.points;
+                        for (let i = 0; i < points.length; i++) {
+                            const point = points[i];
+                            const start = point.end > point.start ? point.start : point.t;
+                            const end = schemaPointEnd(points, i);
+                            if (ns >= start && ns <= end) return { series, group, point };
+                            const distance = Math.min(Math.abs(ns - start), Math.abs(ns - end));
+                            if (distance < bestDistance) {
+                                bestDistance = distance;
+                                best = { series, group, point };
+                            }
+                            if (start > ns && distance > bestDistance) break;
+                        }
+                    }
+                }
+                const toleranceNs = (viewEnd - viewStart) / 100;
+                return bestDistance <= toleranceNs ? best : null;
+            }
+
+            function schemaTimeSeriesTooltipHtml(view, hit) {
+                const { series, group, point } = hit;
+                const title = group.title || series.spec.title || series.spec.id;
+                const showSeries = view.series.length > 1 || series.groups.length > 1;
+                let html = showSeries
+                    ? `<span class="label">Series:</span> <span class="value">${esc(title)}</span>`
+                    : "";
+                const hasExplicitTooltip = Array.isArray(series.spec.tooltip);
+                const rows = hasExplicitTooltip ? series.spec.tooltip : [
+                    { label: "Value", expr: { field: "point.value" }, unit: series.spec.unit },
+                ];
+                for (const row of rows) {
+                    const value = evaluateViewSpecExpression(row.expr, schemaExpressionContext(view, point));
+                    if (value == null) continue;
+                    html += `${html ? "<br>" : ""}<span class="label">${esc(row.label)}:</span> <span class="value">${esc(formatSpecValue(value, row.unit))}</span>`;
+                }
+                if (!hasExplicitTooltip) {
+                    html += `${html ? "<br>" : ""}<span class="label">@</span> <span class="value">${fmtTs(point.t)}</span>`;
+                }
+                return html;
+            }
+
+            function handleSchemaTimeSeriesMouseMove(e, view) {
+                if (!view) return;
+                const panel = schemaTimeSeriesPanelEls.get(schemaPanelKey(view));
+                const canvas = panel?.querySelector("canvas");
+                if (!panel || !canvas) return;
+                const rect = canvas.getBoundingClientRect();
+                const mx = e.clientX - rect.left;
+                const scrollbarW = lanesContainer.offsetWidth - lanesContainer.clientWidth;
+                const layout = timePanelLayout(panel, scrollbarW);
+
+                let hit = null;
+                if (mx >= LABEL_W && mx <= LABEL_W + layout.drawW) {
+                    const ns = layout.panelXToNs(mx);
+                    mouseNs = ns;
+                    hit = findSchemaTimeSeriesHit(view, ns);
+                }
+
+                canvas.style.cursor = hit ? "crosshair" : "default";
+                if (hit) {
+                    tooltip.innerHTML = schemaTimeSeriesTooltipHtml(view, hit);
+                    tooltip.style.display = "block";
+                    placeTooltip(e);
+                } else {
+                    tooltip.style.display = "none";
+                }
+                scheduleCrosshairRedraw();
+            }
+
             function fmtCpuCores(value) {
                 if (!Number.isFinite(value)) return "-";
                 return value
@@ -3838,7 +4376,7 @@
                     ctx.setLineDash([]);
                     ctx.fillStyle = "#ffcf99";
                     ctx.textAlign = "left";
-                    ctx.fillText(`${fmtCpuCores(capacity)} core capacity`, LABEL_W + 6, Math.max(12, capY - 4));
+                    ctx.fillText(`${fmtCpuCores(capacity)} cores · capacity`, LABEL_W + 6, Math.max(12, capY - 4));
                 }
 
                 for (const interval of processCpuUsage.intervals) {
@@ -4033,13 +4571,37 @@
                     .join(", ");
             }
 
+            function eventDisplayFieldEntries(ev) {
+                const rows = [];
+                for (const [key, value] of Object.entries(ev.fields || {})) {
+                    rows.push({ key, label: key, value, unit: ev.units?.[key], computed: false });
+                }
+                for (const [key, value] of Object.entries(ev.computed || {})) {
+                    rows.push({
+                        key,
+                        label: ev.computed_labels?.[key] || key,
+                        value,
+                        unit: ev.computed_units?.[key],
+                        computed: true,
+                    });
+                }
+                return rows;
+            }
+
+            function eventFieldLookup(ev, key) {
+                if (ev.fields && Object.prototype.hasOwnProperty.call(ev.fields, key)) return ev.fields[key];
+                if (ev.computed && Object.prototype.hasOwnProperty.call(ev.computed, key)) return ev.computed[key];
+                return undefined;
+            }
+
             function ceBodyHtml(events) {
                 let html = "";
                 if (events.length === 1) {
                     const ev = events[0];
                     html = `<span class="label">Event:</span> <span class="value">${esc(ev.name)}</span>`;
-                    for (const [k, v] of Object.entries(ev.fields || {})) {
-                        html += `<br><span class="label">${esc(k)}:</span> <span class="value">${esc(formatFieldValue(v, ev.units?.[k]))}</span>`;
+                    for (const row of eventDisplayFieldEntries(ev)) {
+                        const label = row.computed ? `${row.label} (computed)` : row.label;
+                        html += `<br><span class="label">${esc(label)}:</span> <span class="value">${esc(formatFieldValue(row.value, row.unit))}</span>`;
                     }
                     html += `<br><span class="label">@</span> <span class="value">${fmtTs(ev.timestamp)}</span>`;
                 } else {
@@ -4097,14 +4659,15 @@
                 let html = "";
                 if (events.length === 1) {
                     const ev = events[0];
-                    for (const [k, v] of Object.entries(ev.fields || {})) {
-                        const corrVal = String(v);
-                        const display = formatFieldValue(v, ev.units?.[k]);
+                    for (const row of eventDisplayFieldEntries(ev)) {
+                        const corrVal = String(row.value);
+                        const display = formatFieldValue(row.value, row.unit);
+                        const key = row.computed ? `${row.label} (computed)` : row.label;
                         // Only offer correlation when another event shares the value;
                         // a value unique to this event leads nowhere.
-                        html += eventsWithField(k, corrVal).length > 1
-                            ? kvRowCorrelate(k, display, corrVal)
-                            : kvRow(k, display);
+                        html += !row.computed && eventsWithField(row.key, corrVal).length > 1
+                            ? kvRowCorrelate(key, display, corrVal)
+                            : kvRow(key, display);
                     }
                     html += kvRow("@", fmtTs(ev.timestamp));
                 } else {
@@ -4156,7 +4719,10 @@
             // Custom events sharing a field value, sorted by time.
             function eventsWithField(key, val) {
                 const target = String(val);
-                return customEventsWhere(e => e.fields && String(e.fields[key]) === target);
+                return customEventsWhere(e => {
+                    const value = eventFieldLookup(e, key);
+                    return value !== undefined && String(value) === target;
+                });
             }
 
             // Build the Related tab body for a single event and (re)populate the
@@ -6504,6 +7070,12 @@
                     }
                     // CPU panel owns its interval tooltip.
                     if (e.target.closest && e.target.closest("#cpu-panel")) {
+                        mouseNs = eventToTimelineNs(e.clientX);
+                        lanesContainer.style.cursor = "";
+                        scheduleCrosshairRedraw();
+                        return;
+                    }
+                    if (e.target.closest && e.target.closest(".schema-time-series-panel")) {
                         mouseNs = eventToTimelineNs(e.clientX);
                         lanesContainer.style.cursor = "";
                         scheduleCrosshairRedraw();
