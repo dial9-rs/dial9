@@ -2164,7 +2164,10 @@
                 _spanDurCache = null;
                 clearSpanTaskSelection();
                 if (trace.customEvents && trace.customEvents.length > 0) {
-                    const spanResult2 = buildSpanData(trace.customEvents);
+                    // Pass workerSpans (built above) so span active/idle segments
+                    // are reconstructed from each span's owning task's polls,
+                    // rather than the coarse on-wire SpanEnter/SpanExit segments.
+                    const spanResult2 = buildSpanData(trace.customEvents, workerSpans);
                     allSpans = spanResult2.allSpans;
                     spanMeta = spanResult2.spanMeta;
                     spanMaxDepth = spanResult2.maxDepth;
@@ -3985,15 +3988,9 @@
                             const parent = spanMeta.get(parentId);
                             parentId = parent?.parentSpanId ?? null;
                         }
-                        // Find the task that was polling when this span's first segment ran
-                        const firstSeg = hit.segments[0];
-                        if (firstSeg) {
-                            const polls = workerSpans[firstSeg.workerId]?.polls;
-                            if (polls) {
-                                const poll = polls.find(p => p.start <= firstSeg.start && p.end >= firstSeg.start);
-                                if (poll && poll.taskId) selectedTaskId = poll.taskId;
-                            }
-                        }
+                        // The owning task is resolved once in buildSpanData (poll
+                        // covering the span's enter) and stored on the span.
+                        if (hit.taskId != null) selectedTaskId = hit.taskId;
                         // Show percentile info
                         const durations = allSpans
                             .filter(s => s.spanName === hit.spanName)
