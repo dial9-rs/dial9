@@ -132,6 +132,10 @@ pub(crate) struct TokioRuntimesSource {
     /// used to skip the rebuild when nothing changed. See `segment_metadata` for
     /// what it is and why it is sufficient. `0` means "nothing emitted yet".
     last_fingerprint: usize,
+    /// Whether the fixed `sched.wait_sample_rate` metadata entry has been
+    /// emitted yet. It never changes, so it is emitted exactly once (the writer
+    /// keeps it in its merged cache and re-emits it on every rotation).
+    sched_rate_emitted: bool,
 }
 
 impl TokioRuntimesSource {
@@ -141,6 +145,7 @@ impl TokioRuntimesSource {
             last_sample: time_source().instant(),
             sample_interval: Duration::from_millis(10),
             last_fingerprint: 0,
+            sched_rate_emitted: false,
         }
     }
 }
@@ -169,6 +174,19 @@ impl Source for TokioRuntimesSource {
     }
 
     fn segment_metadata(&mut self, out: &mut Vec<(String, String)>) {
+        // Record the schedstat sampling rate once so a consumer reading
+        // `WorkerUnparkEvent::sched_wait_ns` knows the measurement represents
+        // roughly 1-in-N parks, not every park. Fixed for the process lifetime
+        // (the rate is read once via `OnceLock`), so emit it a single time; the
+        // writer keeps it in its merged cache and re-emits it on every rotation.
+        if !self.sched_rate_emitted {
+            out.push((
+                "sched.wait_sample_rate".to_string(),
+                sched_wait_sample_rate().to_string(),
+            ));
+            self.sched_rate_emitted = true;
+        }
+
         // Self-detected change: there is no external signal to keep in sync, so
         // a new caller that mutates runtime/worker metadata cannot forget to
         // announce it. The fingerprint is the runtime count plus the total
@@ -467,12 +485,18 @@ mod tests {
         let contexts: RuntimeContextRegistry = Arc::new(Mutex::new(Vec::new()));
         let mut source = TokioRuntimesSource::new(contexts.clone());
 
-        // Empty registry: nothing to append.
+        // Empty registry: no runtime metadata yet, but the fixed schedstat
+        // sample-rate entry is emitted once on the first call.
         let mut out = Vec::new();
         source.segment_metadata(&mut out);
-        assert!(out.is_empty());
+        assert_eq!(
+            out.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>(),
+            vec!["sched.wait_sample_rate"],
+            "first call emits only the fixed sched-wait sample-rate entry"
+        );
 
-        // Register a runtime: the count grows, so the source rebuilds.
+        // Register a runtime: the count grows, so the source rebuilds. The
+        // sched-wait rate is not re-emitted (it is emitted exactly once).
         push_named_runtime(&contexts, "main", 0);
 
         out.clear();
@@ -491,6 +515,33 @@ mod tests {
         source.segment_metadata(&mut out);
         assert!(out.contains(&("runtime.main".to_string(), "0".to_string())));
         assert!(out.contains(&("runtime.io".to_string(), "1".to_string())));
+        // The sched-wait rate is fixed and emitted exactly once, so later
+        // change cycles never re-emit it.
+        assert!(!out.iter().any(|(k, _)| k == "sched.wait_sample_rate"));
+    }
+
+    #[test]
+    fn segment_metadata_reports_sched_wait_sample_rate_once() {
+        // The schedstat sampling rate is recorded in segment metadata so a
+        // consumer knows `sched_wait_ns` is 1-in-N sampled and knows N. It is
+        // fixed for the process lifetime, so it must be emitted exactly once.
+        let contexts: RuntimeContextRegistry = Arc::new(Mutex::new(Vec::new()));
+        let mut source = TokioRuntimesSource::new(contexts);
+
+        let mut out = Vec::new();
+        source.segment_metadata(&mut out);
+        let (_, value) = out
+            .iter()
+            .find(|(k, _)| k == "sched.wait_sample_rate")
+            .expect("first call emits the sched-wait sample-rate entry");
+        // The value is the process-global rate rendered as a positive integer.
+        assert_eq!(value, &sched_wait_sample_rate().to_string());
+        assert!(value.parse::<u64>().is_ok_and(|n| n >= 1));
+
+        // Emitted exactly once: a second call (no runtime change) appends nothing.
+        out.clear();
+        source.segment_metadata(&mut out);
+        assert!(out.is_empty());
     }
 
     #[test]
