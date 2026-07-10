@@ -96,6 +96,27 @@ export default defineConfig({
   build: {
     target: "es2022",
     sourcemap: false,
+    // T16: rollup's CJS interop only covers node_modules by default, but
+    // the frozen core is CJS-guard .js at the ui ROOT (ADR-0004 section
+    // 6), consumed via named ESM imports from lib/trace + lib/canvas.
+    // vite-node (dev/test) interops via Node require semantics; the
+    // BUILD needs the commonjs plugin to cover the root modules too, or
+    // any rollup graph that reaches the core ("is not exported by
+    // trace_parser.js") fails - first exercised by the worker entry.
+    // "*.js" resolves against the ui/ cwd: root-level .js only. decode.js
+    // is a SYMLINK into dial9-trace-format/js/ and Vite ids modules by
+    // realpath, so its target directory needs its own pattern.
+    commonjsOptions: {
+      include: [/node_modules/, "*.js", "../../dial9-trace-format/js/*.js"],
+      // Keep the core's Node-only dynamic require (trace_parser.js
+      // getTraceDecoder: `require(path.resolve(__dirname, "decode.js"))`)
+      // as a literal `require` in the output instead of rewriting it to a
+      // throwing helper. In a bundled module worker `typeof require` is
+      // then genuinely "undefined", so the core takes its browser branch
+      // (the TraceDecoder global, seeded by the worker entry) - the same
+      // resolution the legacy <script src> pages use.
+      ignoreDynamicRequires: true,
+    },
     rollupOptions: {
       // No migrated page entries exist yet; this placeholder module gives
       // `vite build` an input (and gives T04 an HMR probe target). Page
