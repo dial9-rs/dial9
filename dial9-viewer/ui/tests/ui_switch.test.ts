@@ -205,11 +205,12 @@ describe("hash dropping (raw switch, no view-state porting)", () => {
   });
 });
 
-describe("no registered target (the shipped state today)", () => {
-  it("the shipped registry is empty until T13/T14/T41 register pages", () => {
+describe("no registered target (unmigrated pages)", () => {
+  it("the shipped registry holds exactly the migrated pages", () => {
     // Not a freeze: page tickets REPLACE this expectation when they
     // register their entry (one line there, one here).
-    expect(Object.keys(NEW_UI_ENTRIES)).toEqual([]);
+    expect(Object.keys(NEW_UI_ENTRIES).sort()).toEqual(["flamegraph.html"]);
+    expect(NEW_UI_ENTRIES["flamegraph.html"]).toBe("new/flamegraph.html");
   });
   it("no redirect and no control, even with ?ui=new", () => {
     const d = decide(

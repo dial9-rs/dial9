@@ -129,11 +129,13 @@ export default defineConfig({
       ignoreDynamicRequires: true,
     },
     rollupOptions: {
-      // No migrated page entries exist yet; this placeholder module gives
-      // `vite build` an input (and gives T04 an HMR probe target). Page
-      // tickets replace it with real HTML entries.
+      // Real page entries (each page ships ONE bundle - N6 - so no shared
+      // placeholder inputs: the T02/T04 dev-probe module was retired when
+      // the first real entry landed, as its header said it would be).
       input: {
-        "dev-probe": "src/pages/dev-probe.ts",
+        // T13: the migrated flamegraph page, served at /new/flamegraph.html
+        // (HTML inputs keep their project-root-relative path in dist/).
+        flamegraph: "new/flamegraph.html",
       },
     },
   },
