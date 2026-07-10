@@ -29,6 +29,7 @@ export {
   formatFrame,
   loadTrace,
   loadTraceBuffered,
+  loadTraceInWorker,
   loadTraceStreamed,
   objectTraceUrls,
   parseTraceBuffer,
@@ -54,7 +55,24 @@ export type {
   SymbolFrame,
   TaskDump,
   TraceEvent,
+  TraceSliceStore,
+  WorkerLoadOptions,
+  WorkerLoadResult,
+  WorkerTraceLoad,
 } from "./load.js";
+
+// worker/protocol.ts - the worker-boundary message vocabulary pages and
+// transport adapters consume (the worker entry itself is not exported;
+// load.ts's factory owns it).
+export type {
+  TraceWorkerFactory,
+  TraceWorkerLoadMode,
+  TraceWorkerPort,
+  TraceWorkerProgress,
+  TraceWorkerRequest,
+  TraceWorkerResponse,
+  TraceWorkerTiming,
+} from "./worker/protocol.js";
 
 // reparse.ts - Set/Clear-Range in-memory windowed re-parse.
 export { isRangeActive, reparseWithRange } from "./reparse.js";
