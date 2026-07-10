@@ -12,6 +12,9 @@
 //   merge them), the memoized dimmer behind pollColorDim, and the
 //   stable name->color assignment behind spanColor/ceColor.
 
+// MUST precede the trace_analysis.js import: its factory reads the
+// TraceParser browser global in bundled entries (see core-globals.ts).
+import "./core-globals.js";
 import { pollHeatmapColorQuantized } from "../../../trace_analysis.js";
 
 export {

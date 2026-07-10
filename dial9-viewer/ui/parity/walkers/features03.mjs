@@ -39,8 +39,11 @@ export const registry = {
   F171: async ({ page, pageUrl }) => {
     // UTC time pickers: URL ns params seed the pickers as UTC wall-clock,
     // and reading them back (Apply -> URL sync) returns the same ns.
-    const startMs = Date.UTC(2026, 3, 9, 19, 0, 0);
-    const endMs = Date.UTC(2026, 3, 9, 20, 0, 0);
+    // Nonzero seconds: the browser normalizes a datetime-local VALUE by
+    // dropping trailing ":00" seconds on read-back, which would make the
+    // string comparison fail for a reason that is not this row's contract.
+    const startMs = Date.UTC(2026, 3, 9, 19, 0, 7);
+    const endMs = Date.UTC(2026, 3, 9, 20, 0, 8);
     // Exact decimal ns strings (ms + 6 zeros), no float round-trip.
     const startNs = `${startMs}000000`;
     const endNs = `${endMs}000000`;

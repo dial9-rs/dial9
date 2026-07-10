@@ -19,6 +19,10 @@
 // it lives here for now and may move behind lib/canvas when the span-panel
 // component ticket lands.
 
+// MUST be the first dependency: trace_analysis.js's factory reads the
+// TraceParser browser global in bundled entries (see core-globals.ts).
+import "./core-globals.js";
+
 export {
   analyzeAllocations,
   attachCpuSamples,

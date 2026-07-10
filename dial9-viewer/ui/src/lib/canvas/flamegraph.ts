@@ -12,6 +12,10 @@
 // is unreachable in bundled entries, exactly like legacy pages that load
 // all three <script src> tags).
 
+// MUST precede the flamegraph.js import: its factory reads the
+// TraceAnalysis and FlamegraphExport browser globals in bundled entries
+// (see export-globals.ts / core-globals.ts for the seed chain).
+import "./export-globals.js";
 export { createFlamegraph, filterCpuSamples } from "../../../flamegraph.js";
 export type {
   FlamegraphDataSample,

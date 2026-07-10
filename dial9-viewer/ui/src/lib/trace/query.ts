@@ -7,6 +7,9 @@
 // typed. Selection state, rendering and DOM hit-testing stay with the
 // page/component tickets.
 
+// MUST precede the trace_analysis.js import: its factory reads the
+// TraceParser browser global in bundled entries (see core-globals.ts).
+import "./core-globals.js";
 import { enclosingSpans } from "../../../trace_analysis.js";
 import type { PollSpan, TracingSpan } from "../../../trace_analysis.js";
 

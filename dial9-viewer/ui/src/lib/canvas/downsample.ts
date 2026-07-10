@@ -20,6 +20,9 @@
 // The stroke-side counterpart (per-column vertices for LINES, not fills)
 // is ./stroke.ts - the core has no stroke downsampler (that gap is F1).
 
+// MUST precede the trace_analysis.js import: its factory reads the
+// TraceParser browser global in bundled entries (see core-globals.ts).
+import "./core-globals.js";
 import { makeBarCoalescer } from "../../../trace_analysis.js";
 
 export {
