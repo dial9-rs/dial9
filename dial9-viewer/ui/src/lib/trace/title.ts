@@ -16,10 +16,12 @@ import { formatEpoch, parseKey, type EpochFormatOptions } from "./keys.js";
  *   one distinct epoch exists.
  * - `segs`: total number of selected keys, always set.
  *
- * Unknown-layout keys (see keys.ts) carry no service/host/epoch, so they
- * contribute only to `segs` - a deliberate consequence of the ADR-0004
+ * Unknown-layout keys (see keys.ts) carry no service/host, so they never
+ * contribute to `svc`/`host` - a deliberate consequence of the ADR-0004
  * section 1 defect fix: the legacy code fed their positionally shifted
- * fields into the title (Finding 1's `svc=host-0`).
+ * fields into the title (Finding 1's `svc=host-0`). Their FILENAME epoch
+ * is layout-independent, though, so it still contributes to the `from`/`to`
+ * window (T15; the legacy title carried the window for these keys too).
  */
 export function traceTitleParams(
   keys: readonly string[],
@@ -29,7 +31,7 @@ export function traceTitleParams(
   const known = parsed.filter((p) => p.layout === "known");
   const services = [...new Set(known.map((p) => p.service).filter(Boolean))];
   const hosts = [...new Set(known.map((p) => p.host).filter(Boolean))];
-  const epochs = known
+  const epochs = parsed
     .map((p) => p.epoch)
     .filter((e) => e > 0)
     .sort((a, b) => a - b);

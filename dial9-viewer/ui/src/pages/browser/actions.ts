@@ -18,16 +18,13 @@ import {
   tileSegments,
   totalBytes,
 } from "../../lib/canvas/heatmap.js";
+import { extractPrefix, parseKey } from "../../lib/trace/keys.js";
+import { objectTraceUrls } from "../../lib/trace/object-urls.js";
 import { isDateLayer } from "../../lib/trace/prefixes.js";
+import { traceTitleParams } from "../../lib/trace/title.js";
 import { apiFetch, type BrowseResponse } from "./api.js";
 import type { BrowserEls } from "./dom.js";
 import { dateToPickerStr, pickerToDate, xToTime } from "./format.js";
-import {
-  extractPrefix,
-  objectTraceUrls,
-  parseKeyCompat,
-  titleParamsCompat,
-} from "./legacy-keys.js";
 import type {
   BrowseObject,
   BrowserStore,
@@ -41,6 +38,18 @@ import type { UrlStateFields } from "./globals.js";
 
 /** px height of each host row in the heatmap (legacy ROW_H). */
 export const ROW_H = 26;
+
+/**
+ * Heatmap grouping key for an unknown-layout S3 key (T15, I2 amendment):
+ * the key's raw directory path, so segments from the same directory share
+ * a row (at least the granularity the legacy positional grouping had)
+ * without any guessed service/host labels. Falls back to the whole key
+ * for keys with no directory.
+ */
+export function unknownGroupPath(key: string): string {
+  const dir = key.split("/").slice(0, -1).join("/");
+  return dir || key;
+}
 
 export interface BrowserActions {
   syncUrl(): void;
@@ -278,7 +287,7 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
       // include objects just outside the requested window. Trim to the
       // actual range.
       allObjects = allObjects.filter((obj) => {
-        const p = parseKeyCompat(obj.key);
+        const p = parseKey(obj.key);
         if (!p.epoch) return true; // keep if we can't parse
         // Include if segment overlaps the range (last_modified as end proxy)
         const end = obj.last_modified
@@ -339,22 +348,35 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
 
       // Build normalized segments for the density timeline. A segment's
       // wall-clock span is [trace-start epoch, last_modified]; bytes are
-      // spread uniformly across it when rendering density.
+      // spread uniformly across it when rendering density. Unknown-layout
+      // keys (T15, I2 amendment) group by their raw directory path - the
+      // browse view labels those rows with the raw path instead of the
+      // legacy positionally shifted service/host (Finding 1); their
+      // filename epoch is layout-independent, so time placement is
+      // unchanged.
       const segments: HeatmapSegment[] = allObjects
         .map((obj) => {
-          const p = parseKeyCompat(obj.key);
+          const p = parseKey(obj.key);
           const start = p.epoch;
           const end = obj.last_modified
             ? new Date(obj.last_modified).getTime() / 1000
             : start;
+          const shared = { key: obj.key, size: obj.size, start, end };
+          if (p.layout === "known") {
+            return {
+              ...shared,
+              layout: "known" as const,
+              service: p.service,
+              host: p.host,
+              bootId: p.bootId,
+            };
+          }
           return {
-            key: obj.key,
-            size: obj.size,
-            start,
-            end,
-            service: p.service,
-            host: p.host,
-            bootId: p.bootId,
+            ...shared,
+            layout: "unknown" as const,
+            service: "",
+            host: unknownGroupPath(obj.key),
+            bootId: "",
           };
         })
         .filter((s) => s.start > 0);
@@ -742,7 +764,7 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
       return s.browse.selection ? [...s.browse.selection.keys] : [];
     }
     const bySortedRow = [...s.raw.objects]
-      .map((obj) => ({ key: obj.key, epoch: parseKeyCompat(obj.key).epoch }))
+      .map((obj) => ({ key: obj.key, epoch: parseKey(obj.key).epoch }))
       .sort((a, b) => a.epoch - b.epoch);
     return bySortedRow.filter((r) => s.raw.selected.has(r.key)).map((r) => r.key);
   }
@@ -757,7 +779,9 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
 
     // Pass structured metadata for the viewer title, plus one trace=
     // component per file (downloaded in parallel + gunzipped client-side).
-    const titleParams = titleParamsCompat(keys, localTz());
+    // T15 (I2 amendment): lib/trace/title.ts - unknown-layout keys no
+    // longer leak shifted svc/host params into the title.
+    const titleParams = traceTitleParams(keys, { localTz: localTz() });
     for (const url of objectTraceUrls(bucket, keys)) titleParams.append("trace", url);
 
     window.open(`viewer.html?${titleParams.toString()}`, "_blank");
@@ -778,9 +802,12 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
     }
     const keys = sel.keys;
     if (s.config.aggregationEnabled) {
-      const parsed = keys.map((k) => parseKeyCompat(k));
-      const services = [...new Set(parsed.map((p) => p.service).filter(Boolean))];
-      const hosts = [...new Set(parsed.map((p) => p.host).filter(Boolean))];
+      // T15 (I2 amendment): scope params come from KNOWN layouts only -
+      // the legacy path fed positionally shifted fields (svc=host-0) into
+      // the aggregation scope, filtering on wrong names.
+      const known = keys.map((k) => parseKey(k)).filter((p) => p.layout === "known");
+      const services = [...new Set(known.map((p) => p.service).filter(Boolean))];
+      const hosts = [...new Set(known.map((p) => p.host).filter(Boolean))];
       const fgParams = new URLSearchParams();
       fgParams.set("api", "1");
       // Pass the bucket so the flamegraph endpoint knows which bucket to
@@ -804,7 +831,7 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
     }
 
     // Exact mode: open the selected raw traces and decode client-side.
-    const fgParams = titleParamsCompat(keys, localTz());
+    const fgParams = traceTitleParams(keys, { localTz: localTz() });
     for (const url of objectTraceUrls(bucket, keys)) fgParams.append("trace", url);
     window.open("flamegraph.html?" + fgParams.toString(), "_blank");
   }
@@ -820,9 +847,10 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
       return;
     }
     const keys = sel.keys;
-    const parsed = keys.map((k) => parseKeyCompat(k));
-    const services = [...new Set(parsed.map((p) => p.service).filter(Boolean))];
-    const hosts = [...new Set(parsed.map((p) => p.host).filter(Boolean))];
+    // T15 (I2 amendment): known layouts only, as in viewCpuProfile above.
+    const known = keys.map((k) => parseKey(k)).filter((p) => p.layout === "known");
+    const services = [...new Set(known.map((p) => p.service).filter(Boolean))];
+    const hosts = [...new Set(known.map((p) => p.host).filter(Boolean))];
     const hp = new URLSearchParams();
     if (bucket) hp.set("bucket", bucket);
     const pfx = extractPrefix(keys[0]!);

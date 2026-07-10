@@ -15,10 +15,15 @@
 //   - dev-server seed: single segment at traces/2026-04-09/1900/... — hence
 //     the pinned page clock (lib/browser.mjs DEV_SEED_CLOCK) and the
 //     April-window helpers (lib/actions.mjs);
-//   - the seeded key has six post-date path components, so parseKey's
-//     positional fallback mislabels it (features/01 Finding 1): Service
-//     reads "host-0", Host reads "abcd". The walkers assert that recorded
-//     reality, not the conforming-layout labels.
+//   - the seeded key has six post-date path components — an UNKNOWN layout.
+//     On the LEGACY page the positional fallback mislabels it (features/01
+//     Finding 1): Service reads "host-0", Host reads "abcd". The MIGRATED
+//     page carries the T15 amendments (inventory "2026-07-10 T15
+//     amendments" table): unknown keys render RAW, the raw table sorts,
+//     the axis dates day-crossing spans, and the bucket filter is
+//     config-driven. Walkers for the amended rows branch on `side`
+//     (walk-rows.mjs): "new" asserts the amended contract, "legacy" the
+//     preserved pre-amendment behavior. All other walkers are side-blind.
 
 import {
   expect,
@@ -274,13 +279,24 @@ export const registry = {
   },
 
   // ── F. Browse view: density heatmap ──
-  F4: async ({ page, pageUrl }) => {
+  F4: async ({ page, pageUrl, side }) => {
     await gotoBrowserPage(page, pageUrl);
     await searchAprilWindow(page);
     const rows = page.locator("#heatmap-labels .row");
     expect((await rows.count()) === 1, "expected 1 host row for the single seeded host");
     const label = (await rows.first().textContent()).trim();
-    expect(/host-0 \/ abcd/.test(label), `row label was "${label}"`);
+    if (side === "new") {
+      // T15 I2-display amendment: the seeded key's layout is unknown, so
+      // the row groups/labels by its raw directory path - no mislabeled
+      // "service / host" split.
+      expect(
+        label === "traces/2026-04-09/1900/demo-service/local/host-0/abcd",
+        `row label was "${label}" (expected the raw directory path)`,
+      );
+    } else {
+      // Legacy page: the recorded Finding-1 mislabel is its behavior.
+      expect(/host-0 \/ abcd/.test(label), `row label was "${label}"`);
+    }
     return `1 host row "${label}"`;
   },
 
@@ -491,12 +507,29 @@ export const registry = {
   },
 
   // ── I. Cross-cutting behaviors ──
-  I2: async ({ page, pageUrl }) => {
+  I2: async ({ page, pageUrl, side }) => {
     // parseKey runs on every displayed key. The seeded key has an extra
-    // path component, so the positional fallback mislabels it (Finding 1):
-    // that recorded reality is what re-derives here.
+    // path component: an UNKNOWN layout. Legacy mislabels it positionally
+    // (Finding 1); the migrated page renders it RAW (T15 amendment).
     await gotoBrowserPage(page, pageUrl);
     await rawSearchSeededRows(page);
+    if (side === "new") {
+      const rawCell = page.locator("#raw-body tr td.rawkey");
+      expect((await rawCell.count()) === 1, "raw-key cell missing for the unknown-layout key");
+      expect(
+        (await rawCell.getAttribute("colspan")) === "3",
+        "raw-key cell does not span the Service/Host/Boot columns",
+      );
+      const text = (await rawCell.textContent()).trim();
+      expect(
+        /^traces\/2026-04-09\/1900\/demo-service\/local\/host-0\/abcd\/\d+-0\.bin\.gz$/.test(text),
+        `raw-key cell was "${text}"`,
+      );
+      // The layout-independent filename epoch still fills Trace Start.
+      const traceStart = await textOf(page, "#raw-body tr td:nth-child(3)");
+      expect(/^\d{4}-\d{2}-\d{2} /.test(traceStart), `Trace Start cell was "${traceStart}"`);
+      return "unknown-layout key rendered raw (full key across Service/Host/Boot); epoch kept";
+    }
     const service = await textOf(page, "#raw-body tr td:nth-child(2)");
     const host = await textOf(page, "#raw-body tr td:nth-child(3)");
     expect(service === "host-0", `Service cell was "${service}" (expected mislabel "host-0")`);

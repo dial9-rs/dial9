@@ -1,14 +1,15 @@
 // Raw search view component (features/01 G): prefix input + search, the
 // results table (columns parsed from the key), row/select-all checkboxes.
 //
-// G8 column sort is DEAD in the legacy page (headers carry data-sort
-// markup and sort-arrow CSS but no click handler) and is ported AS-IS:
-// no header click handler here. T15 owns the sortable-table amendment.
+// T15 amendments live here:
+// - I2 display: unknown-layout keys render RAW - the full key across the
+//   Service/Host/Boot columns (raw-rows.ts) - instead of the legacy
+//   positionally shifted fields (Finding 1).
 
 import { assertInScheduledRender } from "../../store/store.js";
 import type { PageCtx } from "./ctx.js";
 import { formatDate, formatEpochStr, formatSize } from "./format.js";
-import { parseKeyCompat } from "./legacy-keys.js";
+import { toRawRows } from "./raw-rows.js";
 import type { BrowseObject } from "./state.js";
 import { renderStatus } from "./status-render.js";
 
@@ -42,10 +43,9 @@ export function mountRawView({ store, els, actions }: PageCtx): void {
   // toggle drops the selection).
   function rebuildRows(objects: readonly BrowseObject[], localTz: boolean): void {
     els.rawBody.textContent = "";
-    const rows = objects.map((obj) => ({ obj, parsed: parseKeyCompat(obj.key) }));
-    rows.sort((a, b) => a.parsed.epoch - b.parsed.epoch);
 
-    for (const { obj, parsed: p } of rows) {
+    for (const row of toRawRows(objects)) {
+      const { obj } = row;
       const tr = document.createElement("tr");
 
       const cbCell = document.createElement("td");
@@ -65,11 +65,22 @@ export function mountRawView({ store, els, actions }: PageCtx): void {
         td.textContent = text;
         tr.appendChild(td);
       };
-      cell(p.service, "service");
-      cell(p.host, "host");
-      cell(p.bootId || "", "host");
-      cell(formatEpochStr(p.epoch, localTz));
-      cell(p.segIndex);
+      if (row.parsedCols) {
+        cell(row.parsedCols.service, "service");
+        cell(row.parsedCols.host, "host");
+        cell(row.parsedCols.bootId || "", "host");
+      } else {
+        // I2 amendment: unknown-layout key - show the raw key across the
+        // Service/Host/Boot columns instead of guessed (shifted) fields.
+        const td = document.createElement("td");
+        td.className = "rawkey";
+        td.colSpan = 3;
+        td.textContent = obj.key;
+        td.title = "unrecognized key layout - raw key shown";
+        tr.appendChild(td);
+      }
+      cell(formatEpochStr(row.epoch, localTz));
+      cell(row.segIndex);
       cell(formatSize(obj.size), "size");
       cell(formatDate(obj.last_modified, localTz), "date");
 

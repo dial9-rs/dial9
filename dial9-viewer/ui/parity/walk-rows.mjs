@@ -11,6 +11,14 @@
 //   NOT-TRIGGERABLE — the row's recorded verdict maps outside the gated set
 //                     (shared verdict mapping): listed, not driven.
 //
+// Per-side walks (T15): amended rows diverge by design between the two UI
+// generations — the MIGRATED page carries the amended contract while the
+// LEGACY page keeps the recorded pre-amendment behavior (e.g. G8's dead
+// sort). Walkers receive `side` ("new" when the page URL lives under /new/,
+// else "legacy") and the amended rows' walkers branch on it, asserting the
+// amended behavior on the new page and the preserved legacy behavior on the
+// legacy page. Both sides therefore stay green against the ONE inventory.
+//
 // Usage:
 //   node parity/walk-rows.mjs \
 //     --inventory ../../docs/ui-inventory/features/01-index-html.md \
@@ -83,6 +91,9 @@ async function main() {
   const only = opts.rows ? new Set(opts.rows.split(",").map((s) => s.trim())) : null;
   const pageUrl = opts.url;
   const baseUrl = new URL(pageUrl).origin;
+  // Which UI generation this walk targets (see the per-side note above).
+  // The migrated entries are served under /new/ (vite.config.ts inputs).
+  const side = new URL(pageUrl).pathname.startsWith("/new/") ? "new" : "legacy";
   await assertServerReady(baseUrl);
 
   const browser = await launchBrowser();
@@ -122,7 +133,7 @@ async function main() {
       const started = Date.now();
       try {
         const evidence = await withTimeout(
-          walker({ page, context, browser, baseUrl, pageUrl }),
+          walker({ page, context, browser, baseUrl, pageUrl, side }),
           WALKER_TIMEOUT_MS,
           `walker ${row.id}`,
         );

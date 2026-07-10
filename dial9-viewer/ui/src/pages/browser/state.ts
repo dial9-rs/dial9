@@ -30,6 +30,13 @@ export interface HeatmapSegment {
   start: number;
   /** last_modified epoch seconds (upload time), or start when missing. */
   end: number;
+  /**
+   * Key-layout discriminant (T15, I2 amendment). For "unknown" segments
+   * service is "" and host carries the key's raw directory path - the
+   * grouping key and the label the browse view renders raw, instead of
+   * the legacy positionally shifted fields (Finding 1).
+   */
+  layout: "known" | "unknown";
   service: string;
   host: string;
   bootId: string;

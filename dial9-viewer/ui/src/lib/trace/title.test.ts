@@ -50,13 +50,14 @@ describe("traceTitleParams (features/01 I3)", () => {
     expect(p.get("segs")).toBe("3");
   });
 
-  it("unknown-layout keys contribute only to segs", () => {
+  it("unknown-layout keys contribute no svc/host, but keep the epoch window (T15)", () => {
     const demoKey =
       "traces/2026-04-09/1900/demo-service/local/host-0/abcd/1744224000-0.bin.gz";
     const p = traceTitleParams([demoKey]);
     expect(p.get("svc")).toBeNull();
     expect(p.get("host")).toBeNull();
-    expect(p.get("from")).toBeNull();
+    // The filename epoch is layout-independent: the from window survives.
+    expect(p.get("from")).toBe("2025-04-09 18:40:00");
     expect(p.get("segs")).toBe("1");
   });
 

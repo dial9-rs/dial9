@@ -60,16 +60,24 @@ export function mountBrowseView({ store, els }: PageCtx): void {
 
   // Host labels (one row per service/host; boot count annotated) - legacy
   // renderHeatmap's label loop, built with createElement/textContent.
+  // T15 (I2 amendment): unknown-layout groups render their raw directory
+  // path instead of a guessed "service / host" split (Finding 1).
   function rebuildLabels(rows: readonly HeatmapRow[]): void {
     els.heatmapLabels.textContent = "";
     for (const row of rows) {
       const boots = bootTransitions(row.segments);
       const div = document.createElement("div");
       div.className = "row";
-      const svc = document.createElement("span");
-      svc.className = "svc";
-      svc.textContent = row.service;
-      div.append(svc, document.createTextNode(` / ${row.host}`));
+      if (row.segments[0]?.layout === "unknown") {
+        // Raw display: `host` carries the group's raw directory path
+        // (actions.ts unknownGroupPath); no service/host split exists.
+        div.append(document.createTextNode(row.host));
+      } else {
+        const svc = document.createElement("span");
+        svc.className = "svc";
+        svc.textContent = row.service;
+        div.append(svc, document.createTextNode(` / ${row.host}`));
+      }
       if (boots.length) {
         div.append(document.createTextNode(" "));
         const boot = document.createElement("span");
@@ -78,7 +86,9 @@ export function mountBrowseView({ store, els }: PageCtx): void {
         boot.textContent = `▏${boots.length + 1} boots`;
         div.append(boot);
       }
-      div.title = row.label;
+      // Unknown-layout rows: the frozen groupByHost label is " / <path>";
+      // the raw path alone is the honest tooltip.
+      div.title = row.segments[0]?.layout === "unknown" ? row.host : row.label;
       els.heatmapLabels.appendChild(div);
     }
   }

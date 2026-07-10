@@ -192,6 +192,9 @@ tbody td { padding: 6px; white-space: nowrap; }
 td.size, td.date { color: #aaa; }
 td.service { color: #7ec8e3; }
 td.host { color: #aaa; font-size: 0.8em; }
+/* T15 (I2 amendment): unknown-layout keys render raw across the parsed
+   columns instead of positionally shifted Service/Host/Boot fields. */
+td.rawkey { color: #aaa; font-size: 0.8em; font-family: monospace; }
 td input[type="checkbox"] { accent-color: #6c63ff; }
 
 .actions {
