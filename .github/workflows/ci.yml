@@ -190,7 +190,6 @@ jobs:
           cache-dependency-path: dial9-viewer/ui/package-lock.json
       - run: npm ci
       - run: npx tsc --noEmit
-      # --passWithNoTests until T10 migrates real suites to Vitest.
       - run: npm run test
       - run: npm run build
 
