@@ -1,207 +1,119 @@
-# T08 HANDOFF - lib/canvas: shared drawing utilities
+# T38 HANDOFF - Dual-UI raw switch (all pages)
 
-(Replaces the T07 HANDOFF inherited through the branch chain; T07's own
-record lives at commit 63a18e8.)
+(Replaces the T08 HANDOFF inherited through the branch chain; T08's own
+record lives at commit 0acc10a.)
 
 ## STATUS
 
-DONE - all DoD checks pass (evidence below). No STOP-gate hit. Utilities
-only: no components, no page wiring, no store changes, no frozen-core
-.js edits, no page HTML, no Rust touched.
+DONE at the mechanism level - all gates pass (evidence below). No
+STOP-gate hit. The DoD items that require a real migrated page are
+structurally pending T13/T14 and are covered at the logic level only
+(listed under REMAINING).
 
-Note on ticket numbering: T07's HANDOFF listed "T08: store actions /
-uiPrefs persistence" under REMAINING - that reflected its author's guess
-at the ticket map, not this ticket. This T08 is lib/canvas per the
-chunk-1 partition; store actions remain unowned by this branch.
+Scope fence honored: exactly ONE line added to each of the four legacy
+pages (verified: `git diff 0acc10a..HEAD --numstat -- '*.html'` shows
+1 insertion, 0 deletions per page); no page migration; the default flip
+is a single commented line in ui-switch.js, left unmade.
 
-## COMPLETED (commits on `ticket/T08-lib-canvas`, on top of 63a18e8)
+## COMPLETED (commits on `ticket/T38-dual-ui-switch`, on top of 0acc10a)
 
-- `db7cbc1` layout.ts + layout.test.ts: typed wrapper over the frozen
-  panel_layout.js; LABEL_W pinned; PanelGeometry/LaneGeometry producers.
-- `9e0254f` dpr.ts + dpr.test.ts: resize-only-on-geometry-change (F3);
-  pure planBackingStore + createCanvasSizer binding.
-- `a2c74c9` stroke.ts + stroke.test.ts: pixel-bounded, style-batched
-  stroke building (the F1 fix direction as named contracts).
-- `73c518e` downsample.ts, palette.ts, their tests, index.ts barrel.
-- `ff69b43` coverage-gap tests -> 100% stmts/branch/funcs/lines on
-  src/lib/canvas/**.
+- `10aa900` ui-switch.js (the whole mechanism) + vite.config.ts:
+  static-copy list gains ui-switch.js; vitest include widened to
+  `tests/**/*.test.ts` (non-core ui/-root scripts test under tests/).
+- `1042add` the sanctioned single edit: one
+  `<script src="ui-switch.js"></script>` line in each legacy page's
+  <head> (index.html, viewer.html, flamegraph.html, tokio_stats.html),
+  placed in <head> so a `?ui=new` dispatch replaces the page before any
+  body script runs.
+- `e890916` tests/ui_switch.test.ts: 33 vitest cases over the pure
+  decision logic (createRequire pattern, as tests/core/).
+- `044ae7e` ui/README.md: "Dual-UI switch" section - convention,
+  precedence, control id, T13/T14/T41 registration recipe.
 - (final commit): this HANDOFF.
 
-## WHAT WAS BUILT (and the decisions inside it)
+## MECHANISM SUMMARY (for consumers T13/T14/T41/T21, and T12)
 
-All under `dial9-viewer/ui/src/lib/canvas/`, tests colocated. The
-barrel `index.ts` is the import surface for future canvas components;
-only the modules behind it import the frozen core's drawing helpers.
+- Routing: `?ui=new` on the canonical URL (shared decision). Precedence:
+  explicit `?ui=` param > localStorage `dial9-ui-preference` ("new" |
+  "legacy"; reads wrapped in try/catch - failure = no preference) >
+  `DEFAULT_UI` in ui-switch.js ("legacy"; THE FLIP is that one commented
+  line).
+- Registry: `NEW_UI_ENTRIES` in ui-switch.js maps canonical page ->
+  new-entry dist path. EMPTY today. Registering a migrated page is one
+  line there (plus updating the registry expectation in
+  tests/ui_switch.test.ts, which pins today's empty state). Unregistered
+  page = no redirect AND no control (a switch to nowhere never renders).
+- Raw switch: query string preserved everywhere (URLSearchParams
+  re-serialization, repeated trace= params intact - N10) except the
+  script-owned `ui` param: removed when targeting new (the entry path
+  selects it), pinned `ui=legacy` when targeting legacy (so the
+  canonical page cannot bounce back even with storage unavailable or a
+  stale "new" preference). Hash always dropped, both directions.
+- Control: fixed bottom-right pill, `id="d9-ui-switch"` (stable, for the
+  T12 census), textContent-only rendering, hrefs built via
+  URLSearchParams (no URL content interpolated into HTML). Clicking it
+  writes the localStorage preference (best-effort).
+- New-UI entries: load ui-switch.js and call
+  `window.D9UiSwitch.mount({ side: "new" })`; canonical page resolved by
+  reverse registry lookup on location.pathname, `page:` option overrides.
+  The new side never auto-dispatches; only canonical URLs dispatch.
+- Guard: a self-registration (page -> same path) is treated as
+  unregistered to prevent a location.replace reload loop.
+- Switch targets are built root-absolute ("/" + path): assumes the UI is
+  served at the server root, true for `dial9 serve` and the dev-server.
 
-### layout.ts (architecture 2.3 N4; ADR-0004 section 5)
+## REMAINING (structurally pending later tickets - NOT blockers)
 
-- `timePanelLayout({pw, scrollbarW?, viewStart, viewEnd})` -> the frozen
-  core's TimePanelLayout with labelW pinned to the exported LABEL_W=100.
-  The wrapper deliberately has NO labelW parameter, so the historical
-  200px-gutter bug cannot be rebuilt through this API.
-- PURE, unlike viewer.html's timePanelLayout(panel, scrollbarW): callers
-  pass measured widths in, so DOM reads can batch once per frame (F3).
-  drawW <= 0 is surfaced, not masked (caller early-returns, legacy
-  contract).
-- `panelGeometry(...)` and `laneStackGeometry(workerIds, laneHeight)`
-  produce the types/state.d.ts geometry shapes; layout.ts is their
-  single producer as that file's comment mandates.
+- DoD "every page with a migrated version shows the switch on BOTH
+  versions": no migrated version exists yet; the legacy side hides the
+  control by design until T13/T14/T41 register entries. Verified now at
+  the logic level (tests).
+- DoD "round-trip switch keeps the same trace loaded on all pages":
+  covered as a logic-level round-trip test; browser round-trip needs a
+  real new entry (T13 first).
+- DoD "no view state leaks across (zoom in new viewer, switch, legacy
+  opens default view)": needs the migrated viewer (chunk 2 / T21); hash
+  dropping is unit-tested in both directions now.
+- T12 census: assert presence of `<script src="ui-switch.js">` in the
+  four legacy pages and/or `#d9-ui-switch` when a registration exists.
+- The default flip (DEFAULT_UI -> "new"): deliberately left unmade,
+  maintainer decision; it is one commented line in ui-switch.js.
 
-### dpr.ts (F3: backing stores resize only on geometry change)
+## PARITY BASELINE NOTE (per the ticket's own note)
 
-- Pure decision: `planBackingStore(prev, next)` - exact compare of
-  {cssWidth, cssHeight, dpr} against the last-APPLIED geometry. Never
-  reads canvas.width back (integer truncation would make fractional
-  sizes always look changed). Device size = round(css * dpr) - the
-  legacy code let the canvas setter truncate, undersizing up to 1px.
-- Thin binding: `createCanvasSizer(canvas).ensure(w, h, dpr?)` applies
-  the plan; unchanged path performs ZERO canvas writes besides an
-  absolute `setTransform(dpr,0,0,dpr,0,0)` (setTransform, not scale(),
-  so repeated calls never compound; needed because the unchanged path no
-  longer gets the implicit state reset of a width= write).
-- The unchanged path does NOT clear the canvas (a resize used to clear
-  as a side effect). Renderers must paint their full area - every legacy
-  panel starts with a background fill, so this holds; documented on
-  ensure().
-- Typed against a minimal structural `DprCanvas<Ctx>`; the test file
-  carries a compile-time proof that HTMLCanvasElement satisfies it, and
-  drives the binding with a recording stub (write-count assertions).
-- Context is fetched once and cached; getContext returning null throws
-  (no silent no-op rendering).
-
-### stroke.ts (F1: stroke() was 76% of pan CPU; ADR section 5 rule 1)
-
-- `downsampleSeriesToColumns(points, {xOf, yOf, weightOf?, x0?, drawW})`
-  -> at most one vertex per pixel column, BEFORE pathing. Representative
-  policy mirrors the core's pixelDownsampleSpans: largest `weightOf`
-  wins; default is last-in-column (step carry-out). Input must be sorted
-  ascending by xOf - out-of-order THROWS instead of garbling the line
-  (same contract the core documents but does not check). Off-view x
-  clamps into the edge columns so the legacy lowerBound-1 pre-view
-  sample keeps the line's entry height.
-- `expandSteps(vertices)`: step-function knees inserted only between
-  vertices >= 2 columns apart (sub-pixel steps skipped), bound
-  <= 2 * ceil(drawW) - still O(width). The strict one-vertex-per-column
-  guarantee (DoD) is series(); stepSeries() carries the documented 2x
-  bound for zoomed-in step charts (the queue chart's shape at sparse
-  sample counts cannot be represented under a 1x bound; both regimes
-  stay O(width), never O(samples)).
-- `makeStrokeBatcher()`: `.series()/.stepSeries()` (downsample + append
-  as a subpath), `.polyline()` (escape hatch, caller owns the bound),
-  `.tick(style, x, y1, y2)` (vertical markers deduped per pixel column,
-  first wins - the open-ended-poll dashed-edge storm becomes O(width)),
-  `.batches()` in first-use order.
-- `drawStrokeBatches(ctx, batches, styleOf)`: per style ONE
-  strokeStyle/lineWidth assignment, at most ONE setLineDash, ONE
-  beginPath, ONE stroke - however many subpaths. Dash state restored to
-  solid on return (no leakage into subsequent fills/strokes). ctx typed
-  as structural StrokePathContext -> Node-testable with a recorder.
-
-### downsample.ts / palette.ts
-
-- downsample.ts: typed re-exports of the core fill primitives
-  (pixelDownsampleSpans, makeBarCoalescer + BarCoalescer type,
-  pixelCoverage) with their sorted-input contracts in the docs. Tests
-  are wiring smoke checks only; core behavior stays covered by its own
-  suites.
-- palette.ts: re-exports pollHeatmapColor / pollHeatmapColorQuantized /
-  flamegraphColor (exact core export names; the ticket's "pollColor" is
-  NOT a core export - it is viewer.html inline lore, ported here):
-  `pollColor(startNs, endNs)` = quantized duration color (issue #450
-  bucketing contract, tested), `makeColorDimmer(factor=0.4)` = the
-  memoized channel-multiply behind pollColorDim (throws on non-#rrggbb
-  and factor outside [0,1]), `SPAN_COLORS` + `makeColorAssigner()` = the
-  stable name->color assignment behind spanColor/ceColor (one assigner
-  per namespace = the legacy two-maps behavior).
-
-## INTEROP (the ticket asked this documented)
-
-src/ modules import the frozen core with plain ESM named imports and a
-root-relative specifier, e.g.
-`import { makeTimePanelLayout } from "../../../panel_layout.js"`:
-
-- tsc: matched by the T05 ambient wildcard declarations
-  (`declare module "*/panel_layout.js"` etc.); clean under
-  verbatimModuleSyntax because the value/type split is explicit
-  (`import type` for types).
-- Vitest: vite-node's CJS interop resolves the named exports from the
-  browser-global + CJS-guard files as-is (verified empirically before
-  building; 59 tests exercise the path).
-- Vite build: unaffected today - nothing in the rollup input graph
-  imports lib/canvas yet, so dist/ is unchanged. When a page ticket
-  first pulls the barrel in, Vite's commonjs interop bundles the core
-  file into the page chunk (the architecture 2.1 plan); the same import
-  form is the one probe.ts already uses.
-- createRequire stays a tests/core-only pattern (it would break browser
-  bundles if used in src/).
-
-## DoD EVIDENCE
-
-All run in dial9-viewer/ui (npm ci done):
-
-1. `npx tsc --noEmit`: clean (exit 0).
-2. `npm run test`: 15 files, 201 tests, all pass (142 inherited + 59
-   new: layout 9, dpr 14, stroke 21, downsample 3, palette 12 - counts
-   after the coverage-gap commit).
-3. DoD axes, each a named test:
-   - layout invariant: "known case: pw=1200, sb=17 -> drawW=1083, axis
-     spans [100, 1183]" + no-scrollbar case + gutter-cannot-diverge
-     invariant (layout.test.ts).
-   - stroke batcher pixel bound: seeded-random property test, 50 rounds
-     of up to 10k points at drawW 1..2000, asserts vertices
-     <= ceil(drawW) (stroke.test.ts "DoD: arbitrary random series...")
-     plus the per-style variant through makeStrokeBatcher.
-   - DPR no-op: planBackingStore identical-geometry case + binding test
-     asserting ZERO canvas writes across repeated ensure() with a
-     recording stub (dpr.test.ts "DoD: unchanged geometry...").
-4. Coverage (`npx vitest run --coverage.enabled
-   --coverage.include='src/lib/canvas/**' src/lib/canvas`):
-   100% statements (152/152), 100% branches (75/75), 100% functions
-   (26/26), 100% lines (141/141).
-5. `npm run build`: dist listing unchanged - same 19 files as T07's
-   recorded listing (dev-probe chunk + 4 legacy pages + 12 legacy
-   scripts + 2 public assets). Local `vite build` deletes the tracked
-   dist/.gitkeep; restored via git checkout before committing
-   (pre-existing quirk, same as T06/T07).
-6. Not run: cargo build/nextest/clippy (no .rs touched, no trace-format
-   change; rust-embed embeds ui/dist, whose listing is unchanged - same
-   justification as T06/T07 per the AGENTS.md JS-only rule). No
-   test_*.js added, so no scripts/e2e-trace-tests.sh registration
-   needed (vitest CI picks the new suites up via the src/**/*.test.ts
-   include).
-
-## REMAINING
-
-None for T08. Intentionally left for later tickets:
-
-- Canvas COMPONENTS (components/canvas/*) consuming this barrel; the
-  renderer registry mapping slices -> panels (architecture 2.3).
-- A binary-search "first visible index" helper (viewer.html's
-  lowerBound/findFirstVisible lore) - callers of pixelDownsampleSpans
-  need a startIdx; that helper reads sorted trace invariants and belongs
-  next to the derived-data caches (F5 ticket / lib/trace), not in
-  lib/canvas.
-- Trailing right-edge extension of the queue step line
-  (`ctx.lineTo(pw, lastY)` in legacy): a one-vertex caller concern via
-  polyline(); left to the queue panel component.
+This ticket intentionally breaks the T02 "byte-identical to
+pre-migration" baseline for the four legacy pages by exactly one line
+each - the sanctioned single edit they ever receive. The parity baseline
+is re-recorded once from this state. Source-vs-dist byte identity is
+UNAFFECTED and re-verified (evidence below): static-copy still ships the
+edited sources verbatim.
 
 ## BLOCKERS
 
 None.
 
-## NOTES FOR THE INTEGRATOR / SUCCESSORS
+## EVIDENCE (gates, all run in this worktree)
 
-- The stroke DoD bound is per series()/tick() call: series() emits
-  <= ceil(drawW) vertices per subpath, tick() <= 1 subpath per column
-  per style. polyline() is the unchecked escape hatch - reviewers should
-  treat unexplained polyline() calls in components as a smell.
-- drawStrokeBatches resets dash to solid but leaves
-  strokeStyle/lineWidth at the last style's values - callers set their
-  own state before further stroking, as all legacy code already does.
-- createCanvasSizer assumes it is the ONLY writer of its canvas's size:
-  one sizer per canvas, created once at component mount, not per frame
-  (a fresh sizer forgets the applied geometry and resizes once).
-- The unchanged-geometry path does not clear the canvas; components must
-  fully repaint (all legacy panels do - background fill first).
-- LOCKFILE: unchanged by this branch (T07's @vitest/coverage-v8 note
-  still applies against T12's playwright addition).
+- `npx tsc --noEmit`: clean.
+- `npm run test`: 16 files, 234 tests passed (201 inherited + 33 new in
+  tests/ui_switch.test.ts).
+- `npm run build`: dist/ contains ui-switch.js + the four edited pages
+  ("Copied 17 items", was 16).
+- Byte identity source-vs-dist (`cmp`): IDENTICAL for index.html,
+  viewer.html, flamegraph.html, tokio_stats.html, ui-switch.js.
+- `CARGO_TARGET_DIR=<main repo>/target cargo build -p dial9-viewer`:
+  Finished (rust-embed picks up the new file).
+- Dev-server smoke (PORT=3031, dev-server feature): served
+  flamegraph.html line 7 = `<script src="ui-switch.js"></script>`;
+  GET /ui-switch.js -> HTTP 200, 12731 bytes; all four served pages +
+  ui-switch.js byte-identical (`cmp`) to their sources. Server killed
+  after (curl confirms down).
+- No Rust files touched (JS/HTML-only per AGENTS.md: nextest/stress/
+  clippy/fmt not required; cargo build embed check done).
+
+## OPEN QUESTIONS
+
+None blocking. One recorded choice: on legacy pages with no registry
+entry, ui-switch.js is a deliberate no-op (~13 KB script parse); that is
+the cost of the uniform one-line include on all four pages, including
+tokio_stats.html, which has no migration ticket in chunk 1.
