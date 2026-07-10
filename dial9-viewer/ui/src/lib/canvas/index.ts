@@ -57,3 +57,12 @@ export {
   pollHeatmapColor,
   pollHeatmapColorQuantized,
 } from "./palette.js";
+
+// flamegraph.ts - the frozen flamegraph widget (canvas rendering, zoom,
+// search, tooltip, export menu), typed (T13).
+export { createFlamegraph, filterCpuSamples } from "./flamegraph.js";
+export type {
+  FlamegraphDataSample,
+  FlamegraphInstance,
+  FlamegraphSetDataOptions,
+} from "./flamegraph.js";

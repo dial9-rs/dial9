@@ -57,7 +57,7 @@
   // page is what makes `?ui=new` work on its canonical URL and what makes the
   // "Switch to new UI" control appear on its legacy version.
   var NEW_UI_ENTRIES = {
-    // (no migrated pages yet)
+    "flamegraph.html": "new/flamegraph.html", // T13
   };
 
   // THE DEFAULT FLIP (ADR-0004 section 8, stage 2 -> stage 3): change

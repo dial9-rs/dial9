@@ -186,6 +186,32 @@ export type {
   WorkerWake,
 } from "./analysis.js";
 
+// creds.ts - the frozen creds.js store, typed (T13). Trace fetches carry
+// its x-dial9-aws-* headers.
+export { Dial9Creds } from "./creds.js";
+export type {
+  CredentialCheckResult,
+  Dial9CredsApi,
+  SetCredentialsInput,
+  StoredCredentials,
+} from "./creds.js";
+
+// api_format.ts - aggregated-mode (`?api=1`) display/format helpers,
+// re-exported from the legacy-shared flamegraph_api.js (+
+// formatHumanDuration from the frozen format.js) so both UI generations
+// run one implementation (T13).
+export {
+  coveragePercent,
+  formatCoverageBadge,
+  formatHumanDuration,
+  hostFacetOptions,
+  nextMaxFiles,
+  nsToPickerUtc,
+  pickerUtcToNs,
+  shouldAutoStopRefining,
+} from "./api_format.js";
+export type { FacetOption, LegacyCoverage } from "./api_format.js";
+
 // aggregates.ts - tier-1 server aggregate endpoints client (T18):
 // /api/flamegraph + /api/tokio-stats typed requests, the refine-polling
 // helper, and the coverage full/partial/none fallback signal.
