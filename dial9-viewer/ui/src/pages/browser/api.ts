@@ -17,6 +17,9 @@ export interface ApiConfig {
   default_prefix?: string | undefined;
   aggregation_enabled?: boolean | undefined;
   supports_byo_credentials?: boolean | undefined;
+  /** Bucket-picker filter substring (T15, C6 amendment); may be absent on
+   * servers predating the field - the client falls back to "dial9". */
+  bucket_filter?: string | undefined;
 }
 
 /** GET /api/browse response fields the page reads (#582; features/01 F2). */

@@ -123,7 +123,15 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
       if (fromDate) state.from = Math.floor(fromDate.getTime() / 1000);
       if (toDate) state.to = Math.floor(toDate.getTime() / 1000);
     }
-    const qs = window.Dial9UrlState.serialize(state);
+    let qs = window.Dial9UrlState.serialize(state);
+    // C6 (T15 amendment): a page-load `bucket_filter=` override must
+    // survive URL syncs, but Dial9UrlState (shared verbatim with the
+    // legacy page) doesn't know the param - re-append it here. An empty
+    // override ("no filtering") is meaningful and serialized too.
+    const filterOverride = s.config.bucketFilterOverride;
+    if (filterOverride != null) {
+      qs += (qs ? "&" : "") + "bucket_filter=" + encodeURIComponent(filterOverride);
+    }
     // Keep the pathname explicit: a bare "?qs" would resolve against
     // <base href="/"> and rewrite this off-root page's path to "/". The
     // legacy page (served at the root) got the same result implicitly.

@@ -14,6 +14,7 @@
 
 import { createStore, type Store } from "../../store/store.js";
 import type { HostRow } from "../../lib/canvas/heatmap.js";
+import { DEFAULT_BUCKET_FILTER } from "./bucket-filter.js";
 import type { RawSort } from "./raw-rows.js";
 
 /** One object row from GET /api/browse (`objects[]`). */
@@ -90,6 +91,12 @@ export interface ConfigSlice {
   aggregationEnabled: boolean;
   /** Server declared a default prefix; Search waits for one (D9). */
   serverHasPrefix: boolean;
+  /** Bucket-picker filter substring in effect (T15, C6 amendment):
+   * URL override > /api/config `bucket_filter` > "dial9". "" = no filter. */
+  bucketFilter: string;
+  /** The page-URL `bucket_filter=` override (null = absent). Non-null wins
+   * over the server value and rides every URL sync (bucket-filter.ts). */
+  bucketFilterOverride: string | null;
 }
 
 /** DOM-input mirror for renders that depend on typed values (see header). */
@@ -181,7 +188,12 @@ export type BrowserStore = Store<BrowserState>;
 export function initialBrowserState(): BrowserState {
   return {
     ui: { tab: "browse", useLocalTz: false },
-    config: { aggregationEnabled: false, serverHasPrefix: false },
+    config: {
+      aggregationEnabled: false,
+      serverHasPrefix: false,
+      bucketFilter: DEFAULT_BUCKET_FILTER,
+      bucketFilterOverride: null,
+    },
     form: { prefix: "" },
     search: {
       quickRange: null,

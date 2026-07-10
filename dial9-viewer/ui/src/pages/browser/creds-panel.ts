@@ -11,6 +11,7 @@
 // open, status line, bucket picker).
 
 import { assertInScheduledRender } from "../../store/store.js";
+import { bucketMatchesFilter } from "./bucket-filter.js";
 import type { PageCtx } from "./ctx.js";
 
 export interface CredsPanel {
@@ -19,9 +20,14 @@ export interface CredsPanel {
 }
 
 export function mountCredsPanel({ store, els, actions }: PageCtx): CredsPanel {
-  // Buckets whose name contains "dial9" are the trace buckets - surfaced
-  // by default. Everything else is hidden unless "Show all" is on (C6).
-  const isTraceBucket = (n: string) => n.toLowerCase().includes("dial9");
+  // Buckets whose name matches the configured filter are the trace buckets
+  // - surfaced by default; everything else is hidden unless "Show all" is
+  // on (C6). T15 amendment: the predicate is config-driven (URL
+  // `bucket_filter=` override > /api/config > "dial9" - bucket-filter.ts)
+  // instead of the legacy hardcoded "dial9". An empty filter matches every
+  // bucket, so filtering is effectively off and the toggle disappears.
+  const isTraceBucket = (n: string) =>
+    bucketMatchesFilter(n, store.getState().config.bucketFilter);
 
   function setStatus(msg: string | null, kind: "ok" | "error" | null): void {
     store.update("creds", { status: { text: msg || "", kind } });
@@ -78,9 +84,9 @@ export function mountCredsPanel({ store, els, actions }: PageCtx): CredsPanel {
     }
   }
 
-  // Auto-select when there's exactly one dial9 bucket - the common case -
-  // but not in the "show all" view, where the user is browsing (legacy
-  // renderBucketPicker tail).
+  // Auto-select when there's exactly one filter-matching bucket - the
+  // common case - but not in the "show all" view, where the user is
+  // browsing (legacy renderBucketPicker tail).
   function autoSelectSingleMatch(): void {
     const s = store.getState().creds;
     if (s.showAll) return;
@@ -107,14 +113,17 @@ export function mountCredsPanel({ store, els, actions }: PageCtx): CredsPanel {
   }
 
   // Render the bucket picker from the last listing (legacy
-  // renderBucketPicker): dial9 trace buckets by default, every visible
-  // bucket when "Show all" is on, a toggle when the two lists differ.
+  // renderBucketPicker): filter-matching trace buckets by default, every
+  // visible bucket when "Show all" is on, a toggle when the two lists
+  // differ. The filter name renders into the messages ("dial9" by default,
+  // byte-identical to the legacy strings).
   function renderPicker(
     buckets: readonly string[],
     showAll: boolean,
     selectedBucket: string | null,
   ): void {
     els.credsBuckets.textContent = "";
+    const filter = store.getState().config.bucketFilter;
 
     const all = [...buckets].sort((a, b) => a.localeCompare(b));
     const matches = all.filter(isTraceBucket);
@@ -124,14 +133,14 @@ export function mountCredsPanel({ store, els, actions }: PageCtx): CredsPanel {
       if (all.length === matches.length) return;
       const t = document.createElement("button");
       t.textContent = showAll
-        ? `Show dial9 only (${matches.length})`
+        ? `Show ${filter} only (${matches.length})`
         : `Show all (${all.length})`;
       t.style.cssText = "font-style:italic;opacity:0.85";
       t.addEventListener("click", () => {
         const nowShowAll = !store.getState().creds.showAll;
         store.update("creds", { showAll: nowShowAll });
         // Legacy re-rendered the picker, whose tail auto-selects a single
-        // dial9 match when returning to the filtered view.
+        // filter match when returning to the filtered view.
         if (!nowShowAll) autoSelectSingleMatch();
       });
       els.credsBuckets.appendChild(t);
@@ -141,7 +150,7 @@ export function mountCredsPanel({ store, els, actions }: PageCtx): CredsPanel {
       els.credsBuckets.append(
         document.createTextNode(
           buckets.length
-            ? "No dial9 trace buckets visible to these credentials."
+            ? `No ${filter} trace buckets visible to these credentials.`
             : "No buckets visible to these credentials.",
         ),
       );
@@ -164,14 +173,16 @@ export function mountCredsPanel({ store, els, actions }: PageCtx): CredsPanel {
   }
 
   // Render subscription (registered at mount; everything renders from the
-  // creds slice, so the pre-init state - hidden button, closed panel - is
-  // just the initial state).
+  // creds slice - plus the config slice's bucketFilter, which the picker
+  // predicate/messages read - so the pre-init state - hidden button,
+  // closed panel - is just the initial state).
   let lastPicker: {
     buckets: readonly string[];
     showAll: boolean;
     selectedBucket: string | null;
+    bucketFilter: string;
   } | null = null;
-  store.subscribe(["creds"], (state) => {
+  store.subscribe(["creds", "config"], (state) => {
     assertInScheduledRender("creds-panel render");
     const c = state.creds;
     els.credsBtn.style.display = c.enabled ? "" : "none";
@@ -185,12 +196,14 @@ export function mountCredsPanel({ store, els, actions }: PageCtx): CredsPanel {
       !lastPicker ||
       lastPicker.buckets !== c.buckets ||
       lastPicker.showAll !== c.showAll ||
-      lastPicker.selectedBucket !== c.selectedBucket
+      lastPicker.selectedBucket !== c.selectedBucket ||
+      lastPicker.bucketFilter !== state.config.bucketFilter
     ) {
       lastPicker = {
         buckets: c.buckets,
         showAll: c.showAll,
         selectedBucket: c.selectedBucket,
+        bucketFilter: state.config.bucketFilter,
       };
       renderPicker(c.buckets, c.showAll, c.selectedBucket);
     }

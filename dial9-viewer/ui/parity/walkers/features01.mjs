@@ -158,6 +158,50 @@ export const registry = {
     return 'status "Credentials cleared"; fields and picker wiped';
   },
 
+  C6: async ({ page, pageUrl, side }) => {
+    // Bucket picker (T15-amended row). Default filter "dial9": the seeded
+    // `demo-traces` bucket does not match, so the filtered view is empty
+    // with a "Show all (1)" toggle revealing it (#607 behavior, both
+    // pages). The MIGRATED page additionally makes the predicate
+    // config-driven: a `?bucket_filter=demo` page override surfaces
+    // demo-traces as a match directly (and auto-selects the single match).
+    await gotoBrowserPage(page, pageUrl);
+    await applyTestCreds(page);
+    const picker = page.locator("#creds-buckets");
+    expect(
+      /No dial9 trace buckets visible/.test(await picker.textContent()),
+      "default dial9 filter did not report an empty filtered view",
+    );
+    const toggle = picker.locator("button", { hasText: "Show all (1)" });
+    expect((await toggle.count()) === 1, "Show all toggle missing");
+    await toggle.click();
+    await page.waitForSelector("#creds-buckets button:has-text('demo-traces')", {
+      timeout: 5_000,
+    });
+    if (side !== "new") {
+      return 'dial9 filter empty; "Show all (1)" revealed demo-traces (toggle path)';
+    }
+    // New page only: the config-driven override. Credentials persist in
+    // sessionStorage (C9), so the reload re-lists buckets in the
+    // background; with creds active the bucket input starts EMPTY (no
+    // server-default prefill), letting the auto-select below prove itself.
+    await page.goto(`${pageUrl}?bucket_filter=demo`);
+    await page.waitForFunction(
+      () => document.getElementById("creds-btn-label")?.textContent.includes("✓"),
+      { timeout: 15_000 },
+    );
+    await page.click("#creds-btn");
+    await page.waitForSelector("#creds-buckets button.match:has-text('demo-traces')", {
+      timeout: 10_000,
+    });
+    // Exactly one match in the filtered view -> auto-select kicks in.
+    await page.waitForFunction(
+      () => document.getElementById("bucket-input").value === "demo-traces",
+      { timeout: 10_000 },
+    );
+    return "toggle path ok; ?bucket_filter=demo surfaced + auto-selected demo-traces";
+  },
+
   C8: async ({ page, pageUrl }) => {
     await gotoBrowserPage(page, pageUrl);
     await page.click("#creds-btn");
