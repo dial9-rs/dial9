@@ -21,12 +21,11 @@ export async function textOf(page, selector) {
 }
 
 /**
- * Load the browser page and wait for the bootstrap to settle: bucket/prefix
+ * Wait for the browser page's load-time bootstrap to settle: bucket/prefix
  * prefilled from /api/config, prefix chips discovered, Search enabled, and
  * the load-time auto-search no longer in flight.
  */
-export async function gotoBrowserPage(page, pageUrl) {
-  await page.goto(pageUrl);
+export async function waitBrowserBootstrap(page) {
   await page.waitForSelector("#prefix-suggestions button", { timeout: 15_000 });
   await page.waitForSelector("#search-btn:not([disabled])", { timeout: 15_000 });
   // The auto-search fires on load; let it settle so a walker's own search
@@ -35,6 +34,12 @@ export async function gotoBrowserPage(page, pageUrl) {
     () => !document.getElementById("browse-status").textContent.includes("Searching"),
     { timeout: 15_000 },
   );
+}
+
+/** Load the browser page and wait out the bootstrap. */
+export async function gotoBrowserPage(page, pageUrl) {
+  await page.goto(pageUrl);
+  await waitBrowserBootstrap(page);
 }
 
 /**
