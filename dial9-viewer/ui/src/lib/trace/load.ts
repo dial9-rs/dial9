@@ -22,12 +22,9 @@ import {
   canStreamDecode,
   deduplicateSamples,
   deriveBlockInPlaceGaps,
-  fetchTraceStream,
   fetchTraces,
-  fetchTracesStream,
   formatFrame,
   parseTrace,
-  parseTraceStream,
   symbolizeChain,
 } from "../../../trace_parser.js";
 import type {
@@ -35,6 +32,7 @@ import type {
   ParseOptions,
   ParsedTrace,
 } from "../../../trace_parser.js";
+import { streamTraceWithCapture } from "./stream.js";
 
 // Typed pass-throughs of the core load/parse/symbol surface.
 export {
@@ -116,7 +114,8 @@ export function parseTraceBuffer(
  * segment overlaps the in-flight downloads of the rest (issue #595). The
  * gunzipped chunks are captured while parsing so the full buffer is still
  * available afterwards for in-memory Set/Clear-Range re-parsing (which
- * never re-fetches).
+ * never re-fetches). Mechanism lives in ./stream.ts (shared with the
+ * worker body, which must not import this module - see stream.ts header).
  */
 export async function loadTraceStreamed(
   urls: string | readonly string[],
@@ -124,30 +123,8 @@ export async function loadTraceStreamed(
 ): Promise<LoadedTrace> {
   const list = Array.isArray(urls) ? (urls as readonly string[]) : [urls as string];
   const { fetchOpts, parseOpts } = splitOptions(opts);
-  const stream =
-    list.length === 1
-      ? await fetchTraceStream(list[0]!, fetchOpts)
-      : fetchTracesStream([...list], fetchOpts);
-  const captured: Uint8Array[] = [];
-  const capturing: AsyncIterable<Uint8Array> = {
-    async *[Symbol.asyncIterator]() {
-      for await (const chunk of stream) {
-        captured.push(chunk);
-        yield chunk;
-      }
-    },
-  };
-  const trace = await parseTraceStream(capturing, parseOpts);
-  // Reassemble the full buffer from the captured chunks.
-  let total = 0;
-  for (const c of captured) total += c.length;
-  const buffer = new Uint8Array(total);
-  let off = 0;
-  for (const c of captured) {
-    buffer.set(c, off);
-    off += c.length;
-  }
-  return { trace, buffer: buffer.buffer, mode: "stream" };
+  const { trace, buffer } = await streamTraceWithCapture(list, fetchOpts, parseOpts);
+  return { trace, buffer, mode: "stream" };
 }
 
 /**
