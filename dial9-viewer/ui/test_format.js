@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 "use strict";
 
-// Unit tests for formatHumanDuration, formatHumanBytes, and formatFieldValue.
+// Unit tests for shared viewer value formatting.
 //
 // formatHumanDuration takes a nanosecond value and returns a human-friendly
 // string that picks a sensible unit (ns, µs, ms, s, m, h, d). This fixes the
@@ -13,6 +13,8 @@ const {
   formatHumanDuration,
   formatHumanBytes,
   formatFieldValue,
+  formatSpecValue,
+  formatSpecTickValue,
 } = require("./format.js");
 
 let failed = 0;
@@ -93,9 +95,9 @@ assertEq(formatFieldValue(1_500, "us"), "1.50ms", "us unit");
 assertEq(formatFieldValue(1.5, "ms"), "1.50ms", "ms unit");
 assertEq(formatFieldValue(90, "s"), "1m 30.0s", "s unit");
 assertEq(formatFieldValue(12_884_901_888, "bytes"), "12.00 GiB", "bytes unit");
-// Only the canonical short forms are accepted; aliases render raw.
-assertEq(formatFieldValue(1_500, "µs"), "1500", "mu-char µs is not accepted");
-assertEq(formatFieldValue(512, "b"), "512", "b alias is not accepted");
+// Only canonical units receive scaling; other units remain literal.
+assertEq(formatFieldValue(1_500, "µs"), "1500 µs", "mu-char µs is literal");
+assertEq(formatFieldValue(512, "b"), "512 b", "b is a literal custom unit");
 // Decoded I64 fields arrive as BigInt and Varint fields as strings.
 assertEq(formatFieldValue(1_500_000n, "ns"), "1.50ms", "BigInt value");
 assertEq(formatFieldValue("1500000", "ns"), "1.50ms", "string value");
@@ -104,11 +106,19 @@ assertEq(
   "12.00 GiB",
   "BigInt bytes",
 );
-// No or unknown unit falls back to String(value) — the pre-existing behavior.
+// Missing units have no suffix.
 assertEq(formatFieldValue(42), "42", "no unit");
-assertEq(formatFieldValue(42, "furlongs"), "42", "unknown unit");
+assertEq(formatFieldValue(42, "furlongs"), "42 furlongs", "custom unit");
 assertEq(formatFieldValue(42n, undefined), "42", "BigInt without unit");
 assertEq(formatFieldValue("hello", undefined), "hello", "string without unit");
+
+// ── formatSpecValue ──
+assertEq(formatSpecValue(0.48, "cores"), "0.48 cores", "custom unit is shown");
+assertEq(formatSpecValue(12, "bananas"), "12 bananas", "custom unit is generic");
+assertEq(formatSpecValue(1_500_000, "ns"), "1.50ms", "scaled unit is not duplicated");
+assertEq(formatSpecValue(12.34, "%"), "12.3%", "percent has intrinsic formatting");
+assertEq(formatSpecTickValue(0.48, "cores"), "0.48", "custom axis unit is omitted from ticks");
+assertEq(formatSpecTickValue(1_500_000, "ns"), "1.50ms", "scaled axis unit remains meaningful");
 
 // ── Summary ──
 console.log(`\n${passed} passed, ${failed} failed`);

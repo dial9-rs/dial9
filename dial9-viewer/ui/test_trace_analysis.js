@@ -20,6 +20,8 @@ const {
   getTraceTimeRange,
   hasCpuProfileSamples,
   buildProcessCpuUsageSeries,
+  buildSchemaDrivenTimeSeriesViews,
+  evaluateViewSpecExpression,
   analyzeAllocations,
   makeBarCoalescer,
   computePollWakes,
@@ -76,7 +78,6 @@ async function main() {
 
   function testResourceOnlyTraceRangeUsesProcessResourceUsageEvents() {
     const range = getTraceTimeRange([], [], [
-      { name: "OtherEvent", timestamp: 50, fields: {} },
       { name: "ProcessResourceUsageEvent", timestamp: 300, fields: {} },
       { name: "ProcessResourceUsageEvent", timestamp: 100, fields: {} },
     ]);
@@ -84,6 +85,17 @@ async function main() {
       fail(`resource-only range should come from process resource usage events, got ${JSON.stringify(range)}`);
     }
     pass("Resource-only trace range uses process resource usage events");
+  }
+
+  function testCustomOnlyTraceRangeUsesAnyCustomEvent() {
+    const range = getTraceTimeRange([], [], [
+      { name: "TcpAcceptQueueEvent", timestamp: 400, fields: {} },
+      { name: "TcpAcceptQueueEvent", timestamp: 200, fields: {} },
+    ]);
+    if (!range || range.minTs !== 200 || range.maxTs !== 400 || range.durationNs !== 200) {
+      fail(`custom-only range should come from custom events, got ${JSON.stringify(range)}`);
+    }
+    pass("Custom-only trace range uses custom event timestamps");
   }
 
   function testProcessCpuUsageSeriesDerivesIntervals() {
@@ -149,14 +161,186 @@ async function main() {
     pass("Process CPU usage series skips invalid pairs");
   }
 
+  function testSchemaDrivenCpuUsageSeries() {
+    const customEvents = [
+      {
+        name: "ProcessResourceUsageEvent",
+        timestamp: 0,
+        fields: { user_cpu_ns: "100000000", system_cpu_ns: "50000000", max_rss_bytes: "1024" },
+        units: { user_cpu_ns: "ns", system_cpu_ns: "ns", max_rss_bytes: "bytes" },
+      },
+      {
+        name: "ProcessResourceUsageEvent",
+        timestamp: 1_000_000_000,
+        fields: { user_cpu_ns: "500000000", system_cpu_ns: "150000000", max_rss_bytes: "2048" },
+        units: { user_cpu_ns: "ns", system_cpu_ns: "ns", max_rss_bytes: "bytes" },
+      },
+    ];
+    const trace = {
+      customEvents,
+      allEvents: customEvents,
+      eventStreams: new Map([
+        ["ProcessResourceUsageEvent", { name: "ProcessResourceUsageEvent", units: customEvents[0].units, events: customEvents }],
+      ]),
+      segmentMetadata: new Map([["process.available_parallelism", "4"]]),
+    };
+    const result = buildSchemaDrivenTimeSeriesViews(trace);
+    if (result.diagnostics.length !== 0) fail(`expected no schema diagnostics, got ${JSON.stringify(result.diagnostics)}`);
+    if (customEvents[0].computed?.cpu_time_ns !== 150_000_000) {
+      fail(`expected computed cpu_time_ns on first event, got ${JSON.stringify(customEvents[0].computed)}`);
+    }
+    if (customEvents[0].computed_labels?.cpu_time_ns !== "CPU time") {
+      fail(`expected computed field display label, got ${JSON.stringify(customEvents[0].computed_labels)}`);
+    }
+    const cpu = result.views.find((view) => view.spec.id === "process.cpu");
+    if (!cpu) fail("expected process.cpu schema view");
+    const points = cpu.series[0].groups[0].points;
+    if (points.length !== 1) fail(`expected one CPU point, got ${points.length}`);
+    if (Math.abs(points[0].value - 0.5) > 1e-9) fail(`expected 0.5 cores, got ${points[0].value}`);
+    if (points[0].value_delta_ns !== 500_000_000 || points[0].wall_delta_ns !== 1_000_000_000) {
+      fail(`unexpected CPU deltas: ${JSON.stringify(points[0])}`);
+    }
+    const summaryContext = {
+      current: {},
+      previous: null,
+      point: null,
+      metadata: trace.segmentMetadata,
+      series: cpu.series,
+      ranges: { visible: { start: 0, end: 1_000_000_000 } },
+    };
+    const summaries = cpu.spec.summary.map((summary) => evaluateViewSpecExpression(summary.expr, summaryContext));
+    if (Math.abs(summaries[0] - 0.5) > 1e-9 || Math.abs(summaries[1] - 12.5) > 1e-9 || summaries[2] !== 0.5) {
+      fail(`unexpected CPU summaries: ${JSON.stringify(summaries)}`);
+    }
+    pass("Schema-driven CPU usage derives rate series and visible summaries");
+  }
+
+  function testViewSpecAggregateExpressions() {
+    const series = [{
+      spec: { id: "cores" },
+      groups: [{
+        points: [
+          { start: 0, end: 10, t: 10, value: 2, current: {}, previous: null },
+          { start: 10, end: 30, t: 30, value: 4, current: {}, previous: null },
+        ],
+      }],
+    }];
+    const context = {
+      current: {},
+      previous: null,
+      point: null,
+      metadata: new Map(),
+      series,
+      ranges: { visible: { start: 5, end: 20 } },
+    };
+    const weightedMean = {
+      op: "aggregate",
+      fn: "duration_weighted_mean",
+      over: { series: "cores", range: "visible" },
+      value: { field: "point.value" },
+    };
+    const aggregateMax = {
+      op: "aggregate",
+      fn: "max",
+      over: { series: "cores", range: "visible" },
+      value: { field: "point.value" },
+    };
+    const mean = evaluateViewSpecExpression(weightedMean, context);
+    if (Math.abs(mean - (50 / 15)) > 1e-9) fail(`unexpected duration-weighted mean: ${mean}`);
+    if (evaluateViewSpecExpression(aggregateMax, context) !== 4) fail("aggregate max should reduce visible points");
+    if (evaluateViewSpecExpression({ op: "max", args: [{ const: 3 }, { const: 7 }] }, context) !== 7) {
+      fail("scalar max should compare its arguments");
+    }
+    if (evaluateViewSpecExpression({ op: "sum", args: [{ const: 3 }, { const: 7 }] }, context) !== 10) {
+      fail("scalar sum should add its arguments");
+    }
+    if (evaluateViewSpecExpression({ op: "avg", args: [{ const: 3 }, { const: 7 }] }, context) !== 5) {
+      fail("scalar avg should average its arguments");
+    }
+    if (evaluateViewSpecExpression({ op: "clamp", args: [{ const: 12 }, { const: 0 }, { const: 10 }] }, context) !== 10) {
+      fail("scalar clamp should bound its value");
+    }
+    const scaledMean = evaluateViewSpecExpression({ op: "mul", args: [weightedMean, { const: 10 }] }, context);
+    if (Math.abs(scaledMean - (500 / 15)) > 1e-9) fail(`aggregate should compose with scalar arithmetic: ${scaledMean}`);
+    const empty = evaluateViewSpecExpression(weightedMean, {
+      ...context,
+      ranges: { visible: { start: 40, end: 50 } },
+    });
+    if (empty !== null) fail(`empty aggregate should be null, got ${empty}`);
+    pass("View expressions distinguish scalar math from collection aggregation");
+  }
+
+  function testSchemaDrivenMaxRssSeries() {
+    const customEvents = [
+      { name: "ProcessResourceUsageEvent", timestamp: 10, fields: { user_cpu_ns: "1", system_cpu_ns: "1", max_rss_bytes: "4096" } },
+      { name: "ProcessResourceUsageEvent", timestamp: 20, fields: { user_cpu_ns: "2", system_cpu_ns: "2", max_rss_bytes: "8192" } },
+    ];
+    const trace = { customEvents, allEvents: customEvents, segmentMetadata: new Map() };
+    const result = buildSchemaDrivenTimeSeriesViews(trace);
+    const rss = result.views.find((view) => view.spec.id === "process.max_rss");
+    if (!rss) fail("expected process.max_rss schema view");
+    const points = rss.series[0].groups[0].points;
+    if (points.length !== 2 || points[1].value !== 8192) {
+      fail(`unexpected Max RSS points: ${JSON.stringify(points)}`);
+    }
+    pass("Schema-driven Max RSS direct field series is built");
+  }
+
+  function testSchemaDrivenSocketAcceptQueueGroups() {
+    const customEvents = [
+      { name: "TcpAcceptQueueEvent", timestamp: 10, fields: { socket_cookie: "a", pending_connections: "4", backlog_limit: "10", local_addr: "127.0.0.1", local_port: "3000" } },
+      { name: "TcpAcceptQueueEvent", timestamp: 20, fields: { socket_cookie: "b", pending_connections: "2", backlog_limit: "10", local_addr: "127.0.0.1", local_port: "3001" } },
+      { name: "TcpAcceptQueueEvent", timestamp: 30, fields: { socket_cookie: "a", pending_connections: "8", backlog_limit: "10", local_addr: "127.0.0.1", local_port: "3000" } },
+    ];
+    const trace = { customEvents, allEvents: customEvents, segmentMetadata: new Map() };
+    const result = buildSchemaDrivenTimeSeriesViews(trace);
+    const socket = result.views.find((view) => view.spec.id === "socket.accept_queue");
+    if (!socket) fail("expected socket.accept_queue schema view");
+    const groups = socket.series[0].groups;
+    if (groups.length !== 2) fail(`expected two socket groups, got ${groups.length}`);
+    const a = groups.find((group) => group.values[0] === "a");
+    if (!a || a.points.length !== 2 || a.points[1].value !== 80) {
+      fail(`unexpected socket group a points: ${JSON.stringify(a)}`);
+    }
+    const thresholdValues = socket.series[0].spec.thresholds.map((threshold) => {
+      if (Object.prototype.hasOwnProperty.call(threshold, "value")) {
+        fail("threshold specs should use expr instead of value");
+      }
+      return evaluateViewSpecExpression(threshold.expr, { metadata: trace.segmentMetadata });
+    });
+    if (thresholdValues[0] !== 80 || thresholdValues[1] !== 100) {
+      fail(`unexpected socket thresholds: ${JSON.stringify(thresholdValues)}`);
+    }
+    pass("Schema-driven socket accept queue groups by socket cookie");
+  }
+
   testProfilerOnlyTraceRangeUsesCpuSamples();
   testProfilerOnlyTraceRangeExpandsSingleCpuSample();
   testResourceOnlyTraceRangeUsesProcessResourceUsageEvents();
+  testCustomOnlyTraceRangeUsesAnyCustomEvent();
   testProcessCpuUsageSeriesDerivesIntervals();
   testProcessCpuUsageSeriesSkipsInvalidPairs();
+  testSchemaDrivenCpuUsageSeries();
+  testViewSpecAggregateExpressions();
+  testSchemaDrivenMaxRssSeries();
+  testSchemaDrivenSocketAcceptQueueGroups();
 
   const trace = await parseTrace(fs.readFileSync(tracePath));
   const evts = trace.events;
+
+  function testParsedTraceExposesRawEventStreams() {
+    if (!(trace.eventStreams instanceof Map)) fail("trace.eventStreams should be a Map");
+    if (!Array.isArray(trace.allEvents)) fail("trace.allEvents should be an array");
+    if (trace.allEvents.length === 0) fail("trace.allEvents should contain decoded raw events");
+    if (!trace.eventStreams.has("PollStartEvent")) fail("eventStreams should include built-in PollStartEvent");
+    const stream = trace.eventStreams.get("PollStartEvent");
+    if (!stream || !Array.isArray(stream.events) || stream.events.length === 0) {
+      fail("PollStartEvent stream should contain raw events");
+    }
+    pass("Parsed trace exposes raw event streams for built-in events");
+  }
+
+  testParsedTraceExposesRawEventStreams();
 
   const wSet = new Set();
   evts.forEach((e) => {

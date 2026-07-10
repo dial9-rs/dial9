@@ -47,6 +47,9 @@ node dial9-viewer/ui/test_trace_analysis.js
 echo "--- Checking trace property oracle (Rust decode parity reference) ---"
 node dial9-viewer/ui/test_trace_properties.js
 
+echo "--- Checking viewer value formatting ---"
+node dial9-viewer/ui/test_format.js
+
 echo "--- Checking multi-component trace fetch (repeatable trace=) ---"
 node dial9-viewer/ui/test_fetch_traces.js
 

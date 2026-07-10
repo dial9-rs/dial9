@@ -142,6 +142,7 @@ test("INVARIANT: no time-based panel declares its own left gutter in CSS", () =>
   const PANELS = [
     "#timeline-header",
     "#span-panel",
+    ".schema-time-series-panel",
     "#task-detail",
     "#queue-chart",
   ];
