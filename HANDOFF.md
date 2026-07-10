@@ -126,7 +126,7 @@ root-relative specifier, e.g.
   (`import type` for types).
 - Vitest: vite-node's CJS interop resolves the named exports from the
   browser-global + CJS-guard files as-is (verified empirically before
-  building; 55 tests exercise the path).
+  building; 59 tests exercise the path).
 - Vite build: unaffected today - nothing in the rollup input graph
   imports lib/canvas yet, so dist/ is unchanged. When a page ticket
   first pulls the barrel in, Vite's commonjs interop bundles the core
@@ -140,8 +140,8 @@ root-relative specifier, e.g.
 All run in dial9-viewer/ui (npm ci done):
 
 1. `npx tsc --noEmit`: clean (exit 0).
-2. `npm run test`: 15 files, 201 tests, all pass (146 inherited + 55
-   new: layout 9, dpr 14, stroke 22, downsample 3, palette 12 - counts
+2. `npm run test`: 15 files, 201 tests, all pass (142 inherited + 59
+   new: layout 9, dpr 14, stroke 21, downsample 3, palette 12 - counts
    after the coverage-gap commit).
 3. DoD axes, each a named test:
    - layout invariant: "known case: pw=1200, sb=17 -> drawW=1083, axis
