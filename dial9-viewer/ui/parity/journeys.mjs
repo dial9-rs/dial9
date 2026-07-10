@@ -1,8 +1,9 @@
-// Journey scripts J1-J8 — the eight expert journeys from
+// Journey scripts J1-J9 — the eight expert journeys from
 // docs/ui-inventory/04-ux-findings.md ("Method": J1 cold triage, J2
 // worst-poll hunt, J3 locate a known moment, J4 follow a task, J5 flamegraph
 // work, J6 S3 browse, J7 queue buildup, J8 share a view), made concrete as
-// executable step lists (see lib/steps.mjs for the step vocabulary).
+// executable step lists (see lib/steps.mjs for the step vocabulary), plus
+// J9 (T19): restore a recorded legacy zoom link.
 //
 // The audit-phase scripts these derive from lived in an ephemeral session
 // scratchpad and are gone; these step lists are authored fresh against the
@@ -130,6 +131,27 @@ export const JOURNEYS = {
       { key: "ArrowRight" },
       { sleep: 200 },
       { checkpoint: "after-interaction" },
+    ],
+  },
+
+  J9: {
+    label: "restore a shared zoom link",
+    page: "flamegraph",
+    // T19 legacy-param fixture (features/03 F148/F150/F151): a worker-zoom
+    // URL RECORDED from the legacy page itself - click-zoom on the demo
+    // trace, copy the emitted URL, keep a child-by-child-walkable prefix
+    // of its tab-joined path (the full emitted path is ~85 frames deep;
+    // the prefix exercises the same restore code). Regenerate after a
+    // demo-trace refresh by re-doing that click and re-recording.
+    // Restore must NOT rewrite the URL on either page generation, so the
+    // url.query readout doubles as the no-write assertion; fg.breadcrumb
+    // is the zoom-visible readout.
+    defaultPath:
+      "/flamegraph.html?trace=demo-trace.bin&worker-zoom=" +
+      "0xffff9b8cbf1c%090xffff9b862030%09Thread%3A%3Anew%3A%3Athread_start+unix.rs%3A130",
+    steps: [
+      { sleep: 200 },
+      { checkpoint: "restored" },
     ],
   },
 };
