@@ -3,3 +3,7 @@ dist/*
 !dist/.gitkeep
 # parity tool reports (generated)
 parity/out/
+# regenerable fixture seed tree (incl. the >200 MB large family) — only the
+# small fixtures under parity/fixtures/segments/ are committed (size policy:
+# ui/README.md "Parity gate tooling")
+parity/fixtures/generated/
