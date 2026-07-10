@@ -254,8 +254,12 @@ export interface SegmentEntry {
   /** Retained across eviction (see SegmentParseInvariants). */
   invariants?: SegmentParseInvariants;
   /**
-   * Boundary-poll evidence at the segment's edges (types/trace.d.ts);
-   * present iff state === "parsed" (dropped with the parse on eviction).
+   * Boundary-poll evidence at the segment's edges (types/trace.d.ts).
+   * Written at first parse and RETAINED across eviction (they are tiny -
+   * at most one open + one close per worker): a poll crossing an evicted
+   * neighbor still needs that neighbor's edge evidence to surface as
+   * explicitly truncated instead of vanishing (T17-audit finding 1).
+   * Absent only before the first parse.
    */
   edgePolls?: SegmentEdgePolls;
 }

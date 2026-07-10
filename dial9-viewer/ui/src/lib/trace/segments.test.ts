@@ -492,32 +492,42 @@ describe("segmentInvariants", () => {
 
 // ── boundary polls: window-level stitching + truncation ──────────────────
 
-describe("computeWindowBoundaryPolls", () => {
-  /** A parsed entry over synthetic events (edge polls derived for real). */
-  function parsedEntry(extent: TimeRange, events: TraceEvent[]): SegmentEntry {
-    const timestamps = events.map((e) => e.timestamp);
-    const trace = {
-      events,
-      minTs: timestamps.length ? Math.min(...timestamps) : null,
-      maxTs: timestamps.length ? Math.max(...timestamps) : null,
-    } as unknown as ParsedTrace;
-    return {
-      state: "parsed",
-      extent,
-      sizeBytes: 1,
-      trace,
-      rawByteLength: 100,
-      invariants: segmentInvariants(trace),
-      edgePolls: computeSegmentEdgePolls(trace),
-    };
-  }
-
-  const listedEntry = (extent: TimeRange): SegmentEntry => ({
-    state: "listed",
+/** A parsed entry over synthetic events (edge polls derived for real). */
+function parsedEntry(extent: TimeRange, events: TraceEvent[]): SegmentEntry {
+  const timestamps = events.map((e) => e.timestamp);
+  const trace = {
+    events,
+    minTs: timestamps.length ? Math.min(...timestamps) : null,
+    maxTs: timestamps.length ? Math.max(...timestamps) : null,
+  } as unknown as ParsedTrace;
+  return {
+    state: "parsed",
     extent,
     sizeBytes: 1,
-  });
+    trace,
+    rawByteLength: 100,
+    invariants: segmentInvariants(trace),
+    edgePolls: computeSegmentEdgePolls(trace),
+  };
+}
 
+const listedEntry = (extent: TimeRange): SegmentEntry => ({
+  state: "listed",
+  extent,
+  sizeBytes: 1,
+});
+
+/**
+ * A previously-parsed, now-evicted entry: the parse (trace) is gone, but
+ * invariants AND edgePolls are retained across eviction (T17-audit
+ * finding 1) - built from the same synthetic events for realism.
+ */
+function evictedEntry(extent: TimeRange, events: TraceEvent[]): SegmentEntry {
+  const { trace: _trace, ...kept } = parsedEntry(extent, events);
+  return { ...kept, state: "evicted" };
+}
+
+describe("computeWindowBoundaryPolls", () => {
   const keys = ["s0", "s1", "s2", "s3"];
   const extents = [range(0, 100), range(100, 200), range(200, 300), range(300, 400)];
 
@@ -644,6 +654,191 @@ describe("computeWindowBoundaryPolls", () => {
     const { truncated } = computeWindowBoundaryPolls(keys, entries);
     expect(truncated.map((t) => t.truncatedAt)).toEqual(["end"]);
     expect(truncated[0]!.taskId).toBe(7);
+  });
+});
+
+// ── T17-audit finding 1: polls spanning 3+ segments (N-segment chains) ───
+//
+// The audit's executed probe: a poll whose PollStart is in segment k and
+// PollEnd in segment k+2, with the worker silent through k+1, returned
+// {truncated: [], stitched: []} - the poll VANISHED even with every
+// segment resident. Silence through a whole adjacent segment is itself
+// evidence: any PollEnd/Park/PollStart there would have closed the poll,
+// so the chain walk carries the open across silent segments.
+
+describe("computeWindowBoundaryPolls: T17-audit finding 1 (N-segment stitching)", () => {
+  const keys3 = ["s0", "s1", "s2"];
+  const extents3 = [range(0, 100), range(100, 200), range(200, 300)];
+
+  it("stitches a poll spanning 3 resident segments (silent interior) into ONE complete poll - the audit probe", () => {
+    const entries = new Map<string, SegmentEntry>([
+      ["s0", parsedEntry(extents3[0]!, [pollStart(10, 1, 7)])],
+      // Only worker-2 events: worker 1 is silent through all of s1.
+      ["s1", parsedEntry(extents3[1]!, [pollStart(110, 2), pollEnd(120, 2)])],
+      ["s2", parsedEntry(extents3[2]!, [pollEnd(210, 1), pollStart(250, 1), pollEnd(260, 1)])],
+    ]);
+    const { stitched, truncated } = computeWindowBoundaryPolls(keys3, entries);
+    expect(stitched).toEqual([
+      {
+        workerId: 1,
+        start: 10,
+        end: 210,
+        taskId: 7,
+        spawnLocId: "loc-7",
+        spawnLoc: "src/task7.rs:1",
+      },
+    ]);
+    expect(truncated).toEqual([]);
+  });
+
+  it("stitches across TWO silent interior segments (4-segment span)", () => {
+    const keys4 = ["s0", "s1", "s2", "s3"];
+    const extents4 = [range(0, 100), range(100, 200), range(200, 300), range(300, 400)];
+    const entries = new Map<string, SegmentEntry>([
+      ["s0", parsedEntry(extents4[0]!, [pollStart(10, 1, 7)])],
+      ["s1", parsedEntry(extents4[1]!, [pollStart(110, 2), pollEnd(120, 2)])],
+      ["s2", parsedEntry(extents4[2]!, [pollStart(210, 3), pollEnd(220, 3)])],
+      ["s3", parsedEntry(extents4[3]!, [pollEnd(310, 1)])],
+    ]);
+    const { stitched, truncated } = computeWindowBoundaryPolls(keys4, entries);
+    expect(stitched).toEqual([
+      {
+        workerId: 1,
+        start: 10,
+        end: 310,
+        taskId: 7,
+        spawnLocId: "loc-7",
+        spawnLoc: "src/task7.rs:1",
+      },
+    ]);
+    expect(truncated).toEqual([]);
+  });
+
+  it("a prefix-resident chain surfaces as ONE poll truncated at the LAST resident edge", () => {
+    const entries = new Map<string, SegmentEntry>([
+      ["s0", parsedEntry(extents3[0]!, [pollStart(10, 1, 7)])],
+      ["s1", parsedEntry(extents3[1]!, [pollStart(110, 2), pollEnd(190, 2)])],
+      // The close lives in unfetched s2: the poll must still be visible
+      // across ALL resident data it provably spans (s0's start through
+      // s1's last observed event), truncated - never dropped as IDLE.
+      ["s2", listedEntry(extents3[2]!)],
+    ]);
+    const { stitched, truncated } = computeWindowBoundaryPolls(keys3, entries);
+    expect(stitched).toEqual([]);
+    expect(truncated).toEqual([
+      {
+        workerId: 1,
+        start: 10,
+        end: 190, // s1's maxTs: the last RESIDENT observed event
+        taskId: 7,
+        spawnLocId: "loc-7",
+        spawnLoc: "src/task7.rs:1",
+        truncatedAt: "end",
+        openEnded: true,
+      },
+    ]);
+  });
+
+  it("middle-only-resident: retained neighbor edge evidence surfaces the poll as both-edges-truncated with its task identity", () => {
+    const entries = new Map<string, SegmentEntry>([
+      // Both neighbors were parsed once and evicted; their edgePolls are
+      // retained (finding 1: eviction keeps them - they are tiny).
+      ["s0", evictedEntry(extents3[0]!, [pollStart(10, 1, 7)])],
+      ["s1", parsedEntry(extents3[1]!, [pollStart(110, 2), pollEnd(190, 2)])],
+      ["s2", evictedEntry(extents3[2]!, [pollEnd(210, 1), pollStart(250, 1), pollEnd(260, 1)])],
+    ]);
+    const { stitched, truncated } = computeWindowBoundaryPolls(keys3, entries);
+    // Not stitched (neither endpoint is resident); the resident middle
+    // segment is provably mid-poll for worker 1 through its whole span.
+    expect(stitched).toEqual([]);
+    expect(truncated).toEqual([
+      {
+        workerId: 1,
+        start: 110, // s1's minTs
+        end: 190, // s1's maxTs
+        taskId: 7, // known: the PollStart WAS parsed; evidence retained
+        spawnLocId: "loc-7",
+        spawnLoc: "src/task7.rs:1",
+        truncatedAt: "both",
+        openEnded: true,
+      },
+    ]);
+  });
+
+  it("a chain broken by an active segment with no matching close is dropped whole (core #194 parity)", () => {
+    const entries = new Map<string, SegmentEntry>([
+      ["s0", parsedEntry(extents3[0]!, [pollStart(10, 1, 7)])],
+      ["s1", parsedEntry(extents3[1]!, [pollStart(110, 2), pollEnd(120, 2)])],
+      // Worker 1 is ACTIVE here but its first event is a PollStart: the
+      // close never made it to the wire - unmatched evidence drops, and
+      // the silent-interior extension drops with it (the silence proof
+      // is only as good as the wire).
+      ["s2", parsedEntry(extents3[2]!, [pollStart(250, 1), pollEnd(260, 1)])],
+    ]);
+    const { stitched, truncated } = computeWindowBoundaryPolls(keys3, entries);
+    expect(stitched).toEqual([]);
+    expect(truncated).toEqual([]);
+  });
+});
+
+// ── T17-audit finding 3: extent adjacency gates stitching ────────────────
+//
+// The listing can have holes (retention-deleted objects, undecodable
+// keys): two CONSECUTIVELY LISTED segments are not necessarily adjacent
+// in time. Stitching across an extent gap would fabricate one completed
+// long poll out of two different polls' evidence - exactly the lie the
+// 2.8 hard edge forbids.
+
+describe("computeWindowBoundaryPolls: T17-audit finding 3 (extent-gap guard)", () => {
+  it("never stitches across an extent gap: both fragments surface truncated", () => {
+    // Segment B (100..300) is missing from the listing; A and C are
+    // consecutively listed but NOT adjacent in time.
+    const entries = new Map<string, SegmentEntry>([
+      ["A", parsedEntry(range(0, 100), [pollStart(10, 1, 7)])],
+      ["C", parsedEntry(range(300, 400), [pollEnd(310, 1), pollStart(350, 1), pollEnd(360, 1)])],
+    ]);
+    const { stitched, truncated } = computeWindowBoundaryPolls(["A", "C"], entries);
+    // The fabricated {start: 10, end: 310} completed poll must NOT exist.
+    expect(stitched).toEqual([]);
+    expect(truncated).toHaveLength(2);
+    expect(truncated).toContainEqual({
+      workerId: 1,
+      start: 10,
+      end: 10, // clamped to A's last observed event
+      taskId: 7,
+      spawnLocId: "loc-7",
+      spawnLoc: "src/task7.rs:1",
+      truncatedAt: "end",
+      openEnded: true,
+    });
+    expect(truncated).toContainEqual({
+      workerId: 1,
+      start: 310, // clamped to C's first observed event
+      end: 310,
+      taskId: null, // unobserved gap: identity honestly unknown
+      spawnLocId: null,
+      spawnLoc: null,
+      truncatedAt: "start",
+      openEnded: true,
+    });
+  });
+
+  it("touching or tiled-overlapping extents still count as adjacent (stitching preserved)", () => {
+    const entries = new Map<string, SegmentEntry>([
+      ["A", parsedEntry(range(0, 100), [pollStart(10, 1, 7)])],
+      ["C", parsedEntry(range(100, 200), [pollEnd(110, 1)])],
+    ]);
+    const { stitched } = computeWindowBoundaryPolls(["A", "C"], entries);
+    expect(stitched).toEqual([
+      {
+        workerId: 1,
+        start: 10,
+        end: 110,
+        taskId: 7,
+        spawnLocId: "loc-7",
+        spawnLoc: "src/task7.rs:1",
+      },
+    ]);
   });
 });
 

@@ -135,32 +135,41 @@ export interface SegmentEdgePolls {
 
 /**
  * A poll truncated by a resident-window edge. `start`/`end` never extend
- * past observed data (`end` is clamped to the segment's last event for
- * "end"-truncated polls, `start` to the first event for "start"-truncated
- * ones), so the span is a LOWER bound on the real poll - renderers must
- * show the G5 truncation marker, not a duration.
+ * past RESIDENT observed data (`end` is clamped to the last resident
+ * event the poll provably spans for "end"-truncated polls, `start` to
+ * the first for "start"-truncated ones), so the span is a LOWER bound on
+ * the real poll - renderers must show the G5 truncation marker, not a
+ * duration. A poll provably in flight across one or more whole resident
+ * segments (its start AND end both beyond the resident window, continuity
+ * proven by worker silence plus retained edge evidence - T17-audit
+ * finding 1) is truncated at "both" edges.
  */
 export interface WindowEdgePoll {
   workerId: number;
   start: number;
   end: number;
   /**
-   * null when the poll began before the resident window: its PollStart
-   * (the only carrier of task identity) was never parsed.
+   * null when task identity is genuinely unknown: the PollStart (the only
+   * carrier of task identity) was never parsed AND no edge evidence
+   * retained from an earlier parse of the neighbor identifies it.
    */
   taskId: number | null;
   spawnLocId: string | null;
   spawnLoc: string | null;
-  /** Which window edge truncates this poll. */
-  truncatedAt: "start" | "end";
+  /** Which window edge(s) truncate this poll. */
+  truncatedAt: "start" | "end" | "both";
   /** Always true: duration unknown, G5 marker semantics. */
   openEnded: true;
 }
 
 /**
- * A complete poll reconstructed across an INTERNAL boundary between two
- * adjacent resident segments (PollStart in one, PollEnd in the next).
- * Field-compatible with the core's PollSpan.
+ * A complete poll reconstructed across internal boundaries of a run of
+ * extent-adjacent RESIDENT segments: PollStart in one segment, PollEnd in
+ * a later one, every interior segment resident and provably silent for
+ * the worker (a PollEnd/Park/PollStart there would have closed the poll).
+ * The two-segment case is the k = 2 degenerate chain; polls spanning 3+
+ * segments assemble the same way (T17-audit finding 1). Field-compatible
+ * with the core's PollSpan.
  */
 export interface StitchedBoundaryPoll {
   workerId: number;

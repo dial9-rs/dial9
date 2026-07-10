@@ -365,10 +365,11 @@ describe("hard edge: two-level cache", () => {
     win.setViewport(viewOver(segs, 2));
     await settle();
     expect(entryOf(store, segKey(0))!.state).toBe("evicted");
-    // Eviction keeps the invariants and the learned raw size, drops the
-    // parse itself.
+    // Eviction keeps the invariants, the learned raw size AND the edge
+    // polls (T17-audit finding 1: tiny, and required so polls crossing an
+    // evicted neighbor stay visible); only the parse itself drops.
     expect(entryOf(store, segKey(0))!.trace).toBeUndefined();
-    expect(entryOf(store, segKey(0))!.edgePolls).toBeUndefined();
+    expect(entryOf(store, segKey(0))!.edgePolls).toBeDefined();
     expect(entryOf(store, segKey(0))!.rawByteLength).toBe(300);
     expect(entryOf(store, segKey(0))!.invariants).toBeDefined();
 
@@ -528,6 +529,69 @@ describe("hard edge: boundary-poll truncation through the orchestrator", () => {
       start: 80,
       end: 130,
     });
+  });
+});
+
+// ── T17-audit finding 1 (orchestrator): cross-segment poll continuity ───
+
+describe("T17-audit finding 1: poll continuity across evicted neighbors", () => {
+  it("a worker mid-poll through the only-resident segment surfaces both-edges-truncated (edgePolls retained through real eviction)", async () => {
+    // Worker 1's poll: PollStart in segment 0, PollEnd in segment 2,
+    // silent through segment 1 - the audit's long-blocked-poll scenario.
+    const eventsFor = (url: string | undefined): TraceEvent[] => {
+      switch (url) {
+        case segKey(0):
+          return [pollStart(10, 1, 7)];
+        case segKey(1):
+          return [pollStart(110, 2), pollEnd(190, 2)]; // worker 1 silent
+        case segKey(2):
+          return [pollEnd(210, 1), pollStart(250, 1), pollEnd(260, 1)];
+        default:
+          return [];
+      }
+    };
+    const segs = makeSegments(3, 25); // estimate = 100 each
+    const store = makeStore();
+    const fetcher = makeFetcher();
+    const parser = makeParser({ tag: fetcher.tag, rawByteLength: 300, events: eventsFor });
+    const idle = makeIdle();
+    const win = createSegmentWindow(store, segs, {
+      fetchBytes: fetcher.fetchBytes,
+      parser: parser.parser,
+      idle: idle.idle,
+      residentBudgetBytes: 500, // trigger 450: only ONE 300-byte parse fits
+    });
+
+    // Walk 0 -> 1 -> 2 -> back to 1: each step's completion pass evicts
+    // the previous resident (real sizes exceed the trigger pairwise).
+    for (const i of [0, 1, 2, 1]) {
+      win.setViewport(viewOver(segs, i));
+      await settle();
+    }
+    expect(entryOf(store, segKey(1))!.state).toBe("parsed");
+    for (const i of [0, 2]) {
+      expect(entryOf(store, segKey(i))!.state).toBe("evicted");
+      expect(entryOf(store, segKey(i))!.edgePolls).toBeDefined();
+      expect(entryOf(store, segKey(i))!.trace).toBeUndefined();
+    }
+
+    // Worker 1 is provably mid-poll (task 7) through ALL of segment 1:
+    // without the retained neighbor evidence this rendered as pure IDLE.
+    const polls = win.boundaryPolls();
+    expect(polls.stitched).toEqual([]);
+    expect(polls.truncated).toEqual([
+      {
+        workerId: 1,
+        start: 110, // segment 1's first observed event
+        end: 190, // segment 1's last observed event
+        taskId: 7,
+        spawnLocId: "loc-7",
+        spawnLoc: "src/task7.rs:1",
+        truncatedAt: "both",
+        openEnded: true,
+      },
+    ]);
+    win.dispose();
   });
 });
 
