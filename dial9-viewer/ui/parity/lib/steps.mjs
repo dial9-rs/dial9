@@ -25,7 +25,7 @@
 
 import { waitBrowserBootstrap } from "./actions.mjs";
 
-const LOADED_WAITS = {
+export const LOADED_WAITS = {
   // Trace parsed and stats line rendered.
   viewer: (page) =>
     page.waitForFunction(
@@ -37,6 +37,36 @@ const LOADED_WAITS = {
   // Browser page bootstrap settled.
   index: (page) => waitBrowserBootstrap(page),
 };
+
+/**
+ * Infer the page kind (LOADED_WAITS key) from a page URL. Used by the tools
+ * that take bare page URLs (census, axe scan) rather than a journey.
+ * Returns null for pages without a kind-specific loaded-wait.
+ */
+export function pageKindFor(pageUrl) {
+  const p = new URL(pageUrl).pathname;
+  if (p.endsWith("/viewer.html")) return "viewer";
+  if (p.endsWith("/flamegraph.html")) return "flamegraph";
+  if (p.endsWith("/index.html") || p === "/") return "index";
+  return null;
+}
+
+/**
+ * Kind-aware "the page is settled" wait for a bare page URL. Falls back to
+ * load + a short settle when no kind-specific wait applies (unknown page, or
+ * viewer/flamegraph without a `?trace=` — their loaded-waits expect a parsed
+ * trace).
+ */
+export async function waitLoadedByUrl(page, pageUrl) {
+  const kind = pageKindFor(pageUrl);
+  const hasTrace = new URL(pageUrl).searchParams.has("trace");
+  if (kind === "index" || (kind && hasTrace)) {
+    await LOADED_WAITS[kind](page);
+  } else {
+    await page.waitForLoadState("load");
+    await page.waitForTimeout(750);
+  }
+}
 
 async function box(page, selector) {
   const b = await page.locator(selector).boundingBox();
