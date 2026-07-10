@@ -1,3 +1,5 @@
 node_modules/
 dist/*
 !dist/.gitkeep
+# parity tool reports (generated)
+parity/out/
