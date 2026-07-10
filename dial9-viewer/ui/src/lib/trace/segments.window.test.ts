@@ -137,6 +137,8 @@ interface PendingParse {
 function makeParser(opts: {
   tag: WeakMap<ArrayBuffer, string>;
   rawByteLength?: number;
+  /** Per-segment decompressed size; wins over `rawByteLength`. */
+  rawByteLengthFor?: (url: string | undefined) => number;
   events?: (url: string | undefined) => TraceEvent[];
   manual?: boolean;
 }) {
@@ -151,7 +153,10 @@ function makeParser(opts: {
       minTs: timestamps.length > 0 ? Math.min(...timestamps) : null,
       maxTs: timestamps.length > 0 ? Math.max(...timestamps) : null,
     } as unknown as ParsedTrace;
-    return { trace, rawByteLength: opts.rawByteLength ?? 100 };
+    return {
+      trace,
+      rawByteLength: opts.rawByteLengthFor?.(url) ?? opts.rawByteLength ?? 100,
+    };
   };
   const parser: SegmentParser = (bytes) => {
     const url = opts.tag.get(bytes.buffer as ArrayBuffer);
@@ -451,6 +456,135 @@ describe("hard edge: budget eviction", () => {
       expect(entry.rawByteLength).toBe(300);
       expect(entry.trace).toBeUndefined();
     }
+  });
+});
+
+// ── T17-audit finding 2: oversized-segment admission ─────────────────────
+//
+// The audit's executed probe: one segment whose decompressed size (2000)
+// exceeds the hard budget (1000) was force-admitted by capToBudget, hard-
+// clamp evicted by planEviction, and force-re-admitted on the next pass -
+// entry state "evicted" after EVERY setViewport, parsesStarted
+// incrementing per call, peakResidentRawBytes at 2x the budget. The fix:
+// the real size is learned at the first parse and the entry moves to the
+// honest terminal "oversized" state - never resident, never re-admitted,
+// distinguishable from "listed" (not yet fetched).
+
+describe("T17-audit finding 2: oversized segments defer honestly", () => {
+  it("a segment larger than the hard budget parses ONCE, lands in 'oversized', and never loops - the audit probe", async () => {
+    const segs = makeSegments(1, 25); // gzip estimate 100: admitted on the estimate
+    const store = makeStore();
+    const fetcher = makeFetcher();
+    const parser = makeParser({ tag: fetcher.tag, rawByteLength: 2000 });
+    const idle = makeIdle();
+    const win = createSegmentWindow(store, segs, {
+      fetchBytes: fetcher.fetchBytes,
+      parser: parser.parser,
+      idle: idle.idle,
+      residentBudgetBytes: 1000,
+    });
+
+    // Chunk 2 wires setViewport to the viewport slice: it fires per
+    // pan/zoom tick. Drive several ticks; the probe saw a fetch-free but
+    // full re-parse -> evict cycle on every one of them.
+    for (let tick = 0; tick < 5; tick++) {
+      win.setViewport(viewOver(segs, 0));
+      await settle();
+    }
+
+    const entry = entryOf(store, segKey(0))!;
+    expect(entry.state).toBe("oversized");
+    expect(entry.trace).toBeUndefined(); // never resident
+    expect(entry.rawByteLength).toBe(2000); // the learned real size
+    // Parse evidence IS kept: lanes/axes stability and boundary-poll
+    // continuity work across the segment exactly as across an eviction.
+    expect(entry.invariants).toBeDefined();
+    expect(entry.edgePolls).toBeDefined();
+
+    expect(win.stats().networkFetches).toBe(1);
+    expect(win.stats().parsesStarted).toBe(1); // ONE parse, not one per tick
+    expect(win.stats().evictions).toBe(0); // no parse -> evict churn
+    // The oversized parse never entered the resident accounting: no
+    // 2x-budget peak.
+    expect(win.stats().residentRawBytes).toBe(0);
+    expect(win.stats().peakResidentRawBytes).toBe(0);
+    win.dispose();
+  });
+
+  it("an oversized segment is distinguishable from unfetched neighbors and does not starve them", async () => {
+    const segs = makeSegments(4, 25);
+    const store = makeStore();
+    const fetcher = makeFetcher();
+    const parser = makeParser({
+      tag: fetcher.tag,
+      rawByteLengthFor: (url) => (url === segKey(1) ? 2000 : 300),
+    });
+    const idle = makeIdle();
+    const win = createSegmentWindow(store, segs, {
+      fetchBytes: fetcher.fetchBytes,
+      parser: parser.parser,
+      idle: idle.idle,
+      residentBudgetBytes: 1000,
+    });
+
+    // Viewport over segments 0..2; segment 3 stays beyond prefetch reach.
+    win.setViewport(range(segs[0]!.extent.startNs + 1e9, segs[2]!.extent.startNs + 1e9));
+    await settle();
+    win.setViewport(range(segs[0]!.extent.startNs + 1e9, segs[2]!.extent.startNs + 1e9));
+    await settle();
+
+    // "too big for budget" (oversized) vs "not yet fetched" (listed):
+    // an explicit, distinct vocabulary - the T06 exhaustive-switch union.
+    expect(entryOf(store, segKey(1))!.state).toBe("oversized");
+    expect(entryOf(store, segKey(3))!.state).toBe("listed");
+    // The fitting neighbors are unaffected and resident.
+    expect(entryOf(store, segKey(0))!.state).toBe("parsed");
+    expect(entryOf(store, segKey(2))!.state).toBe("parsed");
+    expect(win.stats().residentRawBytes).toBe(600);
+    expect(parser.started.filter((u) => u === segKey(1)).length).toBe(1);
+    win.dispose();
+  });
+
+  it("10-segment walk with one oversized segment: no admission loop, resident under budget throughout (the finding-2/-5 class the 3x fixture missed)", async () => {
+    const segs = makeSegments(10, 10 * MB);
+    const store = makeStore();
+    const fetcher = makeFetcher({ byteLength: 16 });
+    // Segment 5 lists at 10 MB gzip like the rest but decompresses to
+    // 150 MB (a 15x expander, past the 128 MB hard budget); the others
+    // expand 3x as in the DoD scenario.
+    const parser = makeParser({
+      tag: fetcher.tag,
+      rawByteLengthFor: (url) => (url === segKey(5) ? 150 * MB : 30 * MB),
+    });
+    const idle = makeIdle();
+    const win = createSegmentWindow(store, segs, {
+      fetchBytes: fetcher.fetchBytes,
+      parser: parser.parser,
+      idle: idle.idle,
+    });
+
+    const step = async (i: number): Promise<void> => {
+      win.setViewport(viewOver(segs, i));
+      await settle();
+      idle.runIdles();
+      await settle();
+      expect(win.stats().residentRawBytes).toBeLessThanOrEqual(
+        RESIDENT_RAW_BUDGET_BYTES
+      );
+    };
+    for (let i = 0; i < 10; i++) await step(i);
+    for (let i = 9; i >= 0; i--) await step(i);
+
+    expect(entryOf(store, segKey(5))!.state).toBe("oversized");
+    // The oversized segment was fetched and parsed exactly ONCE across
+    // the whole out-and-back walk - the probe's loop re-parsed it per
+    // viewport tick.
+    expect(parser.started.filter((u) => u === segKey(5)).length).toBe(1);
+    expect(win.stats().networkFetches).toBe(10); // zero re-downloads
+    expect(win.stats().peakResidentRawBytes).toBeLessThanOrEqual(
+      RESIDENT_RAW_BUDGET_BYTES
+    );
+    win.dispose();
   });
 });
 

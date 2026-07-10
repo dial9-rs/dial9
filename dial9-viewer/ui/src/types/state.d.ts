@@ -207,12 +207,26 @@ export interface TransientSlice {
 
 /**
  * Lifecycle of one S3 segment in the two-tier pipeline:
- * listed -> fetching -> parsed -> evicted. Eviction drops the parsed
- * data (the ~10x cost) and falls back to tier-1 rendering; re-entering
- * a window re-parses. Exhaustive switches over this union keep every
- * consumer honest when the lifecycle grows.
+ * listed -> fetching -> parsed -> evicted, plus the terminal "oversized"
+ * refusal. Eviction drops the parsed data (the ~10x cost) and falls back
+ * to tier-1 rendering; re-entering a window re-parses.
+ *
+ * "oversized" (T17-audit finding 2, additive per the T06 precedent): the
+ * segment's DECOMPRESSED size, learned from its one and only parse,
+ * exceeds the resident budget - it can never be resident, so admission
+ * defers it instead of spinning through parse -> evict on every viewport
+ * tick. Explicitly distinct from "listed" (not yet fetched) and
+ * "evicted" (fits, will re-parse on re-entry): consumers must render it
+ * as unavailable-at-this-budget (tier-1 fallback + badge, chunk 2).
+ * Exhaustive switches over this union keep every consumer honest when
+ * the lifecycle grows.
  */
-export type SegmentLifecycle = "listed" | "fetching" | "parsed" | "evicted";
+export type SegmentLifecycle =
+  | "listed"
+  | "fetching"
+  | "parsed"
+  | "evicted"
+  | "oversized";
 
 /**
  * Parse-derived invariants retained ACROSS eviction (architecture 2.8:

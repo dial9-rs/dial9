@@ -299,9 +299,16 @@ export interface AdmissionPlan {
  * nearest the viewport center first while their estimated raw sizes fit
  * within `capacityBytes` on top of `baseBytes` (bytes already committed by
  * earlier admission rounds). The nearest candidate of the FIRST round
- * (baseBytes === 0) is always admitted, even oversized: the minimum useful
- * window is one segment, and the budget is a window limit, not a
- * load-time rejection (N19).
+ * (baseBytes === 0) is always admitted, even when its ESTIMATE exceeds
+ * the capacity: the minimum useful window is one segment, and the budget
+ * is a window limit, not a load-time rejection (N19) - estimates are
+ * guesses, so the segment gets its one real fetch + parse.
+ *
+ * Candidates whose REAL decompressed size is known to exceed the hard
+ * budget must never reach this function: the orchestrator parks them in
+ * the "oversized" state at parse completion and filters them out before
+ * admission (T17-audit finding 2), so the force-admit clause cannot
+ * re-admit a segment that provably cannot fit.
  */
 export function capToBudget(
   candidates: readonly AdmissionCandidate[],
@@ -1173,6 +1180,9 @@ interface InflightJob {
  *
  * where "fetching" covers the whole in-flight job (network or raw-cache
  * read + worker parse; an aborted job reverts to its pre-flight state).
+ * A parse whose decompressed size exceeds the resident budget moves the
+ * entry to the terminal "oversized" state instead of "parsed" (T17-audit
+ * finding 2): never resident, never re-admitted, tier-1 rendering only.
  */
 export function createSegmentWindow(
   store: SegmentsSliceStore,
@@ -1270,6 +1280,9 @@ export function createSegmentWindow(
   const startJob = (key: string): void => {
     const entry = entriesNow().get(key);
     if (entry === undefined || entry.state === "parsed") return;
+    // "oversized" is terminal (T17-audit finding 2): the real size is
+    // known and can never fit - re-parsing it would restart the loop.
+    if (entry.state === "oversized") return;
     if (inflight.has(key) || failed.has(key)) return;
     const job: InflightJob = {
       aborted: false,
@@ -1317,6 +1330,33 @@ export function createSegmentWindow(
         const { trace, rawByteLength } = await parseJob.done;
         if (job.aborted || disposed) return;
         inflight.delete(key);
+        if (rawByteLength > residentBudget) {
+          // T17-audit finding 2: the segment's real decompressed size can
+          // NEVER fit the resident window. Writing it as "parsed" would
+          // hand planEviction's hard clamp a mandatory eviction and the
+          // next admission a force-re-admit - a permanent parse -> evict
+          // loop with a ~2x-budget resident spike per viewport tick.
+          // Instead the parse is dropped on the spot and the entry moves
+          // to the honest terminal state: the learned size, invariants
+          // and edge evidence are kept (lane stability and boundary-poll
+          // continuity work exactly as across an eviction); the trace is
+          // not, so it never enters the resident accounting.
+          writeEntries((next) => {
+            const e = next.get(key);
+            if (e === undefined) return;
+            next.set(key, {
+              ...e,
+              state: "oversized",
+              rawByteLength,
+              invariants: segmentInvariants(trace),
+              edgePolls: computeSegmentEdgePolls(trace),
+            });
+          });
+          recomputeResident();
+          // Its reservation just freed: deferred work may now be admitted.
+          reconcile();
+          return;
+        }
         writeEntries((next) => {
           const e = next.get(key);
           if (e === undefined) return;
@@ -1365,8 +1405,23 @@ export function createSegmentWindow(
   const reconcile = (): void => {
     if (disposed || view === null) return;
     const currentView = view;
-    const needKeys = computeNeedSet(segments, currentView);
-    const prefetchKeys = computePrefetchSet(segments, needKeys, currentView);
+    const geometricNeed = computeNeedSet(segments, currentView);
+    const geometricPrefetch = computePrefetchSet(
+      segments,
+      geometricNeed,
+      currentView
+    );
+    // Segments that can NEVER fit (real size learned oversized, T17-audit
+    // finding 2) are excluded from admission entirely - capToBudget's
+    // first-round force-admit clause must only ever see estimates or
+    // fitting sizes, or the parse -> evict loop returns. They still
+    // render via tier 1. Geometric sets are computed FIRST so an
+    // oversized need segment keeps contributing its neighbors to the
+    // prefetch geometry.
+    const admissible = (key: string): boolean =>
+      entriesNow().get(key)?.state !== "oversized";
+    const needKeys = geometricNeed.filter(admissible);
+    const prefetchKeys = geometricPrefetch.filter(admissible);
 
     // Budget admission (N19 window limit): need first, prefetch only into
     // what remains. Estimates use real decompressed sizes when known.
@@ -1449,8 +1504,12 @@ export function createSegmentWindow(
 
     // Start need jobs now; prefetch waits for idle. A key the hard clamp
     // JUST evicted is not restarted in the same pass (it would refetch
-    // straight back over the budget); by the next pass its real
-    // decompressed size is on the entry and admission defers it honestly.
+    // straight back over the budget). By the next pass its learned real
+    // size drives admission: segments that only COLLECTIVELY overshoot
+    // (estimates undershot) are deferred by the capacity check, and a
+    // segment that can never fit at all was parked in "oversized" at
+    // parse completion (T17-audit finding 2) and filtered out above -
+    // neither shape can loop.
     const justEvicted = new Set(plan.evict);
     for (const key of needPlan.admitted) {
       if (!justEvicted.has(key)) startJob(key);

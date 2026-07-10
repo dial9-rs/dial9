@@ -117,6 +117,9 @@ function segmentHoldsParsedData(state: SegmentLifecycle): boolean {
     case "listed":
     case "fetching":
     case "evicted":
+    // "oversized" (T17-audit finding 2): parsed once to learn the real
+    // size, but the parse is never retained - tier-1 rendering only.
+    case "oversized":
       return false;
     case "parsed":
       return true;
@@ -173,6 +176,7 @@ describe("app-level discriminated unions are exhaustively switchable", () => {
     expect(segmentHoldsParsedData("fetching")).toBe(false);
     expect(segmentHoldsParsedData("parsed")).toBe(true);
     expect(segmentHoldsParsedData("evicted")).toBe(false);
+    expect(segmentHoldsParsedData("oversized")).toBe(false);
   });
 });
 
