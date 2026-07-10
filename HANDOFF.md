@@ -1,160 +1,140 @@
-# T06 HANDOFF - App-level trace + state types
+# T07 HANDOFF - Store: typed slices + RAF scheduler
 
-(Replaces the T10 HANDOFF inherited through the merged branch chain;
-T10's own record lives on `ticket/T10-vitest-first-batch` / its worktree.)
+(Replaces the T06 HANDOFF inherited through the branch chain; T06's own
+record lives at commit f106b6c / its worktree.)
 
 ## STATUS
 
-DONE - all DoD checks pass (evidence below). No gate hit: the spec's
-options had a clearly preferable reading everywhere (choices documented
-below). No frozen-core .js, no test_*.js, no page HTML, no Rust touched.
+DONE - all DoD checks pass (evidence below). No STOP-gate hit: the one
+spec point with multiple readings ("transient channel") had a clearly
+preferable reading, documented below and in the store header. Store only;
+no page wiring, no component code, no frozen-core .js, no page HTML, no
+Rust touched.
 
-## COMPLETED (commits on `ticket/T06-app-level-types`, on top of merge 9b25022)
+## COMPLETED (commits on `ticket/T07-store-scheduler`, on top of f106b6c)
 
-- `f1d0418`: src/types/trace.d.ts - app-level trace vocabulary.
-- `d5511e7`: src/types/state.d.ts - store slices + panels + geometry.
-- `9bb41ef`: src/types/exhaustive.test.ts - exhaustive-switch DoD test.
+- `892be3e`: src/store/store.ts (the store core, 133 code lines) +
+  src/vite-env.d.ts (standard Vite client-type shim for import.meta.env).
+- `3e51e56`: src/store/store.test.ts (14 tests) + @vitest/coverage-v8
+  devDependency (package.json / package-lock.json).
 - (final commit): this HANDOFF.
 
-## WHAT THE TYPES ARE (and the decisions inside them)
+## WHAT WAS BUILT (and the decisions inside it)
 
-### Form: importable module .d.ts (vs T05's ambient wildcards)
+`src/store/store.ts` - one file, 133 lines excluding comments/blanks
+(<200 target, architecture 2.2):
 
-T05's declarations are ambient (`declare module "*/x.js"`) because they
-describe real frozen-core .js files reached by relative import. trace.d.ts
-and state.d.ts have NO backing .js module, so a wildcard/ambient form
-would invite runtime imports of a nonexistent file. They are instead
-plain module .d.ts files containing TYPES ONLY (no `export const` - a
-value declared there would be a lie at runtime). Consumers write
-`import type { ... } from "../types/trace.js"` (or `./state.js`);
-TS resolves the `.js` specifier to the `.d.ts`, `import type` is erased
-by Vite, and `verbatimModuleSyntax` makes any accidental VALUE import a
-TS1484 compile error, so a runtime import of the missing module cannot
-ship. This composes with T05: trace.d.ts re-exports the core shapes from
-the wildcard modules (type-only), giving src/ one import surface.
+- `createStore<S>(initial, options?)` -> `Store<S>` with `getState()`,
+  `update(slice, patch)`, `subscribe(sliceSet, fn) -> unsubscribe`,
+  `derived(deps, compute) -> getter`. Generic over the slice shape with a
+  homomorphic constraint (`S extends { [K in keyof S]: object }`) because
+  a `Record<string, object>` constraint rejects interface types like
+  StoreState. Composes with T06's types: `ViewerStore = Store<StoreState>`
+  (imported from src/types/state.js, nothing redeclared).
+- Update semantics: patch is merged into a FRESH slice object (slice
+  replaced wholesale, never mutated); the root state object keeps stable
+  identity. Slice identity change is the derived-cache invalidation
+  signal (F5), verified by the isolation tests.
+- Scheduler: one tick per frame; `update` marks the slice dirty and
+  schedules at most one flush; the flush runs each subscriber whose slice
+  set intersects the frame's changed set, at most once, passing
+  `(state, changedSet)`. Updates made DURING a flush open a new frame
+  (dirty set swapped before dispatch), never re-enter the running one.
+  A throwing subscriber aborts the rest of its frame loudly (errors are
+  not swallowed) but cannot leave the N18 gate open (try/finally).
+- INJECTABLE scheduler (`StoreOptions.scheduler`), chosen over a
+  stubbable module-level binding: Node has no requestAnimationFrame, and
+  injection means concurrent stores/tests never share stub state. Default
+  schedules via `requestAnimationFrame` and fails loudly (ReferenceError
+  on first update) where none exists - no silent setTimeout fallback.
+- TRANSIENT CHANNEL reading: architecture 2.2/2.3 says transient updates
+  ride "the crosshair RAF channel" and "never trigger full renders". This
+  is implemented as slice-set filtering, not a second mechanism: an
+  update to `transient` notifies only subscribers that declared
+  `transient` (the crosshair overlay). Observable behavior is identical
+  to a physically separate channel (the DoD test asserts it) at a
+  fraction of the code; a separate queue can be split out later without
+  changing the API. Not treated as a STOP-gate for that reason.
+- `derived(deps, compute)` (F5): caches the computed value plus the dep
+  slice objects seen at compute time; recomputes only when a dep slice's
+  identity changed. No version counters needed given the
+  replaced-wholesale invariant.
+- N18 hook: `assertInScheduledRender(context?)` - render-marked functions
+  call it at entry; in dev builds it throws when `notifyDepth === 0`
+  (i.e. the caller is not inside a store notification tick; F2: no path
+  from input event to render may skip the scheduler). Entirely gated on
+  `import.meta.env.DEV`, so Vite compiles it out of release bundles.
+  `devRenderAssertStats()` returns `{ calls, violations }` - the
+  externally readable counters T12's perf probe plugs into. The depth
+  counter is module-level (shared across stores) so render fns need no
+  store handle; it is a depth, not a boolean, so a synchronous injected
+  scheduler that nests flushes still balances.
 
-### trace.d.ts
-
-- Re-exports the T05 core shapes (ParsedTrace, TraceEvent, CpuSample,
-  CustomTraceEvent, BlockInPlaceGap, PollSpan/ParkSpan/ActiveSpan/
-  WorkerLane, TracingSpan/SpanData, FlamegraphNode, allocation shapes,
-  ...) - referenced, never redeclared.
-- `TimeRange {startNs, endNs}` shared primitive (sidebar range, segment
-  extents, re-parse windows).
-- `RuntimeEvent` kind-discriminated union + `RuntimeEventKind`: one
-  variant per trace_parser.js EVENT_TYPES entry (poll-start, poll-end,
-  worker-park, worker-unpark, queue-sample, wake), string `kind`
-  discriminant, each variant carrying ONLY the fields processFrame
-  actually populates for that type (verified against trace_parser.js
-  processFrame, lines ~735-850). The flat-TraceEvent -> union refinement
-  is lib/trace's job (architecture 2.7, later ticket); this defines the
-  vocabulary.
-- ADR-0002 encoded explicitly, never silently optional: `tid` on the
-  park/unpark variants is a REQUIRED `number | undefined` - constructors
-  must write `tid: undefined` for old traces that predate the field;
-  omitting it is a compile error. Doc comments carry the gap semantics
-  (detection skips events without tid; no fabricated attribution).
-
-### state.d.ts
-
-- Panel unions from the real vocabulary: `FoldablePanelKind =
-  "spans" | "events" | "cpu" | "queue"` (the literal data-panel-key
-  values in viewer.html; also the localStorage key suffixes, features
-  02 O4) and `PanelKind = FoldablePanelKind | "task-detail"`
-  (task-detail is a panel but not foldable, features 02 N).
-- Store slices per architecture 2.2 + 2.8, aggregated as `StoreState`
-  with `StoreSliceName = keyof StoreState`:
-  - `TraceSlice { trace: ParsedTrace | null }` - replaced wholesale,
-    never mutated; derived analyses are computed, not stored.
-  - `ViewportSlice { viewStart, viewEnd, minTs, maxTs }` - clamps
-    (100ns min span, bounds clamping) documented as store-action
-    behavior for T07/T08, not encoded as types.
-  - `SelectionSlice { selectedTaskId, spanFocus (SpanFocus: clicked
-    span + ancestor chain, 02 G7), focusedSpanId (span-panel subtree
-    filter - deliberately distinct from spanFocus; both exist as
-    separate globals today: selectedSpanId/selectedSpanIds vs
-    focusedSpanId), pinnedEvent (PinnedCustomEvent incl. detailEvent
-    replacing selectedEventRef), sidebarRange (TimeRange | null,
-    replacing sidebarSelStart/End), hoveredWakerTaskId }` - all
-    independently clearable, hence all explicitly nullable.
-  - `UiPrefsSlice { panelCollapsed: Record<FoldablePanelKind, boolean>,
-    sidebarWidth, selectedSpanNames/selectedEventNames (legend chip
-    toggles, 02 J9/K5) }`.
-  - `TransientSlice { mouseNs, hoverEventTs, drag: DragState | null,
-    keyboardSelection: KeyboardSelection | null }` with `DragKind =
-    "pan" | "region-select" | "zoom-select"` (2.5 vocabulary; the
-    legacy shift/alt naming maps to region/zoom) and keyboard selection
-    mirroring the two selection modes.
-  - `SegmentsSlice`: `ReadonlyMap<string, SegmentEntry>` keyed by S3
-    object key; `SegmentLifecycle = "listed" | "fetching" | "parsed" |
-    "evicted"` exactly per 2.8, entry carries extent (TimeRange, trace
-    ns, known from listing before any fetch) + sizeBytes. Payload
-    refinement (raw-byte cache, abort handles) is left to the segments
-    implementation ticket - lifecycle vocabulary only.
-- Layout geometry wrapping panel_layout outputs: re-exports
-  `TimePanelLayout`, adds `LaneGeometry` (worker lane row) and
-  `PanelGeometry { kind, time: TimePanelLayout, height, dpr }` - the
-  `render(ctx, state, layout)` vocabulary; lib/canvas/layout.ts (2.3)
-  is the intended single producer.
-
-### Test placement (ticket said "your call, document it")
-
-Colocated at `src/types/exhaustive.test.ts`. Reason: the vitest include
-(vite.config.ts) is `["tests/core/**/*.test.ts", "src/**/*.test.ts"]` -
-a `tests/types/` directory would NOT be picked up without editing
-vite.config.ts, and tests/core/ is reserved for migrated legacy suites.
-Colocation is also the architecture 2.1 convention (`**/*.test.ts`
-colocated with sources). The test doubles as the use-site type anchor
-for the .d.ts bodies (skipLibCheck: true means they are otherwise only
-checked at use sites, same rationale as T05's probe.ts).
+`src/vite-env.d.ts`: standard Vite scaffold shim (`/// <reference
+types="vite/client" />`) so `import.meta.env.DEV` typechecks in src/.
+First consumer is the store; page tickets (T13/T14) would have added it
+anyway.
 
 ## DoD EVIDENCE
 
-All run in dial9-viewer/ui after `npm ci`:
+All run in dial9-viewer/ui after `npm ci` (plus the coverage-v8 install):
 
 1. `npx tsc --noEmit`: clean (exit 0).
-2. Exhaustive-switch DoD: temporarily adding
-   `| { kind: "task-spawn"; timestamp: number }` to RuntimeEvent made
-   `npx tsc --noEmit` fail (exit 2) with:
-   - `src/types/exhaustive.test.ts(59,13): error TS2322: Type '"task-spawn"' is not assignable to type 'never'.` (eventTypeId switch)
-   - `src/types/exhaustive.test.ts(85,13): error TS2322: Type '{ kind: "task-spawn"; timestamp: number; }' is not assignable to type 'never'.` (describeEvent switch)
-   Variant reverted; clean run confirmed again. The demonstration is
-   recorded in the test file header; the same never-default pattern
-   guards PanelKind and SegmentLifecycle.
-3. `npm run test`: 9 files, 128 tests, all pass (8 migrated legacy
-   suites + the new exhaustive test).
-4. `npm run build`: dist listing byte-identical to the pre-change
-   baseline (19 files; captured before the first edit, diffed after -
-   no new artifacts; the .d.ts/.test.ts files are not in any build
-   input).
-5. Not run: cargo/nextest/clippy (no .rs touched, no trace-format
-   change; rust-embed embeds only ui/dist, whose listing is unchanged -
-   per ticket "you likely need no cargo at all" and the AGENTS.md
-   JS-only rule). No new test_*.js at the ui/ root, so no
-   scripts/e2e-trace-tests.sh registration is needed (vitest CI runs
-   the new test via the include glob).
+2. `npm run test`: 10 files, 142 tests, all pass (8 migrated legacy
+   suites + T06 exhaustive test + the new store suite's 14 tests).
+3. Coverage (`npx vitest run --coverage.enabled
+   --coverage.include='src/store/**'`, provider @vitest/coverage-v8):
+   src/store/store.ts = 100% statements (54/54), 100% BRANCHES (20/20),
+   100% functions (13/13), 100% lines (48/48). DoD's 100%-branch
+   requirement met. Coverage invoked via CLI flags; vite.config.ts is
+   untouched (avoids conflicts with sibling tickets).
+4. DoD test axes all present in src/store/store.test.ts: slice isolation
+   (3 tests), one-notification-per-frame under a fake injected RAF
+   (5 tests incl. re-arm, mid-flush update deferral, mid-flush
+   unsubscribe, default-RAF path via vi.stubGlobal), transient channel
+   bypassing full notification (composed with the REAL StoreState via
+   ViewerStore - doubles as the T06-composition proof), derived-cache
+   invalidation, N18 hook (4 tests incl. DEV=false via vi.stubEnv and
+   gate-closure on a throwing subscriber).
+5. `npm run build`: dist listing unchanged - 19 files before and after,
+   `diff` empty (src/store is imported by no Vite entry; nothing new can
+   ship until a page wires it). Note: running vite build locally deletes
+   the tracked `dist/.gitkeep`; restored via git checkout before
+   committing (pre-existing quirk, not from this change).
+6. Not run: cargo build/nextest/clippy (no .rs touched, no trace-format
+   change; rust-embed embeds ui/dist, whose listing is unchanged - same
+   justification as T06 per the AGENTS.md JS-only rule). No test_*.js
+   added, so no scripts/e2e-trace-tests.sh registration needed (vitest CI
+   runs the new suite via the existing src/**/*.test.ts include).
 
 ## REMAINING
 
-None for T06. Intentionally left for later tickets:
+None for T07. Intentionally left for later tickets:
 
-- The flat-TraceEvent -> RuntimeEvent refinement function (lib/trace,
-  architecture 2.7 ticket).
-- Store implementation: update/subscribe, actions, clamps, localStorage
-  persistence (T07/T08).
-- Segment machinery payloads (raw-byte cache, AbortController handles)
-  and lib/trace/segments.ts (2.8 implementation ticket).
-- lib/canvas/layout.ts producing LaneGeometry/PanelGeometry (2.3).
+- T08: store actions (zoom/pan clamps, selection ops), initial-state
+  construction, localStorage persistence for uiPrefs.
+- T12: perf probe reading devRenderAssertStats().
+- Renderer registry mapping changed slices -> affected canvases (2.3
+  ticket); it subscribes per slice set like any other subscriber.
 
 ## BLOCKERS
 
 None.
 
-## NOTES FOR SUCCESSORS
+## NOTES FOR THE INTEGRATOR / SUCCESSORS
 
-- Keep trace.d.ts/state.d.ts free of value declarations; if a typed
-  CONSTANT is ever needed (e.g. MIN_VIEW_SPAN_NS = 100), it belongs in
-  a real .ts module (store or lib), not in these .d.ts files.
-- When adding a RuntimeEvent/PanelKind/SegmentLifecycle variant, expect
-  compile failures in every never-default switch - that is the designed
-  workflow; fix each site rather than loosening the default.
+- LOCKFILE: this branch adds `@vitest/coverage-v8@^4.1.10` to
+  devDependencies (package.json + package-lock.json). T12's playwright
+  addition will conflict in package-lock.json; regenerate the lockfile
+  after merging both rather than hand-merging hunks.
+- API notes for T08+: `update()` is also the "replace wholesale" op
+  (patch with the full slice content, e.g.
+  `update("trace", { trace: parsed })`). Subscribers receive the frame's
+  FULL changed-slice set, which may include slices they did not declare.
+  An empty patch still replaces the slice object, i.e. it signals change.
+- Render functions should call `assertInScheduledRender("<name>")` at
+  entry (the context string names the offender in the error). Remember it
+  throws in dev: a direct render call from an event handler will blow up
+  the handler - that is the point (F2).
+- The store never persists anything and never touches localStorage; keep
+  it that way (persistence is an action-layer concern, T08).
