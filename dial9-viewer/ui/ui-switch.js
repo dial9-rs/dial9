@@ -58,6 +58,8 @@
   // "Switch to new UI" control appear on its legacy version.
   var NEW_UI_ENTRIES = {
     "flamegraph.html": "new/flamegraph.html", // T13
+    // T14: the migrated S3 browser page (Vite entry new/index.html).
+    "index.html": "new/index.html",
   };
 
   // THE DEFAULT FLIP (ADR-0004 section 8, stage 2 -> stage 3): change

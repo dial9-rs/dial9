@@ -136,6 +136,10 @@ export default defineConfig({
         // T13: the migrated flamegraph page, served at /new/flamegraph.html
         // (HTML inputs keep their project-root-relative path in dist/).
         flamegraph: "new/flamegraph.html",
+        // T14: the migrated S3 browser page, served off-root at
+        // new/index.html (registered in ui-switch.js NEW_UI_ENTRIES; the
+        // canonical /index.html keeps serving the legacy page).
+        "new-index": "new/index.html",
       },
     },
   },

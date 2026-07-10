@@ -66,3 +66,20 @@ export type {
   FlamegraphInstance,
   FlamegraphSetDataOptions,
 } from "./flamegraph.js";
+
+// heatmap.ts - the frozen heatmap data helpers (density, host grouping,
+// segment math), typed (T14).
+export {
+  MAX_OPEN_BYTES,
+  MIN_SEGMENT_SECONDS,
+  accumulateDensity,
+  bootTransitions,
+  densityColor,
+  groupByHost,
+  segmentGaps,
+  segmentSpan,
+  segmentsOverlapping,
+  tileSegments,
+  totalBytes,
+} from "./heatmap.js";
+export type { HostRow, SegmentInput } from "./heatmap.js";

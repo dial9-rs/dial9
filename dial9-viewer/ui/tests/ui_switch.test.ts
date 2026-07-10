@@ -207,10 +207,15 @@ describe("hash dropping (raw switch, no view-state porting)", () => {
 
 describe("no registered target (unmigrated pages)", () => {
   it("the shipped registry holds exactly the migrated pages", () => {
-    // Not a freeze: page tickets REPLACE this expectation when they
-    // register their entry (one line there, one here).
-    expect(Object.keys(NEW_UI_ENTRIES).sort()).toEqual(["flamegraph.html"]);
+    // Not a freeze: page tickets EXTEND this expectation when they
+    // register their entry (one line there, one here). T13: flamegraph;
+    // T14: browser page.
     expect(NEW_UI_ENTRIES["flamegraph.html"]).toBe("new/flamegraph.html");
+    expect(NEW_UI_ENTRIES["index.html"]).toBe("new/index.html");
+    expect(Object.keys(NEW_UI_ENTRIES).sort()).toEqual([
+      "flamegraph.html",
+      "index.html",
+    ]);
   });
   it("no redirect and no control, even with ?ui=new", () => {
     const d = decide(
