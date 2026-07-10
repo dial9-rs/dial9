@@ -29,9 +29,15 @@ export async function waitBrowserBootstrap(page) {
   await page.waitForSelector("#prefix-suggestions button", { timeout: 15_000 });
   await page.waitForSelector("#search-btn:not([disabled])", { timeout: 15_000 });
   // The auto-search fires on load; let it settle so a walker's own search
-  // can't race it.
+  // can't race it. A search that found results HIDES the status element and
+  // leaves its text as "Searching…" (index.html search handler), so hidden
+  // counts as settled — this matters when the wait re-runs post-search
+  // (perf-probe storms re-enter the loaded-wait).
   await page.waitForFunction(
-    () => !document.getElementById("browse-status").textContent.includes("Searching"),
+    () => {
+      const el = document.getElementById("browse-status");
+      return el.style.display === "none" || !el.textContent.includes("Searching");
+    },
     { timeout: 15_000 },
   );
 }

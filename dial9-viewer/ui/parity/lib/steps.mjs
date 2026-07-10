@@ -16,6 +16,8 @@
 //   { focus: "sel" }                  focus an element
 //   { hover: "sel" }                  hover element center
 //   { hoverSweep: ["sel", n] }        n mousemove points left->right across el
+//   { hoverSweep: ["sel", n, fy] }    same, at fractional height fy (def 0.5;
+//                                     clamped into the viewport)
 //   { wheel: { selector, dy, modifier? } }  wheel at element center
 //   { drag: { selector, from: [fx,fy], to: [fx,fy], alt? } }  fractional drag
 //   { sleep: ms }                     settle wait (keep rare and short)
@@ -69,7 +71,9 @@ export async function waitLoadedByUrl(page, pageUrl) {
 }
 
 async function box(page, selector) {
-  const b = await page.locator(selector).boundingBox();
+  // .first(): tool selectors may match several elements (e.g. the flamegraph
+  // page has a hidden second .fg-canvas); document order picks the live one.
+  const b = await page.locator(selector).first().boundingBox();
   if (!b) throw new Error(`no bounding box for ${selector}`);
   return b;
 }
@@ -126,10 +130,14 @@ export async function runSteps(page, journey, { onCheckpoint } = {}) {
         await page.hover(arg);
         break;
       case "hoverSweep": {
-        const [sel, n] = arg;
+        const [sel, n, fy = 0.5] = arg;
         const b = await box(page, sel);
+        // Elements can be taller than the viewport (flamegraph canvas);
+        // clamp the sweep line into view so the moves actually hit it.
+        const vp = page.viewportSize();
+        const y = Math.min(b.y + b.height * fy, (vp?.height ?? 900) - 2);
         for (let i = 0; i <= n; i++) {
-          await page.mouse.move(b.x + (b.width * i) / n, b.y + b.height / 2);
+          await page.mouse.move(b.x + (b.width * i) / n, y);
         }
         break;
       }
