@@ -10,6 +10,7 @@
   },
   "devDependencies": {
     "@types/node": "^24.13.3",
+    "@vitest/coverage-v8": "^4.1.10",
     "typescript": "^5.9.3",
     "vite": "^7.3.0",
     "vite-plugin-static-copy": "^3.2.0",
