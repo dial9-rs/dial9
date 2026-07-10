@@ -329,7 +329,8 @@ describe("derived caches", () => {
   it("computes once per dependency change and is invalidated only by its deps", () => {
     const raf = fakeRaf();
     const store = createStore(testState(), { scheduler: raf.scheduler });
-    const compute = vi.fn((s: Readonly<TestState>) => s.a.n * 2);
+    // compute sees only the declared deps (Pick), not the full state.
+    const compute = vi.fn((s: Pick<TestState, "a">) => s.a.n * 2);
     const doubled = store.derived(["a"], compute);
 
     expect(doubled()).toBe(0);
@@ -344,6 +345,18 @@ describe("derived caches", () => {
     expect(doubled()).toBe(42);
     expect(doubled()).toBe(42);
     expect(compute).toHaveBeenCalledTimes(2);
+  });
+
+  it("narrows compute's argument to the declared deps (type-level, audit finding 5)", () => {
+    const raf = fakeRaf();
+    const store = createStore(testState(), { scheduler: raf.scheduler });
+    // Invalidation watches ONLY the declared deps, so an undeclared-slice
+    // read would return stale caches silently; the Pick-narrowed compute
+    // signature makes that unrepresentable.
+    // @ts-expect-error 'b' was not declared as a dep of this derived getter
+    store.derived(["a"], (s) => s.b.s);
+    const keepOfA = store.derived(["a"], (s) => s.a.keep);
+    expect(keepOfA()).toBe("k");
   });
 });
 

@@ -82,9 +82,15 @@ export interface Store<S> {
   /**
    * A cached getter over state (F5): `compute` reruns only when one of the
    * `deps` slices has been replaced since the last call, otherwise the
-   * cached value is returned.
+   * cached value is returned. Because invalidation watches ONLY the
+   * declared deps, `compute` is narrowed to Pick<S, deps> (audit finding
+   * 5): reading an undeclared slice - which would cache stale data with no
+   * diagnostics - does not typecheck. Type-level only, zero runtime cost.
    */
-  derived<T>(deps: readonly SliceKey<S>[], compute: (state: Readonly<S>) => T): () => T;
+  derived<T, K extends SliceKey<S>>(
+    deps: readonly K[],
+    compute: (state: ReadonlyState<Pick<S, K>>) => T,
+  ): () => T;
 }
 
 /** The viewer-page store, composed with the T06 slice shapes. */
