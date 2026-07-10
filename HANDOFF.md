@@ -1,197 +1,118 @@
-# FIX-T38 HANDOFF - dual-UI switch audit fixes
+# T40 HANDOFF - Inventory: tokio_stats.html (features/04)
 
-(Replaces the FIX-T17 HANDOFF inherited through the branch chain;
-FIX-T17's record lives at commit 502a2c5.)
-
-Branch `fix/T38-click-time-switch-url`, based on the integrated chunk-1
-tip 851b02e. Authoritative spec: the adversarial audit at
-`docs/tickets/reviews/T38-audit.md` (finding 1 MEDIUM, findings 2-3 LOW;
-none blocking today with the registry empty, but finding 1 must land
-before the first page registers in NEW_UI_ENTRIES).
+(Replaces the FIX-T38 HANDOFF inherited through the branch chain; FIX-T38's
+record lives at commit b5864e5.)
 
 ## STATUS
 
-DONE - all three findings fixed in `dial9-viewer/ui/ui-switch.js` only,
-each with failing-first regression tests in
-`dial9-viewer/ui/tests/ui_switch.test.ts` (33 -> 48 cases). All gates
-pass (evidence below). No STOP-gate hit: no materially forked reading of
-the audit was encountered. Scope fence respected: no page HTML, no
-frozen core, no .rs, no inventories, no pushes/PRs. ui-switch.js remains
-a plain browser script (no build step, textContent-only rendering,
-URL/URLSearchParams platform APIs only). Finding 2 carries a documented
-residual (below) that is not fixable from ui-switch.js alone.
+DONE - no STOP-gate hit. Docs only (scope fence respected: no code changes
+anywhere, features/01-03 untouched, no push/PR). The dev-server started for
+the walk was killed (port 3071 verified free).
 
-## COMPLETED (commits on top of 851b02e)
+## COMPLETED (commits on `ticket/T40-tokio-stats-inventory`, on top of c1d923e)
 
-- `6677d16` finding 1 (MEDIUM): the switch-control target URL is now
-  resolved from the LIVE location.pathname + location.search at
-  interaction time (new pure helper `liveControlHref`, exported), never
-  from the boot-time snapshot. `mountControl` refreshes the anchor href
-  on `mousedown` (runs ahead of left-/middle-click navigation and of the
-  context menu's copy-link) and on `click` (keyboard activation fires no
-  mousedown), so navigation after any in-page history.replaceState/
-  pushState carries the current query - the loaded trace/scope survives
-  the switch. Label/direction stay boot-time per the spec; a null
-  resolution keeps the previous href (no dead link). decide()'s registry
-  lookup + loop guard were factored into `registeredEntry`
-  (behavior-preserving in this commit) so both paths share them.
-- `aef8350` finding 2 (LOW): when the legacy side boots with an explicit
-  `?ui=legacy` pin that is LOAD-BEARING - the same URL without the pin
-  would resolve "new" (new pure helper `pinWouldBounce`, exported) - the
-  "legacy" choice is persisted to the localStorage preference at boot.
-  Three of the four legacy pages strip the pin on their first URL sync;
-  with storage aligned, a stripped pin plus a reload (or a copied
-  address-bar URL in the same browser) still resolves legacy. This is
-  the audit's own suggested fix ("on booting a canonical page with an
-  explicit ?ui=legacy while storage says new, write legacy"),
-  generalized to stay correct after the DEFAULT_UI flip (a no-preference
-  visitor then resolves "new" too, so the pin is load-bearing for them
-  as well). Gated on a registered counterpart (result.control): on
-  unregistered pages no dispatch is possible, so a stray pin never
-  touches the global preference.
-- `68eb9cb` finding 3 (LOW): `registeredEntry` rejects any entry that is
-  itself a registry key - subsumes the old exact self-registration
-  check and kills cross-registration cycles ({"a.html": "b.html",
-  "b.html": "a.html"}), which would otherwise location.replace()-loop
-  with no escape (buildQuery strips `ui` on every new-bound hop). A
-  legitimate entry is never a key (new-UI entries live off-root). The
-  guard sits in the shared lookup, covering both decide() dispatch and
-  liveControlHref. Chose this over the audit's alternative
-  (sessionStorage one-shot breaker): pure, testable, no storage
-  dependency. A permanent acyclicity walk over the shipped
-  NEW_UI_ENTRIES pins the data side.
-- (final commit) this HANDOFF.
+- `7bcedc9` docs(viewer): add features/04 inventory for tokio_stats.html -
+  `docs/ui-inventory/features/04-tokio-stats-html.md`, 69 rows, sections A-K,
+  snapshot date 2026-07-10, full verdict table + reproduce recipe.
+- `930fea5` docs(tickets): ownership summaries updated in
+  `docs/tickets/chunk-3-post.md` (chunk-3 summary + T40 completion note +
+  T41 heads-up). Chunk-1's ownership summary does NOT reference features/04
+  (grep-checked), so per the DoD's conditional it was not edited.
+- (this commit) HANDOFF.
 
-## EVIDENCE (per finding: failing-first -> green)
+## ROW / VERDICT COUNTS
 
-All runs in `dial9-viewer/ui` (npm ci done) on this branch.
+69 rows: A (bootstrap/URL contract) 10, B (periods) 6, C (toolbar) 4,
+D (loading/refinement) 6, E (client stats) 5, F (single-period view) 4,
+G (tabs/diff) 9, H (exemplar links) 4, I (XSS #587) 3, J (backend
+`/api/tokio-stats` contract) 15, K (cross-cutting) 3.
 
-- Finding 1: the 6 cases of "click-time target resolution (T38-audit
-  finding 1)" were written first and failed on the unfixed tree
-  (liveControlHref is not a function); after `6677d16`: 39/39. The
-  audit's stale-boot-query scenario is the first case: boot search
-  `?bucket=b&host=all` yields the boot href; a simulated replaceState to
-  `?bucket=b&host=h1&period=custom` resolves
-  `/new/flamegraph.html?bucket=b&host=h1&period=custom`, asserted
-  different from the boot href.
-- Finding 2: the 5 cases of "legacy-pin storage alignment (T38-audit
-  finding 2)" failed on the unfixed tree (pinWouldBounce is not a
-  function); after `aef8350`: 44/44. The audit's middle-click bounce is
-  a single sequential case: boot pinned with storedPref=new stays legacy
-  (param precedence); the pre-fix reload after the strip resolves "new"
-  (the bounce, asserted); with the pin detected load-bearing and storage
-  aligned to "legacy", the same pin-less reload resolves legacy.
-- Finding 3: 3 behavior cases of "registry cycle guard (T38-audit
-  finding 3)" failed on the unfixed tree (the synthetic cycle produced
-  redirect "/b.html" / "/a.html" from both nodes, param- and
-  pref-driven); after `68eb9cb`: 48/48. The acyclicity walk over the
-  shipped registry is trivially green today (registry empty) and becomes
-  load-bearing as T13/T14/T41 register lines.
+Verdicts (per-row table in the doc's "2026-07-10 validation" section):
+- VERIFIED component (live curl walk / served bytes / fix-diff / T38 unit):
+  22 rows (A1, A3, A8, A10, C1, D1, D2, D3, D5, H4, I1, J1-J3, J5-J7,
+  J10-J15).
+- CODE-READ (no browser driver; re-derivable by the T12 row-walker once T41
+  registers features04 walkers): the remaining 47 rows.
+- NOT-TRIGGERABLE sub-cases recorded with reasons (all T42 fixture targets):
+  time-windowed scopes (demo-key epoch vs date-path catch-22 - BOTH window
+  directions 404, reproduced live), off-CPU class 0 (demo max poll ~1ms <
+  10ms confidence bound), cap-plateau refinement (1 matched file < baseline
+  4), multi-host/-service data, live multi-period diff, `--agg`-server gate
+  variant.
+- Status tags: 1 DEAD row (H4, see findings), rest OK/CONDITIONAL.
 
-## REGRESSION TESTS (named so a reviewer can find them)
+## EVIDENCE - dev-server walk log (2026-07-10, port 3071)
 
-In `dial9-viewer/ui/tests/ui_switch.test.ts`:
-- `click-time target resolution (T38-audit finding 1)`: "legacy side:
-  resolves from the live query after a simulated replaceState, not the
-  boot query", "new side: the live query is carried back with ui=legacy
-  pinned", "re-resolves the page from the live pathname (an SPA
-  pushState may move it)", "falls back to the boot page when the live
-  pathname resolves nothing", "returns null when no target resolves
-  (caller keeps the previous href)", "owns the live ui param: stripped
-  toward new, replaced toward legacy".
-- `legacy-pin storage alignment (T38-audit finding 2)`: "detects the
-  audit's bounce precondition: pin present, stored pref says new",
-  "middle-click scenario: once storage is aligned, a stripped pin no
-  longer bounces", "no alignment when the visitor already resolves
-  legacy without the pin", "no alignment without an explicit ui=legacy
-  pin", "post-flip: the pin is load-bearing for a no-preference visitor
-  too".
-- `registry cycle guard (T38-audit finding 3)`: "a two-page
-  cross-registration cycle never dispatches from either node", "an entry
-  that is itself a registry key is rejected; innocent keys still
-  dispatch", "the live href resolver applies the same guard", "the
-  shipped registry is acyclic: no entry is a registry key".
+Build + launch (post-T04 the dev-server serves ui/dist):
+`npm ci && npm run build` in dial9-viewer/ui (green, 17 items static-copied),
+then `CARGO_TARGET_DIR=<repo>/target PORT=3071 cargo run -p dial9-viewer
+--bin dev-server --features dev-server`.
 
-## FINDING-2 RESIDUAL (and proposed follow-up)
+- `/api/config` -> `{aggregation_enabled:true, supports_byo_credentials:true,
+  supports_assume_role:false, default_bucket:"demo-traces",
+  default_prefix:"traces"}`.
+- `GET /tokio_stats.html` -> 200 text/html, 19483 bytes, byte-identical to
+  `ui/tokio_stats.html` (diff -q); `ui-switch.js` + `creds.js` 200 and
+  byte-identical.
+- Cold poll `?bucket=demo-traces&prefix=traces` -> instant
+  `{time_span_ns:1, total_polls:0, by_spawn_loc:[], coverage:{files_matched:1,
+  files_folded:0, samples_folded:0, total_bytes:4336378, hosts_matched:1,
+  hosts_folded:0}}`.
+- `&refine=true` -> `total_polls:94212`, `time_span_ns:4143811668`, folded
+  1/1 files + 1/1 hosts, 5 spawn locations (top:
+  `examples/metrics-service/src/axum_traced.rs:243:33`, 3319 notable polls).
+  Asserted on the wire with node: durations desc-sorted, all >= 100000 ns,
+  classes aligned + values {1,2,3} only, locations sorted by notable count
+  desc, one zero-notable location present, per-class exemplars with
+  host:"local" + raw source_key.
+- Warm read-only poll -> identical folded counts (frozen terminator).
+- `prefix=no-such-prefix` -> 404 `no source files match this scope`.
+- no `bucket` param -> 404 `tokio-stats requires aggregation (start with
+  --agg or supply a bucket)`.
+- `refine=1` -> 400 (strict serde bool; page always sends literal "true").
+- `service=demo-service` 200; `host=local` 200; `host=local&host=nonexistent`
+  200 (OR semantics); `host=host-0` 404 (demo key's host component is
+  `local`).
+- Time windows: `start_ns/end_ns` at the data's row timestamps (June 2026)
+  -> 404; at the key's date-path hour (2026-04-09 19:00 UTC) -> 404 (listing
+  finds the file, `scope_matches` rejects on the filename epoch 1744224000 =
+  2025-04-09). Catch-22 documented as features/01 finding 3 biting the
+  aggregate listing.
+- `GET /api/trace?...` -> 404 - confirms finding 1 (exemplar deep links dead
+  at HEAD; `/api/trace` removed by #582 (`git show 97cc9fa`) while #570's
+  page still targets it).
 
-The script-side fix provably kills the audit's bounce whenever
-localStorage is writable, which covers every storage state that can
-produce the bounce pre-flip (the bounce needs a READABLE storedPref of
-"new"; a readable-but-unwritable localStorage is an exotic edge). Two
-residuals remain that CANNOT be fixed from ui-switch.js, because the pin
-is simply gone from the URL:
+Doc integrity: markdown tables render (pipe-balanced), anchors spot-checked
+against the tree - page anchors from the numbered read of tokio_stats.html
+(escapeHtml 93, syncUrl 147, exemplarLink 166, computeStats 177,
+renderFromCache 226, renderSinglePeriod 272, renderDiffView 302, loadPeriod
+371, auto-load 428), backend anchors re-greped (get_tokio_stats
+tokio_stats.rs:71, classify_poll 224, scope_matches aggregate.rs:236,
+time_scoped_prefixes refine.rs:381, route mod.rs:448, gate config.rs:30);
+the features/01 H6 cross-link notes the +1 line shift T38 introduced in
+index.html.
 
-1. Storage-unwritable visitors after the DEFAULT_UI flip: with the
-   default "new", a pinned visitor with NO stored preference (or whose
-   storage rejects writes) bounces on reload once a page strips the pin.
-   writeStoredPref is best-effort by design.
-2. Post-strip copied URLs across browsers: a URL copied from the address
-   bar AFTER the page's first URL sync carries no ui=legacy at all, so a
-   recipient (or the same user in another browser/profile) resolving
-   "new" lands on the new UI. Pre-strip copies keep the pin (and the
-   finding-1 mousedown refresh keeps the control's own copy-link URL
-   pinned and live).
+## NOTABLE FINDINGS (detailed in the doc)
 
-Proposed ONE-LINE follow-up for the page tickets (recorded here, NOT
-applied - page edits beyond T38's sanctioned script include are fenced):
-in each query-rebuild helper that replaces the URL from scratch
-(index.html:749 via url_state, flamegraph.html:219, tokio_stats.html:155),
-carry the `ui` param through the rebuild before
-history.replaceState/pushState, e.g.
-`if (new URLSearchParams(location.search).has("ui")) params.set("ui", new URLSearchParams(location.search).get("ui"));`
-(viewer.html:1946-1952 already preserves unknown params and needs
-nothing). That closes both residuals; the script-side alignment stays
-correct alongside it.
+1. H4: exemplar deep links broken at HEAD (`/api/trace` removed by #582);
+   fix candidate is one line (`/api/object?bucket&key`). T41 ledger decision.
+2. D4: coverage fetched but never displayed (no refinement progress UI,
+   unlike flamegraph F174/F176-F179); silent plateau at the sampling cap.
+3. E2/H2: mixed (2) + unknown (3) classes and their exemplars are on the
+   wire but invisible in the UI.
+4. G3: diff view throws (TypeError on `first.rate`) when P1 failed to load
+   while 2+ later periods loaded. Code-read.
+5. A4/A7: URL restores at most 10 periods; sync writes all of them.
 
-## DECISIONS A REVIEWER SHOULD SEE
+## OPEN QUESTIONS
 
-- pinWouldBounce generalizes the audit's literal trigger ("storage says
-  new") to "the pin is the only thing keeping this visitor on legacy"
-  (resolution without the pin === "new"). Pre-flip the two conditions
-  are identical; post-flip the general form also covers no-preference
-  visitors. It stays false when the visitor already resolves legacy, so
-  a shared ?ui=legacy link does NOT sticky-switch such recipients
-  (mirroring the write-on-click-only rule). It DOES sticky-switch a
-  recipient whose stored pref says "new" - the audit explicitly weighs
-  honoring the pinned intent above the no-sticky rule for exactly that
-  conflict.
-- The control's href refresh is null-safe: if the live location stops
-  resolving to a registered target (cannot happen with today's static
-  pathnames), the previous href is kept rather than rendering a dead
-  link.
-- The browser wiring itself (mountControl listeners, run()'s alignment
-  call) remains untestable at the DOM level in this suite - the same
-  structural gap the T38 HANDOFF recorded (pure decide()-level tests;
-  browser-level coverage lands with T13/T14's first registered page).
-  All new decision logic is pure and exported precisely so the audit
-  scenarios are testable now.
-- Finding 3 hardening intentionally rejects CHAINS too (an entry that is
-  a registered key, even without a full cycle): a new-UI entry is never
-  a root-level canonical page, so such a registration is always a
-  misconfiguration; the innocent key keeps dispatching (tested).
-
-## GATES
-
-1. `npx tsc --noEmit`: clean (exit 0), re-verified after each commit and
-   at the end.
-2. `npm run test` (full suite): 46 files passed, 1 skipped; 839 tests
-   passed, 1 expected fail, 11 skipped; exit 0. Targeted suite
-   `npx vitest run tests/ui_switch.test.ts`: 48/48.
-3. `npm run build`: clean; `cmp ui-switch.js dist/ui-switch.js`:
-   byte-identical (static-copy ships it verbatim).
-4. `cargo build -p dial9-viewer`: exit 0 (AGENTS.md JS-only rule; no new
-   embedded files, no .rs touched - no nextest/stress/clippy/fmt run).
-   No new ui-root plain-script tests, so no e2e-trace-tests.sh
-   registration (the extended suite is the existing vitest-discovered
-   tests/ui_switch.test.ts).
-
-## REMAINING
-
-- Page tickets (T13/T14/T41): the one-line `ui`-param carry-through
-  above, closing the finding-2 residuals.
-- T13 (first registration) inherits the audit's browser-level test
-  obligation for run()/mountControl (real round trip in a browser).
-
-## BLOCKERS
-
-None.
+None blocking. Two notes for the maintainer/next tickets:
+- The T40 DoD's "T12 row-walker used for validation" was satisfied in the
+  sanctioned fallback mode (hand-walk + curl in the features/01-refresh
+  style, each verdict recording its method): `ui/parity/walkers/` contains
+  only `features01.mjs`, and features/04 walkers are T41's deliverable. A
+  minimal features04 registry was considered and skipped as not-cheap: the
+  page's rows are dominated by API-contract and multi-period states the
+  walker lib has no fixtures for yet.
+- Whether to fix finding 1 (dead exemplar links) in legacy before T41, or
+  only in the migrated page, is a ledger call outside T40's docs-only fence.
