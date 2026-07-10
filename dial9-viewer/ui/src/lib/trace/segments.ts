@@ -1386,45 +1386,35 @@ export function createSegmentWindow(
     })();
   };
 
-  const schedulePrefetch = (key: string): void => {
-    if (pendingPrefetch.has(key)) return;
-    pendingPrefetch.add(key);
-    idle(() => {
-      pendingPrefetch.delete(key);
-      if (disposed || view === null) return;
-      // Re-verify at idle time: the viewport may have moved on.
-      const need = computeNeedSet(segments, view);
-      const prefetch = computePrefetchSet(segments, need, view);
-      if (!prefetch.includes(key)) return;
-      startJob(key);
-    });
-  };
-
-  // ── reconcile: the whole policy, one pass ───────────────────────────────
-
-  const reconcile = (): void => {
-    if (disposed || view === null) return;
-    const currentView = view;
+  /**
+   * Budget admission for a viewport (N19 window limit): need first,
+   * prefetch only into what remains. Estimates use real decompressed
+   * sizes when known. Shared by reconcile and the idle prefetch
+   * callbacks - the latter must re-run ADMISSION, not just geometry,
+   * before starting work (T17-audit finding 4).
+   *
+   * Segments that can NEVER fit (real size learned oversized, T17-audit
+   * finding 2) are excluded from admission entirely - capToBudget's
+   * first-round force-admit clause must only ever see estimates or
+   * fitting sizes, or the parse -> evict loop returns. They still
+   * render via tier 1. Geometric sets are computed FIRST so an
+   * oversized need segment keeps contributing its neighbors to the
+   * prefetch geometry.
+   */
+  const planAdmission = (
+    currentView: TimeRange
+  ): { needPlan: AdmissionPlan; prefetchPlan: AdmissionPlan } => {
     const geometricNeed = computeNeedSet(segments, currentView);
     const geometricPrefetch = computePrefetchSet(
       segments,
       geometricNeed,
       currentView
     );
-    // Segments that can NEVER fit (real size learned oversized, T17-audit
-    // finding 2) are excluded from admission entirely - capToBudget's
-    // first-round force-admit clause must only ever see estimates or
-    // fitting sizes, or the parse -> evict loop returns. They still
-    // render via tier 1. Geometric sets are computed FIRST so an
-    // oversized need segment keeps contributing its neighbors to the
-    // prefetch geometry.
     const admissible = (key: string): boolean =>
       entriesNow().get(key)?.state !== "oversized";
     const needKeys = geometricNeed.filter(admissible);
     const prefetchKeys = geometricPrefetch.filter(admissible);
 
-    // Budget admission (N19 window limit): need first, prefetch only into
-    // what remains. Estimates use real decompressed sizes when known.
     const capacity = evictionTriggerBytes(residentBudget, threshold);
     const toCandidate = (key: string): AdmissionCandidate => ({
       key,
@@ -1442,6 +1432,39 @@ export function createSegmentWindow(
       capacity,
       needBytes
     );
+    return { needPlan, prefetchPlan };
+  };
+
+  const schedulePrefetch = (key: string): void => {
+    if (pendingPrefetch.has(key)) return;
+    pendingPrefetch.add(key);
+    idle(() => {
+      pendingPrefetch.delete(key);
+      if (disposed || view === null) return;
+      // Re-verify at idle time: the viewport may have moved on, and the
+      // latest reconcile may have budget-DEFERRED this key even though
+      // it is still a geometric neighbor (T17-audit finding 4).
+      // Geometry alone is not admission: starting anyway would burn a
+      // fetch + parse that lands unprotected and is discarded by the
+      // next eviction pass, after transiently pushing resident past the
+      // trigger.
+      const { needPlan, prefetchPlan } = planAdmission(view);
+      if (
+        !needPlan.admitted.includes(key) &&
+        !prefetchPlan.admitted.includes(key)
+      ) {
+        return;
+      }
+      startJob(key);
+    });
+  };
+
+  // ── reconcile: the whole policy, one pass ───────────────────────────────
+
+  const reconcile = (): void => {
+    if (disposed || view === null) return;
+    const currentView = view;
+    const { needPlan, prefetchPlan } = planAdmission(currentView);
     const wanted = new Set([...needPlan.admitted, ...prefetchPlan.admitted]);
 
     // Stale-fetch cancellation (2.8 hard edge): viewport jumps abort

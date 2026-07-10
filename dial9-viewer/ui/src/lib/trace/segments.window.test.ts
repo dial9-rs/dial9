@@ -756,6 +756,56 @@ describe("prefetch", () => {
     expect(entryOf(store, segKey(3))!.state).toBe("parsed");
   });
 
+  it("T17-audit finding 4: a stale idle callback re-runs BUDGET admission, not just geometry", async () => {
+    // Segment layout: A and B small, C big. Under V1 (over A) the
+    // prefetch of B is budget-admitted and queued at idle priority.
+    // Under V2 (over C) B is STILL a geometric neighbor, but the need
+    // set's estimate eats the capacity: the latest reconcile budget-
+    // DEFERRED B. The stale idle callback must not start it anyway -
+    // that fetch + parse would land unprotected and be discarded by the
+    // very next eviction pass, after transiently pushing resident past
+    // the trigger.
+    const segs = makeSegments(3, 10); // estimates 40 each...
+    segs[2] = { ...segs[2]!, sizeBytes: 40 }; // ...but C estimates 160
+    const store = makeStore();
+    const fetcher = makeFetcher();
+    const parser = makeParser({
+      tag: fetcher.tag,
+      rawByteLengthFor: (url) => (url === segKey(2) ? 160 : 40),
+    });
+    const idle = makeIdle();
+    const win = createSegmentWindow(store, segs, {
+      fetchBytes: fetcher.fetchBytes,
+      parser: parser.parser,
+      idle: idle.idle,
+      residentBudgetBytes: 200, // trigger 180
+    });
+
+    // V1: need {A} (40) admitted, prefetch {B} (40 on top of 40) admitted
+    // and queued for idle - which deliberately does NOT run yet.
+    win.setViewport(viewOver(segs, 0));
+    await settle();
+    expect(entryOf(store, segKey(0))!.state).toBe("parsed");
+    expect(idle.queuedCount()).toBe(1);
+
+    // V2: need {C} (est 160) admitted; prefetch {B}: 160 + 40 > 180,
+    // budget-deferred by this reconcile.
+    win.setViewport(viewOver(segs, 2));
+    await settle();
+    expect(entryOf(store, segKey(2))!.state).toBe("parsed");
+
+    // The stale idle callback fires now. B is still V2's geometric
+    // prefetch neighbor - geometry alone would start it.
+    idle.runIdles();
+    await settle();
+
+    expect(fetcher.calls).not.toContain(segKey(1));
+    expect(parser.started).not.toContain(segKey(1));
+    expect(entryOf(store, segKey(1))!.state).toBe("listed");
+    expect(win.stats().networkFetches).toBe(2); // A and C only
+    win.dispose();
+  });
+
   it("a stale idle callback (viewport moved on) starts nothing", async () => {
     const segs = makeSegments(8);
     const store = makeStore();
