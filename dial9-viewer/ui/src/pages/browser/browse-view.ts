@@ -10,11 +10,13 @@
 // debounced resize (browse.renderEpoch). Anything else that changes the
 // browse slice (e.g. the selection) re-runs the cheap chrome writes only.
 
+// Leaf heatmap seam, not the lib/canvas barrel (see actions.ts: the barrel
+// evaluates trace_analysis.js, which the browser page must not carry).
 import {
   accumulateDensity,
   bootTransitions,
   densityColor,
-} from "../../lib/canvas/index.js";
+} from "../../lib/canvas/heatmap.js";
 import { assertInScheduledRender } from "../../store/store.js";
 import { ROW_H } from "./actions.js";
 import type { PageCtx } from "./ctx.js";

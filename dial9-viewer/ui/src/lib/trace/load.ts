@@ -402,20 +402,7 @@ export function loadTraceInWorker(
   };
 }
 
-/**
- * Build one viewer `trace=` component per selected key, each pointing at
- * /api/object (which serves that single file's raw, still-gzipped bytes).
- * The viewer and flamegraph read all repeated `trace=` params and download
- * them in parallel + gunzip client-side (see loadTrace above). Ported from
- * index.html:1713-1720 (features/01 I4); this replaced a single /api/trace
- * URL that forced the backend to fetch, gunzip and merge every file into
- * one large uncompressed response.
- */
-export function objectTraceUrls(bucket: string, keys: readonly string[]): string[] {
-  return keys.map((key) => {
-    const p = new URLSearchParams();
-    p.set("bucket", bucket);
-    p.set("key", key);
-    return "/api/object?" + p.toString();
-  });
-}
+// objectTraceUrls (features/01 I4) moved to ./object-urls.ts (T14) so the
+// browser page can import it without pulling the parser into its bundle;
+// re-exported here to keep this module's import surface unchanged.
+export { objectTraceUrls } from "./object-urls.js";

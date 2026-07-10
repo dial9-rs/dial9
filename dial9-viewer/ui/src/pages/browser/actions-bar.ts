@@ -3,7 +3,8 @@
 // The render is the legacy updateSelectionCount (index.html:1888-1922)
 // as a pure function of store state.
 
-import { MAX_OPEN_BYTES } from "../../lib/canvas/index.js";
+// Leaf heatmap seam, not the lib/canvas barrel (see actions.ts).
+import { MAX_OPEN_BYTES } from "../../lib/canvas/heatmap.js";
 import { assertInScheduledRender } from "../../store/store.js";
 import type { PageCtx } from "./ctx.js";
 import { fmtTick, formatSize } from "./format.js";

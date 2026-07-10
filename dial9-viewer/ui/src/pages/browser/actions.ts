@@ -5,6 +5,10 @@
 // store scheduler). Text inputs stay DOM-owned; actions read them live,
 // exactly like the legacy handlers did.
 
+// Leaf seam modules, NOT the lib barrels: the barrel indexes evaluate
+// modules that import trace_analysis.js / trace_parser.js at init (they
+// expect <script>-established globals in a browser), and the legacy
+// browser page never loaded the parser at all - its port must not either.
 import {
   MAX_OPEN_BYTES,
   groupByHost,
@@ -13,8 +17,8 @@ import {
   segmentsOverlapping,
   tileSegments,
   totalBytes,
-} from "../../lib/canvas/index.js";
-import { isDateLayer } from "../../lib/trace/index.js";
+} from "../../lib/canvas/heatmap.js";
+import { isDateLayer } from "../../lib/trace/prefixes.js";
 import { apiFetch, type BrowseResponse } from "./api.js";
 import type { BrowserEls } from "./dom.js";
 import { dateToPickerStr, pickerToDate, xToTime } from "./format.js";
@@ -110,7 +114,14 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
       if (toDate) state.to = Math.floor(toDate.getTime() / 1000);
     }
     const qs = window.Dial9UrlState.serialize(state);
-    history.replaceState(null, "", qs ? "?" + qs : window.location.pathname);
+    // Keep the pathname explicit: a bare "?qs" would resolve against
+    // <base href="/"> and rewrite this off-root page's path to "/". The
+    // legacy page (served at the root) got the same result implicitly.
+    history.replaceState(
+      null,
+      "",
+      window.location.pathname + (qs ? "?" + qs : ""),
+    );
   }
 
   function mirrorPrefix(): void {

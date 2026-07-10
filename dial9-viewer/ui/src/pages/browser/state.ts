@@ -13,7 +13,7 @@
 // from it (features/01 D9 `updateSearchReady`).
 
 import { createStore, type Store } from "../../store/store.js";
-import type { HostRow } from "../../lib/canvas/index.js";
+import type { HostRow } from "../../lib/canvas/heatmap.js";
 
 /** One object row from GET /api/browse (`objects[]`). */
 export interface BrowseObject {
@@ -220,5 +220,18 @@ export function initialBrowserState(): BrowserState {
 }
 
 export function createBrowserStore(): BrowserStore {
-  return createStore(initialBrowserState());
+  return createStore(initialBrowserState(), {
+    // Microtask scheduler instead of the default requestAnimationFrame:
+    // updates made in an event handler still coalesce (one flush per task),
+    // but the flush lands before the event's turn ends - matching the
+    // legacy page, where every DOM effect was synchronous inside the
+    // handler. This page's renders are cheap idempotent chrome writes plus
+    // an identity-memoized canvas paint, so per-task flushing carries none
+    // of the per-frame-render concerns the RAF default exists for (F2);
+    // what it buys is that anything observing the DOM right after an input
+    // event (users, and the T12 row walkers, which assert click -> effect
+    // with no settle wait, exactly like the legacy page allowed) never
+    // sees a stale frame.
+    scheduler: (cb) => queueMicrotask(cb),
+  });
 }

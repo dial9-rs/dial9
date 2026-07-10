@@ -77,6 +77,11 @@ export function mountHeatmapInteraction({ store, els, actions }: PageCtx): void 
     actions.resetHeatmapZoom();
   });
 
+  // The "Reset zoom" button in the hint bar (F16; legacy inline onclick).
+  els.heatmapResetZoom.addEventListener("click", () => {
+    actions.resetHeatmapZoom();
+  });
+
   // Clicking anywhere outside the timeline and the actions bar clears the
   // current selection (F18). Clicks inside the plot are handled by its own
   // mousedown/up; clicks on the action buttons must preserve the selection.

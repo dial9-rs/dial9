@@ -17,7 +17,12 @@
 // title metadata at lib/trace/title.ts.
 // ==========================================================================
 
-import { parseKey, objectTraceUrls } from "../../lib/trace/index.js";
+// Leaf lib/trace modules, NOT the barrel: the barrel evaluates load.ts,
+// which imports the frozen trace_parser.js at module init - the browser
+// page's bundle must not carry (or evaluate) the parser, exactly like the
+// legacy page never <script>-loaded it.
+import { parseKey } from "../../lib/trace/keys.js";
+import { objectTraceUrls } from "../../lib/trace/object-urls.js";
 import { formatEpochStr } from "./format.js";
 
 export { objectTraceUrls };
