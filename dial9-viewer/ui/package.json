@@ -13,6 +13,8 @@
   "devDependencies": {
     "@types/node": "^24.13.3",
     "@vitest/coverage-v8": "^4.1.10",
+    "axe-core": "^4.12.1",
+    "playwright": "^1.61.1",
     "typescript": "^5.9.3",
     "vite": "^7.3.0",
     "vite-plugin-static-copy": "^3.2.0",

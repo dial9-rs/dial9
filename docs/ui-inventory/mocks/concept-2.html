@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Concept 2: triage-first</title>
+<link rel="stylesheet" href="mock.css"></head>
+<body>
+<div class="mockbar"><b>CONCEPT 2 - Triage-first</b>
+  <span>cold-open answers "is anything wrong?": ranked issues rail left, timeline center, inspector right</span>
+  <span class="key">C</span><span>hold to compare with current UI</span>
+  <span style="margin-left:auto"><a href="index.html">gallery</a> · <a href="concept-1.html">concept 1</a> · <a href="concept-3.html">concept 3</a></span>
+</div>
+
+<div class="toolbar">
+  <span class="title">demo-trace.bin</span><span class="meta">294,465 events · 2 workers · 4.15s</span>
+  <span style="background:rgba(255,107,107,.15); border:1px solid #ff6b6b; border-radius:4px; padding:2px 8px; font-size:11px">
+    ⚠ 74 sched delays · 12 long polls · 3 blocking calls <span class="tag-new">red-flags summary</span></span>
+  <span style="margin-left:auto"></span>
+  <button class="btn-hot">🔥 Flamegraph (8993)</button><button>?</button>
+</div>
+
+<div class="minimap"><div class="density"></div>
+  <div class="poi" style="left:12%"></div><div class="poi" style="left:31%"></div><div class="poi" style="left:58%"></div>
+  <div class="viewport"></div><div class="label">overview · click issue row -> viewport jumps <span class="tag-new">NEW</span></div>
+</div>
+
+<div style="flex:1; display:flex; min-height:0">
+  <!-- Issues rail: the POI worklist as a real, ranked, keyboard-navigable list -->
+  <div style="width:300px; background:#151530; border-right:1px solid #3a3a5e; display:flex; flex-direction:column; flex-shrink:0">
+    <div style="padding:6px 10px; font-size:11px; color:#778; border-bottom:1px solid #333">
+      ISSUES <span class="tag-new">replaces "0/74 Next"</span> · <span class="key">n</span>/<span class="key">p</span> step · sort: worst
+    </div>
+    <div style="flex:1; overflow:auto">
+      <table class="poilist">
+        <tr><th></th><th>what</th><th>t</th><th>dur</th></tr>
+        <tr class="on"><td><span class="dot d-red"></span>W1</td><td>sched delay</td><td>+1.72s</td><td>84ms</td></tr>
+        <tr><td><span class="dot d-red"></span>W0</td><td>long poll</td><td>+2.03s</td><td>61ms</td></tr>
+        <tr><td><span class="dot d-org"></span>W1</td><td>blocking call</td><td>+0.88s</td><td>37ms</td></tr>
+        <tr><td><span class="dot d-org"></span>W0</td><td>sched delay</td><td>+3.11s</td><td>29ms</td></tr>
+        <tr><td><span class="dot d-yel"></span>W1</td><td>long poll</td><td>+1.09s</td><td>18ms</td></tr>
+        <tr><td><span class="dot d-yel"></span>W0</td><td>queue spike</td><td>+3.64s</td><td>q:76</td></tr>
+      </table>
+      <div style="padding:6px 10px" class="illustrative">rows illustrative; real data = existing POI + red-flag detectors</div>
+    </div>
+  </div>
+
+  <div style="flex:1; overflow-y:auto; min-width:0">
+    <div class="strip crop" style="height:130px; background-image:url(assets/crop-lanes.png); background-position:0 -6px;"></div>
+    <div class="strip"><div class="strip-label">CPU</div>
+      <div class="crop" style="height:64px; margin-left:100px; background-image:url(assets/A1-all-panels-expanded.png); background-position:-100px -790px;"></div></div>
+    <div class="strip"><div class="strip-label">Queue G+L</div>
+      <div class="crop" style="height:64px; margin-left:100px; background-image:url(assets/A1-all-panels-expanded.png); background-position:-100px -905px;"></div></div>
+    <div style="padding:8px 12px" class="illustrative">selected issue -> orange marker line across all tracks at +1.72s; spans/events tracks available via track picker</div>
+  </div>
+
+  <div class="inspector" style="width:330px">
+    <div class="tabs"><div class="on">Issue</div><div>Task</div><div>Stack</div></div>
+    <div class="body">
+      <div style="color:#ff6b6b; margin-bottom:6px">Kernel sched delay · 84ms</div>
+      <div class="kv"><span class="k">worker</span><span class="v">W1</span></div>
+      <div class="kv"><span class="k">at</span><span class="v">+1.72s (14:29:21.84)</span></div>
+      <div class="kv"><span class="k">task</span><span class="v">0x3a axum_traced.rs:243</span></div>
+      <div class="kv"><span class="k">queue at t</span><span class="v">G:0 L:8</span></div>
+      <div style="margin-top:10px; color:#888; font-size:11px">Issue -> its task -> its stack without leaving the rail. "why is this slow" chain in one place.</div>
+    </div>
+  </div>
+</div>
+
+<div class="statusbar">
+  <span class="sel">Issue 1/74 · W1 sched delay</span>
+  <span>view +1.32s - +2.24s</span>
+  <span class="link">⎘ copy link to this view</span>
+  <span style="margin-left:auto">/ search · n/p issue · f fit · z undo zoom · g goto · ? help</span>
+</div>
+
+<div class="fullshot" id="cmp" style="background-image:url(assets/J1-1-viewer-initial.png)"></div>
+<div class="compare-note">hold <b>C</b> = current UI</div>
+<script>
+  const cmp = document.getElementById("cmp");
+  addEventListener("keydown", e => { if (e.key.toLowerCase() === "c") cmp.style.display = "block"; });
+  addEventListener("keyup", e => { if (e.key.toLowerCase() === "c") cmp.style.display = "none"; });
+</script>
+</body></html>
