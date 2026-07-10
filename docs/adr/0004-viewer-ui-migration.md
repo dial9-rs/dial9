@@ -18,6 +18,7 @@ Ground rule: lose nothing. The current functional surface is the contract. This 
 | `docs/ui-inventory/02-architecture.md`          | Non-functional requirements and target architecture                                                                                            |
 | `docs/ui-inventory/03-performance-findings.md`  | Measured structural performance issues and the design rules they yield                                                                         |
 | `docs/ui-inventory/04-ux-findings.md`           | UX audit: 23 verified findings (8 structural, 8 keyboard, 7 feedback), genre-gap table, works-well list                                        |
+| `docs/ui-inventory/05-url-view-state.md`        | Versioned URL view-state schema (hash codec, T19): key registry, precedence vs legacy zoom params, ownership boundary, chunk-2 extension rules |
 | `docs/ui-inventory/mocks/`                      | Runnable design mocks (3 layout concepts + interactive keyboard model); see its README                                                         |
 
 ## Decisions
