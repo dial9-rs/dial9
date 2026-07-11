@@ -149,7 +149,7 @@ into a report keep resolving.
 | `host` | Host name (display label) |
 | `from` | Human-readable wall-clock start (display only) |
 | `to` | Human-readable wall-clock end (display only) |
-| `segs` | Segment COUNT as an integer string (display only) — NOT a list of segment keys |
+| `segs` | Segment COUNT as an integer string (display only) - NOT a list of segment keys |
 
 **`?worker=`, `?task=`, and `?source=` do NOT exist.** Do not invent them — they will be silently ignored. Selection/highlight params do not exist yet either: the contract reserves hash keys (`sel.*`, `vp`) that land with the migrated viewer; until then a time window is the finest link granularity.
 
@@ -170,7 +170,7 @@ than hand-assembling the path; zoom restore requires the same
 ```
 
 On migrated (chunk-1+) pages the same zoom state also travels in the URL
-hash as `#v=1&fg.w=<path>`; emit the `worker-zoom` query form in reports —
+hash as `#v=1&fg.w=<path>`; emit the `worker-zoom` query form in reports -
 it works on both page generations.
 
 ### Limitation
