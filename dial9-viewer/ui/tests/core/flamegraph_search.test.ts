@@ -29,7 +29,7 @@ const require = createRequire(import.meta.url);
 
 interface TreeNode {
   name: string;
-  fullName?: string;
+  fullName?: string | undefined;
   children: Map<string, TreeNode>;
   count: number;
   self: number;
