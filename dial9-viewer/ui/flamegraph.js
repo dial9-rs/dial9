@@ -267,7 +267,8 @@
   //     (counted once per stack, at the top-most occurrence — no recursion
   //     double-count), i.e. how "big" the frame is across the whole graph.
   //   - self:  leaf samples attributed to the function (always exact).
-  //   - sites: number of top-most call sites.
+  //   - sites: number of distinct call paths (top-most occurrences) into the
+  //     function; rendered as "call paths" in the UI.
   function collectSearchResults(roots, queryLower) {
     const rootList = Array.isArray(roots) ? roots : [roots];
     const byKey = new Map();
@@ -826,7 +827,7 @@
       const bits = [res.total.toLocaleString() + " samples"];
       if (pct) bits.push(pct);
       if (selfPct) bits.push(selfPct);
-      bits.push(res.occurrences + (res.occurrences === 1 ? " site" : " sites"));
+      bits.push(res.occurrences + (res.occurrences === 1 ? " call path" : " call paths"));
       statSpan.textContent = bits.join(" · ");
       focusBand.appendChild(statSpan);
       // Fixed accent color (set in CSS) — the focus band is deliberately NOT
@@ -1042,7 +1043,7 @@
         row.className = "fg-sr-row";
         row.title = (r.fullName || r.name) + "\n" + r.total.toLocaleString() +
           " samples · " + r.self.toLocaleString() + " self · " +
-          r.sites + (r.sites === 1 ? " site" : " sites");
+          r.sites + (r.sites === 1 ? " call path" : " call paths");
 
         const bar = document.createElement("span");
         bar.className = "fg-sr-bar";
@@ -1056,7 +1057,7 @@
         const size = document.createElement("span");
         size.className = "fg-sr-size";
         size.textContent = pct + "% · " + r.total.toLocaleString() +
-          (r.sites > 1 ? " · " + r.sites + " sites" : "");
+          (r.sites > 1 ? " · " + r.sites + " paths" : "");
 
         row.appendChild(bar);
         row.appendChild(name);
@@ -1162,7 +1163,8 @@
           '<span style="color:#555"> (' + (isMac ? '\u2318' : 'Ctrl') + ' + click)</span>';
       }
       if (!pinned) {
-        h += '<br><span style="color:#555">' + (isMac ? '\u2325' : 'Alt') + ' + click to pin</span>';
+        h += '<br><span style="color:#555">' + (isMac ? '\u2325' : 'Alt') +
+          ' + click to pin \u00b7 right-click to inspect</span>';
       }
       return h;
     }
