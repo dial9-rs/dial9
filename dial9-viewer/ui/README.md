@@ -432,6 +432,19 @@ per frame via a pluggable source (`lib/render-sources.mjs`; the default
 node parity/perf-probe.mjs --url <pageUrl> [--journey J3] [--render-source stub] [--json p]
 ```
 
+**(f) URL-contract check** - the live half of the URL contract's
+enforcement (the codec-level pin is `src/lib/url/url-contract.test.ts`):
+constructs the contract section's deep-link recipe URLs in plain Node (no
+browser) and asserts real pages honor them - the legacy viewer opens at an
+exact `?start/?end` window, the recorded zoom link restores on both page
+generations (query form on legacy, `#v=1` hash form on migrated), reserved
+hash keys are inert, a foreign version restores nothing. Exit 0 only when
+all legs pass:
+
+```bash
+node parity/url-contract.mjs --base http://localhost:3021 [--json p]
+```
+
 Self-tests (run whenever the tools themselves change): census and behavioral
 differ legacy-vs-legacy on the same URL must emit ZERO diff; the row-walker
 against the legacy browser page must stay green (zero FAILED).
