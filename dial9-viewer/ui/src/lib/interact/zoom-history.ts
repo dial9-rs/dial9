@@ -2,12 +2,11 @@
 // unified `z` (undo last zoom) key (T20; 04-ux-findings.md K4, mock
 // keyboard.html "z - undo last zoom (view history)").
 //
-// One generic mechanism, two consumers in chunk 1:
-//   - the store-owned viewport history (ViewportSlice.zoomHistory,
-//     lib/interact/viewport.ts) for the viewer's time window - T23 wires
-//     the viewer surfaces to it in chunk 2;
-//   - the flamegraph page's frame-zoom history over the frozen widget's
-//     zoom paths (src/pages/flamegraph/fg-zoom-history.ts).
+// One generic mechanism; its chunk-1 consumer is the flamegraph page's
+// frame-zoom history over the frozen widget's zoom paths
+// (src/pages/flamegraph/fg-keys.ts). The viewer's store-owned viewport
+// history (its ViewportSlice) reuses this same stack when T23 wires the
+// viewer surfaces in chunk 2.
 //
 // Zoom history is STORE/page state, deliberately NOT URL state: the T19
 // view-state codec owns the hash, and carrying an undo stack in a share
