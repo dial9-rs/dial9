@@ -135,6 +135,35 @@
                     errorEl.textContent = msg;
                 }
 
+                // ── View state <-> URL (single source of truth) ──────────────
+                // "Deep-link anything" means the URL IS the store for the
+                // flamegraph's view state (the zoom path + the inspect/butterfly
+                // focus). Rather than a framework, we centralize the encode/decode
+                // in these two pure helpers so every mode (exact-trace and API
+                // aggregate) serializes and restores focus identically — a shared
+                // link always reproduces the exact focus position. The renderer
+                // owns the live state; these functions are the only place that
+                // maps it to/from URL params.
+                function writeViewState(p, fg) {
+                    const z = fg.getZoomPath();
+                    if (z.worker && z.worker.length) p.set("worker-zoom", z.worker.join("\t"));
+                    else p.delete("worker-zoom");
+                    if (z.offworker && z.offworker.length) p.set("offworker-zoom", z.offworker.join("\t"));
+                    else p.delete("offworker-zoom");
+                    const inspect = fg.getInspectFocus();
+                    if (inspect) p.set("inspect", inspect);
+                    else p.delete("inspect");
+                    return p;
+                }
+                function restoreViewState(fg, p) {
+                    const wz = p.get("worker-zoom");
+                    const oz = p.get("offworker-zoom");
+                    if (wz) fg.zoomToPath("worker", wz.split("\t"));
+                    if (oz) fg.zoomToPath("offworker", oz.split("\t"));
+                    const inspect = p.get("inspect");
+                    if (inspect) fg.focusInspectByKey(inspect);
+                }
+
                 // --- Diff mode: two-sided differential flamegraph (?diff=1) ---
                 // Side A (left) and side B (right) are independent aggregate
                 // scopes (each a base64url'd query in `a=`/`b=`). Both default to
@@ -464,7 +493,7 @@
                         <button id="f-more" style="background:#2a2a4a;color:#e0e0e0;${btnStyle}">Refine more</button>
                         <button id="f-stop" style="background:#2a2a4a;color:#e0e0e0;${btnStyle};opacity:0.4;cursor:not-allowed" disabled>Stop</button>
                         <span style="flex:1"></span>
-                        <button id="f-copylink" title="Copy a link that re-fetches this exact scope (bucket/prefix included; no credentials)" style="background:#2a2a4a;color:#e0e0e0;border:1px solid #444;padding:4px 14px;border-radius:3px;cursor:pointer;font-weight:600">Copy link</button>
+                        <button id="f-copylink" title="Copy a link that re-opens this exact view — scope (bucket/prefix included; no credentials) plus your current zoom/inspect focus" style="background:#2a2a4a;color:#e0e0e0;border:1px solid #444;padding:4px 14px;border-radius:3px;cursor:pointer;font-weight:600">Copy link</button>
                         <button id="f-adddiff" title="Capture this view (current host/filters) as one side of a diff; pick a second host/scope and add it to compare" style="background:#2a2a4a;color:#e0e0e0;border:1px solid #444;padding:4px 14px;border-radius:3px;cursor:pointer;font-weight:600">+ Add to diff</button>
                         <button id="f-diff" title="Compare this flamegraph against another" style="background:#2a2a4a;color:#e0e0e0;border:1px solid #444;padding:4px 14px;border-radius:3px;cursor:pointer;font-weight:600">Diff…</button>
                     `;
@@ -621,7 +650,24 @@
                         const endNs = pickerUtcToNs(fEnd.value);
                         if (startNs) p.set("start_ns", startNs);
                         if (endNs) p.set("end_ns", endNs);
+                        // Carry the live zoom/inspect focus so the address bar (and
+                        // anything copied from it) always reproduces the exact view.
+                        if (fg) writeViewState(p, fg);
                         history.pushState(null, "", window.location.pathname + "?" + p.toString());
+                    }
+
+                    // Fired by the renderer on every zoom/inspect change. Rewrites
+                    // the address bar in place (no history spam) so the URL always
+                    // reflects the current focus — deep-linkable at any moment.
+                    // A genuine (user-driven) change also ends URL-restore attempts
+                    // so a late-arriving snapshot can never snap the view back.
+                    let restoringView = false;
+                    function onApiViewChange() {
+                        if (!fg) return;
+                        if (!restoringView) viewRestored = true;
+                        const p = new URLSearchParams(window.location.search);
+                        writeViewState(p, fg);
+                        history.replaceState(null, "", window.location.pathname + "?" + p.toString());
                     }
 
                     // Build the data-driven facet controls from the backend's
@@ -739,7 +785,7 @@
                         return { name: node.name, count: node.count, self: node.self, children: m };
                     }
 
-                    const fg = FlamegraphRenderer.createFlamegraph(containerEl);
+                    const fg = FlamegraphRenderer.createFlamegraph(containerEl, onApiViewChange);
 
                     // Build the base stats string ("N samples \u00b7 M hosts \u00b7 \u2026")
                     // from the response metadata, shared by every event.
@@ -762,6 +808,9 @@
                     // stream that has since been superseded.
                     let streamToken = 0;
                     let abortCtl = null;
+                    // One-time guard: restore zoom/inspect focus from the URL on
+                    // the first streamed snapshot only.
+                    let viewRestored = false;
                     // The last-rendered coverage badge (without the trailing status
                     // suffix), so close/stop handlers can re-stamp it. `lastCoverage`
                     // feeds the "Refine more" ceiling computation.
@@ -802,6 +851,33 @@
                         loadingEl.classList.add("hidden");
                         containerEl.style.display = "flex";
                         fg.setTreeDirect(toFgTree(resp.tree), resp.tree.count);
+
+                        // Restore any zoom/inspect focus carried on the shared
+                        // link. The aggregate tree STREAMS in and refines, so a
+                        // deep target frame may not exist in the first snapshot —
+                        // we retry on each snapshot until the focus is applied
+                        // EXACTLY as the link asked. Each attempt resets the view
+                        // first so re-applying is idempotent (zoomToPath appends).
+                        // A genuine user interaction flips viewRestored via
+                        // onApiViewChange, which stops us from ever snapping their
+                        // view back to the URL.
+                        if (!viewRestored) {
+                            const wantW = params.get("worker-zoom");
+                            const wantO = params.get("offworker-zoom");
+                            const wantInspect = params.get("inspect");
+                            restoringView = true;
+                            fg.resetView();
+                            restoreViewState(fg, params);
+                            restoringView = false;
+                            const z = fg.getZoomPath();
+                            const zoomOk =
+                                (!wantW || z.worker.join("\t") === wantW) &&
+                                (!wantO || z.offworker.join("\t") === wantO);
+                            const inspectOk = !wantInspect || fg.getInspectFocus() != null;
+                            // Done once the link's focus is fully in place (or the
+                            // link carried no focus at all).
+                            if (zoomOk && inspectOk) viewRestored = true;
+                        }
 
                         const cov = resp.coverage;
                         lastCoverage = cov;
@@ -916,8 +992,14 @@
                     }
 
                     document.getElementById("f-copylink").addEventListener("click", async () => {
+                        // The Copy link carries the full scope PLUS the live
+                        // zoom/inspect focus, so a coworker opening it lands on the
+                        // exact same focus position. (currentScopeQuery stays
+                        // focus-free so diff captures compare scopes, not views.)
+                        const q = currentScopeQuery();
+                        writeViewState(q, fg);
                         const url = window.location.origin + window.location.pathname +
-                            "?" + currentScopeQuery().toString();
+                            "?" + q.toString();
                         const btn = document.getElementById("f-copylink");
                         const orig = btn.textContent;
                         try {
@@ -1081,12 +1163,7 @@
                 containerEl.style.display = "flex";
 
                 function updateUrlZoom() {
-                    const p = new URLSearchParams(window.location.search);
-                    const z = fg.getZoomPath();
-                    if (z.worker.length > 0) p.set("worker-zoom", z.worker.join("\t"));
-                    else p.delete("worker-zoom");
-                    if (z.offworker.length > 0) p.set("offworker-zoom", z.offworker.join("\t"));
-                    else p.delete("offworker-zoom");
+                    const p = writeViewState(new URLSearchParams(window.location.search), fg);
                     const newUrl = window.location.pathname + "?" + p.toString();
                     window.history.replaceState(null, "", newUrl);
                 }
@@ -1097,12 +1174,10 @@
                     runtimeWorkers: trace.runtimeWorkers,
                 });
 
-                // Restore zoom from URL (only if time range filter succeeded, otherwise tree differs)
+                // Restore zoom + inspect focus from URL (only if time range filter
+                // succeeded, otherwise the tree differs and the path won't match)
                 if (timeRangeMatched) {
-                    const wz = params.get("worker-zoom");
-                    const oz = params.get("offworker-zoom");
-                    if (wz) fg.zoomToPath("worker", wz.split("\t"));
-                    if (oz) fg.zoomToPath("offworker", oz.split("\t"));
+                    restoreViewState(fg, params);
                 }
 
                 // Responsive resize

@@ -99,6 +99,9 @@ echo "--- Checking flamegraph inspect/butterfly + search results (#652/#653) ---
 node dial9-viewer/ui/test_flamegraph_inspect.js
 node dial9-viewer/ui/test_flamegraph_inspect_dom.js
 
+echo "--- Checking flamegraph deep-link view state (zoom + inspect focus) ---"
+node dial9-viewer/ui/test_flamegraph_deeplink.js
+
 echo "--- Checking runtime grouping (multi-runtime lanes) ---"
 node dial9-viewer/ui/test_runtime_groups.js
 

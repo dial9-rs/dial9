@@ -763,6 +763,9 @@
       unpinTooltip();
       renderAll();
       renderBreadcrumb();
+      // Entering/re-pivoting inspect is a view-state change, so notify the host
+      // (flamegraph.html) to persist the new focus into the URL for deep links.
+      onZoomChange();
     }
 
     // Clear all inspect state without triggering a re-render. Used both by the
@@ -785,6 +788,8 @@
       setInspectVisible(false);
       renderAll();
       renderBreadcrumb();
+      // Leaving inspect clears the persisted focus from the URL.
+      onZoomChange();
     }
 
     function renderInspect() {
@@ -1645,6 +1650,56 @@
       if (stack.length > 0) renderAll();
     }
 
+    // Deep-link support for the inspect (butterfly) focus. The focus is
+    // identified by its frameKey (fullName || name) so it survives tree
+    // rebuilds and streamed refinements, and can be reconstructed from a URL.
+    function getInspectFocus() {
+      return inspectActive && inspectFocusSrc ? frameKey(inspectFocusSrc) : null;
+    }
+
+    // Find a source-tree node whose frameKey matches `key`, anywhere in the tree.
+    function findNodeByKey(tree, key) {
+      let found = null;
+      function dfs(node) {
+        if (frameKey(node) === key) { found = node; return true; }
+        for (const child of node.children.values()) {
+          if (dfs(child)) return true;
+        }
+        return false;
+      }
+      for (const child of tree.children.values()) {
+        if (dfs(child)) break;
+      }
+      return found;
+    }
+
+    // Restore inspect mode focused on the frame identified by `key`. No-op if
+    // the frame is not present in the current trees (e.g. filtered out).
+    function focusInspectByKey(key) {
+      if (!key) return false;
+      for (const root of sourceRoots()) {
+        const node = findNodeByKey(root, key);
+        if (node) { enterInspect(node, false); return true; }
+      }
+      return false;
+    }
+
+    // Clear zoom + inspect WITHOUT notifying the host. Used by flamegraph.html's
+    // URL-restore retries (the aggregate tree streams in, so restore may run over
+    // several snapshots): each attempt resets first, making re-applying a URL
+    // zoom path idempotent (zoomToPath appends, so it must start from a clean
+    // stack). Not part of the user-facing zoom-out flow — that's resetZoom(),
+    // which does notify.
+    function resetView() {
+      workerZoomStack = [];
+      offworkerZoomStack = [];
+      if (inspectActive) {
+        resetInspectState();
+        setInspectVisible(false);
+      }
+      renderAll();
+    }
+
     function setTreeDirect(tree, totalCount) {
       // For API mode: set a pre-built tree directly (no worker/off-worker split)
       // Preserve the current zoom by finding the same node in the new tree.
@@ -1693,7 +1748,7 @@
       renderAll();
     }
 
-    return { setData, setTreeDirect, resize, destroy, handleEscape, isZoomed, getZoomPath, zoomToPath };
+    return { setData, setTreeDirect, resize, destroy, handleEscape, isZoomed, getZoomPath, zoomToPath, getInspectFocus, focusInspectByKey, resetView };
   }
 
   const fgExports = {
