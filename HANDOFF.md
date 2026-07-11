@@ -1,123 +1,129 @@
 # T48 HANDOFF - flamegraph search-count mismatch (#593)
 
 (Replaces the T19 HANDOFF inherited through the branch chain; T19's record
-lives at commit e6b95a6.)
+lives at commit e6b95a6. This ticket's BLOCKED-ON-MAINTAINER analysis
+record lives at commit 3d5ae23.)
 
 ## STATUS
 
-BLOCKED-ON-MAINTAINER (semantic choice) - the expected STOP-gate for this
-ticket's analysis-first mode. Root cause is proven and measured; the fix is
-a small core-side edit, but T48 ties the choice of percentage semantic to
-the #593 issue author's expectation, which is not readable from this
-environment (GitHub access forbidden). In-repo evidence leans strongly one
-way but does not make the alternative indefensible, so no code was changed.
+done
 
-Branch: `ticket/T48-search-count-mismatch`, based on integrated tip 74bab07.
+Branch: `ticket/T48-search-count-mismatch` (base 74bab07). The analysis
+phase ended BLOCKED-ON-MAINTAINER at 3d5ae23; the maintainer ruled OPTION 1
+(confirmed against the #593 issue body: the reporter expects the percentage
+to match the highlighted sections), and the fix phase landed it.
+
+## DECISION AND WHICH BRANCH WAS TAKEN
+
+Option 1: percentage = highlighted-area share (union of INCLUSIVE sample
+counts of the topmost matching frames over the in-view total), and the
+`matchedSelf > 0` hiding guard removed. CORE-side branch taken (sanctioned
+by T48, which carries the core-vs-page fork): the edit is in frozen
+`dial9-viewer/ui/flamegraph.js`, so BOTH page generations change together -
+intended by the ruling. No page-side seam was added; core diff kept
+minimal (one function's math + the stat's guard + a test export).
 
 ## COMPLETED (commits)
 
 | sha | what |
 | --- | --- |
-| be77d29 | `docs/tickets/issue-closures.md` (T44's file, created): #593 entry with root cause, three-way-cross-checked measurements, both candidate semantics, maintainer decision point, DRAFT closing comment |
+| be77d29 | analysis: `docs/tickets/issue-closures.md` created with the #593 entry (root cause, three-way-cross-checked measurements, both semantics, decision point, draft comment) |
+| 3d5ae23 | analysis HANDOFF (BLOCKED-ON-MAINTAINER record) |
+| bb80759 | failing-first regression suite `dial9-viewer/ui/tests/core/flamegraph_search.test.ts` (14/14 red pre-fix: export missing + self-sample math) |
+| 9cee429 | the core fix: `countSearchMatches` returns the topmost-match inclusive union (`matchedCount`) + frame count; `updateSearchStats` uses it and drops the hiding guard; `countSearchMatches` exported for the suite. 14/14 green |
+| 9ee0b88 | features/03 F38 amended `[2026-07-11]` (T48, #593) + ledger line (shared format). F84 untouched - wording stands, F38 now cross-references it |
+| ba36a0e | issue-closures.md: decision recorded (option 1, maintainer-confirmed), implementation + parity implications documented, draft close-comment finalized (draft only) |
+| c167a0c | test tweak for `exactOptionalPropertyTypes` (tsc clean) |
 
-Analysis-only: no code gates required; doc integrity only. The measurement
-dev server (port 3121) was killed and verified down.
+## THE FIX
 
-## ROOT CAUSE
+`flamegraph.js:106-127` (`countSearchMatches`): walks with an `underMatch`
+flag; a matching node increments `frameCount` always, but adds its
+INCLUSIVE `count` to `matchedCount` only when no ancestor matched (a nested
+match lies inside its ancestor's highlighted extent - no double count).
+`flamegraph.js:493-529` (`updateSearchStats`): percentage =
+`matchedSamples / totalSamples` per zoom root (F35 zoom-relative totals
+preserved), shown whenever the total is > 0 - mid-stack-only matches are no
+longer hidden. Matching rules (name + fullName, case-insensitive, F34),
+frame counting, and the no-match path (F39) unchanged. Blast radius:
+`countSearchMatches` is consumed ONLY by `updateSearchStats` (grep: call
+sites :505/:511 + the export for tests), so the stat text is the entire
+behavioral surface.
 
-The stat and the highlight measure different things:
+## GATES (all green; JS-only change per AGENTS.md)
 
-- `updateSearchStats` (`dial9-viewer/ui/flamegraph.js:485-518`) reports
-  `matchedSelf / totalSelf`; `countSearchMatches` (`:106-118`) sums
-  `node.self`, which counts only samples whose innermost (leaf) frame is
-  that node (`trace_analysis.js:1034`).
-- The highlight (`:347-363`, row F40) lights every matching frame's FULL
-  bar; bar width is `node.count / total`, the INCLUSIVE weight.
+- `npx tsc --noEmit`: clean.
+- FULL `npm run test` (incl. the check:boundary pretest): 55 files passed
+  + 1 skipped, 947 passed / 1 expected fail / 11 skipped (pre-existing
+  baseline), 0 unexpected failures. New suite 14/14.
+- `npm run build`: clean (flamegraph bundle rebuilt).
+- `cargo build -p dial9-viewer`: clean (rust-embed pickup).
+- No `.rs` touched, no trace-format change: nextest/stress/clippy not
+  required. Dev server (port 3121) killed and verified down.
 
-Mid-stack frames have `self == 0`, so a query lighting most of the canvas
-reports a tiny number, and the `matchedSelf > 0` guard (`:513`) hides the
-percentage entirely when every match is mid-stack. Compounding evidence:
-the page's own SVG export embeds flamegraph.pl-style search
-(`flamegraph_export.js:378-421`, rows F79/F84) whose `Matched: X%` IS the
-highlighted-area share - the page disagrees with its own export on the same
-data. Also, "N frames" counts matching tree nodes, so it can exceed the
-sample count.
+## PARITY EVIDENCE (search stat is the ONLY behavioral delta)
 
-## EVIDENCE (measured numbers)
+Live probe (Playwright, fillRect interception: union of alpha-1.0 bar
+extents / union of all bar extents), demo trace, BOTH generations
+byte-identical:
 
-Demo trace, 147 CPU samples (all worker-side; offworker empty). Reported
-stat read live from `.fg-search-stats` via Playwright on BOTH
-`/new/flamegraph.html?trace=demo-trace.bin` and legacy
-`/flamegraph.html?trace=demo-trace.bin` over the dev server - byte-identical
-on both generations (same core flamegraph.js). Lit-area share measured
-exactly by intercepting canvas `fillRect` during the same runs: union of
-alpha-1.0 bar x-extents / union of all bar x-extents (F40 dims non-matches
-to 0.25). Cross-checked two independent ways: headless Node replication of
-the page's tree build (union of inclusive counts of topmost matched
-frames), and the export SVG (`treeToInteractiveSvg`) driven through its
-embedded `search()` with ignorecase.
+| Query | Reported (was, pre-fix) | Reported (now) | Lit-area measured |
+| --- | --- | --- | --- |
+| poll | 146 frames, 2.7% of samples | 146 frames, 100.0% of samples | 100.0% |
+| tokio | 230 frames, 5.4% of samples | 230 frames, 100.0% of samples | 100.0% |
+| axum | 32 frames (pct hidden) | 32 frames, 92.5% of samples | 92.5% |
+| dispatcher | 24 frames (pct hidden) | 24 frames, 68.7% of samples | 68.6% (canvas sub-0.1%-width draw filter; exact tree value 68.7, the export SVG agrees at 68.7) |
+| framebuf | 8 frames (pct hidden) | 8 frames, 54.4% of samples | 54.4% |
+| spawn | 2 frames (pct hidden) | 2 frames, 100.0% of samples | 100.0% |
 
-| Query | Page stat (F38) | Lit-area (draw calls) | Export SVG `Matched:` | Tree math |
-| --- | --- | --- | --- | --- |
-| poll | 146 frames, 2.7% of samples | 100.0% | 100% | 100.0% |
-| tokio | 230 frames, 5.4% of samples | 100.0% | 100% | 100.0% |
-| axum | 32 frames (no pct) | 92.5% | 92.5% | 92.5% |
-| dispatcher | 24 frames (no pct) | 68.6% | 68.7% | 68.7% |
-| framebuf | 8 frames (no pct) | 54.4% | 54.4% | 54.4% |
-| spawn | 2 frames (no pct) | 100.0% | 100% | 100.0% |
+Reported% == lit-area% on every query, and the previously-hidden mid-stack
+cases now show the figure. The numbers equal the export SVG's embedded
+`Matched:` search (option 1's semantic) measured in the analysis phase.
 
-(68.6 vs 68.7: canvas rounding + the sub-0.1%-width draw filter; the
-independent measurements otherwise agree exactly.)
+Behavioral differ (legacy /flamegraph.html vs migrated /new/flamegraph.html,
+same server, demo trace):
 
-One-line version: searching `poll` lights 100% of the canvas and reports
-"2.7% of samples"; `framebuf` lights 54.4% and reports no percentage at all.
+- J5 (flamegraph work, includes the search step): `checkpoint rendered:
+  identical (6 fields); checkpoint searched: identical (6 fields); ZERO
+  DIFF` (exit 0).
+- J9 (restore a shared zoom link, non-search journey): `checkpoint
+  restored: identical (6 fields); ZERO DIFF` (exit 0).
 
-## THE QUESTION FOR THE MAINTAINER
+Old-vs-new (against the pre-fix baseline): at J5's "searched" checkpoint
+the `fg.searchStats` readout is the single changed field - "146 frames .
+2.7% of samples" -> "146 frames . 100.0% of samples" (middle-dot
+separator) - while every other captured field carries its pre-fix value
+(`fg.title` "Flamegraph - demo-trace.bin", `fg.stats` "147 samples",
+`fg.canvases` 2, `fg.breadcrumb` empty, `url.query` unchanged), and the
+"rendered" checkpoint (no query active) is identical to pre-fix. Journeys
+on other pages cannot observe the change (the edit is confined to the
+flamegraph search-stat path).
 
-With the #593 issue body in hand, pick the remedy (full write-up + draft
-closing comment in `docs/tickets/issue-closures.md`):
+## COLLATERAL
 
-1. Change the math to the highlighted-area share: samples passing through
-   at least one matching frame (union of inclusive counts of topmost
-   matched frames / total). Matches the highlight, the SVG export, and
-   flamegraph.pl; "X% of samples" remains an accurate label.
-2. Keep the self-sample math but relabel ("X% self samples") and stop
-   suppressing the figure when matchedSelf == 0.
-3. Show both.
-
-Evidence leaning: (1) - it is what users see (F40), the industry
-convention, and this product's own export semantic (F79/F84). But (2) is a
-defensible cheaper remedy (self time is a real metric; only the label
-lies), so the choice is not made unilaterally per the ticket.
-
-## IMPLEMENTATION NOTES FOR THE FIX (once decided)
-
-- Sanctioned core-side edit: `countSearchMatches` / `updateSearchStats` in
-  `flamegraph.js`. BOTH page generations load this file, so both change
-  together.
-- Regression test in `dial9-viewer/ui/tests/core/` (the flamegraph
-  export/search suites show the pattern); gates: `npx tsc --noEmit`, FULL
-  `npm run test`, `npm run build`.
-- Amend rows F38/F40 in
-  `docs/ui-inventory/features/03-flamegraph-html.md` in-diff + ledger line.
-- Byte-parity implications: re-run the census/behavioral differ baselines.
-  J5's "searched" checkpoint captures `.fg-search-stats` (readout
-  `fg.searchStats`, `parity/fixtures/readout-schema.mjs:61`), so the stat
-  change must appear there as the ONLY behavioral delta; J5 must stay
-  zero-diff for non-search steps and all non-search journeys zero-diff.
-
-## OPEN QUESTIONS
-
-- The semantic choice above (blocking).
-- If option 1 is chosen: should "N frames" change too? It counts matching
-  tree nodes (146 "frames" for `poll` on a 147-sample trace; 230 for
-  `tokio`). Counting distinct matched function names, or topmost matched
-  extents, would both read saner; flag in the fix PR either way.
+- `docs/ui-inventory/features/03-flamegraph-html.md`: F38 amended in-diff,
+  marked `[2026-07-11]` (T48, #593), anchors re-derived, regression suite
+  referenced. F84 wording unchanged.
+- `docs/tickets/ledger.md`: features/03 F38 amended-line added (shared
+  format; maintainer sign-off = approving the PR carrying this line).
+- `docs/tickets/issue-closures.md`: #593 marked FIXED with the decision
+  provenance and the FINAL draft close-comment (posting still requires
+  maintainer sign-off per T44's convention).
 
 ## SCOPE FENCE
 
-- Frozen core untouched; no inventory rows amended; no ledger line (none
-  earned - analysis only, per ledger format that records row changes).
-- No push, no PRs, no GitHub access.
-- Scratch measurement scripts were not committed (methodology recorded in
+- Only the T48 option-1 fix and its listed collateral; no other tickets or
+  plans acted on. No push, no PRs, no GitHub access. No AI-attribution
+  trailers. Scratch probe scripts not committed (methodology recorded in
   issue-closures.md precisely enough to reproduce).
+
+## OPEN QUESTIONS (non-blocking)
+
+- "N frames" still counts matching TREE NODES (146 for `poll` on a
+  147-sample trace) - unchanged deliberately; the ruling covered only the
+  percentage + guard. Flagged in issue-closures.md for the fix PR review;
+  counting distinct function names or topmost extents would read saner if
+  the maintainer wants it.
+- The demo-trace anchor tests are data-dependent: after a demo-trace
+  regeneration, re-derive the six anchor values; the synthetic-tree tests
+  are regeneration-proof.
