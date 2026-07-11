@@ -8,11 +8,17 @@ amends the entry, and only a human or an explicitly-authorized agent posts).
 
 ## #593 - Flamegraph search percentage does not match the highlighted frames (T48)
 
-Status: analysis complete; fix BLOCKED on a maintainer semantic decision
-(see "Decision point" below). Analyzed in ticket/T48-search-count-mismatch
-without GitHub access, so the issue body's exact expectation could not be
-read; the decision point is written so the maintainer can answer it with the
-issue body in hand.
+Status: FIXED on ticket/T48-search-count-mismatch (close on land with the
+draft comment below). Decision taken: OPTION 1, maintainer-confirmed
+against the issue body - the reporter explicitly expects the percentage to
+match the highlighted sections ("matched sections clearly have more samples
+and more total contribution than the percentage would suggest"). The
+percentage is now the highlighted-area share, and the `matchedSelf > 0`
+hiding guard is removed. Core-side change in `flamegraph.js` (sanctioned by
+T48), so both page generations changed together. Regression suite:
+`tests/core/flamegraph_search.test.ts` (failing-first, 14 tests incl. the
+demo-trace anchors below). F38 amended `[2026-07-11]` + ledger line added.
+The analysis below is kept as the record that produced the decision.
 
 ### Root cause
 
@@ -107,30 +113,36 @@ Evidence that keeps A defensible: self time is a real metric and the
 cheaper remedy is relabeling, not re-math; the issue author's actual
 expectation is the tiebreaker per T48 and was not readable in-environment.
 
-### Decision point (maintainer)
+### Decision (was: decision point for the maintainer)
 
-Answer with the #593 issue body in hand - which remedy matches the report:
+RESOLVED: option 1, maintainer-confirmed against the #593 issue body (the
+reporter expects the percentage to match the highlighted sections). The
+original three options are kept for the record:
 
 1. Change the math to B (inclusive union share). "X% of samples" stays an
    accurate label; the stat now agrees with the highlight and the export.
+   <- CHOSEN.
 2. Keep A's math, fix the label ("X% self samples" or similar) and drop the
    asymmetric `matchedSelf > 0` suppression (show `0.0% self` rather than
-   nothing).
-3. Show both (e.g. "54.4% of samples, 0.0% self").
+   nothing). <- rejected: the reporter's expectation is the highlight.
+3. Show both (e.g. "54.4% of samples, 0.0% self"). <- rejected: same
+   reason, plus toolbar noise.
 
-Implementation notes for whichever branch is chosen (sanctioned core-side
-change per T48): the edit lands in `flamegraph.js`
-(`countSearchMatches`/`updateSearchStats`), which BOTH page generations
-load, so both change together; it needs a `tests/core/` regression suite
-(the flamegraph export/search suites show the pattern), amended F38 (and
-F40 cross-reference) rows in `docs/ui-inventory/features/03-flamegraph-html.md`
-plus a ledger line, and a re-run of the census/behavioral differ baselines:
-J5's "searched" checkpoint captures `.fg-search-stats` (readout
-`fg.searchStats`, `parity/fixtures/readout-schema.mjs:61`), so the stat
-change must appear there as the ONLY behavioral delta, with all non-search
-journeys still zero-diff.
+Implementation (landed on ticket/T48-search-count-mismatch): the edit is in
+`flamegraph.js` (`countSearchMatches` returns the union of inclusive counts
+of topmost matching frames; `updateSearchStats` uses it and drops the
+hiding guard), which BOTH page generations load, so both change together -
+intended by the ruling. Regression suite `tests/core/flamegraph_search.test.ts`
+(failing-first: 14/14 red pre-fix, 14/14 green post-fix; synthetic
+mid-stack/leaf/nested/disjoint cases + the demo-trace anchors above). F38
+amended `[2026-07-11]` in features/03 + ledger line. Parity: legacy-vs-new
+differ stays zero-diff (same core on both sides); against the OLD baseline
+the J5 "searched" checkpoint's `fg.searchStats` readout is the single
+expected behavioral delta (e.g. `poll`: "146 frames . 2.7% of samples" ->
+"146 frames . 100.0% of samples"); non-search journeys and checkpoints
+unaffected (the fix touches only the stat-text path).
 
-### DRAFT closing comment (do not post without maintainer sign-off)
+### DRAFT closing comment (final; do not post without maintainer sign-off)
 
 > Fixed in <PR link>. Root cause: the search stat counted only SELF samples
 > (samples whose leaf frame matched), while the highlight lights every
@@ -140,15 +152,16 @@ journeys still zero-diff.
 > "2.7% of samples", and some queries highlighted half the graph while
 > showing no percentage at all).
 >
-> [Variant if option 1 is chosen:] The percentage now reports the share of
-> samples that pass through at least one matching frame (the union of the
-> highlighted frames' extents) - the same semantic as the SVG export's
-> "Matched: X%" and flamegraph.pl, so the number now matches what is
-> highlighted.
+> The percentage now reports the share of samples that pass through at
+> least one matching frame: the union of the highlighted frames' extents
+> (a match nested under another match adds no new area) over the samples
+> in view - the same semantic as the SVG export's "Matched: X%" and
+> flamegraph.pl, so the number now matches what is highlighted. It is also
+> no longer hidden when all matches are mid-stack. On the demo trace,
+> `poll` now reports 100.0% (was 2.7%), and `framebuf` reports 54.4%
+> (previously no percentage at all) - both equal to the measured lit share
+> of the canvas.
 >
-> [Variant if option 2 is chosen:] The stat is now labeled as self time
-> ("X% self samples") so it no longer claims to describe the highlighted
-> area, and it is no longer hidden when matches are mid-stack.
->
-> Verified with a regression test over the search-stat math and a
-> behavioral-parity run showing the stat as the only delta.
+> Verified with a failing-first regression suite over the search-stat math
+> (synthetic trees + demo-trace anchors) and a behavioral-parity run
+> showing the stat as the only delta.
