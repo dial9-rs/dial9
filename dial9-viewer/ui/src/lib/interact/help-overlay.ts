@@ -63,7 +63,10 @@ export function createHelpOverlay(
   box.setAttribute("aria-label", options.title);
   box.tabIndex = -1;
 
-  const heading = doc.createElement("h3");
+  // h2 title + h3 sections: the migrated pages' headers carry the h1,
+  // so the dialog's headings continue the outline without skips
+  // (axe heading-order).
+  const heading = doc.createElement("h2");
   heading.textContent = options.title;
   box.appendChild(heading);
 

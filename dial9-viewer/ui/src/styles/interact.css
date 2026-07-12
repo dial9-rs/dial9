@@ -57,10 +57,10 @@
     padding: 18px 22px; font-size: 13px; color: #e0e0e0;
     z-index: 1041; outline: none;
 }
-.d9-help h3 {
+.d9-help h2, .d9-help h3 {
     color: #8f88ff; font-size: 13px; margin: 10px 0 6px; font-weight: 600;
 }
-.d9-help h3:first-child { margin-top: 0; }
+.d9-help h2:first-child { margin-top: 0; }
 .d9-help .d9-help-row {
     display: flex; gap: 14px; padding: 3px 0; align-items: baseline;
 }
