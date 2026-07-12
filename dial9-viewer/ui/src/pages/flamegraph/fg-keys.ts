@@ -150,7 +150,7 @@ export function mountFlamegraphKeys(options: FgKeysOptions): FgKeys {
       return;
     }
     restore(prev);
-    announcer.announce(`Zoom undo — ${history.depth()} more`);
+    announcer.announce(`Zoom undo (${history.depth()} more)`);
   }
 
   function fit(): void {
@@ -168,11 +168,11 @@ export function mountFlamegraphKeys(options: FgKeysOptions): FgKeys {
     // undoable (`z` right after `f` returns to where you were).
     history.record(fg.getZoomPath());
     options.onZoomMutated?.();
-    announcer.announce("Fit — full tree");
+    announcer.announce("Fit: full tree");
   }
 
   const help = createHelpOverlay(document, {
-    title: "Flamegraph — keyboard & mouse",
+    title: "Flamegraph - keyboard & mouse",
     sections: [KEY_ROWS, MOUSE_ROWS],
   });
 

@@ -88,3 +88,10 @@
     position: absolute; left: -9999px; width: 1px; height: 1px;
     overflow: hidden;
 }
+
+/* ── Keyboard-focusable interaction regions (K2) ────────────────────── */
+
+.d9-kb-focus:focus-visible {
+    outline: 2px solid #6c63ff;
+    outline-offset: -2px;
+}

@@ -45,7 +45,8 @@ export interface HelpOverlay {
   dispose(): void;
 }
 
-const DEFAULT_FOOTER = "Press Esc or ? to close · existing bindings unchanged";
+const DEFAULT_FOOTER =
+  "Press Esc or ? to close \u00b7 existing bindings unchanged";
 
 /** Create the overlay, mounted hidden into `doc.body`. */
 export function createHelpOverlay(

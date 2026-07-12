@@ -1,0 +1,102 @@
+// src/pages/browser/page-keys.ts - the browser page's landing-time
+// wiring of the unified keyboard model (T20; K2/K3; ticket "browser:
+// `?` help, `/` focuses search, Enter submits").
+//
+// NEW module, additive by design: T15's browser-page amendments merge on
+// top of this branch, so T20 keeps its browser wiring in new files plus
+// two mount lines in main.ts (see the T20 HANDOFF's T15-overlap notes).
+//
+// Bindings (all previously dead on this page - the legacy page's only
+// key handler is Enter in the raw-search field, features/01 G2):
+//   - `?` toggles the unified help overlay;
+//   - `/` focuses the active tab's search input (browse: the prefix
+//     field, the text input the Search button's readiness gates on;
+//     raw: the raw key-substring input) and selects its text;
+//   - Enter in the browse controls-bar fields (bucket, prefix, From/To
+//     pickers) clicks Search when it is enabled - K2's "no key submits
+//     search" fix. The raw tab keeps its own G2 handler (raw-view.ts).
+//
+// Per architecture 2.5: keys dispatch actions/focus only, never render.
+
+import {
+  createHelpOverlay,
+  mountKeyRouter,
+} from "../../lib/interact/index.js";
+import type { HelpSection } from "../../lib/interact/index.js";
+import type { PageCtx } from "./ctx.js";
+
+const KEY_ROWS: HelpSection = {
+  title: "Keyboard",
+  rows: [
+    { keys: "/", text: "Focus the search field (browse: prefix, raw: key substring)" },
+    { keys: "Enter", text: "Run the search (in any controls-bar field)" },
+    {
+      keys: "Shift",
+      text: "Heatmap focused: start a window selection, Shift again confirms",
+    },
+    { keys: "Left / Right", text: "Extend the heatmap window selection" },
+    { keys: "Enter", text: "Confirm the heatmap window selection" },
+    { keys: "Esc", text: "Cancel the selection / close this help" },
+    { keys: "?", text: "Toggle this help" },
+  ],
+};
+
+// The heatmap's existing mouse paths (features/01 F12-F15), so the
+// overlay documents the full selection story, not just the new keys.
+const MOUSE_ROWS: HelpSection = {
+  title: "Mouse (heatmap)",
+  rows: [
+    { keys: "Drag", text: "Select a window of segments" },
+    { keys: "Alt + drag", text: "Zoom the time axis" },
+    { keys: "Click", text: "Select a single segment" },
+    { keys: "Double-click", text: "Reset zoom" },
+  ],
+};
+
+export function mountBrowserPageKeys({ store, els, actions }: PageCtx): void {
+  const help = createHelpOverlay(document, {
+    title: "Trace browser - keyboard",
+    sections: [KEY_ROWS, MOUSE_ROWS],
+  });
+
+  // K2: Enter submits the browse (time-range) search from any
+  // controls-bar field, exactly like clicking Search - including its
+  // disabled gate (D9 readiness formula renders into the button).
+  const submitOnEnter = (e: KeyboardEvent): void => {
+    if (e.key !== "Enter") return;
+    if (els.searchBtn.disabled) return;
+    e.preventDefault();
+    void actions.doTimeRangeSearch();
+  };
+  for (const el of [els.bucketInput, els.prefixInput, els.rangeFrom, els.rangeTo]) {
+    el.addEventListener("keydown", submitOnEnter);
+  }
+
+  mountKeyRouter(window, [
+    { key: "?", onKey: () => help.toggle() },
+    {
+      key: "/",
+      onKey: (): void => {
+        const target =
+          store.getState().ui.tab === "raw" ? els.rawSearchInput : els.prefixInput;
+        target.focus();
+        target.select();
+      },
+    },
+    {
+      // Focus-elsewhere close for the overlay (it consumes its own
+      // Escape while focused); declines when closed so the page default
+      // stays intact.
+      key: "Escape",
+      preserveDefault: true,
+      inTextEntry: true,
+      onKey: (): boolean => {
+        if (help.isOpen()) {
+          help.close();
+          return true;
+        }
+        return false;
+      },
+    },
+  ]);
+}

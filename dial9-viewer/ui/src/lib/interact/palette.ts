@@ -77,7 +77,7 @@ export interface SearchPalette {
 }
 
 const DEFAULT_PLACEHOLDER =
-  "search tasks, spans, POIs...  (Enter jump · Shift+Enter prev · Esc close)";
+  "search tasks, spans, POIs...  (Enter jump \u00b7 Shift+Enter prev \u00b7 Esc close)";
 
 /** Create the palette, mounted hidden into `doc.body`. */
 export function createSearchPalette(
