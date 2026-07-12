@@ -123,11 +123,14 @@ to Opus).
 - T38 dual-UI switch: FINDINGS (`reviews/T38-audit.md`, commit 254cd69):
   (1) MEDIUM boot-time href goes stale vs live query rewrites -> trace loss
   on switch; MUST fix in ui-switch.js before/with T13's first page
-  registration (executor notified with fix direction); (2)+(3) LOW (pin
-  stripped by page query rebuilds; loop guard misses cross-registration
-  cycles). Fundamentals verified clean (repeated trace=, hash drop,
-  precedence, one-line injection, 404-inert, default=legacy, tests
-  re-run 33/33).
+  registration; (2)+(3) LOW. RESOLVED 2026-07-12: all three were already
+  fixed during T13/T14 page registration (liveControlHref click-time
+  resolution reading location.search + pinWouldBounce + live-href loop
+  guard), regression-tested in tests/ui_switch.test.ts (48 pass, findings
+  1+2 named in the suite). The audit had reviewed a pre-T13 tip; the
+  redundant fix dispatch was discarded. Fundamentals also clean (repeated
+  trace=, hash drop, precedence, one-line injection, 404-inert,
+  default=legacy).
 - T48 flamegraph search fix (SANCTIONED frozen-core touch): audit-verified
   inline 2026-07-11 - diff minimal + semantically correct (topmost-match
   inclusive union = lit-area share, no nested double-count), guard dropped
