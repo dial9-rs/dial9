@@ -74,9 +74,57 @@ Status values: `pending` | `in-progress(<who/branch>)` | `gates-passed` |
 
 | Ticket | Status | Branch | Notes |
 |---|---|---|---|
-| T01 | pending | - | pilot, serial |
-| T02 | pending | - | pilot, serial, after T01 |
-| T03-T48 | pending | - | per waves above |
+| T01 | implemented; docs-lineage ticket | ticket/T01-inventory-refresh @ c1fccc5 | push+PR = maintainer; 3 HANDOFF questions still await maintainer ruling |
+| T02-T19, T38, T43, T48 + fixes | MERGED into integration/chunk-1 | (ticket/* branches retained) | rolling tip; last verified gate ~947 tests + 1 sanctioned xfail; executor reports counts per merge (T10/T12/T13/T14/T15/T40 etc. landed per executor reports - executor's dispatch log is authoritative for per-ticket detail) |
+| T43 | MERGED into integration (clean) | ticket/T43-url-contract-api @ 346a284 | all 4 parity legs green, 12/12 codec pin, skill-link e2e PASS, full gate run clean; #303 disposition: URL contract covers set-time-range + open-flamegraph; "highlight" reserved until chunk 2 (T21-T23); issue's server-push/event-API asks are OUT of migration scope - recommend #303 stays OPEN with a partial-progress comment, not closed |
+| T15, T19-T37, T39, T41, T42, T44-T48 | pending/in-flight per executor | - | chunk-2 renderer obligations from T17 audit attached; T20+T48 in flight |
+
+**CONTROL MODEL (decided by maintainer 2026-07-10, supersedes the freeze):**
+Executor drives; orchestrator audits.
+- The long-running executor agent owns implementation dispatch per the wave
+  plan (T12 -> T13/T14/T40 -> onward), keeping all implementer hard rules:
+  no push/GitHub, HANDOFF + commit discipline, stop-on-gate escalation to
+  the maintainer for genuine decisions.
+- The planning session (or successor) owns AUDIT: adversarial reviews of the
+  integrated tree, risk-targeted (T07 store/scheduler and T17 windowing
+  first - largest blast radius; T12 parity tooling on landing - it is the
+  future verification substrate; others as budget allows). Findings file to
+  `docs/tickets/reviews/` ; blocking findings halt the affected wave until
+  resolved.
+- Maintainer: merge authority, gate rulings, pushes/PRs.
+- Review-before-build is replaced by build-with-trailing-audit; the
+  integration tree's full gate run (tsc + all tests) remains the merge bar
+  for every ticket branch entering integration/chunk-1.
+
+**Audit log:**
+- T07 store/scheduler: FINDINGS (non-blocking), 5 defects filed
+  (`reviews/T07-audit.md`) -> ALL FIXED via fix(store), merged into
+  integration/chunk-1 BEFORE any subscriber code exists (sequencing
+  obligation met). Core mechanics + coverage claim verified sound.
+- T17 segment windowing: BLOCKING (`reviews/T17-audit.md`) -> FIXED +
+  AUDIT-VERIFIED 2026-07-10: `fix/T17-segment-stitching-budget` (4 commits
+  off 3004ca2) resolves findings 1-4 + the coverage item with failing-first
+  regression tests; audit re-ran the suites (72/72) and inspected the
+  probe-mirror assertions. MERGED into integration/chunk-1 (tip 851b02e;
+  gate: tsc clean, 824 passed + 1 sanctioned xfail) - block LIFTED
+  2026-07-10. Chunk-2 obligations stand: renderers must consume
+  `truncatedAt:"both"` and surface the `oversized` state (audit notes 6+7);
+  carried in the executor's dispatch notes for the owning tickets.
+- T38 dual-UI switch: FINDINGS (`reviews/T38-audit.md`, commit 254cd69):
+  (1) MEDIUM boot-time href goes stale vs live query rewrites -> trace loss
+  on switch; MUST fix in ui-switch.js before/with T13's first page
+  registration (executor notified with fix direction); (2)+(3) LOW (pin
+  stripped by page query rebuilds; loop guard misses cross-registration
+  cycles). Fundamentals verified clean (repeated trace=, hash drop,
+  precedence, one-line injection, 404-inert, default=legacy, tests
+  re-run 33/33).
+- T48 flamegraph search fix (SANCTIONED frozen-core touch): audit-verified
+  inline 2026-07-11 - diff minimal + semantically correct (topmost-match
+  inclusive union = lit-area share, no nested double-count), guard dropped
+  per ruling, blast radius confirmed (feeds updateSearchStats only), parity
+  probe reported%==lit% across queries. MERGED into integration 2026-07-11 (HANDOFF-only conflict). Non-blocking note stands: "N frames" counts tree nodes (unchanged
+  by design, flagged in issue-closures.md).
+- Queue: T12 parity tooling on landing; T02 embed as budget allows.
 
 ## Standing risks
 
