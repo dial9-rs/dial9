@@ -205,7 +205,6 @@ function shellTemplate(vm: ShellViewModel, deps: ShellDeps): TemplateResult {
     <div class="d9-body">
       <main
         class="d9-track-column"
-        role="application"
         aria-label="Trace timeline"
         tabindex="0"
       >

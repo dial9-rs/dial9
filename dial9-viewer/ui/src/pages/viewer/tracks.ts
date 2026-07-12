@@ -125,7 +125,7 @@ export function sizeTracks(
     }
     let sizer = sizers.get(canvas);
     if (!sizer) {
-      sizer = createCanvasSizer(canvas);
+      sizer = createCanvasSizer<CanvasRenderingContext2D>(canvas);
       sizers.set(canvas, sizer);
     }
     const ctx = sizer.ensure(drawW, track.height, dpr);
