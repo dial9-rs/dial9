@@ -30,6 +30,9 @@ const SPEC = {
   json: { help: "write full axe violations as JSON to this path" },
   md: { help: "write the violation table as markdown to this path" },
   "fail-on": { help: "gate: exit 1 on violations at/above this impact (critical|serious|moderate|minor)" },
+  // T20: display:none content is invisible to axe; keyboard-opened
+  // surfaces (the unified `?` help overlay) need their key pressed first.
+  press: { help: 'comma-separated keys to press after load, before the scan (e.g. "?")' },
 };
 
 const IMPACT_ORDER = ["critical", "serious", "moderate", "minor"];
@@ -78,6 +81,14 @@ async function main() {
     try {
       await page.goto(opts.url);
       await waitLoadedByUrl(page, opts.url);
+      if (opts.press) {
+        for (const key of opts.press.split(",")) {
+          await page.keyboard.press(key.trim());
+        }
+        // Overlay open/close is a class toggle (no animation); one settle
+        // beat is enough.
+        await page.waitForTimeout(250);
+      }
       await page.addScriptTag({ content: axeSource() });
       violations = await page.evaluate(async () => {
         const res = await window.axe.run(document, { resultTypes: ["violations"] });

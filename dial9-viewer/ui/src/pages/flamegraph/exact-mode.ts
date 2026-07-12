@@ -28,6 +28,8 @@ import type { ParsedTrace, TraceSliceStore } from "../../lib/trace/index.js";
 import { createFlamegraph, filterCpuSamples } from "../../lib/canvas/index.js";
 import { mountCopyLink } from "../../lib/url/index.js";
 import type { PageEls } from "./dom.js";
+import { closeHelpOnEscape, mountFlamegraphKeys } from "./fg-keys.js";
+import type { FgKeys } from "./fg-keys.js";
 import { loadingLabel, resolveTraceUrls } from "./query.js";
 import { createFgUrlSync, restoreZoomFromUrl } from "./view-state.js";
 
@@ -198,7 +200,14 @@ export async function runExactMode(
     urlSync.flush();
   };
 
-  const fg = createFlamegraph(els.containerEl, urlSync.onZoomChange);
+  // Unified keys (T20): mounted after the URL zoom restore below so the
+  // landed state is the undo baseline; late-bound here because the
+  // widget's onZoomChange must also record zoom history for `z`.
+  let keys: FgKeys | null = null;
+  const fg = createFlamegraph(els.containerEl, () => {
+    keys?.recordZoom();
+    urlSync.onZoomChange();
+  });
   fg.setData(allSamples, trace.callframeSymbols, {
     exportTitle: `Flamegraph \u2014 ${label}`,
     runtimeWorkers: trace.runtimeWorkers,
@@ -213,12 +222,23 @@ export async function runExactMode(
     timeRangeMatched,
   );
 
+  // Unified keyboard model (T20): `?` help, `f` fit, `z` zoom-undo; the
+  // widget's own `/` / Ctrl+F / Escape bindings stay untouched (fg-keys
+  // module header). f/z settle the zoom URL sync through onZoomMutated.
+  keys = mountFlamegraphKeys({
+    fg,
+    containerEl: els.containerEl,
+    onZoomMutated: urlSync.onZoomChange,
+  });
+
   // Responsive resize (F155).
   window.addEventListener("resize", () => fg.resize());
 
-  // Escape cascade (F157).
+  // Escape cascade (F157) - an open unified help overlay closes first
+  // (new stage ahead of the widget cascade; no-op when closed).
   window.addEventListener("keydown", (e) => {
     if (e.key === "Escape") {
+      if (keys !== null && closeHelpOnEscape(keys)) return;
       fg.handleEscape();
     }
   });

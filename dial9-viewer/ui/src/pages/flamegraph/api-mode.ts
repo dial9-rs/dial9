@@ -35,6 +35,8 @@ import type {
 import { createFlamegraph } from "../../lib/canvas/index.js";
 import { mountCopyLink } from "../../lib/url/index.js";
 import type { PageEls } from "./dom.js";
+import { closeHelpOnEscape, mountFlamegraphKeys } from "./fg-keys.js";
+import type { FgKeys } from "./fg-keys.js";
 import { buildApiUrl, buildBrowserQuery, seedFacetState, type ApiQueryState } from "./query.js";
 
 /** One accumulated facet: display label + monotonically-unioned values. */
@@ -274,9 +276,17 @@ export function runApiMode(params: URLSearchParams, els: PageEls): void {
     return { name: node.name, count: node.count, self: node.self, children: m };
   }
 
-  // No updateUrlZoom callback: canvas zoom is NOT URL-synced in api mode
-  // (F180) - the browser URL carries the filter scope instead.
-  const fg = createFlamegraph(containerEl);
+  // Canvas zoom is NOT URL-synced in api mode (F180) - the browser URL
+  // carries the filter scope instead. The onZoomChange callback here
+  // records zoom history only (T20 `z` undo); it never touches the URL.
+  let keys: FgKeys | null = null;
+  const fg = createFlamegraph(containerEl, () => {
+    keys?.recordZoom();
+  });
+  // Unified keyboard model (T20): `?` help, `f` fit, `z` zoom-undo. The
+  // widget's toolbar + canvases exist as of createFlamegraph, so the
+  // root state recorded at mount is the correct undo baseline.
+  keys = mountFlamegraphKeys({ fg, containerEl });
 
   // Build the base stats string ("N samples [middot] M hosts [middot] ...")
   // from the response metadata, shared by every poll.
@@ -451,7 +461,12 @@ export function runApiMode(params: URLSearchParams, els: PageEls): void {
 
   startPolling();
   window.addEventListener("resize", () => fg.resize());
+  // Escape cascade (F185/F157) - an open unified help overlay closes
+  // first (T20; no-op when closed).
   window.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") fg.handleEscape();
+    if (e.key === "Escape") {
+      if (keys !== null && closeHelpOnEscape(keys)) return;
+      fg.handleEscape();
+    }
   });
 }

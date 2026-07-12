@@ -1,0 +1,97 @@
+/* Shared styles for the unified keyboard model's surfaces (T20): search
+   palette, unified help overlay, status toast. Visuals follow the canonical
+   interactive spec (docs/ui-inventory/mocks/keyboard.html) on the pages'
+   dark theme (#1a1a2e); muted foregrounds are lifted where the mock's
+   values fall short of the 4.5:1 contrast bar (axe clean is a T20 gate). */
+
+/* ── Search palette ─────────────────────────────────────────────────── */
+
+.d9-palette {
+    position: fixed; top: 12%; left: 50%; transform: translateX(-50%);
+    width: 560px; max-width: calc(100vw - 32px);
+    background: #151530; border: 1px solid #6c63ff; border-radius: 8px;
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.6);
+    display: none; z-index: 1050;
+}
+.d9-palette.open { display: block; }
+.d9-palette input {
+    width: 100%; background: #0f0f22; border: none;
+    border-bottom: 1px solid #333; color: #e0e0e0;
+    padding: 10px 14px; font-size: 14px; outline: none;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    border-radius: 8px 8px 0 0;
+}
+.d9-palette input:focus { border-bottom-color: #6c63ff; }
+.d9-palette .d9-palette-results { max-height: 300px; overflow: auto; }
+.d9-palette .d9-palette-row {
+    padding: 7px 14px; font-size: 12px; display: flex; gap: 12px;
+    cursor: pointer; align-items: baseline;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: #e0e0e0;
+}
+.d9-palette .d9-palette-row[aria-selected="true"] { background: #26265a; }
+.d9-palette .d9-palette-row .d9-palette-kind {
+    color: #a3a3c2; width: 52px; flex-shrink: 0;
+}
+.d9-palette .d9-palette-row .d9-palette-detail {
+    color: #9ab0c4; margin-left: auto;
+}
+.d9-palette .d9-palette-empty {
+    padding: 10px 14px; font-size: 12px; color: #a3a3c2;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+/* ── Unified help overlay ───────────────────────────────────────────── */
+
+.d9-help-backdrop {
+    position: fixed; inset: 0; background: rgba(0, 0, 0, 0.5);
+    display: none; z-index: 1040;
+}
+.d9-help-backdrop.open { display: block; }
+.d9-help {
+    position: fixed; top: 12%; left: 50%; transform: translateX(-50%);
+    width: 560px; max-width: calc(100vw - 32px);
+    max-height: 76vh; overflow: auto;
+    background: #151530; border: 1px solid #6c63ff; border-radius: 8px;
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.6);
+    padding: 18px 22px; font-size: 13px; color: #e0e0e0;
+    z-index: 1041; outline: none;
+}
+.d9-help h2, .d9-help h3 {
+    color: #8f88ff; font-size: 13px; margin: 10px 0 6px; font-weight: 600;
+}
+.d9-help h2:first-child { margin-top: 0; }
+.d9-help .d9-help-row {
+    display: flex; gap: 14px; padding: 3px 0; align-items: baseline;
+}
+.d9-help .d9-help-row kbd {
+    min-width: 84px; text-align: center; flex-shrink: 0;
+    background: #2a2a4a; border: 1px solid #444; border-radius: 4px;
+    padding: 1px 6px; font-size: 11px; color: #e0e0e0;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.d9-help .d9-help-foot {
+    color: #a3a3c2; font-size: 11px; margin-top: 12px; text-align: center;
+}
+
+/* ── Status announcements (toast + offscreen live region) ───────────── */
+
+.d9-toast {
+    position: fixed; bottom: 46px; left: 50%; transform: translateX(-50%);
+    background: rgba(13, 13, 26, 0.95); border: 1px solid #444;
+    padding: 8px 16px; border-radius: 6px; font-size: 12px;
+    color: #e0e0e0; display: none; z-index: 1060;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.d9-toast.show { display: block; }
+.d9-announce-region {
+    position: absolute; left: -9999px; width: 1px; height: 1px;
+    overflow: hidden;
+}
+
+/* ── Keyboard-focusable interaction regions (K2) ────────────────────── */
+
+.d9-kb-focus:focus-visible {
+    outline: 2px solid #6c63ff;
+    outline-offset: -2px;
+}
