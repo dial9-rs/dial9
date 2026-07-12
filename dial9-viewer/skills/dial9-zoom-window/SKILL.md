@@ -111,6 +111,29 @@ If the app installed the tracing layer (`Dial9TracingLayer`), the `tracing` span
 that executed inside the longest poll, by name. Tells you *what code* ran inside a
 long poll even without reading CPU stacks.
 
+## Share the window as a viewer deep link
+
+Every window has a URL. The full interactive viewer honors `?start=`/`?end=`
+(ABSOLUTE monotonic ns, parse-time filters) per the stable URL contract in
+`dial9-viewer/ui/README.md`, section "URL contract (stable deep-link API)".
+`zoom.js` prints this link at the end of every window report; to construct
+it yourself from the relative-ms numbers the aggregate tools print:
+
+```javascript
+// centerMs / halfMs: the same numbers you passed to zoom.js.
+const centerMs = 6953.5, halfMs = 40;
+const start = Math.round(trace.minTs + (centerMs - halfMs) * 1e6);
+const end = Math.round(trace.minTs + (centerMs + halfMs) * 1e6);
+console.log(`viewer.html?trace=<TRACE_URL>&start=${start}&end=${end}`);
+```
+
+`<TRACE_URL>` is wherever the trace is served over HTTP (a report folder's
+`traces/full.bin`, an `/api/object?...` URL from the S3 browser); the viewer
+cannot fetch `file://` paths. The same `start`/`end` params work on
+`flamegraph.html` for a CPU-profile view of the window. Do not invent other
+params (`?worker=`, `?task=` do not exist); selection/highlight keys are
+reserved in the contract and land with the migrated viewer.
+
 ## From window back to cause
 
 The zoom is descriptive — it shows the instant. To turn "worker 9 sat in a 53ms

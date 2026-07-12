@@ -136,6 +136,178 @@ links to it; it remains only for out-of-tree callers (e.g. the
 `dial9-trace-loading` skill). New code should fetch individual objects via
 `/api/object` and let `fetchTraces` merge them.
 
+## URL contract (stable deep-link API)
+
+The pages' URLs are an API, for humans sharing links and for agents driving
+the UI without a browser (issue #303): a report generator, a skill, or a
+`curl`-style script can construct a URL from the tables below and know the
+page will honor it. This section is the normative contract; the skills that
+emit viewer links (`../skills/dial9-html-report`, `../skills/dial9-zoom-window`)
+and the contract tests (see Enforcement below) follow it.
+
+**Stability promise (architecture NFR N10): old params stay valid forever.**
+Evolution is additive-only: a param documented here never changes meaning,
+never gets removed, and never stops being honored by the page that owns it.
+New capability means a NEW query param or hash key, and adding one requires
+updating this section, the ledger (`docs/tickets/ledger.md`), and the
+contract tests in the same PR.
+
+The split, made explicit:
+
+- **QUERY string = load scope + page-owned state.** What data to load
+  (`trace=`, time-range filters) and per-page state that predates the hash
+  codec (browser-page search state, flamegraph zoom, api-mode facets).
+  Query params can reach the server and are preserved verbatim by every
+  view-state rewrite.
+- **HASH = versioned view state** (`#v=1&...`), what the reader is LOOKING
+  at, never what is loaded. Owned exclusively by the T19 codec on migrated
+  pages; never reaches the server; deliberately dropped by the dual-UI raw
+  switch. Normative schema: `docs/ui-inventory/05-url-view-state.md`
+  (codec: `src/lib/url/view-state.ts`).
+
+### Query params - viewer.html and flamegraph.html (exact mode)
+
+Both trace-rendering pages read the same load-scope vocabulary (the browser
+page emits it via `traceTitleParams`/`objectTraceUrls`):
+
+| Param | Value | Meaning |
+|-------|-------|---------|
+| `trace` | URL, **repeatable** | Trace component to fetch and gunzip client-side; N values parse as one trace (see "The `trace=` query parameter" above). Relative or absolute; must be same-origin-fetchable. |
+| `start` | absolute monotonic ns (integer) | Parse-time time-range filter, inclusive; either optional. The page re-writes it via `history.replaceState` when the user sets/clears a range (viewer "Set Range", features/02 E3-E5; flamegraph F19). |
+| `end` | absolute monotonic ns (integer) | Filter end; same semantics as `start`. |
+| `svc` | string | Service name, display label only. |
+| `host` | string | Host name, display label only. |
+| `segs` | integer as string | Segment COUNT for the header/stats display (index.html sets `String(keys.length)`); NOT a list of segment keys. |
+| `from` | string | Human-readable wall-clock range start, display only. |
+| `to` | string | Human-readable wall-clock range end, display only. |
+| `worker-zoom` | TAB-joined frame names, root -> target | Flamegraph only: worker-tree zoom path (features/03 F148/F150). Legacy view-state param, kept live forever; the migrated page also mirrors zoom state here so copied links open on both page generations. |
+| `offworker-zoom` | same | Flamegraph only: off-worker-tree zoom path (F149). |
+| `prof` | `1` | Viewer only, debug: enables the render profiler (features/02 A14). Honored but not part of any UI's emitted links. |
+
+`start`/`end` are ABSOLUTE monotonic nanoseconds, the same values carried by
+`event.ts`/`trace.minTs` from `TraceParser.parseTrace()`, NOT offsets from
+trace start. `?worker=`, `?task=`, `?source=` do NOT exist on these pages -
+unknown query params are silently ignored, so inventing params fails
+silently. Selection/highlight travels in the HASH once implemented (see
+reserved keys below).
+
+### Query params - flamegraph.html aggregated API mode (`?api=1`)
+
+`api=1` switches the flamegraph page to server-aggregated mode; scope and
+facet params are rebuilt and `history.pushState`ed on every Apply/facet
+change (features/03 F168/F180), so Back walks the filter history:
+
+| Param | Value | Meaning |
+|-------|-------|---------|
+| `api` | `1` | Mode switch. |
+| `data_dir` | path | Local-directory scope (alternative to bucket/prefix). |
+| `bucket` | string | S3 scope bucket. |
+| `prefix` | string | S3 scope key prefix. |
+| `service` | string | Scope service name. |
+| `host` | string, **repeatable** | Scope host filter. |
+| `start_ns` | epoch ns | Scope window start (seeds the UTC picker). |
+| `end_ns` | epoch ns | Scope window end. |
+| `source` | `cpu` (default) etc. | Facet filter: sample source. |
+| `thread_class` | string | Facet filter. |
+| `spawn_location` | string | Facet filter. |
+| `max_files` | integer | Refinement fold ceiling. |
+
+Canvas zoom is deliberately NOT URL-synced in api mode (F180); there are no
+view-state params here.
+
+### Query params - index.html (trace browser)
+
+Owned by `url_state.js` (its header is the field-level contract); serialized
+with `history.replaceState` on every state change, defaults omitted:
+
+| Param | Value | Meaning |
+|-------|-------|---------|
+| `bucket` | string | S3 bucket name. |
+| `aws_region` | string | Region the bucket lives in (cross-region buckets). |
+| `prefix` | string | User-entered key prefix. |
+| `tab` | `raw` | Active tab; `browse` is the default and omitted. |
+| `tz` | `local` | Timezone toggle; `utc` is the default and omitted. |
+| `last` | positive number | Relative quick range in hours ("last N hours from now"). Mutually exclusive with `from`/`to`; wins when both present. |
+| `from` | epoch seconds | Precise window start. NOTE: same NAME as the viewer's display-only `from`, different page, different meaning - both stable. |
+| `to` | epoch seconds | Precise window end. |
+| `q` | string | Raw-search prefix query. |
+
+### Query params - every page
+
+| Param | Value | Meaning |
+|-------|-------|---------|
+| `ui` | `new` \| `legacy` | Dual-UI switch (owned by `ui-switch.js`, see above). Preserved-minus-`ui` across switches; the hash is dropped by design. |
+
+### Hash - versioned view state (`#v=1`)
+
+The hash carries a form-encoded payload with a leading integer version:
+`#v=1&fg.w=<tab-joined path>&tm=abs`. Full grammar, precedence against the
+legacy zoom params, tolerant-reader and version rules:
+`docs/ui-inventory/05-url-view-state.md`. The v1 key registry, with honest
+status:
+
+| Key | Status | Meaning |
+|-----|--------|---------|
+| `v` | live | Schema version, currently `1`. Required; a hash without a well-formed integer `v` is foreign and left alone. |
+| `fg.w` | live (flamegraph) | Worker-tree zoom path; overrides `worker-zoom` per field, legacy fills gaps. |
+| `fg.o` | live (flamegraph) | Off-worker-tree zoom path. |
+| `tm` | defined, unwritten | Clock display mode (`rel`\|`abs`); the chunk-2 viewer wires it. |
+| `tz` | defined, unwritten | Timezone (`utc`\|`local`) for absolute timestamps. |
+| `vp` | reserved - completes with chunk 2 (T21-T23) | Viewport time window. NOT honored yet; do not emit. |
+| `sel.*` | reserved - completes with chunk 2 (T21-T23) | Selection/highlight (task, span, event). NOT honored yet; do not emit. |
+| `poi` | reserved - completes with chunk 2 (T21-T23) | POI position for n/p stepping. NOT honored yet; do not emit. |
+
+Reserved keys claim the NAME only. Emitting them today does nothing (a
+tolerant reader preserves them verbatim but restores nothing); links that
+need selection or viewport state become constructible when the chunk-2
+viewer tickets land and this table flips their status to live.
+
+### Deep-link recipes for agents (issue #303)
+
+The three asks from #303, in contract terms:
+
+1. **Set a time range / open the viewer at an exact window** (works today,
+   on the legacy viewer and any migrated page honoring the same params):
+
+   ```
+   viewer.html?trace=<trace-url>&start=<ns>&end=<ns>
+   ```
+
+   Compute `start`/`end` as `trace.minTs + offsetNs` (absolute monotonic
+   ns). The page parses only events in `[start, end]` and shows "Clear
+   Range" immediately.
+
+2. **Open a flamegraph, optionally pre-zoomed to a subtree:**
+
+   ```
+   flamegraph.html?trace=<trace-url>&start=<ns>&end=<ns>&worker-zoom=<f1>%09<f2>
+   ```
+
+   Emit the legacy `worker-zoom`/`offworker-zoom` QUERY form for maximum
+   compatibility: both page generations honor it (the migrated page reads
+   it as the hash's fallback). The hash form
+   `#v=1&fg.w=<f1>%09<f2>` is equivalent on migrated pages and wins per
+   field when both are present. Zoom restore is gated on the time-range
+   filter reproducing the shared tree (F151), so carry the same
+   `start`/`end` the zoomed view had (or none).
+
+3. **Highlight / select:** NOT constructible yet. The `sel.*` and `vp` hash
+   keys are reserved and complete with chunk 2 (T21-T23); until then there
+   is no selection param on any page, and inventing query params fails
+   silently (see above).
+
+### Enforcement
+
+- `src/lib/url/url-contract.test.ts` (vitest) pins this section against the
+  code: schema version, hash-key registry behavior (live keys round-trip,
+  reserved keys preserved-not-honored), and the param tables against the
+  recorded fixtures (`src/lib/url/legacy-params.fixture.ts`, `url_state.js`).
+  Renaming this section's headings or table param names breaks that test by
+  design.
+- `parity/url-contract.mjs` (T12-style, live server) constructs the recipe
+  URLs above and asserts the pages honor them end-to-end; see "Parity gate
+  tooling" below.
+
 ## Parity gate tooling (`parity/`)
 
 The migration's "lose nothing" machinery (ticket T12; ADR-0004 section 7):
@@ -263,6 +435,19 @@ per frame via a pluggable source (`lib/render-sources.mjs`; the default
 
 ```bash
 node parity/perf-probe.mjs --url <pageUrl> [--journey J3] [--render-source stub] [--json p]
+```
+
+**(f) URL-contract check** - the live half of the URL contract's
+enforcement (the codec-level pin is `src/lib/url/url-contract.test.ts`):
+constructs the contract section's deep-link recipe URLs in plain Node (no
+browser) and asserts real pages honor them - the legacy viewer opens at an
+exact `?start/?end` window, the recorded zoom link restores on both page
+generations (query form on legacy, `#v=1` hash form on migrated), reserved
+hash keys are inert, a foreign version restores nothing. Exit 0 only when
+all legs pass:
+
+```bash
+node parity/url-contract.mjs --base http://localhost:3021 [--json p]
 ```
 
 Self-tests (run whenever the tools themselves change): census and behavioral
