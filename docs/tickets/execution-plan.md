@@ -75,7 +75,7 @@ Status values: `pending` | `in-progress(<who/branch>)` | `gates-passed` |
 | Ticket | Status | Branch | Notes |
 |---|---|---|---|
 | T01 | implemented; docs-lineage ticket | ticket/T01-inventory-refresh @ c1fccc5 | push+PR = maintainer; 3 HANDOFF questions still await maintainer ruling |
-| T02-T19, T38, T43, T48 + fixes | MERGED into integration/chunk-1 | (ticket/* branches retained) | rolling tip; last verified gate ~947 tests + 1 sanctioned xfail; executor reports counts per merge (T10/T12/T13/T14/T15/T40 etc. landed per executor reports - executor's dispatch log is authoritative for per-ticket detail) |
+| T02-T20, T38, T43, T48 + audit fixes | MERGED into integration/chunk-1 @ d4d67c8 | (ticket/* branches retained) | **CHUNK 1 CLOSED 2026-07-12**: T20 merge gate-verified by orchestrator inline (tsc clean, 1001 passed + 1 sanctioned xfail, build clean, 17 static-copy items). Chunk 2 (T21 viewer shell) now unlocked, plus T41/T46. |
 | T43 | MERGED into integration (clean) | ticket/T43-url-contract-api @ 346a284 | all 4 parity legs green, 12/12 codec pin, skill-link e2e PASS, full gate run clean; #303 disposition: URL contract covers set-time-range + open-flamegraph; "highlight" reserved until chunk 2 (T21-T23); issue's server-push/event-API asks are OUT of migration scope - recommend #303 stays OPEN with a partial-progress comment, not closed |
 | T15, T19-T37, T39, T41, T42, T44-T48 | pending/in-flight per executor | - | chunk-2 renderer obligations from T17 audit attached; T20+T48 in flight |
 
