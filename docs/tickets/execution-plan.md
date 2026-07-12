@@ -96,6 +96,16 @@ Executor drives; orchestrator audits.
   integration tree's full gate run (tsc + all tests) remains the merge bar
   for every ticket branch entering integration/chunk-1.
 
+**EXECUTOR TRANSITION (2026-07-12):** the long-running executor agent is
+stall-looping (bloated context amid API instability; 2 consecutive watchdog
+deaths) and is RETIRED from dispatch. The orchestrator session temporarily
+holds dispatch: a fresh bounded agent is finishing T20's evidence phase
+(implementation complete at 52c5bd7). After T20 lands: stand up a FRESH
+executor that boots from this file + branch survey (per the resume
+protocol), or continue orchestrator-dispatched bounded agents - whichever
+the maintainer prefers. Do NOT resume the old executor or the old T20
+agent.
+
 **Audit log:**
 - T07 store/scheduler: FINDINGS (non-blocking), 5 defects filed
   (`reviews/T07-audit.md`) -> ALL FIXED via fix(store), merged into
