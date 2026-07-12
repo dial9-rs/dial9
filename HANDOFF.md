@@ -1,150 +1,227 @@
-# T19 HANDOFF - Viewer URL view-state + copy-link
+# T20 HANDOFF - Unified keyboard model
 
-(Replaces the T40 HANDOFF inherited through the branch chain; T40's record
-lives at commit bd1503b.)
+(Replaces the T19 HANDOFF inherited through the branch chain; T19's
+record lives in the tree at base 009582d.)
 
 ## STATUS
 
-COMPLETE - no STOP-gate hit. All DoD items done, all gates green, no open
-blockers. The hash-vs-query reconciliation followed the recorded default
-(legacy params untouched and mirrored; versioned hash carries the new
-unified state; hash wins per field on read) - it proved workable, no fork.
+COMPLETE - no STOP-gate hit. All scope items landed, all gates green,
+DoD evidence below. Base: 009582d (integration/chunk-1 tip). Branch:
+`ticket/T20-unified-keyboard`. No push, no PRs.
 
-Branch: `ticket/T19-url-view-state`, based on integrated tip 03f4626.
+Session note: this ticket ran across three agent sessions (one budget
+kill, one watchdog stall). Commit b43aa08 is the salvage decision on the
+first session's two draft files (both KEPT as-is: coherent, matched the
+ticket design); edc4cbe is a mid-work wip checkpoint committed by the
+supervising session (completed and verified by 52c5bd7).
 
 ## COMPLETED (commits)
 
 | sha | what |
 | --- | --- |
-| a87564c | codec (`ui/src/lib/url/view-state.ts`) + legacy-param fixture (`legacy-params.fixture.ts`) + property/round-trip tests |
-| 9f09db0 | store->URL sync binding (`ui/src/lib/url/sync.ts`) + copy-link (`ui/src/lib/url/copy-link.ts`) + barrel + tests |
-| d4015e0 | flamegraph page integration (`ui/src/pages/flamegraph/view-state.ts`; exact-mode/api-mode/dom/new-html wiring) + integration tests |
-| 2a212e4 | parity: journey J9 (recorded legacy zoom-link restore) + `fg.breadcrumb` readout |
-| 33b5204 | schema doc `docs/ui-inventory/05-url-view-state.md` + ADR-0004 doc-index row + ledger entries |
+| b43aa08 | salvage: keyboard.ts router + zoom-history.ts drafts (KEPT as-is) |
+| 7e30fba | mechanism: palette, help overlay, goto-time, announce, lib/interact barrel, interact.css |
+| 85da324 | Vitest: router + zoom stack + palette policy + goto-time (40 cases) |
+| e5bb83e | flamegraph wiring: fg-keys.ts (`?`/`f`/`z`), exact+api mode hooks |
+| edc4cbe | wip checkpoint (supervisor salvage; superseded by 52c5bd7) |
+| 52c5bd7 | browser wiring: page-keys.ts + heatmap-keys.ts + main.ts mounts |
+| 68f9424 | parity tooling: axe-scan --press, axe-keyboard.mjs + harness, keyboard-checks.mjs |
+| a4886b9 | axe fixes: overlay h2 heading order, harness landmark |
+| cfafd6c | docs: inventory amendments in-diff + 10 ledger lines |
 
 ## WHAT SHIPPED
 
-- Versioned URL hash codec: `#v=1&fg.w=<tab path>&fg.o=...&tm=...&tz=...`
-  (form-encoded payload; empty state = no hash at all). Tolerant reader:
-  unknown v=1 keys preserved on rewrite; invalid values dropped; foreign
-  or future-version hashes never restored from nor rewritten.
-- Store-slice -> URL sync: one debounced (150ms trailing) replaceState
-  per change burst; no-op writes skipped; host/timer/scheduler injectable
-  for Node tests. Restore-on-load bypasses the store (the frozen widget's
-  zoomToPath does not fire onZoomChange), so opening a shared link
-  produces ZERO URL writes - legacy parity, gated by J9's url.query.
-- Flamegraph page (first consumer): user zoom -> page-local store slice
-  (`fgView`) -> one write carrying BOTH the legacy `worker-zoom` /
-  `offworker-zoom` query params (exact F147-F153 semantics: address-bar
-  copies still open on the legacy page) AND the versioned hash. Read
-  precedence: hash wins per field, legacy fills gaps; F151
-  timeRangeMatched gate kept.
-- Copy-link button (`.d9-copy-link`) in the migrated page header, both
-  modes: flushes the pending debounced write, copies location.href,
-  flashes "Copied". API mode mounts it without a flush (its URL is
-  already current via F180 pushState; canvas zoom deliberately not
-  URL-synced there - legacy parity, codec stays out).
-- Time mode: `tm` (`rel`|`abs`) + `tz` (`utc`|`local`) DEFINED in the v1
-  vocabulary but unwritten - the flamegraph page has no clock-mode
-  control; the chunk-2 viewer wires them (design addition, rationale
-  documented in the schema doc).
+Mechanism (`ui/src/lib/interact/`): focus-tolerant key router (K5;
+DOM-free core, Node-tested), bounded zoom-history stack (K4; store/page
+state, deliberately NOT URL state per 05-url-view-state.md), search
+palette component (K1; mock semantics: clamped arrows, wrapped
+Enter-cycling, Shift+Enter prev), unified help overlay component (K3;
+per-page content sections, dialog a11y, focus capture/restore),
+goto-time grammar (mechanism only - T23 wires `g`), announcer
+(aria-live region + 1.6s toast; viewer announce() + mock say()
+precedent).
+
+Flamegraph page (BOTH modes): `?` help (features/03 F94 table as the
+content baseline + the page's live keys), `f` fit (zoom reset WITHOUT
+clearing search - the F44 invariant the Escape cascade cannot honor),
+`z` zoom-undo (bounded view history). `/` and Ctrl/Cmd+F remain the
+frozen widget's own (composition via defaultPrevented; nothing
+intercepted or re-mapped; F41 exactly as before). Zoom restore composes
+released widget behaviors only: synthetic contextmenu pops (the public
+right-click zoom-out-one-level, F94) drain the stacks, zoomToPath
+rebuilds, a reentrancy guard keeps intermediate pops out of the
+history; exact mode settles the URL sync once, api mode stays
+URL-silent (F180). Frozen core untouched.
+
+Browser page: `?` help, `/` focuses the active tab's search input,
+Enter submits the browse search from any controls-bar field (K2),
+heatmap keyboard window selection (K2 fix direction = the viewer's
+documented Shift -> arrows -> Enter state machine; the plot is now
+keyboard-focusable, fixing K2's axe-serious scroll region; keyboard
+confirm lands on the SAME finalizeSelection as the mouse path and the
+in-progress band renders through the same transient drag channel;
+announced).
+
+Viewer keys (n/p, g, WASD timeline): mechanism only, per the ticket
+boundary - T23 wires the viewer surfaces in chunk 2.
+
+## GATES (all green, run at cfafd6c)
+
+- `npx tsc --noEmit`: clean.
+- FULL `npm run test`: 57 files passed | 1 skipped; 962 tests passed,
+  1 expected fail (suite-declared), 11 skipped - the pre-existing
+  baseline plus the 4 new lib/interact suites (40 cases).
+- `npm run build`: clean.
+- boundary check (`npm run check:boundary`): OK - no core imports
+  outside lib/trace + lib/canvas.
+- `cargo build -p dial9-viewer`: clean (rust-embed embed check). JS/TS +
+  docs only - per AGENTS.md no nextest/stress/clippy required.
+- Dev-server (:3101) and browsers killed after evidence collection.
 
 ## DoD EVIDENCE
 
-1. check: Vitest codec round-trip property test - PASS.
-   `ui/src/lib/url/view-state.test.ts`: 500 seeded-random states
-   (mulberry32; adversarial frame names incl. `& = # % + ? / \ ' " space
-   unicode`; tab excluded = the legacy wire format's own limitation),
-   decode(encode(s)) === s, encode-stability, legacy-mirror round-trip.
-   No new deps (constraint S1) - hand-rolled PRNG, no fast-check.
+### check: `?` opens help on every migrated page (enumerated)
 
-2. check: restore-on-load integration test on each page migrated at
-   landing time (flamegraph is the only one) - PASS, done BOTH sanctioned
-   ways, documented:
-   - vitest-level against the page module:
-     `ui/src/pages/flamegraph/view-state.test.ts` (recording fake widget:
-     legacy-only / hash-only / both-precedence / F151 gate / zero writes
-     on restore / write shape / Esc cleanup / F153 preservation / flush).
-   - parity behavioral differ (in-browser, real page + real widget):
-     journey J9 below.
+`node parity/keyboard-checks.mjs --base http://localhost:3101`
+(dev-server over built dist):
 
-3. check: recorded legacy-param fixture URLs resolve identically - PASS.
-   - Fixture (the ticket's FIRST work item), recorded from reading
-     flamegraph.html + flamegraph.js + features/03 M/P into
-     `ui/src/lib/url/legacy-params.fixture.ts`:
-     - exact mode, load scope (read-only): `trace` (repeatable), `start`,
-       `end`, `svc`, `host`, `segs`, `from`, `to`;
-     - exact mode, VIEW STATE (replaceState, F147-F153): `worker-zoom`,
-       `offworker-zoom` (tab-joined frame paths; set when non-empty,
-       deleted when empty; restore gated on timeRangeMatched F151; Esc
-       clears F152; all other params preserved F153);
-     - api mode (pushState on Apply/facet change, F180): `api`,
-       `data_dir`, `bucket`, `prefix`, `service`, `host` (repeatable),
-       `start_ns`, `end_ns`, `source`, `thread_class`, `spawn_location`,
-       `max_files` - NO view-state params by design (canvas zoom not
-       URL-synced in api mode; kept that way).
-   - Behavioral differ (dev-server :3081 over built dist, per the DoD
-     recipe), J9 fixture URL recorded from the LEGACY page itself
-     (click-zoom on demo-trace, walkable prefix of the emitted path):
-     `/flamegraph.html?trace=demo-trace.bin&worker-zoom=0xffff9b8cbf1c%090xffff9b862030%09Thread%3A%3Anew%3A%3Athread_start+unix.rs%3A130`
-     Output: `== J9 (restore a shared zoom link) ... checkpoint restored:
-     identical (6 fields) ... ZERO DIFF` (legacy /flamegraph.html vs
-     migrated /new/flamegraph.html).
-   - J5 re-run legacy vs new with the copy-link mounted: `ZERO DIFF`
-     (rendered + searched checkpoints, 6 fields each).
-   - End-to-end playwright verification on the migrated page (throwaway
-     script, removed): zoom writes legacy params + v=1 hash (debounced);
-     hash-only URL restores (breadcrumb populated, URL byte-stable, no
-     write-back); copy-link copies href (clipboard === href, "Copied"
-     flash); Esc clears both params and the hash, keeps `trace`; the
-     LEGACY page loads a hash URL fine and is simply not zoomed (raw
-     ui-switch policy honored - no state porting, none attempted).
+```
+PASS  browser page (new/index.html)  (? opened: true, Esc closed: true)
+PASS  flamegraph exact mode (new/flamegraph.html?trace=/demo-trace.bin)  (? opened: true, Esc closed: true)
+PASS  flamegraph api mode (new/flamegraph.html?api=1&bucket=demo-traces&prefix=traces)  (? opened: true, Esc closed: true)
+```
 
-4. review: schema documented for chunk-2 extension -
-   `docs/ui-inventory/05-url-view-state.md`: key registry
-   (live/defined/reserved), version + tolerant-reader rules, precedence,
-   write mechanics, ownership boundary table, extension checklist.
-   Registered in ADR-0004's doc-index table.
+### check: axe clean on palette/overlay
 
-## GATES
+Component harness (`node parity/axe-keyboard.mjs --fail-on minor`;
+palette + overlay OPEN, real src/ components served by a throwaway
+programmatic Vite dev server - the palette has no landing-time page
+mount in chunk 1, T23 wires it):
 
-- `npx tsc --noEmit`: clean.
-- `npm run test` (FULL suite, includes the check:boundary pretest):
-  50 files passed + 1 skipped (pre-existing), 888 passed / 1 expected
-  fail / 11 skipped (pre-existing baseline). 0 unexpected failures.
-- `npm run build`: clean (dist/new/flamegraph.html + bundles + 17
-  static-copied items).
-- `cargo build -p dial9-viewer`: clean (rust-embed embed check).
-- Dev-server killed; port 3081 verified closed.
-- JS/TS-only change (no .rs touched, no trace-format change): per
-  AGENTS.md, cargo nextest/stress/clippy not required.
+```
+Summary: 0 violations, 0 nodes   (PASS at --fail-on minor)
+```
 
-## RECONCILIATION / SCOPE FENCE
+Two moderates were found and fixed en route (a4886b9): overlay title
+h3->h2 (heading-order skip after the pages' h1) and a missing harness
+landmark.
 
-- `url_state.js` and the browser page: NOT modified (T14's surface).
-  Reconciliation is documentation + codec design: url_state.js owns the
-  browser page's QUERY params (`bucket`, `aws_region`, `prefix`, `tab`,
-  `tz`, `last`, `from`, `to`, `q`); the codec owns the HASH on migrated
-  pages. The `tz` name exists in both vocabularies deliberately (same
-  values, different carrier + page - no interference). Boundary table in
-  the schema doc.
-- Frozen core untouched. The parity readout-schema/journey extension is a
-  parity-TOOL change, explicitly allowed by the schema fixture's header.
-- No chunk-2 chrome: only the minimal copy-link button the ticket owns.
-- No push, no PRs.
+Live pages, overlay open vs closed delta (`axe-scan.mjs` with/without
+the new `--press "?"`):
 
-## OPEN QUESTIONS / NOTES FOR MAINTAINER + CHUNK-2
+```
+browser page:     closed 4 violations/29 nodes -> open 3/28; nodes added by opening: NONE
+flamegraph exact: closed 6/13 -> open 4/11;                  nodes added by opening: []
+d9-component nodes in violations: NONE (only pre-existing #d9-ui-switch, T38, in both scans)
+```
 
-None blocking. Notes:
-- Ledger lines added (= PR sign-off items): `features/03 F147/F153
-  amended (T19)` (debounced write + hash alongside unchanged legacy
-  params) and `features/03 census +.d9-copy-link added (T19)`.
-- The J9 fixture path is demo-trace-dependent: after a demo-trace
-  regeneration, re-record it by click-zooming the legacy page and copying
-  the emitted URL (comment in parity/journeys.mjs says the same).
-- Chunk-2's status bar should replace `mountCopyLink` but keep the
-  flush-then-read contract (`ViewStateBinding.flush()` before reading
-  href).
-- Sibling coordination: T14 (browser page) may adopt the codec for any
-  NEW view state on its page; url_state.js's params stay query-based
-  as-is (schema doc, boundary table).
+All remaining violations are pre-existing legacy-ported markup (label
+#range-from, h1 contrast, region landmarks).
+
+### check: row-walker on touched rows (dev-server :3101, built dist)
+
+features/01 on new/index.html (`--rows D9,F12,F13,F14,F15,G2`):
+
+```
+D9 VERIFIED | F12 VERIFIED | F13 VERIFIED | F14 VERIFIED | F15 VERIFIED | G2 VERIFIED
+Summary: 6 rows - 6 VERIFIED. GREEN: zero FAILED
+```
+
+features/03 on new/flamegraph.html
+(`--rows F41,F92,F93,F94,F95,F96,F157,F171,F176,F177`):
+
+```
+F41, F92-F96, F157: NOT-TRIGGERABLE (no recorded verdict - listed, not
+  gated, per the shared verdict mapping)
+F171 VERIFIED | F176 VERIFIED | F177 VERIFIED   (api mode green with
+  the new key wiring mounted)
+Summary: 10 rows - 7 NOT-TRIGGERABLE, 3 VERIFIED. GREEN: zero FAILED
+```
+
+### check: Vitest for router + palette filtering + zoom stack
+
+`ui/src/lib/interact/{keyboard,palette,zoom-history,goto-time}.test.ts`
+- 40 cases, green inside the full run (85da324).
+
+### Inventory amendments in-diff + ledger
+
+- features/03: F157 amended; F186/F187/F188 added (section N).
+- features/01: D9, F12 amended; A8, A9, F21 added.
+- docs/tickets/ledger.md: 10 T20 lines appended.
+- NOTE: markers are dated `[2026-07-12]` (the actual amendment date;
+  the ticket draft anticipated `[2026-07-11]` - the sessions were
+  killed across the date boundary).
+
+## T15-OVERLAP: files touched under src/pages/browser/
+
+For the integrator merging on top of T15 (sortable-table / unknown-key /
+bucket-filter / axis changes - NOT in this base):
+
+- `src/pages/browser/page-keys.ts` - NEW FILE (no conflict possible).
+- `src/pages/browser/heatmap-keys.ts` - NEW FILE (no conflict possible).
+- `src/pages/browser/main.ts` - EDITED, the ONLY pre-existing browser
+  file touched: 2 import lines + 2 mount calls
+  (`mountBrowserPageKeys(ctx); mountHeatmapKeys(ctx);`) inside boot(),
+  between mountHeatmapInteraction and mountRawView. If T15 restructured
+  main.ts, re-apply these four lines anywhere after `ctx` exists - the
+  placement is NOT load-bearing (both modules only register listeners /
+  set plot attributes; no store-subscriber ordering constraints).
+
+Semantic overlap notes:
+- page-keys.ts reads `els.searchBtn.disabled` for the Enter gate: if
+  T15's bucket-filter work changed the Search readiness formula, the
+  Enter path inherits it automatically (defers to rendered state).
+- heatmap-keys.ts reads `els.heatmapCanvas.clientWidth` +
+  `browse.rows`/ROW_H: if T15's axis change altered canvas sizing, the
+  keyboard path scales with it (no duplicated constants).
+- raw-view.ts (T15's sortable-table landing zone) untouched; G2's Enter
+  handler is as T14 shipped it.
+
+Also touched OUTSIDE the browser page (no T15 contact):
+`src/pages/flamegraph/{exact-mode,api-mode}.ts` + new `fg-keys.ts`;
+`src/lib/interact/*` (new + salvaged); `src/styles/interact.css` (new);
+`parity/axe-scan.mjs` (additive --press flag) + new
+`parity/{axe-keyboard.mjs,keyboard-checks.mjs,fixtures/keyboard-harness.html}`;
+docs (both inventories, ledger).
+
+## JUDGMENT CALLS (flagged; none met the STOP-gate bar)
+
+1. "Enter-cycling" (palette): the mock's implementation closes on
+   Enter, but its placeholder says "Enter jump - Shift+Enter prev" and
+   the ticket names the canonical semantics "palette Enter-cycling".
+   Implemented: Enter activates AND advances the selection (wrapping),
+   Shift+Enter activates and steps back, palette stays open; Escape or
+   click-activation closes. Trivial to flip if review prefers
+   close-on-Enter.
+2. Ticket says browser "`?` help (exists)" and K3 claims "? opens help
+   on viewer/browser": no legacy browser help surface exists at HEAD
+   (the page's only key handler is G2's Enter, index.html:1814).
+   Implemented as a new binding - the work item is the same either way;
+   recorded in the ledger's A8 line.
+3. `z`/`f` over the frozen widget API: there is no public zoom-state
+   setter (zoomToPath appends and no-ops on empty; the Escape-cascade
+   reset clears search first, violating F44 for fit). Chosen: compose
+   the widget's released behaviors (synthetic contextmenu = its public
+   right-click zoom-out) + zoomToPath, reentrancy-guarded. The
+   alternative (unfreezing flamegraph.js for a resetZoomOnly()) was not
+   taken - scope fence.
+4. Heatmap keyboard selection spans ALL host rows (row narrowing stays
+   pointer-only) and has no keyboard zoom analog - K2's stated minimum
+   plus the viewer-state-machine precedent; cheap to extend.
+5. Shift-to-start inherits the viewer's known quirk: `?` (Shift+/)
+   while the plot is focused starts a selection first (Escape/blur
+   cancels) - identical to the legacy viewer's Shift behavior.
+6. Marker date [2026-07-12] instead of the drafted [2026-07-11] (see
+   DoD evidence note).
+
+## OPEN QUESTIONS (non-blocking)
+
+- Palette Enter semantics (judgment call 1) - flip on review?
+- parity layer additions (--press flag + two scripts + harness) are
+  T12-owned surface: fold into ui/README.md's parity section when
+  convenient (README edit deliberately not made here - outside the
+  ticket's doc scope of inventories + ledger).
+- K3's row in 04-ux-findings.md still claims "? opens help on
+  viewer/browser"; the browser half did not re-verify (see judgment
+  call 2). Left un-edited: 04 is the audit RECORD, not a contract file;
+  the correction is carried by the ledger + A8's row text.
