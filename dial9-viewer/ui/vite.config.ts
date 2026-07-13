@@ -140,6 +140,10 @@ export default defineConfig({
         // new/index.html (registered in ui-switch.js NEW_UI_ENTRIES; the
         // canonical /index.html keeps serving the legacy page).
         "new-index": "new/index.html",
+        // T21: the migrated trace-viewer shell, served off-root at
+        // new/viewer.html (registered in ui-switch.js NEW_UI_ENTRIES; the
+        // canonical /viewer.html keeps serving the legacy page).
+        "new-viewer": "new/viewer.html",
       },
     },
   },

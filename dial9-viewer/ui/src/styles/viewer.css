@@ -1,0 +1,262 @@
+/* Viewer shell styles (T21). The DECIDED concept-1 hybrid layout: toolbar
+   row, overview minimap, a body splitting the unified time-aligned track
+   column from a persistent inspector, and a status bar. Dark theme matches
+   the other pages (#1a1a2e). Muted foregrounds are held at >= 4.5:1 against
+   the background (amendment F6 contrast; same bar as interact.css). */
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+:root {
+    --d9-bg: #1a1a2e;
+    --d9-bg-panel: #16213e;
+    --d9-bg-track: #12172a;
+    --d9-border: #2f2f4a;
+    --d9-fg: #e0e0e0;
+    /* Muted text lifted to clear the 4.5:1 contrast bar (F6). */
+    --d9-fg-muted: #a9b0d0;
+    --d9-accent: #8f88ff;
+}
+
+html, body { height: 100%; }
+body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--d9-bg);
+    color: var(--d9-fg);
+    font-size: 14px;
+    overflow: hidden;
+}
+
+.d9-viewer {
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    min-height: 0;
+}
+
+/* ── Toolbar ─────────────────────────────────────────────────────────── */
+
+.d9-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 6px 12px;
+    background: var(--d9-bg-panel);
+    border-bottom: 1px solid var(--d9-border);
+    flex-shrink: 0;
+    min-height: 40px;
+}
+.d9-app-title {
+    font-size: 0.95em;
+    font-weight: 600;
+    color: var(--d9-accent);
+}
+.d9-file-name { font-size: 0.85em; color: var(--d9-fg); }
+.d9-file-meta { font-size: 0.8em; color: var(--d9-fg-muted); }
+.d9-toolbar-spacer { flex: 1; }
+.d9-toolbar-slot {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 2px 8px;
+    border: 1px dashed var(--d9-border);
+    border-radius: 4px;
+}
+.d9-slot-hint { font-size: 0.75em; color: var(--d9-fg-muted); }
+.d9-help-btn {
+    background: #2a2a4a;
+    border: 1px solid #444;
+    color: var(--d9-fg);
+    width: 28px; height: 28px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.95em;
+    flex-shrink: 0;
+}
+.d9-help-btn:hover { background: #3a3a5a; }
+.d9-help-btn:focus-visible { outline: 2px solid var(--d9-accent); outline-offset: 1px; }
+
+/* ── Minimap slot ────────────────────────────────────────────────────── */
+
+.d9-minimap {
+    height: 46px;
+    flex-shrink: 0;
+    background: #12122a;
+    border-bottom: 1px solid var(--d9-border);
+    display: flex;
+    align-items: center;
+    padding: 0 12px;
+}
+.d9-minimap:focus-visible { outline: 2px solid var(--d9-accent); outline-offset: -2px; }
+
+/* ── Body: track column + inspector ──────────────────────────────────── */
+
+.d9-body {
+    flex: 1;
+    display: flex;
+    min-height: 0;
+}
+.d9-track-column {
+    flex: 1;
+    min-width: 0;
+    overflow-y: auto;
+    overflow-x: hidden;
+    background: #0f1424;
+}
+.d9-track-column:focus-visible { outline: 2px solid var(--d9-accent); outline-offset: -2px; }
+
+/* Persistent interaction hint chips (F5). */
+.d9-hint-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--d9-border);
+    background: #101632;
+}
+.d9-chip {
+    font-size: 0.72em;
+    color: #cdd2f0;
+    background: #26265a;
+    border: 1px solid #3a3a5e;
+    border-radius: 10px;
+    padding: 2px 9px;
+    white-space: nowrap;
+}
+
+/* ── Tracks ──────────────────────────────────────────────────────────── */
+
+.d9-tracks { display: flex; flex-direction: column; }
+.d9-track {
+    display: flex;
+    align-items: stretch;
+    border-bottom: 1px solid var(--d9-border);
+}
+.d9-track-label {
+    width: var(--d9-label-w, 100px);
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 2px;
+    padding: 0 8px;
+    background: #131834;
+    border-right: 1px solid var(--d9-border);
+}
+.d9-track-name { font-size: 0.8em; color: var(--d9-fg); }
+.d9-track-owner { font-size: 0.68em; color: var(--d9-fg-muted); }
+.d9-track-canvas-wrap {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    background: var(--d9-bg-track);
+}
+.d9-track-canvas { display: block; }
+
+/* ── Empty state (F4) ────────────────────────────────────────────────── */
+
+.d9-empty {
+    max-width: 520px;
+    margin: 48px auto;
+    padding: 0 20px;
+    color: var(--d9-fg);
+    text-align: center;
+}
+.d9-empty h2 { font-size: 1.1em; color: var(--d9-accent); margin-bottom: 10px; }
+.d9-empty p { color: var(--d9-fg-muted); margin: 8px 0; }
+.d9-empty-steps {
+    list-style: none;
+    display: inline-block;
+    text-align: left;
+    margin: 10px 0;
+    color: var(--d9-fg);
+}
+.d9-empty-steps li { padding: 4px 0; }
+.d9-empty-steps code {
+    background: #2a2a4a;
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.85em;
+}
+.d9-empty-hint { font-size: 0.8em; }
+
+/* ── Inspector ───────────────────────────────────────────────────────── */
+
+.d9-inspector {
+    width: 360px;
+    flex-shrink: 0;
+    background: var(--d9-bg-panel);
+    border-left: 1px solid var(--d9-border);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+.d9-inspector:focus-visible { outline: 2px solid var(--d9-accent); outline-offset: -2px; }
+.d9-inspector-tabs {
+    display: flex;
+    gap: 4px;
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--d9-border);
+}
+.d9-inspector-tab {
+    font-size: 0.78em;
+    color: var(--d9-fg-muted);
+    padding: 3px 8px;
+    border-radius: 4px;
+}
+.d9-inspector-tab.on { color: var(--d9-fg); background: #26265a; }
+.d9-inspector-body { padding: 12px; overflow-y: auto; }
+.d9-slot-owner { font-size: 0.72em; color: var(--d9-fg-muted); margin-top: 8px; }
+
+/* ── Status bar ──────────────────────────────────────────────────────── */
+
+.d9-status {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 5px 12px;
+    background: var(--d9-bg-panel);
+    border-top: 1px solid var(--d9-border);
+    flex-shrink: 0;
+    font-size: 0.76em;
+    color: var(--d9-fg-muted);
+}
+.d9-status-sel { color: var(--d9-fg); }
+.d9-status-hints { margin-left: auto; }
+
+/* ── Toasts (features/02 U) ──────────────────────────────────────────── */
+
+.d9-toast-region {
+    position: absolute;
+    top: 52px;
+    left: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    z-index: 60;
+    pointer-events: none;
+}
+.d9-toast-item {
+    pointer-events: auto;
+    padding: 8px 14px;
+    border-radius: 6px;
+    font-size: 0.8em;
+    max-width: 360px;
+    border: 1px solid #444;
+    background: rgba(13, 13, 26, 0.95);
+    color: var(--d9-fg);
+}
+.d9-toast-info { border-color: #4a6fb0; }
+.d9-toast-warn { border-color: #c98a3a; }
+.d9-toast-error { border-color: #c9524a; }
+.d9-toast-in { animation: d9-toast-in 0.2s ease-out; }
+.d9-toast-wiggle { animation: d9-toast-wiggle 0.4s ease-in-out; }
+@keyframes d9-toast-in {
+    from { opacity: 0; transform: translateY(-6px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+@keyframes d9-toast-wiggle {
+    0%, 100% { transform: translateX(0); }
+    25% { transform: translateX(-4px); }
+    75% { transform: translateX(4px); }
+}

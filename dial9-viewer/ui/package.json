@@ -10,6 +10,9 @@
     "pretest": "npm run check:boundary",
     "test": "vitest run"
   },
+  "dependencies": {
+    "lit-html": "^3.3.3"
+  },
   "devDependencies": {
     "@types/node": "^24.13.3",
     "@vitest/coverage-v8": "^4.1.10",
