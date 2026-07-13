@@ -176,16 +176,25 @@ committed it (30851a7) then merged. Most earlier agents committed fine via
 `git -C <wt> commit`; T31's likely used `cd <wt> && git` (denied). MITIGATION:
 added the `git -C` (not `cd && git`) note to T32's prompt; VERIFY every agent's
 worktree `git status` on completion and salvage-commit if uncommitted.
-IN FLIGHT (cap 3, off 45640e6): T35 (minimap+status), T36 (track collapse+reorder),
-T32 (in-viewer flamegraph + region analyses - now unblocked; S7 count investigation
-+ frame->time link; renders into T31's Stack tab; frozen core NOT edited, K7 defers
-to T47 if it needs a core API).
-OWED: full-suite BATCH GATE. Merged T30/T23/T27/T29/T34/T33/T31 on tsc+build only
-(tsc caught + fixed 2 cross-ticket breaks). Run ONE clean full Vitest when running
-count hits 0 (concurrent Vitest starves timing suites) - the checkpoint before the
-final T37 polish ticket.
-REMAINING after this wave: T37 (UX polish, LAST in chunk 2) -> chunk 3
-(T40/T41/T44/T46 - verify which remain) -> T39 (legacy removal) last.
+T35 (minimap+status) MERGED (c29141a) + T36 (track collapse+reorder) MERGED
+(d307614), 2026-07-13. 16 CHUNK-2 TICKETS NOW INTEGRATED: T21-T31, T33-T36.
+T35 was another big semantic merge: T33 removed file-info from ShellViewModel
+(toolbar owns), T35 independently removed selection/range fields (status-bar
+component owns) - union reduced ShellViewModel to just TracksViewModel; MountedShell
+gained all 4 hosts (keyBindings+inspectorRegion+minimapRegion+statusRegion). T36
+added trackOrder/collapsed to the vm (track column reads them) - kept those, dropped
+T35-already-removed status labels. tsc clean after each.
+IN FLIGHT: T32 (in-viewer flamegraph + region; S7 count investigation; renders into
+T31's Stack tab; frozen core NOT edited, K7 defers to T47).
+FULL-SUITE BATCH GATE: RUNNING in background on the 16-merge tree (validates
+T30/T23/T27/T29/T34/T33/T31/T35/T36 which rode tsc+build only; tsc caught + fixed 2
+cross-ticket breaks along the way). Build clean (167KB viewer bundle). Holding new
+dispatch until the gate confirms chunk-2 health.
+REMAINING: chunk 2 -> T37 (UX polish, needs assembled UI; after T32+gate) -> T39
+(legacy removal, LAST, needs parity). Chunk 3 -> T40->T41 (tokio_stats inventory+
+migrate), T42 (fixtures, feeds T39), T45 (segment metadata #68, needs T33 done),
+T46 (end-user docs), T44 (issue housekeeping); T43+T48 already MERGED; T47
+(core-reshape ADR) gated on T39.
 DEFERRED BATCH GATE: full Vitest for T30/T23/T27 folded forward - run ONE clean
 full-suite gate after T29/T33/T34 land (never concurrent with a running agent's
 own suite; T27 proved concurrent Vitest starves timing-sensitive suites -> 13
