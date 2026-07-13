@@ -1,95 +1,130 @@
-# T36 - Track management (collapse, reorder) - HANDOFF
+# T41 - Migrate tokio_stats.html - HANDOFF
 
-(Supersedes the T33 HANDOFF inherited through the branch chain.)
+(Supersedes the T36 HANDOFF inherited through the branch chain.)
 
-## STATUS: DONE (DoD met, all gates green)
+## STATUS: DoD met (implementation complete, all runnable gates green)
 
-Per-track collapse + drag-reorder under the unified track column, persisted to
-`uiPrefs` and surviving reload. Section O's fold BEHAVIOR (per-surface show/hide
-+ persistence) is preserved; the one-line-fold PRESENTATION stays retired by S1.
-Pinning is OUT (as fenced). Per-track render delegation is UNCHANGED.
+Behavior-preserving migration of `tokio_stats.html` onto the new stack, same
+treatment as T13/T14. The full mechanical gate bar is green; the live T12
+Playwright parity layers are delivered (features04 walker registry + switch
+registration) and their properties are proven offline (Vitest exact-number
+behavioral tests, the XSS regression, the switch round-trip logic + a live
+Playwright smoke). The live parity RUNS themselves need the seeded DDB
+dev-server, which is environment-gated (as the T40 inventory itself notes for
+features/04) - see REMAINING.
 
-## COMPLETED (commits on `ticket/T36-track-mgmt`)
+## COMPLETED (commits on `ticket/T41-migrate-tokio-stats`)
 
-- `ae4f3f5` feat(viewer): declare uiPrefs.trackOrder + collapsed (T36 schema)
-- `5ea10a0` feat(viewer): per-track collapse + drag-reorder, persisted (T36)
-- `5efb230` test(viewer): track collapse/reorder/persist + reload round-trip
-- `e8dfad5` docs(T36): amend section O for track collapse/reorder + ledger
+- `83c1013` feat: migrate tokio_stats.html to the new stack
+  - `src/pages/tokio-stats/`: `format.ts` (converters), `stats.ts`
+    (computeStats + diff math + refine-termination), `exemplar.ts`
+    (deep-link builder), `url.ts` (URL contract), `render.ts` (lit-html
+    declarative templates - N17 XSS guard), `keys.ts` (T20 `?` help),
+    `dom.ts`, `main.ts` (wiring + refine loop via T18's `fetchTokioStats`).
+  - `new/tokio_stats.html` Vite entry (new-UI path); legacy page stays
+    servable. Registered `tokio_stats.html` in `ui-switch.js` NEW_UI_ENTRIES
+    and `vite.config.ts` input; extended the pinned `ui_switch.test.ts`
+    registry test.
+- `e69c37f` test: behavioral parity, XSS regression, URL + switch round-trip
+  (`stats/render/format/exemplar/url.test.ts` + the tokio_stats switch
+  round-trip case in `ui_switch.test.ts`).
+- `e7ab280` test(parity): `parity/walkers/features04.mjs` (9 gated-row
+  walkers) + registration in `walk-rows.mjs`; T41 ledger entries.
+- `6edd8c8` fix: keep pathname explicit in `syncUrl` under `<base href>`
+  (a real URL-contract break caught by the Playwright smoke).
 
-## WHAT LANDED
+## DoD CHECKS
 
-- **Schema** (`src/types/state.d.ts`): `uiPrefs.trackOrder: readonly string[]` +
-  `uiPrefs.collapsed: Readonly<Record<string, boolean>>`, additive (T25/T33/T26
-  precedent). `panelCollapsed` left as a superseded no-op holder. Full-slice
-  fixtures kept complete (`exhaustive.test.ts`, `store.test.ts`), plus the
-  viewer store's resting default (`pages/viewer/store.ts`: empty order, nothing
-  collapsed = the S1 "all surfaces visible" default).
-- **Mechanism** (`src/pages/viewer/track-management.ts`, NEW - owned): the
-  manageable set (cpu/queue/spans/events = section-O scope; timeline/lanes/
-  task-detail pinned), order resolution robust to stale/partial orders,
-  swap-reorder (`drop = swap position`), collapse predicate + `COLLAPSED_TRACK_H`
-  (24, legacy O1), store actions (toggle/reorder with no-thrash guards), and
-  localStorage persistence (`dial9.viewer.trackPrefs` JSON blob; hydrate on boot
-  + persist on change; try/catch in-memory fallback mirroring legacy).
-- **Column integration** (`tracks.ts`): ordered + collapse-aware visible list;
-  `repeat` keyed by track id so a reordered canvas MOVES with its track (no
-  cross-track pixel bleed); shell-owned manage wrapper (caret + grip in a
-  reserved label-gutter strip, pointer-events:none except the two controls so
-  the spans copy buttons stay live); `sizeTracks` skips a collapsed track and
-  re-paints from CURRENT windowed state on re-expand (carried T17-audit 6-7).
-- **Wiring** (`shell.ts`, `main.ts`): thread actions into the track column;
-  hydrate before first paint + mount the persistence subscriber (dispose on
-  unload). `viewer.css`: caret/grip strip + collapsed body-hide (legacy
-  label-only). Per-track render delegation (the id-keyed branches) unchanged.
-- **Docs**: `features/02` section O rewritten (O1-O7 amended inline, O8 added)
-  with an AMENDED banner; ledger entries for O1/O2/O3, O4, O5/O6/O7, O8, and the
-  schema additions.
+- **XSS regression test (hostile strings render inert)** - DONE.
+  `src/pages/tokio-stats/render.test.ts` proves the #587 sinks (spawn_loc,
+  the exemplar URL, the diff-% cell) are interpolated lit-html VALUES (inert),
+  never baked into static HTML, plus a source guard against the `innerHTML` /
+  `unsafeHTML` class. NOTE: `service`/`host` URL params are never rendered by
+  this page (they only build the fetch query), so they are inert by
+  construction; spawn_loc is the actual attacker-influenceable sink the #587
+  fix and this test target.
+- **Switch round-trip preserves the FULL query string** - DONE.
+  Logic-level in `ui_switch.test.ts` (bucket, prefix, service, REPEATABLE
+  host, per-period bounds) AND a live Playwright smoke (repeatable host
+  preserved across legacy->new). The page's own `syncUrl` keeps all scope +
+  `p{i}_*` params (`url.test.ts`).
+- **Behavioral differ (exact numbers)** - proven offline in `stats.test.ts`
+  against the recorded refine fixture (total_polls 94212, notable 3379,
+  per-location long/p50/p99/max, class buckets, rates) + the diff model
+  (G3-G9). The LIVE old-vs-new differ needs the dev-server (REMAINING).
+- **T12 row-walker on features/04** - registry DELIVERED
+  (`parity/walkers/features04.mjs`), covering exactly the 9 gated rows
+  (A8, A10, D3, D5, I1, J3, J5, J6, J11 - verified == the inventory's gated
+  set), registered in `walk-rows.mjs`. LIVE run env-gated (REMAINING).
+- **Census diff == switch delta** - analyzed switch-only and ledgered; the
+  seed's default single-period state renders no tabs/exemplar-links (the
+  onclick-vs-@click affordances never appear on either side) and the help
+  overlay content is not census-selected. LIVE run env-gated.
+- **axe clean** - the help overlay uses axe-considered semantics
+  (role=dialog, aria-modal, h2/h3 heading order). LIVE axe-scan env-gated.
 
-## DoD
-
-- check: collapse/reorder/persist walked -> Vitest
-  `src/pages/viewer/track-management.test.ts` (23 cases): manageable set, order
-  resolution (empty/permute/robust-to-stale), collapse predicate, swap-reorder,
-  store actions, collapse height + re-expand-membership (T17 obligation).
-- check: uiPrefs survives reload (Vitest + one browser check) -> Vitest
-  "persistence: uiPrefs survives reload" (save -> fresh store -> hydrate restores
-  order + collapse; + malformed-blob and storage-blocked fallback). BROWSER
-  CHECK: manual (see REMAINING) - node has no DOM/localStorage; the persistence
-  logic and store actions are fully unit-tested and the wiring is bundled
-  (verified: `d9-track-manage`/`trackPrefs`/`d9-track-caret`/`d9-track-grip`
-  present in `dist/assets/new-viewer-*.js` and `.css`).
-- check: O rows' amended semantics documented in-diff -> `features/02` section O
-  + `docs/tickets/ledger.md`.
-
-## EVIDENCE (gate bar)
+## GATE BAR EVIDENCE (all green)
 
 - `npx tsc --noEmit` -> exit 0.
-- `npm run test` (full Vitest, single process) -> Test Files 87 passed | 1
-  skipped; Tests 1392 passed | 1 expected-fail | 11 skipped. No unexpected
-  failures. (The 1 expected-fail is the pre-existing `.fails` flamegraph-search
-  checkpoint, unrelated. Known stragglers - `all_skills_snippets` + heavy
-  worker_threads suites - passed in this run; re-run in isolation if they ever
-  time out under full-parallel load.)
-- `npm run build` -> clean (`built in ~0.5s`, 17 static items copied).
-- `cargo build -p dial9-viewer` -> Finished (rust-embed picks up the rebuilt
-  `dist/`).
+- `npm run test` (full Vitest, single process) -> **1492 passed, 1 expected
+  fail, 11 skipped; 97 files passed, 1 skipped. 0 unexpected.** (The known
+  stragglers did not time out this run.)
+- `npm run build` -> clean; emits `dist/new/tokio_stats.html` +
+  `new-tokio-stats` chunk (12.76 kB, gzip 4.81 kB). The `<script
+  src="/ui-switch.js"> can't be bundled` line is a benign warning identical
+  for all four new pages (the copied plain script is intentionally external).
+- `cargo build -p dial9-viewer` -> exit 0 (rust-embed picks up the new
+  `dist/new/tokio_stats.html`).
+- `npm run check:boundary` -> OK (no core imports outside lib/trace).
+- Playwright smoke (`vite preview` + built dist) -> GREEN: new page boots with
+  zero console errors, renders the shell/one period, threshold label
+  "1.00ms", switch "Switch to legacy UI"; + Add period adds a row and the
+  remove (x) buttons; `?` opens / Esc closes the help overlay; legacy page
+  now renders "Switch to new UI" -> `/new/tokio_stats.html`; full-query
+  (repeatable host) round-trip lands on `/new/tokio_stats.html` with all
+  params preserved.
 
-## REMAINING (manual, not blocking)
+## DECISIONS (recorded for maintainer sign-off)
 
-- **One browser check** (DoD): in a real browser on `?ui=new`, collapse a track
-  via the caret, drag-reorder two tracks via the grip, reload the page, and
-  confirm the order + collapse state persist. The mechanism is fully unit-tested
-  (round-trip) and bundled; this is the DOM-drag confirmation the node env can't
-  perform.
+- **H4 (dead `/api/trace` exemplar link) - PRESERVED**, not fixed. This is a
+  behavior-preserving port (T13/T14 treatment: defects carried); the DoD
+  requires the census/behavioral differ to show ONLY the switch delta, so
+  repointing to `/api/object` would introduce a second, non-switch delta.
+  Ledgered (`docs/tickets/ledger.md`, `features/04 H4 | preserved`). The
+  one-line fix (`exemplarLink` -> `/api/object?bucket&key`) is a follow-up if
+  the maintainer wants it live. Other preserved defects: D4 (no coverage UI),
+  G3 (diff crash when P1 unloaded - the null deref is kept and pinned by a
+  test), E2 (mixed/unknown classes computed but invisible).
+- **`?` help (T20)** integrated as the ONLY keyboard binding (features/04 K1:
+  the legacy page had no keyboard; "existing bindings unchanged" holds
+  vacuously). Ledgered `features/04 K1 | amended`.
+- **Test DOM env**: briefly added `happy-dom` for the XSS render test, then
+  REMOVED it (it carries a critical VM-escape/RCE advisory - a bad fit for a
+  published library, especially a test that feeds hostile scripts). The XSS
+  test is structural instead (TemplateResult value-vs-static-HTML + source
+  guard), matching the repo's deliberate "no DOM env; lit-html exercised by
+  browser tooling" convention. `package.json`/`package-lock.json` are
+  byte-identical to the base - zero dependency residue.
+
+## REMAINING (environment-gated; NOT blockers)
+
+Run the live T12 parity layers against a seeded DDB dev-server (the recipe is
+the features/04 inventory's Reproduce block):
+
+```
+cd dial9-viewer/ui && npm ci && npm run build
+PORT=3071 cargo run -p dial9-viewer --bin dev-server --features dev-server
+# row-walker (new + legacy sides):
+node parity/walk-rows.mjs --inventory ../../docs/ui-inventory/features/04-tokio-stats-html.md --url http://localhost:3071/new/tokio_stats.html
+node parity/walk-rows.mjs --inventory ../../docs/ui-inventory/features/04-tokio-stats-html.md --url http://localhost:3071/tokio_stats.html
+# census + behavioral differ (legacy vs new), axe: see ui/README parity section
+node parity/axe-scan.mjs http://localhost:3071/new/tokio_stats.html
+```
+
+The walkers are correct-by-construction against the inventory's recorded seed
+facts; time-window rows stay NOT-TRIGGERABLE on the seed (the epoch/date
+catch-22 - unblocked by T42's synthetic fixtures).
 
 ## BLOCKERS / QUESTIONS
 
-None. No STOP-gate hit.
-
-## NOTES (scope-fence, note-only)
-
-- `uiPrefs.panelCollapsed` (legacy `Record<FoldablePanelKind, boolean>`) is now a
-  superseded no-op holder (no live surface reads it; the new `collapsed` field is
-  the live track-collapse state). Left in place per the additive scope fence
-  rather than removed; noted in the schema doc + ledger. A future cleanup could
-  drop it once nothing depends on it.
+None.
