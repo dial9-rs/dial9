@@ -1,19 +1,8 @@
-// src/pages/tokio-stats/main.ts - the migrated Tokio Stats page entry (T41;
-// Vite entry new/tokio_stats.html; ADR-0004 section 8). A behavior-
-// preserving typed port of the legacy inline IIFE (tokio_stats.html:65-429;
-// features/04 is the contract). Same treatment as T13/T14: declarative
-// rendering (lit-html, N17 - the XSS structural guard), the frozen-core /
-// server boundary through lib/trace, the dual-UI switch injected, defects
-// carried not fixed (H4 dead exemplar link, D4 no coverage UI, G3 diff
-// crash, E2 invisible mixed/unknown - all preserved).
-//
-// The page is ENTIRELY an aggregated server-driven surface (no trace bytes
-// are decoded): it is the PRIMARY consumer of /api/tokio-stats, driven
-// through T18's typed aggregates client (fetchTokioStats). The refine LOOP
-// is the page's own (shouldStopRefining) - it must match the legacy
-// termination + 300ms pacing exactly for the behavioral differ, so it drives
-// fetchTokioStats per poll rather than the generic refineUntilFrozen helper
-// (which does one extra poll in the fully-folded case and has no pacing).
+// The Tokio Stats page entry. Entirely an aggregated server-driven surface (no
+// trace bytes decoded): the primary consumer of /api/tokio-stats via the typed
+// aggregates client (fetchTokioStats). The refine loop is the page's own
+// (shouldStopRefining), driving fetchTokioStats per poll with 300ms pacing
+// rather than the generic refineUntilFrozen helper.
 
 import { Dial9Creds, fetchTokioStats } from "../../lib/trace/index.js";
 import type { TokioStatsQuery, TokioStatsResponse } from "../../lib/trace/index.js";
@@ -40,7 +29,7 @@ import {
 } from "./url.js";
 import { mountTokioStatsKeys } from "./keys.js";
 
-/** One comparison period (module-scoped state, exactly as the legacy IIFE). */
+/** One comparison period (module-scoped state). */
 interface Period {
   id: number;
   startNs: string | null;
@@ -48,16 +37,16 @@ interface Period {
   data: TokioStatsResponse | null;
 }
 
-// Dual-UI switch (T38): render the "Switch to legacy UI" control. The
-// ui-switch.js <head> auto-boot is a no-op on this off-root path.
+// Render the "Switch to legacy UI" control. The ui-switch.js <head> auto-boot
+// is a no-op on this off-root path.
 if (window.D9UiSwitch) {
   window.D9UiSwitch.mount({ side: "new" });
 } else {
   console.warn("ui-switch.js is not loaded; the UI switch control is unavailable");
 }
 
-// URL params are read ONCE (A3): the scope is fixed for the page's lifetime,
-// and auto-load (A6) checks the ORIGINAL query before syncUrl rewrites it.
+// URL params are read ONCE: the scope is fixed for the page's lifetime, and
+// auto-load checks the ORIGINAL query before syncUrl rewrites it.
 const originalParams = new URLSearchParams(window.location.search);
 const scope = readScope(originalParams);
 
@@ -67,7 +56,7 @@ let periods: Period[] = [];
 let periodIdCounter = 0;
 let activeTab = "diff"; // "diff" or "p0", "p1", ...
 
-// ── Period management (section B) ──
+// ── Period management ──
 
 function renderPeriodsNow(): void {
   renderPeriods(els.periods, periods, els.utcToggle.checked, {
@@ -77,10 +66,8 @@ function renderPeriodsNow(): void {
 }
 
 function syncUrl(): void {
-  // Keep the pathname explicit: a bare "?qs" would resolve against this
-  // page's <base href="/"> and rewrite the off-root path to "/". The legacy
-  // page (served at the root, no <base>) got the same URL implicitly. The
-  // trailing "?" on an empty query matches the legacy replaceState.
+  // Keep the pathname explicit: a bare "?qs" would resolve against this page's
+  // <base href="/"> and rewrite the off-root path to "/".
   history.replaceState(null, "", window.location.pathname + "?" + buildSyncQuery(scope, periods));
 }
 
@@ -112,19 +99,19 @@ function updatePeriod(id: number, field: "start" | "end", val: string): void {
   syncUrl();
 }
 
-// ── Threshold (section C) ──
+// ── Threshold ──
 
 function updateThreshLabel(): void {
   els.threshLabel.textContent = formatDuration(thresholdNs(els.slider.value));
 }
 
-// ── Exemplar deep links (section H) ──
+// ── Exemplar deep links ──
 
 function openExemplar(url: string): void {
   window.open(url, "_blank");
 }
 
-// ── Render pipeline (sections E/F/G) ──
+// ── Render pipeline ──
 
 function renderTabsNow(stats: (ReturnType<typeof computeStats>)[]): void {
   const loaded = stats.filter((s) => s).length;
@@ -155,7 +142,7 @@ function renderFromCache(): void {
 
   const multi = periods.length > 1 && stats.filter((s) => s).length > 1;
 
-  // A specific period's detail tab -> single-period view (G2).
+  // A specific period's detail tab -> single-period view.
   if (multi && activeTab.startsWith("p")) {
     const idx = parseInt(activeTab.slice(1), 10);
     const s = stats[idx];
@@ -192,21 +179,20 @@ function renderFromCache(): void {
     return;
   }
 
-  // Diff view (G3-G9).
+  // Diff view.
   const model = buildDiffModel(stats, periods.length);
   renderDiff(els.summary, els.tableContainer, model, periods.length);
 }
 
-// ── Data loading + refinement loop (section D) ──
+// ── Data loading + refinement loop ──
 
 async function loadPeriod(period: Period): Promise<void> {
   let refine = false;
   let prevFolded = -1;
   for (;;) {
-    // Build the scope query with only the params the legacy page sets (each
-    // is set only when present / truthy - tokio_stats.html:376-384). Omitted
-    // keys keep the server's serde defaults; explicit `undefined` is rejected
-    // under exactOptionalPropertyTypes.
+    // Build the scope query, setting each param only when present / truthy.
+    // Omitted keys keep the server's serde defaults; explicit `undefined` is
+    // rejected under exactOptionalPropertyTypes.
     const query: TokioStatsQuery = { host: scope.host, refine };
     if (scope.bucket) query.bucket = scope.bucket;
     if (scope.prefix) query.prefix = scope.prefix;
@@ -217,11 +203,10 @@ async function loadPeriod(period: Period): Promise<void> {
       headers: Dial9Creds.headers(),
     });
     if (result.kind === "unavailable") {
-      // 404 (no agg context / no source files match this scope) - the legacy
-      // page throws the response body text and paints the status line red
-      // (C2/D5). "disabled" never occurs here: aggregationEnabled is NOT
-      // passed, so the client issues the request unconditionally, matching
-      // the legacy page which always fetches.
+      // 404 (no agg context / no source files match this scope): throw the
+      // response body text and paint the status line red. "disabled" never
+      // occurs here: aggregationEnabled is not passed, so the client issues the
+      // request unconditionally.
       throw new Error(result.message ?? "");
     }
     const data = result.response;
@@ -239,7 +224,7 @@ async function loadAll(): Promise<void> {
   els.status.textContent = "Loading…";
   els.status.className = "status";
   try {
-    // All periods load concurrently, each with its own refine loop (D6).
+    // All periods load concurrently, each with its own refine loop.
     await Promise.all(periods.map((p) => loadPeriod(p)));
     els.status.textContent = "Complete";
   } catch (e) {
@@ -257,7 +242,7 @@ els.btnAdd.addEventListener("click", () => {
   const last = periods[periods.length - 1];
   if (last && last.startNs && last.endNs) {
     // "Compare against the previous window": the immediately-preceding window
-    // of the same span (B4).
+    // of the same span.
     const span = Number(last.endNs) - Number(last.startNs);
     addPeriod(String(Number(last.startNs) - span), last.startNs);
   } else {
@@ -270,7 +255,7 @@ els.slider.addEventListener("input", () => {
 });
 updateThreshLabel();
 
-// ── Init: restore periods from the URL (A4/A5), render, sync once ──
+// ── Init: restore periods from the URL, render, sync once ──
 
 for (const b of parseInitialPeriods(originalParams)) {
   periods.push({
@@ -283,8 +268,8 @@ for (const b of parseInitialPeriods(originalParams)) {
 renderPeriodsNow();
 syncUrl();
 
-// Unified keyboard model (T20): `?` help overlay (the page had no keyboard).
+// Unified keys: `?` help overlay (the page had no keyboard).
 mountTokioStatsKeys();
 
-// Auto-load on open when the original URL carried start_ns or bucket (A6).
+// Auto-load on open when the original URL carried start_ns or bucket.
 if (shouldAutoLoad(originalParams)) void loadAll();

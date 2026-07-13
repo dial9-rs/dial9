@@ -1,26 +1,17 @@
-// src/pages/flamegraph/view-state.ts - the flamegraph page's URL
-// view-state wiring (T19; the codec's first consumer). Two halves:
+// The flamegraph page's URL view-state wiring, in two halves:
 //
 // - restoreZoomFromUrl: on load, resolve the effective zoom from the URL
-//   (versioned hash wins per field, legacy worker-zoom/offworker-zoom
-//   query params fill the gaps - codec precedence) and drive the frozen
-//   widget's zoomToPath. Restore stays OUTSIDE the store: the frozen
-//   widget only fires onZoomChange for USER zooms (zoomToPath does not),
-//   so restoring produces zero URL writes - exactly like the legacy page,
-//   and what keeps a shared link byte-stable on open.
+//   (versioned hash wins per field, worker-zoom/offworker-zoom query params
+//   fill the gaps) and drive the widget's zoomToPath. Restore stays OUTSIDE the
+//   store: the widget only fires onZoomChange for USER zooms, so restoring
+//   produces zero URL writes and keeps a shared link byte-stable on open.
 //
 // - createFgUrlSync: user zoom -> store slice update -> ONE debounced
-//   history.replaceState carrying BOTH the legacy query params (exact
-//   F147-F153 semantics, so an address-bar copy still opens on the legacy
-//   page) and the versioned hash (the unified carrier chunk-2 extends).
+//   history.replaceState carrying BOTH the legacy query params and the
+//   versioned hash.
 //
-// This page has no clock-mode control, so it writes no tm/tz; the codec's
-// vocabulary reserves them for the chunk-2 viewer (see the schema doc).
-//
-// Kept DOM-free (the fg widget is a structural interface; URL host, timer
-// and frame scheduler injectable) so the restore-on-load and zoom->URL
-// paths are integration-testable under plain Node - the in-browser twin
-// is parity journey J9.
+// Kept DOM-free (URL host, timer and frame scheduler injectable) so the
+// restore-on-load and zoom->URL paths are integration-testable under plain Node.
 
 import { createStore, type FrameScheduler } from "../../store/store.js";
 import {
@@ -32,7 +23,7 @@ import {
   type ViewState,
 } from "../../lib/url/index.js";
 
-/** The two zoom paths, as the frozen widget reports them (getZoomPath). */
+/** The two zoom paths, as the widget reports them (getZoomPath). */
 export interface FgZoomPaths {
   worker: string[];
   offworker: string[];
@@ -44,9 +35,9 @@ export interface FgZoomTarget {
 }
 
 /**
- * Restore zoom state from the URL (F151 gate: only when the time-range
- * filter reproduced the shared tree - a fallback trace has a different
- * one). Returns the resolved state for callers that want to inspect it.
+ * Restore zoom state from the URL (only when the time-range filter reproduced
+ * the shared tree - a fallback trace has a different one). Returns the resolved
+ * state for callers that want to inspect it.
  */
 export function restoreZoomFromUrl(
   url: { search: string; hash: string },
@@ -109,7 +100,7 @@ export function createFgUrlSync(
   const binding = bindViewStateToUrl(store, {
     slices: ["fgView"],
     project: (s) => fgViewToViewState(s.fgView),
-    // Keep the legacy params live alongside the hash (F147-F153; N10).
+    // Keep the legacy params live alongside the hash.
     mirrorToQuery: applyLegacyZoomToQuery,
     ...(options.host !== undefined ? { host: options.host } : {}),
     ...(options.timer !== undefined ? { timer: options.timer } : {}),

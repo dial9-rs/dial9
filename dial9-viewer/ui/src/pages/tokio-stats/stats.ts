@@ -1,9 +1,6 @@
-// src/pages/tokio-stats/stats.ts - the page's pure stats computation, a
-// verbatim port of computeStats + the diff-view math (tokio_stats.html:
-// 177-208, 302-334; features/04 E, G). This is the behavioral-differ target
-// (K3): "same numbers from the same responses". Everything here is a pure
-// function of one cached /api/tokio-stats response, re-run on every render,
-// so it is exhaustively Node-testable against the recorded fixtures.
+// The page's pure stats computation: computeStats + the diff-view math.
+// Everything here is a pure function of one cached /api/tokio-stats response,
+// re-run on every render.
 
 import type {
   PollExemplar,
@@ -13,20 +10,20 @@ import type {
 
 /** Per-spawn-location render model (one row of the single-period table). */
 export interface LocStats {
-  /** Polls above the current threshold (F2 "Long" column). */
+  /** Polls above the current threshold (the "Long" column). */
   long: number;
   /** Off-CPU (class 0), on-CPU (class 1), mixed (class 2) among the long. */
   offCpu: number;
   onCpu: number;
-  /** Computed then unused by the UI - carried for parity (finding 3). */
+  /** Computed then unused by the UI - carried for parity. */
   mixed: number;
-  /** Long polls per minute, over the RESPONSE's observed span (E3). */
+  /** Long polls per minute, over the RESPONSE's observed span. */
   rate: number;
-  /** Percentiles over the DESC-sorted above-threshold durations (E4). */
+  /** Percentiles over the DESC-sorted above-threshold durations. */
   p50: number;
   p99: number;
   max: number;
-  /** [off_cpu, on_cpu, mixed, unknown] worst-per-class exemplars (E5). */
+  /** [off_cpu, on_cpu, mixed, unknown] worst-per-class exemplars. */
   exemplars: SpawnLocStats["exemplars"];
 }
 
@@ -42,10 +39,10 @@ export interface PeriodStats {
 }
 
 /**
- * Turn one cached response into the render model (E1-E5). Null in -> null
- * out (an unloaded period). Correctness of p50/p99/max depends on the wire
- * contract sorting `durations_ns` DESCENDING (J13); re-sorting ascending
- * would silently swap p50/p99.
+ * Turn one cached response into the render model. Null in -> null out (an
+ * unloaded period). Correctness of p50/p99/max depends on the wire contract
+ * sorting `durations_ns` DESCENDING; re-sorting ascending would silently swap
+ * p50/p99.
  */
 export function computeStats(
   data: TokioStatsResponse | null,
@@ -108,8 +105,8 @@ export interface LocRow {
 }
 
 /**
- * Rows for the single-period table: locations with `long > 0`, sorted by
- * rate descending (F2). Empty when nothing exceeds the threshold (F3).
+ * Rows for the single-period table: locations with `long > 0`, sorted by rate
+ * descending. Empty when nothing exceeds the threshold.
  */
 export function singlePeriodRows(s: PeriodStats): LocRow[] {
   return Object.entries(s.byLoc)
@@ -118,30 +115,30 @@ export function singlePeriodRows(s: PeriodStats): LocRow[] {
     .map(([loc, v]) => ({ loc, v }));
 }
 
-/** A diff-table row (G9). `pct` is rendered verbatim - see the quirk below. */
+/** A diff-table row. `pct` is rendered verbatim - see the quirk below. */
 export interface DiffRow {
   loc: string;
   fRate: number;
   lRate: number;
   delta: number;
   /**
-   * The Delta% cell. LEGACY QUIRK preserved (tokio_stats.html:358,364): the
-   * value is always a string (`toFixed(0)` or "new") and is rendered raw -
-   * the code path that would have appended "%" / "+" is dead, so the cell
-   * shows e.g. "50" or "new", never "50%".
+   * The Delta% cell. QUIRK preserved: the value is always a string
+   * (`toFixed(0)` or "new") and is rendered raw - the code path that would have
+   * appended "%" / "+" is dead, so the cell shows e.g. "50" or "new", never
+   * "50%".
    */
   pct: string;
   first: LocStats | undefined;
   last: LocStats | undefined;
 }
 
-/** The four diff summary cards (G4). */
+/** The four diff summary cards. */
 export interface DiffCards {
   firstRate: number;
   lastRate: number;
   arrow: string;
   cls: string;
-  /** The "(...%)" label body, e.g. "+50%", "+∞%", "0%" (G4). */
+  /** The "(...%)" label body, e.g. "+50%", "+∞%", "0%". */
   ratePctLabel: string;
   offFirst: number;
   offLast: number;
@@ -159,11 +156,10 @@ export interface DiffModel {
 }
 
 /**
- * Build the first-vs-last diff model (G3-G9). Compares stats[0] (P1) against
- * stats[last] ONLY; middle periods contribute locations to the union but not
- * their rates. PRESERVED DEFECT (finding 4 / G3): if P1 failed to load,
- * `first` is null and this throws a TypeError just like the legacy page - no
- * guard is added (behavior-preserving port).
+ * Build the first-vs-last diff model. Compares stats[0] (P1) against stats[last]
+ * ONLY; middle periods contribute locations to the union but not their rates.
+ * KNOWN DEFECT (preserved): if P1 failed to load, `first` is null and this
+ * throws a TypeError - no guard is added.
  */
 export function buildDiffModel(
   stats: (PeriodStats | null)[],
@@ -185,10 +181,10 @@ export function buildDiffModel(
   const arrow = rateDelta > 0 ? "↑" : rateDelta < 0 ? "↓" : "→";
   const cls = rateDelta > 0.5 ? "bad" : rateDelta < -0.5 ? "good" : "";
   const offCls = offDelta > 0.1 ? "bad" : offDelta < -0.1 ? "good" : "";
-  // Legacy loose comparison `ratePct > 0` (string vs number): the "+" prefix
-  // shows only for a positive numeric percentage; "+∞" and "0" and any
-  // negative string coerce to NaN/<=0 and get no prefix (their sign, if any,
-  // is already in the string).
+  // Loose comparison `ratePct > 0` (string vs number): the "+" prefix shows
+  // only for a positive numeric percentage; "+∞" and "0" and any negative
+  // string coerce to NaN/<=0 and get no prefix (their sign, if any, is already
+  // in the string).
   const ratePctLabel = (Number(ratePct) > 0 ? "+" : "") + ratePct + "%";
 
   const allLocs = new Set<string>();
@@ -250,13 +246,9 @@ export function buildDiffModel(
 }
 
 /**
- * The refine-loop termination predicate, extracted from loadPeriod
- * (tokio_stats.html:393) so it is unit-testable. Stops when: no coverage, OR
- * fully folded (files_folded >= files_matched), OR frozen (files_folded did
- * not change since the previous poll). `prevFolded` is -1 before the first
- * poll. This is the page's OWN termination - the aggregates client's generic
- * refineUntilFrozen does one extra poll in the fully-folded case and has no
- * pacing, so the page drives the loop itself for exact parity.
+ * The refine-loop termination predicate. Stops when: no coverage, OR fully
+ * folded (files_folded >= files_matched), OR frozen (files_folded did not change
+ * since the previous poll). `prevFolded` is -1 before the first poll.
  */
 export function shouldStopRefining(
   coverage: { files_folded: number; files_matched: number } | null | undefined,

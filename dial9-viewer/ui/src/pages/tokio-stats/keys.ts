@@ -1,12 +1,5 @@
-// src/pages/tokio-stats/keys.ts - the tokio-stats page's wiring of the
-// unified keyboard model (T20; K3 "? help on every migrated page").
-//
-// The legacy page bound NO keyboard shortcuts and had no Escape handling
-// (features/04 K1: integration "starts from zero here"). So the ONLY binding
-// added is the unified `?` help overlay (a previously-dead key), plus Escape
-// to close it - "existing bindings unchanged" holds vacuously (there were
-// none). Per architecture 2.5, keys dispatch actions / toggle chrome; they
-// never render page content.
+// The tokio-stats page's wiring of the unified keyboard model: the `?` help
+// overlay plus Escape to close it (the page has no other keyboard bindings).
 
 import {
   createHelpOverlay,
@@ -15,7 +8,7 @@ import {
 } from "../../lib/interact/index.js";
 import type { HelpOverlay, HelpSection } from "../../lib/interact/index.js";
 
-/** The page's control reference, the help overlay's content baseline. */
+/** The keyboard reference shown in the help overlay. */
 const KEY_ROWS: HelpSection = {
   title: "Keyboard",
   rows: [
@@ -50,9 +43,9 @@ export function mountTokioStatsKeys(): TokioStatsKeys {
     { key: "?", onKey: () => help.toggle() },
   ]);
 
-  // Focus-outside Escape (the overlay consumes its own Escape while focused;
-  // this covers the case where focus is elsewhere on the page). The page has
-  // no other Escape behavior to cascade to (K1).
+  // Focus-outside Escape: the overlay consumes its own Escape while focused;
+  // this covers the case where focus is elsewhere. The page has no other Escape
+  // behavior to cascade to.
   function onKeydown(e: KeyboardEvent): void {
     if (e.key !== "Escape") return;
     if (isTextEntryTarget(e.target)) return;

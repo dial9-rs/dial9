@@ -1,7 +1,4 @@
-// src/pages/tokio-stats/dom.ts - element lookups for the migrated tokio-stats
-// shell (new/tokio_stats.html). The static markup is byte-faithful to the
-// legacy page so the affordance census is zero-diff (the switch control is
-// the only intentional addition); ALL behavior lives in the module.
+// Element lookups for the tokio-stats shell. All behavior lives in the module.
 
 /** The page's static elements, resolved once at boot. */
 export interface PageEls {

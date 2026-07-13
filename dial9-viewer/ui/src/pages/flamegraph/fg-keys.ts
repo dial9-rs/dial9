@@ -1,35 +1,15 @@
-// src/pages/flamegraph/fg-keys.ts - the flamegraph page's landing-time
-// wiring of the unified keyboard model (T20; docs/ui-inventory/mocks/
-// keyboard.html; ticket "flamegraph: `?` help, `/` search unify, `f`
-// fit, `z` zoom-undo").
+// The flamegraph page's wiring of the unified keyboard model: `?` help, `f`
+// fit, `z` zoom-undo. `/` and Ctrl/Cmd+F stay the widget's own frame search,
+// and Escape keeps the widget's cascade; the new bindings sit on previously
+// dead keys.
 //
-// Composition with the frozen widget (features/03 D/N rows) - the router
-// NEVER steals a working binding:
-//   - `/` and Ctrl/Cmd+F stay the widget's own (its document-level
-//     handler runs before our window-level router and preventDefaults,
-//     F41); "`/` search unify" means the widget's frame search IS this
-//     page's `/` in the unified vocabulary - no palette shadows it.
-//   - Escape keeps the widget cascade (F157) via the page's existing
-//     window listener; an OPEN unified help overlay closes first (the
-//     overlay consumes Escape itself while focused; pages check
-//     isOpen() for the focus-elsewhere case - see closeHelpOnEscape).
-//   - `?` (dead on the legacy page - K3 verified ?, h, F1 all dead),
-//     `f` and `z` (dead - K4) are NEW bindings on previously dead keys.
-//
-// Zoom undo/fit over the FROZEN widget API: the widget exposes no
-// public "set zoom state" - zoomToPath() only ever deepens (it appends
-// to the live stack and no-ops on an empty path), and the only public
-// paths that shrink the stack are the Escape-cascade reset (which would
-// clear the search first - F157 ordering, unacceptable for f/z since
-// zoom reset must NOT clear search, F44) and the right-click
-// zoom-out-one-level (F94/N rows). So restore composes exactly those
-// released behaviors: synthetic contextmenu events pop the stacks to
-// root (the widget preventDefaults them, no browser menu appears), then
-// zoomToPath() rebuilds the target state. The pops fire onZoomChange;
-// a reentrancy guard keeps them out of the history while restoring.
-//
-// Per architecture 2.5: keys dispatch widget/store actions and announce;
-// they never render.
+// Zoom undo/fit over the widget's API is indirect: the widget exposes no "set
+// zoom state" (zoomToPath only ever deepens), and the only public path that
+// shrinks the stack is the right-click zoom-out-one-level. So restore composes
+// those released behaviors: synthetic contextmenu events pop the stacks to root
+// (the widget preventDefaults them, no browser menu appears), then zoomToPath
+// rebuilds the target state. The pops fire onZoomChange; a reentrancy guard
+// keeps them out of the history while restoring.
 
 import type { FlamegraphInstance } from "../../lib/canvas/index.js";
 import {
@@ -59,10 +39,10 @@ export interface FgKeysOptions {
   /** The widget's container (canvas lookup for the zoom-out pops). */
   containerEl: HTMLElement;
   /**
-   * Fired once after `f`/`z` finish mutating zoom state - exact mode
-   * passes the URL sync's onZoomChange (the intermediate pops also fire
-   * it, debounced; this final call settles the real state). Api mode
-   * omits it: canvas zoom is not URL-synced there (F180).
+   * Fired once after `f`/`z` finish mutating zoom state. Exact mode passes the
+   * URL sync's onZoomChange (the intermediate pops also fire it, debounced;
+   * this final call settles the real state). Api mode omits it: canvas zoom is
+   * not URL-synced there.
    */
   onZoomMutated?: () => void;
 }
@@ -78,7 +58,7 @@ export interface FgKeys {
   dispose(): void;
 }
 
-/** The features/03 section-H reference table (F94) - content baseline. */
+/** The mouse reference table (help overlay content). */
 const MOUSE_ROWS: HelpSection = {
   title: "Mouse",
   rows: [

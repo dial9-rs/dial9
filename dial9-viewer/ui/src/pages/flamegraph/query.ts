@@ -1,16 +1,7 @@
-// src/pages/flamegraph/query.ts - pure URL/label logic for the flamegraph
-// page (T13), extracted from the legacy inline bootstrap
-// (flamegraph.html:92-642) so the N10 URL contract is unit-testable:
-//
-// - trace-URL resolution against the ORIGIN ROOT (the legacy page lives at
-//   /flamegraph.html, so its relative `?trace=` values are root-relative
-//   by construction; the migrated entry lives at /new/flamegraph.html and
-//   hands the fetch to a worker whose script URL is under /assets/, so
-//   both would silently mis-resolve a relative value without this);
-// - the exact-mode loading-phase labels (features/03 F9);
-// - the aggregated-mode (`?api=1`) /api/flamegraph query and browser-URL
-//   query builders (F168/F180), byte-compatible with the legacy
-//   buildApiUrl/updateBrowserUrl including parameter order.
+// Pure URL/label logic for the flamegraph page, extracted so the URL contract
+// is unit-testable: trace-URL resolution against the origin root, the exact-
+// mode loading-phase labels, and the aggregated-mode (`?api=1`) /api/flamegraph
+// query and browser-URL builders.
 
 /**
  * Resolve each `trace=` component against the origin root. Relative
@@ -26,9 +17,9 @@ export function resolveTraceUrls(
 }
 
 /**
- * The exact-mode loading label (F9). Streaming fuses fetch+parse, so the
- * label is "Loading ..." throughout; buffered mode shows "Fetching ..."
- * then "Parsing trace..." (all with the U+2026 ellipsis, as legacy).
+ * The exact-mode loading label. Streaming fuses fetch+parse, so the label is
+ * "Loading ..." throughout; buffered mode shows "Fetching ..." then "Parsing
+ * trace..." (all with the U+2026 ellipsis).
  */
 export function loadingLabel(
   mode: "stream" | "buffered",
@@ -45,11 +36,10 @@ export function loadingLabel(
 }
 
 /**
- * The aggregated-mode query state, seeded from the page URL and mutated
- * by the toolbar (api-mode.ts). `facets` carries every non-host facet
- * filter - the three seeded keys plus any facet the backend later
- * reports - in insertion order (the order rides into the query string,
- * matching the legacy filterState object).
+ * The aggregated-mode query state, seeded from the page URL and mutated by the
+ * toolbar (api-mode.ts). `facets` carries every non-host facet filter - the
+ * three seeded keys plus any facet the backend later reports - in insertion
+ * order (the order rides into the query string).
  */
 export interface ApiQueryState {
   /** data_dir passthrough (local-dir mode); empty/absent skipped. */
@@ -68,7 +58,7 @@ export interface ApiQueryState {
   maxFiles: number | null;
 }
 
-/** Seed the non-host facet filters from the page URL (legacy order). */
+/** Seed the non-host facet filters from the page URL. */
 export function seedFacetState(params: URLSearchParams): Record<string, string> {
   return {
     // Source defaults to "cpu" (the on-CPU view).
@@ -84,7 +74,6 @@ function appendScope(p: URLSearchParams, state: ApiQueryState): void {
   if (state.prefix) p.set("prefix", state.prefix);
   if (state.service) p.set("service", state.service);
   for (const h of state.hosts) p.append("host", h);
-  // Send all non-empty facet filters as query params.
   for (const [k, v] of Object.entries(state.facets)) {
     if (!v) continue;
     p.set(k, v);
@@ -94,10 +83,9 @@ function appendScope(p: URLSearchParams, state: ApiQueryState): void {
 }
 
 /**
- * The GET /api/flamegraph URL for one poll (F168/F173). The first poll
- * per scope is read-only (`refine` omitted); refining polls send the
- * literal `refine=true` (the backend param is a serde bool - "1" would
- * 400).
+ * The GET /api/flamegraph URL for one poll. The first poll per scope is
+ * read-only (`refine` omitted); refining polls send the literal `refine=true`
+ * (the backend param is a serde bool - "1" would 400).
  */
 export function buildApiUrl(
   state: ApiQueryState,
@@ -112,9 +100,9 @@ export function buildApiUrl(
 }
 
 /**
- * The browser-URL query for Apply / facet changes (F180). Rebuilt from
- * scratch - `api=1` + scope + facet state + picker times, NO max_files
- * and no `ui` param - exactly like the legacy updateBrowserUrl.
+ * The browser-URL query for Apply / facet changes. Rebuilt from scratch -
+ * `api=1` + scope + facet state + picker times, with no max_files and no `ui`
+ * param.
  */
 export function buildBrowserQuery(state: ApiQueryState): string {
   const p = new URLSearchParams();

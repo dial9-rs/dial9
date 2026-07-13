@@ -1,17 +1,7 @@
-// src/pages/flamegraph/api-mode.ts - the aggregated server-side mode
-// (`?api=1`; features/03 section P, F168-F185): a behavior-preserving
-// typed port of the legacy inline bootstrap's api branch
-// (flamegraph.html:112-501). Instead of fetching + decoding trace bytes
-// client-side, the page polls the server's demand-driven /api/flamegraph
-// refinement loop and renders the pre-built tree each response carries.
-//
-// The pure helpers (coverage badge/percent, plateau auto-stop, UTC picker
-// conversion, max_files ceiling, host facet options) are the SAME
-// implementation the legacy page runs - flamegraph_api.js via the
-// lib/trace seam - so the two page generations cannot drift while both
-// are servable. The raw fetch loop is ported verbatim (rather than the
-// lib/trace aggregates client) because the legacy page surfaces a 404 as
-// an error while the client maps it to "unavailable"; parity wins.
+// The aggregated server-side flamegraph mode (`?api=1`): instead of fetching +
+// decoding trace bytes client-side, the page polls the server's demand-driven
+// /api/flamegraph refinement loop and renders the pre-built tree each response
+// carries.
 
 import {
   coveragePercent,
@@ -48,18 +38,14 @@ interface AvailFacet {
 export function runApiMode(params: URLSearchParams, els: PageEls): void {
   const { loadingEl, errorEl, containerEl, titleEl, statsEl } = els;
 
-  // Copy-link (T19). No beforeCopy flush here: api mode has no debounced
-  // view-state sync - the URL is already current, because Apply/facet
-  // changes pushState it synchronously (F180) and canvas zoom is
-  // deliberately NOT URL-synced in this mode (legacy parity).
+  // No beforeCopy flush here: the URL is already current (Apply/facet changes
+  // pushState synchronously, and canvas zoom is deliberately not URL-synced in
+  // this mode).
   mountCopyLink(els.headerEl);
 
-  // --- Filter toolbar (data-driven) ---
-  // The facet controls (Thread / Source / Host) are NOT hard-coded:
-  // they're built from the backend's reported `metadata` facets on the
-  // first response (see renderFacets), so the toolbar offers only
-  // dimensions that actually have data. The time pickers and action
-  // buttons are intrinsic, so they stay static.
+  // Filter toolbar. The facet controls are built from the backend's reported
+  // metadata facets (see renderFacets), so only dimensions with data appear;
+  // the time pickers and action buttons stay static.
   const ctlStyle =
     "background:#1a1a2e;color:#e0e0e0;border:1px solid #444;padding:2px 6px;border-radius:3px";
   const btnStyle =
@@ -85,24 +71,21 @@ export function runApiMode(params: URLSearchParams, els: PageEls): void {
   const fEnd = document.getElementById("f-end") as HTMLInputElement;
 
   // The original scope host set from the URL (the heatmap box selection).
-  // "All" in the host selector re-applies this set; a named host narrows
-  // to one. Kept separate from the live selection so "All" never broadens
-  // past the original scope.
+  // "All" in the host selector re-applies this set; a named host narrows to
+  // one. Kept separate from the live selection so "All" never broadens past the
+  // original scope.
   const originalHosts = params.getAll("host");
 
-  // Single source of truth for the query. Seeded from the URL, mutated by
-  // the facet controls, read by buildApiUrl / updateBrowserUrl.
-  // Deliberately decoupled from the DOM so the first poll can fire before
-  // the (data-driven) facet selects even exist. (The picker times are the
-  // exception: read from the DOM per build, like legacy.)
+  // Single source of truth for the query: seeded from the URL, mutated by the
+  // facet controls, read by buildApiUrl / updateBrowserUrl. Decoupled from the
+  // DOM so the first poll can fire before the facet selects exist (the picker
+  // times are the exception: read from the DOM per build).
   const facetState = seedFacetState(params);
   let hosts: string[] = originalHosts.slice();
 
   // Initialize datetime pickers from URL ns params. The picker shows UTC
-  // wall-clock (S3 trace keys are bucketed in UTC). The read (ns ->
-  // picker) and write (picker -> ns) sides MUST be symmetric: both treat
-  // the picker value as UTC. See the unit-tested nsToPickerUtc /
-  // pickerUtcToNs in flamegraph_api.js.
+  // wall-clock; the read (ns -> picker) and write (picker -> ns) sides must be
+  // symmetric, both treating the picker value as UTC.
   const startNsParam = params.get("start_ns");
   const endNsParam = params.get("end_ns");
   if (startNsParam) fStart.value = nsToPickerUtc(startNsParam);
@@ -142,29 +125,22 @@ export function runApiMode(params: URLSearchParams, els: PageEls): void {
     );
   }
 
-  // Build the data-driven facet controls from the backend's reported
-  // metadata facets. Called on every response, but only rebuilds when the
-  // *available* facet set changes (the facets are recorded independent of
-  // the active filter, so they stay stable as the user flips selectors).
-  // The guard also avoids clobbering a <select> mid-interaction.
-  // Accumulated available facets: the backend's facet metadata is scoped
-  // to the *current* query, so narrowing one dimension collapses the
-  // others (picking a single host makes that response report only that
-  // host, only its sources, etc.). We union every response's facets into
-  // monotonically-growing sets, so a control never loses an option it
-  // once offered - otherwise selecting a host would make the host
-  // selector vanish and you could never get back to "All". Seeded with
-  // the original scope hosts so the selector is correct even before the
-  // first response.
+  // Build the data-driven facet controls from the backend's reported metadata
+  // facets. Called on every response, but only rebuilds when the *available*
+  // facet set changes (which also avoids clobbering a <select> mid-interaction).
+  // The backend's facet metadata is scoped to the current query, so narrowing
+  // one dimension collapses the others; we union every response's facets into
+  // monotonically-growing sets so a control never loses an option it once
+  // offered (otherwise selecting a host would make the host selector vanish and
+  // you could never get back to "All"). Seeded with the original scope hosts so
+  // the selector is correct before the first response.
   const availFacets: Record<string, AvailFacet> = {};
   let renderedFacetKey: string | null = null;
   function renderFacets(meta: FlamegraphMetadata): void {
-    // Accumulate from the generic facets array.
     for (const f of meta.facets || []) {
       const acc = (availFacets[f.name] ??= { label: f.label, values: new Set() });
       for (const v of f.values) acc.values.add(v);
     }
-    // Seed the host facet from the original scope hosts.
     const hostFacet = availFacets["host"];
     if (hostFacet) {
       for (const h of originalHosts) hostFacet.values.add(h);
@@ -211,7 +187,6 @@ export function runApiMode(params: URLSearchParams, els: PageEls): void {
       startPolling();
     }
 
-    // Render each facet generically.
     for (const [name, { label, values }] of Object.entries(availFacets)) {
       const sorted = [...values].sort();
       if (name === "host") {
@@ -238,15 +213,14 @@ export function runApiMode(params: URLSearchParams, els: PageEls): void {
     }
   }
 
-  // Render the scope summary in the page header from the backend's
-  // resolved scope + facets (service, host(s), time range), so the header
-  // reflects backend truth rather than URL params the client guessed at.
+  // Render the scope summary in the page header from the backend's resolved
+  // scope (service, host(s), time range), so the header reflects backend truth
+  // rather than the URL params the client guessed at.
   function renderScopeHeader(meta: FlamegraphMetadata): void {
     const bits: string[] = [];
-    // `host_names` is not part of the current wire contract
-    // (src/server/flamegraph.rs sends `hosts` as a count) - the legacy
-    // page reads it tolerantly for older/other servers and so does this
-    // port; with the current server the branch never fires.
+    // `host_names` is not part of the current wire contract (the server sends
+    // `hosts` as a count); read tolerantly for older/other servers, so with the
+    // current server this branch never fires.
     const hostNames =
       (meta as FlamegraphMetadata & { host_names?: string[] }).host_names || [];
     const firstHost = hostNames[0];
@@ -266,8 +240,8 @@ export function runApiMode(params: URLSearchParams, els: PageEls): void {
       : `Flamegraph \u2014 ${svc}`;
   }
 
-  // Convert the wire tree (children as an optional array) into the frozen
-  // widget's shape (children as a Map).
+  // Convert the wire tree (children as an optional array) into the widget's
+  // shape (children as a Map).
   function toFgTree(node: ApiFlamegraphNode): FlamegraphNode {
     const m = new Map<string, FlamegraphNode>();
     for (const child of node.children || []) {
@@ -276,20 +250,19 @@ export function runApiMode(params: URLSearchParams, els: PageEls): void {
     return { name: node.name, count: node.count, self: node.self, children: m };
   }
 
-  // Canvas zoom is NOT URL-synced in api mode (F180) - the browser URL
-  // carries the filter scope instead. The onZoomChange callback here
-  // records zoom history only (T20 `z` undo); it never touches the URL.
+  // Canvas zoom is not URL-synced in api mode - the browser URL carries the
+  // filter scope instead. The onZoomChange callback records zoom history only
+  // (`z` undo); it never touches the URL.
   let keys: FgKeys | null = null;
   const fg = createFlamegraph(containerEl, () => {
     keys?.recordZoom();
   });
-  // Unified keyboard model (T20): `?` help, `f` fit, `z` zoom-undo. The
-  // widget's toolbar + canvases exist as of createFlamegraph, so the
-  // root state recorded at mount is the correct undo baseline.
+  // Unified keys: `?` help, `f` fit, `z` zoom-undo. The widget's toolbar +
+  // canvases exist as of createFlamegraph, so the root state recorded at mount
+  // is the correct undo baseline.
   keys = mountFlamegraphKeys({ fg, containerEl });
 
-  // Build the base stats string ("N samples [middot] M hosts [middot] ...")
-  // from the response metadata, shared by every poll.
+  // Build the base stats string from the response metadata, shared by every poll.
   function baseStats(resp: FlamegraphResponse): string {
     const meta = resp.metadata;
     const bits = [`${resp.total_samples.toLocaleString()} samples`];
@@ -322,11 +295,9 @@ export function runApiMode(params: URLSearchParams, els: PageEls): void {
   const applyBtn = document.getElementById("f-apply") as HTMLButtonElement;
 
   function setRefiningUi(active: boolean): void {
-    // Stop button: enabled only while refining.
     stopBtn.disabled = !active;
     stopBtn.style.opacity = active ? "1" : "0.4";
     stopBtn.style.cursor = active ? "pointer" : "not-allowed";
-    // Refine-more button: enabled only when idle (not refining).
     moreBtn.disabled = active;
     moreBtn.style.opacity = active ? "0.4" : "1";
     moreBtn.style.cursor = active ? "not-allowed" : "pointer";
@@ -363,20 +334,18 @@ export function runApiMode(params: URLSearchParams, els: PageEls): void {
     if (token !== pollToken) return; // superseded while fetching
 
     const meta = resp.metadata;
-    // Header scope summary + filter controls are both built from the
-    // backend's reported metadata (data-driven), not hard-coded HTML.
     renderScopeHeader(meta);
     renderFacets(meta);
 
-    // First successful response hides the loading overlay; subsequent
-    // polls refine in-place without it.
+    // First successful response hides the loading overlay; subsequent polls
+    // refine in-place without it.
     loadingEl.classList.add("hidden");
     containerEl.style.display = "flex";
     fg.setTreeDirect(toFgTree(resp.tree), resp.tree.count);
 
     const cov = resp.coverage;
     if (cov == null) {
-      // Older / local-dir mode: no coverage, single fetch only (F183).
+      // Older / local-dir mode: no coverage, single fetch only.
       statsEl.textContent = baseStats(resp);
       stopPolling();
       return;
@@ -393,8 +362,8 @@ export function runApiMode(params: URLSearchParams, els: PageEls): void {
 
     const badge = baseStats(resp) + " \u00b7 " + formatCoverageBadge(cov);
 
-    // Stop when the server can't fold more (frozen) or coverage has
-    // plateaued (diminishing returns over recent polls) - F177.
+    // Stop when the server can't fold more (frozen) or coverage has plateaued
+    // (diminishing returns over recent polls).
     if (refine && (frozen || plateaued)) {
       statsEl.textContent = badge + " \u00b7 refined";
       stopPolling();
@@ -404,7 +373,6 @@ export function runApiMode(params: URLSearchParams, els: PageEls): void {
       badge +
       ' \u00b7 <span class="spinner" style="width:0.9em;height:0.9em;display:inline-block;vertical-align:middle"></span> refining\u2026';
 
-    // Subsequent polls refine. Schedule the next one.
     setRefiningUi(true);
     pollTimer = setTimeout(() => {
       if (token === pollToken) void poll(token, true);
@@ -428,17 +396,16 @@ export function runApiMode(params: URLSearchParams, els: PageEls): void {
   }
 
   applyBtn.addEventListener("click", () => {
-    // New filters invalidate the current scope; reset depth (F172).
+    // New filters invalidate the current scope; reset depth.
     maxFiles = null;
     updateBrowserUrl();
     startPolling();
   });
 
   moreBtn.addEventListener("click", () => {
-    // Request deeper sampling for the current scope: raise the ceiling to
-    // ~4x the files folded so far, then resume refining (reset the
-    // plateau tracker so it doesn't immediately auto-stop on the prior
-    // history) - F178.
+    // Request deeper sampling for the current scope: raise the ceiling to ~4x
+    // the files folded so far, then resume refining (reset the plateau tracker
+    // so it doesn't immediately auto-stop on the prior history).
     const folded = prevCoverage ? prevCoverage.files_folded : 0;
     maxFiles = nextMaxFiles(folded);
     coverageDeltas = [];
@@ -453,7 +420,7 @@ export function runApiMode(params: URLSearchParams, els: PageEls): void {
   });
 
   stopBtn.addEventListener("click", () => {
-    // Manual stop: freeze at the current coverage (F179).
+    // Manual stop: freeze at the current coverage.
     const badge = (statsEl.textContent ?? "").replace(/ \u00b7 refining\u2026$/, "");
     stopPolling();
     statsEl.textContent = badge + " \u00b7 stopped";
@@ -461,8 +428,7 @@ export function runApiMode(params: URLSearchParams, els: PageEls): void {
 
   startPolling();
   window.addEventListener("resize", () => fg.resize());
-  // Escape cascade (F185/F157) - an open unified help overlay closes
-  // first (T20; no-op when closed).
+  // Escape cascade: an open unified help overlay closes first (no-op when closed).
   window.addEventListener("keydown", (e) => {
     if (e.key === "Escape") {
       if (keys !== null && closeHelpOnEscape(keys)) return;

@@ -1,22 +1,15 @@
-// src/pages/tokio-stats/exemplar.ts - the exemplar deep-link builder, a
-// verbatim port of the legacy exemplarLink (tokio_stats.html:166-175;
-// features/04 H1/H3).
+// The exemplar deep-link builder.
 //
-// PRESERVED DEFECT (features/04 H4 / finding 1): the link still targets the
-// `/api/trace` endpoint, which #582 removed - so every exemplar click opens
-// a viewer tab whose trace fetch 404s. T41 is a behavior-preserving port
-// (same treatment as T13/T14: defects are carried, not fixed), so the URL is
-// built byte-identically to the legacy page; the census/behavioral differ
-// therefore carries only the switch delta, and fixing the endpoint is a
-// separate maintainer call (ledger). See HANDOFF.md.
+// KNOWN DEFECT (preserved): the link still targets the `/api/trace` endpoint,
+// which #582 removed - so every exemplar click opens a viewer tab whose trace
+// fetch 404s. Kept byte-identical; fixing the endpoint is a separate call.
 
 import type { PollExemplar } from "../../lib/trace/index.js";
 
 /**
- * Build the viewer deep link for one exemplar, or "" when the exemplar is
- * null or has no start_ns (H3 guard). `bucketFromData` is the response's
- * echoed source bucket (J13); `bucketParam` is the URL fallback (H1). All
- * values are URL-encoded.
+ * Build the viewer deep link for one exemplar, or "" when the exemplar is null
+ * or has no start_ns. `bucketFromData` is the response's echoed source bucket;
+ * `bucketParam` is the URL fallback. All values are URL-encoded.
  */
 export function exemplarLink(
   ex: PollExemplar | null | undefined,

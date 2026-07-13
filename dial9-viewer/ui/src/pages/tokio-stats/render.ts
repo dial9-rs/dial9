@@ -1,18 +1,10 @@
-// src/pages/tokio-stats/render.ts - the page's DECLARATIVE rendering (N17,
-// the structural XSS guard). Every server/URL-derived string (spawn
-// locations from traced code, the exemplar deep-link URL) reaches the DOM
-// only through lit-html interpolation, which escapes text content and sets
-// attribute values via the DOM API - never innerHTML with interpolated data.
-//
-// This is the guard for the #587 vulnerability (features/04 I1): the legacy
-// page hand-escaped spawn_loc with escapeHtml; here hostile strings are inert
-// by construction (they render as text, not markup - see render.test.ts).
-//
-// The templates mirror the legacy DOM structure/classes/text exactly so the
-// affordance census is zero-diff (tokio_stats.html:116-369). The only
-// intentional divergence from the legacy markup is the exemplar count link's
-// event wiring: an @click handler replaces the inline onclick + global
-// openExemplar, keeping the same href="#" + class + data-url attributes.
+// The page's DECLARATIVE rendering (the structural XSS guard). Every
+// server/URL-derived string (spawn locations from traced code, the exemplar
+// deep-link URL) reaches the DOM only through lit-html interpolation, which
+// escapes text content and sets attribute values via the DOM API - never
+// innerHTML with interpolated data. This is the guard for the #587
+// vulnerability: hostile strings are inert by construction (they render as
+// text, not markup - see render.test.ts).
 
 import { html, nothing, render, type TemplateResult } from "lit-html";
 import type { TokioStatsResponse } from "../../lib/trace/index.js";
@@ -26,7 +18,7 @@ import {
   type PeriodStats,
 } from "./stats.js";
 
-/** Period-tag palette, cycling blue/purple/green/orange (B1). */
+/** Period-tag palette, cycling blue/purple/green/orange. */
 export const COLORS = ["#58a6ff", "#d2a8ff", "#7ee787", "#ffa657"];
 
 /** Minimal period shape the row template needs. */
@@ -36,13 +28,13 @@ export interface PeriodRow {
   endNs: string | null;
 }
 
-/** Handlers wired to the period-row inline controls (B2/B5/B6). */
+/** Handlers wired to the period-row inline controls. */
 export interface PeriodHandlers {
   onUpdate: (id: number, field: "start" | "end", value: string) => void;
   onRemove: (id: number) => void;
 }
 
-/** One view tab (G1). */
+/** One view tab. */
 export interface Tab {
   id: string;
   label: string;
@@ -52,7 +44,7 @@ function inputValue(e: Event): string {
   return (e.target as HTMLInputElement).value;
 }
 
-/** The period-management rows (B1): colored P{i} tag, From/To, remove. */
+/** The period-management rows: colored P{i} tag, From/To, remove. */
 function periodsTemplate(
   periods: readonly PeriodRow[],
   utc: boolean,
@@ -93,7 +85,7 @@ function periodsTemplate(
   })}`;
 }
 
-/** Render the period rows into their container (B1). */
+/** Render the period rows into their container. */
 export function renderPeriods(
   el: HTMLElement,
   periods: readonly PeriodRow[],
@@ -103,7 +95,7 @@ export function renderPeriods(
   render(periodsTemplate(periods, utc, handlers), el);
 }
 
-/** The view-tab strip (G1); hidden by the caller until 2+ periods loaded. */
+/** The view-tab strip; hidden by the caller until 2+ periods loaded. */
 export function renderTabs(
   el: HTMLElement,
   tabs: readonly Tab[],
@@ -122,7 +114,7 @@ export function renderTabs(
   );
 }
 
-/** A class-count cell: an exemplar link when available, else plain (H2/H3). */
+/** A class-count cell: an exemplar link when available, else plain. */
 function linkedStat(
   count: number,
   exemplar: LocStats["exemplars"][number],
@@ -148,7 +140,7 @@ function linkedStat(
   return html`<span class=${cls}>${count}</span>`;
 }
 
-/** The single-period summary cards (F1). */
+/** The single-period summary cards. */
 function summaryCardsTemplate(s: PeriodStats, threshNs: number): TemplateResult {
   return html`
     <div class="card">
@@ -175,9 +167,9 @@ function summaryCardsTemplate(s: PeriodStats, threshNs: number): TemplateResult 
 }
 
 /**
- * The per-location table (F2), or the empty-threshold state (F3). Exported
- * for the XSS regression test: it is the sink for the attacker-influenceable
- * spawn_loc (the #587 vuln) and the exemplar deep-link URL.
+ * The per-location table, or the empty-threshold state. Exported for the XSS
+ * regression test: it is the sink for the attacker-influenceable spawn_loc (the
+ * #587 vuln) and the exemplar deep-link URL.
  */
 export function locTableTemplate(
   s: PeriodStats,
@@ -240,7 +232,7 @@ export function locTableTemplate(
   `;
 }
 
-/** Render one period through the single-period view (F1/F2/F3). */
+/** Render one period through the single-period view. */
 export function renderSinglePeriod(
   sumEl: HTMLElement,
   tableEl: HTMLElement,
@@ -254,12 +246,12 @@ export function renderSinglePeriod(
   render(locTableTemplate(s, data, bucketParam, onOpen), tableEl);
 }
 
-/** Render the "Not loaded yet." guard for a stale detail tab (G2). */
+/** Render the "Not loaded yet." guard for a stale detail tab. */
 export function renderNotLoaded(tableEl: HTMLElement): void {
   render(html`<p>Not loaded yet.</p>`, tableEl);
 }
 
-/** The four diff summary cards (G4). */
+/** The four diff summary cards. */
 function diffCardsTemplate(
   model: DiffModel,
   periodsLength: number,
@@ -287,8 +279,8 @@ function diffCardsTemplate(
   `;
 }
 
-/** One ranked diff table (G9). Exported for the XSS regression test (the
- * diff tables are the second spawn_loc sink, escaped by #587). */
+/** One ranked diff table. Exported for the XSS regression test (the diff tables
+ * are the second spawn_loc sink). */
 export function diffTableTemplate(
   rows: DiffModel["regressions"],
   cls: string,
@@ -320,7 +312,7 @@ export function diffTableTemplate(
   `;
 }
 
-/** The diff view: cards + Regressions / New offenders / Improvements (G4-G8). */
+/** The diff view: cards + Regressions / New offenders / Improvements. */
 export function renderDiff(
   sumEl: HTMLElement,
   tableEl: HTMLElement,

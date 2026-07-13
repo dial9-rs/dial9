@@ -1,8 +1,5 @@
-// src/pages/flamegraph/dom.ts - the flamegraph page's shell elements
-// (T13). The Vite entry new/flamegraph.html carries the same static
-// skeleton as the legacy page (header title/stats, container, loading,
-// error); this module is the one place that resolves it, so a drifted
-// shell fails loudly instead of null-dereferencing mid-load.
+// The flamegraph page's shell elements: the one place that resolves the static
+// skeleton, so a drifted shell fails loudly instead of null-dereferencing.
 
 export interface PageEls {
   loadingEl: HTMLElement;
@@ -10,7 +7,7 @@ export interface PageEls {
   containerEl: HTMLElement;
   titleEl: HTMLElement;
   statsEl: HTMLElement;
-  /** Page header bar; page-level controls (T19 copy-link) mount here. */
+  /** Page header bar; page-level controls (copy-link) mount here. */
   headerEl: HTMLElement;
   /** Hide the loading indicator and show `msg` in the error element. */
   showError(msg: string): void;
