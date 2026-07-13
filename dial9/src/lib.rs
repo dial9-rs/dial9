@@ -100,7 +100,8 @@ pub use dial9_perf_self_profile::{
 #[cfg(any(
     feature = "cpu-profiling",
     feature = "process-resource",
-    feature = "linux-socket"
+    feature = "linux-socket",
+    feature = "memory-profiling"
 ))]
 pub use dial9_perf_self_profile::RecorderPerfExt;
 
@@ -137,7 +138,8 @@ pub mod prelude {
     #[cfg(any(
         feature = "cpu-profiling",
         feature = "process-resource",
-        feature = "linux-socket"
+        feature = "linux-socket",
+        feature = "memory-profiling"
     ))]
     pub use crate::RecorderPerfExt;
     pub use crate::RegisterSource;

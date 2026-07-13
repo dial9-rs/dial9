@@ -28,6 +28,12 @@ pub trait RecorderPerfExt: Sized {
     /// Register the Linux `sock_diag` accept-queue sampler. Warns and skips off Linux.
     #[cfg(feature = "linux-socket")]
     fn with_socket_accept_queues(self, config: crate::SocketAcceptQueuesConfig) -> Self;
+
+    /// Install sampled memory allocation profiling on the recording session
+    /// (needs the global allocator). Installs once recording starts.
+    /// Warns and skips on install failure.
+    #[cfg(feature = "memory-profiling")]
+    fn with_memory_profiling(self, config: crate::memory_profiling::MemoryProfilingConfig) -> Self;
 }
 
 impl<T: RegisterSource> RecorderPerfExt for T {
@@ -85,6 +91,19 @@ impl<T: RegisterSource> RecorderPerfExt for T {
             tracing::warn!("socket accept queues enabled but sock_diag is only available on Linux");
             self
         }
+    }
+
+    #[cfg(feature = "memory-profiling")]
+    fn with_memory_profiling(self, config: crate::memory_profiling::MemoryProfilingConfig) -> Self {
+        self.on_session_start(move |handle| {
+            if let Err(e) =
+                crate::memory_profiling::MemoryProfiler::from_config(config).install(handle.clone())
+            {
+                rate_limited!(std::time::Duration::from_secs(60), {
+                    tracing::warn!("failed to install memory profiler: {e}");
+                });
+            }
+        })
     }
 }
 

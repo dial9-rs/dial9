@@ -17,7 +17,8 @@ use dial9_tokio_telemetry::telemetry::{RecorderBuilderTokioExt, TracedRecorder};
 #[cfg(any(
     feature = "cpu-profiling",
     feature = "process-resource",
-    feature = "linux-socket"
+    feature = "linux-socket",
+    feature = "memory-profiling"
 ))]
 use dial9_tokio_telemetry::telemetry::RecorderPerfExt;
 

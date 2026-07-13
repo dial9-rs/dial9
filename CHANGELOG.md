@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `dial9::recorder` (also `dial9_core::recorder`): a recording-session builder. `recorder(writer).source(..).pipe(..).build()` returns a live `CoreSession`; any `Source` (e.g. CPU profiling, or your own) plugs in ([#356](https://github.com/dial9-rs/dial9/issues/356))
 - `TracedRuntime::into_parts`: decompose a runtime into its owned `(runtime, guard, ..)` parts to sequence shutdown yourself or handle the drain result. The inverse of `from_parts` ([#356](https://github.com/dial9-rs/dial9/issues/356))
 - `dial9::recorder(writer).with_tokio(..)`: attach a Tokio runtime and build a `TracedRuntime` (the `RecorderBuilderTokioExt` trait). Plug profiling sources with `.with_cpu_profiling` / `.with_sched_events` / `.with_process_resource_usage` / `.with_socket_accept_queues` (the `RecorderPerfExt` trait). `dial9::recorder_from_env()` builds a production recorder from `DIAL9_*`; `dial9::recorder_or_disabled(writer, ..)` downgrades to a plain runtime on writer-setup failure; `dial9::TracedRecorder::disabled()` runs without telemetry ([#356](https://github.com/dial9-rs/dial9/issues/356))
+- `.with_memory_profiling(config)` on the recorder builder (the `RecorderPerfExt` trait): install sampled allocation profiling on the plain recording session or a tokio runtime in one call. Backed by `RegisterSource::on_session_start`, a hook run once with the live handle when recording starts ([#356](https://github.com/dial9-rs/dial9/issues/356))
 
 ### Changed
 

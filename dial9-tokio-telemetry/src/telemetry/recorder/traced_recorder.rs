@@ -15,6 +15,7 @@ use super::runtime_context::{RuntimeContextRegistry, TokioRuntimesSource};
 use crate::background_task::{PipelineBuilder, SegmentProcessor};
 use crate::primitives::sync::{Arc, Mutex};
 use crate::telemetry::TracedRuntime;
+use dial9_core::handle::Dial9Handle;
 use dial9_core::recorder::{RecorderBuilder, RegisterSource};
 use dial9_core::source::Source;
 use dial9_core::writer::{Disk, WriterMode};
@@ -60,10 +61,6 @@ pub struct TokioAttachConfig {
     /// [`Dial9Handle::dump_trigger`](crate::telemetry::Dial9Handle::dump_trigger)
     /// can reach it; the matching rx must already feed the core builder.
     dump_trigger: Option<crate::dump::DumpTrigger>,
-    /// Post-start memory-profiler install config.
-    #[cfg(feature = "memory-profiling")]
-    memory_profiling_config:
-        Option<dial9_perf_self_profile::memory_profiling::MemoryProfilingConfig>,
 }
 
 impl std::fmt::Debug for TokioAttachConfig {
@@ -86,8 +83,6 @@ pub fn build_traced<M: WriterMode>(
             runtime,
             guard,
             config.graceful_shutdown_timeout,
-            #[cfg(feature = "memory-profiling")]
-            None,
         ));
     }
 
@@ -182,16 +177,11 @@ pub fn build_traced<M: WriterMode>(
     };
 
     guard.enable();
-    #[cfg(feature = "memory-profiling")]
-    let memory_profiler_guard =
-        crate::telemetry::install_memory_profiler_on_guard(config.memory_profiling_config, &guard);
 
     Ok(TracedRuntime::from_parts(
         runtime,
         guard,
         config.graceful_shutdown_timeout,
-        #[cfg(feature = "memory-profiling")]
-        memory_profiler_guard,
     ))
 }
 
@@ -287,9 +277,6 @@ pub struct TracedRecorder<W: WriterMode = Disk> {
     // the tx is stashed post-build so `Dial9Handle::dump_trigger` can find it.
     trigger_rx: Option<crate::dump::DumpRx>,
     dump_trigger: Option<crate::dump::DumpTrigger>,
-    #[cfg(feature = "memory-profiling")]
-    memory_profiling_config:
-        Option<dial9_perf_self_profile::memory_profiling::MemoryProfilingConfig>,
 }
 
 impl<W: WriterMode> std::fmt::Debug for TracedRecorder<W> {
@@ -334,8 +321,6 @@ impl<W: WriterMode> TracedRecorder<W> {
             graceful_shutdown_timeout: Some(DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT),
             trigger_rx: None,
             dump_trigger: None,
-            #[cfg(feature = "memory-profiling")]
-            memory_profiling_config: None,
         }
     }
 
@@ -463,16 +448,6 @@ impl<W: WriterMode> TracedRecorder<W> {
         self
     }
 
-    /// Enable sampled memory allocation profiling (needs the global allocator).
-    #[cfg(feature = "memory-profiling")]
-    pub fn with_memory_profiling(
-        mut self,
-        config: dial9_perf_self_profile::memory_profiling::MemoryProfilingConfig,
-    ) -> Self {
-        self.memory_profiling_config = Some(config);
-        self
-    }
-
     /// Build and start the traced runtime.
     pub fn build(self) -> std::io::Result<TracedRuntime> {
         let Some(mut core) = self.core else {
@@ -483,8 +458,6 @@ impl<W: WriterMode> TracedRecorder<W> {
                 runtime,
                 guard,
                 self.graceful_shutdown_timeout,
-                #[cfg(feature = "memory-profiling")]
-                None,
             ));
         };
         if let Some(rx) = self.trigger_rx {
@@ -516,8 +489,6 @@ impl<W: WriterMode> TracedRecorder<W> {
         let builder = builder
             .maybe_s3_config(s3_config)
             .maybe_s3_client(self.s3_client);
-        #[cfg(feature = "memory-profiling")]
-        let builder = builder.maybe_memory_profiling_config(self.memory_profiling_config);
 
         let tokio_builder = materialize_tokio_builder(&self.tokio_configurators);
         build_traced(core, tokio_builder, builder.build())
@@ -536,6 +507,13 @@ impl<W: WriterMode> RegisterSource for TracedRecorder<W> {
     fn source(self, source: impl Source + 'static) -> Self {
         Self {
             core: self.core.map(|c| c.source(source)),
+            ..self
+        }
+    }
+
+    fn on_session_start(self, hook: impl FnOnce(&Dial9Handle) + Send + 'static) -> Self {
+        Self {
+            core: self.core.map(|c| c.on_session_start(hook)),
             ..self
         }
     }

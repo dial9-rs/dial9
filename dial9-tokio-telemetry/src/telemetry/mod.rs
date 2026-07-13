@@ -25,7 +25,8 @@ pub use dial9_core::recorder::{RecorderBuilder, recorder};
 #[cfg(any(
     feature = "cpu-profiling",
     feature = "process-resource",
-    feature = "linux-socket"
+    feature = "linux-socket",
+    feature = "memory-profiling"
 ))]
 pub use dial9_perf_self_profile::RecorderPerfExt;
 #[cfg(feature = "linux-socket")]
@@ -51,25 +52,3 @@ pub use recorder::{
 pub use task_dump_config::TaskDumpConfig;
 pub use task_metadata::{TaskId, UNKNOWN_TASK_ID};
 pub use writer::{Disk, DiskWriter, InMemoryWriter, Memory, SegmentWriter, WriterMode};
-
-/// Install the memory profiler on a running session (post-`enable`).
-/// Warns and skips on error or a disabled guard.
-#[cfg(feature = "memory-profiling")]
-pub(crate) fn install_memory_profiler_on_guard(
-    config: Option<dial9_perf_self_profile::memory_profiling::MemoryProfilingConfig>,
-    guard: &TelemetryGuard,
-) -> Option<dial9_perf_self_profile::memory_profiling::MemoryProfilerGuard> {
-    let config = config?;
-    if !guard.is_enabled() {
-        return None;
-    }
-    match dial9_perf_self_profile::memory_profiling::MemoryProfiler::from_config(config)
-        .install(guard.handle())
-    {
-        Ok(memory_guard) => Some(memory_guard),
-        Err(e) => {
-            tracing::warn!(target: "dial9_telemetry", "failed to install memory profiler: {e}");
-            None
-        }
-    }
-}

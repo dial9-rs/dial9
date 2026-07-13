@@ -1,6 +1,6 @@
 use crate::flush_loop::run_flush_loop;
 use crate::handle::{ControlCommand, Dial9Handle};
-use crate::primitives::sync::Arc;
+use crate::primitives::sync::{Arc, Mutex};
 use crate::primitives::{sync::mpsc, thread::JoinHandle};
 use crate::shared_state::SharedState;
 use crate::writer::{SegmentWriter, WriterMode};
@@ -36,9 +36,15 @@ impl WorkerHandle {
 pub struct CoreSession {
     handle: Dial9Handle,
     flush_thread: Option<JoinHandle<()>>,
+    /// Hooks run once, with the handle, on the first `enable()`.
+    session_start_hooks: Mutex<Vec<SessionStartHook>>,
     #[cfg(feature = "pipeline")]
     worker: Option<WorkerHandle>,
 }
+
+/// A hook run once, with the live [`Dial9Handle`], when the session first
+/// enables recording.
+pub type SessionStartHook = Box<dyn FnOnce(&Dial9Handle) + Send>;
 
 impl CoreSession {
     /// Create a session from an existing handle and flush thread.
@@ -46,9 +52,15 @@ impl CoreSession {
         Self {
             handle,
             flush_thread,
+            session_start_hooks: Mutex::new(Vec::new()),
             #[cfg(feature = "pipeline")]
             worker: None,
         }
+    }
+
+    /// Install the one-shot hooks to run on the first `enable()`.
+    pub fn set_session_start_hooks(&self, hooks: Vec<SessionStartHook>) {
+        *self.session_start_hooks.lock().unwrap() = hooks;
     }
 
     /// Start a session over `shared`: build the recording [`Dial9Handle`], spawn
@@ -117,6 +129,12 @@ impl CoreSession {
     /// Enable recording.
     pub fn enable(&self) {
         self.handle.enable();
+        // Run the one-shot start hooks now that the handle is live and
+        // recording. Draining leaves them run-once across repeated enables.
+        let hooks = std::mem::take(&mut *self.session_start_hooks.lock().unwrap());
+        for hook in hooks {
+            hook(&self.handle);
+        }
     }
 
     /// Disable recording.

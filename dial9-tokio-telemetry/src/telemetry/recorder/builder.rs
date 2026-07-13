@@ -258,8 +258,6 @@ impl<M: WriterMode, S: telemetry_core_builder::State> TelemetryCoreBuilder<M, S>
 pub struct TracedRuntime {
     pub(crate) runtime: tokio::runtime::Runtime,
     pub(crate) guard: TelemetryGuard,
-    #[cfg(feature = "memory-profiling")]
-    pub(crate) memory_profiler_guard: Option<crate::memory_profiling::MemoryProfilerGuard>,
     /// Graceful-shutdown timeout carried from the [`TracedRecorder`](super::TracedRecorder).
     /// Consumed by [`graceful_shutdown`](TracedRuntime::graceful_shutdown)
     /// (used by the `#[dial9::main]` macro). `None` skips the
@@ -390,8 +388,6 @@ impl TracedRuntime {
         let Self {
             runtime,
             guard,
-            #[cfg(feature = "memory-profiling")]
-                memory_profiler_guard: _memory_profiler_guard,
             graceful_shutdown_timeout,
         } = self;
         // Drop the runtime first so Tokio worker threads exit and flush their
@@ -413,15 +409,10 @@ impl TracedRuntime {
         runtime: tokio::runtime::Runtime,
         guard: TelemetryGuard,
         graceful_shutdown_timeout: Option<Duration>,
-        #[cfg(feature = "memory-profiling")] memory_profiler_guard: Option<
-            crate::memory_profiling::MemoryProfilerGuard,
-        >,
     ) -> Self {
         Self {
             runtime,
             guard,
-            #[cfg(feature = "memory-profiling")]
-            memory_profiler_guard,
             graceful_shutdown_timeout,
         }
     }
@@ -432,32 +423,7 @@ impl TracedRuntime {
     /// sequence shutdown yourself, keep the guard past the runtime, or drive
     /// [`TelemetryGuard::graceful_shutdown`] to get the drain result. Most
     /// callers want [`graceful_shutdown`](Self::graceful_shutdown).
-    #[cfg(not(feature = "memory-profiling"))]
     pub fn into_parts(self) -> (tokio::runtime::Runtime, TelemetryGuard, Option<Duration>) {
         (self.runtime, self.guard, self.graceful_shutdown_timeout)
-    }
-
-    /// Decompose into owned parts. The inverse of [`from_parts`](Self::from_parts).
-    ///
-    /// Reach for this when you need to own the runtime and guard separately:
-    /// sequence shutdown yourself, keep the guard past the runtime, or drive
-    /// [`TelemetryGuard::graceful_shutdown`] to get the drain result. Most
-    /// callers want [`graceful_shutdown`](Self::graceful_shutdown). Keep the
-    /// returned memory profiler guard alive to keep memory profiling running.
-    #[cfg(feature = "memory-profiling")]
-    pub fn into_parts(
-        self,
-    ) -> (
-        tokio::runtime::Runtime,
-        TelemetryGuard,
-        Option<Duration>,
-        Option<crate::memory_profiling::MemoryProfilerGuard>,
-    ) {
-        (
-            self.runtime,
-            self.guard,
-            self.graceful_shutdown_timeout,
-            self.memory_profiler_guard,
-        )
     }
 }

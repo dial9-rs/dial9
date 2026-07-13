@@ -18,8 +18,9 @@
 //! already registered. The Tokio integration builds on the same builder internally.
 
 use crate::clock;
+use crate::handle::Dial9Handle;
 use crate::primitives::sync::Arc;
-use crate::session::CoreSession;
+use crate::session::{CoreSession, SessionStartHook};
 use crate::shared_state::SharedState;
 use crate::source::Source;
 use crate::writer::{Disk, SegmentWriter, WriterMode};
@@ -42,6 +43,7 @@ pub fn recorder<M: WriterMode>(writer: SegmentWriter<M>) -> RecorderBuilder<M> {
     RecorderBuilder {
         writer,
         sources: Vec::new(),
+        session_start_hooks: Vec::new(),
         segment_metadata: Vec::new(),
         metrics_sink: None,
         thread_init: noop_thread_hook(),
@@ -59,6 +61,7 @@ pub fn recorder<M: WriterMode>(writer: SegmentWriter<M>) -> RecorderBuilder<M> {
 pub struct RecorderBuilder<M: WriterMode = Disk> {
     writer: SegmentWriter<M>,
     sources: Vec<Box<dyn Source>>,
+    session_start_hooks: Vec<SessionStartHook>,
     segment_metadata: Vec<(String, String)>,
     metrics_sink: Option<metrique::writer::BoxEntrySink>,
     thread_init: RecordingThreadHook,
@@ -172,6 +175,8 @@ impl<M: WriterMode> RecorderBuilder<M> {
             session.attach_worker(worker);
         }
 
+        session.set_session_start_hooks(self.session_start_hooks);
+
         session
     }
 
@@ -191,11 +196,20 @@ impl<M: WriterMode> RecorderBuilder<M> {
 pub trait RegisterSource: Sized {
     /// Register a [`Source`] with the underlying recording session.
     fn source(self, source: impl Source + 'static) -> Self;
+
+    /// Register a hook run once, with the live [`Dial9Handle`], when the session
+    /// starts recording.
+    fn on_session_start(self, hook: impl FnOnce(&Dial9Handle) + Send + 'static) -> Self;
 }
 
 impl<M: WriterMode> RegisterSource for RecorderBuilder<M> {
     fn source(mut self, source: impl Source + 'static) -> Self {
         self.sources.push(Box::new(source));
+        self
+    }
+
+    fn on_session_start(mut self, hook: impl FnOnce(&Dial9Handle) + Send + 'static) -> Self {
+        self.session_start_hooks.push(Box::new(hook));
         self
     }
 }
@@ -338,6 +352,32 @@ mod tests {
             session.shared().expect("live session").is_enabled(),
             "recording on after enable()"
         );
+    }
+
+    /// `on_session_start` hooks run once, with the handle on `enable()`.
+    #[test]
+    fn on_session_start_runs_at_enable() {
+        use std::sync::Arc as StdArc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let writer = InMemoryWriter::new(1 << 20).expect("writer");
+        let runs = StdArc::new(AtomicUsize::new(0));
+        let runs_hook = StdArc::clone(&runs);
+        let session = recorder(writer)
+            .on_session_start(move |_handle| {
+                runs_hook.fetch_add(1, Ordering::SeqCst);
+            })
+            .build();
+
+        assert_eq!(
+            runs.load(Ordering::SeqCst),
+            0,
+            "hook must not run before enable"
+        );
+        session.enable();
+        assert_eq!(runs.load(Ordering::SeqCst), 1, "hook runs on enable");
+        session.enable();
+        assert_eq!(runs.load(Ordering::SeqCst), 1, "hook runs at most once");
     }
 
     /// Pipeline: `.pipe()` spawns the background worker for a runtime-agnostic
