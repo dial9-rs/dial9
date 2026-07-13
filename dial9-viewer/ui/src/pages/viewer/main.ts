@@ -53,7 +53,7 @@ function boot(): void {
     toggleHelp: () => help.toggle(),
     sourceLabel: source.label,
   });
-  createToasts(shell.toastRegion);
+  const toasts = createToasts(shell.toastRegion);
 
   // Initialize the viewport from the trace the moment it loads.
   initViewportFromTrace(store);
@@ -83,7 +83,14 @@ function boot(): void {
   const load = loadTraceInWorker(store, source.urls);
   load.done.catch((err: unknown) => {
     if (err instanceof DOMException && err.name === "AbortError") return;
-    // One-time load failure surfaced to the user; not a loop.
+    // One-time load failure surfaced to the user via an error toast (U4);
+    // not a loop, so no rate-limiting needed.
+    const detail = err instanceof Error ? err.message : String(err);
+    toasts.show({
+      id: "load-error",
+      type: "error",
+      message: `Could not load ${source.label}: ${detail}`,
+    });
     console.error("viewer: trace load failed", err);
   });
 
