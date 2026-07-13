@@ -125,6 +125,18 @@ export interface TaskDetailTrackController {
   ): void;
   /** Read the current (cached) derivation - T31's inspector Task tab source. */
   data(): TaskDetailData;
+  /**
+   * N8/G8: dispatch `selection.hoveredWakerTaskId` for a pointer at draw-area
+   * (mx, my) over `model` (null off any waker label). Dispatches only on a
+   * change (no store thrash). The DOM hover handler delegates here; exposed so
+   * the dispatch is testable without a canvas/DOM (the DoD's waker-hover
+   * dispatch Vitest).
+   */
+  hoverWaker(model: TaskDetailRenderModel, mx: number, my: number): void;
+  /** N8: clicking a waker label selects that waker task (via the store). */
+  clickWaker(model: TaskDetailRenderModel, mx: number, my: number): void;
+  /** N8: clear the waker highlight (pointer left the canvas). */
+  clearHover(): void;
   /** Tear down (no external resources today; symmetry with other tracks). */
   dispose(): void;
 }
@@ -244,12 +256,9 @@ export function createTaskDetailTrack(store: ViewerStore): TaskDetailTrackContro
     );
   }
 
-  function onCanvasHover(ev: MouseEvent): void {
-    const canvas = ev.currentTarget as HTMLCanvasElement;
-    const model = lastModel;
-    if (model === null) return;
-    const { mx, my } = pointerAt(canvas, ev);
+  // ── Store-dispatch seams (model-driven, DOM-free - testable) ───────────
 
+  function hoverWaker(model: TaskDetailRenderModel, mx: number, my: number): void {
     // N8/G8: waker-label hover -> dispatch selection.hoveredWakerTaskId (the
     // store field the lanes consume). Only dispatch on an actual change, so a
     // hover inside the same region does not thrash the store (legacy 6587).
@@ -258,33 +267,9 @@ export function createTaskDetailTrack(store: ViewerStore): TaskDetailTrackContro
     if (found !== state().selection.hoveredWakerTaskId) {
       store.update("selection", { hoveredWakerTaskId: found });
     }
-
-    // N5: status readout (imperative, hover-only - no store, no layout read).
-    const status = statusEl(canvas);
-    if (status !== null) status.textContent = statusTextAt(model, mx, my);
-
-    // Cursor: pointer over a waker label or a dumped idle region (N8/N11).
-    const hit = hitRegionAt(model, mx, my);
-    const clickable =
-      found !== null || (hit !== null && hit.dumps !== null && hit.dumps.length > 0);
-    canvas.style.cursor = clickable ? "pointer" : "";
   }
 
-  function onCanvasLeave(ev: MouseEvent): void {
-    const canvas = ev.currentTarget as HTMLCanvasElement;
-    const status = statusEl(canvas);
-    if (status !== null) status.textContent = "";
-    if (state().selection.hoveredWakerTaskId !== null) {
-      store.update("selection", { hoveredWakerTaskId: null });
-    }
-  }
-
-  function onCanvasClick(ev: MouseEvent): void {
-    const canvas = ev.currentTarget as HTMLCanvasElement;
-    const model = lastModel;
-    if (model === null) return;
-    const { mx, my } = pointerAt(canvas, ev);
-
+  function clickWaker(model: TaskDetailRenderModel, mx: number, my: number): void {
     // N8: click a waker label -> select the waker task (re-scopes the whole
     // detail to that task). Clear the hover highlight so the newly selected
     // task starts clean.
@@ -294,12 +279,54 @@ export function createTaskDetailTrack(store: ViewerStore): TaskDetailTrackContro
         selectedTaskId: waker.wakerTaskId,
         hoveredWakerTaskId: null,
       });
-      return;
     }
     // N11: click a dumped idle gap -> open the captured async stack. The stack
     // renders in T31's inspector / T32's flamegraph surface (deferred-until-T31,
     // see HANDOFF): this track exposes the dumps on the derivation + hit region;
     // it does not build the flamegraph modal here (scope fence).
+  }
+
+  function clearHover(): void {
+    if (state().selection.hoveredWakerTaskId !== null) {
+      store.update("selection", { hoveredWakerTaskId: null });
+    }
+  }
+
+  // ── DOM event handlers (thin wrappers over the seams above) ────────────
+
+  function onCanvasHover(ev: MouseEvent): void {
+    const canvas = ev.currentTarget as HTMLCanvasElement;
+    const model = lastModel;
+    if (model === null) return;
+    const { mx, my } = pointerAt(canvas, ev);
+
+    hoverWaker(model, mx, my);
+
+    // N5: status readout (imperative, hover-only - no store, no layout read).
+    const status = statusEl(canvas);
+    if (status !== null) status.textContent = statusTextAt(model, mx, my);
+
+    // Cursor: pointer over a waker label or a dumped idle region (N8/N11).
+    const waker = wakeRegionAt(model, mx, my);
+    const hit = hitRegionAt(model, mx, my);
+    const clickable =
+      waker !== null || (hit !== null && hit.dumps !== null && hit.dumps.length > 0);
+    canvas.style.cursor = clickable ? "pointer" : "";
+  }
+
+  function onCanvasLeave(ev: MouseEvent): void {
+    const canvas = ev.currentTarget as HTMLCanvasElement;
+    const status = statusEl(canvas);
+    if (status !== null) status.textContent = "";
+    clearHover();
+  }
+
+  function onCanvasClick(ev: MouseEvent): void {
+    const canvas = ev.currentTarget as HTMLCanvasElement;
+    const model = lastModel;
+    if (model === null) return;
+    const { mx, my } = pointerAt(canvas, ev);
+    clickWaker(model, mx, my);
   }
 
   function data(): TaskDetailData {
@@ -313,7 +340,7 @@ export function createTaskDetailTrack(store: ViewerStore): TaskDetailTrackContro
     sizerCanvas = null;
   }
 
-  return { rowTemplate, paint, data, dispose };
+  return { rowTemplate, paint, data, hoverWaker, clickWaker, clearHover, dispose };
 }
 
 // ── Canvas draw (extracted so the render input is unit-testable) ───────────
