@@ -31,6 +31,7 @@ import {
   createTaskDetailTrack,
   type TaskDetailTrackController,
 } from "./task-detail-track.js";
+import { createEventsTrack, type EventsTrackController } from "./events-track.js";
 
 /** Callbacks the shell chrome needs from the page entry. */
 export interface ShellDeps {
@@ -182,6 +183,7 @@ function shellTemplate(
   deps: ShellDeps,
   spansTrack: SpansTrackController,
   taskDetailTrack: TaskDetailTrackController,
+  eventsTrack: EventsTrackController,
 ): TemplateResult {
   return html`
     <header class="d9-toolbar" role="banner">
@@ -224,7 +226,7 @@ function shellTemplate(
       >
         ${hintChipsTemplate()}
         ${vm.hasTrace
-          ? tracksTemplate(vm, spansTrack, taskDetailTrack)
+          ? tracksTemplate(vm, spansTrack, taskDetailTrack, eventsTrack)
           : emptyStateTemplate()}
       </main>
       ${inspectorTemplate()}
@@ -277,22 +279,24 @@ export function mountShell(
 ): MountedShell {
   root.classList.add("d9-viewer");
 
-  // The spans track (T26) is a store-wired content component: created once so
-  // its derived caches + name->color assignment live across renders. Other
-  // content tracks (T22/T27-T30) mount the same way as they land.
+  // The spans track (T26) and custom-events track (T27) are store-wired
+  // content components: created once so their derived caches + name->color
+  // assignment live across renders. Other content tracks (T22/T28-T30) mount
+  // the same way as they land.
   const spansTrack = createSpansTrack(store);
   // The task-detail track (T30): store-wired like spans, created once so its
   // selection-keyed derivation cache lives across renders (F5). Its row is
   // only rendered while a task is selected (selectionOnly, N1).
   const taskDetailTrack = createTaskDetailTrack(store);
+  const eventsTrack = createEventsTrack(store);
 
   function renderPass(): void {
     const state = store.getState() as StoreState;
     const vm = viewModel(state, deps);
-    render(shellTemplate(vm, deps, spansTrack, taskDetailTrack), root);
+    render(shellTemplate(vm, deps, spansTrack, taskDetailTrack, eventsTrack), root);
     const column = root.querySelector<HTMLElement>(".d9-track-column");
     if (column && vm.hasTrace) {
-      sizeTracks(column, vm, spansTrack, taskDetailTrack);
+      sizeTracks(column, vm, spansTrack, taskDetailTrack, eventsTrack);
     }
   }
 
@@ -330,6 +334,7 @@ export function mountShell(
       window.removeEventListener("resize", onResize);
       spansTrack.dispose();
       taskDetailTrack.dispose();
+      eventsTrack.dispose();
     },
   };
 }

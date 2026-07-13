@@ -373,6 +373,82 @@ body {
 }
 .d9-task-detail-canvas { display: block; }
 
+/* ── Custom-events track (T27; features/02 section K) ────────────────────── */
+
+/* The events row keeps the shared LABEL_W gutter (axis alignment) and stacks a
+   name-chip legend strip (K5/K6) over the marker-tick canvas (K1). */
+.d9-track--events .d9-events-label {
+    justify-content: center;
+}
+.d9-events-body {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    background: var(--d9-bg-track);
+}
+.d9-events-legend {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    height: 26px;
+    flex-shrink: 0;
+    padding: 0 8px;
+    background: #1a1a2e;
+    border-bottom: 1px solid var(--d9-border);
+    overflow-x: auto;
+    overflow-y: hidden;
+    white-space: nowrap;
+}
+.d9-event-btn {
+    background: #23233f;
+    border: 1px solid #444;
+    color: var(--d9-fg);
+    font-size: 0.72em;
+    padding: 1px 5px;
+    border-radius: 3px;
+    cursor: pointer;
+    flex-shrink: 0;
+}
+.d9-event-btn:hover { background: #33335a; }
+.d9-event-chips {
+    display: inline-flex;
+    gap: 3px;
+    align-items: center;
+}
+.d9-event-chip {
+    font-size: 0.72em;
+    padding: 1px 6px;
+    border-radius: 3px;
+    cursor: pointer;
+    background: transparent;
+    border: 1px solid var(--chip, #888);
+    color: var(--d9-fg-muted);
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+.d9-event-chip.on { background: var(--chip, #888); color: #fff; }
+.d9-events-canvas-wrap { flex: 1; min-width: 0; display: flex; }
+.d9-events-canvas { display: block; cursor: default; }
+
+/* Event hover tooltip (K3): follows the cursor, appended to <body>. */
+.d9-event-tooltip {
+    position: fixed;
+    z-index: 80;
+    display: none;
+    max-width: 320px;
+    padding: 6px 9px;
+    border-radius: 5px;
+    background: rgba(13, 13, 26, 0.96);
+    border: 1px solid #444;
+    color: var(--d9-fg);
+    font-size: 0.75em;
+    line-height: 1.4;
+    pointer-events: none;
+}
+.d9-event-tooltip .tt-k { color: var(--d9-fg-muted); }
+.d9-event-tooltip .tt-dim { color: #888; }
+
 /* ── Empty state (F4) ────────────────────────────────────────────────── */
 
 .d9-empty {
