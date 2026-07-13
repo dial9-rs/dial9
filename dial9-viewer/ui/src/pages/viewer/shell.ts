@@ -32,9 +32,12 @@ import {
   type TaskDetailTrackController,
 } from "./task-detail-track.js";
 import { createEventsTrack, type EventsTrackController } from "./events-track.js";
+import { createToolbar, type ToolbarController, type ToolbarDeps } from "./toolbar.js";
+import { createIssuesRail, type IssuesRailController } from "./issues-rail.js";
+import type { KeyBinding } from "../../lib/interact/keyboard.js";
 
 /** Callbacks the shell chrome needs from the page entry. */
-export interface ShellDeps {
+export interface ShellDeps extends ToolbarDeps {
   /** Toggle the help overlay (bound to the `?` button and key). */
   toggleHelp(): void;
   /** Human label for the loaded trace source (toolbar file info). */
@@ -108,17 +111,6 @@ function viewModel(state: StoreState, deps: ShellDeps): ShellViewModel {
   };
 }
 
-/** Toolbar file-info text: the loaded-wait hook and app identity (A1/A3).
- * The richer structured display (features/02 C1) is T33's; T21 renders the
- * minimal `N events` line the shell and parity loaded-wait depend on. */
-function fileMeta(vm: ShellViewModel): string {
-  if (!vm.hasTrace) return "no trace loaded";
-  const parts = [`${(vm.eventCount ?? 0).toLocaleString()} events`];
-  if (vm.workerCount !== null) parts.push(`${vm.workerCount} workers`);
-  if (vm.durationLabel !== null) parts.push(vm.durationLabel);
-  return parts.join(" · ");
-}
-
 /** F4 empty state: teach the next steps instead of a bare drop target. */
 function emptyStateTemplate(): TemplateResult {
   return html`
@@ -180,7 +172,10 @@ function inspectorTemplate(): TemplateResult {
 /** The full shell template for one render pass. */
 function shellTemplate(
   vm: ShellViewModel,
+  state: StoreState,
   deps: ShellDeps,
+  toolbar: ToolbarController,
+  rail: IssuesRailController,
   spansTrack: SpansTrackController,
   taskDetailTrack: TaskDetailTrackController,
   eventsTrack: EventsTrackController,
@@ -188,16 +183,13 @@ function shellTemplate(
   return html`
     <header class="d9-toolbar" role="banner">
       <h1 class="d9-app-title">dial9 trace viewer</h1>
-      <span class="d9-file-name">${vm.fileName}</span>
-      <span class="d9-file-meta" data-file-meta id="toolbar-row-data"
-        >${fileMeta(vm)}</span
-      >
+      ${toolbar.fileInfoTemplate(state, deps.sourceLabel)}
       <span class="d9-toolbar-slot" role="group" aria-label="Analysis actions">
-        <span class="d9-slot-hint">Analysis (T33)</span>
+        ${toolbar.analysisTemplate(state, deps.sourceLabel)}
       </span>
       <span class="d9-toolbar-spacer"></span>
       <span class="d9-toolbar-slot" role="group" aria-label="Time display">
-        <span class="d9-slot-hint">Time (T33)</span>
+        ${toolbar.timeTemplate(state)}
       </span>
       <button
         type="button"
@@ -219,6 +211,7 @@ function shellTemplate(
     </div>
 
     <div class="d9-body">
+      ${rail.template(state)}
       <main
         class="d9-track-column"
         aria-label="Trace timeline"
@@ -259,6 +252,12 @@ export interface MountedShell {
   toastRegion: HTMLElement;
   /** The track column element (canvas host for sizing). */
   trackColumn: HTMLElement;
+  /**
+   * Key bindings the toolbar + issues rail contribute to the unified router
+   * (T20): the rail's `n`/`p` POI step and the toolbar's `g` goto-time. The
+   * entry registers them alongside the lane-interaction bindings.
+   */
+  keyBindings: readonly KeyBinding[];
   /** Force one render+size pass (used after mount and on resize). */
   refresh(): void;
   /** Tear down the store subscription and resize listener. */
@@ -289,11 +288,27 @@ export function mountShell(
   // only rendered while a task is selected (selectionOnly, N1).
   const taskDetailTrack = createTaskDetailTrack(store);
   const eventsTrack = createEventsTrack(store);
+  // Toolbar (file info / analysis / time) and the issues rail (T33): store-
+  // wired controllers filling the toolbar slots + the body's left column.
+  const toolbar = createToolbar(store, deps);
+  const rail = createIssuesRail(store);
 
   function renderPass(): void {
     const state = store.getState() as StoreState;
     const vm = viewModel(state, deps);
-    render(shellTemplate(vm, deps, spansTrack, taskDetailTrack, eventsTrack), root);
+    render(
+      shellTemplate(
+        vm,
+        state,
+        deps,
+        toolbar,
+        rail,
+        spansTrack,
+        taskDetailTrack,
+        eventsTrack,
+      ),
+      root,
+    );
     const column = root.querySelector<HTMLElement>(".d9-track-column");
     if (column && vm.hasTrace) {
       sizeTracks(column, vm, spansTrack, taskDetailTrack, eventsTrack);
@@ -304,7 +319,7 @@ export function mountShell(
   // shell is chrome, so it renders declaratively from state; track/inspector
   // CONTENT tickets add their own slice subscriptions against this store.
   const unsubscribe = store.subscribe(
-    ["trace", "viewport", "selection", "uiPrefs"],
+    ["trace", "viewport", "selection", "poi", "uiPrefs"],
     () => renderPass(),
   );
 
@@ -328,6 +343,7 @@ export function mountShell(
   return {
     toastRegion,
     trackColumn,
+    keyBindings: [...rail.keyBindings, ...toolbar.keyBindings],
     refresh: () => store.update("viewport", {}),
     dispose(): void {
       unsubscribe();
@@ -335,6 +351,8 @@ export function mountShell(
       spansTrack.dispose();
       taskDetailTrack.dispose();
       eventsTrack.dispose();
+      toolbar.dispose();
+      rail.dispose();
     },
   };
 }

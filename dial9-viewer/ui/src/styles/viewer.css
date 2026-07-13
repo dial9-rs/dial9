@@ -62,6 +62,199 @@ body {
     border-radius: 4px;
 }
 .d9-slot-hint { font-size: 0.75em; color: var(--d9-fg-muted); }
+
+/* ── T33: toolbar controls (analysis buttons, time toggles, ranges) ──── */
+
+.d9-toolbar-btn {
+    background: #23233f;
+    border: 1px solid #444;
+    color: var(--d9-fg);
+    font-size: 0.76em;
+    padding: 3px 8px;
+    border-radius: 4px;
+    cursor: pointer;
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+.d9-toolbar-btn:hover:not(:disabled) { background: #33335a; }
+.d9-toolbar-btn:disabled { opacity: 0.4; cursor: default; }
+.d9-toolbar-btn:focus-visible { outline: 2px solid var(--d9-accent); outline-offset: 1px; }
+.d9-hidden { display: none !important; }
+
+/* Screen-reader-only label text (visually hidden, still announced). */
+.d9-sr-only {
+    position: absolute;
+    width: 1px; height: 1px;
+    padding: 0; margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+}
+
+/* Red-flags summary chip (concept-2): existing detectors' counts. */
+.d9-redflags {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 0.74em;
+    padding: 2px 8px;
+    border-radius: 4px;
+    background: rgba(255, 107, 107, 0.14);
+    border: 1px solid #b0504f;
+    color: #ffc9c9;
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+.d9-redflags-sep { color: #8a6a6a; }
+.d9-redflags-item { white-space: nowrap; }
+
+/* Goto-time input (S2). */
+.d9-goto-label { display: inline-flex; align-items: center; flex-shrink: 0; }
+.d9-goto-input {
+    background: #0f1629;
+    border: 1px solid #444;
+    color: var(--d9-fg);
+    padding: 3px 6px;
+    border-radius: 4px;
+    font-size: 0.76em;
+    width: 130px;
+}
+.d9-goto-input:disabled { opacity: 0.4; }
+.d9-goto-input:focus-visible { outline: 2px solid var(--d9-accent); outline-offset: 1px; }
+
+/* Info menu (F2: Parse perf + uninstrumented demoted here). */
+.d9-info-menu { position: relative; flex-shrink: 0; }
+.d9-info-summary {
+    list-style: none;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 26px;
+}
+.d9-info-summary::-webkit-details-marker { display: none; }
+.d9-info-menu-body {
+    position: absolute;
+    top: calc(100% + 4px);
+    right: 0;
+    z-index: 200;
+    width: 260px;
+    max-height: 60vh;
+    overflow-y: auto;
+    padding: 8px 10px;
+    background: rgba(13, 13, 26, 0.98);
+    border: 1px solid #444;
+    border-radius: 6px;
+    font-size: 0.78em;
+}
+.d9-info-heading {
+    color: var(--d9-accent);
+    font-size: 0.9em;
+    font-weight: 600;
+    margin: 4px 0 3px;
+}
+.d9-info-row {
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 1px 0;
+    color: var(--d9-fg);
+}
+.d9-info-row span:first-child { color: var(--d9-fg-muted); }
+.d9-info-note { color: var(--d9-fg-muted); font-size: 0.9em; margin: 4px 0; line-height: 1.4; }
+.d9-info-note code {
+    background: #2a2a4a;
+    padding: 0 3px;
+    border-radius: 2px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+/* ── T33: issues rail (concept-2, replaces the "0/74" stepper; 04 S5) ── */
+
+.d9-rail {
+    width: 300px;
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    background: #151530;
+    border-right: 1px solid var(--d9-border);
+}
+.d9-rail-head {
+    flex-shrink: 0;
+    padding: 6px 10px;
+    border-bottom: 1px solid var(--d9-border);
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+}
+.d9-rail-title { display: flex; align-items: baseline; justify-content: space-between; }
+.d9-rail-heading { font-size: 0.72em; letter-spacing: 0.06em; color: var(--d9-fg-muted); }
+.d9-rail-pos { font-size: 0.74em; color: var(--d9-fg); font-variant-numeric: tabular-nums; }
+.d9-rail-controls { display: flex; align-items: center; gap: 8px; }
+.d9-rail-filter {
+    flex: 1;
+    min-width: 0;
+    background: #0f1629;
+    border: 1px solid #444;
+    color: var(--d9-fg);
+    font-size: 0.74em;
+    padding: 2px 4px;
+    border-radius: 3px;
+}
+.d9-rail-filter:focus-visible { outline: 2px solid var(--d9-accent); outline-offset: 1px; }
+.d9-rail-hint { font-size: 0.7em; color: var(--d9-fg-muted); white-space: nowrap; }
+.d9-rail-hint kbd {
+    background: #26265a;
+    border: 1px solid #3a3a5e;
+    border-radius: 3px;
+    padding: 0 3px;
+    font-size: 0.9em;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.d9-rail-list { flex: 1; overflow-y: auto; min-height: 0; }
+.d9-rail-empty { padding: 12px 10px; color: var(--d9-fg-muted); font-size: 0.8em; font-style: italic; }
+
+.d9-rail-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.76em;
+}
+.d9-rail-table thead th {
+    position: sticky;
+    top: 0;
+    background: #151530;
+    padding: 0;
+    text-align: left;
+    border-bottom: 1px solid var(--d9-border);
+    z-index: 1;
+}
+.d9-rail-sort {
+    width: 100%;
+    background: none;
+    border: none;
+    color: var(--d9-fg-muted);
+    font-size: inherit;
+    text-align: left;
+    padding: 4px 6px;
+    cursor: pointer;
+    white-space: nowrap;
+}
+.d9-rail-sort:hover { color: var(--d9-fg); }
+.d9-rail-sort.on { color: var(--d9-accent); }
+.d9-rail-sort:focus-visible { outline: 2px solid var(--d9-accent); outline-offset: -2px; }
+
+.d9-rail-row { cursor: pointer; border-bottom: 1px solid rgba(255, 255, 255, 0.04); }
+.d9-rail-row:hover { background: #1c1c40; }
+.d9-rail-row.on { background: #2a2a5e; }
+.d9-rail-row td { padding: 4px 6px; color: var(--d9-fg); }
+.d9-rail-worker { display: flex; align-items: center; gap: 5px; white-space: nowrap; }
+.d9-rail-num { text-align: right; font-variant-numeric: tabular-nums; color: #cdd2f0; white-space: nowrap; }
+.d9-rail-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.d9-rail-dot.sev-high { background: #ff6b6b; }
+.d9-rail-dot.sev-med { background: #ffa94d; }
+.d9-rail-dot.sev-low { background: #ffd43b; }
 .d9-help-btn {
     background: #2a2a4a;
     border: 1px solid #444;

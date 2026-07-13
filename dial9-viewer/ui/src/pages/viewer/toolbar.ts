@@ -184,7 +184,7 @@ function fileInfoTemplate(state: StoreState, sourceLabel: string): TemplateResul
 }
 
 /** The C1 stats line: events, workers, duration, plus truncation/filter notes. */
-function fileMetaText(trace: ParsedTrace | null): string {
+export function fileMetaText(trace: ParsedTrace | null): string {
   if (trace === null) return "no trace loaded";
   const workers = new Set(trace.tidToWorker.values()).size;
   const parts = [`${trace.events.length.toLocaleString()} events`, `${workers} workers`];
