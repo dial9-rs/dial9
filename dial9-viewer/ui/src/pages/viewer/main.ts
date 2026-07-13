@@ -18,6 +18,7 @@ import { createEscCascade, ESC_PRIORITY } from "./esc-cascade.js";
 import { mountViewerHelp } from "./help.js";
 import { createToasts } from "./toasts.js";
 import { mountShell } from "./shell.js";
+import { mountLanes } from "../../components/canvas/lanes/index.js";
 import { initViewportFromTrace } from "./viewport-init.js";
 
 // Dual-UI switch (T38): render the always-visible "Switch to legacy UI"
@@ -54,6 +55,11 @@ function boot(): void {
     sourceLabel: source.label,
   });
   const toasts = createToasts(shell.toastRegion);
+
+  // Worker-lanes track content (T22): mounts AFTER the shell so its store
+  // subscription runs after the shell's chrome render each frame, and claims
+  // the lanes canvas so the shell stops painting its placeholder.
+  const lanes = mountLanes(shell.trackColumn, store);
 
   // Initialize the viewport from the trace the moment it loads.
   initViewportFromTrace(store);
@@ -97,6 +103,7 @@ function boot(): void {
   // Teardown hook for HMR / tests (not strictly needed in production).
   window.addEventListener("beforeunload", () => {
     load.abort();
+    lanes.dispose();
     shell.dispose();
     help.dispose();
   });

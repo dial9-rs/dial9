@@ -1,0 +1,687 @@
+// components/canvas/lanes/render.ts - the worker-lanes canvas draw pass
+// (T22; features/02 section G rows G1-G19). A pure `render(ctx, state,
+// layout)` function ported from viewer.html renderLane (~:2957) under the
+// new render rules:
+//
+//   - Pixel-bounded FILLS via the frozen core's pixelDownsampleSpans +
+//     makeBarCoalescer (lib/canvas/downsample) - one representative per
+//     pixel column, coalesced runs (G3/G4).
+//   - Pixel-bounded, style-BATCHED strokes via the T08 stroke batcher
+//     (lib/canvas/stroke): the local-queue step line and every dashed
+//     marker are downsampled to per-column vertices and drawn one path per
+//     style, NOT one setLineDash + stroke() per item. This is the 03 F1
+//     fix (legacy stroke() was 76% of pan-storm CPU).
+//   - No per-frame re-derivation: the worker spans, queue series and span
+//     index are derived once (data.ts, store-cached) and handed in; this
+//     function only reads per-frame inputs (viewport, selection) (03 F5).
+//
+// The unified-column layout gives the lanes ONE canvas (features/02 G1 was
+// one 60px canvas per worker in a scrollable container). N worker rows are
+// stacked into it; each row's internal band geometry is the legacy 60px
+// reference scaled by `sf = laneH / LANE_REF_H`, so the poll band, queue
+// step area, ticks and triangles keep their proportions at any row height.
+
+import type {
+  ActiveSpan,
+  BlockInPlaceGap,
+  ParkSpan,
+  PollSpan,
+  TracingSpan,
+  WorkerLane,
+  WorkerWake,
+} from "../../../types/trace.js";
+import type { TimePanelLayout } from "../../../types/state.js";
+import {
+  makeBarCoalescer,
+  pixelDownsampleSpans,
+} from "../../../lib/canvas/downsample.js";
+import {
+  drawStrokeBatches,
+  makeStrokeBatcher,
+  type StrokePathContext,
+  type StrokeStyleSpec,
+} from "../../../lib/canvas/stroke.js";
+import { pollColor } from "../../../lib/canvas/palette.js";
+import { findSpanAt } from "../../../lib/trace/query.js";
+
+/** The legacy per-lane reference height (viewer.html LANE_H). Band offsets
+ *  below are expressed against this and scaled to the real row height. */
+export const LANE_REF_H = 60;
+
+/** The minimal 2D-context surface renderLanes needs (Node-testable). */
+export interface LaneDrawContext extends StrokePathContext {
+  fillStyle: string | CanvasGradient | CanvasPattern;
+  font: string;
+  textAlign: CanvasTextAlign;
+  clearRect(x: number, y: number, w: number, h: number): void;
+  fillRect(x: number, y: number, w: number, h: number): void;
+  fillText(text: string, x: number, y: number): void;
+  fill(): void;
+  closePath(): void;
+}
+
+/** Per-frame render inputs (all derived/selection state, no live store). */
+export interface LanesRenderInput {
+  /** Worker ids in render order (top to bottom). */
+  workerIds: readonly number[];
+  /** Reconstructed spans per worker (buildWorkerSpans + attachCpuSamples). */
+  workerSpans: Readonly<Record<number, WorkerLane>>;
+  /** Per-worker local-queue samples, sorted by t (G12). */
+  workerQueueSamples: Readonly<Record<number, readonly { t: number; local: number }[]>>;
+  /** Wake events indexed by target worker (G11). */
+  wakesByWorker: Readonly<Record<number, readonly WorkerWake[]>>;
+  /** span id -> every span instance sharing it (G7 highlight lookup). */
+  spansById: ReadonlyMap<string, readonly TracingSpan[]>;
+  /** Block-in-place handoff gaps (G2 hatched overlay). */
+  blockInPlaceGaps: readonly BlockInPlaceGap[];
+  hasCpuTime: boolean;
+  hasSchedWait: boolean;
+  viewStart: number;
+  viewEnd: number;
+  /** Selected task -> yellow polls + wake markers (G6/G11). */
+  selectedTaskId: number | null;
+  /** Focused span + ancestor chain -> yellow poll outlines (G7). */
+  selectedSpanIds: ReadonlySet<string>;
+  /** Hovered waker task -> orange polls (G8). */
+  hoveredWakerTaskId: number | null;
+  /** Pinned custom-event poll -> single yellow bar (the I5/K4 in-lane mark). */
+  pinnedPoll: PollSpan | null;
+  /** Shared visible local-queue max across all workers (G12 scale). */
+  sharedMaxQ: number;
+  /** Cached channel-multiply dimmer for non-selected polls (G6). */
+  dimmer: (color: string) => string;
+}
+
+/** Where and how big the lanes canvas is this frame. */
+export interface LanesLayout {
+  /** Shared ns<->x mapping (labelW-shifted; we subtract labelW for local x). */
+  time: TimePanelLayout;
+  /** Total canvas height in CSS px (divided evenly across workers). */
+  height: number;
+}
+
+const spanDur = (s: { start: number; end: number }): number => s.end - s.start;
+
+/** First index whose span could be visible (end >= viewStart); binary search
+ *  over a start-sorted, non-overlapping span array (legacy findFirstVisible). */
+function firstVisible(
+  spans: readonly { start: number; end: number }[],
+  viewStart: number,
+): number {
+  let lo = 0;
+  let hi = spans.length - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (spans[mid]!.end < viewStart) lo = mid + 1;
+    else hi = mid - 1;
+  }
+  return lo;
+}
+
+/** Largest index i with arr[i].t <= val (or -1); binary search. */
+function lowerBoundT(arr: readonly { t: number }[], val: number): number {
+  let lo = 0;
+  let hi = arr.length - 1;
+  let ans = -1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (arr[mid]!.t <= val) {
+      ans = mid;
+      lo = mid + 1;
+    } else hi = mid - 1;
+  }
+  return ans;
+}
+
+/** Smallest index i with arr[i].t >= val (or arr.length); binary search. */
+function upperBoundT(arr: readonly { t: number }[], val: number): number {
+  let lo = 0;
+  let hi = arr.length - 1;
+  let ans = arr.length;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (arr[mid]!.t >= val) {
+      ans = mid;
+      hi = mid - 1;
+    } else lo = mid + 1;
+  }
+  return ans;
+}
+
+/** Style keys are namespaced per row ("queue:w0") so ticks dedupe within a
+ *  lane, not across lanes; styleOf reads the kind prefix. */
+function strokeStyleOf(styleKey: string): StrokeStyleSpec {
+  const kind = styleKey.slice(0, styleKey.indexOf(":"));
+  switch (kind) {
+    case "queue":
+      return { strokeStyle: "rgba(255,200,50,0.8)", lineWidth: 1.5 };
+    case "openpoll":
+      return { strokeStyle: "#ff9800", lineWidth: 2, lineDash: [3, 2] };
+    case "gap":
+      return { strokeStyle: "#ff9800", lineWidth: 1, lineDash: [4, 4] };
+    case "sep":
+      return { strokeStyle: "#333", lineWidth: 0.5 };
+    default:
+      return { strokeStyle: "#888", lineWidth: 1 };
+  }
+}
+
+/**
+ * Compute the max visible local-queue depth across all workers (G12 uses a
+ * SHARED scale so lanes are comparable). Bounded to the visible window by
+ * binary search; never scans the whole series. Minimum 1.
+ */
+export function sharedVisibleMaxQueue(
+  workerIds: readonly number[],
+  workerQueueSamples: Readonly<Record<number, readonly { t: number; local: number }[]>>,
+  viewStart: number,
+  viewEnd: number,
+): number {
+  let max = 1;
+  for (const w of workerIds) {
+    const samples = workerQueueSamples[w];
+    if (!samples || samples.length === 0) continue;
+    const start = Math.max(0, lowerBoundT(samples, viewStart));
+    const end = Math.min(samples.length - 1, upperBoundT(samples, viewEnd));
+    for (let i = start; i <= end; i++) {
+      const local = samples[i]!.local;
+      if (local > max) max = local;
+    }
+  }
+  return max;
+}
+
+/**
+ * Draw every worker lane into `ctx` (features/02 G1-G12, plus the G6-G11
+ * selection/hover highlights). Pure over its inputs; the only mutable state
+ * is the canvas. The context transform is assumed already DPR-scaled by the
+ * caller (lib/canvas/dpr sizer), so all coordinates are CSS px.
+ */
+export function renderLanes(
+  ctx: LaneDrawContext,
+  input: LanesRenderInput,
+  layout: LanesLayout,
+): void {
+  const drawW = layout.time.drawW;
+  const totalH = layout.height;
+  const n = input.workerIds.length;
+  if (drawW <= 0 || totalH <= 0 || n === 0) return;
+
+  const laneH = totalH / n;
+  const labelW = layout.time.labelW;
+  const nsToX = (ns: number): number => layout.time.nsToPanelX(ns) - labelW;
+  const { viewStart, viewEnd } = input;
+
+  // One batcher for the whole canvas: strokes accumulate per (kind,row) style
+  // key and stroke ONCE each at the end - the F1 batching contract.
+  const batcher = makeStrokeBatcher();
+
+  ctx.clearRect(0, 0, drawW, totalH);
+
+  for (let row = 0; row < n; row++) {
+    const workerId = input.workerIds[row]!;
+    const spans = input.workerSpans[workerId];
+    if (!spans) continue;
+    const top = row * laneH;
+    const sf = laneH / LANE_REF_H;
+    // Band geometry scaled from the 60px legacy reference.
+    const bandTop = top + 10 * sf;
+    const bandH = 20 * sf;
+    const sepY = top + 33 * sf;
+    const qTop = top + 34 * sf;
+    const qH = laneH - 38 * sf;
+
+    drawLaneBackground(ctx, spans, input, nsToX, drawW, top, laneH, sf);
+    drawBlockInPlaceGaps(ctx, batcher, row, input, workerId, nsToX, drawW, top, laneH, sf);
+    drawParks(ctx, spans.parks, input, nsToX, drawW, top, laneH, sf);
+    drawPolls(ctx, batcher, row, spans, input, nsToX, drawW, bandTop, bandH);
+    drawCpuTicks(ctx, spans.cpuSampleTimes, viewStart, viewEnd, nsToX, drawW, bandTop, bandH);
+    drawSchedTriangles(ctx, spans.polls, input, nsToX, bandTop, bandH);
+    drawWakerHighlight(ctx, spans.polls, input, nsToX, drawW, bandTop, bandH);
+    drawSelectedSpanOutlines(ctx, spans.polls, workerId, input, nsToX, drawW, bandTop, bandH);
+    drawWakeMarkers(ctx, workerId, input, nsToX, top, sf);
+    drawQueueStepLine(ctx, batcher, row, workerId, input, nsToX, drawW, qTop, qH, sf);
+
+    // Separator between poll band and queue area (batched solid stroke).
+    batcher.polyline(`sep:w${row}`, [
+      { x: 0, y: sepY },
+      { x: drawW, y: sepY },
+    ]);
+  }
+
+  // One stroke() per style: the whole canvas's queue lines, dashed markers,
+  // gap outlines and separators drain here (F1's "one path per style").
+  drawStrokeBatches(ctx, batcher.batches(), strokeStyleOf);
+}
+
+// ── G2/G3: lane background + CPU tint ────────────────────────────────────
+
+function drawLaneBackground(
+  ctx: LaneDrawContext,
+  spans: WorkerLane,
+  input: LanesRenderInput,
+  nsToX: (ns: number) => number,
+  drawW: number,
+  top: number,
+  laneH: number,
+  _sf: number,
+): void {
+  // Base: entire lane "active" (dark).
+  ctx.fillStyle = "#1a1e2a";
+  ctx.fillRect(0, top, drawW, laneH);
+
+  // CPU scheduling tint (G3): one representative active per pixel column,
+  // longest wins. Only when the trace carries CPU time.
+  if (!input.hasCpuTime) return;
+  const startIdx = firstVisible(spans.actives, input.viewStart);
+  const reps = pixelDownsampleSpans(
+    spans.actives as ActiveSpan[],
+    startIdx,
+    input.viewStart,
+    input.viewEnd,
+    drawW,
+    spanDur,
+  );
+  for (const s of reps) {
+    const x1 = Math.max(0, nsToX(s.start));
+    const x2 = Math.min(drawW, nsToX(s.end));
+    const w = Math.max(x2 - x1, 1);
+    ctx.fillStyle =
+      s.ratio >= 0.95 ? "#1a2a1a" : s.ratio >= 0.5 ? "#2a2a1a" : "#2a1a1a";
+    ctx.fillRect(x1, top, w, laneH);
+  }
+}
+
+// ── G2: block-in-place gap overlays (fill + batched dashed outline) ───────
+
+function drawBlockInPlaceGaps(
+  ctx: LaneDrawContext,
+  batcher: ReturnType<typeof makeStrokeBatcher>,
+  row: number,
+  input: LanesRenderInput,
+  workerId: number,
+  nsToX: (ns: number) => number,
+  drawW: number,
+  top: number,
+  laneH: number,
+  _sf: number,
+): void {
+  const gaps = input.blockInPlaceGaps;
+  if (gaps.length === 0) return;
+  for (const g of gaps) {
+    if (g.workerId !== workerId) continue;
+    if (g.endNs < input.viewStart || g.startNs > input.viewEnd) continue;
+    const x1 = Math.max(0, nsToX(g.startNs));
+    const x2 = Math.min(drawW, nsToX(g.endNs));
+    const w = Math.max(x2 - x1, 1);
+    ctx.fillStyle = "#3a2a00";
+    ctx.fillRect(x1, top, w, laneH);
+    // Dashed outline via the batcher (F1: dashed markers are batched).
+    const l = x1 + 0.5;
+    const r = x1 + w - 0.5;
+    const t = top + 0.5;
+    const b = top + laneH - 0.5;
+    batcher.polyline(`gap:w${row}`, [
+      { x: l, y: t },
+      { x: r, y: t },
+      { x: r, y: b },
+      { x: l, y: b },
+      { x: l, y: t },
+    ]);
+  }
+}
+
+// ── G2: park spans (normal park vs scheduling-delay split) ────────────────
+
+function drawParks(
+  ctx: LaneDrawContext,
+  parks: readonly ParkSpan[],
+  input: LanesRenderInput,
+  nsToX: (ns: number) => number,
+  drawW: number,
+  top: number,
+  laneH: number,
+  sf: number,
+): void {
+  const startIdx = firstVisible(parks, input.viewStart);
+  const reps = pixelDownsampleSpans(
+    parks as ParkSpan[],
+    startIdx,
+    input.viewStart,
+    input.viewEnd,
+    drawW,
+    spanDur,
+  );
+  const accentH = 4 * sf;
+  for (const s of reps) {
+    const x1 = Math.max(0, nsToX(s.start));
+    const x2 = Math.min(drawW, nsToX(s.end));
+    const w = Math.max(x2 - x1, 1);
+    const schedWait = s.schedWait;
+    if (input.hasSchedWait && schedWait !== undefined && schedWait > 0) {
+      const wakeupShouldBe = s.end - schedWait;
+      if (wakeupShouldBe > s.start) {
+        const xSplit = Math.min(drawW, nsToX(wakeupShouldBe));
+        const normalW = Math.max(xSplit - x1, 0);
+        if (normalW > 0) {
+          ctx.fillStyle = "#2a1520";
+          ctx.fillRect(x1, top, normalW, laneH);
+          ctx.fillStyle = "#cc5533";
+          ctx.fillRect(x1, top, normalW, accentH);
+        }
+        const delayW = Math.max(x2 - xSplit, 0);
+        if (delayW > 0) {
+          ctx.fillStyle = "#ff0000";
+          ctx.fillRect(xSplit, top, delayW, laneH);
+        }
+      } else {
+        ctx.fillStyle = "#ff0000";
+        ctx.fillRect(x1, top, w, laneH);
+      }
+    } else {
+      ctx.fillStyle = "#2a1520";
+      ctx.fillRect(x1, top, w, laneH);
+      ctx.fillStyle = "#cc5533";
+      ctx.fillRect(x1, top, w, accentH);
+    }
+  }
+}
+
+// ── G4/G5/G6: poll bars (dim/selected passes), open-ended markers, pin ────
+
+function drawPolls(
+  ctx: LaneDrawContext,
+  batcher: ReturnType<typeof makeStrokeBatcher>,
+  row: number,
+  spans: WorkerLane,
+  input: LanesRenderInput,
+  nsToX: (ns: number) => number,
+  drawW: number,
+  bandTop: number,
+  bandH: number,
+): void {
+  const { viewStart, viewEnd, selectedTaskId } = input;
+  const pollStart = firstVisible(spans.polls, viewStart);
+  // Representative weighting mirrors legacy: latest starter wins a column
+  // (an unbiased colour sample, not the worst-case red); a selected task's
+  // polls force-win so a short selected poll can't vanish (G6).
+  const weight = selectedTaskId
+    ? (s: PollSpan): number => (s.taskId === selectedTaskId ? Infinity : s.start)
+    : (s: PollSpan): number => s.start;
+  const reps = pixelDownsampleSpans(
+    spans.polls as PollSpan[],
+    pollStart,
+    viewStart,
+    viewEnd,
+    drawW,
+    weight,
+  );
+
+  const drawCoalesced = (color: (s: PollSpan) => string | null): void => {
+    const merge = makeBarCoalescer((x, w, fill) => {
+      ctx.fillStyle = fill;
+      ctx.fillRect(x, bandTop, w, bandH);
+    });
+    for (const s of reps) {
+      const fill = color(s);
+      if (fill == null) continue;
+      const x1 = Math.max(0, nsToX(s.start));
+      const x2 = Math.min(drawW, nsToX(s.end));
+      merge.push(x1, x2, fill);
+    }
+    merge.flush();
+  };
+
+  if (selectedTaskId) {
+    // Dim pass (non-selected) then the selected task's polls solid yellow.
+    drawCoalesced((s) =>
+      s.taskId === selectedTaskId ? null : input.dimmer(pollColor(s.start, s.end)),
+    );
+    drawCoalesced((s) => (s.taskId === selectedTaskId ? "#ffeb3b" : null));
+  } else {
+    drawCoalesced((s) => pollColor(s.start, s.end));
+  }
+
+  // G5: open-ended poll markers - dashed right edge, batched (F1).
+  for (let i = pollStart; i < spans.polls.length; i++) {
+    const s = spans.polls[i]!;
+    if (s.start > viewEnd) break;
+    if (!s.openEnded) continue;
+    const x2 = Math.min(drawW, nsToX(s.end));
+    batcher.tick(`openpoll:w${row}`, x2, bandTop, bandTop + bandH);
+  }
+
+  // Pinned custom-event poll highlight (I5/K4 in-lane mark): resolve the
+  // worker by value-matching the poll in this lane, then a single yellow bar.
+  const pinned = input.pinnedPoll;
+  if (pinned && pinned.end >= viewStart && pinned.start <= viewEnd) {
+    const hit = findSpanAt(spans.polls, pinned.start);
+    if (
+      hit &&
+      hit.start === pinned.start &&
+      hit.end === pinned.end &&
+      hit.taskId === pinned.taskId
+    ) {
+      const x1 = Math.max(0, nsToX(hit.start));
+      const x2 = Math.min(drawW, nsToX(hit.end));
+      const w = Math.max(x2 - x1, 2);
+      ctx.fillStyle = "#ffeb3b";
+      ctx.fillRect(x1, bandTop, w, bandH);
+      ctx.strokeStyle = "#fff";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(x1 - 0.5, bandTop - 0.5);
+      ctx.lineTo(x1 + w + 0.5, bandTop - 0.5);
+      ctx.lineTo(x1 + w + 0.5, bandTop + bandH + 0.5);
+      ctx.lineTo(x1 - 0.5, bandTop + bandH + 0.5);
+      ctx.lineTo(x1 - 0.5, bandTop - 0.5);
+      ctx.stroke();
+    }
+  }
+}
+
+// ── G9: CPU sample ticks ─────────────────────────────────────────────────
+
+function drawCpuTicks(
+  ctx: LaneDrawContext,
+  times: readonly number[],
+  viewStart: number,
+  viewEnd: number,
+  nsToX: (ns: number) => number,
+  _drawW: number,
+  bandTop: number,
+  bandH: number,
+): void {
+  if (times.length === 0) return;
+  ctx.fillStyle = "#ce93d8";
+  // Binary search for the first visible sample time.
+  let lo = 0;
+  let hi = times.length - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (times[mid]! < viewStart) lo = mid + 1;
+    else hi = mid - 1;
+  }
+  const y = bandTop + bandH;
+  for (let i = lo; i < times.length; i++) {
+    if (times[i]! > viewEnd) break;
+    ctx.fillRect(nsToX(times[i]!), y, 3, 4);
+  }
+}
+
+// ── G10: sched-event triangles ───────────────────────────────────────────
+
+function drawSchedTriangles(
+  ctx: LaneDrawContext,
+  polls: readonly PollSpan[],
+  input: LanesRenderInput,
+  nsToX: (ns: number) => number,
+  bandTop: number,
+  bandH: number,
+): void {
+  const { viewStart, viewEnd } = input;
+  const pollStart = firstVisible(polls, viewStart);
+  ctx.fillStyle = "#ff2222";
+  const yTop = bandTop + bandH + 1;
+  const yBot = bandTop + bandH + 7;
+  for (let i = pollStart; i < polls.length; i++) {
+    const s = polls[i]!;
+    if (s.start > viewEnd) break;
+    if (!s.schedSamples) continue;
+    for (const sample of s.schedSamples) {
+      if (sample.timestamp < viewStart || sample.timestamp > viewEnd) continue;
+      const x = nsToX(sample.timestamp);
+      ctx.beginPath();
+      ctx.moveTo(x, yTop);
+      ctx.lineTo(x - 3, yBot);
+      ctx.lineTo(x + 3, yBot);
+      ctx.closePath();
+      ctx.fill();
+    }
+  }
+}
+
+// ── G8: hovered-waker highlight ──────────────────────────────────────────
+
+function drawWakerHighlight(
+  ctx: LaneDrawContext,
+  polls: readonly PollSpan[],
+  input: LanesRenderInput,
+  nsToX: (ns: number) => number,
+  drawW: number,
+  bandTop: number,
+  bandH: number,
+): void {
+  const waker = input.hoveredWakerTaskId;
+  if (!waker) return;
+  const { viewStart, viewEnd } = input;
+  const pollStart = firstVisible(polls, viewStart);
+  ctx.fillStyle = "#ff8a65";
+  for (let i = pollStart; i < polls.length; i++) {
+    const s = polls[i]!;
+    if (s.start > viewEnd) break;
+    if (s.taskId !== waker) continue;
+    const x1 = Math.max(0, nsToX(s.start));
+    const x2 = Math.min(drawW, nsToX(s.end));
+    ctx.fillRect(x1, bandTop, Math.max(x2 - x1, 2), bandH);
+  }
+}
+
+// ── G7: selected-span poll outlines ──────────────────────────────────────
+
+function drawSelectedSpanOutlines(
+  ctx: LaneDrawContext,
+  polls: readonly PollSpan[],
+  workerId: number,
+  input: LanesRenderInput,
+  nsToX: (ns: number) => number,
+  drawW: number,
+  bandTop: number,
+  bandH: number,
+): void {
+  if (input.selectedSpanIds.size === 0) return;
+  ctx.strokeStyle = "#ffeb3b";
+  ctx.lineWidth = 2;
+  // O(workers x selectedSpanIds) via the span index, NOT an allSpans scan
+  // (03 F6): each selected span id maps to its instances; each instance's
+  // segments on this worker map to a poll via binary search.
+  for (const spanId of input.selectedSpanIds) {
+    const matches = input.spansById.get(spanId);
+    if (!matches) continue;
+    for (const s of matches) {
+      for (const seg of s.segments) {
+        if (seg.workerId !== workerId) continue;
+        const poll = findSpanAt(polls, seg.start);
+        if (!poll) continue;
+        const x1 = Math.max(0, nsToX(poll.start));
+        const x2 = Math.min(drawW, nsToX(poll.end));
+        const w = Math.max(x2 - x1, 4);
+        ctx.beginPath();
+        ctx.moveTo(x1, bandTop);
+        ctx.lineTo(x1 + w, bandTop);
+        ctx.lineTo(x1 + w, bandTop + bandH);
+        ctx.lineTo(x1, bandTop + bandH);
+        ctx.lineTo(x1, bandTop);
+        ctx.stroke();
+      }
+    }
+  }
+}
+
+// ── G11: wake markers (only while a task is selected) ─────────────────────
+
+function drawWakeMarkers(
+  ctx: LaneDrawContext,
+  workerId: number,
+  input: LanesRenderInput,
+  nsToX: (ns: number) => number,
+  top: number,
+  sf: number,
+): void {
+  const selected = input.selectedTaskId;
+  if (!selected) return;
+  const wakes = input.wakesByWorker[workerId];
+  if (!wakes || wakes.length === 0) return;
+  const { viewStart, viewEnd } = input;
+  ctx.fillStyle = "#66bb6a";
+  const yTop = top + 2 * sf;
+  const yBot = top + 8 * sf;
+  for (const w of wakes) {
+    if (w.timestamp < viewStart || w.timestamp > viewEnd) continue;
+    if (w.wokenTaskId !== selected) continue;
+    const x = nsToX(w.timestamp);
+    ctx.beginPath();
+    ctx.moveTo(x, yTop);
+    ctx.lineTo(x - 3, yBot);
+    ctx.lineTo(x + 3, yBot);
+    ctx.closePath();
+    ctx.fill();
+  }
+}
+
+// ── G12: local-queue step line (batched, pixel-bounded) ───────────────────
+
+function drawQueueStepLine(
+  ctx: LaneDrawContext,
+  batcher: ReturnType<typeof makeStrokeBatcher>,
+  row: number,
+  workerId: number,
+  input: LanesRenderInput,
+  nsToX: (ns: number) => number,
+  drawW: number,
+  qTop: number,
+  qH: number,
+  sf: number,
+): void {
+  const samples = input.workerQueueSamples[workerId];
+  if (!samples || samples.length === 0) return;
+  const { viewStart, viewEnd } = input;
+  const iStart = Math.max(0, lowerBoundT(samples, viewStart));
+  const iEnd = Math.min(samples.length - 1, upperBoundT(samples, viewEnd));
+  if (iEnd < iStart) return;
+  const maxQ = input.sharedMaxQ || 1;
+
+  // q:N scale label (cheap text, drawn directly - not a stroke primitive).
+  ctx.fillStyle = "#666";
+  ctx.font = "8px monospace";
+  ctx.textAlign = "left";
+  ctx.fillText(`q:${maxQ}`, 2, qTop + 8 * sf);
+
+  // Downsample the visible slice to one vertex per pixel column (spikes win),
+  // expand into a step polyline, and extend the last level to the right edge
+  // - one batched stroke per lane instead of legacy's per-sample path (F1).
+  const yOf = (s: { local: number }): number => qTop + qH - (s.local / maxQ) * qH;
+  const visible = samples.slice(iStart, iEnd + 1);
+  const last = visible[visible.length - 1]!;
+  const points: { t: number; local: number }[] = visible.slice();
+  // Trailing extension so the final level runs to the panel edge (legacy
+  // lineTo(pw, lastY)).
+  points.push({ t: viewEnd, local: last.local });
+
+  batcher.stepSeries(`queue:w${row}`, points, {
+    xOf: (s) => nsToX(s.t),
+    yOf,
+    weightOf: (s) => s.local,
+    drawW,
+  });
+}
