@@ -194,13 +194,20 @@ T40/T42 FINDING: both were already DONE + MERGED into integration/chunk-1 in the
 earlier (pre-compaction) session - features/04 inventory + gen_fixtures.rs + parity
 fixtures all present in the tree, branch tips are ancestors of integration. Their
 stale worktrees remain on disk (harmless). Do NOT re-dispatch them.
-IN FLIGHT: T32 (flamegraph+region), T41 (migrate tokio_stats.html - separate page,
-no chunk-2 viewer conflict; deps T40/T02-T09/T12/T18/T20/T38 all met).
-REMAINING: chunk 2 -> T37 (UX polish, needs assembled UI; dispatch after T32) -> T39
-(legacy removal, LAST, needs parity). Chunk 3 -> T45 (segment metadata #68, needs
-T33 done - HELD until chunk-2 settles, it is a viewer file), T46 (end-user docs -
-HELD until UI final so wording matches), T44 (issue housekeeping - final sweep after
-T39), T47 (core-reshape ADR - gated on T39). T43+T48+T40+T42 DONE.
+T32 (flamegraph+region) MERGED 2026-07-13 (6585f8c). main.ts+viewer.css auto-merged;
+only ledger+HANDOFF conflicted. tsc+build clean (full-suite validation folded into
+next batch gate). S7 concluded (units mismatch, not a bug - reconciled on-screen +
+F20 frame->timeline link added). K7 deferred to T47; F17/F18 (task-scoped fgs)
+deferred (need T30/T22 dispatch). ALL 16 CHUNK-2 FEATURE TICKETS (T21-T36) NOW
+INTEGRATED. Only T37 (polish) + T39 (legacy removal) remain in chunk 2.
+T37 BLOCKED on T41: its DoD needs axe/census across all FOUR pages incl. tokio-stats
+(T41). Dispatch T37 after T41 merges (removed its premature worktree).
+IN FLIGHT (cap 3, off 6585f8c): T41 (tokio_stats migration), T45 (segment metadata
+#68 - toolbar file-info surface, metadata-wins reconciliation vs URL svc/host; frozen
+trace_parser.js read-only), T46 (end-user docs - ui README + AGENTS.md testing
+section rewrite for Vitest reality; documents new UI as opt-in, NOT default-flipped).
+REMAINING: T37 (after T41) -> T39 (legacy removal, LAST, needs parity) -> T44 (issue
+housekeeping) + T47 (core-reshape ADR), both after T39. T43+T48+T40+T42 DONE.
 DEFERRED BATCH GATE: full Vitest for T30/T23/T27 folded forward - run ONE clean
 full-suite gate after T29/T33/T34 land (never concurrent with a running agent's
 own suite; T27 proved concurrent Vitest starves timing-sensitive suites -> 13
