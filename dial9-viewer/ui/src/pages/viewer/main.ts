@@ -52,15 +52,28 @@ function boot(): void {
   const help = mountViewerHelp(document, esc);
 
   const source = traceSource(window.location.search);
-  // Forward reference: the shell's "New File" button opens the load chrome,
-  // which is created just below (it needs the shell's toast region first).
+  // Forward references resolved after the shell mounts: the "New File" button
+  // opens the load chrome (created below - it needs the shell's toast region
+  // first), and the toolbar's not-yet-landed surfaces (T31/T32 analysis
+  // panels, T34 range re-parse) dispatch through toasts instead of harmful
+  // placeholder state.
   let loadChrome: ReturnType<typeof mountLoadChrome> | null = null;
+  let toastsRef: ReturnType<typeof createToasts> | null = null;
+  const notify = (message: string): void => {
+    toastsRef?.show({ id: "t33-seam", type: "info", message });
+  };
   const shell = mountShell(root, store, {
     toggleHelp: () => help.toggle(),
     sourceLabel: () => loadChrome?.currentLabel() ?? source.label,
     onNewFile: () => loadChrome?.requestNewFile(),
+    onOpenAnalysis: (kind) =>
+      notify(`${analysisName(kind)} analysis opens in the inspector (region analyses, T32).`),
+    onSetRange: () =>
+      notify("Set Range re-parses the loaded trace to the current view (load chrome, T34)."),
+    onClearRange: () => notify("Clear Range restores the full trace (load chrome, T34)."),
   });
   const toasts = createToasts(shell.toastRegion);
+  toastsRef = toasts;
 
   // Worker-lanes track content (T22): mounts AFTER the shell so its store
   // subscription runs after the shell's chrome render each frame, and claims
@@ -91,6 +104,10 @@ function boot(): void {
   // timeline (the legacy D9 fallback). The router is the T20 substrate.
   mountKeyRouter(window, [
     ...laneInteraction.keyBindings,
+    // Toolbar + issues-rail accelerators (T33): `n`/`p` step the POI rail,
+    // `g` focuses the goto-time input. After the lane bindings so a live
+    // keyboard selection still owns arrows/Enter/Escape.
+    ...shell.keyBindings,
     { key: "?", onKey: () => help.toggle() },
     {
       key: "Escape",
@@ -131,6 +148,18 @@ function boot(): void {
     shell.dispose();
     help.dispose();
   });
+}
+
+/** Human name for an analysis-button seam message (T33 -> T32). */
+function analysisName(kind: "cpu" | "blocking" | "heap"): string {
+  switch (kind) {
+    case "cpu":
+      return "CPU flamegraph";
+    case "blocking":
+      return "Blocking-calls";
+    case "heap":
+      return "Heap";
+  }
 }
 
 interface TraceSource {

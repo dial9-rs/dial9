@@ -22,7 +22,6 @@
 import { html, render, nothing, type TemplateResult } from "lit-html";
 import type { ViewerStore } from "../../store/store.js";
 import type { StoreState } from "../../types/state.js";
-import { formatHumanDuration } from "../../lib/trace/index.js";
 import { tracksTemplate, sizeTracks, type TracksViewModel } from "./tracks.js";
 import { deriveAxisInputs } from "./axis.js";
 import { deriveCpuInputs } from "./cpu.js";
@@ -33,9 +32,12 @@ import {
   type TaskDetailTrackController,
 } from "./task-detail-track.js";
 import { createEventsTrack, type EventsTrackController } from "./events-track.js";
+import { createToolbar, type ToolbarController, type ToolbarDeps } from "./toolbar.js";
+import { createIssuesRail, type IssuesRailController } from "./issues-rail.js";
+import type { KeyBinding } from "../../lib/interact/keyboard.js";
 
 /** Callbacks the shell chrome needs from the page entry. */
-export interface ShellDeps {
+export interface ShellDeps extends ToolbarDeps {
   /** Toggle the help overlay (bound to the `?` button and key). */
   toggleHelp(): void;
   /**
@@ -52,12 +54,10 @@ export interface ShellDeps {
   onNewFile?(): void;
 }
 
-/** Everything the shell template needs, derived from store state. */
+/** Everything the shell template needs, derived from store state. The file-
+ * info fields moved to the toolbar controller (T33 owns C1); the shell keeps
+ * only the track inputs + the status-bar labels. */
 interface ShellViewModel extends TracksViewModel {
-  fileName: string;
-  eventCount: number | null;
-  workerCount: number | null;
-  durationLabel: string | null;
   selectionLabel: string;
   viewRangeLabel: string;
 }
@@ -79,22 +79,11 @@ function relOffset(ns: number, minTs: number): string {
 }
 
 /** Build the view model for a render pass from the current store state. */
-function viewModel(state: StoreState, deps: ShellDeps): ShellViewModel {
+function viewModel(state: StoreState): ShellViewModel {
   const trace = state.trace.trace;
   const hasTrace = trace !== null;
   const taskSelected = state.selection.selectedTaskId !== null;
   const { viewStart, viewEnd, minTs } = state.viewport;
-
-  let eventCount: number | null = null;
-  let workerCount: number | null = null;
-  let durationLabel: string | null = null;
-  if (trace !== null) {
-    eventCount = trace.events.length;
-    workerCount = new Set(trace.tidToWorker.values()).size;
-    if (trace.minTs !== null && trace.maxTs !== null) {
-      durationLabel = formatHumanDuration(trace.maxTs - trace.minTs);
-    }
-  }
 
   const selectionLabel = taskSelected
     ? `Task 0x${(state.selection.selectedTaskId ?? 0).toString(16)} selected · Esc clears`
@@ -110,24 +99,9 @@ function viewModel(state: StoreState, deps: ShellDeps): ShellViewModel {
     viewEnd,
     axis: deriveAxisInputs(state),
     cpu: deriveCpuInputs(state),
-    fileName: deps.sourceLabel(),
-    eventCount,
-    workerCount,
-    durationLabel,
     selectionLabel,
     viewRangeLabel,
   };
-}
-
-/** Toolbar file-info text: the loaded-wait hook and app identity (A1/A3).
- * The richer structured display (features/02 C1) is T33's; T21 renders the
- * minimal `N events` line the shell and parity loaded-wait depend on. */
-function fileMeta(vm: ShellViewModel): string {
-  if (!vm.hasTrace) return "no trace loaded";
-  const parts = [`${(vm.eventCount ?? 0).toLocaleString()} events`];
-  if (vm.workerCount !== null) parts.push(`${vm.workerCount} workers`);
-  if (vm.durationLabel !== null) parts.push(vm.durationLabel);
-  return parts.join(" · ");
 }
 
 /** F4 empty state: teach the next steps instead of a bare drop target. */
@@ -191,7 +165,10 @@ function inspectorTemplate(): TemplateResult {
 /** The full shell template for one render pass. */
 function shellTemplate(
   vm: ShellViewModel,
+  state: StoreState,
   deps: ShellDeps,
+  toolbar: ToolbarController,
+  rail: IssuesRailController,
   spansTrack: SpansTrackController,
   taskDetailTrack: TaskDetailTrackController,
   eventsTrack: EventsTrackController,
@@ -200,16 +177,13 @@ function shellTemplate(
   return html`
     <header class="d9-toolbar" role="banner">
       <h1 class="d9-app-title">dial9 trace viewer</h1>
-      <span class="d9-file-name">${vm.fileName}</span>
-      <span class="d9-file-meta" data-file-meta id="toolbar-row-data"
-        >${fileMeta(vm)}</span
-      >
+      ${toolbar.fileInfoTemplate(state, deps.sourceLabel())}
       <span class="d9-toolbar-slot" role="group" aria-label="Analysis actions">
-        <span class="d9-slot-hint">Analysis (T33)</span>
+        ${toolbar.analysisTemplate(state, deps.sourceLabel())}
       </span>
       <span class="d9-toolbar-spacer"></span>
       <span class="d9-toolbar-slot" role="group" aria-label="Time display">
-        <span class="d9-slot-hint">Time (T33)</span>
+        ${toolbar.timeTemplate(state)}
       </span>
       ${vm.hasTrace && deps.onNewFile !== undefined
         ? html`<button
@@ -240,6 +214,7 @@ function shellTemplate(
     </div>
 
     <div class="d9-body">
+      ${rail.template(state)}
       <main
         class="d9-track-column"
         aria-label="Trace timeline"
@@ -280,6 +255,12 @@ export interface MountedShell {
   toastRegion: HTMLElement;
   /** The track column element (canvas host for sizing). */
   trackColumn: HTMLElement;
+  /**
+   * Key bindings the toolbar + issues rail contribute to the unified router
+   * (T20): the rail's `n`/`p` POI step and the toolbar's `g` goto-time. The
+   * entry registers them alongside the lane-interaction bindings.
+   */
+  keyBindings: readonly KeyBinding[];
   /** Force one render+size pass (used after mount and on resize). */
   refresh(): void;
   /** Tear down the store subscription and resize listener. */
@@ -313,12 +294,26 @@ export function mountShell(
   // only rendered while a task is selected (selectionOnly, N1).
   const taskDetailTrack = createTaskDetailTrack(store);
   const eventsTrack = createEventsTrack(store);
+  // Toolbar (file info / analysis / time) and the issues rail (T33): store-
+  // wired controllers filling the toolbar slots + the body's left column.
+  const toolbar = createToolbar(store, deps);
+  const rail = createIssuesRail(store);
 
   function renderPass(): void {
     const state = store.getState() as StoreState;
-    const vm = viewModel(state, deps);
+    const vm = viewModel(state);
     render(
-      shellTemplate(vm, deps, spansTrack, taskDetailTrack, eventsTrack, queueTrack),
+      shellTemplate(
+        vm,
+        state,
+        deps,
+        toolbar,
+        rail,
+        spansTrack,
+        taskDetailTrack,
+        eventsTrack,
+        queueTrack,
+      ),
       root,
     );
     const column = root.querySelector<HTMLElement>(".d9-track-column");
@@ -331,7 +326,7 @@ export function mountShell(
   // shell is chrome, so it renders declaratively from state; track/inspector
   // CONTENT tickets add their own slice subscriptions against this store.
   const unsubscribe = store.subscribe(
-    ["trace", "viewport", "selection", "uiPrefs"],
+    ["trace", "viewport", "selection", "poi", "uiPrefs"],
     () => renderPass(),
   );
 
@@ -355,6 +350,7 @@ export function mountShell(
   return {
     toastRegion,
     trackColumn,
+    keyBindings: [...rail.keyBindings, ...toolbar.keyBindings],
     refresh: () => store.update("viewport", {}),
     dispose(): void {
       unsubscribe();
@@ -363,6 +359,8 @@ export function mountShell(
       queueTrack.dispose();
       taskDetailTrack.dispose();
       eventsTrack.dispose();
+      toolbar.dispose();
+      rail.dispose();
     },
   };
 }
