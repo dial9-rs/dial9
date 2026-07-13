@@ -91,9 +91,11 @@ function boot(): void {
     keyDerivedIdentity: readKeyDerivedIdentity(window.location.search),
     onNewFile: () => loadChrome?.requestNewFile(),
     onOpenAnalysis: (kind) => regionPanel?.openWholeTrace(kind),
-    onSetRange: () =>
-      notify("Set Range re-parses the loaded trace to the current view (load chrome, T34)."),
-    onClearRange: () => notify("Clear Range restores the full trace (load chrome, T34)."),
+    // Set Range (E3): re-parse the loaded trace filtered to the current view,
+    // off the main thread; the reparsed trace's extent becomes the new bounds
+    // (initViewportFromTrace refits). Clear Range (E4): re-parse the full trace.
+    onSetRange: (range) => loadChrome?.reparseToRange(range),
+    onClearRange: () => loadChrome?.reparseToRange(null),
   });
   const toasts = createToasts(shell.toastRegion);
   toastsRef = toasts;

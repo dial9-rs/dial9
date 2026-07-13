@@ -19,6 +19,7 @@
 
 import { html, render, nothing, type TemplateResult } from "lit-html";
 import { loadTraceInWorker, Dial9Creds } from "../../lib/trace/index.js";
+import type { ReparseRange } from "../../lib/trace/index.js";
 import type { ViewerStore } from "../../store/store.js";
 import type { EscCascade } from "./esc-cascade.js";
 import {
@@ -51,6 +52,11 @@ export interface LoadChrome {
   requestNewFile(): void;
   /** The current source label for the toolbar (updates on each load). */
   currentLabel(): string;
+  /**
+   * Set/Clear Range (E3/E4): re-parse the loaded trace to `range` (null = full
+   * trace). Runs off the main thread; a no-op before the first load.
+   */
+  reparseToRange(range: ReparseRange | null): void;
   dispose(): void;
 }
 
@@ -265,6 +271,7 @@ export function mountLoadChrome(options: LoadChromeOptions): LoadChrome {
       controller.requestNewFile();
     },
     currentLabel: () => committedLabel,
+    reparseToRange: (range) => controller.reparse(range),
     dispose(): void {
       controller.dispose();
       unregisterEsc();

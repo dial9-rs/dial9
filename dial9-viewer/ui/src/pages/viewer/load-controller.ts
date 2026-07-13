@@ -26,7 +26,8 @@
 
 import { ESC_PRIORITY } from "./esc-cascade.js";
 import type { EscapableSurface } from "./esc-cascade.js";
-import type { TraceWorkerProgress } from "../../lib/trace/index.js";
+import type { TraceWorkerProgress, ReparseRange } from "../../lib/trace/index.js";
+import { isRangeActive } from "../../lib/trace/index.js";
 
 /** The load section's discrete states (features/02 B1/B7). */
 export type LoadSection = "closed" | "chooser" | "loading";
@@ -56,6 +57,13 @@ export interface StartLoadOptions {
   onProgress(progress: TraceWorkerProgress): void;
   /** Same-origin credential headers (B17); omitted for local file loads. */
   headers?: Record<string, string>;
+  /**
+   * Set-Range reparse window (absolute ns, E3/E4): the worker filters events
+   * to this range while re-parsing the retained buffer. Omitted for a normal
+   * load and for Clear Range (full trace).
+   */
+  startTime?: number;
+  endTime?: number;
 }
 
 /** Start a load over one or more URLs; returns its handle. Injected so tests
@@ -159,6 +167,11 @@ export interface LoadController {
   loadFile(file: Blob & { name?: string }): void;
   /** Load one or more URLs (boot `?trace=`, B12). `label` is the B8 initial. */
   loadUrls(urls: readonly string[], label: string): void;
+  /**
+   * Set/Clear Range (E3/E4): re-parse the retained buffer filtered to `range`
+   * (null / open bounds = full trace). No-op before the first load completes.
+   */
+  reparse(range: ReparseRange | null): void;
   /** Load the bundled demo trace (B6). */
   loadDemo(): void;
   /** Cancel the in-flight load and return to the chooser (B10/B11). */
@@ -199,6 +212,9 @@ export function createLoadController(deps: LoadControllerDeps): LoadController {
   // load never writes state (its done/catch callbacks capture the token).
   let loadToken = 0;
   let currentHandle: LoadHandle | null = null;
+  // The decompressed trace bytes from the last successful load, retained for
+  // Set/Clear Range reparse (B14). Null until the first load completes.
+  let retainedBuffer: ArrayBuffer | null = null;
 
   function notify(): void {
     deps.onChange();
@@ -228,7 +244,13 @@ export function createLoadController(deps: LoadControllerDeps): LoadController {
 
   function begin(
     urls: readonly string[],
-    opts: { label: string; withHeaders: boolean; objectUrl: string | null },
+    opts: {
+      label: string;
+      withHeaders: boolean;
+      objectUrl: string | null;
+      /** Set-Range reparse window forwarded to the worker (E3/E4). */
+      range?: ReparseRange | null;
+    },
   ): void {
     // Supersede any in-flight load (its callbacks are already token-guarded).
     if (currentHandle !== null) currentHandle.abort();
@@ -249,6 +271,10 @@ export function createLoadController(deps: LoadControllerDeps): LoadController {
       const h = headers();
       if (h !== undefined) startOpts.headers = h;
     }
+    if (opts.range != null) {
+      if (opts.range.startNs != null) startOpts.startTime = opts.range.startNs;
+      if (opts.range.endNs != null) startOpts.endTime = opts.range.endNs;
+    }
 
     const handle = deps.startLoad(urls, startOpts);
     currentHandle = handle;
@@ -262,7 +288,12 @@ export function createLoadController(deps: LoadControllerDeps): LoadController {
     };
 
     handle.done.then(
-      () => {
+      (result: unknown) => {
+        // Retain the decompressed buffer the worker transfers back so Set/Clear
+        // Range can re-parse it with a time window (B14) without re-fetching.
+        // Blob copies on reparse, so this reference stays valid across reparses.
+        const buf = (result as { buffer?: unknown } | undefined)?.buffer;
+        if (buf instanceof ArrayBuffer && buf.byteLength > 0) retainedBuffer = buf;
         cleanup();
         if (token !== loadToken) return;
         // Success: the store's trace slice is now populated; commit the
@@ -351,6 +382,22 @@ export function createLoadController(deps: LoadControllerDeps): LoadController {
     },
     loadUrls(urls, label): void {
       begin(urls, { label, withHeaders: true, objectUrl: null });
+    },
+    reparse(range): void {
+      // Set/Clear Range (E3/E4): re-parse the retained buffer with a time
+      // window, OFF the main thread (reuses the worker load path via an object
+      // URL). The worker filters events to the window; initViewportFromTrace
+      // refits to the new trace's extent. No-op before the first load.
+      if (retainedBuffer === null) return;
+      const objectUrl = createObjectUrl(new Blob([retainedBuffer]));
+      begin([objectUrl], {
+        label: isRangeActive(range ?? {})
+          ? "Applying range..."
+          : "Restoring full trace...",
+        withHeaders: false,
+        objectUrl,
+        range,
+      });
     },
     loadDemo(): void {
       begin(["/demo-trace.bin"], {
