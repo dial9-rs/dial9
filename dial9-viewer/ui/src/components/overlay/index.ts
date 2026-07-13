@@ -55,10 +55,21 @@ function columnGeometry(
 ): ColumnGeometry {
   const pw = trackColumn.clientWidth;
   const scrollbarW = Math.max(0, trackColumn.offsetWidth - trackColumn.clientWidth);
+  // Height must cover the tracks so the crosshair spans them even when scrolled,
+  // but must NOT read trackColumn.scrollHeight: this overlay is an absolutely
+  // positioned child, so it contributes to scrollHeight itself - sizing to
+  // scrollHeight is a feedback ratchet that only ever grows the column's scroll
+  // area (phantom empty scroll below the last track). Measure the real FLOW
+  // content instead (hint chips + tracks), floored at the visible height.
+  const flowContent =
+    trackColumn.querySelector<HTMLElement>(".d9-tracks") ?? trackColumn;
+  const hint = trackColumn.querySelector<HTMLElement>(".d9-hint-chips");
+  const contentHeight =
+    (hint?.offsetHeight ?? 0) + flowContent.offsetHeight;
   return {
     layout: timePanelLayout({ pw, scrollbarW, viewStart, viewEnd }),
     pw,
-    scrollHeight: trackColumn.scrollHeight,
+    scrollHeight: Math.max(trackColumn.clientHeight, contentHeight),
   };
 }
 

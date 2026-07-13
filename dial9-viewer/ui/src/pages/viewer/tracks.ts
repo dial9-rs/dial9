@@ -271,7 +271,6 @@ function defaultTrackRow(t: TrackSpec): TemplateResult {
     <div class="d9-track" data-track-id=${t.id} style="height:${t.height}px">
       <div class="d9-track-label" id="d9-track-label-${t.id}">
         <span class="d9-track-name">${t.label}</span>
-        <span class="d9-track-owner" aria-hidden="true">${t.ownedBy}</span>
       </div>
       <div class="d9-track-canvas-wrap">
         <canvas

@@ -373,7 +373,6 @@ body {
     border-right: 1px solid var(--d9-border);
 }
 .d9-track-name { font-size: 0.8em; color: var(--d9-fg); }
-.d9-track-owner { font-size: 0.68em; color: var(--d9-fg-muted); }
 .d9-track-canvas-wrap {
     flex: 1;
     min-width: 0;
@@ -846,12 +845,14 @@ body {
 .d9-inspector-clear {
     flex-shrink: 0;
     font-size: 0.9em;
-    color: var(--d9-fg-muted);
-    border: 1px solid var(--d9-border);
+    color: var(--d9-fg);
+    background: rgba(143, 136, 255, 0.12);
+    border: 1px solid var(--d9-accent);
     border-radius: 4px;
     padding: 1px 6px;
+    cursor: pointer;
 }
-.d9-inspector-clear:hover { color: var(--d9-fg); border-color: var(--d9-accent); }
+.d9-inspector-clear:hover { color: #fff; background: rgba(143, 136, 255, 0.28); border-color: var(--d9-accent); }
 .d9-inspector-clear:focus-visible { outline: 2px solid var(--d9-accent); outline-offset: 1px; }
 /* S4: the ONE at-cursor readout surface (I6). */
 .d9-atcursor {

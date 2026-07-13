@@ -164,6 +164,11 @@ export function mountLaneInteraction(
     if (e.button !== 0) return; // left button drives pan/select (H6)
     // Clicks on the viewport controls are their own (H4): never start a pan.
     if ((e.target as Element | null)?.closest?.(`.${CONTROLS_CLASS}`)) return;
+    // The track-management strip (collapse caret + reorder grip, T36) owns its
+    // own gestures: the grip is a native drag source (draggable), and native
+    // DnD swallows the matching mouseup, so a pan started here would never be
+    // released and would keep panning after the drop. Never start a pan on it.
+    if ((e.target as Element | null)?.closest?.(".d9-track-manage-strip")) return;
     // A mousedown pre-empts an in-flight keyboard selection (legacy :5148).
     if (kbSel.active()) runCommands(kbSel.clear());
     const state = store.getState() as StoreState;

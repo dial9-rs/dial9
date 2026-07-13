@@ -98,6 +98,12 @@ export interface LanesLayout {
   time: TimePanelLayout;
   /** Total canvas height in CSS px (divided evenly across workers). */
   height: number;
+  /**
+   * Px reserved at the BOTTOM for the overlaid legend (G19 / F3), so the last
+   * worker row is never hidden under it (#8). Worker rows lay out into
+   * `height - bottomInset`; the full `height` is still cleared. Default 0.
+   */
+  bottomInset?: number;
 }
 
 const spanDur = (s: { start: number; end: number }): number => s.end - s.start;
@@ -205,9 +211,12 @@ export function renderLanes(
   const drawW = layout.time.drawW;
   const totalH = layout.height;
   const n = input.workerIds.length;
-  if (drawW <= 0 || totalH <= 0 || n === 0) return;
+  // Worker rows lay out above the reserved legend band (#8); the full canvas
+  // is still cleared to totalH below so no stale pixels show through it.
+  const drawableH = totalH - (layout.bottomInset ?? 0);
+  if (drawW <= 0 || drawableH <= 0 || n === 0) return;
 
-  const laneH = totalH / n;
+  const laneH = drawableH / n;
   const labelW = layout.time.labelW;
   const nsToX = (ns: number): number => layout.time.nsToPanelX(ns) - labelW;
   const { viewStart, viewEnd } = input;

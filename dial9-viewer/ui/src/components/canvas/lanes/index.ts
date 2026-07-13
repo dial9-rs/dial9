@@ -129,7 +129,16 @@ export function mountLanes(trackColumn: HTMLElement, store: ViewerStore): Mounte
       sharedMaxQ,
       dimmer,
     };
-    renderLanes(ctx, input, { time: geometry.time, height: track.height });
+    // Reserve the overlaid legend's height at the bottom so worker rows never
+    // hide under it (#8). Measured live (the legend wraps to more lines at
+    // narrow widths); +6 for its bottom offset + a small gap.
+    const legendEl = trackColumn.querySelector<HTMLElement>(".d9-lanes-legend");
+    const bottomInset = legendEl ? legendEl.offsetHeight + 6 : 0;
+    renderLanes(ctx, input, {
+      time: geometry.time,
+      height: track.height,
+      bottomInset,
+    });
   }
 
   // Only the slices the lanes actually read - NOT uiPrefs (legend chips filter
