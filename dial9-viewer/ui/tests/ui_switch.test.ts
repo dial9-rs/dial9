@@ -209,12 +209,14 @@ describe("no registered target (unmigrated pages)", () => {
   it("the shipped registry holds exactly the migrated pages", () => {
     // Not a freeze: page tickets EXTEND this expectation when they
     // register their entry (one line there, one here). T13: flamegraph;
-    // T14: browser page.
+    // T14: browser page; T21: viewer shell.
     expect(NEW_UI_ENTRIES["flamegraph.html"]).toBe("new/flamegraph.html");
     expect(NEW_UI_ENTRIES["index.html"]).toBe("new/index.html");
+    expect(NEW_UI_ENTRIES["viewer.html"]).toBe("new/viewer.html");
     expect(Object.keys(NEW_UI_ENTRIES).sort()).toEqual([
       "flamegraph.html",
       "index.html",
+      "viewer.html",
     ]);
   });
   it("no redirect and no control, even with ?ui=new", () => {
