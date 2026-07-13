@@ -30,6 +30,7 @@ import { mountLanes } from "../../components/canvas/lanes/index.js";
 import { mountOverlay } from "../../components/overlay/index.js";
 import { mountLaneInteraction } from "./lane-interaction.js";
 import { initViewportFromTrace } from "./viewport-init.js";
+import { readKeyDerivedIdentity } from "../../lib/trace/index.js";
 
 // Dual-UI switch (T38): render the always-visible "Switch to legacy UI"
 // pill. The <head> auto-boot is a no-op on this off-root new-UI path.
@@ -85,6 +86,9 @@ function boot(): void {
   const shell = mountShell(root, store, {
     toggleHelp: () => help.toggle(),
     sourceLabel: () => loadChrome?.currentLabel() ?? source.label,
+    // Key-derived svc/host from the S3 browser handoff (C1a; T45). A boot
+    // constant: the toolbar reconciles it against the trace-embedded metadata.
+    keyDerivedIdentity: readKeyDerivedIdentity(window.location.search),
     onNewFile: () => loadChrome?.requestNewFile(),
     onOpenAnalysis: (kind) => regionPanel?.openWholeTrace(kind),
     onSetRange: () =>

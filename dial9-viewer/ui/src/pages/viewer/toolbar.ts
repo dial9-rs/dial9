@@ -25,12 +25,16 @@ import { html, type TemplateResult } from "lit-html";
 import { classMap } from "lit-html/directives/class-map.js";
 import type { ViewerStore } from "../../store/store.js";
 import type { StoreState, ViewportSlice } from "../../types/state.js";
-import type { ParsedTrace } from "../../types/trace.js";
+import type { ParsedTrace, SegmentIdentity } from "../../types/trace.js";
 import type { KeyBinding } from "../../lib/interact/keyboard.js";
 import { parseGotoTime, type GotoTime } from "../../lib/interact/goto-time.js";
 import {
   formatHumanDuration,
   hasCpuProfileSamples,
+  readSegmentIdentity,
+  reconcileIdentity,
+  type IdentityField,
+  type ReconciledIdentity,
 } from "../../lib/trace/index.js";
 import { poiSourceFor, kindLabel, redFlagCounts } from "./poi.js";
 import type { PointOfInterestType } from "../../types/trace.js";
@@ -46,6 +50,14 @@ export interface ToolbarDeps {
   onSetRange(range: { startNs: number; endNs: number }): void;
   /** Clear the active time-range filter (E4 -> T34 reparse). */
   onClearRange(): void;
+  /**
+   * The S3-key-derived svc/host identity from the viewer URL (C1a; T45). A
+   * boot constant read once from `location.search` by the page entry; the
+   * file-info surface reconciles it against the trace-EMBEDDED metadata
+   * (embedded wins, disagreeing key-derived value tooltipped). Omitted (or
+   * `{}`) when the viewer was not opened from the S3 browser handoff.
+   */
+  keyDerivedIdentity?: SegmentIdentity;
 }
 
 export interface ToolbarController {
@@ -158,8 +170,11 @@ export function createToolbar(
     },
   ];
 
+  const keyDerivedIdentity = deps.keyDerivedIdentity ?? {};
+
   return {
-    fileInfoTemplate: (state, sourceLabel) => fileInfoTemplate(state, sourceLabel),
+    fileInfoTemplate: (state, sourceLabel) =>
+      fileInfoTemplate(state, sourceLabel, keyDerivedIdentity),
     analysisTemplate: (state, sourceLabel) =>
       analysisTemplate(state, sourceLabel, deps),
     timeTemplate: (state) =>
@@ -171,16 +186,50 @@ export function createToolbar(
   };
 }
 
-// ── file info (C1) ───────────────────────────────────────────────────────
+// ── file info (C1 + C1a identity) ─────────────────────────────────────────
 
-function fileInfoTemplate(state: StoreState, sourceLabel: string): TemplateResult {
+function fileInfoTemplate(
+  state: StoreState,
+  sourceLabel: string,
+  keyDerived: SegmentIdentity,
+): TemplateResult {
   const trace = state.trace.trace;
+  const identity = reconcileIdentity(readSegmentIdentity(trace), keyDerived);
   return html`
     <span class="d9-file-name" title=${sourceLabel}>${sourceLabel}</span>
+    ${identityTemplate(identity)}
     <span class="d9-file-meta" data-file-meta id="toolbar-row-data"
       >${fileMetaText(trace)}</span
     >
   `;
+}
+
+/**
+ * The trace-embedded service/host identity chips (C1a; T45; closes #68).
+ * Renders nothing when neither the trace metadata nor the URL params yield a
+ * value (e.g. an old trace loaded without an S3-key handoff). Each chip shows
+ * the embedded metadata value (which wins) and, when the S3-key-derived value
+ * disagrees, tooltips that key-derived value.
+ */
+function identityTemplate(identity: ReconciledIdentity): TemplateResult | string {
+  const chips: TemplateResult[] = [];
+  if (identity.service) chips.push(identityChip("service", identity.service));
+  if (identity.host) chips.push(identityChip("host", identity.host));
+  if (chips.length === 0) return "";
+  return html`<span class="d9-file-identity" data-file-identity>${chips}</span>`;
+}
+
+function identityChip(
+  field: "service" | "host",
+  info: IdentityField,
+): TemplateResult {
+  const title =
+    info.keyDerived !== undefined
+      ? `${field}: ${info.value} (trace metadata; S3 key says "${info.keyDerived}")`
+      : `${field}: ${info.value} (from ${info.fromMetadata ? "trace metadata" : "S3 key"})`;
+  return html`<span class="d9-file-identity-item" data-identity=${field} title=${title}
+    ><span class="d9-file-identity-key">${field}</span>${info.value}</span
+  >`;
 }
 
 /** The C1 stats line: events, workers, duration, plus truncation/filter notes. */
