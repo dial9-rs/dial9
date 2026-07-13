@@ -73,6 +73,8 @@ export const LEGEND_H = 26;
 const CANVAS_BG = "#1a1a2e";
 const EMPTY_TEXT = "#555";
 const PARTIAL_LABEL = "#ffb3b3";
+// The legacy #ce-panel-info text color (viewer.html:933).
+const INFO_FILL = "#aaa";
 
 /** Derived worker lanes + ids for task resolution (K7). */
 interface WorkerLaneData {
@@ -231,6 +233,10 @@ export function createEventsTrack(store: ViewerStore): EventsTrackController {
     const hlTask = eventHighlightTask(s.selection);
     const oversized = anyOversized(s.segments.segments);
     drawEventsCanvas(ctx, model, hlTask, drawW, canvasH, oversized, s.uiPrefs.selectedEventNames.size > 0);
+    // Mirror the K2 info readout to a DOM-queryable attribute (the legacy
+    // `#ce-panel-info` text) for the row-walker / behavioral differ - same as
+    // the CPU track's `cpuReadout` (tracks.ts).
+    canvas.dataset["eventsInfo"] = model.info;
   }
 
   // ── Templates (K5 legend chips, K6 clear) ───────────────────────────────
@@ -562,6 +568,16 @@ export function drawEventsCanvas(
     }
   }
   ctx.globalAlpha = 1.0;
+
+  // K2 info readout, top-right (legacy `#ce-panel-info`: `N events · M
+  // markers`, overlaid on the panel).
+  if (model.info.length > 0) {
+    ctx.fillStyle = INFO_FILL;
+    ctx.font = "10px sans-serif";
+    ctx.textAlign = "right";
+    ctx.fillText(model.info, Math.max(0, drawW - 6), 11);
+    ctx.textAlign = "left";
+  }
 
   // T17 obligation: surface a permanently-partial (oversized) window.
   if (oversized) drawPartialBadge(ctx, drawW, canvasH);

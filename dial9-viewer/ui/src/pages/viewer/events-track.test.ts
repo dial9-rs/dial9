@@ -165,12 +165,15 @@ describe("dispatchHoverEvent (I4)", () => {
 
 // ── 3. Dim-on-selection render input (S4, same rule as T26) ──────────────
 
-/** A minimal recording 2d context: captures each fillRect's x + alpha. */
+/** A minimal recording 2d context: captures each fillRect's x + alpha and
+ *  every fillText string. */
 function recordingCtx(): {
   ctx: CanvasRenderingContext2D;
   fills: { x: number; alpha: number }[];
+  texts: string[];
 } {
   const fills: { x: number; alpha: number }[] = [];
+  const texts: string[] = [];
   const ctx = {
     globalAlpha: 1,
     fillStyle: "",
@@ -180,10 +183,12 @@ function recordingCtx(): {
     fillRect(x: number, _y: number, _w: number, _h: number) {
       fills.push({ x, alpha: (this as CanvasRenderingContext2D).globalAlpha });
     },
-    fillText() {},
+    fillText(text: string) {
+      texts.push(text);
+    },
     setTransform() {},
   } as unknown as CanvasRenderingContext2D;
-  return { ctx, fills };
+  return { ctx, fills, texts };
 }
 
 function twoClusterModel(): EventRenderModel {
@@ -210,6 +215,26 @@ describe("drawEventsCanvas dimming (S4)", () => {
     drawEventsCanvas(ctx, twoClusterModel(), 1, 100, 40, false, false);
     expect(fills.find((f) => f.x === 8.5)!.alpha).toBeCloseTo(0.55, 10); // on task 1
     expect(fills.find((f) => f.x === 48.5)!.alpha).toBeCloseTo(0.55 * 0.2, 10); // dimmed
+  });
+
+  it("paints the K2 info readout on the canvas", () => {
+    const { ctx, texts } = recordingCtx();
+    drawEventsCanvas(ctx, twoClusterModel(), null, 100, 40, false, false);
+    expect(texts).toContain("2 events · 2 markers");
+  });
+
+  it("paints the resting message and no info when there are no events", () => {
+    const { ctx, texts } = recordingCtx();
+    drawEventsCanvas(
+      ctx,
+      { buckets: [], info: "", emptyReason: "no-events" },
+      null,
+      100,
+      40,
+      false,
+      false,
+    );
+    expect(texts).toContain("No custom events");
   });
 });
 
