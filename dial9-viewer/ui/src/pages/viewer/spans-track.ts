@@ -340,7 +340,7 @@ export function createSpansTrack(store: ViewerStore): SpansTrackController {
               title="Copy value"
               @click=${(e: MouseEvent) => copyValue(e, r.copy)}
             >
-              ⎋
+              ⎘
             </button>
           </div>
         `,
