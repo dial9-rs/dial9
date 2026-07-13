@@ -152,6 +152,148 @@ body {
 }
 .d9-track-canvas { display: block; }
 
+/* ── Spans track (T26; features/02 section J) ────────────────────────── */
+
+/* The spans row keeps the shared LABEL_W gutter so its canvas stays axis-
+   aligned with every other track; the gutter shows the focused-span metadata
+   (J3) and the body stacks a legend/controls strip (J7-J14) over the canvas. */
+.d9-track--spans .d9-spans-label {
+    justify-content: flex-start;
+    padding: 4px 6px;
+    overflow-y: auto;
+    overflow-x: hidden;
+}
+.d9-spans-meta-name {
+    font-size: 0.78em;
+    color: #ccc;
+    margin-bottom: 3px;
+    word-break: break-word;
+}
+.d9-kv-row {
+    display: flex;
+    align-items: baseline;
+    gap: 2px;
+    margin-top: 2px;
+    line-height: 1.3;
+}
+.d9-kv-key { color: var(--d9-fg-muted); font-size: 0.72em; white-space: nowrap; }
+.d9-kv-val {
+    color: #cdd2f0;
+    font-size: 0.72em;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 1;
+    min-width: 0;
+}
+.d9-kv-copy {
+    background: none;
+    border: 1px solid #555;
+    color: var(--d9-fg-muted);
+    font-size: 0.7em;
+    padding: 0 3px;
+    cursor: pointer;
+    border-radius: 2px;
+    flex-shrink: 0;
+}
+.d9-kv-copy:hover { background: #333; color: #fff; }
+
+.d9-spans-body {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    background: var(--d9-bg-track);
+}
+.d9-spans-controls {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    height: 30px;
+    flex-shrink: 0;
+    padding: 0 8px;
+    background: #1a1a2e;
+    border-bottom: 1px solid var(--d9-border);
+    overflow-x: auto;
+    overflow-y: hidden;
+    white-space: nowrap;
+}
+.d9-span-filter {
+    background: #0f1629;
+    border: 1px solid #444;
+    color: var(--d9-fg);
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-size: 0.78em;
+    width: 150px;
+    flex-shrink: 0;
+}
+.d9-span-btn {
+    background: #23233f;
+    border: 1px solid #444;
+    color: var(--d9-fg);
+    font-size: 0.72em;
+    padding: 1px 5px;
+    border-radius: 3px;
+    cursor: pointer;
+    flex-shrink: 0;
+}
+.d9-span-btn:hover:not(:disabled) { background: #33335a; }
+.d9-span-btn:disabled { opacity: 0.4; cursor: default; }
+.d9-span-count { font-size: 0.72em; color: var(--d9-fg-muted); flex-shrink: 0; }
+.d9-span-pct {
+    background: #0f1629;
+    border: 1px solid #444;
+    color: var(--d9-fg);
+    font-size: 0.74em;
+    padding: 1px 3px;
+    border-radius: 3px;
+    flex-shrink: 0;
+}
+.d9-span-chips {
+    display: inline-flex;
+    gap: 3px;
+    align-items: center;
+}
+.d9-span-chip {
+    font-size: 0.72em;
+    padding: 1px 6px;
+    border-radius: 3px;
+    cursor: pointer;
+    background: transparent;
+    border: 1px solid var(--chip, #888);
+    color: var(--d9-fg-muted);
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+.d9-span-chip.on { background: var(--chip, #888); color: #fff; }
+.d9-span-unmatched {
+    font-size: 0.72em;
+    color: #d98a8a;
+    flex-shrink: 0;
+    margin-left: 4px;
+}
+.d9-spans-canvas-wrap { flex: 1; min-width: 0; display: flex; }
+.d9-spans-canvas { display: block; cursor: pointer; }
+
+/* Span hover tooltip (J6): follows the cursor, appended to <body>. */
+.d9-span-tooltip {
+    position: fixed;
+    z-index: 80;
+    display: none;
+    max-width: 320px;
+    padding: 6px 9px;
+    border-radius: 5px;
+    background: rgba(13, 13, 26, 0.96);
+    border: 1px solid #444;
+    color: var(--d9-fg);
+    font-size: 0.75em;
+    line-height: 1.4;
+    pointer-events: none;
+}
+.d9-span-tooltip .tt-k { color: var(--d9-fg-muted); }
+.d9-span-tooltip .tt-dim { color: #888; }
+
 /* ── Empty state (F4) ────────────────────────────────────────────────── */
 
 .d9-empty {

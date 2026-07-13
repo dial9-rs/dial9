@@ -25,6 +25,7 @@ import type { StoreState } from "../../types/state.js";
 import { formatHumanDuration } from "../../lib/trace/index.js";
 import { tracksTemplate, sizeTracks, type TracksViewModel } from "./tracks.js";
 import { deriveAxisInputs } from "./axis.js";
+import { createSpansTrack, type SpansTrackController } from "./spans-track.js";
 
 /** Callbacks the shell chrome needs from the page entry. */
 export interface ShellDeps {
@@ -170,7 +171,11 @@ function inspectorTemplate(): TemplateResult {
 }
 
 /** The full shell template for one render pass. */
-function shellTemplate(vm: ShellViewModel, deps: ShellDeps): TemplateResult {
+function shellTemplate(
+  vm: ShellViewModel,
+  deps: ShellDeps,
+  spansTrack: SpansTrackController,
+): TemplateResult {
   return html`
     <header class="d9-toolbar" role="banner">
       <h1 class="d9-app-title">dial9 trace viewer</h1>
@@ -211,7 +216,7 @@ function shellTemplate(vm: ShellViewModel, deps: ShellDeps): TemplateResult {
         tabindex="0"
       >
         ${hintChipsTemplate()}
-        ${vm.hasTrace ? tracksTemplate(vm) : emptyStateTemplate()}
+        ${vm.hasTrace ? tracksTemplate(vm, spansTrack) : emptyStateTemplate()}
       </main>
       ${inspectorTemplate()}
     </div>
@@ -263,13 +268,18 @@ export function mountShell(
 ): MountedShell {
   root.classList.add("d9-viewer");
 
+  // The spans track (T26) is a store-wired content component: created once so
+  // its derived caches + name->color assignment live across renders. Other
+  // content tracks (T22/T27-T30) mount the same way as they land.
+  const spansTrack = createSpansTrack(store);
+
   function renderPass(): void {
     const state = store.getState() as StoreState;
     const vm = viewModel(state, deps);
-    render(shellTemplate(vm, deps), root);
+    render(shellTemplate(vm, deps, spansTrack), root);
     const column = root.querySelector<HTMLElement>(".d9-track-column");
     if (column && vm.hasTrace) {
-      sizeTracks(column, vm);
+      sizeTracks(column, vm, spansTrack);
     }
   }
 
@@ -305,6 +315,7 @@ export function mountShell(
     dispose(): void {
       unsubscribe();
       window.removeEventListener("resize", onResize);
+      spansTrack.dispose();
     },
   };
 }
