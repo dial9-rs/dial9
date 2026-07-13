@@ -106,6 +106,20 @@ ticket). Chunk-2 sequencing: fix(ui-switch) T38-href FIRST, then T21 (viewer
 shell), then the wave. The Fable-credit stream cuts are resolved (switched
 to Opus).
 
+**In-flight dispatch (chunk 2 tracks, 2026-07-12):** off integration tip
+8e6f35d (T21+T25 merged). Parallelism cap 3, all three bounded implementers:
+- T22 worker lanes track (branch ticket/T22-worker-lanes) - CORE viz; committed
+  d3acc6c (render + data + click/hover resolvers), agent still running.
+- T26 spans track (branch ticket/T26-spans-track) - dispatched; owns features/02
+  J rows; derived-cache span layout + selection dimming.
+- T28 CPU track (branch ticket/T28-cpu-track) - dispatched; owns features/02 L
+  rows; bars via coalescer, dashed capacity/grid via batched-stroke.
+Shared merge point across these = the shell track registry (src/pages/viewer/
+tracks.ts); expect trivial append-union conflicts on merge. T17 carried
+obligation (truncatedAt:"both" + oversized surfacing) handed to each. Next
+dependency layer after T22 lands: T23 (pointer+keyboard) + T24 (crosshair/
+tooltip), both need lanes; then T27/T29/T30 tracks; then T31/T33/T34/T35/T36/T37.
+
 **Audit log:**
 - T25 timeline axis: MERGED 2026-07-12. Gate green (1042 tests, tsc clean
   after npm install in INTEG - T21's lit-html dep needed installing there).
