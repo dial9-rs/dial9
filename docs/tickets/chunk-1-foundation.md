@@ -127,14 +127,16 @@ byte-identical in served behavior.
 (strict, `noUncheckedIndexedAccess`, erasable-syntax-only) under `ui/`;
 `src/` skeleton dirs; `dist/.gitkeep` committed, `dist/*` + `node_modules/`
 gitignored; rust-embed `#[folder]` -> `ui/dist/` (`src/server/mod.rs:49`);
-asset mechanism split: `demo-trace.bin` + `flamegraph.css` MOVE to `public/`
-(Vite's verbatim-copy dir, no plugin needed); legacy pages + core files ship
-into `dist/` via `vite-plugin-static-copy` (dev dependency, justified: the
-temporary migration aid per architecture 2.1, list shrinks to empty as pages
-migrate); MPA entries not yet migrated (thin-shell conversion happens per
-page ticket). Legacy pages reference `flamegraph.css`/`demo-trace.bin` by
-root-relative path - verify the served paths stay identical after the
-public/ move.
+asset mechanism (AMENDED 2026-07-08, orchestrator ruling at the T02
+implementation gate): `demo-trace.bin` + `flamegraph.css` STAY at `ui/` root
+and ride the static-copy list - moving them to `public/` before T04 breaks
+the disk-served dev loop (H5, hard) and touches ~18 readers (tests, Rust
+benches, CI, regen scripts) outside this ticket's scope; the `public/` move
+lands with T04, which repoints the dev loop and updates readers atomically.
+Legacy pages + core files ship into `dist/` via `vite-plugin-static-copy`
+(dev dependency, justified: the temporary migration aid per architecture
+2.1, list shrinks to empty as pages migrate); MPA entries not yet migrated
+(thin-shell conversion happens per page ticket).
 
 **DoD:** check: `npm ci && npm run build` produces a `dist/` from which the
 server serves all FOUR pages (incl. tokio_stats.html) byte-identical to
@@ -199,7 +201,12 @@ trivial probe module is fine - no page code exists yet by design).
 
 **Work:** `npm run dev` = Vite dev server, `server.proxy` for `/api/*` ->
 :3001 dev-server; `npm run dev:embedded` = `vite build --watch` into `ui/dist`
-with `with_dev_ui_dir` repointed at `ui/dist`; delete `dial9-viewer/serve.py`
+with `with_dev_ui_dir` repointed at `ui/dist`; ALSO (moved here from T02 by
+the 2026-07-08 gate ruling): move `demo-trace.bin` + `flamegraph.css` to
+`public/`, drop their static-copy lines, and update every disk reader
+(`test_*.js`, Rust test/bench paths, regen scripts, compose/stress
+workflows, AGENTS.md path references) in the same PR - safe here because
+this ticket owns the dev-loop repointing the move depends on; delete `dial9-viewer/serve.py`
 (obsolete: static-only, port conflict trap - it is not part of any documented
 workflow); update `ui/README.md` dev instructions.
 
