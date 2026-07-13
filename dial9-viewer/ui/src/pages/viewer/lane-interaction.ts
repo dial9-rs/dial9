@@ -432,6 +432,18 @@ export function mountLaneInteraction(
     { key: "s", onKey: zoomKey(2) },
     { key: "a", onKey: panKey(-1) },
     { key: "d", onKey: panKey(1) },
+    // f: fit the whole trace in view (K4 fit-key; the H3/`f` action the mouse
+    // "Fit all" button already drives). Commits to history so `z` can undo it,
+    // and matches the flamegraph's `f` for one vocabulary (K3). The `?` help
+    // overlay advertises it; this binding makes the advertised key live.
+    {
+      key: "f",
+      onKey: () => {
+        if (!hasTrace()) return false;
+        viewport.fit();
+        deps.announcer.announce("Fitted the whole trace in view");
+      },
+    },
     // z: undo the last committed view (K4). Announced through A16.
     {
       key: "z",
