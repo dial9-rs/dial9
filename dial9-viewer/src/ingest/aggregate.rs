@@ -793,18 +793,132 @@ impl FlamegraphAccum {
     /// Merge one folded file's samples part-file (and its optional stacks dict)
     /// into the running totals.
     pub(crate) fn merge(&mut self, samples: Vec<u8>, dict: Option<Vec<u8>>) -> anyhow::Result<()> {
-        read_samples_part(
-            samples,
-            &self.filter,
-            &mut self.counts,
-            &mut self.facets,
-            &mut self.total_samples,
-            &mut self.min_ts,
-            &mut self.max_ts,
-            &mut self.poll_hist,
-        )?;
+        self.read_samples_part(samples)?;
         if let Some(dict) = dict {
             read_dict_part(dict, &mut self.dict)?;
+        }
+        Ok(())
+    }
+
+    /// Parse a single samples part-file and merge its rows into the running
+    /// accumulators, applying time/facet/band filters.
+    fn read_samples_part(&mut self, data: Vec<u8>) -> anyhow::Result<()> {
+        // `Bytes::from(Vec<u8>)` reuses the allocation (no copy); threading the
+        // owned buffer in from the caller avoids the round-trip through `&[u8]`.
+        let reader = ::parquet::arrow::arrow_reader::ParquetRecordBatchReader::try_new(
+            bytes::Bytes::from(data),
+            4096,
+        )?;
+        for batch in reader {
+            let batch = batch?;
+            let stack_col = batch.column_by_name("stack_id").and_then(|c| {
+                c.as_any()
+                    .downcast_ref::<arrow::array::FixedSizeBinaryArray>()
+            });
+            let Some(stack_arr) = stack_col else { continue };
+            let ts_arr = batch
+                .column_by_name("timestamp_ns")
+                .and_then(|c| c.as_any().downcast_ref::<arrow::array::Int64Array>());
+            // Poll-duration column, for the latency-band filter. Nullable and absent
+            // from old part-files; either case means "no poll duration for this row".
+            let poll_arr = batch
+                .column_by_name("poll_duration_ns")
+                .and_then(|c| c.as_any().downcast_ref::<arrow::array::Int64Array>());
+            let poll_band = self.filter.min_poll_ns.is_some() || self.filter.max_poll_ns.is_some();
+
+            // Pre-resolve column references for each facet in this batch.
+            let facet_cols: Vec<ResolvedFacetCol> = FACETS
+                .iter()
+                .map(|def| resolve_facet_col(&batch, def))
+                .collect();
+
+            for i in 0..batch.num_rows() {
+                // Time range filter.
+                if let Some(ts) = ts_arr {
+                    let v = ts.value(i);
+                    if self.filter.start_ns.is_some_and(|start| v < start) {
+                        continue;
+                    }
+                    if self.filter.end_ns.is_some_and(|end| v >= end) {
+                        continue;
+                    }
+                }
+
+                // Extract facet values for this row and record them (pre-filter).
+                let mut row_values: Vec<Option<String>> = Vec::with_capacity(FACETS.len());
+                for (fi, col) in facet_cols.iter().enumerate() {
+                    let val = extract_facet_value(col, i);
+                    if let Some(ref v) = val {
+                        self.facets.sets[fi].insert(v.clone());
+                    }
+                    row_values.push(val);
+                }
+
+                // Apply facet filters: every active filter must match.
+                let mut passes = true;
+                for (fi, def) in FACETS.iter().enumerate() {
+                    if let Some(wanted) = self.filter.facets.get(def.name) {
+                        if wanted.is_empty() {
+                            continue;
+                        }
+                        match &row_values[fi] {
+                            Some(v) if v == wanted => {}
+                            _ => {
+                                passes = false;
+                                break;
+                            }
+                        }
+                    }
+                }
+                if !passes {
+                    continue;
+                }
+
+                // This row passed the time + facet filters. Its enclosing-poll
+                // duration (if any) feeds two things: the pre-band histogram (so the
+                // minimap shows the full distribution the band selects from) and the
+                // band filter itself.
+                let poll_dur = poll_arr.and_then(|a| (!a.is_null(i)).then(|| a.value(i)));
+
+                // Sample-weighted poll-duration histogram, BEFORE the band filter.
+                // Off-poll rows (no duration) don't fall in any log₂ bucket, so they
+                // simply don't contribute — matching the band's exclusion of them.
+                if let Some(k) = poll_dur.and_then(poll_bucket) {
+                    *self.poll_hist.entry(k).or_insert(0) += 1;
+                }
+
+                // Poll-duration band filter. A row with no poll duration (null column,
+                // or the column absent in an old part-file) is excluded whenever a
+                // band is set — the slice is inherently about in-poll samples.
+                if poll_band {
+                    match poll_dur {
+                        Some(d) => {
+                            if self.filter.min_poll_ns.is_some_and(|min| d < min) {
+                                continue;
+                            }
+                            if self.filter.max_poll_ns.is_some_and(|max| d > max) {
+                                continue;
+                            }
+                        }
+                        None => continue,
+                    }
+                }
+
+                // Count this sample.
+                let mut id = [0u8; 16];
+                id.copy_from_slice(stack_arr.value(i));
+                *self.counts.entry(id).or_insert(0) += 1;
+                self.total_samples += 1;
+                if let Some(ts) = ts_arr {
+                    let v = ts.value(i);
+                    self.min_ts = Some(self.min_ts.map_or(v, |m| m.min(v)));
+                    self.max_ts = Some(self.max_ts.map_or(v, |m| m.max(v)));
+                }
+                // Track matched hosts for the "N hosts" badge.
+                if let Some(ref h) = row_values[host_facet_index()] {
+                    self.facets.matched_hosts.insert(h.clone());
+                }
+            }
         }
         Ok(())
     }
@@ -924,136 +1038,7 @@ pub(crate) async fn fetch_polls_part(
     output.get_object(bucket, &polls_key).await.ok()
 }
 
-#[allow(clippy::too_many_arguments)]
-fn read_samples_part(
-    data: Vec<u8>,
-    filter: &SampleFilter,
-    counts: &mut HashMap<[u8; 16], u64>,
-    accum: &mut FacetAccum,
-    total_samples: &mut usize,
-    min_ts: &mut Option<i64>,
-    max_ts: &mut Option<i64>,
-    poll_hist: &mut PollHist,
-) -> anyhow::Result<()> {
-    // `Bytes::from(Vec<u8>)` reuses the allocation (no copy); threading the
-    // owned buffer in from the caller avoids the round-trip through `&[u8]`.
-    let reader = ::parquet::arrow::arrow_reader::ParquetRecordBatchReader::try_new(
-        bytes::Bytes::from(data),
-        4096,
-    )?;
-    for batch in reader {
-        let batch = batch?;
-        let stack_col = batch.column_by_name("stack_id").and_then(|c| {
-            c.as_any()
-                .downcast_ref::<arrow::array::FixedSizeBinaryArray>()
-        });
-        let Some(stack_arr) = stack_col else { continue };
-        let ts_arr = batch
-            .column_by_name("timestamp_ns")
-            .and_then(|c| c.as_any().downcast_ref::<arrow::array::Int64Array>());
-        // Poll-duration column, for the latency-band filter. Nullable and absent
-        // from old part-files; either case means "no poll duration for this row".
-        let poll_arr = batch
-            .column_by_name("poll_duration_ns")
-            .and_then(|c| c.as_any().downcast_ref::<arrow::array::Int64Array>());
-        let poll_band = filter.min_poll_ns.is_some() || filter.max_poll_ns.is_some();
 
-        // Pre-resolve column references for each facet in this batch.
-        let facet_cols: Vec<ResolvedFacetCol> = FACETS
-            .iter()
-            .map(|def| resolve_facet_col(&batch, def))
-            .collect();
-
-        for i in 0..batch.num_rows() {
-            // Time range filter.
-            if let Some(ts) = ts_arr {
-                let v = ts.value(i);
-                if filter.start_ns.is_some_and(|start| v < start) {
-                    continue;
-                }
-                if filter.end_ns.is_some_and(|end| v >= end) {
-                    continue;
-                }
-            }
-
-            // Extract facet values for this row and record them (pre-filter).
-            let mut row_values: Vec<Option<String>> = Vec::with_capacity(FACETS.len());
-            for (fi, col) in facet_cols.iter().enumerate() {
-                let val = extract_facet_value(col, i);
-                if let Some(ref v) = val {
-                    accum.sets[fi].insert(v.clone());
-                }
-                row_values.push(val);
-            }
-
-            // Apply facet filters: every active filter must match.
-            let mut passes = true;
-            for (fi, def) in FACETS.iter().enumerate() {
-                if let Some(wanted) = filter.facets.get(def.name) {
-                    if wanted.is_empty() {
-                        continue;
-                    }
-                    match &row_values[fi] {
-                        Some(v) if v == wanted => {}
-                        _ => {
-                            passes = false;
-                            break;
-                        }
-                    }
-                }
-            }
-            if !passes {
-                continue;
-            }
-
-            // This row passed the time + facet filters. Its enclosing-poll
-            // duration (if any) feeds two things: the pre-band histogram (so the
-            // minimap shows the full distribution the band selects from) and the
-            // band filter itself.
-            let poll_dur = poll_arr.and_then(|a| (!a.is_null(i)).then(|| a.value(i)));
-
-            // Sample-weighted poll-duration histogram, BEFORE the band filter.
-            // Off-poll rows (no duration) don't fall in any log₂ bucket, so they
-            // simply don't contribute — matching the band's exclusion of them.
-            if let Some(k) = poll_dur.and_then(poll_bucket) {
-                *poll_hist.entry(k).or_insert(0) += 1;
-            }
-
-            // Poll-duration band filter. A row with no poll duration (null column,
-            // or the column absent in an old part-file) is excluded whenever a
-            // band is set — the slice is inherently about in-poll samples.
-            if poll_band {
-                match poll_dur {
-                    Some(d) => {
-                        if filter.min_poll_ns.is_some_and(|min| d < min) {
-                            continue;
-                        }
-                        if filter.max_poll_ns.is_some_and(|max| d > max) {
-                            continue;
-                        }
-                    }
-                    None => continue,
-                }
-            }
-
-            // Count this sample.
-            let mut id = [0u8; 16];
-            id.copy_from_slice(stack_arr.value(i));
-            *counts.entry(id).or_insert(0) += 1;
-            *total_samples += 1;
-            if let Some(ts) = ts_arr {
-                let v = ts.value(i);
-                *min_ts = Some(min_ts.map_or(v, |m| m.min(v)));
-                *max_ts = Some(max_ts.map_or(v, |m| m.max(v)));
-            }
-            // Track matched hosts for the "N hosts" badge.
-            if let Some(ref h) = row_values[host_facet_index()] {
-                accum.matched_hosts.insert(h.clone());
-            }
-        }
-    }
-    Ok(())
-}
 
 /// Index of the "host" facet in [`FACETS`]. A missing "host" facet is a
 /// developer error (the facet table is a compile-time constant), so this panics
