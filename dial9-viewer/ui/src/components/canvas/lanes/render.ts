@@ -675,8 +675,13 @@ function drawQueueStepLine(
   const last = visible[visible.length - 1]!;
   const points: { t: number; local: number }[] = visible.slice();
   // Trailing extension so the final level runs to the panel edge (legacy
-  // lineTo(pw, lastY)).
-  points.push({ t: viewEnd, local: last.local });
+  // lineTo(pw, lastY)) - but ONLY when the last visible sample sits left of
+  // the edge. iEnd may include one sample past viewEnd (so the step line
+  // exits at the correct height); appending a viewEnd point after such a
+  // sample would be out of ascending-x order and trip the sorted-input
+  // contract in downsampleSeriesToColumns. When the last sample already
+  // reaches/passes the edge, it covers the trailing level itself.
+  if (viewEnd > last.t) points.push({ t: viewEnd, local: last.local });
 
   batcher.stepSeries(`queue:w${row}`, points, {
     xOf: (s) => nsToX(s.t),

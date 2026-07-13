@@ -1,6 +1,112 @@
 /// <reference types="vitest/config" />
 import { defineConfig, type Plugin } from "vite";
 import { viteStaticCopy } from "vite-plugin-static-copy";
+import { createRequire } from "node:module";
+import { readFileSync } from "node:fs";
+import path from "node:path";
+
+// Dev-mode CJS interop for the frozen core (ADR-0004 section 6).
+//
+// The frozen-core files (decode.js, trace_parser.js, ...) are CommonJS-guarded
+// browser scripts at the ui root. They declare exports in mixed styles
+// (`exports.X = ...` through an IIFE parameter, `module.exports = {...}` object
+// literals, ...) which Vite's dev browser transform cannot statically see, so
+// it exposes only a `default` export. The lib/trace + lib/canvas barrels import
+// the core by NAME (`import { makeTimePanelLayout } from ".../panel_layout.js"`)
+// and so throw at boot in `npm run dev`: "does not provide an export named ...".
+// Every new page breaks (they all reach trace_parser/decode/... this way).
+//
+// Two things stack against a naive fix: (1) the dev export-detector
+// (cjs-module-lexer) misses the guarded names; (2) these files are ALSO in the
+// static-copy list (the legacy pages load them as classic `<script src>`), and
+// in dev vite-plugin-static-copy serves them RAW over HTTP for ANY request to
+// `/panel_layout.js` (query included), which overrides the module pipeline.
+//
+// So this plugin diverts only the ESM IMPORTS - never the classic-script
+// requests, which don't pass through resolveId - to a `\0` virtual module that
+// static-copy cannot match. The virtual module executes the frozen-core CJS
+// inline (self-contained: no re-import of the static URL) and re-exports the
+// names, which are discovered by requiring each core file in Node here - the
+// same CJS the build and tests run, robust across the files' export styles.
+//
+// Scope: `serve` only, skipped under VITEST. Build is unaffected
+// (build.commonjsOptions owns it); Vitest is unaffected (vite-node Node
+// require). The frozen-core files on disk are never touched.
+function frozenCoreDevInterop(): Plugin {
+  const require = createRequire(import.meta.url);
+  const CORE = [
+    "decode",
+    "trace_parser",
+    "trace_analysis",
+    "format",
+    "heatmap",
+    "prefix_detect",
+    "creds",
+    "panel_layout",
+    "flamegraph",
+    "flamegraph_export",
+    "flamegraph_api",
+  ];
+  const VIRT = "\0d9core:";
+  const uiRoot = process.cwd(); // npm scripts run from ui/
+  const exportNames = new Map<string, string[]>();
+  for (const base of CORE) {
+    try {
+      const mod = require(`${uiRoot}/${base}.js`) as Record<string, unknown>;
+      exportNames.set(
+        base,
+        Object.keys(mod).filter(
+          (k) => k !== "default" && /^[A-Za-z_$][\w$]*$/.test(k),
+        ),
+      );
+    } catch {
+      // Leave empty: the shim still passes `default` through, so a core file
+      // that fails to require in Node degrades to default-only rather than
+      // breaking the whole dev server.
+      exportNames.set(base, []);
+    }
+  }
+  return {
+    name: "dial9:frozen-core-dev-interop",
+    apply: (_config, env) => env.command === "serve" && !process.env.VITEST,
+    enforce: "pre",
+    async resolveId(source, importer, options) {
+      if (source.startsWith(VIRT)) return source; // already ours
+      if (importer === undefined) return null;
+      const base = /(?:^|\/)([A-Za-z_]+)\.js$/.exec(source)?.[1];
+      if (base === undefined || !CORE.includes(base)) return null;
+      // Confirm it resolves to the ROOT core file, not a src TS module.
+      const resolved = await this.resolve(source, importer, {
+        ...options,
+        skipSelf: true,
+      });
+      if (resolved === null) return null;
+      const clean = resolved.id.split("?")[0] ?? resolved.id;
+      if (clean.includes("/src/") || !clean.endsWith(`/${base}.js`)) return null;
+      return `${VIRT}${clean}`;
+    },
+    load(id) {
+      if (!id.startsWith(VIRT)) return null;
+      const file = id.slice(VIRT.length);
+      const base = path.basename(file, ".js");
+      const src = readFileSync(file, "utf8");
+      const names = exportNames.get(base) ?? [];
+      // Run the CJS body with a local module/exports so its `typeof module`
+      // guard populates our object; call with globalThis as `this` to match
+      // classic-script semantics for any UMD header that reads `this`.
+      return [
+        `const __d9mod = { exports: {} };`,
+        `(function (module, exports) {`,
+        src,
+        `}).call(globalThis, __d9mod, __d9mod.exports);`,
+        `export default __d9mod.exports;`,
+        ...names.map(
+          (n) => `export const ${n} = __d9mod.exports[${JSON.stringify(n)}];`,
+        ),
+      ].join("\n");
+    },
+  };
+}
 
 // T02 scaffolding config (docs/ui-inventory/02-architecture.md section 2.1,
 // docs/adr/0004-viewer-ui-migration.md section 3).
@@ -152,6 +258,10 @@ export default defineConfig({
     },
   },
   plugins: [
+    // Dev-only: give the frozen-core CJS files real ESM named exports so the
+    // lib/trace + lib/canvas barrels resolve in `npm run dev` (see the
+    // frozenCoreDevInterop docs above). No-op for build / vitest.
+    frozenCoreDevInterop(),
     viteStaticCopy({
       targets: [
         ...legacyPages.map((f) => ({ src: f, dest: "." })),

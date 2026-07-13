@@ -231,12 +231,23 @@ interface TraceSource {
  */
 function traceSource(search: string): TraceSource {
   const params = new URLSearchParams(search);
-  const traceUrls = params.getAll("trace").filter((u) => u.length > 0);
-  if (traceUrls.length > 0) {
-    const first = traceUrls[0] ?? "trace";
-    return { urls: traceUrls, label: lastPathSegment(first) };
-  }
-  return { urls: [], label: "" };
+  const raw = params.getAll("trace").filter((u) => u.length > 0);
+  if (raw.length === 0) return { urls: [], label: "" };
+  // Resolve each ?trace= value against the ORIGIN ROOT before it reaches the
+  // worker. On the legacy page (/viewer.html) a relative value like
+  // "demo-trace.bin" is root-relative by construction, but the migrated entry
+  // (/new/viewer.html) hands the fetch to a worker whose script URL is under
+  // /assets/ (or /src/lib/trace/worker/ in dev). A bare relative value would
+  // resolve against the WORKER url and fetch an HTML fallback, which the parser
+  // rejects with "Invalid trace header" - the failure seen from the browser
+  // page's "load demo" button (window.open("viewer.html?trace=demo-trace.bin")).
+  // Root-relative ("/api/object?...") and absolute values pass through. Mirrors
+  // the flamegraph page's resolveTraceUrls (src/pages/flamegraph/query.ts).
+  const urls = raw.map((u) =>
+    new URL(u, window.location.origin + "/").toString(),
+  );
+  const first = raw[0] ?? "trace";
+  return { urls, label: lastPathSegment(first) };
 }
 
 function lastPathSegment(url: string): string {
