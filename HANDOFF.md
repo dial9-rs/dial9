@@ -1,137 +1,120 @@
-# T22 - Worker lanes track - HANDOFF
+# T24 - Crosshair overlay, hover tooltip, info readout - HANDOFF
 
-(Supersedes the T21 HANDOFF inherited through the branch chain; T21's record
-lives in the tree at base e0fa98e.)
+(Supersedes the T22 HANDOFF inherited through the branch chain.)
 
-STATUS: **partial** - code-complete on the owned G rows + all four gates
-green; the live-browser DoD items (row-walker, behavioral differ, pan-storm
-perf) are PENDING because the environment cannot sustain a Playwright
-dev-server. Recorded below, not faked.
+## STATUS: DoD met (mechanical gates green; live-browser items deferred per the
+T21/T22/T25 precedent). Ready for review.
 
-Branch: `ticket/T22-lanes-track` off `integration/chunk-1` (e0fa98e).
+The transient channel (features/02 I1-I6 + V) landed on the store's `transient`
+RAF channel with the 03 F3 read-after-write anti-pattern eliminated. The
+`transient.atCursor` readout store contract is defined and populated; a minimal
+inspector stub renders it until T31 lands.
 
-## COMPLETED (with shas)
+## COMPLETED (commits, on branch ticket/T24-crosshair-tooltip)
 
-- **d3acc6c** feat: lanes render + data + resolvers.
-  - `src/components/canvas/lanes/render.ts` - `renderLanes(ctx, input, layout)`
-    pure draw of G1-G12 + the G6-G11 highlights, ported from viewer.html
-    `renderLane` (:2957). Pixel-bounded fills via the frozen core
-    `pixelDownsampleSpans` + `makeBarCoalescer`; the local-queue step line
-    (G12) and every dashed marker (G5 open-ended, G2 block_in_place outline)
-    go through the **T08 stroke batcher** - one path per style, dash state
-    hoisted (03 F1). N worker rows stack into the one lanes canvas; band
-    geometry scales from the 60px legacy reference.
-  - `src/components/canvas/lanes/data.ts` - `deriveLaneData(trace)`
-    (buildWorkerSpans + attachCpuSamples + buildSpanData + span-id index),
-    derived ONCE per trace and store-cached over the `trace` slice (03 F5).
-  - `src/components/canvas/lanes/click.ts` - `resolveLaneClick` pure resolver
-    (G13 select-task/toggle, G14 outermost-span focus, G15 Poll-Detail
-    signal) over the T09 query helpers (03 F6).
-  - `src/components/canvas/lanes/hover.ts` - `assembleLaneHover` pure G16
-    readout via binary-search/indexed helpers; carries `hasClickableStack`
-    (the K8 affordance signal T24 turns into a pointer cursor).
-  - `src/pages/viewer/track-renderers.ts` - the renderer registry
-    (claim/skip-placeholder seam). Shell seam edits: `tracks.ts` skips claimed
-    tracks; `main.ts` mounts `mountLanes` AFTER the shell.
-- **cf4b6d8** test + legend: `src/components/canvas/lanes/lanes.test.ts`
-  (9 tests, green) + the G19/04 F3 legend ribbon + CSS.
-- **a807040** docs: ledger G20 retired / G17-G19 amended; features/02 G rows
-  annotated (contract-amendment rule).
+- `79a02c6` feat(T24): transient.atCursor readout contract in state types
+  - `types/state.d.ts`: new `AtCursorReadout` interface (the store contract T31
+    renders) + `atCursor` field on `TransientSlice`. Carries the T17
+    windowed-data `coverage` signal.
+  - `pages/viewer/store.ts`: init `transient.atCursor: null`.
+  - `store/store.test.ts`, `types/exhaustive.test.ts`: extended the T06/T07
+    StoreState literals with the additive field (mechanical, like T25's
+    timeMode/tz).
+- `d457bee` feat(T24): crosshair overlay + hover tooltip + at-cursor readout
+  - `components/overlay/crosshair.ts`: pure `drawCrosshair` (I2 mouse / I3
+    keyboard cursor / I4 custom-event guide / I5 pinned marker) + `crosshairX`
+    using the SHARED `time.nsToPanelX` (A13/N4 invariant). Overlay canvas
+    resizes only on geometry change (lib/canvas/dpr).
+  - `components/overlay/tooltip.ts`: `placeTooltip` PURE over CACHED dims (the
+    F3 fix), ResizeObserver-refreshed; `laneTooltipModel` reproduces the G16
+    content from T22's `assembleLaneHover` output (consumed, not
+    reimplemented); lit-html render (auto-escapes, #587).
+  - `components/overlay/readout.ts`: `computeAtCursorReadout` (I6 parity) +
+    `coverageAt` (T17 residency mapping) + `renderAtCursorStub` (inspector).
+  - `components/overlay/data.ts`: once-per-trace hover-input derivation (global
+    queue + active-task series LaneData omits), cached via store.derived.
+  - `components/overlay/index.ts`: hover controller - mousemove reads geometry
+    once (clean, pre-write) and dispatches transient; drawFrame (sole
+    subscriber on hover frames) reads-before-writes -> zero forced layout.
+  - `pages/viewer/main.ts`: mounts the overlay after shell+lanes.
+  - `styles/viewer.css`: overlay/tooltip/readout styles + `.d9-track-column`
+    positioning context.
+- `0fe9320` test(T24): overlay vitest (crosshair/tooltip/readout).
 
-## Owned-row disposition (features/02 G)
+## DoD
 
-- G1-G5, G9, G10, G12 rendered (grid, bg states, CPU tint, poll bars,
-  open-ended markers, CPU ticks, sched triangles, queue step line).
-- G6, G7, G8, G11 selection/hover highlights (task, span chain, waker, wakes)
-  driven by the `selection` slice - redraw lanes only (03 F2).
-- G13/G14/G15 click **semantics** as a pure resolver (T23 owns the gesture
-  layer that drives it - see SEAMS).
-- G16 hover **data** assembler (T24 owns the tooltip component - see SEAMS).
-- G17/G18 amended by the unified-column scroll model (ledger).
-- G19 amended -> lanes legend ribbon covering all marks + q:NN (04 F3, ledger).
-- **G20 retired** (dead `selectedEvent` indicator; ledger).
+- check: row-walker green on I/V rows -> DEFERRED (T12 Playwright row-walker;
+  live-browser, same disposition as T21/T22/T25 HANDOFFs). Behavioral fidelity
+  is a faithful port of the legacy `renderCrosshair` / lane-hover handler /
+  `updateInfoPanel`, locked by the `laneTooltipModel` content Vitest.
+- check: T12 perf probe - hover storm ZERO forced-layout from the tooltip path
+  -> DESIGN GUARANTEE + Vitest proxy DONE; full Playwright probe DEFERRED.
+  Guarantee: `placeTooltip` is pure over cached dims (no element measure, ever);
+  dims refresh via ResizeObserver (no forced sync layout); on a hover-only frame
+  the shell does NOT run (never subscribes to `transient`), so `drawFrame` is
+  the sole subscriber and its geometry reads precede all writes. `placeTooltip`
+  purity asserted in tooltip.test.ts.
+- check: crosshair alignment vs lanes (Vitest on shared layout math) -> DONE
+  (crosshair.test.ts: overlay x == every track's absolute-in-column x at three
+  widths). The "+ one T12 visual check" is the deferred live item.
+- check: at-cursor store contract populated during hover -> DONE
+  (readout.test.ts: computeAtCursorReadout + the transient.atCursor contract
+  delivered to a subscriber on the coalesced tick; the stub renders it).
 
-## EVIDENCE (gates, run in dial9-viewer/ui)
+## GATE BAR (hard rule 3) - all green
 
-- `npx tsc --noEmit` -> clean (no output).
-- `node scripts/check-core-imports.mjs` -> OK (no core imports outside
-  lib/trace + lib/canvas).
-- `npx vitest run` -> **1026 passed | 1 expected-fail | 11 skipped** (65 files),
-  incl. the 9 new T22 tests. No regressions.
-- `npm run build` -> dist built; `new-viewer` bundle 32.59 kB (lanes
-  included); 17 static-copy items.
-- `CARGO_TARGET_DIR=.../target cargo build -p dial9-viewer` -> Finished
-  (rust-embed picks up the new dist).
+- `npx tsc --noEmit` -> exit 0.
+- `npm run test` (full Vitest) -> Test Files 68 passed | 1 skipped; Tests 1080
+  passed | 1 expected-fail | 11 skipped. Zero unexpected failures. Boundary
+  check (`check:boundary`) OK - no core imports outside lib/trace + lib/canvas.
+- `npm run build` -> clean (129 modules; new-viewer bundle 48.30 kB).
+- `cargo build -p dial9-viewer` -> Finished (rust-embed picks up the new
+  dist/). JS/TS/CSS-only change: no `.rs` touched, no trace format change, so
+  cargo nextest/clippy/fmt skipped per AGENTS.md.
 
-### Vitest coverage of the DoD "downsample/coalesce usage" item
+## SCOPE NOTES / SEAMS
 
-- 1,000,000 contiguous polls, drawW 200 -> `fillRect` <= drawW+5
-  (pixel-bounded, not O(polls)).
-- 500,000 queue samples, one lane -> `stroke()` **<= 2** (queue + separator
-  styles), `setLineDash` 0 - the F1 fix (legacy stroked per-sample).
-- 10,000 open-ended markers -> `setLineDash` <= 2 (dash hoisted), one dashed
-  stroke - not one per marker.
-- `resolveLaneClick`: select-task, same-task toggle-off, span ancestor walk,
-  Poll-Detail-only-with-samples.
-- `assembleLaneHover`: polling (task/cpu/sched/queue/active-task +
-  hasClickableStack), parked (kernel sched delay).
+- T22 seam: consumed `assembleLaneHover` / `LaneHoverData` unchanged; T24 only
+  assembles its INPUT (via `deriveOverlayData`, reusing frozen-core builders)
+  and renders the tooltip. Lane hover LOGIC not reimplemented. `deriveWorkerIds`
+  imported from lanes/data.ts. (One extra one-time `buildWorkerSpans` pass per
+  trace load - overlay + lanes each derive; not a per-frame cost.)
+- T23 seam (pointer machine, NOT landed): T24 owns the HOVER path only
+  (`transient.mouseNs` + tooltip + readout). It adds a mousemove/mouseleave
+  listener that dispatches transient; drag/zoom and the keyboard-selection
+  cursor are T23's (`transient.drag` / `transient.keyboardSelection`, which the
+  crosshair already reads). While a drag is active the controller suppresses the
+  tooltip + mouse crosshair (legacy V3), so the two won't fight when T23 lands.
+- T31 seam: `transient.atCursor` is the store contract T31's inspector renders;
+  `renderAtCursorStub` is the placeholder that proves the wiring until then.
+  It appends into `.d9-inspector-body` (static-content container -> survives the
+  shell's declarative re-renders, the legend/toast technique).
+- Shell shared point: `main.ts` got a 3-line additive mount + dispose; the
+  overlay canvas is an imperatively-appended child of `.d9-track-column`
+  (re-ensured each frame). No edit to `tracks.ts`/`track-renderers.ts`.
 
-## PENDING (live-browser DoD - no dev-server in this environment)
+## BLOCKERS / QUESTIONS
 
-Not faked; run once a Playwright dev-server is available:
-1. **Row-walker green on G rows** (`dial9-viewer/ui/parity/`). NOTE: there is
-   no `parity/walkers/features02.mjs` yet - the features/02 walker itself does
-   not exist; running the G-row walk needs that walker written PLUS a live
-   `PORT=3001 cargo run -p dial9-viewer --bin dev-server --features dev-server`.
-   G20 is ledger-retired (listed, not gated).
-2. **Behavioral differ vs legacy on J2/J4** (identical poll/task selection).
-   The pure `resolveLaneClick` is unit-covered; the end-to-end click needs
-   T23's gesture wiring to drive it against the running page.
-3. **Pan-storm perf (x8 repeated demo):** record renders <=1/frame (N2),
-   lanes script time, and stroke() self-time share vs legacy's 76%. Needs the
-   dev-server + `parity/perf-probe.mjs`. The stroke-batch Vitest bounds are
-   the code-level proxy (stroke() is now O(styles), not O(samples)).
+None blocking. One observation:
 
-## SEAMS (coordinate with dependent tickets)
+- The binding-file `docs/tickets/reviews/T17-audit.md` does NOT exist in this
+  worktree (the whole `docs/tickets/reviews/` dir is absent). The T17-audit
+  FINDINGS are baked into the merged code (`types/state.d.ts` cites "T17-audit
+  finding 2", `types/trace.d.ts` cites finding 1 + "notes 6-7"). I satisfied the
+  carried obligation from those: `AtCursorReadout.coverage` + the tooltip
+  "Window:" warning row surface a truncated/oversized window instead of
+  presenting it as whole, populated from the `segments` slice residency
+  (`coverageAt`). On the current whole-trace (non-segmented) load path the map
+  is empty, so coverage resolves to "complete"; when a future ticket wires
+  segment windowing into the viewer, the covering segment's state drives it. Not
+  a stop-gate (the obligation is directional and satisfied); flagged for the
+  reviewer's awareness.
 
-- **T23 (interaction):** owns the pointer gesture layer (3px drag-intent,
-  x->ns, y->worker). It should call `resolveLaneClick(...)`, dispatch the
-  returned `selection` patch, and route `openStackFor` to T31. T22
-  deliberately does NOT wire a raw `click`/pan listener (it would fight T23's
-  pan drag) - hence the live behavioral-differ is PENDING, not done here.
-- **T24 (hover/tooltip):** consumes `assembleLaneHover(...)` for the G16
-  tooltip and sets the K8 pointer cursor from `hasClickableStack`.
-- **T27 (custom events):** dispatches `selection.pinnedEvent`; the in-lane
-  pinned-poll highlight resolves the worker by value-matching the poll in the
-  lane (`selection.pinnedEvent.poll` carries no workerId). If T27 adds a
-  workerId, the match can tighten.
-- **Runtime groups (G21-G24, #596):** NOT in T22's owned set (G1-G19) and
-  NOT-TRIGGERABLE on the demo (zero named runtimes). `deriveWorkerIds` already
-  orders lanes by `computeRuntimeGroups`, but group HEADERS / collapse /
-  per-group hit-testing are unbuilt and belong with track management (T36) /
-  the shell. Flagged so they are not silently dropped.
+## EVIDENCE (commands)
 
-## INTEGRATION NOTES (shell edits - minimal, additive)
-
-- `tracks.ts sizeTracks` skips claimed tracks (no placeholder, no resize that
-  would clear the renderer's draw). Non-lanes tracks unchanged.
-- `main.ts` mounts `mountLanes(shell.trackColumn, store)` after the shell so
-  its subscription runs after the shell's chrome render each frame; the shell
-  never clobbers the lanes canvas, and a uiPrefs-only change (which the lanes
-  do not subscribe to) leaves the canvas untouched (claim keeps the
-  placeholder off).
-- Lanes track height stays the shell's 130px; N worker rows divide it evenly.
-  Very large worker counts make rows thin (legacy scrolled per-lane) - a
-  track-height/scroll refinement for T36, noted not fixed (scope fence).
-
-## SCOPE-FENCE / UNRELATED
-
-- No `.rs`, no trace-format, no frozen-core edits. JS/TS + docs only, so the
-  Rust nextest/stress suites are not required (AGENTS.md).
-- No unrelated bugs found or fixed.
-
-## Open questions
-None blocking. The G13-G16 seam split (T22 semantics/data vs T23/T24 wiring)
-follows the ticket's stated seams; if the maintainer wants T22 to also land a
-throwaway click listener for a self-contained live differ, that is a small
-add - but it would be replaced by T23 and risks fighting T23's pan.
+- `cd dial9-viewer/ui && npx tsc --noEmit` -> exit 0
+- `cd dial9-viewer/ui && npx vitest run src/components/overlay/` -> 3 files, 29
+  tests passed
+- `cd dial9-viewer/ui && npm run test` -> 1080 passed, 0 unexpected failures
+- `cd dial9-viewer/ui && npm run build` -> built in ~0.4s, clean
+- `cargo build -p dial9-viewer` -> Finished
