@@ -59,6 +59,8 @@ function initialViewerState(): StoreState {
       sidebarWidth: 320,
       selectedSpanNames: new Set(),
       selectedEventNames: new Set(),
+      timeMode: "rel",
+      tz: "utc",
     },
     transient: { mouseNs: null, hoverEventTs: null, drag: null, keyboardSelection: null },
     segments: { segments: new Map() },

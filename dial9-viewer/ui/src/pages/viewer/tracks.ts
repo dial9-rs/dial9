@@ -21,6 +21,7 @@ import { createCanvasSizer } from "../../lib/canvas/dpr.js";
 import type { CanvasSizer } from "../../lib/canvas/dpr.js";
 import { LABEL_W, TRACKS, trackGeometry } from "./track-layout.js";
 import type { TrackSpec } from "./track-layout.js";
+import { renderTimeAxis, type AxisInputs } from "./axis.js";
 
 export interface TracksViewModel {
   /** True once a trace is loaded (tracks render empty until then). */
@@ -29,6 +30,12 @@ export interface TracksViewModel {
   taskSelected: boolean;
   viewStart: number;
   viewEnd: number;
+  /**
+   * Clock/format state the time-axis track (T25) reads to label its ticks.
+   * The shell lifts it from the store via `deriveAxisInputs`; other tracks
+   * ignore it (they render placeholders until their own tickets land).
+   */
+  axis: AxisInputs;
 }
 
 /** The tracks visible for a view model (task-detail only when selected). */
@@ -129,7 +136,14 @@ export function sizeTracks(
       sizers.set(canvas, sizer);
     }
     const ctx = sizer.ensure(drawW, track.height, dpr);
-    paintPlaceholder(ctx, drawW, track.height, vm.hasTrace);
+    // The time-axis track (T25) is the first slot with real content: it
+    // draws the F-row ruler instead of a placeholder. Every other track
+    // stays an empty placeholder until its own ticket (T22-T30) fills it.
+    if (track.id === "timeline") {
+      renderTimeAxis(ctx, geometry, vm.viewStart, vm.viewEnd, vm.axis, vm.hasTrace);
+    } else {
+      paintPlaceholder(ctx, drawW, track.height, vm.hasTrace);
+    }
     canvas.dataset["drawW"] = String(Math.round(drawW));
     out.push({ id: track.id, drawW, height: track.height });
   }

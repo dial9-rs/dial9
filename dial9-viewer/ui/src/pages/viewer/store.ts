@@ -42,6 +42,11 @@ export function initialViewerState(): StoreState {
       sidebarWidth: DEFAULT_INSPECTOR_WIDTH,
       selectedSpanNames: new Set<string>(),
       selectedEventNames: new Set<string>(),
+      // Legacy resting clock mode (viewer.html `useAbsoluteTime`/`useLocalTz`
+      // both false): relative offsets in UTC. The toolbar toggles (T33)
+      // mutate these; the time-axis track (T25) reads them.
+      timeMode: "rel",
+      tz: "utc",
     },
     transient: {
       mouseNs: null,
