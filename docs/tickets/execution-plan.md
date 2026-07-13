@@ -107,6 +107,14 @@ shell), then the wave. The Fable-credit stream cuts are resolved (switched
 to Opus).
 
 **Audit log:**
+- T21 viewer shell: MERGED into integration 2026-07-12 (opens chunk 2). Gate
+  bar green (tsc, 1016 tests + 1 xfail, build). Orchestrator finished the
+  last 3 commits after the implementer stall-looped on connection drops (2
+  test fixes: toasts-fake Proxy identity bug + ui-switch registry extension;
+  no shell impl authored by orchestrator). TRAILING OBLIGATION: DoD live
+  walks (row-walker on A/T/U rows, axe on shell, tab-order dump) were
+  DEFERRED - run them as a trailing audit before relying on the shell's a11y
+  claims. Placeholder track slots by design (content = T22-T30).
 - T07 store/scheduler: FINDINGS (non-blocking), 5 defects filed
   (`reviews/T07-audit.md`) -> ALL FIXED via fix(store), merged into
   integration/chunk-1 BEFORE any subscriber code exists (sequencing
