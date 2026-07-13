@@ -76,6 +76,13 @@ export interface LoadControllerDeps {
   onError(message: string): void;
   /** Notify the view that getState() changed (re-render). */
   onChange(): void;
+  /**
+   * Fired once, synchronously, when a load SUCCEEDS - after the store's trace
+   * slice is populated and before the section closes. The page commits the
+   * loaded source's toolbar label here (order-safe: it runs in the load's
+   * microtask, ahead of the store scheduler's next render frame).
+   */
+  onLoaded?(): void;
   /** Wall clock for the elapsed timer; default performance.now. */
   now?(): number;
   /** Interval scheduler for the 250ms elapsed tick; default setInterval. */
@@ -258,8 +265,9 @@ export function createLoadController(deps: LoadControllerDeps): LoadController {
       () => {
         cleanup();
         if (token !== loadToken) return;
-        // Success: the store's trace slice is now populated; drop the load
-        // section so the tracks show through.
+        // Success: the store's trace slice is now populated; commit the
+        // toolbar label, then drop the load section so the tracks show through.
+        deps.onLoaded?.();
         section = "closed";
         dragCounter = 0;
         notify();

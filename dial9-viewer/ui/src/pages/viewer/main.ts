@@ -10,7 +10,6 @@
 // replace the bootstrap load below with the real drop-zone pipeline.
 
 import "../../styles/viewer.css";
-import { loadTraceInWorker } from "../../lib/trace/index.js";
 import { mountKeyRouter } from "../../lib/interact/index.js";
 import { getAnnouncer } from "../../lib/interact/announce.js";
 import { createViewerStore } from "./store.js";
@@ -18,6 +17,7 @@ import { createEscCascade, ESC_PRIORITY } from "./esc-cascade.js";
 import { mountViewerHelp } from "./help.js";
 import { createToasts } from "./toasts.js";
 import { mountShell } from "./shell.js";
+import { mountLoadChrome } from "./load-chrome.js";
 import { mountLanes } from "../../components/canvas/lanes/index.js";
 import { mountOverlay } from "../../components/overlay/index.js";
 import { mountLaneInteraction } from "./lane-interaction.js";
@@ -52,9 +52,13 @@ function boot(): void {
   const help = mountViewerHelp(document, esc);
 
   const source = traceSource(window.location.search);
+  // Forward reference: the shell's "New File" button opens the load chrome,
+  // which is created just below (it needs the shell's toast region first).
+  let loadChrome: ReturnType<typeof mountLoadChrome> | null = null;
   const shell = mountShell(root, store, {
     toggleHelp: () => help.toggle(),
-    sourceLabel: source.label,
+    sourceLabel: () => loadChrome?.currentLabel() ?? source.label,
+    onNewFile: () => loadChrome?.requestNewFile(),
   });
   const toasts = createToasts(shell.toastRegion);
 
@@ -101,26 +105,26 @@ function boot(): void {
     },
   ]);
 
-  // Bootstrap load: `?trace=` components, else the bundled demo trace. This
-  // is a stand-in for T34's drop-zone/URL pipeline - enough to render the
-  // shell on real data (the DoD: shell renders on the demo trace).
-  const load = loadTraceInWorker(store, source.urls);
-  load.done.catch((err: unknown) => {
-    if (err instanceof DOMException && err.name === "AbortError") return;
-    // One-time load failure surfaced to the user via an error toast (U4);
-    // not a loop, so no rate-limiting needed.
-    const detail = err instanceof Error ? err.message : String(err);
-    toasts.show({
-      id: "load-error",
-      type: "error",
-      message: `Could not load ${source.label}: ${detail}`,
-    });
-    console.error("viewer: trace load failed", err);
+  // Load chrome (T34): the drop zone / file picker / drag-drop / URL loading
+  // surfaces + the New File flow. It consumes the T16 worker pipeline
+  // (loadTraceInWorker), registers its Escape surface in the cascade, and
+  // auto-loads the boot `?trace=` components when present; otherwise it shows
+  // the drop zone (the resting empty state, B1). Load failures surface as an
+  // error toast (U4/B13).
+  loadChrome = mountLoadChrome({
+    store,
+    esc,
+    onError: (message) => {
+      toasts.show({ id: "load-error", type: "error", message });
+    },
+    ...(source.urls.length > 0
+      ? { initialUrls: source.urls, initialLabel: source.label }
+      : {}),
   });
 
   // Teardown hook for HMR / tests (not strictly needed in production).
   window.addEventListener("beforeunload", () => {
-    load.abort();
+    loadChrome?.dispose();
     laneInteraction.dispose();
     overlay.dispose();
     lanes.dispose();
@@ -134,7 +138,12 @@ interface TraceSource {
   label: string;
 }
 
-/** Resolve the trace source: `?trace=` components, else the demo trace. */
+/**
+ * Resolve the boot trace source from `?trace=` components. With none, the
+ * urls are empty: the load chrome shows the drop zone and waits for a
+ * drop / pick / demo instead of auto-loading (features/02 B1 - the drop zone
+ * is the resting empty state; the demo is a link, not the default).
+ */
 function traceSource(search: string): TraceSource {
   const params = new URLSearchParams(search);
   const traceUrls = params.getAll("trace").filter((u) => u.length > 0);
@@ -142,7 +151,7 @@ function traceSource(search: string): TraceSource {
     const first = traceUrls[0] ?? "trace";
     return { urls: traceUrls, label: lastPathSegment(first) };
   }
-  return { urls: ["/demo-trace.bin"], label: "demo-trace.bin" };
+  return { urls: [], label: "" };
 }
 
 function lastPathSegment(url: string): string {
