@@ -13,12 +13,21 @@ const {
   layoutSide,
   nodeAtPath,
   fullScopeQuery,
+  scopeWithHost,
+  shiftScopeTime,
+  DIFF_SHIFT_1H,
+  DIFF_SHIFT_24H,
+  DIFF_SHIFT_7D,
   b64urlEncode,
   b64urlDecode,
   encodeScope,
   decodeScope,
   diffSearch,
   parseDiff,
+  chooseTarget,
+  addDiffCapture,
+  swapDiffCapture,
+  removeDiffSide,
 } = require("./flamegraph_diff.js");
 
 let passed = 0;
@@ -234,6 +243,7 @@ assertEq(
   const src = new URLSearchParams();
   src.set("api", "1");
   src.set("bucket", "my-bucket");
+  src.set("aws_region", "us-west-2");
   src.set("prefix", "traces/svc");
   src.set("service", "svc");
   src.append("host", "h1");
@@ -250,6 +260,7 @@ assertEq(
 
   const out = fullScopeQuery(src);
   assertEq(out.get("bucket"), "my-bucket", "bucket survives (fixes lossy address bar)");
+  assertEq(out.get("aws_region"), "us-west-2", "region survives (cross-region bucket link)");
   assertEq(out.get("prefix"), "traces/svc", "prefix survives");
   assertEq(out.get("max_files"), "256", "max_files survives");
   assertEq(out.getAll("host").join(","), "h1,h2", "repeatable host set survives in order");
@@ -335,15 +346,53 @@ assertEq(parseDiff("diff=1"), null, "diff link missing both a and b -> null");
 assert(parseDiff(new URLSearchParams("diff=1&a=" + encodeScope("bucket=x") + "&b=" + encodeScope("bucket=y"))) != null,
   "parseDiff accepts a URLSearchParams as well as a string");
 
+// ── chooseTarget: single-scope vs captured A/B diff routing (issue #626) ──
+// The landing page's top "Flamegraph"/"Tokio Stats" buttons route through the
+// same seam as the diff tray's launch buttons, so once a full diff is captured
+// the top button opens the diff instead of a single scope.
+{
+  const diffA = fullScopeQuery(new URLSearchParams("bucket=ba&service=svc&host=h1"));
+  const diffB = fullScopeQuery(new URLSearchParams("bucket=bb&service=svc&host=h2"));
+
+  // hasDiff true -> diff link, correct page per kind, per-side api=1 for flamegraph.
+  const fg = chooseTarget("flamegraph", { hasDiff: true, diffA, diffB });
+  assertEq(fg.page, "flamegraph.html", "diff mode flamegraph -> flamegraph.html");
+  assert(fg.search.indexOf("diff=1&a=") === 0, "diff mode flamegraph search starts with diff=1&a=..");
+  assert(fg.search.indexOf("&b=") !== -1, "diff mode flamegraph search carries b=..");
+  const fgParsed = parseDiff(fg.search);
+  assertEq(fgParsed.a.get("bucket"), "ba", "diff mode flamegraph: side A scope round-trips");
+  assertEq(fgParsed.a.get("api"), "1", "diff mode flamegraph: per-side api=1 set on A");
+  assertEq(fgParsed.b.get("api"), "1", "diff mode flamegraph: per-side api=1 set on B");
+
+  const tk = chooseTarget("tokio", { hasDiff: true, diffA, diffB });
+  assertEq(tk.page, "tokio_stats.html", "diff mode tokio -> tokio_stats.html");
+  assert(tk.search.indexOf("diff=1&a=") === 0, "diff mode tokio search starts with diff=1&a=..");
+  const tkParsed = parseDiff(tk.search);
+  assertEq(tkParsed.a.get("api"), null, "diff mode tokio: no api flag (tokio-stats does not use it)");
+
+  // hasDiff false -> the caller's pre-built single-scope query, unchanged.
+  const single = chooseTarget("flamegraph", { hasDiff: false, singleQuery: "api=1&bucket=b&service=svc" });
+  assertEq(single.page, "flamegraph.html", "single mode -> flamegraph.html");
+  assertEq(single.search, "api=1&bucket=b&service=svc", "single mode passes the single-scope query through unchanged");
+  assert(parseDiff(single.search) == null, "single mode search is not a diff link");
+  assertEq(
+    chooseTarget("tokio", { hasDiff: false, singleQuery: "bucket=b&service=svc" }).page,
+    "tokio_stats.html",
+    "single mode tokio -> tokio_stats.html",
+  );
+}
+
 // ── flamegraph_diff_view: apiUrlFor / scopeLabel (DOM-free helpers) ──
 {
   const V = require("./flamegraph_diff_view.js");
   const scope = new URLSearchParams(
-    "api=1&bucket=b&prefix=traces/svc&service=svc&host=h1&host=h2&source=cpu&start_ns=100&max_files=64",
+    "api=1&bucket=b&aws_region=us-west-2&prefix=traces/svc&service=svc&host=h1&host=h2&source=cpu&start_ns=100&max_files=64",
   );
   const u = V.apiUrlFor({ scope, origin: "https://viewer.example.com" });
   assertEq(u.pathname, "/api/flamegraph", "apiUrlFor targets /api/flamegraph");
   assertEq(u.searchParams.get("bucket"), "b", "apiUrlFor forwards bucket");
+  assertEq(u.searchParams.get("aws_region"), "us-west-2",
+    "apiUrlFor forwards region (side B often has a cross-region bucket)");
   assertEq(u.searchParams.get("max_files"), "64", "apiUrlFor forwards max_files");
   assertEq(u.searchParams.getAll("host").join(","), "h1,h2", "apiUrlFor forwards repeatable hosts");
   assertEq(u.searchParams.get("api"), null, "apiUrlFor does NOT forward the client-only api flag");
@@ -365,6 +414,143 @@ assert(parseDiff(new URLSearchParams("diff=1&a=" + encodeScope("bucket=x") + "&b
   assertEq(V.scopeLabel(new URLSearchParams("service=svc"), "A"), "svc", "label: no host");
   assertEq(V.scopeLabel(new URLSearchParams("service=svc&host=a&host=b&host=c"), "A"), "svc @ 3 hosts", "label: host count");
   assertEq(V.scopeLabel(new URLSearchParams("host=h1"), "A"), "A @ h1", "label: no service falls back");
+
+  // isSearchFocusKey: "/" focuses the highlight box only when it isn't already
+  // focused (so a literal "/" can be typed into the regex); Ctrl/Cmd+F always
+  // focuses; other keys never do.
+  assertEq(V.isSearchFocusKey({ key: "/" }, false), true, "'/' focuses when not already in the search box");
+  assertEq(V.isSearchFocusKey({ key: "/" }, true), false, "'/' does not steal focus while typing in the search box");
+  assertEq(V.isSearchFocusKey({ key: "f", ctrlKey: true }, false), true, "Ctrl+F focuses the search box");
+  assertEq(V.isSearchFocusKey({ key: "f", metaKey: true }, false), true, "Cmd+F focuses the search box");
+  assertEq(V.isSearchFocusKey({ key: "a" }, false), false, "other keys do not focus the search box");
+}
+
+// ── addDiffCapture / swapDiffCapture / removeDiffSide: tray state machine ──
+// Backs the in-page "Add to diff" tray on the flamegraph aggregate toolbar
+// (issue #646): capture fills A first, then B, then replaces B; A always fills
+// before B (no B-without-A hole).
+{
+  const sa = new URLSearchParams("api=1&bucket=b&service=svc&host=host-a");
+  const sb = new URLSearchParams("api=1&bucket=b&service=svc&host=host-b");
+  const sc = new URLSearchParams("api=1&bucket=b&service=svc&host=host-c");
+
+  let st = { a: null, b: null };
+  st = addDiffCapture(st, sa);
+  assertEq(st.a, sa, "first add fills A");
+  assertEq(st.b, null, "first add leaves B empty");
+  st = addDiffCapture(st, sb);
+  assertEq(st.a, sa, "second add keeps A");
+  assertEq(st.b, sb, "second add fills B");
+  st = addDiffCapture(st, sc);
+  assertEq(st.a, sa, "third add keeps A");
+  assertEq(st.b, sc, "third add replaces B (most recent)");
+
+  // Swap flips A/B only when both are set.
+  const sw = swapDiffCapture(st);
+  assertEq(sw.a, sc, "swap makes old B the new A");
+  assertEq(sw.b, sa, "swap makes old A the new B");
+  const swLone = swapDiffCapture({ a: sa, b: null });
+  assertEq(swLone.a, sa, "swap with a lone A is a no-op (keeps A)");
+  assertEq(swLone.b, null, "swap with a lone A leaves B empty");
+
+  // Removing A promotes B so there is never a B-without-A hole.
+  const rmA = removeDiffSide({ a: sa, b: sb }, "a");
+  assertEq(rmA.a, sb, "removing A promotes B into A");
+  assertEq(rmA.b, null, "removing A leaves B empty");
+  const rmB = removeDiffSide({ a: sa, b: sb }, "b");
+  assertEq(rmB.a, sa, "removing B keeps A");
+  assertEq(rmB.b, null, "removing B clears B");
+
+  // Inputs are not mutated in place (transitions return fresh state objects).
+  const orig = { a: sa, b: null };
+  addDiffCapture(orig, sb);
+  assertEq(orig.b, null, "addDiffCapture does not mutate the input state");
+}
+
+// ── Capture → diff round-trip for host-vs-host (issue #646) ──
+// The core of the "Add to diff" flow: capture the current view narrowed to one
+// host as side A, re-narrow to a second host and capture as side B, then open
+// the two-sided diff. Both host selections must survive the codec independently,
+// as must the shared scope (api/bucket/service).
+{
+  const scopeA = fullScopeQuery(new URLSearchParams("api=1&bucket=b&prefix=p&service=svc&host=host-a"));
+  const scopeB = fullScopeQuery(new URLSearchParams("api=1&bucket=b&prefix=p&service=svc&host=host-b"));
+
+  let st = { a: null, b: null };
+  st = addDiffCapture(st, scopeA);
+  st = addDiffCapture(st, scopeB);
+  const parsed = parseDiff(diffSearch(st.a, st.b));
+  assert(parsed != null, "capture -> diffSearch -> parseDiff round-trips");
+  assertEq(parsed.a.get("host"), "host-a", "side A narrowed to host-a survives");
+  assertEq(parsed.b.get("host"), "host-b", "side B narrowed to host-b survives");
+  assertEq(parsed.a.get("api"), "1", "side A carries api=1 (aggregate path)");
+  assertEq(parsed.b.get("api"), "1", "side B carries api=1 (aggregate path)");
+  assertEq(parsed.a.get("bucket"), "b", "shared bucket survives on A");
+  assertEq(parsed.b.get("service"), "svc", "shared service survives on B");
+}
+
+// ── shiftScopeTime: earlier-window presets (issue #624) ──
+// start_ns/end_ns are ~1.78e18, far above Number.MAX_SAFE_INTEGER, so the shift
+// must use BigInt or the values corrupt. Assert exact string equality against
+// BigInt-computed expectations, that the window LENGTH is preserved, and that
+// non-time params are untouched.
+{
+  const scope = fullScopeQuery(new URLSearchParams(
+    "api=1&bucket=b&prefix=p&service=svc&host=h1&start_ns=1782155999000000000&end_ns=1782159599000000000"));
+
+  const shifted = shiftScopeTime(scope, DIFF_SHIFT_24H);
+  // 1782155999000000000 - 86400000000000 = 1782069599000000000
+  assertEq(shifted.get("start_ns"), "1782069599000000000", "-24h shifts start_ns back by exactly the delta");
+  assertEq(shifted.get("end_ns"), "1782073199000000000", "-24h shifts end_ns back by exactly the delta");
+  // Window length preserved.
+  const origLen = BigInt(scope.get("end_ns")) - BigInt(scope.get("start_ns"));
+  const newLen = BigInt(shifted.get("end_ns")) - BigInt(shifted.get("start_ns"));
+  assert(origLen === newLen, "-24h preserves the window length");
+  // Non-time params untouched.
+  assertEq(shifted.get("bucket"), "b", "shiftScopeTime leaves bucket untouched");
+  assertEq(shifted.get("service"), "svc", "shiftScopeTime leaves service untouched");
+  assertEq(shifted.get("host"), "h1", "shiftScopeTime leaves host untouched");
+
+  // -1h and -7d line up with their BigInt deltas too.
+  const s1h = shiftScopeTime(scope, DIFF_SHIFT_1H);
+  assertEq(s1h.get("start_ns"), (BigInt(scope.get("start_ns")) - DIFF_SHIFT_1H).toString(), "-1h start_ns matches BigInt delta");
+  const s7d = shiftScopeTime(scope, DIFF_SHIFT_7D);
+  assertEq(s7d.get("start_ns"), (BigInt(scope.get("start_ns")) - DIFF_SHIFT_7D).toString(), "-7d start_ns matches BigInt delta");
+
+  // No window -> returned unchanged (no start_ns/end_ns to shift).
+  const noWindow = fullScopeQuery(new URLSearchParams("api=1&bucket=b&service=svc&host=h1"));
+  const nwShifted = shiftScopeTime(noWindow, DIFF_SHIFT_24H);
+  assertEq(nwShifted.get("start_ns"), null, "no start_ns -> none introduced");
+  assertEq(nwShifted.get("end_ns"), null, "no end_ns -> none introduced");
+  assertEq(nwShifted.get("bucket"), "b", "windowless scope carries other params through");
+
+  // Input is not mutated.
+  assertEq(scope.get("start_ns"), "1782155999000000000", "shiftScopeTime does not mutate the input scope");
+}
+
+// ── scopeWithHost: same-time-different-host preset (issue #624) ──
+{
+  const scope = fullScopeQuery(new URLSearchParams(
+    "api=1&bucket=b&prefix=p&service=svc&host=h1&host=h2&start_ns=1000&end_ns=2000"));
+
+  const swapped = scopeWithHost(scope, "h3");
+  assertEq(swapped.getAll("host").join(","), "h3", "scopeWithHost replaces all hosts with exactly the chosen one");
+  assertEq(swapped.get("bucket"), "b", "scopeWithHost preserves bucket");
+  assertEq(swapped.get("prefix"), "p", "scopeWithHost preserves prefix");
+  assertEq(swapped.get("service"), "svc", "scopeWithHost preserves service");
+  assertEq(swapped.get("start_ns"), "1000", "scopeWithHost preserves start_ns");
+  assertEq(swapped.get("end_ns"), "2000", "scopeWithHost preserves end_ns");
+
+  // Input is not mutated.
+  assertEq(scope.getAll("host").join(","), "h1,h2", "scopeWithHost does not mutate the input scope");
+
+  // End-to-end through the existing codec: preset 1 builds a diff link whose
+  // side B is the chosen host at side A's window.
+  const parsed = parseDiff(diffSearch(scope, scopeWithHost(scope, "h3")));
+  assert(parsed != null, "preset 1 -> diffSearch -> parseDiff round-trips");
+  assertEq(parsed.b.get("host"), "h3", "preset 1: side B narrowed to the chosen host");
+  assertEq(parsed.b.get("start_ns"), scope.get("start_ns"), "preset 1: side B keeps side A's window (same time)");
+  assertEq(parsed.a.getAll("host").join(","), "h1,h2", "preset 1: side A scope unchanged");
 }
 
 // ── Summary ──

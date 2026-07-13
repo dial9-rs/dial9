@@ -35,8 +35,29 @@ pub(crate) fn is_perf_blocked(err: &io::Error) -> bool {
 
 impl PerfSampler {
     /// Start sampling the current process.
+    ///
+    /// Tries perf first, falls back to ctimer if `perf_event_open` is blocked.
+    /// Also respects the `DIAL9_FORCE_CTIMER` environment variable.
     pub fn start(config: SamplerConfig) -> io::Result<Self> {
         Self::start_for_pid(0, config)
+    }
+
+    /// Start sampling using only the perf backend. No ctimer fallback.
+    ///
+    /// Returns an error if `perf_event_open` is blocked or fails for any reason.
+    pub(crate) fn start_perf_only(config: SamplerConfig) -> io::Result<Self> {
+        let perf = PerfSamplerImpl::start_for_pid(0, &config)?;
+        Ok(Self {
+            inner: Box::new(perf),
+        })
+    }
+
+    /// Start sampling using only the ctimer backend. No perf attempt.
+    ///
+    /// Only supports frequency-based sampling. Returns an error for
+    /// period-based configurations.
+    pub(crate) fn start_ctimer_only(config: SamplerConfig) -> io::Result<Self> {
+        Self::with_ctimer_process_wide(&config)
     }
 
     /// Start sampling a specific process.

@@ -77,6 +77,9 @@ node dial9-viewer/ui/test_flamegraph_diff.js
 echo "--- Checking tokio-stats API helpers (exemplar link + coverage) ---"
 node dial9-viewer/ui/test_tokio_stats_api.js
 
+echo "--- Checking Tokio-stats deep-link focus timebase (wall→monotonic) ---"
+node dial9-viewer/ui/test_focus_timebase.js
+
 echo "--- Checking SSE frame decoder ---"
 node dial9-viewer/ui/test_sse.js
 
@@ -89,7 +92,13 @@ node dial9-viewer/ui/test_enclosing_spans.js
 echo "--- Checking flamegraph export (folded + SVG) ---"
 node dial9-viewer/ui/test_flamegraph_export.js
 
+echo "--- Checking flamegraph export button enablement in API mode (#625) ---"
+node dial9-viewer/ui/test_flamegraph_setdirect_export.js
+
 echo "--- Checking runtime grouping (multi-runtime lanes) ---"
 node dial9-viewer/ui/test_runtime_groups.js
+
+echo "--- Checking browse density-timeline / heatmap helpers ---"
+node dial9-viewer/ui/test_heatmap.js
 
 echo "All E2E trace checks passed."

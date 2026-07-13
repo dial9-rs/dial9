@@ -239,6 +239,18 @@
       exportBtn.setAttribute("aria-expanded", "false");
     }
 
+    // Sync the Export control to the currently-rendered trees. Called by every
+    // render path (both the exact-trace applyFilters() and the aggregated/API
+    // setTreeDirect()) so the button never gets stuck in its initial disabled
+    // state. Always closes the menu: the trees were just rebuilt, so a menu left
+    // open would refer to the previous dataset.
+    function updateExportState() {
+      const canExport = hasExportableData();
+      exportBtn.disabled = !canExport;
+      exportBtn.title = canExport ? "Export this flamegraph" : "No samples to export";
+      closeExportMenu();
+    }
+
     if (FE) {
       exportBtn.addEventListener("click", function (e) {
         e.stopPropagation();
@@ -808,13 +820,7 @@
       offworkerLabel.textContent =
         `${offworkerLabelPrefix} \u2014 ${offworkerSamples.length} samples`;
 
-      // Export is only meaningful when there is something rendered. Always
-      // close the menu: the trees were just rebuilt, so a menu left open would
-      // refer to the previous (filtered) dataset.
-      const canExport = hasExportableData();
-      exportBtn.disabled = !canExport;
-      exportBtn.title = canExport ? "Export this flamegraph" : "No samples to export";
-      closeExportMenu();
+      updateExportState();
 
       renderAll();
     }
@@ -994,12 +1000,19 @@
         const path = findNodePath(workerTree, prevTarget);
         if (path) workerZoomStack = path;
       }
+      // Aggregated trees are not split into worker/off-worker lanes, so the
+      // exported section header should read "All threads" to match the label
+      // shown on screen (rather than the default "Worker threads" prefix).
+      workerLabelPrefix = "All threads";
       workerLabel.textContent = `All threads \u2014 ${totalCount.toLocaleString()} samples`;
       offworkerLabel.textContent = "";
       offworkerCanvas.style.display = "none";
       offworkerLabel.style.display = "none";
       spawnFilter.style.display = "none";
       runtimeFilter.style.display = "none";
+      // Enable the Export control now that an aggregated tree is rendered \u2014 the
+      // exact-trace path does this in applyFilters(), but API mode bypasses it.
+      updateExportState();
       renderAll();
     }
 

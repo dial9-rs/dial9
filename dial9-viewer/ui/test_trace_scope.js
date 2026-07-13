@@ -71,6 +71,7 @@ test("parseKey: compound instance path is best-effort, never throws", () => {
 test("encodeScope/readScope round-trips a scope", () => {
   const s = {
     bucket: "cell1-prod-pdx-dial9-traces",
+    region: "us-west-2",
     prefix: "traces",
     service: "shale",
     hosts: ["ip-10-2-1-1", "ip-10-2-1-2"],
@@ -80,6 +81,24 @@ test("encodeScope/readScope round-trips a scope", () => {
   const { query } = scope.encodeScope(new URLSearchParams(), s);
   const got = scope.readScope(new URLSearchParams(query));
   assert.deepStrictEqual(got, s);
+});
+
+test("encodeScope/readScope round-trips an empty region as ''", () => {
+  // A region-less scope (bucket in the server's default region, or unknown)
+  // must still round-trip cleanly: encodeScope omits s_region, readScope
+  // normalizes the absence back to "".
+  const s = {
+    bucket: "b",
+    region: "",
+    prefix: "traces",
+    service: "shale",
+    hosts: ["h1"],
+    from: 1,
+    to: 2,
+  };
+  const { query } = scope.encodeScope(new URLSearchParams(), s);
+  assert.strictEqual(new URLSearchParams(query).get("s_region"), null, "empty region not serialized");
+  assert.deepStrictEqual(scope.readScope(new URLSearchParams(query)), s);
 });
 
 test("readScope returns null when no time window is present", () => {
@@ -102,6 +121,7 @@ test("encodeScope preserves unrelated base params and namespaces its own", () =>
 test("encodeAggregationParams emits the un-namespaced names + ns window", () => {
   const s = {
     bucket: "bkt",
+    region: "us-west-2",
     prefix: "traces",
     service: "shale",
     hosts: ["h1", "h2"],
@@ -117,6 +137,9 @@ test("encodeAggregationParams emits the un-namespaced names + ns window", () => 
   assert.strictEqual(p.get("bucket"), "bkt");
   assert.strictEqual(p.get("prefix"), "traces");
   assert.strictEqual(p.get("service"), "shale");
+  // Region rides as `aws_region` — the same param the server reads — so a link
+  // straight to /api/flamegraph signs the right regional endpoint on its own.
+  assert.strictEqual(p.get("aws_region"), "us-west-2");
   assert.deepStrictEqual(p.getAll("host"), ["h1", "h2"], "repeatable host set");
   // Window converts seconds -> nanoseconds for the aggregation endpoints.
   assert.strictEqual(p.get("start_ns"), "1782760000000000000");
@@ -194,6 +217,29 @@ test("scopeFromKeys derives service/hosts/prefix/window", () => {
   assert.strictEqual(s.prefix, "traces");
   assert.strictEqual(s.from, 1782760000);
   assert.strictEqual(s.to, 1782760800);
+});
+
+test("scopeFromKeys carries the region when supplied, else ''", () => {
+  const keys = [key("h1", 1782760100, 1)];
+  assert.strictEqual(
+    scope.scopeFromKeys("bkt", keys, 1782760000, 1782760800, "us-west-2").region,
+    "us-west-2",
+    "region threaded through",
+  );
+  // Trailing/optional: existing 4-arg callers get an empty region, not undefined.
+  assert.strictEqual(scope.scopeFromKeys("bkt", keys, 1782760000, 1782760800).region, "");
+});
+
+test("scopeFromKeys region survives an aggregation round-trip", () => {
+  // End-to-end: a heatmap selection in a us-west-2 bucket produces an
+  // /api/flamegraph link that carries aws_region, so the opened tab signs the
+  // right endpoint without inheriting a detected region.
+  const keys = [key("h1", 1782760100, 1), key("h1", 1782760200, 2)];
+  const s = scope.scopeFromKeys("cell1-prod-pdx-dial9-traces", keys, 1782760000, 1782760800, "us-west-2");
+  const base = new URLSearchParams();
+  base.set("api", "1");
+  const { query } = scope.encodeAggregationParams(base, s);
+  assert.strictEqual(new URLSearchParams(query).get("aws_region"), "us-west-2");
 });
 
 test("scopeFromKeys derives the window from key epochs when none is supplied", () => {

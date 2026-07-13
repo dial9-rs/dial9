@@ -9,6 +9,7 @@
 const {
   exemplarViewerUrl,
   formatTokioCoverage,
+  latencyHeat,
   canRefineMore,
 } = require("./tokio_stats_api.js");
 
@@ -78,6 +79,45 @@ function assertEq(actual, expected, desc) {
   assertEq(q.has("start"), false, "window dropped even when provided");
 }
 
+// A focus window lands on the exact poll via the NON-DESTRUCTIVE focus_* params
+// (never start/end): focus_start pans the view, worker/task/end refine it.
+{
+  const url = exemplarViewerUrl({
+    bucket: "b",
+    sourceKey: "k.bin.gz",
+    focusStartNs: "1782687631093903000",
+    focusEndNs: "1782687631102430000",
+    focusWorker: 3,
+    focusTask: 42,
+  });
+  const q = new URLSearchParams(url.slice(url.indexOf("?") + 1));
+  assertEq(q.get("focus_start"), "1782687631093903000", "focus_start emitted");
+  assertEq(q.get("focus_end"), "1782687631102430000", "focus_end emitted");
+  assertEq(q.get("focus_worker"), "3", "focus_worker emitted");
+  assertEq(q.get("focus_task"), "42", "focus_task emitted");
+  // Must still be the focus params, NOT the destructive parse filter.
+  assertEq(q.has("start"), false, "focus link does not emit start");
+  assertEq(q.has("end"), false, "focus link does not emit end");
+}
+
+// focus_start alone is enough (spawn-loc exemplars have no worker/task); the
+// refining params are simply omitted rather than sent empty.
+{
+  const url = exemplarViewerUrl({ bucket: "b", sourceKey: "k.bin.gz", focusStartNs: 500 });
+  const q = new URLSearchParams(url.slice(url.indexOf("?") + 1));
+  assertEq(q.get("focus_start"), "500", "focus_start emitted on its own");
+  assertEq(q.has("focus_end"), false, "focus_end omitted when absent");
+  assertEq(q.has("focus_worker"), false, "focus_worker omitted when absent");
+  assertEq(q.has("focus_task"), false, "focus_task omitted when absent");
+}
+
+// No focus window (plain segment link) emits no focus_* params at all.
+{
+  const url = exemplarViewerUrl({ bucket: "b", sourceKey: "k.bin.gz" });
+  const q = new URLSearchParams(url.slice(url.indexOf("?") + 1));
+  assertEq(q.has("focus_start"), false, "no focus params without a window");
+}
+
 assertEq(exemplarViewerUrl({ bucket: "b" }), "", "no source key -> empty link");
 assertEq(exemplarViewerUrl({}), "", "no opts -> empty link");
 
@@ -114,6 +154,16 @@ assertEq(
   "poll count omitted when not provided",
 );
 assertEq(formatTokioCoverage(null, 100), "", "no coverage -> empty badge");
+
+// ── latencyHeat ──
+// Thresholds match IRIS's latencyHeat: ≥3ms red, ≥1ms amber, else green. Input
+// is nanoseconds (the wire unit for poll durations).
+assertEq(latencyHeat(500_000), "#3fb950", "sub-1ms poll is green");
+assertEq(latencyHeat(999_999), "#3fb950", "just under 1ms is still green");
+assertEq(latencyHeat(1_000_000), "#d29922", "1ms poll is amber");
+assertEq(latencyHeat(2_500_000), "#d29922", "1–3ms poll is amber");
+assertEq(latencyHeat(3_000_000), "#f85149", "3ms poll is red");
+assertEq(latencyHeat(50_000_000), "#f85149", "50ms poll is red");
 
 // ── canRefineMore ──
 assertEq(canRefineMore({ files_matched: 480, files_folded: 24 }), true, "folded < matched -> more");

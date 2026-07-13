@@ -44,11 +44,7 @@ async fn main() {
         h.await.unwrap();
     }
 
-    let trace_path = format!("{}/trace.bin", TRACE_DIR);
-    println!("\n✓ Trace files written to: {}", trace_path);
-    println!(
-        "  You can view them with: cargo run --package dial9-viewer -- --local-dir {}",
-        TRACE_DIR
-    );
-    println!("  Then open http://localhost:3000 in your browser");
+    println!("\n✓ Trace written to: {TRACE_DIR}");
+    println!("  View with: cargo run -p dial9-viewer -- serve --local-dir {TRACE_DIR}");
+    println!("  Then open http://localhost:3000");
 }

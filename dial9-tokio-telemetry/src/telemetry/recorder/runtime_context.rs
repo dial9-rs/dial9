@@ -54,6 +54,43 @@ thread_local! {
 crate::primitives::thread_local! {
     /// schedstat wait_time_ns captured at park time, used to compute delta on unpark.
     static PARKED_SCHED_WAIT: Cell<u64> = const { Cell::new(0) };
+    /// Per-thread park counter used to sample `SchedStat::read_current`. See
+    /// [`sched_wait_sample_rate`]: schedstat is only read on 1-in-N parks to
+    /// bound the CPU cost of reading `/proc/self/task/<tid>/schedstat`.
+    static PARK_COUNTER: Cell<u64> = const { Cell::new(0) };
+    /// Whether the current park cycle successfully read schedstat at park time.
+    /// Unpark only computes a wait-time delta when this is `true`, guaranteeing
+    /// every reported `sched_wait_ns` comes from a matched park->unpark pair.
+    static SCHED_SAMPLED_THIS_PARK: Cell<bool> = const { Cell::new(false) };
+}
+
+/// How often to read `SchedStat::read_current` in the worker park/unpark path.
+///
+/// Reading `/proc/self/task/<tid>/schedstat` on every park is measurable CPU
+/// overhead, and there is no need to catch every scheduler pause: periodic
+/// sampling still surfaces scheduling latency. We therefore only read schedstat
+/// on 1-in-N parks. `N` defaults to 10 and is overridable via the
+/// `DIAL9_SCHED_WAIT_SAMPLE_RATE` environment variable (values are clamped to at
+/// least 1; `1` restores read-on-every-park).
+fn sched_wait_sample_rate() -> u64 {
+    static RATE: OnceLock<u64> = OnceLock::new();
+    *RATE.get_or_init(|| {
+        std::env::var("DIAL9_SCHED_WAIT_SAMPLE_RATE")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .unwrap_or(10)
+            .max(1)
+    })
+}
+
+/// Advance a per-thread park counter and decide whether this park should read
+/// schedstat. Samples every `rate`th park (`rate` is clamped to at least 1, so
+/// `rate == 1` samples every park). Returns the incremented counter and the
+/// sampling decision. Pure so the 1-in-N logic can be unit-tested without the
+/// process-global rate or a live schedstat read.
+fn advance_park_counter(counter: u64, rate: u64) -> (u64, bool) {
+    let next = counter.wrapping_add(1);
+    (next, next.is_multiple_of(rate.max(1)))
 }
 
 /// Returns a strictly monotonic timestamp for this thread.
@@ -95,6 +132,10 @@ pub(crate) struct TokioRuntimesSource {
     /// used to skip the rebuild when nothing changed. See `segment_metadata` for
     /// what it is and why it is sufficient. `0` means "nothing emitted yet".
     last_fingerprint: usize,
+    /// Whether the fixed `sched.wait_sample_rate` metadata entry has been
+    /// emitted yet. It never changes, so it is emitted exactly once (the writer
+    /// keeps it in its merged cache and re-emits it on every rotation).
+    sched_rate_emitted: bool,
 }
 
 impl TokioRuntimesSource {
@@ -104,6 +145,7 @@ impl TokioRuntimesSource {
             last_sample: time_source().instant(),
             sample_interval: Duration::from_millis(10),
             last_fingerprint: 0,
+            sched_rate_emitted: false,
         }
     }
 }
@@ -132,6 +174,19 @@ impl Source for TokioRuntimesSource {
     }
 
     fn segment_metadata(&mut self, out: &mut Vec<(String, String)>) {
+        // Record the schedstat sampling rate once so a consumer reading
+        // `WorkerUnparkEvent::sched_wait_ns` knows the measurement represents
+        // roughly 1-in-N parks, not every park. Fixed for the process lifetime
+        // (the rate is read once via `OnceLock`), so emit it a single time; the
+        // writer keeps it in its merged cache and re-emits it on every rotation.
+        if !self.sched_rate_emitted {
+            out.push((
+                "sched.wait_sample_rate".to_string(),
+                sched_wait_sample_rate().to_string(),
+            ));
+            self.sched_rate_emitted = true;
+        }
+
         // Self-detected change: there is no external signal to keep in sync, so
         // a new caller that mutates runtime/worker metadata cannot forget to
         // announce it. The fingerprint is the runtime count plus the total
@@ -355,9 +410,24 @@ pub(super) fn make_worker_park(ctx: &RuntimeContext, shared: &SharedState) -> Wo
         .map(|(_, idx)| ctx.local_queue_depth(idx))
         .unwrap_or(0);
     let cpu_time_nanos = crate::telemetry::events::thread_cpu_time_nanos();
-    if let Ok(ss) = SchedStat::read_current() {
-        PARKED_SCHED_WAIT.with(|c| c.set(ss.wait_time_ns));
-    }
+    // Only read schedstat on 1-in-N parks. The counter and the "sampled this
+    // park" flag are thread-local, so the matching unpark on the same worker
+    // thread reads schedstat iff park did, keeping the wait-time delta a valid
+    // park->unpark pair.
+    let sample = PARK_COUNTER.with(|c| {
+        let (next, sample) = advance_park_counter(c.get(), sched_wait_sample_rate());
+        c.set(next);
+        sample
+    });
+    let sampled = sample
+        && match SchedStat::read_current() {
+            Ok(ss) => {
+                PARKED_SCHED_WAIT.with(|c| c.set(ss.wait_time_ns));
+                true
+            }
+            Err(_) => false,
+        };
+    SCHED_SAMPLED_THIS_PARK.with(|c| c.set(sampled));
     WorkerParkEvent {
         timestamp_ns: crate::telemetry::events::clock_monotonic_ns(),
         worker_id: resolved.map(|(id, _)| id).unwrap_or(WorkerId::UNKNOWN),
@@ -373,11 +443,19 @@ pub(super) fn make_worker_unpark(ctx: &RuntimeContext, shared: &SharedState) -> 
         .map(|(_, idx)| ctx.local_queue_depth(idx))
         .unwrap_or(0);
     let cpu_time_nanos = crate::telemetry::events::thread_cpu_time_nanos();
-    let sched_wait_delta_nanos = if let Ok(ss) = SchedStat::read_current() {
-        let prev = PARKED_SCHED_WAIT.with(|c| c.get());
-        ss.wait_time_ns.saturating_sub(prev)
+    // Only read schedstat on unpark if the matching park sampled it, so the
+    // delta below always pairs with a park-time reading. Reset the flag either
+    // way so a subsequent unsampled park can't reuse a stale pair. Report `None`
+    // when unsampled so consumers can distinguish "not measured" from a genuine
+    // zero-wait unpark rather than diluting their averages with false zeros.
+    let sampled = SCHED_SAMPLED_THIS_PARK.with(|c| c.replace(false));
+    let sched_wait_delta_nanos = if sampled {
+        SchedStat::read_current().ok().map(|ss| {
+            let prev = PARKED_SCHED_WAIT.with(|c| c.get());
+            ss.wait_time_ns.saturating_sub(prev)
+        })
     } else {
-        0
+        None
     };
     WorkerUnparkEvent {
         timestamp_ns: crate::telemetry::events::clock_monotonic_ns(),
@@ -407,12 +485,18 @@ mod tests {
         let contexts: RuntimeContextRegistry = Arc::new(Mutex::new(Vec::new()));
         let mut source = TokioRuntimesSource::new(contexts.clone());
 
-        // Empty registry: nothing to append.
+        // Empty registry: no runtime metadata yet, but the fixed schedstat
+        // sample-rate entry is emitted once on the first call.
         let mut out = Vec::new();
         source.segment_metadata(&mut out);
-        assert!(out.is_empty());
+        assert_eq!(
+            out.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>(),
+            vec!["sched.wait_sample_rate"],
+            "first call emits only the fixed sched-wait sample-rate entry"
+        );
 
-        // Register a runtime: the count grows, so the source rebuilds.
+        // Register a runtime: the count grows, so the source rebuilds. The
+        // sched-wait rate is not re-emitted (it is emitted exactly once).
         push_named_runtime(&contexts, "main", 0);
 
         out.clear();
@@ -431,6 +515,66 @@ mod tests {
         source.segment_metadata(&mut out);
         assert!(out.contains(&("runtime.main".to_string(), "0".to_string())));
         assert!(out.contains(&("runtime.io".to_string(), "1".to_string())));
+        // The sched-wait rate is fixed and emitted exactly once, so later
+        // change cycles never re-emit it.
+        assert!(!out.iter().any(|(k, _)| k == "sched.wait_sample_rate"));
+    }
+
+    #[test]
+    fn segment_metadata_reports_sched_wait_sample_rate_once() {
+        // The schedstat sampling rate is recorded in segment metadata so a
+        // consumer knows `sched_wait_ns` is 1-in-N sampled and knows N. It is
+        // fixed for the process lifetime, so it must be emitted exactly once.
+        let contexts: RuntimeContextRegistry = Arc::new(Mutex::new(Vec::new()));
+        let mut source = TokioRuntimesSource::new(contexts);
+
+        let mut out = Vec::new();
+        source.segment_metadata(&mut out);
+        let (_, value) = out
+            .iter()
+            .find(|(k, _)| k == "sched.wait_sample_rate")
+            .expect("first call emits the sched-wait sample-rate entry");
+        // The value is the process-global rate rendered as a positive integer.
+        assert_eq!(value, &sched_wait_sample_rate().to_string());
+        assert!(value.parse::<u64>().is_ok_and(|n| n >= 1));
+
+        // Emitted exactly once: a second call (no runtime change) appends nothing.
+        out.clear();
+        source.segment_metadata(&mut out);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn park_counter_samples_one_in_n() {
+        // rate == 1: every park samples.
+        let mut counter = 0u64;
+        for _ in 0..5 {
+            let (next, sample) = advance_park_counter(counter, 1);
+            counter = next;
+            assert!(sample);
+        }
+
+        // rate == 10 (the default): exactly one park in ten samples, and the
+        // sampled park is the 10th, not the 1st, so a burst of short parks is
+        // not over-counted.
+        counter = 0;
+        let mut sampled = 0;
+        let mut sampled_indices = Vec::new();
+        for i in 1..=30 {
+            let (next, sample) = advance_park_counter(counter, 10);
+            counter = next;
+            if sample {
+                sampled += 1;
+                sampled_indices.push(i);
+            }
+        }
+        assert_eq!(sampled, 3);
+        assert_eq!(sampled_indices, vec![10, 20, 30]);
+
+        // rate == 0 is clamped to 1 (defensive: the env parser already clamps,
+        // but the pure helper must not divide by zero).
+        let (_, sample) = advance_park_counter(0, 0);
+        assert!(sample);
     }
 
     mod steady_state_alloc {

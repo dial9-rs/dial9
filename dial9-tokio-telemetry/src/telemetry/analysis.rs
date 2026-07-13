@@ -148,8 +148,12 @@ pub struct WorkerStats {
     pub max_local_queue: usize,
     /// Maximum OS scheduling wait observed during any single unpark, in nanoseconds.
     pub max_sched_wait_ns: u64,
-    /// Cumulative OS scheduling wait across all unparks, in nanoseconds.
+    /// Cumulative OS scheduling wait across all *sampled* unparks, in nanoseconds.
     pub total_sched_wait_ns: u64,
+    /// Number of unparks that carried a schedstat sample. Since schedstat is
+    /// only read on a subset of parks (see `DIAL9_SCHED_WAIT_SAMPLE_RATE`), this
+    /// is the correct denominator for the sched-wait average, not `unpark_count`.
+    pub sched_wait_sample_count: usize,
 }
 
 /// Aggregated poll statistics for a single spawn location.
@@ -289,8 +293,13 @@ pub fn analyze_trace(events: &[Dial9Event]) -> TraceAnalysis {
                 let stats = worker_stats.entry(wid).or_default();
                 stats.max_local_queue = stats.max_local_queue.max(e.local_queue as usize);
                 stats.unpark_count += 1;
-                stats.total_sched_wait_ns += e.sched_wait_ns;
-                stats.max_sched_wait_ns = stats.max_sched_wait_ns.max(e.sched_wait_ns);
+                // Only fold sampled unparks into the sched-wait aggregates;
+                // unsampled ones (`None`) carry no measurement.
+                if let Some(sched_wait_ns) = e.sched_wait_ns {
+                    stats.sched_wait_sample_count += 1;
+                    stats.total_sched_wait_ns += sched_wait_ns;
+                    stats.max_sched_wait_ns = stats.max_sched_wait_ns.max(sched_wait_ns);
+                }
             }
             _ => {}
         }
@@ -420,10 +429,11 @@ pub fn print_analysis(analysis: &TraceAnalysis) {
             }
         );
         println!("  Max local queue: {}", stats.max_local_queue);
-        if stats.unpark_count > 0 {
+        if stats.sched_wait_sample_count > 0 {
             println!(
-                "  Sched wait: avg {:.1}µs, max {:.1}µs",
-                stats.total_sched_wait_ns as f64 / stats.unpark_count as f64 / 1000.0,
+                "  Sched wait ({} sampled): avg {:.1}µs, max {:.1}µs",
+                stats.sched_wait_sample_count,
+                stats.total_sched_wait_ns as f64 / stats.sched_wait_sample_count as f64 / 1000.0,
                 stats.max_sched_wait_ns as f64 / 1000.0,
             );
         }
@@ -555,13 +565,14 @@ pub fn detect_sched_delays(events: &[Dial9Event], threshold_ns: u64) -> Vec<Sche
             Dial9Event::WorkerUnparkEvent(e) => {
                 let wid = e.worker_id;
                 if let Some(park_ns) = park_times.remove(&wid)
-                    && e.sched_wait_ns >= threshold_ns
+                    && let Some(sched_wait_ns) = e.sched_wait_ns
+                    && sched_wait_ns >= threshold_ns
                 {
                     delays.push(SchedDelay {
                         worker_id: wid,
                         park_ns,
                         unpark_ns: e.timestamp_ns,
-                        sched_wait_ns: e.sched_wait_ns,
+                        sched_wait_ns,
                     });
                 }
             }
@@ -881,7 +892,7 @@ mod tests {
                 worker_id: WorkerId(0),
                 local_queue: 0,
                 cpu_time_ns: 0,
-                sched_wait_ns: 0,
+                sched_wait_ns: Some(0),
                 tid: 0,
             }),
         ];
@@ -890,6 +901,78 @@ mod tests {
         assert_eq!(idle[0].0, WorkerId(0));
         assert_eq!(idle[0].1, 4_000_000);
         assert_eq!(idle[0].2, 20);
+    }
+
+    #[test]
+    fn unsampled_unparks_are_excluded_from_sched_wait_stats() {
+        // Three unparks on worker 0: two carry a schedstat sample (300us and a
+        // genuine 0us wait), one is unsampled (`None`). The average must use the
+        // sampled count (2) as its denominator, and `Some(0)` must count as a
+        // real sample distinct from `None`.
+        let park = |ts| {
+            Dial9Event::WorkerParkEvent(WorkerParkEvent {
+                timestamp_ns: ts,
+                worker_id: WorkerId(0),
+                local_queue: 0,
+                cpu_time_ns: 0,
+                tid: 0,
+            })
+        };
+        let unpark = |ts, sched_wait_ns| {
+            Dial9Event::WorkerUnparkEvent(WorkerUnparkEvent {
+                timestamp_ns: ts,
+                worker_id: WorkerId(0),
+                local_queue: 0,
+                cpu_time_ns: 0,
+                sched_wait_ns,
+                tid: 0,
+            })
+        };
+        let events = vec![
+            park(1_000_000),
+            unpark(2_000_000, Some(300_000)),
+            park(3_000_000),
+            unpark(4_000_000, None),
+            park(5_000_000),
+            unpark(6_000_000, Some(0)),
+        ];
+
+        let analysis = analyze_trace(&events);
+        let stats = &analysis.worker_stats[&WorkerId(0)];
+        assert_eq!(stats.unpark_count, 3);
+        // Only the two sampled unparks contribute.
+        assert_eq!(stats.sched_wait_sample_count, 2);
+        assert_eq!(stats.total_sched_wait_ns, 300_000);
+        assert_eq!(stats.max_sched_wait_ns, 300_000);
+        // Average over sampled unparks is 150us, not 100us (which is what
+        // dividing by unpark_count would wrongly give).
+        let avg_us =
+            stats.total_sched_wait_ns as f64 / stats.sched_wait_sample_count as f64 / 1000.0;
+        assert_eq!(avg_us, 150.0);
+    }
+
+    #[test]
+    fn detect_sched_delays_skips_unsampled_unparks() {
+        // An unsampled unpark (`None`) must never be reported as a delay, even
+        // though a naive `>= threshold` on a zero-filled field would pass.
+        let events = vec![
+            Dial9Event::WorkerParkEvent(WorkerParkEvent {
+                timestamp_ns: 1_000_000,
+                worker_id: WorkerId(0),
+                local_queue: 0,
+                cpu_time_ns: 0,
+                tid: 0,
+            }),
+            Dial9Event::WorkerUnparkEvent(WorkerUnparkEvent {
+                timestamp_ns: 2_000_000,
+                worker_id: WorkerId(0),
+                local_queue: 0,
+                cpu_time_ns: 0,
+                sched_wait_ns: None,
+                tid: 0,
+            }),
+        ];
+        assert!(detect_sched_delays(&events, 0).is_empty());
     }
 
     #[test]
@@ -993,7 +1076,7 @@ mod tests {
                 worker_id: WorkerId(0),
                 local_queue: 0,
                 cpu_time_ns: 0,
-                sched_wait_ns: 200_000,
+                sched_wait_ns: Some(200_000),
                 tid: 0,
             }),
         ];
@@ -1020,7 +1103,7 @@ mod tests {
                 worker_id: WorkerId(0),
                 local_queue: 0,
                 cpu_time_ns: 0,
-                sched_wait_ns: 50_000,
+                sched_wait_ns: Some(50_000),
                 tid: 0,
             }),
         ];
@@ -1050,7 +1133,7 @@ mod tests {
                 worker_id: WorkerId(0),
                 local_queue: 0,
                 cpu_time_ns: 0,
-                sched_wait_ns: 500_000,
+                sched_wait_ns: Some(500_000),
                 tid: 0,
             }),
             Dial9Event::WorkerUnparkEvent(WorkerUnparkEvent {
@@ -1058,7 +1141,7 @@ mod tests {
                 worker_id: WorkerId(1),
                 local_queue: 0,
                 cpu_time_ns: 0,
-                sched_wait_ns: 10_000,
+                sched_wait_ns: Some(10_000),
                 tid: 0,
             }),
         ];
@@ -1332,7 +1415,7 @@ mod tests {
                 worker_id: WorkerId(0),
                 local_queue: 0,
                 cpu_time_ns: 0,
-                sched_wait_ns: 0,
+                sched_wait_ns: Some(0),
                 tid: 0,
             }),
         ];

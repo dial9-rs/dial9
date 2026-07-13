@@ -210,10 +210,11 @@ fn is_date(s: &str) -> bool {
 }
 
 /// True if a raw source key is a trace segment (not our own Parquet output).
-fn is_trace_segment(key: &str) -> bool {
+pub(crate) fn is_trace_segment(key: &str) -> bool {
     (key.ends_with(".bin.gz") || key.ends_with(".bin"))
         && !key.contains("/samples/")
         && !key.contains("/dict/")
+        && !key.contains("/flamegraph-data/")
 }
 
 /// Filter a raw source listing down to the files a [`Scope`] selects, then sort

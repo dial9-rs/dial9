@@ -164,6 +164,18 @@
             background: rgba(0,229,255,0.12);
             border: none; border-left: 1px solid #00e5ff; border-right: 1px solid #00e5ff;
         }
+        /* Hover cursor line + time readout — follow the pointer to answer
+           "what time am I looking at?". Hidden until the pointer enters the plot. */
+        #heatmap-cursor {
+            position: absolute; top: 0; width: 1px; pointer-events: none; display: none;
+            background: rgba(230,230,255,0.55);
+        }
+        #heatmap-cursor-label {
+            position: absolute; top: 2px; pointer-events: none; display: none;
+            transform: translateX(-50%); white-space: nowrap;
+            padding: 1px 5px; border-radius: 3px; font-size: 0.72em;
+            background: rgba(20,20,40,0.92); color: #e6e6ff; border: 1px solid #3a3a5e;
+        }
         #heatmap-axis {
             flex-shrink: 0; height: 22px; position: relative;
             border-top: 1px solid #222; font-size: 0.72em; color: #888;
@@ -296,7 +308,7 @@
             </div>
             <div id="heatmap-view" style="display:none">
                 <div id="heatmap-hint">
-                    <span>Drag to select a window, then open or profile it. <b>⌥ Option+drag</b> to zoom, double-click to reset.</span>
+                    <span>Click a segment to select just one · Drag to select a window · <b>⌥ Option+drag</b> to zoom · double-click to reset.</span>
                     <span class="legend">low <span class="bar"></span> high data density</span>
                     <span class="legend"><span class="gap-swatch"></span> gap (no data)</span>
                     <span style="color:#00e5ff">▏ boot change</span>
@@ -307,6 +319,8 @@
                     <div id="heatmap-plot">
                         <canvas id="heatmap-canvas"></canvas>
                         <div id="heatmap-sel"></div>
+                        <div id="heatmap-cursor"></div>
+                        <div id="heatmap-cursor-label"></div>
                     </div>
                 </div>
                 <div id="heatmap-axis"></div>
@@ -376,6 +390,18 @@
             <button onclick="clearDiff()" class="ghost" style="background:#2a2a44;color:#e0e0e0;border:1px solid #444;padding:3px 10px;border-radius:3px;cursor:pointer" title="Clear both sides">Clear</button>
         </div>
         <div id="diff-sides" style="display:grid;grid-template-columns:1fr 1fr;gap:10px"></div>
+        <!-- One-click presets to fill side B relative to side A (issue #624):
+             same window shifted back in time, or same window on a different
+             host in the browse view. Shown only when A is set and B is not. -->
+        <div id="diff-presets" style="display:none;margin-top:10px;align-items:center;gap:8px;flex-wrap:wrap">
+            <span style="color:#8b949e">Quick B:</span>
+            <button onclick="presetShiftB('1h')" class="ghost" style="background:#2a2a44;color:#e0e0e0;border:1px solid #444;padding:3px 10px;border-radius:3px;cursor:pointer" title="Side B = side A one hour earlier">−1h</button>
+            <button onclick="presetShiftB('24h')" class="ghost" style="background:#2a2a44;color:#e0e0e0;border:1px solid #444;padding:3px 10px;border-radius:3px;cursor:pointer" title="Side B = side A one day earlier">−24h</button>
+            <button onclick="presetShiftB('7d')" class="ghost" style="background:#2a2a44;color:#e0e0e0;border:1px solid #444;padding:3px 10px;border-radius:3px;cursor:pointer" title="Side B = side A one week earlier">−7d</button>
+            <select id="diff-preset-host" onchange="presetHostB(this.value)" style="background:#14142a;color:#e0e0e0;border:1px solid #444;padding:3px 8px;border-radius:3px;cursor:pointer" title="Side B = side A on a different host, same time window">
+                <option value="">same time, different host…</option>
+            </select>
+        </div>
         <div id="diff-launch" style="display:none;margin-top:10px;align-items:center;gap:8px">
             <span style="color:#8b949e">Compare in:</span>
             <button onclick="launchDiff('flamegraph')" style="background:#6c63ff;color:#fff;border:none;padding:4px 14px;border-radius:3px;cursor:pointer;font-weight:600">🔥 Flamegraph</button>
@@ -438,9 +464,15 @@
     let heatmapCols = [];      // per-row Float64Array of bytes-per-column
     let heatmapColMax = 0;     // global max column value (for normalization)
     let heatmapSelection = null; // { keys:[], bytes, t0, t1 }
+    // Set on mouseup when a heatmap interaction was a real drag (region select or
+    // zoom) rather than a click. The document-level deselect handler consumes it
+    // to ignore the synthetic click the browser fires after a drag that ends
+    // outside the pane, which would otherwise wipe the just-created selection.
+    let justDraggedOnHeatmap = false;
     let rawObjects = [];       // raw search results
     let currentTab = 'browse';
     let aggregationEnabled = false; // server runs demand-driven aggregation
+    let localMode = false;             // true when server is local-dir (no BYO creds)
     let currentQuickRange = null;   // hours, when a "Last Nhr" quick range is active
                                     // (null once the user edits the range manually)
 
@@ -858,6 +890,7 @@
         // When the server runs demand-driven aggregation, the flamegraph button
         // drives the sampled server-side loop instead of decoding raw traces.
         aggregationEnabled = !!config.aggregation_enabled;
+        localMode = !config.supports_byo_credentials;
         if (config.supports_byo_credentials) initCredsUi();
         // Server defaults (bucket/prefix) were filled programmatically above;
         // reflect them in the URL so the link is complete.
@@ -1008,9 +1041,19 @@
         if (fromDate) document.getElementById('range-from').value = dateToPickerStr(fromDate);
         if (toDate) document.getElementById('range-to').value = dateToPickerStr(toDate);
 
-        // Re-render current view
+        // Re-render current view. Only the axis tick labels are TZ-dependent,
+        // so redraw the canvas (which relabels the axis via fmtTick) and re-lay
+        // the selection rect instead of calling renderHeatmap(), which would
+        // clear the current selection and reset the zoom. Mirrors the resize
+        // handler below.
         if (currentTab === 'browse') {
-            if (heatmapRows.length) renderHeatmap();
+            if (heatmapRows.length) {
+                drawHeatmapCanvas();
+                if (heatmapSelection && heatmapSelection.rows) {
+                    showSelRect(heatmapSelection.t0, heatmapSelection.t1,
+                        heatmapSelection.rows[0], heatmapSelection.rows[1]);
+                }
+            }
         } else {
             renderRawTable(rawObjects);
         }
@@ -1057,6 +1100,16 @@
     // formatEpoch — that presentation concern stays here, not in the module.
     const parseKey = (key) => Dial9TraceScope.parseKey(key);
     const extractPrefix = (key) => Dial9TraceScope.extractPrefix(key);
+
+    // Parse last_modified into epoch seconds. The local backend sends numeric
+    // epoch seconds; S3 sends ISO 8601 strings. Returns 0 when absent/unparseable.
+    function epochSeconds(lastModified) {
+        if (!lastModified) return 0;
+        const n = Number(lastModified);
+        if (!isNaN(n) && n > 0) return n;
+        const ms = new Date(lastModified).getTime();
+        return isNaN(ms) ? 0 : ms / 1000;
+    }
 
     function toLocalDatetime(d) {
         const pad = n => String(n).padStart(2, '0');
@@ -1178,7 +1231,7 @@
                 const p = parseKey(obj.key);
                 if (!p.epoch) return true; // keep if we can't parse
                 // Include if segment overlaps the range (use last_modified as end proxy)
-                const end = obj.last_modified ? new Date(obj.last_modified).getTime() / 1000 : p.epoch;
+                const end = epochSeconds(obj.last_modified) || p.epoch;
                 return p.epoch <= toEpoch && end >= fromEpoch;
             });
 
@@ -1213,10 +1266,9 @@
             // spread uniformly across it when rendering density.
             heatmapSegments = allObjects.map(obj => {
                 const p = parseKey(obj.key);
-                const start = p.epoch;
-                const end = obj.last_modified
-                    ? new Date(obj.last_modified).getTime() / 1000
-                    : start;
+                const mtime = epochSeconds(obj.last_modified);
+                const start = p.epoch || mtime;
+                const end = mtime || start;
                 return {
                     key: obj.key, size: obj.size, start, end,
                     service: p.service, host: p.host, bootId: p.bootId,
@@ -1424,22 +1476,63 @@
             ctx.fillRect(0, y + ROW_H - 1, W, 1);
         }
 
-        drawHeatmapAxis(W);
+        // Faint full-height vertical gridlines at each axis tick, so the tick
+        // labels below project onto the strips and segment start/stop times can
+        // be read off the timeline. Drawn last so they sit above the strips.
+        const ticks = niceTimeTicks(tMin, tMax, clamp(Math.floor(W / 130), 2, 8));
+        ctx.strokeStyle = 'rgba(120,120,160,0.18)';
+        ctx.lineWidth = 1;
+        for (const t of ticks) {
+            const gx = Math.round(timeToX(t, tMin, tMax, W)) + 0.5;
+            if (gx < 0 || gx > W) continue;
+            ctx.beginPath();
+            ctx.moveTo(gx, 0);
+            ctx.lineTo(gx, H);
+            ctx.stroke();
+        }
+
+        drawHeatmapAxis(W, ticks);
     }
 
-    function drawHeatmapAxis(W) {
+    // Does the epoch-second range [tMin, tMax] cross a calendar-day boundary?
+    // Uses the active TZ mode so the date label matches the tick times.
+    function spansMultipleDays(tMin, tMax) {
+        const dayKey = (epoch) => {
+            const d = new Date(epoch * 1000);
+            return useLocalTz
+                ? d.getFullYear() + '-' + d.getMonth() + '-' + d.getDate()
+                : d.getUTCFullYear() + '-' + d.getUTCMonth() + '-' + d.getUTCDate();
+        };
+        return dayKey(tMin) !== dayKey(tMax);
+    }
+
+    // Format a tick's date (YYYY-MM-DD) in the active TZ mode.
+    function fmtTickDate(epoch) {
+        const d = new Date(epoch * 1000);
+        const pad = n => String(n).padStart(2, '0');
+        return useLocalTz
+            ? d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate())
+            : d.getUTCFullYear() + '-' + pad(d.getUTCMonth() + 1) + '-' + pad(d.getUTCDate());
+    }
+
+    function drawHeatmapAxis(W, ticks) {
         const axis = document.getElementById('heatmap-axis');
         axis.innerHTML = '';
         const { tMin, tMax } = heatmapDomain;
-        const n = clamp(Math.floor(W / 130), 2, 8);
-        for (let i = 0; i <= n; i++) {
-            const frac = i / n;
+        if (!ticks) ticks = niceTimeTicks(tMin, tMax, clamp(Math.floor(W / 130), 2, 8));
+        // Show the date on the leftmost tick, or on every tick when the visible
+        // window crosses a day boundary, so the day is never ambiguous.
+        const showDates = spansMultipleDays(tMin, tMax);
+        ticks.forEach((t, i) => {
+            const x = timeToX(t, tMin, tMax, W);
+            if (x < 0 || x > W) return;
             const tick = document.createElement('div');
             tick.className = 'tick';
-            tick.style.left = (LABEL_W + frac * W) + 'px';
-            tick.textContent = fmtTick(tMin + frac * (tMax - tMin));
+            tick.style.left = (LABEL_W + x) + 'px';
+            const withDate = showDates || i === 0;
+            tick.textContent = withDate ? fmtTickDate(t) + ' ' + fmtTick(t) : fmtTick(t);
             axis.appendChild(tick);
-        }
+        });
     }
 
     // ── Region selection / zoom on the heatmap ──
@@ -1448,7 +1541,14 @@
     (function setupHeatmapInteraction() {
         const plot = document.getElementById('heatmap-plot');
         const sel = document.getElementById('heatmap-sel');
+        const cursor = document.getElementById('heatmap-cursor');
+        const cursorLabel = document.getElementById('heatmap-cursor-label');
         let dragging = false, zooming = false, startX = 0, startY = 0;
+
+        function hideCursor() {
+            cursor.style.display = 'none';
+            cursorLabel.style.display = 'none';
+        }
 
         function localXY(e) {
             const rect = plot.getBoundingClientRect();
@@ -1465,6 +1565,7 @@
 
         plot.addEventListener('mousedown', (e) => {
             if (!heatmapRows.length) return;
+            justDraggedOnHeatmap = false; // reset for this fresh interaction
             dragging = true;
             zooming = e.altKey;
             const { x, y } = localXY(e);
@@ -1495,6 +1596,7 @@
             const { x, y } = localXY(e);
             if (zooming) {
                 zooming = false;
+                justDraggedOnHeatmap = true; // suppress the trailing synthetic click
                 sel.style.display = 'none'; // rubber-band was transient
                 zoomToX(Math.min(x, startX), Math.max(x, startX));
                 return;
@@ -1503,9 +1605,33 @@
             if (dx < 4 && dy < 4) {
                 selectSegmentAt(startX, startY); // treat as a click
             } else {
+                justDraggedOnHeatmap = true; // suppress the trailing synthetic click
                 finalizeSelection(Math.min(x, startX), Math.max(x, startX), Math.min(y, startY), Math.max(y, startY));
             }
         });
+        // Hover readout: while NOT dragging, follow the pointer with a thin
+        // cursor line and a label showing the full timestamp under it, so the
+        // user always knows what time they're looking at. Suppressed during a
+        // drag/zoom (the rubber-band already communicates the span) and when
+        // there's no data.
+        plot.addEventListener('mousemove', (e) => {
+            if (dragging || !heatmapRows.length || !heatmapDomain) { hideCursor(); return; }
+            const { x } = localXY(e);
+            const canvas = document.getElementById('heatmap-canvas');
+            const W = canvas.clientWidth || parseFloat(canvas.style.width) || 1;
+            const { tMin, tMax } = heatmapDomain;
+            const t = xToTime(x, tMin, tMax, W);
+            const H = heatmapRows.length * ROW_H;
+            cursor.style.left = Math.round(x) + 'px';
+            cursor.style.height = H + 'px';
+            cursor.style.display = 'block';
+            cursorLabel.textContent = formatEpoch(t);
+            // Clamp the label so it never overflows the plot's right/left edge.
+            const half = cursorLabel.offsetWidth / 2;
+            cursorLabel.style.left = clamp(x, half, W - half) + 'px';
+            cursorLabel.style.display = 'block';
+        });
+        plot.addEventListener('mouseleave', hideCursor);
         // Double-click anywhere on the plot resets to the full time range.
         plot.addEventListener('dblclick', () => resetHeatmapZoom());
     })();
@@ -1663,10 +1789,22 @@
     // Clicking anywhere outside the timeline and the actions bar clears the
     // current selection. (Clicks inside the plot are handled by its own
     // mousedown/up; clicks on the action buttons must preserve the selection.)
+    // A drag that ends outside the pane fires a synthetic click whose target is
+    // above #heatmap-view, so consume `justDraggedOnHeatmap` on every click to
+    // keep that phantom click from wiping the just-created selection.
     document.addEventListener('click', (e) => {
-        if (currentTab !== 'browse' || !heatmapSelection) return;
-        if (e.target.closest('#heatmap-view') || e.target.closest('#actions-bar')) return;
-        setHeatmapSelection(null);
+        const wasDrag = justDraggedOnHeatmap;
+        justDraggedOnHeatmap = false;
+        if (shouldClearSelectionOnClick({
+            isBrowseTab: currentTab === 'browse',
+            hasSelection: !!heatmapSelection,
+            wasDrag,
+            targetInHeatmap: !!e.target.closest('#heatmap-view'),
+            targetInActions: !!e.target.closest('#actions-bar'),
+            targetInHeader: !!e.target.closest('header'),
+        })) {
+            setHeatmapSelection(null);
+        }
     });
 
     // Structured title metadata (svc / host / time window / segment count)
@@ -1691,6 +1829,20 @@
     }
 
 
+    // The bucket's region, for stamping onto every link this page opens
+    // (flamegraph / tokio-stats / viewer) so the opened tab's URL is
+    // self-contained — it signs the right regional S3 endpoint without relying
+    // on having inherited a detected region from this page. Source of truth is
+    // the credentials store (where region detection lands on Apply / bucket
+    // pick); the panel's region field is the fallback. Empty string when unknown
+    // (the server then uses its default region).
+    function currentRegion() {
+        const stored = window.Dial9Creds ? Dial9Creds.get() : null;
+        if (stored && stored.region) return stored.region;
+        const field = document.getElementById('creds-region');
+        return (field && field.value.trim()) || '';
+    }
+
     // Build the aggregate SCOPE (bucket/prefix/service/host-set/time window) for
     // the current heatmap selection, as a URLSearchParams. This is the single
     // source of truth shared by the flamegraph button, the tokio-stats button,
@@ -1709,7 +1861,7 @@
         // wrap the query back into the URLSearchParams the diff tray works with,
         // and warn if the host set was too large to name in the link (the capture
         // then covers all hosts in the window).
-        const scope = Dial9TraceScope.scopeFromKeys(bucket, heatmapSelection.keys, heatmapSelection.t0, heatmapSelection.t1);
+        const scope = Dial9TraceScope.scopeFromKeys(bucket, heatmapSelection.keys, heatmapSelection.t0, heatmapSelection.t1, currentRegion());
         const { query, hostsDropped } = Dial9TraceScope.encodeAggregationParams(new URLSearchParams(), scope);
         if (hostsDropped) warnHostsDropped();
         return new URLSearchParams(query);
@@ -1721,6 +1873,11 @@
     // serve each whole file — no server-side event filtering is needed for a
     // working flamegraph. The selection is already size-capped.
     function viewCpuProfile() {
+        // A full A/B diff has been captured — the top button opens the diff
+        // rather than a single-scope flamegraph (issue #626). launchDiff early-
+        // returns unless BOTH sides are set, so a partial capture still falls
+        // through to the single-scope flamegraph of the current selection.
+        if (diffA && diffB) { launchDiff('flamegraph'); return; }
         if (!heatmapSelection || !heatmapSelection.keys.length) return;
         const bucket = bucketInput.value.trim();
         if (!bucket) { alert('Bucket is required'); return; }
@@ -1739,7 +1896,7 @@
             // (A box spanning >1 service sends no service filter — all services
             // in the box — matching exact mode, rather than the old "first
             // service wins" which silently dropped the others.)
-            const scope = Dial9TraceScope.scopeFromKeys(bucket, keys, heatmapSelection.t0, heatmapSelection.t1);
+            const scope = Dial9TraceScope.scopeFromKeys(bucket, keys, heatmapSelection.t0, heatmapSelection.t1, currentRegion());
             const base = new URLSearchParams();
             base.set('api', '1');
             const { query, hostsDropped } = Dial9TraceScope.encodeAggregationParams(base, scope);
@@ -1755,7 +1912,7 @@
         // can't overflow CloudFront's 8192-byte request-URI cap and 414 the tab)
         // and stateless (so a shared deep link re-resolves in any browser).
         const fgParams = traceTitleParams(keys);
-        const scope = Dial9TraceScope.scopeFromKeys(bucket, keys, heatmapSelection.t0, heatmapSelection.t1);
+        const scope = Dial9TraceScope.scopeFromKeys(bucket, keys, heatmapSelection.t0, heatmapSelection.t1, currentRegion());
         const { query, hostsDropped } = Dial9TraceScope.encodeScope(fgParams, scope);
         if (hostsDropped) warnHostsDropped();
         window.open('flamegraph.html?' + query, '_blank');
@@ -1773,13 +1930,16 @@
     }
 
     function viewTokioStats() {
+        // In diff mode the top button opens the A/B diff (issue #626); a partial
+        // capture falls through to a single-scope tokio-stats view.
+        if (diffA && diffB) { launchDiff('tokio'); return; }
         if (!heatmapSelection || !heatmapSelection.keys.length) return;
         const bucket = bucketInput.value.trim();
         if (!bucket) { alert('Bucket is required'); return; }
         const keys = heatmapSelection.keys;
         // Same scope the aggregation flamegraph uses, same param vocabulary —
         // /api/tokio-stats reads bucket/prefix/service/host + start_ns/end_ns.
-        const scope = Dial9TraceScope.scopeFromKeys(bucket, keys, heatmapSelection.t0, heatmapSelection.t1);
+        const scope = Dial9TraceScope.scopeFromKeys(bucket, keys, heatmapSelection.t0, heatmapSelection.t1, currentRegion());
         const { query, hostsDropped } = Dial9TraceScope.encodeAggregationParams(new URLSearchParams(), scope);
         if (hostsDropped) warnHostsDropped();
         window.open('tokio_stats.html?' + query, '_blank');
@@ -1857,6 +2017,84 @@
             sideCell('A · left', diffA, '#1e3050', '#9ec1ff', 'a') +
             sideCell('B · right', diffB, '#4a221c', '#ffb3a0', 'b');
         launch.style.display = (diffA && diffB) ? 'flex' : 'none';
+        renderDiffPresets();
+        refreshDiffModeButtons();
+    }
+
+    // Populate/toggle the "Quick B" presets (issue #624). They only make sense
+    // once side A is captured and side B is still empty: they derive B from A.
+    // The time-shift buttons need A to carry a window (start_ns/end_ns); the
+    // host dropdown lists every host in the current browse view except A's own.
+    function renderDiffPresets() {
+        const presets = document.getElementById('diff-presets');
+        if (!presets) return;
+        if (!diffA || diffB) { presets.style.display = 'none'; return; }
+        presets.style.display = 'flex';
+
+        // Shift presets are only meaningful with a window on side A.
+        const hasWindow = diffA.get('start_ns') != null && diffA.get('end_ns') != null;
+        for (const btn of presets.querySelectorAll('button')) {
+            btn.disabled = !hasWindow;
+            btn.style.opacity = hasWindow ? '1' : '0.4';
+            btn.style.cursor = hasWindow ? 'pointer' : 'not-allowed';
+        }
+
+        // Host dropdown: all service/host pairs in the browse window, minus the
+        // host(s) already on side A (comparing a host to itself is a no-op).
+        const sel = document.getElementById('diff-preset-host');
+        const aHosts = new Set(diffA.getAll('host'));
+        const seen = new Set();
+        const opts = ['<option value="">same time, different host…</option>'];
+        for (const row of heatmapRows) {
+            if (!row.host || aHosts.has(row.host) || seen.has(row.host)) continue;
+            seen.add(row.host);
+            const label = row.service ? row.service + ' / ' + row.host : row.host;
+            opts.push('<option value="' + escapeHtmlIdx(row.host) + '">' + escapeHtmlIdx(label) + '</option>');
+        }
+        sel.innerHTML = opts.join('');
+        // Disable the dropdown when there is no other host to pick.
+        const hasOther = opts.length > 1;
+        sel.disabled = !hasOther;
+        sel.style.opacity = hasOther ? '1' : '0.4';
+        sel.style.cursor = hasOther ? 'pointer' : 'not-allowed';
+    }
+
+    // Preset: side B = side A shifted back one hour / day / week (same window
+    // length). Reuses the shared shiftScopeTime helper AND the shared BigInt-ns
+    // shift constants so this matches the flamegraph Diff dialog exactly (#624).
+    const DIFF_SHIFTS = {
+        '1h': FlamegraphDiff.DIFF_SHIFT_1H,
+        '24h': FlamegraphDiff.DIFF_SHIFT_24H,
+        '7d': FlamegraphDiff.DIFF_SHIFT_7D,
+    };
+    function presetShiftB(which) {
+        if (!diffA || diffB) return;
+        const deltaNs = DIFF_SHIFTS[which];
+        if (deltaNs == null) return;
+        diffB = FlamegraphDiff.shiftScopeTime(diffA, deltaNs);
+        renderDiffTray();
+    }
+    window.presetShiftB = presetShiftB;
+
+    // Preset: side B = side A on a different host, same time window. Reuses the
+    // shared scopeWithHost helper (issue #624).
+    function presetHostB(host) {
+        if (!host || !diffA || diffB) return;
+        diffB = FlamegraphDiff.scopeWithHost(diffA, host);
+        renderDiffTray();
+    }
+    window.presetHostB = presetHostB;
+
+    // Relabel the top actions-bar buttons to reflect that, in diff mode, they now
+    // open the A/B diff instead of a single-scope view (issue #626). Called from
+    // both diff-state changes (renderDiffTray) and selection changes
+    // (updateSelectionCount) so the label stays in sync in both directions.
+    function refreshDiffModeButtons() {
+        const cpuBtn = document.getElementById('cpu-btn');
+        const healthBtn = document.getElementById('health-btn');
+        const diffMode = !!(diffA && diffB);
+        if (cpuBtn) cpuBtn.textContent = diffMode ? '🔥 Flamegraph diff' : '🔥 Flamegraph';
+        if (healthBtn) healthBtn.textContent = diffMode ? '⚡ Tokio Stats diff' : '⚡ Tokio Stats';
     }
 
     // Launch the captured A/B diff in the chosen viz. Uses the shared scope-link
@@ -1864,17 +2102,9 @@
     // encoding — the unified diff-handling seam between the two views.
     function launchDiff(kind) {
         if (!diffA || !diffB) return;
-        // Flamegraph scopes carry the client-only `api=1` flag; tokio-stats does
-        // not use it. Add it per-side only for the flamegraph target so each side
-        // hits /api/flamegraph in aggregate mode.
-        function scopeFor(base) {
-            if (kind !== 'flamegraph') return base;
-            const s = new URLSearchParams(base.toString());
-            s.set('api', '1');
-            return s;
-        }
-        const search = FlamegraphDiff.diffSearch(scopeFor(diffA), scopeFor(diffB));
-        const page = kind === 'tokio' ? 'tokio_stats.html' : 'flamegraph.html';
+        // chooseTarget owns the single-vs-diff routing and the per-side `api=1`
+        // flag for the flamegraph target (tokio-stats does not use it).
+        const { page, search } = FlamegraphDiff.chooseTarget(kind, { hasDiff: true, diffA, diffB });
         window.open(page + '?' + search, '_blank');
     }
 
@@ -1996,6 +2226,10 @@
         const warn = document.getElementById('selection-warn');
         const count = document.getElementById('selection-count');
 
+        // Keep the top-button labels ("Flamegraph" vs "Flamegraph diff") in sync
+        // as the selection changes (issue #626).
+        refreshDiffModeButtons();
+
         if (currentTab === 'browse') {
             const sel = heatmapSelection;
             if (!sel || !sel.keys.length) {
@@ -2037,6 +2271,16 @@
 
         const bucket = bucketInput.value.trim();
 
+        // Local mode: open traces directly by key (no scope resolution needed,
+        // and the scope can't be derived from buffer-style key names anyway).
+        if (localMode) {
+            const traceParams = keys.map(k =>
+                'trace=' + encodeURIComponent('/api/object?key=' + encodeURIComponent(k))
+            ).join('&');
+            window.open('viewer.html?' + traceParams, '_blank');
+            return;
+        }
+
         // Carry the selection as a compact *scope* (bucket/prefix/service/
         // host-set + time window) instead of one trace= component per file. The
         // viewer re-lists the matching files from the scope and downloads them
@@ -2048,7 +2292,7 @@
         const titleParams = traceTitleParams(keys);
         const t0 = heatmapSelection ? heatmapSelection.t0 : null;
         const t1 = heatmapSelection ? heatmapSelection.t1 : null;
-        const scope = Dial9TraceScope.scopeFromKeys(bucket, keys, t0, t1);
+        const scope = Dial9TraceScope.scopeFromKeys(bucket, keys, t0, t1, currentRegion());
         // Raw mode passes no window, so scopeFromKeys derives it from the keys'
         // epochs. It returns null when none parse (an unrecognized key layout);
         // there is no window to build a scope from, so tell the user rather than

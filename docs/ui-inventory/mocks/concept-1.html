@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Concept 1: unified timeline column</title>
+<link rel="stylesheet" href="mock.css"></head>
+<body>
+<div class="mockbar"><b>CONCEPT 1 - Unified timeline column</b>
+  <span>all analysis surfaces are time-aligned tracks in ONE scrolling column; persistent inspector right; minimap top</span>
+  <span class="key">C</span><span>hold to compare with current UI</span>
+  <span style="margin-left:auto"><a href="index.html">gallery</a> · <a href="concept-2.html">concept 2</a> · <a href="concept-3.html">concept 3</a></span>
+</div>
+
+<div class="toolbar">
+  <span class="title">demo-trace.bin</span><span class="meta">294,465 events · 2 workers · 4.15s</span>
+  <button>⚠ Blocking Calls</button><button class="btn-hot">🔥 Flamegraph (8993)</button>
+  <span style="margin-left:auto"></span>
+  <button>Time: Absolute</button><button>?</button>
+</div>
+
+<div class="minimap"><div class="density"></div>
+  <div class="poi" style="left:12%"></div><div class="poi" style="left:31%"></div><div class="poi" style="left:33%"></div><div class="poi" style="left:58%"></div><div class="poi" style="left:83%"></div>
+  <div class="viewport" id="vp" title="drag me"></div><div class="label">overview 0s - 4.15s · red ticks = POIs · <b style="color:#00e5ff">drag the cyan box</b> <span class="tag-new">NEW</span></div>
+</div>
+
+<div style="flex:1; display:flex; min-height:0">
+  <div style="flex:1; overflow-y:auto; min-width:0">
+    <!-- Worker lanes: real screenshot crop -->
+    <div class="strip crop pan" style="height:130px; background-image:url(assets/crop-lanes.png); background-position: 0 -6px;" data-bx="0"></div>
+    <!-- Time-aligned tracks, all OPEN by default -->
+    <div class="strip"><div class="strip-label">CPU</div>
+      <div class="crop pan" style="height:74px; margin-left:100px; background-image:url(assets/A1-all-panels-expanded.png); background-position: -100px -790px;" data-bx="-100"></div></div>
+    <div class="strip"><div class="strip-label">Queue G+L</div>
+      <div class="crop pan" style="height:74px; margin-left:100px; background-image:url(assets/A1-all-panels-expanded.png); background-position: -100px -905px;" data-bx="-100"></div></div>
+    <div class="strip"><div class="strip-label">Spans</div>
+      <div class="crop pan" style="height:150px; margin-left:100px; background-image:url(assets/A1-all-panels-expanded.png); background-position: -100px -320px;" data-bx="-100"></div></div>
+    <div class="strip"><div class="strip-label">Events</div>
+      <div class="crop pan" style="height:44px; margin-left:100px; background-image:url(assets/A1-all-panels-expanded.png); background-position: -100px -650px;" data-bx="-100"></div></div>
+    <div style="padding:8px 12px" class="illustrative">track order drag-to-reorder; per-track collapse caret; tracks share the one time axis (no per-panel folds)</div>
+  </div>
+
+  <div class="inspector">
+    <div class="tabs"><div class="on">Task</div><div>Poll</div><div>Stack</div><div>Wakes</div><div>Events</div></div>
+    <div class="body">
+      <div style="color:#ffeb3b; margin-bottom:6px">Task 0x3a <span class="tag-new">persistent</span></div>
+      <div class="kv"><span class="k">spawn</span><span class="v">axum_traced.rs:243:33</span></div>
+      <div class="kv"><span class="k">polls</span><span class="v">891</span></div>
+      <div class="kv"><span class="k">wakes</span><span class="v">1014</span></div>
+      <div class="kv"><span class="k">lifetime</span><span class="v">1.00s</span></div>
+      <div class="kv"><span class="k">at cursor: global Q</span><span class="v">0</span></div>
+      <div class="kv"><span class="k">at cursor: local Q</span><span class="v">8</span></div>
+      <div class="kv"><span class="k">at cursor: active tasks</span><span class="v">14</span></div>
+      <div style="margin-top:10px; color:#888; font-size:11px">All at-moment stats live HERE (one surface), not in three screen corners. Selection re-scopes Spans + Events tracks (dimmed to task).</div>
+    </div>
+  </div>
+</div>
+
+<div class="statusbar">
+  <span class="sel">Task 0x3a selected · Esc clears</span>
+  <span>view +1.32s - +2.24s</span>
+  <span class="link">⎘ copy link to this view <span class="tag-new">URL state</span></span>
+  <span style="margin-left:auto">/ search · n/p POI · f fit · z undo zoom · g goto time · ? help</span>
+</div>
+
+<div class="fullshot" id="cmp" style="background-image:url(assets/J1-1-viewer-initial.png)"></div>
+<div class="compare-note">hold <b>C</b> = current UI</div>
+<script>
+  const cmp = document.getElementById("cmp");
+  addEventListener("keydown", e => { if (e.key.toLowerCase() === "c") cmp.style.display = "block"; });
+  addEventListener("keyup", e => { if (e.key.toLowerCase() === "c") cmp.style.display = "none"; });
+
+  // Interactive minimap: drag the viewport box; all time-aligned tracks pan in sync.
+  // (Mock mechanics: panning shifts the screenshot crops; the real thing moves viewStart/viewEnd.)
+  const vp = document.getElementById("vp");
+  const mm = vp.parentElement;
+  const strips = [...document.querySelectorAll(".pan")];
+  const PAN_RANGE = 900; // px of simulated horizontal travel across the full trace
+  let dragging = false, home = null;
+  function applyFrac(frac) {
+    const w = mm.clientWidth, vw = vp.offsetWidth;
+    const left = Math.max(0, Math.min(w - vw, frac * w - vw / 2));
+    vp.style.left = left + "px";
+    const center = (left + vw / 2) / w;            // 0..1 position in trace
+    if (home === null) home = center;               // first drag anchors the crops' current offset
+    const dx = (center - home) * PAN_RANGE;
+    for (const s of strips) {
+      const bx = parseFloat(s.dataset.bx);
+      s.style.backgroundPositionX = (bx - dx) + "px";
+    }
+  }
+  vp.addEventListener("mousedown", e => { dragging = true; e.preventDefault(); });
+  mm.addEventListener("mousedown", e => { if (e.target === mm || e.target.classList.contains("density")) { dragging = true; applyFrac((e.clientX - mm.getBoundingClientRect().left) / mm.clientWidth); } });
+  addEventListener("mousemove", e => { if (dragging) applyFrac((e.clientX - mm.getBoundingClientRect().left) / mm.clientWidth); });
+  addEventListener("mouseup", () => dragging = false);
+</script>
+</body></html>

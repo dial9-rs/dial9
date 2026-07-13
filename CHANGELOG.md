@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Explicit CPU profiling backend selection via `CpuProfilingConfig::with_perf_backend()` and `CpuProfilingConfig::with_ctimer_backend()` constructors. The default (Auto: try perf, fall back to ctimer) is unchanged ([#579](https://github.com/dial9-rs/dial9/issues/579), [#660](https://github.com/dial9-rs/dial9/pull/660))
 - In-memory writer (`InMemoryWriter`): run the trace pipeline with no filesystem dependency, encoded segments are held in process memory and shipped by the existing processor pipeline ([#435](https://github.com/dial9-rs/dial9/pull/435))
 - `#[dial9::main]` now performs an implicit graceful shutdown after the async body returns: it drops the runtime and drains the background worker so the final segment is symbolized, compressed, and uploaded. Configure the deadline with `.graceful_shutdown(Duration)` on the recorder (default 1s) or skip it with `.disable_graceful_shutdown()`. The low-level `TracedRuntime` API is unchanged — call `TelemetryGuard::graceful_shutdown` yourself ([#479](https://github.com/dial9-rs/dial9/issues/479))
 - `SegmentProcessor::finalize_dump`: custom processors can flush per-dump state when an on-demand dump completes ([#549](https://github.com/dial9-rs/dial9/pull/549))
@@ -30,6 +31,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Memory profiling moved into `dial9-perf-self-profile`. The `dial9_tokio_telemetry::memory_profiling::*` paths and public API (`Dial9Allocator`, `MemoryProfiler::install`, `MemoryProfilerGuard`) are unchanged.
 - **Breaking:** removed `Dial9Config` and its builders (`Dial9ConfigBuilder`, `DiskConfigBuilder`, `MemoryConfigBuilder`) along with `Dial9ConfigBuilderError` / `ValidationError` / `TelemetryRuntimeError`. Configure telemetry with `dial9::recorder(writer).with_tokio(..)` (programmatic) or `dial9::recorder_from_env()` (env). Per-source knobs (`with_cpu_profiling`, …) move to the recorder builder (the `RecorderPerfExt` trait); `.build_or_disabled()` becomes `dial9::recorder_or_disabled(writer, ..)`. All `DIAL9_*` env vars are unchanged ([#356](https://github.com/dial9-rs/dial9/issues/356))
 - **Breaking:** removed the low-level `TracedRuntime::builder()` / `TracedRuntimeBuilder` and its pipeline type-state markers. Build a traced runtime via `dial9::recorder(writer).with_tokio(..)`; for multiple runtimes on one session use `TelemetryCore::builder()` + `TelemetryGuard::trace_runtime()`. The worker trace path comes solely from the writer's base path ([#356](https://github.com/dial9-rs/dial9/issues/356))
+
+### Fixed
+
+- Viewer: browsing a nonexistent bucket now returns HTTP 404 instead of 500, and a syntactically invalid bucket name returns HTTP 400. The S3 `NoSuchBucket`/`NoSuchKey` and `InvalidBucketName` error codes were falling through to the generic error arm, which logged an "unclassified S3 error" and reported a server `fault` — so a user typo in the bucket name polluted the viewer's fault metric. They now classify as `NotFound` (404) and `BadRequest` (400) respectively.
 
 ## [0.3.13](https://github.com/dial9-rs/dial9/compare/dial9-tokio-telemetry-v0.3.12...dial9-tokio-telemetry-v0.3.13) - 2026-05-29
 

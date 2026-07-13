@@ -13,6 +13,8 @@ const {
     segmentsOverlapping,
     totalBytes,
     densityColor,
+    shouldClearSelectionOnClick,
+    niceTimeTicks,
 } = require("./heatmap.js");
 
 let failed = 0;
@@ -201,6 +203,84 @@ function seg(o) {
     ok(low !== "rgb(26,26,46)", "densityColor: small positive is visible (not background)");
     ok(lum(low) < lum(mid) && lum(mid) < lum(hi), "densityColor: brighter with higher density");
     ok(densityColor(1) === "rgb(255,217,61)", "densityColor: 1 → hot yellow");
+}
+
+// ── shouldClearSelectionOnClick ──
+{
+    // The regression: a selection drag that ends outside the pane fires a
+    // synthetic click on an ancestor above #heatmap-view. That click must NOT
+    // clear the just-created selection.
+    ok(shouldClearSelectionOnClick({
+        isBrowseTab: true, hasSelection: true, wasDrag: true,
+        targetInHeatmap: false, targetInActions: false,
+    }) === false, "shouldClearSelectionOnClick: drag ending outside pane keeps selection");
+
+    // A genuine outside click (no drag) clears the selection.
+    ok(shouldClearSelectionOnClick({
+        isBrowseTab: true, hasSelection: true, wasDrag: false,
+        targetInHeatmap: false, targetInActions: false,
+    }) === true, "shouldClearSelectionOnClick: genuine outside click clears");
+
+    // Clicks inside the timeline or on the actions bar preserve the selection.
+    ok(shouldClearSelectionOnClick({
+        isBrowseTab: true, hasSelection: true, wasDrag: false,
+        targetInHeatmap: true, targetInActions: false,
+    }) === false, "shouldClearSelectionOnClick: click inside heatmap keeps selection");
+    ok(shouldClearSelectionOnClick({
+        isBrowseTab: true, hasSelection: true, wasDrag: false,
+        targetInHeatmap: false, targetInActions: true,
+    }) === false, "shouldClearSelectionOnClick: click on actions bar keeps selection");
+
+    // Regression (#645/#644 interaction): the TZ toggle and credentials button
+    // live in the page <header>, which is neither the timeline nor the actions
+    // bar. Clicking header chrome must NOT clear the selection — toggling TZ
+    // only relabels the axis.
+    ok(shouldClearSelectionOnClick({
+        isBrowseTab: true, hasSelection: true, wasDrag: false,
+        targetInHeatmap: false, targetInActions: false, targetInHeader: true,
+    }) === false, "shouldClearSelectionOnClick: click in header (TZ toggle) keeps selection");
+
+    // No-ops when not on browse tab or nothing is selected.
+    ok(shouldClearSelectionOnClick({
+        isBrowseTab: false, hasSelection: true, wasDrag: false,
+        targetInHeatmap: false, targetInActions: false,
+    }) === false, "shouldClearSelectionOnClick: not browse tab → no clear");
+    ok(shouldClearSelectionOnClick({
+        isBrowseTab: true, hasSelection: false, wasDrag: false,
+        targetInHeatmap: false, targetInActions: false,
+    }) === false, "shouldClearSelectionOnClick: no selection → no clear");
+}
+
+// ── niceTimeTicks ──
+{
+    // Ticks are ascending and stay within [tMin, tMax].
+    const ticks = niceTimeTicks(1000, 1600, 6);
+    ok(ticks.length > 0, "niceTimeTicks: returns at least one tick");
+    ok(ticks.every((t, i) => i === 0 || t > ticks[i - 1]), "niceTimeTicks: strictly ascending");
+    ok(ticks.every((t) => t >= 1000 && t <= 1600), "niceTimeTicks: all ticks within range");
+
+    // A ~600s span with target 6 must snap to a round step (a multiple of a
+    // human interval like 120s), not an arbitrary 100s division.
+    const step = ticks[1] - ticks[0];
+    ok([60, 120].includes(step), `niceTimeTicks: snaps to a round step (got ${step})`);
+    ok(step % 60 === 0 || step % 30 === 0, "niceTimeTicks: step is a round interval");
+
+    // Count stays within the target.
+    ok(ticks.length <= 6, `niceTimeTicks: count <= target (got ${ticks.length})`);
+
+    // Ticks are aligned to multiples of the step so they land on round times.
+    ok(ticks.every((t) => t % step === 0), "niceTimeTicks: ticks aligned to the step");
+
+    // A wider span still respects the target.
+    const wide = niceTimeTicks(0, 86400, 8);
+    ok(wide.length <= 8, `niceTimeTicks: wide span respects target (got ${wide.length})`);
+    ok(wide.every((t, i) => i === 0 || t > wide[i - 1]), "niceTimeTicks: wide span ascending");
+}
+{
+    // Degenerate range (tMax <= tMin) returns a single tick without throwing.
+    ok(niceTimeTicks(500, 500, 6).length === 1, "niceTimeTicks: equal bounds → single tick");
+    ok(niceTimeTicks(500, 500, 6)[0] === 500, "niceTimeTicks: single tick is tMin");
+    ok(niceTimeTicks(900, 500, 6).length === 1, "niceTimeTicks: inverted bounds → single tick");
 }
 
 // ── constants ──

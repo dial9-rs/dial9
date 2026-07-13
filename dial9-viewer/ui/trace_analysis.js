@@ -1133,7 +1133,17 @@
     }
 
     for (const ev of customEvents) {
-      if (ev.name.startsWith("SpanEnter:") || ev.name === "SpanEnterEvent") {
+      // Span events are recognized by name. The built-in tracing layer emits
+      // dynamic schema names "SpanEnter:{target}::{name}:{file}:{line}". A
+      // hand-written `#[derive(TraceEvent)]` struct's wire name is its Rust
+      // identifier, which cannot contain ':', so we also accept the "SpanEnter__"
+      // prefix (a struct named e.g. `SpanEnter__MyOp`) and the exact legacy
+      // names. The suffix only distinguishes schemas; classification ignores it.
+      if (
+        ev.name.startsWith("SpanEnter:") ||
+        ev.name.startsWith("SpanEnter__") ||
+        ev.name === "SpanEnterEvent"
+      ) {
         const v = ev.fields;
         const workerId = Number(v.worker_id);
         const spanId = String(v.span_id);
@@ -1154,7 +1164,11 @@
           spanMap.set(spanId, { spanName, fields, parentSpanId, segments: [] });
         }
         spanMeta.set(spanId, { spanName, fields, parentSpanId });
-      } else if (ev.name.startsWith("SpanExit:") || ev.name === "SpanExitEvent") {
+      } else if (
+        ev.name.startsWith("SpanExit:") ||
+        ev.name.startsWith("SpanExit__") ||
+        ev.name === "SpanExitEvent"
+      ) {
         const v = ev.fields;
         const workerId = Number(v.worker_id);
         const spanId = String(v.span_id);
@@ -1174,7 +1188,7 @@
           if (Object.keys(exitFields).length > 0) rec.fields = exitFields;
           rec.segments.push({ start: enter.timestamp, end: ev.timestamp, workerId });
         }
-      } else if (ev.name === "SpanCloseEvent") {
+      } else if (ev.name.startsWith("SpanClose__") || ev.name === "SpanCloseEvent") {
         const spanId = String(ev.fields.span_id);
         openEnters.delete(spanId);
         finalizeSpan(spanId);

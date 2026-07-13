@@ -140,8 +140,9 @@ pub struct WorkerUnparkEvent {
     pub local_queue: u8,
     /// Thread CPU time in nanoseconds.
     pub cpu_time_ns: u64,
-    /// Scheduling wait delta in nanoseconds.
-    pub sched_wait_ns: u64,
+    /// Scheduling wait delta in nanoseconds, or `None` when this park->unpark
+    /// pair was not sampled for schedstat. `None` is distinct from `Some(0)`.
+    pub sched_wait_ns: Option<u64>,
     /// OS thread ID.
     pub tid: u32,
 }
@@ -482,7 +483,7 @@ mod tests {
             worker_id: format::WorkerId::from(1u8),
             local_queue: 3,
             cpu_time_ns: 600_000,
-            sched_wait_ns: 100_000,
+            sched_wait_ns: Some(100_000),
             tid: 12345,
         })
         .unwrap();
@@ -623,7 +624,7 @@ mod tests {
         assert_eq!(e.worker_id, WorkerId(1));
         assert_eq!(e.local_queue, 3);
         assert_eq!(e.cpu_time_ns, 600_000);
-        assert_eq!(e.sched_wait_ns, 100_000);
+        assert_eq!(e.sched_wait_ns, Some(100_000));
         assert_eq!(e.tid, 12345);
 
         // 5. QueueSampleEvent

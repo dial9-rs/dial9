@@ -43,7 +43,7 @@ fn encode(workers: Vec<usize>) -> Vec<u8> {
                 worker_id: wid,
                 local_queue: 5,
                 cpu_time_ns: 500_000,
-                sched_wait_ns: 1_000,
+                sched_wait_ns: Some(1_000),
                 tid: 0,
             });
 

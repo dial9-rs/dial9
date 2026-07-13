@@ -1,0 +1,27 @@
+{
+  "environment": "release",
+  "wait_timer": 0,
+  "prevent_self_review": false,
+  "reviewers": [
+    {
+      "type": "Team",
+      "id": 16676353,
+      "_name": "dial9-maintainers"
+    }
+  ],
+  "deployment_branch_policy": {
+    "protected_branches": false,
+    "custom_branch_policies": true
+  },
+  "branch_policies": [
+    {
+      "name": "main",
+      "type": "branch"
+    },
+    {
+      "name": "release-*",
+      "type": "branch"
+    }
+  ],
+  "can_admins_bypass": true
+}

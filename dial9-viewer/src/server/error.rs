@@ -17,6 +17,9 @@ pub fn storage_error_response(err: StorageError) -> (StatusCode, String) {
         // mismatch, and distinct from a generic 500 so the UI can surface the
         // actionable "set the region" message.
         StorageError::WrongRegion => (StatusCode::MISDIRECTED_REQUEST, err.to_string()),
+        // Client-side malformed input (e.g. an invalid bucket name): a 400, not
+        // a 500 `fault` — the mistake is in the request, not the server.
+        StorageError::BadRequest(_) => (StatusCode::BAD_REQUEST, err.to_string()),
         StorageError::Other(_) => (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
     }
 }

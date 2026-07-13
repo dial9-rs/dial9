@@ -335,7 +335,7 @@
      *   localQueue: number,
      *   globalQueue: number,
      *   cpuTime: number,
-     *   schedWait: number,
+     *   schedWait: number|null,
      *   taskId: number,
      *   spawnLocId: string|null,
      *   spawnLoc: string|null,
@@ -795,7 +795,12 @@
                     workerId: num(v.worker_id),
                     localQueue: num(v.local_queue),
                     cpuTime: num(v.cpu_time_ns),
-                    schedWait: num(v.sched_wait_ns),
+                    // sched_wait_ns is optional: null when this park->unpark
+                    // pair was not sampled for schedstat. Keep null distinct
+                    // from 0 (a sampled zero-wait) so downstream sched-delay
+                    // detection skips unsampled unparks rather than treating
+                    // them as instantaneous.
+                    schedWait: v.sched_wait_ns == null ? null : num(v.sched_wait_ns),
                     // tid was added later; old traces won't have it. Leave undefined
                     // so the block-in-place gap detection can skip them.
                     tid: v.tid != null ? num(v.tid) : undefined,

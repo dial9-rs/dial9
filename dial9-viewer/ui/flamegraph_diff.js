@@ -197,6 +197,9 @@ const SCOPE_KEYS_SINGLE = [
   "api",
   "data_dir",
   "bucket",
+  // The bucket's region (a property of the bucket, not a credential), so a
+  // scope/diff link signs the right regional S3 endpoint on its own.
+  "aws_region",
   "prefix",
   "service",
   "thread_class",
@@ -218,6 +221,46 @@ function fullScopeQuery(params) {
   const hosts = params.getAll("host");
   for (let i = 0; i < hosts.length; i++) out.append("host", hosts[i]);
   return out;
+}
+
+// ---------------------------------------------------------------------------
+// Diff presets (issue #624): derive side B from side A without a second tab
+// ---------------------------------------------------------------------------
+
+// Backward time-shift deltas for the "same scope, earlier window" presets, in
+// nanoseconds. Kept as BigInt: start_ns/end_ns are ~1.78e18, well above
+// Number.MAX_SAFE_INTEGER (~9.0e15), so Number arithmetic would silently
+// corrupt them.
+const DIFF_SHIFT_1H = 3600000000000n;
+const DIFF_SHIFT_24H = 86400000000000n;
+const DIFF_SHIFT_7D = 604800000000000n;
+
+// "Same time, different host": return a NEW URLSearchParams copy of `scope`
+// with ALL existing host params removed and a single host=<host> appended.
+// Everything else (bucket/prefix/service/start_ns/end_ns/…) is preserved. The
+// input is not mutated.
+function scopeWithHost(scope, host) {
+  const p = new URLSearchParams(scope);
+  p.delete("host");
+  p.append("host", host);
+  return p;
+}
+
+// "Same scope, earlier window": return a NEW URLSearchParams copy of `scope`
+// with start_ns/end_ns each shifted back by `deltaNs` (a BigInt or a value
+// BigInt() accepts). The window LENGTH is preserved. If the scope has no
+// start_ns/end_ns there is no window to shift, so the copy is returned
+// unchanged. Host/service/bucket are untouched. The input is not mutated.
+function shiftScopeTime(scope, deltaNs) {
+  const p = new URLSearchParams(scope);
+  const start = p.get("start_ns");
+  const end = p.get("end_ns");
+  if (start != null && end != null) {
+    const d = BigInt(deltaNs);
+    p.set("start_ns", (BigInt(start) - d).toString());
+    p.set("end_ns", (BigInt(end) - d).toString());
+  }
+  return p;
 }
 
 // base64url (no padding) of a UTF-8 string. Works in both the browser and Node.
@@ -278,6 +321,78 @@ function parseDiff(search) {
   return { a: decodeScope(a), b: decodeScope(b) };
 }
 
+// ---------------------------------------------------------------------------
+// Button routing: single scope vs captured A/B diff
+// ---------------------------------------------------------------------------
+
+// Decide which page + query string a viz button should open. This is the shared
+// routing seam behind the landing page's "Flamegraph"/"Tokio Stats" buttons and
+// the diff tray's launch buttons, so all of them agree on the single-vs-diff
+// decision. `kind` is "flamegraph" or "tokio". When `hasDiff` is true (a full
+// A/B diff has been captured) the target is the two-sided diff link
+// (?diff=1&a=..&b=..) built from `diffA`/`diffB`; otherwise it is the caller's
+// pre-built single-scope `singleQuery`. Pure/DOM-free so the routing is
+// unit-testable without a browser.
+//
+// Flamegraph diff scopes carry the client-only `api=1` flag per side (each side
+// hits /api/flamegraph in aggregate mode); tokio-stats does not use it.
+function chooseTarget(kind, opts) {
+  const page = kind === "tokio" ? "tokio_stats.html" : "flamegraph.html";
+  if (opts && opts.hasDiff) {
+    const withApi = (scope) => {
+      if (kind !== "flamegraph") return scope;
+      const s = new URLSearchParams(
+        typeof scope === "string" ? scope : scope.toString(),
+      );
+      s.set("api", "1");
+      return s;
+    };
+    return { page: page, search: diffSearch(withApi(opts.diffA), withApi(opts.diffB)) };
+  }
+  const single = opts && opts.singleQuery != null ? opts.singleQuery : "";
+  return { page: page, search: typeof single === "string" ? single : single.toString() };
+}
+
+// ---------------------------------------------------------------------------
+// Capture-tray state machine (in-page "Add to diff")
+// ---------------------------------------------------------------------------
+
+// The in-page "Add to diff" tray (flamegraph.html's aggregate toolbar, and the
+// landing page's heatmap tray) captures two scopes — A (left) and B (right) —
+// then launches a two-sided diff. State is `{ a, b }` where each side is a
+// scope (URLSearchParams) or null. These three transitions keep the invariant
+// "A fills before B" so there is never a B-without-A hole. Pure/DOM-free so the
+// tray wiring is unit-testable without a browser.
+
+// Capture one more scope: fill A first, then B; once both are set a further
+// add replaces B (the most recent), so the user can keep re-picking the
+// comparison side.
+function addDiffCapture(state, scope) {
+  const a = state && state.a ? state.a : null;
+  const b = state && state.b ? state.b : null;
+  if (!a) return { a: scope, b: b };
+  return { a: a, b: scope };
+}
+
+// Swap which capture is A vs B. Only meaningful when both sides are set;
+// swapping a lone side would move it into B and leave A empty, violating the
+// "fill A first" invariant — so it's a no-op then.
+function swapDiffCapture(state) {
+  const a = state && state.a ? state.a : null;
+  const b = state && state.b ? state.b : null;
+  if (!a || !b) return { a: a, b: b };
+  return { a: b, b: a };
+}
+
+// Remove one side. Clearing A promotes B to A so there is never a B-without-A
+// hole (the codec fills A first); clearing B just drops it.
+function removeDiffSide(state, side) {
+  const a = state && state.a ? state.a : null;
+  const b = state && state.b ? state.b : null;
+  if (side === "a") return { a: b, b: null };
+  return { a: a, b: null };
+}
+
 var FlamegraphDiff = {
   newDiffNode,
   addSide,
@@ -286,12 +401,21 @@ var FlamegraphDiff = {
   layoutSide,
   nodeAtPath,
   fullScopeQuery,
+  scopeWithHost,
+  shiftScopeTime,
+  DIFF_SHIFT_1H,
+  DIFF_SHIFT_24H,
+  DIFF_SHIFT_7D,
   b64urlEncode,
   b64urlDecode,
   encodeScope,
   decodeScope,
   diffSearch,
   parseDiff,
+  chooseTarget,
+  addDiffCapture,
+  swapDiffCapture,
+  removeDiffSide,
   SCOPE_KEYS_SINGLE,
 };
 
