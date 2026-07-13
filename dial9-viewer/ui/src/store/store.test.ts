@@ -54,6 +54,7 @@ function initialViewerState(): StoreState {
       sidebarRange: null,
       hoveredWakerTaskId: null,
     },
+    poi: { filter: "sched", sortKey: "duration", sortDir: "desc", index: -1 },
     uiPrefs: {
       panelCollapsed: { spans: false, events: false, cpu: false, queue: false },
       sidebarWidth: 320,

@@ -35,6 +35,16 @@ export function initialViewerState(): StoreState {
       sidebarRange: null,
       hoveredWakerTaskId: null,
     },
+    // POI / issues-rail controls (T33; features/02 C, 04 S5). Defaults mirror
+    // the legacy toolbar resting state: filter = "sched" (the `#poi-filter`
+    // first option) and worst-first ON (sort by the duration column, desc).
+    // No POI is current until the user steps (`n`/`p`) or clicks a rail row.
+    poi: {
+      filter: "sched",
+      sortKey: "duration",
+      sortDir: "desc",
+      index: -1,
+    },
     uiPrefs: {
       // S1 amendment: analysis surfaces are visible by default. The unified
       // column has no per-panel folds; every surface starts expanded.

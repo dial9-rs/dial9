@@ -15,6 +15,7 @@ import type {
   ParsedTrace,
   PollSpan,
   CustomTraceEvent,
+  PointOfInterestType,
   SegmentEdgePolls,
   TimeRange,
 } from "./trace.js";
@@ -152,6 +153,51 @@ export interface SelectionSlice {
   sidebarRange: TimeRange | null;
   /** Waker task hovered in the task-detail panel (orange polls, 02 G8). */
   hoveredWakerTaskId: number | null;
+}
+
+// ── poi slice (features 02 C: points-of-interest / issues rail) ─────────
+
+/**
+ * How the issues rail (04 S5: the ranked list replacing the blind "0/74"
+ * stepper) orders its rows. The four sortable columns of the concept-2 rail
+ * (mocks/concept-2.html): the worker id, the detector KIND, the event TIME,
+ * or the detector's severity value shown in the DURATION column. The legacy
+ * "Worst first" checkbox (features 02 C3) maps to `duration`/`desc`;
+ * unchecked maps to `time`/`asc` (chronological), exactly as the legacy
+ * `filterPointsOfInterest({ sortByWorst })` did. Column-header clicks pick
+ * any of the four directly - a re-sort of the SAME rows, so the row COUNT
+ * (the rail-parity DoD target) is sort-independent.
+ */
+export type PoiSortKey = "worker" | "kind" | "time" | "duration";
+
+/**
+ * Points-of-interest navigation state (features 02 C2/C3/C6, 04 S5). The
+ * detectors are the frozen `filterPointsOfInterest` set (trace_analysis.js,
+ * consumed via lib/trace/analysis); this slice holds only the VIEW controls
+ * - which detector is active, how the rail is ordered, and which row is the
+ * "current" one the `n`/`p` keys (T20) step through and the timeline centers
+ * on. The filtered list itself is DERIVED from the trace + these controls
+ * (pages/viewer/poi.ts), never stored, so the ~68-global inventory's
+ * `pointsOfInterest`/`currentPoiIndex` pair collapses to reactive state.
+ */
+export interface PoiSlice {
+  /**
+   * Active detector filter (features 02 C2). Default "sched" (the legacy
+   * `#poi-filter` first option, "Kernel Scheduling Delays") - the filter the
+   * rail-parity DoD is measured at.
+   */
+  filter: PointOfInterestType;
+  /** Rail sort column (04 S5). Default "duration" (worst-first). */
+  sortKey: PoiSortKey;
+  /** Sort direction. Default "desc" (worst-first = highest severity first). */
+  sortDir: "asc" | "desc";
+  /**
+   * Index of the "current" POI within the DERIVED filtered+sorted list, or
+   * -1 when none is selected (legacy `currentPoiIndex`). Reset to -1 whenever
+   * the filter changes (the list is rebuilt). The `n`/`p` keys and a rail row
+   * click set it; the status/rail read it for the "N/total" position.
+   */
+  index: number;
 }
 
 // ── uiPrefs slice ───────────────────────────────────────────────────────
@@ -401,12 +447,13 @@ export interface StoreState {
   trace: TraceSlice;
   viewport: ViewportSlice;
   selection: SelectionSlice;
+  poi: PoiSlice;
   uiPrefs: UiPrefsSlice;
   transient: TransientSlice;
   segments: SegmentsSlice;
 }
 
-/** "trace" | "viewport" | "selection" | "uiPrefs" | "transient" | "segments" */
+/** "trace" | "viewport" | "selection" | "poi" | "uiPrefs" | "transient" | "segments" */
 export type StoreSliceName = keyof StoreState;
 
 // ── Layout geometry (architecture 2.3) ──────────────────────────────────

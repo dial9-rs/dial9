@@ -194,6 +194,7 @@ const initialState: StoreState = {
     sidebarRange: null,
     hoveredWakerTaskId: null,
   },
+  poi: { filter: "sched", sortKey: "duration", sortDir: "desc", index: -1 },
   uiPrefs: {
     // All four foldable panels start collapsed (features 02 O4);
     // Record<FoldablePanelKind, boolean> forces exactly these keys.
