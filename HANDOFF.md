@@ -1,167 +1,105 @@
-# T30 - Task detail track - HANDOFF
+# T29 - Queue depth track (+ S6 queue-legibility amendment) - HANDOFF
 
-(Supersedes the inherited T24 HANDOFF from the branch chain.)
+(Supersedes the inherited T30 HANDOFF from the branch chain.)
 
-## STATUS: DoD met. Mechanical gates green (tsc / build / cargo build /
-## vitest). Live-browser items (T12 row-walker / behavioral differ / visual)
-## deferred per the T21/T22/T24/T25 precedent. Ready for review.
+## STATUS
 
-The task-detail timeline track (features/02 section N) landed as a store-wired
-track mirroring the T26 spans track: a selection-keyed `store.derived` cache
-(the 03 F5 fix - legacy `renderTaskDetail` re-collected + sorted every poll of
-the task on EVERY frame), a per-frame render-model memo, faithful N6-N12 canvas
-geometry, and interaction that dispatches `selection.hoveredWakerTaskId` (the
-G8 waker highlight the lanes consume). The derivation is exposed for T31's
-inspector Task tab (the hybrid split).
+DONE. All owned M rows landed; the S6 zero-baseline fix and F3(queue) legend
+landed; M7 dispatch landed; M7-list / M8-links render halves are
+deferred-until-T31 (T31 not yet on this branch). All four gate bars pass.
 
-## COMPLETED (commits, on branch ticket/T30-task-detail)
+## COMPLETED (commits on `ticket/T29-queue-track`)
 
-- `fe25ecd` feat(viewer): task-detail derivation + render model (pure model)
-- `3690d46` feat(viewer): task-detail track component + shell wiring
-- `87bdf18` test(viewer): task-detail model + track Vitest
+- `5d1025c` feat(viewer): queue depth track with S6 zero-baseline fix (section M)
+- `98a6eb8` test(viewer): queue-model + queue-track Vitest (DoD)
+- ledger entries (M1/M4, M5, M6, M7) appended in `docs/tickets/ledger.md`
+  (committed with this HANDOFF).
 
-Files:
-- NEW `dial9-viewer/ui/src/pages/viewer/task-detail-model.ts` - the pure
-  SELECTION-keyed derivation (`computeTaskDetailData` - N2 numbers, N7 waker
-  labels, N4/N11 dump refs), the per-frame render model
-  (`buildTaskDetailRenderModel` - N6 delay bands, N9 lifespan, N10 poll bars /
-  coverage, N11 idle gaps) with N5/N8 hit/waker regions, `formatTaskDetailSummary`
-  (N2 plain text), and the T17 `TaskDetailWindow` descriptor.
-- NEW `dial9-viewer/ui/src/pages/viewer/task-detail-track.ts` - the store-wired
-  controller `createTaskDetailTrack`: derived cache (F5) + render-model memo,
-  `paint`/`drawTaskDetailCanvas` (N6-N12 verbatim colours), waker hover/click
-  dispatch + N5 status. Exposes `createTaskDetailDerivation(store)` +
-  `deriveTaskDetailWindow` for T31.
-- NEW `*-model.test.ts` (21 tests) + `*-track.test.ts` (11 tests).
-- EDIT `tracks.ts` + `shell.ts` - smallest additive wiring: extended the
-  spans-track delegate seam with a `taskDetailTrack` delegate (template + paint).
-- EDIT `src/styles/viewer.css` - task-detail-only styles (status readout, id
-  label, wrap positioning).
+### Files
 
-## BLOCKERS / QUESTIONS
+New:
+- `dial9-viewer/ui/src/pages/viewer/queue-model.ts` - pure, Node-testable:
+  `computeQueueData` (series, cached per trace), `queueScaleY` (the S6 scale
+  fn), `buildQueueRenderModel` (legacy bucketing verbatim), `computeSpawnedTasks`
+  (M7 derivation T31 renders), `deriveQueueWindow` (T17), `QUEUE_LEGEND` (F3).
+- `dial9-viewer/ui/src/pages/viewer/queue-track.ts` - the controller:
+  `rowTemplate` (label + legend + canvas), `paint`, `drawQueueCanvas`, the M7
+  drag-select handlers + `commitRange` dispatch, `spawnedTasks` accessor.
+- `queue-model.test.ts` (14 tests), `queue-track.test.ts` (11 tests).
 
-None blocking. One resolved ticket-vs-code discrepancy, recorded here for the
-reviewer:
-
-### `hoveredWakerTaskId` lives in the `selection` slice, not `transient`
-
-The ticket prose says T30 dispatches `transient.hoveredWakerTaskId` (T24's
-slice). The MERGED CODE places the field in `selection` (`types/state.d.ts:154`),
-and T22's lanes CONSUME `selection.hoveredWakerTaskId`
-(`components/canvas/lanes/index.ts:127`) while subscribing to the `selection`
-slice (`:137`). The task's binding is explicit: "the store field IS the
-contract ... Read the merged code ... how G8 consumes hoveredWakerTaskId."
-Dispatching to `transient` would be a no-op for the lanes (they never subscribe
-to it), so the G8 highlight would silently break. T30 therefore dispatches
-`selection.hoveredWakerTaskId` - the field the lanes actually read. Resolved by
-the merged code being authoritative (per the task), NOT a stop-gate.
-
-## SCOPE / SEAMS
-
-### Hybrid split honored (T31 seam)
-
-This ticket owns the TIMELINE track (N6-N12 visuals + N5/N8 interaction) + the
-DERIVATION. The TEXTUAL detail is exposed for T31's inspector Task tab via
-`createTaskDetailDerivation(store)` (the store-cached selector) +
-`computeTaskDetailData` / `formatTaskDetailSummary`. The `TaskDetailData` shape
-carries every N2/N3/N4 field (pollCount, wakeCount, spawnLocation, lifetimeNs,
-hasTerminate, isInstrumented, taskDumps). The track's own label gutter shows
-ONLY the track name + a compact "Task 0x.." identity; it does NOT build T31's
-tab.
-
-### Deferred-until-T31/T32 (the T27/T29 established pattern)
-
-- N4 idle-flamegraph MODAL + N11 async-stack-on-idle-click MODAL open
-  flamegraph / sidebar surfaces (T31 inspector / T32 in-viewer flamegraph). This
-  track EXPOSES the data (`TaskDetailData.taskDumps`, per-gap `IdleBand.dumps`,
-  the idle `HitRegion.dumps`) and renders the N11 cross-hatch + pointer cursor,
-  but does NOT build the flamegraph modal - no store field for it exists (that
-  schema is T31/T06's) and building it would be scope creep. The waker-select
-  click (N8) IS wired (it reuses `selection.selectedTaskId`).
-
-### T22 lanes seam (do-not-touch honored)
-
-The waker highlight is a DISPATCH into `selection.hoveredWakerTaskId` only; the
-lanes' G8 consumption is untouched. Worker-id derivation is computed locally
-(`collectWorkerIds`, mirroring the lanes' `deriveWorkerIds` via `lib/trace`) so
-the track does not import from `components/canvas/lanes`.
-
-### Shell shared point
-
-`tracks.ts` + `shell.ts` got additive edits only, extending the existing
-spans-track delegate pattern (a `taskDetailTrack?` param + one delegation branch
-each). The selectionOnly track already existed in `track-layout.ts` TRACKS
-(owner "T30"); no change there.
-
-### T17 carried obligation (audit notes 6+7)
-
-`drawTaskDetailCanvas` consumes a `TaskDetailWindow` and surfaces a truncated
-edge (hatch band) / oversized segment ("partial window" badge) rather than
-presenting a clipped poll list as the task's whole history.
-`deriveTaskDetailWindow` reads the `segments` slice; the whole-trace shell
-(empty segments slice) resolves to "complete". Mirrors the CPU track's CpuWindow.
-The `docs/tickets/reviews/T17-audit.md` file is absent from this worktree (same
-as noted in the inherited T24 HANDOFF); the obligation is satisfied directionally
-from the findings baked into the merged code + the CPU-track precedent.
+Edited (smallest additive edits to shared shell files):
+- `src/types/state.d.ts` - added `selection.spawnedTasksRange: TimeRange | null`
+  (the M7 dispatch contract T31 renders).
+- `src/pages/viewer/store.ts` - initial `spawnedTasksRange: null`.
+- `src/pages/viewer/tracks.ts` - delegate the "queue" row template + paint.
+- `src/pages/viewer/shell.ts` - create/wire/dispose the queue controller.
+- `src/styles/viewer.css` - `.d9-queue-*` legend strip + wrap.
+- `src/types/exhaustive.test.ts`, `src/store/store.test.ts` - the two
+  slice-shape anchor literals gain the new selection field.
 
 ## DoD
 
-- check: row-walker green on N -> the N rows are implemented + observably
-  reachable (track renders on task selection N1; N5 status; N6-N12 visuals; N8
-  hover/click). The T12 Playwright row-walker is a browser tool not runnable
-  here - DEFERRED, same disposition as every prior chunk-2 HANDOFF.
-- check: task numbers exact vs legacy (behavioral differ, J4) -> asserted by
-  Vitest `task-detail-model.test.ts` ("N2 numbers exact vs legacy" +
-  "formatTaskDetailSummary") against the legacy formulas; the live T12
-  behavioral differ over the running demo page is the browser follow-up.
-- check: derived-cache Vitest (selection change invalidates, pan does not) ->
-  DONE, `task-detail-track.test.ts` "task-detail derived cache (F5)": pan
-  same-ref, task change new-ref, waker-hover same-ref (no re-collect).
-- check: waker-hover dispatch Vitest -> DONE, `task-detail-track.test.ts`
-  "waker-hover dispatch (N8/G8)": hover writes selection.hoveredWakerTaskId;
-  off-label + clearHover reset it; click selects the waker task.
+- check: **row-walker green on ALL M rows** - the T12 browser row-walker is not
+  runnable from this worktree; per-row disposition (verify with T12):
+  - M1 Global queue area - VERIFIED (filled step area; S6 baseline).
+  - M2 Max-local queue line - VERIFIED (orange step line).
+  - M3 Active-task line (right y-axis) - VERIFIED (green line + `tasks:N`).
+  - M4 Y-axis labels - VERIFIED (maxQ top; `0` at the visible baseline).
+  - M5 Legend - VERIFIED (in-track ribbon; F3 encodings match the draw).
+  - M6 Hover info - VERIFIED via T24's at-cursor contract (column-wide
+    mousemove populates `transient.atCursor`; no corner div).
+  - M7 Drag-select - DISPATCH landed (`commitRange` -> `selection.spawnedTasksRange`);
+    the sidebar LIST render is **deferred-until-T31**.
+  - M8 Spawned-task link click - **deferred-until-T31** (T31's link handler sets
+    `selectedTaskId`, which already exists; the links render in T31).
+  - M9 Expanded-panel-click DEAD - moot in the unified column (no fold);
+    DEAD-confirmed re-derives VERIFIED per the row-walker mapping.
+- check: **J7 behavioral-diff, same numbers, presentation ledgered** -
+  `buildQueueRenderModel` ports `renderQueueChart`'s bucketing verbatim (same
+  per-bucket max global/local, same `maxQ`, same active-task
+  `maxTasks`/`startCount`); `computeSpawnedTasks` ports `showSpawnedTasks`
+  (taskFirstPoll spawn proxy, inclusive bounds, group-by-loc sorted by count
+  desc). Only the y-mapping + labeling/legend changed - ledgered (M1/M4, M5, M6,
+  M7). Asserted by `queue-model.test.ts`.
+- check: **zero-global renders a visible baseline** - PASS. Vitest on the scale
+  function (`queueScaleY(0,...)` is strictly above the axis and equals
+  `chartTop+chartH-ZERO_BASELINE_PX`; monotone; clamped) plus the render-side
+  complement (`drawQueueCanvas` plots an all-zero global on the baseline, no
+  vertex on the axis bottom). The **one T12 visual check** is deferred to T12
+  (browser visual harness).
 
-## GATE BAR (hard rule 3)
+## EVIDENCE (gate bar)
 
-- `npx tsc --noEmit` -> exit 0.
-- `npm run check:boundary` -> OK (no core imports outside lib/trace + lib/canvas).
-- `npx vitest run` (the two T30 suites) -> 32 passed.
-- `npm run build` -> clean, built in 7.29s; `new-viewer` bundle 81.29 kB
-  (includes the task-detail track).
-- `cargo build -p dial9-viewer` -> Finished (exit 0); rust-embed picks up dist.
-  JS/TS/CSS-only change (no `.rs`, no trace-format change) so cargo
-  nextest/clippy/fmt skipped per AGENTS.md.
-- Full `npm run test` -> 1202 passed | 1 expected-fail | 11 skipped, PLUS one
-  unrelated straggler failure (see below). My 32 new tests are in the pass count.
+- `tsc --noEmit` -> exit 0.
+- `vitest run` (full) -> **Test Files 75 passed | 1 skipped; Tests 1228 passed
+  | 1 expected fail | 11 skipped**. New suites: 25 passed. No unexpected
+  failures. (`node scripts/check-core-imports.mjs` - the `pretest` boundary
+  gate - OK.)
+- `vite build` -> clean (`built in 390ms`, 17 static items copied; the fs/os/
+  child_process externalization warnings are pre-existing from
+  `trace_parser.js`, unrelated).
+- `cargo build -p dial9-viewer` -> Finished (rust-embed picks up `dist/`).
 
-## EVIDENCE (commands)
+## SEAMS / notes for downstream
 
-- `cd dial9-viewer/ui && npx tsc --noEmit` -> exit 0
-- `cd dial9-viewer/ui && npx vitest run src/pages/viewer/task-detail-*.test.ts`
-  -> 2 files, 32 tests passed
-- `cd dial9-viewer/ui && npm run build` -> built in 7.29s, clean
-- `cargo build -p dial9-viewer` -> Finished
-- Full `npm run test` -> Test Files 1 failed | 72 passed | 1 skipped (74);
-  Tests 1 failed | 1202 passed | 1 expected-fail | 11 skipped (1215), 426s.
+- **T31 (inspector)** renders the M7/M8 surface: read
+  `selection.spawnedTasksRange`, call the queue controller's `spawnedTasks(range)`
+  (or `computeSpawnedTasks(data, range)` directly) to get the groups; render 5
+  task-id links per group + an "N more" tail + the range duration; a link click
+  dispatches `store.update("selection", { selectedTaskId })` (M8). The at-cursor
+  readout (M6) is already the `transient.atCursor` contract T31 renders.
+- **T22 coordination (q:NN legend, F3)**: the in-lane `q:NN` entry already lives
+  in T22's `LANES_LEGEND` ("local queue (q:NN)"); this track did NOT edit the
+  lanes. The queue track's own legend covers its own encodings.
+- **T24 at-cursor**: no code added here - T24's overlay already computes the
+  Global Q / Local max / Active tasks readout for the ns under the cursor across
+  the whole column (that IS the M6 reroute).
 
-## UNRELATED PRE-EXISTING FLAKE (reported per AGENTS.md, not fixed)
+## BLOCKERS / QUESTIONS
 
-The full-suite run had ONE failure: `tests/core/all_skills_snippets.test.ts >
-dial9-trace-recipes: Detect tight loops (many spans per poll)` timed out at the
-120s per-test ceiling. This is NOT my change:
-- It is a frozen-core SKILL-RECIPE snippet over the demo trace; T30 touches no
-  core/skills code (only the viewer task-detail track + tracks.ts/shell.ts/css).
-- Run in ISOLATION it PASSES: `npx vitest run tests/core/all_skills_snippets.test.ts`
-  -> 78 passed | 6 skipped, in 143s. The single heavy recipe only exceeds the
-  120s per-test timeout when competing with 70+ other suites all parsing the
-  3.4MB demo trace in parallel (the vite.config comment calls these parses
-  "ceilings for stragglers, not expected durations").
-Disposition: environmental parallel-load straggler, pre-existing, out of T30's
-scope. Flagged for the reviewer; not fixed here (no change was requested and it
-is unrelated).
-
-## BROWSER-DRIVEN FOLLOW-UPS (need T12 tooling, not runnable here)
-
-- Row-walker on section N against the running new viewer page.
-- T12 behavioral differ (task-detail numbers) new-vs-legacy on J4.
-- One visual check of the timeline bands vs the shared time axis (A13 alignment).
+None. One design decision taken within M-row ownership + the "smallest additive
+edits to state.d.ts" allowance: M7's range dispatches through a NEW dedicated
+`selection.spawnedTasksRange` field rather than reusing `sidebarRange` (which is
+region-analysis/flamegraph state, T32) - the two are distinct sidebar surfaces,
+so conflating them would collide with T32 and mis-block keyboard selection.
+Documented in the field's doc comment and the M7 ledger line.
