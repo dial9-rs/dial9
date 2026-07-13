@@ -57,6 +57,9 @@ export function initialViewerState(): StoreState {
       hoverEventTs: null,
       drag: null,
       keyboardSelection: null,
+      // At-cursor readout (T24; 02 I6 / 04 S4): null until the pointer hovers
+      // the draw area over a loaded trace.
+      atCursor: null,
     },
     segments: { segments: new Map() },
   };

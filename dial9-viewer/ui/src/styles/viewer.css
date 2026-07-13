@@ -101,6 +101,8 @@ body {
     overflow-y: auto;
     overflow-x: hidden;
     background: #0f1424;
+    /* Positioning context for the transient crosshair overlay (T24, I1). */
+    position: relative;
 }
 .d9-track-column:focus-visible { outline: 2px solid var(--d9-accent); outline-offset: -2px; }
 
@@ -448,3 +450,56 @@ body {
     25% { transform: translateX(-4px); }
     75% { transform: translateX(4px); }
 }
+
+/* ── Transient overlay: crosshair, tooltip, at-cursor readout (T24) ─────
+   The overlay canvas (I1) covers the scrollable track content; it is
+   non-interactive so pointer events reach the lanes underneath. Sits above
+   the track canvases but is a faint 1px line, so it never obscures content. */
+.d9-crosshair-overlay {
+    position: absolute;
+    top: 0;
+    left: 0;
+    pointer-events: none;
+    z-index: 5;
+}
+
+/* Shared hover tooltip (V-section). One element, appended to <body>, reused
+   by every panel. Ported from the legacy #tooltip; placement is JS-driven
+   from CACHED dimensions (03 F3 - never measured after write). */
+.d9-tooltip {
+    position: fixed;
+    display: none;
+    top: 0;
+    left: 0;
+    background: #222244;
+    border: 1px solid #555;
+    padding: 8px 12px;
+    border-radius: 6px;
+    font-size: 0.8em;
+    line-height: 1.5;
+    max-width: 320px;
+    pointer-events: none;
+    z-index: 100;
+    color: var(--d9-fg);
+}
+.d9-tooltip .label { color: #8a90b4; }
+.d9-tooltip .value { color: #fff; font-weight: 600; }
+.d9-tooltip .hint { color: #6a6a86; }
+
+/* At-cursor readout stub in the inspector slot (I6 rehomed per 04 S4). Until
+   T31 renders `transient.atCursor` properly, this proves the store contract
+   is populated during hover. */
+.d9-atcursor-readout {
+    margin: 0 0 10px;
+    padding: 6px 8px;
+    background: #10163000;
+    border: 1px solid var(--d9-border);
+    border-radius: 4px;
+    font-size: 0.76em;
+    line-height: 1.6;
+}
+.d9-atcursor-row { display: flex; flex-wrap: wrap; gap: 3px 8px; align-items: baseline; }
+.d9-atcursor-row .label { color: var(--d9-fg-muted); }
+.d9-atcursor-row .value { color: var(--d9-fg); font-weight: 600; }
+.d9-atcursor-empty { color: var(--d9-fg-muted); font-style: italic; }
+.d9-atcursor-warn { color: #e0a94a; font-weight: 600; }

@@ -233,6 +233,48 @@ export interface KeyboardSelection {
 }
 
 /**
+ * The "at this instant" stats mirrored into ONE persistent surface (04 S4;
+ * the store contract T24 DEFINES and T31's inspector RENDERS). It carries the
+ * values the legacy floating top-right `#info-panel` showed (features/02 I6 -
+ * global injection-queue depth, max local-queue depth across workers, and the
+ * active-task count) plus the worker + timestamp the cursor resolved to.
+ *
+ * Written to `transient.atCursor` by the crosshair/hover channel (T24) on
+ * every hover frame; read by the inspector (T31) - and, until T31 lands, by
+ * T24's minimal readout stub in the inspector slot - so "at-moment stats" live
+ * in the inspector, not a floating corner div. Because it rides the transient
+ * slice, updating it never triggers a full track redraw (only subscribers that
+ * declared `transient` re-run - the readout surface and the crosshair overlay).
+ */
+export interface AtCursorReadout {
+  /** Timestamp under the cursor (trace-monotonic ns). */
+  ns: number;
+  /** Worker row under the cursor; null when the cursor is off any lane. */
+  workerId: number | null;
+  /** Global injection-queue depth at ns (nearest sample); null when none. */
+  globalQueue: number | null;
+  /** Max local-queue depth across all workers at ns; null when none. */
+  localMax: number | null;
+  /**
+   * Active-task count at ns (step: latest sample with t <= ns); null when the
+   * trace carries no task tracking (matches the legacy info-panel omitting the
+   * "Active tasks" line when `activeTaskSamples` is empty).
+   */
+  activeTaskCount: number | null;
+  /**
+   * Windowed-data completeness at the cursor (T17 segment-windowing carried
+   * obligation - T17-audit notes 6-7): "complete" when the segment covering
+   * `ns` is fully resident (or the whole trace is resident on the
+   * non-segmented path); "truncated" when the covering segment is only
+   * partially resident (listed/fetching/evicted - a window edge, not whole
+   * data); "oversized" when the covering segment can never be resident at the
+   * budget (SegmentLifecycle "oversized"). Consumers MUST surface a
+   * non-"complete" state rather than presenting a truncated window as whole.
+   */
+  coverage: "complete" | "truncated" | "oversized";
+}
+
+/**
  * High-frequency interaction state, updated on the crosshair RAF channel;
  * never triggers full renders (architecture 2.2/2.3 overlay layer).
  */
@@ -245,6 +287,14 @@ export interface TransientSlice {
   drag: DragState | null;
   /** Active keyboard selection; null when none (02 I3). */
   keyboardSelection: KeyboardSelection | null;
+  /**
+   * At-cursor stats readout (02 I6 + 04 S4), null when the cursor is outside
+   * the draw area or no trace is loaded. The store contract T31's inspector
+   * renders; populated by the T24 hover channel. Distinct from the ephemeral
+   * hover TOOLTIP (which is rendered imperatively from LaneHoverData, not
+   * stored) - this is the persistent mirror.
+   */
+  atCursor: AtCursorReadout | null;
 }
 
 // ── segments slice (architecture 2.8) ───────────────────────────────────

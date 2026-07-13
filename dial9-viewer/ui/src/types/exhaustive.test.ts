@@ -211,6 +211,7 @@ const initialState: StoreState = {
     hoverEventTs: null,
     drag: null,
     keyboardSelection: null,
+    atCursor: null,
   },
   segments: { segments: new Map() },
 };
@@ -251,6 +252,14 @@ function populatedState(): StoreState {
         kind: "zoom-select",
         startNs: 2_000,
         cursorNs: 3_000,
+      },
+      atCursor: {
+        ns: 4_200,
+        workerId: 0,
+        globalQueue: 3,
+        localMax: 2,
+        activeTaskCount: 5,
+        coverage: "complete",
       },
     },
     segments: {
