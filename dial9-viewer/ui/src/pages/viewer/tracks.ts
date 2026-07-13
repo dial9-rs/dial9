@@ -25,6 +25,7 @@ import { renderTimeAxis, type AxisInputs } from "./axis.js";
 import { isTrackClaimed } from "./track-renderers.js";
 import { renderCpuTrack, type CpuInputs } from "./cpu.js";
 import type { SpansTrackController } from "./spans-track.js";
+import type { QueueTrackController } from "./queue-track.js";
 import type { TaskDetailTrackController } from "./task-detail-track.js";
 
 export interface TracksViewModel {
@@ -69,6 +70,7 @@ export function tracksTemplate(
   vm: TracksViewModel,
   spansTrack?: SpansTrackController,
   taskDetailTrack?: TaskDetailTrackController,
+  queueTrack?: QueueTrackController,
 ): TemplateResult {
   const tracks = visibleTracks(vm);
   return html`
@@ -81,6 +83,9 @@ export function tracksTemplate(
       ${tracks.map((t) => {
         if (t.id === "spans" && spansTrack !== undefined) {
           return spansTrack.rowTemplate(t);
+        }
+        if (t.id === "queue" && queueTrack !== undefined) {
+          return queueTrack.rowTemplate(t);
         }
         if (t.id === "task-detail" && taskDetailTrack !== undefined) {
           return taskDetailTrack.rowTemplate(t);
@@ -136,6 +141,7 @@ export function sizeTracks(
   vm: TracksViewModel,
   spansTrack?: SpansTrackController,
   taskDetailTrack?: TaskDetailTrackController,
+  queueTrack?: QueueTrackController,
 ): TrackSizing[] {
   const dpr = (typeof devicePixelRatio === "number" ? devicePixelRatio : 1) || 1;
   // Full column width and the scrollbar gutter (so the draw area's right
@@ -176,6 +182,15 @@ export function sizeTracks(
     // full track height. Delegate and skip the uniform placeholder path.
     if (track.id === "spans" && spansTrack !== undefined) {
       spansTrack.paint(canvas, drawW, track.height, dpr, vm.viewStart, vm.viewEnd);
+      canvas.dataset["drawW"] = String(Math.round(drawW));
+      out.push({ id: track.id, drawW, height: track.height });
+      continue;
+    }
+    // The queue track (T29) owns its own canvas sizing + draw: it reserves a
+    // legend strip above the canvas, so its draw area is shorter than the full
+    // track height (like the spans track). Delegate and skip the placeholder.
+    if (track.id === "queue" && queueTrack !== undefined) {
+      queueTrack.paint(canvas, drawW, track.height, dpr, vm.viewStart, vm.viewEnd);
       canvas.dataset["drawW"] = String(Math.round(drawW));
       out.push({ id: track.id, drawW, height: track.height });
       continue;

@@ -193,6 +193,7 @@ const initialState: StoreState = {
     pinnedEvent: null,
     sidebarRange: null,
     hoveredWakerTaskId: null,
+    spawnedTasksRange: null,
   },
   uiPrefs: {
     // All four foldable panels start collapsed (features 02 O4);
@@ -243,6 +244,7 @@ function populatedState(): StoreState {
       },
       sidebarRange: range,
       hoveredWakerTaskId: 7,
+      spawnedTasksRange: range,
     },
     transient: {
       mouseNs: 4_200,
