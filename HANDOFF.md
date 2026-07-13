@@ -1,157 +1,120 @@
-# T32 - In-viewer flamegraph + region analyses - HANDOFF
+# T46 - End-user documentation refresh - HANDOFF
 
-## STATUS: DONE. DoD met; gate bar green. Committed on `ticket/T32-flamegraph-region`.
+## STATUS: DONE (DoD met). Not blocked.
 
-The Shift+drag region -> flamegraph / blocking-calls / heap panel is embedded in
-T31's inspector Stack tab, driving the frozen `flamegraph.js` widget through its
-existing public surface. The S7 amendment (count reconciliation + frame->timeline
-link) and the T17 partial-window badge are landed. K7 keyboard traversal and
-F17/F18 (idle / task-dump) are DEFERRED with ledger notes (see below).
+## SUMMARY
 
-## COMPLETED (commit shas on this branch)
+Most of T46's target end-state was ALREADY in place on this branch.
+`ticket/T46-docs-refresh` is cut from `integration/chunk-1` (267 commits ahead
+of `main`), which already merged the dependency tickets (T04 dev loops,
+T10/T11 Vitest migration + dual-runner retirement, T12 parity tooling, T20
+keyboard/help, T38 switch, T43 URL contract). Those tickets had already:
 
-- `88c1996` feat(viewer): region-analysis pure model (F15/F16/R3-R9 + S7)
-- `46f7681` feat(viewer): embedded region-analysis panel + toolbar/inspector wiring
-- (this commit) docs: ledger + F20 inventory row + T47 K7 line item + HANDOFF
-  + region-analysis re-entrancy hardening
+- Rewritten `dial9-viewer/ui/README.md` to cover dev loops, the dual-UI
+  switch, the URL contract, the parity tooling, and Vitest-only test
+  conventions.
+- Updated the `AGENTS.md` "## Testing" section to Vitest reality (commit
+  `f754bbe`, "retire the dual-runner setup"): `npm run test` = `vitest run`,
+  Vitest auto-discovery, the `TRACE_SUITES` list, the `test_parser.js` Node
+  exception. The stale "CI does NOT auto-discover JS tests / You MUST
+  register... in scripts/e2e-trace-tests.sh" instruction was ALREADY GONE.
 
-## SCOPE DELIVERED (features/02 section S + the R3-R9 seam from T31)
+So the headline stale-instruction removal and the AGENTS.md / ui-README
+rewrites were done by dependency work (docs-vs-ticket-assumption conflict,
+resolved cleanly: reality was already AHEAD of the ticket's stated stale
+state). T46's remaining, un-done delta was the END-USER-facing documentation,
+which I added, plus verifying every DoD `check:` against reality.
 
-- **F15 CPU flamegraph (region/whole)** + **F16 heap flamegraph** render EMBEDDED
-  in the inspector Stack tab, not a show-on-demand sidebar. The frozen
-  `createFlamegraph`/`setData`/`getZoomPath` surface (via `lib/canvas`) is driven
-  unchanged; the region-scoped sample building, counts, and Horvitz-Thompson heap
-  estimates (Bytes/Count toggle, hook-frame stripping) are the pure
-  `region-analysis-model.ts`, ported verbatim from `showFlamegraph` /
-  `showHeapFlamegraph`.
-- **R3-R9 blocking-calls panel** (deferred from T31 by the merged lane-interaction
-  seam): group-by leaf/full (R4), 5-color summary bars (R5), expandable full-stack
-  sub-groups (R7), 5 example-poll jump links centering the viewport (R8). Ports
-  `collectSchedSamples` + `renderSchedPanel` verbatim.
-- **H7 "what opens by data present"**: `defaultRegionMode` (sched-only -> blocking,
-  heap-only -> heap, else CPU); the sub-tab bar shows only modes with data (P4).
-- **Toolbar D1/D2/D3** now open the analyses for the whole trace via the
-  `onOpenAnalysis` seam T33 injected (`openWholeTrace`).
-- **F19 Pop Out**: opens `flamegraph.html` with trace URL(s)/start/end/zoom paths.
-- **S7 count reconciliation** (below) + **S7 frame->timeline link** ("Show in
-  timeline" navigates to the zoomed frame's `[min,max]` sample extent). New
-  inventory row F20 + ledger.
-- **T17 partial-window badge**: `regionCoverage` over the segments slice; the
-  chunk-2 consumer of T17's coverage signal the audit (notes 6/7) required.
+## COMPLETED (commit shas)
 
-## S7 COUNT ROOT-CAUSE (DoD: documented in the PR + reconciliation landed)
+- `f01acd8` docs(viewer): document new-UI opt-in switch, keyboard help,
+  windowed loading for users.
+  - Adds a "Using the viewer" subsection to `dial9-tokio-telemetry/README.md`
+    ("Analyzing trace files" section): the staged-rollout switch (`?ui=new`
+    opt-in, `?ui=legacy` to force legacy, legacy default until the flip,
+    choice remembered per browser, bottom-right pill); the in-app `?` help
+    overlay as the AUTHORITATIVE keyboard map (linked, not duplicated);
+    windowed loading with the "partial window" / "oversized segment"
+    at-cursor badges so a truncated window is never shown as whole.
+  - Documents the CURRENT reality only (opt-in, legacy default). Does NOT
+    document the default as flipped (that is T39's one-line `DEFAULT_UI`
+    change in `ui-switch.js`, not yet made).
+- (this commit) docs: T46 HANDOFF (replaces the inherited T32 HANDOFF at the
+  worktree root; T32 content stays in git history).
 
-**Conclusive (single reading; no STOP needed).** The two counts measure different
-units on the same trace:
+## DECISION: README_TELEMETRY.md de-dup (update-both vs de-duplicate)
 
-- Toolbar **"Flamegraph (8993)"** = `trace.cpuSamples.length` (toolbar.ts /
-  legacy viewer.html:2375) - ALL CPU sample RECORDS: on-CPU + off-CPU/scheduling
-  (`source === 1`) + stackless samples.
-- Flamegraph **"147 samples"** = `filterCpuSamples(...).length` - only the
-  FOLDABLE subset: `callchain.length > 0 && source !== 1` (frozen
-  `flamegraph.js:129`; verified against `attachCpuSamples` which routes
-  `source === 1` to `schedSamples`).
+Already de-duplicated at the filesystem level - no restructure needed:
 
-Not a bug - different units. The toolbar "advertises data volume before
-commitment" (04-ux-findings "Works well"); the flamegraph counts what actually
-folds. **Reconciliation landed**: the embedded CPU panel labels its count
-`"N samples (on-CPU, with stacks) of M CPU records"` (`cpuCountLabel`) so the two
-never read as a contradiction on one screen. The T33 toolbar button label is a
-correct volume indicator and is left unchanged (T33-owned surface; changing it
-would be scope creep with no correctness gain).
+- `dial9-viewer/README_TELEMETRY.md` is a SYMLINK -> `../dial9-tokio-telemetry/README.md`
+- top-level `README.md` is a SYMLINK -> `dial9-tokio-telemetry/README.md`
+- `dial9-tokio-telemetry/README.md` is the single canonical file (the
+  "# dial9" library README).
 
-## DoD CHECKLIST
+There is nothing to de-duplicate: both READMEs already resolve to one source
+of truth via symlinks. Editing the canonical file updates all three surfaces
+atomically (verified: `grep -c "Using the viewer"` returns 1 through each of
+`dial9-viewer/README_TELEMETRY.md`, top-level `README.md`, and
+`dial9-tokio-telemetry/README.md`). So the user-facing switch doc went into
+the one canonical file. No irreversible restructure was performed or needed.
 
-- check: row-walker green on section-S rows -> the features/02 row-walker
-  registry does NOT exist yet (only `parity/walkers/features01.mjs` +
-  `features03.mjs`; the viewer page is mid-migration). Satisfied per the
-  established chunk-2 pattern (T31/T29/T30 HANDOFFs): the section-S behavior is
-  behaviorally verified by `region-analysis-model.test.ts` (19 cases: F15 counts,
-  F16 HT estimates + mode mapping, R3-R9 grouping, H7 default, S7 extent + count
-  reconciliation, T17 coverage). F1-F14 are frozen `flamegraph.js` behaviors
-  consumed unchanged (covered by the existing flamegraph_export / flamegraph page
-  suites). When the features02 walker lands, register F15/F16/F19/F20 + R3-R9.
-- check: region-select flows behavioral-diffed (J2/J5) -> the pure model ports
-  the legacy sample-building / grouping / counts verbatim; the model tests are the
-  field-level diff surface.
-- check: count root-cause documented + reconciliation landed -> above + ledger +
-  `cpuCountLabel`.
-- check: frame click "show in timeline" -> `frameSampleTimeExtent` +
-  `region-analysis.ts` "Show in timeline" button; ledger + new inventory row F20.
-- check: partial-window badge when the region exceeds the resident window ->
-  `regionCoverage` + `coverageBadge`; tested with a synthetic segments slice.
+(`dial9-viewer/README.md` is a SEPARATE small crates.io stub for the
+`dial9-viewer` crate that just points at the `dial9` crate README - out of
+scope, untouched.)
 
-## DEFERRALS (ledgered)
+## DoD - every check verified
 
-- **K7 (keyboard frame traversal) -> T47.** The frozen `flamegraph.js` public
-  surface has `getZoomPath` (read) + `zoomToPath` (append-from-EMPTY-stack, for
-  URL restore) + `handleEscape` (cascade reset) but NO absolute zoom control
-  (`setZoomPath` / `resetZoom` / `zoomToNode`), so keyboard traversal cannot drive
-  the widget cleanly without editing the frozen core (forbidden). Deferred per the
-  ticket with a T47 line item (chunk-3-post.md). Escape-to-reset-zoom already
-  works via the widget's `handleEscape` in the inspector esc-cascade.
-- **F17 (idle-time) / F18 (task-dump) flamegraphs -> follow-on.** Both are
-  task-scoped (not range-scoped) analyses whose access paths are T30 (task-detail
-  idle link N4) and T22 (lane idle-gap click N11) surfaces not wired at HEAD, and
-  the selection-driven inspector does not model a task-scoped analysis surface
-  without those dispatches. The region-panel rendering seam is ready to host them.
-  The ticket GOAL (Shift+drag -> flamegraph/blocking/heap + S7) is complete.
+- check: AGENTS.md testing rules match reality (Vitest, no hand registration)
+  -> PASS (already correct via `f754bbe`; verified against reality:
+  `package.json` `test` = `vitest run`; `vite.config.ts`
+  `test.include: ["tests/**/*.test.ts","src/**/*.test.ts"]` = auto-discovery;
+  `scripts/e2e-trace-tests.sh` `TRACE_SUITES` for regenerated-trace suites;
+  `test_parser.js` still at ui root, driven by
+  `dial9-tokio-telemetry/tests/js_parser.rs`). No edit needed.
+- check: ui README covers dev/test/parity/URL-contract -> PASS (sections
+  present: "UI development requires Node", "Dev loops", "Dual-UI switch",
+  "URL contract (stable deep-link API)", "Parity gate tooling", "Tests -
+  IMPORTANT for agents"). No edit needed.
+- check: switch documented for users -> PASS (commit `f01acd8`).
+- check: stale instructions removed (registration warnings) -> PASS. Dead-ref
+  sweep over owned docs for
+  `CI does NOT auto-discover|You MUST register|must register|hand-registration|serve.py`
+  returns ZERO matches. Remaining `e2e-trace-tests.sh` / `node test_`
+  mentions are all correct-context: the `TRACE_SUITES` reference, the
+  "`node test_*.js` runner was retired (T11)" historical note, and the
+  legitimate `test_parser.js` Node exception.
 
-## MERGED-CODE-VS-TICKET NOTES
+Extra ticket requirements:
+- AGENTS.md still parses as valid markdown: unchanged by this ticket (no
+  edit), so validity is identical to the committed baseline.
+- Docs-only change; no path rust-embed serves was touched (the canonical
+  README is not under `ui/dist/`), so no `cargo build -p dial9-viewer`
+  required. Evidence is the grep sweeps + read-throughs above.
 
-- The R3-R9 blocking-calls panel is a **section R** row in the inventory but was
-  DEFERRED to T32 by the merged `lane-interaction.ts:14-18` seam ("what opens for
-  sidebarRange is T32's") and T31's HANDOFF. Picked up here (the region open is
-  authoritatively T32's per the merged code, hard rule 1).
-- **Whole-trace box:** the toolbar opens (`openWholeTrace`) reuse
-  `selection.sidebarRange` = `[minTs,maxTs]` so the Stack tab activates (P4); the
-  H10 selection overlay therefore boxes the full draw area (legacy toolbar opens
-  drew no box). Intentional analyzed-scope indicator, ledgered. No new store field
-  was needed (avoids state.d.ts / fixture churn).
+## REMAINING: none.
 
-## FILES
+## BLOCKERS / QUESTIONS: none.
 
-New:
-- `src/pages/viewer/region-analysis-model.ts` - pure derivations.
-- `src/pages/viewer/region-analysis.ts` - the `createRegionAnalysis` controller
-  (widget lifecycle + sub-tab framework + imperative render into the host).
-- `src/pages/viewer/region-analysis-model.test.ts` - 19 model cases (Vitest
-  auto-discovered; not a demo-trace suite, no `e2e-trace-tests.sh` registration).
+## OBSERVATIONS (outside owned scope - noted, not fixed per scope fence)
 
-Edited (smallest additive):
-- `src/pages/viewer/inspector.ts` - `regionPanel` added to `InspectorDeps`; Stack
-  tab renders the binding-free `[data-region-host]`; `regionPanel.sync()` after
-  each frame render.
-- `src/pages/viewer/main.ts` - creates the panel, wires `onOpenAnalysis` ->
-  `openWholeTrace`, disposes it.
-- `new/viewer.html` - loads `/flamegraph.css` for the embedded widget chrome.
-- `src/styles/viewer.css` - region-panel + blocking-calls styles.
-- `docs/tickets/ledger.md` - F15/F16, R3-R9, S7, F20, F19, D1/D2/D3,
-  partial-window, F17/F18 defer, K7 defer.
-- `docs/ui-inventory/features/02-viewer-html.md` - new row F20 (frame->timeline).
-- `docs/tickets/chunk-3-post.md` - T47 K7 core-API line item.
+- `AGENTS.md` line 80 (the testing section, authored by dependency commit
+  `f754bbe`) contains em-dash characters. Pre-existing dependency content,
+  correct in substance; not touched. My own additions use no em-dashes.
 
-## EVIDENCE (gate bar - all four green)
+## EVIDENCE (commands)
 
-- `npx tsc --noEmit`: **exit 0**.
-- `npm run test` (full Vitest): **Test Files 88 passed | 1 skipped (89); Tests
-  1403 passed | 1 expected fail | 11 skipped (1415)**. 0 unexpected failures; ran
-  full-parallel in ~120s, no straggler timeout. region-analysis-model: 19/19.
-- `npm run build` (vite): **clean** (only the pre-existing frozen-core
-  "externalized for browser" warnings; new-viewer bundle grows with the embedded
-  widget).
-- `cargo build -p dial9-viewer`: **exit 0** (rust-embed picks up the rebuilt dist).
+```
+# de-dup decision / symlinks
+ls -la README.md dial9-viewer/README_TELEMETRY.md   # both -> dial9-tokio-telemetry/README.md
+grep -c "Using the viewer" dial9-viewer/README_TELEMETRY.md README.md dial9-tokio-telemetry/README.md  # 1,1,1
 
-## NOT MECHANICALLY VERIFIED HERE (browser-driven; Vitest env is `node`)
+# DoD4 dead-ref sweep (clean)
+git grep -nE "CI does NOT auto-discover|You MUST register|must register|hand-registration|serve.py" \
+  -- AGENTS.md dial9-viewer/ui/README.md dial9-tokio-telemetry/README.md   # no matches
 
-- The live DOM flow (widget rendering into the inspector, sub-tab clicks, the
-  show-in-timeline navigation, pop-out) is not jsdom-tested (no jsdom; env is
-  `node`) - consistent with T27/T30/T31. The pure model covers the logic; the
-  browser-driven check is the features02 row-walker's when it lands.
-- S7 frame->time is CPU-mode only (heap would need alloc timestamps carried into
-  the heap base samples - a small follow-on).
-
-## BLOCKERS / QUESTIONS
-
-None. K7 and F17/F18 are deferred with ledger + T47 notes (sanctioned outcomes),
-not blockers.
+# reality anchors for DoD1
+# package.json: "test": "vitest run"
+# vite.config.ts: test.include: ["tests/**/*.test.ts","src/**/*.test.ts"]
+# in-app help: src/lib/interact/help-overlay.ts, src/pages/viewer/help.ts ("?" toggles)
+# partial-data badge: src/components/overlay/readout.ts ("partial window"/"oversized segment")
+```
