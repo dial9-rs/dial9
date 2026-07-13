@@ -268,7 +268,14 @@ body {
    the header's 5 (empty dot-th + worker + what + t + dur). Shrinks to the dot. */
 .d9-rail-dot-cell { width: 1%; padding-right: 0 !important; }
 .d9-rail-num { text-align: right; font-variant-numeric: tabular-nums; color: #cdd2f0; white-space: nowrap; }
-.d9-rail-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.d9-rail-dot {
+    display: inline-block;
+    vertical-align: middle;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+}
 .d9-rail-dot.sev-high { background: #ff6b6b; }
 .d9-rail-dot.sev-med { background: #ffa94d; }
 .d9-rail-dot.sev-low { background: #ffd43b; }
