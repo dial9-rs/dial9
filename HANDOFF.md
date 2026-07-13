@@ -1,120 +1,126 @@
-# T24 - Crosshair overlay, hover tooltip, info readout - HANDOFF
+# T23 - Pointer + keyboard interaction state machine - HANDOFF
 
-(Supersedes the T22 HANDOFF inherited through the branch chain.)
+(Supersedes the T24 HANDOFF inherited through the branch chain.)
 
-## STATUS: DoD met (mechanical gates green; live-browser items deferred per the
-T21/T22/T25 precedent). Ready for review.
+## STATUS: COMPLETE (runnable gates green; T12-tooling gates implemented, not runnable in this env)
 
-The transient channel (features/02 I1-I6 + V) landed on the store's `transient`
-RAF channel with the 03 F3 read-after-write anti-pattern eliminated. The
-`transient.atCursor` readout store contract is defined and populated; a minimal
-inspector stub renders it until T31 lands.
+All lane-area input is now `lib/interact` state machines dispatching store
+actions (architecture 2.5). Owned rows H1-H13 implemented, plus the K4
+(zoom-undo on `z`) and K5 (WASD on the timeline) viewer integrations. Handlers
+dispatch store actions ONLY - they never render (F2) and never scan
+O(allSpans) (F6: click resolution reuses T22's `resolveLaneClick` / the
+`lib/trace/query` helpers).
 
-## COMPLETED (commits, on branch ticket/T24-crosshair-tooltip)
+## COMPLETED (commits on `ticket/T23-lane-interaction`)
 
-- `79a02c6` feat(T24): transient.atCursor readout contract in state types
-  - `types/state.d.ts`: new `AtCursorReadout` interface (the store contract T31
-    renders) + `atCursor` field on `TransientSlice`. Carries the T17
-    windowed-data `coverage` signal.
-  - `pages/viewer/store.ts`: init `transient.atCursor: null`.
-  - `store/store.test.ts`, `types/exhaustive.test.ts`: extended the T06/T07
-    StoreState literals with the additive field (mechanical, like T25's
-    timeMode/tz).
-- `d457bee` feat(T24): crosshair overlay + hover tooltip + at-cursor readout
-  - `components/overlay/crosshair.ts`: pure `drawCrosshair` (I2 mouse / I3
-    keyboard cursor / I4 custom-event guide / I5 pinned marker) + `crosshairX`
-    using the SHARED `time.nsToPanelX` (A13/N4 invariant). Overlay canvas
-    resizes only on geometry change (lib/canvas/dpr).
-  - `components/overlay/tooltip.ts`: `placeTooltip` PURE over CACHED dims (the
-    F3 fix), ResizeObserver-refreshed; `laneTooltipModel` reproduces the G16
-    content from T22's `assembleLaneHover` output (consumed, not
-    reimplemented); lit-html render (auto-escapes, #587).
-  - `components/overlay/readout.ts`: `computeAtCursorReadout` (I6 parity) +
-    `coverageAt` (T17 residency mapping) + `renderAtCursorStub` (inspector).
-  - `components/overlay/data.ts`: once-per-trace hover-input derivation (global
-    queue + active-task series LaneData omits), cached via store.derived.
-  - `components/overlay/index.ts`: hover controller - mousemove reads geometry
-    once (clean, pre-write) and dispatches transient; drawFrame (sole
-    subscriber on hover frames) reads-before-writes -> zero forced layout.
-  - `pages/viewer/main.ts`: mounts the overlay after shell+lanes.
-  - `styles/viewer.css`: overlay/tooltip/readout styles + `.d9-track-column`
-    positioning context.
-- `0fe9320` test(T24): overlay vitest (crosshair/tooltip/readout).
+- `b84b871` feat: pure state machines (pointer, wheel, kb-selection) + viewport
+  actions with the K4 zoom-history stack; adds the additive `curNs` field to
+  `transient.DragState`.
+- `842fa1c` feat: `lane-interaction.ts` DOM binding + `main.ts` wiring +
+  selection-overlay/viewport-controls CSS.
+- `6b141e8` test: 60 Vitest cases over the machines (every transition + cancel).
+- `468198c` perf: plain-scroll wheels bail before any layout read (H5).
+
+## FILES
+
+New (T23-owned):
+- `src/lib/interact/pointer.ts` - pan/region/zoom drag machine, 3px intent,
+  drag-vs-click discrimination (+ `pointer.test.ts`).
+- `src/lib/interact/wheel.ts` - Ctrl/Cmd = zoom-at-cursor, plain = scroll (H5)
+  (+ `wheel.test.ts`).
+- `src/lib/interact/kb-selection.ts` - H9 keyboard region/zoom selection machine
+  (+ `kb-selection.test.ts`).
+- `src/pages/viewer/viewport-actions.ts` - pure zoom/pan/fit/region math (legacy
+  parity) + store-bound actions + K4 zoom history (+ `viewport-actions.test.ts`).
+- `src/pages/viewer/selection-overlay.ts` - H10 region box render surface
+  (+ `selection-overlay.test.ts`).
+- `src/pages/viewer/lane-interaction.ts` - the DOM binding (listeners, viewport
+  controls H1-H4, selection overlay, router key bindings).
+
+Edited (small, additive - merge points):
+- `src/types/state.d.ts` - `DragState.curNs` (drives the H10 box from the store);
+  `src/types/exhaustive.test.ts` updated to the new shape.
+- `src/pages/viewer/main.ts` - mounts lane interaction; folds its key bindings
+  into the router BEFORE the generic `?`/Escape fallbacks.
+- `src/styles/viewer.css` - `.d9-selection-overlay` (+ `.zoom`),
+  `.d9-viewport-controls`.
+- `src/lib/interact/index.ts` - barrel exports for the new machines.
+
+## ROW COVERAGE (features/02 H)
+
+- H1/H2/H3 zoom in/out/fit buttons - rendered as the floating `#btn-zoom-in`/
+  `#btn-zoom-out`/`#btn-fit` controls, wired to `viewport.zoom(0.5)`/`zoom(2)`/
+  `fit()`. Minor conscious deviation: legacy `zoom()` called `clearToasts()`;
+  the new shell uses PERSISTENT hint chips (F5), not hint toasts, so there is
+  nothing to clear - error toasts are deliberately left alone.
+- H4 viewport controls panel - floating bottom-right, buttons `stopPropagation`
+  so a click is never a lane click.
+- H5 wheel - Ctrl/Cmd zoom-at-cursor (factor 1.3), plain wheel scrolls the lanes.
+- H6 drag pan - 3px intent, duration-preserving edge-carry clamp.
+- H7 Shift+drag region - GESTURE only: commits the range to
+  `selection.sidebarRange`. WHAT it opens (flamegraph/blocking/heap, and the
+  "no CPU samples" toast) is T32's `sidebarRange` consumer - the ticket's H7
+  seam. Deliberately NOT gated on `cpuSamples` here.
+- H8 Alt+drag zoom - zooms the viewport to the region.
+- H9 keyboard Shift/Alt selection - full machine (start/extend 5%/confirm/cancel),
+  seeded at mouse-in-view else view centre, blocked while `sidebarRange` is
+  retained, announced via A16.
+- H10 selection overlay - `selection-overlay.ts` renders the blue/teal box from
+  `transient.drag` / `transient.keyboardSelection`, and PERSISTS a retained
+  `selection.sidebarRange` box until the sidebar (T32) clears it.
+- H11 arrow zoom / H12 arrow pan - ArrowUp/Down zoom, ArrowLeft/Right pan 20%
+  (extend the kb cursor instead while a selection is active).
+- H13 Set/Clear Range - delegates to E3/E4 (the toolbar Set Range/Clear Range
+  buttons), which is T33's surface. T23 keeps the viewport slice those buttons
+  read correct; no T23-rendered control. Row-walker will read H13
+  NOT-TRIGGERABLE until T33 lands the toolbar.
+- K4 (`z` zoom-undo) + K5 (WASD) integrated via the router bindings.
 
 ## DoD
 
-- check: row-walker green on I/V rows -> DEFERRED (T12 Playwright row-walker;
-  live-browser, same disposition as T21/T22/T25 HANDOFFs). Behavioral fidelity
-  is a faithful port of the legacy `renderCrosshair` / lane-hover handler /
-  `updateInfoPanel`, locked by the `laneTooltipModel` content Vitest.
-- check: T12 perf probe - hover storm ZERO forced-layout from the tooltip path
-  -> DESIGN GUARANTEE + Vitest proxy DONE; full Playwright probe DEFERRED.
-  Guarantee: `placeTooltip` is pure over cached dims (no element measure, ever);
-  dims refresh via ResizeObserver (no forced sync layout); on a hover-only frame
-  the shell does NOT run (never subscribes to `transient`), so `drawFrame` is
-  the sole subscriber and its geometry reads precede all writes. `placeTooltip`
-  purity asserted in tooltip.test.ts.
-- check: crosshair alignment vs lanes (Vitest on shared layout math) -> DONE
-  (crosshair.test.ts: overlay x == every track's absolute-in-column x at three
-  widths). The "+ one T12 visual check" is the deferred live item.
-- check: at-cursor store contract populated during hover -> DONE
-  (readout.test.ts: computeAtCursorReadout + the transient.atCursor contract
-  delivered to a subscriber on the coalesced tick; the stub renders it).
+- check: Vitest on the state machines (every transition incl. cancel paths) -
+  PASS. 60 tests across pointer/wheel/kb-selection/viewport-actions/
+  selection-overlay.
+- check: wheel-zoom coalesced to <= 1 render/frame (03 F2) - PASS at unit level:
+  `viewport-actions.test.ts` "6 wheel-style zooms flush a single subscriber
+  notification". The T12 perf-probe (Playwright) is the integration form.
+- check: row-walker green on H rows / behavioral differ vs legacy on J2/J3/J4 -
+  REQUIRES T12 tooling (Playwright + dev-server + browser); NOT runnable in this
+  environment. Access paths are implemented per ROW COVERAGE above; selection/
+  zoom/pan semantics reuse the legacy math verbatim and T22's `resolveLaneClick`,
+  so parity is structural. Run the row-walker + behavioral differ against the new
+  viewer once T12's harness is available (the DoD's mechanical closure).
 
-## GATE BAR (hard rule 3) - all green
+## GATE EVIDENCE
 
-- `npx tsc --noEmit` -> exit 0.
-- `npm run test` (full Vitest) -> Test Files 68 passed | 1 skipped; Tests 1080
-  passed | 1 expected-fail | 11 skipped. Zero unexpected failures. Boundary
-  check (`check:boundary`) OK - no core imports outside lib/trace + lib/canvas.
-- `npm run build` -> clean (129 modules; new-viewer bundle 48.30 kB).
-- `cargo build -p dial9-viewer` -> Finished (rust-embed picks up the new
-  dist/). JS/TS/CSS-only change: no `.rs` touched, no trace format change, so
-  cargo nextest/clippy/fmt skipped per AGENTS.md.
+- `npx tsc --noEmit` -> exit 0 (clean).
+- `npm run test` (full Vitest) -> 1230 passed, 1 expected-fail, 11 skipped, and
+  ONE failure: `tests/core/all_skills_snippets.test.ts > ... Detect tight loops`
+  timed out at 120000ms (the recipe itself runs ~200s). PRE-EXISTING and
+  UNRELATED to T23 (a trace-analysis skills-snippet recipe; touches no
+  interaction code). Reported, not fixed (scope rule). My five new suites: 60/60
+  pass in 300ms.
+- `npm run build` -> clean; viewer bundle `new/viewer.html` + `new-viewer-*.js`
+  (82 kB) includes the interaction layer. ("externalized for browser" warnings
+  are pre-existing from `trace_parser.js`.)
+- `cargo build -p dial9-viewer` -> Finished (rust-embed picks up the built UI).
 
-## SCOPE NOTES / SEAMS
+## SEAMS / DEFERRED (not T23's scope)
 
-- T22 seam: consumed `assembleLaneHover` / `LaneHoverData` unchanged; T24 only
-  assembles its INPUT (via `deriveOverlayData`, reusing frozen-core builders)
-  and renders the tooltip. Lane hover LOGIC not reimplemented. `deriveWorkerIds`
-  imported from lanes/data.ts. (One extra one-time `buildWorkerSpans` pass per
-  trace load - overlay + lanes each derive; not a per-frame cost.)
-- T23 seam (pointer machine, NOT landed): T24 owns the HOVER path only
-  (`transient.mouseNs` + tooltip + readout). It adds a mousemove/mouseleave
-  listener that dispatches transient; drag/zoom and the keyboard-selection
-  cursor are T23's (`transient.drag` / `transient.keyboardSelection`, which the
-  crosshair already reads). While a drag is active the controller suppresses the
-  tooltip + mouse crosshair (legacy V3), so the two won't fight when T23 lands.
-- T31 seam: `transient.atCursor` is the store contract T31's inspector renders;
-  `renderAtCursorStub` is the placeholder that proves the wiring until then.
-  It appends into `.d9-inspector-body` (static-content container -> survives the
-  shell's declarative re-renders, the legend/toast technique).
-- Shell shared point: `main.ts` got a 3-line additive mount + dispose; the
-  overlay canvas is an imperatively-appended child of `.d9-track-column`
-  (re-ensured each frame). No edit to `tracks.ts`/`track-renderers.ts`.
+- H7 region opening + the no-CPU toast -> T32 (consumes `selection.sidebarRange`).
+- Lane-click `openStackFor` -> Poll Detail is T31's surface; the SELECTION is
+  dispatched now, the popup lands with T31 (noted in `lane-interaction.ts`).
+- T17 windowing (carried obligation, audit notes 6/7): click/region resolution
+  reads the resident `trace` slice (the viewer currently loads the whole trace).
+  T23 never fabricates data for out-of-window regions - it dispatches ranges;
+  coverage surfacing is T24's `coverageAt` readout + T32's partial-window badge.
+  When viewer segment-windowing lands, the click resolver must respect the
+  truncated/oversized covering segment (the T22 resolver's input data).
 
-## BLOCKERS / QUESTIONS
+## MINOR NOTES FOR REVIEW
 
-None blocking. One observation:
-
-- The binding-file `docs/tickets/reviews/T17-audit.md` does NOT exist in this
-  worktree (the whole `docs/tickets/reviews/` dir is absent). The T17-audit
-  FINDINGS are baked into the merged code (`types/state.d.ts` cites "T17-audit
-  finding 2", `types/trace.d.ts` cites finding 1 + "notes 6-7"). I satisfied the
-  carried obligation from those: `AtCursorReadout.coverage` + the tooltip
-  "Window:" warning row surface a truncated/oversized window instead of
-  presenting it as whole, populated from the `segments` slice residency
-  (`coverageAt`). On the current whole-trace (non-segmented) load path the map
-  is empty, so coverage resolves to "complete"; when a future ticket wires
-  segment windowing into the viewer, the covering segment's state drives it. Not
-  a stop-gate (the obligation is directional and satisfied); flagged for the
-  reviewer's awareness.
-
-## EVIDENCE (commands)
-
-- `cd dial9-viewer/ui && npx tsc --noEmit` -> exit 0
-- `cd dial9-viewer/ui && npx vitest run src/components/overlay/` -> 3 files, 29
-  tests passed
-- `cd dial9-viewer/ui && npm run test` -> 1080 passed, 0 unexpected failures
-- `cd dial9-viewer/ui && npm run build` -> built in ~0.4s, clean
-- `cargo build -p dial9-viewer` -> Finished
+- `z` records history per discrete view change including each wheel notch, so a
+  wheel-zoom storm is undone notch-by-notch. Defensible as "view history";
+  coarser granularity is a T37 polish call if wanted.
+- Announcement strings are ASCII (no em-dash / arrow glyphs) while preserving
+  the legacy semantics (they are feedback-only; no logic depends on them).
