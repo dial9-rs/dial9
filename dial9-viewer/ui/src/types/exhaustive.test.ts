@@ -201,6 +201,8 @@ const initialState: StoreState = {
     sidebarWidth: 400,
     selectedSpanNames: new Set(),
     selectedEventNames: new Set(),
+    timeMode: "rel",
+    tz: "utc",
   },
   transient: {
     mouseNs: null,

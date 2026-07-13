@@ -37,6 +37,24 @@ export type FoldablePanelKind = "spans" | "events" | "cpu" | "queue";
  */
 export type PanelKind = FoldablePanelKind | "task-detail";
 
+// ── Clock display vocabulary (features 02 E1/E2, F) ─────────────────────
+
+/**
+ * Clock display mode for the time axis and all timestamps (features 02 E1):
+ * "rel" shows offsets from the trace start (`+1.23s`), "abs" shows
+ * wall-clock time via the trace's clock-sync anchors. Replaces the legacy
+ * `useAbsoluteTime` boolean; the same "rel"/"abs" vocabulary the URL codec
+ * carries (lib/url/view-state.ts TimeMode).
+ */
+export type TimeMode = "rel" | "abs";
+
+/**
+ * Timezone for absolute timestamps (features 02 E2): "utc" vs the viewer's
+ * local zone. Only meaningful when timeMode === "abs". Replaces the legacy
+ * `useLocalTz` boolean.
+ */
+export type TimeZoneMode = "utc" | "local";
+
 // ── trace slice ─────────────────────────────────────────────────────────
 
 /**
@@ -154,6 +172,17 @@ export interface UiPrefsSlice {
    */
   selectedSpanNames: ReadonlySet<string>;
   selectedEventNames: ReadonlySet<string>;
+  /**
+   * Clock display mode for the time axis + timestamps (02 E1). Default
+   * "rel" (legacy `useAbsoluteTime` = false). The toolbar toggle drives it
+   * (T33); the time-axis track (T25) and every timestamp formatter READ it.
+   */
+  timeMode: TimeMode;
+  /**
+   * Timezone for absolute timestamps (02 E2). Default "utc" (legacy
+   * `useLocalTz` = false); only consulted when timeMode === "abs".
+   */
+  tz: TimeZoneMode;
 }
 
 // ── transient slice ─────────────────────────────────────────────────────
