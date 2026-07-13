@@ -201,6 +201,8 @@ const initialState: StoreState = {
     sidebarWidth: 400,
     selectedSpanNames: new Set(),
     selectedEventNames: new Set(),
+    spanFilter: "",
+    spanPctFilter: 0,
     timeMode: "rel",
     tz: "utc",
   },

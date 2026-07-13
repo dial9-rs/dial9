@@ -42,6 +42,10 @@ export function initialViewerState(): StoreState {
       sidebarWidth: DEFAULT_INSPECTOR_WIDTH,
       selectedSpanNames: new Set<string>(),
       selectedEventNames: new Set<string>(),
+      // Span filter resting state (02 J7/J8): no text, no percentile floor
+      // (spans track T26).
+      spanFilter: "",
+      spanPctFilter: 0,
       // Legacy resting clock mode (viewer.html `useAbsoluteTime`/`useLocalTz`
       // both false): relative offsets in UTC. The toolbar toggles (T33)
       // mutate these; the time-axis track (T25) reads them.
