@@ -77,7 +77,11 @@ function renderPeriodsNow(): void {
 }
 
 function syncUrl(): void {
-  history.replaceState(null, "", "?" + buildSyncQuery(scope, periods));
+  // Keep the pathname explicit: a bare "?qs" would resolve against this
+  // page's <base href="/"> and rewrite the off-root path to "/". The legacy
+  // page (served at the root, no <base>) got the same URL implicitly. The
+  // trailing "?" on an empty query matches the legacy replaceState.
+  history.replaceState(null, "", window.location.pathname + "?" + buildSyncQuery(scope, periods));
 }
 
 function addPeriod(startNs: string | null, endNs: string | null): void {
