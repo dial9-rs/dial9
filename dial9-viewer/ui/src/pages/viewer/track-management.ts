@@ -160,7 +160,9 @@ export function createTrackManageActions(store: ViewerStore): TrackManageActions
       const cur = (store.getState() as StoreState).uiPrefs.trackOrder;
       const next = computeReorder(cur, dragged, target);
       // Only write on an actual change (no store thrash / needless render).
-      if (sameOrder(cur, next)) return;
+      // Compare against the RESOLVED current order, not the raw stored value:
+      // a same-track drop with an empty stored order must not normalize-write.
+      if (sameOrder(manageableOrder(cur), next)) return;
       store.update("uiPrefs", { trackOrder: next });
     },
   };
