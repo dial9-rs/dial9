@@ -6,9 +6,9 @@
 //!
 //!   cargo run -p memory-local
 
-use dial9::Dial9Config;
 use dial9::memory_profiling::{Dial9Allocator, MemoryProfiler, MemoryProfilingConfig};
 use dial9::telemetry::{Dial9Handle, Dial9TokioHandle};
+use dial9::{DiskWriter, TracedRecorder};
 use std::time::Duration;
 
 const TRACE_DIR: &str = "/tmp/memory-local-traces";
@@ -25,17 +25,17 @@ async fn allocate_some() {
     std::hint::black_box(&buffers);
 }
 
-fn my_config() -> Dial9Config {
+fn my_config() -> TracedRecorder {
     let trace_path = format!("{TRACE_DIR}/trace.bin");
-    Dial9Config::builder()
-        .on_disk_buffer(&trace_path)
+    let writer = DiskWriter::builder()
+        .base_path(&trace_path)
         .max_file_size(10_000_000)
         .max_total_size(50_000_000)
-        .with_runtime(|r| r.with_task_tracking(true))
-        .with_tokio(|t| {
-            t.worker_threads(2);
-        })
-        .build_or_disabled()
+        .build();
+    dial9::recorder_or_disabled(writer, |t| {
+        t.worker_threads(2);
+    })
+    .with_task_tracking(true)
 }
 
 #[dial9::main(config = my_config)]

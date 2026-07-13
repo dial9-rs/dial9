@@ -65,7 +65,6 @@ pub mod unwinder;
 #[cfg(feature = "dial9-source")]
 pub mod cpu_source;
 
-/// Extension trait adding `.enable_*` source sugar to the core recorder builder.
 #[cfg(feature = "dial9-source")]
 pub mod recorder_ext;
 

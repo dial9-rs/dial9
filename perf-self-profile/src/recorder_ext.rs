@@ -1,37 +1,38 @@
-//! `.enable_*` sugar for plugging this crate's profiling `Source`s into a
+//! `.with_*` sugar for plugging this crate's profiling `Source`s into a
 //! [`RecorderBuilder`](dial9_core::recorder::RecorderBuilder) in one call. Each
 //! method is `.source(<Source>::new(cfg))` that warns and skips on a start
 //! failure or unsupported platform. Use `.source(CpuProfiler::start(cfg)?)` to
 //! propagate the failure instead.
 
-use dial9_core::recorder::RecorderBuilder;
-use dial9_core::writer::WriterMode;
+use dial9_core::recorder::RegisterSource;
 
 #[cfg(feature = "dial9-source")]
 use crate::rate_limit::rate_limited;
 
-/// `.enable_*` sugar for this crate's profiling `Source`s, for every writer mode.
+/// `.with_*` convenience for this crate's profiling `Source`s, available on any
+/// [`RegisterSource`]. The core [`RecorderBuilder`](dial9_core::recorder::RecorderBuilder)
+/// and runtime wrappers that forward to it.
 pub trait RecorderPerfExt: Sized {
     /// Register the process-wide CPU profiler. Warns and skips on start failure.
     #[cfg(feature = "dial9-source")]
-    fn enable_cpu_profiling(self, config: crate::CpuProfilingConfig) -> Self;
+    fn with_cpu_profiling(self, config: crate::CpuProfilingConfig) -> Self;
 
     /// Register the per-thread scheduler-event profiler. Warns and skips on start failure.
     #[cfg(feature = "dial9-source")]
-    fn enable_sched_events(self, config: crate::SchedEventConfig) -> Self;
+    fn with_sched_events(self, config: crate::SchedEventConfig) -> Self;
 
     /// Register the `getrusage` resource-usage sampler. Warns and skips off unix.
     #[cfg(feature = "process-resource")]
-    fn enable_process_resource_usage(self, config: crate::ProcessResourceUsageConfig) -> Self;
+    fn with_process_resource_usage(self, config: crate::ProcessResourceUsageConfig) -> Self;
 
     /// Register the Linux `sock_diag` accept-queue sampler. Warns and skips off Linux.
     #[cfg(feature = "linux-socket")]
-    fn enable_socket_accept_queues(self, config: crate::SocketAcceptQueuesConfig) -> Self;
+    fn with_socket_accept_queues(self, config: crate::SocketAcceptQueuesConfig) -> Self;
 }
 
-impl<M: WriterMode> RecorderPerfExt for RecorderBuilder<M> {
+impl<T: RegisterSource> RecorderPerfExt for T {
     #[cfg(feature = "dial9-source")]
-    fn enable_cpu_profiling(self, config: crate::CpuProfilingConfig) -> Self {
+    fn with_cpu_profiling(self, config: crate::CpuProfilingConfig) -> Self {
         match crate::CpuProfiler::start(config) {
             Ok(source) => self.source(source),
             Err(e) => {
@@ -44,7 +45,7 @@ impl<M: WriterMode> RecorderPerfExt for RecorderBuilder<M> {
     }
 
     #[cfg(feature = "dial9-source")]
-    fn enable_sched_events(self, config: crate::SchedEventConfig) -> Self {
+    fn with_sched_events(self, config: crate::SchedEventConfig) -> Self {
         match crate::SchedProfiler::new(config) {
             Ok(source) => self.source(source),
             Err(e) => {
@@ -57,7 +58,7 @@ impl<M: WriterMode> RecorderPerfExt for RecorderBuilder<M> {
     }
 
     #[cfg(feature = "process-resource")]
-    fn enable_process_resource_usage(self, config: crate::ProcessResourceUsageConfig) -> Self {
+    fn with_process_resource_usage(self, config: crate::ProcessResourceUsageConfig) -> Self {
         #[cfg(unix)]
         {
             self.source(crate::ProcessResourceUsageSource::new(config))
@@ -73,7 +74,7 @@ impl<M: WriterMode> RecorderPerfExt for RecorderBuilder<M> {
     }
 
     #[cfg(feature = "linux-socket")]
-    fn enable_socket_accept_queues(self, config: crate::SocketAcceptQueuesConfig) -> Self {
+    fn with_socket_accept_queues(self, config: crate::SocketAcceptQueuesConfig) -> Self {
         #[cfg(target_os = "linux")]
         {
             self.source(crate::SocketAcceptQueuesSource::new(config))
@@ -98,10 +99,10 @@ mod tests {
     use std::time::Duration;
 
     #[test]
-    fn enable_process_resource_usage_registers_the_source() {
+    fn with_process_resource_usage_registers_the_source() {
         let writer = InMemoryWriter::new(64 * 1024).expect("writer");
         let session = recorder(writer)
-            .enable_process_resource_usage(ProcessResourceUsageConfig::default())
+            .with_process_resource_usage(ProcessResourceUsageConfig::default())
             .build_and_start();
         let names: Vec<String> = session
             .shared()

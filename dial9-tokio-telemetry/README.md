@@ -37,17 +37,20 @@ rustflags = [
 ```
 
 ```rust,ignore
-use dial9::{main, Dial9Config, telemetry::Dial9TokioHandle};
+use dial9::{DiskWriter, main, telemetry::Dial9TokioHandle};
 
-fn my_config() -> Dial9Config {
-    Dial9Config::builder()
-        .on_disk_buffer("/tmp/my_traces/trace.bin")
+fn my_config() -> dial9::TracedRecorder {
+    let writer = DiskWriter::builder()
+        .base_path("/tmp/my_traces/trace.bin")
         .max_total_size(5 * 1024 * 1024)   // keep at most 5 MiB on disk
         .max_file_size(1024 * 1024)     // optional: defaults to min(100 MiB, max_total_size / 4)
         .rotation_period(std::time::Duration::from_secs(300)) // optional: rotate every 5 min (default: 60 s)
-        .with_runtime(|r| r.with_runtime_name("main").with_task_tracking(true))  // TracedRuntime knobs
-        .with_tokio(|t| { t.worker_threads(4); }) // tokio knobs
-        .build_or_disabled() // or use build() to handle config failures explicitly
+        .build();
+    // Downgrades to a plain tokio runtime if the writer can't be created; use
+    // `dial9::recorder(writer?)` instead to surface writer errors explicitly.
+    dial9::recorder_or_disabled(writer, |t| { t.worker_threads(4); }) // tokio knobs
+        .with_runtime_name("main")
+        .with_task_tracking(true)
 }
 
 #[dial9::main(config = my_config)] // inline config function is also supported
@@ -60,23 +63,19 @@ async fn main() {
 }
 ```
 
-For zero-code configuration in production, use `Dial9Config::from_env()`:
+For zero-code configuration in production, use `dial9::recorder_from_env`:
 
 ```rust,ignore
-use dial9::{main, Dial9Config, telemetry::Dial9TokioHandle};
+use dial9::{main, telemetry::Dial9TokioHandle};
 
-fn my_config() -> Dial9Config {
-    Dial9Config::from_env()
-}
-
-#[dial9::main(config = my_config)]
+#[dial9::main(config = dial9::recorder_from_env)]
 async fn main() {
     let handle = Dial9TokioHandle::current();
     handle.spawn(async { /* wake events tracked when enabled */ }).await.unwrap();
 }
 ```
 
-`from_env()` supports these local trace writer knobs:
+`recorder_from_env` supports these local trace writer knobs:
 
 | Name | Default | Meaning |
 | --- | --- | --- |
@@ -139,7 +138,7 @@ Task dump knobs (capture requires the `taskdump` feature):
 | `DIAL9_TASK_DUMP_ENABLED` | `false` | Capture async task dumps at idle yield points. |
 | `DIAL9_TASK_DUMP_IDLE_THRESHOLD_MS` | `10` | Mean idle duration for task dump sampling. |
 
-Missing variables use defaults. Blank, invalid, or non-Unicode values emit a warning and are treated as missing. Some numeric defaults come from the underlying config builders and are listed here as the current `from_env()` behavior.
+Missing variables use defaults. Blank, invalid, or non-Unicode values emit a warning and are treated as missing. Some numeric defaults come from the underlying config builders and are listed here as the current `recorder_from_env` behavior.
 
 ## Why dial9-tokio-telemetry?
 
@@ -173,25 +172,25 @@ dial9 is fundamentally a central buffer that can collect data from different sou
 ```rust,ignore
 # #[cfg(feature = "worker-s3")]
 # mod inner {
-use dial9_tokio_telemetry::Dial9Config;
+use dial9::{DiskWriter, RecorderBuilderTokioExt, TracedRecorder};
 use dial9_tokio_telemetry::background_task::s3::S3Config;
 
-fn my_config() -> Dial9Config {
+fn my_config() -> TracedRecorder {
     let s3_config = S3Config::builder()
         .bucket("my-trace-bucket")
         .service_name("my-service")
         .build();
 
-    Dial9Config::builder()
-        .on_disk_buffer("/tmp/my_traces/trace.bin")
+    let writer = DiskWriter::builder()
+        .base_path("/tmp/my_traces/trace.bin")
         .max_file_size(100 * 1024 * 1024)
         .max_total_size(500 * 1024 * 1024)
+        .build()
+        .expect("build trace writer");
+    dial9::recorder(writer)
         .with_tokio(|t| { t.worker_threads(4); })
-        .with_runtime(|r| {
-            r.with_task_tracking(true)
-             .with_s3_uploader(s3_config)
-        })
-        .build_or_disabled()
+        .with_task_tracking(true)
+        .with_s3_uploader(s3_config)
 }
 # }
 ```
@@ -207,16 +206,16 @@ Programmatic builders leave process resource usage sampling disabled unless you
 opt in:
 
 ```rust,ignore
-use dial9_tokio_telemetry::telemetry::{ProcessResourceUsageConfig, TracedRuntime};
+use dial9::telemetry::ProcessResourceUsageConfig;
+use dial9::{RecorderBuilderTokioExt, RecorderPerfExt};
 
-let (runtime, guard) = TracedRuntime::builder()
+let traced = dial9::recorder(writer)
     .with_process_resource_usage(ProcessResourceUsageConfig::default())
-    .build_and_start(tokio::runtime::Builder::new_multi_thread(), writer)?;
+    .with_tokio(|_| {})
+    .build()?;
 ```
 
-Or use `TelemetryCore::builder().process_resource_usage(...)` directly.
-
-`Dial9Config::from_env()` enables this by default on Unix when telemetry itself
+`dial9::recorder_from_env` enables this by default on Unix when telemetry itself
 is enabled. To opt out, set:
 
 ```text
@@ -234,14 +233,16 @@ Programmatic builders leave socket accept queue sampling disabled unless you
 opt in:
 
 ```rust,ignore
-use dial9_tokio_telemetry::telemetry::{SocketAcceptQueuesConfig, TracedRuntime};
+use dial9::telemetry::SocketAcceptQueuesConfig;
+use dial9::{RecorderBuilderTokioExt, RecorderPerfExt};
 
-let (runtime, guard) = TracedRuntime::builder()
+let traced = dial9::recorder(writer)
     .with_socket_accept_queues(SocketAcceptQueuesConfig::default())
-    .build_and_start(tokio::runtime::Builder::new_multi_thread(), writer)?;
+    .with_tokio(|_| {})
+    .build()?;
 ```
 
-`Dial9Config::from_env()` also leaves this source disabled by default. To opt
+`dial9::recorder_from_env` also leaves this source disabled by default. To opt
 in, set:
 
 ```text
@@ -271,19 +272,17 @@ dial9-tokio-telemetry = { version = "0.3", features = ["cpu-profiling"] }
 rustflags = ["--cfg", "tokio_unstable", "-C", "force-frame-pointers=yes"]
 ```
 
-**Set `with_cpu_profiling`**:
+**Enable CPU profiling** (`.with_cpu_profiling` on the recorder):
 
 ```rust,ignore
-use dial9_tokio_telemetry::Dial9Config;
-use dial9_tokio_telemetry::telemetry::{CpuProfilingConfig, SchedEventConfig};
-Dial9Config::builder()
-    // ...
-    .with_runtime(|r| {
-        // Enable normal CPU profiles
-        .with_cpu_profiling(CpuProfilingConfig::default())
-        // Enable scheduling profiling
-        .with_sched_events(SchedEventConfig::default().include_kernel(true))
-    })
+use dial9::telemetry::{CpuProfilingConfig, SchedEventConfig};
+use dial9::{RecorderBuilderTokioExt, RecorderPerfExt};
+dial9::recorder(writer)
+    // Enable normal CPU profiles
+    .with_cpu_profiling(CpuProfilingConfig::default())
+    // Enable per-worker scheduler event capture
+    .with_sched_events(SchedEventConfig::default().include_kernel(true))
+    .with_tokio(|_| {})
     // ...
 ```
 
@@ -291,13 +290,14 @@ To use dial9 as a CPU profiler without installing Tokio runtime hooks, keep
 telemetry enabled and disable only Tokio instrumentation:
 
 ```rust,ignore
-use dial9_tokio_telemetry::telemetry::CpuProfilingConfig;
-use dial9_tokio_telemetry::telemetry::TracedRuntime;
+use dial9::telemetry::CpuProfilingConfig;
+use dial9::{RecorderBuilderTokioExt, RecorderPerfExt};
 
-let (runtime, guard) = TracedRuntime::builder()
+let traced = dial9::recorder(writer)
     .with_cpu_profiling(CpuProfilingConfig::default())
+    .with_tokio(|_| {})
     .with_tokio_instrumentation(false)
-    .build_and_start(tokio::runtime::Builder::new_multi_thread(), writer)?;
+    .build()?;
 ```
 
 You can also use `TelemetryCore::builder()` directly when you only need the
@@ -389,7 +389,7 @@ When `track_liveset(true)` is set, dial9 records every deallocation so it can de
 
 Without liveset tracking, the profiler adds negligible overhead. With liveset tracking, the ~200 ns per free is the dominant cost — budget accordingly for allocation-heavy services.
 
-`Dial9Config::from_env()` can install the profiler when `DIAL9_MEMORY_PROFILE_ENABLED=true`, but your binary must still declare `Dial9Allocator` as shown above so allocations pass through dial9's hook.
+`dial9::recorder_from_env` can install the profiler when `DIAL9_MEMORY_PROFILE_ENABLED=true`, but your binary must still declare `Dial9Allocator` as shown above so allocations pass through dial9's hook.
 
 ### Tracing span events (opt-in)
 
@@ -425,26 +425,25 @@ Careful filtering of the data you send to dial9 strongly recommended. dial9 does
 
 > Note: The taskdump feature requires Tokio's upstream taskdump support, which only compiles on Linux (aarch64, x86, x86_64). Enabling it on other targets is a hard compile error from Tokio.
 
-```rust
-# #[cfg(feature = "taskdump")]
-# mod inner {
-# use std::time::Duration;
-use dial9_tokio_telemetry::{Dial9Config, telemetry::TaskDumpConfig};
+```rust,ignore
+use std::time::Duration;
+use dial9::telemetry::TaskDumpConfig;
+use dial9::{DiskWriter, RecorderBuilderTokioExt, TracedRecorder};
 
-fn my_config() -> Dial9Config {
-    Dial9Config::builder()
-        // ...
-        .with_runtime(|r| {
-            r.with_task_tracking(true)
-             .with_task_dumps(TaskDumpConfig::builder().idle_threshold(Duration::from_millis(10)).build())
-        })
-        .build_or_disabled()
+fn my_config() -> TracedRecorder {
+    let writer = DiskWriter::builder()
+        .base_path("/tmp/dial9/trace.bin")
+        .max_total_size(64 * 1024 * 1024)
+        .build()
+        .expect("build trace writer");
+    dial9::recorder(writer)
+        .with_tokio(|_| {})
+        .with_task_tracking(true)
+        .with_task_dumps(TaskDumpConfig::builder().idle_threshold(Duration::from_millis(10)).build())
 }
 
 #[dial9::main(config = my_config)]
 async fn main() { /* ... */ }
-# }
-# fn main() {}
 ```
 
 > Performance note: Task dumps currently produce one extra wake per capture and are more likely than other features to degrade performance. Measure overhead in your environment before enabling in latency-sensitive paths.
@@ -485,8 +484,10 @@ custom events. This is useful for draining application-owned queues or taking
 periodic snapshots without passing a [`Dial9Handle`] through your code:
 
 ```rust,ignore
+use dial9::telemetry::CustomEventsConfig;
+use dial9::{RecorderBuilderTokioExt, recorder};
+use dial9_core::custom_events::CustomEventsSource;
 use dial9_trace_format::TraceEvent;
-use dial9_tokio_telemetry::telemetry::{CustomEventsConfig, TracedRuntime};
 
 #[derive(TraceEvent)]
 struct CacheEvent {
@@ -495,13 +496,14 @@ struct CacheEvent {
     entries: u64,
 }
 
-let (_runtime, _guard) = TracedRuntime::builder()
-    .with_custom_events(CustomEventsConfig::default(), move |ctx| {
+let traced = recorder(writer)
+    .source(CustomEventsSource::new(CustomEventsConfig::default(), move |ctx| {
         while let Ok(event) = rx.try_recv() {
             ctx.record_event(event);
         }
-    })
-    .build_and_start(builder, writer)?;
+    }))
+    .with_tokio(|_| {})
+    .build()?;
 ```
 
 `CustomEventsConfig::default()` runs the callback every flush cycle
@@ -514,12 +516,12 @@ the callback.
 dial9 installs callbacks on all 8 Tokio runtime hooks to collect telemetry. If you need to run your own logic alongside dial9's instrumentation, use `with_tokio_hooks`:
 
 ```rust,no_run
-use dial9_tokio_telemetry::telemetry::{InMemoryWriter, TracedRuntime};
+use dial9_tokio_telemetry::telemetry::{InMemoryWriter, RecorderBuilderTokioExt, recorder};
 
-let mut builder = tokio::runtime::Builder::new_multi_thread();
-builder.worker_threads(4).enable_all();
-
-let (runtime, guard) = TracedRuntime::builder()
+let traced = recorder(InMemoryWriter::new(16 * 1024 * 1024).unwrap())
+    .with_tokio(|t| {
+        t.worker_threads(4);
+    })
     .with_tokio_hooks(|hooks| {
         hooks.on_thread_start(|| {
             println!("Worker thread started");
@@ -530,7 +532,7 @@ let (runtime, guard) = TracedRuntime::builder()
         // Also available: on_thread_park, on_thread_unpark,
         // on_task_spawn, on_task_terminate, on_before_task_poll, on_after_task_poll
     })
-    .build_and_start(builder, InMemoryWriter::new(16 * 1024 * 1024).unwrap())
+    .build()
     .unwrap();
 ```
 
@@ -557,23 +559,24 @@ dial9-tokio-telemetry = { version = "0.3", features = ["worker-s3"] }
 ```rust,ignore
 # #[cfg(feature = "worker-s3")]
 # mod inner {
-use dial9_tokio_telemetry::Dial9Config;
+use dial9::{DiskWriter, RecorderBuilderTokioExt, TracedRecorder};
 use dial9_tokio_telemetry::background_task::s3::S3Config;
 
-fn my_config() -> Dial9Config {
+fn my_config() -> TracedRecorder {
     let s3_config = S3Config::builder()
         .bucket("my-trace-bucket")
         .service_name("my-service")
         .build();
 
-    Dial9Config::builder()
-        .on_disk_buffer("/tmp/dial9/trace.bin")
+    let writer = DiskWriter::builder()
+        .base_path("/tmp/dial9/trace.bin")
         .max_total_size(1 << 30)
-        .with_runtime(|r| {
-            r.with_task_tracking(true)
-             .with_s3_uploader(s3_config)
-        })
-        .build_or_disabled()
+        .build()
+        .expect("build trace writer");
+    dial9::recorder(writer)
+        .with_tokio(|_| {})
+        .with_task_tracking(true)
+        .with_s3_uploader(s3_config)
 }
 
 #[dial9::main(config = my_config)]
@@ -601,19 +604,17 @@ To run with **no filesystem dependency** (disk unavailable, read-only, or unwelc
 # #[cfg(feature = "worker-s3")]
 # mod inner {
 use dial9_tokio_telemetry::background_task::s3::S3Config;
-use dial9_tokio_telemetry::telemetry::{InMemoryWriter, TracedRuntime};
+use dial9_tokio_telemetry::telemetry::{InMemoryWriter, RecorderBuilderTokioExt, recorder};
 
 # fn example() -> std::io::Result<()> {
 let writer = InMemoryWriter::new(16 * 1024 * 1024)?; // 16 MiB RAM budget
 
-let mut tk = tokio::runtime::Builder::new_multi_thread();
-tk.enable_all();
-
 let s3 = S3Config::builder().bucket("my-bucket").service_name("svc").build();
-let (runtime, guard) = TracedRuntime::builder()
+let traced = recorder(writer)
+    .with_tokio(|_| {})
     .with_custom_pipeline(|p| p.gzip().s3(s3))
-    .build_and_start(tk, writer)?;
-# let _ = (runtime, guard);
+    .build()?;
+# let _ = traced;
 # Ok(())
 # }
 # }

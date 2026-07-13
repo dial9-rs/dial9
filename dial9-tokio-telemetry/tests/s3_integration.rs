@@ -8,7 +8,7 @@ use aws_config::Region;
 use aws_sdk_s3::Client;
 use common::{fast_sealing_writer, wait_for_sealed_segment};
 use dial9_tokio_telemetry::background_task::s3::S3Config;
-use dial9_tokio_telemetry::telemetry::{DiskWriter, TracedRuntime};
+use dial9_tokio_telemetry::telemetry::{DiskWriter, RecorderBuilderTokioExt, recorder};
 use fake_s3::{
     fake_s3_client, fake_s3_client_always_failing, fake_s3_client_flaky, fake_s3_client_hanging,
     fake_s3_client_with_region,
@@ -39,22 +39,21 @@ fn worker_thread_starts_and_stops_cleanly() {
     let writer = DiskWriter::new(&trace_path, 1024, 10 * 1024).unwrap();
     let (s3_config, client) = dummy_s3(s3_root.path());
 
-    let mut builder = tokio::runtime::Builder::new_multi_thread();
-    builder.worker_threads(1).enable_all();
-
-    let (runtime, guard) = TracedRuntime::builder()
+    let traced = recorder(writer)
+        .worker_poll_interval(std::time::Duration::from_millis(50))
+        .with_tokio(|t| {
+            t.worker_threads(1);
+        })
         .with_s3_uploader(s3_config.clone())
         .with_s3_client(client.clone())
-        .with_worker_poll_interval(std::time::Duration::from_millis(50))
-        .build(builder, writer)
+        .build()
         .unwrap();
 
-    runtime.block_on(async {
+    traced.runtime().block_on(async {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     });
 
-    drop(guard);
-    drop(runtime);
+    drop(traced);
 }
 
 #[test]
@@ -66,20 +65,18 @@ fn graceful_shutdown_seals_segments() {
     let writer = DiskWriter::new(&trace_path, 1024, 10 * 1024).unwrap();
     let (s3_config, client) = dummy_s3(s3_root.path());
 
-    let mut builder = tokio::runtime::Builder::new_multi_thread();
-    builder.worker_threads(1).enable_all();
-
-    let (runtime, guard) = TracedRuntime::builder()
+    let traced = recorder(writer)
+        .worker_poll_interval(std::time::Duration::from_millis(50))
+        .with_tokio(|t| {
+            t.worker_threads(1);
+        })
         .with_s3_uploader(s3_config.clone())
         .with_s3_client(client.clone())
-        .with_worker_poll_interval(std::time::Duration::from_millis(50))
-        .build_and_start(builder, writer)
+        .graceful_shutdown(std::time::Duration::from_secs(1))
+        .build()
         .unwrap();
 
-    drop(runtime);
-    let result = guard.graceful_shutdown(std::time::Duration::from_secs(1));
-
-    assert!(result.is_ok());
+    traced.graceful_shutdown();
 
     let active_files: Vec<_> = std::fs::read_dir(trace_dir.path())
         .unwrap()
@@ -117,19 +114,20 @@ fn end_to_end_trace_to_s3_roundtrip() {
         .region("us-east-1")
         .build();
 
-    let mut builder = tokio::runtime::Builder::new_multi_thread();
-    builder.worker_threads(2).enable_all();
-
-    let (runtime, guard) = TracedRuntime::builder()
+    let traced = recorder(writer)
+        .worker_poll_interval(std::time::Duration::from_millis(50))
+        .with_tokio(|t| {
+            t.worker_threads(2);
+        })
         .with_runtime_name("test-runtime")
         .with_s3_uploader(s3_config.clone())
         .with_s3_client(client.clone())
-        .with_worker_poll_interval(std::time::Duration::from_millis(50))
-        .build_and_start(builder, writer)
+        .graceful_shutdown(Duration::from_secs(1))
+        .build()
         .unwrap();
 
     // Run a workload that generates enough events to trigger rotation.
-    runtime.block_on(async {
+    traced.runtime().block_on(async {
         let mut handles = Vec::new();
         for _ in 0..50 {
             handles.push(tokio::spawn(async {
@@ -141,10 +139,7 @@ fn end_to_end_trace_to_s3_roundtrip() {
         }
     });
 
-    drop(runtime);
-    guard
-        .graceful_shutdown(Duration::from_secs(1))
-        .expect("clean shutdown");
+    traced.graceful_shutdown();
 
     // List objects in the bucket — should have at least one uploaded segment
     let list_rt = tokio::runtime::Builder::new_current_thread()
@@ -293,26 +288,24 @@ fn region_auto_detection_corrects_wrong_client_region() {
         .instance_path("test-host")
         .build();
 
-    let mut builder = tokio::runtime::Builder::new_multi_thread();
-    builder.worker_threads(2).enable_all();
-
-    let (runtime, guard) = TracedRuntime::builder()
+    let traced = recorder(writer)
+        .worker_poll_interval(std::time::Duration::from_millis(50))
+        .with_tokio(|t| {
+            t.worker_threads(2);
+        })
         .with_s3_uploader(s3_config.clone())
         .with_s3_client(client.clone())
-        .with_worker_poll_interval(std::time::Duration::from_millis(50))
-        .build_and_start(builder, writer)
+        .graceful_shutdown(Duration::from_secs(1))
+        .build()
         .unwrap();
 
-    runtime.block_on(async {
+    traced.runtime().block_on(async {
         for _ in 0..50 {
             tokio::spawn(async { tokio::task::yield_now().await });
         }
     });
 
-    drop(runtime);
-    guard
-        .graceful_shutdown(Duration::from_secs(1))
-        .expect("clean shutdown");
+    traced.graceful_shutdown();
 
     // Verify objects were uploaded despite the wrong initial region.
     let list_rt = tokio::runtime::Builder::new_current_thread()
@@ -410,22 +403,23 @@ fn stress_test_all_segments_uploaded_and_valid() {
         sink: metrics_sink,
     } = metrique_writer::test_util::test_entry_sink();
 
-    let mut builder = tokio::runtime::Builder::new_multi_thread();
-    builder.worker_threads(4).enable_all();
-
-    let (runtime, guard) = TracedRuntime::builder()
+    let traced = recorder(writer)
+        .worker_poll_interval(std::time::Duration::from_millis(50))
+        .metrics_sink(metrics_sink)
+        .with_tokio(|t| {
+            t.worker_threads(4);
+        })
         .with_task_tracking(true)
         .with_s3_uploader(s3_config.clone())
         .with_s3_client(client.clone())
-        .with_worker_poll_interval(std::time::Duration::from_millis(50))
-        .with_worker_metrics_sink(metrics_sink)
-        .build_and_start(builder, writer)
+        .graceful_shutdown(std::time::Duration::from_secs(10))
+        .build()
         .unwrap();
 
-    let handle = guard.tokio_handle(runtime.handle());
+    let handle = traced.guard().tokio_handle(traced.runtime().handle());
 
     // Generate load for 1 second — enough to produce several segments at 64KB each.
-    runtime.block_on(async {
+    traced.runtime().block_on(async {
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
         loop {
             if tokio::time::Instant::now() >= deadline {
@@ -448,10 +442,7 @@ fn stress_test_all_segments_uploaded_and_valid() {
         // citizen" that loses data rather than blocking the application.
     });
 
-    drop(runtime);
-    guard
-        .graceful_shutdown(std::time::Duration::from_secs(10))
-        .expect("graceful shutdown");
+    traced.graceful_shutdown();
 
     // List all uploaded objects.
     let list_rt = tokio::runtime::Builder::new_current_thread()
@@ -617,35 +608,35 @@ fn graceful_shutdown_completes_when_s3_hangs() {
         .region("us-east-1")
         .build();
 
-    let mut builder = tokio::runtime::Builder::new_multi_thread();
-    builder.worker_threads(2).enable_all();
-
-    let (runtime, guard) = TracedRuntime::builder()
+    // graceful_shutdown should complete within the timeout, not hang forever.
+    let shutdown_timeout = std::time::Duration::from_secs(3);
+    let traced = recorder(writer)
+        .worker_poll_interval(std::time::Duration::from_millis(50))
+        .with_tokio(|t| {
+            t.worker_threads(2);
+        })
         .with_s3_uploader(s3_config.clone())
         .with_s3_client(client.clone())
-        .with_worker_poll_interval(std::time::Duration::from_millis(50))
-        .build_and_start(builder, writer)
+        .graceful_shutdown(shutdown_timeout)
+        .build()
         .unwrap();
 
     // Generate trace data on the TracedRuntime, then let the worker pick it up.
-    let handle = guard.tokio_handle(runtime.handle());
-    runtime.block_on(async {
+    let handle = traced.guard().tokio_handle(traced.runtime().handle());
+    traced.runtime().block_on(async {
         for _ in 0..50 {
             handle.spawn(async { tokio::task::yield_now().await });
         }
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     });
 
-    drop(runtime);
-
-    // graceful_shutdown should complete within the timeout, not hang forever.
-    let shutdown_timeout = std::time::Duration::from_secs(3);
     let test_deadline = std::time::Duration::from_secs(10);
 
+    // Drain on a worker thread so a hung shutdown can't wedge the test.
     let (tx, rx) = std::sync::mpsc::channel();
     let t = std::thread::spawn(move || {
-        let result = guard.graceful_shutdown(shutdown_timeout);
-        let _ = tx.send(result);
+        traced.graceful_shutdown();
+        let _ = tx.send(());
     });
 
     let result = rx.recv_timeout(test_deadline);
@@ -656,7 +647,6 @@ fn graceful_shutdown_completes_when_s3_hangs() {
         "graceful_shutdown hung beyond {test_deadline:?} — it did not respect its own {shutdown_timeout:?} timeout"
     );
 
-    let _ = result.unwrap();
     let _ = t.join();
 }
 
@@ -686,20 +676,21 @@ fn stress_test_with_s3_failures() {
         .region("us-east-1")
         .build();
 
-    let mut builder = tokio::runtime::Builder::new_multi_thread();
-    builder.worker_threads(4).enable_all();
-
-    let (runtime, guard) = TracedRuntime::builder()
+    let traced = recorder(writer)
+        .worker_poll_interval(std::time::Duration::from_millis(50))
+        .with_tokio(|t| {
+            t.worker_threads(4);
+        })
         .with_task_tracking(true)
         .with_s3_uploader(s3_config.clone())
         .with_s3_client(client.clone())
-        .with_worker_poll_interval(std::time::Duration::from_millis(50))
-        .build_and_start(builder, writer)
+        .graceful_shutdown(std::time::Duration::from_secs(10))
+        .build()
         .unwrap();
 
-    let handle = guard.tokio_handle(runtime.handle());
+    let handle = traced.guard().tokio_handle(traced.runtime().handle());
 
-    runtime.block_on(async {
+    traced.runtime().block_on(async {
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
         loop {
             if tokio::time::Instant::now() >= deadline {
@@ -718,10 +709,7 @@ fn stress_test_with_s3_failures() {
         }
     });
 
-    drop(runtime);
-    guard
-        .graceful_shutdown(std::time::Duration::from_secs(10))
-        .expect("graceful shutdown");
+    traced.graceful_shutdown();
 
     // Verify some objects landed in S3 despite failures.
     let verify_client = fake_s3_client(s3_root.path());
@@ -772,15 +760,16 @@ fn permanently_broken_s3_produces_failure_metrics() {
         sink: metrics_sink,
     } = metrique_writer::test_util::test_entry_sink();
 
-    let mut builder = tokio::runtime::Builder::new_multi_thread();
-    builder.worker_threads(2).enable_all();
-
-    let (runtime, guard) = TracedRuntime::builder()
+    let traced = recorder(writer)
+        .worker_poll_interval(std::time::Duration::from_millis(50))
+        .metrics_sink(metrics_sink)
+        .with_tokio(|t| {
+            t.worker_threads(2);
+        })
         .with_s3_uploader(s3_config.clone())
         .with_s3_client(client.clone())
-        .with_worker_poll_interval(std::time::Duration::from_millis(50))
-        .with_worker_metrics_sink(metrics_sink)
-        .build_and_start(builder, writer)
+        .graceful_shutdown(std::time::Duration::from_secs(2))
+        .build()
         .unwrap();
 
     let has_pipeline_metric = || {
@@ -792,7 +781,7 @@ fn permanently_broken_s3_produces_failure_metrics() {
 
     // Generate enough events to seal segments, then poll until the worker has
     // recorded a pipeline (Failure/Success) metric.
-    runtime.block_on(async {
+    traced.runtime().block_on(async {
         for _ in 0..50 {
             tokio::spawn(async { tokio::task::yield_now().await });
         }
@@ -802,10 +791,7 @@ fn permanently_broken_s3_produces_failure_metrics() {
         }
     });
 
-    drop(runtime);
-    guard
-        .graceful_shutdown(std::time::Duration::from_secs(2))
-        .expect("graceful shutdown");
+    traced.graceful_shutdown();
 
     let entries = inspector.entries();
     // Filter to pipeline metrics only (FlushMetrics entries don't have Failure/Success keys).
@@ -854,18 +840,23 @@ fn dump_trigger_uploads_segments_and_writes_manifest() {
         .region("us-east-1")
         .build();
 
-    let mut builder = tokio::runtime::Builder::new_multi_thread();
-    builder.worker_threads(2).enable_all();
-
-    let (runtime, guard) = TracedRuntime::builder()
+    let traced = recorder(writer)
+        .worker_poll_interval(Duration::from_millis(50))
+        .with_tokio(|t| {
+            t.worker_threads(2);
+        })
         .with_s3_uploader(s3_config.clone())
         .with_s3_client(client.clone())
         .with_dump_trigger(|_| {})
-        .with_worker_poll_interval(Duration::from_millis(50))
-        .build_and_start(builder, writer)
+        .graceful_shutdown(Duration::from_secs(5))
+        .build()
         .unwrap();
 
-    let trigger = guard.handle().dump_trigger().expect("trigger wired");
+    let trigger = traced
+        .guard()
+        .handle()
+        .dump_trigger()
+        .expect("trigger wired");
 
     // Before any dump, triggered mode must not have uploaded anything.
     let list_rt = tokio::runtime::Builder::new_current_thread()
@@ -897,9 +888,9 @@ fn dump_trigger_uploads_segments_and_writes_manifest() {
     // A triggered worker parks until a dump is requested, so a confirmed-sealed
     // segment persists and the unbounded `dump_current_data` window is
     // guaranteed to match it.
-    wait_for_sealed_segment(&runtime, trace_dir.path());
+    wait_for_sealed_segment(traced.runtime(), trace_dir.path());
 
-    let receipt = runtime.block_on(async {
+    let receipt = traced.runtime().block_on(async {
         trigger
             .dump_current_data()
             .with_metadata("reason", "test")
@@ -919,10 +910,7 @@ fn dump_trigger_uploads_segments_and_writes_manifest() {
         "receipt names the manifest key"
     );
 
-    drop(runtime);
-    guard
-        .graceful_shutdown(Duration::from_secs(5))
-        .expect("clean shutdown");
+    traced.graceful_shutdown();
 
     // The manifest object exists and lists the produced segment keys.
     let manifest_bytes = list_rt.block_on(async {

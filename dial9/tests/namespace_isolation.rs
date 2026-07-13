@@ -1,10 +1,11 @@
-//! Per-process namespace isolation: trace segments from the managed
-//! `Dial9Config` disk path must land in a `{boot_id}/` subdirectory, and dead
-//! peers' directories must be reclaimed (or kept) per the GC setting.
+//! Per-process namespace isolation: trace segments written to a namespaced disk
+//! writer must land in a `{boot_id}/` subdirectory, and dead peers' directories
+//! must be reclaimed (or kept) per the GC setting. This mirrors what the managed
+//! `recorder_from_env` path sets up internally.
 
 use std::path::{Path, PathBuf};
 
-use dial9::{Dial9Config, TracedRuntime};
+use dial9::{DiskWriter, RecorderBuilderTokioExt};
 
 /// Names a directory entry that looks like a boot_id (`{4-alpha}-{pid}`).
 fn is_boot_id_dir(path: &Path) -> bool {
@@ -39,22 +40,35 @@ fn has_trace_segment(boot_dir: &Path) -> bool {
         .any(|e| e.file_name().to_string_lossy().starts_with("trace."))
 }
 
+/// Build a namespaced disk writer under `trace_dir`, the way the managed env
+/// path does: set up the per-process `{boot_id}/` namespace, then point a
+/// `DiskWriter` at the rewritten trace path.
+fn namespaced_writer(trace_dir: &Path, gc_dead_namespaces: bool) -> DiskWriter {
+    let namespace =
+        dial9_core::boot_id::setup_namespace(&trace_dir.join("trace.bin"), gc_dead_namespaces)
+            .expect("namespace setup should succeed");
+    let mut writer = DiskWriter::builder()
+        .base_path(namespace.trace_path.clone())
+        .max_total_size(4 * 1024 * 1024)
+        .build()
+        .expect("writer should build");
+    writer.set_namespace(namespace.boot_id, namespace.lock);
+    writer
+}
+
 /// Build a disk-backed runtime under `trace_dir`, run a trivial workload, and
 /// shut it down so segments are sealed.
 fn run_workload(trace_dir: &Path, gc_dead_namespaces: bool) {
-    let cfg = Dial9Config::builder()
-        .on_disk_buffer(trace_dir.join("trace.bin"))
-        .max_total_size(4 * 1024 * 1024)
-        .gc_dead_namespaces(gc_dead_namespaces)
+    let traced = dial9::recorder(namespaced_writer(trace_dir, gc_dead_namespaces))
+        .with_tokio(|_| {})
         .build()
-        .expect("config should build");
-    let rt = TracedRuntime::try_new(cfg).expect("runtime should build");
-    assert!(rt.guard().is_enabled());
-    rt.block_on(async {
+        .expect("runtime should build");
+    assert!(traced.guard().is_enabled());
+    traced.block_on(async {
         tokio::task::yield_now().await;
     });
     // Dropping the runtime drops its guard, which flushes and seals segments.
-    drop(rt);
+    drop(traced);
 }
 
 #[test]
@@ -145,24 +159,20 @@ fn s3_boot_id_matches_namespace_dir() {
     use dial9_trace_format::decoder::Decoder;
 
     let dir = tempfile::tempdir().unwrap();
-    let cfg = Dial9Config::builder()
-        .on_disk_buffer(dir.path().join("trace.bin"))
-        .max_total_size(4 * 1024 * 1024)
-        .with_runtime(|r| {
-            r.with_s3_uploader::<dial9::telemetry::Disk>(
-                S3Config::builder()
-                    .bucket("test-bucket")
-                    .service_name("test-svc")
-                    .build(),
-            )
-        })
+    let traced = dial9::recorder(namespaced_writer(dir.path(), true))
+        .with_tokio(|_| {})
+        .with_s3_uploader(
+            S3Config::builder()
+                .bucket("test-bucket")
+                .service_name("test-svc")
+                .build(),
+        )
         .build()
-        .expect("config should build");
-    let rt = TracedRuntime::try_new(cfg).expect("runtime should build");
-    rt.block_on(async {
+        .expect("runtime should build");
+    traced.block_on(async {
         tokio::task::yield_now().await;
     });
-    drop(rt);
+    drop(traced);
 
     let boot_dir = boot_id_dirs(dir.path())
         .into_iter()

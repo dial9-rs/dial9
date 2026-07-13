@@ -7,7 +7,8 @@
 //!
 //! Produces: `block_in_place_trace.bin` in the current directory.
 
-use dial9::telemetry::{DiskWriter, TracedRuntime};
+use dial9::prelude::*;
+use dial9::{DiskWriter, recorder};
 use std::time::Duration;
 
 /// CPU-intensive work that shows up in CPU profiles.
@@ -49,22 +50,23 @@ async fn background_burn(id: usize) {
 }
 
 fn main() {
-    let mut builder = tokio::runtime::Builder::new_multi_thread();
-    builder.worker_threads(4).enable_all();
-
     let writer = DiskWriter::builder()
         .base_path("block_in_place_trace.bin")
         .max_file_size(100 * 1024 * 1024)
         .max_total_size(500 * 1024 * 1024)
         .build()
         .unwrap();
-    let (runtime, guard) = TracedRuntime::builder()
-        .with_task_tracking(true)
+    let traced = recorder(writer)
         .with_cpu_profiling(Default::default())
-        .build_and_start(builder, writer)
+        .with_tokio(|t| {
+            t.worker_threads(4);
+        })
+        .with_task_tracking(true)
+        .graceful_shutdown(Duration::from_secs(10))
+        .build()
         .unwrap();
 
-    runtime.block_on(async {
+    traced.runtime().block_on(async {
         // Background work on all workers to generate CPU samples.
         let bg: Vec<_> = (0..8).map(|i| tokio::spawn(background_burn(i))).collect();
 
@@ -87,9 +89,8 @@ fn main() {
         tokio::time::sleep(Duration::from_millis(100)).await;
     });
 
-    drop(runtime);
     // Graceful shutdown seals the final segment and runs symbolization.
-    guard.graceful_shutdown(Duration::from_secs(10)).ok();
+    traced.graceful_shutdown();
 
     println!("Trace written to block_in_place_trace.*.bin");
 }

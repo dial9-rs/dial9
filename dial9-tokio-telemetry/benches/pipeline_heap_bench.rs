@@ -27,7 +27,8 @@ use std::time::{Duration, Instant};
 use dial9_tokio_telemetry::background_task::{ProcessError, SegmentData, SegmentProcessor};
 use dial9_tokio_telemetry::telemetry::CpuProfilingConfig;
 use dial9_tokio_telemetry::telemetry::{
-    Dial9TokioHandle, DiskWriter, InMemoryWriter, TracedRuntime,
+    Dial9TokioHandle, DiskWriter, InMemoryWriter, RecorderBuilderTokioExt, RecorderPerfExt,
+    recorder,
 };
 
 // ── Tracking allocator ─────────────────────────────────────────────────────
@@ -194,10 +195,7 @@ fn measure(mode: Mode) -> Sample {
 
     // Scope writer/runtime so they drop before we sample post_shutdown.
     let steady_state = {
-        let mut tk = tokio::runtime::Builder::new_multi_thread();
-        tk.worker_threads(WORKER_THREADS).enable_all();
-
-        let (runtime, guard) = match mode {
+        let traced = match mode {
             Mode::Disk => {
                 let tmp = tempfile::tempdir().unwrap();
                 let trace_path = tmp.path().join("trace.bin");
@@ -208,11 +206,15 @@ fn measure(mode: Mode) -> Sample {
                     .rotation_period(ROTATION_PERIOD)
                     .build()
                     .unwrap();
-                let r = TracedRuntime::builder()
+                let r = recorder(writer)
+                    .with_tokio(|t| {
+                        t.worker_threads(WORKER_THREADS);
+                    })
                     .with_task_tracking(true)
                     .with_custom_pipeline(|p| p.gzip().pipe(NoopSink))
-                    .build_and_start(tk, writer)
-                    .expect("build_and_start (disk)");
+                    .graceful_shutdown(Duration::from_secs(30))
+                    .build()
+                    .expect("build (disk)");
                 // Keep tmp alive for the duration; leak it intentionally so
                 // its Drop doesn't show up in the measurement window.
                 std::mem::forget(tmp);
@@ -228,12 +230,16 @@ fn measure(mode: Mode) -> Sample {
                     .rotation_period(ROTATION_PERIOD)
                     .build()
                     .unwrap();
-                let r = TracedRuntime::builder()
-                    .with_task_tracking(true)
+                let r = recorder(writer)
                     .with_cpu_profiling(CpuProfilingConfig::default().frequency_hz(199))
+                    .with_tokio(|t| {
+                        t.worker_threads(WORKER_THREADS);
+                    })
+                    .with_task_tracking(true)
                     .with_custom_pipeline(|p| p.symbolize().gzip().pipe(NoopSink))
-                    .build_and_start(tk, writer)
-                    .expect("build_and_start (disk+cpu)");
+                    .graceful_shutdown(Duration::from_secs(30))
+                    .build()
+                    .expect("build (disk+cpu)");
                 std::mem::forget(tmp);
                 r
             }
@@ -244,11 +250,15 @@ fn measure(mode: Mode) -> Sample {
                     .rotation_period(ROTATION_PERIOD)
                     .build()
                     .expect("InMemoryWriter build");
-                TracedRuntime::builder()
+                recorder(writer)
+                    .with_tokio(|t| {
+                        t.worker_threads(WORKER_THREADS);
+                    })
                     .with_task_tracking(true)
                     .with_custom_pipeline(|p| p.gzip().pipe(NoopSink))
-                    .build_and_start(tk, writer)
-                    .expect("build_and_start (mem)")
+                    .graceful_shutdown(Duration::from_secs(30))
+                    .build()
+                    .expect("build (mem)")
             }
             Mode::MemCpu => {
                 let writer = InMemoryWriter::builder()
@@ -257,22 +267,25 @@ fn measure(mode: Mode) -> Sample {
                     .rotation_period(ROTATION_PERIOD)
                     .build()
                     .expect("InMemoryWriter build");
-                TracedRuntime::builder()
-                    .with_task_tracking(true)
+                recorder(writer)
                     .with_cpu_profiling(CpuProfilingConfig::default().frequency_hz(199))
+                    .with_tokio(|t| {
+                        t.worker_threads(WORKER_THREADS);
+                    })
+                    .with_task_tracking(true)
                     .with_custom_pipeline(|p| p.symbolize().gzip().pipe(NoopSink))
-                    .build_and_start(tk, writer)
-                    .expect("build_and_start (mem+cpu)")
+                    .graceful_shutdown(Duration::from_secs(30))
+                    .build()
+                    .expect("build (mem+cpu)")
             }
         };
-        guard.enable();
-        let handle = guard.tokio_handle(runtime.handle());
-        runtime.block_on(workload(handle, tasks_done.clone()));
+        traced.guard().enable();
+        let handle = traced.guard().tokio_handle(traced.runtime().handle());
+        traced
+            .runtime()
+            .block_on(workload(handle, tasks_done.clone()));
         let steady = ALLOC.peak();
-        guard
-            .graceful_shutdown(Duration::from_secs(30))
-            .expect("graceful_shutdown");
-        drop(runtime);
+        traced.graceful_shutdown();
         steady
     };
 

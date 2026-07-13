@@ -25,7 +25,7 @@
 
 use std::time::Duration;
 
-use dial9::Dial9Config;
+use dial9::DiskWriter;
 use dial9::telemetry::{Dial9Handle, Dial9TokioHandle};
 
 const TRACE_DIR: &str = "/tmp/dial9-on-trigger-windows";
@@ -35,19 +35,18 @@ const TRACE_DIR: &str = "/tmp/dial9-on-trigger-windows";
     let _ = std::fs::create_dir_all(TRACE_DIR);
     let trace_path = format!("{TRACE_DIR}/trace.bin");
 
-    Dial9Config::builder()
-        .on_disk_buffer(trace_path)
+    let writer = DiskWriter::builder()
+        .base_path(trace_path)
         // Fast-rotating writer so the demo seals a segment every ~half second.
         .max_file_size(4 * 1024)
         .max_total_size(10 * 1024 * 1024)
         .rotation_period(Duration::from_millis(500))
-        .with_tokio(|t| { t.worker_threads(2); })
+        .build();
+    dial9::recorder_or_disabled(writer, |t| { t.worker_threads(2); })
         // No debounce here: we want the two concurrent dumps to each register,
         // not fold into one another.
-        .with_runtime(|r| r
-            .with_custom_pipeline(|p| p.gzip().write_back())
-            .with_dump_trigger(|_| {}))
-        .build_or_disabled()
+        .with_custom_pipeline(|p| p.gzip().write_back())
+        .with_dump_trigger(|_| {})
 })]
 async fn main() {
     let handle = Dial9TokioHandle::current();

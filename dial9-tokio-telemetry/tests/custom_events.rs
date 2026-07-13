@@ -2,7 +2,7 @@ mod common;
 
 use common::{CAPTURE_BUFFER_SIZE, capture_processor};
 use dial9_tokio_telemetry::telemetry::{
-    CustomEventsConfig, InMemoryWriter, TelemetryCore, TracedRuntime,
+    CustomEventsConfig, InMemoryWriter, RecorderBuilderTokioExt, TelemetryCore, recorder,
 };
 use dial9_trace_format::TraceEvent;
 use dial9_trace_format::decoder::Decoder;
@@ -40,22 +40,23 @@ fn traced_runtime_records_custom_events_callback_events() {
     .unwrap();
     drop(tx);
 
-    let mut builder = tokio::runtime::Builder::new_multi_thread();
-    builder.worker_threads(1).enable_all();
-    let (runtime, guard) = TracedRuntime::builder()
-        .with_custom_events(CustomEventsConfig::default(), move |ctx| {
-            while let Ok(event) = rx.try_recv() {
-                ctx.record_event(event);
-            }
+    let traced = recorder(InMemoryWriter::new(CAPTURE_BUFFER_SIZE).unwrap())
+        .source(dial9_core::custom_events::CustomEventsSource::new(
+            CustomEventsConfig::default(),
+            move |ctx| {
+                while let Ok(event) = rx.try_recv() {
+                    ctx.record_event(event);
+                }
+            },
+        ))
+        .with_tokio(|t| {
+            t.worker_threads(1);
         })
         .with_custom_pipeline(|p| p.pipe(capture))
-        .build_and_start(builder, InMemoryWriter::new(CAPTURE_BUFFER_SIZE).unwrap())
+        .build()
         .unwrap();
 
-    drop(runtime);
-    guard
-        .graceful_shutdown(std::time::Duration::from_secs(1))
-        .expect("clean shutdown");
+    traced.graceful_shutdown();
 
     let batches = batches.lock().unwrap();
     let events = decode_queued_events(&batches);

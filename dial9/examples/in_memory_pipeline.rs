@@ -17,7 +17,9 @@ use std::pin::Pin;
 use std::time::Duration;
 
 use dial9::background_task::{ProcessError, SegmentData, SegmentProcessor};
-use dial9::telemetry::{Dial9TokioHandle, InMemoryWriter, TracedRuntime};
+use dial9::prelude::*;
+use dial9::telemetry::Dial9TokioHandle;
+use dial9::{InMemoryWriter, recorder};
 
 /// Stand-in delivery processor. Inspects each segment, forwards unchanged.
 /// Replace with a real uploader in production.
@@ -66,20 +68,21 @@ async fn workload() {
 fn main() -> std::io::Result<()> {
     let writer = InMemoryWriter::new(16 * 1024 * 1024)?; // 16 MB
 
-    let mut builder = tokio::runtime::Builder::new_multi_thread();
-    builder.worker_threads(4).enable_all();
-
-    let (runtime, guard) = TracedRuntime::builder()
+    let traced = recorder(writer)
+        .with_tokio(|t| {
+            t.worker_threads(4);
+        })
         .with_task_tracking(true)
         .with_custom_pipeline(|p| p.pipe(PrintProcessor))
-        .build_and_start(builder, writer)?;
+        .graceful_shutdown(Duration::from_secs(5))
+        .build()?;
 
-    runtime.block_on(async {
+    traced.runtime().block_on(async {
         println!("Running (no files written to disk)…");
         workload().await;
     });
 
-    guard.graceful_shutdown(Duration::from_secs(5))?;
+    traced.graceful_shutdown();
     println!("Done.");
     Ok(())
 }

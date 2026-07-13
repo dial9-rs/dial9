@@ -10,14 +10,14 @@
 //!
 //! ### Enabling and disabling
 //!
-//! - Setting [`.enabled(false)`](dial9::DiskConfigBuilder::enabled) on the config builder produces a
-//!   pass-through config: the `#[main]` macro builds a plain, unmodified tokio runtime with zero dial9 overhead.
+//! - Returning a [`TracedRecorder::disabled()`](dial9::TracedRecorder::disabled) from the config
+//!   function produces a pass-through: the `#[main]` macro builds a plain, unmodified tokio runtime with zero dial9 overhead.
 //!   [`Dial9TokioHandle::current()`](dial9::telemetry::Dial9TokioHandle::current) returns an inert
 //!   handle, and `handle.spawn` falls through to `tokio::spawn`, so application code does not need branches.
 //! - Alternatively, you can install dial9 but leave recording disabled at runtime via the handle's
 //!   [`disable()`](dial9::telemetry::Dial9Handle::disable). The runtime hooks are installed
 //!   but all event writes are no-ops behind a relaxed atomic read. This has slightly more overhead than
-//!   [`.enabled(false)`](dial9::DiskConfigBuilder::enabled) but lets a background task flip
+//!   a [`TracedRecorder::disabled()`](dial9::TracedRecorder::disabled) recorder but lets a background task flip
 //!   recording on from dynamic configuration later. It is a larger surface area of code, so it is higher risk.
 //!
 //! > Note! dial9 must be created _before_ your async runtime. dial9 relies on installing itself into the runtime
@@ -53,9 +53,8 @@
 //! Dial9 emits operational metrics about its own internals via a pluggable
 //! [`metrique::writer::BoxEntrySink`]. These tell you how the trace pipeline
 //! is performing (not application metrics). Wire up a sink with
-//! [`TracedRuntimeBuilder::with_worker_metrics_sink`](dial9::telemetry::recorder::TracedRuntimeBuilder::with_worker_metrics_sink)
-//! or via `.with_runtime(|r| ...)` on the `Dial9Config` builder.
-//! If no sink is provided, metrics are discarded.
+//! [`RecorderBuilder::metrics_sink`](dial9::RecorderBuilder::metrics_sink) on the
+//! recorder, before `.with_tokio(..)`. If no sink is provided, metrics are discarded.
 //!
 //! #### Metrics emitted
 //!
@@ -87,13 +86,12 @@
 //! );
 //! ```
 //!
-//! Then pass it inside `.with_runtime`:
+//! Then set it on the recorder, before `.with_tokio(..)`:
 //!
 //! ```rust,ignore
-//! Dial9Config::builder()
-//!     // ...other config...
-//!     .with_runtime(move |r| r.with_worker_metrics_sink(metrics_sink))
-//!     .build_or_disabled()
+//! dial9::recorder(writer)
+//!     .metrics_sink(metrics_sink)
+//!     .with_tokio(|_| {})
 //! ```
 //!
 //! In a test or local-dev scenario you can use the test utilities from
@@ -137,10 +135,11 @@
 //! Invalid operator input for the knobs above (unknown boolean, non-numeric
 //! duration, etc.) is caught by `clap` and exits with a diagnostic, as it
 //! would for any misconfigured CLI tool. Invalid _dial9_ configuration
-//! (writer I/O failure, unwritable trace directory, etc.) is handled
-//! lazily by [`dial9::Dial9ConfigBuilder::build_or_disabled`]: the builder logs
-//! the error and falls back to a plain tokio runtime with telemetry
-//! disabled. A bad trace config must never take down prod.
+//! (writer I/O failure, unwritable trace directory, etc.) is caught by the
+//! config function, which logs the error and returns a
+//! [`TracedRecorder::disabled()`](dial9::TracedRecorder::disabled), a plain
+//! tokio runtime with telemetry disabled. A bad trace config must never take
+//! down prod.
 //!
 //! # Running the example
 //!
@@ -166,8 +165,8 @@
 use std::time::Duration;
 
 use clap::Parser;
-use dial9::Dial9Config;
-use dial9::telemetry::{Dial9TokioHandle, PipelineUnset, TracedRuntimeBuilder};
+use dial9::telemetry::Dial9TokioHandle;
+use dial9::{Disk, DiskWriter, RecorderBuilder, RecorderBuilderTokioExt, TracedRecorder};
 use metrique::local::{LocalFormat, OutputStyle};
 use metrique::writer::format::FormatExt;
 use metrique::writer::sink::FlushImmediatelyBuilder;
@@ -235,111 +234,85 @@ fn stderr_metrics_sink() -> metrique::writer::BoxEntrySink {
     )
 }
 
+/// Plug the perf `Source`s selected by the operator onto the recorder builder,
+/// before `.with_tokio(..)`.
 #[cfg(feature = "cpu-profiling")]
-fn configure_runtime_common(
-    mut r: TracedRuntimeBuilder<PipelineUnset>,
-    metrics_sink: metrique::writer::BoxEntrySink,
-    cpu_profile_enabled: bool,
-    schedule_profile_enabled: bool,
-    cpu_sample_hz: u64,
-) -> TracedRuntimeBuilder<PipelineUnset> {
-    r = r
-        .with_task_tracking(true)
-        .with_worker_metrics_sink(metrics_sink);
+fn configure_sources(mut core: RecorderBuilder<Disk>, opts: &Dial9Opts) -> RecorderBuilder<Disk> {
+    use dial9::RecorderPerfExt;
     use dial9::telemetry::{CpuProfilingConfig, SchedEventConfig};
-    if cpu_profile_enabled {
-        r = r.with_cpu_profiling(CpuProfilingConfig::default().frequency_hz(cpu_sample_hz));
+    if opts.cpu_profile_enabled {
+        core =
+            core.with_cpu_profiling(CpuProfilingConfig::default().frequency_hz(opts.cpu_sample_hz));
     }
-    if schedule_profile_enabled {
-        r = r.with_sched_events(SchedEventConfig::default());
+    if opts.schedule_profile_enabled {
+        core = core.with_sched_events(SchedEventConfig::default());
     }
-    r
+    core
 }
 
 #[cfg(not(feature = "cpu-profiling"))]
-fn configure_runtime_common(
-    r: TracedRuntimeBuilder<PipelineUnset>,
-    metrics_sink: metrique::writer::BoxEntrySink,
-) -> TracedRuntimeBuilder<PipelineUnset> {
-    r.with_task_tracking(true)
-        .with_worker_metrics_sink(metrics_sink)
+fn configure_sources(core: RecorderBuilder<Disk>, _opts: &Dial9Opts) -> RecorderBuilder<Disk> {
+    core
 }
 
-/// Translate parsed options into a [`Dial9Config`] the `#[main]` macro can consume.
+/// Translate parsed options into a [`TracedRecorder`] the `#[main]` macro can consume.
 ///
-/// `build_or_disabled()` is the important piece here: any writer I/O or
-/// validation failure (unwritable `trace_dir`, zero-sized budget, etc.)
-/// logs an error and returns a pass-through config that builds a plain
-/// tokio runtime. In both the disabled and fallback cases,
-/// `Dial9TokioHandle::current()` returns an inert handle and
-/// `handle.spawn` delegates to `tokio::spawn`, so application code does
-/// not need to branch on whether dial9 is running.
-fn configure_dial9(opts: &Dial9Opts) -> Dial9Config {
-    if opts.enabled
-        && let Err(e) = std::fs::create_dir_all(&opts.trace_dir)
-    {
+/// `--enabled false` and any writer I/O failure (unwritable `trace_dir`,
+/// zero-sized budget, etc.) return a writer-free [`TracedRecorder::disabled`],
+/// which builds a plain tokio runtime. In both
+/// cases `Dial9TokioHandle::current()` returns an inert handle and
+/// `handle.spawn` delegates to `tokio::spawn`, so application code does not
+/// need to branch on whether dial9 is running.
+fn configure_dial9(opts: &Dial9Opts) -> TracedRecorder {
+    if !opts.enabled {
+        return TracedRecorder::disabled();
+    }
+
+    if let Err(e) = std::fs::create_dir_all(&opts.trace_dir) {
         eprintln!("warning: could not create {}: {e}", opts.trace_dir);
     }
+    warn_if_feature_missing(opts);
 
     let base_path = format!("{}/trace.bin", opts.trace_dir.trim_end_matches('/'));
     let max_disk = opts.max_disk_usage_bytes();
     let max_file_size = (max_disk / 4).max(16 * 1024 * 1024);
 
-    if opts.enabled {
-        warn_if_feature_missing(opts);
-    }
-
-    #[cfg(feature = "cpu-profiling")]
-    let (cpu_enabled, sched_enabled, cpu_hz) = (
-        opts.cpu_profile_enabled,
-        opts.schedule_profile_enabled,
-        opts.cpu_sample_hz,
-    );
-    #[cfg(feature = "worker-s3")]
-    let (s3_bucket, s3_service) = (opts.s3_bucket.clone(), opts.service_name.clone());
-
-    let cfg = Dial9Config::builder()
-        .on_disk_buffer(base_path)
-        .enabled(opts.enabled)
+    let writer = match DiskWriter::builder()
+        .base_path(base_path)
         .max_file_size(max_file_size)
         .max_total_size(max_disk)
-        .rotation_period(opts.rotation());
+        .rotation_period(opts.rotation())
+        .build()
+    {
+        Ok(writer) => writer,
+        Err(e) => {
+            // A bad trace config must never take down prod: fall back to a
+            // plain tokio runtime with telemetry disabled.
+            eprintln!("warning: could not open trace writer: {e}; running without telemetry");
+            return TracedRecorder::disabled();
+        }
+    };
+
+    let core = configure_sources(
+        dial9::recorder(writer).metrics_sink(stderr_metrics_sink()),
+        opts,
+    );
+
+    #[cfg_attr(not(feature = "worker-s3"), allow(unused_mut))]
+    let mut traced = core.with_tokio(|_| {}).with_task_tracking(true);
 
     #[cfg(feature = "worker-s3")]
-    if let (Some(bucket), Some(service_name)) = (s3_bucket, s3_service) {
+    if let (Some(bucket), Some(service_name)) = (opts.s3_bucket.clone(), opts.service_name.clone())
+    {
         use dial9::background_task::s3::S3Config;
         let s3 = S3Config::builder()
             .bucket(bucket)
             .service_name(service_name)
             .build();
-        return cfg
-            .with_runtime(move |r| {
-                let sink = stderr_metrics_sink();
-                #[cfg(feature = "cpu-profiling")]
-                {
-                    configure_runtime_common(r, sink, cpu_enabled, sched_enabled, cpu_hz)
-                        .with_s3_uploader(s3)
-                }
-                #[cfg(not(feature = "cpu-profiling"))]
-                {
-                    configure_runtime_common(r, sink).with_s3_uploader(s3)
-                }
-            })
-            .build_or_disabled();
+        traced = traced.with_s3_uploader(s3);
     }
 
-    cfg.with_runtime(move |r| {
-        let sink = stderr_metrics_sink();
-        #[cfg(feature = "cpu-profiling")]
-        {
-            configure_runtime_common(r, sink, cpu_enabled, sched_enabled, cpu_hz)
-        }
-        #[cfg(not(feature = "cpu-profiling"))]
-        {
-            configure_runtime_common(r, sink)
-        }
-    })
-    .build_or_disabled()
+    traced
 }
 
 /// Complain at startup when the operator asked for something a feature flag
@@ -359,7 +332,7 @@ fn warn_if_feature_missing(opts: &Dial9Opts) {
     }
 }
 
-fn my_config() -> Dial9Config {
+fn my_config() -> TracedRecorder {
     let opts = Dial9Opts::parse();
     eprintln!(
         "dial9 telemetry: {}",

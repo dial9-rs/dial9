@@ -19,8 +19,10 @@ mod bmf;
 
 #[cfg(target_os = "linux")]
 use dial9_tokio_telemetry::telemetry::CpuProfilingConfig;
+#[cfg(target_os = "linux")]
+use dial9_tokio_telemetry::telemetry::RecorderPerfExt;
 use dial9_tokio_telemetry::telemetry::{
-    Dial9TokioHandle, DiskWriter, InMemoryWriter, TelemetryGuard, TracedRuntime,
+    Dial9TokioHandle, DiskWriter, InMemoryWriter, RecorderBuilderTokioExt, TelemetryGuard, recorder,
 };
 use hdrhistogram::Histogram;
 use std::sync::Arc;
@@ -104,28 +106,40 @@ struct BenchResult {
 }
 
 fn run_bench(mode: &str, duration_secs: u64) -> BenchResult {
-    let mut builder = tokio::runtime::Builder::new_multi_thread();
-    builder.worker_threads(4).enable_all();
-
     let (server_rt, guard): (tokio::runtime::Runtime, Option<TelemetryGuard>) = match mode {
         "telemetry" => {
             let writer = DiskWriter::single_file("/tmp/overhead_bench_trace.bin").unwrap();
             #[allow(unused_mut)]
-            let mut tb = TracedRuntime::builder().with_task_tracking(true);
+            let mut rec = recorder(writer);
             #[cfg(target_os = "linux")]
             {
-                tb = tb.with_cpu_profiling(CpuProfilingConfig::default());
+                rec = rec.with_cpu_profiling(CpuProfilingConfig::default());
             }
-            let (rt, g) = tb.build_and_start(builder, writer).unwrap();
+            let traced = rec
+                .with_tokio(|t| {
+                    t.worker_threads(4);
+                })
+                .with_task_tracking(true)
+                .build()
+                .unwrap();
+            let (rt, g, ..) = traced.into_parts();
             (rt, Some(g))
         }
         "noop" => {
-            let (rt, g) = TracedRuntime::builder()
-                .build_and_start(builder, InMemoryWriter::new(16 * 1024 * 1024).unwrap())
+            let traced = recorder(InMemoryWriter::new(16 * 1024 * 1024).unwrap())
+                .with_tokio(|t| {
+                    t.worker_threads(4);
+                })
+                .build()
                 .unwrap();
+            let (rt, g, ..) = traced.into_parts();
             (rt, Some(g))
         }
-        "baseline" => (builder.build().unwrap(), None),
+        "baseline" => {
+            let mut builder = tokio::runtime::Builder::new_multi_thread();
+            builder.worker_threads(4).enable_all();
+            (builder.build().unwrap(), None)
+        }
         other => {
             eprintln!("unknown mode: {other} (expected: baseline, telemetry, noop)");
             std::process::exit(1);

@@ -10,7 +10,7 @@ use dial9_tokio_telemetry::memory_profiling::{
     Dial9Allocator, MemoryProfiler, MemoryProfilingConfig,
 };
 use dial9_tokio_telemetry::telemetry::analysis_events::Dial9Event;
-use dial9_tokio_telemetry::telemetry::{DiskWriter, TracedRuntime};
+use dial9_tokio_telemetry::telemetry::{DiskWriter, RecorderBuilderTokioExt, recorder};
 use std::time::Duration;
 
 #[global_allocator]
@@ -23,13 +23,15 @@ fn memory_sample_rate_appears_in_segment_metadata() {
 
     let writer = DiskWriter::single_file(&trace_path).unwrap();
 
-    let mut builder = tokio::runtime::Builder::new_multi_thread();
-    builder.worker_threads(1).enable_all();
-    let (runtime, guard) = TracedRuntime::builder()
-        .build_and_start(builder, writer)
+    let traced = recorder(writer)
+        .with_tokio(|t| {
+            t.worker_threads(1);
+        })
+        .graceful_shutdown(Duration::from_secs(5))
+        .build()
         .unwrap();
 
-    let handle = guard.handle();
+    let handle = traced.guard().handle();
     let _mem_guard = MemoryProfiler::from_config(
         MemoryProfilingConfig::builder()
             .sample_rate_bytes(2048)
@@ -39,12 +41,11 @@ fn memory_sample_rate_appears_in_segment_metadata() {
     .install(handle)
     .expect("install should succeed");
 
-    runtime.block_on(async {
+    traced.runtime().block_on(async {
         tokio::time::sleep(Duration::from_millis(100)).await;
     });
 
-    drop(runtime);
-    let _ = guard.graceful_shutdown(Duration::from_secs(5));
+    traced.graceful_shutdown();
 
     let mut found = false;
     let files: Vec<_> = std::fs::read_dir(dir.path())

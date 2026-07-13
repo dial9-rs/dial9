@@ -12,10 +12,12 @@
 // Example prints the deprecated `CpuSampleEvent::worker_id` for illustration.
 #![allow(deprecated)]
 
+use dial9::prelude::*;
 use dial9::telemetry::{
-    CpuProfilingConfig, DiskWriter, TracedRuntime,
+    CpuProfilingConfig,
     analysis_events::{CpuSampleSource, Dial9Event, WorkerId},
 };
+use dial9::{DiskWriter, recorder};
 use dial9_trace_format::decoder::Decoder;
 use std::time::Duration;
 
@@ -45,23 +47,24 @@ fn main() {
     let trace_base = "cpu_profile_trace.bin";
     let segment_path = "cpu_profile_trace.0.bin";
 
-    let mut builder = tokio::runtime::Builder::new_multi_thread();
-    builder.worker_threads(4).enable_all();
-
     let writer = DiskWriter::builder()
         .base_path(trace_base)
         .max_file_size(1024 * 1024 * 20) // rotate after 20 MiB per file
         .max_total_size(1024 * 1024 * 100) // keep at most 100 MiB on disk
         .build()
         .unwrap();
-    let (runtime, guard) = TracedRuntime::builder()
-        .with_task_tracking(true)
+    let traced = recorder(writer)
         .with_cpu_profiling(CpuProfilingConfig::default())
-        .build_and_start(builder, writer)
+        .with_tokio(|t| {
+            t.worker_threads(4);
+        })
+        .with_task_tracking(true)
+        .graceful_shutdown(Duration::from_secs(30))
+        .build()
         .unwrap();
 
     eprintln!("Running workload with CPU profiling at 99 Hz...");
-    runtime.block_on(async {
+    traced.runtime().block_on(async {
         let tasks: Vec<_> = (0..200).map(|i| tokio::spawn(cpu_heavy_task(i))).collect();
         for task in tasks {
             let _ = task.await;
@@ -70,15 +73,11 @@ fn main() {
         tokio::time::sleep(Duration::from_millis(500)).await;
     });
 
-    drop(runtime);
-
     // Graceful shutdown: flush + seal the segment, then wait for the background
     // worker to symbolize and gzip-compress it. Drop impl is a hard shutdown
     // (worker exits without draining), so we must use graceful_shutdown here.
     eprintln!("Waiting for background worker to symbolize trace (up to 30s)...");
-    if let Err(e) = guard.graceful_shutdown(Duration::from_secs(30)) {
-        eprintln!("Worker shutdown warning: {e}");
-    }
+    traced.graceful_shutdown();
 
     // Read back and report
     eprintln!("\n=== Reading trace from {segment_path} ===");

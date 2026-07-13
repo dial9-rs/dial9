@@ -1,4 +1,5 @@
-use dial9::telemetry::{DiskWriter, TracedRuntime};
+use dial9::prelude::*;
+use dial9::{DiskWriter, recorder};
 use std::time::Duration;
 
 async fn blocking_task(id: usize) {
@@ -11,18 +12,18 @@ async fn blocking_task(id: usize) {
 }
 
 fn main() {
-    let mut builder = tokio::runtime::Builder::new_multi_thread();
-    builder.worker_threads(2).enable_all();
-
     let writer = DiskWriter::single_file("blocking_sleep_trace.bin").unwrap();
-    let (runtime, _guard) = TracedRuntime::builder()
-        .with_task_tracking(true)
+    let traced = recorder(writer)
         .with_cpu_profiling(Default::default())
         .with_sched_events(Default::default())
-        .build_and_start(builder, writer)
+        .with_tokio(|t| {
+            t.worker_threads(2);
+        })
+        .with_task_tracking(true)
+        .build()
         .unwrap();
 
-    runtime.block_on(async {
+    traced.runtime().block_on(async {
         let tasks: Vec<_> = (0..4).map(|i| tokio::spawn(blocking_task(i))).collect();
         for t in tasks {
             let _ = t.await;

@@ -9,21 +9,22 @@ mod common;
 use common::{CAPTURE_BUFFER_SIZE, capture_processor, decode_all};
 use dial9_tokio_telemetry::memory_profiling::{MemoryProfiler, push_test_alloc};
 use dial9_tokio_telemetry::telemetry::analysis_events::Dial9Event;
-use dial9_tokio_telemetry::telemetry::{InMemoryWriter, TracedRuntime};
+use dial9_tokio_telemetry::telemetry::{InMemoryWriter, RecorderBuilderTokioExt, recorder};
 use std::time::Duration;
 
 #[test]
 fn install_registers_source_with_recorder() {
     let (capture, batches) = capture_processor();
 
-    let mut builder = tokio::runtime::Builder::new_multi_thread();
-    builder.worker_threads(1).enable_all();
-    let (runtime, guard) = TracedRuntime::builder()
+    let traced = recorder(InMemoryWriter::new(CAPTURE_BUFFER_SIZE).unwrap())
+        .with_tokio(|t| {
+            t.worker_threads(1);
+        })
         .with_custom_pipeline(|p| p.pipe(capture))
-        .build_and_start(builder, InMemoryWriter::new(CAPTURE_BUFFER_SIZE).unwrap())
+        .build()
         .unwrap();
 
-    let handle = guard.handle();
+    let handle = traced.guard().handle();
     let _mem_guard = MemoryProfiler::with_defaults()
         .install(handle)
         .expect("install should succeed");
@@ -35,14 +36,11 @@ fn install_registers_source_with_recorder() {
     );
 
     // Give the flush thread time to drain.
-    runtime.block_on(async {
+    traced.runtime().block_on(async {
         tokio::time::sleep(Duration::from_millis(100)).await;
     });
 
-    drop(runtime);
-    guard
-        .graceful_shutdown(std::time::Duration::from_secs(1))
-        .expect("clean shutdown");
+    traced.graceful_shutdown();
 
     let b = batches.lock().unwrap();
     let events: Vec<Dial9Event> = decode_all(&b);

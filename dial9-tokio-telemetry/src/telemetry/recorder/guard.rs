@@ -10,7 +10,7 @@ use super::attach_runtime;
 use super::handle::Dial9TokioHandle;
 use super::runtime_context::RuntimeContextRegistry;
 
-/// RAII guard returned by [`TracedRuntimeBuilder::build`](super::builder::TracedRuntimeBuilder::build).
+/// RAII guard for an installed telemetry session.
 ///
 /// A guard is always present on a [`TracedRuntime`](super::builder::TracedRuntime), regardless of
 /// whether telemetry is enabled. When telemetry is disabled (because
@@ -187,12 +187,15 @@ impl TelemetryGuard {
     /// flush thread or background worker to drain.
     ///
     /// ```rust,no_run
-    /// # use dial9_tokio_telemetry::telemetry::{DiskWriter, TracedRuntime};
+    /// # use dial9_tokio_telemetry::telemetry::{DiskWriter, TelemetryCore};
     /// # use std::time::Duration;
     /// # fn main() -> std::io::Result<()> {
     /// # let writer = DiskWriter::new("/tmp/t.bin", 1024, 4096)?;
-    /// # let builder = tokio::runtime::Builder::new_multi_thread();
-    /// let (runtime, guard) = TracedRuntime::build_and_start(builder, writer)?;
+    /// let guard = TelemetryCore::builder().writer(writer).build()?;
+    /// guard.enable();
+    /// let (runtime, _handle) = guard
+    ///     .trace_runtime("main")
+    ///     .build(tokio::runtime::Builder::new_multi_thread())?;
     /// runtime.block_on(async { /* ... */ });
     /// drop(runtime); // worker threads exit, flushing thread-local buffers
     /// guard.graceful_shutdown(Duration::from_secs(5))?;

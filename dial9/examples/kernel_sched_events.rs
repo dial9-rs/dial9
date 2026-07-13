@@ -45,8 +45,10 @@
 // Example prints the deprecated `CpuSampleEvent::worker_id` for illustration.
 #![allow(deprecated)]
 
+use dial9::prelude::*;
+use dial9::telemetry::SchedEventConfig;
 use dial9::telemetry::analysis_events::{CpuSampleSource, Dial9Event};
-use dial9::telemetry::{DiskWriter, SchedEventConfig, TracedRuntime};
+use dial9::{DiskWriter, recorder};
 use dial9_trace_format::decoder::Decoder;
 use std::time::Duration;
 
@@ -64,29 +66,28 @@ fn main() {
     let trace_base = format!("{trace_dir}/kernel_sched_trace.bin");
     let trace_read_path = format!("{trace_dir}/kernel_sched_trace.0.bin");
 
-    let mut builder = tokio::runtime::Builder::new_multi_thread();
-    builder.worker_threads(2).enable_all();
-
     let writer = DiskWriter::single_file(&trace_base).unwrap();
-    let (runtime, guard) = TracedRuntime::builder()
-        .with_task_tracking(true)
+    let traced = recorder(writer)
         .with_sched_events(
             SchedEventConfig::default()
                 .sampling_interval(5)
                 .include_kernel(true),
         )
-        .build_and_start(builder, writer)
+        .with_tokio(|t| {
+            t.worker_threads(2);
+        })
+        .with_task_tracking(true)
+        .build()
         .unwrap();
 
-    runtime.block_on(async {
+    traced.runtime().block_on(async {
         let tasks: Vec<_> = (0..4).map(|i| tokio::spawn(blocking_task(i))).collect();
         for t in tasks {
             let _ = t.await;
         }
     });
 
-    drop(runtime);
-    drop(guard);
+    drop(traced);
 
     // Read back and print callchains
     eprintln!("\n=== Reading trace from {trace_read_path} ===");

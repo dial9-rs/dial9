@@ -32,7 +32,7 @@
 
 use std::time::Duration;
 
-use dial9::Dial9Config;
+use dial9::DiskWriter;
 use dial9::dump::DumpError;
 use dial9::telemetry::{Dial9Handle, Dial9TokioHandle};
 
@@ -54,22 +54,21 @@ fn sealed_segments() -> usize {
     let _ = std::fs::create_dir_all(TRACE_DIR);
     let trace_path = format!("{TRACE_DIR}/trace.bin");
 
-    Dial9Config::builder()
-        .on_disk_buffer(trace_path)
+    let writer = DiskWriter::builder()
+        .base_path(trace_path)
         // Fast-rotating writer so the demo seals a segment within a couple of
         // seconds instead of waiting on the default rotation period.
         .max_file_size(4 * 1024)
         .max_total_size(10 * 1024 * 1024)
         .rotation_period(Duration::from_millis(500))
-        .with_tokio(|t| { t.worker_threads(2); })
+        .build();
+    dial9::recorder_or_disabled(writer, |t| { t.worker_threads(2); })
+        .with_task_tracking(true)
         // The pipeline is whatever you would run continuously (here: gzip +
         // write_back); `with_dump_trigger(...)` only changes *when* it runs. The
         // debounce gate folds a burst of re-trips into a single dump.
-        .with_runtime(|r| r
-            .with_task_tracking(true)
-            .with_custom_pipeline(|p| p.gzip().write_back())
-            .with_dump_trigger(|t| t.debounce(Duration::from_secs(30))))
-        .build_or_disabled()
+        .with_custom_pipeline(|p| p.gzip().write_back())
+        .with_dump_trigger(|t| t.debounce(Duration::from_secs(30)))
 })]
 async fn main() {
     let handle = Dial9TokioHandle::current();

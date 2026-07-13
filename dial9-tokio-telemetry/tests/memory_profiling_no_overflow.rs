@@ -8,7 +8,7 @@ use common::{CAPTURE_BUFFER_SIZE, capture_processor, decode_all};
 use dial9_tokio_telemetry::memory_profiling::{
     Dial9Allocator, MemoryProfiler, MemoryProfilingConfig,
 };
-use dial9_tokio_telemetry::telemetry::{InMemoryWriter, TracedRuntime};
+use dial9_tokio_telemetry::telemetry::{InMemoryWriter, RecorderBuilderTokioExt, recorder};
 use serde::Deserialize;
 use std::time::Duration;
 
@@ -34,14 +34,15 @@ enum OverflowEvent {
 fn no_overflow_event_when_ring_has_capacity() {
     let (capture, batches) = capture_processor();
 
-    let mut builder = tokio::runtime::Builder::new_multi_thread();
-    builder.worker_threads(1).enable_all();
-    let (runtime, guard) = TracedRuntime::builder()
+    let traced = recorder(InMemoryWriter::new(CAPTURE_BUFFER_SIZE).unwrap())
+        .with_tokio(|t| {
+            t.worker_threads(1);
+        })
         .with_custom_pipeline(|p| p.pipe(capture))
-        .build_and_start(builder, InMemoryWriter::new(CAPTURE_BUFFER_SIZE).unwrap())
+        .build()
         .unwrap();
 
-    let handle = guard.handle();
+    let handle = traced.guard().handle();
     let _mem_guard = MemoryProfiler::from_config(
         MemoryProfilingConfig::builder()
             .sample_rate_bytes(512 * 1024)
@@ -52,7 +53,7 @@ fn no_overflow_event_when_ring_has_capacity() {
     .install(handle)
     .expect("install should succeed");
 
-    runtime.block_on(async {
+    traced.runtime().block_on(async {
         for _ in 0..10 {
             let v: Vec<u8> = vec![0u8; 64];
             std::hint::black_box(&v);
@@ -61,10 +62,7 @@ fn no_overflow_event_when_ring_has_capacity() {
         tokio::time::sleep(Duration::from_millis(100)).await;
     });
 
-    drop(runtime);
-    guard
-        .graceful_shutdown(std::time::Duration::from_secs(1))
-        .expect("clean shutdown");
+    traced.graceful_shutdown();
 
     let batches = batches.lock().unwrap();
     let events: Vec<OverflowEvent> = decode_all(&batches);

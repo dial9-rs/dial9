@@ -228,7 +228,7 @@ impl<F: Future> Future for WakeTraced<F> {
 mod tests {
     use super::*;
     use crate::telemetry::analysis_events::Dial9Event;
-    use crate::telemetry::recorder::{TelemetryCore, TracedRuntime};
+    use crate::telemetry::recorder::TelemetryCore;
     use crate::telemetry::task_metadata::UNKNOWN_TASK_ID;
     use crate::telemetry::writer::{DiskWriter, InMemoryWriter};
     use dial9_core::test_util;
@@ -281,11 +281,15 @@ mod tests {
 
         // Build a current-thread runtime so that all tasks — and all thread-local
         // BUFFER accesses — share a single thread with the test itself.
-        let (runtime, guard) = TracedRuntime::build_and_start(
-            tokio::runtime::Builder::new_current_thread(),
-            DiskWriter::single_file(&trace_path).unwrap(),
-        )
-        .unwrap();
+        let guard = TelemetryCore::builder()
+            .writer(DiskWriter::single_file(&trace_path).unwrap())
+            .build()
+            .unwrap();
+        guard.enable();
+        let (runtime, _th) = guard
+            .trace_runtime("test")
+            .build(tokio::runtime::Builder::new_current_thread())
+            .unwrap();
 
         let handle = guard.tokio_handle(runtime.handle());
         let notify = Arc::new(tokio::sync::Notify::new());

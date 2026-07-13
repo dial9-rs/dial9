@@ -5,21 +5,22 @@ mod common;
 
 use common::{CAPTURE_BUFFER_SIZE, capture_processor, decode_all};
 use dial9_tokio_telemetry::telemetry::analysis_events::Dial9Event;
-use dial9_tokio_telemetry::telemetry::{InMemoryWriter, TracedRuntime};
+use dial9_tokio_telemetry::telemetry::{InMemoryWriter, RecorderBuilderTokioExt, recorder};
 
 #[test]
 fn decode_builtin_events_via_serde() {
     let (capture, batches) = capture_processor();
 
-    let mut builder = tokio::runtime::Builder::new_multi_thread();
-    builder.worker_threads(2).enable_all();
-    let (runtime, guard) = TracedRuntime::builder()
+    let traced = recorder(InMemoryWriter::new(CAPTURE_BUFFER_SIZE).unwrap())
+        .with_tokio(|t| {
+            t.worker_threads(2);
+        })
         .with_task_tracking(true)
         .with_custom_pipeline(|p| p.pipe(capture))
-        .build_and_start(builder, InMemoryWriter::new(CAPTURE_BUFFER_SIZE).unwrap())
+        .build()
         .unwrap();
 
-    runtime.block_on(async {
+    traced.runtime().block_on(async {
         let mut handles = Vec::new();
         for _ in 0..10 {
             handles.push(tokio::spawn(async {
@@ -33,10 +34,7 @@ fn decode_builtin_events_via_serde() {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     });
 
-    drop(runtime);
-    guard
-        .graceful_shutdown(std::time::Duration::from_secs(1))
-        .expect("clean shutdown");
+    traced.graceful_shutdown();
 
     let batches = batches.lock().unwrap();
     let events: Vec<Dial9Event> = decode_all(&batches);

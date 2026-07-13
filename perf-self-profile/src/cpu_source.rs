@@ -210,6 +210,10 @@ pub struct CpuProfiler {
 }
 
 impl CpuProfiler {
+    /// [`Source::name`] of the CPU profiler. The runtime builder keys off this
+    /// to decide whether the pipeline symbolizes.
+    pub const SOURCE_NAME: &'static str = "cpu_profile";
+
     /// Start the process-wide CPU profiler with the given config.
     pub fn start(config: CpuProfilingConfig) -> io::Result<Self> {
         let sampler = PerfSampler::start(
@@ -271,7 +275,7 @@ impl Source for CpuProfiler {
     }
 
     fn name(&self) -> &'static str {
-        "cpu_profile"
+        Self::SOURCE_NAME
     }
 }
 

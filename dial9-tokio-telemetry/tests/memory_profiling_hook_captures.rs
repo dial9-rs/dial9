@@ -10,7 +10,7 @@ use dial9_tokio_telemetry::memory_profiling::{
     Dial9Allocator, MemoryProfiler, MemoryProfilingConfig,
 };
 use dial9_tokio_telemetry::telemetry::analysis_events::Dial9Event;
-use dial9_tokio_telemetry::telemetry::{InMemoryWriter, TracedRuntime};
+use dial9_tokio_telemetry::telemetry::{InMemoryWriter, RecorderBuilderTokioExt, recorder};
 use std::time::Duration;
 
 #[global_allocator]
@@ -20,14 +20,15 @@ static ALLOC: Dial9Allocator = Dial9Allocator::system();
 fn hook_captures_sampled_allocations() {
     let (capture, batches) = capture_processor();
 
-    let mut builder = tokio::runtime::Builder::new_multi_thread();
-    builder.worker_threads(1).enable_all();
-    let (runtime, guard) = TracedRuntime::builder()
+    let traced = recorder(InMemoryWriter::new(CAPTURE_BUFFER_SIZE).unwrap())
+        .with_tokio(|t| {
+            t.worker_threads(1);
+        })
         .with_custom_pipeline(|p| p.pipe(capture))
-        .build_and_start(builder, InMemoryWriter::new(CAPTURE_BUFFER_SIZE).unwrap())
+        .build()
         .unwrap();
 
-    let handle = guard.handle();
+    let handle = traced.guard().handle();
     let _mem_guard = MemoryProfiler::from_config(
         MemoryProfilingConfig::builder()
             .sample_rate_bytes(1024)
@@ -37,7 +38,7 @@ fn hook_captures_sampled_allocations() {
     .install(handle)
     .expect("install should succeed");
 
-    runtime.block_on(async {
+    traced.runtime().block_on(async {
         for _ in 0..100 {
             let v: Vec<u8> = Vec::with_capacity(1024);
             std::hint::black_box(v);
@@ -46,10 +47,7 @@ fn hook_captures_sampled_allocations() {
         tokio::time::sleep(Duration::from_millis(200)).await;
     });
 
-    drop(runtime);
-    guard
-        .graceful_shutdown(std::time::Duration::from_secs(1))
-        .expect("clean shutdown");
+    traced.graceful_shutdown();
 
     let b = batches.lock().unwrap();
     let events: Vec<Dial9Event> = decode_all(&b);

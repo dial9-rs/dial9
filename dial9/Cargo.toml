@@ -124,6 +124,7 @@ dial9 = { path = ".", features = [
     "unstable-events",
     "worker-s3",
 ] }
+dial9-core = { workspace = true }
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = [
     "rt-multi-thread",

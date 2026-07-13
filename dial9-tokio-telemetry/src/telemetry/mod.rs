@@ -21,6 +21,13 @@ pub(crate) use dial9_core::writer;
 pub use crate::traced::TracedFuture;
 pub use custom_events::{CustomEventsConfig, CustomEventsContext};
 pub use dial9_core::buffer::{Encodable, ThreadLocalEncoder};
+pub use dial9_core::recorder::{RecorderBuilder, recorder};
+#[cfg(any(
+    feature = "cpu-profiling",
+    feature = "process-resource",
+    feature = "linux-socket"
+))]
+pub use dial9_perf_self_profile::RecorderPerfExt;
 #[cfg(feature = "linux-socket")]
 pub use dial9_perf_self_profile::SocketAcceptQueuesConfig;
 #[cfg(feature = "memory-profiling")]
@@ -37,10 +44,32 @@ pub use format::{
     WorkerUnparkEvent,
 };
 pub use recorder::{
-    BuildAndStartRuntime, Dial9Handle, Dial9TokioHandle, PipelineCustom, PipelineS3, PipelineUnset,
-    TelemetryCore, TelemetryCoreBuilder, TelemetryGuard, TokioHooks, TraceRuntimeCoreBuilder,
-    TracedRuntime, TracedRuntimeBuilder, current_worker_id, spawn,
+    Dial9Handle, Dial9TokioHandle, RecorderBuilderTokioExt, TelemetryCore, TelemetryCoreBuilder,
+    TelemetryGuard, TokioAttachConfig, TokioHooks, TraceRuntimeCoreBuilder, TracedRecorder,
+    TracedRuntime, build_traced, current_worker_id, spawn,
 };
 pub use task_dump_config::TaskDumpConfig;
 pub use task_metadata::{TaskId, UNKNOWN_TASK_ID};
 pub use writer::{Disk, DiskWriter, InMemoryWriter, Memory, SegmentWriter, WriterMode};
+
+/// Install the memory profiler on a running session (post-`enable`).
+/// Warns and skips on error or a disabled guard.
+#[cfg(feature = "memory-profiling")]
+pub(crate) fn install_memory_profiler_on_guard(
+    config: Option<dial9_perf_self_profile::memory_profiling::MemoryProfilingConfig>,
+    guard: &TelemetryGuard,
+) -> Option<dial9_perf_self_profile::memory_profiling::MemoryProfilerGuard> {
+    let config = config?;
+    if !guard.is_enabled() {
+        return None;
+    }
+    match dial9_perf_self_profile::memory_profiling::MemoryProfiler::from_config(config)
+        .install(guard.handle())
+    {
+        Ok(memory_guard) => Some(memory_guard),
+        Err(e) => {
+            tracing::warn!(target: "dial9_telemetry", "failed to install memory profiler: {e}");
+            None
+        }
+    }
+}

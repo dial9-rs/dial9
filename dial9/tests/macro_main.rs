@@ -8,33 +8,29 @@ fn tmp_base_path() -> PathBuf {
 }
 
 // ===========================================================================
-// Fluent builder API — `Dial9Config::builder()`
+// Recorder builder API — `recorder(DiskWriter::builder()...).with_tokio(..)`
 // ===========================================================================
 mod fluent_builder {
     use std::panic::{AssertUnwindSafe, catch_unwind};
 
-    use dial9::Dial9Config;
+    use dial9::{DiskWriter, RecorderBuilderTokioExt, TracedRecorder};
 
     use super::tmp_base_path;
 
-    fn test_config() -> Dial9Config {
-        Dial9Config::builder()
-            .on_disk_buffer(tmp_base_path())
+    fn test_config() -> TracedRecorder {
+        let writer = DiskWriter::builder()
+            .base_path(tmp_base_path())
             .max_file_size(1024 * 1024)
             .max_total_size(4 * 1024 * 1024)
             .build()
-            .expect("config build failed")
+            .expect("writer build failed");
+        dial9::recorder(writer).with_tokio(|_| {})
     }
 
-    fn disabled_config() -> Dial9Config {
-        Dial9Config::builder()
-            .on_disk_buffer(tmp_base_path())
-            .enabled(false)
-            .with_tokio(|t| {
-                t.worker_threads(2);
-            })
-            .build()
-            .expect("disabled build should succeed")
+    fn disabled_config() -> TracedRecorder {
+        TracedRecorder::disabled().with_tokio(|t| {
+            t.worker_threads(2);
+        })
     }
 
     #[dial9::main(config = test_config)]
@@ -48,12 +44,13 @@ mod fluent_builder {
     }
 
     #[dial9::main(config = || {
-        Dial9Config::builder()
-            .on_disk_buffer(tmp_base_path())
+        let writer = DiskWriter::builder()
+            .base_path(tmp_base_path())
             .max_file_size(1024 * 1024)
             .max_total_size(4 * 1024 * 1024)
             .build()
-            .expect("config build failed")
+            .expect("writer build failed");
+        dial9::recorder(writer).with_tokio(|_| {})
     })]
     async fn runs_with_inline_closure() {
         tokio::time::sleep(std::time::Duration::from_millis(1)).await;
@@ -65,13 +62,13 @@ mod fluent_builder {
     }
 
     #[dial9::main(config = move || {
-        let path = tmp_base_path();
-        Dial9Config::builder()
-            .on_disk_buffer(path)
+        let writer = DiskWriter::builder()
+            .base_path(tmp_base_path())
             .max_file_size(1024 * 1024)
             .max_total_size(4 * 1024 * 1024)
             .build()
-            .expect("config build failed")
+            .expect("writer build failed");
+        dial9::recorder(writer).with_tokio(|_| {})
     })]
     async fn runs_with_move_closure() {
         tokio::time::sleep(std::time::Duration::from_millis(1)).await;
@@ -173,12 +170,8 @@ mod fluent_builder {
 
     // --- Disabled telemetry ---
 
-    fn disabled_config_default() -> Dial9Config {
-        Dial9Config::builder()
-            .on_disk_buffer(tmp_base_path())
-            .enabled(false)
-            .build()
-            .expect("disabled build should succeed")
+    fn disabled_config_default() -> TracedRecorder {
+        TracedRecorder::disabled()
     }
 
     #[dial9::main(config = disabled_config)]
@@ -246,14 +239,14 @@ mod fluent_builder {
     }
 }
 
-// In-memory writer via `Dial9Config::builder().in_memory_buffer()`.
+// In-memory writer via `recorder(InMemoryWriter::builder()...)`.
 mod in_memory {
     use std::future::Future;
     use std::pin::Pin;
 
-    use dial9::Dial9Config;
     use dial9::background_task::{ProcessError, SegmentData, SegmentProcessor};
     use dial9::telemetry::{Dial9Handle, Dial9TokioHandle};
+    use dial9::{InMemoryWriter, RecorderBuilderTokioExt, TracedRecorder};
 
     /// Stand-in delivery processor: forwards each segment unchanged.
     #[derive(Debug, Default)]
@@ -272,13 +265,14 @@ mod in_memory {
         }
     }
 
-    fn memory_config() -> Dial9Config {
-        Dial9Config::builder()
-            .in_memory_buffer()
+    fn memory_config() -> TracedRecorder<dial9::Memory> {
+        let writer = InMemoryWriter::builder()
             .max_total_size(16 * 1024 * 1024)
-            .with_runtime(|r| r.with_custom_pipeline(|p| p.pipe(NoopProcessor)))
             .build()
-            .expect("in-memory config build failed")
+            .expect("in-memory writer build failed");
+        dial9::recorder(writer)
+            .with_tokio(|_| {})
+            .with_custom_pipeline(|p| p.pipe(NoopProcessor))
     }
 
     #[dial9::main(config = memory_config)]
@@ -298,37 +292,39 @@ mod in_memory {
 }
 
 // ===========================================================================
-// Fluent builder fallback API - `Dial9Config::builder().build_or_disabled()`
-// (lenient: writer-I/O probe failures at config-build time downgrade to a
-// disabled config that still preserves the user's `with_tokio`
-// configurators). Exercises the macro through the lenient downgrade path.
+// Lenient downgrade path: on a writer-I/O failure the config function falls
+// back to `TracedRecorder::disabled()` (a plain tokio runtime with no
+// telemetry). Exercises the macro through that downgrade.
 // ===========================================================================
 mod fluent_builder_fallback {
     use std::path::PathBuf;
 
-    use dial9::Dial9Config;
     use dial9::telemetry::Dial9Handle;
+    use dial9::{DiskWriter, TracedRecorder};
 
     use super::tmp_base_path;
 
-    fn fallback_config() -> Dial9Config {
-        Dial9Config::builder()
-            .on_disk_buffer(tmp_base_path())
+    /// Build a disk-backed recorder, or fall back to a disabled recorder (a
+    /// plain tokio runtime) when the writer cannot be created.
+    fn disk_recorder_or_disabled(base_path: PathBuf) -> TracedRecorder {
+        let writer = DiskWriter::builder()
+            .base_path(base_path)
             .max_file_size(1024 * 1024)
             .max_total_size(4 * 1024 * 1024)
-            .build_or_disabled()
+            .build();
+        dial9::recorder_or_disabled(writer, |_| {})
+    }
+
+    fn fallback_config() -> TracedRecorder {
+        disk_recorder_or_disabled(tmp_base_path())
     }
 
     fn unwritable_base_path() -> PathBuf {
         PathBuf::from("/this/dir/does/not/exist/dial9_macro_fallback_trace.bin")
     }
 
-    fn cascading_fallback_config() -> Dial9Config {
-        Dial9Config::builder()
-            .on_disk_buffer(unwritable_base_path())
-            .max_file_size(1024 * 1024)
-            .max_total_size(4 * 1024 * 1024)
-            .build_or_disabled()
+    fn cascading_fallback_config() -> TracedRecorder {
+        disk_recorder_or_disabled(unwritable_base_path())
     }
 
     #[dial9::main(config = fallback_config)]

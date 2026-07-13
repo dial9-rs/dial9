@@ -10,7 +10,7 @@
 use dial9_tokio_telemetry::memory_profiling::{
     Dial9Allocator, MemoryProfiler, MemoryProfilingConfig,
 };
-use dial9_tokio_telemetry::telemetry::{InMemoryWriter, TracedRuntime};
+use dial9_tokio_telemetry::telemetry::{InMemoryWriter, RecorderBuilderTokioExt, recorder};
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -58,13 +58,14 @@ fn opt_out_prevents_tls_teardown_panic() {
 
     PANICS.store(0, Ordering::Relaxed);
 
-    let mut builder = tokio::runtime::Builder::new_multi_thread();
-    builder.worker_threads(1).enable_all();
-    let (runtime, guard) = TracedRuntime::builder()
-        .build_and_start(builder, InMemoryWriter::new(16 * 1024 * 1024).unwrap())
+    let traced = recorder(InMemoryWriter::new(16 * 1024 * 1024).unwrap())
+        .with_tokio(|t| {
+            t.worker_threads(1);
+        })
+        .build()
         .unwrap();
 
-    let handle = guard.handle();
+    let handle = traced.guard().handle();
     let _mem_guard = MemoryProfiler::from_config(
         MemoryProfilingConfig::builder()
             .sample_rate_bytes(64) // sample aggressively
@@ -77,7 +78,7 @@ fn opt_out_prevents_tls_teardown_panic() {
 
     const N_THREADS: usize = 16;
 
-    runtime.block_on(async {
+    traced.runtime().block_on(async {
         // Give time for the profiler to fully initialize.
         tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -110,8 +111,7 @@ fn opt_out_prevents_tls_teardown_panic() {
         tokio::time::sleep(Duration::from_millis(100)).await;
     });
 
-    drop(runtime);
-    drop(guard);
+    drop(traced);
 
     // Restore the original panic hook.
     std::panic::set_hook(prev_hook);

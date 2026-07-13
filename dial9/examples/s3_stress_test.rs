@@ -12,7 +12,8 @@
 
 use clap::Parser;
 use dial9::background_task::s3::S3Config;
-use dial9::telemetry::{DiskWriter, TracedRuntime};
+use dial9::prelude::*;
+use dial9::{DiskWriter, recorder};
 use metrique::local::{LocalFormat, OutputStyle};
 use metrique::writer::format::FormatExt;
 use metrique::writer::sink::FlushImmediatelyBuilder;
@@ -143,16 +144,18 @@ fn main() -> std::io::Result<()> {
         LocalFormat::new(OutputStyle::Pretty).output_to_makewriter(|| std::io::stderr().lock()),
     );
 
-    let mut builder = tokio::runtime::Builder::new_multi_thread();
-    builder.worker_threads(args.worker_threads).enable_all();
-
-    let (runtime, guard) = TracedRuntime::builder()
+    let worker_threads = args.worker_threads;
+    let traced = recorder(writer)
+        .metrics_sink(metrics_sink)
+        .with_tokio(move |t| {
+            t.worker_threads(worker_threads);
+        })
         .with_task_tracking(true)
         .with_s3_uploader(s3_config)
-        .with_worker_metrics_sink(metrics_sink)
-        .build_and_start(builder, writer)?;
+        .graceful_shutdown(Duration::from_secs(30))
+        .build()?;
 
-    let handle = guard.tokio_handle(runtime.handle());
+    let handle = traced.guard().tokio_handle(traced.runtime().handle());
     let load_duration = Duration::from_secs(args.duration);
     let tasks_done = Arc::new(AtomicU64::new(0));
     let start = Instant::now();
@@ -163,7 +166,7 @@ fn main() -> std::io::Result<()> {
     eprintln!("  Segment size: {} bytes", args.segment_size);
     eprintln!();
 
-    runtime.block_on(async {
+    traced.runtime().block_on(async {
         let counter = tasks_done.clone();
         let trace_dir2 = trace_dir.clone();
         let trace_stem2 = trace_stem.clone();
@@ -240,10 +243,7 @@ fn main() -> std::io::Result<()> {
     });
 
     eprintln!("Calling graceful_shutdown...");
-    drop(runtime);
-    guard
-        .graceful_shutdown(Duration::from_secs(30))
-        .expect("graceful shutdown");
+    traced.graceful_shutdown();
     eprintln!("Done.");
 
     // Count uploaded objects in S3

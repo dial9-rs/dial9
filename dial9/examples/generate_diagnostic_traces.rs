@@ -11,9 +11,9 @@
 //! Note: "missing frame pointers" and "missing debug symbols" require building
 //! with different RUSTFLAGS, so they are handled by the shell script wrapper.
 
-use dial9::telemetry::{
-    CpuProfilingConfig, Dial9TokioHandle, DiskWriter, SchedEventConfig, TracedRuntime,
-};
+use dial9::prelude::*;
+use dial9::telemetry::{CpuProfilingConfig, Dial9TokioHandle, SchedEventConfig};
+use dial9::{DiskWriter, recorder};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -42,18 +42,19 @@ fn generate_no_wake_events(dir: &PathBuf) {
     std::fs::create_dir_all(dir).unwrap();
     let trace_path = dir.join("trace.bin");
 
-    let mut builder = tokio::runtime::Builder::new_multi_thread();
-    builder.worker_threads(4).enable_all();
-
     let writer = DiskWriter::new(&trace_path, 4 * 1024, 50 * 1024 * 1024).unwrap();
-    let (runtime, guard) = TracedRuntime::builder()
-        .with_task_tracking(true)
+    let traced = recorder(writer)
         .with_cpu_profiling(CpuProfilingConfig::default().frequency_hz(999))
-        .with_worker_poll_interval(Duration::from_millis(50))
-        .build_and_start(builder, writer)
+        .worker_poll_interval(Duration::from_millis(50))
+        .with_tokio(|t| {
+            t.worker_threads(4);
+        })
+        .with_task_tracking(true)
+        .graceful_shutdown(Duration::from_secs(10))
+        .build()
         .unwrap();
 
-    runtime.block_on(async {
+    traced.runtime().block_on(async {
         // Deliberately use tokio::spawn — NOT Dial9TokioHandle::spawn
         let tasks: Vec<_> = (0..50).map(|i| tokio::spawn(cpu_task(i))).collect();
         for t in tasks {
@@ -62,10 +63,7 @@ fn generate_no_wake_events(dir: &PathBuf) {
         tokio::time::sleep(Duration::from_secs(2)).await;
     });
 
-    drop(runtime);
-    guard
-        .graceful_shutdown(Duration::from_secs(10))
-        .expect("graceful shutdown");
+    traced.graceful_shutdown();
 }
 
 /// Generate a fully-configured "good" trace for comparison.
@@ -73,19 +71,20 @@ fn generate_good_trace(dir: &PathBuf) {
     std::fs::create_dir_all(dir).unwrap();
     let trace_path = dir.join("trace.bin");
 
-    let mut builder = tokio::runtime::Builder::new_multi_thread();
-    builder.worker_threads(4).enable_all();
-
     let writer = DiskWriter::new(&trace_path, 4 * 1024, 50 * 1024 * 1024).unwrap();
-    let (runtime, guard) = TracedRuntime::builder()
-        .with_task_tracking(true)
+    let traced = recorder(writer)
         .with_cpu_profiling(CpuProfilingConfig::default().frequency_hz(999))
         .with_sched_events(SchedEventConfig::default())
-        .with_worker_poll_interval(Duration::from_millis(50))
-        .build_and_start(builder, writer)
+        .worker_poll_interval(Duration::from_millis(50))
+        .with_tokio(|t| {
+            t.worker_threads(4);
+        })
+        .with_task_tracking(true)
+        .graceful_shutdown(Duration::from_secs(10))
+        .build()
         .unwrap();
 
-    runtime.block_on(async {
+    traced.runtime().block_on(async {
         let handle = Dial9TokioHandle::current();
         let tasks: Vec<_> = (0..50).map(|i| handle.spawn(cpu_task(i))).collect();
         for t in tasks {
@@ -94,10 +93,7 @@ fn generate_good_trace(dir: &PathBuf) {
         tokio::time::sleep(Duration::from_secs(2)).await;
     });
 
-    drop(runtime);
-    guard
-        .graceful_shutdown(Duration::from_secs(10))
-        .expect("graceful shutdown");
+    traced.graceful_shutdown();
 }
 
 /// Generate a trace with CPU profiling but NO sched events.
@@ -105,19 +101,20 @@ fn generate_no_sched_events(dir: &PathBuf) {
     std::fs::create_dir_all(dir).unwrap();
     let trace_path = dir.join("trace.bin");
 
-    let mut builder = tokio::runtime::Builder::new_multi_thread();
-    builder.worker_threads(4).enable_all();
-
     let writer = DiskWriter::new(&trace_path, 4 * 1024, 50 * 1024 * 1024).unwrap();
-    let (runtime, guard) = TracedRuntime::builder()
-        .with_task_tracking(true)
+    let traced = recorder(writer)
         .with_cpu_profiling(CpuProfilingConfig::default().frequency_hz(999))
         // Deliberately omit .with_sched_events()
-        .with_worker_poll_interval(Duration::from_millis(50))
-        .build_and_start(builder, writer)
+        .worker_poll_interval(Duration::from_millis(50))
+        .with_tokio(|t| {
+            t.worker_threads(4);
+        })
+        .with_task_tracking(true)
+        .graceful_shutdown(Duration::from_secs(10))
+        .build()
         .unwrap();
 
-    runtime.block_on(async {
+    traced.runtime().block_on(async {
         let handle = Dial9TokioHandle::current();
         let tasks: Vec<_> = (0..50).map(|i| handle.spawn(cpu_task(i))).collect();
         for t in tasks {
@@ -126,10 +123,7 @@ fn generate_no_sched_events(dir: &PathBuf) {
         tokio::time::sleep(Duration::from_secs(2)).await;
     });
 
-    drop(runtime);
-    guard
-        .graceful_shutdown(Duration::from_secs(10))
-        .expect("graceful shutdown");
+    traced.graceful_shutdown();
 }
 
 fn main() {

@@ -5,7 +5,7 @@
 use dial9_tokio_telemetry::memory_profiling::{
     MemoryProfiler, MemoryProfilingConfig, is_installed,
 };
-use dial9_tokio_telemetry::telemetry::TracedRuntime;
+use dial9_tokio_telemetry::telemetry::{RecorderBuilderTokioExt, recorder};
 
 mod common;
 
@@ -13,13 +13,14 @@ mod common;
 fn install_publishes_active_inner() {
     assert!(!is_installed(), "should not be installed before install()");
 
-    let mut builder = tokio::runtime::Builder::new_multi_thread();
-    builder.worker_threads(1).enable_all();
-    let (_runtime, guard) = TracedRuntime::builder()
-        .build_and_start(builder, common::small_mem_writer())
+    let traced = recorder(common::small_mem_writer())
+        .with_tokio(|t| {
+            t.worker_threads(1);
+        })
+        .build()
         .unwrap();
 
-    let handle = guard.handle();
+    let handle = traced.guard().handle();
     let _mem_guard = MemoryProfiler::from_config(
         MemoryProfilingConfig::builder()
             .sample_rate_bytes(256 * 1024)

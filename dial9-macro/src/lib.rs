@@ -14,14 +14,14 @@ struct MainArgs {
 }
 
 const MISSING_CONFIG_HELP: &str = "missing required `config` argument, e.g.\n  \
-                           #[dial9::main(config = my_config_fn)]\n\
+                           #[dial9::main(config = dial9::recorder_from_env)]\n\
                            or with an inline closure:\n  \
-                           #[dial9::main(config = || Dial9Config::builder().on_disk_buffer(...).max_total_size(...).build().unwrap())]";
+                           #[dial9::main(config = || dial9::recorder(writer).with_tokio(|_| {}))]";
 
 const CONFIG_MUST_BE_ZERO_ARG_HELP: &str = "`config` must be a zero-argument function path or a zero-argument closure, e.g.\n  \
                            #[dial9::main(config = my_config_fn)]\n\
                            or with an inline closure:\n  \
-                           #[dial9::main(config = || Dial9Config::builder().on_disk_buffer(...).max_total_size(...).build().unwrap())]";
+                           #[dial9::main(config = || dial9::recorder(writer).with_tokio(|_| {}))]";
 impl Parse for MainArgs {
     fn parse(input: ParseStream) -> syn::Result<Self> {
         if input.is_empty() {
@@ -118,19 +118,13 @@ fn expand_main(args: MainArgs, input: ItemFn) -> Result<TokenStream2, syn::Error
 /// # Arguments
 ///
 /// * `config` — a zero-argument function path or a zero-argument closure
-///   returning any value convertible into a `TracedRuntime`. In
-///   practice that means one of:
-///     - `Dial9Config` from `Dial9Config::builder().on_disk_buffer(..)..build()`
-///       or `..in_memory_buffer()..build()` (strict): a writer-I/O failure surfaces
-///       from `.build()` as a `Dial9ConfigBuilderError`; runtime construction
-///       under the macro panics on tokio-builder or telemetry-core I/O.
-///     - `Dial9Config` from `..build_or_disabled()` (lenient): the same
-///       `Dial9Config` type, but writer-I/O failures are logged at `error!`
-///       and downgraded to a disabled config that still preserves your
-///       `with_tokio` configurators.
+///   returning a value convertible into a `TracedRuntime`, in practice a
+///   `TracedRecorder` from `dial9::recorder(writer).with_tokio(..)` or from
+///   `dial9::recorder_from_env`. Runtime construction under the macro panics on
+///   tokio-builder or telemetry-core I/O.
 ///
-///   Use `.enabled(false)` to run without telemetry while keeping your
-///   `with_tokio` configurators.
+///   Use `dial9::TracedRecorder::disabled()` to run without telemetry while
+///   keeping your `with_tokio` configurators.
 ///
 /// # Graceful shutdown
 ///
@@ -142,12 +136,10 @@ fn expand_main(args: MainArgs, input: ItemFn) -> Result<TokenStream2, syn::Error
 /// builder:
 ///
 /// ```rust,ignore
-/// Dial9Config::builder()
-///     .on_disk_buffer("/tmp/trace.bin")
-///     .max_total_size(16 * 1024 * 1024)
+/// dial9::recorder(writer)
+///     .with_tokio(|_| {})
 ///     .graceful_shutdown(std::time::Duration::from_secs(5)) // custom deadline
 ///     // .disable_graceful_shutdown()                       // or opt out entirely
-///     .build()
 /// ```
 ///
 /// The low-level `TracedRuntime` API is unaffected — there you call
@@ -163,15 +155,17 @@ fn expand_main(args: MainArgs, input: ItemFn) -> Result<TokenStream2, syn::Error
 /// Using a named function:
 ///
 /// ```rust,ignore
-/// use dial9::{main, Dial9Config, telemetry::Dial9TokioHandle};
+/// use dial9::telemetry::Dial9TokioHandle;
+/// use dial9::{main, DiskWriter, RecorderBuilderTokioExt, TracedRecorder};
 ///
-/// fn my_config() -> Dial9Config {
-///     Dial9Config::builder()
-///         .on_disk_buffer("/tmp/trace.bin")
+/// fn my_config() -> TracedRecorder {
+///     let writer = DiskWriter::builder()
+///         .base_path("/tmp/trace.bin")
 ///         .max_file_size(1024 * 1024)
 ///         .max_total_size(16 * 1024 * 1024)
 ///         .build()
-///         .expect("config build failed")
+///         .expect("writer build failed");
+///     dial9::recorder(writer).with_tokio(|_| {})
 /// }
 ///
 /// #[dial9::main(config = my_config)]
@@ -188,29 +182,24 @@ fn expand_main(args: MainArgs, input: ItemFn) -> Result<TokenStream2, syn::Error
 ///
 /// ```rust,ignore
 /// #[dial9::main(config = || {
-///     Dial9Config::builder()
-///         .on_disk_buffer("/tmp/trace.bin")
+///     let writer = dial9::DiskWriter::builder()
+///         .base_path("/tmp/trace.bin")
 ///         .max_file_size(1024 * 1024)
 ///         .max_total_size(16 * 1024 * 1024)
 ///         .build()
-///         .expect("config build failed")
+///         .expect("writer build failed");
+///     dial9::recorder(writer).with_tokio(|_| {})
 /// })]
 /// async fn main() {
 ///     /* ... */
 /// }
 /// ```
 ///
-/// Lenient (telemetry is best-effort; falls back to a plain tokio
-/// runtime if writer setup fails):
+/// From the environment (best-effort; `DIAL9_ENABLED` off, or a writer-setup
+/// failure, yields a plain tokio runtime):
 ///
 /// ```rust,ignore
-/// #[dial9::main(config = || {
-///     Dial9Config::builder()
-///         .on_disk_buffer("/tmp/trace.bin")
-///         .max_file_size(1024 * 1024)
-///         .max_total_size(16 * 1024 * 1024)
-///         .build_or_disabled()
-/// })]
+/// #[dial9::main(config = dial9::recorder_from_env)]
 /// async fn main() {
 ///     /* ... */
 /// }
@@ -220,28 +209,23 @@ fn expand_main(args: MainArgs, input: ItemFn) -> Result<TokenStream2, syn::Error
 /// dial9 off via a feature flag or env var without removing the macro):
 ///
 /// ```rust,ignore
-/// #[dial9::main(config = || {
-///     Dial9Config::builder()
-///         .on_disk_buffer("/tmp/trace.bin")
-///         .enabled(false)
-///         .build()
-///         .expect("config build failed")
-/// })]
+/// #[dial9::main(config = || dial9::TracedRecorder::disabled())]
 /// async fn main() {
 ///     /* ... */
 /// }
 /// ```
 ///
-/// In-memory writer (no telemetry on disk), select it with `.in_memory_buffer()`.
+/// In-memory writer (no telemetry on disk), via `InMemoryWriter`:
 ///
 /// ```rust,ignore
 /// #[dial9::main(config = || {
-///     Dial9Config::builder()
-///         .in_memory_buffer()
+///     let writer = dial9::InMemoryWriter::builder()
 ///         .max_total_size(16 * 1024 * 1024)
-///         .with_runtime(|r| r.with_custom_pipeline(|p| p.pipe(MyUploader)))
 ///         .build()
-///         .expect("config build failed")
+///         .expect("writer build failed");
+///     dial9::recorder(writer)
+///         .with_tokio(|_| {})
+///         .with_custom_pipeline(|p| p.pipe(MyUploader))
 /// })]
 /// async fn main() {
 ///     /* ... */

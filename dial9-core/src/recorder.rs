@@ -85,6 +85,17 @@ impl<M: WriterMode> RecorderBuilder<M> {
         self
     }
 
+    /// Names of the registered sources, in registration order.
+    pub fn source_names(&self) -> impl Iterator<Item = &str> + '_ {
+        self.sources.iter().map(|s| s.name())
+    }
+
+    /// The writer's per-process namespace boot id, or `None` before
+    /// [`set_namespace`](SegmentWriter::set_namespace) has run.
+    pub fn writer_boot_id(&self) -> Option<&str> {
+        self.writer.boot_id()
+    }
+
     /// Static metadata written into every rotated segment header. Later calls
     /// replace earlier ones.
     pub fn segment_metadata(mut self, entries: impl IntoIterator<Item = (String, String)>) -> Self {
@@ -169,6 +180,23 @@ impl<M: WriterMode> RecorderBuilder<M> {
         let session = self.build();
         session.enable();
         session
+    }
+}
+
+/// A builder that can register [`Source`]s.
+///
+/// Implemented by [`RecorderBuilder`] and by runtime wrappers that own a core
+/// builder (e.g. the tokio layer's `TracedRecorder`), so source-registration
+/// sugar works the same on either.
+pub trait RegisterSource: Sized {
+    /// Register a [`Source`] with the underlying recording session.
+    fn source(self, source: impl Source + 'static) -> Self;
+}
+
+impl<M: WriterMode> RegisterSource for RecorderBuilder<M> {
+    fn source(mut self, source: impl Source + 'static) -> Self {
+        self.sources.push(Box::new(source));
+        self
     }
 }
 

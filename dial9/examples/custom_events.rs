@@ -10,7 +10,8 @@
 //! ```
 
 use dial9::telemetry::{
-    DiskWriter, Encodable, ThreadLocalEncoder, TracedRuntime, clock_monotonic_ns,
+    DiskWriter, Encodable, RecorderBuilderTokioExt, ThreadLocalEncoder, clock_monotonic_ns,
+    recorder,
 };
 use dial9_trace_format::{InternedString, TraceEvent};
 use std::time::Duration;
@@ -67,13 +68,14 @@ fn main() -> std::io::Result<()> {
     let trace_path = dir.path().join("trace.bin");
 
     let writer = DiskWriter::single_file(&trace_path)?;
-    let mut builder = tokio::runtime::Builder::new_multi_thread();
-    builder.worker_threads(2).enable_all();
+    let traced = recorder(writer)
+        .with_tokio(|t| {
+            t.worker_threads(2);
+        })
+        .build()?;
+    let handle = traced.guard().handle();
 
-    let (runtime, guard) = TracedRuntime::build_and_start(builder, writer)?;
-    let handle = guard.handle();
-
-    runtime.block_on(async {
+    traced.runtime().block_on(async {
         // Simple: derive-only events
         for i in 0..10 {
             let error_message = if i % 4 == 3 {
@@ -102,8 +104,7 @@ fn main() -> std::io::Result<()> {
         tokio::time::sleep(Duration::from_millis(100)).await;
     });
 
-    drop(runtime);
-    drop(guard);
+    drop(traced);
 
     // Verify: decode the trace and count our custom events
     let sealed = dir.path().join("trace.0.bin");

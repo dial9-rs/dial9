@@ -10,8 +10,8 @@
 //! `graceful_shutdown` itself: `run_workload()` is the only call.
 #![cfg(all(feature = "cpu-profiling", target_os = "linux"))]
 
-use dial9::Dial9Config;
 use dial9::telemetry::CpuProfilingConfig;
+use dial9::{DiskWriter, RecorderBuilderTokioExt, RecorderPerfExt, TracedRecorder};
 use dial9_trace_format::decoder::Decoder;
 use flate2::read::GzDecoder;
 use std::io::Read;
@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 static TRACE_DIR: OnceLock<PathBuf> = OnceLock::new();
 static OUTPUT_DIR: OnceLock<PathBuf> = OnceLock::new();
 
-fn macro_test_config() -> Dial9Config {
+fn macro_test_config() -> TracedRecorder {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("trace.bin");
     let output = dir.path().join("output");
@@ -30,19 +30,20 @@ fn macro_test_config() -> Dial9Config {
     OUTPUT_DIR.get_or_init(|| output.clone());
     std::mem::forget(dir);
 
-    Dial9Config::builder()
-        .on_disk_buffer(&path)
+    let writer = DiskWriter::builder()
+        .base_path(&path)
         // Large budget + default per-file size => a single segment that is
         // sealed only at shutdown, so symbolization can't run mid-workload.
         .max_total_size(256 * 1024 * 1024)
+        .build()
+        .unwrap();
+
+    dial9::recorder(writer)
+        .with_cpu_profiling(CpuProfilingConfig::default().frequency_hz(999))
+        .with_tokio(|_| {})
         // Generous deadline so the drain finishes symbolizing the segment.
         .graceful_shutdown(Duration::from_secs(10))
-        .with_runtime(|r| {
-            r.with_cpu_profiling(CpuProfilingConfig::default().frequency_hz(999))
-                .with_custom_pipeline(move |p| p.symbolize().gzip().write_back_to(output.clone()))
-        })
-        .build()
-        .unwrap()
+        .with_custom_pipeline(move |p| p.symbolize().gzip().write_back_to(output.clone()))
 }
 
 /// Burn CPU for a fixed window so the profiler reliably captures stack samples.

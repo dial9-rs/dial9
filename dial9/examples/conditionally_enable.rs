@@ -2,8 +2,9 @@
 //!
 //! A common pattern is to run with telemetry in staging or on-demand in
 //! production, while keeping a plain tokio runtime in dev. The `config`
-//! function checks `ENABLE_DIAL9` and returns either an enabled or disabled
-//! [`Dial9Config`] — the macro handles both cases transparently.
+//! function checks `ENABLE_DIAL9` and toggles recording with
+//! [`TracedRecorder::enabled`]: on when the var is set, off (a plain tokio
+//! runtime) otherwise.
 //!
 //! Run with telemetry enabled:
 //! ```sh
@@ -17,20 +18,20 @@
 
 use std::time::Duration;
 
-use dial9::Dial9Config;
 use dial9::telemetry::{Dial9Handle, Dial9TokioHandle};
+use dial9::{DiskWriter, TracedRecorder};
 
-fn my_config() -> Dial9Config {
-    Dial9Config::builder()
-        .on_disk_buffer("conditionally_enable_trace.bin")
-        .enabled(std::env::var("ENABLE_DIAL9").is_ok())
+fn my_config() -> TracedRecorder {
+    let writer = DiskWriter::builder()
+        .base_path("conditionally_enable_trace.bin")
         .max_file_size(64 * 1024 * 1024)
         .max_total_size(256 * 1024 * 1024)
-        .with_tokio(|t| {
-            t.worker_threads(4);
-        })
-        .with_runtime(|r| r.with_task_tracking(true))
-        .build_or_disabled()
+        .build();
+    dial9::recorder_or_disabled(writer, |t| {
+        t.worker_threads(4);
+    })
+    .enabled(std::env::var("ENABLE_DIAL9").is_ok())
+    .with_task_tracking(true)
 }
 
 async fn cpu_work(iterations: u64) -> u64 {

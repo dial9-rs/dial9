@@ -31,7 +31,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
 
-use dial9::Dial9Config;
+use dial9::DiskWriter;
 use dial9::background_task::{ProcessError, SegmentData, SegmentProcessor};
 use dial9::telemetry::Dial9TokioHandle;
 
@@ -185,8 +185,8 @@ async fn worker_task(id: usize) {
     let _ = std::fs::create_dir_all(TRACE_DIR);
     let base_path = format!("{TRACE_DIR}/trace.bin");
 
-    Dial9Config::builder()
-        .on_disk_buffer(base_path)
+    let writer = DiskWriter::builder()
+        .base_path(base_path)
         // Small per-file budget + short rotation period so we get several
         // sealed segments in a few seconds of work - otherwise the whole
         // run might fit in a single segment and the stateful processor
@@ -194,19 +194,18 @@ async fn worker_task(id: usize) {
         .max_file_size(512 * 1024)
         .max_total_size(16 * 1024 * 1024)
         .rotation_period(Duration::from_secs(2))
-        .with_tokio(|t| { t.worker_threads(4); })
-        .with_runtime(|r| r
-            .with_task_tracking(true)
-            .with_custom_pipeline(|p| p
-                .pipe(MetadataTagger::new([
-                    ("service", "custom-pipeline-demo"),
-                    ("environment", "local"),
-                ]))
-                .pipe(LoggingProcessor)
-                .pipe(SizeReporter::every(1))
-                .gzip()
-                .write_back()))
-        .build_or_disabled()
+        .build();
+    dial9::recorder_or_disabled(writer, |t| { t.worker_threads(4); })
+        .with_task_tracking(true)
+        .with_custom_pipeline(|p| p
+            .pipe(MetadataTagger::new([
+                ("service", "custom-pipeline-demo"),
+                ("environment", "local"),
+            ]))
+            .pipe(LoggingProcessor)
+            .pipe(SizeReporter::every(1))
+            .gzip()
+            .write_back())
 })]
 async fn main() {
     println!("Running workload, traces under {TRACE_DIR}/");
