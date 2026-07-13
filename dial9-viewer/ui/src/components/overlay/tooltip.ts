@@ -1,26 +1,23 @@
-// components/overlay/tooltip.ts - the shared hover tooltip COMPONENT
-// (features/02 section V: V1 placeTooltip, V2 panel-owned suppression, V3
-// hide-on-drag/leave; the G16 lane-hover CONTENT). T24 owns the component
-// (placement, render template, transient-channel updates); T22 supplies the
-// hover DATA (LaneHoverData via assembleLaneHover) - this file never rescans
-// the trace, it only renders what the assembler produced.
+// The shared hover tooltip COMPONENT (placement, render template,
+// transient-channel updates). The hover DATA (LaneHoverData via
+// assembleLaneHover) comes from elsewhere - this file never rescans the trace,
+// it only renders what the assembler produced.
 //
-// THE 03 F3 FIX (this ticket's reason to exist): the legacy tooltip wrote
-// `tooltip.innerHTML` then IMMEDIATELY read `tooltip.offsetWidth/offsetHeight`
-// in placeTooltip (171 forced layouts / 183 mousemoves). Here:
+// AVOID MEASURE-AFTER-WRITE: a naive tooltip writes `tooltip.innerHTML` then
+// IMMEDIATELY reads `tooltip.offsetWidth/offsetHeight` to place it, forcing a
+// synchronous layout on every mousemove. Here:
 //   - `placeTooltip` is a PURE function of the cursor, CACHED dimensions, and
 //     the viewport - it never touches the DOM, so there is no measure-after-
 //     write on the hover path.
 //   - the cached dimensions are refreshed OUT OF BAND by a ResizeObserver
 //     (which reports geometry with no forced synchronous layout), never by a
 //     read that follows a write in the same frame.
-// A naive read-after-write reintroduces F3 and fails the hover-storm DoD.
 
 import { html, render, type TemplateResult } from "lit-html";
 import { formatHumanDuration } from "../../lib/trace/index.js";
 import type { LaneHoverData } from "../canvas/lanes/index.js";
 
-// ── Placement (V1; pure, cached-dimension - the F3 fix) ─────────────────
+// Placement (pure, cached-dimension - avoids measure-after-write).
 
 export interface TooltipDims {
   width: number;
@@ -44,11 +41,10 @@ export interface TooltipPlacement {
 
 /**
  * Position the tooltip near the cursor, clamped to the viewport on both axes,
- * flipping ABOVE the cursor when it would spill off the bottom (legacy
- * `placeTooltip`, viewer.html:1486-1493). PURE: `dims` are the CACHED tooltip
- * dimensions (never read here) - this is the read-after-write elimination that
- * kills 03 F3. `dy` is the vertical offset below the cursor (130 for the tall
- * lane tooltip, matching the legacy call site; 16 default for the rest).
+ * flipping ABOVE the cursor when it would spill off the bottom. PURE: `dims`
+ * are the CACHED tooltip dimensions (never read here) - this is the
+ * read-after-write elimination. `dy` is the vertical offset below the cursor
+ * (130 for the tall lane tooltip; 16 default for the rest).
  */
 export function placeTooltip(
   cursor: CursorPos,
@@ -62,7 +58,7 @@ export function placeTooltip(
   return { left: Math.max(8, tx), top: Math.max(8, ty) };
 }
 
-// ── Lane-hover content model (G16; pure, testable) ───────────────────────
+// Lane-hover content model (pure, testable).
 
 /** One label/value(/hint) unit within a tooltip row. */
 export interface TooltipSegment {
@@ -80,9 +76,9 @@ export interface TooltipFormatOpts {
   /** Format a trace-monotonic timestamp for the header (clock-mode aware). */
   formatTs(ns: number): string;
   /**
-   * Windowed-data coverage at the cursor (T17 carried obligation): a
-   * non-"complete" value adds an explicit truncation warning row so a
-   * partial/oversized window is never presented as whole data.
+   * Windowed-data coverage at the cursor: a non-"complete" value adds an
+   * explicit truncation warning row so a partial/oversized window is never
+   * presented as whole data.
    */
   coverage?: "complete" | "truncated" | "oversized";
 }
@@ -103,9 +99,8 @@ const STATE_LABEL: Record<LaneHoverData["state"], string> = {
 };
 
 /**
- * Build the G16 tooltip content rows from the assembled hover data, mirroring
- * the legacy handler (viewer.html:6420-6560) field-for-field. Pure over its
- * inputs (no DOM, no trace rescans) so the content mapping is Vitest-locked.
+ * Build the tooltip content rows from the assembled hover data. Pure over its
+ * inputs (no DOM, no trace rescans) so the content mapping is testable.
  */
 export function laneTooltipModel(
   data: LaneHoverData,
@@ -129,7 +124,7 @@ export function laneTooltipModel(
   rows.push([{ label: "State:", value: stateValue }]);
 
   // Scheduling / handoff (schedInfo): block_in_place handoff wins; else the
-  // active on-CPU ratio (suppressed while parked, matching the legacy clear).
+  // active on-CPU ratio (suppressed while parked).
   if (data.blockInPlace !== null) {
     rows.push([
       {
@@ -191,7 +186,7 @@ export function laneTooltipModel(
     }
   }
 
-  // Queue depths (I6 mirror; "-" for missing, matching the legacy readout).
+  // Queue depths ("-" for missing).
   const g = data.globalQueue;
   const l = data.localQueue;
   const total = (g ?? 0) + (l ?? 0);
@@ -219,7 +214,7 @@ export function laneTooltipModel(
     }
   }
 
-  // T17 carried obligation: surface a partial/oversized window explicitly.
+  // Surface a partial/oversized window explicitly.
   if (opts.coverage === "truncated") {
     rows.push([{ label: "Window:", value: "⚠️ partial data (window edge - not the full extent)" }]);
   } else if (opts.coverage === "oversized") {
@@ -229,7 +224,7 @@ export function laneTooltipModel(
   return rows;
 }
 
-// ── lit-html render (declarative; V1 - no measure-after-write) ───────────
+// lit-html render (declarative; no measure-after-write).
 
 /** Build the full lane-hover tooltip template from assembled hover data. */
 export function buildLaneTooltip(
@@ -239,7 +234,7 @@ export function buildLaneTooltip(
   return tooltipRowsTemplate(laneTooltipModel(data, opts));
 }
 
-/** Render tooltip rows as an escaped lit-html template (auto-escapes #587). */
+/** Render tooltip rows as an escaped lit-html template (auto-escapes). */
 export function tooltipRowsTemplate(rows: readonly TooltipRow[]): TemplateResult {
   return html`${rows.map(
     (row, i) => html`${i > 0 ? html`<br />` : ""}${row.map(
@@ -253,12 +248,12 @@ export function tooltipRowsTemplate(rows: readonly TooltipRow[]): TemplateResult
   )}`;
 }
 
-// ── Stateful element (dimension cache; the ResizeObserver F3 guard) ──────
+// Stateful element (dimension cache; the ResizeObserver guard).
 
 export interface TooltipHandle {
   /** Render `content` into the tooltip, show it, and place it at `cursor`. */
   show(content: TemplateResult, cursor: CursorPos, dy?: number): void;
-  /** Hide the tooltip (V3 hide-on-drag/leave). */
+  /** Hide the tooltip (hide-on-drag/leave). */
   hide(): void;
   /** The last cached dimensions (for tests/diagnostics). */
   dims(): TooltipDims;
@@ -275,11 +270,10 @@ function windowViewport(): Viewport {
 }
 
 /**
- * Create the single shared `#tooltip` element (V-section: one element, all
- * panels reuse it). Placement reads CACHED dims kept fresh by a
- * ResizeObserver, so no hover-path code ever measures the element after
- * writing it (03 F3). The observer geometry is delivered post-layout with no
- * forced synchronous reflow.
+ * Create the single shared `#tooltip` element (one element, all panels reuse
+ * it). Placement reads CACHED dims kept fresh by a ResizeObserver, so no
+ * hover-path code ever measures the element after writing it. The observer
+ * geometry is delivered post-layout with no forced synchronous reflow.
  */
 export function createTooltip(doc: Document = document): TooltipHandle {
   const el = doc.createElement("div");

@@ -1,9 +1,6 @@
-// components/canvas/lanes/hover.ts - lane hover-tooltip DATA assembly
-// (features/02 G16). T22 supplies the per-cursor hover data; T24 owns the
-// tooltip COMPONENT (placement, template, transient-channel updates). Kept
-// as a pure assembler so it is testable and so the tooltip never rescans:
-// every lookup is a binary-search / indexed query helper (03 F6), not a
-// linear per-mousemove scan of the legacy handler (viewer.html:6417-6562).
+// Lane hover-tooltip DATA assembly. A pure assembler so it is testable and so
+// the tooltip never rescans: every lookup is a binary-search / indexed query
+// helper, not a linear per-mousemove scan.
 
 import { findContainingSpan, findSpanAt } from "../../../lib/trace/query.js";
 import type {
@@ -15,7 +12,7 @@ import type {
   WorkerLane,
 } from "../../../types/trace.js";
 
-/** A worker's state at the hovered instant (G16). */
+/** A worker's state at the hovered instant. */
 export type WorkerHoverState = "active" | "parked" | "block_in_place" | "polling";
 
 export interface HoverPollInfo {
@@ -38,12 +35,12 @@ export interface HoverSpanInfo {
   parentName: string | null;
 }
 
-/** Structured hover readout the tooltip (T24) renders. */
+/** Structured hover readout the tooltip renders. */
 export interface LaneHoverData {
   workerId: number;
   ns: number;
   state: WorkerHoverState;
-  /** on-CPU ratio 0..1 for the active period at `ns` (G3), null if none/no CPU. */
+  /** on-CPU ratio 0..1 for the active period at `ns`, null if none/no CPU. */
   onCpuRatio: number | null;
   parkDurationNs: number | null;
   kernelSchedDelayNs: number | null;
@@ -53,7 +50,7 @@ export interface LaneHoverData {
   localQueue: number | null;
   activeTaskCount: number | null;
   span: HoverSpanInfo | null;
-  /** K8: the cursor becomes a pointer where a click opens Poll Detail (G15). */
+  /** The cursor becomes a pointer where a click opens Poll Detail. */
   hasClickableStack: boolean;
 }
 
@@ -75,7 +72,7 @@ export interface LaneHoverInput {
   hasTaskTracking: boolean;
 }
 
-/** Nearest sample to `ns` by |t - ns| via binary search (legacy findNearest). */
+/** Nearest sample to `ns` by |t - ns| via binary search. */
 function nearestByT<T extends { t: number }>(arr: readonly T[], ns: number): T | null {
   if (arr.length === 0) return null;
   let lo = 0;
@@ -114,12 +111,11 @@ function activeTaskCountAt(
 }
 
 /**
- * Assemble the hover readout for one worker at one timestamp (G16). Pure;
- * uses only indexed lookups (findSpanAt binary search over the worker's
+ * Assemble the hover readout for one worker at one timestamp. Pure; uses only
+ * indexed lookups (findSpanAt binary search over the worker's
  * parks/polls/actives, findContainingSpan for span detail, binary-search
- * nearest for queue depths). Mirrors the legacy precedence: active -> parked
- * -> block_in_place -> polling, with poll info layered on when a poll spans
- * the instant.
+ * nearest for queue depths). Precedence: active -> parked -> block_in_place ->
+ * polling, with poll info layered on when a poll spans the instant.
  */
 export function assembleLaneHover(input: LaneHoverInput): LaneHoverData {
   const { workerId, ns, spans } = input;

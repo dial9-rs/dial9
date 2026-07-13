@@ -1,24 +1,21 @@
-// components/overlay/crosshair.ts - the transient crosshair overlay
-// (features/02 section I: I1 overlay canvas, I2 mouse crosshair, I3 keyboard
-// cursor, I4 custom-event guide, I5 pinned-event marker). T24; ported from
-// viewer.html `renderCrosshair` (:4929-5022) under the new render rules.
+// The transient crosshair overlay: mouse crosshair, keyboard cursor,
+// custom-event guide, pinned-event marker.
 //
-// The overlay is a SEPARATE canvas on its OWN RAF channel: it subscribes to
-// the `transient` slice (+ viewport/selection/trace for line placement) and
-// redraws ONLY this canvas, never the full track column (03 F2 - a mousemove
-// updates transient, which notifies only transient subscribers; the lanes
-// subscribe to trace/viewport/selection, NOT transient, so a hover never
-// redraws them). The backing store resizes ONLY on geometry change
-// (lib/canvas/dpr, the 03 F3 fix - legacy reallocated it every frame).
+// The overlay is a SEPARATE canvas on its OWN RAF channel: it subscribes to the
+// `transient` slice (+ viewport/selection/trace for line placement) and redraws
+// ONLY this canvas, never the full track column (a mousemove updates transient,
+// which notifies only transient subscribers; the lanes subscribe to
+// trace/viewport/selection, NOT transient, so a hover never redraws them). The
+// backing store resizes ONLY on geometry change (lib/canvas/dpr).
 //
-// ALIGNMENT INVARIANT (A13/N4, extended to the overlay): the crosshair uses
-// the SHARED layout math - `time.nsToPanelX(ns)` from lib/canvas/layout, the
-// exact mapping the lanes/axis use - so a line at `ns` lands pixel-exact on
-// the poll/tick at `ns` below it. The overlay canvas spans the full column
-// width (x=0 at the label-gutter left edge), and nsToPanelX is already
-// LABEL_W-shifted, so `crosshairX(ns) === nsToPanelX(ns)` equals the lanes'
-// absolute-in-column x (LABEL_W + their canvas-local `nsToPanelX(ns) - labelW`)
-// by construction. Never compute a private x-mapping here.
+// ALIGNMENT INVARIANT: the crosshair uses the SHARED layout math -
+// `time.nsToPanelX(ns)` from lib/canvas/layout, the exact mapping the
+// lanes/axis use - so a line at `ns` lands pixel-exact on the poll/tick at `ns`
+// below it. The overlay canvas spans the full column width (x=0 at the
+// label-gutter left edge), and nsToPanelX is already LABEL_W-shifted, so
+// `crosshairX(ns) === nsToPanelX(ns)` equals the lanes' absolute-in-column x
+// (LABEL_W + their canvas-local `nsToPanelX(ns) - labelW`) by construction.
+// Never compute a private x-mapping here.
 
 import type { KeyboardSelection, TimePanelLayout } from "../../types/state.js";
 
@@ -42,7 +39,7 @@ export interface CrosshairContext {
   setLineDash(segments: number[]): void;
 }
 
-/** The pinned custom-event marker (I5): timestamp + a preformatted chip label. */
+/** The pinned custom-event marker: timestamp + a preformatted chip label. */
 export interface CrosshairPinnedEvent {
   timestamp: number;
   /** "name @ HH:MM:SS" style chip label, formatted by the caller (clock mode). */
@@ -51,7 +48,7 @@ export interface CrosshairPinnedEvent {
 
 /** Everything one overlay draw pass reads; pure over these inputs. */
 export interface CrosshairInput {
-  /** Shared ns<->x mapping (LABEL_W-shifted; the A13 invariant source). */
+  /** Shared ns<->x mapping (LABEL_W-shifted; the alignment invariant source). */
   time: TimePanelLayout;
   /** Overlay canvas CSS width (full column width, pw). */
   width: number;
@@ -59,44 +56,43 @@ export interface CrosshairInput {
   height: number;
   viewStart: number;
   viewEnd: number;
-  /** Mouse timestamp (I2); null hides the dashed crosshair. */
+  /** Mouse timestamp; null hides the dashed crosshair. */
   mouseNs: number | null;
-  /** Keyboard-selection cursor (I3); null when not selecting. */
+  /** Keyboard-selection cursor; null when not selecting. */
   keyboardSelection: KeyboardSelection | null;
-  /** Hovered custom-event timestamp for the orange guide (I4); null hides it. */
+  /** Hovered custom-event timestamp for the orange guide; null hides it. */
   hoverEventTs: number | null;
-  /** Pinned custom-event marker + label chip (I5); null when none pinned. */
+  /** Pinned custom-event marker + label chip; null when none pinned. */
   pinnedEvent: CrosshairPinnedEvent | null;
 }
 
 /**
  * The crosshair x (overlay-space CSS px) for a timestamp: the SHARED layout
  * mapping, unchanged. Equals the lanes' absolute-in-column x for the same ns
- * (the A13/N4 alignment invariant) - the whole point of not inventing a
- * private mapping here.
+ * (the alignment invariant) - the whole point of not inventing a private
+ * mapping here.
  */
 export function crosshairX(time: TimePanelLayout, ns: number): number {
   return time.nsToPanelX(ns);
 }
 
-/** True when `ns` is within the visible window (inclusive), the legacy guard. */
+/** True when `ns` is within the visible window (inclusive). */
 function inView(ns: number, viewStart: number, viewEnd: number): boolean {
   return ns >= viewStart && ns <= viewEnd;
 }
 
 /**
- * Draw all crosshair overlays into `ctx` (I2-I5), ported from the legacy
- * `renderCrosshair`. The context transform is assumed already DPR-scaled by
- * the caller (lib/canvas/dpr sizer), so coordinates are CSS px. Pure over its
- * inputs; the only mutable state is the canvas. Zero DOM reads (the 03 F3
- * contract - the overlay path never measures layout).
+ * Draw all crosshair overlays into `ctx`. The context transform is assumed
+ * already DPR-scaled by the caller (lib/canvas/dpr sizer), so coordinates are
+ * CSS px. Pure over its inputs; the only mutable state is the canvas. Zero DOM
+ * reads (the overlay path never measures layout).
  */
 export function drawCrosshair(ctx: CrosshairContext, input: CrosshairInput): void {
   const { width, height, viewStart, viewEnd } = input;
   ctx.clearRect(0, 0, width, height);
   if (width <= 0 || height <= 0 || viewEnd <= viewStart) return;
 
-  // I2. Mouse crosshair: dashed white vertical line.
+  // Mouse crosshair: dashed white vertical line.
   if (input.mouseNs !== null && inView(input.mouseNs, viewStart, viewEnd)) {
     const x = crosshairX(input.time, input.mouseNs);
     ctx.strokeStyle = "rgba(255,255,255,0.3)";
@@ -109,7 +105,7 @@ export function drawCrosshair(ctx: CrosshairContext, input: CrosshairInput): voi
     ctx.setLineDash([]);
   }
 
-  // I3. Keyboard-selection cursor: solid bright line at the moving cursor.
+  // Keyboard-selection cursor: solid bright line at the moving cursor.
   const kb = input.keyboardSelection;
   if (kb !== null && inView(kb.cursorNs, viewStart, viewEnd)) {
     const x = crosshairX(input.time, kb.cursorNs);
@@ -122,7 +118,7 @@ export function drawCrosshair(ctx: CrosshairContext, input: CrosshairInput): voi
     ctx.stroke();
   }
 
-  // I4. Custom-event hover guide: orange dashed line across all lanes.
+  // Custom-event hover guide: orange dashed line across all lanes.
   if (input.hoverEventTs !== null && inView(input.hoverEventTs, viewStart, viewEnd)) {
     const x = crosshairX(input.time, input.hoverEventTs);
     ctx.strokeStyle = "rgba(255,140,0,0.4)";
@@ -135,7 +131,7 @@ export function drawCrosshair(ctx: CrosshairContext, input: CrosshairInput): voi
     ctx.setLineDash([]);
   }
 
-  // I5. Pinned custom-event marker: persistent orange dashed line + label chip.
+  // Pinned custom-event marker: persistent orange dashed line + label chip.
   const pin = input.pinnedEvent;
   if (pin !== null && inView(pin.timestamp, viewStart, viewEnd)) {
     const mx = crosshairX(input.time, pin.timestamp);

@@ -1,16 +1,11 @@
-// components/canvas/lanes/click.ts - lane-click resolution semantics
-// (features/02 G13 select-task, G14 span auto-focus, G15 stack popup).
+// Lane-click resolution semantics: select-task, span auto-focus, stack popup.
 //
-// A PURE resolver: given the worker + timestamp a click resolved to (the
-// GESTURE - drag-vs-click discrimination, x->ns, y->worker - is T23's
-// interaction machine), it returns the selection-slice patch and whether to
-// open the Poll Detail. T23 dispatches the patch; T31 renders the popup.
-// Isolating it here makes the exact legacy toggle/focus semantics testable
-// without a DOM (the behavioral-differ contract on J2/J4).
+// A PURE resolver: given the worker + timestamp a click resolved to, it returns
+// the selection-slice patch and whether to open the Poll Detail. Isolating it
+// here makes the toggle/focus semantics testable without a DOM.
 //
-// Uses the T09 query helpers only (taskAt, findContainingSpan,
-// spanAncestryAt) - no O(allSpans) rescans beyond the one containing-span
-// lookup the legacy handler itself did (03 F6).
+// Uses the query helpers only (taskAt, findContainingSpan, spanAncestryAt) - no
+// O(allSpans) rescans beyond the one containing-span lookup.
 
 import { findContainingSpan, spanAncestryAt, taskAt } from "../../../lib/trace/query.js";
 import type { PollSpan, TracingSpan } from "../../../types/trace.js";
@@ -18,7 +13,7 @@ import type { SpanFocus } from "../../../types/state.js";
 
 /** Everything the resolver needs, pulled from LaneData + current selection. */
 export interface LaneClickInput {
-  /** Worker the click resolved to (T23's workerAtClientY equivalent). */
+  /** Worker the click resolved to. */
   workerId: number;
   /** Timestamp under the click (trace-monotonic ns). */
   ns: number;
@@ -40,29 +35,28 @@ export interface LaneClickResult {
   spanFocus: SpanFocus | null;
   /** New span-panel focus id (mirrors spanFocus.spanId; null clears). */
   focusedSpanId: string | null;
-  /** Always: any lane click clears the pinned custom-event marker (G13). */
+  /** Always: any lane click clears the pinned custom-event marker. */
   clearPinnedEvent: true;
-  /** Poll to open in Poll Detail when it has CPU/sched samples (G15), else null. */
+  /** Poll to open in Poll Detail when it has CPU/sched samples, else null. */
   openStackFor: PollSpan | null;
-  /** True when this click toggled OFF the already-selected task (G13). */
+  /** True when this click toggled OFF the already-selected task. */
   toggledOff: boolean;
 }
 
 /**
- * Resolve a lane click to its selection + popup effects (G13/G14/G15).
- * Mirrors viewer.html:5362-5453 exactly:
- *  - find the poll at `ns`; its task becomes the selection (G13);
+ * Resolve a lane click to its selection + popup effects:
+ *  - find the poll at `ns`; its task becomes the selection;
  *  - clicking the SAME task again clears task AND span focus (single un-click);
  *  - additively, walk the outermost span containing `ns` on this worker and
- *    focus it + its ancestor chain (G14);
- *  - open Poll Detail if the poll carries CPU or sched samples (G15).
+ *    focus it + its ancestor chain;
+ *  - open Poll Detail if the poll carries CPU or sched samples.
  */
 export function resolveLaneClick(input: LaneClickInput): LaneClickResult {
   const hit = taskAt(input.polls, input.ns);
   const poll = hit ? hit.poll : null;
   const foundTask = hit ? hit.taskId : null;
 
-  // G15: Poll Detail opens only when the poll has samples to show.
+  // Poll Detail opens only when the poll has samples to show.
   const openStackFor =
     poll &&
     ((poll.cpuSamples && poll.cpuSamples.length > 0) ||
@@ -70,7 +64,7 @@ export function resolveLaneClick(input: LaneClickInput): LaneClickResult {
       ? poll
       : null;
 
-  // G14: outermost containing span on this worker + ancestor chain.
+  // Outermost containing span on this worker + ancestor chain.
   let spanFocus: SpanFocus | null = null;
   const containing = findContainingSpan(input.allSpans, input.workerId, input.ns);
   if (containing) {
@@ -79,7 +73,7 @@ export function resolveLaneClick(input: LaneClickInput): LaneClickResult {
   }
   const focusedSpanId = spanFocus ? spanFocus.spanId : null;
 
-  // G13: toggle off when re-clicking the selected task; else adopt the new
+  // Toggle off when re-clicking the selected task; else adopt the new
   // selection (task may be null - clears task but keeps additive span focus).
   const togglingOff = foundTask !== null && foundTask === input.currentSelectedTaskId;
   if (togglingOff) {

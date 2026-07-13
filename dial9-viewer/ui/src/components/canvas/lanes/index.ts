@@ -1,15 +1,14 @@
-// components/canvas/lanes/index.ts - mount the worker-lanes track (T22).
+// Mount the worker-lanes track.
 //
 // Wires render.ts to the viewer store: subscribes to the slices the lanes
 // depend on (trace / viewport / selection) and redraws ONLY the lanes canvas
-// when one of them changes (03 F2 - a selection change redraws lanes, not the
-// span/cpu/queue panels; those are their own tickets with their own
-// subscriptions). Frame-invariant lane data (buildWorkerSpans etc.) is
-// computed through the store's derived() cache keyed by the `trace` slice, so
-// pan and selection never re-derive it (03 F5).
+// when one of them changes (a selection change redraws lanes, not the
+// span/cpu/queue panels, which own their own subscriptions). Frame-invariant
+// lane data (buildWorkerSpans etc.) is computed through the store's derived()
+// cache keyed by the `trace` slice, so pan and selection never re-derive it.
 //
-// The lanes canvas lives in the shell's track column (T21). This mount claims
-// the "lanes" track (track-renderers.ts) so the shell stops painting the
+// The lanes canvas lives in the shell's track column. This mount claims the
+// "lanes" track (track-renderers.ts) so the shell stops painting the
 // placeholder over it, then owns the canvas's DPR sizing + draw.
 
 import type { ViewerStore } from "../../../store/store.js";
@@ -48,7 +47,7 @@ export function mountLanes(trackColumn: HTMLElement, store: ViewerStore): Mounte
   const disposeLegend = mountLanesLegend(trackColumn);
 
   // Frame-invariant lane data, recomputed only when the trace slice is
-  // replaced (F5). Non-null only once a trace has loaded.
+  // replaced. Non-null only once a trace has loaded.
   const laneData = store.derived(["trace"], (s): LaneData | null =>
     s.trace.trace ? deriveLaneData(s.trace.trace) : null,
   );
@@ -80,8 +79,8 @@ export function mountLanes(trackColumn: HTMLElement, store: ViewerStore): Mounte
     const track = TRACKS.find((t) => t.id === LANES_TRACK_ID);
     if (!track) return;
 
-    // Batch the column measure once per frame (F3): the shell reads layout in
-    // the same tick; here we read our own canvas host's width + scrollbar.
+    // Batch the column measure once per frame: the shell reads layout in the
+    // same tick; here we read our own canvas host's width + scrollbar.
     const dpr = (typeof devicePixelRatio === "number" ? devicePixelRatio : 1) || 1;
     const pw = trackColumn.clientWidth;
     const scrollbarW = Math.max(0, trackColumn.offsetWidth - trackColumn.clientWidth);
@@ -95,7 +94,7 @@ export function mountLanes(trackColumn: HTMLElement, store: ViewerStore): Mounte
     const drawW = geometry.time.drawW;
     if (drawW <= 0) return;
 
-    // Own the canvas's DPR backing store (resize only on geometry change, F3).
+    // Own the canvas's DPR backing store (resize only on geometry change).
     if (sizer === null || sizerCanvas !== canvas) {
       sizer = createCanvasSizer<CanvasRenderingContext2D>(canvas);
       sizerCanvas = canvas;
@@ -130,8 +129,8 @@ export function mountLanes(trackColumn: HTMLElement, store: ViewerStore): Mounte
       dimmer,
     };
     // Reserve the overlaid legend's height at the bottom so worker rows never
-    // hide under it (#8). Measured live (the legend wraps to more lines at
-    // narrow widths); +6 for its bottom offset + a small gap.
+    // hide under it. Measured live (the legend wraps to more lines at narrow
+    // widths); +6 for its bottom offset + a small gap.
     const legendEl = trackColumn.querySelector<HTMLElement>(".d9-lanes-legend");
     const bottomInset = legendEl ? legendEl.offsetHeight + 6 : 0;
     renderLanes(ctx, input, {

@@ -1,8 +1,7 @@
-// components/canvas/lanes/data.ts - the once-per-trace lane derivation
-// (T22; 03 F5: frame-invariant data is derived once and cached, never
-// recomputed per pan/selection frame). Ported from viewer.html's trace-load
-// setup (~:1976-2093): worker ids, reconstructed spans, per-worker queue
-// series, wake indices, and the span-id index the G7 highlight reads.
+// The once-per-trace lane derivation: frame-invariant data derived once and
+// cached, never recomputed per pan/selection frame. Produces worker ids,
+// reconstructed spans, per-worker queue series, wake indices, and the span-id
+// index the highlight reads.
 //
 // This is the DERIVED input to render.ts. The mount wires it through the
 // store's derived() cache keyed by the `trace` slice, so it recomputes only
@@ -29,25 +28,25 @@ export interface LaneData {
   workerIds: number[];
   /** Reconstructed poll/park/active spans per worker, CPU samples attached. */
   workerSpans: Record<number, WorkerLane>;
-  /** Per-worker local-queue samples, sorted by t (G12). */
+  /** Per-worker local-queue samples, sorted by t. */
   workerQueueSamples: Record<number, { t: number; local: number }[]>;
-  /** Wake events indexed by target worker (G11). */
+  /** Wake events indexed by target worker. */
   wakesByWorker: Record<number, WorkerWake[]>;
-  /** span id -> every span instance sharing it (G7 highlight lookup, no scan). */
+  /** span id -> every span instance sharing it (highlight lookup, no scan). */
   spansById: Map<string, TracingSpan[]>;
-  /** All completed spans, start-sorted (G14 containing-span lookup). */
+  /** All completed spans, start-sorted (containing-span lookup). */
   allSpans: TracingSpan[];
-  /** span id -> a single span, for the G14 ancestor walk. */
+  /** span id -> a single span, for the ancestor walk. */
   spanByIdSingle: Map<string, TracingSpan>;
   hasCpuTime: boolean;
   hasSchedWait: boolean;
   hasTaskTracking: boolean;
 }
 
-/** The distinct worker ids in a trace, in runtime-group render order.
- *  Mirrors viewer.html :1976-1987 (scan non-queue/non-wake events for the
- *  worker set, then reorder to match the runtime groups so grouped lanes
- *  render in group order; single-runtime traces stay simple-sorted). */
+/** The distinct worker ids in a trace, in runtime-group render order: scan
+ *  non-queue/non-wake events for the worker set, then reorder to match the
+ *  runtime groups so grouped lanes render in group order; single-runtime
+ *  traces stay simple-sorted. */
 export function deriveWorkerIds(trace: ParsedTrace): number[] {
   const set = new Set<number>();
   for (const e of trace.events) {
@@ -82,7 +81,7 @@ export function deriveLaneData(trace: ParsedTrace): LaneData {
   }
 
   // Span-id index: id -> every instance (recycled ids highlight every
-  // instance, matching the legacy full-allSpans scan exactly but O(1) lookup).
+  // instance, but O(1) lookup instead of a full allSpans scan).
   const spanData = buildSpanData(trace.customEvents);
   const spansById = new Map<string, TracingSpan[]>();
   for (const s of spanData.allSpans) {

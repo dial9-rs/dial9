@@ -1,22 +1,21 @@
-// components/overlay/index.ts - the transient overlay controller (T24): wires
-// the crosshair canvas, hover tooltip, and at-cursor readout to the viewer
-// store's `transient` channel. This is the ONE place the hover path lives:
+// The transient overlay controller: wires the crosshair canvas, hover tooltip,
+// and at-cursor readout to the viewer store's `transient` channel. This is the
+// ONE place the hover path lives:
 //
-//   pointer mousemove ─▶ store.update("transient", {mouseNs, atCursor})  (reads
+//   pointer mousemove -> store.update("transient", {mouseNs, atCursor}) (reads
 //     column/lane geometry ONCE at the start of a fresh event - a clean read,
 //     never after a write - then dispatches; no synchronous DOM write here)
-//   store transient tick ─▶ drawFrame (RAF-coalesced): draw the crosshair
+//   store transient tick -> drawFrame (RAF-coalesced): draw the crosshair
 //     overlay, render the tooltip from CACHED dims, mirror the readout. On a
 //     hover-only frame the shell does NOT run (it never subscribes to
 //     `transient`), so drawFrame is the sole subscriber and its geometry reads
-//     precede all its writes: ZERO forced synchronous layout (the 03 F3 fix).
+//     precede all its writes: ZERO forced synchronous layout.
 //
-// SEAM with T23 (pointer/keyboard state machine, not yet landed): T24 owns the
-// HOVER path only (mouseNs + tooltip + readout). Drag/zoom gestures and the
-// keyboard-selection cursor are T23's - they populate `transient.drag` /
-// `transient.keyboardSelection`, which the crosshair already reads. When a
-// drag is active this controller suppresses the tooltip + mouse crosshair
-// (legacy V3), so the two never fight.
+// This controller owns the HOVER path only (mouseNs + tooltip + readout).
+// Drag/zoom gestures and the keyboard-selection cursor populate
+// `transient.drag` / `transient.keyboardSelection`, which the crosshair reads.
+// When a drag is active this controller suppresses the tooltip + mouse
+// crosshair, so the two never fight.
 
 import type { ViewerStore } from "../../store/store.js";
 import type { StoreState, TimePanelLayout } from "../../types/state.js";
@@ -98,7 +97,7 @@ export function mountOverlay(
   store: ViewerStore,
 ): MountedOverlay {
   // Frame-invariant hover data, recomputed only when the trace slice is
-  // replaced (03 F5). Null until a trace loads.
+  // replaced. Null until a trace loads.
   const overlayData = store.derived(["trace"], (s): OverlayData | null =>
     s.trace.trace ? deriveOverlayData(s.trace.trace) : null,
   );
@@ -121,7 +120,7 @@ export function mountOverlay(
       canvas = root.ownerDocument.createElement("canvas");
       canvas.className = OVERLAY_CLASS;
       canvas.setAttribute("aria-hidden", "true");
-      // Non-interactive overlay (I1): clicks fall through to the lanes.
+      // Non-interactive overlay: clicks fall through to the lanes.
       trackColumn.appendChild(canvas);
     }
     if (canvas !== overlayCanvas) {
@@ -138,14 +137,14 @@ export function mountOverlay(
 
     // ALL reads first (geometry), THEN all writes: on a hover-only frame this
     // subscriber is alone, so its reads precede every write in the frame and
-    // force no layout (03 F3).
+    // force no layout.
     const geom = columnGeometry(trackColumn, viewStart, viewEnd);
     const dpr = (typeof devicePixelRatio === "number" ? devicePixelRatio : 1) || 1;
 
     const axis = deriveAxisInputs(state);
     const formatTs = (ns: number): string => fmtAxisTick(axis, ns, false);
 
-    // ── writes from here down ───────────────────────────────────────────
+    // writes from here down
     if (sizer === null) return;
     const ctx = sizer.ensure(geom.pw, geom.scrollHeight, dpr) as unknown as CrosshairContext;
 
@@ -164,13 +163,13 @@ export function mountOverlay(
         : null,
     });
 
-    // At-cursor readout (the S4 contract): the overlay's job is to POPULATE
-    // `transient.atCursor` (computeAtCursorReadout, above); T31's persistent
-    // inspector RENDERS it in one place, so the old inspector-slot stub no
-    // longer runs here. renderAtCursorStub stays exported for its own test.
+    // At-cursor readout: the overlay's job is to POPULATE `transient.atCursor`
+    // (computeAtCursorReadout); the persistent inspector RENDERS it in one
+    // place, so no inspector-slot stub runs here. renderAtCursorStub stays
+    // exported for its own test.
 
-    // Tooltip (V-section): rebuilt only on a fresh mousemove; hidden on
-    // mouseleave/drag. Uses CACHED dims (no measure-after-write).
+    // Tooltip: rebuilt only on a fresh mousemove; hidden on mouseleave/drag.
+    // Uses CACHED dims (no measure-after-write).
     if (hidePending) {
       tooltip.hide();
       hidePending = false;
@@ -204,11 +203,11 @@ export function mountOverlay(
     }
   }
 
-  // ── Pointer wiring (hover only; drag/zoom are T23's) ────────────────────
+  // Pointer wiring (hover only).
 
   function onMouseMove(e: MouseEvent): void {
     const state = store.getState() as StoreState;
-    // V3: suppress the tooltip + mouse crosshair while a drag is in flight.
+    // Suppress the tooltip + mouse crosshair while a drag is in flight.
     if (state.transient.drag !== null) {
       if (state.transient.mouseNs !== null) store.update("transient", { mouseNs: null, atCursor: null });
       pendingTooltip = null;

@@ -1,15 +1,11 @@
-// components/canvas/lanes/legend.ts - the worker-lanes legend (features/02
-// G19), with the 04 F3 amendment: the legend must cover EVERY in-lane mark,
-// including the "q:NN" local-queue label and the marks the legacy toolbar
-// legend omitted (block_in_place, open-ended poll, wake, sched, CPU sample).
+// The worker-lanes legend: it must cover EVERY in-lane mark, including the
+// "q:NN" local-queue label and marks like block_in_place, open-ended poll,
+// wake, sched, and CPU sample.
 //
-// Legacy G19 was a non-interactive toolbar row (viewer.html:6646-6670). The
-// unified column has no legacy toolbar; the legend is a compact, non-
-// interactive (pointer-events:none) ribbon overlaid on the lanes track's
-// canvas wrap. It is built imperatively into the statically-templated wrap
-// (the wrap holds only a static <canvas>, no lit-html child binding), so the
-// shell's declarative re-renders do not clobber it (same technique the toast
-// region uses).
+// The legend is a compact, non-interactive (pointer-events:none) ribbon
+// overlaid on the lanes track's canvas wrap. It is built imperatively into the
+// statically-templated wrap (the wrap holds only a static <canvas>, no lit-html
+// child binding), so the shell's declarative re-renders do not clobber it.
 
 const LEGEND_CLASS = "d9-lanes-legend";
 
@@ -23,8 +19,8 @@ export interface LegendEntry {
 }
 
 /**
- * The legend contract (F3): every visual the lanes draw must be explained.
- * Ordered to match a reader scanning a lane top -> bottom.
+ * The legend contract: every visual the lanes draw must be explained. Ordered
+ * to match a reader scanning a lane top -> bottom.
  */
 export const LANES_LEGEND: readonly LegendEntry[] = [
   { swatch: "linear-gradient(90deg,#0a1a3a,#00bcd4,#ff9800,#f44336)", label: "poll (short -> long)", shape: "gradient" },
