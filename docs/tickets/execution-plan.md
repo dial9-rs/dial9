@@ -118,14 +118,23 @@ so T24/T26/T28 all flagged the T17-audit path missing (handled it from types
 instead). Copied reviews/ onto integration/chunk-1 (commit 3e4b03f) so
 T27/T29/T30 can read it. LESSON: anything an implementer is told to read must be
 on integration/chunk-1, not just the planning branch.
-IN FLIGHT (cap 3, off 3e4b03f): T23 (lane pointer+keyboard gestures - T22 ships
+T30 (task detail) MERGED into integration/chunk-1 2026-07-13 (tip bdaa422, clean
+merge - base==tip, additive only; tsc clean; full-suite validation folded into
+the next batch gate). T30 note: caught a ticket-vs-code discrepancy - the waker-
+hover field lives in the `selection` slice (selection.hoveredWakerTaskId), NOT
+`transient` as the prose said; dispatched to the field the merged lanes actually
+consume (state.d.ts:154, lanes/index.ts). Good judgment, documented.
+IN FLIGHT (cap 3, off bdaa422): T23 (lane pointer+keyboard gestures - T22 ships
 resolvers only, T23 owns the listener), T27 (custom events track - dispatches
-transient.hoverEvent/selection.pinnedEvent for T24 to draw), T30 (task detail
-track + derivation - dispatches transient.hoveredWakerTaskId for T22 G8; exposes
-derived data for T31's textual tab).
-QUEUED: T29 (queue track, needs T22+T24 - held for next slot) -> then T31
-(inspector, needs T24+T30) -> T33/T34/T35/T36/T37 -> chunk 3 (T40/T41/T44/T46)
--> T39 (legacy removal) last.
+hoverEvent/pinnedEvent for T24 to draw), T29 (queue track + S6 zero-global-
+baseline fix; M6 via T24 at-cursor, M7/M8 dispatch selection).
+QUEUED: T31 (inspector, needs T24+T30 both merged; HELD until T27 lands so the
+event-selection contract is in-tree) -> T33/T34/T35/T36/T37 -> chunk 3
+(T40/T41/T44/T46) -> T39 (legacy removal) last.
+KNOWN STRAGGLER: tests/core/all_skills_snippets.test.ts (+ heavy worker_threads/
+gunzip parse suites) time out under full-parallel load, pass in isolation
+(flagged in vite.config). NOT a regression - re-run in isolation to confirm when
+a batch gate reports it failing.
 
 **Audit log:**
 - T22 worker lanes track (CORE viz): MERGED into integration/chunk-1 2026-07-13
