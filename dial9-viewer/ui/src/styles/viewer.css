@@ -52,6 +52,20 @@ body {
 }
 .d9-file-name { font-size: 0.85em; color: var(--d9-fg); }
 .d9-file-meta { font-size: 0.8em; color: var(--d9-fg-muted); }
+/* C1a: trace-embedded service/host identity chips (T45). */
+.d9-file-identity { display: inline-flex; align-items: center; gap: 6px; }
+.d9-file-identity-item {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 4px;
+    font-size: 0.8em;
+    color: var(--d9-fg);
+    padding: 0 7px;
+    border: 1px solid var(--d9-border);
+    border-radius: 999px;
+    white-space: nowrap;
+}
+.d9-file-identity-key { color: var(--d9-fg-muted); }
 .d9-toolbar-spacer { flex: 1; }
 .d9-toolbar-slot {
     display: inline-flex;
