@@ -59,6 +59,8 @@ function initialViewerState(): StoreState {
     poi: { filter: "sched", sortKey: "duration", sortDir: "desc", index: -1 },
     uiPrefs: {
       panelCollapsed: { spans: false, events: false, cpu: false, queue: false },
+      trackOrder: [],
+      collapsed: {},
       sidebarWidth: 320,
       selectedSpanNames: new Set(),
       selectedEventNames: new Set(),

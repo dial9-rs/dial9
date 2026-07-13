@@ -1,114 +1,95 @@
-# T35 - Minimap + status bar - HANDOFF
+# T36 - Track management (collapse, reorder) - HANDOFF
 
-(Supersedes the T34 HANDOFF inherited through the branch chain.)
+(Supersedes the T33 HANDOFF inherited through the branch chain.)
 
 ## STATUS: DONE (DoD met, all gates green)
 
-Branch `ticket/T35-minimap-status` (worktree), based on `integration/chunk-1`
-@ `aeb724b` (T34 merged). Two new persistent viewer surfaces landed: the
-overview minimap and the status bar. No blockers.
+Per-track collapse + drag-reorder under the unified track column, persisted to
+`uiPrefs` and surviving reload. Section O's fold BEHAVIOR (per-surface show/hide
++ persistence) is preserved; the one-line-fold PRESENTATION stays retired by S1.
+Pinning is OUT (as fenced). Per-track render delegation is UNCHANGED.
 
-## COMPLETED (commits)
+## COMPLETED (commits on `ticket/T36-track-mgmt`)
 
-- `7aac7b1` feat(T35): minimap density/coverage/geometry MODEL (pure, tier-1
-  sources) + tests.
-- `054ebac` feat(T35): minimap canvas + status bar COMPONENTS, shell/main
-  wiring, viewer.css, POI derivation, tests.
-- `0efc267` docs(T35): inventory section X (additions) + ledger + a T18
-  `coverageSignal` fallback test.
+- `ae4f3f5` feat(viewer): declare uiPrefs.trackOrder + collapsed (T36 schema)
+- `5ea10a0` feat(viewer): per-track collapse + drag-reorder, persisted (T36)
+- `5efb230` test(viewer): track collapse/reorder/persist + reload round-trip
+- `e8dfad5` docs(T36): amend section O for track collapse/reorder + ledger
 
-## WHAT LANDED (against the ticket)
+## WHAT LANDED
 
-Owns: NEW inventory rows (ledger "additions"). Amendments: S8, S3(surface),
-F7(status), 2.8 progress feedback.
+- **Schema** (`src/types/state.d.ts`): `uiPrefs.trackOrder: readonly string[]` +
+  `uiPrefs.collapsed: Readonly<Record<string, boolean>>`, additive (T25/T33/T26
+  precedent). `panelCollapsed` left as a superseded no-op holder. Full-slice
+  fixtures kept complete (`exhaustive.test.ts`, `store.test.ts`), plus the
+  viewer store's resting default (`pages/viewer/store.ts`: empty order, nothing
+  collapsed = the S1 "all surfaces visible" default).
+- **Mechanism** (`src/pages/viewer/track-management.ts`, NEW - owned): the
+  manageable set (cpu/queue/spans/events = section-O scope; timeline/lanes/
+  task-detail pinned), order resolution robust to stale/partial orders,
+  swap-reorder (`drop = swap position`), collapse predicate + `COLLAPSED_TRACK_H`
+  (24, legacy O1), store actions (toggle/reorder with no-thrash guards), and
+  localStorage persistence (`dial9.viewer.trackPrefs` JSON blob; hydrate on boot
+  + persist on change; try/catch in-memory fallback mirroring legacy).
+- **Column integration** (`tracks.ts`): ordered + collapse-aware visible list;
+  `repeat` keyed by track id so a reordered canvas MOVES with its track (no
+  cross-track pixel bleed); shell-owned manage wrapper (caret + grip in a
+  reserved label-gutter strip, pointer-events:none except the two controls so
+  the spans copy buttons stay live); `sizeTracks` skips a collapsed track and
+  re-paints from CURRENT windowed state on re-expand (carried T17-audit 6-7).
+- **Wiring** (`shell.ts`, `main.ts`): thread actions into the track column;
+  hydrate before first paint + mount the persistence subscriber (dispose on
+  unload). `viewer.css`: caret/grip strip + collapsed body-hide (legacy
+  label-only). Per-track render delegation (the id-keyed branches) unchanged.
+- **Docs**: `features/02` section O rewritten (O1-O7 amended inline, O8 added)
+  with an AMENDED banner; ledger entries for O1/O2/O3, O4, O5/O6/O7, O8, and the
+  schema additions.
 
-Minimap (`src/pages/viewer/minimap.ts`, `minimap-model.ts`, `minimap-poi.ts`):
-- Fills the shell's `.d9-minimap` host with a canvas overview of the WHOLE
-  trace range + a draggable/clickable viewport box (04 S8 position context).
-- Density from TIER-1 sources only (architecture 2.8), precedence: aggregate
-  density on coverage `full` -> listing-metadata (T17 segment extents + gzip
-  sizes) -> whole-trace event histogram -> flat band. Falls back off a
-  `partial`/`none` aggregate (never presents a partial density as complete).
-- Per-bin coverage distinguishes FETCHED (`parsed`) from tier-1-only
-  (`listed`/`fetching`/`evicted`/`oversized`) with the same residency mapping
-  as `overlay/readout.coverageAt`; a "partial" badge surfaces tier-1-only
-  regions so an unfetched tail is never rendered as empty/complete (T17-audit
-  notes 6-7 - the headline correctness requirement).
-- POI ticks from the frozen detectors (`filterPointsOfInterest` via
-  `deriveMinimapPois`) - the SAME source as T33's rail, no code dependency.
-- Drag scrubs / click jumps, dispatching store viewport updates (never a direct
-  render, F2); ArrowLeft/Right keyboard pan on the focusable region.
+## DoD
 
-Status bar (`src/pages/viewer/status-bar.ts`): selection line + explicit clear
-affordance (04 F7), view range + duration, segment fetch/parse progress from
-the segments slice (2.8 feedback hard edge; spinner while fetching), the T19
-copy-link button (04 S3 surface clause), and persistent key hints.
+- check: collapse/reorder/persist walked -> Vitest
+  `src/pages/viewer/track-management.test.ts` (23 cases): manageable set, order
+  resolution (empty/permute/robust-to-stale), collapse predicate, swap-reorder,
+  store actions, collapse height + re-expand-membership (T17 obligation).
+- check: uiPrefs survives reload (Vitest + one browser check) -> Vitest
+  "persistence: uiPrefs survives reload" (save -> fresh store -> hydrate restores
+  order + collapse; + malformed-blob and storage-blocked fallback). BROWSER
+  CHECK: manual (see REMAINING) - node has no DOM/localStorage; the persistence
+  logic and store actions are fully unit-tested and the wiring is bundled
+  (verified: `d9-track-manage`/`trackPrefs`/`d9-track-caret`/`d9-track-grip`
+  present in `dist/assets/new-viewer-*.js` and `.css`).
+- check: O rows' amended semantics documented in-diff -> `features/02` section O
+  + `docs/tickets/ledger.md`.
 
-Shell (`shell.ts`): the `.d9-minimap` + `.d9-status` slots became empty ARIA
-hosts the two components fill imperatively (toast/legend technique - the
-declarative shell re-render never orphans their children); exposed as
-`minimapRegion` / `statusRegion`. `main.ts` mounts + disposes both. Edits kept
-localized to the two slot regions + wiring (hot-merge-point discipline).
+## EVIDENCE (gate bar)
 
-## DoD CHECKS
+- `npx tsc --noEmit` -> exit 0.
+- `npm run test` (full Vitest, single process) -> Test Files 87 passed | 1
+  skipped; Tests 1392 passed | 1 expected-fail | 11 skipped. No unexpected
+  failures. (The 1 expected-fail is the pre-existing `.fails` flamegraph-search
+  checkpoint, unrelated. Known stragglers - `all_skills_snippets` + heavy
+  worker_threads suites - passed in this run; re-run in isolation if they ever
+  time out under full-parallel load.)
+- `npm run build` -> clean (`built in ~0.5s`, 17 static items copied).
+- `cargo build -p dial9-viewer` -> Finished (rust-embed picks up the rebuilt
+  `dist/`).
 
-- check: minimap navigates a multi-segment trace whose tail is UNFETCHED
-  (tier-1-only) -> `minimap-model.test.ts` ("multi-segment tail UNFETCHED
-  (headline DoD)") + `minimap.test.ts` ("navigating into an UNFETCHED tail"):
-  the range spans the full 10-segment listing, the tail bins are `truncated`
-  (not empty/complete), and a click at the tail moves the viewport into a still
-  `listed` (unfetched) segment. PASS.
-- check: drag/click behavioral tests -> `minimap-model.test.ts` (pure
-  click/drag/clamp math) + `minimap.test.ts` (store-dispatch behavioral:
-  click-center, drag-scrub keeping the grabbed point under the pointer,
-  edge-clamp). PASS.
-- check: status bar reflects selection/range/progress (Vitest on store
-  bindings) -> `status-bar.test.ts` (selectionState F7, segmentProgress 2.8,
-  statusViewModel range+duration). PASS.
-- check: new rows walked by T12 -> inventory section X (X1-X14) added with
-  `file:line`/`data-*` anchors; T12 does not yet exist as a running tool
-  (chunk-1), so the rows are recorded for its walk, not executed here.
+## REMAINING (manual, not blocking)
 
-## GATE EVIDENCE (worktree `dial9-viewer/ui`)
+- **One browser check** (DoD): in a real browser on `?ui=new`, collapse a track
+  via the caret, drag-reorder two tracks via the grip, reload the page, and
+  confirm the order + collapse state persist. The mechanism is fully unit-tested
+  (round-trip) and bundled; this is the DOM-drag confirmation the node env can't
+  perform.
 
-- `npx tsc --noEmit` -> exit 0 (TSC_OK).
-- `npm run test` (full Vitest, includes `check:boundary` pretest = OK) ->
-  `Test Files 87 passed | 1 skipped (88)`,
-  `Tests 1377 passed | 1 expected fail | 11 skipped (1389)`. Zero unexpected
-  failures; the known straggler did not time out this run. The 38 T35 tests
-  are in minimap-model (23), minimap-poi (4), minimap (5), status-bar (6).
-- `npm run build` -> clean (`built in ~0.4s`, static-copy 17 items; the only
-  warnings are the pre-existing trace_parser.js `fs/os/child_process`
-  externalization notes).
-- `cargo build -p dial9-viewer` -> Finished (rust-embed picks up `ui/dist`).
+## BLOCKERS / QUESTIONS
 
-## SCOPE BOUNDARIES / NOTES (not blockers)
+None. No STOP-gate hit.
 
-1. AGGREGATE DENSITY (T18) is a SEAM, not a live fetch. The viewer has no
-   populated aggregate source wired (the dev-server has no agg context per the
-   shared-decisions aggregation note; the T17 segment window itself is also not
-   yet wired into the live viewer - both are chunk-2 integrations, consumed as
-   OUTPUTS here). `mountMinimap` accepts an optional `aggregate()` supplier
-   (defaults to null); the density model implements + tests the documented T18
-   `full` -> trust / `partial`|`none` -> fall-back-to-listing rule, exercised
-   with the real `coverageSignal` classifier. A later scope-aware ticket feeds
-   real aggregates through the seam without touching the component. This is the
-   boundary the ticket itself draws ("consume T18 outputs"); not a gate.
-2. S3 URL-STATE remains T19's. The copy-link button copies the live URL and
-   exposes a `beforeCopyLink` flush seam; the viewer's view-state<->URL sync
-   (`bindViewStateToUrl`) is T19's clause and is not wired here (the ticket
-   assigns only the copy-link SURFACE to T35).
-3. Minimap navigation dispatches viewport updates DIRECTLY and is not recorded
-   in T23's private zoom-history stack (so `z` does not undo a minimap pan).
-   The ticket does not require it; recording would need exposing T23's
-   `ViewportActions`. Possible future enhancement.
-4. Browser-driven halves (canvas pixel rendering, real DOM pointer wiring, axe)
-   are deferred to T12 per the established chunk-2 pattern (e.g.
-   spans-track.test.ts). Covered here at the pure-model + store-dispatch level.
+## NOTES (scope-fence, note-only)
 
-## FILES
-
-New: `src/pages/viewer/minimap.ts`, `minimap-model.ts`, `minimap-poi.ts`,
-`status-bar.ts` (+ their `.test.ts`). Edited: `src/pages/viewer/shell.ts`,
-`main.ts`, `src/styles/viewer.css`, `docs/ui-inventory/features/02-viewer-html.md`
-(section X), `docs/tickets/ledger.md` (3 addition lines).
+- `uiPrefs.panelCollapsed` (legacy `Record<FoldablePanelKind, boolean>`) is now a
+  superseded no-op holder (no live surface reads it; the new `collapsed` field is
+  the live track-collapse state). Left in place per the additive scope fence
+  rather than removed; noted in the schema doc + ledger. A future cleanup could
+  drop it once nothing depends on it.

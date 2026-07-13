@@ -34,6 +34,10 @@ import {
 import { createEventsTrack, type EventsTrackController } from "./events-track.js";
 import { createToolbar, type ToolbarController, type ToolbarDeps } from "./toolbar.js";
 import { createIssuesRail, type IssuesRailController } from "./issues-rail.js";
+import {
+  createTrackManageActions,
+  type TrackManageActions,
+} from "./track-management.js";
 import type { KeyBinding } from "../../lib/interact/keyboard.js";
 
 /** Callbacks the shell chrome needs from the page entry. */
@@ -89,6 +93,9 @@ function viewModel(state: StoreState): ShellViewModel {
     viewEnd,
     axis: deriveAxisInputs(state),
     cpu: deriveCpuInputs(state),
+    // Track management (T36): the order + collapse map the track column reads.
+    trackOrder: state.uiPrefs.trackOrder,
+    collapsed: state.uiPrefs.collapsed,
   };
 }
 
@@ -146,6 +153,7 @@ function shellTemplate(
   deps: ShellDeps,
   toolbar: ToolbarController,
   rail: IssuesRailController,
+  trackActions: TrackManageActions,
   spansTrack: SpansTrackController,
   taskDetailTrack: TaskDetailTrackController,
   eventsTrack: EventsTrackController,
@@ -201,7 +209,14 @@ function shellTemplate(
       >
         ${hintChipsTemplate()}
         ${vm.hasTrace
-          ? tracksTemplate(vm, spansTrack, taskDetailTrack, eventsTrack, queueTrack)
+          ? tracksTemplate(
+              vm,
+              trackActions,
+              spansTrack,
+              taskDetailTrack,
+              eventsTrack,
+              queueTrack,
+            )
           : emptyStateTemplate()}
       </main>
       ${inspectorTemplate()}
@@ -278,6 +293,10 @@ export function mountShell(
   // wired controllers filling the toolbar slots + the body's left column.
   const toolbar = createToolbar(store, deps);
   const rail = createIssuesRail(store);
+  // Track management (T36): collapse/reorder dispatchers the caret + grip in
+  // the track column bind to. Persistence (hydrate on boot + save on change)
+  // is wired at the page entry (main.ts) so the store itself stays pure.
+  const trackActions = createTrackManageActions(store);
 
   function renderPass(): void {
     const state = store.getState() as StoreState;
@@ -289,6 +308,7 @@ export function mountShell(
         deps,
         toolbar,
         rail,
+        trackActions,
         spansTrack,
         taskDetailTrack,
         eventsTrack,

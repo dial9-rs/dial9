@@ -229,8 +229,35 @@ export interface PoiSlice {
  * (T07/T08), not encoded here.
  */
 export interface UiPrefsSlice {
-  /** Foldable-panel collapsed state (localStorage-backed, 02 O4). */
+  /**
+   * Legacy foldable-panel collapsed state (02 O4). SUPERSEDED by `collapsed`
+   * (T36): the one-line-fold presentation is retired by S1 and per-track
+   * collapse now lives in `collapsed` (keyed by any track id, not just the
+   * four foldable panels). Retained as an additive no-op holder so existing
+   * S1 defaults are undisturbed; no live surface reads it.
+   */
   panelCollapsed: Readonly<Record<FoldablePanelKind, boolean>>;
+  /**
+   * Track order for the unified column (T36; amended section O). The user
+   * drag-reorders the manageable analysis tracks (cpu/queue/spans/events) by
+   * the track-label grip; this is their resulting id order. Empty = the
+   * catalogue order (track-layout.ts TRACKS). Resolution is robust to unknown
+   * or missing ids, so an order stored before a new track was added still
+   * resolves (the new track appears in its catalogue slot). Persisted to
+   * localStorage (dial9.viewer.trackPrefs) so it survives reload.
+   */
+  trackOrder: readonly string[];
+  /**
+   * Per-track collapsed state (T36; amends O1/O4 - the fold BEHAVIOR
+   * "per-surface show/hide with persistence" survives, the one-line-fold
+   * PRESENTATION is retired by S1). Track id -> true when the user collapsed
+   * it to label-only height via the track-label caret. Absent or false =
+   * expanded (the S1 default: analysis surfaces visible by default). Only the
+   * manageable analysis tracks (cpu/queue/spans/events) are collapsible.
+   * localStorage-backed (dial9.viewer.trackPrefs); replaces the legacy
+   * per-panel `dial9.viewer.panelCollapsed.<key>` string keys.
+   */
+  collapsed: Readonly<Record<string, boolean>>;
   /** Stack-sidebar width in CSS px (drag-resizable, 02 P2). */
   sidebarWidth: number;
   /**

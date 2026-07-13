@@ -201,6 +201,9 @@ const initialState: StoreState = {
     // All four foldable panels start collapsed (features 02 O4);
     // Record<FoldablePanelKind, boolean> forces exactly these keys.
     panelCollapsed: { spans: true, events: true, cpu: true, queue: true },
+    // Track management (T36; amended section O): custom order + collapse map.
+    trackOrder: ["queue", "cpu", "spans", "events"],
+    collapsed: { cpu: true, queue: false },
     sidebarWidth: 400,
     selectedSpanNames: new Set(),
     selectedEventNames: new Set(),
