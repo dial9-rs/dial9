@@ -1224,3 +1224,134 @@ body {
 }
 .d9-new-file-btn:hover { background: #3a3a5a; }
 .d9-new-file-btn:focus-visible { outline: 2px solid var(--d9-accent); outline-offset: 1px; }
+
+/* ── Region analysis (T32, features/02 section S + R3-R9): the flamegraph /
+   blocking-calls / heap panel that opens in the inspector Stack tab for a
+   Shift+drag region (or a whole-trace toolbar open). The `[data-region-host]`
+   is a binding-free node the T32 controller renders into imperatively; the
+   embedded flamegraph widget lives in `.d9-region-fg` inside `.d9-region-fg-host`
+   and persists across the inspector's re-renders. */
+
+.d9-region-host { display: block; }
+.d9-region { display: flex; flex-direction: column; gap: 6px; min-height: 0; }
+.d9-region-tabs { display: flex; gap: 4px; flex-wrap: wrap; }
+.d9-region-tab {
+    font-size: 0.78em;
+    color: var(--d9-fg-muted);
+    padding: 3px 8px;
+    border-radius: 4px;
+    background: transparent;
+    border: 1px solid var(--d9-border);
+    cursor: pointer;
+}
+.d9-region-tab.on { color: var(--d9-fg); background: #26265a; border-color: var(--d9-accent); }
+.d9-region-tab:hover { color: var(--d9-fg); }
+.d9-region-tab:focus-visible { outline: 2px solid var(--d9-accent); outline-offset: 1px; }
+
+.d9-region-badge {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.78em;
+    color: #e0a94a;
+    background: rgba(224, 169, 74, 0.1);
+    border: 1px solid rgba(224, 169, 74, 0.4);
+    border-radius: 4px;
+    padding: 3px 8px;
+}
+
+.d9-region-body { display: flex; flex-direction: column; gap: 6px; min-height: 0; flex: 1; }
+.d9-region-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    flex-shrink: 0;
+}
+.d9-region-count { font-size: 0.8em; color: var(--d9-fg-muted); font-variant-numeric: tabular-nums; }
+.d9-region-showtime, .d9-region-popout {
+    font-size: 0.78em;
+    color: var(--d9-accent);
+    background: transparent;
+    border: 1px solid var(--d9-border);
+    border-radius: 4px;
+    padding: 2px 8px;
+    cursor: pointer;
+}
+.d9-region-showtime:hover, .d9-region-popout:hover { background: #26265a; }
+.d9-region-showtime:focus-visible, .d9-region-popout:focus-visible {
+    outline: 2px solid var(--d9-accent);
+    outline-offset: 1px;
+}
+
+.d9-region-fg-host { flex: 1; min-height: 360px; height: 46vh; position: relative; }
+.d9-region-fg { width: 100%; height: 100%; }
+
+.d9-heap-toggle { display: inline-flex; border: 1px solid var(--d9-border); border-radius: 4px; overflow: hidden; }
+.d9-heap-mode {
+    font-size: 0.76em;
+    color: var(--d9-fg-muted);
+    background: transparent;
+    border: none;
+    padding: 2px 8px;
+    cursor: pointer;
+}
+.d9-heap-mode.on { color: #fff; background: #4caf50; }
+.d9-heap-mode:focus-visible { outline: 2px solid var(--d9-accent); outline-offset: -2px; }
+
+/* Blocking-calls panel (R3-R9). */
+.d9-block-groupby select {
+    background: var(--d9-bg-track);
+    border: 1px solid var(--d9-border);
+    color: var(--d9-fg);
+    padding: 3px 6px;
+    border-radius: 4px;
+    font-size: 0.82em;
+}
+.d9-block-note { color: var(--d9-fg-muted); font-size: 0.82em; line-height: 1.4; }
+.d9-block-bars { display: flex; flex-direction: column; gap: 3px; margin-bottom: 8px; }
+.d9-block-row { display: flex; align-items: center; gap: 8px; font-size: 0.82em; }
+.d9-block-count { min-width: 40px; text-align: right; font-weight: 600; font-variant-numeric: tabular-nums; }
+.d9-block-bar { display: inline-block; height: 12px; border-radius: 2px; opacity: 0.75; }
+.d9-block-leaf { color: var(--d9-fg); word-break: break-all; }
+.d9-block-pct { color: var(--d9-fg-muted); }
+.d9-block-row.c-lock .d9-block-count, .d9-block-row.c-lock .d9-block-bar { color: #ff4444; background: #ff4444; }
+.d9-block-row.c-io .d9-block-count, .d9-block-row.c-io .d9-block-bar { color: #ff8a65; background: #ff8a65; }
+.d9-block-row.c-poll .d9-block-count, .d9-block-row.c-poll .d9-block-bar { color: #4fc3f7; background: #4fc3f7; }
+.d9-block-row.c-syscall .d9-block-count, .d9-block-row.c-syscall .d9-block-bar { color: #888; background: #888; }
+.d9-block-row.c-other .d9-block-count, .d9-block-row.c-other .d9-block-bar { color: #cc66ff; background: #cc66ff; }
+.d9-block-row .d9-block-count { background: transparent; }
+
+.d9-block-group { border: 1px solid var(--d9-border); border-radius: 6px; margin-bottom: 8px; overflow: hidden; }
+.d9-block-group-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    background: var(--d9-bg-panel);
+    flex-wrap: wrap;
+}
+.d9-block-group.c-lock .d9-block-group-head .d9-block-count { color: #ff4444; }
+.d9-block-group.c-io .d9-block-group-head .d9-block-count,
+.d9-block-group.c-poll .d9-block-group-head .d9-block-count,
+.d9-block-group.c-syscall .d9-block-group-head .d9-block-count,
+.d9-block-group.c-other .d9-block-group-head .d9-block-count { color: #ff8a65; }
+.d9-block-sub { margin: 8px 12px; border-left: 3px solid var(--d9-border); padding-left: 10px; }
+.d9-block-sub-head { color: var(--d9-fg-muted); font-size: 0.82em; margin-bottom: 2px; }
+.d9-block-frame { color: #aaa; font-family: ui-monospace, monospace; font-size: 0.8em; }
+.d9-block-frame.leaf { color: #fff; font-weight: 600; }
+.d9-block-frame.tokio { color: #555; }
+.d9-block-frame a { color: inherit; text-decoration: underline dotted; }
+.d9-block-examples { padding: 6px 12px; color: var(--d9-accent); font-size: 0.82em; }
+.d9-block-jump {
+    color: var(--d9-accent);
+    background: transparent;
+    border: none;
+    text-decoration: underline;
+    cursor: pointer;
+    margin-right: 8px;
+    padding: 0;
+    font-size: inherit;
+}
+.d9-block-jump:focus-visible { outline: 2px solid var(--d9-accent); outline-offset: 1px; }
+.d9-block-more { color: var(--d9-fg-muted); }
