@@ -223,7 +223,7 @@ export function laneTooltipModel(
   if (opts.coverage === "truncated") {
     rows.push([{ label: "Window:", value: "⚠️ partial data (window edge - not the full extent)" }]);
   } else if (opts.coverage === "oversized") {
-    rows.push([{ label: "Window:", value: "⚠️ segment too large to load in full (tier-1 view)" }]);
+    rows.push([{ label: "Window:", value: "⚠️ oversized segment - tier-1 view only (not the full extent)" }]);
   }
 
   return rows;
