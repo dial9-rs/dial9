@@ -76,6 +76,11 @@ export function createEscCascade(): EscCascade {
  */
 export const ESC_PRIORITY = {
   help: 100,
+  // The load section (T34): a modal drop-zone/loading surface. Sits below
+  // help (a `?` overlay opened over a load still closes first) and above the
+  // popups/sidebar it covers, so Esc cancels a load / dismisses the New-File
+  // chooser (#281) before touching anything behind it.
+  load: 90,
   popup: 80,
   sidebar: 60,
   selection: 20,
