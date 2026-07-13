@@ -254,6 +254,10 @@ export function mountLaneInteraction(
   // ── wheel: Ctrl/Cmd = zoom-at-cursor (H5); plain = scroll lanes ──────────
 
   function onWheel(e: WheelEvent): void {
+    // Plain wheel scrolls the lanes: bail BEFORE any layout read so a scroll
+    // never forces a measure (H5). Only Ctrl/Cmd wheels zoom.
+    if (!e.ctrlKey && !e.metaKey) return;
+    if (store.getState().trace.trace === null) return;
     const geom = readColumnGeom();
     const mouseXInDraw = e.clientX - geom.rectLeft - LABEL_W;
     const intent = wheelZoomIntent({
@@ -263,8 +267,7 @@ export function mountLaneInteraction(
       mouseXInDraw,
       drawW: geom.drawW,
     });
-    if (intent === null) return; // plain wheel: let the browser scroll the lanes
-    if (store.getState().trace.trace === null) return;
+    if (intent === null) return;
     e.preventDefault();
     // Store dispatch only: N wheel notches in a frame -> N viewport updates ->
     // ONE coalesced render (03 F2 regression; the DoD's <= 1 render/frame).
