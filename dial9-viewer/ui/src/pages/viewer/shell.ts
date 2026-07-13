@@ -27,6 +27,10 @@ import { tracksTemplate, sizeTracks, type TracksViewModel } from "./tracks.js";
 import { deriveAxisInputs } from "./axis.js";
 import { deriveCpuInputs } from "./cpu.js";
 import { createSpansTrack, type SpansTrackController } from "./spans-track.js";
+import {
+  createTaskDetailTrack,
+  type TaskDetailTrackController,
+} from "./task-detail-track.js";
 
 /** Callbacks the shell chrome needs from the page entry. */
 export interface ShellDeps {
@@ -177,6 +181,7 @@ function shellTemplate(
   vm: ShellViewModel,
   deps: ShellDeps,
   spansTrack: SpansTrackController,
+  taskDetailTrack: TaskDetailTrackController,
 ): TemplateResult {
   return html`
     <header class="d9-toolbar" role="banner">
@@ -218,7 +223,9 @@ function shellTemplate(
         tabindex="0"
       >
         ${hintChipsTemplate()}
-        ${vm.hasTrace ? tracksTemplate(vm, spansTrack) : emptyStateTemplate()}
+        ${vm.hasTrace
+          ? tracksTemplate(vm, spansTrack, taskDetailTrack)
+          : emptyStateTemplate()}
       </main>
       ${inspectorTemplate()}
     </div>
@@ -274,14 +281,18 @@ export function mountShell(
   // its derived caches + name->color assignment live across renders. Other
   // content tracks (T22/T27-T30) mount the same way as they land.
   const spansTrack = createSpansTrack(store);
+  // The task-detail track (T30): store-wired like spans, created once so its
+  // selection-keyed derivation cache lives across renders (F5). Its row is
+  // only rendered while a task is selected (selectionOnly, N1).
+  const taskDetailTrack = createTaskDetailTrack(store);
 
   function renderPass(): void {
     const state = store.getState() as StoreState;
     const vm = viewModel(state, deps);
-    render(shellTemplate(vm, deps, spansTrack), root);
+    render(shellTemplate(vm, deps, spansTrack, taskDetailTrack), root);
     const column = root.querySelector<HTMLElement>(".d9-track-column");
     if (column && vm.hasTrace) {
-      sizeTracks(column, vm, spansTrack);
+      sizeTracks(column, vm, spansTrack, taskDetailTrack);
     }
   }
 
@@ -318,6 +329,7 @@ export function mountShell(
       unsubscribe();
       window.removeEventListener("resize", onResize);
       spansTrack.dispose();
+      taskDetailTrack.dispose();
     },
   };
 }

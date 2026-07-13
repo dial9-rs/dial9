@@ -342,6 +342,37 @@ body {
 .d9-span-tooltip .tt-k { color: var(--d9-fg-muted); }
 .d9-span-tooltip .tt-dim { color: #888; }
 
+/* ── Task-detail track (T30; features/02 section N) ──────────────────────
+   Selection-only track: the label gutter shows the track name + a compact
+   task identity (the full textual header is T31's inspector Task tab); the
+   canvas hosts the timeline (N6-N12); a status readout floats top-right over
+   the canvas (N5, updated imperatively on hover, matching the legacy
+   #task-detail-status). */
+.d9-track--task-detail .d9-track-label { justify-content: center; }
+.d9-task-detail-id {
+    font-size: 0.72em;
+    color: #4fc3f7;
+    font-family: var(--d9-mono, monospace);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.d9-task-detail-wrap { position: relative; }
+.d9-task-detail-status {
+    position: absolute;
+    top: 4px;
+    right: 12px;
+    z-index: 2;
+    font-size: 0.75em;
+    color: #aaa;
+    pointer-events: none;
+    white-space: nowrap;
+    max-width: calc(100% - 24px);
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.d9-task-detail-canvas { display: block; }
+
 /* ── Empty state (F4) ────────────────────────────────────────────────── */
 
 .d9-empty {
