@@ -128,10 +128,23 @@ Toolbar is a two-row flex column (`#toolbar`, `#toolbar-row-data` + `#toolbar-ro
 
 ## F. Timeline header (time axis)
 
+> AMENDED 2026-07-12 by T25 (chunk-2 viewer migration). Rows marked
+> `[2026-07-12]` describe the MIGRATED viewer's time-axis track
+> (`src/pages/viewer/axis.ts`, filling the "timeline" track slot from T21's
+> `track-layout.ts`); the legacy `#timeline-canvas` keeps its recorded
+> behavior. The row-walker asserts each side per-side (T15 convention). Two
+> deltas land here: (1) a layout-seam adaptation - in the unified track
+> column every track's canvas is `drawW`-wide and sits after a shared
+> `LABEL_W` DOM label gutter, so the axis draws at draw-area-relative x
+> (the F2 `nsToX`) instead of the legacy full-width canvas that added
+> `LABEL_W` inline; the shared DOM gutter is what keeps every track aligned
+> (A13). (2) the date-qualification amendment (no 04 finding id; S2/#137
+> time-legibility family) - see F1.
+
 | Feature | What it does | Access path | Source |
 | --- | --- | --- | --- |
-| F1. Time axis ruler | Fixed 30px canvas drawing tick marks + `fmtTs`-formatted labels. Interval auto-picked from a nice-values list (`1e3..1e10` ns) targeting ~4-16 ticks (`max(4, floor(drawW/100))`); ticks offset by `LABEL_W` to align with lanes. Non-interactive; redraws on zoom/pan/resize. | Above the lanes (`#timeline-canvas`). | `viewer.html:887-888`, `2900-2940` (`renderTimeline`) |
-| F2. Coordinate transform | `nsToX(ns, drawW)` maps timestamp to pixel (relative to draw area, no `LABEL_W`, used by lane-style canvases); `makeTimePanelLayout` variants add the `LABEL_W` offset for panels. | Internal. | `viewer.html:2826-2828` |
+| F1. Time axis ruler | Fixed 30px canvas drawing tick marks + `fmtTs`-formatted labels. Interval auto-picked from a nice-values list (`1e3..1e10` ns) targeting ~4-16 ticks (`max(4, floor(drawW/100))`); ticks offset by `LABEL_W` to align with lanes. Non-interactive; redraws on zoom/pan/resize. `[2026-07-12]` (T25, migrated page) The ruler is the "timeline" track: same nice-value interval + `fmtTs`-parity labels, but drawn at draw-area-relative x (canvas is `drawW`-wide, the `LABEL_W` offset comes from the DOM label gutter - F2). Clock/format mode is READ from the store (`uiPrefs.timeMode` E1, `uiPrefs.tz` E2 - the toggle buttons are T33's). DATE-QUALIFICATION AMENDMENT: when the visible span's start and end fall on DIFFERENT calendar days in the active tz (absolute mode with resolvable clock-sync anchors), every tick label gains a `MM-DD ` date prefix (`MM-DD HH:MM:SS`) so day-crossing ticks are unambiguous; same-day spans, and relative mode, stay time-only (same rule as T15's heatmap-axis amendment, features/01 F10; narrower `MM-DD` prefix). Legacy page stays full-width-canvas + time-only. | Above the lanes (`#timeline-canvas`; migrated: the `timeline` track canvas). | legacy `viewer.html:887-888`, `2900-2940` (`renderTimeline`); migrated `src/pages/viewer/axis.ts` (`renderTimeAxis`, `fmtAxisTick`, `isDateQualified`) |
+| F2. Coordinate transform | `nsToX(ns, drawW)` maps timestamp to pixel (relative to draw area, no `LABEL_W`, used by lane-style canvases); `makeTimePanelLayout` variants add the `LABEL_W` offset for panels. `[2026-07-12]` (T25, migrated page) The axis uses this draw-area-relative form directly (`nsToDrawX` == `nsToX(ns, drawW)`) so its ticks are byte-identical to the lanes' canvas-local x; the shared `PanelGeometry` from `lib/canvas/layout` is the single producer of the mapping (the A13 invariant, asserted pixel-exact at three widths in `axis.test.ts`). | Internal. | legacy `viewer.html:2826-2828`; migrated `src/pages/viewer/axis.ts` (`nsToDrawX`) |
 
 ---
 
