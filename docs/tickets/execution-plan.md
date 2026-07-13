@@ -107,6 +107,12 @@ shell), then the wave. The Fable-credit stream cuts are resolved (switched
 to Opus).
 
 **Audit log:**
+- T25 timeline axis: MERGED 2026-07-12. Gate green (1042 tests, tsc clean
+  after npm install in INTEG - T21's lit-html dep needed installing there).
+  Live alignment check passed (timeline drawW == lanes drawW). Filled a T21
+  gap: added uiPrefs.timeMode/tz store fields (legacy rel/utc defaults; T33
+  drives them). NOTE for future merges: when a merge brings a new npm dep,
+  run `npm install` in the INTEG worktree before tsc/build gates.
 - T21 viewer shell: MERGED into integration 2026-07-12 (opens chunk 2). Gate
   bar green (tsc, 1016 tests + 1 xfail, build). Orchestrator finished the
   last 3 commits after the implementer stall-looped on connection drops (2
