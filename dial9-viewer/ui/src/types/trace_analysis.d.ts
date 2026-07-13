@@ -1,13 +1,9 @@
-// Hand-written type declarations for the frozen-core file `trace_analysis.js`.
+// Type declarations for the frozen-core file `trace_analysis.js`.
 // See src/types/decode.d.ts for the declaration-form rationale.
 //
-// Shapes verified against trace_analysis.js (whole file), the
-// dial9-trace-analysis skill (buildWorkerSpans/buildSpanData/buildFgData
-// schemas), and call sites in viewer.html / flamegraph.html.
-//
-// ADR-0002 encoding: buildWorkerSpans takes the trace's blockInPlaceGaps and
-// DISCARDS active spans that cross a gap (they are absent from `actives`,
-// never split); the final still-open park span has no schedWait, hence
+// buildWorkerSpans takes the trace's blockInPlaceGaps and DISCARDS active
+// spans that cross a gap (they are absent from `actives`, never split); the
+// final still-open park span has no schedWait, hence
 // `ParkSpan.schedWait?: number`.
 
 declare module "*/trace_analysis.js" {
@@ -54,9 +50,9 @@ declare module "*/trace_analysis.js" {
 
   /**
    * Worker awake period (Unpark -> Park). `ratio` is CPU time / wall time.
-   * ADR-0002: active spans crossing a block-in-place gap are DISCARDED
-   * (the CPU-time delta mixes two threads and is meaningless), so gaps
-   * appear as missing actives, never as spans with a bogus ratio.
+   * Active spans crossing a block-in-place gap are DISCARDED (the CPU-time
+   * delta mixes two threads and is meaningless), so gaps appear as missing
+   * actives, never as spans with a bogus ratio.
    */
   export interface ActiveSpan {
     start: number;
@@ -99,7 +95,7 @@ declare module "*/trace_analysis.js" {
   /**
    * Reconstruct poll/park/active spans from raw events.
    * Pass `blockInPlaceGaps` (from ParsedTrace) so active spans crossing a
-   * gap are suppressed per ADR-0002; omitting it skips that suppression.
+   * gap are suppressed; omitting it skips that suppression.
    */
   export function buildWorkerSpans(
     events: readonly TraceEvent[],

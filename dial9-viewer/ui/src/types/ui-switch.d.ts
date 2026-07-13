@@ -1,9 +1,8 @@
-// Ambient declaration for the dual-UI switch global (ui-switch.js, T38;
-// ADR-0004 section 8). New-UI entries load ui-switch.js via a plain
-// <script src="/ui-switch.js"> tag (it is NOT bundled - the same copied
-// file serves the legacy pages) and call window.D9UiSwitch.mount() from
-// their entry module, so the global is the typed surface here rather than
-// a module declaration.
+// Ambient declaration for the dual-UI switch global (ui-switch.js). New-UI
+// entries load ui-switch.js via a plain <script src="/ui-switch.js"> tag (it
+// is NOT bundled - the same copied file serves the legacy pages) and call
+// window.D9UiSwitch.mount() from their entry module, so the global is the
+// typed surface here rather than a module declaration.
 
 interface D9UiSwitchApi {
   /**

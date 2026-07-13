@@ -1,9 +1,8 @@
-// T05 type-checking probe. Imports every API declared in src/types/*.d.ts
-// and uses each in a type-checked position, mirroring the real call shapes
-// found in viewer.html / index.html / flamegraph.html / tokio_stats.html
-// (the call-site catalog). This file exists ONLY for `tsc --noEmit`; it is
-// not referenced from any Vite input and never ships to dist. Nothing here
-// runs -- the exported functions are never called.
+// Type-checking probe. Imports every API declared in src/types/*.d.ts and
+// uses each in a type-checked position, mirroring the real call shapes from
+// the pages. This file exists ONLY for `tsc --noEmit`; it is not referenced
+// from any Vite input and never ships to dist. Nothing here runs -- the
+// exported functions are never called.
 
 import { TraceDecoder, FieldType } from "../../decode.js";
 import type { DecodedFrame, EventSchema } from "../../decode.js";
@@ -115,7 +114,7 @@ export function probeDecode(buffer: Uint8Array): EventSchema | undefined {
       const name: string = frame.name;
       const value = frame.values[name];
       if (typeof value === "bigint") void value.toString();
-      // trace_parser.js:981 -- units lookup off the decoder's schema map.
+      // Units lookup off the decoder's schema map.
       const units: Record<string, string> | undefined = dec.schemas.get(
         frame.typeId
       )?.units;
@@ -144,7 +143,7 @@ export function probeDecode(buffer: Uint8Array): EventSchema | undefined {
 
 // ── trace_parser.js ───────────────────────────────────────────────────────
 
-// Mirrors viewer.html:1693-1882 / flamegraph.html:517-534 load paths.
+// Mirrors the trace load paths.
 export async function probeParser(list: string[]): Promise<ParsedTrace> {
   const credHeaders: Record<string, string> = Dial9Creds.headers();
   let trace: ParsedTrace;
@@ -173,7 +172,7 @@ export async function probeParser(list: string[]): Promise<ParsedTrace> {
   const one: Promise<ParsedTrace> = parseOne(new Uint8Array());
   void one;
 
-  // ADR-0002 nullability, encoded and consumed explicitly.
+  // Block-in-place gap nullability, encoded and consumed explicitly.
   const gaps: BlockInPlaceGap[] = trace.blockInPlaceGaps;
   for (const g of gaps) void (g.workerId + g.fromTid + g.toTid + g.startNs + g.endNs);
   const rederived: BlockInPlaceGap[] = deriveBlockInPlaceGaps(
@@ -199,7 +198,7 @@ export async function probeParser(list: string[]): Promise<ParsedTrace> {
   const offset: number | null = trace.clockOffsetNs;
   void offset;
 
-  // Symbol utilities (viewer.html:1016/6078/5475).
+  // Symbol utilities.
   const frames: SymbolFrame[] = symbolizeChain(
     trace.cpuSamples[0]?.callchain ?? [],
     trace.callframeSymbols
@@ -218,7 +217,6 @@ export async function probeParser(list: string[]): Promise<ParsedTrace> {
 
 // ── trace_analysis.js ─────────────────────────────────────────────────────
 
-// Mirrors viewer.html:1969-2402 and flamegraph.html:559-561.
 export function probeAnalysis(trace: ParsedTrace): void {
   const evts: TraceEvent[] = trace.events;
   const workerIds: number[] = [0, 1, 2];
@@ -230,7 +228,7 @@ export function probeAnalysis(trace: ParsedTrace): void {
   const runtimeGroups = computeRuntimeGroups(workerIds, trace.runtimeWorkers);
   for (const g of runtimeGroups) void (g.name + g.workerIds.length + (g.inferred ? 1 : 0));
 
-  // viewer.html:2002 passes blockInPlaceGaps; flamegraph.html:559 omits it.
+  // One caller passes blockInPlaceGaps; another omits it.
   const spanResult = buildWorkerSpans(evts, workerIds, maxTs, trace.blockInPlaceGaps);
   const spanResult3Arg = buildWorkerSpans(evts, workerIds, maxTs);
   void spanResult3Arg;
@@ -241,7 +239,7 @@ export function probeAnalysis(trace: ParsedTrace): void {
   const lane = workerSpans[0];
   if (lane !== undefined) {
     for (const p of lane.polls) {
-      // ADR-0002 adjacent semantics: openEnded polls have unknown duration.
+      // openEnded polls have unknown duration.
       if (p.openEnded === true) void p.taskId;
       if (p.schedSamples !== undefined) {
         void deduplicateSamples(p.schedSamples, trace.callframeSymbols);
@@ -273,7 +271,6 @@ export function probeAnalysis(trace: ParsedTrace): void {
     if (poi.schedDelay !== undefined) void poi.schedDelay.delay;
   }
 
-  // viewer.html:4476
   const taskWakes = spanResult.wakesByTask[7];
   const pollWakes = computePollWakes(lane !== undefined ? lane.polls : [], taskWakes);
   for (const pw of pollWakes) {
@@ -289,7 +286,7 @@ export function probeAnalysis(trace: ParsedTrace): void {
   const rtFilter = buildRuntimeFilterData(trace.cpuSamples, trace.runtimeWorkers);
   for (const o of rtFilter.options) void (o.name + o.sampleCount);
 
-  // Span data (viewer.html:2080/3421/3441/4049).
+  // Span data.
   const spanData = buildSpanData(trace.customEvents);
   const allSpans: TracingSpan[] = spanData.allSpans;
   const renderSet = selectSpanRenderSet({
@@ -331,7 +328,7 @@ export function probeAnalysis(trace: ParsedTrace): void {
   void (alloc.summary.leakedBytes + alloc.summary.totalDroppedFrees);
   void alloc.perTask.get(1)?.estimatedBytes;
 
-  // Rendering helpers (viewer.html:1084/2994/3123/4606).
+  // Rendering helpers.
   const color: string = pollHeatmapColorQuantized(12345);
   const color2: string = pollHeatmapColor(12345);
   void (color + color2 + flamegraphColor("frame"));
@@ -347,7 +344,7 @@ export function probeAnalysis(trace: ParsedTrace): void {
     void cov[0];
   }
 
-  // Flamegraph tree building (buildFgData per the skill doc).
+  // Flamegraph tree building.
   const fg = buildFgData(trace.cpuSamples, trace.callframeSymbols);
   if (fg !== null) void (fg.totalSamples + fg.maxDepth + fg.nodes.length);
   const tree = buildFlamegraphTree(trace.cpuSamples, trace.callframeSymbols);
@@ -367,7 +364,7 @@ export function probeFormat(): string {
   );
 }
 
-// ── heatmap.js (index.html:1237-1425 call shapes) ─────────────────────────
+// ── heatmap.js ────────────────────────────────────────────────────────────
 
 interface BrowseSegment {
   key: string;
@@ -400,14 +397,14 @@ export function probeHeatmap(heatmapSegments: BrowseSegment[]): string {
   return densityColor(0.5);
 }
 
-// ── prefix_detect.js (index.html:900) ─────────────────────────────────────
+// ── prefix_detect.js ──────────────────────────────────────────────────────
 
 export function probePrefixDetect(prefixes: string[]): boolean {
   const seg: string = lastSegment("traces/2026-06-12/");
   return isDateLayer(prefixes) && seg.length > 0;
 }
 
-// ── creds.js (index.html:443-471, tokio_stats.html:385) ───────────────────
+// ── creds.js ──────────────────────────────────────────────────────────────
 
 export async function probeCreds(blob: string): Promise<void> {
   const parsed = Dial9Creds.parse(blob);
@@ -431,7 +428,7 @@ export async function probeCreds(blob: string): Promise<void> {
   });
 }
 
-// ── panel_layout.js (viewer.html:2868) ────────────────────────────────────
+// ── panel_layout.js ───────────────────────────────────────────────────────
 
 export function probePanelLayout(
   panel: HTMLElement,
@@ -446,23 +443,23 @@ export function probePanelLayout(
   return base.pw + base.labelW + base.drawW + xc + ns;
 }
 
-// ── flamegraph.js (viewer.html:6702-7041, flamegraph.html:336-620) ────────
+// ── flamegraph.js ─────────────────────────────────────────────────────────
 
 export function probeFlamegraph(container: HTMLElement, trace: ParsedTrace): void {
   const fg: FlamegraphInstance = createFlamegraph(container, () => {});
 
-  // flamegraph.html:570 filter shape; generic keeps CpuSample fields.
+  // Filter shape; generic keeps CpuSample fields.
   const samples: CpuSample[] = filterCpuSamples(trace.cpuSamples, null, null);
   const ranged = filterCpuSamples(trace.cpuSamples, 0, 1e18);
   void ranged[0]?.tid;
 
-  // viewer.html:7041 CPU shape.
+  // CPU shape.
   fg.setData(samples, trace.callframeSymbols, {
     exportTitle: "CPU flamegraph",
     runtimeWorkers: trace.runtimeWorkers,
   });
 
-  // viewer.html:6924-6919 heap pseudo-samples with weights + formatCount.
+  // Heap pseudo-samples with weights + formatCount.
   const heapSamples = samples.map((s) => ({ ...s, weight: 8, allocWeight: 1 }));
   fg.setData(heapSamples, trace.callframeSymbols, {
     workerLabel: "Allocations",
@@ -479,7 +476,7 @@ export function probeFlamegraph(container: HTMLElement, trace: ParsedTrace): voi
     },
   });
 
-  // flamegraph.html:328-412 API mode: minimal toFgTree node into setTreeDirect.
+  // API mode: minimal toFgTree node into setTreeDirect.
   function toFgTree(node: { name: string; count: number; self: number; children?: { name: string; count: number; self: number }[] }): FlamegraphNode {
     const m = new Map<string, FlamegraphNode>();
     for (const child of node.children ?? []) m.set(child.name, toFgTree(child));
@@ -497,7 +494,7 @@ export function probeFlamegraph(container: HTMLElement, trace: ParsedTrace): voi
   fg.destroy();
 }
 
-// ── flamegraph_export.js (consumed via flamegraph.js export menu) ─────────
+// ── flamegraph_export.js (consumed via flamegraph.js export menu) ──────────
 
 export function probeFlamegraphExport(tree: FlamegraphNode): string {
   const panels = [

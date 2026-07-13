@@ -1,8 +1,6 @@
-// Hand-written type declarations for the frozen-core file `panel_layout.js`
+// Type declarations for the frozen-core file `panel_layout.js`
 // (shared time-panel layout math). See src/types/decode.d.ts for the
-// declaration-form rationale. Verified against panel_layout.js and the
-// viewer.html call site (timePanelLayout wrapper, which passes an
-// optionally-undefined scrollbarW).
+// declaration-form rationale.
 
 declare module "*/panel_layout.js" {
   export interface TimePanelLayout {
@@ -22,8 +20,7 @@ declare module "*/panel_layout.js" {
 
   /**
    * Build a time-panel layout view. Pure function -- no globals, no DOM.
-   * `scrollbarW` may be undefined (treated as 0), matching the viewer.html
-   * wrapper which forwards an optional parameter positionally.
+   * `scrollbarW` may be undefined (treated as 0).
    */
   export function makeTimePanelLayout(
     pw: number,

@@ -1,9 +1,6 @@
-// Hand-written type declarations for the frozen-core file `flamegraph.js`
+// Type declarations for the frozen-core file `flamegraph.js`
 // (shared flamegraph widget: canvas rendering, zoom, search, export menu).
 // See src/types/decode.d.ts for the declaration-form rationale.
-// Verified against flamegraph.js and call sites in flamegraph.html
-// (createFlamegraph/setTreeDirect/setData/filterCpuSamples) and viewer.html
-// (CPU + heap flamegraph sidebars).
 
 declare module "*/flamegraph.js" {
   import type { CallframeSymbols, CpuSample } from "*/trace_parser.js";

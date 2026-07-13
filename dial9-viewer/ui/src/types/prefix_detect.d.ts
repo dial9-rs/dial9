@@ -1,7 +1,6 @@
-// Hand-written type declarations for the frozen-core file `prefix_detect.js`
+// Type declarations for the frozen-core file `prefix_detect.js`
 // (S3 prefix-discovery heuristics). See src/types/decode.d.ts for the
-// declaration-form rationale. Verified against prefix_detect.js and the
-// index.html call site (isDateLayer(prefixes) gating the date layer).
+// declaration-form rationale.
 
 declare module "*/prefix_detect.js" {
   /**

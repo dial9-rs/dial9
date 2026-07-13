@@ -1,9 +1,6 @@
-// Hand-written type declarations for the frozen-core file
-// `flamegraph_export.js` (folded stacks + interactive SVG export).
+// Type declarations for the frozen-core file `flamegraph_export.js`
+// (folded stacks + interactive SVG export).
 // See src/types/decode.d.ts for the declaration-form rationale.
-// Verified against flamegraph_export.js and its consumer flamegraph.js
-// (export menu handlers: treeToInteractiveSvg / treeToFolded /
-// filenameStem); the module has no direct HTML call site by design.
 
 declare module "*/flamegraph_export.js" {
   import type { FlamegraphNode } from "*/trace_analysis.js";

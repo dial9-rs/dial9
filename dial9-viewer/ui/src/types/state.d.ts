@@ -1,15 +1,9 @@
-// App-level store-state vocabulary (T06; docs/ui-inventory/02-architecture.md
-// 2.2 store slices, 2.8 segments slice, 2.3 layout geometry).
+// App-level store-state vocabulary.
 //
 // TYPES ONLY, same form and rules as src/types/trace.d.ts (see its header):
 // importable module .d.ts with no runtime backing; consumers must
-// `import type`. The store IMPLEMENTATION (update/subscribe mechanics,
-// actions, persistence) is T07/T08 -- this file defines only the shapes
-// those tickets and every component/interact module share.
-//
-// Slice contents follow architecture 2.2 verbatim, with field shapes
-// verified against the viewer.html globals they replace (the ~68-global
-// inventory, docs/ui-inventory/features/02-viewer-html.md).
+// `import type`. This file defines only the shapes the store implementation
+// and every component/interact module share.
 
 import type {
   ParsedTrace,
@@ -25,34 +19,32 @@ import type { TimePanelLayout } from "../../panel_layout.js";
 
 /**
  * The four foldable analysis panels, named by their real DOM
- * `data-panel-key` values (viewer.html) -- "events" is the custom-events
- * panel. These keys are load-bearing: localStorage persistence uses
- * `dial9.viewer.panelCollapsed.<key>` (features 02 O4).
+ * `data-panel-key` values -- "events" is the custom-events panel. These
+ * keys are load-bearing: localStorage persistence uses
+ * `dial9.viewer.panelCollapsed.<key>`.
  */
 export type FoldablePanelKind = "spans" | "events" | "cpu" | "queue";
 
 /**
  * Every analysis panel below the worker lanes, discriminating render
- * targets in the renderer registry (architecture 2.3). "task-detail" is
- * shown only while a task is selected and is NOT foldable (features 02 N).
+ * targets in the renderer registry. "task-detail" is shown only while a
+ * task is selected and is NOT foldable.
  */
 export type PanelKind = FoldablePanelKind | "task-detail";
 
-// ── Clock display vocabulary (features 02 E1/E2, F) ─────────────────────
+// ── Clock display vocabulary ────────────────────────────────────────────
 
 /**
- * Clock display mode for the time axis and all timestamps (features 02 E1):
- * "rel" shows offsets from the trace start (`+1.23s`), "abs" shows
- * wall-clock time via the trace's clock-sync anchors. Replaces the legacy
- * `useAbsoluteTime` boolean; the same "rel"/"abs" vocabulary the URL codec
- * carries (lib/url/view-state.ts TimeMode).
+ * Clock display mode for the time axis and all timestamps: "rel" shows
+ * offsets from the trace start (`+1.23s`), "abs" shows wall-clock time via
+ * the trace's clock-sync anchors. The same "rel"/"abs" vocabulary the URL
+ * codec carries (lib/url/view-state.ts TimeMode).
  */
 export type TimeMode = "rel" | "abs";
 
 /**
- * Timezone for absolute timestamps (features 02 E2): "utc" vs the viewer's
- * local zone. Only meaningful when timeMode === "abs". Replaces the legacy
- * `useLocalTz` boolean.
+ * Timezone for absolute timestamps: "utc" vs the viewer's local zone. Only
+ * meaningful when timeMode === "abs".
  */
 export type TimeZoneMode = "utc" | "local";
 
@@ -60,9 +52,8 @@ export type TimeZoneMode = "utc" | "local";
 
 /**
  * The parsed trace produced by the frozen core. Replaced WHOLESALE on
- * load/reparse, never mutated (architecture 2.2); derived analyses
- * (worker spans, span data, flamegraph trees) are computed from it, not
- * stored in it.
+ * load/reparse, never mutated; derived analyses (worker spans, span data,
+ * flamegraph trees) are computed from it, not stored in it.
  */
 export interface TraceSlice {
   /** null until a trace has been loaded. */
@@ -72,11 +63,10 @@ export interface TraceSlice {
 // ── viewport slice ──────────────────────────────────────────────────────
 
 /**
- * The visible time window over the trace. Zoom/pan ops (store actions,
- * T07/T08) keep the existing clamps: a 100ns minimum view span and
- * clamping to [minTs, maxTs] (features 02 H1-H12). All fields are 0
- * until a trace loads (matching today's globals); the slice is only
- * meaningful alongside a non-null TraceSlice.trace.
+ * The visible time window over the trace. Zoom/pan ops keep the existing
+ * clamps: a 100ns minimum view span and clamping to [minTs, maxTs]. All
+ * fields are 0 until a trace loads; the slice is only meaningful alongside
+ * a non-null TraceSlice.trace.
  */
 export interface ViewportSlice {
   /** Left edge of the visible window (trace-monotonic ns). */
@@ -93,8 +83,7 @@ export interface ViewportSlice {
 
 /**
  * A pinned (clicked) custom event: draws the persistent orange marker
- * across all lanes and backs the sidebar Event/Related tabs (features
- * 02 I5, K4). Replaces the `selectedEvent` global.
+ * across all lanes and backs the sidebar Event/Related tabs.
  */
 export interface PinnedCustomEvent {
   /** All events at the clicked tick (a cluster pins several). */
@@ -109,16 +98,14 @@ export interface PinnedCustomEvent {
   poll: PollSpan | null;
   /**
    * Detail pin for the Related tab: the single event whose detail is
-   * shown. Explicitly null for cluster pins (Related is single-event
-   * only) -- replaces the `selectedEventRef` global.
+   * shown. Explicitly null for cluster pins (Related is single-event only).
    */
   detailEvent: CustomTraceEvent | null;
 }
 
 /**
- * The focused-span chain (features 02 G7, J): a clicked span bar plus
- * its ancestor chain, highlighted across the lanes. Replaces the
- * `selectedSpanId` + `selectedSpanIds` globals.
+ * The focused-span chain: a clicked span bar plus its ancestor chain,
+ * highlighted across the lanes.
  */
 export interface SpanFocus {
   /** The clicked span. */
@@ -128,95 +115,85 @@ export interface SpanFocus {
 }
 
 /**
- * Cross-highlight state that is scattered globals today (architecture
- * 2.2; features 02 G6-G8, I4-I5). All fields are independently
- * clearable, hence all explicitly nullable.
+ * Cross-highlight state. All fields are independently clearable, hence all
+ * explicitly nullable.
  */
 export interface SelectionSlice {
-  /** Yellow-highlighted task across all lanes (02 G6). */
+  /** Yellow-highlighted task across all lanes. */
   selectedTaskId: number | null;
-  /** Focused span + ancestor chain (02 G7). */
+  /** Focused span + ancestor chain. */
   spanFocus: SpanFocus | null;
   /**
-   * Span whose subtree the span panel is filtered to (span + descendants,
-   * 02 J) -- distinct from spanFocus, which is the lane highlight.
+   * Span whose subtree the span panel is filtered to (span + descendants)
+   * -- distinct from spanFocus, which is the lane highlight.
    */
   focusedSpanId: string | null;
-  /** Pinned custom event + marker (02 I5). */
+  /** Pinned custom event + marker. */
   pinnedEvent: PinnedCustomEvent | null;
   /**
-   * The clicked poll shown in the Poll Detail inspector tab (features 02
-   * R1 / G15). Set by the lane-interaction click when a poll carrying CPU or
-   * scheduling samples is clicked (`resolveLaneClick.openStackFor`); null when
-   * no poll detail is open. T31's inspector renders the deduplicated
-   * blocking-sched + CPU-sample groups from it. Additive selection field
-   * (the T29 `spawnedTasksRange` precedent): the legacy showStackPopup carried
-   * the clicked poll in a local, so the store gains an explicit field the
-   * persistent inspector re-scopes to in the same click action (04 S4).
+   * The clicked poll shown in the Poll Detail inspector tab. Set by the
+   * lane-interaction click when a poll carrying CPU or scheduling samples is
+   * clicked (`resolveLaneClick.openStackFor`); null when no poll detail is
+   * open. The inspector renders the deduplicated blocking-sched + CPU-sample
+   * groups from it.
    */
   pollDetail: PollSpan | null;
   /**
    * Range retained while the sidebar shows a region analysis (region
-   * select -> flamegraph/blocking calls); blocks keyboard selection
-   * until the sidebar closes (02 H9/H10). Replaces
-   * `sidebarSelStart`/`sidebarSelEnd`.
+   * select -> flamegraph/blocking calls); blocks keyboard selection until
+   * the sidebar closes.
    */
   sidebarRange: TimeRange | null;
-  /** Waker task hovered in the task-detail panel (orange polls, 02 G8). */
+  /** Waker task hovered in the task-detail panel (orange polls). */
   hoveredWakerTaskId: number | null;
   /**
-   * Time range drag-selected on the queue track (features 02 M7). T29
-   * dispatches it here on drag-release; T31's inspector RENDERS the "tasks
-   * spawned in range" list from it (queue-model.ts `computeSpawnedTasks` is
-   * the shared derivation - T29 dispatches, T31 renders). Distinct from
-   * `sidebarRange` (region -> flamegraph/blocking, T32): M7 is the
+   * Time range drag-selected on the queue track. Dispatched on drag-release;
+   * the inspector RENDERS the "tasks spawned in range" list from it
+   * (queue-model.ts `computeSpawnedTasks` is the shared derivation). Distinct
+   * from `sidebarRange` (region -> flamegraph/blocking): this is the
    * spawn-location task listing, a different sidebar surface. null when no
    * range is active.
    */
   spawnedTasksRange: TimeRange | null;
 }
 
-// ── poi slice (features 02 C: points-of-interest / issues rail) ─────────
+// ── poi slice (points-of-interest / issues rail) ────────────────────────
 
 /**
- * How the issues rail (04 S5: the ranked list replacing the blind "0/74"
- * stepper) orders its rows. The four sortable columns of the concept-2 rail
- * (mocks/concept-2.html): the worker id, the detector KIND, the event TIME,
- * or the detector's severity value shown in the DURATION column. The legacy
- * "Worst first" checkbox (features 02 C3) maps to `duration`/`desc`;
- * unchecked maps to `time`/`asc` (chronological), exactly as the legacy
- * `filterPointsOfInterest({ sortByWorst })` did. Column-header clicks pick
- * any of the four directly - a re-sort of the SAME rows, so the row COUNT
- * (the rail-parity DoD target) is sort-independent.
+ * How the issues rail orders its rows. The four sortable columns: the
+ * worker id, the detector KIND, the event TIME, or the detector's severity
+ * value shown in the DURATION column. The "Worst first" mode maps to
+ * `duration`/`desc`; unchecked maps to `time`/`asc` (chronological), exactly
+ * as `filterPointsOfInterest({ sortByWorst })` does. Column-header clicks
+ * pick any of the four directly - a re-sort of the SAME rows, so the row
+ * COUNT is sort-independent.
  */
 export type PoiSortKey = "worker" | "kind" | "time" | "duration";
 
 /**
- * Points-of-interest navigation state (features 02 C2/C3/C6, 04 S5). The
- * detectors are the frozen `filterPointsOfInterest` set (trace_analysis.js,
- * consumed via lib/trace/analysis); this slice holds only the VIEW controls
- * - which detector is active, how the rail is ordered, and which row is the
- * "current" one the `n`/`p` keys (T20) step through and the timeline centers
- * on. The filtered list itself is DERIVED from the trace + these controls
- * (pages/viewer/poi.ts), never stored, so the ~68-global inventory's
- * `pointsOfInterest`/`currentPoiIndex` pair collapses to reactive state.
+ * Points-of-interest navigation state. The detectors are the frozen
+ * `filterPointsOfInterest` set (trace_analysis.js, consumed via
+ * lib/trace/analysis); this slice holds only the VIEW controls - which
+ * detector is active, how the rail is ordered, and which row is the
+ * "current" one the `n`/`p` keys step through and the timeline centers on.
+ * The filtered list itself is DERIVED from the trace + these controls
+ * (pages/viewer/poi.ts), never stored.
  */
 export interface PoiSlice {
   /**
-   * Active detector filter (features 02 C2). Default "sched" (the legacy
-   * `#poi-filter` first option, "Kernel Scheduling Delays") - the filter the
-   * rail-parity DoD is measured at.
+   * Active detector filter. Default "sched" (the "Kernel Scheduling Delays"
+   * option).
    */
   filter: PointOfInterestType;
-  /** Rail sort column (04 S5). Default "duration" (worst-first). */
+  /** Rail sort column. Default "duration" (worst-first). */
   sortKey: PoiSortKey;
   /** Sort direction. Default "desc" (worst-first = highest severity first). */
   sortDir: "asc" | "desc";
   /**
    * Index of the "current" POI within the DERIVED filtered+sorted list, or
-   * -1 when none is selected (legacy `currentPoiIndex`). Reset to -1 whenever
-   * the filter changes (the list is rebuilt). The `n`/`p` keys and a rail row
-   * click set it; the status/rail read it for the "N/total" position.
+   * -1 when none is selected. Reset to -1 whenever the filter changes (the
+   * list is rebuilt). The `n`/`p` keys and a rail row click set it; the
+   * status/rail read it for the "N/total" position.
    */
   index: number;
 }
@@ -224,72 +201,68 @@ export interface PoiSlice {
 // ── uiPrefs slice ───────────────────────────────────────────────────────
 
 /**
- * View preferences persisted to localStorage as today (architecture 2.2;
- * features 02 O4, P). Persistence mechanics are the store's concern
- * (T07/T08), not encoded here.
+ * View preferences persisted to localStorage. Persistence mechanics are the
+ * store's concern, not encoded here.
  */
 export interface UiPrefsSlice {
   /**
-   * Legacy foldable-panel collapsed state (02 O4). SUPERSEDED by `collapsed`
-   * (T36): the one-line-fold presentation is retired by S1 and per-track
-   * collapse now lives in `collapsed` (keyed by any track id, not just the
-   * four foldable panels). Retained as an additive no-op holder so existing
-   * S1 defaults are undisturbed; no live surface reads it.
+   * Legacy foldable-panel collapsed state. SUPERSEDED by `collapsed`: the
+   * one-line-fold presentation is retired and per-track collapse now lives in
+   * `collapsed` (keyed by any track id, not just the four foldable panels).
+   * Retained as an additive no-op holder so existing defaults are undisturbed;
+   * no live surface reads it.
    */
   panelCollapsed: Readonly<Record<FoldablePanelKind, boolean>>;
   /**
-   * Track order for the unified column (T36; amended section O). The user
-   * drag-reorders the manageable analysis tracks (cpu/queue/spans/events) by
-   * the track-label grip; this is their resulting id order. Empty = the
-   * catalogue order (track-layout.ts TRACKS). Resolution is robust to unknown
-   * or missing ids, so an order stored before a new track was added still
-   * resolves (the new track appears in its catalogue slot). Persisted to
-   * localStorage (dial9.viewer.trackPrefs) so it survives reload.
+   * Track order for the unified column. The user drag-reorders the
+   * manageable analysis tracks (cpu/queue/spans/events) by the track-label
+   * grip; this is their resulting id order. Empty = the catalogue order
+   * (track-layout.ts TRACKS). Resolution is robust to unknown or missing ids,
+   * so an order stored before a new track was added still resolves (the new
+   * track appears in its catalogue slot). Persisted to localStorage
+   * (dial9.viewer.trackPrefs) so it survives reload.
    */
   trackOrder: readonly string[];
   /**
-   * Per-track collapsed state (T36; amends O1/O4 - the fold BEHAVIOR
-   * "per-surface show/hide with persistence" survives, the one-line-fold
-   * PRESENTATION is retired by S1). Track id -> true when the user collapsed
-   * it to label-only height via the track-label caret. Absent or false =
-   * expanded (the S1 default: analysis surfaces visible by default). Only the
-   * manageable analysis tracks (cpu/queue/spans/events) are collapsible.
-   * localStorage-backed (dial9.viewer.trackPrefs); replaces the legacy
-   * per-panel `dial9.viewer.panelCollapsed.<key>` string keys.
+   * Per-track collapsed state. Track id -> true when the user collapsed it to
+   * label-only height via the track-label caret. Absent or false = expanded
+   * (analysis surfaces visible by default). Only the manageable analysis
+   * tracks (cpu/queue/spans/events) are collapsible. localStorage-backed
+   * (dial9.viewer.trackPrefs).
    */
   collapsed: Readonly<Record<string, boolean>>;
-  /** Stack-sidebar width in CSS px (drag-resizable, 02 P2). */
+  /** Stack-sidebar width in CSS px (drag-resizable). */
   sidebarWidth: number;
   /**
-   * Legend chip toggles (02 J9, K5): span / custom-event names currently
-   * selected for display filtering. Empty set = no name filter.
+   * Legend chip toggles: span / custom-event names currently selected for
+   * display filtering. Empty set = no name filter.
    */
   selectedSpanNames: ReadonlySet<string>;
   selectedEventNames: ReadonlySet<string>;
   /**
-   * Span filter text (02 J7): case-insensitive substring over span name or
-   * field key/value. Empty string = no text filter. AND-combined with the
-   * name chips and the percentile filter (spanMatchesFilter). Lives in the
-   * store (not component-local) so the spans track re-renders reactively and
-   * a filter keystroke coalesces through the RAF scheduler to <= 1 render per
-   * frame (perf finding F2) instead of the legacy synchronous renderAll.
+   * Span filter text: case-insensitive substring over span name or field
+   * key/value. Empty string = no text filter. AND-combined with the name
+   * chips and the percentile filter (spanMatchesFilter). Lives in the store
+   * (not component-local) so the spans track re-renders reactively and a
+   * filter keystroke coalesces through the RAF scheduler to <= 1 render per
+   * frame.
    */
   spanFilter: string;
   /**
-   * Span percentile filter (02 J8): 0 = All, else 50 / 90 / 95 / 99 - show
-   * only spans at/above that percentile of their name's duration
-   * distribution. AND-combined with the text + name filters.
+   * Span percentile filter: 0 = All, else 50 / 90 / 95 / 99 - show only spans
+   * at/above that percentile of their name's duration distribution.
+   * AND-combined with the text + name filters.
    */
   spanPctFilter: number;
   /**
-   * Clock display mode for the time axis + timestamps (02 E1). Default
-   * "rel" (legacy `useAbsoluteTime` = false). The toolbar toggle drives it
-   * (T33); the time-axis track (T25) and every timestamp formatter READ it.
+   * Clock display mode for the time axis + timestamps. Default "rel". The
+   * toolbar toggle drives it; the time-axis track and every timestamp
+   * formatter READ it.
    */
   timeMode: TimeMode;
   /**
-   * Timezone for absolute timestamps (02 E2). Default "utc" (legacy
-   * `useLocalTz` = false); only consulted when timeMode === "abs".
+   * Timezone for absolute timestamps. Default "utc"; only consulted when
+   * timeMode === "abs".
    */
   tz: TimeZoneMode;
 }
@@ -297,9 +270,9 @@ export interface UiPrefsSlice {
 // ── transient slice ─────────────────────────────────────────────────────
 
 /**
- * In-flight drag gestures on the lanes (architecture 2.5): plain drag
- * pans, Shift+drag region-selects, Alt+drag zoom-selects. A drag only
- * becomes "moved" past the 3px intent threshold (02 H6-H8).
+ * In-flight drag gestures on the lanes: plain drag pans, Shift+drag
+ * region-selects, Alt+drag zoom-selects. A drag only becomes "moved" past
+ * the 3px intent threshold.
  */
 export type DragKind = "pan" | "region-select" | "zoom-select";
 
@@ -311,8 +284,8 @@ export interface DragState {
   startNs: number;
   /**
    * Timestamp under the pointer NOW (trace-monotonic ns, clamped to the draw
-   * area). Equals startNs at press; the pointer machine (T23) advances it on
-   * every move so the H10 selection overlay can render the region box from
+   * area). Equals startNs at press; the pointer machine advances it on every
+   * move so the selection overlay can render the region box from
    * [startNs, curNs] without re-reading the pointer position. For a "pan"
    * drag it is unused (stays at startNs) - pan updates the viewport, not a box.
    */
@@ -322,9 +295,9 @@ export interface DragState {
 }
 
 /**
- * Keyboard-driven Shift/Alt selection (02 H9): cursor seeded at the
- * mouse position (or view center), extended by arrow keys, confirmed
- * with Enter. Mirrors DragKind's selection modes.
+ * Keyboard-driven Shift/Alt selection: cursor seeded at the mouse position
+ * (or view center), extended by arrow keys, confirmed with Enter. Mirrors
+ * DragKind's selection modes.
  */
 export interface KeyboardSelection {
   kind: "region-select" | "zoom-select";
@@ -335,17 +308,15 @@ export interface KeyboardSelection {
 }
 
 /**
- * The "at this instant" stats mirrored into ONE persistent surface (04 S4;
- * the store contract T24 DEFINES and T31's inspector RENDERS). It carries the
- * values the legacy floating top-right `#info-panel` showed (features/02 I6 -
- * global injection-queue depth, max local-queue depth across workers, and the
- * active-task count) plus the worker + timestamp the cursor resolved to.
+ * The "at this instant" stats mirrored into ONE persistent surface. It carries
+ * the values the floating info panel showed - global injection-queue depth,
+ * max local-queue depth across workers, and the active-task count - plus the
+ * worker + timestamp the cursor resolved to.
  *
- * Written to `transient.atCursor` by the crosshair/hover channel (T24) on
- * every hover frame; read by the inspector (T31) - and, until T31 lands, by
- * T24's minimal readout stub in the inspector slot - so "at-moment stats" live
- * in the inspector, not a floating corner div. Because it rides the transient
- * slice, updating it never triggers a full track redraw (only subscribers that
+ * Written to `transient.atCursor` by the crosshair/hover channel on every
+ * hover frame; read by the inspector - so "at-moment stats" live in the
+ * inspector, not a floating corner div. Because it rides the transient slice,
+ * updating it never triggers a full track redraw (only subscribers that
  * declared `transient` re-run - the readout surface and the crosshair overlay).
  */
 export interface AtCursorReadout {
@@ -359,14 +330,12 @@ export interface AtCursorReadout {
   localMax: number | null;
   /**
    * Active-task count at ns (step: latest sample with t <= ns); null when the
-   * trace carries no task tracking (matches the legacy info-panel omitting the
-   * "Active tasks" line when `activeTaskSamples` is empty).
+   * trace carries no task tracking (activeTaskSamples empty).
    */
   activeTaskCount: number | null;
   /**
-   * Windowed-data completeness at the cursor (T17 segment-windowing carried
-   * obligation - T17-audit notes 6-7): "complete" when the segment covering
-   * `ns` is fully resident (or the whole trace is resident on the
+   * Windowed-data completeness at the cursor: "complete" when the segment
+   * covering `ns` is fully resident (or the whole trace is resident on the
    * non-segmented path); "truncated" when the covering segment is only
    * partially resident (listed/fetching/evicted - a window edge, not whole
    * data); "oversized" when the covering segment can never be resident at the
@@ -378,28 +347,27 @@ export interface AtCursorReadout {
 
 /**
  * High-frequency interaction state, updated on the crosshair RAF channel;
- * never triggers full renders (architecture 2.2/2.3 overlay layer).
+ * never triggers full renders (overlay layer).
  */
 export interface TransientSlice {
-  /** Timestamp under the mouse; null when outside the lanes (02 I2). */
+  /** Timestamp under the mouse; null when outside the lanes. */
   mouseNs: number | null;
-  /** Hovered custom event's timestamp for the guide line (02 I4). */
+  /** Hovered custom event's timestamp for the guide line. */
   hoverEventTs: number | null;
   /** Active drag gesture; null when not dragging. */
   drag: DragState | null;
-  /** Active keyboard selection; null when none (02 I3). */
+  /** Active keyboard selection; null when none. */
   keyboardSelection: KeyboardSelection | null;
   /**
-   * At-cursor stats readout (02 I6 + 04 S4), null when the cursor is outside
-   * the draw area or no trace is loaded. The store contract T31's inspector
-   * renders; populated by the T24 hover channel. Distinct from the ephemeral
-   * hover TOOLTIP (which is rendered imperatively from LaneHoverData, not
-   * stored) - this is the persistent mirror.
+   * At-cursor stats readout, null when the cursor is outside the draw area or
+   * no trace is loaded. Distinct from the ephemeral hover TOOLTIP (which is
+   * rendered imperatively from LaneHoverData, not stored) - this is the
+   * persistent mirror.
    */
   atCursor: AtCursorReadout | null;
 }
 
-// ── segments slice (architecture 2.8) ───────────────────────────────────
+// ── segments slice ──────────────────────────────────────────────────────
 
 /**
  * Lifecycle of one S3 segment in the two-tier pipeline:
@@ -407,15 +375,13 @@ export interface TransientSlice {
  * refusal. Eviction drops the parsed data (the ~10x cost) and falls back
  * to tier-1 rendering; re-entering a window re-parses.
  *
- * "oversized" (T17-audit finding 2, additive per the T06 precedent): the
- * segment's DECOMPRESSED size, learned from its one and only parse,
- * exceeds the resident budget - it can never be resident, so admission
+ * "oversized": the segment's DECOMPRESSED size, learned from its one and only
+ * parse, exceeds the resident budget - it can never be resident, so admission
  * defers it instead of spinning through parse -> evict on every viewport
- * tick. Explicitly distinct from "listed" (not yet fetched) and
- * "evicted" (fits, will re-parse on re-entry): consumers must render it
- * as unavailable-at-this-budget (tier-1 fallback + badge, chunk 2).
- * Exhaustive switches over this union keep every consumer honest when
- * the lifecycle grows.
+ * tick. Explicitly distinct from "listed" (not yet fetched) and "evicted"
+ * (fits, will re-parse on re-entry): consumers must render it as
+ * unavailable-at-this-budget (tier-1 fallback + badge). Exhaustive switches
+ * over this union keep every consumer honest when the lifecycle grows.
  */
 export type SegmentLifecycle =
   | "listed"
@@ -425,9 +391,8 @@ export type SegmentLifecycle =
   | "oversized";
 
 /**
- * Parse-derived invariants retained ACROSS eviction (architecture 2.8:
- * "parsed-window invariants (min/max ts, worker set) are retained so
- * lanes/axes stay stable"). Written when a segment first parses; never
+ * Parse-derived invariants (min/max ts, worker set) retained ACROSS eviction
+ * so lanes/axes stay stable. Written when a segment first parses; never
  * cleared while the segment stays listed.
  */
 export interface SegmentParseInvariants {
@@ -450,34 +415,34 @@ export interface SegmentEntry {
   /** Raw (gzipped) object size from the listing, bytes. */
   sizeBytes: number;
 
-  // ── T17 additive fields (all absent until first parse) ───────────────
+  // ── Additive fields (all absent until first parse) ───────────────────
 
   /** The segment's own parse; present iff state === "parsed". */
   trace?: ParsedTrace;
   /**
    * Decompressed (raw) byte size, learned from the first parse and
    * RETAINED after eviction: it is the segment's resident-budget cost
-   * (N19 accounts raw bytes as the proxy for the ~10x parsed heap) and
-   * upgrades the pre-fetch gzip-size estimate for re-entry planning.
+   * (raw bytes are the proxy for the ~10x parsed heap) and upgrades the
+   * pre-fetch gzip-size estimate for re-entry planning.
    */
   rawByteLength?: number;
   /** Retained across eviction (see SegmentParseInvariants). */
   invariants?: SegmentParseInvariants;
   /**
-   * Boundary-poll evidence at the segment's edges (types/trace.d.ts).
+   * Boundary-poll evidence at the segment's edges (SegmentEdgePolls).
    * Written at first parse and RETAINED across eviction (they are tiny -
    * at most one open + one close per worker): a poll crossing an evicted
    * neighbor still needs that neighbor's edge evidence to surface as
-   * explicitly truncated instead of vanishing (T17-audit finding 1).
-   * Absent only before the first parse.
+   * explicitly truncated instead of vanishing. Absent only before the first
+   * parse.
    */
   edgePolls?: SegmentEdgePolls;
 }
 
 /**
- * The segment-windowed loading state (architecture 2.8): segment key
- * (S3 object key) -> entry. The viewport drives transitions; budgets,
- * prefetch, and eviction policy live in lib/trace/segments.ts.
+ * The segment-windowed loading state: segment key (S3 object key) -> entry.
+ * The viewport drives transitions; budgets, prefetch, and eviction policy
+ * live in lib/trace/segments.ts.
  */
 export interface SegmentsSlice {
   segments: ReadonlyMap<string, SegmentEntry>;
@@ -486,10 +451,9 @@ export interface SegmentsSlice {
 // ── Store shape ─────────────────────────────────────────────────────────
 
 /**
- * The full per-page store state: one property per slice (architecture
- * 2.2 + the 2.8 segments slice). Subscribers declare dependencies as
- * sets of StoreSliceName; the scheduler coalesces notifications per RAF
- * tick (implementation: T07/T08).
+ * The full per-page store state: one property per slice. Subscribers declare
+ * dependencies as sets of StoreSliceName; the scheduler coalesces
+ * notifications per RAF tick.
  */
 export interface StoreState {
   trace: TraceSlice;
@@ -504,7 +468,7 @@ export interface StoreState {
 /** "trace" | "viewport" | "selection" | "poi" | "uiPrefs" | "transient" | "segments" */
 export type StoreSliceName = keyof StoreState;
 
-// ── Layout geometry (architecture 2.3) ──────────────────────────────────
+// ── Layout geometry ──────────────────────────────────────────────────────
 //
 // lib/canvas/layout.ts is the single producer of these; the frozen
 // panel_layout.js invariant (LABEL_W gutter, drawW, scrollbar

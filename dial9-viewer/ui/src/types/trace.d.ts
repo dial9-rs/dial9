@@ -1,29 +1,29 @@
-// App-level trace vocabulary (T06; docs/ui-inventory/02-architecture.md 2.6).
+// App-level trace vocabulary.
 //
 // This is the single import surface for trace-domain types in `src/`: it
 // re-exports the frozen core's shapes (declared in the ambient wildcard
-// modules of src/types/*.d.ts, T05) and adds the app-level shapes the core
-// does not return -- most importantly the kind-discriminated RuntimeEvent
-// union that makes event switches compiler-exhaustive.
+// modules of src/types/*.d.ts) and adds the app-level shapes the core does
+// not return -- most importantly the kind-discriminated RuntimeEvent union
+// that makes event switches compiler-exhaustive.
 //
-// FORM: unlike the T05 declarations (ambient `declare module "*/x.js"`
-// blocks describing real .js files), this is an importable module .d.ts.
-// There is NO backing .js module at runtime, so this file must contain
-// TYPES ONLY -- no `export const`, no functions. Consumers must use
+// FORM: unlike the ambient `declare module "*/x.js"` blocks describing real
+// .js files, this is an importable module .d.ts. There is NO backing .js
+// module at runtime, so this file must contain TYPES ONLY -- no
+// `export const`, no functions. Consumers must use
 // `import type { ... } from "../types/trace.js"`; `verbatimModuleSyntax`
-// (tsconfig) turns any accidental value import into a compile error
-// (TS1484), so a runtime import of the nonexistent module cannot ship.
+// (tsconfig) turns any accidental value import into a compile error (TS1484),
+// so a runtime import of the nonexistent module cannot ship.
 //
-// ADR-0002 (block-in-place gap is unknowable): gap-related absence is
-// encoded EXPLICITLY, never silently optional. `tid` on park/unpark
-// variants is a required `number | undefined` -- constructors must
-// acknowledge old traces that predate the field rather than forget them.
+// Block-in-place gap is unknowable: gap-related absence is encoded
+// EXPLICITLY, never silently optional. `tid` on park/unpark variants is a
+// required `number | undefined` -- constructors must acknowledge old traces
+// that predate the field rather than forget them.
 
-// ── Re-exported core shapes (T05 declarations) ──────────────────────────
+// ── Re-exported core shapes ──────────────────────────────────────────────
 //
-// The parsed-trace shape per architecture 2.6: workers, polls, spans,
-// custom events, CPU/heap samples, sched events, queue series,
-// block-in-place gaps. Type-only re-exports; erased at build time.
+// The parsed-trace shape: workers, polls, spans, custom events, CPU/heap
+// samples, sched events, queue series, block-in-place gaps. Type-only
+// re-exports; erased at build time.
 
 export type {
   ParsedTrace,
@@ -82,13 +82,10 @@ export interface TimeRange {
  * Trace-embedded identity read from a trace's free-form SegmentMetadata KV
  * map (`ParsedTrace.segmentMetadata`). The `service`/`host` KEY NAMES are a
  * writer-side convention, NOT a wire-format contract; they are confirmed
- * against the dial9 writer/source code (dial9-utils S3 source
- * `.metadata("service" | "host", ...)`, `gen_fixtures.rs standard_metadata()`,
- * the writer roundtrip test, and the metrics-service example) and pinned ONCE
- * as the read contract in `lib/trace/segment-metadata.ts` (SEGMENT_SERVICE_KEY
- * / SEGMENT_HOST_KEY). A field is present only when the map carries a
- * non-empty value for its key; traces predating the convention carry neither
- * (surfaced in the toolbar file info, T45; closes #68).
+ * against the dial9 writer/source code and pinned ONCE as the read contract
+ * in `lib/trace/segment-metadata.ts` (SEGMENT_SERVICE_KEY / SEGMENT_HOST_KEY).
+ * A field is present only when the map carries a non-empty value for its key;
+ * traces predating the convention carry neither.
  */
 export interface SegmentIdentity {
   /** SegmentMetadata `service` value; `undefined` when absent or empty. */
@@ -97,25 +94,24 @@ export interface SegmentIdentity {
   host?: string;
 }
 
-// ── Segment-window boundary polls (architecture 2.8; T17) ───────────────
+// ── Segment-window boundary polls ────────────────────────────────────────
 //
 // A poll can straddle a segment boundary (segment rotation is not
 // poll-aligned): its PollStart lands in one S3 object and its PollEnd in
 // the next. The frozen core, parsing one segment at a time, DISCARDS the
-// open poll at the segment's end (trace_analysis.js #194 - "segment
-// rotated mid-poll, not a long poll") and IGNORES the dangling PollEnd at
-// the next segment's start. Under segment-windowed loading these shapes
-// carry that boundary evidence through the parsed output instead:
+// open poll at the segment's end ("segment rotated mid-poll, not a long
+// poll") and IGNORES the dangling PollEnd at the next segment's start. Under
+// segment-windowed loading these shapes carry that boundary evidence through
+// the parsed output instead:
 //
 // - When BOTH neighbors are resident, the two halves stitch back into a
 //   complete poll (StitchedBoundaryPoll).
 // - When the neighbor is beyond the resident window (evicted/unfetched),
 //   the poll surfaces explicitly truncated at the window edge
-//   (WindowEdgePoll) - the features/02 G5 open-ended marker extended to
-//   window edges, never a long-poll false positive and never silently
-//   dropped data.
+//   (WindowEdgePoll) - the open-ended marker extended to window edges, never
+//   a long-poll false positive and never silently dropped data.
 //
-// Additive only (T06 precedent): nothing in the core's PollSpan changes.
+// Additive only: nothing in the core's PollSpan changes.
 
 /**
  * A poll left open at a segment's END: its PollStart was parsed but no
@@ -138,7 +134,7 @@ export interface SegmentEdgeOpenPoll {
  * event for the worker in this segment is a PollEnd, so the poll began
  * before the segment. (A WorkerPark-first segment start is ambiguous -
  * no poll may have been running - and is deliberately NOT captured:
- * absence is never fabricated, ADR-0002 spirit.)
+ * absence is never fabricated.)
  */
 export interface SegmentEdgeDanglingClose {
   workerId: number;
@@ -157,11 +153,11 @@ export interface SegmentEdgePolls {
  * past RESIDENT observed data (`end` is clamped to the last resident
  * event the poll provably spans for "end"-truncated polls, `start` to
  * the first for "start"-truncated ones), so the span is a LOWER bound on
- * the real poll - renderers must show the G5 truncation marker, not a
+ * the real poll - renderers must show the truncation marker, not a
  * duration. A poll provably in flight across one or more whole resident
  * segments (its start AND end both beyond the resident window, continuity
- * proven by worker silence plus retained edge evidence - T17-audit
- * finding 1) is truncated at "both" edges.
+ * proven by worker silence plus retained edge evidence) is truncated at
+ * "both" edges.
  */
 export interface WindowEdgePoll {
   workerId: number;
@@ -177,7 +173,7 @@ export interface WindowEdgePoll {
   spawnLoc: string | null;
   /** Which window edge(s) truncate this poll. */
   truncatedAt: "start" | "end" | "both";
-  /** Always true: duration unknown, G5 marker semantics. */
+  /** Always true: duration unknown, open-ended marker semantics. */
   openEnded: true;
 }
 
@@ -187,8 +183,7 @@ export interface WindowEdgePoll {
  * a later one, every interior segment resident and provably silent for
  * the worker (a PollEnd/Park/PollStart there would have closed the poll).
  * The two-segment case is the k = 2 degenerate chain; polls spanning 3+
- * segments assemble the same way (T17-audit finding 1). Field-compatible
- * with the core's PollSpan.
+ * segments assemble the same way. Field-compatible with the core's PollSpan.
  */
 export interface StitchedBoundaryPoll {
   workerId: number;
@@ -209,7 +204,7 @@ export interface WindowBoundaryPolls {
   stitched: readonly StitchedBoundaryPoll[];
 }
 
-// ── Kind-discriminated runtime-event union (architecture 2.6) ───────────
+// ── Kind-discriminated runtime-event union ───────────────────────────────
 //
 // The frozen core normalizes every runtime event into a flat `TraceEvent`
 // with a numeric `eventType` and zero/null defaults for fields the type
@@ -217,8 +212,8 @@ export interface WindowBoundaryPolls {
 // app-level view: one variant per EVENT_TYPES entry, carrying ONLY the
 // fields that event type actually populates, discriminated by a string
 // `kind` so switches are exhaustive (see src/types/exhaustive.test.ts).
-// The flat-to-union refinement lives in lib/trace (typed core boundary,
-// architecture 2.7) -- this file only defines the vocabulary.
+// The flat-to-union refinement lives in lib/trace (typed core boundary) --
+// this file only defines the vocabulary.
 
 /** Common fields present on every runtime event. */
 interface RuntimeEventBase {
@@ -255,8 +250,8 @@ export interface WorkerParkEvent extends RuntimeEventBase {
   cpuTime: number;
   /**
    * OS thread id the park happened on. Explicitly `undefined` (not
-   * optional) on traces that predate the field: ADR-0002 gap detection
-   * needs park/unpark tids and must SKIP events without one instead of
+   * optional) on traces that predate the field: gap detection needs
+   * park/unpark tids and must SKIP events without one instead of
    * fabricating attribution -- constructors are forced to acknowledge
    * the absence.
    */
@@ -272,7 +267,7 @@ export interface WorkerUnparkEvent extends RuntimeEventBase {
   cpuTime: number;
   /** Kernel scheduling wait (ns) between wakeup request and running. */
   schedWait: number;
-  /** See WorkerParkEvent.tid (ADR-0002). */
+  /** See WorkerParkEvent.tid. */
   tid: number | undefined;
 }
 

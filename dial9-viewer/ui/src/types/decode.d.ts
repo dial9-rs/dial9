@@ -1,15 +1,11 @@
-// Hand-written type declarations for the frozen-core file `decode.js`
-// (dial9-trace-format decoder). See docs/adr/0004-viewer-ui-migration.md
-// section 6 (frozen core policy) and 02-architecture.md sections 2.6/2.7.
+// Type declarations for the frozen-core file `decode.js`
+// (dial9-trace-format decoder).
 //
 // Declaration form: an ambient wildcard module (`*/decode.js`) so any
 // relative import path from src/ (e.g. `import { TraceDecoder } from
 // "../../decode.js"`) picks up these types via Vite's CJS interop without
 // enabling allowJs. The wildcard matches the trailing `/decode.js` segment
 // of the specifier; the core .js file itself is never type-checked.
-//
-// Public API only; shapes verified against decode.js (whole file) and its
-// consumers (trace_parser.js getTraceDecoder/parse loops, test_stream_parse.js).
 
 declare module "*/decode.js" {
   /**

@@ -1,18 +1,14 @@
-// Hand-written type declarations for `flamegraph_api.js` (pure helpers for
-// the aggregated `?api=1` flamegraph mode: coverage badge/percent, auto-stop
-// plateau heuristic, UTC picker conversion, max_files ceiling, facet
-// options). See src/types/decode.d.ts for the declaration-form rationale.
-// Verified against flamegraph_api.js and its call sites in flamegraph.html
-// (api-mode IIFE) and tests/core/flamegraph_api.test.ts.
+// Type declarations for `flamegraph_api.js` (pure helpers for the aggregated
+// `?api=1` flamegraph mode: coverage badge/percent, auto-stop plateau
+// heuristic, UTC picker conversion, max_files ceiling, facet options).
+// See src/types/decode.d.ts for the declaration-form rationale.
 //
-// NOT frozen core (post-freeze page module), but it lives at the ui/ root in
-// browser-global + CommonJS-guard form and is still loaded by the legacy
-// page via <script src>, so typed src/ code consumes it through the
-// lib/trace boundary (src/lib/trace/api_format.ts) exactly like the core.
-//
-// `isCoverageFrozen` is deliberately NOT re-exported into src/: the typed
-// port in lib/trace/aggregates.ts (same semantics, typed Coverage) is the
-// src/-side implementation.
+// Not frozen core, but loaded as a browser global (CommonJS-guard form) and
+// consumed by typed src/ through the lib/trace boundary
+// (src/lib/trace/api_format.ts) exactly like the core. `isCoverageFrozen` is
+// deliberately NOT re-exported into src/: the typed port in
+// lib/trace/aggregates.ts (same semantics, typed Coverage) is the src/-side
+// implementation.
 
 declare module "*/flamegraph_api.js" {
   /**

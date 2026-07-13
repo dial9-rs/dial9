@@ -1,8 +1,6 @@
-// Hand-written type declarations for the frozen-core file `heatmap.js`
+// Type declarations for the frozen-core file `heatmap.js`
 // (S3 browser density timeline helpers). See src/types/decode.d.ts for the
 // declaration-form rationale.
-// Verified against heatmap.js and the index.html call sites (normalized
-// segments are built there as {key, size, start, end, service, host, bootId}).
 
 declare module "*/heatmap.js" {
   /** Max total bytes allowed to open in the viewer at once (open-size cap). */
@@ -12,15 +10,15 @@ declare module "*/heatmap.js" {
   export const MIN_SEGMENT_SECONDS: number;
 
   /**
-   * Minimal segment shape the helpers read. index.html's normalized
-   * segments carry more fields (key, ...); the generics below preserve
-   * them. `service`/`host`/`bootId` come from parseKey and may be missing
-   * on unknown key layouts. Times are epoch seconds.
+   * Minimal segment shape the helpers read. Callers' normalized segments
+   * carry more fields (key, ...); the generics below preserve them.
+   * `service`/`host`/`bootId` come from parseKey and may be missing on
+   * unknown key layouts. Times are epoch seconds.
    *
    * The optional fields include `| undefined` explicitly
    * (exactOptionalPropertyTypes): the JS treats an explicitly-undefined
-   * field the same as a missing one, and index.html's normalized segments
-   * do carry explicit undefineds from parseKey.
+   * field the same as a missing one, and callers' normalized segments do
+   * carry explicit undefineds from parseKey.
    */
   export interface SegmentInput {
     start: number;

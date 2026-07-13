@@ -1,15 +1,11 @@
-// Hand-written type declarations for the frozen-core file `trace_parser.js`.
+// Type declarations for the frozen-core file `trace_parser.js`.
 // See src/types/decode.d.ts for the declaration-form rationale (ambient
 // wildcard module matching any relative import ending in `/trace_parser.js`).
 //
-// Shapes verified against trace_parser.js (processFrame/finalizeParse), the
-// dial9-trace-loading skill (ParsedTrace schema), and call sites in
-// viewer.html / flamegraph.html.
-//
-// Trace-format backwards compatibility (AGENTS.md): fields added to the wire
-// format later than the first release are optional here (e.g. `tid` on
-// park/unpark TraceEvents) because old traces won't carry them. ADR-0002
-// (block-in-place gap is unknowable) nullability is encoded explicitly on
+// Trace-format backwards compatibility: fields added to the wire format later
+// than the first release are optional here (e.g. `tid` on park/unpark
+// TraceEvents) because old traces won't carry them. Block-in-place gap
+// nullability (the gap is unknowable) is encoded explicitly on
 // `BlockInPlaceGap`, `TraceEvent.tid` and the OFF_WORKER_WORKER_ID sentinel.
 
 declare module "*/trace_parser.js" {
@@ -26,8 +22,7 @@ declare module "*/trace_parser.js" {
   /**
    * Sentinel `workerId` for CPU samples that cannot be confidently attributed
    * to a specific worker (matches producer-side `WorkerId::UNKNOWN`).
-   * ADR-0002: samples falling inside a block-in-place gap are rewritten to
-   * this value.
+   * Samples falling inside a block-in-place gap are rewritten to this value.
    */
   export const OFF_WORKER_WORKER_ID: number;
 
@@ -52,7 +47,7 @@ declare module "*/trace_parser.js" {
     /**
      * OS thread id. Only set on WorkerPark/WorkerUnpark events, and only for
      * traces new enough to carry it (`undefined` on old traces -- the
-     * block-in-place gap detection of ADR-0002 skips events without it).
+     * block-in-place gap detection skips events without it).
      */
     tid?: number | undefined;
     /** WakeEvent only. */
@@ -67,10 +62,9 @@ declare module "*/trace_parser.js" {
     /** Monotonic nanoseconds. */
     timestamp: number;
     /**
-     * Worker attribution, re-derived from park/unpark tids at parse time
-     * (ADR-0001). May be the OFF_WORKER_WORKER_ID sentinel (255) for samples
-     * that cannot be attributed -- including samples inside a block-in-place
-     * gap (ADR-0002).
+     * Worker attribution, re-derived from park/unpark tids at parse time.
+     * May be the OFF_WORKER_WORKER_ID sentinel (255) for samples that cannot
+     * be attributed -- including samples inside a block-in-place gap.
      */
     workerId: number;
     tid: number;
@@ -157,10 +151,10 @@ declare module "*/trace_parser.js" {
   }
 
   /**
-   * A detected block-in-place handoff interval (ADR-0002). Worker
-   * attribution inside [startNs, endNs) is unknowable: samples in the gap
-   * have workerId rewritten to OFF_WORKER_WORKER_ID, and active spans
-   * crossing a gap are discarded by buildWorkerSpans.
+   * A detected block-in-place handoff interval. Worker attribution inside
+   * [startNs, endNs) is unknowable: samples in the gap have workerId
+   * rewritten to OFF_WORKER_WORKER_ID, and active spans crossing a gap are
+   * discarded by buildWorkerSpans.
    */
   export interface BlockInPlaceGap {
     workerId: number;
@@ -212,7 +206,7 @@ declare module "*/trace_parser.js" {
     clockSyncAnchors: ClockSyncAnchor[];
     /** Monotonic-to-wall-clock offset; null when no anchor exists. */
     clockOffsetNs: number | null;
-    /** Sorted by startNs. See ADR-0002. */
+    /** Sorted by startNs. */
     blockInPlaceGaps: BlockInPlaceGap[];
   }
 
@@ -351,7 +345,7 @@ declare module "*/trace_parser.js" {
   /**
    * Derive block-in-place gaps from park/unpark events and rewrite
    * `cpuSamples[i].workerId` to OFF_WORKER_WORKER_ID for samples inside a
-   * gap (mutates cpuSamples). Returns gaps sorted by startNs. ADR-0002.
+   * gap (mutates cpuSamples). Returns gaps sorted by startNs.
    */
   export function deriveBlockInPlaceGaps(
     events: readonly TraceEvent[],

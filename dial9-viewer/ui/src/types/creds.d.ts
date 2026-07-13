@@ -1,8 +1,6 @@
-// Hand-written type declarations for the frozen-core file `creds.js`
+// Type declarations for the frozen-core file `creds.js`
 // (bring-your-own-credentials store). See src/types/decode.d.ts for the
-// declaration-form rationale. Verified against creds.js and call sites in
-// index.html (apply path: parse/set/get/has/clear/listBuckets) and
-// flamegraph.html / tokio_stats.html (headers()).
+// declaration-form rationale.
 //
 // Note: creds.js also publishes `window.Dial9Creds` as the stable
 // userscript contract; that global is intentionally NOT declared here --

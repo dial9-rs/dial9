@@ -1,6 +1,5 @@
-// Hand-written type declarations for the frozen-core file `format.js`.
+// Type declarations for the frozen-core file `format.js`.
 // See src/types/decode.d.ts for the declaration-form rationale.
-// Verified against format.js and call sites in viewer.html/flamegraph.html.
 
 declare module "*/format.js" {
   /**
