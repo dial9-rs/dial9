@@ -144,6 +144,10 @@ export default defineConfig({
         // new/viewer.html (registered in ui-switch.js NEW_UI_ENTRIES; the
         // canonical /viewer.html keeps serving the legacy page).
         "new-viewer": "new/viewer.html",
+        // T41: the migrated Tokio Stats page, served off-root at
+        // new/tokio_stats.html (registered in ui-switch.js NEW_UI_ENTRIES;
+        // the canonical /tokio_stats.html keeps serving the legacy page).
+        "new-tokio-stats": "new/tokio_stats.html",
       },
     },
   },

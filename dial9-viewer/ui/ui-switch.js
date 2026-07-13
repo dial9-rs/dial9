@@ -62,6 +62,8 @@
     "index.html": "new/index.html",
     // T21: the migrated trace-viewer shell (Vite entry new/viewer.html).
     "viewer.html": "new/viewer.html",
+    // T41: the migrated Tokio Stats page (Vite entry new/tokio_stats.html).
+    "tokio_stats.html": "new/tokio_stats.html",
   };
 
   // THE DEFAULT FLIP (ADR-0004 section 8, stage 2 -> stage 3): change
