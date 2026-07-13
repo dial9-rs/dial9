@@ -263,7 +263,10 @@ body {
 .d9-rail-row:hover { background: #1c1c40; }
 .d9-rail-row.on { background: #2a2a5e; }
 .d9-rail-row td { padding: 4px 6px; color: var(--d9-fg); }
-.d9-rail-worker { display: flex; align-items: center; gap: 5px; white-space: nowrap; }
+.d9-rail-worker { white-space: nowrap; }
+/* The severity-dot column: its own cell so the body's 5 columns line up with
+   the header's 5 (empty dot-th + worker + what + t + dur). Shrinks to the dot. */
+.d9-rail-dot-cell { width: 1%; padding-right: 0 !important; }
 .d9-rail-num { text-align: right; font-variant-numeric: tabular-nums; color: #cdd2f0; white-space: nowrap; }
 .d9-rail-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
 .d9-rail-dot.sev-high { background: #ff6b6b; }

@@ -828,8 +828,17 @@ export function mountInspector(
 
   function applyWidth(width: number, persist: boolean): void {
     const clamped = clampWidth(width);
+    // Apply to the DOM synchronously so the track column (flex sibling)
+    // reflows to the new width THIS frame, before the tracks redraw below.
+    host.style.width = `${clamped}px`;
     if (clamped !== state().uiPrefs.sidebarWidth) {
       store.update("uiPrefs", { sidebarWidth: clamped });
+      // Poke the viewport channel so the track-CONTENT controllers redraw at
+      // the new column width in real time: lanes/spans/cpu/... subscribe to
+      // `viewport`, not `uiPrefs`, so a bare sidebarWidth change re-renders the
+      // shell chrome + resizes the canvases but leaves their pixels stale.
+      // Mirrors the shell's window-resize handler (store.update("viewport", {})).
+      store.update("viewport", {});
     }
     if (persist) writeStoredWidth(clamped);
   }

@@ -231,16 +231,16 @@ function railTable(vm: PoiViewModel, h: RailHandlers): TemplateResult {
                 title=${`${row.worker} · ${row.kind} · ${row.time} · ${row.duration}`}
                 @click=${() => h.jumpTo(i)}
               >
-                <td class="d9-rail-worker">
+                <td class="d9-rail-dot-cell">
                   <span
                     class=${classMap({
                       "d9-rail-dot": true,
                       [`sev-${row.severity}`]: true,
                     })}
                     aria-hidden="true"
-                  ></span
-                  >${row.worker}
+                  ></span>
                 </td>
+                <td class="d9-rail-worker">${row.worker}</td>
                 <td>${row.kind}</td>
                 <td class="d9-rail-num">${row.time}</td>
                 <td class="d9-rail-num">${row.duration}</td>
