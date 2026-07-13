@@ -80,7 +80,7 @@ fn repo_root() -> PathBuf {
 }
 
 fn demo_trace_compressed() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ui/demo-trace.bin")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ui/public/demo-trace.bin")
 }
 
 fn load_demo_trace() -> Vec<u8> {
@@ -352,7 +352,7 @@ fn rust_decode_matches_js_reference_properties() {
     assert_eq!(
         js["total_samples"], golden["total_samples"],
         "golden fixture is stale vs live JS oracle — regenerate it:\n  \
-         node dial9-viewer/ui/trace_properties.js dial9-viewer/ui/demo-trace.bin \
+         node dial9-viewer/ui/trace_properties.js dial9-viewer/ui/public/demo-trace.bin \
          > dial9-viewer/tests/fixtures/demo-trace.properties.json"
     );
 

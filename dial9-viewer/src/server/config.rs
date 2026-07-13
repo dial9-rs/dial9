@@ -18,6 +18,12 @@ pub struct ConfigResponse {
     /// (`x-dial9-aws-role-arn`) — i.e. an assumer is wired. Lets a client offer
     /// "read via role" as an alternative to pasting credentials.
     pub supports_assume_role: bool,
+    /// Bucket-name substring (matched case-insensitively, client-side) the UI's
+    /// bucket picker uses to surface likely trace buckets. Defaults to "dial9";
+    /// an empty string disables the filtering. The page may override this per
+    /// load with a `bucket_filter=` query param on its own URL (T15; resolves
+    /// the features/01 Finding-2 bucket-filter lockout structurally).
+    pub bucket_filter: String,
 }
 
 pub async fn get_config(State(state): State<AppState>) -> Json<ConfigResponse> {
@@ -33,5 +39,6 @@ pub async fn get_config(State(state): State<AppState>) -> Json<ConfigResponse> {
         // Assume-role is available only when an assumer was wired (S3 source
         // with an ambient identity); see `AppState::role_assumer`.
         supports_assume_role: state.role_assumer.is_some(),
+        bucket_filter: state.bucket_filter.clone(),
     })
 }

@@ -103,19 +103,27 @@
     return { nodes, maxDepth: maxD };
   }
 
-  // Count matching frames and their self-samples for search stats.
+  // Count matching frames and the samples the search highlights (#593).
+  // `matchedCount` is the union of INCLUSIVE sample counts of the topmost
+  // matching frames: a match nested under another match lies inside its
+  // ancestor's highlighted extent and adds no new area. This equals the
+  // share of the canvas lit at full alpha (the search highlight renders
+  // each matching frame's full `count`-wide bar), and is the same semantic
+  // as the exported SVG's embedded search ("Matched: X%",
+  // flamegraph_export.js) and flamegraph.pl.
   function countSearchMatches(root, queryLower) {
-    let selfCount = 0;
+    let matchedCount = 0;
     let frameCount = 0;
-    function walk(node) {
-      if (node.name.toLowerCase().includes(queryLower) || (node.fullName && node.fullName.toLowerCase().includes(queryLower))) {
-        selfCount += node.self;
+    function walk(node, underMatch) {
+      const isMatch = node.name.toLowerCase().includes(queryLower) || (node.fullName && node.fullName.toLowerCase().includes(queryLower));
+      if (isMatch) {
         frameCount++;
+        if (!underMatch) matchedCount += node.count;
       }
-      for (const child of node.children.values()) walk(child);
+      for (const child of node.children.values()) walk(child, underMatch || isMatch);
     }
-    walk(root);
-    return { selfCount, frameCount };
+    walk(root, false);
+    return { matchedCount, frameCount };
   }
 
   function filterCpuSamples(cpuSamples, startNs, endNs) {
@@ -488,30 +496,33 @@
         return;
       }
       const qLower = searchQuery.toLowerCase();
-      let matchedSelf = 0;
+      let matchedSamples = 0;
       let matchedFrames = 0;
-      let totalSelf = 0;
+      let totalSamples = 0;
       const wRoot = workerZoomStack.length > 0 ? workerZoomStack[workerZoomStack.length - 1] : workerTree;
       const oRoot = offworkerZoomStack.length > 0 ? offworkerZoomStack[offworkerZoomStack.length - 1] : offworkerTree;
       if (wRoot) {
         const m = countSearchMatches(wRoot, qLower);
-        matchedSelf += m.selfCount;
+        matchedSamples += m.matchedCount;
         matchedFrames += m.frameCount;
-        totalSelf += wRoot.count;
+        totalSamples += wRoot.count;
       }
       if (oRoot) {
         const m = countSearchMatches(oRoot, qLower);
-        matchedSelf += m.selfCount;
+        matchedSamples += m.matchedCount;
         matchedFrames += m.frameCount;
-        totalSelf += oRoot.count;
+        totalSamples += oRoot.count;
       }
       if (matchedFrames === 0) {
         searchStats.textContent = "no matches";
         return;
       }
       let text = matchedFrames + (matchedFrames === 1 ? " frame" : " frames");
-      if (matchedSelf > 0 && totalSelf > 0) {
-        const pct = ((matchedSelf / totalSelf) * 100).toFixed(1);
+      // The percentage is the highlighted-area share (countSearchMatches,
+      // #593); it is shown whenever there are matches - a mid-stack-only
+      // match set is no longer silently hidden.
+      if (totalSamples > 0) {
+        const pct = ((matchedSamples / totalSamples) * 100).toFixed(1);
         text += ` \u00b7 ${pct}% of samples`;
       }
       searchStats.textContent = text;
@@ -1006,7 +1017,10 @@
     return { setData, setTreeDirect, resize, destroy, handleEscape, isZoomed, getZoomPath, zoomToPath };
   }
 
-  const fgExports = { createFlamegraph: createFlamegraph, filterCpuSamples: filterCpuSamples };
+  // countSearchMatches is exported for the #593 regression suite
+  // (tests/core/flamegraph_search.test.ts); the pages use it only through
+  // createFlamegraph's search stats.
+  const fgExports = { createFlamegraph: createFlamegraph, filterCpuSamples: filterCpuSamples, countSearchMatches: countSearchMatches };
   if (typeof module !== "undefined" && module.exports) {
     module.exports = fgExports;
   } else {

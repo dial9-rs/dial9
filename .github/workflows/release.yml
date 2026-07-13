@@ -26,6 +26,17 @@ jobs:
         uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
         with:
           toolchain: stable
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: dial9-viewer/ui/package-lock.json
+      # Build the viewer UI BEFORE release-plz publishes: the dial9-viewer
+      # crate archive must carry ui/dist (embedded via rust-embed at compile
+      # time), so cargo-install users never need Node (constraint H1).
+      - name: Build viewer UI
+        working-directory: dial9-viewer/ui
+        run: npm ci && npm run build
       - name: Authenticate to crates.io
         uses: rust-lang/crates-io-auth-action@b7e9a28eded4986ec6b1fa40eeee8f8f165559ec # v1
         id: auth
@@ -74,6 +85,19 @@ jobs:
         with:
           toolchain: stable
           targets: ${{ matrix.target }}
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: dial9-viewer/ui/package-lock.json
+
+      # Build the viewer UI BEFORE the binaries: rust-embed embeds ui/dist
+      # into dial9-viewer at compile time (constraint H1).
+      - name: Build viewer UI
+        working-directory: dial9-viewer/ui
+        shell: bash
+        run: npm ci && npm run build
 
       - run: cargo build --release --target ${{ matrix.target }} -p dial9-viewer -p dial9
         env:

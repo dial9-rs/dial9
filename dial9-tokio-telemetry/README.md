@@ -642,6 +642,27 @@ dial9 serve --local-dir /tmp/my_traces
 dial9 serve --bucket my-trace-bucket
 ```
 
+### Using the viewer
+
+The viewer is being migrated to a rebuilt UI, rolled out in stages. During the
+rollout the new UI is **opt-in**: add `?ui=new` to the page URL (for example
+`viewer.html?trace=<trace>&ui=new`), or click the "Switch to new UI" pill in the
+bottom-right corner. The legacy UI stays the default until the migration
+completes, and your choice is remembered per browser; add `?ui=legacy` to a
+shared link to force the legacy UI.
+
+- **Keyboard shortcuts:** press `?` on any migrated page to open the in-app help
+  overlay. It is the authoritative keyboard map and lists only the keys wired on
+  the current page, so it never drifts from what actually works.
+- **Windowed loading:** large traces load the time window you are looking at
+  rather than the whole file at once. When a window's data is truncated at its
+  edge, the at-cursor readout flags it ("partial window", or "oversized segment"
+  for an over-budget segment) so a partially-loaded window is never presented as
+  complete.
+- **Shareable links:** the page URL is a stable deep-link API. The query string
+  (`trace=`, time range) and the `#v=1` view-state hash round-trip, so a copied
+  link reopens the same trace at the same view.
+
 ### Agent toolkit
 
 `dial9` also ships skill documentation and JS analysis modules for scripted trace analysis.

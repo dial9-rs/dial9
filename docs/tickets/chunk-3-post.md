@@ -13,7 +13,14 @@ gets its own inventory (T40).
 
 Ownership summary (chunk 3):
 - tokio_stats.html: T40 (inventory) + T41 (migration, all its rows)
+  (T40 2026-07-10: `docs/ui-inventory/features/04-tokio-stats-html.md`
+  landed - 69 rows in sections A-K, incl. the `/api/tokio-stats` backend
+  contract (section J) and a findings list. "All its rows" for T41 = those
+  69. One row is DEAD at HEAD: exemplar deep links target `/api/trace`,
+  removed by #582 - T41 must ledger fix-vs-preserve; see finding 1 there.)
 - No other feature rows; T42-T48 are enablement/process/deferred work.
+- Chunk-1's ownership summary does not reference features/04 (checked
+  2026-07-10), so no update there.
 
 ---
 
@@ -43,6 +50,18 @@ the dev-server; ownership summaries in this file + chunk-1 updated.
 
 **Deps:** T12 (row-walker used for validation). Blocks: T41.
 
+(T40 2026-07-10: DONE - 69 rows. Two ticket caveats superseded by the walk:
+(1) the dev-server's `/api/tokio-stats` IS functional against the seeded
+demo bucket (cold poll empty, `refine=true` folds 94212 polls / 5 spawn
+locations) - the agg=None recipe work item was unnecessary (T18 verified the
+same); (2) what remains NOT-TRIGGERABLE locally is narrower: time-windowed
+scopes (the demo key's filename-epoch vs date-path mismatch 404s every
+window - features/01 finding 3), off-CPU class-0 polls (demo max poll ~1ms
+< the 10ms confidence bound), cap-plateau refinement (1 matched file), and
+multi-host/-service data - all T42 fixture targets. No `features04` walker
+registry was added (per-page walkers are T41's implementation-time
+deliverable); DOM verdicts are CODE-READ, API verdicts curl-VERIFIED.)
+
 ---
 
 ## T41 - Migrate tokio_stats.html
@@ -70,6 +89,16 @@ refine - all of it, per the T38 rule); check: axe clean; check: XSS
 regression test (hostile service/host strings render inert).
 
 **Deps:** T40, T02-T09, T12, T18, T20, T38.
+
+(T40 2026-07-10 heads-up for T41: features/04 landed with 69 rows; four
+carry behavior-vs-fix ledger decisions - H4 exemplar deep links are DEAD at
+HEAD (`/api/trace` removed by #582; fix candidate: link through
+`/api/object?bucket&key=<source_key>`), D4 coverage is fetched but never
+displayed (no refinement progress UI), E2/H2 mixed+unknown classes and
+their exemplars are wire-present but invisible, and G3 diff view throws
+when P1 is unloaded. The "behavioral differ on the stats numbers - exact
+match" gate maps to rows E1-E5/K3 (pure client recompute from cached
+responses).)
 
 ---
 
@@ -250,6 +279,18 @@ seam (2.7) is the swap boundary; shuttle/stress test obligations (AGENTS.md)
 for core touches. ADR number: the next free at authoring time (0005 if
 nothing else lands first - 0004 is the migration ADR). Micro-fixes are
 partition entries INSIDE the new ADR's ticket set, not separate.
+
+**Deferred core-API line item (from T32, K7 keyboard flamegraph traversal):**
+`flamegraph.js`'s public surface has `getZoomPath` (read) + `zoomToPath`
+(append-from-EMPTY-stack, meant for URL restore) + `handleEscape` (cascade
+reset) but NO absolute zoom control (`setZoomPath` / `resetZoom` /
+`zoomToNode`). K7 (04-ux-findings: arrows walk the tree + Enter zoom, genre
+standard) needs one so the PAGE layer can drive the widget's zoom to an
+arbitrary tree node without editing the frozen core. T32 defers K7 here (it
+built the tree-walk data via `lib/trace/analysis` but has no clean zoom-drive
+API); this partition entry adds the minimal core method (e.g.
+`setZoomPath(key, names)` that replaces rather than appends the stack, or a
+`zoomToNode`). Escape-to-reset already works via the existing `handleEscape`.
 
 **Owns:** the ADR document + its own ticket partition (implementation is NOT
 this ticket).

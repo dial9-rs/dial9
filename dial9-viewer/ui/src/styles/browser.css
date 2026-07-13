@@ -1,0 +1,219 @@
+/* Browser (S3 trace browser) page styles - ported VERBATIM from the legacy
+   index.html inline <style> (T14 behavior-preserving port; features/01).
+   Do not restyle here: visual redesign is out of T14's scope. */
+:root {
+    /* Width of the heatmap host-label column. Read from JS (see LABEL_W)
+       so the timeline axis ticks line up with the canvas left edge. */
+    --heatmap-label-w: 220px;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace;
+    background: #1a1a2e; color: #e0e0e0;
+    display: flex; flex-direction: column; height: 100vh;
+}
+header {
+    padding: 12px 20px; background: #16213e;
+    border-bottom: 1px solid #333; flex-shrink: 0;
+    display: flex; align-items: center; gap: 12px;
+}
+header h1 { font-size: 1.1em; color: #6c63ff; }
+/* T37 F6 contrast: legacy #666 on #16213e was ~2.8:1 (axe serious). Lifted to
+   a muted grey that clears 4.5:1 on the header/controls background. Brighter
+   text on this all-dark page can only raise contrast, never regress it. */
+header span { font-size: 0.8em; color: #9a9ab2; }
+header .spacer { flex: 1; }
+.controls {
+    padding: 12px 20px; background: #16213e;
+    border-bottom: 1px solid #333; flex-shrink: 0;
+    display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+}
+.controls label { font-size: 0.8em; color: #888; }
+.controls input[type="text"], .controls input[type="datetime-local"] {
+    background: #2a2a4a; border: 1px solid #444; color: #e0e0e0;
+    padding: 6px 10px; border-radius: 4px; font-size: 0.85em;
+    font-family: inherit;
+}
+button {
+    background: #2a2a4a; border: 1px solid #444; color: #ccc;
+    padding: 6px 14px; border-radius: 4px; cursor: pointer;
+    font-size: 0.85em; font-family: inherit;
+}
+button:hover { background: #3a3a5a; }
+button:disabled { opacity: 0.4; cursor: not-allowed; }
+button.primary { background: #6c63ff; border-color: #6c63ff; color: #fff; }
+button.primary:hover { background: #5a52e0; }
+button.primary:disabled { background: #4a4a6a; border-color: #4a4a6a; }
+button.active { background: #6c63ff; border-color: #6c63ff; color: #fff; }
+.quick-btns { display: flex; gap: 4px; }
+.quick-btns button.selected { background: #6c63ff; border-color: #6c63ff; color: #fff; }
+.main-area { flex: 1; overflow-y: auto; padding: 0; display: flex; flex-direction: column; }
+/* T37 F6/F4 contrast: the empty-state / loading status is the browser page's
+   "teach the next step" surface (F4). Legacy #666 (~2.8:1) lifted to clear
+   4.5:1 so the guidance is legible. */
+.status { padding: 40px; text-align: center; color: #9a9ab2; font-size: 0.9em; }
+.status.error { color: #ff6b6b; }
+/* Truncation / partial-results warning banner (Browse mode). */
+.warning-banner {
+    margin: 10px 20px 0; padding: 8px 12px; border-radius: 4px;
+    background: #3a2e12; border: 1px solid #b8860b; color: #ffd479;
+    font-size: 0.85em; line-height: 1.4;
+}
+
+/* Bring-your-own-credentials panel */
+#creds-panel {
+    padding: 12px 20px; background: #1e2746;
+    border-bottom: 1px solid #333; flex-shrink: 0;
+    display: flex; flex-direction: column; gap: 8px;
+}
+#creds-panel .creds-row {
+    display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+}
+#creds-panel label { font-size: 0.8em; color: #888; }
+#creds-panel input {
+    background: #2a2a4a; border: 1px solid #444; color: #e0e0e0;
+    padding: 6px 10px; border-radius: 4px; font-size: 0.85em; font-family: inherit;
+}
+#creds-panel strong { font-size: 0.9em; color: #e0e0e0; }
+#creds-panel .creds-hint { font-size: 0.75em; color: #888; }
+#creds-panel .spacer { flex: 1; }
+.creds-status { font-size: 0.8em; }
+.creds-status.ok { color: #6ee7a0; }
+.creds-status.error { color: #ff6b6b; }
+#creds-btn.active { background: #2a2a4a; border-color: #6ee7a0; color: #ccc; }
+/* The label is a <span>, so `header span { color }` would otherwise win;
+   inherit the button's own text color instead. */
+#creds-btn-label { color: inherit; }
+/* The 🔑 emoji's tall glyph box inflates the line box (and so the button
+   height) vs the text-only TZ button. Constrain the emoji to a zero-height
+   inline-block so it can't grow the line box; both buttons then share the
+   same default line-height and match in height. */
+.creds-btn-icon {
+    display: inline-block; line-height: 0; vertical-align: middle; font-size: 0.95em;
+}
+.creds-buckets { display: flex; flex-wrap: wrap; gap: 6px; max-height: 120px; overflow-y: auto; }
+.creds-buckets button { font-size: 0.8em; padding: 4px 10px; }
+.creds-buckets button.match { border-color: #6c63ff; color: #c7c2ff; }
+.creds-buckets button.selected { background: #6c63ff; border-color: #6c63ff; color: #fff; }
+
+/* Tab bar */
+.tab-bar {
+    display: flex; gap: 0; border-bottom: 1px solid #333;
+    padding: 0 20px; background: #16213e; flex-shrink: 0;
+}
+.tab-bar button {
+    border: none; border-bottom: 2px solid transparent;
+    border-radius: 0; padding: 8px 16px; font-size: 0.85em;
+    background: transparent; color: #888;
+}
+.tab-bar button:hover { color: #ccc; background: transparent; }
+.tab-bar button.active { color: #6c63ff; border-bottom-color: #6c63ff; background: transparent; }
+
+/* Host picker */
+.host-grid {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+    gap: 12px; padding: 20px;
+}
+.host-card {
+    background: #222244; border: 1px solid #333; border-radius: 6px;
+    padding: 14px; cursor: pointer; transition: border-color 0.15s;
+}
+.host-card:hover { border-color: #6c63ff; }
+.host-card.selected { border-color: #6c63ff; background: #2a2a5a; }
+.host-card .svc { color: #7ec8e3; font-size: 0.85em; margin-bottom: 2px; }
+.host-card .hostname { font-size: 1em; font-weight: 600; }
+.host-card .meta { font-size: 0.8em; color: #888; margin-top: 6px; }
+
+/* Density heatmap timeline */
+#heatmap-view { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+#heatmap-hint {
+    padding: 8px 20px; font-size: 0.8em; color: #888;
+    border-bottom: 1px solid #222; display: flex; gap: 16px; align-items: center; flex-wrap: wrap;
+}
+#heatmap-hint .legend { display: inline-flex; align-items: center; gap: 6px; }
+#heatmap-reset-zoom { padding: 2px 10px; font-size: 0.95em; }
+#heatmap-hint .legend .bar {
+    width: 90px; height: 10px; border-radius: 2px;
+    background: linear-gradient(to right, #2a2a5a, #6c63ff, #ff6b6b, #ffd93d);
+}
+#heatmap-hint .legend .gap-swatch {
+    width: 16px; height: 12px; border-radius: 2px;
+    border-left: 1px solid rgba(150,150,190,0.6); border-right: 1px solid rgba(150,150,190,0.6);
+    background-color: #15152a;
+    background-image: repeating-linear-gradient(-45deg,
+        rgba(120,120,160,0.35) 0 1px, transparent 1px 6px);
+}
+#heatmap-body { flex: 1; overflow: auto; display: flex; min-height: 0; }
+#heatmap-labels { flex-shrink: 0; width: var(--heatmap-label-w); border-right: 2px solid #3a3a5e; }
+#heatmap-labels .row {
+    height: 26px; line-height: 26px; padding: 0 8px;
+    font-size: 0.78em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    border-bottom: 1px solid #2a2a4a; color: #cfcfe6;
+}
+#heatmap-labels .row:nth-child(odd) { background: #20203e; }
+#heatmap-labels .row:nth-child(even) { background: #191932; }
+#heatmap-labels .row.sel { background: #2f2f6a; }
+#heatmap-labels .row .svc { color: #7ec8e3; }
+#heatmap-labels .row .boot { color: #00e5ff; font-size: 0.85em; }
+#heatmap-plot { flex: 1; position: relative; min-width: 0; }
+#heatmap-canvas { display: block; width: 100%; cursor: crosshair; }
+#heatmap-sel {
+    position: absolute; top: 0; pointer-events: none; display: none;
+    background: rgba(108,99,255,0.22); border: 1px solid #6c63ff;
+}
+/* Zoom rubber-band: cyan, left/right edges only, to read as a time cut. */
+#heatmap-sel.zoom {
+    background: rgba(0,229,255,0.12);
+    border: none; border-left: 1px solid #00e5ff; border-right: 1px solid #00e5ff;
+}
+#heatmap-axis {
+    flex-shrink: 0; height: 22px; position: relative;
+    border-top: 1px solid #222; font-size: 0.72em; color: #888;
+}
+#heatmap-axis .tick { position: absolute; top: 3px; transform: translateX(-50%); white-space: nowrap; }
+#heatmap-axis .tick::before {
+    content: ''; position: absolute; top: -3px; left: 50%; width: 1px; height: 4px; background: #444;
+}
+
+/* Segment list */
+.segment-panel { padding: 12px 20px; flex: 1; overflow-y: auto; }
+.segment-panel .back-link {
+    font-size: 0.85em; color: #6c63ff; cursor: pointer;
+    margin-bottom: 10px; display: inline-block;
+}
+.segment-panel .back-link:hover { text-decoration: underline; }
+.segment-panel h3 { font-size: 0.95em; margin-bottom: 8px; }
+table { width: 100%; border-collapse: collapse; font-size: 0.85em; }
+thead th {
+    position: sticky; top: 0; background: #1a1a2e;
+    text-align: left; padding: 8px 6px; color: #888;
+    border-bottom: 1px solid #333; font-weight: 600;
+    cursor: pointer; user-select: none;
+}
+thead th:hover { color: #bbb; }
+thead th .sort-arrow { font-size: 0.7em; margin-left: 3px; }
+tbody tr { border-bottom: 1px solid #222; }
+tbody tr:hover { background: #222244; }
+tbody td { padding: 6px; white-space: nowrap; }
+td.size, td.date { color: #aaa; }
+td.service { color: #7ec8e3; }
+td.host { color: #aaa; font-size: 0.8em; }
+/* T15 (I2 amendment): unknown-layout keys render raw across the parsed
+   columns instead of positionally shifted Service/Host/Boot fields. */
+td.rawkey { color: #aaa; font-size: 0.8em; font-family: monospace; }
+td input[type="checkbox"] { accent-color: #6c63ff; }
+
+.actions {
+    padding: 8px 20px; background: #16213e;
+    border-top: 1px solid #333; flex-shrink: 0;
+    display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+}
+.actions .count { font-size: 0.8em; color: #888; margin-left: auto; }
+/* T37 F6/F4 contrast: the footer carries the demo-trace + drop-file
+   affordances (F4). Legacy #444 on #1a1a2e was ~1.75:1 (axe serious) - the
+   worst node on the page. Lifted to a muted grey that clears 4.5:1. */
+footer {
+    padding: 6px 20px; font-size: 0.75em; color: #8b8ba3;
+    border-top: 1px solid #222; flex-shrink: 0;
+}
+footer a { color: #6c63ff; text-decoration: none; }
