@@ -121,3 +121,74 @@ Maintainer prioritization over S1-S8 / K1-K8 / F1-F7, and a decision on the
 structural cluster: S1-S8 together justify a reorganization concept pass
 (2-3 alternative layouts for the viewer's information architecture, mocked and
 compared) before the affected pages' migration slices are specced.
+
+## Findings closure (T37)
+
+This table closes every finding above against the amendments that landed
+across T15 and T19-T41. It was built by grepping each finding id (S1..S8,
+K1..K8, F1..F7) across `docs/tickets/ledger.md` and the chunk files
+(`chunk-1-foundation.md`, `chunk-2-viewer.md`, `chunk-3-post.md`); the cited
+ticket is the one whose ledger line claims the finding.
+
+Outcome vocabulary (shared ledger convention):
+- `LANDED` - fixed; the landing ticket(s) are cited and their ledger line
+  carries the amendment.
+- `DEFERRED` - owned but not landed; the reason and the follow-up ticket are
+  named. A deferral is not a rejection.
+- `REJECTED` - a maintainer decision not to fix; requires sign-off by
+  approving this ledger PR. None this sweep (see "For maintainer" below).
+
+Verification note: the live T12 axe/census across the four migrated pages
+(browser, viewer, flamegraph, tokio-stats) needs the seeded DDB dev-server
+and is a documented trailing item (see the T37 HANDOFF). Structural a11y
+(roles / labels / cursor affordances present in the templates) was verified
+by inspection and is cited per row.
+
+| # | Outcome | Landing ticket(s) | Closure note |
+|---|---|---|---|
+| S1 | LANDED | T21, T36 | Collapsed folds die with the unified track column (T21); per-track collapse defaults to EXPANDED not all-collapsed (T36 O4, "the S1 amendment"). |
+| S2 | LANDED | T33, T25 | Goto-time `g` input in the toolbar time cluster gives "locate the moment" a mechanism (T33 E3/E4, the `g` action from T20); time-axis date qualification (T25 F1, S2/#137 family). |
+| S3 | LANDED | T19, T34, T35 | Union: zoom->URL debounced sync + versioned view-state hash + copy-link (T19); New File confirm + #281 dismissible load with recovery both ways (T34 B15); status-bar view-range + copy-link surface (T35 X8-X14). |
+| S4 | LANDED | T24, T26, T27, T29, T31 | Selection re-scopes in one action: at-cursor readout contract (T24), spans/events tracks dim to selection (T26/T27), queue hover routes to the at-cursor readout (T29 M6), persistent inspector re-scopes its content and unifies the at-moment stats into one surface (T31 I6/S4). |
+| S5 | LANDED | T33 | The blind POI stepper is replaced by the concept-2 issues rail: ranked, sortable, keyboard-navigable, with a red-flags summary chip (T33 C2-C8). |
+| S6 | LANDED | T29 | Global/max-local/active-task series share one visible zero baseline; queue-track legend matches the drawn series (T29 M1/M4/M5). |
+| S7 | LANDED | T32 | Count contradiction root-caused and reconciled on-screen (cpuCountLabel); "Show in timeline" links a CPU frame to its time extent (F20); flamegraph embedded in the inspector (T32 S7/F15-F16). |
+| S8 | LANDED | T35 | Whole-trace overview minimap with a draggable/clickable viewport box (T35 X1-X7). |
+| K1 | DEFERRED | T20 (mechanism); viewer wiring UNCLAIMED | The search palette component (`createSearchPalette` + `palette.test.ts`) landed in T20, but no chunk-2 ticket wired it into the viewer: `createSearchPalette` has zero page callers and the viewer key router binds only lane keys / `n`/`p` / `g` / `?` / Esc (no `/`). T20 planned the palette to "index whatever query exposes per page" as a chunk-2 activation that did not occur. Wiring it (index tasks/spans/POIs via `lib/trace/query` -> `palette.open` -> selection + viewport dispatch) is feature-sized, past T37's polish fence. The viewer `?` help advertises `/` (help.ts:23), currently a dead key, left as-is pending the wiring decision. FOLLOW-UP: a viewer-search wiring ticket (see "For maintainer"). Browser time-range search and flamegraph F38/F40 search are separate surfaces and present. |
+| K2 | LANDED | T20 | Heatmap keyboard window-selection (F21), Enter submits the search (D9), `/` focuses the search input (A9). |
+| K3 | LANDED | T20, T41, T21 | One `?` help vocabulary on all four migrated pages: flamegraph (T20 F186), browser (T20 A8), tokio-stats (T41), viewer (T21 help.ts); `/` unified where a search input exists (T20 A9). T37 also makes the viewer's advertised `f` live (K4), so `f`=fit reads the same on viewer and flamegraph. |
+| K4 | LANDED | T20, T23, T37 | Flamegraph `f` fit + `z` zoom-undo (T20 F187/F188); viewer `z` zoom-undo (T23, lane-interaction); viewer `f` fit bound in T37 to the existing `viewport.fit()` (the H3/`f` action the "Fit all" mouse button already drove), closing the viewer fit-key sub-gap the `?` help advertised. |
+| K5 | LANDED | T20, T23 | Focus-tolerant key router (T20); WASD (`w`/`a`/`s`/`d`) plus arrows on the timeline (T23, lane-interaction). |
+| K6 | LANDED | T21 | Tab order follows the task flow (toolbar -> minimap -> tracks -> inspector); enforced by the T21 tab-order-dump DoD. |
+| K7 | DEFERRED | T32 -> T47 | Keyboard flamegraph frame traversal needs a frozen-core absolute-zoom API (`setZoomPath` / `zoomToNode`) not in `flamegraph.js`'s public surface; T32 deferred it and filed the T47 core-reshape line item (chunk-3-post.md). Escape-to-reset already works via `handleEscape`. |
+| K8 | LANDED | T22 | Lane click-target cursor/hover affordance (T22). Outside-lane clickable surfaces carry cursor affordances: minimap viewport box, issues-rail rows, inspector links/resizer, status-bar copy-link (viewer.css `cursor:pointer`); browser host-cards, heatmap (`crosshair`), sortable headers, back-link (browser.css). |
+| F1 | LANDED | T21, T20 | ARIA landmarks + labeled controls built into the shell as the axe-critical fixes (T21, 04 F1), enforced by the T12 axe gate; palette/overlay roles (T20: `role=dialog`/`combobox`/`listbox`). Live axe = trailing item; structural roles/labels verified in the templates. |
+| F2 | LANDED | T33 | Tooltips on every toolbar control; "Parse perf" demoted into the info menu (D6/D7); Clear Range conditional (T33 D1-D3/E3-E4). Non-toolbar surfaces (status-bar, minimap, issues-rail, inspector) carry `title`/`aria-label` (verified). |
+| F3 | LANDED | T22, T29 | Merged lanes legend covers every in-lane mark incl `q:NN` (T22 G19); queue-track legend matches the drawn series (T29 M5). |
+| F4 | LANDED (viewer) + PARTIAL (browser) | T21, T34, T37 | Viewer empty state teaches the next step (T21); load surfaces reframed (T34). Browser: T37 lifts the empty-state status + footer text to WCAG AA so the demo/drop next-step affordances are legible. The deeper IA change (moving demo/drop actions into the empty-state body rather than the footer) is a browser-page layout change, feature-sized, noted as an optional follow-up (not landed). |
+| F5 | LANDED | T21 | Persistent hint chips covering the gesture set (T21). |
+| F6 | LANDED | T21, T20, T37 | Viewer contrast fixes in styles (T21); interact.css muted foregrounds lifted to 4.5:1 (T20); browser page footer (#444, ~1.75:1) + header meta / empty-state status (#666, ~2.8:1) lifted to AA (T37). Trailing: live axe confirmation across the four pages; the browser page's `#888` labels on `#16213e` (~4.48:1, borderline) flagged for the live scan. |
+| F7 | LANDED | T31, T35 | Persistent inspector selection status line + explicit clear affordance (T31 F7/P1); status-bar selection line + clear (T35 X8-X14). |
+
+Summary: 23 findings - 21 LANDED, 2 DEFERRED (K1 viewer-search wiring, K7
+flamegraph keyboard traversal), 0 REJECTED. F4 lands for the viewer and is
+partially closed for the browser (contrast legibility landed; the empty-state
+IA restructure is an optional follow-up).
+
+Trailing / follow-up items (do not gate this closure):
+- Live T12 axe/census across the four migrated pages (needs the seeded DDB
+  dev-server) - confirm F1/F6 clean and re-check the browser `#888`-on-dark
+  labels noted in F6.
+- K7 keyboard flamegraph traversal -> T47 (already filed).
+- K1 viewer task/span search wiring -> new ticket (mechanism ready in T20).
+- F4 browser empty-state IA (attach demo/drop actions to the empty state
+  body) -> optional follow-up.
+
+For maintainer (ledger-PR sign-off):
+- No findings are REJECTED this sweep, so no reject sign-off is required.
+- Two DEFERRALS need a maintainer decision on their follow-up:
+  - K1 (task-blocking): the viewer never wired the T20 search palette. Decide
+    whether to file the wiring ticket now and whether to hide the currently
+    dead `/` entry in the viewer `?` help until it lands.
+  - F4 (browser): decide whether the empty-state IA restructure is wanted or
+    the T37 legibility fix is sufficient.
