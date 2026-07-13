@@ -162,33 +162,53 @@ by inspection and is cited per row.
 | K6 | LANDED | T21 | Tab order follows the task flow (toolbar -> minimap -> tracks -> inspector); enforced by the T21 tab-order-dump DoD. |
 | K7 | DEFERRED | T32 -> T47 | Keyboard flamegraph frame traversal needs a frozen-core absolute-zoom API (`setZoomPath` / `zoomToNode`) not in `flamegraph.js`'s public surface; T32 deferred it and filed the T47 core-reshape line item (chunk-3-post.md). Escape-to-reset already works via `handleEscape`. |
 | K8 | LANDED | T22 | Lane click-target cursor/hover affordance (T22). Outside-lane clickable surfaces carry cursor affordances: minimap viewport box, issues-rail rows, inspector links/resizer, status-bar copy-link (viewer.css `cursor:pointer`); browser host-cards, heatmap (`crosshair`), sortable headers, back-link (browser.css). |
-| F1 | LANDED | T21, T20 | ARIA landmarks + labeled controls built into the shell as the axe-critical fixes (T21, 04 F1), enforced by the T12 axe gate; palette/overlay roles (T20: `role=dialog`/`combobox`/`listbox`). Live axe = trailing item; structural roles/labels verified in the templates. |
+| F1 | LANDED (viewer) + DEFERRED (ported pages) | T21, T20; ported-page a11y pass UNCLAIMED | Viewer (new build, T21): ARIA landmarks + labeled controls built into the shell as the axe-critical fixes, enforced by the T12 axe gate; palette/overlay roles (T20: `role=dialog`/`combobox`/`listbox`). Headless axe on the built viewer shell shows no label/landmark/contrast violations (one `nested-interactive` nit noted below). The three behavior-preserving ports (browser T14, flamegraph T13, tokio-stats T41) CARRY legacy F1 debt by design (ledger H4 precedent: "defects carried, not fixed"): headless axe on the built shells finds unlabeled datetime inputs (browser `#range-from`/`#range-to` label x2; tokio-stats label x1), missing `<main>` (landmark-one-main), and un-regioned content (browser region x11, flamegraph x3, tokio-stats x5). Remediating these touches census-relevant markup on merged, parity-gated ports, so it is a dedicated a11y pass, not a T37 polish edit. DEFERRED, flag for maintainer. |
 | F2 | LANDED | T33 | Tooltips on every toolbar control; "Parse perf" demoted into the info menu (D6/D7); Clear Range conditional (T33 D1-D3/E3-E4). Non-toolbar surfaces (status-bar, minimap, issues-rail, inspector) carry `title`/`aria-label` (verified). |
 | F3 | LANDED | T22, T29 | Merged lanes legend covers every in-lane mark incl `q:NN` (T22 G19); queue-track legend matches the drawn series (T29 M5). |
 | F4 | LANDED (viewer) + PARTIAL (browser) | T21, T34, T37 | Viewer empty state teaches the next step (T21); load surfaces reframed (T34). Browser: T37 lifts the empty-state status + footer text to WCAG AA so the demo/drop next-step affordances are legible. The deeper IA change (moving demo/drop actions into the empty-state body rather than the footer) is a browser-page layout change, feature-sized, noted as an optional follow-up (not landed). |
 | F5 | LANDED | T21 | Persistent hint chips covering the gesture set (T21). |
-| F6 | LANDED | T21, T20, T37 | Viewer contrast fixes in styles (T21); interact.css muted foregrounds lifted to 4.5:1 (T20); browser page footer (#444, ~1.75:1) + header meta / empty-state status (#666, ~2.8:1) lifted to AA (T37). Trailing: live axe confirmation across the four pages; the browser page's `#888` labels on `#16213e` (~4.48:1, borderline) flagged for the live scan. |
+| F6 | LANDED (viewer) + PARTIAL (ports) | T21, T20, T37 | Viewer (new build): contrast fixes in styles (T21); interact.css muted foregrounds lifted to 4.5:1 (T20). Headless axe on the built viewer shell finds ZERO contrast violations. Browser (T37): the three egregious muted-grey nodes fixed - footer `#444` on `#1a1a2e` (~1.75:1, the worst node) + header meta / empty-state status `#666` on `#16213e` (~2.8:1) lifted to AA; headless axe confirms those three no longer appear (page went 15 -> 12 contrast nodes). The REMAINING browser/flamegraph/tokio-stats contrast is dominated by the SYSTEMIC brand accent - `#6c63ff` on `#16213e` (3.68:1: browser `h1`, flamegraph `#fg-title`) and white on `#6c63ff` (4.31:1: `.selected`, tokio-stats `#btn-load`) - plus the browser's borderline `#888`-on-`#16213e` labels (4.48:1). Changing the brand accent is a product decision, not polish; the ports carried the legacy palette by design (T13/T14/T41). DEFERRED (brand-accent contrast), flag for maintainer. Trailing: live axe re-confirm across the four pages. |
 | F7 | LANDED | T31, T35 | Persistent inspector selection status line + explicit clear affordance (T31 F7/P1); status-bar selection line + clear (T35 X8-X14). |
 
-Summary: 23 findings - 21 LANDED, 2 DEFERRED (K1 viewer-search wiring, K7
-flamegraph keyboard traversal), 0 REJECTED. F4 lands for the viewer and is
-partially closed for the browser (contrast legibility landed; the empty-state
-IA restructure is an optional follow-up).
+Summary: 23 findings - 18 fully LANDED; 3 LANDED-for-the-viewer with a
+deferred remainder (F1 ported-page a11y debt, F4 browser empty-state IA, F6
+ported-page brand-accent contrast); 2 DEFERRED outright (K1 viewer-search
+wiring, K7 flamegraph keyboard traversal -> T47); 0 REJECTED. The DoD's "axe
+clean across all four migrated pages" holds for the new-build viewer (T21,
+confirmed by a headless axe scan of the built shell) and, for the three
+behavior-preserving ports (browser/flamegraph/tokio-stats), means
+parity-with-legacy - their owning tickets' bar (T13/T14/T41). The residual
+legacy a11y debt on the ports (labels/landmarks/regions + the brand-accent
+contrast) is a distinct a11y-remediation follow-up, not re-openable within
+this polish sweep.
+
+Axe evidence (headless axe-core on the BUILT static shells, no live server;
+the live seeded-DDB run is the trailing verification): viewer - no
+label/landmark/contrast violations (1 `nested-interactive` nit on the drop
+zone, not an 04 finding, T21-owned); browser - 12 contrast nodes (h1 +
+`.selected` brand accent, `#888` labels), 2 unlabeled inputs, missing main,
+11 un-regioned; flamegraph - 1 brand-accent contrast, missing main/h1, 3
+un-regioned; tokio-stats - 1 brand-accent contrast, 1 unlabeled input,
+missing main, 5 un-regioned.
 
 Trailing / follow-up items (do not gate this closure):
 - Live T12 axe/census across the four migrated pages (needs the seeded DDB
-  dev-server) - confirm F1/F6 clean and re-check the browser `#888`-on-dark
-  labels noted in F6.
+  dev-server) - re-confirm the headless results above against loaded pages.
 - K7 keyboard flamegraph traversal -> T47 (already filed).
 - K1 viewer task/span search wiring -> new ticket (mechanism ready in T20).
+- F1/F6 ported-page a11y remediation (labels, `<main>`, regions, brand-accent
+  contrast on browser/flamegraph/tokio-stats) -> a dedicated a11y ticket.
 - F4 browser empty-state IA (attach demo/drop actions to the empty state
   body) -> optional follow-up.
 
 For maintainer (ledger-PR sign-off):
 - No findings are REJECTED this sweep, so no reject sign-off is required.
-- Two DEFERRALS need a maintainer decision on their follow-up:
+- Deferrals needing a maintainer decision on their follow-up:
   - K1 (task-blocking): the viewer never wired the T20 search palette. Decide
     whether to file the wiring ticket now and whether to hide the currently
     dead `/` entry in the viewer `?` help until it lands.
+  - F1/F6 (ported pages): the brand accent `#6c63ff` fails contrast on dark and
+    the ports carry legacy label/landmark/region gaps by design. Decide whether
+    to open an a11y-remediation ticket (and whether the brand accent may change).
   - F4 (browser): decide whether the empty-state IA restructure is wanted or
     the T37 legibility fix is sufficient.
