@@ -62,7 +62,7 @@ function initialViewerState(): StoreState {
       timeMode: "rel",
       tz: "utc",
     },
-    transient: { mouseNs: null, hoverEventTs: null, drag: null, keyboardSelection: null },
+    transient: { mouseNs: null, hoverEventTs: null, drag: null, keyboardSelection: null, atCursor: null },
     segments: { segments: new Map() },
   };
 }
