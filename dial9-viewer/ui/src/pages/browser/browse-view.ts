@@ -1,14 +1,12 @@
-// Browse view component (features/01 F): status/warning chrome, host-label
-// column, the density heatmap canvas, the time axis and the reset-zoom
-// button. The drawing code is the legacy drawHeatmapCanvas/drawHeatmapAxis
-// ported verbatim; all density MATH comes from the frozen heatmap.js via
-// the lib/canvas barrel (accumulateDensity, tiling, gaps, boot transitions,
-// densityColor ramp).
+// Browse view component: status/warning chrome, host-label column, the
+// density heatmap canvas, the time axis and the reset-zoom button. Density
+// math comes from heatmap.js (accumulateDensity, tiling, gaps, boot
+// transitions, densityColor ramp).
 //
-// The paint is memoized on exactly the legacy redraw triggers: a new result
-// set (rows identity), a domain change (zoom/reset), a TZ flip, and the
-// debounced resize (browse.renderEpoch). Anything else that changes the
-// browse slice (e.g. the selection) re-runs the cheap chrome writes only.
+// The paint is memoized on its redraw triggers: a new result set (rows
+// identity), a domain change (zoom/reset), a TZ flip, and the debounced
+// resize (browse.renderEpoch). Anything else that changes the browse slice
+// (e.g. the selection) re-runs the cheap chrome writes only.
 
 // Leaf heatmap seam, not the lib/canvas barrel (see actions.ts: the barrel
 // evaluates trace_analysis.js, which the browser page must not carry).
@@ -26,7 +24,7 @@ import { renderStatus } from "./status-render.js";
 
 // Read the label-column width from the --heatmap-label-w CSS custom
 // property so the JS axis layout and the CSS column width share a single
-// source (legacy LABEL_W; lazy so the stylesheet is applied first).
+// source. Lazy so the stylesheet is applied first.
 let labelW: number | null = null;
 function LABEL_W(): number {
   if (labelW === null) {
@@ -39,9 +37,9 @@ function LABEL_W(): number {
 }
 
 // Precomputed 256-entry density color ramp. Building a color string per
-// pixel column was the hot path in the legacy drawHeatmapCanvas; quantizing
-// to 256 buckets lets us reuse strings (and, with run-length coalescing,
-// collapse adjacent equal-color columns into a single fillRect).
+// pixel column is the hot path; quantizing to 256 buckets lets us reuse
+// strings (and, with run-length coalescing, collapse adjacent equal-color
+// columns into a single fillRect).
 let densityPalette: string[] | null = null;
 function densityPaletteColor(norm: number): string {
   if (!densityPalette) {
@@ -58,10 +56,9 @@ export function mountBrowseView({ store, els }: PageCtx): void {
   let lastTz: boolean | null = null;
   let lastEpoch = -1;
 
-  // Host labels (one row per service/host; boot count annotated) - legacy
-  // renderHeatmap's label loop, built with createElement/textContent.
-  // T15 (I2 amendment): unknown-layout groups render their raw directory
-  // path instead of a guessed "service / host" split (Finding 1).
+  // Host labels (one row per service/host; boot count annotated).
+  // Unknown-layout groups render their raw directory path instead of a
+  // guessed "service / host" split.
   function rebuildLabels(rows: readonly HeatmapRow[]): void {
     els.heatmapLabels.textContent = "";
     for (const row of rows) {
@@ -86,14 +83,13 @@ export function mountBrowseView({ store, els }: PageCtx): void {
         boot.textContent = `▏${boots.length + 1} boots`;
         div.append(boot);
       }
-      // Unknown-layout rows: the frozen groupByHost label is " / <path>";
-      // the raw path alone is the honest tooltip.
+      // Unknown-layout rows: the groupByHost label is " / <path>"; the raw
+      // path alone is the honest tooltip.
       div.title = row.segments[0]?.layout === "unknown" ? row.host : row.label;
       els.heatmapLabels.appendChild(div);
     }
   }
 
-  // Legacy drawHeatmapCanvas (index.html:1332-1440), verbatim.
   function drawCanvas(rows: readonly HeatmapRow[], domain: TimeDomain, tz: boolean): void {
     const W = Math.max(50, Math.floor(els.heatmapPlot.clientWidth));
     const H = rows.length * ROW_H;
@@ -204,12 +200,11 @@ export function mountBrowseView({ store, els }: PageCtx): void {
     drawAxis(W, domain, tz);
   }
 
-  // Legacy drawHeatmapAxis (index.html:1442-1455): 2 to 8 TZ-aware ticks,
-  // aligned to the canvas left edge via --heatmap-label-w.
-  // T15 (F10-axis amendment, Finding 3): when the visible span crosses a
-  // calendar-day boundary, ticks carry the date ("YYYY-MM-DD HH:MM:SS") -
-  // time-only ticks across a multi-day span were ambiguous. Tick COUNT is
-  // unchanged in both modes.
+  // 2 to 8 TZ-aware ticks, aligned to the canvas left edge via
+  // --heatmap-label-w. When the visible span crosses a calendar-day
+  // boundary, ticks carry the date ("YYYY-MM-DD HH:MM:SS") - time-only
+  // ticks across a multi-day span were ambiguous. Tick COUNT is unchanged
+  // in both modes.
   function drawAxis(W: number, domain: TimeDomain, tz: boolean): void {
     els.heatmapAxis.textContent = "";
     const { tMin, tMax } = domain;
@@ -229,7 +224,7 @@ export function mountBrowseView({ store, els }: PageCtx): void {
     assertInScheduledRender("browse-view render");
     const b = state.browse;
 
-    // F20 truncation banner (legacy setBrowseWarning).
+    // Truncation banner.
     if (b.warning) {
       els.browseWarning.textContent = "⚠ " + b.warning;
       els.browseWarning.style.display = "";
@@ -238,15 +233,14 @@ export function mountBrowseView({ store, els }: PageCtx): void {
       els.browseWarning.style.display = "none";
     }
 
-    // F1/F3 status area.
+    // Status area.
     renderStatus(els.browseStatus, b.status);
 
     // Heatmap visibility BEFORE painting: the canvas width is measured from
-    // the live layout, so the container must be displayed first (legacy
-    // renderHeatmap ordering).
+    // the live layout, so the container must be displayed first.
     els.heatmapView.style.display = b.heatmapVisible ? "" : "none";
 
-    // F16: the Reset zoom control shows only while a sub-range is displayed.
+    // The Reset zoom control shows only while a sub-range is displayed.
     const zoomed =
       b.fullDomain &&
       b.domain &&

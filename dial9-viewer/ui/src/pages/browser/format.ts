@@ -1,10 +1,8 @@
-// Pure display/format helpers for the browser page (T14), ported verbatim
-// from the legacy index.html inline script (features/01 I1, D7, F10). The
-// legacy versions read the page-global `useLocalTz` flag; these take the
-// timezone mode as a parameter so they stay pure - callers pass the live
-// store value at render time.
+// Pure display/format helpers for the browser page. They take the timezone
+// mode as a parameter (rather than reading a global) so they stay pure -
+// callers pass the live store value at render time.
 
-/** Human byte size, exactly as the legacy `formatSize` (index.html). */
+/** Human byte size. */
 export function formatSize(bytes: number): string {
   if (bytes < 1024) return bytes + " B";
   if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB";
@@ -13,8 +11,7 @@ export function formatSize(bytes: number): string {
 
 /**
  * "YYYY-MM-DD HH:MM:SS" in the active TZ mode. Invalid input falls back to
- * the raw string (legacy `formatDate` catch branch); empty/missing input
- * renders "".
+ * the raw string; empty/missing input renders "".
  */
 export function formatDate(dateStr: string | null | undefined, localTz: boolean): string {
   if (!dateStr) return "";
@@ -42,17 +39,16 @@ export function formatDate(dateStr: string | null | undefined, localTz: boolean)
   }
 }
 
-/** Epoch seconds -> formatDate; "" for 0/missing (legacy `formatEpoch`). */
+/** Epoch seconds -> formatDate; "" for 0/missing. */
 export function formatEpochStr(epoch: number, localTz: boolean): string {
   if (!epoch) return "";
   return formatDate(new Date(epoch * 1000).toISOString(), localTz);
 }
 
-/** Axis/selection tick in the active TZ mode (legacy `fmtTick`): HH:MM:SS
- * by default; with `withDate` (T15's F10-axis amendment - features/01
- * Finding 3) the calendar date is prefixed ("YYYY-MM-DD HH:MM:SS") so
- * ticks on a day-crossing span stay unambiguous. The selection-count
- * readout keeps the time-only form (the amendment covers the axis only).
+/** Axis/selection tick in the active TZ mode: HH:MM:SS by default; with
+ * `withDate` the calendar date is prefixed ("YYYY-MM-DD HH:MM:SS") so ticks
+ * on a day-crossing span stay unambiguous. The selection-count readout
+ * keeps the time-only form.
  */
 export function fmtTick(epoch: number, localTz: boolean, withDate = false): string {
   if (withDate) return formatEpochStr(epoch, localTz);
@@ -65,9 +61,8 @@ export function fmtTick(epoch: number, localTz: boolean, withDate = false): stri
 
 /**
  * Whether [t0, t1] (epoch seconds) crosses a calendar-day boundary in the
- * active TZ mode - the trigger for date-carrying axis ticks (T15, F10-axis
- * amendment). A span strictly inside one calendar day keeps the compact
- * legacy HH:MM:SS ticks.
+ * active TZ mode - the trigger for date-carrying axis ticks. A span
+ * strictly inside one calendar day keeps the compact HH:MM:SS ticks.
  */
 export function crossesDayBoundary(t0: number, t1: number, localTz: boolean): boolean {
   const a = new Date(t0 * 1000);

@@ -1,22 +1,15 @@
-// src/pages/browser/page-keys.ts - the browser page's landing-time
-// wiring of the unified keyboard model (T20; K2/K3; ticket "browser:
-// `?` help, `/` focuses search, Enter submits").
+// The browser page's wiring of the unified keyboard model.
 //
-// NEW module, additive by design: T15's browser-page amendments merge on
-// top of this branch, so T20 keeps its browser wiring in new files plus
-// two mount lines in main.ts (see the T20 HANDOFF's T15-overlap notes).
-//
-// Bindings (all previously dead on this page - the legacy page's only
-// key handler is Enter in the raw-search field, features/01 G2):
+// Bindings:
 //   - `?` toggles the unified help overlay;
 //   - `/` focuses the active tab's search input (browse: the prefix
 //     field, the text input the Search button's readiness gates on;
 //     raw: the raw key-substring input) and selects its text;
 //   - Enter in the browse controls-bar fields (bucket, prefix, From/To
-//     pickers) clicks Search when it is enabled - K2's "no key submits
-//     search" fix. The raw tab keeps its own G2 handler (raw-view.ts).
+//     pickers) clicks Search when it is enabled. The raw tab keeps its own
+//     Enter handler (raw-view.ts).
 //
-// Per architecture 2.5: keys dispatch actions/focus only, never render.
+// Keys dispatch actions/focus only, never render.
 
 import {
   createHelpOverlay,
@@ -41,8 +34,8 @@ const KEY_ROWS: HelpSection = {
   ],
 };
 
-// The heatmap's existing mouse paths (features/01 F12-F15), so the
-// overlay documents the full selection story, not just the new keys.
+// The heatmap's existing mouse paths, so the overlay documents the full
+// selection story, not just the new keys.
 const MOUSE_ROWS: HelpSection = {
   title: "Mouse (heatmap)",
   rows: [
@@ -59,9 +52,9 @@ export function mountBrowserPageKeys({ store, els, actions }: PageCtx): void {
     sections: [KEY_ROWS, MOUSE_ROWS],
   });
 
-  // K2: Enter submits the browse (time-range) search from any
-  // controls-bar field, exactly like clicking Search - including its
-  // disabled gate (D9 readiness formula renders into the button).
+  // Enter submits the browse (time-range) search from any controls-bar
+  // field, exactly like clicking Search - including its disabled gate (the
+  // readiness formula renders into the button).
   const submitOnEnter = (e: KeyboardEvent): void => {
     if (e.key !== "Enter") return;
     if (els.searchBtn.disabled) return;

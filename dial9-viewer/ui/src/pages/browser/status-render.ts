@@ -1,9 +1,7 @@
-// Shared renderer for the two status areas (#browse-status / #raw-status).
-// Reproduces exactly the DOM the legacy page produced: plain text for
-// simple messages, or a lead line + <br> + one styled <code> per sample key
-// (the empty-result hint, features/01 F3/G7). Built with createElement /
-// textContent - no HTML interpolation - which renders the same DOM the
-// legacy esc()+innerHTML path did (I6's escaping concern disappears).
+// Shared renderer for the two status areas (#browse-status / #raw-status):
+// plain text for simple messages, or a lead line + <br> + one styled
+// <code> per sample key (the empty-result hint). Built with createElement /
+// textContent - no HTML interpolation.
 
 import type { StatusState } from "./state.js";
 

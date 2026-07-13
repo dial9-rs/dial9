@@ -1,13 +1,8 @@
-// Browser page entry (T14): the S3 trace browser as a Vite page module -
-// the behavior-preserving port of the legacy index.html inline script
-// (docs/ui-inventory/features/01-index-html.md is the contract; the four
-// T15 amendment targets - G8 dead sort, C6, I2 rendering, F10 axis - are
-// ported AS-IS).
+// Browser page entry: the S3 trace browser as a Vite page module.
 //
-// Boot order mirrors the legacy page: dual-UI switch mount, `?trace=`
-// passthrough, state restore from the URL (#585/#607), then the
-// /api/config bootstrap chain (creds UI -> region detect -> prefix
-// discovery -> auto-search).
+// Boot order: dual-UI switch mount, `?trace=` passthrough, state restore
+// from the URL, then the /api/config bootstrap chain (creds UI -> region
+// detect -> prefix discovery -> auto-search).
 
 import "../../styles/browser.css";
 import { createActions } from "./actions.js";
@@ -30,16 +25,15 @@ import { mountSelectionOverlay } from "./selection-overlay.js";
 import { createBrowserStore, type BrowserState } from "./state.js";
 import { mountTabs } from "./tabs.js";
 
-// Dual-UI switch (T38): render the "Switch to legacy UI" control. The
+// Dual-UI switch: render the "Switch to legacy UI" control. The
 // ui-switch.js <head> auto-boot is a no-op on this off-root path.
 window.D9UiSwitch?.mount({ side: "new" });
 
-// A1: `?trace=` passthrough - redirect to the viewer preserving all params
+// `?trace=` passthrough - redirect to the viewer preserving all params
 // (including repeated `trace=` components). Relative target resolves to
-// /viewer.html via <base href="/">. Unlike the legacy inline script (which
-// kept executing while the navigation was pending), the rest of the boot is
-// skipped: nothing observable renders before the replace lands, and it
-// avoids firing stray /api requests from a page that is going away.
+// /viewer.html via <base href="/">. The rest of the boot is skipped:
+// nothing observable renders before the replace lands, and it avoids
+// firing stray /api requests from a page that is going away.
 const qs = window.location.search;
 if (new URLSearchParams(qs).has("trace")) {
   window.location.replace("viewer.html" + qs);
@@ -53,10 +47,10 @@ function boot(): void {
   const actions = createActions(store, els);
   const ctx: PageCtx = { store, els, actions };
 
-  // C6 (T15 amendment): resolve the bucket-picker filter BEFORE the URL
-  // restore below - its final syncUrl() rewrites the query string, and a
-  // `bucket_filter=` override must be captured first (actions.syncUrl then
-  // re-appends it so the override survives every history.replaceState).
+  // Resolve the bucket-picker filter BEFORE the URL restore below - its
+  // final syncUrl() rewrites the query string, and a `bucket_filter=`
+  // override must be captured first (actions.syncUrl then re-appends it so
+  // the override survives every history.replaceState).
   const bucketFilter = resolveBucketFilter(window.location.search);
   if (bucketFilter.override != null) {
     store.update("config", {
@@ -74,8 +68,8 @@ function boot(): void {
   mountBrowseView(ctx);
   mountSelectionOverlay(ctx);
   mountHeatmapInteraction(ctx);
-  // Unified keyboard model (T20): `?` help, `/` search focus, Enter
-  // submits, heatmap keyboard window selection (K2).
+  // Unified keyboard model: `?` help, `/` search focus, Enter submits,
+  // heatmap keyboard window selection.
   mountBrowserPageKeys(ctx);
   mountHeatmapKeys(ctx);
   mountRawView(ctx);
@@ -83,10 +77,10 @@ function boot(): void {
   const credsPanel = mountCredsPanel(ctx);
   mountFooter(ctx);
 
-  // ── Init: restore state from the URL (#585/#607; legacy
-  // index.html:698-794). Every state-changing action mirrors the page state
-  // into the query string via syncUrl(); restore that saved state here.
-  // syncUrl() is suppressed while restoring, then run once at the end.
+  // Init: restore state from the URL. Every state-changing action mirrors
+  // the page state into the query string via syncUrl(); restore that saved
+  // state here. syncUrl() is suppressed while restoring, then run once at
+  // the end.
   const urlState = window.Dial9UrlState.parse(window.location.search);
   actions.setRestoring(true);
   // Timezone first: the range pickers format in the active TZ, so it must
@@ -109,7 +103,6 @@ function boot(): void {
     if (!els.credsRegion.value) els.credsRegion.value = urlState.region;
     const stored = window.Dial9Creds.get();
     if (stored && stored.accessKeyId && stored.region !== urlState.region) {
-      // Legacy fired this without awaiting.
       void window.Dial9Creds.set({
         ...stored,
         region: urlState.region,
@@ -137,11 +130,11 @@ function boot(): void {
 
   // First paint: run every component's render once through the scheduler
   // so the initial DOM reflects the restored state (renders never run
-  // outside a store notification tick - N18).
+  // outside a store notification tick).
   primeRenders(store);
 
-  // ── Config bootstrap (A5; legacy index.html:796-829). Plain fetch, not
-  // apiFetch: legacy fetched /api/config uncredentialed.
+  // Config bootstrap. Plain fetch, not apiFetch: /api/config is fetched
+  // uncredentialed.
   fetch("/api/config")
     .then(async (r) => {
       if (!r.ok) {
@@ -165,10 +158,10 @@ function boot(): void {
       }
       // When the server runs demand-driven aggregation, the flamegraph
       // button drives the sampled server-side loop instead of decoding raw
-      // traces (#570); Tokio Stats enables on selection (H6).
+      // traces; Tokio Stats enables on selection.
       store.update("config", { aggregationEnabled: !!config.aggregation_enabled });
-      // C6 (T15): the server's bucket-picker filter applies unless the page
-      // URL pinned an override at load (which wins). Servers predating the
+      // The server's bucket-picker filter applies unless the page URL
+      // pinned an override at load (which wins). Servers predating the
       // field leave the "dial9" default in place.
       if (
         config.bucket_filter != null &&
@@ -182,8 +175,8 @@ function boot(): void {
       actions.syncUrl();
       // If we're restoring a bucket with credentials but no region pinned
       // in the URL, detect it before discovery/search so the first signed
-      // call lands on the right regional endpoint (#607). A pinned region
-      // makes this a fast no-op.
+      // call lands on the right regional endpoint. A pinned region makes
+      // this a fast no-op.
       return actions
         .detectRegionForBucket(els.bucketInput.value.trim())
         .then(() => actions.discoverPrefixes())

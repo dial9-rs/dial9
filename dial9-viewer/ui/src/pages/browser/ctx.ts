@@ -1,6 +1,6 @@
-// Shared mount context for the browser page's DOM components (T14;
-// architecture 2.4: each component owns its subtree, subscribes to the
-// slices it renders, and dispatches actions on user input).
+// Shared mount context for the browser page's DOM components: each
+// component owns its subtree, subscribes to the slices it renders, and
+// dispatches actions on user input.
 
 import type { BrowserActions } from "./actions.js";
 import type { BrowserEls } from "./dom.js";

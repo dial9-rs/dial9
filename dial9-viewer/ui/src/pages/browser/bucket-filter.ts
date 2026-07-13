@@ -1,10 +1,5 @@
-// Bucket-picker filter predicate (T15 amendment of features/01 C6;
-// ADR-0004 section 1, Live-validation Finding 2).
-//
-// The legacy page hardcoded the picker's trace-bucket predicate to names
-// containing "dial9" - any differently-named bucket was invisible until
-// #607 bolted on a "Show all" toggle. The migrated page makes the
-// predicate config-driven instead:
+// Bucket-picker filter predicate. The trace-bucket predicate is
+// config-driven, resolved in precedence order:
 //
 //   1. page-URL override:  ?bucket_filter=<substring>   (wins; "" allowed)
 //   2. server config:      /api/config `bucket_filter`  (server default "dial9")
@@ -13,10 +8,10 @@
 //
 // An empty filter matches every bucket (filtering disabled: the filtered
 // and full lists coincide, so the show-all toggle disappears). Matching is
-// case-insensitive substring, exactly like the legacy predicate.
+// case-insensitive substring.
 //
 // Pure module (no DOM/store) so the resolution and predicate are
-// unit-testable under the node test env.
+// unit-testable.
 
 /** The fallback when neither URL nor server provides a filter. */
 export const DEFAULT_BUCKET_FILTER = "dial9";

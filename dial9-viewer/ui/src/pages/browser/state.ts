@@ -1,16 +1,13 @@
-// Browser-page store state (T14; architecture 2.2 applied to features/01).
+// Browser-page store state.
 //
-// One typed store for the page, replacing the legacy inline script's page
-// globals (useLocalTz, allObjects, heatmap*, rawObjects, currentTab,
-// aggregationEnabled, currentQuickRange, serverHasPrefix, ...). Slices are
-// replaced wholesale via store.update(); every DOM render subscribes to the
-// slices it reads and runs through the store scheduler (src/store/store.ts).
+// One typed store for the page. Slices are replaced wholesale via
+// store.update(); every DOM render subscribes to the slices it reads and
+// runs through the store scheduler (src/store/store.ts).
 //
-// Text inputs (bucket/prefix/pickers/raw query/creds fields) stay
-// DOM-owned (uncontrolled), exactly like the legacy page: user-typed values
-// are not state the store renders. The single input mirrored into state is
-// the prefix (FormSlice) because the Search button's disabled state renders
-// from it (features/01 D9 `updateSearchReady`).
+// Text inputs (bucket/prefix/pickers/raw query/creds fields) stay DOM-owned
+// (uncontrolled): user-typed values are not state the store renders. The
+// single input mirrored into state is the prefix (FormSlice) because the
+// Search button's disabled state renders from it.
 
 import { createStore, type Store } from "../../store/store.js";
 import type { HostRow } from "../../lib/canvas/heatmap.js";
@@ -24,7 +21,7 @@ export interface BrowseObject {
   last_modified?: string | undefined;
 }
 
-/** Normalized heatmap segment (legacy `heatmapSegments` element shape). */
+/** Normalized heatmap segment. */
 export interface HeatmapSegment {
   key: string;
   size: number;
@@ -33,10 +30,9 @@ export interface HeatmapSegment {
   /** last_modified epoch seconds (upload time), or start when missing. */
   end: number;
   /**
-   * Key-layout discriminant (T15, I2 amendment). For "unknown" segments
-   * service is "" and host carries the key's raw directory path - the
-   * grouping key and the label the browse view renders raw, instead of
-   * the legacy positionally shifted fields (Finding 1).
+   * Key-layout discriminant. For "unknown" segments service is "" and host
+   * carries the key's raw directory path - the grouping key and the label
+   * the browse view renders raw, instead of positionally shifted fields.
    */
   layout: "known" | "unknown";
   service: string;
@@ -44,8 +40,8 @@ export interface HeatmapSegment {
   bootId: string;
 }
 
-/** A grouped host row plus the density inputs the legacy `renderHeatmap`
- * precomputed onto each row (tiled segments + coverage gaps). */
+/** A grouped host row plus the precomputed density inputs (tiled segments
+ * + coverage gaps). */
 export type HeatmapRow = HostRow<HeatmapSegment> & {
   tiled: readonly HeatmapSegment[];
   gaps: readonly { start: number; end: number }[];
@@ -56,7 +52,7 @@ export interface TimeDomain {
   tMax: number;
 }
 
-/** Legacy `heatmapSelection` shape. `rows` = [firstRow, lastRow] indices. */
+/** `rows` = [firstRow, lastRow] indices. */
 export interface HeatmapSelection {
   keys: readonly string[];
   bytes: number;
@@ -66,12 +62,10 @@ export interface HeatmapSelection {
 }
 
 /**
- * A status area's state, mirroring exactly the DOM writes the legacy page
- * performed on #browse-status / #raw-status: visibility (style.display),
- * kind (className "status" vs "status error"), text, and - for the
- * empty-result hint - the sample-key list rendered as <code> lines.
- * The text persists while hidden (the parity readouts read the hidden
- * element's text, e.g. the post-search "Searching…" leftover).
+ * A status area's state for #browse-status / #raw-status: visibility
+ * (style.display), kind (className "status" vs "status error"), text, and
+ * - for the empty-result hint - the sample-key list rendered as <code>
+ * lines. The text persists while hidden.
  */
 export interface StatusState {
   visible: boolean;
@@ -87,12 +81,12 @@ export interface UiSlice {
 }
 
 export interface ConfigSlice {
-  /** Server runs demand-driven aggregation (#570; drives H3 mode + H6). */
+  /** Server runs demand-driven aggregation. */
   aggregationEnabled: boolean;
-  /** Server declared a default prefix; Search waits for one (D9). */
+  /** Server declared a default prefix; Search waits for one. */
   serverHasPrefix: boolean;
-  /** Bucket-picker filter substring in effect (T15, C6 amendment):
-   * URL override > /api/config `bucket_filter` > "dial9". "" = no filter. */
+  /** Bucket-picker filter substring in effect: URL override >
+   * /api/config `bucket_filter` > "dial9". "" = no filter. */
   bucketFilter: string;
   /** The page-URL `bucket_filter=` override (null = absent). Non-null wins
    * over the server value and rides every URL sync (bucket-filter.ts). */
@@ -109,16 +103,16 @@ export interface SearchSlice {
   quickRange: number | null;
   /** Discovered prefix chip labels (trailing "/" stripped). */
   suggestions: readonly string[];
-  /** Chip currently marked active (explicit state: the legacy highlight
-   * does NOT follow later prefix-input edits). */
+  /** Chip currently marked active (explicit state: the highlight does NOT
+   * follow later prefix-input edits). */
   activeSuggestion: string | null;
-  /** The prefix input's placeholder (D2's state cycling). */
+  /** The prefix input's placeholder (state cycling). */
   prefixPlaceholder: string;
 }
 
 export interface BrowseSlice {
   status: StatusState;
-  /** Truncation warning banner text (F20); null = hidden. */
+  /** Truncation warning banner text; null = hidden. */
   warning: string | null;
   segments: readonly HeatmapSegment[];
   rows: readonly HeatmapRow[];
@@ -137,33 +131,33 @@ export interface RawSlice {
   tableVisible: boolean;
   objects: readonly BrowseObject[];
   /** Keys of the checked row checkboxes (mirror of the DOM state; the
-   * checkboxes themselves stay uncontrolled, as in the legacy page). */
+   * checkboxes themselves stay uncontrolled). */
   selected: ReadonlySet<string>;
-  /** Active column sort (T15, G8 amendment); null = the legacy default
-   * order (trace-start epoch ascending). Unlike a search/TZ rebuild, a
-   * sort rebuild PRESERVES the checkbox selection. */
+  /** Active column sort; null = the default order (trace-start epoch
+   * ascending). Unlike a search/TZ rebuild, a sort rebuild PRESERVES the
+   * checkbox selection. */
   sort: RawSort | null;
   /** Bumped when the table body must rebuild (TZ toggle re-render). */
   renderEpoch: number;
 }
 
 export interface CredsSlice {
-  /** Server supports BYO credentials; header button shown (B2). */
+  /** Server supports BYO credentials; header button shown. */
   enabled: boolean;
   /** Credentials stored (green button + check label). */
   active: boolean;
   panelOpen: boolean;
   status: { text: string; kind: "ok" | "error" | null };
-  /** Last /api/buckets listing (legacy `lastBucketNames`). */
+  /** Last /api/buckets listing. */
   buckets: readonly string[];
   bucketsRowVisible: boolean;
-  /** "Show all" vs dial9-filtered picker view (C6). */
+  /** "Show all" vs filtered picker view. */
   showAll: boolean;
   /** Name of the picked bucket chip (renders `.selected`). */
   selectedBucket: string | null;
 }
 
-/** High-frequency overlay state (architecture 2.2 "transient channel"). */
+/** High-frequency overlay state (the "transient channel"). */
 export interface TransientSlice {
   /** In-progress heatmap drag (rubber band), in plot-local px. */
   drag: { x0: number; y0: number; x1: number; y1: number; zooming: boolean } | null;
@@ -248,15 +242,11 @@ export function createBrowserStore(): BrowserStore {
   return createStore(initialBrowserState(), {
     // Microtask scheduler instead of the default requestAnimationFrame:
     // updates made in an event handler still coalesce (one flush per task),
-    // but the flush lands before the event's turn ends - matching the
-    // legacy page, where every DOM effect was synchronous inside the
-    // handler. This page's renders are cheap idempotent chrome writes plus
-    // an identity-memoized canvas paint, so per-task flushing carries none
-    // of the per-frame-render concerns the RAF default exists for (F2);
-    // what it buys is that anything observing the DOM right after an input
-    // event (users, and the T12 row walkers, which assert click -> effect
-    // with no settle wait, exactly like the legacy page allowed) never
-    // sees a stale frame.
+    // but the flush lands before the event's turn ends. This page's renders
+    // are cheap idempotent chrome writes plus an identity-memoized canvas
+    // paint, so per-task flushing carries none of the per-frame-render
+    // concerns the RAF default exists for; what it buys is that anything
+    // observing the DOM right after an input event never sees a stale frame.
     scheduler: (cb) => queueMicrotask(cb),
   });
 }

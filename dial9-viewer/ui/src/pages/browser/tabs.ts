@@ -1,6 +1,6 @@
-// Tab bar component (features/01 E1/E2): Browse <-> Raw Search switching
-// and the per-tab actions swap (Raw shows Select All/Deselect All; Browse
-// shows the Flamegraph and Tokio Stats buttons).
+// Tab bar component: Browse <-> Raw Search switching and the per-tab
+// actions swap (Raw shows Select All/Deselect All; Browse shows the
+// Flamegraph and Tokio Stats buttons).
 
 import { assertInScheduledRender } from "../../store/store.js";
 import type { PageCtx } from "./ctx.js";

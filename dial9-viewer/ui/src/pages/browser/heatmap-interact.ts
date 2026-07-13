@@ -1,11 +1,9 @@
-// Heatmap pointer interaction (features/01 F12-F15, F18, F19): plain drag
-// selects a region, Option/Alt+drag zooms the time axis, click selects one
-// segment, double-click resets zoom, click-outside clears the selection,
-// and window resizes trigger a debounced repaint. Ported from the legacy
-// setupHeatmapInteraction IIFE (index.html:1460-1523) + the resize and
-// click-outside listeners. Raw events translate into store actions and
-// transient-channel updates only (architecture 2.5); rendering is the
-// selection overlay's and painter's job.
+// Heatmap pointer interaction: plain drag selects a region, Option/Alt+drag
+// zooms the time axis, click selects one segment, double-click resets zoom,
+// click-outside clears the selection, and window resizes trigger a
+// debounced repaint. Raw events translate into store actions and
+// transient-channel updates only; rendering is the selection overlay's and
+// painter's job.
 
 import { ROW_H } from "./actions.js";
 import type { PageCtx } from "./ctx.js";
@@ -72,18 +70,18 @@ export function mountHeatmapInteraction({ store, els, actions }: PageCtx): void 
     }
   });
 
-  // Double-click anywhere on the plot resets to the full time range (F15).
+  // Double-click anywhere on the plot resets to the full time range.
   els.heatmapPlot.addEventListener("dblclick", () => {
     actions.resetHeatmapZoom();
   });
 
-  // The "Reset zoom" button in the hint bar (F16; legacy inline onclick).
+  // The "Reset zoom" button in the hint bar.
   els.heatmapResetZoom.addEventListener("click", () => {
     actions.resetHeatmapZoom();
   });
 
   // Clicking anywhere outside the timeline and the actions bar clears the
-  // current selection (F18). Clicks inside the plot are handled by its own
+  // current selection. Clicks inside the plot are handled by its own
   // mousedown/up; clicks on the action buttons must preserve the selection.
   document.addEventListener("click", (e) => {
     const s = store.getState();
@@ -96,7 +94,7 @@ export function mountHeatmapInteraction({ store, els, actions }: PageCtx): void 
   });
 
   // Redraw the canvas (and re-measure width) on window resize, debounced
-  // 100ms (F19). The renderEpoch bump repaints the canvas and re-places the
+  // 100ms. The renderEpoch bump repaints the canvas and re-places the
   // selection rect through the normal render subscriptions.
   let resizeTimer: ReturnType<typeof setTimeout> | null = null;
   window.addEventListener("resize", () => {

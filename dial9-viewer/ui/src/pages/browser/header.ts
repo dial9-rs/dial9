@@ -1,5 +1,5 @@
-// Header chrome: the timezone toggle button (features/01 B3). The creds
-// button lives in creds-panel.ts (it is part of the C-section component).
+// Header chrome: the timezone toggle button. The creds button lives in
+// creds-panel.ts.
 
 import { assertInScheduledRender } from "../../store/store.js";
 import type { PageCtx } from "./ctx.js";

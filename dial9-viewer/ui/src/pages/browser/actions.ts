@@ -1,14 +1,10 @@
-// Browser-page actions (T14): the verbs the components dispatch. Each one
-// mirrors a block of the legacy index.html inline script (cited per
-// function); the DOM writes the legacy code performed inline become store
-// updates here, and the subscribed components render them (through the
-// store scheduler). Text inputs stay DOM-owned; actions read them live,
-// exactly like the legacy handlers did.
+// Browser-page actions: the verbs the components dispatch. DOM writes
+// become store updates that subscribed components render through the
+// store scheduler. Text inputs stay DOM-owned; actions read them live.
 
 // Leaf seam modules, NOT the lib barrels: the barrel indexes evaluate
 // modules that import trace_analysis.js / trace_parser.js at init (they
-// expect <script>-established globals in a browser), and the legacy
-// browser page never loaded the parser at all - its port must not either.
+// expect <script>-established globals), which this page must not load.
 import {
   MAX_OPEN_BYTES,
   groupByHost,
@@ -37,15 +33,14 @@ import type {
 } from "./state.js";
 import type { UrlStateFields } from "./globals.js";
 
-/** px height of each host row in the heatmap (legacy ROW_H). */
+/** px height of each host row in the heatmap. */
 export const ROW_H = 26;
 
 /**
- * Heatmap grouping key for an unknown-layout S3 key (T15, I2 amendment):
- * the key's raw directory path, so segments from the same directory share
- * a row (at least the granularity the legacy positional grouping had)
- * without any guessed service/host labels. Falls back to the whole key
- * for keys with no directory.
+ * Heatmap grouping key for an unknown-layout S3 key: the key's raw
+ * directory path, so segments from the same directory share a row without
+ * any guessed service/host labels. Falls back to the whole key for keys
+ * with no directory.
  */
 export function unknownGroupPath(key: string): string {
   const dir = key.split("/").slice(0, -1).join("/");
@@ -84,12 +79,11 @@ export interface BrowserActions {
 export function createActions(store: BrowserStore, els: BrowserEls): BrowserActions {
   // While restoring state from the URL on load, syncUrl() is suppressed: the
   // intermediate restore steps (tab switch, range set) would otherwise each
-  // rewrite the URL and could drop fields not yet restored (legacy
-  // `restoring`).
+  // rewrite the URL and could drop fields not yet restored.
   let restoring = false;
 
   // On page load, automatically run the search once so the heatmap is
-  // populated without an extra click (legacy `autoSearched`).
+  // populated without an extra click.
   let autoSearched = false;
 
   function localTz(): boolean {
@@ -99,7 +93,7 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
   // Mirror the current page state into the URL, replacing the history entry
   // so a stream of actions doesn't stack up Back-button steps. A quick range
   // is stored relative (`last=N`); a manually-edited range as precise
-  // epoch-second from/to. Ported from legacy syncUrl (index.html:725-750).
+  // epoch-second from/to.
   function syncUrl(): void {
     if (restoring) return;
     // The bucket's region rides in the URL (as aws_region) so a cross-region
@@ -124,17 +118,15 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
       if (toDate) state.to = Math.floor(toDate.getTime() / 1000);
     }
     let qs = window.Dial9UrlState.serialize(state);
-    // C6 (T15 amendment): a page-load `bucket_filter=` override must
-    // survive URL syncs, but Dial9UrlState (shared verbatim with the
-    // legacy page) doesn't know the param - re-append it here. An empty
+    // A page-load `bucket_filter=` override must survive URL syncs, but
+    // Dial9UrlState doesn't know the param - re-append it here. An empty
     // override ("no filtering") is meaningful and serialized too.
     const filterOverride = s.config.bucketFilterOverride;
     if (filterOverride != null) {
       qs += (qs ? "&" : "") + "bucket_filter=" + encodeURIComponent(filterOverride);
     }
     // Keep the pathname explicit: a bare "?qs" would resolve against
-    // <base href="/"> and rewrite this off-root page's path to "/". The
-    // legacy page (served at the root) got the same result implicitly.
+    // <base href="/"> and rewrite this off-root page's path to "/".
     history.replaceState(
       null,
       "",
@@ -146,7 +138,6 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
     store.update("form", { prefix: els.prefixInput.value });
   }
 
-  // Quick range buttons (legacy setQuickRange, index.html:1099-1114).
   function setQuickRange(hours: number): void {
     const now = new Date();
     const from = new Date(now.getTime() - hours * 3600 * 1000);
@@ -159,23 +150,20 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
     syncUrl();
   }
 
-  // A manual edit turns the range into a precise/custom window (legacy
-  // clearQuickRange, index.html:1119-1123).
+  // A manual edit turns the range into a precise/custom window.
   function clearQuickRange(): void {
     store.update("search", { quickRange: null });
     syncUrl();
   }
 
-  // Tab switching (legacy switchTab, index.html:1128-1140). All the DOM
-  // toggles (tab classes, view/actions visibility, selection count) render
-  // from the ui slice.
+  // Tab switching: all the DOM toggles (tab classes, view/actions
+  // visibility, selection count) render from the ui slice.
   function switchTab(tab: "browse" | "raw"): void {
     store.update("ui", { tab });
     syncUrl();
   }
 
-  // Full data extent across segments (from legacy renderHeatmap's domain
-  // computation, index.html:1297-1303).
+  // Full data extent across segments.
   function computeExtent(segments: readonly HeatmapSegment[]): TimeDomain {
     let tMin = Infinity;
     let tMax = -Infinity;
@@ -188,8 +176,7 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
     return { tMin, tMax };
   }
 
-  // The state transition of legacy renderHeatmap (index.html:1281-1330):
-  // clear the selection, and either show the "no traces" status (no rows)
+  // Clear the selection, and either show the "no traces" status (no rows)
   // or reset the domain to the data extent and show the heatmap. The actual
   // painting is the browse-view component's render.
   function renderHeatmapState(): void {
@@ -217,7 +204,6 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
     });
   }
 
-  // Timezone toggle (legacy tz-btn handler, index.html:953-972).
   function toggleTz(): void {
     const wasLocal = localTz();
     // Read current picker values in the OLD tz mode before toggling
@@ -231,22 +217,20 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
     if (fromDate) els.rangeFrom.value = dateToPickerStr(fromDate, nowLocal);
     if (toDate) els.rangeTo.value = dateToPickerStr(toDate, nowLocal);
 
-    // Re-render current view (legacy: renderHeatmap() / renderRawTable()).
+    // Re-render the current view.
     const s = store.getState();
     if (s.ui.tab === "browse") {
       if (s.browse.rows.length) renderHeatmapState();
     } else {
-      // Legacy re-ran renderRawTable(rawObjects): rebuilds the table (which
-      // drops any checked rows) or, when empty, re-runs the sample-key
-      // empty-state fetch.
+      // Rebuild the raw table (dropping any checked rows) or, when empty,
+      // re-run the sample-key empty-state fetch.
       void renderRawResults(s.raw.objects);
     }
     syncUrl();
   }
 
-  // Time-range search, Browse mode (legacy doTimeRangeSearch,
-  // index.html:1151-1246). One GET /api/browse; the server owns the prefix
-  // fan-out (#582) and returns merged objects plus a `truncated` flag.
+  // Time-range search, Browse mode. One GET /api/browse; the server owns
+  // the prefix fan-out and returns merged objects plus a `truncated` flag.
   async function doTimeRangeSearch(): Promise<void> {
     const bucket = els.bucketInput.value.trim();
     if (!bucket) {
@@ -358,11 +342,8 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
       // Build normalized segments for the density timeline. A segment's
       // wall-clock span is [trace-start epoch, last_modified]; bytes are
       // spread uniformly across it when rendering density. Unknown-layout
-      // keys (T15, I2 amendment) group by their raw directory path - the
-      // browse view labels those rows with the raw path instead of the
-      // legacy positionally shifted service/host (Finding 1); their
-      // filename epoch is layout-independent, so time placement is
-      // unchanged.
+      // keys group by their raw directory path; their filename epoch is
+      // layout-independent, so time placement is unchanged.
       const segments: HeatmapSegment[] = allObjects
         .map((obj) => {
           const p = parseKey(obj.key);
@@ -392,8 +373,7 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
 
       // Precompute per-row density inputs once (reused across zoom/resize
       // redraws): segments tiled so upload-lag overlaps don't double-count,
-      // plus the genuine coverage gaps between them (legacy renderHeatmap
-      // stamped these onto each row).
+      // plus the genuine coverage gaps between them.
       const rows: HeatmapRow[] = groupByHost(segments).map((row) => ({
         ...row,
         tiled: tileSegments(row.segments),
@@ -414,8 +394,7 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
     }
   }
 
-  // Raw search (legacy doRawSearch, index.html:1790-1812). Post-#582 this
-  // is GET /api/browse with an implicit last-30-days window.
+  // Raw search: GET /api/browse with an implicit last-30-days window.
   async function doRawSearch(): Promise<void> {
     const bucket = els.bucketInput.value.trim();
     if (!bucket) {
@@ -434,8 +413,8 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
     try {
       const resp = await apiFetch(url);
       if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${await resp.text()}`);
-      // Legacy read `.objects` with no fallback; a missing field would have
-      // thrown into the catch below, so keep that shape strict.
+      // Read `.objects` with no fallback: a missing field throws into the
+      // catch below, keeping the shape strict.
       const objects = ((await resp.json()) as { objects: BrowseObject[] }).objects;
       store.update("raw", { objects });
       await renderRawResults(objects);
@@ -451,12 +430,11 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
     }
   }
 
-  // The state transition of legacy renderRawTable (index.html:1818-1866):
-  // empty results -> status + async sample-key hint; results -> table
+  // Empty results -> status + async sample-key hint; results -> table
   // rebuild (renderEpoch bump; the raw-view component builds the rows).
-  // Legacy's rebuild left every checkbox unchecked, so the selection mirror
+  // The rebuild leaves every checkbox unchecked, so the selection mirror
   // resets with it. NOTE: the empty-state sample fetch uses plain fetch(),
-  // not apiFetch - a legacy quirk (G7) preserved verbatim.
+  // not apiFetch.
   async function renderRawResults(objects: readonly BrowseObject[]): Promise<void> {
     if (objects.length === 0) {
       const prev = store.getState().raw.status;
@@ -501,7 +479,6 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
     });
   }
 
-  // Auto-discover prefixes (legacy discoverPrefixes, index.html:877-935).
   async function discoverPrefixes(): Promise<void> {
     const bucket = els.bucketInput.value.trim();
     if (!bucket) {
@@ -519,17 +496,17 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
         return;
       }
       const prefixes = (await resp.json()) as string[];
-      // Legacy cleared the suggestion chips right after parsing, before any
-      // early return below.
+      // Clear the suggestion chips right after parsing, before any early
+      // return below.
       store.update("search", { suggestions: [], activeSuggestion: null });
       if (prefixes.length === 0) {
         store.update("search", { prefixPlaceholder: "(none found)" });
         return;
       }
-      // Issue #471: when the root children are all date partitions
-      // (YYYY-MM-DD/), the bucket has no key prefix - the trace data starts
-      // directly at the date layer. Don't offer the dates as prefix
-      // suggestions; the correct prefix is empty.
+      // When the root children are all date partitions (YYYY-MM-DD/), the
+      // bucket has no key prefix - the trace data starts directly at the
+      // date layer. Don't offer the dates as prefix suggestions; the
+      // correct prefix is empty.
       if (!store.getState().config.serverHasPrefix && isDateLayer(prefixes)) {
         els.prefixInput.value = "";
         mirrorPrefix();
@@ -549,9 +526,8 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
       store.update("search", {
         prefixPlaceholder: "e.g. traces",
         suggestions: labels,
-        // The active chip matches the legacy per-chip render check
-        // `prefixInput.value === label`; later manual edits of the prefix
-        // input deliberately do NOT move this highlight (legacy behavior).
+        // Later manual edits of the prefix input deliberately do NOT move
+        // this highlight.
         activeSuggestion: labels.includes(current) ? current : null,
       });
     } catch {
@@ -561,8 +537,7 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
     }
   }
 
-  // Region auto-detection (#607; legacy detectRegionForBucket,
-  // index.html:856-874). Resolve a (possibly cross-region) bucket's real
+  // Region auto-detection: resolve a (possibly cross-region) bucket's real
   // region via /api/credentials/check before any data endpoint is hit, and
   // persist it into the stored credentials. No-op without credentials.
   async function detectRegionForBucket(bucket: string): Promise<void> {
@@ -588,10 +563,9 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
     }
   }
 
-  // Load-time auto-search (legacy autoSearch, index.html:837-843). Legacy
-  // gated on the live DOM `search-btn.disabled`; renders are frame-deferred
-  // here, so evaluate the same readiness formula (updateSearchReady) from
-  // state instead - identical semantics, no scheduler race.
+  // Load-time auto-search. Renders are frame-deferred, so evaluate the
+  // search-readiness formula from state rather than the live DOM
+  // `search-btn.disabled` - identical semantics, no scheduler race.
   function autoSearch(): void {
     if (autoSearched) return;
     autoSearched = true;
@@ -602,8 +576,7 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
     }
   }
 
-  // Re-run whichever search the user last triggered (legacy
-  // reRunCurrentSearch, index.html:690-696).
+  // Re-run whichever search the user last triggered.
   function reRunCurrentSearch(): void {
     if (store.getState().ui.tab === "raw") {
       if (els.rawSearchInput.value.trim()) void doRawSearch();
@@ -613,7 +586,7 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
   }
 
   // Wipe the browse pane back to its initial empty state; used when
-  // credentials are cleared (legacy resetBrowsePane, index.html:1547-1559).
+  // credentials are cleared.
   function resetBrowsePane(): void {
     store.update("browse", {
       segments: [],
@@ -637,9 +610,8 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
     );
   }
 
-  // Zoom the displayed time domain to the pixel range [x0, x1] (legacy
-  // zoomToX, index.html:1529-1541). Density re-normalizes to the visible
-  // window on the repaint.
+  // Zoom the displayed time domain to the pixel range [x0, x1]. Density
+  // re-normalizes to the visible window on the repaint.
   function zoomToX(x0: number, x1: number): void {
     const b = store.getState().browse;
     if (!b.domain || x1 - x0 < 4) return;
@@ -651,8 +623,7 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
     store.update("browse", { domain: { tMin: t0, tMax: t1 }, selection: null });
   }
 
-  // Restore the full data extent (legacy resetHeatmapZoom,
-  // index.html:1561-1569; no-op if not currently zoomed).
+  // Restore the full data extent; no-op if not currently zoomed.
   function resetHeatmapZoom(): void {
     const b = store.getState().browse;
     if (!b.fullDomain) return;
@@ -661,8 +632,7 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
     store.update("browse", { domain: { tMin, tMax }, selection: null });
   }
 
-  // Single-click: select the one segment under the cursor (legacy
-  // selectSegmentAt, index.html:1599-1615).
+  // Single-click: select the one segment under the cursor.
   function selectSegmentAt(x: number, y: number): void {
     const b = store.getState().browse;
     if (!b.domain) return;
@@ -693,9 +663,8 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
     });
   }
 
-  // Drag-select region (legacy finalizeSelection, index.html:1617-1642).
-  // Opening fetches WHOLE segment files, so the selection snaps to the
-  // actual [min start, max end] of the covered files.
+  // Drag-select region. Opening fetches WHOLE segment files, so the
+  // selection snaps to the actual [min start, max end] of the covered files.
   function finalizeSelection(x0: number, x1: number, y0: number, y1: number): void {
     const b = store.getState().browse;
     if (!b.domain || x1 - x0 < 3) {
@@ -734,15 +703,13 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
     });
   }
 
-  // (legacy setHeatmapSelection, index.html:1644-1659; the rect, label
-  // highlights and selection count all render from the slice.)
+  // The rect, label highlights and selection count all render from the slice.
   function setHeatmapSelection(sel: HeatmapSelection | null): void {
     store.update("browse", { selection: sel });
   }
 
-  // Raw-mode Select All / Deselect All (legacy rawSelectAll,
-  // index.html:1872-1876). The checkboxes are DOM-owned; mirror the result
-  // into the raw slice for the count render.
+  // Raw-mode Select All / Deselect All. The checkboxes are DOM-owned;
+  // mirror the result into the raw slice for the count render.
   function rawSelectAll(checked: boolean): void {
     els.rawBody
       .querySelectorAll<HTMLInputElement>(".raw-cb")
@@ -764,10 +731,8 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
     store.update("raw", { selected });
   }
 
-  // Selected keys (legacy getSelectedKeys, index.html:1879-1886). Raw mode
-  // returns keys in TABLE ROW ORDER exactly as the legacy
-  // `.raw-cb:checked` DOM walk did - since T15's G8 amendment the row
-  // order follows the active column sort (default: epoch ascending).
+  // Selected keys. Raw mode returns keys in TABLE ROW ORDER following the
+  // active column sort (default: epoch ascending).
   function getSelectedKeys(): string[] {
     const s = store.getState();
     if (s.ui.tab === "browse") {
@@ -778,8 +743,7 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
       .filter((key) => s.raw.selected.has(key));
   }
 
-  // Open the viewer on the selection (legacy viewSelected,
-  // index.html:1924-1936).
+  // Open the viewer on the selection.
   function viewSelected(): void {
     const keys = getSelectedKeys();
     if (keys.length === 0) return;
@@ -788,18 +752,16 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
 
     // Pass structured metadata for the viewer title, plus one trace=
     // component per file (downloaded in parallel + gunzipped client-side).
-    // T15 (I2 amendment): lib/trace/title.ts - unknown-layout keys no
-    // longer leak shifted svc/host params into the title.
+    // Unknown-layout keys don't leak shifted svc/host params into the title.
     const titleParams = traceTitleParams(keys, { localTz: localTz() });
     for (const url of objectTraceUrls(bucket, keys)) titleParams.append("trace", url);
 
     window.open(`viewer.html?${titleParams.toString()}`, "_blank");
   }
 
-  // Flamegraph button (legacy viewCpuProfile, index.html:1728-1768). Two
-  // modes since #570: aggregation-enabled servers get the sampled
-  // server-side refinement loop over the selection's scope; otherwise the
-  // exact per-key trace= set.
+  // Flamegraph button. Two modes: aggregation-enabled servers get the
+  // sampled server-side refinement loop over the selection's scope;
+  // otherwise the exact per-key trace= set.
   function viewCpuProfile(): void {
     const s = store.getState();
     const sel = s.browse.selection;
@@ -811,9 +773,8 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
     }
     const keys = sel.keys;
     if (s.config.aggregationEnabled) {
-      // T15 (I2 amendment): scope params come from KNOWN layouts only -
-      // the legacy path fed positionally shifted fields (svc=host-0) into
-      // the aggregation scope, filtering on wrong names.
+      // Scope params come from KNOWN layouts only, so we don't filter the
+      // aggregation on positionally shifted (wrong) names.
       const known = keys.map((k) => parseKey(k)).filter((p) => p.layout === "known");
       const services = [...new Set(known.map((p) => p.service).filter(Boolean))];
       const hosts = [...new Set(known.map((p) => p.host).filter(Boolean))];
@@ -824,7 +785,7 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
       if (bucket) fgParams.set("bucket", bucket);
       // Extract the key prefix from the first selected key (everything
       // before the date segment). Authoritative regardless of whether the
-      // prefix came from the server or the user's input (I8).
+      // prefix came from the server or the user's input.
       const pfx = extractPrefix(keys[0]!);
       if (pfx) fgParams.set("prefix", pfx);
       // The loop's Scope takes a single service; a box almost always spans
@@ -845,7 +806,7 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
     window.open("flamegraph.html?" + fgParams.toString(), "_blank");
   }
 
-  // Tokio Stats button (#570; legacy viewTokioStats, index.html:1770-1787).
+  // Tokio Stats button.
   function viewTokioStats(): void {
     const s = store.getState();
     const sel = s.browse.selection;
@@ -856,7 +817,7 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
       return;
     }
     const keys = sel.keys;
-    // T15 (I2 amendment): known layouts only, as in viewCpuProfile above.
+    // Known layouts only, as in viewCpuProfile above.
     const known = keys.map((k) => parseKey(k)).filter((p) => p.layout === "known");
     const services = [...new Set(known.map((p) => p.service).filter(Boolean))];
     const hosts = [...new Set(known.map((p) => p.host).filter(Boolean))];

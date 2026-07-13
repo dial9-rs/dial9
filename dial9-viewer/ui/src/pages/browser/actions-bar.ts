@@ -1,7 +1,5 @@
-// Actions bar component (features/01 H): View Selected / Flamegraph /
-// Tokio Stats buttons, the selection count and the size-cap warning.
-// The render is the legacy updateSelectionCount (index.html:1888-1922)
-// as a pure function of store state.
+// Actions bar: View Selected / Flamegraph / Tokio Stats buttons, the
+// selection count and the size-cap warning, rendered from store state.
 
 // Leaf heatmap seam, not the lib/canvas barrel (see actions.ts).
 import { MAX_OPEN_BYTES } from "../../lib/canvas/heatmap.js";
@@ -34,9 +32,9 @@ export function mountActionsBar({ store, els, actions }: PageCtx): void {
         els.selectionCount.textContent = "";
         return;
       }
-      // H4: the selection size cap (MAX_OPEN_BYTES; raised to 200 MB by
-      // #600). Since #570, Flamegraph is exempt in aggregation mode (the
-      // server samples; no client decode) and Tokio Stats is never capped.
+      // Selection size cap (MAX_OPEN_BYTES). Flamegraph is exempt in
+      // aggregation mode (the server samples; no client decode) and Tokio
+      // Stats is never capped.
       const over = sel.bytes > MAX_OPEN_BYTES;
       els.viewBtn.disabled = over;
       els.cpuBtn.disabled = over && !agg;
@@ -52,9 +50,8 @@ export function mountActionsBar({ store, els, actions }: PageCtx): void {
       return;
     }
 
-    // Raw mode. The legacy branch never touched the (hidden) Flamegraph /
-    // Tokio Stats buttons here; their disabled state is browse-selection
-    // territory and is left untouched.
+    // Raw mode. The (hidden) Flamegraph / Tokio Stats buttons are
+    // browse-selection territory; leave their disabled state untouched.
     const count = state.raw.selected.size;
     els.selectionWarn.textContent = "";
     els.selectionCount.textContent = count ? `${count} selected` : "";

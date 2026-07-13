@@ -1,16 +1,13 @@
-// Raw search view component (features/01 G): prefix input + search, the
-// results table (columns parsed from the key), row/select-all checkboxes.
+// Raw search view component: prefix input + search, the results table
+// (columns parsed from the key), row/select-all checkboxes.
 //
-// T15 amendments live here:
-// - I2 display: unknown-layout keys render RAW - the full key across the
-//   Service/Host/Boot columns (raw-rows.ts) - instead of the legacy
-//   positionally shifted fields (Finding 1).
-// - G8: the sortable columns the legacy page advertised (data-sort markup,
-//   sort-arrow CSS, pointer cursor) but never wired now actually sort:
-//   click a header to sort (asc), click again to flip. Numeric for Trace
-//   Start / Seg # / Size, lexical otherwise (raw-rows.ts). A sort rebuild
-//   preserves the checkbox selection (unlike a search/TZ rebuild, whose
-//   selection drop is recorded legacy behavior).
+// - Unknown-layout keys render RAW: the full key across the
+//   Service/Host/Boot columns (raw-rows.ts) instead of positionally
+//   shifted fields.
+// - Sortable columns: click a header to sort (asc), click again to flip.
+//   Numeric for Trace Start / Seg # / Size, lexical otherwise
+//   (raw-rows.ts). A sort rebuild preserves the checkbox selection (unlike
+//   a search/TZ rebuild, which drops it).
 
 import { assertInScheduledRender } from "../../store/store.js";
 import type { PageCtx } from "./ctx.js";
@@ -26,11 +23,11 @@ import type { BrowseObject } from "./state.js";
 import { renderStatus } from "./status-render.js";
 
 export function mountRawView({ store, els, actions }: PageCtx): void {
-  // G2: Enter in the prefix field triggers the search.
+  // Enter in the prefix field triggers the search.
   els.rawSearchInput.addEventListener("keydown", (e) => {
     if (e.key === "Enter") void actions.doRawSearch();
   });
-  // A6: the raw query rides the URL as `q`.
+  // The raw query rides the URL as `q`.
   els.rawSearchInput.addEventListener("input", () => {
     actions.syncUrl();
   });
@@ -38,11 +35,11 @@ export function mountRawView({ store, els, actions }: PageCtx): void {
     void actions.doRawSearch();
   });
 
-  // G5: select-all header checkbox toggles all row checkboxes.
+  // Select-all header checkbox toggles all row checkboxes.
   els.rawSelectAll.addEventListener("change", () => {
     actions.rawSelectAll(els.rawSelectAll.checked);
   });
-  // G6: Select All / Deselect All actions-bar buttons (Raw tab only).
+  // Select All / Deselect All actions-bar buttons (Raw tab only).
   els.rawSelectAllBtn.addEventListener("click", () => {
     actions.rawSelectAll(true);
   });
@@ -50,7 +47,7 @@ export function mountRawView({ store, els, actions }: PageCtx): void {
     actions.rawSelectAll(false);
   });
 
-  // G8 (T15 amendment): sortable column headers.
+  // Sortable column headers.
   const sortHeaders = [
     ...els.rawTable.querySelectorAll<HTMLTableCellElement>("th[data-sort]"),
   ];
@@ -61,8 +58,8 @@ export function mountRawView({ store, els, actions }: PageCtx): void {
     });
   }
 
-  // Direction indicator (the .sort-arrow slot the legacy CSS always styled)
-  // plus aria-sort on the active header.
+  // Direction indicator (the .sort-arrow slot) plus aria-sort on the
+  // active header.
   function renderSortIndicators(sort: RawSort | null): void {
     for (const th of sortHeaders) {
       const active = sort !== null && th.dataset["sort"] === sort.key;
@@ -82,10 +79,10 @@ export function mountRawView({ store, els, actions }: PageCtx): void {
     }
   }
 
-  // G3: rebuild the table body. Rows in the active sort order (default:
-  // trace-start epoch ascending). A search/TZ rebuild starts unchecked
-  // (legacy renderRawTable semantics - a TZ toggle drops the selection);
-  // a G8 sort rebuild passes the selection mirror to re-check its rows.
+  // Rebuild the table body. Rows in the active sort order (default:
+  // trace-start epoch ascending). A search/TZ rebuild starts unchecked (a
+  // TZ toggle drops the selection); a sort rebuild passes the selection
+  // mirror to re-check its rows.
   function rebuildRows(
     objects: readonly BrowseObject[],
     localTz: boolean,
@@ -121,8 +118,8 @@ export function mountRawView({ store, els, actions }: PageCtx): void {
         cell(row.parsedCols.host, "host");
         cell(row.parsedCols.bootId || "", "host");
       } else {
-        // I2 amendment: unknown-layout key - show the raw key across the
-        // Service/Host/Boot columns instead of guessed (shifted) fields.
+        // Unknown-layout key: show the raw key across the Service/Host/Boot
+        // columns instead of guessed (shifted) fields.
         const td = document.createElement("td");
         td.className = "rawkey";
         td.colSpan = 3;
@@ -147,9 +144,9 @@ export function mountRawView({ store, els, actions }: PageCtx): void {
     els.rawTable.style.display = state.raw.tableVisible ? "" : "none";
     renderSortIndicators(state.raw.sort);
     // Rebuild only when a search / TZ toggle bumped the render epoch
-    // (selection reset - legacy semantics) or a G8 header click changed
-    // the sort (selection preserved); selection mirror changes must NOT
-    // rebuild (they would wipe the checkboxes the user just clicked).
+    // (selection reset) or a header click changed the sort (selection
+    // preserved); selection mirror changes must NOT rebuild (they would
+    // wipe the checkboxes the user just clicked).
     const epochChanged = state.raw.renderEpoch !== lastEpoch;
     const sortChanged = state.raw.sort !== lastSort;
     if (epochChanged || sortChanged) {

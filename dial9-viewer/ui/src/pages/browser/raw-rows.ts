@@ -1,26 +1,21 @@
-// Pure row model + column sorting for the raw-results table (T15
-// amendments of features/01 I2 display and G8; ADR-0004 section 1).
+// Pure row model + column sorting for the raw-results table.
 //
 // Row model: maps a browse object through the typed key parser
 // (lib/trace/keys.ts) into what each column displays:
 //
 // - known-layout keys render Service / Host / Boot as parsed;
 // - unknown-layout keys render RAW: the full key shown across the
-//   Service/Host/Boot columns instead of positionally shifted fields
-//   (the legacy mislabel this amendment retires - Finding 1).
+//   Service/Host/Boot columns instead of positionally shifted fields.
 //
 // The filename epoch/segIndex are layout-independent (see keys.ts), so
 // Trace Start and Seg # render for both variants, and the default table
-// order (trace-start epoch ascending, legacy G3) covers unknown keys too.
+// order (trace-start epoch ascending) covers unknown keys too.
 //
-// Sorting (G8 amendment - the legacy page advertised sortable headers with
-// no handler): every column is sortable; NUMERIC for Trace Start (epoch),
-// Seg # and Size, LEXICAL otherwise (ticket-decided semantics). A repeated
-// click on the active column flips the direction. `sort: null` keeps the
-// legacy default order.
+// Sorting: every column is sortable; NUMERIC for Trace Start (epoch),
+// Seg # and Size, LEXICAL otherwise. A repeated click on the active column
+// flips the direction. `sort: null` keeps the default order.
 //
-// Kept free of DOM so the model is unit-testable under the node test env;
-// raw-view.ts renders it.
+// Kept free of DOM so the model is unit-testable; raw-view.ts renders it.
 
 import { parseKey } from "../../lib/trace/keys.js";
 import type { BrowseObject } from "./state.js";
@@ -51,7 +46,7 @@ export function toRawRow(obj: BrowseObject): RawRow {
   return { obj, parsedCols: null, epoch: p.epoch, segIndex: p.segIndex };
 }
 
-/** Build the table's row models in the legacy default order (epoch asc). */
+/** Build the table's row models in the default order (epoch asc). */
 export function toRawRows(objects: readonly BrowseObject[]): RawRow[] {
   const rows = objects.map(toRawRow);
   rows.sort((a, b) => a.epoch - b.epoch);
@@ -75,8 +70,8 @@ export interface RawSort {
 }
 
 /**
- * Next sort state after clicking a header (G8): first click sorts that
- * column ascending; clicking the active column again flips the direction.
+ * Next sort state after clicking a header: first click sorts that column
+ * ascending; clicking the active column again flips the direction.
  */
 export function nextSort(current: RawSort | null, clicked: RawSortKey): RawSort {
   if (current && current.key === clicked) {
@@ -114,9 +109,9 @@ export function sortValue(row: RawRow, key: RawSortKey): number | string {
 }
 
 /**
- * Sort the row models for display. `sort: null` = the legacy default
- * (trace-start epoch ascending). Ties fall back to epoch-then-key so the
- * order is total and stable across rebuilds.
+ * Sort the row models for display. `sort: null` = the default (trace-start
+ * epoch ascending). Ties fall back to epoch-then-key so the order is total
+ * and stable across rebuilds.
  */
 export function sortRawRows(rows: readonly RawRow[], sort: RawSort | null): RawRow[] {
   const out = [...rows];

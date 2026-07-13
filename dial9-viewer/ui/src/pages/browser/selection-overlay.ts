@@ -1,6 +1,6 @@
-// Selection overlay (features/01 F12/F14/F17): the #heatmap-sel rectangle -
-// live rubber band during a drag (transient channel), persistent selection
-// box after - plus the selected host-label row highlights.
+// Selection overlay: the #heatmap-sel rectangle - live rubber band during a
+// drag (transient channel), persistent selection box after - plus the
+// selected host-label row highlights.
 //
 // MOUNT ORDER: after mountBrowseView. Both subscribe to `browse`; when a
 // search rebuilds the label rows, the painter must have rebuilt them within
@@ -19,7 +19,7 @@ export function mountSelectionOverlay({ store, els }: PageCtx): void {
     const drag = state.transient.drag;
     const selEl = els.heatmapSel;
 
-    // Highlight the selected host-label rows (legacy setHeatmapSelection).
+    // Highlight the selected host-label rows.
     const labelRows = els.heatmapLabels.querySelectorAll(".row");
     labelRows.forEach((el, i) => {
       const inSel = sel && sel.rows && i >= sel.rows[0] && i <= sel.rows[1];
@@ -27,8 +27,8 @@ export function mountSelectionOverlay({ store, els }: PageCtx): void {
     });
 
     if (drag) {
-      // In-progress drag: the legacy mousedown/mousemove rubber band. A
-      // zoom drag is purely horizontal, so its band spans all rows.
+      // In-progress drag rubber band. A zoom drag is purely horizontal, so
+      // its band spans all rows.
       selEl.classList.toggle("zoom", drag.zooming);
       selEl.style.display = "block";
       const l = Math.min(drag.x0, drag.x1);
@@ -53,7 +53,7 @@ export function mountSelectionOverlay({ store, els }: PageCtx): void {
       return;
     }
     if (sel.rows && state.browse.domain) {
-      // Legacy showSelRect: whole rows [r0,r1] x time span [t0,t1].
+      // Whole rows [r0,r1] x time span [t0,t1].
       const W =
         els.heatmapCanvas.clientWidth ||
         parseFloat(els.heatmapCanvas.style.width) ||

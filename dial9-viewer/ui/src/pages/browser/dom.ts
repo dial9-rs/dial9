@@ -1,6 +1,5 @@
-// Typed element handles for the browser page (T14). The ids/classes are the
-// legacy page's, unchanged - they are load-bearing for the parity census and
-// the row walkers (docs/ui-inventory/features/01-index-html.md access paths).
+// Typed element handles for the browser page. The ids/classes match the
+// page markup and are load-bearing for the row walkers.
 
 function byId<T extends HTMLElement>(id: string): T {
   const el = document.getElementById(id);

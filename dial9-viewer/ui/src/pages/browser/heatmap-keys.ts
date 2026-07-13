@@ -1,40 +1,30 @@
-// src/pages/browser/heatmap-keys.ts - keyboard window selection on the
-// browse heatmap (T20; the K2 fix: "heatmap window selection is
-// mouse-only... scroll regions not keyboard-focusable (axe serious)").
-//
-// NEW module, additive by design (T15 merges on top of this branch -
-// see page-keys.ts). The state machine mirrors the legacy viewer's
-// documented keyboard region selection ("Shift -> arrows -> Enter",
-// 04-ux-findings.md "Works well"; viewer.html:6227+), with the same
-// announcements pattern:
+// Keyboard window selection on the browse heatmap. The state machine:
 //   - focus the plot (now tabbable), press Shift: a selection window
 //     starts at the center of the visible time range;
-//   - ArrowLeft / ArrowRight move its leading edge (5% steps, the
-//     viewer's ratio);
+//   - ArrowLeft / ArrowRight move its leading edge (5% steps);
 //   - Enter (or Shift again) confirms: the same finalizeSelection the
 //     mouse path uses (all host rows - the keyboard window selects
 //     across hosts; row narrowing stays a pointer affordance);
 //   - Escape cancels.
-// The in-progress window renders through the SAME transient drag
-// channel as the mouse rubber band (selection-overlay.ts), so the
-// keyboard path gets the identical visual for free.
+// The in-progress window renders through the SAME transient drag channel
+// as the mouse rubber band (selection-overlay.ts), so the keyboard path
+// gets the identical visual for free.
 //
-// Per architecture 2.5: raw key events translate into store actions and
-// transient-channel updates only; rendering stays with the overlay.
+// Raw key events translate into store actions and transient-channel
+// updates only; rendering stays with the overlay.
 
 import { getAnnouncer } from "../../lib/interact/index.js";
 import { ROW_H } from "./actions.js";
 import type { PageCtx } from "./ctx.js";
 import { clamp } from "./format.js";
 
-// Edge step per arrow press, as a fraction of the plot width (the
-// viewer's keyboard-selection step ratio).
+// Edge step per arrow press, as a fraction of the plot width.
 const STEP = 0.05;
 
 export function mountHeatmapKeys({ store, els, actions }: PageCtx): void {
   const announcer = getAnnouncer();
 
-  // K2 (axe serious): the scrollable plot becomes keyboard-focusable.
+  // The scrollable plot becomes keyboard-focusable.
   // role=application: arrow keys are the widget's, not AT navigation.
   els.heatmapPlot.tabIndex = 0;
   els.heatmapPlot.setAttribute("role", "application");
