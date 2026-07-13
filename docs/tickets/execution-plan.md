@@ -162,14 +162,30 @@ fired: T34 made sourceLabel `() => string` but T33's toolbar.fileInfoTemplate/
 analysisTemplate take `string` -> tsc 2345. Fixed by resolving the getter at the
 call sites (deps.sourceLabel() per render). Second cross-ticket tsc break this
 session; integration tsc gate is doing its job.
-IN FLIGHT (cap 3, off e9b05ff): T31 (inspector - consumes T30/T24/T27/T29), T35
-(minimap+status), T36 (per-track collapse+reorder -> uiPrefs.trackOrder/collapsed).
-OWED: full-suite BATCH GATE. Since the 4-merge 1171-green point I have merged
-T30/T23/T27/T29/T34/T33 on tsc+build only (2 cross-ticket breaks caught by tsc,
-fixed). Run ONE clean full Vitest the moment running-agent count hits 0 (concurrent
-Vitest starves timing suites) - the checkpoint before dispatching the final wave.
-BLOCKED: T32 (in-viewer flamegraph + region analyses) needs T31 (renders in the
-inspector sidebar tabs) - dispatch AFTER T31 merges, off the post-T31 tip.
+T31 (inspector) MERGED 2026-07-13 (45640e6). Heaviest merge - T31 replaces the
+inspector placeholder with an empty mount-host aside + mountInspector, while T33
+had refactored the shell; auto-merge correctly took T31's empty-aside
+inspectorTemplate (lit-html leaves imperative children alone, toastRegion pattern)
+and unioned keyBindings (T33) + inspectorRegion (T31) in MountedShell + the return
+object, and mountLoadChrome + mountInspector imports in main.ts (boot body
+auto-merged both). tsc clean. Additive selection.pollDetail wired from the lane
+click. T31 deferred R3-R9 (region blocking panel) to T32 per the merged-code seam.
+GIT-COMMIT-DENY FINDING: T31's agent hit a `Bash(git commit *)` deny and left ALL
+work UNCOMMITTED in its worktree (gates were green there). Orchestrator salvage-
+committed it (30851a7) then merged. Most earlier agents committed fine via
+`git -C <wt> commit`; T31's likely used `cd <wt> && git` (denied). MITIGATION:
+added the `git -C` (not `cd && git`) note to T32's prompt; VERIFY every agent's
+worktree `git status` on completion and salvage-commit if uncommitted.
+IN FLIGHT (cap 3, off 45640e6): T35 (minimap+status), T36 (track collapse+reorder),
+T32 (in-viewer flamegraph + region analyses - now unblocked; S7 count investigation
++ frame->time link; renders into T31's Stack tab; frozen core NOT edited, K7 defers
+to T47 if it needs a core API).
+OWED: full-suite BATCH GATE. Merged T30/T23/T27/T29/T34/T33/T31 on tsc+build only
+(tsc caught + fixed 2 cross-ticket breaks). Run ONE clean full Vitest when running
+count hits 0 (concurrent Vitest starves timing suites) - the checkpoint before the
+final T37 polish ticket.
+REMAINING after this wave: T37 (UX polish, LAST in chunk 2) -> chunk 3
+(T40/T41/T44/T46 - verify which remain) -> T39 (legacy removal) last.
 DEFERRED BATCH GATE: full Vitest for T30/T23/T27 folded forward - run ONE clean
 full-suite gate after T29/T33/T34 land (never concurrent with a running agent's
 own suite; T27 proved concurrent Vitest starves timing-sensitive suites -> 13
