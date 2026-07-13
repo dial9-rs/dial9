@@ -151,14 +151,25 @@ only ledger (append-union M-rows + B-rows) + HANDOFF conflicted. tsc clean.
 FLAG for downstream merges: T34 changed ShellDeps.sourceLabel from `string` to
 `() => string` and added optional onNewFile - tsc will catch any T33/T31/T35
 collision at their merge (they share ShellDeps).
-IN FLIGHT (cap 3, off aeb724b): T33 (toolbar + concept-2 issues rail), T31
-(inspector - replaces the placeholder; consumes T30/T24/T27/T29 contracts; P8
-width->uiPrefs, retires R6), T35 (minimap tier-1 density + POI ticks + draggable
-viewport; status bar selection/range/copy-link/progress/hints - closes T34's
-status-bar progress seam).
+T33 (toolbar + issues rail) MERGED 2026-07-13 (e9b05ff, amended with getter fix).
+This was the biggest semantic merge yet: T33 refactored the shell (moved file-
+info out of viewModel into toolbar.ts, changed shellTemplate signature to add
+state/toolbar/rail, made ShellDeps extend ToolbarDeps). Resolved by taking T33's
+slim ShellViewModel + unioning T29's queueTrack into the reconstructed shellTemplate
+call, and unioning T34's loadChrome/onNewFile + T33's onOpenAnalysis/onSetRange/
+onClearRange + notify helper in main.ts. THEN the predicted cross-ticket break
+fired: T34 made sourceLabel `() => string` but T33's toolbar.fileInfoTemplate/
+analysisTemplate take `string` -> tsc 2345. Fixed by resolving the getter at the
+call sites (deps.sourceLabel() per render). Second cross-ticket tsc break this
+session; integration tsc gate is doing its job.
+IN FLIGHT (cap 3, off e9b05ff): T31 (inspector - consumes T30/T24/T27/T29), T35
+(minimap+status), T36 (per-track collapse+reorder -> uiPrefs.trackOrder/collapsed).
+OWED: full-suite BATCH GATE. Since the 4-merge 1171-green point I have merged
+T30/T23/T27/T29/T34/T33 on tsc+build only (2 cross-ticket breaks caught by tsc,
+fixed). Run ONE clean full Vitest the moment running-agent count hits 0 (concurrent
+Vitest starves timing suites) - the checkpoint before dispatching the final wave.
 BLOCKED: T32 (in-viewer flamegraph + region analyses) needs T31 (renders in the
-inspector sidebar tabs) - dispatch AFTER T31 merges. Prematurely created+removed
-its worktree once; recreate off the post-T31 tip.
+inspector sidebar tabs) - dispatch AFTER T31 merges, off the post-T31 tip.
 DEFERRED BATCH GATE: full Vitest for T30/T23/T27 folded forward - run ONE clean
 full-suite gate after T29/T33/T34 land (never concurrent with a running agent's
 own suite; T27 proved concurrent Vitest starves timing-sensitive suites -> 13
