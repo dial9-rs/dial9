@@ -25,50 +25,52 @@ interface FakeEl {
 
 function makeEl(tag: string): FakeEl {
   const classes = new Set<string>();
-  const el: FakeEl = {
+  const el = {
     tagName: tag,
-    className: "",
     textContent: "",
-    children: [],
-    parent: null,
+    children: [] as FakeEl[],
+    parent: null as FakeEl | null,
     ownerDocument: { createElement: makeEl },
     classList: {
-      add: (c) => {
+      add: (c: string) => {
         classes.add(c);
-        el.className = [...classes].join(" ");
       },
-      remove: (c) => {
+      remove: (c: string) => {
         classes.delete(c);
-        el.className = [...classes].join(" ");
       },
-      contains: (c) => classes.has(c),
+      contains: (c: string) => classes.has(c),
     },
-    appendChild: (child) => {
-      child.parent = el;
+    appendChild(child: FakeEl) {
+      child.parent = el as unknown as FakeEl;
       el.children.push(child);
     },
-    remove: () => {
+    remove() {
       if (el.parent) {
-        el.parent.children = el.parent.children.filter((c) => c !== el);
+        el.parent.children = el.parent.children.filter(
+          (c) => c !== (el as unknown as FakeEl),
+        );
         el.parent = null;
       }
     },
   };
-  // className setter must also seed the class set (the manager assigns
-  // className directly for the type classes).
-  return new Proxy(el, {
-    set(target, prop, value) {
-      if (prop === "className" && typeof value === "string") {
-        classes.clear();
-        for (const c of value.split(/\s+/).filter(Boolean)) classes.add(c);
-        target.className = value;
-        return true;
-      }
-      // deno-lint keep: structural set-through
-      (target as unknown as Record<string, unknown>)[prop as string] = value;
-      return true;
+  // Live className getter/setter (no Proxy - a Proxy wrapper breaks node
+  // identity: appendChild would store the proxy while remove() compares the
+  // target, so `c !== el` never matches and children never get removed). The
+  // getter derives from the class set (so classList.add/remove reflect into
+  // className) and the setter seeds the set (the manager assigns className
+  // directly for the type classes).
+  Object.defineProperty(el, "className", {
+    get() {
+      return [...classes].join(" ");
     },
+    set(value: string) {
+      classes.clear();
+      for (const c of String(value).split(/\s+/).filter(Boolean)) classes.add(c);
+    },
+    enumerable: true,
+    configurable: true,
   });
+  return el as unknown as FakeEl;
 }
 
 let container: FakeEl;
