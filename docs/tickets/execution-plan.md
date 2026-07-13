@@ -106,19 +106,26 @@ ticket). Chunk-2 sequencing: fix(ui-switch) T38-href FIRST, then T21 (viewer
 shell), then the wave. The Fable-credit stream cuts are resolved (switched
 to Opus).
 
-**In-flight dispatch (chunk 2 tracks, 2026-07-12):** off integration tip
-8e6f35d (T21+T25 merged). Parallelism cap 3, all three bounded implementers:
-- T22 worker lanes track (branch ticket/T22-worker-lanes) - CORE viz; committed
-  d3acc6c (render + data + click/hover resolvers), agent still running.
-- T26 spans track (branch ticket/T26-spans-track) - dispatched; owns features/02
-  J rows; derived-cache span layout + selection dimming.
-- T28 CPU track (branch ticket/T28-cpu-track) - dispatched; owns features/02 L
-  rows; bars via coalescer, dashed capacity/grid via batched-stroke.
-Shared merge point across these = the shell track registry (src/pages/viewer/
-tracks.ts); expect trivial append-union conflicts on merge. T17 carried
-obligation (truncatedAt:"both" + oversized surfacing) handed to each. Next
-dependency layer after T22 lands: T23 (pointer+keyboard) + T24 (crosshair/
-tooltip), both need lanes; then T27/T29/T30 tracks; then T31/T33/T34/T35/T36/T37.
+**Chunk-2 track progress (2026-07-13):** MERGED into integration/chunk-1
+(tip 3e4b03f): T21, T25, T22 (lanes), T28 (cpu), T26 (spans), T24 (crosshair/
+tooltip/transient slice). Each merged under the gate bar; conflicts were all
+mechanical (tracks.ts import-union, viewer.css block-union, state.d.ts distinct
+regions auto-merged, HANDOFF took-theirs). tsc clean after every merge; full
+4-merge Vitest gate running.
+DOC-TOPOLOGY FIX: `docs/tickets/reviews/` (audit docs incl. T17-audit.md) lived
+only on docs/ui-migration, NOT on integration/chunk-1 where agents branch from -
+so T24/T26/T28 all flagged the T17-audit path missing (handled it from types
+instead). Copied reviews/ onto integration/chunk-1 (commit 3e4b03f) so
+T27/T29/T30 can read it. LESSON: anything an implementer is told to read must be
+on integration/chunk-1, not just the planning branch.
+IN FLIGHT (cap 3, off 3e4b03f): T23 (lane pointer+keyboard gestures - T22 ships
+resolvers only, T23 owns the listener), T27 (custom events track - dispatches
+transient.hoverEvent/selection.pinnedEvent for T24 to draw), T30 (task detail
+track + derivation - dispatches transient.hoveredWakerTaskId for T22 G8; exposes
+derived data for T31's textual tab).
+QUEUED: T29 (queue track, needs T22+T24 - held for next slot) -> then T31
+(inspector, needs T24+T30) -> T33/T34/T35/T36/T37 -> chunk 3 (T40/T41/T44/T46)
+-> T39 (legacy removal) last.
 
 **Audit log:**
 - T22 worker lanes track (CORE viz): MERGED into integration/chunk-1 2026-07-13
