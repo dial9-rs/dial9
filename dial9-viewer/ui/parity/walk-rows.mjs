@@ -45,6 +45,7 @@ import { launchBrowser, newPage, assertServerReady } from "./lib/browser.mjs";
 import { WalkError } from "./lib/actions.mjs";
 import { registry as features01 } from "./walkers/features01.mjs";
 import { registry as features03 } from "./walkers/features03.mjs";
+import { registry as features04 } from "./walkers/features04.mjs";
 import {
   registry as features01Fixtures,
   preflightFamilies,
@@ -63,6 +64,9 @@ const REGISTRIES = {
     fixedClock: true,
   },
   "03-flamegraph-html.md": { walkers: features03, fixedClock: false },
+  // T41: the migrated Tokio Stats page. Its scope is bucket/prefix (not the
+  // browser page's relative time windows), so no pinned clock is needed.
+  "04-tokio-stats-html.md": { walkers: features04, fixedClock: false },
 };
 
 const WALKER_TIMEOUT_MS = 90_000;
