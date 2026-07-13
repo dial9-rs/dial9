@@ -186,15 +186,21 @@ added trackOrder/collapsed to the vm (track column reads them) - kept those, dro
 T35-already-removed status labels. tsc clean after each.
 IN FLIGHT: T32 (in-viewer flamegraph + region; S7 count investigation; renders into
 T31's Stack tab; frozen core NOT edited, K7 defers to T47).
-FULL-SUITE BATCH GATE: RUNNING in background on the 16-merge tree (validates
-T30/T23/T27/T29/T34/T33/T31/T35/T36 which rode tsc+build only; tsc caught + fixed 2
-cross-ticket breaks along the way). Build clean (167KB viewer bundle). Holding new
-dispatch until the gate confirms chunk-2 health.
-REMAINING: chunk 2 -> T37 (UX polish, needs assembled UI; after T32+gate) -> T39
-(legacy removal, LAST, needs parity). Chunk 3 -> T40->T41 (tokio_stats inventory+
-migrate), T42 (fixtures, feeds T39), T45 (segment metadata #68, needs T33 done),
-T46 (end-user docs), T44 (issue housekeeping); T43+T48 already MERGED; T47
-(core-reshape ADR) gated on T39.
+FULL-SUITE BATCH GATE: GREEN 2026-07-13. 1446 passed + 1 xfail + 11 skipped, exit 0
+(ran concurrent with T32, no starvation this time). The 9 tsc-only merges
+(T30/T23/T27/T29/T34/T33/T31/T35/T36) are now full-suite validated - no runtime
+cross-ticket breaks. Chunk-2 (T21-T31, T33-T36) is HEALTHY. Build clean (167KB).
+T40/T42 FINDING: both were already DONE + MERGED into integration/chunk-1 in the
+earlier (pre-compaction) session - features/04 inventory + gen_fixtures.rs + parity
+fixtures all present in the tree, branch tips are ancestors of integration. Their
+stale worktrees remain on disk (harmless). Do NOT re-dispatch them.
+IN FLIGHT: T32 (flamegraph+region), T41 (migrate tokio_stats.html - separate page,
+no chunk-2 viewer conflict; deps T40/T02-T09/T12/T18/T20/T38 all met).
+REMAINING: chunk 2 -> T37 (UX polish, needs assembled UI; dispatch after T32) -> T39
+(legacy removal, LAST, needs parity). Chunk 3 -> T45 (segment metadata #68, needs
+T33 done - HELD until chunk-2 settles, it is a viewer file), T46 (end-user docs -
+HELD until UI final so wording matches), T44 (issue housekeeping - final sweep after
+T39), T47 (core-reshape ADR - gated on T39). T43+T48+T40+T42 DONE.
 DEFERRED BATCH GATE: full Vitest for T30/T23/T27 folded forward - run ONE clean
 full-suite gate after T29/T33/T34 land (never concurrent with a running agent's
 own suite; T27 proved concurrent Vitest starves timing-sensitive suites -> 13
