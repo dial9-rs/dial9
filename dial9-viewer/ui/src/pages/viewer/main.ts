@@ -19,6 +19,7 @@ import { mountViewerHelp } from "./help.js";
 import { createToasts } from "./toasts.js";
 import { mountShell } from "./shell.js";
 import { mountLanes } from "../../components/canvas/lanes/index.js";
+import { mountOverlay } from "../../components/overlay/index.js";
 import { initViewportFromTrace } from "./viewport-init.js";
 
 // Dual-UI switch (T38): render the always-visible "Switch to legacy UI"
@@ -60,6 +61,13 @@ function boot(): void {
   // subscription runs after the shell's chrome render each frame, and claims
   // the lanes canvas so the shell stops painting its placeholder.
   const lanes = mountLanes(shell.trackColumn, store);
+
+  // Transient overlay (T24): crosshair canvas + hover tooltip + at-cursor
+  // readout, on the store's `transient` RAF channel. Mounts AFTER the shell +
+  // lanes so its subscriber runs LAST each frame - it re-ensures the overlay
+  // canvas after any shell re-render that would clobber it, and reads column
+  // geometry only after the shell's writes have settled.
+  const overlay = mountOverlay(root, shell.trackColumn, store);
 
   // Initialize the viewport from the trace the moment it loads.
   initViewportFromTrace(store);
@@ -103,6 +111,7 @@ function boot(): void {
   // Teardown hook for HMR / tests (not strictly needed in production).
   window.addEventListener("beforeunload", () => {
     load.abort();
+    overlay.dispose();
     lanes.dispose();
     shell.dispose();
     help.dispose();
