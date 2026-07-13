@@ -25,6 +25,7 @@ import { renderTimeAxis, type AxisInputs } from "./axis.js";
 import { isTrackClaimed } from "./track-renderers.js";
 import { renderCpuTrack, type CpuInputs } from "./cpu.js";
 import type { SpansTrackController } from "./spans-track.js";
+import type { TaskDetailTrackController } from "./task-detail-track.js";
 
 export interface TracksViewModel {
   /** True once a trace is loaded (tracks render empty until then). */
@@ -67,6 +68,7 @@ export function visibleTracks(vm: TracksViewModel): TrackSpec[] {
 export function tracksTemplate(
   vm: TracksViewModel,
   spansTrack?: SpansTrackController,
+  taskDetailTrack?: TaskDetailTrackController,
 ): TemplateResult {
   const tracks = visibleTracks(vm);
   return html`
@@ -76,11 +78,15 @@ export function tracksTemplate(
       aria-label="Timeline tracks"
       style="--d9-label-w:${LABEL_W}px"
     >
-      ${tracks.map((t) =>
-        t.id === "spans" && spansTrack !== undefined
-          ? spansTrack.rowTemplate(t)
-          : defaultTrackRow(t),
-      )}
+      ${tracks.map((t) => {
+        if (t.id === "spans" && spansTrack !== undefined) {
+          return spansTrack.rowTemplate(t);
+        }
+        if (t.id === "task-detail" && taskDetailTrack !== undefined) {
+          return taskDetailTrack.rowTemplate(t);
+        }
+        return defaultTrackRow(t);
+      })}
     </div>
   `;
 }
@@ -129,6 +135,7 @@ export function sizeTracks(
   columnEl: HTMLElement,
   vm: TracksViewModel,
   spansTrack?: SpansTrackController,
+  taskDetailTrack?: TaskDetailTrackController,
 ): TrackSizing[] {
   const dpr = (typeof devicePixelRatio === "number" ? devicePixelRatio : 1) || 1;
   // Full column width and the scrollbar gutter (so the draw area's right
@@ -169,6 +176,16 @@ export function sizeTracks(
     // full track height. Delegate and skip the uniform placeholder path.
     if (track.id === "spans" && spansTrack !== undefined) {
       spansTrack.paint(canvas, drawW, track.height, dpr, vm.viewStart, vm.viewEnd);
+      canvas.dataset["drawW"] = String(Math.round(drawW));
+      out.push({ id: track.id, drawW, height: track.height });
+      continue;
+    }
+    // The task-detail track (T30) likewise owns its own canvas sizing + draw
+    // (it hosts a status readout + interaction). Its canvas fills the full
+    // track height (no controls strip). Only reached while a task is selected
+    // (selectionOnly, N1). Delegate and skip the placeholder path.
+    if (track.id === "task-detail" && taskDetailTrack !== undefined) {
+      taskDetailTrack.paint(canvas, drawW, track.height, dpr, vm.viewStart, vm.viewEnd);
       canvas.dataset["drawW"] = String(Math.round(drawW));
       out.push({ id: track.id, drawW, height: track.height });
       continue;
