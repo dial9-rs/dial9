@@ -46,7 +46,7 @@ pub(crate) struct ServeConfig {
 
 /// Build an [`S3Backend`] for `bucket`, pinned to the bucket's region when it
 /// can be detected (so cross-region buckets work), else the default chain.
-async fn s3_backend_for(bucket: &str) -> storage::S3Backend {
+pub(crate) async fn s3_backend_for(bucket: &str) -> storage::S3Backend {
     if let Some(region) = detect_bucket_region(bucket).await {
         tracing::info!(%region, %bucket, "detected bucket region");
         let config = aws_config::defaults(aws_config::BehaviorVersion::latest())

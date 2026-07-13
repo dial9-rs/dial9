@@ -1799,3 +1799,79 @@ mod skills_unpack_tests {
         assert!(red_flags_script.exists());
     }
 }
+
+// --- router composition: downstream embedders can customize the server ---
+
+/// An embedder can merge custom routes onto the router returned by
+/// `server::router()`.
+#[tokio::test]
+async fn router_supports_merged_routes() {
+    let state = AppState::new(Arc::new(FakeBackend), None, None);
+    let ui_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("ui");
+    let state = state.with_dev_ui_dir(ui_dir);
+
+    let app = router(state).merge(axum::Router::new().route(
+        "/api/feedback",
+        axum::routing::post(|| async { "feedback received" }),
+    ));
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let base = format!("http://{addr}");
+    let client = reqwest::Client::new();
+
+    // Custom route is reachable
+    let resp = client
+        .post(format!("{base}/api/feedback"))
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() == 200);
+    check!(resp.text().await.unwrap() == "feedback received");
+
+    // Built-in route still works
+    let resp = client
+        .get(format!("{base}/api/config"))
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() == 200);
+}
+
+/// An embedder can layer middleware (e.g. auth) onto the router.
+#[tokio::test]
+async fn router_supports_middleware_layers() {
+    let state = AppState::new(Arc::new(FakeBackend), None, None);
+    let ui_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("ui");
+    let state = state.with_dev_ui_dir(ui_dir);
+
+    let app = router(state).layer(axum::middleware::from_fn(
+        |req: axum::extract::Request, next: axum::middleware::Next| async move {
+            let mut resp = next.run(req).await;
+            resp.headers_mut().insert(
+                axum::http::header::HeaderName::from_static("x-custom-embedder"),
+                axum::http::HeaderValue::from_static("my-internal-tool"),
+            );
+            resp
+        },
+    ));
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let base = format!("http://{addr}");
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .get(format!("{base}/api/config"))
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() == 200);
+    check!(resp.headers().get("x-custom-embedder").unwrap() == "my-internal-tool");
+}

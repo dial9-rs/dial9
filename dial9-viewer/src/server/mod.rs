@@ -126,6 +126,38 @@ impl AppState {
         }
     }
 
+    /// Build an `AppState` backed by an S3 bucket, with automatic region
+    /// detection, bring-your-own-credentials support, and the assume-role
+    /// credential path enabled.
+    ///
+    /// This is the high-level entry point for embedders who want to serve
+    /// traces from S3 without replicating the CLI's setup logic:
+    ///
+    /// ```ignore
+    /// let state = AppState::from_bucket("my-traces", None).await;
+    /// let app = dial9_viewer::server::router(state);
+    /// // … customize app, then bind …
+    /// ```
+    pub async fn from_bucket(bucket: impl Into<String>, prefix: Option<String>) -> Self {
+        let bucket = bucket.into();
+        let backend = Arc::new(crate::s3_backend_for(&bucket).await);
+        let assumer = credentials::StsRoleAssumer::from_env().await;
+        Self::new(backend, Some(bucket), prefix)
+            .with_byo_creds(true)
+            .with_role_assumer(Arc::new(assumer))
+    }
+
+    /// Build an `AppState` backed by a local directory.
+    ///
+    /// ```ignore
+    /// let state = AppState::from_local_dir("/tmp/my-traces");
+    /// let app = dial9_viewer::server::router(state);
+    /// ```
+    pub fn from_local_dir(dir: impl AsRef<std::path::Path>) -> Self {
+        let backend = Arc::new(crate::storage::LocalBackend::new(dir.as_ref()));
+        Self::new(backend, Some("local".into()), None)
+    }
+
     pub fn with_dev_ui_dir(mut self, dir: PathBuf) -> Self {
         self.dev_ui_dir = Some(dir);
         self
