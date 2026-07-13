@@ -229,8 +229,9 @@ chunk-1 + full-suite validated:
 - Chunk 2: T21-T37 (viewer shell, all tracks, interaction, inspector, toolbar+rail,
   load chrome, minimap+status, track-mgmt, flamegraph/region, UX closure).
 - Chunk 3: T40, T41, T42, T45, T46.
-Final certification full-suite gate: running (b9o5mbxpy); prior clean tree was 1524
-green. Build + cargo (rust-embed) clean, all 4 migrated pages bundled.
+Final certification full-suite gate: GREEN 2026-07-13 (1524 passed + 1 xfail + 11
+skipped, exit 0) at integration/chunk-1 tip 5017d4b. tsc clean, build clean, cargo
+build clean (rust-embed, all 4 migrated pages bundled). CERTIFIED.
 
 ## MAINTAINER-GATED REMAINDER (cannot complete autonomously)
 
