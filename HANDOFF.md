@@ -1,85 +1,137 @@
-# HANDOFF - T25 Timeline header / time axis track
+# T22 - Worker lanes track - HANDOFF
 
-(Replaces the T21 HANDOFF inherited through the branch chain; T21's record
+(Supersedes the T21 HANDOFF inherited through the branch chain; T21's record
 lives in the tree at base e0fa98e.)
 
-## STATUS: DoD MET
+STATUS: **partial** - code-complete on the owned G rows + all four gates
+green; the live-browser DoD items (row-walker, behavioral differ, pan-storm
+perf) are PENDING because the environment cannot sustain a Playwright
+dev-server. Recorded below, not faked.
 
-The time-axis track (features/02 section F) is implemented, wired into the
-T21 shell's "timeline" track slot, tested, and verified live in a browser.
-All mechanical gates green; the date-qualification amendment landed with a
-Vitest case, an in-diff features/02 F-row amendment, and a ledger row.
+Branch: `ticket/T22-lanes-track` off `integration/chunk-1` (e0fa98e).
 
-## What the axis renders
+## COMPLETED (with shas)
 
-Fills `TRACKS[0]` ("timeline", T21 seam) with the F1 ruler:
-- Nice-value tick interval auto-picked (`1e3..1e10` ns), targeting
-  `max(4, floor(drawW/100))` ticks - legacy `renderTimeline` verbatim.
-- `fmtTs`-parity labels: relative offsets (`+1.50s`) or absolute wall-clock
-  (`HH:MM:SS` via nearest clock-sync anchor), falling back to relative when
-  the trace has no anchor - legacy `fmtDuration`/`fmtWallClock` ported.
-- Clock/format mode READ from `uiPrefs.timeMode` (E1) + `uiPrefs.tz` (E2);
-  the axis never toggles - the buttons are T33's.
-- Draw-area-relative x (F2 `nsToX`): the track canvas is `drawW`-wide and
-  sits after the shared `LABEL_W` DOM gutter, so ticks align pixel-exact
-  with the lanes/panels by construction (A13). NOT the legacy full-width
-  canvas + inline `LABEL_W`.
-- DATE-QUALIFICATION AMENDMENT: absolute-mode labels gain a `MM-DD ` prefix
-  when the visible span crosses a calendar day in the active tz; same-day
-  and relative mode stay time-only (T15 heatmap-axis rule, narrower prefix).
+- **d3acc6c** feat: lanes render + data + resolvers.
+  - `src/components/canvas/lanes/render.ts` - `renderLanes(ctx, input, layout)`
+    pure draw of G1-G12 + the G6-G11 highlights, ported from viewer.html
+    `renderLane` (:2957). Pixel-bounded fills via the frozen core
+    `pixelDownsampleSpans` + `makeBarCoalescer`; the local-queue step line
+    (G12) and every dashed marker (G5 open-ended, G2 block_in_place outline)
+    go through the **T08 stroke batcher** - one path per style, dash state
+    hoisted (03 F1). N worker rows stack into the one lanes canvas; band
+    geometry scales from the 60px legacy reference.
+  - `src/components/canvas/lanes/data.ts` - `deriveLaneData(trace)`
+    (buildWorkerSpans + attachCpuSamples + buildSpanData + span-id index),
+    derived ONCE per trace and store-cached over the `trace` slice (03 F5).
+  - `src/components/canvas/lanes/click.ts` - `resolveLaneClick` pure resolver
+    (G13 select-task/toggle, G14 outermost-span focus, G15 Poll-Detail
+    signal) over the T09 query helpers (03 F6).
+  - `src/components/canvas/lanes/hover.ts` - `assembleLaneHover` pure G16
+    readout via binary-search/indexed helpers; carries `hasClickableStack`
+    (the K8 affordance signal T24 turns into a pointer cursor).
+  - `src/pages/viewer/track-renderers.ts` - the renderer registry
+    (claim/skip-placeholder seam). Shell seam edits: `tracks.ts` skips claimed
+    tracks; `main.ts` mounts `mountLanes` AFTER the shell.
+- **cf4b6d8** test + legend: `src/components/canvas/lanes/lanes.test.ts`
+  (9 tests, green) + the G19/04 F3 legend ribbon + CSS.
+- **a807040** docs: ledger G20 retired / G17-G19 amended; features/02 G rows
+  annotated (contract-amendment rule).
 
-## COMPLETED (commits, off base e0fa98e)
+## Owned-row disposition (features/02 G)
 
-- `0fd7983` feat(T25): axis render + clock modes + date qualification.
-  New `src/pages/viewer/axis.ts`; `uiPrefs.timeMode`/`tz` added to
-  `UiPrefsSlice` (T21 declared the seam, did not land it; defaulted to
-  legacy rel/utc) + store default; `tracks.ts` dispatches the timeline
-  track to `renderTimeAxis`; `shell.ts` feeds `deriveAxisInputs(state)`.
-- `1fe56f8` test(T25): `src/pages/viewer/axis.test.ts`; in-diff features/02
-  F1/F2 amendment; `ledger.md` features/02 F1 amended row.
+- G1-G5, G9, G10, G12 rendered (grid, bg states, CPU tint, poll bars,
+  open-ended markers, CPU ticks, sched triangles, queue step line).
+- G6, G7, G8, G11 selection/hover highlights (task, span chain, waker, wakes)
+  driven by the `selection` slice - redraw lanes only (03 F2).
+- G13/G14/G15 click **semantics** as a pure resolver (T23 owns the gesture
+  layer that drives it - see SEAMS).
+- G16 hover **data** assembler (T24 owns the tooltip component - see SEAMS).
+- G17/G18 amended by the unified-column scroll model (ledger).
+- G19 amended -> lanes legend ribbon covering all marks + q:NN (04 F3, ledger).
+- **G20 retired** (dead `selectedEvent` indicator; ledger).
 
-Files: axis.ts (+354), axis.test.ts (+309), tracks.ts, shell.ts, store.ts,
-types/state.d.ts (+timeMode/tz), store.test.ts + exhaustive.test.ts
-(fixture fields), features/02-viewer-html.md, ledger.md.
+## EVIDENCE (gates, run in dial9-viewer/ui)
 
-## EVIDENCE (gates)
+- `npx tsc --noEmit` -> clean (no output).
+- `node scripts/check-core-imports.mjs` -> OK (no core imports outside
+  lib/trace + lib/canvas).
+- `npx vitest run` -> **1026 passed | 1 expected-fail | 11 skipped** (65 files),
+  incl. the 9 new T22 tests. No regressions.
+- `npm run build` -> dist built; `new-viewer` bundle 32.59 kB (lanes
+  included); 17 static-copy items.
+- `CARGO_TARGET_DIR=.../target cargo build -p dial9-viewer` -> Finished
+  (rust-embed picks up the new dist).
 
-- `tsc --noEmit`: clean.
-- `vitest run` (FULL): 64 files passed / 1 skipped; 1042 passed,
-  1 expected-fail (pre-existing xfail), 11 skipped. 0 failed.
-- axis.test.ts: alignment pixel-exact at THREE widths
-  (pw 420 / 1024+sb15 / 2560) against lanes/cpu/queue/spans/events
-  geometry; date-qualification (day-cross abs -> MM-DD, same-day/rel ->
-  time only); fmtTs-parity labels; renderTimeAxis ruler.
-- `npm run check:boundary`: OK (no core imports outside lib/*).
-- `vite build`: success (only pre-existing os/child_process externalization
-  warnings from the frozen trace_parser.js).
-- `cargo build -p dial9-viewer` (CARGO_TARGET_DIR=.../target): success -
-  rust-embed picked up the rebuilt dist.
-- LIVE browser check (Playwright + vite preview on dist, ephemeral,
-  not committed): timeline track drawW=980 == lanes drawW=980 (pixel-exact
-  alignment in the real browser); canvas left edge at wrapLeft=100=LABEL_W;
-  corner bg = (22,33,62) = #16213e (legacy F1 axis colour); 36 distinct
-  sampled colours (ticks+labels rendered, not blank); ZERO console/page
-  errors.
+### Vitest coverage of the DoD "downsample/coalesce usage" item
 
-## REMAINING / notes
+- 1,000,000 contiguous polls, drawW 200 -> `fillRect` <= drawW+5
+  (pixel-bounded, not O(polls)).
+- 500,000 queue samples, one lane -> `stroke()` **<= 2** (queue + separator
+  styles), `setLineDash` 0 - the F1 fix (legacy stroked per-sample).
+- 10,000 open-ended markers -> `setLineDash` <= 2 (dash hoisted), one dashed
+  stroke - not one per marker.
+- `resolveLaneClick`: select-task, same-task toggle-off, span ancestor walk,
+  Poll-Detail-only-with-samples.
+- `assembleLaneHover`: polling (task/cpu/sched/queue/active-task +
+  hasClickableStack), parked (kernel sched delay).
 
-- Formal `walk-rows.mjs` features02 registry does NOT exist yet (T21 shipped
-  only the ad-hoc `parity/verify-viewer-shell.mjs`; a viewer features02
-  walker is T12/viewer-parity infra, out of T25 scope). F-row verification
-  was satisfied via (a) the Vitest layout/format/render suite and (b) the
-  live browser observation of the F1/F2 access paths above - the walker's
-  function for F rows, not faked. If a features02 registry lands, F1/F2 slot
-  straight into it.
+## PENDING (live-browser DoD - no dev-server in this environment)
 
-## BLOCKERS: none
+Not faked; run once a Playwright dev-server is available:
+1. **Row-walker green on G rows** (`dial9-viewer/ui/parity/`). NOTE: there is
+   no `parity/walkers/features02.mjs` yet - the features/02 walker itself does
+   not exist; running the G-row walk needs that walker written PLUS a live
+   `PORT=3001 cargo run -p dial9-viewer --bin dev-server --features dev-server`.
+   G20 is ledger-retired (listed, not gated).
+2. **Behavioral differ vs legacy on J2/J4** (identical poll/task selection).
+   The pure `resolveLaneClick` is unit-covered; the end-to-end click needs
+   T23's gesture wiring to drive it against the running page.
+3. **Pan-storm perf (x8 repeated demo):** record renders <=1/frame (N2),
+   lanes script time, and stroke() self-time share vs legacy's 76%. Needs the
+   dev-server + `parity/perf-probe.mjs`. The stroke-batch Vitest bounds are
+   the code-level proxy (stroke() is now O(styles), not O(samples)).
 
-## Seam note for downstream
+## SEAMS (coordinate with dependent tickets)
 
-- `uiPrefs.timeMode`/`tz` now exist (rel/utc default). T33's E1/E2 toggle
-  buttons drive them; T19's URL codec already carries `tm`/`tz` with the
-  same "rel"/"abs"/"utc"/"local" vocabulary (reconcile at wiring time).
-- T22 lanes MUST draw canvas-local x with the same `nsToX(ns, drawW)` form
-  (= `nsToDrawX`) so they stay aligned with the axis; the alignment test
-  locks this.
+- **T23 (interaction):** owns the pointer gesture layer (3px drag-intent,
+  x->ns, y->worker). It should call `resolveLaneClick(...)`, dispatch the
+  returned `selection` patch, and route `openStackFor` to T31. T22
+  deliberately does NOT wire a raw `click`/pan listener (it would fight T23's
+  pan drag) - hence the live behavioral-differ is PENDING, not done here.
+- **T24 (hover/tooltip):** consumes `assembleLaneHover(...)` for the G16
+  tooltip and sets the K8 pointer cursor from `hasClickableStack`.
+- **T27 (custom events):** dispatches `selection.pinnedEvent`; the in-lane
+  pinned-poll highlight resolves the worker by value-matching the poll in the
+  lane (`selection.pinnedEvent.poll` carries no workerId). If T27 adds a
+  workerId, the match can tighten.
+- **Runtime groups (G21-G24, #596):** NOT in T22's owned set (G1-G19) and
+  NOT-TRIGGERABLE on the demo (zero named runtimes). `deriveWorkerIds` already
+  orders lanes by `computeRuntimeGroups`, but group HEADERS / collapse /
+  per-group hit-testing are unbuilt and belong with track management (T36) /
+  the shell. Flagged so they are not silently dropped.
+
+## INTEGRATION NOTES (shell edits - minimal, additive)
+
+- `tracks.ts sizeTracks` skips claimed tracks (no placeholder, no resize that
+  would clear the renderer's draw). Non-lanes tracks unchanged.
+- `main.ts` mounts `mountLanes(shell.trackColumn, store)` after the shell so
+  its subscription runs after the shell's chrome render each frame; the shell
+  never clobbers the lanes canvas, and a uiPrefs-only change (which the lanes
+  do not subscribe to) leaves the canvas untouched (claim keeps the
+  placeholder off).
+- Lanes track height stays the shell's 130px; N worker rows divide it evenly.
+  Very large worker counts make rows thin (legacy scrolled per-lane) - a
+  track-height/scroll refinement for T36, noted not fixed (scope fence).
+
+## SCOPE-FENCE / UNRELATED
+
+- No `.rs`, no trace-format, no frozen-core edits. JS/TS + docs only, so the
+  Rust nextest/stress suites are not required (AGENTS.md).
+- No unrelated bugs found or fixed.
+
+## Open questions
+None blocking. The G13-G16 seam split (T22 semantics/data vs T23/T24 wiring)
+follows the ticket's stated seams; if the maintainer wants T22 to also land a
+throwaway click listener for a self-contained live differ, that is a small
+add - but it would be replaced by T23 and risks fighting T23's pan.

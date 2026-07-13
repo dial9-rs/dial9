@@ -148,9 +148,55 @@ body {
     flex: 1;
     min-width: 0;
     display: flex;
+    position: relative;
     background: var(--d9-bg-track);
 }
 .d9-track-canvas { display: block; }
+
+/* ── Worker-lanes legend (G19 + 04 F3): non-interactive ribbon over the
+   lanes canvas wrap; explains every in-lane mark incl. the q:NN label. ── */
+.d9-lanes-legend {
+    position: absolute;
+    left: 6px;
+    bottom: 4px;
+    right: 6px;
+    margin: 0;
+    padding: 3px 5px;
+    list-style: none;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 3px 9px;
+    font-size: 9px;
+    line-height: 1.1;
+    color: var(--d9-fg-muted);
+    background: rgba(10, 14, 28, 0.72);
+    border: 1px solid var(--d9-border);
+    border-radius: 3px;
+    pointer-events: none;
+}
+.d9-lanes-legend-row { display: inline-flex; align-items: center; gap: 4px; }
+.d9-lanes-legend-swatch {
+    width: 14px;
+    height: 8px;
+    flex-shrink: 0;
+    border-radius: 1px;
+}
+.d9-lanes-legend-swatch.shape-line { height: 2px; }
+.d9-lanes-legend-swatch.shape-dashed {
+    height: 0;
+    border-top: 2px dashed currentColor;
+    background: none !important;
+}
+.d9-lanes-legend-swatch.shape-tick { width: 4px; height: 8px; }
+.d9-lanes-legend-swatch.shape-triangle {
+    width: 0;
+    height: 0;
+    background: none !important;
+    border-left: 5px solid transparent;
+    border-right: 5px solid transparent;
+    border-top: 8px solid currentColor;
+}
+.d9-lanes-legend-text { white-space: nowrap; }
 
 /* ── Empty state (F4) ────────────────────────────────────────────────── */
 

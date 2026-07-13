@@ -22,6 +22,7 @@ import type { CanvasSizer } from "../../lib/canvas/dpr.js";
 import { LABEL_W, TRACKS, trackGeometry } from "./track-layout.js";
 import type { TrackSpec } from "./track-layout.js";
 import { renderTimeAxis, type AxisInputs } from "./axis.js";
+import { isTrackClaimed } from "./track-renderers.js";
 
 export interface TracksViewModel {
   /** True once a trace is loaded (tracks render empty until then). */
@@ -112,6 +113,14 @@ export function sizeTracks(
   const scrollbarW = Math.max(0, columnEl.offsetWidth - columnEl.clientWidth);
   const out: TrackSizing[] = [];
   for (const track of visibleTracks(vm)) {
+    // A track whose content is owned by a mounted renderer (T22 lanes and
+    // later track tickets) sizes AND draws its own canvas on its own store
+    // subscription (03 F2). The shell leaves it alone - no placeholder paint,
+    // no backing-store resize that would clear the renderer's last draw.
+    if (isTrackClaimed(track.id)) {
+      out.push({ id: track.id, drawW: 0, height: track.height });
+      continue;
+    }
     const canvas = columnEl.querySelector<HTMLCanvasElement>(
       `canvas[data-track-canvas="${track.id}"]`,
     );
