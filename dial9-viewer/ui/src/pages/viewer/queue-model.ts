@@ -432,8 +432,9 @@ export function computeSpawnedTasks(
   for (const [taskId, t] of data.taskFirstPoll) {
     if (t < startNs || t > endNs) continue;
     const locId = data.taskSpawnLocs.get(taskId);
-    const loc =
-      locId != null ? data.spawnLocations.get(locId) ?? "(unknown)" : "(unknown)";
+    const raw = locId != null ? data.spawnLocations.get(locId) : null;
+    // Legacy `loc || "(unknown)"`: an empty/missing location groups as unknown.
+    const loc = raw || "(unknown)";
     let bucket = groups.get(loc);
     if (bucket === undefined) {
       bucket = [];
