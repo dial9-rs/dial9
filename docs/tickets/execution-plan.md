@@ -135,10 +135,20 @@ shell.ts). When a ticket's base predates a sibling's merge, git conflicts on the
 shared param lists + delegate chains - resolution is always UNION (keep every
 sibling's delegate), never pick-a-side. viewer.css conflicts are block-union.
 HANDOFF.md always take-theirs.
-IN FLIGHT (cap 3, off 6d022e0): T29 (queue track + S6 zero-global-baseline fix),
-T33 (toolbar + concept-2 issues rail - fills the shell's Analysis/Time slots;
-POI detectors via T09, rail count == legacy x/74 stepper), T34 (load chrome -
-drop/pick/URL + S3 new-file-confirm + #281 dismissible load section).
+T29 (queue track + S6 fix) MERGED 2026-07-13 (44aa32b). N-way union again (queue
+delegate joined task-detail+events in the param lists; bodies auto-merged).
+CROSS-TICKET TSC BREAK caught + fixed at integration: T29 made selection.
+spawnedTasksRange REQUIRED, but T23's selection-overlay.test.ts fixture (merged
+earlier) built a SelectionSlice literal without it -> tsc error 2322. Each branch
+was green ALONE; only the combination breaks. Fixed by adding spawnedTasksRange:
+null to the fixture, amended into the merge commit. LESSON: the integration tsc
+gate is load-bearing - per-worktree green does NOT imply integration green when
+one ticket adds a required slice field and another has an independent full-slice
+fixture. Always tsc the integrated tree after every merge (already doing).
+IN FLIGHT (cap 3, off 44aa32b): T33 (toolbar + concept-2 issues rail), T34 (load
+chrome - S3 new-file-confirm + #281 dismissible), T31 (inspector - REPLACES the
+shell inspectorTemplate placeholder; consumes T30 task-derivation, T24 atCursor,
+T27 pinnedEvent, T29 spawnedTasksRange; implements P8 width->uiPrefs, retires R6).
 DEFERRED BATCH GATE: full Vitest for T30/T23/T27 folded forward - run ONE clean
 full-suite gate after T29/T33/T34 land (never concurrent with a running agent's
 own suite; T27 proved concurrent Vitest starves timing-sensitive suites -> 13
