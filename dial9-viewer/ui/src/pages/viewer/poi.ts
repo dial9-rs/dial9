@@ -22,6 +22,7 @@
 // trace is resident, exactly as every other track does.
 
 import {
+  EVENT_TYPES,
   attachCpuSamples,
   buildWorkerSpans,
   computeSchedulingDelays,
@@ -103,12 +104,24 @@ export interface PoiSource {
 
 const sourceCache = new WeakMap<ParsedTrace, PoiSource>();
 
-/** Distinct worker ids in a trace (park/unpark-derived), sorted ascending.
- *  The detectors iterate workers in this order; sorting matches the legacy
- *  worker-set derivation closely enough for count parity (order does not
- *  affect the count, and the rail re-sorts for display). */
+/** The worker id SET the detectors iterate, matching the legacy derivation
+ *  EXACTLY (viewer.html:1976-1980): every worker seen on a non-queue,
+ *  non-wake event. This must equal the legacy set or the detector COUNT
+ *  (the rail-parity DoD) diverges. Sorted ascending; the legacy runtime-group
+ *  reordering that follows is order-only and never changes the count, so it
+ *  is skipped here (the rail applies its own display sort). */
 function deriveWorkerIds(trace: ParsedTrace): number[] {
-  return [...new Set(trace.tidToWorker.values())].sort((a, b) => a - b);
+  const set = new Set<number>();
+  for (const e of trace.events) {
+    if (
+      e.eventType === EVENT_TYPES.QueueSample ||
+      e.eventType === EVENT_TYPES.WakeEvent
+    ) {
+      continue;
+    }
+    set.add(e.workerId);
+  }
+  return [...set].sort((a, b) => a - b);
 }
 
 /** The memoized POI source for a trace (built once per loaded trace). */
