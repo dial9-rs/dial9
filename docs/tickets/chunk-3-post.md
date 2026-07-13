@@ -280,6 +280,18 @@ for core touches. ADR number: the next free at authoring time (0005 if
 nothing else lands first - 0004 is the migration ADR). Micro-fixes are
 partition entries INSIDE the new ADR's ticket set, not separate.
 
+**Deferred core-API line item (from T32, K7 keyboard flamegraph traversal):**
+`flamegraph.js`'s public surface has `getZoomPath` (read) + `zoomToPath`
+(append-from-EMPTY-stack, meant for URL restore) + `handleEscape` (cascade
+reset) but NO absolute zoom control (`setZoomPath` / `resetZoom` /
+`zoomToNode`). K7 (04-ux-findings: arrows walk the tree + Enter zoom, genre
+standard) needs one so the PAGE layer can drive the widget's zoom to an
+arbitrary tree node without editing the frozen core. T32 defers K7 here (it
+built the tree-walk data via `lib/trace/analysis` but has no clean zoom-drive
+API); this partition entry adds the minimal core method (e.g.
+`setZoomPath(key, names)` that replaces rather than appends the stack, or a
+`zoomToNode`). Escape-to-reset already works via the existing `handleEscape`.
+
 **Owns:** the ADR document + its own ticket partition (implementation is NOT
 this ticket).
 

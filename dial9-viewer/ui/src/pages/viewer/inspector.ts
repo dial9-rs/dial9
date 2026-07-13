@@ -41,6 +41,7 @@ import type {
 } from "../../lib/trace/index.js";
 import { ESC_PRIORITY } from "./esc-cascade.js";
 import type { EscCascade } from "./esc-cascade.js";
+import type { RegionAnalysisController } from "./region-analysis.js";
 import type { ViewerStore } from "../../store/store.js";
 import type { AtCursorReadout, SelectionSlice, StoreState } from "../../types/state.js";
 import {
@@ -81,6 +82,13 @@ const TAB_LABELS: Record<InspectorTab, string> = {
 export interface InspectorDeps {
   /** The esc-cascade to register the F7 clear-selection surface into. */
   esc: EscCascade;
+  /**
+   * The T32 region-analysis panel (flamegraph / blocking-calls / heap). The
+   * Stack tab renders a binding-free `[data-region-host]` for a retained region
+   * (sel.sidebarRange); this controller populates it imperatively and is synced
+   * after every frame render. T31 owns the Stack CONTAINER; T32 owns what opens.
+   */
+  regionPanel: RegionAnalysisController;
 }
 
 export interface MountedInspector {
@@ -246,6 +254,10 @@ export function mountInspector(
     host.style.width = `${s.uiPrefs.sidebarWidth}px`;
     render(frameTemplate(s), host);
     renderReadout();
+    // Populate the Stack tab's region-analysis host (T32). Idempotent + a no-op
+    // unless the Stack tab is showing a retained region; runs after the frame
+    // render so the `[data-region-host]` node exists.
+    deps.regionPanel.sync();
   }
 
   /** Readout-only render (transient channel; the S4 at-moment surface). */
@@ -678,13 +690,12 @@ export function mountInspector(
       `;
     }
     if (sel.sidebarRange !== null) {
-      // Region select -> flamegraph / blocking-calls / heap is T32's surface
-      // (it owns "what opens by data present"; deps on this inspector shell).
-      const range = sel.sidebarRange;
-      return html`<p class="d9-inspector-hint">
-        Region selected (${formatHumanDuration(range.endNs - range.startNs)}).
-        Flamegraph / blocking-calls / heap analysis opens here (T32).
-      </p>`;
+      // Region select -> flamegraph / blocking-calls / heap (T32). This is a
+      // binding-free host: T32's region panel renders its interior (sub-tabs +
+      // the embedded flamegraph widget) into it imperatively via
+      // deps.regionPanel.sync(), so the inspector's re-renders never clobber the
+      // canvas (the toast-region / at-cursor-readout technique).
+      return html`<div class="d9-region-host" data-region-host></div>`;
     }
     return html`<p class="d9-inspector-hint">
       Drag-select on the queue track to list tasks spawned in a range, or

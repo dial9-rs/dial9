@@ -16,6 +16,10 @@
         <!-- Dual-UI switch (T38): the auto-boot is a no-op on this off-root
              path; src/pages/viewer/main.ts calls D9UiSwitch.mount({side:"new"}). -->
         <script src="/ui-switch.js"></script>
+        <!-- Frozen flamegraph widget styles (T32): the in-viewer region
+             analysis (Stack tab) embeds flamegraph.js, which renders `.fg-*`
+             chrome; the same copied stylesheet both other generations load. -->
+        <link rel="stylesheet" href="/flamegraph.css" />
         <script type="module" src="/src/pages/viewer/main.ts"></script>
     </head>
     <body>

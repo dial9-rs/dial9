@@ -25,6 +25,7 @@ import { mountMinimap } from "./minimap.js";
 import { createStatusBar } from "./status-bar.js";
 import { mountLoadChrome } from "./load-chrome.js";
 import { mountInspector } from "./inspector.js";
+import { createRegionAnalysis } from "./region-analysis.js";
 import { mountLanes } from "../../components/canvas/lanes/index.js";
 import { mountOverlay } from "../../components/overlay/index.js";
 import { mountLaneInteraction } from "./lane-interaction.js";
@@ -74,6 +75,10 @@ function boot(): void {
   // placeholder state.
   let loadChrome: ReturnType<typeof mountLoadChrome> | null = null;
   let toastsRef: ReturnType<typeof createToasts> | null = null;
+  // Forward ref: the toolbar analysis buttons (D1/D2/D3) open the T32 region
+  // analyses, but the region panel needs the shell's inspector region + toast
+  // region, created below. The buttons only fire on user click (post-mount).
+  let regionPanel: ReturnType<typeof createRegionAnalysis> | null = null;
   const notify = (message: string): void => {
     toastsRef?.show({ id: "t33-seam", type: "info", message });
   };
@@ -81,14 +86,24 @@ function boot(): void {
     toggleHelp: () => help.toggle(),
     sourceLabel: () => loadChrome?.currentLabel() ?? source.label,
     onNewFile: () => loadChrome?.requestNewFile(),
-    onOpenAnalysis: (kind) =>
-      notify(`${analysisName(kind)} analysis opens in the inspector (region analyses, T32).`),
+    onOpenAnalysis: (kind) => regionPanel?.openWholeTrace(kind),
     onSetRange: () =>
       notify("Set Range re-parses the loaded trace to the current view (load chrome, T34)."),
     onClearRange: () => notify("Clear Range restores the full trace (load chrome, T34)."),
   });
   const toasts = createToasts(shell.toastRegion);
   toastsRef = toasts;
+
+  // Region-analysis panel (T32): flamegraph / blocking-calls / heap for a
+  // Shift+drag region or a whole-trace toolbar open. Renders into T31's
+  // inspector Stack tab (passed as an inspector dep below); driven by the
+  // frozen flamegraph.js widget through its public surface. Created after the
+  // toast region so pop-out/no-trace errors can surface.
+  regionPanel = createRegionAnalysis(store, {
+    inspectorHost: shell.inspectorRegion,
+    notify,
+    announcer,
+  });
 
   // Worker-lanes track content (T22): mounts AFTER the shell so its store
   // subscription runs after the shell's chrome render each frame, and claims
@@ -107,7 +122,7 @@ function boot(): void {
   // Rendered imperatively into the shell's empty inspector aside; re-scopes to
   // the selection in the same action (S4). Registered with the esc-cascade so
   // its content selection clears before the entry's task-selection fallback.
-  const inspector = mountInspector(shell.inspectorRegion, store, { esc });
+  const inspector = mountInspector(shell.inspectorRegion, store, { esc, regionPanel });
 
   // Overview minimap (T35): tier-1 density + POI ticks + a draggable viewport
   // box, filling the shell's minimap host. Drag/click dispatch store viewport
@@ -192,22 +207,11 @@ function boot(): void {
     laneInteraction.dispose();
     overlay.dispose();
     inspector.dispose();
+    regionPanel?.dispose();
     lanes.dispose();
     shell.dispose();
     help.dispose();
   });
-}
-
-/** Human name for an analysis-button seam message (T33 -> T32). */
-function analysisName(kind: "cpu" | "blocking" | "heap"): string {
-  switch (kind) {
-    case "cpu":
-      return "CPU flamegraph";
-    case "blocking":
-      return "Blocking-calls";
-    case "heap":
-      return "Heap";
-  }
 }
 
 interface TraceSource {
