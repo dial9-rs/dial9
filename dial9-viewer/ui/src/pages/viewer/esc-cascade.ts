@@ -1,21 +1,11 @@
-// src/pages/viewer/esc-cascade.ts - the Escape cascade MECHANISM (T21).
-//
-// The legacy viewer hard-codes one global Escape handler that closes
-// surfaces in a fixed order: help -> uninstrumented popup -> parse-perf
-// popup -> stack sidebar -> clear task selection (features/02 D9). That
-// ordering ROW is owned by T33 (section D). T21 owns only the mechanism it
-// hooks: an ordered list of "escapable" surfaces, each a predicate + close
-// callback, tried highest-priority first; the first one that was open
-// consumes the key and stops. Downstream tickets (help here in T21, popups
-// and sidebar in T31/T33) register their surface with a priority; nobody
-// re-implements the keydown wiring or the ordering contract.
-//
-// Priorities are explicit numbers so registrations from different tickets
-// compose without a central edit: higher number = tried first. The legacy
-// order maps to descending priority (help highest, task-selection lowest).
+// The Escape cascade MECHANISM: an ordered list of "escapable" surfaces, each
+// a predicate + close callback, tried highest-priority first; the first one
+// that was open consumes the key and stops. Surfaces register with an explicit
+// priority so registrations from different modules compose without a central
+// edit: higher number = tried first (help highest, task-selection lowest).
 
 export interface EscapableSurface {
-  /** Higher = closed first. See the legacy order in the module header. */
+  /** Higher = closed first. */
   priority: number;
   /** True when the surface is currently open (and thus can consume Esc). */
   isOpen(): boolean;
@@ -29,10 +19,10 @@ export interface EscCascade {
   /** Register a surface; returns an unregister function. */
   register(surface: EscapableSurface): () => void;
   /**
-   * Run the cascade once (call from a keydown handler on Escape). Closes
-   * the highest-priority OPEN surface and returns true; returns false when
-   * nothing was open (the caller then applies its own fallback - e.g. the
-   * legacy "clear task selection + refocus main area").
+   * Run the cascade once (call from a keydown handler on Escape). Closes the
+   * highest-priority OPEN surface and returns true; returns false when nothing
+   * was open (the caller then applies its own fallback - e.g. clear task
+   * selection + refocus the main area).
    */
   handle(): boolean;
   /** Ordered surface names, highest priority first (tests/debug). */
@@ -70,16 +60,15 @@ export function createEscCascade(): EscCascade {
 }
 
 /**
- * Canonical priority bands so cross-ticket registrations stay ordered
- * without coordination (higher = closed first). The legacy D9 order:
- * help > popups > sidebar > selection.
+ * Canonical priority bands so registrations stay ordered without coordination
+ * (higher = closed first): help > popups > sidebar > selection.
  */
 export const ESC_PRIORITY = {
   help: 100,
-  // The load section (T34): a modal drop-zone/loading surface. Sits below
-  // help (a `?` overlay opened over a load still closes first) and above the
+  // The load section: a modal drop-zone/loading surface. Sits below help (a
+  // `?` overlay opened over a load still closes first) and above the
   // popups/sidebar it covers, so Esc cancels a load / dismisses the New-File
-  // chooser (#281) before touching anything behind it.
+  // chooser before touching anything behind it.
   load: 90,
   popup: 80,
   sidebar: 60,

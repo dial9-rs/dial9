@@ -1,25 +1,13 @@
-// src/pages/viewer/region-analysis.ts - the in-viewer region-analysis panel
-// (T32; features/02 section S F15/F16/F19 + the R3-R9 blocking-calls deferred
-// from T31, plus the S7 amendment). It renders the CPU flamegraph / blocking
+// The in-viewer region-analysis panel: renders the CPU flamegraph / blocking
 // calls / heap flamegraph for a Shift+drag region (or a whole-trace toolbar
-// open) INTO T31's inspector Stack tab, DRIVING the frozen flamegraph.js widget
-// through its existing public surface (createFlamegraph/setData/getZoomPath) -
-// the frozen core is never edited (AGENTS.md; K7 keyboard traversal defers to
-// T47 for the missing absolute-zoom core API - see HANDOFF).
+// open) into the inspector's Stack tab, driving the flamegraph widget through
+// its public surface (createFlamegraph/setData/getZoomPath).
 //
-// Rendering model (mirrors the inspector's at-cursor readout + the toast
-// region): T31's inspector renders a binding-free `<div data-region-host>` in
-// its Stack tab; THIS controller renders the panel interior (sub-tab bar,
-// counts, the S7 partial-window badge + "show in timeline", and either the
-// persistent flamegraph canvas OR the blocking-calls HTML) into that host
-// imperatively, so the inspector's lit-html re-renders never clobber the widget.
-// The single fgContainer + fgInstance persist across mode switches and Stack-tab
-// hide/show (parked while detached, resized on re-attach), exactly as the legacy
-// sidebar moved its one #fg-container between panels.
-//
-// The heavy derivations are the pure region-analysis-model (sample building,
-// counts, blocking groups, the S7 extent, coverage); this file owns only the
-// widget lifecycle, the sub-tab framework, and the imperative render.
+// The inspector renders a binding-free `<div data-region-host>`; this controller
+// renders the panel interior into it imperatively, so the inspector's lit-html
+// re-renders never clobber the widget. A single fgContainer + fgInstance persist
+// across mode switches and Stack-tab hide/show (parked while detached, resized
+// on re-attach). The heavy derivations live in the pure region-analysis-model.
 
 import { html, render, nothing, type TemplateResult } from "lit-html";
 import { classMap } from "lit-html/directives/class-map.js";
@@ -66,11 +54,11 @@ const MODE_LABELS: Record<RegionMode, string> = {
 
 /** Callbacks the region panel needs from the page entry. */
 export interface RegionAnalysisDeps {
-  /** The inspector aside (T31); the Stack tab's `[data-region-host]` lives here. */
+  /** The inspector aside; the Stack tab's `[data-region-host]` lives here. */
   inspectorHost: HTMLElement;
   /** Surface an error (pop-out with no trace URL, etc.) as a toast. */
   notify?(message: string): void;
-  /** ARIA/status announcer for the S7 "show in timeline" navigation. */
+  /** ARIA/status announcer for the "show in timeline" navigation. */
   announcer?: Announcer;
 }
 
@@ -79,7 +67,7 @@ export interface RegionAnalysisController {
    *  the Stack tab is not showing a region). Called by the inspector after each
    *  frame render and by this controller's own viewport/segments subscription. */
   sync(): void;
-  /** Toolbar D1/D2/D3: open a whole-trace analysis (activates the Stack tab). */
+  /** Toolbar: open a whole-trace analysis (activates the Stack tab). */
   openWholeTrace(kind: RegionMode): void;
   dispose(): void;
 }
@@ -96,7 +84,7 @@ export function createRegionAnalysis(
   deps: RegionAnalysisDeps,
 ): RegionAnalysisController {
   // Trace-invariant lane data (workerSpans + attached CPU/sched samples),
-  // rebuilt only when the trace slice is replaced (F5).
+  // rebuilt only when the trace slice is replaced.
   const laneData = store.derived(["trace"], (s): LaneData | null =>
     s.trace.trace ? deriveLaneData(s.trace.trace) : null,
   );
@@ -106,7 +94,7 @@ export function createRegionAnalysis(
   let pendingMode: RegionMode | null = null; // set by a toolbar open
   let heapMode: "bytes" | "count" = "bytes";
   let groupBy: "leaf" | "full" = "leaf";
-  let showExtent: TimeRange | null = null; // S7: extent for the current zoom
+  let showExtent: TimeRange | null = null; // extent for the current zoom
   let lastRangeKey: string | null = null;
 
   // ── widget lifecycle (lazy, single instance reused) ─────────────────────
@@ -150,8 +138,8 @@ export function createRegionAnalysis(
     return fgInstance;
   }
 
-  /** The widget fires this whenever the zoom stack changes (F3/F5). Recompute
-   *  the S7 frame->time extent and re-render the header (no setData). */
+  /** The widget fires this whenever the zoom stack changes. Recompute the
+   *  frame->time extent and re-render the header (no setData). */
   function onZoomChange(): void {
     const trace = state().trace.trace;
     if (fgInstance === null || trace === null || mode !== "cpu") {
@@ -178,7 +166,7 @@ export function createRegionAnalysis(
     return { kind: "empty" };
   }
 
-  // ── heap widget options (F16 tooltip / export labels) ───────────────────
+  // ── heap widget options (tooltip / export labels) ───────────────────────
 
   function heapFgOpts(view: HeapRegionView, range: TimeRange): FlamegraphSetDataOptions {
     const m = heapMode;
@@ -232,8 +220,8 @@ export function createRegionAnalysis(
     const key = rangeKey(range);
     if (key !== lastRangeKey) {
       // A genuinely new region (or a fresh toolbar open): pick the mode by the
-      // toolbar's forced kind, else H7's data-present default (legacy resets to
-      // the default on each fresh region, not the previous mode).
+      // toolbar's forced kind, else the data-present default (reset to the
+      // default on each fresh region, not the previous mode).
       lastRangeKey = key;
       mode = pendingMode ?? defaultRegionMode(present);
       pendingMode = null;
@@ -340,8 +328,8 @@ export function createRegionAnalysis(
     </button>`;
   }
 
-  /** The T17 partial-window badge (DoD): a non-complete region must not read as
-   *  the whole picture (audit notes 6/7; 2.8 "never silently wrong"). */
+  /** The partial-window badge: a non-complete region must not read as the whole
+   *  picture. */
   function coverageBadge(coverage: RegionCoverage): TemplateResult | typeof nothing {
     if (coverage === "complete") return nothing;
     const label =
@@ -365,7 +353,7 @@ export function createRegionAnalysis(
     return blockingBody(computedView.blocking);
   }
 
-  // ── CPU body (F15 + S7) ─────────────────────────────────────────────────
+  // ── CPU body ────────────────────────────────────────────────────────────
 
   function cpuBody(view: CpuRegionView, range: TimeRange): TemplateResult {
     if (view.foldableCount === 0) {
@@ -390,7 +378,7 @@ export function createRegionAnalysis(
     `;
   }
 
-  /** S7 frame->timeline link: navigate the viewport to the [min,max] timestamp
+  /** Frame->timeline link: navigate the viewport to the [min,max] timestamp
    *  extent of the zoomed frame's samples within the analyzed region. */
   function showInTimelineButton(): TemplateResult | typeof nothing {
     if (showExtent === null) return nothing;
@@ -413,7 +401,7 @@ export function createRegionAnalysis(
     return `${a} - ${fmtAxisTick(axis, extent.endNs, false)}`;
   }
 
-  // ── Heap body (F16) ─────────────────────────────────────────────────────
+  // ── Heap body ───────────────────────────────────────────────────────────
 
   function heapBody(view: HeapRegionView): TemplateResult {
     if (view.sampleCount === 0) {
@@ -446,7 +434,7 @@ export function createRegionAnalysis(
     `;
   }
 
-  // ── Blocking body (R3-R9) ───────────────────────────────────────────────
+  // ── Blocking body ───────────────────────────────────────────────────────
 
   function blockingBody(view: BlockingView): TemplateResult {
     if (view.total === 0) {
@@ -551,8 +539,8 @@ export function createRegionAnalysis(
     sync();
   }
 
-  /** Center the viewport on a poll (R8 jump-to-poll), preserving a sensible
-   *  padded window (legacy pad = 5x duration). */
+  /** Center the viewport on a poll (jump-to-poll), preserving a sensible padded
+   *  window (pad = 5x duration). */
   function jumpToPoll(start: number, end: number): void {
     const vp = state().viewport;
     const dur = Math.max(end - start, 1);
@@ -563,7 +551,7 @@ export function createRegionAnalysis(
     store.update("viewport", { viewStart, viewEnd });
   }
 
-  /** S7: navigate to the [min,max] extent of the zoomed frame's samples. */
+  /** Navigate to the [min,max] extent of the zoomed frame's samples. */
   function navigateToExtent(extent: TimeRange): void {
     const vp = state().viewport;
     const span = extent.endNs - extent.startNs;
@@ -575,7 +563,7 @@ export function createRegionAnalysis(
     deps.announcer?.announce("Timeline moved to the frame's samples");
   }
 
-  /** F19 Pop Out: open flamegraph.html preserving trace URL(s), range, zoom. */
+  /** Pop Out: open flamegraph.html preserving trace URL(s), range, zoom. */
   function popOut(range: TimeRange): void {
     const params = new URLSearchParams(window.location.search);
     const traceUrls = params.getAll("trace").filter((u) => u.length > 0);
@@ -593,7 +581,7 @@ export function createRegionAnalysis(
     window.open(url, "_blank");
   }
 
-  // ── toolbar open (D1/D2/D3) ─────────────────────────────────────────────
+  // ── toolbar open ────────────────────────────────────────────────────────
 
   function openWholeTrace(kind: RegionMode): void {
     const vp = state().viewport;
@@ -602,8 +590,8 @@ export function createRegionAnalysis(
       return;
     }
     // The whole-trace analysis reuses the retained-region mechanism so the Stack
-    // tab activates (P4) and the analyzed scope is boxed (H10); the forced kind
-    // opens the requested analysis even when other data is present.
+    // tab activates and the analyzed scope is boxed; the forced kind opens the
+    // requested analysis even when other data is present.
     pendingMode = kind;
     store.update("selection", {
       sidebarRange: { startNs: vp.minTs, endNs: vp.maxTs },
@@ -613,8 +601,8 @@ export function createRegionAnalysis(
     });
   }
 
-  // ── own subscription: viewport + segments drive the badge/extent (the
-  //    inspector re-renders on trace/selection/uiPrefs and calls sync too) ──
+  // Own subscription: viewport + segments drive the badge/extent (the inspector
+  // re-renders on trace/selection/uiPrefs and calls sync too).
   const unsubscribe = store.subscribe(["viewport", "segments"], () => sync());
 
   return {

@@ -1,19 +1,13 @@
-// src/pages/viewer/issues-rail.ts - the concept-2 issues rail (T33; 04 S5,
-// features/02 section C). It replaces the legacy blind "0/74 Next" stepper
-// with a ranked, keyboard-navigable, sortable list of points of interest.
+// The issues rail: a ranked, keyboard-navigable, sortable list of points of
+// interest. A store-wired controller (createIssuesRail) created once so its
+// sort memo lives across renders; it exposes a lit-html `template(state)` and
+// `n`/`p` key bindings. Every handler dispatches store actions only - it never
+// renders; the shell's store subscription repaints.
 //
-// A store-wired controller (createIssuesRail), mirroring the track
-// controllers (spans/events/task-detail): created once so its sort memo
-// lives across renders, exposes a lit-html `template(state)` the shell drops
-// into the body left column, and `keyBindings` (the `n`/`p` step, T20's
-// unified router) the entry registers. Every handler dispatches store actions
-// only - it never renders (F2); the shell's store subscription repaints.
-//
-// The rail reads the derived POI model (poi.ts) - the frozen detector output
-// via lib/trace/analysis (T09). Row click and `n`/`p` CENTER the viewport on
-// the POI and SELECT its task (poiJump, legacy C7); the filter dropdown (C2)
-// and column-header sort (04 S5, subsuming the legacy "Worst first" checkbox
-// C3) re-scope/re-order the SAME detector rows, so the count is unchanged.
+// The rail reads the derived POI model (poi.ts). Row click and `n`/`p` center
+// the viewport on the POI and select its task; the filter dropdown and
+// column-header sort re-scope/re-order the SAME detector rows, so the count is
+// unchanged.
 
 import { html, type TemplateResult } from "lit-html";
 import { classMap } from "lit-html/directives/class-map.js";
@@ -35,7 +29,7 @@ import {
 interface Column {
   key: PoiSortKey;
   label: string;
-  /** Column-scoped tooltip (F2: every control explains itself). */
+  /** Column-scoped tooltip. */
   title: string;
   /** Direction applied on the FIRST click of this column. */
   defaultDir: "asc" | "desc";
@@ -51,7 +45,7 @@ const COLUMNS: readonly Column[] = [
 export interface IssuesRailController {
   /** The rail template for one render pass (reads live store state). */
   template(state: StoreState): TemplateResult;
-  /** `n`/`p` step bindings for the unified key router (T20). */
+  /** `n`/`p` step bindings for the unified key router. */
   keyBindings: readonly KeyBinding[];
   /** No live resources; present for symmetry with the track controllers. */
   dispose(): void;
@@ -92,7 +86,7 @@ export function createIssuesRail(store: ViewerStore): IssuesRailController {
     store.update("poi", { index });
   }
 
-  /** `n`/`p`: step the current index and jump (legacy Prev/Next, C4/C5). */
+  /** `n`/`p`: step the current index and jump. */
   function step(dir: 1 | -1): boolean {
     const state = store.getState() as StoreState;
     const vm = viewModel(state);
@@ -103,7 +97,7 @@ export function createIssuesRail(store: ViewerStore): IssuesRailController {
   }
 
   function setFilter(filter: PointOfInterestType): void {
-    // A new filter rebuilds the list; the current index no longer maps (C2).
+    // A new filter rebuilds the list; the current index no longer maps.
     store.update("poi", { filter, index: -1 });
   }
 

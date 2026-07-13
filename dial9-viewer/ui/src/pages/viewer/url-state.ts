@@ -1,13 +1,13 @@
-// src/pages/viewer/url-state.ts - the trace viewer's shareable URL state (#1).
+// The trace viewer's shareable URL state.
 //
 // Projects the store's viewport / selection / uiPrefs into a ViewState so
-// bindViewStateToUrl mirrors them into READABLE query params, and reads them
-// back on load. Clock mode + timezone (tm/tz) ride the hash (the ViewState
-// codec owns those); everything viewer-specific is a plain query param, so a
-// shared URL reads `?start=..&end=..&task=0x..&span-filter=..` rather than an
-// opaque hash blob. The viewport is captured as a POSITION (start/end ns): the
-// recipient sees the same window but keeps the full trace and can zoom out
-// (distinct from Set Range, which reduces the resident data).
+// bindViewStateToUrl mirrors them into readable query params, and reads them
+// back on load. Clock mode + timezone (tm/tz) ride the hash (the ViewState codec
+// owns those); everything viewer-specific is a plain query param, so a shared URL
+// reads `?start=..&end=..&task=0x..&span-filter=..` rather than an opaque hash
+// blob. The viewport is captured as a POSITION (start/end ns): the recipient sees
+// the same window but keeps the full trace and can zoom out (distinct from Set
+// Range, which reduces the resident data).
 
 import type { ReadonlyState } from "../../store/store.js";
 import type { StoreState } from "../../types/state.js";
@@ -20,7 +20,7 @@ const P_SPAN_FILTER = "span-filter";
 const P_TRACK_ORDER = "track-order";
 const P_COLLAPSED = "collapsed";
 
-/** Project the store into the shareable ViewState (#1). */
+/** Project the store into the shareable ViewState. */
 export function projectViewerState(state: ReadonlyState<StoreState>): ViewState {
   const vs: ViewState = {};
   // tm/tz ride the hash; include them only when non-default so a pristine

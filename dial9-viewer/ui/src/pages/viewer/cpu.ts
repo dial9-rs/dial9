@@ -1,53 +1,17 @@
-// src/pages/viewer/cpu.ts - the Process CPU usage track (T28;
-// docs/ui-inventory/features/02-viewer-html.md section L; legacy
-// `renderProcessCpuPanel`/`visibleCpuStats`/`fmtCpuCores`/`cpuIntervalTooltipHtml`
-// in viewer.html).
+// The Process CPU usage track: a fillRect BAR chart of avg-cores-over-time
+// (not a curve). Bars go through the run-length coalescer; the grid lines and
+// the dashed capacity line go through the batched-stroke path (one path per
+// style) - the two paths are never mixed. Draws in draw-area-relative x
+// (nsToDrawX, no LABEL_W) so bars line up pixel-exact with the lanes/axis.
+// `renderCpuTrack` returns the top-right info readout so the shell can mirror
+// it into a DOM-queryable attribute; the hover CONTENT (cpuIntervalAt +
+// cpuIntervalTooltip) is consumed by the overlay/tooltip system.
 //
-// The CPU track fills the unified column's "cpu" slot (track-layout.ts,
-// TRACKS "cpu"). Rendering reality (features/02 L1): it is a fillRect BAR
-// chart of avg-cores-over-time, NOT a curve. The bars go through the T08
-// run-length coalescer (lib/canvas makeBarCoalescer); the ONLY stroked
-// primitives - the 25/50/75% grid lines and the dashed capacity line - go
-// through the T08 batched-stroke path (drawStrokeBatches, one path per
-// style: 03 F1's rule). The two paths are never mixed.
-//
-// LAYOUT SEAM vs legacy (same as the axis, axis.ts): the legacy
-// `#cpu-panel-canvas` spanned the FULL panel width and offset every x by
-// LABEL_W inline (`nsToPanelXClamped` = `LABEL_W + nsToX`). In the new shell
-// the track canvas is `drawW` wide and sits AFTER a LABEL_W DOM label gutter
-// (tracks.ts), so the chart draws in DRAW-AREA-relative coordinates
-// (`nsToDrawX` = the legacy mapping with NO LABEL_W added). The DOM gutter
-// supplies the same offset for every track, so the CPU bars line up
-// pixel-exact with the lanes/axis by construction (the A13 alignment
-// invariant). The y-axis scale numbers, which the legacy drew in the LABEL_W
-// gutter (`x = LABEL_W - 6`), now draw at the draw area's left edge (there
-// is no in-canvas gutter to hold them) - the same gutter->draw-area shift
-// the axis track made for the identical reason.
-//
-// READOUT (features/02 L2): the legacy top-right info span
-// (`avg X cores [· avg Y%] · max Z`) is ported EXACTLY -
-// `cpuReadoutText` reproduces it to the digit (the DoD's behavioral-diff
-// target). `renderCpuTrack` returns it so the shell can mirror it into a
-// DOM-queryable attribute (tracks.ts) and also paints it on the canvas.
-//
-// HOVER (features/02 L3/L4): the tooltip RENDERING + crosshair live in the
-// T24 overlay/tooltip system (sections I + V; not a T28 dep, not yet
-// landed). T28 owns the CPU-specific CONTENT: `cpuIntervalAt` (the
-// binary-search lookup, legacy `findProcessCpuIntervalAt`) and
-// `cpuIntervalTooltip` (the label/value lines, legacy
-// `cpuIntervalTooltipHtml`). T24 wires them; until then their rendered
-// behavior is deferred (see HANDOFF).
-//
-// WINDOWING (T17 carried obligation, binding on every track renderer): when
-// the CPU data is segment-windowed, the renderer MUST NOT paint a truncated
-// window as if it were complete. `renderCpuTrack` consumes a `CpuWindow`
-// descriptor and surfaces truncation (an edge hatch band) and the
-// `oversized` segment state (a "partial window" badge) rather than drawing a
-// clean edge. The viewer shell currently loads WHOLE traces (the segments
-// slice is empty), so `deriveCpuInputs` resolves the descriptor to
-// "complete"; the derivation from a live resident window is the downstream
-// wiring seam (T34/T35). The renderer's consumption of the descriptor is
-// exercised directly by Vitest.
+// Windowing: when the data is segment-windowed the renderer must NOT paint a
+// truncated window as complete. `renderCpuTrack` consumes a `CpuWindow`
+// descriptor and surfaces truncation (an edge hatch band) + the `oversized`
+// segment state (a "partial window" badge). Whole-trace loads resolve the
+// descriptor to "complete".
 
 import type { PanelGeometry, StoreState } from "../../types/state.js";
 import type { ParsedTrace } from "../../types/trace.js";
@@ -63,19 +27,18 @@ import {
   type StrokeStyleSpec,
 } from "../../lib/canvas/index.js";
 
-// ── Windowing descriptor (T17 obligation) ───────────────────────────────
+// ── Windowing descriptor ─────────────────────────────────────────────────
 
 /**
  * The resident-data-window state the CPU renderer must surface so a
- * truncated/partial window is never painted as complete (T17-audit contract
- * notes 6+7, carried obligation). Both fields resolve to the "complete"
- * value ({ truncatedAt: null, oversized: false }) for a whole-trace load.
+ * truncated/partial window is never painted as complete. Both fields resolve
+ * to the "complete" value ({ truncatedAt: null, oversized: false }) for a
+ * whole-trace load.
  */
 export interface CpuWindow {
   /**
-   * Which edge(s) of the resident window truncate the CPU data (mirrors the
-   * `WindowEdgePoll.truncatedAt` union, types/trace.d.ts): data beyond the
-   * edge is not resident, so that edge is a WINDOW boundary, not the true
+   * Which edge(s) of the resident window truncate the CPU data: data beyond
+   * the edge is not resident, so that edge is a WINDOW boundary, not the true
    * data boundary. null when the window covers the whole trace.
    */
   truncatedAt: "start" | "end" | "both" | null;
@@ -99,27 +62,25 @@ export const COMPLETE_WINDOW: CpuWindow = { truncatedAt: null, oversized: false 
  */
 export interface CpuInputs {
   /**
-   * The avg-cores-over-time intervals (frozen-core
-   * `buildProcessCpuUsageSeries`), sorted ascending by `start` and
-   * contiguous except where a sample was dropped. Memoized on the trace
-   * identity - see `cpuSeriesFor`.
+   * The avg-cores-over-time intervals (`buildProcessCpuUsageSeries`), sorted
+   * ascending by `start` and contiguous except where a sample was dropped.
+   * Memoized on the trace identity - see `cpuSeriesFor`.
    */
   intervals: readonly ProcessCpuUsageInterval[];
   /**
-   * Available parallelism = the CPU "capacity" (features/02 L1/L5), the
-   * normalized `process.available_parallelism` segment metadatum; null when
-   * unknown (no capacity line, no percent readout).
+   * Available parallelism = the CPU "capacity", the normalized
+   * `process.available_parallelism` segment metadatum; null when unknown
+   * (no capacity line, no percent readout).
    */
   capacity: number | null;
-  /** Resident-window truncation state (T17 obligation). */
+  /** Resident-window truncation state. */
   window: CpuWindow;
 }
 
 // buildProcessCpuUsageSeries scans every custom event, so memoize on the
-// ParsedTrace identity: the trace slice is replaced wholesale on load
-// (store contract), so a new trace object is a real cache miss and a stable
-// one (pan/zoom/selection frames) is a hit. Mirrors the `sizers` WeakMap in
-// tracks.ts.
+// ParsedTrace identity: the trace slice is replaced wholesale on load, so a
+// new trace object is a real cache miss and a stable one (pan/zoom/selection
+// frames) is a hit.
 type CpuSeries = ReturnType<typeof buildProcessCpuUsageSeries>;
 const seriesCache = new WeakMap<ParsedTrace, CpuSeries>();
 
@@ -137,13 +98,10 @@ export function cpuSeriesFor(trace: ParsedTrace): CpuSeries {
 }
 
 /**
- * Derive the CPU window descriptor from the store (T17 obligation). The
- * `oversized` state is surfaced directly from the segments slice - any
- * needed segment stuck in "oversized" makes the view partial. `truncatedAt`
- * derivation from the resident window (computeWindowBoundaryPolls) is the
- * downstream wiring seam (T34/T35 feed windowed data into the viewer); the
- * whole-trace shell has an empty segments slice, so it resolves to null
- * here while the renderer consumes it regardless (tested).
+ * Derive the CPU window descriptor from the store. The `oversized` state comes
+ * directly from the segments slice - any needed segment stuck in "oversized"
+ * makes the view partial. `truncatedAt` stays null on the whole-trace path
+ * (empty segments slice); the renderer consumes the descriptor regardless.
  */
 export function deriveCpuWindow(state: StoreState): CpuWindow {
   let oversized = false;
@@ -170,7 +128,7 @@ export function deriveCpuInputs(state: StoreState): CpuInputs {
   };
 }
 
-// ── Visible-window stats (features/02 L2; legacy visibleCpuStats) ────────
+// ── Visible-window stats ─────────────────────────────────────────────────
 
 export interface CpuStats {
   /** Time-weighted mean cores over the visible window (0 when no overlap). */
@@ -180,11 +138,10 @@ export interface CpuStats {
 }
 
 /**
- * The avg/max readout stats for the visible window - ported VERBATIM from
- * the legacy `visibleCpuStats` (viewer.html:3653-3668): `avgCores` is the
+ * The avg/max readout stats for the visible window: `avgCores` is the
  * overlap-weighted mean of `interval.cores`, `maxCores` the peak interval
- * touching the window. Intervals are sorted by start, so it breaks once
- * past the right edge. This is the DoD's exact behavioral-diff target.
+ * touching the window. Intervals are sorted by start, so the loop breaks once
+ * past the right edge.
  */
 export function visibleCpuStats(
   intervals: readonly ProcessCpuUsageInterval[],
@@ -208,12 +165,11 @@ export function visibleCpuStats(
   return { avgCores, maxCores };
 }
 
-// ── Formatting (features/02 L2; legacy fmtCpuCores/fmtCpuPercent) ────────
+// ── Formatting ───────────────────────────────────────────────────────────
 
 /**
- * Core count -> compact label (legacy `fmtCpuCores`, viewer.html:3640-3646):
- * 1 decimal at >=10 cores else 2, trailing zeros and a bare dot stripped;
- * non-finite renders `-`. Ported verbatim (behavioral-diff exact).
+ * Core count -> compact label: 1 decimal at >=10 cores else 2, trailing zeros
+ * and a bare dot stripped; non-finite renders `-`.
  */
 export function fmtCpuCores(value: number): string {
   if (!Number.isFinite(value)) return "-";
@@ -224,25 +180,21 @@ export function fmtCpuCores(value: number): string {
 }
 
 /**
- * Percent -> `NN.N%` (legacy `fmtCpuPercent`, viewer.html:3648-3651);
- * non-finite renders `-`. Ported verbatim.
+ * Percent -> `NN.N%`; non-finite renders `-`.
  */
 export function fmtCpuPercent(value: number): string {
   if (!Number.isFinite(value)) return "-";
   return `${value.toFixed(1)}%`;
 }
 
-// The legacy info label joins its parts with a middle dot (U+00B7). Kept as
-// an escape so this source stays plain ASCII while the OUTPUT matches the
-// legacy string byte-for-byte (the behavioral-diff requirement, L2).
+// The info label joins its parts with a middle dot (U+00B7), kept as an escape
+// so this source stays plain ASCII while the OUTPUT is byte-for-byte the dot.
 const SEP = " · ";
 
 /**
- * The visible-window info readout (features/02 L2), ported EXACTLY from
- * viewer.html:3677-3680: `avg <cores> cores`, then (only when capacity is
- * known) `· avg <pct>%` where pct = min(100, avg/capacity*100), then
- * `· max <cores>`. This string must match the legacy `#cpu-panel-info`
- * to the digit.
+ * The visible-window info readout: `avg <cores> cores`, then (only when
+ * capacity is known) `· avg <pct>%` where pct = min(100, avg/capacity*100),
+ * then `· max <cores>`.
  */
 export function cpuReadoutText(stats: CpuStats, capacity: number | null): string {
   let out = `avg ${fmtCpuCores(stats.avgCores)} cores`;
@@ -254,13 +206,12 @@ export function cpuReadoutText(stats: CpuStats, capacity: number | null): string
   return out;
 }
 
-// ── Hover content (features/02 L3; the T24 seam) ─────────────────────────
+// ── Hover content ────────────────────────────────────────────────────────
 
 /**
- * The interval under a timestamp, or null (legacy `findProcessCpuIntervalAt`,
- * viewer.html:3750-3761): binary search over the sorted, non-overlapping
- * intervals. This is the CPU track's half of the L3 hover seam - T24's
- * tooltip/crosshair system consumes it; T28 does not render the tooltip.
+ * The interval under a timestamp, or null: binary search over the sorted,
+ * non-overlapping intervals. The tooltip/crosshair system consumes this;
+ * this module does not render the tooltip.
  */
 export function cpuIntervalAt(
   intervals: readonly ProcessCpuUsageInterval[],
@@ -285,10 +236,9 @@ export interface CpuTooltipRow {
 }
 
 /**
- * The CPU hover tooltip content (features/02 L3), ported from the legacy
- * `cpuIntervalTooltipHtml` (viewer.html:3763-3772) as structured rows so
- * T24 renders them without T28 touching the DOM: Window / CPU time / Cores,
- * plus Total CPU % only when capacity is known.
+ * The CPU hover tooltip content as structured rows (rendered elsewhere,
+ * without this module touching the DOM): Window / CPU time / Cores, plus
+ * Total CPU % only when capacity is known.
  */
 export function cpuIntervalTooltip(
   interval: ProcessCpuUsageInterval,
@@ -308,10 +258,9 @@ export function cpuIntervalTooltip(
   return rows;
 }
 
-// ── Colors + geometry (features/02 L1; legacy renderProcessCpuPanel) ─────
+// ── Colors + geometry ────────────────────────────────────────────────────
 
-// Legacy CPU panel colours (viewer.html), kept identical so the migrated
-// track reads the same.
+// CPU panel colours.
 const CPU_BG = "#111b2e";
 const Y_LABEL = "#667";
 const GRID_STROKE = "rgba(255,255,255,0.07)";
@@ -322,9 +271,7 @@ const TRUNC_BAND = "rgba(255,120,120,0.28)";
 const TRUNC_LABEL = "#ffb3b3";
 const CAP_DASH: readonly number[] = [4, 3];
 
-// Vertical chart margins (legacy: chartTop=20 headroom for labels, chartH =
-// ph-28, i.e. 8px bottom margin). Taken relative to the track height from
-// layout, never the retired 92px fold height.
+// Vertical chart margins: top headroom for labels, small bottom margin.
 const CHART_TOP = 20;
 const CHART_BOTTOM = 8;
 
@@ -339,11 +286,10 @@ function strokeStyleOf(key: string): StrokeStyleSpec {
 }
 
 /**
- * The bar fill colour for an interval, ported verbatim from
- * viewer.html:3733-3739: a blue -> pink/red ramp by load, where load is
- * `cores/capacity` (or `cores/scaleMax` when capacity is unknown), at 0.42
- * alpha. Same load value drives the same colour (used as the coalescer run
- * key, so equal-load neighbours fold into one fillRect).
+ * The bar fill colour for an interval: a blue -> pink/red ramp by load, where
+ * load is `cores/capacity` (or `cores/scaleMax` when capacity is unknown), at
+ * 0.42 alpha. Same load value drives the same colour (the coalescer run key,
+ * so equal-load neighbours fold into one fillRect).
  */
 export function cpuBarColor(
   cores: number,
@@ -360,25 +306,22 @@ export function cpuBarColor(
   return `rgba(${r}, ${g}, ${b}, 0.42)`;
 }
 
-// ── Canvas render (features/02 L1/L2) ────────────────────────────────────
+// ── Canvas render ────────────────────────────────────────────────────────
 
 /**
  * Render the CPU track into `ctx` (already DPR-scaled and sized to
- * `geometry.time.drawW` x `geometry.height`) and RETURN the L2 info readout
- * string (the shell mirrors it into a DOM-queryable attribute, tracks.ts).
+ * `geometry.time.drawW` x `geometry.height`) and RETURN the info readout
+ * string (the shell mirrors it into a DOM-queryable attribute).
  *
- * Draw order mirrors the legacy `renderProcessCpuPanel`: background, then the
- * grid + dashed-capacity strokes via the T08 BATCHED-STROKE path (one path
- * per style, F1), then the load-coloured bars via the T08 COALESCER (one
- * fillRect per pixel run), then the axis/capacity/readout text on top, then
- * the T17 window markers (most prominent). The two render paths are never
- * mixed.
+ * Draw order: background, then the grid + dashed-capacity strokes via the
+ * batched-stroke path (one path per style), then the load-coloured bars via
+ * the coalescer (one fillRect per pixel run), then the axis/capacity/readout
+ * text, then the window markers on top. The two render paths are never mixed.
  *
  * Called from tracks.ts `sizeTracks` for the "cpu" track, inside the store's
- * frame tick (the one place renders run + layout reads batch, F3). A blank
- * background is painted before the trace loads / when the panel is too
- * narrow so the slot still reads as a track; the readout is returned even
- * then (empty-window stats) so the shell stays consistent.
+ * frame tick. A blank background is painted before the trace loads / when the
+ * panel is too narrow; the readout is returned even then (empty-window stats)
+ * so the shell stays consistent.
  */
 export function renderCpuTrack(
   ctx: CanvasRenderingContext2D,
@@ -404,16 +347,15 @@ export function renderCpuTrack(
   const chartH = height - CHART_TOP - CHART_BOTTOM;
   const baselineY = chartTop + chartH;
   if (chartH <= 0) {
-    // Too short to host a chart (e.g. a future collapsed track): keep the
-    // readout, skip the chart body.
+    // Too short to host a chart: keep the readout, skip the chart body.
     paintReadout(ctx, readout, drawW);
     return readout;
   }
 
-  // Scale: 0 .. max(1, visible max cores, capacity) - legacy line 3691.
+  // Scale: 0 .. max(1, visible max cores, capacity).
   const scaleMax = Math.max(1, stats.maxCores, capacity ?? 0);
 
-  // ── Strokes: 25/50/75% grid + dashed capacity, batched by style (F1) ──
+  // ── Strokes: 25/50/75% grid + dashed capacity, batched by style ──
   const batcher = makeStrokeBatcher();
   for (let i = 1; i <= 3; i++) {
     const y = chartTop + (chartH * i) / 4;
@@ -433,11 +375,10 @@ export function renderCpuTrack(
   drawStrokeBatches(ctx, batcher.batches(), strokeStyleOf);
 
   // ── Bars: load-coloured fills via the run-length coalescer ────────────
-  // Key = fill colour + pixel-rounded top, so contiguous bars of equal
-  // height AND colour (the flat-CPU common case) fold into one fillRect,
-  // while a taller/shorter or differently-loaded neighbour starts a new run
-  // (no height is lost - see the module header). The parallel runMeta map
-  // recovers the colour + top the coalescer's opaque key stands for.
+  // Key = fill colour + pixel-rounded top, so contiguous bars of equal height
+  // AND colour fold into one fillRect while a taller/shorter or
+  // differently-loaded neighbour starts a new run (no height is lost). The
+  // parallel runMeta map recovers the colour + top the opaque key stands for.
   const runMeta = new Map<string, { color: string; top: number }>();
   const coalescer = makeBarCoalescer((left: number, width: number, key: string) => {
     const meta = runMeta.get(key);
@@ -462,9 +403,7 @@ export function renderCpuTrack(
   ctx.fillStyle = Y_LABEL;
   ctx.font = "10px monospace";
   ctx.textAlign = "left";
-  // y-axis scale numbers: legacy drew these right-aligned in the LABEL_W
-  // gutter; the new track has no in-canvas gutter, so they sit at the draw
-  // area's left edge (same gutter->draw-area shift as the axis track).
+  // y-axis scale numbers at the draw area's left edge (no in-canvas gutter).
   ctx.fillText(fmtCpuCores(scaleMax), 2, chartTop + 9);
   ctx.fillText("0", 2, baselineY);
 
@@ -479,13 +418,13 @@ export function renderCpuTrack(
 
   paintReadout(ctx, readout, drawW);
 
-  // ── T17: surface a truncated / oversized window (never as complete) ───
+  // ── Surface a truncated / oversized window (never as complete) ───
   drawWindowMarkers(ctx, window, drawW, height);
 
   return readout;
 }
 
-/** Draw the L2 info readout at the draw area's top-right (legacy position). */
+/** Draw the info readout at the draw area's top-right. */
 function paintReadout(
   ctx: CanvasRenderingContext2D,
   readout: string,
@@ -498,10 +437,10 @@ function paintReadout(
 }
 
 /**
- * Surface the resident-window state (T17 obligation): a translucent hatch
- * band at each truncated edge (so the missing data reads as "not loaded",
- * not "idle CPU"), and a "partial window" badge when a needed segment is
- * oversized. No-ops for a complete window - nothing extra is drawn.
+ * Surface the resident-window state: a translucent hatch band at each
+ * truncated edge (so missing data reads as "not loaded", not "idle CPU"), and
+ * a "partial window" badge when a needed segment is oversized. No-ops for a
+ * complete window.
  */
 function drawWindowMarkers(
   ctx: CanvasRenderingContext2D,
@@ -527,7 +466,7 @@ function drawWindowMarkers(
   }
 }
 
-// ── Shared draw-area x mapping (the A13 alignment invariant) ──────────────
+// ── Shared draw-area x mapping (the alignment invariant) ──────────────────
 
 /**
  * Timestamp (ns) -> draw-area-relative x (px), identical to the axis track's
@@ -545,7 +484,7 @@ export function nsToDrawX(
   return ((ns - viewStart) / span) * drawW;
 }
 
-/** Clamp a draw-area x into [0, drawW] (legacy `nsToPanelXClamped`). */
+/** Clamp a draw-area x into [0, drawW]. */
 function clampX(x: number, drawW: number): number {
   return Math.min(Math.max(x, 0), drawW);
 }

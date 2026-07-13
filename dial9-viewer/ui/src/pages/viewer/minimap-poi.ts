@@ -1,14 +1,11 @@
-// src/pages/viewer/minimap-poi.ts - points-of-interest ticks for the overview
-// minimap (T35). Same detector SOURCE as T33's issues rail
-// (lib/trace/analysis filterPointsOfInterest over reconstructed worker spans)
-// with NO code dependency between the two tickets - both read the frozen
-// core's detector output independently (chunk-2 ticket boundary).
+// Points-of-interest ticks for the overview minimap. Same detector source as
+// the issues rail (filterPointsOfInterest over reconstructed worker spans),
+// read independently.
 //
 // The minimap is an OVERVIEW, so it unions the applicable detectors instead of
-// a single selected filter: every notable point earns a tick, giving the
-// position context 04 S8 asks for. Derivation is O(events) (one worker-span
-// reconstruction + one sched-delay pass) and belongs in a trace-keyed
-// derived() cache (the component installs it), so pan/zoom never re-derive it.
+// a single selected filter: every notable point earns a tick. Derivation is
+// O(events) and belongs in a trace-keyed derived() cache (the component
+// installs it), so pan/zoom never re-derive it.
 //
 // "cpu-sampled" is deliberately excluded: it needs attachCpuSamples, which
 // MUTATES the shared poll objects the lanes/overlay caches also hold - the
@@ -56,9 +53,9 @@ function lifecycleWorkerIds(trace: ParsedTrace): number[] {
 /**
  * Derive the overview POI ticks for one parsed trace: reconstruct worker
  * spans, compute scheduling delays, then union the applicable detectors. Each
- * detector runs with `sortByWorst` on (legacy default), matching the rail's
- * ranking; ticks are de-duplicated by (time, worker, type) since a poll can
- * legitimately satisfy more than one detector. Returns [] for an empty trace.
+ * detector runs with `sortByWorst` on; ticks are de-duplicated by (time,
+ * worker, type) since a poll can satisfy more than one detector. Returns []
+ * for an empty trace.
  */
 export function deriveMinimapPois(trace: ParsedTrace): MinimapPoi[] {
   const workerIds = lifecycleWorkerIds(trace);

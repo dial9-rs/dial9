@@ -1,28 +1,20 @@
-// src/pages/viewer/spans-model.ts - the spans track's PURE derivation +
-// filtering + focus + dimming logic (T26; features/02 section J; legacy
-// renderSpanPanel / spanMatchesFilter / selectSpanRenderSet / computeSpanLayout
-// in viewer.html). No store, no DOM, no canvas: every function here is
-// referentially transparent so the spans-track component (spans-track.ts) can
-// cache the trace-invariant half in a store `derived()` (perf finding F5) and
-// unit-test the filter/focus/dim halves directly (the DoD's Vitest checks).
+// The spans track's pure derivation + filtering + focus + dimming logic. No
+// store, no DOM, no canvas - every function is referentially transparent.
 //
-// The split mirrors F5's two tiers:
-//   1. computeSpanTrackData(customEvents) - TRACE-INVARIANT: buildSpanData plus
-//      the per-name duration index (percentile filter J8) and the sorted name
-//      list (legend chips J9). Recomputed ONLY when the trace slice changes;
-//      the component wraps it in store.derived(["trace"], ...).
-//   2. buildSpanRenderModel(...) - VIEWPORT/FILTER/FOCUS-dependent: the visible
-//      window (binary-searched, F5/F6 - never an O(allSpans) scan), the
-//      name/text/percentile filter (J7-J9), selectSpanRenderSet (roots-only or
-//      focused+descendants), computeSpanLayout, and the focus repositioning
-//      (J2). Produces final bucket geometry so the DRAW step only needs the
-//      selection-derived highlight set for alpha (S4 dimming stays a cheap
-//      redraw, never a layout recompute).
+// Two tiers:
+//   1. computeSpanTrackData(customEvents) - trace-invariant: buildSpanData plus
+//      the per-name duration index (percentile filter) and the sorted name list
+//      (legend chips). Recomputed only when the trace slice changes; the
+//      component wraps it in store.derived(["trace"], ...).
+//   2. buildSpanRenderModel(...) - viewport/filter/focus-dependent: the visible
+//      window (binary-searched, never an O(allSpans) scan), the filter,
+//      selectSpanRenderSet, computeSpanLayout, and focus repositioning. Produces
+//      final bucket geometry so the draw step needs only the highlight set for
+//      alpha (dimming stays a cheap redraw, never a layout recompute).
 //
-// T17 obligation (audit notes 6+7): incomplete spans are NEVER silently
-// dropped. buildSpanData's `unmatchedSpans` (enter without exit - trace ended
-// mid-span OR a segment rotated) is surfaced as the J13 warning by the
-// component; this file carries the count through so the consumer exists.
+// Incomplete spans are never silently dropped: buildSpanData's `unmatchedSpans`
+// (enter without exit - trace ended mid-span or a segment rotated) is carried
+// through so the component can surface the warning.
 
 import {
   buildSpanData,
@@ -41,9 +33,9 @@ import type {
 } from "../../lib/trace/index.js";
 import type { SelectionSlice } from "../../types/state.js";
 
-// ── Trace-invariant span data (F5 tier 1) ───────────────────────────────
+// ── Trace-invariant span data ────────────────────────────────────────────
 
-/** Per-span-name metadata carried out of buildSpanData for J3/J4. */
+/** Per-span-name metadata carried out of buildSpanData. */
 export interface SpanNameMeta {
   spanName: string;
   fields: Record<string, unknown>;
@@ -51,24 +43,24 @@ export interface SpanNameMeta {
 }
 
 /**
- * Everything about a trace's tracing spans that does NOT depend on the
- * viewport, filter, or selection - computed once per trace load and cached
- * in a store `derived(["trace"], ...)` (F5). `allSpans` is sorted by start
- * (buildSpanData's contract), which the visibility binary search relies on.
+ * Everything about a trace's tracing spans that does NOT depend on the viewport,
+ * filter, or selection - computed once per trace load and cached in a store
+ * `derived(["trace"], ...)`. `allSpans` is sorted by start (buildSpanData's
+ * contract), which the visibility binary search relies on.
  */
 export interface SpanTrackData {
   allSpans: readonly TracingSpan[];
   spanMeta: SpanData["spanMeta"];
   childrenByParent: SpanData["childrenByParent"];
-  /** Spans with an enter but no exit (J13; the truncation/incompleteness
-   *  surface - T17 audit notes 6+7: surfaced, never dropped). */
+  /** Spans with an enter but no exit - the truncation/incompleteness surface,
+   *  surfaced, never dropped. */
   unmatchedSpans: readonly UnmatchedSpan[];
   maxDepth: number;
-  /** Unique span names, sorted - the legend chip set (J9). */
+  /** Unique span names, sorted - the legend chip set. */
   spanNames: readonly string[];
   /**
    * Per-name duration lists (ns), each sorted ascending, for the percentile
-   * filter (J8) and percentile-rank readouts (J5/J6). Legacy getSpanDurations.
+   * filter and percentile-rank readouts.
    */
   durationsByName: ReadonlyMap<string, readonly number[]>;
 }
@@ -86,9 +78,9 @@ export const EMPTY_SPAN_TRACK_DATA: SpanTrackData = {
 
 /**
  * Derive the trace-invariant span data from a trace's custom events. Pure:
- * buildSpanData (frozen core) plus the per-name duration index and the sorted
- * name list. Returns EMPTY_SPAN_TRACK_DATA when there are no spans so the
- * track renders its resting state without branching.
+ * buildSpanData plus the per-name duration index and the sorted name list.
+ * Returns EMPTY_SPAN_TRACK_DATA when there are no spans so the track renders its
+ * resting state without branching.
  */
 export function computeSpanTrackData(
   customEvents: readonly CustomTraceEvent[] | null | undefined,
@@ -125,20 +117,20 @@ export function computeSpanTrackData(
   };
 }
 
-// ── Filtering (J7 text, J8 percentile, J9 chips) ─────────────────────────
+// ── Filtering (text, percentile, chips) ──────────────────────────────────
 
 /** The AND-combined span filter state (uiPrefs.spanFilter/spanPctFilter/
  *  selectedSpanNames). */
 export interface SpanFilterState {
-  /** Case-insensitive substring over name + field key/value (J7). */
+  /** Case-insensitive substring over name + field key/value. */
   text: string;
-  /** 0 = All, else 50/90/95/99 - the percentile floor (J8). */
+  /** 0 = All, else 50/90/95/99 - the percentile floor. */
   pctFloor: number;
-  /** Selected legend-chip names; empty = no name filter (J9). */
+  /** Selected legend-chip names; empty = no name filter. */
   selectedNames: ReadonlySet<string>;
 }
 
-/** True when no filter is active (all three empty) - legacy `hasFilter`. */
+/** True when no filter is active (all three empty). */
 export function isFilterActive(filter: SpanFilterState): boolean {
   return (
     filter.text.length > 0 ||
@@ -148,10 +140,9 @@ export function isFilterActive(filter: SpanFilterState): boolean {
 }
 
 /**
- * Whether `span` passes the AND-combined filter (legacy spanMatchesFilter,
- * viewer.html:1113-1131): name-chip membership, then the percentile floor of
- * its name's duration distribution, then the case-insensitive substring over
- * the span name and every field key/value.
+ * Whether `span` passes the AND-combined filter: name-chip membership, then the
+ * percentile floor of its name's duration distribution, then the
+ * case-insensitive substring over the span name and every field key/value.
  */
 export function spanMatchesFilter(
   span: TracingSpan,
@@ -181,7 +172,7 @@ export function spanMatchesFilter(
 
 /**
  * Percentile rank (0..100) of `span` within its name's duration distribution,
- * or null when the name has no recorded durations (legacy spanPercentileRank).
+ * or null when the name has no recorded durations.
  */
 export function spanPercentileRank(
   span: TracingSpan,
@@ -195,14 +186,13 @@ export function spanPercentileRank(
   return Math.round((rank / durs.length) * 100);
 }
 
-// ── Visibility window (binary search - F5/F6) ────────────────────────────
+// ── Visibility window (binary search) ────────────────────────────────────
 
 /**
- * First index in `allSpans` (sorted by start) whose `start` is strictly
- * greater than `viewEnd` - the exclusive right bound of the candidate window.
- * Binary search: spans at/after this index start after the view and cannot be
- * visible, so the per-frame scan never walks the whole array's tail (F5/F6:
- * no O(allSpans) visibility scan per frame).
+ * First index in `allSpans` (sorted by start) whose `start` is strictly greater
+ * than `viewEnd` - the exclusive right bound of the candidate window. Binary
+ * search: spans at/after this index start after the view and cannot be visible,
+ * so the per-frame scan never walks the whole array's tail.
  */
 export function upperBoundByStart(
   allSpans: readonly TracingSpan[],
@@ -219,12 +209,11 @@ export function upperBoundByStart(
 }
 
 /**
- * Spans that overlap [viewStart, viewEnd] AND pass the filter. The right edge
- * is binary-searched (upperBoundByStart); the candidate prefix is then scanned
- * for `end >= viewStart` (a long-running span with a small start survives).
- * The prefix scan's left edge is not itself binary-bounded (that needs a
- * max-end interval index); it is a strict improvement over the legacy
- * whole-array scan and is where the T17 windowing would later clip.
+ * Spans that overlap [viewStart, viewEnd] AND pass the filter. The right edge is
+ * binary-searched (upperBoundByStart); the candidate prefix is then scanned for
+ * `end >= viewStart` (a long-running span with a small start survives). The
+ * prefix scan's left edge is not itself binary-bounded (that needs a max-end
+ * interval index).
  */
 export function filterVisibleSpans(
   data: SpanTrackData,
@@ -245,7 +234,7 @@ export function filterVisibleSpans(
 
 // ── Render model (viewport/filter/focus tier) ────────────────────────────
 
-/** Cluster x-grid + bar height (legacy CLUSTER_X / BAR_H constants). */
+/** Cluster x-grid + bar height. */
 export const CLUSTER_X_PX = 6;
 export const BASE_BAR_H = 4;
 
@@ -267,9 +256,9 @@ export type SpanEmptyReason = "no-visible" | "no-roots" | null;
 /** The full per-frame render input for the spans canvas + info readout. */
 export interface SpanRenderModel {
   buckets: readonly SpanDrawBucket[];
-  /** J5 info readout: focused -> percentile line; else "N spans · M clusters". */
+  /** Info readout: focused -> percentile line; else "N spans · M clusters". */
   info: string;
-  /** Log-scale y-axis duration ticks bounds (legacy minDur/maxDur). */
+  /** Log-scale y-axis duration ticks bounds. */
   minDur: number;
   maxDur: number;
   /** Spans in the render set (roots or focused+descendants). */
@@ -283,19 +272,18 @@ export interface SpanRenderModelOpts {
   viewEnd: number;
   /** Draw-area width in CSS px (drawW from the shared layout). */
   drawW: number;
-  /** Canvas height in CSS px (the span-panel draw area, legacy ph=120). */
+  /** Canvas height in CSS px (the span-panel draw area). */
   canvasH: number;
-  /** The subtree-focused span, or null (selection.focusedSpanId, J2). */
+  /** The subtree-focused span, or null (selection.focusedSpanId). */
   focusedSpanId: string | null;
   filter: SpanFilterState;
 }
 
 /**
- * Height of one drawn bucket (legacy renderSpanPanel bar-height scaling):
- * the focused span is pinned tall, its children are enlarged, and multi-span
- * clusters grow by log2(size). Depends only on focus + cluster size (NOT the
- * selection highlight), so it is computed here and the draw step never
- * recomputes layout on a selection change (S4).
+ * Height of one drawn bucket: the focused span is pinned tall, its children are
+ * enlarged, and multi-span clusters grow by log2(size). Depends only on focus +
+ * cluster size (NOT the selection highlight), so it is computed here and the
+ * draw step never recomputes layout on a selection change.
  */
 function bucketHeight(
   clusterSize: number,
@@ -315,7 +303,7 @@ function bucketHeight(
   return h;
 }
 
-/** Rich J5 focus readout: `name: dur (P% of N) · P50=.. P99=..`. */
+/** Rich focus readout: `name: dur (P% of N) · P50=.. P99=..`. */
 export function focusInfoLine(
   span: TracingSpan,
   durationsByName: ReadonlyMap<string, readonly number[]>,
@@ -379,8 +367,8 @@ export function buildSpanRenderModel(opts: SpanRenderModelOpts): SpanRenderModel
   });
 
   const hasFocus = focusedSpanId != null;
-  // Focus repositioning (J2): pin the focused cluster at the top, pack the
-  // rest just below it. Matches the legacy PARENT_Y / CHILD_Y placement.
+  // Focus repositioning: pin the focused cluster at the top, pack the rest just
+  // below it.
   const PARENT_Y = 4;
   const CHILD_Y = 34;
   const focusBucketExists =
@@ -395,7 +383,7 @@ export function buildSpanRenderModel(opts: SpanRenderModelOpts): SpanRenderModel
       spans: b.spans,
       representative: b.representative,
       x1: b.x1,
-      // Hit-test / draw minimum width (legacy x2 = max(x2, x1+4)).
+      // Hit-test / draw minimum width.
       x2: Math.max(b.x2, b.x1 + 4),
       y,
       h,
@@ -422,14 +410,14 @@ export function buildSpanRenderModel(opts: SpanRenderModelOpts): SpanRenderModel
   };
 }
 
-// ── Focus chain (J2) + selection-driven dimming (S4) ─────────────────────
+// ── Focus chain + selection-driven dimming ───────────────────────────────
 
 /**
  * The focus highlight chain for a clicked span: the span itself plus its
- * ancestor chain walked through spanMeta parents (legacy click handler
- * viewer.html:3861-3868). Cycle-safe: stops when a parent is already in the
- * chain. This is the set written to selection.spanFocus.chain and the set the
- * lanes highlight; here it also drives the spans-track dimming.
+ * ancestor chain walked through spanMeta parents. Cycle-safe: stops when a
+ * parent is already in the chain. This is the set written to
+ * selection.spanFocus.chain and the set the lanes highlight; here it also drives
+ * the spans-track dimming.
  */
 export function spanFocusChain(
   spanId: string,
@@ -447,15 +435,13 @@ export function spanFocusChain(
 
 /**
  * The dim/highlight decision for the spans track, derived from the selection
- * slice (S4). When a span is focused (`selection.spanFocus`), the focused span
- * + its ancestor chain are the highlight set and every other cluster dims to
- * the background (legacy `selectedSpanIds`-driven alpha in renderSpanPanel).
+ * slice. When a span is focused (`selection.spanFocus`), the focused span + its
+ * ancestor chain are the highlight set and every other cluster dims to the
+ * background.
  *
- * Faithful to the legacy: the dimming is driven by the SPAN highlight set, not
- * by a bare task selection (clicking a poll set `selectedTaskId` but did NOT
- * dim the spans panel). Selecting a span - the selection this track owns - is
- * a genuine selection-slice change that dims the non-selected spans, which is
- * exactly the S4 (partial) reaction the DoD asserts.
+ * The dimming is driven by the SPAN highlight set, not by a bare task selection:
+ * clicking a poll sets `selectedTaskId` but does NOT dim the spans panel. Only
+ * selecting a span - the selection this track owns - dims the non-selected spans.
  */
 export interface SpanHighlight {
   /** Span ids drawn bright; everything else dims when `active`. */
@@ -474,9 +460,9 @@ export function spanHighlight(selection: Pick<SelectionSlice, "spanFocus">): Spa
 
 const EMPTY_HIGHLIGHT: ReadonlySet<string> = new Set<string>();
 
-// ── Legend chips (J9) + metadata rows (J3) declarative models ────────────
+// ── Legend chips + metadata rows declarative models ──────────────────────
 
-/** One legend chip's declarative model (J9): keyed template input. */
+/** One legend chip's declarative model: keyed template input. */
 export interface SpanChipModel {
   name: string;
   color: string;
@@ -485,7 +471,7 @@ export interface SpanChipModel {
 
 /**
  * The legend chip models for the current selection - a keyed template input
- * (perf finding F7: declarative keyed chips, not innerHTML rebuild + relisten).
+ * (declarative keyed chips, not innerHTML rebuild + relisten).
  */
 export function spanChipModels(
   data: SpanTrackData,
@@ -499,20 +485,20 @@ export function spanChipModels(
   }));
 }
 
-/** One metadata k/v row for the focused span's label area (J3/J4). */
+/** One metadata k/v row for the focused span's label area. */
 export interface SpanFieldRow {
   key: string;
   /** Display value (unit-aware, formatFieldValue). */
   display: string;
-  /** Raw value copied by the J4 copy button. */
+  /** Raw value copied by the copy button. */
   copy: string;
 }
 
 /**
- * The focused span's label content (J3): its name plus a unit-aware k/v row
- * per field (each row gets a J4 copy button). Returns null when nothing is
- * focused (the label shows the plain "Spans" title). Prefers the live span's
- * fields, falling back to spanMeta (matching the legacy updateSpanPanelLabel).
+ * The focused span's label content: its name plus a unit-aware k/v row per field
+ * (each row gets a copy button). Returns null when nothing is focused (the label
+ * shows the plain "Spans" title). Prefers the live span's fields, falling back
+ * to spanMeta.
  */
 export interface SpanLabelModel {
   name: string;

@@ -1,39 +1,11 @@
-// src/pages/viewer/axis.ts - the timeline header / time axis track (T25;
-// docs/ui-inventory/features/02-viewer-html.md section F; legacy
-// `renderTimeline`/`fmtTs`/`fmtWallClock` in viewer.html).
+// The timeline header / time axis track: the top track of the unified column.
+// Draws tick marks + labels in draw-area-relative x (nsToDrawX, no LABEL_W
+// added) so ticks line up pixel-exact with the poll/span/CPU marks below.
+// Non-interactive; redrawn when the viewport, trace, or clock mode changes.
 //
-// The time axis is the top track of the unified column (track-layout.ts
-// TRACKS[0] "timeline"). It draws tick marks + labels sharing the ONE
-// ns<->x mapping every track uses (lib/canvas/layout, the A13 alignment
-// invariant), so a tick lines up pixel-exact with the poll/span/CPU marks
-// below it. Non-interactive; redrawn each frame the viewport, trace, or
-// clock mode changes.
-//
-// LAYOUT SEAM vs legacy (features/02 F2): the legacy `#timeline-canvas`
-// spanned the FULL panel width and offset ticks by LABEL_W inline
-// (`x = LABEL_W + nsToX(t)`). In the new shell every track's canvas is
-// `drawW` wide and sits AFTER a LABEL_W DOM label gutter (tracks.ts), so
-// the axis draws in DRAW-AREA-relative coordinates - `nsToDrawX` = the
-// legacy `nsToX(ns, drawW)` with NO LABEL_W added. Because the DOM gutter
-// supplies the same offset for lanes and every panel, drawing at
-// `nsToDrawX` keeps the axis aligned with them by construction (the shared
-// gutter is the invariant; see tracks.ts).
-//
-// CLOCK MODES (features/02 E1/E2, consumed here): `uiPrefs.timeMode`
-// ("rel"|"abs") and `uiPrefs.tz` ("utc"|"local") come from the store - the
-// axis READS them; the toolbar toggle BUTTONS that drive them are T33's.
-// Formatting mirrors the legacy `fmtTs` exactly: relative offsets from the
-// trace start (`fmtDuration`), or wall-clock via the nearest clock-sync
-// anchor (`fmtWallClock`), falling back to relative when the trace has no
-// anchors.
-//
-// DATE-QUALIFICATION AMENDMENT (T25; ledger row, no 04 finding id - S2/#137
-// legibility family): when the visible span's start and end fall on
-// DIFFERENT calendar days (evaluated in the active tz mode), absolute-mode
-// tick labels gain a `MM-DD ` date prefix so ticks across a day boundary
-// are unambiguous. Same rule as T15's heatmap-axis amendment (features/01
-// F10), narrower prefix (`MM-DD` vs the heatmap's `YYYY-MM-DD`) per this
-// ticket. Relative mode has no calendar day, so it is never qualified.
+// Absolute-mode tick labels gain a `MM-DD ` date prefix when the visible span
+// crosses a calendar-day boundary, so ticks across a day boundary read
+// unambiguously. Relative mode has no calendar day, so it is never qualified.
 
 import type {
   PanelGeometry,
@@ -73,12 +45,12 @@ export function deriveAxisInputs(state: StoreState): AxisInputs {
   };
 }
 
-// ── Tick geometry (features/02 F1) ──────────────────────────────────────
+// ── Tick geometry ────────────────────────────────────────────────────────
 
 /**
- * The "nice" tick intervals in ns (legacy `renderTimeline`): 1µs..10s in a
- * 1/5 progression. The auto-picker snaps the raw interval up to the first
- * of these >= it, so ticks land on round durations.
+ * The "nice" tick intervals in ns: 1µs..10s in a 1/5 progression. The
+ * auto-picker snaps the raw interval up to the first of these >= it, so ticks
+ * land on round durations.
  */
 const NICE_INTERVALS: readonly number[] = [
   1e3, 5e3, 1e4, 5e4, 1e5, 5e5, 1e6, 5e6, 1e7, 5e7, 1e8, 5e8, 1e9, 5e9, 1e10,
@@ -86,9 +58,8 @@ const NICE_INTERVALS: readonly number[] = [
 
 /**
  * Auto-pick the tick interval (ns) for a visible span over `drawW` px,
- * targeting ~4-16 ticks (`max(4, floor(drawW/100))`) - the legacy
- * `renderTimeline` rule verbatim. Returns the raw interval when the span is
- * wider than the largest nice value.
+ * targeting ~4-16 ticks (`max(4, floor(drawW/100))`). Returns the raw interval
+ * when the span is wider than the largest nice value.
  */
 export function pickTickInterval(
   viewStart: number,
@@ -103,9 +74,9 @@ export function pickTickInterval(
 
 /**
  * The tick timestamps (ns) for a visible span at a given interval: every
- * multiple of `interval` in `[ceil(viewStart/interval)*interval, viewEnd]`
- * (legacy `firstTick` loop). Guards against a non-positive interval so a
- * degenerate viewport can never spin.
+ * multiple of `interval` in `[ceil(viewStart/interval)*interval, viewEnd]`.
+ * Guards against a non-positive interval so a degenerate viewport can never
+ * spin.
  */
 export function tickTimestamps(
   viewStart: number,
@@ -120,10 +91,10 @@ export function tickTimestamps(
 }
 
 /**
- * Timestamp (ns) -> draw-area-relative x (px), the F2 `nsToX(ns, drawW)`.
- * NO LABEL_W is added: the track canvas already sits after the DOM label
- * gutter, so this is the same expression the lanes/panels use for their
- * canvas-local x (the alignment invariant - see the file header).
+ * Timestamp (ns) -> draw-area-relative x (px). NO LABEL_W is added: the track
+ * canvas already sits after the DOM label gutter, so this is the same
+ * expression the lanes/panels use for their canvas-local x (the alignment
+ * invariant - see the file header).
  */
 export function nsToDrawX(
   ns: number,
@@ -135,12 +106,11 @@ export function nsToDrawX(
   return ((ns - viewStart) / span) * drawW;
 }
 
-// ── Wall-clock resolution (legacy clockOffsetForTimestamp/fmtWallClock) ──
+// ── Wall-clock resolution ────────────────────────────────────────────────
 
 /**
- * The monotonic->wall-clock offset (ns) to apply at timestamp `ns`, ported
- * verbatim from the legacy `clockOffsetForTimestamp`: no anchors -> the
- * whole-trace `clockOffsetNs` (may be null); one anchor -> its fixed
+ * The monotonic->wall-clock offset (ns) to apply at timestamp `ns`: no anchors
+ * -> the whole-trace `clockOffsetNs` (may be null); one anchor -> its fixed
  * offset; many -> the nearest anchor by monotonic time (binary search).
  */
 export function clockOffsetForTimestamp(
@@ -179,8 +149,7 @@ export function clockOffsetForTimestamp(
 
 /**
  * Wall-clock timestamp (ns) for a monotonic `ns`, or null when the trace
- * carries no clock-sync anchor (caller falls back to relative time, exactly
- * as the legacy `fmtWallClock` does).
+ * carries no clock-sync anchor (caller falls back to relative time).
  */
 export function wallClockNs(inputs: AxisInputs, ns: number): number | null {
   const off = clockOffsetForTimestamp(
@@ -191,12 +160,11 @@ export function wallClockNs(inputs: AxisInputs, ns: number): number | null {
   return off == null ? null : ns + off;
 }
 
-// ── Date-qualification amendment (T25) ──────────────────────────────────
+// ── Date qualification ───────────────────────────────────────────────────
 
 /**
  * Whether two wall-clock timestamps (ns) fall on different calendar days in
- * the active tz - the date-prefix trigger. Mirrors T15's
- * `crossesDayBoundary` (features/01 F10) but on ns wall-clock values.
+ * the active tz - the date-prefix trigger.
  */
 export function crossesDayBoundaryNs(
   startWallNs: number,
@@ -220,10 +188,10 @@ export function crossesDayBoundaryNs(
 }
 
 /**
- * Whether the axis should date-qualify its labels for the current view: the
- * amendment applies ONLY in absolute mode with resolvable wall-clock (no
- * anchors -> relative fallback, no calendar day) and only when the visible
- * span crosses a day boundary in the active tz. Computed once per render.
+ * Whether the axis should date-qualify its labels for the current view: only
+ * in absolute mode with resolvable wall-clock (no anchors -> relative
+ * fallback, no calendar day) and only when the visible span crosses a day
+ * boundary in the active tz. Computed once per render.
  */
 export function isDateQualified(
   inputs: AxisInputs,
@@ -237,16 +205,15 @@ export function isDateQualified(
   return crossesDayBoundaryNs(startWall, endWall, inputs.tz === "local");
 }
 
-// ── Label formatting (legacy fmtDuration/fmtWallClock/fmtTs) ─────────────
+// ── Label formatting ─────────────────────────────────────────────────────
 
 function pad2(n: number): string {
   return String(n).padStart(2, "0");
 }
 
 /**
- * Relative offset label with a `+` prefix (legacy `fmtDuration`):
- * s / ms / µs / ns by magnitude. `ns` here is already the offset from the
- * trace start.
+ * Relative offset label with a `+` prefix: s / ms / µs / ns by magnitude.
+ * `ns` here is already the offset from the trace start.
  */
 export function fmtDuration(ns: number): string {
   const v = ns;
@@ -258,9 +225,7 @@ export function fmtDuration(ns: number): string {
 
 /**
  * Wall-clock label for a wall-clock timestamp (ns): "HH:MM:SS", or
- * "MM-DD HH:MM:SS" when `withDate` (the date-qualification amendment), in
- * UTC or the local zone. Mirrors the legacy `fmtWallClock` HH:MM:SS output
- * with the amendment's date prefix bolted on the front.
+ * "MM-DD HH:MM:SS" when `withDate` (date-qualified), in UTC or the local zone.
  */
 export function fmtWallClockLabel(
   wallNs: number,
@@ -278,10 +243,9 @@ export function fmtWallClockLabel(
 }
 
 /**
- * Format one tick's label (legacy `fmtTs` + the amendment). Absolute mode
- * renders wall-clock (date-qualified per `withDate`); with no resolvable
- * anchor it falls back to relative, exactly as the legacy `fmtWallClock`
- * did. `withDate` is precomputed once per render (`isDateQualified`).
+ * Format one tick's label. Absolute mode renders wall-clock (date-qualified
+ * per `withDate`); with no resolvable anchor it falls back to relative.
+ * `withDate` is precomputed once per render (`isDateQualified`).
  */
 export function fmtAxisTick(
   inputs: AxisInputs,
@@ -291,30 +255,28 @@ export function fmtAxisTick(
   if (inputs.timeMode === "abs") {
     const wall = wallClockNs(inputs, ns);
     if (wall != null) return fmtWallClockLabel(wall, inputs.tz === "local", withDate);
-    // No anchor: legacy fmtWallClock falls back to a relative offset.
+    // No anchor: fall back to a relative offset.
   }
   return fmtDuration(ns - inputs.minTs);
 }
 
-// ── Canvas render (features/02 F1) ──────────────────────────────────────
+// ── Canvas render ────────────────────────────────────────────────────────
 
-// Legacy `renderTimeline` colours (viewer.html): axis fill, tick strokes,
-// label text. Kept identical so the migrated axis reads the same.
+// Axis colours: fill, tick strokes, label text.
 const AXIS_BG = "#16213e";
 const TICK_STROKE = "#333";
 const LABEL_FILL = "#888";
 
 /**
  * Render the time axis into `ctx` (already DPR-scaled and sized to
- * `geometry.time.drawW` x `geometry.height`). Draws the F1 ruler: a filled
- * background, a short vertical tick at each auto-picked timestamp, and the
- * `fmtAxisTick` label centred above it. Draw-area-relative x (`nsToDrawX`);
- * the DOM gutter provides the LABEL_W offset (see the file header).
+ * `geometry.time.drawW` x `geometry.height`): a filled background, a short
+ * vertical tick at each auto-picked timestamp, and the `fmtAxisTick` label
+ * centred above it. Draw-area-relative x (`nsToDrawX`); the DOM gutter
+ * provides the LABEL_W offset (see the file header).
  *
  * Called from tracks.ts `sizeTracks` for the "timeline" track, inside the
- * store's frame tick (the one place renders run + layout reads batch, F3).
- * A blank axis is painted before the trace loads / when the panel is too
- * narrow so the slot still reads as a track.
+ * store's frame tick. A blank axis is painted before the trace loads / when
+ * the panel is too narrow so the slot still reads as a track.
  */
 export function renderTimeAxis(
   ctx: CanvasRenderingContext2D,
@@ -339,8 +301,7 @@ export function renderTimeAxis(
   ctx.font = "10px monospace";
   ctx.textAlign = "center";
   ctx.strokeStyle = TICK_STROKE;
-  // Tick marks span the bottom 10px; label baseline sits above them
-  // (legacy: 20->30 tick, label at y=16 in a 30px canvas).
+  // Tick marks span the bottom 10px; label baseline sits above them.
   const tickTop = height - 10;
   const labelY = height - 14;
   for (const t of ticks) {

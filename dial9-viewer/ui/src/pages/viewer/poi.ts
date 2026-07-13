@@ -1,25 +1,12 @@
-// src/pages/viewer/poi.ts - the points-of-interest model behind the issues
-// rail (T33; features/02 section C, 04 S5). The rail replaces the legacy
-// blind "0/74 Next" stepper with a ranked, keyboard-navigable list; this
-// module is the pure, Node-testable data layer under it.
+// The points-of-interest model behind the issues rail: the pure, Node-testable
+// data layer. The POIs come only from the frozen `filterPointsOfInterest`
+// detector set - no new detector is built here. The same output feeds the
+// minimap ticks independently.
 //
-// DETECTOR SOURCE (scope fence): the POIs come ONLY from the frozen
-// `filterPointsOfInterest` detector set (trace_analysis.js), consumed through
-// the lib/trace/analysis seam (T09) - NO new detector is built here. The
-// same output feeds T35's minimap ticks independently (both read this seam;
-// no code dependency either way). The rail-parity DoD is that, with the demo
-// trace + the default filter ("sched") + worst-first, the row COUNT equals
-// the legacy `filterPointsOfInterest(...)` length (the "x/74" the stepper
-// reported) - guaranteed by calling the SAME frozen detector with the SAME
-// inputs, pinned by poi.test.ts.
-//
-// WINDOWING (T17 carried obligation, notes 6+7): the detectors run over the
-// RESIDENT `trace` slice. The viewer shell currently loads WHOLE traces (the
-// segments slice is empty), so the POI set is complete. When segment
-// windowing feeds a partial trace here (T34/T35 wiring), the count is over
-// the resident window only; consumers must not present it as whole-trace
-// truth. That surface is downstream - this module derives over whatever
-// trace is resident, exactly as every other track does.
+// The detectors run over the RESIDENT `trace` slice. Whole-trace loads make
+// the POI set complete; when segment windowing feeds a partial trace, the
+// count is over the resident window only - consumers must not present it as
+// whole-trace truth.
 
 import {
   EVENT_TYPES,
@@ -40,7 +27,7 @@ import type {
 } from "../../types/trace.js";
 import type { PoiSlice, PoiSortKey, ViewportSlice } from "../../types/state.js";
 
-/** The five detector filters, in the legacy `#poi-filter` option order (C2). */
+/** The five detector filters, in `#poi-filter` option order. */
 export const POI_FILTERS: readonly PointOfInterestType[] = [
   "sched",
   "long-poll",
@@ -49,7 +36,7 @@ export const POI_FILTERS: readonly PointOfInterestType[] = [
   "uninstrumented",
 ];
 
-/** The full-length option label for the filter dropdown (legacy C2 text). */
+/** The full-length option label for the filter dropdown. */
 export function filterLabel(type: PointOfInterestType): string {
   switch (type) {
     case "sched":
@@ -65,7 +52,7 @@ export function filterLabel(type: PointOfInterestType): string {
   }
 }
 
-/** The short "what" label shown in a rail row + the red-flags chip (F2). */
+/** The short "what" label shown in a rail row + the red-flags chip. */
 export function kindLabel(type: PointOfInterestType): string {
   switch (type) {
     case "sched":
@@ -81,7 +68,7 @@ export function kindLabel(type: PointOfInterestType): string {
   }
 }
 
-// ── Heavy source, memoized on trace identity (cpu.ts seriesCache precedent) ─
+// ── Heavy source, memoized on trace identity ─────────────────────────────
 
 /**
  * The frame-invariant inputs the detectors need, derived once per loaded
@@ -104,12 +91,10 @@ export interface PoiSource {
 
 const sourceCache = new WeakMap<ParsedTrace, PoiSource>();
 
-/** The worker id SET the detectors iterate, matching the legacy derivation
- *  EXACTLY (viewer.html:1976-1980): every worker seen on a non-queue,
- *  non-wake event. This must equal the legacy set or the detector COUNT
- *  (the rail-parity DoD) diverges. Sorted ascending; the legacy runtime-group
- *  reordering that follows is order-only and never changes the count, so it
- *  is skipped here (the rail applies its own display sort). */
+/** The worker id SET the detectors iterate: every worker seen on a non-queue,
+ *  non-wake event, sorted ascending. Runtime-group reordering is order-only
+ *  and never changes the count, so it is skipped here (the rail applies its
+ *  own display sort). */
 function deriveWorkerIds(trace: ParsedTrace): number[] {
   const set = new Set<number>();
   for (const e of trace.events) {
@@ -138,8 +123,7 @@ export function poiSourceFor(trace: ParsedTrace): PoiSource {
     trace.blockInPlaceGaps,
   );
   const workerSpans = spanResult.workerSpans;
-  // Attach CPU/sched samples so the "cpu-sampled" detector sees them (legacy
-  // ran attachCpuSamples on load before filtering, viewer.html trace setup).
+  // Attach CPU/sched samples so the "cpu-sampled" detector sees them.
   if (trace.cpuSamples.length > 0) {
     attachCpuSamples(trace.cpuSamples, workerSpans);
   }
@@ -162,10 +146,10 @@ export function poiSourceFor(trace: ParsedTrace): PoiSource {
 }
 
 /**
- * The detector output for one filter (features/02 C2), memoized per source.
- * Calls the frozen `filterPointsOfInterest` with `sortByWorst: true` so the
- * base order is worst-first (the legacy default); the rail applies its own
- * display sort on top, which never changes the COUNT (the parity target).
+ * The detector output for one filter, memoized per source. Calls
+ * `filterPointsOfInterest` with `sortByWorst: true` so the base order is
+ * worst-first; the rail applies its own display sort on top, which never
+ * changes the COUNT.
  */
 export function poisForFilter(
   source: PoiSource,
@@ -188,9 +172,8 @@ export function poisForFilter(
   return list;
 }
 
-/** Per-detector counts for the red-flags summary chip (concept-2 toolbar).
- *  Renders the EXISTING detectors' counts - no new detector source (scope
- *  fence). Zero-count detectors are included; the chip filters them out. */
+/** Per-detector counts for the red-flags summary chip. Zero-count detectors
+ *  are included; the chip filters them out. */
 export function redFlagCounts(
   source: PoiSource,
 ): { type: PointOfInterestType; count: number }[] {
@@ -200,7 +183,7 @@ export function redFlagCounts(
   }));
 }
 
-// ── Display sort (04 S5: the four sortable columns) ─────────────────────
+// ── Display sort (the four sortable columns) ─────────────────────────────
 
 /**
  * A stable client-side sort of a filtered POI list by the chosen column. The
@@ -243,12 +226,12 @@ function compareBy(
 
 // ── Row formatting (the rail's four columns + the severity dot) ─────────
 
-/** `W{n}` worker chip label (matches the mock's W0/W1). */
+/** `W{n}` worker chip label. */
 export function workerLabel(worker: number): string {
   return `W${worker}`;
 }
 
-/** `+1.72s` relative-offset time label (the rail's `t` column, mock format). */
+/** `+1.72s` relative-offset time label (the rail's `t` column). */
 export function relTimeLabel(ns: number, minTs: number): string {
   return `+${((ns - minTs) / 1e9).toFixed(2)}s`;
 }
@@ -275,8 +258,8 @@ export function durationLabel(poi: PointOfInterest): string {
   return formatHumanDuration(valueNs(poi));
 }
 
-/** Severity tier for the row dot (mock d-red/d-org/d-yel): the value as a
- *  fraction of the list's peak. Stable regardless of display sort. */
+/** Severity tier for the row dot: the value as a fraction of the list's peak.
+ *  Stable regardless of display sort. */
 export type PoiSeverity = "high" | "med" | "low";
 
 export function severityOf(poi: PointOfInterest, maxValue: number): PoiSeverity {
@@ -294,24 +277,22 @@ export function peakValue(pois: readonly PointOfInterest[]): number {
   return max;
 }
 
-// ── Jump semantics (features/02 C7; legacy jumpToPoi) ───────────────────
+// ── Jump semantics ───────────────────────────────────────────────────────
 
 /** The viewport window + optional task selection a POI jump produces. */
 export interface PoiJump {
   viewStart: number;
   viewEnd: number;
-  /** Task to select (features 02 G6); null when the POI resolves to none. */
+  /** Task to select; null when the POI resolves to none. */
   selectedTaskId: number | null;
 }
 
 /**
- * Center the viewport on a POI, ported verbatim from the legacy `jumpToPoi`
- * (viewer.html:2431-2457): show ~5x the span duration (min 1ms) with 30% left
- * padding, clamped to [minTs, maxTs]. Wake-delay POIs instead frame the full
- * wake->poll window (~3x, 20% pad) and select the delayed task. Other POIs
- * select the poll's task when it has one (features/02 "row click ... selects",
- * 04 S5) - the legacy centered only, but the rail selects so the inspector and
- * lane highlight follow the jump.
+ * Center the viewport on a POI: show ~5x the span duration (min 1ms) with 30%
+ * left padding, clamped to [minTs, maxTs]. Wake-delay POIs instead frame the
+ * full wake->poll window (~3x, 20% pad) and select the delayed task. Other
+ * POIs select the poll's task when it has one, so the inspector and lane
+ * highlight follow the jump.
  */
 export function poiJump(poi: PointOfInterest, vp: ViewportSlice): PoiJump {
   const { minTs, maxTs } = vp;
@@ -339,13 +320,13 @@ function pollTaskId(span: PollSpan | ParkSpan): number | null {
   return null;
 }
 
-// ── Stepping (features/02 C4/C5; legacy Prev/Next semantics) ────────────
+// ── Stepping ─────────────────────────────────────────────────────────────
 
 /**
- * The index the `n`/`p` keys / Prev/Next buttons move to (features 02 C4/C5).
- * Legacy rule: with nothing selected (index -1) and a non-empty list, both
- * directions land on 0; otherwise step by `dir`, clamped to the list. Returns
- * -1 for an empty list (nothing to select).
+ * The index the `n`/`p` keys / Prev/Next buttons move to. With nothing selected
+ * (index -1) and a non-empty list, both directions land on 0; otherwise step
+ * by `dir`, clamped to the list. Returns -1 for an empty list (nothing to
+ * select).
  */
 export function stepIndex(len: number, current: number, dir: 1 | -1): number {
   if (len === 0) return -1;
@@ -375,7 +356,7 @@ export interface PoiViewModel {
   sortDir: "asc" | "desc";
   index: number;
   rows: PoiRow[];
-  /** Total count (the "N/total" position + rail-parity target). */
+  /** Total count (the "N/total" position). */
   total: number;
   /** Per-detector counts for the red-flags summary chip. */
   redFlags: { type: PointOfInterestType; count: number }[];

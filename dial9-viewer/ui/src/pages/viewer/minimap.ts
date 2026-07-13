@@ -1,20 +1,16 @@
-// src/pages/viewer/minimap.ts - the overview minimap canvas component (T35;
-// 04 S8 "no position context"). Fills the shell's `.d9-minimap` slot with a
-// compressed whole-trace overview: TIER-1 density (segment listing extents +
-// aggregate density, per minimap-model), POI ticks (minimap-poi, the same
-// detector source as T33's rail), and a draggable viewport box.
+// The overview minimap canvas component: fills the shell's `.d9-minimap` slot
+// with a compressed whole-trace overview - tier-1 density (segment listing
+// extents + aggregate density), POI ticks, and a draggable viewport box.
 //
-// Store-wired like the lanes/overlay components: it subscribes to the slices
-// the overview depends on (trace / viewport / segments) and redraws its own
-// canvas each frame, INSIDE the store's notification tick (F2). Drag/click on
-// the canvas dispatch a store viewport update (the pure navigation math is in
+// Store-wired: it subscribes to trace / viewport / segments and redraws its own
+// canvas each frame, inside the store's notification tick. Drag/click on the
+// canvas dispatch a store viewport update (the pure navigation math is in
 // minimap-model) - never a direct render. The canvas is (re)ensured every draw
-// so a shell re-render that reconciles the `.d9-minimap` host cannot orphan it
-// (the toast/legend/overlay technique).
+// so a shell re-render that reconciles the `.d9-minimap` host cannot orphan it.
 //
-// Coverage honesty (T17-audit notes 6-7): tier-1-only regions (unfetched /
-// evicted / oversized segments) render in a distinct dimmed style and drive a
-// "partial" badge, so the overview never presents a windowed tail as whole.
+// Coverage honesty: tier-1-only regions (unfetched / evicted / oversized
+// segments) render in a distinct dimmed style and drive a "partial" badge, so
+// the overview never presents a windowed tail as whole.
 
 import type { ViewerStore } from "../../store/store.js";
 import type { StoreState } from "../../types/state.js";
@@ -54,10 +50,9 @@ const BOX_BORDER = "#8f88ff";
 
 export interface MinimapDeps {
   /**
-   * Aggregate density supplier (T18 client). Returns null when no aggregate
-   * data is wired (the current viewer path) - the model then falls back to
-   * listing-metadata / whole-trace density. Kept a seam so a later scope-aware
-   * ticket can feed real aggregates without touching the component.
+   * Aggregate density supplier. Returns null when no aggregate data is wired -
+   * the model then falls back to listing-metadata / whole-trace density. Kept
+   * a seam so aggregates can be fed later without touching the component.
    */
   aggregate?(): AggregateDensity | null;
 }
@@ -67,7 +62,7 @@ export interface MountedMinimap {
   dispose(): void;
 }
 
-/** Dispatch a viewport window to the store (the navigation commit, F2). */
+/** Dispatch a viewport window to the store (the navigation commit). */
 export function minimapNavigate(
   store: ViewerStore,
   range: MinimapRange,
@@ -95,7 +90,7 @@ export function mountMinimap(
   const doc = region.ownerDocument;
 
   // Frame-invariant derivations, recomputed only when the trace slice is
-  // replaced (F5): POI ticks and the whole-trace event histogram.
+  // replaced: POI ticks and the whole-trace event histogram.
   const pois = store.derived(["trace"], (s): MinimapPoi[] =>
     s.trace.trace ? deriveMinimapPois(s.trace.trace) : [],
   );

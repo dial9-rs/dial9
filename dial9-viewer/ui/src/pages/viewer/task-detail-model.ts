@@ -1,33 +1,25 @@
-// src/pages/viewer/task-detail-model.ts - the task-detail track's PURE
-// derivation + per-frame render model (T30; features/02 section N; legacy
-// renderTaskDetail in viewer.html:4358-4713). No store, no DOM, no canvas:
-// every function is referentially transparent so the track component
-// (task-detail-track.ts) can cache the SELECTION-keyed collection in a store
-// `derived()` (perf finding F5 - renderTaskDetail re-collected+sorted every
-// poll of the task on EVERY frame) and unit-test the numbers directly (the
-// DoD's "task numbers exact vs legacy" check).
+// The task-detail track's pure derivation + per-frame render model. No store, no
+// DOM, no canvas - every function is referentially transparent.
 //
-// The split mirrors F5's two tiers + the hybrid track/inspector decision:
-//   1. computeTaskDetailData(source, trace, taskId) - SELECTION-invariant
-//      given the selected task: collect the task's polls across all workers
-//      (sorted by start), its wakes, the per-poll wake match (computePollWakes,
-//      O(P logP)), the lifetime/spawn/terminate numbers (N2), the waker labels
-//      (N7), and the task-dump references (N4/N11). This is BOTH the timeline
-//      track's input AND the data T31's inspector Task tab renders (the hybrid
-//      split: this file owns the derivation, T31 owns the textual tab). Cached
-//      in a store `derived(["trace","selection"], ...)` - selection change
-//      invalidates, PAN does not (the explicit DoD).
-//   2. buildTaskDetailRenderModel(...) - VIEWPORT-dependent: the visible poll
-//      window, wake->poll delay bands (N6), poll bars / coverage histogram
-//      (N10), idle gaps (N11), the lifespan bar (N9), and the hit/wake regions
-//      the interaction layer reads (N5 status, N8 waker hover/click). Pure and
-//      cheap enough to memoize on its primitive inputs so a hover-only redraw
-//      (the G8 waker highlight) never re-walks the collection.
+// Two tiers:
+//   1. computeTaskDetailData(source, trace, taskId) - selection-invariant given
+//      the selected task: collect the task's polls across all workers (sorted by
+//      start), its wakes, the per-poll wake match (computePollWakes), the
+//      lifetime/spawn/terminate numbers, the waker labels, and the task-dump
+//      references. This is both the timeline track's input and the data the
+//      inspector Task tab renders. Cached in a store
+//      `derived(["trace","selection"], ...)` - a selection change invalidates, a
+//      pan does not.
+//   2. buildTaskDetailRenderModel(...) - viewport-dependent: the visible poll
+//      window, wake->poll delay bands, poll bars / coverage histogram, idle
+//      gaps, the lifespan bar, and the hit/wake regions the interaction layer
+//      reads. Memoized on its primitive inputs so a hover-only redraw never
+//      re-walks the collection.
 //
-// T17 obligation (audit notes 6+7): a segment-windowed collection can be
-// missing the task's polls beyond the resident window. The render carries a
-// TaskDetailWindow descriptor and surfaces a truncated/oversized window rather
-// than presenting a clipped poll list as the task's whole history.
+// A segment-windowed collection can be missing the task's polls beyond the
+// resident window. The render carries a TaskDetailWindow descriptor and surfaces
+// a truncated/oversized window rather than presenting a clipped poll list as the
+// task's whole history.
 
 import {
   EVENT_TYPES,
@@ -50,15 +42,15 @@ import { pixelCoverage } from "../../lib/canvas/index.js";
 /**
  * The per-worker poll lanes + wake index the task-detail collection reads,
  * derived once per trace (buildWorkerSpans scans every event). The component
- * wraps this in a store `derived(["trace"], ...)` so it is NOT rebuilt when
- * the selected task or the viewport changes (F5).
+ * wraps this in a store `derived(["trace"], ...)` so it is NOT rebuilt when the
+ * selected task or the viewport changes.
  */
 export interface TaskPollSource {
   /** Distinct runtime worker ids (render order irrelevant here). */
   workerIds: readonly number[];
   /** Reconstructed poll/park/active spans per worker. */
   workerSpans: Record<number, WorkerLane>;
-  /** Wake events indexed by woken task (legacy wakesByTask). */
+  /** Wake events indexed by woken task. */
   wakesByTask: Record<number, TaskWake[]>;
 }
 
@@ -70,12 +62,11 @@ export const EMPTY_TASK_POLL_SOURCE: TaskPollSource = {
 };
 
 /**
- * The distinct worker ids in a trace, in runtime-group order (mirrors the
- * lanes' deriveWorkerIds without coupling to that module): scan non-queue,
- * non-wake events for the worker set, then reorder by runtime groups. Only
- * the SET and its COUNT matter for task-detail (poll collection + the "io"
- * waker discriminant, legacy line 4534), but the grouped order is kept so the
- * count matches the legacy `workerIds.length` exactly.
+ * The distinct worker ids in a trace, in runtime-group order (mirrors the lanes'
+ * deriveWorkerIds without coupling to that module): scan non-queue, non-wake
+ * events for the worker set, then reorder by runtime groups. Only the SET and
+ * its COUNT matter for task-detail (poll collection + the "io" waker
+ * discriminant), but the grouped order is kept.
  */
 export function collectWorkerIds(trace: ParsedTrace): number[] {
   const set = new Set<number>();
@@ -114,57 +105,57 @@ export function buildTaskPollSource(trace: ParsedTrace | null): TaskPollSource {
   };
 }
 
-// ── Per-task detail data (selection-keyed; N2/N4/N6-N9) ───────────────────
+// ── Per-task detail data (selection-keyed) ────────────────────────────────
 
 /**
- * One poll's matched wake (legacy computePollWakes entry) plus the resolved
- * waker LABEL (N7), precomputed here because it depends only on the trace +
- * wake (viewport-invariant) - so the per-frame render model never re-resolves
- * spawn locations while panning.
+ * One poll's matched wake (computePollWakes entry) plus the resolved waker
+ * label, precomputed here because it depends only on the trace + wake
+ * (viewport-invariant) - so the per-frame render model never re-resolves spawn
+ * locations while panning.
  */
 export interface PollWakeInfo {
   wake: TaskWake;
   /** The wake time bumped past an earlier poll that contained it. */
   effectiveWake: number;
-  /** N7 label: "io" for runtime/worker wakes, else spawn filename / hex id. */
+  /** Label: "io" for runtime/worker wakes, else spawn filename / hex id. */
   wakerLabel: string;
 }
 
 /**
- * Everything about ONE selected task that does NOT depend on the viewport -
- * the timeline track's input AND the data T31's inspector Task tab renders
- * (the hybrid split). Cached in a store `derived(["trace","selection"], ...)`.
+ * Everything about ONE selected task that does NOT depend on the viewport - the
+ * timeline track's input AND the data the inspector Task tab renders. Cached in
+ * a store `derived(["trace","selection"], ...)`.
  */
 export interface TaskDetailData {
   /** The selected task, or null when nothing is selected. */
   taskId: number | null;
-  /** All polls for the task across every worker, sorted by start (N10). */
+  /** All polls for the task across every worker, sorted by start. */
   polls: readonly PollSpan[];
-  /** The task's wake events (N2 wake count source). */
+  /** The task's wake events (wake count source). */
   wakes: readonly TaskWake[];
-  /** Per-poll wake match + resolved label, parallel to `polls` (N6/N7). */
+  /** Per-poll wake match + resolved label, parallel to `polls`. */
   pollWakes: readonly (PollWakeInfo | null)[];
-  /** Poll count (N2). */
+  /** Poll count. */
   pollCount: number;
-  /** Wake count (N2; shown only when instrumented). */
+  /** Wake count (shown only when instrumented). */
   wakeCount: number;
-  /** Resolved spawn location string for the task, or null (N2). */
+  /** Resolved spawn location string for the task, or null. */
   spawnLocation: string | null;
-  /** False for tasks spawned via raw tokio::spawn (N3 badge). */
+  /** False for tasks spawned via raw tokio::spawn. */
   isInstrumented: boolean;
-  /** Spawn timestamp (ns), or null when untracked (N9). */
+  /** Spawn timestamp (ns), or null when untracked. */
   spawnTs: number | null;
-  /** Terminate timestamp (ns), or null when the task did not finish (N9). */
+  /** Terminate timestamp (ns), or null when the task did not finish. */
   terminateTs: number | null;
-  /** True when a terminate time exists (the N2 completion mark). */
+  /** True when a terminate time exists (the completion mark). */
   hasTerminate: boolean;
-  /** terminate - spawn (ns), or null when either is missing (N2 lifetime). */
+  /** terminate - spawn (ns), or null when either is missing. */
   lifetimeNs: number | null;
-  /** Async-stack captures for the task, sorted by ts (N4 count, N11 stacks). */
+  /** Async-stack captures for the task, sorted by ts. */
   taskDumps: readonly TaskDump[];
-  /** Distinct worker count (the "io" waker discriminant, N7). */
+  /** Distinct worker count (the "io" waker discriminant). */
   workerIdCount: number;
-  /** True once the task has >= 1 poll - the N1 track-visibility predicate. */
+  /** True once the task has >= 1 poll - the track-visibility predicate. */
   hasPolls: boolean;
 }
 
@@ -188,10 +179,9 @@ export const EMPTY_TASK_DETAIL_DATA: TaskDetailData = {
 };
 
 /**
- * Resolve the waker label for a wake's `wakerTaskId` (legacy renderTaskDetail
- * viewer.html:4531-4540): runtime/worker wakes (falsy, 0, or in the worker-id
- * range) show "io"; otherwise the waker task's spawn filename, falling back to
- * its hex id.
+ * Resolve the waker label for a wake's `wakerTaskId`: runtime/worker wakes
+ * (falsy, 0, or in the worker-id range) show "io"; otherwise the waker task's
+ * spawn filename, falling back to its hex id.
  */
 export function wakerLabelFor(
   wakerTaskId: number,
@@ -214,12 +204,11 @@ export function wakerLabelFor(
 }
 
 /**
- * Collect the selection-keyed detail for `taskId`. Ports the legacy
- * renderTaskDetail collection (viewer.html:4366-4411) EXACTLY: gather the
- * task's polls across every worker and sort by start; match wakes with the
- * frozen-core computePollWakes; read the N2 numbers from the trace's task
- * maps. Returns EMPTY_TASK_DETAIL_DATA when nothing is selected or the task
- * has no polls (the N1 "hide on deselect / no polls" contract).
+ * Collect the selection-keyed detail for `taskId`: gather the task's polls
+ * across every worker and sort by start; match wakes with computePollWakes; read
+ * the numbers from the trace's task maps. Returns EMPTY_TASK_DETAIL_DATA when
+ * nothing is selected or the task has no polls (the "hide on deselect / no
+ * polls" contract).
  */
 export function computeTaskDetailData(
   source: TaskPollSource,
@@ -228,8 +217,7 @@ export function computeTaskDetailData(
 ): TaskDetailData {
   if (taskId === null || trace === null) return EMPTY_TASK_DETAIL_DATA;
 
-  // Collect all polls for this task across all workers, sorted by start
-  // (legacy 4367-4373).
+  // Collect all polls for this task across all workers, sorted by start.
   const polls: PollSpan[] = [];
   for (const w of source.workerIds) {
     const lane = source.workerSpans[w];
@@ -287,12 +275,10 @@ export function computeTaskDetailData(
 }
 
 /**
- * The N2 label as PLAIN text (task id, spawn location, poll count, wake count
- * when instrumented, lifetime, completion mark). Ported from the legacy
- * labelHtml assembly (viewer.html:4397-4403) MINUS the HTML badges/links (N3
- * badge and N4 flamegraph link are T31's inspector surface). The numbers here
- * are the DoD's exact behavioral-diff target; T31 renders the rich version
- * from the same TaskDetailData.
+ * The label as PLAIN text (task id, spawn location, poll count, wake count when
+ * instrumented, lifetime, completion mark), minus the HTML badges/links (the
+ * uninstrumented badge and flamegraph link are the inspector's surface, rendered
+ * from the same TaskDetailData).
  */
 export function formatTaskDetailSummary(data: TaskDetailData): string {
   if (data.taskId === null) return "";
@@ -307,16 +293,16 @@ export function formatTaskDetailSummary(data: TaskDetailData): string {
   return out;
 }
 
-// ── Per-frame render model (viewport-dependent; N6-N12) ───────────────────
+// ── Per-frame render model (viewport-dependent) ───────────────────────────
 
-/** Band vertical placement (legacy bandTop / bandH constants). */
+/** Band vertical placement. */
 export const BAND_TOP = 50;
 export const BAND_H = 30;
 
-/** Delay severity (legacy delayUs thresholds): green / orange / red. */
+/** Delay severity: green / orange / red. */
 export type WakeSeverity = "low" | "mid" | "high";
 
-/** A wake->poll scheduling-delay band (N6) + its waker label (N7). */
+/** A wake->poll scheduling-delay band + its waker label. */
 export interface WakeBand {
   /** Draw-area-relative x of the effective-wake edge (px). */
   x1: number;
@@ -326,13 +312,13 @@ export interface WakeBand {
   severity: WakeSeverity;
   wakerTaskId: number;
   wakerLabel: string;
-  /** N6 duration label shown only when the band is wider than 25px. */
+  /** Duration label shown only when the band is wider than 25px. */
   showDelayLabel: boolean;
-  /** N7 waker label shown (and clickable) only when wider than 40px. */
+  /** Waker label shown (and clickable) only when wider than 40px. */
   showWakerLabel: boolean;
 }
 
-/** A cyan poll bar (N10; per-poll regime). */
+/** A cyan poll bar (per-poll regime). */
 export interface PollBar {
   x1: number;
   x2: number;
@@ -341,20 +327,20 @@ export interface PollBar {
   showLabel: boolean;
 }
 
-/** An idle gap between consecutive polls (N11). */
+/** An idle gap between consecutive polls. */
 export interface IdleBand {
   x1: number;
   x2: number;
   durationNs: number;
   /** True when a task dump was captured for this gap (cross-hatch + purple). */
   hasDump: boolean;
-  /** The captured dumps (N11 stack; T31/T32 build the flamegraph from them). */
+  /** The captured dumps (the inspector/flamegraph surface builds from them). */
   dumps: readonly TaskDump[];
   /** Duration label shown only when wider than 35px. */
   showLabel: boolean;
 }
 
-/** The task lifespan bar (N9), spawn -> terminate. */
+/** The task lifespan bar, spawn -> terminate. */
 export interface LifespanBar {
   x1: number;
   x2: number;
@@ -364,20 +350,20 @@ export interface LifespanBar {
   showDone: boolean;
 }
 
-/** A hover status hit region (N5): polling / scheduled / idle. */
+/** A hover status hit region: polling / scheduled / idle. */
 export type HitType = "polling" | "scheduled" | "idle";
 
 export interface HitRegion {
   x1: number;
   x2: number;
   type: HitType;
-  /** The N5 status text (without the leading icon). */
+  /** The status text (without the leading icon). */
   detail: string;
-  /** Present only on idle regions with captured dumps (N11 click target). */
+  /** Present only on idle regions with captured dumps (click target). */
   dumps: readonly TaskDump[] | null;
 }
 
-/** A waker-label hover/click region (N8). */
+/** A waker-label hover/click region. */
 export interface WakeRegion {
   x1: number;
   x2: number;
@@ -388,23 +374,22 @@ export interface WakeRegion {
 
 /**
  * The full per-frame render input for the task-detail canvas + interaction.
- * Draw geometry is draw-area-relative (0..drawW) - the track canvas sits
- * AFTER the shared LABEL_W DOM gutter, so unlike legacy no LABEL_W is added
- * (the A13 alignment shift every migrated track makes).
+ * Draw geometry is draw-area-relative (0..drawW) - the track canvas sits AFTER
+ * the shared LABEL_W DOM gutter, so no LABEL_W is added to the coordinates.
  */
 export interface TaskDetailRenderModel {
   wakeBands: readonly WakeBand[];
   /** Per-poll bars (empty when the coverage histogram is used instead). */
   pollBars: readonly PollBar[];
-  /** N10 per-pixel coverage (opacity 0..1 per column); null in per-poll mode. */
+  /** Per-pixel coverage (opacity 0..1 per column); null in per-poll mode. */
   coverage: Float64Array | null;
   /** Count of polls overlapping the view (drives the coverage vs bars choice). */
   visiblePolls: number;
   idleBands: readonly IdleBand[];
   lifespan: LifespanBar | null;
-  /** Status hit regions, in the legacy first-match-wins order. */
+  /** Status hit regions, in first-match-wins order. */
   hitRegions: readonly HitRegion[];
-  /** Waker hover/click regions (N8). */
+  /** Waker hover/click regions. */
   wakeRegions: readonly WakeRegion[];
 }
 
@@ -430,9 +415,8 @@ export interface TaskDetailRenderOpts {
 
 /**
  * First index in `polls` (sorted by start, non-overlapping) whose `end` is
- * >= viewStart - the left bound of the visible window (legacy findFirstVisible,
- * viewer.html:2704-2716). Binary searched so a task polled millions of times
- * never walks the whole array's head per frame.
+ * >= viewStart - the left bound of the visible window. Binary searched so a task
+ * polled millions of times never walks the whole array's head per frame.
  */
 export function firstVisibleByEnd(
   polls: readonly PollSpan[],
@@ -456,12 +440,10 @@ function severityOf(delayNs: number): WakeSeverity {
 }
 
 /**
- * Build the per-frame render model, porting renderTaskDetail's geometry
- * (viewer.html:4466-4704) into pure data: wake->poll delay bands (N6/N7), the
- * lifespan bar (N9), poll bars OR the coverage histogram (N10), and idle gaps
- * with their dump lookup (N11). Draw-area-relative coordinates. Hit regions
- * are emitted in the legacy scheduled -> polling -> idle order so the
- * first-match-wins status lookup (N5) matches exactly.
+ * Build the per-frame render model: wake->poll delay bands, the lifespan bar,
+ * poll bars OR the coverage histogram, and idle gaps with their dump lookup.
+ * Draw-area-relative coordinates. Hit regions are emitted in scheduled ->
+ * polling -> idle order so the first-match-wins status lookup matches.
  */
 export function buildTaskDetailRenderModel(
   opts: TaskDetailRenderOpts,
@@ -481,7 +463,7 @@ export function buildTaskDetailRenderModel(
   const wakeRegions: WakeRegion[] = [];
   let lifespan: LifespanBar | null = null;
 
-  // ── Wake->poll delay bands (N6) + waker labels (N7) ──────────────────
+  // ── Wake->poll delay bands + waker labels ────────────────────────────
   for (let i = 0; i < polls.length; i++) {
     const pw = pollWakes[i];
     if (pw == null) continue;
@@ -521,7 +503,7 @@ export function buildTaskDetailRenderModel(
     }
   }
 
-  // ── Task lifespan bar (N9) ───────────────────────────────────────────
+  // ── Task lifespan bar ────────────────────────────────────────────────
   if (data.hasTerminate && data.spawnTs != null && data.terminateTs != null) {
     const lifeStart = data.spawnTs;
     const lifeEnd = data.terminateTs;
@@ -535,8 +517,8 @@ export function buildTaskDetailRenderModel(
     }
   }
 
-  // ── Polling sections (N10): per-poll bars, or a coverage histogram when
-  //    there are more polls than pixels (legacy 4590-4644) ───────────────
+  // ── Polling sections: per-poll bars, or a coverage histogram when there are
+  //    more polls than pixels ─────────────────────────────────────────────
   const pollStartIdx = firstVisibleByEnd(polls, viewStart);
   let visiblePolls = 0;
   for (let i = pollStartIdx; i < polls.length; i++) {
@@ -578,7 +560,7 @@ export function buildTaskDetailRenderModel(
     }
   }
 
-  // ── Idle gaps between consecutive polls (N11) ────────────────────────
+  // ── Idle gaps between consecutive polls ──────────────────────────────
   const dumps = data.taskDumps;
   let dumpIdx = 0;
   for (let i = 0; i < polls.length - 1; i++) {
@@ -598,9 +580,9 @@ export function buildTaskDetailRenderModel(
     const w = Math.max(x2 - x1, 0);
     if (w < 1) continue;
 
-    // Dump lookup (legacy 4664-4675): dumps captured during poll[i-1] describe
-    // what the task waits on during THIS gap. `dumps` is sorted by ts and the
-    // cursor advances monotonically across the outer loop.
+    // Dump lookup: dumps captured during poll[i-1] describe what the task waits
+    // on during THIS gap. `dumps` is sorted by ts and the cursor advances
+    // monotonically across the outer loop.
     const gapDumps: TaskDump[] = [];
     const prevPollStart = i > 0 ? polls[i - 1]!.start : polls[i]!.start;
     while (dumpIdx < dumps.length && dumps[dumpIdx]!.timestamp < prevPollStart) {
@@ -646,9 +628,9 @@ export function buildTaskDetailRenderModel(
   };
 }
 
-// ── N5 status text (icon + detail) ────────────────────────────────────────
+// ── Status text (icon + detail) ───────────────────────────────────────────
 
-/** The N5 status icon for a hit type (legacy line 6605). */
+/** The status icon for a hit type. */
 export function hitIcon(type: HitType): string {
   if (type === "polling") return "⚡"; // lightning
   if (type === "scheduled") return "⏳"; // hourglass
@@ -656,9 +638,9 @@ export function hitIcon(type: HitType): string {
 }
 
 /**
- * The N5 status readout for a pointer at (mx, my): the first hit region
- * containing the point (first-match-wins, legacy 6596-6606), rendered as
- * `<icon> <detail>`, or "" when the pointer is over no region.
+ * The status readout for a pointer at (mx, my): the first hit region containing
+ * the point (first-match-wins), rendered as `<icon> <detail>`, or "" when the
+ * pointer is over no region.
  */
 export function statusTextAt(
   model: TaskDetailRenderModel,
@@ -669,7 +651,7 @@ export function statusTextAt(
   return hit === null ? "" : `${hitIcon(hit.type)} ${hit.detail}`;
 }
 
-/** The first status hit region under (mx, my), or null (N5). */
+/** The first status hit region under (mx, my), or null. */
 export function hitRegionAt(
   model: TaskDetailRenderModel,
   mx: number,
@@ -682,7 +664,7 @@ export function hitRegionAt(
   return null;
 }
 
-/** The first waker region under (mx, my), or null (N8). */
+/** The first waker region under (mx, my), or null. */
 export function wakeRegionAt(
   model: TaskDetailRenderModel,
   mx: number,
@@ -694,13 +676,13 @@ export function wakeRegionAt(
   return null;
 }
 
-// ── T17 windowing descriptor (carried obligation, audit notes 6+7) ────────
+// ── Windowing descriptor ──────────────────────────────────────────────────
 
 /**
  * The resident-data-window state the task-detail renderer must surface so a
  * segment-windowed poll list is never presented as the task's whole history.
- * Resolves to the "complete" value for a whole-trace load (the shell's current
- * path; the segments slice is empty). Mirrors the CPU track's CpuWindow.
+ * Resolves to the "complete" value for a whole-trace load (the segments slice is
+ * empty). Mirrors the CPU track's CpuWindow.
  */
 export interface TaskDetailWindow {
   /** Which edge(s) of the resident window truncate the poll data. */

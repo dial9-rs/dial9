@@ -1,18 +1,8 @@
-// src/pages/viewer/inspector-model.ts - the persistent inspector's PURE
-// derivations (T31; features/02 sections P/Q/R). NODE-TESTABLE: no store, no
-// DOM, no lit-html - every function is referentially transparent so the
-// inspector component (inspector.ts) renders from these and the numbers/rows
-// behavioral-diff against legacy directly (the DoD's "Poll Detail exactly as
-// legacy" + the Q/R row-walker).
-//
-// The split mirrors the rest of the viewer (task-detail-model, queue-model,
-// events-model): this file owns the derivation; inspector.ts owns the tab
-// framework, the imperative render, and the P-row mechanics (resize/persist,
-// tab families, Esc/clear). Legacy sources ported verbatim minus the DOM:
-//   - Poll Detail (R1/R2): showStackPopup (viewer.html:5455-5538).
-//   - Event detail (Q1): eventDetailHtml (viewer.html:3976-4006).
-//   - Related (Q4-Q8): relatedHtml (viewer.html:4044-4167).
-//   - Spawned-tasks (M7/M8): computeSpawnedTasks (queue-model, T29) formatted.
+// The persistent inspector's PURE derivations: no store, no DOM, no lit-html -
+// every function is referentially transparent so the inspector component
+// renders from these. This file owns the derivation (Poll Detail, Event,
+// Related, Spawned-tasks); inspector.ts owns the tab framework, the imperative
+// render, and the P-row mechanics.
 
 import {
   deduplicateSamples,
@@ -32,15 +22,15 @@ import type {
 } from "../../lib/trace/index.js";
 import type { PinnedCustomEvent, SelectionSlice } from "../../types/state.js";
 
-// ── Frame formatting (legacy renderFrame, viewer.html:1025-1029) ──────────
+// ── Frame formatting ─────────────────────────────────────────────────────
 
-/** A display frame: text plus an optional docs.rs link (legacy renderFrame). */
+/** A display frame: text plus an optional docs.rs link. */
 export interface FrameLine {
   text: string;
   docsUrl: string | null;
 }
 
-/** Format a symbolized frame for the inspector (formatFrame, no HTML). */
+/** Format a symbolized frame for the inspector (no HTML). */
 export function frameLine(
   frame: SymbolFrame,
   callframeSymbols?: CallframeSymbols,
@@ -49,30 +39,30 @@ export function frameLine(
   return { text: f.text, docsUrl: f.docsUrl };
 }
 
-// ── Poll Detail (R1/R2): showStackPopup, deduped sample groups ────────────
+// ── Poll Detail: deduped sample groups ────────────────────────────────────
 
-/** One deduplicated sample group as the inspector renders it (R1/R2). */
+/** One deduplicated sample group as the inspector renders it. */
 export interface SampleGroupView {
-  /** Occurrence count (legacy `g.count`). */
+  /** Occurrence count. */
   count: number;
-  /** Percent of this section's samples (legacy `(count/total*100).toFixed(0)`). */
+  /** Percent of this section's samples. */
   pct: number;
-  /** Leaf frame text (legacy `g.leaf`). */
+  /** Leaf frame text. */
   leaf: string;
-  /** Summary bar width in px (legacy `Math.max(2, ratio*200)`; sched only). */
+  /** Summary bar width in px (sched only). */
   barW: number;
-  /** The context frames shown by default (legacy `frames.slice(...,3)`). */
+  /** The context frames shown by default (first three). */
   headFrames: FrameLine[];
-  /** Frames beyond the first three, revealed by the R2 expand toggle. */
+  /** Frames beyond the first three, revealed by the expand toggle. */
   moreFrames: FrameLine[];
 }
 
-/** The Poll Detail tab view (R1): title + sched groups (red) + cpu groups. */
+/** The Poll Detail tab view: title + sched groups (red) + cpu groups. */
 export interface PollDetailView {
   durationLabel: string;
   cpuCount: number;
   schedCount: number;
-  /** Legacy title `Poll <dur>[ · N CPU samples][ · N sched events]`. */
+  /** Title `Poll <dur>[ · N CPU samples][ · N sched events]`. */
   title: string;
   /** Deduplicated blocking-sched groups (red); empty when none. */
   schedGroups: SampleGroupView[];
@@ -95,7 +85,7 @@ function groupViews(
       pct: Math.round(ratio * 100),
       leaf: g.leaf,
       barW: withBar ? Math.max(2, ratio * 200) : 0,
-      // Sched context is frames[0..3]; CPU context is frames[1..3] (legacy).
+      // Sched context is frames[0..3]; CPU context is frames[1..3].
       headFrames: frames
         .slice(headStart, 3)
         .map((f) => frameLine(f, callframeSymbols)),
@@ -108,11 +98,10 @@ function groupViews(
 }
 
 /**
- * Build the Poll Detail view for a clicked poll (R1/R2). Ports showStackPopup
- * (viewer.html:5455-5538): title, deduplicated blocking-sched groups (leaf +
- * first three frames, expandable), then the same treatment for CPU samples
- * (context starts at frame 1, no summary bar). Percentages are section-local
- * (sched vs cpu), matching legacy.
+ * Build the Poll Detail view for a clicked poll: title, deduplicated
+ * blocking-sched groups (leaf + first three frames, expandable), then the same
+ * treatment for CPU samples (context starts at frame 1, no summary bar).
+ * Percentages are section-local (sched vs cpu).
  */
 export function buildPollDetail(
   poll: PollSpan,
@@ -150,30 +139,30 @@ export function buildPollDetail(
   return { durationLabel, cpuCount, schedCount, title, schedGroups, cpuGroups };
 }
 
-// ── Event detail (Q1/Q2/Q3): eventDetailHtml ──────────────────────────────
+// ── Event detail ──────────────────────────────────────────────────────────
 
-/** One key/value detail row; `corrVal` non-null offers the Q3 correlation. */
+/** One key/value detail row; `corrVal` non-null offers correlation. */
 export interface KvRow {
   key: string;
   /** Display value (unit-formatted for a single event). */
   value: string;
-  /** The raw value to correlate on (Q3), or null when correlation is offered
+  /** The raw value to correlate on, or null when correlation is offered
    *  nowhere (cluster rows, the `@`/`Task` rows, or a value unique to one
    *  event). */
   corrVal: string | null;
 }
 
-/** The Event tab view (Q1): kv rows + the resolved task (single or cluster). */
+/** The Event tab view: kv rows + the resolved task (single or cluster). */
 export interface EventDetailView {
-  /** Sidebar title (P3): event name (single) or `Cluster · N events`. */
+  /** Sidebar title: event name (single) or `Cluster · N events`. */
   title: string;
   rows: KvRow[];
   taskId: number | null;
-  /** True for a single-event pin: enables the Related tab (Q4 CONDITIONAL). */
+  /** True for a single-event pin: enables the Related tab. */
   isSingle: boolean;
 }
 
-/** How many events carry `key === String(val)` (legacy eventsWithField). */
+/** How many events carry `key === String(val)`. */
 function countWithField(
   events: readonly CustomTraceEvent[],
   key: string,
@@ -186,7 +175,7 @@ function countWithField(
   return n;
 }
 
-/** Most-frequent-first "name ×N" list (legacy topNames), for cluster types. */
+/** Most-frequent-first "name ×N" list, for cluster types. */
 export function topEventNames(
   events: readonly CustomTraceEvent[],
   limit = 5,
@@ -201,12 +190,11 @@ export function topEventNames(
 }
 
 /**
- * Build the Event tab view for a pinned custom event (Q1). Ports
- * eventDetailHtml (viewer.html:3976-4006): a single event lists its
+ * Build the Event tab view for a pinned custom event: a single event lists its
  * unit-formatted fields (correlation offered only when another event shares
- * the value, Q3) plus its timestamp; a cluster lists count / top types / the
+ * the value) plus its timestamp; a cluster lists count / top types / the
  * timestamp range. The resolved task appends a `Task` row. `allEvents` is the
- * full custom-event stream for the Q3 correlation-availability check.
+ * full custom-event stream for the correlation-availability check.
  */
 export function buildEventDetail(
   pinned: PinnedCustomEvent,
@@ -248,31 +236,31 @@ export function buildEventDetail(
   return { title, rows, taskId: pinned.taskId, isSingle };
 }
 
-// ── Related (Q4-Q8): relatedHtml ──────────────────────────────────────────
+// ── Related ───────────────────────────────────────────────────────────────
 
 export const RELATED_INITIAL = 5;
 export const RELATED_STEP = 25;
 
-/** A clickable Related row target (Q7): navigate to a span or pin an event. */
+/** A clickable Related row target: navigate to a span or pin an event. */
 export type RelatedTarget =
   | { kind: "span"; spanId: string }
   | { kind: "event"; event: CustomTraceEvent };
 
-/** One rendered Related row (Q4/Q7). */
+/** One rendered Related row. */
 export interface RelatedRow {
   /** Row label text (event name / span name / relabelled). */
   name: string;
-  /** Right-aligned time/delta text (Q4 r-delta or span r-time). */
+  /** Right-aligned time/delta text. */
   aside: string;
   /** Left pad in px (enclosing-spans indent by depth). */
   padPx: number;
-  /** The self ("this event") anchor row is non-navigable (Q7). */
+  /** The self ("this event") anchor row is non-navigable. */
   self: boolean;
   /** Click target; null for the self row. */
   target: RelatedTarget | null;
 }
 
-/** A per-direction "load more" affordance (Q6). */
+/** A per-direction "load more" affordance. */
 export interface RelatedLoadMore {
   dir: "before" | "after";
   /** How many rows this click reveals (min(STEP, hidden)). */
@@ -281,49 +269,49 @@ export interface RelatedLoadMore {
   hidden: number;
 }
 
-/** One Related section (Q4/Q5): collapsible, windowed (Q6). */
+/** One Related section: collapsible, windowed. */
 export interface RelatedSection {
   /** Stable title key (also the relatedCollapsed / relatedExpand map key). */
   title: string;
   /** Count shown in the header (null = no count, e.g. unresolved task). */
   count: number | null;
   collapsed: boolean;
-  /** Empty-state placeholder text (Q8), or null when the section has rows. */
+  /** Empty-state placeholder text, or null when the section has rows. */
   empty: string | null;
   loadBefore: RelatedLoadMore | null;
   rows: RelatedRow[];
   loadAfter: RelatedLoadMore | null;
 }
 
-/** Per-section grow state (Q6): extra rows revealed before/after the anchor. */
+/** Per-section grow state: extra rows revealed before/after the anchor. */
 export interface RelatedExpandState {
   before: number;
   after: number;
 }
 
-/** The Related tab UI state the component owns; the model reads it (Q5/Q6). */
+/** The Related tab UI state the component owns; the model reads it. */
 export interface RelatedUiState {
-  /** Explicit collapse choices by section title (tri-state; Q5). */
+  /** Explicit collapse choices by section title (tri-state). */
   collapsed: Readonly<Record<string, boolean>>;
-  /** Per-section grow counters (Q6). */
+  /** Per-section grow counters. */
   expand: Readonly<Record<string, RelatedExpandState>>;
-  /** The Q3 correlation field, or null (set by clicking a correlation button). */
+  /** The correlation field, or null (set by clicking a correlation button). */
   correlate: { key: string; val: string } | null;
 }
 
-/** The full Related tab view (Q4). */
+/** The full Related tab view. */
 export interface RelatedView {
   sections: RelatedSection[];
 }
 
-/** Context the Related derivation reads (trace-invariant, F5-cached). */
+/** Context the Related derivation reads (trace-invariant, cached). */
 export interface RelatedContext {
   allEvents: readonly CustomTraceEvent[];
   allSpans: readonly TracingSpan[];
   /** Resolve the enclosing task for an event (events-model resolveTaskForEvent). */
   taskOf: (ev: CustomTraceEvent) => number | null;
   fmtTs: (ns: number) => string;
-  /** Signed offset from the anchor event (legacy fmtDelta). */
+  /** Signed offset from the anchor event. */
   fmtDelta: (ns: number) => string;
 }
 
@@ -344,9 +332,9 @@ function isCollapsed(
 }
 
 /**
- * Build one self-anchored event section (legacy `eventSection`): a small
- * window around the selected event grown per direction via load-more (Q6).
- * `label` derives the row text per event (defaults to the event name).
+ * Build one self-anchored event section: a small window around the selected
+ * event grown per direction via load-more. `label` derives the row text per
+ * event (defaults to the event name).
  */
 function eventSection(
   ctx: RelatedContext,
@@ -370,7 +358,7 @@ function eventSection(
   const n = sorted.length;
   const anchorRaw = sorted.indexOf(anchor);
   const anchorIdx = anchorRaw < 0 ? 0 : anchorRaw;
-  // Nothing beyond the current event itself -> collapse by default (legacy).
+  // Nothing beyond the current event itself -> collapse by default.
   const collapseByDefault = anchorRaw >= 0 && n === 1;
   const st = ui.expand[title] ?? { before: 0, after: 0 };
   const beforeShown = Math.min(anchorIdx, RELATED_INITIAL + st.before);
@@ -406,11 +394,10 @@ function loadMore(dir: "before" | "after", hidden: number): RelatedLoadMore {
 }
 
 /**
- * Build the Related tab view for a single pinned event (Q4-Q8). Ports
- * relatedHtml (viewer.html:4044-4167): optional field-correlation section
- * (Q3), enclosing spans indented by nesting depth, same-span / same-task /
- * same-type self-anchored windows, each collapsible (Q5) and windowed (Q6),
- * with empty placeholders (Q8). Row targets (Q7) ride on each row.
+ * Build the Related tab view for a single pinned event: an optional
+ * field-correlation section, enclosing spans indented by nesting depth,
+ * same-span / same-task / same-type self-anchored windows, each collapsible
+ * and windowed, with empty placeholders. Row targets ride on each row.
  */
 export function buildRelated(
   ev: CustomTraceEvent,
@@ -422,7 +409,7 @@ export function buildRelated(
   const spans = ctx.allSpans.length ? enclosingSpans(ctx.allSpans, ev) : [];
   const innerSpan = spans.length ? spans[spans.length - 1]! : null;
 
-  // Field correlation (Q3), only when the value links to other events.
+  // Field correlation, only when the value links to other events.
   if (ui.correlate) {
     const { key, val } = ui.correlate;
     const matches = eventsWhere(
@@ -502,32 +489,32 @@ export function buildRelated(
   return { sections };
 }
 
-// ── Spawned tasks (M7/M8): computeSpawnedTasks formatting ─────────────────
+// ── Spawned tasks ─────────────────────────────────────────────────────────
 
-/** One spawn-location group as the inspector renders it (M8: 5 + "N more"). */
+/** One spawn-location group as the inspector renders it (5 + "N more"). */
 export interface SpawnedGroupView {
   loc: string;
-  /** The first `SPAWNED_TASK_HEAD` task ids as clickable hex links (M8). */
+  /** The first `SPAWNED_TASK_HEAD` task ids as clickable hex links. */
   head: readonly { taskId: number; hex: string }[];
   /** Count of tasks beyond the head (the "N more" tail). */
   moreCount: number;
 }
 
-/** The Tasks-spawned-in-range view (M7): total + range label + groups. */
+/** The Tasks-spawned-in-range view: total + range label + groups. */
 export interface SpawnedTasksView {
   total: number;
   rangeLabel: string;
   groups: SpawnedGroupView[];
 }
 
-/** Legacy `showSpawnedTasks` shows up to 5 example task links per group. */
+/** Up to 5 example task links per group. */
 export const SPAWNED_TASK_HEAD = 5;
 
 /**
- * Format the M7 spawned-tasks result (queue-model `computeSpawnedTasks`) for
- * the inspector (M8): each group keeps its first five task ids as clickable hex
- * links plus a "N more" tail. `rangeLabel` is the pre-formatted range duration.
- * Returns null when the range found no spawned task (legacy early return).
+ * Format the spawned-tasks result (`computeSpawnedTasks`) for the inspector:
+ * each group keeps its first five task ids as clickable hex links plus a "N
+ * more" tail. `rangeLabel` is the pre-formatted range duration. Returns null
+ * when the range found no spawned task.
  */
 export function buildSpawnedTasksView(
   result: {
@@ -551,9 +538,9 @@ export function buildSpawnedTasksView(
   return { total: result.total, rangeLabel, groups };
 }
 
-// ── Tab availability (P4 families; the persistent-inspector re-scope) ──────
+// ── Tab availability ──────────────────────────────────────────────────────
 
-/** The inspector tabs (ticket title poll/event/related/stack + the T30 Task). */
+/** The inspector tabs. */
 export type InspectorTab = "task" | "poll" | "event" | "related" | "stack";
 
 export const INSPECTOR_TABS: readonly InspectorTab[] = [
@@ -564,7 +551,7 @@ export const INSPECTOR_TABS: readonly InspectorTab[] = [
   "stack",
 ];
 
-/** Which tabs currently carry content (P4 `showSidebarTabs` availability). */
+/** Which tabs currently carry content. */
 export interface TabAvailability {
   task: boolean;
   poll: boolean;
@@ -574,11 +561,10 @@ export interface TabAvailability {
 }
 
 /**
- * Compute which tabs have content for the current selection (P4). A single
- * pinned event enables Event + Related; a cluster pin enables Event only
- * (Related is single-event, Q4 CONDITIONAL). A selected task enables Task; a
- * clicked poll enables Poll; a retained range (spawned-tasks or region) enables
- * Stack.
+ * Compute which tabs have content for the current selection. A single pinned
+ * event enables Event + Related; a cluster pin enables Event only (Related is
+ * single-event). A selected task enables Task; a clicked poll enables Poll; a
+ * retained range (spawned-tasks or region) enables Stack.
  */
 export function tabAvailability(sel: SelectionSlice): TabAvailability {
   const pinned = sel.pinnedEvent;
@@ -592,10 +578,10 @@ export function tabAvailability(sel: SelectionSlice): TabAvailability {
 }
 
 /**
- * The tab a fresh selection should activate (the S4 "re-scope in the same
- * action"). Ordered by the interaction that most likely just happened: a poll
- * click -> Poll; an event pin -> Event; a range drag -> Stack; a task select ->
- * Task. Returns null when nothing is selected (the inspector shows its resting
+ * The tab a fresh selection should activate (re-scope in the same action).
+ * Ordered by the interaction that most likely just happened: a poll click ->
+ * Poll; an event pin -> Event; a range drag -> Stack; a task select -> Task.
+ * Returns null when nothing is selected (the inspector shows its resting
  * at-cursor readout).
  */
 export function preferredTab(sel: SelectionSlice): InspectorTab | null {
@@ -606,7 +592,7 @@ export function preferredTab(sel: SelectionSlice): InspectorTab | null {
   return null;
 }
 
-/** True when NO selection is active (resting inspector: readout only, F7). */
+/** True when NO selection is active (resting inspector: readout only). */
 export function hasNoSelection(sel: SelectionSlice): boolean {
   return (
     sel.selectedTaskId === null &&
@@ -617,7 +603,7 @@ export function hasNoSelection(sel: SelectionSlice): boolean {
   );
 }
 
-// ── Worker-lane bundle for task resolution (K7, reused from events-model) ──
+// ── Worker-lane bundle for task resolution ──
 
 /** The trace-invariant lanes the Related task resolver reads. */
 export interface InspectorLaneData {

@@ -1,15 +1,8 @@
-// src/pages/viewer/help.ts - the viewer's `?` help overlay (T21;
-// features/02 section T). Uses the unified help-overlay COMPONENT (T20,
-// lib/interact) with viewer-specific content, and hooks it into the
-// shell's Escape cascade at the highest priority (the legacy D9 order:
-// help closes first).
-//
-// Content is the viewer's shortcut vocabulary (features/02 T4 mouse +
-// keyboard reference), extended with the unified-keyboard additions the
-// shell's status bar and hint chips advertise (K3: `/` search, `n`/`p`
-// POI, `f` fit, `z` undo zoom, `g` goto time). The pointer/zoom/selection
-// gestures themselves are wired by T22/T23; the help overlay is the static
-// reference for them, which is exactly what T4 records.
+// The viewer's `?` help overlay: the unified help-overlay component with
+// viewer-specific content, hooked into the shell's Escape cascade at the
+// highest priority (help closes first). Content is the viewer's shortcut
+// vocabulary - a static reference for the mouse/keyboard gestures wired
+// elsewhere.
 
 import { createHelpOverlay } from "../../lib/interact/index.js";
 import type { HelpOverlay, HelpSection } from "../../lib/interact/index.js";

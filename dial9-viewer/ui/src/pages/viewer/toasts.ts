@@ -1,23 +1,17 @@
-// src/pages/viewer/toasts.ts - the viewer's toast/notification channel
-// (T21; features/02 section U). Imperative chrome, like lib/interact's
-// announcer: toasts are transient feedback that no page logic depends on,
-// so they are a small stateful manager mounted into a container, NOT a
-// store slice (nothing subscribes to a toast).
+// The viewer's toast/notification channel. Imperative chrome: toasts are
+// transient feedback that no page logic depends on, so they are a small stateful
+// manager mounted into a container, not a store slice (nothing subscribes to a
+// toast).
 //
-// Ported behavior (U1-U5):
-//   - showToast(id, msg, type, autoHideMs, persistent): create OR update a
-//     toast by id; a duplicate id re-triggers a wiggle instead of stacking
-//     a second copy (U1/U2);
-//   - types info|warn|error with the entry animation (U2);
-//   - persistent toasts survive clearToasts() (U3): the two load-time hint
-//     toasts are the canonical persistent pair, though F5's persistent hint
-//     chips now carry that role in the new shell (see empty-state/hint chips
-//     in shell.ts) - showToast still supports persistent for parity;
-//   - hideToast(id) / clearToasts() removes non-persistent toasts (U1/U5).
+// Behavior:
+//   - show(): create OR update a toast by id; a duplicate id re-triggers a
+//     wiggle instead of stacking a second copy;
+//   - types info|warn|error with the entry animation;
+//   - persistent toasts survive clear();
+//   - hide(id) / clear() removes non-persistent toasts.
 //
-// The container is created with role="status" + aria-live="polite" so the
-// screen reader hears error/info toasts (the legacy container had none -
-// an F1/axe gap the new shell closes).
+// The container is created with role="status" + aria-live="polite" so the screen
+// reader hears error/info toasts.
 
 export type ToastType = "info" | "warn" | "error";
 
@@ -27,16 +21,16 @@ export interface ShowToastOptions {
   message: string;
   /** Visual/semantic kind; defaults to "info". */
   type?: ToastType;
-  /** Auto-remove after N ms; omit/0 to leave until hideToast/clearToasts. */
+  /** Auto-remove after N ms; omit/0 to leave until hide/clear. */
   autoHideMs?: number;
-  /** Survive clearToasts() (U3 persistent hints). */
+  /** Survive clear() (persistent hints). */
   persistent?: boolean;
 }
 
 export interface Toasts {
   show(options: ShowToastOptions): void;
   hide(id: string): void;
-  /** Remove every non-persistent toast (U5 auto-clear triggers). */
+  /** Remove every non-persistent toast. */
   clear(): void;
   /** Remove the container from the document (teardown/tests). */
   dispose(): void;
@@ -72,7 +66,7 @@ export function createToasts(container: HTMLElement): Toasts {
       const type = options.type ?? "info";
       const existing = entries.get(options.id);
       if (existing) {
-        // U1: duplicate id -> refresh text + wiggle, never a second copy.
+        // Duplicate id -> refresh text + wiggle, never a second copy.
         existing.el.textContent = options.message;
         existing.el.className = `d9-toast-item d9-toast-${type}`;
         existing.el.classList.add("d9-toast-wiggle");

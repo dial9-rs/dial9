@@ -1,26 +1,18 @@
-// src/pages/viewer/spans-track.ts - the spans track component (T26;
-// features/02 section J). Hosts inside T21's unified track column: tracks.ts
-// delegates the "spans" row's TEMPLATE (label metadata + legend controls +
-// canvas) and its canvas PAINT here. Everything reactive flows through the
-// store (T07): filter/percentile/chips write uiPrefs, focus writes selection,
-// and the canvas redraws inside the shell's frame tick (never a direct
-// out-of-scheduler render, N18/F2).
+// The spans track component. Hosts inside the unified track column: tracks.ts
+// delegates the "spans" row's template (label metadata + legend controls +
+// canvas) and its canvas paint here. Everything reactive flows through the
+// store: filter/percentile/chips write uiPrefs, focus writes selection, and the
+// canvas redraws inside the shell's frame tick.
 //
-// The heavy derivations are cached the way perf finding F5 prescribes:
-//   - The trace-invariant span data (computeSpanTrackData) is a
-//     store.derived(["trace"], ...) cache - recomputed only when the trace
-//     slice is replaced, NOT per render or per keypress.
-//   - The per-frame render model (buildSpanRenderModel) is memoized on its
-//     primitive inputs, so a selection-only change (S4 dimming) redraws
-//     with the SAME cached layout instead of recomputing it.
-// Filter keystrokes dispatch a store update and the RAF scheduler coalesces
-// them to <= 1 render/frame (F2) - the legacy synchronous renderAll per
-// keypress is gone. The legend chips are a keyed lit-html `repeat`, not an
-// innerHTML rebuild + relisten (F7).
+// Derivations are cached in two tiers: the trace-invariant span data
+// (computeSpanTrackData) is a store.derived(["trace"], ...) cache recomputed only
+// when the trace slice is replaced; the per-frame render model
+// (buildSpanRenderModel) is memoized on its primitive inputs, so a selection-only
+// change (dimming) redraws with the same cached layout. The legend chips are a
+// keyed lit-html `repeat`, not an innerHTML rebuild + relisten.
 //
-// T17 (audit notes 6+7): incomplete spans are surfaced, never dropped - the
-// J13 "N unmatched" warning renders whenever buildSpanData reports spans with
-// an enter but no exit (trace ended mid-span / segment rotated).
+// Incomplete spans are surfaced, never dropped - the "N unmatched" warning
+// renders whenever buildSpanData reports spans with an enter but no exit.
 
 import { html, render, nothing, type TemplateResult } from "lit-html";
 import { repeat } from "lit-html/directives/repeat.js";
@@ -61,7 +53,7 @@ import {
 
 /** Height reserved for the legend/controls strip above the span canvas. */
 const CONTROLS_H = 30;
-/** Percentile-filter dropdown options (features/02 J8). */
+/** Percentile-filter dropdown options. */
 const PCT_OPTIONS: readonly { value: number; label: string }[] = [
   { value: 0, label: "All" },
   { value: 50, label: "≥ P50" },
@@ -70,17 +62,17 @@ const PCT_OPTIONS: readonly { value: number; label: string }[] = [
   { value: 99, label: "≥ P99" },
 ];
 
-// Legacy span-panel colors (viewer.html), kept identical.
+// Span-panel canvas colors.
 const CANVAS_BG = "#1a1a2e";
 const EMPTY_TEXT = "#555";
 const TICK_TEXT = "#666";
 
 /** The handle tracks.ts + the shell drive. */
 export interface SpansTrackController {
-  /** The full `.d9-track` row template for the spans track (J3/J4/J7-J14). */
+  /** The full `.d9-track` row template for the spans track. */
   rowTemplate(track: TrackSpec): TemplateResult;
-  /** Size + draw the span canvas (J1/J2 visual/J5/S4). Called from
-   *  sizeTracks inside the shell's frame tick. */
+  /** Size + draw the span canvas. Called from sizeTracks inside the shell's
+   *  frame tick. */
   paint(
     canvas: HTMLCanvasElement,
     drawW: number,
@@ -94,34 +86,34 @@ export interface SpansTrackController {
 }
 
 export function createSpansTrack(store: ViewerStore): SpansTrackController {
-  // ── Derived caches (F5) ────────────────────────────────────────────────
+  // ── Derived caches ─────────────────────────────────────────────────────
   // Trace-invariant span data: recomputed only when the trace slice changes.
   const spanData = store.derived(["trace"], (s) =>
     computeSpanTrackData(s.trace.trace?.customEvents),
   );
-  // Worker poll lanes, for resolving the task polling at a focused span's
-  // start (J2). Same trace-keyed invalidation.
+  // Worker poll lanes, for resolving the task polling at a focused span's start.
+  // Same trace-keyed invalidation.
   const workerLanes = store.derived(["trace"], (s) =>
     buildWorkerLanes(s.trace.trace),
   );
 
-  // Stable name -> color assignment for this track's lifetime (J1/J9).
+  // Stable name -> color assignment for this track's lifetime.
   const colorOf = makeColorAssigner();
 
   // Per-frame render-model memo, keyed on the derived-data reference (trace
   // identity) + its primitive inputs so a selection-only change (dimming)
-  // reuses the cached layout (S4) but a trace/viewport/filter/focus change
+  // reuses the cached layout but a trace/viewport/filter/focus change
   // recomputes it.
   let modelCache: { data: SpanTrackData; key: string; model: SpanRenderModel } | null =
     null;
-  // The buckets last painted, for canvas hit-testing (J2 click, J6 hover).
+  // The buckets last painted, for canvas hit-testing (click, hover).
   let lastHits: readonly SpanDrawBucket[] = [];
-  // Nav (J11/J12): the filtered match list + cursor, rebuilt when the filter
-  // or trace changes; the cursor is ephemeral track state (not the store).
+  // Nav: the filtered match list + cursor, rebuilt when the filter or trace
+  // changes; the cursor is ephemeral track state (not the store).
   let navMatches: { data: SpanTrackData; key: string; spans: TracingSpan[] } | null =
     null;
   let navIndex = -1;
-  // One tooltip element for J6, created lazily.
+  // One tooltip element for hover, created lazily.
   let tooltipEl: HTMLDivElement | null = null;
   let sizer: CanvasSizer<CanvasRenderingContext2D> | null = null;
   let sizerCanvas: HTMLCanvasElement | null = null;
@@ -214,8 +206,8 @@ export function createSpansTrack(store: ViewerStore): SpansTrackController {
     store.update("uiPrefs", { selectedSpanNames: new Set<string>() });
   }
 
-  /** Focus a span (J2): pin it in the panel, highlight its ancestor chain,
-   *  and select the task polling at its start. */
+  /** Focus a span: pin it in the panel, highlight its ancestor chain, and
+   *  select the task polling at its start. */
   function focusSpan(spanId: string): void {
     const data = spanData();
     const s = state();
@@ -243,8 +235,8 @@ export function createSpansTrack(store: ViewerStore): SpansTrackController {
     });
   }
 
-  /** Step the filtered-span navigation (J11): center the viewport on the
-   *  next/prev match and highlight it + its ancestors. */
+  /** Step the filtered-span navigation: center the viewport on the next/prev
+   *  match and highlight it + its ancestors. */
   function stepNav(delta: number): void {
     const data = spanData();
     const s = state();
@@ -263,7 +255,7 @@ export function createSpansTrack(store: ViewerStore): SpansTrackController {
     });
   }
 
-  // ── Canvas paint (J1/J2 visual/J5/S4) ──────────────────────────────────
+  // ── Canvas paint ───────────────────────────────────────────────────────
 
   function paint(
     canvas: HTMLCanvasElement,
@@ -286,7 +278,7 @@ export function createSpansTrack(store: ViewerStore): SpansTrackController {
     drawSpansCanvas(ctx, model, data, s, drawW, canvasH, viewStart, viewEnd, colorOf);
   }
 
-  // ── Templates (J3/J4 label, J7-J14 controls) ───────────────────────────
+  // ── Templates (label, controls) ────────────────────────────────────────
 
   function rowTemplate(track: TrackSpec): TemplateResult {
     const s = state();
@@ -323,7 +315,7 @@ export function createSpansTrack(store: ViewerStore): SpansTrackController {
     `;
   }
 
-  /** J3 focused-span metadata rows with J4 copy buttons. */
+  /** Focused-span metadata rows with copy buttons. */
   function spanMetaTemplate(label: NonNullable<ReturnType<typeof spanLabelModel>>): TemplateResult {
     return html`
       <div class="d9-spans-meta-name">${label.name}</div>
@@ -348,7 +340,7 @@ export function createSpansTrack(store: ViewerStore): SpansTrackController {
     `;
   }
 
-  /** J7 filter, J11 nav, J12 count, J8 percentile, J10 clear, J9 chips, J13. */
+  /** Filter, nav, count, percentile, clear, chips, unmatched warning. */
   function controlsTemplate(
     data: SpanTrackData,
     s: StoreState,
@@ -453,7 +445,7 @@ export function createSpansTrack(store: ViewerStore): SpansTrackController {
     `;
   }
 
-  // ── Canvas interaction (J2 click, J6 hover) ────────────────────────────
+  // ── Canvas interaction (click, hover) ──────────────────────────────────
 
   function bucketAt(canvas: HTMLCanvasElement, ev: MouseEvent): SpanDrawBucket | null {
     const rect = canvas.getBoundingClientRect();
@@ -591,8 +583,8 @@ export function createSpansTrack(store: ViewerStore): SpansTrackController {
 
 // ── Pure helpers (no store) ──────────────────────────────────────────────
 
-/** Build the worker poll lanes for task resolution (J2). Empty when the
- *  trace has no events. */
+/** Build the worker poll lanes for task resolution. Empty when the trace has no
+ *  events. */
 function buildWorkerLanes(trace: ParsedTrace | null): Record<number, WorkerLane> {
   if (trace === null || trace.maxTs === null) return {};
   const workerIds = [...new Set(trace.tidToWorker.values())];
@@ -600,8 +592,8 @@ function buildWorkerLanes(trace: ParsedTrace | null): Record<number, WorkerLane>
     .workerSpans;
 }
 
-/** The task polling on the focused span's first-segment worker at its start,
- *  or null (legacy click handler viewer.html:3870-3877). */
+/** The task polling on the focused span's first-segment worker at its start, or
+ *  null. */
 function resolveTaskAtSpanStart(
   spanId: string,
   data: SpanTrackData,
@@ -616,7 +608,7 @@ function resolveTaskAtSpanStart(
   return poll && poll.taskId ? poll.taskId : null;
 }
 
-/** Most-frequent-first "name xN" list (legacy topNames), for cluster tooltips. */
+/** Most-frequent-first "name xN" list, for cluster tooltips. */
 function topNames(spans: readonly TracingSpan[], limit = 5): string {
   const counts = new Map<string, number>();
   for (const s of spans) counts.set(s.spanName, (counts.get(s.spanName) ?? 0) + 1);
@@ -631,10 +623,10 @@ function topNames(spans: readonly TracingSpan[], limit = 5): string {
 
 /**
  * Draw the span clusters into `ctx` (already DPR-scaled + sized to
- * drawW x canvasH). The representative bar's alpha encodes the S4 dimming:
- * a highlighted cluster is bright, the rest recede when a highlight is active
- * (legacy renderSpanPanel alpha rules). Draw-area-relative x (0..drawW),
- * exactly the axis's nsToDrawX, so span bars line up with the ticks.
+ * drawW x canvasH). The representative bar's alpha encodes the dimming: a
+ * highlighted cluster is bright, the rest recede when a highlight is active.
+ * Draw-area-relative x (0..drawW), exactly the axis's nsToDrawX, so span bars
+ * line up with the ticks.
  */
 export function drawSpansCanvas(
   ctx: CanvasRenderingContext2D,
@@ -694,7 +686,7 @@ export function drawSpansCanvas(
   }
   ctx.globalAlpha = 1;
 
-  // Log-scale y-axis duration ticks (legacy renderSpanPanel:3514-3539).
+  // Log-scale y-axis duration ticks.
   if (model.minDur > 0 && model.maxDur > 0) {
     const PAD_TOP = 2;
     const usableH = canvasH - PAD_TOP - 2 - BASE_BAR_H;

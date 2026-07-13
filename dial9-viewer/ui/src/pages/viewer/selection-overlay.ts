@@ -1,19 +1,16 @@
-// src/pages/viewer/selection-overlay.ts - the H10 selection overlay: the
-// blue (region) / teal (zoom) box drawn over the lanes during a Shift/Alt drag
-// or a keyboard selection, and the persistent box for a retained region
-// (features/02 H10; ported from viewer.html #selection-overlay :728-735 +
-// updateSelOverlay/updateKbSelOverlay :5184-5209).
+// The selection overlay: the blue (region) / teal (zoom) box drawn over the
+// lanes during a Shift/Alt drag or a keyboard selection, plus the persistent box
+// for a retained region.
 //
-// A store RENDER SURFACE, not a handler: the pointer / keyboard machines write
+// A store render surface, not a handler: the pointer / keyboard machines write
 // `transient.drag` / `transient.keyboardSelection` (and, on a region confirm,
-// `selection.sidebarRange`); THIS subscriber reads those slices on the store's
-// RAF tick and positions one absolutely-placed div. So it obeys F2 (no render
-// from the input handler) and F3 (geometry is read once, before the write) -
-// the same discipline as the T24 crosshair overlay, on the same track column.
+// `selection.sidebarRange`); this subscriber reads those slices on the store's
+// RAF tick and positions one absolutely-placed div. So it renders only from a
+// subscription (never the input handler) and reads geometry once, before the
+// write - the same discipline as the crosshair overlay, on the same track column.
 //
-// H10 persistence: a Shift region stays boxed until the sidebar clears
-// `selection.sidebarRange` (T32 owns the sidebar close). The transient
-// drag/keyboard box takes precedence while a selection is in flight.
+// A Shift region stays boxed until the sidebar clears `selection.sidebarRange`.
+// The transient drag/keyboard box takes precedence while a selection is in flight.
 
 import { assertInScheduledRender } from "../../store/store.js";
 import { timePanelLayout } from "../../lib/canvas/layout.js";
@@ -35,7 +32,7 @@ export interface SelectionRegion {
 }
 
 /**
- * The single source of "what box to show" (H10 precedence), pure over the two
+ * The single source of "what box to show" (precedence order), pure over the two
  * slices so it is unit-testable:
  *   1. a live keyboard selection (Shift/Alt + arrows);
  *   2. else a live drag region/zoom that has crossed the 3px intent;
@@ -81,8 +78,8 @@ export interface SelectionBox {
  * Box left/width from a region and the shared layout. Both edges use the
  * layout's CLAMPED mapping so a selection extending outside the visible window
  * (a keyboard cursor panned past an edge) still renders inside the draw area,
- * never over the label gutter. Pure - the alignment invariant (A13/N4): the
- * box maps ns->x through the same layout the lanes use.
+ * never over the label gutter. Pure - the alignment invariant: the box maps
+ * ns->x through the same layout the lanes use.
  */
 export function selectionBox(region: SelectionRegion, layout: TimePanelLayout): SelectionBox {
   const x1 = layout.nsToPanelXClamped(region.startNs);
@@ -124,8 +121,8 @@ export function mountSelectionOverlay(
       el.style.display = "none";
       return;
     }
-    // Read geometry once (F3): column width + the lanes-matching scrollbar
-    // gutter, then the shared layout - identical inputs to the lanes/overlay.
+    // Read geometry once: column width + the lanes-matching scrollbar gutter,
+    // then the shared layout - identical inputs to the lanes/overlay.
     const pw = trackColumn.clientWidth;
     const scrollbarW = Math.max(0, trackColumn.offsetWidth - trackColumn.clientWidth);
     const { viewStart, viewEnd } = state.viewport;
@@ -147,9 +144,9 @@ export function mountSelectionOverlay(
   // paint comes from the first store notification tick (the viewport update
   // that initViewportFromTrace dispatches on trace load), NOT a synchronous
   // render at mount. A direct render() here runs outside the scheduler tick,
-  // which both violates the F2 "renders via subscriptions only" contract and
-  // trips the N18 dev assertion at boot. Nothing is drawable before that first
-  // tick anyway (no trace, no selection => the box is hidden).
+  // which violates the "renders via subscriptions only" contract and trips the
+  // dev assertion at boot. Nothing is drawable before that first tick anyway
+  // (no trace, no selection => the box is hidden).
   const unsubscribe = store.subscribe(["transient", "viewport", "selection"], () => render());
 
   return {

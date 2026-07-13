@@ -1,25 +1,13 @@
-// src/pages/viewer/toolbar.ts - the viewer toolbar (T33; features/02 sections
-// C1 file info, D analysis buttons, E time display + range). A store-wired
-// controller (createToolbar) rendered into the shell's toolbar slots; every
-// handler dispatches store actions (or an injected seam) and never renders.
+// The viewer toolbar: file info, analysis buttons, time display + range. A
+// store-wired controller (createToolbar) rendered into the shell's toolbar
+// slots; every handler dispatches store actions (or an injected seam) and never
+// renders. Every control has a `title` + accessible name.
 //
-// Amendments carried here:
-//  - F2 (jargon tooltips): EVERY control has a `title` + accessible name; the
-//    legacy bare "Parse perf" / "Uninstrumented (N)" buttons are DEMOTED into
-//    an info menu (the `<details>` disclosure) instead of shouting from the
-//    main row.
-//  - S2 partial (locate the moment): the time-display cluster gains a
-//    goto-time input wired to T20's `g` accelerator + grammar (parseGotoTime),
-//    so a timestamp is directly reachable (the legacy axis was relative-only
-//    with the TZ toggle hidden).
-//
-// SEAMS: the analysis buttons (D1-D3) open the region-analysis surfaces the
-// inspector/flamegraph tickets own (T31/T32) - they call injected callbacks,
-// NOT `selection.sidebarRange` directly, because setting that range with no
-// sidebar to clear it would soft-lock keyboard selection (H9). Set/Clear Range
-// (E3/E4) reparse the retained buffer, which the load chrome owns (T34); they
-// call injected callbacks too. Time toggles (E1/E2) and goto (S2) need no
-// surface ticket and are fully wired here.
+// The analysis buttons open region-analysis surfaces via injected callbacks, NOT
+// `selection.sidebarRange` directly, because setting that range with no sidebar
+// to clear it would soft-lock keyboard selection. Set/Clear Range reparse the
+// retained buffer via injected callbacks too. Time toggles and goto are fully
+// wired here.
 
 import { html, type TemplateResult } from "lit-html";
 import { classMap } from "lit-html/directives/class-map.js";
@@ -39,40 +27,40 @@ import {
 import { poiSourceFor, kindLabel, redFlagCounts } from "./poi.js";
 import type { PointOfInterestType } from "../../types/trace.js";
 
-/** Which whole-trace analysis an analysis button opens (T31/T32 seam kind). */
+/** Which whole-trace analysis an analysis button opens. */
 export type AnalysisKind = "cpu" | "blocking" | "heap";
 
-/** Injected surface seams for controls whose panels other tickets own. */
+/** Injected surface seams for controls whose panels other components own. */
 export interface ToolbarDeps {
-  /** Open a whole-trace analysis in the inspector (D1/D2/D3 -> T31/T32). */
+  /** Open a whole-trace analysis in the inspector. */
   onOpenAnalysis(kind: AnalysisKind): void;
-  /** Set a time-range filter from the current viewport (E3 -> T34 reparse). */
+  /** Set a time-range filter from the current viewport (reparse). */
   onSetRange(range: { startNs: number; endNs: number }): void;
-  /** Clear the active time-range filter (E4 -> T34 reparse). */
+  /** Clear the active time-range filter (reparse). */
   onClearRange(): void;
   /**
-   * The S3-key-derived svc/host identity from the viewer URL (C1a; T45). A
-   * boot constant read once from `location.search` by the page entry; the
-   * file-info surface reconciles it against the trace-EMBEDDED metadata
-   * (embedded wins, disagreeing key-derived value tooltipped). Omitted (or
-   * `{}`) when the viewer was not opened from the S3 browser handoff.
+   * The S3-key-derived svc/host identity from the viewer URL. A boot constant
+   * read once from `location.search` by the page entry; the file-info surface
+   * reconciles it against the trace-EMBEDDED metadata (embedded wins,
+   * disagreeing key-derived value tooltipped). Omitted (or `{}`) when the viewer
+   * was not opened from the S3 browser handoff.
    */
   keyDerivedIdentity?: SegmentIdentity;
 }
 
 export interface ToolbarController {
-  /** File info (C1): filename + structured meta. Fills the file-info slot. */
+  /** File info: filename + structured meta. Fills the file-info slot. */
   fileInfoTemplate(state: StoreState, sourceLabel: string): TemplateResult;
   /** Red-flags chip + analysis buttons + info menu. Fills the Analysis slot. */
   analysisTemplate(state: StoreState, sourceLabel: string): TemplateResult;
   /** Time toggles + goto + Set/Clear Range. Fills the Time slot. */
   timeTemplate(state: StoreState): TemplateResult;
-  /** `g` goto-time accelerator (T20) - focuses the goto input. */
+  /** `g` goto-time accelerator - focuses the goto input. */
   keyBindings: readonly KeyBinding[];
   dispose(): void;
 }
 
-// ── goto-time math (S2; pure + tested) ───────────────────────────────────
+// ── goto-time math ────────────────────────────────────────────────────────
 
 /**
  * Resolve a parsed goto input to an absolute trace timestamp (ns). Absolute
@@ -111,7 +99,7 @@ export function gotoWindow(
 
 // ── derived toolbar flags (from the resident trace) ─────────────────────
 
-/** Count of tasks spawned without wake tracking (raw `tokio::spawn`, D4). */
+/** Count of tasks spawned without wake tracking (raw `tokio::spawn`). */
 export function uninstrumentedCount(trace: ParsedTrace): number {
   let n = 0;
   for (const instrumented of trace.taskInstrumented.values()) {
@@ -158,8 +146,8 @@ export function createToolbar(
 
   const keyBindings: readonly KeyBinding[] = [
     {
-      // `g`: focus the goto-time input (T20 accelerator). Declines (falls
-      // through) when the input is not on the page (no trace yet).
+      // `g`: focus the goto-time input. Declines (falls through) when the input
+      // is not on the page (no trace yet).
       key: "g",
       onKey: () => {
         const input = document.querySelector<HTMLInputElement>("[data-goto-input]");
@@ -186,7 +174,7 @@ export function createToolbar(
   };
 }
 
-// ── file info (C1 + C1a identity) ─────────────────────────────────────────
+// ── file info + identity ──────────────────────────────────────────────────
 
 function fileInfoTemplate(
   state: StoreState,
@@ -205,11 +193,11 @@ function fileInfoTemplate(
 }
 
 /**
- * The trace-embedded service/host identity chips (C1a; T45; closes #68).
- * Renders nothing when neither the trace metadata nor the URL params yield a
- * value (e.g. an old trace loaded without an S3-key handoff). Each chip shows
- * the embedded metadata value (which wins) and, when the S3-key-derived value
- * disagrees, tooltips that key-derived value.
+ * The trace-embedded service/host identity chips. Renders nothing when neither
+ * the trace metadata nor the URL params yield a value (e.g. an old trace loaded
+ * without an S3-key handoff). Each chip shows the embedded metadata value (which
+ * wins) and, when the S3-key-derived value disagrees, tooltips that key-derived
+ * value.
  */
 function identityTemplate(identity: ReconciledIdentity): TemplateResult | string {
   const chips: TemplateResult[] = [];
@@ -232,7 +220,7 @@ function identityChip(
   >`;
 }
 
-/** The C1 stats line: events, workers, duration, plus truncation/filter notes. */
+/** The stats line: events, workers, duration, plus truncation/filter notes. */
 export function fileMetaText(trace: ParsedTrace | null): string {
   if (trace === null) return "no trace loaded";
   const workers = new Set(trace.tidToWorker.values()).size;
@@ -245,7 +233,7 @@ export function fileMetaText(trace: ParsedTrace | null): string {
   return parts.join(" · ");
 }
 
-// ── red-flags chip + analysis buttons + info menu (C section chip + D) ────
+// ── red-flags chip + analysis buttons + info menu ─────────────────────────
 
 function analysisTemplate(
   state: StoreState,
@@ -292,8 +280,8 @@ function analysisTemplate(
   `;
 }
 
-/** The concept-2 red-flags summary chip: existing detectors' COUNTS only
- *  (scope fence - no new detector source). Non-zero detectors only. */
+/** The red-flags summary chip: existing detectors' COUNTS only. Non-zero
+ *  detectors only. */
 function redFlagsChip(trace: ParsedTrace): TemplateResult | string {
   const summary = redFlagCounts(poiSourceFor(trace)).filter((r) => r.count > 0);
   if (summary.length === 0) return "";
@@ -339,7 +327,7 @@ function analysisButton(
   `;
 }
 
-/** The info menu (F2): demoted "Parse perf" + uninstrumented details. */
+/** The info menu: demoted "Parse perf" + uninstrumented details. */
 function infoMenu(
   trace: ParsedTrace,
   sourceLabel: string,
@@ -385,7 +373,7 @@ function infoMenu(
   `;
 }
 
-// ── time display + range (E1/E2/E3/E4 + goto S2) ─────────────────────────
+// ── time display + range + goto ───────────────────────────────────────────
 
 interface TimeHandlers {
   toggleTimeMode(): void;

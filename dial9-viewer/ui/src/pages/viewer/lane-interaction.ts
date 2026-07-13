@@ -1,21 +1,18 @@
-// src/pages/viewer/lane-interaction.ts - the DOM binding that wires the pure
-// interaction machines (lib/interact/pointer, wheel, kb-selection) and the
-// viewport actions to the viewer store, the track column, and the unified key
-// router (T23; features/02 H1-H13, amendments K4 zoom-undo + K5 WASD).
+// The DOM binding that wires the pure interaction machines (pointer, wheel,
+// kb-selection) and the viewport actions to the viewer store, the track
+// column, and the unified key router.
 //
 // This is the ONLY place raw lane pointer/keyboard events are attached (the
-// T22 lanes ship pure resolvers with NO listener; the T24 overlay owns HOVER).
-// Every handler resolves geometry from a CLEAN layout read then dispatches
-// store actions through the machines - it never renders (F2) and never scans
-// O(allSpans) (F6: click resolution goes through the T22 resolveLaneClick /
-// lib/trace/query helpers). Wheel zoom and pan frames update the viewport
-// slice, which the store's RAF scheduler coalesces to <= 1 render/frame.
+// lanes ship pure resolvers with no listener; the overlay owns HOVER). Every
+// handler resolves geometry from a CLEAN layout read then dispatches store
+// actions through the machines - it never renders and never scans O(allSpans)
+// (click resolution goes through resolveLaneClick / query helpers). Wheel zoom
+// and pan frames update the viewport slice, which the store's RAF scheduler
+// coalesces to <= 1 render/frame.
 //
-// SEAMS: a Shift-drag / keyboard region commit writes selection.sidebarRange -
-// WHAT opens for that range (flamegraph / blocking / heap) is T32's. A lane
-// click that lands on a poll with samples returns openStackFor - the Poll
-// Detail surface is T31's; until it lands the selection still dispatches, the
-// popup is a no-op noted below.
+// A Shift-drag / keyboard region commit writes selection.sidebarRange; what
+// opens for that range is the region panel's. A lane click on a poll with
+// samples returns openStackFor, which drives the inspector's Poll Detail.
 
 import { LABEL_W, timePanelLayout } from "../../lib/canvas/layout.js";
 import type { TimePanelLayout } from "../../lib/canvas/layout.js";
@@ -35,13 +32,13 @@ import { mountSelectionOverlay } from "./selection-overlay.js";
 import type { ViewerStore } from "../../store/store.js";
 import type { StoreState } from "../../types/state.js";
 
-/** Cursor-extension step as a fraction of the visible duration (H9, legacy 5%). */
+/** Cursor-extension step as a fraction of the visible duration (5%). */
 const KB_STEP_FRACTION = 0.05;
 
 const CONTROLS_CLASS = "d9-viewport-controls";
 
 export interface LaneInteractionDeps {
-  /** ARIA/toast announcer for selection + zoom-undo status (A16, via T21). */
+  /** ARIA/toast announcer for selection + zoom-undo status. */
   announcer: Announcer;
 }
 
@@ -65,9 +62,9 @@ interface ColumnGeom {
 /**
  * Mount the lane interaction layer against `store`, attaching pointer/wheel/
  * click listeners to `trackColumn` (and window for the drag move/up), the
- * Shift/Alt keyboard-selection listener, the H1-H4 viewport controls, and the
- * H10 selection overlay. `root` is the viewer app root (unused today; reserved
- * so the controls could relocate without touching the entry).
+ * Shift/Alt keyboard-selection listener, the viewport controls, and the
+ * selection overlay. `root` is the viewer app root (unused today; reserved so
+ * the controls could relocate without touching the entry).
  */
 export function mountLaneInteraction(
   root: HTMLElement,
@@ -81,14 +78,13 @@ export function mountLaneInteraction(
   const viewport: ViewportActions = createViewportActions(store);
   const selectionOverlay = mountSelectionOverlay(trackColumn, store);
 
-  // Frame-invariant lane data for click resolution, cached by the trace slice
-  // (F5): recomputed only on load/reparse, not per click. Same derivation the
-  // lanes track caches; clicks are rare, so a second cache is negligible.
+  // Frame-invariant lane data for click resolution, cached by the trace slice:
+  // recomputed only on load/reparse, not per click.
   const laneData = store.derived(["trace"], (s): LaneData | null =>
     s.trace.trace ? deriveLaneData(s.trace.trace) : null,
   );
 
-  // ── geometry (clean reads inside fresh events; F3-safe) ─────────────────
+  // ── geometry (clean reads inside fresh events) ──────────────────────────
 
   function readColumnGeom(): ColumnGeom {
     const rect = trackColumn.getBoundingClientRect();
@@ -141,8 +137,8 @@ export function mountLaneInteraction(
         if (cmd.kind === "zoom-select") {
           viewport.zoomToRegion(cmd.startNs, cmd.endNs);
         } else {
-          // H7 seam: hand the range to the store; T32 opens the panel by data
-          // present. This also retains the range (blocks kb-selection, H9).
+          // Hand the range to the store; the region panel opens by data
+          // present. This also retains the range (blocks kb-selection).
           store.update("selection", { sidebarRange: { startNs: cmd.startNs, endNs: cmd.endNs } });
         }
         return;
@@ -161,15 +157,15 @@ export function mountLaneInteraction(
   // ── pointer: mousedown (column) + mousemove/mouseup (window) ─────────────
 
   function onMouseDown(e: MouseEvent): void {
-    if (e.button !== 0) return; // left button drives pan/select (H6)
-    // Clicks on the viewport controls are their own (H4): never start a pan.
+    if (e.button !== 0) return; // left button drives pan/select
+    // Clicks on the viewport controls are their own: never start a pan.
     if ((e.target as Element | null)?.closest?.(`.${CONTROLS_CLASS}`)) return;
-    // The track-management strip (collapse caret + reorder grip, T36) owns its
-    // own gestures: the grip is a native drag source (draggable), and native
-    // DnD swallows the matching mouseup, so a pan started here would never be
+    // The track-management strip (collapse caret + reorder grip) owns its own
+    // gestures: the grip is a native drag source (draggable), and native DnD
+    // swallows the matching mouseup, so a pan started here would never be
     // released and would keep panning after the drop. Never start a pan on it.
     if ((e.target as Element | null)?.closest?.(".d9-track-manage-strip")) return;
-    // A mousedown pre-empts an in-flight keyboard selection (legacy :5148).
+    // A mousedown pre-empts an in-flight keyboard selection.
     if (kbSel.active()) runCommands(kbSel.clear());
     const state = store.getState() as StoreState;
     const vp = state.viewport;
@@ -190,7 +186,7 @@ export function mountLaneInteraction(
   }
 
   function onMouseMove(e: MouseEvent): void {
-    if (pointer.phase() === "idle") return; // T24 owns the hover path
+    if (pointer.phase() === "idle") return; // the overlay owns the hover path
     const geom = readColumnGeom();
     runCommands(
       pointer.move({
@@ -205,20 +201,19 @@ export function mountLaneInteraction(
     if (pointer.phase() === "idle") return;
     const wasPan = pointer.phase() === "pan";
     runCommands(pointer.up());
-    // Record a completed pan-drag as ONE undo step (H6 -> K4 view history);
-    // zoom/region commits already record inside viewport actions.
+    // Record a completed pan-drag as ONE undo step; zoom/region commits already
+    // record inside viewport actions.
     if (wasPan && pointer.moved()) viewport.recordCurrent();
   }
 
-  // ── click: task/span select (H section relies on drag discrimination) ────
+  // ── click: task/span select (relies on drag discrimination) ────
 
   function onClick(e: MouseEvent): void {
     if (pointer.moved()) return; // the press was a drag, not a click
     if ((e.target as Element | null)?.closest?.(`.${CONTROLS_CLASS}`)) return;
     const data = laneData();
     if (data === null) return;
-    // Restrict task/span selection to clicks over the lanes canvas (legacy
-    // bounded the click to the lanes container, viewer.html:5353).
+    // Restrict task/span selection to clicks over the lanes canvas.
     const lanesCanvas = trackColumn.querySelector<HTMLElement>('canvas[data-track-canvas="lanes"]');
     if (lanesCanvas === null) return;
     const laneRect = lanesCanvas.getBoundingClientRect();
@@ -226,7 +221,7 @@ export function mountLaneInteraction(
 
     const geom = readColumnGeom();
     const mouseXCol = e.clientX - geom.rectLeft;
-    // Any lanes click clears the pinned custom-event marker (legacy :5363).
+    // Any lanes click clears the pinned custom-event marker.
     if (mouseXCol < LABEL_W || mouseXCol > LABEL_W + geom.drawW) {
       store.update("selection", { selectedTaskId: null, pinnedEvent: null, pollDetail: null });
       return;
@@ -251,19 +246,19 @@ export function mountLaneInteraction(
       spanFocus: result.spanFocus,
       focusedSpanId: result.focusedSpanId,
       pinnedEvent: null,
-      // G15/R1: a click on a poll carrying CPU/sched samples opens Poll Detail
-      // in T31's persistent inspector; a click on a bare poll (or empty space)
-      // clears any open Poll Detail. `openStackFor` is null in both no-sample
-      // cases, so this dispatch doubles as the close (S4 re-scope-on-click).
+      // A click on a poll carrying CPU/sched samples opens Poll Detail in the
+      // inspector; a click on a bare poll (or empty space) clears any open Poll
+      // Detail. `openStackFor` is null in both no-sample cases, so this
+      // dispatch doubles as the close.
       pollDetail: result.openStackFor,
     });
   }
 
-  // ── wheel: Ctrl/Cmd = zoom-at-cursor (H5); plain = scroll lanes ──────────
+  // ── wheel: Ctrl/Cmd = zoom-at-cursor; plain = scroll lanes ───────────────
 
   function onWheel(e: WheelEvent): void {
     // Plain wheel scrolls the lanes: bail BEFORE any layout read so a scroll
-    // never forces a measure (H5). Only Ctrl/Cmd wheels zoom.
+    // never forces a measure. Only Ctrl/Cmd wheels zoom.
     if (!e.ctrlKey && !e.metaKey) return;
     if (store.getState().trace.trace === null) return;
     const geom = readColumnGeom();
@@ -278,11 +273,11 @@ export function mountLaneInteraction(
     if (intent === null) return;
     e.preventDefault();
     // Store dispatch only: N wheel notches in a frame -> N viewport updates ->
-    // ONE coalesced render (03 F2 regression; the DoD's <= 1 render/frame).
+    // ONE coalesced render.
     viewport.zoom(intent.factor, intent.centerFrac);
   }
 
-  // ── Shift/Alt keyboard selection start (H9) ─────────────────────────────
+  // ── Shift/Alt keyboard selection start ──────────────────────────────────
   //
   // A dedicated window listener, NOT a router binding: the unified router
   // drops Alt-modified events (its chord gate), so it can never deliver a bare
@@ -302,14 +297,14 @@ export function mountLaneInteraction(
     const state = store.getState() as StoreState;
     if (state.trace.trace === null) return;
     if (state.transient.drag !== null) return; // a drag owns the gesture
-    // Blocked while the sidebar retains a range (legacy :6232).
+    // Blocked while the sidebar retains a range.
     if (state.selection.sidebarRange !== null) return;
     e.preventDefault();
     const mode = e.key === "Shift" ? "region-select" : "zoom-select";
     runCommands(kbSel.start(mode, seedNs(state)));
   }
 
-  // ── viewport controls (H1-H4): floating zoom in / out / fit panel ───────
+  // ── viewport controls: floating zoom in / out / fit panel ───────
 
   function ensureControls(): void {
     if (trackColumn.querySelector(`.${CONTROLS_CLASS}`) !== null) return;
@@ -325,7 +320,7 @@ export function mountLaneInteraction(
       b.textContent = label;
       b.title = title;
       b.setAttribute("aria-label", title);
-      // Clicks here are not lane clicks (H4): stop them reaching the column.
+      // Clicks here are not lane clicks: stop them reaching the column.
       b.addEventListener("click", (ev) => {
         ev.stopPropagation();
         onClick();
@@ -353,8 +348,8 @@ export function mountLaneInteraction(
   });
 
   // Re-attach the controls after any shell re-render that could clobber the
-  // foreign child (same defensiveness as the T24 overlay ensure). Cheap +
-  // idempotent; runs after the shell (this mount is last).
+  // foreign child. Cheap + idempotent; runs after the shell (this mount is
+  // last).
   const unsubChrome = store.subscribe(["trace", "viewport", "selection", "uiPrefs"], () => {
     if (store.getState().trace.trace !== null) ensureControls();
   });
@@ -371,7 +366,7 @@ export function mountLaneInteraction(
     runCommands(kbSel.extend(dir, step, vp.minTs, vp.maxTs));
   }
 
-  /** A zoom accelerator (H11/W-S): declines (falls through) without a trace. */
+  /** A zoom accelerator: declines (falls through) without a trace. */
   function zoomKey(factor: number): () => boolean | void {
     return () => {
       if (!hasTrace()) return false;
@@ -379,7 +374,7 @@ export function mountLaneInteraction(
     };
   }
 
-  /** A pan accelerator (A-D): declines (falls through) without a trace. */
+  /** A pan accelerator: declines (falls through) without a trace. */
   function panKey(dir: -1 | 1): () => boolean | void {
     return () => {
       if (!hasTrace()) return false;
@@ -407,7 +402,7 @@ export function mountLaneInteraction(
         return true;
       },
     },
-    // Left/Right: extend the cursor during a selection (H9), else pan (H12).
+    // Left/Right: extend the cursor during a selection, else pan.
     {
       key: "ArrowLeft",
       onKey: () => {
@@ -430,17 +425,15 @@ export function mountLaneInteraction(
         viewport.pan(1);
       },
     },
-    // Up/Down zoom in/out (H11). WASD mirror them + the arrow pans (K5).
+    // Up/Down zoom in/out. WASD mirror them + the arrow pans.
     { key: "ArrowUp", onKey: zoomKey(0.5) },
     { key: "ArrowDown", onKey: zoomKey(2) },
     { key: "w", onKey: zoomKey(0.5) },
     { key: "s", onKey: zoomKey(2) },
     { key: "a", onKey: panKey(-1) },
     { key: "d", onKey: panKey(1) },
-    // f: fit the whole trace in view (K4 fit-key; the H3/`f` action the mouse
-    // "Fit all" button already drives). Commits to history so `z` can undo it,
-    // and matches the flamegraph's `f` for one vocabulary (K3). The `?` help
-    // overlay advertises it; this binding makes the advertised key live.
+    // f: fit the whole trace in view (the action the "Fit all" button drives).
+    // Commits to history so `z` can undo it.
     {
       key: "f",
       onKey: () => {
@@ -449,7 +442,7 @@ export function mountLaneInteraction(
         deps.announcer.announce("Fitted the whole trace in view");
       },
     },
-    // z: undo the last committed view (K4). Announced through A16.
+    // z: undo the last committed view. Announced through the announcer.
     {
       key: "z",
       onKey: () => {

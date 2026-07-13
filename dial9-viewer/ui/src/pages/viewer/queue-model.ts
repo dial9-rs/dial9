@@ -1,37 +1,29 @@
-// src/pages/viewer/queue-model.ts - the Queue depth track's pure model
-// (T29; docs/ui-inventory/features/02-viewer-html.md section M; legacy
-// `renderQueueChart` / `showSpawnedTasks` in viewer.html). NODE-TESTABLE: no
-// store, no DOM, no canvas - everything the queue-track controller
-// (queue-track.ts) needs to derive its series, scale them, and answer the M7
-// drag-select lives here so the numbers (J7 behavioral-diff) and the S6 scale
-// fix are unit-tested directly.
+// The Queue depth track's pure model: no store, no DOM, no canvas - everything
+// the queue-track controller needs to derive its series, scale them, and answer
+// the drag-select.
 //
-// S6 (issue #282, the core correctness ask): the legacy global-queue area was
-// a filled step whose top edge sat at the very chart bottom when the value was
-// 0 - a 1px stroke fused to the axis, indistinguishable from "no data"
-// ("invisible at zero", which confused a live Tokioconf audience). `queueScaleY`
+// Issue #282: a 0-valued global-queue area rendered as a 1px stroke fused to
+// the axis, indistinguishable from "no data" (invisible at zero). `queueScaleY`
 // reserves ZERO_BASELINE_PX below the lowest data so a 0-valued series maps to
 // a VISIBLE flat line a fixed distance above the axis. The underlying numbers
-// (bucketed max global/local, active-task counts, maxQ) are IDENTICAL to the
-// legacy chart - only the y-mapping changes (the ledgered presentation delta).
+// are unchanged - only the y-mapping does.
 //
 // The three series (global injection queue, max per-worker local queue,
-// active-task count) share ONE explicit zero baseline (the S6 "one labeled,
-// always-visible representation") even though the active-task line keeps its
-// own right-axis magnitude scale, so all three read against the same floor.
+// active-task count) share ONE explicit zero baseline even though the
+// active-task line keeps its own right-axis magnitude scale, so all three read
+// against the same floor.
 
 import type { ParsedTrace, TimeRange } from "../../types/trace.js";
 import type { StoreState } from "../../types/state.js";
 import { buildActiveTaskTimeline, buildWorkerSpans } from "../../lib/trace/index.js";
 import { deriveWorkerIds } from "../../components/canvas/lanes/data.js";
 
-// ── Windowing descriptor (T17 carried obligation) ────────────────────────
+// ── Windowing descriptor ─────────────────────────────────────────────────
 
 /**
  * The resident-window state the queue renderer must surface so a truncated /
- * partial window is never painted as complete (T17-audit notes 6+7). Both
- * fields resolve to the "complete" value for a whole-trace load. Mirrors the
- * CPU track's `CpuWindow` (cpu.ts) and the task-detail track's window.
+ * partial window is never painted as complete. Both fields resolve to the
+ * "complete" value for a whole-trace load. Mirrors the CPU track's `CpuWindow`.
  */
 export interface QueueWindow {
   truncatedAt: "start" | "end" | "both" | null;
@@ -46,7 +38,7 @@ export const COMPLETE_QUEUE_WINDOW: QueueWindow = {
 
 // ── Series data (derived once per trace) ─────────────────────────────────
 
-/** One entry of the merged, sorted local-queue timeline (legacy mergedLocalSamples). */
+/** One entry of the merged, sorted local-queue timeline. */
 export interface MergedLocalSample {
   t: number;
   /** Worker the sample belongs to. */
@@ -55,7 +47,7 @@ export interface MergedLocalSample {
 }
 
 /**
- * Everything the queue track needs for one render pass + the M7 drag-select,
+ * Everything the queue track needs for one render pass + the drag-select,
  * lifted out of the store so the render logic stays Node-testable. Built once
  * per loaded trace by `computeQueueData` (store.derived over the `trace`
  * slice), never per frame.
@@ -63,23 +55,22 @@ export interface MergedLocalSample {
 export interface QueueData {
   /** Worker ids in render order (same set the lanes/overlay use). */
   workerIds: readonly number[];
-  /** Global injection-queue series, sorted by t (M1 / I6 Global Q). */
+  /** Global injection-queue series, sorted by t. */
   queueSamples: readonly { t: number; global: number }[];
   /**
-   * All per-worker local-queue samples merged into one t-sorted timeline
-   * (legacy mergedLocalSamples), so the render steps it once instead of
-   * re-merging per frame (M2 max-local line).
+   * All per-worker local-queue samples merged into one t-sorted timeline, so
+   * the render steps it once instead of re-merging per frame (max-local line).
    */
   mergedLocalSamples: readonly MergedLocalSample[];
-  /** Active-task-count timeline, sorted by t (M3 / I6 Active Tasks). */
+  /** Active-task-count timeline, sorted by t. */
   activeTaskSamples: readonly { t: number; count: number }[];
-  /** task id -> first-poll time (legacy taskFirstPoll), the M7 spawn proxy. */
+  /** task id -> first-poll time, the spawn proxy. */
   taskFirstPoll: ReadonlyMap<number, number>;
   /** task id -> spawn-location id (null when unknown). */
   taskSpawnLocs: ReadonlyMap<number, string | null>;
   /** spawn-location id -> human-readable location. */
   spawnLocations: ReadonlyMap<string, string>;
-  /** True when the trace carries the active-task timeline (M3/M7 gate). */
+  /** True when the trace carries the active-task timeline. */
   hasTaskTracking: boolean;
 }
 
@@ -96,8 +87,8 @@ export const EMPTY_QUEUE_DATA: QueueData = {
 };
 
 /**
- * Derive the queue track's frame-invariant data for one parsed trace. Runs the
- * frozen core's buildWorkerSpans (global + per-worker queue series) and
+ * Derive the queue track's frame-invariant data for one parsed trace. Runs
+ * buildWorkerSpans (global + per-worker queue series) and
  * buildActiveTaskTimeline (active-task counts + taskFirstPoll). Call once per
  * trace and cache (store.derived over the `trace` slice) - never per frame.
  */
@@ -116,8 +107,7 @@ export function computeQueueData(trace: ParsedTrace | null): QueueData {
   );
 
   // Merge every worker's local-queue series into one t-sorted timeline, built
-  // ONCE here so the per-frame render never re-merges (legacy built this at
-  // load time as `mergedLocalSamples`).
+  // ONCE here so the per-frame render never re-merges.
   const merged: MergedLocalSample[] = [];
   for (const w of workerIds) {
     const samples = spanResult.workerQueueSamples[w];
@@ -139,12 +129,11 @@ export function computeQueueData(trace: ParsedTrace | null): QueueData {
 }
 
 /**
- * Derive the T17 window descriptor from the store (carried obligation): any
- * segment stuck "oversized" makes the queue view unavoidably partial. The
- * whole-trace shell has an empty segments slice, so this resolves to complete;
- * the `truncatedAt` edge derivation from a live resident window is the
- * downstream wiring seam (T34/T35), and the renderer consumes it regardless.
- * Mirrors cpu.ts `deriveCpuWindow`.
+ * Derive the window descriptor from the store: any segment stuck "oversized"
+ * makes the queue view unavoidably partial. The whole-trace path has an empty
+ * segments slice, so this resolves to complete; `truncatedAt` stays null while
+ * the renderer consumes the descriptor regardless. Mirrors cpu.ts
+ * `deriveCpuWindow`.
  */
 export function deriveQueueWindow(state: StoreState): QueueWindow {
   for (const entry of state.segments.segments.values()) {
@@ -155,27 +144,25 @@ export function deriveQueueWindow(state: StoreState): QueueWindow {
   return COMPLETE_QUEUE_WINDOW;
 }
 
-// ── The S6 scale function (the Vitest-tested crux) ───────────────────────
+// ── The scale function ───────────────────────────────────────────────────
 
 /**
- * Pixels reserved between the chart's true bottom (the axis) and the y a
- * value of 0 maps to. This is the S6 / #282 fix: a 0-valued series (a global
- * queue that sits at 0 for the whole window) renders as a VISIBLE flat line
- * this far above the axis instead of a stroke fused to it. Small enough to
- * cost almost no vertical range, large enough to read as a distinct line.
+ * Pixels reserved between the chart's true bottom (the axis) and the y a value
+ * of 0 maps to, so a 0-valued series renders as a VISIBLE flat line this far
+ * above the axis instead of a stroke fused to it. Small enough to cost almost
+ * no vertical range, large enough to read as a distinct line.
  */
 export const ZERO_BASELINE_PX = 3;
 
 /**
  * Map a queue-series value in [0, max] to a y coordinate inside the chart band
  * [chartTop, chartTop + chartH]. The bottom ZERO_BASELINE_PX is reserved so
- * value 0 lands a visible distance ABOVE the axis (the explicit zero baseline,
- * S6): `queueScaleY(0, ...)` is strictly less than `chartTop + chartH`. `max`
- * <= 0 pins everything to that baseline. The result is clamped into the band.
+ * value 0 lands a visible distance ABOVE the axis (the explicit zero baseline):
+ * `queueScaleY(0, ...)` is strictly less than `chartTop + chartH`. `max` <= 0
+ * pins everything to that baseline. The result is clamped into the band.
  *
  * This is the single scale every series (global, max-local, active-task) runs
- * through, so a 0-valued global renders the same visible flat line the legacy
- * chart hid at the axis.
+ * through, so a 0-valued global renders a visible flat line.
  */
 export function queueScaleY(
   value: number,
@@ -192,7 +179,7 @@ export function queueScaleY(
   return baselineY - norm * usableH;
 }
 
-/** The y a value of 0 maps to (the visible zero baseline; S6). */
+/** The y a value of 0 maps to (the visible zero baseline). */
 export function queueBaselineY(
   chartTop: number,
   chartH: number,
@@ -201,24 +188,22 @@ export function queueBaselineY(
   return chartTop + chartH - Math.min(Math.max(0, baselinePx), chartH);
 }
 
-// ── Per-frame render model (bucketing; the J7 parity target) ─────────────
+// ── Per-frame render model (bucketing) ───────────────────────────────────
 
-/** The active-task overlay (M3): a step line on its own right-axis magnitude. */
+/** The active-task overlay: a step line on its own right-axis magnitude. */
 export interface QueueActiveTaskModel {
   /** Step-line vertices in draw-area x (px) + raw count (y via queueScaleY). */
   points: readonly { x: number; count: number }[];
-  /** Count at viewStart (the step line's left seed), legacy countAtViewStart. */
+  /** Count at viewStart (the step line's left seed). */
   startCount: number;
-  /** Right-axis magnitude (legacy maxTasks), >= 1. */
+  /** Right-axis magnitude, >= 1. */
   maxTasks: number;
 }
 
 /**
  * The bucketed queue render model for one frame. `global[i]` / `local[i]` are
- * the plotted (carry-forward-applied) step values at pixel column i, exactly
- * the legacy per-bucket values - the y-mapping (queueScaleY) is the only thing
- * that changed for S6, so these numbers behavioral-diff against the legacy
- * chart. `maxQ` is the shared global+local magnitude (legacy: max(1, ...)).
+ * the plotted (carry-forward-applied) step values at pixel column i. `maxQ` is
+ * the shared global+local magnitude (max(1, ...)).
  */
 export interface QueueRenderModel {
   numBuckets: number;
@@ -257,13 +242,11 @@ function lowerBoundT<T extends { t: number }>(arr: readonly T[], target: number)
 
 /**
  * Bucket the global + local + active-task series into `drawW` pixel columns for
- * one view window. Ports `renderQueueChart`'s bucketing verbatim (viewer.html:
- * 4748-4891) so the plotted numbers are identical to legacy (J7): global takes
- * the max sample per pixel bucket; local steps the merged timeline tracking
- * each worker's current depth and takes the max across workers per bucket;
- * both carry the last value forward across empty buckets. `maxQ` is
- * max(1, peak global, peak local). The active-task overlay reproduces
- * legacy maxTasks + countAtViewStart on its own scale.
+ * one view window: global takes the max sample per pixel bucket; local steps
+ * the merged timeline tracking each worker's current depth and takes the max
+ * across workers per bucket; both carry the last value forward across empty
+ * buckets. `maxQ` is max(1, peak global, peak local). The active-task overlay
+ * reproduces maxTasks + countAtViewStart on its own scale.
  */
 export function buildQueueRenderModel(inputs: QueueRenderInputs): QueueRenderModel {
   const { data, viewStart, viewEnd, drawW } = inputs;
@@ -278,7 +261,7 @@ export function buildQueueRenderModel(inputs: QueueRenderInputs): QueueRenderMod
 
   let hasData = false;
 
-  // ── Global queue: max sample per pixel bucket (legacy 4755-4769) ────────
+  // ── Global queue: max sample per pixel bucket ───────────────────────────
   const bucketGlobal = new Array<number>(numBuckets).fill(0);
   const bucketHasData = new Array<boolean>(numBuckets).fill(false);
   {
@@ -295,7 +278,7 @@ export function buildQueueRenderModel(inputs: QueueRenderInputs): QueueRenderMod
     }
   }
 
-  // ── Local queue: single pass over the merged timeline (legacy 4771-4800) ─
+  // ── Local queue: single pass over the merged timeline ───────────────────
   const merged = data.mergedLocalSamples;
   const workerState = new Map<number, number>();
   for (const w of data.workerIds) workerState.set(w, 0);
@@ -324,16 +307,16 @@ export function buildQueueRenderModel(inputs: QueueRenderInputs): QueueRenderMod
     bucketLocal[bi] = max;
   }
 
-  // maxQ across visible buckets (legacy 4802-4807).
+  // maxQ across visible buckets.
   let maxQ = 1;
   for (let i = 0; i < numBuckets; i++) {
     if (bucketGlobal[i]! > maxQ) maxQ = bucketGlobal[i]!;
     if (bucketLocal[i]! > maxQ) maxQ = bucketLocal[i]!;
   }
 
-  // Carry-forward so global[i]/local[i] are the plotted step value at pixel i
-  // (legacy tracked lastY, updating only on hasData buckets; the value carries
-  // otherwise). Start at 0 (the baseline) until the first data bucket.
+  // Carry-forward so global[i]/local[i] are the plotted step value at pixel i:
+  // update only on hasData buckets, else carry the last value. Start at 0 (the
+  // baseline) until the first data bucket.
   let lastG = 0;
   let lastL = 0;
   for (let i = 0; i < numBuckets; i++) {
@@ -352,10 +335,10 @@ export function buildQueueRenderModel(inputs: QueueRenderInputs): QueueRenderMod
 }
 
 /**
- * The active-task step-line model (M3), ported from legacy 4858-4891:
- * maxTasks = max(1, peak count in view, count at viewStart); the step line is
- * seeded with countAtViewStart and one vertex per in-view sample, at draw-area
- * x. Null when the trace has no active-task timeline (M3 CONDITIONAL).
+ * The active-task step-line model: maxTasks = max(1, peak count in view, count
+ * at viewStart); the step line is seeded with countAtViewStart and one vertex
+ * per in-view sample, at draw-area x. Null when the trace has no active-task
+ * timeline.
  */
 function buildActiveTaskModel(
   data: QueueData,
@@ -388,39 +371,35 @@ function buildActiveTaskModel(
   return { points, startCount, maxTasks };
 }
 
-// ── M7 drag-select: tasks spawned in a time range (the T31 render source) ─
+// ── Drag-select: tasks spawned in a time range ────────────────────────────
 
-/** One spawn-location group of tasks first polled inside the M7 range. */
+/** One spawn-location group of tasks first polled inside the range. */
 export interface SpawnedTaskGroup {
   /** Spawn location (or "(unknown)"). */
   loc: string;
-  /** Tasks in this group, in taskFirstPoll iteration order (legacy order). */
+  /** Tasks in this group, in taskFirstPoll iteration order. */
   tasks: readonly { taskId: number; firstPoll: number }[];
 }
 
 /**
- * The M7 drag-select result: tasks whose FIRST POLL falls in `range`, grouped
- * by spawn location and sorted by count desc. This is the DERIVATION half of
- * M7 - T29 dispatches the range to `selection.spawnedTasksRange`; T31's
- * inspector RENDERS this (the clickable hex task-id links, 5 per group + the
- * "N more" tail, and the range duration are T31's presentation). Kept here (a
- * pure port of legacy `showSpawnedTasks`, viewer.html:7147-7188, minus the DOM)
- * so the numbers behavioral-diff against legacy (J7) and T31 reuses the same
- * logic instead of reimplementing it.
+ * The drag-select result: tasks whose FIRST POLL falls in `range`, grouped by
+ * spawn location and sorted by count desc. This is the derivation half - the
+ * track dispatches the range to `selection.spawnedTasksRange`; the inspector
+ * renders this. Kept here (a pure port, minus the DOM) so the inspector reuses
+ * the same logic instead of reimplementing it.
  */
 export interface SpawnedTasksResult {
   range: TimeRange;
-  /** Total tasks found in range (legacy `tasks.length`). */
+  /** Total tasks found in range. */
   total: number;
-  /** Groups sorted by task count desc (legacy sort). */
+  /** Groups sorted by task count desc. */
   groups: readonly SpawnedTaskGroup[];
 }
 
 /**
- * Compute the M7 spawned-task groups for a time range, or null when no task
- * was first polled in range (legacy `if (!tasks.length) return;`). Uses
- * `taskFirstPoll` as the spawn proxy exactly as legacy did (NOT taskSpawnTimes)
- * so the counts match. Bounds are inclusive on both ends (legacy `>=`/`<=`).
+ * Compute the spawned-task groups for a time range, or null when no task was
+ * first polled in range. Uses `taskFirstPoll` as the spawn proxy (NOT
+ * taskSpawnTimes). Bounds are inclusive on both ends.
  */
 export function computeSpawnedTasks(
   data: QueueData,
@@ -433,7 +412,7 @@ export function computeSpawnedTasks(
     if (t < startNs || t > endNs) continue;
     const locId = data.taskSpawnLocs.get(taskId);
     const raw = locId != null ? data.spawnLocations.get(locId) : null;
-    // Legacy `loc || "(unknown)"`: an empty/missing location groups as unknown.
+    // An empty/missing location groups as unknown.
     const loc = raw || "(unknown)";
     let bucket = groups.get(loc);
     if (bucket === undefined) {
@@ -450,7 +429,7 @@ export function computeSpawnedTasks(
   return { range, total, groups: sorted };
 }
 
-// ── Legend (F3: the queue legend covers every in-track encoding) ─────────
+// ── Legend ─────────────────────────────────────────────────────────────────
 
 /** One queue-legend entry: a swatch encoding + its meaning (matches the draw). */
 export interface QueueLegendEntry {
@@ -462,10 +441,9 @@ export interface QueueLegendEntry {
 }
 
 /**
- * The queue track legend (F3 amendment): every series the track draws is
- * explained, with swatch encodings that MATCH the in-track rendering (the
- * legacy header legend omitted the encodings and died with the collapsed fold;
- * S1). Ordered global -> local -> active-task, the draw order.
+ * The queue track legend: every series the track draws is explained, with
+ * swatch encodings that MATCH the in-track rendering. Ordered global -> local
+ * -> active-task, the draw order.
  */
 export const QUEUE_LEGEND: readonly QueueLegendEntry[] = [
   { swatch: "#4fc3f7", label: "Global queue", shape: "area" },

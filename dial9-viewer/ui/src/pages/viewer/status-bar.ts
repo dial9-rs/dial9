@@ -1,15 +1,11 @@
-// src/pages/viewer/status-bar.ts - the persistent status bar (T35): selection
-// state (04 F7), the visible time range, segment fetch/parse progress (the 2.8
-// feedback hard edge), a copy-link button (T19's share affordance, 04 S3
-// surface clause), and the key hints. It fills the shell's `.d9-status` footer.
+// The persistent status bar: selection state, the visible time range, segment
+// fetch/parse progress, a copy-link button, and the key hints. It fills the
+// shell's `.d9-status` footer.
 //
-// Split like every other chunk-2 surface: a PURE view model (statusViewModel,
-// Node-testable over store state) plus an imperative mount. The text content is
-// a lit-html render into a host the component owns, driven by its own store
-// subscription; the copy-link button is appended ONCE (T19 mountCopyLink) as a
-// sibling so its "Copied" flash survives the text re-renders. Both live inside
-// the shell-owned empty `.d9-status` host, so the shell's declarative
-// re-renders never clobber them (the toast/legend/readout-stub technique).
+// A pure view model (statusViewModel, Node-testable over store state) plus an
+// imperative mount. The text content is a lit-html render into a host the
+// component owns; the copy-link button is appended once as a sibling so its
+// "Copied" flash survives the text re-renders.
 
 import { html, render, nothing, type TemplateResult } from "lit-html";
 import type { ViewerStore } from "../../store/store.js";
@@ -18,13 +14,13 @@ import { formatHumanDuration } from "../../lib/trace/index.js";
 import { mountCopyLink } from "../../lib/url/index.js";
 import type { CopyLinkHandle } from "../../lib/url/index.js";
 
-/** Selection descriptor for the status line (04 F7 selection visibility). */
+/** Selection descriptor for the status line. */
 export interface StatusSelection {
   hasSelection: boolean;
   label: string;
 }
 
-/** Segment fetch/parse progress descriptor (2.8 feedback hard edge). */
+/** Segment fetch/parse progress descriptor. */
 export interface StatusProgress {
   /** null when no segment windowing is active (empty segments slice). */
   label: string | null;
@@ -46,7 +42,7 @@ function relOffset(ns: number, minTs: number): string {
   return `+${((ns - minTs) / 1e9).toFixed(2)}s`;
 }
 
-/** Selection line (F7): the primary highlighted entity, or "No selection". */
+/** Selection line: the primary highlighted entity, or "No selection". */
 export function selectionState(sel: StoreState["selection"]): StatusSelection {
   if (sel.selectedTaskId !== null) {
     return {
@@ -64,10 +60,10 @@ export function selectionState(sel: StoreState["selection"]): StatusSelection {
 }
 
 /**
- * Segment fetch/parse progress from the segments slice (2.8): how many
- * segments are resident (parsed) of the listing, plus any in-flight fetch and
- * any oversized (can-never-fit) segments. null when segment windowing is not
- * active (whole-trace path - progress is the load chrome's, T34).
+ * Segment fetch/parse progress from the segments slice: how many segments are
+ * resident (parsed) of the listing, plus any in-flight fetch and any oversized
+ * (can-never-fit) segments. null when segment windowing is not active
+ * (whole-trace path).
  */
 export function segmentProgress(segments: SegmentsSlice): StatusProgress {
   const total = segments.segments.size;
@@ -86,7 +82,7 @@ export function segmentProgress(segments: SegmentsSlice): StatusProgress {
   return { label, active: fetching > 0 };
 }
 
-/** Build the status view model from store state (pure; Vitest over bindings). */
+/** Build the status view model from store state (pure). */
 export function statusViewModel(state: StoreState): StatusViewModel {
   const hasTrace = state.trace.trace !== null;
   const { viewStart, viewEnd, minTs } = state.viewport;
@@ -133,9 +129,9 @@ function statusTemplate(vm: StatusViewModel, onClear: () => void): TemplateResul
 
 /** Callbacks the status bar needs from the page entry. */
 export interface StatusBarDeps {
-  /** F7 clear affordance: clear the selection highlight state. */
+  /** Clear affordance: clear the selection highlight state. */
   clearSelection(): void;
-  /** Run before copy-link reads the URL (T19 sync-binding flush seam). */
+  /** Run before copy-link reads the URL (sync-binding flush seam). */
   beforeCopyLink?(): void;
   /** URL text supplier for copy-link; defaults to the live location href. */
   copyLinkText?(): string;
@@ -169,9 +165,9 @@ export function createStatusBar(
     render(statusTemplate(statusViewModel(state), onClear), textHost);
   }
 
-  // The copy-link button (T19): appended as a sibling so its flash state is
-  // never reset by the text re-render. beforeCopy flushes any pending
-  // view-state write (wired by the page when the URL sync binding exists).
+  // The copy-link button: appended as a sibling so its flash state is never
+  // reset by the text re-render. beforeCopy flushes any pending view-state write
+  // (wired by the page when the URL sync binding exists).
   const copyOptions: Parameters<typeof mountCopyLink>[1] = {};
   if (deps.beforeCopyLink !== undefined) copyOptions.beforeCopy = deps.beforeCopyLink;
   if (deps.copyLinkText !== undefined) copyOptions.getText = deps.copyLinkText;

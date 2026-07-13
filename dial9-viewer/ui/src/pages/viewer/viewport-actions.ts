@@ -1,34 +1,30 @@
-// src/pages/viewer/viewport-actions.ts - the viewport zoom/pan/fit actions and
-// the `z` zoom-history integration (T23; features/02 H1-H3, H8, H11, H12, and
-// the K4 zoom-undo amendment).
+// The viewport zoom/pan/fit actions and the `z` zoom-history integration.
 //
-// TWO layers, kept apart so the arithmetic is testable without a store:
+// Two layers, kept apart so the arithmetic is testable without a store:
 //
-//   1. PURE math over a ViewportSlice (zoomWindow / panWindow / fitWindow /
-//      regionWindow). These reproduce the legacy `zoom()` (viewer.html:5090)
-//      and the arrow pan/zoom handlers (:6294-6324) EXACTLY, including the
-//      100ns minimum-duration clamp and the "clamp each edge independently"
-//      behaviour near a bound. No store, no DOM.
+//   1. Pure math over a ViewportSlice (zoomWindow / panWindow / fitWindow /
+//      regionWindow), including the 100ns minimum-duration clamp and the "clamp
+//      each edge independently" behaviour near a bound. No store, no DOM.
 //
-//   2. A store-bound `ViewportActions` object that applies those results
-//      through the store (never rendering directly - F2: input dispatches
-//      store actions only, the scheduler coalesces) and threads the T20
-//      zoom-history stack so `z` undoes the last committed view (K4).
+//   2. A store-bound `ViewportActions` object that applies those results through
+//      the store (never rendering directly - input dispatches store actions
+//      only, the scheduler coalesces) and threads the zoom-history stack so `z`
+//      undoes the last committed view.
 //
-// The history records every COMMITTED discrete view (each zoom/fit/region/
-// arrow step, plus one entry per pan-drag at its end - the pointer machine
-// calls recordCurrent() on mouseup). Continuous pan frames call applyPan(),
-// which updates the viewport WITHOUT recording, so a drag is one undo step,
-// not hundreds. undo() pops the previous committed view and applies it.
+// The history records every COMMITTED discrete view (each zoom/fit/region/arrow
+// step, plus one entry per pan-drag at its end - the pointer machine calls
+// recordCurrent() on mouseup). Continuous pan frames call applyPan(), which
+// updates the viewport WITHOUT recording, so a drag is one undo step, not
+// hundreds. undo() pops the previous committed view and applies it.
 
 import { createZoomHistory, type ZoomHistory } from "../../lib/interact/zoom-history.js";
 import type { ViewerStore } from "../../store/store.js";
 import type { ViewportSlice } from "../../types/state.js";
 
-/** The minimum view duration in ns (legacy `zoom()` clamp, viewer.html:5094). */
+/** The minimum view duration in ns. */
 export const MIN_VIEW_NS = 100;
 
-/** Arrow / WASD pan step as a fraction of the visible duration (H12). */
+/** Arrow / WASD pan step as a fraction of the visible duration. */
 export const PAN_FRACTION = 0.2;
 
 /** The two horizontal-nav directions: -1 = left (earlier), +1 = right (later). */
@@ -42,10 +38,9 @@ export interface ViewWindow {
 
 /**
  * Zoom the window by `factor` about `centerFrac` of the current view (0 = left
- * edge, 0.5 = middle, 1 = right edge). Ported verbatim from viewer.html:5090
- * `zoom()`: the new duration is clamped to a 100ns floor, then each edge is
- * clamped to [minTs, maxTs] INDEPENDENTLY (so zooming out near a bound can
- * yield a shorter effective span - the legacy behaviour, preserved).
+ * edge, 0.5 = middle, 1 = right edge). The new duration is clamped to a 100ns
+ * floor, then each edge is clamped to [minTs, maxTs] INDEPENDENTLY (so zooming
+ * out near a bound can yield a shorter effective span).
  */
 export function zoomWindow(vp: ViewportSlice, factor: number, centerFrac = 0.5): ViewWindow {
   const viewDur = vp.viewEnd - vp.viewStart;
@@ -57,15 +52,15 @@ export function zoomWindow(vp: ViewportSlice, factor: number, centerFrac = 0.5):
   };
 }
 
-/** Fit the window to the full navigable extent (H3 "Fit All"). */
+/** Fit the window to the full navigable extent ("Fit All"). */
 export function fitWindow(vp: ViewportSlice): ViewWindow {
   return { viewStart: vp.minTs, viewEnd: vp.maxTs };
 }
 
 /**
  * Pan by `PAN_FRACTION` of the visible duration in `dir`, preserving the
- * duration and clamping to [minTs, maxTs] (H12 arrow pan, viewer.html:6302).
- * At a bound the window butts against it and keeps its width.
+ * duration and clamping to [minTs, maxTs]. At a bound the window butts against
+ * it and keeps its width.
  */
 export function panWindow(vp: ViewportSlice, dir: PanDirection): ViewWindow {
   const viewDur = vp.viewEnd - vp.viewStart;
@@ -89,10 +84,10 @@ export function panWindow(vp: ViewportSlice, dir: PanDirection): ViewWindow {
 }
 
 /**
- * Zoom the view to a selected [start, end] region (Alt+drag H8 and the
- * keyboard zoom-selection confirm), clamped to [minTs, maxTs]. Matches
- * viewer.html:5315 / :5245 (direct edge clamp, no 100ns floor - the caller
- * guarantees a non-trivial region: >3px for drag, >=100ns for keyboard).
+ * Zoom the view to a selected [start, end] region (Alt+drag and the keyboard
+ * zoom-selection confirm), clamped to [minTs, maxTs]. Direct edge clamp, no
+ * 100ns floor - the caller guarantees a non-trivial region: >3px for drag,
+ * >=100ns for keyboard.
  */
 export function regionWindow(vp: ViewportSlice, start: number, end: number): ViewWindow {
   return {
@@ -107,29 +102,28 @@ function sameWindow(a: ViewWindow, b: ViewWindow): boolean {
 }
 
 /**
- * The store-bound viewport actions (H1-H3, H8, H11-H12, K4). Every method
- * dispatches a store update and NEVER renders (F2); the store's RAF scheduler
- * coalesces. Discrete view changes are recorded in the zoom-history stack so
- * `z` (undo) can step back.
+ * The store-bound viewport actions. Every method dispatches a store update and
+ * NEVER renders; the store's RAF scheduler coalesces. Discrete view changes are
+ * recorded in the zoom-history stack so `z` (undo) can step back.
  */
 export interface ViewportActions {
-  /** H1/H2/H11/W-S: zoom by factor about centerFrac (default view centre). */
+  /** Zoom by factor about centerFrac (default view centre). */
   zoom(factor: number, centerFrac?: number): void;
-  /** H3/`f`: fit to the full trace extent. */
+  /** `f`: fit to the full trace extent. */
   fit(): void;
-  /** H12/A-D: pan one step in `dir`, preserving duration. */
+  /** Pan one step in `dir`, preserving duration. */
   pan(dir: PanDirection): void;
-  /** H8 / keyboard zoom-select confirm: zoom the view to [start, end]. */
+  /** Keyboard zoom-select confirm: zoom the view to [start, end]. */
   zoomToRegion(start: number, end: number): void;
-  /** H6 drag frame: apply a panned window WITHOUT recording history. */
+  /** Drag frame: apply a panned window WITHOUT recording history. */
   applyPan(win: ViewWindow): void;
   /** Record the CURRENT viewport as a history entry (pan-drag end / baseline). */
   recordCurrent(): void;
   /** Reset history (new trace loaded); optionally seed a baseline. */
   resetHistory(): void;
   /**
-   * `z` zoom-undo (K4): pop the previous committed view and apply it. Returns
-   * true when a view was restored, false when there is nothing to undo.
+   * `z` zoom-undo: pop the previous committed view and apply it. Returns true
+   * when a view was restored, false when there is nothing to undo.
    */
   undo(): boolean;
   /** Available undo depth (for tests / status). */

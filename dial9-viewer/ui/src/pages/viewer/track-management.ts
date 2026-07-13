@@ -1,44 +1,35 @@
-// src/pages/viewer/track-management.ts - per-track collapse + drag-reorder
-// (T36; what section O's foldable-panel mechanics become under the unified
-// column, docs/tickets/chunk-2-viewer.md T36; interaction spec: the
-// concept-1 mock's track column, docs/ui-inventory/mocks/concept-1.html).
+// Per-track collapse + drag-reorder for the unified track column. This module
+// owns:
 //
-// Section O's BEHAVIOR contract - per-surface show/hide with persistence -
-// survives; the one-line-fold PRESENTATION is retired by S1 (analysis
-// surfaces are visible by default). This module owns:
-//
-//   - which tracks are user-manageable (collapse + reorder): the four
-//     foldable analysis surfaces (cpu/queue/spans/events), exactly section
-//     O's scope. The two structural tracks (timeline/lanes) and the
-//     selection-only task-detail track are fixed.
+//   - which tracks are user-manageable (collapse + reorder): the four foldable
+//     analysis surfaces (cpu/queue/spans/events). The two structural tracks
+//     (timeline/lanes) and the selection-only task-detail track are fixed.
 //   - the ordering resolution (uiPrefs.trackOrder -> the ordered TrackSpec
 //     list), robust to unknown/missing ids so a stored order predating a new
 //     track still resolves.
-//   - the reorder swap (drop = swap position, per the interaction spec).
+//   - the reorder swap (drop = swap position).
 //   - the collapse predicate + label-only height.
 //   - the store actions (toggle collapse / reorder) the shell's caret + grip
 //     handlers dispatch.
-//   - localStorage persistence (hydrate on boot + persist on change), the
-//     headline DoD: trackOrder/collapsed survive reload.
+//   - localStorage persistence (hydrate on boot + persist on change):
+//     trackOrder/collapsed survive reload.
 //
-// Scope fence: track PINNING is OUT (no section-O contract). This operates on
-// the track LIST/ORDER + per-track height only; it does NOT touch the
-// per-track render delegation (spans/queue/events/cpu register their own
-// id-keyed branches in tracks.ts, unchanged).
+// Track pinning is out of scope. This operates on the track list/order +
+// per-track height only; it does not touch the per-track render delegation.
 
 import type { ViewerStore } from "../../store/store.js";
 import type { StoreState } from "../../types/state.js";
 import { TRACKS } from "./track-layout.js";
 import type { TrackId, TrackSpec } from "./track-layout.js";
 
-/** Collapsed (label-only) track height in CSS px (legacy O1: 24px). */
+/** Collapsed (label-only) track height in CSS px. */
 export const COLLAPSED_TRACK_H = 24;
 
 /**
  * The tracks the user can collapse + reorder: the foldable analysis surfaces
- * (section O applies to spans/events/cpu/queue; task-detail is NOT foldable).
- * The structural tracks (timeline/lanes) host the shared axis + worker rows
- * and stay pinned at the top. Order here is irrelevant (membership only).
+ * (spans/events/cpu/queue; task-detail is NOT foldable). The structural tracks
+ * (timeline/lanes) host the shared axis + worker rows and stay pinned at the
+ * top. Order here is irrelevant (membership only).
  */
 export const MANAGEABLE_TRACK_IDS: readonly TrackId[] = [
   "cpu",
@@ -111,9 +102,8 @@ function manageableOrder(trackOrder: readonly string[]): TrackId[] {
 
 /**
  * Compute the new trackOrder after dropping `dragged` onto `target`: swap the
- * two tracks' positions (the interaction spec's "drop = swap position"). A
- * no-op (returns the current manageable order) when either id is not
- * manageable or they are the same track.
+ * two tracks' positions. A no-op (returns the current manageable order) when
+ * either id is not manageable or they are the same track.
  */
 export function computeReorder(
   trackOrder: readonly string[],
@@ -173,16 +163,14 @@ function sameOrder(a: readonly string[], b: readonly string[]): boolean {
   return a.every((v, i) => v === b[i]);
 }
 
-// ── localStorage persistence (headline DoD: survives reload) ───────────────
+// ── localStorage persistence (survives reload) ─────────────────────────────
 //
-// Mirrors the legacy viewer's storage robustness (viewer.html:1410-1426): a
-// try/catch around localStorage with an in-memory fallback map, so a
+// A try/catch around localStorage with an in-memory fallback map, so a
 // storage-blocked context (private mode, disabled storage) degrades to
 // session-scoped prefs instead of throwing. Stored as ONE JSON blob under a
-// single key (the amended O4 shape; replaces the legacy per-panel
-// dial9.viewer.panelCollapsed.<key> string keys).
+// single key.
 
-/** localStorage key for the serialized track prefs (amended O4). */
+/** localStorage key for the serialized track prefs. */
 export const TRACK_PREFS_STORAGE_KEY = "dial9.viewer.trackPrefs";
 
 /** The persisted shape: the manageable order + the collapse map. */
@@ -247,8 +235,8 @@ export function saveTrackPrefs(prefs: TrackPrefs): void {
 /**
  * Seed the store's uiPrefs from persisted track prefs (call once on boot,
  * BEFORE the shell's first render, so the initial paint reflects the saved
- * order/collapse). A no-op when nothing is stored (the store keeps its S1
- * resting defaults). Dispatches a single uiPrefs update.
+ * order/collapse). A no-op when nothing is stored (the store keeps its resting
+ * defaults). Dispatches a single uiPrefs update.
  */
 export function hydrateTrackPrefs(store: ViewerStore): void {
   const prefs = loadTrackPrefs();

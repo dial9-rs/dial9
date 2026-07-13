@@ -1,29 +1,26 @@
-// src/pages/viewer/minimap-model.ts - the overview-minimap density/coverage
-// model + geometry (T35; 04 S8 "no position context"; architecture 2.8
-// tier-1 sources). PURE and Node-testable: no DOM, no canvas, no store.
+// The overview-minimap density/coverage model + geometry. PURE and
+// Node-testable: no DOM, no canvas, no store.
 //
 // The minimap is the viewer's position context: a compressed overview of the
 // WHOLE trace time range with a draggable box marking the visible window. Its
-// density comes from TIER-1 sources only (2.8), so a multi-segment trace whose
-// tail is UNFETCHED is still navigable - the tail renders from listing-metadata
-// extents (tier 1), NOT as empty/complete (T17-audit notes 6-7: never present a
-// truncated window as whole).
+// density comes from tier-1 sources only, so a multi-segment trace whose tail
+// is UNFETCHED is still navigable - the tail renders from listing-metadata
+// extents, never as empty/complete.
 //
-// Density source precedence (the T18 coverage hard edge, architecture 2.8):
-//   1. aggregate density with coverage === "full"  -> trust it (server-folded,
+// Density source precedence:
+//   1. aggregate density with coverage === "full" -> trust it (server-folded,
 //      complete);
-//   2. otherwise fall back to LISTING-METADATA density (segment extents +
-//      gzip sizes from the T17 segments slice) - do NOT present a partial
-//      aggregate as complete (the ticket's explicit rule);
-//   3. whole-trace (non-segmented T16 path, empty segments slice) -> the
+//   2. otherwise fall back to LISTING-METADATA density (segment extents + gzip
+//      sizes from the segments slice) - do NOT present a partial aggregate as
+//      complete;
+//   3. whole-trace (non-segmented, empty segments slice) -> the
 //      component-supplied per-time event histogram, all resident/complete;
 //   4. nothing loaded -> null range, the minimap renders empty.
 //
-// Per-bin COVERAGE distinguishes fetched (tier-2 raw, "parsed") from tier-1-only
-// regions, mapping segment residency exactly as components/overlay/readout.ts
-// coverageAt does, so the two surfaces agree:
-//   parsed -> complete ; listed/fetching/evicted -> truncated ; oversized ->
-//   oversized ; no covering segment in a segmented trace -> empty (a listing gap).
+// Per-bin COVERAGE distinguishes fetched ("parsed") from tier-1-only regions,
+// mapping segment residency exactly as the at-cursor readout does so the two
+// surfaces agree: parsed -> complete; listed/fetching/evicted -> truncated;
+// oversized -> oversized; no covering segment -> empty (a listing gap).
 
 import type { CoverageSignal } from "../../lib/trace/index.js";
 import type { SegmentEntry, SegmentLifecycle } from "../../types/state.js";
@@ -64,10 +61,10 @@ export interface ViewportBox {
 }
 
 /**
- * Aggregate density from T18's client (architecture 2.8 tier 1). `bins` is a
- * normalized density series of any length (resampled to the minimap's bin
- * count); `coverage` is T18's CoverageSignal - only trusted for the density
- * when "full" (else the model falls back to listing metadata).
+ * Aggregate density (tier 1). `bins` is a normalized density series of any
+ * length (resampled to the minimap's bin count); `coverage` is a
+ * CoverageSignal - only trusted for the density when "full" (else the model
+ * falls back to listing metadata).
  */
 export interface AggregateDensity {
   coverage: CoverageSignal;
@@ -77,9 +74,9 @@ export interface AggregateDensity {
 /** Inputs to computeDensityBins (all tier-1 sources). */
 export interface DensityInputs {
   range: MinimapRange;
-  /** T17 segments slice: extents (tier 1) + residency (tier 2 when parsed). */
+  /** Segments slice: extents (tier 1) + residency (tier 2 when parsed). */
   segments: ReadonlyMap<string, SegmentEntry>;
-  /** T18 aggregate density; used only when coverage === "full". */
+  /** Aggregate density; used only when coverage === "full". */
   aggregate?: AggregateDensity | null;
   /** Whole-trace event histogram (component-derived), used when no segments. */
   traceDensity?: readonly number[] | null;
@@ -150,9 +147,9 @@ export function deriveMinimapRange(
 // ── Coverage mapping ─────────────────────────────────────────────────────
 
 /**
- * Map one segment's residency to a bin coverage, exactly as
- * components/overlay/readout.ts coverageAt maps it for the at-cursor readout,
- * so the minimap and the readout never disagree about the same segment.
+ * Map one segment's residency to a bin coverage, exactly as the at-cursor
+ * readout maps it, so the minimap and the readout never disagree about the
+ * same segment.
  */
 export function segmentBinCoverage(state: SegmentLifecycle): Exclude<BinCoverage, "empty"> {
   switch (state) {
@@ -225,7 +222,7 @@ export function computeDensityBins(input: DensityInputs): DensityBin[] {
   const span = range.endNs - range.startNs;
   if (span <= 0 || binCount <= 0) return [];
 
-  // 1. Aggregate density, trusted only when fully folded (T18 coverage edge).
+  // 1. Aggregate density, trusted only when fully folded.
   if (aggregate != null && aggregate.coverage === "full" && aggregate.bins.length > 0) {
     return resample(aggregate.bins, binCount).map((density) => ({
       density,
@@ -269,7 +266,7 @@ export function computeDensityBins(input: DensityInputs): DensityBin[] {
 
   // 3. Whole-trace (non-segmented) path: the event histogram is fully
   // resident, so every bin is complete. With no histogram, a flat band still
-  // gives position context (S8).
+  // gives position context.
   if (traceDensity != null && traceDensity.length > 0) {
     return resample(traceDensity, binCount).map((density) => ({
       density: Math.max(density, 0.04),
@@ -280,10 +277,10 @@ export function computeDensityBins(input: DensityInputs): DensityBin[] {
 }
 
 /**
- * The overall coverage descriptor the badge surfaces (never silently wrong,
- * 2.8): the aggregate signal when present, else "partial" when any in-range
- * region is tier-1-only, "full" when everything is resident/complete, "none"
- * when nothing is loaded.
+ * The overall coverage descriptor the badge surfaces (never silently wrong):
+ * the aggregate signal when present, else "partial" when any in-range region
+ * is tier-1-only, "full" when everything is resident/complete, "none" when
+ * nothing is loaded.
  */
 export function overallCoverage(
   bins: readonly DensityBin[],
@@ -348,7 +345,7 @@ function clampWindow(range: MinimapRange, start: number, width: number): Minimap
 /**
  * Click navigation: center the current view (width preserved) on `targetNs`,
  * clamped to the range. A click on the tier-1-only tail jumps the viewport
- * there - the headline S8 "navigate to any position" behavior.
+ * there.
  */
 export function minimapClickWindow(
   range: MinimapRange,

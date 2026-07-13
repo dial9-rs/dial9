@@ -1,28 +1,21 @@
-// src/pages/viewer/inspector.ts - the persistent inspector sidebar component
-// (T31; features/02 sections P/Q/R + amendments S4/F7). Concept-1's PERSISTENT
-// inspector (settled after the sidebar-drift history #291/#304/#305): one
-// mount(host, store) that renders the tabs (Task / Poll / Event / Related /
-// Stack) + the at-cursor readout, driven by the selection slice, and owns the
-// P-row mechanics (resize -> uiPrefs.sidebarWidth + localStorage, tab families,
-// body scroll, the F7 "what is selected" line + Esc/clear affordance).
+// The persistent inspector sidebar component: one mount(host, store) that
+// renders the tabs (Task / Poll / Event / Related / Stack) + the at-cursor
+// readout, driven by the selection slice, and owns the P-row mechanics (resize
+// -> uiPrefs.sidebarWidth + localStorage, tab families, body scroll, the "what
+// is selected" line + Esc/clear affordance).
 //
-// Rendering model (mirrors toasts / the T24 overlay): the shell renders an
-// EMPTY <aside class="d9-inspector"> landmark; this component renders its whole
-// interior imperatively via lit-html into that aside, so the shell's
-// declarative re-renders never clobber it (no child bindings on the aside).
-// It re-renders on its OWN store subscription (selection / trace / uiPrefs /
-// transient) - inside the scheduler tick - and on local UI-state changes (tab
-// switch, section toggle, load-more, frame expand) which render directly, like
-// the events-track tooltip and toasts (not a store-driven track redraw, so no
-// N18 assertion applies).
+// The shell renders an EMPTY <aside class="d9-inspector"> landmark; this
+// component renders its whole interior imperatively via lit-html into that
+// aside, so the shell's declarative re-renders never clobber it (no child
+// bindings on the aside). It re-renders on its OWN store subscription
+// (selection / trace / uiPrefs / transient) inside the scheduler tick, and on
+// local UI-state changes (tab switch, section toggle, load-more, frame expand)
+// which render directly.
 //
-// The heavy derivations are the pure inspector-model (Poll Detail, Event,
-// Related) + the CONSUMED contracts (never reimplemented here): T30's
-// createTaskDetailDerivation (Task tab), T24's transient.atCursor (readout,
-// 04 S4 - this replaces T24's stub), T27's selection.pinnedEvent (Event/Related
-// KV), T29's selection.spawnedTasksRange + computeSpawnedTasks (M7/M8). Trace-
-// invariant lookups (lanes, custom events, symbols, queue data) are cached in a
-// store.derived over the trace slice (F5): a pan/selection never rebuilds them.
+// The heavy derivations are the pure inspector-model plus consumed contracts:
+// the Task-tab derivation, transient.atCursor (readout), selection.pinnedEvent
+// (Event/Related KV), and selection.spawnedTasksRange + computeSpawnedTasks.
+// Trace-invariant lookups are cached in a store.derived over the trace slice.
 
 import { html, render, nothing, type TemplateResult } from "lit-html";
 import { classMap } from "lit-html/directives/class-map.js";
@@ -62,12 +55,12 @@ import {
   type SampleGroupView,
 } from "./inspector-model.js";
 
-/** Clamp bounds for the resize drag (legacy [200px, 92vw], viewer.html:P2). */
+/** Clamp bounds for the resize drag ([200px, 92vw]). */
 const MIN_WIDTH = 200;
 const MAX_WIDTH_VW = 0.92;
-/** localStorage key for the persisted width (P8; the legacy dial9.viewer.* namespace). */
+/** localStorage key for the persisted width. */
 const WIDTH_KEY = "dial9.viewer.sidebarWidth";
-/** Auto-narrow width on a fresh event pin (legacy EVENT_DEFAULT_WIDTH, P5). */
+/** Auto-narrow width on a fresh event pin. */
 const EVENT_DEFAULT_WIDTH = 350;
 
 const TAB_LABELS: Record<InspectorTab, string> = {
@@ -80,13 +73,14 @@ const TAB_LABELS: Record<InspectorTab, string> = {
 
 /** Callbacks the inspector needs from the page entry. */
 export interface InspectorDeps {
-  /** The esc-cascade to register the F7 clear-selection surface into. */
+  /** The esc-cascade to register the clear-selection surface into. */
   esc: EscCascade;
   /**
-   * The T32 region-analysis panel (flamegraph / blocking-calls / heap). The
-   * Stack tab renders a binding-free `[data-region-host]` for a retained region
+   * The region-analysis panel (flamegraph / blocking-calls / heap). The Stack
+   * tab renders a binding-free `[data-region-host]` for a retained region
    * (sel.sidebarRange); this controller populates it imperatively and is synced
-   * after every frame render. T31 owns the Stack CONTAINER; T32 owns what opens.
+   * after every frame render. The inspector owns the Stack CONTAINER; the
+   * region panel owns what opens.
    */
   regionPanel: RegionAnalysisController;
 }
@@ -116,7 +110,7 @@ export function mountInspector(
   store: ViewerStore,
   deps: InspectorDeps,
 ): MountedInspector {
-  // ── Derived caches (F5): rebuilt only when the trace slice is replaced ────
+  // ── Derived caches: rebuilt only when the trace slice is replaced ─────────
   const data = store.derived(["trace"], (s): InspectorData => {
     const trace = s.trace.trace;
     return {
@@ -128,8 +122,8 @@ export function mountInspector(
   });
   const taskDetail = createTaskDetailDerivation(store);
 
-  // Per-event task resolver (K7), memoized in a WeakMap and rebuilt only when
-  // the lane data changes (mirrors events-track's taskCache).
+  // Per-event task resolver, memoized in a WeakMap and rebuilt only when the
+  // lane data changes.
   let taskCache: { key: LaneData; fn: (ev: CustomTraceEvent) => number | null } | null =
     null;
   function taskResolver(): (ev: CustomTraceEvent) => number | null {
@@ -152,19 +146,19 @@ export function mountInspector(
   let activeTab: InspectorTab = "task";
   // Selection "activation signature": the fields that decide which tab to open
   // on a fresh selection (NOT hoveredWakerTaskId - a waker hover must not
-  // re-activate the tab). Auto-activation runs only when this changes (S4).
+  // re-activate the tab). Auto-activation runs only when this changes.
   let lastSelSig: string | null = null;
-  // Poll Detail frame-group expansion (R2), keyed "sched-<i>"/"cpu-<i>".
+  // Poll Detail frame-group expansion, keyed "sched-<i>"/"cpu-<i>".
   let expandedGroups = new Set<string>();
   let lastPollRef: SelectionSlice["pollDetail"] = null;
-  // Related tab UI state (Q3/Q5/Q6); reset when the detail event changes.
+  // Related tab UI state; reset when the detail event changes.
   let relatedUi: RelatedUiState = { collapsed: {}, expand: {}, correlate: null };
   let lastDetailEventRef: CustomTraceEvent | null = null;
-  // Resize / persistence state (P2/P8/P5).
+  // Resize / persistence state.
   let userResized = false;
 
-  // Seed the persisted width (P8): a hand-set width survives reload. When one
-  // is stored, treat it as a manual resize so P5/P6 auto-defaults yield to it.
+  // Seed the persisted width: a hand-set width survives reload. When one is
+  // stored, treat it as a manual resize so auto-defaults yield to it.
   const storedWidth = readStoredWidth();
   if (storedWidth !== null) {
     userResized = true;
@@ -177,7 +171,7 @@ export function mountInspector(
     return store.getState() as StoreState;
   }
 
-  // ── Selection-driven tab activation (S4: re-scope in the same action) ─────
+  // ── Selection-driven tab activation (re-scope in the same action) ─────────
 
   function selectionSignature(sel: SelectionSlice): string {
     return [
@@ -196,20 +190,20 @@ export function mountInspector(
     if (sig === lastSelSig) return;
     lastSelSig = sig;
 
-    // Reset Poll Detail expansion when the clicked poll changes (R2).
+    // Reset Poll Detail expansion when the clicked poll changes.
     if (sel.pollDetail !== lastPollRef) {
       expandedGroups = new Set();
       lastPollRef = sel.pollDetail;
     }
-    // Reset Related UI when the detail event changes (Q5 persistence is per
-    // selection: relatedCollapsed cleared on reset, legacy).
+    // Reset Related UI when the detail event changes (persistence is per
+    // selection: collapse state cleared on reset).
     const detailEvent = sel.pinnedEvent?.detailEvent ?? null;
     if (detailEvent !== lastDetailEventRef) {
       relatedUi = { collapsed: {}, expand: {}, correlate: null };
       lastDetailEventRef = detailEvent;
     }
 
-    // S4: activate the tab the just-completed interaction implies, if it has
+    // Activate the tab the just-completed interaction implies, if it has
     // content. A manual tab switch (no selection change) is preserved because
     // this only runs on a signature change.
     const pref = preferredTab(sel);
@@ -221,13 +215,13 @@ export function mountInspector(
       activeTab = "task";
     }
 
-    // P5: auto-narrow on a fresh single-event pin, unless the user set a width.
+    // Auto-narrow on a fresh single-event pin, unless the user set a width.
     if (!userResized && pref === "event") {
       applyWidth(EVENT_DEFAULT_WIDTH, false);
     }
   }
 
-  // ── Timestamp formatters (W1: honor the rel/abs time mode) ───────────────
+  // ── Timestamp formatters (honor the rel/abs time mode) ───────────────────
 
   function formatters(): { fmtTs: (ns: number) => string; fmtDelta: (ns: number) => string } {
     const axis = deriveAxisInputs(state());
@@ -239,13 +233,13 @@ export function mountInspector(
 
   // ── Render ────────────────────────────────────────────────────────────────
   //
-  // Two render targets so the transient channel stays cheap (architecture
-  // 2.2/2.3): the FRAME (status + tabs + body, incl. the heavy Poll/Related
-  // derivations) re-renders only on trace/selection/uiPrefs changes; the
-  // at-cursor READOUT re-renders on the high-frequency `transient` channel into
-  // its own host, so a hover never re-runs buildPollDetail/buildRelated. The
-  // readout host is a binding-free node inside the frame template, so a frame
-  // re-render leaves its imperative content intact (the toast-region technique).
+  // Two render targets so the transient channel stays cheap: the FRAME (status
+  // + tabs + body, incl. the heavy Poll/Related derivations) re-renders only on
+  // trace/selection/uiPrefs changes; the at-cursor READOUT re-renders on the
+  // high-frequency `transient` channel into its own host, so a hover never
+  // re-runs buildPollDetail/buildRelated. The readout host is a binding-free
+  // node inside the frame template, so a frame re-render leaves its imperative
+  // content intact.
 
   /** Full frame render (non-transient). Also refreshes the readout host. */
   function renderFrame(): void {
@@ -254,13 +248,13 @@ export function mountInspector(
     host.style.width = `${s.uiPrefs.sidebarWidth}px`;
     render(frameTemplate(s), host);
     renderReadout();
-    // Populate the Stack tab's region-analysis host (T32). Idempotent + a no-op
+    // Populate the Stack tab's region-analysis host. Idempotent + a no-op
     // unless the Stack tab is showing a retained region; runs after the frame
     // render so the `[data-region-host]` node exists.
     deps.regionPanel.sync();
   }
 
-  /** Readout-only render (transient channel; the S4 at-moment surface). */
+  /** Readout-only render (transient channel; the at-moment surface). */
   function renderReadout(): void {
     const slot = host.querySelector<HTMLElement>(".d9-atcursor-host");
     if (slot === null) return;
@@ -309,7 +303,7 @@ export function mountInspector(
     </button>`;
   }
 
-  // ── F7: "what is selected" line + explicit clear affordance ──────────────
+  // ── "What is selected" line + explicit clear affordance ──────────────────
 
   function statusTemplate(sel: SelectionSlice): TemplateResult {
     const label = selectionLabel(sel);
@@ -350,7 +344,7 @@ export function mountInspector(
     return "No selection";
   }
 
-  // ── S4 at-cursor readout (I6): the ONE at-moment surface ─────────────────
+  // ── At-cursor readout: the ONE at-moment surface ─────────────────────────
 
   function readoutTemplate(readout: AtCursorReadout | null): TemplateResult {
     if (readout === null) {
@@ -398,7 +392,7 @@ export function mountInspector(
     }
   }
 
-  // ── Task tab (T30 derivation; N2/N3/N4) ──────────────────────────────────
+  // ── Task tab ──────────────────────────────────────────────────────────────
 
   function taskTemplate(d: TaskDetailData): TemplateResult {
     if (d.taskId === null || !d.hasPolls) {
@@ -433,7 +427,7 @@ export function mountInspector(
     return html`<div class="d9-kv"><span class="k">${k}</span><span class="v">${v}</span></div>`;
   }
 
-  // ── Poll Detail tab (R1/R2): the behavioral-diff gate ────────────────────
+  // ── Poll Detail tab ──────────────────────────────────────────────────────
 
   function pollTemplate(sel: SelectionSlice): TemplateResult {
     const poll = sel.pollDetail;
@@ -506,7 +500,7 @@ export function mountInspector(
     return html`<div class=${cls}>${text}</div>`;
   }
 
-  // ── Event tab (Q1/Q2/Q3) ─────────────────────────────────────────────────
+  // ── Event tab ─────────────────────────────────────────────────────────────
 
   function eventTemplate(sel: SelectionSlice): TemplateResult {
     const pinned = sel.pinnedEvent;
@@ -551,7 +545,7 @@ export function mountInspector(
     </div>`;
   }
 
-  // ── Related tab (Q4-Q8) ──────────────────────────────────────────────────
+  // ── Related tab ────────────────────────────────────────────────────────────
 
   function relatedTemplate(sel: SelectionSlice): TemplateResult {
     const ev = sel.pinnedEvent?.detailEvent ?? null;
@@ -647,7 +641,7 @@ export function mountInspector(
     </button>`;
   }
 
-  // ── Stack tab (M7/M8 spawned tasks; the T32 region-analysis seam) ────────
+  // ── Stack tab (spawned tasks + region analysis) ──────────────────────────
 
   function stackTemplate(sel: SelectionSlice): TemplateResult {
     if (sel.spawnedTasksRange !== null) {
@@ -690,11 +684,11 @@ export function mountInspector(
       `;
     }
     if (sel.sidebarRange !== null) {
-      // Region select -> flamegraph / blocking-calls / heap (T32). This is a
-      // binding-free host: T32's region panel renders its interior (sub-tabs +
+      // Region select -> flamegraph / blocking-calls / heap. This is a
+      // binding-free host: the region panel renders its interior (sub-tabs +
       // the embedded flamegraph widget) into it imperatively via
-      // deps.regionPanel.sync(), so the inspector's re-renders never clobber the
-      // canvas (the toast-region / at-cursor-readout technique).
+      // deps.regionPanel.sync(), so the inspector's re-renders never clobber
+      // the canvas.
       return html`<div class="d9-region-host" data-region-host></div>`;
     }
     return html`<p class="d9-inspector-hint">
@@ -736,7 +730,7 @@ export function mountInspector(
   }
 
   function correlate(key: string, val: string): void {
-    // Q3: set the correlation field and switch to Related (single-event only).
+    // Set the correlation field and switch to Related (single-event only).
     relatedUi = { ...relatedUi, correlate: { key, val } };
     activeTab = "related";
     renderFrame();
@@ -745,21 +739,21 @@ export function mountInspector(
   function copyValue(e: MouseEvent, value: string): void {
     const btn = e.currentTarget as HTMLButtonElement;
     void navigator.clipboard?.writeText(value);
-    // Flash a check (Q2), reverting after 800ms - imperative, no store.
+    // Flash a check, reverting after 800ms - imperative, no store.
     btn.textContent = "✓";
     window.setTimeout(() => {
       btn.textContent = "⎘";
     }, 800);
   }
 
-  // ── Store-dispatch seams (Q7 navigation, M8 task links) ──────────────────
+  // ── Store-dispatch seams (navigation + task links) ───────────────────────
 
   function navigateRelated(target: RelatedRow["target"]): void {
     if (target === null) return;
     if (target.kind === "span") {
-      // Focus the span + center it (Q7). Centering the viewport is the
-      // interaction layer's job; the inspector dispatches the focus, which the
-      // lanes consume. Center via the span's midpoint.
+      // Focus the span + center it. Centering the viewport is the interaction
+      // layer's job; the inspector dispatches the focus, which the lanes
+      // consume. Center via the span's midpoint.
       const ld = data().laneData;
       const span = ld?.spanByIdSingle.get(target.spanId) ?? null;
       store.update("selection", {
@@ -769,7 +763,7 @@ export function mountInspector(
       if (span !== null) centerViewOn((span.start + span.end) / 2);
       return;
     }
-    // Event row: pin + center + mark the event (Q7).
+    // Event row: pin + center + mark the event.
     const ev = target.event;
     const taskId = taskResolver()(ev);
     store.update("selection", {
@@ -787,7 +781,7 @@ export function mountInspector(
     centerViewOn(ev.timestamp);
   }
 
-  /** Center the viewport on `ns`, keeping the current zoom (legacy centerView). */
+  /** Center the viewport on `ns`, keeping the current zoom. */
   function centerViewOn(ns: number): void {
     const vp = state().viewport;
     const span = vp.viewEnd - vp.viewStart;
@@ -806,12 +800,12 @@ export function mountInspector(
   }
 
   function selectTask(taskId: number): void {
-    // M8: a spawned-task link selects the task (re-scopes to the Task tab).
+    // A spawned-task link selects the task (re-scopes to the Task tab).
     store.update("selection", { selectedTaskId: taskId, pinnedEvent: null, pollDetail: null });
   }
 
   function clearSelection(): void {
-    // F7: explicit clear affordance - reset the inspector to its resting state.
+    // Explicit clear affordance - reset the inspector to its resting state.
     store.update("selection", {
       selectedTaskId: null,
       spanFocus: null,
@@ -824,7 +818,7 @@ export function mountInspector(
     });
   }
 
-  // ── Resize drag (P2) + width persistence (P8) ────────────────────────────
+  // ── Resize drag + width persistence ──────────────────────────────────────
 
   function applyWidth(width: number, persist: boolean): void {
     const clamped = clampWidth(width);
@@ -837,7 +831,6 @@ export function mountInspector(
       // the new column width in real time: lanes/spans/cpu/... subscribe to
       // `viewport`, not `uiPrefs`, so a bare sidebarWidth change re-renders the
       // shell chrome + resizes the canvases but leaves their pixels stale.
-      // Mirrors the shell's window-resize handler (store.update("viewport", {})).
       store.update("viewport", {});
     }
     if (persist) writeStoredWidth(clamped);
@@ -856,7 +849,7 @@ export function mountInspector(
   function onResizeMove(e: MouseEvent): void {
     if (!dragging) return;
     // The inspector is on the right; dragging its left handle sets the width
-    // from the pointer to the aside's right edge (legacy P2).
+    // from the pointer to the aside's right edge.
     const right = host.getBoundingClientRect().right;
     applyWidth(right - e.clientX, false);
   }
@@ -867,7 +860,7 @@ export function mountInspector(
     document.body.style.cursor = "";
     window.removeEventListener("mousemove", onResizeMove);
     window.removeEventListener("mouseup", onResizeUp);
-    // Persist the final width (P8): survives reload.
+    // Persist the final width: survives reload.
     writeStoredWidth(state().uiPrefs.sidebarWidth);
   }
 
@@ -882,9 +875,9 @@ export function mountInspector(
   );
   const unsubReadout = store.subscribe(["transient"], () => renderReadout());
 
-  // F7 / Esc: the inspector's content selection (poll/event/range) is an
-  // escapable surface at the `sidebar` priority band - Esc clears it before the
-  // entry's fallback clears the task selection (the legacy D9 order).
+  // Esc: the inspector's content selection (poll/event/range) is an escapable
+  // surface at the `sidebar` priority band - Esc clears it before the entry's
+  // fallback clears the task selection.
   const unregisterEsc = deps.esc.register({
     name: "inspector-selection",
     priority: ESC_PRIORITY.sidebar,
@@ -922,7 +915,7 @@ export function mountInspector(
   };
 }
 
-// ── Width persistence helpers (P8) ──────────────────────────────────────────
+// ── Width persistence helpers ───────────────────────────────────────────────
 
 function clampWidth(width: number): number {
   const maxW =
@@ -930,7 +923,7 @@ function clampWidth(width: number): number {
   return Math.round(Math.max(MIN_WIDTH, Math.min(maxW, width)));
 }
 
-/** Read the persisted inspector width (P8); null when absent/unavailable. */
+/** Read the persisted inspector width; null when absent/unavailable. */
 function readStoredWidth(): number | null {
   try {
     const raw = window.localStorage?.getItem(WIDTH_KEY);

@@ -1,17 +1,15 @@
-// src/pages/viewer/track-renderers.ts - the track-content renderer registry
-// (the seam T21's shell exposes to T22-T30).
+// The track-content renderer registry: the seam the shell exposes to content
+// tracks.
 //
-// The shell (tracks.ts) sizes every track canvas and, for tracks WITHOUT a
-// mounted content renderer, paints the empty placeholder. A content ticket
-// (T22 lanes first) "claims" its track id here; the shell then skips the
-// placeholder for that track, leaving the canvas for the claiming renderer,
-// which draws it on its own store subscription (03 F2: a track redraws only
-// when the slices it depends on change - the renderer registry maps changed
-// slices to affected canvases, one renderer at a time).
+// The shell (tracks.ts) sizes every track canvas and, for tracks without a
+// mounted content renderer, paints the empty placeholder. A content renderer
+// "claims" its track id here; the shell then skips the placeholder for that
+// track, leaving the canvas for the claiming renderer, which draws it on its own
+// store subscription.
 //
-// This is intentionally tiny: the "registry" is the set of claimed track
-// ids. Each renderer owns its own store subscription and canvas sizing; the
-// only thing the shell needs to know is "hands off this canvas".
+// Intentionally tiny: the "registry" is the set of claimed track ids. Each
+// renderer owns its own store subscription and canvas sizing; the only thing the
+// shell needs to know is "hands off this canvas".
 
 import type { TrackId } from "./track-layout.js";
 

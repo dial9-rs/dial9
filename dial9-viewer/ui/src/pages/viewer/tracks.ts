@@ -1,20 +1,15 @@
-// src/pages/viewer/tracks.ts - the unified time-aligned track column
-// (T21; concept-1 layout, features/02 sections F/G/J/K/L/M/N as tracks).
+// The unified time-aligned track column.
 //
-// T21 renders the SLOTS: each track is a row = [ LABEL_W label gutter |
-// draw canvas ], the canvas sized to the shared drawW from lib/canvas/
-// layout so every track's time axis lines up vertically (the A13
-// invariant). Track CONTENT is out of scope - each canvas is painted an
-// empty placeholder and a `render(ctx,state,layout)` component fills it
-// later (owner recorded per track in track-layout.ts). Because every track
-// uses ONE DOM label gutter of LABEL_W and a canvas of exactly drawW, the
-// tracks are axis-aligned by construction; a downstream track that draws
-// its own internal gutter would break that, so the shell keeps the gutter
-// in the DOM (matching the lanes' DOM-flex label, A13).
+// Renders the slots: each track is a row = [ LABEL_W label gutter | draw
+// canvas ], the canvas sized to the shared drawW from lib/canvas/layout so every
+// track's time axis lines up vertically. Because every track uses ONE DOM label
+// gutter of LABEL_W and a canvas of exactly drawW, the tracks are axis-aligned
+// by construction; a track that drew its own internal gutter would break that,
+// so the shell keeps the gutter in the DOM (matching the lanes' DOM-flex label).
 //
 // Declarative: the row structure is a lit-html template; canvas sizing is a
-// post-render side effect (measure the column once per frame, size every
-// backing store - F3: geometry-change-only resizes via createCanvasSizer).
+// post-render side effect (measure the column once per frame, size every backing
+// store - geometry-change-only resizes via createCanvasSizer).
 
 import { html, type TemplateResult } from "lit-html";
 import { repeat } from "lit-html/directives/repeat.js";
@@ -45,34 +40,31 @@ export interface TracksViewModel {
   viewStart: number;
   viewEnd: number;
   /**
-   * Clock/format state the time-axis track (T25) reads to label its ticks.
-   * The shell lifts it from the store via `deriveAxisInputs`; other tracks
-   * ignore it (they render placeholders until their own tickets land).
+   * Clock/format state the time-axis track reads to label its ticks. The shell
+   * lifts it from the store via `deriveAxisInputs`; other tracks ignore it.
    */
   axis: AxisInputs;
   /**
-   * CPU series + capacity + window state the CPU track (T28) renders. The
-   * shell lifts it from the store via `deriveCpuInputs`; other tracks ignore
-   * it.
+   * CPU series + capacity + window state the CPU track renders. The shell lifts
+   * it from the store via `deriveCpuInputs`; other tracks ignore it.
    */
   cpu: CpuInputs;
   /**
-   * Track management (T36; amended section O), lifted from uiPrefs by the
-   * shell. `trackOrder` reorders the manageable analysis tracks; `collapsed`
-   * overrides a track's height to label-only. A collapsed track stays in the
-   * visible list (row present, canvas hidden) so re-expanding re-paints it
-   * from CURRENT windowed state (T17-audit notes 6-7: windowing respected).
+   * Track management, lifted from uiPrefs by the shell. `trackOrder` reorders the
+   * manageable analysis tracks; `collapsed` overrides a track's height to
+   * label-only. A collapsed track stays in the visible list (row present, canvas
+   * hidden) so re-expanding re-paints it from CURRENT windowed state.
    */
   trackOrder: readonly string[];
   collapsed: Readonly<Record<string, boolean>>;
 }
 
 /**
- * The tracks visible for a view model, in the user's order (T36): apply
- * `trackOrder` (manageable tracks permuted, structural tracks pinned), then
- * drop the selection-only task-detail track unless a task is selected.
- * Collapsed tracks REMAIN visible (label-only) - collapse is a height
- * override, not a hide - so this is order + selection filtering only.
+ * The tracks visible for a view model, in the user's order: apply `trackOrder`
+ * (manageable tracks permuted, structural tracks pinned), then drop the
+ * selection-only task-detail track unless a task is selected. Collapsed tracks
+ * REMAIN visible (label-only) - collapse is a height override, not a hide - so
+ * this is order + selection filtering only.
  */
 export function visibleTracks(vm: TracksViewModel): TrackSpec[] {
   return orderedTracks(vm.trackOrder).filter(
@@ -82,9 +74,9 @@ export function visibleTracks(vm: TracksViewModel): TrackSpec[] {
 
 /**
  * The TrackSpec a row renders at: the catalogue spec, or a label-only-height
- * clone when the track is collapsed (T36; legacy O1's 24px). The controllers
- * read `track.height`, so passing the collapsed clone shrinks their row DOM;
- * CSS (`.d9-track-manage.is-collapsed`) hides the drawing body.
+ * clone when the track is collapsed. The controllers read `track.height`, so
+ * passing the collapsed clone shrinks their row DOM; CSS
+ * (`.d9-track-manage.is-collapsed`) hides the drawing body.
  */
 function effectiveTrack(
   t: TrackSpec,
@@ -94,17 +86,14 @@ function effectiveTrack(
 }
 
 /**
- * The track column template. One `.d9-track` per visible track: a label
- * gutter (LABEL_W wide) plus a canvas host. The canvas carries data-*
- * attributes the parity row-walker reads to assert the placeholder
- * contract (label present, canvas sized by layout).
+ * The track column template. One `.d9-track` per visible track: a label gutter
+ * (LABEL_W wide) plus a canvas host.
  *
- * Content tracks that need richer per-row DOM than a label + canvas (the
- * spans track's legend/filter controls + focused-span metadata, T26; the
- * events track's name-chip legend, T27) register a controller and render
- * their OWN row template here; every other track uses the uniform placeholder
- * row. The delegation is keyed by track id, mirroring the axis delegation in
- * `sizeTracks`.
+ * Content tracks that need richer per-row DOM than a label + canvas (the spans
+ * track's legend/filter controls + focused-span metadata; the events track's
+ * name-chip legend) register a controller and render their OWN row template
+ * here; every other track uses the uniform placeholder row. The delegation is
+ * keyed by track id, mirroring the axis delegation in `sizeTracks`.
  */
 export function tracksTemplate(
   vm: TracksViewModel,
@@ -140,9 +129,8 @@ export function tracksTemplate(
           );
           // Manageable tracks (the foldable analysis surfaces) gain the shell-
           // owned collapse caret + reorder grip; structural/task-detail tracks
-          // render bare (they are pinned, section O scope). The delegation to
-          // each track's own row renderer is UNCHANGED - the wrapper is outside
-          // it (scope fence: reorder touches the LIST, not the delegation).
+          // render bare (they are pinned). The wrapper is outside each track's
+          // own row renderer, so the delegation is unchanged.
           return isManageableTrack(t.id)
             ? manageWrapper(t, vm, actions, inner)
             : inner;
@@ -153,9 +141,9 @@ export function tracksTemplate(
 }
 
 /**
- * Delegate to a track's own content renderer via the id-keyed branches
- * (unchanged from T21/T26-T30), or fall back to the uniform placeholder row.
- * `t` is the EFFECTIVE spec: a collapsed track carries the label-only height.
+ * Delegate to a track's own content renderer via the id-keyed branches, or fall
+ * back to the uniform placeholder row. `t` is the EFFECTIVE spec: a collapsed
+ * track carries the label-only height.
  */
 function innerRow(
   t: TrackSpec,
@@ -173,13 +161,13 @@ function innerRow(
   return defaultTrackRow(t);
 }
 
-// ── Track management overlay (T36): collapse caret + reorder grip ──────────
+// ── Track management overlay: collapse caret + reorder grip ────────────────
 //
 // The affordances are shell-owned and sit in a reserved strip over the LEFT
-// edge of the label gutter (CSS `.d9-track-manage-strip`), so the frozen
-// per-track labels (the spans/queue/events controllers render their own) are
-// never modified. The strip is pointer-events:none except the two controls,
-// so the rest of the label (e.g. the spans copy buttons) stays interactive.
+// edge of the label gutter (CSS `.d9-track-manage-strip`), so the per-track
+// labels (the spans/queue/events controllers render their own) are never
+// modified. The strip is pointer-events:none except the two controls, so the
+// rest of the label (e.g. the spans copy buttons) stays interactive.
 
 // Id of the track whose grip is being dragged; module-level so `drop` can
 // read it without relying on DataTransfer (jsdom/older browsers vary). Set on
@@ -265,7 +253,7 @@ function manageWrapper(
   `;
 }
 
-/** The uniform placeholder row: label gutter + canvas host (T21). */
+/** The uniform placeholder row: label gutter + canvas host. */
 function defaultTrackRow(t: TrackSpec): TemplateResult {
   return html`
     <div class="d9-track" data-track-id=${t.id} style="height:${t.height}px">
@@ -284,7 +272,7 @@ function defaultTrackRow(t: TrackSpec): TemplateResult {
   `;
 }
 
-/** Per-track sizing result (returned for tests / the row-walker evidence). */
+/** Per-track sizing result (returned for tests). */
 export interface TrackSizing {
   id: string;
   drawW: number;
@@ -296,13 +284,13 @@ export interface TrackSizing {
 const sizers = new WeakMap<HTMLCanvasElement, CanvasSizer<CanvasRenderingContext2D>>();
 
 /**
- * Measure the track column and size every track canvas to the shared
- * drawW (lib/canvas/layout). Paints each canvas an empty placeholder so a
- * correctly-sized, visibly-empty canvas is on screen (the DoD's
- * "placeholder" definition). Returns per-track sizing for assertions.
+ * Measure the track column and size every track canvas to the shared drawW
+ * (lib/canvas/layout). Paints each canvas an empty placeholder so a
+ * correctly-sized, visibly-empty canvas is on screen. Returns per-track sizing
+ * for assertions.
  *
- * Call after the template has rendered into `columnEl`, inside the store's
- * frame tick (the one place layout reads are batched, F3).
+ * Call after the template has rendered into `columnEl`, inside the store's frame
+ * tick (the one place layout reads are batched).
  */
 export function sizeTracks(
   columnEl: HTMLElement,
@@ -313,27 +301,27 @@ export function sizeTracks(
   queueTrack?: QueueTrackController,
 ): TrackSizing[] {
   const dpr = (typeof devicePixelRatio === "number" ? devicePixelRatio : 1) || 1;
-  // Full column width and the scrollbar gutter (so the draw area's right
-  // edge matches the lanes' scrollable region, A12). offsetWidth includes
-  // the scrollbar; clientWidth excludes it.
+  // Full column width and the scrollbar gutter (so the draw area's right edge
+  // matches the lanes' scrollable region). offsetWidth includes the scrollbar;
+  // clientWidth excludes it.
   const pw = columnEl.clientWidth;
   const scrollbarW = Math.max(0, columnEl.offsetWidth - columnEl.clientWidth);
   const out: TrackSizing[] = [];
   for (const track of visibleTracks(vm)) {
-    // A collapsed track (T36) is label-only: its drawing body is hidden by CSS
+    // A collapsed track is label-only: its drawing body is hidden by CSS
     // (`.d9-track-manage.is-collapsed`) and its canvas is not painted this
     // frame - saving the work; the stale backing store stays hidden. Re-
     // expanding flips this off and a normal render+size pass re-paints it from
     // CURRENT windowed state, so a collapsed track still respects windowing on
-    // re-expand (carried T17-audit notes 6-7).
+    // re-expand.
     if (isCollapsed(vm.collapsed, track.id)) {
       out.push({ id: track.id, drawW: 0, height: COLLAPSED_TRACK_H });
       continue;
     }
-    // A track whose content is owned by a mounted renderer (T22 lanes and
-    // later track tickets) sizes AND draws its own canvas on its own store
-    // subscription (03 F2). The shell leaves it alone - no placeholder paint,
-    // no backing-store resize that would clear the renderer's last draw.
+    // A track whose content is owned by a mounted renderer sizes AND draws its
+    // own canvas on its own store subscription. The shell leaves it alone - no
+    // placeholder paint, no backing-store resize that would clear the renderer's
+    // last draw.
     if (isTrackClaimed(track.id)) {
       out.push({ id: track.id, drawW: 0, height: track.height });
       continue;
@@ -356,36 +344,36 @@ export function sizeTracks(
       out.push({ id: track.id, drawW: 0, height: track.height });
       continue;
     }
-    // The spans track (T26) owns its own canvas sizing + draw: it reserves a
-    // controls strip above the canvas, so its draw area is shorter than the
-    // full track height. Delegate and skip the uniform placeholder path.
+    // The spans track owns its own canvas sizing + draw: it reserves a controls
+    // strip above the canvas, so its draw area is shorter than the full track
+    // height. Delegate and skip the uniform placeholder path.
     if (track.id === "spans" && spansTrack !== undefined) {
       spansTrack.paint(canvas, drawW, track.height, dpr, vm.viewStart, vm.viewEnd);
       canvas.dataset["drawW"] = String(Math.round(drawW));
       out.push({ id: track.id, drawW, height: track.height });
       continue;
     }
-    // The queue track (T29) owns its own canvas sizing + draw: it reserves a
-    // legend strip above the canvas, so its draw area is shorter than the full
-    // track height (like the spans track). Delegate and skip the placeholder.
+    // The queue track owns its own canvas sizing + draw: it reserves a legend
+    // strip above the canvas, so its draw area is shorter than the full track
+    // height (like the spans track). Delegate and skip the placeholder.
     if (track.id === "queue" && queueTrack !== undefined) {
       queueTrack.paint(canvas, drawW, track.height, dpr, vm.viewStart, vm.viewEnd);
       canvas.dataset["drawW"] = String(Math.round(drawW));
       out.push({ id: track.id, drawW, height: track.height });
       continue;
     }
-    // The task-detail track (T30) likewise owns its own canvas sizing + draw
-    // (it hosts a status readout + interaction). Its canvas fills the full
-    // track height (no controls strip). Only reached while a task is selected
-    // (selectionOnly, N1). Delegate and skip the placeholder path.
+    // The task-detail track likewise owns its own canvas sizing + draw (it hosts
+    // a status readout + interaction). Its canvas fills the full track height
+    // (no controls strip). Only reached while a task is selected. Delegate and
+    // skip the placeholder path.
     if (track.id === "task-detail" && taskDetailTrack !== undefined) {
       taskDetailTrack.paint(canvas, drawW, track.height, dpr, vm.viewStart, vm.viewEnd);
       canvas.dataset["drawW"] = String(Math.round(drawW));
       out.push({ id: track.id, drawW, height: track.height });
       continue;
     }
-    // The custom-events track (T27) likewise reserves a legend strip above
-    // its canvas, so it owns its own sizing + draw. Same delegation shape.
+    // The custom-events track likewise reserves a legend strip above its canvas,
+    // so it owns its own sizing + draw. Same delegation shape.
     if (track.id === "events" && eventsTrack !== undefined) {
       eventsTrack.paint(canvas, drawW, track.height, dpr, vm.viewStart, vm.viewEnd);
       canvas.dataset["drawW"] = String(Math.round(drawW));
@@ -398,12 +386,10 @@ export function sizeTracks(
       sizers.set(canvas, sizer);
     }
     const ctx = sizer.ensure(drawW, track.height, dpr);
-    // Tracks with landed content render it; the rest stay empty placeholders
-    // until their own ticket (T22/T26/T27/T29/T30) fills them.
-    //  - timeline (T25): the F-row time-axis ruler.
-    //  - cpu (T28): the L-row avg-cores bar chart; its render returns the L2
-    //    info readout, mirrored into a DOM attribute for the row-walker /
-    //    behavioral differ (the legacy `#cpu-panel-info` text).
+    // Tracks with landed content render it; the rest stay empty placeholders.
+    //  - timeline: the time-axis ruler.
+    //  - cpu: the avg-cores bar chart; its render returns the info readout,
+    //    mirrored into a DOM attribute for tests.
     if (track.id === "timeline") {
       renderTimeAxis(ctx, geometry, vm.viewStart, vm.viewEnd, vm.axis, vm.hasTrace);
     } else if (track.id === "cpu") {
@@ -428,8 +414,7 @@ export function sizeTracks(
 /**
  * Paint an empty, correctly-sized placeholder: the track background plus a
  * baseline rule, so an empty-but-present canvas reads as "a track will draw
- * here" rather than a rendering bug. Deliberately minimal - real content is
- * each track's own ticket.
+ * here" rather than a rendering bug. Deliberately minimal.
  */
 function paintPlaceholder(
   ctx: CanvasRenderingContext2D,

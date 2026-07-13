@@ -1,32 +1,24 @@
-// src/pages/viewer/task-detail-track.ts - the task-detail track component
-// (T30; features/02 section N). Hosts inside T21's unified track column:
-// tracks.ts delegates the "task-detail" row's TEMPLATE (label + status
-// readout + canvas) and its canvas PAINT here. The track is selection-only
-// (track-layout.ts marks it selectionOnly), so tracks.ts renders it only
-// while a task is selected (N1).
+// The task-detail track component. Hosts inside the unified track column:
+// tracks.ts delegates the "task-detail" row's template (label + status readout +
+// canvas) and its canvas paint here. The track is selection-only, so tracks.ts
+// renders it only while a task is selected.
 //
-// Everything reactive flows through the store (T07):
+// Everything reactive flows through the store:
 //   - The task collection is a store.derived cache keyed on ["trace",
-//     "selection"] (F5): selecting a DIFFERENT task invalidates it, a PAN
-//     does not. An inner (source, taskId) guard means a hover-only selection
-//     write (the G8 waker highlight below) does NOT re-walk every worker's
-//     polls - only a genuine task change does.
-//   - The per-frame render model is memoized on its primitive inputs, so a
-//     hover redraw reuses the cached geometry instead of rebuilding it.
-//   - Waker hover DISPATCHES `selection.hoveredWakerTaskId` (N8/G8). T22's
-//     lanes CONSUME that store field for the orange-poll highlight - the store
-//     field IS the contract; this track never reaches into the lanes.
+//     "selection"]: selecting a DIFFERENT task invalidates it, a PAN does not. An
+//     inner (source, taskId) guard means a hover-only selection write (the waker
+//     highlight) does NOT re-walk every worker's polls - only a genuine task
+//     change does.
+//   - The per-frame render model is memoized on its primitive inputs, so a hover
+//     redraw reuses the cached geometry instead of rebuilding it.
+//   - Waker hover dispatches `selection.hoveredWakerTaskId`. The lanes consume
+//     that store field for the orange-poll highlight - the store field IS the
+//     contract; this track never reaches into the lanes.
 //
-// HYBRID SPLIT (decided): this file owns the timeline TRACK (per-task
-// polls/wakes over time) + the DERIVATION. The TEXTUAL detail (task id, spawn
-// location, counts, the N3 uninstrumented badge, the N4 idle-flamegraph link)
-// renders in T31's inspector Task tab from the SAME derivation, exposed via
-// createTaskDetailDerivation. This track's label gutter shows only the track
-// name + a compact task identity; it does NOT duplicate T31's textual tab.
-//
-// T17 (audit notes 6+7): a segment-windowed collection can be missing the
-// task's polls beyond the resident window; drawWindowMarkers surfaces a
-// truncated/oversized window rather than presenting a clipped list as whole.
+// This file owns the timeline track (per-task polls/wakes over time) + the
+// derivation. The textual detail (task id, spawn location, counts, the
+// uninstrumented badge, the idle-flamegraph link) renders in the inspector Task
+// tab from the SAME derivation, exposed via createTaskDetailDerivation.
 
 import { html, nothing, type TemplateResult } from "lit-html";
 import { createCanvasSizer } from "../../lib/canvas/index.js";
@@ -53,7 +45,7 @@ import {
   type TaskPollSource,
 } from "./task-detail-model.js";
 
-// Legacy task-detail colours (viewer.html), kept identical.
+// Task-detail canvas colours.
 const CANVAS_BG = "#16213e";
 const POLL_FILL = "#4fc3f7";
 const WAKE_TRIANGLE = "#66bb6a";
@@ -66,16 +58,15 @@ const TRUNC_BAND = "rgba(255,120,120,0.28)";
 const TRUNC_LABEL = "#ffb3b3";
 
 /**
- * The store-cached task-detail derivation (F5). Keyed on ["trace",
- * "selection"] so a task change invalidates it and a pan does not; an inner
- * (source, taskId) memo keeps a hover-only selection write (hoveredWakerTaskId)
- * from re-walking the collection. Exposed as a factory so T31's inspector Task
- * tab reads the SAME derived data without rebuilding the logic (the hybrid
- * split seam).
+ * The store-cached task-detail derivation. Keyed on ["trace", "selection"] so a
+ * task change invalidates it and a pan does not; an inner (source, taskId) memo
+ * keeps a hover-only selection write (hoveredWakerTaskId) from re-walking the
+ * collection. Exposed as a factory so the inspector Task tab reads the SAME
+ * derived data without rebuilding the logic.
  */
 export function createTaskDetailDerivation(store: ViewerStore): () => TaskDetailData {
   // buildWorkerSpans scans every event; cache it on the trace slice so it is
-  // rebuilt only on load/reparse, never per selection/pan (F5).
+  // rebuilt only on load/reparse, never per selection/pan.
   const source = store.derived(["trace"], (s): TaskPollSource =>
     buildTaskPollSource(s.trace.trace),
   );
@@ -96,11 +87,10 @@ export function createTaskDetailDerivation(store: ViewerStore): () => TaskDetail
 }
 
 /**
- * The T17 window descriptor from the store (carried obligation): any needed
- * segment stuck "oversized" makes the poll list unavoidably partial. The
- * whole-trace shell has an empty segments slice, so this resolves to complete;
- * the truncatedAt edge derivation from a live resident window is the
- * downstream wiring seam (T34/T35), and the renderer consumes it regardless.
+ * The window descriptor from the store: any needed segment stuck "oversized"
+ * makes the poll list unavoidably partial. The whole-trace shell has an empty
+ * segments slice, so this resolves to complete; the renderer consumes the
+ * descriptor regardless.
  */
 export function deriveTaskDetailWindow(state: StoreState): TaskDetailWindow {
   for (const entry of state.segments.segments.values()) {
@@ -111,10 +101,10 @@ export function deriveTaskDetailWindow(state: StoreState): TaskDetailWindow {
 
 /** The handle tracks.ts + the shell drive. */
 export interface TaskDetailTrackController {
-  /** The full `.d9-track` row template for the task-detail track (N1/N5). */
+  /** The full `.d9-track` row template for the task-detail track. */
   rowTemplate(track: TrackSpec): TemplateResult;
-  /** Size + draw the task-detail canvas (N6-N12). Called from sizeTracks
-   *  inside the shell's frame tick. */
+  /** Size + draw the task-detail canvas. Called from sizeTracks inside the
+   *  shell's frame tick. */
   paint(
     canvas: HTMLCanvasElement,
     drawW: number,
@@ -123,19 +113,18 @@ export interface TaskDetailTrackController {
     viewStart: number,
     viewEnd: number,
   ): void;
-  /** Read the current (cached) derivation - T31's inspector Task tab source. */
+  /** Read the current (cached) derivation - the inspector Task tab source. */
   data(): TaskDetailData;
   /**
-   * N8/G8: dispatch `selection.hoveredWakerTaskId` for a pointer at draw-area
-   * (mx, my) over `model` (null off any waker label). Dispatches only on a
-   * change (no store thrash). The DOM hover handler delegates here; exposed so
-   * the dispatch is testable without a canvas/DOM (the DoD's waker-hover
-   * dispatch Vitest).
+   * Dispatch `selection.hoveredWakerTaskId` for a pointer at draw-area (mx, my)
+   * over `model` (null off any waker label). Dispatches only on a change (no
+   * store thrash). The DOM hover handler delegates here; exposed so the dispatch
+   * is testable without a canvas/DOM.
    */
   hoverWaker(model: TaskDetailRenderModel, mx: number, my: number): void;
-  /** N8: clicking a waker label selects that waker task (via the store). */
+  /** Clicking a waker label selects that waker task (via the store). */
   clickWaker(model: TaskDetailRenderModel, mx: number, my: number): void;
-  /** N8: clear the waker highlight (pointer left the canvas). */
+  /** Clear the waker highlight (pointer left the canvas). */
   clearHover(): void;
   /** Tear down (no external resources today; symmetry with other tracks). */
   dispose(): void;
@@ -149,7 +138,7 @@ export function createTaskDetailTrack(store: ViewerStore): TaskDetailTrackContro
   // reuses the cached geometry (buildTaskDetailRenderModel is not re-run).
   let modelCache: { data: TaskDetailData; key: string; model: TaskDetailRenderModel } | null =
     null;
-  // The model last painted, for canvas hit-testing (N5 status, N8 waker).
+  // The model last painted, for canvas hit-testing (status, waker).
   let lastModel: TaskDetailRenderModel | null = null;
   let sizer: CanvasSizer<CanvasRenderingContext2D> | null = null;
   let sizerCanvas: HTMLCanvasElement | null = null;
@@ -173,7 +162,7 @@ export function createTaskDetailTrack(store: ViewerStore): TaskDetailTrackContro
     return model;
   }
 
-  // ── Canvas paint (N6-N12) ──────────────────────────────────────────────
+  // ── Canvas paint ───────────────────────────────────────────────────────
 
   function paint(
     canvas: HTMLCanvasElement,
@@ -202,7 +191,7 @@ export function createTaskDetailTrack(store: ViewerStore): TaskDetailTrackContro
     );
   }
 
-  // ── Template (N1 identity + N5 status) ─────────────────────────────────
+  // ── Template (identity + status) ───────────────────────────────────────
 
   function rowTemplate(track: TrackSpec): TemplateResult {
     const data = taskDetailData();
@@ -242,7 +231,7 @@ export function createTaskDetailTrack(store: ViewerStore): TaskDetailTrackContro
     `;
   }
 
-  // ── Canvas interaction (N5 status, N8 waker hover/click) ───────────────
+  // ── Canvas interaction (status, waker hover/click) ─────────────────────
 
   function pointerAt(canvas: HTMLCanvasElement, ev: MouseEvent): { mx: number; my: number } {
     const rect = canvas.getBoundingClientRect();
@@ -259,9 +248,9 @@ export function createTaskDetailTrack(store: ViewerStore): TaskDetailTrackContro
   // ── Store-dispatch seams (model-driven, DOM-free - testable) ───────────
 
   function hoverWaker(model: TaskDetailRenderModel, mx: number, my: number): void {
-    // N8/G8: waker-label hover -> dispatch selection.hoveredWakerTaskId (the
-    // store field the lanes consume). Only dispatch on an actual change, so a
-    // hover inside the same region does not thrash the store (legacy 6587).
+    // Waker-label hover -> dispatch selection.hoveredWakerTaskId (the store
+    // field the lanes consume). Only dispatch on an actual change, so a hover
+    // inside the same region does not thrash the store.
     const waker = wakeRegionAt(model, mx, my);
     const found = waker !== null ? waker.wakerTaskId : null;
     if (found !== state().selection.hoveredWakerTaskId) {
@@ -270,9 +259,9 @@ export function createTaskDetailTrack(store: ViewerStore): TaskDetailTrackContro
   }
 
   function clickWaker(model: TaskDetailRenderModel, mx: number, my: number): void {
-    // N8: click a waker label -> select the waker task (re-scopes the whole
-    // detail to that task). Clear the hover highlight so the newly selected
-    // task starts clean.
+    // Click a waker label -> select the waker task (re-scopes the whole detail
+    // to that task). Clear the hover highlight so the newly selected task starts
+    // clean.
     const waker = wakeRegionAt(model, mx, my);
     if (waker !== null) {
       store.update("selection", {
@@ -280,10 +269,10 @@ export function createTaskDetailTrack(store: ViewerStore): TaskDetailTrackContro
         hoveredWakerTaskId: null,
       });
     }
-    // N11: click a dumped idle gap -> open the captured async stack. The stack
-    // renders in T31's inspector / T32's flamegraph surface (deferred-until-T31,
-    // see HANDOFF): this track exposes the dumps on the derivation + hit region;
-    // it does not build the flamegraph modal here (scope fence).
+    // Click a dumped idle gap -> open the captured async stack. The stack
+    // renders in the inspector / flamegraph surface: this track exposes the
+    // dumps on the derivation + hit region; it does not build the flamegraph
+    // modal here.
   }
 
   function clearHover(): void {
@@ -302,11 +291,11 @@ export function createTaskDetailTrack(store: ViewerStore): TaskDetailTrackContro
 
     hoverWaker(model, mx, my);
 
-    // N5: status readout (imperative, hover-only - no store, no layout read).
+    // Status readout (imperative, hover-only - no store, no layout read).
     const status = statusEl(canvas);
     if (status !== null) status.textContent = statusTextAt(model, mx, my);
 
-    // Cursor: pointer over a waker label or a dumped idle region (N8/N11).
+    // Cursor: pointer over a waker label or a dumped idle region.
     const waker = wakeRegionAt(model, mx, my);
     const hit = hitRegionAt(model, mx, my);
     const clickable =
@@ -347,11 +336,9 @@ export function createTaskDetailTrack(store: ViewerStore): TaskDetailTrackContro
 
 /**
  * Draw the task-detail timeline into `ctx` (already DPR-scaled + sized to
- * drawW x height). Ports renderTaskDetail's canvas ops (viewer.html:4436-4712)
- * in the legacy order: background, wake->poll delay bands (N6/N7), lifespan
- * bar (N9), poll bars / coverage histogram (N10), idle gaps (N11), legend
- * (N12), then the T17 window markers on top. Draw-area-relative coordinates
- * (the model's x's already omit LABEL_W - the A13 alignment shift).
+ * drawW x height), in order: background, wake->poll delay bands, lifespan bar,
+ * poll bars / coverage histogram, idle gaps, legend, then the window markers on
+ * top. Draw-area-relative coordinates (the model's x's already omit LABEL_W).
  */
 export function drawTaskDetailCanvas(
   ctx: CanvasRenderingContext2D,
@@ -368,7 +355,7 @@ export function drawTaskDetailCanvas(
 
   ctx.font = "9px monospace";
 
-  // ── Wake->poll delay bands (N6) + waker labels (N7) ──────────────────
+  // ── Wake->poll delay bands + waker labels ────────────────────────────
   for (const band of model.wakeBands) {
     const w = band.x2 - band.x1;
     ctx.fillStyle =
@@ -413,7 +400,7 @@ export function drawTaskDetailCanvas(
     }
   }
 
-  // ── Task lifespan bar (N9) ───────────────────────────────────────────
+  // ── Task lifespan bar ────────────────────────────────────────────────
   if (model.lifespan !== null) {
     const l = model.lifespan;
     ctx.fillStyle = LIFESPAN_FILL;
@@ -452,7 +439,7 @@ export function drawTaskDetailCanvas(
     ctx.font = "9px monospace";
   }
 
-  // ── Polling sections (N10): coverage histogram or per-poll bars ──────
+  // ── Polling sections: coverage histogram or per-poll bars ────────────
   ctx.textAlign = "center";
   if (model.coverage !== null) {
     const cov = model.coverage;
@@ -480,7 +467,7 @@ export function drawTaskDetailCanvas(
     }
   }
 
-  // ── Idle gaps (N11) ──────────────────────────────────────────────────
+  // ── Idle gaps ────────────────────────────────────────────────────────
   for (const idle of model.idleBands) {
     const w = idle.x2 - idle.x1;
     ctx.fillStyle = idle.hasDump ? "#2a2a5a" : "#2a2a4a";
@@ -498,7 +485,7 @@ export function drawTaskDetailCanvas(
     }
   }
 
-  // ── Legend (N12) ─────────────────────────────────────────────────────
+  // ── Legend ───────────────────────────────────────────────────────────
   ctx.fillStyle = LEGEND_LABEL;
   ctx.font = "9px monospace";
   ctx.textAlign = "left";
@@ -506,13 +493,13 @@ export function drawTaskDetailCanvas(
   ctx.fillStyle = WAKE_TRIANGLE;
   ctx.fillText("▲ = wake", 6, BAND_TOP + BAND_H + 18);
 
-  // ── T17: surface a truncated / oversized window (never as complete) ──
+  // ── Surface a truncated / oversized window (never as complete) ───────
   drawWindowMarkers(ctx, window, drawW, height);
 }
 
 /**
- * Diagonal cross-hatch inside (x, y, w, h), clipped (legacy drawCrossHatch,
- * viewer.html:4449-4463) - flags idle periods with a captured task dump.
+ * Diagonal cross-hatch inside (x, y, w, h), clipped - flags idle periods with a
+ * captured task dump.
  */
 function drawCrossHatch(
   ctx: CanvasRenderingContext2D,
@@ -539,10 +526,10 @@ function drawCrossHatch(
 }
 
 /**
- * Surface the resident-window state (T17 obligation): a translucent hatch band
- * at each truncated edge (so missing polls read as "not loaded", not "no
- * activity"), and a "partial window" badge when a needed segment is oversized.
- * No-ops for a complete window. Mirrors the CPU track's drawWindowMarkers.
+ * Surface the resident-window state: a translucent hatch band at each truncated
+ * edge (so missing polls read as "not loaded", not "no activity"), and a
+ * "partial window" badge when a needed segment is oversized. No-ops for a
+ * complete window. Mirrors the CPU track's drawWindowMarkers.
  */
 function drawWindowMarkers(
   ctx: CanvasRenderingContext2D,

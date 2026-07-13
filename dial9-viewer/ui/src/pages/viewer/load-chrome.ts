@@ -1,21 +1,16 @@
-// src/pages/viewer/load-chrome.ts - the load-chrome DOM view + wiring (T34;
-// features/02 section B). Thin glue over the DOM-free load controller
-// (load-controller.ts): it renders the drop zone / loading view / drag
+// The load-chrome DOM view + wiring: thin glue over the DOM-free load
+// controller (load-controller.ts). Renders the drop zone / loading view / drag
 // feedback as a declarative lit-html template, forwards window drag-drop and
 // file-picker events to the controller, and registers the controller's
 // escapable surface in the shell's Escape cascade.
 //
-// The layer is a fixed, full-cover container appended to the document body
-// (a sibling of the shell's #app, like the toasts region and help overlay) so
-// the shell's own declarative re-render never clobbers it. It is a modal while
-// the drop zone / loading view is up (pointer-events block the trace behind);
-// when only the drag overlay shows it is click-through so the `drop` still
-// reaches the document listener.
-//
-// Loading itself is CONSUMED from T16 (loadTraceInWorker writes the store's
-// trace slice); this module only surfaces it. The streaming progress line
-// (B8/B9) renders here in the loading view - the status-bar duplicate is
-// T35's surface. The keep-exactly labels live in load-controller.ts.
+// The layer is a fixed, full-cover container appended to the document body (a
+// sibling of the shell's #app) so the shell's own declarative re-render never
+// clobbers it. It is modal while the drop zone / loading view is up
+// (pointer-events block the trace behind); when only the drag overlay shows it
+// is click-through so the `drop` still reaches the document listener. Loading
+// itself runs in the trace worker (loadTraceInWorker); this module only
+// surfaces it.
 
 import { html, render, nothing, type TemplateResult } from "lit-html";
 import { loadTraceInWorker, Dial9Creds } from "../../lib/trace/index.js";
@@ -35,9 +30,9 @@ export interface LoadChromeOptions {
   store: ViewerStore;
   /** The shell's Escape cascade; the load surface registers itself. */
   esc: EscCascade;
-  /** Show a load failure to the user (wired to the toast channel, U4/B13). */
+  /** Show a load failure to the user (wired to the toast channel). */
   onError(message: string): void;
-  /** Boot `?trace=` components; when present the layer auto-loads them (B12). */
+  /** Boot `?trace=` components; when present the layer auto-loads them. */
   initialUrls?: readonly string[];
   /** Toolbar label for the boot source (shown once it loads). */
   initialLabel?: string;
@@ -48,13 +43,13 @@ export interface LoadChromeOptions {
 }
 
 export interface LoadChrome {
-  /** Toolbar "New File" click (B15): the controller runs the S3 confirm. */
+  /** Toolbar "New File" click: the controller runs the confirm. */
   requestNewFile(): void;
   /** The current source label for the toolbar (updates on each load). */
   currentLabel(): string;
   /**
-   * Set/Clear Range (E3/E4): re-parse the loaded trace to `range` (null = full
-   * trace). Runs off the main thread; a no-op before the first load.
+   * Set/Clear Range: re-parse the loaded trace to `range` (null = full trace).
+   * Runs off the main thread; a no-op before the first load.
    */
   reparseToRange(range: ReparseRange | null): void;
   dispose(): void;
@@ -62,9 +57,9 @@ export interface LoadChrome {
 
 /**
  * Mount the load chrome. Returns the handle the entry threads into the shell
- * (New File) and the toolbar (source label). Boot behavior: with
- * `initialUrls` the drop zone shows the loading view and auto-loads; without,
- * the drop zone waits for a drop / pick / demo (B1, the resting empty state).
+ * (New File) and the toolbar (source label). Boot behavior: with `initialUrls`
+ * the drop zone shows the loading view and auto-loads; without, the drop zone
+ * waits for a drop / pick / demo (the resting empty state).
  */
 export function mountLoadChrome(options: LoadChromeOptions): LoadChrome {
   const doc = options.document ?? document;
@@ -84,14 +79,14 @@ export function mountLoadChrome(options: LoadChromeOptions): LoadChrome {
 
   // The file input and the lit-html render target are persistent siblings:
   // lit-html owns the render target's children, so the input lives OUTSIDE it
-  // (a render pass would otherwise clobber a child input, B2).
+  // (a render pass would otherwise clobber a child input).
   const fileInput = doc.createElement("input");
   fileInput.type = "file";
   fileInput.accept = ".bin,.gz";
   fileInput.className = "d9-load-file-input";
   fileInput.addEventListener("change", () => {
     const file = fileInput.files?.[0];
-    // Reset so re-picking the SAME file still fires change (B2).
+    // Reset so re-picking the SAME file still fires change.
     fileInput.value = "";
     if (file) {
       pendingLabel = file.name;
@@ -124,7 +119,7 @@ export function mountLoadChrome(options: LoadChromeOptions): LoadChrome {
 
   const unregisterEsc = options.esc.register(controller.escSurface);
 
-  // ── Document-level drag-and-drop (B3/B4/B5) ───────────────────────────────
+  // ── Document-level drag-and-drop ──────────────────────────────────────────
   const isFileDrag = (e: DragEvent): boolean =>
     e.dataTransfer?.types.includes("Files") ?? false;
 

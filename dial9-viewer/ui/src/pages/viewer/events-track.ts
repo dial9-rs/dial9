@@ -1,41 +1,21 @@
-// src/pages/viewer/events-track.ts - the custom-events track component (T27;
-// features/02 section K). Hosts inside T21's unified track column: tracks.ts
-// delegates the "events" row's TEMPLATE (legend chips + canvas) and its canvas
-// PAINT here. Everything reactive flows through the store (T07): the name-chip
-// filter writes uiPrefs.selectedEventNames, a click PINS the event
-// (selection.pinnedEvent), a hover writes the guide-line timestamp
-// (transient.hoverEventTs); the canvas redraws inside the shell's frame tick
-// (never a direct out-of-scheduler render, N18/F2).
+// The custom-events track component: the "events" row's template (legend chips
+// + canvas) and its canvas paint. Everything reactive flows through the store:
+// the name-chip filter writes uiPrefs.selectedEventNames, a click PINS the
+// event (selection.pinnedEvent), a hover writes the guide-line timestamp
+// (transient.hoverEventTs); the canvas redraws inside the shell's frame tick.
 //
-// The heavy derivations are cached the way perf finding F5 prescribes:
-//   - The trace-invariant event data (computeEventTrackData) is a
-//     store.derived(["trace"], ...) cache - recomputed only when the trace
-//     slice is replaced, NOT per render.
-//   - The per-frame render model (buildEventRenderModel) is memoized on its
-//     primitive inputs, so a selection-only change (S4 dimming) redraws with
-//     the SAME cached geometry instead of recomputing it.
-//   - The per-event task resolver (K7) is memoized in a WeakMap (legacy
-//     `_taskForEventCache`), rebuilt only when the worker lanes change.
-// The visible-event window is BINARY-SEARCHED at both edges (events-model
-// filterVisibleEvents) - the legacy O(all generic events) per-frame scan (03
-// F5) is gone, per 03 F6's binary-search-helpers rule. This is the perf fix
-// T27 owns.
+// Heavy derivations are cached: the trace-invariant event data in a
+// store.derived over the trace slice; the per-frame render model memoized on
+// its primitive inputs, so a selection-only change (dimming) redraws with the
+// SAME cached geometry; the per-event task resolver in a WeakMap, rebuilt only
+// when the worker lanes change. The visible-event window is binary-searched at
+// both edges.
 //
-// SEAMS (scope fence, T27 ticket):
-//   - The hover guide line (I4) and pinned-event marker (I5) are drawn by the
-//     T24 overlay (components/overlay/crosshair.ts) reading transient.
-//     hoverEventTs + selection.pinnedEvent. This track DISPATCHES those slices;
-//     it does NOT draw the overlay marks.
-//   - The event-KV sidebar is T31's surface. This track dispatches selection.
-//     pinnedEvent (the PinnedCustomEvent contract, types/state.d.ts); T31
-//     renders it. Until T31 lands the pin still drives the overlay marker + the
-//     track dimming, which is observable today.
-//
-// T17 carried obligation (audit notes 6+7): a segment stuck "oversized" makes
-// this view unavoidably partial; the canvas surfaces a "partial window" badge
-// rather than presenting the loaded ticks as the whole event stream. (Point
-// markers have no continuous edge to hatch, unlike the CPU series, so only the
-// oversized state is surfaced.)
+// The overlay draws the hover guide line + pinned-event marker from the
+// transient/selection slices this track dispatches; the inspector renders the
+// event-KV sidebar. A segment stuck "oversized" makes the view unavoidably
+// partial, so the canvas surfaces a "partial window" badge (point markers have
+// no continuous edge to hatch, so only the oversized state is surfaced).
 
 import { html, render, nothing, type TemplateResult } from "lit-html";
 import { repeat } from "lit-html/directives/repeat.js";
@@ -65,29 +45,28 @@ import {
   type EventTrackData,
 } from "./events-model.js";
 
-/** Height reserved for the legend strip above the event canvas (features/02
- *  K5/K6). */
+/** Height reserved for the legend strip above the event canvas. */
 export const LEGEND_H = 26;
 
-// Legacy custom-events panel colors (viewer.html), kept identical.
+// Custom-events panel colors.
 const CANVAS_BG = "#1a1a2e";
 const EMPTY_TEXT = "#555";
 const PARTIAL_LABEL = "#ffb3b3";
-// The legacy #ce-panel-info text color (viewer.html:933).
+// The #ce-panel-info text color.
 const INFO_FILL = "#aaa";
 
-/** Derived worker lanes + ids for task resolution (K7). */
+/** Derived worker lanes + ids for task resolution. */
 interface WorkerLaneData {
   lanes: Record<number, WorkerLane>;
   workerIds: number[];
 }
 
-/** The handle tracks.ts + the shell drive (mirrors SpansTrackController). */
+/** The handle tracks.ts + the shell drive. */
 export interface EventsTrackController {
-  /** The full `.d9-track` row template for the events track (K1/K2/K5/K6). */
+  /** The full `.d9-track` row template for the events track. */
   rowTemplate(track: TrackSpec): TemplateResult;
-  /** Size + draw the event canvas (K1/S4). Called from sizeTracks inside the
-   *  shell's frame tick. */
+  /** Size + draw the event canvas. Called from sizeTracks inside the shell's
+   *  frame tick. */
   paint(
     canvas: HTMLCanvasElement,
     drawW: number,
@@ -101,36 +80,35 @@ export interface EventsTrackController {
 }
 
 export function createEventsTrack(store: ViewerStore): EventsTrackController {
-  // ── Derived caches (F5) ────────────────────────────────────────────────
+  // ── Derived caches ──────────────────────────────────────────────────────
   // Trace-invariant event data: recomputed only when the trace slice changes.
   const eventData = store.derived(["trace"], (s) =>
     computeEventTrackData(s.trace.trace?.customEvents),
   );
-  // Worker poll lanes, for resolving the task/poll a custom event ran in (K7).
+  // Worker poll lanes, for resolving the task/poll a custom event ran in.
   // Same trace-keyed invalidation.
   const workerLanes = store.derived(["trace"], (s) =>
     buildWorkerLaneData(s.trace.trace),
   );
 
-  // Stable name -> color assignment for this track's lifetime (K1/K5). An
-  // independent assigner from the spans track's, exactly like the legacy pair
-  // of maps (_ceColorMap vs _spanColorMap).
+  // Stable name -> color assignment for this track's lifetime. An independent
+  // assigner from the spans track's.
   const colorOf = makeColorAssigner();
 
-  // Per-event task resolver (K7), memoized in a WeakMap and rebuilt only when
-  // the worker lanes change (legacy `_taskForEventCache`).
+  // Per-event task resolver, memoized in a WeakMap and rebuilt only when the
+  // worker lanes change.
   let taskCache: { key: WorkerLaneData; fn: (ev: CustomTraceEvent) => number | null } | null =
     null;
 
   // Per-frame render-model memo, keyed on the derived-data reference (trace
   // identity) + its primitive inputs so a selection-only change (dimming)
-  // reuses the cached geometry (S4) but a trace/viewport/filter change
-  // recomputes it. NOT keyed on the selection - the draw applies the fade.
+  // reuses the cached geometry but a trace/viewport/filter change recomputes
+  // it. NOT keyed on the selection - the draw applies the fade.
   let modelCache: { data: EventTrackData; key: string; model: EventRenderModel } | null =
     null;
-  // The buckets last painted, for canvas hit-testing (K3 hover, K4 click).
+  // The buckets last painted, for canvas hit-testing (hover + click).
   let lastHits: readonly EventDrawBucket[] = [];
-  // One tooltip element for K3, created lazily.
+  // One tooltip element, created lazily.
   let tooltipEl: HTMLDivElement | null = null;
   let sizer: CanvasSizer<CanvasRenderingContext2D> | null = null;
   let sizerCanvas: HTMLCanvasElement | null = null;
@@ -139,7 +117,7 @@ export function createEventsTrack(store: ViewerStore): EventsTrackController {
     return store.getState() as StoreState;
   }
 
-  /** The memoized per-event task resolver bound to the current lanes (K7). */
+  /** The memoized per-event task resolver bound to the current lanes. */
   function taskResolver(): (ev: CustomTraceEvent) => number | null {
     const laneData = workerLanes();
     if (taskCache !== null && taskCache.key === laneData) return taskCache.fn;
@@ -199,18 +177,18 @@ export function createEventsTrack(store: ViewerStore): EventsTrackController {
     store.update("uiPrefs", { selectedEventNames: new Set<string>() });
   }
 
-  /** Pin (or toggle off) a clicked cluster (K4); see dispatchEventPin. */
+  /** Pin (or toggle off) a clicked cluster; see dispatchEventPin. */
   function pinCluster(bucket: EventDrawBucket): void {
     const laneData = workerLanes();
     dispatchEventPin(store, bucket, laneData.lanes, laneData.workerIds);
   }
 
-  /** Dispatch (or clear) the hover guide-line timestamp (I4; T24 draws it). */
+  /** Dispatch (or clear) the hover guide-line timestamp (the overlay draws it). */
   function setHoverEvent(ts: number | null): void {
     dispatchHoverEvent(store, ts);
   }
 
-  // ── Canvas paint (K1/S4) ────────────────────────────────────────────────
+  // ── Canvas paint ────────────────────────────────────────────────────────
 
   function paint(
     canvas: HTMLCanvasElement,
@@ -233,13 +211,12 @@ export function createEventsTrack(store: ViewerStore): EventsTrackController {
     const hlTask = eventHighlightTask(s.selection);
     const oversized = anyOversized(s.segments.segments);
     drawEventsCanvas(ctx, model, hlTask, drawW, canvasH, oversized, s.uiPrefs.selectedEventNames.size > 0);
-    // Mirror the K2 info readout to a DOM-queryable attribute (the legacy
-    // `#ce-panel-info` text) for the row-walker / behavioral differ - same as
-    // the CPU track's `cpuReadout` (tracks.ts).
+    // Mirror the info readout to a DOM-queryable attribute (the `#ce-panel-info`
+    // text) for the row-walker - same as the CPU track's `cpuReadout`.
     canvas.dataset["eventsInfo"] = model.info;
   }
 
-  // ── Templates (K5 legend chips, K6 clear) ───────────────────────────────
+  // ── Templates (legend chips + clear) ────────────────────────────────────
 
   function rowTemplate(track: TrackSpec): TemplateResult {
     const s = state();
@@ -273,7 +250,7 @@ export function createEventsTrack(store: ViewerStore): EventsTrackController {
     `;
   }
 
-  /** K5 name-chip legend + K6 clear button (keyed template, not innerHTML). */
+  /** Name-chip legend + clear button (keyed template, not innerHTML). */
   function legendTemplate(
     data: EventTrackData,
     selectedNames: ReadonlySet<string>,
@@ -314,7 +291,7 @@ export function createEventsTrack(store: ViewerStore): EventsTrackController {
     `;
   }
 
-  // ── Canvas interaction (K4 click, K3 hover) ─────────────────────────────
+  // ── Canvas interaction (click + hover) ──────────────────────────────────
 
   function bucketAt(canvas: HTMLCanvasElement, ev: MouseEvent): EventDrawBucket | null {
     const rect = canvas.getBoundingClientRect();
@@ -332,7 +309,7 @@ export function createEventsTrack(store: ViewerStore): EventsTrackController {
   function onCanvasClick(ev: MouseEvent): void {
     const canvas = ev.currentTarget as HTMLCanvasElement;
     const bucket = bucketAt(canvas, ev);
-    // Legacy: a click that misses every tick does nothing (no clear).
+    // A click that misses every tick does nothing (no clear).
     if (bucket !== null) pinCluster(bucket);
   }
 
@@ -346,8 +323,8 @@ export function createEventsTrack(store: ViewerStore): EventsTrackController {
       return;
     }
     showTooltip(ev, bucket);
-    // Guide line across the lanes at the hovered event's timestamp (I4; the
-    // T24 overlay draws it from this slice).
+    // Guide line across the lanes at the hovered event's timestamp (the
+    // overlay draws it from this slice).
     setHoverEvent(bucket.representative.timestamp);
   }
 
@@ -436,16 +413,15 @@ export function createEventsTrack(store: ViewerStore): EventsTrackController {
   return { rowTemplate, paint, dispose };
 }
 
-// ── Store dispatch (exported so the DoD's dispatch checks are Vitest-able
-//    without a DOM; the controller's canvas handlers delegate here) ─────────
+// ── Store dispatch (exported so the dispatch is testable without a DOM; the
+//    controller's canvas handlers delegate here) ─────────
 
 /**
- * Pin a clicked cluster to the selection slice (K4), or toggle the pin off
- * when the SAME cluster is clicked again (legacy viewer.html:4292-4315). This
- * is the "dispatch side" the T27 ticket owns: it writes selection.pinnedEvent
- * (the contract T24's overlay marker + T31's inspector read) and clears any
- * prior task/span selection so the lanes show only this event's poll + marker
- * (legacy clearSpanTaskSelection). It does NOT draw the marker (T24 does).
+ * Pin a clicked cluster to the selection slice, or toggle the pin off when the
+ * SAME cluster is clicked again. Writes selection.pinnedEvent (the contract
+ * the overlay marker + the inspector read) and clears any prior task/span
+ * selection so the lanes show only this event's poll + marker. Does NOT draw
+ * the marker (the overlay does).
  */
 export function dispatchEventPin(
   store: ViewerStore,
@@ -467,10 +443,10 @@ export function dispatchEventPin(
 }
 
 /**
- * Dispatch (or clear) the hovered custom-event timestamp for the guide line
- * (I4). T27 writes transient.hoverEventTs; the T24 overlay draws the orange
- * guide from it. Rides the transient channel, so it never redraws the full
- * track column. No-op when unchanged (avoids a redundant frame).
+ * Dispatch (or clear) the hovered custom-event timestamp for the guide line.
+ * Writes transient.hoverEventTs; the overlay draws the orange guide from it.
+ * Rides the transient channel, so it never redraws the full track column.
+ * No-op when unchanged (avoids a redundant frame).
  */
 export function dispatchHoverEvent(store: ViewerStore, ts: number | null): void {
   if ((store.getState() as StoreState).transient.hoverEventTs !== ts) {
@@ -480,8 +456,8 @@ export function dispatchHoverEvent(store: ViewerStore, ts: number | null): void 
 
 // ── Pure helpers (no store) ──────────────────────────────────────────────
 
-/** Build the worker poll lanes + ids for task resolution (K7). Empty when the
- *  trace has no events (mirrors spans-track's buildWorkerLanes). */
+/** Build the worker poll lanes + ids for task resolution. Empty when the trace
+ *  has no events. */
 function buildWorkerLaneData(trace: ParsedTrace | null): WorkerLaneData {
   if (trace === null || trace.maxTs === null) return { lanes: {}, workerIds: [] };
   const workerIds = [...new Set(trace.tidToWorker.values())];
@@ -494,7 +470,7 @@ function buildWorkerLaneData(trace: ParsedTrace | null): WorkerLaneData {
   return { lanes, workerIds };
 }
 
-/** Most-frequent-first "name xN" list (legacy topNames), for cluster tooltips. */
+/** Most-frequent-first "name xN" list, for cluster tooltips. */
 function topNames(events: readonly CustomTraceEvent[], limit = 5): string {
   const counts = new Map<string, number>();
   for (const e of events) counts.set(e.name, (counts.get(e.name) ?? 0) + 1);
@@ -505,8 +481,8 @@ function topNames(events: readonly CustomTraceEvent[], limit = 5): string {
     .join(", ");
 }
 
-/** True when any segment is stuck "oversized" (T17 obligation): the view is
- *  unavoidably partial. Empty on the whole-trace path. */
+/** True when any segment is stuck "oversized": the view is unavoidably
+ *  partial. Empty on the whole-trace path. */
 function anyOversized(segments: ReadonlyMap<string, { state: string }>): boolean {
   for (const entry of segments.values()) {
     if (entry.state === "oversized") return true;
@@ -517,14 +493,13 @@ function anyOversized(segments: ReadonlyMap<string, { state: string }>): boolean
 // ── Canvas draw (extracted so the render input is unit-testable) ──────────
 
 /**
- * Draw the event marker ticks into `ctx` (already DPR-scaled + sized to
- * drawW x canvasH). Ported from the legacy `renderCustomEventsPanel`
- * (viewer.html:3588-3637): each cluster is a colored tick whose alpha encodes
- * cluster size, faded to 20% when a task is highlighted and this cluster did
- * NOT run on it (the S4/K1 selection-driven dimming - a cheap redraw over the
- * cached geometry, mirroring T26's spans dimming). Mixed-name clusters get a
- * secondary-color bottom stripe. `hlTask` is the highlighted task (null = no
- * dimming); `hasNameFilter` only tunes the empty-state message.
+ * Draw the event marker ticks into `ctx` (already DPR-scaled + sized to drawW
+ * x canvasH): each cluster is a colored tick whose alpha encodes cluster size,
+ * faded to 20% when a task is highlighted and this cluster did NOT run on it
+ * (the selection-driven dimming - a cheap redraw over the cached geometry).
+ * Mixed-name clusters get a secondary-color bottom stripe. `hlTask` is the
+ * highlighted task (null = no dimming); `hasNameFilter` only tunes the
+ * empty-state message.
  */
 export function drawEventsCanvas(
   ctx: CanvasRenderingContext2D,
@@ -569,8 +544,7 @@ export function drawEventsCanvas(
   }
   ctx.globalAlpha = 1.0;
 
-  // K2 info readout, top-right (legacy `#ce-panel-info`: `N events · M
-  // markers`, overlaid on the panel).
+  // Info readout, top-right (`#ce-panel-info`: `N events · M markers`).
   if (model.info.length > 0) {
     ctx.fillStyle = INFO_FILL;
     ctx.font = "10px sans-serif";
@@ -579,11 +553,11 @@ export function drawEventsCanvas(
     ctx.textAlign = "left";
   }
 
-  // T17 obligation: surface a permanently-partial (oversized) window.
+  // Surface a permanently-partial (oversized) window.
   if (oversized) drawPartialBadge(ctx, drawW, canvasH);
 }
 
-/** The "partial window" badge (T17 obligation), mirroring the CPU track. */
+/** The "partial window" badge, mirroring the CPU track. */
 function drawPartialBadge(
   ctx: CanvasRenderingContext2D,
   drawW: number,

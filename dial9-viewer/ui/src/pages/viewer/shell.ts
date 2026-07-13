@@ -1,23 +1,12 @@
-// src/pages/viewer/shell.ts - the viewer page shell (T21; DECIDED layout,
-// docs/tickets/chunk-2-viewer.md header; mocks concept-1.html + concept-2.html).
+// The viewer page shell: the whole viewer chrome as one declarative lit-html
+// render driven by store state. The layout is a top toolbar row, an overview
+// minimap slot, a body splitting a unified time-aligned track column (left)
+// from a persistent inspector sidebar (right), and a status bar along the bottom.
 //
-// The whole viewer chrome as ONE declarative lit-html render driven by store
-// state (N17: no DOM mutation outside a state-driven render). The layout is
-// the concept-1 hybrid: a top toolbar row, an overview minimap slot, a body
-// splitting a unified time-aligned TRACK COLUMN (left) from a persistent
-// INSPECTOR sidebar (right), and a status bar slot along the bottom.
-//
-// T21 owns the SHELL and the app chrome (features/02 A shell/global, T help,
-// U toasts, W reachability). Everything else is a labeled placeholder SLOT
-// that a later ticket fills: tracks T22-T30, inspector T31, toolbar+rail
-// T33, minimap+status T35. The slots carry ARIA landmarks and labels from
-// the start (04 F1 axe fixes) so those tickets inherit an accessible frame.
-//
-// Landmark + tab order (DoD "toolbar -> minimap -> tracks -> inspector"):
-// the regions appear in that DOM order, and the one focusable representative
-// of each (toolbar help button, minimap region, track column, inspector)
-// makes the Tab sequence follow the triage task flow (K6). No positive
-// tabindex is used, so DOM order IS tab order.
+// The regions appear in DOM order toolbar -> minimap -> tracks -> inspector, and
+// the one focusable representative of each (toolbar help button, minimap region,
+// track column, inspector) makes the Tab sequence follow the triage task flow.
+// No positive tabindex is used, so DOM order IS tab order.
 
 import { html, render, nothing, type TemplateResult } from "lit-html";
 import type { ViewerStore } from "../../store/store.js";
@@ -47,29 +36,24 @@ export interface ShellDeps extends ToolbarDeps {
   /**
    * Human label for the loaded trace source (toolbar file info). A getter so
    * it tracks the load chrome's current source across drop/pick/demo/URL
-   * loads (T34) rather than freezing at the boot value.
+   * loads rather than freezing at the boot value.
    */
   sourceLabel(): string;
   /**
-   * Toolbar "New File" (features/02 B15): open the load chrome. The load
-   * chrome runs the S3 confirm before discarding a loaded trace (T34). Absent
-   * on mounts without load chrome (the button then does not render).
+   * Toolbar "New File": open the load chrome. The load chrome runs the confirm
+   * before discarding a loaded trace. Absent on mounts without load chrome (the
+   * button then does not render).
    */
   onNewFile?(): void;
 }
 
-/** Everything the shell template needs, derived from store state. The file-
- * info fields moved to the toolbar controller (T33 owns C1); the shell keeps
- * only the track inputs + the status-bar labels. */
+/** Everything the shell template needs, derived from store state. */
 interface ShellViewModel extends TracksViewModel {
-  // File-info fields moved to the toolbar controller (T33 owns C1); the
-  // selection/range/duration status fields moved to the mounted status-bar
-  // component (T35 reads them from the store). The shell view model now carries
-  // only the track inputs (TracksViewModel).
+  // Carries only the track inputs; file-info fields live in the toolbar
+  // controller and the status fields in the mounted status-bar component.
 }
 
-/** The persistent interaction hint chips (F5): always visible, never
- * auto-hidden (they replace the legacy load-time hint toasts, U3). */
+/** The persistent interaction hint chips: always visible, never auto-hidden. */
 const HINT_CHIPS: readonly string[] = [
   "Shift+drag = select region",
   "Option+drag = zoom",
@@ -93,13 +77,13 @@ function viewModel(state: StoreState): ShellViewModel {
     viewEnd,
     axis: deriveAxisInputs(state),
     cpu: deriveCpuInputs(state),
-    // Track management (T36): the order + collapse map the track column reads.
+    // Track management: the order + collapse map the track column reads.
     trackOrder: state.uiPrefs.trackOrder,
     collapsed: state.uiPrefs.collapsed,
   };
 }
 
-/** F4 empty state: teach the next steps instead of a bare drop target. */
+/** Empty state: teach the next steps instead of a bare drop target. */
 function emptyStateTemplate(): TemplateResult {
   return html`
     <div class="d9-empty" role="note">
@@ -127,13 +111,13 @@ function hintChipsTemplate(): TemplateResult {
 }
 
 /**
- * The persistent inspector landmark (T31). Rendered EMPTY here (like the toast
- * region): the T31 inspector component (mountInspector) owns the tabs + body +
+ * The persistent inspector landmark. Rendered EMPTY here (like the toast
+ * region): the inspector component (mountInspector) owns the tabs + body +
  * resize handle and renders them imperatively into this aside, so the shell's
  * declarative re-renders never clobber the inspector's interior (no child
  * bindings on this node = lit-html leaves imperatively-added children intact).
- * The landmark + role + tabindex live here so the A11y frame and tab order
- * (toolbar -> minimap -> tracks -> inspector) exist before the component mounts.
+ * The landmark + role + tabindex live here so the a11y frame and tab order exist
+ * before the component mounts.
  */
 function inspectorTemplate(): TemplateResult {
   return html`
@@ -245,16 +229,16 @@ export interface MountedShell {
   /** The track column element (canvas host for sizing). */
   trackColumn: HTMLElement;
   /**
-   * Key bindings the toolbar + issues rail contribute to the unified router
-   * (T20): the rail's `n`/`p` POI step and the toolbar's `g` goto-time. The
-   * entry registers them alongside the lane-interaction bindings.
+   * Key bindings the toolbar + issues rail contribute to the unified router:
+   * the rail's `n`/`p` POI step and the toolbar's `g` goto-time. The entry
+   * registers them alongside the lane-interaction bindings.
    */
   keyBindings: readonly KeyBinding[];
-  /** The persistent inspector landmark (pass to mountInspector, T31). */
+  /** The persistent inspector landmark (pass to mountInspector). */
   inspectorRegion: HTMLElement;
-  /** The overview-minimap host (pass to mountMinimap, T35). */
+  /** The overview-minimap host (pass to mountMinimap). */
   minimapRegion: HTMLElement;
-  /** The status-bar footer host (pass to createStatusBar, T35). */
+  /** The status-bar footer host (pass to createStatusBar). */
   statusRegion: HTMLElement;
   /** Force one render+size pass (used after mount and on resize). */
   refresh(): void;
@@ -263,11 +247,11 @@ export interface MountedShell {
 }
 
 /**
- * Mount the shell into `root`, wired to `store`. Subscribes to the slice
- * set that changes the chrome (trace/viewport/selection/uiPrefs) and
- * renders + sizes track canvases each frame INSIDE the store's notification
- * tick (the scheduler is the only place renders run and layout reads are
- * batched, F2/F3). Returns handles the entry needs (toast region, teardown).
+ * Mount the shell into `root`, wired to `store`. Subscribes to the slice set
+ * that changes the chrome (trace/viewport/selection/uiPrefs) and renders +
+ * sizes track canvases each frame INSIDE the store's notification tick (the
+ * scheduler is the only place renders run and layout reads are batched).
+ * Returns handles the entry needs (toast region, teardown).
  */
 export function mountShell(
   root: HTMLElement,
@@ -276,26 +260,25 @@ export function mountShell(
 ): MountedShell {
   root.classList.add("d9-viewer");
 
-  // The spans track (T26) and custom-events track (T27) are store-wired
-  // content components: created once so their derived caches + name->color
-  // assignment live across renders. Other content tracks (T22/T28-T30) mount
-  // the same way as they land.
+  // The spans track and custom-events track are store-wired content
+  // components: created once so their derived caches + name->color assignment
+  // live across renders.
   const spansTrack = createSpansTrack(store);
-  // The queue track (T29): store-wired like spans, created once so its
-  // trace-keyed series cache + drag state live across renders (F5).
+  // The queue track: store-wired like spans, created once so its trace-keyed
+  // series cache + drag state live across renders.
   const queueTrack = createQueueTrack(store);
-  // The task-detail track (T30): store-wired like spans, created once so its
-  // selection-keyed derivation cache lives across renders (F5). Its row is
-  // only rendered while a task is selected (selectionOnly, N1).
+  // The task-detail track: store-wired like spans, created once so its
+  // selection-keyed derivation cache lives across renders. Its row is only
+  // rendered while a task is selected.
   const taskDetailTrack = createTaskDetailTrack(store);
   const eventsTrack = createEventsTrack(store);
-  // Toolbar (file info / analysis / time) and the issues rail (T33): store-
-  // wired controllers filling the toolbar slots + the body's left column.
+  // Toolbar (file info / analysis / time) and the issues rail: store-wired
+  // controllers filling the toolbar slots + the body's left column.
   const toolbar = createToolbar(store, deps);
   const rail = createIssuesRail(store);
-  // Track management (T36): collapse/reorder dispatchers the caret + grip in
-  // the track column bind to. Persistence (hydrate on boot + save on change)
-  // is wired at the page entry (main.ts) so the store itself stays pure.
+  // Track management: collapse/reorder dispatchers the caret + grip in the
+  // track column bind to. Persistence (hydrate on boot + save on change) is
+  // wired at the page entry (main.ts) so the store itself stays pure.
   const trackActions = createTrackManageActions(store);
 
   function renderPass(): void {
@@ -322,17 +305,17 @@ export function mountShell(
     }
   }
 
-  // Render the chrome whenever any chrome-affecting slice changes. The
-  // shell is chrome, so it renders declaratively from state; track/inspector
-  // CONTENT tickets add their own slice subscriptions against this store.
+  // Render the chrome whenever any chrome-affecting slice changes. The shell is
+  // chrome, so it renders declaratively from state; track/inspector content
+  // components add their own slice subscriptions against this store.
   const unsubscribe = store.subscribe(
     ["trace", "viewport", "selection", "poi", "uiPrefs"],
     () => renderPass(),
   );
 
-  // Resize reflow (features/02 A15): re-render on window resize so the track
-  // canvases refit. Dispatch a no-op store update so the render still runs
-  // through the scheduler (never a direct out-of-tick render, N18).
+  // Resize reflow: re-render on window resize so the track canvases refit.
+  // Dispatch a no-op store update so the render still runs through the
+  // scheduler (never a direct out-of-tick render).
   const onResize = (): void => {
     store.update("viewport", {});
   };

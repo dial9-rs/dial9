@@ -1,28 +1,8 @@
-// src/pages/viewer/region-analysis-model.ts - the PURE derivations for the
-// in-viewer region-analysis panel (T32; features/02 section S rows F15/F16 +
-// R3-R9 blocking-calls, deferred to T32 by T31's Stack-tab seam). NODE-TESTABLE:
-// no store, no DOM, no flamegraph.js widget - every function is referentially
-// transparent so the region-analysis component (region-analysis.ts) renders from
-// these and the sample counts / trees / blocking groups behavioral-diff against
-// legacy directly (the DoD's J2/J5 region-select flows).
-//
-// The split mirrors the rest of the viewer (inspector-model, queue-model,
-// task-detail-model): this file owns the derivation; region-analysis.ts owns the
-// embedded-flamegraph widget lifecycle (createFlamegraph via lib/canvas), the
-// sub-tab framework, and the imperative render into T31's inspector Stack tab.
-// Legacy sources ported verbatim minus the DOM:
-//   - CPU region samples + count (F15): showFlamegraph (viewer.html:6989-7050)
-//     + the frozen filterCpuSamples (flamegraph.js:129).
-//   - Heap samples / Horvitz-Thompson estimates (F16): showHeapFlamegraph
-//     (viewer.html:6825-6987).
-//   - Blocking-calls groups (R3-R9): collectSchedSamples + renderSchedPanel
-//     (viewer.html:6054-6203).
-//   - "what opens by data present" (H7): the region mouseup branch
-//     (viewer.html:5322-5344).
-//
-// S7 amendment (04 S7 / iss #571): the count reconciliation (foldable on-CPU vs
-// total CPU records) is computed here (countLabel); the frame->timeline extent
-// (frameSampleTimeExtent) is the [min,max] timestamp of a zoomed frame's samples.
+// Pure derivations for the in-viewer region-analysis panel: CPU flamegraph
+// samples, off-CPU blocking-call groups, heap (Horvitz-Thompson) estimates, and
+// partial-window coverage. No store, no DOM - every function is referentially
+// transparent so region-analysis.ts (which owns the widget lifecycle) renders
+// from these.
 
 import {
   OFF_WORKER_WORKER_ID,
@@ -42,15 +22,15 @@ import type { FlamegraphDataSample } from "../../lib/canvas/index.js";
 import type { TimeRange } from "../../types/trace.js";
 import type { SegmentsSlice } from "../../types/state.js";
 
-/** Worker-lane bundle the region analyses read (frozen buildWorkerSpans output). */
+/** Worker-lane bundle the region analyses read. */
 export type WorkerSpans = Record<number, WorkerLane>;
 
-// ── Region modes present + default (H7 / P4 tab families for a range) ─────────
+// ── Region modes present + default ────────────────────────────────────────────
 
-/** The three range-scoped analysis modes (P4's Flamegraph/Blocking/Heap family). */
+/** The three range-scoped analysis modes (Flamegraph / Blocking / Heap). */
 export type RegionMode = "cpu" | "blocking" | "heap";
 
-/** Which analyses have data in the region (P4 tab availability by data present). */
+/** Which analyses have data in the region. */
 export interface RegionModesPresent {
   cpu: boolean;
   blocking: boolean;
@@ -58,11 +38,10 @@ export interface RegionModesPresent {
 }
 
 /**
- * The frozen `filterCpuSamples` predicate (flamegraph.js:129) inlined so the
- * pure model stays free of the widget module: an on-CPU sample (`source !== 1`)
- * carrying a stack (`callchain.length > 0`). Off-CPU/scheduling samples
- * (`source === 1`) and stackless samples are excluded - they are the units the
- * S7 count reconciliation separates (see cpuRegionView).
+ * The `filterCpuSamples` predicate: an on-CPU sample (`source !== 1`) carrying a
+ * stack (`callchain.length > 0`). Off-CPU/scheduling samples (`source === 1`)
+ * and stackless samples are excluded - they are the units the count
+ * reconciliation separates (see cpuRegionView).
  */
 export function isFoldableCpuSample(
   s: Pick<CpuSample, "callchain" | "source">,
@@ -70,8 +49,7 @@ export function isFoldableCpuSample(
   return s.callchain.length > 0 && s.source !== 1;
 }
 
-/** Foldable on-CPU samples in [start,end] (nulls = open bound), mirroring the
- *  frozen filterCpuSamples so the embedded tree matches the flamegraph page. */
+/** Foldable on-CPU samples in [start,end] (nulls = open bound). */
 export function filterRegionCpuSamples(
   cpuSamples: readonly CpuSample[],
   startNs: number | null,
@@ -96,8 +74,7 @@ export interface SchedEntry {
 
 /**
  * Collect the in-poll scheduling (off-CPU) samples within `range` (null = whole
- * trace), grouped exactly as legacy `collectSchedSamples` (viewer.html:6054):
- * kernel deschedules recorded inside a worker poll. Only these back the
+ * trace): kernel deschedules recorded inside a worker poll. Only these back the
  * blocking-calls panel; a sched sample outside any poll is not counted.
  */
 export function collectSchedSamplesInRange(
@@ -121,7 +98,7 @@ export function collectSchedSamplesInRange(
   return out;
 }
 
-/** Whether alloc events with stacks exist in `range` (F16 CONDITIONAL). */
+/** Whether alloc events with stacks exist in `range`. */
 export function hasHeapInRange(
   allocEvents: readonly AllocEvent[],
   range: TimeRange | null,
@@ -135,8 +112,8 @@ export function hasHeapInRange(
 }
 
 /**
- * Which analyses have data in `range` (null = whole trace). Drives the P4 sub-tab
- * family (Flamegraph / Blocking / Heap) and the H7 default pick.
+ * Which analyses have data in `range` (null = whole trace). Drives the sub-tab
+ * family (Flamegraph / Blocking / Heap) and the default-mode pick.
  */
 export function regionModesPresent(
   trace: ParsedTrace,
@@ -153,36 +130,34 @@ export function regionModesPresent(
 }
 
 /**
- * The mode a fresh region opens in (H7, viewer.html:5334-5344): sched-only ->
- * blocking; heap-but-no-cpu -> heap; otherwise CPU flamegraph. Returns null when
- * the region has NO analyzable data (the caller shows the R9 no-data hint).
+ * The mode a fresh region opens in: sched-only -> blocking; heap-but-no-cpu ->
+ * heap; otherwise CPU flamegraph. Returns null when the region has NO analyzable
+ * data (the caller shows the no-data hint).
  */
 export function defaultRegionMode(present: RegionModesPresent): RegionMode | null {
   if (present.blocking && !present.cpu && !present.heap) return "blocking";
   if (!present.cpu && present.heap) return "heap";
   if (present.cpu) return "cpu";
-  // No CPU and no heap and no blocking, or blocking already handled above.
   if (present.blocking) return "blocking";
   if (present.heap) return "heap";
   return null;
 }
 
-// ── CPU region view (F15) + S7 count reconciliation ──────────────────────────
+// ── CPU region view + count reconciliation ────────────────────────────────────
 
-/** The CPU flamegraph view for a region (F15). */
+/** The CPU flamegraph view for a region. */
 export interface CpuRegionView {
-  /** Foldable on-CPU samples, ready for the widget's setData (F15). */
+  /** Foldable on-CPU samples, ready for the widget's setData. */
   samples: CpuSample[];
   /** How many foldable samples build the tree (the flamegraph "N samples"). */
   foldableCount: number;
   /** Total CPU sample RECORDS in range - the unit the toolbar label counts. */
   totalRecords: number;
   /**
-   * S7 reconciliation (04 S7 / iss #571): the toolbar "Flamegraph (8993)" counts
-   * ALL cpuSamples records (on-CPU + off-CPU/scheduling + stackless); the
-   * flamegraph shows only the foldable on-CPU-with-stacks subset ("147 samples").
-   * Not a bug - different units. This label states both so the two never read as
-   * a contradiction on one screen.
+   * The toolbar "Flamegraph (8993)" counts ALL cpuSamples records (on-CPU +
+   * off-CPU/scheduling + stackless); the flamegraph shows only the foldable
+   * on-CPU-with-stacks subset ("147 samples"). Not a bug - different units.
+   * This label states both so the two never read as a contradiction on screen.
    */
   countLabel: string;
 }
@@ -201,7 +176,7 @@ export function countCpuRecords(
   return n;
 }
 
-/** Build the CPU flamegraph view for a region (F15 + S7 count reconciliation). */
+/** Build the CPU flamegraph view for a region. */
 export function cpuRegionView(
   trace: ParsedTrace,
   range: TimeRange | null,
@@ -221,7 +196,7 @@ export function cpuRegionView(
   };
 }
 
-/** The S7 reconciliation label: "147 samples (on-CPU, with stacks) of 8,993 CPU
+/** The reconciliation label: "147 samples (on-CPU, with stacks) of 8,993 CPU
  *  records". When the two coincide (all records foldable), the of-clause drops. */
 export function cpuCountLabel(foldable: number, total: number): string {
   const base = `${foldable.toLocaleString()} sample${foldable === 1 ? "" : "s"} (on-CPU, with stacks)`;
@@ -229,12 +204,12 @@ export function cpuCountLabel(foldable: number, total: number): string {
   return `${base} of ${total.toLocaleString()} CPU records`;
 }
 
-// ── Heap region view (F16) ───────────────────────────────────────────────────
+// ── Heap region view ──────────────────────────────────────────────────────────
 
-/** Sampling reservoir constant R for the Horvitz-Thompson estimator (legacy). */
+/** Sampling reservoir constant R for the Horvitz-Thompson estimator. */
 const HEAP_R = 524288;
 
-/** Allocator hook frames stripped from the top of each heap callchain (legacy). */
+/** Allocator hook frames stripped from the top of each heap callchain. */
 const HOOK_PATTERNS: readonly string[] = [
   "memory_profiling::hook::on_alloc",
   "memory_profiling::allocator::Dial9Allocator",
@@ -253,7 +228,7 @@ export interface HeapBaseSample {
   countWeight: number;
 }
 
-/** The heap flamegraph view for a region (F16). */
+/** The heap flamegraph view for a region. */
 export interface HeapRegionView {
   baseSamples: HeapBaseSample[];
   /** Raw sampled alloc count (post hook-strip / stack filter). */
@@ -263,7 +238,7 @@ export interface HeapRegionView {
   estimatedAllocs: number;
 }
 
-/** Strip leading allocator-hook frames (legacy stripHookFrames). */
+/** Strip leading allocator-hook frames. */
 function stripHookFrames(
   chain: readonly string[],
   callframeSymbols: CallframeSymbols,
@@ -285,7 +260,7 @@ function stripHookFrames(
 }
 
 /** Spawn location of the poll `timestamp` fell in for tid->worker `wId` (binary
- *  search over the worker's polls; legacy showHeapFlamegraph inner search). */
+ *  search over the worker's polls). */
 function spawnLocAt(
   workerSpans: WorkerSpans,
   wId: number | undefined,
@@ -308,9 +283,9 @@ function spawnLocAt(
 }
 
 /**
- * Build the heap region view (F16): filter allocs to `range`, strip hook frames,
- * and compute the per-sample unbiased byte/count weights via the Horvitz-Thompson
- * estimator invP = 1 / (1 - exp(-size/R)) (legacy showHeapFlamegraph:6851-6882).
+ * Build the heap region view: filter allocs to `range`, strip hook frames, and
+ * compute the per-sample unbiased byte/count weights via the Horvitz-Thompson
+ * estimator invP = 1 / (1 - exp(-size/R)).
  */
 export function heapRegionView(
   trace: ParsedTrace,
@@ -348,8 +323,8 @@ export function heapRegionView(
   };
 }
 
-/** Map heap base samples to widget samples for the Bytes/Count toggle (legacy
- *  samplesForMode): bytes -> weight=bytes/allocWeight=count; count -> swapped. */
+/** Map heap base samples to widget samples for the Bytes/Count toggle:
+ *  bytes -> weight=bytes/allocWeight=count; count -> swapped. */
 export function heapSamplesForMode(
   base: readonly HeapBaseSample[],
   mode: "bytes" | "count",
@@ -363,7 +338,7 @@ export function heapSamplesForMode(
   }));
 }
 
-/** Human bytes for heap labels (legacy fmtB). */
+/** Human bytes for heap labels. */
 export function formatHeapBytes(bytes: number): string {
   return bytes >= 1e9
     ? (bytes / 1e9).toFixed(1) + " GB"
@@ -374,9 +349,9 @@ export function formatHeapBytes(bytes: number): string {
         : Math.round(bytes) + " B";
 }
 
-// ── Blocking-calls panel (R3-R9) ─────────────────────────────────────────────
+// ── Blocking-calls panel ──────────────────────────────────────────────────────
 
-/** How the blocking-calls panel groups (R4): by leaf frame or by full stack. */
+/** How the blocking-calls panel groups: by leaf frame or by full stack. */
 export type BlockingGroupBy = "leaf" | "full";
 
 /** One symbolized frame in a blocking sub-stack. */
@@ -387,15 +362,15 @@ export interface BlockingFrame {
   isTokio: boolean;
 }
 
-/** One unique full stack within a blocking group (R7). */
+/** One unique full stack within a blocking group. */
 export interface BlockingSubStack {
   count: number;
-  /** Percent of the group (legacy `count/g.count*100`). */
+  /** Percent of the group. */
   pct: number;
   frames: BlockingFrame[];
 }
 
-/** One example poll link within a blocking group (R8). */
+/** One example poll link within a blocking group. */
 export interface BlockingExample {
   worker: number;
   start: number;
@@ -403,35 +378,35 @@ export interface BlockingExample {
   durLabel: string;
 }
 
-/** One blocking-call group (R5 summary bar + R7 sub-stacks + R8 examples). */
+/** One blocking-call group (summary bar + sub-stacks + examples). */
 export interface BlockingGroup {
-  /** Leaf display text (R5). */
+  /** Leaf display text. */
   leaf: string;
   /** Leaf raw symbol (color classification + full-stack keys). */
   leafRaw: string;
   count: number;
   /** Percent of all sched events in scope. */
   pct: number;
-  /** Summary bar width as a percent (legacy max(4, count/total*100)). */
+  /** Summary bar width as a percent. */
   barPct: number;
-  /** Color class from the leaf symbol (R5 palette). */
+  /** Color class from the leaf symbol. */
   color: BlockingColor;
   subStacks: BlockingSubStack[];
   examples: BlockingExample[];
-  /** Count of polls beyond the 5 shown examples (legacy "... N more"). */
+  /** Count of polls beyond the 5 shown examples. */
   moreExamples: number;
 }
 
-/** The blocking-calls panel view (R3-R9). */
+/** The blocking-calls panel view. */
 export interface BlockingView {
   total: number;
   groups: BlockingGroup[];
 }
 
-/** R5 color classification for a blocking leaf symbol. */
+/** Color classification for a blocking leaf symbol. */
 export type BlockingColor = "lock" | "io" | "poll" | "syscall" | "other";
 
-/** Classify a leaf symbol into the R5 summary palette (legacy inline ternary). */
+/** Classify a leaf symbol into the summary palette. */
 export function blockingColor(leafRaw: string): BlockingColor {
   if (leafRaw.includes("lock") || leafRaw.includes("mutex")) return "lock";
   if (leafRaw.includes("epoll") || leafRaw.includes("poll")) return "poll";
@@ -453,11 +428,10 @@ function frameOf(frame: { symbol: string; location: string | null }): BlockingFr
 }
 
 /**
- * Build the blocking-calls panel view (R3-R9): group in-poll sched samples by
- * leaf frame or full stack (R4), each with a summary bar (R5), the unique
- * full-stacks it spans (R7), and up to five example polls (R8). Ports
- * renderSchedPanel (viewer.html:6069-6176). Percentages are scope-total for the
- * summary and group-local for the sub-stacks, matching legacy.
+ * Build the blocking-calls panel view: group in-poll sched samples by leaf frame
+ * or full stack, each with a summary bar, the unique full-stacks it spans, and
+ * up to five example polls. Percentages are scope-total for the summary and
+ * group-local for the sub-stacks.
  */
 export function buildBlockingView(
   entries: readonly SchedEntry[],
@@ -525,9 +499,9 @@ export function buildBlockingView(
   return { total, groups: out };
 }
 
-// ── S7 frame -> timeline extent ──────────────────────────────────────────────
+// ── Frame -> timeline extent ──────────────────────────────────────────────────
 
-/** A flamegraph zoom path per panel (frozen getZoomPath()'s return shape). */
+/** A flamegraph zoom path per panel (getZoomPath()'s return shape). */
 export interface ZoomPath {
   /** Display-name path (root child -> zoomed frame) in the worker panel. */
   worker: readonly string[];
@@ -537,9 +511,9 @@ export interface ZoomPath {
 
 /**
  * The display-name path a sample contributes to the flamegraph tree, root child
- * first (outermost caller) to leaf. Reproduces buildFlamegraphTree's per-node
- * naming EXACTLY (trace_analysis.js:reverse + inline-frame expansion +
- * formatFrame) so a prefix match against getZoomPath()'s names is exact.
+ * first (outermost caller) to leaf. Reproduces the tree's per-node naming
+ * exactly (reverse + inline-frame expansion + formatFrame) so a prefix match
+ * against getZoomPath()'s names is exact.
  */
 export function displayNamePath(
   callchain: readonly string[],
@@ -577,11 +551,11 @@ export interface ExtentSample {
 
 /**
  * The [min,max] timestamp extent of the samples flowing through the currently
- * zoomed frame (S7 frame->timeline link). `samples` are the SAME samples handed
- * to the widget for this analysis (region-scoped), so the extent is bounded by
- * the analyzed region. Returns null when nothing is zoomed or no sample matches
- * (e.g. an off-worker-only zoom over worker samples). The worker panel wins when
- * both panels are zoomed (getZoomPath can report both).
+ * zoomed frame. `samples` are the SAME samples handed to the widget for this
+ * analysis (region-scoped), so the extent is bounded by the analyzed region.
+ * Returns null when nothing is zoomed or no sample matches (e.g. an
+ * off-worker-only zoom over worker samples). The worker panel wins when both
+ * panels are zoomed (getZoomPath can report both).
  */
 export function frameSampleTimeExtent(
   samples: readonly ExtentSample[],
@@ -606,19 +580,18 @@ export function frameSampleTimeExtent(
   return min <= max ? { startNs: min, endNs: max } : null;
 }
 
-// ── Partial-window coverage (T17-audit notes 6/7; the 2.8 DoD badge) ──────────
+// ── Partial-window coverage ───────────────────────────────────────────────────
 
-/** Region data completeness against the resident segment window (T17). */
+/** Region data completeness against the resident segment window. */
 export type RegionCoverage = "complete" | "partial" | "oversized";
 
 /**
- * Whether the analyzed region is fully backed by resident (parsed) segment data
- * (T17-audit notes 6/7; 2.8 "never silently wrong"). With no segments (the
- * non-windowed whole-trace load) coverage is always "complete". Otherwise, a
- * segment overlapping the region that is not "parsed" makes the region
- * "partial"; an "oversized" overlap (never resident at the budget) reports
- * "oversized". Consumers MUST badge a non-"complete" region rather than
- * presenting a truncated window as the whole picture.
+ * Whether the analyzed region is fully backed by resident (parsed) segment data.
+ * With no segments (the non-windowed whole-trace load) coverage is always
+ * "complete". Otherwise, a segment overlapping the region that is not "parsed"
+ * makes the region "partial"; an "oversized" overlap (never resident at the
+ * budget) reports "oversized". Consumers MUST badge a non-"complete" region
+ * rather than presenting a truncated window as the whole picture.
  */
 export function regionCoverage(
   segments: SegmentsSlice,
@@ -639,9 +612,9 @@ export function regionCoverage(
   return "complete";
 }
 
-// ── Titles (P3) ──────────────────────────────────────────────────────────────
+// ── Titles ────────────────────────────────────────────────────────────────────
 
-/** The P3 sidebar title for a region analysis: "Nms selected" or "Whole trace". */
+/** The sidebar title for a region analysis: "Nms selected" or "Whole trace". */
 export function regionTitle(range: TimeRange | null): string {
   if (range === null) return "Whole trace";
   return `${((range.endNs - range.startNs) / 1e6).toFixed(2)}ms selected`;
