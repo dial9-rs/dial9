@@ -25,6 +25,7 @@ import type { StoreState } from "../../types/state.js";
 import { formatHumanDuration } from "../../lib/trace/index.js";
 import { tracksTemplate, sizeTracks, type TracksViewModel } from "./tracks.js";
 import { deriveAxisInputs } from "./axis.js";
+import { deriveCpuInputs } from "./cpu.js";
 
 /** Callbacks the shell chrome needs from the page entry. */
 export interface ShellDeps {
@@ -91,6 +92,7 @@ function viewModel(state: StoreState, deps: ShellDeps): ShellViewModel {
     viewStart,
     viewEnd,
     axis: deriveAxisInputs(state),
+    cpu: deriveCpuInputs(state),
     fileName: deps.sourceLabel,
     eventCount,
     workerCount,
