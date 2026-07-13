@@ -22,7 +22,6 @@
 import { html, render, type TemplateResult } from "lit-html";
 import type { ViewerStore } from "../../store/store.js";
 import type { StoreState } from "../../types/state.js";
-import { formatHumanDuration } from "../../lib/trace/index.js";
 import { tracksTemplate, sizeTracks, type TracksViewModel } from "./tracks.js";
 import { deriveAxisInputs } from "./axis.js";
 import { deriveCpuInputs } from "./cpu.js";
@@ -44,12 +43,10 @@ export interface ShellDeps extends ToolbarDeps {
   sourceLabel: string;
 }
 
-/** Everything the shell template needs, derived from store state. */
+/** Everything the shell template needs, derived from store state. The file-
+ * info fields moved to the toolbar controller (T33 owns C1); the shell keeps
+ * only the track inputs + the status-bar labels. */
 interface ShellViewModel extends TracksViewModel {
-  fileName: string;
-  eventCount: number | null;
-  workerCount: number | null;
-  durationLabel: string | null;
   selectionLabel: string;
   viewRangeLabel: string;
 }
@@ -71,22 +68,11 @@ function relOffset(ns: number, minTs: number): string {
 }
 
 /** Build the view model for a render pass from the current store state. */
-function viewModel(state: StoreState, deps: ShellDeps): ShellViewModel {
+function viewModel(state: StoreState): ShellViewModel {
   const trace = state.trace.trace;
   const hasTrace = trace !== null;
   const taskSelected = state.selection.selectedTaskId !== null;
   const { viewStart, viewEnd, minTs } = state.viewport;
-
-  let eventCount: number | null = null;
-  let workerCount: number | null = null;
-  let durationLabel: string | null = null;
-  if (trace !== null) {
-    eventCount = trace.events.length;
-    workerCount = new Set(trace.tidToWorker.values()).size;
-    if (trace.minTs !== null && trace.maxTs !== null) {
-      durationLabel = formatHumanDuration(trace.maxTs - trace.minTs);
-    }
-  }
 
   const selectionLabel = taskSelected
     ? `Task 0x${(state.selection.selectedTaskId ?? 0).toString(16)} selected · Esc clears`
@@ -102,10 +88,6 @@ function viewModel(state: StoreState, deps: ShellDeps): ShellViewModel {
     viewEnd,
     axis: deriveAxisInputs(state),
     cpu: deriveCpuInputs(state),
-    fileName: deps.sourceLabel,
-    eventCount,
-    workerCount,
-    durationLabel,
     selectionLabel,
     viewRangeLabel,
   };
@@ -295,7 +277,7 @@ export function mountShell(
 
   function renderPass(): void {
     const state = store.getState() as StoreState;
-    const vm = viewModel(state, deps);
+    const vm = viewModel(state);
     render(
       shellTemplate(
         vm,
