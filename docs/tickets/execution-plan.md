@@ -202,10 +202,12 @@ deferred (need T30/T22 dispatch). ALL 16 CHUNK-2 FEATURE TICKETS (T21-T36) NOW
 INTEGRATED. Only T37 (polish) + T39 (legacy removal) remain in chunk 2.
 T37 BLOCKED on T41: its DoD needs axe/census across all FOUR pages incl. tokio-stats
 (T41). Dispatch T37 after T41 merges (removed its premature worktree).
-IN FLIGHT (cap 3, off 6585f8c): T41 (tokio_stats migration), T45 (segment metadata
-#68 - toolbar file-info surface, metadata-wins reconciliation vs URL svc/host; frozen
-trace_parser.js read-only), T46 (end-user docs - ui README + AGENTS.md testing
-section rewrite for Vitest reality; documents new UI as opt-in, NOT default-flipped).
+T46 (end-user docs) MERGED clean (docs-only). Most of its scope was already landed by
+dependency tickets (AGENTS.md testing section already Vitest-rewritten, ui/README
+already current); net change = end-user "Using the viewer" section in the canonical
+README (symlinked -> all 3 surfaces). NOTE: AGENTS.md line ~80 has pre-existing
+em-dashes (dependency-authored, f754bbe) - flagged, out of T46 scope; clean up later.
+IN FLIGHT (off 6585f8c): T41 (tokio_stats migration), T45 (segment metadata #68).
 REMAINING: T37 (after T41) -> T39 (legacy removal, LAST, needs parity) -> T44 (issue
 housekeeping) + T47 (core-reshape ADR), both after T39. T43+T48+T40+T42 DONE.
 DEFERRED BATCH GATE: full Vitest for T30/T23/T27 folded forward - run ONE clean
