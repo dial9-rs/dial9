@@ -61,9 +61,15 @@ window (03 F6's binary-search-helpers rule) - the perf fix this ticket owns.
     (access-counting Proxy over a 50k-event array: `< 100` element reads for a
     10-event window vs 50k linear), name filter, clustering geometry, info,
     task/poll/cluster resolution, S4 key.
-  - `events-track.test.ts` (6 tests): click-to-pin dispatch (contract +
+  - `events-track.test.ts` (8 tests): click-to-pin dispatch (contract +
     toggle-off + prior-selection clear), hover dispatch + no-op-when-unchanged,
-    dim-on-selection render input, derived-cache invalidation.
+    dim-on-selection render input, K2 info paint + resting message, and
+    derived-cache invalidation.
+
+- `bcdfa18` feat(viewer): surface the K2 events info readout
+  - Paints `N events · M markers` top-right on the events canvas (legacy
+    `#ce-panel-info`) and mirrors it to `canvas.dataset.eventsInfo` for the
+    row-walker / behavioral differ (CPU-track pattern). +2 draw-input tests.
 
 ## DoD status
 
@@ -88,8 +94,8 @@ window (03 F6's binary-search-helpers rule) - the perf fix this ticket owns.
 - `npm run check:boundary` -> "OK (no core imports outside lib/trace +
   lib/canvas)".
 - `npm run test` (full Vitest) -> Test Files 73 passed | 1 skipped (74);
-  Tests 1197 passed | 1 expected fail | 11 skipped (1209). 0 unexpected
-  failures. (The events suites: 26 passed.)
+  Tests 1199 passed | 1 expected fail | 11 skipped (1211). 0 unexpected
+  failures. (The events suites: 28 passed.)
 - `npm run build` -> clean, "built in 394ms", 17 static-copy items.
 - `cargo build -p dial9-viewer` (repo root) -> Finished (rust-embed picks up
   the rebuilt `ui/dist`).
