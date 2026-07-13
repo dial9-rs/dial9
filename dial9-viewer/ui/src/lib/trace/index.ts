@@ -19,6 +19,17 @@ export type {
 // title.ts - shared viewer/flamegraph header metadata.
 export { traceTitleParams } from "./title.js";
 
+// segment-metadata.ts - trace-embedded service/host identity (T45; #68) and
+// its reconciliation against the key-derived svc/host URL params.
+export {
+  SEGMENT_HOST_KEY,
+  SEGMENT_SERVICE_KEY,
+  readKeyDerivedIdentity,
+  readSegmentIdentity,
+  reconcileIdentity,
+} from "./segment-metadata.js";
+export type { IdentityField, ReconciledIdentity } from "./segment-metadata.js";
+
 // format.ts - frozen format.js field-value formatter (span metadata/tooltip).
 export { formatFieldValue } from "./format.js";
 

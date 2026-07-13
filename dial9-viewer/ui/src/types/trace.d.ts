@@ -78,6 +78,25 @@ export interface TimeRange {
   endNs: number;
 }
 
+/**
+ * Trace-embedded identity read from a trace's free-form SegmentMetadata KV
+ * map (`ParsedTrace.segmentMetadata`). The `service`/`host` KEY NAMES are a
+ * writer-side convention, NOT a wire-format contract; they are confirmed
+ * against the dial9 writer/source code (dial9-utils S3 source
+ * `.metadata("service" | "host", ...)`, `gen_fixtures.rs standard_metadata()`,
+ * the writer roundtrip test, and the metrics-service example) and pinned ONCE
+ * as the read contract in `lib/trace/segment-metadata.ts` (SEGMENT_SERVICE_KEY
+ * / SEGMENT_HOST_KEY). A field is present only when the map carries a
+ * non-empty value for its key; traces predating the convention carry neither
+ * (surfaced in the toolbar file info, T45; closes #68).
+ */
+export interface SegmentIdentity {
+  /** SegmentMetadata `service` value; `undefined` when absent or empty. */
+  service?: string;
+  /** SegmentMetadata `host` value; `undefined` when absent or empty. */
+  host?: string;
+}
+
 // ── Segment-window boundary polls (architecture 2.8; T17) ───────────────
 //
 // A poll can straddle a segment boundary (segment rotation is not
