@@ -494,6 +494,58 @@ body {
     z-index: 5;
 }
 
+/* Region/zoom selection box (H10). Absolutely placed inside the track column
+   (position:relative) by mountSelectionOverlay from the shared ns<->x mapping;
+   non-interactive so pointer events reach the lanes. Blue = Shift region,
+   teal (.zoom) = Alt zoom, matching the legacy #selection-overlay colours. */
+.d9-selection-overlay {
+    position: absolute;
+    top: 0;
+    left: 0;
+    display: none;
+    pointer-events: none;
+    z-index: 4;
+    background: rgba(66, 133, 244, 0.15);
+    border: 1px solid rgba(66, 133, 244, 0.6);
+}
+.d9-selection-overlay.zoom {
+    background: rgba(0, 188, 180, 0.15);
+    border-color: rgba(0, 188, 180, 0.6);
+}
+
+/* Floating viewport controls (H1-H4): zoom in / out / fit, bottom-right glass
+   panel. Fixed so it stays in the corner while the track column scrolls; its
+   buttons stopPropagation so a click is never treated as a lane click. */
+.d9-viewport-controls {
+    position: fixed;
+    right: 20px;
+    bottom: 44px;
+    z-index: 50;
+    display: flex;
+    gap: 4px;
+    padding: 6px;
+    background: rgba(22, 33, 62, 0.92);
+    backdrop-filter: blur(6px);
+    border: 1px solid var(--d9-border);
+    border-radius: 8px;
+}
+.d9-viewport-controls button {
+    min-width: 30px;
+    height: 26px;
+    padding: 0 8px;
+    background: #2a2a4a;
+    border: 1px solid #444;
+    color: var(--d9-fg);
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.85em;
+}
+.d9-viewport-controls button:hover { background: #3a3a5a; }
+.d9-viewport-controls button:focus-visible {
+    outline: 2px solid var(--d9-accent);
+    outline-offset: 1px;
+}
+
 /* Shared hover tooltip (V-section). One element, appended to <body>, reused
    by every panel. Ported from the legacy #tooltip; placement is JS-driven
    from CACHED dimensions (03 F3 - never measured after write). */

@@ -1,167 +1,126 @@
-# T30 - Task detail track - HANDOFF
+# T23 - Pointer + keyboard interaction state machine - HANDOFF
 
-(Supersedes the inherited T24 HANDOFF from the branch chain.)
+(Supersedes the T24 HANDOFF inherited through the branch chain.)
 
-## STATUS: DoD met. Mechanical gates green (tsc / build / cargo build /
-## vitest). Live-browser items (T12 row-walker / behavioral differ / visual)
-## deferred per the T21/T22/T24/T25 precedent. Ready for review.
+## STATUS: COMPLETE (runnable gates green; T12-tooling gates implemented, not runnable in this env)
 
-The task-detail timeline track (features/02 section N) landed as a store-wired
-track mirroring the T26 spans track: a selection-keyed `store.derived` cache
-(the 03 F5 fix - legacy `renderTaskDetail` re-collected + sorted every poll of
-the task on EVERY frame), a per-frame render-model memo, faithful N6-N12 canvas
-geometry, and interaction that dispatches `selection.hoveredWakerTaskId` (the
-G8 waker highlight the lanes consume). The derivation is exposed for T31's
-inspector Task tab (the hybrid split).
+All lane-area input is now `lib/interact` state machines dispatching store
+actions (architecture 2.5). Owned rows H1-H13 implemented, plus the K4
+(zoom-undo on `z`) and K5 (WASD on the timeline) viewer integrations. Handlers
+dispatch store actions ONLY - they never render (F2) and never scan
+O(allSpans) (F6: click resolution reuses T22's `resolveLaneClick` / the
+`lib/trace/query` helpers).
 
-## COMPLETED (commits, on branch ticket/T30-task-detail)
+## COMPLETED (commits on `ticket/T23-lane-interaction`)
 
-- `fe25ecd` feat(viewer): task-detail derivation + render model (pure model)
-- `3690d46` feat(viewer): task-detail track component + shell wiring
-- `87bdf18` test(viewer): task-detail model + track Vitest
+- `b84b871` feat: pure state machines (pointer, wheel, kb-selection) + viewport
+  actions with the K4 zoom-history stack; adds the additive `curNs` field to
+  `transient.DragState`.
+- `842fa1c` feat: `lane-interaction.ts` DOM binding + `main.ts` wiring +
+  selection-overlay/viewport-controls CSS.
+- `6b141e8` test: 60 Vitest cases over the machines (every transition + cancel).
+- `468198c` perf: plain-scroll wheels bail before any layout read (H5).
 
-Files:
-- NEW `dial9-viewer/ui/src/pages/viewer/task-detail-model.ts` - the pure
-  SELECTION-keyed derivation (`computeTaskDetailData` - N2 numbers, N7 waker
-  labels, N4/N11 dump refs), the per-frame render model
-  (`buildTaskDetailRenderModel` - N6 delay bands, N9 lifespan, N10 poll bars /
-  coverage, N11 idle gaps) with N5/N8 hit/waker regions, `formatTaskDetailSummary`
-  (N2 plain text), and the T17 `TaskDetailWindow` descriptor.
-- NEW `dial9-viewer/ui/src/pages/viewer/task-detail-track.ts` - the store-wired
-  controller `createTaskDetailTrack`: derived cache (F5) + render-model memo,
-  `paint`/`drawTaskDetailCanvas` (N6-N12 verbatim colours), waker hover/click
-  dispatch + N5 status. Exposes `createTaskDetailDerivation(store)` +
-  `deriveTaskDetailWindow` for T31.
-- NEW `*-model.test.ts` (21 tests) + `*-track.test.ts` (11 tests).
-- EDIT `tracks.ts` + `shell.ts` - smallest additive wiring: extended the
-  spans-track delegate seam with a `taskDetailTrack` delegate (template + paint).
-- EDIT `src/styles/viewer.css` - task-detail-only styles (status readout, id
-  label, wrap positioning).
+## FILES
 
-## BLOCKERS / QUESTIONS
+New (T23-owned):
+- `src/lib/interact/pointer.ts` - pan/region/zoom drag machine, 3px intent,
+  drag-vs-click discrimination (+ `pointer.test.ts`).
+- `src/lib/interact/wheel.ts` - Ctrl/Cmd = zoom-at-cursor, plain = scroll (H5)
+  (+ `wheel.test.ts`).
+- `src/lib/interact/kb-selection.ts` - H9 keyboard region/zoom selection machine
+  (+ `kb-selection.test.ts`).
+- `src/pages/viewer/viewport-actions.ts` - pure zoom/pan/fit/region math (legacy
+  parity) + store-bound actions + K4 zoom history (+ `viewport-actions.test.ts`).
+- `src/pages/viewer/selection-overlay.ts` - H10 region box render surface
+  (+ `selection-overlay.test.ts`).
+- `src/pages/viewer/lane-interaction.ts` - the DOM binding (listeners, viewport
+  controls H1-H4, selection overlay, router key bindings).
 
-None blocking. One resolved ticket-vs-code discrepancy, recorded here for the
-reviewer:
+Edited (small, additive - merge points):
+- `src/types/state.d.ts` - `DragState.curNs` (drives the H10 box from the store);
+  `src/types/exhaustive.test.ts` updated to the new shape.
+- `src/pages/viewer/main.ts` - mounts lane interaction; folds its key bindings
+  into the router BEFORE the generic `?`/Escape fallbacks.
+- `src/styles/viewer.css` - `.d9-selection-overlay` (+ `.zoom`),
+  `.d9-viewport-controls`.
+- `src/lib/interact/index.ts` - barrel exports for the new machines.
 
-### `hoveredWakerTaskId` lives in the `selection` slice, not `transient`
+## ROW COVERAGE (features/02 H)
 
-The ticket prose says T30 dispatches `transient.hoveredWakerTaskId` (T24's
-slice). The MERGED CODE places the field in `selection` (`types/state.d.ts:154`),
-and T22's lanes CONSUME `selection.hoveredWakerTaskId`
-(`components/canvas/lanes/index.ts:127`) while subscribing to the `selection`
-slice (`:137`). The task's binding is explicit: "the store field IS the
-contract ... Read the merged code ... how G8 consumes hoveredWakerTaskId."
-Dispatching to `transient` would be a no-op for the lanes (they never subscribe
-to it), so the G8 highlight would silently break. T30 therefore dispatches
-`selection.hoveredWakerTaskId` - the field the lanes actually read. Resolved by
-the merged code being authoritative (per the task), NOT a stop-gate.
-
-## SCOPE / SEAMS
-
-### Hybrid split honored (T31 seam)
-
-This ticket owns the TIMELINE track (N6-N12 visuals + N5/N8 interaction) + the
-DERIVATION. The TEXTUAL detail is exposed for T31's inspector Task tab via
-`createTaskDetailDerivation(store)` (the store-cached selector) +
-`computeTaskDetailData` / `formatTaskDetailSummary`. The `TaskDetailData` shape
-carries every N2/N3/N4 field (pollCount, wakeCount, spawnLocation, lifetimeNs,
-hasTerminate, isInstrumented, taskDumps). The track's own label gutter shows
-ONLY the track name + a compact "Task 0x.." identity; it does NOT build T31's
-tab.
-
-### Deferred-until-T31/T32 (the T27/T29 established pattern)
-
-- N4 idle-flamegraph MODAL + N11 async-stack-on-idle-click MODAL open
-  flamegraph / sidebar surfaces (T31 inspector / T32 in-viewer flamegraph). This
-  track EXPOSES the data (`TaskDetailData.taskDumps`, per-gap `IdleBand.dumps`,
-  the idle `HitRegion.dumps`) and renders the N11 cross-hatch + pointer cursor,
-  but does NOT build the flamegraph modal - no store field for it exists (that
-  schema is T31/T06's) and building it would be scope creep. The waker-select
-  click (N8) IS wired (it reuses `selection.selectedTaskId`).
-
-### T22 lanes seam (do-not-touch honored)
-
-The waker highlight is a DISPATCH into `selection.hoveredWakerTaskId` only; the
-lanes' G8 consumption is untouched. Worker-id derivation is computed locally
-(`collectWorkerIds`, mirroring the lanes' `deriveWorkerIds` via `lib/trace`) so
-the track does not import from `components/canvas/lanes`.
-
-### Shell shared point
-
-`tracks.ts` + `shell.ts` got additive edits only, extending the existing
-spans-track delegate pattern (a `taskDetailTrack?` param + one delegation branch
-each). The selectionOnly track already existed in `track-layout.ts` TRACKS
-(owner "T30"); no change there.
-
-### T17 carried obligation (audit notes 6+7)
-
-`drawTaskDetailCanvas` consumes a `TaskDetailWindow` and surfaces a truncated
-edge (hatch band) / oversized segment ("partial window" badge) rather than
-presenting a clipped poll list as the task's whole history.
-`deriveTaskDetailWindow` reads the `segments` slice; the whole-trace shell
-(empty segments slice) resolves to "complete". Mirrors the CPU track's CpuWindow.
-The `docs/tickets/reviews/T17-audit.md` file is absent from this worktree (same
-as noted in the inherited T24 HANDOFF); the obligation is satisfied directionally
-from the findings baked into the merged code + the CPU-track precedent.
+- H1/H2/H3 zoom in/out/fit buttons - rendered as the floating `#btn-zoom-in`/
+  `#btn-zoom-out`/`#btn-fit` controls, wired to `viewport.zoom(0.5)`/`zoom(2)`/
+  `fit()`. Minor conscious deviation: legacy `zoom()` called `clearToasts()`;
+  the new shell uses PERSISTENT hint chips (F5), not hint toasts, so there is
+  nothing to clear - error toasts are deliberately left alone.
+- H4 viewport controls panel - floating bottom-right, buttons `stopPropagation`
+  so a click is never a lane click.
+- H5 wheel - Ctrl/Cmd zoom-at-cursor (factor 1.3), plain wheel scrolls the lanes.
+- H6 drag pan - 3px intent, duration-preserving edge-carry clamp.
+- H7 Shift+drag region - GESTURE only: commits the range to
+  `selection.sidebarRange`. WHAT it opens (flamegraph/blocking/heap, and the
+  "no CPU samples" toast) is T32's `sidebarRange` consumer - the ticket's H7
+  seam. Deliberately NOT gated on `cpuSamples` here.
+- H8 Alt+drag zoom - zooms the viewport to the region.
+- H9 keyboard Shift/Alt selection - full machine (start/extend 5%/confirm/cancel),
+  seeded at mouse-in-view else view centre, blocked while `sidebarRange` is
+  retained, announced via A16.
+- H10 selection overlay - `selection-overlay.ts` renders the blue/teal box from
+  `transient.drag` / `transient.keyboardSelection`, and PERSISTS a retained
+  `selection.sidebarRange` box until the sidebar (T32) clears it.
+- H11 arrow zoom / H12 arrow pan - ArrowUp/Down zoom, ArrowLeft/Right pan 20%
+  (extend the kb cursor instead while a selection is active).
+- H13 Set/Clear Range - delegates to E3/E4 (the toolbar Set Range/Clear Range
+  buttons), which is T33's surface. T23 keeps the viewport slice those buttons
+  read correct; no T23-rendered control. Row-walker will read H13
+  NOT-TRIGGERABLE until T33 lands the toolbar.
+- K4 (`z` zoom-undo) + K5 (WASD) integrated via the router bindings.
 
 ## DoD
 
-- check: row-walker green on N -> the N rows are implemented + observably
-  reachable (track renders on task selection N1; N5 status; N6-N12 visuals; N8
-  hover/click). The T12 Playwright row-walker is a browser tool not runnable
-  here - DEFERRED, same disposition as every prior chunk-2 HANDOFF.
-- check: task numbers exact vs legacy (behavioral differ, J4) -> asserted by
-  Vitest `task-detail-model.test.ts` ("N2 numbers exact vs legacy" +
-  "formatTaskDetailSummary") against the legacy formulas; the live T12
-  behavioral differ over the running demo page is the browser follow-up.
-- check: derived-cache Vitest (selection change invalidates, pan does not) ->
-  DONE, `task-detail-track.test.ts` "task-detail derived cache (F5)": pan
-  same-ref, task change new-ref, waker-hover same-ref (no re-collect).
-- check: waker-hover dispatch Vitest -> DONE, `task-detail-track.test.ts`
-  "waker-hover dispatch (N8/G8)": hover writes selection.hoveredWakerTaskId;
-  off-label + clearHover reset it; click selects the waker task.
+- check: Vitest on the state machines (every transition incl. cancel paths) -
+  PASS. 60 tests across pointer/wheel/kb-selection/viewport-actions/
+  selection-overlay.
+- check: wheel-zoom coalesced to <= 1 render/frame (03 F2) - PASS at unit level:
+  `viewport-actions.test.ts` "6 wheel-style zooms flush a single subscriber
+  notification". The T12 perf-probe (Playwright) is the integration form.
+- check: row-walker green on H rows / behavioral differ vs legacy on J2/J3/J4 -
+  REQUIRES T12 tooling (Playwright + dev-server + browser); NOT runnable in this
+  environment. Access paths are implemented per ROW COVERAGE above; selection/
+  zoom/pan semantics reuse the legacy math verbatim and T22's `resolveLaneClick`,
+  so parity is structural. Run the row-walker + behavioral differ against the new
+  viewer once T12's harness is available (the DoD's mechanical closure).
 
-## GATE BAR (hard rule 3)
+## GATE EVIDENCE
 
-- `npx tsc --noEmit` -> exit 0.
-- `npm run check:boundary` -> OK (no core imports outside lib/trace + lib/canvas).
-- `npx vitest run` (the two T30 suites) -> 32 passed.
-- `npm run build` -> clean, built in 7.29s; `new-viewer` bundle 81.29 kB
-  (includes the task-detail track).
-- `cargo build -p dial9-viewer` -> Finished (exit 0); rust-embed picks up dist.
-  JS/TS/CSS-only change (no `.rs`, no trace-format change) so cargo
-  nextest/clippy/fmt skipped per AGENTS.md.
-- Full `npm run test` -> 1202 passed | 1 expected-fail | 11 skipped, PLUS one
-  unrelated straggler failure (see below). My 32 new tests are in the pass count.
+- `npx tsc --noEmit` -> exit 0 (clean).
+- `npm run test` (full Vitest) -> 1230 passed, 1 expected-fail, 11 skipped, and
+  ONE failure: `tests/core/all_skills_snippets.test.ts > ... Detect tight loops`
+  timed out at 120000ms (the recipe itself runs ~200s). PRE-EXISTING and
+  UNRELATED to T23 (a trace-analysis skills-snippet recipe; touches no
+  interaction code). Reported, not fixed (scope rule). My five new suites: 60/60
+  pass in 300ms.
+- `npm run build` -> clean; viewer bundle `new/viewer.html` + `new-viewer-*.js`
+  (82 kB) includes the interaction layer. ("externalized for browser" warnings
+  are pre-existing from `trace_parser.js`.)
+- `cargo build -p dial9-viewer` -> Finished (rust-embed picks up the built UI).
 
-## EVIDENCE (commands)
+## SEAMS / DEFERRED (not T23's scope)
 
-- `cd dial9-viewer/ui && npx tsc --noEmit` -> exit 0
-- `cd dial9-viewer/ui && npx vitest run src/pages/viewer/task-detail-*.test.ts`
-  -> 2 files, 32 tests passed
-- `cd dial9-viewer/ui && npm run build` -> built in 7.29s, clean
-- `cargo build -p dial9-viewer` -> Finished
-- Full `npm run test` -> Test Files 1 failed | 72 passed | 1 skipped (74);
-  Tests 1 failed | 1202 passed | 1 expected-fail | 11 skipped (1215), 426s.
+- H7 region opening + the no-CPU toast -> T32 (consumes `selection.sidebarRange`).
+- Lane-click `openStackFor` -> Poll Detail is T31's surface; the SELECTION is
+  dispatched now, the popup lands with T31 (noted in `lane-interaction.ts`).
+- T17 windowing (carried obligation, audit notes 6/7): click/region resolution
+  reads the resident `trace` slice (the viewer currently loads the whole trace).
+  T23 never fabricates data for out-of-window regions - it dispatches ranges;
+  coverage surfacing is T24's `coverageAt` readout + T32's partial-window badge.
+  When viewer segment-windowing lands, the click resolver must respect the
+  truncated/oversized covering segment (the T22 resolver's input data).
 
-## UNRELATED PRE-EXISTING FLAKE (reported per AGENTS.md, not fixed)
+## MINOR NOTES FOR REVIEW
 
-The full-suite run had ONE failure: `tests/core/all_skills_snippets.test.ts >
-dial9-trace-recipes: Detect tight loops (many spans per poll)` timed out at the
-120s per-test ceiling. This is NOT my change:
-- It is a frozen-core SKILL-RECIPE snippet over the demo trace; T30 touches no
-  core/skills code (only the viewer task-detail track + tracks.ts/shell.ts/css).
-- Run in ISOLATION it PASSES: `npx vitest run tests/core/all_skills_snippets.test.ts`
-  -> 78 passed | 6 skipped, in 143s. The single heavy recipe only exceeds the
-  120s per-test timeout when competing with 70+ other suites all parsing the
-  3.4MB demo trace in parallel (the vite.config comment calls these parses
-  "ceilings for stragglers, not expected durations").
-Disposition: environmental parallel-load straggler, pre-existing, out of T30's
-scope. Flagged for the reviewer; not fixed here (no change was requested and it
-is unrelated).
-
-## BROWSER-DRIVEN FOLLOW-UPS (need T12 tooling, not runnable here)
-
-- Row-walker on section N against the running new viewer page.
-- T12 behavioral differ (task-detail numbers) new-vs-legacy on J4.
-- One visual check of the timeline bands vs the shared time axis (A13 alignment).
+- `z` records history per discrete view change including each wheel notch, so a
+  wheel-zoom storm is undone notch-by-notch. Defensible as "view history";
+  coarser granularity is a T37 polish call if wanted.
+- Announcement strings are ASCII (no em-dash / arrow glyphs) while preserving
+  the legacy semantics (they are feedback-only; no logic depends on them).

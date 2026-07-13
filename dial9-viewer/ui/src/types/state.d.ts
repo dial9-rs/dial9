@@ -215,6 +215,14 @@ export interface DragState {
   startX: number;
   /** Timestamp under the pointer at drag start (trace-monotonic ns). */
   startNs: number;
+  /**
+   * Timestamp under the pointer NOW (trace-monotonic ns, clamped to the draw
+   * area). Equals startNs at press; the pointer machine (T23) advances it on
+   * every move so the H10 selection overlay can render the region box from
+   * [startNs, curNs] without re-reading the pointer position. For a "pan"
+   * drag it is unused (stays at startNs) - pan updates the viewport, not a box.
+   */
+  curNs: number;
   /** True once movement exceeded the 3px drag-intent threshold. */
   moved: boolean;
 }
