@@ -1,137 +1,114 @@
-# T31 - Inspector sidebar (tabs: poll/event/related/stack) - HANDOFF
+# T35 - Minimap + status bar - HANDOFF
 
-## STATUS: implemented, gate-bar green. Commit is BLOCKED in this environment
-(`git commit` denied - see BLOCKERS). All work is in the working tree, ready for
-the maintainer to commit.
+(Supersedes the T34 HANDOFF inherited through the branch chain.)
 
-## SCOPE DELIVERED
+## STATUS: DONE (DoD met, all gates green)
 
-Persistent inspector `mountInspector(host, store, { esc })` replacing the shell
-placeholder. Tabs: **Task / Poll / Event / Related / Stack**, driven by the
-selection slice, re-scoping in the same action (04 S4).
+Branch `ticket/T35-minimap-status` (worktree), based on `integration/chunk-1`
+@ `aeb724b` (T34 merged). Two new persistent viewer surfaces landed: the
+overview minimap and the status bar. No blockers.
 
-- **P (sidebar mechanics):**
-  - P1: persistent inspector (concept-1); selection re-scopes content, no
-    open/close of the whole surface. Ledgered (features/02 P1 amended).
-  - P2 + P8: drag-resize handle -> `uiPrefs.sidebarWidth` (live) + persisted to
-    `localStorage["dial9.viewer.sidebarWidth"]`, re-read on mount. **P8 flips
-    DEAD -> implemented** (ledgered). Clamp [200px, 92vw] as legacy.
-  - P3: the F7 "what is selected" status line is the sidebar-title analogue.
-  - P4: tab families - `tabAvailability(selection)` enables/disables tabs;
-    `preferredTab(selection)` auto-activates on a fresh selection.
-  - P5: auto-narrow to 350px on a fresh single-event pin (yields to a
-    user/persisted width). P7 body scroll is CSS (`overflow-y:auto`). P6
-    auto-widen-on-flamegraph is part of the T32 range seam.
-- **Q (event / related detail):** Q1 event KV (single + cluster), Q2 copy
-  (flash check), Q3 correlation button -> Related, Q4-Q8 Related sections (field
-  correlation, enclosing spans, same-span/task/type), collapsible (Q5), windowed
-  load-more (Q6), row navigation (Q7 - span focus+center / event pin+center),
-  empty placeholders (Q8).
-- **R (poll detail):** R1/R2 Poll Detail - deduplicated blocking-sched (red) +
-  CPU-profile (orange) groups by leaf frame, count/percentage/bar, 3-frame head
-  + expandable tail. **The behavioral-diff DoD gate**, ported from legacy
-  `showStackPopup`. **R6 retired via ledger** (handler-less summary row, G20
-  pattern). R3-R5/R7-R9 are the T32 seam (see SCOPE DECISION).
-- **S4:** the at-cursor readout (`transient.atCursor`, T24's contract) renders
-  in ONE place in the inspector, on the transient channel; **T24's inspector
-  stub call is removed** from `components/overlay/index.ts`. Surfaces the T17
-  coverage state (partial/oversized window). Ledgered (I6/S4).
-- **M7/M8:** the Stack tab renders `computeSpawnedTasks` (T29's derivation) for
-  `selection.spawnedTasksRange` - 5 hex task-id links per spawn-location group +
-  a "N more" tail; a link selects the task (M8 -> selectedTaskId).
-- **Task tab:** T30's `createTaskDetailDerivation` textual detail (spawn loc,
-  polls, wakes, lifetime, completion, N3 uninstrumented badge, N4 idle-stack
-  count). Consumed, not reimplemented.
-- **F7:** "what is selected" line + explicit `✕ clear` button; Esc registered
-  with the esc-cascade at the `sidebar` priority band (clears poll/event/range
-  before the entry's task-clear fallback - the legacy D9 order).
+## COMPLETED (commits)
 
-### New store contract (additive; T29 `spawnedTasksRange` precedent)
-`selection.pollDetail: PollSpan | null` (types/state.d.ts) - the clicked poll
-for the Poll Detail tab. Wired in `lane-interaction.ts` onClick from
-`resolveLaneClick(...).openStackFor` (the merged code already computed it and
-noted "the popup lands when T31 wires it"). Store default added
-(pages/viewer/store.ts). Three existing full-slice test fixtures updated with
-`pollDetail: null`.
+- `7aac7b1` feat(T35): minimap density/coverage/geometry MODEL (pure, tier-1
+  sources) + tests.
+- `054ebac` feat(T35): minimap canvas + status bar COMPONENTS, shell/main
+  wiring, viewer.css, POI derivation, tests.
+- `0efc267` docs(T35): inventory section X (additions) + ledger + a T18
+  `coverageSignal` fallback test.
 
-## SCOPE DECISION (flagged for maintainer): R3-R9 region blocking-calls -> T32
+## WHAT LANDED (against the ticket)
 
-The ticket says "Owns P/Q/R rows", but the MERGED CODE
-(`lane-interaction.ts:14-18`) states: a Shift-drag / keyboard region commit
-writes `selection.sidebarRange` and "WHAT opens for that range (flamegraph /
-blocking / heap) is T32's." Per hard rule 1 (merged code is authoritative on a
-ticket-vs-code conflict), the region-triggered Blocking-Calls / scheduling panel
-(R3, R4, R5, R7, R8, R9 - legacy `showSchedPanel`, viewer.html:6008-6203) is
-T32's rendering (T32 deps on T31). T31 lands the Stack-tab CONTAINER + the
-poll-click R1/R2 + the R6 retirement; the Stack tab shows a documented seam note
-when `sidebarRange` is set. **Confirm this split** (T31 = inspector shell +
-poll-detail + R6 disposition; T32 = region blocking-calls/flamegraph/heap into
-the Stack tab). If R3-R9 must live in T31, they are an unported follow-on.
+Owns: NEW inventory rows (ledger "additions"). Amendments: S8, S3(surface),
+F7(status), 2.8 progress feedback.
+
+Minimap (`src/pages/viewer/minimap.ts`, `minimap-model.ts`, `minimap-poi.ts`):
+- Fills the shell's `.d9-minimap` host with a canvas overview of the WHOLE
+  trace range + a draggable/clickable viewport box (04 S8 position context).
+- Density from TIER-1 sources only (architecture 2.8), precedence: aggregate
+  density on coverage `full` -> listing-metadata (T17 segment extents + gzip
+  sizes) -> whole-trace event histogram -> flat band. Falls back off a
+  `partial`/`none` aggregate (never presents a partial density as complete).
+- Per-bin coverage distinguishes FETCHED (`parsed`) from tier-1-only
+  (`listed`/`fetching`/`evicted`/`oversized`) with the same residency mapping
+  as `overlay/readout.coverageAt`; a "partial" badge surfaces tier-1-only
+  regions so an unfetched tail is never rendered as empty/complete (T17-audit
+  notes 6-7 - the headline correctness requirement).
+- POI ticks from the frozen detectors (`filterPointsOfInterest` via
+  `deriveMinimapPois`) - the SAME source as T33's rail, no code dependency.
+- Drag scrubs / click jumps, dispatching store viewport updates (never a direct
+  render, F2); ArrowLeft/Right keyboard pan on the focusable region.
+
+Status bar (`src/pages/viewer/status-bar.ts`): selection line + explicit clear
+affordance (04 F7), view range + duration, segment fetch/parse progress from
+the segments slice (2.8 feedback hard edge; spinner while fetching), the T19
+copy-link button (04 S3 surface clause), and persistent key hints.
+
+Shell (`shell.ts`): the `.d9-minimap` + `.d9-status` slots became empty ARIA
+hosts the two components fill imperatively (toast/legend technique - the
+declarative shell re-render never orphans their children); exposed as
+`minimapRegion` / `statusRegion`. `main.ts` mounts + disposes both. Edits kept
+localized to the two slot regions + wiring (hot-merge-point discipline).
+
+## DoD CHECKS
+
+- check: minimap navigates a multi-segment trace whose tail is UNFETCHED
+  (tier-1-only) -> `minimap-model.test.ts` ("multi-segment tail UNFETCHED
+  (headline DoD)") + `minimap.test.ts` ("navigating into an UNFETCHED tail"):
+  the range spans the full 10-segment listing, the tail bins are `truncated`
+  (not empty/complete), and a click at the tail moves the viewport into a still
+  `listed` (unfetched) segment. PASS.
+- check: drag/click behavioral tests -> `minimap-model.test.ts` (pure
+  click/drag/clamp math) + `minimap.test.ts` (store-dispatch behavioral:
+  click-center, drag-scrub keeping the grabbed point under the pointer,
+  edge-clamp). PASS.
+- check: status bar reflects selection/range/progress (Vitest on store
+  bindings) -> `status-bar.test.ts` (selectionState F7, segmentProgress 2.8,
+  statusViewModel range+duration). PASS.
+- check: new rows walked by T12 -> inventory section X (X1-X14) added with
+  `file:line`/`data-*` anchors; T12 does not yet exist as a running tool
+  (chunk-1), so the rows are recorded for its walk, not executed here.
+
+## GATE EVIDENCE (worktree `dial9-viewer/ui`)
+
+- `npx tsc --noEmit` -> exit 0 (TSC_OK).
+- `npm run test` (full Vitest, includes `check:boundary` pretest = OK) ->
+  `Test Files 87 passed | 1 skipped (88)`,
+  `Tests 1377 passed | 1 expected fail | 11 skipped (1389)`. Zero unexpected
+  failures; the known straggler did not time out this run. The 38 T35 tests
+  are in minimap-model (23), minimap-poi (4), minimap (5), status-bar (6).
+- `npm run build` -> clean (`built in ~0.4s`, static-copy 17 items; the only
+  warnings are the pre-existing trace_parser.js `fs/os/child_process`
+  externalization notes).
+- `cargo build -p dial9-viewer` -> Finished (rust-embed picks up `ui/dist`).
+
+## SCOPE BOUNDARIES / NOTES (not blockers)
+
+1. AGGREGATE DENSITY (T18) is a SEAM, not a live fetch. The viewer has no
+   populated aggregate source wired (the dev-server has no agg context per the
+   shared-decisions aggregation note; the T17 segment window itself is also not
+   yet wired into the live viewer - both are chunk-2 integrations, consumed as
+   OUTPUTS here). `mountMinimap` accepts an optional `aggregate()` supplier
+   (defaults to null); the density model implements + tests the documented T18
+   `full` -> trust / `partial`|`none` -> fall-back-to-listing rule, exercised
+   with the real `coverageSignal` classifier. A later scope-aware ticket feeds
+   real aggregates through the seam without touching the component. This is the
+   boundary the ticket itself draws ("consume T18 outputs"); not a gate.
+2. S3 URL-STATE remains T19's. The copy-link button copies the live URL and
+   exposes a `beforeCopyLink` flush seam; the viewer's view-state<->URL sync
+   (`bindViewStateToUrl`) is T19's clause and is not wired here (the ticket
+   assigns only the copy-link SURFACE to T35).
+3. Minimap navigation dispatches viewport updates DIRECTLY and is not recorded
+   in T23's private zoom-history stack (so `z` does not undo a minimap pan).
+   The ticket does not require it; recording would need exposing T23's
+   `ViewportActions`. Possible future enhancement.
+4. Browser-driven halves (canvas pixel rendering, real DOM pointer wiring, axe)
+   are deferred to T12 per the established chunk-2 pattern (e.g.
+   spans-track.test.ts). Covered here at the pure-model + store-dispatch level.
 
 ## FILES
 
-New:
-- `src/pages/viewer/inspector-model.ts` - pure derivations (Poll Detail, Event,
-  Related, spawned-tasks, tab availability).
-- `src/pages/viewer/inspector.ts` - the `mountInspector` component.
-- `src/pages/viewer/inspector-model.test.ts` - 15 model cases (auto-discovered
-  by Vitest; NOT a demo-trace suite, so no `e2e-trace-tests.sh` registration).
-
-Edited:
-- `src/types/state.d.ts` (+`selection.pollDetail`), `src/pages/viewer/store.ts`
-  (+default), `src/pages/viewer/shell.ts` (empty inspector aside + expose
-  `inspectorRegion`), `src/pages/viewer/main.ts` (mount + dispose),
-  `src/pages/viewer/lane-interaction.ts` (dispatch pollDetail),
-  `src/components/overlay/index.ts` (remove T24 readout-stub call),
-  `src/styles/viewer.css` (inspector styles).
-- `docs/tickets/ledger.md` (R6 retired; P8, I6/S4, P1 amended).
-- Test fixtures: `store.test.ts`, `exhaustive.test.ts`,
-  `selection-overlay.test.ts` (+`pollDetail: null`).
-
-## ARCHITECTURE NOTES
-
-- Render split (architecture 2.2/2.3): the FRAME (status/tabs/body, incl. the
-  heavy Poll/Related derivations) re-renders only on trace/selection/uiPrefs;
-  the READOUT re-renders on the high-frequency `transient` channel into its own
-  binding-free host - a hover never re-runs buildPollDetail/buildRelated.
-- The shell renders an EMPTY `<aside class="d9-inspector">`; the component owns
-  its interior imperatively (the toast-region technique), so shell re-renders
-  never clobber it. Shell edit is localized to the aside region + an
-  `inspectorRegion` handle, mirroring toastRegion/trackColumn.
-- Trace-invariant lookups cached in `store.derived(["trace"], ...)` (F5).
-- T17 (audit notes 6+7): the readout surfaces `coverage` (partial/oversized)
-  rather than presenting a truncated window as whole - the chunk-2 consumer the
-  audit required.
-
-## EVIDENCE (gate bar - all four green)
-
-- `npx tsc --noEmit`: **exit 0**.
-- `npm run test` (full Vitest, after the final refactor):
-  **Test Files 83 passed | 1 skipped (84); Tests 1331 passed | 1 expected fail
-  | 11 skipped (1343)**. 0 unexpected failures; no straggler timeout (ran full
-  parallel in 120s). inspector-model + overlay/readout suites: 22/22.
-- `npm run build` (vite): **clean** (only pre-existing frozen-core
-  "externalized for browser" warnings).
-- `cargo build -p dial9-viewer`: **exit 0** (rust-embed picks up the rebuilt
-  dist).
-
-## REMAINING / NOT UNIT-TESTED HERE (browser-driven; Vitest env is `node`)
-
-- Row-walker (T12) not runnable in this worktree; P/Q/R rows implemented to pass
-  it but not mechanically verified here.
-- Store/DOM-boundary halves (live tab activation, resize round-trip, Esc
-  registration, navigateRelated/selectTask dispatch) are not jsdom-tested (no
-  jsdom installed; env is `node`) - the pure model suite covers the logic; the
-  browser-driven verification is the row-walker's, consistent with T27/T30.
-- Cosmetic simplifications vs legacy: Poll Detail per-frame escalating indent
-  rendered as fixed 8/16px; Related span-row focus chain is the single span, not
-  its ancestor chain. Content/counts/expand behavior is faithful.
-
-## BLOCKERS
-
-- **`git commit` is DENIED** in this environment (deny rule `Bash(git commit *)`).
-  No step could be committed. Work is in the working tree (the first step's
-  contract+ledger edits were `git add`-staged; later edits are unstaged). The
-  maintainer must commit. Suggested split:
-  1. `feat(viewer): add selection.pollDetail contract + T31 ledger entries`
-  2. `feat(viewer): persistent inspector sidebar (P/Q/R + S4/F7)`
+New: `src/pages/viewer/minimap.ts`, `minimap-model.ts`, `minimap-poi.ts`,
+`status-bar.ts` (+ their `.test.ts`). Edited: `src/pages/viewer/shell.ts`,
+`main.ts`, `src/styles/viewer.css`, `docs/ui-inventory/features/02-viewer-html.md`
+(section X), `docs/tickets/ledger.md` (3 addition lines).

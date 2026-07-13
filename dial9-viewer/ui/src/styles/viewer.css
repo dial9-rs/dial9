@@ -275,11 +275,32 @@ body {
     flex-shrink: 0;
     background: #12122a;
     border-bottom: 1px solid var(--d9-border);
-    display: flex;
-    align-items: center;
-    padding: 0 12px;
+    /* Positioning context for the coverage badge (T35). */
+    position: relative;
 }
 .d9-minimap:focus-visible { outline: 2px solid var(--d9-accent); outline-offset: -2px; }
+/* Overview minimap canvas (T35): fills the host; grab to drag the viewport. */
+.d9-minimap-canvas {
+    display: block;
+    width: 100%;
+    height: 100%;
+    cursor: pointer;
+}
+/* Coverage badge (T35): shown only when the overview has tier-1-only regions
+   (unfetched/partial), so a windowed tail is never presented as whole. */
+.d9-minimap-badge {
+    position: absolute;
+    top: 4px;
+    right: 8px;
+    padding: 1px 6px;
+    font-size: 0.62em;
+    color: #12122a;
+    background: #e0b050;
+    border-radius: 3px;
+    pointer-events: none;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
 
 /* ── Body: track column + inspector ──────────────────────────────────── */
 
@@ -936,8 +957,46 @@ body {
     font-size: 0.76em;
     color: var(--d9-fg-muted);
 }
-.d9-status-sel { color: var(--d9-fg); }
-.d9-status-hints { margin-left: auto; }
+/* Status-bar text row (T35): the shell host also holds the imperative
+   copy-link button as a sibling, so this stays flex:1 and the button sits at
+   the far right. */
+.d9-status-main {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    flex: 1;
+    min-width: 0;
+}
+.d9-status-sel { color: var(--d9-fg); display: inline-flex; align-items: center; gap: 6px; }
+/* F7 explicit clear-selection affordance. */
+.d9-status-clear {
+    padding: 0 5px;
+    font: inherit;
+    line-height: 1.4;
+    color: var(--d9-fg-muted);
+    background: transparent;
+    border: 1px solid var(--d9-border);
+    border-radius: 3px;
+    cursor: pointer;
+}
+.d9-status-clear:hover { color: var(--d9-fg); border-color: var(--d9-accent); }
+.d9-status-clear:focus-visible { outline: 2px solid var(--d9-accent); outline-offset: 1px; }
+/* Segment fetch/parse progress (2.8 feedback surface). */
+.d9-status-progress { color: var(--d9-fg-muted); white-space: nowrap; }
+.d9-status-progress.active { color: var(--d9-accent); }
+.d9-status-progress.active::after {
+    content: "";
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    margin-left: 6px;
+    vertical-align: -1px;
+    border: 2px solid var(--d9-border);
+    border-top-color: var(--d9-accent);
+    border-radius: 50%;
+    animation: d9-spin 0.8s linear infinite;
+}
+.d9-status-hints { margin-left: auto; white-space: nowrap; }
 
 /* ── Toasts (features/02 U) ──────────────────────────────────────────── */
 

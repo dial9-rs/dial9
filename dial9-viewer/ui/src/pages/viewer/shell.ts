@@ -58,8 +58,10 @@ export interface ShellDeps extends ToolbarDeps {
  * info fields moved to the toolbar controller (T33 owns C1); the shell keeps
  * only the track inputs + the status-bar labels. */
 interface ShellViewModel extends TracksViewModel {
-  selectionLabel: string;
-  viewRangeLabel: string;
+  // File-info fields moved to the toolbar controller (T33 owns C1); the
+  // selection/range/duration status fields moved to the mounted status-bar
+  // component (T35 reads them from the store). The shell view model now carries
+  // only the track inputs (TracksViewModel).
 }
 
 /** The persistent interaction hint chips (F5): always visible, never
@@ -73,24 +75,12 @@ const HINT_CHIPS: readonly string[] = [
   "? help",
 ];
 
-function relOffset(ns: number, minTs: number): string {
-  const sec = (ns - minTs) / 1e9;
-  return `+${sec.toFixed(2)}s`;
-}
-
 /** Build the view model for a render pass from the current store state. */
 function viewModel(state: StoreState): ShellViewModel {
   const trace = state.trace.trace;
   const hasTrace = trace !== null;
   const taskSelected = state.selection.selectedTaskId !== null;
-  const { viewStart, viewEnd, minTs } = state.viewport;
-
-  const selectionLabel = taskSelected
-    ? `Task 0x${(state.selection.selectedTaskId ?? 0).toString(16)} selected · Esc clears`
-    : "No selection";
-  const viewRangeLabel = hasTrace
-    ? `view ${relOffset(viewStart, minTs)} - ${relOffset(viewEnd, minTs)}`
-    : "no trace loaded";
+  const { viewStart, viewEnd } = state.viewport;
 
   return {
     hasTrace,
@@ -99,8 +89,6 @@ function viewModel(state: StoreState): ShellViewModel {
     viewEnd,
     axis: deriveAxisInputs(state),
     cpu: deriveCpuInputs(state),
-    selectionLabel,
-    viewRangeLabel,
   };
 }
 
@@ -193,14 +181,16 @@ function shellTemplate(
       </button>
     </header>
 
+    <!-- Overview minimap (T35): an empty, focusable host that mountMinimap
+         fills with its canvas + coverage badge. Kept empty in the template so
+         the shell's declarative re-renders never orphan the component's
+         imperative children (the toast/legend technique). -->
     <div
       class="d9-minimap"
       role="region"
       aria-label="Overview minimap"
       tabindex="0"
-    >
-      <span class="d9-slot-hint">Overview minimap (T35)</span>
-    </div>
+    ></div>
 
     <div class="d9-body">
       ${rail.template(state)}
@@ -217,15 +207,10 @@ function shellTemplate(
       ${inspectorTemplate()}
     </div>
 
-    <footer class="d9-status" role="contentinfo">
-      <span class="d9-status-sel">${vm.selectionLabel}</span>
-      <span class="d9-status-view">${vm.viewRangeLabel}</span>
-      <span class="d9-status-slot">copy link (T35)</span>
-      <span class="d9-status-hints"
-        >/ search · n/p POI · f fit · z undo zoom · g goto
-        · ? help</span
-      >
-    </footer>
+    <!-- Status bar (T35): an empty host that createStatusBar fills (selection
+         line, view range, segment progress, copy-link button, key hints).
+         Empty in the template for the same reason as the minimap host. -->
+    <footer class="d9-status" role="contentinfo"></footer>
 
     <!-- Toast channel (features/02 U): imperative children, so no dynamic
          template content here - createToasts owns it. role=status makes
@@ -252,6 +237,10 @@ export interface MountedShell {
   keyBindings: readonly KeyBinding[];
   /** The persistent inspector landmark (pass to mountInspector, T31). */
   inspectorRegion: HTMLElement;
+  /** The overview-minimap host (pass to mountMinimap, T35). */
+  minimapRegion: HTMLElement;
+  /** The status-bar footer host (pass to createStatusBar, T35). */
+  statusRegion: HTMLElement;
   /** Force one render+size pass (used after mount and on resize). */
   refresh(): void;
   /** Tear down the store subscription and resize listener. */
@@ -338,12 +327,16 @@ export function mountShell(
   const toastRegion = ensureRegion(root, ".d9-toast-region");
   const trackColumn = ensureRegion(root, ".d9-track-column");
   const inspectorRegion = ensureRegion(root, ".d9-inspector");
+  const minimapRegion = ensureRegion(root, ".d9-minimap");
+  const statusRegion = ensureRegion(root, ".d9-status");
 
   return {
     toastRegion,
     trackColumn,
     keyBindings: [...rail.keyBindings, ...toolbar.keyBindings],
     inspectorRegion,
+    minimapRegion,
+    statusRegion,
     refresh: () => store.update("viewport", {}),
     dispose(): void {
       unsubscribe();

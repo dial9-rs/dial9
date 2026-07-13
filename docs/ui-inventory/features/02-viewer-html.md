@@ -454,6 +454,35 @@ Single shared `#tooltip` element (`display:none`, `position:fixed`, `#222244` bg
 
 ---
 
+## X. Overview minimap & status bar (T35 additions - new surfaces)
+
+New persistent surfaces on the migrated viewer with NO legacy `viewer.html`
+equivalent (added by T35; ledger "additions"). Sources are the new `src/`
+modules. The minimap addresses 04 S8 (no position context); the status bar
+carries 04 F7 (selection visibility), S3's status-line + copy-link SURFACE
+clause (S3's URL-state clause is T19's), and the 2.8 segment feedback edge.
+Density is TIER-1 only (architecture 2.8): an unfetched (tier-1-only) region
+renders as such, never as empty/complete (T17-audit notes 6-7).
+
+| Feature | What it does | Access path | Source |
+| --- | --- | --- | --- |
+| X1. Overview minimap surface | Persistent band under the toolbar showing the WHOLE trace time range with a viewport box; the viewer's position context (S8). | Always visible once a trace loads. | `src/pages/viewer/minimap.ts` (`mountMinimap`); shell host `.d9-minimap` (`shell.ts`) |
+| X2. Tier-1 density | Per-bin density bars from tier-1 sources: aggregate density when coverage is `full`, else listing-metadata (segment extents + gzip sizes), else the whole-trace event histogram, else a flat band. Falls back off aggregate on `partial`/`none` (never presents a partial density as complete). | Automatic; reflects the T17 segments slice / T18 coverage. | `src/pages/viewer/minimap-model.ts` (`computeDensityBins`, `binTimestamps`) |
+| X3. Fetched vs tier-1-only coverage | Bins map segment residency: `parsed` -> solid "complete"; `listed`/`fetching`/`evicted` -> dimmed "truncated"; `oversized` -> distinct color; a `partial` badge appears when any in-range region is tier-1-only. Same residency->coverage mapping as the at-cursor readout (`overlay/readout.coverageAt`). | Automatic; badge visible on partial coverage. | `minimap-model.ts` (`segmentBinCoverage`, `overallCoverage`); `minimap.ts` (`updateBadge`) |
+| X4. POI ticks | Amber ticks at points-of-interest times, unioning the applicable frozen-core detectors (long-poll always; sched/wake-delay when sched-wait data; uninstrumented when instrumented) - the SAME detector source as T33's issues rail, no code dependency. | Automatic. | `src/pages/viewer/minimap-poi.ts` (`deriveMinimapPois` over `filterPointsOfInterest`) |
+| X5. Draggable/clickable viewport box | The box marks `[viewStart, viewEnd]`. A press jumps (centers the current-width view on the cursor); a drag scrubs, keeping the grabbed point under the pointer; both clamp to the overview range and DISPATCH a store viewport update (never a direct render). The unfetched tail stays navigable. | Click / drag on the minimap. | `minimap.ts` (`onMouseDown`/`onMouseMove`, `minimapNavigate`); `minimap-model.ts` (`minimapClickWindow`, `minimapDragWindow`, `grabOffsetFor`) |
+| X6. Keyboard pan | ArrowLeft / ArrowRight pan the view by 15% of its width on the focused minimap region (so the focusable region is not a keyboard trap). | Focus the minimap; Left/Right. | `minimap.ts` (`onKeyDown`) |
+| X7. Accessible overview label | The canvas `aria-label` announces the viewed range vs total duration and a partial-data note when regions are unfetched. | Screen reader on the minimap canvas. | `minimap.ts` (`draw`) |
+| X8. Status bar surface | Persistent footer with selection, view range, segment progress, copy-link, and key hints. | Always visible. | `src/pages/viewer/status-bar.ts` (`createStatusBar`); shell host `.d9-status` (`shell.ts`) |
+| X9. Selection line (F7) | Shows the selected task (`Task 0x<hex> selected`), else the focused span, else the pinned event, else "No selection". | Automatic; updates on the selection slice. `[data-status-selection]`. | `status-bar.ts` (`selectionState`) |
+| X10. Clear-selection affordance (F7) | An `x` button clears the selection highlight state (task / span focus / focused span / pinned event). | Click the `x` when a selection exists. | `status-bar.ts` (`.d9-status-clear`); `main.ts` `clearSelection` |
+| X11. View range readout | `view +X.XXs - +Y.YYs (duration)` from the viewport slice; "no trace loaded" at rest. | Automatic; updates on viewport. `[data-status-view]`. | `status-bar.ts` (`statusViewModel`) |
+| X12. Segment fetch/parse progress (2.8) | `Segments P/N loaded · fetching F · O oversized` from the segments slice, with a spinner while any segment fetches; hidden when segment windowing is inactive (whole-trace path). | Automatic; visible during windowed loading. `[data-status-progress]`. | `status-bar.ts` (`segmentProgress`) |
+| X13. Copy-link button (S3 surface) | The T19 copy-link control copies the current view URL (a `beforeCopyLink` seam flushes any pending view-state write; the viewer's view-state URL sync itself is T19's clause). | Click "Copy link". | `src/lib/url/copy-link.ts` (`mountCopyLink`) via `status-bar.ts` |
+| X14. Key hints | Persistent hint text: `/ search · n/p POI · f fit · z undo zoom · g goto · ? help`. | Always visible. | `status-bar.ts` (`KEY_HINTS`) |
+
+---
+
 ## 2026-07-08 refresh (drift commits #596/#600; anchor re-derivation)
 
 Method: code read + Node-level checks + local unit tests; dev-server on :3001
