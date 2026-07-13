@@ -31,6 +31,17 @@ import { mountOverlay } from "../../components/overlay/index.js";
 import { mountLaneInteraction } from "./lane-interaction.js";
 import { initViewportFromTrace } from "./viewport-init.js";
 import { readKeyDerivedIdentity } from "../../lib/trace/index.js";
+import {
+  bindViewStateToUrl,
+  resolveViewState,
+  type ViewStateBinding,
+} from "../../lib/url/index.js";
+import {
+  projectViewerState,
+  mirrorViewerToQuery,
+  readViewerUrlState,
+} from "./url-state.js";
+import type { StoreState } from "../../types/state.js";
 
 // Dual-UI switch (T38): render the always-visible "Switch to legacy UI"
 // pill. The <head> auto-boot is a no-op on this off-root new-UI path.
@@ -58,6 +69,32 @@ function boot(): void {
   // previous session's subscriber wrote).
   hydrateTrackPrefs(store);
   const disposeTrackPrefs = mountTrackPrefsPersistence(store);
+
+  // Restore shareable state from the URL (#1). The hash carries tm/tz; readable
+  // query params carry the rest. Boot-time prefs (tm/tz, span filter, track
+  // order/collapse) apply now - OVER the localStorage hydrate above, so a
+  // shared URL wins. The viewport window + task selection apply after the trace
+  // loads (below), once minTs/maxTs and the task set exist.
+  const urlView = readViewerUrlState(window.location.search);
+  const urlHash = resolveViewState({
+    search: window.location.search,
+    hash: window.location.hash,
+  });
+  const bootPrefs: Partial<StoreState["uiPrefs"]> = {};
+  if (urlHash.timeMode !== undefined) bootPrefs.timeMode = urlHash.timeMode;
+  if (urlHash.timeZone !== undefined) bootPrefs.tz = urlHash.timeZone;
+  if (urlView.spanFilter !== undefined) bootPrefs.spanFilter = urlView.spanFilter;
+  if (urlView.trackOrder !== undefined) bootPrefs.trackOrder = urlView.trackOrder;
+  if (urlView.collapsed !== undefined) {
+    bootPrefs.collapsed = Object.fromEntries(
+      urlView.collapsed.map((id) => [id, true]),
+    );
+  }
+  if (Object.keys(bootPrefs).length > 0) store.update("uiPrefs", bootPrefs);
+
+  // The URL sync binding (#1), assigned after mount; forward-referenced by the
+  // status bar's copy-link flush so a copy always reflects the live state.
+  let urlBinding: ViewStateBinding | null = null;
 
   // ARIA live region (A16): mount it now so screen-reader announcements
   // (keyboard selection start/complete, zoom confirmations) have a target.
@@ -150,12 +187,36 @@ function boot(): void {
         pinnedEvent: null,
       });
     },
+    // Flush the debounced URL write so copy-link copies the live state (#1).
+    beforeCopyLink: () => urlBinding?.flush(),
   });
 
   // Initialize the viewport from the trace the moment it loads. Registered
   // BEFORE the lane interaction so its zoom-history baseline records the
   // fitted view (both subscribe to `trace`; order = registration order).
   initViewportFromTrace(store);
+
+  // Apply the URL's viewport window + task selection to the FIRST loaded trace
+  // (#1). Registered AFTER initViewportFromTrace so it overrides the full-fit;
+  // one-shot, so a later Set-Range reparse refits to its own extent instead of
+  // snapping back to the shared window.
+  if (urlView.viewStart !== undefined || urlView.selectedTaskId !== undefined) {
+    let applied = false;
+    const unsubUrlRestore = store.subscribe(["trace"], (state) => {
+      if (applied || state.trace.trace === null) return;
+      applied = true;
+      unsubUrlRestore();
+      if (urlView.viewStart !== undefined && urlView.viewEnd !== undefined) {
+        store.update("viewport", {
+          viewStart: urlView.viewStart,
+          viewEnd: urlView.viewEnd,
+        });
+      }
+      if (urlView.selectedTaskId !== undefined) {
+        store.update("selection", { selectedTaskId: urlView.selectedTaskId });
+      }
+    });
+  }
 
   // Lane interaction (T23): pointer pan/zoom/region gestures, wheel zoom,
   // click-select, the H10 selection overlay, and the H1-H4 viewport controls.
@@ -204,8 +265,18 @@ function boot(): void {
       : {}),
   });
 
+  // Mirror the shareable state INTO the URL as it changes (#1), debounced.
+  // Registered last so the boot-time restore above does not fight it; the
+  // copy-link button flushes it first (beforeCopyLink) so a copy is current.
+  urlBinding = bindViewStateToUrl(store, {
+    slices: ["viewport", "selection", "uiPrefs"],
+    project: projectViewerState,
+    mirrorToQuery: mirrorViewerToQuery,
+  });
+
   // Teardown hook for HMR / tests (not strictly needed in production).
   window.addEventListener("beforeunload", () => {
+    urlBinding?.dispose();
     disposeTrackPrefs();
     loadChrome?.dispose();
     statusBar.dispose();

@@ -74,6 +74,22 @@ export interface ViewState {
   timeMode?: TimeMode;
   /** Timezone for absolute timestamps (key `tz`). */
   timeZone?: TimeZoneMode;
+  // ── Trace-viewer shareable state (#1). Carried in READABLE query params by
+  // the viewer's mirrorToQuery, NOT the hash: the hash codec above ignores
+  // these fields (it only serializes the keys it knows), so a shared viewer URL
+  // reads `?start=..&end=..&task=..` rather than an opaque hash blob. ──
+  /** Viewport window start (absolute ns); set only when zoomed in. */
+  viewStart?: number;
+  /** Viewport window end (absolute ns); set only when zoomed in. */
+  viewEnd?: number;
+  /** Selected task id, when one is selected. */
+  selectedTaskId?: number;
+  /** Span-filter text, when non-empty. */
+  spanFilter?: string;
+  /** Track display order, when reordered from the default. */
+  trackOrder?: readonly string[];
+  /** Ids of the collapsed tracks, when any. */
+  collapsed?: readonly string[];
 }
 
 /** An unrecognized-but-versioned hash entry, preserved for rewrite. */
