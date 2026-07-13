@@ -1,24 +1,19 @@
-// lib/interact/palette.ts - the unified search palette (T20; K1;
-// canonical spec docs/ui-inventory/mocks/keyboard.html).
+// The unified search palette.
 //
 // One palette component for every page: `/` opens it, typing filters,
-// ArrowUp/ArrowDown move the selection (clamped, mock semantics), Enter
-// activates the selected item and CYCLES the selection forward (wrapping)
-// so repeated Enter steps through the matches; Shift+Enter cycles
-// backward ("Enter jump - Shift+Enter prev" in the mock's placeholder).
-// Escape closes. The palette indexes whatever its opener supplies -
-// tasks/spans/POIs come from lib/trace/query on the pages that have a
-// parsed trace (the chunk-2 viewer; T23 wires it). Per architecture 2.5
-// the component translates keys into the onActivate callback only - what
-// an activation DOES (center viewport, select task) is the caller's.
+// ArrowUp/ArrowDown move the selection (clamped), Enter activates the
+// selected item and CYCLES the selection forward (wrapping) so repeated
+// Enter steps through the matches; Shift+Enter cycles backward. Escape
+// closes. The palette indexes whatever its opener supplies. The component
+// translates keys into the onActivate callback only - what an activation
+// DOES (center viewport, select task) is the caller's.
 //
 // The filtering + selection-stepping policy is pure and Node-testable
 // (filterPaletteItems / stepClamped / stepWrapped); the component is the
 // thin DOM shell around it.
 //
-// Keydown inside the palette stops propagation (mock line 96): palette
-// typing must never reach page-level routers or the frozen flamegraph
-// widget's document-level `/` handler.
+// Keydown inside the palette stops propagation: palette typing must never
+// reach page-level routers or a widget's document-level `/` handler.
 
 import "../../styles/interact.css";
 
@@ -28,14 +23,14 @@ export interface PaletteItem {
   kind: string;
   /** Primary display text; the filter matches on `kind` + `label`. */
   label: string;
-  /** Optional right-aligned detail (the mock renders a time, "+0.31s"). */
+  /** Optional right-aligned detail (e.g. a time, "+0.31s"). */
   detail?: string;
 }
 
 /**
- * Case-insensitive substring filter over `"<kind> <label>"` - exactly the
- * mock's matching rule, so "poi sched" narrows by kind and text at once.
- * An empty/whitespace query keeps everything.
+ * Case-insensitive substring filter over `"<kind> <label>"`, so "poi
+ * sched" narrows by kind and text at once. An empty/whitespace query keeps
+ * everything.
  */
 export function filterPaletteItems<T extends PaletteItem>(
   items: readonly T[],
@@ -48,7 +43,7 @@ export function filterPaletteItems<T extends PaletteItem>(
   );
 }
 
-/** Arrow-key selection step: clamped to [0, length-1] (mock semantics). */
+/** Arrow-key selection step: clamped to [0, length-1]. */
 export function stepClamped(index: number, delta: number, length: number): number {
   if (length <= 0) return 0;
   return Math.min(Math.max(index + delta, 0), length - 1);
@@ -61,7 +56,7 @@ export function stepWrapped(index: number, delta: number, length: number): numbe
 }
 
 export interface PaletteOptions {
-  /** Input placeholder; defaults to the canonical mock hint text. */
+  /** Input placeholder; defaults to the canonical hint text. */
   placeholder?: string;
   /** Called on Enter with the activated item. The palette stays open. */
   onActivate(item: PaletteItem): void;
@@ -141,8 +136,8 @@ export function createSearchPalette(
         detail.textContent = item.detail;
         row.appendChild(detail);
       }
-      // Mouse path: keys are accelerators, never the only path (mock
-      // status bar). Click activates and closes.
+      // Mouse path: keys are accelerators, never the only path. Click
+      // activates and closes.
       row.addEventListener("click", () => {
         options.onActivate(item);
         close();

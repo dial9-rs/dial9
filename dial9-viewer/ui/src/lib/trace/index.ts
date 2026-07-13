@@ -1,11 +1,10 @@
-// lib/trace barrel - THE typed boundary around the frozen core (T09;
-// architecture 2.7). This directory is the only place in src/ permitted
-// to import the frozen core (decode.js, trace_parser.js,
-// trace_analysis.js) directly - everything else consumes this barrel
-// (lib/canvas re-exports the core's drawing math through its own barrel
-// under the same rule; scripts/check-core-imports.mjs enforces both).
-// Explicit named re-exports, not `export *`: a name collision between
-// modules must be a compile error, never a silently-omitted export.
+// lib/trace barrel - THE typed boundary around the frozen core. This
+// directory is the only place in src/ permitted to import the frozen core
+// (decode.js, trace_parser.js, trace_analysis.js) directly; everything else
+// consumes this barrel (lib/canvas re-exports the core's drawing math
+// through its own barrel under the same rule). Explicit named re-exports,
+// not `export *`: a name collision must be a compile error, never a
+// silently-omitted export.
 
 // keys.ts - S3 key parsing with the known/unknown layout discriminant.
 export { extractPrefix, formatEpoch, parseKey } from "./keys.js";
@@ -19,8 +18,8 @@ export type {
 // title.ts - shared viewer/flamegraph header metadata.
 export { traceTitleParams } from "./title.js";
 
-// segment-metadata.ts - trace-embedded service/host identity (T45; #68) and
-// its reconciliation against the key-derived svc/host URL params.
+// segment-metadata.ts - trace-embedded service/host identity and its
+// reconciliation against the key-derived svc/host URL params.
 export {
   SEGMENT_HOST_KEY,
   SEGMENT_SERVICE_KEY,
@@ -91,10 +90,9 @@ export type {
   TraceWorkerTiming,
 } from "./worker/protocol.js";
 
-// segments.ts - segment-windowed loading (tier 2, architecture 2.8):
-// budget constants (N19), extent derivation, window decision functions,
-// the raw-gzip cache, boundary-poll stitching/truncation, and the
-// viewport-driven orchestrator.
+// segments.ts - segment-windowed loading: budget constants, extent
+// derivation, window decision functions, the raw-gzip cache, boundary-poll
+// stitching/truncation, and the viewport-driven orchestrator.
 export {
   BUDGET_EVICTION_THRESHOLD_FRACTION,
   GZIP_EXPANSION_ESTIMATE,
@@ -203,8 +201,8 @@ export type {
   WorkerWake,
 } from "./analysis.js";
 
-// creds.ts - the frozen creds.js store, typed (T13). Trace fetches carry
-// its x-dial9-aws-* headers.
+// creds.ts - the frozen creds.js store, typed. Trace fetches carry its
+// x-dial9-aws-* headers.
 export { Dial9Creds } from "./creds.js";
 export type {
   CredentialCheckResult,
@@ -216,7 +214,7 @@ export type {
 // api_format.ts - aggregated-mode (`?api=1`) display/format helpers,
 // re-exported from the legacy-shared flamegraph_api.js (+
 // formatHumanDuration from the frozen format.js) so both UI generations
-// run one implementation (T13).
+// run one implementation.
 export {
   coveragePercent,
   formatCoverageBadge,
@@ -229,7 +227,7 @@ export {
 } from "./api_format.js";
 export type { FacetOption, LegacyCoverage } from "./api_format.js";
 
-// aggregates.ts - tier-1 server aggregate endpoints client (T18):
+// aggregates.ts - tier-1 server aggregate endpoints client:
 // /api/flamegraph + /api/tokio-stats typed requests, the refine-polling
 // helper, and the coverage full/partial/none fallback signal.
 export {

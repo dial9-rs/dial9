@@ -1,18 +1,11 @@
-// lib/trace/keys.ts - S3 trace-key parsing (T09; architecture 2.7,
-// features/01 I2). Ported out of the inline `parseKey` in index.html
-// (index.html:1006-1059). Since T15, the migrated browser page consumes
-// this parser directly (the T14 legacy-keys compat seam is retired) and
-// tests/core/parse_key.test.ts targets this module.
-//
-// DEFECT FIX (ADR-0004 section 1; features/01 "Live validation" Finding 1):
-// the legacy parser silently fell back to positional parsing for keys whose
-// component count matched no documented layout, shifting columns (the
-// dev-server's 6-segment demo key showed Service=host-0, Host=abcd). The
-// typed parser returns an explicit `{ layout: "unknown", rawKey }` variant
-// instead of silently mislabeled fields. The positional fallback survives
-// ONLY for keys with no date-shaped segment at all (custom prefix schemes),
-// where it was genuinely best-effort rather than a mislabel of a documented
-// layout.
+// S3 trace-key parsing. The parser returns an explicit
+// `{ layout: "unknown", rawKey }` variant for keys whose component count
+// matches no documented layout, rather than silently falling back to
+// positional parsing and shifting columns (which mislabeled fields, e.g. a
+// 6-segment demo key showing Service=host-0, Host=abcd). The positional
+// fallback survives ONLY for keys with no date-shaped segment at all (custom
+// prefix schemes), where it was genuinely best-effort rather than a mislabel
+// of a documented layout.
 
 /** A key that matched a documented layout (or the positional fallback). */
 export interface KnownTraceKey {
@@ -20,8 +13,8 @@ export interface KnownTraceKey {
   service: string;
   host: string;
   /**
-   * Boot id from the #225 layout; "" for the legacy (pre-#225) layout and
-   * the positional fallback, which carry no boot id on the path.
+   * Boot id from the current layout; "" for the legacy layout and the
+   * positional fallback, which carry no boot id on the path.
    */
   bootId: string;
   /**
@@ -35,12 +28,11 @@ export interface KnownTraceKey {
 
 /**
  * A key whose directory layout is unrecognized. No DIRECTORY field is
- * guessed: the legacy behavior of positionally shifting columns for these
- * keys is the defect this variant fixes. Callers surface the raw key
- * instead. The FILENAME convention (`{epoch}-{index}.bin[.gz]`) is
- * independent of the directory layout, so epoch/segIndex are still parsed
- * when the filename matches (T15 amendment; they drive time placement and
- * sorting, never a Service/Host/Boot label).
+ * guessed: positionally shifting columns for these keys is the defect this
+ * variant fixes. Callers surface the raw key instead. The FILENAME
+ * convention (`{epoch}-{index}.bin[.gz]`) is independent of the directory
+ * layout, so epoch/segIndex are still parsed when the filename matches (they
+ * drive time placement and sorting, never a Service/Host/Boot label).
  */
 export interface UnknownTraceKey {
   layout: "unknown";
@@ -72,9 +64,9 @@ function known(
 /**
  * Parse an S3 trace key into service / host / boot / segment metadata.
  *
- * Default layout (as of issue #225):
+ * Default layout:
  *   {prefix}/{YYYY-MM-DD}/{HHMM}/{service}/{instance}/{boot_id}/{epoch}-{index}.bin[.gz]
- * Legacy layout (pre-#225):
+ * Legacy layout (older, no boot id):
  *   {prefix}/{YYYY-MM-DD}/{HHMM}/{service}/{instance}/{epoch}-{index}.bin[.gz]
  *
  * We find the date-shaped segment and count components between it and the
@@ -84,9 +76,8 @@ function known(
  * positional parsing when they have enough components, and are otherwise
  * `unknown` too.
  *
- * The legacy parse result exposed a lazy `traceStart` getter that read the
- * page-global timezone toggle; the typed boundary keeps parsing pure - call
- * `formatEpoch(key.epoch, { localTz })` at render time instead.
+ * Parsing is pure: call `formatEpoch(key.epoch, { localTz })` at render time
+ * rather than reading a page-global timezone toggle.
  */
 export function parseKey(key: string): ParsedTraceKey {
   const parts = key.split("/");
@@ -122,12 +113,11 @@ export function parseKey(key: string): ParsedTraceKey {
       return known(parts[dateIdx + 2]!, parts[dateIdx + 3]!, "", epoch, segIndex);
     }
     // A date-shaped segment with an undocumented component count: the
-    // legacy code shifted columns positionally here (Finding 1's demo-key
-    // mislabel). Flag it instead.
+    // legacy code shifted columns positionally here. Flag it instead.
     return { layout: "unknown", rawKey: key, epoch, segIndex };
   }
-  // No date-shaped segment anywhere: positional, best-effort (preserved
-  // legacy behavior for custom prefix schemes).
+  // No date-shaped segment anywhere: positional, best-effort (custom prefix
+  // schemes).
   if (parts.length >= 5) {
     return known(
       parts[parts.length - 3]!,
@@ -142,10 +132,8 @@ export function parseKey(key: string): ParsedTraceKey {
 
 /**
  * Everything before the first `YYYY-MM-DD` path segment of an S3 key - the
- * authoritative key prefix handed to the aggregation endpoints (features/01
- * I8, #570). "" when no date segment is found. Ported verbatim from the
- * legacy inline `extractPrefix` (index.html:1061-1071); moved here from the
- * browser page's T14 compat seam when T15 retired it.
+ * authoritative key prefix handed to the aggregation endpoints. "" when no
+ * date segment is found.
  */
 export function extractPrefix(key: string): string {
   const parts = key.split("/");
@@ -160,9 +148,8 @@ export function extractPrefix(key: string): string {
 /** Formatting options shared by `formatEpoch` / `traceTitleParams`. */
 export interface EpochFormatOptions {
   /**
-   * Render in the browser's local timezone instead of UTC. The legacy
-   * pages read a page-global `useLocalTz` toggle (default false / UTC);
-   * pages pass their live preference here.
+   * Render in the browser's local timezone instead of UTC (default false /
+   * UTC). Pages pass their live preference here.
    */
   localTz?: boolean;
 }
@@ -171,7 +158,6 @@ export interface EpochFormatOptions {
  * Format a unix-seconds epoch as "YYYY-MM-DD HH:MM:SS" (UTC by default,
  * local time with `localTz`). Returns "" for 0/missing epochs - the
  * "filename didn't carry an epoch" case, not a hidden error.
- * Ported from index.html's `formatEpoch`/`formatDate` (index.html:988-1004).
  */
 export function formatEpoch(epoch: number, opts: EpochFormatOptions = {}): string {
   if (!epoch) return "";

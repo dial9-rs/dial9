@@ -1,44 +1,27 @@
-// lib/trace/aggregates.ts - typed client for the tier-1 server aggregate
-// endpoints `/api/flamegraph` and `/api/tokio-stats` (T18; architecture 2.8
-// tier 1). These are the zero-raw-bytes overview sources: the Parquet
-// aggregation pipeline folds raw trace segments server-side and both
-// endpoints answer from the folded set, refining on demand.
+// Typed client for the tier-1 server aggregate endpoints `/api/flamegraph`
+// and `/api/tokio-stats`. Both answer from a server-side Parquet aggregation
+// that folds raw trace segments and refines on demand. Wire field names are
+// the JSON as served (snake_case).
 //
-// Response/request types are derived from the server source of truth:
-// src/server/flamegraph.rs (FlamegraphParams/FlamegraphResponse),
-// src/server/tokio_stats.rs (TokioStatsParams/TokioStatsResponse) and
-// src/ingest/aggregate.rs (Coverage, FacetResult). Wire field names are
-// kept verbatim (snake_case) - these interfaces describe JSON as served.
-//
-// Coverage hard edge (architecture 2.8 "Aggregate coverage"): the Parquet
-// pipeline can lag or miss hosts, and the endpoints 404 when the server has
-// no aggregation context at all. Consumers therefore never get a thrown
-// error for "no data" - they get a `CoverageSignal` (full | partial | none)
-// and fall back to listing-metadata density on `none`, badge on `partial`,
-// never blocking on aggregates:
-//   - config `aggregation_enabled` false -> `none`, WITHOUT a request
-//     (short-circuited; note the flag is `agg.is_some() || allow_byo_creds`,
-//     so true does NOT guarantee data - a 404 can still follow);
-//   - HTTP 404 (no agg context, or no source files match the scope) ->
-//     `none`, not an error;
-//   - Coverage counts folded < matched -> `partial` (computed client-side;
-//     the server only sends counts);
-//   - everything folded -> `full`.
-// Genuinely unexpected failures (500, auth) still throw - see
-// AggregatesRequestError.
+// Coverage hard edge: the pipeline can lag or miss hosts, and the endpoints
+// 404 when the server has no aggregation context at all. Consumers never get
+// a thrown error for "no data" - they get a `CoverageSignal`
+// (full | partial | none) and fall back to listing-metadata density on
+// `none`, badge on `partial`, never blocking on aggregates. Genuinely
+// unexpected failures (500, auth) still throw - see AggregatesRequestError.
 //
 // Progressive refinement: both endpoints take a `refine` query param (a
 // serde bool - the literal string "true", never "1"). A read-only poll
 // (refine absent) returns whatever is already folded, instantly; each
 // refine=true poll folds one more bounded batch. `refineUntilFrozen` drives
-// that loop; termination rule documented on it.
+// that loop.
 
 // ─── Coverage: the tier-1 fallback signal ────────────────────────────────
 
 /**
  * How much of a scope has been folded so far, reported on every
- * demand-driven query (src/ingest/aggregate.rs Coverage). Counts only -
- * the client computes the full/partial/none signal (coverageSignal).
+ * demand-driven query. Counts only - the client computes the
+ * full/partial/none signal (coverageSignal).
  */
 export interface Coverage {
   /** Source files matching the scope. */
@@ -59,17 +42,16 @@ export interface Coverage {
 }
 
 /**
- * The consumer-facing coverage signal (the tier-1 hard edge, architecture
- * 2.8): "none" -> fall back to listing-metadata density, "partial" ->
- * usable but badge it (never silently wrong), "full" -> trust it.
+ * The consumer-facing coverage signal: "none" -> fall back to
+ * listing-metadata density, "partial" -> usable but badge it (never
+ * silently wrong), "full" -> trust it.
  */
 export type CoverageSignal = "full" | "partial" | "none";
 
 /**
  * Classify a response's coverage:
  *  - no coverage block -> "full": the server only omits it outside
- *    demand-driven mode, where the single fetch covers everything
- *    (the legacy page treats that as final, flamegraph.html:415-420);
+ *    demand-driven mode, where the single fetch covers everything;
  *  - nothing matched or nothing folded yet -> "none" (zero aggregate
  *    data - a cold first poll looks like this);
  *  - folded < matched on files OR hosts -> "partial" (the host check
@@ -92,8 +74,7 @@ export function coverageSignal(coverage: Coverage | null | undefined): CoverageS
  * Coverage is "frozen" when files_folded does not increase between two
  * consecutive polls - the refinement loop's stop condition. `prev` is the
  * previous poll's coverage (null/undefined on the first poll, which is
- * never frozen). Mirrors the legacy flamegraph_api.js isCoverageFrozen
- * semantics (page-adjacent file, deliberately not imported into src/).
+ * never frozen).
  */
 export function isCoverageFrozen(
   prev: Coverage | null | undefined,
@@ -106,10 +87,9 @@ export function isCoverageFrozen(
 // ─── Wire types: /api/flamegraph ─────────────────────────────────────────
 
 /**
- * One node of the server-built flamegraph tree
- * (src/server/flamegraph.rs FlamegraphNode). Distinct from the frozen
- * core's client-built `FlamegraphNode` (trace_analysis.js) - pages convert
- * before handing to the widget, hence the `Api` prefix.
+ * One node of the server-built flamegraph tree. Distinct from the
+ * client-built `FlamegraphNode` (analysis.ts) - pages convert before handing
+ * to the widget, hence the `Api` prefix.
  */
 export interface ApiFlamegraphNode {
   name: string;
@@ -121,7 +101,7 @@ export interface ApiFlamegraphNode {
   children?: ApiFlamegraphNode[];
 }
 
-/** One facet's values (src/ingest/aggregate.rs FacetResult). */
+/** One facet's values. */
 export interface FacetResult {
   /** Query-param / filter key name (e.g. "source", "thread_class"). */
   name: string;
@@ -133,8 +113,8 @@ export interface FacetResult {
 
 /**
  * The resolved query scope echoed back by the server (the selection it
- * actually applied), so headers render backend truth rather than URL
- * params the client guessed at (src/server/flamegraph.rs ScopeEcho).
+ * actually applied), so headers render backend truth rather than URL params
+ * the client guessed at.
  */
 export interface ScopeEcho {
   service: string | null;
@@ -173,10 +153,7 @@ export interface FlamegraphResponse {
 
 // ─── Wire types: /api/tokio-stats ────────────────────────────────────────
 
-/**
- * Worst poll per class, for deep-linking into the viewer
- * (src/server/tokio_stats.rs PollExemplar).
- */
+/** Worst poll per class, for deep-linking into the viewer. */
 export interface PollExemplar {
   start_ns: number;
   end_ns: number;
@@ -186,7 +163,7 @@ export interface PollExemplar {
   source_key: string;
 }
 
-/** Long-poll stats for one spawn location (src/server/tokio_stats.rs). */
+/** Long-poll stats for one spawn location. */
 export interface SpawnLocStats {
   spawn_loc: string;
   total_polls: number;
@@ -321,9 +298,8 @@ export interface AggregatesRequestOptions {
   /**
    * The /api/config `aggregation_enabled` flag, caller-provided. `false`
    * short-circuits to `unavailable("disabled")` WITHOUT issuing a request.
-   * Absent/true proceeds - but does not guarantee data: the flag is
-   * `agg.is_some() || allow_byo_creds` (config.rs:30), so the endpoints
-   * can still 404 (mapped to `unavailable("not-found")`, never thrown).
+   * Absent/true proceeds - but does not guarantee data (the endpoints can
+   * still 404, mapped to `unavailable("not-found")`, never thrown).
    */
   aggregationEnabled?: boolean;
   /** Injectable fetch (see FetchLike). */
@@ -345,9 +321,8 @@ export type AggregateUnavailableReason = "disabled" | "not-found";
 
 /**
  * The result of one aggregate request. `coverage` is the tier-1 fallback
- * signal (see module header): consumers switch on it, falling back to
- * listing metadata on "none" and badging on "partial", without having to
- * re-derive the rule from counts.
+ * signal: consumers switch on it, falling back to listing metadata on "none"
+ * and badging on "partial", without having to re-derive the rule from counts.
  */
 export type AggregateResult<T> =
   | { kind: "data"; response: T; coverage: CoverageSignal }
@@ -360,10 +335,10 @@ export type AggregateResult<T> =
     };
 
 /**
- * A genuinely unexpected endpoint failure: any non-ok status other than
- * the 404-means-no-data case (500 internal, 401/403 auth, 421 wrong
- * region - see src/server/error.rs). Carries the status and the server's
- * plain-text body so pages can surface an actionable message.
+ * A genuinely unexpected endpoint failure: any non-ok status other than the
+ * 404-means-no-data case (500 internal, 401/403 auth, 421 wrong region).
+ * Carries the status and the server's plain-text body so pages can surface an
+ * actionable message.
  */
 export class AggregatesRequestError extends Error {
   readonly status: number;
@@ -388,7 +363,7 @@ async function fetchAggregate<T extends { coverage?: Coverage }>(
   if (opts?.signal !== undefined) init.signal = opts.signal;
   const resp = await doFetch(url, init);
   if (resp.status === 404) {
-    // "No data", by design - not an error (see module header).
+    // "No data", by design - not an error.
     const message = await resp.text();
     return { kind: "unavailable", reason: "not-found", coverage: "none", message };
   }
@@ -436,7 +411,7 @@ export interface RefineUntilFrozenOptions<T> {
   /**
    * Called with every poll's result as it lands (pollIndex 0 = the
    * read-only poll), so consumers re-render progressively as coverage
-   * climbs, exactly like the legacy flamegraph page.
+   * climbs.
    */
   onResult?: (result: AggregateResult<T>, pollIndex: number) => void;
 }
@@ -450,24 +425,19 @@ export interface RefineUntilFrozenOptions<T> {
  *   refineUntilFrozen((refine) => fetchTokioStats({ ...scope, refine }, opts))
  *
  * Sequence: one read-only poll (instant server-side, establishes the
- * baseline), then refine=true polls. TERMINATION RULE - stops when:
+ * baseline), then refine=true polls. Termination rule - stops when:
  *  - FROZEN: `files_folded` did not increase between two consecutive
- *    polls (isCoverageFrozen, mirroring flamegraph_api.js:56-61 - the
- *    server could fold nothing new, so more polls change nothing); or
+ *    polls (isCoverageFrozen - the server could fold nothing new, so more
+ *    polls change nothing); or
  *  - CEILING: maxRefinePolls refine polls ran (default
- *    DEFAULT_MAX_REFINE_POLLS = 30); or
+ *    DEFAULT_MAX_REFINE_POLLS); or
  *  - the endpoint reports unavailable (disabled/404), returned as-is; or
  *  - a response carries no `coverage` (non-demand-driven single fetch:
  *    nothing to refine).
- * The legacy page also auto-stops on a coverage PLATEAU
- * (shouldAutoStopRefining's diminishing-returns heuristic); that is a
- * consumer-side policy layered via onResult + an external abort, left to
- * chunk 2 - this helper is deliberately frozen-or-ceiling only.
  *
- * Pacing: none built in (the legacy page waits 800ms between polls, a UI
- * policy). Consumers pace inside `poll` if desired; each refine request
- * already takes a server-side fold long, so unpaced loops are bounded by
- * fold time, not a tight spin.
+ * Pacing: none built in. Consumers pace inside `poll` if desired; each
+ * refine request already takes a server-side fold long, so unpaced loops
+ * are bounded by fold time, not a tight spin.
  *
  * Returns the last result (the frozen/ceiling-hit one). Throws only what
  * `poll` throws (AggregatesRequestError, network, abort).

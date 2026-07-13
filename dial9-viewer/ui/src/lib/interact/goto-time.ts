@@ -1,13 +1,6 @@
-// lib/interact/goto-time.ts - the goto-time (`g`) input grammar (T20;
-// canonical spec docs/ui-inventory/mocks/keyboard.html: "g - go to time
-// (absolute or +relative)", prompt placeholder "go to time (s or +s)").
+// The goto-time (`g`) input grammar.
 //
-// MECHANISM ONLY in chunk 1: no migrated page has a time axis at landing
-// time, so nothing wires `g` yet - T23 binds it to the viewer's viewport
-// slice in chunk 2. The parser lives here so the grammar is fixed (and
-// unit-tested) before any surface consumes it.
-//
-// Grammar (seconds; the mock's units):
+// Grammar (seconds):
 //   "1.72"  / "1.72s"  -> absolute trace time 1.72s
 //   "+0.5"  / "+0.5s"  -> 0.5s forward from the current position
 //   "-2"    / "-2s"    -> 2s back from the current position

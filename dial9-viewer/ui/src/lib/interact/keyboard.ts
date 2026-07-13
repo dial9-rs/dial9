@@ -1,41 +1,33 @@
-// lib/interact/keyboard.ts - the focus-tolerant page key router (T20;
-// docs/ui-inventory/04-ux-findings.md K5, 02-architecture.md 2.5, canonical
-// interactive spec docs/ui-inventory/mocks/keyboard.html).
+// The focus-tolerant page key router.
 //
-// One vocabulary on every page: `/` search, n/p POI step, g goto-time,
-// f fit, z zoom-undo, W/A/S/D nav, `?` help. This module is the MECHANISM
-// only - pages register their landing-time bindings; the viewer surfaces
-// wire theirs in chunk 2 (T23).
+// One vocabulary on every page: `/` search, n/p POI step, g goto-time, f
+// fit, z zoom-undo, W/A/S/D nav, `?` help. This module is the mechanism;
+// pages register their own bindings.
 //
-// Focus-tolerant (K5): single-key accelerators fire even while a
-// non-text-entry form control (button, select, checkbox, link, canvas)
-// has focus - the finding is that nav keys die the moment a <select>
-// grabs focus. They are SUPPRESSED while the user is typing in a
-// text-entry context (text-like <input>, <textarea>, contenteditable),
-// where letters must insert text; a binding opts back in with
-// `inTextEntry: true` (e.g. Escape, which the flamegraph page must
-// deliver to the widget's cascade even from its search field - F44/F157).
+// Focus-tolerant: single-key accelerators fire even while a non-text-entry
+// form control (button, select, checkbox, link, canvas) has focus - nav
+// keys otherwise die the moment a <select> grabs focus. They are
+// SUPPRESSED while the user is typing in a text-entry context (text-like
+// <input>, <textarea>, contenteditable), where letters must insert text; a
+// binding opts back in with `inTextEntry: true` (e.g. Escape, which the
+// flamegraph page must deliver to the widget's cascade even from its
+// search field).
 //
 // Composition rules (the router NEVER steals someone else's key):
-//   - events something already consumed (e.defaultPrevented) are skipped -
-//     the frozen flamegraph widget's own keydown handler (Ctrl/Cmd+F, `/`;
-//     features/03 F41) registers first and preventDefaults, so its keys
-//     pass through untouched;
+//   - events something already consumed (e.defaultPrevented) are skipped,
+//     so a widget that registers first and preventDefaults keeps its keys;
 //   - Ctrl/Cmd/Alt chords are never matched (browser + widget territory);
 //     Shift is allowed only insofar as it produced the event key itself
 //     (`?` IS Shift+/ on most layouts);
 //   - a binding can DECLINE by returning false: the event falls through to
 //     later bindings and, if none consume, to the page default (no
 //     preventDefault) - this is how a binding scoped to specific elements
-//     (e.g. the browser page's Enter-submits) stays out of everyone
-//     else's way.
+//     stays out of everyone else's way.
 //
-// Per architecture 2.5, bindings translate keys into store actions /
-// component calls only - they never render.
-//
-// The router core is DOM-free (structural event/target types) so the
-// policy is unit-testable under plain Node; mountKeyRouter is the thin
-// browser attachment.
+// Bindings translate keys into store actions / component calls only - they
+// never render. The router core is DOM-free (structural event/target
+// types) so the policy is unit-testable under plain Node; mountKeyRouter
+// is the thin browser attachment.
 
 /** Structural subset of KeyboardEvent the router reads (Node-testable). */
 export interface KeyEventLike {
@@ -70,9 +62,8 @@ export interface KeyBinding {
    */
   onKey(e: KeyEventLike): boolean | void;
   /**
-   * Consume without preventDefault (default false). Used where the
-   * legacy page deliberately left the browser default intact (e.g. the
-   * flamegraph Escape wiring never called preventDefault).
+   * Consume without preventDefault (default false). Used where the browser
+   * default must be left intact.
    */
   preserveDefault?: boolean;
 }
@@ -100,10 +91,9 @@ interface ElementLike {
 }
 
 /**
- * Is `target` a text-entry context (K5 suppression rule)? Buttons,
- * selects, checkboxes, radios, ranges, links, canvases and the body are
- * NOT: accelerators stay live there - that is the "focus-tolerant" in the
- * ticket. Structural (no DOM types) for Node tests.
+ * Is `target` a text-entry context? Buttons, selects, checkboxes, radios,
+ * ranges, links, canvases and the body are NOT: accelerators stay live
+ * there (focus-tolerant). Structural (no DOM types) for Node tests.
  */
 export function isTextEntryTarget(target: unknown): boolean {
   if (target === null || typeof target !== "object") return false;

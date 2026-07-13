@@ -1,16 +1,11 @@
-// lib/canvas/palette.ts - the viewer's color vocabulary as typed
-// utilities (T08; architecture 2.3 N1).
+// The viewer's color vocabulary as typed utilities.
 //
-// Two layers:
 // - Frozen-core palettes re-exported: pollHeatmapColor /
-//   pollHeatmapColorQuantized (poll-duration heatmap) and
-//   flamegraphColor (deterministic warm frame color) live in
-//   trace_analysis.js and stay there.
-// - App-level color lore lifted out of viewer.html inline script (NOT
-//   frozen core): pollColor (issue #450: use the QUANTIZED heatmap so
+//   pollHeatmapColorQuantized (poll-duration heatmap) and flamegraphColor
+//   (deterministic warm frame color) live in trace_analysis.js.
+// - App-level color logic: pollColor (uses the quantized heatmap so
 //   equal-ish durations share a color string and the bar coalescer can
-//   merge them), the memoized dimmer behind pollColorDim, and the
-//   stable name->color assignment behind spanColor/ceColor.
+//   merge them), the memoized dimmer, and the stable name->color assigner.
 
 // MUST precede the trace_analysis.js import: its factory reads the
 // TraceParser browser global in bundled entries (see core-globals.ts).
@@ -26,8 +21,7 @@ export {
 /**
  * Duration-based poll coloring: short=dim, long=hot. Quantized variant
  * (<= 24 distinct strings) so adjacent approximately-equal polls share a
- * color and the LOD path merges them into one fillRect (viewer.html
- * pollColor, issue #450 item 1).
+ * color and the LOD path merges them into one fillRect.
  */
 export function pollColor(startNs: number, endNs: number): string {
   return pollHeatmapColorQuantized(endNs - startNs);
@@ -35,11 +29,10 @@ export function pollColor(startNs: number, endNs: number): string {
 
 /**
  * A memoized channel-multiply dimmer: `#rrggbb` -> `#rrggbb` with each
- * channel scaled by `factor` (hue preserved, bar visually recedes).
- * Port of viewer.html pollColorDim's cache: the transform depends only
- * on the (quantized, <= 24 distinct) input color, and it runs once per
- * NON-selected poll per render - millions of times on a large trace -
- * so it must collapse to a Map lookup after the first hit.
+ * channel scaled by `factor` (hue preserved, bar visually recedes). The
+ * transform depends only on the (quantized, <= 24 distinct) input color,
+ * and it runs once per NON-selected poll per render - millions of times on
+ * a large trace - so it must collapse to a Map lookup after the first hit.
  *
  * Throws on non-`#rrggbb` input and factors outside [0, 1] rather than
  * emitting a plausible-looking wrong color.
@@ -71,8 +64,8 @@ export function makeColorDimmer(factor: number = 0.4): (color: string) => string
 }
 
 /**
- * The categorical palette used for tracing spans AND custom events
- * (viewer.html SPAN_COLORS - one list, two assignment maps).
+ * The categorical palette used for tracing spans AND custom events (one
+ * list, two assignment maps).
  */
 export const SPAN_COLORS: readonly string[] = [
   "#7c4dff", "#00bfa5", "#ff6e40", "#448aff", "#c6ff00",
@@ -83,10 +76,9 @@ export const SPAN_COLORS: readonly string[] = [
 
 /**
  * Stable name->color assignment: first-seen order walks the palette,
- * wrapping past the end; a given name keeps its color for the
- * assigner's lifetime (viewer.html spanColor/ceColor - build one
- * assigner per namespace so span names and event names get independent
- * sequences, exactly like the legacy pair of maps).
+ * wrapping past the end; a given name keeps its color for the assigner's
+ * lifetime. Build one assigner per namespace so span names and event names
+ * get independent sequences.
  */
 export function makeColorAssigner(
   palette: readonly string[] = SPAN_COLORS,

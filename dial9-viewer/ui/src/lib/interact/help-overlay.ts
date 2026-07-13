@@ -1,17 +1,13 @@
-// lib/interact/help-overlay.ts - the unified `?` help overlay (T20; K3;
-// canonical spec docs/ui-inventory/mocks/keyboard.html #helpov).
-//
-// One component for every migrated page; each page supplies its OWN
-// content sections (only the bindings that actually work on that page -
-// the overlay never advertises keys a page has not wired). `?` toggles it
-// from the page's key router; Escape and click-outside close it.
+// The unified `?` help overlay. One component for every page; each page
+// supplies its OWN content sections (only the bindings that work on that
+// page). `?` toggles it from the page's key router; Escape and
+// click-outside close it.
 //
 // Escape composition: the overlay grabs focus on open (root tabindex=-1)
 // and consumes Escape locally with stopPropagation, so an open overlay
-// closes WITHOUT running page-level Escape handlers (e.g. the frozen
-// flamegraph widget's cascade, features/03 F157). Because focus can still
-// leave the overlay (mouse click on the page), pages must ALSO check
-// isOpen() first in their own Escape handling - see the per-page wiring.
+// closes WITHOUT running page-level Escape handlers. Because focus can
+// still leave the overlay (mouse click on the page), pages must ALSO check
+// isOpen() first in their own Escape handling.
 
 import "../../styles/interact.css";
 
@@ -63,9 +59,8 @@ export function createHelpOverlay(
   box.setAttribute("aria-label", options.title);
   box.tabIndex = -1;
 
-  // h2 title + h3 sections: the migrated pages' headers carry the h1,
-  // so the dialog's headings continue the outline without skips
-  // (axe heading-order).
+  // h2 title + h3 sections: the pages' headers carry the h1, so the
+  // dialog's headings continue the outline without skipping levels.
   const heading = doc.createElement("h2");
   heading.textContent = options.title;
   box.appendChild(heading);
@@ -116,8 +111,7 @@ export function createHelpOverlay(
     box.focus();
   }
 
-  // Click on the dark backdrop (not the content box) closes - the frozen
-  // widget's own overlay behaves the same way (features/03 F96).
+  // Click on the dark backdrop (not the content box) closes.
   backdrop.addEventListener("click", (e) => {
     if (e.target === backdrop) close();
   });

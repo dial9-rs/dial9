@@ -1,29 +1,21 @@
-// lib/trace/worker/protocol.ts - the message contract between the worker
-// load orchestrator (load.ts loadTraceInWorker) and the worker load body
-// (worker/body.ts), plus the Worker-API port abstraction the orchestrator
-// drives (T16; ADR-0004 section 6 "do now"; architecture 2.8 worker tier).
+// The message contract between the worker load orchestrator
+// (load.ts loadTraceInWorker) and the worker load body (worker/body.ts),
+// plus the Worker-API port abstraction the orchestrator drives.
 //
 // TYPES ONLY - no runtime exports. body.ts must stay runnable under plain
 // Node's native type stripping (see node-worker-entry.mjs), where
 // `import type` of this module is erased instead of resolved on disk.
 //
-// CLONEABILITY (T16 first work item): every message crosses a
-// structured-clone boundary (postMessage). Verified against the real parse
-// output of public/demo-trace.bin under Node: ParsedTrace is plain data -
-// plain objects/arrays, numbers, strings, nulls, and 11 Maps (Maps ARE
-// structured-cloneable and round-trip as Maps); zero functions, accessors/
-// getters, class instances, symbols, or typed-array leaves. Custom-event
-// field values may be bigint (decode.js DecodedFieldValue), which the
-// structured clone algorithm also supports. structuredClone() of the full
-// 294k-event demo parse succeeds and round-trips counts + spot samples.
-// No serializable snapshot shape is therefore needed; ParsedTrace crosses
-// as-is. (The features/01 parseKey getters are page code, not core
-// output.) `buffer` is an ArrayBuffer and is TRANSFERRED (zero-copy), not
-// cloned.
+// CLONEABILITY: every message crosses a structured-clone boundary
+// (postMessage). ParsedTrace is plain data - plain objects/arrays, numbers,
+// strings, nulls, Maps (which round-trip as Maps), and bigint custom-event
+// field values; no functions, getters, class instances, symbols, or
+// typed-array leaves - so it crosses as-is, no snapshot shape needed.
+// `buffer` is an ArrayBuffer and is TRANSFERRED (zero-copy), not cloned.
 
 import type { ParsedTrace } from "../../../../trace_parser.js";
 
-/** How the load acquired bytes (features/02 B12/B16 `mode`). */
+/** How the load acquired bytes. */
 export type TraceWorkerLoadMode = "stream" | "buffered";
 
 /**
@@ -40,32 +32,31 @@ export interface TraceWorkerParseOptions {
 }
 
 /**
- * Start a whole-trace load: fetch runs INSIDE the worker (T16 decision),
- * then gunzip + parse, then the result posts back.
+ * Start a whole-trace load: fetch runs INSIDE the worker, then gunzip +
+ * parse, then the result posts back.
  */
 export interface TraceWorkerLoadRequest {
   kind: "load";
   /** Repeatable `trace=` components, fetched as one logical trace. */
   urls: readonly string[];
   /**
-   * Same-origin credential headers (features/02 B17). The page resolves
-   * Dial9Creds.headers() on the main thread and passes the plain record;
-   * the core's same-origin withholding still applies inside the worker.
+   * Same-origin credential headers. The page resolves Dial9Creds.headers()
+   * on the main thread and passes the plain record; the core's same-origin
+   * withholding still applies inside the worker.
    */
   headers?: Record<string, string>;
   parse?: TraceWorkerParseOptions;
 }
 
 /**
- * Parse an already-fetched buffer (T17 segment windowing): the segment
- * orchestrator fetches raw gzipped segment bytes on the main thread (it
- * owns the raw-gzip byte cache, architecture 2.8 two-level cache) and
- * hands them here for off-main-thread gunzip + parse. The bytes may still
- * be gzipped (sniffed by magic, like the core's maybeGunzip) or raw.
+ * Parse an already-fetched buffer: the segment orchestrator fetches raw
+ * gzipped segment bytes on the main thread (it owns the raw-gzip byte cache)
+ * and hands them here for off-main-thread gunzip + parse. The bytes may
+ * still be gzipped (sniffed by magic, like the core's maybeGunzip) or raw.
  *
- * The buffer is CLONED, not transferred: the sender's copy is a live
- * cache entry that must survive the parse (a transfer would detach it).
- * The done message still transfers the decompressed buffer back.
+ * The buffer is CLONED, not transferred: the sender's copy is a live cache
+ * entry that must survive the parse (a transfer would detach it). The done
+ * message still transfers the decompressed buffer back.
  */
 export interface TraceWorkerParseBufferRequest {
   kind: "parse-buffer";
@@ -91,10 +82,9 @@ export type TraceWorkerRequest =
   | TraceWorkerAbortRequest;
 
 /**
- * One progress update. Carries the data behind the load-timing UX rows
- * (features/02 B8 progress text, B9 elapsed, B16 marks); the page owns
- * turning them into labels ("Fetching...", "Parsing: N% - Yk events",
- * "Loading N traces...").
+ * One progress update. Carries the data behind the load-timing UX rows; the
+ * page owns turning them into labels ("Fetching...", "Parsing: N% - Yk
+ * events", "Loading N traces...").
  *
  * Clock note: startMs/elapsedMs are worker-clock performance.now() values
  * (a worker has its own timeOrigin). Consumers must use deltas, never mix
@@ -104,40 +94,38 @@ export interface TraceWorkerProgress {
   /**
    * "fetching" while the buffered-mode download runs; "parsing" once
    * decoded bytes flow. Stream mode is always "parsing" - fetch and parse
-   * are fused (B12).
+   * are fused.
    */
   phase: "fetching" | "parsing";
   mode: TraceWorkerLoadMode;
-  /** Number of trace= components in this load (B8 multi-trace labels). */
+  /** Number of trace= components in this load. */
   urlCount: number;
-  /** Decompressed bytes fed to the parser so far (B8 "X MB"). */
+  /** Decompressed bytes fed to the parser so far. */
   bytesRead: number;
   /**
-   * Total decompressed bytes; null while streaming (size unknown until
-   * the stream ends - B8 shows MB instead of a percentage).
+   * Total decompressed bytes; null while streaming (size unknown until the
+   * stream ends).
    */
   totalBytes: number | null;
-  /** Events decoded so far (B8 "Yk events"). */
+  /** Events decoded so far. */
   eventCount: number;
-  /** Worker-clock ms mark when the load began (B16 startMs). */
+  /** Worker-clock ms mark when the load began. */
   startMs: number;
-  /** Ms since startMs at post time (B9 elapsed). */
+  /** Ms since startMs at post time. */
   elapsedMs: number;
 }
 
 /**
- * The worker-measurable slice of the legacy loadPerf record (features/02
- * B16). `totalMs` is deliberately absent: it is defined as "start ->
- * render-complete" and is finalized page-side via double-rAF after layout;
- * pages derive it from their own clock. Same worker-clock note as
- * TraceWorkerProgress.
+ * The worker-measurable slice of the load-timing record. `totalMs` is
+ * deliberately absent: it is defined as "start -> render-complete" and is
+ * finalized page-side via double-rAF after layout; pages derive it from
+ * their own clock. Same worker-clock note as TraceWorkerProgress.
  */
 export interface TraceWorkerTiming {
   startMs: number;
   /**
-   * Buffered mode only: when the fetch phase completed. null in stream
-   * mode - streaming fuses fetch+parse, so there is no separate fetch
-   * mark (legacy loadPerf parity).
+   * Buffered mode only: when the fetch phase completed. null in stream mode
+   * - streaming fuses fetch+parse, so there is no separate fetch mark.
    */
   fetchDoneMs: number | null;
   /** When parsing finished (all modes). */
@@ -160,7 +148,7 @@ export interface TraceWorkerDoneMessage {
   trace: ParsedTrace;
   /**
    * The raw (gunzipped, concatenated) trace bytes, TRANSFERRED zero-copy
-   * for Set/Clear-Range in-memory re-parse (features/02 B14).
+   * for Set/Clear-Range in-memory re-parse.
    */
   buffer: ArrayBuffer;
   mode: TraceWorkerLoadMode;
@@ -209,6 +197,5 @@ export interface TraceWorkerPort {
   terminate(): void;
 }
 
-/** Creates the port for one load (one worker per whole-trace load; T17
- * revisits lifetime for the per-segment tier). */
+/** Creates the port for one load (one worker per whole-trace load). */
 export type TraceWorkerFactory = () => TraceWorkerPort;

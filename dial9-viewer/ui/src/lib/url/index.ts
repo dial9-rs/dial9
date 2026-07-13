@@ -1,6 +1,5 @@
-// src/lib/url/ barrel (T19): the versioned URL view-state codec, the
-// store->URL sync binding, and the copy-link action. Schema + boundary
-// doc: docs/ui-inventory/05-url-view-state.md.
+// Barrel for the URL view-state layer: the versioned view-state codec, the
+// store->URL sync binding, and the copy-link action.
 
 export {
   VIEW_STATE_VERSION,

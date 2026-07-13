@@ -1,8 +1,7 @@
-// lib/interact barrel (T20; architecture 2.5): the unified keyboard
-// model's mechanism. Pages import from here; interaction modules
-// translate raw events into store actions / component callbacks only -
-// they never render page content (the palette/help/toast surfaces they
-// own are chrome, not trace rendering).
+// lib/interact barrel: the unified keyboard model's mechanism. Pages
+// import from here; interaction modules translate raw events into store
+// actions / component callbacks only - they never render page content (the
+// palette/help/toast surfaces they own are chrome, not trace rendering).
 
 export {
   createKeyRouter,

@@ -1,17 +1,9 @@
-// lib/canvas/stroke.ts - pixel-bounded, style-batched stroke building
-// (T08; docs/ui-inventory/03-performance-findings.md F1, ADR-0004
-// section 5 rule 1).
-//
-// The measured problem (F1): stroked primitives bypass the codebase's
-// pixel-downsampling discipline. At the x8 pan storm, stroke() was 76%
-// of sampled CPU: the per-lane queue step line paths one vertex PER
-// VISIBLE SAMPLE (viewer.html:3320-3343), and open-ended poll markers
-// call setLineDash around every 2-point path (:3150-3163).
-//
-// The design rule this module names: every stroke is (a) pixel-bounded -
-// at most one vertex per pixel column, downsampled BEFORE pathing - and
-// (b) batched - one beginPath/stroke per STYLE, not per primitive, with
-// dash state hoisted to the style switch.
+// Pixel-bounded, style-batched stroke building. Stroked primitives
+// otherwise bypass the pixel-downsampling discipline and dominate CPU
+// under pan storms. The rule this module names: every stroke is (a)
+// pixel-bounded - at most one vertex per pixel column, downsampled BEFORE
+// pathing - and (b) batched - one beginPath/stroke per STYLE, not per
+// primitive, with dash state hoisted to the style switch.
 //
 // Everything here is pure data -> data; drawStrokeBatches applies a
 // finished batch set to a context typed against a minimal structural
@@ -43,15 +35,15 @@ export interface ColumnSeriesOpts<P> {
 }
 
 /**
- * Downsample a series to at most one vertex per pixel column - the F1
- * pre-pathing step. Returns vertices in ascending column order, at most
- * ceil(drawW) of them, regardless of how many input points are visible.
+ * Downsample a series to at most one vertex per pixel column. Returns
+ * vertices in ascending column order, at most ceil(drawW) of them,
+ * regardless of how many input points are visible.
  *
  * `points` MUST be sorted ascending by xOf (same contract as the frozen
  * core's pixelDownsampleSpans); out-of-order input throws rather than
  * silently producing a garbled line. X values outside [x0, x0 + drawW]
- * are clamped, so the samples just outside the view collapse into the
- * edge columns and the line keeps its entry/exit height.
+ * are clamped, so the samples just outside the view collapse into the edge
+ * columns and the line keeps its entry/exit height.
  */
 export function downsampleSeriesToColumns<P>(
   points: readonly P[],

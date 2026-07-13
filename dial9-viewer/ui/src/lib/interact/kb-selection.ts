@@ -1,28 +1,28 @@
-// lib/interact/kb-selection.ts - the keyboard region/zoom selection machine
-// (T23; features/02 H9, docs/ui-inventory/02-architecture.md 2.5).
+// The keyboard region/zoom selection machine.
 //
-// Pressing Shift (region) or Alt (zoom) with no drag starts a keyboard-driven
-// selection: a cursor seeded at the mouse (if in view) or the view centre,
-// extended by Left/Right arrows (5% of the visible duration per step), then
-// confirmed (Shift/Alt again, or Enter) or cancelled (Escape). Ported from
-// viewer.html:6228-6268 + completeKbSelection/cancelKbSelection (:5216-5268).
+// Pressing Shift (region) or Alt (zoom) with no drag starts a
+// keyboard-driven selection: a cursor seeded at the mouse (if in view) or
+// the view centre, extended by Left/Right arrows (5% of the visible
+// duration per step), then confirmed (Shift/Alt again, or Enter) or
+// cancelled (Escape).
 //
-// A PURE, DOM-free machine (same shape as pointer.ts): it returns COMMANDS the
-// binding executes as store actions. The binding supplies the seed timestamp,
-// the per-step ns, and the clamp bounds (all layout/viewport-derived), so the
-// machine is unit-testable over plain numbers. It never renders (F2).
+// A pure, DOM-free machine (same shape as pointer.ts): it returns COMMANDS
+// the binding executes as store actions. The binding supplies the seed
+// timestamp, the per-step ns, and the clamp bounds (all
+// layout/viewport-derived), so the machine is unit-testable over plain
+// numbers. It never renders.
 //
 // Region vs zoom on confirm: a region selection emits `commit-region` with
-// kind "region-select" (the binding writes selection.sidebarRange; T32 opens
-// the flamegraph/blocking/heap panel by data present - the H7 seam). A zoom
-// selection emits kind "zoom-select" (the binding zooms the viewport, H8).
-// Both announce through the A16 live region (T21) - feedback only.
+// kind "region-select" (the binding writes selection.sidebarRange, opening
+// the flamegraph/blocking/heap panel by data present). A zoom selection
+// emits kind "zoom-select" (the binding zooms the viewport). Both announce
+// through the live region - feedback only.
 
 import type { KeyboardSelection } from "../../types/state.js";
 
 /**
- * Minimum selection span to commit (legacy completeKbSelection `< 100`,
- * viewer.html:5238). A smaller keyboard selection is silently discarded.
+ * Minimum selection span to commit. A smaller keyboard selection is
+ * silently discarded.
  */
 export const MIN_SELECTION_NS = 100;
 
@@ -36,7 +36,7 @@ export type ExtendDirection = -1 | 1;
  * Commands the machine emits; the binding maps each to a store action.
  *   - set-kb:        write `transient.keyboardSelection` (start / extend / clear);
  *   - commit-region: a completed selection [startNs,endNs] to open/zoom;
- *   - announce:      an ARIA/toast status string (A16; feedback only).
+ *   - announce:      an ARIA/toast status string (feedback only).
  */
 export type KbSelectionCommand =
   | { type: "set-kb"; selection: KeyboardSelection | null }
@@ -44,7 +44,6 @@ export type KbSelectionCommand =
   | { type: "announce"; message: string };
 
 const START_MESSAGE: Record<SelectionMode, string> = {
-  // ASCII-only wording (no em-dash / arrow glyphs); semantics preserved.
   "region-select":
     "Region selection started. Use Left and Right arrows to extend, Shift or Enter to confirm.",
   "zoom-select":
@@ -62,10 +61,9 @@ export interface KbSelectionMachine {
   /** The active mode, or null when idle. */
   mode(): SelectionMode | null;
   /**
-   * Start a selection at `seedNs`. If a selection is already active, this is a
-   * toggle: SAME mode confirms it, a DIFFERENT mode is ignored (legacy: the
-   * Shift/Alt branch only completes when kbSelMode === mode). Returns the
-   * commands to run.
+   * Start a selection at `seedNs`. If a selection is already active, this
+   * is a toggle: SAME mode confirms it, a DIFFERENT mode is ignored.
+   * Returns the commands to run.
    */
   start(mode: SelectionMode, seedNs: number): KbSelectionCommand[];
   /** Move the cursor one step (`stepNs`) in `dir`, clamped to [minTs,maxTs]. */
@@ -99,7 +97,7 @@ export function createKbSelectionMachine(): KbSelectionMachine {
 
     start(mode: SelectionMode, seedNs: number): KbSelectionCommand[] {
       if (sel !== null) {
-        // Toggle: same mode confirms; different mode is a no-op (legacy).
+        // Toggle: same mode confirms; different mode is a no-op.
         if (sel.kind === mode) return this.confirm();
         return [];
       }
@@ -123,7 +121,7 @@ export function createKbSelectionMachine(): KbSelectionMachine {
       const start = Math.min(sel.startNs, sel.cursorNs);
       const end = Math.max(sel.startNs, sel.cursorNs);
       sel = null;
-      // Too small: clear the cursor, commit nothing (legacy `< 100` -> hide).
+      // Too small: clear the cursor, commit nothing.
       if (end - start < MIN_SELECTION_NS) {
         return [{ type: "set-kb", selection: null }];
       }

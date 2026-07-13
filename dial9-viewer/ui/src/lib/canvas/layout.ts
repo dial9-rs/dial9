@@ -1,25 +1,17 @@
-// lib/canvas/layout.ts - the typed wrapper around the frozen core's
-// panel_layout.js (T08; docs/ui-inventory/02-architecture.md 2.3,
-// docs/ui-inventory/03-performance-findings.md F3, ADR-0004 section 5).
+// Typed wrapper around the frozen core's panel_layout.js.
 //
-// TIME-PANEL LAYOUT INVARIANT (carried over from viewer.html): every
-// time-based panel splits its width as
-//
-//   [ label gutter (LABEL_W) | draw area (drawW) | scrollbar (scrollbarW) ]
-//
+// Time-panel layout invariant: every time-based panel splits its width as
+// label gutter (LABEL_W) + draw area (drawW) + scrollbar (scrollbarW),
 // with drawW = pw - LABEL_W - scrollbarW, so all panels map the same
-// timestamp to the same x-coordinate and their time axes line up
-// vertically. A panel that redefines the gutter (the historical 200px
-// span-panel bug) silently shifts its axis relative to every other panel.
+// timestamp to the same x and their time axes line up vertically. A panel
+// that redefines the gutter silently shifts its axis relative to every
+// other panel.
 //
-// This module is the SINGLE producer of layout geometry in src/
-// (types/state.d.ts "Layout geometry"): every canvas component receives
-// a PanelGeometry built here, and nothing else in src/ imports
-// panel_layout.js directly. Unlike viewer.html's timePanelLayout(panel,
-// scrollbarW) - which reads panel.clientWidth and the viewStart/viewEnd
-// globals inline - this wrapper is pure: callers pass measured widths in,
-// so DOM reads can be batched once per frame (F3) instead of interleaved
-// with draws.
+// This module is the single producer of layout geometry in src/: every
+// canvas component receives a PanelGeometry built here, and nothing else
+// imports panel_layout.js directly. The wrapper is pure - callers pass
+// measured widths in - so DOM reads batch once per frame instead of
+// interleaving with draws.
 
 import { makeTimePanelLayout } from "../../../panel_layout.js";
 import type { TimePanelLayout } from "../../../panel_layout.js";
@@ -33,8 +25,8 @@ export type { TimePanelLayout };
 
 /**
  * The canonical left-gutter width (CSS px) reserved for labels in every
- * time-based panel. Same value as viewer.html's LABEL_W; the invariant is
- * that ALL panels use this one constant, never a private gutter width.
+ * time-based panel. The invariant is that ALL panels use this one
+ * constant, never a private gutter width.
  */
 export const LABEL_W = 100;
 
@@ -57,10 +49,10 @@ export interface TimePanelLayoutOpts {
  * Build the shared ns<->x mapping for one time panel, with the LABEL_W
  * gutter applied. Thin typed wrapper over the frozen core's
  * makeTimePanelLayout - the math (including the zero-span guard) lives
- * there, unchanged.
+ * there.
  *
  * `drawW` can come out <= 0 on very narrow panels; callers are expected
- * to early-return in that case (same contract as the legacy wrapper).
+ * to early-return in that case.
  */
 export function timePanelLayout(opts: TimePanelLayoutOpts): TimePanelLayout {
   return makeTimePanelLayout(
@@ -82,8 +74,8 @@ export interface PanelGeometryOpts extends TimePanelLayoutOpts {
 
 /**
  * Build the full geometry handed to a canvas component's
- * `render(ctx, state, layout)` (types/state.d.ts PanelGeometry): the
- * shared time mapping plus this panel's box.
+ * `render(ctx, state, layout)`: the shared time mapping plus this panel's
+ * box.
  */
 export function panelGeometry(opts: PanelGeometryOpts): PanelGeometry {
   return {
@@ -96,8 +88,8 @@ export function panelGeometry(opts: PanelGeometryOpts): PanelGeometry {
 
 /**
  * Geometry of the worker-lane rows as a vertical stack: row `i` sits at
- * y = i * laneHeight, in the order `workerIds` is given (types/state.d.ts
- * LaneGeometry). `y` is lanes-local (before scroll offset).
+ * y = i * laneHeight, in the order `workerIds` is given. `y` is
+ * lanes-local (before scroll offset).
  */
 export function laneStackGeometry(
   workerIds: readonly number[],

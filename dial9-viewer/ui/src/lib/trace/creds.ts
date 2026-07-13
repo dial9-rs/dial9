@@ -1,10 +1,8 @@
-// lib/trace/creds.ts - typed seam over the frozen creds.js (T13;
-// bring-your-own-credentials store). Trace fetches carry its
-// x-dial9-aws-* headers (features/03 F8/F184), which is why the seam
-// lives in lib/trace. Importing the module also runs its browser side
-// effect of publishing `window.Dial9Creds` (the stable userscript
-// contract) - the same global the legacy pages establish via
-// <script src="creds.js">, so a bundled page behaves identically.
+// Typed seam over the frozen creds.js bring-your-own-credentials store.
+// Trace fetches carry its x-dial9-aws-* headers, which is why the seam
+// lives in lib/trace. Importing it also runs creds.js's side effect of
+// publishing `window.Dial9Creds` (the stable userscript contract), so a
+// bundled page behaves like the legacy <script src="creds.js"> pages.
 
 export { Dial9Creds } from "../../../creds.js";
 export type {

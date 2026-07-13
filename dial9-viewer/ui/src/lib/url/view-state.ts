@@ -1,46 +1,35 @@
-// src/lib/url/view-state.ts - the versioned URL view-state codec (T19;
-// UX finding S3, ADR-0004 section 9 "view state becomes shareable",
-// architecture NFR N10).
-//
-// The codec maps shareable VIEW state (what the reader is looking at, not
-// what data is loaded) to and from the URL HASH, as a versioned
-// form-encoded payload:
+// The versioned URL view-state codec. Maps shareable VIEW state (what the
+// reader is looking at, not what data is loaded) to and from the URL HASH, as a
+// versioned form-encoded payload:
 //
 //   #v=1&fg.w=<tab-joined frame path>&tm=abs
 //
-// Full schema, extension rules, and the boundary against the query-string
-// params owned by other mechanisms (url_state.js on the browser page,
-// api-mode scope/facet params, legacy flamegraph zoom params):
-// docs/ui-inventory/05-url-view-state.md. Keep that document and KNOWN_KEYS
-// in lockstep.
-//
-// Design rules (N10: additive only, old links must keep working):
+// Design rules (additive only, old links must keep working):
 //
 // - LEGACY PARAMS ARE UNTOUCHED. The flamegraph page's `worker-zoom` /
-//   `offworker-zoom` QUERY params (features/03 F148/F149) keep their exact
-//   legacy semantics - this module reads them as a fallback
-//   (legacyZoomFromQuery) and mirrors state back into them
-//   (applyLegacyZoomToQuery) so links copied from the address bar keep
-//   working on the legacy page too. The hash is the NEW unified carrier.
-// - PRECEDENCE: when both the versioned hash and legacy query params carry
-//   the same field, the hash wins PER FIELD; legacy params fill the gaps.
-//   The two only diverge on hand-edited URLs - the sync layer always
-//   writes them together.
-// - TOLERANT READER: unrecognized keys in a v=1 payload are preserved
-//   verbatim (`unknown`) so an older deployed viewer rewriting the URL
-//   does not strip state a newer viewer put there. Invalid VALUES of known
-//   keys are dropped, never propagated.
-// - FOREIGN HASHES are not ours: a non-empty hash without a well-formed
-//   `v` integer decodes to null, and callers must leave it alone.
-// - VERSION: `v` bumps ONLY on incompatible reinterpretation of an
-//   existing key (expected: never). New fields are added within v=1.
-//   A payload with a different version decodes to { version, empty state,
-//   no unknowns } - callers must not restore from it nor overwrite it.
+//   `offworker-zoom` QUERY params keep their exact legacy semantics - this
+//   module reads them as a fallback (legacyZoomFromQuery) and mirrors state
+//   back into them (applyLegacyZoomToQuery) so links copied from the address
+//   bar keep working on the legacy page too. The hash is the NEW unified
+//   carrier.
+// - PRECEDENCE: when both the versioned hash and legacy query params carry the
+//   same field, the hash wins PER FIELD; legacy params fill the gaps. The two
+//   only diverge on hand-edited URLs - the sync layer always writes them
+//   together.
+// - TOLERANT READER: unrecognized keys in a v=1 payload are preserved verbatim
+//   (`unknown`) so an older deployed viewer rewriting the URL does not strip
+//   state a newer viewer put there. Invalid VALUES of known keys are dropped,
+//   never propagated.
+// - FOREIGN HASHES are not ours: a non-empty hash without a well-formed `v`
+//   integer decodes to null, and callers must leave it alone.
+// - VERSION: `v` bumps ONLY on incompatible reinterpretation of an existing
+//   key (expected: never). New fields are added within v=1. A payload with a
+//   different version decodes to { version, empty state, no unknowns } -
+//   callers must not restore from it nor overwrite it.
 //
-// Zoom-path values reuse the legacy wire format exactly: frame names
-// joined by TAB (\t), root -> target (features/03 F150). Tab therefore
-// cannot appear IN a frame name - the same limitation the legacy params
-// have always had.
+// Zoom-path values reuse the legacy wire format exactly: frame names joined by
+// TAB (\t), root -> target. Tab therefore cannot appear IN a frame name - the
+// same limitation the legacy params have always had.
 //
 // This module is PURE (no window/history/DOM): the browser side lives in
 // sync.ts, so the codec is property-testable under plain Node.
@@ -48,22 +37,15 @@
 /** Current schema version. Bump ONLY on incompatible reinterpretation. */
 export const VIEW_STATE_VERSION = 1;
 
-/** Clock display mode (viewer E1: relative offsets vs absolute wall-clock). */
+/** Clock display mode: relative offsets vs absolute wall-clock. */
 export type TimeMode = "rel" | "abs";
-/** Timezone for absolute timestamps (viewer E2; meaningful with tm=abs). */
+/** Timezone for absolute timestamps (meaningful with tm=abs). */
 export type TimeZoneMode = "utc" | "local";
 
 /**
- * The decoded view state. Every field optional: absent means "the URL does
- * not carry this field" (pages fall back to their own defaults).
- *
- * v1 fields written today: fgWorkerZoom/fgOffworkerZoom (the flamegraph
- * page). timeMode/timeZone are part of the v1 vocabulary by design (the
- * ticket's S3 rationale: restoring a shared view with the wrong clock mode
- * changes what the reader sees) but no migrated page has a clock-mode
- * control yet - the chunk-2 viewer wires them. Chunk-2 additions
- * (viewport, selection, POI) extend this interface additively; see the
- * schema doc's reserved-key table.
+ * The decoded view state. Every field optional: absent means "the URL does not
+ * carry this field" (pages fall back to their own defaults). New fields extend
+ * this interface additively.
  */
 export interface ViewState {
   /** Flamegraph worker-tree zoom path, root -> target frame names. */
@@ -74,10 +56,10 @@ export interface ViewState {
   timeMode?: TimeMode;
   /** Timezone for absolute timestamps (key `tz`). */
   timeZone?: TimeZoneMode;
-  // ── Trace-viewer shareable state (#1). Carried in READABLE query params by
-  // the viewer's mirrorToQuery, NOT the hash: the hash codec above ignores
-  // these fields (it only serializes the keys it knows), so a shared viewer URL
-  // reads `?start=..&end=..&task=..` rather than an opaque hash blob. ──
+  // Trace-viewer shareable state. Carried in READABLE query params by the
+  // viewer's mirrorToQuery, NOT the hash: the hash codec above ignores these
+  // fields (it only serializes the keys it knows), so a shared viewer URL reads
+  // `?start=..&end=..&task=..` rather than an opaque hash blob.
   /** Viewport window start (absolute ns); set only when zoomed in. */
   viewStart?: number;
   /** Viewport window end (absolute ns); set only when zoomed in. */
@@ -124,11 +106,11 @@ const KNOWN_KEYS: readonly string[] = [
   KEY_TIME_ZONE,
 ];
 
-/** The legacy flamegraph zoom-state QUERY params (features/03 F148/F149). */
+/** The legacy flamegraph zoom-state QUERY params. */
 export const LEGACY_WORKER_ZOOM_PARAM = "worker-zoom";
 export const LEGACY_OFFWORKER_ZOOM_PARAM = "offworker-zoom";
 
-/** Frame-path wire format (F150): tab-joined, root -> target. */
+/** Frame-path wire format: tab-joined, root -> target. */
 function encodeZoomPath(path: readonly string[]): string {
   return path.join("\t");
 }
@@ -155,9 +137,9 @@ function isTimeZoneMode(v: string): v is TimeZoneMode {
 
 /**
  * Encode `state` (plus preserved unknown entries) into a hash payload
- * (form-encoded, WITHOUT the leading "#"). Returns "" when there is
- * nothing to carry - callers then omit the hash entirely, so a pristine
- * page keeps a clean URL (mirrors url_state.js's omit-defaults rule).
+ * (form-encoded, WITHOUT the leading "#"). Returns "" when there is nothing to
+ * carry - callers then omit the hash entirely, so a pristine page keeps a clean
+ * URL.
  */
 export function encodeViewState(
   state: ViewState,
@@ -220,10 +202,9 @@ export function decodeViewState(hashPayload: string): DecodedViewState | null {
 }
 
 /**
- * Read the LEGACY flamegraph zoom params from a query string (features/03
- * F148/F149), with their exact legacy semantics: absent or empty param =
- * no zoom for that tree. Field names line up with ViewState so the result
- * merges directly.
+ * Read the LEGACY flamegraph zoom params from a query string, with their exact
+ * legacy semantics: absent or empty param = no zoom for that tree. Field names
+ * line up with ViewState so the result merges directly.
  */
 export function legacyZoomFromQuery(
   search: string | URLSearchParams,
@@ -244,11 +225,10 @@ export function legacyZoomFromQuery(
 }
 
 /**
- * Mirror the zoom fields of `state` into the LEGACY query params, exactly
- * as the legacy page writes them (F147/F148/F149/F152/F153): set when
- * non-empty, DELETE when empty, touch nothing else in `params`. Keeping
- * the mirror alive is what makes an address-bar copy from the migrated
- * page open correctly on the legacy page.
+ * Mirror the zoom fields of `state` into the LEGACY query params, exactly as
+ * the legacy page writes them: set when non-empty, DELETE when empty, touch
+ * nothing else in `params`. Keeping the mirror alive is what makes an
+ * address-bar copy from the migrated page open correctly on the legacy page.
  */
 export function applyLegacyZoomToQuery(params: URLSearchParams, state: ViewState): void {
   if (state.fgWorkerZoom !== undefined && state.fgWorkerZoom.length > 0) {

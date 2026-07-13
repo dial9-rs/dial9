@@ -1,30 +1,27 @@
-// lib/interact/pointer.ts - the lane pointer gesture state machine (T23;
-// docs/ui-inventory/02-architecture.md 2.5, features/02 H5-H8/H10).
+// The lane pointer gesture state machine.
 //
-// The single owner of the drag-vs-click discrimination that viewer.html
-// interleaved across three handlers (mousedown :5145, mousemove :5271,
-// mouseup :5303). A PURE, DOM-free machine: it consumes abstract pointer
-// events (client x + modifiers + the timestamp under the pointer, resolved by
-// the caller through the shared layout) and returns COMMANDS the DOM binding
+// The single owner of the drag-vs-click discrimination. A pure, DOM-free
+// machine: it consumes abstract pointer events (client x + modifiers + the
+// timestamp under the pointer, resolved by the caller through the shared
+// layout) and returns COMMANDS the DOM binding
 // (pages/viewer/lane-interaction.ts) executes as store actions. It never
-// touches the store, the DOM, or renders (F2) - which makes every transition,
+// touches the store, the DOM, or renders - which makes every transition,
 // including the cancel paths, unit-testable under plain Node.
 //
-// Gestures (legacy thresholds preserved, viewer.html):
-//   - plain drag  -> PAN the viewport (H6), intent at 3px of movement;
-//   - Shift+drag  -> REGION select (H7), the gesture only; WHAT the region
-//     opens (flamegraph / blocking / heap) is T32's - this machine emits a
-//     `commit-region` command carrying [start,end], the binding routes it to
-//     the store (selection.sidebarRange), T32 reacts;
-//   - Alt+drag    -> ZOOM select (H8): commit-region with kind "zoom", the
+// Gestures:
+//   - plain drag  -> PAN the viewport, intent at 3px of movement;
+//   - Shift+drag  -> REGION select, the gesture only; WHAT the region
+//     opens (flamegraph / blocking / heap) is the binding's - this machine
+//     emits a `commit-region` command carrying [start,end], the binding
+//     routes it to the store (selection.sidebarRange);
+//   - Alt+drag    -> ZOOM select: commit-region with kind "zoom", the
 //     binding zooms the viewport to the range;
 //   - a press+release under 3px is NOT a drag: the machine reports it as
 //     unmoved so the binding's click handler runs the task/span select.
 //
-// Shift takes precedence over Alt (matching legacy `altZooming = altKey &&
-// !shiftKey`): Shift+Alt+drag is a region select.
+// Shift takes precedence over Alt: Shift+Alt+drag is a region select.
 
-/** Movement (CSS px) before a press becomes a drag (H6/H7 intent threshold). */
+/** Movement (CSS px) before a press becomes a drag. */
 export const DRAG_INTENT_PX = 3;
 
 /** Which drag gesture a press initiated. */
@@ -44,7 +41,7 @@ export interface PointerDownInput {
   /** Navigable bounds (pan/zoom clamp). */
   minTs: number;
   maxTs: number;
-  /** No gesture starts without a trace (legacy required `trace`). */
+  /** No gesture starts without a trace. */
   hasTrace: boolean;
 }
 
@@ -71,7 +68,7 @@ export interface DragSnapshot {
  * Commands the machine emits; the binding maps each to a store action.
  *   - set-drag:      write `transient.drag` (starts/updates the drag snapshot);
  *   - clear-drag:    write `transient.drag = null` (gesture ended/cancelled);
- *   - pan:           apply the panned window (H6 frame; the binding coalesces);
+ *   - pan:           apply the panned window (the binding coalesces);
  *   - commit-region: a completed region/zoom selection [startNs,endNs];
  *   - cursor:        the document cursor to show ("grabbing"/"crosshair"/"").
  */
@@ -113,17 +110,16 @@ export interface PointerMachine {
   phase(): "idle" | "pan" | "select";
   /**
    * Did the LAST gesture cross the 3px intent threshold? Reset on the next
-   * down(). The click handler reads this to skip a click that was really a
-   * drag (legacy `dragMoved`, which persisted past mouseup until the next
-   * mousedown - reproduced here).
+   * down() (so it persists past up()). The click handler reads this to skip
+   * a click that was really a drag.
    */
   moved(): boolean;
 }
 
 /**
  * Pan a window by a pixel delta, preserving duration and clamping to
- * [minTs,maxTs] with the legacy edge-carry (viewer.html:5286-5300). Exported
- * pure so pointer.test can assert the pan arithmetic directly.
+ * [minTs,maxTs] with edge-carry. Exported pure so pointer.test can assert
+ * the pan arithmetic directly.
  */
 export function panWindowByPixels(
   anchorStart: number,
@@ -155,7 +151,7 @@ export function panWindowByPixels(
 /** Create a fresh pointer machine (idle). */
 export function createPointerMachine(): PointerMachine {
   let state: MachineState = { phase: "idle" };
-  // Persists past up() until the next down(), exactly like legacy `dragMoved`.
+  // Persists past up() until the next down().
   let dragMoved = false;
 
   function snapshot(
@@ -176,7 +172,7 @@ export function createPointerMachine(): PointerMachine {
         return [];
       }
       if (input.shiftKey || input.altKey) {
-        // Shift wins over Alt (legacy altZooming = altKey && !shiftKey).
+        // Shift wins over Alt.
         const kind: "region-select" | "zoom-select" =
           input.altKey && !input.shiftKey ? "zoom-select" : "region-select";
         state = {
@@ -191,7 +187,7 @@ export function createPointerMachine(): PointerMachine {
           { type: "cursor", cursor: "crosshair" },
         ];
       }
-      // Plain press: pan gesture, anchored to the current window (H6).
+      // Plain press: pan gesture, anchored to the current window.
       state = {
         phase: "pan",
         startX: input.clientX,
@@ -210,7 +206,7 @@ export function createPointerMachine(): PointerMachine {
       if (state.phase === "select") {
         if (Math.abs(input.clientX - state.startX) > DRAG_INTENT_PX) dragMoved = true;
         state.curNs = input.nsAtClamped;
-        // Re-write the drag snapshot so the H10 selection overlay redraws the
+        // Re-write the drag snapshot so the selection overlay redraws the
         // region box from [startNs, curNs] on the transient RAF channel.
         return [
           {
@@ -243,10 +239,9 @@ export function createPointerMachine(): PointerMachine {
           { type: "clear-drag" },
           { type: "cursor", cursor: "" },
         ];
-        // Only a moved drag commits a region (legacy: `if (dragMoved)`). An
-        // unmoved shift/alt press falls through to the click handler, which
-        // reads moved() === false and runs the ordinary task select - the
-        // legacy behaviour.
+        // Only a moved drag commits a region. An unmoved shift/alt press
+        // falls through to the click handler, which reads moved() === false
+        // and runs the ordinary task select.
         if (moved) {
           cmds.push({
             type: "commit-region",

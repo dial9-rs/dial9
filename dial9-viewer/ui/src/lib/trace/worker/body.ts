@@ -1,20 +1,18 @@
-// lib/trace/worker/body.ts - the worker load pipeline as a PURE module: a
-// message handler over a postMessage-shaped sink, with no Worker-global
-// bindings (T16; ADR-0004 section 6 "do now": run the frozen core in a Web
-// Worker unchanged - the 3.8-12.2 s load walls are main-thread parse time,
-// 03-performance-findings.md). The thin environment bindings live next
-// door: trace-worker.ts (browser, Vite worker build) and
+// The worker load pipeline as a PURE module: a message handler over a
+// postMessage-shaped sink, with no Worker-global bindings, so the frozen
+// core runs in a Web Worker unchanged. The thin environment bindings live
+// next door: trace-worker.ts (browser, Vite worker build) and
 // node-worker-entry.mjs (node:worker_threads, for the Vitest integration
 // tests). Keeping the body pure lets Node tests drive the full pipeline
-// in-process, while the worker_threads harness exercises the real thread
-// + structured-clone boundary.
+// in-process, while the worker_threads harness exercises the real thread +
+// structured-clone boundary.
 //
 // PLAIN-NODE CONSTRAINT: node-worker-entry.mjs runs this file under Node's
-// native type stripping, which resolves import specifiers on disk as
-// written - no bundler. Every RUNTIME import reachable from here must
-// resolve on disk: the frozen core's real .js files, or sibling TS via an
-// explicit .ts specifier (hence allowImportingTsExtensions in tsconfig).
-// Type-only imports are erased by the stripper and exempt.
+// native type stripping, which resolves import specifiers on disk as written
+// - no bundler. Every RUNTIME import reachable from here must resolve on
+// disk: the frozen core's real .js files, or sibling TS via an explicit .ts
+// specifier (hence allowImportingTsExtensions in tsconfig). Type-only
+// imports are erased by the stripper and exempt.
 
 import {
   canStreamDecode,
@@ -37,10 +35,10 @@ export interface TraceWorkerBody {
 }
 
 /**
- * The progress/done reporting shared by both job kinds (url load and
- * buffer parse): posts progress messages carrying the features/02 B8/B9
- * load-timing fields, and the final done message with the B16 timing
- * record and the decompressed buffer transferred back zero-copy.
+ * The progress/done reporting shared by both job kinds (url load and buffer
+ * parse): posts progress messages carrying the load-timing fields, and the
+ * final done message with the timing record and the decompressed buffer
+ * transferred back zero-copy.
  */
 function makeReporter(
   post: TraceWorkerPost,
@@ -68,10 +66,10 @@ function makeReporter(
       },
     });
   };
-  // The core fires this every 100 KB decoded (trace_parser.js); each
-  // firing becomes one small progress message. Inside a worker the
-  // parse loop's paint-yield macrotasks (B18) still run, which is what
-  // lets the "abort" request be processed mid-parse.
+  // The core fires this every 100 KB decoded; each firing becomes one small
+  // progress message. Inside a worker the parse loop's paint-yield
+  // macrotasks still run, which is what lets the "abort" request be
+  // processed mid-parse.
   const onParseProgress = (p: {
     bytesRead: number;
     totalBytes: number | null;
@@ -154,9 +152,9 @@ export function createWorkerBody(post: TraceWorkerPost): TraceWorkerBody {
     const fetchOpts: FetchOptions = { signal: controller.signal };
     if (request.headers !== undefined) fetchOpts.headers = request.headers;
     if (mode === "stream") {
-      // Streaming fuses fetch+parse (B12): no separate fetch mark
-      // (fetchDoneMs stays null, legacy loadPerf parity), and the first
-      // progress signals the parse phase directly.
+      // Streaming fuses fetch+parse: no separate fetch mark (fetchDoneMs
+      // stays null), and the first progress signals the parse phase
+      // directly.
       progress("parsing", 0, null);
       const { trace, buffer } = await streamTraceWithCapture(urls, fetchOpts, {
         ...parseOpts,
@@ -175,12 +173,11 @@ export function createWorkerBody(post: TraceWorkerPost): TraceWorkerBody {
     }
   }
 
-  // Parse an already-fetched buffer (T17 segment windowing; see
-  // protocol.ts). No fetch phase: the bytes arrived with the request.
-  // Gzipped bytes stream through DecompressionStream so parse overlaps
-  // gunzip (mode "stream", and the done buffer is the decompressed bytes
-  // - its byteLength is what the segment budget accountant records); raw
-  // bytes parse directly (mode "buffered", total size known up front).
+  // Parse an already-fetched buffer. No fetch phase: the bytes arrived with
+  // the request. Gzipped bytes stream through DecompressionStream so parse
+  // overlaps gunzip (mode "stream", and the done buffer is the decompressed
+  // bytes - its byteLength is what the segment budget accountant records);
+  // raw bytes parse directly (mode "buffered", total size known up front).
   async function runParseBuffer(
     request: TraceWorkerParseBufferRequest
   ): Promise<void> {

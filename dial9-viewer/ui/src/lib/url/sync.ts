@@ -1,22 +1,19 @@
-// src/lib/url/sync.ts - store-slice -> URL view-state sync (T19; UX
-// finding S3, ADR-0004 section 9). The browser half of the codec
-// (view-state.ts): subscribes to declared store slices, projects them to a
-// ViewState, and writes it into the URL via ONE debounced
-// history.replaceState per settled change burst (replaceState, never
-// pushState: view tweaks must not pollute Back - the api-mode filter
-// history, F180, deliberately differs and stays page-owned).
+// Store-slice -> URL view-state sync: the browser half of the codec
+// (view-state.ts). Subscribes to declared store slices, projects them to a
+// ViewState, and writes it into the URL via ONE debounced history.replaceState
+// per settled change burst (replaceState, never pushState: view tweaks must not
+// pollute Back).
 //
-// Write rules (see the codec header + docs/ui-inventory/05-url-view-state.md):
-// - the query string is preserved verbatim except what `mirrorToQuery`
-//   touches (the flamegraph page passes applyLegacyZoomToQuery, F153);
-// - a versioned hash is rewritten with unknown keys preserved; a FOREIGN
-//   hash (not ours) is never overwritten - hash carriage is skipped, query
-//   mirroring still applies;
-// - no-op writes are skipped (URL already says this), so binding at page
-//   load never dirties history: restore-on-load produces zero writes.
+// Write rules:
+// - the query string is preserved verbatim except what `mirrorToQuery` touches
+//   (the flamegraph page passes applyLegacyZoomToQuery);
+// - a versioned hash is rewritten with unknown keys preserved; a FOREIGN hash
+//   (not ours) is never overwritten - hash carriage is skipped, query mirroring
+//   still applies;
+// - no-op writes are skipped (URL already says this), so binding at page load
+//   never dirties history: restore-on-load produces zero writes.
 //
-// The debounce timer is injectable for Node tests, mirroring the store's
-// injectable frame scheduler.
+// The debounce timer is injectable for Node tests.
 
 import type { ReadonlyState, SliceKey, Store } from "../../store/store.js";
 import {
@@ -85,7 +82,7 @@ export interface BindViewStateOptions<S> {
   /**
    * Mirror view-state fields into LEGACY query params during each write
    * (the flamegraph page passes applyLegacyZoomToQuery). The hook must
-   * only touch its own params (F153).
+   * only touch its own params.
    */
   mirrorToQuery?: (params: URLSearchParams, state: ViewState) => void;
   host?: UrlHost;

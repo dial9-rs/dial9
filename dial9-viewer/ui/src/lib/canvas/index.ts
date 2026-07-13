@@ -1,9 +1,8 @@
-// lib/canvas barrel - the shared drawing utilities (T08; architecture
-// 2.3): layout geometry, DPR-aware canvas sizing, pixel-bounded
-// downsampling (fills via the frozen core, strokes via ./stroke.ts) and
-// palettes. Canvas components (components/canvas/*) consume drawing math
-// through this barrel; only the modules behind it import the frozen
-// core's drawing helpers directly.
+// lib/canvas barrel - the shared drawing utilities: layout geometry,
+// DPR-aware canvas sizing, pixel-bounded downsampling (fills via the
+// frozen core, strokes via ./stroke.ts) and palettes. Canvas components
+// consume drawing math through this barrel; only the modules behind it
+// import the frozen core's drawing helpers directly.
 
 export {
   LABEL_W,
@@ -58,8 +57,6 @@ export {
   pollHeatmapColorQuantized,
 } from "./palette.js";
 
-// flamegraph.ts - the frozen flamegraph widget (canvas rendering, zoom,
-// search, tooltip, export menu), typed (T13).
 export { createFlamegraph, filterCpuSamples } from "./flamegraph.js";
 export type {
   FlamegraphDataSample,
@@ -67,8 +64,6 @@ export type {
   FlamegraphSetDataOptions,
 } from "./flamegraph.js";
 
-// heatmap.ts - the frozen heatmap data helpers (density, host grouping,
-// segment math), typed (T14).
 export {
   MAX_OPEN_BYTES,
   MIN_SEGMENT_SECONDS,

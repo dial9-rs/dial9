@@ -1,17 +1,15 @@
-// lib/trace/stream.ts - the streaming fetch + gunzip + capture mechanism
-// shared by the main-thread load path (load.ts loadTraceStreamed) and the
-// Web Worker load body (worker/body.ts). Extracted from load.ts in T16:
-// load.ts also hosts the worker ORCHESTRATOR (the `new Worker(new URL(...))`
-// factory), so the worker body importing load.ts would pull the worker
-// entry's own reference into the worker bundle graph. This leaf module
-// breaks that cycle.
+// The streaming fetch + gunzip + capture mechanism shared by the main-thread
+// load path (load.ts loadTraceStreamed) and the Web Worker load body
+// (worker/body.ts). It is a leaf module so the worker body can import it
+// without pulling load.ts's worker ORCHESTRATOR (and thus the worker entry)
+// into the worker bundle graph.
 //
-// LEAF-MODULE RULE (plain-Node constraint): the worker body runs under
-// plain Node via native type stripping (worker/node-worker-entry.mjs),
-// which resolves import specifiers on disk as written - no bundler. Every
-// runtime import reachable from the body must therefore resolve on disk:
-// this file may import the frozen core (real .js files at the ui root)
-// and nothing else at runtime; type-only imports are erased and exempt.
+// LEAF-MODULE RULE (plain-Node constraint): the worker body runs under plain
+// Node via native type stripping (no bundler), which resolves import
+// specifiers on disk as written. Every runtime import reachable from the body
+// must therefore resolve on disk: this file may import the frozen core (real
+// .js files at the ui root) and nothing else at runtime; type-only imports
+// are erased and exempt.
 
 import {
   fetchTraceStream,
@@ -30,7 +28,7 @@ export interface StreamedParse {
   /**
    * The raw (gunzipped, concatenated) trace bytes, captured while parsing
    * and reassembled, so Set/Clear Range can re-parse in memory without
-   * re-fetching (features/02 B14).
+   * re-fetching.
    */
   buffer: ArrayBuffer;
 }
@@ -39,8 +37,8 @@ export interface StreamedParse {
  * Parse an async stream of raw (already-gunzipped) trace chunks while
  * capturing them, then reassemble the captured chunks into the full raw
  * buffer. The chunk source is the caller's concern: the URL path below
- * feeds it fetch streams; the worker's parse-buffer path (T17 segment
- * re-parse) feeds it a DecompressionStream over cached gzip bytes.
+ * feeds it fetch streams; the worker's parse-buffer path feeds it a
+ * DecompressionStream over cached gzip bytes.
  */
 export async function parseChunksWithCapture(
   chunks: AsyncIterable<Uint8Array>,
@@ -56,7 +54,6 @@ export async function parseChunksWithCapture(
     },
   };
   const trace = await parseTraceStream(capturing, parseOpts);
-  // Reassemble the full buffer from the captured chunks.
   let total = 0;
   for (const c of captured) total += c.length;
   const buffer = new Uint8Array(total);
@@ -73,11 +70,10 @@ export async function parseChunksWithCapture(
  * time overlaps the download (~max(download, parse) instead of their sum).
  * For multiple URLs the fetches run concurrently and the components stream
  * in back-to-back, in order, as one logical trace - so parsing the first
- * segment overlaps the in-flight downloads of the rest (issue #595). The
- * gunzipped chunks are captured while parsing so the full buffer is still
+ * segment overlaps the in-flight downloads of the rest. The gunzipped
+ * chunks are captured while parsing so the full buffer is still
  * available afterwards for in-memory Set/Clear-Range re-parsing (which
- * never re-fetches). This is the streamAndShowTrace mechanism
- * (viewer.html:1678-1712) without the page chrome.
+ * never re-fetches).
  */
 export async function streamTraceWithCapture(
   urls: readonly string[],

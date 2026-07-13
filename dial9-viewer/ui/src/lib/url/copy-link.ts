@@ -1,14 +1,9 @@
-// src/lib/url/copy-link.ts - the minimal copy-link action (T19; UX
-// finding S3). A small toolbar button that copies the CURRENT page URL -
-// after flushing any pending debounced view-state write, so the copied
-// link carries the view the user is looking at, not the one from 150ms
-// ago. The full share chrome (status bar) is chunk-2's; this button is
-// what makes the mechanism usable on pages migrated at landing time.
+// A minimal toolbar button that copies the CURRENT page URL, after flushing
+// any pending debounced view-state write so the copied link carries the view
+// the user is looking at, not the one from ~150ms ago.
 //
-// The page provides the mount point (its header/toolbar); this module
-// owns the element, its inline look, and the copy mechanics. Styling is
-// deliberately inline and minimal: the button must not disturb the
-// migrated pages' pixel-parity headers beyond its own box.
+// The page provides the mount point (its header/toolbar); this module owns the
+// element, its inline look, and the copy mechanics.
 
 export interface CopyLinkOptions {
   /** Run before reading the URL (pages pass the sync binding's flush). */

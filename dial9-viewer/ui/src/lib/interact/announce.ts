@@ -1,17 +1,13 @@
-// lib/interact/announce.ts - status announcements for keyboard actions
-// (T20; canonical spec docs/ui-inventory/mocks/keyboard.html `say()`).
-//
-// Two channels per announcement, following the mock and the legacy
-// viewer's precedent (viewer.html:5212 announce() + its offscreen
-// aria-live region):
+// Status announcements for keyboard actions. Two channels per
+// announcement:
 //   - an offscreen aria-live="polite" region, so screen readers hear the
 //     result of a key that produced no focus change (zoom undo, fit,
 //     selection started/confirmed);
-//   - a transient visible toast (1.6s, mock timing), so sighted keyboard
-//     users get the same confirmation without hunting for what changed.
+//   - a transient visible toast (1.6s), so sighted keyboard users get the
+//     same confirmation without hunting for what changed.
 //
-// One shared instance per page (lazily mounted); keys are accelerators,
-// and announcements are feedback only - no page logic may depend on them.
+// One shared instance per page (lazily mounted); announcements are
+// feedback only - no page logic may depend on them.
 
 import "../../styles/interact.css";
 

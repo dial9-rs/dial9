@@ -1,5 +1,4 @@
-// lib/trace/segments.ts - segment-windowed loading, the tier-2 detail
-// mechanism (T17; docs/ui-inventory/02-architecture.md 2.8; budget N19).
+// Segment-windowed loading, the tier-2 detail mechanism.
 //
 // Traces reach ~100 MB/min in S3 and parsed heap is ~10x raw, so loading
 // whole traces tops out around one minute of data. The replacement keeps a
@@ -14,17 +13,6 @@
 //               cache so re-entry re-parses (~33 MB/s) instead of
 //               re-downloading.
 //
-// Layout of this module:
-//   1. Budget constants (shared decisions, chunk-1 ticket header).
-//   2. Listing -> extent derivation (features/01 F2/I2 heatmap parity).
-//   3. Pure decision functions: need set, prefetch set, budget admission,
-//      eviction plan. Exhaustively unit-tested; the orchestrator only
-//      wires them to fetch/worker/store.
-//   4. Raw-gzip byte cache (the two-level cache's lower level).
-//   5. Boundary-poll extraction/stitching (the 2.8 truncation hard edge).
-//   6. Worker parse driver (parse-buffer protocol, T16 seam).
-//   7. The orchestrator: createSegmentWindow.
-//
 // CLOCK DOMAIN: all extents handed to the orchestrator and every viewport
 // passed to setViewport must share ONE clock domain. deriveSegmentExtents
 // produces wall-clock ns (that is all a listing knows); once a first parse
@@ -32,10 +20,10 @@
 // trace-monotonic domain the viewer's viewport lives in. The decision
 // functions are deliberately domain-agnostic.
 //
-// ADR-0002 note: block-in-place gap detection runs INSIDE each segment's
-// parse (deriveBlockInPlaceGaps over that segment's events only), so a
-// window edge is a trace edge as far as gap detection is concerned -
-// nothing here can fabricate park/unpark continuity across segments.
+// Block-in-place gap detection runs INSIDE each segment's parse
+// (deriveBlockInPlaceGaps over that segment's events only), so a window edge
+// is a trace edge as far as gap detection is concerned - nothing here can
+// fabricate park/unpark continuity across segments.
 
 import { EVENT_TYPES } from "../../../trace_parser.js";
 import { parseKey } from "./keys.js";
@@ -61,12 +49,12 @@ import type {
   TraceWorkerResponse,
 } from "./worker/protocol.js";
 
-// ── 1. Budget constants (N19; shared-decisions block) ───────────────────
+// ── 1. Budget constants ──────────────────────────────────────────────────
 
 /**
  * Resident raw window: the sum of DECOMPRESSED byte sizes of all parsed
  * segments (the proxy for their ~10x parsed heap). A window limit, not a
- * load-time rejection - it replaces the legacy 100/200 MB open cap.
+ * load-time rejection.
  */
 export const RESIDENT_RAW_BUDGET_BYTES = 128 * 1024 * 1024;
 
@@ -97,7 +85,7 @@ export function evictionTriggerBytes(
   return Math.floor(budgetBytes * thresholdFraction);
 }
 
-// ── 2. Listing -> extent derivation (features/01 F2 + I2 parity) ────────
+// ── 2. Listing -> extent derivation ──────────────────────────────────────
 
 /** One object from an S3 listing (the /api/browse response shape). */
 export interface SegmentListing {
@@ -123,33 +111,31 @@ export interface SkippedListing {
 }
 
 export interface DerivedExtents {
-  /** Sorted by extent start, ends tiled (heatmap parity). */
+  /** Sorted by extent start, ends tiled. */
   segments: ListedSegment[];
   skipped: SkippedListing[];
 }
 
-// Same floor as heatmap.js MIN_SEGMENT_SECONDS: a segment whose end is not
-// strictly after its start still gets a 1s span instead of vanishing.
+// A segment whose end is not strictly after its start still gets a 1s span
+// instead of vanishing.
 const MIN_SEGMENT_NS = 1e9;
 
-// The `{epoch}-{index}.bin[.gz]` basename pattern (keys.ts FILE_RE
-// equivalent, applied to the basename only): extent derivation needs just
-// the filename epoch, so it works even for directory layouts parseKey
+// The `{epoch}-{index}.bin[.gz]` basename pattern: extent derivation needs
+// only the filename epoch, so it works even for directory layouts parseKey
 // cannot attribute service/host fields to.
 const BASENAME_EPOCH_RE = /^(\d+)-\d+\.bin/;
 
 /**
- * Derive per-segment time extents from listing metadata exactly as the
- * browser page's heatmap does (features/01 F2/F4/F7): start = the epoch in
- * the `{epoch}-{index}.bin.gz` filename (via keys.ts parseKey, falling
+ * Derive per-segment time extents from listing metadata: start = the epoch
+ * in the `{epoch}-{index}.bin.gz` filename (via keys.ts parseKey, falling
  * back to the basename pattern for unrecognized directory layouts), end =
- * listing last_modified, floored to a 1s span, then each end clamped to
- * the next segment's start so upload-lag overlaps tile instead of
- * double-covering (heatmap.js tileSegments).
+ * listing last_modified, floored to a 1s span, then each end clamped to the
+ * next segment's start so upload-lag overlaps tile instead of
+ * double-covering.
  *
- * Extents are wall-clock EPOCH NANOSECONDS; see the clock-domain note in
- * the module header. Entries with no derivable epoch are returned in
- * `skipped` with a reason - never silently mislabeled.
+ * Extents are wall-clock EPOCH NANOSECONDS; see the clock-domain note in the
+ * module header. Entries with no derivable epoch are returned in `skipped`
+ * with a reason - never silently mislabeled.
  */
 export function deriveSegmentExtents(
   listings: readonly SegmentListing[]
@@ -185,7 +171,7 @@ export function deriveSegmentExtents(
   segments.sort(
     (a, b) => a.extent.startNs - b.extent.startNs || (a.key < b.key ? -1 : 1)
   );
-  // Tile: clamp only on real overlap, never past the start (tileSegments).
+  // Tile: clamp only on real overlap, never past the start.
   for (let i = 0; i < segments.length - 1; i++) {
     const seg = segments[i]!;
     const next = segments[i + 1]!;
@@ -290,7 +276,7 @@ export interface AdmissionCandidate {
 export interface AdmissionPlan {
   /** Admitted keys, nearest-to-viewport-center first. */
   admitted: string[];
-  /** Candidates deferred to tier-1 rendering (window limit, N19). */
+  /** Candidates deferred to tier-1 rendering. */
   deferred: string[];
 }
 
@@ -299,16 +285,16 @@ export interface AdmissionPlan {
  * nearest the viewport center first while their estimated raw sizes fit
  * within `capacityBytes` on top of `baseBytes` (bytes already committed by
  * earlier admission rounds). The nearest candidate of the FIRST round
- * (baseBytes === 0) is always admitted, even when its ESTIMATE exceeds
- * the capacity: the minimum useful window is one segment, and the budget
- * is a window limit, not a load-time rejection (N19) - estimates are
- * guesses, so the segment gets its one real fetch + parse.
+ * (baseBytes === 0) is always admitted, even when its ESTIMATE exceeds the
+ * capacity: the minimum useful window is one segment, and the budget is a
+ * window limit, not a load-time rejection - estimates are guesses, so the
+ * segment gets its one real fetch + parse.
  *
- * Candidates whose REAL decompressed size is known to exceed the hard
- * budget must never reach this function: the orchestrator parks them in
- * the "oversized" state at parse completion and filters them out before
- * admission (T17-audit finding 2), so the force-admit clause cannot
- * re-admit a segment that provably cannot fit.
+ * Candidates whose REAL decompressed size is known to exceed the hard budget
+ * must never reach this function: the orchestrator parks them in the
+ * "oversized" state at parse completion and filters them out before
+ * admission, so the force-admit clause cannot re-admit a segment that
+ * provably cannot fit.
  */
 export function capToBudget(
   candidates: readonly AdmissionCandidate[],
@@ -376,8 +362,8 @@ export interface EvictionPlan {
 }
 
 /**
- * Eviction policy (architecture 2.8): once resident raw bytes cross the
- * trigger (90% of budget, hysteresis margin), drop parsed segments in
+ * Eviction policy: once resident raw bytes cross the trigger (90% of
+ * budget, hysteresis margin), drop parsed segments in
  * order of distance from the viewport - farthest first - until back at or
  * under the trigger. Need/prefetch members are protected at this stage.
  *
@@ -521,7 +507,7 @@ export function createRawByteCache(
   };
 }
 
-// ── 5. Boundary polls (2.8 truncation hard edge; features/02 G5) ────────
+// ── 5. Boundary polls (truncation hard edge) ─────────────────────────────
 
 /**
  * Extract the boundary-poll evidence at a segment parse's edges in one
@@ -529,7 +515,7 @@ export function createRawByteCache(
  *
  * - openAtEnd: a PollStart with no closing event (PollEnd / WorkerPark /
  *   next PollStart) before the segment ends - exactly the polls the
- *   frozen core DISCARDS at trace end (trace_analysis.js #194).
+ *   frozen core DISCARDS at trace end.
  * - closeAtStart: the worker's first lifecycle event (PollStart, PollEnd,
  *   WorkerPark or WorkerUnpark) is a PollEnd - the poll began before this
  *   segment. A Park/Unpark-first segment start is ambiguous and captured
@@ -591,7 +577,7 @@ export function computeSegmentEdgePolls(
 }
 
 /**
- * Parse-derived invariants retained across eviction (2.8: lanes/axes stay
+ * Parse-derived invariants retained across eviction (lanes/axes stay
  * stable). Worker ids come from the poll/park lifecycle events - the same
  * events that create lanes.
  */
@@ -619,20 +605,18 @@ export function segmentInvariants(
 /**
  * Derive the window-level boundary-poll view from the segments slice.
  *
- * A poll's lifecycle can span ANY number of segments - segment rotation
- * is not poll-aligned, and a worker blocked in one poll for minutes (the
+ * A poll's lifecycle can span ANY number of segments - segment rotation is
+ * not poll-aligned, and a worker blocked in one poll for minutes (the
  * pathology this tool diagnoses) is silent for whole segments. The
- * derivation walks each worker's evidence chain across the listing
- * (T17-audit findings 1 and 3; formerly a pairwise-boundary matcher that
- * made 3+-segment polls vanish):
+ * derivation walks each worker's evidence chain across the listing:
  *
  * - CONTINUITY: an open poll at a segment's end continues through the
  *   next listed segment when (a) their extents are ADJACENT - no
  *   unobserved time between them; listing order alone can hide holes,
  *   and stitching across one would fabricate a completed long poll out
- *   of two different polls' evidence (finding 3) - and (b) the worker is
- *   SILENT there: any PollEnd / WorkerPark / PollStart would have closed
- *   the poll, and silence is proven via the parse invariants' worker set
+ *   of two different polls' evidence - and (b) the worker is SILENT
+ *   there: any PollEnd / WorkerPark / PollStart would have closed the
+ *   poll, and silence is proven via the parse invariants' worker set
  *   (which, like edgePolls, survives eviction).
  * - STITCH: a chain whose open and close endpoints and every interior
  *   segment are RESIDENT assembles into ONE complete poll, whether it
@@ -642,18 +626,16 @@ export function segmentInvariants(
  *   surfaces each maximal resident stretch it provably spans as a
  *   WindowEdgePoll truncated at "start"/"end"/"both", spans clamped to
  *   RESIDENT observed events - a lower bound, never an inflated long
- *   poll (the G5 marker semantics). Task identity carries whenever the
- *   PollStart was ever parsed (resident or retained edge evidence);
- *   otherwise it is explicitly null.
- * - DROP (core #194 parity): a chain meeting a boundary where the worker
- *   is ACTIVE with retained edges but no matching counterpart drops
- *   whole - the counterpart never made it to the wire, and the silence
- *   proof is only as good as the wire. Chains running off the ABSOLUTE
- *   listing ends also drop: the frozen core's trace-edge behavior,
- *   preserved for parity.
+ *   poll. Task identity carries whenever the PollStart was ever parsed
+ *   (resident or retained edge evidence); otherwise it is explicitly null.
+ * - DROP: a chain meeting a boundary where the worker is ACTIVE with
+ *   retained edges but no matching counterpart drops whole - the
+ *   counterpart never made it to the wire, and the silence proof is only
+ *   as good as the wire. Chains running off the ABSOLUTE listing ends
+ *   also drop: the frozen core's trace-edge behavior, preserved for parity.
  *
- * Pure derivation over (listing order, entries): recompute when the set
- * of parsed segments changes; T07's derived() fits.
+ * Pure derivation over (listing order, entries): recompute when the set of
+ * parsed segments changes.
  */
 export function computeWindowBoundaryPolls(
   orderedKeys: readonly string[],
@@ -834,7 +816,7 @@ export function computeWindowBoundaryPolls(
           live = false; // evidence-only interior: span breaks here
         }
       }
-      // Absolute listing start: core trace-edge parity (#194) - drop.
+      // Absolute listing start: core trace-edge parity - drop.
       if (reason === "listing-start") return;
       // Active neighbor with retained edges and (necessarily) no
       // matching open - a matching open would have produced a forward
@@ -852,8 +834,8 @@ export function computeWindowBoundaryPolls(
       if (carry !== null) {
         const prev = spots[i - 1]!;
         if (!adjacent(prev, spot)) {
-          // Extent gap (finding 3): the chain breaks - truncated
-          // fragments, never a fabricated complete poll.
+          // Extent gap: the chain breaks - truncated fragments, never a
+          // fabricated complete poll.
           emitStretches(workerId, carry.stretches, carry.open);
           carry = null;
         } else if (spot.invariants === undefined) {
@@ -894,7 +876,7 @@ export function computeWindowBoundaryPolls(
           const close = closeAt(spot);
           if (close === undefined) {
             // Unmatched: the counterpart never made it to the wire.
-            // Core #194 parity - the whole chain drops.
+            // Core trace-edge parity - the whole chain drops.
             carry = null;
           } else if (spot.resident) {
             closeConsumed = true;
@@ -946,12 +928,12 @@ export function computeWindowBoundaryPolls(
       }
     }
     // A carry running off the absolute listing end: core trace-edge
-    // parity (#194) - dropped, no marker.
+    // parity - dropped, no marker.
   }
   return { truncated, stitched };
 }
 
-// ── 6. Worker parse driver (T16 parse-buffer protocol) ──────────────────
+// ── 6. Worker parse driver ───────────────────────────────────────────────
 
 export interface SegmentParseResult {
   trace: ParsedTrace;
@@ -983,13 +965,12 @@ export type SegmentParser = (
 ) => SegmentParseJob;
 
 /**
- * Parse one segment's raw (possibly still-gzipped) bytes in a worker via
- * the parse-buffer request: one worker per parse, terminated on settle
- * (T16's per-load lifecycle, reused per-segment - worker spawn is
- * negligible next to a segment parse; a persistent pool remains open on
- * the TraceWorkerFactory seam if profiling ever asks for one). The bytes
- * are CLONED across the boundary (see protocol.ts): the caller's copy -
- * a raw-cache entry - stays live.
+ * Parse one segment's raw (possibly still-gzipped) bytes in a worker via the
+ * parse-buffer request: one worker per parse, terminated on settle (worker
+ * spawn is negligible next to a segment parse; a persistent pool remains
+ * open on the TraceWorkerFactory seam if profiling ever asks for one). The
+ * bytes are CLONED across the boundary (see protocol.ts): the caller's copy
+ * - a raw-cache entry - stays live.
  */
 export const parseSegmentInWorker: SegmentParser = (bytes, opts = {}) => {
   const port = (opts.worker ?? defaultTraceWorkerFactory)();
@@ -1000,7 +981,7 @@ export const parseSegmentInWorker: SegmentParser = (bytes, opts = {}) => {
     resolveDone = resolve;
     rejectDone = reject;
   });
-  // Fire-and-forget friendliness (T16 precedent): pre-mark handled.
+  // Fire-and-forget friendliness: pre-mark handled.
   done.catch(() => {});
 
   /** Settle exactly once; always terminates (no live worker after). */
@@ -1012,7 +993,7 @@ export const parseSegmentInWorker: SegmentParser = (bytes, opts = {}) => {
   };
 
   port.onMessage((message: TraceWorkerResponse) => {
-    // Late messages (queued behind an abort) are dropped, T16 semantics.
+    // Late messages (queued behind an abort) are dropped.
     if (settled) return;
     switch (message.kind) {
       case "progress":
@@ -1069,11 +1050,10 @@ export const parseSegmentInWorker: SegmentParser = (bytes, opts = {}) => {
 // ── 7. The orchestrator ──────────────────────────────────────────────────
 
 /**
- * The store surface the segment window writes into; structurally
- * satisfied by the T07 ViewerStore (compile-checked in tests) without
- * lib/trace depending on src/store. This orchestrator is the slice's ONLY
- * writer: entries are replaced through a fresh Map per update (slice
- * replacement contract, architecture 2.2).
+ * The store surface the segment window writes into; structurally satisfied
+ * by the ViewerStore (compile-checked in tests) without lib/trace depending
+ * on src/store. This orchestrator is the slice's ONLY writer: entries are
+ * replaced through a fresh Map per update.
  */
 export interface SegmentsSliceStore {
   getState(): { segments: SegmentsSlice };
@@ -1099,17 +1079,17 @@ export interface SegmentWindowOptions {
   fetchBytes?: SegmentBytesFetcher;
   /** Segment parser; defaults to the worker-based parseSegmentInWorker. */
   parser?: SegmentParser;
-  /** Same-origin credential headers (features/02 B17). */
+  /** Same-origin credential headers. */
   headers?: Record<string, string>;
   residentBudgetBytes?: number;
   gzipCacheBudgetBytes?: number;
   thresholdFraction?: number;
   /**
    * Idle scheduler for prefetch starts; defaults to requestIdleCallback
-   * (setTimeout 0 fallback). Injectable, T07 scheduler precedent.
+   * (setTimeout 0 fallback). Injectable.
    */
   idle?: (callback: () => void) => void;
-  /** Per-segment fetch/parse progress (2.8 status-bar feedback edge). */
+  /** Per-segment fetch/parse progress. */
   onProgress?: (key: string, progress: TraceWorkerProgress) => void;
   /**
    * Per-segment failure surface. Failed keys are NOT hot-retried: a key
@@ -1133,10 +1113,7 @@ export interface SegmentWindowStats {
 }
 
 export interface SegmentWindow {
-  /**
-   * Drive the window from the viewport (chunk 2 wires this to a
-   * store subscription on the viewport slice). Idempotent per view.
-   */
+  /** Drive the window from the viewport. Idempotent per view. */
   setViewport(view: TimeRange): void;
   /** Current boundary-poll view (see computeWindowBoundaryPolls). */
   boundaryPolls(): WindowBoundaryPolls;
@@ -1181,8 +1158,8 @@ interface InflightJob {
  * where "fetching" covers the whole in-flight job (network or raw-cache
  * read + worker parse; an aborted job reverts to its pre-flight state).
  * A parse whose decompressed size exceeds the resident budget moves the
- * entry to the terminal "oversized" state instead of "parsed" (T17-audit
- * finding 2): never resident, never re-admitted, tier-1 rendering only.
+ * entry to the terminal "oversized" state instead of "parsed": never
+ * resident, never re-admitted, tier-1 rendering only.
  */
 export function createSegmentWindow(
   store: SegmentsSliceStore,
@@ -1280,8 +1257,8 @@ export function createSegmentWindow(
   const startJob = (key: string): void => {
     const entry = entriesNow().get(key);
     if (entry === undefined || entry.state === "parsed") return;
-    // "oversized" is terminal (T17-audit finding 2): the real size is
-    // known and can never fit - re-parsing it would restart the loop.
+    // "oversized" is terminal: the real size is known and can never fit -
+    // re-parsing it would restart the loop.
     if (entry.state === "oversized") return;
     if (inflight.has(key) || failed.has(key)) return;
     const job: InflightJob = {
@@ -1331,16 +1308,16 @@ export function createSegmentWindow(
         if (job.aborted || disposed) return;
         inflight.delete(key);
         if (rawByteLength > residentBudget) {
-          // T17-audit finding 2: the segment's real decompressed size can
-          // NEVER fit the resident window. Writing it as "parsed" would
-          // hand planEviction's hard clamp a mandatory eviction and the
-          // next admission a force-re-admit - a permanent parse -> evict
-          // loop with a ~2x-budget resident spike per viewport tick.
-          // Instead the parse is dropped on the spot and the entry moves
-          // to the honest terminal state: the learned size, invariants
-          // and edge evidence are kept (lane stability and boundary-poll
-          // continuity work exactly as across an eviction); the trace is
-          // not, so it never enters the resident accounting.
+          // The segment's real decompressed size can NEVER fit the resident
+          // window. Writing it as "parsed" would hand planEviction's hard
+          // clamp a mandatory eviction and the next admission a
+          // force-re-admit - a permanent parse -> evict loop with a
+          // ~2x-budget resident spike per viewport tick. Instead the parse
+          // is dropped on the spot and the entry moves to the honest
+          // terminal state: the learned size, invariants and edge evidence
+          // are kept (lane stability and boundary-poll continuity work
+          // exactly as across an eviction); the trace is not, so it never
+          // enters the resident accounting.
           writeEntries((next) => {
             const e = next.get(key);
             if (e === undefined) return;
@@ -1387,19 +1364,17 @@ export function createSegmentWindow(
   };
 
   /**
-   * Budget admission for a viewport (N19 window limit): need first,
-   * prefetch only into what remains. Estimates use real decompressed
-   * sizes when known. Shared by reconcile and the idle prefetch
-   * callbacks - the latter must re-run ADMISSION, not just geometry,
-   * before starting work (T17-audit finding 4).
+   * Budget admission for a viewport (window limit): need first, prefetch
+   * only into what remains. Estimates use real decompressed sizes when
+   * known. Shared by reconcile and the idle prefetch callbacks - the latter
+   * must re-run ADMISSION, not just geometry, before starting work.
    *
-   * Segments that can NEVER fit (real size learned oversized, T17-audit
-   * finding 2) are excluded from admission entirely - capToBudget's
-   * first-round force-admit clause must only ever see estimates or
-   * fitting sizes, or the parse -> evict loop returns. They still
-   * render via tier 1. Geometric sets are computed FIRST so an
-   * oversized need segment keeps contributing its neighbors to the
-   * prefetch geometry.
+   * Segments that can NEVER fit (real size learned oversized) are excluded
+   * from admission entirely - capToBudget's first-round force-admit clause
+   * must only ever see estimates or fitting sizes, or the parse -> evict
+   * loop returns. They still render via tier 1. Geometric sets are computed
+   * FIRST so an oversized need segment keeps contributing its neighbors to
+   * the prefetch geometry.
    */
   const planAdmission = (
     currentView: TimeRange
@@ -1442,12 +1417,11 @@ export function createSegmentWindow(
       pendingPrefetch.delete(key);
       if (disposed || view === null) return;
       // Re-verify at idle time: the viewport may have moved on, and the
-      // latest reconcile may have budget-DEFERRED this key even though
-      // it is still a geometric neighbor (T17-audit finding 4).
-      // Geometry alone is not admission: starting anyway would burn a
-      // fetch + parse that lands unprotected and is discarded by the
-      // next eviction pass, after transiently pushing resident past the
-      // trigger.
+      // latest reconcile may have budget-DEFERRED this key even though it is
+      // still a geometric neighbor. Geometry alone is not admission:
+      // starting anyway would burn a fetch + parse that lands unprotected
+      // and is discarded by the next eviction pass, after transiently
+      // pushing resident past the trigger.
       const { needPlan, prefetchPlan } = planAdmission(view);
       if (
         !needPlan.admitted.includes(key) &&
@@ -1467,8 +1441,8 @@ export function createSegmentWindow(
     const { needPlan, prefetchPlan } = planAdmission(currentView);
     const wanted = new Set([...needPlan.admitted, ...prefetchPlan.admitted]);
 
-    // Stale-fetch cancellation (2.8 hard edge): viewport jumps abort
-    // whatever is no longer wanted, fetch and parse phase alike.
+    // Stale-fetch cancellation: viewport jumps abort whatever is no longer
+    // wanted, fetch and parse phase alike.
     for (const [key, job] of [...inflight]) {
       if (!wanted.has(key)) abortJob(key, job);
     }
@@ -1479,10 +1453,10 @@ export function createSegmentWindow(
       if (!wanted.has(key)) failed.delete(key);
     }
 
-    // Eviction (2.8): fires past the trigger; need/prefetch protected up
-    // to the hard budget. Admitted-but-unparsed work is RESERVED so the
-    // room is freed BEFORE those parses land - resident bytes never have
-    // to overshoot the budget waiting for a completion-time pass (the
+    // Eviction: fires past the trigger; need/prefetch protected up to the
+    // hard budget. Admitted-but-unparsed work is RESERVED so the room is
+    // freed BEFORE those parses land - resident bytes never have to
+    // overshoot the budget waiting for a completion-time pass (the
     // GZIP_EXPANSION_ESTIMATE is deliberately above the observed ratio so
     // reservations over-cover; the hard clamp below is the backstop for
     // segments that expand beyond it).
@@ -1515,8 +1489,8 @@ export function createSegmentWindow(
           // Drop the parsed data (the 10x cost); keep extent, sizes,
           // invariants (lanes/axes stability) AND edgePolls (tiny; polls
           // crossing this segment must stay visible as truncated in the
-          // still-resident neighbors - T17-audit finding 1). Raw gzip
-          // bytes stay in the cache under its own budget.
+          // still-resident neighbors). Raw gzip bytes stay in the cache
+          // under its own budget.
           const { trace: _trace, ...kept } = entry;
           next.set(key, { ...kept, state: "evicted" });
           stats.evictions += 1;
@@ -1530,9 +1504,8 @@ export function createSegmentWindow(
     // straight back over the budget). By the next pass its learned real
     // size drives admission: segments that only COLLECTIVELY overshoot
     // (estimates undershot) are deferred by the capacity check, and a
-    // segment that can never fit at all was parked in "oversized" at
-    // parse completion (T17-audit finding 2) and filtered out above -
-    // neither shape can loop.
+    // segment that can never fit at all was parked in "oversized" at parse
+    // completion and filtered out above - neither shape can loop.
     const justEvicted = new Set(plan.evict);
     for (const key of needPlan.admitted) {
       if (!justEvicted.has(key)) startJob(key);

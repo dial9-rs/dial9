@@ -1,11 +1,7 @@
-// lib/trace/query.ts - per-interaction read helpers (T09; architecture
-// 2.7; features/02 G13/G14). Mechanism ported out of viewer.html: the
-// poll-at-timestamp binary search (viewer.html:2618-2626), the
+// Per-interaction read helpers: poll-at-timestamp binary search, the
 // containing-span scan and ancestor walk from the lane-click handler
-// (viewer.html:5404-5439, cycle-guarded), plus task lookup on a poll hit.
-// `enclosingSpans` already lives in the frozen core and is re-exported
-// typed. Selection state, rendering and DOM hit-testing stay with the
-// page/component tickets.
+// (cycle-guarded), and task lookup on a poll hit. `enclosingSpans` is
+// re-exported typed from the frozen core.
 
 // MUST precede the trace_analysis.js import: its factory reads the
 // TraceParser browser global in bundled entries (see core-globals.ts).
@@ -38,10 +34,9 @@ export function findSpanAt<S extends { start: number; end: number }>(
 }
 
 /**
- * The task under a lane click (features/02 G13): the poll at `ns`, if any,
- * and its task. `taskId` is null when the poll carries no task - the
- * parser materializes taskId 0 for traces without task tracking, and the
- * legacy handler treated that as "no task" (truthy check); preserved here.
+ * The task under a lane click: the poll at `ns`, if any, and its task.
+ * `taskId` is null when the poll carries no task - the parser materializes
+ * taskId 0 for traces without task tracking, treated here as "no task".
  */
 export function taskAt(
   polls: readonly PollSpan[],
@@ -54,9 +49,8 @@ export function taskAt(
 
 /**
  * Find a span whose time range contains `ns` AND which has a segment
- * actively executing on `workerId` at `ns` - the span under a lane click
- * (features/02 G14). First match in allSpans order (sorted by start),
- * matching the legacy scan.
+ * actively executing on `workerId` at `ns` - the span under a lane click.
+ * First match in allSpans order (sorted by start).
  */
 export function findContainingSpan(
   allSpans: readonly TracingSpan[],
@@ -83,7 +77,7 @@ export function spansById(
   return byId;
 }
 
-/** Defense against parent cycles in malformed span data (legacy guard). */
+/** Defense against parent cycles in malformed span data. */
 export const SPAN_ANCESTRY_CYCLE_LIMIT = 1024;
 
 /** Result of walking a span's ancestor chain at an instant. */
@@ -97,15 +91,15 @@ export interface SpanAncestry {
 /**
  * Walk up the parent chain from `span` to the outermost ancestor whose
  * [start, end] still contains `ns`, collecting the chain's span ids along
- * the way (the span-panel focus + highlight set of features/02 G14). The
- * walk stops at a missing parent, a parent not containing `ns`, or after
+ * the way (the span-panel focus + highlight set). The walk stops at a
+ * missing parent, a parent not containing `ns`, or after
  * SPAN_ANCESTRY_CYCLE_LIMIT steps.
  *
- * Guard note: the legacy walk (viewer.html:5421-5437) guarded on the id
- * SET's size, which stops growing once a cycle revisits a span - a parent
- * cycle shorter than the limit hung the page. The port counts iterations
- * instead: identical behavior on well-formed data (a distinct-ancestor
- * chain also stops after 1024 steps), but actual cycles terminate.
+ * Guard note: guarding on the id SET's size stops growing once a cycle
+ * revisits a span - a parent cycle shorter than the limit would hang. This
+ * counts iterations instead: identical behavior on well-formed data (a
+ * distinct-ancestor chain also stops after 1024 steps), but actual cycles
+ * terminate.
  */
 export function spanAncestryAt(
   span: TracingSpan,

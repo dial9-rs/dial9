@@ -1,21 +1,9 @@
-// lib/canvas/dpr.ts - DPR-aware canvas backing-store sizing (T08;
-// docs/ui-inventory/03-performance-findings.md F3, architecture 2.3).
-//
-// The measured problem (F3): the legacy renderers reassign canvas.width/
-// canvas.height on EVERY render invocation (renderLane viewer.html:2963,
-// renderCrosshair :4779), which reallocates the backing store - and
-// clears the canvas - even when the size is unchanged. The design rule:
-// canvas backing stores resize only on geometry change.
-//
-// Split so the decision is Node-testable without a DOM:
-//
-// - planBackingStore(prev, next): PURE - given the last-applied geometry
-//   and the requested one, decide whether a resize is needed and what the
-//   device-pixel size is.
-// - createCanvasSizer(canvas): the thin stateful binding that applies the
-//   plan to a real canvas. Typed against a minimal structural surface
-//   (DprCanvas) so tests drive it with a recording stub;
-//   HTMLCanvasElement satisfies it.
+// DPR-aware canvas backing-store sizing. Backing stores resize only on
+// geometry change: reassigning canvas.width/height on every render
+// reallocates the store and clears the canvas even when the size is
+// unchanged. planBackingStore is the pure decision (Node-testable without
+// a DOM); createCanvasSizer is the thin stateful binding onto a real
+// canvas.
 
 /** The inputs that determine a canvas backing store's size. */
 export interface CanvasGeometry {
@@ -40,10 +28,9 @@ export interface BackingStorePlan {
  * Decide whether a canvas backing store needs resizing. Pure - no DOM.
  *
  * `changed` is an exact comparison against the last-APPLIED geometry
- * (never a read-back of canvas.width, whose integer truncation would
- * make fractional sizes always look "changed"). Device sizes round to
- * the nearest device pixel; the legacy code let the canvas setter
- * truncate instead, which could undersize the store by up to 1px.
+ * (never a read-back of canvas.width, whose integer truncation would make
+ * fractional sizes always look "changed"). Device sizes round to the
+ * nearest device pixel so the store is never undersized by up to 1px.
  */
 export function planBackingStore(
   prev: CanvasGeometry | null,
@@ -90,16 +77,15 @@ export interface CanvasSizer<Ctx extends DprTransformContext> {
    * return its 2d context with the DPR transform applied.
    *
    * - Reallocates the backing store ONLY when the geometry differs from
-   *   the last ensure() (F3). The unchanged path performs zero canvas
-   *   writes besides setTransform.
-   * - Because the unchanged path does not touch canvas.width, it does
-   *   NOT clear the canvas; renderers must paint their full area (every
-   *   panel starts with a background fill, so this holds today).
+   *   the last ensure(). The unchanged path performs zero canvas writes
+   *   besides setTransform.
+   * - Because the unchanged path does not touch canvas.width, it does NOT
+   *   clear the canvas; renderers must paint their full area (every panel
+   *   starts with a background fill, so this holds today).
    * - The transform is reset with setTransform (not scale()) so repeated
    *   calls never compound the scale.
    *
-   * `dpr` defaults to the live devicePixelRatio (1 where unavailable),
-   * matching the legacy `devicePixelRatio || 1` call sites.
+   * `dpr` defaults to the live devicePixelRatio (1 where unavailable).
    */
   ensure(cssWidth: number, cssHeight: number, dpr?: number): Ctx;
   /** The last-applied geometry; null before the first ensure(). */

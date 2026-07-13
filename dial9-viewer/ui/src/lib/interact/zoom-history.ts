@@ -1,20 +1,7 @@
-// lib/interact/zoom-history.ts - the bounded zoom-history stack behind the
-// unified `z` (undo last zoom) key (T20; 04-ux-findings.md K4, mock
-// keyboard.html "z - undo last zoom (view history)").
-//
-// One generic mechanism; its chunk-1 consumer is the flamegraph page's
-// frame-zoom history over the frozen widget's zoom paths
-// (src/pages/flamegraph/fg-keys.ts). The viewer's store-owned viewport
-// history (its ViewportSlice) reuses this same stack when T23 wires the
-// viewer surfaces in chunk 2.
-//
-// Zoom history is STORE/page state, deliberately NOT URL state: the T19
-// view-state codec owns the hash, and carrying an undo stack in a share
-// link is chunk-2 territory if ever (see docs/ui-inventory/
-// 05-url-view-state.md). Semantics: `record` tracks the CURRENT state and
-// pushes the previous one; `undo` pops back one state. The stack is
-// bounded (oldest entries drop) so a long session cannot grow it
-// unboundedly.
+// The bounded zoom-history stack behind the unified `z` (undo last zoom)
+// key. A generic mechanism: `record` tracks the CURRENT state and pushes
+// the previous one; `undo` pops back one state. The stack is bounded
+// (oldest entries drop) so a long session cannot grow it unboundedly.
 
 export interface ZoomHistoryOptions<T> {
   /** Max undo depth; oldest entries drop beyond it. Default 64. */

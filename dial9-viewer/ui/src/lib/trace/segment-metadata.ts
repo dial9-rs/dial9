@@ -1,30 +1,19 @@
-// lib/trace/segment-metadata.ts - the trace-embedded service/host identity
-// (T45; features/02 C1a; closes #68). SegmentMetadata (service, host) is
-// parsed into `ParsedTrace.segmentMetadata` by the frozen core but was never
-// surfaced in the migrated viewer. This module is the ONE place that pins the
-// writer-side key-name convention and reconciles the two distinct sources of
-// svc/host the viewer sees.
-//
-// TWO SOURCES, reconciled explicitly:
+// The trace-embedded service/host identity and its reconciliation with the
+// key-derived svc/host the viewer also sees. Two sources:
 //   1. TRACE-EMBEDDED metadata - `segmentMetadata.get("service"|"host")`,
-//      written by the producer (dial9-utils S3 source `.metadata(...)`, or a
-//      DiskWriter `.segment_metadata(...)` caller). This is the authoritative
-//      value: it travels inside the trace.
+//      written by the producer. Authoritative: it travels inside the trace.
 //   2. KEY-DERIVED params - the `svc`/`host` URL query params the S3 browser
-//      page appends when it opens the viewer (lib/trace/title.ts
-//      `traceTitleParams`, from parsing the S3 object KEY). This is a hint
-//      derived from the storage path, not the trace body.
+//      page appends when it opens the viewer (title.ts `traceTitleParams`,
+//      from parsing the S3 object KEY). A hint from the storage path, not the
+//      trace body.
 //
-// Rule (T45 DoD): embedded metadata WINS when both are present; a disagreeing
-// key-derived value is preserved as a tooltip. When only the key-derived value
-// exists (e.g. an old trace with no embedded metadata, loaded from an S3 key),
-// it is shown as a fallback so the info block is never emptier than legacy.
+// Rule: embedded metadata WINS when both are present; a disagreeing
+// key-derived value is preserved as a tooltip. When only the key-derived
+// value exists (e.g. an old trace with no embedded metadata), it is shown as
+// a fallback.
 //
-// The key NAMES are literal strings, confirmed against the writer:
-//   - dial9-utils/src/s3.rs: `.metadata("service", ...)` / `.metadata("host", ...)`
-//   - dial9-viewer/src/bin/gen_fixtures.rs `standard_metadata()`:
-//     ("service", ...), ("host", ...)
-//   - dial9-core writer roundtrip test + the metrics-service example emit "service"
+// The key NAMES ("service", "host") are literal strings, confirmed against
+// the writer side.
 
 import type { ParsedTrace, SegmentIdentity } from "../../types/trace.js";
 

@@ -1,7 +1,4 @@
-// lib/trace/title.ts - trace title metadata (T09; architecture 2.7,
-// features/01 I3). Ported out of the inline `traceTitleParams` in
-// index.html (index.html:1686-1702), which both the viewer and the
-// flamegraph render in their headers.
+// Trace title metadata, rendered in the viewer and flamegraph headers.
 
 import { formatEpoch, parseKey, type EpochFormatOptions } from "./keys.js";
 
@@ -11,17 +8,15 @@ import { formatEpoch, parseKey, type EpochFormatOptions } from "./keys.js";
  *
  * - `svc`: unique services, ", "-joined (omitted when none parse).
  * - `host`: set ONLY when every parsed key agrees on a single host;
- *   multi-host selections drop it (legacy behavior, features/01 I3).
+ *   multi-host selections drop it.
  * - `from`/`to`: formatted min/max segment epoch; `from` alone when only
  *   one distinct epoch exists.
  * - `segs`: total number of selected keys, always set.
  *
  * Unknown-layout keys (see keys.ts) carry no service/host, so they never
- * contribute to `svc`/`host` - a deliberate consequence of the ADR-0004
- * section 1 defect fix: the legacy code fed their positionally shifted
- * fields into the title (Finding 1's `svc=host-0`). Their FILENAME epoch
- * is layout-independent, though, so it still contributes to the `from`/`to`
- * window (T15; the legacy title carried the window for these keys too).
+ * contribute to `svc`/`host` - the deliberate consequence of the parser's
+ * defect fix. Their FILENAME epoch is layout-independent, though, so it
+ * still contributes to the `from`/`to` window.
  */
 export function traceTitleParams(
   keys: readonly string[],

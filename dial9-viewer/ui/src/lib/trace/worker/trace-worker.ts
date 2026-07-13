@@ -1,8 +1,7 @@
-// lib/trace/worker/trace-worker.ts - browser binding of the worker load
-// body: the Vite worker entry, built via the statically-detected
-// `new Worker(new URL("./worker/trace-worker.ts", import.meta.url),
-// { type: "module" })` in load.ts. All logic lives in body.ts (pure
-// module); this file only wires the DedicatedWorkerGlobalScope message
+// Browser binding of the worker load body: the Vite worker entry, built via
+// the statically-detected `new Worker(new URL("./worker/trace-worker.ts",
+// import.meta.url), { type: "module" })` in load.ts. All logic lives in
+// body.ts; this file only wires the DedicatedWorkerGlobalScope message
 // plumbing. The Node binding (worker_threads, tests) is
 // node-worker-entry.mjs.
 
