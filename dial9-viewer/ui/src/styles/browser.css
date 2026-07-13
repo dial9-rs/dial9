@@ -18,7 +18,10 @@ header {
     display: flex; align-items: center; gap: 12px;
 }
 header h1 { font-size: 1.1em; color: #6c63ff; }
-header span { font-size: 0.8em; color: #666; }
+/* T37 F6 contrast: legacy #666 on #16213e was ~2.8:1 (axe serious). Lifted to
+   a muted grey that clears 4.5:1 on the header/controls background. Brighter
+   text on this all-dark page can only raise contrast, never regress it. */
+header span { font-size: 0.8em; color: #9a9ab2; }
 header .spacer { flex: 1; }
 .controls {
     padding: 12px 20px; background: #16213e;
@@ -45,7 +48,10 @@ button.active { background: #6c63ff; border-color: #6c63ff; color: #fff; }
 .quick-btns { display: flex; gap: 4px; }
 .quick-btns button.selected { background: #6c63ff; border-color: #6c63ff; color: #fff; }
 .main-area { flex: 1; overflow-y: auto; padding: 0; display: flex; flex-direction: column; }
-.status { padding: 40px; text-align: center; color: #666; font-size: 0.9em; }
+/* T37 F6/F4 contrast: the empty-state / loading status is the browser page's
+   "teach the next step" surface (F4). Legacy #666 (~2.8:1) lifted to clear
+   4.5:1 so the guidance is legible. */
+.status { padding: 40px; text-align: center; color: #9a9ab2; font-size: 0.9em; }
 .status.error { color: #ff6b6b; }
 /* Truncation / partial-results warning banner (Browse mode). */
 .warning-banner {
@@ -203,8 +209,11 @@ td input[type="checkbox"] { accent-color: #6c63ff; }
     display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
 }
 .actions .count { font-size: 0.8em; color: #888; margin-left: auto; }
+/* T37 F6/F4 contrast: the footer carries the demo-trace + drop-file
+   affordances (F4). Legacy #444 on #1a1a2e was ~1.75:1 (axe serious) - the
+   worst node on the page. Lifted to a muted grey that clears 4.5:1. */
 footer {
-    padding: 6px 20px; font-size: 0.75em; color: #444;
+    padding: 6px 20px; font-size: 0.75em; color: #8b8ba3;
     border-top: 1px solid #222; flex-shrink: 0;
 }
 footer a { color: #6c63ff; text-decoration: none; }
