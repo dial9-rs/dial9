@@ -19,6 +19,27 @@ export type {
 export { createZoomHistory } from "./zoom-history.js";
 export type { ZoomHistory, ZoomHistoryOptions } from "./zoom-history.js";
 
+export { createPointerMachine, panWindowByPixels, DRAG_INTENT_PX } from "./pointer.js";
+export type {
+  PointerMachine,
+  PointerCommand,
+  PointerDownInput,
+  PointerMoveInput,
+  DragSnapshot,
+  GestureKind,
+} from "./pointer.js";
+
+export { wheelZoomIntent, WHEEL_ZOOM_FACTOR } from "./wheel.js";
+export type { WheelInput, WheelZoomIntent } from "./wheel.js";
+
+export { createKbSelectionMachine, MIN_SELECTION_NS } from "./kb-selection.js";
+export type {
+  KbSelectionMachine,
+  KbSelectionCommand,
+  SelectionMode,
+  ExtendDirection,
+} from "./kb-selection.js";
+
 export {
   createSearchPalette,
   filterPaletteItems,

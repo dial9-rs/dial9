@@ -247,7 +247,7 @@ function populatedState(): StoreState {
     transient: {
       mouseNs: 4_200,
       hoverEventTs: null,
-      drag: { kind: "region-select", startX: 120, startNs: 2_000, moved: true },
+      drag: { kind: "region-select", startX: 120, startNs: 2_000, curNs: 2_500, moved: true },
       keyboardSelection: {
         kind: "zoom-select",
         startNs: 2_000,

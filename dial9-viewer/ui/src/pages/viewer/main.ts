@@ -20,6 +20,7 @@ import { createToasts } from "./toasts.js";
 import { mountShell } from "./shell.js";
 import { mountLanes } from "../../components/canvas/lanes/index.js";
 import { mountOverlay } from "../../components/overlay/index.js";
+import { mountLaneInteraction } from "./lane-interaction.js";
 import { initViewportFromTrace } from "./viewport-init.js";
 
 // Dual-UI switch (T38): render the always-visible "Switch to legacy UI"
@@ -44,7 +45,7 @@ function boot(): void {
   // ARIA live region (A16): mount it now so screen-reader announcements
   // (keyboard selection start/complete, zoom confirmations) have a target.
   // T23 dispatches through it; T21 lands the region.
-  getAnnouncer();
+  const announcer = getAnnouncer();
 
   // App chrome: esc-cascade mechanism + help overlay + toasts.
   const esc = createEscCascade();
@@ -69,14 +70,23 @@ function boot(): void {
   // geometry only after the shell's writes have settled.
   const overlay = mountOverlay(root, shell.trackColumn, store);
 
-  // Initialize the viewport from the trace the moment it loads.
+  // Initialize the viewport from the trace the moment it loads. Registered
+  // BEFORE the lane interaction so its zoom-history baseline records the
+  // fitted view (both subscribe to `trace`; order = registration order).
   initViewportFromTrace(store);
 
-  // Unified keyboard: `?` toggles help, Escape runs the cascade then falls
-  // back to clearing the task selection + refocusing the timeline (the
-  // legacy D9 fallback). The n/p/g/f/z/WASD viewer bindings are T23's; the
-  // router here is the substrate they extend.
+  // Lane interaction (T23): pointer pan/zoom/region gestures, wheel zoom,
+  // click-select, the H10 selection overlay, and the H1-H4 viewport controls.
+  // Its key bindings (arrows/WASD/z + the kb-selection Escape/Enter) join the
+  // unified router BEFORE the entry's `?`/Escape fallbacks so a kb-selection
+  // cancel/confirm wins, and the generic Escape cascade runs otherwise.
+  const laneInteraction = mountLaneInteraction(root, shell.trackColumn, store, { announcer });
+
+  // Unified keyboard: T23's lane bindings first, then `?` toggles help and
+  // Escape runs the cascade + clears the task selection + refocuses the
+  // timeline (the legacy D9 fallback). The router is the T20 substrate.
   mountKeyRouter(window, [
+    ...laneInteraction.keyBindings,
     { key: "?", onKey: () => help.toggle() },
     {
       key: "Escape",
@@ -111,6 +121,7 @@ function boot(): void {
   // Teardown hook for HMR / tests (not strictly needed in production).
   window.addEventListener("beforeunload", () => {
     load.abort();
+    laneInteraction.dispose();
     overlay.dispose();
     lanes.dispose();
     shell.dispose();

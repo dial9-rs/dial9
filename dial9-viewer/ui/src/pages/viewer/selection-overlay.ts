@@ -1,0 +1,155 @@
+// src/pages/viewer/selection-overlay.ts - the H10 selection overlay: the
+// blue (region) / teal (zoom) box drawn over the lanes during a Shift/Alt drag
+// or a keyboard selection, and the persistent box for a retained region
+// (features/02 H10; ported from viewer.html #selection-overlay :728-735 +
+// updateSelOverlay/updateKbSelOverlay :5184-5209).
+//
+// A store RENDER SURFACE, not a handler: the pointer / keyboard machines write
+// `transient.drag` / `transient.keyboardSelection` (and, on a region confirm,
+// `selection.sidebarRange`); THIS subscriber reads those slices on the store's
+// RAF tick and positions one absolutely-placed div. So it obeys F2 (no render
+// from the input handler) and F3 (geometry is read once, before the write) -
+// the same discipline as the T24 crosshair overlay, on the same track column.
+//
+// H10 persistence: a Shift region stays boxed until the sidebar clears
+// `selection.sidebarRange` (T32 owns the sidebar close). The transient
+// drag/keyboard box takes precedence while a selection is in flight.
+
+import { assertInScheduledRender } from "../../store/store.js";
+import { timePanelLayout } from "../../lib/canvas/layout.js";
+import type { TimePanelLayout } from "../../lib/canvas/layout.js";
+import type { ViewerStore } from "../../store/store.js";
+import type { SelectionSlice, TransientSlice } from "../../types/state.js";
+
+const OVERLAY_CLASS = "d9-selection-overlay";
+const ZOOM_MODIFIER = "zoom";
+
+/** Which encoding the box uses: region (blue) or zoom (teal). */
+export type SelectionMode = "region" | "zoom";
+
+/** The active selection extent to draw, resolved from the store slices. */
+export interface SelectionRegion {
+  startNs: number;
+  endNs: number;
+  mode: SelectionMode;
+}
+
+/**
+ * The single source of "what box to show" (H10 precedence), pure over the two
+ * slices so it is unit-testable:
+ *   1. a live keyboard selection (Shift/Alt + arrows);
+ *   2. else a live drag region/zoom that has crossed the 3px intent;
+ *   3. else a retained region (selection.sidebarRange) - the persistent
+ *      Shift selection that lives until the sidebar closes;
+ *   4. else nothing (box hidden).
+ * A "pan" drag draws no box (it moves the viewport, not a selection).
+ */
+export function activeSelectionRegion(
+  transient: TransientSlice,
+  selection: SelectionSlice,
+): SelectionRegion | null {
+  const kb = transient.keyboardSelection;
+  if (kb !== null) {
+    return {
+      startNs: Math.min(kb.startNs, kb.cursorNs),
+      endNs: Math.max(kb.startNs, kb.cursorNs),
+      mode: kb.kind === "zoom-select" ? "zoom" : "region",
+    };
+  }
+  const drag = transient.drag;
+  if (drag !== null && drag.kind !== "pan" && drag.moved) {
+    return {
+      startNs: Math.min(drag.startNs, drag.curNs),
+      endNs: Math.max(drag.startNs, drag.curNs),
+      mode: drag.kind === "zoom-select" ? "zoom" : "region",
+    };
+  }
+  const retained = selection.sidebarRange;
+  if (retained !== null) {
+    return { startNs: retained.startNs, endNs: retained.endNs, mode: "region" };
+  }
+  return null;
+}
+
+/** Horizontal placement (CSS px, column-local) of the box for `region`. */
+export interface SelectionBox {
+  left: number;
+  width: number;
+}
+
+/**
+ * Box left/width from a region and the shared layout. Both edges use the
+ * layout's CLAMPED mapping so a selection extending outside the visible window
+ * (a keyboard cursor panned past an edge) still renders inside the draw area,
+ * never over the label gutter. Pure - the alignment invariant (A13/N4): the
+ * box maps ns->x through the same layout the lanes use.
+ */
+export function selectionBox(region: SelectionRegion, layout: TimePanelLayout): SelectionBox {
+  const x1 = layout.nsToPanelXClamped(region.startNs);
+  const x2 = layout.nsToPanelXClamped(region.endNs);
+  return { left: Math.min(x1, x2), width: Math.max(1, Math.abs(x2 - x1)) };
+}
+
+export interface MountedSelectionOverlay {
+  dispose(): void;
+}
+
+/**
+ * Mount the selection overlay against `store`, positioning one div inside the
+ * shell's track column. Subscribes to the slices that move the box
+ * (transient = the live gesture, viewport = pan/zoom re-maps ns->x, selection
+ * = the retained range) and repositions it on each tick.
+ */
+export function mountSelectionOverlay(
+  trackColumn: HTMLElement,
+  store: ViewerStore,
+): MountedSelectionOverlay {
+  function ensureEl(): HTMLElement {
+    let el = trackColumn.querySelector<HTMLElement>(`.${OVERLAY_CLASS}`);
+    if (el === null) {
+      el = trackColumn.ownerDocument.createElement("div");
+      el.className = OVERLAY_CLASS;
+      el.setAttribute("aria-hidden", "true");
+      trackColumn.appendChild(el);
+    }
+    return el;
+  }
+
+  function render(): void {
+    assertInScheduledRender("selection-overlay render");
+    const state = store.getState();
+    const el = ensureEl();
+    const region = activeSelectionRegion(state.transient, state.selection);
+    if (region === null) {
+      el.style.display = "none";
+      return;
+    }
+    // Read geometry once (F3): column width + the lanes-matching scrollbar
+    // gutter, then the shared layout - identical inputs to the lanes/overlay.
+    const pw = trackColumn.clientWidth;
+    const scrollbarW = Math.max(0, trackColumn.offsetWidth - trackColumn.clientWidth);
+    const { viewStart, viewEnd } = state.viewport;
+    if (viewEnd <= viewStart) {
+      el.style.display = "none";
+      return;
+    }
+    const layout = timePanelLayout({ pw, scrollbarW, viewStart, viewEnd });
+    const box = selectionBox(region, layout);
+    el.classList.toggle(ZOOM_MODIFIER, region.mode === "zoom");
+    el.style.left = `${box.left}px`;
+    el.style.width = `${box.width}px`;
+    el.style.top = "0px";
+    el.style.height = `${trackColumn.scrollHeight}px`;
+    el.style.display = "block";
+  }
+
+  const unsubscribe = store.subscribe(["transient", "viewport", "selection"], () => render());
+  render();
+
+  return {
+    dispose(): void {
+      unsubscribe();
+      trackColumn.querySelector<HTMLElement>(`.${OVERLAY_CLASS}`)?.remove();
+    },
+  };
+}
