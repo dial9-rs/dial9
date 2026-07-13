@@ -17,6 +17,8 @@ import { createEscCascade, ESC_PRIORITY } from "./esc-cascade.js";
 import { mountViewerHelp } from "./help.js";
 import { createToasts } from "./toasts.js";
 import { mountShell } from "./shell.js";
+import { mountMinimap } from "./minimap.js";
+import { createStatusBar } from "./status-bar.js";
 import { mountLoadChrome } from "./load-chrome.js";
 import { mountLanes } from "../../components/canvas/lanes/index.js";
 import { mountOverlay } from "../../components/overlay/index.js";
@@ -74,6 +76,28 @@ function boot(): void {
   // geometry only after the shell's writes have settled.
   const overlay = mountOverlay(root, shell.trackColumn, store);
 
+  // Overview minimap (T35): tier-1 density + POI ticks + a draggable viewport
+  // box, filling the shell's minimap host. Drag/click dispatch store viewport
+  // updates (never a direct render). No live aggregate source is wired in the
+  // viewer yet, so it renders from the T17 segments slice + the whole-trace
+  // event histogram; the aggregate seam stays open for a scope-aware ticket.
+  const minimap = mountMinimap(shell.minimapRegion, store);
+
+  // Status bar (T35): selection line (04 F7), view range, segment fetch/parse
+  // progress (the 2.8 feedback surface), the copy-link button (T19), and the
+  // key hints. The copy-link copies the live URL; when the T19 view-state URL
+  // sync is wired into the viewer it passes a `beforeCopyLink` flush here.
+  const statusBar = createStatusBar(shell.statusRegion, store, {
+    clearSelection: () => {
+      store.update("selection", {
+        selectedTaskId: null,
+        spanFocus: null,
+        focusedSpanId: null,
+        pinnedEvent: null,
+      });
+    },
+  });
+
   // Initialize the viewport from the trace the moment it loads. Registered
   // BEFORE the lane interaction so its zoom-history baseline records the
   // fitted view (both subscribe to `trace`; order = registration order).
@@ -125,6 +149,8 @@ function boot(): void {
   // Teardown hook for HMR / tests (not strictly needed in production).
   window.addEventListener("beforeunload", () => {
     loadChrome?.dispose();
+    statusBar.dispose();
+    minimap.dispose();
     laneInteraction.dispose();
     overlay.dispose();
     lanes.dispose();

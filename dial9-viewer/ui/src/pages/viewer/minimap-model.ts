@@ -180,6 +180,30 @@ function worseCoverage(a: BinCoverage, b: BinCoverage): BinCoverage {
 
 // ── Density bins ─────────────────────────────────────────────────────────
 
+/**
+ * Bin a set of timestamps into `resolution` counts over `range` (the
+ * whole-trace event histogram source, component-derived once per trace). Out
+ * of range timestamps are dropped. Returns raw counts (computeDensityBins
+ * normalizes on resample).
+ */
+export function binTimestamps(
+  times: readonly number[],
+  range: MinimapRange,
+  resolution: number,
+): number[] {
+  const span = range.endNs - range.startNs;
+  if (span <= 0 || resolution <= 0) return [];
+  const bins = new Array<number>(resolution).fill(0);
+  for (const t of times) {
+    if (t < range.startNs || t > range.endNs) continue;
+    let idx = Math.floor(((t - range.startNs) / span) * resolution);
+    if (idx >= resolution) idx = resolution - 1;
+    if (idx < 0) idx = 0;
+    bins[idx] = (bins[idx] ?? 0) + 1;
+  }
+  return bins;
+}
+
 /** Resample a normalized source series to `binCount` bins (nearest-neighbor). */
 function resample(src: readonly number[], binCount: number): number[] {
   const max = src.reduce((m, v) => (v > m ? v : m), 0) || 1;
