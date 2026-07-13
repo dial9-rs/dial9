@@ -13,6 +13,10 @@ import "../../styles/viewer.css";
 import { mountKeyRouter } from "../../lib/interact/index.js";
 import { getAnnouncer } from "../../lib/interact/announce.js";
 import { createViewerStore } from "./store.js";
+import {
+  hydrateTrackPrefs,
+  mountTrackPrefsPersistence,
+} from "./track-management.js";
 import { createEscCascade, ESC_PRIORITY } from "./esc-cascade.js";
 import { mountViewerHelp } from "./help.js";
 import { createToasts } from "./toasts.js";
@@ -41,6 +45,14 @@ function boot(): void {
   }
 
   const store = createViewerStore();
+
+  // Track management persistence (T36; headline DoD: survives reload). Hydrate
+  // the saved track order + collapse map into uiPrefs BEFORE the shell mounts
+  // so the first paint reflects them, then subscribe to persist future
+  // changes. Together they close the reload round-trip (hydrate reads what the
+  // previous session's subscriber wrote).
+  hydrateTrackPrefs(store);
+  const disposeTrackPrefs = mountTrackPrefsPersistence(store);
 
   // ARIA live region (A16): mount it now so screen-reader announcements
   // (keyboard selection start/complete, zoom confirmations) have a target.
@@ -141,6 +153,7 @@ function boot(): void {
 
   // Teardown hook for HMR / tests (not strictly needed in production).
   window.addEventListener("beforeunload", () => {
+    disposeTrackPrefs();
     loadChrome?.dispose();
     laneInteraction.dispose();
     overlay.dispose();

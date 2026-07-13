@@ -348,6 +348,65 @@ body {
 }
 .d9-track-canvas { display: block; }
 
+/* ── Track management: collapse caret + drag-reorder grip (T36; amends
+   section O - the fold BEHAVIOR survives, one-line-fold presentation retired
+   by S1). The affordances overlay a reserved strip at the LEFT edge of the
+   label gutter so the frozen per-track labels are not modified; the strip is
+   pointer-events:none except the two controls, so the rest of the label (e.g.
+   the spans copy buttons) stays interactive. ── */
+.d9-track-manage { position: relative; }
+/* Reserve room for the strip so it never covers the label text / copy buttons. */
+.d9-track-manage .d9-track-label { padding-left: 34px; }
+.d9-track-manage-strip {
+    position: absolute;
+    left: 2px;
+    top: 0;
+    bottom: 0;
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 1px;
+    pointer-events: none;
+    z-index: 2;
+}
+.d9-track-caret,
+.d9-track-grip {
+    pointer-events: auto;
+    width: 15px;
+    height: 18px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 11px;
+    line-height: 1;
+    background: transparent;
+    border: 0;
+    padding: 0;
+    color: var(--d9-accent);
+    cursor: pointer;
+}
+/* CSS-driven caret (legacy O3 was a ::before chevron): down = expanded,
+   right = collapsed. Keeps the glyph out of the TS source. */
+.d9-track-caret::before { content: "\25BE"; }
+.d9-track-manage.is-collapsed .d9-track-caret::before { content: "\25B8"; }
+.d9-track-caret:focus-visible {
+    outline: 2px solid var(--d9-accent);
+    outline-offset: 1px;
+    border-radius: 3px;
+}
+.d9-track-grip {
+    color: var(--d9-fg-muted);
+    cursor: grab;
+}
+.d9-track-grip::before { content: "\2261"; } /* triple bar = drag handle */
+.d9-track-grip:active { cursor: grabbing; }
+/* Collapsed (label-only, legacy O1 24px): hide the drawing body. Covers both
+   body variants (spans/events) and the canvas-wrap variants (cpu/queue). */
+.d9-track-manage.is-collapsed .d9-track-body,
+.d9-track-manage.is-collapsed .d9-track-canvas-wrap {
+    display: none;
+}
+
 /* ── Worker-lanes legend (G19 + 04 F3): non-interactive ribbon over the
    lanes canvas wrap; explains every in-lane mark incl. the q:NN label. ── */
 .d9-lanes-legend {

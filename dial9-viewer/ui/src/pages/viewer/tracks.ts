@@ -17,10 +17,18 @@
 // backing store - F3: geometry-change-only resizes via createCanvasSizer).
 
 import { html, type TemplateResult } from "lit-html";
+import { repeat } from "lit-html/directives/repeat.js";
 import { createCanvasSizer } from "../../lib/canvas/dpr.js";
 import type { CanvasSizer } from "../../lib/canvas/dpr.js";
-import { LABEL_W, TRACKS, trackGeometry } from "./track-layout.js";
-import type { TrackSpec } from "./track-layout.js";
+import { LABEL_W, trackGeometry } from "./track-layout.js";
+import type { TrackId, TrackSpec } from "./track-layout.js";
+import {
+  COLLAPSED_TRACK_H,
+  isCollapsed,
+  isManageableTrack,
+  orderedTracks,
+  type TrackManageActions,
+} from "./track-management.js";
 import { renderTimeAxis, type AxisInputs } from "./axis.js";
 import { isTrackClaimed } from "./track-renderers.js";
 import { renderCpuTrack, type CpuInputs } from "./cpu.js";
@@ -48,11 +56,41 @@ export interface TracksViewModel {
    * it.
    */
   cpu: CpuInputs;
+  /**
+   * Track management (T36; amended section O), lifted from uiPrefs by the
+   * shell. `trackOrder` reorders the manageable analysis tracks; `collapsed`
+   * overrides a track's height to label-only. A collapsed track stays in the
+   * visible list (row present, canvas hidden) so re-expanding re-paints it
+   * from CURRENT windowed state (T17-audit notes 6-7: windowing respected).
+   */
+  trackOrder: readonly string[];
+  collapsed: Readonly<Record<string, boolean>>;
 }
 
-/** The tracks visible for a view model (task-detail only when selected). */
+/**
+ * The tracks visible for a view model, in the user's order (T36): apply
+ * `trackOrder` (manageable tracks permuted, structural tracks pinned), then
+ * drop the selection-only task-detail track unless a task is selected.
+ * Collapsed tracks REMAIN visible (label-only) - collapse is a height
+ * override, not a hide - so this is order + selection filtering only.
+ */
 export function visibleTracks(vm: TracksViewModel): TrackSpec[] {
-  return TRACKS.filter((t) => !t.selectionOnly || vm.taskSelected);
+  return orderedTracks(vm.trackOrder).filter(
+    (t) => !t.selectionOnly || vm.taskSelected,
+  );
+}
+
+/**
+ * The TrackSpec a row renders at: the catalogue spec, or a label-only-height
+ * clone when the track is collapsed (T36; legacy O1's 24px). The controllers
+ * read `track.height`, so passing the collapsed clone shrinks their row DOM;
+ * CSS (`.d9-track-manage.is-collapsed`) hides the drawing body.
+ */
+function effectiveTrack(
+  t: TrackSpec,
+  collapsed: Readonly<Record<string, boolean>>,
+): TrackSpec {
+  return isCollapsed(collapsed, t.id) ? { ...t, height: COLLAPSED_TRACK_H } : t;
 }
 
 /**
@@ -70,6 +108,7 @@ export function visibleTracks(vm: TracksViewModel): TrackSpec[] {
  */
 export function tracksTemplate(
   vm: TracksViewModel,
+  actions: TrackManageActions,
   spansTrack?: SpansTrackController,
   taskDetailTrack?: TaskDetailTrackController,
   eventsTrack?: EventsTrackController,
@@ -83,21 +122,145 @@ export function tracksTemplate(
       aria-label="Timeline tracks"
       style="--d9-label-w:${LABEL_W}px"
     >
-      ${tracks.map((t) => {
-        if (t.id === "spans" && spansTrack !== undefined) {
-          return spansTrack.rowTemplate(t);
-        }
-        if (t.id === "queue" && queueTrack !== undefined) {
-          return queueTrack.rowTemplate(t);
-        }
-        if (t.id === "task-detail" && taskDetailTrack !== undefined) {
-          return taskDetailTrack.rowTemplate(t);
-        }
-        if (t.id === "events" && eventsTrack !== undefined) {
-          return eventsTrack.rowTemplate(t);
-        }
-        return defaultTrackRow(t);
-      })}
+      ${repeat(
+        tracks,
+        // Key by track id so lit-html MOVES a track's DOM (and its canvas
+        // backing store) on reorder instead of repainting nodes in place -
+        // otherwise a reordered canvas would show the previous track's pixels
+        // until its next paint.
+        (t) => t.id,
+        (t) => {
+          const eff = effectiveTrack(t, vm.collapsed);
+          const inner = innerRow(
+            eff,
+            spansTrack,
+            taskDetailTrack,
+            eventsTrack,
+            queueTrack,
+          );
+          // Manageable tracks (the foldable analysis surfaces) gain the shell-
+          // owned collapse caret + reorder grip; structural/task-detail tracks
+          // render bare (they are pinned, section O scope). The delegation to
+          // each track's own row renderer is UNCHANGED - the wrapper is outside
+          // it (scope fence: reorder touches the LIST, not the delegation).
+          return isManageableTrack(t.id)
+            ? manageWrapper(t, vm, actions, inner)
+            : inner;
+        },
+      )}
+    </div>
+  `;
+}
+
+/**
+ * Delegate to a track's own content renderer via the id-keyed branches
+ * (unchanged from T21/T26-T30), or fall back to the uniform placeholder row.
+ * `t` is the EFFECTIVE spec: a collapsed track carries the label-only height.
+ */
+function innerRow(
+  t: TrackSpec,
+  spansTrack?: SpansTrackController,
+  taskDetailTrack?: TaskDetailTrackController,
+  eventsTrack?: EventsTrackController,
+  queueTrack?: QueueTrackController,
+): TemplateResult {
+  if (t.id === "spans" && spansTrack !== undefined) return spansTrack.rowTemplate(t);
+  if (t.id === "queue" && queueTrack !== undefined) return queueTrack.rowTemplate(t);
+  if (t.id === "task-detail" && taskDetailTrack !== undefined) {
+    return taskDetailTrack.rowTemplate(t);
+  }
+  if (t.id === "events" && eventsTrack !== undefined) return eventsTrack.rowTemplate(t);
+  return defaultTrackRow(t);
+}
+
+// ── Track management overlay (T36): collapse caret + reorder grip ──────────
+//
+// The affordances are shell-owned and sit in a reserved strip over the LEFT
+// edge of the label gutter (CSS `.d9-track-manage-strip`), so the frozen
+// per-track labels (the spans/queue/events controllers render their own) are
+// never modified. The strip is pointer-events:none except the two controls,
+// so the rest of the label (e.g. the spans copy buttons) stays interactive.
+
+// Id of the track whose grip is being dragged; module-level so `drop` can
+// read it without relying on DataTransfer (jsdom/older browsers vary). Set on
+// dragstart, cleared on dragend/drop. Transient, like the `sizers` memo below.
+let dragSourceId: TrackId | null = null;
+
+function onGripDragStart(e: DragEvent, id: TrackId): void {
+  dragSourceId = id;
+  if (e.dataTransfer !== null) {
+    e.dataTransfer.effectAllowed = "move";
+    // Best-effort payload for native DnD; the module var is the source of truth.
+    try {
+      e.dataTransfer.setData("text/plain", id);
+    } catch {
+      /* setData can throw in restricted contexts; the module var covers us. */
+    }
+  }
+}
+
+function onRowDragOver(e: DragEvent, id: TrackId): void {
+  // Only a manageable target accepts a drop; preventDefault enables it.
+  if (dragSourceId !== null && dragSourceId !== id && isManageableTrack(id)) {
+    e.preventDefault();
+    if (e.dataTransfer !== null) e.dataTransfer.dropEffect = "move";
+  }
+}
+
+function onRowDrop(e: DragEvent, targetId: TrackId, actions: TrackManageActions): void {
+  e.preventDefault();
+  const src = dragSourceId;
+  dragSourceId = null;
+  if (src === null || src === targetId || !isManageableTrack(targetId)) return;
+  actions.reorder(src, targetId);
+}
+
+function onGripDragEnd(): void {
+  dragSourceId = null;
+}
+
+/**
+ * Wrap a manageable track's row with the collapse caret + reorder grip and
+ * the drop target. The wrapper is `position:relative` (the strip's containing
+ * block) and carries `is-collapsed` so CSS can hide the drawing body.
+ */
+function manageWrapper(
+  t: TrackSpec,
+  vm: TracksViewModel,
+  actions: TrackManageActions,
+  inner: TemplateResult,
+): TemplateResult {
+  const collapsed = isCollapsed(vm.collapsed, t.id);
+  return html`
+    <div
+      class="d9-track-manage ${collapsed ? "is-collapsed" : ""}"
+      data-track-manage=${t.id}
+      @dragover=${(e: DragEvent) => onRowDragOver(e, t.id)}
+      @drop=${(e: DragEvent) => onRowDrop(e, t.id, actions)}
+    >
+      <div class="d9-track-manage-strip" aria-hidden="false">
+        <button
+          type="button"
+          class="d9-track-caret"
+          aria-expanded=${collapsed ? "false" : "true"}
+          aria-label=${collapsed
+            ? `Expand ${t.label} track`
+            : `Collapse ${t.label} track`}
+          title=${collapsed ? "Expand track" : "Collapse track"}
+          @click=${() => actions.toggleCollapse(t.id)}
+        ></button>
+        <span
+          class="d9-track-grip"
+          draggable="true"
+          role="button"
+          tabindex="-1"
+          aria-label=${`Drag to reorder ${t.label} track`}
+          title="Drag to reorder"
+          @dragstart=${(e: DragEvent) => onGripDragStart(e, t.id)}
+          @dragend=${onGripDragEnd}
+        ></span>
+      </div>
+      ${inner}
     </div>
   `;
 }
@@ -158,6 +321,16 @@ export function sizeTracks(
   const scrollbarW = Math.max(0, columnEl.offsetWidth - columnEl.clientWidth);
   const out: TrackSizing[] = [];
   for (const track of visibleTracks(vm)) {
+    // A collapsed track (T36) is label-only: its drawing body is hidden by CSS
+    // (`.d9-track-manage.is-collapsed`) and its canvas is not painted this
+    // frame - saving the work; the stale backing store stays hidden. Re-
+    // expanding flips this off and a normal render+size pass re-paints it from
+    // CURRENT windowed state, so a collapsed track still respects windowing on
+    // re-expand (carried T17-audit notes 6-7).
+    if (isCollapsed(vm.collapsed, track.id)) {
+      out.push({ id: track.id, drawW: 0, height: COLLAPSED_TRACK_H });
+      continue;
+    }
     // A track whose content is owned by a mounted renderer (T22 lanes and
     // later track tickets) sizes AND draws its own canvas on its own store
     // subscription (03 F2). The shell leaves it alone - no placeholder paint,

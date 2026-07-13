@@ -1,0 +1,272 @@
+// src/pages/viewer/track-management.ts - per-track collapse + drag-reorder
+// (T36; what section O's foldable-panel mechanics become under the unified
+// column, docs/tickets/chunk-2-viewer.md T36; interaction spec: the
+// concept-1 mock's track column, docs/ui-inventory/mocks/concept-1.html).
+//
+// Section O's BEHAVIOR contract - per-surface show/hide with persistence -
+// survives; the one-line-fold PRESENTATION is retired by S1 (analysis
+// surfaces are visible by default). This module owns:
+//
+//   - which tracks are user-manageable (collapse + reorder): the four
+//     foldable analysis surfaces (cpu/queue/spans/events), exactly section
+//     O's scope. The two structural tracks (timeline/lanes) and the
+//     selection-only task-detail track are fixed.
+//   - the ordering resolution (uiPrefs.trackOrder -> the ordered TrackSpec
+//     list), robust to unknown/missing ids so a stored order predating a new
+//     track still resolves.
+//   - the reorder swap (drop = swap position, per the interaction spec).
+//   - the collapse predicate + label-only height.
+//   - the store actions (toggle collapse / reorder) the shell's caret + grip
+//     handlers dispatch.
+//   - localStorage persistence (hydrate on boot + persist on change), the
+//     headline DoD: trackOrder/collapsed survive reload.
+//
+// Scope fence: track PINNING is OUT (no section-O contract). This operates on
+// the track LIST/ORDER + per-track height only; it does NOT touch the
+// per-track render delegation (spans/queue/events/cpu register their own
+// id-keyed branches in tracks.ts, unchanged).
+
+import type { ViewerStore } from "../../store/store.js";
+import type { StoreState } from "../../types/state.js";
+import { TRACKS } from "./track-layout.js";
+import type { TrackId, TrackSpec } from "./track-layout.js";
+
+/** Collapsed (label-only) track height in CSS px (legacy O1: 24px). */
+export const COLLAPSED_TRACK_H = 24;
+
+/**
+ * The tracks the user can collapse + reorder: the foldable analysis surfaces
+ * (section O applies to spans/events/cpu/queue; task-detail is NOT foldable).
+ * The structural tracks (timeline/lanes) host the shared axis + worker rows
+ * and stay pinned at the top. Order here is irrelevant (membership only).
+ */
+export const MANAGEABLE_TRACK_IDS: readonly TrackId[] = [
+  "cpu",
+  "queue",
+  "spans",
+  "events",
+];
+
+const MANAGEABLE = new Set<string>(MANAGEABLE_TRACK_IDS);
+
+/** True when a track can be collapsed + reordered (a foldable analysis track). */
+export function isManageableTrack(id: TrackId): boolean {
+  return MANAGEABLE.has(id);
+}
+
+/**
+ * True when track `id` is currently collapsed: manageable AND explicitly
+ * flagged in the collapse map. Non-manageable tracks (timeline/lanes/
+ * task-detail) are never collapsed, whatever the map says.
+ */
+export function isCollapsed(
+  collapsed: Readonly<Record<string, boolean>>,
+  id: TrackId,
+): boolean {
+  return isManageableTrack(id) && collapsed[id] === true;
+}
+
+/**
+ * Resolve `uiPrefs.trackOrder` into the full ordered TrackSpec list. The
+ * structural tracks (timeline/lanes) and task-detail keep their catalogue
+ * positions; only the manageable analysis tracks are permuted, in the stored
+ * order. Robust to a stale/partial/dirty stored order:
+ *   - unknown ids and non-manageable ids in `trackOrder` are ignored;
+ *   - duplicates are de-duped (first occurrence wins);
+ *   - manageable tracks not named in `trackOrder` are appended in catalogue
+ *     order (so a stored order predating a newly added track still shows it).
+ * The manageable tracks fill their catalogue SLOTS in the resolved order, so
+ * the fixed tracks never move.
+ */
+export function orderedTracks(
+  trackOrder: readonly string[],
+): readonly TrackSpec[] {
+  const catalogueManageable = TRACKS.filter((t) => isManageableTrack(t.id));
+  const byId = new Map(catalogueManageable.map((t) => [t.id, t] as const));
+  const seen = new Set<string>();
+  const managed: TrackSpec[] = [];
+  for (const id of trackOrder) {
+    const spec = byId.get(id as TrackId);
+    if (spec !== undefined && !seen.has(id)) {
+      managed.push(spec);
+      seen.add(id);
+    }
+  }
+  for (const t of catalogueManageable) {
+    if (!seen.has(t.id)) managed.push(t);
+  }
+  // Re-lay the catalogue, drawing manageable slots from `managed` in order.
+  let mi = 0;
+  return TRACKS.map((t) =>
+    isManageableTrack(t.id) ? (managed[mi++] as TrackSpec) : t,
+  );
+}
+
+/** The manageable track ids in their current resolved order (persist target). */
+function manageableOrder(trackOrder: readonly string[]): TrackId[] {
+  return orderedTracks(trackOrder)
+    .filter((t) => isManageableTrack(t.id))
+    .map((t) => t.id);
+}
+
+/**
+ * Compute the new trackOrder after dropping `dragged` onto `target`: swap the
+ * two tracks' positions (the interaction spec's "drop = swap position"). A
+ * no-op (returns the current manageable order) when either id is not
+ * manageable or they are the same track.
+ */
+export function computeReorder(
+  trackOrder: readonly string[],
+  dragged: TrackId,
+  target: TrackId,
+): TrackId[] {
+  const order = manageableOrder(trackOrder);
+  if (
+    dragged === target ||
+    !isManageableTrack(dragged) ||
+    !isManageableTrack(target)
+  ) {
+    return order;
+  }
+  const i = order.indexOf(dragged);
+  const j = order.indexOf(target);
+  if (i < 0 || j < 0) return order;
+  const swapped = order.slice();
+  [swapped[i], swapped[j]] = [swapped[j] as TrackId, swapped[i] as TrackId];
+  return swapped;
+}
+
+// ── Store actions ────────────────────────────────────────────────────────
+
+/** The collapse/reorder dispatchers the shell's caret + grip handlers call. */
+export interface TrackManageActions {
+  /** Toggle a track's collapsed state (caret click / Enter / Space). */
+  toggleCollapse(id: TrackId): void;
+  /** Reorder: drop `dragged` onto `target`, swapping their positions. */
+  reorder(dragged: TrackId, target: TrackId): void;
+}
+
+/** Bind the track-management actions to a store (dispatch uiPrefs updates). */
+export function createTrackManageActions(store: ViewerStore): TrackManageActions {
+  return {
+    toggleCollapse(id: TrackId): void {
+      if (!isManageableTrack(id)) return;
+      const cur = (store.getState() as StoreState).uiPrefs.collapsed;
+      store.update("uiPrefs", {
+        collapsed: { ...cur, [id]: !(cur[id] === true) },
+      });
+    },
+    reorder(dragged: TrackId, target: TrackId): void {
+      const cur = (store.getState() as StoreState).uiPrefs.trackOrder;
+      const next = computeReorder(cur, dragged, target);
+      // Only write on an actual change (no store thrash / needless render).
+      if (sameOrder(cur, next)) return;
+      store.update("uiPrefs", { trackOrder: next });
+    },
+  };
+}
+
+function sameOrder(a: readonly string[], b: readonly string[]): boolean {
+  if (a.length !== b.length) return false;
+  return a.every((v, i) => v === b[i]);
+}
+
+// ── localStorage persistence (headline DoD: survives reload) ───────────────
+//
+// Mirrors the legacy viewer's storage robustness (viewer.html:1410-1426): a
+// try/catch around localStorage with an in-memory fallback map, so a
+// storage-blocked context (private mode, disabled storage) degrades to
+// session-scoped prefs instead of throwing. Stored as ONE JSON blob under a
+// single key (the amended O4 shape; replaces the legacy per-panel
+// dial9.viewer.panelCollapsed.<key> string keys).
+
+/** localStorage key for the serialized track prefs (amended O4). */
+export const TRACK_PREFS_STORAGE_KEY = "dial9.viewer.trackPrefs";
+
+/** The persisted shape: the manageable order + the collapse map. */
+export interface TrackPrefs {
+  trackOrder: readonly string[];
+  collapsed: Readonly<Record<string, boolean>>;
+}
+
+const memoryFallback = new Map<string, string>();
+
+function storageGet(key: string): string | null {
+  try {
+    return globalThis.localStorage.getItem(key);
+  } catch {
+    return memoryFallback.has(key) ? (memoryFallback.get(key) ?? null) : null;
+  }
+}
+
+function storageSet(key: string, value: string): void {
+  try {
+    globalThis.localStorage.setItem(key, value);
+  } catch {
+    memoryFallback.set(key, value);
+  }
+}
+
+/**
+ * Read persisted track prefs, or null when none are stored / the stored value
+ * is unusable. Defensive parse: a malformed blob (hand-edited, older schema)
+ * yields null rather than throwing, so a corrupt entry degrades to defaults.
+ */
+export function loadTrackPrefs(): TrackPrefs | null {
+  const raw = storageGet(TRACK_PREFS_STORAGE_KEY);
+  if (raw === null) return null;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (parsed === null || typeof parsed !== "object") return null;
+    const obj = parsed as { trackOrder?: unknown; collapsed?: unknown };
+    const trackOrder = Array.isArray(obj.trackOrder)
+      ? obj.trackOrder.filter((v): v is string => typeof v === "string")
+      : [];
+    const collapsed: Record<string, boolean> = {};
+    if (obj.collapsed !== null && typeof obj.collapsed === "object") {
+      for (const [k, v] of Object.entries(obj.collapsed as Record<string, unknown>)) {
+        if (typeof v === "boolean") collapsed[k] = v;
+      }
+    }
+    return { trackOrder, collapsed };
+  } catch {
+    return null;
+  }
+}
+
+/** Persist track prefs (order + collapse map) to localStorage. */
+export function saveTrackPrefs(prefs: TrackPrefs): void {
+  storageSet(
+    TRACK_PREFS_STORAGE_KEY,
+    JSON.stringify({ trackOrder: prefs.trackOrder, collapsed: prefs.collapsed }),
+  );
+}
+
+/**
+ * Seed the store's uiPrefs from persisted track prefs (call once on boot,
+ * BEFORE the shell's first render, so the initial paint reflects the saved
+ * order/collapse). A no-op when nothing is stored (the store keeps its S1
+ * resting defaults). Dispatches a single uiPrefs update.
+ */
+export function hydrateTrackPrefs(store: ViewerStore): void {
+  const prefs = loadTrackPrefs();
+  if (prefs === null) return;
+  store.update("uiPrefs", {
+    trackOrder: prefs.trackOrder,
+    collapsed: prefs.collapsed,
+  });
+}
+
+/**
+ * Persist trackOrder/collapsed whenever they change. Subscribes to the
+ * uiPrefs slice and writes the two fields on every uiPrefs update (cheap - a
+ * small JSON blob). Returns an unsubscribe for teardown/HMR. Pair with
+ * hydrateTrackPrefs (hydrate first, then mount this) so the reload round-trip
+ * is closed: hydrate reads what a previous session's subscriber wrote.
+ */
+export function mountTrackPrefsPersistence(store: ViewerStore): () => void {
+  return store.subscribe(["uiPrefs"], (state) => {
+    const { trackOrder, collapsed } = state.uiPrefs;
+    saveTrackPrefs({ trackOrder, collapsed });
+  });
+}
