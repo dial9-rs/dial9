@@ -67,7 +67,9 @@ export const TRACKS: readonly TrackSpec[] = [
   { id: "cpu", label: "CPU", height: 74, ownedBy: "T28" },
   { id: "queue", label: "Queue G+L", height: 74, ownedBy: "T29" },
   { id: "spans", label: "Spans", height: 150, ownedBy: "T26" },
-  { id: "events", label: "Events", height: 44, ownedBy: "T27" },
+  // Events track (T27): a legend strip (LEGEND_H) above a marker-tick canvas.
+  // Height seats the legacy 40px tick canvas plus the chip legend.
+  { id: "events", label: "Events", height: 70, ownedBy: "T27" },
   {
     id: "task-detail",
     label: "Task detail",

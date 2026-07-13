@@ -27,6 +27,7 @@ import { tracksTemplate, sizeTracks, type TracksViewModel } from "./tracks.js";
 import { deriveAxisInputs } from "./axis.js";
 import { deriveCpuInputs } from "./cpu.js";
 import { createSpansTrack, type SpansTrackController } from "./spans-track.js";
+import { createEventsTrack, type EventsTrackController } from "./events-track.js";
 
 /** Callbacks the shell chrome needs from the page entry. */
 export interface ShellDeps {
@@ -177,6 +178,7 @@ function shellTemplate(
   vm: ShellViewModel,
   deps: ShellDeps,
   spansTrack: SpansTrackController,
+  eventsTrack: EventsTrackController,
 ): TemplateResult {
   return html`
     <header class="d9-toolbar" role="banner">
@@ -218,7 +220,9 @@ function shellTemplate(
         tabindex="0"
       >
         ${hintChipsTemplate()}
-        ${vm.hasTrace ? tracksTemplate(vm, spansTrack) : emptyStateTemplate()}
+        ${vm.hasTrace
+          ? tracksTemplate(vm, spansTrack, eventsTrack)
+          : emptyStateTemplate()}
       </main>
       ${inspectorTemplate()}
     </div>
@@ -270,18 +274,20 @@ export function mountShell(
 ): MountedShell {
   root.classList.add("d9-viewer");
 
-  // The spans track (T26) is a store-wired content component: created once so
-  // its derived caches + name->color assignment live across renders. Other
-  // content tracks (T22/T27-T30) mount the same way as they land.
+  // The spans track (T26) and custom-events track (T27) are store-wired
+  // content components: created once so their derived caches + name->color
+  // assignment live across renders. Other content tracks (T22/T28-T30) mount
+  // the same way as they land.
   const spansTrack = createSpansTrack(store);
+  const eventsTrack = createEventsTrack(store);
 
   function renderPass(): void {
     const state = store.getState() as StoreState;
     const vm = viewModel(state, deps);
-    render(shellTemplate(vm, deps, spansTrack), root);
+    render(shellTemplate(vm, deps, spansTrack, eventsTrack), root);
     const column = root.querySelector<HTMLElement>(".d9-track-column");
     if (column && vm.hasTrace) {
-      sizeTracks(column, vm, spansTrack);
+      sizeTracks(column, vm, spansTrack, eventsTrack);
     }
   }
 
@@ -318,6 +324,7 @@ export function mountShell(
       unsubscribe();
       window.removeEventListener("resize", onResize);
       spansTrack.dispose();
+      eventsTrack.dispose();
     },
   };
 }

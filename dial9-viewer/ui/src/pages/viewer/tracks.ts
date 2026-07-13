@@ -25,6 +25,7 @@ import { renderTimeAxis, type AxisInputs } from "./axis.js";
 import { isTrackClaimed } from "./track-renderers.js";
 import { renderCpuTrack, type CpuInputs } from "./cpu.js";
 import type { SpansTrackController } from "./spans-track.js";
+import type { EventsTrackController } from "./events-track.js";
 
 export interface TracksViewModel {
   /** True once a trace is loaded (tracks render empty until then). */
@@ -59,14 +60,16 @@ export function visibleTracks(vm: TracksViewModel): TrackSpec[] {
  * contract (label present, canvas sized by layout).
  *
  * Content tracks that need richer per-row DOM than a label + canvas (the
- * spans track's legend/filter controls + focused-span metadata, T26)
- * register a controller and render their OWN row template here; every other
- * track uses the uniform placeholder row. The delegation is keyed by track
- * id, mirroring the axis delegation in `sizeTracks`.
+ * spans track's legend/filter controls + focused-span metadata, T26; the
+ * events track's name-chip legend, T27) register a controller and render
+ * their OWN row template here; every other track uses the uniform placeholder
+ * row. The delegation is keyed by track id, mirroring the axis delegation in
+ * `sizeTracks`.
  */
 export function tracksTemplate(
   vm: TracksViewModel,
   spansTrack?: SpansTrackController,
+  eventsTrack?: EventsTrackController,
 ): TemplateResult {
   const tracks = visibleTracks(vm);
   return html`
@@ -76,11 +79,11 @@ export function tracksTemplate(
       aria-label="Timeline tracks"
       style="--d9-label-w:${LABEL_W}px"
     >
-      ${tracks.map((t) =>
-        t.id === "spans" && spansTrack !== undefined
-          ? spansTrack.rowTemplate(t)
-          : defaultTrackRow(t),
-      )}
+      ${tracks.map((t) => {
+        if (t.id === "spans" && spansTrack !== undefined) return spansTrack.rowTemplate(t);
+        if (t.id === "events" && eventsTrack !== undefined) return eventsTrack.rowTemplate(t);
+        return defaultTrackRow(t);
+      })}
     </div>
   `;
 }
@@ -129,6 +132,7 @@ export function sizeTracks(
   columnEl: HTMLElement,
   vm: TracksViewModel,
   spansTrack?: SpansTrackController,
+  eventsTrack?: EventsTrackController,
 ): TrackSizing[] {
   const dpr = (typeof devicePixelRatio === "number" ? devicePixelRatio : 1) || 1;
   // Full column width and the scrollbar gutter (so the draw area's right
@@ -169,6 +173,14 @@ export function sizeTracks(
     // full track height. Delegate and skip the uniform placeholder path.
     if (track.id === "spans" && spansTrack !== undefined) {
       spansTrack.paint(canvas, drawW, track.height, dpr, vm.viewStart, vm.viewEnd);
+      canvas.dataset["drawW"] = String(Math.round(drawW));
+      out.push({ id: track.id, drawW, height: track.height });
+      continue;
+    }
+    // The custom-events track (T27) likewise reserves a legend strip above
+    // its canvas, so it owns its own sizing + draw. Same delegation shape.
+    if (track.id === "events" && eventsTrack !== undefined) {
+      eventsTrack.paint(canvas, drawW, track.height, dpr, vm.viewStart, vm.viewEnd);
       canvas.dataset["drawW"] = String(Math.round(drawW));
       out.push({ id: track.id, drawW, height: track.height });
       continue;
