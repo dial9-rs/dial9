@@ -360,6 +360,16 @@ body {
     display: flex;
     align-items: stretch;
     border-bottom: 1px solid var(--d9-border);
+    /* Collapse/expand (#7): animate the row height so the tracks below slide
+       into the reclaimed space instead of snapping, and clip the canvas while
+       the row grows/shrinks so it reveals smoothly rather than popping. The
+       transition does not fire on first mount (no prior height to animate
+       from), so initial load stays instant. */
+    overflow: hidden;
+    transition: height 0.16s ease;
+}
+@media (prefers-reduced-motion: reduce) {
+    .d9-track { transition: none; }
 }
 .d9-track-label {
     width: var(--d9-label-w, 100px);
