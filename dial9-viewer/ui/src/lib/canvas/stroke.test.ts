@@ -1,6 +1,6 @@
-// DoD (T08): the stroke batcher emits <= drawW vertices for ARBITRARY
-// series (F1: strokes must be pixel-bounded), one path per style, dash
-// state hoisted. Random-series property tests + a recording context.
+// The stroke batcher emits <= drawW vertices for arbitrary series (strokes
+// must be pixel-bounded), one path per style, dash state hoisted.
+// Random-series property tests + a recording context.
 
 import { describe, it, expect } from "vitest";
 import {
@@ -197,7 +197,7 @@ describe("makeStrokeBatcher", () => {
     const tMax = 1e6;
     const b = makeStrokeBatcher();
     // Many series funneled into two styles (e.g. all lanes' queue lines
-    // share one style - the F1 batching win).
+    // share one style - the batching win).
     for (let lane = 0; lane < 8; lane++) {
       b.series(lane % 2 === 0 ? "queue" : "active", randomSeries(rand, 3000, tMax), {
         xOf: mapX(tMax, 0, drawW),

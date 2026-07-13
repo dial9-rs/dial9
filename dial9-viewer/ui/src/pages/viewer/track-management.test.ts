@@ -1,13 +1,12 @@
-// Tests for track management (T36; amended section O). Env is node (no DOM):
-// the drag-and-drop wiring is the browser-check half of the DoD (HANDOFF.md);
-// here we pin the pure surface + store actions + the persistence round-trip
-// that is the headline DoD ("uiPrefs survives reload"):
+// Tests for track management. Env is node (no DOM): the drag-and-drop wiring is
+// the browser-check half; here we pin the pure surface + store actions + the
+// persistence round-trip ("uiPrefs survives reload"):
 //   1. manageability + order resolution (robust to stale/partial orders).
 //   2. collapse predicate + swap-reorder.
 //   3. store actions dispatch the right uiPrefs updates (no thrash).
 //   4. persistence: save -> reload -> hydrate restores order + collapse.
 //   5. a collapsed track stays in the ordered list, so re-expand restores it
-//      (carried T17-audit notes 6-7: windowing respected on re-expand).
+//      (windowing respected on re-expand).
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createViewerStore } from "./store.js";

@@ -1,8 +1,5 @@
-// Unit tests for the per-page store (T07 DoD): slice isolation, one
-// notification per frame under a fake RAF, derived-cache invalidation, the
-// transient channel bypassing full notification, and the N18 dev assertion
-// hook. The frame scheduler is injected (StoreOptions.scheduler) because
-// Node has no requestAnimationFrame - see the store header for the choice.
+// Unit tests for the per-page store. The frame scheduler is injected because
+// Node has no requestAnimationFrame.
 
 import { describe, it, expect, vi, afterEach } from "vitest";
 import {
@@ -31,7 +28,7 @@ function fakeRaf(): { scheduler: FrameScheduler; frame: () => void; pending: () 
 }
 
 // Minimal two-slice shape: keeps mechanics tests independent of the real
-// viewer state. Composition with the T06 StoreState is proven separately.
+// viewer state. Composition with the full StoreState is proven separately.
 interface TestState {
   a: { n: number; keep: string };
   b: { s: string };
@@ -41,7 +38,7 @@ function testState(): TestState {
   return { a: { n: 0, keep: "k" }, b: { s: "" } };
 }
 
-// Full initial viewer state per the T06 slice shapes (src/types/state.d.ts).
+// Full initial viewer state matching the real slice shapes.
 function initialViewerState(): StoreState {
   return {
     trace: { trace: null },

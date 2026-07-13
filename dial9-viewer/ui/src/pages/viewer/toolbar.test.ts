@@ -1,7 +1,6 @@
-// Tests for the toolbar's pure logic (T33; features/02 C1, D, E, 04 S2).
-// The lit-html templates are exercised by the T12 census/axe tooling in the
-// browser (no DOM env here); this suite pins the goto-time math (S2), the C1
-// file-info stats line, and the D4 uninstrumented count.
+// Tests for the toolbar's pure logic. The lit-html templates are exercised in
+// the browser (no DOM env here); this suite pins the goto-time math, the
+// file-info stats line, and the uninstrumented count.
 
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";

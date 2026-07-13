@@ -1,6 +1,5 @@
-// T23 wheel semantics (features/02 H5): plain wheel scrolls the lanes (null
-// intent, the binding leaves the browser default), Ctrl/Cmd+wheel zooms at the
-// cursor. Ported mapping from viewer.html:5100-5115.
+// Wheel semantics: plain wheel scrolls the lanes (null intent, the binding
+// leaves the browser default), Ctrl/Cmd+wheel zooms at the cursor.
 
 import { describe, it, expect } from "vitest";
 import { wheelZoomIntent, WHEEL_ZOOM_FACTOR, type WheelInput } from "./wheel.js";

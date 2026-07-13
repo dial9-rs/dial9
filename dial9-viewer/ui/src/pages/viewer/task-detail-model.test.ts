@@ -1,10 +1,9 @@
-// Tests for the task-detail track's pure model (T30; features/02 section N).
-// The DoD's behavioral checks that do NOT need a browser: the selection-keyed
-// collection numbers (N2 - "task numbers exact vs legacy"), the waker-label
-// resolution (N7), and the per-frame render geometry (N6 delay bands, N9
-// lifespan, N10 poll bars / coverage, N11 idle gaps) with its N5 status + N8
-// waker hit regions. Poll/wake records are built synthetically; one case drives
-// the frozen-core computePollWakes through computeTaskDetailData.
+// Tests for the task-detail track's pure model - the behavioral checks that do
+// NOT need a browser: the selection-keyed collection numbers, the waker-label
+// resolution, and the per-frame render geometry (delay bands, lifespan, poll
+// bars / coverage, idle gaps) with its status + waker hit regions. Poll/wake
+// records are built synthetically; one case drives computePollWakes through
+// computeTaskDetailData.
 
 import { describe, it, expect } from "vitest";
 import { formatHumanDuration } from "../../lib/trace/index.js";
@@ -83,7 +82,7 @@ function fakeTrace(o: {
   } as unknown as ParsedTrace;
 }
 
-// ── computeTaskDetailData - the N2 numbers (behavioral-diff target) ───────
+// ── computeTaskDetailData - the collection numbers ────────────────────────
 
 describe("computeTaskDetailData (N2 numbers, exact vs legacy)", () => {
   it("collects a task's polls across workers, sorted, with the exact counts", () => {
@@ -123,7 +122,7 @@ describe("computeTaskDetailData (N2 numbers, exact vs legacy)", () => {
     const trace = fakeTrace({});
     expect(computeTaskDetailData(src, trace, null)).toBe(EMPTY_TASK_DETAIL_DATA);
     expect(computeTaskDetailData(src, null, 9)).toBe(EMPTY_TASK_DETAIL_DATA);
-    // A selected task with no matching polls hides the track (legacy 4374).
+    // A selected task with no matching polls hides the track.
     expect(computeTaskDetailData(src, trace, 999)).toBe(EMPTY_TASK_DETAIL_DATA);
   });
 
@@ -141,13 +140,13 @@ describe("computeTaskDetailData (N2 numbers, exact vs legacy)", () => {
     const src = source({ workerIds: [0], pollsByWorker: { 0: [poll(10, 20, 8)] } });
     const trace = fakeTrace({ taskDumps: { 8: dumps } });
     const data = computeTaskDetailData(src, trace, 8);
-    // No taskInstrumented entry => instrumented (legacy `?? true`).
+    // No taskInstrumented entry => instrumented (the `?? true` default).
     expect(data.isInstrumented).toBe(true);
     expect(data.taskDumps).toEqual(dumps);
   });
 });
 
-// ── formatTaskDetailSummary - the N2 label assembly (exact) ───────────────
+// ── formatTaskDetailSummary - the label assembly ──────────────────────────
 
 describe("formatTaskDetailSummary (N2 label parts)", () => {
   const base = source({ workerIds: [0], pollsByWorker: { 0: [poll(100, 200, 42), poll(300, 400, 42)] } });
@@ -176,7 +175,7 @@ describe("formatTaskDetailSummary (N2 label parts)", () => {
   });
 });
 
-// ── wakerLabelFor - N7 ────────────────────────────────────────────────────
+// ── wakerLabelFor ─────────────────────────────────────────────────────────
 
 describe("wakerLabelFor (N7)", () => {
   const trace = fakeTrace({
@@ -199,7 +198,7 @@ describe("wakerLabelFor (N7)", () => {
   });
 });
 
-// ── buildTaskDetailRenderModel - geometry (N6/N9/N10/N11) ─────────────────
+// ── buildTaskDetailRenderModel - geometry ─────────────────────────────────
 
 /** A hand-built TaskDetailData (bypasses computePollWakes for geometry). */
 function detailData(o: {
@@ -245,7 +244,7 @@ describe("buildTaskDetailRenderModel: wake bands (N6/N7)", () => {
     // Width thresholds: delay label when > 25px, waker label when > 40px.
     expect(m.wakeBands.map((b) => b.showDelayLabel)).toEqual([true, false, true]);
     expect(m.wakeBands.map((b) => b.showWakerLabel)).toEqual([true, false, true]);
-    // A waker region exists only for the labelled (w>40) bands (N8 targets).
+    // A waker region exists only for the labelled (w>40) bands.
     expect(m.wakeRegions.map((r) => r.wakerTaskId)).toEqual([20, 22]);
     // Hit regions for the bands are typed "scheduled" and come first.
     expect(m.hitRegions.filter((r) => r.type === "scheduled")).toHaveLength(3);
@@ -303,7 +302,7 @@ describe("buildTaskDetailRenderModel: idle gaps (N11) + lifespan (N9)", () => {
   });
 
   it("cross-hatches an idle gap that has a captured task dump", () => {
-    // Legacy attribution: a dump captured during poll[i-1] (ts in
+    // Dump attribution: a dump captured during poll[i-1] (ts in
     // [poll[i-1].start, poll[i].start]) describes gap i - so gap 0 has a
     // degenerate window and the dump attaches to gap 1 (between poll 1 and 2).
     const data = detailData({
@@ -326,7 +325,7 @@ describe("buildTaskDetailRenderModel: idle gaps (N11) + lifespan (N9)", () => {
   });
 });
 
-// ── Hit-region ordering + status/waker lookups (N5/N8) ────────────────────
+// ── Hit-region ordering + status/waker lookups ────────────────────────────
 
 describe("hit-region order + status/waker lookups (N5/N8)", () => {
   const data = detailData({
@@ -372,7 +371,7 @@ describe("hit-region order + status/waker lookups (N5/N8)", () => {
   });
 });
 
-// ── firstVisibleByEnd (N10 windowing) ─────────────────────────────────────
+// ── firstVisibleByEnd (windowing) ─────────────────────────────────────────
 
 describe("firstVisibleByEnd", () => {
   it("finds the first poll whose end reaches viewStart", () => {

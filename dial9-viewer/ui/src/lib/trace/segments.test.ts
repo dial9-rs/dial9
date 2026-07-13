@@ -1,8 +1,7 @@
-// segments.ts pure-function tests (T17): extents, need/prefetch sets,
-// budget admission, eviction planning, the raw-gzip cache, and the
-// boundary-poll extraction/stitching - the decision layer, exercised
-// exhaustively without any orchestrator. The orchestrator wiring is
-// segments.window.test.ts.
+// segments.ts pure-function tests: extents, need/prefetch sets, budget
+// admission, eviction planning, the raw-gzip cache, and the boundary-poll
+// extraction/stitching - the decision layer, exercised without any
+// orchestrator. The orchestrator wiring is segments.window.test.ts.
 
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -33,8 +32,8 @@ import type { TimeRange } from "../../types/trace.js";
 
 // ── Fixtures ─────────────────────────────────────────────────────────────
 
-// Default #225 layout: {prefix}/{date}/{HHMM}/{service}/{instance}/{boot}/
-// {epoch}-{index}.bin.gz (features/01 I2).
+// Default layout: {prefix}/{date}/{HHMM}/{service}/{instance}/{boot}/
+// {epoch}-{index}.bin.gz.
 const key = (epoch: number, index = 0): string =>
   `traces/2026-07-08/1030/svc-a/host-1/boot-1/${epoch}-${index}.bin.gz`;
 
@@ -519,8 +518,8 @@ const listedEntry = (extent: TimeRange): SegmentEntry => ({
 
 /**
  * A previously-parsed, now-evicted entry: the parse (trace) is gone, but
- * invariants AND edgePolls are retained across eviction (T17-audit
- * finding 1) - built from the same synthetic events for realism.
+ * invariants AND edgePolls are retained across eviction - built from the
+ * same synthetic events for realism.
  */
 function evictedEntry(extent: TimeRange, events: TraceEvent[]): SegmentEntry {
   const { trace: _trace, ...kept } = parsedEntry(extent, events);
@@ -609,7 +608,7 @@ describe("computeWindowBoundaryPolls", () => {
     const entries = new Map<string, SegmentEntry>([
       // s0 (first listed) starts with a dangling close; s3 (last listed)
       // ends mid-poll. Neither has a LISTED neighbor beyond the edge, so
-      // both keep core parity: dropped (#194), not marked.
+      // both keep core parity: dropped, not marked.
       ["s0", parsedEntry(extents[0]!, [pollEnd(10, 1), pollStart(20, 1), pollEnd(30, 1)])],
       ["s1", parsedEntry(extents[1]!, [pollStart(110, 1), pollEnd(120, 1)])],
       ["s2", parsedEntry(extents[2]!, [pollStart(210, 1), pollEnd(220, 1)])],
@@ -657,14 +656,12 @@ describe("computeWindowBoundaryPolls", () => {
   });
 });
 
-// ── T17-audit finding 1: polls spanning 3+ segments (N-segment chains) ───
+// ── Polls spanning 3+ segments (N-segment chains) ────────────────────────
 //
-// The audit's executed probe: a poll whose PollStart is in segment k and
-// PollEnd in segment k+2, with the worker silent through k+1, returned
-// {truncated: [], stitched: []} - the poll VANISHED even with every
-// segment resident. Silence through a whole adjacent segment is itself
-// evidence: any PollEnd/Park/PollStart there would have closed the poll,
-// so the chain walk carries the open across silent segments.
+// A poll whose PollStart is in segment k and PollEnd in segment k+2, with the
+// worker silent through k+1, must not vanish. Silence through a whole adjacent
+// segment is itself evidence: any PollEnd/Park/PollStart there would have
+// closed the poll, so the chain walk carries the open across silent segments.
 
 describe("computeWindowBoundaryPolls: T17-audit finding 1 (N-segment stitching)", () => {
   const keys3 = ["s0", "s1", "s2"];
@@ -742,7 +739,7 @@ describe("computeWindowBoundaryPolls: T17-audit finding 1 (N-segment stitching)"
   it("middle-only-resident: retained neighbor edge evidence surfaces the poll as both-edges-truncated with its task identity", () => {
     const entries = new Map<string, SegmentEntry>([
       // Both neighbors were parsed once and evicted; their edgePolls are
-      // retained (finding 1: eviction keeps them - they are tiny).
+      // retained (eviction keeps them - they are tiny).
       ["s0", evictedEntry(extents3[0]!, [pollStart(10, 1, 7)])],
       ["s1", parsedEntry(extents3[1]!, [pollStart(110, 2), pollEnd(190, 2)])],
       ["s2", evictedEntry(extents3[2]!, [pollEnd(210, 1), pollStart(250, 1), pollEnd(260, 1)])],
@@ -781,13 +778,12 @@ describe("computeWindowBoundaryPolls: T17-audit finding 1 (N-segment stitching)"
   });
 });
 
-// ── T17-audit finding 3: extent adjacency gates stitching ────────────────
+// ── Extent adjacency gates stitching ─────────────────────────────────────
 //
-// The listing can have holes (retention-deleted objects, undecodable
-// keys): two CONSECUTIVELY LISTED segments are not necessarily adjacent
-// in time. Stitching across an extent gap would fabricate one completed
-// long poll out of two different polls' evidence - exactly the lie the
-// 2.8 hard edge forbids.
+// The listing can have holes (retention-deleted objects, undecodable keys):
+// two CONSECUTIVELY LISTED segments are not necessarily adjacent in time.
+// Stitching across an extent gap would fabricate one completed long poll out
+// of two different polls' evidence - a lie we must never tell.
 
 describe("computeWindowBoundaryPolls: T17-audit finding 3 (extent-gap guard)", () => {
   it("never stitches across an extent gap: both fragments surface truncated", () => {

@@ -1,7 +1,6 @@
-// Store-binding tests for the status bar (T35): the DoD check "status bar
-// reflects selection / range / progress (Vitest on store bindings)". The pure
-// view model reads store state; the imperative mount + copy-link button are the
-// browser-driven halves (listed in HANDOFF).
+// Store-binding tests for the status bar: selection / range / progress. The
+// pure view model reads store state; the imperative mount + copy-link button
+// are the browser-driven halves.
 
 import { describe, it, expect } from "vitest";
 import { initialViewerState } from "./store.js";

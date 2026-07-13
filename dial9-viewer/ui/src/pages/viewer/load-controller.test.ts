@@ -1,7 +1,6 @@
-// Tests for the load-chrome state machine (T34; features/02 section B + the
-// S3 new-file-confirm and #281 dismissal amendments). DOM-free: the
-// controller is driven directly, the load handle is a scripted fake (the same
-// shape loadTraceInWorker returns), and the elapsed timer uses fake timers.
+// Tests for the load-chrome state machine. DOM-free: the controller is driven
+// directly, the load handle is a scripted fake (the same shape loadTraceInWorker
+// returns), and the elapsed timer uses fake timers.
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
@@ -117,7 +116,7 @@ function makeHarness(over: Partial<LoadControllerDeps> = {}): Harness {
   };
 }
 
-// ── Pure label helpers (B8, keep-exactly) ──────────────────────────────────
+// ── Pure label helpers ──────────────────────────────────────────────────────
 
 describe("progressLabel (B8 keep-exactly)", () => {
   it("fetching: singular and multi-trace labels", () => {
@@ -225,7 +224,7 @@ describe("URL / demo loads (B6/B12) feed the worker and close on success", () =>
   });
 });
 
-// ── File drop / pick (B2/B3) ───────────────────────────────────────────────
+// ── File drop / pick ────────────────────────────────────────────────────────
 
 describe("file loads via object URL (B2/B3)", () => {
   it("creates an object URL, loads it, and revokes on settle", async () => {
@@ -251,7 +250,7 @@ describe("file loads via object URL (B2/B3)", () => {
   });
 });
 
-// ── S3: New File confirms before opening over a loaded trace ────────────────
+// ── New File confirms before opening over a loaded trace ────────────────────
 
 describe("requestNewFile (S3 confirm amendment)", () => {
   it("confirms before opening the chooser when a trace is loaded", async () => {
@@ -279,7 +278,7 @@ describe("requestNewFile (S3 confirm amendment)", () => {
   });
 });
 
-// ── #281: the chooser is dismissible (Esc + close control), reopen works ────
+// ── The chooser is dismissible (Esc + close control), reopen works ──────────
 
 describe("dismissal (#281 amendment)", () => {
   it("Esc/close dismisses the New-File chooser back to the trace, and reopening works", async () => {
@@ -326,7 +325,7 @@ describe("dismissal (#281 amendment)", () => {
   });
 });
 
-// ── Esc during loading cancels (B10) ───────────────────────────────────────
+// ── Esc during loading cancels ──────────────────────────────────────────────
 
 describe("cancel (B10/B11)", () => {
   it("Esc during a load aborts it and returns to the chooser", () => {
@@ -347,7 +346,7 @@ describe("cancel (B10/B11)", () => {
   });
 });
 
-// ── Drag feedback counter (B3/B4/B5) ───────────────────────────────────────
+// ── Drag feedback counter ───────────────────────────────────────────────────
 
 describe("drag feedback counter", () => {
   it("tracks nested dragenter/dragleave and resets on drop", () => {
@@ -366,7 +365,7 @@ describe("drag feedback counter", () => {
   });
 });
 
-// ── Live elapsed timer (B9) ─────────────────────────────────────────────────
+// ── Live elapsed timer ──────────────────────────────────────────────────────
 
 describe("elapsed timer (B9)", () => {
   beforeEach(() => vi.useFakeTimers());

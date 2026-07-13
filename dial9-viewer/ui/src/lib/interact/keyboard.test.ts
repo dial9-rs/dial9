@@ -1,8 +1,5 @@
-// DoD (T20): the focus-tolerant key router (K5). The routing policy is
-// pure over structural events (KeyEventLike), so every rule is driven
-// here under plain Node: text-entry suppression + opt-in, chord skip,
-// defaultPrevented composition, decline fallthrough, case-insensitive
-// single-char matching, preserveDefault.
+// The focus-tolerant key router. The routing policy is pure over structural
+// events (KeyEventLike), so every rule is driven here under plain Node.
 
 import { describe, it, expect, vi } from "vitest";
 import {
@@ -58,7 +55,7 @@ describe("isTextEntryTarget (K5 suppression rule)", () => {
   });
 
   it("K5: non-text form controls stay accelerator-live", () => {
-    // The finding: nav keys die the moment a <select> grabs focus.
+    // Without this, nav keys die the moment a <select> grabs focus.
     expect(isTextEntryTarget(selectEl)).toBe(false);
     expect(isTextEntryTarget(checkbox)).toBe(false);
     expect(isTextEntryTarget(buttonEl)).toBe(false);
@@ -101,8 +98,8 @@ describe("createKeyRouter", () => {
   });
 
   it("composition: an already-consumed event is never re-handled", () => {
-    // The frozen flamegraph widget preventDefaults its own '/' handler
-    // (features/03 F41); the router must compose, not double-handle.
+    // The frozen flamegraph widget preventDefaults its own '/' handler; the
+    // router must compose, not double-handle.
     const onKey = vi.fn();
     const router = createKeyRouter([{ key: "/", onKey }]);
     expect(router.handle(ev({ key: "/", defaultPrevented: true }))).toBe(false);
@@ -135,7 +132,7 @@ describe("createKeyRouter", () => {
     // 'f' typed into a text input must insert text, not fit.
     expect(router.handle(ev({ key: "f", target: textInput }))).toBe(false);
     expect(pageKey).not.toHaveBeenCalled();
-    // Escape opted in (the flamegraph search field cascade, F44/F157).
+    // Escape opted in (the flamegraph search field cascade).
     expect(router.handle(ev({ key: "Escape", target: textInput }))).toBe(true);
     expect(escKey).toHaveBeenCalledTimes(1);
   });

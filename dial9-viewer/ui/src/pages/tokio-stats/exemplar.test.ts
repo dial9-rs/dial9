@@ -1,4 +1,4 @@
-// Unit tests for the exemplar deep-link builder (features/04 H1/H3/H4).
+// Unit tests for the exemplar deep-link builder.
 
 import { describe, it, expect } from "vitest";
 import type { PollExemplar } from "../../lib/trace/index.js";
@@ -17,11 +17,10 @@ describe("exemplarLink (H1)", () => {
     const link = exemplarLink(EX, "demo-traces", null);
     expect(link.startsWith("viewer.html?")).toBe(true);
     const params = new URLSearchParams(link.slice("viewer.html?".length));
-    // The trace param is the /api/trace endpoint - which #582 removed, so
-    // this link 404s at HEAD. Preserved byte-for-byte (behavior-preserving
-    // port; the fix-vs-preserve is a ledgered maintainer call). The
-    // source_key is encodeURIComponent'd inside the trace URL (legacy
-    // exemplarLink), so the once-decoded trace param carries the escaped key.
+    // The trace param is the /api/trace endpoint, which no longer exists, so
+    // this link 404s at HEAD; it is preserved byte-for-byte anyway. The
+    // source_key is encodeURIComponent'd inside the trace URL, so the
+    // once-decoded trace param carries the escaped key.
     expect(params.get("trace")).toBe(
       `/api/trace?bucket=demo-traces&keys=${encodeURIComponent(EX.source_key)}`,
     );

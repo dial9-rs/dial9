@@ -1,6 +1,5 @@
-// T23 keyboard region/zoom selection machine (features/02 H9; DoD: every
-// transition incl. cancel paths). Ported from viewer.html:6228-6268 +
-// completeKbSelection/cancelKbSelection.
+// Keyboard region/zoom selection machine: every transition including the
+// cancel paths.
 
 import { describe, it, expect } from "vitest";
 import {

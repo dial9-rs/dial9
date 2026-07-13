@@ -1,13 +1,11 @@
-// Tests for the Queue depth track's pure model (T29; features/02 section M).
-// The DoD's mechanical checks live here:
-//   1. S6 / issue #282 - `queueScaleY` maps a 0-valued series to a VISIBLE
-//      baseline STRICTLY above the axis (the zero-global-invisible fix), and
-//      the shared scale is monotone + clamped. This is the "Vitest on the
-//      scale function" half of the DoD (the T12 visual is the other half).
-//   2. J7 behavioral-diff - `buildQueueRenderModel` reproduces the legacy
-//      bucketed numbers (maxQ, carry-forward step values, active-task
-//      maxTasks/startCount) and `computeSpawnedTasks` reproduces the legacy
-//      M7 task-finding + grouping. Presentation changed; the numbers did not.
+// Tests for the Queue depth track's pure model:
+//   1. `queueScaleY` maps a 0-valued series to a VISIBLE baseline STRICTLY
+//      above the axis (the zero-global-invisible fix, issue #282), and the
+//      shared scale is monotone + clamped.
+//   2. `buildQueueRenderModel` reproduces the bucketed numbers (maxQ,
+//      carry-forward step values, active-task maxTasks/startCount) and
+//      `computeSpawnedTasks` reproduces the task-finding + grouping.
+//      Presentation changed; the numbers did not.
 
 import { describe, it, expect } from "vitest";
 import {
@@ -35,7 +33,7 @@ describe("queueScaleY (S6 / #282: 0 must render a visible baseline)", () => {
 
   it("maps value 0 STRICTLY above the axis bottom (not fused to it)", () => {
     const y0 = queueScaleY(0, 5, top, h);
-    // The legacy bug: 0 -> chartTop + chartH (the axis) -> invisible. The fix
+    // The bug: 0 -> chartTop + chartH (the axis) -> invisible. The fix
     // reserves ZERO_BASELINE_PX so 0 lands above the axis.
     expect(y0).toBeLessThan(top + h);
     expect(y0).toBe(top + h - ZERO_BASELINE_PX);

@@ -1,7 +1,6 @@
-// DoD (T08): the DPR wrapper no-ops when geometry is unchanged (F3:
-// backing stores resize only on geometry change). The decision logic is
-// pure (planBackingStore); the binding is driven with a recording stub
-// that counts every canvas write.
+// The DPR wrapper no-ops when geometry is unchanged (backing stores resize
+// only on geometry change). The decision logic is pure (planBackingStore);
+// the binding is driven with a recording stub that counts every canvas write.
 
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { createCanvasSizer, planBackingStore } from "./dpr.js";

@@ -1,6 +1,5 @@
 // Palette utilities: core re-export wiring + the app-level color lore
-// ported from viewer.html inline script (pollColor / pollColorDim /
-// spanColor-style assignment).
+// (pollColor / pollColorDim / spanColor-style assignment).
 
 import { describe, it, expect } from "vitest";
 import {
@@ -20,9 +19,8 @@ describe("frozen-core palette re-exports", () => {
   });
 
   it("quantized variant buckets nearby durations to one string", () => {
-    // The point of the quantized palette (issue #450): approximately
-    // equal durations share the exact color string so the coalescer can
-    // merge their bars.
+    // The point of the quantized palette: approximately equal durations share
+    // the exact color string so the coalescer can merge their bars.
     expect(pollHeatmapColorQuantized(50_000)).toBe(
       pollHeatmapColorQuantized(50_001),
     );

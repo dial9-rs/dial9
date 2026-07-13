@@ -1,8 +1,8 @@
-// Unit tests for the tokio-stats URL contract (features/04 A3-A7). These pin
-// the switch round-trip's page half: the FULL query string the page keeps in
-// its URL (bucket, prefix, service, repeatable host, per-period bounds) is
-// exactly what the dual-UI switch carries across (the switch's own verbatim
-// preservation is pinned in tests/ui_switch.test.ts).
+// Unit tests for the tokio-stats URL contract. These pin the switch
+// round-trip's page half: the FULL query string the page keeps in its URL
+// (bucket, prefix, service, repeatable host, per-period bounds) is exactly what
+// the dual-UI switch carries across (the switch's own verbatim preservation is
+// pinned in tests/ui_switch.test.ts).
 
 import { describe, it, expect } from "vitest";
 import {

@@ -1,8 +1,7 @@
-// Tests for the trace-embedded service/host identity + reconciliation (T45;
-// features/02 C1a; closes #68). Pins the writer-side key-name contract, the
-// embedded-wins-with-tooltip reconciliation rule, and walks both real sources:
-// the committed demo trace (carries `service`, no `host`) and a T42 window
-// fixture (carries both).
+// Tests for the trace-embedded service/host identity + reconciliation. Pins
+// the writer-side key-name contract, the embedded-wins-with-tooltip
+// reconciliation rule, and walks both real sources: the committed demo trace
+// (carries `service`, no `host`) and a window fixture (carries both).
 
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";

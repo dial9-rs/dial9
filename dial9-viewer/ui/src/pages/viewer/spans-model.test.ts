@@ -1,10 +1,8 @@
-// Tests for the spans track's pure model (T26; features/02 section J). These
-// are the DoD's behavioral checks that do NOT need a browser: the filter
-// semantics (J7-J9), the render-set / focus repositioning (J1/J2), the
-// binary-searched visibility window (F5/F6), the selection-driven dimming
-// input (S4), and the J13 unmatched-span surfacing (T17 audit notes 6+7).
-// Span records are built synthetically (the enclosing_spans.test.ts pattern);
-// one case drives buildSpanData through real SpanEnter/SpanExit events.
+// Tests for the spans track's pure model - the behavioral checks that do NOT
+// need a browser: the filter semantics, the render-set / focus repositioning,
+// the binary-searched visibility window, the selection-driven dimming input,
+// and the unmatched-span surfacing. Span records are built synthetically; one
+// case drives buildSpanData through real SpanEnter/SpanExit events.
 
 import { describe, it, expect } from "vitest";
 import type { CustomTraceEvent, TracingSpan } from "../../lib/trace/index.js";
@@ -85,7 +83,7 @@ function trackData(spans: TracingSpan[]): SpanTrackData {
 
 const noFilter: SpanFilterState = { text: "", pctFloor: 0, selectedNames: new Set() };
 
-// ── computeSpanTrackData (buildSpanData path + J13) ──────────────────────
+// ── computeSpanTrackData (buildSpanData path) ─────────────────────────────
 
 function enter(ts: number, spanId: string, name: string, extra: Record<string, unknown> = {}): CustomTraceEvent {
   return {
@@ -134,7 +132,7 @@ describe("computeSpanTrackData", () => {
   });
 });
 
-// ── Filtering (J7/J8/J9) ─────────────────────────────────────────────────
+// ── Filtering ─────────────────────────────────────────────────────────────
 
 describe("spanMatchesFilter", () => {
   const durs = new Map<string, number[]>([["req", [10, 20, 30, 40, 100]]]);
@@ -185,7 +183,7 @@ describe("spanPercentileRank", () => {
   });
 });
 
-// ── Visibility window (binary search - F5/F6) ────────────────────────────
+// ── Visibility window (binary search) ─────────────────────────────────────
 
 describe("visibility window", () => {
   const spans = [span("a", "s", 0, 100), span("b", "s", 200, 300), span("c", "s", 500, 600)];
@@ -215,7 +213,7 @@ describe("visibility window", () => {
   });
 });
 
-// ── Render model (J1/J2/J5) ──────────────────────────────────────────────
+// ── Render model ──────────────────────────────────────────────────────────
 
 describe("buildSpanRenderModel", () => {
   const parent = span("p", "parent", 0, 1000, { activeNs: 1000 });
@@ -238,7 +236,7 @@ describe("buildSpanRenderModel", () => {
     const other = m.buckets.find((b) => b.representative.spanId === "c");
     expect(focus?.y).toBe(4); // PARENT_Y
     expect(other?.y).toBe(34); // CHILD_Y
-    expect(m.info).toContain("parent:"); // rich focus readout (J5)
+    expect(m.info).toContain("parent:"); // rich focus readout
   });
 
   it("reports no-visible when nothing overlaps the window", () => {
@@ -253,7 +251,7 @@ describe("buildSpanRenderModel", () => {
   });
 });
 
-// ── Focus chain (J2) + dimming (S4) ──────────────────────────────────────
+// ── Focus chain + dimming ─────────────────────────────────────────────────
 
 describe("spanFocusChain", () => {
   it("walks the ancestor chain from a clicked span (J2)", () => {
@@ -288,7 +286,7 @@ describe("spanHighlight (S4 dim input)", () => {
   });
 });
 
-// ── Chip + label models (J9/J3, F7) ──────────────────────────────────────
+// ── Chip + label models ───────────────────────────────────────────────────
 
 describe("spanChipModels", () => {
   it("emits one keyed chip per name with active + color (J9/F7)", () => {

@@ -1,6 +1,6 @@
-// Tests for the T14 browser-page format helpers (format.ts), ported from
-// the legacy inline helpers. UTC-mode expectations are literal; local-mode
-// expectations are round-trip properties (the test host's TZ is arbitrary).
+// Tests for the browser-page format helpers (format.ts). UTC-mode expectations
+// are literal; local-mode expectations are round-trip properties (the test
+// host's TZ is arbitrary).
 
 import { describe, expect, it } from "vitest";
 import {

@@ -1,9 +1,8 @@
-// loadTraceInWorker orchestrator tests (T16): the message-level contract
-// against a scripted in-process fake port and a REAL T07 store. This layer
-// pins the single-AbortController semantics (the DoD abort observables:
-// worker terminated, trace slice unchanged, no progress after abort)
-// independent of transport; the true thread + structured-clone boundary is
-// worker/integration.test.ts.
+// loadTraceInWorker orchestrator tests: the message-level contract against a
+// scripted in-process fake port and a real store. This layer pins the
+// single-AbortController semantics (worker terminated, trace slice unchanged,
+// no progress after abort) independent of transport; the true thread +
+// structured-clone boundary is worker/integration.test.ts.
 
 import { describe, expect, it, vi } from "vitest";
 import { createStore } from "../../store/store.js";

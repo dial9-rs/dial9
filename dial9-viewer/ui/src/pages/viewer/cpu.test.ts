@@ -1,12 +1,11 @@
-// Tests for the Process CPU usage track (T28; features/02 section L). The
-// DoD's two checks are asserted mechanically here: (1) the avg/max readout
-// figures match the legacy `visibleCpuStats`/`fmtCpu*`/info-label output to
-// the digit (the behavioral-diff target), and (2) the render obeys the T08
-// render discipline - bars via the run-length COALESCER (contiguous equal
-// bars fold), grid + capacity via the BATCHED-STROKE path (one stroke() per
-// style, not one per line: 03 F1). The T17 carried obligation (surface a
-// truncated/oversized window, never paint it as complete) is exercised
-// directly on the renderer.
+// Tests for the Process CPU usage track. Two checks are asserted mechanically
+// here: (1) the avg/max readout figures match the legacy
+// `visibleCpuStats`/`fmtCpu*`/info-label output to the digit (the
+// behavioral-diff target), and (2) the render obeys the render discipline -
+// bars via the run-length COALESCER (contiguous equal bars fold), grid +
+// capacity via the BATCHED-STROKE path (one stroke() per style, not one per
+// line). The carried obligation (surface a truncated/oversized window, never
+// paint it as complete) is exercised directly on the renderer.
 
 import { describe, it, expect } from "vitest";
 import {
@@ -59,7 +58,7 @@ function iv(
   } as ProcessCpuUsageInterval;
 }
 
-// ── visibleCpuStats: the exact behavioral-diff core (features/02 L2) ─────
+// ── visibleCpuStats: the exact behavioral-diff core ──────────────────────
 
 describe("visibleCpuStats (legacy visibleCpuStats, verbatim)", () => {
   it("is the overlap-weighted mean and the peak over the visible window", () => {
@@ -97,7 +96,7 @@ describe("visibleCpuStats (legacy visibleCpuStats, verbatim)", () => {
   });
 });
 
-// ── Formatting (features/02 L2; legacy fmtCpuCores/fmtCpuPercent) ────────
+// ── Formatting (fmtCpuCores / fmtCpuPercent) ─────────────────────────────
 
 describe("fmtCpuCores / fmtCpuPercent (verbatim ports)", () => {
   it("fmtCpuCores: 2 decimals under 10, 1 at/above, trailing zeros stripped", () => {
@@ -140,7 +139,7 @@ describe("cpuReadoutText (legacy #cpu-panel-info string, exact)", () => {
   });
 });
 
-// ── Hover content: the T24 seam (features/02 L3) ─────────────────────────
+// ── Hover content ────────────────────────────────────────────────────────
 
 describe("cpuIntervalAt (legacy findProcessCpuIntervalAt binary search)", () => {
   const intervals = [iv(0, 100, 1), iv(100, 200, 2), iv(200, 300, 3)];
@@ -176,7 +175,7 @@ describe("cpuIntervalTooltip (legacy cpuIntervalTooltipHtml, structured)", () =>
   });
 });
 
-// ── Bar colour ramp (features/02 L1; legacy load ramp) ───────────────────
+// ── Bar colour ramp ──────────────────────────────────────────────────────
 
 describe("cpuBarColor (legacy load ramp, verbatim)", () => {
   it("ramps blue at zero load to pink/red at capacity", () => {
@@ -194,7 +193,7 @@ describe("cpuBarColor (legacy load ramp, verbatim)", () => {
   });
 });
 
-// ── Draw-area alignment (A13; same mapping as the axis) ──────────────────
+// ── Draw-area alignment (same mapping as the axis) ───────────────────────
 
 describe("nsToDrawX (A13 alignment invariant)", () => {
   it("is the axis track's mapping verbatim (no LABEL_W added)", () => {
@@ -216,7 +215,7 @@ describe("nsToDrawX (A13 alignment invariant)", () => {
 });
 
 // A recording 2D context capturing the ops the CPU render makes (node has no
-// canvas). Enough to assert the F1 stroke batching + coalesced fills.
+// canvas). Enough to assert the stroke batching + coalesced fills.
 interface RectCall {
   x: number;
   y: number;
@@ -359,7 +358,7 @@ describe("renderCpuTrack (features/02 L1)", () => {
   });
 });
 
-// ── T17 obligation: surface a windowed/oversized view ────────────────────
+// ── Surface a windowed/oversized view ────────────────────────────────────
 
 describe("renderCpuTrack surfaces a windowed view (T17 obligation)", () => {
   const trace = [iv(0, 500, 2), iv(500, 1000, 4)];
@@ -388,16 +387,15 @@ describe("renderCpuTrack surfaces a windowed view (T17 obligation)", () => {
   });
 });
 
-// ── Behavioral diff: readout EXACT vs legacy (the DoD check) ─────────────
+// ── Behavioral diff: readout EXACT vs legacy ─────────────────────────────
 //
 // The demo trace carries no ProcessResourceUsageEvent data (the legacy CPU
 // panel is hidden for it), and no other repo fixture does either, so a live
 // real-trace diff is not available. Instead this diffs the ported readout
-// against the LEGACY functions copied VERBATIM from viewer.html
-// (fmtCpuCores :3640-3646, fmtCpuPercent :3648-3651, visibleCpuStats
-// :3653-3668, the info string :3677-3680) over a realistic interval series
-// at many viewports. The readout is a pure function of (intervals, viewport,
-// capacity), so this is complete behavioral coverage of the L2 figures.
+// against the LEGACY functions copied VERBATIM from viewer.html (fmtCpuCores,
+// fmtCpuPercent, visibleCpuStats, the info string) over a realistic interval
+// series at many viewports. The readout is a pure function of (intervals,
+// viewport, capacity), so this is complete behavioral coverage.
 
 // --- verbatim legacy copies (viewer.html) ---
 function legacyFmtCpuCores(value: number): string {
@@ -436,8 +434,8 @@ function legacyReadout(
   stats: { avgCores: number; maxCores: number },
   capacity: number | null,
 ): string {
-  // Copied byte-for-byte from viewer.html:3677-3680 (the middle dot is the
-  // literal U+00B7 that ships in the legacy label).
+  // Copied byte-for-byte from viewer.html (the middle dot is the literal
+  // U+00B7 that ships in the legacy label).
   const avgPct =
     capacity != null ? Math.min(100, (stats.avgCores / capacity) * 100) : null;
   const pctText = avgPct != null ? ` · avg ${legacyFmtCpuPercent(avgPct)}` : "";
@@ -480,7 +478,7 @@ describe("readout behavioral diff: ported == legacy, to the digit", () => {
   });
 });
 
-// ── Store lifting + memoization (features/02 L5) ─────────────────────────
+// ── Store lifting + memoization ──────────────────────────────────────────
 
 /** A ProcessResourceUsageEvent custom event (the CPU series source). */
 function cpuEvent(t: number, userNs: number, systemNs: number): unknown {

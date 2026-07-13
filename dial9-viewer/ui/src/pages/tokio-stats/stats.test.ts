@@ -1,8 +1,8 @@
-// Behavioral-differ target (features/04 K3, E, G): computeStats + the diff
-// math must reproduce the legacy page's numbers EXACTLY from the same cached
-// response. The single-period assertions run against the recorded refine
-// fixture (the exact wire the dev seed folds); the diff assertions run
-// against synthetic two-period responses with hand-verifiable rates.
+// Behavioral-differ target: computeStats + the diff math must reproduce the
+// legacy page's numbers EXACTLY from the same cached response. The
+// single-period assertions run against the recorded refine fixture (the exact
+// wire the dev seed folds); the diff assertions run against synthetic
+// two-period responses with hand-verifiable rates.
 
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -51,7 +51,7 @@ describe("computeStats against the recorded refine fixture (E1-E4)", () => {
 
   it("no off-CPU polls in the demo trace; on-CPU only at the class-1 location (E2)", () => {
     // The demo's longest poll is ~1ms (< the 10ms off-CPU confidence bound),
-    // so class 0 never occurs (finding: classes 1/2/3 only).
+    // so class 0 never occurs (classes 1/2/3 only).
     expect(s.totalOffCpu).toBe(0);
     expect(s.totalOnCpu).toBeGreaterThan(0);
     // AXUM is the only location carrying class-1 (on-CPU) polls.
@@ -93,7 +93,7 @@ describe("computeStats against the recorded refine fixture (E1-E4)", () => {
   });
 });
 
-// ── Diff model (G3-G9) against synthetic two-period responses ──
+// ── Diff model against synthetic two-period responses ──
 
 function loc(spawn: string, durations: number[], classes: number[]): SpawnLocStats {
   return {

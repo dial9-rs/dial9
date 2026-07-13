@@ -1,6 +1,5 @@
-// query.ts tests: the ported poll-at-timestamp binary search, task
-// lookup, containing-span scan and cycle-guarded ancestor walk
-// (viewer.html lane-click lore, features/02 G13/G14).
+// query.ts tests: the poll-at-timestamp binary search, task lookup,
+// containing-span scan, and cycle-guarded ancestor walk.
 
 import { describe, expect, it } from "vitest";
 import type { PollSpan, TracingSpan } from "../../../trace_analysis.js";

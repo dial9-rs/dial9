@@ -1,16 +1,16 @@
-// Store-integration tests for the custom-events track (T27). The
-// store/render-input DoD checks (the browser-driven halves - row-walker, T12
-// visual - are listed in HANDOFF.md):
-//   1. click-to-pin dispatches the selection slice (K4): dispatchEventPin
-//      writes selection.pinnedEvent with the right contract and toggles it off
-//      on a repeat click, clearing any prior task/span selection.
-//   2. hover dispatches the guide-line timestamp (I4): dispatchHoverEvent
-//      writes transient.hoverEventTs (the slice T24's overlay draws from) and
-//      clears it on leave.
-//   3. dim-on-selection (S4, same rule as T26): drawEventsCanvas's render input
-//      fades a cluster that did not run on the highlighted task to 20%.
-//   4. derived-cache invalidation (F5): the trace-invariant event data
-//      recomputes ONLY when the trace slice changes.
+// Store-integration tests for the custom-events track. The store/render-input
+// checks (the browser-driven halves - row-walker, visual - are listed in
+// HANDOFF.md):
+//   1. click-to-pin dispatches the selection slice: dispatchEventPin writes
+//      selection.pinnedEvent with the right contract and toggles it off on a
+//      repeat click, clearing any prior task/span selection.
+//   2. hover dispatches the guide-line timestamp: dispatchHoverEvent writes
+//      transient.hoverEventTs (the slice the overlay draws from) and clears it
+//      on leave.
+//   3. dim-on-selection: drawEventsCanvas's render input fades a cluster that
+//      did not run on the highlighted task to 20%.
+//   4. derived-cache invalidation: the trace-invariant event data recomputes
+//      ONLY when the trace slice changes.
 
 import { describe, it, expect } from "vitest";
 import { createViewerStore } from "./store.js";
@@ -71,7 +71,7 @@ function lane(polls: PollSpan[]): WorkerLane {
   return { polls, parks: [], actives: [], cpuSampleTimes: [] };
 }
 
-// ── 1. Click-to-pin dispatch (K4) ────────────────────────────────────────
+// ── 1. Click-to-pin dispatch ─────────────────────────────────────────────
 
 describe("dispatchEventPin (K4)", () => {
   it("pins a single-event cluster into selection.pinnedEvent", () => {
@@ -135,7 +135,7 @@ describe("dispatchEventPin (K4)", () => {
   });
 });
 
-// ── 2. Hover guide-line dispatch (I4) ────────────────────────────────────
+// ── 2. Hover guide-line dispatch ─────────────────────────────────────────
 
 describe("dispatchHoverEvent (I4)", () => {
   it("writes and clears transient.hoverEventTs (the slice T24 draws from)", () => {
@@ -163,7 +163,7 @@ describe("dispatchHoverEvent (I4)", () => {
   });
 });
 
-// ── 3. Dim-on-selection render input (S4, same rule as T26) ──────────────
+// ── 3. Dim-on-selection render input ─────────────────────────────────────
 
 /** A minimal recording 2d context: captures each fillRect's x + alpha and
  *  every fillText string. */
@@ -238,7 +238,7 @@ describe("drawEventsCanvas dimming (S4)", () => {
   });
 });
 
-// ── 4. Derived-cache invalidation (F5) ───────────────────────────────────
+// ── 4. Derived-cache invalidation ────────────────────────────────────────
 
 /** A ParsedTrace stub carrying only the customEvents the event data reads. */
 function fakeTrace(events: CustomTraceEvent[]): ParsedTrace {

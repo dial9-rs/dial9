@@ -1,7 +1,6 @@
-// Tests for the issues-rail controller (T33; features/02 C4/C5/C7, 04 S5).
-// The lit-html rail markup is exercised by the T12 census/axe tooling in the
-// browser (no DOM env here); this suite pins the `n`/`p` stepping wiring that
-// dispatches into the store - the store-side of the keyboard nav.
+// Tests for the issues-rail controller. The lit-html rail markup is exercised
+// in the browser (no DOM env here); this suite pins the `n`/`p` stepping wiring
+// that dispatches into the store - the store-side of the keyboard nav.
 
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";

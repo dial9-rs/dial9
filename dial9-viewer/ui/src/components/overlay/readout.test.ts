@@ -1,14 +1,12 @@
-// T24 at-cursor readout DoD: the readout compute mirrors the legacy info-panel
-// (I6), the T17 coverage signal maps the covering segment's residency, and the
-// contract is POPULATED on the transient channel during hover (a subscriber -
-// the stub / T31 - sees transient.atCursor). Node-pure + a store instance.
+// At-cursor readout tests: the compute, the coverage-signal mapping, and the
+// transient-channel store contract during hover. Node-pure + a store instance.
 
 import { describe, it, expect } from "vitest";
 import { computeAtCursorReadout, coverageAt, type AtCursorInput } from "./readout.js";
 import { createViewerStore } from "../../pages/viewer/store.js";
 import type { AtCursorReadout, SegmentEntry } from "../../types/state.js";
 
-// ── computeAtCursorReadout (I6) ──────────────────────────────────────────
+// ── computeAtCursorReadout ──────────────────────────────────────────
 
 describe("computeAtCursorReadout (I6 info-panel parity)", () => {
   const input: AtCursorInput = {
@@ -62,7 +60,7 @@ describe("computeAtCursorReadout (I6 info-panel parity)", () => {
   });
 });
 
-// ── coverageAt (T17 carried obligation) ──────────────────────────────────
+// ── coverageAt ──────────────────────────────────
 
 describe("coverageAt (T17 windowed-data completeness)", () => {
   const entry = (state: SegmentEntry["state"], startNs: number, endNs: number): SegmentEntry => ({

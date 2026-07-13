@@ -1,8 +1,7 @@
-// Tests for the toast manager (T21; features/02 U). The env is node (no
-// DOM), so a minimal structural fake element stands in - the manager only
-// uses createElement / append / remove / textContent / className /
-// classList, which the fake models exactly. Fake timers drive the
-// auto-hide (U1) and wiggle (U2) windows.
+// Tests for the toast manager. The env is node (no DOM), so a minimal
+// structural fake element stands in - the manager only uses createElement /
+// append / remove / textContent / className / classList, which the fake models
+// exactly. Fake timers drive the auto-hide and wiggle windows.
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { createToasts } from "./toasts.js";

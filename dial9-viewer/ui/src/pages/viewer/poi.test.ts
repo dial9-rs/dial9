@@ -1,12 +1,12 @@
-// Tests for the POI / issues-rail model (T33; features/02 section C, 04 S5).
+// Tests for the POI / issues-rail model.
 //
-// The headline check is the rail-count PARITY DoD: with the demo trace, the
-// default filter ("sched") and worst-first, the derived rail lists EXACTLY the
-// count the legacy "x/74" stepper reported. We prove it by independently
-// re-deriving the legacy pipeline (buildWorkerSpans -> computeSchedulingDelays
-// -> filterPointsOfInterest, viewer.html:1976-2054/2403) and asserting the
-// model's count equals it, for every detector filter - so a wrong default
-// filter, a dropped worst-first, or a mismatched worker set would fail here.
+// The headline check is rail-count parity: with the demo trace, the default
+// filter ("sched") and worst-first, the derived rail lists EXACTLY the count
+// the "x/74" stepper reported. We prove it by independently re-deriving the
+// detector pipeline (buildWorkerSpans -> computeSchedulingDelays ->
+// filterPointsOfInterest) and asserting the model's count equals it, for every
+// detector filter - so a wrong default filter, a dropped worst-first, or a
+// mismatched worker set would fail here.
 
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";

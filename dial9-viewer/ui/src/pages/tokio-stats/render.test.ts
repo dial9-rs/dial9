@@ -1,17 +1,16 @@
-// XSS regression test (features/04 I1; the #587 vuln - a real past XSS on
-// THIS page). The structural guard is N17: all server/URL-derived strings
-// (spawn locations from traced code, the exemplar deep-link URL, the diff-%
-// cell) reach the DOM only through lit-html interpolation, which treats a
-// `${value}` as DATA - text-escaped in element position, setAttribute'd in
-// attribute position - NEVER as parsed markup.
+// XSS regression test (a real past XSS on this page). The structural guard:
+// all server/URL-derived strings (spawn locations from traced code, the
+// exemplar deep-link URL, the diff-% cell) reach the DOM only through lit-html
+// interpolation, which treats a `${value}` as DATA - text-escaped in element
+// position, setAttribute'd in attribute position - NEVER as parsed markup.
 //
 // Rather than execute a hostile string in a DOM (the repo keeps no DOM test
-// env; the live render is covered by the T12 axe/census browser layer), this
-// proves the invariant at the template level: a hostile string is always a
-// lit-html VALUE (dynamic, escaped at render) and NEVER a substring of the
-// static HTML chunks (which are our fixed template text). A regression that
-// reintroduced the vuln - string-concatenating data into HTML, or wrapping it
-// in unsafeHTML - would break one of these assertions or the source guard.
+// env; the live render is covered by the browser layer), this proves the
+// invariant at the template level: a hostile string is always a lit-html VALUE
+// (dynamic, escaped at render) and NEVER a substring of the static HTML chunks
+// (which are our fixed template text). A regression that reintroduced the vuln
+// - string-concatenating data into HTML, or wrapping it in unsafeHTML - would
+// break one of these assertions or the source guard.
 
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";

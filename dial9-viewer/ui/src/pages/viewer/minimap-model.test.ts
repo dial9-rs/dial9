@@ -1,7 +1,7 @@
-// Unit tests for the overview-minimap density/coverage/geometry model (T35).
-// The HEADLINE DoD lives here: a multi-segment trace whose tail is UNFETCHED
-// (tier-1-only) must render a navigable overview whose tail is NOT presented as
-// empty/complete, and a click/drag on that tail must move the viewport into it.
+// Unit tests for the overview-minimap density/coverage/geometry model. The
+// headline behavior: a multi-segment trace whose tail is UNFETCHED (tier-1-only)
+// must render a navigable overview whose tail is NOT presented as empty/complete,
+// and a click/drag on that tail must move the viewport into it.
 
 import { describe, it, expect } from "vitest";
 import {
@@ -32,9 +32,9 @@ function seg(
 }
 
 /**
- * The DoD fixture shape: a repeated-demo multi-segment set (10 segments, each
- * 1s wide, tiled) where fetching is suppressed beyond segment N - the head is
- * "parsed" (fetched tier-2), the tail is "listed" (tier-1-only).
+ * The fixture shape: a multi-segment set (10 segments, each 1s wide, tiled)
+ * where fetching is suppressed beyond segment N - the head is "parsed" (fetched
+ * tier-2), the tail is "listed" (tier-1-only).
  */
 function multiSegmentSet(
   count: number,
@@ -161,7 +161,7 @@ describe("computeDensityBins - source precedence", () => {
 
   it("falls back on a T18 coverageSignal-classified PARTIAL fold (real classifier)", () => {
     // A demand-driven aggregate mid-fold: files_folded < files_matched -> the
-    // T18 client classifies this "partial", so the minimap must NOT trust its
+    // client classifies this "partial", so the minimap must NOT trust its
     // density and must fall back to listing residency.
     const signal = coverageSignal({
       files_matched: 10,

@@ -1,8 +1,5 @@
-// T22 lanes DoD: the render pass must be pixel-bounded (downsample +
-// coalesce fills, batch strokes - 03 F1), and the click/hover resolvers must
-// reproduce the legacy selection/tooltip semantics (G13-G16) over the T09
-// query helpers. Node-testable: a recording 2D-context stub + synthetic lane
-// data, no DOM, no trace parse.
+// Lane render/click/hover tests over a recording 2D-context stub and
+// synthetic lane data: no DOM, no trace parse.
 
 import { describe, it, expect } from "vitest";
 import {
@@ -112,7 +109,7 @@ function poll(start: number, end: number, taskId = 1): PollSpan {
   return { start, end, taskId, spawnLocId: null, spawnLoc: null };
 }
 
-// ── Downsample / coalesce usage (the DoD item) ───────────────────────────
+// ── Downsample / coalesce usage ───────────────────────────
 
 describe("renderLanes: pixel-bounded fills (03 F1 downsample+coalesce)", () => {
   it("draws O(width) fillRects for a million polls, not O(polls)", () => {
@@ -155,13 +152,11 @@ describe("renderLanes: pixel-bounded fills (03 F1 downsample+coalesce)", () => {
       { time: layout(0, n, drawW), height: 60 },
     );
     // Whole-canvas strokes: queue(1 style) + separator(1 style) = 2 stroke()
-    // calls for one lane, independent of the 500k samples. Legacy stroked
-    // once per sample here (03 F1).
+    // calls for one lane, independent of the 500k samples.
     expect(rec.strokes).toBeLessThanOrEqual(2);
     // The batcher hoists dash state; the solid queue/separator styles never
     // touch setLineDash on the draw path.
     expect(rec.setLineDashes).toBe(0);
-    // The q:NN scale label is present (G12 / F3 legend coverage).
     expect(rec.fillTexts.some((t) => t.startsWith("q:"))).toBe(true);
   });
 
@@ -207,7 +202,7 @@ describe("sharedVisibleMaxQueue", () => {
   });
 });
 
-// ── Click resolution (G13/G14/G15) ───────────────────────────────────────
+// ── Click resolution ───────────────────────────────────────
 
 function span(
   spanId: string,
@@ -233,8 +228,7 @@ describe("resolveLaneClick (G13/G14/G15)", () => {
   const polls = [poll(0, 100, 42), poll(200, 300, 7)];
   // Parent's segment ran on ANOTHER worker at this instant, so the
   // containing-span lookup on worker 0 finds the child; the ancestor walk
-  // then re-adds the parent (its [start,end] still contains ns). This is the
-  // real G14 case the outermost-walk exists for.
+  // then re-adds the parent (its [start,end] still contains ns).
   const child = span("c", 10, 90, 0, "p");
   const parent = span("p", 0, 100, 1, null);
   const allSpans = [parent, child];
@@ -297,7 +291,7 @@ describe("resolveLaneClick (G13/G14/G15)", () => {
   });
 });
 
-// ── Hover assembly (G16) ─────────────────────────────────────────────────
+// ── Hover assembly ─────────────────────────────────────────────────
 
 describe("assembleLaneHover (G16)", () => {
   it("reports polling state with task, sample counts and clickable-stack (K8)", () => {

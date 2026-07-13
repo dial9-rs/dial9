@@ -1,7 +1,5 @@
-// analysis.ts wiring smoke checks (T08 downsample.test.ts precedent):
-// the CJS-interop named re-exports resolve and behave; the core's own
-// behavior stays covered by its legacy suites (test_trace_analysis.js,
-// test_runtime_groups.js, test_task_lifecycle.js, ...).
+// analysis.ts wiring smoke checks: the CJS-interop named re-exports resolve
+// and behave (the core's own behavior stays covered by its Node suites).
 
 import { describe, expect, it } from "vitest";
 import {

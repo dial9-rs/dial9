@@ -1,6 +1,6 @@
-// T23 viewport actions: the pure zoom/pan/fit/region math (legacy parity) and
-// the store-bound actions with the K4 zoom-history stack + the F2 coalescing
-// contract (many zoom calls in one frame -> one render).
+// Viewport actions: the pure zoom/pan/fit/region math and the store-bound
+// actions with the zoom-history stack + the coalescing contract (many zoom
+// calls in one frame -> one render).
 
 import { describe, it, expect, vi } from "vitest";
 import {
@@ -18,7 +18,7 @@ import type { ViewportSlice } from "../../types/state.js";
 
 const VP: ViewportSlice = { viewStart: 0, viewEnd: 1_000, minTs: 0, maxTs: 10_000 };
 
-// ── pure math (legacy parity) ────────────────────────────────────────────
+// ── pure math ─────────────────────────────────────────────────────────────
 
 describe("zoomWindow (viewer.html:5090)", () => {
   it("zoom in about the centre halves the visible duration", () => {

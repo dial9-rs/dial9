@@ -1,6 +1,6 @@
-// Unit tests for the overview-minimap POI tick derivation (T35). Synthetic
-// worker events drive the frozen detectors so the assertions are deterministic
-// (the same detector functions T33's rail uses; no code dependency).
+// Unit tests for the overview-minimap POI tick derivation. Synthetic worker
+// events drive the frozen detectors so the assertions are deterministic (the
+// same detector functions the issues rail uses; no code dependency).
 
 import { describe, it, expect } from "vitest";
 import { EVENT_TYPES } from "../../lib/trace/index.js";

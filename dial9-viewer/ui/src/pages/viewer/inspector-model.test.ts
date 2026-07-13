@@ -1,15 +1,7 @@
-// Pure-model tests for the persistent inspector (T31; features/02 P/Q/R +
-// amendments S4/F7). The store/DOM-boundary halves (tab activation on a live
-// store, resize->uiPrefs->localStorage, Esc registration, the row-walker) are
-// browser-driven and listed in HANDOFF.md; this suite pins the derivations the
-// DoD gates behaviorally:
-//   - Poll Detail (R1/R2): title, deduped group percentages + bar width, the
-//     3-frame head/expand split, the CPU headStart offset (the "exactly as
-//     legacy" behavioral-diff surface).
-//   - Event detail (Q1/Q3): kv rows + correlation availability.
-//   - Related (Q4-Q8): sections, windowing, empty states.
-//   - Spawned tasks (M8): the 5-link head + "N more" tail.
-//   - Tab families + S4 activation (P4 / preferredTab / hasNoSelection).
+// Pure-model tests for the persistent inspector: poll detail, event detail,
+// related sections, spawned tasks, and tab availability. The store/DOM-boundary
+// halves (tab activation, resize persistence, Esc, the row-walker) are
+// browser-driven.
 
 import { describe, it, expect } from "vitest";
 import {
@@ -79,7 +71,7 @@ function sel(over: Partial<SelectionSlice>): SelectionSlice {
   };
 }
 
-// ── Poll Detail (R1/R2): the behavioral-diff gate ─────────────────────────
+// ── Poll Detail ────────────────────────────────────────────────────────────
 
 describe("buildPollDetail (R1/R2)", () => {
   const stackLong = ["0x1", "0x2", "0x3", "0x4", "0x5"]; // 5 frames
@@ -128,7 +120,7 @@ describe("buildPollDetail (R1/R2)", () => {
     const c = v.cpuGroups[0]!;
     expect(c.count).toBe(2);
     expect(c.pct).toBe(100);
-    expect(c.barW).toBe(0); // CPU groups have no bar (legacy)
+    expect(c.barW).toBe(0); // CPU groups have no bar
     expect(c.headFrames).toHaveLength(2); // frames.slice(1,3) of a 4-frame stack
     expect(c.moreFrames).toHaveLength(1); // frames.slice(3)
   });
@@ -142,7 +134,7 @@ describe("buildPollDetail (R1/R2)", () => {
   });
 });
 
-// ── Event detail (Q1/Q3) ──────────────────────────────────────────────────
+// ── Event detail ─────────────────────────────────────────────────────────────
 
 describe("buildEventDetail (Q1/Q3)", () => {
   const fmtTs = (ns: number): string => `t${ns}`;
@@ -181,7 +173,7 @@ describe("buildEventDetail (Q1/Q3)", () => {
   });
 });
 
-// ── Related (Q4-Q8) ────────────────────────────────────────────────────────
+// ── Related ──────────────────────────────────────────────────────────────────
 
 describe("buildRelated (Q4-Q8)", () => {
   const anchor = ev("Tick", 100, { path: "/x" });
@@ -203,14 +195,14 @@ describe("buildRelated (Q4-Q8)", () => {
     expect(titles).toContain("Enclosing spans");
     expect(titles).toContain("Same task");
     expect(titles).toContain("Same type");
-    // No spans -> Enclosing spans is an empty section (Q8).
+    // No spans -> Enclosing spans is an empty section.
     const enc = v.sections.find((s) => s.title === "Enclosing spans")!;
     expect(enc.count).toBe(0);
     expect(enc.empty).toBe("none");
     // Same type: two "Tick" events (anchor + sameType).
     const st = v.sections.find((s) => s.title === "Same type")!;
     expect(st.count).toBe(2);
-    // The self row is non-navigable (Q7).
+    // The self row is non-navigable.
     const selfRow = st.rows.find((r) => r.self);
     expect(selfRow?.target).toBeNull();
   });
@@ -228,7 +220,7 @@ describe("buildRelated (Q4-Q8)", () => {
   });
 });
 
-// ── Spawned tasks (M8) ─────────────────────────────────────────────────────
+// ── Spawned tasks ────────────────────────────────────────────────────────────
 
 describe("buildSpawnedTasksView (M8)", () => {
   it("keeps 5 task links per group + a 'N more' tail", () => {
@@ -247,7 +239,7 @@ describe("buildSpawnedTasksView (M8)", () => {
   });
 });
 
-// ── Tab families + S4 activation (P4) ──────────────────────────────────────
+// ── Tab families + activation ────────────────────────────────────────────────
 
 describe("tab availability + preferred tab (P4 / S4)", () => {
   it("a poll click enables + prefers Poll", () => {

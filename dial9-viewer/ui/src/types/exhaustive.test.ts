@@ -1,27 +1,8 @@
-// T06 DoD: exhaustive-switch probes over the app-level discriminated
-// unions (src/types/trace.d.ts, src/types/state.d.ts).
-//
-// Placement: colocated under src/ (matched by the vitest include
-// `src/**/*.test.ts`, vite.config.ts) rather than tests/, which is
-// reserved for migrated legacy suites (tests/core/).
-//
-// Two jobs:
-//
-// 1. Compile-time: every switch below ends in a `default` branch that
-//    assigns the discriminant to `never`. If a variant is ADDED to a
-//    union and a switch doesn't handle it, the discriminant no longer
-//    narrows to `never` in the default branch and `tsc --noEmit` fails.
-//    Demonstration (verified during T06): temporarily adding
-//      | { kind: "task-spawn"; timestamp: number }
-//    to RuntimeEvent produced, in this file:
-//      error TS2322: Type '"task-spawn"' is not assignable to type 'never'.
-//    in BOTH eventTypeId() and describeEvent(). Same mechanism for
-//    PanelKind and SegmentLifecycle.
-//
-// 2. Type-check anchor: tsconfig has `skipLibCheck: true`, so the .d.ts
-//    bodies are only validated at USE sites. The typed sample values at
-//    the bottom pin the slice shapes the way T05's probe.ts pins the
-//    core declarations.
+// Exhaustive-switch probes over the app-level discriminated unions. Each
+// switch ends in a `default` branch assigning the discriminant to `never`, so
+// adding an unhandled union variant fails to compile. The typed sample values
+// at the bottom anchor the slice shapes, which skipLibCheck otherwise only
+// validates at use sites.
 
 import { describe, expect, it } from "vitest";
 import type {
@@ -73,7 +54,7 @@ function describeEvent(ev: RuntimeEvent): string {
     case "poll-end":
       return `poll end on worker ${ev.workerId}`;
     case "worker-park":
-      // ADR-0002: tid is required-but-undefinable; consumers must branch.
+      // tid is required-but-undefinable; consumers must branch.
       return `worker ${ev.workerId} parked${ev.tid !== undefined ? ` on tid ${ev.tid}` : ""}`;
     case "worker-unpark":
       return `worker ${ev.workerId} unparked after ${ev.schedWait}ns sched wait`;
@@ -90,7 +71,7 @@ function describeEvent(ev: RuntimeEvent): string {
 
 // ── Exhaustive switch over the panel union ──────────────────────────────
 
-/** The DOM element id hosting each panel (viewer.html today). */
+/** The DOM element id hosting each panel (viewer.html). */
 function panelElementId(panel: PanelKind): string {
   switch (panel) {
     case "spans":
@@ -110,15 +91,15 @@ function panelElementId(panel: PanelKind): string {
   }
 }
 
-// ── Exhaustive switch over the segment lifecycle (architecture 2.8) ─────
+// ── Exhaustive switch over the segment lifecycle ────────────────────────
 
 function segmentHoldsParsedData(state: SegmentLifecycle): boolean {
   switch (state) {
     case "listed":
     case "fetching":
     case "evicted":
-    // "oversized" (T17-audit finding 2): parsed once to learn the real
-    // size, but the parse is never retained - tier-1 rendering only.
+    // "oversized": parsed once to learn the real size, but the parse is
+    // never retained - tier-1 rendering only.
     case "oversized":
       return false;
     case "parsed":
@@ -147,8 +128,8 @@ describe("app-level discriminated unions are exhaustively switchable", () => {
       workerId: 2,
       localQueue: 0,
       cpuTime: 500,
-      // ADR-0002: old traces predate tid; the field must still be
-      // acknowledged explicitly -- omitting it is a compile error.
+      // Old traces predate tid; the field must still be acknowledged
+      // explicitly -- omitting it is a compile error.
       tid: undefined,
     };
     expect(describeEvent(park)).toBe("worker 2 parked");
@@ -198,10 +179,10 @@ const initialState: StoreState = {
   },
   poi: { filter: "sched", sortKey: "duration", sortDir: "desc", index: -1 },
   uiPrefs: {
-    // All four foldable panels start collapsed (features 02 O4);
+    // All four foldable panels start collapsed;
     // Record<FoldablePanelKind, boolean> forces exactly these keys.
     panelCollapsed: { spans: true, events: true, cpu: true, queue: true },
-    // Track management (T36; amended section O): custom order + collapse map.
+    // Track management: custom order + collapse map.
     trackOrder: ["queue", "cpu", "spans", "events"],
     collapsed: { cpu: true, queue: false },
     sidebarWidth: 400,

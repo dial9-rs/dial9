@@ -1,10 +1,7 @@
-// load.ts tests (T09 DoD): fetch + gunzip + concat and the stream/buffered
-// parity, following the legacy test_fetch_traces.js fixture pattern
-// (in-memory gzip fixtures + stubbed global fetch). The core's own
-// behavior (credential withholding, eager dispatch, unhandled-rejection
-// hygiene) stays covered by test_fetch_traces.js; these tests cover the
-// typed wrapper's orchestration: option splitting, chunk capture, buffer
-// reassembly, mode selection, and objectTraceUrls.
+// load.ts tests: fetch + gunzip + concat and the stream/buffered parity, with
+// in-memory gzip fixtures + a stubbed global fetch. These cover the typed
+// wrapper's orchestration: option splitting, chunk capture, buffer reassembly,
+// mode selection, and objectTraceUrls.
 
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -174,7 +171,7 @@ describe("loadTrace mode selection", () => {
   });
 });
 
-// ── objectTraceUrls (features/01 I4) ─────────────────────────────────────
+// ── objectTraceUrls ─────────────────────────────────────
 
 describe("objectTraceUrls", () => {
   it("builds one /api/object URL per key with encoded bucket and key", () => {

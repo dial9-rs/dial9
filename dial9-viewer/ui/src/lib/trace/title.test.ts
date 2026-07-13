@@ -1,5 +1,5 @@
-// title.ts tests (T09 DoD): features/01 I3 single- and multi-host cases,
-// plus epoch window and unknown-key handling.
+// title.ts tests: single- and multi-host cases, plus epoch window and
+// unknown-key handling.
 
 import { describe, expect, it } from "vitest";
 import { traceTitleParams } from "./title.js";

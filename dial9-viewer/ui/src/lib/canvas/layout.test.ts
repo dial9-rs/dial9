@@ -1,8 +1,6 @@
-// DoD (T08): layout invariant - label gutter + drawW + scrollbar math -
-// against known cases. The frozen core's own math is covered by
-// tests/core/panel_layout.test.ts; this suite tests the src/ wrapper:
-// that it pins labelW to the canonical LABEL_W=100 and forwards the
-// geometry unchanged, so every panel built through it lines up.
+// Layout invariant - label gutter + drawW + scrollbar math - against known
+// cases. Tests the src/ wrapper: it pins labelW to the canonical LABEL_W=100
+// and forwards the geometry unchanged, so every panel built through it lines up.
 
 import { describe, it, expect } from "vitest";
 import {

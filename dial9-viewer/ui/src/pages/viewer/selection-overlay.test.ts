@@ -1,6 +1,6 @@
-// T23 H10 selection overlay: the pure "which box to show" precedence and the
-// box placement math (blue region / teal zoom). The DOM mount is thin; the
-// logic under test is these two pure functions.
+// Selection overlay: the pure "which box to show" precedence and the box
+// placement math (blue region / teal zoom). The DOM mount is thin; the logic
+// under test is these two pure functions.
 
 import { describe, it, expect } from "vitest";
 import { activeSelectionRegion, selectionBox } from "./selection-overlay.js";

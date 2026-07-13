@@ -1,14 +1,14 @@
-// Pure-model tests for the custom-events track (T27; features/02 section K).
-// The store/DOM-boundary checks (click-to-pin dispatch, hover dispatch,
-// dim-on-selection render input) live in events-track.test.ts; the
-// browser-driven halves (row-walker, T12 visual) are listed in HANDOFF.md.
+// Pure-model tests for the custom-events track. The store/DOM-boundary checks
+// (click-to-pin dispatch, hover dispatch, dim-on-selection render input) live
+// in events-track.test.ts; the browser-driven halves (row-walker, visual) are
+// listed in HANDOFF.md.
 //
-// DoD coverage here:
+// Coverage here:
 //   - bounded-scan: filterVisibleEvents binary-searches BOTH window edges, so
 //     the per-frame work is O(log N + window), never the legacy O(all generic
-//     events) scan (03 F5 -> F6). Proven with an access-counting Proxy.
-//   - clustering + geometry (K1), name filter (K5), info counts (K2),
-//     task/poll resolution (K7), and the S4 highlight-task derivation.
+//     events) scan. Proven with an access-counting Proxy.
+//   - clustering + geometry, name filter, info counts, task/poll resolution,
+//     and the highlight-task derivation.
 
 import { describe, it, expect } from "vitest";
 import {
@@ -43,7 +43,7 @@ function ev(
   };
 }
 
-// ── Generic-event extraction (F5 tier 1) ─────────────────────────────────
+// ── Generic-event extraction ─────────────────────────────────────────────
 
 describe("computeEventTrackData", () => {
   it("drops span lifecycle events, sorts by ts, and lists unique names", () => {
@@ -66,7 +66,7 @@ describe("computeEventTrackData", () => {
   });
 });
 
-// ── Binary-search window (F5/F6): bounded scan, the perf fix T27 owns ─────
+// ── Binary-search window: bounded scan ───────────────────────────────────
 
 describe("visibility window binary search", () => {
   const events = Array.from({ length: 20 }, (_, i) => ev("e", i * 10));
@@ -106,7 +106,7 @@ describe("visibility window binary search", () => {
   });
 });
 
-// ── Name filter (K5) ─────────────────────────────────────────────────────
+// ── Name filter ──────────────────────────────────────────────────────────
 
 describe("eventMatchesFilter (K5)", () => {
   it("passes everything when no names are selected", () => {
@@ -127,7 +127,7 @@ describe("eventMatchesFilter (K5)", () => {
   });
 });
 
-// ── Clustering + tick geometry (K1) + info (K2) ──────────────────────────
+// ── Clustering + tick geometry + info ────────────────────────────────────
 
 describe("buildEventRenderModel (K1/K2)", () => {
   const colorOf = (n: string): string => (n === "a" ? "#aaa" : "#bbb");
@@ -198,7 +198,7 @@ describe("buildEventRenderModel (K1/K2)", () => {
   });
 });
 
-// ── Task / poll resolution (K7) ──────────────────────────────────────────
+// ── Task / poll resolution ───────────────────────────────────────────────
 
 function poll(start: number, end: number, taskId: number): PollSpan {
   return { start, end, taskId, spawnLocId: null, spawnLoc: null };
@@ -254,7 +254,7 @@ describe("resolveClusterTask (K7)", () => {
   });
 });
 
-// ── S4 highlight-task derivation ─────────────────────────────────────────
+// ── Highlight-task derivation ────────────────────────────────────────────
 
 describe("eventHighlightTask (S4)", () => {
   it("prefers the selected task, then the pinned event's task, else null", () => {

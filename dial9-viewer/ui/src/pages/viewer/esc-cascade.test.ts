@@ -1,7 +1,6 @@
-// Tests for the Escape cascade mechanism (T21). The mechanism is owned
-// here; the D9 esc-ordering ROW is T33's. These prove the ordering
-// contract downstream tickets rely on: highest priority open surface wins,
-// and handle() reports whether anything consumed the key.
+// Tests for the Escape cascade mechanism. These prove the ordering contract:
+// highest priority open surface wins, and handle() reports whether anything
+// consumed the key.
 
 import { describe, it, expect } from "vitest";
 import { createEscCascade, ESC_PRIORITY } from "./esc-cascade.js";

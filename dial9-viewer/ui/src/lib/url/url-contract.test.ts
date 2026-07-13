@@ -1,6 +1,5 @@
-// src/lib/url/url-contract.test.ts - the URL-contract pin (T43, issue
-// #303). The contract doc is dial9-viewer/ui/README.md, section "URL
-// contract (stable deep-link API)"; this suite keeps that section, the
+// The URL-contract pin. The contract doc is dial9-viewer/ui/README.md, section
+// "URL contract (stable deep-link API)"; this suite keeps that section, the
 // recorded legacy-param fixture, url_state.js, and the view-state codec in
 // lockstep:
 //
@@ -11,13 +10,13 @@
 // - hash keys documented "live" round-trip through the codec; keys
 //   documented "reserved" are preserved-verbatim-but-not-honored (the
 //   tolerant-reader rule that makes "reserved" an honest status);
-// - the #303 recipe URL shapes resolve at codec level (the live-page twin
-//   is parity/url-contract.mjs, which drives real pages on a dev-server).
+// - the recipe URL shapes resolve at codec level (the live-page twin is
+//   parity/url-contract.mjs, which drives real pages on a dev-server).
 //
-// The N10 promise this enforces: old params stay valid forever, evolution
-// is additive-only. Removing or renaming ANY name below is a breaking
-// change and must not happen; adding one means updating the README section,
-// the ledger, and this suite in the same PR.
+// The promise this enforces: old params stay valid forever, evolution is
+// additive-only. Removing or renaming ANY name below is a breaking change and
+// must not happen; adding one means updating the README section, the ledger,
+// and this suite in the same PR.
 
 import { describe, it, expect } from "vitest";
 import { createRequire } from "node:module";
@@ -169,9 +168,9 @@ describe("URL contract: reserved hash keys", () => {
     const decoded = decodeViewState(reservedPayload);
     expect(decoded).not.toBeNull();
     expect(decoded!.version).toBe(VIEW_STATE_VERSION);
-    // No state field materializes from a reserved key today. When a
-    // chunk-2 ticket implements one, it moves the key to "live" in the
-    // README table and REMOVES it from this list in the same PR.
+    // No state field materializes from a reserved key today. When one is
+    // implemented, it moves the key to "live" in the README table and
+    // REMOVES it from this list in the same PR.
     expect(decoded!.state).toEqual({});
   });
 
@@ -190,7 +189,7 @@ describe("URL contract: reserved hash keys", () => {
   });
 });
 
-// ── The #303 recipe URL shapes, at codec level ───────────────────────────
+// ── The recipe URL shapes, at codec level ────────────────────────────────
 
 describe("URL contract: recipe URLs resolve", () => {
   it("recipe 2, query form: worker-zoom resolves as the zoom path", () => {

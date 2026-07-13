@@ -1,8 +1,7 @@
-// createSegmentWindow orchestrator tests (T17): the wiring of the pure
-// decision layer (segments.test.ts) to fetch/worker/store, driven with a
-// mock fetcher, an injectable parser, a captured idle scheduler and a
-// REAL T07 store (microtask scheduler, the T16 precedent). Every 2.8
-// client-side hard edge is pinned here:
+// createSegmentWindow orchestrator tests: the wiring of the pure decision
+// layer (segments.test.ts) to fetch/worker/store, driven with a mock fetcher,
+// an injectable parser, a captured idle scheduler and a real store (microtask
+// scheduler). Every client-side hard edge is pinned here:
 //
 //   - stale-fetch abort on viewport jump (fetch phase AND parse phase);
 //   - boundary polls marked truncated, never long;
@@ -11,8 +10,8 @@
 //
 // plus the 10-segment end-to-end scenario (recorded-size accounting; the
 // real-parse anchor test ties the accounting to actual buffers at demo
-// scale - the accountant only ever does byteLength arithmetic, so
-// recorded 30 MB entries behave identically to real 11 MB ones).
+// scale - the accountant only ever does byteLength arithmetic, so recorded
+// 30 MB entries behave identically to real 11 MB ones).
 
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -44,7 +43,7 @@ import type {
 } from "./worker/protocol.js";
 
 // Compile-time: the full viewer store satisfies the orchestrator's store
-// surface (fails tsc otherwise; the T16 TraceSliceStore precedent).
+// surface (fails tsc otherwise).
 const _viewerStoreIsSegmentsSliceStore: (s: ViewerStore) => SegmentsSliceStore =
   (s) => s;
 void _viewerStoreIsSegmentsSliceStore;
@@ -371,8 +370,8 @@ describe("hard edge: two-level cache", () => {
     await settle();
     expect(entryOf(store, segKey(0))!.state).toBe("evicted");
     // Eviction keeps the invariants, the learned raw size AND the edge
-    // polls (T17-audit finding 1: tiny, and required so polls crossing an
-    // evicted neighbor stay visible); only the parse itself drops.
+    // polls (tiny, and required so polls crossing an evicted neighbor stay
+    // visible); only the parse itself drops.
     expect(entryOf(store, segKey(0))!.trace).toBeUndefined();
     expect(entryOf(store, segKey(0))!.edgePolls).toBeDefined();
     expect(entryOf(store, segKey(0))!.rawByteLength).toBe(300);
@@ -459,15 +458,12 @@ describe("hard edge: budget eviction", () => {
   });
 });
 
-// ── T17-audit finding 2: oversized-segment admission ─────────────────────
+// ── Oversized-segment admission ──────────────────────────────────────────
 //
-// The audit's executed probe: one segment whose decompressed size (2000)
-// exceeds the hard budget (1000) was force-admitted by capToBudget, hard-
-// clamp evicted by planEviction, and force-re-admitted on the next pass -
-// entry state "evicted" after EVERY setViewport, parsesStarted
-// incrementing per call, peakResidentRawBytes at 2x the budget. The fix:
-// the real size is learned at the first parse and the entry moves to the
-// honest terminal "oversized" state - never resident, never re-admitted,
+// A segment whose decompressed size (2000) exceeds the hard budget (1000)
+// must not loop (force-admit -> hard-clamp evict -> force-re-admit). The real
+// size is learned at the first parse and the entry moves to the honest
+// terminal "oversized" state - never resident, never re-admitted,
 // distinguishable from "listed" (not yet fetched).
 
 describe("T17-audit finding 2: oversized segments defer honestly", () => {
@@ -484,9 +480,8 @@ describe("T17-audit finding 2: oversized segments defer honestly", () => {
       residentBudgetBytes: 1000,
     });
 
-    // Chunk 2 wires setViewport to the viewport slice: it fires per
-    // pan/zoom tick. Drive several ticks; the probe saw a fetch-free but
-    // full re-parse -> evict cycle on every one of them.
+    // setViewport fires per pan/zoom tick; drive several ticks to prove the
+    // oversized segment is not re-parsed and evicted on every one of them.
     for (let tick = 0; tick < 5; tick++) {
       win.setViewport(viewOver(segs, 0));
       await settle();
@@ -534,7 +529,7 @@ describe("T17-audit finding 2: oversized segments defer honestly", () => {
     await settle();
 
     // "too big for budget" (oversized) vs "not yet fetched" (listed):
-    // an explicit, distinct vocabulary - the T06 exhaustive-switch union.
+    // an explicit, distinct vocabulary.
     expect(entryOf(store, segKey(1))!.state).toBe("oversized");
     expect(entryOf(store, segKey(3))!.state).toBe("listed");
     // The fitting neighbors are unaffected and resident.
@@ -551,7 +546,7 @@ describe("T17-audit finding 2: oversized segments defer honestly", () => {
     const fetcher = makeFetcher({ byteLength: 16 });
     // Segment 5 lists at 10 MB gzip like the rest but decompresses to
     // 150 MB (a 15x expander, past the 128 MB hard budget); the others
-    // expand 3x as in the DoD scenario.
+    // expand 3x.
     const parser = makeParser({
       tag: fetcher.tag,
       rawByteLengthFor: (url) => (url === segKey(5) ? 150 * MB : 30 * MB),
@@ -576,9 +571,8 @@ describe("T17-audit finding 2: oversized segments defer honestly", () => {
     for (let i = 9; i >= 0; i--) await step(i);
 
     expect(entryOf(store, segKey(5))!.state).toBe("oversized");
-    // The oversized segment was fetched and parsed exactly ONCE across
-    // the whole out-and-back walk - the probe's loop re-parsed it per
-    // viewport tick.
+    // The oversized segment was fetched and parsed exactly ONCE across the
+    // whole out-and-back walk.
     expect(parser.started.filter((u) => u === segKey(5)).length).toBe(1);
     expect(win.stats().networkFetches).toBe(10); // zero re-downloads
     expect(win.stats().peakResidentRawBytes).toBeLessThanOrEqual(
@@ -666,12 +660,12 @@ describe("hard edge: boundary-poll truncation through the orchestrator", () => {
   });
 });
 
-// ── T17-audit finding 1 (orchestrator): cross-segment poll continuity ───
+// ── Cross-segment poll continuity ────────────────────────────────────────
 
 describe("T17-audit finding 1: poll continuity across evicted neighbors", () => {
   it("a worker mid-poll through the only-resident segment surfaces both-edges-truncated (edgePolls retained through real eviction)", async () => {
     // Worker 1's poll: PollStart in segment 0, PollEnd in segment 2,
-    // silent through segment 1 - the audit's long-blocked-poll scenario.
+    // silent through segment 1.
     const eventsFor = (url: string | undefined): TraceEvent[] => {
       switch (url) {
         case segKey(0):
@@ -879,7 +873,7 @@ describe("failure handling", () => {
   });
 });
 
-// ── DoD: the 10-segment end-to-end scenario ──────────────────────────────
+// ── The 10-segment end-to-end scenario ───────────────────────────────────
 
 describe("10-segment scenario (DoD)", () => {
   it("navigates end-to-end and back with resident raw <= 128 MB throughout and zero re-downloads", async () => {
@@ -936,13 +930,11 @@ describe("10-segment scenario (DoD)", () => {
   });
 });
 
-// ── Real-parse anchor: accounting tied to actual buffers ────────────────
+// ── Real-parse anchor: accounting tied to actual buffers ─────────────────
 //
-// T42 upgrade: this anchor used to simulate a multi-segment window by
-// serving TWO COPIES of the demo trace. It now runs the generated fixture
-// set (parity/fixtures/segments/, ten REAL distinct segments sharing one
-// monotonic clock with planted boundary-spanning polls — manifest.json
-// records the planted facts). Regenerate with:
+// Runs the generated fixture set (parity/fixtures/segments/, ten real distinct
+// segments sharing one monotonic clock with planted boundary-spanning polls;
+// manifest.json records the planted facts). Regenerate with:
 //   cargo run --release -p dial9-viewer --features dev-server --bin gen-fixtures
 
 interface FixtureManifest {
@@ -980,7 +972,7 @@ describe("real-parse anchor (generated fixture set through the real core)", () =
 
     const store = makeStore();
     // Real gzipped fixture bytes; a real (main-thread) parser implementing
-    // the SegmentParser seam over the frozen core.
+    // the SegmentParser seam.
     const fetchBytes: SegmentBytesFetcher = (url) => {
       const gz = gzByKey.get(url);
       if (!gz) return Promise.reject(new Error(`no fixture for ${url}`));

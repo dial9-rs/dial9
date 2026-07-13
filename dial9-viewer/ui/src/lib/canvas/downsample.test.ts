@@ -1,6 +1,5 @@
-// Wiring tests for the frozen-core re-exports: prove the typed seam
-// delivers the real implementations (the core's own behavior is covered
-// by its Node suites). Each re-export gets one behavioral smoke check.
+// Wiring smoke checks for the frozen-core re-exports: prove the typed seam
+// delivers the real implementations. One behavioral check per re-export.
 
 import { describe, it, expect } from "vitest";
 import {

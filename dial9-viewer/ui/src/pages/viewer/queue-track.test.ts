@@ -1,13 +1,12 @@
-// Store-integration + render tests for the queue track (T29; features/02
-// section M). The browser-driven DoD halves (row-walker on the M rows, the T12
-// zero-global VISUAL check) are listed in HANDOFF.md; what lives at the
-// store/render-input boundary is asserted here:
-//   1. S6 render: with an all-zero global series, drawQueueCanvas plots the
-//      global line on the VISIBLE zero baseline (strictly above the axis), not
-//      fused to the canvas bottom - the render-side complement to the
-//      queueScaleY Vitest (queue-model.test.ts).
-//   2. M7 dispatch: commitRange writes the drag-selected range to
-//      selection.spawnedTasksRange (T29 dispatches; T31 renders), idempotently.
+// Store-integration + render tests for the queue track. The browser-driven
+// halves (row-walker, zero-global visual check) are covered elsewhere; what
+// lives at the store/render-input boundary is asserted here:
+//   1. render: with an all-zero global series, drawQueueCanvas plots the global
+//      line on the VISIBLE zero baseline (strictly above the axis), not fused to
+//      the canvas bottom - the render-side complement to the queueScaleY unit
+//      test (queue-model.test.ts).
+//   2. dispatch: commitRange writes the drag-selected range to
+//      selection.spawnedTasksRange, idempotently.
 
 import { describe, it, expect } from "vitest";
 import { createViewerStore } from "./store.js";
@@ -82,8 +81,8 @@ describe("drawQueueCanvas (S6: zero-global renders a visible baseline)", () => {
     const baselineY = queueBaselineY(chartTop, chartH);
 
     expect(rec.pathYs.length).toBeGreaterThan(0);
-    // No vertex sits on the axis (the legacy invisible-at-zero bug); every
-    // plotted point is at least ZERO_BASELINE_PX above the chart bottom.
+    // No vertex sits on the axis (the invisible-at-zero bug); every plotted
+    // point is at least ZERO_BASELINE_PX above the chart bottom.
     const axisBottom = chartTop + chartH;
     for (const y of rec.pathYs) {
       expect(y).toBeLessThanOrEqual(axisBottom - ZERO_BASELINE_PX);

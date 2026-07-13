@@ -1,10 +1,8 @@
-// Tests for the time-axis track (T25; features/02 section F + the
-// date-qualification amendment). Two load-bearing properties are asserted
-// mechanically here (the DoD's primary checks, the live visual walk being a
-// plus): (1) axis ticks align PIXEL-EXACT with every other track's ns<->x
-// mapping at three column widths (the A13 invariant), and (2) the
-// date-qualification amendment - a day-crossing absolute span gains a
-// `MM-DD ` prefix, a same-day span does not.
+// Tests for the time-axis track. Two load-bearing properties are asserted
+// mechanically here: (1) axis ticks align PIXEL-EXACT with every other track's
+// ns<->x mapping at three column widths, and (2) the date-qualification rule -
+// a day-crossing absolute span gains a `MM-DD ` prefix, a same-day span does
+// not.
 
 import { describe, it, expect } from "vitest";
 import {
@@ -116,7 +114,7 @@ describe("nsToDrawX / alignment invariant (A13, three widths)", () => {
           // Canvas-local x a lane/panel draws content at (same nsToX form).
           const laneLocalX = nsToDrawX(ns, viewStart, viewEnd, g.time.drawW);
           expect(axisX).toBe(laneLocalX);
-          // And, tied to the frozen-core mapping: the axis's FULL-panel x
+          // And, tied to the shared mapping: the axis's FULL-panel x
           // (gutter + local) equals the shared nsToPanelX.
           expect(LABEL_W + axisX).toBeCloseTo(g.time.nsToPanelX(ns), 9);
         }
@@ -220,7 +218,7 @@ describe("label formatting (fmtTs parity + amendment)", () => {
 });
 
 // A minimal recording 2D context: captures the draw ops renderTimeAxis
-// makes (node has no canvas). Enough to assert the F1 ruler is drawn.
+// makes (node has no canvas). Enough to assert the ruler is drawn.
 interface FillTextCall {
   text: string;
   x: number;

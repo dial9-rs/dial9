@@ -1,9 +1,8 @@
-// Tests for the store->URL view-state sync binding (T19): debounced
-// single-write coalescing, flush-for-copy-link, no-op write suppression
-// (restore-on-load must not dirty history), legacy query mirroring,
-// unknown-hash-key preservation, and foreign-hash refusal. Store scheduler
-// and debounce timer are both injected (Node has neither RAF nor a reason
-// to sleep in tests).
+// Tests for the store->URL view-state sync binding: debounced single-write
+// coalescing, flush-for-copy-link, no-op write suppression (restore-on-load
+// must not dirty history), legacy query mirroring, unknown-hash-key
+// preservation, and foreign-hash refusal. Store scheduler and debounce timer
+// are both injected (Node has neither RAF nor a reason to sleep in tests).
 
 import { describe, it, expect } from "vitest";
 import { createStore, type FrameScheduler } from "../../store/store.js";

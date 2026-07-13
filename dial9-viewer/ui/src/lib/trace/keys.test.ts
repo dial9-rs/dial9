@@ -1,9 +1,6 @@
-// keys.ts tests (T09 DoD): the documented key layouts from features/01 I2
-// (#225 layout, legacy layout, positional fallback) plus the
-// unknown-layout discriminant (ADR-0004 section 1 defect fix; features/01
-// "Live validation" Finding 1). T15 amendments covered here: the unknown
-// variant carries the layout-independent filename epoch/segIndex, and
-// extractPrefix (features/01 I8) lives in this module.
+// keys.ts tests: the documented key layouts (#225 layout, legacy layout,
+// positional fallback), the unknown-layout discriminant, the unknown
+// variant's layout-independent filename epoch/segIndex, and extractPrefix.
 
 import { describe, expect, it } from "vitest";
 import { extractPrefix, formatEpoch, parseKey } from "./keys.js";
@@ -98,10 +95,9 @@ describe("parseKey: positional fallback (no date-shaped segment)", () => {
 
 describe("parseKey: unknown-layout discriminant (defect fix)", () => {
   it("the dev-server 6-segment demo key yields unknown, NOT shifted fields", () => {
-    // features/01 "Live validation" Finding 1: six components after the
-    // date. The legacy parser positionally shifted this to Service=host-0,
-    // Host=abcd. The filename epoch/segIndex are layout-independent and
-    // still parsed (T15).
+    // Six components after the date. The legacy parser positionally shifted
+    // this to Service=host-0, Host=abcd. The filename epoch/segIndex are
+    // layout-independent and still parsed.
     const rawKey =
       "traces/2026-04-09/1900/demo-service/local/host-0/abcd/1744224000-0.bin.gz";
     expect(parseKey(rawKey)).toEqual({

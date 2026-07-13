@@ -1,7 +1,7 @@
-// T23 pointer-machine transitions (DoD: every transition incl. cancel paths).
+// Pointer-machine transitions (every transition including the cancel paths).
 // Pure machine, no DOM: drive it with abstract down/move/up/cancel and assert
-// the emitted commands + phase. Thresholds preserved (3px drag intent); the
-// legacy pan/region/zoom/click discrimination (viewer.html:5145-5346).
+// the emitted commands + phase. 3px drag-intent threshold; pan/region/zoom/
+// click discrimination.
 
 import { describe, it, expect } from "vitest";
 import {

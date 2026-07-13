@@ -1,13 +1,13 @@
-// Generated-fixture suite (T42): the committed synthetic segments under
-// parity/fixtures/segments/ parsed through the REAL frozen core, re-deriving
-// the facts the generator planted (recorded in manifest.json):
+// The committed synthetic segments under parity/fixtures/segments/ parsed
+// through the real core, re-deriving the facts the generator planted in
+// manifest.json:
 //
 //   - a poll spanning the seg0/seg1 boundary (open PollStart at the end of
 //     seg0, dangling PollEnd at the start of seg1);
 //   - a poll spanning seg3 -> seg5 with the worker completely SILENT through
-//     seg4 (the T17-audit N-segment chain), over real wire bytes;
-//   - a multi-runtime (#596) segment whose `runtime.<name>` segment-metadata
-//     entry groups workers 64..67 as a named runtime.
+//     seg4;
+//   - a multi-runtime segment whose `runtime.<name>` segment-metadata entry
+//     groups workers 64..67 as a named runtime.
 //
 // Regenerate with:
 //   cargo run --release -p dial9-viewer --features dev-server --bin gen-fixtures
@@ -80,7 +80,7 @@ beforeAll(async () => {
   );
 }, 60_000);
 
-// ── The window set through the frozen core ───────────────────────────────
+// ── The generated window set ─────────────────────────────────────────────
 
 describe("generated window segments (real parse)", () => {
   it("every segment's events sit inside its declared monotonic window", () => {
@@ -171,7 +171,7 @@ describe("generated window segments (real parse)", () => {
   it("a non-resident interior segment downgrades the chain to an honest truncation", () => {
     // Drop seg4 (the silent interior of the seg3 -> seg5 poll) to "listed":
     // the chain loses its silence proof and must surface truncated, not
-    // stitched (2.8 hard edge: never fabricate a completed poll).
+    // stitched - never fabricate a completed poll.
     const p = manifest.plantedPolls.find((x) => x.endSegment - x.startSegment > 1)!;
     const interior = manifest.segments[p.startSegment + 1]!;
     const keys = manifest.segments.map((s) => s.key);
@@ -215,7 +215,7 @@ describe("generated window segments (real parse)", () => {
   });
 });
 
-// ── Multi-runtime (#596) over real wire bytes ────────────────────────────
+// ── Multi-runtime fixture ────────────────────────────────────────────────
 
 describe("multi-runtime fixture (#596)", () => {
   interface RuntimeGroup {

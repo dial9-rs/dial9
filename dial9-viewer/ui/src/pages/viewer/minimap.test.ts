@@ -1,9 +1,8 @@
-// Behavioral store-integration tests for the minimap's navigation dispatch
-// (T35 DoD "drag/click behavioral tests"). The pure pointer math is covered in
-// minimap-model.test.ts; here we assert the component's navigation commit moves
-// the store viewport - including into an UNFETCHED tier-1-only tail (the
-// headline scenario). The canvas render + DOM pointer wiring are browser-driven
-// (listed in HANDOFF).
+// Behavioral store-integration tests for the minimap's navigation dispatch.
+// The pure pointer math is covered in minimap-model.test.ts; here we assert the
+// component's navigation commit moves the store viewport - including into an
+// UNFETCHED tier-1-only tail (the headline scenario). The canvas render + DOM
+// pointer wiring are browser-driven.
 
 import { describe, it, expect } from "vitest";
 import { createViewerStore, initialViewerState } from "./store.js";

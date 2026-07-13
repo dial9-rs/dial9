@@ -1,8 +1,6 @@
-// T24 crosshair DoD: (1) the overlay's ns<->x mapping is PIXEL-EXACT with the
-// lanes/panels at three column widths (the A13/N4 alignment invariant extended
-// to the overlay - the same method T25's axis test uses), and (2) drawCrosshair
-// reproduces the legacy I2-I5 overlays (dash styles, in-view gating, x at the
-// shared mapping). Node-testable: a recording 2D-context stub, no DOM.
+// Crosshair tests: the overlay's ns<->x mapping stays pixel-exact with the
+// lanes/panels across column widths, and drawCrosshair emits the expected
+// overlays. Recording 2D-context stub, no DOM.
 
 import { describe, it, expect } from "vitest";
 import { crosshairX, drawCrosshair, type CrosshairContext, type CrosshairInput } from "./crosshair.js";
@@ -11,7 +9,7 @@ import type { TrackSpec } from "../../pages/viewer/track-layout.js";
 
 const trackById = (id: string): TrackSpec => TRACKS.find((t) => t.id === id) as TrackSpec;
 
-// ── Alignment invariant (N4: overlay lines up with every track) ──────────
+// ── Alignment invariant (overlay lines up with every track) ──────────
 
 describe("crosshairX / alignment invariant (A13/N4, three widths)", () => {
   const viewStart = 1_000_000;
@@ -218,7 +216,7 @@ describe("drawCrosshair (I2-I5)", () => {
       hoverEventTs: 300_000,
       pinnedEvent: { timestamp: 500_000, label: "E @ t" },
     });
-    // I2 + I3 + I4 + I5 marker = 4 stroked lines.
+    // Mouse crosshair + keyboard cursor + event guide + pinned marker = 4 lines.
     expect(rec.strokes.length).toBe(4);
   });
 });

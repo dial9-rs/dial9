@@ -1,10 +1,10 @@
-// Integration tests for the flamegraph page's URL view-state wiring (T19
-// DoD: restore-on-load at the vitest level - the widget is a recording
-// fake; the in-browser twin against the real page is parity journey J9).
-// Covers: restore from legacy params / hash / both (hash precedence), the
-// F151 timeRangeMatched gate, zero URL writes on restore, the zoom->URL
-// write carrying legacy params + hash together, Esc-reset cleanup, and
-// context-param preservation over the recorded legacy fixture URLs.
+// Integration tests for the flamegraph page's URL view-state wiring:
+// restore-on-load at the vitest level (the widget is a recording fake; the
+// in-browser twin against the real page is a separate parity journey). Covers:
+// restore from legacy params / hash / both (hash precedence), the
+// timeRangeMatched gate, zero URL writes on restore, the zoom->URL write
+// carrying legacy params + hash together, Esc-reset cleanup, and context-param
+// preservation over the recorded legacy fixture URLs.
 
 import { describe, it, expect } from "vitest";
 import type { FrameScheduler } from "../../store/store.js";
@@ -16,7 +16,7 @@ import {
   type FgZoomPaths,
 } from "./view-state.js";
 
-// Recording stand-in for the frozen widget's zoom surface.
+// Recording stand-in for the widget's zoom surface.
 function fakeFg(): {
   calls: Array<[string, readonly string[]]>;
   paths: FgZoomPaths;
@@ -213,7 +213,7 @@ describe("createFgUrlSync (restore -> zoom -> share loop)", () => {
   });
 
   it("preserves every non-zoom context param on write (F153)", () => {
-    const fixture = LEGACY_FIXTURE_URLS[3]!; // the full S3-context URL
+    const fixture = LEGACY_FIXTURE_URLS[3]!; // the full context-param fixture URL
     const { fg, raf, timer, host, sync } = setup({
       pathname: "/new/flamegraph.html",
       search: fixture,

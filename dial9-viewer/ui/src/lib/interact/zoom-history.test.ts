@@ -1,6 +1,5 @@
-// DoD (T20): the bounded zoom-history stack behind the unified `z` key
-// (K4). record/undo semantics, the no-baseline first record, equality
-// dedup, the depth bound, and clear.
+// The bounded zoom-history stack behind the unified `z` key: record/undo
+// semantics, the no-baseline first record, equality dedup, depth bound, clear.
 
 import { describe, it, expect } from "vitest";
 import { createZoomHistory } from "./zoom-history.js";

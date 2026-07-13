@@ -1,19 +1,19 @@
-// Worker-path integration tests (T16 DoD): the REAL boundary. A
-// node:worker_threads Worker runs node-worker-entry.mjs (which loads
-// body.ts via Node's native type stripping), fetch runs INSIDE that
-// worker against a local http server serving the demo trace, and every
-// message crosses an actual postMessage structured-clone hop - the same
-// algorithm browsers use. The orchestrator (loadTraceInWorker) drives it
-// through a ~15-line Worker-API adapter and writes into a real T07 store.
+// Worker-path integration tests: the REAL boundary. A node:worker_threads
+// Worker runs node-worker-entry.mjs (which loads body.ts via Node's native
+// type stripping), fetch runs INSIDE that worker against a local http server
+// serving the demo trace, and every message crosses an actual postMessage
+// structured-clone hop - the same algorithm browsers use. The orchestrator
+// (loadTraceInWorker) drives it through a ~15-line Worker-API adapter and
+// writes into a real store.
 //
-// LAYER MAP (what each T16 suite exercises; for T12/T13 verification):
+// LAYER MAP (what each suite exercises):
 //   - worker/body.test.ts: pipeline logic in-process (no thread).
 //   - load.worker.test.ts: orchestrator contract vs a scripted port.
 //   - THIS FILE: real thread + clone boundary + in-worker fetch + store.
 //   - Browser-only remainder: the Vite `new Worker(new URL(...))` entry
 //     bundling in load.ts's default factory (node has no Web Worker;
 //     verified at build time by the dist worker chunk, exercised live
-//     once a page migrates - T13).
+//     once a page migrates).
 
 import { createServer } from "node:http";
 import { readFileSync } from "node:fs";
@@ -82,8 +82,8 @@ afterAll(async () => {
 
 function makeNodeWorker(): {
   factory: TraceWorkerFactory;
-  /** Resolves with the exit code once the thread is gone (the DoD
-   * "worker terminated, no live handle" observable). */
+  /** Resolves with the exit code once the thread is gone (the "worker
+   * terminated, no live handle" observable). */
   exited: Promise<number>;
 } {
   let resolveExited!: (code: number) => void;
@@ -122,13 +122,13 @@ function makeTraceStore(): Store<{ trace: TraceSlice }> {
   );
 }
 
-// Byte-equality via Buffer.equals (memcmp; see the T09 toEqual trap).
+// Byte-equality via Buffer.equals (memcmp; toEqual deep-diff times out on the big array).
 function expectBytesEqual(actual: Uint8Array, expected: Uint8Array): void {
   expect(actual.length).toBe(expected.length);
   expect(Buffer.from(actual).equals(Buffer.from(expected))).toBe(true);
 }
 
-// ── DoD check 1+2: parity through the worker path, live progress ─────────
+// ── Parity through the worker path, live progress ────────────────────────
 
 describe("worker path (real thread + structured clone)", () => {
   it("parses the demo trace deep-equal to a direct parse and streams progress", async () => {
@@ -178,7 +178,7 @@ describe("worker path (real thread + structured clone)", () => {
     // The store's trace slice received the parsed trace.
     expect(store.getState().trace.trace).toBe(result.trace);
 
-    // DoD: progress events with the load-timing fields non-empty.
+    // Progress events with the load-timing fields non-empty.
     expect(progress.length).toBeGreaterThan(1);
     for (const p of progress) {
       expect(p.phase === "parsing" || p.phase === "fetching").toBe(true);
@@ -193,7 +193,7 @@ describe("worker path (real thread + structured clone)", () => {
     expect(last.bytesRead).toBeGreaterThan(0);
     expect(last.eventCount).toBeGreaterThan(0);
 
-    // Timing record (B16 worker-measurable slice).
+    // Timing record (the worker-measurable slice).
     expect(result.mode).toBe("stream");
     expect(result.timing.fetchDoneMs).toBeNull();
     expect(result.timing.parseDoneMs).toBeGreaterThanOrEqual(result.timing.startMs);
@@ -204,7 +204,7 @@ describe("worker path (real thread + structured clone)", () => {
     await exited;
   }, 120_000);
 
-  // ── DoD check 3: the three abort observables ──────────────────────────
+  // ── The three abort observables ───────────────────────────────────────
 
   it("abort mid-parse: worker terminated, trace slice unchanged, no late progress", async () => {
     const store = makeTraceStore();
@@ -263,7 +263,7 @@ describe("worker path (real thread + structured clone)", () => {
     await exited;
   }, 120_000);
 
-  // ── T17: the parse-buffer request across the real clone boundary ──────
+  // ── The parse-buffer request across the real clone boundary ───────────
 
   it("parse-buffer: cached gzipped bytes parse in the thread with parity, no fetch involved", async () => {
     const { factory, exited } = makeNodeWorker();
@@ -274,7 +274,7 @@ describe("worker path (real thread + structured clone)", () => {
     });
     const result = await job.done;
 
-    // Parity: counts + spot samples (whole-object toEqual OOMs, T09 trap).
+    // Parity: counts + spot samples (whole-object toEqual OOMs).
     expect(result.trace.events.length).toBe(direct.events.length);
     expect(result.trace.events[0]).toEqual(direct.events[0]);
     expect(result.trace.events.at(-1)).toEqual(direct.events.at(-1));

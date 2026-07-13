@@ -1,4 +1,4 @@
-// aggregates.ts tests (T18 DoD): both endpoints against RECORDED fixtures
+// aggregates.ts tests: both endpoints against RECORDED fixtures
 // (no live server in vitest), a full cold -> refine -> warm(frozen) refine
 // sequence, and the degradation matrix (404 / flag-false / partial
 // coverage) - each yielding the documented signal without throwing.
@@ -417,7 +417,7 @@ describe("refineUntilFrozen", () => {
   });
 });
 
-// ─── Degradation matrix (T18 DoD): each signal, never a throw ────────────
+// ─── Degradation matrix: each signal, never a throw ────────────
 
 describe("degradation: 404 -> none", () => {
   it("no-agg-context 404 (synthetic; not producible from the dev-server)", async () => {

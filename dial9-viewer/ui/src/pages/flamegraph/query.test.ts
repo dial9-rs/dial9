@@ -1,7 +1,7 @@
-// Unit tests for the flamegraph page's pure URL/label logic (T13). The
-// api-mode expectations are transcribed from the legacy inline bootstrap
-// (flamegraph.html buildApiUrl/updateBrowserUrl) - parameter ORDER
-// included, since the browser URL is user-visible shared state (F180).
+// Unit tests for the flamegraph page's pure URL/label logic. The api-mode
+// expectations are transcribed from the legacy inline bootstrap
+// (flamegraph.html buildApiUrl/updateBrowserUrl) - parameter ORDER included,
+// since the browser URL is user-visible shared state.
 
 import { describe, it, expect } from "vitest";
 import {

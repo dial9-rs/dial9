@@ -1,11 +1,9 @@
-// body.ts tests (T16): the worker load pipeline driven IN-PROCESS - the
-// pure message handler with a captured post sink and a stubbed global
-// fetch (the load.test.ts fixture pattern). This layer covers the full
-// pipeline logic (mode selection, fetch-in-worker, gunzip, capture,
-// progress fields, timing marks, abort wiring) without a thread; the real
-// thread + structured-clone boundary is integration.test.ts's job, and
-// the Vite `new Worker(new URL(...))` binding itself is browser-only
-// (noted for T12/T13 verification).
+// body.ts tests: the worker load pipeline driven IN-PROCESS - the pure
+// message handler with a captured post sink and a stubbed global fetch. This
+// layer covers the full pipeline logic (mode selection, fetch-in-worker,
+// gunzip, capture, progress fields, timing marks, abort wiring) without a
+// thread; the real thread + structured-clone boundary is integration.test.ts's
+// job, and the Vite `new Worker(new URL(...))` binding itself is browser-only.
 
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -136,7 +134,7 @@ describe("worker body: stream load", () => {
     const done = doneOf(sink)[0]!;
 
     // Parity: counts + spot samples (NOT whole-object toEqual; the
-    // ~300k-event arrays OOM vitest's differ - T09 HANDOFF trap).
+    // ~300k-event arrays OOM vitest's differ).
     expect(done.trace.events.length).toBe(direct.events.length);
     expect(done.trace.cpuSamples.length).toBe(direct.cpuSamples.length);
     expect(done.trace.customEvents.length).toBe(direct.customEvents.length);
@@ -148,7 +146,7 @@ describe("worker body: stream load", () => {
     expect(done.trace.maxTs).toBe(direct.maxTs);
     expect(done.trace.callframeSymbols.size).toBe(direct.callframeSymbols.size);
 
-    // The raw buffer round-trips for Set/Clear-Range re-parse (B14).
+    // The raw buffer round-trips for Set/Clear-Range re-parse.
     expect(done.mode).toBe("stream");
     expectBytesEqual(new Uint8Array(done.buffer), rawTrace);
 
@@ -171,8 +169,7 @@ describe("worker body: stream load", () => {
     expect(live.length).toBeGreaterThan(0);
     expect(live.at(-1)!.eventCount).toBeGreaterThan(0);
 
-    // Timing (B16 minus page-side totalMs): stream mode has no separate
-    // fetch mark.
+    // Timing: stream mode has no separate fetch mark.
     expect(done.timing.mode).toBe("stream");
     expect(done.timing.fetchDoneMs).toBeNull();
     expect(done.timing.parseDoneMs).toBeGreaterThanOrEqual(done.timing.startMs);
@@ -224,7 +221,7 @@ describe("worker body: buffered fallback", () => {
       urlCount: 2,
       bytesRead: 0,
     });
-    // Once fetched, the parse phase knows the total size (B8 percentage).
+    // Once fetched, the parse phase knows the total size.
     const parsing = progress.filter((p) => p.phase === "parsing");
     expect(parsing.length).toBeGreaterThan(0);
     expect(parsing[0]!.totalBytes).toBe(rawTrace.length * 2);
@@ -235,7 +232,7 @@ describe("worker body: buffered fallback", () => {
   }, 60_000);
 });
 
-// ── parse-buffer (T17 segment windowing: parse cached bytes, no fetch) ───
+// ── parse-buffer (segment windowing: parse cached bytes, no fetch) ───────
 
 describe("worker body: parse-buffer", () => {
   it("gzipped bytes: gunzip-streams + parses with parity to a direct parse", async () => {
@@ -259,8 +256,8 @@ describe("worker body: parse-buffer", () => {
     expect(done.trace.events.at(-1)).toEqual(direct.events.at(-1));
     expect(done.trace.minTs).toBe(direct.minTs);
     expect(done.trace.maxTs).toBe(direct.maxTs);
-    // The decompressed bytes round-trip; their length is what the T17
-    // budget accountant records as the segment's resident raw size.
+    // The decompressed bytes round-trip; their length is what the budget
+    // accountant records as the segment's resident raw size.
     expectBytesEqual(new Uint8Array(done.buffer), rawTrace);
     expect(done.timing.bytes).toBe(rawTrace.length);
     expect(done.timing.fetchDoneMs).toBeNull();

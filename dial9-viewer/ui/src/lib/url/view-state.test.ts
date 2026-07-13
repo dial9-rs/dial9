@@ -1,8 +1,8 @@
-// Tests for the URL view-state codec (T19 DoD): the encode/decode
-// round-trip PROPERTY test (seeded PRNG, no new deps - constraint S1
-// forbids a property-testing library), the recorded legacy-param fixture
-// semantics (N10: old links keep resolving identically), hash-vs-query
-// precedence, tolerant-reader rules, and foreign-hash refusal.
+// Tests for the URL view-state codec: the encode/decode round-trip PROPERTY
+// test (seeded PRNG, no new deps - no property-testing library allowed), the
+// recorded legacy-param fixture semantics (old links keep resolving
+// identically), hash-vs-query precedence, tolerant-reader rules, and
+// foreign-hash refusal.
 
 import { describe, it, expect } from "vitest";
 import {
@@ -118,7 +118,7 @@ describe("view-state codec round-trip (property)", () => {
         expected.fgOffworkerZoom = state.fgOffworkerZoom;
       }
       expect(back).toEqual(expected);
-      // The mirror never touches anything but the two zoom params (F153).
+      // The mirror never touches anything but the two zoom params.
       expect(params.get("trace")).toBe("demo-trace.bin");
     }
   });
@@ -169,7 +169,7 @@ describe("recorded legacy-param fixture (N10)", () => {
       expect(p.mode).toBe("exact");
       expect(p.mechanism).toBe("replaceState");
     }
-    // API mode has NO view-state params by design (F180: zoom not synced).
+    // API mode has NO view-state params by design (zoom is not synced there).
     expect(
       FLAMEGRAPH_LEGACY_PARAMS.filter((p) => p.mode === "api" && p.viewState),
     ).toEqual([]);

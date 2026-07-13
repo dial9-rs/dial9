@@ -1,7 +1,7 @@
-// Tests for the viewer track catalogue + per-track geometry (T21).
+// Tests for the viewer track catalogue + per-track geometry.
 // The load-bearing property: every track shares ONE drawW so their time
-// axes line up (the A13 invariant) - a shell regression here silently
-// misaligns tracks, so it is asserted explicitly.
+// axes line up - a shell regression here silently misaligns tracks, so it
+// is asserted explicitly.
 
 import { describe, it, expect } from "vitest";
 import { TRACKS, LABEL_W, trackGeometry } from "./track-layout.js";

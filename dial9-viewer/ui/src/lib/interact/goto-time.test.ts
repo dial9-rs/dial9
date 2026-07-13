@@ -1,5 +1,4 @@
-// DoD (T20): the goto-time grammar ('g'; mechanism only in chunk 1 -
-// see goto-time.ts). Absolute and signed-relative seconds, optional 's'
+// The goto-time grammar: absolute and signed-relative seconds, optional 's'
 // suffix, strict rejection of everything else.
 
 import { describe, it, expect } from "vitest";

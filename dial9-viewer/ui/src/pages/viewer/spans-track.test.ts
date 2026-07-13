@@ -1,14 +1,13 @@
-// Store-integration tests for the spans track (T26). The three DoD checks
-// that live at the store/render-input boundary (the browser-driven halves -
-// row-walker, T12 perf probe, visual - are listed in HANDOFF.md):
+// Store-integration tests for the spans track. The three checks that live at
+// the store/render-input boundary (the browser-driven halves - row-walker, perf
+// probe, visual - are covered elsewhere):
 //   1. derived-cache invalidation: the trace-invariant span data recomputes
-//      ONLY when the trace slice changes (perf finding F5).
-//   2. filter typing coalesces to <= 1 render/frame (perf finding F2): the
-//      spans filter dispatches a store update per keystroke and the RAF
-//      scheduler runs subscribers once per frame - never a synchronous
-//      renderAll per keypress.
-//   3. selection-driven dimming (S4): drawSpansCanvas's render input reacts to
-//      the selection slice - non-highlighted clusters recede.
+//      ONLY when the trace slice changes.
+//   2. filter typing coalesces to <= 1 render/frame: the spans filter dispatches
+//      a store update per keystroke and the RAF scheduler runs subscribers once
+//      per frame - never a synchronous renderAll per keypress.
+//   3. selection-driven dimming: drawSpansCanvas's render input reacts to the
+//      selection slice - non-highlighted clusters recede.
 
 import { describe, it, expect } from "vitest";
 import { createStore } from "../../store/store.js";
@@ -49,7 +48,7 @@ function fakeTrace(events: CustomTraceEvent[]): ParsedTrace {
   return { customEvents: events } as unknown as ParsedTrace;
 }
 
-// ── 1. Derived-cache invalidation (F5) ───────────────────────────────────
+// ── 1. Derived-cache invalidation ─────────────────────────────────────────
 
 describe("span-data derived cache (F5)", () => {
   it("recomputes only when the trace slice changes", () => {
@@ -88,7 +87,7 @@ describe("span-data derived cache (F5)", () => {
   });
 });
 
-// ── 2. Filter typing coalesces to <= 1 render/frame (F2) ─────────────────
+// ── 2. Filter typing coalesces to <= 1 render/frame ───────────────────────
 
 describe("filter typing coalescing (F2)", () => {
   it("collapses a burst of filter keystrokes into one render per frame", () => {
@@ -119,7 +118,7 @@ describe("filter typing coalescing (F2)", () => {
   });
 });
 
-// ── 3. Selection-driven dimming render input (S4) ────────────────────────
+// ── 3. Selection-driven dimming render input ──────────────────────────────
 
 /** A minimal recording 2d context: captures each fillRect's y + alpha. */
 function recordingCtx(): {

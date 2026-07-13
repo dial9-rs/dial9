@@ -1,7 +1,6 @@
-// T24 tooltip DoD: (1) placement is a PURE function of the cursor, CACHED
-// dimensions, and the viewport - it never reads the DOM, which is the 03 F3
-// read-after-write elimination the hover-storm DoD hinges on; (2) the G16
-// content model reproduces the legacy lane tooltip field-for-field. Node-pure.
+// Tooltip tests: placement is a pure function of the cursor, cached dimensions,
+// and the viewport (it never reads the DOM), and the content model reproduces
+// the lane tooltip field-for-field. Node-pure.
 
 import { describe, it, expect } from "vitest";
 import {
@@ -12,7 +11,7 @@ import {
 } from "./tooltip.js";
 import type { LaneHoverData } from "../canvas/lanes/index.js";
 
-// ── Placement (V1; pure, cached-dimension - the F3 fix) ─────────────────
+// ── Placement (pure, cached-dimension) ─────────────────
 
 describe("placeTooltip (V1, pure over cached dims)", () => {
   const vp = { width: 1000, height: 800 };
@@ -60,7 +59,7 @@ describe("placeTooltip (V1, pure over cached dims)", () => {
   });
 });
 
-// ── G16 content model (reproduces the legacy lane tooltip) ───────────────
+// ── content model (reproduces the lane tooltip) ───────────────
 
 const fmt = { formatTs: (ns: number): string => `t${ns}` };
 

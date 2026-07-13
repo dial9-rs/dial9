@@ -1,5 +1,5 @@
-// Unit tests for the tokio-stats formatters (features/04 B2/B3/C3). Pure
-// ports of the legacy converters; the UTC direction is a parameter here.
+// Unit tests for the tokio-stats formatters. The UTC direction is a parameter
+// here.
 
 import { describe, it, expect } from "vitest";
 import {

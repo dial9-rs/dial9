@@ -1,9 +1,9 @@
-// raw-rows.ts tests (T15 amendments):
-// - I2 display: known-layout keys keep their parsed Service/Host/Boot
-//   columns; unknown-layout keys render RAW (parsedCols null - the view
-//   shows the full key across those columns) while still carrying the
-//   layout-independent filename epoch/segIndex.
-// - G8 sorting: all columns sortable, numeric for epoch/size/seg#, lexical
+// raw-rows.ts tests:
+// - display: known-layout keys keep their parsed Service/Host/Boot columns;
+//   unknown-layout keys render RAW (parsedCols null - the view shows the full
+//   key across those columns) while still carrying the layout-independent
+//   filename epoch/segIndex.
+// - sorting: all columns sortable, numeric for epoch/size/seg#, lexical
 //   otherwise; repeated header clicks flip the direction.
 
 import { describe, expect, it } from "vitest";
@@ -12,7 +12,7 @@ import { nextSort, sortRawRows, toRawRow, toRawRows } from "./raw-rows.js";
 const KNOWN_KEY =
   "traces/2026-04-09/1910/checkout-api/us-east-1/abcd-123213/1744224000-3.bin.gz";
 // The dev-server demo key: six components after the date -> unknown layout
-// (features/01 Finding 1; the legacy page mislabeled it Service=host-0).
+// (the legacy page mislabeled it Service=host-0).
 const UNKNOWN_KEY =
   "traces/2026-04-09/1900/demo-service/local/host-0/abcd/1744224600-0.bin.gz";
 

@@ -1,13 +1,13 @@
-// Store-integration tests for the task-detail track (T30; features/02 section
-// N). The DoD checks that live at the store/render-input boundary (the
-// browser-driven halves - row-walker, T12 visual - are listed in HANDOFF.md):
-//   1. derived-cache invalidation (F5): the selection-keyed collection
-//      recomputes when the SELECTED TASK changes, a PAN does not recompute it,
-//      and a waker-hover selection write reuses it (no O(all-polls) re-collect).
-//   2. waker-hover dispatch (N8/G8): hovering a waker label writes
-//      selection.hoveredWakerTaskId - the store field T22's lanes consume.
+// Store-integration tests for the task-detail track. The checks that live at
+// the store/render-input boundary (the browser-driven halves - row-walker,
+// visual - are covered elsewhere):
+//   1. derived-cache invalidation: the selection-keyed collection recomputes
+//      when the SELECTED TASK changes, a PAN does not recompute it, and a
+//      waker-hover selection write reuses it (no O(all-polls) re-collect).
+//   2. waker-hover dispatch: hovering a waker label writes
+//      selection.hoveredWakerTaskId - the store field the lanes consume.
 //   3. drawTaskDetailCanvas render input: the hovered waker's label bolds, and
-//      the T17 window markers surface a truncated/oversized window.
+//      the window markers surface a truncated/oversized window.
 
 import { describe, it, expect } from "vitest";
 import { EVENT_TYPES, type ParsedTrace } from "../../lib/trace/index.js";
@@ -70,7 +70,7 @@ function demoTrace(): ParsedTrace {
   ]);
 }
 
-// ── 1. Derived-cache invalidation (F5) ───────────────────────────────────
+// ── 1. Derived-cache invalidation ─────────────────────────────────────────
 
 describe("task-detail derived cache (F5)", () => {
   it("pan does not recompute; task change invalidates; hover reuses it", () => {
@@ -89,8 +89,8 @@ describe("task-detail derived cache (F5)", () => {
     expect(derivation()).toBe(first);
 
     // A waker-hover selection write changes the selection slice but NOT the
-    // task, so the inner (source, taskId) guard reuses the collection (the F5
-    // win: no O(all-polls) re-collect on every hover frame).
+    // task, so the inner (source, taskId) guard reuses the collection (no
+    // O(all-polls) re-collect on every hover frame).
     store.update("selection", { hoveredWakerTaskId: 500 });
     expect(derivation()).toBe(first);
 
@@ -116,7 +116,7 @@ describe("task-detail derived cache (F5)", () => {
   });
 });
 
-// ── 2. Waker-hover dispatch (N8/G8) ──────────────────────────────────────
+// ── 2. Waker-hover dispatch ───────────────────────────────────────────────
 
 describe("waker-hover dispatch (N8/G8 - the lanes contract)", () => {
   function setup() {
@@ -172,7 +172,7 @@ describe("waker-hover dispatch (N8/G8 - the lanes contract)", () => {
   });
 });
 
-// ── 3. drawTaskDetailCanvas render input (bolding + T17 markers) ──────────
+// ── 3. drawTaskDetailCanvas render input (bolding + markers) ───────────────
 
 interface DrawnText {
   text: string;

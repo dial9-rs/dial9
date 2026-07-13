@@ -1,5 +1,5 @@
-// reparse.ts tests: in-memory windowed re-parse (features/02 E3/E4, B14)
-// against the real demo trace - no fetch involved.
+// reparse.ts tests: in-memory windowed re-parse against the real demo trace -
+// no fetch involved.
 
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";

@@ -1,12 +1,11 @@
-// DoD (T20): palette filtering + the selection-stepping policy (K1;
-// canonical semantics mocks/keyboard.html). The component's DOM shell is
-// exercised by the parity axe scan; the policy is pure and tested here.
+// Palette filtering + the selection-stepping policy. The policy is pure and
+// tested here; the component's DOM shell is exercised by the parity axe scan.
 
 import { describe, it, expect } from "vitest";
 import { filterPaletteItems, stepClamped, stepWrapped } from "./palette.js";
 import type { PaletteItem } from "./palette.js";
 
-// The mock's dataset shape (kinds + labels from keyboard.html).
+// The mock's dataset shape (kinds + labels).
 const ITEMS: PaletteItem[] = [
   { kind: "task", label: "0x3a axum_traced.rs:243:33", detail: "+0.31s" },
   { kind: "task", label: "0x51 hyper::proto conn", detail: "+0.02s" },

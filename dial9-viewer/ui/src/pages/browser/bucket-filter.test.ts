@@ -1,5 +1,5 @@
-// bucket-filter.ts tests (T15, C6 amendment): the config-driven predicate
-// that replaces the legacy hardcoded "dial9" bucket filter (Finding 2).
+// bucket-filter.ts tests: the config-driven predicate that replaces the legacy
+// hardcoded "dial9" bucket filter.
 
 import { describe, expect, it } from "vitest";
 import {

@@ -1,8 +1,7 @@
-// Region-analysis model behavioral tests (T32; features/02 section S + the
-// R3-R9 blocking-calls deferred from T31). Node-testable pure derivations - the
-// behavioral-diff surface for the J2/J5 region-select flows: sample counts,
-// heap estimates, blocking groups, the S7 count reconciliation + frame->time
-// extent, and the T17 partial-window coverage. No DOM, no widget.
+// Region-analysis model behavioral tests. Node-testable pure derivations for
+// the region-select flows: sample counts, heap estimates, blocking groups, the
+// count reconciliation + frame->time extent, and the partial-window coverage.
+// No DOM, no widget.
 
 import { describe, expect, it } from "vitest";
 import type {
@@ -76,7 +75,7 @@ function trace(over: Partial<ParsedTrace>): ParsedTrace {
   } as unknown as ParsedTrace;
 }
 
-// ── CPU region samples + S7 count reconciliation (F15 / S7) ──────────────────
+// ── CPU region samples + count reconciliation ────────────────────────────────
 
 describe("filterRegionCpuSamples", () => {
   it("keeps only on-CPU (source!=1) samples with a stack, honoring the range", () => {
@@ -106,7 +105,7 @@ describe("cpuRegionView / cpuCountLabel (S7 count reconciliation)", () => {
 
   it("drops the of-clause when every record is foldable (no contradiction)", () => {
     expect(cpuCountLabel(147, 147)).toBe("147 samples (on-CPU, with stacks)");
-    // The S7 shape: toolbar-8993 total vs page-147 foldable, reconciled inline.
+    // Toolbar-8993 total vs page-147 foldable, reconciled inline.
     expect(cpuCountLabel(147, 8993)).toBe(
       "147 samples (on-CPU, with stacks) of 8,993 CPU records",
     );
@@ -120,7 +119,7 @@ describe("cpuRegionView / cpuCountLabel (S7 count reconciliation)", () => {
   });
 });
 
-// ── region modes present + H7 default ────────────────────────────────────────
+// ── region modes present + default ───────────────────────────────────────────
 
 describe("regionModesPresent / defaultRegionMode (H7)", () => {
   const cs = symbols({ a: "leaf", s: "std::sync::Mutex::lock" });
@@ -151,7 +150,7 @@ describe("regionModesPresent / defaultRegionMode (H7)", () => {
   });
 });
 
-// ── heap (F16) ───────────────────────────────────────────────────────────────
+// ── heap ─────────────────────────────────────────────────────────────────────
 
 describe("heapRegionView (F16)", () => {
   const cs = symbols({
@@ -196,7 +195,7 @@ describe("heapRegionView (F16)", () => {
   });
 });
 
-// ── blocking-calls panel (R3-R9) ─────────────────────────────────────────────
+// ── blocking-calls panel ─────────────────────────────────────────────────────
 
 describe("buildBlockingView (R3-R9)", () => {
   const cs = symbols({
@@ -248,7 +247,7 @@ describe("buildBlockingView (R3-R9)", () => {
   });
 });
 
-// ── S7 frame -> timeline extent ──────────────────────────────────────────────
+// ── frame -> timeline extent ─────────────────────────────────────────────────
 
 describe("displayNamePath / frameSampleTimeExtent (S7 frame->time)", () => {
   const cs = symbols({ leaf: "leaf_fn", mid: "mid_fn", root: "root_fn" });
@@ -285,7 +284,7 @@ describe("displayNamePath / frameSampleTimeExtent (S7 frame->time)", () => {
   });
 });
 
-// ── partial-window coverage (T17 badge; 2.8) ─────────────────────────────────
+// ── partial-window coverage ──────────────────────────────────────────────────
 
 describe("regionCoverage (T17 partial-window badge)", () => {
   function segs(entries: { state: string; startNs: number; endNs: number }[]): SegmentsSlice {
