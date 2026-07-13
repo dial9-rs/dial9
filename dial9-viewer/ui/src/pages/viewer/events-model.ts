@@ -40,7 +40,7 @@ import type {
   PollSpan,
   WorkerLane,
 } from "../../lib/trace/index.js";
-import type { SelectionSlice } from "../../types/state.js";
+import type { PinnedCustomEvent, SelectionSlice } from "../../types/state.js";
 
 // ── Generic-event extraction (legacy viewer.html:2100-2119) ──────────────
 
@@ -449,5 +449,56 @@ export function buildEventRenderModel(opts: EventRenderModelOpts): EventRenderMo
     buckets,
     info: `${visible.length} events · ${clusters.size} markers`,
     emptyReason: null,
+  };
+}
+
+// ── Click-to-pin (K4): the PinnedCustomEvent contract T24/T31 consume ─────
+
+/**
+ * True when `bucket` is the cluster currently pinned (a repeat click toggles
+ * the pin off, legacy viewer.html:4292-4315). Identity of the representative
+ * event object uniquely names the cluster - the same underlying
+ * CustomTraceEvent survives re-renders, and no two clusters share an event -
+ * so this replaces the legacy timestamp+length+pixel-x compare without needing
+ * the pixel column (which the PinnedCustomEvent contract does not carry).
+ */
+export function isSameCluster(
+  pinned: PinnedCustomEvent | null,
+  bucket: EventDrawBucket,
+): boolean {
+  return (
+    pinned !== null &&
+    pinned.events.length === bucket.events.length &&
+    pinned.events[0] === bucket.representative
+  );
+}
+
+/**
+ * Build the PinnedCustomEvent for a clicked cluster (K4): the events, the
+ * cluster timestamp, its resolved task (K7), a display name (single event name
+ * or `N events`), the specific poll it landed in (resolvePollForEvent, for
+ * T31's Poll tab + the lane highlight), and the single detail event (null for a
+ * cluster - the Related tab is single-event only). Pure over the worker lanes;
+ * the store dispatch (dispatchEventPin) reads the prior pin for the toggle.
+ */
+export function buildPinnedEvent(
+  bucket: EventDrawBucket,
+  workerSpans: Record<number, WorkerLane>,
+  workerIds: readonly number[],
+): PinnedCustomEvent {
+  const events = bucket.events;
+  const single = events.length === 1;
+  return {
+    events: [...events],
+    timestamp: bucket.representative.timestamp,
+    taskId: bucket.taskId,
+    name: single ? bucket.representative.name : `${events.length} events`,
+    poll: resolvePollForEvent(
+      bucket.representative,
+      workerSpans,
+      workerIds,
+      bucket.taskId,
+    ),
+    detailEvent: single ? bucket.representative : null,
   };
 }

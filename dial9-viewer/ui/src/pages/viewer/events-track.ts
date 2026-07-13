@@ -49,14 +49,15 @@ import type {
   WorkerLane,
 } from "../../lib/trace/index.js";
 import type { ViewerStore } from "../../store/store.js";
-import type { PinnedCustomEvent, StoreState } from "../../types/state.js";
+import type { StoreState } from "../../types/state.js";
 import { deriveAxisInputs, fmtAxisTick } from "./axis.js";
 import type { TrackSpec } from "./track-layout.js";
 import {
   buildEventRenderModel,
+  buildPinnedEvent,
   computeEventTrackData,
   eventHighlightTask,
-  resolvePollForEvent,
+  isSameCluster,
   resolveTaskForEvent,
   EVENT_DIM_FACTOR,
   type EventDrawBucket,
@@ -196,63 +197,15 @@ export function createEventsTrack(store: ViewerStore): EventsTrackController {
     store.update("uiPrefs", { selectedEventNames: new Set<string>() });
   }
 
-  /**
-   * Pin a clicked cluster (K4): build the PinnedCustomEvent contract T24's
-   * overlay + T31's inspector consume, and dispatch it to the selection slice.
-   * Clicking the same cluster again toggles the pin off (legacy
-   * viewer.html:4292-4315). Clearing the prior task/span selection (as the
-   * legacy `clearSpanTaskSelection` did) keeps the lanes showing only this
-   * event's poll plus the marker line.
-   */
+  /** Pin (or toggle off) a clicked cluster (K4); see dispatchEventPin. */
   function pinCluster(bucket: EventDrawBucket): void {
-    const s = state();
-    const prior = s.selection.pinnedEvent;
-    // Same cluster? Compare the representative event by identity (the same
-    // underlying CustomTraceEvent object survives re-renders) + cluster size -
-    // no two clusters share a representative event. Replaces the legacy
-    // timestamp+length+pixel-x compare without needing the pixel column.
-    const sameAsPinned =
-      prior !== null &&
-      prior.events.length === bucket.events.length &&
-      prior.events[0] === bucket.representative;
-    if (sameAsPinned) {
-      store.update("selection", { pinnedEvent: null });
-      return;
-    }
-    const events = bucket.events;
-    const name =
-      events.length === 1 ? bucket.representative.name : `${events.length} events`;
     const laneData = workerLanes();
-    const poll = resolvePollForEvent(
-      bucket.representative,
-      laneData.lanes,
-      laneData.workerIds,
-      bucket.taskId,
-    );
-    const pinned: PinnedCustomEvent = {
-      events: [...events],
-      timestamp: bucket.representative.timestamp,
-      taskId: bucket.taskId,
-      name,
-      poll,
-      // Related tab is single-event only: a cluster pin has no detail event.
-      detailEvent: events.length === 1 ? bucket.representative : null,
-    };
-    // Drop any prior task/span selection so the lanes show only this event's
-    // poll plus the marker line (legacy clearSpanTaskSelection).
-    store.update("selection", {
-      pinnedEvent: pinned,
-      selectedTaskId: null,
-      spanFocus: null,
-      focusedSpanId: null,
-    });
+    dispatchEventPin(store, bucket, laneData.lanes, laneData.workerIds);
   }
 
   /** Dispatch (or clear) the hover guide-line timestamp (I4; T24 draws it). */
   function setHoverEvent(ts: number | null): void {
-    if (state().transient.hoverEventTs !== ts) {
-      store.update("transient", { hoverEventTs: ts });
-    }
+    dispatchHoverEvent(store, ts);
   }
 
   // ── Canvas paint (K1/S4) ────────────────────────────────────────────────
@@ -475,6 +428,48 @@ export function createEventsTrack(store: ViewerStore): EventsTrackController {
   }
 
   return { rowTemplate, paint, dispose };
+}
+
+// ── Store dispatch (exported so the DoD's dispatch checks are Vitest-able
+//    without a DOM; the controller's canvas handlers delegate here) ─────────
+
+/**
+ * Pin a clicked cluster to the selection slice (K4), or toggle the pin off
+ * when the SAME cluster is clicked again (legacy viewer.html:4292-4315). This
+ * is the "dispatch side" the T27 ticket owns: it writes selection.pinnedEvent
+ * (the contract T24's overlay marker + T31's inspector read) and clears any
+ * prior task/span selection so the lanes show only this event's poll + marker
+ * (legacy clearSpanTaskSelection). It does NOT draw the marker (T24 does).
+ */
+export function dispatchEventPin(
+  store: ViewerStore,
+  bucket: EventDrawBucket,
+  lanes: Record<number, WorkerLane>,
+  workerIds: readonly number[],
+): void {
+  const prior = (store.getState() as StoreState).selection.pinnedEvent;
+  if (isSameCluster(prior, bucket)) {
+    store.update("selection", { pinnedEvent: null });
+    return;
+  }
+  store.update("selection", {
+    pinnedEvent: buildPinnedEvent(bucket, lanes, workerIds),
+    selectedTaskId: null,
+    spanFocus: null,
+    focusedSpanId: null,
+  });
+}
+
+/**
+ * Dispatch (or clear) the hovered custom-event timestamp for the guide line
+ * (I4). T27 writes transient.hoverEventTs; the T24 overlay draws the orange
+ * guide from it. Rides the transient channel, so it never redraws the full
+ * track column. No-op when unchanged (avoids a redundant frame).
+ */
+export function dispatchHoverEvent(store: ViewerStore, ts: number | null): void {
+  if ((store.getState() as StoreState).transient.hoverEventTs !== ts) {
+    store.update("transient", { hoverEventTs: ts });
+  }
 }
 
 // ── Pure helpers (no store) ──────────────────────────────────────────────
