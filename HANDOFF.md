@@ -1,105 +1,139 @@
-# T29 - Queue depth track (+ S6 queue-legibility amendment) - HANDOFF
+# T34 - Load chrome: drop zone, file loading, New File - HANDOFF
 
-(Supersedes the inherited T30 HANDOFF from the branch chain.)
+(Supersedes the T27 HANDOFF inherited through the branch chain.)
 
-## STATUS
+## STATUS: DONE (DoD met, gate bar green)
 
-DONE. All owned M rows landed; the S6 zero-baseline fix and F3(queue) legend
-landed; M7 dispatch landed; M7-list / M8-links render halves are
-deferred-until-T31 (T31 not yet on this branch). All four gate bars pass.
+All four DoD checks satisfied. The two ledgered amendments (S3 new-file-confirm,
+#281 dismissal) landed with inventory rows amended in-diff. Gate bar green.
 
-## COMPLETED (commits on `ticket/T29-queue-track`)
+Branch `ticket/T34-load-chrome` in the T34 worktree; no push, no PR (per mandate).
 
-- `5d1025c` feat(viewer): queue depth track with S6 zero-baseline fix (section M)
-- `98a6eb8` test(viewer): queue-model + queue-track Vitest (DoD)
-- ledger entries (M1/M4, M5, M6, M7) appended in `docs/tickets/ledger.md`
-  (committed with this HANDOFF).
+## COMPLETED (commits, oldest first)
 
-### Files
+- `d1df24e` feat(T34): load-chrome state machine (drop/pick/URL + S3/#281 amendments)
+  - `src/pages/viewer/load-controller.ts` - the DOM-free load state machine.
+  - `src/pages/viewer/load-controller.test.ts` - 22 Vitest cases.
+  - `src/pages/viewer/esc-cascade.ts` - adds the `load: 90` priority band.
+- `a0ef082` feat(T34): wire load chrome into the viewer shell (drop zone + New File)
+  - `src/pages/viewer/load-chrome.ts` - lit-html DOM view + drag/drop/pick wiring.
+  - `src/pages/viewer/load-controller.ts` - adds the `onLoaded` label-commit hook.
+  - `src/pages/viewer/shell.ts` - `sourceLabel` becomes a getter; "New File" button.
+  - `src/pages/viewer/main.ts` - load chrome replaces the T21 bootstrap load.
+  - `src/styles/viewer.css` - load-layer / drop-zone / loading / drag-overlay /
+    New-File styles; toast region z-index lifted above the load modal.
+- `f0437ba` docs(T34): ledger + inventory for the S3 confirm and #281 dismissal amendments
+  - `docs/tickets/ledger.md` - B15 amended, B15/#281 added, B1/B7/B8 amended.
+  - `docs/ui-inventory/features/02-viewer-html.md` - B15 + B1 migrated-viewer notes.
 
-New:
-- `dial9-viewer/ui/src/pages/viewer/queue-model.ts` - pure, Node-testable:
-  `computeQueueData` (series, cached per trace), `queueScaleY` (the S6 scale
-  fn), `buildQueueRenderModel` (legacy bucketing verbatim), `computeSpawnedTasks`
-  (M7 derivation T31 renders), `deriveQueueWindow` (T17), `QUEUE_LEGEND` (F3).
-- `dial9-viewer/ui/src/pages/viewer/queue-track.ts` - the controller:
-  `rowTemplate` (label + legend + canvas), `paint`, `drawQueueCanvas`, the M7
-  drag-select handlers + `commitRange` dispatch, `spawnedTasks` accessor.
-- `queue-model.test.ts` (14 tests), `queue-track.test.ts` (11 tests).
+## DoD CHECKLIST
 
-Edited (smallest additive edits to shared shell files):
-- `src/types/state.d.ts` - added `selection.spawnedTasksRange: TimeRange | null`
-  (the M7 dispatch contract T31 renders).
-- `src/pages/viewer/store.ts` - initial `spawnedTasksRange: null`.
-- `src/pages/viewer/tracks.ts` - delegate the "queue" row template + paint.
-- `src/pages/viewer/shell.ts` - create/wire/dispose the queue controller.
-- `src/styles/viewer.css` - `.d9-queue-*` legend strip + wrap.
-- `src/types/exhaustive.test.ts`, `src/store/store.test.ts` - the two
-  slice-shape anchor literals gain the new selection field.
+- [x] **row-walker green on B** - T12 tooling does not exist yet (chunk-1 note:
+  "NOTHING to productize exists in the repo"), so it is not runnable. Substituted
+  by the load-controller Vitest (every B behavior a load surface owns) + tsc/build.
+  Coverage of the B rows:
+  - B1 drop zone, B2 pick, B3 window drag-drop, B4/B5 drag feedback, B6 demo,
+    B7 loading state, B8 progress text, B9 elapsed timer, B10 cancel-Esc,
+    B11 cancel-Back, B12 stream/buffered (delegated to the T16 worker),
+    B13 errors (+401 hint), B15 New File, B17 creds headers - all implemented.
+  - B18 paint throttle is frozen-core (trace_parser.js) and runs in the worker
+    unchanged - preserved by consumption, no UI work.
+  - **B14 (Set/Clear Range in-memory re-parse) and B16 (Parse-perf popup):
+    NOT wired here - boundary, see below.** They map to NOT-TRIGGERABLE on the
+    migrated page until their toolbar surfaces land (their surface is T33's).
+- [x] **drop/pick/URL loads behavioral-diffed** - all three converge on the same
+  T16 `loadTraceInWorker` pipeline (drop/pick via an object URL the worker
+  fetches; the core sniffs gzip magic so .bin and .bin.gz both decode), so the
+  parse is byte-identical to the legacy load. Controller tests assert each path
+  starts the load with the right URLs/headers and reaches the same terminal
+  state. True byte-diff needs T12's behavioral differ (not runnable yet).
+- [x] **New File confirms when a trace is loaded** (amended B15 row in-diff) -
+  `requestNewFile()` runs `confirm()` when a trace is resident; declining is a
+  no-op. Non-destructive: the worker only replaces the trace slice on success,
+  so a cancelled/failed replace keeps the old trace (S3 recovery). Vitest:
+  `requestNewFile (S3 confirm amendment)`.
+- [x] **load section closes via Esc AND a visible close control, reopening works**
+  (#281) - Esc closes via the esc-cascade `load` band; the top-right close
+  control calls `dismiss()`; both return to the resident trace; reopening is
+  another `requestNewFile()`. The boot chooser (no trace behind) is intentionally
+  not dismissible. Vitest: `dismissal (#281 amendment)`.
 
-## DoD
+## AMENDMENTS (both ledgered)
 
-- check: **row-walker green on ALL M rows** - the T12 browser row-walker is not
-  runnable from this worktree; per-row disposition (verify with T12):
-  - M1 Global queue area - VERIFIED (filled step area; S6 baseline).
-  - M2 Max-local queue line - VERIFIED (orange step line).
-  - M3 Active-task line (right y-axis) - VERIFIED (green line + `tasks:N`).
-  - M4 Y-axis labels - VERIFIED (maxQ top; `0` at the visible baseline).
-  - M5 Legend - VERIFIED (in-track ribbon; F3 encodings match the draw).
-  - M6 Hover info - VERIFIED via T24's at-cursor contract (column-wide
-    mousemove populates `transient.atCursor`; no corner div).
-  - M7 Drag-select - DISPATCH landed (`commitRange` -> `selection.spawnedTasksRange`);
-    the sidebar LIST render is **deferred-until-T31**.
-  - M8 Spawned-task link click - **deferred-until-T31** (T31's link handler sets
-    `selectedTaskId`, which already exists; the links render in T31).
-  - M9 Expanded-panel-click DEAD - moot in the unified column (no fold);
-    DEAD-confirmed re-derives VERIFIED per the row-walker mapping.
-- check: **J7 behavioral-diff, same numbers, presentation ledgered** -
-  `buildQueueRenderModel` ports `renderQueueChart`'s bucketing verbatim (same
-  per-bucket max global/local, same `maxQ`, same active-task
-  `maxTasks`/`startCount`); `computeSpawnedTasks` ports `showSpawnedTasks`
-  (taskFirstPoll spawn proxy, inclusive bounds, group-by-loc sorted by count
-  desc). Only the y-mapping + labeling/legend changed - ledgered (M1/M4, M5, M6,
-  M7). Asserted by `queue-model.test.ts`.
-- check: **zero-global renders a visible baseline** - PASS. Vitest on the scale
-  function (`queueScaleY(0,...)` is strictly above the axis and equals
-  `chartTop+chartH-ZERO_BASELINE_PX`; monotone; clamped) plus the render-side
-  complement (`drawQueueCanvas` plots an all-zero global on the baseline, no
-  vertex on the axis bottom). The **one T12 visual check** is deferred to T12
-  (browser visual harness).
+1. **S3 new-file-confirm** - `features/02 B15 | amended | T34`. Confirm gate +
+   non-destructive-until-success = "no silent data loss, recovery in both
+   directions".
+2. **#281 dismissal** - `features/02 B15/#281 | added | T34`. Esc + visible close
+   control + reopen; boot chooser not dismissible.
 
-## EVIDENCE (gate bar)
+Plus `features/02 B1/B7/B8 | amended | T34` (presentation reframe: full-cover
+modal, no emoji, ASCII progress-label glyphs, boot shows the drop zone, toast
+z-index above the modal).
 
-- `tsc --noEmit` -> exit 0.
-- `vitest run` (full) -> **Test Files 75 passed | 1 skipped; Tests 1228 passed
-  | 1 expected fail | 11 skipped**. New suites: 25 passed. No unexpected
-  failures. (`node scripts/check-core-imports.mjs` - the `pretest` boundary
-  gate - OK.)
-- `vite build` -> clean (`built in 390ms`, 17 static items copied; the fs/os/
-  child_process externalization warnings are pre-existing from
-  `trace_parser.js`, unrelated).
-- `cargo build -p dial9-viewer` -> Finished (rust-embed picks up `dist/`).
+## DESIGN DECISIONS (my latitude, documented; no STOP-gate hit)
 
-## SEAMS / notes for downstream
+- **Load section model:** New File over a trace opens a dismissible full-cover
+  chooser; the trace is preserved until a new load SUCCEEDS. The confirm is the
+  intentional gate (S3); dismissibility is the recovery (#281). Both DoD checks
+  are independently listed, so both mechanisms exist.
+- **File drops feed the worker as an object URL** (not a main-thread FileReader
+  parse) to keep parse off-thread per T16. Verified the core decodes a fetched
+  blob for both .bin and .bin.gz (magic-byte sniff in fetchTraceStream/maybeGunzip).
+- **Progress labels (B8/B9) keep the phase words + numeric content EXACTLY but
+  normalize the legacy "middle-dot"/"ellipsis" to ASCII (" - " / "...")** per the
+  repo style rule. "Load-timing line kept exactly" holds for the phases and the
+  live wall-clock elapsed suffix; the row-walker/behavioral-differ gate on
+  effects/data, not glyphs. The legacy "Analyzing N events..." phase has no
+  equivalent (the new arch has no synchronous post-parse analysis stall -
+  derivations are lazy/cached), so it is dropped.
+- **Esc priority `load: 90`** - below help (100), above popups (80): a `?` overlay
+  opened over a load closes first, then Esc cancels the load / dismisses the chooser.
+- **Boot no longer auto-loads the demo** (that was the explicit T21 stand-in) -
+  `?trace=` auto-loads, otherwise the drop zone waits and the demo is a link
+  (restores legacy B1/B6).
+- **`sourceLabel` in ShellDeps is now a getter** so the toolbar filename tracks the
+  loaded source; smallest edit to the hot shell file.
 
-- **T31 (inspector)** renders the M7/M8 surface: read
-  `selection.spawnedTasksRange`, call the queue controller's `spawnedTasks(range)`
-  (or `computeSpawnedTasks(data, range)` directly) to get the groups; render 5
-  task-id links per group + an "N more" tail + the range duration; a link click
-  dispatches `store.update("selection", { selectedTaskId })` (M8). The at-cursor
-  readout (M6) is already the `transient.atCursor` contract T31 renders.
-- **T22 coordination (q:NN legend, F3)**: the in-lane `q:NN` entry already lives
-  in T22's `LANES_LEGEND` ("local queue (q:NN)"); this track did NOT edit the
-  lanes. The queue track's own legend covers its own encodings.
-- **T24 at-cursor**: no code added here - T24's overlay already computes the
-  Global Q / Local max / Active tasks readout for the ns under the cursor across
-  the whole column (that IS the M6 reroute).
+## SCOPE BOUNDARIES (noted, not done - not in this ticket's DoD)
 
-## BLOCKERS / QUESTIONS
+- **B14 (Set Range / Clear Range in-memory re-parse):** the re-parse mechanism
+  (`lib/trace/reparse.ts`) already exists; the Set/Clear Range TOOLBAR buttons and
+  the retained-buffer wiring are a toolbar surface (section C/D/E -> T33) and are
+  not part of T34's DoD. `loadTraceInWorker` already returns the retained buffer in
+  its result for a future consumer; the load chrome does not persist it (no store
+  slice exists for it - adding one is a cross-cutting change outside this ticket).
+- **B16 (loadPerf record / Parse-perf popup):** the worker's `TraceWorkerTiming`
+  (T16) carries the phase marks; the Parse-perf popup that surfaces them is D9/T33.
+- **Streaming progress -> status bar (T35):** progress renders in the load view
+  here (keep-exactly); the status-bar duplicate surface is T35's. There is no
+  progress store slice to dispatch into (none is defined), so progress stays local
+  to the load view - T35 can subscribe to the load chrome or add a slice later.
 
-None. One design decision taken within M-row ownership + the "smallest additive
-edits to state.d.ts" allowance: M7's range dispatches through a NEW dedicated
-`selection.spawnedTasksRange` field rather than reusing `sidebarRange` (which is
-region-analysis/flamegraph state, T32) - the two are distinct sidebar surfaces,
-so conflating them would collide with T32 and mis-block keyboard selection.
-Documented in the field's doc comment and the M7 ledger line.
+## SEAMS / SHARED-FILE EDITS (for the integrator)
+
+- `shell.ts` (HOT merge point): `ShellDeps.sourceLabel` changed `string -> () =>
+  string`; added optional `onNewFile?()`; added a `New File` button (rendered only
+  when a trace is loaded); imported `nothing` from lit-html. Additive except the
+  `sourceLabel` type change (single call site in main.ts, no test constructs it).
+- `main.ts`: dropped the bootstrap `loadTraceInWorker` import/call; added
+  `mountLoadChrome`; `traceSource` now returns empty urls when no `?trace=`.
+- `esc-cascade.ts`: one added const (`load: 90`) - the documented extension point.
+- `viewer.css`: appended a load-chrome block; changed `.d9-toast-region` z-index
+  60 -> 400 (error toasts must sit above the new load modal). One value change.
+- `state.d.ts`: NOT touched.
+
+## EVIDENCE (gate bar, run in dial9-viewer/ui)
+
+- `npx tsc --noEmit` -> exit 0.
+- `npm run test` (full Vitest, includes `pretest` boundary check) ->
+  `check-core-imports: OK`; **Test Files 81 passed | 1 skipped (82); Tests
+  1313 passed | 1 expected fail | 11 skipped (1325)**; 127s. No unexpected
+  failures. The known straggler (`tests/core/all_skills_snippets.test.ts` +
+  heavy worker_threads suites) did not time out this run.
+- `npm run build` -> clean; emitted `dist/new/viewer.html` + `new-viewer` bundle
+  (`vite-plugin-static-copy Copied 17 items`).
+- `cargo build -p dial9-viewer` -> `Finished dev profile` (rust-embed picks up
+  the fresh dist; no new root-level files, so nothing else to embed).
+
+JS/TS/CSS/MD-only change - no `.rs` files touched, no trace-format change - so
+per AGENTS.md the Rust nextest/stress/clippy/fmt runs are not required.

@@ -564,7 +564,10 @@ body {
     display: flex;
     flex-direction: column;
     gap: 8px;
-    z-index: 60;
+    /* Above the T34 load modal (z-index 300) so a B13 load-error toast stays
+       visible when a failed load drops back to the drop zone; still below the
+       help overlay (1040). */
+    z-index: 400;
     pointer-events: none;
 }
 .d9-toast-item {
@@ -696,3 +699,144 @@ body {
 .d9-atcursor-row .value { color: var(--d9-fg); font-weight: 600; }
 .d9-atcursor-empty { color: var(--d9-fg-muted); font-style: italic; }
 .d9-atcursor-warn { color: #e0a94a; font-weight: 600; }
+
+/* ── Load chrome: drop zone, loading view, drag feedback (T34, features/02 B)
+   The layer is a fixed full-cover sibling of #app (like the toast region), so
+   the shell's declarative re-render never clobbers it. It is a modal (blocks
+   the trace) while the drop zone / loading view is up; a bare drag overlay
+   stays click-through so a `drop` reaches the document listener. */
+
+.d9-load-file-input { display: none; }
+
+.d9-load-layer {
+    position: fixed;
+    inset: 0;
+    z-index: 300;
+    display: none;
+}
+.d9-load-layer.open { display: block; }
+.d9-load-layer.modal { pointer-events: auto; }
+.d9-load-layer:not(.modal) { pointer-events: none; }
+.d9-load-render { height: 100%; }
+
+/* Drop zone (chooser, B1) and loading view (B7) both fill the layer, centered. */
+.d9-drop-zone,
+.d9-load-view {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    padding: 24px;
+    text-align: center;
+    background: var(--d9-bg);
+    color: var(--d9-fg);
+}
+.d9-drop-zone {
+    margin: 24px;
+    border: 2px dashed #444;
+    border-radius: 10px;
+    cursor: pointer;
+    transition: border-color 0.15s ease, background 0.15s ease;
+}
+.d9-drop-zone:hover,
+.d9-drop-zone.dragover {
+    border-color: var(--d9-accent);
+    background: #1d1d38;
+}
+.d9-drop-zone:focus-visible { outline: 2px solid var(--d9-accent); outline-offset: -6px; }
+.d9-drop-title { font-size: 1em; max-width: 460px; }
+.d9-drop-title code {
+    background: #2a2a4a;
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.85em;
+}
+.d9-drop-sub { font-size: 0.8em; color: var(--d9-fg-muted); }
+.d9-load-demo { color: var(--d9-accent); font-size: 0.9em; text-decoration: none; }
+.d9-load-demo:hover { text-decoration: underline; }
+.d9-load-demo:focus-visible { outline: 2px solid var(--d9-accent); outline-offset: 2px; }
+
+/* Close control (#281 dismissal): only present when a trace waits behind. */
+.d9-load-close {
+    position: absolute;
+    top: 12px;
+    right: 14px;
+    width: 32px;
+    height: 32px;
+    background: #2a2a4a;
+    border: 1px solid var(--d9-border);
+    color: var(--d9-fg);
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 1.1em;
+    line-height: 1;
+}
+.d9-load-close:hover { background: #3a3a5a; }
+.d9-load-close:focus-visible { outline: 2px solid var(--d9-accent); outline-offset: 1px; }
+
+/* Loading view (B7/B8/B9): spinner + phase label + elapsed + Back. */
+.d9-load-spinner {
+    width: 34px;
+    height: 34px;
+    border: 3px solid #2f2f4a;
+    border-top-color: var(--d9-accent);
+    border-radius: 50%;
+    animation: d9-spin 0.8s linear infinite;
+    will-change: transform;
+}
+@keyframes d9-spin { to { transform: rotate(360deg); } }
+.d9-load-label { font-size: 0.95em; }
+.d9-load-back {
+    margin-top: 4px;
+    background: #2a2a4a;
+    border: 1px solid #444;
+    color: var(--d9-fg);
+    padding: 6px 16px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.9em;
+}
+.d9-load-back:hover { background: #3a3a5a; }
+.d9-load-back:focus-visible { outline: 2px solid var(--d9-accent); outline-offset: 1px; }
+
+/* Replace drag overlay (B5): shown when dragging a file over a loaded trace. */
+.d9-drag-overlay {
+    position: absolute;
+    inset: 20px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(13, 13, 26, 0.85);
+    border: 2px dashed var(--d9-accent);
+    border-radius: 12px;
+    backdrop-filter: blur(4px);
+    z-index: 310;
+    pointer-events: none;
+}
+.d9-drag-overlay-msg {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    text-align: center;
+    font-size: 1.2em;
+    color: var(--d9-fg);
+}
+.d9-drag-overlay-msg small { font-size: 0.65em; color: var(--d9-fg-muted); }
+
+/* Toolbar "New File" (B15); rendered by the shell when a trace is loaded. */
+.d9-new-file-btn {
+    background: #2a2a4a;
+    border: 1px solid #444;
+    color: var(--d9-fg);
+    padding: 4px 12px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.82em;
+    flex-shrink: 0;
+}
+.d9-new-file-btn:hover { background: #3a3a5a; }
+.d9-new-file-btn:focus-visible { outline: 2px solid var(--d9-accent); outline-offset: 1px; }

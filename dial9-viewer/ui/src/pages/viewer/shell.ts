@@ -19,7 +19,7 @@
 // makes the Tab sequence follow the triage task flow (K6). No positive
 // tabindex is used, so DOM order IS tab order.
 
-import { html, render, type TemplateResult } from "lit-html";
+import { html, render, nothing, type TemplateResult } from "lit-html";
 import type { ViewerStore } from "../../store/store.js";
 import type { StoreState } from "../../types/state.js";
 import { formatHumanDuration } from "../../lib/trace/index.js";
@@ -38,8 +38,18 @@ import { createEventsTrack, type EventsTrackController } from "./events-track.js
 export interface ShellDeps {
   /** Toggle the help overlay (bound to the `?` button and key). */
   toggleHelp(): void;
-  /** Human label for the loaded trace source (toolbar file info). */
-  sourceLabel: string;
+  /**
+   * Human label for the loaded trace source (toolbar file info). A getter so
+   * it tracks the load chrome's current source across drop/pick/demo/URL
+   * loads (T34) rather than freezing at the boot value.
+   */
+  sourceLabel(): string;
+  /**
+   * Toolbar "New File" (features/02 B15): open the load chrome. The load
+   * chrome runs the S3 confirm before discarding a loaded trace (T34). Absent
+   * on mounts without load chrome (the button then does not render).
+   */
+  onNewFile?(): void;
 }
 
 /** Everything the shell template needs, derived from store state. */
@@ -100,7 +110,7 @@ function viewModel(state: StoreState, deps: ShellDeps): ShellViewModel {
     viewEnd,
     axis: deriveAxisInputs(state),
     cpu: deriveCpuInputs(state),
-    fileName: deps.sourceLabel,
+    fileName: deps.sourceLabel(),
     eventCount,
     workerCount,
     durationLabel,
@@ -201,6 +211,15 @@ function shellTemplate(
       <span class="d9-toolbar-slot" role="group" aria-label="Time display">
         <span class="d9-slot-hint">Time (T33)</span>
       </span>
+      ${vm.hasTrace && deps.onNewFile !== undefined
+        ? html`<button
+            type="button"
+            class="d9-new-file-btn"
+            @click=${deps.onNewFile}
+          >
+            New File
+          </button>`
+        : nothing}
       <button
         type="button"
         class="d9-help-btn"
