@@ -18,6 +18,7 @@ import {
   viewportBox,
   type AggregateDensity,
 } from "./minimap-model.js";
+import { coverageSignal } from "../../lib/trace/index.js";
 import type { SegmentEntry, SegmentLifecycle } from "../../types/state.js";
 
 /** A minimal segment entry carrying only what the density model reads. */
@@ -156,6 +157,36 @@ describe("computeDensityBins - source precedence", () => {
     const r = deriveMinimapRange({ minTs: 0, maxTs: 2e9 }, segments)!;
     const bins = computeDensityBins({ range: r, segments, aggregate, binCount: 2 });
     expect(bins.map((b) => b.coverage)).toEqual(["complete", "truncated"]);
+  });
+
+  it("falls back on a T18 coverageSignal-classified PARTIAL fold (real classifier)", () => {
+    // A demand-driven aggregate mid-fold: files_folded < files_matched -> the
+    // T18 client classifies this "partial", so the minimap must NOT trust its
+    // density and must fall back to listing residency.
+    const signal = coverageSignal({
+      files_matched: 10,
+      files_folded: 4,
+      samples_folded: 123,
+      total_bytes: 1_000_000,
+      hosts_matched: 3,
+      hosts_folded: 2,
+    });
+    expect(signal).toBe("partial");
+    const segments = multiSegmentSet(4, 1);
+    const aggregate: AggregateDensity = { coverage: signal, bins: [9, 9, 9, 9] };
+    const bins = computeDensityBins({
+      range: deriveMinimapRange({ minTs: 0, maxTs: 4e9 }, segments)!,
+      segments,
+      aggregate,
+      binCount: 4,
+    });
+    expect(bins.map((b) => b.coverage)).toEqual([
+      "complete",
+      "complete",
+      "truncated",
+      "truncated",
+    ]);
+    expect(overallCoverage(bins, aggregate).signal).toBe("partial");
   });
 
   it("uses the whole-trace histogram when there are no segments", () => {
