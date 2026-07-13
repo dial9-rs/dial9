@@ -124,13 +124,28 @@ the next batch gate). T30 note: caught a ticket-vs-code discrepancy - the waker-
 hover field lives in the `selection` slice (selection.hoveredWakerTaskId), NOT
 `transient` as the prose said; dispatched to the field the merged lanes actually
 consume (state.d.ts:154, lanes/index.ts). Good judgment, documented.
-IN FLIGHT (cap 3, off bdaa422): T23 (lane pointer+keyboard gestures - T22 ships
-resolvers only, T23 owns the listener), T27 (custom events track - dispatches
-hoverEvent/pinnedEvent for T24 to draw), T29 (queue track + S6 zero-global-
-baseline fix; M6 via T24 at-cursor, M7/M8 dispatch selection).
-QUEUED: T31 (inspector, needs T24+T30 both merged; HELD until T27 lands so the
-event-selection contract is in-tree) -> T33/T34/T35/T36/T37 -> chunk 3
-(T40/T41/T44/T46) -> T39 (legacy removal) last.
+MERGED SINCE: T23 (6c7a902, lane interaction; only HANDOFF conflict) and T27
+(6d022e0, events track; N-way union merge of tracks.ts+shell.ts+viewer.css
+delegations - T27's base predated T30 so both the task-detail and events track
+delegations had to be unioned by hand in tracksTemplate/sizeTracks/shellTemplate/
+mount/dispose). tsc clean after each. Build clean on the 9-merge tree.
+MERGE PATTERN for the shell hot-files: each track/chrome ticket adds one
+delegate (import + template branch + sizeTracks branch + create/thread/dispose in
+shell.ts). When a ticket's base predates a sibling's merge, git conflicts on the
+shared param lists + delegate chains - resolution is always UNION (keep every
+sibling's delegate), never pick-a-side. viewer.css conflicts are block-union.
+HANDOFF.md always take-theirs.
+IN FLIGHT (cap 3, off 6d022e0): T29 (queue track + S6 zero-global-baseline fix),
+T33 (toolbar + concept-2 issues rail - fills the shell's Analysis/Time slots;
+POI detectors via T09, rail count == legacy x/74 stepper), T34 (load chrome -
+drop/pick/URL + S3 new-file-confirm + #281 dismissible load section).
+DEFERRED BATCH GATE: full Vitest for T30/T23/T27 folded forward - run ONE clean
+full-suite gate after T29/T33/T34 land (never concurrent with a running agent's
+own suite; T27 proved concurrent Vitest starves timing-sensitive suites -> 13
+spurious timeouts).
+QUEUED: T31 (inspector, needs T24+T30+T27+T29 contracts - dispatch after T29 so
+M7/M8 queue-list contract is in-tree) -> T35 (minimap+status) -> T36 (track mgmt)
+-> T37 (UX polish) -> chunk 3 (T40/T41/T44/T46) -> T39 (legacy removal) last.
 KNOWN STRAGGLER: tests/core/all_skills_snippets.test.ts (+ heavy worker_threads/
 gunzip parse suites) time out under full-parallel load, pass in isolation
 (flagged in vite.config). NOT a regression - re-run in isolation to confirm when
