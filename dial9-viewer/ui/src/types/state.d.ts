@@ -173,6 +173,21 @@ export interface UiPrefsSlice {
   selectedSpanNames: ReadonlySet<string>;
   selectedEventNames: ReadonlySet<string>;
   /**
+   * Span filter text (02 J7): case-insensitive substring over span name or
+   * field key/value. Empty string = no text filter. AND-combined with the
+   * name chips and the percentile filter (spanMatchesFilter). Lives in the
+   * store (not component-local) so the spans track re-renders reactively and
+   * a filter keystroke coalesces through the RAF scheduler to <= 1 render per
+   * frame (perf finding F2) instead of the legacy synchronous renderAll.
+   */
+  spanFilter: string;
+  /**
+   * Span percentile filter (02 J8): 0 = All, else 50 / 90 / 95 / 99 - show
+   * only spans at/above that percentile of their name's duration
+   * distribution. AND-combined with the text + name filters.
+   */
+  spanPctFilter: number;
+  /**
    * Clock display mode for the time axis + timestamps (02 E1). Default
    * "rel" (legacy `useAbsoluteTime` = false). The toolbar toggle drives it
    * (T33); the time-axis track (T25) and every timestamp formatter READ it.

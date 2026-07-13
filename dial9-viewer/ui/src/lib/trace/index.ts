@@ -19,6 +19,9 @@ export type {
 // title.ts - shared viewer/flamegraph header metadata.
 export { traceTitleParams } from "./title.js";
 
+// format.ts - frozen format.js field-value formatter (span metadata/tooltip).
+export { formatFieldValue } from "./format.js";
+
 // prefixes.ts - S3 prefix-discovery heuristics (frozen prefix_detect.js).
 export { isDateLayer, lastSegment } from "./prefixes.js";
 

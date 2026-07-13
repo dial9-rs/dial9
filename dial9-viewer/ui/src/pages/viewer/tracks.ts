@@ -24,6 +24,7 @@ import type { TrackSpec } from "./track-layout.js";
 import { renderTimeAxis, type AxisInputs } from "./axis.js";
 import { isTrackClaimed } from "./track-renderers.js";
 import { renderCpuTrack, type CpuInputs } from "./cpu.js";
+import type { SpansTrackController } from "./spans-track.js";
 
 export interface TracksViewModel {
   /** True once a trace is loaded (tracks render empty until then). */
@@ -56,8 +57,17 @@ export function visibleTracks(vm: TracksViewModel): TrackSpec[] {
  * gutter (LABEL_W wide) plus a canvas host. The canvas carries data-*
  * attributes the parity row-walker reads to assert the placeholder
  * contract (label present, canvas sized by layout).
+ *
+ * Content tracks that need richer per-row DOM than a label + canvas (the
+ * spans track's legend/filter controls + focused-span metadata, T26)
+ * register a controller and render their OWN row template here; every other
+ * track uses the uniform placeholder row. The delegation is keyed by track
+ * id, mirroring the axis delegation in `sizeTracks`.
  */
-export function tracksTemplate(vm: TracksViewModel): TemplateResult {
+export function tracksTemplate(
+  vm: TracksViewModel,
+  spansTrack?: SpansTrackController,
+): TemplateResult {
   const tracks = visibleTracks(vm);
   return html`
     <div
@@ -66,24 +76,31 @@ export function tracksTemplate(vm: TracksViewModel): TemplateResult {
       aria-label="Timeline tracks"
       style="--d9-label-w:${LABEL_W}px"
     >
-      ${tracks.map(
-        (t) => html`
-          <div class="d9-track" data-track-id=${t.id} style="height:${t.height}px">
-            <div class="d9-track-label" id="d9-track-label-${t.id}">
-              <span class="d9-track-name">${t.label}</span>
-              <span class="d9-track-owner" aria-hidden="true">${t.ownedBy}</span>
-            </div>
-            <div class="d9-track-canvas-wrap">
-              <canvas
-                class="d9-track-canvas"
-                data-track-canvas=${t.id}
-                aria-labelledby="d9-track-label-${t.id}"
-                role="img"
-              ></canvas>
-            </div>
-          </div>
-        `,
+      ${tracks.map((t) =>
+        t.id === "spans" && spansTrack !== undefined
+          ? spansTrack.rowTemplate(t)
+          : defaultTrackRow(t),
       )}
+    </div>
+  `;
+}
+
+/** The uniform placeholder row: label gutter + canvas host (T21). */
+function defaultTrackRow(t: TrackSpec): TemplateResult {
+  return html`
+    <div class="d9-track" data-track-id=${t.id} style="height:${t.height}px">
+      <div class="d9-track-label" id="d9-track-label-${t.id}">
+        <span class="d9-track-name">${t.label}</span>
+        <span class="d9-track-owner" aria-hidden="true">${t.ownedBy}</span>
+      </div>
+      <div class="d9-track-canvas-wrap">
+        <canvas
+          class="d9-track-canvas"
+          data-track-canvas=${t.id}
+          aria-labelledby="d9-track-label-${t.id}"
+          role="img"
+        ></canvas>
+      </div>
     </div>
   `;
 }
@@ -111,6 +128,7 @@ const sizers = new WeakMap<HTMLCanvasElement, CanvasSizer<CanvasRenderingContext
 export function sizeTracks(
   columnEl: HTMLElement,
   vm: TracksViewModel,
+  spansTrack?: SpansTrackController,
 ): TrackSizing[] {
   const dpr = (typeof devicePixelRatio === "number" ? devicePixelRatio : 1) || 1;
   // Full column width and the scrollbar gutter (so the draw area's right
@@ -144,6 +162,15 @@ export function sizeTracks(
     // collapsed column; render nothing but keep the slot.
     if (drawW <= 0) {
       out.push({ id: track.id, drawW: 0, height: track.height });
+      continue;
+    }
+    // The spans track (T26) owns its own canvas sizing + draw: it reserves a
+    // controls strip above the canvas, so its draw area is shorter than the
+    // full track height. Delegate and skip the uniform placeholder path.
+    if (track.id === "spans" && spansTrack !== undefined) {
+      spansTrack.paint(canvas, drawW, track.height, dpr, vm.viewStart, vm.viewEnd);
+      canvas.dataset["drawW"] = String(Math.round(drawW));
+      out.push({ id: track.id, drawW, height: track.height });
       continue;
     }
     let sizer = sizers.get(canvas);
