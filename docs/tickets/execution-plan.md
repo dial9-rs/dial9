@@ -122,10 +122,11 @@ tooltip), both need lanes; then T27/T29/T30 tracks; then T31/T33/T34/T35/T36/T37
 
 **Audit log:**
 - T22 worker lanes track (CORE viz): MERGED into integration/chunk-1 2026-07-13
-  (tip 1ec89e3). Gate: tsc clean, build clean (lanes bundled), full Vitest
-  running to confirm (T22's own worktree suite was 1026 pass + 1 xfail incl. 9
-  new lane tests; merge added only import-union in tracks.ts + doc appends, no
-  logic change - low risk). Merge conflicts were all trivial: tracks.ts import
+  (tip 1ec89e3). Gate GREEN: tsc clean, build clean (lanes bundled), full
+  Vitest 1051 passed + 1 xfail + 11 skipped (T22's own worktree suite had 1026
+  + 9 new lane tests; INTEG total higher with T25/T21 suites). Merge added only
+  import-union in tracks.ts + doc appends, no logic change. Merge conflicts were
+  all trivial: tracks.ts import
   block (kept BOTH renderTimeAxis from T25 + isTrackClaimed from T22; bodies
   auto-merged), ledger append-union, HANDOFF took-theirs. Introduced the
   track-renderer registry (track-renderers.ts / isTrackClaimed) so a mounted
