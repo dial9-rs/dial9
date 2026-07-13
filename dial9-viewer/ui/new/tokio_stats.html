@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<!-- The migrated Tokio Stats page (T41): the Vite entry served at
+     /new/tokio_stats.html (the new-UI path; the canonical /tokio_stats.html
+     keeps serving the legacy page until removal - ADR-0004 section 8).
+     Static skeleton + styles are byte-faithful to the legacy page so the
+     affordance census is zero-diff (the dual-UI switch pill is the only
+     intentional addition); ALL script lives in the module entry
+     (src/pages/tokio-stats/main.ts) except ui-switch.js, the same plain
+     copied file both UI generations load. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Tokio Stats</title>
+<!-- New-UI entries are served off-root; resolve relative navigation targets
+     (the exemplar viewer.html deep links) against the server root exactly
+     like the root-served legacy page does. -->
+<base href="/" />
+<!-- Dual-UI switch (T38). The <head> auto-boot is a no-op on this off-root
+     path; src/pages/tokio-stats/main.ts calls D9UiSwitch.mount({side:"new"}). -->
+<script src="/ui-switch.js"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0d1117; color: #e0e0e0; padding: 20px; }
+  h1 { margin-bottom: 12px; font-size: 1.4em; }
+  .periods { display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px; }
+  .period-row { display: flex; gap: 8px; align-items: center; padding: 8px 10px; background: #161b22; border-radius: 6px; flex-wrap: wrap; }
+  .period-row label { font-size: 0.85em; }
+  .period-row input { background: #1a1a2e; color: #e0e0e0; border: 1px solid #444; padding: 4px 10px; border-radius: 3px; }
+  .period-row .tag { font-weight: 700; font-size: 0.85em; padding: 2px 8px; border-radius: 3px; margin-right: 4px; }
+  .toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 16px; }
+  .toolbar button { cursor: pointer; font-weight: 600; background: #6c63ff; color: #fff; border: none; padding: 4px 14px; border-radius: 3px; }
+  .toolbar button.secondary { background: #2a2a4a; color: #e0e0e0; border: 1px solid #444; }
+  .threshold-row { display: flex; align-items: center; gap: 8px; }
+  .threshold-row input[type=range] { width: 180px; }
+  .summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-bottom: 20px; }
+  .card { background: #161b22; border-radius: 6px; padding: 14px; text-align: center; }
+  .card .value { font-size: 1.6em; font-weight: 700; }
+  .card .label { font-size: 0.75em; color: #8b949e; margin-top: 4px; }
+  .card.bad .value { color: #f85149; }
+  .card.warn .value { color: #d29922; }
+  .card.good .value { color: #3fb950; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.85em; }
+  th, td { padding: 8px 10px; text-align: left; border-bottom: 1px solid #21262d; }
+  th { background: #161b22; color: #8b949e; font-weight: 600; position: sticky; top: 0; }
+  tr:hover { background: #1c2128; }
+  .off-cpu { color: #f85149; font-weight: 600; }
+  .on-cpu { color: #d29922; }
+  .status { margin: 10px 0; font-size: 0.9em; color: #8b949e; }
+  .error { color: #f85149; }
+  a { color: #58a6ff; text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .delta-bad { color: #f85149; }
+  .delta-good { color: #3fb950; }
+  .delta-neutral { color: #8b949e; }
+  .view-tab { display: inline-block; padding: 6px 16px; cursor: pointer; border-radius: 4px 4px 0 0; font-size: 0.85em; font-weight: 600; background: #161b22; color: #8b949e; border: 1px solid #21262d; border-bottom: none; margin-right: 2px; }
+  .view-tab.active { background: #0d1117; color: #e0e0e0; border-color: #444; }
+</style>
+</head>
+<body>
+<h1>⚡ Tokio Stats</h1>
+<div id="periods" class="periods"></div>
+<div class="toolbar">
+  <button id="btn-add" class="secondary">+ Add period</button>
+  <button id="btn-load">Load</button>
+  <div class="threshold-row">
+    <label>Threshold:</label>
+    <input id="threshold-slider" type="range" min="-1" max="3" step="0.1" value="0">
+    <span id="threshold-label">1ms</span>
+  </div>
+  <label style="font-size:0.85em"><input type="checkbox" id="utc-toggle" checked> UTC</label>
+</div>
+<div id="status" class="status"></div>
+<div id="view-tabs" style="display:none;margin-bottom:12px"></div>
+<div id="summary" class="summary" style="display:none"></div>
+<div id="table-container" style="max-height:70vh;overflow-y:auto"></div>
+
+<script type="module" src="/src/pages/tokio-stats/main.ts"></script>
+</body>
+</html>

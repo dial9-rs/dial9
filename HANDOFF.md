@@ -1,76 +1,130 @@
-# T45 - Surface segment metadata in the viewer (#68) - HANDOFF
+# T41 - Migrate tokio_stats.html - HANDOFF
 
-## STATUS: DONE (DoD met, all gates green)
+(Supersedes the T36 HANDOFF inherited through the branch chain.)
 
-Surfaces the trace-EMBEDDED `service`/`host` from `ParsedTrace.segmentMetadata`
-in the viewer toolbar file-info area (features/02 C1a), reconciled against the
-S3-key-derived `svc`/`host` URL params. Closes the read side of #68 (the issue
-itself is closed via T44 per the ticket; no GitHub action taken here).
+## STATUS: DoD met (implementation complete, all runnable gates green)
 
-## COMPLETED (commit shas, on branch ticket/T45-segment-metadata)
+Behavior-preserving migration of `tokio_stats.html` onto the new stack, same
+treatment as T13/T14. The full mechanical gate bar is green; the live T12
+Playwright parity layers are delivered (features04 walker registry + switch
+registration) and their properties are proven offline (Vitest exact-number
+behavioral tests, the XSS regression, the switch round-trip logic + a live
+Playwright smoke). The live parity RUNS themselves need the seeded DDB
+dev-server, which is environment-gated (as the T40 inventory itself notes for
+features/04) - see REMAINING.
 
-- `73f40e2` feat(viewer): pin SegmentMetadata service/host read contract (T45)
-  - `src/types/trace.d.ts`: `SegmentIdentity` interface (the pinned read-contract shape).
-  - `src/lib/trace/segment-metadata.ts` (NEW): `SEGMENT_SERVICE_KEY`/`SEGMENT_HOST_KEY`
-    (literal `"service"`/`"host"`), `readSegmentIdentity(trace)`,
-    `readKeyDerivedIdentity(search)`, `reconcileIdentity(embedded, keyDerived)`
-    (+ `IdentityField`/`ReconciledIdentity`).
-  - `src/lib/trace/index.ts`: barrel exports.
-  - `src/lib/trace/segment-metadata.test.ts` (NEW): 13 tests - key contract,
-    accessors, reconciliation rule, and a row-walk over the demo trace + a T42
-    window fixture.
-- `3bcd86c` feat(viewer): surface trace service/host in toolbar file info (T45)
-  - `src/pages/viewer/toolbar.ts`: `keyDerivedIdentity?` added to `ToolbarDeps`;
-    `fileInfoTemplate` renders `identityTemplate` chips (`[data-file-identity]`,
-    `[data-identity="service"|"host"]`) with the embedded-wins + tooltip rule.
-  - `src/pages/viewer/main.ts`: reads `readKeyDerivedIdentity(location.search)`
-    once and passes it into the shell/toolbar deps.
-  - `src/styles/viewer.css`: minimal chip styling.
-- `cf0e49c` docs(T45): C1a inventory row + ledger addition for #68
-  - `docs/ui-inventory/features/02-viewer-html.md`: new C1a row.
-  - `docs/tickets/ledger.md`: `features/02 C1a | added | T45 | ...` line.
+## COMPLETED (commits on `ticket/T41-migrate-tokio-stats`)
 
-## KEY FINDINGS / DECISIONS
+- `83c1013` feat: migrate tokio_stats.html to the new stack
+  - `src/pages/tokio-stats/`: `format.ts` (converters), `stats.ts`
+    (computeStats + diff math + refine-termination), `exemplar.ts`
+    (deep-link builder), `url.ts` (URL contract), `render.ts` (lit-html
+    declarative templates - N17 XSS guard), `keys.ts` (T20 `?` help),
+    `dom.ts`, `main.ts` (wiring + refine loop via T18's `fetchTokioStats`).
+  - `new/tokio_stats.html` Vite entry (new-UI path); legacy page stays
+    servable. Registered `tokio_stats.html` in `ui-switch.js` NEW_UI_ENTRIES
+    and `vite.config.ts` input; extended the pinned `ui_switch.test.ts`
+    registry test.
+- `e69c37f` test: behavioral parity, XSS regression, URL + switch round-trip
+  (`stats/render/format/exemplar/url.test.ts` + the tokio_stats switch
+  round-trip case in `ui_switch.test.ts`).
+- `e7ab280` test(parity): `parity/walkers/features04.mjs` (9 gated-row
+  walkers) + registration in `walk-rows.mjs`; T41 ledger entries.
+- `6edd8c8` fix: keep pathname explicit in `syncUrl` under `<base href>`
+  (a real URL-contract break caught by the Playwright smoke).
 
-- **Writer key names confirmed literal (`"service"` / `"host"`)** - no STOP-gate
-  needed. Confirmed across: `dial9-utils/src/s3.rs` S3 source
-  `.metadata("service"|"host", ...)`; `dial9-viewer/src/bin/gen_fixtures.rs`
-  `standard_metadata()`; the `dial9-core` writer roundtrip test; the
-  `metrics-service` example (`service` only). SegmentMetadata is a free-form KV
-  map; the key names are a writer-side convention, now pinned once in
-  `lib/trace/segment-metadata.ts` with the shape in `types/trace.d.ts`.
-- **Demo trace carries `service` (= "metrics-service") but NOT `host`** - the
-  metrics-service example emits no host. The host surface is row-walked via the
-  committed T42 fixture `parity/fixtures/segments/window-00.bin.gz`
-  (`service`="svc-fix", `host`="window"). No new fixture needed.
-- **Two sources reconciled** (embedded metadata vs URL `svc`/`host` from S3-key
-  parsing via `traceTitleParams`, which the browser page appends when opening
-  the viewer): embedded WINS when both present; a disagreeing key-derived value
-  is tooltipped; key-derived shows as a fallback when the trace has no embedded
-  metadata. This also restores the structured-metadata display the T33 C1 port
-  had silently dropped (legacy C1/W11).
-- **Frozen core untouched** - `trace_parser.js` read-only; the boundary guard
-  `check:boundary` passes (module lives inside `lib/trace`).
+## DoD CHECKS
 
-## REMAINING
+- **XSS regression test (hostile strings render inert)** - DONE.
+  `src/pages/tokio-stats/render.test.ts` proves the #587 sinks (spawn_loc,
+  the exemplar URL, the diff-% cell) are interpolated lit-html VALUES (inert),
+  never baked into static HTML, plus a source guard against the `innerHTML` /
+  `unsafeHTML` class. NOTE: `service`/`host` URL params are never rendered by
+  this page (they only build the fetch query), so they are inert by
+  construction; spawn_loc is the actual attacker-influenceable sink the #587
+  fix and this test target.
+- **Switch round-trip preserves the FULL query string** - DONE.
+  Logic-level in `ui_switch.test.ts` (bucket, prefix, service, REPEATABLE
+  host, per-period bounds) AND a live Playwright smoke (repeatable host
+  preserved across legacy->new). The page's own `syncUrl` keeps all scope +
+  `p{i}_*` params (`url.test.ts`).
+- **Behavioral differ (exact numbers)** - proven offline in `stats.test.ts`
+  against the recorded refine fixture (total_polls 94212, notable 3379,
+  per-location long/p50/p99/max, class buckets, rates) + the diff model
+  (G3-G9). The LIVE old-vs-new differ needs the dev-server (REMAINING).
+- **T12 row-walker on features/04** - registry DELIVERED
+  (`parity/walkers/features04.mjs`), covering exactly the 9 gated rows
+  (A8, A10, D3, D5, I1, J3, J5, J6, J11 - verified == the inventory's gated
+  set), registered in `walk-rows.mjs`. LIVE run env-gated (REMAINING).
+- **Census diff == switch delta** - analyzed switch-only and ledgered; the
+  seed's default single-period state renders no tabs/exemplar-links (the
+  onclick-vs-@click affordances never appear on either side) and the help
+  overlay content is not census-selected. LIVE run env-gated.
+- **axe clean** - the help overlay uses axe-considered semantics
+  (role=dialog, aria-modal, h2/h3 heading order). LIVE axe-scan env-gated.
 
-None. Scope fence respected (contract addition + toolbar surface + one
-inventory row + ledger). #68 closure itself is T44's per the ticket.
+## GATE BAR EVIDENCE (all green)
+
+- `npx tsc --noEmit` -> exit 0.
+- `npm run test` (full Vitest, single process) -> **1492 passed, 1 expected
+  fail, 11 skipped; 97 files passed, 1 skipped. 0 unexpected.** (The known
+  stragglers did not time out this run.)
+- `npm run build` -> clean; emits `dist/new/tokio_stats.html` +
+  `new-tokio-stats` chunk (12.76 kB, gzip 4.81 kB). The `<script
+  src="/ui-switch.js"> can't be bundled` line is a benign warning identical
+  for all four new pages (the copied plain script is intentionally external).
+- `cargo build -p dial9-viewer` -> exit 0 (rust-embed picks up the new
+  `dist/new/tokio_stats.html`).
+- `npm run check:boundary` -> OK (no core imports outside lib/trace).
+- Playwright smoke (`vite preview` + built dist) -> GREEN: new page boots with
+  zero console errors, renders the shell/one period, threshold label
+  "1.00ms", switch "Switch to legacy UI"; + Add period adds a row and the
+  remove (x) buttons; `?` opens / Esc closes the help overlay; legacy page
+  now renders "Switch to new UI" -> `/new/tokio_stats.html`; full-query
+  (repeatable host) round-trip lands on `/new/tokio_stats.html` with all
+  params preserved.
+
+## DECISIONS (recorded for maintainer sign-off)
+
+- **H4 (dead `/api/trace` exemplar link) - PRESERVED**, not fixed. This is a
+  behavior-preserving port (T13/T14 treatment: defects carried); the DoD
+  requires the census/behavioral differ to show ONLY the switch delta, so
+  repointing to `/api/object` would introduce a second, non-switch delta.
+  Ledgered (`docs/tickets/ledger.md`, `features/04 H4 | preserved`). The
+  one-line fix (`exemplarLink` -> `/api/object?bucket&key`) is a follow-up if
+  the maintainer wants it live. Other preserved defects: D4 (no coverage UI),
+  G3 (diff crash when P1 unloaded - the null deref is kept and pinned by a
+  test), E2 (mixed/unknown classes computed but invisible).
+- **`?` help (T20)** integrated as the ONLY keyboard binding (features/04 K1:
+  the legacy page had no keyboard; "existing bindings unchanged" holds
+  vacuously). Ledgered `features/04 K1 | amended`.
+- **Test DOM env**: briefly added `happy-dom` for the XSS render test, then
+  REMOVED it (it carries a critical VM-escape/RCE advisory - a bad fit for a
+  published library, especially a test that feeds hostile scripts). The XSS
+  test is structural instead (TemplateResult value-vs-static-HTML + source
+  guard), matching the repo's deliberate "no DOM env; lit-html exercised by
+  browser tooling" convention. `package.json`/`package-lock.json` are
+  byte-identical to the base - zero dependency residue.
+
+## REMAINING (environment-gated; NOT blockers)
+
+Run the live T12 parity layers against a seeded DDB dev-server (the recipe is
+the features/04 inventory's Reproduce block):
+
+```
+cd dial9-viewer/ui && npm ci && npm run build
+PORT=3071 cargo run -p dial9-viewer --bin dev-server --features dev-server
+# row-walker (new + legacy sides):
+node parity/walk-rows.mjs --inventory ../../docs/ui-inventory/features/04-tokio-stats-html.md --url http://localhost:3071/new/tokio_stats.html
+node parity/walk-rows.mjs --inventory ../../docs/ui-inventory/features/04-tokio-stats-html.md --url http://localhost:3071/tokio_stats.html
+# census + behavioral differ (legacy vs new), axe: see ui/README parity section
+node parity/axe-scan.mjs http://localhost:3071/new/tokio_stats.html
+```
+
+The walkers are correct-by-construction against the inventory's recorded seed
+facts; time-window rows stay NOT-TRIGGERABLE on the seed (the epoch/date
+catch-22 - unblocked by T42's synthetic fixtures).
 
 ## BLOCKERS / QUESTIONS
 
 None.
-
-## EVIDENCE (all gates green)
-
-- `npx tsc --noEmit` -> exit 0 (no output).
-- `npm run build` -> clean; `built in 453ms` (the `fs`/`os`/`child_process`
-  externalized-for-browser warnings are pre-existing from the frozen
-  `trace_parser.js` Node imports, unrelated to this change).
-- `npm run test` (full Vitest) -> `Test Files 94 passed | 1 skipped (95)`,
-  `Tests 1478 passed | 1 expected fail | 11 skipped (1490)`. No unexpected
-  failures; no straggler timeouts (single full-parallel run). `check:boundary`
-  (pretest) -> OK.
-- `cargo build -p dial9-viewer` -> exit 0 (`Finished dev profile`).
-- Focused: `npx vitest run src/lib/trace/segment-metadata.test.ts
-  src/pages/viewer/toolbar.test.ts` -> 20 passed.
