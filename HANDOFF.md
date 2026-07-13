@@ -1,115 +1,137 @@
-# T33 - Toolbar, file info, and the issues rail - HANDOFF
+# T31 - Inspector sidebar (tabs: poll/event/related/stack) - HANDOFF
 
-(Supersedes the T27 HANDOFF inherited through the branch chain.)
+## STATUS: implemented, gate-bar green. Commit is BLOCKED in this environment
+(`git commit` denied - see BLOCKERS). All work is in the working tree, ready for
+the maintainer to commit.
 
-## STATUS: DONE (DoD met, all gates green)
+## SCOPE DELIVERED
 
-Branch `ticket/T33-toolbar-rail` off `integration/chunk-1` (base 6d022e0).
-The concept-2 issues rail replaces the blind POI stepper; the toolbar file
-info / analysis buttons / time controls land with F2 tooltips; the goto-time
-`g` accelerator lands (S2). No push, no PR (per mandate).
+Persistent inspector `mountInspector(host, store, { esc })` replacing the shell
+placeholder. Tabs: **Task / Poll / Event / Related / Stack**, driven by the
+selection slice, re-scoping in the same action (04 S4).
 
-## COMPLETED (commits)
+- **P (sidebar mechanics):**
+  - P1: persistent inspector (concept-1); selection re-scopes content, no
+    open/close of the whole surface. Ledgered (features/02 P1 amended).
+  - P2 + P8: drag-resize handle -> `uiPrefs.sidebarWidth` (live) + persisted to
+    `localStorage["dial9.viewer.sidebarWidth"]`, re-read on mount. **P8 flips
+    DEAD -> implemented** (ledgered). Clamp [200px, 92vw] as legacy.
+  - P3: the F7 "what is selected" status line is the sidebar-title analogue.
+  - P4: tab families - `tabAvailability(selection)` enables/disables tabs;
+    `preferredTab(selection)` auto-activates on a fresh selection.
+  - P5: auto-narrow to 350px on a fresh single-event pin (yields to a
+    user/persisted width). P7 body scroll is CSS (`overflow-y:auto`). P6
+    auto-widen-on-flamegraph is part of the T32 range seam.
+- **Q (event / related detail):** Q1 event KV (single + cluster), Q2 copy
+  (flash check), Q3 correlation button -> Related, Q4-Q8 Related sections (field
+  correlation, enclosing spans, same-span/task/type), collapsible (Q5), windowed
+  load-more (Q6), row navigation (Q7 - span focus+center / event pin+center),
+  empty placeholders (Q8).
+- **R (poll detail):** R1/R2 Poll Detail - deduplicated blocking-sched (red) +
+  CPU-profile (orange) groups by leaf frame, count/percentage/bar, 3-frame head
+  + expandable tail. **The behavioral-diff DoD gate**, ported from legacy
+  `showStackPopup`. **R6 retired via ledger** (handler-less summary row, G20
+  pattern). R3-R5/R7-R9 are the T32 seam (see SCOPE DECISION).
+- **S4:** the at-cursor readout (`transient.atCursor`, T24's contract) renders
+  in ONE place in the inspector, on the transient channel; **T24's inspector
+  stub call is removed** from `components/overlay/index.ts`. Surfaces the T17
+  coverage state (partial/oversized window). Ledgered (I6/S4).
+- **M7/M8:** the Stack tab renders `computeSpawnedTasks` (T29's derivation) for
+  `selection.spawnedTasksRange` - 5 hex task-id links per spawn-location group +
+  a "N more" tail; a link selects the task (M8 -> selectedTaskId).
+- **Task tab:** T30's `createTaskDetailDerivation` textual detail (spawn loc,
+  polls, wakes, lifetime, completion, N3 uninstrumented badge, N4 idle-stack
+  count). Consumed, not reimplemented.
+- **F7:** "what is selected" line + explicit `✕ clear` button; Esc registered
+  with the esc-cascade at the `sidebar` priority band (clears poll/event/range
+  before the entry's task-clear fallback - the legacy D9 order).
 
-- 3cd56ce  feat(viewer): POI slice + issues-rail data model (poi.ts)
-- 7885846  test(viewer): POI model + rail-count parity (DoD)
-- a3ed15a  feat(viewer): issues rail + toolbar components
-- 9f6fa11  feat(viewer): wire toolbar + issues rail into the shell
-- 5167242  refactor(viewer): drop shell file-info fields superseded by toolbar
-- (ledger + this HANDOFF committed next)
+### New store contract (additive; T29 `spawnedTasksRange` precedent)
+`selection.pollDetail: PollSpan | null` (types/state.d.ts) - the clicked poll
+for the Poll Detail tab. Wired in `lane-interaction.ts` onClick from
+`resolveLaneClick(...).openStackFor` (the merged code already computed it and
+noted "the popup lands when T31 wires it"). Store default added
+(pages/viewer/store.ts). Three existing full-slice test fixtures updated with
+`pollDetail: null`.
 
-### What landed
+## SCOPE DECISION (flagged for maintainer): R3-R9 region blocking-calls -> T32
 
-Owned rows features/02 C, D, E + amendments S5, F2, S2(partial):
+The ticket says "Owns P/Q/R rows", but the MERGED CODE
+(`lane-interaction.ts:14-18`) states: a Shift-drag / keyboard region commit
+writes `selection.sidebarRange` and "WHAT opens for that range (flamegraph /
+blocking / heap) is T32's." Per hard rule 1 (merged code is authoritative on a
+ticket-vs-code conflict), the region-triggered Blocking-Calls / scheduling panel
+(R3, R4, R5, R7, R8, R9 - legacy `showSchedPanel`, viewer.html:6008-6203) is
+T32's rendering (T32 deps on T31). T31 lands the Stack-tab CONTAINER + the
+poll-click R1/R2 + the R6 retirement; the Stack tab shows a documented seam note
+when `sidebarRange` is set. **Confirm this split** (T31 = inspector shell +
+poll-detail + R6 disposition; T32 = region blocking-calls/flamegraph/heap into
+the Stack tab). If R3-R9 must live in T31, they are an unported follow-on.
 
-- **Issues rail** (`src/pages/viewer/issues-rail.ts`, 04 S5): ranked,
-  sortable (worker/kind/time/duration column headers), keyboard-navigable POI
-  list replacing the "0/74 Next" stepper. Filter dropdown (C2), `n`/`p` step
-  via the T20 router (C4/C5), row click centers the viewport + selects the
-  task (C7 `jumpToPoi` math ported), "N/total" position (C6). Left column of
-  the shell body.
-- **POI model** (`src/pages/viewer/poi.ts`): the frozen `filterPointsOfInterest`
-  detector set consumed via `lib/trace/analysis` (T09 seam) - NO new detector
-  (scope fence). Memoized on trace identity (cpu.ts precedent). Jump semantics,
-  n/p stepping, four-column sort, red-flag counts, per-row formatting.
-- **Toolbar** (`src/pages/viewer/toolbar.ts`): file info (C1), red-flags
-  summary chip (existing detectors' counts), analysis buttons (D1-D3) with
-  tooltips + conditional visibility + count labels, info menu (info-icon
-  `<details>`) hosting the DEMOTED Parse perf + uninstrumented details
-  (D4/D6, F2), Time / TZ toggles driving `uiPrefs.timeMode/tz` (E1/E2),
-  Set/Clear Range (E3/E4), and the goto-time input wired to `g` (S2).
-- **Store**: new `poi` slice { filter, sortKey, sortDir, index } (state.d.ts,
-  store.ts); `PoiSortKey` type. Additive; shell subscribes to it. Two full
-  StoreState test fixtures (store.test.ts, exhaustive.test.ts) got the slice.
-- Shell/main wiring: toolbar fills the Analysis/Time slots, rail in the body;
-  `n`/`p`/`g` registered in the unified router; analysis/range surfaces route
-  through injected seams (toasts) until T31/T32/T34 land.
-- Styles: `src/styles/viewer.css` T33 section (toolbar controls, red-flags
-  chip, info menu, rail table + severity dots, sr-only helper).
+## FILES
 
-## DoD - all checks pass
+New:
+- `src/pages/viewer/inspector-model.ts` - pure derivations (Poll Detail, Event,
+  Related, spawned-tasks, tab availability).
+- `src/pages/viewer/inspector.ts` - the `mountInspector` component.
+- `src/pages/viewer/inspector-model.test.ts` - 15 model cases (auto-discovered
+  by Vitest; NOT a demo-trace suite, so no `e2e-trace-tests.sh` registration).
 
-- **check: rail count parity** - with the demo trace, default filter "sched",
-  worst-first, the rail lists **exactly 74** (== the legacy "x/74"). Proven
-  structurally in `poi.test.ts` against an independently re-derived legacy
-  pipeline, for ALL five filters (sched=74, long-poll=2, cpu-sampled=3069,
-  wake-delay=36496, uninstrumented=7529). Sort is count-independent (pinned).
-- **check: every toolbar control has a tooltip (F2)** - every `<button>`,
-  `<select>`, `<input>`, `<summary>` and clickable rail `<tr>` in toolbar.ts /
-  issues-rail.ts carries a `title` + accessible name (source census; the T12
-  axe/census browser tooling is the mechanical run, outside this gate bar).
-- **check: row-walker green on C/D/E** - T12's row-walker is a browser dev
-  tool (not in the gate bar). Owned-row behavior is covered by the Vitest
-  units; the ledger amendments are in-diff (per-row disposition recorded).
+Edited:
+- `src/types/state.d.ts` (+`selection.pollDetail`), `src/pages/viewer/store.ts`
+  (+default), `src/pages/viewer/shell.ts` (empty inspector aside + expose
+  `inspectorRegion`), `src/pages/viewer/main.ts` (mount + dispose),
+  `src/pages/viewer/lane-interaction.ts` (dispatch pollDetail),
+  `src/components/overlay/index.ts` (remove T24 readout-stub call),
+  `src/styles/viewer.css` (inspector styles).
+- `docs/tickets/ledger.md` (R6 retired; P8, I6/S4, P1 amended).
+- Test fixtures: `store.test.ts`, `exhaustive.test.ts`,
+  `selection-overlay.test.ts` (+`pollDetail: null`).
 
-## GATE BAR - EVIDENCE
+## ARCHITECTURE NOTES
 
-- `npx tsc --noEmit` -> exit 0 (clean).
-- `npm run test` -> 83 files passed | 1 skipped; **1322 passed | 1 expected
-  fail | 11 skipped**; `check:boundary` OK (no core imports outside
-  lib/trace + lib/canvas - confirms the T09 seam is respected). ~122s, single
-  process (never two at once). No unexpected failures.
-- `npm run build` -> clean (150 modules; new-viewer bundle 119 kB / 39 kB gz).
-- `cargo build -p dial9-viewer` -> Finished (rust-embed picks up dist).
-- T33 suites in isolation: poi.test (21) + toolbar.test (6) + issues-rail.test
-  (4) = 31 passed.
+- Render split (architecture 2.2/2.3): the FRAME (status/tabs/body, incl. the
+  heavy Poll/Related derivations) re-renders only on trace/selection/uiPrefs;
+  the READOUT re-renders on the high-frequency `transient` channel into its own
+  binding-free host - a hover never re-runs buildPollDetail/buildRelated.
+- The shell renders an EMPTY `<aside class="d9-inspector">`; the component owns
+  its interior imperatively (the toast-region technique), so shell re-renders
+  never clobber it. Shell edit is localized to the aside region + an
+  `inspectorRegion` handle, mirroring toastRegion/trackColumn.
+- Trace-invariant lookups cached in `store.derived(["trace"], ...)` (F5).
+- T17 (audit notes 6+7): the readout surfaces `coverage` (partial/oversized)
+  rather than presenting a truncated window as whole - the chunk-2 consumer the
+  audit required.
 
-## REMAINING / SEAMS (not T33 scope)
+## EVIDENCE (gate bar - all four green)
 
-- Analysis buttons D1/D2/D3 open the inspector/flamegraph region analyses -
-  those SURFACES are T31/T32. The buttons call an injected `onOpenAnalysis`
-  seam (a toast now); they deliberately do NOT set `selection.sidebarRange`
-  (that would soft-lock keyboard selection H9 with no sidebar to clear it).
-  When T32 lands, swap the callback in `main.ts`.
-- Set/Clear Range (E3/E4) reparse the retained buffer - buffer retention +
-  URL start/end are the load chrome (T34) / URL codec (T19). Buttons call the
-  `onSetRange`/`onClearRange` seams (toasts) now. Clear Range shows only when
-  the resident trace is already range-filtered (trace.timeFiltered).
-- POI tick marks on the minimap are T35's surface. T35 consumes the SAME
-  detector output via `lib/trace/analysis` (poi.ts `poiSourceFor` / the frozen
-  `filterPointsOfInterest`) - no T33<->T35 code dependency, as specified.
-- The rail dispatches viewport updates directly (not through T23's
-  ViewportActions instance), so a rail jump is NOT pushed onto the `z`
-  zoom-history stack; because it does not record either, `z` returns to the
-  last committed view (a reasonable undo of a jump). Sharing one
-  ViewportActions across lane-interaction + rail was out of scope.
+- `npx tsc --noEmit`: **exit 0**.
+- `npm run test` (full Vitest, after the final refactor):
+  **Test Files 83 passed | 1 skipped (84); Tests 1331 passed | 1 expected fail
+  | 11 skipped (1343)**. 0 unexpected failures; no straggler timeout (ran full
+  parallel in 120s). inspector-model + overlay/readout suites: 22/22.
+- `npm run build` (vite): **clean** (only pre-existing frozen-core
+  "externalized for browser" warnings).
+- `cargo build -p dial9-viewer`: **exit 0** (rust-embed picks up the rebuilt
+  dist).
 
-## T17 CARRIED OBLIGATION (audit notes 6+7)
+## REMAINING / NOT UNIT-TESTED HERE (browser-driven; Vitest env is `node`)
 
-The detectors run over the RESIDENT `trace` slice. The viewer shell loads
-WHOLE traces today (segments slice empty), so the POI set / counts are
-complete. When segment windowing feeds a partial trace (T34/T35 wiring), the
-counts are over the resident window; consumers must not present them as
-whole-trace truth. Documented in poi.ts header; no windowing UI built here
-(downstream), matching the cpu.ts precedent.
+- Row-walker (T12) not runnable in this worktree; P/Q/R rows implemented to pass
+  it but not mechanically verified here.
+- Store/DOM-boundary halves (live tab activation, resize round-trip, Esc
+  registration, navigateRelated/selectTask dispatch) are not jsdom-tested (no
+  jsdom installed; env is `node`) - the pure model suite covers the logic; the
+  browser-driven verification is the row-walker's, consistent with T27/T30.
+- Cosmetic simplifications vs legacy: Poll Detail per-frame escalating indent
+  rendered as fixed 8/16px; Related span-row focus chain is the single span, not
+  its ancestor chain. Content/counts/expand behavior is faithful.
 
-## BLOCKERS / QUESTIONS
+## BLOCKERS
 
-None. No STOP-gate hit. Two design calls made without a maintainer gate
-(recorded in the ledger, reversible):
-1. C3 "Worst first" checkbox is SUBSUMED by column-header sorting (the
-   duration-desc default == worst-first; time-asc == chronological). The
-   discrete checkbox is not reproduced - the ranked, directly-sortable list is
-   the S5 amendment's intent.
-2. Analysis/range buttons use injected seams (toasts) rather than dispatching
-   store state, to avoid the H9 soft-lock. Reversible when T31/T32/T34 land.
+- **`git commit` is DENIED** in this environment (deny rule `Bash(git commit *)`).
+  No step could be committed. Work is in the working tree (the first step's
+  contract+ledger edits were `git add`-staged; later edits are unstaged). The
+  maintainer must commit. Suggested split:
+  1. `feat(viewer): add selection.pollDetail contract + T31 ledger entries`
+  2. `feat(viewer): persistent inspector sidebar (P/Q/R + S4/F7)`

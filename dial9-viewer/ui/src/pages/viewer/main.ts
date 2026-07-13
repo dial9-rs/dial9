@@ -18,6 +18,7 @@ import { mountViewerHelp } from "./help.js";
 import { createToasts } from "./toasts.js";
 import { mountShell } from "./shell.js";
 import { mountLoadChrome } from "./load-chrome.js";
+import { mountInspector } from "./inspector.js";
 import { mountLanes } from "../../components/canvas/lanes/index.js";
 import { mountOverlay } from "../../components/overlay/index.js";
 import { mountLaneInteraction } from "./lane-interaction.js";
@@ -87,6 +88,13 @@ function boot(): void {
   // geometry only after the shell's writes have settled.
   const overlay = mountOverlay(root, shell.trackColumn, store);
 
+  // Persistent inspector sidebar (T31): tabs (Task/Poll/Event/Related/Stack),
+  // the at-cursor readout (04 S4), and the P-row mechanics (resize/persist).
+  // Rendered imperatively into the shell's empty inspector aside; re-scopes to
+  // the selection in the same action (S4). Registered with the esc-cascade so
+  // its content selection clears before the entry's task-selection fallback.
+  const inspector = mountInspector(shell.inspectorRegion, store, { esc });
+
   // Initialize the viewport from the trace the moment it loads. Registered
   // BEFORE the lane interaction so its zoom-history baseline records the
   // fitted view (both subscribe to `trace`; order = registration order).
@@ -144,6 +152,7 @@ function boot(): void {
     loadChrome?.dispose();
     laneInteraction.dispose();
     overlay.dispose();
+    inspector.dispose();
     lanes.dispose();
     shell.dispose();
     help.dispose();

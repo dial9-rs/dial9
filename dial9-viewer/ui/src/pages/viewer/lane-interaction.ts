@@ -223,13 +223,13 @@ export function mountLaneInteraction(
     const mouseXCol = e.clientX - geom.rectLeft;
     // Any lanes click clears the pinned custom-event marker (legacy :5363).
     if (mouseXCol < LABEL_W || mouseXCol > LABEL_W + geom.drawW) {
-      store.update("selection", { selectedTaskId: null, pinnedEvent: null });
+      store.update("selection", { selectedTaskId: null, pinnedEvent: null, pollDetail: null });
       return;
     }
     const ns = geom.layout.panelXToNs(mouseXCol);
     const workerId = workerAtClientY(e.clientY, data.workerIds);
     if (workerId === null) {
-      store.update("selection", { selectedTaskId: null, pinnedEvent: null });
+      store.update("selection", { selectedTaskId: null, pinnedEvent: null, pollDetail: null });
       return;
     }
     const polls = data.workerSpans[workerId]?.polls ?? [];
@@ -246,9 +246,12 @@ export function mountLaneInteraction(
       spanFocus: result.spanFocus,
       focusedSpanId: result.focusedSpanId,
       pinnedEvent: null,
+      // G15/R1: a click on a poll carrying CPU/sched samples opens Poll Detail
+      // in T31's persistent inspector; a click on a bare poll (or empty space)
+      // clears any open Poll Detail. `openStackFor` is null in both no-sample
+      // cases, so this dispatch doubles as the close (S4 re-scope-on-click).
+      pollDetail: result.openStackFor,
     });
-    // result.openStackFor -> Poll Detail (features/02 G15/R); T31's surface.
-    // The selection is dispatched now; the popup lands when T31 wires it.
   }
 
   // ── wheel: Ctrl/Cmd = zoom-at-cursor (H5); plain = scroll lanes ──────────

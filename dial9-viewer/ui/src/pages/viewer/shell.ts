@@ -131,34 +131,23 @@ function hintChipsTemplate(): TemplateResult {
   `;
 }
 
-/** Inspector placeholder (T31 fills the tabs + content). */
+/**
+ * The persistent inspector landmark (T31). Rendered EMPTY here (like the toast
+ * region): the T31 inspector component (mountInspector) owns the tabs + body +
+ * resize handle and renders them imperatively into this aside, so the shell's
+ * declarative re-renders never clobber the inspector's interior (no child
+ * bindings on this node = lit-html leaves imperatively-added children intact).
+ * The landmark + role + tabindex live here so the A11y frame and tab order
+ * (toolbar -> minimap -> tracks -> inspector) exist before the component mounts.
+ */
 function inspectorTemplate(): TemplateResult {
-  const tabs = ["Task", "Poll", "Stack", "Wakes", "Events"];
   return html`
     <aside
       class="d9-inspector"
       role="complementary"
       aria-label="Inspector"
       tabindex="0"
-    >
-      <div class="d9-inspector-tabs" role="tablist" aria-label="Inspector tabs">
-        ${tabs.map(
-          (t, i) =>
-            html`<span
-              class="d9-inspector-tab ${i === 0 ? "on" : ""}"
-              role="tab"
-              aria-selected=${i === 0 ? "true" : "false"}
-              >${t}</span
-            >`,
-        )}
-      </div>
-      <div class="d9-inspector-body">
-        <p class="d9-slot-hint">
-          Select a task, poll, or event to inspect it here.
-        </p>
-        <p class="d9-slot-owner" aria-hidden="true">inspector content: T31</p>
-      </div>
-    </aside>
+    ></aside>
   `;
 }
 
@@ -261,6 +250,8 @@ export interface MountedShell {
    * entry registers them alongside the lane-interaction bindings.
    */
   keyBindings: readonly KeyBinding[];
+  /** The persistent inspector landmark (pass to mountInspector, T31). */
+  inspectorRegion: HTMLElement;
   /** Force one render+size pass (used after mount and on resize). */
   refresh(): void;
   /** Tear down the store subscription and resize listener. */
@@ -346,11 +337,13 @@ export function mountShell(
 
   const toastRegion = ensureRegion(root, ".d9-toast-region");
   const trackColumn = ensureRegion(root, ".d9-track-column");
+  const inspectorRegion = ensureRegion(root, ".d9-inspector");
 
   return {
     toastRegion,
     trackColumn,
     keyBindings: [...rail.keyBindings, ...toolbar.keyBindings],
+    inspectorRegion,
     refresh: () => store.update("viewport", {}),
     dispose(): void {
       unsubscribe();
