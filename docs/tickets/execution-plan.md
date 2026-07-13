@@ -214,8 +214,8 @@ dropped (C1a). T41: ALL FOUR PAGES now migrated (browser/viewer/flamegraph/tokio
 stats); caught+fixed a `<base href>` replaceState bug; H4/D4/G3/E2 defects PRESERVED
 (census-delta rule) - ledgered for maintainer; happy-dom added-then-removed (RCE
 advisory), package.json byte-identical. tsc clean after each.
-FULL-SUITE BATCH GATE: running in background (bzhpoot55) validating T32/T41/T45 on a
-clean (no-agent) tree. Build clean.
+FULL-SUITE BATCH GATE: GREEN (1524 passed + 1 xfail + 11 skipped, exit 0, clean
+no-agent run). T32/T41/T45 validated; tree at 2c1f84f healthy. Build clean.
 T37 (UX-findings closure sweep - LAST chunk-2 ticket) DISPATCHED off 2c1f84f (deps
 T21-T36 + T41 all met). Builds the finding->ticket map, closes every 04 finding
 (landed/deferred/reject-pending), small polish only.
