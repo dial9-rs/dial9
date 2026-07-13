@@ -1,4 +1,4 @@
-// Parity layer (a): the row-walker.
+// The row-walker.
 //
 // Given a feature-inventory file and a live page URL, drives each inventory
 // row's access path and emits one of three verdicts per row:
@@ -8,16 +8,16 @@
 //                     the documented absence of behavior);
 //   FAILED          — the walker drove the access path and the behavior did
 //                     not re-derive (this is the gate: green = zero FAILED);
-//   NOT-TRIGGERABLE — the row's recorded verdict maps outside the gated set
-//                     (shared verdict mapping): listed, not driven.
+//   NOT-TRIGGERABLE — the row's recorded verdict maps outside the gated set:
+//                     listed, not driven.
 //
-// Per-side walks (T15): amended rows diverge by design between the two UI
-// generations — the MIGRATED page carries the amended contract while the
-// LEGACY page keeps the recorded pre-amendment behavior (e.g. G8's dead
-// sort). Walkers receive `side` ("new" when the page URL lives under /new/,
-// else "legacy") and the amended rows' walkers branch on it, asserting the
-// amended behavior on the new page and the preserved legacy behavior on the
-// legacy page. Both sides therefore stay green against the ONE inventory.
+// Per-side walks: amended rows diverge by design between the two UI
+// generations — the migrated page carries the amended contract while the
+// legacy page keeps the pre-amendment behavior (e.g. G8's dead sort).
+// Walkers receive `side` ("new" when the page URL lives under /new/, else
+// "legacy") and the amended rows' walkers branch on it, asserting the amended
+// behavior on the new page and the preserved legacy behavior on the legacy
+// page. Both sides therefore stay green against the ONE inventory.
 //
 // Usage:
 //   node parity/walk-rows.mjs \
@@ -25,16 +25,14 @@
 //     --url http://localhost:3021/index.html \
 //     [--rows A1,F12] [--json parity/out/walk.json] [--md parity/out/walk.md]
 //
-// Fixture mode (T42): `--fixtures` drives the rows whose recorded verdict is
+// Fixture mode: `--fixtures` drives the rows whose recorded verdict is
 // NOT-TRIGGERABLE on the demo seed but which the generated fixture data CAN
 // exercise (walkers/features01.fixtures.mjs). It targets a fixture-seeded
 // dev-server (see that file's header for the invocation) and, without
 // --rows, walks ONLY the fixture-backed rows. The runner preflights every
-// needed fixture family against the live server first. Recorded inventory
-// verdicts are untouched — the walk output IS the flipped-rows evidence
-// (re-recording is T39's final gate).
+// needed fixture family against the live server first.
 //
-// See ui/README.md ("Parity gate tooling") for the full contract.
+// See ui/README.md for the full contract.
 
 import path from "node:path";
 import process from "node:process";
@@ -64,7 +62,7 @@ const REGISTRIES = {
     fixedClock: true,
   },
   "03-flamegraph-html.md": { walkers: features03, fixedClock: false },
-  // T41: the migrated Tokio Stats page. Its scope is bucket/prefix (not the
+  // The migrated Tokio Stats page. Its scope is bucket/prefix (not the
   // browser page's relative time windows), so no pinned clock is needed.
   "04-tokio-stats-html.md": { walkers: features04, fixedClock: false },
 };

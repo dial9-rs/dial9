@@ -1,8 +1,5 @@
-// The readout schema — the fixture OWNED BY THE PARITY TOOL that defines
-// which data readouts the behavioral differ compares field-by-field
-// (T12 layer c). Page tickets assert "identical readouts" against exactly
-// these fields; extending the schema is a parity-tool change, not a page
-// change.
+// The readout schema — the fixture, owned by the parity tool, that defines
+// which data readouts the behavioral differ compares field-by-field.
 //
 // Field kinds:
 //   text     — trimmed textContent of `selector`; if `regex` is set, capture
@@ -60,8 +57,8 @@ export const READOUT_SCHEMA = {
     { id: "fg.stats", kind: "text", selector: "#fg-stats" },
     { id: "fg.searchStats", kind: "text", selector: ".fg-search-stats", optional: true },
     { id: "fg.canvases", kind: "count", selector: ".fg-canvas" },
-    // Zoom-visible readout (T19/J9): the breadcrumb trail renders the
-    // active zoom path (features/03 F138); empty when not zoomed.
+    // Zoom-visible readout: the breadcrumb trail renders the active zoom
+    // path; empty when not zoomed.
     { id: "fg.breadcrumb", kind: "text", selector: ".fg-breadcrumb", optional: true },
     { id: "url.query", kind: "urlQuery" },
   ],

@@ -1,20 +1,15 @@
-// Parity layer (d): axe + contrast scan.
-//
-// Runs axe-core (the devDependency; injected into the page, no CDN) against a
-// live page URL and emits the violation list in the shape 04-ux-findings.md
-// cites its axe evidence in: impact (critical/serious/moderate/minor) + rule +
-// affected node count per page, with a dedicated contrast summary line
-// (e.g. "serious contrast violations (15 nodes)" -> finding F6).
+// axe + contrast scan: runs axe-core (injected into the page, no CDN)
+// against a live page URL and emits the violation list — impact
+// (critical/serious/moderate/minor) + rule + affected node count per page,
+// plus a dedicated contrast summary line.
 //
 // Usage:
 //   node parity/axe-scan.mjs --url <pageUrl> [--json p] [--md p]
 //                            [--fail-on serious]
 //
 // The scan is a report producer: it exits 0 on completion regardless of
-// violations (the legacy pages have recorded violations by design).
-// --fail-on <impact> turns it into a gate: exit 1 when any violation at or
-// above that impact exists (chunk-2 tickets assert "no new violations"
-// against the --json output).
+// violations. --fail-on <impact> turns it into a gate: exit 1 when any
+// violation at or above that impact exists.
 
 import fs from "node:fs";
 import path from "node:path";
@@ -30,8 +25,8 @@ const SPEC = {
   json: { help: "write full axe violations as JSON to this path" },
   md: { help: "write the violation table as markdown to this path" },
   "fail-on": { help: "gate: exit 1 on violations at/above this impact (critical|serious|moderate|minor)" },
-  // T20: display:none content is invisible to axe; keyboard-opened
-  // surfaces (the unified `?` help overlay) need their key pressed first.
+  // display:none content is invisible to axe; keyboard-opened surfaces
+  // (the unified `?` help overlay) need their key pressed first.
   press: { help: 'comma-separated keys to press after load, before the scan (e.g. "?")' },
 };
 

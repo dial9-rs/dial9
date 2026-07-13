@@ -1,6 +1,6 @@
-// Parity layer (c): the behavioral differ — run the SAME journey on two page
-// URLs and compare the data readouts (fixtures/readout-schema.mjs) captured
-// at every checkpoint, field by field, exactly.
+// The behavioral differ — run the SAME journey on two page URLs and compare
+// the data readouts (fixtures/readout-schema.mjs) captured at every
+// checkpoint, field by field, exactly.
 //
 // Usage:
 //   node parity/behavior-diff.mjs --a <url> --b <url> [--journey J6] [--json p]
@@ -9,12 +9,12 @@
 // the journey's defaultPath appended, so `--a http://localhost:3021 --b
 // http://localhost:3022` runs every journey against its own page on both
 // hosts. --journey narrows to one journey (default: all whose page the URLs
-// can serve — i.e. all of J1-J8 for origin inputs).
+// can serve).
 //
 // Exit 0 only when EVERY checkpoint of every journey run has zero field
 // diffs. Volatile schema fields (wall-clock: load time) are captured for
-// context but excluded. Legacy-vs-legacy on the same URL is the self-test:
-// two independent runs of a journey must produce identical readouts.
+// context but excluded. Two independent runs of a journey against the same
+// URL is the self-test: they must produce identical readouts.
 
 import process from "node:process";
 import { parseArgs, usage } from "./lib/cli.mjs";

@@ -1,8 +1,7 @@
 // Minimal CLI argument parser shared by the parity entry points.
 //
 // Supports `--flag value` and `--flag` (boolean) forms plus positional
-// arguments. No external dependency by design (constraint S1: playwright and
-// axe-core are the only new devDependencies).
+// arguments. No external dependency by design.
 
 export function parseArgs(argv, spec = {}) {
   const opts = {};

@@ -1,7 +1,6 @@
-// T14 DoD evidence script: the dual-UI switch round-trip keeps the
-// bucket/search context (query string preserved through both hops; the
-// audited click-time href resolution, T38 finding 1). Not a registered
-// parity tool - a one-shot check invoked from the ticket run:
+// The dual-UI switch round-trip keeps the bucket/search context: the query
+// string is preserved through both hops via click-time href resolution. Not
+// a registered parity tool - a one-shot check:
 //   node parity/switch-roundtrip.mjs http://localhost:3061
 // Exits 0 when both hops preserve the query.
 

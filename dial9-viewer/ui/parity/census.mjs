@@ -1,14 +1,12 @@
-// Parity layer (b): the affordance census — dump one page's census, or diff
-// two pages' censuses (the "nothing missing, nothing mutated" control-surface
-// gate for page migrations).
+// The affordance census — dump one page's census, or diff two pages'
+// censuses (the "nothing missing, nothing mutated" control-surface gate).
 //
 // Usage:
 //   node parity/census.mjs --url <pageUrl> [--json p] [--md p]      # dump
 //   node parity/census.mjs --a <pageUrl> --b <pageUrl> [--json p]   # diff
 //
-// Diff mode exits 0 only on ZERO diff (the T13/T14 gates assert this, modulo
-// ledger-justified entries). Legacy-vs-legacy on the same URL is the
-// self-test: two independent contexts must produce identical censuses.
+// Diff mode exits 0 only on ZERO diff. Two independent contexts capturing
+// the same URL is the self-test: they must produce identical censuses.
 //
 // The page's loaded-wait is inferred from the URL (lib/steps.mjs
 // waitLoadedByUrl); index pages get the pinned dev-seed clock (lib/browser.mjs)

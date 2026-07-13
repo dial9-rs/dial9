@@ -1,20 +1,18 @@
-// Affordance census: capture + diff (T12 layer b).
+// Affordance census: capture + diff.
 //
 // The census enumerates every DOM affordance on a page — the interactive
 // controls a user can operate — in document order, with the attributes that
 // define the affordance from the outside: what it is (tag/type/role), what it
 // says (label/title/placeholder), where it goes (href), and whether it is
-// currently operable (visible/disabled). This is the "33 live DOM
-// affordances" idea from features/01's Live-validation Outcome, productized.
+// currently operable (visible/disabled).
 //
-// What it deliberately does NOT capture: styling (classes change across the
-// migration), values (behavioral state — layer (c)'s readouts own those), and
+// What it deliberately does NOT capture: styling (classes are not part of the
+// contract), values (behavioral state — the readouts own those), and
 // canvas-internal hit targets (not DOM; covered by row walkers + journeys).
 //
 // Identity for diffing: `#id` when the element has one, else
-// `tag[role]:label`; duplicate identities get a `~n` occurrence suffix (the
-// legacy pages DO contain duplicate ids — an axe finding — so even id keys
-// are disambiguated).
+// `tag[role]:label`; duplicate identities get a `~n` occurrence suffix (some
+// pages DO contain duplicate ids, so even id keys are disambiguated).
 
 // Roles that make a non-native element an affordance.
 const INTERACTIVE_ROLES = [

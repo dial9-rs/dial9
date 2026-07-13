@@ -1,22 +1,16 @@
-// Row walkers for docs/ui-inventory/features/03-flamegraph-html.md (the
-// standalone CPU-profile flamegraph page), added by T13 to gate the
-// migrated page (new/flamegraph.html; the same access paths hold on the
-// legacy page, which is the self-test).
+// Row walkers for the standalone CPU-profile flamegraph page
+// (new/flamegraph.html; the same access paths hold on the legacy page,
+// which is the self-test).
 //
-// One walker per row the inventory records as gated under the shared
-// verdict mapping (see ui/README.md, "Parity gate tooling"). features/03
-// has NO base live-validation table - its 2026-07-08 refresh table is the
-// only recorded-verdict source, and it gates exactly three rows (F171,
-// F176, F177 - recorded VERIFIED (unit)); every other row's recorded
-// verdict (CODE-READ / VERIFIED (API) / NOT-TRIGGERABLE / CODE-ONLY) maps
-// to NOT-TRIGGERABLE: listed, not driven. Exact-mode behavior is gated by
-// the OTHER parity layers instead (census diff + behavioral differ J5).
+// One walker per row the inventory records as gated. This page's aggregated
+// (?api=1) mode gates exactly three rows; every other row's recorded verdict
+// maps to NOT-TRIGGERABLE: listed, not driven. Exact-mode behavior is gated
+// by the other parity layers instead (census diff + behavioral differ).
 //
-// Environment assumptions (ui/README.md): dev-server seed = ONE folded
-// demo segment in bucket `demo-traces` under prefix `traces`, whose
-// aggregated fold yields 147 CPU samples with coverage 1 / 1 files -
-// so refinement freezes after the first refine=true poll (F177's
-// auto-stop is deterministic on this seed).
+// Environment assumptions: dev-server seed = ONE folded demo segment in
+// bucket `demo-traces` under prefix `traces`, whose aggregated fold yields
+// 147 CPU samples with coverage 1 / 1 files - so refinement freezes after
+// the first refine=true poll (the auto-stop is deterministic on this seed).
 
 import { expect, textOf } from "../lib/actions.mjs";
 

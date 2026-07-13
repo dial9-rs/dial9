@@ -1,6 +1,6 @@
-// Ad-hoc T21 shell verification (dev-only): loads the migrated viewer shell,
-// waits for the demo trace, then dumps the DoD-relevant observations -
-// track slots (label + canvas drawW sized by layout), landmark/tab order
+// Ad-hoc shell verification (dev-only): loads the migrated viewer shell,
+// waits for the demo trace, then dumps the relevant observations - track
+// slots (label + canvas drawW sized by layout), landmark/tab order
 // (toolbar -> minimap -> tracks -> inspector), help-overlay toggle, and a
 // toast round-trip. Run against a dev-server serving ui/dist:
 //   node parity/verify-viewer-shell.mjs --url http://localhost:3210/new/viewer.html
@@ -84,9 +84,9 @@ const helpOpenAfterEsc = await page.evaluate(
   () => document.querySelector(".d9-help-backdrop")?.classList.contains("open") ?? false,
 );
 
-// Toast round-trip via the mounted manager (proves U wiring): drive it by
-// dispatching through the shell's toast region directly is not exposed, so
-// assert the region exists + is a status live region instead.
+// Toast round-trip via the mounted manager: driving it by dispatching
+// through the shell's toast region directly is not exposed, so assert the
+// region exists + is a status live region instead.
 const toastRegion = await page.evaluate(() => {
   const el = document.querySelector(".d9-toast-region");
   return el

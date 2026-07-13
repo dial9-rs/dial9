@@ -1,22 +1,18 @@
-// URL-contract verification against a live server (T43, issue #303; T12
-// tooling family). The codec-level pin is src/lib/url/url-contract.test.ts;
-// this script is the end-to-end half: it CONSTRUCTS the deep-link URLs the
-// contract documents (dial9-viewer/ui/README.md, "URL contract (stable
-// deep-link API)") the way an agent would - string concatenation from
-// numbers computed in plain Node, no browser involved - then drives real
-// pages and asserts they honor them.
+// URL-contract verification against a live server. The codec-level pin is
+// src/lib/url/url-contract.test.ts; this script is the end-to-end half: it
+// CONSTRUCTS the deep-link URLs the contract documents the way an agent
+// would - string concatenation from numbers computed in plain Node, no
+// browser involved - then drives real pages and asserts they honor them.
 //
 // Legs:
 //   viewer-window        recipe 1: viewer.html?trace&start&end opens the
-//                        LEGACY viewer at exactly that window (the viewer
-//                        page is not migrated yet; its ?start/?end are the
-//                        stable parse-time filters, features/02 E5). The
-//                        start/end values are computed from the demo trace
-//                        parsed in Node, exactly as the dial9-zoom-window
-//                        skill documents (minTs + relative-ms * 1e6).
-//   fg-legacy-zoom       recipe 2, query form, LEGACY page: the recorded J9
+//                        viewer at exactly that window (?start/?end are its
+//                        stable parse-time filters). The start/end values are
+//                        computed from the demo trace parsed in Node
+//                        (minTs + relative-ms * 1e6).
+//   fg-legacy-zoom       recipe 2, query form, legacy page: the recorded J9
 //                        worker-zoom link restores the zoom, zero rewrites.
-//   fg-hash-zoom         recipe 2, hash form, MIGRATED page: #v=1&fg.w=
+//   fg-hash-zoom         recipe 2, hash form, migrated page: #v=1&fg.w=
 //                        restores the same zoom, zero rewrites; a reserved
 //                        key riding along (sel.task) is inert and preserved.
 //   fg-foreign-version   version rule: #v=2 restores nothing, rewrites
@@ -124,7 +120,7 @@ async function main() {
         await page.goto(urlWin);
         await LOADED_WAITS.viewer(page);
         win = await captureReadouts(page, READOUT_SCHEMA.viewer);
-        // E4: a range present on load reveals Clear Range immediately.
+        // A range present on load reveals Clear Range immediately.
         if (!(await page.locator("#btn-clear-range").isVisible())) {
           problems.push("Clear Range button not visible with ?start/?end present");
         }

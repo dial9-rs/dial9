@@ -1,17 +1,16 @@
-// Parser for the feature-inventory markdown files
-// (docs/ui-inventory/features/*.md) plus the shared verdict mapping
-// (docs/tickets/chunk-1-foundation.md, "Row-walker verdict mapping").
+// Parser for the feature-inventory markdown files plus the shared verdict
+// mapping.
 //
 // An inventory file contains:
 //   - feature tables (sections A..): first cell "A1. <name>" — these are the
 //     rows the walker enumerates;
 //   - a base live-validation verdict table (header "| Feature | Verdict |..."),
-//     the 2026-06-30 pass, using the 7-value legend;
-//   - optionally a refresh verdict table (header "| Row | Verdict |..."),
-//     e.g. the 2026-07-08 pass. Where a refresh entry amends a row that also
-//     appears in the base table, the refresh entry SUPERSEDES it.
+//     using the 7-value legend;
+//   - optionally a refresh verdict table (header "| Row | Verdict |...").
+//     Where a refresh entry amends a row that also appears in the base
+//     table, the refresh entry SUPERSEDES it.
 //
-// Verdict mapping (shared decision, chunk-1 header):
+// Verdict mapping:
 //   - recorded VERIFIED and DEAD-CONFIRMED rows are GATED: the walker must
 //     re-derive VERIFIED for them (a DEAD row's access path producing no
 //     effect IS its expected behavior);

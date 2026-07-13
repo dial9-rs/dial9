@@ -1,7 +1,5 @@
-// Report rendering shared by the parity tools: the verdict table emulates the
-// "Live validation results" format of the feature inventories
-// (docs/ui-inventory/features/01-index-html.md) — one markdown row per
-// feature: | Feature | Verdict | Evidence / note |.
+// Report rendering shared by the parity tools: the verdict table renders one
+// markdown row per feature — | Feature | Verdict | Evidence / note |.
 
 import fs from "node:fs";
 import path from "node:path";

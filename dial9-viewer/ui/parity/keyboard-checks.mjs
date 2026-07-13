@@ -1,7 +1,7 @@
-// T20 DoD evidence runner: `?` opens the unified help overlay on every
-// page migrated at landing time, and Escape closes it again.
+// Checks that `?` opens the unified help overlay at landing time on each
+// page below, and Escape closes it again.
 //
-// Page instances checked (the chunk-1 enumeration):
+// Page instances checked:
 //   - new/index.html                       (browser page)
 //   - new/flamegraph.html?trace=...        (flamegraph, exact mode)
 //   - new/flamegraph.html?api=1&...        (flamegraph, aggregated mode)

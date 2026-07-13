@@ -41,7 +41,7 @@ export async function newPage(browser, { fixedClock = false } = {}) {
 
 /**
  * Readiness gate: the dev-server (or `dial9 serve`) answering /api/config
- * with JSON. Mirrors the "Reproduce" gate in the feature inventories.
+ * with JSON.
  */
 export async function assertServerReady(baseUrl) {
   let resp;

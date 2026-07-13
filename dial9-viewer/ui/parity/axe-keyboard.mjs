@@ -1,14 +1,10 @@
-// Parity layer (d) addition, T20: axe scan of the unified keyboard
-// components (search palette + help overlay) in isolation.
-//
-// The palette has no landing-time page mount in chunk 1 (T23 wires it to
-// the viewer surfaces), so it cannot be reached on a live dev-server
-// page. This scan spins up a throwaway Vite DEV server (the devDependency;
-// port 0 = OS-assigned) purely to serve parity/fixtures/
-// keyboard-harness.html, which mounts the REAL components from src/ in
-// their open state, and runs axe against that page. Live-page overlay
-// scans stay with axe-scan.mjs (its --press flag opens the overlay on a
-// real page first).
+// axe scan of the unified keyboard components (search palette + help
+// overlay) in isolation. They have no live-page mount, so this spins up a
+// throwaway Vite dev server (port 0 = OS-assigned) to serve
+// parity/fixtures/keyboard-harness.html, which mounts the REAL components
+// from src/ in their open state, and runs axe against that page. Live-page
+// overlay scans stay with axe-scan.mjs (its --press flag opens the overlay
+// on a real page first).
 //
 // Usage:
 //   node parity/axe-keyboard.mjs [--fail-on serious] [--json p] [--md p]
@@ -25,8 +21,8 @@ import { parseArgs, usage } from "./lib/cli.mjs";
 import { launchBrowser, newPage } from "./lib/browser.mjs";
 import { writeReport, writeJson } from "./lib/report.mjs";
 
-// Same table shape as axe-scan.mjs's violationTable (not imported:
-// axe-scan.mjs runs its main() at module load).
+// Same table shape as axe-scan.mjs's violationTable, not imported because
+// axe-scan.mjs runs its main() at module load.
 function violationTable(violations) {
   const lines = [
     "| Impact | Rule | Description | Nodes | Example target |",

@@ -1,28 +1,23 @@
-// Row walkers for docs/ui-inventory/features/04-tokio-stats-html.md (the
-// Tokio runtime stats page), added by T41 to gate the migrated page
-// (new/tokio_stats.html; the same access paths hold on the legacy page,
-// which is the self-test). This is the `features04` walker registry the T40
-// inventory flagged as T41's implementation-time deliverable.
+// Row walkers for the Tokio runtime stats page (new/tokio_stats.html; the
+// same access paths hold on the legacy page, which is the self-test).
 //
-// One walker per row whose recorded verdict GATES under the shared verdict
-// mapping (chunk-1 header; parity/lib/inventory.mjs isGated): recorded
-// VERIFIED / DEAD-CONFIRMED re-derive VERIFIED. For features/04 that is the
-// set that normalizes to plain VERIFIED (not "VERIFIED (API)", which maps to
-// the listed-not-gated VERIFIED-API token): A8, A10, D3, D5, I1, J3, J5,
-// J6, J11. Every other row's recorded verdict (CODE-READ / VERIFIED (API) /
-// CODE-ONLY / NOT-TRIGGERABLE) is listed, not driven. Time-window rows (J9,
+// One walker per row whose recorded verdict GATES (parity/lib/inventory.mjs
+// isGated): recorded VERIFIED / DEAD-CONFIRMED re-derive VERIFIED. Here that
+// is the set that normalizes to plain VERIFIED (not "VERIFIED (API)", which
+// maps to the listed-not-gated VERIFIED-API token): A8, A10, D3, D5, I1, J3,
+// J5, J6, J11. Every other row's recorded verdict (CODE-READ / VERIFIED (API)
+// / CODE-ONLY / NOT-TRIGGERABLE) is listed, not driven. Time-window rows (J9,
 // and J6's window half) stay NOT-TRIGGERABLE on the seed - the epoch/date
-// catch-22 (features/04 validation section) makes the positive window case
-// unreachable until T42's synthetic fixtures.
+// catch-22 makes the positive window case unreachable without synthetic
+// fixtures.
 //
-// Environment assumptions (ui/README.md; same dev seed as features03): the
-// dev-server serves ui/dist and its aggregate endpoints answer against the
-// seeded `demo-traces` bucket under prefix `traces` - ONE folded segment
-// that yields total_polls 94212, time_span_ns 4143811668, five spawn
-// locations (top: axum_traced.rs:243:33 with 3319 notable polls), coverage
-// 1/1 files, classes {1,2,3} (no off-CPU). The page auto-loads when the URL
-// carries `bucket` (features/04 A6), so the scoped URL drives the refine
-// loop end to end.
+// Environment assumptions (same dev seed as features03): the dev-server
+// serves ui/dist and its aggregate endpoints answer against the seeded
+// `demo-traces` bucket under prefix `traces` - ONE folded segment that yields
+// total_polls 94212, time_span_ns 4143811668, five spawn locations (top:
+// axum_traced.rs:243:33 with 3319 notable polls), coverage 1/1 files, classes
+// {1,2,3} (no off-CPU). The page auto-loads when the URL carries `bucket`, so
+// the scoped URL drives the refine loop end to end.
 //
 //   PORT=3071 cargo run -p dial9-viewer --bin dev-server --features dev-server
 //   node parity/walk-rows.mjs \
@@ -33,12 +28,12 @@ import { expect, textOf } from "../lib/actions.mjs";
 
 const AXUM = "examples/metrics-service/src/axum_traced.rs:243:33";
 
-/** The seed scope URL: `bucket` present -> the page auto-loads (A6). */
+/** The seed scope URL: `bucket` present -> the page auto-loads. */
 function seedUrl(pageUrl) {
   return `${pageUrl}?bucket=demo-traces&prefix=traces`;
 }
 
-/** Wait until the refine loop settles to its terminal status line (C2). */
+/** Wait until the refine loop settles to its terminal status line. */
 async function waitComplete(page) {
   await page.waitForFunction(
     () => document.getElementById("status")?.textContent === "Complete",
@@ -51,7 +46,7 @@ export const registry = {
 
   A8: async ({ page, pageUrl, side }) => {
     // The dual-UI switch control renders on BOTH generations now that
-    // tokio_stats is registered (T38); the label is per-side.
+    // tokio_stats is registered; the label is per-side.
     await page.goto(pageUrl);
     await page.waitForSelector("#d9-ui-switch", { state: "visible", timeout: 15_000 });
     const label = await textOf(page, "#d9-ui-switch");
@@ -89,7 +84,7 @@ export const registry = {
 
   D5: async ({ page, pageUrl }) => {
     // Error handling: a scope that 404s paints the status line red with the
-    // server's body text (C2/D5/J7).
+    // server's body text.
     await page.goto(`${pageUrl}?bucket=demo-traces&prefix=no-such-prefix`);
     await page.waitForFunction(
       () => /^Error:/.test(document.getElementById("status")?.textContent ?? ""),
@@ -108,10 +103,10 @@ export const registry = {
   // ── I. XSS hardening ──
 
   I1: async ({ page, pageUrl }) => {
-    // Spawn locations render as INERT text in <code> (the #587 escape path).
-    // The seed's real paths carry no markup chars, so they render literally;
-    // hostile-string inertness is owned by the Vitest XSS regression
-    // (src/pages/tokio-stats/render.test.ts) as the inventory records.
+    // Spawn locations render as INERT text in <code>. The seed's real paths
+    // carry no markup chars, so they render literally; hostile-string
+    // inertness is owned by the Vitest XSS regression
+    // (src/pages/tokio-stats/render.test.ts).
     await page.goto(seedUrl(pageUrl));
     await waitComplete(page);
     // Drop the threshold to its floor so every location surfaces.
@@ -180,7 +175,7 @@ export const registry = {
   J11: async ({ page, baseUrl }) => {
     // Poll classification: the demo carries classes {1,2,3} only (its longest
     // poll ~1ms is under the 10ms off-CPU bound, so class 0 never occurs),
-    // and classes are index-aligned with durations (E4 depends on it).
+    // and classes are index-aligned with durations.
     const data = await (
       await page.request.get(
         `${baseUrl}/api/tokio-stats?bucket=demo-traces&prefix=traces&refine=true`,

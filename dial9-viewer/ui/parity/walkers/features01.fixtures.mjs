@@ -1,6 +1,6 @@
-// Fixture-backed row walkers for features/01 rows the demo seed cannot
-// trigger (T42). Driven only by `walk-rows.mjs --fixtures`, against a
-// dev-server seeded with the generated fixture tree:
+// Fixture-backed row walkers for rows the demo seed cannot trigger. Driven
+// only by `walk-rows.mjs --fixtures`, against a dev-server seeded with the
+// generated fixture tree:
 //
 //   cargo run --release -p dial9-viewer --features dev-server --bin gen-fixtures
 //   DIAL9_SEED_DIR=dial9-viewer/ui/parity/fixtures/generated/s3 \
@@ -11,8 +11,8 @@
 // families against the live server before walking (fail fast with the
 // generation instructions instead of a wall of walker timeouts).
 //
-// The heatmap rows (F5/F7/F8/F9) assert the RENDERED canvas, census-style:
-// pixel signatures at positions derived from the page's own domain mapping
+// The heatmap rows assert the RENDERED canvas, census-style: pixel
+// signatures at positions derived from the page's own domain mapping
 // (`timeToX`/`heatmapDomain` are top-level bindings of the classic inline
 // script, so `page.evaluate` sees them). The fixture geometry these walkers
 // hardcode (hosts, epochs, mtimes) is defined in gen_fixtures.rs — the two
@@ -80,8 +80,8 @@ export const FAMILIES = {
       );
     },
   },
-  // F20's range-truncation banner needs no seeded data (any bucket + a
-  // >2000-hour window overflows the server's prefix fan-out cap).
+  // The truncation banner needs no seeded data (any bucket + a >2000-hour
+  // window overflows the server's prefix fan-out cap).
   none: { bucket: null, what: "no fixture data required", probe: async () => {} },
 };
 
@@ -214,9 +214,9 @@ const approx = (x, target, tol) => Math.abs(x - target) <= tol;
 // ── Walkers ──────────────────────────────────────────────────────────────
 
 export const registry = {
-  // F5: boot-count annotation — the boots host carries three boot ids in
-  // the window; its label must annotate "3 boots" while single-boot rows
-  // stay unannotated.
+  // Boot-count annotation — the boots host carries three boot ids in the
+  // window; its label must annotate "3 boots" while single-boot rows stay
+  // unannotated.
   F5: {
     family: "browse",
     walk: async ({ page, pageUrl }) => {
@@ -233,10 +233,10 @@ export const registry = {
     },
   },
 
-  // F7: seam tiling — the seam host's first segment's last_modified
-  // overshoots the second's start by 5 minutes. Tiling clamps it, so the
-  // rendered density is UNIFORM across both halves; without tiling the
-  // overlap would double-count into a visibly brighter band.
+  // Seam tiling — the seam host's first segment's last_modified overshoots
+  // the second's start by 5 minutes. Tiling clamps it, so the rendered
+  // density is UNIFORM across both halves; without tiling the overlap would
+  // double-count into a visibly brighter band.
   F7: {
     family: "browse",
     walk: async ({ page, pageUrl }) => {
@@ -268,9 +268,9 @@ export const registry = {
     },
   },
 
-  // F8: coverage-gap hatching — the gap host stops reporting 19:05-19:15;
-  // that interval must render the hatched no-data band (#15152a fill +
-  // diagonal hatch) framed by edge ticks, distinct from painted density.
+  // Coverage-gap hatching — the gap host stops reporting 19:05-19:15; that
+  // interval must render the hatched no-data band (#15152a fill + diagonal
+  // hatch) framed by edge ticks, distinct from painted density.
   F8: {
     family: "browse",
     walk: async ({ page, pageUrl }) => {
@@ -325,9 +325,8 @@ export const registry = {
     },
   },
 
-  // F9: boot-change dividers — dashed cyan verticals exactly at the boots
-  // host's two boot transitions (19:05 and 19:10), absent from single-boot
-  // rows.
+  // Boot-change dividers — dashed cyan verticals exactly at the boots host's
+  // two boot transitions (19:05 and 19:10), absent from single-boot rows.
   F9: {
     family: "browse",
     walk: async ({ page, pageUrl }) => {
@@ -352,10 +351,10 @@ export const registry = {
     },
   },
 
-  // H4: 200 MB selection cap (amended by #570/#600) — selecting the large
-  // host's full row (~224 MB) disables View; on an aggregation-enabled
-  // server (this one: BYO creds => aggregation on) the warning is
-  // suppressed and Flamegraph is exempt from the cap, per the amended row.
+  // 200 MB selection cap — selecting the large host's full row (~224 MB)
+  // disables View; on an aggregation-enabled server (this one: BYO creds =>
+  // aggregation on) the warning is suppressed and Flamegraph is exempt from
+  // the cap.
   H4: {
     family: "large",
     walk: async ({ page, pageUrl }) => {
@@ -379,9 +378,9 @@ export const registry = {
     },
   },
 
-  // C7: bucket picker -> region detect — the dial9-named fixture buckets
-  // appear in the picker's filtered view; clicking one fills the bucket
-  // field, resolves the region via /api/credentials/check, and re-discovers
+  // Bucket picker -> region detect — the dial9-named fixture buckets appear
+  // in the picker's filtered view; clicking one fills the bucket field,
+  // resolves the region via /api/credentials/check, and re-discovers
   // prefixes.
   C7: {
     family: "browse",
@@ -417,9 +416,9 @@ export const registry = {
     },
   },
 
-  // D4: date-layer auto-empty (#471) — a bucket whose root children are all
-  // date partitions gets an EMPTY prefix (dates are not selectable
-  // prefixes). Requires the server to have no default prefix.
+  // Date-layer auto-empty — a bucket whose root children are all date
+  // partitions gets an EMPTY prefix (dates are not selectable prefixes).
+  // Requires the server to have no default prefix.
   D4: {
     family: "dates",
     walk: async ({ page, pageUrl }) => {
@@ -440,9 +439,9 @@ export const registry = {
     },
   },
 
-  // F20: truncation warning banner — a window wider than the server's
-  // prefix fan-out cap (2000 hourly prefixes) comes back truncated and the
-  // banner renders. No seeded data needed: the range alone overflows.
+  // Truncation warning banner — a window wider than the server's prefix
+  // fan-out cap (2000 hourly prefixes) comes back truncated and the banner
+  // renders. No seeded data needed: the range alone overflows.
   F20: {
     family: "none",
     walk: async ({ page, pageUrl }) => {

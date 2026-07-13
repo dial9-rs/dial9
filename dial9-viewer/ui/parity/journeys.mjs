@@ -1,18 +1,13 @@
-// Journey scripts J1-J9 — the eight expert journeys from
-// docs/ui-inventory/04-ux-findings.md ("Method": J1 cold triage, J2
+// Journey scripts J1-J9 — expert journeys made concrete as executable step
+// lists (see lib/steps.mjs for the step vocabulary): J1 cold triage, J2
 // worst-poll hunt, J3 locate a known moment, J4 follow a task, J5 flamegraph
-// work, J6 S3 browse, J7 queue buildup, J8 share a view), made concrete as
-// executable step lists (see lib/steps.mjs for the step vocabulary), plus
-// J9 (T19): restore a recorded legacy zoom link.
-//
-// The audit-phase scripts these derive from lived in an ephemeral session
-// scratchpad and are gone; these step lists are authored fresh against the
-// journey labels and drive the same flows against the demo trace / dev seed.
+// work, J6 S3 browse, J7 queue buildup, J8 share a view, J9 restore a
+// recorded zoom link.
 //
 // `defaultPath` is the canonical target for each journey against a base URL
-// (behavior-diff and perf-probe accept full page URLs, so old/new stacks or
-// different hosts can be compared). `checkpoint` steps mark where the
-// behavioral differ captures the readout schema.
+// (behavior-diff and perf-probe accept full page URLs, so different stacks or
+// hosts can be compared). `checkpoint` steps mark where the behavioral
+// differ captures the readout schema.
 
 export const JOURNEYS = {
   J1: {
@@ -21,8 +16,8 @@ export const JOURNEYS = {
     defaultPath: "/viewer.html?trace=demo-trace.bin",
     steps: [
       { checkpoint: "cold-open" },
-      // The default layout keeps the analysis panels folded (finding S1);
-      // triage starts by opening them.
+      // The default layout keeps the analysis panels folded; triage starts
+      // by opening them.
       { click: "#span-panel .chart-label" },
       { click: "#queue-chart .chart-label" },
       { sleep: 200 },
@@ -124,8 +119,8 @@ export const JOURNEYS = {
     defaultPath: "/viewer.html?trace=demo-trace.bin",
     steps: [
       { checkpoint: "loaded" },
-      // Zoom + pan, then look at the URL: on the legacy viewer the view
-      // state never reaches it (finding S3) — url.query is the readout.
+      // Zoom + pan, then look at the URL: this viewer never syncs the view
+      // state to it, so url.query is the readout.
       { wheel: { selector: "#lanes-container", dy: -240, modifier: "Control" } },
       { focus: "#main-area" },
       { key: "ArrowRight" },
@@ -137,15 +132,13 @@ export const JOURNEYS = {
   J9: {
     label: "restore a shared zoom link",
     page: "flamegraph",
-    // T19 legacy-param fixture (features/03 F148/F150/F151): a worker-zoom
-    // URL RECORDED from the legacy page itself - click-zoom on the demo
-    // trace, copy the emitted URL, keep a child-by-child-walkable prefix
-    // of its tab-joined path (the full emitted path is ~85 frames deep;
-    // the prefix exercises the same restore code). Regenerate after a
-    // demo-trace refresh by re-doing that click and re-recording.
-    // Restore must NOT rewrite the URL on either page generation, so the
-    // url.query readout doubles as the no-write assertion; fg.breadcrumb
-    // is the zoom-visible readout.
+    // A worker-zoom URL RECORDED from the flamegraph page itself: click-zoom
+    // on the demo trace, copy the emitted URL, keep a child-by-child-walkable
+    // prefix of its tab-joined path (the full emitted path is ~85 frames
+    // deep; the prefix exercises the same restore code). Regenerate after a
+    // demo-trace refresh by re-doing that click and re-recording. Restore
+    // must NOT rewrite the URL, so the url.query readout doubles as the
+    // no-write assertion; fg.breadcrumb is the zoom-visible readout.
     defaultPath:
       "/flamegraph.html?trace=demo-trace.bin&worker-zoom=" +
       "0xffff9b8cbf1c%090xffff9b862030%09Thread%3A%3Anew%3A%3Athread_start+unix.rs%3A130",

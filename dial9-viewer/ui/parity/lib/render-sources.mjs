@@ -1,4 +1,4 @@
-// Pluggable render-invocation sources for the perf probe (T12 layer e).
+// Pluggable render-invocation sources for the perf probe.
 //
 // The probe reports "render invocations per frame" — how many times the UI's
 // render layer ran per painted frame during the interaction storm. WHERE that
@@ -15,12 +15,8 @@
 //                  window; the probe divides them by painted frames.
 //
 // Sources:
-//   stub (default) — the documented placeholder for the legacy pages and any
-//     page that exposes no render-counter hook. Always reports
-//     available:false. The NEW stack's store scheduler exposes dev counters
-//     (devRenderAssertStats()) — that source is wired here by chunk 2 (T16+)
-//     once the store exists in-tree; page tickets then run the probe with
-//     --render-source store.
+//   stub (default) — placeholder for any page that exposes no render-counter
+//     hook. Always reports available:false.
 
 export const RENDER_SOURCES = {
   stub: {

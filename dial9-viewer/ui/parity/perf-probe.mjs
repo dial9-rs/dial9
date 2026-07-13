@@ -1,6 +1,6 @@
-// Parity layer (e): the perf probe — drive a scripted interaction storm
-// (hover sweeps / pans / wheel zooms, built from the journey step vocabulary)
-// against a live page and record, for the storm window only:
+// The perf probe — drive a scripted interaction storm (hover sweeps / pans /
+// wheel zooms, built from the journey step vocabulary) against a live page
+// and record, for the storm window only:
 //
 //   frames        painted frames (rAF ticks) — the denominator;
 //   long tasks    PerformanceObserver 'longtask' entries (count/total/max ms);
@@ -8,8 +8,7 @@
 //                 FORCED layouts (Layout events carrying a JS stack trace —
 //                 the DevTools "forced reflow" signal), plus per-frame rates;
 //   render        render invocations per frame via a PLUGGABLE source
-//                 (lib/render-sources.mjs; default `stub` reports unavailable —
-//                 chunk 2 wires the store scheduler's dev-hook source).
+//                 (lib/render-sources.mjs; default `stub` reports unavailable).
 //
 // Usage:
 //   node parity/perf-probe.mjs --url <pageUrl> [--journey J6] [--json p]
@@ -17,7 +16,7 @@
 //
 // The journey runs first to reach a representative state (defaults per page
 // kind: index -> J6, viewer -> J1, flamegraph -> J5); the storm and all
-// measurements start after it. Chunk-2 DoDs assert against the --json output.
+// measurements start after it.
 
 import process from "node:process";
 import { parseArgs, usage } from "./lib/cli.mjs";
