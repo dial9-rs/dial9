@@ -121,6 +121,22 @@ dependency layer after T22 lands: T23 (pointer+keyboard) + T24 (crosshair/
 tooltip), both need lanes; then T27/T29/T30 tracks; then T31/T33/T34/T35/T36/T37.
 
 **Audit log:**
+- T22 worker lanes track (CORE viz): MERGED into integration/chunk-1 2026-07-13
+  (tip 1ec89e3). Gate: tsc clean, build clean (lanes bundled), full Vitest
+  running to confirm (T22's own worktree suite was 1026 pass + 1 xfail incl. 9
+  new lane tests; merge added only import-union in tracks.ts + doc appends, no
+  logic change - low risk). Merge conflicts were all trivial: tracks.ts import
+  block (kept BOTH renderTimeAxis from T25 + isTrackClaimed from T22; bodies
+  auto-merged), ledger append-union, HANDOFF took-theirs. Introduced the
+  track-renderer registry (track-renderers.ts / isTrackClaimed) so a mounted
+  track owns its own canvas draw+size and the shell stops painting the
+  placeholder. TRAILING OBLIGATION (per T22 HANDOFF): live-browser DoD items
+  PENDING - G-row row-walker (needs a features02.mjs walker that does not exist
+  yet), J2/J4 behavioral differ, x8 pan-storm perf capture. Stroke-batch Vitest
+  bounds stand as the code-level proxy. G20 retired, G17/G18/G19 amended (ledger
+  annotated). Deliberate seams: T22 ships click/hover as pure resolvers/data
+  only (no raw listener - T23 owns gestures); G21-G24 runtime-group headers
+  unbuilt (T36/shell).
 - T25 timeline axis: MERGED 2026-07-12. Gate green (1042 tests, tsc clean
   after npm install in INTEG - T21's lit-html dep needed installing there).
   Live alignment check passed (timeline drawW == lanes drawW). Filled a T21
