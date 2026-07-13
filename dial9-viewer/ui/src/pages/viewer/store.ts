@@ -50,6 +50,13 @@ export function initialViewerState(): StoreState {
       // S1 amendment: analysis surfaces are visible by default. The unified
       // column has no per-panel folds; every surface starts expanded.
       panelCollapsed: { spans: false, events: false, cpu: false, queue: false },
+      // Track management (T36; amended section O). Empty resting state: the
+      // catalogue order (track-layout.ts) and nothing collapsed - i.e. the S1
+      // "all analysis surfaces visible" default. hydrateTrackPrefs (main.ts)
+      // overlays the persisted order/collapse on boot; the store stays pure
+      // (no localStorage here, so it is Node-testable).
+      trackOrder: [],
+      collapsed: {},
       sidebarWidth: DEFAULT_INSPECTOR_WIDTH,
       selectedSpanNames: new Set<string>(),
       selectedEventNames: new Set<string>(),
