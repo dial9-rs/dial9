@@ -273,8 +273,11 @@ export function createRegionAnalysis(
         needResize = true;
       }
       if (sig !== appliedSig) {
-        applyFlamegraph(instance, trace, range);
+        // Set the applied signature BEFORE setData so a re-entrant sync (the
+        // widget's onZoomChange fires sync) sees the signature satisfied and
+        // never loops back into setData.
         appliedSig = sig;
+        applyFlamegraph(instance, trace, range);
         needResize = true;
       }
       if (needResize) {

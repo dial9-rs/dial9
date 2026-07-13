@@ -1,137 +1,157 @@
-# T31 - Inspector sidebar (tabs: poll/event/related/stack) - HANDOFF
+# T32 - In-viewer flamegraph + region analyses - HANDOFF
 
-## STATUS: implemented, gate-bar green. Commit is BLOCKED in this environment
-(`git commit` denied - see BLOCKERS). All work is in the working tree, ready for
-the maintainer to commit.
+## STATUS: DONE. DoD met; gate bar green. Committed on `ticket/T32-flamegraph-region`.
 
-## SCOPE DELIVERED
+The Shift+drag region -> flamegraph / blocking-calls / heap panel is embedded in
+T31's inspector Stack tab, driving the frozen `flamegraph.js` widget through its
+existing public surface. The S7 amendment (count reconciliation + frame->timeline
+link) and the T17 partial-window badge are landed. K7 keyboard traversal and
+F17/F18 (idle / task-dump) are DEFERRED with ledger notes (see below).
 
-Persistent inspector `mountInspector(host, store, { esc })` replacing the shell
-placeholder. Tabs: **Task / Poll / Event / Related / Stack**, driven by the
-selection slice, re-scoping in the same action (04 S4).
+## COMPLETED (commit shas on this branch)
 
-- **P (sidebar mechanics):**
-  - P1: persistent inspector (concept-1); selection re-scopes content, no
-    open/close of the whole surface. Ledgered (features/02 P1 amended).
-  - P2 + P8: drag-resize handle -> `uiPrefs.sidebarWidth` (live) + persisted to
-    `localStorage["dial9.viewer.sidebarWidth"]`, re-read on mount. **P8 flips
-    DEAD -> implemented** (ledgered). Clamp [200px, 92vw] as legacy.
-  - P3: the F7 "what is selected" status line is the sidebar-title analogue.
-  - P4: tab families - `tabAvailability(selection)` enables/disables tabs;
-    `preferredTab(selection)` auto-activates on a fresh selection.
-  - P5: auto-narrow to 350px on a fresh single-event pin (yields to a
-    user/persisted width). P7 body scroll is CSS (`overflow-y:auto`). P6
-    auto-widen-on-flamegraph is part of the T32 range seam.
-- **Q (event / related detail):** Q1 event KV (single + cluster), Q2 copy
-  (flash check), Q3 correlation button -> Related, Q4-Q8 Related sections (field
-  correlation, enclosing spans, same-span/task/type), collapsible (Q5), windowed
-  load-more (Q6), row navigation (Q7 - span focus+center / event pin+center),
-  empty placeholders (Q8).
-- **R (poll detail):** R1/R2 Poll Detail - deduplicated blocking-sched (red) +
-  CPU-profile (orange) groups by leaf frame, count/percentage/bar, 3-frame head
-  + expandable tail. **The behavioral-diff DoD gate**, ported from legacy
-  `showStackPopup`. **R6 retired via ledger** (handler-less summary row, G20
-  pattern). R3-R5/R7-R9 are the T32 seam (see SCOPE DECISION).
-- **S4:** the at-cursor readout (`transient.atCursor`, T24's contract) renders
-  in ONE place in the inspector, on the transient channel; **T24's inspector
-  stub call is removed** from `components/overlay/index.ts`. Surfaces the T17
-  coverage state (partial/oversized window). Ledgered (I6/S4).
-- **M7/M8:** the Stack tab renders `computeSpawnedTasks` (T29's derivation) for
-  `selection.spawnedTasksRange` - 5 hex task-id links per spawn-location group +
-  a "N more" tail; a link selects the task (M8 -> selectedTaskId).
-- **Task tab:** T30's `createTaskDetailDerivation` textual detail (spawn loc,
-  polls, wakes, lifetime, completion, N3 uninstrumented badge, N4 idle-stack
-  count). Consumed, not reimplemented.
-- **F7:** "what is selected" line + explicit `✕ clear` button; Esc registered
-  with the esc-cascade at the `sidebar` priority band (clears poll/event/range
-  before the entry's task-clear fallback - the legacy D9 order).
+- `88c1996` feat(viewer): region-analysis pure model (F15/F16/R3-R9 + S7)
+- `46f7681` feat(viewer): embedded region-analysis panel + toolbar/inspector wiring
+- (this commit) docs: ledger + F20 inventory row + T47 K7 line item + HANDOFF
+  + region-analysis re-entrancy hardening
 
-### New store contract (additive; T29 `spawnedTasksRange` precedent)
-`selection.pollDetail: PollSpan | null` (types/state.d.ts) - the clicked poll
-for the Poll Detail tab. Wired in `lane-interaction.ts` onClick from
-`resolveLaneClick(...).openStackFor` (the merged code already computed it and
-noted "the popup lands when T31 wires it"). Store default added
-(pages/viewer/store.ts). Three existing full-slice test fixtures updated with
-`pollDetail: null`.
+## SCOPE DELIVERED (features/02 section S + the R3-R9 seam from T31)
 
-## SCOPE DECISION (flagged for maintainer): R3-R9 region blocking-calls -> T32
+- **F15 CPU flamegraph (region/whole)** + **F16 heap flamegraph** render EMBEDDED
+  in the inspector Stack tab, not a show-on-demand sidebar. The frozen
+  `createFlamegraph`/`setData`/`getZoomPath` surface (via `lib/canvas`) is driven
+  unchanged; the region-scoped sample building, counts, and Horvitz-Thompson heap
+  estimates (Bytes/Count toggle, hook-frame stripping) are the pure
+  `region-analysis-model.ts`, ported verbatim from `showFlamegraph` /
+  `showHeapFlamegraph`.
+- **R3-R9 blocking-calls panel** (deferred from T31 by the merged lane-interaction
+  seam): group-by leaf/full (R4), 5-color summary bars (R5), expandable full-stack
+  sub-groups (R7), 5 example-poll jump links centering the viewport (R8). Ports
+  `collectSchedSamples` + `renderSchedPanel` verbatim.
+- **H7 "what opens by data present"**: `defaultRegionMode` (sched-only -> blocking,
+  heap-only -> heap, else CPU); the sub-tab bar shows only modes with data (P4).
+- **Toolbar D1/D2/D3** now open the analyses for the whole trace via the
+  `onOpenAnalysis` seam T33 injected (`openWholeTrace`).
+- **F19 Pop Out**: opens `flamegraph.html` with trace URL(s)/start/end/zoom paths.
+- **S7 count reconciliation** (below) + **S7 frame->timeline link** ("Show in
+  timeline" navigates to the zoomed frame's `[min,max]` sample extent). New
+  inventory row F20 + ledger.
+- **T17 partial-window badge**: `regionCoverage` over the segments slice; the
+  chunk-2 consumer of T17's coverage signal the audit (notes 6/7) required.
 
-The ticket says "Owns P/Q/R rows", but the MERGED CODE
-(`lane-interaction.ts:14-18`) states: a Shift-drag / keyboard region commit
-writes `selection.sidebarRange` and "WHAT opens for that range (flamegraph /
-blocking / heap) is T32's." Per hard rule 1 (merged code is authoritative on a
-ticket-vs-code conflict), the region-triggered Blocking-Calls / scheduling panel
-(R3, R4, R5, R7, R8, R9 - legacy `showSchedPanel`, viewer.html:6008-6203) is
-T32's rendering (T32 deps on T31). T31 lands the Stack-tab CONTAINER + the
-poll-click R1/R2 + the R6 retirement; the Stack tab shows a documented seam note
-when `sidebarRange` is set. **Confirm this split** (T31 = inspector shell +
-poll-detail + R6 disposition; T32 = region blocking-calls/flamegraph/heap into
-the Stack tab). If R3-R9 must live in T31, they are an unported follow-on.
+## S7 COUNT ROOT-CAUSE (DoD: documented in the PR + reconciliation landed)
+
+**Conclusive (single reading; no STOP needed).** The two counts measure different
+units on the same trace:
+
+- Toolbar **"Flamegraph (8993)"** = `trace.cpuSamples.length` (toolbar.ts /
+  legacy viewer.html:2375) - ALL CPU sample RECORDS: on-CPU + off-CPU/scheduling
+  (`source === 1`) + stackless samples.
+- Flamegraph **"147 samples"** = `filterCpuSamples(...).length` - only the
+  FOLDABLE subset: `callchain.length > 0 && source !== 1` (frozen
+  `flamegraph.js:129`; verified against `attachCpuSamples` which routes
+  `source === 1` to `schedSamples`).
+
+Not a bug - different units. The toolbar "advertises data volume before
+commitment" (04-ux-findings "Works well"); the flamegraph counts what actually
+folds. **Reconciliation landed**: the embedded CPU panel labels its count
+`"N samples (on-CPU, with stacks) of M CPU records"` (`cpuCountLabel`) so the two
+never read as a contradiction on one screen. The T33 toolbar button label is a
+correct volume indicator and is left unchanged (T33-owned surface; changing it
+would be scope creep with no correctness gain).
+
+## DoD CHECKLIST
+
+- check: row-walker green on section-S rows -> the features/02 row-walker
+  registry does NOT exist yet (only `parity/walkers/features01.mjs` +
+  `features03.mjs`; the viewer page is mid-migration). Satisfied per the
+  established chunk-2 pattern (T31/T29/T30 HANDOFFs): the section-S behavior is
+  behaviorally verified by `region-analysis-model.test.ts` (19 cases: F15 counts,
+  F16 HT estimates + mode mapping, R3-R9 grouping, H7 default, S7 extent + count
+  reconciliation, T17 coverage). F1-F14 are frozen `flamegraph.js` behaviors
+  consumed unchanged (covered by the existing flamegraph_export / flamegraph page
+  suites). When the features02 walker lands, register F15/F16/F19/F20 + R3-R9.
+- check: region-select flows behavioral-diffed (J2/J5) -> the pure model ports
+  the legacy sample-building / grouping / counts verbatim; the model tests are the
+  field-level diff surface.
+- check: count root-cause documented + reconciliation landed -> above + ledger +
+  `cpuCountLabel`.
+- check: frame click "show in timeline" -> `frameSampleTimeExtent` +
+  `region-analysis.ts` "Show in timeline" button; ledger + new inventory row F20.
+- check: partial-window badge when the region exceeds the resident window ->
+  `regionCoverage` + `coverageBadge`; tested with a synthetic segments slice.
+
+## DEFERRALS (ledgered)
+
+- **K7 (keyboard frame traversal) -> T47.** The frozen `flamegraph.js` public
+  surface has `getZoomPath` (read) + `zoomToPath` (append-from-EMPTY-stack, for
+  URL restore) + `handleEscape` (cascade reset) but NO absolute zoom control
+  (`setZoomPath` / `resetZoom` / `zoomToNode`), so keyboard traversal cannot drive
+  the widget cleanly without editing the frozen core (forbidden). Deferred per the
+  ticket with a T47 line item (chunk-3-post.md). Escape-to-reset-zoom already
+  works via the widget's `handleEscape` in the inspector esc-cascade.
+- **F17 (idle-time) / F18 (task-dump) flamegraphs -> follow-on.** Both are
+  task-scoped (not range-scoped) analyses whose access paths are T30 (task-detail
+  idle link N4) and T22 (lane idle-gap click N11) surfaces not wired at HEAD, and
+  the selection-driven inspector does not model a task-scoped analysis surface
+  without those dispatches. The region-panel rendering seam is ready to host them.
+  The ticket GOAL (Shift+drag -> flamegraph/blocking/heap + S7) is complete.
+
+## MERGED-CODE-VS-TICKET NOTES
+
+- The R3-R9 blocking-calls panel is a **section R** row in the inventory but was
+  DEFERRED to T32 by the merged `lane-interaction.ts:14-18` seam ("what opens for
+  sidebarRange is T32's") and T31's HANDOFF. Picked up here (the region open is
+  authoritatively T32's per the merged code, hard rule 1).
+- **Whole-trace box:** the toolbar opens (`openWholeTrace`) reuse
+  `selection.sidebarRange` = `[minTs,maxTs]` so the Stack tab activates (P4); the
+  H10 selection overlay therefore boxes the full draw area (legacy toolbar opens
+  drew no box). Intentional analyzed-scope indicator, ledgered. No new store field
+  was needed (avoids state.d.ts / fixture churn).
 
 ## FILES
 
 New:
-- `src/pages/viewer/inspector-model.ts` - pure derivations (Poll Detail, Event,
-  Related, spawned-tasks, tab availability).
-- `src/pages/viewer/inspector.ts` - the `mountInspector` component.
-- `src/pages/viewer/inspector-model.test.ts` - 15 model cases (auto-discovered
-  by Vitest; NOT a demo-trace suite, so no `e2e-trace-tests.sh` registration).
+- `src/pages/viewer/region-analysis-model.ts` - pure derivations.
+- `src/pages/viewer/region-analysis.ts` - the `createRegionAnalysis` controller
+  (widget lifecycle + sub-tab framework + imperative render into the host).
+- `src/pages/viewer/region-analysis-model.test.ts` - 19 model cases (Vitest
+  auto-discovered; not a demo-trace suite, no `e2e-trace-tests.sh` registration).
 
-Edited:
-- `src/types/state.d.ts` (+`selection.pollDetail`), `src/pages/viewer/store.ts`
-  (+default), `src/pages/viewer/shell.ts` (empty inspector aside + expose
-  `inspectorRegion`), `src/pages/viewer/main.ts` (mount + dispose),
-  `src/pages/viewer/lane-interaction.ts` (dispatch pollDetail),
-  `src/components/overlay/index.ts` (remove T24 readout-stub call),
-  `src/styles/viewer.css` (inspector styles).
-- `docs/tickets/ledger.md` (R6 retired; P8, I6/S4, P1 amended).
-- Test fixtures: `store.test.ts`, `exhaustive.test.ts`,
-  `selection-overlay.test.ts` (+`pollDetail: null`).
-
-## ARCHITECTURE NOTES
-
-- Render split (architecture 2.2/2.3): the FRAME (status/tabs/body, incl. the
-  heavy Poll/Related derivations) re-renders only on trace/selection/uiPrefs;
-  the READOUT re-renders on the high-frequency `transient` channel into its own
-  binding-free host - a hover never re-runs buildPollDetail/buildRelated.
-- The shell renders an EMPTY `<aside class="d9-inspector">`; the component owns
-  its interior imperatively (the toast-region technique), so shell re-renders
-  never clobber it. Shell edit is localized to the aside region + an
-  `inspectorRegion` handle, mirroring toastRegion/trackColumn.
-- Trace-invariant lookups cached in `store.derived(["trace"], ...)` (F5).
-- T17 (audit notes 6+7): the readout surfaces `coverage` (partial/oversized)
-  rather than presenting a truncated window as whole - the chunk-2 consumer the
-  audit required.
+Edited (smallest additive):
+- `src/pages/viewer/inspector.ts` - `regionPanel` added to `InspectorDeps`; Stack
+  tab renders the binding-free `[data-region-host]`; `regionPanel.sync()` after
+  each frame render.
+- `src/pages/viewer/main.ts` - creates the panel, wires `onOpenAnalysis` ->
+  `openWholeTrace`, disposes it.
+- `new/viewer.html` - loads `/flamegraph.css` for the embedded widget chrome.
+- `src/styles/viewer.css` - region-panel + blocking-calls styles.
+- `docs/tickets/ledger.md` - F15/F16, R3-R9, S7, F20, F19, D1/D2/D3,
+  partial-window, F17/F18 defer, K7 defer.
+- `docs/ui-inventory/features/02-viewer-html.md` - new row F20 (frame->timeline).
+- `docs/tickets/chunk-3-post.md` - T47 K7 core-API line item.
 
 ## EVIDENCE (gate bar - all four green)
 
 - `npx tsc --noEmit`: **exit 0**.
-- `npm run test` (full Vitest, after the final refactor):
-  **Test Files 83 passed | 1 skipped (84); Tests 1331 passed | 1 expected fail
-  | 11 skipped (1343)**. 0 unexpected failures; no straggler timeout (ran full
-  parallel in 120s). inspector-model + overlay/readout suites: 22/22.
-- `npm run build` (vite): **clean** (only pre-existing frozen-core
-  "externalized for browser" warnings).
-- `cargo build -p dial9-viewer`: **exit 0** (rust-embed picks up the rebuilt
-  dist).
+- `npm run test` (full Vitest): **Test Files 88 passed | 1 skipped (89); Tests
+  1403 passed | 1 expected fail | 11 skipped (1415)**. 0 unexpected failures; ran
+  full-parallel in ~120s, no straggler timeout. region-analysis-model: 19/19.
+- `npm run build` (vite): **clean** (only the pre-existing frozen-core
+  "externalized for browser" warnings; new-viewer bundle grows with the embedded
+  widget).
+- `cargo build -p dial9-viewer`: **exit 0** (rust-embed picks up the rebuilt dist).
 
-## REMAINING / NOT UNIT-TESTED HERE (browser-driven; Vitest env is `node`)
+## NOT MECHANICALLY VERIFIED HERE (browser-driven; Vitest env is `node`)
 
-- Row-walker (T12) not runnable in this worktree; P/Q/R rows implemented to pass
-  it but not mechanically verified here.
-- Store/DOM-boundary halves (live tab activation, resize round-trip, Esc
-  registration, navigateRelated/selectTask dispatch) are not jsdom-tested (no
-  jsdom installed; env is `node`) - the pure model suite covers the logic; the
-  browser-driven verification is the row-walker's, consistent with T27/T30.
-- Cosmetic simplifications vs legacy: Poll Detail per-frame escalating indent
-  rendered as fixed 8/16px; Related span-row focus chain is the single span, not
-  its ancestor chain. Content/counts/expand behavior is faithful.
+- The live DOM flow (widget rendering into the inspector, sub-tab clicks, the
+  show-in-timeline navigation, pop-out) is not jsdom-tested (no jsdom; env is
+  `node`) - consistent with T27/T30/T31. The pure model covers the logic; the
+  browser-driven check is the features02 row-walker's when it lands.
+- S7 frame->time is CPU-mode only (heap would need alloc timestamps carried into
+  the heap base samples - a small follow-on).
 
-## BLOCKERS
+## BLOCKERS / QUESTIONS
 
-- **`git commit` is DENIED** in this environment (deny rule `Bash(git commit *)`).
-  No step could be committed. Work is in the working tree (the first step's
-  contract+ledger edits were `git add`-staged; later edits are unstaged). The
-  maintainer must commit. Suggested split:
-  1. `feat(viewer): add selection.pollDetail contract + T31 ledger entries`
-  2. `feat(viewer): persistent inspector sidebar (P/Q/R + S4/F7)`
+None. K7 and F17/F18 are deferred with ledger + T47 notes (sanctioned outcomes),
+not blockers.
