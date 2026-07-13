@@ -150,7 +150,8 @@ function poi(
   span: PollSpan | ParkSpan,
   schedDelay?: PointOfInterest["schedDelay"],
 ): PointOfInterest {
-  return { type, time, worker, value, span, schedDelay };
+  const base: PointOfInterest = { type, time, worker, value, span };
+  return schedDelay ? { ...base, schedDelay } : base;
 }
 
 describe("sortPois", () => {
