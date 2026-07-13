@@ -145,10 +145,20 @@ null to the fixture, amended into the merge commit. LESSON: the integration tsc
 gate is load-bearing - per-worktree green does NOT imply integration green when
 one ticket adds a required slice field and another has an independent full-slice
 fixture. Always tsc the integrated tree after every merge (already doing).
-IN FLIGHT (cap 3, off 44aa32b): T33 (toolbar + concept-2 issues rail), T34 (load
-chrome - S3 new-file-confirm + #281 dismissible), T31 (inspector - REPLACES the
-shell inspectorTemplate placeholder; consumes T30 task-derivation, T24 atCursor,
-T27 pinnedEvent, T29 spawnedTasksRange; implements P8 width->uiPrefs, retires R6).
+T34 (load chrome) MERGED 2026-07-13 (aeb724b). shell.ts + viewer.css auto-merged
+(T34's sourceLabel getter + New File button coexisted with T29's queue wiring);
+only ledger (append-union M-rows + B-rows) + HANDOFF conflicted. tsc clean.
+FLAG for downstream merges: T34 changed ShellDeps.sourceLabel from `string` to
+`() => string` and added optional onNewFile - tsc will catch any T33/T31/T35
+collision at their merge (they share ShellDeps).
+IN FLIGHT (cap 3, off aeb724b): T33 (toolbar + concept-2 issues rail), T31
+(inspector - replaces the placeholder; consumes T30/T24/T27/T29 contracts; P8
+width->uiPrefs, retires R6), T35 (minimap tier-1 density + POI ticks + draggable
+viewport; status bar selection/range/copy-link/progress/hints - closes T34's
+status-bar progress seam).
+BLOCKED: T32 (in-viewer flamegraph + region analyses) needs T31 (renders in the
+inspector sidebar tabs) - dispatch AFTER T31 merges. Prematurely created+removed
+its worktree once; recreate off the post-T31 tip.
 DEFERRED BATCH GATE: full Vitest for T30/T23/T27 folded forward - run ONE clean
 full-suite gate after T29/T33/T34 land (never concurrent with a running agent's
 own suite; T27 proved concurrent Vitest starves timing-sensitive suites -> 13
