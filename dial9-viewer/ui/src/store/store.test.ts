@@ -51,6 +51,7 @@ function initialViewerState(): StoreState {
       spanFocus: null,
       focusedSpanId: null,
       pinnedEvent: null,
+      pollDetail: null,
       sidebarRange: null,
       hoveredWakerTaskId: null,
       spawnedTasksRange: null,

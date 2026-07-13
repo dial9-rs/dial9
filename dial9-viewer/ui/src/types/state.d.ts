@@ -144,6 +144,17 @@ export interface SelectionSlice {
   /** Pinned custom event + marker (02 I5). */
   pinnedEvent: PinnedCustomEvent | null;
   /**
+   * The clicked poll shown in the Poll Detail inspector tab (features 02
+   * R1 / G15). Set by the lane-interaction click when a poll carrying CPU or
+   * scheduling samples is clicked (`resolveLaneClick.openStackFor`); null when
+   * no poll detail is open. T31's inspector renders the deduplicated
+   * blocking-sched + CPU-sample groups from it. Additive selection field
+   * (the T29 `spawnedTasksRange` precedent): the legacy showStackPopup carried
+   * the clicked poll in a local, so the store gains an explicit field the
+   * persistent inspector re-scopes to in the same click action (04 S4).
+   */
+  pollDetail: PollSpan | null;
+  /**
    * Range retained while the sidebar shows a region analysis (region
    * select -> flamegraph/blocking calls); blocks keyboard selection
    * until the sidebar closes (02 H9/H10). Replaces

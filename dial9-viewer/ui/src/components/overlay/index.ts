@@ -27,7 +27,7 @@ import { assembleLaneHover } from "../canvas/lanes/index.js";
 import type { LaneHoverInput } from "../canvas/lanes/hover.js";
 import { deriveOverlayData, type OverlayData } from "./data.js";
 import { drawCrosshair, type CrosshairContext } from "./crosshair.js";
-import { computeAtCursorReadout, coverageAt, renderAtCursorStub } from "./readout.js";
+import { computeAtCursorReadout, coverageAt } from "./readout.js";
 import { buildLaneTooltip, createTooltip, type TooltipHandle } from "./tooltip.js";
 
 const OVERLAY_CLASS = "d9-crosshair-overlay";
@@ -153,8 +153,10 @@ export function mountOverlay(
         : null,
     });
 
-    // At-cursor readout mirror (the S4 contract; T31 replaces this stub).
-    renderAtCursorStub(root, state.transient.atCursor);
+    // At-cursor readout (the S4 contract): the overlay's job is to POPULATE
+    // `transient.atCursor` (computeAtCursorReadout, above); T31's persistent
+    // inspector RENDERS it in one place, so the old inspector-slot stub no
+    // longer runs here. renderAtCursorStub stays exported for its own test.
 
     // Tooltip (V-section): rebuilt only on a fresh mousemove; hidden on
     // mouseleave/drag. Uses CACHED dims (no measure-after-write).
