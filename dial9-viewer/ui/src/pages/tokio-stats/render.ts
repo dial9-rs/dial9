@@ -174,8 +174,12 @@ function summaryCardsTemplate(s: PeriodStats, threshNs: number): TemplateResult 
   `;
 }
 
-/** The per-location table (F2), or the empty-threshold state (F3). */
-function locTableTemplate(
+/**
+ * The per-location table (F2), or the empty-threshold state (F3). Exported
+ * for the XSS regression test: it is the sink for the attacker-influenceable
+ * spawn_loc (the #587 vuln) and the exemplar deep-link URL.
+ */
+export function locTableTemplate(
   s: PeriodStats,
   data: TokioStatsResponse,
   bucketParam: string | null,
@@ -283,8 +287,9 @@ function diffCardsTemplate(
   `;
 }
 
-/** One ranked diff table (G9). */
-function diffTableTemplate(
+/** One ranked diff table (G9). Exported for the XSS regression test (the
+ * diff tables are the second spawn_loc sink, escaped by #587). */
+export function diffTableTemplate(
   rows: DiffModel["regressions"],
   cls: string,
   periodsLength: number,

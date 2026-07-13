@@ -347,6 +347,47 @@ describe("round trip keeps the trace loaded (logic level)", () => {
   });
 });
 
+describe("tokio-stats switch round-trip preserves the full query (T41 DoD)", () => {
+  // The migrated Tokio Stats page's URL carries the full scope + period query
+  // (bucket, prefix, service, REPEATABLE host, p{i}_start_ns/_end_ns). The
+  // switch must preserve all of it across both hops (T38 rule); repeated
+  // params and every scope key survive verbatim.
+  const REG_TS = { "tokio_stats.html": "new/tokio_stats.html" };
+  const FULL =
+    "?bucket=demo-traces&prefix=traces&service=svc&host=h1&host=h2&p1_start_ns=100&p1_end_ns=200&p2_start_ns=300";
+
+  it("legacy -> new carries every param including both host= entries, ui stripped", () => {
+    const toNew = decide(
+      input({ page: "tokio_stats.html", registry: REG_TS, search: FULL + "&ui=new" }),
+    );
+    expect(toNew.redirect).toBe("/new/tokio_stats.html" + FULL);
+  });
+
+  it("new -> legacy pins ui=legacy and preserves the rest verbatim", () => {
+    const href = liveControlHref(
+      "new",
+      "tokio_stats.html",
+      "/new/tokio_stats.html",
+      FULL,
+      REG_TS,
+    );
+    expect(href).toBe("/tokio_stats.html" + FULL + "&ui=legacy");
+  });
+
+  it("landing back on the canonical URL with the pin stays legacy, offers the switch", () => {
+    const landed = decide(
+      input({
+        page: "tokio_stats.html",
+        registry: REG_TS,
+        search: FULL + "&ui=legacy",
+        storedPref: "new",
+      }),
+    );
+    expect(landed.redirect).toBeNull();
+    expect(landed.control!.label).toBe("Switch to new UI");
+  });
+});
+
 describe("page resolution helpers", () => {
   it("canonicalPageFromPath maps root-level pages, '/' is index.html", () => {
     expect(canonicalPageFromPath("/")).toBe("index.html");
