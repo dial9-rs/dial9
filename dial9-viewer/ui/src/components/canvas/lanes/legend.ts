@@ -4,11 +4,12 @@
 // legend omitted (block_in_place, open-ended poll, wake, sched, CPU sample).
 //
 // Legacy G19 was a non-interactive toolbar row (viewer.html:6646-6670). The
-// unified column has no legacy toolbar; the legend lives in the lanes
-// track's left label gutter (T21 keeps a per-track label area). It stays
-// non-interactive (pointer-events:none) and is built imperatively into the
-// statically-templated gutter, so the shell's declarative re-renders do not
-// clobber it (same technique the toast region uses).
+// unified column has no legacy toolbar; the legend is a compact, non-
+// interactive (pointer-events:none) ribbon overlaid on the lanes track's
+// canvas wrap. It is built imperatively into the statically-templated wrap
+// (the wrap holds only a static <canvas>, no lit-html child binding), so the
+// shell's declarative re-renders do not clobber it (same technique the toast
+// region uses).
 
 const LEGEND_CLASS = "d9-lanes-legend";
 
@@ -39,22 +40,22 @@ export const LANES_LEGEND: readonly LegendEntry[] = [
   { swatch: "rgba(255,200,50,0.8)", label: "local queue (q:NN)", shape: "line" },
 ];
 
-/** The lanes track's label gutter (statically templated by the shell). */
-function laneLabelGutter(trackColumn: HTMLElement): HTMLElement | null {
+/** The lanes track's canvas wrap (statically templated by the shell). */
+function laneCanvasWrap(trackColumn: HTMLElement): HTMLElement | null {
   return trackColumn.querySelector<HTMLElement>(
-    `.d9-track[data-track-id="lanes"] .d9-track-label`,
+    `.d9-track[data-track-id="lanes"] .d9-track-canvas-wrap`,
   );
 }
 
 /**
- * Ensure the legend list exists in the lanes label gutter (idempotent):
- * appends it if the gutter is present and the legend is missing. Safe to
- * call every frame - it is a no-op once the legend is attached.
+ * Ensure the legend ribbon exists in the lanes canvas wrap (idempotent):
+ * appends it if the wrap is present and the legend is missing. Safe to call
+ * every frame - it is a no-op once the legend is attached.
  */
 export function ensureLanesLegend(trackColumn: HTMLElement): HTMLElement | null {
-  const gutter = laneLabelGutter(trackColumn);
-  if (!gutter) return null;
-  const existing = gutter.querySelector<HTMLElement>(`.${LEGEND_CLASS}`);
+  const wrap = laneCanvasWrap(trackColumn);
+  if (!wrap) return null;
+  const existing = wrap.querySelector<HTMLElement>(`.${LEGEND_CLASS}`);
   if (existing) return existing;
 
   const list = document.createElement("ul");
@@ -65,8 +66,10 @@ export function ensureLanesLegend(trackColumn: HTMLElement): HTMLElement | null 
     li.className = "d9-lanes-legend-row";
     const swatch = document.createElement("span");
     swatch.className = `d9-lanes-legend-swatch shape-${entry.shape ?? "box"}`;
-    if (entry.shape === "gradient") swatch.style.background = entry.swatch;
-    else swatch.style.background = entry.swatch;
+    swatch.style.background = entry.swatch;
+    // Shapes drawn with borders (triangle/dashed) read the entry color via
+    // currentColor rather than a fill.
+    swatch.style.color = entry.swatch;
     const text = document.createElement("span");
     text.className = "d9-lanes-legend-text";
     text.textContent = entry.label;
@@ -74,14 +77,14 @@ export function ensureLanesLegend(trackColumn: HTMLElement): HTMLElement | null 
     li.appendChild(text);
     list.appendChild(li);
   }
-  gutter.appendChild(list);
+  wrap.appendChild(list);
   return list;
 }
 
 /** Remove the legend (teardown / HMR). */
 export function removeLanesLegend(trackColumn: HTMLElement): void {
-  const gutter = laneLabelGutter(trackColumn);
-  gutter?.querySelector(`.${LEGEND_CLASS}`)?.remove();
+  const wrap = laneCanvasWrap(trackColumn);
+  wrap?.querySelector(`.${LEGEND_CLASS}`)?.remove();
 }
 
 /** Mount the legend and return a disposer (removes it). */
