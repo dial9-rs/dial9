@@ -96,6 +96,14 @@ window (03 F6's binary-search-helpers rule) - the perf fix this ticket owns.
 - `npm run test` (full Vitest) -> Test Files 73 passed | 1 skipped (74);
   Tests 1199 passed | 1 expected fail | 11 skipped (1211). 0 unexpected
   failures. (The events suites: 28 passed.)
+  - Note on flakiness: running MULTIPLE full Vitest processes concurrently
+    (which I briefly did while capturing results) starves the timing-sensitive
+    base suites (worker_threads / fake-timer / RAF: `store.test.ts`,
+    `toasts.test.ts`, `segments.window.test.ts`, `load.worker.test.ts`,
+    `worker/*.test.ts`, `parse_yield_throttle.test.ts`) - that contended run
+    clocked 732s (vs 135s alone) and timed out ~13 assertions. Run ALONE the
+    suite is green. None of those suites are touched by T27; this is a
+    run-concurrency artifact, not a regression.
 - `npm run build` -> clean, "built in 394ms", 17 static-copy items.
 - `cargo build -p dial9-viewer` (repo root) -> Finished (rust-embed picks up
   the rebuilt `ui/dist`).
