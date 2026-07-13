@@ -34,6 +34,7 @@ export function initialViewerState(): StoreState {
       pinnedEvent: null,
       sidebarRange: null,
       hoveredWakerTaskId: null,
+      spawnedTasksRange: null,
     },
     uiPrefs: {
       // S1 amendment: analysis surfaces are visible by default. The unified

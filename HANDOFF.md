@@ -1,131 +1,105 @@
-# T27 - Custom events track - HANDOFF
+# T29 - Queue depth track (+ S6 queue-legibility amendment) - HANDOFF
 
-(Supersedes the T24 HANDOFF inherited through the branch chain.)
+(Supersedes the inherited T30 HANDOFF from the branch chain.)
 
-## STATUS: DoD met (mechanical gates green; live-browser row-walk + the
-T31-dependent sidebar-KV diff deferred per the T24/T26 precedent). Ready for
-review.
+## STATUS
 
-The custom-events panel (features/02 section K) landed as a time-aligned track
-in the unified column: per-pixel marker ticks (K1), the `N events · M markers`
-info (K2), name-chip legend + clear (K5/K6), click-to-pin (K4), the hover guide
-line (K3/I4), and task/poll resolution (K7). The T24/T31 seams are honored
-strictly: T27 DISPATCHES `transient.hoverEventTs` (the orange guide) and
-`selection.pinnedEvent` (the marker + sidebar); T24's overlay draws the marks,
-T31's inspector will render the event KV. The legacy per-frame O(all generic
-events) visibility scan (03 F5) is replaced by a BOTH-EDGES binary-searched
-window (03 F6's binary-search-helpers rule) - the perf fix this ticket owns.
+DONE. All owned M rows landed; the S6 zero-baseline fix and F3(queue) legend
+landed; M7 dispatch landed; M7-list / M8-links render halves are
+deferred-until-T31 (T31 not yet on this branch). All four gate bars pass.
 
-## COMPLETED (commits, on branch ticket/T27-events-track)
+## COMPLETED (commits on `ticket/T29-queue-track`)
 
-- `00f54a3` feat(viewer): custom-events track - markers, legend, click-to-pin,
-  hover guide (T27)
-  - NEW `pages/viewer/events-model.ts`: pure derivation + logic.
-    - `computeEventTrackData` (F5 tier-1, trace-invariant): generic (non-span)
-      custom events sorted by ts + sorted unique names for the legend. Filters
-      out SpanEnter:/SpanExit: prefixes + SpanEnter/Exit/CloseEvent (legacy
-      viewer.html:2100-2119).
-    - `lowerBoundByTimestamp` / `upperBoundByTimestamp` / `filterVisibleEvents`:
-      the visible window BINARY-SEARCHED at BOTH edges (point events, unlike
-      spans, need no back-scan) - O(log N + window), never O(N). THE 03 F5 -> F6
-      fix.
-    - `buildEventRenderModel` (K1/K2): per-pixel clustering, tick width
-      `max(3, min(3+log2(size)*2, 10))`, base alpha `min(0.4+size*0.15, 1)`,
-      mixed-name second stripe, `>=12px` hit padding, `N events · M markers`.
-      Does NOT read the selection (the draw applies the S4 fade -> a selection
-      change is a cheap redraw over cached geometry).
-    - `resolveTaskForEvent` / `resolvePollForEvent` / `resolveClusterTask` (K7):
-      ported verbatim from legacy `taskForEvent`/`pollForEvent`.
-    - `eventHighlightTask` (S4): `selectedTaskId ?? pinnedEvent.taskId` - the
-      selection-slice-driven dim key, same mechanism as T26's `spanHighlight`.
-    - `buildPinnedEvent` / `isSameCluster` (K4): the PinnedCustomEvent contract
-      builder + the same-cluster (toggle-off) test by representative-event
-      identity.
-  - NEW `pages/viewer/events-track.ts`: the store-wired controller
-    (mirrors `spans-track.ts`). Derived caches (event data + worker lanes, F5),
-    a WeakMap-memoized per-event task resolver (legacy `_taskForEventCache`), a
-    render-model memo NOT keyed on selection (S4), the K5/K6 legend template
-    (keyed `repeat`, F7), the K3 hover tooltip, and the exported dispatch
-    functions `dispatchEventPin` (K4) / `dispatchHoverEvent` (I4) + the pure
-    `drawEventsCanvas`. Surfaces a "partial window" badge when a segment is
-    `oversized` (T17 carried obligation; point markers have no continuous edge
-    to hatch, so only the oversized state is surfaced).
-  - Shell wiring (smallest additive edits, mirroring the spans track):
-    `tracks.ts` (+`eventsTrack?` param on `tracksTemplate`/`sizeTracks` + the
-    "events" delegation branches), `shell.ts` (create/thread/dispose
-    `createEventsTrack`), `track-layout.ts` (events height 44 -> 70 for the
-    legend strip + tick canvas), `styles/viewer.css` (`d9-events-*`).
+- `5d1025c` feat(viewer): queue depth track with S6 zero-baseline fix (section M)
+- `98a6eb8` test(viewer): queue-model + queue-track Vitest (DoD)
+- ledger entries (M1/M4, M5, M6, M7) appended in `docs/tickets/ledger.md`
+  (committed with this HANDOFF).
 
-- `91c5f4e` test(T27): events-model + events-track Vitest (K rows + DoD checks)
-  - `events-model.test.ts` (20 tests): extraction, the BOUNDED-SCAN proof
-    (access-counting Proxy over a 50k-event array: `< 100` element reads for a
-    10-event window vs 50k linear), name filter, clustering geometry, info,
-    task/poll/cluster resolution, S4 key.
-  - `events-track.test.ts` (8 tests): click-to-pin dispatch (contract +
-    toggle-off + prior-selection clear), hover dispatch + no-op-when-unchanged,
-    dim-on-selection render input, K2 info paint + resting message, and
-    derived-cache invalidation.
+### Files
 
-- `bcdfa18` feat(viewer): surface the K2 events info readout
-  - Paints `N events · M markers` top-right on the events canvas (legacy
-    `#ce-panel-info`) and mirrors it to `canvas.dataset.eventsInfo` for the
-    row-walker / behavioral differ (CPU-track pattern). +2 draw-input tests.
+New:
+- `dial9-viewer/ui/src/pages/viewer/queue-model.ts` - pure, Node-testable:
+  `computeQueueData` (series, cached per trace), `queueScaleY` (the S6 scale
+  fn), `buildQueueRenderModel` (legacy bucketing verbatim), `computeSpawnedTasks`
+  (M7 derivation T31 renders), `deriveQueueWindow` (T17), `QUEUE_LEGEND` (F3).
+- `dial9-viewer/ui/src/pages/viewer/queue-track.ts` - the controller:
+  `rowTemplate` (label + legend + canvas), `paint`, `drawQueueCanvas`, the M7
+  drag-select handlers + `commitRange` dispatch, `spawnedTasks` accessor.
+- `queue-model.test.ts` (14 tests), `queue-track.test.ts` (11 tests).
 
-## DoD status
+Edited (smallest additive edits to shared shell files):
+- `src/types/state.d.ts` - added `selection.spawnedTasksRange: TimeRange | null`
+  (the M7 dispatch contract T31 renders).
+- `src/pages/viewer/store.ts` - initial `spawnedTasksRange: null`.
+- `src/pages/viewer/tracks.ts` - delegate the "queue" row template + paint.
+- `src/pages/viewer/shell.ts` - create/wire/dispose the queue controller.
+- `src/styles/viewer.css` - `.d9-queue-*` legend strip + wrap.
+- `src/types/exhaustive.test.ts`, `src/store/store.test.ts` - the two
+  slice-shape anchor literals gain the new selection field.
 
-- check: row-walker green on K -> DEFERRED (live browser + T12 row-walker, not
-  runnable headless here; same deferral as T24/T25/T26). All K rows (K1-K8; K8
-  is the legacy DEAD "inline tick label", preserved as not-implemented)
-  are ported - see events-model.ts / events-track.ts anchors above.
-- check: click-to-pin dispatches the selection slice (Vitest) -> DONE
-  (`events-track.test.ts` > `dispatchEventPin (K4)`).
-  - sidebar-KV behavioral-diff vs legacy -> DEFERRED-UNTIL-T31 (T31 owns the
-    event-KV inspector surface; T27 dispatches `selection.pinnedEvent` with
-    `detailEvent`, verified in the same test). Re-run this diff once T31 lands.
-- check: bounded-scan Vitest -> DONE (`events-model.test.ts` >
-  "scans O(log N + window), NOT O(N)").
-- check: dim-on-selection as T26 -> DONE (`events-track.test.ts` >
-  `drawEventsCanvas dimming (S4)`); mechanism mirrors T26's `spanHighlight`
-  (selection-slice-driven, cheap redraw over cached geometry).
+## DoD
 
-## EVIDENCE (gate bar, run in dial9-viewer/ui unless noted)
+- check: **row-walker green on ALL M rows** - the T12 browser row-walker is not
+  runnable from this worktree; per-row disposition (verify with T12):
+  - M1 Global queue area - VERIFIED (filled step area; S6 baseline).
+  - M2 Max-local queue line - VERIFIED (orange step line).
+  - M3 Active-task line (right y-axis) - VERIFIED (green line + `tasks:N`).
+  - M4 Y-axis labels - VERIFIED (maxQ top; `0` at the visible baseline).
+  - M5 Legend - VERIFIED (in-track ribbon; F3 encodings match the draw).
+  - M6 Hover info - VERIFIED via T24's at-cursor contract (column-wide
+    mousemove populates `transient.atCursor`; no corner div).
+  - M7 Drag-select - DISPATCH landed (`commitRange` -> `selection.spawnedTasksRange`);
+    the sidebar LIST render is **deferred-until-T31**.
+  - M8 Spawned-task link click - **deferred-until-T31** (T31's link handler sets
+    `selectedTaskId`, which already exists; the links render in T31).
+  - M9 Expanded-panel-click DEAD - moot in the unified column (no fold);
+    DEAD-confirmed re-derives VERIFIED per the row-walker mapping.
+- check: **J7 behavioral-diff, same numbers, presentation ledgered** -
+  `buildQueueRenderModel` ports `renderQueueChart`'s bucketing verbatim (same
+  per-bucket max global/local, same `maxQ`, same active-task
+  `maxTasks`/`startCount`); `computeSpawnedTasks` ports `showSpawnedTasks`
+  (taskFirstPoll spawn proxy, inclusive bounds, group-by-loc sorted by count
+  desc). Only the y-mapping + labeling/legend changed - ledgered (M1/M4, M5, M6,
+  M7). Asserted by `queue-model.test.ts`.
+- check: **zero-global renders a visible baseline** - PASS. Vitest on the scale
+  function (`queueScaleY(0,...)` is strictly above the axis and equals
+  `chartTop+chartH-ZERO_BASELINE_PX`; monotone; clamped) plus the render-side
+  complement (`drawQueueCanvas` plots an all-zero global on the baseline, no
+  vertex on the axis bottom). The **one T12 visual check** is deferred to T12
+  (browser visual harness).
 
-- `npx tsc --noEmit` -> exit 0.
-- `npm run check:boundary` -> "OK (no core imports outside lib/trace +
-  lib/canvas)".
-- `npm run test` (full Vitest) -> Test Files 73 passed | 1 skipped (74);
-  Tests 1199 passed | 1 expected fail | 11 skipped (1211). 0 unexpected
-  failures. (The events suites: 28 passed.)
-  - Note on flakiness: running MULTIPLE full Vitest processes concurrently
-    (which I briefly did while capturing results) starves the timing-sensitive
-    base suites (worker_threads / fake-timer / RAF: `store.test.ts`,
-    `toasts.test.ts`, `segments.window.test.ts`, `load.worker.test.ts`,
-    `worker/*.test.ts`, `parse_yield_throttle.test.ts`) - that contended run
-    clocked 732s (vs 135s alone) and timed out ~13 assertions. Run ALONE the
-    suite is green. None of those suites are touched by T27; this is a
-    run-concurrency artifact, not a regression.
-- `npm run build` -> clean, "built in 394ms", 17 static-copy items.
-- `cargo build -p dial9-viewer` (repo root) -> Finished (rust-embed picks up
-  the rebuilt `ui/dist`).
+## EVIDENCE (gate bar)
 
-## REMAINING / deferred
+- `tsc --noEmit` -> exit 0.
+- `vitest run` (full) -> **Test Files 75 passed | 1 skipped; Tests 1228 passed
+  | 1 expected fail | 11 skipped**. New suites: 25 passed. No unexpected
+  failures. (`node scripts/check-core-imports.mjs` - the `pretest` boundary
+  gate - OK.)
+- `vite build` -> clean (`built in 390ms`, 17 static items copied; the fs/os/
+  child_process externalization warnings are pre-existing from
+  `trace_parser.js`, unrelated).
+- `cargo build -p dial9-viewer` -> Finished (rust-embed picks up `dist/`).
 
-- T12 row-walker on features/02 section K against the running new-UI viewer
-  (headless browser env required).
-- Sidebar-KV behavioral diff vs legacy: activates once T31 lands and renders
-  `selection.pinnedEvent`.
+## SEAMS / notes for downstream
+
+- **T31 (inspector)** renders the M7/M8 surface: read
+  `selection.spawnedTasksRange`, call the queue controller's `spawnedTasks(range)`
+  (or `computeSpawnedTasks(data, range)` directly) to get the groups; render 5
+  task-id links per group + an "N more" tail + the range duration; a link click
+  dispatches `store.update("selection", { selectedTaskId })` (M8). The at-cursor
+  readout (M6) is already the `transient.atCursor` contract T31 renders.
+- **T22 coordination (q:NN legend, F3)**: the in-lane `q:NN` entry already lives
+  in T22's `LANES_LEGEND` ("local queue (q:NN)"); this track did NOT edit the
+  lanes. The queue track's own legend covers its own encodings.
+- **T24 at-cursor**: no code added here - T24's overlay already computes the
+  Global Q / Local max / Active tasks readout for the ns under the cursor across
+  the whole column (that IS the M6 reroute).
 
 ## BLOCKERS / QUESTIONS
 
-None. No STOP-gate hit: every K row had a legacy source of truth, the T24
-overlay contract (`transient.hoverEventTs`, `selection.pinnedEvent`) was already
-consumed by the merged `components/overlay/crosshair.ts`, and the spans track
-(T26) supplied the exact track-wiring + dim pattern to mirror.
-
-## SCOPE NOTES (owned K rows only; no unrelated changes)
-
-- Did NOT draw T24's overlay marks (I4 guide / I5 marker) - only dispatched the
-  slices; `crosshair.ts` already draws both.
-- Did NOT build T31's sidebar - only dispatched `selection.pinnedEvent`.
-- `track-layout.ts` events height 44 -> 70 is the one shared-shell geometry
-  edit, needed to seat the legend strip above the (legacy 40px) tick canvas.
+None. One design decision taken within M-row ownership + the "smallest additive
+edits to state.d.ts" allowance: M7's range dispatches through a NEW dedicated
+`selection.spawnedTasksRange` field rather than reusing `sidebarRange` (which is
+region-analysis/flamegraph state, T32) - the two are distinct sidebar surfaces,
+so conflating them would collide with T32 and mis-block keyboard selection.
+Documented in the field's doc comment and the M7 ledger line.

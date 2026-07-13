@@ -152,6 +152,16 @@ export interface SelectionSlice {
   sidebarRange: TimeRange | null;
   /** Waker task hovered in the task-detail panel (orange polls, 02 G8). */
   hoveredWakerTaskId: number | null;
+  /**
+   * Time range drag-selected on the queue track (features 02 M7). T29
+   * dispatches it here on drag-release; T31's inspector RENDERS the "tasks
+   * spawned in range" list from it (queue-model.ts `computeSpawnedTasks` is
+   * the shared derivation - T29 dispatches, T31 renders). Distinct from
+   * `sidebarRange` (region -> flamegraph/blocking, T32): M7 is the
+   * spawn-location task listing, a different sidebar surface. null when no
+   * range is active.
+   */
+  spawnedTasksRange: TimeRange | null;
 }
 
 // ── uiPrefs slice ───────────────────────────────────────────────────────

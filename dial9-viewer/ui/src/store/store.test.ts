@@ -53,6 +53,7 @@ function initialViewerState(): StoreState {
       pinnedEvent: null,
       sidebarRange: null,
       hoveredWakerTaskId: null,
+      spawnedTasksRange: null,
     },
     uiPrefs: {
       panelCollapsed: { spans: false, events: false, cpu: false, queue: false },

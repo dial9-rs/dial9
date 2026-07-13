@@ -27,6 +27,7 @@ import { tracksTemplate, sizeTracks, type TracksViewModel } from "./tracks.js";
 import { deriveAxisInputs } from "./axis.js";
 import { deriveCpuInputs } from "./cpu.js";
 import { createSpansTrack, type SpansTrackController } from "./spans-track.js";
+import { createQueueTrack, type QueueTrackController } from "./queue-track.js";
 import {
   createTaskDetailTrack,
   type TaskDetailTrackController,
@@ -184,6 +185,7 @@ function shellTemplate(
   spansTrack: SpansTrackController,
   taskDetailTrack: TaskDetailTrackController,
   eventsTrack: EventsTrackController,
+  queueTrack: QueueTrackController,
 ): TemplateResult {
   return html`
     <header class="d9-toolbar" role="banner">
@@ -226,7 +228,7 @@ function shellTemplate(
       >
         ${hintChipsTemplate()}
         ${vm.hasTrace
-          ? tracksTemplate(vm, spansTrack, taskDetailTrack, eventsTrack)
+          ? tracksTemplate(vm, spansTrack, taskDetailTrack, eventsTrack, queueTrack)
           : emptyStateTemplate()}
       </main>
       ${inspectorTemplate()}
@@ -284,6 +286,9 @@ export function mountShell(
   // assignment live across renders. Other content tracks (T22/T28-T30) mount
   // the same way as they land.
   const spansTrack = createSpansTrack(store);
+  // The queue track (T29): store-wired like spans, created once so its
+  // trace-keyed series cache + drag state live across renders (F5).
+  const queueTrack = createQueueTrack(store);
   // The task-detail track (T30): store-wired like spans, created once so its
   // selection-keyed derivation cache lives across renders (F5). Its row is
   // only rendered while a task is selected (selectionOnly, N1).
@@ -293,10 +298,13 @@ export function mountShell(
   function renderPass(): void {
     const state = store.getState() as StoreState;
     const vm = viewModel(state, deps);
-    render(shellTemplate(vm, deps, spansTrack, taskDetailTrack, eventsTrack), root);
+    render(
+      shellTemplate(vm, deps, spansTrack, taskDetailTrack, eventsTrack, queueTrack),
+      root,
+    );
     const column = root.querySelector<HTMLElement>(".d9-track-column");
     if (column && vm.hasTrace) {
-      sizeTracks(column, vm, spansTrack, taskDetailTrack, eventsTrack);
+      sizeTracks(column, vm, spansTrack, taskDetailTrack, eventsTrack, queueTrack);
     }
   }
 
@@ -333,6 +341,7 @@ export function mountShell(
       unsubscribe();
       window.removeEventListener("resize", onResize);
       spansTrack.dispose();
+      queueTrack.dispose();
       taskDetailTrack.dispose();
       eventsTrack.dispose();
     },

@@ -200,6 +200,40 @@ body {
 }
 .d9-lanes-legend-text { white-space: nowrap; }
 
+/* ── Queue depth track (T29; features/02 section M + S6/F3) ──────────── */
+/* Column wrap: an always-visible legend strip (F3) above the chart canvas so
+   the global/max-local/active-task encodings are labeled (the S6 fix - one
+   legible representation), not hidden in a collapsed fold. */
+.d9-queue-wrap { flex-direction: column; }
+.d9-queue-legend {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 2px 12px;
+    height: 18px;
+    margin: 0;
+    padding: 2px 6px;
+    list-style: none;
+    font-size: 9px;
+    line-height: 1;
+    color: var(--d9-fg-muted);
+    background: #131834;
+    border-bottom: 1px solid var(--d9-border);
+    overflow: hidden;
+}
+.d9-queue-legend-row { display: inline-flex; align-items: center; gap: 4px; }
+.d9-queue-legend-swatch {
+    width: 14px;
+    height: 8px;
+    flex-shrink: 0;
+    border-radius: 1px;
+}
+/* Line encodings (max-local, active-task) read as a 2px rule, not a box, so
+   the swatch matches what the track draws (F3: swatches match rendering). */
+.d9-queue-legend-swatch.shape-line { height: 2px; }
+.d9-queue-legend-text { white-space: nowrap; }
+.d9-queue-canvas { flex: 1; min-width: 0; }
+
 /* ── Spans track (T26; features/02 section J) ────────────────────────── */
 
 /* The spans row keeps the shared LABEL_W gutter so its canvas stays axis-
