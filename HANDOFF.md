@@ -1,120 +1,117 @@
-# T24 - Crosshair overlay, hover tooltip, info readout - HANDOFF
+# T27 - Custom events track - HANDOFF
 
-(Supersedes the T22 HANDOFF inherited through the branch chain.)
+(Supersedes the T24 HANDOFF inherited through the branch chain.)
 
-## STATUS: DoD met (mechanical gates green; live-browser items deferred per the
-T21/T22/T25 precedent). Ready for review.
+## STATUS: DoD met (mechanical gates green; live-browser row-walk + the
+T31-dependent sidebar-KV diff deferred per the T24/T26 precedent). Ready for
+review.
 
-The transient channel (features/02 I1-I6 + V) landed on the store's `transient`
-RAF channel with the 03 F3 read-after-write anti-pattern eliminated. The
-`transient.atCursor` readout store contract is defined and populated; a minimal
-inspector stub renders it until T31 lands.
+The custom-events panel (features/02 section K) landed as a time-aligned track
+in the unified column: per-pixel marker ticks (K1), the `N events · M markers`
+info (K2), name-chip legend + clear (K5/K6), click-to-pin (K4), the hover guide
+line (K3/I4), and task/poll resolution (K7). The T24/T31 seams are honored
+strictly: T27 DISPATCHES `transient.hoverEventTs` (the orange guide) and
+`selection.pinnedEvent` (the marker + sidebar); T24's overlay draws the marks,
+T31's inspector will render the event KV. The legacy per-frame O(all generic
+events) visibility scan (03 F5) is replaced by a BOTH-EDGES binary-searched
+window (03 F6's binary-search-helpers rule) - the perf fix this ticket owns.
 
-## COMPLETED (commits, on branch ticket/T24-crosshair-tooltip)
+## COMPLETED (commits, on branch ticket/T27-events-track)
 
-- `79a02c6` feat(T24): transient.atCursor readout contract in state types
-  - `types/state.d.ts`: new `AtCursorReadout` interface (the store contract T31
-    renders) + `atCursor` field on `TransientSlice`. Carries the T17
-    windowed-data `coverage` signal.
-  - `pages/viewer/store.ts`: init `transient.atCursor: null`.
-  - `store/store.test.ts`, `types/exhaustive.test.ts`: extended the T06/T07
-    StoreState literals with the additive field (mechanical, like T25's
-    timeMode/tz).
-- `d457bee` feat(T24): crosshair overlay + hover tooltip + at-cursor readout
-  - `components/overlay/crosshair.ts`: pure `drawCrosshair` (I2 mouse / I3
-    keyboard cursor / I4 custom-event guide / I5 pinned marker) + `crosshairX`
-    using the SHARED `time.nsToPanelX` (A13/N4 invariant). Overlay canvas
-    resizes only on geometry change (lib/canvas/dpr).
-  - `components/overlay/tooltip.ts`: `placeTooltip` PURE over CACHED dims (the
-    F3 fix), ResizeObserver-refreshed; `laneTooltipModel` reproduces the G16
-    content from T22's `assembleLaneHover` output (consumed, not
-    reimplemented); lit-html render (auto-escapes, #587).
-  - `components/overlay/readout.ts`: `computeAtCursorReadout` (I6 parity) +
-    `coverageAt` (T17 residency mapping) + `renderAtCursorStub` (inspector).
-  - `components/overlay/data.ts`: once-per-trace hover-input derivation (global
-    queue + active-task series LaneData omits), cached via store.derived.
-  - `components/overlay/index.ts`: hover controller - mousemove reads geometry
-    once (clean, pre-write) and dispatches transient; drawFrame (sole
-    subscriber on hover frames) reads-before-writes -> zero forced layout.
-  - `pages/viewer/main.ts`: mounts the overlay after shell+lanes.
-  - `styles/viewer.css`: overlay/tooltip/readout styles + `.d9-track-column`
-    positioning context.
-- `0fe9320` test(T24): overlay vitest (crosshair/tooltip/readout).
+- `00f54a3` feat(viewer): custom-events track - markers, legend, click-to-pin,
+  hover guide (T27)
+  - NEW `pages/viewer/events-model.ts`: pure derivation + logic.
+    - `computeEventTrackData` (F5 tier-1, trace-invariant): generic (non-span)
+      custom events sorted by ts + sorted unique names for the legend. Filters
+      out SpanEnter:/SpanExit: prefixes + SpanEnter/Exit/CloseEvent (legacy
+      viewer.html:2100-2119).
+    - `lowerBoundByTimestamp` / `upperBoundByTimestamp` / `filterVisibleEvents`:
+      the visible window BINARY-SEARCHED at BOTH edges (point events, unlike
+      spans, need no back-scan) - O(log N + window), never O(N). THE 03 F5 -> F6
+      fix.
+    - `buildEventRenderModel` (K1/K2): per-pixel clustering, tick width
+      `max(3, min(3+log2(size)*2, 10))`, base alpha `min(0.4+size*0.15, 1)`,
+      mixed-name second stripe, `>=12px` hit padding, `N events · M markers`.
+      Does NOT read the selection (the draw applies the S4 fade -> a selection
+      change is a cheap redraw over cached geometry).
+    - `resolveTaskForEvent` / `resolvePollForEvent` / `resolveClusterTask` (K7):
+      ported verbatim from legacy `taskForEvent`/`pollForEvent`.
+    - `eventHighlightTask` (S4): `selectedTaskId ?? pinnedEvent.taskId` - the
+      selection-slice-driven dim key, same mechanism as T26's `spanHighlight`.
+    - `buildPinnedEvent` / `isSameCluster` (K4): the PinnedCustomEvent contract
+      builder + the same-cluster (toggle-off) test by representative-event
+      identity.
+  - NEW `pages/viewer/events-track.ts`: the store-wired controller
+    (mirrors `spans-track.ts`). Derived caches (event data + worker lanes, F5),
+    a WeakMap-memoized per-event task resolver (legacy `_taskForEventCache`), a
+    render-model memo NOT keyed on selection (S4), the K5/K6 legend template
+    (keyed `repeat`, F7), the K3 hover tooltip, and the exported dispatch
+    functions `dispatchEventPin` (K4) / `dispatchHoverEvent` (I4) + the pure
+    `drawEventsCanvas`. Surfaces a "partial window" badge when a segment is
+    `oversized` (T17 carried obligation; point markers have no continuous edge
+    to hatch, so only the oversized state is surfaced).
+  - Shell wiring (smallest additive edits, mirroring the spans track):
+    `tracks.ts` (+`eventsTrack?` param on `tracksTemplate`/`sizeTracks` + the
+    "events" delegation branches), `shell.ts` (create/thread/dispose
+    `createEventsTrack`), `track-layout.ts` (events height 44 -> 70 for the
+    legend strip + tick canvas), `styles/viewer.css` (`d9-events-*`).
 
-## DoD
+- `91c5f4e` test(T27): events-model + events-track Vitest (K rows + DoD checks)
+  - `events-model.test.ts` (20 tests): extraction, the BOUNDED-SCAN proof
+    (access-counting Proxy over a 50k-event array: `< 100` element reads for a
+    10-event window vs 50k linear), name filter, clustering geometry, info,
+    task/poll/cluster resolution, S4 key.
+  - `events-track.test.ts` (6 tests): click-to-pin dispatch (contract +
+    toggle-off + prior-selection clear), hover dispatch + no-op-when-unchanged,
+    dim-on-selection render input, derived-cache invalidation.
 
-- check: row-walker green on I/V rows -> DEFERRED (T12 Playwright row-walker;
-  live-browser, same disposition as T21/T22/T25 HANDOFFs). Behavioral fidelity
-  is a faithful port of the legacy `renderCrosshair` / lane-hover handler /
-  `updateInfoPanel`, locked by the `laneTooltipModel` content Vitest.
-- check: T12 perf probe - hover storm ZERO forced-layout from the tooltip path
-  -> DESIGN GUARANTEE + Vitest proxy DONE; full Playwright probe DEFERRED.
-  Guarantee: `placeTooltip` is pure over cached dims (no element measure, ever);
-  dims refresh via ResizeObserver (no forced sync layout); on a hover-only frame
-  the shell does NOT run (never subscribes to `transient`), so `drawFrame` is
-  the sole subscriber and its geometry reads precede all writes. `placeTooltip`
-  purity asserted in tooltip.test.ts.
-- check: crosshair alignment vs lanes (Vitest on shared layout math) -> DONE
-  (crosshair.test.ts: overlay x == every track's absolute-in-column x at three
-  widths). The "+ one T12 visual check" is the deferred live item.
-- check: at-cursor store contract populated during hover -> DONE
-  (readout.test.ts: computeAtCursorReadout + the transient.atCursor contract
-  delivered to a subscriber on the coalesced tick; the stub renders it).
+## DoD status
 
-## GATE BAR (hard rule 3) - all green
+- check: row-walker green on K -> DEFERRED (live browser + T12 row-walker, not
+  runnable headless here; same deferral as T24/T25/T26). All K rows (K1-K8; K8
+  is the legacy DEAD "inline tick label", preserved as not-implemented)
+  are ported - see events-model.ts / events-track.ts anchors above.
+- check: click-to-pin dispatches the selection slice (Vitest) -> DONE
+  (`events-track.test.ts` > `dispatchEventPin (K4)`).
+  - sidebar-KV behavioral-diff vs legacy -> DEFERRED-UNTIL-T31 (T31 owns the
+    event-KV inspector surface; T27 dispatches `selection.pinnedEvent` with
+    `detailEvent`, verified in the same test). Re-run this diff once T31 lands.
+- check: bounded-scan Vitest -> DONE (`events-model.test.ts` >
+  "scans O(log N + window), NOT O(N)").
+- check: dim-on-selection as T26 -> DONE (`events-track.test.ts` >
+  `drawEventsCanvas dimming (S4)`); mechanism mirrors T26's `spanHighlight`
+  (selection-slice-driven, cheap redraw over cached geometry).
+
+## EVIDENCE (gate bar, run in dial9-viewer/ui unless noted)
 
 - `npx tsc --noEmit` -> exit 0.
-- `npm run test` (full Vitest) -> Test Files 68 passed | 1 skipped; Tests 1080
-  passed | 1 expected-fail | 11 skipped. Zero unexpected failures. Boundary
-  check (`check:boundary`) OK - no core imports outside lib/trace + lib/canvas.
-- `npm run build` -> clean (129 modules; new-viewer bundle 48.30 kB).
-- `cargo build -p dial9-viewer` -> Finished (rust-embed picks up the new
-  dist/). JS/TS/CSS-only change: no `.rs` touched, no trace format change, so
-  cargo nextest/clippy/fmt skipped per AGENTS.md.
+- `npm run check:boundary` -> "OK (no core imports outside lib/trace +
+  lib/canvas)".
+- `npm run test` (full Vitest) -> Test Files 73 passed | 1 skipped (74);
+  Tests 1197 passed | 1 expected fail | 11 skipped (1209). 0 unexpected
+  failures. (The events suites: 26 passed.)
+- `npm run build` -> clean, "built in 394ms", 17 static-copy items.
+- `cargo build -p dial9-viewer` (repo root) -> Finished (rust-embed picks up
+  the rebuilt `ui/dist`).
 
-## SCOPE NOTES / SEAMS
+## REMAINING / deferred
 
-- T22 seam: consumed `assembleLaneHover` / `LaneHoverData` unchanged; T24 only
-  assembles its INPUT (via `deriveOverlayData`, reusing frozen-core builders)
-  and renders the tooltip. Lane hover LOGIC not reimplemented. `deriveWorkerIds`
-  imported from lanes/data.ts. (One extra one-time `buildWorkerSpans` pass per
-  trace load - overlay + lanes each derive; not a per-frame cost.)
-- T23 seam (pointer machine, NOT landed): T24 owns the HOVER path only
-  (`transient.mouseNs` + tooltip + readout). It adds a mousemove/mouseleave
-  listener that dispatches transient; drag/zoom and the keyboard-selection
-  cursor are T23's (`transient.drag` / `transient.keyboardSelection`, which the
-  crosshair already reads). While a drag is active the controller suppresses the
-  tooltip + mouse crosshair (legacy V3), so the two won't fight when T23 lands.
-- T31 seam: `transient.atCursor` is the store contract T31's inspector renders;
-  `renderAtCursorStub` is the placeholder that proves the wiring until then.
-  It appends into `.d9-inspector-body` (static-content container -> survives the
-  shell's declarative re-renders, the legend/toast technique).
-- Shell shared point: `main.ts` got a 3-line additive mount + dispose; the
-  overlay canvas is an imperatively-appended child of `.d9-track-column`
-  (re-ensured each frame). No edit to `tracks.ts`/`track-renderers.ts`.
+- T12 row-walker on features/02 section K against the running new-UI viewer
+  (headless browser env required).
+- Sidebar-KV behavioral diff vs legacy: activates once T31 lands and renders
+  `selection.pinnedEvent`.
 
 ## BLOCKERS / QUESTIONS
 
-None blocking. One observation:
+None. No STOP-gate hit: every K row had a legacy source of truth, the T24
+overlay contract (`transient.hoverEventTs`, `selection.pinnedEvent`) was already
+consumed by the merged `components/overlay/crosshair.ts`, and the spans track
+(T26) supplied the exact track-wiring + dim pattern to mirror.
 
-- The binding-file `docs/tickets/reviews/T17-audit.md` does NOT exist in this
-  worktree (the whole `docs/tickets/reviews/` dir is absent). The T17-audit
-  FINDINGS are baked into the merged code (`types/state.d.ts` cites "T17-audit
-  finding 2", `types/trace.d.ts` cites finding 1 + "notes 6-7"). I satisfied the
-  carried obligation from those: `AtCursorReadout.coverage` + the tooltip
-  "Window:" warning row surface a truncated/oversized window instead of
-  presenting it as whole, populated from the `segments` slice residency
-  (`coverageAt`). On the current whole-trace (non-segmented) load path the map
-  is empty, so coverage resolves to "complete"; when a future ticket wires
-  segment windowing into the viewer, the covering segment's state drives it. Not
-  a stop-gate (the obligation is directional and satisfied); flagged for the
-  reviewer's awareness.
+## SCOPE NOTES (owned K rows only; no unrelated changes)
 
-## EVIDENCE (commands)
-
-- `cd dial9-viewer/ui && npx tsc --noEmit` -> exit 0
-- `cd dial9-viewer/ui && npx vitest run src/components/overlay/` -> 3 files, 29
-  tests passed
-- `cd dial9-viewer/ui && npm run test` -> 1080 passed, 0 unexpected failures
-- `cd dial9-viewer/ui && npm run build` -> built in ~0.4s, clean
-- `cargo build -p dial9-viewer` -> Finished
+- Did NOT draw T24's overlay marks (I4 guide / I5 marker) - only dispatched the
+  slices; `crosshair.ts` already draws both.
+- Did NOT build T31's sidebar - only dispatched `selection.pinnedEvent`.
+- `track-layout.ts` events height 44 -> 70 is the one shared-shell geometry
+  edit, needed to seat the legend strip above the (legacy 40px) tick canvas.
