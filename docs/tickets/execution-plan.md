@@ -216,12 +216,54 @@ stats); caught+fixed a `<base href>` replaceState bug; H4/D4/G3/E2 defects PRESE
 advisory), package.json byte-identical. tsc clean after each.
 FULL-SUITE BATCH GATE: GREEN (1524 passed + 1 xfail + 11 skipped, exit 0, clean
 no-agent run). T32/T41/T45 validated; tree at 2c1f84f healthy. Build clean.
-T37 (UX-findings closure sweep - LAST chunk-2 ticket) DISPATCHED off 2c1f84f (deps
-T21-T36 + T41 all met). Builds the finding->ticket map, closes every 04 finding
-(landed/deferred/reject-pending), small polish only.
-REMAINING after T37: T39 (legacy removal, TRUE FINAL chunk-2 - needs parity gates) ->
-T44 (issue housekeeping, draft-only: gh closes are maintainer) + T47 (core-reshape
-ADR), both after T39.
+T37 (UX-findings closure) MERGED 2026-07-13 (5017d4b, clean). Closure table for all
+23 findings in 04-ux-findings.md (18 landed / 3 landed+remainder / 2 deferred / 0
+rejected). 2 small fixes: browser.css contrast (F6/F4, axe 15->12 nodes) + viewer
+`f`=fit binding (K4). tsc+build+cargo clean.
+
+## MIGRATION IMPLEMENTATION COMPLETE (2026-07-13)
+
+Every autonomously-implementable ticket is IMPLEMENTED + MERGED into integration/
+chunk-1 + full-suite validated:
+- Chunk 1: T01-T20, T38, T43, T48.
+- Chunk 2: T21-T37 (viewer shell, all tracks, interaction, inspector, toolbar+rail,
+  load chrome, minimap+status, track-mgmt, flamegraph/region, UX closure).
+- Chunk 3: T40, T41, T42, T45, T46.
+Final certification full-suite gate: running (b9o5mbxpy); prior clean tree was 1524
+green. Build + cargo (rust-embed) clean, all 4 migrated pages bundled.
+
+## MAINTAINER-GATED REMAINDER (cannot complete autonomously)
+
+- **T39 (legacy removal capstone)** - the migration's definition-of-done. Requires:
+  (a) "bake time (maintainer-declared)" - the plan reserves WHEN legacy is removed
+  for the maintainer; (b) DESTRUCTIVE deletion of legacy pages + static-copy list +
+  ui-switch injection (irreversible, outward-facing - needs sign-off); (c) the FULL
+  live T12 parity suite (census + behavioral differ vs recorded baselines + NFR
+  budgets N1-N4/N6/N19 + ~10x heap) on demo + x8 stress + the T42 >=100MB set -
+  needs the seeded DDB dev-server (env limit every chunk-2 ticket hit); (d) the
+  100MB cap lift (features/01 H4); (e) every ledger line's sign-off PR. NOT started
+  - reversible prep (baseline recording, cap-lift code) could be pre-staged on
+  request, but deletion + bake-time is the maintainer's call.
+- **T44 (issue housekeeping)** - close the GitHub issues the migration fixes (#68,
+  #281, #282, #303, #571, #596 + #587/#593 already). gh closes are DENIED to me
+  (maintainer-only); draft-able on request.
+- **T47 (core-reshape ADR)** - activated only AFTER T39 (K7 keyboard-frame-traversal
+  + flamegraph absolute-zoom core API). Gated.
+- **Push/PR integration/chunk-1 -> main** - push DENIED; maintainer owns.
+
+## SURFACED DECISIONS / KNOWN GAPS (for the maintainer)
+
+- **K1**: the viewer `?` help ADVERTISES `/` search but it is NOT wired (T20 built
+  createSearchPalette, zero viewer callers). Either wire it (feature-sized: index via
+  lib/trace/query -> palette -> selection dispatch) or drop `/` from the viewer help.
+  Currently the help promises a key that does nothing - a real UX defect.
+- **a11y debt on the 3 behavior-preserving ports** (browser/flamegraph/tokio-stats):
+  unlabeled inputs, missing <main>, brand accent #6c63ff fails contrast (3.68:1).
+  Carried by design (census-preserving ports); needs a separate a11y ticket.
+- **T41 preserved defects** H4 (/api/trace 404 exemplar), D4/G3/E2 - carried
+  byte-identical per census-delta rule; one-line fixes deferred, maintainer sign-off.
+- AGENTS.md ~line 80 has pre-existing em-dashes (dependency-authored) - cleanup.
+- T01 HANDOFF: 3 open questions still await maintainer ruling.
 REMAINING: T37 (after T41) -> T39 (legacy removal, LAST, needs parity) -> T44 (issue
 housekeeping) + T47 (core-reshape ADR), both after T39. T43+T48+T40+T42 DONE.
 DEFERRED BATCH GATE: full Vitest for T30/T23/T27 folded forward - run ONE clean
