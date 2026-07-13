@@ -207,7 +207,21 @@ dependency tickets (AGENTS.md testing section already Vitest-rewritten, ui/READM
 already current); net change = end-user "Using the viewer" section in the canonical
 README (symlinked -> all 3 surfaces). NOTE: AGENTS.md line ~80 has pre-existing
 em-dashes (dependency-authored, f754bbe) - flagged, out of T46 scope; clean up later.
-IN FLIGHT (off 6585f8c): T41 (tokio_stats migration), T45 (segment metadata #68).
+T45 (segment metadata #68) MERGED (9c8a2b8) + T41 (tokio_stats migration) MERGED
+(2c1f84f), 2026-07-13. Both only ledger+HANDOFF conflicts. T45: confirmed writer
+keys literally "service"/"host", restored structured-metadata display T33's port
+dropped (C1a). T41: ALL FOUR PAGES now migrated (browser/viewer/flamegraph/tokio-
+stats); caught+fixed a `<base href>` replaceState bug; H4/D4/G3/E2 defects PRESERVED
+(census-delta rule) - ledgered for maintainer; happy-dom added-then-removed (RCE
+advisory), package.json byte-identical. tsc clean after each.
+FULL-SUITE BATCH GATE: running in background (bzhpoot55) validating T32/T41/T45 on a
+clean (no-agent) tree. Build clean.
+T37 (UX-findings closure sweep - LAST chunk-2 ticket) DISPATCHED off 2c1f84f (deps
+T21-T36 + T41 all met). Builds the finding->ticket map, closes every 04 finding
+(landed/deferred/reject-pending), small polish only.
+REMAINING after T37: T39 (legacy removal, TRUE FINAL chunk-2 - needs parity gates) ->
+T44 (issue housekeeping, draft-only: gh closes are maintainer) + T47 (core-reshape
+ADR), both after T39.
 REMAINING: T37 (after T41) -> T39 (legacy removal, LAST, needs parity) -> T44 (issue
 housekeeping) + T47 (core-reshape ADR), both after T39. T43+T48+T40+T42 DONE.
 DEFERRED BATCH GATE: full Vitest for T30/T23/T27 folded forward - run ONE clean
