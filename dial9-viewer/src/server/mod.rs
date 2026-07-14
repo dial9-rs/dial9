@@ -30,7 +30,7 @@ use credentials::{CredError, CredSource, MaybeCreds};
 /// success and the `x-amz-bucket-region` response header on the redirect error
 /// that S3 returns when the client's region doesn't match the bucket's.
 ///
-/// Shared by startup region detection ([`crate::serve`]) and the
+/// Shared by startup region detection ([`crate::build_app`]) and the
 /// `/api/credentials/check` endpoint.
 pub(crate) async fn region_from_head_bucket(
     client: &aws_sdk_s3::Client,
