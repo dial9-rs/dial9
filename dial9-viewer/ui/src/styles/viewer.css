@@ -486,6 +486,11 @@ body {
 .d9-track-manage.is-collapsed .d9-track-canvas-wrap {
     display: none;
 }
+/* Collapsed: header is the whole row - span it so the label centers. */
+.d9-track-manage.is-collapsed .d9-track-manage-strip {
+    bottom: 0;
+    padding-top: 0;
+}
 
 /* ── Worker-lanes legend (G19 + 04 F3): non-interactive ribbon over the
    lanes canvas wrap; explains every in-lane mark incl. the q:NN label. ── */

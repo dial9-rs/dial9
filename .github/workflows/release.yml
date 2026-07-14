@@ -33,7 +33,7 @@ jobs:
           cache-dependency-path: dial9-viewer/ui/package-lock.json
       # Build the viewer UI BEFORE release-plz publishes: the dial9-viewer
       # crate archive must carry ui/dist (embedded via rust-embed at compile
-      # time), so cargo-install users never need Node (constraint H1).
+      # time), so cargo-install users never need Node.
       - name: Build viewer UI
         working-directory: dial9-viewer/ui
         run: npm ci && npm run build
@@ -93,7 +93,7 @@ jobs:
           cache-dependency-path: dial9-viewer/ui/package-lock.json
 
       # Build the viewer UI BEFORE the binaries: rust-embed embeds ui/dist
-      # into dial9-viewer at compile time (constraint H1).
+      # into dial9-viewer at compile time.
       - name: Build viewer UI
         working-directory: dial9-viewer/ui
         shell: bash

@@ -23,7 +23,7 @@ import { TRACKS } from "./track-layout.js";
 import type { TrackId, TrackSpec } from "./track-layout.js";
 
 /** Collapsed (label-only) track height in CSS px. */
-export const COLLAPSED_TRACK_H = 24;
+export const COLLAPSED_TRACK_H = 36;
 
 /**
  * The tracks the user can collapse + reorder: the foldable analysis surfaces
