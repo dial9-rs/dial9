@@ -13,11 +13,11 @@ fn tmp_base_path() -> PathBuf {
 mod fluent_builder {
     use std::panic::{AssertUnwindSafe, catch_unwind};
 
-    use dial9::{DiskWriter, RecorderBuilderTokioExt, TracedRecorder};
+    use dial9::{DiskWriter, RecorderBuilderTokioExt, TokioSessionBuilder};
 
     use super::tmp_base_path;
 
-    fn test_config() -> TracedRecorder {
+    fn test_config() -> TokioSessionBuilder {
         let writer = DiskWriter::builder()
             .base_path(tmp_base_path())
             .max_file_size(1024 * 1024)
@@ -27,8 +27,8 @@ mod fluent_builder {
         dial9::recorder(writer).with_tokio(|_| {})
     }
 
-    fn disabled_config() -> TracedRecorder {
-        TracedRecorder::disabled().with_tokio(|t| {
+    fn disabled_config() -> TokioSessionBuilder {
+        TokioSessionBuilder::disabled().with_tokio(|t| {
             t.worker_threads(2);
         })
     }
@@ -170,8 +170,8 @@ mod fluent_builder {
 
     // --- Disabled telemetry ---
 
-    fn disabled_config_default() -> TracedRecorder {
-        TracedRecorder::disabled()
+    fn disabled_config_default() -> TokioSessionBuilder {
+        TokioSessionBuilder::disabled()
     }
 
     #[dial9::main(config = disabled_config)]
@@ -246,7 +246,7 @@ mod in_memory {
 
     use dial9::background_task::{ProcessError, SegmentData, SegmentProcessor};
     use dial9::telemetry::{Dial9Handle, Dial9TokioHandle};
-    use dial9::{InMemoryWriter, RecorderBuilderTokioExt, TracedRecorder};
+    use dial9::{InMemoryWriter, RecorderBuilderTokioExt, TokioSessionBuilder};
 
     /// Stand-in delivery processor: forwards each segment unchanged.
     #[derive(Debug, Default)]
@@ -265,7 +265,7 @@ mod in_memory {
         }
     }
 
-    fn memory_config() -> TracedRecorder<dial9::Memory> {
+    fn memory_config() -> TokioSessionBuilder<dial9::Memory> {
         let writer = InMemoryWriter::builder()
             .max_total_size(16 * 1024 * 1024)
             .build()
@@ -293,20 +293,20 @@ mod in_memory {
 
 // ===========================================================================
 // Lenient downgrade path: on a writer-I/O failure the config function falls
-// back to `TracedRecorder::disabled()` (a plain tokio runtime with no
+// back to `TokioSessionBuilder::disabled()` (a plain tokio runtime with no
 // telemetry). Exercises the macro through that downgrade.
 // ===========================================================================
 mod fluent_builder_fallback {
     use std::path::PathBuf;
 
     use dial9::telemetry::Dial9Handle;
-    use dial9::{DiskWriter, TracedRecorder};
+    use dial9::{DiskWriter, TokioSessionBuilder};
 
     use super::tmp_base_path;
 
     /// Build a disk-backed recorder, or fall back to a disabled recorder (a
     /// plain tokio runtime) when the writer cannot be created.
-    fn disk_recorder_or_disabled(base_path: PathBuf) -> TracedRecorder {
+    fn disk_recorder_or_disabled(base_path: PathBuf) -> TokioSessionBuilder {
         let writer = DiskWriter::builder()
             .base_path(base_path)
             .max_file_size(1024 * 1024)
@@ -315,7 +315,7 @@ mod fluent_builder_fallback {
         dial9::recorder_or_disabled(writer, |_| {})
     }
 
-    fn fallback_config() -> TracedRecorder {
+    fn fallback_config() -> TokioSessionBuilder {
         disk_recorder_or_disabled(tmp_base_path())
     }
 
@@ -323,7 +323,7 @@ mod fluent_builder_fallback {
         PathBuf::from("/this/dir/does/not/exist/dial9_macro_fallback_trace.bin")
     }
 
-    fn cascading_fallback_config() -> TracedRecorder {
+    fn cascading_fallback_config() -> TokioSessionBuilder {
         disk_recorder_or_disabled(unwritable_base_path())
     }
 

@@ -42,7 +42,7 @@ static ALLOC: Dial9Allocator<CountingAllocator> = Dial9Allocator::new(CountingAl
 fn hook_realloc_emits_alloc_and_free_when_liveset_on() {
     let (capture, batches) = capture_processor();
 
-    let traced = recorder(InMemoryWriter::new(CAPTURE_BUFFER_SIZE).unwrap())
+    let session = recorder(InMemoryWriter::new(CAPTURE_BUFFER_SIZE).unwrap())
         .with_tokio(|t| {
             t.worker_threads(1);
         })
@@ -50,7 +50,7 @@ fn hook_realloc_emits_alloc_and_free_when_liveset_on() {
         .build()
         .unwrap();
 
-    let handle = traced.guard().handle();
+    let handle = session.record_handle();
     let _mem_guard = MemoryProfiler::from_config(
         MemoryProfilingConfig::builder()
             .sample_rate_bytes(64)
@@ -61,7 +61,7 @@ fn hook_realloc_emits_alloc_and_free_when_liveset_on() {
     .install(handle)
     .expect("install should succeed");
 
-    traced.runtime().block_on(async {
+    session.runtime().block_on(async {
         let mut v: Vec<u8> = Vec::new();
         for i in 0..1000u16 {
             v.push((i & 0xff) as u8);
@@ -72,7 +72,7 @@ fn hook_realloc_emits_alloc_and_free_when_liveset_on() {
         tokio::time::sleep(Duration::from_millis(200)).await;
     });
 
-    traced.graceful_shutdown();
+    session.graceful_shutdown();
 
     assert!(
         ALLOC_COUNT.load(Ordering::Relaxed) > 0,

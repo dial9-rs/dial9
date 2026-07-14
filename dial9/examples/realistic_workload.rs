@@ -1,11 +1,11 @@
 use std::time::Duration;
 
 use dial9::telemetry::Dial9TokioHandle;
-use dial9::{DiskWriter, TracedRecorder};
+use dial9::{DiskWriter, TokioSessionBuilder};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
-fn my_config() -> TracedRecorder {
+fn my_config() -> TokioSessionBuilder {
     let writer = DiskWriter::builder()
         .base_path("realistic_trace.bin")
         .max_file_size(64 * 1024 * 1024)

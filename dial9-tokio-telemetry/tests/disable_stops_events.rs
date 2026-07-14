@@ -40,7 +40,7 @@ fn disable_stops_all_event_production() {
     let trace_path = dir.path().join("trace.bin");
     let writer = DiskWriter::single_file(&trace_path).unwrap();
 
-    let traced = recorder(writer)
+    let session = recorder(writer)
         .with_tokio(|t| {
             t.worker_threads(2);
         })
@@ -48,10 +48,10 @@ fn disable_stops_all_event_production() {
         .build()
         .unwrap();
 
-    let handle = traced.guard().handle();
+    let handle = session.record_handle();
 
     // Phase 1: produce events while enabled
-    traced.runtime().block_on(async {
+    session.runtime().block_on(async {
         let mut handles = Vec::new();
         for _ in 0..100 {
             handles.push(tokio::spawn(async {
@@ -77,7 +77,7 @@ fn disable_stops_all_event_production() {
         .count();
 
     // Phase 2: produce more work while disabled
-    traced.runtime().block_on(async {
+    session.runtime().block_on(async {
         let mut handles = Vec::new();
         for _ in 0..500 {
             handles.push(tokio::spawn(async {
@@ -107,7 +107,7 @@ fn disable_stops_all_event_production() {
         count_after_phase2 - count_after_disable,
     );
 
-    drop(traced);
+    drop(session);
 }
 
 /// After `disable()` with CPU profiling enabled, no new events should
@@ -123,7 +123,7 @@ fn disable_stops_cpu_sample_production() {
     let trace_path = dir.path().join("trace.bin");
     let writer = DiskWriter::single_file(&trace_path).unwrap();
 
-    let traced = recorder(writer)
+    let session = recorder(writer)
         .with_cpu_profiling(CpuProfilingConfig::default())
         .with_tokio(|t| {
             t.worker_threads(2);
@@ -132,10 +132,10 @@ fn disable_stops_cpu_sample_production() {
         .build()
         .unwrap();
 
-    let handle = traced.guard().handle();
+    let handle = session.record_handle();
 
     // Phase 1: burn CPU to generate perf samples while enabled.
-    traced.runtime().block_on(async {
+    session.runtime().block_on(async {
         let mut handles = Vec::new();
         for _ in 0..4 {
             handles.push(tokio::spawn(async {
@@ -170,7 +170,7 @@ fn disable_stops_cpu_sample_production() {
     let total_after_disable = read_events_on_disk(dir.path()).len();
 
     // Phase 2: burn CPU while disabled — should NOT produce any events
-    traced.runtime().block_on(async {
+    session.runtime().block_on(async {
         let mut handles = Vec::new();
         for _ in 0..4 {
             handles.push(tokio::spawn(async {
@@ -196,7 +196,7 @@ fn disable_stops_cpu_sample_production() {
         total_after_phase2 - total_after_disable,
     );
 
-    drop(traced);
+    drop(session);
 }
 
 /// After `disable()`, the DiskWriter must not produce new segments.
@@ -217,7 +217,7 @@ fn disable_stops_segment_rotation() {
         .build()
         .unwrap();
 
-    let traced = recorder(writer)
+    let session = recorder(writer)
         .with_tokio(|t| {
             t.worker_threads(2);
         })
@@ -225,10 +225,10 @@ fn disable_stops_segment_rotation() {
         .build()
         .unwrap();
 
-    let handle = traced.guard().handle();
+    let handle = session.record_handle();
 
     // Phase 1: produce events while enabled, let a few rotations happen.
-    traced.runtime().block_on(async {
+    session.runtime().block_on(async {
         let mut handles = Vec::new();
         for _ in 0..100 {
             handles.push(tokio::spawn(async {
@@ -277,7 +277,7 @@ fn disable_stops_segment_rotation() {
         segments_after_wait.saturating_sub(segments_after_disable),
     );
 
-    traced.graceful_shutdown();
+    session.graceful_shutdown();
 }
 
 /// After `disable()`, re-enabling with `enable()` should resume event production.
@@ -287,7 +287,7 @@ fn enable_after_disable_resumes_events() {
     let trace_path = dir.path().join("trace.bin");
     let writer = DiskWriter::single_file(&trace_path).unwrap();
 
-    let traced = recorder(writer)
+    let session = recorder(writer)
         .with_tokio(|t| {
             t.worker_threads(2);
         })
@@ -295,14 +295,14 @@ fn enable_after_disable_resumes_events() {
         .build()
         .unwrap();
 
-    let handle = traced.guard().handle();
+    let handle = session.record_handle();
 
     // Disable, then re-enable
     handle.disable();
     std::thread::sleep(Duration::from_millis(50));
     handle.enable();
 
-    traced.runtime().block_on(async {
+    session.runtime().block_on(async {
         let mut handles = Vec::new();
         for _ in 0..100 {
             handles.push(tokio::spawn(async {
@@ -315,7 +315,7 @@ fn enable_after_disable_resumes_events() {
     });
 
     // Drop runtime to flush TL buffers, then guard to flush collector
-    drop(traced);
+    drop(session);
 
     let runtime_event_count = read_events_on_disk(dir.path())
         .iter()

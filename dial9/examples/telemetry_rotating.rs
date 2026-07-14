@@ -30,13 +30,13 @@ fn main() -> std::io::Result<()> {
     // recorder(writer).with_tokio(..).build() installs telemetry hooks on the
     // tokio runtime and returns a traced runtime that owns the background
     // flush/sampler thread.
-    let traced = recorder(writer)
+    let session = recorder(writer)
         .with_tokio(|t| {
             t.worker_threads(4);
         })
         .build()?;
 
-    traced.runtime().block_on(async {
+    session.runtime().block_on(async {
         println!("Starting rotating-writer telemetry demo...");
 
         // Spawn a batch of tasks that do a mix of yielding and sleeping to
@@ -62,7 +62,7 @@ fn main() -> std::io::Result<()> {
     });
 
     // Dropping the traced runtime flushes remaining events.
-    drop(traced);
+    drop(session);
 
     // List the trace files that were written.
     println!("\nTrace files in {trace_dir}/:");

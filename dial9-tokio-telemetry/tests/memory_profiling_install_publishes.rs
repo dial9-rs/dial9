@@ -13,14 +13,14 @@ mod common;
 fn install_publishes_active_inner() {
     assert!(!is_installed(), "should not be installed before install()");
 
-    let traced = recorder(common::small_mem_writer())
+    let session = recorder(common::small_mem_writer())
         .with_tokio(|t| {
             t.worker_threads(1);
         })
         .build()
         .unwrap();
 
-    let handle = traced.guard().handle();
+    let handle = session.record_handle();
     let _mem_guard = MemoryProfiler::from_config(
         MemoryProfilingConfig::builder()
             .sample_rate_bytes(256 * 1024)

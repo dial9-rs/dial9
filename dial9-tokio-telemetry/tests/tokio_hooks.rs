@@ -1,4 +1,4 @@
-use dial9_tokio_telemetry::telemetry::{RecorderBuilderTokioExt, TelemetryCore, recorder};
+use dial9_tokio_telemetry::telemetry::{RecorderBuilderTokioExt, recorder};
 
 mod common;
 use std::sync::Arc;
@@ -12,7 +12,7 @@ fn on_thread_start_and_stop_fire() {
     let stc = stop_count.clone();
 
     let num_workers = 4;
-    let traced = recorder(common::small_mem_writer())
+    let session = recorder(common::small_mem_writer())
         .with_tokio(move |t| {
             t.worker_threads(num_workers);
         })
@@ -27,7 +27,7 @@ fn on_thread_start_and_stop_fire() {
         .build()
         .unwrap();
 
-    traced.runtime().block_on(async {
+    session.runtime().block_on(async {
         // Ensure all workers have started by spawning work on each.
         let mut handles = Vec::new();
         for _ in 0..num_workers * 4 {
@@ -40,7 +40,7 @@ fn on_thread_start_and_stop_fire() {
         }
     });
 
-    drop(traced);
+    drop(session);
 
     assert!(
         start_count.load(Ordering::Relaxed) >= num_workers,
@@ -61,15 +61,17 @@ fn each_runtime_gets_own_hooks() {
     let ca = count_a.clone();
     let cb = count_b.clone();
 
-    let guard = TelemetryCore::builder()
-        .writer(common::small_mem_writer())
+    // Unused current-thread primary; the runtimes under test attach below.
+    let session = recorder(common::small_mem_writer())
+        .with_tokio(|t| {
+            *t = tokio::runtime::Builder::new_current_thread();
+        })
         .build()
         .unwrap();
-    guard.enable();
 
     let mut builder_a = tokio::runtime::Builder::new_multi_thread();
     builder_a.worker_threads(2).enable_all();
-    let (runtime_a, _handle_a) = guard
+    let (runtime_a, _handle_a) = session
         .trace_runtime("a")
         .with_tokio_hooks(|h| {
             h.on_before_task_poll(move |_meta| {
@@ -81,7 +83,7 @@ fn each_runtime_gets_own_hooks() {
 
     let mut builder_b = tokio::runtime::Builder::new_multi_thread();
     builder_b.worker_threads(2).enable_all();
-    let (runtime_b, _handle_b) = guard
+    let (runtime_b, _handle_b) = session
         .trace_runtime("b")
         .with_tokio_hooks(|h| {
             h.on_before_task_poll(move |_meta| {
@@ -134,7 +136,7 @@ fn each_runtime_gets_own_hooks() {
 
     drop(runtime_a);
     drop(runtime_b);
-    let _ = guard.graceful_shutdown(std::time::Duration::from_secs(1));
+    session.graceful_shutdown();
 }
 
 #[test]
@@ -142,7 +144,7 @@ fn on_thread_park_fires() {
     let park_count = Arc::new(AtomicUsize::new(0));
     let pc = park_count.clone();
 
-    let traced = recorder(common::small_mem_writer())
+    let session = recorder(common::small_mem_writer())
         .with_tokio(|t| {
             t.worker_threads(2);
         })
@@ -154,12 +156,12 @@ fn on_thread_park_fires() {
         .build()
         .unwrap();
 
-    traced.runtime().block_on(async {
+    session.runtime().block_on(async {
         // Sleep to let workers park
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     });
 
-    drop(traced);
+    drop(session);
 
     assert!(
         park_count.load(Ordering::Relaxed) > 0,
@@ -172,7 +174,7 @@ fn on_thread_unpark_fires() {
     let unpark_count = Arc::new(AtomicUsize::new(0));
     let uc = unpark_count.clone();
 
-    let traced = recorder(common::small_mem_writer())
+    let session = recorder(common::small_mem_writer())
         .with_tokio(|t| {
             t.worker_threads(2);
         })
@@ -184,7 +186,7 @@ fn on_thread_unpark_fires() {
         .build()
         .unwrap();
 
-    traced.runtime().block_on(async {
+    session.runtime().block_on(async {
         // Generate work to trigger unparks
         let mut handles = Vec::new();
         for _ in 0..20 {
@@ -197,7 +199,7 @@ fn on_thread_unpark_fires() {
         }
     });
 
-    drop(traced);
+    drop(session);
 
     assert!(
         unpark_count.load(Ordering::Relaxed) > 0,
@@ -212,7 +214,7 @@ fn task_poll_hooks_fire() {
     let bc = before_count.clone();
     let ac = after_count.clone();
 
-    let traced = recorder(common::small_mem_writer())
+    let session = recorder(common::small_mem_writer())
         .with_tokio(|t| {
             t.worker_threads(2);
         })
@@ -227,14 +229,14 @@ fn task_poll_hooks_fire() {
         .build()
         .unwrap();
 
-    traced.runtime().block_on(async {
+    session.runtime().block_on(async {
         let handle = tokio::spawn(async {
             tokio::task::yield_now().await;
         });
         handle.await.unwrap();
     });
 
-    drop(traced);
+    drop(session);
 
     assert!(
         before_count.load(Ordering::Relaxed) > 0,
@@ -259,7 +261,7 @@ fn task_lifecycle_hooks_fire() {
     let tc = terminate_count.clone();
 
     let num_tasks = 10;
-    let traced = recorder(common::small_mem_writer())
+    let session = recorder(common::small_mem_writer())
         .with_tokio(|t| {
             t.worker_threads(2);
         })
@@ -275,7 +277,7 @@ fn task_lifecycle_hooks_fire() {
         .build()
         .unwrap();
 
-    traced.runtime().block_on(async {
+    session.runtime().block_on(async {
         let mut handles = Vec::new();
         for _ in 0..num_tasks {
             handles.push(tokio::spawn(async {
@@ -287,7 +289,7 @@ fn task_lifecycle_hooks_fire() {
         }
     });
 
-    drop(traced);
+    drop(session);
 
     assert!(
         spawn_count.load(Ordering::Relaxed) >= num_tasks,
@@ -307,7 +309,7 @@ fn task_spawn_hook_fires_when_task_tracking_disabled() {
     let sc = spawn_count.clone();
 
     let num_tasks = 5;
-    let traced = recorder(common::small_mem_writer())
+    let session = recorder(common::small_mem_writer())
         .with_tokio(|t| {
             t.worker_threads(2);
         })
@@ -320,7 +322,7 @@ fn task_spawn_hook_fires_when_task_tracking_disabled() {
         .build()
         .unwrap();
 
-    traced.runtime().block_on(async {
+    session.runtime().block_on(async {
         let mut handles = Vec::new();
         for _ in 0..num_tasks {
             handles.push(tokio::spawn(async {
@@ -332,7 +334,7 @@ fn task_spawn_hook_fires_when_task_tracking_disabled() {
         }
     });
 
-    drop(traced);
+    drop(session);
 
     assert!(
         spawn_count.load(Ordering::Relaxed) >= num_tasks,
@@ -347,7 +349,7 @@ fn task_terminate_hook_fires_when_task_tracking_disabled() {
     let tc = terminate_count.clone();
 
     let num_tasks = 5;
-    let traced = recorder(common::small_mem_writer())
+    let session = recorder(common::small_mem_writer())
         .with_tokio(|t| {
             t.worker_threads(2);
         })
@@ -360,7 +362,7 @@ fn task_terminate_hook_fires_when_task_tracking_disabled() {
         .build()
         .unwrap();
 
-    traced.runtime().block_on(async {
+    session.runtime().block_on(async {
         let mut handles = Vec::new();
         for _ in 0..num_tasks {
             handles.push(tokio::spawn(async {
@@ -372,7 +374,7 @@ fn task_terminate_hook_fires_when_task_tracking_disabled() {
         }
     });
 
-    drop(traced);
+    drop(session);
 
     assert!(
         terminate_count.load(Ordering::Relaxed) >= num_tasks,
@@ -388,7 +390,7 @@ fn dial9_hooks_run_before_user_hooks() {
     let hook_fired = Arc::new(AtomicUsize::new(0));
     let hf = hook_fired.clone();
 
-    let traced = recorder(common::small_mem_writer())
+    let session = recorder(common::small_mem_writer())
         .with_tokio(|t| {
             t.worker_threads(2);
         })
@@ -406,7 +408,7 @@ fn dial9_hooks_run_before_user_hooks() {
         .build()
         .unwrap();
 
-    traced.runtime().block_on(async {
+    session.runtime().block_on(async {
         tokio::spawn(async {
             tokio::task::yield_now().await;
         })
@@ -414,7 +416,7 @@ fn dial9_hooks_run_before_user_hooks() {
         .unwrap();
     });
 
-    drop(traced);
+    drop(session);
 
     assert!(
         hook_fired.load(Ordering::Relaxed) > 0,
@@ -427,7 +429,7 @@ fn hook_stacking_single_callback_fires() {
     let log = Arc::new(std::sync::Mutex::new(Vec::<&'static str>::new()));
     let log_c = log.clone();
 
-    let traced = recorder(common::small_mem_writer())
+    let session = recorder(common::small_mem_writer())
         .with_tokio(|t| {
             t.worker_threads(1);
         })
@@ -439,12 +441,12 @@ fn hook_stacking_single_callback_fires() {
         .build()
         .unwrap();
 
-    traced.runtime().block_on(async {
+    session.runtime().block_on(async {
         // Sleep to let the worker park at least once
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     });
 
-    drop(traced);
+    drop(session);
 
     let entries = log.lock().unwrap();
     assert!(
@@ -459,7 +461,7 @@ fn hook_stacking_multiple_callbacks_fire_in_order() {
     let log_a = log.clone();
     let log_b = log.clone();
 
-    let traced = recorder(common::small_mem_writer())
+    let session = recorder(common::small_mem_writer())
         .with_tokio(|t| {
             t.worker_threads(1);
         })
@@ -474,11 +476,11 @@ fn hook_stacking_multiple_callbacks_fire_in_order() {
         .build()
         .unwrap();
 
-    traced.runtime().block_on(async {
+    session.runtime().block_on(async {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     });
 
-    drop(traced);
+    drop(session);
 
     let entries = log.lock().unwrap();
     assert!(
@@ -504,7 +506,7 @@ fn hook_stacking_multiple_with_tokio_hooks_calls() {
     let log_a = log.clone();
     let log_b = log.clone();
 
-    let traced = recorder(common::small_mem_writer())
+    let session = recorder(common::small_mem_writer())
         .with_tokio(|t| {
             t.worker_threads(1);
         })
@@ -521,11 +523,11 @@ fn hook_stacking_multiple_with_tokio_hooks_calls() {
         .build()
         .unwrap();
 
-    traced.runtime().block_on(async {
+    session.runtime().block_on(async {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     });
 
-    drop(traced);
+    drop(session);
 
     let entries = log.lock().unwrap();
     assert!(
@@ -550,7 +552,7 @@ fn hook_stacking_task_meta_hooks_fire_in_order() {
     let log_a = log.clone();
     let log_b = log.clone();
 
-    let traced = recorder(common::small_mem_writer())
+    let session = recorder(common::small_mem_writer())
         .with_tokio(|t| {
             t.worker_threads(1);
         })
@@ -565,7 +567,7 @@ fn hook_stacking_task_meta_hooks_fire_in_order() {
         .build()
         .unwrap();
 
-    traced.runtime().block_on(async {
+    session.runtime().block_on(async {
         tokio::spawn(async {
             tokio::task::yield_now().await;
         })
@@ -573,7 +575,7 @@ fn hook_stacking_task_meta_hooks_fire_in_order() {
         .unwrap();
     });
 
-    drop(traced);
+    drop(session);
 
     let entries = log.lock().unwrap();
     assert!(

@@ -95,7 +95,7 @@ fn expand_main(args: MainArgs, input: ItemFn) -> Result<TokenStream2, syn::Error
     Ok(quote! {
         #(#attrs)*
         #vis fn #name() #ret {
-            let __dial9_rt = ::dial9::TracedRuntime::new(#config_call);
+            let __dial9_rt = ::dial9::TokioSession::new(#config_call);
             let __dial9_out = __dial9_rt.block_on(async move { #(#body_stmts)* });
             __dial9_rt.graceful_shutdown();
             __dial9_out
@@ -118,12 +118,12 @@ fn expand_main(args: MainArgs, input: ItemFn) -> Result<TokenStream2, syn::Error
 /// # Arguments
 ///
 /// * `config` — a zero-argument function path or a zero-argument closure
-///   returning a value convertible into a `TracedRuntime`, in practice a
-///   `TracedRecorder` from `dial9::recorder(writer).with_tokio(..)` or from
+///   returning a value convertible into a `TokioSession`, in practice a
+///   `TokioSessionBuilder` from `dial9::recorder(writer).with_tokio(..)` or from
 ///   `dial9::recorder_from_env`. Runtime construction under the macro panics on
 ///   tokio-builder or telemetry-core I/O.
 ///
-///   Use `dial9::TracedRecorder::disabled()` to run without telemetry while
+///   Use `dial9::TokioSessionBuilder::disabled()` to run without telemetry while
 ///   keeping your `with_tokio` configurators.
 ///
 /// # Graceful shutdown
@@ -142,8 +142,8 @@ fn expand_main(args: MainArgs, input: ItemFn) -> Result<TokenStream2, syn::Error
 ///     // .disable_graceful_shutdown()                       // or opt out entirely
 /// ```
 ///
-/// The low-level `TracedRuntime` API is unaffected — there you call
-/// `TelemetryGuard::graceful_shutdown` yourself.
+/// The low-level `TokioSession` API is unaffected — there you call
+/// `TokioSession::graceful_shutdown` yourself.
 ///
 /// The implicit drain only runs when the body returns normally. If the body
 /// panics, the panic propagates and the guard's `Drop` still flushes and seals
@@ -156,9 +156,9 @@ fn expand_main(args: MainArgs, input: ItemFn) -> Result<TokenStream2, syn::Error
 ///
 /// ```rust,ignore
 /// use dial9::telemetry::Dial9TokioHandle;
-/// use dial9::{main, DiskWriter, RecorderBuilderTokioExt, TracedRecorder};
+/// use dial9::{main, DiskWriter, RecorderBuilderTokioExt, TokioSessionBuilder};
 ///
-/// fn my_config() -> TracedRecorder {
+/// fn my_config() -> TokioSessionBuilder {
 ///     let writer = DiskWriter::builder()
 ///         .base_path("/tmp/trace.bin")
 ///         .max_file_size(1024 * 1024)
@@ -209,7 +209,7 @@ fn expand_main(args: MainArgs, input: ItemFn) -> Result<TokenStream2, syn::Error
 /// dial9 off via a feature flag or env var without removing the macro):
 ///
 /// ```rust,ignore
-/// #[dial9::main(config = || dial9::TracedRecorder::disabled())]
+/// #[dial9::main(config = || dial9::TokioSessionBuilder::disabled())]
 /// async fn main() {
 ///     /* ... */
 /// }

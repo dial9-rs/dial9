@@ -1,22 +1,22 @@
 //! The Tokio runtime builder.
 //!
-//! [`TracedRecorder`] is the ergonomic builder, reached via
+//! [`TokioSessionBuilder`] is the ergonomic builder, reached via
 //! `recorder(w).with_tokio(..)` (the [`RecorderBuilderTokioExt`] trait, which
 //! the `dial9` facade re-exports). It configures the Tokio integration plus the
-//! segment pipeline and builds a [`TracedRuntime`].
+//! segment pipeline and builds a [`TokioSession`].
 //!
 //! [`build_traced`] + [`TokioAttachConfig`] are the lower-level primitive it
 //! builds on: they take a fully-assembled core [`RecorderBuilder`] plus Tokio
 //! config and wire up the runtime.
 
-use super::builder::{PipelineConfig, assemble_processors};
-use super::guard::TelemetryGuard;
+use super::builder::{PipelineConfig, TokioSession, assemble_processors};
 use super::runtime_context::{RuntimeContextRegistry, TokioRuntimesSource};
 use crate::background_task::{PipelineBuilder, SegmentProcessor};
 use crate::primitives::sync::{Arc, Mutex};
-use crate::telemetry::TracedRuntime;
+use crate::telemetry::task_dump_config::TaskDumpConfig;
 use dial9_core::handle::Dial9Handle;
 use dial9_core::recorder::{RecorderBuilder, RegisterSource};
+use dial9_core::session::CoreSession;
 use dial9_core::source::Source;
 use dial9_core::writer::{Disk, WriterMode};
 use std::time::Duration;
@@ -69,34 +69,25 @@ impl std::fmt::Debug for TokioAttachConfig {
     }
 }
 
-/// Build a [`TracedRuntime`] from a fully-assembled core builder + Tokio config.
-///
-/// Most callers want [`TracedRecorder`] (`recorder(w).with_tokio(..)`).
-pub fn build_traced<M: WriterMode>(
+/// Assemble the enabled recording [`CoreSession`] plus the shared runtime-context
+/// registry and task-dump config. [`build_traced`] then builds the primary
+/// runtime and wraps everything in a [`TokioSession`]. The session is left with
+/// recording off; the caller enables it after attaching the runtime.
+fn assemble_session_parts<M: WriterMode>(
     core: RecorderBuilder<M>,
-    tokio_builder: tokio::runtime::Builder,
-    config: TokioAttachConfig,
-) -> std::io::Result<TracedRuntime> {
-    if !config.enabled {
-        let (runtime, guard) = TracedRuntime::build_disabled(tokio_builder)?;
-        return Ok(TracedRuntime::from_parts(
-            runtime,
-            guard,
-            config.graceful_shutdown_timeout,
-        ));
-    }
-
+    config: &mut TokioAttachConfig,
+) -> std::io::Result<(CoreSession, RuntimeContextRegistry, Option<TaskDumpConfig>)> {
     // When the writer is namespaced, S3 keys and the embedded segment metadata
     // must use the same boot_id as the on-disk `{boot_id}/` directory, so a
     // local segment and its upload share one identity.
     let namespace_boot_id = core.writer_boot_id().map(str::to_owned);
 
     #[cfg(feature = "worker-s3")]
-    let preset = match (config.custom_processors, config.s3_config) {
+    let preset = match (config.custom_processors.take(), config.s3_config.take()) {
         (Some(procs), _) => PipelineConfig::Custom(procs),
         (None, Some(s3)) => {
             let mut uploader =
-                crate::background_task::S3PipelineUploader::new(s3, config.s3_client);
+                crate::background_task::S3PipelineUploader::new(s3, config.s3_client.take());
             if let Some(boot_id) = &namespace_boot_id {
                 uploader.set_boot_id(boot_id.clone());
             }
@@ -105,12 +96,12 @@ pub fn build_traced<M: WriterMode>(
         (None, None) => PipelineConfig::Unset,
     };
     #[cfg(not(feature = "worker-s3"))]
-    let preset = match config.custom_processors {
+    let preset = match config.custom_processors.take() {
         Some(procs) => PipelineConfig::Custom(procs),
         None => PipelineConfig::Unset,
     };
 
-    let mut segment_metadata = config.segment_metadata;
+    let mut segment_metadata = std::mem::take(&mut config.segment_metadata);
     if let Some(boot_id) = &namespace_boot_id {
         for (key, value) in &mut segment_metadata {
             if key == "boot_id" {
@@ -120,7 +111,7 @@ pub fn build_traced<M: WriterMode>(
     }
 
     // The default / S3 presets symbolize when the CPU profiler source is
-    // present (registered via `.with_cpu_profiling` before `.with_tokio`).
+    // present (registered via `.with_cpu_profiling`).
     #[cfg(feature = "cpu-profiling")]
     let symbolize = core
         .source_names()
@@ -148,39 +139,57 @@ pub fn build_traced<M: WriterMode>(
         });
 
     let core_session = core.build();
-    let guard = TelemetryGuard::enabled(core_session, contexts.clone(), config.task_dump_config);
 
     // Stash the dump trigger's tx so `Dial9Handle::dump_trigger` can reach it.
-    if let (Some(trigger), Some(shared)) = (config.dump_trigger, guard.shared()) {
+    if let (Some(trigger), Some(shared)) = (config.dump_trigger.take(), core_session.shared()) {
         shared.set_dump_trigger(trigger);
     }
+
+    Ok((core_session, contexts, config.task_dump_config.take()))
+}
+
+/// Build a [`TokioSession`] (recording session plus one owned primary runtime)
+/// from a fully-assembled core builder + Tokio config.
+///
+/// Most callers want [`TokioSessionBuilder`] (`recorder(w).with_tokio(..)`).
+pub fn build_traced<M: WriterMode>(
+    core: RecorderBuilder<M>,
+    tokio_builder: tokio::runtime::Builder,
+    mut config: TokioAttachConfig,
+) -> std::io::Result<TokioSession> {
+    if !config.enabled {
+        return TokioSession::build_disabled(tokio_builder, config.graceful_shutdown_timeout);
+    }
+
+    let (core_session, contexts, taskdump_config) = assemble_session_parts(core, &mut config)?;
 
     let runtime = if !config.tokio_instrumentation_enabled {
         let mut tokio_builder = tokio_builder;
         tokio_builder.build()?
     } else {
-        let handle = guard
-            .session_handle()
-            .expect("enabled guard has a session handle")
-            .clone();
-        let shared = guard.shared().expect("enabled guard has shared state");
+        let handle = core_session.handle().clone();
+        let shared = core_session
+            .shared()
+            .expect("enabled session has shared state");
         super::attach_runtime(
             shared,
             &contexts,
             tokio_builder,
-            config.runtime_name,
+            config.runtime_name.take(),
             &handle,
             config.task_tracking_enabled,
-            config.tokio_hooks,
-            guard.taskdump_config(),
+            std::mem::take(&mut config.tokio_hooks),
+            taskdump_config,
         )?
     };
 
-    guard.enable();
+    core_session.enable();
 
-    Ok(TracedRuntime::from_parts(
+    Ok(TokioSession::enabled(
         runtime,
-        guard,
+        core_session,
+        contexts,
+        taskdump_config,
         config.graceful_shutdown_timeout,
     ))
 }
@@ -230,34 +239,33 @@ mod sealed {
 impl<W: WriterMode> sealed::Sealed for RecorderBuilder<W> {}
 
 /// Extension trait adding `.with_tokio(..)` to the core [`RecorderBuilder`],
-/// transitioning it to a [`TracedRecorder`] that builds a [`TracedRuntime`].
+/// transitioning it to a [`TokioSessionBuilder`] that builds a [`TokioSession`].
 pub trait RecorderBuilderTokioExt<W: WriterMode>: sealed::Sealed + Sized {
     /// Wire this recorder to a Tokio runtime. The closure configures the
     /// runtime's [`tokio::runtime::Builder`] (pre-seeded `new_multi_thread()` +
-    /// `enable_all()`); replace `*t` inside to switch flavor.
-    ///
-    /// Plug sources (`.with_cpu_profiling(..)`, `.source(..)`) on the recorder
-    /// *before* this call; they belong to the core builder, and the pipeline
-    /// keys off them (e.g. CPU profiling drives symbolization).
-    fn with_tokio<F>(self, f: F) -> TracedRecorder<W>
+    /// `enable_all()`); replace `*t` inside to switch flavor. Finish with
+    /// [`build`](TokioSessionBuilder::build) to get a [`TokioSession`], then attach
+    /// more runtimes with [`TokioSession::trace_runtime`] for a multi-runtime
+    /// session.
+    fn with_tokio<F>(self, f: F) -> TokioSessionBuilder<W>
     where
         F: Fn(&mut tokio::runtime::Builder) + Send + Sync + 'static;
 }
 
 impl<W: WriterMode> RecorderBuilderTokioExt<W> for RecorderBuilder<W> {
-    fn with_tokio<F>(self, f: F) -> TracedRecorder<W>
+    fn with_tokio<F>(self, f: F) -> TokioSessionBuilder<W>
     where
         F: Fn(&mut tokio::runtime::Builder) + Send + Sync + 'static,
     {
-        TracedRecorder::new(self).with_tokio(f)
+        TokioSessionBuilder::new(self).with_tokio(f)
     }
 }
 
-/// Builds a [`TracedRuntime`] from a core [`RecorderBuilder`] plus Tokio
+/// Builds a [`TokioSession`] from a core [`RecorderBuilder`] plus Tokio
 /// integration and a segment pipeline. Reached via
 /// [`RecorderBuilderTokioExt::with_tokio`].
 #[must_use = "call `.build()` (or pass to `#[dial9::main]`) to start the runtime"]
-pub struct TracedRecorder<W: WriterMode = Disk> {
+pub struct TokioSessionBuilder<W: WriterMode = Disk> {
     // `None` only for the disabled, writer-free recorder (see [`disabled`]);
     // every other path owns a fully-built core builder.
     core: Option<RecorderBuilder<W>>,
@@ -279,27 +287,28 @@ pub struct TracedRecorder<W: WriterMode = Disk> {
     dump_trigger: Option<crate::dump::DumpTrigger>,
 }
 
-impl<W: WriterMode> std::fmt::Debug for TracedRecorder<W> {
+impl<W: WriterMode> std::fmt::Debug for TokioSessionBuilder<W> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TracedRecorder").finish_non_exhaustive()
+        f.debug_struct("TokioSessionBuilder")
+            .finish_non_exhaustive()
     }
 }
 
-impl<W: WriterMode> TracedRecorder<W> {
+impl<W: WriterMode> TokioSessionBuilder<W> {
     /// A disabled recorder: builds a plain Tokio runtime with no telemetry and,
     /// unlike `recorder(w).enabled(false)`, no writer at all. Nothing touches
     /// the disk, so [`recorder_from_env`](crate::telemetry) can take this path
     /// when `DIAL9_ENABLED` is off. Chain `.with_tokio(..)` for Tokio knobs.
     ///
     /// `W` defaults to [`Disk`] and is inferred from the return position, so a
-    /// `-> TracedRecorder<Memory>` config can `return TracedRecorder::disabled()`
+    /// `-> TokioSessionBuilder<Memory>` config can `return TokioSessionBuilder::disabled()`
     /// too.
     pub fn disabled() -> Self {
         Self::from_core(None)
     }
 }
 
-impl<W: WriterMode> TracedRecorder<W> {
+impl<W: WriterMode> TokioSessionBuilder<W> {
     fn new(core: RecorderBuilder<W>) -> Self {
         Self::from_core(Some(core))
     }
@@ -383,7 +392,8 @@ impl<W: WriterMode> TracedRecorder<W> {
         self
     }
 
-    /// Bound on the worker drain at shutdown.
+    /// Bound on the worker drain at shutdown (used by
+    /// [`TokioSession::graceful_shutdown`]).
     pub fn graceful_shutdown(mut self, timeout: Duration) -> Self {
         self.graceful_shutdown_timeout = Some(timeout);
         self
@@ -448,20 +458,28 @@ impl<W: WriterMode> TracedRecorder<W> {
         self
     }
 
-    /// Build and start the traced runtime.
-    pub fn build(self) -> std::io::Result<TracedRuntime> {
-        let Some(mut core) = self.core else {
+    /// Build the [`TokioSession`] (recording session plus one owned primary runtime).
+    pub fn build(self) -> std::io::Result<TokioSession> {
+        let (core, config, configurators) = self.into_parts();
+        let tokio_builder = materialize_tokio_builder(&configurators);
+        let Some(core) = core else {
             // No core: the writer-free disabled recorder builds a plain runtime.
-            let tokio_builder = materialize_tokio_builder(&self.tokio_configurators);
-            let (runtime, guard) = TracedRuntime::build_disabled(tokio_builder)?;
-            return Ok(TracedRuntime::from_parts(
-                runtime,
-                guard,
-                self.graceful_shutdown_timeout,
-            ));
+            return TokioSession::build_disabled(tokio_builder, config.graceful_shutdown_timeout);
         };
+        build_traced(core, tokio_builder, config)
+    }
+
+    /// Lower the builder to `(core, Tokio config, runtime configurators)`.
+    fn into_parts(
+        self,
+    ) -> (
+        Option<RecorderBuilder<W>>,
+        TokioAttachConfig,
+        Vec<TokioConfigurator>,
+    ) {
+        let mut core = self.core;
         if let Some(rx) = self.trigger_rx {
-            core = core.trigger(rx);
+            core = core.map(|c| c.trigger(rx));
         }
 
         let mut custom_processors: Option<Vec<Box<dyn SegmentProcessor>>> = None;
@@ -490,20 +508,19 @@ impl<W: WriterMode> TracedRecorder<W> {
             .maybe_s3_config(s3_config)
             .maybe_s3_client(self.s3_client);
 
-        let tokio_builder = materialize_tokio_builder(&self.tokio_configurators);
-        build_traced(core, tokio_builder, builder.build())
+        (core, builder.build(), self.tokio_configurators)
     }
 }
 
-impl<W: WriterMode> TryFrom<TracedRecorder<W>> for TracedRuntime {
+impl<W: WriterMode> TryFrom<TokioSessionBuilder<W>> for TokioSession {
     type Error = std::io::Error;
 
-    fn try_from(recorder: TracedRecorder<W>) -> Result<Self, Self::Error> {
+    fn try_from(recorder: TokioSessionBuilder<W>) -> Result<Self, Self::Error> {
         recorder.build()
     }
 }
 
-impl<W: WriterMode> RegisterSource for TracedRecorder<W> {
+impl<W: WriterMode> RegisterSource for TokioSessionBuilder<W> {
     fn source(self, source: impl Source + 'static) -> Self {
         Self {
             core: self.core.map(|c| c.source(source)),
@@ -524,34 +541,56 @@ mod tests {
     use super::*;
 
     // The graceful-shutdown timeout set on the recorder flows through the
-    // (writer-free) build path into the resulting `TracedRuntime`.
+    // (writer-free) build path into the resulting `TokioSession`.
     #[test]
     fn graceful_shutdown_defaults_to_one_second() {
-        let traced = TracedRecorder::<Disk>::disabled().build().unwrap();
+        let session = TokioSessionBuilder::<Disk>::disabled().build().unwrap();
         assert_eq!(
-            traced.graceful_shutdown_timeout,
+            session.configured_graceful_shutdown_timeout(),
             Some(Duration::from_secs(1))
         );
     }
 
     #[test]
     fn graceful_shutdown_setter_overrides_default() {
-        let traced = TracedRecorder::<Disk>::disabled()
+        let session = TokioSessionBuilder::<Disk>::disabled()
             .graceful_shutdown(Duration::from_secs(7))
             .build()
             .unwrap();
         assert_eq!(
-            traced.graceful_shutdown_timeout,
+            session.configured_graceful_shutdown_timeout(),
             Some(Duration::from_secs(7))
         );
     }
 
     #[test]
     fn disable_graceful_shutdown_sets_none() {
-        let traced = TracedRecorder::<Disk>::disabled()
+        let session = TokioSessionBuilder::<Disk>::disabled()
             .disable_graceful_shutdown()
             .build()
             .unwrap();
-        assert_eq!(traced.graceful_shutdown_timeout, None);
+        assert_eq!(session.configured_graceful_shutdown_timeout(), None);
+    }
+
+    // A `TokioSession` can attach a second runtime to the same session via
+    // `trace_runtime`, and recording is enabled on both.
+    #[test]
+    fn trace_runtime_attaches_second_runtime() {
+        use dial9_core::recorder::recorder;
+        use dial9_core::writer::InMemoryWriter;
+
+        let session = recorder(InMemoryWriter::new(1 << 20).unwrap())
+            .with_tokio(|t| {
+                t.worker_threads(1);
+            })
+            .build()
+            .unwrap();
+        assert!(session.is_enabled());
+
+        let (runtime, _handle) = session
+            .trace_runtime("second")
+            .build(tokio::runtime::Builder::new_current_thread())
+            .unwrap();
+        runtime.block_on(async {});
     }
 }

@@ -20,7 +20,7 @@ static ALLOC: Dial9Allocator = Dial9Allocator::system();
 fn hook_captures_sampled_allocations() {
     let (capture, batches) = capture_processor();
 
-    let traced = recorder(InMemoryWriter::new(CAPTURE_BUFFER_SIZE).unwrap())
+    let session = recorder(InMemoryWriter::new(CAPTURE_BUFFER_SIZE).unwrap())
         .with_tokio(|t| {
             t.worker_threads(1);
         })
@@ -28,7 +28,7 @@ fn hook_captures_sampled_allocations() {
         .build()
         .unwrap();
 
-    let handle = traced.guard().handle();
+    let handle = session.record_handle();
     let _mem_guard = MemoryProfiler::from_config(
         MemoryProfilingConfig::builder()
             .sample_rate_bytes(1024)
@@ -38,7 +38,7 @@ fn hook_captures_sampled_allocations() {
     .install(handle)
     .expect("install should succeed");
 
-    traced.runtime().block_on(async {
+    session.runtime().block_on(async {
         for _ in 0..100 {
             let v: Vec<u8> = Vec::with_capacity(1024);
             std::hint::black_box(v);
@@ -47,7 +47,7 @@ fn hook_captures_sampled_allocations() {
         tokio::time::sleep(Duration::from_millis(200)).await;
     });
 
-    traced.graceful_shutdown();
+    session.graceful_shutdown();
 
     let b = batches.lock().unwrap();
     let events: Vec<Dial9Event> = decode_all(&b);

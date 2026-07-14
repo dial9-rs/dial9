@@ -34,7 +34,7 @@ enum OverflowEvent {
 fn no_overflow_event_when_ring_has_capacity() {
     let (capture, batches) = capture_processor();
 
-    let traced = recorder(InMemoryWriter::new(CAPTURE_BUFFER_SIZE).unwrap())
+    let session = recorder(InMemoryWriter::new(CAPTURE_BUFFER_SIZE).unwrap())
         .with_tokio(|t| {
             t.worker_threads(1);
         })
@@ -42,7 +42,7 @@ fn no_overflow_event_when_ring_has_capacity() {
         .build()
         .unwrap();
 
-    let handle = traced.guard().handle();
+    let handle = session.record_handle();
     let _mem_guard = MemoryProfiler::from_config(
         MemoryProfilingConfig::builder()
             .sample_rate_bytes(512 * 1024)
@@ -53,7 +53,7 @@ fn no_overflow_event_when_ring_has_capacity() {
     .install(handle)
     .expect("install should succeed");
 
-    traced.runtime().block_on(async {
+    session.runtime().block_on(async {
         for _ in 0..10 {
             let v: Vec<u8> = vec![0u8; 64];
             std::hint::black_box(&v);
@@ -62,7 +62,7 @@ fn no_overflow_event_when_ring_has_capacity() {
         tokio::time::sleep(Duration::from_millis(100)).await;
     });
 
-    traced.graceful_shutdown();
+    session.graceful_shutdown();
 
     let batches = batches.lock().unwrap();
     let events: Vec<OverflowEvent> = decode_all(&batches);

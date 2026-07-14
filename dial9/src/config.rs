@@ -1,7 +1,7 @@
 //! Environment-driven configuration for the `#[dial9::main]` macro.
 //!
 //! [`recorder_from_env`] reads the standard `DIAL9_*` variables and assembles a
-//! [`TracedRecorder`] ready to hand to `#[dial9::main]` (or `.build()` directly).
+//! [`TokioSessionBuilder`] ready to hand to `#[dial9::main]` (or `.build()` directly).
 //! With `DIAL9_ENABLED` off it returns a writer-free disabled recorder that
 //! builds a plain Tokio runtime; a writer-setup failure is logged at `error!`
 //! and downgraded the same way, so a bad trace config never takes down
@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use dial9_core::writer::{Disk, DiskWriter, SegmentWriter};
-use dial9_tokio_telemetry::telemetry::{RecorderBuilderTokioExt, TracedRecorder};
+use dial9_tokio_telemetry::telemetry::{RecorderBuilderTokioExt, TokioSessionBuilder};
 
 #[cfg(any(
     feature = "cpu-profiling",
@@ -447,7 +447,7 @@ fn build_s3_config(
         .build()
 }
 
-/// Build a production-oriented [`TracedRecorder`] from standard `DIAL9_*`
+/// Build a production-oriented [`TokioSessionBuilder`] from standard `DIAL9_*`
 /// environment variables.
 ///
 /// Hand it straight to the macro: `#[dial9::main(config = dial9::recorder_from_env)]`.
@@ -533,11 +533,11 @@ fn build_s3_config(
 /// emit a warning and are treated as missing. With `DIAL9_ENABLED` off, or
 /// when the trace writer cannot be created, the returned recorder builds a
 /// plain Tokio runtime (the failure is logged at `error!`).
-pub fn recorder_from_env() -> TracedRecorder<Disk> {
+pub fn recorder_from_env() -> TokioSessionBuilder<Disk> {
     recorder_from_env_source(&ProcessEnv)
 }
 
-fn recorder_from_env_source(env: &impl EnvSource) -> TracedRecorder<Disk> {
+fn recorder_from_env_source(env: &impl EnvSource) -> TokioSessionBuilder<Disk> {
     let ResolvedEnvConfig {
         enabled,
         trace_dir,
@@ -587,7 +587,7 @@ fn recorder_from_env_source(env: &impl EnvSource) -> TracedRecorder<Disk> {
 
     // Disabled: return a writer-free recorder so nothing touches the disk.
     if !enabled {
-        return TracedRecorder::disabled();
+        return TokioSessionBuilder::disabled();
     }
 
     // Build the disk writer; on failure downgrade to a disabled recorder so a
@@ -605,23 +605,23 @@ fn recorder_from_env_source(env: &impl EnvSource) -> TracedRecorder<Disk> {
             error(format_args!(
                 "dial9: telemetry writer setup failed; falling back to plain tokio runtime: {e}"
             ));
-            return TracedRecorder::disabled();
+            return TokioSessionBuilder::disabled();
         }
     };
 
     // Sources that live on the flush-thread recorder are plugged before
     // `with_tokio`; the Tokio-only knobs (and S3 / memory profiling) chain onto
-    // the resulting `TracedRecorder`.
+    // the resulting `TokioSessionBuilder`.
     let core = apply_core_sources(dial9_core::recorder::recorder(writer), &runtime_config);
-    let traced = apply_runtime_env(core.with_tokio(|_| {}), runtime_config, s3);
+    let session = apply_runtime_env(core.with_tokio(|_| {}), runtime_config, s3);
 
     #[cfg(feature = "memory-profiling")]
-    let traced = match memory_profiling_config {
-        Some(config) => traced.with_memory_profiling(config),
-        None => traced,
+    let session = match memory_profiling_config {
+        Some(config) => session.with_memory_profiling(config),
+        None => session,
     };
 
-    traced
+    session
 }
 
 fn build_env_disk_writer(
@@ -707,19 +707,19 @@ fn apply_core_sources(
     core
 }
 
-/// Apply the Tokio-only env knobs (plus S3 upload) onto the `TracedRecorder`.
+/// Apply the Tokio-only env knobs (plus S3 upload) onto the `TokioSessionBuilder`.
 fn apply_runtime_env(
-    mut traced: TracedRecorder<Disk>,
+    mut session: TokioSessionBuilder<Disk>,
     config: RuntimeEnvConfig,
     s3: Option<ResolvedS3Config>,
-) -> TracedRecorder<Disk> {
+) -> TokioSessionBuilder<Disk> {
     if let Some(name) = config.runtime_name {
-        traced = traced.with_runtime_name(name);
+        session = session.with_runtime_name(name);
     }
     if let Some(enabled) = config.tokio_instrumentation_enabled {
-        traced = traced.with_tokio_instrumentation(enabled);
+        session = session.with_tokio_instrumentation(enabled);
     }
-    traced = traced.with_task_tracking(config.task_tracking_enabled);
+    session = session.with_task_tracking(config.task_tracking_enabled);
 
     if config.task_dump_enabled {
         let task_dump_config = match config.task_dump_idle_threshold {
@@ -728,12 +728,12 @@ fn apply_runtime_env(
                 .build(),
             None => dial9_tokio_telemetry::telemetry::TaskDumpConfig::default(),
         };
-        traced = traced.with_task_dumps(task_dump_config);
+        session = session.with_task_dumps(task_dump_config);
     }
 
     #[cfg(feature = "worker-s3")]
     if let Some(s3) = s3 {
-        traced = traced.with_s3_uploader(build_s3_config(s3));
+        session = session.with_s3_uploader(build_s3_config(s3));
     }
     #[cfg(not(feature = "worker-s3"))]
     if s3.is_some() {
@@ -742,7 +742,7 @@ fn apply_runtime_env(
         ));
     }
 
-    traced
+    session
 }
 
 #[cfg(test)]
@@ -750,7 +750,7 @@ mod tests {
     use std::collections::HashMap;
     use std::ffi::OsString;
 
-    use crate::TracedRuntime;
+    use crate::TokioSession;
 
     use super::*;
 
@@ -768,9 +768,8 @@ mod tests {
 
     /// Names of the sources installed on the runtime's session, reached through
     /// the public `guard().session()` accessor.
-    fn source_names(rt: &TracedRuntime) -> Vec<String> {
-        rt.guard()
-            .session()
+    fn source_names(rt: &TokioSession) -> Vec<String> {
+        rt.session()
             .expect("enabled session")
             .shared()
             .expect("enabled session")
@@ -779,9 +778,8 @@ mod tests {
     }
 
     /// Segment metadata contributed by the runtime's sources.
-    fn segment_metadata(rt: &TracedRuntime) -> Vec<(String, String)> {
-        rt.guard()
-            .session()
+    fn segment_metadata(rt: &TokioSession) -> Vec<(String, String)> {
+        rt.session()
             .expect("enabled session")
             .shared()
             .expect("enabled session")
@@ -1124,7 +1122,7 @@ mod tests {
             .build()
             .expect("disabled runtime should build");
         assert!(
-            !rt.guard().is_enabled(),
+            !rt.is_enabled(),
             "an env with DIAL9_ENABLED unset must yield a disabled runtime"
         );
         assert_eq!(rt.block_on(async { 5u32 }), 5);
@@ -1142,7 +1140,7 @@ mod tests {
             .build()
             .expect("writer I/O failure should downgrade to a plain runtime");
         assert!(
-            !rt.guard().is_enabled(),
+            !rt.is_enabled(),
             "writer setup failure must downgrade to a disabled runtime"
         );
         assert_eq!(rt.block_on(async { 42u32 }), 42);
@@ -1157,7 +1155,7 @@ mod tests {
             .build()
             .expect("runtime should build");
         assert!(
-            rt.guard().is_enabled(),
+            rt.is_enabled(),
             "DIAL9_ENABLED + DIAL9_TRACE_DIR should keep telemetry enabled"
         );
         // With per-process namespace isolation, trace files land in a
@@ -1204,7 +1202,7 @@ mod tests {
             "exactly one runtime, named from env, should surface in segment metadata"
         );
         assert_eq!(
-            rt.guard().taskdump_config().map(|c| c.idle_threshold()),
+            rt.taskdump_config().map(|c| c.idle_threshold()),
             Some(Duration::from_millis(25)),
             "env config should configure task dumps"
         );
@@ -1286,7 +1284,7 @@ mod tests {
         let rt = recorder_from_env_source(&env)
             .build()
             .expect("runtime should build");
-        assert!(rt.guard().is_enabled(), "telemetry should remain enabled");
+        assert!(rt.is_enabled(), "telemetry should remain enabled");
         let runtime_meta = segment_metadata(&rt);
         assert!(
             !runtime_meta.iter().any(|(k, _)| k.starts_with("runtime.")),

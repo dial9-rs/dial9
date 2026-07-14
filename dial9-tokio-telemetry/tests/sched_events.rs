@@ -18,7 +18,7 @@ fn sched_events_capture_context_switches() {
 
     let num_workers = 2u64;
 
-    let traced = recorder(InMemoryWriter::new(CAPTURE_BUFFER_SIZE).unwrap())
+    let session = recorder(InMemoryWriter::new(CAPTURE_BUFFER_SIZE).unwrap())
         .with_sched_events(SchedEventConfig::default())
         .with_tokio(move |t| {
             t.worker_threads(num_workers as usize);
@@ -27,7 +27,7 @@ fn sched_events_capture_context_switches() {
         .build()
         .unwrap();
 
-    traced.runtime().block_on(async {
+    session.runtime().block_on(async {
         let mut handles = Vec::new();
         for _ in 0..num_workers * 2 {
             handles.push(tokio::spawn(async {
@@ -40,7 +40,7 @@ fn sched_events_capture_context_switches() {
         tokio::time::sleep(Duration::from_millis(500)).await;
     });
 
-    traced.graceful_shutdown();
+    session.graceful_shutdown();
 
     let b = batches.lock().unwrap();
     let events: Vec<Dial9Event> = decode_all(&b);
@@ -88,7 +88,7 @@ fn sched_events_sampling_reduces_count() {
 
     let (capture, batches) = capture_processor();
 
-    let traced = recorder(InMemoryWriter::new(CAPTURE_BUFFER_SIZE).unwrap())
+    let session = recorder(InMemoryWriter::new(CAPTURE_BUFFER_SIZE).unwrap())
         .with_sched_events(SchedEventConfig::default().sampling_interval(PERIOD))
         .with_tokio(move |t| {
             t.worker_threads(num_workers as usize);
@@ -101,7 +101,7 @@ fn sched_events_sampling_reduces_count() {
     // Baseline switch counts for all current threads (workers already spawned).
     let before = common::snapshot_task_switches();
 
-    traced.runtime().block_on(async {
+    session.runtime().block_on(async {
         let mut handles = Vec::new();
         for _ in 0..num_workers * 20 {
             handles.push(tokio::spawn(async {
@@ -119,7 +119,7 @@ fn sched_events_sampling_reduces_count() {
     // Snapshot again while the worker threads are still alive.
     let after = common::snapshot_task_switches();
 
-    traced.graceful_shutdown();
+    session.graceful_shutdown();
 
     let b = batches.lock().unwrap();
     let events: Vec<Dial9Event> = decode_all(&b);

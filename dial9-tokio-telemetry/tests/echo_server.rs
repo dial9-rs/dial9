@@ -59,7 +59,7 @@ fn overhead_bench_validates() {
 
     let num_workers = 4;
     let writer = DiskWriter::single_file(&trace_path).unwrap();
-    let traced = recorder(writer)
+    let session = recorder(writer)
         .with_tokio(move |t| {
             t.worker_threads(num_workers);
         })
@@ -69,7 +69,7 @@ fn overhead_bench_validates() {
 
     let running = Arc::new(AtomicBool::new(true));
 
-    let tokio_metrics = traced.runtime().block_on(async move {
+    let tokio_metrics = session.runtime().block_on(async move {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
 
@@ -94,7 +94,7 @@ fn overhead_bench_validates() {
         (metrics, total_requests)
     });
 
-    drop(traced);
+    drop(session);
 
     let (metrics, total_requests) = tokio_metrics;
     eprintln!("Total requests processed: {total_requests}");

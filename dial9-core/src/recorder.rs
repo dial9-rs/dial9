@@ -191,7 +191,7 @@ impl<M: WriterMode> RecorderBuilder<M> {
 /// A builder that can register [`Source`]s.
 ///
 /// Implemented by [`RecorderBuilder`] and by runtime wrappers that own a core
-/// builder (e.g. the tokio layer's `TracedRecorder`), so source-registration
+/// builder (e.g. the tokio layer's `TokioSessionBuilder`), so source-registration
 /// sugar works the same on either.
 pub trait RegisterSource: Sized {
     /// Register a [`Source`] with the underlying recording session.
@@ -200,6 +200,23 @@ pub trait RegisterSource: Sized {
     /// Register a hook run once, with the live [`Dial9Handle`], when the session
     /// starts recording.
     fn on_session_start(self, hook: impl FnOnce(&Dial9Handle) + Send + 'static) -> Self;
+
+    /// Register a callback that dial9 invokes on the flush thread at the config's
+    /// interval to emit custom events. Sugar for [`source`](Self::source) with a
+    /// [`CustomEventsSource`](crate::custom_events::CustomEventsSource). Not
+    /// tokio-coupled — works on the plain recorder and the tokio session builder.
+    fn with_custom_events<F>(
+        self,
+        config: crate::custom_events::CustomEventsConfig,
+        callback: F,
+    ) -> Self
+    where
+        F: for<'a> FnMut(&mut crate::custom_events::CustomEventsContext<'a>) + Send + 'static,
+    {
+        self.source(crate::custom_events::CustomEventsSource::new(
+            config, callback,
+        ))
+    }
 }
 
 impl<M: WriterMode> RegisterSource for RecorderBuilder<M> {

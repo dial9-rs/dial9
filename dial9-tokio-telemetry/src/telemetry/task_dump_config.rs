@@ -3,8 +3,7 @@
 //! Task dumps capture async backtraces at yield points for tasks that have
 //! been idle, using Poisson sampling keyed on idle duration.
 //! Use [`TaskDumpConfig`] with
-//! [`TracedRecorder::with_task_dumps`](crate::telemetry::TracedRecorder::with_task_dumps)
-//! or [`TelemetryCoreBuilder::task_dump_config`](crate::telemetry::TelemetryCoreBuilder::task_dump_config).
+//! [`TokioSessionBuilder::with_task_dumps`](crate::telemetry::TokioSessionBuilder::with_task_dumps).
 //!
 //! Requires the `taskdump` crate feature. With that feature off, this module
 //! is still compiled so the configuration API surface stays the same, but no

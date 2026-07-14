@@ -1,10 +1,10 @@
 //! Multiple named runtimes sharing a single telemetry session.
 //!
 //! A common pattern is to run separate runtimes for different workload types
-//! (e.g. request handling vs background I/O). This example shows how to
-//! create a telemetry session with `TelemetryCore`, then attach multiple
-//! runtimes via `trace_runtime`, so all workers appear in a single trace
-//! file with their runtime names in the segment metadata.
+//! (e.g. request handling vs background I/O). This example builds a primary
+//! runtime with `recorder(w).with_tokio(..).build()`, then attaches a second
+//! one with `trace_runtime`, so all workers appear in a single trace file with
+//! their runtime names in the segment metadata.
 //!
 //! Usage:
 //!   cargo run --example multi_runtime
@@ -12,7 +12,7 @@
 //! After running, inspect the trace:
 //!   cargo run --example analyze_trace -- /tmp/multi_runtime/trace.0.bin
 
-use dial9::telemetry::{DiskWriter, TelemetryCore};
+use dial9::telemetry::{DiskWriter, RecorderBuilderTokioExt, recorder};
 use std::time::Duration;
 
 fn main() -> std::io::Result<()> {
@@ -25,28 +25,28 @@ fn main() -> std::io::Result<()> {
         .max_total_size(5 * 1024 * 1024)
         .build()?;
 
-    // Create the telemetry session — no runtime needed yet.
-    let guard = TelemetryCore::builder().writer(writer).build()?;
-    guard.enable();
-
     // Primary runtime for request handling.
-    let mut builder = tokio::runtime::Builder::new_multi_thread();
-    builder.worker_threads(2).enable_all();
-    let (main_rt, main_handle) = guard.trace_runtime("main").build(builder)?;
+    let session = recorder(writer)
+        .with_tokio(|t| {
+            t.worker_threads(2);
+        })
+        .with_runtime_name("main")
+        .graceful_shutdown(Duration::from_secs(5))
+        .build()?;
 
     // Secondary runtime for background I/O, sharing the same trace session.
     let mut io_builder = tokio::runtime::Builder::new_multi_thread();
     io_builder.worker_threads(2).enable_all();
-    let (io_rt, io_handle) = guard.trace_runtime("io").build(io_builder)?;
+    let (io_rt, io_handle) = session.trace_runtime("io").build(io_builder)?;
 
     println!("Running workload on two named runtimes...");
 
-    // Simulate request handling on the main runtime.
-    // Use handle.spawn() instead of tokio::spawn() for wake event tracking.
-    main_rt.block_on(async {
+    // Request handling on the main runtime. Spawn through the traced handle
+    // instead of tokio::spawn() for wake-event tracking.
+    let main_handle = session.handle();
+    session.runtime().block_on(async {
         let mut handles = Vec::new();
         for i in 0..20 {
-            // spawning into the traced handle allows for more tracking
             handles.push(main_handle.spawn(async move {
                 // Simulate request processing: some CPU work + async I/O.
                 tokio::task::yield_now().await;
@@ -60,11 +60,10 @@ fn main() -> std::io::Result<()> {
         }
     });
 
-    // Simulate background I/O on the io runtime.
+    // Background I/O on the second runtime.
     io_rt.block_on(async {
         let mut handles = Vec::new();
         for i in 0..10 {
-            // spawning into the traced handle allows for more tracking
             handles.push(io_handle.spawn(async move {
                 tokio::time::sleep(Duration::from_millis(10)).await;
                 tokio::task::yield_now().await;
@@ -78,10 +77,9 @@ fn main() -> std::io::Result<()> {
 
     println!("All tasks completed.");
 
-    // Drop runtimes before the guard so worker threads flush their buffers.
-    drop(main_rt);
+    // Drop the attached runtime before shutdown so worker threads flush their buffers.
     drop(io_rt);
-    let _ = guard.graceful_shutdown(Duration::from_secs(5));
+    session.graceful_shutdown();
 
     println!("\nTrace files in {trace_dir}/:");
     for entry in std::fs::read_dir(trace_dir)? {

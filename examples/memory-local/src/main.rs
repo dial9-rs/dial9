@@ -8,7 +8,7 @@
 
 use dial9::memory_profiling::{Dial9Allocator, MemoryProfiler, MemoryProfilingConfig};
 use dial9::telemetry::{Dial9Handle, Dial9TokioHandle};
-use dial9::{DiskWriter, TracedRecorder};
+use dial9::{DiskWriter, TokioSessionBuilder};
 use std::time::Duration;
 
 const TRACE_DIR: &str = "/tmp/memory-local-traces";
@@ -25,7 +25,7 @@ async fn allocate_some() {
     std::hint::black_box(&buffers);
 }
 
-fn my_config() -> TracedRecorder {
+fn my_config() -> TokioSessionBuilder {
     let trace_path = format!("{TRACE_DIR}/trace.bin");
     let writer = DiskWriter::builder()
         .base_path(&trace_path)

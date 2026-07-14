@@ -73,7 +73,7 @@ fn main() {
     {
         rec = rec.with_cpu_profiling(CpuProfilingConfig::default());
     }
-    let traced = rec
+    let session = rec
         .with_tokio(|t| {
             t.worker_threads(4);
         })
@@ -82,7 +82,7 @@ fn main() {
         .unwrap();
 
     let start = Instant::now();
-    traced.runtime().block_on(async {
+    session.runtime().block_on(async {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let server = tokio::spawn(workload_server(listener));
@@ -104,7 +104,7 @@ fn main() {
     });
     let wall = start.elapsed();
 
-    traced.graceful_shutdown();
+    session.graceful_shutdown();
 
     let rps = TOTAL_REQUESTS as f64 / wall.as_secs_f64();
     let mut report = bmf::Report::new();

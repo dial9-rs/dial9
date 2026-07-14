@@ -37,7 +37,7 @@ fn cpu_sample_timestamps_align_with_wall_clock() {
 
     let num_workers = 2u64;
 
-    let traced = recorder(InMemoryWriter::new(CAPTURE_BUFFER_SIZE).unwrap())
+    let session = recorder(InMemoryWriter::new(CAPTURE_BUFFER_SIZE).unwrap())
         .with_cpu_profiling(CpuProfilingConfig::default().frequency_hz(999))
         .with_tokio(move |t| {
             t.worker_threads(num_workers as usize);
@@ -47,13 +47,13 @@ fn cpu_sample_timestamps_align_with_wall_clock() {
         .unwrap();
 
     // All timestamps are now absolute CLOCK_MONOTONIC nanoseconds.
-    let _trace_start = traced.guard().start_time();
+    let _trace_start = session.start_time();
     let burn_windows: Arc<Mutex<Vec<(u64, u64)>>> = Arc::new(Mutex::new(Vec::new()));
 
     // Pattern: 150ms sleep → 80ms burn → 150ms sleep, repeated sequentially.
     // The 150ms gaps are much larger than the ~25ms MONOTONIC_RAW offset,
     // so a clock mismatch will cause samples to spill outside burn windows.
-    traced.runtime().block_on(async {
+    session.runtime().block_on(async {
         for _ in 0..3u64 {
             let windows = burn_windows.clone();
             tokio::spawn(async move {
@@ -70,7 +70,7 @@ fn cpu_sample_timestamps_align_with_wall_clock() {
         tokio::time::sleep(Duration::from_millis(500)).await;
     });
 
-    traced.graceful_shutdown();
+    session.graceful_shutdown();
 
     let b = batches.lock().unwrap();
     let events: Vec<Dial9Event> = decode_all(&b);
@@ -258,7 +258,7 @@ fn thread_name_attribution_for_external_and_blocking_threads() {
 
     let (capture, batches) = capture_processor();
 
-    let traced = recorder(InMemoryWriter::new(CAPTURE_BUFFER_SIZE).unwrap())
+    let session = recorder(InMemoryWriter::new(CAPTURE_BUFFER_SIZE).unwrap())
         .with_cpu_profiling(CpuProfilingConfig::default().frequency_hz(999))
         .with_tokio(|t| {
             t.worker_threads(2).thread_name("test-traced-runtime");
@@ -274,7 +274,7 @@ fn thread_name_attribution_for_external_and_blocking_threads() {
         .unwrap();
 
     // ── spawn_blocking — also exits before flush ─────────────────────────
-    let blocking_handle = traced.runtime().spawn(async {
+    let blocking_handle = session.runtime().spawn(async {
         tokio::task::spawn_blocking(|| burn_cpu(Duration::from_millis(400)));
         tokio::task::spawn_blocking(|| {
             let tid = nix::unistd::gettid().as_raw() as u32;
@@ -287,13 +287,13 @@ fn thread_name_attribution_for_external_and_blocking_threads() {
 
     // Wait for both to finish — threads are gone after this point
     ext_handle.join().unwrap();
-    let blocking_tid = traced.runtime().block_on(async {
+    let blocking_tid = session.runtime().block_on(async {
         let tid = blocking_handle.await.unwrap();
         tokio::time::sleep(Duration::from_millis(500)).await;
         tid
     });
 
-    traced.graceful_shutdown();
+    session.graceful_shutdown();
 
     let b = batches.lock().unwrap();
     let events: Vec<Dial9Event> = decode_all(&b);

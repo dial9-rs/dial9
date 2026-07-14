@@ -58,14 +58,14 @@ fn opt_out_prevents_tls_teardown_panic() {
 
     PANICS.store(0, Ordering::Relaxed);
 
-    let traced = recorder(InMemoryWriter::new(16 * 1024 * 1024).unwrap())
+    let session = recorder(InMemoryWriter::new(16 * 1024 * 1024).unwrap())
         .with_tokio(|t| {
             t.worker_threads(1);
         })
         .build()
         .unwrap();
 
-    let handle = traced.guard().handle();
+    let handle = session.record_handle();
     let _mem_guard = MemoryProfiler::from_config(
         MemoryProfilingConfig::builder()
             .sample_rate_bytes(64) // sample aggressively
@@ -78,7 +78,7 @@ fn opt_out_prevents_tls_teardown_panic() {
 
     const N_THREADS: usize = 16;
 
-    traced.runtime().block_on(async {
+    session.runtime().block_on(async {
         // Give time for the profiler to fully initialize.
         tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -111,7 +111,7 @@ fn opt_out_prevents_tls_teardown_panic() {
         tokio::time::sleep(Duration::from_millis(100)).await;
     });
 
-    drop(traced);
+    drop(session);
 
     // Restore the original panic hook.
     std::panic::set_hook(prev_hook);

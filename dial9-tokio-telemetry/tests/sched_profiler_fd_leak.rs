@@ -44,7 +44,7 @@ fn sched_profiler_fds_bounded_with_many_blocking_threads() {
     let num_workers = 2;
     let num_blocking_tasks = 50;
 
-    let traced = recorder(common::small_mem_writer())
+    let session = recorder(common::small_mem_writer())
         .with_sched_events(SchedEventConfig::default())
         .with_tokio(move |t| {
             t.worker_threads(num_workers);
@@ -53,7 +53,7 @@ fn sched_profiler_fds_bounded_with_many_blocking_threads() {
         .unwrap();
 
     // Let workers start and resolve their identity.
-    traced.runtime().block_on(async {
+    session.runtime().block_on(async {
         tokio::time::sleep(Duration::from_millis(100)).await;
     });
 
@@ -61,7 +61,7 @@ fn sched_profiler_fds_bounded_with_many_blocking_threads() {
 
     // Spawn many blocking tasks. Each one creates a new blocking pool thread.
     // Use std::thread::sleep to ensure they actually block and force new threads.
-    traced.runtime().block_on(async {
+    session.runtime().block_on(async {
         let mut handles = Vec::new();
         for _ in 0..num_blocking_tasks {
             handles.push(tokio::task::spawn_blocking(|| {
@@ -77,7 +77,7 @@ fn sched_profiler_fds_bounded_with_many_blocking_threads() {
 
     let perf_fds_after = count_perf_fds();
 
-    traced.graceful_shutdown();
+    session.graceful_shutdown();
 
     // Only worker threads should have perf fds. Before the fix, we'd see
     // ~50 new perf fds (one per blocking thread). After the fix, the count
@@ -102,7 +102,7 @@ fn sched_profiler_fds_cleaned_up_on_shutdown() {
     {
         let num_workers = 4;
 
-        let traced = recorder(common::small_mem_writer())
+        let session = recorder(common::small_mem_writer())
             .with_sched_events(SchedEventConfig::default())
             .with_tokio(move |t| {
                 t.worker_threads(num_workers);
@@ -111,7 +111,7 @@ fn sched_profiler_fds_cleaned_up_on_shutdown() {
             .unwrap();
 
         // Do some work so workers resolve their identity.
-        traced.runtime().block_on(async {
+        session.runtime().block_on(async {
             for _ in 0..10 {
                 tokio::spawn(async { tokio::task::yield_now().await })
                     .await
@@ -127,7 +127,7 @@ fn sched_profiler_fds_cleaned_up_on_shutdown() {
             "expected perf fds while runtime is running, got 0"
         );
 
-        traced.graceful_shutdown();
+        session.graceful_shutdown();
     }
 
     let perf_fds_after = count_perf_fds();

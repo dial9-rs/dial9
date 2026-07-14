@@ -11,7 +11,7 @@ fn recorder_with_tokio_records_poll_events() {
     let dir = tempfile::tempdir().unwrap();
     let writer = DiskWriter::single_file(dir.path().join("trace.bin")).unwrap();
 
-    let traced = recorder(writer)
+    let session = recorder(writer)
         .with_tokio(|t| {
             t.worker_threads(2);
         })
@@ -20,7 +20,7 @@ fn recorder_with_tokio_records_poll_events() {
         .build()
         .expect("build traced runtime");
 
-    traced.block_on(async {
+    session.block_on(async {
         let mut handles = Vec::new();
         for _ in 0..50 {
             handles.push(tokio::spawn(async {
@@ -34,7 +34,7 @@ fn recorder_with_tokio_records_poll_events() {
         }
     });
 
-    traced.graceful_shutdown();
+    session.graceful_shutdown();
 
     let bytes = std::fs::read(dir.path().join("trace.0.bin")).expect("sealed segment");
     let mut decoder = Decoder::new(&bytes).expect("valid trace");
@@ -64,15 +64,15 @@ fn recorder_with_tokio_disabled_runs_plainly() {
     let dir = tempfile::tempdir().unwrap();
     let writer = DiskWriter::single_file(dir.path().join("trace.bin")).unwrap();
 
-    let traced = recorder(writer)
+    let session = recorder(writer)
         .with_tokio(|_| {})
         .enabled(false)
         .build()
         .expect("build disabled runtime");
 
-    let out = traced.block_on(async { 1 + 1 });
+    let out = session.block_on(async { 1 + 1 });
     assert_eq!(out, 2);
-    traced.graceful_shutdown();
+    session.graceful_shutdown();
 }
 
 /// On-demand dump mode on the `with_tokio` path: the trigger must be reachable
@@ -82,31 +82,31 @@ fn recorder_with_tokio_dump_trigger_reachable() {
     let dir = tempfile::tempdir().unwrap();
     let writer = DiskWriter::single_file(dir.path().join("trace.bin")).unwrap();
 
-    let traced = recorder(writer)
+    let session = recorder(writer)
         .with_tokio(|_| {})
         .with_dump_trigger(|_| {})
         .build()
         .expect("build traced runtime");
 
-    traced.block_on(async {
+    session.block_on(async {
         assert!(
             dial9::current_handle().dump_trigger().is_some(),
             "dump_trigger should be reachable via the ambient handle in on-demand mode"
         );
     });
 
-    traced.graceful_shutdown();
+    session.graceful_shutdown();
 }
 
-/// The builder is `TryInto<TracedRuntime>`, so `#[dial9::main]` (which calls
-/// `TracedRuntime::new(config)`) accepts it directly.
+/// The builder is `TryInto<TokioSession>`, so `#[dial9::main]` (which calls
+/// `TokioSession::new(config)`) accepts it directly.
 #[test]
 fn traced_recorder_is_macro_compatible() {
     let dir = tempfile::tempdir().unwrap();
     let writer = DiskWriter::single_file(dir.path().join("trace.bin")).unwrap();
     let builder = recorder(writer).with_tokio(|_| {});
-    let traced = dial9::TracedRuntime::try_new(builder).expect("try_into TracedRuntime");
-    traced.graceful_shutdown();
+    let session = dial9::TokioSession::try_new(builder).expect("try_into TokioSession");
+    session.graceful_shutdown();
 }
 
 /// `recorder_or_disabled` runs the Tokio configurator on the downgrade path
@@ -128,7 +128,7 @@ fn recorder_or_disabled_runs_tokio_config_on_writer_failure() {
 
     let ran = Arc::new(AtomicUsize::new(0));
     let ran_in_closure = Arc::clone(&ran);
-    let traced = dial9::recorder_or_disabled(writer, move |b| {
+    let session = dial9::recorder_or_disabled(writer, move |b| {
         ran_in_closure.fetch_add(1, Ordering::SeqCst);
         b.worker_threads(1);
     })
@@ -136,35 +136,14 @@ fn recorder_or_disabled_runs_tokio_config_on_writer_failure() {
     .expect("downgrade builds a plain runtime");
 
     assert!(
-        !traced.guard().is_enabled(),
+        !session.is_enabled(),
         "writer failure must downgrade to a disabled runtime"
     );
-    assert_eq!(traced.block_on(async { 7u32 }), 7);
+    assert_eq!(session.block_on(async { 7u32 }), 7);
     assert!(
         ran.load(Ordering::SeqCst) >= 1,
         "the Tokio configurator must run on the downgrade path"
     );
-}
-
-/// `into_parts` hands back the owned runtime + guard so callers can sequence
-/// shutdown themselves and get the drain result, like the old two-value API.
-#[test]
-fn into_parts_yields_owned_runtime_and_guard() {
-    let dir = tempfile::tempdir().unwrap();
-    let writer = DiskWriter::single_file(dir.path().join("trace.bin")).unwrap();
-    let traced = recorder(writer)
-        .with_tokio(|_| {})
-        .build()
-        .expect("build traced runtime");
-
-    // Tuple index (not destructure) so this holds whether or not the
-    // `memory-profiling` feature adds a fourth element.
-    let parts = traced.into_parts();
-    drop(parts.0); // drop the runtime first, as `graceful_shutdown` does internally
-    parts
-        .1
-        .graceful_shutdown(std::time::Duration::from_secs(1))
-        .expect("drain the worker after dropping the runtime");
 }
 
 /// `recorder_or_disabled` is generic over writer mode: a valid in-memory writer
@@ -174,18 +153,18 @@ fn recorder_or_disabled_accepts_in_memory_writer() {
     use dial9::InMemoryWriter;
 
     let writer = InMemoryWriter::new(4 * 1024 * 1024);
-    let traced = dial9::recorder_or_disabled(writer, |b| {
+    let session = dial9::recorder_or_disabled(writer, |b| {
         b.worker_threads(1);
     })
     .build()
     .expect("in-memory recorder builds");
 
     assert!(
-        traced.guard().is_enabled(),
+        session.is_enabled(),
         "a valid in-memory writer must stay enabled"
     );
-    assert_eq!(traced.block_on(async { 5u32 }), 5);
-    traced.graceful_shutdown();
+    assert_eq!(session.block_on(async { 5u32 }), 5);
+    session.graceful_shutdown();
 }
 
 /// The downgrade path is generic too: an in-memory writer failure falls back to
@@ -197,18 +176,18 @@ fn recorder_or_disabled_downgrades_on_in_memory_writer_failure() {
     let writer: std::io::Result<InMemoryWriter> =
         Err(std::io::Error::other("simulated in-memory writer failure"));
 
-    let traced = dial9::recorder_or_disabled(writer, |b| {
+    let session = dial9::recorder_or_disabled(writer, |b| {
         b.worker_threads(1);
     })
     .build()
     .expect("downgrade builds a plain runtime");
 
     assert!(
-        !traced.guard().is_enabled(),
+        !session.is_enabled(),
         "in-memory writer failure must downgrade to a disabled runtime"
     );
-    assert_eq!(traced.block_on(async { 9u32 }), 9);
-    traced.graceful_shutdown();
+    assert_eq!(session.block_on(async { 9u32 }), 9);
+    session.graceful_shutdown();
 }
 
 #[test]
@@ -243,7 +222,7 @@ fn source_registered_after_with_tokio_is_recorded() {
     let dir = tempfile::tempdir().unwrap();
     let writer = DiskWriter::single_file(dir.path().join("trace.bin")).unwrap();
 
-    let traced = recorder(writer)
+    let session = recorder(writer)
         .with_tokio(|t| {
             t.worker_threads(1);
         })
@@ -253,10 +232,10 @@ fn source_registered_after_with_tokio_is_recorded() {
         .build()
         .expect("build traced runtime");
 
-    traced.block_on(async {
+    session.block_on(async {
         tokio::task::yield_now().await;
     });
-    traced.graceful_shutdown();
+    session.graceful_shutdown();
 
     let bytes = std::fs::read(dir.path().join("trace.0.bin")).expect("sealed segment");
     let mut decoder = Decoder::new(&bytes).expect("valid trace");
@@ -288,7 +267,7 @@ fn on_session_start_fires_on_tokio_path() {
 
     let ran = Arc::new(AtomicBool::new(false));
     let ran_hook = Arc::clone(&ran);
-    let traced = recorder(writer)
+    let session = recorder(writer)
         .with_tokio(|_| {})
         .on_session_start(move |_handle| ran_hook.store(true, Ordering::SeqCst))
         .build()
@@ -298,5 +277,5 @@ fn on_session_start_fires_on_tokio_path() {
         ran.load(Ordering::SeqCst),
         "on_session_start should fire when the tokio session enables at build"
     );
-    traced.graceful_shutdown();
+    session.graceful_shutdown();
 }

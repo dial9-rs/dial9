@@ -228,9 +228,10 @@ impl<F: Future> Future for WakeTraced<F> {
 mod tests {
     use super::*;
     use crate::telemetry::analysis_events::Dial9Event;
-    use crate::telemetry::recorder::TelemetryCore;
+    use crate::telemetry::recorder::RecorderBuilderTokioExt;
     use crate::telemetry::task_metadata::UNKNOWN_TASK_ID;
     use crate::telemetry::writer::{DiskWriter, InMemoryWriter};
+    use dial9_core::recorder::recorder;
     use dial9_core::test_util;
     use futures_util::task::noop_waker;
     use std::pin::Pin;
@@ -240,11 +241,13 @@ mod tests {
 
     #[test]
     fn traced_future_falls_back_after_missing_task_context() {
-        let guard = TelemetryCore::builder()
-            .writer(InMemoryWriter::new(16 * 1024 * 1024).unwrap())
+        let session = recorder(InMemoryWriter::new(16 * 1024 * 1024).unwrap())
+            .with_tokio(|t| {
+                *t = tokio::runtime::Builder::new_current_thread();
+            })
             .build()
             .unwrap();
-        let handle = crate::telemetry::recorder::traced_handle(&guard.handle())
+        let handle = crate::telemetry::recorder::traced_handle(&session.record_handle())
             .expect("enabled handle yields TracedHandle");
 
         let mut future = TracedFuture::new(std::future::pending::<()>(), Some(handle));
@@ -281,17 +284,15 @@ mod tests {
 
         // Build a current-thread runtime so that all tasks — and all thread-local
         // BUFFER accesses — share a single thread with the test itself.
-        let guard = TelemetryCore::builder()
-            .writer(DiskWriter::single_file(&trace_path).unwrap())
+        let session = recorder(DiskWriter::single_file(&trace_path).unwrap())
+            .with_tokio(|t| {
+                *t = tokio::runtime::Builder::new_current_thread();
+                t.enable_all();
+            })
             .build()
             .unwrap();
-        guard.enable();
-        let (runtime, _th) = guard
-            .trace_runtime("test")
-            .build(tokio::runtime::Builder::new_current_thread())
-            .unwrap();
-
-        let handle = guard.tokio_handle(runtime.handle());
+        let runtime = session.runtime();
+        let handle = session.handle();
         let notify = Arc::new(tokio::sync::Notify::new());
         let notify_clone = notify.clone();
 
@@ -322,13 +323,13 @@ mod tests {
         // Wake events land in the thread-local buffer (capacity 1_024), so a
         // single event will not auto-flush.  Manually drain the buffer into the
         // collector so that the guard flush below picks it up.
-        let th = crate::telemetry::recorder::traced_handle(&guard.handle())
+        let th = crate::telemetry::recorder::traced_handle(&session.record_handle())
             .expect("enabled handle yields TracedHandle");
         test_util::drain_thread_local(&th.shared);
 
-        // Dropping the guard stops the background flush thread, joins it, then
-        // performs a final flush: collector → DiskWriter → trace file.
-        drop(guard);
+        // Dropping the runtime + guard stops the background flush thread, joins
+        // it, then performs a final flush: collector → DiskWriter → trace file.
+        drop(session);
 
         // Parse the trace file and collect all WakeEvents.
         let sealed = dir.path().join("trace.0.bin");

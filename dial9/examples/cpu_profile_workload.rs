@@ -53,7 +53,7 @@ fn main() {
         .max_total_size(1024 * 1024 * 100) // keep at most 100 MiB on disk
         .build()
         .unwrap();
-    let traced = recorder(writer)
+    let session = recorder(writer)
         .with_cpu_profiling(CpuProfilingConfig::default())
         .with_tokio(|t| {
             t.worker_threads(4);
@@ -64,7 +64,7 @@ fn main() {
         .unwrap();
 
     eprintln!("Running workload with CPU profiling at 99 Hz...");
-    traced.runtime().block_on(async {
+    session.runtime().block_on(async {
         let tasks: Vec<_> = (0..200).map(|i| tokio::spawn(cpu_heavy_task(i))).collect();
         for task in tasks {
             let _ = task.await;
@@ -77,7 +77,7 @@ fn main() {
     // worker to symbolize and gzip-compress it. Drop impl is a hard shutdown
     // (worker exits without draining), so we must use graceful_shutdown here.
     eprintln!("Waiting for background worker to symbolize trace (up to 30s)...");
-    traced.graceful_shutdown();
+    session.graceful_shutdown();
 
     // Read back and report
     eprintln!("\n=== Reading trace from {segment_path} ===");

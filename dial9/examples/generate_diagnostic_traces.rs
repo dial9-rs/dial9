@@ -43,7 +43,7 @@ fn generate_no_wake_events(dir: &PathBuf) {
     let trace_path = dir.join("trace.bin");
 
     let writer = DiskWriter::new(&trace_path, 4 * 1024, 50 * 1024 * 1024).unwrap();
-    let traced = recorder(writer)
+    let session = recorder(writer)
         .with_cpu_profiling(CpuProfilingConfig::default().frequency_hz(999))
         .worker_poll_interval(Duration::from_millis(50))
         .with_tokio(|t| {
@@ -54,7 +54,7 @@ fn generate_no_wake_events(dir: &PathBuf) {
         .build()
         .unwrap();
 
-    traced.runtime().block_on(async {
+    session.runtime().block_on(async {
         // Deliberately use tokio::spawn — NOT Dial9TokioHandle::spawn
         let tasks: Vec<_> = (0..50).map(|i| tokio::spawn(cpu_task(i))).collect();
         for t in tasks {
@@ -63,7 +63,7 @@ fn generate_no_wake_events(dir: &PathBuf) {
         tokio::time::sleep(Duration::from_secs(2)).await;
     });
 
-    traced.graceful_shutdown();
+    session.graceful_shutdown();
 }
 
 /// Generate a fully-configured "good" trace for comparison.
@@ -72,7 +72,7 @@ fn generate_good_trace(dir: &PathBuf) {
     let trace_path = dir.join("trace.bin");
 
     let writer = DiskWriter::new(&trace_path, 4 * 1024, 50 * 1024 * 1024).unwrap();
-    let traced = recorder(writer)
+    let session = recorder(writer)
         .with_cpu_profiling(CpuProfilingConfig::default().frequency_hz(999))
         .with_sched_events(SchedEventConfig::default())
         .worker_poll_interval(Duration::from_millis(50))
@@ -84,7 +84,7 @@ fn generate_good_trace(dir: &PathBuf) {
         .build()
         .unwrap();
 
-    traced.runtime().block_on(async {
+    session.runtime().block_on(async {
         let handle = Dial9TokioHandle::current();
         let tasks: Vec<_> = (0..50).map(|i| handle.spawn(cpu_task(i))).collect();
         for t in tasks {
@@ -93,7 +93,7 @@ fn generate_good_trace(dir: &PathBuf) {
         tokio::time::sleep(Duration::from_secs(2)).await;
     });
 
-    traced.graceful_shutdown();
+    session.graceful_shutdown();
 }
 
 /// Generate a trace with CPU profiling but NO sched events.
@@ -102,7 +102,7 @@ fn generate_no_sched_events(dir: &PathBuf) {
     let trace_path = dir.join("trace.bin");
 
     let writer = DiskWriter::new(&trace_path, 4 * 1024, 50 * 1024 * 1024).unwrap();
-    let traced = recorder(writer)
+    let session = recorder(writer)
         .with_cpu_profiling(CpuProfilingConfig::default().frequency_hz(999))
         // Deliberately omit .with_sched_events()
         .worker_poll_interval(Duration::from_millis(50))
@@ -114,7 +114,7 @@ fn generate_no_sched_events(dir: &PathBuf) {
         .build()
         .unwrap();
 
-    traced.runtime().block_on(async {
+    session.runtime().block_on(async {
         let handle = Dial9TokioHandle::current();
         let tasks: Vec<_> = (0..50).map(|i| handle.spawn(cpu_task(i))).collect();
         for t in tasks {
@@ -123,7 +123,7 @@ fn generate_no_sched_events(dir: &PathBuf) {
         tokio::time::sleep(Duration::from_secs(2)).await;
     });
 
-    traced.graceful_shutdown();
+    session.graceful_shutdown();
 }
 
 fn main() {

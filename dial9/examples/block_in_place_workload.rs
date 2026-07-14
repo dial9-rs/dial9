@@ -56,7 +56,7 @@ fn main() {
         .max_total_size(500 * 1024 * 1024)
         .build()
         .unwrap();
-    let traced = recorder(writer)
+    let session = recorder(writer)
         .with_cpu_profiling(Default::default())
         .with_tokio(|t| {
             t.worker_threads(4);
@@ -66,7 +66,7 @@ fn main() {
         .build()
         .unwrap();
 
-    traced.runtime().block_on(async {
+    session.runtime().block_on(async {
         // Background work on all workers to generate CPU samples.
         let bg: Vec<_> = (0..8).map(|i| tokio::spawn(background_burn(i))).collect();
 
@@ -90,7 +90,7 @@ fn main() {
     });
 
     // Graceful shutdown seals the final segment and runs symbolization.
-    traced.graceful_shutdown();
+    session.graceful_shutdown();
 
     println!("Trace written to block_in_place_trace.*.bin");
 }

@@ -3,7 +3,7 @@
 //! A common pattern is to run with telemetry in staging or on-demand in
 //! production, while keeping a plain tokio runtime in dev. The `config`
 //! function checks `ENABLE_DIAL9` and toggles recording with
-//! [`TracedRecorder::enabled`]: on when the var is set, off (a plain tokio
+//! [`TokioSessionBuilder::enabled`]: on when the var is set, off (a plain tokio
 //! runtime) otherwise.
 //!
 //! Run with telemetry enabled:
@@ -19,9 +19,9 @@
 use std::time::Duration;
 
 use dial9::telemetry::{Dial9Handle, Dial9TokioHandle};
-use dial9::{DiskWriter, TracedRecorder};
+use dial9::{DiskWriter, TokioSessionBuilder};
 
-fn my_config() -> TracedRecorder {
+fn my_config() -> TokioSessionBuilder {
     let writer = DiskWriter::builder()
         .base_path("conditionally_enable_trace.bin")
         .max_file_size(64 * 1024 * 1024)

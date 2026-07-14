@@ -12,7 +12,7 @@ use dial9_tokio_telemetry::telemetry::{
 fn traced_runtime_records_process_resource_usage() {
     let (capture, batches) = capture_processor();
 
-    let traced = recorder(InMemoryWriter::new(CAPTURE_BUFFER_SIZE).unwrap())
+    let session = recorder(InMemoryWriter::new(CAPTURE_BUFFER_SIZE).unwrap())
         .with_process_resource_usage(ProcessResourceUsageConfig::default())
         .with_tokio(|t| {
             t.worker_threads(1);
@@ -21,7 +21,7 @@ fn traced_runtime_records_process_resource_usage() {
         .build()
         .unwrap();
 
-    traced.graceful_shutdown();
+    session.graceful_shutdown();
 
     let batches = batches.lock().unwrap();
     let events: Vec<Dial9Event> = decode_all(&batches);
@@ -45,7 +45,7 @@ fn traced_runtime_records_process_resource_usage() {
 fn traced_runtime_does_not_record_process_resource_usage_by_default() {
     let (capture, batches) = capture_processor();
 
-    let traced = recorder(InMemoryWriter::new(CAPTURE_BUFFER_SIZE).unwrap())
+    let session = recorder(InMemoryWriter::new(CAPTURE_BUFFER_SIZE).unwrap())
         .with_tokio(|t| {
             t.worker_threads(1);
         })
@@ -53,7 +53,7 @@ fn traced_runtime_does_not_record_process_resource_usage_by_default() {
         .build()
         .unwrap();
 
-    traced.graceful_shutdown();
+    session.graceful_shutdown();
 
     let batches = batches.lock().unwrap();
     let events: Vec<Dial9Event> = decode_all(&batches);

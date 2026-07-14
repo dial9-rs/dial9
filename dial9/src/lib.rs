@@ -1,6 +1,6 @@
 //! The main crate for dial9 telemetry.
 //!
-//! Most applications want the `tokio` feature: `#[dial9::main]`, `TracedRuntime`,
+//! Most applications want the `tokio` feature: `#[dial9::main]`, `TokioSession`,
 //! `spawn`, and the `recorder(w).with_tokio(..)` builder. Library authors who
 //! only need to record events into a trace can use the always-available core API
 //! ([`recorder`](fn@recorder), [`Dial9Handle`], [`record_event`], [`Source`])
@@ -37,17 +37,17 @@ pub use dial9_core::{dump, pipeline, worker};
 #[cfg(feature = "tokio")]
 pub use dial9_macro::main;
 #[cfg(feature = "tokio")]
-pub use dial9_tokio_telemetry::{TracedFuture, TracedRuntime, background_task, spawn, telemetry};
+pub use dial9_tokio_telemetry::{TokioSession, TracedFuture, background_task, spawn, telemetry};
 
 #[cfg(feature = "tokio")]
-pub use dial9_tokio_telemetry::telemetry::{RecorderBuilderTokioExt, TracedRecorder};
+pub use dial9_tokio_telemetry::telemetry::{RecorderBuilderTokioExt, TokioSessionBuilder};
 
 #[cfg(feature = "tokio")]
 mod config;
 #[cfg(feature = "tokio")]
 pub use config::recorder_from_env;
 
-/// Build a [`TracedRecorder`] from a writer result, or fall back to a disabled
+/// Build a [`TokioSessionBuilder`] from a writer result, or fall back to a disabled
 /// (writer-free) one when the writer cannot be created. Works with any writer:
 /// [`DiskWriter`] or [`InMemoryWriter`]. Telemetry stays best-effort: a failed
 /// writer logs at `error!` and runs a plain Tokio runtime rather than panicking
@@ -56,7 +56,7 @@ pub use config::recorder_from_env;
 ///
 /// ```no_run
 /// use dial9::DiskWriter;
-/// fn config() -> dial9::TracedRecorder {
+/// fn config() -> dial9::TokioSessionBuilder {
 ///     let writer = DiskWriter::builder()
 ///         .base_path("/tmp/trace.bin")
 ///         .max_total_size(64 * 1024 * 1024)
@@ -72,7 +72,7 @@ pub use config::recorder_from_env;
 pub fn recorder_or_disabled<M, F>(
     writer: std::io::Result<SegmentWriter<M>>,
     configure: F,
-) -> TracedRecorder<M>
+) -> TokioSessionBuilder<M>
 where
     M: WriterMode,
     F: Fn(&mut ::tokio::runtime::Builder) + Send + Sync + 'static,
@@ -84,7 +84,7 @@ where
                 target: "dial9_telemetry",
                 "dial9: trace writer setup failed; running without telemetry: {e}"
             );
-            TracedRecorder::disabled().with_tokio(configure)
+            TokioSessionBuilder::disabled().with_tokio(configure)
         }
     }
 }

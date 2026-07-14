@@ -59,16 +59,16 @@ fn namespaced_writer(trace_dir: &Path, gc_dead_namespaces: bool) -> DiskWriter {
 /// Build a disk-backed runtime under `trace_dir`, run a trivial workload, and
 /// shut it down so segments are sealed.
 fn run_workload(trace_dir: &Path, gc_dead_namespaces: bool) {
-    let traced = dial9::recorder(namespaced_writer(trace_dir, gc_dead_namespaces))
+    let session = dial9::recorder(namespaced_writer(trace_dir, gc_dead_namespaces))
         .with_tokio(|_| {})
         .build()
         .expect("runtime should build");
-    assert!(traced.guard().is_enabled());
-    traced.block_on(async {
+    assert!(session.is_enabled());
+    session.block_on(async {
         tokio::task::yield_now().await;
     });
     // Dropping the runtime drops its guard, which flushes and seals segments.
-    drop(traced);
+    drop(session);
 }
 
 #[test]
@@ -159,7 +159,7 @@ fn s3_boot_id_matches_namespace_dir() {
     use dial9_trace_format::decoder::Decoder;
 
     let dir = tempfile::tempdir().unwrap();
-    let traced = dial9::recorder(namespaced_writer(dir.path(), true))
+    let session = dial9::recorder(namespaced_writer(dir.path(), true))
         .with_tokio(|_| {})
         .with_s3_uploader(
             S3Config::builder()
@@ -169,10 +169,10 @@ fn s3_boot_id_matches_namespace_dir() {
         )
         .build()
         .expect("runtime should build");
-    traced.block_on(async {
+    session.block_on(async {
         tokio::task::yield_now().await;
     });
-    drop(traced);
+    drop(session);
 
     let boot_dir = boot_id_dirs(dir.path())
         .into_iter()

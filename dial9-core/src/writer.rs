@@ -2278,7 +2278,7 @@ mod tests {
         let base = dir.path().join("trace");
         let mut writer = DiskWriter::new(&base, 100_000, 100_000).unwrap();
 
-        // Simulate TelemetryCore::new setting S3 metadata
+        // Simulate the session builder setting S3 metadata
         writer.update_segment_metadata(vec![
             ("bucket".into(), "my-bucket".into()),
             ("service_name".into(), "my-svc".into()),
@@ -2321,7 +2321,7 @@ mod tests {
         let one_event = single_event_file_size();
         let mut writer = DiskWriter::new(&base, one_event, 100_000).unwrap();
 
-        // Step 1: S3 metadata set (like TelemetryCore::new)
+        // Step 1: S3 metadata set (like the session builder)
         writer.update_segment_metadata(vec![
             ("bucket".into(), "my-bucket".into()),
             ("service_name".into(), "my-svc".into()),

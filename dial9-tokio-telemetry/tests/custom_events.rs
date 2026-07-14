@@ -1,8 +1,9 @@
 mod common;
 
 use common::{CAPTURE_BUFFER_SIZE, capture_processor};
+use dial9_core::recorder::RegisterSource;
 use dial9_tokio_telemetry::telemetry::{
-    CustomEventsConfig, InMemoryWriter, RecorderBuilderTokioExt, TelemetryCore, recorder,
+    CustomEventsConfig, InMemoryWriter, RecorderBuilderTokioExt, recorder,
 };
 use dial9_trace_format::TraceEvent;
 use dial9_trace_format::decoder::Decoder;
@@ -40,15 +41,12 @@ fn traced_runtime_records_custom_events_callback_events() {
     .unwrap();
     drop(tx);
 
-    let traced = recorder(InMemoryWriter::new(CAPTURE_BUFFER_SIZE).unwrap())
-        .source(dial9_core::custom_events::CustomEventsSource::new(
-            CustomEventsConfig::default(),
-            move |ctx| {
-                while let Ok(event) = rx.try_recv() {
-                    ctx.record_event(event);
-                }
-            },
-        ))
+    let session = recorder(InMemoryWriter::new(CAPTURE_BUFFER_SIZE).unwrap())
+        .with_custom_events(CustomEventsConfig::default(), move |ctx| {
+            while let Ok(event) = rx.try_recv() {
+                ctx.record_event(event);
+            }
+        })
         .with_tokio(|t| {
             t.worker_threads(1);
         })
@@ -56,7 +54,7 @@ fn traced_runtime_records_custom_events_callback_events() {
         .build()
         .unwrap();
 
-    traced.graceful_shutdown();
+    session.graceful_shutdown();
 
     let batches = batches.lock().unwrap();
     let events = decode_queued_events(&batches);
@@ -77,29 +75,25 @@ fn telemetry_core_attach_runtime_records_custom_events_callback_events() {
     .unwrap();
     drop(tx);
 
-    let guard = TelemetryCore::builder()
-        .writer(InMemoryWriter::new(CAPTURE_BUFFER_SIZE).unwrap())
-        .processors(vec![Box::new(capture)])
-        .build()
-        .unwrap();
-    guard.enable();
-
-    let mut builder = tokio::runtime::Builder::new_multi_thread();
-    builder.worker_threads(1).enable_all();
-    let (runtime, _handle) = guard
-        .trace_runtime("main")
+    let session = recorder(InMemoryWriter::new(CAPTURE_BUFFER_SIZE).unwrap())
         .with_custom_events(CustomEventsConfig::default(), move |ctx| {
             while let Ok(event) = rx.try_recv() {
                 ctx.record_event(event);
             }
         })
-        .build(builder)
+        .with_tokio(|t| {
+            *t = tokio::runtime::Builder::new_current_thread();
+        })
+        .with_custom_pipeline(|p| p.pipe(capture))
+        .build()
         .unwrap();
 
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.worker_threads(1).enable_all();
+    let (runtime, _handle) = session.trace_runtime("main").build(builder).unwrap();
+
     drop(runtime);
-    guard
-        .graceful_shutdown(std::time::Duration::from_secs(1))
-        .expect("clean shutdown");
+    session.graceful_shutdown();
 
     let batches = batches.lock().unwrap();
     let events = decode_queued_events(&batches);

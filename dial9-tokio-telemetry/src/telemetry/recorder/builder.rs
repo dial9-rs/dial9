@@ -1,8 +1,14 @@
-use crate::primitives::sync::{Arc, Mutex};
-use crate::telemetry::writer::{SegmentWriter, WriterMode};
 use std::time::Duration;
 
-use super::guard::TelemetryGuard;
+use crate::primitives::sync::{Arc, Mutex};
+use crate::telemetry::task_dump_config::TaskDumpConfig;
+use dial9_core::handle::Dial9Handle;
+use dial9_core::session::CoreSession;
+
+use super::SharedState;
+use super::guard::TraceRuntimeCoreBuilder;
+use super::handle::Dial9TokioHandle;
+use super::runtime_context::RuntimeContextRegistry;
 
 pub(super) enum PipelineConfig {
     Unset,
@@ -68,246 +74,95 @@ pub(super) fn assemble_processors(
     processors
 }
 
-/// Entry point for creating a telemetry session decoupled from any tokio runtime.
+/// A Tokio runtime plus its dial9 telemetry session.
 ///
-/// Use [`TelemetryCore::builder()`] to configure the session, then call
-/// [`TelemetryGuard::trace_runtime`] to attach one or more runtimes.
+/// Returned by `recorder(w).with_tokio(..).build()`. It owns a primary tokio
+/// runtime and the recording session, and hosts any number of additional
+/// runtimes that share the same trace.
 ///
-/// ```rust,no_run
-/// # use dial9_tokio_telemetry::telemetry::{DiskWriter, TelemetryCore};
-/// # fn main() -> std::io::Result<()> {
-/// let writer = DiskWriter::single_file("/tmp/trace.bin")?;
-/// let guard = TelemetryCore::builder()
-///     .writer(writer)
-///     .build()?;
-/// guard.enable();
+/// - Drive the primary runtime: [`block_on`](Self::block_on),
+///   [`runtime`](Self::runtime), [`handle`](Self::handle).
+/// - Attach more runtimes to the same trace: [`trace_runtime`](Self::trace_runtime).
+/// - End it: [`shutdown`](Self::shutdown).
 ///
-/// let mut builder = tokio::runtime::Builder::new_multi_thread();
-/// builder.worker_threads(4).enable_all();
-/// let (runtime, handle) = guard.trace_runtime("main").build(builder)?;
-/// # Ok(())
-/// # }
-/// ```
-#[derive(Debug)]
-pub struct TelemetryCore;
+/// When telemetry is disabled (opted out, or a lenient config downgraded after a
+/// build failure) the runtime is a plain tokio runtime and the telemetry methods
+/// are inert. Use [`is_enabled`](Self::is_enabled) to tell.
+pub struct TokioSession {
+    // `runtime` is dropped first (Tokio workers exit and flush their
+    // thread-locals) before `session` seals the final segment.
+    runtime: tokio::runtime::Runtime,
+    /// The recording session; `None` when telemetry is disabled.
+    session: Option<CoreSession>,
+    /// Registry of runtimes attached to this session (empty when disabled).
+    contexts: RuntimeContextRegistry,
+    /// Task-dump settings installed on attached runtimes.
+    taskdump_config: Option<TaskDumpConfig>,
+    /// Drain bound used by [`graceful_shutdown`](Self::graceful_shutdown). `None`
+    /// skips the drain. Set via
+    /// [`TokioSessionBuilder::graceful_shutdown`](super::TokioSessionBuilder::graceful_shutdown).
+    graceful_shutdown_timeout: Option<Duration>,
+}
 
-#[bon::bon]
-impl TelemetryCore {
-    /// Build a telemetry session. Recording starts disabled; call
-    /// [`TelemetryGuard::enable`] to begin recording.
-    #[builder(state_mod = telemetry_core_builder)]
-    pub fn new<M: WriterMode>(
-        /// The pipeline of [`SegmentProcessor`](crate::background_task::SegmentProcessor)s
-        /// to run on each sealed segment. When empty the background worker
-        /// is not spawned.
-        #[builder(field)]
-        processors: Vec<Box<dyn crate::background_task::SegmentProcessor>>,
-        /// Static segment metadata injected into every rotated segment's
-        /// header. Empty by default; the S3 preset populates it from the
-        /// configured `S3Config` so traces stay self-describing.
-        #[builder(field)]
-        segment_metadata: Vec<(String, String)>,
-        /// S3 upload configuration.
-        #[cfg(feature = "worker-s3")]
-        #[builder(field)]
-        s3_config: Option<crate::background_task::s3::S3Config>,
-        /// Pre-built S3 client.
-        #[cfg(feature = "worker-s3")]
-        #[builder(field)]
-        s3_client: Option<aws_sdk_s3::Client>,
-        /// The trace writer ([`DiskWriter`] or [`InMemoryWriter`](crate::telemetry::InMemoryWriter)).
-        writer: SegmentWriter<M>,
-        /// Capture async backtraces at yield points. Requires the `taskdump`
-        /// crate feature to actually record events.
-        task_dump_config: Option<crate::telemetry::task_dump_config::TaskDumpConfig>,
-        /// How often the background worker polls for sealed segments.
-        worker_poll_interval: Option<Duration>,
-        /// Metrics sink for the flush/worker threads.
-        worker_metrics_sink: Option<metrique::writer::BoxEntrySink>,
-        /// Trigger receiver flipping the background worker into on-demand
-        /// operation; see [`crate::dump`]. `None` keeps continuous mode.
-        #[builder(setters(vis = "pub(crate)"))]
-        trigger: Option<crate::dump::DumpRx>,
-    ) -> std::io::Result<TelemetryGuard> {
-        // Determine the pipeline strategy from the builder fields, then
-        // delegate to `assemble_processors` — the single source of truth for
-        // which processors are used in each configuration. The `Custom`
-        // pass-through means a list pre-assembled by the caller is not
-        // re-symbolized.
-        #[allow(unused_mut)]
-        let mut segment_metadata = segment_metadata;
-
-        #[allow(unused_variables)]
-        let pipeline = if !processors.is_empty() {
-            PipelineConfig::Custom(processors)
-        } else {
-            #[cfg(feature = "worker-s3")]
-            if let Some(config) = s3_config {
-                if segment_metadata.is_empty() {
-                    segment_metadata = config
-                        .as_metadata()
-                        .map(|(k, v)| (k.to_string(), v.to_string()))
-                        .collect();
-                }
-                PipelineConfig::S3(Box::new(crate::background_task::S3PipelineUploader::new(
-                    config, s3_client,
-                )))
-            } else {
-                PipelineConfig::Unset
-            }
-            #[cfg(not(feature = "worker-s3"))]
-            PipelineConfig::Unset
-        };
-
-        // Multi-runtime sessions plug perf `Source`s through the recorder
-        // builder before attach, so this path installs none itself: no CPU
-        // profiler means nothing to symbolize.
-        let processors = assemble_processors(
-            #[cfg(feature = "cpu-profiling")]
-            false,
-            M::IS_DISK,
-            pipeline,
-        );
-
-        // The Tokio runtime-context source carries the runtime name into segment
-        // metadata, `contexts` is retained so the guard can attach runtimes.
-        let contexts: super::runtime_context::RuntimeContextRegistry =
-            Arc::new(Mutex::new(Vec::new()));
-
-        //  Setup a recorder and feed it the Tokio-specific source, the assembled pipeline,
-        // and the perf thread-registration hook.
-        #[allow(unused_mut)]
-        let mut builder = dial9_core::recorder::recorder(writer)
-            .source(super::runtime_context::TokioRuntimesSource::new(
-                contexts.clone(),
-            ))
-            .segment_metadata(segment_metadata)
-            .processors(processors)
-            .on_recording_thread_start(|| {
-                #[cfg(feature = "cpu-profiling")]
-                let _ = dial9_perf_self_profile::register_current_thread();
-                move || {
-                    #[cfg(feature = "cpu-profiling")]
-                    dial9_perf_self_profile::unregister_current_thread();
-                }
-            });
-        if let Some(sink) = worker_metrics_sink {
-            builder = builder.metrics_sink(sink);
-        }
-        if let Some(interval) = worker_poll_interval {
-            builder = builder.worker_poll_interval(interval);
-        }
-        if let Some(trigger) = trigger {
-            builder = builder.trigger(trigger);
-        }
-
-        let core_session = builder.build();
-
-        Ok(TelemetryGuard::enabled(
-            core_session,
-            contexts,
-            task_dump_config,
-        ))
+impl std::fmt::Debug for TokioSession {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TokioSession")
+            .field("enabled", &self.is_enabled())
+            .finish_non_exhaustive()
     }
 }
 
-// Custom methods on the generated builder.
-impl<M: WriterMode, S: telemetry_core_builder::State> TelemetryCoreBuilder<M, S> {
-    /// Configure S3 upload for sealed trace segments.
-    #[cfg(feature = "worker-s3")]
-    pub fn s3_config(mut self, config: crate::background_task::s3::S3Config) -> Self {
-        self.s3_config = Some(config);
-        self
-    }
-
-    /// Provide a pre-built S3 client (for custom credentials or endpoints).
-    #[cfg(feature = "worker-s3")]
-    pub fn s3_client(mut self, client: aws_sdk_s3::Client) -> Self {
-        self.s3_client = Some(client);
-        self
-    }
-
-    /// Set the processor pipeline directly.
-    pub fn processors(
-        mut self,
-        processors: Vec<Box<dyn crate::background_task::SegmentProcessor>>,
+impl TokioSession {
+    /// Assemble an enabled session from its parts. Called by
+    /// [`build_traced`](super::build_traced).
+    pub(crate) fn enabled(
+        runtime: tokio::runtime::Runtime,
+        session: CoreSession,
+        contexts: RuntimeContextRegistry,
+        taskdump_config: Option<TaskDumpConfig>,
+        graceful_shutdown_timeout: Option<Duration>,
     ) -> Self {
-        self.processors = processors;
-        self
+        Self {
+            runtime,
+            session: Some(session),
+            contexts,
+            taskdump_config,
+            graceful_shutdown_timeout,
+        }
     }
 
-    /// Set static segment metadata.
-    pub fn segment_metadata(mut self, entries: Vec<(String, String)>) -> Self {
-        self.segment_metadata = entries;
-        self
-    }
-}
-
-/// A tokio runtime paired with its (optional) dial9 telemetry guard.
-///
-/// The guard, when present, must outlive the runtime so traces are flushed
-/// on drop — keeping both inside one struct enforces that ordering at the
-/// type level (fields drop top-to-bottom, so `runtime` drops before `guard`).
-///
-/// Construct it from a [`TracedRecorder`](super::TracedRecorder)
-/// (`recorder(w).with_tokio(..)`) via [`TracedRuntime::new`] (panicking, used by
-/// the `#[dial9::main]` macro) or [`TracedRuntime::try_new`] (fallible). For a
-/// multi-runtime setup, build a [`TelemetryCore`] session and attach runtimes
-/// with [`TelemetryGuard::trace_runtime`] instead.
-#[derive(Debug)]
-pub struct TracedRuntime {
-    pub(crate) runtime: tokio::runtime::Runtime,
-    pub(crate) guard: TelemetryGuard,
-    /// Graceful-shutdown timeout carried from the [`TracedRecorder`](super::TracedRecorder).
-    /// Consumed by [`graceful_shutdown`](TracedRuntime::graceful_shutdown)
-    /// (used by the `#[dial9::main]` macro). `None` skips the
-    /// implicit drain.
-    pub(crate) graceful_shutdown_timeout: Option<Duration>,
-}
-
-impl TracedRuntime {
-    /// Build a plain runtime with no telemetry installed.
-    ///
-    /// The returned [`TelemetryGuard`] is in its disabled mode — see
-    /// [`TelemetryGuard::is_enabled`].
-    pub fn build_disabled(
+    /// Build a plain runtime with no telemetry installed (the disabled session).
+    pub(crate) fn build_disabled(
         mut builder: tokio::runtime::Builder,
-    ) -> std::io::Result<(tokio::runtime::Runtime, TelemetryGuard)> {
+        graceful_shutdown_timeout: Option<Duration>,
+    ) -> std::io::Result<Self> {
         let runtime = builder.build()?;
-        Ok((runtime, TelemetryGuard::disabled()))
+        Ok(Self {
+            runtime,
+            session: None,
+            contexts: Arc::new(Mutex::new(Vec::new())),
+            taskdump_config: None,
+            graceful_shutdown_timeout,
+        })
     }
-}
 
-// ---------------------------------------------------------------------------
-// High-level construction: TracedRuntime::new / try_new
-// ---------------------------------------------------------------------------
-
-impl TracedRuntime {
-    /// Build a [`TracedRuntime`] from a config, panicking with the
-    /// underlying error on failure. Used by the
-    /// `#[dial9::main]` macro.
+    /// Build a [`TokioSession`] from a config, panicking with the underlying
+    /// error on failure. Used by the `#[dial9::main]` macro.
     ///
-    /// Reach for this directly when the macro doesn't fit — e.g. when an
-    /// application owns multiple tokio runtimes, when you need to control
-    /// runtime lifetime explicitly, or when you want to drive
-    /// [`TelemetryGuard::graceful_shutdown`] before the runtime drops.
-    ///
-    /// Generic over any input that converts into a [`TracedRuntime`]: in
-    /// practice that means a [`TracedRecorder`](super::TracedRecorder)
-    /// (from `recorder(w).with_tokio(..)`). The generic shape is what keeps
-    /// the macro source-compatible across input types.
+    /// Generic over any input that converts into a [`TokioSession`] — in
+    /// practice a [`TokioSessionBuilder`](super::TokioSessionBuilder) (from
+    /// `recorder(w).with_tokio(..)`). The generic shape keeps the macro
+    /// source-compatible across input types.
     ///
     /// # Panics
     ///
-    /// Panics if the underlying conversion fails — i.e. if the tokio
-    /// runtime cannot be built or the telemetry background worker fails
-    /// to start.
-    ///
-    /// For fallible construction, use [`try_new`](Self::try_new).
+    /// Panics if the tokio runtime cannot be built or the telemetry background
+    /// worker fails to start. For fallible construction, use
+    /// [`try_new`](Self::try_new).
     pub fn new<C>(config: C) -> Self
     where
-        C: TryInto<TracedRuntime>,
-        <C as TryInto<TracedRuntime>>::Error: std::fmt::Display,
+        C: TryInto<TokioSession>,
+        <C as TryInto<TokioSession>>::Error: std::fmt::Display,
     {
         config
             .try_into()
@@ -315,43 +170,102 @@ impl TracedRuntime {
     }
 
     /// Fallible counterpart to [`new`](Self::new).
-    ///
-    /// Returns the conversion error directly. Use this when you want to handle
-    /// runtime construction failure rather than panic.
-    pub fn try_new<C>(config: C) -> Result<Self, <C as TryInto<TracedRuntime>>::Error>
+    pub fn try_new<C>(config: C) -> Result<Self, <C as TryInto<TokioSession>>::Error>
     where
-        C: TryInto<TracedRuntime>,
+        C: TryInto<TokioSession>,
     {
         config.try_into()
     }
 
-    /// Borrow the underlying tokio runtime.
+    /// Borrow the primary tokio runtime.
     pub fn runtime(&self) -> &tokio::runtime::Runtime {
         &self.runtime
     }
 
-    /// Borrow the telemetry guard.
-    ///
-    /// The guard is always present, regardless of whether telemetry was
-    /// installed. Use [`TelemetryGuard::is_enabled`] to distinguish a
-    /// live telemetry session from an inert (disabled) guard.
-    pub fn guard(&self) -> &TelemetryGuard {
-        &self.guard
+    /// A [`Dial9TokioHandle`] for spawning instrumented tasks on the primary
+    /// runtime. Use `handle.spawn(..)` instead of `tokio::spawn` for wake-event
+    /// tracking. Inert when telemetry is disabled.
+    pub fn handle(&self) -> Dial9TokioHandle {
+        self.tokio_handle(self.runtime.handle())
     }
 
-    /// Run `fut` to completion on the runtime.
+    /// A [`Dial9TokioHandle`] for spawning instrumented tasks on `runtime`.
+    /// Inert when telemetry is disabled.
+    pub fn tokio_handle(&self, runtime: &tokio::runtime::Handle) -> Dial9TokioHandle {
+        Dial9TokioHandle::for_runtime(runtime.clone(), super::traced_handle(&self.record_handle()))
+    }
+
+    /// The recording [`Dial9Handle`] (for `record_event` and enable/disable).
+    /// Inert when telemetry is disabled.
+    pub fn record_handle(&self) -> Dial9Handle {
+        self.session
+            .as_ref()
+            .map_or_else(Dial9Handle::disabled, |s| s.handle().clone())
+    }
+
+    /// Whether this session is recording (vs an inert, disabled session).
+    pub fn is_enabled(&self) -> bool {
+        self.session.is_some()
+    }
+
+    /// Begin recording. No-op when disabled.
+    pub fn enable(&self) {
+        if let Some(s) = &self.session {
+            s.enable();
+        }
+    }
+
+    /// Stop recording. No-op when disabled.
+    pub fn disable(&self) {
+        if let Some(s) = &self.session {
+            s.disable();
+        }
+    }
+
+    /// Monotonic session start time in nanoseconds, if recording.
+    pub fn start_time(&self) -> Option<u64> {
+        self.session.as_ref().and_then(|s| s.start_time())
+    }
+
+    /// The underlying runtime-agnostic recording session. `None` when disabled.
+    pub fn session(&self) -> Option<&CoreSession> {
+        self.session.as_ref()
+    }
+
+    /// The configured task-dump settings, if any.
+    pub fn taskdump_config(&self) -> Option<TaskDumpConfig> {
+        self.taskdump_config
+    }
+
+    /// Attach another named tokio runtime to this session, so several runtimes
+    /// share one trace. You build and own the returned runtime; drop it before
+    /// [`shutdown`](Self::shutdown) so its workers flush.
     ///
-    /// The future is always spawned through a
-    /// [`Dial9TokioHandle`](super::handle::Dial9TokioHandle) bound to this
-    /// runtime. On an enabled guard this records poll and wake events; on
-    /// a disabled guard the handle's `spawn` falls through to plain
-    /// [`tokio::spawn`].
+    /// ```no_run
+    /// # use dial9_tokio_telemetry::telemetry::{DiskWriter, RecorderBuilderTokioExt, recorder};
+    /// let session = recorder(DiskWriter::single_file("/tmp/trace.bin")?)
+    ///     .with_tokio(|t| { t.worker_threads(4); })
+    ///     .build()?;
+    /// let (io_rt, io_handle) = session
+    ///     .trace_runtime("io")
+    ///     .build(tokio::runtime::Builder::new_multi_thread())?;
+    /// # Ok::<(), std::io::Error>(())
+    /// ```
+    pub fn trace_runtime(&self, name: impl Into<String>) -> TraceRuntimeCoreBuilder<'_> {
+        TraceRuntimeCoreBuilder::new(self, name.into())
+    }
+
+    /// Run `fut` to completion on the primary runtime.
+    ///
+    /// The future is spawned through a [`Dial9TokioHandle`] bound to the
+    /// primary runtime, so on an enabled session this records poll and wake
+    /// events; on a disabled one it falls through to plain `tokio::spawn`.
     pub fn block_on<F>(&self, fut: F) -> F::Output
     where
         F: std::future::Future + Send + 'static,
         F::Output: Send + 'static,
     {
-        let handle = self.guard.tokio_handle(self.runtime.handle());
+        let handle = self.handle();
         self.runtime.block_on(async move {
             match handle.spawn(fut).await {
                 Ok(output) => output,
@@ -361,69 +275,47 @@ impl TracedRuntime {
         })
     }
 
-    /// Drop the runtime and perform the configured graceful shutdown.
+    /// Drop the primary runtime, then drain the background worker within the
+    /// configured timeout (set via
+    /// [`TokioSessionBuilder::graceful_shutdown`](super::TokioSessionBuilder::graceful_shutdown),
+    /// default 1s; `None` skips the drain).
     ///
-    /// This is what `#[dial9::main]` calls after the body
-    /// completes. It:
-    ///
-    /// 1. drops the tokio runtime so worker threads exit and flush their
-    ///    thread-local telemetry buffers, then
-    /// 2. if a graceful-shutdown timeout was configured on the
-    ///    [`TracedRecorder`](super::TracedRecorder) (the default is 1s; `None`
-    ///    when disabled via
-    ///    [`TracedRecorder::disable_graceful_shutdown`](super::TracedRecorder::disable_graceful_shutdown)),
-    ///    calls [`TelemetryGuard::graceful_shutdown`] with that timeout to
-    ///    drain the background worker.
-    ///
-    /// Typically paired with [`block_on`](Self::block_on): build the runtime
-    /// from a [`TracedRecorder`](super::TracedRecorder), run the body with
-    /// `block_on`, then call `graceful_shutdown`.
-    ///
-    /// The drain is best-effort: any error returned by
-    /// [`TelemetryGuard::graceful_shutdown`] is logged at `error!` and
-    /// otherwise ignored. When you need the deadline at a call site, the
-    /// low-level [`TelemetryGuard::graceful_shutdown`] also takes an
-    /// explicit timeout.
+    /// **Call this after any runtimes you attached with
+    /// [`trace_runtime`](Self::trace_runtime) have been dropped**, so their
+    /// worker threads have flushed. Consumes the session; a no-op when disabled.
+    /// This is what `#[dial9::main]` calls. Best-effort — drain errors are
+    /// logged at `error!`. To skip the drain entirely, just drop the session.
     pub fn graceful_shutdown(self) {
+        let timeout = self.graceful_shutdown_timeout;
         let Self {
-            runtime,
-            guard,
-            graceful_shutdown_timeout,
+            runtime, session, ..
         } = self;
-        // Drop the runtime first so Tokio worker threads exit and flush their
-        // thread-local buffers into the collector before the guard drains the
-        // background worker.
+        // Drop the runtime first so Tokio workers exit and flush before the
+        // session seals the final segment.
         drop(runtime);
-        if let Some(timeout) = graceful_shutdown_timeout
-            && let Err(e) = guard.graceful_shutdown(timeout)
+        if let (Some(timeout), Some(s)) = (timeout, session)
+            && let Err(e) = s.graceful_shutdown(timeout)
         {
             tracing::error!(target: "dial9_telemetry", error = %e, "dial9 graceful shutdown failed");
         }
     }
 
-    /// Assemble a [`TracedRuntime`] from already-built parts.
-    ///
-    /// Prefer [`new`](Self::new) / [`try_new`](Self::try_new) for the
-    /// usual high-level construction.
-    pub fn from_parts(
-        runtime: tokio::runtime::Runtime,
-        guard: TelemetryGuard,
-        graceful_shutdown_timeout: Option<Duration>,
-    ) -> Self {
-        Self {
-            runtime,
-            guard,
-            graceful_shutdown_timeout,
-        }
+    // ── Internal accessors for TraceRuntimeCoreBuilder ──────────────────────
+
+    pub(crate) fn shared(&self) -> Option<&Arc<SharedState>> {
+        self.session.as_ref().and_then(|s| s.shared())
     }
 
-    /// Decompose into owned parts. The inverse of [`from_parts`](Self::from_parts).
-    ///
-    /// Reach for this when you need to own the runtime and guard separately:
-    /// sequence shutdown yourself, keep the guard past the runtime, or drive
-    /// [`TelemetryGuard::graceful_shutdown`] to get the drain result. Most
-    /// callers want [`graceful_shutdown`](Self::graceful_shutdown).
-    pub fn into_parts(self) -> (tokio::runtime::Runtime, TelemetryGuard, Option<Duration>) {
-        (self.runtime, self.guard, self.graceful_shutdown_timeout)
+    pub(crate) fn contexts_registry(&self) -> Option<&RuntimeContextRegistry> {
+        self.session.as_ref().map(|_| &self.contexts)
+    }
+
+    pub(crate) fn session_handle(&self) -> Option<&Dial9Handle> {
+        self.session.as_ref().map(|s| s.handle())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn configured_graceful_shutdown_timeout(&self) -> Option<Duration> {
+        self.graceful_shutdown_timeout
     }
 }

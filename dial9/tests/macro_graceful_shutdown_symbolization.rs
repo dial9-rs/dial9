@@ -11,7 +11,7 @@
 #![cfg(all(feature = "cpu-profiling", target_os = "linux"))]
 
 use dial9::telemetry::CpuProfilingConfig;
-use dial9::{DiskWriter, RecorderBuilderTokioExt, RecorderPerfExt, TracedRecorder};
+use dial9::{DiskWriter, RecorderBuilderTokioExt, RecorderPerfExt, TokioSessionBuilder};
 use dial9_trace_format::decoder::Decoder;
 use flate2::read::GzDecoder;
 use std::io::Read;
@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 static TRACE_DIR: OnceLock<PathBuf> = OnceLock::new();
 static OUTPUT_DIR: OnceLock<PathBuf> = OnceLock::new();
 
-fn macro_test_config() -> TracedRecorder {
+fn macro_test_config() -> TokioSessionBuilder {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("trace.bin");
     let output = dir.path().join("output");

@@ -1,4 +1,4 @@
-//! End-to-end test: encode events via TracedRuntime, decode via serde into
+//! End-to-end test: encode events via TokioSession, decode via serde into
 //! the built-in analysis event structs.
 
 mod common;
@@ -11,7 +11,7 @@ use dial9_tokio_telemetry::telemetry::{InMemoryWriter, RecorderBuilderTokioExt, 
 fn decode_builtin_events_via_serde() {
     let (capture, batches) = capture_processor();
 
-    let traced = recorder(InMemoryWriter::new(CAPTURE_BUFFER_SIZE).unwrap())
+    let session = recorder(InMemoryWriter::new(CAPTURE_BUFFER_SIZE).unwrap())
         .with_tokio(|t| {
             t.worker_threads(2);
         })
@@ -20,7 +20,7 @@ fn decode_builtin_events_via_serde() {
         .build()
         .unwrap();
 
-    traced.runtime().block_on(async {
+    session.runtime().block_on(async {
         let mut handles = Vec::new();
         for _ in 0..10 {
             handles.push(tokio::spawn(async {
@@ -34,7 +34,7 @@ fn decode_builtin_events_via_serde() {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     });
 
-    traced.graceful_shutdown();
+    session.graceful_shutdown();
 
     let batches = batches.lock().unwrap();
     let events: Vec<Dial9Event> = decode_all(&batches);

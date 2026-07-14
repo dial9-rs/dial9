@@ -1,7 +1,7 @@
 use dial9_tokio_telemetry::telemetry::{DiskWriter, RecorderBuilderTokioExt, recorder};
 use std::time::Duration;
 
-/// After TelemetryGuard is dropped, all trace files should be sealed (.bin),
+/// After TokioSession is dropped, all trace files should be sealed (.bin),
 /// with no .active files remaining. This is the contract the worker depends on.
 #[test]
 fn guard_drop_produces_sealed_bin_files() {
@@ -9,21 +9,21 @@ fn guard_drop_produces_sealed_bin_files() {
     let trace_path = dir.path().join("trace.bin");
 
     let writer = DiskWriter::new(&trace_path, 1024, 1024 * 1024).unwrap();
-    let traced = recorder(writer)
+    let session = recorder(writer)
         .with_tokio(|t| {
             t.worker_threads(2);
         })
         .build()
         .unwrap();
 
-    traced.runtime().block_on(async {
+    session.runtime().block_on(async {
         for _ in 0..100 {
             tokio::spawn(async { tokio::task::yield_now().await });
         }
         tokio::time::sleep(Duration::from_millis(300)).await;
     });
 
-    drop(traced);
+    drop(session);
 
     let entries: Vec<_> = std::fs::read_dir(dir.path())
         .unwrap()

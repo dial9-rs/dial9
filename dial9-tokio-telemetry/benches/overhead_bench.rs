@@ -22,7 +22,7 @@ use dial9_tokio_telemetry::telemetry::CpuProfilingConfig;
 #[cfg(target_os = "linux")]
 use dial9_tokio_telemetry::telemetry::RecorderPerfExt;
 use dial9_tokio_telemetry::telemetry::{
-    Dial9TokioHandle, DiskWriter, InMemoryWriter, RecorderBuilderTokioExt, TelemetryGuard, recorder,
+    Dial9TokioHandle, DiskWriter, InMemoryWriter, RecorderBuilderTokioExt, TokioSession, recorder,
 };
 use hdrhistogram::Histogram;
 use std::sync::Arc;
@@ -106,7 +106,11 @@ struct BenchResult {
 }
 
 fn run_bench(mode: &str, duration_secs: u64) -> BenchResult {
-    let (server_rt, guard): (tokio::runtime::Runtime, Option<TelemetryGuard>) = match mode {
+    enum Server {
+        Traced(TokioSession),
+        Plain(tokio::runtime::Runtime),
+    }
+    let server: Server = match mode {
         "telemetry" => {
             let writer = DiskWriter::single_file("/tmp/overhead_bench_trace.bin").unwrap();
             #[allow(unused_mut)]
@@ -115,30 +119,27 @@ fn run_bench(mode: &str, duration_secs: u64) -> BenchResult {
             {
                 rec = rec.with_cpu_profiling(CpuProfilingConfig::default());
             }
-            let traced = rec
-                .with_tokio(|t| {
+            Server::Traced(
+                rec.with_tokio(|t| {
                     t.worker_threads(4);
                 })
                 .with_task_tracking(true)
                 .build()
-                .unwrap();
-            let (rt, g, ..) = traced.into_parts();
-            (rt, Some(g))
+                .unwrap(),
+            )
         }
-        "noop" => {
-            let traced = recorder(InMemoryWriter::new(16 * 1024 * 1024).unwrap())
+        "noop" => Server::Traced(
+            recorder(InMemoryWriter::new(16 * 1024 * 1024).unwrap())
                 .with_tokio(|t| {
                     t.worker_threads(4);
                 })
                 .build()
-                .unwrap();
-            let (rt, g, ..) = traced.into_parts();
-            (rt, Some(g))
-        }
+                .unwrap(),
+        ),
         "baseline" => {
             let mut builder = tokio::runtime::Builder::new_multi_thread();
             builder.worker_threads(4).enable_all();
-            (builder.build().unwrap(), None)
+            Server::Plain(builder.build().unwrap())
         }
         other => {
             eprintln!("unknown mode: {other} (expected: baseline, telemetry, noop)");
@@ -146,12 +147,14 @@ fn run_bench(mode: &str, duration_secs: u64) -> BenchResult {
         }
     };
 
+    let (server_rt, handle): (&tokio::runtime::Runtime, Option<Dial9TokioHandle>) = match &server {
+        Server::Traced(s) => (s.runtime(), Some(s.handle())),
+        Server::Plain(rt) => (rt, None),
+    };
+
     let port = server_rt.block_on(async {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        let handle = guard
-            .as_ref()
-            .map(|g| g.tokio_handle(&tokio::runtime::Handle::current()));
         tokio::spawn(echo_server(listener, handle));
         port
     });
@@ -192,7 +195,7 @@ fn run_bench(mode: &str, duration_secs: u64) -> BenchResult {
     });
 
     drop(client_rt);
-    drop(server_rt);
+    drop(server);
 
     BenchResult { hist, wall }
 }
