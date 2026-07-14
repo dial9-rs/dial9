@@ -1019,6 +1019,7 @@ body {
     width: 100%;
     text-align: left;
     color: var(--d9-fg);
+    font-size: 0.9em;
     font-weight: 600;
     padding: 4px 0;
     background: transparent;
