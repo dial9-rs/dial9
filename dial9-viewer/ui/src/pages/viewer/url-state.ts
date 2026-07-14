@@ -19,6 +19,11 @@ const P_TASK = "task";
 const P_SPAN_FILTER = "span-filter";
 const P_TRACK_ORDER = "track-order";
 const P_COLLAPSED = "collapsed";
+const P_SPAN = "span";
+const P_POLL = "poll";
+const P_EVENT = "event";
+const P_REGION = "region";
+const P_SPAWNED = "spawned";
 
 /** Project the store into the shareable ViewState. */
 export function projectViewerState(state: ReadonlyState<StoreState>): ViewState {
@@ -37,8 +42,16 @@ export function projectViewerState(state: ReadonlyState<StoreState>): ViewState 
     vs.viewStart = vp.viewStart;
     vs.viewEnd = vp.viewEnd;
   }
-  if (state.selection.selectedTaskId !== null) {
-    vs.selectedTaskId = state.selection.selectedTaskId;
+  const sel = state.selection;
+  if (sel.selectedTaskId !== null) vs.selectedTaskId = sel.selectedTaskId;
+  if (sel.spanFocus !== null) vs.selectedSpanId = sel.spanFocus.spanId;
+  if (sel.pollDetail !== null) vs.pollStartNs = sel.pollDetail.start;
+  if (sel.pinnedEvent !== null) vs.pinnedEventTs = sel.pinnedEvent.timestamp;
+  if (sel.sidebarRange !== null) {
+    vs.sidebarRange = `${sel.sidebarRange.startNs}-${sel.sidebarRange.endNs}`;
+  }
+  if (sel.spawnedTasksRange !== null) {
+    vs.spawnedRange = `${sel.spawnedTasksRange.startNs}-${sel.spawnedTasksRange.endNs}`;
   }
   if (state.uiPrefs.spanFilter !== "") vs.spanFilter = state.uiPrefs.spanFilter;
   if (state.uiPrefs.trackOrder.length > 0) {
@@ -62,6 +75,11 @@ export function mirrorViewerToQuery(
   set(params, P_SPAN_FILTER, vs.spanFilter && vs.spanFilter.length > 0 ? vs.spanFilter : null);
   set(params, P_TRACK_ORDER, vs.trackOrder && vs.trackOrder.length > 0 ? vs.trackOrder.join(",") : null);
   set(params, P_COLLAPSED, vs.collapsed && vs.collapsed.length > 0 ? vs.collapsed.join(",") : null);
+  set(params, P_SPAN, vs.selectedSpanId ?? null);
+  set(params, P_POLL, vs.pollStartNs != null ? String(Math.round(vs.pollStartNs)) : null);
+  set(params, P_EVENT, vs.pinnedEventTs != null ? String(Math.round(vs.pinnedEventTs)) : null);
+  set(params, P_REGION, vs.sidebarRange ?? null);
+  set(params, P_SPAWNED, vs.spawnedRange ?? null);
 }
 
 function set(params: URLSearchParams, key: string, value: string | null): void {
@@ -78,6 +96,12 @@ export interface ViewerUrlState {
   spanFilter?: string;
   trackOrder?: string[];
   collapsed?: string[];
+  /** Canvas-selection anchors, re-resolved against the loaded trace on load. */
+  selectedSpanId?: string;
+  pollStartNs?: number;
+  pinnedEventTs?: number;
+  sidebarRange?: { startNs: number; endNs: number };
+  spawnedRange?: { startNs: number; endNs: number };
 }
 
 /** Read the viewer fields from a URL query string. */
@@ -102,7 +126,28 @@ export function readViewerUrlState(search: string): ViewerUrlState {
   if (col != null && col.length > 0) {
     out.collapsed = col.split(",").filter((s) => s.length > 0);
   }
+  const span = p.get(P_SPAN);
+  if (span != null && span.length > 0) out.selectedSpanId = span;
+  const poll = num(p.get(P_POLL));
+  if (poll != null) out.pollStartNs = poll;
+  const event = num(p.get(P_EVENT));
+  if (event != null) out.pinnedEventTs = event;
+  const region = rangePair(p.get(P_REGION));
+  if (region != null) out.sidebarRange = region;
+  const spawned = rangePair(p.get(P_SPAWNED));
+  if (spawned != null) out.spawnedRange = spawned;
   return out;
+}
+
+/** Parse a `"startNs-endNs"` param into a range, or null. */
+function rangePair(v: string | null): { startNs: number; endNs: number } | null {
+  if (v === null) return null;
+  const dash = v.indexOf("-", 1); // skip a leading '-' (negative not expected)
+  if (dash <= 0) return null;
+  const startNs = num(v.slice(0, dash));
+  const endNs = num(v.slice(dash + 1));
+  if (startNs == null || endNs == null || endNs <= startNs) return null;
+  return { startNs, endNs };
 }
 
 function num(v: string | null): number | null {

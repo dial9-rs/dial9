@@ -36,6 +36,7 @@ import {
   mirrorViewerToQuery,
   readViewerUrlState,
 } from "./url-state.js";
+import { resolveUrlSelection } from "./url-selection.js";
 import type { StoreState } from "../../types/state.js";
 
 // Dual-UI switch: render the always-visible "Switch to legacy UI" pill. The
@@ -188,10 +189,11 @@ function boot(): void {
   // Registered AFTER initViewportFromTrace so it overrides the full-fit;
   // one-shot, so a later Set-Range reparse refits to its own extent instead of
   // snapping back to the shared window.
-  if (urlView.viewStart !== undefined || urlView.selectedTaskId !== undefined) {
+  {
     let applied = false;
     const unsubUrlRestore = store.subscribe(["trace"], (state) => {
-      if (applied || state.trace.trace === null) return;
+      const trace = state.trace.trace;
+      if (applied || trace === null) return;
       applied = true;
       unsubUrlRestore();
       if (urlView.viewStart !== undefined && urlView.viewEnd !== undefined) {
@@ -200,8 +202,15 @@ function boot(): void {
           viewEnd: urlView.viewEnd,
         });
       }
+      // Re-resolve the canvas-selection anchors (span/poll/event/region/
+      // spawned) against the loaded trace, plus the task, into one patch.
+      // Unresolvable anchors are silently dropped.
+      const selPatch = resolveUrlSelection(trace, urlView);
       if (urlView.selectedTaskId !== undefined) {
-        store.update("selection", { selectedTaskId: urlView.selectedTaskId });
+        selPatch.selectedTaskId = urlView.selectedTaskId;
+      }
+      if (Object.keys(selPatch).length > 0) {
+        store.update("selection", selPatch);
       }
     });
   }

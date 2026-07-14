@@ -72,6 +72,16 @@ export interface ViewState {
   trackOrder?: readonly string[];
   /** Ids of the collapsed tracks, when any. */
   collapsed?: readonly string[];
+  /** Focused span id (re-resolved to the span + highlight chain on load). */
+  selectedSpanId?: string;
+  /** Poll-detail anchor: the clicked poll's start ns (re-resolved on load). */
+  pollStartNs?: number;
+  /** Pinned-event anchor: the cluster timestamp ns (re-resolved on load). */
+  pinnedEventTs?: number;
+  /** Retained region (`"startNs-endNs"`) -> selection.sidebarRange. */
+  sidebarRange?: string;
+  /** Spawned-tasks range (`"startNs-endNs"`) -> selection.spawnedTasksRange. */
+  spawnedRange?: string;
 }
 
 /** An unrecognized-but-versioned hash entry, preserved for rewrite. */
