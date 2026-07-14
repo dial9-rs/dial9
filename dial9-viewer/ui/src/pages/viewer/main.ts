@@ -37,6 +37,10 @@ import {
   readViewerUrlState,
 } from "./url-state.js";
 import { resolveUrlSelection } from "./url-selection.js";
+import { mountViewerSearch } from "./search-overlay.js";
+import { buildSearchIndex, searchWindow } from "./search-model.js";
+import type { SearchResult } from "./search-model.js";
+import { poiJump } from "./poi.js";
 import type { StoreState } from "../../types/state.js";
 
 // Dual-UI switch: render the always-visible "Switch to legacy UI" pill. The
@@ -116,6 +120,37 @@ function boot(): void {
   // App chrome: esc-cascade mechanism + help overlay + toasts.
   const esc = createEscCascade();
   const help = mountViewerHelp(document, esc);
+
+  // `/` search palette: a per-trace index (via store.derived), the modal, and
+  // a jump on pick.
+  const searchIndex = store.derived(["trace"], (s) =>
+    s.trace.trace ? buildSearchIndex(s.trace.trace) : null,
+  );
+  const search = mountViewerSearch(document, esc, {
+    getIndex: () => searchIndex(),
+    onPick: (r) => navigateToSearchResult(r),
+  });
+  function navigateToSearchResult(r: SearchResult): void {
+    const vp = store.getState().viewport;
+    if (r.nav.kind === "poi") {
+      const j = poiJump(r.nav.poi, vp);
+      store.update("viewport", { viewStart: j.viewStart, viewEnd: j.viewEnd });
+      if (j.selectedTaskId !== null) {
+        store.update("selection", { selectedTaskId: j.selectedTaskId });
+      }
+      return;
+    }
+    const win = searchWindow(r.nav.startNs, r.nav.endNs, vp.minTs, vp.maxTs);
+    store.update("viewport", { viewStart: win.start, viewEnd: win.end });
+    if (r.nav.kind === "task") {
+      store.update("selection", { selectedTaskId: r.nav.taskId });
+    } else {
+      store.update("selection", {
+        spanFocus: { spanId: r.nav.spanId, chain: new Set([r.nav.spanId]) },
+        focusedSpanId: r.nav.spanId,
+      });
+    }
+  }
 
   const source = traceSource(window.location.search);
   // Forward references resolved after the shell mounts: the "New File" button
@@ -249,6 +284,9 @@ function boot(): void {
     // focuses the goto-time input. After the lane bindings so a live keyboard
     // selection still owns arrows/Enter/Escape.
     ...shell.keyBindings,
+    // No inTextEntry: a `/` typed in a field types a slash; elsewhere it is
+    // consumed, which also stops Firefox's native quick-find hijacking it.
+    { key: "/", onKey: () => search.open() },
     { key: "?", onKey: () => help.toggle() },
     {
       key: "Escape",
@@ -291,6 +329,7 @@ function boot(): void {
   // Teardown hook for HMR / tests (not strictly needed in production).
   window.addEventListener("beforeunload", () => {
     urlBinding?.dispose();
+    search.dispose();
     disposeTrackPrefs();
     loadChrome?.dispose();
     statusBar.dispose();

@@ -65,6 +65,8 @@ export function createEscCascade(): EscCascade {
  */
 export const ESC_PRIORITY = {
   help: 100,
+  // A modal over everything but help: Esc closes an open search first.
+  search: 95,
   // The load section: a modal drop-zone/loading surface. Sits below help (a
   // `?` overlay opened over a load still closes first) and above the
   // popups/sidebar it covers, so Esc cancels a load / dismisses the New-File
