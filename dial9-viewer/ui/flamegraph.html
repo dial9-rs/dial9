@@ -848,9 +848,13 @@
                     // (attached ONCE below, not per render, so they don't
                     // accumulate). `minimapDrag` is null except during a brush.
                     let minimapDrag = null;
-                    // The split (ns) for the fast/slow diff — set by clicking the
-                    // histogram, seeded to the sample-weighted median on each new
-                    // response. `splitNs` null until a histogram exists.
+                    // The split (ns) for the fast/slow diff. Seeded to the
+                    // sample-weighted median when a new scope's histogram first
+                    // arrives, and set explicitly by clicking the histogram. A
+                    // scope change (startStreaming without preserveSplit) resets it
+                    // to null so it re-seeds to the new distribution; a user click
+                    // survives re-renders and "Refine more" within the same scope.
+                    // Null until a histogram exists.
                     let splitNs = null;
                     // Latest layout, so the persistent header buttons + window drag
                     // handlers can map pixels ↔ ns without recomputing.
@@ -1215,7 +1219,16 @@
                     // (Re)start the stream from scratch: aborts any in-flight
                     // stream and shows the loading overlay. The server emits the
                     // already-folded snapshot immediately, then refines to the cap.
-                    function startStreaming() {
+                    //
+                    // A scope change (new filters/facets/time/poll-band) resets the
+                    // fast/slow split so it re-seeds to the incoming distribution's
+                    // median. "Refine more" passes preserveSplit=true: it's the same
+                    // scope with deeper sampling, so a user-chosen split must stick.
+                    function startStreaming(preserveSplit = false) {
+                        if (!preserveSplit) {
+                            splitNs = null;
+                            renderedHistKey = null; // force the marker to re-seed
+                        }
                         stopStreaming();
                         setRefiningUi(true);
                         gotEvent = false;
@@ -1265,7 +1278,7 @@
                         // folded files are served instantly) up to the new cap.
                         const folded = lastCoverage ? lastCoverage.files_folded : 0;
                         maxFiles = nextMaxFiles(folded);
-                        startStreaming();
+                        startStreaming(true); // same scope → keep the chosen split
                     });
 
                     stopBtn.addEventListener("click", () => {

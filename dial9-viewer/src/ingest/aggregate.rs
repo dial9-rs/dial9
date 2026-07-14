@@ -1038,8 +1038,6 @@ pub(crate) async fn fetch_polls_part(
     output.get_object(bucket, &polls_key).await.ok()
 }
 
-
-
 /// Index of the "host" facet in [`FACETS`]. A missing "host" facet is a
 /// developer error (the facet table is a compile-time constant), so this panics
 /// rather than silently picking the wrong column.
