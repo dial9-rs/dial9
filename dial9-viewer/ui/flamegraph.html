@@ -84,6 +84,7 @@
         <script src="format.js"></script>
         <script src="flamegraph_api.js"></script>
         <script src="sse.js"></script>
+        <script src="flamegraph_view_state.js"></script>
         <script src="flamegraph_diff.js"></script>
         <script src="flamegraph_diff_view.js"></script>
         <script src="decode.js"></script>
@@ -137,31 +138,19 @@
 
                 // ── View state <-> URL (single source of truth) ──────────────
                 // "Deep-link anything" means the URL IS the store for the
-                // flamegraph's view state (the zoom path + the inspect/butterfly
-                // focus). Rather than a framework, we centralize the encode/decode
-                // in these two pure helpers so every mode (exact-trace and API
-                // aggregate) serializes and restores focus identically — a shared
-                // link always reproduces the exact focus position. The renderer
-                // owns the live state; these functions are the only place that
-                // maps it to/from URL params.
+                // flamegraph's view state (zoom path + inspect/butterfly focus +
+                // search/filters). The encode/decode lives in
+                // flamegraph_view_state.js — one codec shared with the unit tests
+                // — and the renderer owns the live state via
+                // getViewState/applyViewState. These two thin adapters bridge the
+                // two so every mode (exact-trace and API aggregate) serializes and
+                // restores identically: a shared link always reproduces the view.
+                const ViewState = window.Dial9FlamegraphViewState;
                 function writeViewState(p, fg) {
-                    const z = fg.getZoomPath();
-                    if (z.worker && z.worker.length) p.set("worker-zoom", z.worker.join("\t"));
-                    else p.delete("worker-zoom");
-                    if (z.offworker && z.offworker.length) p.set("offworker-zoom", z.offworker.join("\t"));
-                    else p.delete("offworker-zoom");
-                    const inspect = fg.getInspectFocus();
-                    if (inspect) p.set("inspect", inspect);
-                    else p.delete("inspect");
-                    return p;
+                    return ViewState.writeState(p, fg.getViewState());
                 }
                 function restoreViewState(fg, p) {
-                    const wz = p.get("worker-zoom");
-                    const oz = p.get("offworker-zoom");
-                    if (wz) fg.zoomToPath("worker", wz.split("\t"));
-                    if (oz) fg.zoomToPath("offworker", oz.split("\t"));
-                    const inspect = p.get("inspect");
-                    if (inspect) fg.focusInspectByKey(inspect);
+                    fg.applyViewState(ViewState.readState(p));
                 }
 
                 // --- Diff mode: two-sided differential flamegraph (?diff=1) ---
@@ -276,11 +265,22 @@
                         });
                     }
 
+                    // Persist the diff view's zoom + highlight to the URL so any
+                    // position is a shareable link. The scope keys (diff/a/b) are
+                    // already in the address bar; writeDiffState only touches its
+                    // own diff_zoom/diff_search keys, so it composes with them.
+                    function onDiffViewChange(st) {
+                        const p = new URLSearchParams(window.location.search);
+                        ViewState.writeDiffState(p, st);
+                        history.replaceState(null, "", window.location.pathname + "?" + p.toString());
+                    }
                     view = FlamegraphDiffView.createDiffView(containerEl, {
                         scopeA: diffParsed.a,
                         scopeB: diffParsed.b,
                         headersFor: headersFor,
                         onSideError: onSideError,
+                        onChange: onDiffViewChange,
+                        initialState: ViewState.readDiffState(params),
                     });
                     statsEl.textContent = "A (left) vs B (right) · blue = heavier in A, red = heavier in B";
                     return;
@@ -856,26 +856,25 @@
                         // link. The aggregate tree STREAMS in and refines, so a
                         // deep target frame may not exist in the first snapshot —
                         // we retry on each snapshot until the focus is applied
-                        // EXACTLY as the link asked. Each attempt resets the view
-                        // first so re-applying is idempotent (zoomToPath appends).
-                        // A genuine user interaction flips viewRestored via
-                        // onApiViewChange, which stops us from ever snapping their
-                        // view back to the URL.
+                        // EXACTLY as the link asked. applyViewState resets the
+                        // view first, so re-applying over successive snapshots is
+                        // idempotent. A genuine user interaction flips
+                        // viewRestored via onApiViewChange, which stops us from
+                        // ever snapping their view back to the URL.
                         if (!viewRestored) {
-                            const wantW = params.get("worker-zoom");
-                            const wantO = params.get("offworker-zoom");
-                            const wantInspect = params.get("inspect");
+                            const want = ViewState.readState(params);
                             restoringView = true;
-                            fg.resetView();
-                            restoreViewState(fg, params);
+                            fg.applyViewState(want);
                             restoringView = false;
                             const z = fg.getZoomPath();
                             const zoomOk =
-                                (!wantW || z.worker.join("\t") === wantW) &&
-                                (!wantO || z.offworker.join("\t") === wantO);
-                            const inspectOk = !wantInspect || fg.getInspectFocus() != null;
+                                (!want.workerZoom || z.worker.join("\t") === want.workerZoom.join("\t")) &&
+                                (!want.offworkerZoom || z.offworker.join("\t") === want.offworkerZoom.join("\t"));
+                            const inspectOk = !want.inspect || fg.getInspectFocus() != null;
                             // Done once the link's focus is fully in place (or the
-                            // link carried no focus at all).
+                            // link carried no focus at all). search/spawn/runtime
+                            // apply synchronously, so zoom+inspect are the only
+                            // pieces that can lag a streamed snapshot.
                             if (zoomOk && inspectOk) viewRestored = true;
                         }
 

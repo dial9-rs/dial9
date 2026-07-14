@@ -323,6 +323,16 @@
 
   function createFlamegraph(container, onZoomChange) {
     onZoomChange = onZoomChange || function () {};
+    // While restoring view state from a URL we mutate zoom/inspect/search/filters
+    // programmatically; those must NOT fire the persist callback (which would
+    // rewrite the address bar mid-restore, and — via writeState's delete-on-
+    // absence — could clobber a URL key the restore hasn't applied yet). All
+    // internal "view changed" notifications go through notifyChange() so restore
+    // can suspend them; genuine user interactions run with it un-suspended.
+    let suspendNotify = false;
+    function notifyChange() {
+      if (!suspendNotify) onZoomChange();
+    }
     let workerTree = null;
     let offworkerTree = null;
     let workerData = null;
@@ -334,6 +344,11 @@
     let repaintQueued = false;
     let allSamples = [];
     let currentSymbols = null;
+    // True once setTreeDirect() has installed a pre-built (aggregated/API) tree.
+    // In that mode there are no raw `allSamples`, so the spawn/runtime filters
+    // (which rebuild the trees from samples) do not apply and must not run —
+    // applyFilters() over an empty sample set would wipe the direct-set tree.
+    let directMode = false;
     // Map of workerId -> runtime name, derived from the trace's runtime.<name>
     // segment metadata. Empty when the trace has a single runtime (or none),
     // in which case the runtime filter stays hidden.
@@ -509,6 +524,7 @@
       hideSearchResults();
       repaint();
       searchInput.focus();
+      notifyChange();
     });
 
     const breadcrumbBar = document.createElement("div");
@@ -765,7 +781,7 @@
       renderBreadcrumb();
       // Entering/re-pivoting inspect is a view-state change, so notify the host
       // (flamegraph.html) to persist the new focus into the URL for deep links.
-      onZoomChange();
+      notifyChange();
     }
 
     // Clear all inspect state without triggering a re-render. Used both by the
@@ -789,7 +805,7 @@
       renderAll();
       renderBreadcrumb();
       // Leaving inspect clears the persisted focus from the URL.
-      onZoomChange();
+      notifyChange();
     }
 
     function renderInspect() {
@@ -886,7 +902,7 @@
         if (key === "worker") workerZoomStack = [];
         else offworkerZoomStack = [];
         renderAll();
-        onZoomChange();
+        notifyChange();
       });
       breadcrumbBar.appendChild(rootSpan);
 
@@ -907,7 +923,7 @@
             if (key === "worker") workerZoomStack = workerZoomStack.slice(0, idx + 1);
             else offworkerZoomStack = offworkerZoomStack.slice(0, idx + 1);
             renderAll();
-            onZoomChange();
+            notifyChange();
           });
         }
         breadcrumbBar.appendChild(span);
@@ -984,6 +1000,8 @@
       searchClear.style.display = searchQuery ? "" : "none";
       renderSearchResults();
       repaint();
+      // Persist the query so a shared link reproduces the same search.
+      notifyChange();
     }
 
     // Focus the search box → re-show the results if a query is already present.
@@ -1090,14 +1108,14 @@
       if (key === "worker") workerZoomStack.push(treeNode);
       else offworkerZoomStack.push(treeNode);
       renderAll();
-      onZoomChange();
+      notifyChange();
     }
 
     function resetZoom() {
       workerZoomStack = [];
       offworkerZoomStack = [];
       renderAll();
-      onZoomChange();
+      notifyChange();
     }
 
     function isZoomed() {
@@ -1265,7 +1283,7 @@
             if (hitKey === "worker") workerZoomStack = [tn];
             else offworkerZoomStack = [tn];
             renderAll();
-            onZoomChange();
+            notifyChange();
           } else {
             zoomTo(hitKey, tn);
           }
@@ -1317,7 +1335,7 @@
       if (stack.length > 0) {
         stack.pop();
         renderAll();
-        onZoomChange();
+        notifyChange();
       }
     });
 
@@ -1422,6 +1440,7 @@
         searchQuery = "";
         searchClear.style.display = "none";
         renderAll();
+        notifyChange();
         return true;
       }
       if (inspectActive) {
@@ -1476,14 +1495,22 @@
       renderAll();
     }
 
-    spawnFilter.addEventListener("change", applyFilters);
-    runtimeFilter.addEventListener("change", applyFilters);
+    // User-driven filter change: rebuild the trees AND persist the new filter
+    // to the URL. applyFilters() itself stays notify-free so the initial load
+    // (setData → applyFilters) doesn't churn the address bar.
+    function onFilterChange() {
+      applyFilters();
+      notifyChange();
+    }
+    spawnFilter.addEventListener("change", onFilterChange);
+    runtimeFilter.addEventListener("change", onFilterChange);
 
     let workerLabelPrefix = "Worker threads";
     let offworkerLabelPrefix = "Off-worker (sampler thread)";
     let formatCount = null;
 
     function setData(samples, callframeSymbols, opts) {
+      directMode = false;
       allSamples = samples;
       currentSymbols = callframeSymbols;
       formatCount = (opts && opts.formatCount) || null;
@@ -1684,6 +1711,110 @@
       return false;
     }
 
+    // The current search query (the frames-search box text), or "" when empty.
+    function getSearch() {
+      return searchQuery;
+    }
+
+    // Programmatically set the search query (used by view-state restore). Mirrors
+    // the input handler minus the notify — restore drives this under suspend.
+    function setSearch(q) {
+      q = q || "";
+      searchInput.value = q;
+      searchQuery = q;
+      searchClear.style.display = q ? "" : "none";
+      renderSearchResults();
+      repaint();
+    }
+
+    // The active spawn-location / runtime filter values ("" = no filter). Empty
+    // in aggregated/API mode, where these controls are hidden and inapplicable.
+    function getSpawnFilter() {
+      return directMode ? "" : (spawnFilter.value || "");
+    }
+    function getRuntimeFilter() {
+      return directMode ? "" : (runtimeFilter.value || "");
+    }
+
+    // Set a filter's value only if that exact option exists (a stale link into a
+    // trace lacking the option is ignored rather than selecting an empty value).
+    function setSelectIfPresent(sel, value) {
+      if (!value) { sel.value = ""; return; }
+      for (const opt of sel.options) {
+        if (opt.value === value) { sel.value = value; return; }
+      }
+    }
+
+    // The complete, serializable view state — the exact shape the URL codec in
+    // flamegraph_view_state.js reads/writes. Absent pieces are simply omitted so
+    // the codec deletes their keys. `inspect` carries the name/symbol split so a
+    // restored link re-derives the same identity key (fullName || name).
+    function getViewState() {
+      const z = getZoomPath();
+      const out = {};
+      if (z.worker && z.worker.length) out.workerZoom = z.worker;
+      if (z.offworker && z.offworker.length) out.offworkerZoom = z.offworker;
+      if (inspectActive && inspectFocusSrc) {
+        out.inspect = {
+          name: inspectFocusSrc.name,
+          fullName: inspectFocusSrc.fullName || inspectFocusSrc.name,
+        };
+      }
+      if (searchQuery) out.search = searchQuery;
+      const spawn = getSpawnFilter();
+      if (spawn) out.spawn = spawn;
+      const runtime = getRuntimeFilter();
+      if (runtime) out.runtime = runtime;
+      return out;
+    }
+
+    // Restore a view state produced by getViewState (typically decoded from the
+    // URL). Silent by default: mutating zoom/inspect/search/filters here must not
+    // fire the persist callback (that would rewrite the URL mid-restore). Order
+    // matters: filters rebuild the trees and reset zoom, so they run FIRST, then
+    // the zoom path, then inspect, then search.
+    function applyViewState(state, opts) {
+      state = state || {};
+      const silent = !opts || opts.silent !== false;
+      const prev = suspendNotify;
+      if (silent) suspendNotify = true;
+      try {
+        // Full restore (not a merge): drive every dimension to the state's value,
+        // including "absent" → cleared, so re-applying the same URL over several
+        // streamed snapshots converges instead of accumulating.
+        resetView();
+        // Filters only apply in exact mode (raw samples present). Applying them
+        // rebuilds the trees + resets zoom, so they must precede zoom/inspect.
+        // resetView above does not touch the filter <select>s, so set them here
+        // (to the target, or "" to clear) and rebuild — but only when the value
+        // actually changes, to avoid a redundant full tree rebuild on the common
+        // fresh-load case where no filter is being restored.
+        if (!directMode) {
+          const wantSpawn = state.spawn || "";
+          const wantRuntime = state.runtime || "";
+          if (spawnFilter.value !== wantSpawn || runtimeFilter.value !== wantRuntime) {
+            setSelectIfPresent(spawnFilter, wantSpawn);
+            setSelectIfPresent(runtimeFilter, wantRuntime);
+            applyFilters();
+          }
+        }
+        if (state.workerZoom && state.workerZoom.length) {
+          zoomToPath("worker", state.workerZoom);
+        }
+        if (state.offworkerZoom && state.offworkerZoom.length) {
+          zoomToPath("offworker", state.offworkerZoom);
+        }
+        if (state.inspect) {
+          // The identity key is fullName || name — the same key focusInspectByKey
+          // matches on and getInspectFocus reports.
+          focusInspectByKey(state.inspect.fullName || state.inspect.name);
+        }
+        setSearch(state.search || "");
+      } finally {
+        suspendNotify = prev;
+      }
+    }
+
     // Clear zoom + inspect WITHOUT notifying the host. Used by flamegraph.html's
     // URL-restore retries (the aggregate tree streams in, so restore may run over
     // several snapshots): each attempt resets first, making re-applying a URL
@@ -1701,6 +1832,7 @@
     }
 
     function setTreeDirect(tree, totalCount) {
+      directMode = true;
       // For API mode: set a pre-built tree directly (no worker/off-worker split)
       // Preserve the current zoom by finding the same node in the new tree.
       const prevTarget = workerZoomStack.length > 0
@@ -1748,7 +1880,13 @@
       renderAll();
     }
 
-    return { setData, setTreeDirect, resize, destroy, handleEscape, isZoomed, getZoomPath, zoomToPath, getInspectFocus, focusInspectByKey, resetView };
+    return {
+      setData, setTreeDirect, resize, destroy, handleEscape, isZoomed,
+      getZoomPath, zoomToPath, getInspectFocus, focusInspectByKey, resetView,
+      // Consolidated view-state accessors (shape matches flamegraph_view_state.js).
+      getViewState, applyViewState,
+      getSearch, setSearch, getSpawnFilter, getRuntimeFilter,
+    };
   }
 
   const fgExports = {

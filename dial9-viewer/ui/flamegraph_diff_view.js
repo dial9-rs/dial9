@@ -89,6 +89,13 @@
     const scopeB = opts.scopeB;
     const headersFor = opts.headersFor || (() => ({}));
     const onSideError = opts.onSideError || (() => {});
+    // Fired whenever the user changes the view (zoom or highlight), so the host
+    // can persist { zoom, search } to the URL for a shareable deep link. `zoom`
+    // is the full path from the merged root down (root INCLUDED as element 0),
+    // matching flamegraph_view_state.js's readDiffState/writeDiffState contract.
+    const onChange = opts.onChange || (() => {});
+    // Optional { zoom, search } to seed the view from a shared link.
+    const initialState = opts.initialState || {};
     const labelA = scopeLabel(scopeA, "A");
     const labelB = scopeLabel(scopeB, "B");
 
@@ -157,6 +164,16 @@
     let treeB = null; // server JSON tree, side B
     let merged = D.mergeTrees(null, null);
     let zoomPath = ["(all)"];
+    // A URL-restore zoom target (full path from the merged root down, root at
+    // index 0) we keep trying to LAND as the sides stream in: the merged tree is
+    // empty until the first snapshot, and a deep target may only appear as
+    // folding deepens. render() promotes it into zoomPath once it resolves;
+    // seeding zoomPath directly would be wiped by render()'s "path gone → root"
+    // fallback on the first (empty) paint. Cleared once it lands or the user
+    // takes control of the zoom.
+    let pendingZoom = (initialState.zoom && initialState.zoom.length)
+      ? initialState.zoom.slice()
+      : null;
     const SEP = String.fromCharCode(31);
     // `coverage` is the last-seen coverage block (files_folded/files_matched),
     // used to decide whether "Load more" can still deepen the sample and to
@@ -201,6 +218,16 @@
     // zoom change, and resize.
     function render() {
       merged = D.mergeTrees(treeA, treeB);
+      // A shared link's zoom target may not exist until the sides stream in (or
+      // fold deeper), so retry landing it on each render; adopt it only once it
+      // resolves against the current merged tree. Until then we stay at the root
+      // rather than discarding the target.
+      if (pendingZoom) {
+        if (D.nodeAtPath(merged, pendingZoom)) {
+          zoomPath = pendingZoom.slice();
+          pendingZoom = null;
+        }
+      }
       // Resolve the zoom focus; if a prior zoom path no longer exists in the
       // merged tree (pruned away), fall back to the root.
       let focus = D.nodeAtPath(merged, zoomPath);
@@ -321,11 +348,11 @@
       });
       p.canvas.addEventListener("click", (e) => {
         const box = boxAtEvent(side, e);
-        if (box && box.path.length > zoomPath.length) { zoomPath = box.path.slice(); render(); }
+        if (box && box.path.length > zoomPath.length) { commitZoom(box.path.slice()); }
       });
       p.canvas.addEventListener("contextmenu", (e) => {
         e.preventDefault();
-        if (zoomPath.length > 1) { zoomPath = zoomPath.slice(0, -1); render(); }
+        if (zoomPath.length > 1) { commitZoom(zoomPath.slice(0, -1)); }
       });
     }
     setupPanelEvents("a");
@@ -348,7 +375,7 @@
         span.textContent = zoomPath[i];
         if (!isLast) {
           const idx = i;
-          span.addEventListener("click", () => { zoomPath = zoomPath.slice(0, idx + 1); render(); });
+          span.addEventListener("click", () => { commitZoom(zoomPath.slice(0, idx + 1)); });
         }
         breadcrumb.appendChild(span);
       }
@@ -404,6 +431,25 @@
       return d.innerHTML;
     }
 
+    // Persist the current user-facing view state (zoom path + highlight query)
+    // via the host callback so a shared URL reproduces it. `zoom` omits the
+    // root-only path (nothing zoomed) so the URL stays clean at the top level.
+    function persistState() {
+      const zoom = zoomPath.length > 1 ? zoomPath.slice() : [];
+      onChange({ zoom: zoom, search: searchInput.value.trim() });
+    }
+
+    // A user-driven zoom: cancel any not-yet-landed URL-restore target (so a
+    // late-arriving snapshot can't snap the view away from where the user just
+    // navigated — mirrors the single-flamegraph viewRestored guard), set the new
+    // path, repaint, and persist to the URL.
+    function commitZoom(path) {
+      pendingZoom = null;
+      zoomPath = path;
+      render();
+      persistState();
+    }
+
     // ── Search ──
     // Recompiles the highlight regex and repaints; matched/faded state is drawn
     // by paint() (per-box alpha), not per-element class toggles.
@@ -413,10 +459,10 @@
       if (q) { try { searchRe = new RegExp(q, "i"); } catch (e) { searchRe = null; } }
       repaint();
     }
-    searchInput.addEventListener("input", applySearch);
-    resetBtn.addEventListener("click", () => { zoomPath = [rootName()]; render(); });
+    searchInput.addEventListener("input", () => { applySearch(); persistState(); });
+    resetBtn.addEventListener("click", () => { commitZoom([rootName()]); });
     const onKeydown = (e) => {
-      if (e.key === "Escape") { zoomPath = [rootName()]; render(); return; }
+      if (e.key === "Escape") { commitZoom([rootName()]); return; }
       if (isSearchFocusKey(e, document.activeElement === searchInput)) {
         e.preventDefault();
         searchInput.focus();
@@ -601,6 +647,14 @@
       repollSide("a");
       repollSide("b");
     });
+
+    // Seed the highlight box from a shared link (before the first paint so the
+    // restored highlight is visible immediately). This does not re-persist —
+    // restore must not write back over the URL it came from.
+    if (initialState.search) {
+      searchInput.value = initialState.search;
+      applySearch();
+    }
 
     updateStats();
     render();

@@ -273,4 +273,108 @@ test("resetView makes repeated zoom restore idempotent (streaming retry safety)"
   }
 });
 
+// --- getViewState / applyViewState: the bridge flamegraph.html uses with the
+// flamegraph_view_state.js URL codec. These pin the object shape the codec
+// reads/writes and the restore semantics (silent, full-restore, retry-safe). ---
+
+test("getViewState reports the live zoom + inspect focus in codec shape", () => {
+  const dom = makeDom();
+  try {
+    const { createFlamegraph } = require("./flamegraph.js");
+    const fg = createFlamegraph(dom.makeEl());
+    fg.setTreeDirect(sampleTree(), 15);
+
+    assert.deepStrictEqual(fg.getViewState(), {}, "empty view → empty state");
+
+    fg.zoomToPath("worker", ["a", "mid"]);
+    fg.focusInspectByKey("leaf");
+    const st = fg.getViewState();
+    assert.deepStrictEqual(st.workerZoom, ["a", "mid"], "workerZoom captured");
+    // fullName falls back to name for aggregated trees (no symbol).
+    assert.deepStrictEqual(st.inspect, { name: "leaf", fullName: "leaf" },
+      "inspect captured as {name, fullName}");
+  } finally {
+    dom.restore();
+  }
+});
+
+test("applyViewState restores zoom + inspect and is silent (no URL churn)", () => {
+  const dom = makeDom();
+  try {
+    const { createFlamegraph } = require("./flamegraph.js");
+    let calls = 0;
+    const fg = createFlamegraph(dom.makeEl(), () => { calls++; });
+    fg.setTreeDirect(sampleTree(), 15);
+
+    const before = calls;
+    fg.applyViewState({ workerZoom: ["a", "mid", "leaf"], inspect: { name: "mid", fullName: "mid" } });
+    assert.strictEqual(calls, before, "applyViewState does not fire the change callback");
+    assert.deepStrictEqual(fg.getZoomPath().worker, ["a", "mid", "leaf"], "zoom restored");
+    assert.strictEqual(fg.getInspectFocus(), "mid", "inspect restored");
+  } finally {
+    dom.restore();
+  }
+});
+
+test("getViewState → applyViewState round-trips through the codec", () => {
+  const dom = makeDom();
+  try {
+    const { createFlamegraph } = require("./flamegraph.js");
+    const VS = require("./flamegraph_view_state.js");
+    const fg = createFlamegraph(dom.makeEl());
+    fg.setTreeDirect(sampleTree(), 15);
+
+    fg.zoomToPath("worker", ["a", "mid"]);
+    fg.focusInspectByKey("leaf");
+
+    // Serialize to a URL and back exactly as flamegraph.html does.
+    const params = VS.writeState(new URLSearchParams(), fg.getViewState());
+
+    const fg2 = createFlamegraph(dom.makeEl());
+    fg2.setTreeDirect(sampleTree(), 15);
+    fg2.applyViewState(VS.readState(params));
+
+    assert.deepStrictEqual(fg2.getZoomPath().worker, ["a", "mid"], "zoom survived the URL round-trip");
+    assert.strictEqual(fg2.getInspectFocus(), "leaf", "inspect survived the URL round-trip");
+  } finally {
+    dom.restore();
+  }
+});
+
+test("applyViewState is a full restore: absent fields are cleared", () => {
+  const dom = makeDom();
+  try {
+    const { createFlamegraph } = require("./flamegraph.js");
+    const fg = createFlamegraph(dom.makeEl());
+    fg.setTreeDirect(sampleTree(), 15);
+
+    fg.applyViewState({ workerZoom: ["a", "mid"], inspect: { name: "leaf", fullName: "leaf" } });
+    // Re-apply an empty state: prior zoom/inspect must be gone, not merged.
+    fg.applyViewState({});
+    assert.deepStrictEqual(fg.getZoomPath().worker, [], "zoom cleared by empty restore");
+    assert.strictEqual(fg.getInspectFocus(), null, "inspect cleared by empty restore");
+  } finally {
+    dom.restore();
+  }
+});
+
+test("repeated applyViewState converges (streamed-snapshot retry safety)", () => {
+  const dom = makeDom();
+  try {
+    const { createFlamegraph } = require("./flamegraph.js");
+    const fg = createFlamegraph(dom.makeEl());
+    fg.setTreeDirect(sampleTree(), 15);
+
+    // flamegraph.html re-applies the URL state on each streamed snapshot until
+    // the focus lands; that must be idempotent (no duplicated zoom frames).
+    for (let i = 0; i < 3; i++) {
+      fg.applyViewState({ workerZoom: ["a", "mid", "leaf"] });
+    }
+    assert.deepStrictEqual(fg.getZoomPath().worker, ["a", "mid", "leaf"],
+      "zoom path exact after repeated restore");
+  } finally {
+    dom.restore();
+  }
+});
+
 summarize();
