@@ -11,8 +11,8 @@
 #![cfg(feature = "worker-s3")]
 
 use clap::Parser;
+use dial9::RecorderBuilderTokioExt;
 use dial9::background_task::s3::S3Config;
-use dial9::prelude::*;
 use dial9::{DiskWriter, recorder};
 use metrique::local::{LocalFormat, OutputStyle};
 use metrique::writer::format::FormatExt;

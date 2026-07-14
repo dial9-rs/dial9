@@ -11,9 +11,9 @@
 //! Note: "missing frame pointers" and "missing debug symbols" require building
 //! with different RUSTFLAGS, so they are handled by the shell script wrapper.
 
-use dial9::prelude::*;
 use dial9::telemetry::{CpuProfilingConfig, Dial9TokioHandle, SchedEventConfig};
 use dial9::{DiskWriter, recorder};
+use dial9::{RecorderBuilderTokioExt, RecorderPerfExt};
 use std::path::PathBuf;
 use std::time::Duration;
 

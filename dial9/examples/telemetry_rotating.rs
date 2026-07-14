@@ -9,7 +9,7 @@
 //! After running, inspect the trace files:
 //!   cargo run --example analyze_trace -- /tmp/telemetry_rotating/trace.0.bin
 
-use dial9::prelude::*;
+use dial9::RecorderBuilderTokioExt;
 use dial9::{DiskWriter, recorder};
 use std::time::Duration;
 

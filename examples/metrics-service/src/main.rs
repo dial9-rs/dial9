@@ -9,7 +9,6 @@ use std::time::Duration;
 use aws_config::BehaviorVersion;
 use clap::Parser;
 use dial9::memory_profiling::{Dial9Allocator, MemoryProfiler, MemoryProfilingConfig};
-use dial9::prelude::*;
 #[cfg(target_os = "linux")]
 use dial9::telemetry::SocketAcceptQueuesConfig;
 #[cfg(target_os = "linux")]
@@ -17,6 +16,7 @@ use dial9::telemetry::{CpuProfilingConfig, SchedEventConfig};
 use dial9::telemetry::{Dial9TokioHandle, ProcessResourceUsageConfig, TaskDumpConfig};
 use dial9::tracing_layer::Dial9TracingLayer;
 use dial9::{DiskWriter, recorder};
+use dial9::{RecorderBuilderTokioExt, RecorderPerfExt};
 use tokio_util::sync::CancellationToken;
 
 use buffer::MetricsBuffer;

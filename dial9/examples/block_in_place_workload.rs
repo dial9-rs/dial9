@@ -7,8 +7,8 @@
 //!
 //! Produces: `block_in_place_trace.bin` in the current directory.
 
-use dial9::prelude::*;
 use dial9::{DiskWriter, recorder};
+use dial9::{RecorderBuilderTokioExt, RecorderPerfExt};
 use std::time::Duration;
 
 /// CPU-intensive work that shows up in CPU profiles.

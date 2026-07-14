@@ -129,18 +129,3 @@ pub use dial9_perf_self_profile::{SocketAcceptQueuesConfig, TcpAcceptQueueEvent}
 // Tracing-subscriber layer.
 #[cfg(feature = "tracing-layer")]
 pub use dial9_tokio_telemetry::tracing_layer;
-
-/// Brings the extension traits into scope so the `.with_*` source sugar is
-/// callable: `use dial9::prelude::*;`.
-pub mod prelude {
-    #[cfg(feature = "tokio")]
-    pub use crate::RecorderBuilderTokioExt;
-    #[cfg(any(
-        feature = "cpu-profiling",
-        feature = "process-resource",
-        feature = "linux-socket",
-        feature = "memory-profiling"
-    ))]
-    pub use crate::RecorderPerfExt;
-    pub use crate::RegisterSource;
-}

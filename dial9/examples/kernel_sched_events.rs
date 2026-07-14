@@ -45,10 +45,10 @@
 // Example prints the deprecated `CpuSampleEvent::worker_id` for illustration.
 #![allow(deprecated)]
 
-use dial9::prelude::*;
 use dial9::telemetry::SchedEventConfig;
 use dial9::telemetry::analysis_events::{CpuSampleSource, Dial9Event};
 use dial9::{DiskWriter, recorder};
+use dial9::{RecorderBuilderTokioExt, RecorderPerfExt};
 use dial9_trace_format::decoder::Decoder;
 use std::time::Duration;
 

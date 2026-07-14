@@ -2,8 +2,8 @@
 //! runtime built from the core recorder, producing poll instrumentation.
 #![cfg(feature = "tokio")]
 
-use dial9::prelude::*;
 use dial9::{DiskWriter, recorder};
+use dial9::{RecorderBuilderTokioExt, RegisterSource};
 use dial9_trace_format::decoder::Decoder;
 
 #[test]

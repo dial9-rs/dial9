@@ -1,5 +1,5 @@
-use dial9::prelude::*;
 use dial9::{DiskWriter, recorder};
+use dial9::{RecorderBuilderTokioExt, RecorderPerfExt};
 use std::time::Duration;
 
 async fn blocking_task(id: usize) {

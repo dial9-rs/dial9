@@ -16,8 +16,8 @@ use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
 
+use dial9::RecorderBuilderTokioExt;
 use dial9::background_task::{ProcessError, SegmentData, SegmentProcessor};
-use dial9::prelude::*;
 use dial9::telemetry::Dial9TokioHandle;
 use dial9::{InMemoryWriter, recorder};
 
