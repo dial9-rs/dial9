@@ -44,6 +44,7 @@
 <body>
 <script src="creds.js"></script>
 <script src="format.js"></script>
+<script src="time_format.js"></script>
 <script src="flamegraph_diff.js"></script>
 <script src="sse.js"></script>
 <script src="flamegraph_api.js"></script>
@@ -59,7 +60,8 @@
     <input id="threshold-slider" type="range" min="-1" max="3" step="0.1" value="0">
     <span id="threshold-label">1ms</span>
   </div>
-  <label style="font-size:0.85em"><input type="checkbox" id="utc-toggle" checked> UTC</label>
+  <button id="time-mode" class="secondary" type="button" title="Toggle UTC and local time display">Time: UTC</button>
+  <input type="checkbox" id="utc-toggle" checked style="display:none" aria-hidden="true">
 </div>
 <div id="status" class="status"></div>
 <div id="view-tabs" style="display:none;margin-bottom:12px"></div>
@@ -101,6 +103,7 @@
   // the backend pick its own (default) sampling cap. Seeded from the URL so a
   // deep-sampled view is shareable / survives reload.
   let maxFiles = params.get("max_files") ? Number(params.get("max_files")) : null;
+  document.getElementById("utc-toggle").checked = params.get("tz") !== "local";
   let loading = false;
 
   // Per-period label ("A"/"B" in diff mode, "P1"/"P2"… otherwise), used by the
@@ -147,15 +150,10 @@
   function isUtc() { return document.getElementById("utc-toggle").checked; }
 
   function nsToDatetime(ns) {
-    if (!ns) return "";
-    const d = new Date(Number(ns) / 1e6);
-    if (isUtc()) return d.toISOString().slice(0, 19);
-    return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 19);
+    return Dial9TimeFormat.nsToPicker(ns, !isUtc());
   }
   function datetimeToNs(val) {
-    if (!val) return null;
-    const ms = isUtc() ? new Date(val + "Z").getTime() : new Date(val).getTime();
-    return String(Math.floor(ms * 1e6));
+    return Dial9TimeFormat.pickerToNs(val, !isUtc());
   }
   function formatDuration(ns) {
     if (ns >= 1e9) return (ns / 1e9).toFixed(2) + "s";
@@ -213,7 +211,8 @@
   window.updatePeriod = function(id, field, val) {
     const p = periods.find(x => x.id === id);
     if (p) {
-      const ns = datetimeToNs(val);
+      const currentNs = field === "start" ? p.startNs : p.endNs;
+      const ns = Dial9TimeFormat.pickerToNsPreserving(val, currentNs, !isUtc());
       if (field === "start") p.startNs = ns; else p.endNs = ns;
     }
     syncUrl();
@@ -253,12 +252,13 @@
       };
       if (periods[0]) applyTime(a, periods[0]);
       if (periods[1]) applyTime(b, periods[1]);
-      history.replaceState(null, "", "?" + FlamegraphDiff.diffSearch(a, b));
+      history.replaceState(null, "", "?" + FlamegraphDiff.diffSearch(a, b, isUtc() ? "" : "local"));
       return;
     }
     const u = new URLSearchParams();
     for (const k of ["bucket", "aws_region", "prefix", "service"]) { if (params.get(k)) u.set(k, params.get(k)); }
     for (const h of params.getAll("host")) u.append("host", h);
+    if (!isUtc()) u.set("tz", "local");
     periods.forEach((p, i) => {
       if (p.startNs) u.set(`p${i+1}_start_ns`, p.startNs);
       if (p.endNs) u.set(`p${i+1}_end_ns`, p.endNs);
@@ -291,6 +291,7 @@
       focusEndNs: ex.end_ns,
       focusWorker: ex.worker_id,
       focusTask: ex.task_id,
+      timeMode: isUtc() ? "" : "local",
     });
   }
 
@@ -643,7 +644,18 @@
     }
   }
 
-  document.getElementById("utc-toggle").addEventListener("change", renderPeriods);
+  const timeModeButton = document.getElementById("time-mode");
+  timeModeButton.textContent = isUtc() ? "Time: UTC" : "Time: Local";
+  function renderTimeMode() {
+    timeModeButton.textContent = isUtc() ? "Time: UTC" : "Time: Local";
+    renderPeriods();
+  }
+  timeModeButton.addEventListener("click", () => {
+    const toggle = document.getElementById("utc-toggle");
+    toggle.checked = !toggle.checked;
+    renderTimeMode();
+    syncUrl();
+  });
   document.getElementById("btn-load").addEventListener("click", () => {
     // A manual reload drops any "Load more" deepening and returns to the
     // sampling cap the page was opened with (the URL's max_files, or default).

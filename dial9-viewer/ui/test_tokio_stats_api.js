@@ -79,6 +79,12 @@ function assertEq(actual, expected, desc) {
   assertEq(q.has("start"), false, "window dropped even when provided");
 }
 
+{
+  const url = exemplarViewerUrl({ bucket: "b", sourceKey: "k.bin.gz", timeMode: "local" });
+  const q = new URLSearchParams(url.slice(url.indexOf("?") + 1));
+  assertEq(q.get("tz"), "local", "local time mode carried to viewer exemplar");
+}
+
 // A focus window lands on the exact poll via the NON-DESTRUCTIVE focus_* params
 // (never start/end): focus_start pans the view, worker/task/end refine it.
 {

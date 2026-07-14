@@ -205,6 +205,7 @@ const SCOPE_KEYS_SINGLE = [
   "thread_class",
   "source",
   "spawn_location",
+  "tz",
   "start_ns",
   "end_ns",
   "max_files",
@@ -306,8 +307,9 @@ function decodeScope(b64) {
 // Build the query string (no leading "?") for a diff view comparing two scopes.
 // Callers prepend "flamegraph.html?". Each scope is a query string or
 // URLSearchParams (typically from fullScopeQuery).
-function diffSearch(scopeA, scopeB) {
-  return "diff=1&a=" + encodeScope(scopeA) + "&b=" + encodeScope(scopeB);
+function diffSearch(scopeA, scopeB, timeMode) {
+  const search = "diff=1&a=" + encodeScope(scopeA) + "&b=" + encodeScope(scopeB);
+  return timeMode === "local" ? search + "&tz=local" : search;
 }
 
 // Parse a diff view's location.search. Returns { a, b } (each a URLSearchParams
@@ -347,7 +349,10 @@ function chooseTarget(kind, opts) {
       s.set("api", "1");
       return s;
     };
-    return { page: page, search: diffSearch(withApi(opts.diffA), withApi(opts.diffB)) };
+    return {
+      page: page,
+      search: diffSearch(withApi(opts.diffA), withApi(opts.diffB), opts.tz),
+    };
   }
   const single = opts && opts.singleQuery != null ? opts.singleQuery : "";
   return { page: page, search: typeof single === "string" ? single : single.toString() };

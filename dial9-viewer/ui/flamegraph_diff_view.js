@@ -459,8 +459,9 @@
       const hosts = scope.getAll("host").length || (meta && meta.hosts) || 0;
       if (hosts) scopeBits.push(hosts + (hosts === 1 ? " host" : " hosts"));
       if (win) {
-        const from = new Date(win.fromMs).toISOString().slice(5, 16).replace("T", " ");
-        scopeBits.push(from + " UTC · " + formatHumanDuration(win.durNs));
+        const useLocalTz = new URLSearchParams(window.location.search).get("tz") === "local";
+        const from = Dial9TimeFormat.formatDateTime(new Date(win.fromMs), useLocalTz);
+        scopeBits.push(from + " · " + formatHumanDuration(win.durNs));
       }
       const tc = scope.get("thread_class");
       if (tc) scopeBits.push(tc);

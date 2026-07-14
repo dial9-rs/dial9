@@ -876,8 +876,8 @@
                 </div>
                 <div class="toolbar-row" id="toolbar-row-view">
                     <span style="flex: 1"></span>
-                    <button id="btn-time-mode" title="Toggle between relative (offset from trace start) and absolute timestamps">Time: Relative</button>
-                    <button id="btn-tz-mode" title="Toggle between UTC and local timezone for absolute timestamps" style="display:none">TZ: UTC</button>
+                    <button id="btn-time-mode" title="Toggle between relative (trace-start offset) and UTC timestamps">Time: Relative</button>
+                    <button id="btn-tz-mode" title="Toggle between UTC and local display for absolute timestamps" style="display:none">Time zone: UTC</button>
                 </div>
             </div>
             <div id="viewer-body">
@@ -1010,6 +1010,7 @@
         <script src="trace_scope.js"></script>
         <script src="trace_analysis.js"></script>
         <script src="format.js"></script>
+        <script src="time_format.js"></script>
         <script src="flamegraph_export.js"></script>
         <script src="flamegraph.js"></script>
         <script src="panel_layout.js"></script>
@@ -1191,7 +1192,9 @@
                 maxTs = 0,
                 durationNs = 0;
             let useAbsoluteTime = false;
-            let useLocalTz = false;
+            let useLocalTz = new URLSearchParams(window.location.search).get("tz") === "local";
+            document.getElementById("btn-tz-mode").textContent =
+                useLocalTz ? "Time zone: Local" : "Time zone: UTC";
 
             function fmtDuration(ns) {
                 const prefix = "+";
@@ -1243,15 +1246,7 @@
                 }
                 const wallNs = ns + offsetNs;
                 const ms = wallNs / 1e6;
-                const d = new Date(ms);
-                const pad2 = n => String(n).padStart(2, "0");
-                if (useLocalTz) {
-                    return pad2(d.getHours()) + ":" + pad2(d.getMinutes()) + ":" +
-                        pad2(d.getSeconds());
-                } else {
-                    return pad2(d.getUTCHours()) + ":" + pad2(d.getUTCMinutes()) + ":" +
-                        pad2(d.getUTCSeconds());
-                }
+                return Dial9TimeFormat.formatTime(new Date(ms), useLocalTz);
             }
 
             // Format a timestamp (ns) for display. In relative mode, shows
@@ -5194,7 +5189,7 @@
             document.getElementById("btn-time-mode").addEventListener("click", () => {
                 useAbsoluteTime = !useAbsoluteTime;
                 document.getElementById("btn-time-mode").textContent =
-                    useAbsoluteTime ? "Time: Absolute" : "Time: Relative";
+                    Dial9TimeFormat.timeModeLabel(!useAbsoluteTime, useLocalTz);
                 document.getElementById("btn-tz-mode").style.display =
                     useAbsoluteTime ? "" : "none";
                 renderAll();
@@ -5202,7 +5197,9 @@
             document.getElementById("btn-tz-mode").addEventListener("click", () => {
                 useLocalTz = !useLocalTz;
                 document.getElementById("btn-tz-mode").textContent =
-                    useLocalTz ? "TZ: Local" : "TZ: UTC";
+                    useLocalTz ? "Time zone: Local" : "Time zone: UTC";
+                document.getElementById("btn-time-mode").textContent =
+                    Dial9TimeFormat.timeModeLabel(!useAbsoluteTime, useLocalTz);
                 renderAll();
             });
 
@@ -7176,6 +7173,7 @@
                 const base = new URLSearchParams();
                 base.set("start", String(Math.round(fgSelStart)));
                 base.set("end", String(Math.round(fgSelEnd)));
+                if (useLocalTz) base.set("tz", "local");
                 const z = fgInstance.getZoomPath();
                 if (z.worker.length > 0) base.set("worker-zoom", z.worker.join("\t"));
                 if (z.offworker.length > 0) base.set("offworker-zoom", z.offworker.join("\t"));

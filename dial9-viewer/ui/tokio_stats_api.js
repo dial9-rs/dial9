@@ -40,6 +40,7 @@ function exemplarViewerUrl(opts) {
   p.set("trace", traceUrl);
   if (o.svc) p.set("svc", o.svc);
   if (o.host) p.set("host", o.host);
+  if (o.timeMode === "local") p.set("tz", "local");
   // Non-destructive focus on the exact poll. `focus_start` alone is enough to
   // pan the view; worker/task/end refine the framing and highlight.
   if (o.focusStartNs != null) {

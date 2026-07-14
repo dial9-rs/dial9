@@ -75,6 +75,8 @@
         <div class="fg-page-header">
             <span class="fg-title" id="fg-title">Flamegraph</span>
             <span class="fg-stats" id="fg-stats"></span>
+            <span style="flex:1"></span>
+            <button id="fg-time-mode" title="Toggle UTC and local time display" style="background:#2a2a4a;color:#e0e0e0;border:1px solid #444;padding:4px 10px;border-radius:3px;cursor:pointer;font-weight:600">Time: UTC</button>
         </div>
         <div id="fold-warning" style="display:none;padding:6px 12px;background:#3a1a1a;color:#ffb3b3;border-bottom:1px solid #5a2a2a;font-size:0.8em;flex-shrink:0;font-family:monospace;white-space:pre-wrap;word-break:break-word;"></div>
         <div id="fg-container"></div>
@@ -82,6 +84,7 @@
         <div id="error"></div>
 
         <script src="format.js"></script>
+        <script src="time_format.js"></script>
         <script src="flamegraph_api.js"></script>
         <script src="sse.js"></script>
         <script src="flamegraph_diff.js"></script>
@@ -96,6 +99,15 @@
         <script>
             (async function () {
                 const params = new URLSearchParams(window.location.search);
+                let useLocalTz = params.get("tz") === "local";
+                const timeModeButton = document.getElementById("fg-time-mode");
+                timeModeButton.textContent = useLocalTz ? "Time: Local" : "Time: UTC";
+                timeModeButton.addEventListener("click", () => {
+                    const next = new URLSearchParams(window.location.search);
+                    if (useLocalTz) next.delete("tz");
+                    else next.set("tz", "local");
+                    window.location.search = next.toString();
+                });
                 // `trace` is repeatable — each value is a separate (possibly
                 // gzipped) component to fetch and concatenate. A `s_*` scope
                 // (bucket/prefix/service/host-set + window) is the compact,
@@ -276,9 +288,11 @@
                         if (src && src !== "cpu") bits.push(src);
                         const s = scope.get("start_ns"), e = scope.get("end_ns");
                         if (s && e) {
-                            const from = new Date(Number(s) / 1e6).toISOString().slice(5, 16).replace("T", " ");
+                            const from = Dial9TimeFormat.formatDateTime(
+                                new Date(Number(s) / 1e6), useLocalTz
+                            );
                             const dur = formatHumanDuration(Number(e) - Number(s));
-                            bits.push(from + " UTC · " + dur);
+                            bits.push(from + " · " + dur);
                         }
                         const bkt = scope.get("bucket");
                         if (bkt) bits.push(bkt);
@@ -405,7 +419,7 @@
                         // two-sided diff (thisScope stays side A). Same window.open
                         // path as the Compare button below.
                         function launchPreset(scopeB) {
-                            const search = FlamegraphDiff.diffSearch(thisScope, scopeB);
+                            const search = FlamegraphDiff.diffSearch(thisScope, scopeB, useLocalTz ? "local" : "");
                             window.open(window.location.pathname + "?" + search, "_blank");
                             back.remove();
                         }
@@ -439,7 +453,7 @@
                             }
                             const scopeA = thisIsA ? thisScope : otherScope;
                             const scopeB = thisIsA ? otherScope : thisScope;
-                            const search = FlamegraphDiff.diffSearch(scopeA, scopeB);
+                            const search = FlamegraphDiff.diffSearch(scopeA, scopeB, useLocalTz ? "local" : "");
                             window.open(window.location.pathname + "?" + search, "_blank");
                             back.remove();
                         });
@@ -526,7 +540,7 @@
                             // Both captured scopes already carry api=1
                             // (currentScopeQuery sets it), so no per-side flag
                             // fix-up is needed here.
-                            const search = FlamegraphDiff.diffSearch(a, b);
+                            const search = FlamegraphDiff.diffSearch(a, b, useLocalTz ? "local" : "");
                             window.open(window.location.pathname + "?" + search, "_blank");
                         }
                     });
@@ -553,14 +567,21 @@
                         hosts: originalHosts.slice(),
                     };
 
-                    // Initialize datetime pickers from URL ns params. The picker
-                    // shows UTC wall-clock (S3 trace keys are bucketed in UTC).
-                    // The read (ns -> picker) and write (picker -> ns) sides MUST
-                    // be symmetric: both treat the picker value as UTC. See the
-                    // unit-tested nsToPickerUtc / pickerUtcToNs in
-                    // flamegraph_api.js (test_flamegraph_api.js).
-                    if (params.get("start_ns")) fStart.value = nsToPickerUtc(params.get("start_ns"));
-                    if (params.get("end_ns")) fEnd.value = nsToPickerUtc(params.get("end_ns"));
+                    // Initialize datetime pickers from URL ns params. The active
+                    // page-level time mode controls their UTC or local wall-clock
+                    // presentation; both conversions preserve the same instant.
+                    let preservedStartNs = params.get("start_ns");
+                    let preservedEndNs = params.get("end_ns");
+                    if (preservedStartNs) fStart.value = Dial9TimeFormat.nsToPicker(preservedStartNs, useLocalTz);
+                    if (preservedEndNs) fEnd.value = Dial9TimeFormat.nsToPicker(preservedEndNs, useLocalTz);
+                    fStart.addEventListener("input", () => { preservedStartNs = null; });
+                    fEnd.addEventListener("input", () => { preservedEndNs = null; });
+                    const selectedStartNs = () => Dial9TimeFormat.pickerToNsPreserving(
+                        fStart.value, preservedStartNs, useLocalTz
+                    );
+                    const selectedEndNs = () => Dial9TimeFormat.pickerToNsPreserving(
+                        fEnd.value, preservedEndNs, useLocalTz
+                    );
 
                     // `max_files` ceiling override, raised by the "Refine more"
                     // button. null = let the backend pick its own ceiling.
@@ -593,8 +614,8 @@
                             if (k === "hosts" || !v) continue;
                             u.searchParams.set(k, v);
                         }
-                        const startNs = pickerUtcToNs(fStart.value);
-                        const endNs = pickerUtcToNs(fEnd.value);
+                        const startNs = selectedStartNs();
+                        const endNs = selectedEndNs();
                         if (startNs) u.searchParams.set("start_ns", startNs);
                         if (endNs) u.searchParams.set("end_ns", endNs);
                         if (maxFiles != null) u.searchParams.set("max_files", String(maxFiles));
@@ -612,13 +633,14 @@
                         if (scopeRegion) p.set("aws_region", scopeRegion);
                         if (scopePrefix) p.set("prefix", scopePrefix);
                         if (scopeService) p.set("service", scopeService);
+                        if (useLocalTz) p.set("tz", "local");
                         for (const h of filterState.hosts) p.append("host", h);
                         for (const [k, v] of Object.entries(filterState)) {
                             if (k === "hosts" || !v) continue;
                             p.set(k, v);
                         }
-                        const startNs = pickerUtcToNs(fStart.value);
-                        const endNs = pickerUtcToNs(fEnd.value);
+                        const startNs = selectedStartNs();
+                        const endNs = selectedEndNs();
                         if (startNs) p.set("start_ns", startNs);
                         if (endNs) p.set("end_ns", endNs);
                         history.pushState(null, "", window.location.pathname + "?" + p.toString());
@@ -720,8 +742,12 @@
                         if (hostNames.length === 1) bits.push(hostNames[0]);
                         else if (hostNames.length > 1) bits.push(`${hostNames.length} hosts`);
                         if (meta.min_timestamp_ns && meta.max_timestamp_ns) {
-                            const from = new Date(meta.min_timestamp_ns / 1e6).toISOString().slice(0, 19) + "Z";
-                            const to = new Date(meta.max_timestamp_ns / 1e6).toISOString().slice(11, 19) + "Z";
+                            const from = Dial9TimeFormat.formatDateTime(
+                                new Date(meta.min_timestamp_ns / 1e6), useLocalTz
+                            );
+                            const to = Dial9TimeFormat.formatDateTime(
+                                new Date(meta.max_timestamp_ns / 1e6), useLocalTz
+                            );
                             bits.push(`${from} \u2192 ${to}`);
                         }
                         const svc = meta.service || "aggregated";
@@ -748,10 +774,14 @@
                         const bits = [`${resp.total_samples.toLocaleString()} samples`];
                         if (meta.hosts > 1) bits.push(`${meta.hosts} hosts`);
                         if (meta.min_timestamp_ns && meta.max_timestamp_ns) {
-                            const from = new Date(meta.min_timestamp_ns / 1e6);
-                            const to = new Date(meta.max_timestamp_ns / 1e6);
+                            const from = Dial9TimeFormat.formatDateTime(
+                                new Date(meta.min_timestamp_ns / 1e6), useLocalTz
+                            );
+                            const to = Dial9TimeFormat.formatDateTime(
+                                new Date(meta.max_timestamp_ns / 1e6), useLocalTz
+                            );
                             const dur = formatHumanDuration(meta.max_timestamp_ns - meta.min_timestamp_ns);
-                            bits.push(`${from.toISOString().slice(11,19)} \u2192 ${to.toISOString().slice(11,19)} (${dur})`);
+                            bits.push(`${from} \u2192 ${to} (${dur})`);
                         }
                         return bits.join(" \u00b7 ");
                     }
@@ -899,6 +929,7 @@
                         if (scopeRegion) p.set("aws_region", scopeRegion);
                         if (scopePrefix) p.set("prefix", scopePrefix);
                         if (scopeService) p.set("service", scopeService);
+                        if (useLocalTz) p.set("tz", "local");
                         for (const h of filterState.hosts) p.append("host", h);
                         // Send all non-empty facet filters (source, thread_class,
                         // spawn_location) — the live filterState is the source of
@@ -907,8 +938,8 @@
                             if (k === "hosts" || !v) continue;
                             p.set(k, v);
                         }
-                        const sNs = pickerUtcToNs(fStart.value);
-                        const eNs = pickerUtcToNs(fEnd.value);
+                        const sNs = selectedStartNs();
+                        const eNs = selectedEndNs();
                         if (sNs) p.set("start_ns", sNs);
                         if (eNs) p.set("end_ns", eNs);
                         if (maxFiles != null) p.set("max_files", String(maxFiles));
@@ -1060,8 +1091,14 @@
                 const svc = params.get("svc");
                 const host = params.get("host");
                 const segs = params.get("segs");
-                const fromTime = params.get("from");
-                const toTime = params.get("to");
+                const fromNs = params.get("from_ns");
+                const toNs = params.get("to_ns");
+                const fromTime = fromNs
+                    ? Dial9TimeFormat.formatDateTime(new Date(Number(fromNs) / 1e6), useLocalTz)
+                    : params.get("from");
+                const toTime = toNs
+                    ? Dial9TimeFormat.formatDateTime(new Date(Number(toNs) / 1e6), useLocalTz)
+                    : params.get("to");
                 const label = svc
                     ? svc + (host ? ` @ ${host}` : "")
                     : (traceUrls[0].split("/").pop() || "trace");

@@ -231,7 +231,7 @@
         <button id="creds-btn" style="display:none" title="Use your own temporary AWS credentials">
             <span class="creds-btn-icon">🔑</span> <span id="creds-btn-label">AWS Credentials</span>
         </button>
-        <button id="tz-btn" title="Toggle between UTC and local timezone">TZ: UTC</button>
+        <button id="tz-btn" title="Toggle between UTC and local time display">Time: UTC</button>
     </header>
 
     <!-- Bring-your-own-credentials panel. Hidden unless the server reports
@@ -419,6 +419,7 @@
 
     <script src="creds.js"></script>
     <script src="format.js"></script>
+    <script src="time_format.js"></script>
     <script src="flamegraph_diff.js"></script>
     <script src="prefix_detect.js"></script>
     <script src="url_state.js"></script>
@@ -812,7 +813,7 @@
     restoring = true;
     if (urlState.tz === 'local') {
         useLocalTz = true;
-        document.getElementById('tz-btn').textContent = 'TZ: Local';
+        document.getElementById('tz-btn').textContent = 'Time: Local';
     }
     if (urlState.bucket) bucketInput.value = urlState.bucket;
     if (urlState.prefix) prefixInput.value = urlState.prefix;
@@ -1035,7 +1036,7 @@
         const toDate = pickerToDate(document.getElementById('range-to').value);
 
         useLocalTz = !useLocalTz;
-        document.getElementById('tz-btn').textContent = useLocalTz ? 'TZ: Local' : 'TZ: UTC';
+        document.getElementById('tz-btn').textContent = useLocalTz ? 'Time: Local' : 'Time: UTC';
 
         // Re-write picker values in the NEW tz mode
         if (fromDate) document.getElementById('range-from').value = dateToPickerStr(fromDate);
@@ -1077,15 +1078,8 @@
 
     function formatDate(dateStr) {
         if (!dateStr) return '';
-        try {
-            const d = new Date(dateStr);
-            if (useLocalTz) {
-                const pad = n => String(n).padStart(2, '0');
-                return d.getFullYear() + '-' + pad(d.getMonth()+1) + '-' + pad(d.getDate()) +
-                    ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
-            }
-            return d.toISOString().replace('T', ' ').slice(0, 19);
-        } catch { return dateStr; }
+        const formatted = Dial9TimeFormat.formatDateTime(new Date(dateStr), useLocalTz);
+        return formatted || dateStr;
     }
 
     function formatEpoch(epoch) {
@@ -1506,13 +1500,9 @@
         return dayKey(tMin) !== dayKey(tMax);
     }
 
-    // Format a tick's date (YYYY-MM-DD) in the active TZ mode.
+    // Format a tick's date (YYYY/MM/DD) in the active time mode.
     function fmtTickDate(epoch) {
-        const d = new Date(epoch * 1000);
-        const pad = n => String(n).padStart(2, '0');
-        return useLocalTz
-            ? d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate())
-            : d.getUTCFullYear() + '-' + pad(d.getUTCMonth() + 1) + '-' + pad(d.getUTCDate());
+        return Dial9TimeFormat.formatDate(new Date(epoch * 1000), useLocalTz);
     }
 
     function drawHeatmapAxis(W, ticks) {
@@ -1821,9 +1811,13 @@
         if (epochs.length >= 2) {
             params.set('from', formatEpoch(epochs[0]));
             params.set('to', formatEpoch(epochs[epochs.length - 1]));
+            params.set('from_ns', String(BigInt(epochs[0]) * 1_000_000_000n));
+            params.set('to_ns', String(BigInt(epochs[epochs.length - 1]) * 1_000_000_000n));
         } else if (epochs.length === 1) {
             params.set('from', formatEpoch(epochs[0]));
+            params.set('from_ns', String(BigInt(epochs[0]) * 1_000_000_000n));
         }
+        if (useLocalTz) params.set('tz', 'local');
         params.set('segs', String(keys.length));
         return params;
     }
@@ -1862,7 +1856,9 @@
         // and warn if the host set was too large to name in the link (the capture
         // then covers all hosts in the window).
         const scope = Dial9TraceScope.scopeFromKeys(bucket, heatmapSelection.keys, heatmapSelection.t0, heatmapSelection.t1, currentRegion());
-        const { query, hostsDropped } = Dial9TraceScope.encodeAggregationParams(new URLSearchParams(), scope);
+        const base = new URLSearchParams();
+        if (useLocalTz) base.set('tz', 'local');
+        const { query, hostsDropped } = Dial9TraceScope.encodeAggregationParams(base, scope);
         if (hostsDropped) warnHostsDropped();
         return new URLSearchParams(query);
     }
@@ -1899,6 +1895,7 @@
             const scope = Dial9TraceScope.scopeFromKeys(bucket, keys, heatmapSelection.t0, heatmapSelection.t1, currentRegion());
             const base = new URLSearchParams();
             base.set('api', '1');
+            if (useLocalTz) base.set('tz', 'local');
             const { query, hostsDropped } = Dial9TraceScope.encodeAggregationParams(base, scope);
             if (hostsDropped) warnHostsDropped();
             window.open('flamegraph.html?' + query, '_blank');
@@ -1940,7 +1937,9 @@
         // Same scope the aggregation flamegraph uses, same param vocabulary —
         // /api/tokio-stats reads bucket/prefix/service/host + start_ns/end_ns.
         const scope = Dial9TraceScope.scopeFromKeys(bucket, keys, heatmapSelection.t0, heatmapSelection.t1, currentRegion());
-        const { query, hostsDropped } = Dial9TraceScope.encodeAggregationParams(new URLSearchParams(), scope);
+        const base = new URLSearchParams();
+        if (useLocalTz) base.set('tz', 'local');
+        const { query, hostsDropped } = Dial9TraceScope.encodeAggregationParams(base, scope);
         if (hostsDropped) warnHostsDropped();
         window.open('tokio_stats.html?' + query, '_blank');
     }
@@ -1964,8 +1963,8 @@
         else if (hosts.length > 1) bits.push(hosts.length + ' hosts');
         const s = scope.get('start_ns'), e = scope.get('end_ns');
         if (s && e) {
-            const from = new Date(Number(s) / 1e6).toISOString().slice(5, 16).replace('T', ' ');
-            bits.push(from + ' UTC · ' + formatHumanDuration(Number(e) - Number(s)));
+            const from = Dial9TimeFormat.formatDateTime(new Date(Number(s) / 1e6), useLocalTz);
+            bits.push(from + ' · ' + formatHumanDuration(Number(e) - Number(s)));
         }
         const bkt = scope.get('bucket');
         if (bkt) bits.push(bkt);
@@ -2104,7 +2103,12 @@
         if (!diffA || !diffB) return;
         // chooseTarget owns the single-vs-diff routing and the per-side `api=1`
         // flag for the flamegraph target (tokio-stats does not use it).
-        const { page, search } = FlamegraphDiff.chooseTarget(kind, { hasDiff: true, diffA, diffB });
+        const { page, search } = FlamegraphDiff.chooseTarget(kind, {
+            hasDiff: true,
+            diffA,
+            diffB,
+            tz: useLocalTz ? 'local' : '',
+        });
         window.open(page + '?' + search, '_blank');
     }
 
@@ -2277,7 +2281,7 @@
             const traceParams = keys.map(k =>
                 'trace=' + encodeURIComponent('/api/object?key=' + encodeURIComponent(k))
             ).join('&');
-            window.open('viewer.html?' + traceParams, '_blank');
+            window.open('viewer.html?' + traceParams + (useLocalTz ? '&tz=local' : ''), '_blank');
             return;
         }
 
