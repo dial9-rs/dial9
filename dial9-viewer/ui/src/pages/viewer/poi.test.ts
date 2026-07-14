@@ -191,7 +191,7 @@ describe("stepIndex (n/p semantics, legacy Prev/Next)", () => {
   });
 });
 
-describe("poiJump (features/02 C7)", () => {
+describe("poiJump", () => {
   const vp: ViewportSlice = { viewStart: 0, viewEnd: 1e9, minTs: 0, maxTs: 1e9 };
 
   it("centers on a normal poll POI with 5x span / 30% left pad", () => {

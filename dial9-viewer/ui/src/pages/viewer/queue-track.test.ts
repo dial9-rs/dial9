@@ -58,7 +58,7 @@ function recordingCtx(): { ctx: CanvasRenderingContext2D; rec: Rec } {
 
 const zeros = (n: number): number[] => new Array<number>(n).fill(0);
 
-describe("drawQueueCanvas (S6: zero-global renders a visible baseline)", () => {
+describe("drawQueueCanvas (zero-global renders a visible baseline)", () => {
   it("plots an all-zero global series on the baseline, above the axis", () => {
     const canvasH = 56;
     // A model with samples present (hasData) but every value 0 - the exact
@@ -126,7 +126,7 @@ describe("drawQueueCanvas (S6: zero-global renders a visible baseline)", () => {
     expect(rec.strokes).toBe(0);
   });
 
-  it("surfaces an oversized window with a partial-window badge (T17)", () => {
+  it("surfaces an oversized window with a partial-window badge", () => {
     const model: QueueRenderModel = {
       numBuckets: 2,
       global: [0, 0],
@@ -141,7 +141,7 @@ describe("drawQueueCanvas (S6: zero-global renders a visible baseline)", () => {
   });
 });
 
-describe("createQueueTrack (M7 dispatch through the selection slice)", () => {
+describe("createQueueTrack (dispatch through the selection slice)", () => {
   function newStore() {
     const pending: (() => void)[] = [];
     const store = createViewerStore({ scheduler: (cb) => pending.push(cb) });

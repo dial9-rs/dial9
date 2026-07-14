@@ -91,7 +91,7 @@ describe("createToasts", () => {
     expect(container.children[0]?.className).toContain("d9-toast-error");
   });
 
-  it("U1: a duplicate id refreshes + wiggles instead of stacking", () => {
+  it("a duplicate id refreshes + wiggles instead of stacking", () => {
     const toasts = createToasts(container as unknown as HTMLElement);
     toasts.show({ id: "a", message: "one" });
     toasts.show({ id: "a", message: "two" });
@@ -102,7 +102,7 @@ describe("createToasts", () => {
     expect(container.children[0]?.className).not.toContain("d9-toast-wiggle");
   });
 
-  it("U1: auto-hide removes the toast after the timeout", () => {
+  it("auto-hide removes the toast after the timeout", () => {
     const toasts = createToasts(container as unknown as HTMLElement);
     toasts.show({ id: "a", message: "bye", autoHideMs: 1000 });
     expect(container.children).toHaveLength(1);
@@ -110,7 +110,7 @@ describe("createToasts", () => {
     expect(container.children).toHaveLength(0);
   });
 
-  it("U3/U5: clear() removes non-persistent toasts but keeps persistent ones", () => {
+  it("clear() removes non-persistent toasts but keeps persistent ones", () => {
     const toasts = createToasts(container as unknown as HTMLElement);
     toasts.show({ id: "transient", message: "t" });
     toasts.show({ id: "hint", message: "h", persistent: true });

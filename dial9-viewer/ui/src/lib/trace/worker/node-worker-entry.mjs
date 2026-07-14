@@ -2,7 +2,7 @@
 // body over node:worker_threads, used by the Vitest integration tests
 // (integration.test.ts) to exercise the REAL thread + postMessage
 // structured-clone boundary. Node has no Web Worker, and browser-mode
-// testing is T12's turf (Playwright deps), so this is the T16-chosen
+// testing is the Playwright suite's turf, so this is the chosen
 // Node-shim path. The browser binding is trace-worker.ts.
 //
 // Plain .mjs on purpose: worker_threads needs an on-disk entry, and Node's

@@ -32,7 +32,7 @@ beforeAll(async () => {
 
 const vp: ViewportSlice = { viewStart: 4e8, viewEnd: 6e8, minTs: 0, maxTs: 1e9 };
 
-describe("goto-time (S2)", () => {
+describe("goto-time", () => {
   it("resolves absolute seconds as an offset from the trace start", () => {
     const g = parseGotoTime("0.5")!;
     expect(gotoTargetNs(g, vp)).toBe(0.5e9); // minTs(0) + 0.5s
@@ -59,7 +59,7 @@ describe("goto-time (S2)", () => {
   });
 });
 
-describe("C1 file-info stats line", () => {
+describe("file-info stats line", () => {
   it("reads 'no trace loaded' before a trace", () => {
     expect(fileMetaText(null)).toBe("no trace loaded");
   });
@@ -72,7 +72,7 @@ describe("C1 file-info stats line", () => {
   });
 });
 
-describe("D4 uninstrumented count", () => {
+describe("uninstrumented count", () => {
   it("counts tasks flagged not-instrumented, never below zero", () => {
     const n = uninstrumentedCount(trace);
     expect(n).toBeGreaterThanOrEqual(0);

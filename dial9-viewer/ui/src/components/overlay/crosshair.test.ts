@@ -11,7 +11,7 @@ const trackById = (id: string): TrackSpec => TRACKS.find((t) => t.id === id) as 
 
 // ── Alignment invariant (overlay lines up with every track) ──────────
 
-describe("crosshairX / alignment invariant (A13/N4, three widths)", () => {
+describe("crosshairX / alignment invariant (three widths)", () => {
   const viewStart = 1_000_000;
   const viewEnd = 4_000_000_000;
   const samples = [viewStart, viewStart + 1, (viewStart + viewEnd) / 2, viewEnd - 7, viewEnd];
@@ -130,7 +130,7 @@ function layoutFor(pw: number, viewStart: number, viewEnd: number): CrosshairInp
   return trackGeometry(trackById("lanes"), { pw, scrollbarW: 0, viewStart, viewEnd, dpr: 1 }).time;
 }
 
-describe("drawCrosshair (I2-I5)", () => {
+describe("drawCrosshair", () => {
   const viewStart = 0;
   const viewEnd = 1_000_000;
   const time = layoutFor(1000, viewStart, viewEnd);
@@ -153,7 +153,7 @@ describe("drawCrosshair (I2-I5)", () => {
     expect(rec.strokes.length).toBe(0);
   });
 
-  it("I2: dashed white mouse crosshair at nsToPanelX, only in view", () => {
+  it("dashed white mouse crosshair at nsToPanelX, only in view", () => {
     const ns = 400_000;
     const rec = recordingCtx();
     drawCrosshair(rec.ctx, { ...base, mouseNs: ns });
@@ -169,7 +169,7 @@ describe("drawCrosshair (I2-I5)", () => {
     expect(rec2.strokes.length).toBe(0);
   });
 
-  it("I3: solid bright keyboard cursor at cursorNs", () => {
+  it("solid bright keyboard cursor at cursorNs", () => {
     const rec = recordingCtx();
     drawCrosshair(rec.ctx, {
       ...base,
@@ -183,7 +183,7 @@ describe("drawCrosshair (I2-I5)", () => {
     expect(s.lineWidth).toBe(1.5);
   });
 
-  it("I4: orange dashed custom-event guide at hoverEventTs", () => {
+  it("orange dashed custom-event guide at hoverEventTs", () => {
     const rec = recordingCtx();
     drawCrosshair(rec.ctx, { ...base, hoverEventTs: 600_000 });
     expect(rec.strokes.length).toBe(1);
@@ -193,7 +193,7 @@ describe("drawCrosshair (I2-I5)", () => {
     expect(s.strokeStyle).toBe("rgba(255,140,0,0.4)");
   });
 
-  it("I5: pinned marker draws a line + label chip, clamped inside the overlay", () => {
+  it("pinned marker draws a line + label chip, clamped inside the overlay", () => {
     const rec = recordingCtx();
     drawCrosshair(rec.ctx, {
       ...base,

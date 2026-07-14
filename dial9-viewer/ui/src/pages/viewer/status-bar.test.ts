@@ -24,7 +24,7 @@ function loadedState(): StoreState {
   return s;
 }
 
-describe("selectionState (04 F7)", () => {
+describe("selectionState", () => {
   it("reads a selected task as a hex label with a clear affordance", () => {
     const sel = { ...initialViewerState().selection, selectedTaskId: 0x2a };
     expect(selectionState(sel)).toEqual({ hasSelection: true, label: "Task 0x2a selected" });
@@ -52,7 +52,7 @@ describe("selectionState (04 F7)", () => {
   });
 });
 
-describe("segmentProgress (2.8 feedback surface)", () => {
+describe("segmentProgress (feedback surface)", () => {
   it("is inactive with no segment windowing (empty slice)", () => {
     expect(segmentProgress({ segments: new Map() })).toEqual({ label: null, active: false });
   });

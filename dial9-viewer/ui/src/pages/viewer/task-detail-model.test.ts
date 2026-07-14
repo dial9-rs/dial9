@@ -84,7 +84,7 @@ function fakeTrace(o: {
 
 // ── computeTaskDetailData - the collection numbers ────────────────────────
 
-describe("computeTaskDetailData (N2 numbers, exact vs legacy)", () => {
+describe("computeTaskDetailData (numbers, exact vs legacy)", () => {
   it("collects a task's polls across workers, sorted, with the exact counts", () => {
     const src = source({
       workerIds: [0, 1],
@@ -117,7 +117,7 @@ describe("computeTaskDetailData (N2 numbers, exact vs legacy)", () => {
     expect(data.hasPolls).toBe(true);
   });
 
-  it("returns EMPTY when nothing is selected or the task has no polls (N1)", () => {
+  it("returns EMPTY when nothing is selected or the task has no polls", () => {
     const src = source({ workerIds: [0], pollsByWorker: { 0: [poll(0, 1, 9)] } });
     const trace = fakeTrace({});
     expect(computeTaskDetailData(src, trace, null)).toBe(EMPTY_TASK_DETAIL_DATA);
@@ -135,7 +135,7 @@ describe("computeTaskDetailData (N2 numbers, exact vs legacy)", () => {
     expect(data.terminateTs).toBeNull();
   });
 
-  it("defaults taskInstrumented to true and carries the task dumps (N3/N4)", () => {
+  it("defaults taskInstrumented to true and carries the task dumps", () => {
     const dumps: TaskDump[] = [{ timestamp: 15, callchain: ["a", "b"] }];
     const src = source({ workerIds: [0], pollsByWorker: { 0: [poll(10, 20, 8)] } });
     const trace = fakeTrace({ taskDumps: { 8: dumps } });
@@ -148,7 +148,7 @@ describe("computeTaskDetailData (N2 numbers, exact vs legacy)", () => {
 
 // ── formatTaskDetailSummary - the label assembly ──────────────────────────
 
-describe("formatTaskDetailSummary (N2 label parts)", () => {
+describe("formatTaskDetailSummary (label parts)", () => {
   const base = source({ workerIds: [0], pollsByWorker: { 0: [poll(100, 200, 42), poll(300, 400, 42)] } });
 
   it("assembles id, location, poll/wake counts, lifetime, and completion mark", () => {
@@ -168,7 +168,7 @@ describe("formatTaskDetailSummary (N2 label parts)", () => {
     expect(formatTaskDetailSummary(data)).toBe(expected);
   });
 
-  it("drops the wake count for an uninstrumented task (N3)", () => {
+  it("drops the wake count for an uninstrumented task", () => {
     const trace = fakeTrace({ taskInstrumented: { 42: false } });
     const data = computeTaskDetailData(base, trace, 42);
     expect(formatTaskDetailSummary(data)).toBe("Task 0x2a · 2 polls");
@@ -177,7 +177,7 @@ describe("formatTaskDetailSummary (N2 label parts)", () => {
 
 // ── wakerLabelFor ─────────────────────────────────────────────────────────
 
-describe("wakerLabelFor (N7)", () => {
+describe("wakerLabelFor", () => {
   const trace = fakeTrace({
     spawnLocations: { L: "crate/mod/handler.rs:9" },
     taskSpawnLocs: { 7: "L" },
@@ -227,7 +227,7 @@ function wakeInfo(effectiveWake: number, wakerTaskId: number, label: string): Po
   return { wake: wake(effectiveWake, wakerTaskId), effectiveWake, wakerLabel: label };
 }
 
-describe("buildTaskDetailRenderModel: wake bands (N6/N7)", () => {
+describe("buildTaskDetailRenderModel: wake bands", () => {
   it("colours bands by delay severity and gates the labels on width", () => {
     // 1:1 ns->x would need a huge drawW; use a 10ms window / 1000px so the
     // three severities and both width thresholds are all exercised.
@@ -251,7 +251,7 @@ describe("buildTaskDetailRenderModel: wake bands (N6/N7)", () => {
   });
 });
 
-describe("buildTaskDetailRenderModel: poll sections (N10)", () => {
+describe("buildTaskDetailRenderModel: poll sections", () => {
   it("renders per-poll bars when polls fit the pixel budget", () => {
     const data = detailData({ polls: [poll(100, 150, 1), poll(300, 350, 1), poll(600, 650, 1)] });
     const m = buildTaskDetailRenderModel({ data, viewStart: 0, viewEnd: 1000, drawW: 1000 });
@@ -281,7 +281,7 @@ describe("buildTaskDetailRenderModel: poll sections (N10)", () => {
   });
 });
 
-describe("buildTaskDetailRenderModel: idle gaps (N11) + lifespan (N9)", () => {
+describe("buildTaskDetailRenderModel: idle gaps + lifespan", () => {
   it("draws an idle band between polls when no wake covers the gap", () => {
     const data = detailData({ polls: [poll(100, 150, 1), poll(300, 350, 1)] });
     const m = buildTaskDetailRenderModel({ data, viewStart: 0, viewEnd: 1000, drawW: 1000 });
@@ -327,7 +327,7 @@ describe("buildTaskDetailRenderModel: idle gaps (N11) + lifespan (N9)", () => {
 
 // ── Hit-region ordering + status/waker lookups ────────────────────────────
 
-describe("hit-region order + status/waker lookups (N5/N8)", () => {
+describe("hit-region order + status/waker lookups", () => {
   const data = detailData({
     polls: [poll(100, 150, 1), poll(400, 450, 1)],
     pollWakes: [wakeInfo(0, 9, "a.rs:1"), null], // wide wake band on poll 0

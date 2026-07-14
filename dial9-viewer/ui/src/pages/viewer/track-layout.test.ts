@@ -22,17 +22,13 @@ describe("track catalogue", () => {
     ]);
   });
 
-  it("marks only task-detail as selection-only (features/02 N1)", () => {
+  it("marks only task-detail as selection-only", () => {
     const selectionOnly = TRACKS.filter((t) => t.selectionOnly).map((t) => t.id);
     expect(selectionOnly).toEqual(["task-detail"]);
   });
-
-  it("records a downstream owner ticket for every slot", () => {
-    for (const t of TRACKS) expect(t.ownedBy).toMatch(/^T\d+$/);
-  });
 });
 
-describe("trackGeometry - shared axis (A13)", () => {
+describe("trackGeometry - shared axis", () => {
   it("gives every track the same drawW at a fixed column width", () => {
     const drawWs = new Set(TRACKS.map((t) => trackGeometry(t, opts).time.drawW));
     expect(drawWs.size).toBe(1);

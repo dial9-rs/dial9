@@ -12,11 +12,11 @@
          (census hrefs, walker popup URLs), so resolve them against the server
          root exactly like the root-served legacy page does. -->
     <base href="/" />
-    <!-- Dual-UI switch (T38). The auto-boot is a no-op on this off-root path;
+    <!-- Dual-UI switch. The auto-boot is a no-op on this off-root path;
          src/pages/browser/main.ts calls window.D9UiSwitch.mount({side:"new"}). -->
     <script src="/ui-switch.js"></script>
     <!-- window.Dial9Creds is the page's stable userscript contract
-         (features/01 C10) and window.Dial9UrlState the URL-state contract
+         and window.Dial9UrlState the URL-state contract
          (#585); both are shared with the legacy page and stay plain scripts
          (they live outside the src/ import boundary). -->
     <script src="/creds.js"></script>

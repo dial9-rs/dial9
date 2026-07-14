@@ -65,7 +65,7 @@ describe("fmtTick", () => {
   it("HH:MM:SS in UTC mode", () => {
     expect(fmtTick(1744221600, false)).toBe("18:00:00");
   });
-  it("withDate prefixes the calendar date (T15 F10-axis amendment)", () => {
+  it("withDate prefixes the calendar date", () => {
     expect(fmtTick(1744221600, false, true)).toBe("2025-04-09 18:00:00");
   });
   it("withDate in local mode matches formatEpochStr", () => {
@@ -73,7 +73,7 @@ describe("fmtTick", () => {
   });
 });
 
-describe("crossesDayBoundary (T15 F10-axis amendment)", () => {
+describe("crossesDayBoundary", () => {
   // 2025-04-09 00:00:00 UTC.
   const midnight = 1744156800;
   it("false within a single UTC day", () => {
@@ -84,7 +84,7 @@ describe("crossesDayBoundary (T15 F10-axis amendment)", () => {
   it("true across a UTC day boundary", () => {
     expect(crossesDayBoundary(midnight + 82800, midnight + 90000, false)).toBe(true);
   });
-  it("true across a multi-month span (the dev-seed shape, Finding 3)", () => {
+  it("true across a multi-month span (the dev-seed shape)", () => {
     expect(crossesDayBoundary(1744224000, 1744224000 + 400 * 86400, false)).toBe(true);
   });
   it("local mode compares local calendar dates", () => {

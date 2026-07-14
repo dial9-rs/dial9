@@ -27,7 +27,7 @@ function queueData(over: Partial<QueueData> = {}): QueueData {
   return { ...EMPTY_QUEUE_DATA, ...over };
 }
 
-describe("queueScaleY (S6 / #282: 0 must render a visible baseline)", () => {
+describe("queueScaleY (#282: 0 must render a visible baseline)", () => {
   const top = 10;
   const h = 100;
 
@@ -65,7 +65,7 @@ describe("queueScaleY (S6 / #282: 0 must render a visible baseline)", () => {
   });
 });
 
-describe("buildQueueRenderModel (J7: legacy bucket numbers preserved)", () => {
+describe("buildQueueRenderModel (legacy bucket numbers preserved)", () => {
   it("returns no-data on an empty view or degenerate window", () => {
     const m = buildQueueRenderModel({
       data: queueData(),
@@ -158,7 +158,7 @@ describe("buildQueueRenderModel (J7: legacy bucket numbers preserved)", () => {
   });
 });
 
-describe("computeSpawnedTasks (M7 / J7: legacy task-finding + grouping)", () => {
+describe("computeSpawnedTasks (legacy task-finding + grouping)", () => {
   const data = queueData({
     hasTaskTracking: true,
     taskFirstPoll: new Map([

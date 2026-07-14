@@ -466,7 +466,7 @@ describe("hard edge: budget eviction", () => {
 // terminal "oversized" state - never resident, never re-admitted,
 // distinguishable from "listed" (not yet fetched).
 
-describe("T17-audit finding 2: oversized segments defer honestly", () => {
+describe("audit finding 2: oversized segments defer honestly", () => {
   it("a segment larger than the hard budget parses ONCE, lands in 'oversized', and never loops - the audit probe", async () => {
     const segs = makeSegments(1, 25); // gzip estimate 100: admitted on the estimate
     const store = makeStore();
@@ -662,7 +662,7 @@ describe("hard edge: boundary-poll truncation through the orchestrator", () => {
 
 // ── Cross-segment poll continuity ────────────────────────────────────────
 
-describe("T17-audit finding 1: poll continuity across evicted neighbors", () => {
+describe("audit finding 1: poll continuity across evicted neighbors", () => {
   it("a worker mid-poll through the only-resident segment surfaces both-edges-truncated (edgePolls retained through real eviction)", async () => {
     // Worker 1's poll: PollStart in segment 0, PollEnd in segment 2,
     // silent through segment 1.
@@ -750,7 +750,7 @@ describe("prefetch", () => {
     expect(entryOf(store, segKey(3))!.state).toBe("parsed");
   });
 
-  it("T17-audit finding 4: a stale idle callback re-runs BUDGET admission, not just geometry", async () => {
+  it("audit finding 4: a stale idle callback re-runs BUDGET admission, not just geometry", async () => {
     // Segment layout: A and B small, C big. Under V1 (over A) the
     // prefetch of B is budget-admitted and queued at idle priority.
     // Under V2 (over C) B is STILL a geometric neighbor, but the need

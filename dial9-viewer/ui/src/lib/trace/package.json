@@ -1,4 +1,4 @@
 {
-  "//": "Module-type scope only (T16). The ui/ root package.json deliberately has no \"type\": \"module\" so `node test_*.js` keeps treating the legacy root scripts as CommonJS (constraint H2). Plain Node runs this directory's worker chain (worker/node-worker-entry.mjs -> worker/body.ts -> stream.ts) through native type stripping; without this file Node CJS-parses each TS module first, warns (MODULE_TYPELESS_PACKAGE_JSON), and reparses as ESM. Vite/vitest/tsc do not consult it.",
+  "//": "Module-type scope only. The ui/ root package.json deliberately has no \"type\": \"module\" so `node test_*.js` keeps treating the legacy root scripts as CommonJS. Plain Node runs this directory's worker chain (worker/node-worker-entry.mjs -> worker/body.ts -> stream.ts) through native type stripping; without this file Node CJS-parses each TS module first, warns (MODULE_TYPELESS_PACKAGE_JSON), and reparses as ESM. Vite/vitest/tsc do not consult it.",
   "type": "module"
 }

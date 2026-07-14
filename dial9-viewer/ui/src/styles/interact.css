@@ -1,8 +1,8 @@
-/* Shared styles for the unified keyboard model's surfaces (T20): search
+/* Shared styles for the unified keyboard model's surfaces: search
    palette, unified help overlay, status toast. Visuals follow the canonical
    interactive spec (docs/ui-inventory/mocks/keyboard.html) on the pages'
    dark theme (#1a1a2e); muted foregrounds are lifted where the mock's
-   values fall short of the 4.5:1 contrast bar (axe clean is a T20 gate). */
+   values fall short of the 4.5:1 contrast bar (axe clean is a gate). */
 
 /* ── Search palette ─────────────────────────────────────────────────── */
 
@@ -89,7 +89,7 @@
     overflow: hidden;
 }
 
-/* ── Keyboard-focusable interaction regions (K2) ────────────────────── */
+/* ── Keyboard-focusable interaction regions ────────────────────── */
 
 .d9-kb-focus:focus-visible {
     outline: 2px solid #6c63ff;

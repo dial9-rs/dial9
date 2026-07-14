@@ -86,7 +86,7 @@ function fakeHost(initial: UrlParts): UrlHost & { writes: string[] } {
 }
 
 describe("restoreZoomFromUrl", () => {
-  it("restores from legacy query params (old links keep working, N10)", () => {
+  it("restores from legacy query params (old links keep working)", () => {
     const fg = fakeFg();
     restoreZoomFromUrl(
       { search: "?trace=t.bin&worker-zoom=main%09poll&offworker-zoom=blk", hash: "" },
@@ -121,7 +121,7 @@ describe("restoreZoomFromUrl", () => {
     ]);
   });
 
-  it("skips restore when the time range did not match (F151)", () => {
+  it("skips restore when the time range did not match", () => {
     const fg = fakeFg();
     const state = restoreZoomFromUrl(
       { search: "?worker-zoom=a", hash: "#v=1&fg.o=b" },
@@ -198,7 +198,7 @@ describe("createFgUrlSync (restore -> zoom -> share loop)", () => {
     ]);
   });
 
-  it("Esc reset clears both zoom params and the hash (F152)", () => {
+  it("Esc reset clears both zoom params and the hash", () => {
     const { fg, raf, timer, host, sync } = setup({
       pathname: "/p",
       search: "?trace=t.bin&worker-zoom=a&offworker-zoom=b",
@@ -212,7 +212,7 @@ describe("createFgUrlSync (restore -> zoom -> share loop)", () => {
     expect(host.writes).toEqual(["/p?trace=t.bin"]);
   });
 
-  it("preserves every non-zoom context param on write (F153)", () => {
+  it("preserves every non-zoom context param on write", () => {
     const fixture = LEGACY_FIXTURE_URLS[3]!; // the full context-param fixture URL
     const { fg, raf, timer, host, sync } = setup({
       pathname: "/new/flamegraph.html",

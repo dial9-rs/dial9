@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- The migrated flamegraph page (T13): the Vite entry served at
+<!-- The migrated flamegraph page: the Vite entry served at
      /new/flamegraph.html (the new-UI path; the canonical /flamegraph.html
      keeps serving the legacy page until removal - ADR-0004 section 8).
      Static skeleton + styles are byte-faithful to the legacy page so the
@@ -80,8 +80,8 @@
         </style>
     </head>
     <body>
-        <!-- id="fg-header": mount point for page-level controls (T19
-             copy-link); the class/styling stays legacy-faithful. -->
+        <!-- id="fg-header": mount point for page-level controls
+             (copy-link); the class/styling stays legacy-faithful. -->
         <div class="fg-page-header" id="fg-header">
             <span class="fg-title" id="fg-title">Flamegraph</span>
             <span class="fg-stats" id="fg-stats"></span>

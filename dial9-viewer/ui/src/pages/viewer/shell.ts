@@ -95,7 +95,7 @@ function emptyStateTemplate(): TemplateResult {
         <li>Open a shared <code>?trace=</code> link</li>
       </ul>
       <p class="d9-empty-hint">
-        Loading is wired by the file-load chrome (T34); this is the shell's
+        Loading is wired by the file-load chrome; this is the shell's
         teaching state.
       </p>
     </div>
@@ -173,7 +173,7 @@ function shellTemplate(
       </button>
     </header>
 
-    <!-- Overview minimap (T35): an empty, focusable host that mountMinimap
+    <!-- Overview minimap: an empty, focusable host that mountMinimap
          fills with its canvas + coverage badge. Kept empty in the template so
          the shell's declarative re-renders never orphan the component's
          imperative children (the toast/legend technique). -->
@@ -206,12 +206,12 @@ function shellTemplate(
       ${inspectorTemplate()}
     </div>
 
-    <!-- Status bar (T35): an empty host that createStatusBar fills (selection
+    <!-- Status bar: an empty host that createStatusBar fills (selection
          line, view range, segment progress, copy-link button, key hints).
          Empty in the template for the same reason as the minimap host. -->
     <footer class="d9-status" role="contentinfo"></footer>
 
-    <!-- Toast channel (features/02 U): imperative children, so no dynamic
+    <!-- Toast channel: imperative children, so no dynamic
          template content here - createToasts owns it. role=status makes
          errors/info audible (an axe gap the legacy container had). -->
     <div

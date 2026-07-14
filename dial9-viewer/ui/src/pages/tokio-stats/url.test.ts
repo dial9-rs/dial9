@@ -12,7 +12,7 @@ import {
   shouldAutoLoad,
 } from "./url.js";
 
-describe("readScope (A3)", () => {
+describe("readScope", () => {
   it("reads bucket/prefix/service (single) and host (repeatable)", () => {
     const p = new URLSearchParams(
       "?bucket=b&prefix=pre&service=svc&host=h1&host=h2",
@@ -34,7 +34,7 @@ describe("readScope (A3)", () => {
   });
 });
 
-describe("parseInitialPeriods (A4/A5)", () => {
+describe("parseInitialPeriods", () => {
   it("restores multiple periods from p{i}_start_ns/p{i}_end_ns", () => {
     const p = new URLSearchParams("?p1_start_ns=100&p1_end_ns=200&p2_start_ns=300");
     expect(parseInitialPeriods(p)).toEqual([
@@ -42,7 +42,7 @@ describe("parseInitialPeriods (A4/A5)", () => {
       { startNs: "300", endNs: null },
     ]);
   });
-  it("falls back to a single start_ns/end_ns period (H6 button shape)", () => {
+  it("falls back to a single start_ns/end_ns period (button shape)", () => {
     expect(parseInitialPeriods(new URLSearchParams("?start_ns=5&end_ns=6"))).toEqual([
       { startNs: "5", endNs: "6" },
     ]);
@@ -52,7 +52,7 @@ describe("parseInitialPeriods (A4/A5)", () => {
       { startNs: null, endNs: null },
     ]);
   });
-  it("caps restore at 10 periods (A4: an 11th silently drops)", () => {
+  it("caps restore at 10 periods (an 11th silently drops)", () => {
     const parts: string[] = [];
     for (let i = 1; i <= 11; i++) parts.push(`p${i}_start_ns=${i}`);
     const periods = parseInitialPeriods(new URLSearchParams("?" + parts.join("&")));
@@ -60,7 +60,7 @@ describe("parseInitialPeriods (A4/A5)", () => {
   });
 });
 
-describe("buildSyncQuery (A7)", () => {
+describe("buildSyncQuery", () => {
   it("keeps the full scope incl. repeatable host and writes per-period bounds", () => {
     const scope = { bucket: "b", prefix: "pre", service: "svc", host: ["h1", "h2"] };
     const periods = [
@@ -93,7 +93,7 @@ describe("buildSyncQuery (A7)", () => {
   });
 });
 
-describe("shouldAutoLoad (A6)", () => {
+describe("shouldAutoLoad", () => {
   it("true when the original URL carried a non-empty start_ns or bucket", () => {
     expect(shouldAutoLoad(new URLSearchParams("?bucket=b"))).toBe(true);
     expect(shouldAutoLoad(new URLSearchParams("?start_ns=5"))).toBe(true);

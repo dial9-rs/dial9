@@ -32,7 +32,7 @@ function selection(over: Partial<SelectionSlice> = {}): SelectionSlice {
   };
 }
 
-describe("activeSelectionRegion - precedence (H10)", () => {
+describe("activeSelectionRegion - precedence", () => {
   it("a live keyboard selection wins over everything", () => {
     const region = activeSelectionRegion(
       transient({ keyboardSelection: { kind: "zoom-select", startNs: 800, cursorNs: 200 } }),

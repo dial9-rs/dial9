@@ -101,7 +101,7 @@ describe("computeDensityBins - multi-segment tail UNFETCHED (headline DoD)", () 
     );
   });
 
-  it("does NOT present the unfetched tail as complete (T17-audit notes 6-7)", () => {
+  it("does NOT present the unfetched tail as complete", () => {
     const { hasTier1Only, signal } = overallCoverage(bins, null);
     expect(hasTier1Only).toBe(true);
     expect(signal).toBe("partial");
@@ -159,7 +159,7 @@ describe("computeDensityBins - source precedence", () => {
     expect(bins.map((b) => b.coverage)).toEqual(["complete", "truncated"]);
   });
 
-  it("falls back on a T18 coverageSignal-classified PARTIAL fold (real classifier)", () => {
+  it("falls back on a coverageSignal-classified PARTIAL fold (real classifier)", () => {
     // A demand-driven aggregate mid-fold: files_folded < files_matched -> the
     // client classifies this "partial", so the minimap must NOT trust its
     // density and must fall back to listing residency.

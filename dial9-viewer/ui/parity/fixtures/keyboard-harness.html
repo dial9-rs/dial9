@@ -1,8 +1,8 @@
 <!doctype html>
-<!-- T20 a11y harness: mounts the unified keyboard model's two overlay
+<!-- a11y harness: mounts the unified keyboard model's two overlay
      components (lib/interact palette + help overlay) OPEN, so the axe
      scan can audit them. The palette has no landing-time page mount in
-     chunk 1 (its page wiring is the chunk-2 viewer, T23), so it cannot
+     chunk 1 (its page wiring is the chunk-2 viewer), so it cannot
      be scanned on a live page yet; this harness renders the REAL
      component code (imported from src/, transformed by the Vite dev
      server that parity/axe-keyboard.mjs spins up) - never a replica
@@ -12,7 +12,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>T20 keyboard components a11y harness</title>
+  <title>keyboard components a11y harness</title>
   <style>
     body { background: #1a1a2e; color: #e0e0e0; font-family: monospace; }
   </style>

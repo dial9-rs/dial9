@@ -13,7 +13,7 @@ const KEY_C_HOST2 =
 const KEY_OTHER_SVC =
   "traces/2026-04-09/1910/billing/host1/boot-c/1744224600-2.bin.gz";
 
-describe("traceTitleParams (features/01 I3)", () => {
+describe("traceTitleParams", () => {
   it("single-host: svc, host, from/to window, segs", () => {
     const p = traceTitleParams([KEY_A_HOST1, KEY_B_HOST1]);
     expect(p.get("svc")).toBe("checkout-api");
@@ -50,7 +50,7 @@ describe("traceTitleParams (features/01 I3)", () => {
     expect(p.get("segs")).toBe("3");
   });
 
-  it("unknown-layout keys contribute no svc/host, but keep the epoch window (T15)", () => {
+  it("unknown-layout keys contribute no svc/host, but keep the epoch window", () => {
     const demoKey =
       "traces/2026-04-09/1900/demo-service/local/host-0/abcd/1744224000-0.bin.gz";
     const p = traceTitleParams([demoKey]);

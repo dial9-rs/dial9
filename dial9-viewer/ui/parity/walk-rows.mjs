@@ -13,7 +13,7 @@
 //
 // Per-side walks: amended rows diverge by design between the two UI
 // generations — the migrated page carries the amended contract while the
-// legacy page keeps the pre-amendment behavior (e.g. G8's dead sort).
+// legacy page keeps the pre-amendment behavior (e.g. a dead sort).
 // Walkers receive `side` ("new" when the page URL lives under /new/, else
 // "legacy") and the amended rows' walkers branch on it, asserting the amended
 // behavior on the new page and the preserved legacy behavior on the legacy

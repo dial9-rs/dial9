@@ -44,7 +44,7 @@ const buttonEl = { tagName: "BUTTON" };
 const textarea = { tagName: "TEXTAREA" };
 const editable = { isContentEditable: true, tagName: "DIV" };
 
-describe("isTextEntryTarget (K5 suppression rule)", () => {
+describe("isTextEntryTarget (suppression rule)", () => {
   it("text-like inputs, textareas and contenteditable are text entry", () => {
     expect(isTextEntryTarget(textInput)).toBe(true);
     expect(isTextEntryTarget(searchInput)).toBe(true);
@@ -54,7 +54,7 @@ describe("isTextEntryTarget (K5 suppression rule)", () => {
     expect(isTextEntryTarget({ tagName: "INPUT" })).toBe(true);
   });
 
-  it("K5: non-text form controls stay accelerator-live", () => {
+  it("non-text form controls stay accelerator-live", () => {
     // Without this, nav keys die the moment a <select> grabs focus.
     expect(isTextEntryTarget(selectEl)).toBe(false);
     expect(isTextEntryTarget(checkbox)).toBe(false);
@@ -122,7 +122,7 @@ describe("createKeyRouter", () => {
     expect(onKey).toHaveBeenCalledTimes(1);
   });
 
-  it("K5: suppressed in text-entry targets unless the binding opts in", () => {
+  it("suppressed in text-entry targets unless the binding opts in", () => {
     const pageKey = vi.fn();
     const escKey = vi.fn();
     const router = createKeyRouter([
@@ -137,7 +137,7 @@ describe("createKeyRouter", () => {
     expect(escKey).toHaveBeenCalledTimes(1);
   });
 
-  it("K5: accelerators fire while a select/button/checkbox has focus", () => {
+  it("accelerators fire while a select/button/checkbox has focus", () => {
     const onKey = vi.fn();
     const router = createKeyRouter([{ key: "z", onKey }]);
     expect(router.handle(ev({ key: "z", target: selectEl }))).toBe(true);

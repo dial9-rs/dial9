@@ -50,7 +50,7 @@ function fakeTrace(events: CustomTraceEvent[]): ParsedTrace {
 
 // ── 1. Derived-cache invalidation ─────────────────────────────────────────
 
-describe("span-data derived cache (F5)", () => {
+describe("span-data derived cache", () => {
   it("recomputes only when the trace slice changes", () => {
     const sched = manualScheduler();
     const store = createViewerStore({ scheduler: (cb) => sched.pending.push(cb) });
@@ -89,7 +89,7 @@ describe("span-data derived cache (F5)", () => {
 
 // ── 2. Filter typing coalesces to <= 1 render/frame ───────────────────────
 
-describe("filter typing coalescing (F2)", () => {
+describe("filter typing coalescing", () => {
   it("collapses a burst of filter keystrokes into one render per frame", () => {
     const sched = manualScheduler();
     // A fresh store with the manual scheduler so we can count frames exactly.
@@ -181,7 +181,7 @@ function stateWithFocus(spanFocus: StoreState["selection"]["spanFocus"]): StoreS
   return { ...base, selection: { ...base.selection, spanFocus } };
 }
 
-describe("drawSpansCanvas dimming (S4)", () => {
+describe("drawSpansCanvas dimming", () => {
   it("draws every cluster at full weight when nothing is selected", () => {
     const { ctx, fills } = recordingCtx();
     drawSpansCanvas(ctx, twoBucketModel(), emptyData, stateWithFocus(null), 400, 120, 0, 400, colorOf);

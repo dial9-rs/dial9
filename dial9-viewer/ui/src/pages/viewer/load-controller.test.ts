@@ -118,7 +118,7 @@ function makeHarness(over: Partial<LoadControllerDeps> = {}): Harness {
 
 // ── Pure label helpers ──────────────────────────────────────────────────────
 
-describe("progressLabel (B8 keep-exactly)", () => {
+describe("progressLabel (keep-exactly)", () => {
   it("fetching: singular and multi-trace labels", () => {
     expect(progressLabel(progress({ phase: "fetching", urlCount: 1 }))).toBe("Fetching...");
     expect(progressLabel(progress({ phase: "fetching", urlCount: 3 }))).toBe(
@@ -146,7 +146,7 @@ describe("progressLabel (B8 keep-exactly)", () => {
   });
 });
 
-describe("loadErrorMessage (B13)", () => {
+describe("loadErrorMessage", () => {
   it("gives the credentials hint on HTTP 401 with a creds module present", () => {
     expect(loadErrorMessage("HTTP 401 fetching /api/object", true)).toMatch(
       /requires AWS credentials/,
@@ -180,7 +180,7 @@ describe("createLoadController: resting state", () => {
   });
 });
 
-describe("URL / demo loads (B6/B12) feed the worker and close on success", () => {
+describe("URL / demo loads feed the worker and close on success", () => {
   it("loadUrls starts a load, tracks progress, and closes when it resolves", async () => {
     const h = makeHarness();
     h.ctrl.loadUrls(["/a", "/b"], initialUrlLabel(2));
@@ -205,7 +205,7 @@ describe("URL / demo loads (B6/B12) feed the worker and close on success", () =>
     expect(h.loads[0]?.urls).toEqual(["/demo-trace.bin"]);
   });
 
-  it("attaches credential headers to URL loads but not file loads (B17)", () => {
+  it("attaches credential headers to URL loads but not file loads", () => {
     const h = makeHarness({ headers: () => ({ "x-dial9-aws-key": "k" }) });
     h.ctrl.loadUrls(["/a"], initialUrlLabel(1));
     expect(h.loads[0]?.opts.headers).toEqual({ "x-dial9-aws-key": "k" });
@@ -214,7 +214,7 @@ describe("URL / demo loads (B6/B12) feed the worker and close on success", () =>
     expect(h.loads[1]?.opts.headers).toBeUndefined();
   });
 
-  it("surfaces a load failure and returns to the chooser (B13)", async () => {
+  it("surfaces a load failure and returns to the chooser", async () => {
     const h = makeHarness({ credsMissing: () => true });
     h.ctrl.loadUrls(["/a"], initialUrlLabel(1));
     h.loads[0]?.reject(new Error("HTTP 401 fetching /a"));
@@ -226,7 +226,7 @@ describe("URL / demo loads (B6/B12) feed the worker and close on success", () =>
 
 // ── File drop / pick ────────────────────────────────────────────────────────
 
-describe("file loads via object URL (B2/B3)", () => {
+describe("file loads via object URL", () => {
   it("creates an object URL, loads it, and revokes on settle", async () => {
     const created: string[] = [];
     const revoked: string[] = [];
@@ -252,7 +252,7 @@ describe("file loads via object URL (B2/B3)", () => {
 
 // ── New File confirms before opening over a loaded trace ────────────────────
 
-describe("requestNewFile (S3 confirm amendment)", () => {
+describe("requestNewFile (confirm amendment)", () => {
   it("confirms before opening the chooser when a trace is loaded", async () => {
     const h = makeHarness();
     await loadATrace(h);
@@ -309,7 +309,7 @@ describe("dismissal (#281 amendment)", () => {
     expect(h.ctrl.getState().section).toBe("chooser"); // cannot dismiss to nothing
   });
 
-  it("a failed/cancelled replace keeps the old trace resident (S3 recovery)", async () => {
+  it("a failed/cancelled replace keeps the old trace resident (recovery)", async () => {
     const h = makeHarness();
     await loadATrace(h); // hasTrace true, section closed
     h.ctrl.requestNewFile(); // chooser over the trace
@@ -327,7 +327,7 @@ describe("dismissal (#281 amendment)", () => {
 
 // ── Esc during loading cancels ──────────────────────────────────────────────
 
-describe("cancel (B10/B11)", () => {
+describe("cancel", () => {
   it("Esc during a load aborts it and returns to the chooser", () => {
     const h = makeHarness();
     h.ctrl.loadUrls(["/a"], initialUrlLabel(1));
@@ -367,7 +367,7 @@ describe("drag feedback counter", () => {
 
 // ── Live elapsed timer ──────────────────────────────────────────────────────
 
-describe("elapsed timer (B9)", () => {
+describe("elapsed timer", () => {
   beforeEach(() => vi.useFakeTimers());
   afterEach(() => vi.useRealTimers());
 

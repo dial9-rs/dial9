@@ -111,7 +111,7 @@ function poll(start: number, end: number, taskId = 1): PollSpan {
 
 // ── Downsample / coalesce usage ───────────────────────────
 
-describe("renderLanes: pixel-bounded fills (03 F1 downsample+coalesce)", () => {
+describe("renderLanes: pixel-bounded fills (downsample+coalesce)", () => {
   it("draws O(width) fillRects for a million polls, not O(polls)", () => {
     const drawW = 200;
     const n = 1_000_000;
@@ -224,7 +224,7 @@ function span(
   };
 }
 
-describe("resolveLaneClick (G13/G14/G15)", () => {
+describe("resolveLaneClick", () => {
   const polls = [poll(0, 100, 42), poll(200, 300, 7)];
   // Parent's segment ran on ANOTHER worker at this instant, so the
   // containing-span lookup on worker 0 finds the child; the ancestor walk
@@ -266,7 +266,7 @@ describe("resolveLaneClick (G13/G14/G15)", () => {
     expect(r.toggledOff).toBe(true);
   });
 
-  it("opens Poll Detail only when the poll carries CPU or sched samples (G15)", () => {
+  it("opens Poll Detail only when the poll carries CPU or sched samples", () => {
     const withSamples = poll(0, 100, 42);
     withSamples.cpuSamples = [{ timestamp: 50 } as never];
     const r = resolveLaneClick({
@@ -293,8 +293,8 @@ describe("resolveLaneClick (G13/G14/G15)", () => {
 
 // ── Hover assembly ─────────────────────────────────────────────────
 
-describe("assembleLaneHover (G16)", () => {
-  it("reports polling state with task, sample counts and clickable-stack (K8)", () => {
+describe("assembleLaneHover", () => {
+  it("reports polling state with task, sample counts and clickable-stack", () => {
     const p = poll(0, 100, 0x1a);
     p.cpuSamples = [{ timestamp: 10 } as never, { timestamp: 20 } as never];
     p.spawnLoc = "src/main.rs:10";

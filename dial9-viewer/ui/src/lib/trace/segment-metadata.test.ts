@@ -123,7 +123,7 @@ describe("row-walk against real traces", () => {
     expect(id.host).toBeUndefined();
   });
 
-  it("surfaces both `service` and `host` from a T42 window fixture", () => {
+  it("surfaces both `service` and `host` from a window fixture", () => {
     const id = readSegmentIdentity(windowSeg);
     expect(id.service).toBe("svc-fix");
     expect(id.host).toBe("window");

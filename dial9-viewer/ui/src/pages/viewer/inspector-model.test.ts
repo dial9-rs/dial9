@@ -73,7 +73,7 @@ function sel(over: Partial<SelectionSlice>): SelectionSlice {
 
 // ── Poll Detail ────────────────────────────────────────────────────────────
 
-describe("buildPollDetail (R1/R2)", () => {
+describe("buildPollDetail", () => {
   const stackLong = ["0x1", "0x2", "0x3", "0x4", "0x5"]; // 5 frames
   const stackShort = ["0x6", "0x2"]; // 2 frames
   const stackCpu = ["0x1", "0x2", "0x3", "0x4"]; // 4 frames
@@ -136,7 +136,7 @@ describe("buildPollDetail (R1/R2)", () => {
 
 // ── Event detail ─────────────────────────────────────────────────────────────
 
-describe("buildEventDetail (Q1/Q3)", () => {
+describe("buildEventDetail", () => {
   const fmtTs = (ns: number): string => `t${ns}`;
 
   it("single event: fields + correlation only on shared values + @ + Task", () => {
@@ -175,7 +175,7 @@ describe("buildEventDetail (Q1/Q3)", () => {
 
 // ── Related ──────────────────────────────────────────────────────────────────
 
-describe("buildRelated (Q4-Q8)", () => {
+describe("buildRelated", () => {
   const anchor = ev("Tick", 100, { path: "/x" });
   const sameType = ev("Tick", 300, { path: "/x" });
   const other = ev("Other", 150);
@@ -189,7 +189,7 @@ describe("buildRelated (Q4-Q8)", () => {
   };
   const restingUi: RelatedUiState = { collapsed: {}, expand: {}, correlate: null };
 
-  it("emits the standard sections with counts and empty states (Q4/Q8)", () => {
+  it("emits the standard sections with counts and empty states", () => {
     const v = buildRelated(anchor, ctx, restingUi);
     const titles = v.sections.map((s) => s.title);
     expect(titles).toContain("Enclosing spans");
@@ -207,13 +207,13 @@ describe("buildRelated (Q4-Q8)", () => {
     expect(selfRow?.target).toBeNull();
   });
 
-  it("adds the field-correlation section only when the value links (Q3)", () => {
+  it("adds the field-correlation section only when the value links", () => {
     const withCorr: RelatedUiState = { ...restingUi, correlate: { key: "path", val: "/x" } };
     const v = buildRelated(anchor, ctx, withCorr);
     expect(v.sections.some((s) => s.title === "Same path=/x")).toBe(true);
   });
 
-  it("task-unresolved renders the placeholder (Q8)", () => {
+  it("task-unresolved renders the placeholder", () => {
     const v = buildRelated(other, ctx, restingUi);
     const sameTask = v.sections.find((s) => s.title === "Same task")!;
     expect(sameTask.empty).toBe("task unresolved");
@@ -222,7 +222,7 @@ describe("buildRelated (Q4-Q8)", () => {
 
 // ── Spawned tasks ────────────────────────────────────────────────────────────
 
-describe("buildSpawnedTasksView (M8)", () => {
+describe("buildSpawnedTasksView", () => {
   it("keeps 5 task links per group + a 'N more' tail", () => {
     const tasks = Array.from({ length: 7 }, (_, i) => ({ taskId: i + 1, firstPoll: i }));
     const result = { total: 7, groups: [{ loc: "spawn.rs:1", tasks }] };
@@ -241,7 +241,7 @@ describe("buildSpawnedTasksView (M8)", () => {
 
 // ── Tab families + activation ────────────────────────────────────────────────
 
-describe("tab availability + preferred tab (P4 / S4)", () => {
+describe("tab availability + preferred tab", () => {
   it("a poll click enables + prefers Poll", () => {
     const poll = { start: 0, end: 10 } as PollSpan;
     const s = sel({ pollDetail: poll });

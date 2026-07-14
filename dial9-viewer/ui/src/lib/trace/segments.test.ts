@@ -663,7 +663,7 @@ describe("computeWindowBoundaryPolls", () => {
 // segment is itself evidence: any PollEnd/Park/PollStart there would have
 // closed the poll, so the chain walk carries the open across silent segments.
 
-describe("computeWindowBoundaryPolls: T17-audit finding 1 (N-segment stitching)", () => {
+describe("computeWindowBoundaryPolls: audit finding 1 (N-segment stitching)", () => {
   const keys3 = ["s0", "s1", "s2"];
   const extents3 = [range(0, 100), range(100, 200), range(200, 300)];
 
@@ -785,7 +785,7 @@ describe("computeWindowBoundaryPolls: T17-audit finding 1 (N-segment stitching)"
 // Stitching across an extent gap would fabricate one completed long poll out
 // of two different polls' evidence - a lie we must never tell.
 
-describe("computeWindowBoundaryPolls: T17-audit finding 3 (extent-gap guard)", () => {
+describe("computeWindowBoundaryPolls: audit finding 3 (extent-gap guard)", () => {
   it("never stitches across an extent gap: both fragments surface truncated", () => {
     // Segment B (100..300) is missing from the listing; A and C are
     // consecutively listed but NOT adjacent in time.

@@ -53,7 +53,7 @@ const DAY0_NS = 1_609_459_200 * 1e9;
 const HOUR_NS = 3_600 * 1e9;
 const DAY_NS = 86_400 * 1e9;
 
-describe("pickTickInterval (F1 nice-values)", () => {
+describe("pickTickInterval (nice-values)", () => {
   it("targets max(4, floor(drawW/100)) ticks and snaps to a nice value", () => {
     // drawW 800 -> 8 target ticks; 4e9 / 8 = 5e8 -> exact nice value.
     expect(pickTickInterval(0, 4e9, 800)).toBe(5e8);
@@ -72,7 +72,7 @@ describe("pickTickInterval (F1 nice-values)", () => {
   });
 });
 
-describe("tickTimestamps (F1 firstTick loop)", () => {
+describe("tickTimestamps (firstTick loop)", () => {
   it("emits every interval multiple in [ceil(start/int)*int, end]", () => {
     expect(tickTimestamps(0, 1e9, 5e8)).toEqual([0, 5e8, 1e9]);
     expect(tickTimestamps(1e8, 1e9, 5e8)).toEqual([5e8, 1e9]);
@@ -84,7 +84,7 @@ describe("tickTimestamps (F1 firstTick loop)", () => {
   });
 });
 
-describe("nsToDrawX / alignment invariant (A13, three widths)", () => {
+describe("nsToDrawX / alignment invariant (three widths)", () => {
   const viewStart = 1_000_000;
   const viewEnd = 4_000_000_000;
   // A representative timestamp set, incl. the edges.
@@ -153,7 +153,7 @@ describe("wallClockNs", () => {
   });
 });
 
-describe("date-qualification amendment (T25)", () => {
+describe("date-qualification amendment", () => {
   it("crossesDayBoundaryNs true only across a UTC calendar day", () => {
     expect(crossesDayBoundaryNs(DAY0_NS + HOUR_NS, DAY0_NS + 2 * HOUR_NS, false)).toBe(false);
     expect(crossesDayBoundaryNs(DAY0_NS + 23 * HOUR_NS, DAY0_NS + 25 * HOUR_NS, false)).toBe(true);
@@ -252,7 +252,7 @@ function recordingCtx(): { ctx: CanvasRenderingContext2D; rec: Recording } {
   return { ctx, rec };
 }
 
-describe("renderTimeAxis (F1 ruler)", () => {
+describe("renderTimeAxis (ruler)", () => {
   const viewStart = 0;
   const viewEnd = 4e9;
   const geo: PanelGeometry = trackGeometry(trackById("timeline"), {

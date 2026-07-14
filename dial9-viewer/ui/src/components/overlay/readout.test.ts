@@ -8,7 +8,7 @@ import type { AtCursorReadout, SegmentEntry } from "../../types/state.js";
 
 // ── computeAtCursorReadout ──────────────────────────────────────────
 
-describe("computeAtCursorReadout (I6 info-panel parity)", () => {
+describe("computeAtCursorReadout (info-panel parity)", () => {
   const input: AtCursorInput = {
     workerIds: [0, 1],
     queueSamples: [
@@ -62,7 +62,7 @@ describe("computeAtCursorReadout (I6 info-panel parity)", () => {
 
 // ── coverageAt ──────────────────────────────────
 
-describe("coverageAt (T17 windowed-data completeness)", () => {
+describe("coverageAt (windowed-data completeness)", () => {
   const entry = (state: SegmentEntry["state"], startNs: number, endNs: number): SegmentEntry => ({
     state,
     extent: { startNs, endNs },

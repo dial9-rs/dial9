@@ -417,7 +417,7 @@ export function mountInspector(
         ${d.lifetimeNs != null ? kv("lifetime", formatHumanDuration(d.lifetimeNs)) : nothing}
         ${kv("status", d.hasTerminate ? "completed ✓" : "running")}
         ${d.taskDumps.length > 0
-          ? kv("idle stacks", `${d.taskDumps.length} captured (flamegraph: T32)`)
+          ? kv("idle stacks", `${d.taskDumps.length} captured (flamegraph)`)
           : nothing}
       </div>
     `;

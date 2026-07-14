@@ -101,7 +101,7 @@ describe("createViewportActions - store dispatch", () => {
   });
 });
 
-describe("createViewportActions - zoom history (K4)", () => {
+describe("createViewportActions - zoom history", () => {
   it("undo steps back to the previous committed view", () => {
     const { store, frame } = manualStore();
     const actions = createViewportActions(store);
@@ -131,7 +131,7 @@ describe("createViewportActions - zoom history (K4)", () => {
   });
 });
 
-describe("F2 coalescing: many zooms in one frame => one render", () => {
+describe("coalescing: many zooms in one frame => one render", () => {
   it("6 wheel-style zooms flush a single subscriber notification", () => {
     const { store, frame } = manualStore();
     const actions = createViewportActions(store);

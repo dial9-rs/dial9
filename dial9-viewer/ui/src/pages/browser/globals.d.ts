@@ -1,12 +1,12 @@
-// Window globals the browser page consumes (T14). These come from the two
+// Window globals the browser page consumes. These come from the two
 // plain <script src> includes in new/index.html:
 //
 // - creds.js publishes window.Dial9Creds - the page's STABLE USERSCRIPT
-//   contract (features/01 C10), typed by src/types/creds.d.ts (type-only
+//   contract, typed by src/types/creds.d.ts (type-only
 //   import below; .d.ts files are exempt from the core-import boundary).
 // - url_state.js publishes window.Dial9UrlState (#585 URL-state semantics,
 //   shared verbatim with the legacy page).
-// - ui-switch.js publishes window.D9UiSwitch (T38 dual-UI switch).
+// - ui-switch.js publishes window.D9UiSwitch (dual-UI switch).
 
 import type { Dial9CredsApi } from "../../../creds.js";
 

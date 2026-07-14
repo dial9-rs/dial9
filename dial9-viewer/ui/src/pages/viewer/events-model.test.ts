@@ -82,7 +82,7 @@ describe("visibility window binary search", () => {
     expect(vis.map((e) => e.timestamp)).toEqual([50, 60, 70, 80, 90, 100, 110, 120]);
   });
 
-  it("scans O(log N + window), NOT O(N) (03 F5 -> F6 bounded scan)", () => {
+  it("scans O(log N + window), NOT O(N) (bounded scan)", () => {
     const N = 50_000;
     const big = Array.from({ length: N }, (_, i) => ev("e", i));
     let reads = 0;
@@ -108,7 +108,7 @@ describe("visibility window binary search", () => {
 
 // ── Name filter ──────────────────────────────────────────────────────────
 
-describe("eventMatchesFilter (K5)", () => {
+describe("eventMatchesFilter", () => {
   it("passes everything when no names are selected", () => {
     expect(eventMatchesFilter(ev("x", 1), new Set())).toBe(true);
   });
@@ -129,7 +129,7 @@ describe("eventMatchesFilter (K5)", () => {
 
 // ── Clustering + tick geometry + info ────────────────────────────────────
 
-describe("buildEventRenderModel (K1/K2)", () => {
+describe("buildEventRenderModel", () => {
   const colorOf = (n: string): string => (n === "a" ? "#aaa" : "#bbb");
   const noTask = (): number | null => null;
 
@@ -207,7 +207,7 @@ function lane(polls: PollSpan[]): WorkerLane {
   return { polls, parks: [], actives: [], cpuSampleTimes: [] };
 }
 
-describe("resolveTaskForEvent (K7)", () => {
+describe("resolveTaskForEvent", () => {
   const lanes: Record<number, WorkerLane> = {
     0: lane([poll(0, 100, 42)]),
     1: lane([poll(0, 100, 99)]),
@@ -231,7 +231,7 @@ describe("resolveTaskForEvent (K7)", () => {
   });
 });
 
-describe("resolvePollForEvent (K7)", () => {
+describe("resolvePollForEvent", () => {
   const lanes: Record<number, WorkerLane> = { 0: lane([poll(0, 100, 42)]) };
   it("returns the actual poll for a worker_id hit", () => {
     const p = resolvePollForEvent(ev("e", 50, { worker_id: 0 }), lanes, [0]);
@@ -244,7 +244,7 @@ describe("resolvePollForEvent (K7)", () => {
   });
 });
 
-describe("resolveClusterTask (K7)", () => {
+describe("resolveClusterTask", () => {
   it("returns the common task, else null", () => {
     const taskOf = (e: CustomTraceEvent): number | null =>
       e.name === "x" ? 1 : e.name === "y" ? 2 : null;
@@ -256,7 +256,7 @@ describe("resolveClusterTask (K7)", () => {
 
 // ── Highlight-task derivation ────────────────────────────────────────────
 
-describe("eventHighlightTask (S4)", () => {
+describe("eventHighlightTask", () => {
   it("prefers the selected task, then the pinned event's task, else null", () => {
     expect(eventHighlightTask({ selectedTaskId: 5, pinnedEvent: null })).toBe(5);
     expect(

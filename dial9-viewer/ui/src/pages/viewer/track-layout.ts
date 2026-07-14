@@ -28,8 +28,6 @@ export interface TrackSpec {
   label: string;
   /** Starting track height in CSS px (draw-area height for the canvas). */
   height: number;
-  /** The ticket that fills this slot's content. */
-  ownedBy: string;
   /**
    * Shown only while a task is selected (task-detail); the shell keeps its slot
    * in the DOM but hidden until selection drives it.
@@ -43,19 +41,18 @@ export interface TrackSpec {
  * task is selected).
  */
 export const TRACKS: readonly TrackSpec[] = [
-  { id: "timeline", label: "Time", height: 30, ownedBy: "T25" },
-  { id: "lanes", label: "Workers", height: 130, ownedBy: "T22" },
-  { id: "cpu", label: "CPU", height: 74, ownedBy: "T28" },
-  { id: "queue", label: "Queue G+L", height: 74, ownedBy: "T29" },
-  { id: "spans", label: "Spans", height: 150, ownedBy: "T26" },
+  { id: "timeline", label: "Time", height: 30 },
+  { id: "lanes", label: "Workers", height: 130 },
+  { id: "cpu", label: "CPU", height: 74 },
+  { id: "queue", label: "Queue G+L", height: 74 },
+  { id: "spans", label: "Spans", height: 150 },
   // Events track: a legend strip (LEGEND_H) above a marker-tick canvas. Height
   // seats a 40px tick canvas plus the chip legend.
-  { id: "events", label: "Events", height: 70, ownedBy: "T27" },
+  { id: "events", label: "Events", height: 70 },
   {
     id: "task-detail",
     label: "Task detail",
     height: 160,
-    ownedBy: "T30",
     selectionOnly: true,
   },
 ];

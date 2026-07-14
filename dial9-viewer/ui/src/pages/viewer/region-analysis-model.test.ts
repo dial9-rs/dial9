@@ -90,7 +90,7 @@ describe("filterRegionCpuSamples", () => {
   });
 });
 
-describe("cpuRegionView / cpuCountLabel (S7 count reconciliation)", () => {
+describe("cpuRegionView / cpuCountLabel (count reconciliation)", () => {
   it("separates foldable on-CPU samples from total CPU records", () => {
     // 4 records in range: 2 foldable on-CPU, 1 sched, 1 stackless.
     const t = trace({
@@ -121,7 +121,7 @@ describe("cpuRegionView / cpuCountLabel (S7 count reconciliation)", () => {
 
 // ── region modes present + default ───────────────────────────────────────────
 
-describe("regionModesPresent / defaultRegionMode (H7)", () => {
+describe("regionModesPresent / defaultRegionMode", () => {
   const cs = symbols({ a: "leaf", s: "std::sync::Mutex::lock" });
   const ws: WorkerSpans = {
     0: lane({ polls: [poll(0, 100, { schedSamples: [cpu(50, 1, ["s"])] })] }),
@@ -141,7 +141,7 @@ describe("regionModesPresent / defaultRegionMode (H7)", () => {
     });
   });
 
-  it("H7: sched-only -> blocking; heap-only -> heap; else cpu", () => {
+  it("sched-only -> blocking; heap-only -> heap; else cpu", () => {
     expect(defaultRegionMode({ cpu: false, blocking: true, heap: false })).toBe("blocking");
     expect(defaultRegionMode({ cpu: false, blocking: false, heap: true })).toBe("heap");
     expect(defaultRegionMode({ cpu: false, blocking: true, heap: true })).toBe("heap");
@@ -152,7 +152,7 @@ describe("regionModesPresent / defaultRegionMode (H7)", () => {
 
 // ── heap ─────────────────────────────────────────────────────────────────────
 
-describe("heapRegionView (F16)", () => {
+describe("heapRegionView", () => {
   const cs = symbols({
     hook: "memory_profiling::hook::on_alloc",
     site: "my_crate::alloc_here",
@@ -197,7 +197,7 @@ describe("heapRegionView (F16)", () => {
 
 // ── blocking-calls panel ─────────────────────────────────────────────────────
 
-describe("buildBlockingView (R3-R9)", () => {
+describe("buildBlockingView", () => {
   const cs = symbols({
     lock: "std::sync::Mutex::lock",
     epoll: "mio::epoll_wait",
@@ -249,7 +249,7 @@ describe("buildBlockingView (R3-R9)", () => {
 
 // ── frame -> timeline extent ─────────────────────────────────────────────────
 
-describe("displayNamePath / frameSampleTimeExtent (S7 frame->time)", () => {
+describe("displayNamePath / frameSampleTimeExtent (frame->time)", () => {
   const cs = symbols({ leaf: "leaf_fn", mid: "mid_fn", root: "root_fn" });
 
   it("displayNamePath yields root-child-first display names (buildFlamegraphTree order)", () => {
@@ -286,7 +286,7 @@ describe("displayNamePath / frameSampleTimeExtent (S7 frame->time)", () => {
 
 // ── partial-window coverage ──────────────────────────────────────────────────
 
-describe("regionCoverage (T17 partial-window badge)", () => {
+describe("regionCoverage (partial-window badge)", () => {
   function segs(entries: { state: string; startNs: number; endNs: number }[]): SegmentsSlice {
     const m = new Map();
     entries.forEach((e, i) =>

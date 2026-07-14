@@ -1,5 +1,5 @@
 <!doctype html>
-<!-- The migrated trace-viewer page (T21): the Vite entry served at
+<!-- The migrated trace-viewer page: the Vite entry served at
      /new/viewer.html (the new-UI path; the canonical /viewer.html keeps
      serving the legacy page until removal - ADR-0004 section 8). ALL script
      lives in the module entry (src/pages/viewer/main.ts) except ui-switch.js,
@@ -13,10 +13,10 @@
         <!-- Off-root new-UI entry: resolve root-relative asset/nav targets
              (/demo-trace.bin, /ui-switch.js) against the server root. -->
         <base href="/" />
-        <!-- Dual-UI switch (T38): the auto-boot is a no-op on this off-root
+        <!-- Dual-UI switch: the auto-boot is a no-op on this off-root
              path; src/pages/viewer/main.ts calls D9UiSwitch.mount({side:"new"}). -->
         <script src="/ui-switch.js"></script>
-        <!-- Frozen flamegraph widget styles (T32): the in-viewer region
+        <!-- Frozen flamegraph widget styles: the in-viewer region
              analysis (Stack tab) embeds flamegraph.js, which renders `.fg-*`
              chrome; the same copied stylesheet both other generations load. -->
         <link rel="stylesheet" href="/flamegraph.css" />

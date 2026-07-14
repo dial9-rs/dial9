@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- The migrated Tokio Stats page (T41): the Vite entry served at
+<!-- The migrated Tokio Stats page: the Vite entry served at
      /new/tokio_stats.html (the new-UI path; the canonical /tokio_stats.html
      keeps serving the legacy page until removal - ADR-0004 section 8).
      Static skeleton + styles are byte-faithful to the legacy page so the
@@ -16,7 +16,7 @@
      (the exemplar viewer.html deep links) against the server root exactly
      like the root-served legacy page does. -->
 <base href="/" />
-<!-- Dual-UI switch (T38). The <head> auto-boot is a no-op on this off-root
+<!-- Dual-UI switch. The <head> auto-boot is a no-op on this off-root
      path; src/pages/tokio-stats/main.ts calls D9UiSwitch.mount({side:"new"}). -->
 <script src="/ui-switch.js"></script>
 <style>

@@ -72,7 +72,7 @@ function demoTrace(): ParsedTrace {
 
 // ── 1. Derived-cache invalidation ─────────────────────────────────────────
 
-describe("task-detail derived cache (F5)", () => {
+describe("task-detail derived cache", () => {
   it("pan does not recompute; task change invalidates; hover reuses it", () => {
     const store = createViewerStore({ scheduler: () => {} });
     const derivation = createTaskDetailDerivation(store);
@@ -102,7 +102,7 @@ describe("task-detail derived cache (F5)", () => {
     expect(second.polls[0]!.start).toBe(1200);
   });
 
-  it("resolves the N2 numbers from the trace maps for the selected task", () => {
+  it("resolves the numbers from the trace maps for the selected task", () => {
     const store = createViewerStore({ scheduler: () => {} });
     const derivation = createTaskDetailDerivation(store);
     store.update("trace", { trace: demoTrace() });
@@ -118,7 +118,7 @@ describe("task-detail derived cache (F5)", () => {
 
 // ── 2. Waker-hover dispatch ───────────────────────────────────────────────
 
-describe("waker-hover dispatch (N8/G8 - the lanes contract)", () => {
+describe("waker-hover dispatch (the lanes contract)", () => {
   function setup() {
     const store = createViewerStore({ scheduler: () => {} });
     const track = createTaskDetailTrack(store);
@@ -163,7 +163,7 @@ describe("waker-hover dispatch (N8/G8 - the lanes contract)", () => {
     expect(store.getState().selection.hoveredWakerTaskId).toBeNull();
   });
 
-  it("clicking a waker label selects that waker task (N8)", () => {
+  it("clicking a waker label selects that waker task", () => {
     const { store, track, model } = setup();
     const region = model.wakeRegions[0]!;
     track.clickWaker(model, (region.x1 + region.x2) / 2, (region.y1 + region.y2) / 2);
@@ -251,7 +251,7 @@ function wakeBandModel() {
 }
 
 describe("drawTaskDetailCanvas render input", () => {
-  it("bolds the hovered waker's label (N8/G8)", () => {
+  it("bolds the hovered waker's label", () => {
     const model = wakeBandModel();
     const hovered = recordingCtx();
     drawTaskDetailCanvas(hovered.ctx, model, 500, 2000, 160, COMPLETE_TASK_DETAIL_WINDOW);
@@ -266,7 +266,7 @@ describe("drawTaskDetailCanvas render input", () => {
     expect(notBold?.fillStyle).toBe("#66bb6a");
   });
 
-  it("draws the N12 legend", () => {
+  it("draws the legend", () => {
     const model = wakeBandModel();
     const { ctx, texts } = recordingCtx();
     drawTaskDetailCanvas(ctx, model, null, 2000, 160, COMPLETE_TASK_DETAIL_WINDOW);
@@ -274,7 +274,7 @@ describe("drawTaskDetailCanvas render input", () => {
     expect(texts.some((t) => t.text === "▲ = wake")).toBe(true);
   });
 
-  it("surfaces a truncated/oversized window rather than a clean edge (T17)", () => {
+  it("surfaces a truncated/oversized window rather than a clean edge", () => {
     const model = wakeBandModel();
     const window: TaskDetailWindow = { truncatedAt: "both", oversized: true };
     const { ctx, texts, rects } = recordingCtx();

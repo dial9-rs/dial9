@@ -13,7 +13,7 @@ import type { LaneHoverData } from "../canvas/lanes/index.js";
 
 // ── Placement (pure, cached-dimension) ─────────────────
 
-describe("placeTooltip (V1, pure over cached dims)", () => {
+describe("placeTooltip (pure over cached dims)", () => {
   const vp = { width: 1000, height: 800 };
 
   it("places to the right/below the cursor by default", () => {
@@ -44,7 +44,7 @@ describe("placeTooltip (V1, pure over cached dims)", () => {
   });
 
   it("is a pure function of its args: the RESULT tracks the cached dims, and a "
-     + "hover storm touches no DOM (F3 proxy - no element is even passed)", () => {
+     + "hover storm touches no DOM (proxy - no element is even passed)", () => {
     // Different cached dims -> different clamp, proving placement reads the
     // passed dims, never the element (there is no element to measure here).
     const wide = placeTooltip({ clientX: 950, clientY: 100 }, { width: 400, height: 50 }, vp).left;
@@ -100,7 +100,7 @@ function pollingData(): LaneHoverData {
   };
 }
 
-describe("laneTooltipModel (G16 content)", () => {
+describe("laneTooltipModel (content)", () => {
   it("polling: header, state, poll detail, queues, active tasks, span", () => {
     const rows = laneTooltipModel(pollingData(), fmt);
     const texts = rowText(rows);
@@ -179,7 +179,7 @@ describe("laneTooltipModel (G16 content)", () => {
     expect(seg(laneTooltipModel(parked, fmt), "Scheduling:")).toBeUndefined();
   });
 
-  it("T17: a non-complete window adds an explicit truncation warning row", () => {
+  it("a non-complete window adds an explicit truncation warning row", () => {
     const trunc = laneTooltipModel(pollingData(), { ...fmt, coverage: "truncated" });
     expect(seg(trunc, "Window:")!.value).toContain("partial data");
     const over = laneTooltipModel(pollingData(), { ...fmt, coverage: "oversized" });

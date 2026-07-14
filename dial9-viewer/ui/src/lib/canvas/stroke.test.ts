@@ -332,7 +332,7 @@ describe("drawStrokeBatches", () => {
     expect(ctx.calls.filter((c) => c === "beginPath")).toHaveLength(2);
   });
 
-  it("F1: dash state is hoisted - one setLineDash per dashed style, not per marker", () => {
+  it("dash state is hoisted - one setLineDash per dashed style, not per marker", () => {
     const b = makeStrokeBatcher();
     for (let x = 0; x < 100; x += 1) b.tick("open-ended", x, 10, 30);
     const ctx = makeRecordingCtx();

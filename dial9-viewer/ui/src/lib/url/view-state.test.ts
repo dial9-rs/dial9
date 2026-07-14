@@ -161,7 +161,7 @@ describe("versioning and tolerant-reader rules", () => {
   });
 });
 
-describe("recorded legacy-param fixture (N10)", () => {
+describe("recorded legacy-param fixture", () => {
   it("enumerates exactly two view-state params, both replaceState/exact", () => {
     const vs = FLAMEGRAPH_LEGACY_PARAMS.filter((p) => p.viewState);
     expect(vs.map((p) => p.param).sort()).toEqual(["offworker-zoom", "worker-zoom"]);

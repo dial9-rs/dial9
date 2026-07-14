@@ -121,7 +121,7 @@ describe("computeSpanTrackData", () => {
     expect(data.durationsByName.get("auth")).toEqual([250]);
   });
 
-  it("surfaces enter-without-exit as unmatchedSpans (J13; T17 notes 6+7)", () => {
+  it("surfaces enter-without-exit as unmatchedSpans", () => {
     const data = computeSpanTrackData([
       enter(100, "a", "load"),
       exit(300, "a", "load"),
@@ -137,20 +137,20 @@ describe("computeSpanTrackData", () => {
 describe("spanMatchesFilter", () => {
   const durs = new Map<string, number[]>([["req", [10, 20, 30, 40, 100]]]);
 
-  it("matches on span name substring, case-insensitive (J7)", () => {
+  it("matches on span name substring, case-insensitive", () => {
     const s = span("1", "HttpRequest", 0, 10);
     expect(spanMatchesFilter(s, { ...noFilter, text: "request" }, durs)).toBe(true);
     expect(spanMatchesFilter(s, { ...noFilter, text: "grpc" }, durs)).toBe(false);
   });
 
-  it("matches on field key or value (J7)", () => {
+  it("matches on field key or value", () => {
     const s = span("1", "req", 0, 10, { fields: { route: "/users" } });
     expect(spanMatchesFilter(s, { ...noFilter, text: "route" }, durs)).toBe(true);
     expect(spanMatchesFilter(s, { ...noFilter, text: "/users" }, durs)).toBe(true);
     expect(spanMatchesFilter(s, { ...noFilter, text: "/posts" }, durs)).toBe(false);
   });
 
-  it("applies the percentile floor of the name's duration distribution (J8)", () => {
+  it("applies the percentile floor of the name's duration distribution", () => {
     // P50 index = floor(5 * 50/100) = 2 -> threshold durs[2] = 30.
     const below = span("1", "req", 0, 20); // dur 20 < 30
     const above = span("2", "req", 0, 50); // dur 50 >= 30
@@ -158,7 +158,7 @@ describe("spanMatchesFilter", () => {
     expect(spanMatchesFilter(above, { ...noFilter, pctFloor: 50 }, durs)).toBe(true);
   });
 
-  it("AND-combines name chips with the text + percentile filters (J9)", () => {
+  it("AND-combines name chips with the text + percentile filters", () => {
     const s = span("1", "req", 0, 50);
     const names = new Set(["other"]);
     expect(spanMatchesFilter(s, { ...noFilter, selectedNames: names }, durs)).toBe(false);
@@ -175,7 +175,7 @@ describe("spanMatchesFilter", () => {
 });
 
 describe("spanPercentileRank", () => {
-  it("ranks a span within its name's duration distribution (J5/J6)", () => {
+  it("ranks a span within its name's duration distribution", () => {
     const durs = new Map<string, number[]>([["req", [10, 20, 30, 40]]]);
     expect(spanPercentileRank(span("1", "req", 0, 40), durs)).toBe(100);
     expect(spanPercentileRank(span("2", "req", 0, 20), durs)).toBe(50);
@@ -229,7 +229,7 @@ describe("buildSpanRenderModel", () => {
     expect(m.emptyReason).toBeNull();
   });
 
-  it("focused view includes descendants and pins the focus at the top (J2)", () => {
+  it("focused view includes descendants and pins the focus at the top", () => {
     const m = buildSpanRenderModel({ ...base, focusedSpanId: "p" });
     expect(m.renderCount).toBe(2); // parent + child
     const focus = m.buckets.find((b) => b.representative.spanId === "p");
@@ -254,7 +254,7 @@ describe("buildSpanRenderModel", () => {
 // ── Focus chain + dimming ─────────────────────────────────────────────────
 
 describe("spanFocusChain", () => {
-  it("walks the ancestor chain from a clicked span (J2)", () => {
+  it("walks the ancestor chain from a clicked span", () => {
     const data = trackData([
       span("root", "r", 0, 1000),
       span("mid", "m", 10, 900, { parent: "root" }),
@@ -271,7 +271,7 @@ describe("spanFocusChain", () => {
   });
 });
 
-describe("spanHighlight (S4 dim input)", () => {
+describe("spanHighlight (dim input)", () => {
   it("is inactive with no span focus (no dimming)", () => {
     const h = spanHighlight({ spanFocus: null });
     expect(h.active).toBe(false);
@@ -289,7 +289,7 @@ describe("spanHighlight (S4 dim input)", () => {
 // ── Chip + label models ───────────────────────────────────────────────────
 
 describe("spanChipModels", () => {
-  it("emits one keyed chip per name with active + color (J9/F7)", () => {
+  it("emits one keyed chip per name with active + color", () => {
     const data = trackData([span("1", "auth", 0, 10), span("2", "load", 0, 10)]);
     const chips = spanChipModels(data, new Set(["auth"]), (n) => `c-${n}`);
     expect(chips.map((c) => [c.name, c.active])).toEqual([
@@ -300,20 +300,20 @@ describe("spanChipModels", () => {
   });
 });
 
-describe("spanLabelModel + focusInfoLine (J3/J5)", () => {
+describe("spanLabelModel + focusInfoLine", () => {
   it("is null when nothing is focused (label shows 'Spans')", () => {
     const data = trackData([span("1", "auth", 0, 10)]);
     expect(spanLabelModel(null, data)).toBeNull();
   });
 
-  it("renders the focused span name + a copyable row per field (J3/J4)", () => {
+  it("renders the focused span name + a copyable row per field", () => {
     const data = trackData([span("1", "auth", 0, 10, { fields: { user: "abc" } })]);
     const label = spanLabelModel("1", data);
     expect(label?.name).toBe("auth");
     expect(label?.rows).toEqual([{ key: "user", display: "abc", copy: "abc" }]);
   });
 
-  it("formats the focus readout name: dur (P% of N) P50 P99 (J5)", () => {
+  it("formats the focus readout name: dur (P% of N) P50 P99", () => {
     const durs = new Map<string, number[]>([["req", [100, 200, 300]]]);
     const line = focusInfoLine(span("1", "req", 0, 200), durs);
     expect(line).toMatch(/^req: .* \(P\d+ of 3\) · P50=.* P99=.*$/);

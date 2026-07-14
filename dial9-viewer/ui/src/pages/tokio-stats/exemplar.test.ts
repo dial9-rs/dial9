@@ -12,8 +12,8 @@ const EX: PollExemplar = {
   source_key: "traces/2026-04-09/1900/demo-service/local/host-0/abcd/1744224000-0.bin.gz",
 };
 
-describe("exemplarLink (H1)", () => {
-  it("builds a viewer deep link that PRESERVES the /api/trace target (H4 defect carried)", () => {
+describe("exemplarLink", () => {
+  it("builds a viewer deep link that PRESERVES the /api/trace target (defect carried)", () => {
     const link = exemplarLink(EX, "demo-traces", null);
     expect(link.startsWith("viewer.html?")).toBe(true);
     const params = new URLSearchParams(link.slice("viewer.html?".length));
@@ -28,7 +28,7 @@ describe("exemplarLink (H1)", () => {
     expect(params.get("end_ns")).toBe("2000");
   });
 
-  it("bucket precedence: response bucket wins, else the URL param, else empty (H1)", () => {
+  it("bucket precedence: response bucket wins, else the URL param, else empty", () => {
     const fromData = exemplarLink(EX, "resp-bucket", "url-bucket");
     expect(new URLSearchParams(fromData.split("?")[1]).get("trace")).toContain(
       "bucket=resp-bucket",
@@ -44,7 +44,7 @@ describe("exemplarLink (H1)", () => {
     );
   });
 
-  it("returns '' for a null exemplar or one with no start_ns (H3 guard)", () => {
+  it("returns '' for a null exemplar or one with no start_ns (guard)", () => {
     expect(exemplarLink(null, "b", null)).toBe("");
     expect(exemplarLink(undefined, "b", null)).toBe("");
     expect(exemplarLink({ ...EX, start_ns: 0 }, "b", null)).toBe("");

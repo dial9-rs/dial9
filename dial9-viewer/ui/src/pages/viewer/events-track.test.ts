@@ -73,7 +73,7 @@ function lane(polls: PollSpan[]): WorkerLane {
 
 // ── 1. Click-to-pin dispatch ─────────────────────────────────────────────
 
-describe("dispatchEventPin (K4)", () => {
+describe("dispatchEventPin", () => {
   it("pins a single-event cluster into selection.pinnedEvent", () => {
     const store = testStore();
     // Seed a prior task/span selection so we can prove the pin clears them.
@@ -137,8 +137,8 @@ describe("dispatchEventPin (K4)", () => {
 
 // ── 2. Hover guide-line dispatch ─────────────────────────────────────────
 
-describe("dispatchHoverEvent (I4)", () => {
-  it("writes and clears transient.hoverEventTs (the slice T24 draws from)", () => {
+describe("dispatchHoverEvent", () => {
+  it("writes and clears transient.hoverEventTs (the slice the crosshair draws from)", () => {
     const store = testStore();
     expect(store.getState().transient.hoverEventTs).toBeNull();
     dispatchHoverEvent(store, 4200);
@@ -200,7 +200,7 @@ function twoClusterModel(): EventRenderModel {
   };
 }
 
-describe("drawEventsCanvas dimming (S4)", () => {
+describe("drawEventsCanvas dimming", () => {
   it("draws every tick at its base alpha when no task is highlighted", () => {
     const { ctx, fills } = recordingCtx();
     drawEventsCanvas(ctx, twoClusterModel(), null, 100, 40, false, false);
@@ -209,7 +209,7 @@ describe("drawEventsCanvas dimming (S4)", () => {
     expect(fills.find((f) => f.x === 48.5)!.alpha).toBeCloseTo(0.55, 10);
   });
 
-  it("fades ticks not on the highlighted task to 20% (legacy K1 / S4)", () => {
+  it("fades ticks not on the highlighted task to 20% (legacy)", () => {
     const { ctx, fills } = recordingCtx();
     // Highlight task 1: the px-10 cluster stays bright, the px-50 one dims.
     drawEventsCanvas(ctx, twoClusterModel(), 1, 100, 40, false, false);
@@ -217,7 +217,7 @@ describe("drawEventsCanvas dimming (S4)", () => {
     expect(fills.find((f) => f.x === 48.5)!.alpha).toBeCloseTo(0.55 * 0.2, 10); // dimmed
   });
 
-  it("paints the K2 info readout on the canvas", () => {
+  it("paints the info readout on the canvas", () => {
     const { ctx, texts } = recordingCtx();
     drawEventsCanvas(ctx, twoClusterModel(), null, 100, 40, false, false);
     expect(texts).toContain("2 events · 2 markers");
@@ -245,7 +245,7 @@ function fakeTrace(events: CustomTraceEvent[]): ParsedTrace {
   return { customEvents: events } as unknown as ParsedTrace;
 }
 
-describe("event-data derived cache (F5)", () => {
+describe("event-data derived cache", () => {
   it("recomputes only when the trace slice changes", () => {
     const store = testStore();
     let computes = 0;

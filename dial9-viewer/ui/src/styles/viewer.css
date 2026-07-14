@@ -1,8 +1,8 @@
-/* Viewer shell styles (T21). The DECIDED concept-1 hybrid layout: toolbar
+/* Viewer shell styles. The DECIDED concept-1 hybrid layout: toolbar
    row, overview minimap, a body splitting the unified time-aligned track
    column from a persistent inspector, and a status bar. Dark theme matches
    the other pages (#1a1a2e). Muted foregrounds are held at >= 4.5:1 against
-   the background (amendment F6 contrast; same bar as interact.css). */
+   the background (contrast; same bar as interact.css). */
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
 
@@ -12,7 +12,7 @@
     --d9-bg-track: #12172a;
     --d9-border: #2f2f4a;
     --d9-fg: #e0e0e0;
-    /* Muted text lifted to clear the 4.5:1 contrast bar (F6). */
+    /* Muted text lifted to clear the 4.5:1 contrast bar. */
     --d9-fg-muted: #a9b0d0;
     --d9-accent: #8f88ff;
 }
@@ -52,7 +52,7 @@ body {
 }
 .d9-file-name { font-size: 0.85em; color: var(--d9-fg); }
 .d9-file-meta { font-size: 0.8em; color: var(--d9-fg-muted); }
-/* C1a: trace-embedded service/host identity chips (T45). */
+/* Trace-embedded service/host identity chips. */
 .d9-file-identity { display: inline-flex; align-items: center; gap: 6px; }
 .d9-file-identity-item {
     display: inline-flex;
@@ -77,7 +77,7 @@ body {
 }
 .d9-slot-hint { font-size: 0.75em; color: var(--d9-fg-muted); }
 
-/* ── T33: toolbar controls (analysis buttons, time toggles, ranges) ──── */
+/* ── Toolbar controls (analysis buttons, time toggles, ranges) ───────── */
 
 .d9-toolbar-btn {
     background: #23233f;
@@ -123,7 +123,7 @@ body {
 .d9-redflags-sep { color: #8a6a6a; }
 .d9-redflags-item { white-space: nowrap; }
 
-/* Goto-time input (S2). */
+/* Goto-time input. */
 .d9-goto-label { display: inline-flex; align-items: center; flex-shrink: 0; }
 .d9-goto-input {
     background: #0f1629;
@@ -137,7 +137,7 @@ body {
 .d9-goto-input:disabled { opacity: 0.4; }
 .d9-goto-input:focus-visible { outline: 2px solid var(--d9-accent); outline-offset: 1px; }
 
-/* Info menu (F2: Parse perf + uninstrumented demoted here). */
+/* Info menu (Parse perf + uninstrumented demoted here). */
 .d9-info-menu { position: relative; flex-shrink: 0; }
 .d9-info-summary {
     list-style: none;
@@ -183,7 +183,7 @@ body {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
-/* ── T33: issues rail (concept-2, replaces the "0/74" stepper; 04 S5) ── */
+/* ── Issues rail (concept-2, replaces the "0/74" stepper) ────────────── */
 
 .d9-rail {
     width: 300px;
@@ -299,18 +299,18 @@ body {
     flex-shrink: 0;
     background: #12122a;
     border-bottom: 1px solid var(--d9-border);
-    /* Positioning context for the coverage badge (T35). */
+    /* Positioning context for the coverage badge. */
     position: relative;
 }
 .d9-minimap:focus-visible { outline: 2px solid var(--d9-accent); outline-offset: -2px; }
-/* Overview minimap canvas (T35): fills the host; grab to drag the viewport. */
+/* Overview minimap canvas: fills the host; grab to drag the viewport. */
 .d9-minimap-canvas {
     display: block;
     width: 100%;
     height: 100%;
     cursor: pointer;
 }
-/* Coverage badge (T35): shown only when the overview has tier-1-only regions
+/* Coverage badge: shown only when the overview has tier-1-only regions
    (unfetched/partial), so a windowed tail is never presented as whole. */
 .d9-minimap-badge {
     position: absolute;
@@ -339,12 +339,12 @@ body {
     overflow-y: auto;
     overflow-x: hidden;
     background: #0f1424;
-    /* Positioning context for the transient crosshair overlay (T24, I1). */
+    /* Positioning context for the transient crosshair overlay. */
     position: relative;
 }
 .d9-track-column:focus-visible { outline: 2px solid var(--d9-accent); outline-offset: -2px; }
 
-/* Persistent interaction hint chips (F5). */
+/* Persistent interaction hint chips. */
 .d9-hint-chips {
     display: flex;
     flex-wrap: wrap;
@@ -415,9 +415,9 @@ body {
 }
 .d9-track-canvas { display: block; }
 
-/* ── Track management: collapse caret + drag-reorder grip (T36; amends
-   section O - the fold BEHAVIOR survives, one-line-fold presentation retired
-   by S1). The affordances overlay a reserved strip at the LEFT edge of the
+/* ── Track management: collapse caret + drag-reorder grip (the fold
+   BEHAVIOR survives, one-line-fold presentation retired). The affordances
+   overlay a reserved strip at the LEFT edge of the
    label gutter so the frozen per-track labels are not modified; the strip is
    pointer-events:none except the two controls, so the rest of the label (e.g.
    the spans copy buttons) stays interactive. ── */
@@ -465,7 +465,7 @@ body {
     color: var(--d9-accent);
     cursor: pointer;
 }
-/* CSS-driven caret (legacy O3 was a ::before chevron): down = expanded,
+/* CSS-driven caret (legacy was a ::before chevron): down = expanded,
    right = collapsed. Keeps the glyph out of the TS source. */
 .d9-track-caret::before { content: "\25BE"; }
 .d9-track-manage.is-collapsed .d9-track-caret::before { content: "\25B8"; }
@@ -480,7 +480,7 @@ body {
 }
 .d9-track-grip::before { content: "\2261"; } /* triple bar = drag handle */
 .d9-track-grip:active { cursor: grabbing; }
-/* Collapsed (label-only, legacy O1 24px): hide the drawing body. Covers both
+/* Collapsed (label-only, legacy 24px): hide the drawing body. Covers both
    body variants (spans/events) and the canvas-wrap variants (cpu/queue). */
 .d9-track-manage.is-collapsed .d9-track-body,
 .d9-track-manage.is-collapsed .d9-track-canvas-wrap {
@@ -492,7 +492,7 @@ body {
     padding-top: 0;
 }
 
-/* ── Worker-lanes legend (G19 + 04 F3): non-interactive ribbon over the
+/* ── Worker-lanes legend: non-interactive ribbon over the
    lanes canvas wrap; explains every in-lane mark incl. the q:NN label. ── */
 .d9-lanes-legend {
     position: absolute;
@@ -537,9 +537,9 @@ body {
 }
 .d9-lanes-legend-text { white-space: nowrap; }
 
-/* ── Queue depth track (T29; features/02 section M + S6/F3) ──────────── */
-/* Column wrap: an always-visible legend strip (F3) above the chart canvas so
-   the global/max-local/active-task encodings are labeled (the S6 fix - one
+/* ── Queue depth track ───────────────────────────────────────────────── */
+/* Column wrap: an always-visible legend strip above the chart canvas so
+   the global/max-local/active-task encodings are labeled (the fix - one
    legible representation), not hidden in a collapsed fold. */
 .d9-queue-wrap { flex-direction: column; }
 .d9-queue-legend {
@@ -566,16 +566,16 @@ body {
     border-radius: 1px;
 }
 /* Line encodings (max-local, active-task) read as a 2px rule, not a box, so
-   the swatch matches what the track draws (F3: swatches match rendering). */
+   the swatch matches what the track draws (swatches match rendering). */
 .d9-queue-legend-swatch.shape-line { height: 2px; }
 .d9-queue-legend-text { white-space: nowrap; }
 .d9-queue-canvas { flex: 1; min-width: 0; }
 
-/* ── Spans track (T26; features/02 section J) ────────────────────────── */
+/* ── Spans track ─────────────────────────────────────────────────────── */
 
 /* The spans row keeps the shared LABEL_W gutter so its canvas stays axis-
    aligned with every other track; the gutter shows the focused-span metadata
-   (J3) and the body stacks a legend/controls strip (J7-J14) over the canvas. */
+   and the body stacks a legend/controls strip over the canvas. */
 .d9-track--spans .d9-spans-label {
     justify-content: flex-start;
     padding: 4px 6px;
@@ -695,7 +695,7 @@ body {
 .d9-spans-canvas-wrap { flex: 1; min-width: 0; display: flex; }
 .d9-spans-canvas { display: block; cursor: pointer; }
 
-/* Span hover tooltip (J6): follows the cursor, appended to <body>. */
+/* Span hover tooltip: follows the cursor, appended to <body>. */
 .d9-span-tooltip {
     position: fixed;
     z-index: 80;
@@ -713,11 +713,11 @@ body {
 .d9-span-tooltip .tt-k { color: var(--d9-fg-muted); }
 .d9-span-tooltip .tt-dim { color: #888; }
 
-/* ── Task-detail track (T30; features/02 section N) ──────────────────────
+/* ── Task-detail track ───────────────────────────────────────────────────
    Selection-only track: the label gutter shows the track name + a compact
-   task identity (the full textual header is T31's inspector Task tab); the
-   canvas hosts the timeline (N6-N12); a status readout floats top-right over
-   the canvas (N5, updated imperatively on hover, matching the legacy
+   task identity (the full textual header is the inspector Task tab); the
+   canvas hosts the timeline; a status readout floats top-right over
+   the canvas (updated imperatively on hover, matching the legacy
    #task-detail-status). */
 .d9-track--task-detail .d9-track-label { justify-content: center; }
 .d9-task-detail-id {
@@ -744,10 +744,10 @@ body {
 }
 .d9-task-detail-canvas { display: block; }
 
-/* ── Custom-events track (T27; features/02 section K) ────────────────────── */
+/* ── Custom-events track ─────────────────────────────────────────────────── */
 
 /* The events row keeps the shared LABEL_W gutter (axis alignment) and stacks a
-   name-chip legend strip (K5/K6) over the marker-tick canvas (K1). */
+   name-chip legend strip over the marker-tick canvas. */
 .d9-track--events .d9-events-label {
     justify-content: center;
 }
@@ -802,7 +802,7 @@ body {
 .d9-events-canvas-wrap { flex: 1; min-width: 0; display: flex; }
 .d9-events-canvas { display: block; cursor: default; }
 
-/* Event hover tooltip (K3): follows the cursor, appended to <body>. */
+/* Event hover tooltip: follows the cursor, appended to <body>. */
 .d9-event-tooltip {
     position: fixed;
     z-index: 80;
@@ -820,7 +820,7 @@ body {
 .d9-event-tooltip .tt-k { color: var(--d9-fg-muted); }
 .d9-event-tooltip .tt-dim { color: #888; }
 
-/* ── Empty state (F4) ────────────────────────────────────────────────── */
+/* ── Empty state ─────────────────────────────────────────────────────── */
 
 .d9-empty {
     max-width: 520px;
@@ -850,9 +850,9 @@ body {
 
 /* ── Inspector ───────────────────────────────────────────────────────── */
 
-/* ── Persistent inspector (T31; features/02 P/Q/R + S4/F7) ───────────────
+/* ── Persistent inspector ────────────────────────────────────────────────
    Width is applied imperatively by mountInspector (uiPrefs.sidebarWidth,
-   persisted; P8). The aside is position:relative so the drag handle (P2)
+   persisted). The aside is position:relative so the drag handle
    anchors to its left edge. The interior is rendered imperatively into the
    otherwise-empty aside, so the shell's declarative re-render never clobbers
    it. */
@@ -882,7 +882,7 @@ body {
     height: 100%;
     overflow: hidden;
 }
-/* F7: "what is selected" line + explicit clear affordance. */
+/* "what is selected" line + explicit clear affordance. */
 .d9-inspector-status {
     display: flex;
     align-items: center;
@@ -905,7 +905,7 @@ body {
 }
 .d9-inspector-clear:hover { color: #fff; background: rgba(143, 136, 255, 0.28); border-color: var(--d9-accent); }
 .d9-inspector-clear:focus-visible { outline: 2px solid var(--d9-accent); outline-offset: 1px; }
-/* S4: the ONE at-cursor readout surface (I6). */
+/* The ONE at-cursor readout surface. */
 .d9-atcursor {
     display: flex;
     flex-wrap: wrap;
@@ -951,7 +951,7 @@ body {
 .d9-inspector-body:focus-visible { outline: 2px solid var(--d9-accent); outline-offset: -2px; }
 .d9-inspector-hint { color: var(--d9-fg-muted); font-style: italic; }
 
-/* Task tab (N2/N3). */
+/* Task tab. */
 .d9-task-detail-head { color: #ffeb3b; font-weight: 600; margin-bottom: 6px; }
 .d9-kv, .d9-kv-row { display: flex; gap: 8px; align-items: baseline; margin: 2px 0; }
 .d9-kv .k, .d9-kv-row .k { color: var(--d9-fg-muted); flex-shrink: 0; min-width: 72px; }
@@ -966,7 +966,7 @@ body {
     font-weight: 400;
 }
 
-/* Poll Detail tab (R1/R2). */
+/* Poll Detail tab. */
 .d9-poll-title { color: var(--d9-fg); font-weight: 600; margin-bottom: 8px; }
 .d9-poll-sched-head { color: #ff4444; font-weight: 600; margin-bottom: 6px; }
 .d9-poll-cpu-head { color: #ff8c00; font-weight: 600; margin: 8px 0 6px; }
@@ -998,7 +998,7 @@ body {
     cursor: pointer;
 }
 
-/* Event tab (Q1/Q2/Q3). */
+/* Event tab. */
 .d9-event-title { color: var(--d9-fg); font-weight: 600; margin-bottom: 8px; word-break: break-all; }
 .d9-kv-corr, .d9-kv-copy {
     flex-shrink: 0;
@@ -1012,7 +1012,7 @@ body {
 }
 .d9-kv-corr:hover, .d9-kv-copy:hover { color: var(--d9-fg); border-color: var(--d9-accent); }
 
-/* Related tab (Q4-Q8). */
+/* Related tab. */
 .d9-related-section { margin-bottom: 4px; }
 .d9-related-head {
     display: block;
@@ -1051,7 +1051,7 @@ body {
     cursor: pointer;
 }
 
-/* Stack tab: spawned tasks (M7/M8). */
+/* Stack tab: spawned tasks. */
 .d9-spawned-head { color: var(--d9-fg); font-weight: 600; margin-bottom: 8px; }
 .d9-spawned-group { margin-bottom: 8px; }
 .d9-spawned-loc { color: var(--d9-fg-muted); word-break: break-all; margin-bottom: 2px; }
@@ -1082,7 +1082,7 @@ body {
     font-size: 0.76em;
     color: var(--d9-fg-muted);
 }
-/* Status-bar text row (T35): the shell host also holds the imperative
+/* Status-bar text row: the shell host also holds the imperative
    copy-link button as a sibling, so this stays flex:1 and the button sits at
    the far right. */
 .d9-status-main {
@@ -1093,7 +1093,7 @@ body {
     min-width: 0;
 }
 .d9-status-sel { color: var(--d9-fg); display: inline-flex; align-items: center; gap: 6px; }
-/* F7 explicit clear-selection affordance. */
+/* Explicit clear-selection affordance. */
 .d9-status-clear {
     padding: 0 5px;
     font: inherit;
@@ -1123,7 +1123,7 @@ body {
 }
 .d9-status-hints { margin-left: auto; white-space: nowrap; }
 
-/* ── Toasts (features/02 U) ──────────────────────────────────────────── */
+/* ── Toasts ──────────────────────────────────────────────────────────── */
 
 .d9-toast-region {
     position: absolute;
@@ -1132,7 +1132,7 @@ body {
     display: flex;
     flex-direction: column;
     gap: 8px;
-    /* Above the T34 load modal (z-index 300) so a B13 load-error toast stays
+    /* Above the load modal (z-index 300) so a load-error toast stays
        visible when a failed load drops back to the drop zone; still below the
        help overlay (1040). */
     z-index: 400;
@@ -1163,8 +1163,8 @@ body {
     75% { transform: translateX(4px); }
 }
 
-/* ── Transient overlay: crosshair, tooltip, at-cursor readout (T24) ─────
-   The overlay canvas (I1) covers the scrollable track content; it is
+/* ── Transient overlay: crosshair, tooltip, at-cursor readout ───────────
+   The overlay canvas covers the scrollable track content; it is
    non-interactive so pointer events reach the lanes underneath. Sits above
    the track canvases but is a faint 1px line, so it never obscures content. */
 .d9-crosshair-overlay {
@@ -1175,7 +1175,7 @@ body {
     z-index: 5;
 }
 
-/* Region/zoom selection box (H10). Absolutely placed inside the track column
+/* Region/zoom selection box. Absolutely placed inside the track column
    (position:relative) by mountSelectionOverlay from the shared ns<->x mapping;
    non-interactive so pointer events reach the lanes. Blue = Shift region,
    teal (.zoom) = Alt zoom, matching the legacy #selection-overlay colours. */
@@ -1194,7 +1194,7 @@ body {
     border-color: rgba(0, 188, 180, 0.6);
 }
 
-/* Floating viewport controls (H1-H4): zoom in / out / fit, bottom-right glass
+/* Floating viewport controls: zoom in / out / fit, bottom-right glass
    panel. Fixed so it stays in the corner while the track column scrolls; its
    buttons stopPropagation so a click is never treated as a lane click. */
 .d9-viewport-controls {
@@ -1227,9 +1227,9 @@ body {
     outline-offset: 1px;
 }
 
-/* Shared hover tooltip (V-section). One element, appended to <body>, reused
+/* Shared hover tooltip. One element, appended to <body>, reused
    by every panel. Ported from the legacy #tooltip; placement is JS-driven
-   from CACHED dimensions (03 F3 - never measured after write). */
+   from CACHED dimensions (never measured after write). */
 .d9-tooltip {
     position: fixed;
     display: none;
@@ -1250,8 +1250,8 @@ body {
 .d9-tooltip .value { color: #fff; font-weight: 600; }
 .d9-tooltip .hint { color: #6a6a86; }
 
-/* At-cursor readout stub in the inspector slot (I6 rehomed per 04 S4). Until
-   T31 renders `transient.atCursor` properly, this proves the store contract
+/* At-cursor readout stub in the inspector slot. Until
+   `transient.atCursor` is rendered properly, this proves the store contract
    is populated during hover. */
 .d9-atcursor-readout {
     margin: 0 0 10px;
@@ -1268,7 +1268,7 @@ body {
 .d9-atcursor-empty { color: var(--d9-fg-muted); font-style: italic; }
 .d9-atcursor-warn { color: #e0a94a; font-weight: 600; }
 
-/* ── Load chrome: drop zone, loading view, drag feedback (T34, features/02 B)
+/* ── Load chrome: drop zone, loading view, drag feedback
    The layer is a fixed full-cover sibling of #app (like the toast region), so
    the shell's declarative re-render never clobbers it. It is a modal (blocks
    the trace) while the drop zone / loading view is up; a bare drag overlay
@@ -1287,7 +1287,7 @@ body {
 .d9-load-layer:not(.modal) { pointer-events: none; }
 .d9-load-render { height: 100%; }
 
-/* Drop zone (chooser, B1) and loading view (B7) both fill the layer, centered. */
+/* Drop zone (chooser) and loading view both fill the layer, centered. */
 .d9-drop-zone,
 .d9-load-view {
     position: absolute;
@@ -1346,7 +1346,7 @@ body {
 .d9-load-close:hover { background: #3a3a5a; }
 .d9-load-close:focus-visible { outline: 2px solid var(--d9-accent); outline-offset: 1px; }
 
-/* Loading view (B7/B8/B9): spinner + phase label + elapsed + Back. */
+/* Loading view: spinner + phase label + elapsed + Back. */
 .d9-load-spinner {
     width: 34px;
     height: 34px;
@@ -1371,7 +1371,7 @@ body {
 .d9-load-back:hover { background: #3a3a5a; }
 .d9-load-back:focus-visible { outline: 2px solid var(--d9-accent); outline-offset: 1px; }
 
-/* Replace drag overlay (B5): shown when dragging a file over a loaded trace. */
+/* Replace drag overlay: shown when dragging a file over a loaded trace. */
 .d9-drag-overlay {
     position: absolute;
     inset: 20px;
@@ -1395,7 +1395,7 @@ body {
 }
 .d9-drag-overlay-msg small { font-size: 0.65em; color: var(--d9-fg-muted); }
 
-/* Toolbar "New File" (B15); rendered by the shell when a trace is loaded. */
+/* Toolbar "New File"; rendered by the shell when a trace is loaded. */
 .d9-new-file-btn {
     background: #2a2a4a;
     border: 1px solid #444;
@@ -1409,10 +1409,10 @@ body {
 .d9-new-file-btn:hover { background: #3a3a5a; }
 .d9-new-file-btn:focus-visible { outline: 2px solid var(--d9-accent); outline-offset: 1px; }
 
-/* ── Region analysis (T32, features/02 section S + R3-R9): the flamegraph /
+/* ── Region analysis: the flamegraph /
    blocking-calls / heap panel that opens in the inspector Stack tab for a
    Shift+drag region (or a whole-trace toolbar open). The `[data-region-host]`
-   is a binding-free node the T32 controller renders into imperatively; the
+   is a binding-free node the controller renders into imperatively; the
    embedded flamegraph widget lives in `.d9-region-fg` inside `.d9-region-fg-host`
    and persists across the inspector's re-renders. */
 
@@ -1483,7 +1483,7 @@ body {
 .d9-heap-mode.on { color: #fff; background: #4caf50; }
 .d9-heap-mode:focus-visible { outline: 2px solid var(--d9-accent); outline-offset: -2px; }
 
-/* Blocking-calls panel (R3-R9). */
+/* Blocking-calls panel. */
 .d9-block-groupby select {
     background: var(--d9-bg-track);
     border: 1px solid var(--d9-border);

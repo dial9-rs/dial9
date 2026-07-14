@@ -195,7 +195,7 @@ describe("cpuBarColor (legacy load ramp, verbatim)", () => {
 
 // ── Draw-area alignment (same mapping as the axis) ───────────────────────
 
-describe("nsToDrawX (A13 alignment invariant)", () => {
+describe("nsToDrawX (alignment invariant)", () => {
   it("is the axis track's mapping verbatim (no LABEL_W added)", () => {
     for (const ns of [0, 250, 500, 1000]) {
       expect(nsToDrawX(ns, 0, 1000, 1100)).toBe(
@@ -287,7 +287,7 @@ function inputs(
   return { intervals, capacity, window };
 }
 
-describe("renderCpuTrack (features/02 L1)", () => {
+describe("renderCpuTrack", () => {
   it("paints only a background and returns the empty readout before a trace loads", () => {
     const { ctx, rec } = recordingCtx();
     const readout = renderCpuTrack(ctx, geo(), 0, 1000, inputs([], null), false);
@@ -296,7 +296,7 @@ describe("renderCpuTrack (features/02 L1)", () => {
     expect(readout).toBe("avg 0 cores · max 0");
   });
 
-  it("batches the grid + capacity strokes: one stroke() per STYLE (F1)", () => {
+  it("batches the grid + capacity strokes: one stroke() per STYLE", () => {
     const { ctx, rec } = recordingCtx();
     // 3 grid lines + 1 capacity line = 4 primitives, but 2 styles.
     renderCpuTrack(ctx, geo(), 0, 1000, inputs([iv(0, 1000, 2)], 4), true);
@@ -348,7 +348,7 @@ describe("renderCpuTrack (features/02 L1)", () => {
     expect(barFills(diff.rec).length).toBe(4);
   });
 
-  it("returns the readout it painted (L2 mirror source)", () => {
+  it("returns the readout it painted (mirror source)", () => {
     const { ctx } = recordingCtx();
     const intervals = [iv(0, 500, 2), iv(500, 1000, 4)];
     const readout = renderCpuTrack(ctx, geo(), 0, 1000, inputs(intervals, 4), true);
@@ -360,7 +360,7 @@ describe("renderCpuTrack (features/02 L1)", () => {
 
 // ── Surface a windowed/oversized view ────────────────────────────────────
 
-describe("renderCpuTrack surfaces a windowed view (T17 obligation)", () => {
+describe("renderCpuTrack surfaces a windowed view (windowing obligation)", () => {
   const trace = [iv(0, 500, 2), iv(500, 1000, 4)];
 
   it("draws no window markers for a complete whole-trace window", () => {
@@ -501,7 +501,7 @@ function traceWith(
   return { customEvents: events, segmentMetadata } as unknown as ParsedTrace;
 }
 
-describe("deriveCpuInputs / cpuSeriesFor (features/02 L5)", () => {
+describe("deriveCpuInputs / cpuSeriesFor", () => {
   it("builds intervals from resource-usage events and reads capacity", () => {
     // Two 1000ns steps: cpuDelta 2000 over 1000 -> cores 2, then 4000 -> 4.
     const trace = traceWith(

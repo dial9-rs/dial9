@@ -179,7 +179,7 @@ describe("createPointerMachine - cancel paths", () => {
   });
 });
 
-describe("panWindowByPixels (H6 pan math, viewer.html:5286-5300)", () => {
+describe("panWindowByPixels (pan math)", () => {
   it("drags right => earlier window (negative shift), duration preserved", () => {
     const w = panWindowByPixels(1_000, 2_000, 100, 100, 0, 10_000);
     // nsPerPx = 1000/100 = 10; shift = -100*10 = -1000

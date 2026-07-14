@@ -54,7 +54,7 @@ describe("resolveTraceUrls", () => {
   });
 });
 
-describe("loadingLabel (F9 phase text)", () => {
+describe("loadingLabel (phase text)", () => {
   it("streaming: Loading trace / Loading N traces, regardless of phase", () => {
     expect(loadingLabel("stream", "parsing", 1)).toBe("Loading trace\u2026");
     expect(loadingLabel("stream", "parsing", 3)).toBe("Loading 3 traces\u2026");
@@ -87,7 +87,7 @@ describe("seedFacetState", () => {
   });
 });
 
-describe("buildApiUrl (F168/F173, legacy buildApiUrl parity)", () => {
+describe("buildApiUrl (legacy buildApiUrl parity)", () => {
   it("read-only first poll: scope + non-empty facets, no refine", () => {
     expect(buildApiUrl(state(), false, ORIGIN)).toBe(
       `${ORIGIN}/api/flamegraph?bucket=demo-traces&prefix=traces&source=cpu`,
@@ -133,7 +133,7 @@ describe("buildApiUrl (F168/F173, legacy buildApiUrl parity)", () => {
   });
 });
 
-describe("buildBrowserQuery (F180, legacy updateBrowserUrl parity)", () => {
+describe("buildBrowserQuery (legacy updateBrowserUrl parity)", () => {
   it("api=1 leads; no max_files, no ui param", () => {
     expect(buildBrowserQuery(state({ maxFiles: 640 }))).toBe(
       "api=1&bucket=demo-traces&prefix=traces&source=cpu",

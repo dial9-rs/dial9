@@ -37,7 +37,7 @@ describe("toRawRow", () => {
 });
 
 describe("toRawRows", () => {
-  it("orders by trace-start epoch ascending (legacy G3 default)", () => {
+  it("orders by trace-start epoch ascending (legacy default)", () => {
     const rows = toRawRows([
       { key: UNKNOWN_KEY, size: 1 }, // epoch 1744224600
       { key: KNOWN_KEY, size: 2 }, // epoch 1744224000
@@ -54,7 +54,7 @@ describe("toRawRows", () => {
   });
 });
 
-describe("sorting (G8 amendment)", () => {
+describe("sorting (amendment)", () => {
   const keyFor = (svc: string, host: string, epoch: number, seg: number) =>
     `traces/2026-04-09/1910/${svc}/${host}/boot-a/${epoch}-${seg}.bin.gz`;
   const objects = [

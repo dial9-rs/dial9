@@ -75,7 +75,7 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-describe("manageable tracks (section O scope)", () => {
+describe("manageable tracks", () => {
   it("collapse/reorder apply to the four foldable analysis tracks only", () => {
     expect([...MANAGEABLE_TRACK_IDS].sort()).toEqual(
       ["cpu", "events", "queue", "spans"].sort(),
@@ -278,7 +278,7 @@ describe("persistence: uiPrefs survives reload (headline DoD)", () => {
     expect(loadTrackPrefs()).toBeNull();
   });
 
-  it("hydrate is a no-op when nothing is stored (keeps S1 defaults)", () => {
+  it("hydrate is a no-op when nothing is stored (keeps defaults)", () => {
     vi.stubGlobal("localStorage", fakeLocalStorage());
     const store = createViewerStore({ scheduler: () => {} });
     hydrateTrackPrefs(store);
@@ -315,9 +315,9 @@ describe("persistence: uiPrefs survives reload (headline DoD)", () => {
   });
 });
 
-describe("collapse height + re-expand windowing obligation (T17-audit 6-7)", () => {
-  it("uses the legacy label-only height when collapsed", () => {
-    expect(COLLAPSED_TRACK_H).toBe(24);
+describe("collapse height + re-expand windowing obligation", () => {
+  it("uses the label-only height when collapsed", () => {
+    expect(COLLAPSED_TRACK_H).toBe(36);
   });
 
   it("keeps a collapsed track in the ordered list so re-expand restores it", () => {
