@@ -22,11 +22,14 @@ Stable terms:
 | `series` | A sequence of points or intervals to draw/analyze. |
 | `computed series` | A series produced from event streams and expressions. |
 | `multi-series` | One panel with more than one series, e.g. Queue Depth. |
-| `source` | Named event stream used by a spec. |
-| `point` | One output item produced by a computed series. |
+| `source` | Named event stream used by a spec. Stateful operations additionally isolate input by recording/component identity and `partition_by`. |
+| `point` | An instantaneous output item with a timestamp. |
+| `interval` | An output item with explicit half-open temporal support `[start, end)`. |
 | `view` | One recommended viewer panel. |
 | `display` | Generic panel type and rendering hints. |
 | `mark` | Shape used for one series inside a display: `line`, `step_line`, `step_area`, `bars`, `points`. |
+
+The expression namespace keeps the existing name `point` for the current output item, including when that item has interval support.
 
 Recommended bundle shape:
 
@@ -99,13 +102,13 @@ The simple `event: "Name"` source form is an exact event-name match. Structured 
 Qualified field access:
 
 ```js
-expr: "rate(usage.user_cpu_ns + usage.system_cpu_ns, usage.timestamp)"
+expr: "rate(usage.user_cpu_ns, usage.timestamp) + rate(usage.system_cpu_ns, usage.timestamp)"
 ```
 
 Single-source shorthand may be accepted by a future string parser:
 
 ```js
-expr: "rate(user_cpu_ns + system_cpu_ns, timestamp)"
+expr: "rate(user_cpu_ns, timestamp) + rate(system_cpu_ns, timestamp)"
 ```
 
 Global metadata access:
@@ -155,19 +158,23 @@ Arithmetic:
 }
 ```
 
-Rate over event order:
+Rate over event order. Rates are applied to component counters before they are added so a decrease in one component cannot be hidden by an increase in another:
 
 ```js
 {
-  op: "rate",
-  value: {
-    op: "add",
-    args: [
-      { field: "usage.user_cpu_ns" },
-      { field: "usage.system_cpu_ns" }
-    ]
-  },
-  time: { field: "usage.timestamp" }
+  op: "add",
+  args: [
+    {
+      op: "rate",
+      value: { field: "usage.user_cpu_ns" },
+      time: { field: "usage.timestamp" }
+    },
+    {
+      op: "rate",
+      value: { field: "usage.system_cpu_ns" },
+      time: { field: "usage.timestamp" }
+    }
+  ]
 }
 ```
 
@@ -229,7 +236,7 @@ Minimum expression operations:
 | arithmetic | `+`, `-`, `*`, `/` |
 | scalar `min`, `max`, `sum`, `avg` | Operations over scalar arguments. |
 | `clamp(value, min, max)` | Bounds a scalar value. |
-| `rate(value, time)` | `(current(value) - previous(value)) / (current(time) - previous(time))` |
+| `rate(value, time)` | `(current(value) - previous(value)) / (current(time) - previous(time))`, with output support `[previous(time), current(time))`. |
 | `aggregate(fn, over, value)` | Reduces values from a resolved series; initial reducers are `max` and `duration_weighted_mean`. |
 
 Additional expression operations:
@@ -243,11 +250,80 @@ Additional expression operations:
 | `count_active(start, end, key)` | Active set/time-series derivation. |
 | `pair_intervals(startEvent, endEvent, key)` | Build interval bars from event pairs. |
 
+## Temporal Semantics
+
+Series values are either points or intervals. This distinction is part of the derived data, not something a renderer infers from the selected mark.
+
+- A raw gauge observation or scalar expression produces a point at the source timestamp.
+- `rate(value, time)` produces an interval with support `[previous(time), current(time))`.
+- `transform: { op: "hold_until_next" }` converts each input point into `[current(time), next(time))` while preserving its value.
+- The final `hold_until_next` point may extend to the stable trace boundary `trace.recordMaxTs`. It must never extend to the current viewport boundary. If the trace boundary does not follow the point, no interval is produced.
+- Interval boundaries are half-open. An interval ending at `viewStart` or starting at `viewEnd` does not overlap the visible range.
+
+The expression evaluator carries temporal support together with each value. Its conceptual internal result is:
+
+```js
+{
+  value: 0.5,
+  support: { start: 1000, end: 2000 }
+}
+```
+
+Support propagation rules:
+
+- Arithmetic between an interval-supported value and a timeless scalar such as a constant or metadata preserves the interval support.
+- Arithmetic between interval-supported values requires identical support. If their intervals differ, the expression result is missing for that output item.
+- Arithmetic between point values from the same source event remains a point.
+- A nested `rate` retains its support through arithmetic; support is not a property only of the top-level expression.
+- A mark does not alter support. Transforms run before summaries, downsampling, hit testing, and rendering.
+
+Mark compatibility is explicit:
+
+| Mark | Input shape | Rendering |
+| --- | --- | --- |
+| `line` | points | Linear interpolation between adjacent valid points. |
+| `points` | points | Instantaneous markers. |
+| `step_line` | intervals | Horizontal segment over each interval plus a vertical transition only between contiguous intervals. |
+| `step_area` | intervals | Area over each interval; gaps remain empty. |
+| `bars` | intervals | One bar per interval. |
+
+The viewer clips all series geometry, guides, and thresholds to the chart rectangle. A line may use the nearest valid point on either side of the viewport to interpolate the visible crossing, but completely offscreen values must not expand the visible Y domain. Interval summaries and domains use overlap with the requested range, not only whether an endpoint is visible.
+
+A visible range is also half-open: `[viewStart, viewEnd)`. Point aggregates include timestamps in that range. Interval aggregates include items with positive overlap; `duration_weighted_mean` weights each value by the overlap duration. Hit testing at a shared boundary selects the interval beginning at that boundary, not the one ending there.
+
+Downsampling is a presentation optimization. It must preserve interval boundaries, gaps, partition/stream identity, and tooltip provenance. Summaries are computed from the original resolved series rather than downsampled geometry.
+
+## Counter Windows And Gaps
+
+Stateful operations keep independent previous-sample state for every resolved stream identity and partition. For a monotonic counter:
+
+- A decrease makes `[previous(time), current(time))` invalid. The initial policy is to omit that interval and use the current valid sample as the baseline for the next interval.
+- The viewer does not infer a reset amount or extrapolate through the gap. Dial9 does not currently carry enough counter start/reset information to do that reliably.
+- A missing, non-numeric, or non-finite sample produces no output and does not replace the last valid baseline. The next valid cumulative sample may therefore produce a rate over a longer window.
+- A non-positive time delta produces no output and does not replace the baseline.
+- Composite counters are rated independently before arithmetic. In particular, CPU is `rate(user_cpu_ns) + rate(system_cpu_ns)`, not `rate(user_cpu_ns + system_cpu_ns)`.
+
+`window.on_decrease: "skip"` selects this behavior. A future `"warn"` policy may additionally emit a diagnostic, but must not turn the invalid delta into a value. Showing negative rates is not part of the initial counter contract.
+
 ## Missing Data And Diagnostics
 
 If a required source, field, metadata key, or expression input is missing, the viewer should skip the affected series or view and report a diagnostic. It should not invent plausible defaults.
 
 If an expression fails for one point because an input is missing, non-numeric, division by zero, or non-finite, skip that point unless the spec explicitly defines a semantic fallback.
+
+An invalid snapshot still delimits time for `hold_until_next`: it ends the preceding valid interval and leaves a gap until the next valid snapshot. Renderers and downsampling must not bridge this gap or an invalid counter interval. Diagnostics should identify the view, series, source, and reason without logging once per event in high-volume traces.
+
+## Source And Metadata Scope
+
+An event name identifies an event type, not a unique stateful stream. The runtime stream identity also includes the trace recording/component identity and the series `partition_by` key. Previous-sample operations such as `rate`, `delta`, and `lag` must never cross one of those boundaries.
+
+Metadata referenced by an expression must have a scope compatible with the source stream. Process metadata from one recording cannot be applied to events from another recording merely because files were loaded into the same viewer session.
+
+The initial frontend resolves only existing `customEvents`; exposing every built-in event through a duplicated `allEvents` collection is deferred because of its memory cost. Until the loader preserves component identity on custom events, the conservative multi-trace behavior is:
+
+- If exactly one component is known, stateful operations may use it.
+- If multiple components are known and a unique stream cannot be proven, skip the affected series and emit a diagnostic.
+- Never concatenate counters from different components into one apparent stream.
 
 ## Computed Fields
 
@@ -293,10 +369,10 @@ Example spec:
 }
 ```
 
-Computed fields can feed computed series:
+Computed fields can feed computed series when doing so preserves the required metric semantics. A total such as `cpu_time_ns` is useful in event details, but applying `rate` to the precomputed sum could hide a decrease in one component counter. CPU therefore rates each raw counter first:
 
 ```js
-expr: "rate(usage.cpu_time_ns, usage.timestamp)"
+expr: "rate(usage.user_cpu_ns, usage.timestamp) + rate(usage.system_cpu_ns, usage.timestamp)"
 ```
 
 Collision rule: a computed field should not silently overwrite a raw field.
@@ -330,7 +406,7 @@ Bundle shape:
       series: [
         {
           id: "cores",
-          expr: "rate(usage.cpu_time_ns, usage.timestamp)",
+          expr: "rate(usage.user_cpu_ns, usage.timestamp) + rate(usage.system_cpu_ns, usage.timestamp)",
           unit: "cores",
           mark: "step_area"
         }
@@ -355,7 +431,7 @@ Potential attributes:
 | `expr` | series/tooltip/guide/summary/threshold/computed field | Expression to evaluate. |
 | `unit` | series/computed field/tooltip/guide/summary | Output unit. |
 | `metric.kind` | series output/computed field/field metadata | `gauge`, `counter`, `up_down_counter`. |
-| `transform` | view | Derives display items before rendering, e.g. `pair_intervals`. |
+| `transform` | series/view | Derives display items before summaries and rendering, e.g. `hold_until_next` or `pair_intervals`. |
 | `partition_by` | series | Split output into one series per unique key tuple. |
 | `summary` | view | Labeled expressions shown as panel-level summary values. |
 | `mark` | series | `line`, `step_line`, `step_area`, `bars`, `points`. |
@@ -368,13 +444,15 @@ Potential attributes:
 | `display.guides` | display | Neutral reference lines/bands; `show_value: false` displays only the label. |
 | `display.color_by` | display | Field/expression used for color encoding. |
 | `downsample` | series | `last_per_pixel`, `max_per_pixel`, `avg_per_pixel`, `min_max_per_pixel`. |
-| `window.missing_previous` | series | `skip`, `null`, `zero` for previous-sample expressions such as `rate`. |
-| `window.on_decrease` | series | `skip`, `warn`, `show` when previous-sample expressions detect an unexpected decrease. |
+| `window.missing_previous` | series | Initially `skip`: previous-sample expressions produce no item until a valid baseline exists. |
+| `window.on_decrease` | series | Initially `skip`: omit the invalid interval and rebase at the current valid sample. A future `warn` may also emit a diagnostic. |
 | `sort` | source/series | Event ordering; default is timestamp. |
 
 `summary` is view-level because it defines scalar outputs that are independent of display geometry. Guides remain under `display` because they participate in its coordinate system and bounds. Both use the same resolved-series expression scope.
 
 Threshold expressions are evaluated once in view scope and inherit the series unit. `time_series` renders each resolved threshold as a horizontal line, includes it in the Y domain, and applies its level to step-series coloring. Resolved guides and thresholds appear as `label (value)` in the panel legend; a guide may omit either the unit or the label.
+
+Threshold levels are discrete classifications. A continuous color scale driven by the series value is a separate future encoding and is not part of the initial frontend implementation.
 
 ```js
 thresholds: [{
@@ -424,6 +502,7 @@ Display kinds:
       display: {
         kind: "time_series",
         y_min: 0,
+        y_max: 1,
         guides: [
           {
             kind: "horizontal_line",
@@ -454,7 +533,7 @@ Display kinds:
         {
           id: "cores",
           title: "CPU",
-          expr: "rate(usage.cpu_time_ns, usage.timestamp)",
+          expr: "rate(usage.user_cpu_ns, usage.timestamp) + rate(usage.system_cpu_ns, usage.timestamp)",
           unit: "cores",
           mark: "step_area",
           metric: { kind: "gauge" },
@@ -465,7 +544,7 @@ Display kinds:
           downsample: "max_per_pixel",
           tooltip: [
             { label: "Window", expr: "point.wall_delta_ns", unit: "ns" },
-            { label: "CPU time", expr: "point.value_delta_ns", unit: "ns" },
+            { label: "CPU time", expr: "point.value * point.wall_delta_ns", unit: "ns" },
             { label: "Cores", expr: "point.value" },
             {
               label: "Total CPU",
@@ -491,7 +570,7 @@ usage[0].computed = { cpu_time_ns: 150 };
 usage[1].computed = { cpu_time_ns: 650 };
 ```
 
-Output point:
+Output interval:
 
 ```js
 {
@@ -499,7 +578,6 @@ Output point:
   end: 2000,
   t: 2000,
   value: 0.5,
-  value_delta_ns: 500,
   wall_delta_ns: 1000,
   current: { usage: usage[1] },
   previous: { usage: usage[0] }
@@ -527,6 +605,7 @@ The examples below show individual view specs. They can be wrapped in the bundle
       id: "utilization",
       title: "Accept Queue Utilization",
       expr: "accept.pending_connections / accept.backlog_limit * 100",
+      transform: { op: "hold_until_next" },
       unit: "%",
       mark: "step_line",
       metric: { kind: "gauge" },
@@ -569,6 +648,7 @@ This is not first-iteration scope, but the spec shape should not block it.
       id: "global",
       title: "Global",
       expr: "queue.global_queue",
+      transform: { op: "hold_until_next" },
       unit: "tasks",
       mark: "step_area",
       metric: { kind: "gauge" },
@@ -578,6 +658,7 @@ This is not first-iteration scope, but the spec shape should not block it.
       id: "local",
       title: "Local",
       expr: "worker.local_queue",
+      transform: { op: "hold_until_next" },
       unit: "tasks",
       mark: "step_line",
       metric: { kind: "gauge" },
@@ -645,6 +726,12 @@ Implement first:
 - Support `display.guides`, `tooltip`, `thresholds`, `downsample` for `time_series`.
 - Migrate CPU Usage to the generic spec path.
 - Use Socket Accept Queue and Context Switch Rate as additional validation cases.
+- Preserve explicit point/interval support through nested expressions.
+- Materialize snapshot gauges with `hold_until_next` before aggregation and rendering.
+- Use half-open range overlap consistently for summaries, domains, hit testing, and drawing.
+- Clip all chart geometry and preserve gaps through downsampling.
+- Keep stateful counter windows isolated by component and partition identity.
+- Remove the event-specific CPU panel after the generic path has equivalent coverage.
 
 Deliberately deferred:
 
@@ -655,18 +742,20 @@ Deliberately deferred:
 - Multi-source execution and its join shape are not yet defined.
 - Field-level metric semantics and monotonic counter validation; these should come from Rust/schema metadata rather than duplicated JavaScript declarations.
 - Full validation and user-visible diagnostics for trace-provided specs.
+- Continuous value-driven color scales; threshold levels remain the initial discrete coloring mechanism.
 - `interval_bars`, `markers`, `heatmap`, and `flamegraph` stay future work.
 
 ### Rust API And Transmission
 
 Second phase:
 
-- Decide where global view specs live in the trace format.
-- Avoid overloading `FieldAnnotation` for schema-wide or trace-wide specs.
-- Keep field annotations for field-local metadata such as `unit` and metric semantics.
-- Add a schema-level or trace-level metadata mechanism for computed fields and view specs.
+- Add field-local metric semantics such as `metric.kind` alongside `unit` in `FieldAnnotation`.
+- Transmit a versioned bundle of `computed_fields` and `views` in trace-segment metadata initially; do not place a schema-wide bundle in `FieldAnnotation`.
+- Preserve recording/component identity and metadata scope when segments or files are combined.
+- Validate the JSON AST without executing JavaScript from a trace.
+- Bound bundle size, expression depth, number of series, and partition cardinality before accepting trace-provided specs.
 - Add Rust builders/macros only after the JSON shape is validated in JS.
-- Generate specs as JSON or equivalent structured data from Rust.
+- Add dedicated schema-level metadata later only if associating bundles by event name proves insufficient.
 
 Potential Rust ergonomics:
 
@@ -699,7 +788,7 @@ TraceSpecBundle::builder()
             .series(
                 SeriesSpec::builder()
                     .id("cores")
-                    .expr("rate(usage.cpu_time_ns, usage.timestamp)")
+                    .expr("rate(usage.user_cpu_ns, usage.timestamp) + rate(usage.system_cpu_ns, usage.timestamp)")
                     .unit("cores")
                     .mark("step_area")
                     .metric_kind(MetricKind::Gauge)
@@ -719,7 +808,7 @@ TraceSpecBundle::builder()
 - Generic event marker panels.
 - Heatmap encodings.
 - Flamegraph specs.
-- Cross-trace compatibility/versioning for specs.
+- Compatibility policy across bundle versions.
 - UI for hiding/reordering schema-recommended panels.
 - Validation and diagnostics for invalid specs.
 
@@ -803,9 +892,9 @@ Useful ideas:
 
 Reference areas:
 
-- Trace Processor
-- Trace metrics
-- Debug tracks
+- [Trace Processor](https://perfetto.dev/docs/analysis/trace-processor)
+- [Trace metrics](https://perfetto.dev/docs/analysis/metrics)
+- [Data Explorer](https://perfetto.dev/docs/visualization/data-explorer), including conversion of counter snapshots to leading intervals before interval aggregation
 
 ### OpenTelemetry
 
@@ -815,6 +904,16 @@ Useful ideas:
 - Instrument units and semantic conventions.
 - Distinction between metric meaning and export/rendering.
 - Temporality vocabulary for counters: cumulative vs delta.
+
+Reference: [OpenTelemetry metrics data model](https://opentelemetry.io/docs/specs/otel/metrics/data-model/).
+
+### Prometheus
+
+Useful idea:
+
+- Apply `rate` before aggregation so a reset in one counter cannot be hidden by an increase in another. Dial9 adopts this composition rule, but not Prometheus reset correction or extrapolation without equivalent counter-start information.
+
+Reference: [Prometheus `rate`](https://prometheus.io/docs/prometheus/latest/querying/functions/#rate).
 
 ### Grafana
 
