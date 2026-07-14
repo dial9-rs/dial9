@@ -189,6 +189,35 @@ test("onChange fires with { zoom, search } when the highlight box changes", () =
   }
 });
 
+test("highlight typed before a deep-link zoom lands keeps the zoom in the URL", () => {
+  const dom = makeDom();
+  sides = [];
+  try {
+    const s = scopes();
+    let last = null;
+    // Deep-link seeds a zoom target that can't resolve until data arrives.
+    const view = createDiffView(dom.container, {
+      scopeA: s.a, scopeB: s.b,
+      initialState: { zoom: ["(all)", "runtime"] },
+      onChange: (st) => { last = st; },
+    });
+    // User types a highlight BEFORE any snapshot arrives (pendingZoom still in
+    // flight, zoomPath still root-only). persistState must carry the pending
+    // target, not wipe diff_zoom — otherwise the URL loses the zoom the view
+    // will still jump to once data lands.
+    const searchInput = dom.container.children[0]._q[".fgd-search"];
+    searchInput.value = "poll";
+    searchInput.dispatchEvent({ type: "input" });
+    assert.ok(last, "onChange fired on highlight input");
+    assert.strictEqual(last.search, "poll", "highlight persisted");
+    assert.deepStrictEqual(last.zoom, ["(all)", "runtime"],
+      "pending zoom target preserved in the URL, not wiped");
+    view.destroy();
+  } finally {
+    dom.restore();
+  }
+});
+
 test("onChange fires with a root-inclusive zoom on Escape reset", () => {
   const dom = makeDom();
   sides = [];

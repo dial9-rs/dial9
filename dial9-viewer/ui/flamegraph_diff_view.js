@@ -434,8 +434,16 @@
     // Persist the current user-facing view state (zoom path + highlight query)
     // via the host callback so a shared URL reproduces it. `zoom` omits the
     // root-only path (nothing zoomed) so the URL stays clean at the top level.
+    // While a URL-restore target is still in flight (pendingZoom set, not yet
+    // landed because data hasn't arrived), persist THAT target rather than the
+    // current root-only zoomPath — otherwise a highlight keystroke before the
+    // zoom lands would wipe diff_zoom from the URL even though the view will
+    // still jump to it. commitZoom clears pendingZoom first, so an explicit
+    // user navigation always persists where they actually are.
     function persistState() {
-      const zoom = zoomPath.length > 1 ? zoomPath.slice() : [];
+      const zoom = pendingZoom
+        ? pendingZoom.slice()
+        : (zoomPath.length > 1 ? zoomPath.slice() : []);
       onChange({ zoom: zoom, search: searchInput.value.trim() });
     }
 
