@@ -13,7 +13,7 @@
 //! # Ok::<(), std::io::Error>(())
 //! ```
 //!
-//! This is the assembler layered above the low-level [`CoreSession::start`](crate::session::CoreSession::start),
+//! This is the assembler layered above the low-level `CoreSession::start`,
 //! which requires a pre-built [`SharedState`](crate::shared_state::SharedState) with sources
 //! already registered. The Tokio integration builds on the same builder internally.
 

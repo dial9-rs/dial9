@@ -48,7 +48,7 @@ pub type SessionStartHook = Box<dyn FnOnce(&Dial9Handle) + Send>;
 
 impl CoreSession {
     /// Create a session from an existing handle and flush thread.
-    pub fn new(handle: Dial9Handle, flush_thread: Option<JoinHandle<()>>) -> Self {
+    pub(crate) fn new(handle: Dial9Handle, flush_thread: Option<JoinHandle<()>>) -> Self {
         Self {
             handle,
             flush_thread,
@@ -59,7 +59,7 @@ impl CoreSession {
     }
 
     /// Install the one-shot hooks to run on the first `enable()`.
-    pub fn set_session_start_hooks(&self, hooks: Vec<SessionStartHook>) {
+    pub(crate) fn set_session_start_hooks(&self, hooks: Vec<SessionStartHook>) {
         *self.session_start_hooks.lock().unwrap() = hooks;
     }
 
@@ -74,7 +74,7 @@ impl CoreSession {
     /// thread with a runtime's profiler.
     ///
     /// Pass `None` for `flush_metrics_sink` to discard flush metrics.
-    pub fn start<M, Init, Teardown>(
+    pub(crate) fn start<M, Init, Teardown>(
         shared: Arc<SharedState>,
         writer: SegmentWriter<M>,
         flush_metrics_sink: Option<metrique::writer::BoxEntrySink>,
@@ -112,7 +112,7 @@ impl CoreSession {
     /// Attach the background worker to this session, so its lifecycle is tied
     /// to the session's (drained on `graceful_shutdown`, stopped on drop).
     #[cfg(feature = "pipeline")]
-    pub fn attach_worker(&mut self, worker: WorkerHandle) {
+    pub(crate) fn attach_worker(&mut self, worker: WorkerHandle) {
         self.worker = Some(worker);
     }
 
@@ -147,7 +147,7 @@ impl CoreSession {
     /// Call this before dropping any runtime state that owns worker threads, so
     /// that their thread-local buffers have already been flushed to the central
     /// collector.
-    pub fn stop_flush_thread(&mut self) {
+    pub(crate) fn stop_flush_thread(&mut self) {
         // Drain the calling thread's local buffer — it won't get a thread-stop
         // hook, so any unflushed events would be lost otherwise.
         if let Some(shared) = self.handle.shared() {
