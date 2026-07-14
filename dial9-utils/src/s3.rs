@@ -122,6 +122,17 @@ pub struct S3Config {
     /// Custom S3 key function. When set, overrides the default key layout.
     #[builder(with = |key_fn: impl S3KeyFn + 'static| Arc::new(key_fn) as Arc<dyn S3KeyFn>)]
     key_fn: Option<Arc<dyn S3KeyFn>>,
+    /// Per-attempt wall-clock timeout for individual S3 operations
+    /// (`PutObject`, `HeadBucket`). Bounds how long a single HTTP attempt may
+    /// stall before the SDK aborts it; the SDK retry policy and the pipeline
+    /// circuit breaker then decide whether to re-drive. Without it a hung
+    /// request could block the upload worker indefinitely. Defaults to 30s.
+    ///
+    /// Only applied to the client dial9 builds itself (the `.s3(..)` path). A
+    /// client supplied through `.s3_with_client(..)` keeps its own timeout
+    /// configuration untouched.
+    #[builder(default = Duration::from_secs(30))]
+    operation_attempt_timeout: Duration,
 }
 
 impl std::fmt::Debug for S3Config {
@@ -131,6 +142,7 @@ impl std::fmt::Debug for S3Config {
             .field("service_name", &self.service_name)
             .field("prefix", &self.prefix)
             .field("region", &self.region)
+            .field("operation_attempt_timeout", &self.operation_attempt_timeout)
             .finish_non_exhaustive()
     }
 }
@@ -164,6 +176,11 @@ impl S3Config {
     /// Optional region override for the S3 client.
     pub(crate) fn region(&self) -> Option<&str> {
         self.region.as_deref()
+    }
+
+    /// Per-attempt timeout applied to the client dial9 builds itself.
+    pub(crate) fn operation_attempt_timeout(&self) -> Duration {
+        self.operation_attempt_timeout
     }
 
     /// Build the S3 object key for a sealed segment.
@@ -550,7 +567,15 @@ impl S3PipelineUploader {
         let bootstrap_client = match client {
             Some(c) => c,
             None => {
+                // Bound each attempt so a hung PutObject/HeadBucket can't wedge
+                // the upload worker; retries are left to the SDK policy and the
+                // pipeline circuit breaker. Only the client we build ourselves
+                // gets this — a caller-supplied client keeps its own config.
+                let timeout_config = aws_sdk_s3::config::timeout::TimeoutConfig::builder()
+                    .operation_attempt_timeout(s3_config.operation_attempt_timeout())
+                    .build();
                 let sdk_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+                    .timeout_config(timeout_config)
                     .load()
                     .await;
                 aws_sdk_s3::Client::new(&sdk_config)
@@ -836,6 +861,22 @@ mod tests {
             .build();
 
         aws_sdk_s3::Client::from_conf(s3_config)
+    }
+
+    #[test]
+    fn operation_attempt_timeout_defaults_to_30s_and_is_overridable() {
+        let default_cfg = S3Config::builder().bucket("b").service_name("svc").build();
+        check!(
+            default_cfg.operation_attempt_timeout() == std::time::Duration::from_secs(30),
+            "self-built client must get a bounded per-attempt timeout by default"
+        );
+
+        let custom = S3Config::builder()
+            .bucket("b")
+            .service_name("svc")
+            .operation_attempt_timeout(std::time::Duration::from_secs(5))
+            .build();
+        check!(custom.operation_attempt_timeout() == std::time::Duration::from_secs(5));
     }
 
     // --- Key format tests ---
