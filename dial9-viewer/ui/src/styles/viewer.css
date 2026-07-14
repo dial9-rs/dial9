@@ -386,13 +386,26 @@ body {
     flex-shrink: 0;
     display: flex;
     flex-direction: column;
-    justify-content: center;
+    justify-content: flex-start;
     gap: 2px;
-    padding: 0 8px;
+    padding: 6px 8px 0 8px;
     background: #131834;
     border-right: 1px solid var(--d9-border);
 }
 .d9-track-name { font-size: 0.8em; color: var(--d9-fg); }
+/* On a manageable track the visible name lives in the strip's 3-column header;
+   keep the inner name for aria-labelledby, but hide it visually (sr-only). */
+.d9-track-manage .d9-track-label .d9-track-name {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+}
 .d9-track-canvas-wrap {
     flex: 1;
     min-width: 0;
@@ -410,18 +423,31 @@ body {
    the spans copy buttons) stays interactive. ── */
 .d9-track-manage { position: relative; }
 /* Reserve room for the strip so it never covers the label text / copy buttons. */
-.d9-track-manage .d9-track-label { padding-left: 34px; }
+/* The manageable-track header: a top-fixed 3-column row spanning the label
+   gutter - [collapse caret] [label] [drag grip]. Anchored to the top with
+   padding, so the three columns never move when the track collapses or
+   resizes. Overlays the (aria-only) inner label; the caret/grip are the only
+   interactive parts. */
 .d9-track-manage-strip {
     position: absolute;
-    left: 2px;
+    left: 0;
     top: 0;
-    bottom: 0;
+    width: var(--d9-label-w, 100px);
     display: flex;
     flex-direction: row;
-    align-items: center;
-    gap: 1px;
+    align-items: flex-start;
+    gap: 4px;
+    padding: 6px 6px 0 6px;
     pointer-events: none;
     z-index: 2;
+}
+.d9-track-strip-name {
+    flex: 1;
+    min-width: 0;
+    font-size: 0.8em;
+    line-height: 1.15;
+    color: var(--d9-fg);
+    overflow: hidden;
 }
 .d9-track-caret,
 .d9-track-grip {

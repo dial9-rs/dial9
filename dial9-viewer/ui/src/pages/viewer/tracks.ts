@@ -237,6 +237,7 @@ function manageWrapper(
           title=${collapsed ? "Expand track" : "Collapse track"}
           @click=${() => actions.toggleCollapse(t.id)}
         ></button>
+        <span class="d9-track-strip-name" aria-hidden="true">${t.label}</span>
         <span
           class="d9-track-grip"
           draggable="true"
