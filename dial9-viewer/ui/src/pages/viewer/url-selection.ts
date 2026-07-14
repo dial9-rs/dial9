@@ -28,10 +28,15 @@ export function resolveUrlSelection(
     patch.focusedSpanId = url.selectedSpanId;
   }
 
-  // Poll: the first poll on any worker whose start matches the anchor.
-  if (url.pollStartNs !== undefined) {
+  // Poll: matched by start AND task - start alone is ambiguous across workers
+  // (two workers can poll at the same instant); a task's poll at a given start
+  // is unique.
+  if (url.poll !== undefined) {
+    const { startNs, taskId } = url.poll;
     for (const w of lane.workerIds) {
-      const poll = lane.workerSpans[w]?.polls.find((p) => p.start === url.pollStartNs);
+      const poll = lane.workerSpans[w]?.polls.find(
+        (p) => p.start === startNs && p.taskId === taskId,
+      );
       if (poll !== undefined) {
         patch.pollDetail = poll;
         break;

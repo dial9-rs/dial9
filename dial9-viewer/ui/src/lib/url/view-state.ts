@@ -74,8 +74,12 @@ export interface ViewState {
   collapsed?: readonly string[];
   /** Focused span id (re-resolved to the span + highlight chain on load). */
   selectedSpanId?: string;
-  /** Poll-detail anchor: the clicked poll's start ns (re-resolved on load). */
-  pollStartNs?: number;
+  /**
+   * Poll-detail anchor: `"<startNs>:<taskId>"`. Start ns alone is ambiguous -
+   * two workers can start a poll at the same instant - so the task qualifies
+   * it (a task's poll at a given start is unique). Re-resolved on load.
+   */
+  pollAnchor?: string;
   /** Pinned-event anchor: the cluster timestamp ns (re-resolved on load). */
   pinnedEventTs?: number;
   /** Retained region (`"startNs-endNs"`) -> selection.sidebarRange. */

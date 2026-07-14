@@ -45,7 +45,9 @@ export function projectViewerState(state: ReadonlyState<StoreState>): ViewState 
   const sel = state.selection;
   if (sel.selectedTaskId !== null) vs.selectedTaskId = sel.selectedTaskId;
   if (sel.spanFocus !== null) vs.selectedSpanId = sel.spanFocus.spanId;
-  if (sel.pollDetail !== null) vs.pollStartNs = sel.pollDetail.start;
+  if (sel.pollDetail !== null) {
+    vs.pollAnchor = `${sel.pollDetail.start}:${sel.pollDetail.taskId}`;
+  }
   if (sel.pinnedEvent !== null) vs.pinnedEventTs = sel.pinnedEvent.timestamp;
   if (sel.sidebarRange !== null) {
     vs.sidebarRange = `${sel.sidebarRange.startNs}-${sel.sidebarRange.endNs}`;
@@ -76,7 +78,7 @@ export function mirrorViewerToQuery(
   set(params, P_TRACK_ORDER, vs.trackOrder && vs.trackOrder.length > 0 ? vs.trackOrder.join(",") : null);
   set(params, P_COLLAPSED, vs.collapsed && vs.collapsed.length > 0 ? vs.collapsed.join(",") : null);
   set(params, P_SPAN, vs.selectedSpanId ?? null);
-  set(params, P_POLL, vs.pollStartNs != null ? String(Math.round(vs.pollStartNs)) : null);
+  set(params, P_POLL, vs.pollAnchor ?? null);
   set(params, P_EVENT, vs.pinnedEventTs != null ? String(Math.round(vs.pinnedEventTs)) : null);
   set(params, P_REGION, vs.sidebarRange ?? null);
   set(params, P_SPAWNED, vs.spawnedRange ?? null);
@@ -98,7 +100,7 @@ export interface ViewerUrlState {
   collapsed?: string[];
   /** Canvas-selection anchors, re-resolved against the loaded trace on load. */
   selectedSpanId?: string;
-  pollStartNs?: number;
+  poll?: { startNs: number; taskId: number };
   pinnedEventTs?: number;
   sidebarRange?: { startNs: number; endNs: number };
   spawnedRange?: { startNs: number; endNs: number };
@@ -128,8 +130,13 @@ export function readViewerUrlState(search: string): ViewerUrlState {
   }
   const span = p.get(P_SPAN);
   if (span != null && span.length > 0) out.selectedSpanId = span;
-  const poll = num(p.get(P_POLL));
-  if (poll != null) out.pollStartNs = poll;
+  const poll = p.get(P_POLL);
+  if (poll != null) {
+    const colon = poll.indexOf(":");
+    const startNs = num(colon > 0 ? poll.slice(0, colon) : poll);
+    const taskId = colon > 0 ? num(poll.slice(colon + 1)) : null;
+    if (startNs != null && taskId != null) out.poll = { startNs, taskId };
+  }
   const event = num(p.get(P_EVENT));
   if (event != null) out.pinnedEventTs = event;
   const region = rangePair(p.get(P_REGION));
