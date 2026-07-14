@@ -46,8 +46,7 @@ pub use format::{
 };
 pub use recorder::{
     Dial9Handle, Dial9TokioHandle, RecorderBuilderTokioExt, TokioAttachConfig, TokioHooks,
-    TokioSession, TokioSessionBuilder, TraceRuntimeCoreBuilder, build_traced, current_worker_id,
-    spawn,
+    TokioSession, TokioSessionBuilder, build_traced, current_worker_id, spawn,
 };
 pub use task_dump_config::TaskDumpConfig;
 pub use task_metadata::{TaskId, UNKNOWN_TASK_ID};

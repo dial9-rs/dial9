@@ -2,13 +2,14 @@ use super::attach_runtime;
 use super::builder::TokioSession;
 use super::handle::Dial9TokioHandle;
 
-/// Builder for attaching a runtime to an existing [`TokioSession`].
+/// A pending runtime attachment, returned by [`TokioSession::trace_runtime`].
 ///
-/// Created by [`TokioSession::trace_runtime`]. Call [`.build()`](Self::build)
-/// with a [`tokio::runtime::Builder`] to install hooks and build the runtime.
+/// Chain per-runtime settings on it, then finish with
+/// [`build`](Self::build), passing a [`tokio::runtime::Builder`], to install the
+/// hooks and create the runtime.
 #[must_use]
 #[derive(Debug)]
-pub struct TraceRuntimeCoreBuilder<'a> {
+pub struct RuntimeAttach<'a> {
     session: &'a TokioSession,
     name: String,
     task_tracking: bool,
@@ -16,7 +17,7 @@ pub struct TraceRuntimeCoreBuilder<'a> {
     tokio_hooks: super::TokioHooks,
 }
 
-impl<'a> TraceRuntimeCoreBuilder<'a> {
+impl<'a> RuntimeAttach<'a> {
     pub(crate) fn new(session: &'a TokioSession, name: String) -> Self {
         Self {
             session,

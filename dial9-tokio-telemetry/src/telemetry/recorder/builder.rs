@@ -6,7 +6,7 @@ use dial9_core::handle::Dial9Handle;
 use dial9_core::session::CoreSession;
 
 use super::SharedState;
-use super::guard::TraceRuntimeCoreBuilder;
+use super::guard::RuntimeAttach;
 use super::handle::Dial9TokioHandle;
 use super::runtime_context::RuntimeContextRegistry;
 
@@ -251,8 +251,8 @@ impl TokioSession {
     ///     .build(tokio::runtime::Builder::new_multi_thread())?;
     /// # Ok::<(), std::io::Error>(())
     /// ```
-    pub fn trace_runtime(&self, name: impl Into<String>) -> TraceRuntimeCoreBuilder<'_> {
-        TraceRuntimeCoreBuilder::new(self, name.into())
+    pub fn trace_runtime(&self, name: impl Into<String>) -> RuntimeAttach<'_> {
+        RuntimeAttach::new(self, name.into())
     }
 
     /// Run `fut` to completion on the primary runtime.
@@ -300,7 +300,7 @@ impl TokioSession {
         }
     }
 
-    // ── Internal accessors for TraceRuntimeCoreBuilder ──────────────────────
+    // ── Internal accessors for RuntimeAttach ──────────────────────
 
     pub(crate) fn shared(&self) -> Option<&Arc<SharedState>> {
         self.session.as_ref().and_then(|s| s.shared())

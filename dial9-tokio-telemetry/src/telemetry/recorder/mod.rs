@@ -11,7 +11,6 @@ pub(crate) use runtime_context::poll_start_ts_monotonic;
 
 pub use builder::TokioSession;
 pub use dial9_core::handle::Dial9Handle;
-pub use guard::TraceRuntimeCoreBuilder;
 pub(crate) use handle::traced_handle;
 pub use handle::{Dial9TokioHandle, spawn};
 
