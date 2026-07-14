@@ -2,7 +2,7 @@
 
 Status: working design draft.
 
-Goal: let traces describe computed values and recommended viewer panels so adding common visualizations does not require event-specific frontend code. Simple validation cases include process CPU, memory, and socket queue utilization; the design should also leave room for current hardcoded viewer concepts such as queue depth, event markers, span interval bars, worker lanes, scheduling overlays, heatmaps, and eventually stack-based views like flamegraphs.
+Goal: let traces describe computed values and recommended viewer panels so adding common visualizations does not require event-specific frontend code. Simple validation cases include process CPU, socket queue utilization, and context-switch rates; the design should also leave room for current hardcoded viewer concepts such as queue depth, event markers, span interval bars, worker lanes, scheduling overlays, heatmaps, and eventually stack-based views like flamegraphs.
 
 The viewer still owns rendering. Rust/schema metadata should describe data semantics, computed values, and recommended views, not Canvas implementation details.
 
@@ -78,9 +78,9 @@ Initial useful units:
 | `s` | Seconds, formatted as human duration. |
 | `bytes` | Bytes, formatted as human byte size. |
 | `cores` | Logical CPU cores. |
-| `%` | Percent; expression should produce `0..100`. |
+| `%` | Percent; values may exceed `100` unless the expression explicitly clamps them. |
 
-The current tokens also describe the input scale: `us` means the expression produces microseconds. Add a separate multiplier only if the wire representation must use a different scale from its semantic unit; computed expressions should normally produce their declared unit directly.
+These tokens also describe the input scale: `us` means the expression produces microseconds. Add a separate multiplier only if the wire representation must use a different scale from its semantic unit; computed expressions should normally produce their declared unit directly.
 
 ## Expression Scopes
 
@@ -102,7 +102,7 @@ Qualified field access:
 expr: "rate(usage.user_cpu_ns + usage.system_cpu_ns, usage.timestamp)"
 ```
 
-Single-source shorthand may be accepted:
+Single-source shorthand may be accepted by a future string parser:
 
 ```js
 expr: "rate(user_cpu_ns + system_cpu_ns, timestamp)"
@@ -140,6 +140,8 @@ View expressions may also reference a resolved series collection. The initial co
 ## JSON AST
 
 Use JSON AST internally first. String expressions can compile to this AST later via `jsep`, Rhai, or another parser.
+
+Long examples below sometimes use string shorthand for readability. Those strings are design notation until a string expression syntax is selected.
 
 Arithmetic:
 
@@ -362,7 +364,7 @@ Potential attributes:
 | `tooltip` | series/view | Tooltip rows. |
 | `display.kind` | display | `time_series`, `interval_bars`, `markers`, `heatmap`, `flamegraph`. |
 | `display.y_min` | display | Optional Y-axis minimum. |
-| `display.y_max` | display | Optional Y-axis maximum. |
+| `display.y_max` | display | Optional initial Y-domain maximum hint; observed values, guides, and thresholds may expand it. |
 | `display.guides` | display | Neutral reference lines/bands; `show_value: false` displays only the label. |
 | `display.color_by` | display | Field/expression used for color encoding. |
 | `downsample` | series | `last_per_pixel`, `max_per_pixel`, `avg_per_pixel`, `min_max_per_pixel`. |
@@ -372,7 +374,7 @@ Potential attributes:
 
 `summary` is view-level because it defines scalar outputs that are independent of display geometry. Guides remain under `display` because they participate in its coordinate system and bounds. Both use the same resolved-series expression scope.
 
-Threshold expressions are evaluated once in view scope and inherit the series unit. `time_series` renders each resolved threshold as a horizontal line, includes it in the Y domain, and applies its level to series coloring. Resolved guides and thresholds appear as `label (value)` in the panel legend; a guide may omit either the unit or the label.
+Threshold expressions are evaluated once in view scope and inherit the series unit. `time_series` renders each resolved threshold as a horizontal line, includes it in the Y domain, and applies its level to step-series coloring. Resolved guides and thresholds appear as `label (value)` in the panel legend; a guide may omit either the unit or the label.
 
 ```js
 thresholds: [{
@@ -439,7 +441,7 @@ Display kinds:
         },
         {
           label: "avg",
-          expr: "clamp(aggregate('duration_weighted_mean', series['cores'], range['visible'], point.value) / metadata['process.available_parallelism'] * 100, 0, 100)",
+          expr: "aggregate('duration_weighted_mean', series['cores'], range['visible'], point.value) / metadata['process.available_parallelism'] * 100",
           unit: "%"
         },
         {
@@ -467,7 +469,7 @@ Display kinds:
             { label: "Cores", expr: "point.value" },
             {
               label: "Total CPU",
-              expr: "clamp(point.value / metadata['process.available_parallelism'] * 100, 0, 100)",
+              expr: "point.value / metadata['process.available_parallelism'] * 100",
               unit: "%"
             }
           ]
@@ -541,35 +543,6 @@ The examples below show individual view specs. They can be wrapped in the bundle
         { label: "Pending", expr: "point.current.accept.pending_connections" },
         { label: "Backlog", expr: "point.current.accept.backlog_limit" },
         { label: "Utilization", expr: "point.value", unit: "%" }
-      ]
-    }
-  ]
-}
-```
-
-## Example: Max RSS
-
-`max_rss_bytes` is a high-water mark from `getrusage`, not current memory usage. This is still useful as a simple gauge-like time-series example.
-
-```js
-{
-  id: "process.max_rss",
-  title: "Max RSS",
-  sources: [
-    { id: "usage", event: "ProcessResourceUsageEvent" }
-  ],
-  display: { kind: "time_series" },
-  series: [
-    {
-      id: "max_rss",
-      title: "Max RSS",
-      expr: "usage.max_rss_bytes",
-      unit: "bytes",
-      mark: "step_line",
-      metric: { kind: "gauge" },
-      downsample: "last_per_pixel",
-      tooltip: [
-        { label: "Max RSS", expr: "point.value", unit: "bytes" }
       ]
     }
   ]
@@ -656,29 +629,32 @@ This is not first-iteration scope, but the spec shape should not block it.
 
 ## Initial Work Split
 
-### Frontend JS Foundation
+### Frontend MVP
 
 Implement first:
 
-- Preserve all events in `trace.eventStreams` or `trace.allEvents`, including built-in events.
-- Keep schema and unit metadata available for every event stream.
+- Use existing custom events as the initial source model.
+- Keep custom-event unit metadata available to computed fields and generic rendering.
 - Add hardcoded JS spec bundles using the same shape expected from future trace metadata.
 - Implement `computed_fields` and expose them in generic/custom event detail rendering.
 - Implement `buildTimeSeriesFromSpec(trace, spec)`.
 - Implement first expression support: field access, metadata access, arithmetic, `rate(value, time)`, `partition_by`.
 - Support scalar aggregation over resolved series for view summaries.
-- Implement generic `renderTimeSeriesPanel(spec, resolvedSeries)` using existing `timePanelLayout`.
-- Support `mark`: `step_line`, `step_area`, maybe `line`.
+- Implement a generic time-series renderer over resolved views using existing `timePanelLayout`.
+- Support `mark`: `step_line`, `step_area`, and `line`.
 - Support `display.guides`, `tooltip`, `thresholds`, `downsample` for `time_series`.
 - Migrate CPU Usage to the generic spec path.
-- Add Max RSS and Socket Accept Queue specs as validation cases if practical.
+- Use Socket Accept Queue and Context Switch Rate as additional validation cases.
 
-Known limits:
+Deliberately deferred:
 
 - Specs are hardcoded in JS at first.
+- A unified event source model that makes built-in and custom events available to specs; the first iteration resolves only existing custom events.
 - Only `time_series` is implemented initially.
 - Expression language is intentionally small.
-- Multi-source specs may be shape-compatible but not fully implemented.
+- Multi-source execution and its join shape are not yet defined.
+- Field-level metric semantics and monotonic counter validation; these should come from Rust/schema metadata rather than duplicated JavaScript declarations.
+- Full validation and user-visible diagnostics for trace-provided specs.
 - `interval_bars`, `markers`, `heatmap`, and `flamegraph` stay future work.
 
 ### Rust API And Transmission

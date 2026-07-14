@@ -146,7 +146,7 @@
     };
   }
 
-  const HARDCODED_VIEW_SPEC_BUNDLE = {
+  const HARDCODED_VIEW_SPEC_BUNDLE_WITH_DEMOS = {
     computed_fields: [
       {
         id: "process_resource_usage.cpu_time_ns",
@@ -197,27 +197,20 @@
           {
             label: "avg",
             expr: {
-              op: "clamp",
+              op: "mul",
               args: [
                 {
-                  op: "mul",
+                  op: "div",
                   args: [
                     {
-                      op: "div",
-                      args: [
-                        {
-                          op: "aggregate",
-                          fn: "duration_weighted_mean",
-                          over: { series: "cores", range: "visible" },
-                          value: { field: "point.value" },
-                        },
-                        { metadata: "process.available_parallelism" },
-                      ],
+                      op: "aggregate",
+                      fn: "duration_weighted_mean",
+                      over: { series: "cores", range: "visible" },
+                      value: { field: "point.value" },
                     },
-                    { const: 100 },
+                    { metadata: "process.available_parallelism" },
                   ],
                 },
-                { const: 0 },
                 { const: 100 },
               ],
             },
@@ -255,49 +248,20 @@
               {
                 label: "Total CPU",
                 expr: {
-                  op: "clamp",
+                  op: "mul",
                   args: [
                     {
-                      op: "mul",
+                      op: "div",
                       args: [
-                        {
-                          op: "div",
-                          args: [
-                            { field: "point.value" },
-                            { metadata: "process.available_parallelism" },
-                          ],
-                        },
-                        { const: 100 },
+                        { field: "point.value" },
+                        { metadata: "process.available_parallelism" },
                       ],
                     },
-                    { const: 0 },
                     { const: 100 },
                   ],
                 },
                 unit: "%",
               },
-            ],
-          },
-        ],
-      },
-      {
-        id: "process.max_rss",
-        title: "Max RSS",
-        sources: [
-          { id: "usage", event: PROCESS_RESOURCE_USAGE_EVENT },
-        ],
-        display: { kind: "time_series", y_min: 0 },
-        series: [
-          {
-            id: "max_rss",
-            title: "Max RSS",
-            expr: { field: "usage.max_rss_bytes" },
-            unit: "bytes",
-            mark: "step_line",
-            metric: { kind: "gauge" },
-            downsample: "last_per_pixel",
-            tooltip: [
-              { label: "Max RSS", expr: { field: "point.value" }, unit: "bytes" },
             ],
           },
         ],
@@ -346,8 +310,74 @@
           },
         ],
       },
+      {
+        id: "process.context_switch_rate",
+        title: "Context Switch Rate",
+        sources: [
+          { id: "usage", event: PROCESS_RESOURCE_USAGE_EVENT },
+        ],
+        display: { kind: "time_series", y_min: 0 },
+        series: [
+          {
+            id: "voluntary",
+            title: "Voluntary",
+            expr: {
+              op: "mul",
+              args: [
+                {
+                  op: "rate",
+                  value: { field: "usage.voluntary_context_switches" },
+                  time: { field: "usage.timestamp" },
+                },
+                { const: 1_000_000_000 },
+              ],
+            },
+            unit: "switches/s",
+            mark: "line",
+            metric: { kind: "gauge" },
+            color: "#81c784",
+            downsample: "min_max_per_pixel",
+          },
+          {
+            id: "involuntary",
+            title: "Involuntary",
+            expr: {
+              op: "mul",
+              args: [
+                {
+                  op: "rate",
+                  value: { field: "usage.involuntary_context_switches" },
+                  time: { field: "usage.timestamp" },
+                },
+                { const: 1_000_000_000 },
+              ],
+            },
+            unit: "switches/s",
+            mark: "line",
+            metric: { kind: "gauge" },
+            color: "#ffb74d",
+            downsample: "min_max_per_pixel",
+          },
+        ],
+      },
     ],
   };
+
+  const DEMO_VIEW_IDS = new Set([
+    "socket.accept_queue",
+    "process.context_switch_rate",
+  ]);
+
+  const HARDCODED_VIEW_SPEC_BUNDLE = {
+    computed_fields: HARDCODED_VIEW_SPEC_BUNDLE_WITH_DEMOS.computed_fields,
+    views: HARDCODED_VIEW_SPEC_BUNDLE_WITH_DEMOS.views.filter(
+      (view) => !DEMO_VIEW_IDS.has(view.id)
+    ),
+  };
+
+  function getHardcodedViewSpecBundle({ includeDemos = false } = {}) {
+    return includeDemos ? HARDCODED_VIEW_SPEC_BUNDLE_WITH_DEMOS : HARDCODED_VIEW_SPEC_BUNDLE;
+  }
 
   function hasOwn(obj, key) {
     return Object.prototype.hasOwnProperty.call(obj, key);
@@ -540,6 +570,13 @@
     }
   }
 
+  function evaluateViewSpecNumber(expr, context) {
+    const value = evaluateViewSpecExpression(expr, context);
+    if (value == null || value === "") return null;
+    const number = Number(value);
+    return Number.isFinite(number) ? number : null;
+  }
+
   function evaluateRateExpression(expr, context, windowSpec) {
     const previous = context.previous || null;
     if (!previous) return null;
@@ -566,15 +603,6 @@
   function getTraceEventStream(trace, source) {
     if (!trace || !source || !source.event) return [];
     const name = source.event;
-    if (trace.eventStreams instanceof Map) {
-      const stream = trace.eventStreams.get(name);
-      if (Array.isArray(stream)) return stream;
-      if (stream && Array.isArray(stream.events)) return stream.events;
-    }
-    if (Array.isArray(trace.allEvents)) {
-      const events = trace.allEvents.filter((ev) => ev.name === name);
-      if (events.length > 0) return events;
-    }
     return (trace.customEvents || []).filter((ev) => ev.name === name);
   }
 
@@ -732,6 +760,109 @@
     }
 
     return { spec: viewSpec, sourceIds: [sourceId], series, diagnostics };
+  }
+
+  function lowerBoundPointTime(points, value) {
+    let lo = 0;
+    let hi = points.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (points[mid].t < value) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo;
+  }
+
+  function upperBoundPointTime(points, value) {
+    let lo = 0;
+    let hi = points.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (points[mid].t <= value) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo;
+  }
+
+  function timeSeriesLinePointsInView(points, viewStart, viewEnd) {
+    if (!points.length || !(viewEnd > viewStart)) return [];
+    const firstInside = lowerBoundPointTime(points, viewStart);
+    const afterInside = upperBoundPointTime(points, viewEnd);
+    if (firstInside === afterInside && (firstInside === 0 || firstInside === points.length)) {
+      return [];
+    }
+    const start = Math.max(0, firstInside - 1);
+    const end = Math.min(points.length, afterInside + 1);
+    return points.slice(start, end);
+  }
+
+  function downsampleTimeSeriesLinePoints(points, viewStart, viewEnd, drawW, mode) {
+    if (!points.length || !(viewEnd > viewStart)) return [];
+    const firstInside = lowerBoundPointTime(points, viewStart);
+    const afterInside = upperBoundPointTime(points, viewEnd);
+    if (firstInside === afterInside && (firstInside === 0 || firstInside === points.length)) {
+      return [];
+    }
+    const start = Math.max(0, firstInside - 1);
+    const end = Math.min(points.length, afterInside + 1);
+    const width = Math.floor(drawW);
+    if (!mode || width <= 0 || end - start <= width * 4) {
+      return points.slice(start, end);
+    }
+
+    const span = viewEnd - viewStart;
+    const buckets = new Map();
+    for (let index = firstInside; index < afterInside; index++) {
+      const point = points[index];
+      const px = Math.max(
+        0,
+        Math.min(width - 1, Math.floor(((point.t - viewStart) / span) * width)),
+      );
+      let bucket = buckets.get(px);
+      if (!bucket) {
+        bucket = { entries: [], sum: 0 };
+        buckets.set(px, bucket);
+      }
+      bucket.entries.push({ point, index });
+      bucket.sum += point.value;
+    }
+
+    const sampled = [];
+    if (firstInside > 0) sampled.push(points[firstInside - 1]);
+    for (const bucket of buckets.values()) {
+      const entries = bucket.entries;
+      let selected;
+      if (mode === "last_per_pixel") {
+        selected = [entries[entries.length - 1]];
+      } else if (mode === "max_per_pixel") {
+        selected = [entries.reduce((best, entry) =>
+          entry.point.value > best.point.value ? entry : best
+        )];
+      } else if (mode === "avg_per_pixel") {
+        const last = entries[entries.length - 1];
+        selected = [{
+          index: last.index,
+          point: { ...last.point, value: bucket.sum / entries.length },
+        }];
+      } else if (mode === "min_max_per_pixel") {
+        const first = entries[0];
+        const last = entries[entries.length - 1];
+        const min = entries.reduce((best, entry) =>
+          entry.point.value < best.point.value ? entry : best
+        );
+        const max = entries.reduce((best, entry) =>
+          entry.point.value > best.point.value ? entry : best
+        );
+        selected = [...new Map(
+          [first, min, max, last].map((entry) => [entry.index, entry])
+        ).values()].sort((a, b) => a.index - b.index);
+      } else {
+        selected = entries;
+      }
+      for (const entry of selected) sampled.push(entry.point);
+    }
+    if (afterInside < points.length) sampled.push(points[afterInside]);
+    return sampled;
   }
 
   function buildSchemaDrivenTimeSeriesViews(trace, bundle) {
@@ -2264,10 +2395,14 @@
     hasCpuProfileSamples,
     buildProcessCpuUsageSeries,
     HARDCODED_VIEW_SPEC_BUNDLE,
+    getHardcodedViewSpecBundle,
     applyComputedFields,
     buildTimeSeriesFromSpec,
     buildSchemaDrivenTimeSeriesViews,
     evaluateViewSpecExpression,
+    evaluateViewSpecNumber,
+    timeSeriesLinePointsInView,
+    downsampleTimeSeriesLinePoints,
     buildSpanData,
     collectDescendants,
     selectSpanRenderSet,

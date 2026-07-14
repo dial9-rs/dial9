@@ -1057,7 +1057,7 @@
         <script src="panel_layout.js"></script>
         <script>
             const { EVENT_TYPES: ET, parseTrace, formatFrame, symbolizeChain, deduplicateSamples } = TraceParser;
-            const { buildWorkerSpans, attachCpuSamples, buildActiveTaskTimeline, computeSchedulingDelays, filterPointsOfInterest, buildSpanData, collectDescendants, selectSpanRenderSet, enclosingSpans, computeSpanLayout, getTraceTimeRange, hasCpuProfileSamples, buildProcessCpuUsageSeries, computeRuntimeGroups, buildSchemaDrivenTimeSeriesViews, evaluateViewSpecExpression } = TraceAnalysis;
+            const { buildWorkerSpans, attachCpuSamples, buildActiveTaskTimeline, computeSchedulingDelays, filterPointsOfInterest, buildSpanData, collectDescendants, selectSpanRenderSet, enclosingSpans, computeSpanLayout, getTraceTimeRange, hasCpuProfileSamples, buildProcessCpuUsageSeries, computeRuntimeGroups, buildSchemaDrivenTimeSeriesViews, evaluateViewSpecExpression, evaluateViewSpecNumber, getHardcodedViewSpecBundle, timeSeriesLinePointsInView, downsampleTimeSeriesLinePoints } = TraceAnalysis;
 
             function esc(s) {
                 return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -1996,6 +1996,7 @@
             // compact, stateless alternative the S3 browser emits for large
             // selections; loadTraceFromScope re-lists its files below.
             const urlParams = new URLSearchParams(window.location.search);
+            const demoMode = urlParams.get('demo') === '1';
             const traceUrls = urlParams.getAll('trace');
             // Render profiler: ?prof=1 (or window.D9PROF=1 from the console).
             if (urlParams.get('prof') === '1') window.D9PROF = 1;
@@ -2196,7 +2197,10 @@
                 console.log(`Found ${Object.keys(wakesByTask).length} tasks with wake events, ${schedDelays.length} scheduling delays`);
 
                 document.getElementById("cpu-panel").style.display = "none";
-                const specResult = buildSchemaDrivenTimeSeriesViews(trace);
+                const specResult = buildSchemaDrivenTimeSeriesViews(
+                    trace,
+                    getHardcodedViewSpecBundle({ includeDemos: demoMode }),
+                );
                 schemaTimeSeriesViews = specResult.views;
                 ensureSchemaTimeSeriesPanelElements();
                 if (specResult.diagnostics.length > 0) {
@@ -3903,8 +3907,8 @@
             function schemaGuideValues(view) {
                 const guides = [];
                 for (const guide of view.spec.display?.guides || []) {
-                    const value = Number(evaluateViewSpecExpression(guide.expr, schemaExpressionContext(view)));
-                    if (Number.isFinite(value)) guides.push({ ...guide, value });
+                    const value = evaluateViewSpecNumber(guide.expr, schemaExpressionContext(view));
+                    if (value != null) guides.push({ ...guide, value });
                 }
                 return guides;
             }
@@ -3913,11 +3917,11 @@
                 const thresholds = [];
                 view.series.forEach((series, seriesIndex) => {
                     for (const threshold of series.spec.thresholds || []) {
-                        const value = Number(evaluateViewSpecExpression(
+                        const value = evaluateViewSpecNumber(
                             threshold.expr,
                             schemaExpressionContext(view),
-                        ));
-                        if (Number.isFinite(value)) {
+                        );
+                        if (value != null) {
                             thresholds.push({ ...threshold, value, seriesSpec: series.spec, seriesIndex });
                         }
                     }
@@ -3932,7 +3936,17 @@
                 let sawValue = display.y_max != null;
 
                 for (const series of view.series) {
+                    const mark = series.spec.mark || "line";
                     for (const group of series.groups) {
+                        if (mark === "line") {
+                            for (const point of timeSeriesLinePointsInView(group.points, viewStart, viewEnd)) {
+                                if (!Number.isFinite(point.value)) continue;
+                                if (!sawValue || point.value > max) max = point.value;
+                                if (display.y_min == null && point.value < min) min = point.value;
+                                sawValue = true;
+                            }
+                            continue;
+                        }
                         for (let i = 0; i < group.points.length; i++) {
                             const point = group.points[i];
                             const segStart = point.end > point.start ? point.start : point.t;
@@ -4071,6 +4085,7 @@
             function renderSchemaTimeSeriesPanel(view, scrollbarW) {
                 const panel = schemaTimeSeriesPanelEls.get(schemaPanelKey(view));
                 if (!panel || panel.style.display === "none") return;
+                panel._schemaHits = [];
 
                 const ph = 92;
                 const info = panel.querySelector(".schema-panel-info");
@@ -4087,7 +4102,16 @@
                 let visiblePoints = 0;
                 let visibleMax = null;
                 for (const series of view.series) {
+                    const mark = series.spec.mark || "line";
                     for (const group of series.groups) {
+                        if (mark === "line") {
+                            const points = timeSeriesLinePointsInView(group.points, viewStart, viewEnd);
+                            visiblePoints += points.length;
+                            for (const point of points) {
+                                if (visibleMax == null || point.value > visibleMax) visibleMax = point.value;
+                            }
+                            continue;
+                        }
                         for (let i = 0; i < group.points.length; i++) {
                             const point = group.points[i];
                             const segStart = point.end > point.start ? point.start : point.t;
@@ -4106,7 +4130,7 @@
                 if (isPanelCollapsed(schemaPanelKey(view))) return;
 
                 const layout = timePanelLayout(panel, scrollbarW);
-                const { pw, drawW, nsToPanelXClamped } = layout;
+                const { pw, drawW, nsToPanelX, nsToPanelXClamped } = layout;
                 const canvas = panel.querySelector("canvas");
                 const ctx = layout.resizeCanvas(canvas, ph);
                 ctx.clearRect(0, 0, pw, ph);
@@ -4166,18 +4190,52 @@
                         const baseColor = schemaSeriesBaseColor(seriesIndex, groupIndex, seriesSpec);
                         const points = group.points;
                         if (mark === "line") {
+                            const linePoints = downsampleTimeSeriesLinePoints(
+                                points, viewStart, viewEnd, drawW, seriesSpec.downsample,
+                            );
+                            if (linePoints.length === 0) return;
+                            ctx.save();
+                            ctx.beginPath();
+                            ctx.rect(LABEL_W, chartTop, drawW, chartH);
+                            ctx.clip();
                             ctx.strokeStyle = baseColor;
                             ctx.lineWidth = 1.5;
                             ctx.beginPath();
-                            let started = false;
-                            for (const point of points) {
-                                if (point.t < viewStart || point.t > viewEnd) continue;
-                                const x = nsToPanelXClamped(point.t);
+                            let previous = null;
+                            for (const point of linePoints) {
+                                const x = nsToPanelX(point.t);
                                 const y = valueToY(point.value);
-                                if (!started) { ctx.moveTo(x, y); started = true; }
-                                else ctx.lineTo(x, y);
+                                if (!previous) {
+                                    ctx.moveTo(x, y);
+                                } else {
+                                    ctx.lineTo(x, y);
+                                    panel._schemaHits.push({
+                                        kind: "line",
+                                        series,
+                                        group,
+                                        fromPoint: previous.point,
+                                        point,
+                                        x1: previous.x,
+                                        y1: previous.y,
+                                        x2: x,
+                                        y2: y,
+                                    });
+                                }
+                                previous = { point, x, y };
                             }
-                            if (started) ctx.stroke();
+                            if (linePoints.length > 1) {
+                                ctx.stroke();
+                            } else {
+                                const point = linePoints[0];
+                                const x = nsToPanelX(point.t);
+                                const y = valueToY(point.value);
+                                ctx.fillStyle = baseColor;
+                                ctx.fillRect(x - 1.5, y - 1.5, 3, 3);
+                                panel._schemaHits.push({
+                                    kind: "point", series, group, point, x, y,
+                                });
+                            }
+                            ctx.restore();
                             return;
                         }
 
@@ -4211,6 +4269,15 @@
                             ctx.moveTo(x1, y);
                             ctx.lineTo(x1 + w, y);
                             ctx.stroke();
+                            panel._schemaHits.push({
+                                kind: "step",
+                                series,
+                                group,
+                                point,
+                                x1,
+                                x2: x1 + w,
+                                y,
+                            });
                         }
                     });
                 });
@@ -4220,28 +4287,46 @@
                 for (const view of schemaTimeSeriesViews) renderSchemaTimeSeriesPanel(view, scrollbarW);
             }
 
-            function findSchemaTimeSeriesHit(view, ns) {
+            function pointToSegmentDistance(px, py, x1, y1, x2, y2) {
+                const dx = x2 - x1;
+                const dy = y2 - y1;
+                if (dx === 0 && dy === 0) return Math.hypot(px - x1, py - y1);
+                const t = Math.max(0, Math.min(1, ((px - x1) * dx + (py - y1) * dy) / (dx * dx + dy * dy)));
+                return Math.hypot(px - (x1 + t * dx), py - (y1 + t * dy));
+            }
+
+            function findSchemaTimeSeriesHit(panel, mx, my) {
                 let best = null;
-                let bestDistance = Infinity;
-                for (const series of view.series) {
-                    for (const group of series.groups) {
-                        const points = group.points;
-                        for (let i = 0; i < points.length; i++) {
-                            const point = points[i];
-                            const start = point.end > point.start ? point.start : point.t;
-                            const end = schemaPointEnd(points, i);
-                            if (ns >= start && ns <= end) return { series, group, point };
-                            const distance = Math.min(Math.abs(ns - start), Math.abs(ns - end));
-                            if (distance < bestDistance) {
-                                bestDistance = distance;
-                                best = { series, group, point };
-                            }
-                            if (start > ns && distance > bestDistance) break;
+                let bestScore = Infinity;
+                for (const hit of panel._schemaHits || []) {
+                    if (hit.kind === "step") {
+                        const xDistance = mx < hit.x1 ? hit.x1 - mx : mx > hit.x2 ? mx - hit.x2 : 0;
+                        if (xDistance > 8) continue;
+                        const score = Math.abs(my - hit.y) + xDistance * 4;
+                        if (score < bestScore) {
+                            bestScore = score;
+                            best = hit;
+                        }
+                    } else if (hit.kind === "line") {
+                        const score = pointToSegmentDistance(mx, my, hit.x1, hit.y1, hit.x2, hit.y2);
+                        if (score <= 10 && score < bestScore) {
+                            bestScore = score;
+                            best = {
+                                ...hit,
+                                point: Math.abs(mx - hit.x1) <= Math.abs(mx - hit.x2)
+                                    ? hit.fromPoint
+                                    : hit.point,
+                            };
+                        }
+                    } else {
+                        const score = Math.hypot(mx - hit.x, my - hit.y);
+                        if (score <= 8 && score < bestScore) {
+                            bestScore = score;
+                            best = hit;
                         }
                     }
                 }
-                const toleranceNs = (viewEnd - viewStart) / 100;
-                return bestDistance <= toleranceNs ? best : null;
+                return best;
             }
 
             function schemaTimeSeriesTooltipHtml(view, hit) {
@@ -4273,6 +4358,7 @@
                 if (!panel || !canvas) return;
                 const rect = canvas.getBoundingClientRect();
                 const mx = e.clientX - rect.left;
+                const my = e.clientY - rect.top;
                 const scrollbarW = lanesContainer.offsetWidth - lanesContainer.clientWidth;
                 const layout = timePanelLayout(panel, scrollbarW);
 
@@ -4280,7 +4366,7 @@
                 if (mx >= LABEL_W && mx <= LABEL_W + layout.drawW) {
                     const ns = layout.panelXToNs(mx);
                     mouseNs = ns;
-                    hit = findSchemaTimeSeriesHit(view, ns);
+                    hit = findSchemaTimeSeriesHit(panel, mx, my);
                 }
 
                 canvas.style.cursor = hit ? "crosshair" : "default";

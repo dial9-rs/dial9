@@ -50,6 +50,9 @@ node dial9-viewer/ui/test_trace_properties.js
 echo "--- Checking viewer value formatting ---"
 node dial9-viewer/ui/test_format.js
 
+echo "--- Checking shared time-panel layout ---"
+node dial9-viewer/ui/test_panel_layout.js
+
 echo "--- Checking multi-component trace fetch (repeatable trace=) ---"
 node dial9-viewer/ui/test_fetch_traces.js
 
