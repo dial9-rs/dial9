@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use aws_config::BehaviorVersion;
 use clap::Parser;
-use dial9::memory_profiling::{Dial9Allocator, MemoryProfiler, MemoryProfilingConfig};
+use dial9::memory::{Dial9Allocator, MemoryProfiler, MemoryProfilingConfig};
 #[cfg(target_os = "linux")]
 use dial9::telemetry::SocketAcceptQueuesConfig;
 #[cfg(target_os = "linux")]

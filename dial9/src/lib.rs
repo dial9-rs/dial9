@@ -28,9 +28,19 @@ pub fn record_event(event: impl Encodable) {
     current_handle().record_event(event);
 }
 
-// Background pipeline (segment worker, processors, on-demand dumps).
+// Background pipeline (segment worker, on-demand dumps).
 #[cfg(feature = "pipeline")]
-pub use dial9_core::{dump, pipeline, worker};
+pub use dial9_core::{dump, worker};
+
+/// Segment pipeline: background processors and offline symbolization.
+#[cfg(feature = "pipeline")]
+pub mod pipeline {
+    pub use dial9_core::pipeline::*;
+
+    /// Offline symbolization processor. Needs the CPU profiler for stack frames.
+    #[cfg(feature = "cpu-profiling")]
+    pub use dial9_perf_self_profile::SymbolizeProcessor;
+}
 
 // Tokio runtime integration.
 /// Instrument an async `main` with dial9 telemetry. Replaces `#[tokio::main]`.
@@ -89,12 +99,6 @@ where
     }
 }
 
-// CPU and scheduler profiling.
-#[cfg(feature = "cpu-profiling")]
-pub use dial9_perf_self_profile::{
-    CpuProfiler, CpuProfilingConfig, CpuSampleSource, SchedEventConfig, SchedProfiler,
-};
-
 // One-call `.with_*` source sugar on the recorder builder. Available whenever a
 // perf source is compiled in.
 #[cfg(any(
@@ -105,26 +109,35 @@ pub use dial9_perf_self_profile::{
 ))]
 pub use dial9_perf_self_profile::RecorderPerfExt;
 
-// Offline symbolization processor for the segment pipeline. Needs both the CPU
-// profiler (to produce stack frames) and the pipeline (to run the processor).
-#[cfg(all(feature = "cpu-profiling", feature = "pipeline"))]
-pub use dial9_perf_self_profile::SymbolizeProcessor;
+/// CPU sampling and kernel scheduler events.
+#[cfg(feature = "cpu-profiling")]
+pub mod cpu {
+    pub use dial9_perf_self_profile::{
+        CpuProfiler, CpuProfilingConfig, CpuSampleSource, SchedEventConfig, SchedProfiler,
+    };
+}
 
-// Memory profiling.
+/// In-process allocation and free tracking.
 #[cfg(feature = "memory-profiling")]
-pub use dial9_perf_self_profile::{AllocEvent, FreeEvent, memory_profiling};
+pub mod memory {
+    pub use dial9_perf_self_profile::memory_profiling::*;
+}
 
-// Process resource usage source.
-#[cfg(all(feature = "process-resource", unix))]
-pub use dial9_perf_self_profile::ProcessResourceUsageSource;
+/// Process resource-usage (rusage) source.
 #[cfg(feature = "process-resource")]
-pub use dial9_perf_self_profile::{ProcessResourceUsageConfig, ProcessResourceUsageEvent};
+pub mod process {
+    #[cfg(unix)]
+    pub use dial9_perf_self_profile::ProcessResourceUsageSource;
+    pub use dial9_perf_self_profile::{ProcessResourceUsageConfig, ProcessResourceUsageEvent};
+}
 
-// Socket accept-queue source.
-#[cfg(all(feature = "linux-socket", target_os = "linux"))]
-pub use dial9_perf_self_profile::SocketAcceptQueuesSource;
+/// Socket accept-queue depth source (Linux).
 #[cfg(feature = "linux-socket")]
-pub use dial9_perf_self_profile::{SocketAcceptQueuesConfig, TcpAcceptQueueEvent};
+pub mod socket {
+    #[cfg(target_os = "linux")]
+    pub use dial9_perf_self_profile::SocketAcceptQueuesSource;
+    pub use dial9_perf_self_profile::{SocketAcceptQueuesConfig, TcpAcceptQueueEvent};
+}
 
 // Tracing-subscriber layer.
 #[cfg(feature = "tracing-layer")]
