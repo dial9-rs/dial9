@@ -28,6 +28,13 @@ export function resolveUrlSelection(
     patch.focusedSpanId = url.selectedSpanId;
   }
 
+  // Span-panel subtree focus, carried independently of the lane highlight. When
+  // present it wins over the fallback the span block set above; otherwise that
+  // fallback stands (so an old `span`-only URL keeps its prior behavior).
+  if (url.focusedSpanId !== undefined && lane.spanByIdSingle.has(url.focusedSpanId)) {
+    patch.focusedSpanId = url.focusedSpanId;
+  }
+
   // Poll: matched by start AND task - start alone is ambiguous across workers
   // (two workers can poll at the same instant); a task's poll at a given start
   // is unique.

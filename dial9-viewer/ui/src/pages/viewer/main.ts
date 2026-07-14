@@ -84,7 +84,26 @@ function boot(): void {
       urlView.collapsed.map((id) => [id, true]),
     );
   }
+  if (urlView.spanPct !== undefined) bootPrefs.spanPctFilter = urlView.spanPct;
+  if (urlView.spanNames !== undefined) {
+    bootPrefs.selectedSpanNames = new Set(urlView.spanNames);
+  }
+  if (urlView.eventNames !== undefined) {
+    bootPrefs.selectedEventNames = new Set(urlView.eventNames);
+  }
   if (Object.keys(bootPrefs).length > 0) store.update("uiPrefs", bootPrefs);
+
+  // Issues-rail restore. Filter/sort/index are plain values (index maps into
+  // the trace-derived list once it exists, so setting it now is safe); no part
+  // needs the trace to be valid.
+  const poiPatch: Partial<StoreState["poi"]> = {};
+  if (urlView.poiFilter !== undefined) poiPatch.filter = urlView.poiFilter;
+  if (urlView.poiSort !== undefined) {
+    poiPatch.sortKey = urlView.poiSort.key;
+    poiPatch.sortDir = urlView.poiSort.dir;
+  }
+  if (urlView.poiIndex !== undefined) poiPatch.index = urlView.poiIndex;
+  if (Object.keys(poiPatch).length > 0) store.update("poi", poiPatch);
 
   // The URL sync binding, assigned after mount; forward-referenced by the
   // status bar's copy-link flush so a copy always reflects the live state.
@@ -264,7 +283,7 @@ function boot(): void {
   // Registered last so the boot-time restore above does not fight it; the
   // copy-link button flushes it first (beforeCopyLink) so a copy is current.
   urlBinding = bindViewStateToUrl(store, {
-    slices: ["viewport", "selection", "uiPrefs"],
+    slices: ["viewport", "selection", "uiPrefs", "poi"],
     project: projectViewerState,
     mirrorToQuery: mirrorViewerToQuery,
   });

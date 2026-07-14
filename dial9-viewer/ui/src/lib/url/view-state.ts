@@ -86,6 +86,21 @@ export interface ViewState {
   sidebarRange?: string;
   /** Spawned-tasks range (`"startNs-endNs"`) -> selection.spawnedTasksRange. */
   spawnedRange?: string;
+  /** Span-panel subtree focus id, re-resolved on load (distinct from the
+   * lane-highlight `selectedSpanId`). */
+  focusedSpanId?: string;
+  /** Issues-rail detector filter (a PointOfInterestType), when not the default. */
+  poiFilter?: string;
+  /** Issues-rail sort as `"<key>,<dir>"`, when not the default `duration,desc`. */
+  poiSort?: string;
+  /** Current POI index in the filtered+sorted rail list, when >= 0. */
+  poiIndex?: number;
+  /** Span percentile filter (50/90/95/99), when not 0 (All). */
+  spanPct?: number;
+  /** Span legend name chips toggled on for display filtering. */
+  spanNames?: readonly string[];
+  /** Custom-event legend name chips toggled on for display filtering. */
+  eventNames?: readonly string[];
 }
 
 /** An unrecognized-but-versioned hash entry, preserved for rewrite. */
