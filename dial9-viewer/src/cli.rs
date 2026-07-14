@@ -193,13 +193,19 @@ pub async fn run() -> anyhow::Result<()> {
             agg_segment_secs,
             enable_upload,
         } => {
-            return crate::serve(crate::ServeConfig {
-                port,
+            // Logging and per-request metrics are process-global concerns owned
+            // by the binary, not by app assembly (see `crate::build_app`).
+            // `--local` selects human-readable logs + metrique's local metrics
+            // format; the default (deployed) is JSON logs + EMF. Hold the
+            // metrics handle for the life of the server.
+            crate::init_tracing(local);
+            let _metrics = crate::attach_request_metrics(local);
+
+            let app = crate::build_app(crate::ViewerConfig {
                 bucket,
                 prefix,
                 local_dir,
                 dev,
-                local,
                 agg,
                 agg_source_dir,
                 agg_output_dir,
@@ -208,7 +214,15 @@ pub async fn run() -> anyhow::Result<()> {
                 agg_segment_secs,
                 enable_upload,
             })
-            .await;
+            .await?;
+
+            let listener = tokio::net::TcpListener::bind(("0.0.0.0", port)).await?;
+            tracing::info!(port, "dial9-viewer listening");
+            println!("\n  → http://localhost:{port}\n");
+            axum::serve(listener, app)
+                .with_graceful_shutdown(crate::shutdown_signal())
+                .await?;
+            return Ok(());
         }
         Commands::Report { action } => match action {
             ReportAction::Serve { path, port } => {

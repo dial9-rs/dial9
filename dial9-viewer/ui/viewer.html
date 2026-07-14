@@ -7179,6 +7179,10 @@
                 const z = fgInstance.getZoomPath();
                 if (z.worker.length > 0) base.set("worker-zoom", z.worker.join("\t"));
                 if (z.offworker.length > 0) base.set("offworker-zoom", z.offworker.join("\t"));
+                // Carry the inspect (butterfly) focus so the popped-out flamegraph
+                // reproduces the exact focus position, not just the zoom.
+                const insp = fgInstance.getInspectFocus();
+                if (insp) base.set("inspect", insp);
 
                 // Prefer carrying this viewer's own scope through to the
                 // flamegraph (short + stateless, so it can't overflow the URI

@@ -98,6 +98,22 @@ node dial9-viewer/ui/test_flamegraph_export.js
 echo "--- Checking flamegraph export button enablement in API mode (#625) ---"
 node dial9-viewer/ui/test_flamegraph_setdirect_export.js
 
+echo "--- Checking flamegraph inspect/butterfly + search results (#652/#653) ---"
+node dial9-viewer/ui/test_flamegraph_inspect.js
+node dial9-viewer/ui/test_flamegraph_inspect_dom.js
+
+echo "--- Checking flamegraph view-state URL codec (single + diff) ---"
+node dial9-viewer/ui/test_flamegraph_view_state.js
+
+echo "--- Checking flamegraph deep-link view state (zoom + inspect focus) ---"
+node dial9-viewer/ui/test_flamegraph_deeplink.js
+
+echo "--- Checking exact-trace view-state restore (search + spawn filter) ---"
+node dial9-viewer/ui/test_flamegraph_exact_view_state.js
+
+echo "--- Checking diff-view URL state (onChange/initialState wiring) ---"
+node dial9-viewer/ui/test_flamegraph_diff_view_state.js
+
 echo "--- Checking runtime grouping (multi-runtime lanes) ---"
 node dial9-viewer/ui/test_runtime_groups.js
 

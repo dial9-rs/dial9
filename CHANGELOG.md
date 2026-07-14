@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Explicit CPU profiling backend selection via `CpuProfilingConfig::with_perf_backend()` and `CpuProfilingConfig::with_ctimer_backend()` constructors. The default (Auto: try perf, fall back to ctimer) is unchanged ([#579](https://github.com/dial9-rs/dial9/issues/579), [#660](https://github.com/dial9-rs/dial9/pull/660))
 - In-memory writer (`InMemoryWriter`): run the trace pipeline with no filesystem dependency, encoded segments are held in process memory and shipped by the existing processor pipeline ([#435](https://github.com/dial9-rs/dial9/pull/435))
 - `#[dial9_tokio_telemetry::main]` now performs an implicit graceful shutdown after the async body returns: it drops the runtime and drains the background worker so the final segment is symbolized, compressed, and uploaded. Configure the deadline with `Dial9Config::builder()...graceful_shutdown(Duration)` (default 1s) or skip it with `.disable_graceful_shutdown()`. The low-level `TracedRuntime` API is unchanged — call `TelemetryGuard::graceful_shutdown` yourself ([#479](https://github.com/dial9-rs/dial9/issues/479))
 - `SegmentProcessor::finalize_dump`: custom processors can flush per-dump state when an on-demand dump completes ([#549](https://github.com/dial9-rs/dial9/pull/549))
@@ -28,6 +29,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Breaking:** `MemoryProfiler::install` no longer takes a `Dial9Handle`, it returns a `MemorySampler` for standalone draining. For the dial9 trace integration use `MemoryProfiler::install_into(&handle)` ([#591](https://github.com/dial9-rs/dial9/pull/591))
 - **Breaking:** removed `MemoryProfilerGuard`. Memory profiling now drains for the session/guard lifetime (like CPU profiling) rather than being a permanent process-wide install ([#591](https://github.com/dial9-rs/dial9/pull/591))
 - **Breaking:** renamed `Dial9Allocator` to `SamplingAllocator`, the global-allocator wrapper now lives in `dial9-perf-self-profile` and works without dial9 ([#591](https://github.com/dial9-rs/dial9/pull/591))
+
+### Fixed
+
+- Viewer: browsing a nonexistent bucket now returns HTTP 404 instead of 500, and a syntactically invalid bucket name returns HTTP 400. The S3 `NoSuchBucket`/`NoSuchKey` and `InvalidBucketName` error codes were falling through to the generic error arm, which logged an "unclassified S3 error" and reported a server `fault` — so a user typo in the bucket name polluted the viewer's fault metric. They now classify as `NotFound` (404) and `BadRequest` (400) respectively.
 
 ## [0.3.13](https://github.com/dial9-rs/dial9/compare/dial9-tokio-telemetry-v0.3.12...dial9-tokio-telemetry-v0.3.13) - 2026-05-29
 

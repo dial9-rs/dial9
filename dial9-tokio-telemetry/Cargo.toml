@@ -54,7 +54,6 @@ tracing-subscriber = { version = "0.3", optional = true, default-features = fals
 ] }
 hostname = "0.4"
 bon = "3"
-aws-sdk-s3-transfer-manager = { version = "0.1.3", optional = true, default-features = false }
 aws-sdk-s3 = { version = "1", default-features = false, optional = true, features = [
     "behavior-version-latest",
     "sigv4a",
@@ -99,7 +98,6 @@ memory-profiling = [
 ]
 worker-s3 = [
     "dep:dial9-utils",
-    "dep:aws-sdk-s3-transfer-manager",
     "dep:aws-sdk-s3",
     "dep:aws-config",
     "dep:time",
