@@ -58,94 +58,6 @@
     return Number.isFinite(n) ? n : null;
   }
 
-  function processResourceUsageSample(ev) {
-    const fields = ev.fields || {};
-    const t = numericField(ev.timestamp);
-    const userCpuNs = numericField(fields.user_cpu_ns);
-    const systemCpuNs = numericField(fields.system_cpu_ns);
-    if (
-      t == null ||
-      userCpuNs == null ||
-      systemCpuNs == null ||
-      userCpuNs < 0 ||
-      systemCpuNs < 0
-    ) {
-      return null;
-    }
-    return {
-      t,
-      event: ev,
-      userCpuNs,
-      systemCpuNs,
-      cpuTimeNs: userCpuNs + systemCpuNs,
-    };
-  }
-
-  function buildProcessCpuUsageSeries(customEvents, availableParallelism) {
-    const capacity = numericField(availableParallelism);
-    const normalizedCapacity = capacity != null && capacity > 0 ? capacity : null;
-    const samples = [];
-    for (const ev of customEvents || []) {
-      if (ev.name !== PROCESS_RESOURCE_USAGE_EVENT) continue;
-      const sample = processResourceUsageSample(ev);
-      if (sample) samples.push(sample);
-    }
-    samples.sort((a, b) => a.t - b.t);
-
-    const intervals = [];
-    let maxCores = 0;
-    let totalWallNs = 0;
-    let totalCpuNs = 0;
-
-    for (let i = 1; i < samples.length; i++) {
-      const prev = samples[i - 1];
-      const cur = samples[i];
-      const wallDeltaNs = cur.t - prev.t;
-      const userDeltaNs = cur.userCpuNs - prev.userCpuNs;
-      const systemDeltaNs = cur.systemCpuNs - prev.systemCpuNs;
-      const cpuDeltaNs = userDeltaNs + systemDeltaNs;
-      if (
-        !(wallDeltaNs > 0) ||
-        userDeltaNs < 0 ||
-        systemDeltaNs < 0 ||
-        cpuDeltaNs < 0
-      ) {
-        continue;
-      }
-      const cores = cpuDeltaNs / wallDeltaNs;
-      if (!Number.isFinite(cores)) continue;
-      const totalPercent = normalizedCapacity != null
-        ? Math.min(100, (cores / normalizedCapacity) * 100)
-        : null;
-      intervals.push({
-        start: prev.t,
-        end: cur.t,
-        t: cur.t,
-        wallDeltaNs,
-        userDeltaNs,
-        systemDeltaNs,
-        cpuDeltaNs,
-        startCpuTimeNs: prev.cpuTimeNs,
-        endCpuTimeNs: cur.cpuTimeNs,
-        cores,
-        totalPercent,
-        startSample: prev,
-        endSample: cur,
-      });
-      if (cores > maxCores) maxCores = cores;
-      totalWallNs += wallDeltaNs;
-      totalCpuNs += cpuDeltaNs;
-    }
-
-    return {
-      samples,
-      intervals,
-      availableParallelism: normalizedCapacity,
-      maxCores,
-      avgCores: totalWallNs > 0 ? totalCpuNs / totalWallNs : 0,
-    };
-  }
-
   const HARDCODED_VIEW_SPEC_BUNDLE_WITH_DEMOS = {
     computed_fields: [
       {
@@ -174,6 +86,7 @@
         display: {
           kind: "time_series",
           y_min: 0,
+          y_max: 1,
           guides: [
             {
               kind: "horizontal_line",
@@ -232,9 +145,19 @@
             id: "cores",
             title: "CPU",
             expr: {
-              op: "rate",
-              value: { field: "usage.cpu_time_ns" },
-              time: { field: "usage.timestamp" },
+              op: "add",
+              args: [
+                {
+                  op: "rate",
+                  value: { field: "usage.user_cpu_ns" },
+                  time: { field: "usage.timestamp" },
+                },
+                {
+                  op: "rate",
+                  value: { field: "usage.system_cpu_ns" },
+                  time: { field: "usage.timestamp" },
+                },
+              ],
             },
             unit: "cores",
             mark: "step_area",
@@ -243,7 +166,17 @@
             downsample: "max_per_pixel",
             tooltip: [
               { label: "Window", expr: { field: "point.wall_delta_ns" }, unit: "ns" },
-              { label: "CPU time", expr: { field: "point.value_delta_ns" }, unit: "ns" },
+              {
+                label: "CPU time",
+                expr: {
+                  op: "mul",
+                  args: [
+                    { field: "point.value" },
+                    { field: "point.wall_delta_ns" },
+                  ],
+                },
+                unit: "ns",
+              },
               { label: "Cores", expr: { field: "point.value" } },
               {
                 label: "Total CPU",
@@ -290,6 +223,7 @@
                 { const: 100 },
               ],
             },
+            transform: { op: "hold_until_next" },
             unit: "%",
             mark: "step_line",
             metric: { kind: "gauge" },
@@ -333,7 +267,7 @@
               ],
             },
             unit: "switches/s",
-            mark: "line",
+            mark: "step_line",
             metric: { kind: "gauge" },
             color: "#81c784",
             downsample: "min_max_per_pixel",
@@ -353,7 +287,7 @@
               ],
             },
             unit: "switches/s",
-            mark: "line",
+            mark: "step_line",
             metric: { kind: "gauge" },
             color: "#ffb74d",
             downsample: "min_max_per_pixel",
@@ -466,15 +400,29 @@
     return { points: series.groups[0].points, range };
   }
 
+  function pointInHalfOpenRange(t, start, end) {
+    return Number.isFinite(t) && t >= start && t < end;
+  }
+
+  function intervalOverlapsRange(start, end, rangeStart, rangeEnd) {
+    return Number.isFinite(start) && Number.isFinite(end) &&
+      end > start && rangeEnd > rangeStart && end > rangeStart && start < rangeEnd;
+  }
+
+  function intervalOverlapDuration(start, end, rangeStart, rangeEnd) {
+    if (!intervalOverlapsRange(start, end, rangeStart, rangeEnd)) return 0;
+    return Math.min(end, rangeEnd) - Math.max(start, rangeStart);
+  }
+
   function pointOverlapsRange(point, range) {
     if (!range) return true;
     const start = finiteNumber(point.start);
     const end = finiteNumber(point.end);
     if (start != null && end != null && end > start) {
-      return end > range.start && start < range.end;
+      return intervalOverlapsRange(start, end, range.start, range.end);
     }
     const t = finiteNumber(point.t);
-    return t != null && t >= range.start && t <= range.end;
+    return t != null && pointInHalfOpenRange(t, range.start, range.end);
   }
 
   function evaluateAggregateExpression(expr, context) {
@@ -501,7 +449,7 @@
         const end = finiteNumber(point.end);
         if (start == null || end == null || !(end > start)) continue;
         const overlap = collection.range
-          ? Math.min(end, collection.range.end) - Math.max(start, collection.range.start)
+          ? intervalOverlapDuration(start, end, collection.range.start, collection.range.end)
           : end - start;
         if (!(overlap > 0)) continue;
         weightedSum += value * overlap;
@@ -517,57 +465,211 @@
     return Number.isFinite(mean) ? mean : null;
   }
 
-  function evaluateViewSpecExpression(expr, context) {
+  function supportForPoint(point) {
+    if (!point) return null;
+    const start = finiteNumber(point.start);
+    const end = finiteNumber(point.end);
+    if (start != null && end != null && end > start) {
+      return { kind: "interval", start, end };
+    }
+    const t = finiteNumber(point.t);
+    return t == null ? null : { kind: "point", t, event: null };
+  }
+
+  function supportForFieldPath(path, context) {
+    const parts = String(path).split(".");
+    if (parts[0] === "point") return supportForPoint(context.point);
+
+    const current = context.current || {};
+    let event = null;
+    if (hasOwn(current, parts[0])) event = current[parts[0]];
+    else if (context.singleSourceId && hasOwn(current, context.singleSourceId)) {
+      event = current[context.singleSourceId];
+    }
+    if (!event) return null;
+    const t = finiteNumber(event.timestamp);
+    return t == null ? null : { kind: "point", t, event };
+  }
+
+  function sameSupport(a, b) {
+    if (a === b) return true;
+    if (!a || !b || a.kind !== b.kind) return false;
+    if (a.kind === "point") {
+      return a.t === b.t && (!a.event || !b.event || a.event === b.event);
+    }
+    return a.start === b.start && a.end === b.end;
+  }
+
+  function mergeExpressionSupport(results) {
+    let support = null;
+    let current = null;
+    let previous = null;
+    for (const result of results) {
+      if (!result.support) continue;
+      if (support && !sameSupport(support, result.support)) return null;
+      if (!support) support = result.support;
+      if (!current && result.current) current = result.current;
+      if (!previous && result.previous) previous = result.previous;
+    }
+    return { support, current, previous };
+  }
+
+  function expressionResult(value, support = null, current = null, previous = null) {
+    if (value == null) return null;
+    return { value, support, current, previous };
+  }
+
+  function evaluateRateExpressionResult(expr, context, runtime) {
+    const currentValueResult = evaluateViewSpecExpressionResult(expr.value, context, null);
+    const currentTimeResult = evaluateViewSpecExpressionResult(expr.time, context, null);
+    const currentValue = currentValueResult && finiteNumber(currentValueResult.value);
+    const currentTime = currentTimeResult && finiteNumber(currentTimeResult.value);
+    if (currentValue == null || currentTime == null) return null;
+
+    if (runtime) {
+      const baseline = runtime.rateStates.get(expr) || null;
+      if (!baseline) {
+        runtime.rateStates.set(expr, {
+          value: currentValue,
+          time: currentTime,
+          current: context.current || null,
+        });
+        return null;
+      }
+
+      const wallDeltaNs = currentTime - baseline.time;
+      const valueDelta = currentValue - baseline.value;
+      if (!(wallDeltaNs > 0)) return null;
+
+      const nextBaseline = {
+        value: currentValue,
+        time: currentTime,
+        current: context.current || null,
+      };
+      runtime.rateStates.set(expr, nextBaseline);
+      if (valueDelta < 0) return null;
+
+      const value = valueDelta / wallDeltaNs;
+      if (!Number.isFinite(value)) return null;
+      return {
+        value,
+        support: { kind: "interval", start: baseline.time, end: currentTime },
+        current: context.current || null,
+        previous: baseline.current,
+        valueDelta,
+        wallDeltaNs,
+      };
+    }
+
+    const previous = context.previous || null;
+    if (!previous) return null;
+    const previousContext = { ...context, current: previous, previous: null };
+    const previousValueResult = evaluateViewSpecExpressionResult(expr.value, previousContext, null);
+    const previousTimeResult = evaluateViewSpecExpressionResult(expr.time, previousContext, null);
+    const previousValue = previousValueResult && finiteNumber(previousValueResult.value);
+    const previousTime = previousTimeResult && finiteNumber(previousTimeResult.value);
+    if (previousValue == null || previousTime == null) return null;
+
+    const wallDeltaNs = currentTime - previousTime;
+    const valueDelta = currentValue - previousValue;
+    if (!(wallDeltaNs > 0) || valueDelta < 0) return null;
+    const value = valueDelta / wallDeltaNs;
+    if (!Number.isFinite(value)) return null;
+    return {
+      value,
+      support: { kind: "interval", start: previousTime, end: currentTime },
+      current: context.current || null,
+      previous,
+      valueDelta,
+      wallDeltaNs,
+    };
+  }
+
+  function evaluateViewSpecExpressionResult(expr, context = {}, runtime = null) {
     if (expr == null) return null;
-    if (typeof expr === "number" || typeof expr === "boolean") return expr;
-    if (typeof expr === "string") return evaluateStringShorthand(expr, context || {});
+    if (typeof expr === "number" || typeof expr === "boolean") {
+      return expressionResult(expr);
+    }
+    if (typeof expr === "string") {
+      return expressionResult(
+        evaluateStringShorthand(expr, context),
+        /^[A-Za-z_]/.test(expr) ? supportForFieldPath(expr, context) : null,
+        context.current || null,
+        context.previous || null,
+      );
+    }
     if (typeof expr !== "object") return null;
 
-    if (hasOwn(expr, "const")) return expr.const;
-    if (hasOwn(expr, "field")) return resolveFieldPath(expr.field, context || {});
-    if (hasOwn(expr, "metadata")) return metadataLookup((context || {}).metadata, expr.metadata);
+    if (hasOwn(expr, "const")) return expressionResult(expr.const);
+    if (hasOwn(expr, "field")) {
+      return expressionResult(
+        resolveFieldPath(expr.field, context),
+        supportForFieldPath(expr.field, context),
+        context.current || null,
+        context.previous || null,
+      );
+    }
+    if (hasOwn(expr, "metadata")) {
+      return expressionResult(metadataLookup(context.metadata, expr.metadata));
+    }
 
     const op = expr.op;
-    if (op === "rate") {
-      const rate = evaluateRateExpression(expr, context || {}, null);
-      return rate ? rate.value : null;
+    if (op === "rate") return evaluateRateExpressionResult(expr, context, runtime);
+    if (op === "aggregate") {
+      return expressionResult(evaluateAggregateExpression(expr, context));
     }
-    if (op === "aggregate") return evaluateAggregateExpression(expr, context || {});
 
     const args = Array.isArray(expr.args) ? expr.args : [];
-    const values = args.map((arg) => finiteNumber(evaluateViewSpecExpression(arg, context || {})));
+    const results = args.map((arg) => evaluateViewSpecExpressionResult(arg, context, runtime));
+    if (results.some((result) => !result)) return null;
+    const values = results.map((result) => finiteNumber(result.value));
     if (values.some((value) => value == null)) return null;
+    const merged = mergeExpressionSupport(results);
+    if (!merged) return null;
 
+    let value = null;
     switch (op) {
       case "add":
-        return values.reduce((sum, value) => sum + value, 0);
+        value = values.reduce((sum, current) => sum + current, 0);
+        break;
       case "sub":
-        if (values.length === 0) return null;
-        return values.slice(1).reduce((acc, value) => acc - value, values[0]);
-      case "mul":
-        return values.reduce((product, value) => product * value, 1);
-      case "div": {
-        if (values.length === 0) return null;
-        let acc = values[0];
-        for (const value of values.slice(1)) {
-          if (value === 0) return null;
-          acc /= value;
+        if (values.length > 0) {
+          value = values.slice(1).reduce((acc, current) => acc - current, values[0]);
         }
-        return Number.isFinite(acc) ? acc : null;
-      }
+        break;
+      case "mul":
+        value = values.reduce((product, current) => product * current, 1);
+        break;
+      case "div":
+        if (values.length > 0 && values.slice(1).every((current) => current !== 0)) {
+          value = values.slice(1).reduce((acc, current) => acc / current, values[0]);
+        }
+        break;
       case "min":
-        return values.length > 0 ? values.reduce((min, value) => Math.min(min, value)) : null;
+        if (values.length > 0) value = values.reduce((min, current) => Math.min(min, current));
+        break;
       case "max":
-        return values.length > 0 ? values.reduce((max, value) => Math.max(max, value)) : null;
+        if (values.length > 0) value = values.reduce((max, current) => Math.max(max, current));
+        break;
       case "sum":
-        return values.length > 0 ? values.reduce((sum, value) => sum + value, 0) : null;
+        if (values.length > 0) value = values.reduce((sum, current) => sum + current, 0);
+        break;
       case "avg":
-        return values.length > 0 ? values.reduce((sum, value) => sum + value, 0) / values.length : null;
+        if (values.length > 0) value = values.reduce((sum, current) => sum + current, 0) / values.length;
+        break;
       case "clamp":
-        return values.length === 3 ? Math.min(values[2], Math.max(values[1], values[0])) : null;
+        if (values.length === 3) value = Math.min(values[2], Math.max(values[1], values[0]));
+        break;
       default:
         return null;
     }
+    if (!Number.isFinite(value)) return null;
+    return expressionResult(value, merged.support, merged.current, merged.previous);
+  }
+
+  function evaluateViewSpecExpression(expr, context) {
+    const result = evaluateViewSpecExpressionResult(expr, context || {}, null);
+    return result ? result.value : null;
   }
 
   function evaluateViewSpecNumber(expr, context) {
@@ -575,29 +677,6 @@
     if (value == null || value === "") return null;
     const number = Number(value);
     return Number.isFinite(number) ? number : null;
-  }
-
-  function evaluateRateExpression(expr, context, windowSpec) {
-    const previous = context.previous || null;
-    if (!previous) return null;
-    const previousContext = { ...context, current: previous, previous: null };
-
-    const currentValue = finiteNumber(evaluateViewSpecExpression(expr.value, context));
-    const previousValue = finiteNumber(evaluateViewSpecExpression(expr.value, previousContext));
-    const currentTime = finiteNumber(evaluateViewSpecExpression(expr.time, context));
-    const previousTime = finiteNumber(evaluateViewSpecExpression(expr.time, previousContext));
-    if (currentValue == null || previousValue == null || currentTime == null || previousTime == null) {
-      return null;
-    }
-
-    const wallDeltaNs = currentTime - previousTime;
-    const valueDelta = currentValue - previousValue;
-    if (!(wallDeltaNs > 0)) return null;
-    if (valueDelta < 0 && (!windowSpec || windowSpec.on_decrease !== "show")) return null;
-
-    const value = valueDelta / wallDeltaNs;
-    if (!Number.isFinite(value)) return null;
-    return { value, valueDelta, wallDeltaNs, currentTime, previousTime };
   }
 
   function getTraceEventStream(trace, source) {
@@ -655,6 +734,104 @@
     return { key: values.join("\u0000"), values };
   }
 
+  function seriesPointFromResult(result, context, group) {
+    if (!result) return null;
+    const value = finiteNumber(result.value);
+    if (value == null) return null;
+
+    const current = result.current || context.current || {};
+    const previous = result.previous || context.previous || null;
+    const support = result.support || {
+      kind: "point",
+      t: finiteNumber(Object.values(current)[0]?.timestamp),
+    };
+    if (support.kind === "interval") {
+      if (!(support.end > support.start)) return null;
+      const point = {
+        support: { kind: "interval", start: support.start, end: support.end },
+        start: support.start,
+        end: support.end,
+        t: support.end,
+        value,
+        wall_delta_ns: support.end - support.start,
+        current,
+        previous,
+        group_key: group.key,
+        group_values: group.values,
+      };
+      if (Number.isFinite(result.valueDelta)) {
+        point.value_delta = result.valueDelta;
+        point.value_delta_ns = result.valueDelta;
+      }
+      return point;
+    }
+
+    const t = finiteNumber(support.t);
+    if (t == null) return null;
+    return {
+      support: { kind: "point", t },
+      start: t,
+      end: t,
+      t,
+      value,
+      current,
+      previous,
+      group_key: group.key,
+      group_values: group.values,
+    };
+  }
+
+  function holdPointsUntilNext(observations, recordMaxTs) {
+    const points = [];
+    let pending = null;
+    for (const observation of observations) {
+      if (pending && observation.t > pending.t) {
+        points.push({
+          ...pending,
+          support: { kind: "interval", start: pending.t, end: observation.t },
+          start: pending.t,
+          end: observation.t,
+          wall_delta_ns: observation.t - pending.t,
+        });
+      }
+      pending = observation.point && observation.point.support.kind === "point"
+        ? observation.point
+        : null;
+    }
+
+    const finalEnd = finiteNumber(recordMaxTs);
+    if (pending && finalEnd != null && finalEnd > pending.t) {
+      points.push({
+        ...pending,
+        support: { kind: "interval", start: pending.t, end: finalEnd },
+        start: pending.t,
+        end: finalEnd,
+        wall_delta_ns: finalEnd - pending.t,
+      });
+    }
+    return points;
+  }
+
+  function markAcceptsPoints(mark) {
+    return mark === "line" || mark === "points";
+  }
+
+  function markAcceptsIntervals(mark) {
+    return mark === "step_line" || mark === "step_area" || mark === "bars";
+  }
+
+  function expressionUsesPreviousSample(expr) {
+    if (!expr || typeof expr !== "object") return false;
+    if (expr.op === "rate" || expr.op === "delta" || expr.op === "lag") return true;
+    if (Array.isArray(expr.args) && expr.args.some(expressionUsesPreviousSample)) return true;
+    return expressionUsesPreviousSample(expr.value) || expressionUsesPreviousSample(expr.time);
+  }
+
+  function seriesRequiresStreamIdentity(seriesSpec) {
+    return seriesSpec.transform?.op === "hold_until_next" ||
+      expressionUsesPreviousSample(seriesSpec.expr);
+  }
+
   function buildTimeSeriesFromSpec(trace, viewSpec) {
     const diagnostics = [];
     if (!viewSpec || !viewSpec.display || viewSpec.display.kind !== "time_series") {
@@ -684,8 +861,18 @@
 
     const series = [];
     for (const seriesSpec of viewSpec.series || []) {
+      if (trace.sourceComponentCount > 1 && seriesRequiresStreamIdentity(seriesSpec)) {
+        diagnostics.push({
+          level: "warning",
+          id: viewSpec.id,
+          seriesId: seriesSpec.id,
+          message: `skipped stateful series: ${trace.sourceComponentCount} source components loaded, but custom events do not preserve component identity`,
+        });
+        continue;
+      }
       const groups = new Map();
-      const previousByGroup = new Map();
+      const previousEventByGroup = new Map();
+      const runtimeByGroup = new Map();
 
       for (const event of events) {
         const baseContext = {
@@ -707,59 +894,278 @@
             values: group.values,
             title: `${seriesSpec.title || seriesSpec.id}${suffix}`,
             points: [],
+            observations: [],
+            breakPending: false,
           };
           groups.set(group.key, bucket);
+          runtimeByGroup.set(group.key, { rateStates: new Map() });
         }
 
-        const previousEvent = previousByGroup.get(group.key) || null;
+        const previousEvent = previousEventByGroup.get(group.key) || null;
         const context = {
           ...baseContext,
           previous: previousEvent ? { [sourceId]: previousEvent } : null,
         };
-        let point = null;
-        if (seriesSpec.expr && seriesSpec.expr.op === "rate") {
-          const rate = evaluateRateExpression(seriesSpec.expr, context, seriesSpec.window || null);
-          if (rate) {
-            point = {
-              start: rate.previousTime,
-              end: rate.currentTime,
-              t: rate.currentTime,
-              value: rate.value,
-              value_delta: rate.valueDelta,
-              value_delta_ns: rate.valueDelta,
-              wall_delta_ns: rate.wallDeltaNs,
-              current: { [sourceId]: event },
-              previous: { [sourceId]: previousEvent },
-              group_key: group.key,
-              group_values: group.values,
-            };
-          }
-        } else {
-          const value = finiteNumber(evaluateViewSpecExpression(seriesSpec.expr, context));
-          if (value != null) {
-            point = {
-              start: event.timestamp,
-              end: event.timestamp,
-              t: event.timestamp,
-              value,
-              current: { [sourceId]: event },
-              previous: previousEvent ? { [sourceId]: previousEvent } : null,
-              group_key: group.key,
-              group_values: group.values,
-            };
+        const runtime = runtimeByGroup.get(group.key);
+        const result = evaluateViewSpecExpressionResult(seriesSpec.expr, context, runtime);
+        const point = seriesPointFromResult(result, context, group);
+        bucket.observations.push({ t: event.timestamp, point });
+        if (!seriesSpec.transform) {
+          if (point) {
+            if (bucket.breakPending && point.support.kind === "point") {
+              point.break_before = true;
+            }
+            bucket.points.push(point);
+            bucket.breakPending = false;
+          } else if (bucket.points.length > 0) {
+            bucket.breakPending = true;
           }
         }
+        previousEventByGroup.set(group.key, event);
+      }
 
-        if (point) bucket.points.push(point);
-        previousByGroup.set(group.key, event);
+      let invalidTransform = false;
+      for (const group of groups.values()) {
+        if (!seriesSpec.transform) continue;
+        if (seriesSpec.transform.op !== "hold_until_next") {
+          invalidTransform = true;
+          break;
+        }
+        if (group.observations.some((observation) =>
+          observation.point && observation.point.support.kind !== "point"
+        )) {
+          invalidTransform = true;
+          break;
+        }
+        group.points = holdPointsUntilNext(group.observations, trace.recordMaxTs);
+      }
+      if (invalidTransform) {
+        diagnostics.push({
+          level: "warning",
+          id: viewSpec.id,
+          seriesId: seriesSpec.id,
+          message: `unsupported transform for series ${seriesSpec.id}`,
+        });
+        continue;
       }
 
       const groupList = [...groups.values()].filter((group) => group.points.length > 0);
+      const incompatibleMark = groupList.some((group) => group.points.some((point) =>
+        point.support.kind === "point"
+          ? !markAcceptsPoints(seriesSpec.mark)
+          : !markAcceptsIntervals(seriesSpec.mark)
+      ));
+      if (incompatibleMark) {
+        diagnostics.push({
+          level: "warning",
+          id: viewSpec.id,
+          seriesId: seriesSpec.id,
+          message: `mark ${seriesSpec.mark} is incompatible with series support`,
+        });
+        continue;
+      }
       for (const group of groupList) group.points.sort((a, b) => a.t - b.t);
-      if (groupList.length > 0) series.push({ spec: seriesSpec, groups: groupList });
+      if (groupList.length > 0) {
+        for (const group of groupList) {
+          delete group.observations;
+          delete group.breakPending;
+        }
+        series.push({ spec: seriesSpec, groups: groupList });
+      }
     }
 
     return { spec: viewSpec, sourceIds: [sourceId], series, diagnostics };
+  }
+
+  function splitTimeSeriesPointRuns(points) {
+    const runs = [];
+    let run = [];
+    for (const point of points) {
+      if (point.break_before && run.length > 0) {
+        runs.push(run);
+        run = [];
+      }
+      run.push(point);
+    }
+    if (run.length > 0) runs.push(run);
+    return runs;
+  }
+
+  function interpolateTimeSeriesLinePoint(left, right, t) {
+    if (t === left.t) return { t, value: left.value };
+    if (t === right.t) return { t, value: right.value };
+    const ratio = (t - left.t) / (right.t - left.t);
+    return { t, value: left.value + (right.value - left.value) * ratio };
+  }
+
+  function clipTimeSeriesLinePoints(points, viewStart, viewEnd) {
+    if (!(viewEnd > viewStart)) return [];
+    const clipped = [];
+    const relevant = timeSeriesLinePointsInView(points, viewStart, viewEnd);
+    for (const run of splitTimeSeriesPointRuns(relevant)) {
+      const runPoints = [];
+      if (run.length === 1) {
+        if (pointInHalfOpenRange(run[0].t, viewStart, viewEnd)) {
+          runPoints.push({ t: run[0].t, value: run[0].value });
+        }
+      } else {
+        for (let i = 1; i < run.length; i++) {
+          const left = run[i - 1];
+          const right = run[i];
+          if (!(right.t > left.t) || right.t <= viewStart || left.t >= viewEnd) continue;
+          const start = Math.max(left.t, viewStart);
+          const end = Math.min(right.t, viewEnd);
+          if (!(end > start)) continue;
+          const first = interpolateTimeSeriesLinePoint(left, right, start);
+          const last = interpolateTimeSeriesLinePoint(left, right, end);
+          if (runPoints.length === 0 || runPoints[runPoints.length - 1].t !== first.t) {
+            runPoints.push(first);
+          }
+          runPoints.push(last);
+        }
+      }
+      if (runPoints.length > 0) {
+        if (clipped.length > 0) runPoints[0].break_before = true;
+        clipped.push(...runPoints);
+      }
+    }
+    return clipped;
+  }
+
+  function timeSeriesIntervalsInView(points, viewStart, viewEnd) {
+    if (!(viewEnd > viewStart)) return [];
+    let lo = 0;
+    let hi = points.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (points[mid].end <= viewStart) lo = mid + 1;
+      else hi = mid;
+    }
+    const visible = [];
+    for (let i = lo; i < points.length; i++) {
+      const point = points[i];
+      if (point.start >= viewEnd) break;
+      if (intervalOverlapsRange(point.start, point.end, viewStart, viewEnd)) {
+        visible.push(point);
+      }
+    }
+    return visible;
+  }
+
+  function downsampleTimeSeriesIntervals(points, viewStart, viewEnd, drawW, mode) {
+    const visible = timeSeriesIntervalsInView(points, viewStart, viewEnd);
+    const width = Math.floor(drawW);
+    if (!mode || width <= 0 || visible.length <= width * 4) return visible;
+
+    const span = viewEnd - viewStart;
+    const buckets = new Map();
+    let run = 0;
+    let previous = null;
+    for (let index = 0; index < visible.length; index++) {
+      const point = visible[index];
+      if (previous && previous.end !== point.start) run++;
+      const px = Math.max(
+        0,
+        Math.min(width - 1, Math.floor(((point.start - viewStart) / span) * width)),
+      );
+      const key = `${run}:${px}`;
+      let bucket = buckets.get(key);
+      if (!bucket) {
+        bucket = [];
+        buckets.set(key, bucket);
+      }
+      bucket.push({ point, index });
+      previous = point;
+    }
+
+    const selected = [];
+    for (const entries of buckets.values()) {
+      const start = entries[0].point.start;
+      const end = entries[entries.length - 1].point.end;
+      const renderPoint = (entry, value = entry.point.value, sampledRole = null) => ({
+        ...entry,
+        point: {
+          ...entry.point,
+          support: { kind: "interval", start, end },
+          start,
+          end,
+          value,
+          sampled: true,
+          ...(sampledRole ? { sampled_role: sampledRole } : {}),
+        },
+      });
+      if (mode === "last_per_pixel") {
+        selected.push(renderPoint(entries[entries.length - 1]));
+      } else if (mode === "max_per_pixel") {
+        const max = entries.reduce((best, entry) =>
+          entry.point.value > best.point.value ? entry : best
+        );
+        selected.push(renderPoint(max));
+      } else if (mode === "avg_per_pixel") {
+        let weightedSum = 0;
+        let totalDuration = 0;
+        const visibleStart = Math.max(start, viewStart);
+        const visibleEnd = Math.min(end, viewEnd);
+        for (const entry of entries) {
+          const duration = intervalOverlapDuration(
+            entry.point.start,
+            entry.point.end,
+            visibleStart,
+            visibleEnd,
+          );
+          weightedSum += entry.point.value * duration;
+          totalDuration += duration;
+        }
+        const average = totalDuration > 0
+          ? weightedSum / totalDuration
+          : entries[entries.length - 1].point.value;
+        selected.push(renderPoint(entries[entries.length - 1], average));
+      } else if (mode === "min_max_per_pixel") {
+        const min = entries.reduce((best, entry) =>
+          entry.point.value < best.point.value ? entry : best
+        );
+        const max = entries.reduce((best, entry) =>
+          entry.point.value > best.point.value ? entry : best
+        );
+        selected.push(renderPoint(min, min.point.value, "min"));
+        if (max.index !== min.index) {
+          selected.push(renderPoint(max, max.point.value, "max"));
+        }
+      } else {
+        selected.push(renderPoint(entries[entries.length - 1]));
+      }
+    }
+    return [...new Map(selected.map((entry) => [entry.index, entry])).values()]
+      .sort((a, b) => a.index - b.index)
+      .map((entry) => entry.point);
+  }
+
+  function timeSeriesStepGeometry(points, viewStart, viewEnd) {
+    const visible = timeSeriesIntervalsInView(points, viewStart, viewEnd);
+    return visible.map((point, index) => {
+      const previous = index > 0 ? visible[index - 1] : null;
+      return {
+        point,
+        start: Math.max(point.start, viewStart),
+        end: Math.min(point.end, viewEnd),
+        connector: previous && !previous.sampled_role && !point.sampled_role &&
+          previous.end === point.start && point.start > viewStart
+          ? { t: point.start, from: previous.value, to: point.value }
+          : null,
+      };
+    });
+  }
+
+  function findTimeSeriesIntervalAtTime(points, timestamp) {
+    let lo = 0;
+    let hi = points.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (points[mid].start <= timestamp) lo = mid + 1;
+      else hi = mid;
+    }
+    const point = lo > 0 ? points[lo - 1] : null;
+    return point && Number.isFinite(point.end) && timestamp < point.end ? point : null;
   }
 
   function lowerBoundPointTime(points, value) {
@@ -773,21 +1179,10 @@
     return lo;
   }
 
-  function upperBoundPointTime(points, value) {
-    let lo = 0;
-    let hi = points.length;
-    while (lo < hi) {
-      const mid = (lo + hi) >> 1;
-      if (points[mid].t <= value) lo = mid + 1;
-      else hi = mid;
-    }
-    return lo;
-  }
-
   function timeSeriesLinePointsInView(points, viewStart, viewEnd) {
     if (!points.length || !(viewEnd > viewStart)) return [];
     const firstInside = lowerBoundPointTime(points, viewStart);
-    const afterInside = upperBoundPointTime(points, viewEnd);
+    const afterInside = lowerBoundPointTime(points, viewEnd);
     if (firstInside === afterInside && (firstInside === 0 || firstInside === points.length)) {
       return [];
     }
@@ -798,8 +1193,22 @@
 
   function downsampleTimeSeriesLinePoints(points, viewStart, viewEnd, drawW, mode) {
     if (!points.length || !(viewEnd > viewStart)) return [];
+    points = timeSeriesLinePointsInView(points, viewStart, viewEnd);
+    const runs = splitTimeSeriesPointRuns(points);
+    if (runs.length > 1) {
+      const sampled = [];
+      for (const run of runs) {
+        const runSampled = downsampleTimeSeriesLinePoints(run, viewStart, viewEnd, drawW, mode);
+        if (runSampled.length === 0) continue;
+        if (sampled.length > 0) {
+          runSampled[0] = { ...runSampled[0], break_before: true };
+        }
+        sampled.push(...runSampled);
+      }
+      return sampled;
+    }
     const firstInside = lowerBoundPointTime(points, viewStart);
-    const afterInside = upperBoundPointTime(points, viewEnd);
+    const afterInside = lowerBoundPointTime(points, viewEnd);
     if (firstInside === afterInside && (firstInside === 0 || firstInside === points.length)) {
       return [];
     }
@@ -820,11 +1229,10 @@
       );
       let bucket = buckets.get(px);
       if (!bucket) {
-        bucket = { entries: [], sum: 0 };
+        bucket = { entries: [] };
         buckets.set(px, bucket);
       }
       bucket.entries.push({ point, index });
-      bucket.sum += point.value;
     }
 
     const sampled = [];
@@ -840,9 +1248,16 @@
         )];
       } else if (mode === "avg_per_pixel") {
         const last = entries[entries.length - 1];
+        const average = entries.reduce((sum, entry) => sum + entry.point.value, 0) /
+          entries.length;
         selected = [{
           index: last.index,
-          point: { ...last.point, value: bucket.sum / entries.length },
+          point: {
+            ...last.point,
+            value: average,
+            sampled: true,
+            provenance: last.point,
+          },
         }];
       } else if (mode === "min_max_per_pixel") {
         const first = entries[0];
@@ -2393,7 +2808,6 @@
     buildFgData,
     getTraceTimeRange,
     hasCpuProfileSamples,
-    buildProcessCpuUsageSeries,
     HARDCODED_VIEW_SPEC_BUNDLE,
     getHardcodedViewSpecBundle,
     applyComputedFields,
@@ -2401,6 +2815,14 @@
     buildSchemaDrivenTimeSeriesViews,
     evaluateViewSpecExpression,
     evaluateViewSpecNumber,
+    pointInHalfOpenRange,
+    intervalOverlapsRange,
+    intervalOverlapDuration,
+    clipTimeSeriesLinePoints,
+    timeSeriesIntervalsInView,
+    downsampleTimeSeriesIntervals,
+    timeSeriesStepGeometry,
+    findTimeSeriesIntervalAtTime,
     timeSeriesLinePointsInView,
     downsampleTimeSeriesLinePoints,
     buildSpanData,

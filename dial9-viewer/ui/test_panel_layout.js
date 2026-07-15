@@ -163,5 +163,44 @@ test("INVARIANT: no time-based panel declares its own left gutter in CSS", () =>
   }
 });
 
+test("Schema time-series geometry shares one chart clip", () => {
+  const fs = require("fs");
+  const path = require("path");
+  const html = fs.readFileSync(path.join(__dirname, "viewer.html"), "utf8");
+  const start = html.indexOf("function renderSchemaTimeSeriesPanel");
+  const end = html.indexOf("function renderSchemaTimeSeriesPanels", start);
+  const renderer = html.slice(start, end);
+  const clip = renderer.indexOf("ctx.clip()");
+  const thresholds = renderer.indexOf("for (const threshold of thresholds)");
+  const guides = renderer.indexOf("for (const guide of guides)");
+  const series = renderer.indexOf("view.series.forEach");
+  const restore = renderer.lastIndexOf("ctx.restore()");
+  assert.ok(clip >= 0, "schema renderer must establish a chart clip");
+  assert.ok(clip < thresholds && thresholds < guides && guides < series,
+    "thresholds, guides, and series must all render after the chart clip");
+  assert.ok(restore > series, "schema renderer must restore the clip after all series");
+  assert.ok(!renderer.includes("schemaPointEnd") && !renderer.includes("viewEnd;"),
+    "renderer must not infer viewport-dependent interval ends");
+});
+
+test("Schema panels own CPU rendering and list every partition", () => {
+  const fs = require("fs");
+  const path = require("path");
+  const html = fs.readFileSync(path.join(__dirname, "viewer.html"), "utf8");
+  assert.ok(!html.includes('id="cpu-panel"') && !html.includes("renderProcessCpuPanel"),
+    "the event-specific CPU panel must stay removed");
+  const start = html.indexOf("function updateSchemaPanelLegend");
+  const end = html.indexOf("function renderSchemaTimeSeriesPanel", start);
+  const legend = html.slice(start, end);
+  assert.ok(legend.includes("view.series.forEach") && legend.includes("series.groups.forEach"),
+    "schema legend must enumerate every series partition");
+  assert.ok(/\.schema-time-series-panel \.chart-label\s*\{[^}]*overflow-x:\s*auto/s.test(html),
+    "long schema legends must remain horizontally accessible");
+  assert.ok(html.includes('stepGroup.mark === "step_area"') && html.includes("insideArea ? 0"),
+    "step-area tooltips must cover the rendered area, not only its top line");
+  assert.ok(html.includes("mx < LABEL_W + layout.drawW"),
+    "the half-open viewport must exclude hit testing at its right edge");
+});
+
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed > 0 ? 1 : 0);

@@ -19,11 +19,17 @@ const {
   computeSpanLayout,
   getTraceTimeRange,
   hasCpuProfileSamples,
-  buildProcessCpuUsageSeries,
   buildSchemaDrivenTimeSeriesViews,
   getHardcodedViewSpecBundle,
   evaluateViewSpecExpression,
   evaluateViewSpecNumber,
+  intervalOverlapsRange,
+  intervalOverlapDuration,
+  clipTimeSeriesLinePoints,
+  timeSeriesIntervalsInView,
+  downsampleTimeSeriesIntervals,
+  timeSeriesStepGeometry,
+  findTimeSeriesIntervalAtTime,
   timeSeriesLinePointsInView,
   downsampleTimeSeriesLinePoints,
   analyzeAllocations,
@@ -102,69 +108,6 @@ async function main() {
     pass("Custom-only trace range uses custom event timestamps");
   }
 
-  function testProcessCpuUsageSeriesDerivesIntervals() {
-    const series = buildProcessCpuUsageSeries([
-      {
-        name: "ProcessResourceUsageEvent",
-        timestamp: 0,
-        fields: { user_cpu_ns: "100000000", system_cpu_ns: "50000000" },
-      },
-      {
-        name: "ProcessResourceUsageEvent",
-        timestamp: 1_000_000_000,
-        fields: { user_cpu_ns: "500000000", system_cpu_ns: "150000000" },
-      },
-      {
-        name: "ProcessResourceUsageEvent",
-        timestamp: 2_000_000_000,
-        fields: { user_cpu_ns: "1500000000", system_cpu_ns: "1150000000" },
-      },
-    ], "4");
-    if (series.availableParallelism !== 4) fail("available parallelism should parse as 4");
-    if (series.intervals.length !== 2) fail(`expected 2 CPU intervals, got ${series.intervals.length}`);
-    const first = series.intervals[0];
-    if (first.userDeltaNs !== 400_000_000 || first.systemDeltaNs !== 100_000_000) {
-      fail(`unexpected first CPU deltas: ${JSON.stringify(first)}`);
-    }
-    if (Math.abs(first.cores - 0.5) > 1e-9) fail(`expected first interval to use 0.5 cores, got ${first.cores}`);
-    if (Math.abs(first.totalPercent - 12.5) > 1e-9) fail(`expected first interval to use 12.5%, got ${first.totalPercent}`);
-    if (Math.abs(series.maxCores - 2.0) > 1e-9) fail(`expected max cores 2.0, got ${series.maxCores}`);
-    if (Math.abs(series.avgCores - 1.25) > 1e-9) fail(`expected avg cores 1.25, got ${series.avgCores}`);
-    pass("Process CPU usage series derives cores and total percentage");
-  }
-
-  function testProcessCpuUsageSeriesSkipsInvalidPairs() {
-    const series = buildProcessCpuUsageSeries([
-      {
-        name: "ProcessResourceUsageEvent",
-        timestamp: 0,
-        fields: { user_cpu_ns: "100", system_cpu_ns: "100" },
-      },
-      {
-        name: "ProcessResourceUsageEvent",
-        timestamp: 0,
-        fields: { user_cpu_ns: "200", system_cpu_ns: "200" },
-      },
-      {
-        name: "ProcessResourceUsageEvent",
-        timestamp: 10,
-        fields: { user_cpu_ns: "150", system_cpu_ns: "250" },
-      },
-      {
-        name: "ProcessResourceUsageEvent",
-        timestamp: 20,
-        fields: { user_cpu_ns: "300", system_cpu_ns: "350" },
-      },
-      { name: "OtherEvent", timestamp: 30, fields: {} },
-    ], null);
-    if (series.intervals.length !== 1) fail(`expected only one valid CPU interval, got ${series.intervals.length}`);
-    if (series.intervals[0].start !== 10 || series.intervals[0].end !== 20) {
-      fail(`expected valid interval [10, 20], got ${JSON.stringify(series.intervals[0])}`);
-    }
-    if (series.availableParallelism !== null) fail("missing available parallelism should stay null");
-    pass("Process CPU usage series skips invalid pairs");
-  }
-
   function testSchemaDrivenCpuUsageSeries() {
     const customEvents = [
       {
@@ -177,6 +120,12 @@ async function main() {
         name: "ProcessResourceUsageEvent",
         timestamp: 1_000_000_000,
         fields: { user_cpu_ns: "500000000", system_cpu_ns: "150000000" },
+        units: { user_cpu_ns: "ns", system_cpu_ns: "ns" },
+      },
+      {
+        name: "ProcessResourceUsageEvent",
+        timestamp: 2_000_000_000,
+        fields: { user_cpu_ns: "1500000000", system_cpu_ns: "1150000000" },
         units: { user_cpu_ns: "ns", system_cpu_ns: "ns" },
       },
     ];
@@ -195,28 +144,30 @@ async function main() {
     const cpu = result.views.find((view) => view.spec.id === "process.cpu");
     if (!cpu) fail("expected process.cpu schema view");
     const points = cpu.series[0].groups[0].points;
-    if (points.length !== 1) fail(`expected one CPU point, got ${points.length}`);
+    if (points.length !== 2) fail(`expected two CPU points, got ${points.length}`);
     if (Math.abs(points[0].value - 0.5) > 1e-9) fail(`expected 0.5 cores, got ${points[0].value}`);
-    if (points[0].value_delta_ns !== 500_000_000 || points[0].wall_delta_ns !== 1_000_000_000) {
+    if (points[0].value * points[0].wall_delta_ns !== 500_000_000 ||
+        points[0].wall_delta_ns !== 1_000_000_000) {
       fail(`unexpected CPU deltas: ${JSON.stringify(points[0])}`);
     }
+    if (cpu.spec.display.y_max !== 1) fail("CPU should keep a one-core initial Y-domain hint");
     const summaryContext = {
       current: {},
       previous: null,
       point: null,
       metadata: trace.segmentMetadata,
       series: cpu.series,
-      ranges: { visible: { start: 0, end: 1_000_000_000 } },
+      ranges: { visible: { start: 0, end: 2_000_000_000 } },
     };
     const summaries = cpu.spec.summary.map((summary) => evaluateViewSpecExpression(summary.expr, summaryContext));
-    if (Math.abs(summaries[0] - 0.5) > 1e-9 || Math.abs(summaries[1] - 12.5) > 1e-9 || summaries[2] !== 0.5) {
+    if (Math.abs(summaries[0] - 1.25) > 1e-9 || Math.abs(summaries[1] - 31.25) > 1e-9 || summaries[2] !== 2) {
       fail(`unexpected CPU summaries: ${JSON.stringify(summaries)}`);
     }
     const overCapacity = evaluateViewSpecExpression(cpu.spec.summary[1].expr, {
       ...summaryContext,
       metadata: new Map([["process.available_parallelism", "0.25"]]),
     });
-    if (overCapacity !== 200) fail(`CPU percentage should exceed 100%, got ${overCapacity}`);
+    if (overCapacity !== 500) fail(`CPU percentage should exceed 100%, got ${overCapacity}`);
     const missingCapacity = evaluateViewSpecExpression(cpu.spec.summary[1].expr, {
       ...summaryContext,
       metadata: new Map(),
@@ -256,6 +207,7 @@ async function main() {
         points: [
           { start: 0, end: 10, t: 10, value: 2, current: {}, previous: null },
           { start: 10, end: 30, t: 30, value: 4, current: {}, previous: null },
+          { start: 20, end: 20, t: 20, value: 100, current: {}, previous: null },
         ],
       }],
     }];
@@ -281,7 +233,9 @@ async function main() {
     };
     const mean = evaluateViewSpecExpression(weightedMean, context);
     if (Math.abs(mean - (50 / 15)) > 1e-9) fail(`unexpected duration-weighted mean: ${mean}`);
-    if (evaluateViewSpecExpression(aggregateMax, context) !== 4) fail("aggregate max should reduce visible points");
+    if (evaluateViewSpecExpression(aggregateMax, context) !== 4) {
+      fail("aggregate max should exclude points at the half-open range end");
+    }
     if (evaluateViewSpecExpression({ op: "max", args: [{ const: 3 }, { const: 7 }] }, context) !== 7) {
       fail("scalar max should compare its arguments");
     }
@@ -316,7 +270,7 @@ async function main() {
       { name: "TcpAcceptQueueEvent", timestamp: 20, fields: { socket_cookie: "b", pending_connections: "2", backlog_limit: "10", local_addr: "127.0.0.1", local_port: "3001" } },
       { name: "TcpAcceptQueueEvent", timestamp: 30, fields: { socket_cookie: "a", pending_connections: "8", backlog_limit: "10", local_addr: "127.0.0.1", local_port: "3000" } },
     ];
-    const trace = { customEvents, segmentMetadata: new Map() };
+    const trace = { customEvents, segmentMetadata: new Map(), recordMaxTs: 40 };
     const result = buildSchemaDrivenTimeSeriesViews(
       trace,
       getHardcodedViewSpecBundle({ includeDemos: true }),
@@ -326,7 +280,8 @@ async function main() {
     const groups = socket.series[0].groups;
     if (groups.length !== 2) fail(`expected two socket groups, got ${groups.length}`);
     const a = groups.find((group) => group.values[0] === "a");
-    if (!a || a.points.length !== 2 || a.points[1].value !== 80) {
+    if (!a || a.points.length !== 2 || a.points[1].value !== 80 ||
+        a.points[0].start !== 10 || a.points[0].end !== 30 || a.points[1].end !== 40) {
       fail(`unexpected socket group a points: ${JSON.stringify(a)}`);
     }
     const thresholdValues = socket.series[0].spec.thresholds.map((threshold) => {
@@ -341,7 +296,7 @@ async function main() {
     pass("Schema-driven socket accept queue groups by socket cookie");
   }
 
-  function testSchemaDrivenContextSwitchLines() {
+  function testSchemaDrivenContextSwitchIntervals() {
     const customEvents = [
       {
         name: "ProcessResourceUsageEvent",
@@ -374,10 +329,142 @@ async function main() {
     if (values[0] !== 20 || values[1] !== 2) {
       fail(`unexpected context-switch rates: ${JSON.stringify(values)}`);
     }
-    if (view.series.some((series) => series.spec.mark !== "line")) {
-      fail("context-switch rate should exercise the line mark");
+    const intervals = view.series.map((series) => series.groups[0].points[0]);
+    if (intervals.some((point) => point.start !== 0 || point.end !== 1_000_000_000)) {
+      fail(`context-switch rates should retain interval support: ${JSON.stringify(intervals)}`);
     }
-    pass("Schema-driven context-switch rates build two line series");
+    if (view.series.some((series) => series.spec.mark !== "step_line")) {
+      fail("interval-valued context-switch rates should use step_line");
+    }
+    pass("Schema-driven context-switch rates retain nested rate support");
+  }
+
+  function testSchemaDrivenCpuResetCannotBeMasked() {
+    const customEvents = [
+      { name: "ProcessResourceUsageEvent", timestamp: 0, fields: { user_cpu_ns: "100", system_cpu_ns: "100" } },
+      { name: "ProcessResourceUsageEvent", timestamp: 10, fields: { user_cpu_ns: "50", system_cpu_ns: "300" } },
+      { name: "ProcessResourceUsageEvent", timestamp: 20, fields: { user_cpu_ns: "100", system_cpu_ns: "400" } },
+    ];
+    const result = buildSchemaDrivenTimeSeriesViews({
+      customEvents,
+      segmentMetadata: new Map([["process.available_parallelism", "4"]]),
+    });
+    const points = result.views[0].series[0].groups[0].points;
+    if (points.length !== 1 || points[0].start !== 10 || points[0].end !== 20 || points[0].value !== 15) {
+      fail(`component reset should create one gap and recover: ${JSON.stringify(points)}`);
+    }
+    pass("Schema-driven CPU reset cannot be masked by the other counter");
+  }
+
+  function testNestedRatesPreserveIndependentBaselines() {
+    const rate = (field) => ({
+      op: "rate",
+      value: { field: `sample.${field}` },
+      time: { field: "sample.timestamp" },
+    });
+    const view = {
+      id: "nested-rates",
+      sources: [{ id: "sample", event: "CounterSample" }],
+      display: { kind: "time_series" },
+      series: [{
+        id: "combined",
+        expr: { op: "add", args: [rate("a"), rate("b")] },
+        mark: "step_line",
+        partition_by: [{ field: "sample.key" }],
+      }],
+    };
+    const customEvents = [
+      { name: "CounterSample", timestamp: 0, fields: { key: "x", a: "0", b: "0" } },
+      { name: "CounterSample", timestamp: 5, fields: { key: "y", a: "10", b: "20" } },
+      { name: "CounterSample", timestamp: 10, fields: { key: "x", a: null, b: "10" } },
+      { name: "CounterSample", timestamp: 15, fields: { key: "y", a: "20", b: "40" } },
+      { name: "CounterSample", timestamp: 20, fields: { key: "x", a: "20", b: "20" } },
+      { name: "CounterSample", timestamp: 30, fields: { key: "x", a: "30", b: "30" } },
+    ];
+    const result = buildSchemaDrivenTimeSeriesViews(
+      { customEvents, segmentMetadata: new Map() },
+      { computed_fields: [], views: [view] },
+    );
+    const groups = result.views[0].series[0].groups;
+    const x = groups.find((group) => group.values[0] === "x").points;
+    const y = groups.find((group) => group.values[0] === "y").points;
+    if (x.length !== 1 || x[0].start !== 20 || x[0].end !== 30 || x[0].value !== 2) {
+      fail(`missing component should preserve baselines without mismatched support: ${JSON.stringify(x)}`);
+    }
+    if (y.length !== 1 || y[0].start !== 5 || y[0].end !== 15 || y[0].value !== 3) {
+      fail(`partitions should keep independent rate state: ${JSON.stringify(y)}`);
+    }
+    pass("Nested rates preserve support and independent partition baselines");
+  }
+
+  function testNonPositiveRateWindowKeepsBaseline() {
+    const customEvents = [
+      { name: "ProcessResourceUsageEvent", timestamp: 0, fields: { user_cpu_ns: "0", system_cpu_ns: "0" } },
+      { name: "ProcessResourceUsageEvent", timestamp: 0, fields: { user_cpu_ns: "100", system_cpu_ns: "100" } },
+      { name: "ProcessResourceUsageEvent", timestamp: 10, fields: { user_cpu_ns: "110", system_cpu_ns: "110" } },
+    ];
+    const result = buildSchemaDrivenTimeSeriesViews({
+      customEvents,
+      segmentMetadata: new Map([["process.available_parallelism", "4"]]),
+    });
+    const points = result.views[0].series[0].groups[0].points;
+    if (points.length !== 1 || points[0].start !== 0 || points[0].end !== 10 || points[0].value !== 22) {
+      fail(`non-positive window should not replace the valid baseline: ${JSON.stringify(points)}`);
+    }
+    pass("Non-positive rate windows do not replace valid baselines");
+  }
+
+  function testHoldUntilNextPreservesInvalidSnapshotGap() {
+    const customEvents = [
+      { name: "TcpAcceptQueueEvent", timestamp: 10, fields: { socket_cookie: "a", pending_connections: "4", backlog_limit: "10" } },
+      { name: "TcpAcceptQueueEvent", timestamp: 20, fields: { socket_cookie: "a", pending_connections: "5", backlog_limit: "0" } },
+      { name: "TcpAcceptQueueEvent", timestamp: 30, fields: { socket_cookie: "a", pending_connections: "6", backlog_limit: "10" } },
+      { name: "TcpAcceptQueueEvent", timestamp: 40, fields: { socket_cookie: "a", pending_connections: "8", backlog_limit: "10" } },
+    ];
+    const result = buildSchemaDrivenTimeSeriesViews(
+      { customEvents, segmentMetadata: new Map(), recordMaxTs: 50 },
+      getHardcodedViewSpecBundle({ includeDemos: true }),
+    );
+    const socket = result.views.find((candidate) => candidate.spec.id === "socket.accept_queue");
+    const points = socket.series[0].groups[0].points;
+    const supports = points.map((point) => [point.start, point.end, point.value]);
+    const expected = [[10, 20, 40], [30, 40, 60], [40, 50, 80]];
+    if (JSON.stringify(supports) !== JSON.stringify(expected)) {
+      fail(`invalid snapshot should delimit a stable gap: ${JSON.stringify(supports)}`);
+    }
+    const mean = evaluateViewSpecExpression({
+      op: "aggregate",
+      fn: "duration_weighted_mean",
+      over: { series: "utilization", range: "visible" },
+      value: { field: "point.value" },
+    }, {
+      metadata: new Map(),
+      series: socket.series,
+      ranges: { visible: { start: 15, end: 35 } },
+    });
+    if (mean !== 50) fail(`held snapshot aggregate should weight visible overlap, got ${mean}`);
+    pass("hold_until_next uses stable bounds and preserves invalid snapshot gaps");
+  }
+
+  function testStatefulSeriesRejectMultipleUnidentifiedComponents() {
+    const customEvents = [
+      { name: "ProcessResourceUsageEvent", timestamp: 0, fields: { user_cpu_ns: "0", system_cpu_ns: "0" } },
+      { name: "ProcessResourceUsageEvent", timestamp: 10, fields: { user_cpu_ns: "10", system_cpu_ns: "10" } },
+    ];
+    const result = buildSchemaDrivenTimeSeriesViews({
+      customEvents,
+      segmentMetadata: new Map([["process.available_parallelism", "4"]]),
+      sourceComponentCount: 2,
+    });
+    if (result.views.length !== 0 || result.diagnostics.length !== 1) {
+      fail(`multi-component stateful view should be skipped once: ${JSON.stringify(result)}`);
+    }
+    const diagnostic = result.diagnostics[0];
+    if (diagnostic.id !== "process.cpu" || diagnostic.seriesId !== "cores" ||
+        !diagnostic.message.includes("2 source components")) {
+      fail(`unexpected multi-component diagnostic: ${JSON.stringify(diagnostic)}`);
+    }
+    pass("Stateful series reject multiple components without stream identity");
   }
 
   function testTimeSeriesLineViewportAndDownsampling() {
@@ -409,18 +496,126 @@ async function main() {
     pass("Line rendering retains viewport neighbors and pixel-bounded extrema");
   }
 
+  function testTimeSeriesGeometryUsesHalfOpenRanges() {
+    const intervals = [
+      { id: "before", start: 0, end: 10, value: 1 },
+      { id: "first", start: 10, end: 20, value: 2 },
+      { id: "second", start: 20, end: 30, value: 3 },
+    ];
+    const visible = timeSeriesIntervalsInView(intervals, 10, 20);
+    if (visible.length !== 1 || visible[0].id !== "first") {
+      fail(`interval visibility should require positive half-open overlap: ${JSON.stringify(visible)}`);
+    }
+    if (findTimeSeriesIntervalAtTime(intervals, 20)?.id !== "second") {
+      fail("shared-boundary hit should select the interval beginning at the boundary");
+    }
+    if (intervalOverlapsRange(0, 10, 5, 5) || intervalOverlapsRange(0, 10, 8, 2) ||
+        intervalOverlapDuration(0, 10, 8, 2) !== 0) {
+      fail("empty and reversed ranges should never overlap an interval");
+    }
+
+    const steps = timeSeriesStepGeometry([
+      ...intervals,
+      { id: "gap", start: 40, end: 50, value: 4 },
+    ], 0, 50);
+    if (steps[1].connector?.t !== 10 || steps[2].connector?.t !== 20 || steps[3].connector !== null) {
+      fail(`step connectors should exist only across contiguous intervals: ${JSON.stringify(steps)}`);
+    }
+    pass("Time-series intervals use half-open visibility, hits, and connectors");
+  }
+
+  function testTimeSeriesGeometryPreservesDomainsAndGaps() {
+    const clipped = clipTimeSeriesLinePoints([
+      { t: 0, value: 1_000 },
+      { t: 100, value: 0 },
+    ], 90, 100);
+    const values = clipped.map((point) => point.value);
+    if (values.length !== 2 || Math.abs(values[0] - 100) > 1e-9 || values[1] !== 0) {
+      fail(`line domain should use interpolated visible values: ${JSON.stringify(clipped)}`);
+    }
+
+    const intervals = [];
+    for (let i = 0; i < 5; i++) intervals.push({ id: `left-${i}`, start: i, end: i + 1, value: i });
+    for (let i = 10; i < 15; i++) intervals.push({ id: `right-${i}`, start: i, end: i + 1, value: i });
+    const sampled = downsampleTimeSeriesIntervals(intervals, 0, 15, 1, "max_per_pixel");
+    if (sampled.length !== 2 || sampled[0].start !== 0 || sampled[0].end !== 5 ||
+        sampled[1].start !== 10 || sampled[1].end !== 15) {
+      fail(`interval downsampling should retain original support across gaps: ${JSON.stringify(sampled)}`);
+    }
+
+    const contiguous = Array.from({ length: 10 }, (_, i) => ({
+      id: `interval-${i}`,
+      start: i,
+      end: i + 1,
+      value: i,
+    }));
+    const contiguousSampled = downsampleTimeSeriesIntervals(
+      contiguous, 0, 10, 1, "max_per_pixel",
+    );
+    if (contiguousSampled.length !== 1 || contiguousSampled[0].start !== 0 ||
+        contiguousSampled[0].end !== 10 || !contiguousSampled[0].sampled) {
+      fail(`dense contiguous intervals should retain continuous coverage: ${JSON.stringify(contiguousSampled)}`);
+    }
+    const minMaxSampled = downsampleTimeSeriesIntervals(
+      contiguous, 0, 10, 1, "min_max_per_pixel",
+    );
+    if (minMaxSampled.length !== 2 || minMaxSampled[0].start !== 0 ||
+        minMaxSampled[1].end !== 10 ||
+        JSON.stringify(minMaxSampled.map((point) => point.sampled_role).sort()) !==
+          JSON.stringify(["max", "min"])) {
+      fail(`interval min/max downsampling should remain pixel-bounded: ${JSON.stringify(minMaxSampled)}`);
+    }
+    const averageIntervals = downsampleTimeSeriesIntervals([
+      { start: -1000, end: 1, value: 100 },
+      { start: 1, end: 2, value: 0 },
+      { start: 2, end: 3, value: 0 },
+      { start: 3, end: 4, value: 0 },
+      { start: 4, end: 5, value: 0 },
+    ], 0, 5, 1, "avg_per_pixel");
+    if (averageIntervals.length !== 1 || averageIntervals[0].value !== 20) {
+      fail(`interval averages should weight only visible duration: ${JSON.stringify(averageIntervals)}`);
+    }
+
+    const linePoints = Array.from({ length: 20 }, (_, t) => ({
+      t,
+      value: t,
+      ...(t === 10 ? { break_before: true } : {}),
+    }));
+    const sampledLine = downsampleTimeSeriesLinePoints(linePoints, 0, 20, 1, "min_max_per_pixel");
+    if (!sampledLine.some((point) => point.break_before)) {
+      fail("line downsampling should retain explicit run breaks");
+    }
+    const averageLine = downsampleTimeSeriesLinePoints(
+      Array.from({ length: 20 }, (_, t) => ({ t, value: t })),
+      0,
+      20,
+      1,
+      "avg_per_pixel",
+    );
+    if (averageLine.length !== 1 || averageLine[0].value !== 9.5 ||
+        averageLine[0].provenance?.t !== 19) {
+      fail(`average line downsampling should be bounded with explicit provenance: ${JSON.stringify(averageLine)}`);
+    }
+    pass("Time-series clipping and downsampling preserve visible domains and gaps");
+  }
+
   testProfilerOnlyTraceRangeUsesCpuSamples();
   testProfilerOnlyTraceRangeExpandsSingleCpuSample();
   testResourceOnlyTraceRangeUsesProcessResourceUsageEvents();
   testCustomOnlyTraceRangeUsesAnyCustomEvent();
-  testProcessCpuUsageSeriesDerivesIntervals();
-  testProcessCpuUsageSeriesSkipsInvalidPairs();
   testSchemaDrivenCpuUsageSeries();
   testSchemaViewBundleGatingAndSources();
   testViewSpecAggregateExpressions();
   testSchemaDrivenSocketAcceptQueueGroups();
-  testSchemaDrivenContextSwitchLines();
+  testSchemaDrivenContextSwitchIntervals();
+  testSchemaDrivenCpuResetCannotBeMasked();
+  testNestedRatesPreserveIndependentBaselines();
+  testNonPositiveRateWindowKeepsBaseline();
+  testHoldUntilNextPreservesInvalidSnapshotGap();
+  testStatefulSeriesRejectMultipleUnidentifiedComponents();
   testTimeSeriesLineViewportAndDownsampling();
+  testTimeSeriesGeometryUsesHalfOpenRanges();
+  testTimeSeriesGeometryPreservesDomainsAndGaps();
 
   const trace = await parseTrace(fs.readFileSync(tracePath));
   const evts = trace.events;

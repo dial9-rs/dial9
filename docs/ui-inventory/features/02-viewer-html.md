@@ -226,18 +226,18 @@ Foldable panel (`#custom-events-panel`, `data-panel-key=events`, 40px expanded /
 
 ---
 
-## L. CPU usage panel
+## L. Schema-driven time-series panels
 
-Foldable panel (`#cpu-panel`, `data-panel-key=cpu`, 92px expanded / 24px collapsed, hidden unless `processCpuUsage.intervals.length > 0`). Sources: `viewer.html:608-629`, `905-907`, `1972-1973`.
+Dynamic foldable panels (`.schema-time-series-panel`, 92px expanded / 24px collapsed) are created from resolved view specs. CPU Usage is the default schema-driven panel; demo mode also enables Socket Accept Queue and Context Switch Rate.
 
 | Feature | What it does | Access path | Source |
 | --- | --- | --- | --- |
-| L1. CPU stacked-area chart | Draws avg-cores-over-time bars, bg `#111b2e`, y-axis `0..max(1, max cores, available parallelism)`, grid at 25/50/75%; bars colored by load (blue-ish low -> pink/red high); a dashed orange capacity line (`rgba(255,207,153,.65)` + "N core capacity") when parallelism is known. | Expand CPU Usage panel. | `viewer.html:3505-3583` |
-| L2. Info label | Top-right shows `avg X cores [ - avg Y%] - max Z cores` for the visible window (percent only if parallelism known; non-finite shows `-`). | Top-right of panel. | `viewer.html:906`, `3488-3515` |
-| L3. Hover tooltip | Over an interval: Window/CPU-time durations, Cores, optional Total CPU %; cursor `crosshair`; binary-search interval lookup (`findProcessCpuIntervalAt`). | Hover CPU chart. | `viewer.html:4154-4182`, `3585-3607` |
-| L4. Crosshair sync | Hovering updates global `mouseNs` and redraws the crosshair; the panel owns its own tooltip and suppresses the lanes tooltip. | Hover CPU chart. | `viewer.html:6228-6232` |
-| L5. Data source | Built by `buildProcessCpuUsageSeries` from `ProcessResourceUsageEvent` custom events (user/system CPU deltas); `available_parallelism` from `segmentMetadata('process.available_parallelism')`. | Internal on load. | `viewer.html:1970-1971`; `trace_analysis.js:85-148` |
-| L6. Click handler | None wired on the CPU canvas (mousemove/mouseleave only). Status: `DEAD` (no click affordance). | N/A. | `viewer.html:4154-4182` |
+| L1. Generic marks | Draws explicit `line`, `step_line`, and `step_area` series with shared clipping, half-open interval visibility, stable semantic bounds, and gap-preserving downsampling. | Expand a schema panel. | `renderSchemaTimeSeriesPanel`; `trace_analysis.js` time-series geometry helpers. |
+| L2. CPU view | Computes `rate(user_cpu_ns) + rate(system_cpu_ns)` as cores, shows duration-weighted avg/max summaries, an expandable one-core initial domain, and the available-parallelism guide. Values are not clamped to capacity. | Expand CPU Usage. | Hardcoded `process.cpu` view in `trace_analysis.js`. |
+| L3. Hover tooltip | Resolves original points/intervals rather than widened downsample representatives. At a shared boundary, the interval beginning at that timestamp owns the hit. | Hover a schema chart. | `findSchemaTimeSeriesHit`; `schemaTimeSeriesTooltipHtml`. |
+| L4. Legend | Lists every resolved series partition, followed by guides and thresholds. | Expanded panel header. | `updateSchemaPanelLegend`. |
+| L5. Data source | The frontend MVP resolves exact event names from `customEvents`. Stateful views are skipped with one diagnostic when multiple source components are loaded without preserved component identity. | Internal on load. | `buildTimeSeriesFromSpec`; `buildSchemaDrivenTimeSeriesViews`. |
+| L6. Crosshair sync | Hovering updates global `mouseNs`; each dynamic panel owns its tooltip and participates in the shared crosshair. | Hover a schema chart. | `handleSchemaTimeSeriesMouseMove`; main-area mouse handler. |
 
 ---
 
@@ -282,14 +282,14 @@ Optional 160px panel (`#task-detail`), not foldable, shown only when a task is s
 
 ## O. Foldable panel mechanics
 
-Applies to spans / events / cpu / queue panels (Task Detail is NOT foldable). Sources: `viewer.html:399-427`, `1366-1441`.
+Applies to spans, events, queue, and dynamic schema panels (Task Detail is NOT foldable). Sources: `viewer.html` foldable-panel helpers.
 
 | Feature | What it does | Access path | Source |
 | --- | --- | --- | --- |
 | O1. Collapse toggle (click) | Clicking `.chart-label` (or anywhere on a collapsed panel) toggles `is-collapsed`: 24px height, canvas hidden (`display:none !important`), label max-height 18px. Clicking `.kv-copy`, or a non-label area of an expanded panel, does not toggle. | Click panel label / collapsed body. | `viewer.html:1434-1439` |
 | O2. Collapse toggle (keyboard) | Label has `role=button`, `tabindex=0`, `aria-expanded`; Enter/Space toggles when focused. | Tab to label, Enter/Space. | `viewer.html:1426-1432` |
 | O3. Chevron indicator | CSS `::before` caret shows expanded vs collapsed state (`#6c63ff`, 0.85em, 7px right margin). | Visual first char of label. | `viewer.html:410-420` |
-| O4. localStorage persistence | State stored under `dial9.viewer.panelCollapsed.<key>` (`collapsed`/`expanded`), with an in-memory `viewerStorageFallback` map when localStorage is unavailable; all four panels start `is-collapsed` and are synced on load. | Automatic. | `viewer.html:1370-1420` |
+| O4. localStorage persistence | State stored under `dial9.viewer.panelCollapsed.<key>` (`collapsed`/`expanded`), with an in-memory `viewerStorageFallback` map when localStorage is unavailable; static and dynamic panels are synced on load. | Automatic. | `viewer.html` foldable-panel helpers. |
 | O5. Legend sync | Collapsing Spans hides `#span-legend`; Events hides `#ce-legend`; each shows only if expanded, not display:none, and its data is non-empty. | Automatic. | `viewer.html:1403-1409` |
 | O6. Render on toggle | `setPanelCollapsed()` calls `renderAll()` (unless `{redraw:false}`) so the layout is responsive. | Automatic. | `viewer.html:1416-1420` |
 | O7. Expanded-only labels | `.panel-expanded-label` elements (queue legend items) are hidden when collapsed. | Automatic. | `viewer.html:425-427` |
@@ -404,7 +404,7 @@ Single shared `#tooltip` element (`display:none`, `position:fixed`, `#222244` bg
 | Feature | What it does | Access path | Source |
 | --- | --- | --- | --- |
 | V1. placeTooltip | Positions the tooltip near the cursor (`x+12` clamped to `innerWidth-w-8`, `y+dy` default 16); flips above the cursor when it would overflow the bottom; min 8px margins; uses actual offset size. | Automatic after setting innerHTML. | `viewer.html:1446-1453` |
-| V2. Panel-owned tooltips | Span, custom-events, and CPU panels each set the shared tooltip's contents and suppress the lanes tooltip while hovered (see J6/K3/L3); crosshair keeps tracking for correlation. | Hover the respective panel. | `viewer.html:3621-3673`, `4057-4102`, `4154-4182` |
+| V2. Panel-owned tooltips | Span, custom-events, and schema-driven panels each set the shared tooltip's contents and suppress the lanes tooltip while hovered (see J6/K3/L3); crosshair keeps tracking for correlation. | Hover the respective panel. | `viewer.html` panel hover handlers. |
 | V3. Hide on drag / leave | Tooltip hides (and `mouseNs=null`) during drag; hidden on mouseleave of lanes/panels and when the cursor leaves the draw area (label gutter, past `drawW`, out-of-range lane). | Automatic. | `viewer.html:6206-6209`, `6238-6259`, `6413-6417` |
 
 ---
@@ -415,13 +415,13 @@ Single shared `#tooltip` element (`display:none`, `position:fixed`, `#222244` bg
 | --- | --- | --- |
 | W1. Time formatting | `useAbsoluteTime`/`useLocalTz` drive `fmtTs`, `fmtDuration`, `fmtWallClock`, `fmtDelta`; toggling re-renders all views and rewrites labels. | `viewer.html:1155-1230` |
 | W2. Coloring | 20-color `SPAN_COLORS` palette; `spanColor`/`ceColor` memoize per-name color (round-robin, cleared on reload); poll heatmap `pollColor`/`pollColorDim` (log-scale, 24-bin quantized, dim cache); frame color via `flamegraphColor` (shared with SVG export). | `viewer.html:1056-1147`; `trace_analysis.js:184-250`, `979-993` |
-| W3. Render pipeline | `renderAll()` orchestrates timeline/lanes/span/CE/CPU/queue/task-detail/crosshair each frame, computing `window.sharedVisibleMaxQ` first for consistent y-scaling; `scheduleRenderAll` (RAF) coalesces; profiling under `D9PROF`. | `viewer.html:2579-2660` |
+| W3. Render pipeline | `renderAll()` orchestrates timeline/lanes/span/CE/schema time-series/queue/task-detail/crosshair each frame, computing `window.sharedVisibleMaxQ` first for consistent y-scaling; `scheduleRenderAll` (RAF) coalesces; profiling under `D9PROF`. | `viewer.html` rendering section. |
 | W4. Performance LOD | `pixelDownsampleSpans` (one representative per pixel column), `makeBarCoalescer` (merge adjacent same-color bars), `pixelCoverage` (poll sampling-coverage), binary-search hit tests, and precomputed color palettes keep millions of spans/polls smooth. | `viewer.html:2949-2972`; `trace_analysis.js:280-360` |
 | W5. Trace parsing | `TraceDecoder` (D9TF binary: magic, self-describing schemas, ULEB128, pooled strings/frames, delta timestamps, streaming snapshot/restore); `TraceParser.parseTrace`/`parseTraceStream` produce the full `ParsedTrace`; `canStreamDecode`, `fetchTraces`, `fetchTraceStream`, `deriveBlockInPlaceGaps`, `symbolizeChain`, `deduplicateSamples`, `formatFrame`. | `decode.js:121-406`; `trace_parser.js:90-1514` |
-| W6. Analysis | `TraceAnalysis`: `buildWorkerSpans`, `attachCpuSamples`, `computeSchedulingDelays`, `computePollWakes`, `buildProcessCpuUsageSeries`, `buildActiveTaskTimeline`, `getTraceTimeRange`, `hasCpuProfileSamples`, `buildFlamegraphTree`/`flatten`, `filterPointsOfInterest`, `analyzeAllocations`, span layout helpers. | `trace_analysis.js` (throughout) |
+| W6. Analysis | `TraceAnalysis`: runtime/span/task analysis plus schema-driven computed fields, stateful expressions, explicit point/interval series, aggregates, and generic time-series geometry/downsampling helpers. | `trace_analysis.js` (throughout) |
 | W7. Formatting utils | `formatHumanDuration` (ns->d/h/m/s/us/ns), `formatHumanBytes` (binary units), `formatFieldValue` (unit-aware: ns/us/ms/s, bytes). | `format.js:9-69` |
 | W8. Flamegraph export | `FlamegraphExport`: `treeToFolded`, `treeToInteractiveSvg` (self-contained, hover/zoom/regex-search/URL-state), `buildExportRoot`, `layoutTree`, `filenameStem`, `escapeXml`, re-exported `flamegraphColor`. | `flamegraph_export.js:60-585` |
 | W9. Credentials module | `Dial9Creds` (sessionStorage): `get/has/set/clear/parse/check/listBuckets/headers`; never persists beyond the tab, headers only ride same-origin fetches; fires `dial9:credentials-changed`. | `creds.js:51-257` |
-| W10. State reset on load | `processTrace` clears all selection/filter state (`selectedTaskId`, span/event selections, `selectedCENames`, `selectedSpanNames`, span filters, `processCpuUsage`) before analyzing a new trace, preventing stale carry-over. | `viewer.html:1984-2033` |
+| W10. State reset on load | `processTrace` clears selection/filter state and dynamic schema panels before analyzing a new trace, preventing stale carry-over. | `viewer.html` trace reset/processing paths. |
 | W11. URL parameters | `?trace=` (load), `?start`/`?end` (time-range filter), `?prof=1` (profiler), `?svc`/`?host`/`?from`/`?to`/`?segs` (structured metadata for the info block). Range params managed without reload. | `viewer.html:1816`, `1874-1899`, `2087-2091` |
 | W12. Layout constants | `LABEL_W`=100px (gutter), `LANE_H`=60px (worker lane height); used across positioning, hit-testing, and lane auto-scroll. | `viewer.html:1354-1355` |

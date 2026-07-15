@@ -605,28 +605,6 @@
                 height: 100%;
                 display: block;
             }
-            #cpu-panel {
-                display: none;
-                height: 92px;
-                background: #111b2e;
-                border-top: 1px solid #333;
-                flex-shrink: 0;
-                position: relative;
-                overflow: hidden;
-            }
-            #cpu-panel .chart-label {
-                position: absolute;
-                top: 4px;
-                left: 8px;
-                font-size: 0.75em;
-                color: #888;
-                z-index: 2;
-            }
-            #cpu-panel canvas {
-                width: 100%;
-                height: 100%;
-                display: block;
-            }
             .schema-time-series-panel {
                 display: none;
                 height: 92px;
@@ -643,6 +621,10 @@
                 display: inline-flex;
                 align-items: center;
                 white-space: nowrap;
+                max-width: max(120px, calc(100% - 260px));
+                overflow-x: auto;
+                overflow-y: hidden;
+                scrollbar-width: thin;
                 font-size: 0.75em;
                 color: #888;
                 z-index: 2;
@@ -975,11 +957,6 @@
                     <span id="ce-panel-info" style="position:absolute;top:4px;right:12px;font-size:0.75em;color:#aaa;z-index:2;pointer-events:none"></span>
                     <canvas id="ce-panel-canvas"></canvas>
                 </div>
-                <div id="cpu-panel" class="foldable-panel is-collapsed" data-panel-key="cpu" style="display:none">
-                    <div class="chart-label" id="cpu-panel-label">CPU Usage</div>
-                    <span id="cpu-panel-info" style="position:absolute;top:4px;right:12px;font-size:0.75em;color:#aaa;z-index:2;pointer-events:none"></span>
-                    <canvas id="cpu-panel-canvas"></canvas>
-                </div>
                 <div id="task-detail">
                     <span class="chart-label" id="task-detail-label">Task Detail</span>
                     <span id="task-detail-status" style="position:absolute;top:4px;right:12px;font-size:0.75em;color:#aaa;z-index:2"></span>
@@ -1057,7 +1034,7 @@
         <script src="panel_layout.js"></script>
         <script>
             const { EVENT_TYPES: ET, parseTrace, formatFrame, symbolizeChain, deduplicateSamples } = TraceParser;
-            const { buildWorkerSpans, attachCpuSamples, buildActiveTaskTimeline, computeSchedulingDelays, filterPointsOfInterest, buildSpanData, collectDescendants, selectSpanRenderSet, enclosingSpans, computeSpanLayout, getTraceTimeRange, hasCpuProfileSamples, buildProcessCpuUsageSeries, computeRuntimeGroups, buildSchemaDrivenTimeSeriesViews, evaluateViewSpecExpression, evaluateViewSpecNumber, getHardcodedViewSpecBundle, timeSeriesLinePointsInView, downsampleTimeSeriesLinePoints } = TraceAnalysis;
+            const { buildWorkerSpans, attachCpuSamples, buildActiveTaskTimeline, computeSchedulingDelays, filterPointsOfInterest, buildSpanData, collectDescendants, selectSpanRenderSet, enclosingSpans, computeSpanLayout, getTraceTimeRange, hasCpuProfileSamples, computeRuntimeGroups, buildSchemaDrivenTimeSeriesViews, evaluateViewSpecExpression, evaluateViewSpecNumber, getHardcodedViewSpecBundle, clipTimeSeriesLinePoints, timeSeriesIntervalsInView, downsampleTimeSeriesIntervals, timeSeriesStepGeometry, findTimeSeriesIntervalAtTime, downsampleTimeSeriesLinePoints } = TraceAnalysis;
 
             function esc(s) {
                 return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -1328,13 +1305,6 @@
             // Each entry: { t, w, local }. Used by renderQueueChart to avoid per-frame work.
             let mergedLocalSamples = [];
             let maxLocalQueue = 1;
-            let processCpuUsage = {
-                samples: [],
-                intervals: [],
-                availableParallelism: null,
-                maxCores: 0,
-                avgCores: 0,
-            };
             let schemaTimeSeriesViews = [];
             let schemaTimeSeriesPanelEls = new Map();
             // Points of interest for navigation
@@ -1427,7 +1397,6 @@
             //   • Worker lanes     (renderLane)           — uses DOM flex instead of canvas offset
             //   • Span panel       (renderSpanPanel)
             //   • Schema panels    (renderSchemaTimeSeriesPanel)
-            //   • CPU panel        (renderProcessCpuPanel)
             //   • Task detail      (renderTaskDetail)
             //   • Queue chart      (renderQueueChart)
             //
@@ -1604,6 +1573,7 @@
                 resetTraceState({ clearUrlRange: true });
                 currentTraceBuffer = null;
                 currentTraceName = null;
+                currentTraceSourceComponentCount = 1;
                 viewer.style.display = "none";
                 resetDropZone();
             });
@@ -1612,6 +1582,7 @@
             // re-parse in memory with a different time filter.
             let currentTraceBuffer = null;
             let currentTraceName = null;
+            let currentTraceSourceComponentCount = 1;
 
             /** Clear UI state tied to the current trace so it doesn't leak into the next one. */
             function resetTraceState({ clearUrlRange } = {}) {
@@ -1623,12 +1594,10 @@
                 relatedExpand = {};
                 relatedItems = [];
                 hoveredWakerTaskId = null;
-                processCpuUsage = { samples: [], intervals: [], availableParallelism: null, maxCores: 0, avgCores: 0 };
                 schemaTimeSeriesViews = [];
                 clearSchemaTimeSeriesPanelElements();
                 hideStackPopup();
                 taskDetailPanel.style.display = "none";
-                document.getElementById("cpu-panel").style.display = "none";
                 schedPanelTimeRange = null;
 
                 // Default: clear the URL range only when replacing a visible
@@ -1666,7 +1635,8 @@
 
             /** Finish loading: analyze the parsed trace, retain the buffer for
              *  in-memory re-parse (Set/Clear Range), and show the viewer. */
-            async function showParsedTrace(parsed, buffer, name) {
+            async function showParsedTrace(parsed, buffer, name, sourceComponentCount = 1) {
+                parsed.sourceComponentCount = sourceComponentCount;
                 trace = parsed;
                 updateLoadProgress(`Analyzing ${trace.events.length.toLocaleString()} events…`);
                 // processTrace() runs synchronously and hogs the main thread for
@@ -1689,6 +1659,7 @@
                 stopLoadTimer();
                 currentTraceBuffer = buffer;
                 currentTraceName = name;
+                currentTraceSourceComponentCount = sourceComponentCount;
                 showViewer(name);
                 // Apply a one-shot deep-link focus now that lanes exist, then
                 // consume it so a later Set/Clear-Range re-parse doesn't reapply.
@@ -1729,13 +1700,13 @@
             }
 
             /** Parse an already-fetched buffer and show the viewer. */
-            async function parseAndShowTrace(buffer, name, opts = {}) {
+            async function parseAndShowTrace(buffer, name, opts = {}, sourceComponentCount = 1) {
                 try {
                     const fullOpts = { ...opts, onParseProgress: makeParseProgress() };
                     updateLoadProgress("Decompressing…");
                     const parsed = await parseTrace(buffer, fullOpts);
                     if (loadPerf) loadPerf.parseDoneMs = performance.now();
-                    await showParsedTrace(parsed, buffer, name);
+                    await showParsedTrace(parsed, buffer, name, sourceComponentCount);
                 } catch (err) {
                     if (err.name === "AbortError") return;
                     alert("Error: " + err.message);
@@ -1788,7 +1759,7 @@
                     const buffer = new Uint8Array(total);
                     let off = 0;
                     for (const c of captured) { buffer.set(c, off); off += c.length; }
-                    await showParsedTrace(parsed, buffer.buffer, name);
+                    await showParsedTrace(parsed, buffer.buffer, name, list.length);
                 } catch (err) {
                     if (err.name === "AbortError") return;
                     throw err;
@@ -1955,7 +1926,7 @@
                     // fetch and parse are separate phases (unlike streaming).
                     if (loadPerf) { loadPerf.mode = "buffered"; loadPerf.fetchDoneMs = performance.now(); }
                     loadAbortController = null;
-                    await parseAndShowTrace(arrayBuffer, name, getParseOptions());
+                    await parseAndShowTrace(arrayBuffer, name, getParseOptions(), list.length);
                 } catch (err) {
                     if (err.name === 'AbortError') return;
                     if (/HTTP 401/.test(err.message) && window.Dial9Creds && !Dial9Creds.has()) {
@@ -1985,7 +1956,12 @@
                 const opts = {};
                 if (startNs != null) opts.startTime = startNs;
                 if (endNs != null) opts.endTime = endNs;
-                await parseAndShowTrace(currentTraceBuffer, currentTraceName, opts);
+                await parseAndShowTrace(
+                    currentTraceBuffer,
+                    currentTraceName,
+                    opts,
+                    currentTraceSourceComponentCount,
+                );
 
                 clearRangeBtn.style.display = (startNs != null || endNs != null) ? "" : "none";
             }
@@ -2196,7 +2172,6 @@
                 schedDelays = computeSchedulingDelays(workerSpans, workerIds, wakesByTask);
                 console.log(`Found ${Object.keys(wakesByTask).length} tasks with wake events, ${schedDelays.length} scheduling delays`);
 
-                document.getElementById("cpu-panel").style.display = "none";
                 const specResult = buildSchemaDrivenTimeSeriesViews(
                     trace,
                     getHardcodedViewSpecBundle({ includeDemos: demoMode }),
@@ -3939,7 +3914,7 @@
                     const mark = series.spec.mark || "line";
                     for (const group of series.groups) {
                         if (mark === "line") {
-                            for (const point of timeSeriesLinePointsInView(group.points, viewStart, viewEnd)) {
+                            for (const point of clipTimeSeriesLinePoints(group.points, viewStart, viewEnd)) {
                                 if (!Number.isFinite(point.value)) continue;
                                 if (!sawValue || point.value > max) max = point.value;
                                 if (display.y_min == null && point.value < min) min = point.value;
@@ -3947,11 +3922,7 @@
                             }
                             continue;
                         }
-                        for (let i = 0; i < group.points.length; i++) {
-                            const point = group.points[i];
-                            const segStart = point.end > point.start ? point.start : point.t;
-                            const segEnd = schemaPointEnd(group.points, i);
-                            if (segEnd < viewStart || segStart > viewEnd) continue;
+                        for (const point of timeSeriesIntervalsInView(group.points, viewStart, viewEnd)) {
                             if (!Number.isFinite(point.value)) continue;
                             if (!sawValue || point.value > max) max = point.value;
                             if (display.y_min == null && point.value < min) min = point.value;
@@ -3974,82 +3945,16 @@
                 return { min, max };
             }
 
-            function schemaPointEnd(points, index) {
-                const point = points[index];
-                if (point.end > point.start) return point.end;
-                const next = points[index + 1];
-                return next ? next.t : viewEnd;
-            }
-
-            function schemaVisibleSegments(points) {
-                const segments = [];
-                for (let i = 0; i < points.length; i++) {
-                    const point = points[i];
-                    const start = point.end > point.start ? point.start : point.t;
-                    const end = schemaPointEnd(points, i);
-                    if (end < viewStart) continue;
-                    if (start > viewEnd) break;
-                    segments.push({ point, start, end });
-                }
-                return segments;
-            }
-
-            function downsampleSchemaSegments(segments, mode, drawW) {
-                if (!mode || drawW <= 0 || segments.length <= drawW * 2) return segments;
-                const buckets = new Map();
-                const span = viewEnd - viewStart || 1;
-                for (const segment of segments) {
-                    const visibleStart = Math.max(segment.start, viewStart);
-                    const visibleEnd = Math.min(segment.end, viewEnd);
-                    const mid = (visibleStart + visibleEnd) / 2;
-                    const px = Math.max(0, Math.min(Math.floor(drawW) - 1, Math.floor(((mid - viewStart) / span) * drawW)));
-                    let bucket = buckets.get(px);
-                    if (!bucket) {
-                        bucket = {
-                            px,
-                            start: segment.start,
-                            end: segment.end,
-                            last: segment,
-                            max: segment,
-                            min: segment,
-                            sum: 0,
-                            count: 0,
-                        };
-                        buckets.set(px, bucket);
-                    }
-                    if (segment.start < bucket.start) bucket.start = segment.start;
-                    if (segment.end > bucket.end) bucket.end = segment.end;
-                    if (segment.point.t >= bucket.last.point.t) bucket.last = segment;
-                    if (segment.point.value > bucket.max.point.value) bucket.max = segment;
-                    if (segment.point.value < bucket.min.point.value) bucket.min = segment;
-                    bucket.sum += segment.point.value;
-                    bucket.count++;
-                }
-
-                const out = [];
-                for (const bucket of [...buckets.values()].sort((a, b) => a.px - b.px)) {
-                    if (mode === "max_per_pixel") {
-                        out.push({ point: bucket.max.point, start: bucket.start, end: bucket.end });
-                    } else if (mode === "avg_per_pixel") {
-                        out.push({
-                            point: { ...bucket.last.point, value: bucket.sum / bucket.count },
-                            start: bucket.start,
-                            end: bucket.end,
-                        });
-                    } else if (mode === "min_max_per_pixel") {
-                        out.push({ point: bucket.min.point, start: bucket.start, end: bucket.end });
-                        if (bucket.max.point !== bucket.min.point) {
-                            out.push({ point: bucket.max.point, start: bucket.start, end: bucket.end });
-                        }
-                    } else {
-                        out.push({ point: bucket.last.point, start: bucket.start, end: bucket.end });
-                    }
-                }
-                return out;
-            }
-
-            function updateSchemaPanelLegend(panel, guides, thresholds) {
+            function updateSchemaPanelLegend(panel, view, guides, thresholds) {
                 const items = [];
+                view.series.forEach((series, seriesIndex) => {
+                    series.groups.forEach((group, groupIndex) => {
+                        items.push({
+                            text: group.title || series.spec.title || series.spec.id,
+                            color: schemaSeriesBaseColor(seriesIndex, groupIndex, series.spec),
+                        });
+                    });
+                });
                 for (const guide of guides) {
                     const value = formatSpecValue(guide.value, guide.unit);
                     const text = guide.show_value === false
@@ -4069,6 +3974,7 @@
                 const signature = JSON.stringify(items);
                 if (legend.dataset.signature === signature) return;
                 legend.dataset.signature = signature;
+                legend.title = items.map((item) => item.text).join(" · ");
                 legend.replaceChildren();
                 for (const item of items) {
                     const entry = document.createElement("span");
@@ -4086,13 +3992,14 @@
                 const panel = schemaTimeSeriesPanelEls.get(schemaPanelKey(view));
                 if (!panel || panel.style.display === "none") return;
                 panel._schemaHits = [];
+                panel._schemaStepGroups = [];
 
                 const ph = 92;
                 const info = panel.querySelector(".schema-panel-info");
                 const guides = schemaGuideValues(view);
                 const thresholds = schemaThresholdValues(view);
                 const yBounds = schemaYBounds(view, guides, thresholds);
-                updateSchemaPanelLegend(panel, guides, thresholds);
+                updateSchemaPanelLegend(panel, view, guides, thresholds);
                 const summaries = [];
                 for (const summary of view.spec.summary || []) {
                     const value = evaluateViewSpecExpression(summary.expr, schemaExpressionContext(view));
@@ -4105,18 +4012,14 @@
                     const mark = series.spec.mark || "line";
                     for (const group of series.groups) {
                         if (mark === "line") {
-                            const points = timeSeriesLinePointsInView(group.points, viewStart, viewEnd);
+                            const points = clipTimeSeriesLinePoints(group.points, viewStart, viewEnd);
                             visiblePoints += points.length;
                             for (const point of points) {
                                 if (visibleMax == null || point.value > visibleMax) visibleMax = point.value;
                             }
                             continue;
                         }
-                        for (let i = 0; i < group.points.length; i++) {
-                            const point = group.points[i];
-                            const segStart = point.end > point.start ? point.start : point.t;
-                            const segEnd = schemaPointEnd(group.points, i);
-                            if (segEnd < viewStart || segStart > viewEnd) continue;
+                        for (const point of timeSeriesIntervalsInView(group.points, viewStart, viewEnd)) {
                             visiblePoints++;
                             if (visibleMax == null || point.value > visibleMax) visibleMax = point.value;
                         }
@@ -4158,6 +4061,11 @@
                     ctx.stroke();
                 }
 
+                ctx.save();
+                ctx.beginPath();
+                ctx.rect(LABEL_W, chartTop, drawW, chartH);
+                ctx.clip();
+
                 for (const threshold of thresholds) {
                     const y = valueToY(threshold.value);
                     const fallback = schemaSeriesBaseColor(threshold.seriesIndex, 0, threshold.seriesSpec);
@@ -4194,63 +4102,81 @@
                                 points, viewStart, viewEnd, drawW, seriesSpec.downsample,
                             );
                             if (linePoints.length === 0) return;
-                            ctx.save();
-                            ctx.beginPath();
-                            ctx.rect(LABEL_W, chartTop, drawW, chartH);
-                            ctx.clip();
                             ctx.strokeStyle = baseColor;
                             ctx.lineWidth = 1.5;
-                            ctx.beginPath();
-                            let previous = null;
+                            const runs = [];
+                            let run = [];
                             for (const point of linePoints) {
-                                const x = nsToPanelX(point.t);
-                                const y = valueToY(point.value);
-                                if (!previous) {
-                                    ctx.moveTo(x, y);
-                                } else {
-                                    ctx.lineTo(x, y);
+                                if (point.break_before && run.length > 0) {
+                                    runs.push(run);
+                                    run = [];
+                                }
+                                run.push(point);
+                            }
+                            if (run.length > 0) runs.push(run);
+
+                            for (const lineRun of runs) {
+                                if (lineRun.length === 1) {
+                                    const point = lineRun[0];
+                                    const x = nsToPanelX(point.t);
+                                    const y = valueToY(point.value);
+                                    ctx.fillStyle = baseColor;
+                                    ctx.fillRect(x - 1.5, y - 1.5, 3, 3);
                                     panel._schemaHits.push({
-                                        kind: "line",
+                                        kind: "point",
                                         series,
                                         group,
-                                        fromPoint: previous.point,
-                                        point,
-                                        x1: previous.x,
-                                        y1: previous.y,
-                                        x2: x,
-                                        y2: y,
+                                        point: point.provenance || point,
+                                        x,
+                                        y,
                                     });
+                                    continue;
                                 }
-                                previous = { point, x, y };
-                            }
-                            if (linePoints.length > 1) {
+
+                                ctx.beginPath();
+                                let previous = null;
+                                for (const point of lineRun) {
+                                    const x = nsToPanelX(point.t);
+                                    const y = valueToY(point.value);
+                                    if (!previous) ctx.moveTo(x, y);
+                                    else {
+                                        ctx.lineTo(x, y);
+                                        panel._schemaHits.push({
+                                            kind: "line",
+                                            series,
+                                            group,
+                                            fromPoint: previous.point.provenance || previous.point,
+                                            point: point.provenance || point,
+                                            x1: previous.x,
+                                            y1: previous.y,
+                                            x2: x,
+                                            y2: y,
+                                        });
+                                    }
+                                    previous = { point, x, y };
+                                }
                                 ctx.stroke();
-                            } else {
-                                const point = linePoints[0];
-                                const x = nsToPanelX(point.t);
-                                const y = valueToY(point.value);
-                                ctx.fillStyle = baseColor;
-                                ctx.fillRect(x - 1.5, y - 1.5, 3, 3);
-                                panel._schemaHits.push({
-                                    kind: "point", series, group, point, x, y,
-                                });
                             }
-                            ctx.restore();
                             return;
                         }
 
-                        const segments = downsampleSchemaSegments(
-                            schemaVisibleSegments(points), seriesSpec.downsample, drawW,
+                        panel._schemaStepGroups.push({
+                            series,
+                            group,
+                            points,
+                            mark,
+                            valueToY,
+                            chartBottom: chartTop + chartH,
+                        });
+                        const sampledPoints = downsampleTimeSeriesIntervals(
+                            points, viewStart, viewEnd, drawW, seriesSpec.downsample,
                         );
-                        for (const segment of segments) {
+                        for (const segment of timeSeriesStepGeometry(sampledPoints, viewStart, viewEnd)) {
                             const point = segment.point;
-                            const segStart = segment.start;
-                            const segEnd = segment.end;
-                            if (segEnd < viewStart) continue;
-                            if (segStart > viewEnd) break;
-                            const x1 = nsToPanelXClamped(segStart);
-                            const x2 = nsToPanelXClamped(segEnd);
-                            const w = Math.max(1, x2 - x1);
+                            const x1 = nsToPanelXClamped(segment.start);
+                            const x2 = nsToPanelXClamped(segment.end);
+                            const w = x2 - x1;
+                            if (!(w > 0)) continue;
                             const y = valueToY(point.value);
                             const h = chartTop + chartH - y;
                             const color = thresholdColor(point.value, seriesThresholds, baseColor);
@@ -4265,22 +4191,21 @@
                             }
                             ctx.strokeStyle = color;
                             ctx.lineWidth = 1.5;
+                            if (segment.connector) {
+                                const x = nsToPanelXClamped(segment.connector.t);
+                                ctx.beginPath();
+                                ctx.moveTo(x, valueToY(segment.connector.from));
+                                ctx.lineTo(x, valueToY(segment.connector.to));
+                                ctx.stroke();
+                            }
                             ctx.beginPath();
                             ctx.moveTo(x1, y);
-                            ctx.lineTo(x1 + w, y);
+                            ctx.lineTo(x2, y);
                             ctx.stroke();
-                            panel._schemaHits.push({
-                                kind: "step",
-                                series,
-                                group,
-                                point,
-                                x1,
-                                x2: x1 + w,
-                                y,
-                            });
                         }
                     });
                 });
+                ctx.restore();
             }
 
             function renderSchemaTimeSeriesPanels(scrollbarW) {
@@ -4295,19 +4220,24 @@
                 return Math.hypot(px - (x1 + t * dx), py - (y1 + t * dy));
             }
 
-            function findSchemaTimeSeriesHit(panel, mx, my) {
+            function findSchemaTimeSeriesHit(panel, mx, my, timestamp) {
                 let best = null;
                 let bestScore = Infinity;
+                for (const stepGroup of panel._schemaStepGroups || []) {
+                    const point = findTimeSeriesIntervalAtTime(stepGroup.points, timestamp);
+                    if (!point) continue;
+                    const y = stepGroup.valueToY(point.value);
+                    const insideArea = stepGroup.mark === "step_area" &&
+                        my >= Math.min(y, stepGroup.chartBottom) &&
+                        my <= Math.max(y, stepGroup.chartBottom);
+                    const score = insideArea ? 0 : Math.abs(my - y);
+                    if (score <= 10 && score < bestScore) {
+                        bestScore = score;
+                        best = { kind: "step", ...stepGroup, point };
+                    }
+                }
                 for (const hit of panel._schemaHits || []) {
-                    if (hit.kind === "step") {
-                        const xDistance = mx < hit.x1 ? hit.x1 - mx : mx > hit.x2 ? mx - hit.x2 : 0;
-                        if (xDistance > 8) continue;
-                        const score = Math.abs(my - hit.y) + xDistance * 4;
-                        if (score < bestScore) {
-                            bestScore = score;
-                            best = hit;
-                        }
-                    } else if (hit.kind === "line") {
+                    if (hit.kind === "line") {
                         const score = pointToSegmentDistance(mx, my, hit.x1, hit.y1, hit.x2, hit.y2);
                         if (score <= 10 && score < bestScore) {
                             bestScore = score;
@@ -4363,10 +4293,10 @@
                 const layout = timePanelLayout(panel, scrollbarW);
 
                 let hit = null;
-                if (mx >= LABEL_W && mx <= LABEL_W + layout.drawW) {
+                if (mx >= LABEL_W && mx < LABEL_W + layout.drawW) {
                     const ns = layout.panelXToNs(mx);
                     mouseNs = ns;
-                    hit = findSchemaTimeSeriesHit(panel, mx, my);
+                    hit = findSchemaTimeSeriesHit(panel, mx, my, ns);
                 }
 
                 canvas.style.cursor = hit ? "crosshair" : "default";
@@ -4378,140 +4308,6 @@
                     tooltip.style.display = "none";
                 }
                 scheduleCrosshairRedraw();
-            }
-
-            function fmtCpuCores(value) {
-                if (!Number.isFinite(value)) return "-";
-                return value
-                    .toFixed(value >= 10 ? 1 : 2)
-                    .replace(/(\.\d*?)0+$/, "$1")
-                    .replace(/\.$/, "");
-            }
-
-            function fmtCpuPercent(value) {
-                if (!Number.isFinite(value)) return "-";
-                return `${value.toFixed(1)}%`;
-            }
-
-            function visibleCpuStats() {
-                let maxCores = 0;
-                let totalOverlapNs = 0;
-                let weightedCoresNs = 0;
-                for (const interval of processCpuUsage.intervals) {
-                    if (interval.end < viewStart) continue;
-                    if (interval.start > viewEnd) break;
-                    const overlap = Math.min(interval.end, viewEnd) - Math.max(interval.start, viewStart);
-                    if (!(overlap > 0)) continue;
-                    if (interval.cores > maxCores) maxCores = interval.cores;
-                    totalOverlapNs += overlap;
-                    weightedCoresNs += interval.cores * overlap;
-                }
-                const avgCores = totalOverlapNs > 0 ? weightedCoresNs / totalOverlapNs : 0;
-                return { avgCores, maxCores };
-            }
-
-            function renderProcessCpuPanel(scrollbarW) {
-                const panel = document.getElementById("cpu-panel");
-                if (panel.style.display === "none") return;
-                const c = document.getElementById("cpu-panel-canvas");
-                const ph = 92;
-                const stats = visibleCpuStats();
-                const capacity = processCpuUsage.availableParallelism;
-                const avgPct = capacity != null ? Math.min(100, (stats.avgCores / capacity) * 100) : null;
-                const pctText = avgPct != null ? ` · avg ${fmtCpuPercent(avgPct)}` : "";
-                document.getElementById("cpu-panel-info").textContent =
-                    `avg ${fmtCpuCores(stats.avgCores)} cores${pctText} · max ${fmtCpuCores(stats.maxCores)}`;
-                if (isPanelCollapsed("cpu")) return;
-
-                const layout = timePanelLayout(panel, scrollbarW);
-                const { pw, drawW, nsToPanelXClamped } = layout;
-                const ctx = layout.resizeCanvas(c, ph);
-                ctx.clearRect(0, 0, pw, ph);
-                ctx.fillStyle = "#111b2e";
-                ctx.fillRect(0, 0, pw, ph);
-                if (drawW <= 0) return;
-
-                const scaleMax = Math.max(1, stats.maxCores, capacity || 0);
-                const chartTop = 20;
-                const chartH = ph - 28;
-
-                ctx.fillStyle = "#667";
-                ctx.font = "10px monospace";
-                ctx.textAlign = "right";
-                ctx.fillText(fmtCpuCores(scaleMax), LABEL_W - 6, chartTop + 9);
-                ctx.fillText("0", LABEL_W - 6, chartTop + chartH);
-
-                ctx.strokeStyle = "rgba(255,255,255,0.07)";
-                ctx.lineWidth = 1;
-                for (let i = 1; i <= 3; i++) {
-                    const y = chartTop + (chartH * i) / 4;
-                    ctx.beginPath();
-                    ctx.moveTo(LABEL_W, y);
-                    ctx.lineTo(LABEL_W + drawW, y);
-                    ctx.stroke();
-                }
-
-                if (capacity != null) {
-                    const capY = chartTop + chartH - (capacity / scaleMax) * chartH;
-                    ctx.strokeStyle = "rgba(255,207,153,0.65)";
-                    ctx.setLineDash([4, 3]);
-                    ctx.beginPath();
-                    ctx.moveTo(LABEL_W, capY);
-                    ctx.lineTo(LABEL_W + drawW, capY);
-                    ctx.stroke();
-                    ctx.setLineDash([]);
-                    ctx.fillStyle = "#ffcf99";
-                    ctx.textAlign = "left";
-                    ctx.fillText(`${fmtCpuCores(capacity)} cores · capacity`, LABEL_W + 6, Math.max(12, capY - 4));
-                }
-
-                for (const interval of processCpuUsage.intervals) {
-                    if (interval.end < viewStart) continue;
-                    if (interval.start > viewEnd) break;
-                    const x1 = nsToPanelXClamped(interval.start);
-                    const x2 = nsToPanelXClamped(interval.end);
-                    const w = Math.max(1, x2 - x1);
-                    const y = chartTop + chartH - (interval.cores / scaleMax) * chartH;
-                    const h = chartTop + chartH - y;
-                    const load = capacity != null
-                        ? Math.min(1, interval.cores / capacity)
-                        : Math.min(1, interval.cores / scaleMax);
-                    const r = Math.round(79 + 176 * load);
-                    const g = Math.round(195 - 80 * load);
-                    const b = Math.round(247 - 150 * load);
-                    ctx.fillStyle = `rgba(${r}, ${g}, ${b}, 0.42)`;
-                    ctx.fillRect(x1, y, w, h);
-                    ctx.strokeStyle = `rgba(${r}, ${g}, ${b}, 0.9)`;
-                    ctx.beginPath();
-                    ctx.moveTo(x1, y);
-                    ctx.lineTo(x1 + w, y);
-                    ctx.stroke();
-                }
-
-            }
-
-            function findProcessCpuIntervalAt(ns) {
-                const intervals = processCpuUsage.intervals;
-                let lo = 0, hi = intervals.length - 1;
-                while (lo <= hi) {
-                    const mid = (lo + hi) >> 1;
-                    const interval = intervals[mid];
-                    if (ns < interval.start) hi = mid - 1;
-                    else if (ns > interval.end) lo = mid + 1;
-                    else return interval;
-                }
-                return null;
-            }
-
-            function cpuIntervalTooltipHtml(interval) {
-                const capacity = processCpuUsage.availableParallelism;
-                let html = `<span class="label">Window:</span> <span class="value">${formatHumanDuration(interval.wallDeltaNs)}</span>`;
-                html += `<br><span class="label">CPU time:</span> <span class="value">${formatHumanDuration(interval.cpuDeltaNs)}</span>`;
-                html += `<br><span class="label">Cores:</span> <span class="value">${fmtCpuCores(interval.cores)}</span>`;
-                if (capacity != null) {
-                    html += `<br><span class="label">Total CPU:</span> <span class="value">${fmtCpuPercent(interval.totalPercent)}</span>`;
-                }
-                return html;
             }
 
             // Find the bucket at a given (x, y) position in the span panel canvas
@@ -5085,36 +4881,6 @@
                     showEventDetail(hit);
                 }
                 renderAll();
-            });
-
-            document.getElementById("cpu-panel-canvas").addEventListener("mousemove", (e) => {
-                const c = document.getElementById("cpu-panel-canvas");
-                const panel = document.getElementById("cpu-panel");
-                const rect = c.getBoundingClientRect();
-                const mx = e.clientX - rect.left;
-                const scrollbarW = lanesContainer.offsetWidth - lanesContainer.clientWidth;
-                const layout = timePanelLayout(panel, scrollbarW);
-
-                let hit = null;
-                if (mx >= LABEL_W && mx <= LABEL_W + layout.drawW) {
-                    const ns = layout.panelXToNs(mx);
-                    mouseNs = ns;
-                    hit = findProcessCpuIntervalAt(ns);
-                }
-
-                c.style.cursor = hit ? "crosshair" : "default";
-                if (hit) {
-                    tooltip.innerHTML = cpuIntervalTooltipHtml(hit);
-                    tooltip.style.display = "block";
-                    placeTooltip(e);
-                } else {
-                    tooltip.style.display = "none";
-                }
-
-            });
-            document.getElementById("cpu-panel-canvas").addEventListener("mouseleave", () => {
-                tooltip.style.display = "none";
-                document.getElementById("cpu-panel-canvas").style.cursor = "default";
             });
 
             /**
@@ -7149,13 +6915,6 @@
                     }
                     // Custom events panel also owns its own tooltip.
                     if (e.target.closest && e.target.closest("#custom-events-panel")) {
-                        mouseNs = eventToTimelineNs(e.clientX);
-                        lanesContainer.style.cursor = "";
-                        scheduleCrosshairRedraw();
-                        return;
-                    }
-                    // CPU panel owns its interval tooltip.
-                    if (e.target.closest && e.target.closest("#cpu-panel")) {
                         mouseNs = eventToTimelineNs(e.clientX);
                         lanesContainer.style.cursor = "";
                         scheduleCrosshairRedraw();

@@ -291,7 +291,7 @@ The viewer clips all series geometry, guides, and thresholds to the chart rectan
 
 A visible range is also half-open: `[viewStart, viewEnd)`. Point aggregates include timestamps in that range. Interval aggregates include items with positive overlap; `duration_weighted_mean` weights each value by the overlap duration. Hit testing at a shared boundary selects the interval beginning at that boundary, not the one ending there.
 
-Downsampling is a presentation optimization. It must preserve interval boundaries, gaps, partition/stream identity, and tooltip provenance. Summaries are computed from the original resolved series rather than downsampled geometry.
+Downsampling is a presentation optimization. It may coalesce geometry within a contiguous pixel bucket, but must preserve semantic run boundaries, gaps, partition/stream identity, and tooltip provenance. Hit testing and summaries use the original resolved series rather than downsampled geometry.
 
 ## Counter Windows And Gaps
 
