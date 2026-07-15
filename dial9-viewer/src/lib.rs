@@ -42,7 +42,8 @@ pub struct ViewerConfig {
     /// Where the on-demand aggregator writes its Parquet output (local).
     /// Defaults to `<agg_source_dir>/flamegraph-data`.
     pub agg_output_dir: Option<PathBuf>,
-    /// Output S3 bucket for aggregator part-files. Defaults to the source bucket.
+    /// Optional persistent S3 destination for aggregator part-files. When unset,
+    /// S3/BYOC aggregate output uses a process-local temporary directory.
     pub agg_output_bucket: Option<String>,
     /// Output S3 key prefix for aggregator part-files.
     pub agg_output_prefix: String,
@@ -135,11 +136,31 @@ pub async fn build_app(
         enable_upload,
     }: ViewerConfig,
 ) -> anyhow::Result<axum::Router> {
+    // Build one aggregate-output backend shared by the configured aggregation
+    // context and all BYOC requests. An explicit output bucket retains the
+    // persistent S3 behavior; otherwise output uses a process-local temporary
+    // directory that is removed when the server drops it.
+    use crate::ingest::aggregate::AggContext;
+    let agg_output_backend: std::sync::Arc<dyn storage::StorageBackend> =
+        if let Some(out_bucket) = &agg_output_bucket {
+            tracing::info!(
+                %out_bucket,
+                "aggregation output bucket configured (writes go here, not the source)"
+            );
+            std::sync::Arc::new(s3_backend_for(out_bucket).await)
+        } else {
+            let backend = storage::LocalBackend::new_temporary_aggregate();
+            tracing::info!(
+                output = %backend.root().display(),
+                "no aggregation output bucket configured; using temporary local directory"
+            );
+            std::sync::Arc::new(backend)
+        };
+
     // Build the demand-driven aggregation context if requested. Two sources:
     //   - `agg_source_dir` (local): source + output are LocalBackends.
-    //   - `agg` + `bucket` (S3): source is the served bucket/prefix; output is a
-    //     (possibly different) bucket. Both go through region-aware S3 clients.
-    use crate::ingest::aggregate::AggContext;
+    //   - `agg` + `bucket` (S3): source is the served bucket/prefix; output is
+    //     the configured S3 bucket or a process-local temporary directory.
     let agg_output_prefix_for_state = agg_output_prefix.clone();
     let agg = if let Some(src_dir) = &agg_source_dir {
         let src_dir = std::fs::canonicalize(src_dir)?;
@@ -169,13 +190,14 @@ pub async fn build_app(
             .clone()
             .unwrap_or_else(|| src_bucket.clone());
         let source = std::sync::Arc::new(s3_backend_for(&src_bucket).await);
-        // Output may be a different bucket/account/region → its own client.
-        let output = std::sync::Arc::new(s3_backend_for(&out_bucket).await);
+        let output = std::sync::Arc::clone(&agg_output_backend);
         tracing::info!(
             source_bucket = %src_bucket,
-            output_bucket = %out_bucket,
+            output = agg_output_bucket
+                .as_deref()
+                .unwrap_or("temporary local directory"),
             output_prefix = %agg_output_prefix,
-            "demand-driven aggregation enabled (S3)"
+            "demand-driven aggregation enabled (S3 source)"
         );
         Some(AggContext {
             source,
@@ -264,28 +286,14 @@ pub async fn build_app(
         (state, true)
     };
 
-    // When an output bucket is configured, build its region-aware backend once
-    // (ambient identity — the operator owns this bucket) and hand both to the
-    // state. The `/api/flamegraph` BYOC path writes aggregated part-files here
-    // instead of back into the (often read-only) source bucket. Without this,
-    // aggregation against a read-only source fails with S3 AccessDenied on the
-    // first PutObject.
-    let agg_output_backend: Option<std::sync::Arc<dyn storage::StorageBackend>> =
-        match &agg_output_bucket {
-            Some(out_bucket) => {
-                tracing::info!(
-                    %out_bucket,
-                    "aggregation output bucket configured (writes go here, not the source)"
-                );
-                Some(std::sync::Arc::new(s3_backend_for(out_bucket).await))
-            }
-            None => None,
-        };
-
+    // Hand the same output backend to BYOC aggregation. With an explicit
+    // bucket this is the region-aware S3 client built above; otherwise it is
+    // the process-local temporary directory. In neither mode do aggregate
+    // writes use the source backend or the caller's read credentials.
     app_state = app_state
         .with_byo_creds(source_is_s3)
         .with_agg_output_prefix(agg_output_prefix_for_state)
-        .with_agg_output_bucket(agg_output_bucket, agg_output_backend)
+        .with_agg_output_bucket(agg_output_bucket, Some(agg_output_backend))
         .with_agg_segment_secs(agg_segment_secs);
     // For an S3 source, also offer the assume-role path: a request may name a
     // role ARN and the viewer assumes it with its own (ambient) identity via

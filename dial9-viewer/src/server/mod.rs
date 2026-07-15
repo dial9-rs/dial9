@@ -1,4 +1,4 @@
-use crate::storage::{EphemeralS3Config, S3Backend, StorageBackend};
+use crate::storage::{EphemeralS3Config, LocalBackend, S3Backend, StorageBackend};
 use axum::Router;
 use axum::body::Body;
 use axum::extract::DefaultBodyLimit;
@@ -82,17 +82,14 @@ pub struct AppState {
     pub role_assumer: Option<Arc<dyn credentials::RoleAssumer>>,
     /// Output prefix for BYOC aggregation. Defaults to "flamegraph-data".
     pub agg_output_prefix: String,
-    /// Output bucket for BYOC aggregation. `None` means write the aggregated
-    /// part-files back into the source bucket (the query-param `bucket`). Set it
-    /// (via `--agg-output-bucket`) when the source bucket is read-only, so the
-    /// output lands in a separate writable bucket.
+    /// Output bucket for BYOC aggregation. When set, aggregate part-files are
+    /// persisted to this S3 bucket. When unset, they stay in a process-local
+    /// temporary directory that is removed when the server exits.
     pub agg_output_bucket: Option<String>,
-    /// Region-aware backend for [`Self::agg_output_bucket`], built once at
-    /// startup (the output bucket name is known then, so no per-request region
-    /// detection). Writes to the output bucket use the server's ambient identity
-    /// — the operator controls that bucket via `--agg-output-bucket`. `None`
-    /// when no output bucket override is configured; the BYOC path then writes
-    /// to the source bucket through the request's own (BYOC or ambient) backend.
+    /// Backend for BYOC aggregate output. This is a process-local temporary
+    /// directory by default, replaced by a region-aware S3 backend when
+    /// `--agg-output-bucket` is configured. The temporary backend is shared by
+    /// all requests handled by this server process.
     pub agg_output_backend: Option<Arc<dyn StorageBackend>>,
     /// Segment duration (seconds) for BYOC aggregation scope padding.
     pub agg_segment_secs: i64,
@@ -120,7 +117,7 @@ impl AppState {
             role_assumer: None,
             agg_output_prefix: "flamegraph-data".to_string(),
             agg_output_bucket: None,
-            agg_output_backend: None,
+            agg_output_backend: Some(Arc::new(LocalBackend::new_temporary_aggregate())),
             agg_segment_secs: crate::ingest::aggregate::DEFAULT_SEGMENT_DURATION_SECS,
             fold_limits: crate::ingest::aggregate::FoldLimits::default(),
         }
@@ -203,16 +200,17 @@ impl AppState {
         self
     }
 
-    /// Set the output bucket for BYOC aggregation, paired with the region-aware
-    /// backend that writes to it. Pass `None` to keep the default of writing
-    /// back into the source bucket through the request's own backend.
+    /// Set an S3 output bucket and its backend for BYOC aggregation. Passing no
+    /// backend restores a fresh process-local temporary directory; in either
+    /// case the source backend is never used for aggregate writes.
     pub fn with_agg_output_bucket(
         mut self,
         bucket: Option<String>,
         backend: Option<Arc<dyn StorageBackend>>,
     ) -> Self {
         self.agg_output_bucket = bucket;
-        self.agg_output_backend = backend;
+        self.agg_output_backend =
+            Some(backend.unwrap_or_else(|| Arc::new(LocalBackend::new_temporary_aggregate())));
         self
     }
 
@@ -227,9 +225,10 @@ impl AppState {
     /// When `bucket` is `Some`, the request targets the user's own bucket:
     /// resolve a backend from any supplied credentials, scope the source listing
     /// to `prefix` (falling back to the server default), and route output to the
-    /// configured `--agg-output-bucket` (through its own region-aware backend) or
-    /// else back into the source bucket. When `bucket` is `None`, fall back to
-    /// the server's `--agg` context if one is configured.
+    /// configured `--agg-output-bucket` or the shared process-local temporary
+    /// directory. The request's source backend is never used for aggregate
+    /// writes. When `bucket` is `None`, fall back to the server's `--agg`
+    /// context if one is configured.
     ///
     /// Returns `None` only when no `bucket` is given *and* the server has no
     /// `--agg` context — the caller maps that to 404. This is the single place
@@ -250,17 +249,19 @@ impl AppState {
                 .map(str::to_string)
                 .or_else(|| self.default_prefix.clone())
                 .unwrap_or_default();
-            // Output may target a different, writable bucket than the (often
-            // read-only) source. When `--agg-output-bucket` is configured we
-            // write there through its own region-aware backend; otherwise we
-            // write back into the source bucket through the request's backend.
-            let (output_bucket, output) = match (&self.agg_output_bucket, &self.agg_output_backend)
-            {
-                (Some(out_bucket), Some(out_backend)) => {
-                    (out_bucket.clone(), Arc::clone(out_backend))
-                }
-                _ => (bucket.to_string(), Arc::clone(&backend)),
-            };
+            // Output goes through a backend owned by the server, never through
+            // the request's source credentials: either the configured S3 output
+            // bucket or the process-local temporary directory.
+            let output_bucket = self
+                .agg_output_bucket
+                .clone()
+                .unwrap_or_else(|| bucket.to_string());
+            let output = self.agg_output_backend.clone().unwrap_or_else(|| {
+                // Public AppState fields can be constructed manually; preserve
+                // the no-source-writes guarantee even if an embedder cleared
+                // the backend after construction.
+                Arc::new(LocalBackend::new_temporary_aggregate())
+            });
             tracing::info!(
                 %bucket,
                 %output_bucket,
