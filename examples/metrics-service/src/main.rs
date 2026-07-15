@@ -256,8 +256,8 @@ fn main() -> std::io::Result<()> {
 
         traced_builder = traced_builder.with_s3_uploader(s3_config);
     }
-    let session = traced_builder.build()?;
-    let handle = session.tokio_handle(session.runtime().handle());
+    let traced = traced_builder.build()?;
+    let handle = traced.tokio_handle(traced.runtime().handle());
 
     let _mem_guard = if args.no_memory_profiling {
         None
@@ -268,13 +268,13 @@ fn main() -> std::io::Result<()> {
             .build();
         Some(
             MemoryProfiler::from_config(config)
-                .install(session.record_handle())
+                .install(traced.record_handle())
                 .expect("failed to install memory profiler"),
         )
     };
 
     // Wrap the body in a spawned task so the root future is instrumented.
-    session.runtime().block_on(async {
+    traced.runtime().block_on(async {
         handle
             .spawn(async move {
                 let config = aws_config::defaults(BehaviorVersion::latest()).load().await;
@@ -371,7 +371,7 @@ fn main() -> std::io::Result<()> {
 
     // graceful_shutdown drops the runtime so worker threads flush their
     // thread-local telemetry buffers, then drains the background worker.
-    session.graceful_shutdown();
+    traced.graceful_shutdown();
 
     Ok(())
 }

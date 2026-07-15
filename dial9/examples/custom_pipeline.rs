@@ -215,7 +215,7 @@ async fn main() {
     }
 
     // Give the worker a beat to seal + process the final segment before
-    // the runtime shuts down. Not required in production - `TokioSession`
+    // the runtime shuts down. Not required in production - `TracedRuntime`
     // honors the configured drain timeout on drop - but it makes the demo
     // output more satisfying.
     tokio::time::sleep(Duration::from_secs(3)).await;

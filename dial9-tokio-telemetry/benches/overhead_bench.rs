@@ -22,7 +22,7 @@ use dial9_tokio_telemetry::telemetry::CpuProfilingConfig;
 #[cfg(target_os = "linux")]
 use dial9_tokio_telemetry::telemetry::RecorderPerfExt;
 use dial9_tokio_telemetry::telemetry::{
-    Dial9TokioHandle, DiskBuffer, MemoryBuffer, RecorderBuilderTokioExt, TokioSession, recorder,
+    Dial9TokioHandle, DiskBuffer, MemoryBuffer, RecorderBuilderTokioExt, TracedRuntime, recorder,
 };
 use hdrhistogram::Histogram;
 use std::sync::Arc;
@@ -107,7 +107,7 @@ struct BenchResult {
 
 fn run_bench(mode: &str, duration_secs: u64) -> BenchResult {
     enum Server {
-        Traced(TokioSession),
+        Traced(TracedRuntime),
         Plain(tokio::runtime::Runtime),
     }
     let server: Server = match mode {

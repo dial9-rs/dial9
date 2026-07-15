@@ -120,10 +120,10 @@ mod tests {
     #[test]
     fn with_process_resource_usage_registers_the_source() {
         let writer = MemoryBuffer::new(64 * 1024).expect("writer");
-        let session = recorder(writer)
+        let recorder = recorder(writer)
             .with_process_resource_usage(ProcessResourceUsageConfig::default())
             .build_and_start();
-        let names: Vec<String> = session
+        let names: Vec<String> = recorder
             .shared()
             .expect("enabled session")
             .with_sources_mut(|sources| sources.iter().map(|s| s.name().to_string()).collect())
@@ -132,6 +132,8 @@ mod tests {
             names.iter().any(|n| n == "process_resource_usage"),
             "expected the process resource usage source to be registered, got {names:?}"
         );
-        session.graceful_shutdown(Duration::ZERO).expect("shutdown");
+        recorder
+            .graceful_shutdown(Duration::ZERO)
+            .expect("shutdown");
     }
 }

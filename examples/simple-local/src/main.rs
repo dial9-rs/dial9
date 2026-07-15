@@ -1,5 +1,5 @@
 use dial9::telemetry::Dial9TokioHandle;
-use dial9::{DiskBuffer, TokioSessionBuilder};
+use dial9::{DiskBuffer, TracedRuntimeBuilder};
 use std::time::Duration;
 
 const TRACE_DIR: &str = "/tmp/simple-local-traces";
@@ -17,7 +17,7 @@ async fn do_some_work() {
     fibonacci_recursive(25);
 }
 
-fn my_config() -> TokioSessionBuilder {
+fn my_config() -> TracedRuntimeBuilder {
     let trace_path = format!("{}/trace.bin", TRACE_DIR);
     let writer = DiskBuffer::builder()
         .base_path(&trace_path)

@@ -9,7 +9,7 @@ pub(crate) use runtime_context::RuntimeContext;
 pub use runtime_context::current_worker_id;
 pub(crate) use runtime_context::poll_start_ts_monotonic;
 
-pub use builder::TokioSession;
+pub use builder::TracedRuntime;
 pub use dial9_core::handle::Dial9Handle;
 pub(crate) use handle::traced_handle;
 pub use handle::{Dial9TokioHandle, spawn};
@@ -19,7 +19,7 @@ pub use tokio_hooks::TokioHooks;
 
 mod traced_recorder;
 pub use traced_recorder::{
-    RecorderBuilderTokioExt, TokioAttachConfig, TokioSessionBuilder, build_traced,
+    RecorderBuilderTokioExt, TokioAttachConfig, TracedRuntimeBuilder, build_traced,
 };
 
 // Re-exports for internal test access
@@ -338,7 +338,7 @@ mod tests {
     fn current_thread_runtime_resolves_worker_ids() {
         let (capture, data) = CapturingProcessor::new();
 
-        let session = recorder(MemoryBuffer::new(CAPTURE_SIZE).unwrap())
+        let traced = recorder(MemoryBuffer::new(CAPTURE_SIZE).unwrap())
             .with_tokio(|t| {
                 *t = tokio::runtime::Builder::new_current_thread();
                 t.enable_all();
@@ -347,7 +347,7 @@ mod tests {
             .build()
             .unwrap();
 
-        session.block_on(async {
+        traced.block_on(async {
             tokio::spawn(async {
                 tokio::task::yield_now().await;
             })
@@ -355,7 +355,7 @@ mod tests {
             .unwrap();
         });
 
-        session.graceful_shutdown();
+        traced.graceful_shutdown();
 
         let raw = data.lock().unwrap();
         let events = decode_captured(&raw);
@@ -389,7 +389,7 @@ mod tests {
         let on_thread_start_calls = hook_calls.clone();
         let on_before_poll_calls = hook_calls.clone();
 
-        let session = recorder(MemoryBuffer::new(CAPTURE_SIZE).unwrap())
+        let traced = recorder(MemoryBuffer::new(CAPTURE_SIZE).unwrap())
             .with_tokio(|t| {
                 t.worker_threads(2);
             })
@@ -407,9 +407,9 @@ mod tests {
             .build()
             .unwrap();
 
-        assert!(session.is_enabled());
-        assert!(session.shared().unwrap().is_enabled());
-        let runtime_meta = session
+        assert!(traced.is_enabled());
+        assert!(traced.shared().unwrap().is_enabled());
+        let runtime_meta = traced
             .shared()
             .unwrap()
             .with_sources_mut(source::collect_segment_metadata)
@@ -419,7 +419,7 @@ mod tests {
             "disabled Tokio instrumentation should not produce runtime metadata"
         );
 
-        session.runtime().block_on(async {
+        traced.runtime().block_on(async {
             for _ in 0..8 {
                 tokio::spawn(async {
                     tokio::task::yield_now().await;
@@ -429,7 +429,7 @@ mod tests {
             }
         });
 
-        let runtime_meta = session
+        let runtime_meta = traced
             .shared()
             .unwrap()
             .with_sources_mut(source::collect_segment_metadata)
@@ -444,7 +444,7 @@ mod tests {
             "user Tokio hooks should not be installed when Tokio instrumentation is disabled"
         );
 
-        session.graceful_shutdown();
+        traced.graceful_shutdown();
 
         let raw = data.lock().unwrap();
         let events = if raw.is_empty() {
@@ -475,30 +475,30 @@ mod tests {
 
     #[test]
     fn build_disabled_produces_working_runtime_with_noop_guard() {
-        let session = recorder(MemoryBuffer::new(16 * 1024 * 1024).unwrap())
+        let traced = recorder(MemoryBuffer::new(16 * 1024 * 1024).unwrap())
             .with_tokio(|_| {})
             .enabled(false)
             .build()
             .unwrap();
 
         // Guard methods should be safe no-ops
-        session.enable();
-        session.disable();
-        let handle = session.handle();
-        let _start = session.start_time();
+        traced.enable();
+        traced.disable();
+        let handle = traced.handle();
+        let _start = traced.start_time();
 
         // Runtime should work normally, including handle.spawn
-        session.runtime().block_on(async {
+        traced.runtime().block_on(async {
             let result = tokio::spawn(async { 42 }).await.unwrap();
             assert_eq!(result, 42);
 
-            let session = handle.spawn(async { 7 }).await.unwrap();
-            assert_eq!(session, 7);
+            let traced = handle.spawn(async { 7 }).await.unwrap();
+            assert_eq!(traced, 7);
         });
 
         // No flush thread or worker to join — the guard is in its
         // disabled state.
-        assert!(!session.is_enabled());
+        assert!(!traced.is_enabled());
     }
 
     #[test]
@@ -597,16 +597,16 @@ mod tests {
 
     #[test]
     fn trace_runtime_attaches_second_runtime() {
-        let session = recorder(MemoryBuffer::new(16 * 1024 * 1024).unwrap())
+        let traced = recorder(MemoryBuffer::new(16 * 1024 * 1024).unwrap())
             .with_tokio(|_| {})
             .build()
             .unwrap();
 
         let builder_b = tokio::runtime::Builder::new_multi_thread();
-        let (runtime_b, _handle_b) = session.trace_runtime("attached").build(builder_b).unwrap();
+        let (runtime_b, _handle_b) = traced.trace_runtime("attached").build(builder_b).unwrap();
 
         // Both runtimes should work
-        session.block_on(async {
+        traced.block_on(async {
             let r = tokio::spawn(async { 1 }).await.unwrap();
             assert_eq!(r, 1);
         });
@@ -622,7 +622,7 @@ mod tests {
 
         let (capture, data) = CapturingProcessor::new();
 
-        let session = recorder(MemoryBuffer::new(CAPTURE_SIZE).unwrap())
+        let traced = recorder(MemoryBuffer::new(CAPTURE_SIZE).unwrap())
             .with_tokio(|t| {
                 t.worker_threads(2);
             })
@@ -633,7 +633,7 @@ mod tests {
 
         let mut builder_b = tokio::runtime::Builder::new_multi_thread();
         builder_b.worker_threads(2);
-        let (runtime_b, _handle_b) = session
+        let (runtime_b, _handle_b) = traced
             .trace_runtime("attached")
             .task_tracking(true)
             .build(builder_b)
@@ -641,7 +641,7 @@ mod tests {
 
         // Generate poll events on both runtimes. Spawn many concurrent tasks
         // to ensure work lands on actual worker threads (not just block_on's thread).
-        session.block_on(async {
+        traced.block_on(async {
             let mut handles = Vec::new();
             for _ in 0..50 {
                 handles.push(tokio::spawn(async {
@@ -666,7 +666,7 @@ mod tests {
 
         // Drop runtimes, then guard to flush
         drop(runtime_b);
-        session.graceful_shutdown();
+        traced.graceful_shutdown();
 
         let raw = data.lock().unwrap();
         let captured = decode_captured(&raw);
@@ -717,7 +717,7 @@ mod tests {
             .build()
             .unwrap();
 
-        let session = recorder(writer)
+        let traced = recorder(writer)
             .with_tokio(|t| {
                 t.worker_threads(2);
             })
@@ -727,10 +727,10 @@ mod tests {
 
         let mut builder_b = tokio::runtime::Builder::new_multi_thread();
         builder_b.worker_threads(2);
-        let (runtime_b, _handle_b) = session.trace_runtime("io").build(builder_b).unwrap();
+        let (runtime_b, _handle_b) = traced.trace_runtime("io").build(builder_b).unwrap();
 
         // Run work on both runtimes so workers resolve their identities.
-        for rt in [session.runtime(), &runtime_b] {
+        for rt in [traced.runtime(), &runtime_b] {
             rt.block_on(async {
                 let mut handles = Vec::new();
                 for _ in 0..20 {
@@ -749,7 +749,7 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(50));
 
         drop(runtime_b);
-        session.graceful_shutdown();
+        traced.graceful_shutdown();
 
         // Read all sealed trace files and collect SegmentMetadata entries.
         let mut all_metadata: Vec<std::collections::HashMap<String, String>> = Vec::new();
@@ -818,7 +818,7 @@ mod tests {
             .build()
             .unwrap();
 
-        let session = recorder(writer)
+        let traced = recorder(writer)
             .with_tokio(|t| {
                 *t = tokio::runtime::Builder::new_current_thread();
                 t.enable_all();
@@ -832,7 +832,7 @@ mod tests {
         // discarded: `finalize()` removes a segment that holds only header +
         // metadata (no real events). Spawning a tracked task emits real events
         // synchronously — no timing wait.
-        session.block_on(async {
+        traced.block_on(async {
             tokio::spawn(async {
                 tokio::task::yield_now().await;
             })
@@ -843,13 +843,13 @@ mod tests {
         // Attach B to the same session. Its workers are eagerly populated at
         // attach time, so its metadata is complete without ever driving it.
         let builder_b = tokio::runtime::Builder::new_current_thread();
-        let (runtime_b, _handle_b) = session.trace_runtime("second").build(builder_b).unwrap();
+        let (runtime_b, _handle_b) = traced.trace_runtime("second").build(builder_b).unwrap();
 
         drop(runtime_b);
         // Blocks until the flush thread polls every source one final time, writes
         // the segment metadata, and seals the segment, so both runtimes are
         // guaranteed to be in the sealed trace once this returns.
-        session.graceful_shutdown();
+        traced.graceful_shutdown();
 
         let mut saw_first = false;
         let mut saw_second = false;
@@ -895,7 +895,7 @@ mod tests {
 
         let (capture, data) = CapturingProcessor::new();
 
-        let session = recorder(MemoryBuffer::new(CAPTURE_SIZE).unwrap())
+        let traced = recorder(MemoryBuffer::new(CAPTURE_SIZE).unwrap())
             .with_tokio(|t| {
                 t.worker_threads(2);
             })
@@ -906,14 +906,14 @@ mod tests {
 
         let mut builder_b = tokio::runtime::Builder::new_multi_thread();
         builder_b.worker_threads(2);
-        let (runtime_b, _handle_b) = session
+        let (runtime_b, _handle_b) = traced
             .trace_runtime("attached")
             .task_tracking(true)
             .build(builder_b)
             .unwrap();
 
         // Spawn on runtime B with wake-tracked wrapping → wake events.
-        let handle = session.tokio_handle(runtime_b.handle());
+        let handle = traced.tokio_handle(runtime_b.handle());
         runtime_b.block_on(async {
             let mut handles = Vec::new();
             for _ in 0..50 {
@@ -927,7 +927,7 @@ mod tests {
         });
 
         drop(runtime_b);
-        session.graceful_shutdown();
+        traced.graceful_shutdown();
 
         let raw = data.lock().unwrap();
         let captured = decode_captured(&raw);
@@ -1140,7 +1140,7 @@ mod tests {
     // threads; the runtime under test is attached via `trace_runtime`.
     fn session_recorder<M: dial9_core::buffer::BufferMode>(
         writer: dial9_core::buffer::SegmentWriter<M>,
-    ) -> crate::telemetry::TokioSessionBuilder<M> {
+    ) -> crate::telemetry::TracedRuntimeBuilder<M> {
         recorder(writer).with_tokio(|t| {
             *t = tokio::runtime::Builder::new_current_thread();
         })
@@ -1148,22 +1148,22 @@ mod tests {
 
     #[test]
     fn build_produces_enabled_guard() {
-        let session = session_recorder(MemoryBuffer::new(16 * 1024 * 1024).unwrap())
+        let traced = session_recorder(MemoryBuffer::new(16 * 1024 * 1024).unwrap())
             .build()
             .unwrap();
-        assert!(session.is_enabled());
-        session.graceful_shutdown();
+        assert!(traced.is_enabled());
+        traced.graceful_shutdown();
     }
 
     #[test]
     fn trace_runtime_produces_working_runtime() {
-        let session = session_recorder(MemoryBuffer::new(16 * 1024 * 1024).unwrap())
+        let traced = session_recorder(MemoryBuffer::new(16 * 1024 * 1024).unwrap())
             .build()
             .unwrap();
 
         let mut builder = tokio::runtime::Builder::new_multi_thread();
         builder.worker_threads(2).enable_all();
-        let (runtime, _handle) = session.trace_runtime("main").build(builder).unwrap();
+        let (runtime, _handle) = traced.trace_runtime("main").build(builder).unwrap();
 
         runtime.block_on(async {
             let r = tokio::spawn(async { 42 }).await.unwrap();
@@ -1171,20 +1171,20 @@ mod tests {
         });
 
         drop(runtime);
-        session.graceful_shutdown();
+        traced.graceful_shutdown();
     }
 
     #[test]
     fn task_tracking_produces_task_spawn_events() {
         let (capture, data) = CapturingProcessor::new();
-        let session = session_recorder(MemoryBuffer::new(CAPTURE_SIZE).unwrap())
+        let traced = session_recorder(MemoryBuffer::new(CAPTURE_SIZE).unwrap())
             .with_custom_pipeline(|p| p.pipe(capture))
             .build()
             .unwrap();
 
         let mut builder = tokio::runtime::Builder::new_multi_thread();
         builder.worker_threads(2).enable_all();
-        let (runtime, _handle) = session
+        let (runtime, _handle) = traced
             .trace_runtime("main")
             .task_tracking(true)
             .build(builder)
@@ -1197,7 +1197,7 @@ mod tests {
         });
 
         drop(runtime);
-        session.graceful_shutdown();
+        traced.graceful_shutdown();
 
         let raw = data.lock().unwrap();
         let events = decode_captured(&raw);
@@ -1221,14 +1221,14 @@ mod tests {
         use std::collections::HashSet;
 
         let (capture, data) = CapturingProcessor::new();
-        let session = session_recorder(MemoryBuffer::new(CAPTURE_SIZE).unwrap())
+        let traced = session_recorder(MemoryBuffer::new(CAPTURE_SIZE).unwrap())
             .with_custom_pipeline(|p| p.pipe(capture))
             .build()
             .unwrap();
 
         let mut builder_a = tokio::runtime::Builder::new_multi_thread();
         builder_a.worker_threads(2).enable_all();
-        let (runtime_a, _handle_a) = session
+        let (runtime_a, _handle_a) = traced
             .trace_runtime("main")
             .task_tracking(true)
             .build(builder_a)
@@ -1236,7 +1236,7 @@ mod tests {
 
         let mut builder_b = tokio::runtime::Builder::new_multi_thread();
         builder_b.worker_threads(2).enable_all();
-        let (runtime_b, _handle_b) = session
+        let (runtime_b, _handle_b) = traced
             .trace_runtime("io")
             .task_tracking(true)
             .build(builder_b)
@@ -1258,7 +1258,7 @@ mod tests {
 
         drop(runtime_a);
         drop(runtime_b);
-        session.graceful_shutdown();
+        traced.graceful_shutdown();
 
         let raw = data.lock().unwrap();
         let captured = decode_captured(&raw);
@@ -1282,14 +1282,14 @@ mod tests {
     #[test]
     fn trace_runtime_build_returns_telemetry_handle() {
         let (capture, data) = CapturingProcessor::new();
-        let session = session_recorder(MemoryBuffer::new(CAPTURE_SIZE).unwrap())
+        let traced = session_recorder(MemoryBuffer::new(CAPTURE_SIZE).unwrap())
             .with_custom_pipeline(|p| p.pipe(capture))
             .build()
             .unwrap();
 
         let mut builder = tokio::runtime::Builder::new_multi_thread();
         builder.worker_threads(2).enable_all();
-        let (runtime, handle) = session.trace_runtime("main").build(builder).unwrap();
+        let (runtime, handle) = traced.trace_runtime("main").build(builder).unwrap();
 
         runtime.block_on(async {
             // handle.spawn wraps the future with wake tracking;
@@ -1306,13 +1306,13 @@ mod tests {
 
         // Drain thread-local buffers before shutdown.
         test_util::drain_thread_local(
-            &traced_handle(&session.record_handle())
+            &traced_handle(&traced.record_handle())
                 .expect("enabled handle must yield a TracedHandle")
                 .shared,
         );
 
         drop(runtime);
-        session.graceful_shutdown();
+        traced.graceful_shutdown();
 
         // Verify wake events were recorded (handle.spawn wraps with wake tracking)
         let raw = data.lock().unwrap();
@@ -1336,17 +1336,17 @@ mod tests {
     /// correct runtime even when called from outside any runtime context.
     #[test]
     fn trace_runtime_handle_spawns_on_correct_runtime_from_outside() {
-        let session = session_recorder(MemoryBuffer::new(16 * 1024 * 1024).unwrap())
+        let traced = session_recorder(MemoryBuffer::new(16 * 1024 * 1024).unwrap())
             .build()
             .unwrap();
 
         let mut builder_a = tokio::runtime::Builder::new_multi_thread();
         builder_a.worker_threads(1).enable_all().thread_name("rt-a");
-        let (rt_a, handle_a) = session.trace_runtime("a").build(builder_a).unwrap();
+        let (rt_a, handle_a) = traced.trace_runtime("a").build(builder_a).unwrap();
 
         let mut builder_b = tokio::runtime::Builder::new_multi_thread();
         builder_b.worker_threads(1).enable_all().thread_name("rt-b");
-        let (rt_b, handle_b) = session.trace_runtime("b").build(builder_b).unwrap();
+        let (rt_b, handle_b) = traced.trace_runtime("b").build(builder_b).unwrap();
 
         // Spawn from outside any runtime context — should target the correct runtime.
         let join_a = handle_a.spawn(async {
@@ -1372,11 +1372,11 @@ mod tests {
 
         drop(rt_a);
         drop(rt_b);
-        session.graceful_shutdown();
+        traced.graceful_shutdown();
     }
 
     // ---------------------------------------------------------------
-    // Always-present TokioSession / inert Dial9Handle (Phase 3)
+    // Always-present TracedRuntime / inert Dial9Handle (Phase 3)
     // ---------------------------------------------------------------
 
     /// Off-runtime callers should get a usable, inert handle rather
@@ -1426,11 +1426,11 @@ mod tests {
     /// flush thread or background worker to drain.
     #[test]
     fn disabled_session_graceful_shutdown_is_noop() {
-        let session = crate::telemetry::TokioSessionBuilder::<dial9_core::buffer::Disk>::disabled()
+        let traced = crate::telemetry::TracedRuntimeBuilder::<dial9_core::buffer::Disk>::disabled()
             .build()
             .unwrap();
-        assert!(!session.is_enabled());
-        session.graceful_shutdown();
+        assert!(!traced.is_enabled());
+        traced.graceful_shutdown();
     }
 
     /// Regression test for issue #400: multi-runtime callers must be able to
@@ -1442,12 +1442,12 @@ mod tests {
 
         let s3 = S3Config::builder().bucket("b").service_name("s").build();
 
-        let session = session_recorder(MemoryBuffer::new(16 * 1024 * 1024).unwrap())
+        let traced = session_recorder(MemoryBuffer::new(16 * 1024 * 1024).unwrap())
             .with_s3_uploader(s3)
             .build()
             .expect("recorder with s3 uploader must build");
 
-        assert!(session.is_enabled());
-        session.graceful_shutdown();
+        assert!(traced.is_enabled());
+        traced.graceful_shutdown();
     }
 }

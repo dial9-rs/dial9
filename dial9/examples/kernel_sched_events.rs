@@ -67,7 +67,7 @@ fn main() {
     let trace_read_path = format!("{trace_dir}/kernel_sched_trace.0.bin");
 
     let writer = DiskBuffer::single_file(&trace_base).unwrap();
-    let session = recorder(writer)
+    let traced = recorder(writer)
         .with_sched_events(
             SchedEventConfig::default()
                 .sampling_interval(5)
@@ -80,14 +80,14 @@ fn main() {
         .build()
         .unwrap();
 
-    session.runtime().block_on(async {
+    traced.runtime().block_on(async {
         let tasks: Vec<_> = (0..4).map(|i| tokio::spawn(blocking_task(i))).collect();
         for t in tasks {
             let _ = t.await;
         }
     });
 
-    drop(session);
+    drop(traced);
 
     // Read back and print callchains
     eprintln!("\n=== Reading trace from {trace_read_path} ===");

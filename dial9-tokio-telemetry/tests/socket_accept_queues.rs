@@ -17,7 +17,7 @@ fn traced_runtime_records_socket_accept_queue_snapshot() {
     let client = TcpStream::connect(local_addr).unwrap();
 
     let (capture, batches) = capture_processor();
-    let session = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
+    let traced = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
         .with_socket_accept_queues(
             SocketAcceptQueuesConfig::builder()
                 .sample_interval(Duration::ZERO)
@@ -30,7 +30,7 @@ fn traced_runtime_records_socket_accept_queue_snapshot() {
         .build()
         .unwrap();
 
-    session.graceful_shutdown();
+    traced.graceful_shutdown();
     drop(client);
     drop(listener);
 
@@ -66,7 +66,7 @@ fn traced_runtime_does_not_record_socket_accept_queues_by_default() {
     let client = TcpStream::connect(local_addr).unwrap();
 
     let (capture, batches) = capture_processor();
-    let session = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
+    let traced = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
         .with_tokio(|t| {
             t.worker_threads(1);
         })
@@ -74,7 +74,7 @@ fn traced_runtime_does_not_record_socket_accept_queues_by_default() {
         .build()
         .unwrap();
 
-    session.graceful_shutdown();
+    traced.graceful_shutdown();
     drop(client);
     drop(listener);
 

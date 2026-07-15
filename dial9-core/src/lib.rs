@@ -33,7 +33,7 @@ pub mod custom_events;
 pub mod dump;
 /// Thread-local event encoding buffers and the `Encodable` trait.
 pub mod encoder;
-/// Flush-thread loop. Driven by `CoreSession`; not public API.
+/// Flush-thread loop. Driven by `Recorder`; not public API.
 pub(crate) mod flush_loop;
 /// Wire-format events emitted by the bus itself.
 pub mod format;

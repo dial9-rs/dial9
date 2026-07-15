@@ -40,7 +40,7 @@ fn trigger_without_pipeline_resolves_worker_stopped() {
 
     let writer = DiskBuffer::single_file(&trace_path).unwrap();
 
-    let session = recorder(writer)
+    let traced = recorder(writer)
         .with_tokio(|t| {
             t.worker_threads(1);
         })
@@ -48,18 +48,18 @@ fn trigger_without_pipeline_resolves_worker_stopped() {
         .build()
         .unwrap();
 
-    let trigger = session
+    let trigger = traced
         .record_handle()
         .dump_trigger()
         .expect("trigger wired");
 
-    let err = session
+    let err = traced
         .runtime()
         .block_on(async { trigger.dump_current_data().await })
         .expect_err("no worker, dump must fail");
     assert!(matches!(err, DumpError::WorkerStopped));
 
-    drop(session);
+    drop(traced);
 }
 
 /// Two `dump_current_data()` calls fired concurrently both succeed with
@@ -75,7 +75,7 @@ fn concurrent_dumps_both_resolve_with_distinct_ids() {
 
     let writer = fast_sealing_writer(dir.path());
 
-    let session = recorder(writer)
+    let traced = recorder(writer)
         .worker_poll_interval(Duration::from_millis(50))
         .with_tokio(|t| {
             t.worker_threads(2);
@@ -85,16 +85,16 @@ fn concurrent_dumps_both_resolve_with_distinct_ids() {
         .build()
         .unwrap();
 
-    let trigger = session
+    let trigger = traced
         .record_handle()
         .dump_trigger()
         .expect("trigger wired");
 
     // A triggered worker parks until a dump is requested, so a confirmed-sealed
     // segment persists in the ring for the concurrent dumps to capture.
-    wait_for_sealed_segment(session.runtime(), dir.path());
+    wait_for_sealed_segment(traced.runtime(), dir.path());
 
-    let (first, second) = session.runtime().block_on(async {
+    let (first, second) = traced.runtime().block_on(async {
         // Fire two dumps concurrently.
         tokio::join!(
             trigger.dump_current_data().with_metadata("reason", "a"),
@@ -113,5 +113,5 @@ fn concurrent_dumps_both_resolve_with_distinct_ids() {
         "at least one concurrent dump captured the ring"
     );
 
-    drop(session);
+    drop(traced);
 }

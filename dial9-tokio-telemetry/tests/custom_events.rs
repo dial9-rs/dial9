@@ -41,7 +41,7 @@ fn traced_runtime_records_custom_events_callback_events() {
     .unwrap();
     drop(tx);
 
-    let session = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
+    let traced = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
         .with_custom_events(CustomEventsConfig::default(), move |ctx| {
             while let Ok(event) = rx.try_recv() {
                 ctx.record_event(event);
@@ -54,7 +54,7 @@ fn traced_runtime_records_custom_events_callback_events() {
         .build()
         .unwrap();
 
-    session.graceful_shutdown();
+    traced.graceful_shutdown();
 
     let batches = batches.lock().unwrap();
     let events = decode_queued_events(&batches);
@@ -75,7 +75,7 @@ fn telemetry_core_attach_runtime_records_custom_events_callback_events() {
     .unwrap();
     drop(tx);
 
-    let session = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
+    let traced = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
         .with_custom_events(CustomEventsConfig::default(), move |ctx| {
             while let Ok(event) = rx.try_recv() {
                 ctx.record_event(event);
@@ -90,10 +90,10 @@ fn telemetry_core_attach_runtime_records_custom_events_callback_events() {
 
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.worker_threads(1).enable_all();
-    let (runtime, _handle) = session.trace_runtime("main").build(builder).unwrap();
+    let (runtime, _handle) = traced.trace_runtime("main").build(builder).unwrap();
 
     drop(runtime);
-    session.graceful_shutdown();
+    traced.graceful_shutdown();
 
     let batches = batches.lock().unwrap();
     let events = decode_queued_events(&batches);

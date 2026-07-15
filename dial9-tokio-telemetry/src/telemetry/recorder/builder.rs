@@ -3,7 +3,7 @@ use std::time::Duration;
 use crate::primitives::sync::{Arc, Mutex};
 use crate::telemetry::task_dump_config::TaskDumpConfig;
 use dial9_core::handle::Dial9Handle;
-use dial9_core::session::CoreSession;
+use dial9_core::session::Recorder;
 
 use super::SharedState;
 use super::guard::RuntimeAttach;
@@ -88,43 +88,43 @@ pub(super) fn assemble_processors(
 /// When telemetry is disabled (opted out, or a lenient config downgraded after a
 /// build failure) the runtime is a plain tokio runtime and the telemetry methods
 /// are inert. Use [`is_enabled`](Self::is_enabled) to tell.
-pub struct TokioSession {
+pub struct TracedRuntime {
     // `runtime` is dropped first (Tokio workers exit and flush their
     // thread-locals) before `session` seals the final segment.
     runtime: tokio::runtime::Runtime,
     /// The recording session; `None` when telemetry is disabled.
-    session: Option<CoreSession>,
+    recorder: Option<Recorder>,
     /// Registry of runtimes attached to this session (empty when disabled).
     contexts: RuntimeContextRegistry,
     /// Task-dump settings installed on attached runtimes.
     taskdump_config: Option<TaskDumpConfig>,
     /// Drain bound used by [`graceful_shutdown`](Self::graceful_shutdown). `None`
     /// skips the drain. Set via
-    /// [`TokioSessionBuilder::graceful_shutdown`](super::TokioSessionBuilder::graceful_shutdown).
+    /// [`TracedRuntimeBuilder::graceful_shutdown`](super::TracedRuntimeBuilder::graceful_shutdown).
     graceful_shutdown_timeout: Option<Duration>,
 }
 
-impl std::fmt::Debug for TokioSession {
+impl std::fmt::Debug for TracedRuntime {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TokioSession")
+        f.debug_struct("TracedRuntime")
             .field("enabled", &self.is_enabled())
             .finish_non_exhaustive()
     }
 }
 
-impl TokioSession {
+impl TracedRuntime {
     /// Assemble an enabled session from its parts. Called by
     /// [`build_traced`](super::build_traced).
     pub(crate) fn enabled(
         runtime: tokio::runtime::Runtime,
-        session: CoreSession,
+        recorder: Recorder,
         contexts: RuntimeContextRegistry,
         taskdump_config: Option<TaskDumpConfig>,
         graceful_shutdown_timeout: Option<Duration>,
     ) -> Self {
         Self {
             runtime,
-            session: Some(session),
+            recorder: Some(recorder),
             contexts,
             taskdump_config,
             graceful_shutdown_timeout,
@@ -139,18 +139,18 @@ impl TokioSession {
         let runtime = builder.build()?;
         Ok(Self {
             runtime,
-            session: None,
+            recorder: None,
             contexts: Arc::new(Mutex::new(Vec::new())),
             taskdump_config: None,
             graceful_shutdown_timeout,
         })
     }
 
-    /// Build a [`TokioSession`] from a config, panicking with the underlying
+    /// Build a [`TracedRuntime`] from a config, panicking with the underlying
     /// error on failure. Used by the `#[dial9::main]` macro.
     ///
-    /// Generic over any input that converts into a [`TokioSession`] — in
-    /// practice a [`TokioSessionBuilder`](super::TokioSessionBuilder) (from
+    /// Generic over any input that converts into a [`TracedRuntime`] — in
+    /// practice a [`TracedRuntimeBuilder`](super::TracedRuntimeBuilder) (from
     /// `recorder(w).with_tokio(..)`). The generic shape keeps the macro
     /// source-compatible across input types.
     ///
@@ -161,8 +161,8 @@ impl TokioSession {
     /// [`try_new`](Self::try_new).
     pub fn new<C>(config: C) -> Self
     where
-        C: TryInto<TokioSession>,
-        <C as TryInto<TokioSession>>::Error: std::fmt::Display,
+        C: TryInto<TracedRuntime>,
+        <C as TryInto<TracedRuntime>>::Error: std::fmt::Display,
     {
         config
             .try_into()
@@ -170,9 +170,9 @@ impl TokioSession {
     }
 
     /// Fallible counterpart to [`new`](Self::new).
-    pub fn try_new<C>(config: C) -> Result<Self, <C as TryInto<TokioSession>>::Error>
+    pub fn try_new<C>(config: C) -> Result<Self, <C as TryInto<TracedRuntime>>::Error>
     where
-        C: TryInto<TokioSession>,
+        C: TryInto<TracedRuntime>,
     {
         config.try_into()
     }
@@ -198,38 +198,38 @@ impl TokioSession {
     /// The recording [`Dial9Handle`] (for `record_event` and enable/disable).
     /// Inert when telemetry is disabled.
     pub fn record_handle(&self) -> Dial9Handle {
-        self.session
+        self.recorder
             .as_ref()
             .map_or_else(Dial9Handle::disabled, |s| s.handle().clone())
     }
 
     /// Whether this session is recording (vs an inert, disabled session).
     pub fn is_enabled(&self) -> bool {
-        self.session.is_some()
+        self.recorder.is_some()
     }
 
     /// Begin recording. No-op when disabled.
     pub fn enable(&self) {
-        if let Some(s) = &self.session {
+        if let Some(s) = &self.recorder {
             s.enable();
         }
     }
 
     /// Stop recording. No-op when disabled.
     pub fn disable(&self) {
-        if let Some(s) = &self.session {
+        if let Some(s) = &self.recorder {
             s.disable();
         }
     }
 
     /// Monotonic session start time in nanoseconds, if recording.
     pub fn start_time(&self) -> Option<u64> {
-        self.session.as_ref().and_then(|s| s.start_time())
+        self.recorder.as_ref().and_then(|s| s.start_time())
     }
 
     /// The underlying runtime-agnostic recording session. `None` when disabled.
-    pub fn session(&self) -> Option<&CoreSession> {
-        self.session.as_ref()
+    pub fn recorder(&self) -> Option<&Recorder> {
+        self.recorder.as_ref()
     }
 
     /// The configured task-dump settings, if any.
@@ -243,10 +243,10 @@ impl TokioSession {
     ///
     /// ```no_run
     /// # use dial9_tokio_telemetry::telemetry::{DiskBuffer, RecorderBuilderTokioExt, recorder};
-    /// let session = recorder(DiskBuffer::single_file("/tmp/trace.bin")?)
+    /// let traced = recorder(DiskBuffer::single_file("/tmp/trace.bin")?)
     ///     .with_tokio(|t| { t.worker_threads(4); })
     ///     .build()?;
-    /// let (io_rt, io_handle) = session
+    /// let (io_rt, io_handle) = traced
     ///     .trace_runtime("io")
     ///     .build(tokio::runtime::Builder::new_multi_thread())?;
     /// # Ok::<(), std::io::Error>(())
@@ -277,7 +277,7 @@ impl TokioSession {
 
     /// Drop the primary runtime, then drain the background worker within the
     /// configured timeout (set via
-    /// [`TokioSessionBuilder::graceful_shutdown`](super::TokioSessionBuilder::graceful_shutdown),
+    /// [`TracedRuntimeBuilder::graceful_shutdown`](super::TracedRuntimeBuilder::graceful_shutdown),
     /// default 1s; `None` skips the drain).
     ///
     /// **Call this after any runtimes you attached with
@@ -288,12 +288,12 @@ impl TokioSession {
     pub fn graceful_shutdown(self) {
         let timeout = self.graceful_shutdown_timeout;
         let Self {
-            runtime, session, ..
+            runtime, recorder, ..
         } = self;
         // Drop the runtime first so Tokio workers exit and flush before the
-        // session seals the final segment.
+        // recorder seals the final segment.
         drop(runtime);
-        if let (Some(timeout), Some(s)) = (timeout, session)
+        if let (Some(timeout), Some(s)) = (timeout, recorder)
             && let Err(e) = s.graceful_shutdown(timeout)
         {
             tracing::error!(target: "dial9_telemetry", error = %e, "dial9 graceful shutdown failed");
@@ -303,15 +303,15 @@ impl TokioSession {
     // ── Internal accessors for RuntimeAttach ──────────────────────
 
     pub(crate) fn shared(&self) -> Option<&Arc<SharedState>> {
-        self.session.as_ref().and_then(|s| s.shared())
+        self.recorder.as_ref().and_then(|s| s.shared())
     }
 
     pub(crate) fn contexts_registry(&self) -> Option<&RuntimeContextRegistry> {
-        self.session.as_ref().map(|_| &self.contexts)
+        self.recorder.as_ref().map(|_| &self.contexts)
     }
 
     pub(crate) fn session_handle(&self) -> Option<&Dial9Handle> {
-        self.session.as_ref().map(|s| s.handle())
+        self.recorder.as_ref().map(|s| s.handle())
     }
 
     #[cfg(test)]

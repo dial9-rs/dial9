@@ -10,14 +10,14 @@
 //!
 //! ### Enabling and disabling
 //!
-//! - Returning a [`TokioSessionBuilder::disabled()`](dial9::TokioSessionBuilder::disabled) from the config
+//! - Returning a [`TracedRuntimeBuilder::disabled()`](dial9::TracedRuntimeBuilder::disabled) from the config
 //!   function produces a pass-through: the `#[main]` macro builds a plain, unmodified tokio runtime with zero dial9 overhead.
 //!   [`Dial9TokioHandle::current()`](dial9::telemetry::Dial9TokioHandle::current) returns an inert
 //!   handle, and `handle.spawn` falls through to `tokio::spawn`, so application code does not need branches.
 //! - Alternatively, you can install dial9 but leave recording disabled at runtime via the handle's
 //!   [`disable()`](dial9::telemetry::Dial9Handle::disable). The runtime hooks are installed
 //!   but all event writes are no-ops behind a relaxed atomic read. This has slightly more overhead than
-//!   a [`TokioSessionBuilder::disabled()`](dial9::TokioSessionBuilder::disabled) recorder but lets a background task flip
+//!   a [`TracedRuntimeBuilder::disabled()`](dial9::TracedRuntimeBuilder::disabled) recorder but lets a background task flip
 //!   recording on from dynamic configuration later. It is a larger surface area of code, so it is higher risk.
 //!
 //! > Note! dial9 must be created _before_ your async runtime. dial9 relies on installing itself into the runtime
@@ -137,7 +137,7 @@
 //! would for any misconfigured CLI tool. Invalid _dial9_ configuration
 //! (writer I/O failure, unwritable trace directory, etc.) is caught by the
 //! config function, which logs the error and returns a
-//! [`TokioSessionBuilder::disabled()`](dial9::TokioSessionBuilder::disabled), a plain
+//! [`TracedRuntimeBuilder::disabled()`](dial9::TracedRuntimeBuilder::disabled), a plain
 //! tokio runtime with telemetry disabled. A bad trace config must never take
 //! down prod.
 //!
@@ -166,7 +166,7 @@ use std::time::Duration;
 
 use clap::Parser;
 use dial9::telemetry::Dial9TokioHandle;
-use dial9::{Disk, DiskBuffer, RecorderBuilder, RecorderBuilderTokioExt, TokioSessionBuilder};
+use dial9::{Disk, DiskBuffer, RecorderBuilder, RecorderBuilderTokioExt, TracedRuntimeBuilder};
 use metrique::local::{LocalFormat, OutputStyle};
 use metrique::writer::format::FormatExt;
 use metrique::writer::sink::FlushImmediatelyBuilder;
@@ -255,17 +255,17 @@ fn configure_sources(core: RecorderBuilder<Disk>, _opts: &Dial9Opts) -> Recorder
     core
 }
 
-/// Translate parsed options into a [`TokioSessionBuilder`] the `#[main]` macro can consume.
+/// Translate parsed options into a [`TracedRuntimeBuilder`] the `#[main]` macro can consume.
 ///
 /// `--enabled false` and any writer I/O failure (unwritable `trace_dir`,
-/// zero-sized budget, etc.) return a writer-free [`TokioSessionBuilder::disabled`],
+/// zero-sized budget, etc.) return a writer-free [`TracedRuntimeBuilder::disabled`],
 /// which builds a plain tokio runtime. In both
 /// cases `Dial9TokioHandle::current()` returns an inert handle and
 /// `handle.spawn` delegates to `tokio::spawn`, so application code does not
 /// need to branch on whether dial9 is running.
-fn configure_dial9(opts: &Dial9Opts) -> TokioSessionBuilder {
+fn configure_dial9(opts: &Dial9Opts) -> TracedRuntimeBuilder {
     if !opts.enabled {
-        return TokioSessionBuilder::disabled();
+        return TracedRuntimeBuilder::disabled();
     }
 
     if let Err(e) = std::fs::create_dir_all(&opts.trace_dir) {
@@ -289,7 +289,7 @@ fn configure_dial9(opts: &Dial9Opts) -> TokioSessionBuilder {
             // A bad trace config must never take down prod: fall back to a
             // plain tokio runtime with telemetry disabled.
             eprintln!("warning: could not open trace writer: {e}; running without telemetry");
-            return TokioSessionBuilder::disabled();
+            return TracedRuntimeBuilder::disabled();
         }
     };
 
@@ -299,7 +299,7 @@ fn configure_dial9(opts: &Dial9Opts) -> TokioSessionBuilder {
     );
 
     #[cfg_attr(not(feature = "worker-s3"), allow(unused_mut))]
-    let mut session = core.with_tokio(|_| {}).with_task_tracking(true);
+    let mut traced = core.with_tokio(|_| {}).with_task_tracking(true);
 
     #[cfg(feature = "worker-s3")]
     if let (Some(bucket), Some(service_name)) = (opts.s3_bucket.clone(), opts.service_name.clone())
@@ -309,10 +309,10 @@ fn configure_dial9(opts: &Dial9Opts) -> TokioSessionBuilder {
             .bucket(bucket)
             .service_name(service_name)
             .build();
-        session = session.with_s3_uploader(s3);
+        traced = traced.with_s3_uploader(s3);
     }
 
-    session
+    traced
 }
 
 /// Complain at startup when the operator asked for something a feature flag
@@ -332,7 +332,7 @@ fn warn_if_feature_missing(opts: &Dial9Opts) {
     }
 }
 
-fn my_config() -> TokioSessionBuilder {
+fn my_config() -> TracedRuntimeBuilder {
     let opts = Dial9Opts::parse();
     eprintln!(
         "dial9 telemetry: {}",

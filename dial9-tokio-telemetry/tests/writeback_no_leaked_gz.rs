@@ -33,7 +33,7 @@ fn eviction_cleans_up_processed_gz_segments() {
 
     let writer = DiskBuffer::new(trace_dir.path(), max_file_size, max_total_size).unwrap();
 
-    let session = recorder(writer)
+    let traced = recorder(writer)
         .with_cpu_profiling(CpuProfilingConfig::default())
         .worker_poll_interval(Duration::from_millis(50))
         .with_tokio(|t| {
@@ -45,7 +45,7 @@ fn eviction_cleans_up_processed_gz_segments() {
 
     // Generate enough work to produce many sealed segments, exceeding the
     // total budget so eviction must kick in.
-    session.runtime().block_on(async {
+    traced.runtime().block_on(async {
         for _ in 0..30 {
             let mut handles = Vec::new();
             for _ in 0..20 {
@@ -63,7 +63,7 @@ fn eviction_cleans_up_processed_gz_segments() {
         }
     });
 
-    session.graceful_shutdown();
+    traced.graceful_shutdown();
 
     // Collect all trace-related files in the directory.
     let mut bin_files = Vec::new();

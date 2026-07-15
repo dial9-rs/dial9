@@ -91,7 +91,7 @@ fn flush_once<M: BufferMode>(
     }
 }
 
-/// The flush thread main loop. Driven by [`CoreSession::start`](crate::session::CoreSession::start).
+/// The flush thread main loop. Driven by [`Recorder::start`](crate::session::Recorder::start).
 pub(crate) fn run_flush_loop<M: BufferMode>(
     control_rx: crate::primitives::sync::mpsc::Receiver<ControlCommand>,
     shared: &SharedState,

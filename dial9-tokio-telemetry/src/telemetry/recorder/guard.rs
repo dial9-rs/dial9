@@ -1,8 +1,8 @@
 use super::attach_runtime;
-use super::builder::TokioSession;
+use super::builder::TracedRuntime;
 use super::handle::Dial9TokioHandle;
 
-/// A pending runtime attachment, returned by [`TokioSession::trace_runtime`].
+/// A pending runtime attachment, returned by [`TracedRuntime::trace_runtime`].
 ///
 /// Chain per-runtime settings on it, then finish with
 /// [`build`](Self::build), passing a [`tokio::runtime::Builder`], to install the
@@ -10,7 +10,7 @@ use super::handle::Dial9TokioHandle;
 #[must_use]
 #[derive(Debug)]
 pub struct RuntimeAttach<'a> {
-    session: &'a TokioSession,
+    traced: &'a TracedRuntime,
     name: String,
     task_tracking: bool,
     tokio_instrumentation_enabled: bool,
@@ -18,9 +18,9 @@ pub struct RuntimeAttach<'a> {
 }
 
 impl<'a> RuntimeAttach<'a> {
-    pub(crate) fn new(session: &'a TokioSession, name: String) -> Self {
+    pub(crate) fn new(traced: &'a TracedRuntime, name: String) -> Self {
         Self {
-            session,
+            traced,
             name,
             task_tracking: false,
             tokio_instrumentation_enabled: true,
@@ -63,10 +63,10 @@ impl<'a> RuntimeAttach<'a> {
         mut builder: tokio::runtime::Builder,
     ) -> std::io::Result<(tokio::runtime::Runtime, Dial9TokioHandle)> {
         let (Some(shared), Some(contexts), Some(session_handle), Some(traced)) = (
-            self.session.shared(),
-            self.session.contexts_registry(),
-            self.session.session_handle(),
-            super::traced_handle(&self.session.record_handle()),
+            self.traced.shared(),
+            self.traced.contexts_registry(),
+            self.traced.session_handle(),
+            super::traced_handle(&self.traced.record_handle()),
         ) else {
             // Disabled session: build a plain tokio runtime and return a
             // Dial9TokioHandle that effectively short-circuits to tokio::spawn.
@@ -89,7 +89,7 @@ impl<'a> RuntimeAttach<'a> {
             session_handle,
             self.task_tracking,
             self.tokio_hooks,
-            self.session.taskdump_config(),
+            self.traced.taskdump_config(),
         )?;
         let handle = Dial9TokioHandle::for_runtime(runtime.handle().clone(), Some(traced));
         Ok((runtime, handle))

@@ -139,7 +139,7 @@ fn main() -> std::io::Result<()> {
     );
 
     let worker_threads = args.worker_threads;
-    let session = recorder(writer)
+    let traced = recorder(writer)
         .metrics_sink(metrics_sink)
         .with_tokio(move |t| {
             t.worker_threads(worker_threads);
@@ -149,7 +149,7 @@ fn main() -> std::io::Result<()> {
         .graceful_shutdown(Duration::from_secs(30))
         .build()?;
 
-    let handle = session.handle();
+    let handle = traced.handle();
     let load_duration = Duration::from_secs(args.duration);
     let tasks_done = Arc::new(AtomicU64::new(0));
     let start = Instant::now();
@@ -160,7 +160,7 @@ fn main() -> std::io::Result<()> {
     eprintln!("  Segment size: {} bytes", args.segment_size);
     eprintln!();
 
-    session.runtime().block_on(async {
+    traced.runtime().block_on(async {
         let counter = tasks_done.clone();
         let trace_dir2 = trace_dir.clone();
         let trace_stem2 = trace_stem.clone();
@@ -237,7 +237,7 @@ fn main() -> std::io::Result<()> {
     });
 
     eprintln!("Calling graceful_shutdown...");
-    session.graceful_shutdown();
+    traced.graceful_shutdown();
     eprintln!("Done.");
 
     // Count uploaded objects in S3

@@ -47,11 +47,11 @@ fn facade_recorder_records_a_source() {
     let dir = tempfile::tempdir().expect("tempdir");
     let writer = DiskBuffer::single_file(dir.path().join("trace.bin")).expect("writer");
 
-    let session = recorder(writer)
+    let recorder = recorder(writer)
         .source(OnceSource { emitted: false })
         .build_and_start();
     // The session exposes its sources through the public `shared()` API.
-    let source_names: Vec<String> = session
+    let source_names: Vec<String> = recorder
         .shared()
         .expect("enabled session")
         .with_sources_mut(|sources| sources.iter().map(|s| s.name().to_string()).collect())
@@ -60,7 +60,7 @@ fn facade_recorder_records_a_source() {
         source_names.iter().any(|name| name == "once"),
         "the registered source should be visible on the session"
     );
-    session
+    recorder
         .graceful_shutdown(Duration::ZERO)
         .expect("graceful shutdown");
 

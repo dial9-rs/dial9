@@ -24,7 +24,7 @@ enum ParkOrUnpark {
 fn worker_park_unpark_events_carry_nonzero_tid() {
     let (capture, batches) = capture_processor();
 
-    let session = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
+    let traced = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
         .with_tokio(|t| {
             t.worker_threads(2);
         })
@@ -33,7 +33,7 @@ fn worker_park_unpark_events_carry_nonzero_tid() {
         .unwrap();
 
     // Generate park/unpark cycles by spawning work that yields.
-    session.runtime().block_on(async {
+    traced.runtime().block_on(async {
         let mut handles = Vec::new();
         for _ in 0..20 {
             handles.push(tokio::spawn(async {
@@ -47,7 +47,7 @@ fn worker_park_unpark_events_carry_nonzero_tid() {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     });
 
-    session.graceful_shutdown();
+    traced.graceful_shutdown();
 
     let batches = batches.lock().unwrap();
     let events: Vec<ParkOrUnpark> = decode_all(&batches);

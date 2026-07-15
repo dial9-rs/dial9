@@ -23,7 +23,7 @@ fn memory_sample_rate_appears_in_segment_metadata() {
 
     let writer = DiskBuffer::single_file(&trace_path).unwrap();
 
-    let session = recorder(writer)
+    let traced = recorder(writer)
         .with_tokio(|t| {
             t.worker_threads(1);
         })
@@ -31,7 +31,7 @@ fn memory_sample_rate_appears_in_segment_metadata() {
         .build()
         .unwrap();
 
-    let handle = session.record_handle();
+    let handle = traced.record_handle();
     let _mem_guard = MemoryProfiler::from_config(
         MemoryProfilingConfig::builder()
             .sample_rate_bytes(2048)
@@ -41,11 +41,11 @@ fn memory_sample_rate_appears_in_segment_metadata() {
     .install(handle)
     .expect("install should succeed");
 
-    session.runtime().block_on(async {
+    traced.runtime().block_on(async {
         tokio::time::sleep(Duration::from_millis(100)).await;
     });
 
-    session.graceful_shutdown();
+    traced.graceful_shutdown();
 
     let mut found = false;
     let files: Vec<_> = std::fs::read_dir(dir.path())

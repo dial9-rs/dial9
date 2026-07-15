@@ -41,7 +41,7 @@ fn test_js_parser_matches_rust() {
                 dial9_tokio_telemetry::telemetry::CpuProfilingConfig::default(),
             );
         }
-        let session = rec
+        let traced = rec
             .with_tokio(|t| {
                 t.worker_threads(2);
             })
@@ -49,7 +49,7 @@ fn test_js_parser_matches_rust() {
             .build()
             .unwrap();
 
-        session.runtime().block_on(async {
+        traced.runtime().block_on(async {
             let mut tasks = vec![];
             for i in 0..10 {
                 tasks.push(tokio::spawn(cpu_task(i)));

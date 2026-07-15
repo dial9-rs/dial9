@@ -194,7 +194,7 @@ fn measure(mode: Mode) -> Sample {
 
     // Scope writer/runtime so they drop before we sample post_shutdown.
     let steady_state = {
-        let session = match mode {
+        let traced = match mode {
             Mode::Disk => {
                 let tmp = tempfile::tempdir().unwrap();
                 let writer = DiskBuffer::builder()
@@ -276,13 +276,13 @@ fn measure(mode: Mode) -> Sample {
                     .expect("build (mem+cpu)")
             }
         };
-        session.enable();
-        let handle = session.handle();
-        session
+        traced.enable();
+        let handle = traced.handle();
+        traced
             .runtime()
             .block_on(workload(handle, tasks_done.clone()));
         let steady = ALLOC.peak();
-        session.graceful_shutdown();
+        traced.graceful_shutdown();
         steady
     };
 

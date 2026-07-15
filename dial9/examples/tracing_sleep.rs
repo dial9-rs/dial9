@@ -21,7 +21,7 @@ async fn inner_work(id: u32) {
 
 fn main() {
     let writer = DiskBuffer::single_file("tracing_sleep_trace.bin").unwrap();
-    let session = recorder(writer)
+    let traced = recorder(writer)
         .with_tokio(|t| {
             t.worker_threads(2);
         })
@@ -32,7 +32,7 @@ fn main() {
     let subscriber = tracing_subscriber::registry().with(Dial9TracingLayer::new());
     tracing::subscriber::set_global_default(subscriber).expect("failed to set subscriber");
 
-    session.runtime().block_on(async {
+    traced.runtime().block_on(async {
         let tasks: Vec<_> = (0..10).map(|i| tokio::spawn(handle_request(i))).collect();
         for t in tasks {
             let _ = t.await;

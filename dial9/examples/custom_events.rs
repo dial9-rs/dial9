@@ -68,14 +68,14 @@ fn main() -> std::io::Result<()> {
     let trace_path = dir.path().join("trace.bin");
 
     let writer = DiskBuffer::single_file(&trace_path)?;
-    let session = recorder(writer)
+    let traced = recorder(writer)
         .with_tokio(|t| {
             t.worker_threads(2);
         })
         .build()?;
-    let handle = session.record_handle();
+    let handle = traced.record_handle();
 
-    session.runtime().block_on(async {
+    traced.runtime().block_on(async {
         // Simple: derive-only events
         for i in 0..10 {
             let error_message = if i % 4 == 3 {
@@ -104,7 +104,7 @@ fn main() -> std::io::Result<()> {
         tokio::time::sleep(Duration::from_millis(100)).await;
     });
 
-    drop(session);
+    drop(traced);
 
     // Verify: decode the trace and count our custom events
     let sealed = dir.path().join("trace.0.bin");

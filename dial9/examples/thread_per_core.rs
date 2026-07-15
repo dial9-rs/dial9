@@ -46,7 +46,7 @@ fn main() -> std::io::Result<()> {
     // Build the session. The primary runtime is a lightweight current-thread
     // one we never drive — every core gets its own runtime below via
     // `trace_runtime`.
-    let session = recorder(writer)
+    let traced = recorder(writer)
         .with_tokio(|t| {
             *t = tokio::runtime::Builder::new_current_thread();
             t.enable_all();
@@ -65,7 +65,7 @@ fn main() -> std::io::Result<()> {
             let mut core_builder = tokio::runtime::Builder::new_current_thread();
             core_builder.enable_all();
 
-            let (core_rt, handle) = session
+            let (core_rt, handle) = traced
                 .trace_runtime(format!("core-{core_id}"))
                 .build(core_builder)
                 .unwrap();
@@ -74,7 +74,7 @@ fn main() -> std::io::Result<()> {
                 .name(format!("core-{core_id}"))
                 .spawn(move || {
                     core_rt
-                        // spawning into the traced handle allows for more tracking
+                        // spawning into the session handle allows for more tracking
                         .block_on(handle.spawn(async move {
                             for i in 0..20 {
                                 tokio::task::yield_now().await;
@@ -95,7 +95,7 @@ fn main() -> std::io::Result<()> {
     }
     println!("All cores finished.\n");
 
-    session.graceful_shutdown();
+    traced.graceful_shutdown();
 
     // ── Read back the trace and verify ──────────────────────────────────
 

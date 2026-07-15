@@ -17,7 +17,7 @@ fn graceful_shutdown_produces_clean_gzip_segments() {
 
     let writer = DiskBuffer::new(trace_dir.path(), 512 * 1024, 10 * 1024 * 1024).unwrap();
 
-    let session = recorder(writer)
+    let traced = recorder(writer)
         .with_cpu_profiling(CpuProfilingConfig::default())
         .worker_poll_interval(std::time::Duration::from_millis(50))
         .with_tokio(|t| {
@@ -27,7 +27,7 @@ fn graceful_shutdown_produces_clean_gzip_segments() {
         .build()
         .unwrap();
 
-    session.runtime().block_on(async {
+    traced.runtime().block_on(async {
         // Spawn enough work to fill thread-local buffers. The bug requires
         // unflushed events in thread-local buffers at graceful_shutdown time,
         // which then get written through a stale fd in Drop.
@@ -46,7 +46,7 @@ fn graceful_shutdown_produces_clean_gzip_segments() {
         }
     });
 
-    session.graceful_shutdown();
+    traced.graceful_shutdown();
 
     let mut gzip_files = 0;
     for entry in std::fs::read_dir(trace_dir.path()).unwrap() {

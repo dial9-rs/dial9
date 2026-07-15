@@ -27,7 +27,7 @@ fn burn_cpu_work() {
     std::hint::black_box(x);
 }
 
-/// Build a TokioSession with cpu-profiling, run a CPU-burning workload,
+/// Build a TracedRuntime with cpu-profiling, run a CPU-burning workload,
 /// shut down gracefully, then read the symbolized segments and verify
 /// that SymbolTableEntry events contain real resolved symbol names.
 #[test]
@@ -38,7 +38,7 @@ fn background_symbolization_produces_symbol_table_entries() {
     // Large total size so segments aren't evicted before the worker processes them.
     let writer = DiskBuffer::new(trace_dir.path(), 4 * 1024, 10 * 1024 * 1024).unwrap();
 
-    let session = recorder(writer)
+    let traced = recorder(writer)
         .with_cpu_profiling(CpuProfilingConfig::default().frequency_hz(999))
         .worker_poll_interval(std::time::Duration::from_millis(50))
         .with_tokio(|t| {
@@ -49,7 +49,7 @@ fn background_symbolization_produces_symbol_table_entries() {
         .unwrap();
 
     // Burn CPU across multiple threads to generate CpuSample events.
-    session.runtime().block_on(async {
+    traced.runtime().block_on(async {
         let mut handles = Vec::new();
         for _ in 0..4 {
             handles.push(tokio::spawn(tokio::task::spawn_blocking(burn_cpu_work)));
@@ -63,7 +63,7 @@ fn background_symbolization_produces_symbol_table_entries() {
     });
 
     // Graceful shutdown: seals final segment, worker drains all remaining.
-    session.graceful_shutdown();
+    traced.graceful_shutdown();
 
     // Read all .bin files in the trace directory. After the worker runs,
     // processed segments are gzip-compressed (GzipWriteBackProcessor).

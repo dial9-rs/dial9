@@ -36,7 +36,7 @@ enum DumpEvent {
 fn task_dump_emitted_for_long_sleep() {
     let (capture, batches) = capture_processor();
 
-    let session = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
+    let traced = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
         .with_tokio(|t| {
             *t = tokio::runtime::Builder::new_current_thread();
             t.enable_all();
@@ -47,8 +47,8 @@ fn task_dump_emitted_for_long_sleep() {
         .build()
         .unwrap();
 
-    let handle = session.handle();
-    session.runtime().block_on(async {
+    let handle = traced.handle();
+    traced.runtime().block_on(async {
         let join = handle.spawn(async {
             // Well above the 10ms default threshold.
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -56,7 +56,7 @@ fn task_dump_emitted_for_long_sleep() {
         join.await.unwrap();
     });
 
-    session.graceful_shutdown();
+    traced.graceful_shutdown();
 
     let b = batches.lock().unwrap();
     let events: Vec<DumpEvent> = decode_all(&b);
@@ -78,7 +78,7 @@ fn task_dump_emitted_for_long_sleep() {
 fn no_task_dump_for_short_sleep() {
     let (capture, batches) = capture_processor();
 
-    let session = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
+    let traced = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
         .with_tokio(|t| {
             *t = tokio::runtime::Builder::new_current_thread();
             t.enable_all();
@@ -94,15 +94,15 @@ fn no_task_dump_for_short_sleep() {
         .build()
         .unwrap();
 
-    let handle = session.handle();
-    session.runtime().block_on(async {
+    let handle = traced.handle();
+    traced.runtime().block_on(async {
         let join = handle.spawn(async {
             tokio::time::sleep(Duration::from_millis(1)).await;
         });
         join.await.unwrap();
     });
 
-    session.graceful_shutdown();
+    traced.graceful_shutdown();
 
     let b = batches.lock().unwrap();
     let events: Vec<DumpEvent> = decode_all(&b);
@@ -128,13 +128,13 @@ fn task_dump_does_not_produce_extra_events() {
         if enable {
             tb = tb.with_task_dumps(TaskDumpConfig::builder().rng_seed(42).build());
         }
-        let session = tb
+        let traced = tb
             .with_custom_pipeline(|p| p.pipe(capture))
             .build()
             .unwrap();
 
-        let handle = session.handle();
-        session.runtime().block_on(async {
+        let handle = traced.handle();
+        traced.runtime().block_on(async {
             let join = handle.spawn(async {
                 tokio::task::yield_now().await;
                 tokio::task::yield_now().await;
@@ -142,7 +142,7 @@ fn task_dump_does_not_produce_extra_events() {
             });
             join.await.unwrap();
         });
-        session.graceful_shutdown();
+        traced.graceful_shutdown();
 
         let b = batches.lock().unwrap();
         let events: Vec<DumpEvent> = decode_all(&b);
@@ -173,7 +173,7 @@ fn task_dump_does_not_produce_extra_events() {
 fn spawn_with_joinset_emits_task_dump() {
     let (capture, batches) = capture_processor();
 
-    let session = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
+    let traced = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
         .with_tokio(|t| {
             *t = tokio::runtime::Builder::new_current_thread();
             t.enable_all();
@@ -184,8 +184,8 @@ fn spawn_with_joinset_emits_task_dump() {
         .build()
         .unwrap();
 
-    let handle = session.handle();
-    session.runtime().block_on(async {
+    let handle = traced.handle();
+    traced.runtime().block_on(async {
         let mut set: JoinSet<()> = JoinSet::new();
         handle.spawn_with(
             async {
@@ -197,7 +197,7 @@ fn spawn_with_joinset_emits_task_dump() {
         while set.join_next().await.is_some() {}
     });
 
-    session.graceful_shutdown();
+    traced.graceful_shutdown();
 
     let b = batches.lock().unwrap();
     let events: Vec<DumpEvent> = decode_all(&b);

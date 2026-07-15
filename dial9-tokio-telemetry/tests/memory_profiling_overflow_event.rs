@@ -32,7 +32,7 @@ enum OverflowEvent {
 fn overflow_event_emitted_when_ring_overflows() {
     let (capture, batches) = capture_processor();
 
-    let session = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
+    let traced = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
         .with_tokio(|t| {
             t.worker_threads(1);
         })
@@ -40,7 +40,7 @@ fn overflow_event_emitted_when_ring_overflows() {
         .build()
         .unwrap();
 
-    let handle = session.record_handle();
+    let handle = traced.record_handle();
     // Use a tiny ring (capacity 4) so it overflows easily under allocation pressure.
     let _mem_guard = MemoryProfiler::from_config(
         MemoryProfilingConfig::builder()
@@ -53,7 +53,7 @@ fn overflow_event_emitted_when_ring_overflows() {
     .expect("install should succeed");
 
     // Generate enough allocations to overflow the tiny ring.
-    session.runtime().block_on(async {
+    traced.runtime().block_on(async {
         for _ in 0..1000 {
             let v: Vec<u8> = vec![0u8; 64];
             std::hint::black_box(&v);
@@ -63,7 +63,7 @@ fn overflow_event_emitted_when_ring_overflows() {
         tokio::time::sleep(Duration::from_millis(100)).await;
     });
 
-    session.graceful_shutdown();
+    traced.graceful_shutdown();
 
     let batches = batches.lock().unwrap();
     let events: Vec<OverflowEvent> = decode_all(&batches);

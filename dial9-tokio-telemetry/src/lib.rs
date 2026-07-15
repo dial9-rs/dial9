@@ -33,4 +33,4 @@ pub(crate) mod unwind;
 /// Tracing subscriber layer for emitting span events into dial9 traces.
 pub mod tracing_layer;
 
-pub use telemetry::{TokioSession, TracedFuture, spawn};
+pub use telemetry::{TracedFuture, TracedRuntime, spawn};

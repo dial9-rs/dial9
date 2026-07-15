@@ -33,7 +33,7 @@ impl WorkerHandle {
 /// segment, and stops the worker. For a bounded drain of the background worker
 /// (symbolize, compress, upload) call [`graceful_shutdown`](Self::graceful_shutdown)
 /// instead.
-pub struct CoreSession {
+pub struct Recorder {
     handle: Dial9Handle,
     flush_thread: Option<JoinHandle<()>>,
     /// Hooks run once, with the handle, on the first `enable()`.
@@ -46,7 +46,7 @@ pub struct CoreSession {
 /// enables recording.
 pub type SessionStartHook = Box<dyn FnOnce(&Dial9Handle) + Send>;
 
-impl CoreSession {
+impl Recorder {
     /// Create a session from an existing handle and flush thread.
     pub(crate) fn new(handle: Dial9Handle, flush_thread: Option<JoinHandle<()>>) -> Self {
         Self {
@@ -197,7 +197,7 @@ impl CoreSession {
     }
 }
 
-impl Drop for CoreSession {
+impl Drop for Recorder {
     fn drop(&mut self) {
         // 1. Flush + finalize. Idempotent, so a prior graceful_shutdown/stop is fine.
         self.stop_flush_thread();

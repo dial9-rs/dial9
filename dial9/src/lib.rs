@@ -1,6 +1,6 @@
 //! The main crate for dial9 telemetry.
 //!
-//! Most applications want the `tokio` feature: `#[dial9::main]`, `TokioSession`,
+//! Most applications want the `tokio` feature: `#[dial9::main]`, `TracedRuntime`,
 //! `spawn`, and the `recorder(w).with_tokio(..)` builder. Library authors who
 //! only need to record events into a trace can use the always-available core API
 //! ([`recorder`](fn@recorder), [`Dial9Handle`], [`record_event`], [`Source`])
@@ -18,7 +18,7 @@ pub use dial9_core::clock::{self, clock_monotonic_ns};
 pub use dial9_core::encoder::{self, Encodable, ThreadLocalEncoder};
 pub use dial9_core::handle::{self, Dial9Handle, clear_tl_handle, current_handle, set_tl_handle};
 pub use dial9_core::recorder::{self, RecorderBuilder, RegisterSource, recorder};
-pub use dial9_core::session::{self, CoreSession};
+pub use dial9_core::session::{self, Recorder};
 pub use dial9_core::source::{self, FlushContext, Source};
 
 /// Record an event on the calling thread's current handle.
@@ -47,17 +47,17 @@ pub mod pipeline {
 #[cfg(feature = "tokio")]
 pub use dial9_macro::main;
 #[cfg(feature = "tokio")]
-pub use dial9_tokio_telemetry::{TokioSession, TracedFuture, background_task, spawn, telemetry};
+pub use dial9_tokio_telemetry::{TracedFuture, TracedRuntime, background_task, spawn, telemetry};
 
 #[cfg(feature = "tokio")]
-pub use dial9_tokio_telemetry::telemetry::{RecorderBuilderTokioExt, TokioSessionBuilder};
+pub use dial9_tokio_telemetry::telemetry::{RecorderBuilderTokioExt, TracedRuntimeBuilder};
 
 #[cfg(feature = "tokio")]
 mod config;
 #[cfg(feature = "tokio")]
 pub use config::recorder_from_env;
 
-/// Build a [`TokioSessionBuilder`] from a writer result, or fall back to a disabled
+/// Build a [`TracedRuntimeBuilder`] from a writer result, or fall back to a disabled
 /// (writer-free) one when the writer cannot be created. Works with any writer:
 /// [`DiskBuffer`] or [`MemoryBuffer`]. Telemetry stays best-effort: a failed
 /// writer logs at `error!` and runs a plain Tokio runtime rather than panicking
@@ -66,7 +66,7 @@ pub use config::recorder_from_env;
 ///
 /// ```no_run
 /// use dial9::DiskBuffer;
-/// fn config() -> dial9::TokioSessionBuilder {
+/// fn config() -> dial9::TracedRuntimeBuilder {
 ///     let writer = DiskBuffer::builder()
 ///         .base_path("/tmp/dial9-traces")
 ///         .max_total_size(64 * 1024 * 1024)
@@ -82,7 +82,7 @@ pub use config::recorder_from_env;
 pub fn recorder_or_disabled<M, F>(
     writer: std::io::Result<SegmentWriter<M>>,
     configure: F,
-) -> TokioSessionBuilder<M>
+) -> TracedRuntimeBuilder<M>
 where
     M: BufferMode,
     F: Fn(&mut ::tokio::runtime::Builder) + Send + Sync + 'static,
@@ -94,7 +94,7 @@ where
                 target: "dial9_telemetry",
                 "dial9: trace writer setup failed; running without telemetry: {e}"
             );
-            TokioSessionBuilder::disabled().with_tokio(configure)
+            TracedRuntimeBuilder::disabled().with_tokio(configure)
         }
     }
 }

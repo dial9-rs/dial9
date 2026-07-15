@@ -7,7 +7,7 @@ use crate::clock::clock_monotonic_ns;
 use crate::primitives::fs;
 use crate::primitives::sync::atomic::{AtomicU64, Ordering};
 use crate::primitives::sync::{Arc, Mutex};
-use crate::session::CoreSession;
+use crate::session::Recorder;
 use crate::shared_state::SharedState;
 use crate::source::{FlushContext, Source};
 use dial9_trace_format::TraceEvent;
@@ -144,9 +144,9 @@ fn test_core_pipeline() {
 
     let shared = Arc::new(SharedState::new(clock_monotonic_ns()));
     shared.push_source(Box::new(MockSource::new(source_pending.clone())));
-    let mut session = CoreSession::start(shared, writer, None, || || {});
-    session.handle().enable();
-    let handle = session.handle().clone();
+    let mut recorder = Recorder::start(shared, writer, None, || || {});
+    recorder.handle().enable();
+    let handle = recorder.handle().clone();
 
     let expected: Arc<Mutex<Vec<ValidationEvent>>> = Arc::new(Mutex::new(Vec::new()));
     let writers: Vec<_> = (0..num_threads)
@@ -186,7 +186,7 @@ fn test_core_pipeline() {
         w.join().unwrap();
     }
     // Final flush + seal the last segment, then join the flush thread.
-    session.stop_flush_thread();
+    recorder.stop_flush_thread();
 
     // Drain the in-memory ring (memory pops one sealed segment per call).
     let mut all_decoded: Vec<ValidationEvent> = Vec::new();
@@ -289,9 +289,9 @@ fn run_erroring_pipeline(fault: fs::FaultPolicy) -> u64 {
         let writer = DiskBuffer::single_file(dir.path().join("trace.bin")).unwrap();
         let _fault = fs::set_fault(fault);
         let shared = Arc::new(SharedState::new(clock_monotonic_ns()));
-        let mut session = CoreSession::start(shared, writer, None, || || {});
-        session.handle().enable();
-        let handle = session.handle().clone();
+        let mut recorder = Recorder::start(shared, writer, None, || || {});
+        recorder.handle().enable();
+        let handle = recorder.handle().clone();
 
         let writers: Vec<_> = (0..num_threads)
             .map(|thread_id| {
@@ -324,7 +324,7 @@ fn run_erroring_pipeline(fault: fs::FaultPolicy) -> u64 {
         }
         // The shutdown/finalize path runs a final flush + seal, which should
         // also be rate-limited if it logs on error.
-        session.stop_flush_thread();
+        recorder.stop_flush_thread();
     });
 
     warn_count.load(StdOrdering::Relaxed)

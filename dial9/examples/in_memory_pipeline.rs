@@ -68,7 +68,7 @@ async fn workload() {
 fn main() -> std::io::Result<()> {
     let writer = MemoryBuffer::new(16 * 1024 * 1024)?; // 16 MB
 
-    let session = recorder(writer)
+    let traced = recorder(writer)
         .with_tokio(|t| {
             t.worker_threads(4);
         })
@@ -77,12 +77,12 @@ fn main() -> std::io::Result<()> {
         .graceful_shutdown(Duration::from_secs(5))
         .build()?;
 
-    session.runtime().block_on(async {
+    traced.runtime().block_on(async {
         println!("Running (no files written to disk)…");
         workload().await;
     });
 
-    session.graceful_shutdown();
+    traced.graceful_shutdown();
     println!("Done.");
     Ok(())
 }

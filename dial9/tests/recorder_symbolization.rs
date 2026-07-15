@@ -35,7 +35,7 @@ fn recorder_symbolizes_cpu_samples() {
     let profiler = CpuProfiler::start(CpuProfilingConfig::default().frequency_hz(999))
         .expect("start cpu profiler");
 
-    let session = recorder(writer)
+    let traced = recorder(writer)
         .source(profiler)
         .pipe(SymbolizeProcessor::new())
         .pipe(WriteBackProcessor::to_dir(output.clone()))
@@ -48,7 +48,7 @@ fn recorder_symbolizes_cpu_samples() {
         h.join().expect("burn thread");
     }
 
-    session
+    traced
         .graceful_shutdown(Duration::from_secs(10))
         .expect("graceful shutdown");
 

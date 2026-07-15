@@ -26,7 +26,7 @@ fn main() -> std::io::Result<()> {
         .build()?;
 
     // Primary runtime for request handling.
-    let session = recorder(writer)
+    let traced = recorder(writer)
         .with_tokio(|t| {
             t.worker_threads(2);
         })
@@ -37,14 +37,14 @@ fn main() -> std::io::Result<()> {
     // Secondary runtime for background I/O, sharing the same trace session.
     let mut io_builder = tokio::runtime::Builder::new_multi_thread();
     io_builder.worker_threads(2).enable_all();
-    let (io_rt, io_handle) = session.trace_runtime("io").build(io_builder)?;
+    let (io_rt, io_handle) = traced.trace_runtime("io").build(io_builder)?;
 
     println!("Running workload on two named runtimes...");
 
-    // Request handling on the main runtime. Spawn through the traced handle
+    // Request handling on the main runtime. Spawn through the session handle
     // instead of tokio::spawn() for wake-event tracking.
-    let main_handle = session.handle();
-    session.runtime().block_on(async {
+    let main_handle = traced.handle();
+    traced.runtime().block_on(async {
         let mut handles = Vec::new();
         for i in 0..20 {
             handles.push(main_handle.spawn(async move {
@@ -79,7 +79,7 @@ fn main() -> std::io::Result<()> {
 
     // Drop the attached runtime before shutdown so worker threads flush their buffers.
     drop(io_rt);
-    session.graceful_shutdown();
+    traced.graceful_shutdown();
 
     println!("\nTrace files in {trace_dir}/:");
     for entry in std::fs::read_dir(trace_dir)? {

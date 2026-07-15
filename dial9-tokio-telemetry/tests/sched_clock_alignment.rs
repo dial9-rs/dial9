@@ -21,7 +21,7 @@ fn sched_event_timestamps_align_with_wall_clock() {
 
     let num_workers = 2u64;
 
-    let session = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
+    let traced = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
         .with_sched_events(SchedEventConfig::default())
         .with_tokio(move |t| {
             t.worker_threads(num_workers as usize);
@@ -30,13 +30,13 @@ fn sched_event_timestamps_align_with_wall_clock() {
         .build()
         .unwrap();
 
-    let _trace_start = session.start_time();
+    let _trace_start = traced.start_time();
     let sleep_windows: Arc<Mutex<Vec<(u64, u64)>>> = Arc::new(Mutex::new(Vec::new()));
 
     let sleep_duration = Duration::from_millis(1);
     let num_sleeps = 4u64;
 
-    session.runtime().block_on(async {
+    traced.runtime().block_on(async {
         // Warmup
         for _ in 0..num_workers {
             tokio::spawn(async {
@@ -62,7 +62,7 @@ fn sched_event_timestamps_align_with_wall_clock() {
         tokio::time::sleep(Duration::from_millis(500)).await;
     });
 
-    session.graceful_shutdown();
+    traced.graceful_shutdown();
 
     let b = batches.lock().unwrap();
     let events: Vec<Dial9Event> = decode_all(&b);

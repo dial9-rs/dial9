@@ -99,13 +99,13 @@ fn install_profiler() {
 
     // We leak the runtime and guard so they live for the process lifetime.
     // This is intentional — the profiler is process-permanent anyway.
-    let session = recorder(MemoryBuffer::new(16 * 1024 * 1024).unwrap())
+    let traced = recorder(MemoryBuffer::new(16 * 1024 * 1024).unwrap())
         .with_tokio(|t| {
             t.worker_threads(1);
         })
         .build()
         .unwrap();
-    let handle = session.record_handle();
+    let handle = traced.record_handle();
 
     let track_liveset = matches!(
         std::env::var("BENCH_CONFIG").as_deref(),
@@ -123,7 +123,7 @@ fn install_profiler() {
         .expect("profiler install should succeed in bench");
 
     // Leak everything to keep the profiler alive for the process.
-    std::mem::forget(session);
+    std::mem::forget(traced);
     // _mem_guard doesn't implement Drop — dropping is fine.
 }
 

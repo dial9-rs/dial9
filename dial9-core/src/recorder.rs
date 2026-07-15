@@ -1,19 +1,19 @@
 //! Recording-session builder.
 //!
-//! [`recorder`] assembles a [`CoreSession`](crate::session::CoreSession): it
+//! [`recorder`] assembles a [`Recorder`](crate::session::Recorder): it
 //! builds the shared bus, registers your [`Source`](crate::source::Source)s,
 //! spawns the flush thread (and, with the `pipeline` feature, the background
 //! worker), and starts recording.
 //!
 //! ```no_run
 //! use dial9_core::buffer::DiskBuffer;
-//! let session = dial9_core::recorder::recorder(DiskBuffer::single_file("/tmp/trace.bin")?)
+//! let recorder = dial9_core::recorder::recorder(DiskBuffer::single_file("/tmp/trace.bin")?)
 //!     .build_and_start();
-//! // record events through `session.handle()`.
+//! // record events through `recorder.handle()`.
 //! # Ok::<(), std::io::Error>(())
 //! ```
 //!
-//! This is the assembler layered above the low-level `CoreSession::start`,
+//! This is the assembler layered above the low-level `Recorder::start`,
 //! which requires a pre-built [`SharedState`](crate::shared_state::SharedState) with sources
 //! already registered. The Tokio integration builds on the same builder internally.
 
@@ -21,7 +21,7 @@ use crate::buffer::{BufferMode, Disk, SegmentWriter};
 use crate::clock;
 use crate::handle::Dial9Handle;
 use crate::primitives::sync::Arc;
-use crate::session::{CoreSession, SessionStartHook};
+use crate::session::{Recorder, SessionStartHook};
 use crate::shared_state::SharedState;
 use crate::source::Source;
 
@@ -56,7 +56,7 @@ pub fn recorder<M: BufferMode>(writer: SegmentWriter<M>) -> RecorderBuilder<M> {
     }
 }
 
-/// Builder for a runtime-agnostic [`CoreSession`]. See [`recorder`].
+/// Builder for a runtime-agnostic [`Recorder`]. See [`recorder`].
 #[must_use = "call `.build()` (or `.build_and_start()`) to start the session"]
 pub struct RecorderBuilder<M: BufferMode = Disk> {
     writer: SegmentWriter<M>,
@@ -125,9 +125,9 @@ impl<M: BufferMode> RecorderBuilder<M> {
         self
     }
 
-    /// Start the session. Recording begins **disabled**; call
-    /// [`CoreSession::enable`] (or use [`build_and_start`](Self::build_and_start)).
-    pub fn build(self) -> CoreSession {
+    /// Start the recorder. Recording begins **disabled**; call
+    /// [`Recorder::enable`] (or use [`build_and_start`](Self::build_and_start)).
+    pub fn build(self) -> Recorder {
         let shared = Arc::new(SharedState::new(clock::clock_monotonic_ns()));
 
         #[allow(unused_mut)]
@@ -141,7 +141,7 @@ impl<M: BufferMode> RecorderBuilder<M> {
         }
 
         // The worker borrows `&writer`, so it must be spawned before the writer
-        // moves into `CoreSession::start`.
+        // moves into `Recorder::start`.
         #[cfg(feature = "pipeline")]
         let worker = if self.processors.is_empty() {
             None
@@ -169,33 +169,33 @@ impl<M: BufferMode> RecorderBuilder<M> {
 
         let hook = self.thread_init.clone();
         #[allow(unused_mut)]
-        let mut session = CoreSession::start(shared, writer, self.metrics_sink, move || hook());
+        let mut recorder = Recorder::start(shared, writer, self.metrics_sink, move || hook());
 
         #[cfg(feature = "pipeline")]
         if let Some(worker) = worker {
-            session.attach_worker(worker);
+            recorder.attach_worker(worker);
         }
 
-        session.set_session_start_hooks(self.session_start_hooks);
+        recorder.set_session_start_hooks(self.session_start_hooks);
 
-        session
+        recorder
     }
 
     /// Start the session and immediately begin recording.
-    pub fn build_and_start(self) -> CoreSession {
-        let session = self.build();
-        session.enable();
-        session
+    pub fn build_and_start(self) -> Recorder {
+        let recorder = self.build();
+        recorder.enable();
+        recorder
     }
 }
 
 /// A builder that can register [`Source`]s.
 ///
 /// Implemented by [`RecorderBuilder`] and by runtime wrappers that own a core
-/// builder (e.g. the tokio layer's `TokioSessionBuilder`), so source-registration
+/// builder (e.g. the tokio layer's `TracedRuntimeBuilder`), so source-registration
 /// sugar works the same on either.
 pub trait RegisterSource: Sized {
-    /// Register a [`Source`] with the underlying recording session.
+    /// Register a [`Source`] with the underlying recording recorder.
     fn source(self, source: impl Source + 'static) -> Self;
 
     /// Register a hook run once, with the live [`Dial9Handle`], when the session
@@ -337,14 +337,14 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let writer = DiskBuffer::single_file(dir.path().join("trace.bin")).expect("writer");
 
-        let session = recorder(writer)
+        let recorder = recorder(writer)
             .segment_metadata([("service".to_string(), "recorder-test".to_string())])
             .source(OnceSource {
                 emitted: false,
                 value: 7,
             })
             .build_and_start();
-        session
+        recorder
             .graceful_shutdown(Duration::ZERO)
             .expect("graceful shutdown");
 
@@ -360,14 +360,14 @@ mod tests {
     #[test]
     fn build_starts_disabled() {
         let writer = MemoryBuffer::new(1 << 20).expect("writer");
-        let session = recorder(writer).build();
+        let recorder = recorder(writer).build();
         assert!(
-            !session.shared().expect("live session").is_enabled(),
+            !recorder.shared().expect("live session").is_enabled(),
             "recording must be off before enable()"
         );
-        session.enable();
+        recorder.enable();
         assert!(
-            session.shared().expect("live session").is_enabled(),
+            recorder.shared().expect("live session").is_enabled(),
             "recording on after enable()"
         );
     }
@@ -381,7 +381,7 @@ mod tests {
         let writer = MemoryBuffer::new(1 << 20).expect("writer");
         let runs = StdArc::new(AtomicUsize::new(0));
         let runs_hook = StdArc::clone(&runs);
-        let session = recorder(writer)
+        let recorder = recorder(writer)
             .on_session_start(move |_handle| {
                 runs_hook.fetch_add(1, Ordering::SeqCst);
             })
@@ -392,14 +392,14 @@ mod tests {
             0,
             "hook must not run before enable"
         );
-        session.enable();
+        recorder.enable();
         assert_eq!(runs.load(Ordering::SeqCst), 1, "hook runs on enable");
-        session.enable();
+        recorder.enable();
         assert_eq!(runs.load(Ordering::SeqCst), 1, "hook runs at most once");
     }
 
     /// Pipeline: `.pipe()` spawns the background worker for a runtime-agnostic
-    /// session, and it processes the sealed segment on shutdown.
+    /// recorder, and it processes the sealed segment on shutdown.
     #[cfg(feature = "pipeline")]
     #[test]
     fn pipe_runs_the_background_worker() {
@@ -429,14 +429,14 @@ mod tests {
         let writer = DiskBuffer::single_file(dir.path().join("trace.bin")).expect("writer");
         let processed = StdArc::new(AtomicUsize::new(0));
 
-        let session = recorder(writer)
+        let recorder = recorder(writer)
             .source(OnceSource {
                 emitted: false,
                 value: 11,
             })
             .pipe(CountingProcessor(StdArc::clone(&processed)))
             .build_and_start();
-        session
+        recorder
             .graceful_shutdown(Duration::from_secs(5))
             .expect("graceful shutdown drains the worker");
 

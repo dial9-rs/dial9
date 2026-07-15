@@ -9,14 +9,14 @@ mod common;
 
 #[test]
 fn second_install_returns_already_installed() {
-    let session = recorder(common::small_mem_writer())
+    let traced = recorder(common::small_mem_writer())
         .with_tokio(|t| {
             t.worker_threads(1);
         })
         .build()
         .unwrap();
 
-    let handle = session.record_handle();
+    let handle = traced.record_handle();
     let _mem_guard = MemoryProfiler::with_defaults()
         .install(handle.clone())
         .expect("first install should succeed");

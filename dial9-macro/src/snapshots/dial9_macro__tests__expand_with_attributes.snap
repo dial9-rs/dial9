@@ -4,7 +4,7 @@ expression: output
 ---
 #[allow(unused)]
 fn main() {
-    let __dial9_rt = ::dial9::TokioSession::new(my_config());
+    let __dial9_rt = ::dial9::TracedRuntime::new(my_config());
     let __dial9_out = __dial9_rt
         .block_on(async move {
             let _ = 42;

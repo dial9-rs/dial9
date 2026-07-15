@@ -16,7 +16,7 @@ use std::time::Duration;
 fn install_registers_source_with_recorder() {
     let (capture, batches) = capture_processor();
 
-    let session = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
+    let traced = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
         .with_tokio(|t| {
             t.worker_threads(1);
         })
@@ -24,7 +24,7 @@ fn install_registers_source_with_recorder() {
         .build()
         .unwrap();
 
-    let handle = session.record_handle();
+    let handle = traced.record_handle();
     let _mem_guard = MemoryProfiler::with_defaults()
         .install(handle)
         .expect("install should succeed");
@@ -36,11 +36,11 @@ fn install_registers_source_with_recorder() {
     );
 
     // Give the flush thread time to drain.
-    session.runtime().block_on(async {
+    traced.runtime().block_on(async {
         tokio::time::sleep(Duration::from_millis(100)).await;
     });
 
-    session.graceful_shutdown();
+    traced.graceful_shutdown();
 
     let b = batches.lock().unwrap();
     let events: Vec<Dial9Event> = decode_all(&b);
