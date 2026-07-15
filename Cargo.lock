@@ -1905,6 +1905,7 @@ dependencies = [
  "flate2",
  "form_urlencoded",
  "futures",
+ "hex",
  "http 1.4.2",
  "lasso",
  "metrique",

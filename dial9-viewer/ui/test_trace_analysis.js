@@ -1163,6 +1163,40 @@ async function main() {
     pass("Out-of-order events sorted correctly; duplicate enter on different worker ignored");
   }
 
+  // ── Fixture test: old format (no span_instance_id/tid) vs new format ──
+
+  function testBuildSpanDataOldNewFixture() {
+    // Old-format events (without span_instance_id and tid) must still work.
+    const oldEvents = [
+      { name: "SpanEnter:test::op", timestamp: 1000, fields: { worker_id: 0, span_id: 1, parent_span_id: null, span_name: "op" } },
+      { name: "SpanExit:test::op",  timestamp: 2000, fields: { worker_id: 0, span_id: 1, span_name: "op" } },
+      { name: "SpanCloseEvent",     timestamp: 2001, fields: { span_id: 1 } },
+    ];
+    const oldResult = buildSpanData(oldEvents);
+    if (oldResult.allSpans.length !== 1) fail(`Old format: expected 1 span, got ${oldResult.allSpans.length}`);
+    if (oldResult.allSpans[0].spanName !== "op") fail("Old format: wrong spanName");
+    // span_instance_id and tid should NOT appear as user fields.
+    if (oldResult.allSpans[0].fields.span_instance_id) fail("Old format: span_instance_id should not leak to user fields");
+    if (oldResult.allSpans[0].fields.tid) fail("Old format: tid should not leak to user fields");
+
+    // New-format events (with span_instance_id and tid as built-in fields).
+    const newEvents = [
+      { name: "SpanEnter:test::op", timestamp: 1000, fields: { worker_id: 0, span_id: 1, span_instance_id: 42, tid: 12345, parent_span_id: null, span_name: "op", user_field: "val" } },
+      { name: "SpanExit:test::op",  timestamp: 2000, fields: { worker_id: 0, span_id: 1, span_instance_id: 42, tid: 12345, span_name: "op", user_field: "val" } },
+      { name: "SpanCloseEvent",     timestamp: 2001, fields: { span_id: 1 } },
+    ];
+    const newResult = buildSpanData(newEvents);
+    if (newResult.allSpans.length !== 1) fail(`New format: expected 1 span, got ${newResult.allSpans.length}`);
+    if (newResult.allSpans[0].spanName !== "op") fail("New format: wrong spanName");
+    // span_instance_id and tid should NOT appear as user fields (they're built-in).
+    if (newResult.allSpans[0].fields.span_instance_id) fail("New format: span_instance_id should not leak to user fields");
+    if (newResult.allSpans[0].fields.tid) fail("New format: tid should not leak to user fields");
+    // But user_field SHOULD be captured.
+    if (newResult.allSpans[0].fields.user_field !== "val") fail(`New format: user_field not captured, got ${JSON.stringify(newResult.allSpans[0].fields)}`);
+
+    pass("Old/new format fixture: span_instance_id/tid handled as built-in fields");
+  }
+
   // ── Regression: open PollStart at trace end must not create phantom poll (#194) ──
 
   function testOpenPollStartDiscarded() {
@@ -1283,6 +1317,7 @@ async function main() {
   testBuildSpanDataChildrenIndex();
   testBuildSpanDataMultiplePolls();
   testBuildSpanDataOutOfOrder();
+  testBuildSpanDataOldNewFixture();
 
   console.log("\nspan pane layout:");
   testCollectDescendants();

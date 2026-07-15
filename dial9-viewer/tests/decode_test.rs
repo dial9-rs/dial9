@@ -20,7 +20,7 @@ fn load_demo_trace() -> Vec<u8> {
 #[test]
 fn output_timestamps_are_wall_clock() {
     let data = load_demo_trace();
-    let (samples, _, _) = decode_samples(&data, "test").unwrap();
+    let (samples, _, _, _) = decode_samples(&data, "test").unwrap();
 
     assert!(!samples.is_empty());
     // Wall-clock Unix epoch ns for any date after 2017 should exceed 1.5e18.

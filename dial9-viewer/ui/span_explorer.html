@@ -1,0 +1,725 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Span Explorer</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0d1117; color: #e0e0e0; display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
+  header { padding: 10px 20px; background: #16213e; border-bottom: 1px solid #333; flex-shrink: 0; display: flex; align-items: center; gap: 12px; }
+  header h1 { font-size: 1.1em; color: #6c63ff; }
+  header .stats { font-size: 0.8em; color: #888; }
+  .toolbar { padding: 8px 16px; background: #16213e; border-bottom: 1px solid #333; flex-shrink: 0; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; font-size: 0.8em; }
+  .toolbar label { color: #e0e0e0; }
+  .toolbar input, .toolbar select { background: #1a1a2e; color: #e0e0e0; border: 1px solid #444; padding: 3px 8px; border-radius: 3px; }
+  .toolbar button { cursor: pointer; font-weight: 600; border: none; padding: 4px 14px; border-radius: 3px; }
+  .toolbar .primary { background: #6c63ff; color: #fff; }
+  .toolbar .secondary { background: #2a2a4a; color: #e0e0e0; border: 1px solid #444; }
+
+  .main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+
+  /* Catalog table */
+  .catalog-wrap { flex: 0 0 auto; max-height: 35vh; overflow-y: auto; border-bottom: 1px solid #333; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.82em; }
+  th, td { padding: 6px 10px; text-align: left; border-bottom: 1px solid #21262d; white-space: nowrap; }
+  th { background: #161b22; color: #8b949e; font-weight: 600; position: sticky; top: 0; z-index: 1; cursor: pointer; user-select: none; }
+  th:hover { color: #e0e0e0; }
+  tr.selected { background: #1c3a5e; }
+  tr:hover:not(.selected) { background: #1c2128; }
+  td.name { max-width: 300px; overflow: hidden; text-overflow: ellipsis; }
+  .kind-badge { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 0.75em; font-weight: 600; margin-right: 4px; }
+  .kind-tracing { background: #264f78; color: #9ec1ff; }
+  .kind-tokio_poll { background: #3d2b1f; color: #ffa657; }
+
+  /* Detail panel (histogram + composition + flamegraph links) */
+  .detail-panel { flex: 1; display: flex; flex-direction: column; overflow: hidden; padding: 0 16px; }
+  .detail-panel.empty { align-items: center; justify-content: center; color: #666; font-size: 0.9em; }
+  .detail-header { padding: 10px 0 6px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; flex-shrink: 0; }
+  .detail-header h2 { font-size: 1em; color: #e0e0e0; }
+  .detail-header .meta { font-size: 0.8em; color: #888; }
+
+  /* Histogram */
+  .histogram-wrap { flex-shrink: 0; padding: 6px 0; }
+  .histogram-wrap svg { display: block; cursor: crosshair; }
+  .histogram-axis { position: relative; height: 1.2em; margin-top: 2px; font-size: 0.68em; color: #8a8aa0; }
+  .histogram-hint { font-size: 0.66em; color: #6a6a80; margin-top: 2px; }
+
+  /* Time composition bar */
+  .composition-wrap { flex-shrink: 0; padding: 8px 0; }
+  .composition-bar { display: flex; height: 20px; border-radius: 3px; overflow: hidden; background: #21262d; }
+  .composition-bar .seg { height: 100%; transition: width 0.2s; }
+  .composition-legend { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 4px; font-size: 0.75em; }
+  .composition-legend .item { display: flex; align-items: center; gap: 4px; }
+  .composition-legend .swatch { width: 10px; height: 10px; border-radius: 2px; }
+
+  /* Band selection display */
+  .band-info { padding: 6px 0; font-size: 0.8em; color: #aaa; display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
+  .band-info .count { color: #e0e0e0; font-weight: 600; }
+
+  /* Flamegraph links */
+  .fg-links { display: flex; gap: 10px; padding: 8px 0; flex-shrink: 0; flex-wrap: wrap; }
+  .fg-links a { display: inline-block; padding: 6px 16px; border-radius: 4px; font-size: 0.82em; font-weight: 600; text-decoration: none; }
+  .fg-links .on-cpu { background: #ff6b35; color: #fff; }
+  .fg-links .blocking { background: #e63946; color: #fff; }
+  .fg-links a:hover { opacity: 0.85; }
+
+  /* Coverage badge */
+  .coverage { padding: 6px 0; font-size: 0.75em; color: #8b949e; flex-shrink: 0; }
+
+  /* States */
+  .loading { display: flex; align-items: center; justify-content: center; flex: 1; color: #888; gap: 0.6em; }
+  .loading.hidden { display: none; }
+  .spinner { width: 1.2em; height: 1.2em; border: 2px solid #444; border-top-color: #aaa; border-radius: 50%; animation: spin 0.8s linear infinite; display: inline-block; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .error { display: none; align-items: center; justify-content: center; flex: 1; color: #ff6b6b; padding: 24px; text-align: center; }
+
+  /* Confidence / partial indicator */
+  .partial-badge { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 0.7em; background: #3a2a1a; color: #ffa657; margin-left: 6px; }
+</style>
+</head>
+<body>
+<script src="creds.js"></script>
+<script src="format.js"></script>
+<script src="sse.js"></script>
+<script src="flamegraph_api.js"></script>
+<script src="flamegraph_histogram.js"></script>
+<script src="span_explorer.js"></script>
+<script src="decode.js"></script>
+<script src="trace_parser.js"></script>
+<script src="trace_analysis.js"></script>
+
+<header>
+  <h1>🔍 Span Explorer</h1>
+  <span class="stats" id="stats"></span>
+</header>
+
+<div class="toolbar" id="toolbar">
+  <label>From: <input id="f-start" type="datetime-local" step="1"></label>
+  <label>To: <input id="f-end" type="datetime-local" step="1"></label>
+  <button class="primary" id="btn-apply">Apply</button>
+  <button class="secondary" id="btn-more" disabled>Refine more</button>
+  <button class="secondary" id="btn-stop" disabled>Stop</button>
+  <span style="flex:1"></span>
+  <button class="secondary" id="btn-copylink">Copy link</button>
+</div>
+
+<div class="main" id="main">
+  <div class="loading" id="loading"><div class="spinner"></div>Loading span statistics…</div>
+  <div class="error" id="error"></div>
+
+  <!-- Catalog table (populated by JS) -->
+  <div class="catalog-wrap" id="catalog-wrap" style="display:none">
+    <table id="catalog">
+      <thead>
+        <tr>
+          <th data-sort="name">Span</th>
+          <th data-sort="kind">Kind</th>
+          <th data-sort="count">Instances</th>
+          <th data-sort="p50_ns">p50</th>
+          <th data-sort="p95_ns">p95</th>
+          <th data-sort="p99_ns">p99</th>
+          <th data-sort="max_ns">max</th>
+          <th data-sort="quality" title="Fraction of instances with full time-composition data">Quality</th>
+        </tr>
+      </thead>
+      <tbody id="catalog-body"></tbody>
+    </table>
+  </div>
+
+  <!-- Detail panel for selected span type -->
+  <div class="detail-panel empty" id="detail-panel">
+    <span>Select a span type above to see its duration histogram, time composition, and flamegraphs.</span>
+  </div>
+</div>
+
+<script>
+(function() {
+  const params = new URLSearchParams(window.location.search);
+  const SE = window.SpanExplorer;
+
+  // Fold region into creds store (same pattern as flamegraph.html).
+  const urlRegion = params.get("aws_region");
+  if (urlRegion && window.Dial9Creds) {
+    const stored = Dial9Creds.get();
+    if (stored && stored.region !== urlRegion) Dial9Creds.setRegion(urlRegion);
+  }
+
+  // DOM refs
+  const loadingEl = document.getElementById("loading");
+  const errorEl = document.getElementById("error");
+  const statsEl = document.getElementById("stats");
+  const catalogWrap = document.getElementById("catalog-wrap");
+  const catalogBody = document.getElementById("catalog-body");
+  const detailPanel = document.getElementById("detail-panel");
+  const fStart = document.getElementById("f-start");
+  const fEnd = document.getElementById("f-end");
+  const btnMore = document.getElementById("btn-more");
+  const btnStop = document.getElementById("btn-stop");
+
+  // Scope from URL
+  const scopeBucket = params.get("bucket");
+  const scopePrefix = params.get("prefix");
+  const scopeService = params.get("service");
+  const scopeRegion = params.get("aws_region");
+  const scopeHosts = params.getAll("host");
+
+  // Initialize time pickers from URL.
+  if (params.get("start_ns")) fStart.value = nsToPickerUtc(params.get("start_ns"));
+  if (params.get("end_ns")) fEnd.value = nsToPickerUtc(params.get("end_ns"));
+
+  // State
+  let maxFiles = params.get("max_files") ? Number(params.get("max_files")) : null;
+  let spanTypes = [];       // latest snapshot from SSE
+  let selectedUid = params.get("span_type_uid") || null;
+  let bandMinNs = params.get("min_span_ns") != null ? Number(params.get("min_span_ns")) : null;
+  let bandMaxNs = params.get("max_span_ns") != null ? Number(params.get("max_span_ns")) : null;
+  let lastCoverage = null;
+  let streamToken = 0;
+  let abortCtl = null;
+  let sortKey = "count";
+  let sortAsc = false;
+
+  // ── API URL builder ─────────────────────────────────────────────────────────
+
+  function buildApiUrl() {
+    const u = new URL("/api/span-stats", window.location.origin);
+    if (params.get("data_dir")) u.searchParams.set("data_dir", params.get("data_dir"));
+    if (scopeBucket) u.searchParams.set("bucket", scopeBucket);
+    if (scopeRegion) u.searchParams.set("aws_region", scopeRegion);
+    if (scopePrefix) u.searchParams.set("prefix", scopePrefix);
+    if (scopeService) u.searchParams.set("service", scopeService);
+    for (const h of scopeHosts) u.searchParams.append("host", h);
+    const startNs = pickerUtcToNs(fStart.value);
+    const endNs = pickerUtcToNs(fEnd.value);
+    if (startNs) u.searchParams.set("start_ns", startNs);
+    if (endNs) u.searchParams.set("end_ns", endNs);
+    if (maxFiles != null) u.searchParams.set("max_files", String(maxFiles));
+    return u;
+  }
+
+  // ── URL state (deep-linking) ────────────────────────────────────────────────
+
+  function updateBrowserUrl() {
+    const p = new URLSearchParams();
+    p.set("api", "1");
+    if (params.get("data_dir")) p.set("data_dir", params.get("data_dir"));
+    if (scopeBucket) p.set("bucket", scopeBucket);
+    if (scopeRegion) p.set("aws_region", scopeRegion);
+    if (scopePrefix) p.set("prefix", scopePrefix);
+    if (scopeService) p.set("service", scopeService);
+    for (const h of scopeHosts) p.append("host", h);
+    const startNs = pickerUtcToNs(fStart.value);
+    const endNs = pickerUtcToNs(fEnd.value);
+    if (startNs) p.set("start_ns", startNs);
+    if (endNs) p.set("end_ns", endNs);
+    if (selectedUid) p.set("span_type_uid", selectedUid);
+    if (bandMinNs != null) p.set("min_span_ns", String(bandMinNs));
+    if (bandMaxNs != null) p.set("max_span_ns", String(bandMaxNs));
+    history.replaceState(null, "", window.location.pathname + "?" + p.toString());
+  }
+
+  // ── Catalog rendering ───────────────────────────────────────────────────────
+
+  function renderCatalog() {
+    // Attach computed quality for sorting; original objects are not mutated.
+    const augmented = spanTypes.map(st => {
+      const q = SE.spanTypeQuality(st);
+      return q != null ? Object.assign({}, st, { quality: q }) : st;
+    });
+    const sorted = SE.sortSpanTypes(augmented, sortKey, sortAsc);
+    catalogBody.innerHTML = "";
+    for (const st of sorted) {
+      const tr = document.createElement("tr");
+      if (st.span_type_uid === selectedUid) tr.className = "selected";
+      tr.dataset.uid = st.span_type_uid;
+      const kindClass = st.kind === "tracing" ? "kind-tracing" : "kind-tokio_poll";
+      const quality = SE.spanTypeQuality(st);
+      const qualityCell = quality != null ? `${(quality * 100).toFixed(0)}%` : "—";
+      tr.innerHTML =
+        `<td class="name" title="${esc(SE.spanTypeLabel(st))}">${esc(SE.spanTypeLabel(st))}</td>` +
+        `<td><span class="kind-badge ${kindClass}">${esc(st.kind)}</span></td>` +
+        `<td>${st.count.toLocaleString()}</td>` +
+        `<td>${SE.fmtNs(st.p50_ns)}</td>` +
+        `<td>${SE.fmtNs(st.p95_ns)}</td>` +
+        `<td>${SE.fmtNs(st.p99_ns)}</td>` +
+        `<td>${SE.fmtNs(st.max_ns)}</td>` +
+        `<td>${qualityCell}</td>`;
+      tr.addEventListener("click", () => selectSpanType(st.span_type_uid));
+      catalogBody.appendChild(tr);
+    }
+    catalogWrap.style.display = sorted.length > 0 ? "block" : "none";
+  }
+
+  function esc(s) {
+    return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  }
+
+  // ── Span type selection ─────────────────────────────────────────────────────
+
+  function selectSpanType(uid) {
+    selectedUid = uid;
+    // Reset band on type change.
+    bandMinNs = null;
+    bandMaxNs = null;
+    updateBrowserUrl();
+    renderCatalog();
+    renderDetail();
+  }
+
+  // ── Detail panel ────────────────────────────────────────────────────────────
+
+  function renderDetail() {
+
+    const st = spanTypes.find(s => s.span_type_uid === selectedUid);
+    if (!st) {
+      detailPanel.className = "detail-panel empty";
+      detailPanel.innerHTML = "<span>Select a span type above to see its duration histogram, time composition, and flamegraphs.</span>";
+      return;
+    }
+    detailPanel.className = "detail-panel";
+    detailPanel.innerHTML = "";
+
+    // Header
+    const hdr = document.createElement("div");
+    hdr.className = "detail-header";
+    hdr.innerHTML = `<h2>${esc(SE.spanTypeLabel(st))}</h2>` +
+      `<span class="meta">${st.count.toLocaleString()} instances · ` +
+      `p50 ${SE.fmtNs(st.p50_ns)} · p99 ${SE.fmtNs(st.p99_ns)} · max ${SE.fmtNs(st.max_ns)}</span>`;
+    detailPanel.appendChild(hdr);
+
+    // Histogram
+    const histWrap = document.createElement("div");
+    histWrap.className = "histogram-wrap";
+    renderHistogram(histWrap, st.histogram);
+    detailPanel.appendChild(histWrap);
+
+    // Band info (if selection is active)
+    renderBandInfo(detailPanel, st);
+
+    // Time composition
+    renderComposition(detailPanel, st);
+
+    // Flamegraph links
+    renderFlamegraphLinks(detailPanel);
+
+    // Coverage
+    if (lastCoverage) {
+      const cov = document.createElement("div");
+      cov.className = "coverage";
+      cov.textContent = formatCoverageBadge(lastCoverage);
+      detailPanel.appendChild(cov);
+    }
+  }
+
+  // ── Histogram rendering ─────────────────────────────────────────────────────
+
+  const HIST_H = 50;
+  let histDragging = false;
+
+  function renderHistogram(container, histogram) {
+    const bars = SE.normalizeSpanHistogram(histogram);
+    if (bars.length === 0) {
+      container.innerHTML = '<div style="color:#666;font-size:0.8em;padding:4px 0">No histogram data.</div>';
+      return;
+    }
+
+    const W = 600;
+    const { cols, maxCount } = SE.spanHistogramLayout(bars, W, 2);
+
+    const NS = "http://www.w3.org/2000/svg";
+    const svg = document.createElementNS(NS, "svg");
+    svg.setAttribute("width", "100%");
+    svg.setAttribute("viewBox", `0 0 ${W} ${HIST_H}`);
+    svg.setAttribute("preserveAspectRatio", "none");
+    svg.style.cssText = "display:block;cursor:crosshair;overflow:visible;max-width:800px";
+
+    for (const c of cols) {
+      const inBand = (bandMinNs == null || c.hi_ns > bandMinNs) &&
+                     (bandMaxNs == null || c.lo_ns < bandMaxNs);
+      const banded = bandMinNs != null || bandMaxNs != null;
+      const rect = document.createElementNS(NS, "rect");
+      const h = Math.max(1, c.hFrac * (HIST_H - 2));
+      rect.setAttribute("x", c.x);
+      rect.setAttribute("y", HIST_H - h);
+      rect.setAttribute("width", c.w);
+      rect.setAttribute("height", h);
+      rect.setAttribute("fill", banded ? (inBand ? "#6c63ff" : "#3a3a5a") : "#6c63ff");
+      svg.appendChild(rect);
+    }
+
+    // Brush overlay
+    const brush = document.createElementNS(NS, "rect");
+    brush.setAttribute("fill", "rgba(255,255,255,0.12)");
+    brush.setAttribute("stroke", "#fff");
+    brush.setAttribute("stroke-dasharray", "3 2");
+    brush.setAttribute("y", "0");
+    brush.setAttribute("height", HIST_H);
+    brush.style.display = "none";
+    svg.appendChild(brush);
+
+    let dragStart = null;
+    function localX(clientX) {
+      const r = svg.getBoundingClientRect();
+      return (clientX - r.left) / r.width * W;
+    }
+
+    // Use pointer capture instead of global window listeners to prevent
+    // listener accumulation across rerenders (issue: each renderDetail call
+    // previously added new window listeners and relied on manual cleanup).
+    svg.addEventListener("pointerdown", (e) => {
+      dragStart = localX(e.clientX);
+      histDragging = true;
+      brush.setAttribute("x", dragStart);
+      brush.setAttribute("width", 0);
+      brush.style.display = "block";
+      svg.setPointerCapture(e.pointerId);
+      e.preventDefault();
+    });
+
+    svg.addEventListener("pointermove", (e) => {
+      if (!histDragging || dragStart == null) return;
+      const x = localX(e.clientX);
+      brush.setAttribute("x", Math.min(dragStart, x));
+      brush.setAttribute("width", Math.abs(x - dragStart));
+    });
+
+    svg.addEventListener("pointerup", (e) => {
+      if (!histDragging || dragStart == null) return;
+      histDragging = false;
+      brush.style.display = "none";
+      svg.releasePointerCapture(e.pointerId);
+      const endX = localX(e.clientX);
+      const band = SE.spanBrushToBand(bars, W, dragStart, endX);
+      dragStart = null;
+      if (band) {
+        bandMinNs = band.min_ns;
+        bandMaxNs = band.max_ns;
+        updateBrowserUrl();
+        renderDetail();
+      }
+    });
+
+    svg.addEventListener("lostpointercapture", () => {
+      // Safety: if capture is lost (e.g. element removed), reset drag state.
+      if (histDragging) {
+        histDragging = false;
+        brush.style.display = "none";
+        dragStart = null;
+      }
+    });
+
+    container.appendChild(svg);
+
+    // X-axis labels
+    const axis = document.createElement("div");
+    axis.className = "histogram-axis";
+    axis.style.maxWidth = "800px";
+    const stride = Math.max(1, Math.ceil(cols.length / Math.max(1, Math.floor(W / 70))));
+    for (let i = 0; i < cols.length; i++) {
+      if (i % stride !== 0) continue;
+      const c = cols[i];
+      const pct = (c.x / W) * 100;
+      const t = document.createElement("span");
+      t.textContent = FlamegraphHistogram.fmtDurationNs(c.lo_ns);
+      t.style.cssText = `position:absolute;left:${pct}%;white-space:nowrap;transform:translateX(-1px)`;
+      axis.appendChild(t);
+    }
+    container.appendChild(axis);
+
+    // Hint
+    const hint = document.createElement("div");
+    hint.className = "histogram-hint";
+    hint.textContent = `tallest bar = ${maxCount.toLocaleString()} instances · drag to select a duration band`;
+    container.appendChild(hint);
+  }
+
+  // ── Band info ───────────────────────────────────────────────────────────────
+
+  function renderBandInfo(container, st) {
+    const wrap = document.createElement("div");
+    wrap.className = "band-info";
+    if (bandMinNs != null || bandMaxNs != null) {
+      const count = SE.countInBand(st.histogram, bandMinNs, bandMaxNs);
+      const lo = bandMinNs != null ? SE.fmtNs(bandMinNs) : "0";
+      const hi = bandMaxNs != null ? SE.fmtNs(bandMaxNs) : "∞";
+      wrap.innerHTML =
+        `<span>Selected band: ${lo} – ${hi}</span>` +
+        `<span class="count">${count.toLocaleString()} instances</span>` +
+        `<button class="secondary" id="btn-clear-band" style="font-size:0.85em;padding:2px 8px;cursor:pointer">Clear</button>`;
+      wrap.querySelector("#btn-clear-band").addEventListener("click", () => {
+        bandMinNs = null;
+        bandMaxNs = null;
+        updateBrowserUrl();
+        renderDetail();
+      });
+    } else {
+      wrap.innerHTML = '<span style="color:#666">Drag the histogram to select a duration band for flamegraphs.</span>';
+    }
+    container.appendChild(wrap);
+  }
+
+  // ── Time composition ────────────────────────────────────────────────────────
+
+  function renderComposition(container, st) {
+    const comp = SE.computeTimeComposition(st);
+    const quality = SE.spanTypeQuality(st);
+    const wrap = document.createElement("div");
+    wrap.className = "composition-wrap";
+
+    // Label
+    const label = document.createElement("div");
+    label.style.cssText = "font-size:0.8em;color:#aaa;margin-bottom:4px;font-weight:600";
+    label.textContent = "Time composition (estimated)";
+    const isFallback = comp.categories.length === 1 && comp.categories[0].key === "unknown" && !st.composition;
+    if (isFallback) {
+      label.innerHTML += '<span class="partial-badge">awaiting per-category data</span>';
+    } else if (quality != null && quality < 1.0) {
+      label.innerHTML += `<span class="partial-badge">${(quality * 100).toFixed(0)}% detailed</span>`;
+    }
+    wrap.appendChild(label);
+
+    // Bar
+    const bar = document.createElement("div");
+    bar.className = "composition-bar";
+    for (const cat of comp.categories) {
+      if (cat.frac <= 0) continue;
+      const seg = document.createElement("div");
+      seg.className = "seg";
+      seg.style.width = (cat.frac * 100).toFixed(1) + "%";
+      seg.style.background = cat.color;
+      seg.title = `${cat.label}: ${SE.fmtNs(cat.ns)} (${(cat.frac * 100).toFixed(1)}%)`;
+      bar.appendChild(seg);
+    }
+    wrap.appendChild(bar);
+
+    // Legend
+    const legend = document.createElement("div");
+    legend.className = "composition-legend";
+    for (const cat of SE.TIME_CATEGORIES) {
+      const item = document.createElement("span");
+      item.className = "item";
+      item.innerHTML = `<span class="swatch" style="background:${cat.color}"></span>${cat.label}`;
+      legend.appendChild(item);
+    }
+    wrap.appendChild(legend);
+
+    container.appendChild(wrap);
+  }
+
+  // ── Flamegraph links ────────────────────────────────────────────────────────
+
+  function renderFlamegraphLinks(container) {
+    if (!selectedUid) return;
+    const wrap = document.createElement("div");
+    wrap.className = "fg-links";
+
+    // In raw trace mode, flamegraph links are not functional (no backend
+    // aggregation). Show disabled placeholders with an explanation.
+    if (rawTraceParam) {
+      wrap.innerHTML =
+        '<span style="color:#666;font-size:0.82em;padding:6px 0">🔥 On-CPU and 🧱 Blocking flamegraphs ' +
+        'require the aggregation backend (not available in raw trace mode).</span>';
+      container.appendChild(wrap);
+      return;
+    }
+
+    const state = {
+      bucket: scopeBucket,
+      region: scopeRegion,
+      prefix: scopePrefix,
+      service: scopeService,
+      hosts: scopeHosts,
+      start_ns: pickerUtcToNs(fStart.value),
+      end_ns: pickerUtcToNs(fEnd.value),
+      span_type_uid: selectedUid,
+      min_span_ns: bandMinNs,
+      max_span_ns: bandMaxNs,
+    };
+
+    const cpuLink = document.createElement("a");
+    cpuLink.className = "on-cpu";
+    cpuLink.href = SE.flamegraphUrl(state, "on_cpu");
+    cpuLink.target = "_blank";
+    cpuLink.textContent = "🔥 On-CPU Flamegraph";
+    wrap.appendChild(cpuLink);
+
+    const blockLink = document.createElement("a");
+    blockLink.className = "blocking";
+    blockLink.href = SE.flamegraphUrl(state, "blocking");
+    blockLink.target = "_blank";
+    blockLink.textContent = "🧱 Blocking Flamegraph";
+    wrap.appendChild(blockLink);
+
+    container.appendChild(wrap);
+  }
+
+  // ── Streaming ───────────────────────────────────────────────────────────────
+
+  function setStreamingUi(active) {
+    btnStop.disabled = !active;
+    btnStop.style.opacity = active ? "1" : "0.4";
+    btnMore.disabled = active;
+    btnMore.style.opacity = active ? "0.4" : "1";
+  }
+
+  function stopStreaming() {
+    streamToken++;
+    if (abortCtl) { abortCtl.abort(); abortCtl = null; }
+    setStreamingUi(false);
+  }
+
+  function startStreaming() {
+    stopStreaming();
+    setStreamingUi(true);
+    loadingEl.classList.remove("hidden");
+    errorEl.style.display = "none";
+    catalogWrap.style.display = "none";
+    detailPanel.className = "detail-panel empty";
+    detailPanel.innerHTML = "";
+
+    const token = ++streamToken;
+    abortCtl = new AbortController();
+    const credHeaders = window.Dial9Creds ? Dial9Creds.headers() : {};
+    let gotEvent = false;
+
+    Dial9Sse.openSse(buildApiUrl(), {
+      headers: credHeaders,
+      signal: abortCtl.signal,
+      onEvent: (resp) => {
+        if (token !== streamToken) return;
+        gotEvent = true;
+        loadingEl.classList.add("hidden");
+        spanTypes = resp.span_types || [];
+        lastCoverage = resp.coverage || null;
+        renderCatalog();
+        renderDetail();
+        // Stats badge
+        const total = spanTypes.reduce((s, t) => s + t.count, 0);
+        let badge = `${spanTypes.length} span types · ${total.toLocaleString()} instances`;
+        if (lastCoverage) badge += " · " + formatCoverageBadge(lastCoverage);
+        statsEl.innerHTML = badge + ' · <span class="spinner" style="width:0.9em;height:0.9em;vertical-align:middle"></span> refining…';
+      },
+      onClose: () => {
+        if (token !== streamToken) return;
+        setStreamingUi(false);
+        if (gotEvent) {
+          const total = spanTypes.reduce((s, t) => s + t.count, 0);
+          let badge = `${spanTypes.length} span types · ${total.toLocaleString()} instances`;
+          if (lastCoverage) badge += " · " + formatCoverageBadge(lastCoverage);
+          statsEl.textContent = badge + " · refined";
+        }
+      },
+      onError: (err) => {
+        if (token !== streamToken) return;
+        setStreamingUi(false);
+        if (!gotEvent) {
+          loadingEl.classList.add("hidden");
+          errorEl.style.display = "flex";
+          errorEl.textContent = "Failed to load span stats: " + err.message;
+        } else {
+          statsEl.textContent = statsEl.textContent.replace(/ · .*refining.*/, "") + " · interrupted";
+        }
+      },
+    });
+  }
+
+  // ── Event handlers ──────────────────────────────────────────────────────────
+
+  document.getElementById("btn-apply").addEventListener("click", () => {
+    maxFiles = null;
+    updateBrowserUrl();
+    startStreaming();
+  });
+
+  btnMore.addEventListener("click", () => {
+    const folded = lastCoverage ? lastCoverage.files_folded : 0;
+    maxFiles = nextMaxFiles(folded);
+    startStreaming();
+  });
+
+  btnStop.addEventListener("click", () => {
+    stopStreaming();
+    const total = spanTypes.reduce((s, t) => s + t.count, 0);
+    let badge = `${spanTypes.length} span types · ${total.toLocaleString()} instances`;
+    if (lastCoverage) badge += " · " + formatCoverageBadge(lastCoverage);
+    statsEl.textContent = badge + " · stopped";
+  });
+
+  document.getElementById("btn-copylink").addEventListener("click", async () => {
+    const p = new URLSearchParams(window.location.search);
+    const url = window.location.origin + window.location.pathname + "?" + p.toString();
+    const btn = document.getElementById("btn-copylink");
+    const orig = btn.textContent;
+    try {
+      await navigator.clipboard.writeText(url);
+      btn.textContent = "Copied!";
+    } catch (e) {
+      window.prompt("Copy this link:", url);
+      btn.textContent = "Copied!";
+    }
+    setTimeout(() => { btn.textContent = orig; }, 1500);
+  });
+
+  // Column sort
+  document.getElementById("catalog").querySelector("thead").addEventListener("click", (e) => {
+    const th = e.target.closest("th[data-sort]");
+    if (!th) return;
+    const key = th.dataset.sort;
+    if (sortKey === key) sortAsc = !sortAsc;
+    else { sortKey = key; sortAsc = false; }
+    renderCatalog();
+  });
+
+  // ── Init ────────────────────────────────────────────────────────────────────
+
+  // Raw trace mode: ?trace=demo-trace.bin loads a local trace file directly,
+  // parses it client-side, and builds a span catalog without any backend.
+  const rawTraceParam = params.get("trace");
+  if (rawTraceParam) {
+    // Raw mode: hide SSE-only toolbar controls
+    document.getElementById("toolbar").style.display = "none";
+    statsEl.innerHTML = '<span style="color:#ffa657">📂 Raw trace mode</span> — loading…';
+
+    (async function loadRawTrace() {
+      try {
+        const resp = await fetch(rawTraceParam);
+        if (!resp.ok) throw new Error("Failed to fetch trace: HTTP " + resp.status);
+        const buf = await resp.arrayBuffer();
+        loadingEl.lastChild.textContent = "Parsing trace…";
+
+        const parsed = await TraceParser.parseTrace(new Uint8Array(buf));
+        loadingEl.lastChild.textContent = "Building span catalog…";
+
+        // Give the browser a paint frame for the status update
+        await new Promise(r => setTimeout(r, 0));
+
+        const { allSpans } = TraceAnalysis.buildSpanData(parsed.customEvents);
+        spanTypes = SE.buildSpanCatalog(allSpans, parsed.customEvents);
+
+        loadingEl.classList.add("hidden");
+
+        const total = spanTypes.reduce((s, t) => s + t.count, 0);
+        statsEl.innerHTML =
+          '<span style="color:#ffa657">📂 Raw trace mode</span> · ' +
+          spanTypes.length + " span types · " + total.toLocaleString() + " instances";
+
+        renderCatalog();
+        if (selectedUid) renderDetail();
+      } catch (e) {
+        loadingEl.classList.add("hidden");
+        errorEl.style.display = "flex";
+        errorEl.textContent = "Failed to load raw trace: " + e.message;
+      }
+    })();
+  } else if (params.get("api") === "1" || scopeBucket || params.get("data_dir")) {
+    startStreaming();
+  } else {
+    loadingEl.classList.add("hidden");
+    errorEl.style.display = "flex";
+    errorEl.textContent = "No scope provided. Open the Span Explorer from the trace browser or with ?api=1&bucket=…";
+  }
+})();
+</script>
+</body>
+</html>

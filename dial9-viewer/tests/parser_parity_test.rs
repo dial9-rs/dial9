@@ -293,7 +293,7 @@ fn external_trace_parity() {
     let path = std::path::PathBuf::from(path);
     let data = load_trace_file(&path);
     let key = path.to_string_lossy().to_string();
-    let (samples, dict, _) = decode_samples(&data, &key).unwrap();
+    let (samples, dict, _, _) = decode_samples(&data, &key).unwrap();
     let rust = rust_properties(&samples, &dict);
 
     let js = js_properties(&path).expect("node JS oracle must be available for external parity");
@@ -337,7 +337,7 @@ fn external_trace_parity() {
 #[test]
 fn rust_decode_matches_js_reference_properties() {
     let data = load_demo_trace();
-    let (samples, dict, _) = decode_samples(&data, "demo-trace.bin").unwrap();
+    let (samples, dict, _, _) = decode_samples(&data, "demo-trace.bin").unwrap();
     let rust = rust_properties(&samples, &dict);
 
     let golden = golden_properties();

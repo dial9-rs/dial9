@@ -1239,7 +1239,7 @@ async fn refold_is_idempotent_no_duplicate_part_files() {
     let listed = uploader
         .list_objects_v2()
         .bucket("out-bucket")
-        .prefix("flamegraph-data/v3/bucket=src-bucket/samples/")
+        .prefix("flamegraph-data/v4/bucket=src-bucket/samples/")
         .send()
         .await
         .unwrap();
@@ -1644,5 +1644,143 @@ async fn partial_write_failure_does_not_commit_fold() {
     assert_eq!(
         c0.files_folded, 0,
         "no samples part may exist after a partial write failure (samples must be written last)"
+    );
+}
+
+/// Regression test: `fetch_folded_sample_parts` uses `buffer_unordered` which
+/// returns results in arbitrary completion order. Previously the flamegraph
+/// stream associated seed results by positional index — so a reordered response
+/// would mark the WRONG leaf as folded and misattribute merge errors to the
+/// wrong file. After the fix, each result carries its own leaf key, making
+/// association order-independent.
+///
+/// This test seeds 4 source files, folds them fully (first stream), then runs
+/// a second stream that primes from the folded set. It verifies:
+/// 1. All 4 files are correctly reported as folded (no misses from reordering).
+/// 2. The sample count is exact (no duplicates or drops from misassociation).
+/// 3. If one file's GET returns corrupted data (simulated by a backend that
+///    returns garbage for one specific leaf), only THAT leaf is excluded from
+///    the folded count — not a positionally-adjacent one.
+#[tokio::test]
+async fn seed_association_is_order_independent() {
+    let fs = tempfile::tempdir().unwrap();
+    std::fs::create_dir(fs.path().join("src-bucket")).unwrap();
+    std::fs::create_dir(fs.path().join("out-bucket")).unwrap();
+
+    let uploader = fake_s3_client(fs.path());
+    let body = mini_trace_gz();
+    // Seed 4 segments across 4 hosts so the order_key permutation shuffles them.
+    let epoch = 1_744_224_000i64;
+    for (i, host) in ["host-a", "host-b", "host-c", "host-d"].iter().enumerate() {
+        let key = segment_key(
+            "2026-04-09",
+            "1900",
+            "shale",
+            host,
+            epoch + i as i64 * 60,
+            0,
+        );
+        put(&uploader, "src-bucket", &key, body.clone()).await;
+    }
+
+    // First stream: fold all 4 files.
+    let base = start_agg_server(fs.path(), "src-bucket", "out-bucket", 60).await;
+    let http = reqwest::Client::new();
+    let r = stream_final(&http, &base, "service=shale&source=all").await;
+    let c = r.coverage.unwrap();
+    assert_eq!(c.files_matched, 4);
+    assert_eq!(c.files_folded, 4, "all 4 should fold on first stream");
+    let expected_samples = r.total_samples;
+    assert!(expected_samples > 0);
+
+    // Second stream: all 4 are already folded → primed from fetch_folded_sample_parts.
+    // Because buffer_unordered can return them in any order, the keyed results
+    // must still associate correctly.
+    let r2 = stream_final(&http, &base, "service=shale&source=all").await;
+    let c2 = r2.coverage.unwrap();
+    assert_eq!(
+        c2.files_folded, 4,
+        "keyed fetch must correctly identify all 4 leaves regardless of completion order"
+    );
+    assert_eq!(
+        r2.total_samples, expected_samples,
+        "sample count must be identical (no duplicates/drops from misassociation)"
+    );
+    assert_eq!(c2.fold_errors, 0, "no errors in healthy seed path");
+}
+
+/// Regression: when one folded file's seed GET fails (e.g. the part-file was
+/// garbage-collected or corrupted), only THAT file should be excluded from
+/// files_folded — not a neighboring file that happened to arrive at the same
+/// positional index. This pins down the keyed-result association: a merge error
+/// on leaf X must decrement leaf X's presence, not leaf Y's.
+#[tokio::test]
+async fn seed_merge_error_excludes_only_the_failed_leaf() {
+    let fs = tempfile::tempdir().unwrap();
+    std::fs::create_dir(fs.path().join("src-bucket")).unwrap();
+    std::fs::create_dir(fs.path().join("out-bucket")).unwrap();
+
+    let uploader = fake_s3_client(fs.path());
+    let body = mini_trace_gz();
+    let epoch = 1_744_224_000i64;
+    let hosts = ["host-a", "host-b", "host-c", "host-d"];
+    for (i, host) in hosts.iter().enumerate() {
+        let key = segment_key(
+            "2026-04-09",
+            "1900",
+            "shale",
+            host,
+            epoch + i as i64 * 60,
+            0,
+        );
+        put(&uploader, "src-bucket", &key, body.clone()).await;
+    }
+
+    // First stream: fold all 4 files normally.
+    let base = start_agg_server(fs.path(), "src-bucket", "out-bucket", 60).await;
+    let http = reqwest::Client::new();
+    let r = stream_final(&http, &base, "service=shale&source=all").await;
+    assert_eq!(r.coverage.unwrap().files_folded, 4);
+
+    // Now corrupt one file's samples part-file on disk so its merge fails on the
+    // second stream's seed read-back. Find a .parquet in the host=host-b
+    // partition of the samples directory.
+    let out_dir = fs.path().join("out-bucket");
+    fn find_and_corrupt_host_b(dir: &std::path::Path) -> bool {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    if find_and_corrupt_host_b(&path) {
+                        return true;
+                    }
+                } else if path.extension().is_some_and(|e| e == "parquet") {
+                    // Only corrupt a file in the host=host-b partition under samples/
+                    let path_str = path.to_string_lossy();
+                    if path_str.contains("/samples/") && path_str.contains("host=host-b") {
+                        std::fs::write(&path, b"corrupted garbage data").unwrap();
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+    assert!(
+        find_and_corrupt_host_b(&out_dir),
+        "could not find a samples part-file for host-b"
+    );
+
+    // Second stream: seed read-back hits the corrupted file. The keyed result
+    // must correctly attribute the failure to host-b's leaf, not any other.
+    let r2 = stream_final(&http, &base, "service=shale&source=all").await;
+    let c2 = r2.coverage.unwrap();
+    assert_eq!(
+        c2.files_folded, 3,
+        "only the corrupted leaf should be excluded from files_folded"
+    );
+    assert_eq!(
+        c2.fold_errors, 1,
+        "exactly one merge error from the corrupted part"
     );
 }

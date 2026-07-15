@@ -13,11 +13,12 @@ use std::convert::Infallible;
 use std::sync::Arc;
 
 use axum::Extension;
-use axum::extract::State;
+use axum::extract::{RawQuery, State};
 use axum::http::StatusCode;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum_extra::extract::Query as QueryExtra;
 use futures::stream::{self, Stream, StreamExt};
+use hex;
 use serde::{Deserialize, Serialize};
 
 use crate::ingest::aggregate::{
@@ -50,6 +51,8 @@ pub struct FlamegraphParams {
     pub bucket: Option<String>,
     /// S3 key prefix for source segment listing (scopes the search).
     pub prefix: Option<String>,
+    /// Region for ambient-credential S3 reads, carried by browse deep links.
+    pub aws_region: Option<String>,
     /// Worker-attribution filter: `"worker"` (on-runtime), `"off-worker"`
     /// (off-runtime), or empty/absent for all. Sent by the flamegraph UI's
     /// "Thread" selector.
@@ -58,6 +61,10 @@ pub struct FlamegraphParams {
     /// (scheduler context switches), or empty/absent for all. Sent by the
     /// flamegraph UI's "Source" selector.
     pub source: Option<String>,
+    /// Phase filter: `"on_cpu"` maps to `source=cpu`, `"blocking"` maps to
+    /// `source=sched`. A convenience alias for the span explorer's phase picker.
+    /// Takes precedence over `source` when both are set. Invalid values → 400.
+    pub phase: Option<String>,
     /// Spawn location filter: exact match on the task's spawn location string.
     /// Only samples attributed to a poll with this spawn location are counted.
     /// Sent by the flamegraph UI's "Spawn location" selector.
@@ -69,6 +76,15 @@ pub struct FlamegraphParams {
     /// Poll-duration band, upper bound in nanoseconds (inclusive). Keeps only
     /// samples inside a poll at most this long.
     pub max_poll_ns: Option<i64>,
+    /// Span type UID filter (hex-encoded 16 bytes). When present, only samples
+    /// whose `enclosing_spans` list contains a membership matching this type UID
+    /// are included. Used by the span explorer to build per-span-type flamegraphs.
+    pub span_type_uid: Option<String>,
+    /// Minimum span elapsed_ns for the span filter (inclusive). Keeps only
+    /// samples enclosed by a matching span at least this long.
+    pub min_span_ns: Option<i64>,
+    /// Maximum span elapsed_ns for the span filter (inclusive).
+    pub max_span_ns: Option<i64>,
 }
 
 #[derive(Serialize)]
@@ -223,6 +239,7 @@ pub async fn get_flamegraph(
     // `axum_extra`'s Query supports repeated keys (`host=a&host=b`), which the
     // stock `serde_urlencoded`-based extractor does not.
     QueryExtra(params): QueryExtra<FlamegraphParams>,
+    RawQuery(raw_query): RawQuery,
 ) -> Result<
     (
         Extension<OperationMetrics>,
@@ -230,8 +247,103 @@ pub async fn get_flamegraph(
     ),
     (StatusCode, String),
 > {
+    // ── Validate span filter parameters FIRST (before agg_context_for) ───────
+    // `axum_extra::Query` maps an explicitly empty optional value to `None`, so
+    // retain the raw query solely to distinguish `?span_type_uid=` / `?phase=`
+    // from an absent parameter. Both explicit empty values are invalid.
+    // Parse with percent-decoding so that encoded names like `%73pan_type_uid=`
+    // are rejected identically to their literal equivalents.
+    if raw_query.as_deref().is_some_and(|query| {
+        query.split('&').any(|part| {
+            let (raw_key, _) = part.split_once('=').unwrap_or((part, ""));
+            let decoded_key = urlencoding::decode(raw_key).unwrap_or_default();
+            let key = decoded_key.as_ref();
+            // An explicit key with empty (or absent) value is invalid for these
+            // two parameters — they must either be absent or non-empty.
+            let value_part = part.split_once('=').map(|(_, v)| v);
+            let value_empty = value_part.is_none() || value_part == Some("");
+            (key == "span_type_uid" || key == "phase") && value_empty
+        })
+    }) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "span_type_uid and phase must not be empty".to_string(),
+        ));
+    }
+    // Malformed UID, negative/inverted bounds, bounds without type → 400.
+    // Validation runs before any backend access so a malformed request is
+    // rejected cheaply, even when no agg context is configured.
+    if let Some(ref hex_str) = params.span_type_uid {
+        if hex_str.is_empty() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "span_type_uid must not be empty".to_string(),
+            ));
+        }
+        match hex::decode(hex_str) {
+            Ok(bytes) if bytes.len() == 16 => {} // valid
+            _ => {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    format!(
+                        "invalid span_type_uid: must be 32 hex chars (16 bytes), got {hex_str:?}"
+                    ),
+                ));
+            }
+        }
+    }
+    if let (Some(min), Some(max)) = (params.min_span_ns, params.max_span_ns) {
+        if min < 0 || max < 0 {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "span duration bounds must be non-negative: min_span_ns={min}, max_span_ns={max}"
+                ),
+            ));
+        }
+        if min > max {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("inverted span duration bounds: min_span_ns={min} > max_span_ns={max}"),
+            ));
+        }
+    } else if params.min_span_ns.is_some_and(|v| v < 0) || params.max_span_ns.is_some_and(|v| v < 0)
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "span duration bounds must be non-negative".to_string(),
+        ));
+    }
+    // Bounds without type: if min/max span bounds are set but span_type_uid is absent, 400.
+    // (Empty span_type_uid is already rejected above, so only None reaches here.)
+    if (params.min_span_ns.is_some() || params.max_span_ns.is_some())
+        && params.span_type_uid.is_none()
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "min_span_ns/max_span_ns require span_type_uid".to_string(),
+        ));
+    }
+    // Validate phase parameter: only "on_cpu" and "blocking" are valid.
+    if let Some(ref phase) = params.phase
+        && !phase.is_empty()
+        && phase != "on_cpu"
+        && phase != "blocking"
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("invalid phase: must be 'on_cpu' or 'blocking', got {phase:?}"),
+        ));
+    }
+
+    // ── Resolve aggregation context (after validation) ───────────────────────
     let Some(agg) = state
-        .agg_context_for(params.bucket.as_deref(), params.prefix.as_deref(), creds)
+        .agg_context_for(
+            params.bucket.as_deref(),
+            params.prefix.as_deref(),
+            params.aws_region.as_deref(),
+            creds,
+        )
         .await?
     else {
         return Err((
@@ -292,10 +404,13 @@ fn sample_filter(params: &FlamegraphParams) -> SampleFilter {
     for def in FACETS {
         let value = match def.name {
             "source" => {
-                let raw = params
-                    .source
-                    .clone()
-                    .unwrap_or_else(|| def.default_filter.to_string());
+                // phase takes precedence: on_cpu→cpu, blocking→sched.
+                let effective_source = match params.phase.as_deref() {
+                    Some("on_cpu") => Some("cpu".to_string()),
+                    Some("blocking") => Some("sched".to_string()),
+                    _ => params.source.clone(),
+                };
+                let raw = effective_source.unwrap_or_else(|| def.default_filter.to_string());
                 // "all" = no constraint on source.
                 if raw == "all" { String::new() } else { raw }
             }
@@ -316,12 +431,35 @@ fn sample_filter(params: &FlamegraphParams) -> SampleFilter {
         };
         facets.insert(def.name, value);
     }
+
+    // Parse span_type_uid from hex if provided. Pre-validated by the handler,
+    // so malformed hex should not reach here — but fail closed defensively.
+    let span_type_uid = match params.span_type_uid.as_deref() {
+        Some(hex_str) if !hex_str.is_empty() => {
+            match hex::decode(hex_str) {
+                Ok(bytes) if bytes.len() == 16 => {
+                    let mut uid = [0u8; 16];
+                    uid.copy_from_slice(&bytes);
+                    Some(uid)
+                }
+                _ => {
+                    // Unreachable after handler validation; fail closed without warning.
+                    Some([0u8; 16])
+                }
+            }
+        }
+        _ => None,
+    };
+
     SampleFilter {
         start_ns: params.start_ns,
         end_ns: params.end_ns,
         min_poll_ns: params.min_poll_ns,
         max_poll_ns: params.max_poll_ns,
         facets,
+        span_type_uid,
+        min_span_ns: params.min_span_ns,
+        max_span_ns: params.max_span_ns,
     }
 }
 
@@ -406,6 +544,7 @@ fn flamegraph_stream(
             match phase {
                 Phase::Start => {
                     // Prime the accumulator over the already-folded set, concurrently.
+                    // Results are keyed by leaf hash so completion order doesn't matter.
                     let seed = aggregate::fetch_folded_sample_parts(
                         &*ctx.agg.output,
                         &ctx.agg.output_bucket,
@@ -415,13 +554,26 @@ fn flamegraph_stream(
                     )
                     .await;
                     let mut accum = FlamegraphAccum::new(ctx.filter.clone());
-                    for (samples, dict) in seed {
-                        if let Err(e) = accum.merge(samples, dict) {
-                            rate_limited_warn("flamegraph: seed merge failed", &e);
+                    // Only mark a leaf folded after its sample+dict GET and
+                    // full merge succeed; record GET/merge failures.
+                    let mut folded = HashSet::new();
+                    let mut errors = FoldErrors::default();
+                    for (leaf, result) in seed {
+                        match result {
+                            Ok((samples, dict)) => match accum.merge(samples, dict) {
+                                Ok(()) => {
+                                    folded.insert(leaf);
+                                }
+                                Err(e) => {
+                                    rate_limited_warn("flamegraph: seed merge failed", &e);
+                                    errors.record(&leaf, &format!("merge: {e}"));
+                                }
+                            },
+                            Err(msg) => {
+                                errors.record(&leaf, &msg);
+                            }
                         }
                     }
-                    let folded = ctx.resolved.folded().clone();
-                    let errors = FoldErrors::default();
                     let event = snapshot_event(&ctx, &accum, &folded, &errors);
                     let state = Box::new(FoldState {
                         accum,
@@ -434,18 +586,32 @@ fn flamegraph_stream(
                     // Pull the next fold outcome; `None` = work-list drained → close.
                     match folds.next().await? {
                         FoldOutcome::Folded(f) => {
-                            if let Some((samples, dict)) = aggregate::fetch_sample_parts(
+                            // Only mark the leaf folded after sample+dict fetch
+                            // AND full merge succeed; failures increment errors.
+                            match aggregate::fetch_sample_parts(
                                 &*ctx.agg.output,
                                 &ctx.agg.output_bucket,
                                 &ctx.agg.output_prefix,
                                 &f.full_key,
                             )
                             .await
-                                && let Err(e) = state.accum.merge(samples, dict)
                             {
-                                rate_limited_warn("flamegraph: merge failed", &e);
+                                Some((samples, dict)) => match state.accum.merge(samples, dict) {
+                                    Ok(()) => {
+                                        state.folded.insert(aggregate::part_leaf_of(&f.full_key));
+                                    }
+                                    Err(e) => {
+                                        rate_limited_warn("flamegraph: merge failed", &e);
+                                        state.errors.record(&f.raw_key, &format!("merge: {e}"));
+                                    }
+                                },
+                                None => {
+                                    // GET failed — leaf stays unfolded.
+                                    state
+                                        .errors
+                                        .record(&f.raw_key, "sample parts GET failed (not found)");
+                                }
                             }
-                            state.folded.insert(aggregate::part_leaf_of(&f.full_key));
                         }
                         FoldOutcome::Failed { raw_key, error } => {
                             // Count it and carry a sample message so the client can

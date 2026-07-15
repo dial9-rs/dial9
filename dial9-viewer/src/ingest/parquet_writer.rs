@@ -1,10 +1,10 @@
 //! Write samples and stacks dictionary as Parquet files.
 
 use arrow::array::{
-    ArrayRef, FixedSizeBinaryBuilder, ListBuilder, StringBuilder, UInt8Builder, UInt32Builder,
-    UInt64Builder,
+    ArrayRef, BooleanBuilder, FixedSizeBinaryBuilder, Int64Builder, ListBuilder, StringBuilder,
+    StructBuilder, UInt8Builder, UInt32Builder, UInt64Builder,
 };
-use arrow::datatypes::{DataType, Field, Schema};
+use arrow::datatypes::{DataType, Field, Fields, Schema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 use parquet::file::properties::WriterProperties;
@@ -14,6 +14,7 @@ use std::sync::Arc;
 
 use super::decode::ResolvedPoll;
 use super::decode::ResolvedSample;
+use super::decode::ResolvedSpan;
 
 /// Write samples to a Parquet file.
 ///
@@ -52,6 +53,10 @@ pub fn write_samples<W: Write + Send>(
     let map_values_builder = StringBuilder::new();
     let mut map_builder = arrow::array::MapBuilder::new(None, map_keys_builder, map_values_builder);
 
+    // Enclosing spans: LIST<STRUCT<span_uid, span_type_uid, elapsed_ns, details_complete>>
+    let es_fields = enclosing_span_fields();
+    let mut enclosing_spans_builder = ListBuilder::new(StructBuilder::from_fields(es_fields, 4));
+
     for sample in samples {
         ts_builder.append_value(sample.timestamp_ns as i64);
         stack_id_builder.append_value(sample.stack_id)?;
@@ -72,6 +77,29 @@ pub fn write_samples<W: Write + Send>(
             map_builder.values().append_value(v);
         }
         map_builder.append(true)?;
+
+        // Append enclosing spans list for this row
+        let struct_builder = enclosing_spans_builder.values();
+        for es in &sample.enclosing_spans {
+            struct_builder
+                .field_builder::<FixedSizeBinaryBuilder>(0)
+                .unwrap()
+                .append_value(es.span_uid)?;
+            struct_builder
+                .field_builder::<FixedSizeBinaryBuilder>(1)
+                .unwrap()
+                .append_value(es.span_type_uid)?;
+            struct_builder
+                .field_builder::<Int64Builder>(2)
+                .unwrap()
+                .append_value(es.elapsed_ns as i64);
+            struct_builder
+                .field_builder::<BooleanBuilder>(3)
+                .unwrap()
+                .append_value(es.details_complete);
+            struct_builder.append(true);
+        }
+        enclosing_spans_builder.append(true);
     }
 
     let batch = RecordBatch::try_new(
@@ -88,6 +116,7 @@ pub fn write_samples<W: Write + Send>(
             Arc::new(poll_duration_builder.finish()) as ArrayRef,
             Arc::new(spawn_location_builder.finish()) as ArrayRef,
             Arc::new(map_builder.finish()) as ArrayRef,
+            Arc::new(enclosing_spans_builder.finish()) as ArrayRef,
         ],
     )?;
 
@@ -223,6 +252,17 @@ fn samples_schema() -> Arc<Schema> {
             ),
             false,
         ),
+        // Tracing spans enclosing this sample. Typically 0–2 entries.
+        // Old part-files will not have this column; readers must handle absence.
+        Field::new(
+            "enclosing_spans",
+            DataType::List(Arc::new(Field::new(
+                "item",
+                DataType::Struct(enclosing_span_fields()),
+                true,
+            ))),
+            false, // list itself is non-null; empty list = no enclosing spans
+        ),
     ]))
 }
 
@@ -253,6 +293,232 @@ fn polls_schema() -> Arc<Schema> {
     ]))
 }
 
+/// Fields of the enclosing_spans struct within the samples table.
+/// Compact OTAP-aligned: only identity, duration, and completeness for the hot
+/// flamegraph filter path. Full metadata lives in `spans/` only.
+fn enclosing_span_fields() -> Fields {
+    vec![
+        Field::new("span_uid", DataType::FixedSizeBinary(16), false),
+        Field::new("span_type_uid", DataType::FixedSizeBinary(16), false),
+        Field::new("elapsed_ns", DataType::Int64, false),
+        Field::new("details_complete", DataType::Boolean, false),
+    ]
+    .into()
+}
+
+/// Arrow schema for the `spans/` table (one row per span close summary).
+fn spans_schema() -> Arc<Schema> {
+    Arc::new(Schema::new(vec![
+        Field::new("span_uid", DataType::FixedSizeBinary(16), false),
+        Field::new("span_type_uid", DataType::FixedSizeBinary(16), false),
+        Field::new("kind", DataType::Utf8, false),
+        Field::new("name", DataType::Utf8, false),
+        Field::new("target", DataType::Utf8, true),
+        Field::new("callsite_file", DataType::Utf8, true),
+        Field::new("callsite_line", DataType::UInt32, true),
+        Field::new("start_ns", DataType::Int64, false),
+        Field::new("end_ns", DataType::Int64, false),
+        Field::new("elapsed_ns", DataType::Int64, false),
+        Field::new("active_ns", DataType::Int64, true),
+        Field::new("observed_active_wall_ns", DataType::Int64, false),
+        Field::new("detail_coverage_ns", DataType::Int64, false),
+        Field::new("details_complete", DataType::Boolean, false),
+        Field::new("concurrent", DataType::Boolean, false),
+        Field::new("parent_span_uid", DataType::FixedSizeBinary(16), true),
+        // Five-way time attribution (nullable until metadata consumed)
+        Field::new("on_cpu_ns_est", DataType::Int64, true),
+        Field::new("blocked_ns_est", DataType::Int64, true),
+        Field::new("async_wait_ns", DataType::Int64, true),
+        Field::new("scheduler_delay_ns", DataType::Int64, true),
+        Field::new("unknown_ns", DataType::Int64, false),
+        Field::new("cpu_sample_count", DataType::UInt32, false),
+        Field::new("sched_sample_count", DataType::UInt32, false),
+        Field::new("attribution_version", DataType::UInt16, false),
+        Field::new("attribution_flags", DataType::UInt32, false),
+        Field::new("saturated", DataType::Boolean, false),
+        Field::new("loss_observable", DataType::Boolean, false),
+        Field::new("unbalanced_exits", DataType::UInt32, false),
+        Field::new("unbalanced_enters", DataType::UInt32, false),
+        Field::new("identity_quality", DataType::Utf8, false),
+        // Span attributes as Map<String, String>. Current producers always emit
+        // String values (OTAP evolution to typed values remains documented but is
+        // not yet implemented). Empty maps are written as empty maps (non-null).
+        Field::new(
+            "attributes",
+            DataType::Map(
+                Arc::new(Field::new(
+                    "entries",
+                    DataType::Struct(
+                        vec![
+                            Field::new("keys", DataType::Utf8, false),
+                            Field::new("values", DataType::Utf8, true),
+                        ]
+                        .into(),
+                    ),
+                    false,
+                )),
+                false, // keys_sorted
+            ),
+            false,
+        ),
+        Field::new("source_key", DataType::Utf8, false),
+        Field::new("host", DataType::Utf8, false),
+        Field::new("service", DataType::Utf8, false),
+        Field::new("date", DataType::Utf8, false),
+    ]))
+}
+
+/// Write span close summaries to a Parquet file (the `spans/` table).
+pub fn write_spans<W: Write + Send>(writer: W, spans: &[ResolvedSpan]) -> anyhow::Result<()> {
+    let schema = spans_schema();
+    let props = WriterProperties::builder()
+        .set_dictionary_enabled(true)
+        .set_max_row_group_size(128 * 1024)
+        .build();
+    let mut arrow_writer = ArrowWriter::try_new(writer, schema.clone(), Some(props))?;
+
+    let n = spans.len();
+    let mut span_uid_builder = FixedSizeBinaryBuilder::with_capacity(n, 16);
+    let mut span_type_uid_builder = FixedSizeBinaryBuilder::with_capacity(n, 16);
+    let mut kind_builder = StringBuilder::with_capacity(n, 8 * n);
+    let mut name_builder = StringBuilder::with_capacity(n, 64 * n);
+    let mut target_builder = StringBuilder::with_capacity(n, 64 * n);
+    let mut callsite_file_builder = StringBuilder::with_capacity(n, 128 * n);
+    let mut callsite_line_builder = UInt32Builder::with_capacity(n);
+    let mut start_ns_builder = Int64Builder::with_capacity(n);
+    let mut end_ns_builder = Int64Builder::with_capacity(n);
+    let mut elapsed_ns_builder = Int64Builder::with_capacity(n);
+    let mut active_ns_builder = Int64Builder::with_capacity(n);
+    let mut observed_active_wall_ns_builder = Int64Builder::with_capacity(n);
+    let mut detail_coverage_ns_builder = Int64Builder::with_capacity(n);
+    let mut details_complete_builder = BooleanBuilder::with_capacity(n);
+    let mut concurrent_builder = BooleanBuilder::with_capacity(n);
+    let mut parent_span_uid_builder = FixedSizeBinaryBuilder::with_capacity(n, 16);
+    let mut on_cpu_ns_est_builder = Int64Builder::with_capacity(n);
+    let mut blocked_ns_est_builder = Int64Builder::with_capacity(n);
+    let mut async_wait_ns_builder = Int64Builder::with_capacity(n);
+    let mut scheduler_delay_ns_builder = Int64Builder::with_capacity(n);
+    let mut unknown_ns_builder = Int64Builder::with_capacity(n);
+    let mut cpu_sample_count_builder = UInt32Builder::with_capacity(n);
+    let mut sched_sample_count_builder = UInt32Builder::with_capacity(n);
+    let mut attribution_version_builder = arrow::array::UInt16Builder::with_capacity(n);
+    let mut attribution_flags_builder = UInt32Builder::with_capacity(n);
+    let mut saturated_builder = BooleanBuilder::with_capacity(n);
+    let mut loss_observable_builder = BooleanBuilder::with_capacity(n);
+    let mut unbalanced_exits_builder = UInt32Builder::with_capacity(n);
+    let mut unbalanced_enters_builder = UInt32Builder::with_capacity(n);
+    let mut identity_quality_builder = StringBuilder::with_capacity(n, 10 * n);
+
+    // Attributes: Map<String, String>
+    let attr_keys_builder = StringBuilder::new();
+    let attr_values_builder = StringBuilder::new();
+    let mut attr_map_builder =
+        arrow::array::MapBuilder::new(None, attr_keys_builder, attr_values_builder);
+
+    let mut source_key_builder = StringBuilder::with_capacity(n, 128 * n);
+    let mut host_builder = StringBuilder::with_capacity(n, 64 * n);
+    let mut service_builder = StringBuilder::with_capacity(n, 32 * n);
+    let mut date_builder = StringBuilder::with_capacity(n, 10 * n);
+
+    /// Convert u64 ns to i64, rejecting values that exceed i64::MAX.
+    fn to_i64(val: u64) -> anyhow::Result<i64> {
+        i64::try_from(val).map_err(|_| anyhow::anyhow!("timestamp {val} exceeds i64::MAX"))
+    }
+
+    for span in spans {
+        span_uid_builder.append_value(span.span_uid)?;
+        span_type_uid_builder.append_value(span.span_type_uid)?;
+        kind_builder.append_value(span.kind);
+        name_builder.append_value(&span.name);
+        target_builder.append_option(Some(&span.target));
+        callsite_file_builder.append_option(span.callsite_file.as_deref());
+        callsite_line_builder.append_option(span.callsite_line);
+        start_ns_builder.append_value(to_i64(span.start_ns)?);
+        end_ns_builder.append_value(to_i64(span.end_ns)?);
+        elapsed_ns_builder.append_value(to_i64(span.elapsed_ns)?);
+        active_ns_builder.append_option(span.active_ns.map(to_i64).transpose()?);
+        observed_active_wall_ns_builder.append_value(to_i64(span.observed_active_wall_ns)?);
+        detail_coverage_ns_builder.append_value(to_i64(span.detail_coverage_ns)?);
+        details_complete_builder.append_value(span.details_complete);
+        concurrent_builder.append_value(span.concurrent);
+        match span.parent_span_uid {
+            Some(uid) => parent_span_uid_builder.append_value(uid)?,
+            None => parent_span_uid_builder.append_null(),
+        }
+        on_cpu_ns_est_builder.append_option(span.on_cpu_ns_est.map(to_i64).transpose()?);
+        blocked_ns_est_builder.append_option(span.blocked_ns_est.map(to_i64).transpose()?);
+        async_wait_ns_builder.append_option(span.async_wait_ns.map(to_i64).transpose()?);
+        scheduler_delay_ns_builder.append_option(span.scheduler_delay_ns.map(to_i64).transpose()?);
+        unknown_ns_builder.append_value(to_i64(span.unknown_ns)?);
+        cpu_sample_count_builder.append_value(span.cpu_sample_count);
+        sched_sample_count_builder.append_value(span.sched_sample_count);
+        attribution_version_builder.append_value(span.attribution_version);
+        attribution_flags_builder.append_value(span.attribution_flags);
+        saturated_builder.append_value(span.saturated);
+        loss_observable_builder.append_value(span.loss_observable);
+        unbalanced_exits_builder.append_value(span.unbalanced_exits);
+        unbalanced_enters_builder.append_value(span.unbalanced_enters);
+        identity_quality_builder.append_value(span.identity_quality);
+
+        // Append attributes map
+        for (k, v) in &span.attributes {
+            attr_map_builder.keys().append_value(k);
+            attr_map_builder.values().append_value(v);
+        }
+        attr_map_builder.append(true)?;
+
+        source_key_builder.append_value(&span.source_key);
+        host_builder.append_value(&span.host);
+        service_builder.append_value(&span.service);
+        date_builder.append_value(&span.date);
+    }
+
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(span_uid_builder.finish()) as ArrayRef,
+            Arc::new(span_type_uid_builder.finish()) as ArrayRef,
+            Arc::new(kind_builder.finish()) as ArrayRef,
+            Arc::new(name_builder.finish()) as ArrayRef,
+            Arc::new(target_builder.finish()) as ArrayRef,
+            Arc::new(callsite_file_builder.finish()) as ArrayRef,
+            Arc::new(callsite_line_builder.finish()) as ArrayRef,
+            Arc::new(start_ns_builder.finish()) as ArrayRef,
+            Arc::new(end_ns_builder.finish()) as ArrayRef,
+            Arc::new(elapsed_ns_builder.finish()) as ArrayRef,
+            Arc::new(active_ns_builder.finish()) as ArrayRef,
+            Arc::new(observed_active_wall_ns_builder.finish()) as ArrayRef,
+            Arc::new(detail_coverage_ns_builder.finish()) as ArrayRef,
+            Arc::new(details_complete_builder.finish()) as ArrayRef,
+            Arc::new(concurrent_builder.finish()) as ArrayRef,
+            Arc::new(parent_span_uid_builder.finish()) as ArrayRef,
+            Arc::new(on_cpu_ns_est_builder.finish()) as ArrayRef,
+            Arc::new(blocked_ns_est_builder.finish()) as ArrayRef,
+            Arc::new(async_wait_ns_builder.finish()) as ArrayRef,
+            Arc::new(scheduler_delay_ns_builder.finish()) as ArrayRef,
+            Arc::new(unknown_ns_builder.finish()) as ArrayRef,
+            Arc::new(cpu_sample_count_builder.finish()) as ArrayRef,
+            Arc::new(sched_sample_count_builder.finish()) as ArrayRef,
+            Arc::new(attribution_version_builder.finish()) as ArrayRef,
+            Arc::new(attribution_flags_builder.finish()) as ArrayRef,
+            Arc::new(saturated_builder.finish()) as ArrayRef,
+            Arc::new(loss_observable_builder.finish()) as ArrayRef,
+            Arc::new(unbalanced_exits_builder.finish()) as ArrayRef,
+            Arc::new(unbalanced_enters_builder.finish()) as ArrayRef,
+            Arc::new(identity_quality_builder.finish()) as ArrayRef,
+            Arc::new(attr_map_builder.finish()) as ArrayRef,
+            Arc::new(source_key_builder.finish()) as ArrayRef,
+            Arc::new(host_builder.finish()) as ArrayRef,
+            Arc::new(service_builder.finish()) as ArrayRef,
+            Arc::new(date_builder.finish()) as ArrayRef,
+        ],
+    )?;
+
+    arrow_writer.write(&batch)?;
+    arrow_writer.close()?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -270,6 +536,7 @@ mod tests {
             date: "2026-06-19".to_string(),
             poll_duration_ns: Some(5_000_000),
             spawn_location: Some("src/main.rs:42".to_string()),
+            enclosing_spans: Vec::new(),
         }];
         let metadata = HashMap::from([("version".to_string(), "1.0".to_string())]);
 
@@ -306,5 +573,320 @@ mod tests {
         let batches: Vec<_> = reader.into_iter().collect::<Result<_, _>>().unwrap();
         assert_eq!(batches.len(), 1);
         assert_eq!(batches[0].num_rows(), 1);
+    }
+
+    #[test]
+    fn test_write_and_read_spans() {
+        use crate::ingest::decode::ResolvedSpan;
+
+        let spans = vec![ResolvedSpan {
+            span_uid: [1u8; 16],
+            span_type_uid: [2u8; 16],
+            kind: "tracing",
+            name: "handle_request".to_string(),
+            target: "my_crate".to_string(),
+            callsite_file: Some("src/main.rs".to_string()),
+            callsite_line: Some(42),
+            start_ns: 1000,
+            end_ns: 2000,
+            elapsed_ns: 1000,
+            active_ns: Some(800),
+            observed_active_wall_ns: 800,
+            detail_coverage_ns: 800,
+            details_complete: true,
+            concurrent: false,
+            parent_span_uid: None,
+            attributes: vec![("user_id".to_string(), "42".to_string())],
+            on_cpu_ns_est: None,
+            blocked_ns_est: None,
+            async_wait_ns: None,
+            scheduler_delay_ns: None,
+            unknown_ns: 1000,
+            cpu_sample_count: 3,
+            sched_sample_count: 1,
+            attribution_version: 1,
+            attribution_flags: 0b1111,
+            saturated: false,
+            loss_observable: false,
+            unbalanced_exits: 0,
+            unbalanced_enters: 0,
+            identity_quality: "metadata",
+            source_key: "test".to_string(),
+            host: "myhost".to_string(),
+            service: "shale".to_string(),
+            date: "2026-06-19".to_string(),
+        }];
+
+        let mut buf = Vec::new();
+        write_spans(&mut buf, &spans).unwrap();
+
+        let reader = ::parquet::arrow::arrow_reader::ParquetRecordBatchReader::try_new(
+            bytes::Bytes::from(buf),
+            1024,
+        )
+        .unwrap();
+        let batches: Vec<_> = reader.into_iter().collect::<Result<_, _>>().unwrap();
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].num_rows(), 1);
+
+        // Verify elapsed_ns is readable
+        let elapsed_col = batches[0]
+            .column_by_name("elapsed_ns")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow::array::Int64Array>()
+            .unwrap();
+        assert_eq!(elapsed_col.value(0), 1000);
+    }
+
+    /// Finding 3: Verify that distinct unbalanced_enters, unbalanced_exits,
+    /// saturated, loss_observable, identity_quality, and attributes are persisted
+    /// with non-default values and readable from Parquet.
+    #[test]
+    fn test_write_and_read_spans_non_default_fields() {
+        use crate::ingest::decode::ResolvedSpan;
+
+        let spans = vec![ResolvedSpan {
+            span_uid: [3u8; 16],
+            span_type_uid: [4u8; 16],
+            kind: "tracing",
+            name: "non_default_span".to_string(),
+            target: "my_target".to_string(),
+            callsite_file: Some("src/lib.rs".to_string()),
+            callsite_line: Some(99),
+            start_ns: 5000,
+            end_ns: 15000,
+            elapsed_ns: 10000,
+            active_ns: Some(7000),
+            observed_active_wall_ns: 6500,
+            detail_coverage_ns: 6500,
+            details_complete: false,
+            concurrent: true,
+            parent_span_uid: Some([5u8; 16]),
+            attributes: vec![
+                ("http.method".to_string(), "GET".to_string()),
+                ("http.status".to_string(), "200".to_string()),
+            ],
+            on_cpu_ns_est: Some(3000),
+            blocked_ns_est: Some(1000),
+            async_wait_ns: Some(2000),
+            scheduler_delay_ns: Some(500),
+            unknown_ns: 3500,
+            cpu_sample_count: 12,
+            sched_sample_count: 4,
+            attribution_version: 2,
+            attribution_flags: 0b0101,
+            saturated: true,
+            loss_observable: true,
+            unbalanced_exits: 3,
+            unbalanced_enters: 7,
+            identity_quality: "path",
+            source_key: "test/key".to_string(),
+            host: "host-b".to_string(),
+            service: "svc-b".to_string(),
+            date: "2026-07-15".to_string(),
+        }];
+
+        let mut buf = Vec::new();
+        write_spans(&mut buf, &spans).unwrap();
+
+        let reader = ::parquet::arrow::arrow_reader::ParquetRecordBatchReader::try_new(
+            bytes::Bytes::from(buf),
+            1024,
+        )
+        .unwrap();
+        let batches: Vec<_> = reader.into_iter().collect::<Result<_, _>>().unwrap();
+        assert_eq!(batches.len(), 1);
+        let batch = &batches[0];
+        assert_eq!(batch.num_rows(), 1);
+
+        // Verify unbalanced_exits
+        let unbalanced_exits_col = batch
+            .column_by_name("unbalanced_exits")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow::array::UInt32Array>()
+            .unwrap();
+        assert_eq!(unbalanced_exits_col.value(0), 3);
+
+        // Verify unbalanced_enters
+        let unbalanced_enters_col = batch
+            .column_by_name("unbalanced_enters")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow::array::UInt32Array>()
+            .unwrap();
+        assert_eq!(unbalanced_enters_col.value(0), 7);
+
+        // Verify saturated
+        let saturated_col = batch
+            .column_by_name("saturated")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow::array::BooleanArray>()
+            .unwrap();
+        assert!(saturated_col.value(0));
+
+        // Verify loss_observable
+        let loss_observable_col = batch
+            .column_by_name("loss_observable")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow::array::BooleanArray>()
+            .unwrap();
+        assert!(loss_observable_col.value(0));
+
+        // Verify identity_quality
+        let identity_quality_col = batch
+            .column_by_name("identity_quality")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow::array::StringArray>()
+            .unwrap();
+        assert_eq!(identity_quality_col.value(0), "path");
+    }
+
+    /// Finding 4: Build an actual old-schema Parquet fixture WITHOUT the
+    /// `enclosing_spans` column (simulating a pre-v4 part-file). The fixture
+    /// faithfully includes the non-null metadata Map column that was present in
+    /// the historical v3 samples schema, so the only difference from the
+    /// current schema is the absent `enclosing_spans` column.
+    /// Verify that `span_filter_matches` fails closed on this fixture.
+    #[test]
+    fn test_old_schema_parquet_fixture_no_enclosing_spans() {
+        use arrow::array::{
+            ArrayRef, FixedSizeBinaryBuilder, Int64Builder, MapBuilder, StringBuilder,
+            UInt8Builder, UInt32Builder,
+        };
+        use arrow::datatypes::{DataType, Field, Schema};
+        use arrow::record_batch::RecordBatch;
+        use parquet::arrow::ArrowWriter;
+        use parquet::file::properties::WriterProperties;
+        use std::sync::Arc;
+
+        // Build old v3 schema: includes metadata Map column but omits
+        // enclosing_spans (which was added in v4).
+        let old_schema = Arc::new(Schema::new(vec![
+            Field::new("timestamp_ns", DataType::Int64, false),
+            Field::new("stack_id", DataType::FixedSizeBinary(16), false),
+            Field::new("worker_id", DataType::UInt32, true),
+            Field::new("source", DataType::UInt8, false),
+            Field::new("source_key", DataType::Utf8, false),
+            Field::new("host", DataType::Utf8, false),
+            Field::new("service", DataType::Utf8, false),
+            Field::new("date", DataType::Utf8, false),
+            Field::new("poll_duration_ns", DataType::Int64, true),
+            Field::new("spawn_location", DataType::Utf8, true),
+            // The metadata Map column was present in v3.
+            Field::new(
+                "metadata",
+                DataType::Map(
+                    Arc::new(Field::new(
+                        "entries",
+                        DataType::Struct(
+                            vec![
+                                Field::new("keys", DataType::Utf8, false),
+                                Field::new("values", DataType::Utf8, true),
+                            ]
+                            .into(),
+                        ),
+                        false,
+                    )),
+                    false, // keys_sorted
+                ),
+                false,
+            ),
+        ]));
+
+        let mut ts_builder = Int64Builder::with_capacity(1);
+        let mut stack_id_builder = FixedSizeBinaryBuilder::with_capacity(1, 16);
+        let mut worker_id_builder = UInt32Builder::with_capacity(1);
+        let mut source_builder = UInt8Builder::with_capacity(1);
+        let mut source_key_builder = StringBuilder::with_capacity(1, 64);
+        let mut host_builder = StringBuilder::with_capacity(1, 64);
+        let mut service_builder = StringBuilder::with_capacity(1, 32);
+        let mut date_builder = StringBuilder::with_capacity(1, 10);
+        let mut poll_duration_builder = Int64Builder::with_capacity(1);
+        let mut spawn_location_builder = StringBuilder::with_capacity(1, 64);
+
+        // Build metadata map column with a representative entry.
+        let map_keys_builder = StringBuilder::new();
+        let map_values_builder = StringBuilder::new();
+        let mut map_builder = MapBuilder::new(None, map_keys_builder, map_values_builder);
+
+        ts_builder.append_value(1000);
+        stack_id_builder.append_value([1u8; 16]).unwrap();
+        worker_id_builder.append_value(1);
+        source_builder.append_value(0);
+        source_key_builder.append_value("old/key/path.bin.gz");
+        host_builder.append_value("old-host");
+        service_builder.append_value("old-svc");
+        date_builder.append_value("2024-01-01");
+        poll_duration_builder.append_value(5_000_000);
+        spawn_location_builder.append_value("src/old.rs:10");
+
+        // Populate metadata map with a source_key entry (matching historical behavior).
+        map_builder.keys().append_value("source_key");
+        map_builder.values().append_value("old/key/path.bin.gz");
+        map_builder.append(true).unwrap();
+
+        let batch = RecordBatch::try_new(
+            old_schema.clone(),
+            vec![
+                Arc::new(ts_builder.finish()) as ArrayRef,
+                Arc::new(stack_id_builder.finish()) as ArrayRef,
+                Arc::new(worker_id_builder.finish()) as ArrayRef,
+                Arc::new(source_builder.finish()) as ArrayRef,
+                Arc::new(source_key_builder.finish()) as ArrayRef,
+                Arc::new(host_builder.finish()) as ArrayRef,
+                Arc::new(service_builder.finish()) as ArrayRef,
+                Arc::new(date_builder.finish()) as ArrayRef,
+                Arc::new(poll_duration_builder.finish()) as ArrayRef,
+                Arc::new(spawn_location_builder.finish()) as ArrayRef,
+                Arc::new(map_builder.finish()) as ArrayRef,
+            ],
+        )
+        .unwrap();
+
+        let props = WriterProperties::builder()
+            .set_dictionary_enabled(true)
+            .build();
+        let mut buf = Vec::new();
+        let mut arrow_writer =
+            ArrowWriter::try_new(&mut buf, old_schema.clone(), Some(props)).unwrap();
+        arrow_writer.write(&batch).unwrap();
+        arrow_writer.close().unwrap();
+
+        // Verify: reading back the old-schema file, the enclosing_spans column is absent
+        // but metadata is present.
+        let reader = ::parquet::arrow::arrow_reader::ParquetRecordBatchReader::try_new(
+            bytes::Bytes::from(buf.clone()),
+            1024,
+        )
+        .unwrap();
+        let batches: Vec<_> = reader.into_iter().collect::<Result<_, _>>().unwrap();
+        assert_eq!(batches.len(), 1);
+        let read_batch = &batches[0];
+        assert_eq!(read_batch.num_rows(), 1);
+        // Confirm metadata column IS present (faithful v3 representation).
+        assert!(
+            read_batch.column_by_name("metadata").is_some(),
+            "old v3 schema fixture must have the metadata Map column"
+        );
+        // Confirm enclosing_spans column is absent.
+        assert!(
+            read_batch.column_by_name("enclosing_spans").is_none(),
+            "old v3 schema fixture must NOT have enclosing_spans column"
+        );
+
+        // Now test that the span_filter_matches function fails closed.
+        // Import from aggregate module.
+        use crate::ingest::aggregate::span_filter_matches;
+        let wanted_uid = [42u8; 16];
+        let result = span_filter_matches(read_batch, 0, &wanted_uid, None, None);
+        assert!(
+            !result,
+            "span_filter_matches must fail closed (return false) for old v3 schema without enclosing_spans"
+        );
     }
 }

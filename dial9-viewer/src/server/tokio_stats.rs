@@ -41,6 +41,8 @@ const LONG_POLL_SOFT_CAP: usize = LONG_POLL_TOP * 4;
 pub struct TokioStatsParams {
     pub bucket: Option<String>,
     pub prefix: Option<String>,
+    /// Region for ambient-credential S3 reads, carried by browse deep links.
+    pub aws_region: Option<String>,
     pub service: Option<String>,
     #[serde(default)]
     pub host: Vec<String>,
@@ -133,7 +135,12 @@ pub async fn get_tokio_stats(
     (StatusCode, String),
 > {
     let Some(agg) = state
-        .agg_context_for(params.bucket.as_deref(), params.prefix.as_deref(), creds)
+        .agg_context_for(
+            params.bucket.as_deref(),
+            params.prefix.as_deref(),
+            params.aws_region.as_deref(),
+            creds,
+        )
         .await?
     else {
         return Err((
@@ -619,7 +626,7 @@ mod tests {
             dec.read_to_end(&mut buf).unwrap();
             buf
         };
-        let (_, _, polls) = decode_samples(&decompressed, "demo-trace.bin").unwrap();
+        let (_, _, polls, _) = decode_samples(&decompressed, "demo-trace.bin").unwrap();
         assert!(!polls.is_empty());
 
         let mut buf = Vec::new();

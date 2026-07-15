@@ -371,6 +371,9 @@
         <button id="health-btn" onclick="viewTokioStats()" disabled title="Open Tokio stats view for the selected scope">
             ⚡ Tokio Stats
         </button>
+        <button id="spans-btn" onclick="viewSpanExplorer()" disabled title="Open Span Explorer for the selected scope">
+            🔍 Spans
+        </button>
         <button id="diff-add-btn" onclick="addToDiff()" disabled title="Capture this selection as one side (A, then B) of a differential comparison">
             ➕ Add to diff
         </button>
@@ -414,6 +417,7 @@
         <a href="viewer.html">Open Trace Viewer</a>
         <span style="color:#333">|</span>
         <button class="primary" id="load-demo-btn" style="padding:4px 12px;font-size:0.8em">Load demo trace</button>
+        <button id="explore-demo-spans-btn" style="padding:4px 12px;font-size:0.8em;background:#2a2a4a;border:1px solid #6c63ff;color:#c7c2ff">🔍 Explore demo spans</button>
         <span style="color:#555;font-size:0.8em;margin-left:auto">drop a .bin file to open viewer</span>
     </footer>
 
@@ -439,6 +443,10 @@
     // ── Demo trace button ──
     document.getElementById('load-demo-btn').addEventListener('click', () => {
         window.open('viewer.html?trace=demo-trace.bin', '_blank');
+    });
+    // ── Explore demo spans button ──
+    document.getElementById('explore-demo-spans-btn').addEventListener('click', () => {
+        window.open('span_explorer.html?trace=demo-trace.bin', '_blank');
     });
     // ── Global drag-and-drop → open viewer ──
     const footerDrop = document.getElementById('footer-drop');
@@ -1945,6 +1953,19 @@
         window.open('tokio_stats.html?' + query, '_blank');
     }
 
+    function viewSpanExplorer() {
+        if (!heatmapSelection || !heatmapSelection.keys.length) return;
+        const bucket = bucketInput.value.trim();
+        if (!bucket) { alert('Bucket is required'); return; }
+        const keys = heatmapSelection.keys;
+        const scope = Dial9TraceScope.scopeFromKeys(bucket, keys, heatmapSelection.t0, heatmapSelection.t1, currentRegion());
+        const base = new URLSearchParams();
+        base.set('api', '1');
+        const { query, hostsDropped } = Dial9TraceScope.encodeAggregationParams(base, scope);
+        if (hostsDropped) warnHostsDropped();
+        window.open('span_explorer.html?' + query, '_blank');
+    }
+
     // ── Differential comparison (A/B) ──
     // Two captured scopes, each a URLSearchParams from selectionScope(). Launched
     // into either viz via the shared FlamegraphDiff scope-link codec
@@ -2222,6 +2243,7 @@
         const viewBtn = document.getElementById('view-btn');
         const cpuBtn = document.getElementById('cpu-btn');
         const healthBtn = document.getElementById('health-btn');
+        const spansBtn = document.getElementById('spans-btn');
         const diffAddBtn = document.getElementById('diff-add-btn');
         const warn = document.getElementById('selection-warn');
         const count = document.getElementById('selection-count');
@@ -2236,6 +2258,7 @@
                 viewBtn.disabled = true;
                 cpuBtn.disabled = true;
                 healthBtn.disabled = true;
+                if (spansBtn) spansBtn.disabled = true;
                 diffAddBtn.disabled = true;
                 warn.textContent = '';
                 count.textContent = '';
@@ -2245,6 +2268,7 @@
             viewBtn.disabled = over;
             cpuBtn.disabled = over && !aggregationEnabled;
             healthBtn.disabled = !aggregationEnabled;
+            if (spansBtn) spansBtn.disabled = !aggregationEnabled;
             // Diff is an aggregate-only feature (both flamegraph and tokio-stats
             // diffs run the server-side refinement loop per side).
             diffAddBtn.disabled = !aggregationEnabled;
