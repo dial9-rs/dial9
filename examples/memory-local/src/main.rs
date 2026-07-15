@@ -26,9 +26,8 @@ async fn allocate_some() {
 }
 
 fn my_config() -> TokioSessionBuilder {
-    let trace_path = format!("{TRACE_DIR}/trace.bin");
     let writer = DiskBuffer::builder()
-        .base_path(&trace_path)
+        .base_path(TRACE_DIR)
         .max_file_size(10_000_000)
         .max_total_size(50_000_000)
         .build();

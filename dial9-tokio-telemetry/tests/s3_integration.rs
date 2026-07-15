@@ -34,9 +34,8 @@ fn dummy_s3(s3_root: &std::path::Path) -> (S3Config, aws_sdk_s3::Client) {
 fn worker_thread_starts_and_stops_cleanly() {
     let trace_dir = tempfile::tempdir().unwrap();
     let s3_root = tempfile::tempdir().unwrap();
-    let trace_path = trace_dir.path().join("trace.bin");
 
-    let writer = DiskBuffer::new(&trace_path, 1024, 10 * 1024).unwrap();
+    let writer = DiskBuffer::new(trace_dir.path(), 1024, 10 * 1024).unwrap();
     let (s3_config, client) = dummy_s3(s3_root.path());
 
     let session = recorder(writer)
@@ -60,9 +59,8 @@ fn worker_thread_starts_and_stops_cleanly() {
 fn graceful_shutdown_seals_segments() {
     let trace_dir = tempfile::tempdir().unwrap();
     let s3_root = tempfile::tempdir().unwrap();
-    let trace_path = trace_dir.path().join("trace.bin");
 
-    let writer = DiskBuffer::new(&trace_path, 1024, 10 * 1024).unwrap();
+    let writer = DiskBuffer::new(trace_dir.path(), 1024, 10 * 1024).unwrap();
     let (s3_config, client) = dummy_s3(s3_root.path());
 
     let session = recorder(writer)
@@ -95,7 +93,6 @@ fn end_to_end_trace_to_s3_roundtrip() {
 
     let s3_root = tempfile::tempdir().unwrap();
     let trace_dir = tempfile::tempdir().unwrap();
-    let trace_path = trace_dir.path().join("trace.bin");
 
     // Create the bucket directory for s3s-fs
     std::fs::create_dir(s3_root.path().join("test-bucket")).unwrap();
@@ -103,7 +100,7 @@ fn end_to_end_trace_to_s3_roundtrip() {
     let client = fake_s3_client(s3_root.path());
 
     // Small max_file_size to force rotation quickly
-    let mut writer = DiskBuffer::new(&trace_path, 512, 50 * 1024).unwrap();
+    let mut writer = DiskBuffer::new(trace_dir.path(), 512, 50 * 1024).unwrap();
     writer.update_segment_metadata(vec![("custom-metadata".to_string(), "value".to_string())]);
 
     let s3_config = S3Config::builder()
@@ -262,7 +259,6 @@ fn region_auto_detection_corrects_wrong_client_region() {
 
     let s3_root = tempfile::tempdir().unwrap();
     let trace_dir = tempfile::tempdir().unwrap();
-    let trace_path = trace_dir.path().join("trace.bin");
 
     std::fs::create_dir(s3_root.path().join("test-bucket")).unwrap();
 
@@ -278,7 +274,7 @@ fn region_auto_detection_corrects_wrong_client_region() {
             .build(),
     );
 
-    let writer = DiskBuffer::new(&trace_path, 512, 50 * 1024).unwrap();
+    let writer = DiskBuffer::new(trace_dir.path(), 512, 50 * 1024).unwrap();
 
     // Do NOT set .region() — force auto-detection.
     let s3_config = S3Config::builder()
@@ -380,7 +376,6 @@ fn stress_test_all_segments_uploaded_and_valid() {
 
     let s3_root = tempfile::tempdir().unwrap();
     let trace_dir = tempfile::tempdir().unwrap();
-    let trace_path = trace_dir.path().join("trace.bin");
 
     std::fs::create_dir(s3_root.path().join("stress-bucket")).unwrap();
     let client = fake_s3_client(s3_root.path());
@@ -388,7 +383,7 @@ fn stress_test_all_segments_uploaded_and_valid() {
     // Small segments to force rotations, but not so many that drain takes forever.
     let segment_size = 64 * 1024;
     let total_size = 2 * 1024 * 1024; // 2 MB disk budget
-    let writer = DiskBuffer::new(&trace_path, segment_size, total_size).unwrap();
+    let writer = DiskBuffer::new(trace_dir.path(), segment_size, total_size).unwrap();
 
     let s3_config = S3Config::builder()
         .bucket("stress-bucket")
@@ -592,13 +587,12 @@ fn stress_test_all_segments_uploaded_and_valid() {
 fn graceful_shutdown_completes_when_s3_hangs() {
     let trace_dir = tempfile::tempdir().unwrap();
     let s3_root = tempfile::tempdir().unwrap();
-    let trace_path = trace_dir.path().join("trace.bin");
 
     std::fs::create_dir_all(s3_root.path().join("hang-bucket")).unwrap();
     let client = fake_s3_client_hanging(s3_root.path());
 
     // Small segments to force rotation quickly.
-    let writer = DiskBuffer::new(&trace_path, 512, 50 * 1024).unwrap();
+    let writer = DiskBuffer::new(trace_dir.path(), 512, 50 * 1024).unwrap();
 
     let s3_config = S3Config::builder()
         .bucket("hang-bucket")
@@ -659,14 +653,13 @@ fn graceful_shutdown_completes_when_s3_hangs() {
 fn stress_test_with_s3_failures() {
     let s3_root = tempfile::tempdir().unwrap();
     let trace_dir = tempfile::tempdir().unwrap();
-    let trace_path = trace_dir.path().join("trace.bin");
 
     std::fs::create_dir(s3_root.path().join("flaky-bucket")).unwrap();
     let client = fake_s3_client_flaky(s3_root.path(), "us-east-1", 3);
 
     let segment_size = 64 * 1024;
     let total_size = 2 * 1024 * 1024;
-    let writer = DiskBuffer::new(&trace_path, segment_size, total_size).unwrap();
+    let writer = DiskBuffer::new(trace_dir.path(), segment_size, total_size).unwrap();
 
     let s3_config = S3Config::builder()
         .bucket("flaky-bucket")
@@ -740,12 +733,11 @@ fn stress_test_with_s3_failures() {
 fn permanently_broken_s3_produces_failure_metrics() {
     let s3_root = tempfile::tempdir().unwrap();
     let trace_dir = tempfile::tempdir().unwrap();
-    let trace_path = trace_dir.path().join("trace.bin");
 
     std::fs::create_dir_all(s3_root.path().join("broken-bucket")).unwrap();
     let client = fake_s3_client_always_failing(s3_root.path());
 
-    let writer = DiskBuffer::new(&trace_path, 512, 50 * 1024).unwrap();
+    let writer = DiskBuffer::new(trace_dir.path(), 512, 50 * 1024).unwrap();
 
     let s3_config = S3Config::builder()
         .bucket("broken-bucket")
@@ -825,12 +817,11 @@ fn permanently_broken_s3_produces_failure_metrics() {
 fn dump_trigger_uploads_segments_and_writes_manifest() {
     let s3_root = tempfile::tempdir().unwrap();
     let trace_dir = tempfile::tempdir().unwrap();
-    let trace_path = trace_dir.path().join("trace.bin");
 
     std::fs::create_dir(s3_root.path().join("dump-bucket")).unwrap();
     let client = fake_s3_client(s3_root.path());
 
-    let writer = fast_sealing_writer(&trace_path);
+    let writer = fast_sealing_writer(trace_dir.path());
 
     let s3_config = S3Config::builder()
         .bucket("dump-bucket")

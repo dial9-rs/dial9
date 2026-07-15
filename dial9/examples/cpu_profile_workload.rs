@@ -42,13 +42,13 @@ async fn cpu_heavy_task(id: usize) {
 }
 
 fn main() {
-    // Base path without extension: writer produces cpu_profile_trace.0.bin,
+    // base_path is a directory: the writer produces cpu_profile_trace/trace.0.bin,
     // which the background worker can detect, symbolize, and gzip-compress.
-    let trace_base = "cpu_profile_trace.bin";
-    let segment_path = "cpu_profile_trace.0.bin";
+    let trace_dir = "cpu_profile_trace";
+    let segment_path = "cpu_profile_trace/trace.0.bin";
 
     let writer = DiskBuffer::builder()
-        .base_path(trace_base)
+        .base_path(trace_dir)
         .max_file_size(1024 * 1024 * 20) // rotate after 20 MiB per file
         .max_total_size(1024 * 1024 * 100) // keep at most 100 MiB on disk
         .build()

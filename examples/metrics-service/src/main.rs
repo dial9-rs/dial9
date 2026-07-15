@@ -49,8 +49,8 @@ struct Args {
 
     #[arg(
         long,
-        default_value = "/tmp/metrics-service-traces/trace.bin",
-        help = "Trace file path"
+        default_value = "/tmp/metrics-service-traces",
+        help = "Trace output directory"
     )]
     trace_path: String,
 

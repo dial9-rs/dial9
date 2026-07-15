@@ -52,10 +52,8 @@ fn sealed_segments() -> usize {
 #[dial9::main(config = || {
     let _ = std::fs::remove_dir_all(TRACE_DIR);
     let _ = std::fs::create_dir_all(TRACE_DIR);
-    let trace_path = format!("{TRACE_DIR}/trace.bin");
-
     let writer = DiskBuffer::builder()
-        .base_path(trace_path)
+        .base_path(TRACE_DIR)
         // Fast-rotating writer so the demo seals a segment within a couple of
         // seconds instead of waiting on the default rotation period.
         .max_file_size(4 * 1024)

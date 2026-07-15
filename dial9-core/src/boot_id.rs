@@ -214,44 +214,31 @@ fn try_remove_namespace(dir: &Path) -> io::Result<()> {
     fs::remove_dir(dir)
 }
 
-/// Result of setting up a per-process namespace: the boot id, the rewritten
-/// trace path inside `{parent}/{boot_id}/`, and the lock handle that must be
+/// Result of setting up a per-process namespace: the boot id, the per-process
+/// segment directory `{trace_dir}/{boot_id}/`, and the lock handle that must be
 /// kept alive for the process lifetime.
 #[derive(Debug)]
 pub struct Namespace {
     /// Generated boot id for this process.
     pub boot_id: String,
-    /// Trace path rewritten to live inside `{parent}/{boot_id}/`.
-    pub trace_path: PathBuf,
+    /// The per-process segment directory, `{trace_dir}/{boot_id}/`.
+    pub dir: PathBuf,
     /// Namespace lock; must be held for the process lifetime.
     pub lock: std::fs::File,
 }
 
-/// Create `{parent}/{boot_id}/` under `base_path`'s directory, lock it, and
-/// rewrite the trace path to live inside it. When `gc` is true, dead peers'
-/// namespaces under the same parent are reclaimed first.
-pub fn setup_namespace(base_path: &Path, gc: bool) -> io::Result<Namespace> {
-    let parent = base_path
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
-    let filename = base_path
-        .file_name()
-        .unwrap_or_else(|| std::ffi::OsStr::new("trace.bin"));
-
+/// Create `{trace_dir}/{boot_id}/`, lock it, and return the namespace. When
+/// `gc` is true, dead peers' namespaces under `trace_dir` are reclaimed first.
+pub fn setup_namespace(trace_dir: &Path, gc: bool) -> io::Result<Namespace> {
     let boot_id = generate_boot_id();
-    let ns_dir = parent.join(&boot_id);
-    let lock = acquire_namespace_lock(&ns_dir)?;
+    let dir = trace_dir.join(&boot_id);
+    let lock = acquire_namespace_lock(&dir)?;
 
     if gc {
-        gc_dead_namespaces(parent, &boot_id);
+        gc_dead_namespaces(trace_dir, &boot_id);
     }
 
-    Ok(Namespace {
-        boot_id,
-        trace_path: ns_dir.join(filename),
-        lock,
-    })
+    Ok(Namespace { boot_id, dir, lock })
 }
 
 #[cfg(test)]
@@ -324,17 +311,13 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn setup_namespace_creates_subdir_and_rewrites_path() {
+    fn setup_namespace_creates_subdir() {
         let dir = TempDir::new().unwrap();
-        let base = dir.path().join("trace.bin");
 
-        let ns = setup_namespace(&base, true).unwrap();
+        let ns = setup_namespace(dir.path(), true).unwrap();
 
         assert!(is_valid_boot_id(&ns.boot_id));
-        assert_eq!(
-            ns.trace_path,
-            dir.path().join(&ns.boot_id).join("trace.bin")
-        );
+        assert_eq!(ns.dir, dir.path().join(&ns.boot_id));
         assert!(dir.path().join(&ns.boot_id).exists());
         assert!(dir.path().join(&ns.boot_id).join(".lock").exists());
     }
@@ -348,8 +331,7 @@ mod tests {
         std::fs::write(dead_ns.join(".lock"), b"").unwrap();
         std::fs::write(dead_ns.join("trace.0.bin"), b"data").unwrap();
 
-        let base = dir.path().join("trace.bin");
-        let _ns = setup_namespace(&base, false).unwrap();
+        let _ns = setup_namespace(dir.path(), false).unwrap();
 
         // GC disabled, so the dead peer's directory survives.
         assert!(dead_ns.exists());
@@ -385,18 +367,17 @@ mod tests {
     #[test]
     fn two_live_owners_get_isolated_namespaces() {
         let dir = TempDir::new().unwrap();
-        let base = dir.path().join("trace.bin");
 
-        let a = setup_namespace(&base, true).unwrap();
-        let b = setup_namespace(&base, true).unwrap();
+        let a = setup_namespace(dir.path(), true).unwrap();
+        let b = setup_namespace(dir.path(), true).unwrap();
 
         // Distinct namespaces.
         assert_ne!(
             a.boot_id, b.boot_id,
             "two owners must get distinct boot_ids"
         );
-        assert!(a.trace_path.starts_with(dir.path().join(&a.boot_id)));
-        assert!(b.trace_path.starts_with(dir.path().join(&b.boot_id)));
+        assert_eq!(a.dir, dir.path().join(&a.boot_id));
+        assert_eq!(b.dir, dir.path().join(&b.boot_id));
 
         // Each owner still holds its lock — neither GC'd the other.
         assert!(dir.path().join(&a.boot_id).join(".lock").exists());

@@ -154,7 +154,8 @@ impl<M: BufferMode> RecorderBuilder<M> {
                 .clone()
                 .unwrap_or_else(metrique::writer::sink::DevNullSink::boxed);
             let config = crate::worker::BackgroundTaskConfig::builder()
-                .maybe_trace_path(M::IS_DISK.then(|| writer.base_path().to_path_buf()))
+                .maybe_trace_dir(M::IS_DISK.then(|| writer.trace_dir().to_path_buf()))
+                .maybe_trace_stem(M::IS_DISK.then(|| writer.trace_stem().to_string()))
                 .poll_interval(poll)
                 .processors(self.processors)
                 .metrics_sink(metrics)

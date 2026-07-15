@@ -68,7 +68,7 @@ pub use config::recorder_from_env;
 /// use dial9::DiskBuffer;
 /// fn config() -> dial9::TokioSessionBuilder {
 ///     let writer = DiskBuffer::builder()
-///         .base_path("/tmp/trace.bin")
+///         .base_path("/tmp/dial9-traces")
 ///         .max_total_size(64 * 1024 * 1024)
 ///         .build();
 ///     dial9::recorder_or_disabled(writer, |t| { t.worker_threads(4); })

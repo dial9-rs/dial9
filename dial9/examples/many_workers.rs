@@ -13,7 +13,7 @@ use dial9::{DiskBuffer, TokioSessionBuilder};
 
 fn my_config() -> TokioSessionBuilder {
     let writer = DiskBuffer::builder()
-        .base_path("many_workers_trace.bin")
+        .base_path("many_workers_trace")
         .max_file_size(64 * 1024 * 1024)
         .max_total_size(256 * 1024 * 1024)
         .build();
@@ -52,5 +52,5 @@ async fn main() {
         let _ = task.await;
     }
 
-    println!("Trace written to many_workers_trace.*.bin");
+    println!("Trace written to many_workers_trace/trace.*.bin");
 }

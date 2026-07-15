@@ -23,7 +23,7 @@ use dial9::{DiskBuffer, TokioSessionBuilder};
 
 fn my_config() -> TokioSessionBuilder {
     let writer = DiskBuffer::builder()
-        .base_path("conditionally_enable_trace.bin")
+        .base_path("conditionally_enable_trace")
         .max_file_size(64 * 1024 * 1024)
         .max_total_size(256 * 1024 * 1024)
         .build();
@@ -76,7 +76,7 @@ async fn main() {
     }
 
     if telemetry_enabled {
-        println!("All tasks completed — trace written to conditionally_enable_trace.*.bin");
+        println!("All tasks completed — trace written to conditionally_enable_trace/trace.*.bin");
     } else {
         println!("All tasks completed — set ENABLE_DIAL9=1 to enable tracing");
     }

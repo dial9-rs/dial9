@@ -8,7 +8,7 @@
 //!   cargo run --example simple_workload
 //!
 //! Inspect the trace afterwards:
-//!   cargo run --example analyze_trace -- simple_workload_trace.0.bin
+//!   cargo run --example analyze_trace -- simple_workload_trace/trace.0.bin
 
 use std::time::Duration;
 
@@ -40,7 +40,7 @@ async fn mixed_task(id: usize) {
 
 #[dial9::main(config = || {
     let writer = dial9::DiskBuffer::builder()
-        .base_path("simple_workload_trace.bin")
+        .base_path("simple_workload_trace")
         .max_file_size(64 * 1024 * 1024)
         .max_total_size(256 * 1024 * 1024)
         .build();
@@ -57,5 +57,5 @@ async fn main() {
         let _ = task.await;
     }
 
-    println!("Trace written to simple_workload_trace.*.bin");
+    println!("Trace written to simple_workload_trace/trace.*.bin");
 }

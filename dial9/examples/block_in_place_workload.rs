@@ -5,7 +5,7 @@
 //! Run:
 //!   cargo run --example block_in_place_workload --features cpu-profiling
 //!
-//! Produces: `block_in_place_trace.bin` in the current directory.
+//! Produces: `block_in_place_trace/trace.*.bin` in the current directory.
 
 use dial9::{DiskBuffer, recorder};
 use dial9::{RecorderBuilderTokioExt, RecorderPerfExt};
@@ -51,7 +51,7 @@ async fn background_burn(id: usize) {
 
 fn main() {
     let writer = DiskBuffer::builder()
-        .base_path("block_in_place_trace.bin")
+        .base_path("block_in_place_trace")
         .max_file_size(100 * 1024 * 1024)
         .max_total_size(500 * 1024 * 1024)
         .build()
@@ -92,5 +92,5 @@ fn main() {
     // Graceful shutdown seals the final segment and runs symbolization.
     session.graceful_shutdown();
 
-    println!("Trace written to block_in_place_trace.*.bin");
+    println!("Trace written to block_in_place_trace/trace.*.bin");
 }

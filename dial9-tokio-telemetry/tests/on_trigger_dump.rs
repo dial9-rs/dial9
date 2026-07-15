@@ -37,11 +37,10 @@ fn assertion_runtime() -> tokio::runtime::Runtime {
 fn nothing_uploads_until_dump_then_manifest_indexes_it() {
     let s3_root = tempfile::tempdir().unwrap();
     let trace_dir = tempfile::tempdir().unwrap();
-    let trace_path = trace_dir.path().join("trace.bin");
     std::fs::create_dir(s3_root.path().join("test-bucket")).unwrap();
 
     let client = fake_s3_client(s3_root.path());
-    let writer = fast_sealing_writer(&trace_path);
+    let writer = fast_sealing_writer(trace_dir.path());
 
     let session = recorder(writer)
         .worker_poll_interval(Duration::from_millis(50))
@@ -162,11 +161,10 @@ fn nothing_uploads_until_dump_then_manifest_indexes_it() {
 fn lookforward_dump_captures_post_trigger_segments() {
     let s3_root = tempfile::tempdir().unwrap();
     let trace_dir = tempfile::tempdir().unwrap();
-    let trace_path = trace_dir.path().join("trace.bin");
     std::fs::create_dir(s3_root.path().join("test-bucket")).unwrap();
 
     let client = fake_s3_client(s3_root.path());
-    let writer = fast_sealing_writer(&trace_path);
+    let writer = fast_sealing_writer(trace_dir.path());
 
     let session = recorder(writer)
         .worker_poll_interval(Duration::from_millis(50))
@@ -233,9 +231,8 @@ fn lookforward_dump_captures_post_trigger_segments() {
 #[test]
 fn lookforward_dump_resolves_after_deadline() {
     let trace_dir = tempfile::tempdir().unwrap();
-    let trace_path = trace_dir.path().join("trace.bin");
 
-    let writer = DiskBuffer::new(&trace_path, 512, 50 * 1024).unwrap();
+    let writer = DiskBuffer::new(trace_dir.path(), 512, 50 * 1024).unwrap();
 
     let session = recorder(writer)
         .worker_poll_interval(Duration::from_millis(50))
@@ -274,9 +271,8 @@ fn lookforward_dump_resolves_after_deadline() {
 #[test]
 fn off_s3_pipeline_dumps_without_manifest() {
     let trace_dir = tempfile::tempdir().unwrap();
-    let trace_path = trace_dir.path().join("trace.bin");
 
-    let writer = fast_sealing_writer(&trace_path);
+    let writer = fast_sealing_writer(trace_dir.path());
 
     let session = recorder(writer)
         .worker_poll_interval(Duration::from_millis(50))
@@ -319,11 +315,10 @@ fn off_s3_pipeline_dumps_without_manifest() {
 fn shutdown_truncates_open_lookforward_dump() {
     let s3_root = tempfile::tempdir().unwrap();
     let trace_dir = tempfile::tempdir().unwrap();
-    let trace_path = trace_dir.path().join("trace.bin");
     std::fs::create_dir(s3_root.path().join("test-bucket")).unwrap();
 
     let client = fake_s3_client(s3_root.path());
-    let writer = DiskBuffer::new(&trace_path, 512, 50 * 1024).unwrap();
+    let writer = DiskBuffer::new(trace_dir.path(), 512, 50 * 1024).unwrap();
 
     let session = recorder(writer)
         .worker_poll_interval(Duration::from_millis(50))

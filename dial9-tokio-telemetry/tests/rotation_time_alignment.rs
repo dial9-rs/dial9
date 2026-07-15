@@ -110,13 +110,12 @@ impl TimedEvent {
 #[test]
 fn rotated_segments_have_bounded_time_overlap() {
     let dir = tempfile::tempdir().unwrap();
-    let trace_path = dir.path().join("trace.bin");
 
     let rotation_period = Duration::from_secs(2);
     let num_workers = 4;
 
     let writer = DiskBuffer::builder()
-        .base_path(&trace_path)
+        .base_path(dir.path())
         .max_file_size(u64::MAX)
         .max_total_size(u64::MAX)
         .rotation_period(rotation_period)

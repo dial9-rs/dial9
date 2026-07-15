@@ -122,7 +122,7 @@ fn recorder_or_disabled_runs_tokio_config_on_writer_failure() {
     let blocker = dir.path().join("not-a-dir");
     std::fs::write(&blocker, b"x").unwrap();
     let writer = DiskBuffer::builder()
-        .base_path(blocker.join("trace.bin"))
+        .base_path(blocker.join("traces"))
         .max_total_size(4 * 1024 * 1024)
         .build();
 

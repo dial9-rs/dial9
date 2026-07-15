@@ -197,9 +197,8 @@ fn measure(mode: Mode) -> Sample {
         let session = match mode {
             Mode::Disk => {
                 let tmp = tempfile::tempdir().unwrap();
-                let trace_path = tmp.path().join("trace.bin");
                 let writer = DiskBuffer::builder()
-                    .base_path(trace_path.to_str().unwrap())
+                    .base_path(tmp.path().to_str().unwrap())
                     .max_file_size(SEGMENT_SIZE)
                     .max_total_size(TOTAL_BUDGET)
                     .rotation_period(ROTATION_PERIOD)
@@ -221,9 +220,8 @@ fn measure(mode: Mode) -> Sample {
             }
             Mode::DiskCpu => {
                 let tmp = tempfile::tempdir().unwrap();
-                let trace_path = tmp.path().join("trace.bin");
                 let writer = DiskBuffer::builder()
-                    .base_path(trace_path.to_str().unwrap())
+                    .base_path(tmp.path().to_str().unwrap())
                     .max_file_size(SEGMENT_SIZE)
                     .max_total_size(TOTAL_BUDGET)
                     .rotation_period(ROTATION_PERIOD)

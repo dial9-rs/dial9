@@ -592,9 +592,8 @@ fn recorder_from_env_source(env: &impl EnvSource) -> TokioSessionBuilder<Disk> {
 
     // Build the disk writer; on failure downgrade to a disabled recorder so a
     // bad trace config runs a plain runtime instead of aborting startup.
-    let base_path = trace_dir.join("trace.bin");
     let writer = match build_env_disk_writer(
-        &base_path,
+        &trace_dir,
         gc_dead_namespaces,
         max_file_size,
         max_total_size,
@@ -625,15 +624,17 @@ fn recorder_from_env_source(env: &impl EnvSource) -> TokioSessionBuilder<Disk> {
 }
 
 fn build_env_disk_writer(
-    base_path: &Path,
+    trace_dir: &Path,
     gc_dead_namespaces: bool,
     max_file_size: Option<u64>,
     max_total_size: u64,
     rotation_period: Option<Duration>,
 ) -> std::io::Result<SegmentWriter<Disk>> {
-    let namespace = dial9_core::boot_id::setup_namespace(base_path, gc_dead_namespaces)?;
+    // The namespace resolves the segment directory to `{trace_dir}/{boot_id}/`,
+    // which is what the writer's `base_path` wants.
+    let namespace = dial9_core::boot_id::setup_namespace(trace_dir, gc_dead_namespaces)?;
     let mut writer = DiskBuffer::builder()
-        .base_path(namespace.trace_path.clone())
+        .base_path(&namespace.dir)
         .maybe_max_file_size(max_file_size)
         .max_total_size(max_total_size)
         .maybe_rotation_period(rotation_period)

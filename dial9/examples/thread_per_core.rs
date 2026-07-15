@@ -38,7 +38,7 @@ fn main() -> std::io::Result<()> {
     }
 
     let writer = DiskBuffer::builder()
-        .base_path(format!("{trace_dir}/trace.bin"))
+        .base_path(trace_dir)
         .max_file_size(1024 * 1024)
         .max_total_size(5 * 1024 * 1024)
         .build()?;

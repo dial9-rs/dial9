@@ -207,10 +207,9 @@ fn disable_stops_cpu_sample_production() {
 #[test]
 fn disable_stops_segment_rotation() {
     let dir = tempfile::tempdir().unwrap();
-    let trace_path = dir.path().join("trace.bin");
 
     let writer = DiskBuffer::builder()
-        .base_path(&trace_path)
+        .base_path(dir.path())
         .max_file_size(100 * 1024 * 1024)
         .max_total_size(500 * 1024 * 1024)
         .rotation_period(Duration::from_secs(1))

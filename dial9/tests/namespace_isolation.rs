@@ -44,11 +44,10 @@ fn has_trace_segment(boot_dir: &Path) -> bool {
 /// path does: set up the per-process `{boot_id}/` namespace, then point a
 /// `DiskBuffer` at the rewritten trace path.
 fn namespaced_writer(trace_dir: &Path, gc_dead_namespaces: bool) -> DiskBuffer {
-    let namespace =
-        dial9_core::boot_id::setup_namespace(&trace_dir.join("trace.bin"), gc_dead_namespaces)
-            .expect("namespace setup should succeed");
+    let namespace = dial9_core::boot_id::setup_namespace(trace_dir, gc_dead_namespaces)
+        .expect("namespace setup should succeed");
     let mut writer = DiskBuffer::builder()
-        .base_path(namespace.trace_path.clone())
+        .base_path(&namespace.dir)
         .max_total_size(4 * 1024 * 1024)
         .build()
         .expect("writer should build");

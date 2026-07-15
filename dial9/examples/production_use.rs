@@ -273,7 +273,7 @@ fn configure_dial9(opts: &Dial9Opts) -> TokioSessionBuilder {
     }
     warn_if_feature_missing(opts);
 
-    let base_path = format!("{}/trace.bin", opts.trace_dir.trim_end_matches('/'));
+    let base_path = opts.trace_dir.trim_end_matches('/').to_string();
     let max_disk = opts.max_disk_usage_bytes();
     let max_file_size = (max_disk / 4).max(16 * 1024 * 1024);
 

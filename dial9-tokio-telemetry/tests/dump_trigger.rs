@@ -72,9 +72,8 @@ fn concurrent_dumps_both_resolve_with_distinct_ids() {
     use std::time::Duration;
 
     let dir = tempfile::tempdir().unwrap();
-    let trace_path = dir.path().join("trace.bin");
 
-    let writer = fast_sealing_writer(&trace_path);
+    let writer = fast_sealing_writer(dir.path());
 
     let session = recorder(writer)
         .worker_poll_interval(Duration::from_millis(50))

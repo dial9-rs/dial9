@@ -6,7 +6,7 @@
 //!
 //! ```bash
 //! cargo run --release -p dial9-tokio-telemetry --example s3_stress_test -- \
-//!   --trace-path /tmp/stress/trace.bin --bucket my-bucket
+//!   --trace-path /tmp/stress --bucket my-bucket
 //! ```
 #![cfg(feature = "worker-s3")]
 
@@ -113,19 +113,13 @@ fn main() -> std::io::Result<()> {
         .init();
 
     let args = Args::parse();
-    let trace_dir = std::path::Path::new(&args.trace_path)
-        .parent()
-        .unwrap()
-        .to_path_buf();
-    let trace_stem = std::path::Path::new(&args.trace_path)
-        .file_stem()
-        .unwrap()
-        .to_string_lossy()
-        .to_string();
+    // `--trace-path` is the segment directory; dial9 writes `trace.0.bin`, etc. inside it.
+    let trace_dir = std::path::PathBuf::from(&args.trace_path);
+    let trace_stem = "trace".to_string();
 
     std::fs::create_dir_all(&trace_dir)?;
 
-    let writer = DiskBuffer::new(&args.trace_path, args.segment_size, args.total_size)?;
+    let writer = DiskBuffer::new(&trace_dir, args.segment_size, args.total_size)?;
 
     let s3_config = S3Config::builder()
         .bucket(&args.bucket)

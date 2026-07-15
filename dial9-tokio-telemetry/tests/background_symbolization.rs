@@ -33,11 +33,10 @@ fn burn_cpu_work() {
 #[test]
 fn background_symbolization_produces_symbol_table_entries() {
     let trace_dir = tempfile::tempdir().unwrap();
-    let trace_path = trace_dir.path().join("trace.bin");
 
     // Small segments to force rotation so the worker has segments to process.
     // Large total size so segments aren't evicted before the worker processes them.
-    let writer = DiskBuffer::new(&trace_path, 4 * 1024, 10 * 1024 * 1024).unwrap();
+    let writer = DiskBuffer::new(trace_dir.path(), 4 * 1024, 10 * 1024 * 1024).unwrap();
 
     let session = recorder(writer)
         .with_cpu_profiling(CpuProfilingConfig::default().frequency_hz(999))

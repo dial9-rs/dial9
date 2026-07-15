@@ -33,10 +33,8 @@ const TRACE_DIR: &str = "/tmp/dial9-on-trigger-windows";
 #[dial9::main(config = || {
     let _ = std::fs::remove_dir_all(TRACE_DIR);
     let _ = std::fs::create_dir_all(TRACE_DIR);
-    let trace_path = format!("{TRACE_DIR}/trace.bin");
-
     let writer = DiskBuffer::builder()
-        .base_path(trace_path)
+        .base_path(TRACE_DIR)
         // Fast-rotating writer so the demo seals a segment every ~half second.
         .max_file_size(4 * 1024)
         .max_total_size(10 * 1024 * 1024)

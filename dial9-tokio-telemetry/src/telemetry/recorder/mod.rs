@@ -508,7 +508,6 @@ mod tests {
         use crate::telemetry::format::WorkerId;
 
         let dir = tempfile::TempDir::new().unwrap();
-        let base = dir.path().join("trace");
 
         #[track_caller]
         fn loc_a() -> &'static Location<'static> {
@@ -522,7 +521,7 @@ mod tests {
         let location_b = loc_b();
 
         let writer = crate::telemetry::buffer::DiskBuffer::builder()
-            .base_path(&base)
+            .base_path(dir.path())
             .max_file_size(100)
             .max_total_size(100_000)
             .build()
@@ -710,10 +709,9 @@ mod tests {
         use crate::telemetry::analysis_events::Dial9Event;
 
         let dir = tempfile::TempDir::new().unwrap();
-        let trace_path = dir.path().join("trace.bin");
 
         let writer = crate::telemetry::buffer::DiskBuffer::builder()
-            .base_path(&trace_path)
+            .base_path(dir.path())
             .max_file_size(1024 * 1024)
             .max_total_size(10 * 1024 * 1024)
             .build()
@@ -812,10 +810,9 @@ mod tests {
         use crate::telemetry::analysis_events::Dial9Event;
 
         let dir = tempfile::TempDir::new().unwrap();
-        let trace_path = dir.path().join("trace.bin");
 
         let writer = crate::telemetry::buffer::DiskBuffer::builder()
-            .base_path(&trace_path)
+            .base_path(dir.path())
             .max_file_size(1024 * 1024)
             .max_total_size(10 * 1024 * 1024)
             .build()
@@ -1096,10 +1093,9 @@ mod tests {
                 max_file_size in 60u64..300,
             ) {
                 let dir = tempfile::TempDir::new().unwrap();
-                let base = dir.path().join("trace");
 
                 let writer = DiskBuffer::builder()
-                    .base_path(&base)
+                    .base_path(dir.path())
                     .max_file_size(max_file_size)
                     .max_total_size(1_000_000)
                     .build()

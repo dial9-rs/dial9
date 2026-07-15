@@ -40,9 +40,8 @@ async fn cpu_task(_id: usize) {
 /// Uses tokio::spawn instead of Dial9TokioHandle::spawn.
 fn generate_no_wake_events(dir: &PathBuf) {
     std::fs::create_dir_all(dir).unwrap();
-    let trace_path = dir.join("trace.bin");
 
-    let writer = DiskBuffer::new(&trace_path, 4 * 1024, 50 * 1024 * 1024).unwrap();
+    let writer = DiskBuffer::new(dir, 4 * 1024, 50 * 1024 * 1024).unwrap();
     let session = recorder(writer)
         .with_cpu_profiling(CpuProfilingConfig::default().frequency_hz(999))
         .worker_poll_interval(Duration::from_millis(50))
@@ -69,9 +68,8 @@ fn generate_no_wake_events(dir: &PathBuf) {
 /// Generate a fully-configured "good" trace for comparison.
 fn generate_good_trace(dir: &PathBuf) {
     std::fs::create_dir_all(dir).unwrap();
-    let trace_path = dir.join("trace.bin");
 
-    let writer = DiskBuffer::new(&trace_path, 4 * 1024, 50 * 1024 * 1024).unwrap();
+    let writer = DiskBuffer::new(dir, 4 * 1024, 50 * 1024 * 1024).unwrap();
     let session = recorder(writer)
         .with_cpu_profiling(CpuProfilingConfig::default().frequency_hz(999))
         .with_sched_events(SchedEventConfig::default())
@@ -99,9 +97,8 @@ fn generate_good_trace(dir: &PathBuf) {
 /// Generate a trace with CPU profiling but NO sched events.
 fn generate_no_sched_events(dir: &PathBuf) {
     std::fs::create_dir_all(dir).unwrap();
-    let trace_path = dir.join("trace.bin");
 
-    let writer = DiskBuffer::new(&trace_path, 4 * 1024, 50 * 1024 * 1024).unwrap();
+    let writer = DiskBuffer::new(dir, 4 * 1024, 50 * 1024 * 1024).unwrap();
     let session = recorder(writer)
         .with_cpu_profiling(CpuProfilingConfig::default().frequency_hz(999))
         // Deliberately omit .with_sched_events()

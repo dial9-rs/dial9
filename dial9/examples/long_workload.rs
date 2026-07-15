@@ -7,7 +7,7 @@ use tokio::net::TcpListener;
 
 fn my_config() -> TokioSessionBuilder {
     let writer = DiskBuffer::builder()
-        .base_path("long_trace.bin")
+        .base_path("long_trace")
         .max_file_size(64 * 1024 * 1024)
         .max_total_size(256 * 1024 * 1024)
         .build();
@@ -111,5 +111,5 @@ async fn main() {
     handle.spawn(periodic_yielder());
 
     tokio::time::sleep(Duration::from_secs(duration_secs)).await;
-    println!("Done. Trace written to long_trace.*.bin");
+    println!("Done. Trace written to long_trace/trace.*.bin");
 }
