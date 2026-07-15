@@ -1,6 +1,6 @@
 [package]
 name = "dial9"
-version = "0.4.0-alpha.1"
+version = "0.5.0-rc0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -25,10 +25,10 @@ required-features = ["cli"]
 [dependencies]
 dial9-core = { workspace = true }
 dial9-perf-self-profile = { workspace = true, optional = true }
-dial9-tokio-telemetry = { version = "0.4.0-alpha.1", path = "../dial9-tokio-telemetry", optional = true }
+dial9-tokio-telemetry = { version = "0.5.0-rc0", path = "../dial9-tokio-telemetry", optional = true }
 dial9-macro = { workspace = true, optional = true }
 
-dial9-viewer = { version = "0.4.0", path = "../dial9-viewer", optional = true }
+dial9-viewer = { version = "0.5.0-rc0", path = "../dial9-viewer", optional = true }
 anyhow = { version = "1", optional = true }
 
 # Needed by the config → TracedRuntime path (tokio feature only).
