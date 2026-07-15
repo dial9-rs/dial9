@@ -50,6 +50,95 @@ pub(crate) async fn region_from_head_bucket(
 #[folder = "ui/"]
 struct UiAssets;
 
+/// Default output key prefix for aggregate part-files.
+const DEFAULT_AGG_OUTPUT_PREFIX: &str = "flamegraph-data";
+
+/// Destination for the aggregate part-files produced by demand-driven folding.
+///
+/// This is always a **server-owned** backend — never the request's source
+/// backend or the caller's bring-your-own credentials. That is the invariant
+/// that lets aggregation run against a read-only source bucket without failing
+/// on the first `PutObject`, and guarantees a caller's keys are never used for
+/// writes. There are two shapes:
+///   - [`AggOutput::s3`] persists parts to an operator-owned S3 bucket, so
+///     rollups survive restarts. Built from `--agg-output-bucket`.
+///   - [`AggOutput::temporary`] writes to a fresh process-local temporary
+///     directory that is removed at shutdown; rollups are recomputed after a
+///     restart. This is the default when no output bucket is configured.
+///
+/// The backend, bucket, and prefix always travel together, so they are one
+/// value rather than three independently-optional fields on [`AppState`].
+#[derive(Clone)]
+pub struct AggOutput {
+    /// Backend all aggregate writes go through.
+    backend: Arc<dyn StorageBackend>,
+    /// The S3 output bucket, or `None` for the process-local temporary
+    /// directory (whose [`LocalBackend`] ignores the bucket argument, so the
+    /// per-request source bucket rides along as an inert placeholder).
+    bucket: Option<String>,
+    /// Output key prefix (default [`DEFAULT_AGG_OUTPUT_PREFIX`]).
+    prefix: String,
+    /// Human-readable destination, captured at construction for startup logging
+    /// (the temp path is only reachable on the concrete backend, not `dyn`).
+    location: String,
+}
+
+impl AggOutput {
+    /// Persist aggregate parts to the operator-owned S3 `bucket` via `backend`
+    /// (built once at startup with the server's ambient identity, region-aware).
+    pub fn s3(bucket: impl Into<String>, backend: Arc<dyn StorageBackend>) -> Self {
+        let bucket = bucket.into();
+        let location = format!("s3://{bucket}");
+        Self {
+            backend,
+            bucket: Some(bucket),
+            prefix: DEFAULT_AGG_OUTPUT_PREFIX.to_string(),
+            location,
+        }
+    }
+
+    /// Write aggregate parts to a fresh process-local temporary directory,
+    /// removed when this value's last clone drops at server shutdown.
+    pub fn temporary() -> Self {
+        let backend = LocalBackend::new_temporary_aggregate();
+        let location = format!("temporary local directory ({})", backend.root().display());
+        Self {
+            backend: Arc::new(backend),
+            bucket: None,
+            prefix: DEFAULT_AGG_OUTPUT_PREFIX.to_string(),
+            location,
+        }
+    }
+
+    /// Override the output key prefix (default `flamegraph-data`).
+    pub fn with_prefix(mut self, prefix: impl Into<String>) -> Self {
+        self.prefix = prefix.into();
+        self
+    }
+
+    pub(crate) fn backend(&self) -> Arc<dyn StorageBackend> {
+        Arc::clone(&self.backend)
+    }
+
+    pub(crate) fn prefix(&self) -> &str {
+        &self.prefix
+    }
+
+    /// The bucket argument for writes: the configured S3 output bucket, or the
+    /// request's `source_bucket` as an inert placeholder for the local
+    /// temporary backend (which ignores it).
+    pub(crate) fn output_bucket_for(&self, source_bucket: &str) -> String {
+        self.bucket
+            .clone()
+            .unwrap_or_else(|| source_bucket.to_string())
+    }
+
+    /// Human-readable destination, for startup logging.
+    pub(crate) fn location(&self) -> &str {
+        &self.location
+    }
+}
+
 #[derive(Clone)]
 #[non_exhaustive]
 pub struct AppState {
@@ -80,17 +169,11 @@ pub struct AppState {
     /// fake. Independent of `allow_byo_creds` so a deployment can offer one path,
     /// both, or neither.
     pub role_assumer: Option<Arc<dyn credentials::RoleAssumer>>,
-    /// Output prefix for BYOC aggregation. Defaults to "flamegraph-data".
-    pub agg_output_prefix: String,
-    /// Output bucket for BYOC aggregation. When set, aggregate part-files are
-    /// persisted to this S3 bucket. When unset, they stay in a process-local
-    /// temporary directory that is removed when the server exits.
-    pub agg_output_bucket: Option<String>,
-    /// Backend for BYOC aggregate output. This is a process-local temporary
-    /// directory by default, replaced by a region-aware S3 backend when
-    /// `--agg-output-bucket` is configured. The temporary backend is shared by
-    /// all requests handled by this server process.
-    pub agg_output_backend: Option<Arc<dyn StorageBackend>>,
+    /// Destination for BYOC aggregate part-files: an operator-owned S3 bucket
+    /// (persistent) or a process-local temporary directory (the default,
+    /// removed at shutdown). Always a server-owned backend — aggregate writes
+    /// never use the request's source credentials. See [`AggOutput`].
+    pub agg_output: AggOutput,
     /// Segment duration (seconds) for BYOC aggregation scope padding.
     pub agg_segment_secs: i64,
     /// Process-global concurrency limits for the demand-driven fold pipeline,
@@ -115,9 +198,7 @@ impl AppState {
             allow_byo_creds: false,
             ephemeral_s3: None,
             role_assumer: None,
-            agg_output_prefix: "flamegraph-data".to_string(),
-            agg_output_bucket: None,
-            agg_output_backend: Some(Arc::new(LocalBackend::new_temporary_aggregate())),
+            agg_output: AggOutput::temporary(),
             agg_segment_secs: crate::ingest::aggregate::DEFAULT_SEGMENT_DURATION_SECS,
             fold_limits: crate::ingest::aggregate::FoldLimits::default(),
         }
@@ -195,22 +276,12 @@ impl AppState {
         self
     }
 
-    pub fn with_agg_output_prefix(mut self, prefix: String) -> Self {
-        self.agg_output_prefix = prefix;
-        self
-    }
-
-    /// Set an S3 output bucket and its backend for BYOC aggregation. Passing no
-    /// backend restores a fresh process-local temporary directory; in either
-    /// case the source backend is never used for aggregate writes.
-    pub fn with_agg_output_bucket(
-        mut self,
-        bucket: Option<String>,
-        backend: Option<Arc<dyn StorageBackend>>,
-    ) -> Self {
-        self.agg_output_bucket = bucket;
-        self.agg_output_backend =
-            Some(backend.unwrap_or_else(|| Arc::new(LocalBackend::new_temporary_aggregate())));
+    /// Set the destination for BYOC aggregate part-files. Defaults to a
+    /// process-local temporary directory ([`AggOutput::temporary`]); pass
+    /// [`AggOutput::s3`] to persist to an operator-owned bucket. In every case
+    /// the source backend is never used for aggregate writes.
+    pub fn with_agg_output(mut self, output: AggOutput) -> Self {
+        self.agg_output = output;
         self
     }
 
@@ -249,33 +320,24 @@ impl AppState {
                 .map(str::to_string)
                 .or_else(|| self.default_prefix.clone())
                 .unwrap_or_default();
-            // Output goes through a backend owned by the server, never through
-            // the request's source credentials: either the configured S3 output
+            // Output goes through the server-owned backend, never through the
+            // request's source credentials: either the configured S3 output
             // bucket or the process-local temporary directory.
-            let output_bucket = self
-                .agg_output_bucket
-                .clone()
-                .unwrap_or_else(|| bucket.to_string());
-            let output = self.agg_output_backend.clone().unwrap_or_else(|| {
-                // Public AppState fields can be constructed manually; preserve
-                // the no-source-writes guarantee even if an embedder cleared
-                // the backend after construction.
-                Arc::new(LocalBackend::new_temporary_aggregate())
-            });
+            let output_bucket = self.agg_output.output_bucket_for(bucket);
             tracing::info!(
                 %bucket,
                 %output_bucket,
                 resolved_source_prefix = %source_prefix,
-                output_prefix = %self.agg_output_prefix,
+                output_prefix = %self.agg_output.prefix(),
                 "agg: BYOC context"
             );
             Ok(Some(AggContext {
                 source: backend,
-                output,
+                output: self.agg_output.backend(),
                 source_bucket: bucket.to_string(),
                 source_is_local: false,
                 output_bucket,
-                output_prefix: self.agg_output_prefix.clone(),
+                output_prefix: self.agg_output.prefix().to_string(),
                 source_prefixes: vec![source_prefix],
                 segment_duration_secs: self.agg_segment_secs,
             }))
@@ -487,4 +549,34 @@ fn api_router(state: AppState) -> Router {
         // static-asset fetches. Publishes to the global `ServiceMetrics` sink.
         .layer(axum::middleware::from_fn(metrics::record_request_metrics))
         .with_state(state)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The temporary output uses the request's source bucket as the (ignored)
+    /// bucket argument, while an S3 output always writes to its own bucket
+    /// regardless of the source. This is the routing that keeps aggregate
+    /// writes off the caller's (possibly read-only) source bucket.
+    #[test]
+    fn output_bucket_for_routes_temp_to_source_and_s3_to_configured() {
+        let temp = AggOutput::temporary();
+        assert_eq!(temp.output_bucket_for("caller-source"), "caller-source");
+
+        let backend: Arc<dyn StorageBackend> = Arc::new(LocalBackend::new_temporary_aggregate());
+        let s3 = AggOutput::s3("operator-owned", backend);
+        assert_eq!(s3.output_bucket_for("caller-source"), "operator-owned");
+    }
+
+    /// The default output prefix is applied and overridable, and the default
+    /// matches the CLI's `--agg-output-prefix` default.
+    #[test]
+    fn agg_output_prefix_defaults_and_overrides() {
+        assert_eq!(AggOutput::temporary().prefix(), DEFAULT_AGG_OUTPUT_PREFIX);
+        assert_eq!(
+            AggOutput::temporary().with_prefix("custom").prefix(),
+            "custom"
+        );
+    }
 }

@@ -557,7 +557,7 @@ async fn start_byoc_server_with_backend(
     if let Some(out) = output_bucket {
         let out_backend: Arc<dyn dial9_viewer::storage::StorageBackend> =
             Arc::new(S3Backend::from_client(fake_s3_client(fs_root)));
-        state = state.with_agg_output_bucket(Some(out.to_string()), Some(out_backend));
+        state = state.with_agg_output(dial9_viewer::server::AggOutput::s3(out, out_backend));
     }
     let app = router(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
