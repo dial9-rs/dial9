@@ -5,7 +5,7 @@
 mod common;
 
 use common::{CAPTURE_BUFFER_SIZE, capture_processor, decode_all, tid_to_worker};
-use dial9_tokio_telemetry::telemetry::InMemoryWriter;
+use dial9_tokio_telemetry::telemetry::MemoryBuffer;
 use dial9_tokio_telemetry::telemetry::analysis_events::{CpuSampleSource, Dial9Event, WorkerId};
 
 #[test]
@@ -18,7 +18,7 @@ fn sched_events_capture_context_switches() {
 
     let num_workers = 2u64;
 
-    let session = recorder(InMemoryWriter::new(CAPTURE_BUFFER_SIZE).unwrap())
+    let session = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
         .with_sched_events(SchedEventConfig::default())
         .with_tokio(move |t| {
             t.worker_threads(num_workers as usize);
@@ -88,7 +88,7 @@ fn sched_events_sampling_reduces_count() {
 
     let (capture, batches) = capture_processor();
 
-    let session = recorder(InMemoryWriter::new(CAPTURE_BUFFER_SIZE).unwrap())
+    let session = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
         .with_sched_events(SchedEventConfig::default().sampling_interval(PERIOD))
         .with_tokio(move |t| {
             t.worker_threads(num_workers as usize);

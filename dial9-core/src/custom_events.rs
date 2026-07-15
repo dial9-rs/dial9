@@ -1,7 +1,7 @@
 //! User-provided custom event callbacks.
 
-use crate::buffer::Encodable;
 use crate::clock::clock_monotonic_ns;
+use crate::encoder::Encodable;
 use crate::source::{FlushContext, Source};
 use std::time::{Duration, Instant};
 
@@ -135,7 +135,7 @@ mod tests {
 
     /// Drain everything recorded in `shared` into raw encoded-segment bytes.
     fn drain_encoded(shared: &SharedState) -> Vec<Vec<u8>> {
-        crate::buffer::drain_to_collector(&shared.collector);
+        crate::encoder::drain_to_collector(&shared.collector);
         let mut out = Vec::new();
         while let Some(batch) = shared.collector.next() {
             out.push(batch.into_encoded_bytes());

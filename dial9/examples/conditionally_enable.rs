@@ -19,10 +19,10 @@
 use std::time::Duration;
 
 use dial9::telemetry::{Dial9Handle, Dial9TokioHandle};
-use dial9::{DiskWriter, TokioSessionBuilder};
+use dial9::{DiskBuffer, TokioSessionBuilder};
 
 fn my_config() -> TokioSessionBuilder {
-    let writer = DiskWriter::builder()
+    let writer = DiskBuffer::builder()
         .base_path("conditionally_enable_trace.bin")
         .max_file_size(64 * 1024 * 1024)
         .max_total_size(256 * 1024 * 1024)

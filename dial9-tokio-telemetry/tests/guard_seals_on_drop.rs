@@ -1,4 +1,4 @@
-use dial9_tokio_telemetry::telemetry::{DiskWriter, RecorderBuilderTokioExt, recorder};
+use dial9_tokio_telemetry::telemetry::{DiskBuffer, RecorderBuilderTokioExt, recorder};
 use std::time::Duration;
 
 /// After TokioSession is dropped, all trace files should be sealed (.bin),
@@ -8,7 +8,7 @@ fn guard_drop_produces_sealed_bin_files() {
     let dir = tempfile::tempdir().unwrap();
     let trace_path = dir.path().join("trace.bin");
 
-    let writer = DiskWriter::new(&trace_path, 1024, 1024 * 1024).unwrap();
+    let writer = DiskBuffer::new(&trace_path, 1024, 1024 * 1024).unwrap();
     let session = recorder(writer)
         .with_tokio(|t| {
             t.worker_threads(2);

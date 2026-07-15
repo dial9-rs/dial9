@@ -62,9 +62,9 @@ impl TokioHook<TaskMetaCb> {
 /// # Example
 ///
 /// ```rust,no_run
-/// use dial9_tokio_telemetry::telemetry::{InMemoryWriter, RecorderBuilderTokioExt, recorder};
+/// use dial9_tokio_telemetry::telemetry::{MemoryBuffer, RecorderBuilderTokioExt, recorder};
 ///
-/// let session = recorder(InMemoryWriter::new(16 * 1024 * 1024).unwrap())
+/// let session = recorder(MemoryBuffer::new(16 * 1024 * 1024).unwrap())
 ///     .with_tokio(|t| {
 ///         t.worker_threads(4);
 ///     })

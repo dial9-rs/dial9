@@ -166,7 +166,7 @@ use std::time::Duration;
 
 use clap::Parser;
 use dial9::telemetry::Dial9TokioHandle;
-use dial9::{Disk, DiskWriter, RecorderBuilder, RecorderBuilderTokioExt, TokioSessionBuilder};
+use dial9::{Disk, DiskBuffer, RecorderBuilder, RecorderBuilderTokioExt, TokioSessionBuilder};
 use metrique::local::{LocalFormat, OutputStyle};
 use metrique::writer::format::FormatExt;
 use metrique::writer::sink::FlushImmediatelyBuilder;
@@ -277,7 +277,7 @@ fn configure_dial9(opts: &Dial9Opts) -> TokioSessionBuilder {
     let max_disk = opts.max_disk_usage_bytes();
     let max_file_size = (max_disk / 4).max(16 * 1024 * 1024);
 
-    let writer = match DiskWriter::builder()
+    let writer = match DiskBuffer::builder()
         .base_path(base_path)
         .max_file_size(max_file_size)
         .max_total_size(max_disk)

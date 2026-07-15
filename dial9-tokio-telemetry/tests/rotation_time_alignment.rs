@@ -2,7 +2,7 @@
 //! (or minimally overlapping) time ranges.
 
 use common::decode_file;
-use dial9_tokio_telemetry::telemetry::{DiskWriter, RecorderBuilderTokioExt, recorder};
+use dial9_tokio_telemetry::telemetry::{DiskBuffer, RecorderBuilderTokioExt, recorder};
 use metrique::local::{LocalFormat, OutputStyle};
 use serde::Deserialize;
 use std::time::Duration;
@@ -115,7 +115,7 @@ fn rotated_segments_have_bounded_time_overlap() {
     let rotation_period = Duration::from_secs(2);
     let num_workers = 4;
 
-    let writer = DiskWriter::builder()
+    let writer = DiskBuffer::builder()
         .base_path(&trace_path)
         .max_file_size(u64::MAX)
         .max_total_size(u64::MAX)

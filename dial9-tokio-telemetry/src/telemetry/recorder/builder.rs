@@ -242,8 +242,8 @@ impl TokioSession {
     /// [`shutdown`](Self::shutdown) so its workers flush.
     ///
     /// ```no_run
-    /// # use dial9_tokio_telemetry::telemetry::{DiskWriter, RecorderBuilderTokioExt, recorder};
-    /// let session = recorder(DiskWriter::single_file("/tmp/trace.bin")?)
+    /// # use dial9_tokio_telemetry::telemetry::{DiskBuffer, RecorderBuilderTokioExt, recorder};
+    /// let session = recorder(DiskBuffer::single_file("/tmp/trace.bin")?)
     ///     .with_tokio(|t| { t.worker_threads(4); })
     ///     .build()?;
     /// let (io_rt, io_handle) = session

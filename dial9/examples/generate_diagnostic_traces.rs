@@ -12,7 +12,7 @@
 //! with different RUSTFLAGS, so they are handled by the shell script wrapper.
 
 use dial9::telemetry::{CpuProfilingConfig, Dial9TokioHandle, SchedEventConfig};
-use dial9::{DiskWriter, recorder};
+use dial9::{DiskBuffer, recorder};
 use dial9::{RecorderBuilderTokioExt, RecorderPerfExt};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -42,7 +42,7 @@ fn generate_no_wake_events(dir: &PathBuf) {
     std::fs::create_dir_all(dir).unwrap();
     let trace_path = dir.join("trace.bin");
 
-    let writer = DiskWriter::new(&trace_path, 4 * 1024, 50 * 1024 * 1024).unwrap();
+    let writer = DiskBuffer::new(&trace_path, 4 * 1024, 50 * 1024 * 1024).unwrap();
     let session = recorder(writer)
         .with_cpu_profiling(CpuProfilingConfig::default().frequency_hz(999))
         .worker_poll_interval(Duration::from_millis(50))
@@ -71,7 +71,7 @@ fn generate_good_trace(dir: &PathBuf) {
     std::fs::create_dir_all(dir).unwrap();
     let trace_path = dir.join("trace.bin");
 
-    let writer = DiskWriter::new(&trace_path, 4 * 1024, 50 * 1024 * 1024).unwrap();
+    let writer = DiskBuffer::new(&trace_path, 4 * 1024, 50 * 1024 * 1024).unwrap();
     let session = recorder(writer)
         .with_cpu_profiling(CpuProfilingConfig::default().frequency_hz(999))
         .with_sched_events(SchedEventConfig::default())
@@ -101,7 +101,7 @@ fn generate_no_sched_events(dir: &PathBuf) {
     std::fs::create_dir_all(dir).unwrap();
     let trace_path = dir.join("trace.bin");
 
-    let writer = DiskWriter::new(&trace_path, 4 * 1024, 50 * 1024 * 1024).unwrap();
+    let writer = DiskBuffer::new(&trace_path, 4 * 1024, 50 * 1024 * 1024).unwrap();
     let session = recorder(writer)
         .with_cpu_profiling(CpuProfilingConfig::default().frequency_hz(999))
         // Deliberately omit .with_sched_events()

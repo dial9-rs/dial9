@@ -9,14 +9,14 @@ mod common;
 use common::{CAPTURE_BUFFER_SIZE, capture_processor, decode_all};
 use dial9_tokio_telemetry::memory_profiling::{MemoryProfiler, push_test_alloc};
 use dial9_tokio_telemetry::telemetry::analysis_events::Dial9Event;
-use dial9_tokio_telemetry::telemetry::{InMemoryWriter, RecorderBuilderTokioExt, recorder};
+use dial9_tokio_telemetry::telemetry::{MemoryBuffer, RecorderBuilderTokioExt, recorder};
 use std::time::Duration;
 
 #[test]
 fn install_registers_source_with_recorder() {
     let (capture, batches) = capture_processor();
 
-    let session = recorder(InMemoryWriter::new(CAPTURE_BUFFER_SIZE).unwrap())
+    let session = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
         .with_tokio(|t| {
             t.worker_threads(1);
         })

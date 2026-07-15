@@ -5,7 +5,7 @@ mod common;
 use common::{CAPTURE_BUFFER_SIZE, capture_processor, decode_all};
 use dial9_tokio_telemetry::telemetry::analysis_events::Dial9Event;
 use dial9_tokio_telemetry::telemetry::{
-    InMemoryWriter, RecorderBuilderTokioExt, RecorderPerfExt, SocketAcceptQueuesConfig, recorder,
+    MemoryBuffer, RecorderBuilderTokioExt, RecorderPerfExt, SocketAcceptQueuesConfig, recorder,
 };
 use std::net::{TcpListener, TcpStream};
 use std::time::Duration;
@@ -17,7 +17,7 @@ fn traced_runtime_records_socket_accept_queue_snapshot() {
     let client = TcpStream::connect(local_addr).unwrap();
 
     let (capture, batches) = capture_processor();
-    let session = recorder(InMemoryWriter::new(CAPTURE_BUFFER_SIZE).unwrap())
+    let session = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
         .with_socket_accept_queues(
             SocketAcceptQueuesConfig::builder()
                 .sample_interval(Duration::ZERO)
@@ -66,7 +66,7 @@ fn traced_runtime_does_not_record_socket_accept_queues_by_default() {
     let client = TcpStream::connect(local_addr).unwrap();
 
     let (capture, batches) = capture_processor();
-    let session = recorder(InMemoryWriter::new(CAPTURE_BUFFER_SIZE).unwrap())
+    let session = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
         .with_tokio(|t| {
             t.worker_threads(1);
         })

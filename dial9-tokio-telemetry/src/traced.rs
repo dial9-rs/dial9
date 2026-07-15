@@ -228,9 +228,9 @@ impl<F: Future> Future for WakeTraced<F> {
 mod tests {
     use super::*;
     use crate::telemetry::analysis_events::Dial9Event;
+    use crate::telemetry::buffer::{DiskBuffer, MemoryBuffer};
     use crate::telemetry::recorder::RecorderBuilderTokioExt;
     use crate::telemetry::task_metadata::UNKNOWN_TASK_ID;
-    use crate::telemetry::writer::{DiskWriter, InMemoryWriter};
     use dial9_core::recorder::recorder;
     use dial9_core::test_util;
     use futures_util::task::noop_waker;
@@ -241,7 +241,7 @@ mod tests {
 
     #[test]
     fn traced_future_falls_back_after_missing_task_context() {
-        let session = recorder(InMemoryWriter::new(16 * 1024 * 1024).unwrap())
+        let session = recorder(MemoryBuffer::new(16 * 1024 * 1024).unwrap())
             .with_tokio(|t| {
                 *t = tokio::runtime::Builder::new_current_thread();
             })
@@ -274,7 +274,7 @@ mod tests {
     /// matches the spawned task when a `Notify` wakes it.
     ///
     /// This is an integration test: events are written to a real file via
-    /// `DiskWriter` and then read back with `TraceReader`.
+    /// `DiskBuffer` and then read back with `TraceReader`.
     #[test]
     #[cfg(feature = "analysis")]
     fn traced_emits_wake_events() {
@@ -284,7 +284,7 @@ mod tests {
 
         // Build a current-thread runtime so that all tasks — and all thread-local
         // BUFFER accesses — share a single thread with the test itself.
-        let session = recorder(DiskWriter::single_file(&trace_path).unwrap())
+        let session = recorder(DiskBuffer::single_file(&trace_path).unwrap())
             .with_tokio(|t| {
                 *t = tokio::runtime::Builder::new_current_thread();
                 t.enable_all();
@@ -328,7 +328,7 @@ mod tests {
         test_util::drain_thread_local(&th.shared);
 
         // Dropping the runtime + guard stops the background flush thread, joins
-        // it, then performs a final flush: collector → DiskWriter → trace file.
+        // it, then performs a final flush: collector → DiskBuffer → trace file.
         drop(session);
 
         // Parse the trace file and collect all WakeEvents.

@@ -7,7 +7,7 @@
 
 use dial9_tokio_telemetry::telemetry::CpuProfilingConfig;
 use dial9_tokio_telemetry::telemetry::{
-    DiskWriter, RecorderBuilderTokioExt, RecorderPerfExt, recorder,
+    DiskBuffer, RecorderBuilderTokioExt, RecorderPerfExt, recorder,
 };
 use dial9_trace_format::decoder::Decoder;
 use flate2::read::GzDecoder;
@@ -37,7 +37,7 @@ fn background_symbolization_produces_symbol_table_entries() {
 
     // Small segments to force rotation so the worker has segments to process.
     // Large total size so segments aren't evicted before the worker processes them.
-    let writer = DiskWriter::new(&trace_path, 4 * 1024, 10 * 1024 * 1024).unwrap();
+    let writer = DiskBuffer::new(&trace_path, 4 * 1024, 10 * 1024 * 1024).unwrap();
 
     let session = recorder(writer)
         .with_cpu_profiling(CpuProfilingConfig::default().frequency_hz(999))

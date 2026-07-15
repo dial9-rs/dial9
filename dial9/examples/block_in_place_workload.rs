@@ -7,7 +7,7 @@
 //!
 //! Produces: `block_in_place_trace.bin` in the current directory.
 
-use dial9::{DiskWriter, recorder};
+use dial9::{DiskBuffer, recorder};
 use dial9::{RecorderBuilderTokioExt, RecorderPerfExt};
 use std::time::Duration;
 
@@ -50,7 +50,7 @@ async fn background_burn(id: usize) {
 }
 
 fn main() {
-    let writer = DiskWriter::builder()
+    let writer = DiskBuffer::builder()
         .base_path("block_in_place_trace.bin")
         .max_file_size(100 * 1024 * 1024)
         .max_total_size(500 * 1024 * 1024)

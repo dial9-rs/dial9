@@ -113,13 +113,13 @@ impl<T: RegisterSource> RecorderPerfExt for T {
 mod tests {
     use super::RecorderPerfExt;
     use crate::ProcessResourceUsageConfig;
+    use dial9_core::buffer::MemoryBuffer;
     use dial9_core::recorder::recorder;
-    use dial9_core::writer::InMemoryWriter;
     use std::time::Duration;
 
     #[test]
     fn with_process_resource_usage_registers_the_source() {
-        let writer = InMemoryWriter::new(64 * 1024).expect("writer");
+        let writer = MemoryBuffer::new(64 * 1024).expect("writer");
         let session = recorder(writer)
             .with_process_resource_usage(ProcessResourceUsageConfig::default())
             .build_and_start();

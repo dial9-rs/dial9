@@ -2,7 +2,7 @@
 //! Each span is polled multiple times (producing multiple segments in the viewer).
 use dial9::RecorderBuilderTokioExt;
 use dial9::tracing_layer::Dial9TracingLayer;
-use dial9::{DiskWriter, recorder};
+use dial9::{DiskBuffer, recorder};
 use std::time::Duration;
 use tracing_subscriber::prelude::*;
 
@@ -20,7 +20,7 @@ async fn inner_work(id: u32) {
 }
 
 fn main() {
-    let writer = DiskWriter::single_file("tracing_sleep_trace.bin").unwrap();
+    let writer = DiskBuffer::single_file("tracing_sleep_trace.bin").unwrap();
     let session = recorder(writer)
         .with_tokio(|t| {
             t.worker_threads(2);

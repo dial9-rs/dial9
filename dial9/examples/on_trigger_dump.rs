@@ -32,7 +32,7 @@
 
 use std::time::Duration;
 
-use dial9::DiskWriter;
+use dial9::DiskBuffer;
 use dial9::dump::DumpError;
 use dial9::telemetry::{Dial9Handle, Dial9TokioHandle};
 
@@ -54,7 +54,7 @@ fn sealed_segments() -> usize {
     let _ = std::fs::create_dir_all(TRACE_DIR);
     let trace_path = format!("{TRACE_DIR}/trace.bin");
 
-    let writer = DiskWriter::builder()
+    let writer = DiskBuffer::builder()
         .base_path(trace_path)
         // Fast-rotating writer so the demo seals a segment within a couple of
         // seconds instead of waiting on the default rotation period.

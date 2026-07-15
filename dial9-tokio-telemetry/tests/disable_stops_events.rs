@@ -1,5 +1,5 @@
 use dial9_tokio_telemetry::telemetry::analysis_events::Dial9Event;
-use dial9_tokio_telemetry::telemetry::{DiskWriter, RecorderBuilderTokioExt, recorder};
+use dial9_tokio_telemetry::telemetry::{DiskBuffer, RecorderBuilderTokioExt, recorder};
 use dial9_trace_format::decoder::Decoder;
 use std::path::Path;
 use std::time::Duration;
@@ -38,7 +38,7 @@ fn read_events_on_disk(dir: &Path) -> Vec<Dial9Event> {
 fn disable_stops_all_event_production() {
     let dir = tempfile::tempdir().unwrap();
     let trace_path = dir.path().join("trace.bin");
-    let writer = DiskWriter::single_file(&trace_path).unwrap();
+    let writer = DiskBuffer::single_file(&trace_path).unwrap();
 
     let session = recorder(writer)
         .with_tokio(|t| {
@@ -121,7 +121,7 @@ fn disable_stops_cpu_sample_production() {
 
     let dir = tempfile::tempdir().unwrap();
     let trace_path = dir.path().join("trace.bin");
-    let writer = DiskWriter::single_file(&trace_path).unwrap();
+    let writer = DiskBuffer::single_file(&trace_path).unwrap();
 
     let session = recorder(writer)
         .with_cpu_profiling(CpuProfilingConfig::default())
@@ -199,7 +199,7 @@ fn disable_stops_cpu_sample_production() {
     drop(session);
 }
 
-/// After `disable()`, the DiskWriter must not produce new segments.
+/// After `disable()`, the DiskBuffer must not produce new segments.
 ///
 /// Uses a 1-second rotation period and waits 5 seconds after disable.
 /// If the flush loop were still driving rotation, we'd see new `.bin`
@@ -209,7 +209,7 @@ fn disable_stops_segment_rotation() {
     let dir = tempfile::tempdir().unwrap();
     let trace_path = dir.path().join("trace.bin");
 
-    let writer = DiskWriter::builder()
+    let writer = DiskBuffer::builder()
         .base_path(&trace_path)
         .max_file_size(100 * 1024 * 1024)
         .max_total_size(500 * 1024 * 1024)
@@ -285,7 +285,7 @@ fn disable_stops_segment_rotation() {
 fn enable_after_disable_resumes_events() {
     let dir = tempfile::tempdir().unwrap();
     let trace_path = dir.path().join("trace.bin");
-    let writer = DiskWriter::single_file(&trace_path).unwrap();
+    let writer = DiskBuffer::single_file(&trace_path).unwrap();
 
     let session = recorder(writer)
         .with_tokio(|t| {

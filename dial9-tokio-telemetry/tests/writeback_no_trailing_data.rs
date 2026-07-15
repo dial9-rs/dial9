@@ -6,7 +6,7 @@
 
 use dial9_tokio_telemetry::telemetry::CpuProfilingConfig;
 use dial9_tokio_telemetry::telemetry::{
-    DiskWriter, RecorderBuilderTokioExt, RecorderPerfExt, recorder,
+    DiskBuffer, RecorderBuilderTokioExt, RecorderPerfExt, recorder,
 };
 use flate2::read::GzDecoder;
 use std::io::Read;
@@ -16,7 +16,7 @@ fn graceful_shutdown_produces_clean_gzip_segments() {
     let trace_dir = tempfile::tempdir().unwrap();
     let trace_path = trace_dir.path().join("trace.bin");
 
-    let writer = DiskWriter::new(&trace_path, 512 * 1024, 10 * 1024 * 1024).unwrap();
+    let writer = DiskBuffer::new(&trace_path, 512 * 1024, 10 * 1024 * 1024).unwrap();
 
     let session = recorder(writer)
         .with_cpu_profiling(CpuProfilingConfig::default())

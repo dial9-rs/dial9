@@ -8,7 +8,7 @@ use common::{CAPTURE_BUFFER_SIZE, capture_processor, decode_all};
 use dial9_tokio_telemetry::memory_profiling::{
     Dial9Allocator, MemoryProfiler, MemoryProfilingConfig,
 };
-use dial9_tokio_telemetry::telemetry::{InMemoryWriter, RecorderBuilderTokioExt, recorder};
+use dial9_tokio_telemetry::telemetry::{MemoryBuffer, RecorderBuilderTokioExt, recorder};
 use serde::Deserialize;
 use std::time::Duration;
 
@@ -32,7 +32,7 @@ enum OverflowEvent {
 fn overflow_event_emitted_when_ring_overflows() {
     let (capture, batches) = capture_processor();
 
-    let session = recorder(InMemoryWriter::new(CAPTURE_BUFFER_SIZE).unwrap())
+    let session = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
         .with_tokio(|t| {
             t.worker_threads(1);
         })

@@ -12,14 +12,14 @@
 //! After running, inspect the trace:
 //!   cargo run --example analyze_trace -- /tmp/multi_runtime/trace.0.bin
 
-use dial9::telemetry::{DiskWriter, RecorderBuilderTokioExt, recorder};
+use dial9::telemetry::{DiskBuffer, RecorderBuilderTokioExt, recorder};
 use std::time::Duration;
 
 fn main() -> std::io::Result<()> {
     let trace_dir = "/tmp/multi_runtime";
     let _ = std::fs::create_dir_all(trace_dir);
 
-    let writer = DiskWriter::builder()
+    let writer = DiskBuffer::builder()
         .base_path(format!("{trace_dir}/trace.bin"))
         .max_file_size(1024 * 1024)
         .max_total_size(5 * 1024 * 1024)

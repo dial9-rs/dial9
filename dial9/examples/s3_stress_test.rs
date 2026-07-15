@@ -13,7 +13,7 @@
 use clap::Parser;
 use dial9::RecorderBuilderTokioExt;
 use dial9::background_task::s3::S3Config;
-use dial9::{DiskWriter, recorder};
+use dial9::{DiskBuffer, recorder};
 use metrique::local::{LocalFormat, OutputStyle};
 use metrique::writer::format::FormatExt;
 use metrique::writer::sink::FlushImmediatelyBuilder;
@@ -125,7 +125,7 @@ fn main() -> std::io::Result<()> {
 
     std::fs::create_dir_all(&trace_dir)?;
 
-    let writer = DiskWriter::new(&args.trace_path, args.segment_size, args.total_size)?;
+    let writer = DiskBuffer::new(&args.trace_path, args.segment_size, args.total_size)?;
 
     let s3_config = S3Config::builder()
         .bucket(&args.bucket)

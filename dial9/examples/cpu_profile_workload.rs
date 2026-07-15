@@ -16,7 +16,7 @@ use dial9::telemetry::{
     CpuProfilingConfig,
     analysis_events::{CpuSampleSource, Dial9Event, WorkerId},
 };
-use dial9::{DiskWriter, recorder};
+use dial9::{DiskBuffer, recorder};
 use dial9::{RecorderBuilderTokioExt, RecorderPerfExt};
 use dial9_trace_format::decoder::Decoder;
 use std::time::Duration;
@@ -47,7 +47,7 @@ fn main() {
     let trace_base = "cpu_profile_trace.bin";
     let segment_path = "cpu_profile_trace.0.bin";
 
-    let writer = DiskWriter::builder()
+    let writer = DiskBuffer::builder()
         .base_path(trace_base)
         .max_file_size(1024 * 1024 * 20) // rotate after 20 MiB per file
         .max_total_size(1024 * 1024 * 100) // keep at most 100 MiB on disk

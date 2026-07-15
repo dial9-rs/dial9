@@ -3,7 +3,7 @@
 mod common;
 
 use common::{CAPTURE_BUFFER_SIZE, capture_processor, decode_all};
-use dial9_tokio_telemetry::telemetry::{InMemoryWriter, RecorderBuilderTokioExt, recorder};
+use dial9_tokio_telemetry::telemetry::{MemoryBuffer, RecorderBuilderTokioExt, recorder};
 use serde::Deserialize;
 
 /// Tagged union over the events this test cares about.
@@ -24,7 +24,7 @@ enum ParkOrUnpark {
 fn worker_park_unpark_events_carry_nonzero_tid() {
     let (capture, batches) = capture_processor();
 
-    let session = recorder(InMemoryWriter::new(CAPTURE_BUFFER_SIZE).unwrap())
+    let session = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
         .with_tokio(|t| {
             t.worker_threads(2);
         })

@@ -39,7 +39,7 @@ pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(1);
 #[derive(bon::Builder)]
 #[builder(on(String, into))]
 pub struct BackgroundTaskConfig {
-    /// The trace base path (same path passed to `DiskWriter::new`).
+    /// The trace base path (same path passed to `DiskBuffer::new`).
     /// `None` when using the in-memory backend.
     #[builder(into)]
     trace_path: Option<PathBuf>,
@@ -171,13 +171,13 @@ pub(crate) fn run_background_task(
 ///
 /// Owns the fs handoff so callers never touch the writer's storage backend.
 pub fn spawn<M, Init, Teardown>(
-    writer: &crate::writer::SegmentWriter<M>,
+    writer: &crate::buffer::SegmentWriter<M>,
     config: BackgroundTaskConfig,
     shutdown: tokio::sync::oneshot::Receiver<Duration>,
     thread_init: Init,
 ) -> Option<crate::primitives::thread::JoinHandle<()>>
 where
-    M: crate::writer::WriterMode,
+    M: crate::buffer::BufferMode,
     Init: FnOnce() -> Teardown + Send + 'static,
     Teardown: FnOnce(),
 {

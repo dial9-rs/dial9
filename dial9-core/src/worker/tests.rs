@@ -714,7 +714,7 @@ mod worker_pipeline_tests {
     }
 
     /// Disk `mark_writer_done` alone (no stop-token cancel) drains and exits.
-    /// Symmetric with memory mode: `DiskWriter::finalize` is a complete
+    /// Symmetric with memory mode: `DiskBuffer::finalize` is a complete
     /// shutdown signal across both backends.
     #[tokio::test]
     async fn disk_worker_run_drains_on_writer_done() {

@@ -5,7 +5,7 @@ mod common;
 
 use common::{CAPTURE_BUFFER_SIZE, capture_processor, decode_all, decode_file};
 use dial9_tokio_telemetry::telemetry::{
-    DiskWriter, InMemoryWriter, RecorderBuilderTokioExt, TaskId, TokioSession, recorder,
+    DiskBuffer, MemoryBuffer, RecorderBuilderTokioExt, TaskId, TokioSession, recorder,
 };
 use serde::Deserialize;
 use std::sync::{Arc, Mutex};
@@ -32,7 +32,7 @@ enum SpawnEvent {
 /// Standard 2-worker multi_thread runtime with task tracking enabled.
 fn build_capturing_runtime() -> (TokioSession, Arc<Mutex<Vec<Vec<u8>>>>) {
     let (capture, batches) = capture_processor();
-    let session = recorder(InMemoryWriter::new(CAPTURE_BUFFER_SIZE).unwrap())
+    let session = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
         .with_tokio(|t| {
             t.worker_threads(2);
         })
@@ -85,7 +85,7 @@ fn spawn_with_joinset_emits_wake_events() {
 fn spawn_with_marks_taskspawn_and_preserves_caller() {
     let dir = tempfile::tempdir().unwrap();
     let trace_path = dir.path().join("trace.bin");
-    let writer = DiskWriter::single_file(&trace_path).unwrap();
+    let writer = DiskBuffer::single_file(&trace_path).unwrap();
     let session = recorder(writer)
         .with_tokio(|t| {
             t.worker_threads(2);
@@ -171,7 +171,7 @@ fn runtime_handle_spawn_with_targets_correct_runtime() {
 
     let (capture, batches) = capture_processor();
     // Unused current-thread primary; the runtimes under test attach below.
-    let session = recorder(InMemoryWriter::new(CAPTURE_BUFFER_SIZE).unwrap())
+    let session = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
         .with_tokio(|t| {
             *t = tokio::runtime::Builder::new_current_thread();
         })

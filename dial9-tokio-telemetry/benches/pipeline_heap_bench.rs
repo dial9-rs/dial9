@@ -27,8 +27,7 @@ use std::time::{Duration, Instant};
 use dial9_tokio_telemetry::background_task::{ProcessError, SegmentData, SegmentProcessor};
 use dial9_tokio_telemetry::telemetry::CpuProfilingConfig;
 use dial9_tokio_telemetry::telemetry::{
-    Dial9TokioHandle, DiskWriter, InMemoryWriter, RecorderBuilderTokioExt, RecorderPerfExt,
-    recorder,
+    Dial9TokioHandle, DiskBuffer, MemoryBuffer, RecorderBuilderTokioExt, RecorderPerfExt, recorder,
 };
 
 // ── Tracking allocator ─────────────────────────────────────────────────────
@@ -199,7 +198,7 @@ fn measure(mode: Mode) -> Sample {
             Mode::Disk => {
                 let tmp = tempfile::tempdir().unwrap();
                 let trace_path = tmp.path().join("trace.bin");
-                let writer = DiskWriter::builder()
+                let writer = DiskBuffer::builder()
                     .base_path(trace_path.to_str().unwrap())
                     .max_file_size(SEGMENT_SIZE)
                     .max_total_size(TOTAL_BUDGET)
@@ -223,7 +222,7 @@ fn measure(mode: Mode) -> Sample {
             Mode::DiskCpu => {
                 let tmp = tempfile::tempdir().unwrap();
                 let trace_path = tmp.path().join("trace.bin");
-                let writer = DiskWriter::builder()
+                let writer = DiskBuffer::builder()
                     .base_path(trace_path.to_str().unwrap())
                     .max_file_size(SEGMENT_SIZE)
                     .max_total_size(TOTAL_BUDGET)
@@ -244,12 +243,12 @@ fn measure(mode: Mode) -> Sample {
                 r
             }
             Mode::Mem => {
-                let writer = InMemoryWriter::builder()
+                let writer = MemoryBuffer::builder()
                     .max_total_size(TOTAL_BUDGET)
                     .max_segment_size(SEGMENT_SIZE)
                     .rotation_period(ROTATION_PERIOD)
                     .build()
-                    .expect("InMemoryWriter build");
+                    .expect("MemoryBuffer build");
                 recorder(writer)
                     .with_tokio(|t| {
                         t.worker_threads(WORKER_THREADS);
@@ -261,12 +260,12 @@ fn measure(mode: Mode) -> Sample {
                     .expect("build (mem)")
             }
             Mode::MemCpu => {
-                let writer = InMemoryWriter::builder()
+                let writer = MemoryBuffer::builder()
                     .max_total_size(TOTAL_BUDGET)
                     .max_segment_size(SEGMENT_SIZE)
                     .rotation_period(ROTATION_PERIOD)
                     .build()
-                    .expect("InMemoryWriter build");
+                    .expect("MemoryBuffer build");
                 recorder(writer)
                     .with_cpu_profiling(CpuProfilingConfig::default().frequency_hz(199))
                     .with_tokio(|t| {

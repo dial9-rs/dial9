@@ -332,7 +332,7 @@ impl Encodable for TaskDumpData<'_> {
 mod tests {
     use super::TaskDumpData;
     use crate::telemetry::analysis_events::Dial9Event;
-    use crate::telemetry::buffer::encode_single;
+    use crate::telemetry::encoder::encode_single;
     use crate::telemetry::format::decode_events;
     use crate::telemetry::task_metadata::TaskId;
 

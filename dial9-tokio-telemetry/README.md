@@ -37,10 +37,10 @@ rustflags = [
 ```
 
 ```rust,ignore
-use dial9::{DiskWriter, main, telemetry::Dial9TokioHandle};
+use dial9::{DiskBuffer, main, telemetry::Dial9TokioHandle};
 
 fn my_config() -> dial9::TracedRecorder {
-    let writer = DiskWriter::builder()
+    let writer = DiskBuffer::builder()
         .base_path("/tmp/my_traces/trace.bin")
         .max_total_size(5 * 1024 * 1024)   // keep at most 5 MiB on disk
         .max_file_size(1024 * 1024)     // optional: defaults to min(100 MiB, max_total_size / 4)
@@ -172,7 +172,7 @@ dial9 is fundamentally a central buffer that can collect data from different sou
 ```rust,ignore
 # #[cfg(feature = "worker-s3")]
 # mod inner {
-use dial9::{DiskWriter, RecorderBuilderTokioExt, TracedRecorder};
+use dial9::{DiskBuffer, RecorderBuilderTokioExt, TracedRecorder};
 use dial9_tokio_telemetry::background_task::s3::S3Config;
 
 fn my_config() -> TracedRecorder {
@@ -181,7 +181,7 @@ fn my_config() -> TracedRecorder {
         .service_name("my-service")
         .build();
 
-    let writer = DiskWriter::builder()
+    let writer = DiskBuffer::builder()
         .base_path("/tmp/my_traces/trace.bin")
         .max_file_size(100 * 1024 * 1024)
         .max_total_size(500 * 1024 * 1024)
@@ -443,10 +443,10 @@ Careful filtering of the data you send to dial9 strongly recommended. dial9 does
 ```rust,ignore
 use std::time::Duration;
 use dial9::telemetry::TaskDumpConfig;
-use dial9::{DiskWriter, RecorderBuilderTokioExt, TracedRecorder};
+use dial9::{DiskBuffer, RecorderBuilderTokioExt, TracedRecorder};
 
 fn my_config() -> TracedRecorder {
-    let writer = DiskWriter::builder()
+    let writer = DiskBuffer::builder()
         .base_path("/tmp/dial9/trace.bin")
         .max_total_size(64 * 1024 * 1024)
         .build()
@@ -531,9 +531,9 @@ the callback.
 dial9 installs callbacks on all 8 Tokio runtime hooks to collect telemetry. If you need to run your own logic alongside dial9's instrumentation, use `with_tokio_hooks`:
 
 ```rust,no_run
-use dial9_tokio_telemetry::telemetry::{InMemoryWriter, RecorderBuilderTokioExt, recorder};
+use dial9_tokio_telemetry::telemetry::{MemoryBuffer, RecorderBuilderTokioExt, recorder};
 
-let traced = recorder(InMemoryWriter::new(16 * 1024 * 1024).unwrap())
+let traced = recorder(MemoryBuffer::new(16 * 1024 * 1024).unwrap())
     .with_tokio(|t| {
         t.worker_threads(4);
     })
@@ -574,7 +574,7 @@ dial9-tokio-telemetry = { version = "0.3", features = ["worker-s3"] }
 ```rust,ignore
 # #[cfg(feature = "worker-s3")]
 # mod inner {
-use dial9::{DiskWriter, RecorderBuilderTokioExt, TracedRecorder};
+use dial9::{DiskBuffer, RecorderBuilderTokioExt, TracedRecorder};
 use dial9_tokio_telemetry::background_task::s3::S3Config;
 
 fn my_config() -> TracedRecorder {
@@ -583,7 +583,7 @@ fn my_config() -> TracedRecorder {
         .service_name("my-service")
         .build();
 
-    let writer = DiskWriter::builder()
+    let writer = DiskBuffer::builder()
         .base_path("/tmp/dial9/trace.bin")
         .max_total_size(1 << 30)
         .build()
@@ -613,16 +613,16 @@ runtime is dropped.
 
 ### Running without disk (in-memory)
 
-To run with **no filesystem dependency** (disk unavailable, read-only, or unwelcome) use `InMemoryWriter`. Encoded segments stay in process memory and are shipped by the same processor pipeline (S3, custom, ...).
+To run with **no filesystem dependency** (disk unavailable, read-only, or unwelcome) use `MemoryBuffer`. Encoded segments stay in process memory and are shipped by the same processor pipeline (S3, custom, ...).
 
 ```rust,no_run
 # #[cfg(feature = "worker-s3")]
 # mod inner {
 use dial9_tokio_telemetry::background_task::s3::S3Config;
-use dial9_tokio_telemetry::telemetry::{InMemoryWriter, RecorderBuilderTokioExt, recorder};
+use dial9_tokio_telemetry::telemetry::{MemoryBuffer, RecorderBuilderTokioExt, recorder};
 
 # fn example() -> std::io::Result<()> {
-let writer = InMemoryWriter::new(16 * 1024 * 1024)?; // 16 MiB RAM budget
+let writer = MemoryBuffer::new(16 * 1024 * 1024)?; // 16 MiB RAM budget
 
 let s3 = S3Config::builder().bucket("my-bucket").service_name("svc").build();
 let traced = recorder(writer)

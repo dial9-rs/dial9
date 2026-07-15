@@ -6,13 +6,13 @@ use common::{fast_sealing_writer, wait_for_sealed_segment};
 use dial9_tokio_telemetry::background_task::s3::S3Config;
 use dial9_tokio_telemetry::dump::DumpError;
 use dial9_tokio_telemetry::telemetry::{
-    DiskWriter, InMemoryWriter, RecorderBuilderTokioExt, recorder,
+    DiskBuffer, MemoryBuffer, RecorderBuilderTokioExt, recorder,
 };
 
 /// `with_dump_trigger` is available in every pipeline state (compile check).
 #[allow(dead_code)]
 fn with_dump_trigger_compiles_in_all_pipeline_states() {
-    let _unset = recorder(InMemoryWriter::new(4096).unwrap())
+    let _unset = recorder(MemoryBuffer::new(4096).unwrap())
         .with_tokio(|_| {})
         .with_dump_trigger(|_| {});
 
@@ -20,12 +20,12 @@ fn with_dump_trigger_compiles_in_all_pipeline_states() {
         .bucket("bucket")
         .service_name("service")
         .build();
-    let _s3 = recorder(InMemoryWriter::new(4096).unwrap())
+    let _s3 = recorder(MemoryBuffer::new(4096).unwrap())
         .with_tokio(|_| {})
         .with_s3_uploader(s3_config)
         .with_dump_trigger(|_| {});
 
-    let _custom = recorder(DiskWriter::single_file("throwaway").unwrap())
+    let _custom = recorder(DiskBuffer::single_file("throwaway").unwrap())
         .with_tokio(|_| {})
         .with_custom_pipeline(|p| p.gzip().write_back())
         .with_dump_trigger(|_| {});
@@ -38,7 +38,7 @@ fn trigger_without_pipeline_resolves_worker_stopped() {
     let dir = tempfile::tempdir().unwrap();
     let trace_path = dir.path().join("trace.bin");
 
-    let writer = DiskWriter::single_file(&trace_path).unwrap();
+    let writer = DiskBuffer::single_file(&trace_path).unwrap();
 
     let session = recorder(writer)
         .with_tokio(|t| {

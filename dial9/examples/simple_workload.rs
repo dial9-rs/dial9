@@ -39,7 +39,7 @@ async fn mixed_task(id: usize) {
 }
 
 #[dial9::main(config = || {
-    let writer = dial9::DiskWriter::builder()
+    let writer = dial9::DiskBuffer::builder()
         .base_path("simple_workload_trace.bin")
         .max_file_size(64 * 1024 * 1024)
         .max_total_size(256 * 1024 * 1024)

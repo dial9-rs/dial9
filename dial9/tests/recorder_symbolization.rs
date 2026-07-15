@@ -1,8 +1,10 @@
 //! Linux-only: sampling needs `perf_event_open`.
 #![cfg(all(feature = "cpu-profiling", feature = "pipeline", target_os = "linux"))]
 
+use dial9::cpu::{CpuProfiler, CpuProfilingConfig};
+use dial9::pipeline::SymbolizeProcessor;
 use dial9::worker::processors::WriteBackProcessor;
-use dial9::{CpuProfiler, CpuProfilingConfig, DiskWriter, SymbolizeProcessor, recorder};
+use dial9::{DiskBuffer, recorder};
 use dial9_trace_format::decoder::Decoder;
 use std::time::{Duration, Instant};
 
@@ -29,7 +31,7 @@ fn recorder_symbolizes_cpu_samples() {
 
     // `single_file` seals only at shutdown, so the whole run lands in one
     // segment the worker symbolizes on drain.
-    let writer = DiskWriter::single_file(dir.path().join("trace.bin")).expect("writer");
+    let writer = DiskBuffer::single_file(dir.path().join("trace.bin")).expect("writer");
     let profiler = CpuProfiler::start(CpuProfilingConfig::default().frequency_hz(999))
         .expect("start cpu profiler");
 

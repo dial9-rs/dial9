@@ -3,7 +3,7 @@ mod common;
 use common::{CAPTURE_BUFFER_SIZE, capture_processor, decode_all, decode_file};
 use dial9_tokio_telemetry::telemetry::analysis_events::{Dial9Event, WorkerId};
 use dial9_tokio_telemetry::telemetry::{
-    DiskWriter, InMemoryWriter, RecorderBuilderTokioExt, recorder,
+    DiskBuffer, MemoryBuffer, RecorderBuilderTokioExt, recorder,
 };
 use std::time::Duration;
 
@@ -17,7 +17,7 @@ fn end_to_end_trace_matches_workload_and_metrics() {
     let num_workers = 4;
     let total_tasks: usize = 2000;
 
-    let writer = DiskWriter::single_file(&trace_path).unwrap();
+    let writer = DiskBuffer::single_file(&trace_path).unwrap();
     let session = recorder(writer)
         .with_tokio(move |t| {
             t.worker_threads(num_workers);
@@ -135,7 +135,7 @@ fn task_spawn_events_from_main_thread_are_captured() {
 
     const N: usize = 10;
 
-    let session = recorder(InMemoryWriter::new(CAPTURE_BUFFER_SIZE).unwrap())
+    let session = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
         .with_tokio(|t| {
             t.worker_threads(2);
         })
@@ -175,7 +175,7 @@ fn task_terminate_events_are_captured() {
 
     const N: usize = 10;
 
-    let session = recorder(InMemoryWriter::new(CAPTURE_BUFFER_SIZE).unwrap())
+    let session = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
         .with_tokio(|t| {
             t.worker_threads(2);
         })
@@ -223,7 +223,7 @@ fn custom_event_appears_in_trace() {
     let dir = tempfile::tempdir().unwrap();
     let trace_path = dir.path().join("trace.bin");
 
-    let writer = DiskWriter::single_file(&trace_path).unwrap();
+    let writer = DiskBuffer::single_file(&trace_path).unwrap();
     let session = recorder(writer)
         .with_tokio(|t| {
             t.worker_threads(2);
@@ -266,7 +266,7 @@ fn spawn_audit_detects_uninstrumented_spawns() {
     const RAW: usize = 5;
     const INSTRUMENTED: usize = 3;
 
-    let writer = DiskWriter::single_file(&trace_path).unwrap();
+    let writer = DiskBuffer::single_file(&trace_path).unwrap();
     let session = recorder(writer)
         .with_tokio(|t| {
             t.worker_threads(2);

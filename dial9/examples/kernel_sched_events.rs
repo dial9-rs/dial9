@@ -47,7 +47,7 @@
 
 use dial9::telemetry::SchedEventConfig;
 use dial9::telemetry::analysis_events::{CpuSampleSource, Dial9Event};
-use dial9::{DiskWriter, recorder};
+use dial9::{DiskBuffer, recorder};
 use dial9::{RecorderBuilderTokioExt, RecorderPerfExt};
 use dial9_trace_format::decoder::Decoder;
 use std::time::Duration;
@@ -66,7 +66,7 @@ fn main() {
     let trace_base = format!("{trace_dir}/kernel_sched_trace.bin");
     let trace_read_path = format!("{trace_dir}/kernel_sched_trace.0.bin");
 
-    let writer = DiskWriter::single_file(&trace_base).unwrap();
+    let writer = DiskBuffer::single_file(&trace_base).unwrap();
     let session = recorder(writer)
         .with_sched_events(
             SchedEventConfig::default()

@@ -17,7 +17,7 @@
 //!   cargo run --example analyze_trace -- /tmp/thread_per_core/trace.0.bin
 
 use dial9::telemetry::analysis_events::{Dial9Event, WorkerId};
-use dial9::telemetry::{DiskWriter, RecorderBuilderTokioExt, recorder};
+use dial9::telemetry::{DiskBuffer, RecorderBuilderTokioExt, recorder};
 use dial9_trace_format::decoder::Decoder;
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
@@ -37,7 +37,7 @@ fn main() -> std::io::Result<()> {
         }
     }
 
-    let writer = DiskWriter::builder()
+    let writer = DiskBuffer::builder()
         .base_path(format!("{trace_dir}/trace.bin"))
         .max_file_size(1024 * 1024)
         .max_total_size(5 * 1024 * 1024)

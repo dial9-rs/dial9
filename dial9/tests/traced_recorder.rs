@@ -2,14 +2,14 @@
 //! runtime built from the core recorder, producing poll instrumentation.
 #![cfg(feature = "tokio")]
 
-use dial9::{DiskWriter, recorder};
+use dial9::{DiskBuffer, recorder};
 use dial9::{RecorderBuilderTokioExt, RegisterSource};
 use dial9_trace_format::decoder::Decoder;
 
 #[test]
 fn recorder_with_tokio_records_poll_events() {
     let dir = tempfile::tempdir().unwrap();
-    let writer = DiskWriter::single_file(dir.path().join("trace.bin")).unwrap();
+    let writer = DiskBuffer::single_file(dir.path().join("trace.bin")).unwrap();
 
     let session = recorder(writer)
         .with_tokio(|t| {
@@ -62,7 +62,7 @@ fn recorder_with_tokio_records_poll_events() {
 #[test]
 fn recorder_with_tokio_disabled_runs_plainly() {
     let dir = tempfile::tempdir().unwrap();
-    let writer = DiskWriter::single_file(dir.path().join("trace.bin")).unwrap();
+    let writer = DiskBuffer::single_file(dir.path().join("trace.bin")).unwrap();
 
     let session = recorder(writer)
         .with_tokio(|_| {})
@@ -80,7 +80,7 @@ fn recorder_with_tokio_disabled_runs_plainly() {
 #[test]
 fn recorder_with_tokio_dump_trigger_reachable() {
     let dir = tempfile::tempdir().unwrap();
-    let writer = DiskWriter::single_file(dir.path().join("trace.bin")).unwrap();
+    let writer = DiskBuffer::single_file(dir.path().join("trace.bin")).unwrap();
 
     let session = recorder(writer)
         .with_tokio(|_| {})
@@ -103,7 +103,7 @@ fn recorder_with_tokio_dump_trigger_reachable() {
 #[test]
 fn traced_recorder_is_macro_compatible() {
     let dir = tempfile::tempdir().unwrap();
-    let writer = DiskWriter::single_file(dir.path().join("trace.bin")).unwrap();
+    let writer = DiskBuffer::single_file(dir.path().join("trace.bin")).unwrap();
     let builder = recorder(writer).with_tokio(|_| {});
     let session = dial9::TokioSession::try_new(builder).expect("try_into TokioSession");
     session.graceful_shutdown();
@@ -121,7 +121,7 @@ fn recorder_or_disabled_runs_tokio_config_on_writer_failure() {
     let dir = tempfile::tempdir().unwrap();
     let blocker = dir.path().join("not-a-dir");
     std::fs::write(&blocker, b"x").unwrap();
-    let writer = DiskWriter::builder()
+    let writer = DiskBuffer::builder()
         .base_path(blocker.join("trace.bin"))
         .max_total_size(4 * 1024 * 1024)
         .build();
@@ -150,9 +150,9 @@ fn recorder_or_disabled_runs_tokio_config_on_writer_failure() {
 /// builds an enabled, memory-backed runtime just like disk does.
 #[test]
 fn recorder_or_disabled_accepts_in_memory_writer() {
-    use dial9::InMemoryWriter;
+    use dial9::MemoryBuffer;
 
-    let writer = InMemoryWriter::new(4 * 1024 * 1024);
+    let writer = MemoryBuffer::new(4 * 1024 * 1024);
     let session = dial9::recorder_or_disabled(writer, |b| {
         b.worker_threads(1);
     })
@@ -171,9 +171,9 @@ fn recorder_or_disabled_accepts_in_memory_writer() {
 /// a disabled runtime the same way disk does, with the configurator preserved.
 #[test]
 fn recorder_or_disabled_downgrades_on_in_memory_writer_failure() {
-    use dial9::InMemoryWriter;
+    use dial9::MemoryBuffer;
 
-    let writer: std::io::Result<InMemoryWriter> =
+    let writer: std::io::Result<MemoryBuffer> =
         Err(std::io::Error::other("simulated in-memory writer failure"));
 
     let session = dial9::recorder_or_disabled(writer, |b| {
@@ -220,7 +220,7 @@ fn source_registered_after_with_tokio_is_recorded() {
     }
 
     let dir = tempfile::tempdir().unwrap();
-    let writer = DiskWriter::single_file(dir.path().join("trace.bin")).unwrap();
+    let writer = DiskBuffer::single_file(dir.path().join("trace.bin")).unwrap();
 
     let session = recorder(writer)
         .with_tokio(|t| {
@@ -263,7 +263,7 @@ fn on_session_start_fires_on_tokio_path() {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     let dir = tempfile::tempdir().unwrap();
-    let writer = DiskWriter::single_file(dir.path().join("trace.bin")).unwrap();
+    let writer = DiskBuffer::single_file(dir.path().join("trace.bin")).unwrap();
 
     let ran = Arc::new(AtomicBool::new(false));
     let ran_hook = Arc::clone(&ran);

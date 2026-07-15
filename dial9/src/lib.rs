@@ -11,15 +11,15 @@
 //! `dial9` binary (the `cli` feature, on by default).
 
 // Core recording API
-pub use dial9_core::buffer::{self, Encodable, ThreadLocalEncoder};
+pub use dial9_core::buffer::{
+    self, BufferMode, Disk, DiskBuffer, Memory, MemoryBuffer, SegmentWriter,
+};
 pub use dial9_core::clock::{self, clock_monotonic_ns};
+pub use dial9_core::encoder::{self, Encodable, ThreadLocalEncoder};
 pub use dial9_core::handle::{self, Dial9Handle, clear_tl_handle, current_handle, set_tl_handle};
 pub use dial9_core::recorder::{self, RecorderBuilder, RegisterSource, recorder};
 pub use dial9_core::session::{self, CoreSession};
 pub use dial9_core::source::{self, FlushContext, Source};
-pub use dial9_core::writer::{
-    self, Disk, DiskWriter, InMemoryWriter, Memory, SegmentWriter, WriterMode,
-};
 
 /// Record an event on the calling thread's current handle.
 ///
@@ -59,15 +59,15 @@ pub use config::recorder_from_env;
 
 /// Build a [`TokioSessionBuilder`] from a writer result, or fall back to a disabled
 /// (writer-free) one when the writer cannot be created. Works with any writer:
-/// [`DiskWriter`] or [`InMemoryWriter`]. Telemetry stays best-effort: a failed
+/// [`DiskBuffer`] or [`MemoryBuffer`]. Telemetry stays best-effort: a failed
 /// writer logs at `error!` and runs a plain Tokio runtime rather than panicking
 /// your service. `configure` is applied on both paths, so your Tokio settings
 /// survive the downgrade.
 ///
 /// ```no_run
-/// use dial9::DiskWriter;
+/// use dial9::DiskBuffer;
 /// fn config() -> dial9::TokioSessionBuilder {
-///     let writer = DiskWriter::builder()
+///     let writer = DiskBuffer::builder()
 ///         .base_path("/tmp/trace.bin")
 ///         .max_total_size(64 * 1024 * 1024)
 ///         .build();
@@ -84,7 +84,7 @@ pub fn recorder_or_disabled<M, F>(
     configure: F,
 ) -> TokioSessionBuilder<M>
 where
-    M: WriterMode,
+    M: BufferMode,
     F: Fn(&mut ::tokio::runtime::Builder) + Send + Sync + 'static,
 {
     match writer {

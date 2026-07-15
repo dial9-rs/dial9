@@ -31,7 +31,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
 
-use dial9::DiskWriter;
+use dial9::DiskBuffer;
 use dial9::background_task::{ProcessError, SegmentData, SegmentProcessor};
 use dial9::telemetry::Dial9TokioHandle;
 
@@ -185,7 +185,7 @@ async fn worker_task(id: usize) {
     let _ = std::fs::create_dir_all(TRACE_DIR);
     let base_path = format!("{TRACE_DIR}/trace.bin");
 
-    let writer = DiskWriter::builder()
+    let writer = DiskBuffer::builder()
         .base_path(base_path)
         // Small per-file budget + short rotation period so we get several
         // sealed segments in a few seconds of work - otherwise the whole

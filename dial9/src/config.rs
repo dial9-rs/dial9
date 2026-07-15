@@ -11,7 +11,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use dial9_core::writer::{Disk, DiskWriter, SegmentWriter};
+use dial9_core::buffer::{Disk, DiskBuffer, SegmentWriter};
 use dial9_tokio_telemetry::telemetry::{RecorderBuilderTokioExt, TokioSessionBuilder};
 
 #[cfg(any(
@@ -138,12 +138,12 @@ struct ResolvedEnvConfig {
     enabled: bool,
     trace_dir: PathBuf,
 
-    // None means the underlying DiskWriter builder owns the default.
+    // None means the underlying DiskBuffer builder owns the default.
     rotation_period: Option<Duration>,
 
     max_total_size: u64,
 
-    // None means the underlying DiskWriter builder owns the default.
+    // None means the underlying DiskBuffer builder owns the default.
     max_file_size: Option<u64>,
 
     tokio_instrumentation_enabled: Option<bool>,
@@ -632,7 +632,7 @@ fn build_env_disk_writer(
     rotation_period: Option<Duration>,
 ) -> std::io::Result<SegmentWriter<Disk>> {
     let namespace = dial9_core::boot_id::setup_namespace(base_path, gc_dead_namespaces)?;
-    let mut writer = DiskWriter::builder()
+    let mut writer = DiskBuffer::builder()
         .base_path(namespace.trace_path.clone())
         .maybe_max_file_size(max_file_size)
         .max_total_size(max_total_size)

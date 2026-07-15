@@ -1,4 +1,4 @@
-use crate::buffer::{Encodable, ThreadLocalEncoder};
+use crate::encoder::{Encodable, ThreadLocalEncoder};
 use crate::primitives::sync::Arc;
 use crate::shared_state::SharedState;
 use std::cell::RefCell;

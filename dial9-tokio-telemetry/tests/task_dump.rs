@@ -4,7 +4,7 @@ mod common;
 
 use common::{CAPTURE_BUFFER_SIZE, capture_processor, decode_all};
 use dial9_tokio_telemetry::telemetry::{
-    InMemoryWriter, RecorderBuilderTokioExt, TaskDumpConfig, recorder,
+    MemoryBuffer, RecorderBuilderTokioExt, TaskDumpConfig, recorder,
 };
 use serde::Deserialize;
 use std::time::Duration;
@@ -36,7 +36,7 @@ enum DumpEvent {
 fn task_dump_emitted_for_long_sleep() {
     let (capture, batches) = capture_processor();
 
-    let session = recorder(InMemoryWriter::new(CAPTURE_BUFFER_SIZE).unwrap())
+    let session = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
         .with_tokio(|t| {
             *t = tokio::runtime::Builder::new_current_thread();
             t.enable_all();
@@ -78,7 +78,7 @@ fn task_dump_emitted_for_long_sleep() {
 fn no_task_dump_for_short_sleep() {
     let (capture, batches) = capture_processor();
 
-    let session = recorder(InMemoryWriter::new(CAPTURE_BUFFER_SIZE).unwrap())
+    let session = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
         .with_tokio(|t| {
             *t = tokio::runtime::Builder::new_current_thread();
             t.enable_all();
@@ -119,7 +119,7 @@ fn task_dump_does_not_produce_extra_events() {
     fn run(enable: bool) -> (usize, usize, usize) {
         let (capture, batches) = capture_processor();
 
-        let mut tb = recorder(InMemoryWriter::new(CAPTURE_BUFFER_SIZE).unwrap())
+        let mut tb = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
             .with_tokio(|t| {
                 *t = tokio::runtime::Builder::new_current_thread();
                 t.enable_all();
@@ -173,7 +173,7 @@ fn task_dump_does_not_produce_extra_events() {
 fn spawn_with_joinset_emits_task_dump() {
     let (capture, batches) = capture_processor();
 
-    let session = recorder(InMemoryWriter::new(CAPTURE_BUFFER_SIZE).unwrap())
+    let session = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
         .with_tokio(|t| {
             *t = tokio::runtime::Builder::new_current_thread();
             t.enable_all();

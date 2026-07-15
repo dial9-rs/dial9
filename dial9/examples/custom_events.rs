@@ -10,7 +10,7 @@
 //! ```
 
 use dial9::telemetry::{
-    DiskWriter, Encodable, RecorderBuilderTokioExt, ThreadLocalEncoder, clock_monotonic_ns,
+    DiskBuffer, Encodable, RecorderBuilderTokioExt, ThreadLocalEncoder, clock_monotonic_ns,
     recorder,
 };
 use dial9_trace_format::{InternedString, TraceEvent};
@@ -67,7 +67,7 @@ fn main() -> std::io::Result<()> {
     let dir = tempfile::tempdir()?;
     let trace_path = dir.path().join("trace.bin");
 
-    let writer = DiskWriter::single_file(&trace_path)?;
+    let writer = DiskBuffer::single_file(&trace_path)?;
     let session = recorder(writer)
         .with_tokio(|t| {
             t.worker_threads(2);

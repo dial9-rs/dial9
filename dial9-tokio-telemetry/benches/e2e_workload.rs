@@ -7,7 +7,7 @@ mod bmf;
 use dial9_tokio_telemetry::telemetry::CpuProfilingConfig;
 #[cfg(target_os = "linux")]
 use dial9_tokio_telemetry::telemetry::RecorderPerfExt;
-use dial9_tokio_telemetry::telemetry::{DiskWriter, RecorderBuilderTokioExt, recorder};
+use dial9_tokio_telemetry::telemetry::{DiskBuffer, RecorderBuilderTokioExt, recorder};
 use std::time::Instant;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -66,7 +66,7 @@ async fn cpu_task() {
 }
 
 fn main() {
-    let writer = DiskWriter::single_file("/tmp/e2e_workload_trace.bin").unwrap();
+    let writer = DiskBuffer::single_file("/tmp/e2e_workload_trace.bin").unwrap();
     #[allow(unused_mut)]
     let mut rec = recorder(writer);
     #[cfg(target_os = "linux")]

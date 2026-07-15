@@ -19,7 +19,7 @@
 fn main() {}
 
 use dial9_tokio_telemetry::telemetry::{
-    InMemoryWriter, RecorderBuilderTokioExt, TokioSession, recorder,
+    MemoryBuffer, RecorderBuilderTokioExt, TokioSession, recorder,
 };
 use dial9_tokio_telemetry::tracing_layer::Dial9TracingLayer;
 use iai_callgrind::{library_benchmark, library_benchmark_group, main};
@@ -33,7 +33,7 @@ struct Harness {
 }
 
 fn setup_tracing_only() -> Harness {
-    let session = recorder(InMemoryWriter::new(16 * 1024 * 1024).unwrap())
+    let session = recorder(MemoryBuffer::new(16 * 1024 * 1024).unwrap())
         .with_tokio(|t| {
             *t = tokio::runtime::Builder::new_current_thread();
             t.enable_all();
@@ -48,7 +48,7 @@ fn setup_tracing_only() -> Harness {
 }
 
 fn setup_with_dial9() -> Harness {
-    let session = recorder(InMemoryWriter::new(16 * 1024 * 1024).unwrap())
+    let session = recorder(MemoryBuffer::new(16 * 1024 * 1024).unwrap())
         .with_tokio(|t| {
             *t = tokio::runtime::Builder::new_current_thread();
             t.enable_all();

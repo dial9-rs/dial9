@@ -8,17 +8,17 @@ fn tmp_base_path() -> PathBuf {
 }
 
 // ===========================================================================
-// Recorder builder API — `recorder(DiskWriter::builder()...).with_tokio(..)`
+// Recorder builder API — `recorder(DiskBuffer::builder()...).with_tokio(..)`
 // ===========================================================================
 mod fluent_builder {
     use std::panic::{AssertUnwindSafe, catch_unwind};
 
-    use dial9::{DiskWriter, RecorderBuilderTokioExt, TokioSessionBuilder};
+    use dial9::{DiskBuffer, RecorderBuilderTokioExt, TokioSessionBuilder};
 
     use super::tmp_base_path;
 
     fn test_config() -> TokioSessionBuilder {
-        let writer = DiskWriter::builder()
+        let writer = DiskBuffer::builder()
             .base_path(tmp_base_path())
             .max_file_size(1024 * 1024)
             .max_total_size(4 * 1024 * 1024)
@@ -44,7 +44,7 @@ mod fluent_builder {
     }
 
     #[dial9::main(config = || {
-        let writer = DiskWriter::builder()
+        let writer = DiskBuffer::builder()
             .base_path(tmp_base_path())
             .max_file_size(1024 * 1024)
             .max_total_size(4 * 1024 * 1024)
@@ -62,7 +62,7 @@ mod fluent_builder {
     }
 
     #[dial9::main(config = move || {
-        let writer = DiskWriter::builder()
+        let writer = DiskBuffer::builder()
             .base_path(tmp_base_path())
             .max_file_size(1024 * 1024)
             .max_total_size(4 * 1024 * 1024)
@@ -239,14 +239,14 @@ mod fluent_builder {
     }
 }
 
-// In-memory writer via `recorder(InMemoryWriter::builder()...)`.
+// In-memory writer via `recorder(MemoryBuffer::builder()...)`.
 mod in_memory {
     use std::future::Future;
     use std::pin::Pin;
 
     use dial9::background_task::{ProcessError, SegmentData, SegmentProcessor};
     use dial9::telemetry::{Dial9Handle, Dial9TokioHandle};
-    use dial9::{InMemoryWriter, RecorderBuilderTokioExt, TokioSessionBuilder};
+    use dial9::{MemoryBuffer, RecorderBuilderTokioExt, TokioSessionBuilder};
 
     /// Stand-in delivery processor: forwards each segment unchanged.
     #[derive(Debug, Default)]
@@ -266,7 +266,7 @@ mod in_memory {
     }
 
     fn memory_config() -> TokioSessionBuilder<dial9::Memory> {
-        let writer = InMemoryWriter::builder()
+        let writer = MemoryBuffer::builder()
             .max_total_size(16 * 1024 * 1024)
             .build()
             .expect("in-memory writer build failed");
@@ -300,14 +300,14 @@ mod fluent_builder_fallback {
     use std::path::PathBuf;
 
     use dial9::telemetry::Dial9Handle;
-    use dial9::{DiskWriter, TokioSessionBuilder};
+    use dial9::{DiskBuffer, TokioSessionBuilder};
 
     use super::tmp_base_path;
 
     /// Build a disk-backed recorder, or fall back to a disabled recorder (a
     /// plain tokio runtime) when the writer cannot be created.
     fn disk_recorder_or_disabled(base_path: PathBuf) -> TokioSessionBuilder {
-        let writer = DiskWriter::builder()
+        let writer = DiskBuffer::builder()
             .base_path(base_path)
             .max_file_size(1024 * 1024)
             .max_total_size(4 * 1024 * 1024)

@@ -20,7 +20,7 @@ pub(crate) use test_util_pub;
 /// Shared boot identifier (`{4-alpha}-{pid}`) for segment namespacing + S3 keys.
 #[doc(hidden)]
 pub mod boot_id;
-/// Thread-local event encoding buffers and the `Encodable` trait.
+/// Rotating trace-segment buffers: the on-disk and in-memory sinks.
 pub mod buffer;
 /// Monotonic/realtime clock readings, the trace time base.
 pub mod clock;
@@ -31,6 +31,8 @@ pub mod custom_events;
 /// On-demand pipeline runs: trigger, request channel, and dump receipts.
 #[cfg(feature = "pipeline")]
 pub mod dump;
+/// Thread-local event encoding buffers and the `Encodable` trait.
+pub mod encoder;
 /// Flush-thread loop. Driven by `CoreSession`; not public API.
 pub(crate) mod flush_loop;
 /// Wire-format events emitted by the bus itself.
@@ -77,8 +79,6 @@ pub mod thread;
 /// Segment-processing worker: runs a `SegmentProcessor` pipeline over sealed segments.
 #[cfg(feature = "pipeline")]
 pub mod worker;
-/// Rotating trace-segment writer.
-pub mod writer;
 
 #[cfg(all(test, shuttle))]
 mod pipeline_shuttle_tests;

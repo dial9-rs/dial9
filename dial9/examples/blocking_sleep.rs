@@ -1,4 +1,4 @@
-use dial9::{DiskWriter, recorder};
+use dial9::{DiskBuffer, recorder};
 use dial9::{RecorderBuilderTokioExt, RecorderPerfExt};
 use std::time::Duration;
 
@@ -12,7 +12,7 @@ async fn blocking_task(id: usize) {
 }
 
 fn main() {
-    let writer = DiskWriter::single_file("blocking_sleep_trace.bin").unwrap();
+    let writer = DiskBuffer::single_file("blocking_sleep_trace.bin").unwrap();
     let session = recorder(writer)
         .with_cpu_profiling(Default::default())
         .with_sched_events(Default::default())

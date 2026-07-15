@@ -15,7 +15,7 @@ use dial9::telemetry::SocketAcceptQueuesConfig;
 use dial9::telemetry::{CpuProfilingConfig, SchedEventConfig};
 use dial9::telemetry::{Dial9TokioHandle, ProcessResourceUsageConfig, TaskDumpConfig};
 use dial9::tracing_layer::Dial9TracingLayer;
-use dial9::{DiskWriter, recorder};
+use dial9::{DiskBuffer, recorder};
 use dial9::{RecorderBuilderTokioExt, RecorderPerfExt};
 use tokio_util::sync::CancellationToken;
 
@@ -189,7 +189,7 @@ fn main() -> std::io::Result<()> {
         args.trace_max_total_size = 100_000_000;
     }
 
-    let writer = DiskWriter::builder()
+    let writer = DiskBuffer::builder()
         .base_path(&args.trace_path)
         .max_file_size(args.trace_max_file_size)
         .max_total_size(args.trace_max_total_size)

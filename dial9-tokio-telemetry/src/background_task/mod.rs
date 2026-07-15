@@ -3,7 +3,7 @@ pub(crate) mod testutil;
 
 pub use dial9_core::pipeline::{MemorySegment, Payload, SealedSegment, SegmentRef};
 
-use crate::telemetry::writer::{Disk, WriterMode};
+use crate::telemetry::buffer::{BufferMode, Disk};
 use std::marker::PhantomData;
 use std::path::PathBuf;
 
@@ -45,12 +45,12 @@ pub(crate) use dial9_utils::s3::S3PipelineUploader;
 /// builder.with_custom_pipeline(|p| p.pipe(Logger).gzip().write_back())
 /// ```
 #[must_use]
-pub struct PipelineBuilder<Mode: WriterMode = Disk> {
+pub struct PipelineBuilder<Mode: BufferMode = Disk> {
     processors: Vec<Box<dyn SegmentProcessor>>,
     _marker: PhantomData<Mode>,
 }
 
-impl<Mode: WriterMode> PipelineBuilder<Mode> {
+impl<Mode: BufferMode> PipelineBuilder<Mode> {
     pub(crate) fn new() -> Self {
         Self {
             processors: Vec::new(),
@@ -136,7 +136,7 @@ impl PipelineBuilder<Disk> {
     }
 }
 
-impl<Mode: WriterMode> std::fmt::Debug for PipelineBuilder<Mode> {
+impl<Mode: BufferMode> std::fmt::Debug for PipelineBuilder<Mode> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PipelineBuilder")
             .field("len", &self.processors.len())

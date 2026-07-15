@@ -2,7 +2,7 @@ mod common;
 
 use common::decode_file;
 use dial9_tokio_telemetry::telemetry::analysis_events::{Dial9Event, WorkerId};
-use dial9_tokio_telemetry::telemetry::{DiskWriter, RecorderBuilderTokioExt, recorder};
+use dial9_tokio_telemetry::telemetry::{DiskBuffer, RecorderBuilderTokioExt, recorder};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -58,7 +58,7 @@ fn overhead_bench_validates() {
     let trace_path = dir.path().join("trace.bin");
 
     let num_workers = 4;
-    let writer = DiskWriter::single_file(&trace_path).unwrap();
+    let writer = DiskBuffer::single_file(&trace_path).unwrap();
     let session = recorder(writer)
         .with_tokio(move |t| {
             t.worker_threads(num_workers);

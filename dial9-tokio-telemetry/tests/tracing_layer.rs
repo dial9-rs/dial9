@@ -3,7 +3,7 @@
 // Only one test per process can do this. All other tests must use `set_default`
 // (thread-local) instead.
 
-use dial9_tokio_telemetry::telemetry::{DiskWriter, RecorderBuilderTokioExt, recorder};
+use dial9_tokio_telemetry::telemetry::{DiskBuffer, RecorderBuilderTokioExt, recorder};
 use dial9_tokio_telemetry::tracing_layer::Dial9TracingLayer;
 use dial9_trace_format::types::FieldValueRef;
 use std::collections::HashSet;
@@ -125,7 +125,7 @@ fn span_events_appear_in_trace() {
     let dir = tempfile::tempdir().unwrap();
     let trace_path = dir.path().join("trace.bin");
 
-    let writer = DiskWriter::single_file(&trace_path).unwrap();
+    let writer = DiskBuffer::single_file(&trace_path).unwrap();
     let session = recorder(writer)
         .with_tokio(|t| {
             t.worker_threads(4);
@@ -340,7 +340,7 @@ fn span_events_on_current_thread_runtime() {
     let dir = tempfile::tempdir().unwrap();
     let trace_path = dir.path().join("trace.bin");
 
-    let writer = DiskWriter::single_file(&trace_path).unwrap();
+    let writer = DiskBuffer::single_file(&trace_path).unwrap();
     let session = recorder(writer)
         .with_tokio(|t| {
             *t = tokio::runtime::Builder::new_current_thread();

@@ -7,7 +7,7 @@
 //! - [`SchedProfiler`] — per-worker-thread context-switch capture.
 
 use crate::{EventSource, PerfSampler, SamplerConfig, SamplingMode};
-use dial9_core::buffer::{Encodable, ThreadLocalEncoder};
+use dial9_core::encoder::{Encodable, ThreadLocalEncoder};
 use dial9_core::source::{FlushContext, Source};
 use dial9_trace_format::types::{EventEncoder, FieldType};
 use dial9_trace_format::{InternedStackFrames, InternedString, TraceEvent, TraceField};

@@ -1,9 +1,9 @@
+use crate::buffer::{BufferMode, SegmentWriter};
 use crate::flush_loop::run_flush_loop;
 use crate::handle::{ControlCommand, Dial9Handle};
 use crate::primitives::sync::{Arc, Mutex};
 use crate::primitives::{sync::mpsc, thread::JoinHandle};
 use crate::shared_state::SharedState;
-use crate::writer::{SegmentWriter, WriterMode};
 use std::time::Duration;
 
 /// The background worker thread and its stop signal.
@@ -81,7 +81,7 @@ impl CoreSession {
         thread_init: Init,
     ) -> Self
     where
-        M: WriterMode + Send + 'static,
+        M: BufferMode + Send + 'static,
         Init: FnOnce() -> Teardown + Send + 'static,
         Teardown: FnOnce(),
     {
@@ -151,7 +151,7 @@ impl CoreSession {
         // Drain the calling thread's local buffer — it won't get a thread-stop
         // hook, so any unflushed events would be lost otherwise.
         if let Some(shared) = self.handle.shared() {
-            crate::buffer::drain_to_collector(&shared.collector);
+            crate::encoder::drain_to_collector(&shared.collector);
         }
 
         // Tell the flush thread to do a final flush + finalize, then exit.

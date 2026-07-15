@@ -385,7 +385,7 @@ impl Fs {
         }
     }
 
-    /// Returns `true` once `DiskWriter::finalize` has run.
+    /// Returns `true` once `DiskBuffer::finalize` has run.
     #[cfg(feature = "pipeline")]
     pub(crate) fn writer_done(&self) -> bool {
         match self {

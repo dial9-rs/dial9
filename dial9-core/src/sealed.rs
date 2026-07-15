@@ -1,6 +1,6 @@
 //! Sealed-file detection for the worker pipeline.
 //!
-//! Finds `.bin` files produced by `DiskWriter` rename-on-seal,
+//! Finds `.bin` files produced by `DiskBuffer` rename-on-seal,
 //! ignoring `.active` files that are still being written.
 
 // The segment types here are the public pipeline API, exposed via the

@@ -5,7 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
-use dial9::{DiskWriter, RecorderBuilderTokioExt};
+use dial9::{DiskBuffer, RecorderBuilderTokioExt};
 
 /// Names a directory entry that looks like a boot_id (`{4-alpha}-{pid}`).
 fn is_boot_id_dir(path: &Path) -> bool {
@@ -42,12 +42,12 @@ fn has_trace_segment(boot_dir: &Path) -> bool {
 
 /// Build a namespaced disk writer under `trace_dir`, the way the managed env
 /// path does: set up the per-process `{boot_id}/` namespace, then point a
-/// `DiskWriter` at the rewritten trace path.
-fn namespaced_writer(trace_dir: &Path, gc_dead_namespaces: bool) -> DiskWriter {
+/// `DiskBuffer` at the rewritten trace path.
+fn namespaced_writer(trace_dir: &Path, gc_dead_namespaces: bool) -> DiskBuffer {
     let namespace =
         dial9_core::boot_id::setup_namespace(&trace_dir.join("trace.bin"), gc_dead_namespaces)
             .expect("namespace setup should succeed");
-    let mut writer = DiskWriter::builder()
+    let mut writer = DiskBuffer::builder()
         .base_path(namespace.trace_path.clone())
         .max_total_size(4 * 1024 * 1024)
         .build()

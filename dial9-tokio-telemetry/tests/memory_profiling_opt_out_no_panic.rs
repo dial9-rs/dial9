@@ -10,7 +10,7 @@
 use dial9_tokio_telemetry::memory_profiling::{
     Dial9Allocator, MemoryProfiler, MemoryProfilingConfig,
 };
-use dial9_tokio_telemetry::telemetry::{InMemoryWriter, RecorderBuilderTokioExt, recorder};
+use dial9_tokio_telemetry::telemetry::{MemoryBuffer, RecorderBuilderTokioExt, recorder};
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -58,7 +58,7 @@ fn opt_out_prevents_tls_teardown_panic() {
 
     PANICS.store(0, Ordering::Relaxed);
 
-    let session = recorder(InMemoryWriter::new(16 * 1024 * 1024).unwrap())
+    let session = recorder(MemoryBuffer::new(16 * 1024 * 1024).unwrap())
         .with_tokio(|t| {
             t.worker_threads(1);
         })

@@ -10,7 +10,7 @@ use dial9_tokio_telemetry::memory_profiling::{
     Dial9Allocator, MemoryProfiler, MemoryProfilingConfig,
 };
 use dial9_tokio_telemetry::telemetry::analysis_events::Dial9Event;
-use dial9_tokio_telemetry::telemetry::{InMemoryWriter, RecorderBuilderTokioExt, recorder};
+use dial9_tokio_telemetry::telemetry::{MemoryBuffer, RecorderBuilderTokioExt, recorder};
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -42,7 +42,7 @@ static ALLOC: Dial9Allocator<CountingAllocator> = Dial9Allocator::new(CountingAl
 fn hook_realloc_emits_alloc_and_free_when_liveset_on() {
     let (capture, batches) = capture_processor();
 
-    let session = recorder(InMemoryWriter::new(CAPTURE_BUFFER_SIZE).unwrap())
+    let session = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
         .with_tokio(|t| {
             t.worker_threads(1);
         })

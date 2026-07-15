@@ -3,7 +3,7 @@ mod common;
 use common::{CAPTURE_BUFFER_SIZE, capture_processor};
 use dial9_core::recorder::RegisterSource;
 use dial9_tokio_telemetry::telemetry::{
-    CustomEventsConfig, InMemoryWriter, RecorderBuilderTokioExt, recorder,
+    CustomEventsConfig, MemoryBuffer, RecorderBuilderTokioExt, recorder,
 };
 use dial9_trace_format::TraceEvent;
 use dial9_trace_format::decoder::Decoder;
@@ -41,7 +41,7 @@ fn traced_runtime_records_custom_events_callback_events() {
     .unwrap();
     drop(tx);
 
-    let session = recorder(InMemoryWriter::new(CAPTURE_BUFFER_SIZE).unwrap())
+    let session = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
         .with_custom_events(CustomEventsConfig::default(), move |ctx| {
             while let Ok(event) = rx.try_recv() {
                 ctx.record_event(event);
@@ -75,7 +75,7 @@ fn telemetry_core_attach_runtime_records_custom_events_callback_events() {
     .unwrap();
     drop(tx);
 
-    let session = recorder(InMemoryWriter::new(CAPTURE_BUFFER_SIZE).unwrap())
+    let session = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
         .with_custom_events(CustomEventsConfig::default(), move |ctx| {
             while let Ok(event) = rx.try_recv() {
                 ctx.record_event(event);

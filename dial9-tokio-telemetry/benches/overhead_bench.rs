@@ -10,7 +10,7 @@
 //! Modes:
 //!   baseline  – plain tokio runtime, no hooks
 //!   telemetry – hooks installed, writing to a temp file
-//!   noop      – hooks installed, InMemoryWriter (no I/O)
+//!   noop      – hooks installed, MemoryBuffer (no I/O)
 //!
 //! Duration defaults to 30 seconds. A 3-second warmup precedes measurement.
 //! --bmf runs all three modes and outputs Bencher Metric Format JSON.
@@ -22,7 +22,7 @@ use dial9_tokio_telemetry::telemetry::CpuProfilingConfig;
 #[cfg(target_os = "linux")]
 use dial9_tokio_telemetry::telemetry::RecorderPerfExt;
 use dial9_tokio_telemetry::telemetry::{
-    Dial9TokioHandle, DiskWriter, InMemoryWriter, RecorderBuilderTokioExt, TokioSession, recorder,
+    Dial9TokioHandle, DiskBuffer, MemoryBuffer, RecorderBuilderTokioExt, TokioSession, recorder,
 };
 use hdrhistogram::Histogram;
 use std::sync::Arc;
@@ -112,7 +112,7 @@ fn run_bench(mode: &str, duration_secs: u64) -> BenchResult {
     }
     let server: Server = match mode {
         "telemetry" => {
-            let writer = DiskWriter::single_file("/tmp/overhead_bench_trace.bin").unwrap();
+            let writer = DiskBuffer::single_file("/tmp/overhead_bench_trace.bin").unwrap();
             #[allow(unused_mut)]
             let mut rec = recorder(writer);
             #[cfg(target_os = "linux")]
@@ -129,7 +129,7 @@ fn run_bench(mode: &str, duration_secs: u64) -> BenchResult {
             )
         }
         "noop" => Server::Traced(
-            recorder(InMemoryWriter::new(16 * 1024 * 1024).unwrap())
+            recorder(MemoryBuffer::new(16 * 1024 * 1024).unwrap())
                 .with_tokio(|t| {
                     t.worker_threads(4);
                 })

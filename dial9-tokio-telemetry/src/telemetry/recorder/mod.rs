@@ -308,7 +308,7 @@ fn attach_runtime(
 mod tests {
     use super::*;
     use crate::background_task::testutil::{CapturingProcessor, decode_captured};
-    use crate::telemetry::writer::InMemoryWriter;
+    use crate::telemetry::buffer::MemoryBuffer;
     use dial9_core::recorder::recorder;
     use dial9_core::test_util;
     use std::panic::Location;
@@ -338,7 +338,7 @@ mod tests {
     fn current_thread_runtime_resolves_worker_ids() {
         let (capture, data) = CapturingProcessor::new();
 
-        let session = recorder(InMemoryWriter::new(CAPTURE_SIZE).unwrap())
+        let session = recorder(MemoryBuffer::new(CAPTURE_SIZE).unwrap())
             .with_tokio(|t| {
                 *t = tokio::runtime::Builder::new_current_thread();
                 t.enable_all();
@@ -389,7 +389,7 @@ mod tests {
         let on_thread_start_calls = hook_calls.clone();
         let on_before_poll_calls = hook_calls.clone();
 
-        let session = recorder(InMemoryWriter::new(CAPTURE_SIZE).unwrap())
+        let session = recorder(MemoryBuffer::new(CAPTURE_SIZE).unwrap())
             .with_tokio(|t| {
                 t.worker_threads(2);
             })
@@ -475,7 +475,7 @@ mod tests {
 
     #[test]
     fn build_disabled_produces_working_runtime_with_noop_guard() {
-        let session = recorder(InMemoryWriter::new(16 * 1024 * 1024).unwrap())
+        let session = recorder(MemoryBuffer::new(16 * 1024 * 1024).unwrap())
             .with_tokio(|_| {})
             .enabled(false)
             .build()
@@ -521,7 +521,7 @@ mod tests {
         let location_a = loc_a();
         let location_b = loc_b();
 
-        let writer = crate::telemetry::writer::DiskWriter::builder()
+        let writer = crate::telemetry::buffer::DiskBuffer::builder()
             .base_path(&base)
             .max_file_size(100)
             .max_total_size(100_000)
@@ -598,7 +598,7 @@ mod tests {
 
     #[test]
     fn trace_runtime_attaches_second_runtime() {
-        let session = recorder(InMemoryWriter::new(16 * 1024 * 1024).unwrap())
+        let session = recorder(MemoryBuffer::new(16 * 1024 * 1024).unwrap())
             .with_tokio(|_| {})
             .build()
             .unwrap();
@@ -623,7 +623,7 @@ mod tests {
 
         let (capture, data) = CapturingProcessor::new();
 
-        let session = recorder(InMemoryWriter::new(CAPTURE_SIZE).unwrap())
+        let session = recorder(MemoryBuffer::new(CAPTURE_SIZE).unwrap())
             .with_tokio(|t| {
                 t.worker_threads(2);
             })
@@ -712,7 +712,7 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let trace_path = dir.path().join("trace.bin");
 
-        let writer = crate::telemetry::writer::DiskWriter::builder()
+        let writer = crate::telemetry::buffer::DiskBuffer::builder()
             .base_path(&trace_path)
             .max_file_size(1024 * 1024)
             .max_total_size(10 * 1024 * 1024)
@@ -814,7 +814,7 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let trace_path = dir.path().join("trace.bin");
 
-        let writer = crate::telemetry::writer::DiskWriter::builder()
+        let writer = crate::telemetry::buffer::DiskBuffer::builder()
             .base_path(&trace_path)
             .max_file_size(1024 * 1024)
             .max_total_size(10 * 1024 * 1024)
@@ -898,7 +898,7 @@ mod tests {
 
         let (capture, data) = CapturingProcessor::new();
 
-        let session = recorder(InMemoryWriter::new(CAPTURE_SIZE).unwrap())
+        let session = recorder(MemoryBuffer::new(CAPTURE_SIZE).unwrap())
             .with_tokio(|t| {
                 t.worker_threads(2);
             })
@@ -958,15 +958,15 @@ mod tests {
         use super::*;
         use crate::telemetry::analysis::TraceReader;
         use crate::telemetry::analysis_events::Dial9Event;
+        use crate::telemetry::buffer::DiskBuffer;
         use crate::telemetry::format::{WorkerId, WorkerParkEvent};
         use crate::telemetry::task_metadata::TaskId;
-        use crate::telemetry::writer::DiskWriter;
         use proptest::prelude::*;
 
         /// Encode a single event into a batch and write it through the writer.
         fn write_raw_event(
-            writer: &mut DiskWriter,
-            event: &dyn crate::telemetry::buffer::Encodable,
+            writer: &mut DiskBuffer,
+            event: &dyn crate::telemetry::encoder::Encodable,
         ) -> std::io::Result<()> {
             test_util::write_event(writer, event)
         }
@@ -1017,7 +1017,7 @@ mod tests {
 
         fn execute_flush_round(
             round: &FlushRound,
-            ew: &mut DiskWriter,
+            ew: &mut DiskBuffer,
             locations: &[&'static Location<'static>],
             timestamp: &mut u64,
             expected_raw: &mut usize,
@@ -1098,7 +1098,7 @@ mod tests {
                 let dir = tempfile::TempDir::new().unwrap();
                 let base = dir.path().join("trace");
 
-                let writer = DiskWriter::builder()
+                let writer = DiskBuffer::builder()
                     .base_path(&base)
                     .max_file_size(max_file_size)
                     .max_total_size(1_000_000)
@@ -1142,8 +1142,8 @@ mod tests {
 
     // A current-thread primary keeps these session tests from spawning worker
     // threads; the runtime under test is attached via `trace_runtime`.
-    fn session_recorder<M: dial9_core::writer::WriterMode>(
-        writer: dial9_core::writer::SegmentWriter<M>,
+    fn session_recorder<M: dial9_core::buffer::BufferMode>(
+        writer: dial9_core::buffer::SegmentWriter<M>,
     ) -> crate::telemetry::TokioSessionBuilder<M> {
         recorder(writer).with_tokio(|t| {
             *t = tokio::runtime::Builder::new_current_thread();
@@ -1152,7 +1152,7 @@ mod tests {
 
     #[test]
     fn build_produces_enabled_guard() {
-        let session = session_recorder(InMemoryWriter::new(16 * 1024 * 1024).unwrap())
+        let session = session_recorder(MemoryBuffer::new(16 * 1024 * 1024).unwrap())
             .build()
             .unwrap();
         assert!(session.is_enabled());
@@ -1161,7 +1161,7 @@ mod tests {
 
     #[test]
     fn trace_runtime_produces_working_runtime() {
-        let session = session_recorder(InMemoryWriter::new(16 * 1024 * 1024).unwrap())
+        let session = session_recorder(MemoryBuffer::new(16 * 1024 * 1024).unwrap())
             .build()
             .unwrap();
 
@@ -1181,7 +1181,7 @@ mod tests {
     #[test]
     fn task_tracking_produces_task_spawn_events() {
         let (capture, data) = CapturingProcessor::new();
-        let session = session_recorder(InMemoryWriter::new(CAPTURE_SIZE).unwrap())
+        let session = session_recorder(MemoryBuffer::new(CAPTURE_SIZE).unwrap())
             .with_custom_pipeline(|p| p.pipe(capture))
             .build()
             .unwrap();
@@ -1225,7 +1225,7 @@ mod tests {
         use std::collections::HashSet;
 
         let (capture, data) = CapturingProcessor::new();
-        let session = session_recorder(InMemoryWriter::new(CAPTURE_SIZE).unwrap())
+        let session = session_recorder(MemoryBuffer::new(CAPTURE_SIZE).unwrap())
             .with_custom_pipeline(|p| p.pipe(capture))
             .build()
             .unwrap();
@@ -1286,7 +1286,7 @@ mod tests {
     #[test]
     fn trace_runtime_build_returns_telemetry_handle() {
         let (capture, data) = CapturingProcessor::new();
-        let session = session_recorder(InMemoryWriter::new(CAPTURE_SIZE).unwrap())
+        let session = session_recorder(MemoryBuffer::new(CAPTURE_SIZE).unwrap())
             .with_custom_pipeline(|p| p.pipe(capture))
             .build()
             .unwrap();
@@ -1340,7 +1340,7 @@ mod tests {
     /// correct runtime even when called from outside any runtime context.
     #[test]
     fn trace_runtime_handle_spawns_on_correct_runtime_from_outside() {
-        let session = session_recorder(InMemoryWriter::new(16 * 1024 * 1024).unwrap())
+        let session = session_recorder(MemoryBuffer::new(16 * 1024 * 1024).unwrap())
             .build()
             .unwrap();
 
@@ -1430,7 +1430,7 @@ mod tests {
     /// flush thread or background worker to drain.
     #[test]
     fn disabled_session_graceful_shutdown_is_noop() {
-        let session = crate::telemetry::TokioSessionBuilder::<dial9_core::writer::Disk>::disabled()
+        let session = crate::telemetry::TokioSessionBuilder::<dial9_core::buffer::Disk>::disabled()
             .build()
             .unwrap();
         assert!(!session.is_enabled());
@@ -1446,7 +1446,7 @@ mod tests {
 
         let s3 = S3Config::builder().bucket("b").service_name("s").build();
 
-        let session = session_recorder(InMemoryWriter::new(16 * 1024 * 1024).unwrap())
+        let session = session_recorder(MemoryBuffer::new(16 * 1024 * 1024).unwrap())
             .with_s3_uploader(s3)
             .build()
             .expect("recorder with s3 uploader must build");

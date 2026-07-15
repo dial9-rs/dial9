@@ -10,7 +10,7 @@ use dial9_tokio_telemetry::memory_profiling::{
     Dial9Allocator, MemoryProfiler, MemoryProfilingConfig,
 };
 use dial9_tokio_telemetry::telemetry::analysis_events::Dial9Event;
-use dial9_tokio_telemetry::telemetry::{DiskWriter, RecorderBuilderTokioExt, recorder};
+use dial9_tokio_telemetry::telemetry::{DiskBuffer, RecorderBuilderTokioExt, recorder};
 use std::time::Duration;
 
 #[global_allocator]
@@ -21,7 +21,7 @@ fn memory_sample_rate_appears_in_segment_metadata() {
     let dir = tempfile::tempdir().unwrap();
     let trace_path = dir.path().join("trace.bin");
 
-    let writer = DiskWriter::single_file(&trace_path).unwrap();
+    let writer = DiskBuffer::single_file(&trace_path).unwrap();
 
     let session = recorder(writer)
         .with_tokio(|t| {

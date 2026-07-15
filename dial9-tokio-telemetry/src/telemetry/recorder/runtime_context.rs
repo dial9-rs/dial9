@@ -1,7 +1,7 @@
 use super::SharedState;
 use super::source::{FlushContext, Source};
 use crate::primitives::sync::{Arc, Mutex};
-use crate::telemetry::buffer::{Encodable, ThreadLocalEncoder};
+use crate::telemetry::encoder::{Encodable, ThreadLocalEncoder};
 use crate::telemetry::events::{SchedStat, clock_monotonic_ns};
 use crate::telemetry::format::{
     PollEndEvent, PollStartEvent, QueueSampleEvent, TaskSpawnEvent, WorkerId, WorkerParkEvent,

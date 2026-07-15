@@ -1,4 +1,4 @@
-use dial9::{DiskWriter, FlushContext, Source, clock_monotonic_ns, recorder};
+use dial9::{DiskBuffer, FlushContext, Source, clock_monotonic_ns, recorder};
 use dial9_trace_format::TraceEvent;
 use dial9_trace_format::decoder::Decoder;
 use std::path::{Path, PathBuf};
@@ -45,7 +45,7 @@ fn sealed_segment(dir: &Path) -> PathBuf {
 #[test]
 fn facade_recorder_records_a_source() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let writer = DiskWriter::single_file(dir.path().join("trace.bin")).expect("writer");
+    let writer = DiskBuffer::single_file(dir.path().join("trace.bin")).expect("writer");
 
     let session = recorder(writer)
         .source(OnceSource { emitted: false })

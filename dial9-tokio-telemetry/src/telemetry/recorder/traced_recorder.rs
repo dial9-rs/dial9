@@ -14,11 +14,11 @@ use super::runtime_context::{RuntimeContextRegistry, TokioRuntimesSource};
 use crate::background_task::{PipelineBuilder, SegmentProcessor};
 use crate::primitives::sync::{Arc, Mutex};
 use crate::telemetry::task_dump_config::TaskDumpConfig;
+use dial9_core::buffer::{BufferMode, Disk};
 use dial9_core::handle::Dial9Handle;
 use dial9_core::recorder::{RecorderBuilder, RegisterSource};
 use dial9_core::session::CoreSession;
 use dial9_core::source::Source;
-use dial9_core::writer::{Disk, WriterMode};
 use std::time::Duration;
 
 /// Tokio integration settings for [`build_traced`].
@@ -73,7 +73,7 @@ impl std::fmt::Debug for TokioAttachConfig {
 /// registry and task-dump config. [`build_traced`] then builds the primary
 /// runtime and wraps everything in a [`TokioSession`]. The session is left with
 /// recording off; the caller enables it after attaching the runtime.
-fn assemble_session_parts<M: WriterMode>(
+fn assemble_session_parts<M: BufferMode>(
     core: RecorderBuilder<M>,
     config: &mut TokioAttachConfig,
 ) -> std::io::Result<(CoreSession, RuntimeContextRegistry, Option<TaskDumpConfig>)> {
@@ -152,7 +152,7 @@ fn assemble_session_parts<M: WriterMode>(
 /// from a fully-assembled core builder + Tokio config.
 ///
 /// Most callers want [`TokioSessionBuilder`] (`recorder(w).with_tokio(..)`).
-pub fn build_traced<M: WriterMode>(
+pub fn build_traced<M: BufferMode>(
     core: RecorderBuilder<M>,
     tokio_builder: tokio::runtime::Builder,
     mut config: TokioAttachConfig,
@@ -236,11 +236,11 @@ mod sealed {
     pub trait Sealed {}
 }
 
-impl<W: WriterMode> sealed::Sealed for RecorderBuilder<W> {}
+impl<W: BufferMode> sealed::Sealed for RecorderBuilder<W> {}
 
 /// Extension trait adding `.with_tokio(..)` to the core [`RecorderBuilder`],
 /// transitioning it to a [`TokioSessionBuilder`] that builds a [`TokioSession`].
-pub trait RecorderBuilderTokioExt<W: WriterMode>: sealed::Sealed + Sized {
+pub trait RecorderBuilderTokioExt<W: BufferMode>: sealed::Sealed + Sized {
     /// Wire this recorder to a Tokio runtime. The closure configures the
     /// runtime's [`tokio::runtime::Builder`] (pre-seeded `new_multi_thread()` +
     /// `enable_all()`); replace `*t` inside to switch flavor. Finish with
@@ -252,7 +252,7 @@ pub trait RecorderBuilderTokioExt<W: WriterMode>: sealed::Sealed + Sized {
         F: Fn(&mut tokio::runtime::Builder) + Send + Sync + 'static;
 }
 
-impl<W: WriterMode> RecorderBuilderTokioExt<W> for RecorderBuilder<W> {
+impl<W: BufferMode> RecorderBuilderTokioExt<W> for RecorderBuilder<W> {
     fn with_tokio<F>(self, f: F) -> TokioSessionBuilder<W>
     where
         F: Fn(&mut tokio::runtime::Builder) + Send + Sync + 'static,
@@ -265,7 +265,7 @@ impl<W: WriterMode> RecorderBuilderTokioExt<W> for RecorderBuilder<W> {
 /// integration and a segment pipeline. Reached via
 /// [`RecorderBuilderTokioExt::with_tokio`].
 #[must_use = "call `.build()` (or pass to `#[dial9::main]`) to start the runtime"]
-pub struct TokioSessionBuilder<W: WriterMode = Disk> {
+pub struct TokioSessionBuilder<W: BufferMode = Disk> {
     // `None` only for the disabled, writer-free recorder (see [`disabled`]);
     // every other path owns a fully-built core builder.
     core: Option<RecorderBuilder<W>>,
@@ -287,14 +287,14 @@ pub struct TokioSessionBuilder<W: WriterMode = Disk> {
     dump_trigger: Option<crate::dump::DumpTrigger>,
 }
 
-impl<W: WriterMode> std::fmt::Debug for TokioSessionBuilder<W> {
+impl<W: BufferMode> std::fmt::Debug for TokioSessionBuilder<W> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TokioSessionBuilder")
             .finish_non_exhaustive()
     }
 }
 
-impl<W: WriterMode> TokioSessionBuilder<W> {
+impl<W: BufferMode> TokioSessionBuilder<W> {
     /// A disabled recorder: builds a plain Tokio runtime with no telemetry and,
     /// unlike `recorder(w).enabled(false)`, no writer at all. Nothing touches
     /// the disk, so [`recorder_from_env`](crate::telemetry) can take this path
@@ -308,7 +308,7 @@ impl<W: WriterMode> TokioSessionBuilder<W> {
     }
 }
 
-impl<W: WriterMode> TokioSessionBuilder<W> {
+impl<W: BufferMode> TokioSessionBuilder<W> {
     fn new(core: RecorderBuilder<W>) -> Self {
         Self::from_core(Some(core))
     }
@@ -512,7 +512,7 @@ impl<W: WriterMode> TokioSessionBuilder<W> {
     }
 }
 
-impl<W: WriterMode> TryFrom<TokioSessionBuilder<W>> for TokioSession {
+impl<W: BufferMode> TryFrom<TokioSessionBuilder<W>> for TokioSession {
     type Error = std::io::Error;
 
     fn try_from(recorder: TokioSessionBuilder<W>) -> Result<Self, Self::Error> {
@@ -520,7 +520,7 @@ impl<W: WriterMode> TryFrom<TokioSessionBuilder<W>> for TokioSession {
     }
 }
 
-impl<W: WriterMode> RegisterSource for TokioSessionBuilder<W> {
+impl<W: BufferMode> RegisterSource for TokioSessionBuilder<W> {
     fn source(self, source: impl Source + 'static) -> Self {
         Self {
             core: self.core.map(|c| c.source(source)),
@@ -576,10 +576,10 @@ mod tests {
     // `trace_runtime`, and recording is enabled on both.
     #[test]
     fn trace_runtime_attaches_second_runtime() {
+        use dial9_core::buffer::MemoryBuffer;
         use dial9_core::recorder::recorder;
-        use dial9_core::writer::InMemoryWriter;
 
-        let session = recorder(InMemoryWriter::new(1 << 20).unwrap())
+        let session = recorder(MemoryBuffer::new(1 << 20).unwrap())
             .with_tokio(|t| {
                 t.worker_threads(1);
             })

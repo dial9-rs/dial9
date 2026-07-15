@@ -9,18 +9,19 @@ pub mod analysis;
 /// Decode-side companion structs for built-in trace events.
 #[cfg(any(feature = "analysis", test))]
 pub mod analysis_events;
-pub(crate) use dial9_core::buffer;
 pub(crate) use dial9_core::custom_events;
+pub(crate) use dial9_core::encoder;
 pub(crate) mod events;
 pub(crate) mod format;
 pub(crate) mod recorder;
 pub mod task_dump_config;
 pub(crate) mod task_metadata;
-pub(crate) use dial9_core::writer;
+pub(crate) use dial9_core::buffer;
 
 pub use crate::traced::TracedFuture;
+pub use buffer::{BufferMode, Disk, DiskBuffer, Memory, MemoryBuffer, SegmentWriter};
 pub use custom_events::{CustomEventsConfig, CustomEventsContext};
-pub use dial9_core::buffer::{Encodable, ThreadLocalEncoder};
+pub use dial9_core::encoder::{Encodable, ThreadLocalEncoder};
 pub use dial9_core::recorder::{RecorderBuilder, recorder};
 #[cfg(any(
     feature = "cpu-profiling",
@@ -50,4 +51,3 @@ pub use recorder::{
 };
 pub use task_dump_config::TaskDumpConfig;
 pub use task_metadata::{TaskId, UNKNOWN_TASK_ID};
-pub use writer::{Disk, DiskWriter, InMemoryWriter, Memory, SegmentWriter, WriterMode};

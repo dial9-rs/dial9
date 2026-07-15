@@ -11,7 +11,7 @@
 #![cfg(all(feature = "cpu-profiling", target_os = "linux"))]
 
 use dial9::telemetry::CpuProfilingConfig;
-use dial9::{DiskWriter, RecorderBuilderTokioExt, RecorderPerfExt, TokioSessionBuilder};
+use dial9::{DiskBuffer, RecorderBuilderTokioExt, RecorderPerfExt, TokioSessionBuilder};
 use dial9_trace_format::decoder::Decoder;
 use flate2::read::GzDecoder;
 use std::io::Read;
@@ -30,7 +30,7 @@ fn macro_test_config() -> TokioSessionBuilder {
     OUTPUT_DIR.get_or_init(|| output.clone());
     std::mem::forget(dir);
 
-    let writer = DiskWriter::builder()
+    let writer = DiskBuffer::builder()
         .base_path(&path)
         // Large budget + default per-file size => a single segment that is
         // sealed only at shutdown, so symbolization can't run mid-workload.

@@ -6,8 +6,8 @@
 //! worker), and starts recording.
 //!
 //! ```no_run
-//! use dial9_core::writer::DiskWriter;
-//! let session = dial9_core::recorder::recorder(DiskWriter::single_file("/tmp/trace.bin")?)
+//! use dial9_core::buffer::DiskBuffer;
+//! let session = dial9_core::recorder::recorder(DiskBuffer::single_file("/tmp/trace.bin")?)
 //!     .build_and_start();
 //! // record events through `session.handle()`.
 //! # Ok::<(), std::io::Error>(())
@@ -17,13 +17,13 @@
 //! which requires a pre-built [`SharedState`](crate::shared_state::SharedState) with sources
 //! already registered. The Tokio integration builds on the same builder internally.
 
+use crate::buffer::{BufferMode, Disk, SegmentWriter};
 use crate::clock;
 use crate::handle::Dial9Handle;
 use crate::primitives::sync::Arc;
 use crate::session::{CoreSession, SessionStartHook};
 use crate::shared_state::SharedState;
 use crate::source::Source;
-use crate::writer::{Disk, SegmentWriter, WriterMode};
 
 /// A reusable per-thread hook: run on each recording thread, returning a
 /// teardown closure. Reusable (`Fn`) because both the flush thread and the
@@ -39,7 +39,7 @@ fn noop_thread_hook() -> RecordingThreadHook {
 /// Register data sources with [`RecorderBuilder::source`], then
 /// [`build`](RecorderBuilder::build) (session starts disabled) or
 /// [`build_and_start`](RecorderBuilder::build_and_start).
-pub fn recorder<M: WriterMode>(writer: SegmentWriter<M>) -> RecorderBuilder<M> {
+pub fn recorder<M: BufferMode>(writer: SegmentWriter<M>) -> RecorderBuilder<M> {
     RecorderBuilder {
         writer,
         sources: Vec::new(),
@@ -58,7 +58,7 @@ pub fn recorder<M: WriterMode>(writer: SegmentWriter<M>) -> RecorderBuilder<M> {
 
 /// Builder for a runtime-agnostic [`CoreSession`]. See [`recorder`].
 #[must_use = "call `.build()` (or `.build_and_start()`) to start the session"]
-pub struct RecorderBuilder<M: WriterMode = Disk> {
+pub struct RecorderBuilder<M: BufferMode = Disk> {
     writer: SegmentWriter<M>,
     sources: Vec<Box<dyn Source>>,
     session_start_hooks: Vec<SessionStartHook>,
@@ -73,7 +73,7 @@ pub struct RecorderBuilder<M: WriterMode = Disk> {
     trigger: Option<crate::dump::DumpRx>,
 }
 
-impl<M: WriterMode> std::fmt::Debug for RecorderBuilder<M> {
+impl<M: BufferMode> std::fmt::Debug for RecorderBuilder<M> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RecorderBuilder")
             .field("sources", &self.sources.len())
@@ -81,7 +81,7 @@ impl<M: WriterMode> std::fmt::Debug for RecorderBuilder<M> {
     }
 }
 
-impl<M: WriterMode> RecorderBuilder<M> {
+impl<M: BufferMode> RecorderBuilder<M> {
     /// Register a [`Source`] drained by the flush thread each cycle.
     pub fn source(mut self, source: impl Source + 'static) -> Self {
         self.sources.push(Box::new(source));
@@ -219,7 +219,7 @@ pub trait RegisterSource: Sized {
     }
 }
 
-impl<M: WriterMode> RegisterSource for RecorderBuilder<M> {
+impl<M: BufferMode> RegisterSource for RecorderBuilder<M> {
     fn source(mut self, source: impl Source + 'static) -> Self {
         self.sources.push(Box::new(source));
         self
@@ -232,7 +232,7 @@ impl<M: WriterMode> RegisterSource for RecorderBuilder<M> {
 }
 
 #[cfg(feature = "pipeline")]
-impl<M: WriterMode> RecorderBuilder<M> {
+impl<M: BufferMode> RecorderBuilder<M> {
     /// Append a segment processor (compress, symbolize, upload, write-back).
     /// The background worker is spawned only when at least one processor is set
     /// and the writer is filesystem-backed.
@@ -269,8 +269,8 @@ impl<M: WriterMode> RecorderBuilder<M> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::buffer::{DiskBuffer, MemoryBuffer};
     use crate::source::FlushContext;
-    use crate::writer::{DiskWriter, InMemoryWriter};
     use dial9_trace_format::TraceEvent;
     use dial9_trace_format::decoder::Decoder;
     use std::path::{Path, PathBuf};
@@ -334,7 +334,7 @@ mod tests {
     #[test]
     fn records_source_events_to_disk() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let writer = DiskWriter::single_file(dir.path().join("trace.bin")).expect("writer");
+        let writer = DiskBuffer::single_file(dir.path().join("trace.bin")).expect("writer");
 
         let session = recorder(writer)
             .segment_metadata([("service".to_string(), "recorder-test".to_string())])
@@ -358,7 +358,7 @@ mod tests {
     /// leaves it disabled until `enable()`.
     #[test]
     fn build_starts_disabled() {
-        let writer = InMemoryWriter::new(1 << 20).expect("writer");
+        let writer = MemoryBuffer::new(1 << 20).expect("writer");
         let session = recorder(writer).build();
         assert!(
             !session.shared().expect("live session").is_enabled(),
@@ -377,7 +377,7 @@ mod tests {
         use std::sync::Arc as StdArc;
         use std::sync::atomic::{AtomicUsize, Ordering};
 
-        let writer = InMemoryWriter::new(1 << 20).expect("writer");
+        let writer = MemoryBuffer::new(1 << 20).expect("writer");
         let runs = StdArc::new(AtomicUsize::new(0));
         let runs_hook = StdArc::clone(&runs);
         let session = recorder(writer)
@@ -425,7 +425,7 @@ mod tests {
         }
 
         let dir = tempfile::tempdir().expect("tempdir");
-        let writer = DiskWriter::single_file(dir.path().join("trace.bin")).expect("writer");
+        let writer = DiskBuffer::single_file(dir.path().join("trace.bin")).expect("writer");
         let processed = StdArc::new(AtomicUsize::new(0));
 
         let session = recorder(writer)

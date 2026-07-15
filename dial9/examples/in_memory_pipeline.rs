@@ -1,6 +1,6 @@
 //! Memory-only pipeline. No filesystem dependency.
 //!
-//! When disk is unavailable or unwelcome, `InMemoryWriter` keeps sealed segments in process
+//! When disk is unavailable or unwelcome, `MemoryBuffer` keeps sealed segments in process
 //! memory and a delivery processor ships them out. The processor pipeline is
 //! identical to disk mode.
 //!
@@ -19,7 +19,7 @@ use std::time::Duration;
 use dial9::RecorderBuilderTokioExt;
 use dial9::background_task::{ProcessError, SegmentData, SegmentProcessor};
 use dial9::telemetry::Dial9TokioHandle;
-use dial9::{InMemoryWriter, recorder};
+use dial9::{MemoryBuffer, recorder};
 
 /// Stand-in delivery processor. Inspects each segment, forwards unchanged.
 /// Replace with a real uploader in production.
@@ -66,7 +66,7 @@ async fn workload() {
 }
 
 fn main() -> std::io::Result<()> {
-    let writer = InMemoryWriter::new(16 * 1024 * 1024)?; // 16 MB
+    let writer = MemoryBuffer::new(16 * 1024 * 1024)?; // 16 MB
 
     let session = recorder(writer)
         .with_tokio(|t| {

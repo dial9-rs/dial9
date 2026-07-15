@@ -2,6 +2,7 @@
 //! writer -> flush thread -> sealed segment -> drain, plus the flush loop's
 //! rate-limited error handling under fs faults. No tokio, no telemetry sources.
 
+use crate::buffer::{DiskBuffer, MemoryBuffer};
 use crate::clock::clock_monotonic_ns;
 use crate::primitives::fs;
 use crate::primitives::sync::atomic::{AtomicU64, Ordering};
@@ -9,7 +10,6 @@ use crate::primitives::sync::{Arc, Mutex};
 use crate::session::CoreSession;
 use crate::shared_state::SharedState;
 use crate::source::{FlushContext, Source};
-use crate::writer::{DiskWriter, InMemoryWriter};
 use dial9_trace_format::TraceEvent;
 use shuttle::rand::Rng;
 use std::collections::HashMap;
@@ -132,7 +132,7 @@ fn test_core_pipeline() {
 
     // Small segments force frequent rotation: the 100 MiB budget is far above the test's data,
     // so the ring never evicts before we drain it.
-    let writer = InMemoryWriter::builder()
+    let writer = MemoryBuffer::builder()
         .max_total_size(100 * 1024 * 1024)
         .max_segment_size(256)
         .build()
@@ -286,7 +286,7 @@ fn run_erroring_pipeline(fault: fs::FaultPolicy) -> u64 {
         let next_id = Arc::new(AtomicU64::new(0));
 
         let dir = tempfile::tempdir().unwrap();
-        let writer = DiskWriter::single_file(dir.path().join("trace.bin")).unwrap();
+        let writer = DiskBuffer::single_file(dir.path().join("trace.bin")).unwrap();
         let _fault = fs::set_fault(fault);
         let shared = Arc::new(SharedState::new(clock_monotonic_ns()));
         let mut session = CoreSession::start(shared, writer, None, || || {});

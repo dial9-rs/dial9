@@ -8,7 +8,7 @@ mod fake_s3;
 
 use common::{drive_workload, fast_sealing_writer, wait_for_sealed_segment};
 use dial9_tokio_telemetry::background_task::s3::S3Config;
-use dial9_tokio_telemetry::telemetry::{DiskWriter, RecorderBuilderTokioExt, recorder};
+use dial9_tokio_telemetry::telemetry::{DiskBuffer, RecorderBuilderTokioExt, recorder};
 use fake_s3::{fake_s3_client, wait_for_uploaded_segment};
 use std::future::IntoFuture;
 use std::time::{Duration, Instant};
@@ -235,7 +235,7 @@ fn lookforward_dump_resolves_after_deadline() {
     let trace_dir = tempfile::tempdir().unwrap();
     let trace_path = trace_dir.path().join("trace.bin");
 
-    let writer = DiskWriter::new(&trace_path, 512, 50 * 1024).unwrap();
+    let writer = DiskBuffer::new(&trace_path, 512, 50 * 1024).unwrap();
 
     let session = recorder(writer)
         .worker_poll_interval(Duration::from_millis(50))
@@ -323,7 +323,7 @@ fn shutdown_truncates_open_lookforward_dump() {
     std::fs::create_dir(s3_root.path().join("test-bucket")).unwrap();
 
     let client = fake_s3_client(s3_root.path());
-    let writer = DiskWriter::new(&trace_path, 512, 50 * 1024).unwrap();
+    let writer = DiskBuffer::new(&trace_path, 512, 50 * 1024).unwrap();
 
     let session = recorder(writer)
         .worker_poll_interval(Duration::from_millis(50))

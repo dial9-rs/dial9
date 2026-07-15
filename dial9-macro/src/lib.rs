@@ -156,10 +156,10 @@ fn expand_main(args: MainArgs, input: ItemFn) -> Result<TokenStream2, syn::Error
 ///
 /// ```rust,ignore
 /// use dial9::telemetry::Dial9TokioHandle;
-/// use dial9::{main, DiskWriter, RecorderBuilderTokioExt, TokioSessionBuilder};
+/// use dial9::{main, DiskBuffer, RecorderBuilderTokioExt, TokioSessionBuilder};
 ///
 /// fn my_config() -> TokioSessionBuilder {
-///     let writer = DiskWriter::builder()
+///     let writer = DiskBuffer::builder()
 ///         .base_path("/tmp/trace.bin")
 ///         .max_file_size(1024 * 1024)
 ///         .max_total_size(16 * 1024 * 1024)
@@ -182,7 +182,7 @@ fn expand_main(args: MainArgs, input: ItemFn) -> Result<TokenStream2, syn::Error
 ///
 /// ```rust,ignore
 /// #[dial9::main(config = || {
-///     let writer = dial9::DiskWriter::builder()
+///     let writer = dial9::DiskBuffer::builder()
 ///         .base_path("/tmp/trace.bin")
 ///         .max_file_size(1024 * 1024)
 ///         .max_total_size(16 * 1024 * 1024)
@@ -215,11 +215,11 @@ fn expand_main(args: MainArgs, input: ItemFn) -> Result<TokenStream2, syn::Error
 /// }
 /// ```
 ///
-/// In-memory writer (no telemetry on disk), via `InMemoryWriter`:
+/// In-memory writer (no telemetry on disk), via `MemoryBuffer`:
 ///
 /// ```rust,ignore
 /// #[dial9::main(config = || {
-///     let writer = dial9::InMemoryWriter::builder()
+///     let writer = dial9::MemoryBuffer::builder()
 ///         .max_total_size(16 * 1024 * 1024)
 ///         .build()
 ///         .expect("writer build failed");

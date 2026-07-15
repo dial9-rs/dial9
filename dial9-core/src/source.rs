@@ -1,7 +1,7 @@
 //! Source trait for abstracting flush-thread data sources.
 
-use crate::buffer::{self, Encodable, ThreadLocalEncoder};
 use crate::collector::CentralCollector;
+use crate::encoder::{self, Encodable, ThreadLocalEncoder};
 use crate::primitives::sync::Arc;
 use crate::primitives::sync::atomic::AtomicU64;
 
@@ -27,7 +27,7 @@ impl<'a> FlushContext<'a> {
 
     /// Record an event into the trace from this flush cycle.
     pub fn record_event(&self, event: &dyn Encodable) {
-        let _ = buffer::record_encodable_event(event, self.collector, self.drain_epoch);
+        let _ = encoder::record_encodable_event(event, self.collector, self.drain_epoch);
     }
 
     /// Record via the thread-local encoder directly.
@@ -35,7 +35,7 @@ impl<'a> FlushContext<'a> {
     /// Use this when you need encoder-level access, e.g. to call
     /// `enc.intern_stack_frames(..)` before encoding an event.
     pub fn with_encoder(&self, f: impl FnOnce(&mut ThreadLocalEncoder<'_>)) {
-        let _ = buffer::with_encoder(f, self.collector, self.drain_epoch);
+        let _ = encoder::with_encoder(f, self.collector, self.drain_epoch);
     }
 }
 

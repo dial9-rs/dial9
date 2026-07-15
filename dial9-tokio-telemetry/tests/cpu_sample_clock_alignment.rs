@@ -21,7 +21,7 @@
 mod common;
 
 use common::{CAPTURE_BUFFER_SIZE, capture_processor, decode_all};
-use dial9_tokio_telemetry::telemetry::InMemoryWriter;
+use dial9_tokio_telemetry::telemetry::MemoryBuffer;
 use dial9_tokio_telemetry::telemetry::analysis_events::{CpuSampleSource, Dial9Event, WorkerId};
 
 #[test]
@@ -37,7 +37,7 @@ fn cpu_sample_timestamps_align_with_wall_clock() {
 
     let num_workers = 2u64;
 
-    let session = recorder(InMemoryWriter::new(CAPTURE_BUFFER_SIZE).unwrap())
+    let session = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
         .with_cpu_profiling(CpuProfilingConfig::default().frequency_hz(999))
         .with_tokio(move |t| {
             t.worker_threads(num_workers as usize);
@@ -258,7 +258,7 @@ fn thread_name_attribution_for_external_and_blocking_threads() {
 
     let (capture, batches) = capture_processor();
 
-    let session = recorder(InMemoryWriter::new(CAPTURE_BUFFER_SIZE).unwrap())
+    let session = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
         .with_cpu_profiling(CpuProfilingConfig::default().frequency_hz(999))
         .with_tokio(|t| {
             t.worker_threads(2).thread_name("test-traced-runtime");

@@ -1,6 +1,6 @@
 //! Integration test: verify JS trace parser matches Rust parser
 
-use dial9_tokio_telemetry::telemetry::{DiskWriter, RecorderBuilderTokioExt, recorder};
+use dial9_tokio_telemetry::telemetry::{DiskBuffer, RecorderBuilderTokioExt, recorder};
 use dial9_trace_format::decoder::Decoder;
 use std::io::{BufWriter, Write};
 use std::process::Command;
@@ -31,7 +31,7 @@ fn test_js_parser_matches_rust() {
 
     // Generate a trace — enable CPU profiling on Linux where it's available
     {
-        let writer = DiskWriter::single_file(&trace_path).unwrap();
+        let writer = DiskBuffer::single_file(&trace_path).unwrap();
         #[allow(unused_mut)]
         let mut rec = recorder(writer);
         #[cfg(feature = "cpu-profiling")]

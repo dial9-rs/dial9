@@ -95,11 +95,11 @@ fn bench_mixed_sizes(c: &mut Criterion) {
 
 fn install_profiler() {
     use dial9_tokio_telemetry::memory_profiling::{MemoryProfiler, MemoryProfilingConfig};
-    use dial9_tokio_telemetry::telemetry::{InMemoryWriter, RecorderBuilderTokioExt, recorder};
+    use dial9_tokio_telemetry::telemetry::{MemoryBuffer, RecorderBuilderTokioExt, recorder};
 
     // We leak the runtime and guard so they live for the process lifetime.
     // This is intentional — the profiler is process-permanent anyway.
-    let session = recorder(InMemoryWriter::new(16 * 1024 * 1024).unwrap())
+    let session = recorder(MemoryBuffer::new(16 * 1024 * 1024).unwrap())
         .with_tokio(|t| {
             t.worker_threads(1);
         })
