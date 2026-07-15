@@ -452,6 +452,8 @@ Potential attributes:
 
 Threshold expressions are evaluated once in view scope and inherit the series unit. `time_series` renders each resolved threshold as a horizontal line, includes it in the Y domain, and applies its level to step-series coloring. Resolved guides and thresholds appear as `label (value)` in the panel legend; a guide may omit either the unit or the label.
 
+Data-series legend entries appear only when a view resolves multiple series or partitions that need color disambiguation. A single series with a single partition is already identified by the panel title and should not add a redundant legend entry.
+
 Threshold levels are discrete classifications. A continuous color scale driven by the series value is a separate future encoding and is not part of the initial frontend implementation.
 
 ```js

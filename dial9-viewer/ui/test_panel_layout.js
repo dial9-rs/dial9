@@ -183,7 +183,7 @@ test("Schema time-series geometry shares one chart clip", () => {
     "renderer must not infer viewport-dependent interval ends");
 });
 
-test("Schema panels own CPU rendering and list every partition", () => {
+test("Schema panels show data legends only when they disambiguate series", () => {
   const fs = require("fs");
   const path = require("path");
   const html = fs.readFileSync(path.join(__dirname, "viewer.html"), "utf8");
@@ -192,8 +192,14 @@ test("Schema panels own CPU rendering and list every partition", () => {
   const start = html.indexOf("function updateSchemaPanelLegend");
   const end = html.indexOf("function renderSchemaTimeSeriesPanel", start);
   const legend = html.slice(start, end);
-  assert.ok(legend.includes("view.series.forEach") && legend.includes("series.groups.forEach"),
-    "schema legend must enumerate every series partition");
+  assert.ok(legend.includes("view.series.length > 1 || groupCount > 1") &&
+      legend.includes("if (showSeriesItems)") &&
+      legend.includes("view.series.forEach") && legend.includes("series.groups.forEach"),
+    "schema legend must omit a redundant single series/group and enumerate ambiguous data");
+  assert.ok(html.includes(".schema-panel-legend-swatch.is-line") &&
+      html.includes(".schema-panel-legend-swatch.is-area") &&
+      html.includes(".schema-panel-legend-swatch.is-reference"),
+    "series and reference legend swatches must reflect their rendered mark");
   assert.ok(/\.schema-time-series-panel \.chart-label\s*\{[^}]*overflow-x:\s*auto/s.test(html),
     "long schema legends must remain horizontally accessible");
   assert.ok(html.includes('stepGroup.mark === "step_area"') && html.includes("insideArea ? 0"),

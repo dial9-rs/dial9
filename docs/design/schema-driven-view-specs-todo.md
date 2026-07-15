@@ -54,7 +54,7 @@ Update this file as work lands. Check an item only after its implementation and 
 - [x] Make `step_area` consume intervals without filling gaps.
 - [x] Clip lines, step marks, thresholds, and guides to the chart rectangle.
 - [x] Resolve hover at a shared boundary to the interval starting at that boundary.
-- [x] Include every resolved series/partition in the legend.
+- [x] Include resolved series/partitions in the legend when multiple data series need disambiguation.
 - [x] Preserve semantic gaps/run bounds, partition identity, and tooltip provenance during downsampling.
 - [x] Keep summaries independent from downsampled geometry.
 - [x] Add focused tests for clipping, boundary overlap, connectors, gaps, line domains, hover, legends, and downsampling.

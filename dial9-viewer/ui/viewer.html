@@ -643,8 +643,27 @@
             }
             .schema-panel-legend-swatch {
                 width: 12px;
-                border-top: 1px dashed;
                 display: inline-block;
+                flex-shrink: 0;
+                color: inherit;
+            }
+            .schema-panel-legend-swatch.is-reference {
+                border-top: 1px dashed currentColor;
+            }
+            .schema-panel-legend-swatch.is-line {
+                border-top: 2px solid currentColor;
+            }
+            .schema-panel-legend-swatch.is-area {
+                height: 6px;
+                border: 1px solid currentColor;
+                background: currentColor;
+                opacity: 0.55;
+            }
+            .schema-panel-legend-swatch.is-points {
+                width: 6px;
+                height: 6px;
+                border-radius: 50%;
+                background: currentColor;
             }
             .schema-time-series-panel canvas {
                 width: 100%;
@@ -3947,33 +3966,47 @@
 
             function updateSchemaPanelLegend(panel, view, guides, thresholds) {
                 const items = [];
-                view.series.forEach((series, seriesIndex) => {
-                    series.groups.forEach((group, groupIndex) => {
-                        items.push({
-                            text: group.title || series.spec.title || series.spec.id,
-                            color: schemaSeriesBaseColor(seriesIndex, groupIndex, series.spec),
+                const groupCount = view.series.reduce(
+                    (count, series) => count + series.groups.length,
+                    0,
+                );
+                const showSeriesItems = view.series.length > 1 || groupCount > 1;
+                if (showSeriesItems) {
+                    view.series.forEach((series, seriesIndex) => {
+                        series.groups.forEach((group, groupIndex) => {
+                            items.push({
+                                kind: "series",
+                                mark: series.spec.mark,
+                                text: group.title || series.spec.title || series.spec.id,
+                                color: schemaSeriesBaseColor(seriesIndex, groupIndex, series.spec),
+                            });
                         });
                     });
-                });
+                }
                 for (const guide of guides) {
                     const value = formatSpecValue(guide.value, guide.unit);
                     const text = guide.show_value === false
                         ? guide.label || ""
                         : guide.label ? `${guide.label} (${value})` : value;
-                    if (text) items.push({ text, color: "#ffcf99" });
+                    if (text) items.push({ kind: "reference", text, color: "#ffcf99" });
                 }
                 for (const threshold of thresholds) {
                     const label = threshold.label || threshold.level;
                     const value = formatSpecValue(threshold.value, threshold.seriesSpec.unit);
                     const text = label ? `${label} (${value})` : value;
                     const fallback = schemaSeriesBaseColor(threshold.seriesIndex, 0, threshold.seriesSpec);
-                    items.push({ text, color: thresholdLevelColor(threshold.level, fallback) });
+                    items.push({
+                        kind: "reference",
+                        text,
+                        color: thresholdLevelColor(threshold.level, fallback),
+                    });
                 }
 
                 const legend = panel.querySelector(".schema-panel-legend");
                 const signature = JSON.stringify(items);
                 if (legend.dataset.signature === signature) return;
                 legend.dataset.signature = signature;
+                legend.style.display = items.length > 0 ? "inline-flex" : "none";
                 legend.title = items.map((item) => item.text).join(" · ");
                 legend.replaceChildren();
                 for (const item of items) {
@@ -3981,7 +4014,15 @@
                     entry.className = "schema-panel-legend-item";
                     const swatch = document.createElement("span");
                     swatch.className = "schema-panel-legend-swatch";
-                    swatch.style.borderColor = item.color;
+                    const swatchKind = item.kind === "reference"
+                        ? "reference"
+                        : item.mark === "step_area" || item.mark === "bars"
+                            ? "area"
+                            : item.mark === "points"
+                                ? "points"
+                                : "line";
+                    swatch.classList.add(`is-${swatchKind}`);
+                    swatch.style.color = item.color;
                     entry.appendChild(swatch);
                     entry.appendChild(document.createTextNode(item.text));
                     legend.appendChild(entry);
