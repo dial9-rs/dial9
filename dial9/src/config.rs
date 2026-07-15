@@ -767,13 +767,13 @@ mod tests {
         blocker.join("traces")
     }
 
-    /// Names of the sources installed on the runtime's session, reached through
+    /// Names of the sources installed on the runtime's recorder, reached through
     /// the public `guard().recorder()` accessor.
     fn source_names(rt: &TracedRuntime) -> Vec<String> {
         rt.recorder()
-            .expect("enabled session")
+            .expect("enabled recorder")
             .shared()
-            .expect("enabled session")
+            .expect("enabled recorder")
             .with_sources_mut(|sources| sources.iter().map(|s| s.name().to_string()).collect())
             .expect("sources lock")
     }
@@ -781,9 +781,9 @@ mod tests {
     /// Segment metadata contributed by the runtime's sources.
     fn segment_metadata(rt: &TracedRuntime) -> Vec<(String, String)> {
         rt.recorder()
-            .expect("enabled session")
+            .expect("enabled recorder")
             .shared()
-            .expect("enabled session")
+            .expect("enabled recorder")
             .with_sources_mut(|sources| {
                 let mut out = Vec::new();
                 for source in sources.iter_mut() {

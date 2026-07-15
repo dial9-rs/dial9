@@ -17,7 +17,7 @@ use crate::telemetry::task_dump_config::TaskDumpConfig;
 use dial9_core::buffer::{BufferMode, Disk};
 use dial9_core::handle::Dial9Handle;
 use dial9_core::recorder::{RecorderBuilder, RegisterSource};
-use dial9_core::session::Recorder;
+use dial9_core::recording::Recorder;
 use dial9_core::source::Source;
 use std::time::Duration;
 
@@ -57,7 +57,7 @@ pub struct TokioAttachConfig {
     tokio_hooks: super::TokioHooks,
     /// Bound on the worker drain at shutdown.
     graceful_shutdown_timeout: Option<Duration>,
-    /// Sending half of the on-demand dump trigger. Stashed on the session so
+    /// Sending half of the on-demand dump trigger. Stashed on the recorder so
     /// [`Dial9Handle::dump_trigger`](crate::telemetry::Dial9Handle::dump_trigger)
     /// can reach it; the matching rx must already feed the core builder.
     dump_trigger: Option<crate::dump::DumpTrigger>,
@@ -71,7 +71,7 @@ impl std::fmt::Debug for TokioAttachConfig {
 
 /// Assemble the enabled recording [`Recorder`] plus the shared runtime-context
 /// registry and task-dump config. [`build_traced`] then builds the primary
-/// runtime and wraps everything in a [`TracedRuntime`]. The session is left with
+/// runtime and wraps everything in a [`TracedRuntime`]. The recorder is left with
 /// recording off; the caller enables it after attaching the runtime.
 fn assemble_session_parts<M: BufferMode>(
     core: RecorderBuilder<M>,
@@ -148,7 +148,7 @@ fn assemble_session_parts<M: BufferMode>(
     Ok((core_session, contexts, config.task_dump_config.take()))
 }
 
-/// Build a [`TracedRuntime`] (recording session plus one owned primary runtime)
+/// Build a [`TracedRuntime`] (recorder plus one owned primary runtime)
 /// from a fully-assembled core builder + Tokio config.
 ///
 /// Most callers want [`TracedRuntimeBuilder`] (`recorder(w).with_tokio(..)`).
@@ -170,7 +170,7 @@ pub fn build_traced<M: BufferMode>(
         let handle = core_session.handle().clone();
         let shared = core_session
             .shared()
-            .expect("enabled session has shared state");
+            .expect("enabled recorder has shared state");
         super::attach_runtime(
             shared,
             &contexts,
@@ -246,7 +246,7 @@ pub trait RecorderBuilderTokioExt<W: BufferMode>: sealed::Sealed + Sized {
     /// `enable_all()`); replace `*t` inside to switch flavor. Finish with
     /// [`build`](TracedRuntimeBuilder::build) to get a [`TracedRuntime`], then attach
     /// more runtimes with [`TracedRuntime::trace_runtime`] for a multi-runtime
-    /// session.
+    /// setup.
     fn with_tokio<F>(self, f: F) -> TracedRuntimeBuilder<W>
     where
         F: Fn(&mut tokio::runtime::Builder) + Send + Sync + 'static;
@@ -458,7 +458,7 @@ impl<W: BufferMode> TracedRuntimeBuilder<W> {
         self
     }
 
-    /// Build the [`TracedRuntime`] (recording session plus one owned primary runtime).
+    /// Build the [`TracedRuntime`] (recorder plus one owned primary runtime).
     pub fn build(self) -> std::io::Result<TracedRuntime> {
         let (core, config, configurators) = self.into_parts();
         let tokio_builder = materialize_tokio_builder(&configurators);
@@ -528,9 +528,9 @@ impl<W: BufferMode> RegisterSource for TracedRuntimeBuilder<W> {
         }
     }
 
-    fn on_session_start(self, hook: impl FnOnce(&Dial9Handle) + Send + 'static) -> Self {
+    fn on_recording_start(self, hook: impl FnOnce(&Dial9Handle) + Send + 'static) -> Self {
         Self {
-            core: self.core.map(|c| c.on_session_start(hook)),
+            core: self.core.map(|c| c.on_recording_start(hook)),
             ..self
         }
     }
@@ -572,7 +572,7 @@ mod tests {
         assert_eq!(traced.configured_graceful_shutdown_timeout(), None);
     }
 
-    // A `TracedRuntime` can attach a second runtime to the same session via
+    // A `TracedRuntime` can attach a second runtime to the same recorder via
     // `trace_runtime`, and recording is enabled on both.
     #[test]
     fn trace_runtime_attaches_second_runtime() {

@@ -39,7 +39,7 @@ pub struct ProcessResourceUsageEvent {
 /// Configuration for process resource usage sampling.
 ///
 /// Build via `ProcessResourceUsageConfig::builder()...build()`, then plug the
-/// [`ProcessResourceUsageSource`] into a dial9 session.
+/// [`ProcessResourceUsageSource`] into a dial9 recorder.
 #[derive(Debug, Clone, bon::Builder)]
 pub struct ProcessResourceUsageConfig {
     /// Minimum time between samples.

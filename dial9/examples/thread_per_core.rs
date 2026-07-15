@@ -2,7 +2,7 @@
 //!
 //! Some applications pin one single-threaded tokio runtime per CPU core for
 //! cache locality and predictable latency. This example shows how to trace
-//! that pattern: the session is created with `recorder(w).with_tokio(..).build()`,
+//! that pattern: the recorder is created with `recorder(w).with_tokio(..).build()`,
 //! then each per-core runtime is attached via `trace_runtime`.
 //!
 //! After the workload completes, the trace file is read back and all
@@ -43,7 +43,7 @@ fn main() -> std::io::Result<()> {
         .max_total_size(5 * 1024 * 1024)
         .build()?;
 
-    // Build the session. The primary runtime is a lightweight current-thread
+    // Build the recorder. The primary runtime is a lightweight current-thread
     // one we never drive — every core gets its own runtime below via
     // `trace_runtime`.
     let traced = recorder(writer)
@@ -74,7 +74,7 @@ fn main() -> std::io::Result<()> {
                 .name(format!("core-{core_id}"))
                 .spawn(move || {
                     core_rt
-                        // spawning into the session handle allows for more tracking
+                        // spawning into the handle allows for more tracking
                         .block_on(handle.spawn(async move {
                             for i in 0..20 {
                                 tokio::task::yield_now().await;

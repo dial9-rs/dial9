@@ -1,6 +1,6 @@
-//! Recording-session builder.
+//! The recorder builder.
 //!
-//! [`recorder`] assembles a [`Recorder`](crate::session::Recorder): it
+//! [`recorder`] assembles a [`Recorder`](crate::recording::Recorder): it
 //! builds the shared bus, registers your [`Source`](crate::source::Source)s,
 //! spawns the flush thread (and, with the `pipeline` feature, the background
 //! worker), and starts recording.
@@ -21,7 +21,7 @@ use crate::buffer::{BufferMode, Disk, SegmentWriter};
 use crate::clock;
 use crate::handle::Dial9Handle;
 use crate::primitives::sync::Arc;
-use crate::session::{Recorder, SessionStartHook};
+use crate::recording::{Recorder, RecordingStartHook};
 use crate::shared_state::SharedState;
 use crate::source::Source;
 
@@ -34,16 +34,16 @@ fn noop_thread_hook() -> RecordingThreadHook {
     Arc::new(|| Box::new(|| {}) as Box<dyn FnOnce() + Send>)
 }
 
-/// Begin a recording session backed by `writer`.
+/// Begin building a recorder backed by `writer`.
 ///
 /// Register data sources with [`RecorderBuilder::source`], then
-/// [`build`](RecorderBuilder::build) (session starts disabled) or
+/// [`build`](RecorderBuilder::build) (recording starts disabled) or
 /// [`build_and_start`](RecorderBuilder::build_and_start).
 pub fn recorder<M: BufferMode>(writer: SegmentWriter<M>) -> RecorderBuilder<M> {
     RecorderBuilder {
         writer,
         sources: Vec::new(),
-        session_start_hooks: Vec::new(),
+        recording_start_hooks: Vec::new(),
         segment_metadata: Vec::new(),
         metrics_sink: None,
         thread_init: noop_thread_hook(),
@@ -57,11 +57,11 @@ pub fn recorder<M: BufferMode>(writer: SegmentWriter<M>) -> RecorderBuilder<M> {
 }
 
 /// Builder for a runtime-agnostic [`Recorder`]. See [`recorder`].
-#[must_use = "call `.build()` (or `.build_and_start()`) to start the session"]
+#[must_use = "call `.build()` (or `.build_and_start()`) to start recording"]
 pub struct RecorderBuilder<M: BufferMode = Disk> {
     writer: SegmentWriter<M>,
     sources: Vec<Box<dyn Source>>,
-    session_start_hooks: Vec<SessionStartHook>,
+    recording_start_hooks: Vec<RecordingStartHook>,
     segment_metadata: Vec<(String, String)>,
     metrics_sink: Option<metrique::writer::BoxEntrySink>,
     thread_init: RecordingThreadHook,
@@ -164,7 +164,7 @@ impl<M: BufferMode> RecorderBuilder<M> {
             let (tx, rx) = tokio::sync::oneshot::channel();
             let hook = self.thread_init.clone();
             crate::worker::spawn(&writer, config, rx, move || hook())
-                .map(|wt| crate::session::WorkerHandle::new(tx, wt))
+                .map(|wt| crate::recording::WorkerHandle::new(tx, wt))
         };
 
         let hook = self.thread_init.clone();
@@ -176,12 +176,12 @@ impl<M: BufferMode> RecorderBuilder<M> {
             recorder.attach_worker(worker);
         }
 
-        recorder.set_session_start_hooks(self.session_start_hooks);
+        recorder.set_recording_start_hooks(self.recording_start_hooks);
 
         recorder
     }
 
-    /// Start the session and immediately begin recording.
+    /// Start the recorder and immediately begin recording.
     pub fn build_and_start(self) -> Recorder {
         let recorder = self.build();
         recorder.enable();
@@ -198,14 +198,14 @@ pub trait RegisterSource: Sized {
     /// Register a [`Source`] with the underlying recording recorder.
     fn source(self, source: impl Source + 'static) -> Self;
 
-    /// Register a hook run once, with the live [`Dial9Handle`], when the session
+    /// Register a hook run once, with the live [`Dial9Handle`], when the recorder
     /// starts recording.
-    fn on_session_start(self, hook: impl FnOnce(&Dial9Handle) + Send + 'static) -> Self;
+    fn on_recording_start(self, hook: impl FnOnce(&Dial9Handle) + Send + 'static) -> Self;
 
     /// Register a callback that dial9 invokes on the flush thread at the config's
     /// interval to emit custom events. Sugar for [`source`](Self::source) with a
     /// [`CustomEventsSource`](crate::custom_events::CustomEventsSource). Not
-    /// tokio-coupled — works on the plain recorder and the tokio session builder.
+    /// tokio-coupled — works on the plain recorder and the tokio builder.
     fn with_custom_events<F>(
         self,
         config: crate::custom_events::CustomEventsConfig,
@@ -226,8 +226,8 @@ impl<M: BufferMode> RegisterSource for RecorderBuilder<M> {
         self
     }
 
-    fn on_session_start(mut self, hook: impl FnOnce(&Dial9Handle) + Send + 'static) -> Self {
-        self.session_start_hooks.push(Box::new(hook));
+    fn on_recording_start(mut self, hook: impl FnOnce(&Dial9Handle) + Send + 'static) -> Self {
+        self.recording_start_hooks.push(Box::new(hook));
         self
     }
 }
@@ -355,26 +355,26 @@ mod tests {
         );
     }
 
-    /// The session is born with recording off; `build()` (without `_and_start`)
+    /// The recorder is born with recording off; `build()` (without `_and_start`)
     /// leaves it disabled until `enable()`.
     #[test]
     fn build_starts_disabled() {
         let writer = MemoryBuffer::new(1 << 20).expect("writer");
         let recorder = recorder(writer).build();
         assert!(
-            !recorder.shared().expect("live session").is_enabled(),
+            !recorder.shared().expect("live recorder").is_enabled(),
             "recording must be off before enable()"
         );
         recorder.enable();
         assert!(
-            recorder.shared().expect("live session").is_enabled(),
+            recorder.shared().expect("live recorder").is_enabled(),
             "recording on after enable()"
         );
     }
 
-    /// `on_session_start` hooks run once, with the handle on `enable()`.
+    /// `on_recording_start` hooks run once, with the handle on `enable()`.
     #[test]
-    fn on_session_start_runs_at_enable() {
+    fn on_recording_start_runs_at_enable() {
         use std::sync::Arc as StdArc;
         use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -382,7 +382,7 @@ mod tests {
         let runs = StdArc::new(AtomicUsize::new(0));
         let runs_hook = StdArc::clone(&runs);
         let recorder = recorder(writer)
-            .on_session_start(move |_handle| {
+            .on_recording_start(move |_handle| {
                 runs_hook.fetch_add(1, Ordering::SeqCst);
             })
             .build();

@@ -3,7 +3,7 @@ use std::time::Duration;
 use crate::primitives::sync::{Arc, Mutex};
 use crate::telemetry::task_dump_config::TaskDumpConfig;
 use dial9_core::handle::Dial9Handle;
-use dial9_core::session::Recorder;
+use dial9_core::recording::Recorder;
 
 use super::SharedState;
 use super::guard::RuntimeAttach;
@@ -74,10 +74,10 @@ pub(super) fn assemble_processors(
     processors
 }
 
-/// A Tokio runtime plus its dial9 telemetry session.
+/// A Tokio runtime plus its dial9 recorder.
 ///
 /// Returned by `recorder(w).with_tokio(..).build()`. It owns a primary tokio
-/// runtime and the recording session, and hosts any number of additional
+/// runtime and the recorder, and hosts any number of additional
 /// runtimes that share the same trace.
 ///
 /// - Drive the primary runtime: [`block_on`](Self::block_on),
@@ -90,11 +90,11 @@ pub(super) fn assemble_processors(
 /// are inert. Use [`is_enabled`](Self::is_enabled) to tell.
 pub struct TracedRuntime {
     // `runtime` is dropped first (Tokio workers exit and flush their
-    // thread-locals) before `session` seals the final segment.
+    // thread-locals) before `recorder` seals the final segment.
     runtime: tokio::runtime::Runtime,
-    /// The recording session; `None` when telemetry is disabled.
+    /// The recorder; `None` when telemetry is disabled.
     recorder: Option<Recorder>,
-    /// Registry of runtimes attached to this session (empty when disabled).
+    /// Registry of runtimes attached to this recorder (empty when disabled).
     contexts: RuntimeContextRegistry,
     /// Task-dump settings installed on attached runtimes.
     taskdump_config: Option<TaskDumpConfig>,
@@ -113,7 +113,7 @@ impl std::fmt::Debug for TracedRuntime {
 }
 
 impl TracedRuntime {
-    /// Assemble an enabled session from its parts. Called by
+    /// Assemble an enabled recorder from its parts. Called by
     /// [`build_traced`](super::build_traced).
     pub(crate) fn enabled(
         runtime: tokio::runtime::Runtime,
@@ -131,7 +131,7 @@ impl TracedRuntime {
         }
     }
 
-    /// Build a plain runtime with no telemetry installed (the disabled session).
+    /// Build a plain runtime with no telemetry installed (the disabled recorder).
     pub(crate) fn build_disabled(
         mut builder: tokio::runtime::Builder,
         graceful_shutdown_timeout: Option<Duration>,
@@ -203,7 +203,7 @@ impl TracedRuntime {
             .map_or_else(Dial9Handle::disabled, |s| s.handle().clone())
     }
 
-    /// Whether this session is recording (vs an inert, disabled session).
+    /// Whether this recorder is recording (vs an inert, disabled recorder).
     pub fn is_enabled(&self) -> bool {
         self.recorder.is_some()
     }
@@ -222,12 +222,12 @@ impl TracedRuntime {
         }
     }
 
-    /// Monotonic session start time in nanoseconds, if recording.
+    /// Monotonic recording start time in nanoseconds, if recording.
     pub fn start_time(&self) -> Option<u64> {
         self.recorder.as_ref().and_then(|s| s.start_time())
     }
 
-    /// The underlying runtime-agnostic recording session. `None` when disabled.
+    /// The underlying runtime-agnostic recorder. `None` when disabled.
     pub fn recorder(&self) -> Option<&Recorder> {
         self.recorder.as_ref()
     }
@@ -237,7 +237,7 @@ impl TracedRuntime {
         self.taskdump_config
     }
 
-    /// Attach another named tokio runtime to this session, so several runtimes
+    /// Attach another named tokio runtime to this recorder, so several runtimes
     /// share one trace. You build and own the returned runtime; drop it before
     /// [`shutdown`](Self::shutdown) so its workers flush.
     ///
@@ -258,7 +258,7 @@ impl TracedRuntime {
     /// Run `fut` to completion on the primary runtime.
     ///
     /// The future is spawned through a [`Dial9TokioHandle`] bound to the
-    /// primary runtime, so on an enabled session this records poll and wake
+    /// primary runtime, so on an enabled recorder this records poll and wake
     /// events; on a disabled one it falls through to plain `tokio::spawn`.
     pub fn block_on<F>(&self, fut: F) -> F::Output
     where
@@ -282,9 +282,9 @@ impl TracedRuntime {
     ///
     /// **Call this after any runtimes you attached with
     /// [`trace_runtime`](Self::trace_runtime) have been dropped**, so their
-    /// worker threads have flushed. Consumes the session; a no-op when disabled.
+    /// worker threads have flushed. Consumes the recorder; a no-op when disabled.
     /// This is what `#[dial9::main]` calls. Best-effort — drain errors are
-    /// logged at `error!`. To skip the drain entirely, just drop the session.
+    /// logged at `error!`. To skip the drain entirely, just drop the recorder.
     pub fn graceful_shutdown(self) {
         let timeout = self.graceful_shutdown_timeout;
         let Self {

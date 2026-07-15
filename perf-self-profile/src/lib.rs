@@ -41,7 +41,7 @@
 //!
 //! With the `memory-profiling` feature, the `memory_profiling` module adds a
 //! sampled allocation profiler: set `Dial9Allocator` as the global allocator
-//! and register it with a dial9 session via `MemoryProfiler::install`.
+//! and register it with a dial9 recorder via `MemoryProfiler::install`.
 //! Sampled allocations land in the trace as `AllocEvent`/`FreeEvent`.
 //!
 //! ```ignore
@@ -50,7 +50,7 @@
 //! #[global_allocator]
 //! static ALLOC: Dial9Allocator = Dial9Allocator::system();
 //!
-//! // `handle` is a dial9 session handle (dial9_core::handle::Dial9Handle).
+//! // `handle` is a dial9 handle (dial9_core::handle::Dial9Handle).
 //! MemoryProfiler::with_defaults().install(handle)?;
 //! ```
 

@@ -32,7 +32,7 @@ pub struct TcpAcceptQueueEvent {
 /// Configuration for socket accept queue sampling.
 ///
 /// Build via `SocketAcceptQueuesConfig::builder()...build()`, then plug the
-/// [`SocketAcceptQueuesSource`] into a dial9 session.
+/// [`SocketAcceptQueuesSource`] into a dial9 recorder.
 ///
 /// # Performance
 ///

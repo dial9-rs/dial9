@@ -68,7 +68,7 @@ impl<'a> RuntimeAttach<'a> {
             self.traced.session_handle(),
             super::traced_handle(&self.traced.record_handle()),
         ) else {
-            // Disabled session: build a plain tokio runtime and return a
+            // Disabled recorder: build a plain tokio runtime and return a
             // Dial9TokioHandle that effectively short-circuits to tokio::spawn.
             let runtime = builder.build()?;
             let handle = Dial9TokioHandle::for_runtime(runtime.handle().clone(), None);

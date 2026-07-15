@@ -1,4 +1,4 @@
-//! dial9 recording core: the event bus, recording session, and trace writer.
+//! dial9 recording core: the event bus, recorder, and trace writer.
 
 #![warn(unreachable_pub)]
 
@@ -58,15 +58,15 @@ pub mod primitives;
 /// Per-call-site rate limiting for log lines.
 #[doc(hidden)]
 pub mod rate_limit;
-/// Runtime-agnostic recording-session builder.
+/// The recorder builder.
 pub mod recorder;
+/// The live recorder: recording state with RAII shutdown.
+pub mod recording;
 /// Geometric/Poisson sampling primitives (RNG, exponential draws).
 #[doc(hidden)]
 pub mod sampling;
 /// Sealed-segment detection. The segment types are public via [`pipeline`].
 pub(crate) mod sealed;
-/// Runtime-agnostic recording session.
-pub mod session;
 /// Runtime-agnostic recording state shared across threads.
 pub mod shared_state;
 /// `Source` trait: pluggable flush-thread data sources.

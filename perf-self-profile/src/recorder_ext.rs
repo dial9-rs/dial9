@@ -29,7 +29,7 @@ pub trait RecorderPerfExt: Sized {
     #[cfg(feature = "linux-socket")]
     fn with_socket_accept_queues(self, config: crate::SocketAcceptQueuesConfig) -> Self;
 
-    /// Install sampled memory allocation profiling on the recording session
+    /// Install sampled memory allocation profiling on the recorder
     /// (needs the global allocator). Installs once recording starts.
     /// Warns and skips on install failure.
     #[cfg(feature = "memory-profiling")]
@@ -95,7 +95,7 @@ impl<T: RegisterSource> RecorderPerfExt for T {
 
     #[cfg(feature = "memory-profiling")]
     fn with_memory_profiling(self, config: crate::memory_profiling::MemoryProfilingConfig) -> Self {
-        self.on_session_start(move |handle| {
+        self.on_recording_start(move |handle| {
             if let Err(e) =
                 crate::memory_profiling::MemoryProfiler::from_config(config).install(handle.clone())
             {
@@ -125,7 +125,7 @@ mod tests {
             .build_and_start();
         let names: Vec<String> = recorder
             .shared()
-            .expect("enabled session")
+            .expect("enabled recorder")
             .with_sources_mut(|sources| sources.iter().map(|s| s.name().to_string()).collect())
             .expect("sources lock");
         assert!(

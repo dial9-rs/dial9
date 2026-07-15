@@ -26,7 +26,7 @@ impl WorkerHandle {
     }
 }
 
-/// Owns a recording session: the [`Dial9Handle`], the flush thread, and (with
+/// Owns the recording state: the [`Dial9Handle`], the flush thread, and (with
 /// the `pipeline` feature) the background worker.
 ///
 /// This is an RAII guard: dropping it flushes remaining events, seals the final
@@ -37,33 +37,33 @@ pub struct Recorder {
     handle: Dial9Handle,
     flush_thread: Option<JoinHandle<()>>,
     /// Hooks run once, with the handle, on the first `enable()`.
-    session_start_hooks: Mutex<Vec<SessionStartHook>>,
+    recording_start_hooks: Mutex<Vec<RecordingStartHook>>,
     #[cfg(feature = "pipeline")]
     worker: Option<WorkerHandle>,
 }
 
-/// A hook run once, with the live [`Dial9Handle`], when the session first
+/// A hook run once, with the live [`Dial9Handle`], when the recorder first
 /// enables recording.
-pub type SessionStartHook = Box<dyn FnOnce(&Dial9Handle) + Send>;
+pub type RecordingStartHook = Box<dyn FnOnce(&Dial9Handle) + Send>;
 
 impl Recorder {
-    /// Create a session from an existing handle and flush thread.
+    /// Create a recorder from an existing handle and flush thread.
     pub(crate) fn new(handle: Dial9Handle, flush_thread: Option<JoinHandle<()>>) -> Self {
         Self {
             handle,
             flush_thread,
-            session_start_hooks: Mutex::new(Vec::new()),
+            recording_start_hooks: Mutex::new(Vec::new()),
             #[cfg(feature = "pipeline")]
             worker: None,
         }
     }
 
     /// Install the one-shot hooks to run on the first `enable()`.
-    pub(crate) fn set_session_start_hooks(&self, hooks: Vec<SessionStartHook>) {
-        *self.session_start_hooks.lock().unwrap() = hooks;
+    pub(crate) fn set_recording_start_hooks(&self, hooks: Vec<RecordingStartHook>) {
+        *self.recording_start_hooks.lock().unwrap() = hooks;
     }
 
-    /// Start a session over `shared`: build the recording [`Dial9Handle`], spawn
+    /// Start recording over `shared`: build the recording [`Dial9Handle`], spawn
     /// the flush thread that drains the bus into `writer`, and own its lifecycle.
     ///
     /// The flush-thread control channel is created and owned internally; reach
@@ -104,13 +104,13 @@ impl Recorder {
         Self::new(handle, Some(flush_thread))
     }
 
-    /// The recording handle for this session.
+    /// The recording handle for this recorder.
     pub fn handle(&self) -> &Dial9Handle {
         &self.handle
     }
 
-    /// Attach the background worker to this session, so its lifecycle is tied
-    /// to the session's (drained on `graceful_shutdown`, stopped on drop).
+    /// Attach the background worker to this recorder, so its lifecycle is tied
+    /// to the recorder's (drained on `graceful_shutdown`, stopped on drop).
     #[cfg(feature = "pipeline")]
     pub(crate) fn attach_worker(&mut self, worker: WorkerHandle) {
         self.worker = Some(worker);
@@ -121,7 +121,7 @@ impl Recorder {
         self.handle.shared()
     }
 
-    /// Monotonic start time of the session in nanoseconds.
+    /// Monotonic start time of the recorder in nanoseconds.
     pub fn start_time(&self) -> Option<u64> {
         self.shared().map(|s| s.start_time_ns())
     }
@@ -131,7 +131,7 @@ impl Recorder {
         self.handle.enable();
         // Run the one-shot start hooks now that the handle is live and
         // recording. Draining leaves them run-once across repeated enables.
-        let hooks = std::mem::take(&mut *self.session_start_hooks.lock().unwrap());
+        let hooks = std::mem::take(&mut *self.recording_start_hooks.lock().unwrap());
         for hook in hooks {
             hook(&self.handle);
         }
@@ -171,7 +171,7 @@ impl Recorder {
     ///
     /// Call this after any runtime that owns worker threads has been dropped, so
     /// their thread-local buffers have already been flushed. Consumes the
-    /// session so `Drop` becomes a no-op.
+    /// recorder so `Drop` becomes a no-op.
     pub fn graceful_shutdown(mut self, timeout: Duration) -> std::io::Result<()> {
         // `timeout` only bounds the worker drain, which exists under `pipeline`.
         #[cfg(not(feature = "pipeline"))]

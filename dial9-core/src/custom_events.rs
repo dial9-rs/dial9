@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 /// Configuration for custom event callbacks.
 ///
 /// Build via `CustomEventsConfig::builder()...build()`, then plug the
-/// [`CustomEventsSource`] into a session.
+/// [`CustomEventsSource`] into a recorder.
 #[derive(Debug, Clone, bon::Builder)]
 pub struct CustomEventsConfig {
     /// Minimum time between callback invocations.

@@ -2280,7 +2280,7 @@ mod tests {
         let base = dir.path().join("trace");
         let mut writer = DiskBuffer::new(dir.path(), 100_000, 100_000).unwrap();
 
-        // Simulate the session builder setting S3 metadata
+        // Simulate the recorder builder setting S3 metadata
         writer.update_segment_metadata(vec![
             ("bucket".into(), "my-bucket".into()),
             ("service_name".into(), "my-svc".into()),
@@ -2322,7 +2322,7 @@ mod tests {
         let one_event = single_event_file_size();
         let mut writer = DiskBuffer::new(dir.path(), one_event, 100_000).unwrap();
 
-        // Step 1: S3 metadata set (like the session builder)
+        // Step 1: S3 metadata set (like the recorder builder)
         writer.update_segment_metadata(vec![
             ("bucket".into(), "my-bucket".into()),
             ("service_name".into(), "my-svc".into()),

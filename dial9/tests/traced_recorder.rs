@@ -255,10 +255,10 @@ fn source_registered_after_with_tokio_is_recorded() {
     );
 }
 
-/// `on_session_start` hooks forward through the tokio builder and fire when the
-/// runtime's session enables.
+/// `on_recording_start` hooks forward through the tokio builder and fire when the
+/// runtime's recorder enables.
 #[test]
-fn on_session_start_fires_on_tokio_path() {
+fn on_recording_start_fires_on_tokio_path() {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -269,13 +269,13 @@ fn on_session_start_fires_on_tokio_path() {
     let ran_hook = Arc::clone(&ran);
     let traced = recorder(writer)
         .with_tokio(|_| {})
-        .on_session_start(move |_handle| ran_hook.store(true, Ordering::SeqCst))
+        .on_recording_start(move |_handle| ran_hook.store(true, Ordering::SeqCst))
         .build()
         .expect("build traced runtime");
 
     assert!(
         ran.load(Ordering::SeqCst),
-        "on_session_start should fire when the tokio session enables at build"
+        "on_recording_start should fire when the tokio recorder enables at build"
     );
     traced.graceful_shutdown();
 }

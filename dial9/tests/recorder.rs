@@ -51,15 +51,15 @@ fn facade_recorder_records_a_source() {
     let recorder = recorder(writer)
         .source(OnceSource { emitted: false })
         .build_and_start();
-    // The session exposes its sources through the public `shared()` API.
+    // The recorder exposes its sources through the public `shared()` API.
     let source_names: Vec<String> = recorder
         .shared()
-        .expect("enabled session")
+        .expect("enabled recorder")
         .with_sources_mut(|sources| sources.iter().map(|s| s.name().to_string()).collect())
         .expect("sources lock");
     assert!(
         source_names.iter().any(|name| name == "once"),
-        "the registered source should be visible on the session"
+        "the registered source should be visible on the recorder"
     );
     recorder
         .graceful_shutdown(Duration::ZERO)

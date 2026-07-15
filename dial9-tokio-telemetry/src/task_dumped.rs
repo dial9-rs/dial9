@@ -50,7 +50,7 @@ use std::task::{Context, Poll};
 const FRAME_BUF_INITIAL_CAPACITY: usize = 256;
 
 crate::primitives::thread_local! {
-    /// This session's task-dump config for the current thread. Installed on
+    /// This recorder's task-dump config for the current thread. Installed on
     /// every runtime-owned thread: worker thread-start, plus the block_on
     /// thread in `attach_runtime` (which thread-start doesn't fire for on a
     /// current-thread runtime), and cleared on thread stop.
@@ -96,7 +96,7 @@ pin_project! {
         // capture → …). Cleared on the next poll so subsequent real wakes
         // proceed normally.
         just_captured: bool,
-        // Whether task dumps are configured for this session. `None` until the
+        // Whether task dumps are configured for this recorder. `None` until the
         // first poll reads the per-thread config. The wrapping thread may lack
         // it (e.g. an explicit handle spawned from elsewhere), but the polling
         // thread always has it. `Some(false)` makes poll a passthrough.
@@ -127,7 +127,7 @@ impl<F: Future> Future for TaskDumped<F> {
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<F::Output> {
         let mut this = self.project();
 
-        // Read this session's task-dump config on the first poll. Wrapping can
+        // Read this recorder's task-dump config on the first poll. Wrapping can
         // happen on a thread without the config, but a task always polls on a
         // runtime-owned thread, which has it.
         let enabled = match *this.enabled {

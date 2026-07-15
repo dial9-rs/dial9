@@ -1,7 +1,7 @@
 //! Minimal dial9 + memory profiling example.
 //!
 //! Sets `Dial9Allocator` as the global allocator, enables memory profiling
-//! on the running dial9 session, does some allocating work, and writes a trace
+//! on the running dial9 recorder, does some allocating work, and writes a trace
 //! with `AllocEvent`s to disk.
 //!
 //!   cargo run -p memory-local

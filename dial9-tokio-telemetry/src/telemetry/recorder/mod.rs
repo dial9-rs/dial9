@@ -234,7 +234,7 @@ fn register_hooks(
     });
 }
 
-/// Attach a runtime to an existing telemetry session: register hooks, build
+/// Attach a runtime to an existing recorder: register hooks, build
 /// the runtime, reserve worker IDs, and push the context.
 #[allow(clippy::too_many_arguments)]
 fn attach_runtime(
@@ -791,7 +791,7 @@ mod tests {
         );
     }
 
-    /// End-to-end: a runtime attached to an existing telemetry session has its
+    /// End-to-end: a runtime attached to an existing recorder has its
     /// self-detected segment metadata (the runtime→worker mapping) written into
     /// a sealed segment that decodes back. Exercises the full wiring:
     /// `attach → TokioRuntimesSource::segment_metadata → writer → encode → decode`.
@@ -840,7 +840,7 @@ mod tests {
             .unwrap();
         });
 
-        // Attach B to the same session. Its workers are eagerly populated at
+        // Attach B to the same recorder. Its workers are eagerly populated at
         // attach time, so its metadata is complete without ever driving it.
         let builder_b = tokio::runtime::Builder::new_current_thread();
         let (runtime_b, _handle_b) = traced.trace_runtime("second").build(builder_b).unwrap();
@@ -1136,7 +1136,7 @@ mod tests {
         }
     }
 
-    // A current-thread primary keeps these session tests from spawning worker
+    // A current-thread primary keeps these recorder tests from spawning worker
     // threads; the runtime under test is attached via `trace_runtime`.
     fn session_recorder<M: dial9_core::buffer::BufferMode>(
         writer: dial9_core::buffer::SegmentWriter<M>,
@@ -1422,7 +1422,7 @@ mod tests {
         assert_eq!(result, 17);
     }
 
-    /// A disabled session's `graceful_shutdown` must be a no-op — there is no
+    /// A disabled recorder's `graceful_shutdown` must be a no-op — there is no
     /// flush thread or background worker to drain.
     #[test]
     fn disabled_session_graceful_shutdown_is_noop() {
@@ -1434,7 +1434,7 @@ mod tests {
     }
 
     /// Regression test for issue #400: multi-runtime callers must be able to
-    /// configure S3 upload, via `.with_s3_uploader()` on the session builder.
+    /// configure S3 upload, via `.with_s3_uploader()` on the recorder builder.
     #[cfg(feature = "worker-s3")]
     #[test]
     fn session_builder_s3_config_builds_successfully() {

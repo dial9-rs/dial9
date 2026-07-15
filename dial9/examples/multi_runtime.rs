@@ -1,4 +1,4 @@
-//! Multiple named runtimes sharing a single telemetry session.
+//! Multiple named runtimes sharing a single recorder.
 //!
 //! A common pattern is to run separate runtimes for different workload types
 //! (e.g. request handling vs background I/O). This example builds a primary
@@ -34,14 +34,14 @@ fn main() -> std::io::Result<()> {
         .graceful_shutdown(Duration::from_secs(5))
         .build()?;
 
-    // Secondary runtime for background I/O, sharing the same trace session.
+    // Secondary runtime for background I/O, sharing the same recorder.
     let mut io_builder = tokio::runtime::Builder::new_multi_thread();
     io_builder.worker_threads(2).enable_all();
     let (io_rt, io_handle) = traced.trace_runtime("io").build(io_builder)?;
 
     println!("Running workload on two named runtimes...");
 
-    // Request handling on the main runtime. Spawn through the session handle
+    // Request handling on the main runtime. Spawn through the handle
     // instead of tokio::spawn() for wake-event tracking.
     let main_handle = traced.handle();
     traced.runtime().block_on(async {

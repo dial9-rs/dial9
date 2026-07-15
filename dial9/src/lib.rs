@@ -17,7 +17,7 @@
 pub use dial9_core::buffer::{Disk, DiskBuffer, Memory, MemoryBuffer};
 pub use dial9_core::handle::Dial9Handle;
 pub use dial9_core::recorder::{RecorderBuilder, RegisterSource, recorder};
-pub use dial9_core::session::Recorder;
+pub use dial9_core::recording::Recorder;
 
 /// Building blocks for extending dial9: implement a [`Source`](crate::core::Source),
 /// write custom encoders, author custom segment processors, reach the raw
@@ -28,7 +28,6 @@ pub mod core {
     pub use dial9_core::encoder::{self, Encodable, ThreadLocalEncoder};
     pub use dial9_core::handle::{self, clear_tl_handle, current_handle, set_tl_handle};
     pub use dial9_core::recorder;
-    pub use dial9_core::session;
     pub use dial9_core::source::{self, FlushContext, Source};
 
     // Background pipeline (segment worker, on-demand dumps).
@@ -53,7 +52,7 @@ use crate::core::{Encodable, current_handle};
 
 /// Record an event on the calling thread's current handle.
 ///
-///  A no-op when no session is installed on the thread (the handle is disabled).
+///  A no-op when no recorder is installed on the thread (the handle is disabled).
 pub fn record_event(event: impl Encodable) {
     current_handle().record_event(event);
 }

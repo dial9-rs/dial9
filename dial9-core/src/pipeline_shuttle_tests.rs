@@ -7,7 +7,7 @@ use crate::clock::clock_monotonic_ns;
 use crate::primitives::fs;
 use crate::primitives::sync::atomic::{AtomicU64, Ordering};
 use crate::primitives::sync::{Arc, Mutex};
-use crate::session::Recorder;
+use crate::recording::Recorder;
 use crate::shared_state::SharedState;
 use crate::source::{FlushContext, Source};
 use dial9_trace_format::TraceEvent;
