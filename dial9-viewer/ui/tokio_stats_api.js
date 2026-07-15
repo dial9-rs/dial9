@@ -92,6 +92,28 @@ function latencyHeat(ns) {
   return "#3fb950"; // green — sub-millisecond
 }
 
+// Map a worker's poll share to a severity color relative to the ideal balanced
+// share (100 / numWorkers). >2× ideal is red (hot worker), >1.5× amber, else
+// green. Used by the "Worker activity" card.
+function workerShareHeat(sharePct, numWorkers) {
+  if (!numWorkers || numWorkers < 1) return "#3fb950";
+  const ideal = 100 / numWorkers;
+  if (sharePct > ideal * 2) return "#f85149"; // red — hot worker
+  if (sharePct > ideal * 1.5) return "#d29922"; // amber — somewhat concentrated
+  return "#3fb950"; // green — balanced
+}
+
+// Map a worker's busyness percentage to a severity color. Busyness = time spent
+// in poll() / wall-clock time. ≥80% is red (near-saturated), ≥50% amber
+// (moderately loaded), else green. Thresholds are intentionally higher than
+// latencyHeat — a worker spending 50% of time polling is busy but not
+// necessarily problematic (unlike a single 3ms poll which directly starves).
+function busynessHeat(busyPct) {
+  if (busyPct >= 80) return "#f85149"; // red — near-saturated
+  if (busyPct >= 50) return "#d29922"; // amber — moderately loaded
+  return "#3fb950"; // green — has headroom
+}
+
 // Whether a coverage block still has matched files left to fold (so "Load more"
 // can deepen the sample). False when fully folded or coverage is absent.
 function canRefineMore(coverage) {
@@ -106,6 +128,8 @@ if (typeof module !== "undefined" && module.exports) {
     exemplarViewerUrl,
     formatTokioCoverage,
     latencyHeat,
+    workerShareHeat,
+    busynessHeat,
     canRefineMore,
   };
 }

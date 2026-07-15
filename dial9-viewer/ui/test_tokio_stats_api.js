@@ -10,6 +10,8 @@ const {
   exemplarViewerUrl,
   formatTokioCoverage,
   latencyHeat,
+  workerShareHeat,
+  busynessHeat,
   canRefineMore,
 } = require("./tokio_stats_api.js");
 
@@ -164,6 +166,26 @@ assertEq(latencyHeat(1_000_000), "#d29922", "1ms poll is amber");
 assertEq(latencyHeat(2_500_000), "#d29922", "1–3ms poll is amber");
 assertEq(latencyHeat(3_000_000), "#f85149", "3ms poll is red");
 assertEq(latencyHeat(50_000_000), "#f85149", "50ms poll is red");
+
+// ── workerShareHeat ──
+// With 4 workers, ideal = 25%. >50% (2×) is red, >37.5% (1.5×) amber, else green.
+assertEq(workerShareHeat(20, 4), "#3fb950", "4 workers: 20% share is green (balanced)");
+assertEq(workerShareHeat(25, 4), "#3fb950", "4 workers: exactly ideal share is green");
+assertEq(workerShareHeat(38, 4), "#d29922", "4 workers: 38% share is amber (>1.5× ideal)");
+assertEq(workerShareHeat(55, 4), "#f85149", "4 workers: 55% share is red (>2× ideal, hot worker)");
+// Edge case: single worker always gets 100% which is exactly ideal (not hot).
+assertEq(workerShareHeat(100, 1), "#3fb950", "1 worker: 100% is just ideal, green");
+// Edge case: no workers (guard).
+assertEq(workerShareHeat(50, 0), "#3fb950", "0 workers: fallback green");
+
+// ── busynessHeat ──
+// Busyness = poll time / wall-clock. ≥80% red (saturated), ≥50% amber, else green.
+assertEq(busynessHeat(30), "#3fb950", "30% busy is green (has headroom)");
+assertEq(busynessHeat(49.9), "#3fb950", "just under 50% is still green");
+assertEq(busynessHeat(50), "#d29922", "50% busy is amber (moderately loaded)");
+assertEq(busynessHeat(75), "#d29922", "75% busy is amber");
+assertEq(busynessHeat(80), "#f85149", "80% busy is red (near-saturated)");
+assertEq(busynessHeat(99), "#f85149", "99% busy is red");
 
 // ── canRefineMore ──
 assertEq(canRefineMore({ files_matched: 480, files_folded: 24 }), true, "folded < matched -> more");
