@@ -24,7 +24,7 @@ If you are integrating dial9 into a production service, see the [`production_use
 
 You can also find a full [example service](https://github.com/dial9-rs/dial9-tokio-telemetry/blob/main/examples).
 
-Tokio relies on `tokio_unstable` for Tokio runtime hooks and frame pointers for efficient profiling.
+dial9 needs `tokio_unstable` for Tokio runtime hooks and frame pointers for profiling.
 
 ```toml
 # .cargo/config.toml
