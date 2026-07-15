@@ -135,11 +135,13 @@ fn expand_main(args: MainArgs, input: ItemFn) -> Result<TokenStream2, syn::Error
 /// exits. The deadline defaults to 1 second and is configurable on the config
 /// builder:
 ///
-/// ```rust,ignore
-/// dial9::recorder(writer)
+/// ```no_run
+/// # use dial9::{DiskBuffer, RecorderBuilderTokioExt};
+/// # let writer = DiskBuffer::builder().base_path("/tmp/traces").max_total_size(16 << 20).build().unwrap();
+/// let _config = dial9::recorder(writer)
 ///     .with_tokio(|_| {})
-///     .graceful_shutdown(std::time::Duration::from_secs(5)) // custom deadline
-///     // .disable_graceful_shutdown()                       // or opt out entirely
+///     .graceful_shutdown(std::time::Duration::from_secs(5)); // custom deadline
+///     // or `.disable_graceful_shutdown()` to opt out entirely
 /// ```
 ///
 /// The low-level `TracedRuntime` API is unaffected — there you call
@@ -154,13 +156,13 @@ fn expand_main(args: MainArgs, input: ItemFn) -> Result<TokenStream2, syn::Error
 ///
 /// Using a named function:
 ///
-/// ```rust,ignore
+/// ```no_run
 /// use dial9::telemetry::Dial9TokioHandle;
 /// use dial9::{main, DiskBuffer, RecorderBuilderTokioExt, TracedRuntimeBuilder};
 ///
 /// fn my_config() -> TracedRuntimeBuilder {
 ///     let writer = DiskBuffer::builder()
-///         .base_path("/tmp/trace.bin")
+///         .base_path("/tmp/traces")
 ///         .max_file_size(1024 * 1024)
 ///         .max_total_size(16 * 1024 * 1024)
 ///         .build()
@@ -180,10 +182,11 @@ fn expand_main(args: MainArgs, input: ItemFn) -> Result<TokenStream2, syn::Error
 ///
 /// Using an inline closure:
 ///
-/// ```rust,ignore
+/// ```no_run
+/// # use dial9::RecorderBuilderTokioExt;
 /// #[dial9::main(config = || {
 ///     let writer = dial9::DiskBuffer::builder()
-///         .base_path("/tmp/trace.bin")
+///         .base_path("/tmp/traces")
 ///         .max_file_size(1024 * 1024)
 ///         .max_total_size(16 * 1024 * 1024)
 ///         .build()
@@ -198,7 +201,7 @@ fn expand_main(args: MainArgs, input: ItemFn) -> Result<TokenStream2, syn::Error
 /// From the environment (best-effort; `DIAL9_ENABLED` off, or a writer-setup
 /// failure, yields a plain tokio runtime):
 ///
-/// ```rust,ignore
+/// ```no_run
 /// #[dial9::main(config = dial9::recorder_from_env)]
 /// async fn main() {
 ///     /* ... */
@@ -208,24 +211,25 @@ fn expand_main(args: MainArgs, input: ItemFn) -> Result<TokenStream2, syn::Error
 /// Disabled (no telemetry, plain tokio runtime — useful for toggling
 /// dial9 off via a feature flag or env var without removing the macro):
 ///
-/// ```rust,ignore
-/// #[dial9::main(config = || dial9::TracedRuntimeBuilder::disabled())]
+/// ```no_run
+/// #[dial9::main(config = || dial9::TracedRuntimeBuilder::<dial9::Disk>::disabled())]
 /// async fn main() {
 ///     /* ... */
 /// }
 /// ```
 ///
-/// In-memory writer (no telemetry on disk), via `MemoryBuffer`:
+/// In-memory writer (nothing on local disk). With no disk writeback, pair it
+/// with a pipeline that ships the buffered segments somewhere — e.g.
+/// `.with_s3_uploader(..)` or `.with_custom_pipeline(..)`.
 ///
-/// ```rust,ignore
+/// ```no_run
+/// # use dial9::RecorderBuilderTokioExt;
 /// #[dial9::main(config = || {
 ///     let writer = dial9::MemoryBuffer::builder()
 ///         .max_total_size(16 * 1024 * 1024)
 ///         .build()
 ///         .expect("writer build failed");
-///     dial9::recorder(writer)
-///         .with_tokio(|_| {})
-///         .with_custom_pipeline(|p| p.pipe(MyUploader))
+///     dial9::recorder(writer).with_tokio(|_| {})
 /// })]
 /// async fn main() {
 ///     /* ... */

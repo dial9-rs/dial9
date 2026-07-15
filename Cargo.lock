@@ -1850,6 +1850,7 @@ dependencies = [
 name = "dial9-macro"
 version = "0.3.7"
 dependencies = [
+ "dial9",
  "insta",
  "prettyplease",
  "proc-macro2",
