@@ -1,4 +1,5 @@
-use dial9::{DiskBuffer, FlushContext, Source, clock_monotonic_ns, recorder};
+use dial9::core::{FlushContext, Source, clock_monotonic_ns};
+use dial9::{DiskBuffer, recorder};
 use dial9_trace_format::TraceEvent;
 use dial9_trace_format::decoder::Decoder;
 use std::path::{Path, PathBuf};

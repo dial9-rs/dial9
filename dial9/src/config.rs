@@ -499,7 +499,7 @@ fn build_s3_config(
 /// | `DIAL9_SCHEDULE_PROFILE_ENABLED` | `true` on Linux with `cpu-profiling`, `false` otherwise | Enable per-worker scheduler event capture. Requires the [CPU profiling setup](https://github.com/dial9-rs/dial9/blob/HEAD/dial9-tokio-telemetry/README.md#cpu-profiling-linux-only). |
 ///
 /// Supported memory profiling variables (`memory-profiling` feature required;
-/// applications must still install [`Dial9Allocator`](crate::memory_profiling::Dial9Allocator)
+/// applications must still install the `Dial9Allocator` from the `memory` module
 /// as their `#[global_allocator]`):
 ///
 /// | Variable | Default | Meaning |
@@ -1292,7 +1292,7 @@ mod tests {
             "no Tokio runtime metadata should be present when Tokio instrumentation is disabled"
         );
         assert!(
-            !rt.block_on(async { crate::current_handle().is_enabled() }),
+            !rt.block_on(async { crate::core::current_handle().is_enabled() }),
             "Dial9Handle::current() should remain inert without Tokio hooks"
         );
     }

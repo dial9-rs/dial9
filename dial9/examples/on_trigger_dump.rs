@@ -33,7 +33,7 @@
 use std::time::Duration;
 
 use dial9::DiskBuffer;
-use dial9::dump::DumpError;
+use dial9::core::dump::DumpError;
 use dial9::telemetry::{Dial9Handle, Dial9TokioHandle};
 
 const TRACE_DIR: &str = "/tmp/dial9-on-trigger-dump";

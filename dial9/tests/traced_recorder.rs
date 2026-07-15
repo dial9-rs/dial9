@@ -90,7 +90,7 @@ fn recorder_with_tokio_dump_trigger_reachable() {
 
     traced.block_on(async {
         assert!(
-            dial9::current_handle().dump_trigger().is_some(),
+            dial9::core::current_handle().dump_trigger().is_some(),
             "dump_trigger should be reachable via the ambient handle in on-demand mode"
         );
     });
@@ -192,7 +192,7 @@ fn recorder_or_disabled_downgrades_on_in_memory_writer_failure() {
 
 #[test]
 fn source_registered_after_with_tokio_is_recorded() {
-    use dial9::{FlushContext, Source, clock_monotonic_ns};
+    use dial9::core::{FlushContext, Source, clock_monotonic_ns};
 
     #[derive(Debug, serde::Deserialize, dial9_trace_format::TraceEvent)]
     struct MarkerEvent {

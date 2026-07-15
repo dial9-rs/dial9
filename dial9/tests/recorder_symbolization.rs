@@ -1,9 +1,9 @@
 //! Linux-only: sampling needs `perf_event_open`.
 #![cfg(all(feature = "cpu-profiling", feature = "pipeline", target_os = "linux"))]
 
+use dial9::core::pipeline::SymbolizeProcessor;
+use dial9::core::worker::processors::WriteBackProcessor;
 use dial9::cpu::{CpuProfiler, CpuProfilingConfig};
-use dial9::pipeline::SymbolizeProcessor;
-use dial9::worker::processors::WriteBackProcessor;
 use dial9::{DiskBuffer, recorder};
 use dial9_trace_format::decoder::Decoder;
 use std::time::{Duration, Instant};

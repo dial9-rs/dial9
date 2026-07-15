@@ -3,43 +3,59 @@
 //! Most applications want the `tokio` feature: `#[dial9::main]`, `TracedRuntime`,
 //! `spawn`, and the `recorder(w).with_tokio(..)` builder. Library authors who
 //! only need to record events into a trace can use the always-available core API
-//! ([`recorder`](fn@recorder), [`Dial9Handle`], [`record_event`], [`Source`])
-//! without pulling in Tokio.
+//! ([`recorder`](fn@recorder), [`Dial9Handle`], [`record_event`],
+//! [`Source`](crate::core::Source)) without pulling in Tokio.
+//!
+//! Extension points, implementing a [`Source`](crate::core::Source), custom encoders
+//! and processors and the segment worker, can be accessed via the [`core`] module.
 //!
 //! Profiling (`cpu-profiling`, `memory-profiling`), the tracing-subscriber
 //! layer, and S3 upload are behind feature gates. The viewer CLI ships in the
 //! `dial9` binary (the `cli` feature, on by default).
 
 // Core recording API
-pub use dial9_core::buffer::{
-    self, BufferMode, Disk, DiskBuffer, Memory, MemoryBuffer, SegmentWriter,
-};
-pub use dial9_core::clock::{self, clock_monotonic_ns};
-pub use dial9_core::encoder::{self, Encodable, ThreadLocalEncoder};
-pub use dial9_core::handle::{self, Dial9Handle, clear_tl_handle, current_handle, set_tl_handle};
-pub use dial9_core::recorder::{self, RecorderBuilder, RegisterSource, recorder};
-pub use dial9_core::session::{self, Recorder};
-pub use dial9_core::source::{self, FlushContext, Source};
+pub use dial9_core::buffer::{Disk, DiskBuffer, Memory, MemoryBuffer};
+pub use dial9_core::handle::Dial9Handle;
+pub use dial9_core::recorder::{RecorderBuilder, RegisterSource, recorder};
+pub use dial9_core::session::Recorder;
+
+/// Building blocks for extending dial9: implement a [`Source`](crate::core::Source),
+/// write custom encoders, author custom segment processors, reach the raw
+/// recording modules.
+pub mod core {
+    pub use dial9_core::buffer::{self, BufferMode, SegmentWriter};
+    pub use dial9_core::clock::{self, clock_monotonic_ns};
+    pub use dial9_core::encoder::{self, Encodable, ThreadLocalEncoder};
+    pub use dial9_core::handle::{self, clear_tl_handle, current_handle, set_tl_handle};
+    pub use dial9_core::recorder;
+    pub use dial9_core::session;
+    pub use dial9_core::source::{self, FlushContext, Source};
+
+    // Background pipeline (segment worker, on-demand dumps).
+    #[cfg(feature = "pipeline")]
+    pub use dial9_core::{dump, worker};
+
+    /// Segment pipeline: background processors and offline symbolization.
+    #[cfg(feature = "pipeline")]
+    pub mod pipeline {
+        pub use dial9_core::pipeline::{
+            MemorySegment, Payload, ProcessError, ProcessErrorKind, SealedSegment, SegmentData,
+            SegmentProcessor, SegmentRef,
+        };
+
+        /// Offline symbolization processor. Needs the CPU profiler for stack frames.
+        #[cfg(feature = "cpu-profiling")]
+        pub use dial9_perf_self_profile::SymbolizeProcessor;
+    }
+}
+
+use crate::core::{Encodable, current_handle};
 
 /// Record an event on the calling thread's current handle.
 ///
 ///  A no-op when no session is installed on the thread (the handle is disabled).
 pub fn record_event(event: impl Encodable) {
     current_handle().record_event(event);
-}
-
-// Background pipeline (segment worker, on-demand dumps).
-#[cfg(feature = "pipeline")]
-pub use dial9_core::{dump, worker};
-
-/// Segment pipeline: background processors and offline symbolization.
-#[cfg(feature = "pipeline")]
-pub mod pipeline {
-    pub use dial9_core::pipeline::*;
-
-    /// Offline symbolization processor. Needs the CPU profiler for stack frames.
-    #[cfg(feature = "cpu-profiling")]
-    pub use dial9_perf_self_profile::SymbolizeProcessor;
 }
 
 // Tokio runtime integration.
@@ -56,6 +72,9 @@ pub use dial9_tokio_telemetry::telemetry::{RecorderBuilderTokioExt, TracedRuntim
 mod config;
 #[cfg(feature = "tokio")]
 pub use config::recorder_from_env;
+
+#[cfg(feature = "tokio")]
+use crate::core::{BufferMode, SegmentWriter};
 
 /// Build a [`TracedRuntimeBuilder`] from a writer result, or fall back to a disabled
 /// (writer-free) one when the writer cannot be created. Works with any writer:
@@ -120,7 +139,9 @@ pub mod cpu {
 /// In-process allocation and free tracking.
 #[cfg(feature = "memory-profiling")]
 pub mod memory {
-    pub use dial9_perf_self_profile::memory_profiling::*;
+    pub use dial9_perf_self_profile::memory_profiling::{
+        Dial9Allocator, InstallError, MemoryProfiler, MemoryProfilerGuard, MemoryProfilingConfig,
+    };
 }
 
 /// Process resource-usage (rusage) source.
