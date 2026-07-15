@@ -1019,7 +1019,7 @@
             const { buildWorkerSpans, attachCpuSamples, buildActiveTaskTimeline, computeSchedulingDelays, filterPointsOfInterest, buildSpanData, collectDescendants, selectSpanRenderSet, enclosingSpans, computeSpanLayout, getTraceTimeRange, hasCpuProfileSamples, buildProcessCpuUsageSeries, computeRuntimeGroups } = TraceAnalysis;
 
             function esc(s) {
-                return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+                return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
             }
 
             /** Render a raw frame {symbol, location} as HTML, with docs.rs link if available. */

@@ -457,6 +457,10 @@
     });
     // ── State ──
     let useLocalTz = false;
+    // Preserve exact range instants while only their UTC/local display changes.
+    // This distinguishes the two occurrences of a DST fall-back wall-clock hour.
+    let rangeFromDate = null;
+    let rangeToDate = null;
     let allObjects = [];       // all objects from time-range search
     let heatmapSegments = [];  // normalized segments for the timeline
     let heatmapRows = [];      // groupByHost(heatmapSegments)
@@ -798,8 +802,8 @@
         if (currentQuickRange) {
             state.last = currentQuickRange;
         } else {
-            const fromDate = pickerToDate(document.getElementById('range-from').value);
-            const toDate = pickerToDate(document.getElementById('range-to').value);
+            const fromDate = readRangePickerDate('range-from');
+            const toDate = readRangePickerDate('range-to');
             if (fromDate) state.from = Math.floor(fromDate.getTime() / 1000);
             if (toDate) state.to = Math.floor(toDate.getTime() / 1000);
         }
@@ -859,8 +863,8 @@
     if (urlState.last) {
         setQuickRange(urlState.last);
     } else if (urlState.from != null && urlState.to != null) {
-        document.getElementById('range-from').value = dateToPickerStr(new Date(urlState.from * 1000));
-        document.getElementById('range-to').value = dateToPickerStr(new Date(urlState.to * 1000));
+        setRangePickerDate('range-from', new Date(urlState.from * 1000));
+        setRangePickerDate('range-to', new Date(urlState.to * 1000));
     } else {
         setQuickRange(1);
     }
@@ -1032,15 +1036,15 @@
     // ── Timezone toggle ──
     document.getElementById('tz-btn').addEventListener('click', () => {
         // Read current picker values in the OLD tz mode before toggling
-        const fromDate = pickerToDate(document.getElementById('range-from').value);
-        const toDate = pickerToDate(document.getElementById('range-to').value);
+        const fromDate = readRangePickerDate('range-from');
+        const toDate = readRangePickerDate('range-to');
 
         useLocalTz = !useLocalTz;
         document.getElementById('tz-btn').textContent = useLocalTz ? 'Time: Local' : 'Time: UTC';
 
         // Re-write picker values in the NEW tz mode
-        if (fromDate) document.getElementById('range-from').value = dateToPickerStr(fromDate);
-        if (toDate) document.getElementById('range-to').value = dateToPickerStr(toDate);
+        if (fromDate) setRangePickerDate('range-from', fromDate);
+        if (toDate) setRangePickerDate('range-to', toDate);
 
         // Re-render current view. Only the axis tick labels are TZ-dependent,
         // so redraw the canvas (which relabels the axis via fmtTick) and re-lay
@@ -1058,6 +1062,9 @@
         } else {
             renderRawTable(rawObjects);
         }
+        // The selected-segment footer includes fmtTick values, so refresh it
+        // alongside the heatmap when UTC/local mode changes.
+        updateSelectionCount();
         syncUrl();
     });
 
@@ -1105,37 +1112,36 @@
         return isNaN(ms) ? 0 : ms / 1000;
     }
 
-    function toLocalDatetime(d) {
-        const pad = n => String(n).padStart(2, '0');
-        return d.getFullYear() + '-' + pad(d.getMonth()+1) + '-' + pad(d.getDate()) +
-            'T' + pad(d.getHours()) + ':' + pad(d.getMinutes());
-    }
-
-    function toUTCDatetime(d) {
-        const pad = n => String(n).padStart(2, '0');
-        return d.getUTCFullYear() + '-' + pad(d.getUTCMonth()+1) + '-' + pad(d.getUTCDate()) +
-            'T' + pad(d.getUTCHours()) + ':' + pad(d.getUTCMinutes());
-    }
-
-    /** Format a Date for the datetime-local picker in the current TZ mode */
+    /** Format a Date for the native YYYY-MM-DD landing range picker. */
     function dateToPickerStr(d) {
-        return useLocalTz ? toLocalDatetime(d) : toUTCDatetime(d);
+        return Dial9TimeFormat.dateToRangePicker(d, useLocalTz);
     }
 
-    /** Parse a datetime-local picker value into a Date using the current TZ mode */
-    function pickerToDate(str) {
-        if (!str) return null;
-        if (useLocalTz) return new Date(str);
-        // Treat the picker value as UTC
-        return new Date(str + 'Z');
+    /** Read a landing range while preserving its backing instant across mode toggles. */
+    function readRangePickerDate(inputId) {
+        const input = document.getElementById(inputId);
+        const current = inputId === 'range-from' ? rangeFromDate : rangeToDate;
+        const date = Dial9TimeFormat.rangePickerToDatePreserving(input.value, current, useLocalTz);
+        if (date) {
+            if (inputId === 'range-from') rangeFromDate = date;
+            else rangeToDate = date;
+        }
+        return date;
+    }
+
+    /** Set a landing range's visible text and exact backing instant together. */
+    function setRangePickerDate(inputId, date) {
+        document.getElementById(inputId).value = dateToPickerStr(date);
+        if (inputId === 'range-from') rangeFromDate = date;
+        else rangeToDate = date;
     }
 
     // ── Quick range buttons ──
     function setQuickRange(hours) {
         const now = new Date();
         const from = new Date(now.getTime() - hours * 3600 * 1000);
-        document.getElementById('range-from').value = dateToPickerStr(from);
-        document.getElementById('range-to').value = dateToPickerStr(now);
+        setRangePickerDate('range-from', from);
+        setRangePickerDate('range-to', now);
         // Remember the relative window so the URL stays relative ("last N hours
         // from now") rather than freezing these computed timestamps.
         currentQuickRange = hours;
@@ -1151,8 +1157,10 @@
     // A manual edit turns the range into a precise/custom window: clear the
     // quick-button highlight and the relative marker so the URL records exact
     // timestamps instead.
-    function clearQuickRange() {
+    function clearQuickRange(event) {
         currentQuickRange = null;
+        if (event && event.target.id === 'range-from') rangeFromDate = null;
+        if (event && event.target.id === 'range-to') rangeToDate = null;
         document.querySelectorAll('.quick-btns button').forEach(b => b.classList.remove('selected'));
         syncUrl();
     }
@@ -1191,8 +1199,12 @@
         const toStr = document.getElementById('range-to').value;
         if (!fromStr || !toStr) { alert('Select a time range'); return; }
 
-        const from = pickerToDate(fromStr);
-        const to = pickerToDate(toStr);
+        const from = readRangePickerDate('range-from');
+        const to = readRangePickerDate('range-to');
+        if (!from || !to) {
+            alert('Select a valid time range');
+            return;
+        }
         const fromEpoch = Math.floor(from.getTime() / 1000);
         const toEpoch = Math.floor(to.getTime() / 1000);
         // When the server has its own prefix it owns prefixing; otherwise pass
@@ -1291,11 +1303,7 @@
     function xToTime(x, tMin, tMax, W) { return tMin + (x / W) * (tMax - tMin); }
 
     function fmtTick(epoch) {
-        const d = new Date(epoch * 1000);
-        const pad = n => String(n).padStart(2, '0');
-        return useLocalTz
-            ? pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds())
-            : pad(d.getUTCHours()) + ':' + pad(d.getUTCMinutes()) + ':' + pad(d.getUTCSeconds());
+        return Dial9TimeFormat.formatTime(new Date(epoch * 1000), useLocalTz);
     }
 
     // Precomputed 256-entry density color ramp. Building a color string per
@@ -1500,7 +1508,7 @@
         return dayKey(tMin) !== dayKey(tMax);
     }
 
-    // Format a tick's date (YYYY/MM/DD) in the active time mode.
+    // Format a tick's date (YYYY-MM-DD) in the active time mode.
     function fmtTickDate(epoch) {
         return Dial9TimeFormat.formatDate(new Date(epoch * 1000), useLocalTz);
     }
