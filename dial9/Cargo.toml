@@ -64,6 +64,7 @@ tokio = [
     "dep:bon",
     "dep:tracing",
     "pipeline",
+    "process-resource",
 ]
 
 ## CPU and scheduler profiling as a standalone `Source`. Auto-wires into the Tokio
