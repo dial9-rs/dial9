@@ -67,6 +67,7 @@ impl TraceField for WorkerId {
 /// Wire-format event for a task poll start.
 #[derive(Debug, TraceEvent)]
 #[traceevent(wire_slot)]
+#[cfg_attr(not(feature = "unstable-events"), non_exhaustive)]
 pub struct PollStartEvent {
     /// Timestamp in nanoseconds.
     #[traceevent(timestamp)]
@@ -84,6 +85,7 @@ pub struct PollStartEvent {
 /// Wire-format event for a task poll end.
 #[derive(Debug, TraceEvent)]
 #[traceevent(wire_slot)]
+#[cfg_attr(not(feature = "unstable-events"), non_exhaustive)]
 pub struct PollEndEvent {
     /// Timestamp in nanoseconds.
     #[traceevent(timestamp)]
@@ -95,6 +97,7 @@ pub struct PollEndEvent {
 /// Wire-format event for a worker park.
 #[derive(Debug, TraceEvent)]
 #[traceevent(wire_slot)]
+#[cfg_attr(not(feature = "unstable-events"), non_exhaustive)]
 pub struct WorkerParkEvent {
     /// Timestamp in nanoseconds.
     #[traceevent(timestamp)]
@@ -113,6 +116,7 @@ pub struct WorkerParkEvent {
 /// Wire-format event for a worker unpark.
 #[derive(Debug, TraceEvent)]
 #[traceevent(wire_slot)]
+#[cfg_attr(not(feature = "unstable-events"), non_exhaustive)]
 pub struct WorkerUnparkEvent {
     /// Timestamp in nanoseconds.
     #[traceevent(timestamp)]
@@ -143,6 +147,7 @@ pub(crate) struct QueueSampleEvent {
 /// Wire-format event for a task spawn.
 #[derive(Debug, TraceEvent)]
 #[traceevent(wire_slot)]
+#[cfg_attr(not(feature = "unstable-events"), non_exhaustive)]
 pub struct TaskSpawnEvent {
     /// Timestamp in nanoseconds.
     #[traceevent(timestamp)]
@@ -177,6 +182,7 @@ pub(crate) struct TaskDumpEvent {
 /// Wire-format event for a wake notification.
 #[derive(Debug, TraceEvent)]
 #[traceevent(wire_slot)]
+#[cfg_attr(not(feature = "unstable-events"), non_exhaustive)]
 pub struct WakeEventEvent {
     /// Timestamp in nanoseconds.
     #[traceevent(timestamp)]
