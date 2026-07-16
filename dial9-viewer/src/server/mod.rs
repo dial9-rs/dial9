@@ -16,6 +16,7 @@ mod config;
 pub mod credentials;
 mod error;
 pub(crate) mod flamegraph;
+pub(crate) mod fold_stream;
 pub(crate) mod metrics;
 mod prefixes;
 pub(crate) mod span_stats;

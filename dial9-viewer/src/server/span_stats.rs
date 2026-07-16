@@ -8,7 +8,6 @@
 
 use std::collections::HashMap;
 use std::convert::Infallible;
-use std::sync::Arc;
 
 use arrow::array::Array;
 use axum::Extension;
@@ -16,13 +15,14 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum_extra::extract::Query as QueryExtra;
-use futures::stream::{self, Stream, StreamExt};
+use futures::stream::Stream;
 use serde::{Deserialize, Serialize};
 
 use crate::ingest::aggregate::{self, AggContext, Coverage, FoldLimits, Scope};
-use crate::ingest::refine::{self, FoldErrors, FoldOutcome, RefineOpts, Resolved};
+use crate::ingest::refine::{self, FoldErrors, Folded, RefineOpts, Resolved};
 use crate::server::AppState;
 use crate::server::credentials::MaybeCreds;
+use crate::server::fold_stream;
 use crate::server::metrics::OperationMetrics;
 use crate::storage::StorageBackend;
 
@@ -995,15 +995,88 @@ async fn fetch_folded_spans_parts(
         .await
 }
 
-enum Phase {
-    Start,
-    Folding(Box<FoldState>),
+/// The span-stats [`FoldSink`] adapter: owns the [`SpanStatsAccum`]. Supplies the
+/// three operations that differ from flamegraph; the folded-set discipline lives
+/// in the driver.
+struct SpanStatsSink {
+    accum: SpanStatsAccum,
 }
 
-struct FoldState {
-    accum: SpanStatsAccum,
-    folded: std::collections::HashSet<String>,
-    errors: FoldErrors,
+impl fold_stream::FoldSink for SpanStatsSink {
+    async fn seed(
+        &mut self,
+        agg: &AggContext,
+        resolved: &Resolved,
+    ) -> Vec<fold_stream::PartOutcome> {
+        // Prime with already-folded spans parts.
+        let results = fetch_folded_spans_parts(
+            &*agg.output,
+            &agg.output_bucket,
+            &agg.output_prefix,
+            &resolved.capped_full_keys(),
+            resolved.folded(),
+        )
+        .await;
+        // Finding 4: Only include a leaf in `folded` after its GET and merge both
+        // succeed. Failed seed parts increment fold_errors and are excluded from
+        // files_folded. The driver applies the rule from these outcomes.
+        let mut outcomes = Vec::with_capacity(results.len());
+        for (leaf, result) in results {
+            let outcome = match result {
+                Ok(part) => match self.accum.merge_spans_part(part) {
+                    Ok(()) => fold_stream::PartOutcome::Folded { leaf },
+                    Err(e) => fold_stream::PartOutcome::Failed {
+                        key: "seed".to_string(),
+                        error: e.to_string(),
+                    },
+                },
+                Err(msg) => fold_stream::PartOutcome::Failed {
+                    key: "seed".to_string(),
+                    error: msg,
+                },
+            };
+            outcomes.push(outcome);
+        }
+        outcomes
+    }
+
+    async fn fold_one(&mut self, agg: &AggContext, f: &Folded) -> fold_stream::PartOutcome {
+        let spans_key = aggregate::spans_part_key_pub(&agg.output_prefix, &f.full_key);
+        match agg.output.get_object(&agg.output_bucket, &spans_key).await {
+            Ok(data) => match self.accum.merge_spans_part(data) {
+                // Only count as folded when both GET and merge succeed.
+                Ok(()) => fold_stream::PartOutcome::Folded {
+                    leaf: aggregate::part_leaf_of(&f.full_key),
+                },
+                // Decode/merge failure: increment fold_errors, do NOT add to folded set.
+                Err(e) => fold_stream::PartOutcome::Failed {
+                    key: f.raw_key.clone(),
+                    error: format!("decode/merge: {e}"),
+                },
+            },
+            // GET failure: increment fold_errors, do NOT add to folded set.
+            Err(e) => fold_stream::PartOutcome::Failed {
+                key: f.raw_key.clone(),
+                error: format!("spans part GET: {e}"),
+            },
+        }
+    }
+
+    fn snapshot_event(
+        &self,
+        resolved: &Resolved,
+        folded: &std::collections::HashSet<String>,
+        errors: &FoldErrors,
+    ) -> Event {
+        let coverage =
+            fold_stream::coverage_from(resolved, folded, errors, self.accum.total_instances());
+        let mut resp = self.accum.snapshot();
+        resp.coverage = Some(coverage);
+        Event::default().json_data(&resp).unwrap_or_else(|e| {
+            fold_stream::rate_limited_warn("span-stats: serialize failed", &anyhow::anyhow!(e));
+            Event::default().comment("serialize error")
+        })
+    }
 }
 
 /// Build the SSE event stream for one span-stats request.
@@ -1014,140 +1087,8 @@ fn span_stats_stream(
     start_ns: Option<i64>,
     end_ns: Option<i64>,
 ) -> impl Stream<Item = Result<Event, Infallible>> + use<> {
-    let agg = Arc::new(agg);
-    let ctx = Arc::new(StreamCtx {
-        agg: Arc::clone(&agg),
-        resolved,
-        start_ns,
-        end_ns,
-    });
-
-    let folds = Box::pin(refine::fold_stream(
-        agg,
-        limits,
-        ctx.resolved.unfolded_capped(),
-    ));
-
-    stream::unfold(
-        (ctx, folds, Phase::Start),
-        |(ctx, mut folds, phase)| async move {
-            match phase {
-                Phase::Start => {
-                    // Prime with already-folded spans parts.
-                    let results = fetch_folded_spans_parts(
-                        &*ctx.agg.output,
-                        &ctx.agg.output_bucket,
-                        &ctx.agg.output_prefix,
-                        &ctx.resolved.capped_full_keys(),
-                        ctx.resolved.folded(),
-                    )
-                    .await;
-                    let mut accum = SpanStatsAccum::new(ctx.start_ns, ctx.end_ns);
-                    let mut errors = FoldErrors::default();
-                    // Finding 4: Only include a leaf in `folded` after its GET
-                    // and merge both succeed. Failed seed parts increment
-                    // fold_errors and are excluded from files_folded.
-                    let mut folded = std::collections::HashSet::new();
-                    for (leaf, result) in results {
-                        match result {
-                            Ok(part) => {
-                                if let Err(e) = accum.merge_spans_part(part) {
-                                    errors.record("seed", &e.to_string());
-                                } else {
-                                    folded.insert(leaf);
-                                }
-                            }
-                            Err(msg) => {
-                                errors.record("seed", &msg);
-                            }
-                        }
-                    }
-                    let event = snapshot_event(&ctx, &accum, &folded, &errors);
-                    let state = Box::new(FoldState {
-                        accum,
-                        folded,
-                        errors,
-                    });
-                    Some((Ok(event), (ctx, folds, Phase::Folding(state))))
-                }
-                Phase::Folding(mut state) => {
-                    match folds.next().await? {
-                        FoldOutcome::Folded(f) => {
-                            let spans_key =
-                                aggregate::spans_part_key_pub(&ctx.agg.output_prefix, &f.full_key);
-                            match ctx
-                                .agg
-                                .output
-                                .get_object(&ctx.agg.output_bucket, &spans_key)
-                                .await
-                            {
-                                Ok(data) => {
-                                    if let Err(e) = state.accum.merge_spans_part(data) {
-                                        // Decode/merge failure: increment fold_errors,
-                                        // do NOT add to folded set.
-                                        state
-                                            .errors
-                                            .record(&f.raw_key, &format!("decode/merge: {e}"));
-                                    } else {
-                                        // Only count as folded when both GET and merge succeed.
-                                        state.folded.insert(aggregate::part_leaf_of(&f.full_key));
-                                    }
-                                }
-                                Err(e) => {
-                                    // GET failure: increment fold_errors, do NOT add to folded set.
-                                    state
-                                        .errors
-                                        .record(&f.raw_key, &format!("spans part GET: {e}"));
-                                }
-                            }
-                        }
-                        FoldOutcome::Failed { raw_key, error } => {
-                            state.errors.record(&raw_key, &error);
-                        }
-                    }
-                    let event = snapshot_event(&ctx, &state.accum, &state.folded, &state.errors);
-                    Some((Ok(event), (ctx, folds, Phase::Folding(state))))
-                }
-            }
-        },
-    )
-}
-
-struct StreamCtx {
-    agg: Arc<AggContext>,
-    resolved: Resolved,
-    start_ns: Option<i64>,
-    end_ns: Option<i64>,
-}
-
-fn snapshot_event(
-    ctx: &StreamCtx,
-    accum: &SpanStatsAccum,
-    folded: &std::collections::HashSet<String>,
-    errors: &FoldErrors,
-) -> Event {
-    let coverage = Coverage {
-        files_matched: ctx.resolved.files_matched,
-        files_folded: ctx.resolved.files_folded_in(folded),
-        samples_folded: accum.total_instances(),
-        total_bytes: ctx.resolved.total_bytes,
-        hosts_matched: ctx.resolved.hosts_matched,
-        hosts_folded: ctx.resolved.folded_hosts(folded),
-        fold_errors: errors.count,
-        fold_error_sample: errors.sample.clone(),
-    };
-    let mut resp = accum.snapshot();
-    resp.coverage = Some(coverage);
-    Event::default().json_data(&resp).unwrap_or_else(|e| {
-        rate_limited_warn("span-stats: serialize failed", &anyhow::anyhow!(e));
-        Event::default().comment("serialize error")
-    })
-}
-
-fn rate_limited_warn(msg: &str, err: &anyhow::Error) {
-    dial9_core::rate_limited!(std::time::Duration::from_secs(60), {
-        tracing::warn!("{msg}: {err}");
-    });
+    let accum = SpanStatsAccum::new(start_ns, end_ns);
+    fold_stream::drive(agg, resolved, limits, SpanStatsSink { accum })
 }
 
 #[cfg(test)]

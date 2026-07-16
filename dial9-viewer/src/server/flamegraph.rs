@@ -10,14 +10,13 @@
 
 use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
-use std::sync::Arc;
 
 use axum::Extension;
 use axum::extract::{RawQuery, State};
 use axum::http::StatusCode;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum_extra::extract::Query as QueryExtra;
-use futures::stream::{self, Stream, StreamExt};
+use futures::stream::Stream;
 use hex;
 use serde::{Deserialize, Serialize};
 
@@ -25,9 +24,10 @@ use crate::ingest::aggregate::{
     self, AggContext, AggSnapshot, Coverage, FACETS, FacetResult, FlamegraphAccum,
     PollDurationBucket, SampleFilter, Scope,
 };
-use crate::ingest::refine::{self, FoldErrors, FoldOutcome, RefineOpts, Resolved};
+use crate::ingest::refine::{self, FoldErrors, Folded, RefineOpts, Resolved};
 use crate::server::AppState;
 use crate::server::credentials::MaybeCreds;
+use crate::server::fold_stream;
 use crate::server::metrics::OperationMetrics;
 
 #[derive(Deserialize)]
@@ -463,13 +463,11 @@ fn sample_filter(params: &FlamegraphParams) -> SampleFilter {
     }
 }
 
-/// Immutable per-request context threaded through the stream: the resolved
-/// scope, the fixed sample filter, and the params fields needed to shape each
-/// event's metadata. Holding an `Arc<AggContext>` lets both the read-back GETs
-/// and the fold tasks share it without re-cloning per file.
+/// Immutable per-request context shared by the [`FoldSink`] adapter: the resolved
+/// scope-derived fields needed to shape each event's metadata, and the fixed
+/// sample filter. All borrowed data is cloned out of `params` before the stream
+/// is built, so the returned stream captures no borrows (`use<>`).
 struct StreamCtx {
-    agg: Arc<AggContext>,
-    resolved: Resolved,
     filter: SampleFilter,
     service: Option<String>,
     hosts: Vec<String>,
@@ -481,32 +479,117 @@ struct StreamCtx {
     max_poll_ns: Option<i64>,
 }
 
-/// The mutable state carried through the folding phase: the incremental
-/// accumulator, the growing folded-leaf set, and the running fold-error tally.
-/// Boxed inside [`Phase`] so the enum isn't dominated by this variant's size.
-struct FoldState {
+/// The flamegraph [`FoldSink`] adapter: owns the incremental [`FlamegraphAccum`]
+/// and the per-request [`StreamCtx`]. Supplies the three operations that differ
+/// from span-stats; the folded-set discipline lives in the driver.
+struct FlamegraphSink {
+    ctx: StreamCtx,
     accum: FlamegraphAccum,
-    folded: HashSet<String>,
-    /// Files whose fold failed this stream, and the most recent error message —
-    /// surfaced in the coverage block so a systematic failure isn't silent.
-    errors: FoldErrors,
 }
 
-/// Phase of the SSE fold state machine driven by [`flamegraph_stream`]'s
-/// `unfold`. `Start` primes and emits the already-folded snapshot; `Folding`
-/// pulls one folded file at a time, merges it, and emits a refined snapshot.
-enum Phase {
-    Start,
-    Folding(Box<FoldState>),
+impl fold_stream::FoldSink for FlamegraphSink {
+    async fn seed(
+        &mut self,
+        agg: &AggContext,
+        resolved: &Resolved,
+    ) -> Vec<fold_stream::PartOutcome> {
+        // Prime the accumulator over the already-folded set, concurrently.
+        // Results are keyed by leaf hash so completion order doesn't matter.
+        let seed = aggregate::fetch_folded_sample_parts(
+            &*agg.output,
+            &agg.output_bucket,
+            &agg.output_prefix,
+            &resolved.capped_full_keys(),
+            resolved.folded(),
+        )
+        .await;
+        // Only mark a leaf folded after its sample+dict GET and full merge
+        // succeed; record GET/merge failures. The driver applies the rule.
+        let mut outcomes = Vec::with_capacity(seed.len());
+        for (leaf, result) in seed {
+            let outcome = match result {
+                Ok((samples, dict)) => match self.accum.merge(samples, dict) {
+                    Ok(()) => fold_stream::PartOutcome::Folded { leaf },
+                    Err(e) => {
+                        fold_stream::rate_limited_warn("flamegraph: seed merge failed", &e);
+                        fold_stream::PartOutcome::Failed {
+                            key: leaf,
+                            error: format!("merge: {e}"),
+                        }
+                    }
+                },
+                Err(msg) => fold_stream::PartOutcome::Failed {
+                    key: leaf,
+                    error: msg,
+                },
+            };
+            outcomes.push(outcome);
+        }
+        outcomes
+    }
+
+    async fn fold_one(&mut self, agg: &AggContext, f: &Folded) -> fold_stream::PartOutcome {
+        // Only mark the leaf folded after sample+dict fetch AND full merge
+        // succeed; failures increment errors.
+        match aggregate::fetch_sample_parts(
+            &*agg.output,
+            &agg.output_bucket,
+            &agg.output_prefix,
+            &f.full_key,
+        )
+        .await
+        {
+            Some((samples, dict)) => match self.accum.merge(samples, dict) {
+                Ok(()) => fold_stream::PartOutcome::Folded {
+                    leaf: aggregate::part_leaf_of(&f.full_key),
+                },
+                Err(e) => {
+                    fold_stream::rate_limited_warn("flamegraph: merge failed", &e);
+                    fold_stream::PartOutcome::Failed {
+                        key: f.raw_key.clone(),
+                        error: format!("merge: {e}"),
+                    }
+                }
+            },
+            None => {
+                // GET failed — leaf stays unfolded.
+                fold_stream::PartOutcome::Failed {
+                    key: f.raw_key.clone(),
+                    error: "sample parts GET failed (not found)".to_string(),
+                }
+            }
+        }
+    }
+
+    fn snapshot_event(
+        &self,
+        resolved: &Resolved,
+        folded: &HashSet<String>,
+        errors: &FoldErrors,
+    ) -> Event {
+        let snap = self.accum.snapshot();
+        let coverage = fold_stream::coverage_from(resolved, folded, errors, snap.total_samples);
+        let resp = build_response(&self.ctx, &snap, coverage);
+        // `json_data` only fails if the value can't serialize; our response always
+        // can, so fall back to an empty comment event rather than propagating.
+        Event::default().json_data(&resp).unwrap_or_else(|e| {
+            fold_stream::rate_limited_warn(
+                "flamegraph: event serialize failed",
+                &anyhow::anyhow!(e),
+            );
+            Event::default().comment("serialize error")
+        })
+    }
 }
 
 /// Build the SSE event stream for one flamegraph request.
 ///
 /// The first `unfold` step primes an accumulator over the already-folded set and
 /// emits an instant snapshot (like the old read-only first poll). Each later step
-/// pulls one file off [`fold_stream`], reads + merges its part-files, and emits a
-/// refined snapshot, closing when the work-list drains. Dropping the returned
-/// stream (client disconnect) drops the fold stream, cancelling in-flight folds.
+/// pulls one file off [`refine::fold_stream`], reads + merges its part-files, and
+/// emits a refined snapshot, closing when the work-list drains. Dropping the
+/// returned stream (client disconnect) drops the fold stream, cancelling
+/// in-flight folds.
 fn flamegraph_stream(
     agg: AggContext,
     resolved: Resolved,
@@ -515,9 +598,7 @@ fn flamegraph_stream(
     // All borrowed data is cloned out of `params` into `StreamCtx` before the
     // stream is built, so the returned stream captures no borrows (`use<>`).
 ) -> impl Stream<Item = Result<Event, Infallible>> + use<> {
-    let agg = Arc::new(agg);
-    let ctx = Arc::new(StreamCtx {
-        agg: Arc::clone(&agg),
+    let ctx = StreamCtx {
         filter: sample_filter(params),
         service: params.service.clone(),
         hosts: params.host.clone(),
@@ -527,144 +608,9 @@ fn flamegraph_stream(
         end_ns: params.end_ns,
         min_poll_ns: params.min_poll_ns,
         max_poll_ns: params.max_poll_ns,
-        resolved,
-    });
-
-    // `Box::pin` so the fold stream is `Unpin` and we can `.next()` it inside the
-    // `unfold` step. Bounded concurrency comes from the shared `FoldLimits`.
-    let folds = Box::pin(refine::fold_stream(
-        agg,
-        limits,
-        ctx.resolved.unfolded_capped(),
-    ));
-
-    stream::unfold(
-        (ctx, folds, Phase::Start),
-        |(ctx, mut folds, phase)| async move {
-            match phase {
-                Phase::Start => {
-                    // Prime the accumulator over the already-folded set, concurrently.
-                    // Results are keyed by leaf hash so completion order doesn't matter.
-                    let seed = aggregate::fetch_folded_sample_parts(
-                        &*ctx.agg.output,
-                        &ctx.agg.output_bucket,
-                        &ctx.agg.output_prefix,
-                        &ctx.resolved.capped_full_keys(),
-                        ctx.resolved.folded(),
-                    )
-                    .await;
-                    let mut accum = FlamegraphAccum::new(ctx.filter.clone());
-                    // Only mark a leaf folded after its sample+dict GET and
-                    // full merge succeed; record GET/merge failures.
-                    let mut folded = HashSet::new();
-                    let mut errors = FoldErrors::default();
-                    for (leaf, result) in seed {
-                        match result {
-                            Ok((samples, dict)) => match accum.merge(samples, dict) {
-                                Ok(()) => {
-                                    folded.insert(leaf);
-                                }
-                                Err(e) => {
-                                    rate_limited_warn("flamegraph: seed merge failed", &e);
-                                    errors.record(&leaf, &format!("merge: {e}"));
-                                }
-                            },
-                            Err(msg) => {
-                                errors.record(&leaf, &msg);
-                            }
-                        }
-                    }
-                    let event = snapshot_event(&ctx, &accum, &folded, &errors);
-                    let state = Box::new(FoldState {
-                        accum,
-                        folded,
-                        errors,
-                    });
-                    Some((Ok(event), (ctx, folds, Phase::Folding(state))))
-                }
-                Phase::Folding(mut state) => {
-                    // Pull the next fold outcome; `None` = work-list drained → close.
-                    match folds.next().await? {
-                        FoldOutcome::Folded(f) => {
-                            // Only mark the leaf folded after sample+dict fetch
-                            // AND full merge succeed; failures increment errors.
-                            match aggregate::fetch_sample_parts(
-                                &*ctx.agg.output,
-                                &ctx.agg.output_bucket,
-                                &ctx.agg.output_prefix,
-                                &f.full_key,
-                            )
-                            .await
-                            {
-                                Some((samples, dict)) => match state.accum.merge(samples, dict) {
-                                    Ok(()) => {
-                                        state.folded.insert(aggregate::part_leaf_of(&f.full_key));
-                                    }
-                                    Err(e) => {
-                                        rate_limited_warn("flamegraph: merge failed", &e);
-                                        state.errors.record(&f.raw_key, &format!("merge: {e}"));
-                                    }
-                                },
-                                None => {
-                                    // GET failed — leaf stays unfolded.
-                                    state
-                                        .errors
-                                        .record(&f.raw_key, "sample parts GET failed (not found)");
-                                }
-                            }
-                        }
-                        FoldOutcome::Failed { raw_key, error } => {
-                            // Count it and carry a sample message so the client can
-                            // show that folding is failing (e.g. unwritable output).
-                            state.errors.record(&raw_key, &error);
-                        }
-                    }
-                    let event = snapshot_event(&ctx, &state.accum, &state.folded, &state.errors);
-                    Some((Ok(event), (ctx, folds, Phase::Folding(state))))
-                }
-            }
-        },
-    )
-}
-
-/// Rate-limited warn for the per-file merge path (reachable once per folded file
-/// on a large scope), so a systematic decode failure can't spam the log.
-fn rate_limited_warn(msg: &str, err: &anyhow::Error) {
-    use dial9_core::rate_limited;
-    rate_limited!(std::time::Duration::from_secs(60), {
-        tracing::warn!("{msg}: {err}");
-    });
-}
-
-/// Build one SSE `data:` event from the accumulator's current snapshot and the
-/// coverage implied by `folded` (a growing superset of the resolved folded set)
-/// plus the running fold-error tally.
-fn snapshot_event(
-    ctx: &StreamCtx,
-    accum: &FlamegraphAccum,
-    folded: &HashSet<String>,
-    errors: &FoldErrors,
-) -> Event {
-    let snap = accum.snapshot();
-    let files_matched = ctx.resolved.files_matched;
-    let files_folded = ctx.resolved.files_folded_in(folded);
-    let coverage = Coverage {
-        files_matched,
-        files_folded,
-        samples_folded: snap.total_samples,
-        total_bytes: ctx.resolved.total_bytes,
-        hosts_matched: ctx.resolved.hosts_matched,
-        hosts_folded: ctx.resolved.folded_hosts(folded),
-        fold_errors: errors.count,
-        fold_error_sample: errors.sample.clone(),
     };
-    let resp = build_response(ctx, &snap, coverage);
-    // `json_data` only fails if the value can't serialize; our response always
-    // can, so fall back to an empty comment event rather than propagating.
-    Event::default().json_data(&resp).unwrap_or_else(|e| {
-        rate_limited_warn("flamegraph: event serialize failed", &anyhow::anyhow!(e));
-        Event::default().comment("serialize error")
-    })
+    let accum = FlamegraphAccum::new(ctx.filter.clone());
+    fold_stream::drive(agg, resolved, limits, FlamegraphSink { ctx, accum })
 }
 
 /// Shape a [`FlamegraphResponse`] from an [`AggSnapshot`] + [`Coverage`].
