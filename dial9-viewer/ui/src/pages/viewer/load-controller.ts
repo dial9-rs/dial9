@@ -165,6 +165,12 @@ export interface LoadController {
   /** Load one or more URLs (boot `?trace=`). `label` is the initial label. */
   loadUrls(urls: readonly string[], label: string): void;
   /**
+   * Show the loading view without starting a load, for the async gap while a
+   * boot `s_*` scope is resolved to its URLs. The caller follows with loadUrls
+   * (success) or cancel (failure/empty).
+   */
+  showLoading(label: string): void;
+  /**
    * Set/Clear Range: re-parse the retained buffer filtered to `range` (null /
    * open bounds = full trace). No-op before the first load completes.
    */
@@ -379,6 +385,17 @@ export function createLoadController(deps: LoadControllerDeps): LoadController {
     },
     loadUrls(urls, label): void {
       begin(urls, { label, withHeaders: true, objectUrl: null });
+    },
+    showLoading(label): void {
+      // Show the loading view WITHOUT starting a worker load, for the async
+      // gap while a boot `s_*` scope is re-listed to its file URLs (the caller
+      // then calls loadUrls, or cancel() on failure). Bumps the token so a
+      // superseded resolution's late loadUrls can be ignored by the caller.
+      loadToken += 1;
+      section = "loading";
+      progress = label;
+      startTimer();
+      notify();
     },
     reparse(range): void {
       // Set/Clear Range: re-parse the retained buffer with a time window, OFF

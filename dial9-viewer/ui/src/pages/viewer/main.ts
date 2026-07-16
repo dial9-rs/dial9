@@ -19,13 +19,21 @@ import { mountShell } from "./shell.js";
 import { mountMinimap } from "./minimap.js";
 import { createStatusBar } from "./status-bar.js";
 import { mountLoadChrome } from "./load-chrome.js";
+import { initialUrlLabel } from "./load-controller.js";
 import { mountInspector } from "./inspector.js";
 import { createRegionAnalysis } from "./region-analysis.js";
 import { mountLanes } from "../../components/canvas/lanes/index.js";
 import { mountOverlay } from "../../components/overlay/index.js";
 import { mountLaneInteraction } from "./lane-interaction.js";
 import { initViewportFromTrace } from "./viewport-init.js";
-import { readKeyDerivedIdentity } from "../../lib/trace/index.js";
+import {
+  readKeyDerivedIdentity,
+  Dial9Creds,
+  hasScope,
+  readScope,
+  resolveScope,
+  type TraceScope,
+} from "../../lib/trace/index.js";
 import {
   bindViewStateToUrl,
   resolveViewState,
@@ -306,7 +314,15 @@ function boot(): void {
   // Escape surface in the cascade, and auto-loads the boot `?trace=` components
   // when present; otherwise it shows the drop zone. Load failures surface as an
   // error toast.
-  loadChrome = mountLoadChrome({
+  //
+  // Two boot sources feed it: inline `?trace=` components (resolved synchronously
+  // into source.urls) and a compact `s_*` scope (bucket/prefix/service/host-set +
+  // window) the S3 browser emits for large selections. The scope must be re-listed
+  // via `/api/browse` before it yields URLs, so it is resolved asynchronously
+  // below and pushed through loadUrls() once the file set is known. `initialUrls`
+  // is set only for the inline case; the scope case shows the loading view via
+  // loadUrls() the moment resolution completes.
+  const boot = mountLoadChrome({
     store,
     esc,
     onError: (message) => {
@@ -316,6 +332,22 @@ function boot(): void {
       ? { initialUrls: source.urls, initialLabel: source.label }
       : {}),
   });
+  loadChrome = boot;
+
+  // Scope boot: no inline `?trace=`, but the URL carries an `s_*` selection.
+  // Re-list its files (credentialed, like the browser page) and load them
+  // through the same worker path the inline list uses.
+  if (source.urls.length === 0) {
+    const params = new URLSearchParams(window.location.search);
+    if (hasScope(params)) {
+      const scope = readScope(params);
+      if (scope !== null) {
+        void loadFromScope(boot, scope, (message) =>
+          toasts.show({ id: "load-error", type: "error", message }),
+        );
+      }
+    }
+  }
 
   // Mirror the shareable state INTO the URL as it changes, debounced.
   // Registered last so the boot-time restore above does not fight it; the
@@ -374,4 +406,72 @@ function lastPathSegment(url: string): string {
   const noQuery = url.split("?")[0] ?? url;
   const parts = noQuery.split("/").filter((p) => p.length > 0);
   return parts[parts.length - 1] ?? url;
+}
+
+/**
+ * Resolve a boot `s_*` scope to its trace-component URLs and load them. The S3
+ * browser emits a compact scope (bucket/prefix/service/host-set + window) for
+ * large selections instead of one `?trace=` per file, so the viewer must
+ * re-list the matching files via `/api/browse` before it has anything to load
+ * (mirrors the legacy viewer's loadTraceFromScope). Credentialed like the
+ * browser page: the scope's pinned region is folded into Dial9Creds so every
+ * request carries the region header (a cross-region bucket lists empty
+ * otherwise), and `/api/browse` is fetched with the BYO-credentials headers.
+ */
+async function loadFromScope(
+  loadChrome: NonNullable<ReturnType<typeof mountLoadChrome>>,
+  scope: TraceScope,
+  onError: (message: string) => void,
+): Promise<void> {
+  // Fold the scope's pinned region into the creds store so /api/browse and the
+  // subsequent /api/object fetches sign for the bucket's actual region.
+  if (scope.region) {
+    const stored = Dial9Creds.get();
+    if (stored !== null && stored.region !== scope.region) {
+      Dial9Creds.setRegion(scope.region);
+    }
+  }
+
+  loadChrome.scopeLoading("Loading trace selection…");
+  try {
+    const urls = await resolveScope(scope, fetchJsonWithCreds);
+    if (urls.length === 0) {
+      onError(
+        "No traces found for this selection's time range and hosts. They may " +
+          "have expired (S3 lifecycle).",
+      );
+      loadChrome.scopeFailed();
+      return;
+    }
+    loadChrome.loadUrls(urls, initialUrlLabel(urls.length));
+    return;
+  } catch (err) {
+    const raw = err instanceof Error ? err.message : String(err);
+    if (/HTTP 401/.test(raw) && !Dial9Creds.has()) {
+      onError(
+        "This trace requires AWS credentials. Open it from the dial9 home " +
+          "page after applying your credentials, or this tab won't have them.",
+      );
+    } else {
+      onError("Error resolving trace selection: " + raw);
+    }
+    loadChrome.scopeFailed();
+  }
+}
+
+/**
+ * Credentialed JSON fetch for scope resolution: attaches the BYO-credentials
+ * headers (if any) the same way the browser page's apiFetch does, so
+ * `/api/browse` runs under the user's creds (BYOC) or the task's ambient
+ * identity (no creds). Throws with the response body on a non-2xx status so the
+ * caller can distinguish a 401 (missing creds) from other errors.
+ */
+async function fetchJsonWithCreds(url: string): Promise<unknown> {
+  const headers = Dial9Creds.headers();
+  const resp = await fetch(url, { headers });
+  if (!resp.ok) {
+    const body = await resp.text().catch(() => "");
+    throw new Error(`HTTP ${resp.status}${body ? ": " + body : ""}`);
+  }
+  return resp.json();
 }
