@@ -34,6 +34,18 @@ fn noop_thread_hook() -> RecordingThreadHook {
     Arc::new(|| Box::new(|| {}) as Box<dyn FnOnce() + Send>)
 }
 
+/// Merge `entries` into `existing`: on a key collision the incoming value wins.
+/// Matches the writer's segment-metadata merge, so builder-side metadata
+/// accumulates across the core and tokio layers.
+pub(crate) fn merge_segment_metadata(
+    existing: &mut Vec<(String, String)>,
+    entries: impl IntoIterator<Item = (String, String)>,
+) {
+    let incoming: Vec<(String, String)> = entries.into_iter().collect();
+    existing.retain(|(k, _)| !incoming.iter().any(|(ik, _)| ik == k));
+    existing.extend(incoming);
+}
+
 /// Begin building a recorder backed by `writer`.
 ///
 /// Register data sources with [`RecorderBuilder::source`], then
@@ -99,10 +111,10 @@ impl<M: BufferMode> RecorderBuilder<M> {
         self.writer.boot_id()
     }
 
-    /// Static metadata written into every rotated segment header. Later calls
-    /// replace earlier ones.
+    /// Static metadata written into every rotated segment header. Merged across
+    /// calls (and across the tokio layer); on a key collision the later value wins.
     pub fn segment_metadata(mut self, entries: impl IntoIterator<Item = (String, String)>) -> Self {
-        self.segment_metadata = entries.into_iter().collect();
+        merge_segment_metadata(&mut self.segment_metadata, entries);
         self
     }
 
@@ -445,6 +457,29 @@ mod tests {
         assert!(
             processed.load(Ordering::SeqCst) >= 1,
             "the background worker should process the sealed segment"
+        );
+    }
+
+    #[test]
+    fn segment_metadata_merges_last_key_wins() {
+        let mut md = vec![
+            ("service".to_string(), "checkout".to_string()),
+            ("region".to_string(), "us-east-1".to_string()),
+        ];
+        super::merge_segment_metadata(
+            &mut md,
+            [
+                ("region".to_string(), "eu-west-1".to_string()),
+                ("bucket".to_string(), "traces".to_string()),
+            ],
+        );
+
+        assert!(md.contains(&("service".to_string(), "checkout".to_string())));
+        assert!(md.contains(&("region".to_string(), "eu-west-1".to_string())));
+        assert!(md.contains(&("bucket".to_string(), "traces".to_string())));
+        assert!(
+            !md.iter().any(|(k, v)| k == "region" && v == "us-east-1"),
+            "the colliding key's old value must be gone"
         );
     }
 }

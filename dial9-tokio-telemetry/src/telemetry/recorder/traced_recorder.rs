@@ -69,6 +69,16 @@ impl std::fmt::Debug for TokioAttachConfig {
     }
 }
 
+/// Merge `entries` into `existing`; on a key collision the incoming value wins.
+fn merge_segment_metadata(
+    existing: &mut Vec<(String, String)>,
+    entries: impl IntoIterator<Item = (String, String)>,
+) {
+    let incoming: Vec<(String, String)> = entries.into_iter().collect();
+    existing.retain(|(k, _)| !incoming.iter().any(|(ik, _)| ik == k));
+    existing.extend(incoming);
+}
+
 /// Assemble the enabled recording [`Recorder`] plus the shared runtime-context
 /// registry and task-dump config. [`build_traced`] then builds the primary
 /// runtime and wraps everything in a [`TracedRuntime`]. The recorder is left with
@@ -393,7 +403,7 @@ impl<W: BufferMode> TracedRuntimeBuilder<W> {
 
     /// Static metadata embedded in every sealed segment.
     pub fn with_segment_metadata(mut self, entries: Vec<(String, String)>) -> Self {
-        self.segment_metadata = entries;
+        merge_segment_metadata(&mut self.segment_metadata, entries);
         self
     }
 
@@ -446,10 +456,12 @@ impl<W: BufferMode> TracedRuntimeBuilder<W> {
     /// Configure the S3 upload preset for sealed segments.
     #[cfg(feature = "worker-s3")]
     pub fn with_s3_uploader(mut self, config: crate::background_task::s3::S3Config) -> Self {
-        self.segment_metadata = config
-            .as_metadata()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect();
+        merge_segment_metadata(
+            &mut self.segment_metadata,
+            config
+                .as_metadata()
+                .map(|(k, v)| (k.to_string(), v.to_string())),
+        );
         self.pipeline = PipelineChoice::S3(config);
         self
     }
