@@ -145,7 +145,9 @@ function shellTemplate(
 ): TemplateResult {
   return html`
     <header class="d9-toolbar" role="banner">
-      <h1 class="d9-app-title">dial9 trace viewer</h1>
+      <h1 class="d9-app-title">
+        dial9<br /><span class="d9-app-title-sub">Trace Viewer</span>
+      </h1>
       ${toolbar.fileInfoTemplate(state, deps.sourceLabel())}
       <span class="d9-toolbar-slot" role="group" aria-label="Analysis actions">
         ${toolbar.analysisTemplate(state, deps.sourceLabel())}
