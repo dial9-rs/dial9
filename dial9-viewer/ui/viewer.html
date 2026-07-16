@@ -659,12 +659,6 @@
                 background: currentColor;
                 opacity: 0.55;
             }
-            .schema-panel-legend-swatch.is-points {
-                width: 6px;
-                height: 6px;
-                border-radius: 50%;
-                background: currentColor;
-            }
             .schema-time-series-panel canvas {
                 width: 100%;
                 height: 100%;
@@ -1592,7 +1586,6 @@
                 resetTraceState({ clearUrlRange: true });
                 currentTraceBuffer = null;
                 currentTraceName = null;
-                currentTraceSourceComponentCount = 1;
                 viewer.style.display = "none";
                 resetDropZone();
             });
@@ -1601,7 +1594,6 @@
             // re-parse in memory with a different time filter.
             let currentTraceBuffer = null;
             let currentTraceName = null;
-            let currentTraceSourceComponentCount = 1;
 
             /** Clear UI state tied to the current trace so it doesn't leak into the next one. */
             function resetTraceState({ clearUrlRange } = {}) {
@@ -1654,8 +1646,7 @@
 
             /** Finish loading: analyze the parsed trace, retain the buffer for
              *  in-memory re-parse (Set/Clear Range), and show the viewer. */
-            async function showParsedTrace(parsed, buffer, name, sourceComponentCount = 1) {
-                parsed.sourceComponentCount = sourceComponentCount;
+            async function showParsedTrace(parsed, buffer, name) {
                 trace = parsed;
                 updateLoadProgress(`Analyzing ${trace.events.length.toLocaleString()} events…`);
                 // processTrace() runs synchronously and hogs the main thread for
@@ -1678,7 +1669,6 @@
                 stopLoadTimer();
                 currentTraceBuffer = buffer;
                 currentTraceName = name;
-                currentTraceSourceComponentCount = sourceComponentCount;
                 showViewer(name);
                 // Apply a one-shot deep-link focus now that lanes exist, then
                 // consume it so a later Set/Clear-Range re-parse doesn't reapply.
@@ -1719,13 +1709,13 @@
             }
 
             /** Parse an already-fetched buffer and show the viewer. */
-            async function parseAndShowTrace(buffer, name, opts = {}, sourceComponentCount = 1) {
+            async function parseAndShowTrace(buffer, name, opts = {}) {
                 try {
                     const fullOpts = { ...opts, onParseProgress: makeParseProgress() };
                     updateLoadProgress("Decompressing…");
                     const parsed = await parseTrace(buffer, fullOpts);
                     if (loadPerf) loadPerf.parseDoneMs = performance.now();
-                    await showParsedTrace(parsed, buffer, name, sourceComponentCount);
+                    await showParsedTrace(parsed, buffer, name);
                 } catch (err) {
                     if (err.name === "AbortError") return;
                     alert("Error: " + err.message);
@@ -1778,7 +1768,7 @@
                     const buffer = new Uint8Array(total);
                     let off = 0;
                     for (const c of captured) { buffer.set(c, off); off += c.length; }
-                    await showParsedTrace(parsed, buffer.buffer, name, list.length);
+                    await showParsedTrace(parsed, buffer.buffer, name);
                 } catch (err) {
                     if (err.name === "AbortError") return;
                     throw err;
@@ -1945,7 +1935,7 @@
                     // fetch and parse are separate phases (unlike streaming).
                     if (loadPerf) { loadPerf.mode = "buffered"; loadPerf.fetchDoneMs = performance.now(); }
                     loadAbortController = null;
-                    await parseAndShowTrace(arrayBuffer, name, getParseOptions(), list.length);
+                    await parseAndShowTrace(arrayBuffer, name, getParseOptions());
                 } catch (err) {
                     if (err.name === 'AbortError') return;
                     if (/HTTP 401/.test(err.message) && window.Dial9Creds && !Dial9Creds.has()) {
@@ -1979,7 +1969,6 @@
                     currentTraceBuffer,
                     currentTraceName,
                     opts,
-                    currentTraceSourceComponentCount,
                 );
 
                 clearRangeBtn.style.display = (startNs != null || endNs != null) ? "" : "none";
@@ -4016,11 +4005,7 @@
                     swatch.className = "schema-panel-legend-swatch";
                     const swatchKind = item.kind === "reference"
                         ? "reference"
-                        : item.mark === "step_area" || item.mark === "bars"
-                            ? "area"
-                            : item.mark === "points"
-                                ? "points"
-                                : "line";
+                        : item.mark === "step_area" ? "area" : "line";
                     swatch.classList.add(`is-${swatchKind}`);
                     swatch.style.color = item.color;
                     entry.appendChild(swatch);

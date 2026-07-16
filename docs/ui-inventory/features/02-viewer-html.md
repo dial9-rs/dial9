@@ -228,15 +228,15 @@ Foldable panel (`#custom-events-panel`, `data-panel-key=events`, 40px expanded /
 
 ## L. Schema-driven time-series panels
 
-Dynamic foldable panels (`.schema-time-series-panel`, 92px expanded / 24px collapsed) are created from resolved view specs. CPU Usage is the default schema-driven panel; demo mode also enables Socket Accept Queue and Context Switch Rate.
+Dynamic foldable panels (`.schema-time-series-panel`, 92px expanded / 24px collapsed) are created from resolved view specs. CPU Usage is the default schema-driven panel; demo mode also enables Socket Accept Queue, Context Switch Rate, and Context Switches (Cumulative).
 
 | Feature | What it does | Access path | Source |
 | --- | --- | --- | --- |
 | L1. Generic marks | Draws explicit `line`, `step_line`, and `step_area` series with shared clipping, half-open interval visibility, stable semantic bounds, and gap-preserving downsampling. | Expand a schema panel. | `renderSchemaTimeSeriesPanel`; `trace_analysis.js` time-series geometry helpers. |
 | L2. CPU view | Computes `rate(user_cpu_ns) + rate(system_cpu_ns)` as cores, shows duration-weighted avg/max summaries, an expandable one-core initial domain, and the available-parallelism guide. Values are not clamped to capacity. | Expand CPU Usage. | Hardcoded `process.cpu` view in `trace_analysis.js`. |
-| L3. Hover tooltip | Resolves original points/intervals rather than widened downsample representatives. At a shared boundary, the interval beginning at that timestamp owns the hit. | Hover a schema chart. | `findSchemaTimeSeriesHit`; `schemaTimeSeriesTooltipHtml`. |
-| L4. Legend | Lists every resolved series partition, followed by guides and thresholds. | Expanded panel header. | `updateSchemaPanelLegend`. |
-| L5. Data source | The frontend MVP resolves exact event names from `customEvents`. Stateful views are skipped with one diagnostic when multiple source components are loaded without preserved component identity. | Internal on load. | `buildTimeSeriesFromSpec`; `buildSchemaDrivenTimeSeriesViews`. |
+| L3. Hover tooltip | Resolves the hovered value and uses half-open ownership for interval boundaries. | Hover a schema chart. | `findSchemaTimeSeriesHit`; `schemaTimeSeriesTooltipHtml`. |
+| L4. Legend | Lists data series only when multiple series or partitions need color disambiguation, followed by guides and thresholds. | Expanded panel header. | `updateSchemaPanelLegend`. |
+| L5. Data source | The frontend MVP resolves exact event names from `customEvents`; repeated trace inputs follow the viewer's existing one-logical-trace loading model. | Internal on load. | `buildTimeSeriesFromSpec`; `buildSchemaDrivenTimeSeriesViews`. |
 | L6. Crosshair sync | Hovering updates global `mouseNs`; each dynamic panel owns its tooltip and participates in the shared crosshair. | Hover a schema chart. | `handleSchemaTimeSeriesMouseMove`; main-area mouse handler. |
 
 ---

@@ -294,12 +294,43 @@
           },
         ],
       },
+      {
+        id: "process.context_switches.cumulative",
+        title: "Context Switches (Cumulative)",
+        sources: [
+          { id: "usage", event: PROCESS_RESOURCE_USAGE_EVENT },
+        ],
+        display: { kind: "time_series", y_min: 0 },
+        series: [
+          {
+            id: "voluntary",
+            title: "Voluntary",
+            expr: { field: "usage.voluntary_context_switches" },
+            unit: "switches",
+            mark: "line",
+            metric: { kind: "counter" },
+            color: "#81c784",
+            downsample: "min_max_per_pixel",
+          },
+          {
+            id: "involuntary",
+            title: "Involuntary",
+            expr: { field: "usage.involuntary_context_switches" },
+            unit: "switches",
+            mark: "line",
+            metric: { kind: "counter" },
+            color: "#ffb74d",
+            downsample: "min_max_per_pixel",
+          },
+        ],
+      },
     ],
   };
 
   const DEMO_VIEW_IDS = new Set([
     "socket.accept_queue",
     "process.context_switch_rate",
+    "process.context_switches.cumulative",
   ]);
 
   const HARDCODED_VIEW_SPEC_BUNDLE = {
@@ -537,17 +568,21 @@
         return null;
       }
 
-      const wallDeltaNs = currentTime - baseline.time;
-      const valueDelta = currentValue - baseline.value;
-      if (!(wallDeltaNs > 0)) return null;
-
       const nextBaseline = {
         value: currentValue,
         time: currentTime,
         current: context.current || null,
       };
+      const wallDeltaNs = currentTime - baseline.time;
+      const valueDelta = currentValue - baseline.value;
+      if (wallDeltaNs === 0) {
+        runtime.rateStates.set(expr, nextBaseline);
+        return null;
+      }
+      if (wallDeltaNs < 0) return null;
+
       runtime.rateStates.set(expr, nextBaseline);
-      if (valueDelta < 0) return null;
+      if (valueDelta < 0 && runtime.onDecrease !== "show") return null;
 
       const value = valueDelta / wallDeltaNs;
       if (!Number.isFinite(value)) return null;
@@ -813,23 +848,11 @@
   }
 
   function markAcceptsPoints(mark) {
-    return mark === "line" || mark === "points";
+    return mark === "line";
   }
 
   function markAcceptsIntervals(mark) {
-    return mark === "step_line" || mark === "step_area" || mark === "bars";
-  }
-
-  function expressionUsesPreviousSample(expr) {
-    if (!expr || typeof expr !== "object") return false;
-    if (expr.op === "rate" || expr.op === "delta" || expr.op === "lag") return true;
-    if (Array.isArray(expr.args) && expr.args.some(expressionUsesPreviousSample)) return true;
-    return expressionUsesPreviousSample(expr.value) || expressionUsesPreviousSample(expr.time);
-  }
-
-  function seriesRequiresStreamIdentity(seriesSpec) {
-    return seriesSpec.transform?.op === "hold_until_next" ||
-      expressionUsesPreviousSample(seriesSpec.expr);
+    return mark === "step_line" || mark === "step_area";
   }
 
   function buildTimeSeriesFromSpec(trace, viewSpec) {
@@ -861,12 +884,13 @@
 
     const series = [];
     for (const seriesSpec of viewSpec.series || []) {
-      if (trace.sourceComponentCount > 1 && seriesRequiresStreamIdentity(seriesSpec)) {
+      const mark = seriesSpec.mark ?? "line";
+      if (!markAcceptsPoints(mark) && !markAcceptsIntervals(mark)) {
         diagnostics.push({
           level: "warning",
           id: viewSpec.id,
           seriesId: seriesSpec.id,
-          message: `skipped stateful series: ${trace.sourceComponentCount} source components loaded, but custom events do not preserve component identity`,
+          message: `unsupported mark ${mark}`,
         });
         continue;
       }
@@ -898,7 +922,10 @@
             breakPending: false,
           };
           groups.set(group.key, bucket);
-          runtimeByGroup.set(group.key, { rateStates: new Map() });
+          runtimeByGroup.set(group.key, {
+            rateStates: new Map(),
+            onDecrease: seriesSpec.window?.on_decrease || "skip",
+          });
         }
 
         const previousEvent = previousEventByGroup.get(group.key) || null;
@@ -952,15 +979,15 @@
       const groupList = [...groups.values()].filter((group) => group.points.length > 0);
       const incompatibleMark = groupList.some((group) => group.points.some((point) =>
         point.support.kind === "point"
-          ? !markAcceptsPoints(seriesSpec.mark)
-          : !markAcceptsIntervals(seriesSpec.mark)
+          ? !markAcceptsPoints(mark)
+          : !markAcceptsIntervals(mark)
       ));
       if (incompatibleMark) {
         diagnostics.push({
           level: "warning",
           id: viewSpec.id,
           seriesId: seriesSpec.id,
-          message: `mark ${seriesSpec.mark} is incompatible with series support`,
+          message: `mark ${mark} is incompatible with series support`,
         });
         continue;
       }

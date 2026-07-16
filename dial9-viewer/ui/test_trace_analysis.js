@@ -182,7 +182,12 @@ async function main() {
       fail(`default schema bundle should contain only CPU, got ${JSON.stringify(defaultIds)}`);
     }
     const demoIds = getHardcodedViewSpecBundle({ includeDemos: true }).views.map((view) => view.id);
-    for (const id of ["process.cpu", "socket.accept_queue", "process.context_switch_rate"]) {
+    for (const id of [
+      "process.cpu",
+      "socket.accept_queue",
+      "process.context_switch_rate",
+      "process.context_switches.cumulative",
+    ]) {
       if (!demoIds.includes(id)) fail(`schema bundle with demos should include ${id}`);
     }
 
@@ -339,6 +344,54 @@ async function main() {
     pass("Schema-driven context-switch rates retain nested rate support");
   }
 
+  function testSchemaDrivenCumulativeContextSwitchLines() {
+    const customEvents = [
+      {
+        name: "ProcessResourceUsageEvent",
+        timestamp: 0,
+        fields: {
+          user_cpu_ns: "0",
+          system_cpu_ns: "0",
+          voluntary_context_switches: "100",
+          involuntary_context_switches: "5",
+        },
+      },
+      {
+        name: "ProcessResourceUsageEvent",
+        timestamp: 1_000_000_000,
+        fields: {
+          user_cpu_ns: "1",
+          system_cpu_ns: "1",
+          voluntary_context_switches: "120",
+          involuntary_context_switches: "7",
+        },
+      },
+    ];
+    const result = buildSchemaDrivenTimeSeriesViews(
+      { customEvents, segmentMetadata: new Map() },
+      getHardcodedViewSpecBundle({ includeDemos: true }),
+    );
+    const view = result.views.find(
+      (candidate) => candidate.spec.id === "process.context_switches.cumulative",
+    );
+    if (!view) fail("expected process.context_switches.cumulative demo view");
+    const values = view.series.map((series) =>
+      series.groups[0].points.map((point) => point.value)
+    );
+    if (JSON.stringify(values) !== JSON.stringify([[100, 120], [5, 7]])) {
+      fail(`unexpected cumulative context-switch values: ${JSON.stringify(values)}`);
+    }
+    if (view.series.some((series) => series.spec.mark !== "line")) {
+      fail("point-valued cumulative context switches should use line");
+    }
+    if (view.series.some((series) =>
+      series.groups[0].points.some((point) => point.support.kind !== "point")
+    )) {
+      fail("cumulative context switches should retain point support");
+    }
+    pass("Schema-driven cumulative context switches exercise point-valued lines");
+  }
+
   function testSchemaDrivenCpuResetCannotBeMasked() {
     const customEvents = [
       { name: "ProcessResourceUsageEvent", timestamp: 0, fields: { user_cpu_ns: "100", system_cpu_ns: "100" } },
@@ -351,9 +404,9 @@ async function main() {
     });
     const points = result.views[0].series[0].groups[0].points;
     if (points.length !== 1 || points[0].start !== 10 || points[0].end !== 20 || points[0].value !== 15) {
-      fail(`component reset should create one gap and recover: ${JSON.stringify(points)}`);
+      fail(`one CPU counter reset should create one gap and recover: ${JSON.stringify(points)}`);
     }
-    pass("Schema-driven CPU reset cannot be masked by the other counter");
+    pass("A schema-driven CPU counter reset cannot be masked by the other counter");
   }
 
   function testNestedRatesPreserveIndependentBaselines() {
@@ -389,7 +442,7 @@ async function main() {
     const x = groups.find((group) => group.values[0] === "x").points;
     const y = groups.find((group) => group.values[0] === "y").points;
     if (x.length !== 1 || x[0].start !== 20 || x[0].end !== 30 || x[0].value !== 2) {
-      fail(`missing component should preserve baselines without mismatched support: ${JSON.stringify(x)}`);
+      fail(`missing operand should preserve baselines without mismatched support: ${JSON.stringify(x)}`);
     }
     if (y.length !== 1 || y[0].start !== 5 || y[0].end !== 15 || y[0].value !== 3) {
       fail(`partitions should keep independent rate state: ${JSON.stringify(y)}`);
@@ -397,7 +450,7 @@ async function main() {
     pass("Nested rates preserve support and independent partition baselines");
   }
 
-  function testNonPositiveRateWindowKeepsBaseline() {
+  function testDuplicateRateTimestampUsesLatestBaseline() {
     const customEvents = [
       { name: "ProcessResourceUsageEvent", timestamp: 0, fields: { user_cpu_ns: "0", system_cpu_ns: "0" } },
       { name: "ProcessResourceUsageEvent", timestamp: 0, fields: { user_cpu_ns: "100", system_cpu_ns: "100" } },
@@ -408,10 +461,98 @@ async function main() {
       segmentMetadata: new Map([["process.available_parallelism", "4"]]),
     });
     const points = result.views[0].series[0].groups[0].points;
-    if (points.length !== 1 || points[0].start !== 0 || points[0].end !== 10 || points[0].value !== 22) {
-      fail(`non-positive window should not replace the valid baseline: ${JSON.stringify(points)}`);
+    if (points.length !== 1 || points[0].start !== 0 || points[0].end !== 10 || points[0].value !== 2) {
+      fail(`duplicate timestamp should retain the latest sample as baseline: ${JSON.stringify(points)}`);
     }
-    pass("Non-positive rate windows do not replace valid baselines");
+    pass("Duplicate rate timestamps use the latest valid baseline");
+  }
+
+  function testRateDecreasePolicyCanShowNegativeValues() {
+    const rateView = {
+      id: "decreasing-rate",
+      sources: [{ id: "sample", event: "Sample" }],
+      display: { kind: "time_series" },
+      series: [{
+        id: "value",
+        expr: {
+          op: "rate",
+          value: { field: "sample.value" },
+          time: { field: "sample.timestamp" },
+        },
+        mark: "step_line",
+        window: { on_decrease: "show" },
+      }],
+    };
+    const result = buildSchemaDrivenTimeSeriesViews(
+      {
+        customEvents: [
+          { name: "Sample", timestamp: 0, fields: { value: "10" } },
+          { name: "Sample", timestamp: 10, fields: { value: "5" } },
+        ],
+        segmentMetadata: new Map(),
+      },
+      { computed_fields: [], views: [rateView] },
+    );
+    const points = result.views[0].series[0].groups[0].points;
+    if (points.length !== 1 || points[0].value !== -0.5) {
+      fail(`on_decrease=show should preserve a negative rate: ${JSON.stringify(points)}`);
+    }
+    pass("Rate decrease policy can preserve intentional negative derivatives");
+  }
+
+  function testTimeSeriesMarksMatchImplementedShapes() {
+    const pointSeries = (id, mark) => ({
+      id,
+      sources: [{ id: "sample", event: "Sample" }],
+      display: { kind: "time_series" },
+      series: [{
+        id: "value",
+        expr: { field: "sample.value" },
+        ...(mark === undefined ? {} : { mark }),
+      }],
+    });
+    const intervalSeries = {
+      id: "unsupported-bars",
+      sources: [{ id: "sample", event: "Sample" }],
+      display: { kind: "time_series" },
+      series: [{
+        id: "value",
+        expr: {
+          op: "rate",
+          value: { field: "sample.value" },
+          time: { field: "sample.timestamp" },
+        },
+        mark: "bars",
+      }],
+    };
+    const result = buildSchemaDrivenTimeSeriesViews(
+      {
+        customEvents: [
+          { name: "Sample", timestamp: 0, fields: { value: "1" } },
+          { name: "Sample", timestamp: 10, fields: { value: "2" } },
+        ],
+        segmentMetadata: new Map(),
+      },
+      {
+        computed_fields: [],
+        views: [
+          pointSeries("default-line"),
+          pointSeries("unsupported-points", "points"),
+          pointSeries("unsupported-empty", ""),
+          intervalSeries,
+        ],
+      },
+    );
+    if (result.views.length !== 1 || result.views[0].spec.id !== "default-line") {
+      fail(`omitted mark should default to line while unsupported marks are rejected: ${JSON.stringify(result)}`);
+    }
+    if (result.diagnostics.length !== 3 ||
+        !result.diagnostics.some((diagnostic) => diagnostic.message.includes("mark points")) ||
+        !result.diagnostics.some((diagnostic) => diagnostic.message.includes("mark bars")) ||
+        !result.diagnostics.some((diagnostic) => diagnostic.id === "unsupported-empty")) {
+      fail(`unsupported marks should produce diagnostics: ${JSON.stringify(result.diagnostics)}`);
+    }
+    pass("Time-series marks default to line and reject unimplemented shapes");
   }
 
   function testHoldUntilNextPreservesInvalidSnapshotGap() {
@@ -444,27 +585,6 @@ async function main() {
     });
     if (mean !== 50) fail(`held snapshot aggregate should weight visible overlap, got ${mean}`);
     pass("hold_until_next uses stable bounds and preserves invalid snapshot gaps");
-  }
-
-  function testStatefulSeriesRejectMultipleUnidentifiedComponents() {
-    const customEvents = [
-      { name: "ProcessResourceUsageEvent", timestamp: 0, fields: { user_cpu_ns: "0", system_cpu_ns: "0" } },
-      { name: "ProcessResourceUsageEvent", timestamp: 10, fields: { user_cpu_ns: "10", system_cpu_ns: "10" } },
-    ];
-    const result = buildSchemaDrivenTimeSeriesViews({
-      customEvents,
-      segmentMetadata: new Map([["process.available_parallelism", "4"]]),
-      sourceComponentCount: 2,
-    });
-    if (result.views.length !== 0 || result.diagnostics.length !== 1) {
-      fail(`multi-component stateful view should be skipped once: ${JSON.stringify(result)}`);
-    }
-    const diagnostic = result.diagnostics[0];
-    if (diagnostic.id !== "process.cpu" || diagnostic.seriesId !== "cores" ||
-        !diagnostic.message.includes("2 source components")) {
-      fail(`unexpected multi-component diagnostic: ${JSON.stringify(diagnostic)}`);
-    }
-    pass("Stateful series reject multiple components without stream identity");
   }
 
   function testTimeSeriesLineViewportAndDownsampling() {
@@ -608,11 +728,13 @@ async function main() {
   testViewSpecAggregateExpressions();
   testSchemaDrivenSocketAcceptQueueGroups();
   testSchemaDrivenContextSwitchIntervals();
+  testSchemaDrivenCumulativeContextSwitchLines();
   testSchemaDrivenCpuResetCannotBeMasked();
   testNestedRatesPreserveIndependentBaselines();
-  testNonPositiveRateWindowKeepsBaseline();
+  testDuplicateRateTimestampUsesLatestBaseline();
+  testRateDecreasePolicyCanShowNegativeValues();
+  testTimeSeriesMarksMatchImplementedShapes();
   testHoldUntilNextPreservesInvalidSnapshotGap();
-  testStatefulSeriesRejectMultipleUnidentifiedComponents();
   testTimeSeriesLineViewportAndDownsampling();
   testTimeSeriesGeometryUsesHalfOpenRanges();
   testTimeSeriesGeometryPreservesDomainsAndGaps();
@@ -636,6 +758,7 @@ async function main() {
       "process.cpu",
       "socket.accept_queue",
       "process.context_switch_rate",
+      "process.context_switches.cumulative",
     ];
     if (JSON.stringify(demoIds) !== JSON.stringify(expected)) {
       fail(`unexpected demo views: ${JSON.stringify(demoIds)}`);
