@@ -4,463 +4,43 @@
 //! (threads flush buffers independently). This module collects all relevant
 //! events, sorts them by `timestamp_ns`, then processes them in order so that
 //! worker_id can be inferred from WorkerPark/WorkerUnpark tid correlation.
+//!
+//! # Module structure
+//!
+//! The decode pipeline is split into focused deep modules:
+//!
+//! - [`clock`]: Clock-domain newtypes (MonoNs, WallNs, ClockOffset) with
+//!   checked conversion boundary. All mono→wall conversions go through here.
+//! - [`events`]: one-pass wire decoding and malformed-event accounting.
+//! - [`polls`]: worker/tid correlation, poll reconstruction, and attribution.
+//! - [`spans`]: exact-key interval pairing, modern/legacy adapters, and the
+//!   common `ResolvedSpan` finalizer with its five-way accounting invariant.
+//! - [`attribution`]: sweep-line sample-to-span membership over entered
+//!   intervals (never lifecycle envelopes).
+//! - [`types`]: stable public output types at the Parquet-facing seam.
+//!
+//! This facade orchestrates those modules and retains the existing public
+//! `decode_samples` interface.
 
-use dial9_trace_format::decoder::Decoder;
-use lasso::{Rodeo, Spur};
+mod attribution;
+pub(crate) mod clock;
+mod events;
+pub(crate) mod polls;
+pub(crate) mod spans;
+mod types;
+
+use events::*;
 use rustc_hash::FxHashMap;
-use serde::Deserialize;
+#[cfg(test)]
+use spans::span_builder;
+use spans::{interval_pairing, legacy, modern};
+#[cfg(test)]
 use std::collections::HashMap;
+
+pub use types::{DecodeResult, EnclosingSpanSummary, ResolvedPoll, ResolvedSample, ResolvedSpan};
 
 /// Wire value of the `CpuProfile` CPU-sample source (periodic on-CPU sample).
 const SOURCE_CPU_PROFILE: u8 = 0;
-
-// ─── Lightweight serde structs (select only needed fields) ───────────────────
-
-#[derive(Debug, Deserialize)]
-struct CpuSample {
-    timestamp_ns: u64,
-    tid: u32,
-    source: u64,
-    callchain: Vec<u64>,
-}
-
-#[derive(Debug, Deserialize)]
-struct WorkerPark {
-    timestamp_ns: u64,
-    worker_id: u64,
-    tid: u32,
-}
-
-#[derive(Debug, Deserialize)]
-struct WorkerUnpark {
-    timestamp_ns: u64,
-    worker_id: u64,
-    tid: u32,
-}
-
-#[derive(Debug, Deserialize)]
-struct PollStart {
-    timestamp_ns: u64,
-    worker_id: u64,
-    task_id: u64,
-    #[serde(default)]
-    spawn_loc: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct PollEnd {
-    timestamp_ns: u64,
-    worker_id: u64,
-}
-
-#[derive(Debug, Deserialize)]
-struct ClockSync {
-    timestamp_ns: u64,
-    realtime_ns: u64,
-}
-
-#[derive(Debug, Deserialize)]
-struct SymbolEntry {
-    addr: u64,
-    inline_depth: u64,
-    symbol_name: String,
-}
-
-/// Self-contained span close summary emitted by `Dial9TracingLayer` (stage 1).
-/// Fields default to zero/empty for old traces that lack them.
-#[derive(Debug, Clone, Deserialize)]
-#[allow(dead_code)] // Fields deserialized for completeness; some used only in future stages.
-struct SpanCloseSummary {
-    timestamp_ns: u64,
-    #[serde(default)]
-    span_id: u64,
-    #[serde(default)]
-    span_instance_id: u64,
-    #[serde(default)]
-    start_timestamp_ns: u64,
-    #[serde(default)]
-    first_enter_timestamp_ns: Option<u64>,
-    #[serde(default)]
-    active_ns: u64,
-    #[serde(default)]
-    span_name: String,
-    #[serde(default)]
-    target: String,
-    #[serde(default)]
-    file: Option<String>,
-    #[serde(default)]
-    line: Option<u32>,
-    #[serde(default)]
-    parent_span_instance_id: Option<u64>,
-    #[serde(default)]
-    attributes: Vec<(String, String)>,
-    #[serde(default)]
-    unbalanced_enters: u32,
-    #[serde(default)]
-    concurrent: u32,
-    /// Whether `active_ns` saturated (hit `u64::MAX`) during accumulation.
-    /// Non-zero indicates the reported `active_ns` is a lower bound.
-    #[serde(default)]
-    saturated: u32,
-    /// Whether exact drop/loss counts are available for this span's events.
-    /// When `0`, loss is **unobservable**: the backend must classify dropped
-    /// enter/exit events as Unknown rather than assuming zero loss.
-    #[serde(default)]
-    loss_observable: u32,
-}
-
-/// Span enter event carrying instance_id and tid for interval tracking.
-#[derive(Debug, Deserialize)]
-#[allow(dead_code)] // tid deserialized for future per-thread interval attribution.
-struct SpanEnterEvent {
-    timestamp_ns: u64,
-    #[serde(default)]
-    span_instance_id: u64,
-    #[serde(default)]
-    tid: u64,
-    /// Monotonically increasing decode sequence number, assigned in wire decode
-    /// order. Used to break ties when two events share the same timestamp_ns.
-    #[serde(skip)]
-    decode_sequence: u64,
-}
-
-/// Span exit event carrying instance_id and tid for interval tracking.
-#[derive(Debug, Deserialize)]
-#[allow(dead_code)] // tid deserialized for future per-thread interval attribution.
-struct SpanExitEvent {
-    timestamp_ns: u64,
-    #[serde(default)]
-    span_instance_id: u64,
-    #[serde(default)]
-    tid: u64,
-    /// Monotonically increasing decode sequence number, assigned in wire decode
-    /// order. Used to break ties when two events share the same timestamp_ns.
-    #[serde(skip)]
-    decode_sequence: u64,
-}
-
-// ─── Legacy (old-producer) span event structs ────────────────────────────────
-//
-// Old producers emit SpanEnter/SpanExit with `span_id` and `worker_id` but
-// no `span_instance_id` or `tid`. The SpanCloseEvent only has `span_id`.
-// We reconstruct spans from these events using span_id + first-enter context.
-
-/// Legacy span enter event from old producers.
-///
-/// `worker_id` is on the wire but intentionally unused: spans are paired
-/// enter↔exit by `span_id` alone, because a task can migrate workers between
-/// enter and exit (see `resolve_legacy_spans`).
-#[derive(Debug, Deserialize)]
-#[allow(dead_code)]
-struct LegacySpanEnterEvent {
-    timestamp_ns: u64,
-    #[serde(default)]
-    worker_id: u64,
-    #[serde(default)]
-    span_id: u64,
-    #[serde(default)]
-    parent_span_id: Option<u64>,
-    #[serde(default)]
-    span_name: Option<String>,
-}
-
-/// Legacy span exit event from old producers.
-#[derive(Debug, Deserialize)]
-#[allow(dead_code)]
-struct LegacySpanExitEvent {
-    timestamp_ns: u64,
-    #[serde(default)]
-    worker_id: u64,
-    #[serde(default)]
-    span_id: u64,
-    #[serde(default)]
-    span_name: Option<String>,
-}
-
-/// Legacy span close event from old producers (only has span_id).
-#[derive(Debug, Deserialize)]
-struct LegacySpanCloseEvent {
-    timestamp_ns: u64,
-    #[serde(default)]
-    span_id: u64,
-}
-
-/// Metadata parsed from the SpanEnter schema name for old-format events.
-/// Schema name format: `SpanEnter:{target}::{name}:{file}:{line}`
-#[derive(Debug, Clone)]
-struct LegacySpanSchemaInfo {
-    target: String,
-    name: String,
-    file: Option<String>,
-    line: Option<u32>,
-}
-
-/// Parse target/name/file/line from an old-format SpanEnter or SpanExit schema name.
-/// Format: `Span{Enter|Exit}:{target}::{name}:{file}:{line}`
-/// Example: `SpanEnter:metrics_service::routes::record_metric:examples/metrics-service/src/routes.rs:26`
-///
-/// The format is `{prefix}:{target}::{name}:{file}:{line}` where:
-/// - prefix is "SpanEnter" or "SpanExit"
-/// - target is the module path (may contain `::`)
-/// - name is the span name (after the LAST `::` before the file)
-/// - file is the source file path (may contain `:`)
-/// - line is the numeric line number at the end
-fn parse_legacy_span_schema_name(schema_name: &str) -> Option<LegacySpanSchemaInfo> {
-    // Strip the "SpanEnter:" or "SpanExit:" prefix
-    let rest = schema_name
-        .strip_prefix("SpanEnter:")
-        .or_else(|| schema_name.strip_prefix("SpanExit:"))?;
-
-    // The format after prefix is: {target}::{name}:{file}:{line}
-    // We need to find the last `:` that's followed by only digits (the line number),
-    // then the `:` before that separates file from name::target.
-    //
-    // Strategy: split from the right. The line number is the last segment after `:`.
-    // The file path is everything between the second-to-last `:` and the line `:`.
-    // But file paths can contain `:` on Windows, so we use a different approach:
-    //
-    // Find the last `:digits` suffix for line number. Then the segment before that
-    // (back to the previous `:`) is the file. Everything before that is target::name.
-
-    // Find the last `:` followed by only digits
-    let line_colon_pos = rest.rfind(':')?;
-    let line_str = &rest[line_colon_pos + 1..];
-    let line: u32 = line_str.parse().ok()?;
-
-    let before_line = &rest[..line_colon_pos];
-
-    // The file is the segment between the previous `:` and line_colon_pos
-    // But we need to be careful: the format is `target::name:file:line`
-    // where `target::name` uses `::` as separator.
-    // After stripping line, we have `target::name:file`.
-    // The file is separated from name by a single `:` (not `::`).
-    // Find the last single `:` that is NOT part of a `::`.
-    let file_colon_pos = find_last_single_colon(before_line)?;
-
-    let target_name = &before_line[..file_colon_pos];
-    let file = &before_line[file_colon_pos + 1..];
-
-    // Split target_name on the LAST `::` to get target and name.
-    let (target, name) = if let Some(last_dcolon) = target_name.rfind("::") {
-        (&target_name[..last_dcolon], &target_name[last_dcolon + 2..])
-    } else {
-        // No `::` found — treat the whole thing as the name with empty target
-        ("", target_name)
-    };
-
-    Some(LegacySpanSchemaInfo {
-        target: target.to_string(),
-        name: name.to_string(),
-        file: if file.is_empty() {
-            None
-        } else {
-            Some(file.to_string())
-        },
-        line: Some(line),
-    })
-}
-
-/// Find the last `:` in `s` that is NOT part of a `::` sequence.
-/// Returns the byte offset of the single colon, or None if not found.
-fn find_last_single_colon(s: &str) -> Option<usize> {
-    let bytes = s.as_bytes();
-    let mut i = bytes.len();
-    while i > 0 {
-        i -= 1;
-        if bytes[i] == b':' {
-            // Check it's not part of `::`
-            let preceded_by_colon = i > 0 && bytes[i - 1] == b':';
-            let followed_by_colon = i + 1 < bytes.len() && bytes[i + 1] == b':';
-            if !preceded_by_colon && !followed_by_colon {
-                return Some(i);
-            }
-            // If it's part of `::`, skip both colons
-            if preceded_by_colon {
-                i -= 1; // skip the preceding `:`
-            }
-        }
-    }
-    None
-}
-
-// ─── Parsed event enum (sorted by timestamp) ────────────────────────────────
-
-enum TraceEvent {
-    CpuSample(CpuSample),
-    WorkerPark(WorkerPark),
-    WorkerUnpark(WorkerUnpark),
-    PollStart(PollStart),
-    PollEnd(PollEnd),
-}
-
-impl TraceEvent {
-    fn timestamp_ns(&self) -> u64 {
-        match self {
-            Self::CpuSample(e) => e.timestamp_ns,
-            Self::WorkerPark(e) => e.timestamp_ns,
-            Self::WorkerUnpark(e) => e.timestamp_ns,
-            Self::PollStart(e) => e.timestamp_ns,
-            Self::PollEnd(e) => e.timestamp_ns,
-        }
-    }
-}
-
-// ─── Public types ────────────────────────────────────────────────────────────
-
-/// A resolved CPU sample ready for Parquet output.
-#[derive(Debug, Clone)]
-pub struct ResolvedSample {
-    pub timestamp_ns: u64,
-    pub stack_id: [u8; 16],
-    /// Runtime worker this sample is attributed to, or `None` when it cannot be
-    /// attributed to a worker (a non-runtime thread, or the producer's
-    /// `WorkerId::UNKNOWN`/`BLOCKING` sentinels — see [`decode_samples`]). The
-    /// on/off-runtime split downstream is exactly `Some` vs `None`; there is no
-    /// in-band sentinel value.
-    pub worker_id: Option<u32>,
-    pub source: u8,
-    pub source_key: String,
-    /// Extracted from source_key path
-    pub host: String,
-    pub service: String,
-    pub date: String,
-    /// Duration of the enclosing poll span (ns), or `None` if the sample didn't
-    /// land inside a poll (off-worker, between polls, etc.).
-    pub poll_duration_ns: Option<u64>,
-    /// The spawn location of the task that was being polled when this sample
-    /// fired, or `None` if the sample didn't land inside a poll or the task
-    /// has no recorded spawn location.
-    pub spawn_location: Option<String>,
-    /// Tracing spans whose lifecycle encloses this sample's timestamp.
-    /// Typically zero, one, or two entries. Populated during span resolution.
-    pub enclosing_spans: Vec<EnclosingSpanSummary>,
-}
-
-/// A reconstructed poll span: one invocation of `Future::poll` on a task.
-///
-/// Public because it is the third element of [`DecodeResult`], the return type
-/// of the public [`decode_samples`].
-#[derive(Debug, Clone)]
-pub struct ResolvedPoll {
-    pub start_ns: u64,
-    pub end_ns: u64,
-    pub duration_ns: u64,
-    pub worker_id: u32,
-    pub task_id: u64,
-    pub spawn_loc: Option<String>,
-    /// CPU profile samples that landed inside this poll.
-    pub cpu_sample_count: u32,
-    /// Off-CPU / scheduler samples that landed inside this poll.
-    pub sched_sample_count: u32,
-    pub host: String,
-    pub service: String,
-    pub date: String,
-}
-
-/// A decoded tracing span close summary from the source file, ready for the
-/// `spans/` Parquet table. One row per `SpanCloseEvent` observed.
-#[derive(Debug, Clone)]
-pub struct ResolvedSpan {
-    /// Stable 16-byte identity: BLAKE3(boot_id || span_instance_id)[..16].
-    pub span_uid: [u8; 16],
-    /// Grouping identity: BLAKE3(kind || target || name || file || line)[..16].
-    pub span_type_uid: [u8; 16],
-    pub kind: &'static str,
-    pub name: String,
-    pub target: String,
-    pub callsite_file: Option<String>,
-    pub callsite_line: Option<u32>,
-    /// Lifecycle start timestamp (wall-clock epoch ns).
-    pub start_ns: u64,
-    /// Lifecycle close timestamp (wall-clock epoch ns).
-    pub end_ns: u64,
-    /// `end_ns - start_ns`.
-    pub elapsed_ns: u64,
-    /// Producer-accumulated active thread time (from enter/exit intervals).
-    pub active_ns: Option<u64>,
-    /// Union of locally-observed entered intervals (within this source file).
-    pub observed_active_wall_ns: u64,
-    /// Locally classifiable elapsed time.
-    pub detail_coverage_ns: u64,
-    /// Whether all detail fits within this source file.
-    pub details_complete: bool,
-    /// Concurrent/re-entrant execution observed.
-    pub concurrent: bool,
-    /// Explicit stable parent span uid (if available).
-    pub parent_span_uid: Option<[u8; 16]>,
-    /// Final close-time attributes.
-    pub attributes: Vec<(String, String)>,
-    // ── Five-way time attribution (all nullable until effective metadata
-    //    and wake classification are consumed) ─────────────────────────────
-    /// Estimated on-CPU time. Null until profiler metadata is available.
-    pub on_cpu_ns_est: Option<u64>,
-    /// Estimated synchronous blocking time. Null until profiler metadata.
-    pub blocked_ns_est: Option<u64>,
-    /// Async wait (not-ready) time. Null until wake classification.
-    pub async_wait_ns: Option<u64>,
-    /// Scheduling delay (ready-to-poll). Null until wake classification.
-    pub scheduler_delay_ns: Option<u64>,
-    /// Unclassified elapsed time. Invariant:
-    /// elapsed_ns = on_cpu_ns_est + blocked_ns_est + async_wait_ns
-    ///            + scheduler_delay_ns + unknown_ns
-    /// (nullable estimates contribute zero when null).
-    pub unknown_ns: u64,
-    /// CPU samples enclosed by this span.
-    pub cpu_sample_count: u32,
-    /// Scheduler samples enclosed by this span.
-    pub sched_sample_count: u32,
-    /// Attribution algorithm version (monotonically increasing).
-    pub attribution_version: u16,
-    /// Bitfield: missing/lost/ambiguous inputs for attribution.
-    /// Bit 0: profiler metadata missing
-    /// Bit 1: sample drops detected
-    /// Bit 2: worker/tid attribution ambiguous
-    /// Bit 3: wake classification unavailable
-    pub attribution_flags: u32,
-    /// Whether `active_ns` saturated (hit u64::MAX). When true, the reported
-    /// `active_ns` is a lower bound.
-    pub saturated: bool,
-    /// Whether loss of enter/exit events is observable for this span.
-    /// When false, the backend cannot distinguish "zero loss" from "unknown
-    /// loss" and must treat gaps as Unknown.
-    pub loss_observable: bool,
-    /// Number of unmatched exit events for this span instance (exits without
-    /// a corresponding enter on the same tid). Non-zero degrades completeness.
-    pub unbalanced_exits: u32,
-    /// Number of unmatched enter events for this span instance (enters that
-    /// were never popped by a corresponding exit, including producer-reported
-    /// unbalanced enters). Non-zero degrades completeness.
-    pub unbalanced_enters: u32,
-    /// Quality of the span identity anchor.
-    /// - `"metadata"`: boot_id from SegmentMetadata (authoritative, stable
-    ///   across files from the same process).
-    /// - `"path"`: boot_id extracted from a namespaced source key path matching
-    ///   the `{4-alpha}-{pid}` format. Stable across segments from the same
-    ///   process (same boot_id directory). Authoritative.
-    /// - `"flat"`: genuinely flat or legacy path with no identifiable boot_id
-    ///   directory. Cannot claim cross-file stability. Low quality.
-    pub identity_quality: &'static str,
-    /// Source key origin.
-    pub source_key: String,
-    pub host: String,
-    pub service: String,
-    pub date: String,
-}
-
-/// A compact span membership attached to each enriched sample row (the
-/// `enclosing_spans` list). One entry per span whose *locally observed entered
-/// interval* encloses the sample's timestamp — never lifecycle envelopes.
-///
-/// OTAP-aligned: carries only the identity, duration, and completeness needed
-/// for the hot flamegraph filter path. Full metadata lives in `spans/` only.
-#[derive(Debug, Clone, PartialEq)]
-pub struct EnclosingSpanSummary {
-    pub span_uid: [u8; 16],
-    pub span_type_uid: [u8; 16],
-    pub elapsed_ns: u64,
-    pub details_complete: bool,
-}
-
 /// Parse `(date, service, host)` from a source key, anchored on the
 /// `YYYY-MM-DD` date component so a leading prefix (e.g. `traces/`) does not
 /// shift the positions. Layout: `…/{date}/{HHMM}/{service}/{host}/{boot}/{file}`.
@@ -510,245 +90,21 @@ fn is_date(s: &str) -> bool {
 ///
 /// Returns the resolved samples and a map of stack_id → frame names for the
 /// stacks dictionary.
-/// Return type for [`decode_samples`]: resolved samples, stacks dictionary,
-/// poll spans, and tracing span close summaries.
-pub type DecodeResult = (
-    Vec<ResolvedSample>,
-    HashMap<[u8; 16], Vec<String>>,
-    Vec<ResolvedPoll>,
-    Vec<ResolvedSpan>,
-);
-
 pub fn decode_samples(data: &[u8], source_key: &str) -> anyhow::Result<DecodeResult> {
-    let mut decoder = Decoder::new(data).ok_or_else(|| anyhow::anyhow!("invalid trace header"))?;
-
-    let mut interner = Rodeo::default();
-    let mut addr_to_keys: FxHashMap<u64, Vec<(u64, Spur)>> = FxHashMap::default();
-    let mut events: Vec<TraceEvent> = Vec::new();
-    let mut clock_offset_ns: Option<i128> = None;
-    // Monotonic timestamp of the first ClockSync in this file — used as the
-    // file boundary marker for determining whether a span's lifecycle starts
-    // within this source file.
-    let mut first_clock_sync_mono_ns: Option<u64> = None;
-    // Authoritative boot_id decoded from SegmentMetadata entries. When the
-    // namespace isolation layer is active, the writer stamps a
-    // `boot_id` key in segment metadata. This is the stable cross-segment
-    // process identity anchor. When absent, we fall back to the path-based
-    // extraction which cannot claim cross-file stability.
-    let mut segment_metadata_boot_id: Option<String> = None;
-    // Span close summaries collected from SpanCloseEvent (stage 1 producer).
-    let mut span_closes: Vec<SpanCloseSummary> = Vec::new();
-    // Span enter/exit intervals for local observation tracking.
-    let mut span_enters: Vec<SpanEnterEvent> = Vec::new();
-    let mut span_exits: Vec<SpanExitEvent> = Vec::new();
-    let mut span_close_decode_errors: u64 = 0;
-    let mut span_enter_decode_errors: u64 = 0;
-    let mut span_exit_decode_errors: u64 = 0;
-    // Monotonically increasing counter assigned to span enter/exit events in
-    // wire decode order. Used to break timestamp ties deterministically.
-    let mut span_decode_sequence: u64 = 0;
-
-    // Legacy (old-producer) span events: SpanEnter/Exit with span_id + worker_id
-    // and SpanCloseEvent with only span_id. These are reconstructed into
-    // ResolvedSpan rows using local context.
-    let mut legacy_enters: Vec<(String, LegacySpanEnterEvent)> = Vec::new(); // (schema_name, event)
-    let mut legacy_exits: Vec<(String, LegacySpanExitEvent)> = Vec::new();
-    let mut legacy_closes: Vec<LegacySpanCloseEvent> = Vec::new();
-    let mut legacy_enter_decode_errors: u64 = 0;
-    let mut legacy_exit_decode_errors: u64 = 0;
-    let legacy_close_decode_errors: u64 = 0;
-    // Track whether we've seen any modern (span_instance_id > 0) span events.
-    // If we have modern events, we don't use legacy reconstruction.
-    let mut has_modern_spans = false;
-
-    decoder
-        .for_each_event(|ev| match ev.name {
-            "ClockSyncEvent" => {
-                if let Ok(cs) = ev.deserialize::<ClockSync>()
-                    && cs.realtime_ns > 0
-                    && cs.timestamp_ns > 0
-                {
-                    // Record the first ClockSync monotonic timestamp as file boundary.
-                    if first_clock_sync_mono_ns.is_none() {
-                        first_clock_sync_mono_ns = Some(cs.timestamp_ns);
-                    }
-                    if clock_offset_ns.is_none() {
-                        clock_offset_ns = Some(cs.realtime_ns as i128 - cs.timestamp_ns as i128);
-                    }
-                }
-            }
-            "SegmentMetadataEvent" => {
-                // Decode segment metadata to extract the authoritative boot_id.
-                // SegmentMetadataEvent has entries: HashMap<String, String>.
-                #[derive(serde::Deserialize)]
-                struct SegmentMeta {
-                    #[serde(default)]
-                    entries: std::collections::HashMap<String, String>,
-                }
-                if let Ok(meta) = ev.deserialize::<SegmentMeta>()
-                    && segment_metadata_boot_id.is_none()
-                    && let Some(bid) = meta.entries.get("boot_id")
-                    && !bid.is_empty()
-                {
-                    segment_metadata_boot_id = Some(bid.clone());
-                }
-            }
-            "CpuSampleEvent" | "CpuSample" => {
-                if let Ok(s) = ev.deserialize::<CpuSample>()
-                    && !s.callchain.is_empty()
-                {
-                    events.push(TraceEvent::CpuSample(s));
-                }
-            }
-            "WorkerParkEvent" => {
-                if let Ok(p) = ev.deserialize::<WorkerPark>() {
-                    events.push(TraceEvent::WorkerPark(p));
-                }
-            }
-            "WorkerUnparkEvent" => {
-                if let Ok(u) = ev.deserialize::<WorkerUnpark>() {
-                    events.push(TraceEvent::WorkerUnpark(u));
-                }
-            }
-            "PollStartEvent" => {
-                if let Ok(p) = ev.deserialize::<PollStart>() {
-                    events.push(TraceEvent::PollStart(p));
-                }
-            }
-            "PollEndEvent" => {
-                if let Ok(p) = ev.deserialize::<PollEnd>() {
-                    events.push(TraceEvent::PollEnd(p));
-                }
-            }
-            "SymbolTableEntry" => {
-                if let Ok(sym) = ev.deserialize::<SymbolEntry>() {
-                    let key = interner.get_or_intern(&sym.symbol_name);
-                    addr_to_keys
-                        .entry(sym.addr)
-                        .or_default()
-                        .push((sym.inline_depth, key));
-                }
-            }
-            // Stage 1 producer: self-contained span close summary. Accept both
-            // the exact `SpanCloseEvent` name and the struct-derived
-            // `SpanClose__{Type}` convention (see the enter/exit arms below).
-            name if name == "SpanCloseEvent" || name.starts_with("SpanClose__") => {
-                match ev.deserialize::<SpanCloseSummary>() {
-                    Ok(sc) if sc.span_instance_id > 0 => {
-                        has_modern_spans = true;
-                        span_closes.push(sc);
-                    }
-                    Ok(_) => {
-                        // span_instance_id == 0: either telemetry was disabled at
-                        // span creation (modern minimal close event) or this is an
-                        // old-producer close event (only has span_id). Try legacy.
-                        if let Ok(lc) = ev.deserialize::<LegacySpanCloseEvent>()
-                            && lc.span_id > 0
-                        {
-                            legacy_closes.push(lc);
-                        }
-                    }
-                    Err(_) => {
-                        // Try legacy deserialization (old format may not have all new fields)
-                        match ev.deserialize::<LegacySpanCloseEvent>() {
-                            Ok(lc) if lc.span_id > 0 => {
-                                legacy_closes.push(lc);
-                            }
-                            _ => {
-                                span_close_decode_errors += 1;
-                            }
-                        }
-                    }
-                }
-            }
-            // Span enter/exit events for local interval tracking.
-            //
-            // Two on-wire naming conventions carry the same events:
-            //   - `SpanEnter:{target}::{name}:{file}:{line}` — the dynamic schema
-            //     name emitted by the tracing layer (colon-separated).
-            //   - `SpanEnter__{Type}` — a struct-derived event (e.g.
-            //     `SpanEnter__ShaleOperation`). A Rust identifier cannot contain
-            //     `:`, so struct-named events use the `__` separator instead.
-            // We accept both, mirroring the viewer's `buildSpanData`.
-            name if name.starts_with("SpanEnter:") || name.starts_with("SpanEnter__") => {
-                match ev.deserialize::<SpanEnterEvent>() {
-                    Ok(mut enter) if enter.span_instance_id > 0 => {
-                        has_modern_spans = true;
-                        enter.decode_sequence = span_decode_sequence;
-                        span_decode_sequence += 1;
-                        span_enters.push(enter);
-                    }
-                    Ok(_) => {
-                        // span_instance_id == 0: try legacy format (has span_id + worker_id)
-                        if let Ok(le) = ev.deserialize::<LegacySpanEnterEvent>()
-                            && le.span_id > 0
-                        {
-                            legacy_enters.push((name.to_string(), le));
-                        }
-                    }
-                    Err(_) => {
-                        // May be old format that doesn't have span_instance_id at all
-                        match ev.deserialize::<LegacySpanEnterEvent>() {
-                            Ok(le) if le.span_id > 0 => {
-                                legacy_enters.push((name.to_string(), le));
-                            }
-                            _ => {
-                                span_enter_decode_errors += 1;
-                                legacy_enter_decode_errors += 1;
-                            }
-                        }
-                    }
-                }
-            }
-            name if name.starts_with("SpanExit:") || name.starts_with("SpanExit__") => {
-                match ev.deserialize::<SpanExitEvent>() {
-                    Ok(mut exit) if exit.span_instance_id > 0 => {
-                        has_modern_spans = true;
-                        exit.decode_sequence = span_decode_sequence;
-                        span_decode_sequence += 1;
-                        span_exits.push(exit);
-                    }
-                    Ok(_) => {
-                        // span_instance_id == 0: try legacy format
-                        if let Ok(le) = ev.deserialize::<LegacySpanExitEvent>()
-                            && le.span_id > 0
-                        {
-                            legacy_exits.push((name.to_string(), le));
-                        }
-                    }
-                    Err(_) => {
-                        // May be old format without span_instance_id field
-                        match ev.deserialize::<LegacySpanExitEvent>() {
-                            Ok(le) if le.span_id > 0 => {
-                                legacy_exits.push((name.to_string(), le));
-                            }
-                            _ => {
-                                span_exit_decode_errors += 1;
-                                legacy_exit_decode_errors += 1;
-                            }
-                        }
-                    }
-                }
-            }
-            _ => {}
-        })
-        .map_err(|e| anyhow::anyhow!("decode error: {e}"))?;
-
-    if span_close_decode_errors > 0 || span_enter_decode_errors > 0 || span_exit_decode_errors > 0 {
-        use dial9_core::rate_limited;
-        rate_limited!(std::time::Duration::from_secs(60), {
-            tracing::warn!(
-                source_key,
-                span_close_errors = span_close_decode_errors,
-                span_enter_errors = span_enter_decode_errors,
-                span_exit_errors = span_exit_decode_errors,
-                legacy_enter_errors = legacy_enter_decode_errors,
-                legacy_exit_errors = legacy_exit_decode_errors,
-                legacy_close_errors = legacy_close_decode_errors,
-                "skipped malformed span event(s) during decode"
-            );
-        });
-    }
+    let events::DecodedTrace {
+        interner,
+        mut addr_to_keys,
+        mut events,
+        clock_offset,
+        first_clock_sync_mono,
+        segment_metadata_boot_id,
+        span_closes,
+        span_enters,
+        span_exits,
+        legacy_enters,
+        legacy_exits,
+        legacy_closes,
+    } = events::decode_trace(data, source_key)?;
 
     tracing::info!("sorting {} events", events.len());
     // Sort events by timestamp for correct worker_id inference.
@@ -759,109 +115,11 @@ pub fn decode_samples(data: &[u8], source_key: &str) -> anyhow::Result<DecodeRes
         entries.sort_unstable_by_key(|(d, _)| *d);
     }
 
-    // Build tid → worker_id mapping from ALL park/unpark events.
-    // A tid is bound to the same worker for the entire segment lifetime.
-    //
-    // TODO(block-in-place): when a worker hands its tid off via block_in_place,
-    // samples inside the handoff interval are not confidently attributable and
-    // the JS reference rewrites them to off-runtime (see
-    // `deriveBlockInPlaceGaps` in trace_parser.js, ADR-0001/0002). We don't do
-    // that gap detection here yet; it's rare in practice, so for now a tid keeps
-    // its last-seen worker across such a handoff. Closing this requires sorting
-    // park/unpark per worker and detecting tid changes between consecutive events.
-    let mut tid_to_worker: FxHashMap<u32, u64> = FxHashMap::default();
-    for event in &events {
-        match event {
-            TraceEvent::WorkerPark(p) => {
-                tid_to_worker.insert(p.tid, p.worker_id);
-            }
-            TraceEvent::WorkerUnpark(u) => {
-                tid_to_worker.insert(u.tid, u.worker_id);
-            }
-            _ => {}
-        }
-    }
-
-    // Reconstruct poll spans per worker. Track open poll for each worker_id.
-    struct OpenPoll {
-        start_ns: u64,
-        worker_id: u64,
-        task_id: u64,
-        spawn_loc: Option<String>,
-    }
-    let mut open_polls: FxHashMap<u64, OpenPoll> = FxHashMap::default();
-    // Completed polls: (start_ns, end_ns, worker_id, task_id, spawn_loc)
-    let mut polls: Vec<(u64, u64, u64, u64, Option<String>)> = Vec::new();
-
-    for event in &events {
-        match event {
-            TraceEvent::PollStart(p) => {
-                // If there's an open poll for this worker (no PollEnd arrived),
-                // close it at this timestamp (matches JS buildWorkerSpans behavior).
-                if let Some(open) = open_polls.remove(&p.worker_id) {
-                    polls.push((
-                        open.start_ns,
-                        p.timestamp_ns,
-                        open.worker_id,
-                        open.task_id,
-                        open.spawn_loc,
-                    ));
-                }
-                open_polls.insert(
-                    p.worker_id,
-                    OpenPoll {
-                        start_ns: p.timestamp_ns,
-                        worker_id: p.worker_id,
-                        task_id: p.task_id,
-                        spawn_loc: p.spawn_loc.clone(),
-                    },
-                );
-            }
-            TraceEvent::PollEnd(p) => {
-                if let Some(open) = open_polls.remove(&p.worker_id) {
-                    polls.push((
-                        open.start_ns,
-                        p.timestamp_ns,
-                        open.worker_id,
-                        open.task_id,
-                        open.spawn_loc,
-                    ));
-                }
-            }
-            TraceEvent::WorkerPark(p) => {
-                // Close any open poll at park time (same as JS).
-                if let Some(open) = open_polls.remove(&p.worker_id) {
-                    polls.push((
-                        open.start_ns,
-                        p.timestamp_ns,
-                        open.worker_id,
-                        open.task_id,
-                        open.spawn_loc,
-                    ));
-                }
-            }
-            _ => {}
-        }
-    }
-    // Discard unclosed polls (segment-boundary artifacts).
-    drop(open_polls);
-
-    // Sort polls by start_ns for efficient binary search during sample attribution.
-    polls.sort_unstable_by_key(|(start, _, _, _, _)| *start);
-
-    // Build per-worker poll index for sample attribution.
-    // For each worker, polls are sorted by start_ns.
-    let mut polls_by_worker: FxHashMap<u64, Vec<usize>> = FxHashMap::default();
-    for (i, &(_, _, worker_id, _, _)) in polls.iter().enumerate() {
-        polls_by_worker.entry(worker_id).or_default().push(i);
-    }
+    let mut poll_timeline = polls::PollTimeline::reconstruct(&events);
 
     let mut stacks_dict: FxHashMap<[u8; 16], Vec<String>> = FxHashMap::default();
     let mut stack_cache: FxHashMap<Vec<u64>, [u8; 16]> = FxHashMap::default();
     let mut samples = Vec::new();
-    // Track per-poll sample counts: (cpu_count, sched_count) indexed by poll index.
-    let mut poll_sample_counts: Vec<(u32, u32)> = vec![(0, 0); polls.len()];
-
     let (parsed_date, parsed_service, parsed_host) = parse_source_key(source_key);
 
     for event in &events {
@@ -871,28 +129,11 @@ pub fn decode_samples(data: &[u8], source_key: &str) -> anyhow::Result<DecodeRes
             | TraceEvent::PollStart(_)
             | TraceEvent::PollEnd(_) => {}
             TraceEvent::CpuSample(s) => {
-                // Attribute the sample to a worker via its tid. `None` (tid never
-                // bound to a worker) and the producer sentinels (`UNKNOWN` = 255,
-                // `BLOCKING` = 254) are all "off-runtime" — represented as `None`,
-                // not an in-band sentinel.
-                let worker_id = match tid_to_worker.get(&s.tid).copied() {
-                    Some(w) if w < 254 => Some(w as u32),
-                    _ => None,
-                };
-
-                // Find the enclosing poll for this sample (if on a worker).
-                let (poll_duration_ns, spawn_location) = if let Some(w) = worker_id {
-                    find_enclosing_poll(
-                        &polls,
-                        &polls_by_worker,
-                        w as u64,
-                        s.timestamp_ns,
-                        &mut poll_sample_counts,
-                        s.source as u8,
-                    )
-                } else {
-                    (None, None)
-                };
+                let (worker_id, poll_duration_ns, spawn_location) = poll_timeline.attribute_sample(
+                    s.tid,
+                    clock::MonoNs(s.timestamp_ns),
+                    s.source as u8,
+                );
 
                 let stack_id = if let Some(&cached) = stack_cache.get(&s.callchain) {
                     cached
@@ -936,10 +177,9 @@ pub fn decode_samples(data: &[u8], source_key: &str) -> anyhow::Result<DecodeRes
                     id
                 };
 
-                let wall_ns = match clock_offset_ns {
-                    Some(offset) => (s.timestamp_ns as i128 + offset) as u64,
-                    None => s.timestamp_ns,
-                };
+                let wall_ns = clock::MonoNs(s.timestamp_ns)
+                    .to_wall_or_raw(clock_offset)
+                    .raw();
                 samples.push(ResolvedSample {
                     timestamp_ns: wall_ns,
                     stack_id,
@@ -957,39 +197,8 @@ pub fn decode_samples(data: &[u8], source_key: &str) -> anyhow::Result<DecodeRes
         }
     }
 
-    // Build resolved polls with sample counts and wall-clock timestamps.
-    let resolved_polls: Vec<ResolvedPoll> = polls
-        .iter()
-        .enumerate()
-        .map(|(i, &(start, end, worker_id, task_id, ref spawn_loc))| {
-            let (cpu_count, sched_count) = poll_sample_counts[i];
-            let wall_start = match clock_offset_ns {
-                Some(offset) => (start as i128 + offset) as u64,
-                None => start,
-            };
-            let wall_end = match clock_offset_ns {
-                Some(offset) => (end as i128 + offset) as u64,
-                None => end,
-            };
-            ResolvedPoll {
-                start_ns: wall_start,
-                end_ns: wall_end,
-                // Polls are closed in sorted-timestamp order, so end >= start
-                // holds in practice; saturate defensively so a corrupt or
-                // clock-skewed segment can't underflow (panic in debug, wrap in
-                // release) instead of just yielding a zero-length poll.
-                duration_ns: wall_end.saturating_sub(wall_start),
-                worker_id: worker_id as u32,
-                task_id,
-                spawn_loc: spawn_loc.clone(),
-                cpu_sample_count: cpu_count,
-                sched_sample_count: sched_count,
-                host: parsed_host.clone(),
-                service: parsed_service.clone(),
-                date: parsed_date.clone(),
-            }
-        })
-        .collect();
+    let resolved_polls =
+        poll_timeline.resolved(clock_offset, &parsed_host, &parsed_service, &parsed_date);
 
     // ── Stage 2: Resolve tracing span close summaries ────────────────────────
     //
@@ -1028,8 +237,8 @@ pub fn decode_samples(data: &[u8], source_key: &str) -> anyhow::Result<DecodeRes
         &span_exits,
         source_key,
         &boot_id,
-        clock_offset_ns,
-        first_clock_sync_mono_ns,
+        clock_offset,
+        first_clock_sync_mono,
         &parsed_host,
         &parsed_service,
         &parsed_date,
@@ -1040,8 +249,8 @@ pub fn decode_samples(data: &[u8], source_key: &str) -> anyhow::Result<DecodeRes
 
     // ── Stage 2b: Legacy span reconstruction ─────────────────────────────────
     //
-    // If there are NO modern span events but we DO have legacy events, reconstruct
-    // spans from old-producer SpanEnter/SpanExit/SpanClose streams.
+    // Reconstruct any legacy events independently; mixed-format files can carry
+    // both modern and legacy spans.
     //
     // Old format:
     //   SpanEnter:{target}::{name}:{file}:{line} → fields: worker_id, span_id, parent_span_id, span_name, ...
@@ -1052,7 +261,8 @@ pub fn decode_samples(data: &[u8], source_key: &str) -> anyhow::Result<DecodeRes
     // - Use raw span_id as the local identity key
     // - Synthesize a deterministic instance_id from span_id + first-enter timestamp
     //   to avoid collisions when IDs are recycled
-    // - Pair enter/exit using worker_id as the lane (old format has no tid)
+    // - Pair enter/exit by span_id alone (NOT worker_id): async tasks migrate
+    //   workers across .await, so worker_id is not a stable pairing key.
     // - Parse target/name/file/line from the SpanEnter schema name
     // - Lifecycle start = first observed enter (conservative)
     // - details_complete = false (cannot verify boundary without modern metadata)
@@ -1060,23 +270,23 @@ pub fn decode_samples(data: &[u8], source_key: &str) -> anyhow::Result<DecodeRes
     // - loss_observable = false
     // - All elapsed remains unknown (no producer-reported active_ns)
 
-    let mut legacy_intervals: FxHashMap<u64, Vec<(u64, u64)>> = FxHashMap::default();
+    let mut legacy_intervals: FxHashMap<u64, Vec<interval_pairing::MonoInterval>> =
+        FxHashMap::default();
 
-    if !has_modern_spans && (!legacy_enters.is_empty() || !legacy_closes.is_empty()) {
-        // Project polls to (start, end, worker_id, task_id) in monotonic ns for
-        // task-based CPU/wait attribution. `polls` is already sorted by start.
-        let poll_timeline: Vec<(u64, u64, u64, u64)> = polls
-            .iter()
-            .map(|&(start, end, worker_id, task_id, _)| (start, end, worker_id, task_id))
-            .collect();
+    // Process legacy spans independently of modern spans. Both formats can
+    // coexist in the same file (e.g. a library using old-format spans alongside
+    // a service using new-format spans). Previously, `has_modern_spans` globally
+    // suppressed all legacy events, causing valid legacy spans to be lost in
+    // mixed-format files.
+    if !legacy_enters.is_empty() || !legacy_closes.is_empty() {
         let legacy_resolution = resolve_legacy_spans(
             &legacy_enters,
             &legacy_exits,
             &legacy_closes,
-            &poll_timeline,
+            poll_timeline.records(),
             source_key,
             &boot_id,
-            clock_offset_ns,
+            clock_offset,
             &parsed_host,
             &parsed_service,
             &parsed_date,
@@ -1099,126 +309,14 @@ pub fn decode_samples(data: &[u8], source_key: &str) -> anyhow::Result<DecodeRes
     // event-ordered per-(instance_id,tid) LIFO reconstruction) rather than
     // performing a second broken all-enters-then-exits pass.
 
-    struct SpanInterval {
-        start_wall: u64,
-        end_wall: u64,
-        span_idx: usize,
-    }
-
-    let mut all_intervals: Vec<SpanInterval> = Vec::new();
-
-    // Map instance_id → resolved_spans index via span_uid match.
-    for (instance_id, intervals) in &instance_intervals {
-        let target_uid = compute_span_uid(&boot_id, *instance_id);
-        // Find the resolved span with this uid.
-        if let Some(span_idx) = resolved_spans.iter().position(|s| s.span_uid == target_uid) {
-            for &(enter_ts, exit_ts) in intervals {
-                let start_wall = match clock_offset_ns {
-                    Some(offset) => (enter_ts as i128 + offset) as u64,
-                    None => enter_ts,
-                };
-                let end_wall = match clock_offset_ns {
-                    Some(offset) => (exit_ts as i128 + offset) as u64,
-                    None => exit_ts,
-                };
-                all_intervals.push(SpanInterval {
-                    start_wall,
-                    end_wall,
-                    span_idx,
-                });
-            }
-        }
-    }
-
-    // Also include legacy intervals (already computed with synthetic instance_ids).
-    for (synthetic_instance_id, intervals) in &legacy_intervals {
-        let target_uid = compute_span_uid(&boot_id, *synthetic_instance_id);
-        if let Some(span_idx) = resolved_spans.iter().position(|s| s.span_uid == target_uid) {
-            for &(enter_ts, exit_ts) in intervals {
-                let start_wall = match clock_offset_ns {
-                    Some(offset) => (enter_ts as i128 + offset) as u64,
-                    None => enter_ts,
-                };
-                let end_wall = match clock_offset_ns {
-                    Some(offset) => (exit_ts as i128 + offset) as u64,
-                    None => exit_ts,
-                };
-                all_intervals.push(SpanInterval {
-                    start_wall,
-                    end_wall,
-                    span_idx,
-                });
-            }
-        }
-    }
-
-    // Sort intervals by start time for sweep-line attribution.
-    all_intervals.sort_unstable_by_key(|iv| iv.start_wall);
-
-    // ── Sweep-line sample attribution ────────────────────────────────────────
-    //
-    // Sort samples by timestamp. For each sample, advance a pointer through
-    // intervals (sorted by start) to find all that start <= ts. Maintain an
-    // active set of intervals that haven't ended yet. For each sample, check
-    // only the active intervals. This is O((samples + intervals) * max_depth)
-    // where max_depth is the typical nesting depth (small constant), instead
-    // of O(samples * all_intervals) for the backward scan.
-    //
-    // We need to attribute each sample by its index in the original `samples`
-    // vec (not the sorted order), so we sort indices.
-
-    let mut sample_order: Vec<usize> = (0..samples.len()).collect();
-    sample_order.sort_unstable_by_key(|&i| samples[i].timestamp_ns);
-
-    // Active intervals: those whose start_wall <= current sample ts and
-    // end_wall > current sample ts. We maintain this as a Vec that we prune
-    // lazily.
-    let mut active: Vec<usize> = Vec::new(); // indices into all_intervals
-    let mut interval_cursor: usize = 0;
-
-    for &sample_idx in &sample_order {
-        let ts = samples[sample_idx].timestamp_ns;
-
-        // Advance interval cursor: add all intervals starting <= ts.
-        while interval_cursor < all_intervals.len()
-            && all_intervals[interval_cursor].start_wall <= ts
-        {
-            active.push(interval_cursor);
-            interval_cursor += 1;
-        }
-
-        // Prune expired intervals from active set (end_wall <= ts).
-        active.retain(|&iv_idx| all_intervals[iv_idx].end_wall > ts);
-
-        // Attribute the sample to all active intervals (dedup by span_idx).
-        let mut seen_span_indices: Vec<usize> = Vec::new();
-        for &iv_idx in &active {
-            let iv = &all_intervals[iv_idx];
-            debug_assert!(iv.start_wall <= ts && iv.end_wall > ts);
-
-            // Dedup: skip if we already attributed this span index.
-            if seen_span_indices.contains(&iv.span_idx) {
-                continue;
-            }
-            seen_span_indices.push(iv.span_idx);
-
-            // Sample is within this entered interval.
-            if samples[sample_idx].source == SOURCE_CPU_PROFILE {
-                resolved_spans[iv.span_idx].cpu_sample_count += 1;
-            } else {
-                resolved_spans[iv.span_idx].sched_sample_count += 1;
-            }
-            let span = &resolved_spans[iv.span_idx];
-            samples[sample_idx]
-                .enclosing_spans
-                .push(EnclosingSpanSummary {
-                    span_uid: span.span_uid,
-                    span_type_uid: span.span_type_uid,
-                    elapsed_ns: span.elapsed_ns,
-                    details_complete: span.details_complete,
-                });
-        }
-    }
+    attribution::attribute_samples_to_spans(
+        &mut samples,
+        &mut resolved_spans,
+        &instance_intervals,
+        &legacy_intervals,
+        &boot_id,
+        clock_offset,
+    );
 
     Ok((
         samples,
@@ -1234,13 +332,11 @@ pub fn decode_samples(data: &[u8], source_key: &str) -> anyhow::Result<DecodeRes
 /// The boot_id is either decoded from SegmentMetadata (authoritative, stable
 /// across files from the same process) or extracted from the source key path
 /// (low-quality fallback that cannot claim cross-file stability).
+/// Compute a span_uid from the boot-id + span_instance_id.
+/// Delegates to [`span_builder::compute_span_uid`].
+#[cfg(test)]
 fn compute_span_uid(boot_id: &str, span_instance_id: u64) -> [u8; 16] {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(boot_id.as_bytes());
-    hasher.update(&span_instance_id.to_le_bytes());
-    let mut uid = [0u8; 16];
-    uid.copy_from_slice(&hasher.finalize().as_bytes()[..16]);
-    uid
+    span_builder::compute_span_uid(boot_id, span_instance_id)
 }
 
 /// Extract the boot-id directory from a source key path.
@@ -1302,7 +398,8 @@ fn is_boot_id_format(s: &str) -> bool {
 }
 
 /// Compute a span_type_uid from the span's identity fields.
-/// `BLAKE3(kind || target || name || file || line)[..16]`
+/// Delegates to [`span_builder::compute_span_type_uid`].
+#[cfg(test)]
 fn compute_span_type_uid(
     kind: &str,
     target: &str,
@@ -1310,23 +407,7 @@ fn compute_span_type_uid(
     file: Option<&str>,
     line: Option<u32>,
 ) -> [u8; 16] {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(kind.as_bytes());
-    hasher.update(b"\x00");
-    hasher.update(target.as_bytes());
-    hasher.update(b"\x00");
-    hasher.update(name.as_bytes());
-    hasher.update(b"\x00");
-    if let Some(f) = file {
-        hasher.update(f.as_bytes());
-    }
-    hasher.update(b"\x00");
-    if let Some(l) = line {
-        hasher.update(&l.to_le_bytes());
-    }
-    let mut uid = [0u8; 16];
-    uid.copy_from_slice(&hasher.finalize().as_bytes()[..16]);
-    uid
+    span_builder::compute_span_type_uid(kind, target, name, file, line)
 }
 
 /// Result of span resolution: resolved spans and the per-instance interval map
@@ -1334,7 +415,7 @@ fn compute_span_type_uid(
 struct SpanResolution {
     spans: Vec<ResolvedSpan>,
     /// Per span_instance_id: list of monotonic-clock (enter_ts, exit_ts) intervals.
-    instance_intervals: FxHashMap<u64, Vec<(u64, u64)>>,
+    instance_intervals: FxHashMap<u64, Vec<interval_pairing::MonoInterval>>,
 }
 
 /// Resolve span close summaries into `ResolvedSpan` rows.
@@ -1357,751 +438,113 @@ fn resolve_spans(
     span_exits: &[SpanExitEvent],
     source_key: &str,
     boot_id: &str,
-    clock_offset_ns: Option<i128>,
-    first_clock_sync_ns: Option<u64>,
+    clock_offset: Option<clock::ClockOffset>,
+    first_clock_sync_mono: Option<clock::MonoNs>,
     host: &str,
     service: &str,
     date: &str,
     identity_quality: &'static str,
 ) -> SpanResolution {
-    // Build per-(instance_id, tid) enter stacks for LIFO pairing.
-    // Process enters and exits in timestamp order: push enters onto stack,
-    // pop on exit. This correctly handles re-entrant spans where an enter
-    // at t=100 must pair with exit at t=200, not with a later exit.
-    let mut enter_stacks: FxHashMap<(u64, u64), Vec<u64>> = FxHashMap::default();
-    let mut local_intervals: FxHashMap<u64, Vec<(u64, u64)>> = FxHashMap::default();
-
-    // Merge enters and exits into a single timeline sorted by timestamp.
-    enum SpanEvent<'a> {
-        Enter(&'a SpanEnterEvent),
-        Exit(&'a SpanExitEvent),
-    }
-    let mut timeline: Vec<SpanEvent<'_>> = Vec::with_capacity(span_enters.len() + span_exits.len());
-    for enter in span_enters {
-        timeline.push(SpanEvent::Enter(enter));
-    }
-    for exit in span_exits {
-        timeline.push(SpanEvent::Exit(exit));
-    }
-    // Sort by timestamp. On tie, preserve original wire decode order via
-    // decode_sequence. This means that at equal timestamps, the event that
-    // appeared first on the wire is processed first — the only stable,
-    // deterministic ordering when clocks have insufficient resolution.
-    let mut indexed_timeline: Vec<(usize, SpanEvent<'_>)> =
-        timeline.into_iter().enumerate().collect();
-    indexed_timeline.sort_by_key(|(_seq, ev)| match ev {
-        SpanEvent::Enter(e) => (e.timestamp_ns, e.decode_sequence),
-        SpanEvent::Exit(e) => (e.timestamp_ns, e.decode_sequence),
-    });
-
-    // Track unmatched exits per span_instance_id (exits with no corresponding
-    // enter on the same tid). These degrade completeness.
-    let mut unmatched_exits: FxHashMap<u64, u32> = FxHashMap::default();
-
-    for (_seq, ev) in &indexed_timeline {
-        match ev {
-            SpanEvent::Enter(enter) => {
-                enter_stacks
-                    .entry((enter.span_instance_id, enter.tid))
-                    .or_default()
-                    .push(enter.timestamp_ns);
-            }
-            SpanEvent::Exit(exit) => {
-                let key = (exit.span_instance_id, exit.tid);
-                let matched = if let Some(stack) = enter_stacks.get_mut(&key)
-                    && let Some(enter_ts) = stack.pop()
-                    && exit.timestamp_ns >= enter_ts
-                {
-                    local_intervals
-                        .entry(exit.span_instance_id)
-                        .or_default()
-                        .push((enter_ts, exit.timestamp_ns));
-                    true
-                } else {
-                    false
-                };
-                if !matched {
-                    *unmatched_exits.entry(exit.span_instance_id).or_insert(0) += 1;
-                }
-            }
-        }
-    }
-
-    let to_wall = |mono_ns: u64| -> u64 {
-        match clock_offset_ns {
-            Some(offset) => (mono_ns as i128 + offset) as u64,
-            None => mono_ns,
-        }
-    };
-
-    let spans = span_closes
-        .into_iter()
-        .map(|sc| {
-            let span_uid = compute_span_uid(boot_id, sc.span_instance_id);
-            let span_type_uid = compute_span_type_uid(
-                "tracing",
-                &sc.target,
-                &sc.span_name,
-                sc.file.as_deref(),
-                sc.line,
-            );
-
-            let wall_start = to_wall(sc.start_timestamp_ns);
-            let wall_end = to_wall(sc.timestamp_ns);
-            let elapsed_ns = wall_end.saturating_sub(wall_start);
-
-            // Compute locally observed active wall time from enter/exit intervals.
-            // Union overlapping intervals to get true wall coverage (not double-counted).
-            let intervals = local_intervals.get(&sc.span_instance_id);
-            let (observed_active_wall_ns, active_thread_time_ns) = intervals
-                .map(|ivs| {
-                    // Active thread time: sum of all intervals using saturating arithmetic.
-                    let thread_time: u64 = ivs
-                        .iter()
-                        .map(|&(e, x)| x.saturating_sub(e))
-                        .fold(0u64, |acc, v| acc.saturating_add(v));
-                    // Wall time: union of overlapping intervals
-                    let wall_time = union_intervals(ivs);
-                    (wall_time, thread_time)
-                })
-                .unwrap_or((0, 0));
-
-            // Determine if the span was never entered locally.
-            let never_entered = intervals.is_none() || intervals.is_some_and(|v| v.is_empty());
-
-            // Check for unbalanced enters for THIS INSTANCE ONLY (not all instances).
-            // Count leftover enters in stacks keyed by (this instance_id, any tid).
-            let instance_unbalanced: u32 = enter_stacks
-                .iter()
-                .filter(|((iid, _), _)| *iid == sc.span_instance_id)
-                .map(|(_, stack)| stack.len() as u32)
-                .sum();
-            // Unmatched exits for this instance (exits with no matching enter on same tid).
-            let instance_unmatched_exits = unmatched_exits
-                .get(&sc.span_instance_id)
-                .copied()
-                .unwrap_or(0);
-            let has_unbalanced =
-                sc.unbalanced_enters > 0 || instance_unbalanced > 0 || instance_unmatched_exits > 0;
-
-            // Saturation and loss observability from producer.
-            let saturated = sc.saturated > 0;
-            let loss_observable = sc.loss_observable > 0;
-
-            // Detail coverage: how much of elapsed_ns is covered by local data.
-            // If never entered, coverage is 0. Otherwise it's the wall union.
-            let detail_coverage_ns = observed_active_wall_ns;
-
-            // Details are structurally complete if:
-            // 1. We have local intervals (span was entered)
-            // 2. No unbalanced enters/exits for this instance (all pairs matched)
-            // 3. The span lifecycle start is at or after the file boundary
-            //    (approximated by ClockSync timestamp — the first event in each file).
-            //    first_clock_sync_ns MUST be Some: without a clock sync we cannot
-            //    verify the boundary, so we conservatively mark incomplete.
-            // 4. Identity comes from authoritative metadata or namespaced path
-            //    (boot_id in SegmentMetadata or a valid boot_id-shaped path
-            //    directory). Flat/legacy fallback CANNOT yield details_complete=true
-            //    because we cannot verify cross-file stability.
-            // 5. Not saturated: if active_ns hit u64::MAX, the reported value is
-            //    a lower bound and detail timing cannot be trusted.
-            // 6. Loss is observable OR not a concern: when loss_observable is
-            //    false, we cannot distinguish "zero dropped events" from "unknown
-            //    number of dropped events" so we cannot claim completeness.
-            //
-            // NOTE: async gaps are allowed — a span with enter/exit/enter/exit
-            // with gaps IS structurally complete if all enters are balanced.
-            let lifecycle_starts_in_file = match first_clock_sync_ns {
-                Some(file_start) => sc.start_timestamp_ns >= file_start,
-                None => false, // No clock sync → cannot verify boundary → incomplete
-            };
-            let identity_authoritative =
-                identity_quality == "metadata" || identity_quality == "path";
-            let details_complete = !never_entered
-                && !has_unbalanced
-                && lifecycle_starts_in_file
-                && identity_authoritative
-                && !saturated
-                && loss_observable;
-
-            // Unknown = elapsed - what we can account for locally.
-            // Until effective metadata/loss and wake classification are consumed,
-            // set unknown_ns = elapsed_ns so the invariant is exact (don't fake
-            // categories). The detail_coverage_ns is informational only.
-            let unknown_ns = elapsed_ns;
-
-            // Concurrent: detected by producer or by thread-time exceeding wall-time.
-            let concurrent = sc.concurrent > 0
-                || active_thread_time_ns > observed_active_wall_ns.saturating_add(1);
-
-            // Parent span uid (if parent_span_instance_id is known)
-            let parent_span_uid = sc
-                .parent_span_instance_id
-                .map(|parent_id| compute_span_uid(boot_id, parent_id));
-
-            ResolvedSpan {
-                span_uid,
-                span_type_uid,
-                kind: "tracing",
-                name: sc.span_name,
-                target: sc.target,
-                callsite_file: sc.file,
-                callsite_line: sc.line,
-                start_ns: wall_start,
-                end_ns: wall_end,
-                elapsed_ns,
-                active_ns: if sc.active_ns > 0 {
-                    Some(sc.active_ns)
-                } else if !never_entered {
-                    // Use locally computed thread time when producer didn't provide it
-                    Some(active_thread_time_ns)
-                } else {
-                    None
-                },
-                observed_active_wall_ns,
-                detail_coverage_ns,
-                details_complete,
-                concurrent,
-                parent_span_uid,
-                attributes: sc.attributes,
-                // Five-way estimates: all null until effective metadata/loss
-                // and wake classification are actually consumed. The invariant
-                // is exact: unknown_ns = elapsed_ns (nothing is classified).
-                on_cpu_ns_est: None,
-                blocked_ns_est: None,
-                async_wait_ns: None,
-                scheduler_delay_ns: None,
-                unknown_ns,
-                cpu_sample_count: 0, // Will be filled during sample attribution
-                sched_sample_count: 0,
-                // Attribution v1: intervals only, no profiler/wake decomposition.
-                attribution_version: 1,
-                // All flags set: profiler metadata missing (bit 0), no sample
-                // drop info (bit 1), no worker/tid ambiguity check (bit 2),
-                // wake classification unavailable (bit 3).
-                attribution_flags: 0b1111,
-                saturated,
-                loss_observable,
-                unbalanced_exits: instance_unmatched_exits,
-                unbalanced_enters: sc.unbalanced_enters.saturating_add(instance_unbalanced),
-                identity_quality,
-                source_key: source_key.to_string(),
-                host: host.to_string(),
-                service: service.to_string(),
-                date: date.to_string(),
-            }
-        })
-        .collect();
-
+    let result = modern::resolve_modern_spans(
+        span_closes,
+        span_enters,
+        span_exits,
+        source_key,
+        boot_id,
+        clock_offset,
+        first_clock_sync_mono,
+        host,
+        service,
+        date,
+        identity_quality,
+    );
     SpanResolution {
-        spans,
-        instance_intervals: local_intervals,
+        spans: result.spans,
+        instance_intervals: result.instance_intervals,
     }
 }
 
 /// Resolve legacy (old-producer) span events into `ResolvedSpan` rows.
 ///
-/// Old producers emit:
-/// - `SpanEnter:{target}::{name}:{file}:{line}` with fields: worker_id, span_id, span_name, ...
-/// - `SpanExit:{target}::{name}:{file}:{line}` with fields: worker_id, span_id, span_name, ...
-/// - `SpanCloseEvent` with only: span_id
+/// Delegates to the [`legacy`] module which handles:
+/// - Pairing enters/exits by `span_id` alone (not worker_id)
+/// - Synthesizing deterministic instance_ids from span_id + first-enter timestamp
+/// - Parsing target/name/file/line from SpanEnter schema names
+/// - Task-based CPU/wait attribution when polls are available
 ///
-/// Strategy:
-/// - Pair enters/exits by `span_id` alone (NOT worker_id): a task can migrate
-///   workers between its enter and exit, so the worker is not a stable lane.
-/// - For each span_id that has a close event, synthesize a deterministic
-///   instance_id from the span_id and first-enter timestamp.
-/// - Parse target/name/file/line from the SpanEnter schema name.
-/// - Lifecycle start = first observed enter (conservative).
-/// - details_complete = false, identity_quality = "legacy", loss_observable = false.
-/// - Handle recycled IDs conservatively: if we see multiple distinct
-///   first-enter timestamps for the same span_id, each gets a separate
-///   synthetic instance.
-/// - When the span's owning Tokio task can be resolved (the poll on the enter
-///   worker covering the enter timestamp), split the entered wall time into
-///   estimated on-CPU (poll overlap) vs async wait (in-task gaps between polls),
-///   using `task_polls`. See `attribute_legacy_span_from_polls`.
+/// Recycled ID policy: all enters/exits for the same span_id are merged
+/// conservatively into one span instance. Within a single trace segment
+/// (typically 60s), the same span_id almost always represents the same
+/// logical span. A close event marks the lifecycle end.
 #[allow(clippy::too_many_arguments)]
 fn resolve_legacy_spans(
     legacy_enters: &[(String, LegacySpanEnterEvent)],
     legacy_exits: &[(String, LegacySpanExitEvent)],
     legacy_closes: &[LegacySpanCloseEvent],
-    // All reconstructed polls in this file, MONOTONIC ns (pre-`to_wall`):
-    // `(start, end, worker_id, task_id)`. Sorted by start.
-    polls: &[(u64, u64, u64, u64)],
+    polls: &[polls::PollRecord],
     source_key: &str,
     boot_id: &str,
-    clock_offset_ns: Option<i128>,
+    clock_offset: Option<clock::ClockOffset>,
     host: &str,
     service: &str,
     date: &str,
 ) -> SpanResolution {
-    let to_wall = |mono_ns: u64| -> u64 {
-        match clock_offset_ns {
-            Some(offset) => (mono_ns as i128 + offset) as u64,
-            None => mono_ns,
-        }
-    };
-
-    // Collect metadata from first enter event per span_id.
-    // The schema name carries target/name/file/line; the event has span_name.
-    struct SpanContext {
-        schema_info: LegacySpanSchemaInfo,
-        span_name: String,
-        first_enter_ts: u64,
-        /// Worker the first enter ran on. Used only to resolve the owning Tokio
-        /// task (the poll on this worker covering `first_enter_ts`) — NOT for
-        /// enter/exit pairing, which is span_id-only.
-        first_enter_worker: u64,
-        parent_span_id: Option<u64>,
-    }
-    let mut span_contexts: FxHashMap<u64, SpanContext> = FxHashMap::default();
-
-    for (schema_name, enter) in legacy_enters {
-        span_contexts.entry(enter.span_id).or_insert_with(|| {
-            let schema_info =
-                parse_legacy_span_schema_name(schema_name).unwrap_or(LegacySpanSchemaInfo {
-                    target: String::new(),
-                    name: enter.span_name.clone().unwrap_or_default(),
-                    file: None,
-                    line: None,
-                });
-            SpanContext {
-                span_name: enter
-                    .span_name
-                    .clone()
-                    .unwrap_or_else(|| schema_info.name.clone()),
-                schema_info,
-                first_enter_ts: enter.timestamp_ns,
-                first_enter_worker: enter.worker_id,
-                parent_span_id: enter.parent_span_id.filter(|&id| id > 0),
-            }
-        });
-    }
-
-    // Build a per-span_id enter/exit timeline for LIFO pairing. Sort all events
-    // by timestamp, then pair enters with exits.
-    //
-    // The pairing key is `span_id` ALONE — deliberately NOT `(span_id,
-    // worker_id)`. An async span can enter on one worker and exit on another
-    // when its task migrates between workers across an `.await`. Keying on the
-    // worker would push the enter onto one worker's stack and look for the exit
-    // on a different worker's stack, so the pair never matches and the span is
-    // silently dropped. `span_id` is the span's identity; the worker a given
-    // enter/exit ran on is irrelevant to pairing them. (Measured on a real beta
-    // trace: ~44% of fully-captured spans migrated workers and were lost.)
-    struct LegacyTimelineEvent {
-        timestamp_ns: u64,
-        span_id: u64,
-        is_enter: bool,
-        decode_order: usize,
-    }
-
-    let mut timeline: Vec<LegacyTimelineEvent> =
-        Vec::with_capacity(legacy_enters.len() + legacy_exits.len());
-
-    for (i, (_schema_name, enter)) in legacy_enters.iter().enumerate() {
-        timeline.push(LegacyTimelineEvent {
-            timestamp_ns: enter.timestamp_ns,
-            span_id: enter.span_id,
-            is_enter: true,
-            decode_order: i,
-        });
-    }
-    for (i, (_schema_name, exit)) in legacy_exits.iter().enumerate() {
-        timeline.push(LegacyTimelineEvent {
-            timestamp_ns: exit.timestamp_ns,
-            span_id: exit.span_id,
-            is_enter: false,
-            decode_order: legacy_enters.len() + i,
-        });
-    }
-
-    // Sort by (timestamp, decode_order) for deterministic pairing.
-    timeline.sort_unstable_by_key(|ev| (ev.timestamp_ns, ev.decode_order));
-
-    // LIFO pairing per span_id (see above — worker_id is intentionally not a
-    // key, so a span whose task migrated workers between enter and exit still
-    // pairs).
-    let mut enter_stacks: FxHashMap<u64, Vec<u64>> = FxHashMap::default();
-    let mut local_intervals: FxHashMap<u64, Vec<(u64, u64)>> = FxHashMap::default();
-
-    for ev in &timeline {
-        if ev.is_enter {
-            enter_stacks
-                .entry(ev.span_id)
-                .or_default()
-                .push(ev.timestamp_ns);
-        } else if let Some(stack) = enter_stacks.get_mut(&ev.span_id)
-            && let Some(enter_ts) = stack.pop()
-            && ev.timestamp_ns >= enter_ts
-        {
-            local_intervals
-                .entry(ev.span_id)
-                .or_default()
-                .push((enter_ts, ev.timestamp_ns));
-        }
-    }
-
-    // Build a close timestamp map: span_id → close timestamp.
-    let mut close_timestamps: FxHashMap<u64, u64> = FxHashMap::default();
-    for close in legacy_closes {
-        // Use the latest close timestamp for each span_id (conservative).
-        close_timestamps
-            .entry(close.span_id)
-            .and_modify(|ts| *ts = (*ts).max(close.timestamp_ns))
-            .or_insert(close.timestamp_ns);
-    }
-
-    // ── Poll indices for task-based CPU/wait attribution ─────────────────────
-    //
-    // `polls` is sorted by start (monotonic ns). Two views:
-    //  - `polls_by_worker`: to resolve a span's owning task from the poll on its
-    //    enter worker covering the enter timestamp.
-    //  - `polls_by_task`: the task's poll timeline, to split the span's entered
-    //    wall time into on-CPU (poll overlap) vs async wait (in-task gaps).
-    // Each view keeps polls sorted by start (inherited from `polls`), so both
-    // lookups can binary-search.
-    let mut polls_by_worker: FxHashMap<u64, Vec<(u64, u64, u64)>> = FxHashMap::default();
-    let mut polls_by_task: FxHashMap<u64, Vec<(u64, u64)>> = FxHashMap::default();
-    for &(start, end, worker_id, task_id) in polls {
-        // task_id 0 is the block-in-place / no-task stub — not a real task.
-        if task_id != 0 {
-            polls_by_worker
-                .entry(worker_id)
-                .or_default()
-                .push((start, end, task_id));
-            polls_by_task.entry(task_id).or_default().push((start, end));
-        }
-    }
-
-    // Generate a synthetic instance_id deterministically from span_id + first_enter_ts.
-    // This ensures stability within a single file decode while handling ID recycling.
-    let synthetic_instance_id = |span_id: u64, first_enter_ts: u64| -> u64 {
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(b"legacy_instance");
-        hasher.update(&span_id.to_le_bytes());
-        hasher.update(&first_enter_ts.to_le_bytes());
-        let hash = hasher.finalize();
-        u64::from_le_bytes(hash.as_bytes()[..8].try_into().unwrap())
-    };
-
-    // Build ResolvedSpan rows for each span_id that has EITHER a close event
-    // or local intervals (we produce a row even without a close when we have
-    // balanced enter/exit pairs).
-    let mut resolved_spans: Vec<ResolvedSpan> = Vec::new();
-    let mut resolved_intervals: FxHashMap<u64, Vec<(u64, u64)>> = FxHashMap::default();
-
-    // Collect all span_ids that have either a close or intervals.
-    let mut all_span_ids: Vec<u64> = close_timestamps.keys().copied().collect();
-    for &span_id in local_intervals.keys() {
-        if !all_span_ids.contains(&span_id) {
-            all_span_ids.push(span_id);
-        }
-    }
-
-    for &span_id in &all_span_ids {
-        let ctx = span_contexts.get(&span_id);
-        let intervals = local_intervals.get(&span_id);
-        let close_ts = close_timestamps.get(&span_id).copied();
-
-        // Skip spans with no context at all (no enters, no close).
-        if ctx.is_none() && close_ts.is_none() && intervals.is_none() {
-            continue;
-        }
-
-        let first_enter_ts = ctx
-            .map(|c| c.first_enter_ts)
-            .or_else(|| intervals.and_then(|ivs| ivs.iter().map(|&(start, _)| start).min()));
-
-        // Lifecycle bounds
-        let start_ts = first_enter_ts.unwrap_or_else(|| close_ts.unwrap_or(0));
-        let end_ts = close_ts.unwrap_or_else(|| {
-            intervals
-                .and_then(|ivs| ivs.iter().map(|&(_, end)| end).max())
-                .unwrap_or(start_ts)
-        });
-
-        let wall_start = to_wall(start_ts);
-        let wall_end = to_wall(end_ts);
-        let elapsed_ns = wall_end.saturating_sub(wall_start);
-
-        // Metadata from schema name or context.
-        let (target, name, file, line) = if let Some(ctx) = ctx {
-            (
-                ctx.schema_info.target.clone(),
-                ctx.span_name.clone(),
-                ctx.schema_info.file.clone(),
-                ctx.schema_info.line,
-            )
-        } else {
-            (String::new(), String::new(), None, None)
-        };
-
-        // Compute observed active wall time from intervals.
-        let (observed_active_wall_ns, _active_thread_time_ns) = intervals
-            .map(|ivs| {
-                let thread_time: u64 = ivs
-                    .iter()
-                    .map(|&(e, x)| x.saturating_sub(e))
-                    .fold(0u64, |acc, v| acc.saturating_add(v));
-                let wall_time = union_intervals(ivs);
-                (wall_time, thread_time)
-            })
-            .unwrap_or((0, 0));
-
-        // Task-based CPU/wait attribution. Resolve the owning Tokio task from the
-        // poll on the enter worker covering the first enter, then split the
-        // entered wall time into on-CPU (poll overlap) vs async wait (in-task
-        // gaps). All timestamps here are monotonic ns, matching `polls`.
-        //
-        // Only the entered wall time is classified; the rest of elapsed
-        // (before first enter / after last exit — the parts we cannot see in
-        // this file) stays Unknown. `flags` starts fully-unknown (0b1111) and we
-        // clear the bits we resolve.
-        let mut on_cpu_ns_est: Option<u64> = None;
-        let mut async_wait_ns_est: Option<u64> = None;
-        let mut classified_ns: u64 = 0;
-        let mut flags: u32 = 0b1111;
-        if let (Some(ctx), Some(ivs)) = (ctx, intervals)
-            && let Some(worker_polls) = polls_by_worker.get(&ctx.first_enter_worker)
-            && let Some(task_id) = resolve_span_task(worker_polls, ctx.first_enter_ts)
-            && let Some(task_polls) = polls_by_task.get(&task_id)
-        {
-            let (on_cpu, async_wait) = attribute_legacy_span_from_polls(ivs, task_polls);
-            on_cpu_ns_est = Some(on_cpu);
-            async_wait_ns_est = Some(async_wait);
-            classified_ns = on_cpu.saturating_add(async_wait);
-            // Bit 0 (profiler metadata) and bit 3 (wake classification) remain
-            // set — this is a poll-timeline estimate, not sample-based on-CPU nor
-            // true wake attribution. Clear bit 2 (worker/tid ambiguous): we did
-            // resolve the owning task.
-            flags &= !0b0100;
-        }
-        // Unknown = elapsed minus the wall time we classified into on-CPU/wait.
-        let unknown_ns = elapsed_ns.saturating_sub(classified_ns);
-
-        let instance_id = synthetic_instance_id(span_id, start_ts);
-        let span_uid = compute_span_uid(boot_id, instance_id);
-        let span_type_uid = compute_span_type_uid("tracing", &target, &name, file.as_deref(), line);
-
-        // Parent uid (if parent_span_id known from enters)
-        let parent_span_uid = ctx.and_then(|c| c.parent_span_id).map(|parent_id| {
-            // Look up the parent's first_enter_ts for the synthetic ID
-            let parent_start = span_contexts
-                .get(&parent_id)
-                .map(|p| p.first_enter_ts)
-                .unwrap_or(0);
-            let parent_instance = synthetic_instance_id(parent_id, parent_start);
-            compute_span_uid(boot_id, parent_instance)
-        });
-
-        resolved_spans.push(ResolvedSpan {
-            span_uid,
-            span_type_uid,
-            kind: "tracing",
-            name,
-            target,
-            callsite_file: file,
-            callsite_line: line,
-            start_ns: wall_start,
-            end_ns: wall_end,
-            elapsed_ns,
-            active_ns: None, // Old producer doesn't report active_ns
-            observed_active_wall_ns,
-            detail_coverage_ns: observed_active_wall_ns,
-            details_complete: false, // Cannot verify for legacy
-            concurrent: false,
-            parent_span_uid,
-            attributes: Vec::new(), // Old format doesn't carry close-time attributes
-            on_cpu_ns_est,
-            blocked_ns_est: None,
-            async_wait_ns: async_wait_ns_est,
-            scheduler_delay_ns: None,
-            unknown_ns,
-            cpu_sample_count: 0,
-            sched_sample_count: 0,
-            attribution_version: 1,
-            attribution_flags: flags,
-            saturated: false,
-            loss_observable: false,
-            unbalanced_exits: 0,
-            unbalanced_enters: 0,
-            identity_quality: "legacy",
-            source_key: source_key.to_string(),
-            host: host.to_string(),
-            service: service.to_string(),
-            date: date.to_string(),
-        });
-
-        // Store intervals keyed by synthetic_instance_id for sample attribution.
-        if let Some(ivs) = intervals {
-            resolved_intervals.insert(instance_id, ivs.clone());
-        }
-    }
-
+    let result = legacy::resolve_legacy_spans(
+        legacy_enters,
+        legacy_exits,
+        legacy_closes,
+        polls,
+        source_key,
+        boot_id,
+        clock_offset,
+        host,
+        service,
+        date,
+    );
     SpanResolution {
-        spans: resolved_spans,
-        instance_intervals: resolved_intervals,
+        spans: result.spans,
+        instance_intervals: result.instance_intervals,
     }
 }
 
-/// Resolve the Tokio task that owns a span, from the poll on `worker` whose
-/// window covers `enter_ts`. `worker_polls` is that worker's polls as
-/// `(start, end, task_id)`, sorted by `start` and non-overlapping (a worker
-/// runs one poll at a time). Binary search — a worker can hold hundreds of
-/// thousands of polls on a large trace. Returns `None` when no poll covers the
-/// enter (span entered outside any poll, e.g. on a non-runtime thread).
+/// Resolve the Tokio task that owns a span. Delegates to [`legacy::resolve_span_task`].
+#[cfg(test)]
 fn resolve_span_task(worker_polls: &[(u64, u64, u64)], enter_ts: u64) -> Option<u64> {
-    let mut lo = 0usize;
-    let mut hi = worker_polls.len();
-    while lo < hi {
-        let mid = (lo + hi) / 2;
-        let (start, end, task_id) = worker_polls[mid];
-        if end < enter_ts {
-            lo = mid + 1;
-        } else if start > enter_ts {
-            hi = mid;
-        } else {
-            return Some(task_id);
-        }
-    }
-    None
+    let worker_polls: Vec<_> = worker_polls
+        .iter()
+        .map(|&(start, end, task_id)| (clock::MonoNs(start), clock::MonoNs(end), task_id))
+        .collect();
+    legacy::resolve_span_task(&worker_polls, clock::MonoNs(enter_ts))
 }
 
-/// Split a span's entered wall time into estimated on-CPU vs async-wait using
-/// its owning task's poll timeline.
-///
-/// The span's entered intervals (`entered`, monotonic ns) mark when the guard
-/// was held. On-CPU time is where those intervals overlap one of the task's
-/// polls (`task_polls`, `(start, end)` sorted by start, non-overlapping); the
-/// remaining entered wall time is the task alive-but-not-polled — async wait.
-///
-/// Returns `(on_cpu_ns, async_wait_ns)` over the UNION of entered intervals, so
-/// the two sum to `observed_active_wall_ns` and never double-count concurrent or
-/// overlapping enters.
+/// Split a span's entered wall time into estimated on-CPU vs async-wait.
+/// Delegates to [`legacy::attribute_legacy_span_from_polls`].
+#[cfg(test)]
 fn attribute_legacy_span_from_polls(
     entered: &[(u64, u64)],
     task_polls: &[(u64, u64)],
 ) -> (u64, u64) {
-    // Union the entered intervals first so overlapping/re-entrant enters are
-    // counted once (matches observed_active_wall_ns).
-    let entered_union = merge_intervals(entered);
-    let active_wall: u64 = entered_union
+    let entered: Vec<_> = entered
         .iter()
-        .map(|&(s, e)| e.saturating_sub(s))
-        .fold(0u64, u64::saturating_add);
-    if active_wall == 0 || task_polls.is_empty() {
-        return (0, active_wall);
-    }
-
-    // On-CPU = total overlap between the entered union and the task's polls.
-    // Both lists are sorted by start and internally non-overlapping, so sweep
-    // them together in linear time.
-    let mut on_cpu: u64 = 0;
-    let mut pi = 0usize;
-    for &(es, ee) in &entered_union {
-        // Advance past polls that end before this entered interval starts.
-        while pi < task_polls.len() && task_polls[pi].1 <= es {
-            pi += 1;
-        }
-        let mut j = pi;
-        while j < task_polls.len() && task_polls[j].0 < ee {
-            let (ps, pe) = task_polls[j];
-            let lo = ps.max(es);
-            let hi = pe.min(ee);
-            if hi > lo {
-                on_cpu = on_cpu.saturating_add(hi - lo);
-            }
-            j += 1;
-        }
-    }
-    let on_cpu = on_cpu.min(active_wall);
-    (on_cpu, active_wall - on_cpu)
-}
-
-/// Merge intervals into a sorted, non-overlapping set.
-fn merge_intervals(intervals: &[(u64, u64)]) -> Vec<(u64, u64)> {
-    if intervals.is_empty() {
-        return Vec::new();
-    }
-    let mut sorted: Vec<(u64, u64)> = intervals.to_vec();
-    sorted.sort_unstable_by_key(|&(start, _)| start);
-    let mut out: Vec<(u64, u64)> = Vec::with_capacity(sorted.len());
-    let (mut cs, mut ce) = sorted[0];
-    for &(s, e) in &sorted[1..] {
-        if s <= ce {
-            ce = ce.max(e);
-        } else {
-            out.push((cs, ce));
-            cs = s;
-            ce = e;
-        }
-    }
-    out.push((cs, ce));
-    out
+        .map(|&(start, end)| (clock::MonoNs(start), clock::MonoNs(end)))
+        .collect();
+    let task_polls: Vec<_> = task_polls
+        .iter()
+        .map(|&(start, end)| (clock::MonoNs(start), clock::MonoNs(end)))
+        .collect();
+    legacy::attribute_legacy_span_from_polls(&entered, &task_polls)
 }
 
 /// Compute the union of a set of intervals. Returns total wall-clock nanoseconds
 /// covered by the merged (non-overlapping) union.
+/// Delegates to [`interval_pairing::union_interval_duration`].
+#[cfg(test)]
 fn union_intervals(intervals: &[(u64, u64)]) -> u64 {
-    if intervals.is_empty() {
-        return 0;
-    }
-    let mut sorted: Vec<(u64, u64)> = intervals.to_vec();
-    sorted.sort_unstable_by_key(|&(start, _)| start);
-
-    let mut total: u64 = 0;
-    let mut current_start = sorted[0].0;
-    let mut current_end = sorted[0].1;
-
-    for &(start, end) in &sorted[1..] {
-        if start <= current_end {
-            // Overlapping or adjacent: extend
-            current_end = current_end.max(end);
-        } else {
-            // Gap: finalize previous interval
-            total += current_end.saturating_sub(current_start);
-            current_start = start;
-            current_end = end;
-        }
-    }
-    total += current_end.saturating_sub(current_start);
-    total
-}
-
-/// Find the poll enclosing a sample on a given worker. Returns the poll
-/// duration in ns and spawn location if found, and increments the poll's sample count.
-fn find_enclosing_poll(
-    polls: &[(u64, u64, u64, u64, Option<String>)],
-    polls_by_worker: &FxHashMap<u64, Vec<usize>>,
-    worker_id: u64,
-    sample_ts: u64,
-    poll_sample_counts: &mut [(u32, u32)],
-    source: u8,
-) -> (Option<u64>, Option<String>) {
-    let Some(indices) = polls_by_worker.get(&worker_id) else {
-        return (None, None);
-    };
-    // Binary search for the last poll starting <= sample_ts.
-    let pos = indices.partition_point(|&i| polls[i].0 <= sample_ts);
-    if pos == 0 {
-        return (None, None);
-    }
-    let poll_idx = indices[pos - 1];
-    let (start, end, _, _, ref spawn_loc) = polls[poll_idx];
-    // Check sample is within [start, end).
-    if sample_ts >= start && sample_ts < end {
-        let duration = end - start;
-        if source == 0 {
-            poll_sample_counts[poll_idx].0 += 1;
-        } else {
-            poll_sample_counts[poll_idx].1 += 1;
-        }
-        (Some(duration), spawn_loc.clone())
-    } else {
-        (None, None)
-    }
+    let intervals: Vec<_> = intervals
+        .iter()
+        .map(|&(start, end)| (clock::MonoNs(start), clock::MonoNs(end)))
+        .collect();
+    interval_pairing::union_interval_duration(&intervals).raw()
 }
 
 #[cfg(test)]
@@ -2740,7 +1183,7 @@ mod tests {
             source_key,
             "boot",
             None,
-            Some(50), // clock sync boundary before span starts
+            Some(clock::MonoNs(50)), // clock sync boundary before span starts
             "host",
             "svc",
             "2026-06-19",
@@ -2956,7 +1399,7 @@ mod tests {
             "flat-file.bin",
             "flat-file.bin",
             None,
-            Some(900), // clock sync boundary before span start
+            Some(clock::MonoNs(900)), // clock sync boundary before span start
             "host",
             "svc",
             "2026-06-19",
@@ -2978,7 +1421,7 @@ mod tests {
             "2026-06-19/1300/svc/host/abcd-123/0.bin",
             "abcd-123",
             None,
-            Some(900), // clock sync boundary before span start
+            Some(clock::MonoNs(900)), // clock sync boundary before span start
             "host",
             "svc",
             "2026-06-19",
@@ -2999,7 +1442,7 @@ mod tests {
             "2026-06-19/1300/svc/host/boot/0.bin",
             "boot",
             None,
-            Some(900), // clock sync boundary before span start
+            Some(clock::MonoNs(900)), // clock sync boundary before span start
             "host",
             "svc",
             "2026-06-19",
@@ -3126,7 +1569,7 @@ mod tests {
             "2026-06-19/1300/svc/host/boot/0.bin",
             "boot",
             None,
-            Some(50), // clock sync boundary before span start
+            Some(clock::MonoNs(50)), // clock sync boundary before span start
             "host",
             "svc",
             "2026-06-19",
@@ -3150,7 +1593,11 @@ mod tests {
         // Verify the interval was recorded (zero duration is valid).
         let intervals = result.instance_intervals.get(&1).unwrap();
         assert_eq!(intervals.len(), 1);
-        assert_eq!(intervals[0], (100, 100), "zero-duration interval");
+        assert_eq!(
+            intervals[0],
+            (clock::MonoNs(100), clock::MonoNs(100)),
+            "zero-duration interval"
+        );
     }
 
     /// When the exit is decoded before the enter (exit.decode_sequence < enter.decode_sequence),
@@ -3196,7 +1643,7 @@ mod tests {
             "2026-06-19/1300/svc/host/boot/0.bin",
             "boot",
             None,
-            Some(50),
+            Some(clock::MonoNs(50)),
             "host",
             "svc",
             "2026-06-19",
@@ -3280,7 +1727,7 @@ mod tests {
             "2026-06-19/1300/svc/host/boot/0.bin",
             "boot",
             None,
-            Some(900), // boundary before span start
+            Some(clock::MonoNs(900)), // boundary before span start
             "host",
             "svc",
             "2026-06-19",
@@ -3352,7 +1799,7 @@ mod tests {
             "2026-06-19/1300/svc/host/boot/0.bin",
             "boot",
             None,
-            Some(500), // clock sync boundary before span start
+            Some(clock::MonoNs(500)), // clock sync boundary before span start
             "host",
             "svc",
             "2026-06-19",
@@ -3417,7 +1864,7 @@ mod tests {
             "2026-06-19/1300/svc/host/boot/0.bin",
             "boot",
             None,
-            Some(900),
+            Some(clock::MonoNs(900)),
             "host",
             "svc",
             "2026-06-19",
@@ -3475,7 +1922,7 @@ mod tests {
             "2026-06-19/1300/svc/host/boot/0.bin",
             "boot",
             None,
-            Some(900),
+            Some(clock::MonoNs(900)),
             "host",
             "svc",
             "2026-06-19",
@@ -4243,6 +2690,13 @@ mod tests {
         assert_eq!(info.file.as_deref(), Some("src/lib.rs"));
         assert_eq!(info.line, Some(99));
 
+        // Struct-derived format exposes only a stable type suffix.
+        let info = parse_legacy_span_schema_name("SpanEnter__ShaleOperation").unwrap();
+        assert_eq!(info.target, "");
+        assert_eq!(info.name, "ShaleOperation");
+        assert_eq!(info.file, None);
+        assert_eq!(info.line, None);
+
         // Invalid: no colon after prefix
         assert!(parse_legacy_span_schema_name("SpanEnter").is_none());
 
@@ -4480,6 +2934,92 @@ mod tests {
         assert_eq!(span.observed_active_wall_ns, 100);
     }
 
+    /// Wire-order regression: equal monotonic timestamps are ordered by the
+    /// shared decode sequence, not by event kind. An exit encoded before its
+    /// enter must remain two unmatched events rather than becoming a balanced
+    /// zero-duration interval.
+    #[test]
+    fn test_legacy_equal_timestamp_exit_before_enter_stays_unbalanced() {
+        use dial9_trace_format::TraceEvent;
+        use dial9_trace_format::encoder::{Encoder, Schema};
+        use dial9_trace_format::schema::FieldDef;
+        use dial9_trace_format::types::{FieldType, FieldValue};
+
+        #[derive(TraceEvent)]
+        struct ClockSyncEvent {
+            #[traceevent(timestamp)]
+            timestamp_ns: u64,
+            realtime_ns: u64,
+        }
+
+        let enter_schema = Schema::new(
+            "SpanEnter__EqualTimestamp",
+            vec![
+                FieldDef::new("worker_id", FieldType::Varint),
+                FieldDef::new("span_id", FieldType::Varint),
+                FieldDef::new("parent_span_id", FieldType::OptionalVarint),
+                FieldDef::new("span_name", FieldType::String),
+            ],
+        );
+        let exit_schema = Schema::new(
+            "SpanExit__EqualTimestamp",
+            vec![
+                FieldDef::new("worker_id", FieldType::Varint),
+                FieldDef::new("span_id", FieldType::Varint),
+                FieldDef::new("span_name", FieldType::String),
+            ],
+        );
+        let close_schema = Schema::new(
+            "SpanCloseEvent",
+            vec![FieldDef::new("span_id", FieldType::Varint)],
+        );
+
+        let mut enc = Encoder::new();
+        enc.write(&ClockSyncEvent {
+            timestamp_ns: 10,
+            realtime_ns: 1_700_000_000_000_000_010,
+        })
+        .unwrap();
+        enc.write_event(
+            &exit_schema,
+            &[
+                FieldValue::Varint(100),
+                FieldValue::Varint(0),
+                FieldValue::Varint(7),
+                FieldValue::String("equal_timestamp".to_string()),
+            ],
+        )
+        .unwrap();
+        enc.write_event(
+            &enter_schema,
+            &[
+                FieldValue::Varint(100),
+                FieldValue::Varint(0),
+                FieldValue::Varint(7),
+                FieldValue::None,
+                FieldValue::String("equal_timestamp".to_string()),
+            ],
+        )
+        .unwrap();
+        enc.write_event(
+            &close_schema,
+            &[FieldValue::Varint(101), FieldValue::Varint(7)],
+        )
+        .unwrap();
+
+        let (_, _, _, spans) = decode_samples(
+            &enc.into_inner(),
+            "2026-07-15/1714/svc/host/test-boot/0.bin",
+        )
+        .unwrap();
+        assert_eq!(spans.len(), 1);
+        let span = &spans[0];
+        assert_eq!(span.unbalanced_exits, 1);
+        assert_eq!(span.unbalanced_enters, 1);
+        assert_eq!(span.observed_active_wall_ns, 0);
+        assert!(!span.details_complete);
+    }
+
     /// Regression: spans emitted via a struct-derived event use the `__`
     /// naming convention (`SpanEnter__ShaleOperation`), not the colon-separated
     /// dynamic schema name (`SpanEnter:{target}::{name}...`). A Rust identifier
@@ -4578,6 +3118,139 @@ mod tests {
         assert_eq!(span.observed_active_wall_ns, 4000);
         // Even without a close event, the balanced enter/exit pair produces a row.
         assert!(span.elapsed_ns > 0, "elapsed_ns should be > 0");
+    }
+
+    #[test]
+    fn test_struct_derived_schema_suffix_disambiguates_shared_runtime_name() {
+        use dial9_trace_format::encoder::{Encoder, Schema};
+        use dial9_trace_format::schema::FieldDef;
+        use dial9_trace_format::types::{FieldType, FieldValue};
+
+        fn enter_schema(name: &'static str) -> Schema {
+            Schema::new(
+                name,
+                vec![
+                    FieldDef::new("worker_id", FieldType::Varint),
+                    FieldDef::new("span_id", FieldType::Varint),
+                    FieldDef::new("parent_span_id", FieldType::OptionalVarint),
+                    FieldDef::new("span_name", FieldType::String),
+                ],
+            )
+        }
+        fn exit_schema(name: &'static str) -> Schema {
+            Schema::new(
+                name,
+                vec![
+                    FieldDef::new("worker_id", FieldType::Varint),
+                    FieldDef::new("span_id", FieldType::Varint),
+                    FieldDef::new("span_name", FieldType::String),
+                ],
+            )
+        }
+
+        let first_enter = enter_schema("SpanEnter__FirstOperation");
+        let first_exit = exit_schema("SpanExit__FirstOperation");
+        let second_enter = enter_schema("SpanEnter__SecondOperation");
+        let second_exit = exit_schema("SpanExit__SecondOperation");
+        let mut enc = Encoder::new();
+        for (schema, timestamp, span_id) in [
+            (&first_enter, 100, 1),
+            (&first_exit, 200, 1),
+            (&second_enter, 300, 2),
+            (&second_exit, 400, 2),
+        ] {
+            let values = if schema.name().starts_with("SpanEnter__") {
+                vec![
+                    FieldValue::Varint(timestamp),
+                    FieldValue::Varint(0),
+                    FieldValue::Varint(span_id),
+                    FieldValue::None,
+                    FieldValue::String("shared-runtime-name".to_string()),
+                ]
+            } else {
+                vec![
+                    FieldValue::Varint(timestamp),
+                    FieldValue::Varint(0),
+                    FieldValue::Varint(span_id),
+                    FieldValue::String("shared-runtime-name".to_string()),
+                ]
+            };
+            enc.write_event(schema, &values).unwrap();
+        }
+
+        let (_, _, _, spans) = decode_samples(
+            &enc.into_inner(),
+            "2026-07-15/1714/svc/host/test-boot/0.bin",
+        )
+        .unwrap();
+        assert_eq!(spans.len(), 2);
+        assert!(spans.iter().all(|span| span.name == "shared-runtime-name"));
+        assert_ne!(
+            spans[0].span_type_uid, spans[1].span_type_uid,
+            "struct schema suffixes must remain distinct type identities"
+        );
+    }
+
+    #[test]
+    fn test_struct_derived_schema_preserves_distinct_runtime_names() {
+        use dial9_trace_format::encoder::{Encoder, Schema};
+        use dial9_trace_format::schema::FieldDef;
+        use dial9_trace_format::types::{FieldType, FieldValue};
+
+        let enter = Schema::new(
+            "SpanEnter__SharedOperation",
+            vec![
+                FieldDef::new("worker_id", FieldType::Varint),
+                FieldDef::new("span_id", FieldType::Varint),
+                FieldDef::new("parent_span_id", FieldType::OptionalVarint),
+                FieldDef::new("span_name", FieldType::String),
+            ],
+        );
+        let exit = Schema::new(
+            "SpanExit__SharedOperation",
+            vec![
+                FieldDef::new("worker_id", FieldType::Varint),
+                FieldDef::new("span_id", FieldType::Varint),
+                FieldDef::new("span_name", FieldType::String),
+            ],
+        );
+        let mut enc = Encoder::new();
+        for (timestamp, span_id, runtime_name, schema) in [
+            (100, 1, "/jobs", &enter),
+            (200, 1, "/jobs", &exit),
+            (300, 2, "/jobs/next", &enter),
+            (400, 2, "/jobs/next", &exit),
+        ] {
+            let values = if schema.name().starts_with("SpanEnter__") {
+                vec![
+                    FieldValue::Varint(timestamp),
+                    FieldValue::Varint(0),
+                    FieldValue::Varint(span_id),
+                    FieldValue::None,
+                    FieldValue::String(runtime_name.to_string()),
+                ]
+            } else {
+                vec![
+                    FieldValue::Varint(timestamp),
+                    FieldValue::Varint(0),
+                    FieldValue::Varint(span_id),
+                    FieldValue::String(runtime_name.to_string()),
+                ]
+            };
+            enc.write_event(schema, &values).unwrap();
+        }
+
+        let (_, _, _, spans) = decode_samples(
+            &enc.into_inner(),
+            "2026-07-15/1714/svc/host/test-boot/0.bin",
+        )
+        .unwrap();
+        assert_eq!(spans.len(), 2);
+        assert_ne!(spans[0].name, spans[1].name);
+        assert_ne!(
+            spans[0].span_type_uid, spans[1].span_type_uid,
+            "runtime names sharing one struct schema must remain distinct type identities"
+        );
     }
 
     /// Regression: an async span whose task migrates workers between enter and
@@ -4838,9 +3511,13 @@ mod tests {
         assert_eq!(s.attribution_flags & 0b0100, 0, "task-resolved bit cleared");
     }
 
-    /// Verify that recycled span IDs are handled conservatively: if the same
-    /// span_id appears with different first-enter timestamps, they get different
-    /// synthetic instance IDs.
+    /// Verify that recycled span IDs are handled conservatively: all enters/exits
+    /// for the same span_id are merged into one span instance within a single
+    /// trace segment. This is the intended compatibility policy — the old producer
+    /// reuses span_ids within a process, but within a single segment (typically
+    /// 60s), the same span_id almost always represents the same logical span.
+    /// The synthetic instance_id is deterministic from span_id + first-enter
+    /// timestamp.
     #[test]
     fn test_legacy_recycled_span_ids() {
         use dial9_trace_format::TraceEvent;
@@ -4995,6 +3672,167 @@ mod tests {
         assert_eq!(span.target, "modern_target");
         // Modern spans use "path" or "metadata" quality, NOT "legacy".
         assert_ne!(span.identity_quality, "legacy");
+    }
+
+    /// Mixed-format files: both modern (span_instance_id > 0) and legacy
+    /// (span_id only, span_instance_id == 0) span events in the same trace
+    /// file must both produce spans. Previously, `has_modern_spans` globally
+    /// suppressed legacy events, losing valid legacy spans in mixed files.
+    #[test]
+    fn test_mixed_modern_and_legacy_spans_both_resolve() {
+        use dial9_trace_format::TraceEvent;
+        use dial9_trace_format::encoder::{Encoder, Schema};
+        use dial9_trace_format::schema::FieldDef;
+        use dial9_trace_format::types::{FieldType, FieldValue};
+
+        #[derive(TraceEvent)]
+        struct ClockSyncEvent {
+            #[traceevent(timestamp)]
+            timestamp_ns: u64,
+            realtime_ns: u64,
+        }
+        #[derive(TraceEvent)]
+        struct SegmentMetadataEvent {
+            #[traceevent(timestamp)]
+            timestamp_ns: u64,
+            entries: Vec<(String, String)>,
+        }
+        #[derive(TraceEvent)]
+        #[traceevent(name = "SpanCloseEvent")]
+        struct SpanCloseEvent {
+            #[traceevent(timestamp)]
+            timestamp_ns: u64,
+            span_id: u64,
+            span_instance_id: u64,
+            start_timestamp_ns: u64,
+            first_enter_timestamp_ns: Option<u64>,
+            active_ns: u64,
+            span_name: String,
+            target: String,
+            file: Option<String>,
+            line: Option<u32>,
+            parent_span_instance_id: Option<u64>,
+            attributes: Vec<(String, String)>,
+            unbalanced_enters: u32,
+            concurrent: u32,
+            saturated: u32,
+            loss_observable: u32,
+        }
+
+        // Legacy schema (old format: span_id, worker_id, no span_instance_id)
+        let legacy_enter_schema = Schema::new(
+            "SpanEnter:legacy_lib::op:src/legacy.rs:10",
+            vec![
+                FieldDef::new("worker_id", FieldType::Varint),
+                FieldDef::new("span_id", FieldType::Varint),
+                FieldDef::new("parent_span_id", FieldType::OptionalVarint),
+                FieldDef::new("span_name", FieldType::String),
+            ],
+        );
+        let legacy_exit_schema = Schema::new(
+            "SpanExit:legacy_lib::op:src/legacy.rs:10",
+            vec![
+                FieldDef::new("worker_id", FieldType::Varint),
+                FieldDef::new("span_id", FieldType::Varint),
+                FieldDef::new("span_name", FieldType::String),
+            ],
+        );
+
+        let mut enc = Encoder::new();
+        enc.write(&ClockSyncEvent {
+            timestamp_ns: 10,
+            realtime_ns: 1_700_000_000_000_000_010,
+        })
+        .unwrap();
+        enc.write(&SegmentMetadataEvent {
+            timestamp_ns: 11,
+            entries: vec![("boot_id".to_string(), "mixed-boot".to_string())],
+        })
+        .unwrap();
+
+        // Modern span (span_instance_id > 0 → triggers has_modern_spans = true)
+        enc.write(&SpanCloseEvent {
+            timestamp_ns: 500,
+            span_id: 99,
+            span_instance_id: 42,
+            start_timestamp_ns: 100,
+            first_enter_timestamp_ns: None,
+            active_ns: 0,
+            span_name: "modern_op".to_string(),
+            target: "modern_target".to_string(),
+            file: None,
+            line: None,
+            parent_span_instance_id: None,
+            attributes: Vec::new(),
+            unbalanced_enters: 0,
+            concurrent: 0,
+            saturated: 0,
+            loss_observable: 0,
+        })
+        .unwrap();
+
+        // Legacy span (span_instance_id == 0, only span_id) — the decoder
+        // sees span_instance_id == 0 and routes to legacy reconstruction.
+        enc.write_event(
+            &legacy_enter_schema,
+            &[
+                FieldValue::Varint(600),
+                FieldValue::Varint(0),
+                FieldValue::Varint(7),
+                FieldValue::None,
+                FieldValue::String("legacy_op".to_string()),
+            ],
+        )
+        .unwrap();
+        enc.write_event(
+            &legacy_exit_schema,
+            &[
+                FieldValue::Varint(800),
+                FieldValue::Varint(0),
+                FieldValue::Varint(7),
+                FieldValue::String("legacy_op".to_string()),
+            ],
+        )
+        .unwrap();
+        // Close event with span_instance_id=0 triggers legacy route in decoder.
+        enc.write(&SpanCloseEvent {
+            timestamp_ns: 900,
+            span_id: 7,
+            span_instance_id: 0,
+            start_timestamp_ns: 600,
+            first_enter_timestamp_ns: Some(600),
+            active_ns: 0,
+            span_name: "legacy_op".to_string(),
+            target: "legacy_lib".to_string(),
+            file: None,
+            line: None,
+            parent_span_instance_id: None,
+            attributes: Vec::new(),
+            unbalanced_enters: 0,
+            concurrent: 0,
+            saturated: 0,
+            loss_observable: 0,
+        })
+        .unwrap();
+
+        let data = enc.into_inner();
+        let (_, _, _, spans) =
+            decode_samples(&data, "2026-06-19/1300/svc/host/mixed-boot/0.bin").unwrap();
+
+        // Both spans must be present — the fix ensures legacy spans are not
+        // suppressed when modern spans exist in the same file.
+        assert_eq!(
+            spans.len(),
+            2,
+            "mixed modern+legacy file must produce spans from BOTH formats"
+        );
+
+        let modern_span = spans.iter().find(|s| s.name == "modern_op").unwrap();
+        let legacy_span = spans.iter().find(|s| s.name == "legacy_op").unwrap();
+
+        assert_eq!(modern_span.identity_quality, "metadata");
+        assert_eq!(legacy_span.identity_quality, "legacy");
+        assert_eq!(legacy_span.observed_active_wall_ns, 200);
     }
 
     /// DELIVERABLE end-to-end repro for the span-explorer bug: two span TYPES,

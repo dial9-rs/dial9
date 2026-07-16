@@ -35,6 +35,40 @@ function assert(cond, desc) {
   }
 }
 
+
+// ── refinement URL and stream-mode invariants ──
+{
+  const params = new URLSearchParams("api=1");
+  SE.setMaxFilesParam(params, 80);
+  assertEq(params.get("max_files"), "80", "max_files: requested refinement depth is persisted");
+  SE.setMaxFilesParam(params, null);
+  assertEq(params.has("max_files"), false, "max_files: reset removes refinement depth");
+}
+assertEq(
+  SE.shouldAdoptCatalogSnapshot("replace", 80, 0),
+  true,
+  "catalog adoption: replace mode adopts its first snapshot",
+);
+assertEq(
+  SE.shouldAdoptCatalogSnapshot("exemplars", 80, 100),
+  false,
+  "catalog adoption: exemplar refresh never replaces the catalog",
+);
+assertEq(
+  SE.shouldAdoptCatalogSnapshot("refine", 80, 79),
+  false,
+  "catalog adoption: refine preserves the catalog below baseline",
+);
+assertEq(
+  SE.shouldAdoptCatalogSnapshot("refine", 80, 80),
+  true,
+  "catalog adoption: refine adopts at baseline",
+);
+assertEq(
+  SE.shouldAdoptCatalogSnapshot("refine", 80, 96),
+  true,
+  "catalog adoption: refine adopts progressive snapshots above baseline",
+);
 // ── fmtNs ──
 assertEq(SE.fmtNs(500), "500ns", "fmtNs: sub-µs");
 assertEq(SE.fmtNs(1500000), "1.5ms", "fmtNs: 1.5ms");
@@ -297,6 +331,8 @@ assertEq(
 // ── encodeSpanExplorerState / decodeSpanExplorerState ──
 {
   const state = {
+    data_dir: "/tmp/dial9-traces",
+    max_files: 80,
     bucket: "my-bucket",
     region: "us-west-2",
     prefix: "traces/",
@@ -309,6 +345,8 @@ assertEq(
     max_span_ns: 5000000,
   };
   const encoded = SE.encodeSpanExplorerState(state);
+  assertEq(encoded.get("data_dir"), "/tmp/dial9-traces", "encodeState: local data_dir");
+  assertEq(encoded.get("max_files"), "80", "encodeState: refinement depth");
   assertEq(encoded.get("bucket"), "my-bucket", "encodeState: bucket");
   assertEq(encoded.get("aws_region"), "us-west-2", "encodeState: region");
   assertEq(encoded.get("span_type_uid"), state.span_type_uid, "encodeState: span_type_uid");
@@ -316,6 +354,8 @@ assertEq(
   assertEq(encoded.getAll("host").length, 2, "encodeState: hosts repeatable");
 
   const decoded = SE.decodeSpanExplorerState(encoded);
+  assertEq(decoded.data_dir, "/tmp/dial9-traces", "decodeState: local data_dir");
+  assertEq(decoded.max_files, 80, "decodeState: refinement depth");
   assertEq(decoded.bucket, "my-bucket", "decodeState: bucket");
   assertEq(decoded.span_type_uid, state.span_type_uid, "decodeState: span_type_uid");
   assertEq(decoded.min_span_ns, 1000000, "decodeState: min_span_ns");
@@ -325,6 +365,8 @@ assertEq(
 // ── flamegraphUrl ──
 {
   const state = {
+    data_dir: "/tmp/dial9-traces",
+    max_files: 80,
     bucket: "bkt",
     region: null,
     prefix: null,
@@ -337,6 +379,8 @@ assertEq(
     max_span_ns: 5000,
   };
   const cpuUrl = SE.flamegraphUrl(state, "on_cpu");
+  assert(cpuUrl.includes("data_dir=%2Ftmp%2Fdial9-traces"), "flamegraphUrl: carries local data_dir");
+  assert(cpuUrl.includes("max_files=80"), "flamegraphUrl: carries refinement depth");
   assert(cpuUrl.includes("source=cpu"), "flamegraphUrl: on_cpu → source=cpu");
   assert(cpuUrl.includes("span_type_uid=aabb"), "flamegraphUrl: carries span_type_uid");
   assert(cpuUrl.includes("min_span_ns=1000"), "flamegraphUrl: carries min_span_ns");
@@ -442,7 +486,97 @@ assertEq(
   assertEq(qs.get("host"), "h", "exemplarViewerUrl: still carries host without focus");
 }
 
+
+// ── exemplarsInBand ──
+{
+  const exemplars = [
+    { elapsed_ns: 50, span_uid: "slow" },
+    { elapsed_ns: 30, span_uid: "middle" },
+    { elapsed_ns: 10, span_uid: "fast" },
+  ];
+  assertEq(
+    SE.exemplarsInBand(exemplars, 10, 30).map((e) => e.span_uid).join(","),
+    "middle,fast",
+    "exemplarsInBand: applies inclusive duration bounds",
+  );
+  assertEq(
+    SE.exemplarsInBand(exemplars, 31, null).map((e) => e.span_uid).join(","),
+    "slow",
+    "exemplarsInBand: supports an open maximum",
+  );
+  assertEq(
+    SE.exemplarsInBand(exemplars, null, null).length,
+    3,
+    "exemplarsInBand: no bounds preserves all candidates",
+  );
+}
 // ── TIME_CATEGORIES ──
+
+// ── mergeSelectedExemplarSnapshot ──
+{
+  const current = [
+    { span_type_uid: "selected", count: 100, p99_ns: 900, slow_exemplars: [{ elapsed_ns: 900 }] },
+    { span_type_uid: "other", count: 50, slow_exemplars: [{ elapsed_ns: 500 }] },
+  ];
+  const incomingPartial = [
+    {
+      span_type_uid: "selected",
+      count: 3,
+      p99_ns: 30,
+      slow_exemplars: [{ elapsed_ns: 25 }],
+      selected_duration_count: 3,
+    },
+  ];
+  const merged = SE.mergeSelectedExemplarSnapshot(current, incomingPartial, "selected");
+  assert(merged.matched, "mergeSelectedExemplarSnapshot: reports selected type match");
+  assertEq(merged.spanTypes.length, 2, "mergeSelectedExemplarSnapshot: preserves catalog rows");
+  assertEq(merged.spanTypes[0].count, 100, "mergeSelectedExemplarSnapshot: preserves complete count");
+  assertEq(merged.spanTypes[0].p99_ns, 900, "mergeSelectedExemplarSnapshot: preserves complete percentiles");
+  assertEq(merged.spanTypes[0].slow_exemplars[0].elapsed_ns, 25, "mergeSelectedExemplarSnapshot: patches exemplars");
+  assertEq(merged.spanTypes[0].selected_duration_count, 3, "mergeSelectedExemplarSnapshot: patches exact count");
+  assert(merged.spanTypes[1] === current[1], "mergeSelectedExemplarSnapshot: leaves unrelated type untouched");
+
+  const absent = SE.mergeSelectedExemplarSnapshot(current, incomingPartial, "missing");
+  assert(!absent.matched, "mergeSelectedExemplarSnapshot: reports absent selected type");
+  assert(absent.spanTypes === current, "mergeSelectedExemplarSnapshot: retains current catalog when absent");
+}
+
+// ── exemplarRequestMatches ──
+{
+  assert(
+    SE.exemplarRequestMatches("A", "10:20", "A", "10:20"),
+    "exemplarRequestMatches: accepts exact initiating type and bounds",
+  );
+  assert(
+    !SE.exemplarRequestMatches("A", "10:20", "B", ":"),
+    "exemplarRequestMatches: rejects response after selecting another type",
+  );
+  assert(
+    !SE.exemplarRequestMatches("A", "10:20", "A", ":"),
+    "exemplarRequestMatches: rejects late bounded response after A→B→A returns to global scope",
+  );
+}
+
+// ── sameSpanCatalogStatistics ──
+{
+  const complete = [
+    { span_type_uid: "a", count: 10, histogram: [{ lo_ns: 1, hi_ns: 2, count: 10 }], slow_exemplars: [{ elapsed_ns: 2 }] },
+  ];
+  const exemplarOnlyChange = [
+    { span_type_uid: "a", count: 10, histogram: [{ lo_ns: 1, hi_ns: 2, count: 10 }], slow_exemplars: [{ elapsed_ns: 1 }], selected_duration_count: 4 },
+  ];
+  assert(
+    SE.sameSpanCatalogStatistics(complete, exemplarOnlyChange),
+    "sameSpanCatalogStatistics: ignores query-scoped exemplar fields",
+  );
+  const refined = [
+    { span_type_uid: "a", count: 11, histogram: [{ lo_ns: 1, hi_ns: 2, count: 11 }], slow_exemplars: [] },
+  ];
+  assert(
+    !SE.sameSpanCatalogStatistics(complete, refined),
+    "sameSpanCatalogStatistics: detects refined catalog changes",
+  );
+}
 assertEq(SE.TIME_CATEGORIES.length, 5, "TIME_CATEGORIES: five categories");
 assertEq(SE.TIME_CATEGORIES[0].key, "on_cpu", "TIME_CATEGORIES: first is on_cpu");
 assertEq(SE.TIME_CATEGORIES[4].key, "unknown", "TIME_CATEGORIES: last is unknown");
@@ -464,7 +598,14 @@ assertEq(SE.TIME_CATEGORIES[4].key, "unknown", "TIME_CATEGORIES: last is unknown
   assertEq(r3, null, "parseSpanEventName: SpanClose → null");
 
   const r4 = SE.parseSpanEventName("SpanEnter__CustomStruct");
-  assertEq(r4, null, "parseSpanEventName: SpanEnter__ (no colon format) → null");
+  assert(r4 != null, "parseSpanEventName: parses SpanEnter__ struct schema");
+  assertEq(r4.name, "CustomStruct", "parseSpanEventName: __ suffix is the type discriminator");
+  assertEq(r4.target, "", "parseSpanEventName: __ target is unavailable");
+  assertEq(r4.file, null, "parseSpanEventName: __ file is unavailable");
+  assertEq(r4.line, null, "parseSpanEventName: __ line is unavailable");
+
+  const r4Exit = SE.parseSpanEventName("SpanExit__CustomStruct");
+  assertEq(r4Exit.name, "CustomStruct", "parseSpanEventName: parses SpanExit__ struct schema");
 
   const r5 = SE.parseSpanEventName("SomeOtherEvent");
   assertEq(r5, null, "parseSpanEventName: unrelated event → null");
@@ -548,6 +689,25 @@ assertEq(SE.TIME_CATEGORIES[4].key, "unknown", "TIME_CATEGORIES: last is unknown
   }
 }
 
+{
+  const allSpans = [
+    { spanId: "1", start: 100, spanName: "shared", activeNs: 10 },
+    { spanId: "2", start: 200, spanName: "shared", activeNs: 20 },
+  ];
+  const customEvents = [
+    { name: "SpanEnter__FirstOperation", timestamp: 100, fields: { span_id: "1", span_name: "shared" } },
+    { name: "SpanEnter__SecondOperation", timestamp: 200, fields: { span_id: "2", span_name: "shared" } },
+  ];
+  const catalog = SE.buildSpanCatalog(allSpans, customEvents);
+  assertEq(catalog.length, 2, "buildSpanCatalog: distinct __ schemas do not collapse by runtime span_name");
+  assert(catalog.some((entry) => entry.name === "FirstOperation"), "buildSpanCatalog: keeps first __ type suffix");
+  assert(catalog.some((entry) => entry.name === "SecondOperation"), "buildSpanCatalog: keeps second __ type suffix");
+  assert(
+    catalog[0].span_type_uid !== catalog[1].span_type_uid,
+    "buildSpanCatalog: __ schema types receive distinct callsite keys",
+  );
+}
+
 // ── Demo trace integration test ──
 async function testDemoTrace() {
   const tracePath = path.join(__dirname, "demo-trace.bin");
@@ -556,10 +716,48 @@ async function testDemoTrace() {
 {
   const html = fs.readFileSync(path.join(__dirname, "span_explorer.html"), "utf8");
   const decoderPos = html.indexOf('<script src="decode.js"></script>');
+  const flamegraphApiPos = html.indexOf(
+    '<script src="flamegraph_api.js?v=fold-work-cap-1"></script>',
+  );
+  const inlinePagePos = html.indexOf("<script>\n(function() {");
+
   const parserPos = html.indexOf('<script src="trace_parser.js"></script>');
+  assert(flamegraphApiPos >= 0, "span_explorer.html: cache-busts the fold-work helper asset");
+  assert(
+    flamegraphApiPos < inlinePagePos,
+    "span_explorer.html: loads FlamegraphApi before inline page code",
+  );
+  assert(
+    html.includes("const FG_API = window.FlamegraphApi;") &&
+      html.includes("FG_API.refinementWorkDepth(lastCoverage, maxFiles)") &&
+      html.includes("FG_API.nextMaxFiles(workDepth)"),
+    "span_explorer.html: Refine uses the explicit FlamegraphApi namespace",
+  );
   assert(decoderPos >= 0, "span_explorer.html: loads decode.js");
   assert(parserPos >= 0, "span_explorer.html: loads trace_parser.js");
   assert(decoderPos < parserPos, "span_explorer.html: loads TraceDecoder before trace_parser.js");
+  assert(
+    html.includes('u.searchParams.set("min_span_ns", String(bandMinNs))'),
+    "span_explorer.html: sends selected duration minimum to span-stats",
+  );
+  assert(
+    html.includes('u.searchParams.set("max_span_ns", String(bandMaxNs))'),
+    "span_explorer.html: sends selected duration maximum to span-stats",
+  );
+  assert(
+    html.includes('cpuLink.addEventListener("click", openFlamegraphWithSession)') &&
+      html.includes('blockLink.addEventListener("click", openFlamegraphWithSession)'),
+    "span_explorer.html: flamegraph tabs inherit session-backed BYOC credentials",
+  );
+  assert(
+    html.includes('if (mode === "replace") {\n      loadingEl.classList.remove'),
+    "span_explorer.html: exemplar and refine streams do not show the reflowing loading panel",
+  );
+  assert(
+    html.includes('SE.setMaxFilesParam(p, maxFiles)') &&
+      html.includes('startStreaming("refine")'),
+    "span_explorer.html: Refine persists depth and uses the preserving stream mode",
+  );
 }
   if (!fs.existsSync(tracePath)) {
     console.log("· demo-trace.bin absent — skipping demo trace integration tests");

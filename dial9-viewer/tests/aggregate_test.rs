@@ -4,10 +4,10 @@
 //! the whole flow" coverage: folding, ordering, coverage reporting, the
 //! sampling cap, idempotency, zero-sample files, and scope filtering.
 //!
-//! The endpoint streams: one request folds to the sampling cap and emits a
-//! Server-Sent Event per file (the first is the already-folded snapshot, the
-//! last is the fully-refined snapshot). [`stream`] collects every event;
-//! [`stream_final`] returns just the last (at-cap) one — the natural replacement
+//! The endpoint streams: one request folds to the sampling cap and emits
+//! cumulative events after bounded cached batches, then one event per newly
+//! folded file; the last event has drained the bounded new-work list. [`stream`]
+//! collects every event; [`stream_final`] returns just that final one — the natural
 //! for the old "poll until coverage stops climbing" loops.
 
 use dial9_trace_format::encoder::Encoder;
@@ -617,8 +617,8 @@ fn parse_sse_events(body: &str) -> Vec<String> {
 
 /// Open the flamegraph SSE stream for `query` and collect every event. The
 /// server folds to the sampling cap then closes, so `reqwest`'s buffered
-/// `.text()` returns the whole finite stream. The first event is the
-/// already-folded snapshot; the last is the fully-refined (at-cap) snapshot.
+/// `.text()` returns the whole finite stream. Cached state may occupy several
+/// bounded cumulative events; the last event has drained bounded new work.
 async fn stream(client: &reqwest::Client, base: &str, query: &str) -> Vec<Resp> {
     let url = format!("{base}/api/flamegraph?{query}");
     let r = client.get(&url).send().await.unwrap();
@@ -651,8 +651,8 @@ async fn stream(client: &reqwest::Client, base: &str, query: &str) -> Vec<Resp> 
         .collect()
 }
 
-/// The final (fully-refined) event of a flamegraph stream — the natural
-/// replacement for the old "poll to the cap" loop.
+/// The final event after cached reconstruction and bounded new work drain — the
+/// natural replacement for the old client polling loop.
 async fn stream_final(client: &reqwest::Client, base: &str, query: &str) -> Resp {
     stream(client, base, query).await.pop().unwrap()
 }
@@ -1147,16 +1147,27 @@ async fn folded_outside_cap_does_not_starve_budget() {
         "host-00 folded several files, got {host_folded}"
     );
 
-    // 2. Now query the whole fleet at the DEFAULT cap (5). Pre-fix, the folded
-    //    host-00 files (counted across the whole 100-file order) would make
-    //    room = 5 - host_folded <= 0, folding nothing. Post-fix, budgeting is
-    //    scoped to the capped prefix, so the fleet stream folds toward its cap.
-    let fleet = stream_final(&http, &base, "service=shale").await;
-    let cf = fleet.coverage.unwrap();
-    assert_eq!(cf.files_matched, 100);
+    // 2. Now query the whole fleet at the DEFAULT new-fold cap (5). Every
+    // cached host-00 part applies to this broader scope and must be streamed,
+    // including those outside its capped prefix. Missing files inside the prefix
+    // must still fold; cached reuse cannot consume that bounded work budget.
+    let fleet = stream(&http, &base, "service=shale").await;
+    let first = fleet.first().unwrap().coverage.as_ref().unwrap();
+    assert_eq!(first.files_matched, 100);
     assert_eq!(
-        cf.files_folded, 5,
-        "fleet refines to its 5% cap despite folded host-00 files outside the cap"
+        first.files_folded, host_folded,
+        "the first cumulative cached snapshot reuses every matching host-00 part"
+    );
+    let cf = fleet.last().unwrap().coverage.as_ref().unwrap();
+    assert!(
+        cf.files_folded > host_folded,
+        "missing in-cap files still fold after reusing {host_folded} cached files; got {}",
+        cf.files_folded
+    );
+    assert!(
+        cf.files_folded <= host_folded + 5,
+        "new work remains bounded by the five-file capped prefix; got {} from {host_folded} cached",
+        cf.files_folded
     );
 }
 
@@ -1235,11 +1246,11 @@ async fn refold_is_idempotent_no_duplicate_part_files() {
 
     // The output bucket should contain exactly `files_folded` samples part-files
     // (one per folded source file) — no duplicates from re-polling. The output
-    // is namespaced by source bucket: `…/v1/bucket={src}/samples/…`.
+    // is namespaced by source bucket: `…/v5/bucket={src}/samples/…`.
     let listed = uploader
         .list_objects_v2()
         .bucket("out-bucket")
-        .prefix("flamegraph-data/v4/bucket=src-bucket/samples/")
+        .prefix("flamegraph-data/v5/bucket=src-bucket/samples/")
         .send()
         .await
         .unwrap();

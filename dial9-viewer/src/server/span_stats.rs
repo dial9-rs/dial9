@@ -4,11 +4,17 @@
 //! composition.
 //!
 //! Uses the same scope/resolve/fold pipeline as `/api/flamegraph`. Reads
-//! `spans/` part-files (written by the v4 fold) for each folded source file.
+//! `spans/` part-files (written by the v5 fold) for each folded source file.
+mod spans_reader;
+
+#[cfg(test)]
+use spans_reader::parse_map_column;
+use spans_reader::{SpanStatsRow, SpansBatchReader};
 
 use std::collections::HashMap;
 use std::convert::Infallible;
 
+#[cfg(test)]
 use arrow::array::Array;
 use axum::Extension;
 use axum::extract::State;
@@ -54,6 +60,11 @@ pub struct SpanStatsParams {
     pub host: Vec<String>,
     pub start_ns: Option<i64>,
     pub end_ns: Option<i64>,
+    /// Optional inclusive duration bounds used only to choose exemplars. The
+    /// catalog counts, histograms, percentiles, and composition remain scoped
+    /// by occurrence time and are not narrowed by these bounds.
+    pub min_span_ns: Option<i64>,
+    pub max_span_ns: Option<i64>,
     pub max_files: Option<usize>,
     pub bucket: Option<String>,
     pub prefix: Option<String>,
@@ -94,6 +105,10 @@ pub struct SpanTypeStats {
     pub partial_count: u64,
     /// Bounded slow exemplars (longest durations with source coordinates).
     pub slow_exemplars: Vec<SlowExemplar>,
+    /// Exact number of instances inside the requested exemplar-duration bounds.
+    /// Absent when no duration bounds were requested.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selected_duration_count: Option<u64>,
     /// Attribute facets: top values per attribute key.
     pub attribute_facets: Vec<AttributeFacet>,
     /// Whether the attribute key tracking cap was reached (more distinct keys
@@ -249,6 +264,30 @@ pub async fn get_span_stats(
         ));
     }
 
+    if let (Some(min), Some(max)) = (params.min_span_ns, params.max_span_ns) {
+        if min < 0 || max < 0 {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "span duration bounds must be non-negative: min_span_ns={min}, max_span_ns={max}"
+                ),
+            ));
+        }
+        if min > max {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("inverted span duration bounds: min_span_ns={min} > max_span_ns={max}"),
+            ));
+        }
+    } else if params.min_span_ns.is_some_and(|value| value < 0)
+        || params.max_span_ns.is_some_and(|value| value < 0)
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "span duration bounds must be non-negative".to_string(),
+        ));
+    }
+
     let Some(agg) = state
         .agg_context_for(
             params.bucket.as_deref(),
@@ -293,6 +332,8 @@ pub async fn get_span_stats(
         state.fold_limits.clone(),
         params.start_ns,
         params.end_ns,
+        params.min_span_ns,
+        params.max_span_ns,
     );
     Ok((
         Extension(op),
@@ -379,6 +420,8 @@ struct SpanTypeAccum {
     partial_count: u64,
     /// Bounded slow exemplars (min-heap by elapsed_ns, capped at MAX_EXEMPLARS).
     slow_exemplars: Vec<SlowExemplar>,
+    /// Exact matching-instance count when exemplar duration bounds are active.
+    selected_duration_count: Option<u64>,
     /// Attribute facets: key → bounded distinct value tracker.
     attribute_accums: HashMap<String, AttributeKeyAccum>,
     /// Whether we've stopped tracking new attribute keys (cardinality overflow).
@@ -413,6 +456,7 @@ impl SpanTypeAccum {
             details_complete_count: 0,
             partial_count: 0,
             slow_exemplars: Vec::new(),
+            selected_duration_count: None,
             attribute_accums: HashMap::new(),
             attribute_keys_overflow: false,
         }
@@ -575,6 +619,7 @@ impl SpanTypeAccum {
             details_complete_count: self.details_complete_count,
             partial_count: self.partial_count,
             slow_exemplars: exemplars,
+            selected_duration_count: self.selected_duration_count,
             attribute_facets,
             attribute_keys_overflow: self.attribute_keys_overflow,
         }
@@ -591,6 +636,9 @@ struct SpanStatsAccum {
     /// when its end_ns ∈ [query_start, query_end).
     start_ns: Option<i64>,
     end_ns: Option<i64>,
+    /// Inclusive duration bounds applied only to bounded exemplar selection.
+    exemplar_min_ns: Option<i64>,
+    exemplar_max_ns: Option<i64>,
     /// Total instances whose type was dropped because MAX_SPAN_TYPES was reached.
     types_overflow_instances: u64,
 }
@@ -601,298 +649,99 @@ impl SpanStatsAccum {
             types: HashMap::new(),
             start_ns,
             end_ns,
+            exemplar_min_ns: None,
+            exemplar_max_ns: None,
             types_overflow_instances: 0,
         }
     }
 
-    /// Merge one spans part-file transactionally. A malformed later row must
-    /// not leave earlier rows from that same uncommitted part in the aggregate.
+    fn with_exemplar_bounds(mut self, min_ns: Option<i64>, max_ns: Option<i64>) -> Self {
+        self.exemplar_min_ns = min_ns;
+        self.exemplar_max_ns = max_ns;
+        self
+    }
+
+    fn exemplar_matches(&self, elapsed_ns: i64) -> bool {
+        self.exemplar_min_ns.is_none_or(|min| elapsed_ns >= min)
+            && self.exemplar_max_ns.is_none_or(|max| elapsed_ns <= max)
+    }
+
+    /// Stream one spans part into a bounded staged accumulator, then commit it.
+    /// A malformed later row discards the stage, so no row from that part can
+    /// partially mutate the live aggregate.
     fn merge_spans_part(&mut self, data: Vec<u8>) -> anyhow::Result<()> {
         let mut staged = self.clone();
-        staged.merge_spans_part_in_place(data)?;
+        SpansBatchReader::new(self.start_ns, self.end_ns)
+            .read(data, |row| staged.merge_row(row))?;
         *self = staged;
         Ok(())
     }
 
-    fn merge_spans_part_in_place(&mut self, data: Vec<u8>) -> anyhow::Result<()> {
-        let reader = parquet::arrow::arrow_reader::ParquetRecordBatchReader::try_new(
-            bytes::Bytes::from(data),
-            4096,
-        )?;
-        for batch in reader {
-            let batch = batch?;
-            let span_type_uid_col = batch.column_by_name("span_type_uid").and_then(|c| {
-                c.as_any()
-                    .downcast_ref::<arrow::array::FixedSizeBinaryArray>()
-            });
-            let Some(type_uid_arr) = span_type_uid_col else {
-                continue;
-            };
-            // Validate UID fixed-binary width: must be exactly 16 bytes.
-            if type_uid_arr.value_length() != 16 {
-                anyhow::bail!(
-                    "span_type_uid column has wrong width: expected 16 bytes, got {}",
-                    type_uid_arr.value_length()
-                );
-            }
-            let kind_col = batch
-                .column_by_name("kind")
-                .and_then(|c| c.as_any().downcast_ref::<arrow::array::StringArray>());
-            let name_col = batch
-                .column_by_name("name")
-                .and_then(|c| c.as_any().downcast_ref::<arrow::array::StringArray>());
-            let target_col = batch
-                .column_by_name("target")
-                .and_then(|c| c.as_any().downcast_ref::<arrow::array::StringArray>());
-            let file_col = batch
-                .column_by_name("callsite_file")
-                .and_then(|c| c.as_any().downcast_ref::<arrow::array::StringArray>());
-            let line_col = batch
-                .column_by_name("callsite_line")
-                .and_then(|c| c.as_any().downcast_ref::<arrow::array::UInt32Array>());
-            let elapsed_col = batch
-                .column_by_name("elapsed_ns")
-                .and_then(|c| c.as_any().downcast_ref::<arrow::array::Int64Array>());
-            // Row-level time scope: occurrence time is end_ns, half-open [start, end).
-            let end_ns_col = batch
-                .column_by_name("end_ns")
-                .and_then(|c| c.as_any().downcast_ref::<arrow::array::Int64Array>());
-            // Exemplar coordinates: start_ns and source_key let the viewer build a
-            // focus deep link (focus_start/focus_end) that jumps to this instance.
-            let start_ns_col = batch
-                .column_by_name("start_ns")
-                .and_then(|c| c.as_any().downcast_ref::<arrow::array::Int64Array>());
-            let source_key_col = batch
-                .column_by_name("source_key")
-                .and_then(|c| c.as_any().downcast_ref::<arrow::array::StringArray>());
+    fn merge_row(&mut self, row: SpanStatsRow) {
+        let SpanStatsRow {
+            span_type_uid,
+            kind,
+            name,
+            target,
+            callsite_file,
+            callsite_line,
+            elapsed_ns,
+            exemplar,
+            attributes,
+            composition,
+            details_complete,
+        } = row;
+        let has_exemplar_bounds = self.exemplar_min_ns.is_some() || self.exemplar_max_ns.is_some();
+        let matches_exemplar_bounds = self.exemplar_matches(elapsed_ns);
+        let exemplar = exemplar.filter(|_| matches_exemplar_bounds);
 
-            // Finding 3: When time filtering is active, a missing end_ns column
-            // is a merge error — we cannot correctly filter rows. This prevents
-            // silently including all rows from a malformed/old part file.
-            let has_time_filter = self.start_ns.is_some() || self.end_ns.is_some();
-            if has_time_filter && end_ns_col.is_none() {
-                anyhow::bail!(
-                    "time filter active but spans part is missing end_ns column; \
-                     cannot apply occurrence-time filter"
-                );
-            }
+        // Cardinality bound: don't create new types beyond the cap.
+        if !self.types.contains_key(&span_type_uid) && self.types.len() >= MAX_SPAN_TYPES {
+            self.types_overflow_instances += 1;
+            return;
+        }
 
-            // Five-way composition columns
-            let on_cpu_col = batch
-                .column_by_name("on_cpu_ns_est")
-                .and_then(|c| c.as_any().downcast_ref::<arrow::array::Int64Array>());
-            let blocked_col = batch
-                .column_by_name("blocked_ns_est")
-                .and_then(|c| c.as_any().downcast_ref::<arrow::array::Int64Array>());
-            let async_wait_col = batch
-                .column_by_name("async_wait_ns")
-                .and_then(|c| c.as_any().downcast_ref::<arrow::array::Int64Array>());
-            let sched_delay_col = batch
-                .column_by_name("scheduler_delay_ns")
-                .and_then(|c| c.as_any().downcast_ref::<arrow::array::Int64Array>());
-            let unknown_col = batch
-                .column_by_name("unknown_ns")
-                .and_then(|c| c.as_any().downcast_ref::<arrow::array::Int64Array>());
-            // Quality columns
-            let details_complete_col = batch
-                .column_by_name("details_complete")
-                .and_then(|c| c.as_any().downcast_ref::<arrow::array::BooleanArray>());
-            // Span UID for exemplars
-            let span_uid_col = batch.column_by_name("span_uid").and_then(|c| {
-                c.as_any()
-                    .downcast_ref::<arrow::array::FixedSizeBinaryArray>()
-            });
-            // Validate span_uid width if present.
-            if let Some(uid_arr) = span_uid_col
-                && uid_arr.value_length() != 16
-            {
-                anyhow::bail!(
-                    "span_uid column has wrong width: expected 16 bytes, got {}",
-                    uid_arr.value_length()
-                );
-            }
-            let host_col = batch
-                .column_by_name("host")
-                .and_then(|c| c.as_any().downcast_ref::<arrow::array::StringArray>());
-            // Attributes map column
-            let attributes_col = batch
-                .column_by_name("attributes")
-                .and_then(|c| c.as_any().downcast_ref::<arrow::array::MapArray>());
-
-            let Some(elapsed_arr) = elapsed_col else {
-                anyhow::bail!("spans part is missing required column: elapsed_ns");
-            };
-            // Required columns: span_type_uid, elapsed_ns, name, kind are non-null by schema.
-            let Some(name_arr) = name_col else {
-                anyhow::bail!("spans part is missing required column: name");
-            };
-            let Some(kind_arr) = kind_col else {
-                anyhow::bail!("spans part is missing required column: kind");
-            };
-
-            for i in 0..batch.num_rows() {
-                // Require non-null required columns.
-                if type_uid_arr.is_null(i)
-                    || elapsed_arr.is_null(i)
-                    || name_arr.is_null(i)
-                    || kind_arr.is_null(i)
-                {
-                    continue;
-                }
-
-                let elapsed = elapsed_arr.value(i);
-
-                // Reject negative elapsed (corrupt data).
-                if elapsed < 0 {
-                    continue;
-                }
-
-                // Row-level time scope: occurrence time is end_ns, half-open [start, end).
-                // A span "occurs" at end_ns. It is included when:
-                //   end_ns >= query_start AND end_ns < query_end
-                // When time filter is active, end_ns_col is guaranteed Some (checked above).
-                if let Some(end_arr) = end_ns_col {
-                    if end_arr.is_null(i) {
-                        // Finding 3: null end_ns with time filter active is malformed data.
-                        if has_time_filter {
-                            anyhow::bail!(
-                                "null end_ns at row {i} with time filter active; \
-                                 part file is malformed"
-                            );
-                        }
-                        // No time filter → end_ns irrelevant, proceed.
-                    } else {
-                        let row_end = end_arr.value(i);
-                        // Finding 3: Negative end_ns is malformed data.
-                        if row_end < 0 {
-                            anyhow::bail!(
-                                "negative end_ns ({row_end}) at row {i}; part file is malformed"
-                            );
-                        }
-                        if self.start_ns.is_some_and(|qs| row_end < qs) {
-                            continue; // span ends before window start
-                        }
-                        if self.end_ns.is_some_and(|qe| row_end >= qe) {
-                            continue; // span ends at or after window end
-                        }
-                    }
-                }
-
-                let mut uid = [0u8; 16];
-                uid.copy_from_slice(type_uid_arr.value(i));
-
-                // Cardinality bound: don't create new types beyond the cap.
-                if !self.types.contains_key(&uid) && self.types.len() >= MAX_SPAN_TYPES {
-                    self.types_overflow_instances += 1;
-                    continue;
-                }
-
-                let entry = self.types.entry(uid).or_insert_with(|| {
-                    SpanTypeAccum::new(
-                        kind_arr.value(i).to_string(),
-                        name_arr.value(i).to_string(),
-                        target_col.and_then(|c| {
-                            if c.is_null(i) {
-                                None
-                            } else {
-                                Some(c.value(i).to_string())
-                            }
-                        }),
-                        file_col.and_then(|c| {
-                            if c.is_null(i) {
-                                None
-                            } else {
-                                Some(c.value(i).to_string())
-                            }
-                        }),
-                        line_col.and_then(|c| if c.is_null(i) { None } else { Some(c.value(i)) }),
-                    )
-                });
-
-                // Build exemplar. start_ns/end_ns/source_key let the viewer build
-                // a focus deep link that jumps to this exact span instance.
-                let exemplar = span_uid_col.map(|uid_arr| SlowExemplar {
-                    elapsed_ns: elapsed,
-                    span_uid: hex::encode(uid_arr.value(i)),
-                    callsite_file: file_col.and_then(|c| {
-                        if c.is_null(i) {
-                            None
-                        } else {
-                            Some(c.value(i).to_string())
-                        }
-                    }),
-                    callsite_line: line_col
-                        .and_then(|c| if c.is_null(i) { None } else { Some(c.value(i)) }),
-                    host: host_col.map_or(String::new(), |c| c.value(i).to_string()),
-                    start_ns: start_ns_col
-                        .filter(|c| !c.is_null(i))
-                        .map_or(0, |c| c.value(i)),
-                    end_ns: end_ns_col
-                        .filter(|c| !c.is_null(i))
-                        .map_or(0, |c| c.value(i)),
-                    source_key: source_key_col
-                        .filter(|c| !c.is_null(i))
-                        .map_or(String::new(), |c| c.value(i).to_string()),
-                });
-
-                entry.record(elapsed, exemplar);
-
-                // Parse and record attributes from the Map column.
-                if let Some(attr_map) = attributes_col {
-                    let attrs = parse_map_column(attr_map, i);
-                    if !attrs.is_empty() {
-                        entry.record_attributes(&attrs);
-                    }
-                }
-
-                // Five-way composition: sum non-null values. Accumulate both the
-                // grand total and the per-duration-bucket sums (same bucket key
-                // as the count histogram) so the client can scope composition to
-                // a brushed band.
-                if let Some(unknown_arr) = unknown_col {
-                    entry.has_composition = true;
-                    let unknown = unknown_arr.value(i);
-                    let on_cpu = on_cpu_col
-                        .filter(|c| !c.is_null(i))
-                        .map_or(0, |c| c.value(i));
-                    let blocked = blocked_col
-                        .filter(|c| !c.is_null(i))
-                        .map_or(0, |c| c.value(i));
-                    let async_wait = async_wait_col
-                        .filter(|c| !c.is_null(i))
-                        .map_or(0, |c| c.value(i));
-                    let sched_delay = sched_delay_col
-                        .filter(|c| !c.is_null(i))
-                        .map_or(0, |c| c.value(i));
-
-                    entry.unknown_ns_sum += unknown;
-                    entry.on_cpu_ns_sum += on_cpu;
-                    entry.blocked_ns_sum += blocked;
-                    entry.async_wait_ns_sum += async_wait;
-                    entry.scheduler_delay_ns_sum += sched_delay;
-
-                    let bucket = entry
-                        .composition_by_bucket
-                        .entry(hist_bucket_key(elapsed))
-                        .or_default();
-                    bucket.unknown_ns += unknown;
-                    bucket.on_cpu_ns += on_cpu;
-                    bucket.blocked_ns += blocked;
-                    bucket.async_wait_ns += async_wait;
-                    bucket.scheduler_delay_ns += sched_delay;
-                }
-
-                // Quality counts
-                if let Some(dc_arr) = details_complete_col {
-                    if dc_arr.value(i) {
-                        entry.details_complete_count += 1;
-                    } else {
-                        entry.partial_count += 1;
-                    }
-                }
+        let entry = self.types.entry(span_type_uid).or_insert_with(|| {
+            SpanTypeAccum::new(kind, name, target, callsite_file, callsite_line)
+        });
+        if has_exemplar_bounds {
+            let matching_count = entry.selected_duration_count.get_or_insert(0);
+            if matches_exemplar_bounds {
+                *matching_count += 1;
             }
         }
-        Ok(())
+        entry.record(elapsed_ns, exemplar);
+
+        if !attributes.is_empty() {
+            entry.record_attributes(&attributes);
+        }
+
+        if let Some(composition) = composition {
+            entry.has_composition = true;
+            entry.unknown_ns_sum += composition.unknown_ns;
+            entry.on_cpu_ns_sum += composition.on_cpu_ns;
+            entry.blocked_ns_sum += composition.blocked_ns;
+            entry.async_wait_ns_sum += composition.async_wait_ns;
+            entry.scheduler_delay_ns_sum += composition.scheduler_delay_ns;
+
+            let bucket = entry
+                .composition_by_bucket
+                .entry(hist_bucket_key(elapsed_ns))
+                .or_default();
+            bucket.unknown_ns += composition.unknown_ns;
+            bucket.on_cpu_ns += composition.on_cpu_ns;
+            bucket.blocked_ns += composition.blocked_ns;
+            bucket.async_wait_ns += composition.async_wait_ns;
+            bucket.scheduler_delay_ns += composition.scheduler_delay_ns;
+        }
+
+        if let Some(details_complete) = details_complete {
+            if details_complete {
+                entry.details_complete_count += 1;
+            } else {
+                entry.partial_count += 1;
+            }
+        }
     }
 
     /// Total instances across all types (for coverage reporting).
@@ -922,45 +771,6 @@ impl SpanStatsAccum {
     }
 }
 
-/// Parse an Arrow MapArray row into a Vec of (key, value) pairs.
-fn parse_map_column(map_array: &arrow::array::MapArray, row: usize) -> Vec<(String, String)> {
-    let offsets = map_array.offsets();
-    let start = offsets[row] as usize;
-    let end = offsets[row + 1] as usize;
-    if start == end {
-        return Vec::new();
-    }
-
-    let entries = map_array.entries();
-    let keys_col = entries
-        .column(0)
-        .as_any()
-        .downcast_ref::<arrow::array::StringArray>();
-    let values_col = entries
-        .column(1)
-        .as_any()
-        .downcast_ref::<arrow::array::StringArray>();
-
-    let (Some(keys), Some(values)) = (keys_col, values_col) else {
-        return Vec::new();
-    };
-
-    let mut result = Vec::with_capacity(end - start);
-    for idx in start..end {
-        if keys.is_null(idx) {
-            continue;
-        }
-        let key = keys.value(idx).to_string();
-        let value = if values.is_null(idx) {
-            String::new()
-        } else {
-            values.value(idx).to_string()
-        };
-        result.push((key, value));
-    }
-    result
-}
-
 /// Fetch spans part-files for all folded source keys concurrently.
 /// Returns `(leaf_key, Result)` pairs so callers can track which leaves succeed.
 async fn fetch_folded_spans_parts(
@@ -968,15 +778,9 @@ async fn fetch_folded_spans_parts(
     bucket: &str,
     output_prefix: &str,
     source_keys: &[String],
-    folded: &std::collections::HashSet<String>,
 ) -> Vec<(String, Result<Vec<u8>, String>)> {
     use futures::stream::StreamExt;
-    let keys: Vec<String> = source_keys
-        .iter()
-        .filter(|sk| folded.contains(&aggregate::part_leaf_of(sk)))
-        .cloned()
-        .collect();
-    futures::stream::iter(keys)
+    futures::stream::iter(source_keys.iter().cloned())
         .map(|sk| {
             let leaf = aggregate::part_leaf_of(&sk);
             let spans_key = aggregate::spans_part_key_pub(output_prefix, &sk);
@@ -1003,18 +807,17 @@ struct SpanStatsSink {
 }
 
 impl fold_stream::FoldSink for SpanStatsSink {
-    async fn seed(
+    async fn seed_batch(
         &mut self,
         agg: &AggContext,
-        resolved: &Resolved,
+        full_keys: &[String],
     ) -> Vec<fold_stream::PartOutcome> {
-        // Prime with already-folded spans parts.
+        // Prime with one bounded batch of already-folded spans parts.
         let results = fetch_folded_spans_parts(
             &*agg.output,
             &agg.output_bucket,
             &agg.output_prefix,
-            &resolved.capped_full_keys(),
-            resolved.folded(),
+            full_keys,
         )
         .await;
         // Finding 4: Only include a leaf in `folded` after its GET and merge both
@@ -1065,11 +868,17 @@ impl fold_stream::FoldSink for SpanStatsSink {
     fn snapshot_event(
         &self,
         resolved: &Resolved,
-        folded: &std::collections::HashSet<String>,
+        files_folded: usize,
+        hosts_folded: usize,
         errors: &FoldErrors,
     ) -> Event {
-        let coverage =
-            fold_stream::coverage_from(resolved, folded, errors, self.accum.total_instances());
+        let coverage = fold_stream::coverage_from(
+            resolved,
+            files_folded,
+            hosts_folded,
+            errors,
+            self.accum.total_instances(),
+        );
         let mut resp = self.accum.snapshot();
         resp.coverage = Some(coverage);
         Event::default().json_data(&resp).unwrap_or_else(|e| {
@@ -1086,8 +895,11 @@ fn span_stats_stream(
     limits: FoldLimits,
     start_ns: Option<i64>,
     end_ns: Option<i64>,
+    exemplar_min_ns: Option<i64>,
+    exemplar_max_ns: Option<i64>,
 ) -> impl Stream<Item = Result<Event, Infallible>> + use<> {
-    let accum = SpanStatsAccum::new(start_ns, end_ns);
+    let accum = SpanStatsAccum::new(start_ns, end_ns)
+        .with_exemplar_bounds(exemplar_min_ns, exemplar_max_ns);
     fold_stream::drive(agg, resolved, limits, SpanStatsSink { accum })
 }
 
@@ -1674,6 +1486,37 @@ mod tests {
         }
     }
 
+    #[test]
+    fn exemplar_bounds_select_only_matching_instances_without_filtering_stats() {
+        let data = make_spans_parquet(&[
+            (0, 10, 10, "A", "h1", true),
+            (0, 20, 20, "A", "h1", true),
+            (0, 30, 30, "A", "h1", true),
+            (0, 40, 40, "A", "h1", true),
+            (0, 50, 50, "A", "h1", true),
+        ]);
+        let mut accum = SpanStatsAccum::new(None, None).with_exemplar_bounds(Some(20), Some(40));
+        accum.merge_spans_part(data).unwrap();
+
+        let stats = &accum.snapshot().span_types[0];
+        assert_eq!(
+            stats.count, 5,
+            "duration bounds must not narrow catalog stats"
+        );
+        assert_eq!(stats.min_ns, Some(10));
+        assert_eq!(stats.max_ns, Some(50));
+        assert_eq!(stats.selected_duration_count, Some(3));
+        assert_eq!(
+            stats
+                .slow_exemplars
+                .iter()
+                .map(|exemplar| exemplar.elapsed_ns)
+                .collect::<Vec<_>>(),
+            vec![40, 30, 20],
+            "exemplars must use inclusive selected-band bounds"
+        );
+    }
+
     /// Finding 1: Parse attributes Map from Parquet and build bounded facets.
     #[test]
     fn attributes_parsed_and_faceted() {
@@ -1940,6 +1783,7 @@ mod tests {
         let coverage = Coverage {
             files_matched: 10,
             files_folded: 0, // nothing successfully folded
+            fold_work_cap: 10,
             samples_folded: accum.total_instances(),
             total_bytes: 50_000,
             hosts_matched: 3,
@@ -2435,6 +2279,7 @@ mod tests {
         let coverage = Coverage {
             files_matched: 3,
             files_folded: 1, // only the successful one
+            fold_work_cap: 3,
             samples_folded: accum.total_instances(),
             total_bytes: 30_000,
             hosts_matched: 2,

@@ -9,6 +9,9 @@
 
 // Run the datetime round-trip assertions in a negative-offset timezone so a
 // regression to local-time parsing is caught: under UTC the bug is invisible.
+const vm = require("vm");
+const fs = require("fs");
+const path = require("path");
 process.env.TZ = "America/New_York"; // UTC-4 (DST) / UTC-5
 
 const {
@@ -16,6 +19,8 @@ const {
   foldErrorNotice,
   coveragePercent,
   nextMaxFiles,
+  refinementWorkDepth,
+  shouldAdoptRefinementSnapshot,
   nsToPickerUtc,
   pickerUtcToNs,
   msToNs,
@@ -120,7 +125,51 @@ assertEq(nextMaxFiles(2), 16, "small fold count clamps up to min");
 assertEq(nextMaxFiles(5), 20, "above the min floor uses 4x");
 assertEq(nextMaxFiles(1_000_000), 100000, "caps at default ceiling");
 assertEq(nextMaxFiles(12, { cap: 30 }), 30, "respects custom cap");
+
+// ── refinement work depth vs all-cache coverage ──
+assertEq(
+  refinementWorkDepth({ files_folded: 500, fold_work_cap: 100 }, null),
+  100,
+  "Refine grows from work cap, not 500 cached matching files",
+);
+assertEq(
+  nextMaxFiles(refinementWorkDepth({ files_folded: 500, fold_work_cap: 100 }, null)),
+  400,
+  "one Refine click grows a 100-file prefix to 400 despite deeper cache",
+);
+assertEq(
+  refinementWorkDepth({ files_folded: 500 }, 80),
+  80,
+  "older coverage falls back to current requested cap",
+);
+assertEq(
+  refinementWorkDepth({ files_folded: 12 }, null),
+  12,
+  "legacy fallback uses folded coverage when no cap is available",
+);
 assertEq(nextMaxFiles(1, { min: 100 }), 100, "respects custom min");
+
+// ── refinement snapshot adoption ──
+assertEq(
+  shouldAdoptRefinementSnapshot(false, 80, 1),
+  true,
+  "new scope adopts its first snapshot",
+);
+assertEq(
+  shouldAdoptRefinementSnapshot(true, 80, 79),
+  false,
+  "same-scope Refine preserves the current tree below baseline",
+);
+assertEq(
+  shouldAdoptRefinementSnapshot(true, 80, 80),
+  true,
+  "same-scope Refine adopts once baseline is reconstructed",
+);
+assertEq(
+  shouldAdoptRefinementSnapshot(true, 80, 96),
+  true,
+  "same-scope Refine adopts deeper cumulative snapshots",
+);
 
 // ── coveragePercent ──
 assertEq(
@@ -285,6 +334,45 @@ assertEq(nsToMs(""), "", "nsToMs: empty -> empty");
 assertEq(nsToMs(null), "", "nsToMs: null -> empty");
 // Round-trip: a value entered in ms survives ms→ns→ms.
 assertEq(nsToMs(msToNs("2.5")), "2.5", "ms→ns→ms round-trips");
+
+// ── flamegraph.html Refine wiring ──
+{
+  const html = fs.readFileSync(path.join(__dirname, "flamegraph.html"), "utf8");
+  assertEq(
+    html.includes('if (maxFiles != null) p.set("max_files", String(maxFiles));'),
+    true,
+    "flamegraph page persists max_files in browser/scope URLs",
+  );
+  assertEq(
+    html.includes("shouldAdoptRefinementSnapshot(") &&
+      html.includes("if (preserveSplit) {") &&
+      html.includes("const preservedView = preserveSplit && viewRestored") &&
+      html.includes("fg.applyViewState(preservedView);") &&
+      html.includes("updateBrowserUrl();\n                        startStreaming(true)"),
+    true,
+    "flamegraph Refine preserves the tree, coverage gate, and exact live view",
+  );
+}
+
+// ── explicit browser namespace ──
+{
+  const browserGlobal = {};
+  browserGlobal.window = browserGlobal;
+  vm.runInNewContext(
+    fs.readFileSync(path.join(__dirname, "flamegraph_api.js"), "utf8"),
+    browserGlobal,
+  );
+  assertEq(
+    typeof browserGlobal.FlamegraphApi?.refinementWorkDepth,
+    "function",
+    "classic script publishes refinementWorkDepth through window.FlamegraphApi",
+  );
+  assertEq(
+    typeof browserGlobal.FlamegraphApi?.nextMaxFiles,
+    "function",
+    "classic script publishes nextMaxFiles through window.FlamegraphApi",
+  );
+}
 
 // ── Summary ──
 console.log(`\n${passed} passed, ${failed} failed`);

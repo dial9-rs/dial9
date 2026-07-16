@@ -1,22 +1,22 @@
 //! The demand-driven **refinement loop** — the orchestration layer over the
 //! [`aggregate`] kit of parts.
 //!
-//! A query [resolves](resolve) a scope to an ordered, capped set of source
-//! files, then [streams folds](fold_stream) of the not-yet-folded ones
-//! (idempotently), one file at a time, so the caller can emit an incremental
-//! update as each file lands. This is the algorithm shared by every
-//! demand-driven endpoint (`/api/flamegraph`, `/api/tokio-stats`): they differ
-//! only in which part-files they read back and how they shape the response.
+//! A query [resolves](resolve) its full ordered source scope plus a capped prefix
+//! for new work. Generic aggregate streams first reuse every folded matching
+//! part, then [stream folds](fold_stream) for missing files inside that prefix
+//! (idempotently), one file at a time, so callers can emit incremental updates.
+//! Flamegraph and span-stats share this driver; Tokio stats retains a custom
+//! capped-prefix reader for its endpoint-specific accumulator.
 //!
 //! The control flow is **stream-driven**: a single held-open request resolves
-//! the scope once, emits the already-folded snapshot instantly, then folds up to
-//! the [sampling cap](sampling_cap) concurrently and pushes a fresh snapshot as
-//! each file completes, closing when the cap is reached. Folding stops when the
-//! client disconnects (the fold [`JoinSet`] is dropped, cancelling in-flight
-//! folds) and re-folding is safe by idempotency. See `CONTEXT.md` ("Refinement
+//! the scope once, streams all matching cached parts in bounded cumulative
+//! snapshots, then folds missing capped-prefix files concurrently and pushes a
+//! fresh snapshot as each file completes. Folding stops when the work-list
+//! drains or the client disconnects (the fold [`JoinSet`] is dropped, cancelling
+//! in-flight folds), and re-folding is safe by idempotency. See `CONTEXT.md` ("Refinement
 //! loop") for the vocabulary.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use dial9_core::rate_limited;
@@ -87,22 +87,26 @@ pub(crate) struct RefineOpts {
     pub max_files: Option<usize>,
 }
 
-/// What [`resolve`] produced: the capped, ordered prefix of source files for the
-/// scope and the set of those already folded (at resolve time), plus the
-/// coverage denominators.
+/// What [`resolve`] produced: the full ordered matched scope, its capped prefix
+/// for bounded new-fold work, and the globally discovered folded leaves.
 ///
-/// The caller reads its own part-files over the capped set — filtering to the
-/// folded ones via [`Resolved::is_folded`] — and shapes the response. Reads and
-/// aggregation MUST be scoped to [`capped`](Self::capped), never the whole
-/// matched set: counting or aggregating folded files *outside* the cap would let
-/// them inflate the numerator and starve the fold budget, permanently stalling
-/// refinement well below the cap.
+/// Cached reads and coverage use [`matched`](Self::matched): once a matching
+/// source file has been folded, every compatible query benefits from it. New
+/// fold work remains restricted to [`capped`](Self::capped), so cache reuse does
+/// not weaken the request's fold-work bound or let out-of-cap cache entries
+/// starve missing files inside the deterministic prefix.
 pub(crate) struct Resolved {
-    /// The capped prefix of matched source files in [order key] order, as
-    /// `(raw_key, full_key)` pairs. `raw_key` is the listed object key; `full_key`
-    /// is the bucket-qualified key used for part-file addressing.
+    /// Every matched source file in stable [order key] order. Generic aggregate
+    /// streams seed all folded entries from this scope progressively.
     ///
     /// [order key]: aggregate::order_key
+    matched: Vec<(String, String)>,
+    /// Part leaf to host for every matched source. Built once during resolve so
+    /// each successful merge updates file/host coverage without rescanning and
+    /// rehashing the whole matched scope on every SSE event.
+    matched_leaf_hosts: HashMap<String, String>,
+    /// The capped prefix used only as the bounded new-fold work scope.
+    /// `(raw_key, full_key)` pairs.
     pub capped: Vec<(String, String)>,
     /// The folded-set leaves as of resolve time. Test membership with
     /// [`Resolved::is_folded`]. [`fold_stream`] extends this as files fold.
@@ -122,30 +126,53 @@ impl Resolved {
         self.folded.contains(&aggregate::part_leaf_of(full_key))
     }
 
-    /// The folded set, for handing to [`aggregate::fetch_folded_sample_parts`] /
+    /// The folded set, for handing to readers such as
     /// [`aggregate::read_polls_parts`].
     pub fn folded(&self) -> &HashSet<String> {
         &self.folded
     }
 
-    /// The capped full-keys (the aggregation/read scope).
-    pub fn capped_full_keys(&self) -> Vec<String> {
-        self.capped.iter().map(|(_, full)| full.clone()).collect()
+    /// Already-folded full keys anywhere in the matched aggregation scope, in
+    /// stable sampling order. The generic SSE driver consumes these in bounded
+    /// batches, so all applicable cached data is reused without delaying the
+    /// first useful snapshot.
+    pub fn folded_matching_full_keys(&self) -> Vec<String> {
+        self.matched
+            .iter()
+            .filter(|(_, full)| self.is_folded(full))
+            .map(|(_, full)| full.clone())
+            .collect()
     }
 
-    /// How many capped files have a leaf in `folded` — the coverage numerator.
-    /// The streaming loop passes a growing superset of [`folded`](Self::folded)
-    /// as files fold; pass `self.folded()` for the resolve-time count.
+    /// Host for a matched part leaf, if the leaf belongs to this query scope.
+    pub fn matched_host_for_leaf(&self, leaf: &str) -> Option<&str> {
+        self.matched_leaf_hosts.get(leaf).map(String::as_str)
+    }
+
+    /// Number of files in the deterministic prefix eligible for new fold work.
+    pub fn fold_work_cap(&self) -> usize {
+        self.capped.len()
+    }
+
+    /// How many matched files have been successfully merged into this stream.
     pub fn files_folded_in(&self, folded: &HashSet<String>) -> usize {
+        self.matched
+            .iter()
+            .filter(|(_, full)| folded.contains(&aggregate::part_leaf_of(full)))
+            .count()
+    }
+
+    /// How many capped-prefix files have leaves in `folded`. The custom Tokio
+    /// stats stream still aggregates only its capped prefix.
+    pub fn capped_files_folded_in(&self, folded: &HashSet<String>) -> usize {
         self.capped
             .iter()
             .filter(|(_, full)| folded.contains(&aggregate::part_leaf_of(full)))
             .count()
     }
 
-    /// Distinct hosts among the capped files whose leaf is in `folded` — how much
-    /// of the scope's fleet breadth the current sample spans.
-    pub fn folded_hosts(&self, folded: &HashSet<String>) -> usize {
+    /// Distinct hosts represented by folded leaves inside the capped prefix.
+    pub fn capped_folded_hosts(&self, folded: &HashSet<String>) -> usize {
         self.capped
             .iter()
             .filter(|(_, full)| folded.contains(&aggregate::part_leaf_of(full)))
@@ -162,6 +189,24 @@ impl Resolved {
             .filter(|(_, full)| !self.is_folded(full))
             .cloned()
             .collect()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(capped: Vec<(String, String)>, folded: HashSet<String>) -> Self {
+        let files_matched = capped.len();
+        let matched_leaf_hosts = capped
+            .iter()
+            .map(|(_, full)| (aggregate::part_leaf_of(full), aggregate::host_of(full)))
+            .collect();
+        Self {
+            matched: capped.clone(),
+            matched_leaf_hosts,
+            capped,
+            folded,
+            files_matched,
+            total_bytes: 0,
+            hosts_matched: 0,
+        }
     }
 }
 
@@ -230,18 +275,16 @@ impl FoldErrors {
     }
 }
 
-/// Resolve `scope` to the capped, ordered set of source files and the subset
-/// already folded — WITHOUT folding anything.
+/// Resolve `scope` to the full ordered matched set, its capped new-work prefix,
+/// and the globally folded leaves — WITHOUT folding anything.
 ///
 /// 1. List the source scope → filter + order by [order key] → the **matched
-///    set** (coverage denominator, fold order). Listing is scoped to
-///    time-derived prefixes so a wide bucket isn't fully enumerated.
-/// 2. Take the first [`sampling_cap`] files as the **capped prefix**: the
-///    representative sample the query folds into and reads over. Reads,
-///    coverage counting, and the fold work-list are ALL scoped to this prefix —
-///    counting folded files across the whole matched set would let folded files
-///    *outside* the cap inflate the count and starve the budget, permanently
-///    stalling refinement well below the cap.
+///    set** (coverage denominator and cached aggregation scope). Listing is
+///    scoped to time-derived prefixes so a wide bucket isn't fully enumerated.
+/// 2. Take the first [`sampling_cap`] files as the **capped prefix** used only
+///    for bounded new-fold work. Folded matching files outside this prefix are
+///    still reusable cached data, but they do not consume or starve the prefix's
+///    missing-file work budget.
 /// 3. List the **folded set** (the output `samples/` listing — the record of
 ///    what's already folded; see ADR-0003).
 ///
@@ -309,9 +352,10 @@ pub(crate) async fn resolve(agg: &AggContext, scope: &Scope, opts: RefineOpts) -
         return None;
     }
 
-    // Sampling cap: never fold more than this many files for the scope.
+    // Sampling cap: bound new fold work to this deterministic prefix. Cached
+    // reads are intentionally broader and reuse every folded matching file.
     let cap = sampling_cap(files_matched, opts.max_files);
-    let capped: Vec<(String, String)> = ordered.into_iter().take(cap).collect();
+    let capped: Vec<(String, String)> = ordered.iter().take(cap).cloned().collect();
 
     // Folded set: the output samples/ listing, pruned to this source bucket.
     let folded = aggregate::list_folded_leaves(
@@ -322,7 +366,14 @@ pub(crate) async fn resolve(agg: &AggContext, scope: &Scope, opts: RefineOpts) -
     )
     .await;
 
+    let matched_leaf_hosts = ordered
+        .iter()
+        .map(|(_, full)| (aggregate::part_leaf_of(full), aggregate::host_of(full)))
+        .collect();
+
     Some(Resolved {
+        matched: ordered,
+        matched_leaf_hosts,
         capped,
         folded,
         files_matched,
@@ -560,6 +611,56 @@ mod tests {
             sampling_cap(1_000_000, Some(999_999)),
             CAP_MAX_FILES_OVERRIDE,
             "override clamped to hard ceiling"
+        );
+    }
+
+    #[test]
+    fn folded_matching_keys_include_out_of_cap_cache_without_starving_work() {
+        let full_a = "s3://bucket/2026-01-01/0000/svc/host-a/a.bin".to_string();
+        let full_b = "s3://bucket/2026-01-01/0000/svc/host-b/b.bin".to_string();
+        let full_c = "s3://bucket/2026-01-01/0000/svc/host-c/c.bin".to_string();
+        let outside_cap = "s3://bucket/2026-01-01/0000/svc/host-d/d.bin".to_string();
+        let matched = vec![
+            ("raw-c".to_string(), full_c.clone()),
+            ("raw-a".to_string(), full_a.clone()),
+            ("raw-b".to_string(), full_b.clone()),
+            ("raw-d".to_string(), outside_cap.clone()),
+        ];
+        let folded: HashSet<String> = [
+            aggregate::part_leaf_of(&full_a),
+            aggregate::part_leaf_of(&full_c),
+            aggregate::part_leaf_of(&outside_cap),
+        ]
+        .into_iter()
+        .collect();
+        let matched_leaf_hosts = matched
+            .iter()
+            .map(|(_, full)| (aggregate::part_leaf_of(full), aggregate::host_of(full)))
+            .collect();
+        let resolved = Resolved {
+            matched,
+            matched_leaf_hosts,
+            capped: vec![
+                ("raw-c".to_string(), full_c.clone()),
+                ("raw-a".to_string(), full_a.clone()),
+                ("raw-b".to_string(), full_b.clone()),
+            ],
+            folded: folded.clone(),
+            files_matched: 4,
+            total_bytes: 0,
+            hosts_matched: 4,
+        };
+
+        assert_eq!(
+            resolved.folded_matching_full_keys(),
+            vec![full_c, full_a, outside_cap],
+            "all folded matching keys are seeded in stable order, even beyond the fold cap"
+        );
+        assert_eq!(resolved.files_folded_in(&folded), 3);
+        assert_eq!(
+            resolved.unfolded_capped(),
+            vec![("raw-b".to_string(), full_b)],
+            "out-of-cap cache does not consume or starve missing in-cap fold work"
         );
     }
 

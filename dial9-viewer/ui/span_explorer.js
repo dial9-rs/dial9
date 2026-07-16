@@ -9,6 +9,25 @@
 //
 // DOM-free and CommonJS-exported so they can be unit-tested under Node.
 
+
+// Apply the optional refinement cap consistently to API and browser URLs.
+function setMaxFilesParam(searchParams, maxFiles) {
+  if (maxFiles == null) searchParams.delete("max_files");
+  else searchParams.set("max_files", String(maxFiles));
+  return searchParams;
+}
+
+// Decide whether a streamed full snapshot may replace the visible catalog.
+// Refinement reconstructs cached state from bounded seed batches, so snapshots
+// below the already-visible baseline must not temporarily shrink the page.
+function shouldAdoptCatalogSnapshot(mode, baselineFilesFolded, incomingFilesFolded) {
+  if (mode === "replace") return true;
+  if (mode === "exemplars") return false;
+  if (mode === "refine") {
+    return Number(incomingFilesFolded || 0) >= Number(baselineFilesFolded || 0);
+  }
+  return false;
+}
 // ── Duration formatting (reuse from flamegraph_histogram.js when available) ──
 
 function fmtNs(ns) {
@@ -243,6 +262,8 @@ function spanTypeQuality(spanType) {
 function encodeSpanExplorerState(state) {
   const p = new URLSearchParams();
   p.set("api", "1");
+  if (state.data_dir) p.set("data_dir", state.data_dir);
+  setMaxFilesParam(p, state.max_files);
   if (state.bucket) p.set("bucket", state.bucket);
   if (state.region) p.set("aws_region", state.region);
   if (state.prefix) p.set("prefix", state.prefix);
@@ -259,6 +280,8 @@ function encodeSpanExplorerState(state) {
 // Read span explorer state from URL params.
 function decodeSpanExplorerState(params) {
   return {
+    data_dir: params.get("data_dir") || null,
+    max_files: params.get("max_files") != null ? Number(params.get("max_files")) : null,
     bucket: params.get("bucket") || null,
     region: params.get("aws_region") || null,
     prefix: params.get("prefix") || null,
@@ -277,6 +300,8 @@ function decodeSpanExplorerState(params) {
 function flamegraphUrl(state, phase) {
   const p = new URLSearchParams();
   p.set("api", "1");
+  if (state.data_dir) p.set("data_dir", state.data_dir);
+  setMaxFilesParam(p, state.max_files);
   if (state.bucket) p.set("bucket", state.bucket);
   if (state.region) p.set("aws_region", state.region);
   if (state.prefix) p.set("prefix", state.prefix);
@@ -294,6 +319,67 @@ function flamegraphUrl(state, phase) {
     p.set("source", "cpu");
   }
   return "flamegraph.html?" + p.toString();
+}
+
+
+// Keep only exemplars whose durations fall inside the inclusive bounds used by
+// the span flamegraph API. The backend refetches bounded candidates so this
+// also protects the UI from briefly showing stale, out-of-band rows.
+function exemplarsInBand(exemplars, minNs, maxNs) {
+  if (!Array.isArray(exemplars)) return [];
+  return exemplars.filter((exemplar) => {
+    const elapsed = Number(exemplar && exemplar.elapsed_ns);
+    return Number.isFinite(elapsed) &&
+      (minNs == null || elapsed >= minNs) &&
+      (maxNs == null || elapsed <= maxNs);
+  });
+}
+
+// Patch only query-scoped exemplar fields into an existing progressive catalog.
+// Duration-bounded refreshes must not replace catalog statistics with an early
+// partial SSE snapshot or rerender unrelated rows.
+function mergeSelectedExemplarSnapshot(currentTypes, incomingTypes, selectedUid) {
+  const current = Array.isArray(currentTypes) ? currentTypes : [];
+  const incoming = Array.isArray(incomingTypes) ? incomingTypes : [];
+  const selected = incoming.find((spanType) => spanType.span_type_uid === selectedUid);
+  if (!selected) return { spanTypes: current, matched: false };
+  return {
+    matched: true,
+    spanTypes: current.map((spanType) =>
+      spanType.span_type_uid === selectedUid
+        ? Object.assign({}, spanType, {
+            slow_exemplars: selected.slow_exemplars || [],
+            selected_duration_count: selected.selected_duration_count,
+          })
+        : spanType
+    ),
+  };
+}
+
+// Compare query-independent catalog data while ignoring duration-scoped
+// exemplar fields. Preserve-mode refreshes use this at stream completion to
+// avoid rerendering an already-complete catalog, while still adopting a final
+// snapshot if the previous stream had been interrupted mid-refinement.
+function sameSpanCatalogStatistics(leftTypes, rightTypes) {
+  function normalized(types) {
+    if (!Array.isArray(types)) return [];
+    return types
+      .map((spanType) => {
+        const copy = Object.assign({}, spanType);
+        delete copy.slow_exemplars;
+        delete copy.selected_duration_count;
+        return copy;
+      })
+      .sort((a, b) => String(a.span_type_uid).localeCompare(String(b.span_type_uid)));
+  }
+  return JSON.stringify(normalized(leftTypes)) === JSON.stringify(normalized(rightTypes));
+}
+
+// A preserve-mode response is valid only for the exact type and duration scope
+// that initiated it. This rejects late A:X responses after an A→B→A switch
+// has returned the UI to A:global.
+function exemplarRequestMatches(requestUid, requestScopeKey, currentUid, currentScopeKey) {
+  return requestUid === currentUid && requestScopeKey === currentScopeKey;
 }
 
 // Build the viewer deep link that jumps to a specific slow-exemplar span
@@ -316,6 +402,7 @@ function flamegraphUrl(state, phase) {
 function exemplarViewerUrl(exemplar, scope) {
   const ex = exemplar || {};
   const sc = scope || {};
+
   if (!ex.source_key) return "";
   // The backend stores source_key as the fully-qualified `s3://{bucket}/{key}`
   // (that's the `full_key` decode_samples was handed). But `/api/object` wants a
@@ -355,10 +442,18 @@ function exemplarViewerUrl(exemplar, scope) {
 
 // ── Raw trace → SpanTypeStats catalog ────────────────────────────────────────
 
-// Parse a SpanEnter event name "SpanEnter:{target}::{name}:{file}:{line}" into
-// { target, name, file, line }. Returns null for unparseable names.
+// Parse colon-delimited tracing-layer names and struct-derived names such as
+// `SpanEnter__CustomStruct`. Struct-derived schemas carry no target/file/line,
+// so their type suffix is the best available callsite discriminator.
 function parseSpanEventName(evName) {
-  // Strip the prefix: "SpanEnter:" or "SpanExit:" or "SpanClose__"
+  for (const prefix of ["SpanEnter__", "SpanExit__"]) {
+    if (evName.startsWith(prefix)) {
+      const name = evName.slice(prefix.length);
+      return name ? { target: "", name, file: null, line: null } : null;
+    }
+  }
+
+  // Strip the dynamic-schema prefix: "SpanEnter:" or "SpanExit:"
   let body = null;
   if (evName.startsWith("SpanEnter:")) body = evName.slice("SpanEnter:".length);
   else if (evName.startsWith("SpanExit:")) body = evName.slice("SpanExit:".length);
@@ -412,17 +507,22 @@ function spanCallsiteKey(target, name, file, line) {
 // Each entry has: { span_type_uid, name, target, callsite_file, callsite_line,
 //   kind, count, p50_ns, p95_ns, p99_ns, max_ns, histogram, composition }.
 function buildSpanCatalog(allSpans, customEvents) {
-  // Determine callsite info for each span by finding its enter event name.
-  // Build a map: spanName → first SpanEnter event name seen (all spans with the
-  // same name come from the same callsite in practice since the schema name
-  // encodes target/name/file/line).
+  // Prefer exact span-instance lookup so two struct-derived event types with
+  // the same runtime `span_name` remain distinct. Keep the name fallback for
+  // callers that provide older allSpans records without span IDs/start times.
+  const spanStartToCallsite = new Map();
   const nameToCallsite = new Map();
   for (const ev of customEvents) {
     if (ev.name.startsWith("SpanEnter:") || ev.name.startsWith("SpanEnter__")) {
-      const spanName = ev.fields && ev.fields.span_name;
+      const fields = ev.fields || {};
+      const spanName = fields.span_name;
+      const parsed = parseSpanEventName(ev.name);
+      if (!parsed) continue;
+      if (fields.span_id != null) {
+        spanStartToCallsite.set(`${String(fields.span_id)}@${Number(ev.timestamp)}`, parsed);
+      }
       if (spanName && !nameToCallsite.has(spanName)) {
-        const parsed = parseSpanEventName(ev.name);
-        if (parsed) nameToCallsite.set(spanName, parsed);
+        nameToCallsite.set(spanName, parsed);
       }
     }
   }
@@ -430,7 +530,8 @@ function buildSpanCatalog(allSpans, customEvents) {
   // Group spans by callsite key (target::name:file:line).
   const groups = new Map(); // callsiteKey → { spans: [], callsite }
   for (const s of allSpans) {
-    const callsite = nameToCallsite.get(s.spanName);
+    const exactKey = `${String(s.spanId)}@${Number(s.start)}`;
+    const callsite = spanStartToCallsite.get(exactKey) || nameToCallsite.get(s.spanName);
     let key;
     if (callsite) {
       key = spanCallsiteKey(callsite.target, callsite.name, callsite.file, callsite.line);
@@ -540,6 +641,8 @@ function buildLogHistogram(sortedDurations, minNs, maxNs) {
 // ── Exports ──────────────────────────────────────────────────────────────────
 
 var SpanExplorer = {
+  setMaxFilesParam,
+  shouldAdoptCatalogSnapshot,
   fmtNs,
   sortSpanTypes,
   spanTypeLabel,
@@ -555,6 +658,10 @@ var SpanExplorer = {
   encodeSpanExplorerState,
   decodeSpanExplorerState,
   flamegraphUrl,
+  exemplarsInBand,
+  mergeSelectedExemplarSnapshot,
+  exemplarRequestMatches,
+  sameSpanCatalogStatistics,
   exemplarViewerUrl,
   parseSpanEventName,
   buildSpanCatalog,

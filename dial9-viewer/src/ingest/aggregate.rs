@@ -40,7 +40,7 @@ pub(crate) const ORDER_VERSION: u32 = 1;
 /// (`{output_prefix}/v{N}/…`). Bump when changing *what* we persist and we want
 /// a deliberate recompute; reads/writes then target a fresh empty tree that
 /// repopulates lazily. The old tree is abandoned and GC'd out-of-band.
-pub(crate) const SAMPLES_FORMAT_VERSION: u32 = 4;
+pub(crate) const SAMPLES_FORMAT_VERSION: u32 = 5;
 
 /// Default raw-trace segment duration, in seconds. A source file covers
 /// `[epoch, epoch + segment_duration)`; the [`Scope`] time filter pads by this
@@ -524,6 +524,9 @@ pub(crate) async fn list_folded_leaves(
 pub(crate) struct Coverage {
     pub files_matched: usize,
     pub files_folded: usize,
+    /// Number of matched files in the deterministic prefix eligible for new
+    /// folding in this request. Cached coverage may exceed this value.
+    pub fold_work_cap: usize,
     pub samples_folded: usize,
     /// Total bytes of all matched source files in the scope.
     pub total_bytes: u64,
@@ -1059,25 +1062,19 @@ pub(crate) async fn fetch_sample_parts(
     Some((samples.ok()?, dict_data.ok()))
 }
 
-/// Fetch the samples + dict part-files for every folded key in `source_keys`,
+/// Fetch the samples + dict part-files for each explicit source key,
 /// concurrently (`buffer_unordered`). Returns `(leaf, Result)` pairs keyed by
 /// [`part_leaf_of`] so callers can identify exactly which leaves succeeded or
-/// failed regardless of completion order. Used to prime a [`FlamegraphAccum`]
-/// with the already-folded set before streaming new folds.
+/// failed regardless of completion order. Used by the fold-stream driver to
+/// seed a [`FlamegraphAccum`] one bounded batch at a time.
 pub(crate) async fn fetch_folded_sample_parts(
     output: &dyn StorageBackend,
     bucket: &str,
     output_prefix: &str,
     source_keys: &[String],
-    folded: &HashSet<String>,
 ) -> Vec<(String, Result<(Vec<u8>, Option<Vec<u8>>), String>)> {
     use futures::stream::StreamExt;
-    let keys: Vec<String> = source_keys
-        .iter()
-        .filter(|sk| folded.contains(&part_leaf_of(sk)))
-        .cloned()
-        .collect();
-    futures::stream::iter(keys)
+    futures::stream::iter(source_keys.iter().cloned())
         .map(|sk| async move {
             let leaf = part_leaf_of(&sk);
             match fetch_sample_parts(output, bucket, output_prefix, &sk).await {
@@ -1669,7 +1666,7 @@ mod tests {
         let pk = samples_part_key("flamegraph-data", sk);
         // Output is namespaced by source bucket, then partitioned by scope.
         assert!(pk.starts_with(
-            "flamegraph-data/v4/bucket=bkt/samples/service=shale/date=2026-06-19/host=host-a/"
+            "flamegraph-data/v5/bucket=bkt/samples/service=shale/date=2026-06-19/host=host-a/"
         ));
         assert!(pk.ends_with(".parquet"));
         // Leaf is the content hash, idempotent across calls.

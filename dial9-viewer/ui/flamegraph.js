@@ -1606,10 +1606,10 @@
     function getZoomPath() {
       function fullPath(tree, stack) {
         if (!tree || stack.length === 0) return [];
-        // If stack already has the full path (from zoomToPath restore), use it directly.
-        // Otherwise find the path from root to the zoom target.
+        // Resolve the exact target object back to its ancestor chain. Name-based
+        // DFS is ambiguous when different branches end in the same frame name.
         const target = stack[stack.length - 1];
-        const path = findNodePath(tree, target.name);
+        const path = findAncestorPath(tree, target);
         return path ? path.map((n) => n.name) : stack.map((n) => n.name);
       }
       return {

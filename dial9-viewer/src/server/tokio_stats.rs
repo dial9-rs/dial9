@@ -186,7 +186,7 @@ pub async fn get_tokio_stats(
     // it is reported as absent rather than a misleading zero.
     let op = OperationMetrics::tokio_stats(
         resolved.files_matched as u32,
-        resolved.files_folded_in(resolved.folded()) as u32,
+        resolved.capped_files_folded_in(resolved.folded()) as u32,
         None,
     );
 
@@ -364,7 +364,7 @@ fn snapshot_event(
         .collect();
     by_spawn_loc.sort_by_key(|l| std::cmp::Reverse(l.durations_ns.len()));
 
-    let files_folded = ctx.resolved.files_folded_in(folded);
+    let files_folded = ctx.resolved.capped_files_folded_in(folded);
     let resp = TokioStatsResponse {
         time_span_ns,
         total_polls: acc.total_polls,
@@ -374,11 +374,12 @@ fn snapshot_event(
         coverage: Some(aggregate::Coverage {
             files_matched: ctx.resolved.files_matched,
             files_folded,
+            fold_work_cap: ctx.resolved.fold_work_cap(),
             // tokio-stats counts folded files, not samples, as its "folded" unit.
             samples_folded: files_folded,
             total_bytes: ctx.resolved.total_bytes,
             hosts_matched: ctx.resolved.hosts_matched,
-            hosts_folded: ctx.resolved.folded_hosts(folded),
+            hosts_folded: ctx.resolved.capped_folded_hosts(folded),
             fold_errors: errors.count,
             fold_error_sample: errors.sample.clone(),
         }),

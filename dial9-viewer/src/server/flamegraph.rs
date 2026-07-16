@@ -2,13 +2,14 @@
 //! Server-Sent Events, refining as source files fold.
 //!
 //! One request holds the connection open: it [resolves](refine::resolve) the
-//! scope, emits the already-folded snapshot immediately, then folds up to the
-//! [sampling cap](refine) and pushes a fresh full-tree snapshot as each file
-//! lands, closing when the cap is reached. Each SSE `data:` frame is one
+//! scope, streams already-folded parts in bounded cumulative snapshots, then
+//! folds missing capped-prefix files and pushes a fresh full-tree snapshot as
+//! each file lands, closing when the bounded work-list drains. Each SSE `data:`
+//! frame is one
 //! [`FlamegraphResponse`] JSON object — the same shape the UI rendered per poll
 //! before — so the client just re-renders on every event.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::convert::Infallible;
 
 use axum::Extension;
@@ -488,23 +489,24 @@ struct FlamegraphSink {
 }
 
 impl fold_stream::FoldSink for FlamegraphSink {
-    async fn seed(
+    async fn seed_batch(
         &mut self,
         agg: &AggContext,
-        resolved: &Resolved,
+        full_keys: &[String],
     ) -> Vec<fold_stream::PartOutcome> {
-        // Prime the accumulator over the already-folded set, concurrently.
+        // Prime the accumulator from this bounded cached batch concurrently.
         // Results are keyed by leaf hash so completion order doesn't matter.
         let seed = aggregate::fetch_folded_sample_parts(
             &*agg.output,
             &agg.output_bucket,
             &agg.output_prefix,
-            &resolved.capped_full_keys(),
-            resolved.folded(),
+            full_keys,
         )
         .await;
-        // Only mark a leaf folded after its sample+dict GET and full merge
-        // succeed; record GET/merge failures. The driver applies the rule.
+        // Only mark a leaf folded after its required samples GET and full merge
+        // succeed. The stacks dictionary is optional enrichment by the persisted
+        // part-file contract; its absence is represented as `None`.
+        // The driver applies the membership rule.
         let mut outcomes = Vec::with_capacity(seed.len());
         for (leaf, result) in seed {
             let outcome = match result {
@@ -529,8 +531,9 @@ impl fold_stream::FoldSink for FlamegraphSink {
     }
 
     async fn fold_one(&mut self, agg: &AggContext, f: &Folded) -> fold_stream::PartOutcome {
-        // Only mark the leaf folded after sample+dict fetch AND full merge
-        // succeed; failures increment errors.
+        // Only mark the leaf folded after the required samples fetch and full
+        // merge succeed; the stacks dictionary is optional enrichment.
+        // Failures increment errors.
         match aggregate::fetch_sample_parts(
             &*agg.output,
             &agg.output_bucket,
@@ -564,11 +567,18 @@ impl fold_stream::FoldSink for FlamegraphSink {
     fn snapshot_event(
         &self,
         resolved: &Resolved,
-        folded: &HashSet<String>,
+        files_folded: usize,
+        hosts_folded: usize,
         errors: &FoldErrors,
     ) -> Event {
         let snap = self.accum.snapshot();
-        let coverage = fold_stream::coverage_from(resolved, folded, errors, snap.total_samples);
+        let coverage = fold_stream::coverage_from(
+            resolved,
+            files_folded,
+            hosts_folded,
+            errors,
+            snap.total_samples,
+        );
         let resp = build_response(&self.ctx, &snap, coverage);
         // `json_data` only fails if the value can't serialize; our response always
         // can, so fall back to an empty comment event rather than propagating.
@@ -584,10 +594,10 @@ impl fold_stream::FoldSink for FlamegraphSink {
 
 /// Build the SSE event stream for one flamegraph request.
 ///
-/// The first `unfold` step primes an accumulator over the already-folded set and
-/// emits an instant snapshot (like the old read-only first poll). Each later step
-/// pulls one file off [`refine::fold_stream`], reads + merges its part-files, and
-/// emits a refined snapshot, closing when the work-list drains. Dropping the
+/// Cached already-folded parts are merged in bounded batches, with a cumulative
+/// snapshot emitted after each batch. Once cached state is exhausted, each later
+/// step pulls one file off [`refine::fold_stream`], reads + merges its part-files,
+/// and emits a refined snapshot, closing when the work-list drains. Dropping the
 /// returned stream (client disconnect) drops the fold stream, cancelling
 /// in-flight folds.
 fn flamegraph_stream(

@@ -100,7 +100,7 @@
 <script src="creds.js"></script>
 <script src="format.js"></script>
 <script src="sse.js"></script>
-<script src="flamegraph_api.js"></script>
+<script src="flamegraph_api.js?v=fold-work-cap-1"></script>
 <script src="flamegraph_histogram.js"></script>
 <script src="span_explorer.js"></script>
 <script src="decode.js"></script>
@@ -155,6 +155,7 @@
 (function() {
   const params = new URLSearchParams(window.location.search);
   const SE = window.SpanExplorer;
+  const FG_API = window.FlamegraphApi;
 
   // Fold region into creds store (same pattern as flamegraph.html).
   const urlRegion = params.get("aws_region");
@@ -193,12 +194,19 @@
   let bandMinNs = params.get("min_span_ns") != null ? Number(params.get("min_span_ns")) : null;
   let bandMaxNs = params.get("max_span_ns") != null ? Number(params.get("max_span_ns")) : null;
   let lastCoverage = null;
+  let exemplarRefreshPending = false;
   let streamToken = 0;
   let abortCtl = null;
+  let activeStreamMode = null;
   let sortKey = "count";
   let sortAsc = false;
 
   // ── API URL builder ─────────────────────────────────────────────────────────
+
+  const exemplarScopeByUid = new Map();
+  function currentExemplarScopeKey() {
+    return `${bandMinNs == null ? "" : bandMinNs}:${bandMaxNs == null ? "" : bandMaxNs}`;
+  }
 
   function buildApiUrl() {
     const u = new URL("/api/span-stats", window.location.origin);
@@ -212,7 +220,11 @@
     const endNs = pickerUtcToNs(fEnd.value);
     if (startNs) u.searchParams.set("start_ns", startNs);
     if (endNs) u.searchParams.set("end_ns", endNs);
-    if (maxFiles != null) u.searchParams.set("max_files", String(maxFiles));
+    // Duration bounds scope only the backend's bounded exemplar candidates;
+    // catalog statistics remain unchanged.
+    if (bandMinNs != null) u.searchParams.set("min_span_ns", String(bandMinNs));
+    if (bandMaxNs != null) u.searchParams.set("max_span_ns", String(bandMaxNs));
+    SE.setMaxFilesParam(u.searchParams, maxFiles);
     return u;
   }
 
@@ -234,11 +246,24 @@
     if (selectedUid) p.set("span_type_uid", selectedUid);
     if (bandMinNs != null) p.set("min_span_ns", String(bandMinNs));
     if (bandMaxNs != null) p.set("max_span_ns", String(bandMaxNs));
+    SE.setMaxFilesParam(p, maxFiles);
     history.replaceState(null, "", window.location.pathname + "?" + p.toString());
   }
 
   // ── Catalog rendering ───────────────────────────────────────────────────────
 
+
+  // Duration-scoped exemplar fields belong to the bounds of the request that
+  // produced them. Clear the selected type's copy before changing bounds so a
+  // previous band's count or exemplars are never relabeled as the new scope.
+  function invalidateSelectedExemplarData() {
+    spanTypes = spanTypes.map((st) => {
+      if (st.span_type_uid !== selectedUid) return st;
+      const next = Object.assign({}, st, { slow_exemplars: [] });
+      delete next.selected_duration_count;
+      return next;
+    });
+  }
   function renderCatalog() {
     // Attach computed quality for sorting; original objects are not mutated.
     const augmented = spanTypes.map(st => {
@@ -277,13 +302,22 @@
   // ── Span type selection ─────────────────────────────────────────────────────
 
   function selectSpanType(uid) {
+    // A pending preserve response is scoped to the prior type/bounds. Cancel it
+    // even when the newly selected type already has valid cached exemplars.
+    if (activeStreamMode === "exemplars" || activeStreamMode === "refine") stopStreaming();
     selectedUid = uid;
-    // Reset band on type change.
+    // Reset band on type change. Exemplar rows are request-scoped, so refresh
+    // whenever this type's cached rows were produced under different bounds.
     bandMinNs = null;
     bandMaxNs = null;
+    const needsExemplarRefresh =
+      !rawTraceParam && exemplarScopeByUid.get(uid) !== currentExemplarScopeKey();
+    if (needsExemplarRefresh) invalidateSelectedExemplarData();
+    exemplarRefreshPending = needsExemplarRefresh;
     updateBrowserUrl();
     renderCatalog();
     renderDetail();
+    if (needsExemplarRefresh) startStreaming("exemplars");
   }
 
   // ── Detail panel ────────────────────────────────────────────────────────────
@@ -303,9 +337,14 @@
     // to — the slowest exemplar (slow_exemplars[0], sorted desc) is the max
     // instance. Clicking pans/zooms the viewer to that span via focus_* params.
     const scope = exemplarScope(st);
-    const slowest = Array.isArray(st.slow_exemplars) && st.slow_exemplars.length > 0
-      ? st.slow_exemplars[0] : null;
-    const maxJumpUrl = slowest ? SE.exemplarViewerUrl(slowest, scope) : "";
+    const exemplarCandidates = exemplarRefreshPending
+      ? []
+      : SE.exemplarsInBand(st.slow_exemplars, bandMinNs, bandMaxNs);
+    const slowest = exemplarCandidates.length > 0 ? exemplarCandidates[0] : null;
+    const hasDurationBand = bandMinNs != null || bandMaxNs != null;
+    // The header's max value is an all-instances statistic, so never attach an
+    // in-band exemplar whose duration may differ from that displayed maximum.
+    const maxJumpUrl = !hasDurationBand && slowest ? SE.exemplarViewerUrl(slowest, scope) : "";
     const maxHtml = maxJumpUrl
       ? `<a class="max-jump" href="${esc(maxJumpUrl)}" target="_blank" ` +
         `title="Jump to the slowest instance of this span in the viewer">${SE.fmtNs(st.max_ns)}</a>`
@@ -427,8 +466,13 @@
       if (band) {
         bandMinNs = band.min_ns;
         bandMaxNs = band.max_ns;
+        if (!rawTraceParam) invalidateSelectedExemplarData();
+        exemplarRefreshPending = !rawTraceParam;
         updateBrowserUrl();
         renderDetail();
+        // Refetch bounded exemplar candidates. Client filtering alone cannot
+        // recover lower-band spans from the backend's global top-five list.
+        if (!rawTraceParam) startStreaming("exemplars");
       }
     });
 
@@ -472,18 +516,26 @@
     const wrap = document.createElement("div");
     wrap.className = "band-info";
     if (bandMinNs != null || bandMaxNs != null) {
-      const count = SE.countInBand(st.histogram, bandMinNs, bandMaxNs);
+      const count = st.selected_duration_count != null
+        ? Number(st.selected_duration_count)
+        : SE.countInBand(st.histogram, bandMinNs, bandMaxNs);
+      const countLabel = exemplarRefreshPending
+        ? "refreshing exact count…"
+        : `${count.toLocaleString()} instances`;
       const lo = bandMinNs != null ? SE.fmtNs(bandMinNs) : "0";
       const hi = bandMaxNs != null ? SE.fmtNs(bandMaxNs) : "∞";
       wrap.innerHTML =
         `<span>Selected band: ${lo} – ${hi}</span>` +
-        `<span class="count">${count.toLocaleString()} instances</span>` +
+        `<span class="count">${countLabel}</span>` +
         `<button class="secondary" id="btn-clear-band" style="font-size:0.85em;padding:2px 8px;cursor:pointer">Clear</button>`;
       wrap.querySelector("#btn-clear-band").addEventListener("click", () => {
         bandMinNs = null;
         bandMaxNs = null;
+        if (!rawTraceParam) invalidateSelectedExemplarData();
+        exemplarRefreshPending = !rawTraceParam;
         updateBrowserUrl();
         renderDetail();
+        if (!rawTraceParam) startStreaming("exemplars");
       });
     } else {
       wrap.innerHTML = '<span style="color:#666">Drag the histogram to select a duration band for flamegraphs.</span>';
@@ -557,6 +609,7 @@
         (ns > 0 ? ` <span class="legend-ns">(${SE.fmtNs(ns)})</span>` : "");
       item.title = `${cat.label}: ${SE.fmtNs(ns)} (${pct}%)`;
       legend.appendChild(item);
+
     }
     wrap.appendChild(legend);
 
@@ -564,6 +617,17 @@
   }
 
   // ── Flamegraph links ────────────────────────────────────────────────────────
+
+  // Open from the click handler rather than relying on target=_blank. Modern
+  // anchors may imply `noopener`, which prevents the same-origin tab from
+  // inheriting sessionStorage-backed BYOC credentials and yields a misleading
+  // flamegraph 404 after S3 rejects every prefix listing.
+  function openFlamegraphWithSession(event) {
+    event.preventDefault();
+    const href = event.currentTarget.href;
+    const opened = window.open(href, "_blank");
+    if (!opened) window.location.href = href;
+  }
 
   function renderFlamegraphLinks(container) {
     if (!selectedUid) return;
@@ -581,6 +645,8 @@
     }
 
     const state = {
+      data_dir: params.get("data_dir"),
+      max_files: maxFiles,
       bucket: scopeBucket,
       region: scopeRegion,
       prefix: scopePrefix,
@@ -598,6 +664,7 @@
     cpuLink.href = SE.flamegraphUrl(state, "on_cpu");
     cpuLink.target = "_blank";
     cpuLink.textContent = "🔥 On-CPU Flamegraph";
+    cpuLink.addEventListener("click", openFlamegraphWithSession);
     wrap.appendChild(cpuLink);
 
     const blockLink = document.createElement("a");
@@ -605,6 +672,7 @@
     blockLink.href = SE.flamegraphUrl(state, "blocking");
     blockLink.target = "_blank";
     blockLink.textContent = "🧱 Blocking Flamegraph";
+    blockLink.addEventListener("click", openFlamegraphWithSession);
     wrap.appendChild(blockLink);
 
     container.appendChild(wrap);
@@ -629,15 +697,28 @@
   // Each row deep-links to the viewer focused on that exact span instance via
   // focus_* params. In raw-trace mode (or with no source_key) rows are inert.
   function renderExemplars(container, st) {
-    const exemplars = Array.isArray(st.slow_exemplars) ? st.slow_exemplars : [];
-    if (exemplars.length === 0) return;
+    const hasBand = bandMinNs != null || bandMaxNs != null;
+    const exemplars = SE.exemplarsInBand(st.slow_exemplars, bandMinNs, bandMaxNs);
+    if (exemplars.length === 0 && !hasBand) return;
     const scope = exemplarScope(st);
     const wrap = document.createElement("div");
     wrap.className = "exemplars";
     const label = document.createElement("div");
     label.className = "label";
-    label.textContent = "Slow exemplars (click a row to open the span in the viewer):";
+    label.textContent = hasBand
+      ? "Slow exemplars in selected band (click a row to open the span in the viewer):"
+      : "Slow exemplars (click a row to open the span in the viewer):";
     wrap.appendChild(label);
+    if (exemplars.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "muted";
+      empty.textContent = exemplarRefreshPending
+        ? "Refreshing matching exemplars…"
+        : "No matching exemplars are available for this exact duration band.";
+      wrap.appendChild(empty);
+      container.appendChild(wrap);
+      return;
+    }
 
     // Show a Host column only when exemplars span more than one host.
     const multiHost = new Set(exemplars.map((e) => e.host || "")).size > 1;
@@ -681,22 +762,34 @@
 
   function stopStreaming() {
     streamToken++;
+    activeStreamMode = null;
     if (abortCtl) { abortCtl.abort(); abortCtl = null; }
     setStreamingUi(false);
   }
 
-  function startStreaming() {
+  function startStreaming(mode = "replace") {
+    const baselineFilesFolded = (mode === "refine" || mode === "exemplars") && lastCoverage
+      ? lastCoverage.files_folded
+      : 0;
     stopStreaming();
+    activeStreamMode = mode;
     setStreamingUi(true);
-    loadingEl.classList.remove("hidden");
     errorEl.style.display = "none";
-    catalogWrap.style.display = "none";
-    detailPanel.className = "detail-panel empty";
-    detailPanel.innerHTML = "";
+    if (mode === "replace") {
+      loadingEl.classList.remove("hidden");
+      catalogWrap.style.display = "none";
+      detailPanel.className = "detail-panel empty";
+      detailPanel.innerHTML = "";
+    }
 
     const token = ++streamToken;
     abortCtl = new AbortController();
     const credHeaders = window.Dial9Creds ? Dial9Creds.headers() : {};
+    const requestSelectedUid = selectedUid;
+    const requestExemplarScopeKey = currentExemplarScopeKey();
+    let latestIncomingTypes = null;
+    let latestIncomingCoverage = null;
+    let exemplarSnapshotAdopted = false;
     let gotEvent = false;
 
     Dial9Sse.openSse(buildApiUrl(), {
@@ -704,12 +797,49 @@
       signal: abortCtl.signal,
       onEvent: (resp) => {
         if (token !== streamToken) return;
+        if (mode === "exemplars" && !SE.exemplarRequestMatches(
+          requestSelectedUid,
+          requestExemplarScopeKey,
+          selectedUid,
+          currentExemplarScopeKey(),
+        )) return;
         gotEvent = true;
         loadingEl.classList.add("hidden");
-        spanTypes = resp.span_types || [];
-        lastCoverage = resp.coverage || null;
-        renderCatalog();
-        renderDetail();
+        const incomingTypes = resp.span_types || [];
+        const incomingFilesFolded = resp.coverage ? resp.coverage.files_folded : 0;
+        if (mode === "exemplars") {
+          latestIncomingTypes = incomingTypes;
+          latestIncomingCoverage = resp.coverage || null;
+          if (incomingFilesFolded >= baselineFilesFolded) {
+            const merged = SE.mergeSelectedExemplarSnapshot(
+              spanTypes,
+              incomingTypes,
+              requestSelectedUid,
+            );
+            spanTypes = merged.spanTypes;
+            if (merged.matched) {
+              exemplarScopeByUid.set(requestSelectedUid, requestExemplarScopeKey);
+              exemplarRefreshPending = false;
+              exemplarSnapshotAdopted = true;
+            }
+            lastCoverage = resp.coverage || lastCoverage;
+            renderDetail();
+          }
+        } else if (SE.shouldAdoptCatalogSnapshot(
+          mode,
+          baselineFilesFolded,
+          incomingFilesFolded,
+        )) {
+          spanTypes = incomingTypes;
+          exemplarScopeByUid.clear();
+          for (const spanType of incomingTypes) {
+            exemplarScopeByUid.set(spanType.span_type_uid, requestExemplarScopeKey);
+          }
+          lastCoverage = resp.coverage || null;
+          exemplarRefreshPending = false;
+          renderCatalog();
+          renderDetail();
+        }
         // Stats badge
         const total = spanTypes.reduce((s, t) => s + t.count, 0);
         let badge = `${spanTypes.length} span types · ${total.toLocaleString()} instances`;
@@ -719,17 +849,63 @@
       onClose: () => {
         if (token !== streamToken) return;
         setStreamingUi(false);
+        activeStreamMode = null;
+        if (mode === "exemplars" && !SE.exemplarRequestMatches(
+          requestSelectedUid,
+          requestExemplarScopeKey,
+          selectedUid,
+          currentExemplarScopeKey(),
+        )) return;
+        if (mode === "exemplars") {
+          const finalFilesFolded = latestIncomingCoverage
+            ? latestIncomingCoverage.files_folded
+            : 0;
+          const recoveredBaseline = finalFilesFolded >= baselineFilesFolded;
+          const catalogChanged = recoveredBaseline && latestIncomingTypes != null &&
+            !SE.sameSpanCatalogStatistics(spanTypes, latestIncomingTypes);
+          if (catalogChanged) {
+            spanTypes = latestIncomingTypes;
+            lastCoverage = latestIncomingCoverage || lastCoverage;
+            exemplarScopeByUid.clear();
+            for (const spanType of spanTypes) {
+              exemplarScopeByUid.set(spanType.span_type_uid, requestExemplarScopeKey);
+            }
+            renderCatalog();
+          }
+          exemplarRefreshPending = !exemplarSnapshotAdopted;
+          renderDetail();
+        } else {
+          exemplarRefreshPending = false;
+        }
         if (gotEvent) {
           const total = spanTypes.reduce((s, t) => s + t.count, 0);
           let badge = `${spanTypes.length} span types · ${total.toLocaleString()} instances`;
           if (lastCoverage) badge += " · " + formatCoverageBadge(lastCoverage);
-          statsEl.textContent = badge + " · refined";
+          statsEl.textContent = badge +
+            (mode === "exemplars" && !exemplarSnapshotAdopted
+              ? " · exemplar refresh incomplete"
+              : " · refined");
         }
       },
       onError: (err) => {
         if (token !== streamToken) return;
         setStreamingUi(false);
-        if (!gotEvent) {
+        activeStreamMode = null;
+        if (mode === "exemplars" && !SE.exemplarRequestMatches(
+          requestSelectedUid,
+          requestExemplarScopeKey,
+          selectedUid,
+          currentExemplarScopeKey(),
+        )) return;
+        exemplarRefreshPending = mode === "exemplars";
+        if (mode === "exemplars") {
+          renderDetail();
+          statsEl.textContent = statsEl.textContent.replace(/ · .*refining.*/, "") +
+            " · exemplar refresh interrupted";
+        } else if (mode === "refine") {
+          statsEl.textContent = statsEl.textContent.replace(/ · .*refining.*/, "") +
+            " · refinement interrupted";
+        } else if (!gotEvent) {
           loadingEl.classList.add("hidden");
           errorEl.style.display = "flex";
           errorEl.textContent = "Failed to load span stats: " + err.message;
@@ -749,13 +925,17 @@
   });
 
   btnMore.addEventListener("click", () => {
-    const folded = lastCoverage ? lastCoverage.files_folded : 0;
-    maxFiles = nextMaxFiles(folded);
-    startStreaming();
+    const workDepth = FG_API.refinementWorkDepth(lastCoverage, maxFiles);
+    maxFiles = FG_API.nextMaxFiles(workDepth);
+    updateBrowserUrl();
+    startStreaming("refine");
   });
 
   btnStop.addEventListener("click", () => {
+    const stoppedMode = activeStreamMode;
     stopStreaming();
+    if (stoppedMode !== "exemplars") exemplarRefreshPending = false;
+    renderDetail();
     const total = spanTypes.reduce((s, t) => s + t.count, 0);
     let badge = `${spanTypes.length} span types · ${total.toLocaleString()} instances`;
     if (lastCoverage) badge += " · " + formatCoverageBadge(lastCoverage);

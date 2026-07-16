@@ -49,16 +49,19 @@ job). The old tree is abandoned and GC'd out-of-band.
 **Refinement loop**:
 The query control flow, realized as a **single held-open SSE stream** per
 request. The server *resolves* the scope once (list → [[order-key]] sort →
-take the first [[sampling-cap]] files → list the folded set), emits the
-already-folded snapshot immediately, then folds the not-yet-folded
-[[source-file]]s (in order) concurrently and pushes a fresh tree +
-[[coverage]] block as each file lands, closing the stream at the cap. The
+retain the matched set + take the first [[sampling-cap]] files as the new-work
+prefix → list the folded set), streams every folded matching part in bounded
+cumulative snapshots, then folds missing prefix [[source-file]]s (in order)
+concurrently and pushes a fresh tree + [[coverage]] block as each file lands,
+closing when the work-list drains. The cap bounds new source folding; reusable
+cache from overlapping scopes can make coverage exceed it. The
 endpoint merges each folded file into an in-memory accumulator incrementally
 (one merge per file), rather than re-scanning the whole folded set per event.
 No background tasks and no coordination — folding runs only while the request
 is open (the fold `JoinSet` is dropped, cancelling in-flight folds, when the
 client disconnects), and re-folding is safe by idempotency. Coverage climbs
-monotonically until the server closes the stream at the cap.
+monotonically until cached reconstruction and the bounded work-list drain; it may
+exceed the cap because the cap limits new source folding, not reusable cache.
 (Deferred optimization: memoize each file's immutable `{stack_id→count}`
 histogram *across requests* so a reopened stream sums cached per-file maps.)
 _Avoid_: client re-polling, `refine=` request flag, job handle, background
@@ -106,11 +109,12 @@ The point at which the [[refinement-loop]] stops folding a scope's tail:
 backend-configurable. The percentage keeps small scopes sensible; the
 absolute ceiling stops a fleet-day scope from chasing 5% of tens of
 thousands of files (which would re-create the batch job). The
-[[refinement-loop]] closes the stream once it reaches the cap. A user-facing
-"fetch more" reopens the stream with a raised ceiling for that scope on
-demand. Folding also stops early if the client disconnects
-(refine-while-watched).
-_Avoid_: completion target (we deliberately never reach 100%).
+[[refinement-loop]] closes the stream once cached reconstruction and its missing
+in-prefix work drain. A user-facing "fetch more" reopens the stream with a
+raised new-work ceiling for that scope on demand. Folding also stops early if the
+client disconnects (refine-while-watched). The cap is not a coverage ceiling:
+matching reusable cache may take coverage beyond it, including to 100%.
+_Avoid_: completion target for new folding (the cap bounds work, not coverage).
 
 **Scope**:
 A query's selection: a time range (minute precision), a service, and a
