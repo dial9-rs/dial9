@@ -700,6 +700,21 @@
                     // address bar and any copy/diff link so a shared URL stays
                     // self-contained rather than depending on the tab's store.
                     const scopeRegion = params.get("aws_region");
+                    // Span-type filter carried by span-explorer deep links. These
+                    // scope the flamegraph to CPU/sched samples enclosed by a span
+                    // of this type (and optional duration band). They are fixed for
+                    // the life of the view (not toolbar-editable), so they live
+                    // alongside the other scope vars rather than in filterState.
+                    const scopeSpanTypeUid = params.get("span_type_uid");
+                    const scopeMinSpanNs = params.get("min_span_ns");
+                    const scopeMaxSpanNs = params.get("max_span_ns");
+                    // Append the span-type filter params to any request/scope query
+                    // builder. A no-op when no span filter is active.
+                    function addSpanParams(p) {
+                        if (scopeSpanTypeUid) p.set("span_type_uid", scopeSpanTypeUid);
+                        if (scopeMinSpanNs) p.set("min_span_ns", scopeMinSpanNs);
+                        if (scopeMaxSpanNs) p.set("max_span_ns", scopeMaxSpanNs);
+                    }
 
                     function buildApiUrl() {
                         const u = new URL("/api/flamegraph", window.location.origin);
@@ -726,6 +741,7 @@
                         if (minPollNs) u.searchParams.set("min_poll_ns", minPollNs);
                         if (maxPollNs) u.searchParams.set("max_poll_ns", maxPollNs);
                         if (maxFiles != null) u.searchParams.set("max_files", String(maxFiles));
+                        addSpanParams(u.searchParams);
                         // The endpoint is an SSE stream: the server emits the
                         // already-folded snapshot first, then folds to the cap and
                         // pushes a fresh tree per file. No client `refine` flag.
@@ -753,6 +769,7 @@
                         const maxPollNs = msToNs(fPollMax.value);
                         if (minPollNs) p.set("min_poll_ns", minPollNs);
                         if (maxPollNs) p.set("max_poll_ns", maxPollNs);
+                        addSpanParams(p);
                         // Carry the live zoom/inspect focus so the address bar (and
                         // anything copied from it) always reproduces the exact view.
                         if (fg) writeViewState(p, fg);
@@ -1392,6 +1409,7 @@
                         if (minPollNs) p.set("min_poll_ns", minPollNs);
                         if (maxPollNs) p.set("max_poll_ns", maxPollNs);
                         if (maxFiles != null) p.set("max_files", String(maxFiles));
+                        addSpanParams(p);
                         return FlamegraphDiff.fullScopeQuery(p);
                     }
 

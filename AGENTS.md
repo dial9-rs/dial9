@@ -71,6 +71,28 @@ rate_limited!(Duration::from_secs(60), {
 ```
 Unguarded logging in loops causes log spam that degrades observability and can itself become a performance problem. One-time paths (startup, shutdown, per-thread init) are exempt.
 
+## Viewer deep links (`/api/object` and `source_key`)
+
+When building a viewer/flamegraph deep link in the UI that loads a specific
+trace file, the `trace=/api/object?bucket=…&key=…` component's `key` must be a
+**bucket-relative** key (e.g. `2026-07-15/1715/svc/host/boot/epoch-seg.bin.gz`),
+NOT a fully-qualified `s3://{bucket}/{key}` URI. `/api/object` treats the `key`
+verbatim, so passing an `s3://…` URI yields a **404**.
+
+Beware: the folded backend stores a span/sample's `source_key` as the
+fully-qualified `s3://{bucket}/{key}` form (that is the `full_key`
+`decode_samples` was handed). So any UI code that turns a `source_key` into an
+`/api/object` link must split off the `s3://{bucket}/` prefix first (parse the
+bucket from the URI, keep the remainder as the key). See
+`exemplarViewerUrl` in `dial9-viewer/ui/span_explorer.js`.
+
+Diagnosing a broken deep link: a **404 is almost always a wrong key/endpoint**,
+not missing credentials. Credentials (BYOC) live in `sessionStorage`, which the
+browser copies to a tab opened via a normal same-origin link or `window.open`,
+so a new viewer tab inherits them. Before blaming creds, print the exact
+`/api/object?bucket=&key=` the link produces and `curl` it against the running
+server — compare the `s3://…` key vs the bucket-relative key.
+
 ## Testing
 
 ### Local viewer server

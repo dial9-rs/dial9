@@ -1933,6 +1933,122 @@ mod tests {
         );
     }
 
+    /// DELIVERABLE (span-explorer bug repro): the `span_type_uid` filter must keep
+    /// ONLY the samples enclosed by a span of the requested type, and the surviving
+    /// flamegraph must therefore contain ONLY that type's frames. This is the test
+    /// that makes a broken filter obvious: two span types (A, B) enclose samples
+    /// with clearly distinguishable stack frames ("frame_A_only" vs "frame_B_only").
+    /// Filtering to A must yield frame_A_only and NOT frame_B_only, and vice versa.
+    ///
+    /// The count-only span-filter tests above use identical stack frames, so they
+    /// would still pass if the filter mixed the wrong samples in. This test asserts
+    /// on the actual frames present in the folded stacks dictionary, so a filter
+    /// that lets the wrong span type's samples through fails loudly.
+    #[test]
+    fn span_filter_keeps_only_matching_span_types_frames() {
+        use crate::ingest::decode::{EnclosingSpanSummary, ResolvedSample};
+        use crate::ingest::parquet_writer::{write_samples, write_stacks_dict};
+
+        let type_a = [0xAAu8; 16];
+        let type_b = [0xBBu8; 16];
+
+        // Two stacks with distinct, easily-greppable leaf frames.
+        let stack_a = [0x0Au8; 16];
+        let stack_b = [0x0Bu8; 16];
+        let frames_a = vec!["frame_A_only".to_string(), "shared_root".to_string()];
+        let frames_b = vec!["frame_B_only".to_string(), "shared_root".to_string()];
+
+        let sample = |stack_id: [u8; 16], type_uid: [u8; 16], ts: u64| ResolvedSample {
+            timestamp_ns: ts,
+            stack_id,
+            worker_id: Some(1),
+            source: SOURCE_CPU_PROFILE,
+            source_key: "2026-06-19/1450/shale/myhost/boot-1/123-0.bin.gz".to_string(),
+            host: "myhost".to_string(),
+            service: "shale".to_string(),
+            date: "2026-06-19".to_string(),
+            poll_duration_ns: None,
+            spawn_location: None,
+            enclosing_spans: vec![EnclosingSpanSummary {
+                span_uid: [1u8; 16],
+                span_type_uid: type_uid,
+                elapsed_ns: 5_000_000,
+                details_complete: true,
+            }],
+        };
+
+        // 3 samples enclosed by type A (frame_A_only), 2 by type B (frame_B_only).
+        let samples = vec![
+            sample(stack_a, type_a, 1000),
+            sample(stack_a, type_a, 1001),
+            sample(stack_a, type_a, 1002),
+            sample(stack_b, type_b, 1003),
+            sample(stack_b, type_b, 1004),
+        ];
+        let mut samples_buf = Vec::new();
+        write_samples(&mut samples_buf, &samples, &HashMap::new()).unwrap();
+
+        let mut dict = HashMap::new();
+        dict.insert(stack_a, frames_a.clone());
+        dict.insert(stack_b, frames_b.clone());
+        let mut dict_buf = Vec::new();
+        write_stacks_dict(&mut dict_buf, &dict).unwrap();
+
+        // Collect the distinct frame names present in the surviving (kept) stacks.
+        let surviving_frames =
+            |span_type_uid: Option<[u8; 16]>| -> std::collections::HashSet<String> {
+                let filter = SampleFilter {
+                    span_type_uid,
+                    facets: HashMap::from([("source", "cpu".to_string())]),
+                    ..Default::default()
+                };
+                let mut accum = FlamegraphAccum::new(filter);
+                accum
+                    .merge(samples_buf.clone(), Some(dict_buf.clone()))
+                    .unwrap();
+                let snap = accum.snapshot();
+                let mut frames = std::collections::HashSet::new();
+                for (stack_id, count) in &snap.stack_counts {
+                    assert!(*count > 0, "a stack with zero count should not be present");
+                    if let Some(fs) = snap.stacks_dict.get(stack_id) {
+                        for f in fs {
+                            frames.insert(f.clone());
+                        }
+                    }
+                }
+                frames
+            };
+
+        // Filter to type A: only frame_A_only survives.
+        let a = surviving_frames(Some(type_a));
+        assert!(
+            a.contains("frame_A_only"),
+            "type-A filter must keep frame_A_only, got {a:?}"
+        );
+        assert!(
+            !a.contains("frame_B_only"),
+            "type-A filter must NOT keep frame_B_only (broken filter leaks B), got {a:?}"
+        );
+
+        // Filter to type B: only frame_B_only survives.
+        let b = surviving_frames(Some(type_b));
+        assert!(
+            b.contains("frame_B_only"),
+            "type-B filter must keep frame_B_only, got {b:?}"
+        );
+        assert!(
+            !b.contains("frame_A_only"),
+            "type-B filter must NOT keep frame_A_only (broken filter leaks A), got {b:?}"
+        );
+
+        // No filter: both frames survive.
+        let both = surviving_frames(None);
+        assert!(
+            both.contains("frame_A_only") && both.contains("frame_B_only"),
+            "no span filter must keep both span types' frames, got {both:?}"
+        );
+    }
+
     /// FlamegraphAccum::merge is transactional: a dict parse failure after
     /// samples have been read must leave the accumulator unchanged.
     #[test]

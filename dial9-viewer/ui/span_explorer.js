@@ -144,16 +144,49 @@ const TIME_CATEGORIES = [
   { key: "unknown", label: "Unknown", color: "#6c757d" },
 ];
 
+// Sum the `composition_histogram` buckets that fall inside a brushed duration
+// band into a single `{on_cpu_ns, ...}` object, using the same overlap rule as
+// the count histogram (a bucket is in-band when hi_ns > min && lo_ns < max).
+// Returns null when there is no per-bucket composition data. `min`/`max` may be
+// null (open-ended); a null band on both ends sums every bucket.
+function bandComposition(spanType, min_ns, max_ns) {
+  const buckets = spanType.composition_histogram;
+  if (!Array.isArray(buckets) || buckets.length === 0) return null;
+  const acc = { on_cpu_ns: 0, blocked_ns: 0, async_wait_ns: 0, scheduler_delay_ns: 0, unknown_ns: 0 };
+  for (const b of buckets) {
+    const lo = Number(b.lo_ns);
+    const hi = Number(b.hi_ns);
+    const inBand = (min_ns == null || hi > min_ns) && (max_ns == null || lo < max_ns);
+    if (!inBand) continue;
+    acc.on_cpu_ns += Number(b.on_cpu_ns) || 0;
+    acc.blocked_ns += Number(b.blocked_ns) || 0;
+    acc.async_wait_ns += Number(b.async_wait_ns) || 0;
+    acc.scheduler_delay_ns += Number(b.scheduler_delay_ns) || 0;
+    acc.unknown_ns += Number(b.unknown_ns) || 0;
+  }
+  return acc;
+}
+
 // Compute the five-way composition from a SpanTypeStats response. When the
 // backend returns `composition` (an object with `on_cpu_ns`, `blocked_ns`,
 // `async_wait_ns`, `scheduler_delay_ns`, `unknown_ns`), we use those summed
 // values directly. Unknown is always preserved explicitly — even when zero —
 // so the UI communicates that the category was evaluated rather than hidden.
 //
+// When a duration `band` ({min_ns, max_ns}, either may be null) is supplied and
+// the backend returned `composition_histogram`, the composition is scoped to the
+// buckets inside the band — so it tracks the histogram brush. Without a band (or
+// without per-bucket data) the whole-type `composition` total is used.
+//
 // Falls back to a histogram-estimated total with a single "Unknown" bar when
 // `composition` is absent (older backends / partial data).
-function computeTimeComposition(spanType) {
-  const comp = spanType.composition;
+function computeTimeComposition(spanType, band) {
+  let comp = spanType.composition;
+  // Band-scoped composition takes precedence when available.
+  if (band && (band.min_ns != null || band.max_ns != null)) {
+    const scoped = bandComposition(spanType, band.min_ns, band.max_ns);
+    if (scoped) comp = scoped;
+  }
   if (comp && typeof comp === "object") {
     const on_cpu = Number(comp.on_cpu_ns) || 0;
     const blocked = Number(comp.blocked_ns) || 0;
@@ -261,6 +294,63 @@ function flamegraphUrl(state, phase) {
     p.set("source", "cpu");
   }
   return "flamegraph.html?" + p.toString();
+}
+
+// Build the viewer deep link that jumps to a specific slow-exemplar span
+// instance. Mirrors tokio_stats_api.js's exemplarViewerUrl: one `/api/object`
+// component pointing at the exemplar's own source file (bucket + source_key),
+// plus svc/host, and a non-destructive `focus_start`/`focus_end` window that
+// pans/zooms the loaded trace to the span WITHOUT filtering events out.
+//
+// `focus_*` params are DISTINCT from `start`/`end` (which the viewer treats as
+// a hard parse filter that would drop every surrounding event and load an empty
+// page for a narrow single-span window). We never emit start/end here.
+//
+// `exemplar` is a SlowExemplar: { start_ns, end_ns, source_key, host, ... }.
+// `scope` carries the page scope: { bucket, region, service, spanName } (the
+// exemplar's own host takes precedence — exemplars can come from different
+// hosts). `spanName`, when given, is forwarded as `focus_span_name` so the
+// viewer selects the exact span (a long span's window overlaps many others).
+//
+// Returns "" when the exemplar has no source_key to link to.
+function exemplarViewerUrl(exemplar, scope) {
+  const ex = exemplar || {};
+  const sc = scope || {};
+  if (!ex.source_key) return "";
+  // The backend stores source_key as the fully-qualified `s3://{bucket}/{key}`
+  // (that's the `full_key` decode_samples was handed). But `/api/object` wants a
+  // bucket + a BUCKET-RELATIVE key — passing the whole `s3://…` URI as `key=`
+  // 404s. Split it back into bucket + relative key; fall back to the scope
+  // bucket and the raw key for a already-relative key (local mode / older data).
+  let bucket = sc.bucket || "";
+  let key = ex.source_key;
+  const s3 = /^s3:\/\/([^/]+)\/(.+)$/.exec(ex.source_key);
+  if (s3) {
+    bucket = s3[1];
+    key = s3[2];
+  }
+  // Mirror the landing page's objectTraceUrls(): one `/api/object?bucket=&key=`
+  // component, built via URLSearchParams so the key is correctly encoded.
+  const oq = new URLSearchParams();
+  oq.set("bucket", bucket);
+  oq.set("key", key);
+  const traceUrl = "/api/object?" + oq.toString();
+
+  const p = new URLSearchParams();
+  p.set("trace", traceUrl);
+  if (sc.service) p.set("svc", sc.service);
+  // Prefer the exemplar's own host (it may differ from the scope's host set).
+  if (ex.host) p.set("host", ex.host);
+  if (sc.region) p.set("aws_region", sc.region);
+  // Non-destructive focus on the exact span. `focus_start` alone triggers the
+  // pan; `focus_end` frames the zoom; `focus_span_name` lets the viewer select
+  // the matching span rather than just pan to a time window.
+  if (ex.start_ns != null) {
+    p.set("focus_start", String(ex.start_ns));
+    if (ex.end_ns != null) p.set("focus_end", String(ex.end_ns));
+    if (sc.spanName) p.set("focus_span_name", sc.spanName);
+  }
+  return "viewer.html?" + p.toString();
 }
 
 // ── Raw trace → SpanTypeStats catalog ────────────────────────────────────────
@@ -460,10 +550,12 @@ var SpanExplorer = {
   countInBand,
   TIME_CATEGORIES,
   computeTimeComposition,
+  bandComposition,
   spanTypeQuality,
   encodeSpanExplorerState,
   decodeSpanExplorerState,
   flamegraphUrl,
+  exemplarViewerUrl,
   parseSpanEventName,
   buildSpanCatalog,
   buildLogHistogram,

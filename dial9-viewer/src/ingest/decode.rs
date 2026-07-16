@@ -146,7 +146,12 @@ struct SpanExitEvent {
 // We reconstruct spans from these events using span_id + first-enter context.
 
 /// Legacy span enter event from old producers.
+///
+/// `worker_id` is on the wire but intentionally unused: spans are paired
+/// enter↔exit by `span_id` alone, because a task can migrate workers between
+/// enter and exit (see `resolve_legacy_spans`).
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct LegacySpanEnterEvent {
     timestamp_ns: u64,
     #[serde(default)]
@@ -624,8 +629,10 @@ pub fn decode_samples(data: &[u8], source_key: &str) -> anyhow::Result<DecodeRes
                         .push((sym.inline_depth, key));
                 }
             }
-            // Stage 1 producer: self-contained span close summary
-            "SpanCloseEvent" => {
+            // Stage 1 producer: self-contained span close summary. Accept both
+            // the exact `SpanCloseEvent` name and the struct-derived
+            // `SpanClose__{Type}` convention (see the enter/exit arms below).
+            name if name == "SpanCloseEvent" || name.starts_with("SpanClose__") => {
                 match ev.deserialize::<SpanCloseSummary>() {
                     Ok(sc) if sc.span_instance_id > 0 => {
                         has_modern_spans = true;
@@ -654,8 +661,16 @@ pub fn decode_samples(data: &[u8], source_key: &str) -> anyhow::Result<DecodeRes
                     }
                 }
             }
-            // Span enter/exit events for local interval tracking
-            name if name.starts_with("SpanEnter:") => {
+            // Span enter/exit events for local interval tracking.
+            //
+            // Two on-wire naming conventions carry the same events:
+            //   - `SpanEnter:{target}::{name}:{file}:{line}` — the dynamic schema
+            //     name emitted by the tracing layer (colon-separated).
+            //   - `SpanEnter__{Type}` — a struct-derived event (e.g.
+            //     `SpanEnter__ShaleOperation`). A Rust identifier cannot contain
+            //     `:`, so struct-named events use the `__` separator instead.
+            // We accept both, mirroring the viewer's `buildSpanData`.
+            name if name.starts_with("SpanEnter:") || name.starts_with("SpanEnter__") => {
                 match ev.deserialize::<SpanEnterEvent>() {
                     Ok(mut enter) if enter.span_instance_id > 0 => {
                         has_modern_spans = true;
@@ -685,7 +700,7 @@ pub fn decode_samples(data: &[u8], source_key: &str) -> anyhow::Result<DecodeRes
                     }
                 }
             }
-            name if name.starts_with("SpanExit:") => {
+            name if name.starts_with("SpanExit:") || name.starts_with("SpanExit__") => {
                 match ev.deserialize::<SpanExitEvent>() {
                     Ok(mut exit) if exit.span_instance_id > 0 => {
                         has_modern_spans = true;
@@ -1048,10 +1063,17 @@ pub fn decode_samples(data: &[u8], source_key: &str) -> anyhow::Result<DecodeRes
     let mut legacy_intervals: FxHashMap<u64, Vec<(u64, u64)>> = FxHashMap::default();
 
     if !has_modern_spans && (!legacy_enters.is_empty() || !legacy_closes.is_empty()) {
+        // Project polls to (start, end, worker_id, task_id) in monotonic ns for
+        // task-based CPU/wait attribution. `polls` is already sorted by start.
+        let poll_timeline: Vec<(u64, u64, u64, u64)> = polls
+            .iter()
+            .map(|&(start, end, worker_id, task_id, _)| (start, end, worker_id, task_id))
+            .collect();
         let legacy_resolution = resolve_legacy_spans(
             &legacy_enters,
             &legacy_exits,
             &legacy_closes,
+            &poll_timeline,
             source_key,
             &boot_id,
             clock_offset_ns,
@@ -1585,7 +1607,8 @@ fn resolve_spans(
 /// - `SpanCloseEvent` with only: span_id
 ///
 /// Strategy:
-/// - Group enters/exits by (span_id, worker_id) as the lane for pairing.
+/// - Pair enters/exits by `span_id` alone (NOT worker_id): a task can migrate
+///   workers between its enter and exit, so the worker is not a stable lane.
 /// - For each span_id that has a close event, synthesize a deterministic
 ///   instance_id from the span_id and first-enter timestamp.
 /// - Parse target/name/file/line from the SpanEnter schema name.
@@ -1594,11 +1617,18 @@ fn resolve_spans(
 /// - Handle recycled IDs conservatively: if we see multiple distinct
 ///   first-enter timestamps for the same span_id, each gets a separate
 ///   synthetic instance.
+/// - When the span's owning Tokio task can be resolved (the poll on the enter
+///   worker covering the enter timestamp), split the entered wall time into
+///   estimated on-CPU (poll overlap) vs async wait (in-task gaps between polls),
+///   using `task_polls`. See `attribute_legacy_span_from_polls`.
 #[allow(clippy::too_many_arguments)]
 fn resolve_legacy_spans(
     legacy_enters: &[(String, LegacySpanEnterEvent)],
     legacy_exits: &[(String, LegacySpanExitEvent)],
     legacy_closes: &[LegacySpanCloseEvent],
+    // All reconstructed polls in this file, MONOTONIC ns (pre-`to_wall`):
+    // `(start, end, worker_id, task_id)`. Sorted by start.
+    polls: &[(u64, u64, u64, u64)],
     source_key: &str,
     boot_id: &str,
     clock_offset_ns: Option<i128>,
@@ -1619,6 +1649,10 @@ fn resolve_legacy_spans(
         schema_info: LegacySpanSchemaInfo,
         span_name: String,
         first_enter_ts: u64,
+        /// Worker the first enter ran on. Used only to resolve the owning Tokio
+        /// task (the poll on this worker covering `first_enter_ts`) — NOT for
+        /// enter/exit pairing, which is span_id-only.
+        first_enter_worker: u64,
         parent_span_id: Option<u64>,
     }
     let mut span_contexts: FxHashMap<u64, SpanContext> = FxHashMap::default();
@@ -1639,17 +1673,26 @@ fn resolve_legacy_spans(
                     .unwrap_or_else(|| schema_info.name.clone()),
                 schema_info,
                 first_enter_ts: enter.timestamp_ns,
+                first_enter_worker: enter.worker_id,
                 parent_span_id: enter.parent_span_id.filter(|&id| id > 0),
             }
         });
     }
 
-    // Build per-(span_id, worker_id) enter/exit timeline for LIFO pairing.
-    // Sort all events by timestamp, then pair enters with exits.
+    // Build a per-span_id enter/exit timeline for LIFO pairing. Sort all events
+    // by timestamp, then pair enters with exits.
+    //
+    // The pairing key is `span_id` ALONE — deliberately NOT `(span_id,
+    // worker_id)`. An async span can enter on one worker and exit on another
+    // when its task migrates between workers across an `.await`. Keying on the
+    // worker would push the enter onto one worker's stack and look for the exit
+    // on a different worker's stack, so the pair never matches and the span is
+    // silently dropped. `span_id` is the span's identity; the worker a given
+    // enter/exit ran on is irrelevant to pairing them. (Measured on a real beta
+    // trace: ~44% of fully-captured spans migrated workers and were lost.)
     struct LegacyTimelineEvent {
         timestamp_ns: u64,
         span_id: u64,
-        worker_id: u64,
         is_enter: bool,
         decode_order: usize,
     }
@@ -1661,7 +1704,6 @@ fn resolve_legacy_spans(
         timeline.push(LegacyTimelineEvent {
             timestamp_ns: enter.timestamp_ns,
             span_id: enter.span_id,
-            worker_id: enter.worker_id,
             is_enter: true,
             decode_order: i,
         });
@@ -1670,7 +1712,6 @@ fn resolve_legacy_spans(
         timeline.push(LegacyTimelineEvent {
             timestamp_ns: exit.timestamp_ns,
             span_id: exit.span_id,
-            worker_id: exit.worker_id,
             is_enter: false,
             decode_order: legacy_enters.len() + i,
         });
@@ -1679,15 +1720,19 @@ fn resolve_legacy_spans(
     // Sort by (timestamp, decode_order) for deterministic pairing.
     timeline.sort_unstable_by_key(|ev| (ev.timestamp_ns, ev.decode_order));
 
-    // LIFO pairing per (span_id, worker_id).
-    let mut enter_stacks: FxHashMap<(u64, u64), Vec<u64>> = FxHashMap::default();
+    // LIFO pairing per span_id (see above — worker_id is intentionally not a
+    // key, so a span whose task migrated workers between enter and exit still
+    // pairs).
+    let mut enter_stacks: FxHashMap<u64, Vec<u64>> = FxHashMap::default();
     let mut local_intervals: FxHashMap<u64, Vec<(u64, u64)>> = FxHashMap::default();
 
     for ev in &timeline {
-        let key = (ev.span_id, ev.worker_id);
         if ev.is_enter {
-            enter_stacks.entry(key).or_default().push(ev.timestamp_ns);
-        } else if let Some(stack) = enter_stacks.get_mut(&key)
+            enter_stacks
+                .entry(ev.span_id)
+                .or_default()
+                .push(ev.timestamp_ns);
+        } else if let Some(stack) = enter_stacks.get_mut(&ev.span_id)
             && let Some(enter_ts) = stack.pop()
             && ev.timestamp_ns >= enter_ts
         {
@@ -1706,6 +1751,28 @@ fn resolve_legacy_spans(
             .entry(close.span_id)
             .and_modify(|ts| *ts = (*ts).max(close.timestamp_ns))
             .or_insert(close.timestamp_ns);
+    }
+
+    // ── Poll indices for task-based CPU/wait attribution ─────────────────────
+    //
+    // `polls` is sorted by start (monotonic ns). Two views:
+    //  - `polls_by_worker`: to resolve a span's owning task from the poll on its
+    //    enter worker covering the enter timestamp.
+    //  - `polls_by_task`: the task's poll timeline, to split the span's entered
+    //    wall time into on-CPU (poll overlap) vs async wait (in-task gaps).
+    // Each view keeps polls sorted by start (inherited from `polls`), so both
+    // lookups can binary-search.
+    let mut polls_by_worker: FxHashMap<u64, Vec<(u64, u64, u64)>> = FxHashMap::default();
+    let mut polls_by_task: FxHashMap<u64, Vec<(u64, u64)>> = FxHashMap::default();
+    for &(start, end, worker_id, task_id) in polls {
+        // task_id 0 is the block-in-place / no-task stub — not a real task.
+        if task_id != 0 {
+            polls_by_worker
+                .entry(worker_id)
+                .or_default()
+                .push((start, end, task_id));
+            polls_by_task.entry(task_id).or_default().push((start, end));
+        }
     }
 
     // Generate a synthetic instance_id deterministically from span_id + first_enter_ts.
@@ -1783,6 +1850,37 @@ fn resolve_legacy_spans(
             })
             .unwrap_or((0, 0));
 
+        // Task-based CPU/wait attribution. Resolve the owning Tokio task from the
+        // poll on the enter worker covering the first enter, then split the
+        // entered wall time into on-CPU (poll overlap) vs async wait (in-task
+        // gaps). All timestamps here are monotonic ns, matching `polls`.
+        //
+        // Only the entered wall time is classified; the rest of elapsed
+        // (before first enter / after last exit — the parts we cannot see in
+        // this file) stays Unknown. `flags` starts fully-unknown (0b1111) and we
+        // clear the bits we resolve.
+        let mut on_cpu_ns_est: Option<u64> = None;
+        let mut async_wait_ns_est: Option<u64> = None;
+        let mut classified_ns: u64 = 0;
+        let mut flags: u32 = 0b1111;
+        if let (Some(ctx), Some(ivs)) = (ctx, intervals)
+            && let Some(worker_polls) = polls_by_worker.get(&ctx.first_enter_worker)
+            && let Some(task_id) = resolve_span_task(worker_polls, ctx.first_enter_ts)
+            && let Some(task_polls) = polls_by_task.get(&task_id)
+        {
+            let (on_cpu, async_wait) = attribute_legacy_span_from_polls(ivs, task_polls);
+            on_cpu_ns_est = Some(on_cpu);
+            async_wait_ns_est = Some(async_wait);
+            classified_ns = on_cpu.saturating_add(async_wait);
+            // Bit 0 (profiler metadata) and bit 3 (wake classification) remain
+            // set — this is a poll-timeline estimate, not sample-based on-CPU nor
+            // true wake attribution. Clear bit 2 (worker/tid ambiguous): we did
+            // resolve the owning task.
+            flags &= !0b0100;
+        }
+        // Unknown = elapsed minus the wall time we classified into on-CPU/wait.
+        let unknown_ns = elapsed_ns.saturating_sub(classified_ns);
+
         let instance_id = synthetic_instance_id(span_id, start_ts);
         let span_uid = compute_span_uid(boot_id, instance_id);
         let span_type_uid = compute_span_type_uid("tracing", &target, &name, file.as_deref(), line);
@@ -1816,15 +1914,15 @@ fn resolve_legacy_spans(
             concurrent: false,
             parent_span_uid,
             attributes: Vec::new(), // Old format doesn't carry close-time attributes
-            on_cpu_ns_est: None,
+            on_cpu_ns_est,
             blocked_ns_est: None,
-            async_wait_ns: None,
+            async_wait_ns: async_wait_ns_est,
             scheduler_delay_ns: None,
-            unknown_ns: elapsed_ns,
+            unknown_ns,
             cpu_sample_count: 0,
             sched_sample_count: 0,
             attribution_version: 1,
-            attribution_flags: 0b1111,
+            attribution_flags: flags,
             saturated: false,
             loss_observable: false,
             unbalanced_exits: 0,
@@ -1846,6 +1944,102 @@ fn resolve_legacy_spans(
         spans: resolved_spans,
         instance_intervals: resolved_intervals,
     }
+}
+
+/// Resolve the Tokio task that owns a span, from the poll on `worker` whose
+/// window covers `enter_ts`. `worker_polls` is that worker's polls as
+/// `(start, end, task_id)`, sorted by `start` and non-overlapping (a worker
+/// runs one poll at a time). Binary search — a worker can hold hundreds of
+/// thousands of polls on a large trace. Returns `None` when no poll covers the
+/// enter (span entered outside any poll, e.g. on a non-runtime thread).
+fn resolve_span_task(worker_polls: &[(u64, u64, u64)], enter_ts: u64) -> Option<u64> {
+    let mut lo = 0usize;
+    let mut hi = worker_polls.len();
+    while lo < hi {
+        let mid = (lo + hi) / 2;
+        let (start, end, task_id) = worker_polls[mid];
+        if end < enter_ts {
+            lo = mid + 1;
+        } else if start > enter_ts {
+            hi = mid;
+        } else {
+            return Some(task_id);
+        }
+    }
+    None
+}
+
+/// Split a span's entered wall time into estimated on-CPU vs async-wait using
+/// its owning task's poll timeline.
+///
+/// The span's entered intervals (`entered`, monotonic ns) mark when the guard
+/// was held. On-CPU time is where those intervals overlap one of the task's
+/// polls (`task_polls`, `(start, end)` sorted by start, non-overlapping); the
+/// remaining entered wall time is the task alive-but-not-polled — async wait.
+///
+/// Returns `(on_cpu_ns, async_wait_ns)` over the UNION of entered intervals, so
+/// the two sum to `observed_active_wall_ns` and never double-count concurrent or
+/// overlapping enters.
+fn attribute_legacy_span_from_polls(
+    entered: &[(u64, u64)],
+    task_polls: &[(u64, u64)],
+) -> (u64, u64) {
+    // Union the entered intervals first so overlapping/re-entrant enters are
+    // counted once (matches observed_active_wall_ns).
+    let entered_union = merge_intervals(entered);
+    let active_wall: u64 = entered_union
+        .iter()
+        .map(|&(s, e)| e.saturating_sub(s))
+        .fold(0u64, u64::saturating_add);
+    if active_wall == 0 || task_polls.is_empty() {
+        return (0, active_wall);
+    }
+
+    // On-CPU = total overlap between the entered union and the task's polls.
+    // Both lists are sorted by start and internally non-overlapping, so sweep
+    // them together in linear time.
+    let mut on_cpu: u64 = 0;
+    let mut pi = 0usize;
+    for &(es, ee) in &entered_union {
+        // Advance past polls that end before this entered interval starts.
+        while pi < task_polls.len() && task_polls[pi].1 <= es {
+            pi += 1;
+        }
+        let mut j = pi;
+        while j < task_polls.len() && task_polls[j].0 < ee {
+            let (ps, pe) = task_polls[j];
+            let lo = ps.max(es);
+            let hi = pe.min(ee);
+            if hi > lo {
+                on_cpu = on_cpu.saturating_add(hi - lo);
+            }
+            j += 1;
+        }
+    }
+    let on_cpu = on_cpu.min(active_wall);
+    (on_cpu, active_wall - on_cpu)
+}
+
+/// Merge intervals into a sorted, non-overlapping set.
+fn merge_intervals(intervals: &[(u64, u64)]) -> Vec<(u64, u64)> {
+    if intervals.is_empty() {
+        return Vec::new();
+    }
+    let mut sorted: Vec<(u64, u64)> = intervals.to_vec();
+    sorted.sort_unstable_by_key(|&(start, _)| start);
+    let mut out: Vec<(u64, u64)> = Vec::with_capacity(sorted.len());
+    let (mut cs, mut ce) = sorted[0];
+    for &(s, e) in &sorted[1..] {
+        if s <= ce {
+            ce = ce.max(e);
+        } else {
+            out.push((cs, ce));
+            cs = s;
+            ce = e;
+        }
+    }
+    out.push((cs, ce));
+    out
 }
 
 /// Compute the union of a set of intervals. Returns total wall-clock nanoseconds
@@ -2597,6 +2791,58 @@ mod tests {
 
         // Multiple overlapping
         assert_eq!(union_intervals(&[(10, 20), (15, 25), (22, 35)]), 25);
+    }
+
+    #[test]
+    fn test_resolve_span_task_binary_search() {
+        // Worker polls sorted by start, non-overlapping: (start, end, task_id).
+        let polls = [(0, 100, 11), (200, 300, 22), (400, 500, 33)];
+        // Inside a poll → its task.
+        assert_eq!(resolve_span_task(&polls, 250), Some(22));
+        // Poll-start edge is inclusive.
+        assert_eq!(resolve_span_task(&polls, 400), Some(33));
+        assert_eq!(resolve_span_task(&polls, 100), Some(11));
+        // In an inter-poll gap → None (not the nearest poll).
+        assert_eq!(resolve_span_task(&polls, 150), None);
+        // Before all / after all → None.
+        assert_eq!(resolve_span_task(&polls, 600), None);
+        // Empty.
+        assert_eq!(resolve_span_task(&[], 10), None);
+    }
+
+    #[test]
+    fn test_attribute_legacy_span_from_polls() {
+        // One entered interval [0, 1000]; task polled twice inside it
+        // ([100,200], [500,600]). on_cpu = 100+100 = 200, wait = 800.
+        let (on_cpu, wait) =
+            attribute_legacy_span_from_polls(&[(0, 1000)], &[(100, 200), (500, 600)]);
+        assert_eq!(on_cpu, 200);
+        assert_eq!(wait, 800);
+
+        // Polls clamp to the entered window on both edges.
+        let (on_cpu, wait) =
+            attribute_legacy_span_from_polls(&[(300, 700)], &[(100, 400), (600, 900)]);
+        assert_eq!(on_cpu, 100 + 100); // [300,400] + [600,700]
+        assert_eq!(wait, 400 - 200);
+
+        // No task polls → all wait, nothing on-CPU.
+        let (on_cpu, wait) = attribute_legacy_span_from_polls(&[(0, 500)], &[]);
+        assert_eq!(on_cpu, 0);
+        assert_eq!(wait, 500);
+
+        // Fully on-CPU (poll covers the whole entered interval).
+        let (on_cpu, wait) = attribute_legacy_span_from_polls(&[(0, 500)], &[(0, 500)]);
+        assert_eq!(on_cpu, 500);
+        assert_eq!(wait, 0);
+
+        // Overlapping/re-entrant enters are unioned first (counted once).
+        // Union of [(0,300),(200,500)] = [(0,500)] = 500 wall; poll [100,400]
+        // → on_cpu 300, wait 200.
+        let (on_cpu, wait) =
+            attribute_legacy_span_from_polls(&[(0, 300), (200, 500)], &[(100, 400)]);
+        assert_eq!(on_cpu, 300);
+        assert_eq!(wait, 200);
+        assert_eq!(on_cpu + wait, 500);
     }
 
     #[test]
@@ -4234,6 +4480,364 @@ mod tests {
         assert_eq!(span.observed_active_wall_ns, 100);
     }
 
+    /// Regression: spans emitted via a struct-derived event use the `__`
+    /// naming convention (`SpanEnter__ShaleOperation`), not the colon-separated
+    /// dynamic schema name (`SpanEnter:{target}::{name}...`). A Rust identifier
+    /// cannot contain `:`, so a `#[derive(TraceEvent)] struct SpanEnter__Foo`
+    /// serializes under the `__` name. The decoder previously matched only
+    /// `starts_with("SpanEnter:")`, so these events fell through and produced
+    /// zero spans (observed on a real beta `shale` trace: 172 enter/exit events,
+    /// 0 spans). They also carry no close event and are in the legacy field
+    /// layout (worker_id/span_id/span_name, no span_instance_id/tid), so they
+    /// must route through the legacy reconstruction path.
+    #[test]
+    fn test_struct_derived_span_name_convention() {
+        use dial9_trace_format::TraceEvent;
+        use dial9_trace_format::encoder::{Encoder, Schema};
+        use dial9_trace_format::schema::FieldDef;
+        use dial9_trace_format::types::{FieldType, FieldValue};
+
+        #[derive(TraceEvent)]
+        struct ClockSyncEvent {
+            #[traceevent(timestamp)]
+            timestamp_ns: u64,
+            realtime_ns: u64,
+        }
+
+        // Struct-derived schemas: the `__` convention, with an extra user field
+        // (`request_id`) like the real shale trace. No colon-separated
+        // target/name/file/line is available from the name.
+        let enter_schema = Schema::new(
+            "SpanEnter__ShaleOperation",
+            vec![
+                FieldDef::new("worker_id", FieldType::Varint),
+                FieldDef::new("span_id", FieldType::Varint),
+                FieldDef::new("parent_span_id", FieldType::OptionalVarint),
+                FieldDef::new("span_name", FieldType::String),
+                FieldDef::new("request_id", FieldType::String),
+            ],
+        );
+        let exit_schema = Schema::new(
+            "SpanExit__ShaleOperation",
+            vec![
+                FieldDef::new("worker_id", FieldType::Varint),
+                FieldDef::new("span_id", FieldType::Varint),
+                FieldDef::new("span_name", FieldType::String),
+            ],
+        );
+
+        let mut enc = Encoder::new();
+        enc.write(&ClockSyncEvent {
+            timestamp_ns: 10,
+            realtime_ns: 1_700_000_000_000_000_010,
+        })
+        .unwrap();
+
+        // Enter span_id=42 on worker 3.
+        enc.write_event(
+            &enter_schema,
+            &[
+                FieldValue::Varint(1000),
+                FieldValue::Varint(3),
+                FieldValue::Varint(42),
+                FieldValue::None,
+                FieldValue::String("/jobs/next".to_string()),
+                FieldValue::String("req-abc".to_string()),
+            ],
+        )
+        .unwrap();
+
+        // Exit span_id=42 on worker 3. Note: NO close event follows.
+        enc.write_event(
+            &exit_schema,
+            &[
+                FieldValue::Varint(5000),
+                FieldValue::Varint(3),
+                FieldValue::Varint(42),
+                FieldValue::String("/jobs/next".to_string()),
+            ],
+        )
+        .unwrap();
+
+        let data = enc.into_inner();
+        let source_key = "2026-07-15/1714/shale/host/test-boot/0.bin";
+        let (_, _, _, spans) = decode_samples(&data, source_key).unwrap();
+
+        assert_eq!(
+            spans.len(),
+            1,
+            "struct-derived (__) span events must be picked up, not dropped"
+        );
+        let span = &spans[0];
+        // Name comes from the event's span_name field (the schema name carries
+        // no colon-separated metadata to parse).
+        assert_eq!(span.name, "/jobs/next");
+        assert_eq!(span.kind, "tracing");
+        assert_eq!(span.identity_quality, "legacy");
+        // Observed active = exit - enter = 5000 - 1000 = 4000.
+        assert_eq!(span.observed_active_wall_ns, 4000);
+        // Even without a close event, the balanced enter/exit pair produces a row.
+        assert!(span.elapsed_ns > 0, "elapsed_ns should be > 0");
+    }
+
+    /// Regression: an async span whose task migrates workers between enter and
+    /// exit must still be paired into an interval. The enter fires on worker 3,
+    /// the exit on worker 7 (the task was rescheduled onto a different worker
+    /// across an `.await`). Pairing keyed on `(span_id, worker_id)` would push
+    /// the enter onto worker 3's stack and search worker 7's stack for the exit,
+    /// find nothing, and drop the span. Pairing on `span_id` alone recovers it.
+    /// (On a real beta trace ~44% of fully-captured spans migrated workers.)
+    #[test]
+    fn test_legacy_span_survives_worker_migration() {
+        use dial9_trace_format::TraceEvent;
+        use dial9_trace_format::encoder::{Encoder, Schema};
+        use dial9_trace_format::schema::FieldDef;
+        use dial9_trace_format::types::{FieldType, FieldValue};
+
+        #[derive(TraceEvent)]
+        struct ClockSyncEvent {
+            #[traceevent(timestamp)]
+            timestamp_ns: u64,
+            realtime_ns: u64,
+        }
+
+        let enter_schema = Schema::new(
+            "SpanEnter__ShaleOperation",
+            vec![
+                FieldDef::new("worker_id", FieldType::Varint),
+                FieldDef::new("span_id", FieldType::Varint),
+                FieldDef::new("parent_span_id", FieldType::OptionalVarint),
+                FieldDef::new("span_name", FieldType::String),
+            ],
+        );
+        let exit_schema = Schema::new(
+            "SpanExit__ShaleOperation",
+            vec![
+                FieldDef::new("worker_id", FieldType::Varint),
+                FieldDef::new("span_id", FieldType::Varint),
+                FieldDef::new("span_name", FieldType::String),
+            ],
+        );
+
+        let mut enc = Encoder::new();
+        enc.write(&ClockSyncEvent {
+            timestamp_ns: 10,
+            realtime_ns: 1_700_000_000_000_000_010,
+        })
+        .unwrap();
+
+        // Enter span_id=42 on worker 3.
+        enc.write_event(
+            &enter_schema,
+            &[
+                FieldValue::Varint(1000),
+                FieldValue::Varint(3),
+                FieldValue::Varint(42),
+                FieldValue::None,
+                FieldValue::String("/jobs/next".to_string()),
+            ],
+        )
+        .unwrap();
+        // Exit span_id=42 on a DIFFERENT worker (7) — the task migrated.
+        enc.write_event(
+            &exit_schema,
+            &[
+                FieldValue::Varint(5000),
+                FieldValue::Varint(7),
+                FieldValue::Varint(42),
+                FieldValue::String("/jobs/next".to_string()),
+            ],
+        )
+        .unwrap();
+
+        let data = enc.into_inner();
+        let source_key = "2026-07-15/1714/shale/host/test-boot/0.bin";
+        let (_, _, _, spans) = decode_samples(&data, source_key).unwrap();
+
+        assert_eq!(
+            spans.len(),
+            1,
+            "span whose task migrated workers must still be paired, not dropped"
+        );
+        // The enter/exit interval was recovered despite the worker change.
+        assert_eq!(spans[0].observed_active_wall_ns, 4000);
+    }
+
+    /// End-to-end: a legacy span whose owning Tokio task is observable in the
+    /// same file gets its entered wall time split into estimated on-CPU (poll
+    /// overlap) vs async wait (in-task gaps). A long-poll span (entered across a
+    /// single long `.await`) whose task was polled only briefly should report
+    /// mostly async wait and little on-CPU — the whole point of this attribution.
+    #[test]
+    fn test_legacy_span_cpu_wait_attribution_from_polls() {
+        use dial9_trace_format::TraceEvent;
+        use dial9_trace_format::encoder::{Encoder, Schema};
+        use dial9_trace_format::schema::FieldDef;
+        use dial9_trace_format::types::{FieldType, FieldValue};
+
+        #[derive(TraceEvent)]
+        struct ClockSyncEvent {
+            #[traceevent(timestamp)]
+            timestamp_ns: u64,
+            realtime_ns: u64,
+        }
+
+        // Poll events so the decoder reconstructs task 77's poll timeline on
+        // worker 3. A poll spans PollStart→PollEnd. We bind tid→worker via
+        // WorkerUnpark first (worker_id inference needs it, though attribution
+        // itself uses the poll's own worker_id).
+        let unpark_schema = Schema::new(
+            "WorkerUnparkEvent",
+            vec![
+                FieldDef::new("worker_id", FieldType::Varint),
+                FieldDef::new("local_queue", FieldType::Varint),
+                FieldDef::new("cpu_time_ns", FieldType::Varint),
+                FieldDef::new("sched_wait_ns", FieldType::OptionalVarint),
+                FieldDef::new("tid", FieldType::Varint),
+            ],
+        );
+        let poll_start_schema = Schema::new(
+            "PollStartEvent",
+            vec![
+                FieldDef::new("worker_id", FieldType::Varint),
+                FieldDef::new("local_queue", FieldType::Varint),
+                FieldDef::new("task_id", FieldType::Varint),
+                FieldDef::new("spawn_loc", FieldType::String),
+            ],
+        );
+        let poll_end_schema = Schema::new(
+            "PollEndEvent",
+            vec![FieldDef::new("worker_id", FieldType::Varint)],
+        );
+        let enter_schema = Schema::new(
+            "SpanEnter__ShaleOperation",
+            vec![
+                FieldDef::new("worker_id", FieldType::Varint),
+                FieldDef::new("span_id", FieldType::Varint),
+                FieldDef::new("parent_span_id", FieldType::OptionalVarint),
+                FieldDef::new("span_name", FieldType::String),
+            ],
+        );
+        let exit_schema = Schema::new(
+            "SpanExit__ShaleOperation",
+            vec![
+                FieldDef::new("worker_id", FieldType::Varint),
+                FieldDef::new("span_id", FieldType::Varint),
+                FieldDef::new("span_name", FieldType::String),
+            ],
+        );
+
+        let mut enc = Encoder::new();
+        enc.write(&ClockSyncEvent {
+            timestamp_ns: 10,
+            realtime_ns: 1_700_000_000_000_000_010,
+        })
+        .unwrap();
+        // Bind tid 500 → worker 3.
+        enc.write_event(
+            &unpark_schema,
+            &[
+                FieldValue::Varint(500), // ts
+                FieldValue::Varint(3),   // worker_id
+                FieldValue::Varint(0),   // local_queue
+                FieldValue::Varint(0),   // cpu_time_ns
+                FieldValue::None,        // sched_wait_ns
+                FieldValue::Varint(500), // tid
+            ],
+        )
+        .unwrap();
+
+        // Poll of task 77 on worker 3 covering the span's enter: [900, 1100].
+        enc.write_event(
+            &poll_start_schema,
+            &[
+                FieldValue::Varint(900), // ts
+                FieldValue::Varint(3),   // worker_id
+                FieldValue::Varint(0),   // local_queue
+                FieldValue::Varint(77),  // task_id
+                FieldValue::String("app::handler".to_string()),
+            ],
+        )
+        .unwrap();
+        enc.write_event(
+            &poll_end_schema,
+            &[FieldValue::Varint(1100), FieldValue::Varint(3)],
+        )
+        .unwrap();
+
+        // Enter span_id=42 on worker 3 at t=1000 (inside poll [900,1100] → task 77).
+        enc.write_event(
+            &enter_schema,
+            &[
+                FieldValue::Varint(1000),
+                FieldValue::Varint(3),
+                FieldValue::Varint(42),
+                FieldValue::None,
+                FieldValue::String("/jobs/next".to_string()),
+            ],
+        )
+        .unwrap();
+
+        // A second, brief poll of task 77 well into the span: [5000, 5100].
+        // (Non-overlapping with the first — a worker polls one task at a time.)
+        enc.write_event(
+            &poll_start_schema,
+            &[
+                FieldValue::Varint(5000),
+                FieldValue::Varint(3),
+                FieldValue::Varint(0),
+                FieldValue::Varint(77),
+                FieldValue::String("app::handler".to_string()),
+            ],
+        )
+        .unwrap();
+        enc.write_event(
+            &poll_end_schema,
+            &[FieldValue::Varint(5100), FieldValue::Varint(3)],
+        )
+        .unwrap();
+
+        // Exit span_id=42 much later at t=9000: the span was entered across a
+        // long await; the task was only on-CPU during the two polls above.
+        enc.write_event(
+            &exit_schema,
+            &[
+                FieldValue::Varint(9000),
+                FieldValue::Varint(3),
+                FieldValue::Varint(42),
+                FieldValue::String("/jobs/next".to_string()),
+            ],
+        )
+        .unwrap();
+
+        let data = enc.into_inner();
+        let source_key = "2026-07-15/1714/shale/host/test-boot/0.bin";
+        let (_, _, _, spans) = decode_samples(&data, source_key).unwrap();
+
+        assert_eq!(spans.len(), 1);
+        let s = &spans[0];
+        // Entered wall = exit - enter = 9000 - 1000 = 8000.
+        assert_eq!(s.observed_active_wall_ns, 8000);
+        // On-CPU = overlap of [1000,9000] with task 77's polls [900,1100] and
+        // [5000,5100] = [1000,1100] (100) + [5000,5100] (100) = 200.
+        assert_eq!(s.on_cpu_ns_est, Some(200));
+        // Async wait = entered wall - on_cpu = 8000 - 200 = 7800.
+        assert_eq!(s.async_wait_ns, Some(7800));
+        // Accounting invariant: the five categories sum to elapsed.
+        let sum = s.on_cpu_ns_est.unwrap_or(0)
+            + s.blocked_ns_est.unwrap_or(0)
+            + s.async_wait_ns.unwrap_or(0)
+            + s.scheduler_delay_ns.unwrap_or(0)
+            + s.unknown_ns;
+        assert_eq!(
+            sum, s.elapsed_ns,
+            "five-way attribution must sum to elapsed"
+        );
+        // We resolved the owning task, so the worker/tid-ambiguous bit (2) is
+        // cleared, but this is still a poll-timeline estimate (bits 0 and 3 set).
+        assert_eq!(s.attribution_flags & 0b0100, 0, "task-resolved bit cleared");
+    }
+
     /// Verify that recycled span IDs are handled conservatively: if the same
     /// span_id appears with different first-enter timestamps, they get different
     /// synthetic instance IDs.
@@ -4391,5 +4995,335 @@ mod tests {
         assert_eq!(span.target, "modern_target");
         // Modern spans use "path" or "metadata" quality, NOT "legacy".
         assert_ne!(span.identity_quality, "legacy");
+    }
+
+    /// DELIVERABLE end-to-end repro for the span-explorer bug: two span TYPES,
+    /// each enclosing CPU samples with clearly-distinguishable stack frames, run
+    /// through the REAL pipeline (decode → parquet → FlamegraphAccum span filter)
+    /// exactly as `/api/flamegraph?span_type_uid=…` does. Filtering to type A must
+    /// leave only frame_A_only in the flamegraph, and type B only frame_B_only.
+    ///
+    /// This is the "clear, obvious output" test the user asked for: if the
+    /// span_type_uid filter is broken (samples pass unfiltered, or the wrong
+    /// span's samples leak), the surviving frame set contains BOTH frames and the
+    /// assertion prints exactly which frames leaked.
+    #[test]
+    fn span_type_uid_filter_end_to_end_keeps_only_matching_frames() {
+        use crate::ingest::aggregate::{FlamegraphAccum, SampleFilter};
+        use crate::ingest::parquet_writer::{write_samples, write_stacks_dict};
+        use dial9_trace_format::TraceEvent;
+        use dial9_trace_format::encoder::{Encoder, Schema};
+        use dial9_trace_format::schema::FieldDef;
+        use dial9_trace_format::types::{FieldType, FieldValue, StackFrames};
+
+        #[derive(TraceEvent)]
+        struct ClockSyncEvent {
+            #[traceevent(timestamp)]
+            timestamp_ns: u64,
+            realtime_ns: u64,
+        }
+        #[derive(TraceEvent)]
+        struct SegmentMetadataEvent {
+            #[traceevent(timestamp)]
+            timestamp_ns: u64,
+            entries: Vec<(String, String)>,
+        }
+        #[derive(TraceEvent)]
+        struct SpanCloseEvent {
+            #[traceevent(timestamp)]
+            timestamp_ns: u64,
+            span_id: u64,
+            span_instance_id: u64,
+            start_timestamp_ns: u64,
+            first_enter_timestamp_ns: Option<u64>,
+            active_ns: u64,
+            span_name: String,
+            target: String,
+            file: Option<String>,
+            line: Option<u32>,
+            parent_span_instance_id: Option<u64>,
+            attributes: Vec<(String, String)>,
+            unbalanced_enters: u32,
+            concurrent: u32,
+            saturated: u32,
+            loss_observable: u32,
+        }
+
+        // Two span TYPES: A = span_a, B = span_b (distinct target::name → distinct
+        // span_type_uid). Each on its own instance id + tid so their intervals and
+        // CPU samples never overlap.
+        let enter_a = Schema::new(
+            "SpanEnter:type_target::span_a",
+            vec![
+                FieldDef::new("span_instance_id", FieldType::Varint),
+                FieldDef::new("tid", FieldType::Varint),
+            ],
+        );
+        let exit_a = Schema::new(
+            "SpanExit:type_target::span_a",
+            vec![
+                FieldDef::new("span_instance_id", FieldType::Varint),
+                FieldDef::new("tid", FieldType::Varint),
+            ],
+        );
+        let enter_b = Schema::new(
+            "SpanEnter:type_target::span_b",
+            vec![
+                FieldDef::new("span_instance_id", FieldType::Varint),
+                FieldDef::new("tid", FieldType::Varint),
+            ],
+        );
+        let exit_b = Schema::new(
+            "SpanExit:type_target::span_b",
+            vec![
+                FieldDef::new("span_instance_id", FieldType::Varint),
+                FieldDef::new("tid", FieldType::Varint),
+            ],
+        );
+        let cpu_sample_schema = Schema::new(
+            "CpuSampleEvent",
+            vec![
+                FieldDef::new("tid", FieldType::Varint),
+                FieldDef::new("source", FieldType::Varint),
+                FieldDef::new("callchain", FieldType::StackFrames),
+            ],
+        );
+        let worker_park_schema = Schema::new(
+            "WorkerParkEvent",
+            vec![
+                FieldDef::new("worker_id", FieldType::Varint),
+                FieldDef::new("tid", FieldType::Varint),
+            ],
+        );
+        let symbol_schema = Schema::new(
+            "SymbolTableEntry",
+            vec![
+                FieldDef::new("addr", FieldType::Varint),
+                FieldDef::new("inline_depth", FieldType::Varint),
+                FieldDef::new("symbol_name", FieldType::String),
+            ],
+        );
+
+        let mut enc = Encoder::new();
+        enc.write(&ClockSyncEvent {
+            timestamp_ns: 10,
+            realtime_ns: 1_700_000_000_000_000_010,
+        })
+        .unwrap();
+        enc.write(&SegmentMetadataEvent {
+            timestamp_ns: 11,
+            entries: vec![("boot_id".to_string(), "type-filter-boot".to_string())],
+        })
+        .unwrap();
+
+        // Bind two tids to workers so their CPU samples are attributed.
+        for (tid, worker) in [(100u64, 0u64), (200, 1)] {
+            enc.write_event(
+                &worker_park_schema,
+                &[
+                    FieldValue::Varint(12),
+                    FieldValue::Varint(worker),
+                    FieldValue::Varint(tid),
+                ],
+            )
+            .unwrap();
+        }
+
+        // Distinct frame symbols so the two span types are trivially separable.
+        enc.write_event(
+            &symbol_schema,
+            &[
+                FieldValue::Varint(13),
+                FieldValue::Varint(0xA000),
+                FieldValue::Varint(0),
+                FieldValue::String("frame_A_only".to_string()),
+            ],
+        )
+        .unwrap();
+        enc.write_event(
+            &symbol_schema,
+            &[
+                FieldValue::Varint(14),
+                FieldValue::Varint(0xB000),
+                FieldValue::Varint(0),
+                FieldValue::String("frame_B_only".to_string()),
+            ],
+        )
+        .unwrap();
+
+        // Span A on tid 100: interval [1000, 2000), CPU sample at 1500 (frame A).
+        enc.write_event(
+            &enter_a,
+            &[
+                FieldValue::Varint(1000),
+                FieldValue::Varint(1),
+                FieldValue::Varint(100),
+            ],
+        )
+        .unwrap();
+        enc.write_event(
+            &cpu_sample_schema,
+            &[
+                FieldValue::Varint(1500),
+                FieldValue::Varint(100),
+                FieldValue::Varint(0),
+                FieldValue::StackFrames(StackFrames(vec![0xA000])),
+            ],
+        )
+        .unwrap();
+        enc.write_event(
+            &exit_a,
+            &[
+                FieldValue::Varint(2000),
+                FieldValue::Varint(1),
+                FieldValue::Varint(100),
+            ],
+        )
+        .unwrap();
+
+        // Span B on tid 200: interval [3000, 4000), CPU sample at 3500 (frame B).
+        enc.write_event(
+            &enter_b,
+            &[
+                FieldValue::Varint(3000),
+                FieldValue::Varint(2),
+                FieldValue::Varint(200),
+            ],
+        )
+        .unwrap();
+        enc.write_event(
+            &cpu_sample_schema,
+            &[
+                FieldValue::Varint(3500),
+                FieldValue::Varint(200),
+                FieldValue::Varint(0),
+                FieldValue::StackFrames(StackFrames(vec![0xB000])),
+            ],
+        )
+        .unwrap();
+        enc.write_event(
+            &exit_b,
+            &[
+                FieldValue::Varint(4000),
+                FieldValue::Varint(2),
+                FieldValue::Varint(200),
+            ],
+        )
+        .unwrap();
+
+        // Close both spans.
+        enc.write(&SpanCloseEvent {
+            timestamp_ns: 2100,
+            span_id: 1,
+            span_instance_id: 1,
+            start_timestamp_ns: 1000,
+            first_enter_timestamp_ns: Some(1000),
+            active_ns: 0,
+            span_name: "span_a".to_string(),
+            target: "type_target".to_string(),
+            file: None,
+            line: None,
+            parent_span_instance_id: None,
+            attributes: Vec::new(),
+            unbalanced_enters: 0,
+            concurrent: 0,
+            saturated: 0,
+            loss_observable: 1,
+        })
+        .unwrap();
+        enc.write(&SpanCloseEvent {
+            timestamp_ns: 4100,
+            span_id: 2,
+            span_instance_id: 2,
+            start_timestamp_ns: 3000,
+            first_enter_timestamp_ns: Some(3000),
+            active_ns: 0,
+            span_name: "span_b".to_string(),
+            target: "type_target".to_string(),
+            file: None,
+            line: None,
+            parent_span_instance_id: None,
+            attributes: Vec::new(),
+            unbalanced_enters: 0,
+            concurrent: 0,
+            saturated: 0,
+            loss_observable: 1,
+        })
+        .unwrap();
+
+        let data = enc.into_inner();
+        let source_key = "2026-06-19/1300/shale/host/type-filter-boot/0.bin.gz";
+        let (samples, dict, _polls, spans) = decode_samples(&data, source_key).unwrap();
+
+        // Sanity: two spans resolved with distinct type uids, and each CPU sample
+        // is attributed to exactly one span type.
+        assert_eq!(spans.len(), 2, "two spans decoded");
+        let uid_a = spans
+            .iter()
+            .find(|s| s.name == "span_a")
+            .expect("span_a resolved")
+            .span_type_uid;
+        let uid_b = spans
+            .iter()
+            .find(|s| s.name == "span_b")
+            .expect("span_b resolved")
+            .span_type_uid;
+        assert_ne!(uid_a, uid_b, "the two span types have distinct type uids");
+        assert_eq!(samples.len(), 2, "two CPU samples decoded");
+        assert!(
+            samples.iter().all(|s| s.enclosing_spans.len() == 1),
+            "each CPU sample is enclosed by exactly one span; got {:?}",
+            samples
+                .iter()
+                .map(|s| s.enclosing_spans.len())
+                .collect::<Vec<_>>()
+        );
+
+        // Write the samples + dict exactly like the fold does.
+        let mut samples_buf = Vec::new();
+        write_samples(&mut samples_buf, &samples, &HashMap::new()).unwrap();
+        let mut dict_buf = Vec::new();
+        write_stacks_dict(&mut dict_buf, &dict).unwrap();
+
+        // Run the flamegraph accumulator under a span_type_uid filter and collect
+        // the surviving frame names — the observable the user sees in the UI.
+        let surviving_frames =
+            |span_type_uid: Option<[u8; 16]>| -> std::collections::HashSet<String> {
+                let filter = SampleFilter {
+                    span_type_uid,
+                    facets: HashMap::from([("source", "cpu".to_string())]),
+                    ..Default::default()
+                };
+                let mut accum = FlamegraphAccum::new(filter);
+                accum
+                    .merge(samples_buf.clone(), Some(dict_buf.clone()))
+                    .unwrap();
+                let snap = accum.snapshot();
+                let mut frames = std::collections::HashSet::new();
+                for (stack_id, _count) in &snap.stack_counts {
+                    if let Some(fs) = snap.stacks_dict.get(stack_id) {
+                        frames.extend(fs.iter().cloned());
+                    }
+                }
+                frames
+            };
+
+        let a = surviving_frames(Some(uid_a));
+        assert!(
+            a.contains("frame_A_only") && !a.contains("frame_B_only"),
+            "type-A span filter must keep ONLY frame_A_only, got {a:?}"
+        );
+
+        let b = surviving_frames(Some(uid_b));
+        assert!(
+            b.contains("frame_B_only") && !b.contains("frame_A_only"),
+            "type-B span filter must keep ONLY frame_B_only, got {b:?}"
+        );
+
+        let both = surviving_frames(None);
+        assert!(
+            both.contains("frame_A_only") && both.contains("frame_B_only"),
+            "no filter must keep both frames, got {both:?}"
+        );
     }
 }

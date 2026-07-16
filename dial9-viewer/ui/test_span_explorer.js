@@ -214,6 +214,65 @@ assertEq(
   assertEq(comp.categories[4].ns, 0, "computeTimeComposition on_cpu only: unknown ns = 0");
 }
 
+// ── band-scoped composition (composition_histogram) ──
+{
+  // Two duration buckets with distinct compositions: short spans are all
+  // on-CPU, long spans are all async-wait. Brushing to the long bucket must
+  // yield an all-wait composition, not the blended whole-type total.
+  const st = {
+    histogram: [
+      { lo_ns: 1000, hi_ns: 2000, count: 3 },
+      { lo_ns: 1000000, hi_ns: 2000000, count: 1 },
+    ],
+    composition: {
+      on_cpu_ns: 300,
+      blocked_ns: 0,
+      async_wait_ns: 1000000,
+      scheduler_delay_ns: 0,
+      unknown_ns: 0,
+    },
+    composition_histogram: [
+      { lo_ns: 1000, hi_ns: 2000, on_cpu_ns: 300, blocked_ns: 0, async_wait_ns: 0, scheduler_delay_ns: 0, unknown_ns: 0 },
+      { lo_ns: 1000000, hi_ns: 2000000, on_cpu_ns: 0, blocked_ns: 0, async_wait_ns: 1000000, scheduler_delay_ns: 0, unknown_ns: 0 },
+    ],
+  };
+
+  // No band → whole-type total (on_cpu 300 + wait 1e6).
+  const all = SE.computeTimeComposition(st, null);
+  assertEq(all.total_ns, 1000300, "band comp: no band → whole-type total");
+
+  // Brush the long bucket [500000, 3000000): only the wait bucket overlaps.
+  const longBand = SE.computeTimeComposition(st, { min_ns: 500000, max_ns: 3000000 });
+  assertEq(longBand.total_ns, 1000000, "band comp: long band total = wait bucket only");
+  const wait = longBand.categories.find((c) => c.key === "async_wait");
+  assertEq(wait.frac, 1.0, "band comp: long band is 100% async wait");
+  const oncpuLong = longBand.categories.find((c) => c.key === "on_cpu");
+  assertEq(oncpuLong.ns, 0, "band comp: long band has no on-CPU");
+
+  // Brush the short bucket [0, 5000): only the on-CPU bucket overlaps.
+  const shortBand = SE.computeTimeComposition(st, { min_ns: 0, max_ns: 5000 });
+  assertEq(shortBand.total_ns, 300, "band comp: short band total = on-CPU bucket only");
+  const oncpuShort = shortBand.categories.find((c) => c.key === "on_cpu");
+  assertEq(oncpuShort.frac, 1.0, "band comp: short band is 100% on-CPU");
+
+  // bandComposition helper: overlap rule (hi > min && lo < max), open-ended max.
+  const openHi = SE.bandComposition(st, 500000, null);
+  assertEq(openHi.async_wait_ns, 1000000, "bandComposition: open-ended max sums the long bucket");
+  assertEq(openHi.on_cpu_ns, 0, "bandComposition: open-ended max excludes the short bucket");
+}
+
+{
+  // A band selected but NO composition_histogram (older backend): falls back to
+  // the whole-type composition total rather than returning nothing.
+  const st = {
+    histogram: [{ lo_ns: 1000, hi_ns: 2000, count: 1 }],
+    composition: { on_cpu_ns: 100, blocked_ns: 0, async_wait_ns: 0, scheduler_delay_ns: 0, unknown_ns: 0 },
+  };
+  assertEq(SE.bandComposition(st, 0, 5000), null, "bandComposition: null when no composition_histogram");
+  const comp = SE.computeTimeComposition(st, { min_ns: 0, max_ns: 5000 });
+  assertEq(comp.total_ns, 100, "computeTimeComposition: band with no per-bucket data → whole-type total");
+}
+
 {
   // Composition with null/undefined fields treated as 0
   const st = {
@@ -285,6 +344,102 @@ assertEq(
 
   const blockUrl = SE.flamegraphUrl(state, "blocking");
   assert(blockUrl.includes("source=sched"), "flamegraphUrl: blocking → source=sched");
+}
+
+// ── exemplarViewerUrl ──
+{
+  const scope = { bucket: "my-bucket", region: "us-west-2", service: "my-svc", spanName: "/jobs/next" };
+  const exemplar = {
+    elapsed_ns: 5000000,
+    span_uid: "deadbeef",
+    host: "host-7",
+    start_ns: 1700000000000000000,
+    end_ns: 1700000000005000000,
+    source_key: "2026-06-19/1450/shale/host-7/boot-1/123-0.bin.gz",
+  };
+  const url = SE.exemplarViewerUrl(exemplar, scope);
+  assert(url.startsWith("viewer.html?"), "exemplarViewerUrl: points at viewer.html");
+  // Decode the query to inspect the params robustly (values are URL-encoded).
+  const qs = new URLSearchParams(url.slice("viewer.html?".length));
+  const traceParam = qs.get("trace");
+  assert(traceParam != null, "exemplarViewerUrl: has trace param");
+  assert(traceParam.startsWith("/api/object?"), "exemplarViewerUrl: trace is an /api/object component");
+  const traceQs = new URLSearchParams(traceParam.slice("/api/object?".length));
+  assertEq(traceQs.get("bucket"), "my-bucket", "exemplarViewerUrl: trace carries bucket");
+  assertEq(traceQs.get("key"), exemplar.source_key, "exemplarViewerUrl: trace carries source_key");
+  assertEq(qs.get("svc"), "my-svc", "exemplarViewerUrl: carries svc");
+  assertEq(qs.get("host"), "host-7", "exemplarViewerUrl: uses the exemplar's own host");
+  assertEq(qs.get("aws_region"), "us-west-2", "exemplarViewerUrl: carries region");
+  assertEq(qs.get("focus_start"), String(exemplar.start_ns), "exemplarViewerUrl: focus_start from start_ns");
+  assertEq(qs.get("focus_end"), String(exemplar.end_ns), "exemplarViewerUrl: focus_end from end_ns");
+  assertEq(qs.get("focus_span_name"), "/jobs/next", "exemplarViewerUrl: forwards focus_span_name from scope");
+  // Must NOT emit hard parse-filter start/end (would load an empty viewer).
+  assertEq(qs.get("start"), null, "exemplarViewerUrl: never emits hard start filter");
+  assertEq(qs.get("end"), null, "exemplarViewerUrl: never emits hard end filter");
+}
+
+{
+  // focus_span_name is omitted when the scope has no spanName (backwards compat).
+  const url = SE.exemplarViewerUrl(
+    { elapsed_ns: 1, start_ns: 5, end_ns: 6, host: "h", source_key: "k" },
+    { bucket: "b", service: "s" }
+  );
+  const qs = new URLSearchParams(url.slice("viewer.html?".length));
+  assertEq(qs.get("focus_span_name"), null, "exemplarViewerUrl: no focus_span_name without scope.spanName");
+}
+
+{
+  // Regression: the backend stores source_key as a fully-qualified
+  // `s3://{bucket}/{key}` URI (the decode `full_key`). The link must split it
+  // into bucket + BUCKET-RELATIVE key — passing the whole `s3://…` as `key=`
+  // made /api/object 404. The bucket from the URI wins over the scope bucket.
+  const url = SE.exemplarViewerUrl(
+    {
+      elapsed_ns: 5000000,
+      host: "host-9",
+      start_ns: 1700000000000000000,
+      end_ns: 1700000000005000000,
+      source_key:
+        "s3://cell2-beta-pdx-dial9-traces/2026-07-15/1715/shale/host-9/myvk-1/1784135701-469.bin.gz",
+    },
+    { bucket: "scope-bucket", region: "us-west-2", service: "shale" }
+  );
+  const qs = new URLSearchParams(url.slice("viewer.html?".length));
+  const traceQs = new URLSearchParams(qs.get("trace").slice("/api/object?".length));
+  assertEq(
+    traceQs.get("bucket"),
+    "cell2-beta-pdx-dial9-traces",
+    "exemplarViewerUrl: bucket parsed from s3:// URI (not scope bucket)"
+  );
+  assertEq(
+    traceQs.get("key"),
+    "2026-07-15/1715/shale/host-9/myvk-1/1784135701-469.bin.gz",
+    "exemplarViewerUrl: key is bucket-relative (s3://bucket/ stripped)"
+  );
+  assert(
+    !traceQs.get("key").startsWith("s3://"),
+    "exemplarViewerUrl: key must not retain the s3:// scheme"
+  );
+}
+
+{
+  // No source_key → empty string (nothing to link to).
+  const url = SE.exemplarViewerUrl(
+    { elapsed_ns: 1000, start_ns: 1, end_ns: 2, host: "h" },
+    { bucket: "b" }
+  );
+  assertEq(url, "", "exemplarViewerUrl: no source_key → empty string");
+}
+
+{
+  // Missing focus window: start_ns absent → no focus_start (still a valid link).
+  const url = SE.exemplarViewerUrl(
+    { elapsed_ns: 1000, source_key: "k", host: "h" },
+    { bucket: "b", service: "s" }
+  );
+  const qs = new URLSearchParams(url.slice("viewer.html?".length));
+  assertEq(qs.get("focus_start"), null, "exemplarViewerUrl: no start_ns → no focus_start");
+  assertEq(qs.get("host"), "h", "exemplarViewerUrl: still carries host without focus");
 }
 
 // ── TIME_CATEGORIES ──

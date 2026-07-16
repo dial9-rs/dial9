@@ -84,6 +84,11 @@ pub struct SpanTypeStats {
     /// Five-way time composition (summed across all instances).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub composition: Option<TimeComposition>,
+    /// Five-way composition bucketed by the same log-duration buckets as
+    /// `histogram`, so the client can sum the buckets inside a brushed duration
+    /// band to show a band-scoped composition. Empty when no composition data.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub composition_histogram: Vec<CompositionBucket>,
     /// Quality/partial counts.
     pub details_complete_count: u64,
     pub partial_count: u64,
@@ -101,6 +106,60 @@ pub struct SpanDurationBucket {
     pub lo_ns: i64,
     pub hi_ns: i64,
     pub count: u64,
+}
+
+/// Log-duration histogram bucket key for an elapsed value. Zero/negative map to
+/// the special [`ZERO_DURATION_BUCKET`]. Factored out so the count histogram and
+/// the composition histogram bucket identically (the client sums composition
+/// buckets that fall inside a brushed duration band, mirroring the count).
+fn hist_bucket_key(elapsed_ns: i64) -> u32 {
+    if elapsed_ns > 0 {
+        let log2 = (elapsed_ns as f64).log2();
+        (log2 * HIST_SUBDIV as f64).floor() as u32
+    } else {
+        ZERO_DURATION_BUCKET
+    }
+}
+
+/// Serialized half-open bounds `[lo_ns, hi_ns)` for a histogram bucket key.
+fn hist_bucket_bounds(k: u32) -> (i64, i64) {
+    if k == ZERO_DURATION_BUCKET {
+        // Zero-duration spans: distinct bucket [0ns, 1ns).
+        (0, 1)
+    } else {
+        let lo_raw = 2f64.powf(k as f64 / HIST_SUBDIV as f64).round() as i64;
+        let hi_raw = 2f64.powf((k + 1) as f64 / HIST_SUBDIV as f64).round() as i64;
+        // Guarantee a valid half-open integer bucket even when f64 rounding
+        // saturates both edges at i64::MAX. Reserving the final integer for the
+        // upper edge avoids `lo + 1` overflow.
+        let lo = lo_raw.min(i64::MAX - 1);
+        let hi = hi_raw.max(lo + 1);
+        (lo, hi)
+    }
+}
+
+/// One duration bucket's summed five-way time composition. Parallel to
+/// [`SpanDurationBucket`] (same `[lo_ns, hi_ns)`), so the client can sum the
+/// buckets inside a brushed band to get a band-scoped composition.
+#[derive(Debug, Clone, Serialize)]
+pub struct CompositionBucket {
+    pub lo_ns: i64,
+    pub hi_ns: i64,
+    pub on_cpu_ns: i64,
+    pub blocked_ns: i64,
+    pub async_wait_ns: i64,
+    pub scheduler_delay_ns: i64,
+    pub unknown_ns: i64,
+}
+
+/// Per-bucket accumulator for the five-way composition sums.
+#[derive(Clone, Default)]
+struct CompSums {
+    on_cpu_ns: i64,
+    blocked_ns: i64,
+    async_wait_ns: i64,
+    scheduler_delay_ns: i64,
+    unknown_ns: i64,
 }
 
 /// Summed five-way time composition across all instances of a span type.
@@ -123,6 +182,14 @@ pub struct SlowExemplar {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub callsite_line: Option<u32>,
     pub host: String,
+    /// Wall-clock start of this instance (epoch ns). Lets the viewer build a
+    /// `focus_start` deep link that jumps to this exact span.
+    pub start_ns: i64,
+    /// Wall-clock end of this instance (epoch ns). Used for `focus_end`.
+    pub end_ns: i64,
+    /// Source trace file key this instance came from, so the viewer can load the
+    /// right object (`/api/object?key=…`). Empty when the column is unavailable.
+    pub source_key: String,
 }
 
 /// An attribute facet: top values for one attribute key.
@@ -302,6 +369,9 @@ struct SpanTypeAccum {
     async_wait_ns_sum: i64,
     scheduler_delay_ns_sum: i64,
     unknown_ns_sum: i64,
+    /// Per-duration-bucket five-way composition sums (keyed by the same bucket
+    /// key as `histogram`). Lets the client scope composition to a brushed band.
+    composition_by_bucket: HashMap<u32, CompSums>,
     /// Has at least one row with composition data?
     has_composition: bool,
     /// Quality/partial counts.
@@ -338,6 +408,7 @@ impl SpanTypeAccum {
             async_wait_ns_sum: 0,
             scheduler_delay_ns_sum: 0,
             unknown_ns_sum: 0,
+            composition_by_bucket: HashMap::new(),
             has_composition: false,
             details_complete_count: 0,
             partial_count: 0,
@@ -355,14 +426,10 @@ impl SpanTypeAccum {
         // Update histogram bucket.
         // Zero-duration spans get ZERO_DURATION_BUCKET → serialized as [0ns, 1ns).
         // Positive spans use log₂ sub-octave bucketing: 1ns spans → key 0 → [1ns, 2^(1/4) ns).
-        if elapsed_ns > 0 {
-            let log2 = (elapsed_ns as f64).log2();
-            let k = (log2 * HIST_SUBDIV as f64).floor() as u32;
-            *self.histogram.entry(k).or_insert(0) += 1;
-        } else {
-            // elapsed_ns == 0: valid zero-duration span, distinct bucket.
-            *self.histogram.entry(ZERO_DURATION_BUCKET).or_insert(0) += 1;
-        }
+        *self
+            .histogram
+            .entry(hist_bucket_key(elapsed_ns))
+            .or_insert(0) += 1;
         // Maintain bounded slow exemplars
         if let Some(ex) = exemplar {
             if self.slow_exemplars.len() < MAX_EXEMPLARS {
@@ -438,26 +505,11 @@ impl SpanTypeAccum {
         let histogram: Vec<SpanDurationBucket> = hist_keys
             .into_iter()
             .map(|k| {
-                if k == ZERO_DURATION_BUCKET {
-                    // Zero-duration spans: distinct bucket [0ns, 1ns).
-                    SpanDurationBucket {
-                        lo_ns: 0,
-                        hi_ns: 1,
-                        count: self.histogram[&k],
-                    }
-                } else {
-                    let lo_raw = 2f64.powf(k as f64 / HIST_SUBDIV as f64).round() as i64;
-                    let hi_raw = 2f64.powf((k + 1) as f64 / HIST_SUBDIV as f64).round() as i64;
-                    // Guarantee a valid half-open integer bucket even when f64
-                    // rounding saturates both edges at i64::MAX. Reserving the
-                    // final integer for the upper edge avoids `lo + 1` overflow.
-                    let lo = lo_raw.min(i64::MAX - 1);
-                    let hi = hi_raw.max(lo + 1);
-                    SpanDurationBucket {
-                        lo_ns: lo,
-                        hi_ns: hi,
-                        count: self.histogram[&k],
-                    }
+                let (lo_ns, hi_ns) = hist_bucket_bounds(k);
+                SpanDurationBucket {
+                    lo_ns,
+                    hi_ns,
+                    count: self.histogram[&k],
                 }
             })
             .collect();
@@ -473,6 +525,27 @@ impl SpanTypeAccum {
         } else {
             None
         };
+
+        // Per-bucket composition, sorted by bucket key (ascending duration) so
+        // the client can walk buckets and sum those inside a brushed band.
+        let mut comp_keys: Vec<u32> = self.composition_by_bucket.keys().copied().collect();
+        comp_keys.sort_unstable();
+        let composition_histogram: Vec<CompositionBucket> = comp_keys
+            .into_iter()
+            .map(|k| {
+                let (lo_ns, hi_ns) = hist_bucket_bounds(k);
+                let s = &self.composition_by_bucket[&k];
+                CompositionBucket {
+                    lo_ns,
+                    hi_ns,
+                    on_cpu_ns: s.on_cpu_ns,
+                    blocked_ns: s.blocked_ns,
+                    async_wait_ns: s.async_wait_ns,
+                    scheduler_delay_ns: s.scheduler_delay_ns,
+                    unknown_ns: s.unknown_ns,
+                }
+            })
+            .collect();
 
         let mut exemplars = self.slow_exemplars.clone();
         exemplars.sort_by_key(|e| std::cmp::Reverse(e.elapsed_ns));
@@ -498,6 +571,7 @@ impl SpanTypeAccum {
             min_ns: self.min_ns,
             histogram,
             composition,
+            composition_histogram,
             details_complete_count: self.details_complete_count,
             partial_count: self.partial_count,
             slow_exemplars: exemplars,
@@ -583,6 +657,14 @@ impl SpanStatsAccum {
             let end_ns_col = batch
                 .column_by_name("end_ns")
                 .and_then(|c| c.as_any().downcast_ref::<arrow::array::Int64Array>());
+            // Exemplar coordinates: start_ns and source_key let the viewer build a
+            // focus deep link (focus_start/focus_end) that jumps to this instance.
+            let start_ns_col = batch
+                .column_by_name("start_ns")
+                .and_then(|c| c.as_any().downcast_ref::<arrow::array::Int64Array>());
+            let source_key_col = batch
+                .column_by_name("source_key")
+                .and_then(|c| c.as_any().downcast_ref::<arrow::array::StringArray>());
 
             // Finding 3: When time filtering is active, a missing end_ns column
             // is a merge error — we cannot correctly filter rows. This prevents
@@ -727,7 +809,8 @@ impl SpanStatsAccum {
                     )
                 });
 
-                // Build exemplar
+                // Build exemplar. start_ns/end_ns/source_key let the viewer build
+                // a focus deep link that jumps to this exact span instance.
                 let exemplar = span_uid_col.map(|uid_arr| SlowExemplar {
                     elapsed_ns: elapsed,
                     span_uid: hex::encode(uid_arr.value(i)),
@@ -741,6 +824,15 @@ impl SpanStatsAccum {
                     callsite_line: line_col
                         .and_then(|c| if c.is_null(i) { None } else { Some(c.value(i)) }),
                     host: host_col.map_or(String::new(), |c| c.value(i).to_string()),
+                    start_ns: start_ns_col
+                        .filter(|c| !c.is_null(i))
+                        .map_or(0, |c| c.value(i)),
+                    end_ns: end_ns_col
+                        .filter(|c| !c.is_null(i))
+                        .map_or(0, |c| c.value(i)),
+                    source_key: source_key_col
+                        .filter(|c| !c.is_null(i))
+                        .map_or(String::new(), |c| c.value(i).to_string()),
                 });
 
                 entry.record(elapsed, exemplar);
@@ -753,31 +845,41 @@ impl SpanStatsAccum {
                     }
                 }
 
-                // Five-way composition: sum non-null values.
+                // Five-way composition: sum non-null values. Accumulate both the
+                // grand total and the per-duration-bucket sums (same bucket key
+                // as the count histogram) so the client can scope composition to
+                // a brushed band.
                 if let Some(unknown_arr) = unknown_col {
-                    let unknown = unknown_arr.value(i);
-                    entry.unknown_ns_sum += unknown;
                     entry.has_composition = true;
-                    if let Some(on_cpu_arr) = on_cpu_col
-                        && !on_cpu_arr.is_null(i)
-                    {
-                        entry.on_cpu_ns_sum += on_cpu_arr.value(i);
-                    }
-                    if let Some(blocked_arr) = blocked_col
-                        && !blocked_arr.is_null(i)
-                    {
-                        entry.blocked_ns_sum += blocked_arr.value(i);
-                    }
-                    if let Some(async_arr) = async_wait_col
-                        && !async_arr.is_null(i)
-                    {
-                        entry.async_wait_ns_sum += async_arr.value(i);
-                    }
-                    if let Some(sched_arr) = sched_delay_col
-                        && !sched_arr.is_null(i)
-                    {
-                        entry.scheduler_delay_ns_sum += sched_arr.value(i);
-                    }
+                    let unknown = unknown_arr.value(i);
+                    let on_cpu = on_cpu_col
+                        .filter(|c| !c.is_null(i))
+                        .map_or(0, |c| c.value(i));
+                    let blocked = blocked_col
+                        .filter(|c| !c.is_null(i))
+                        .map_or(0, |c| c.value(i));
+                    let async_wait = async_wait_col
+                        .filter(|c| !c.is_null(i))
+                        .map_or(0, |c| c.value(i));
+                    let sched_delay = sched_delay_col
+                        .filter(|c| !c.is_null(i))
+                        .map_or(0, |c| c.value(i));
+
+                    entry.unknown_ns_sum += unknown;
+                    entry.on_cpu_ns_sum += on_cpu;
+                    entry.blocked_ns_sum += blocked;
+                    entry.async_wait_ns_sum += async_wait;
+                    entry.scheduler_delay_ns_sum += sched_delay;
+
+                    let bucket = entry
+                        .composition_by_bucket
+                        .entry(hist_bucket_key(elapsed))
+                        .or_default();
+                    bucket.unknown_ns += unknown;
+                    bucket.on_cpu_ns += on_cpu;
+                    bucket.blocked_ns += blocked;
+                    bucket.async_wait_ns += async_wait;
+                    bucket.scheduler_delay_ns += sched_delay;
                 }
 
                 // Quality counts
@@ -1443,6 +1545,106 @@ mod tests {
     }
 
     #[test]
+    fn composition_histogram_buckets_by_duration() {
+        use crate::ingest::decode::ResolvedSpan;
+        use crate::ingest::parquet_writer::write_spans;
+
+        // Two instances of one span type with very different durations and
+        // compositions: a short 1000ns span that was all on-CPU, and a long
+        // ~1.05ms span that was all async-wait. They land in different
+        // log-duration buckets, so composition_histogram must separate them —
+        // and the whole-type composition must still be the sum.
+        let mk = |elapsed: u64, on_cpu: u64, wait: u64| ResolvedSpan {
+            span_uid: [0u8; 16],
+            span_type_uid: [7u8; 16],
+            kind: "tracing",
+            name: "op".to_string(),
+            target: "t".to_string(),
+            callsite_file: None,
+            callsite_line: None,
+            start_ns: 0,
+            end_ns: elapsed,
+            elapsed_ns: elapsed,
+            active_ns: None,
+            observed_active_wall_ns: on_cpu + wait,
+            detail_coverage_ns: on_cpu + wait,
+            details_complete: false,
+            concurrent: false,
+            parent_span_uid: None,
+            attributes: vec![],
+            on_cpu_ns_est: Some(on_cpu),
+            blocked_ns_est: None,
+            async_wait_ns: Some(wait),
+            scheduler_delay_ns: None,
+            unknown_ns: elapsed - on_cpu - wait,
+            cpu_sample_count: 0,
+            sched_sample_count: 0,
+            attribution_version: 1,
+            attribution_flags: 0b1011,
+            saturated: false,
+            loss_observable: false,
+            unbalanced_exits: 0,
+            unbalanced_enters: 0,
+            identity_quality: "legacy",
+            source_key: "k".to_string(),
+            host: "h".to_string(),
+            service: "svc".to_string(),
+            date: "2026-07-15".to_string(),
+        };
+        let spans = vec![
+            mk(1000, 1000, 0),           // short: all on-CPU
+            mk(1_050_000, 0, 1_050_000), // long: all async-wait
+        ];
+        let mut buf = Vec::new();
+        write_spans(&mut buf, &spans).unwrap();
+
+        let mut accum = SpanStatsAccum::new(None, None);
+        accum.merge_spans_part(buf).unwrap();
+        let snap = accum.snapshot();
+        let st = &snap.span_types[0];
+
+        // Whole-type composition = the sum.
+        let comp = st.composition.as_ref().unwrap();
+        assert_eq!(comp.on_cpu_ns, 1000);
+        assert_eq!(comp.async_wait_ns, 1_050_000);
+
+        // Per-bucket: two distinct buckets, each single-category.
+        assert_eq!(
+            st.composition_histogram.len(),
+            2,
+            "two duration buckets expected"
+        );
+        // The short-duration bucket ([~1000ns]) is all on-CPU.
+        let short = st
+            .composition_histogram
+            .iter()
+            .find(|b| b.lo_ns <= 1000 && b.hi_ns > 1000)
+            .expect("short bucket present");
+        assert_eq!(short.on_cpu_ns, 1000);
+        assert_eq!(short.async_wait_ns, 0);
+        // The long-duration bucket is all async-wait.
+        let long = st
+            .composition_histogram
+            .iter()
+            .find(|b| b.lo_ns <= 1_050_000 && b.hi_ns > 1_050_000)
+            .expect("long bucket present");
+        assert_eq!(long.on_cpu_ns, 0);
+        assert_eq!(long.async_wait_ns, 1_050_000);
+
+        // Each composition bucket must align with a count-histogram bucket.
+        for cb in &st.composition_histogram {
+            assert!(
+                st.histogram
+                    .iter()
+                    .any(|hb| hb.lo_ns == cb.lo_ns && hb.hi_ns == cb.hi_ns),
+                "composition bucket [{}, {}) has no matching count bucket",
+                cb.lo_ns,
+                cb.hi_ns
+            );
+        }
+    }
+
+    #[test]
     fn slow_exemplars_bounded_with_source_coords() {
         use crate::ingest::decode::ResolvedSpan;
         use crate::ingest::parquet_writer::write_spans;
@@ -1517,6 +1719,17 @@ mod tests {
         for ex in &st.slow_exemplars {
             assert!(ex.callsite_file.is_some());
             assert!(ex.callsite_line.is_some());
+        }
+        // Each exemplar carries the jump-link coordinates: start/end wall clock
+        // (start_ns=1000 for all rows, end_ns = start + elapsed) and source_key.
+        for ex in &st.slow_exemplars {
+            assert_eq!(ex.start_ns, 1000, "exemplar start_ns populated");
+            assert_eq!(
+                ex.end_ns,
+                1000 + ex.elapsed_ns,
+                "exemplar end_ns = start + elapsed"
+            );
+            assert_eq!(ex.source_key, "test", "exemplar source_key populated");
         }
     }
 

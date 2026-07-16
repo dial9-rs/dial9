@@ -51,6 +51,8 @@
   .composition-legend { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 4px; font-size: 0.75em; }
   .composition-legend .item { display: flex; align-items: center; gap: 4px; }
   .composition-legend .swatch { width: 10px; height: 10px; border-radius: 2px; }
+  .composition-legend .legend-pct { font-weight: 600; color: #e6edf3; }
+  .composition-legend .legend-ns { color: #8b949e; }
 
   /* Band selection display */
   .band-info { padding: 6px 0; font-size: 0.8em; color: #aaa; display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
@@ -62,6 +64,23 @@
   .fg-links .on-cpu { background: #ff6b35; color: #fff; }
   .fg-links .blocking { background: #e63946; color: #fff; }
   .fg-links a:hover { opacity: 0.85; }
+
+  /* Slow exemplars: a table of the longest instances; rows deep-link to the
+     viewer focused on that span (like the Tokio-stats exemplar tables). */
+  .exemplars { padding: 8px 0; font-size: 0.8em; color: #aaa; flex-shrink: 0; overflow-x: auto; }
+  .exemplars .label { font-weight: 600; margin-bottom: 4px; }
+  .exemplars table.exemplar-table { width: auto; min-width: 320px; border-collapse: collapse; font-size: 0.95em; }
+  .exemplars table.exemplar-table th { position: static; background: transparent; cursor: default; padding: 3px 12px 3px 0; color: #8b949e; font-weight: 600; text-align: left; }
+  .exemplars table.exemplar-table td { padding: 3px 12px 3px 0; border-bottom: 1px solid #21262d; white-space: nowrap; }
+  .exemplars table.exemplar-table td.dur { color: #e6edf3; font-weight: 600; }
+  .exemplars table.exemplar-table td.host { color: #8b949e; }
+  .exemplars table.exemplar-table td.muted, .exemplars .muted { color: #6e7681; }
+  .exemplars table.exemplar-table code { color: #79c0ff; }
+  .exemplars table.exemplar-table tr.jump { cursor: pointer; }
+  .exemplars table.exemplar-table tr.jump:hover { background: #1c2128; }
+  /* Clickable max value in the detail header */
+  .detail-header .meta a.max-jump { color: #79c0ff; text-decoration: none; font-weight: 600; }
+  .detail-header .meta a.max-jump:hover { text-decoration: underline; }
 
   /* Coverage badge */
   .coverage { padding: 6px 0; font-size: 0.75em; color: #8b949e; flex-shrink: 0; }
@@ -280,12 +299,22 @@
     detailPanel.className = "detail-panel";
     detailPanel.innerHTML = "";
 
-    // Header
+    // Header. The `max` value is clickable when we have a slow exemplar to jump
+    // to — the slowest exemplar (slow_exemplars[0], sorted desc) is the max
+    // instance. Clicking pans/zooms the viewer to that span via focus_* params.
+    const scope = exemplarScope(st);
+    const slowest = Array.isArray(st.slow_exemplars) && st.slow_exemplars.length > 0
+      ? st.slow_exemplars[0] : null;
+    const maxJumpUrl = slowest ? SE.exemplarViewerUrl(slowest, scope) : "";
+    const maxHtml = maxJumpUrl
+      ? `<a class="max-jump" href="${esc(maxJumpUrl)}" target="_blank" ` +
+        `title="Jump to the slowest instance of this span in the viewer">${SE.fmtNs(st.max_ns)}</a>`
+      : SE.fmtNs(st.max_ns);
     const hdr = document.createElement("div");
     hdr.className = "detail-header";
     hdr.innerHTML = `<h2>${esc(SE.spanTypeLabel(st))}</h2>` +
       `<span class="meta">${st.count.toLocaleString()} instances · ` +
-      `p50 ${SE.fmtNs(st.p50_ns)} · p99 ${SE.fmtNs(st.p99_ns)} · max ${SE.fmtNs(st.max_ns)}</span>`;
+      `p50 ${SE.fmtNs(st.p50_ns)} · p99 ${SE.fmtNs(st.p99_ns)} · max ${maxHtml}</span>`;
     detailPanel.appendChild(hdr);
 
     // Histogram
@@ -302,6 +331,9 @@
 
     // Flamegraph links
     renderFlamegraphLinks(detailPanel);
+
+    // Slow exemplars: clickable jump links to specific span instances.
+    renderExemplars(detailPanel, st);
 
     // Coverage
     if (lastCoverage) {
@@ -462,7 +494,13 @@
   // ── Time composition ────────────────────────────────────────────────────────
 
   function renderComposition(container, st) {
-    const comp = SE.computeTimeComposition(st);
+    // Scope composition to the brushed duration band when one is active and the
+    // backend provided per-bucket composition (composition_histogram).
+    const band = { min_ns: bandMinNs, max_ns: bandMaxNs };
+    const hasBand = bandMinNs != null || bandMaxNs != null;
+    const bandScoped =
+      hasBand && Array.isArray(st.composition_histogram) && st.composition_histogram.length > 0;
+    const comp = SE.computeTimeComposition(st, band);
     const quality = SE.spanTypeQuality(st);
     const wrap = document.createElement("div");
     wrap.className = "composition-wrap";
@@ -470,10 +508,16 @@
     // Label
     const label = document.createElement("div");
     label.style.cssText = "font-size:0.8em;color:#aaa;margin-bottom:4px;font-weight:600";
-    label.textContent = "Time composition (estimated)";
+    label.textContent = bandScoped
+      ? "Time composition (estimated, selected band)"
+      : "Time composition (estimated)";
     const isFallback = comp.categories.length === 1 && comp.categories[0].key === "unknown" && !st.composition;
     if (isFallback) {
       label.innerHTML += '<span class="partial-badge">awaiting per-category data</span>';
+    } else if (hasBand && !bandScoped) {
+      // A band is selected but this type has no per-bucket data: composition is
+      // still the all-instances total. Say so, so it isn't misread as scoped.
+      label.innerHTML += '<span class="partial-badge">all instances</span>';
     } else if (quality != null && quality < 1.0) {
       label.innerHTML += `<span class="partial-badge">${(quality * 100).toFixed(0)}% detailed</span>`;
     }
@@ -493,13 +537,25 @@
     }
     wrap.appendChild(bar);
 
-    // Legend
+    // Legend — one item per category with its share (percent) and duration, so
+    // the breakdown is readable numerically, not just by bar width. Categories
+    // with zero time are dimmed rather than hidden so the legend stays stable.
+    const byKey = new Map(comp.categories.map((c) => [c.key, c]));
     const legend = document.createElement("div");
     legend.className = "composition-legend";
     for (const cat of SE.TIME_CATEGORIES) {
+      const c = byKey.get(cat.key);
+      const frac = c ? c.frac : 0;
+      const ns = c ? c.ns : 0;
       const item = document.createElement("span");
       item.className = "item";
-      item.innerHTML = `<span class="swatch" style="background:${cat.color}"></span>${cat.label}`;
+      if (frac <= 0) item.style.opacity = "0.4";
+      const pct = (frac * 100).toFixed(frac > 0 && frac < 0.001 ? 2 : 1);
+      item.innerHTML =
+        `<span class="swatch" style="background:${cat.color}"></span>` +
+        `${cat.label} <span class="legend-pct">${pct}%</span>` +
+        (ns > 0 ? ` <span class="legend-ns">(${SE.fmtNs(ns)})</span>` : "");
+      item.title = `${cat.label}: ${SE.fmtNs(ns)} (${pct}%)`;
       legend.appendChild(item);
     }
     wrap.appendChild(legend);
@@ -551,6 +607,66 @@
     blockLink.textContent = "🧱 Blocking Flamegraph";
     wrap.appendChild(blockLink);
 
+    container.appendChild(wrap);
+  }
+
+  // ── Slow exemplars ────────────────────────────────────────────────────────
+
+  // The scope passed to SE.exemplarViewerUrl. bucket/region/service come from
+  // the page; the host comes from each exemplar itself (they can differ). The
+  // span type's name is forwarded so the viewer can select the exact span
+  // (focus_span_name) rather than just panning to a time window.
+  function exemplarScope(st) {
+    return {
+      bucket: scopeBucket,
+      region: scopeRegion,
+      service: scopeService,
+      spanName: st ? st.name : undefined,
+    };
+  }
+
+  // Render the slow exemplars as a table (like the Tokio-stats exemplar tables).
+  // Each row deep-links to the viewer focused on that exact span instance via
+  // focus_* params. In raw-trace mode (or with no source_key) rows are inert.
+  function renderExemplars(container, st) {
+    const exemplars = Array.isArray(st.slow_exemplars) ? st.slow_exemplars : [];
+    if (exemplars.length === 0) return;
+    const scope = exemplarScope(st);
+    const wrap = document.createElement("div");
+    wrap.className = "exemplars";
+    const label = document.createElement("div");
+    label.className = "label";
+    label.textContent = "Slow exemplars (click a row to open the span in the viewer):";
+    wrap.appendChild(label);
+
+    // Show a Host column only when exemplars span more than one host.
+    const multiHost = new Set(exemplars.map((e) => e.host || "")).size > 1;
+    const table = document.createElement("table");
+    table.className = "exemplar-table";
+    let head = "<thead><tr><th>#</th><th>Duration</th><th>Callsite</th>";
+    if (multiHost) head += "<th>Host</th>";
+    head += "</tr></thead>";
+    const rows = exemplars
+      .map((ex, i) => {
+        const url = rawTraceParam ? "" : SE.exemplarViewerUrl(ex, scope);
+        const callsite =
+          ex.callsite_file != null
+            ? esc(ex.callsite_file.split("/").pop() + (ex.callsite_line != null ? ":" + ex.callsite_line : ""))
+            : "<span class=\"muted\">—</span>";
+        let cells =
+          `<td class="muted">${i + 1}</td>` +
+          `<td class="dur">${esc(SE.fmtNs(ex.elapsed_ns))}</td>` +
+          `<td><code>${callsite}</code></td>`;
+        if (multiHost) cells += `<td class="host">${esc(ex.host || "")}</td>`;
+        if (url) {
+          return `<tr class="jump" title="Open the viewer focused on this span instance" ` +
+            `onclick="window.open('${esc(url).replace(/'/g, "&#39;")}','_blank')">${cells}</tr>`;
+        }
+        return `<tr class="inert">${cells}</tr>`;
+      })
+      .join("");
+    table.innerHTML = head + "<tbody>" + rows + "</tbody>";
+    wrap.appendChild(table);
     container.appendChild(wrap);
   }
 
