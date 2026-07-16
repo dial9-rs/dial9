@@ -73,7 +73,7 @@ dial9-utils = { workspace = true, optional = true }
 analysis = []
 cpu-profiling = [
     "dep:dial9-perf-self-profile",
-    "dial9-perf-self-profile/dial9-source",
+    "dial9-perf-self-profile/cpu-profiling",
     "dial9-perf-self-profile/symbolize-processor",
 ]
 ## Process resource usage sampled from `getrusage(RUSAGE_SELF)` (unix). Forwards

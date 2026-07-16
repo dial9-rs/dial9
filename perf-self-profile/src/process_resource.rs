@@ -63,8 +63,8 @@ impl ProcessResourceUsageConfig {
 #[cfg(unix)]
 mod unix {
     use super::{ProcessResourceUsageConfig, ProcessResourceUsageEvent};
-    use crate::rate_limit::rate_limited;
     use dial9_core::clock::clock_monotonic_ns;
+    use dial9_core::rate_limited;
     use dial9_core::source::{FlushContext, Source};
     use std::io;
     use std::mem::MaybeUninit;

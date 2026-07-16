@@ -55,17 +55,21 @@
 //! ```
 
 pub mod offline_symbolize;
-mod rate_limit;
 mod sampler;
 mod symbolize;
 mod sys;
 pub mod tracepoint;
 pub mod unwinder;
 
-#[cfg(feature = "dial9-source")]
+#[cfg(feature = "cpu-profiling")]
 pub mod cpu_source;
 
-#[cfg(feature = "dial9-source")]
+#[cfg(any(
+    feature = "cpu-profiling",
+    feature = "memory-profiling",
+    feature = "process-resource",
+    feature = "linux-socket"
+))]
 pub mod recorder_ext;
 
 #[cfg(feature = "process-resource")]
@@ -122,12 +126,17 @@ pub fn unregister_current_thread() {
 #[cfg(target_os = "linux")]
 pub use sys::{resolve_symbol_with_maps, resolve_symbols_with_maps};
 
-#[cfg(feature = "dial9-source")]
+#[cfg(feature = "cpu-profiling")]
 pub use cpu_source::{
     CpuProfiler, CpuProfilingConfig, CpuSampleSource, SchedEventConfig, SchedProfiler,
 };
 
-#[cfg(feature = "dial9-source")]
+#[cfg(any(
+    feature = "cpu-profiling",
+    feature = "memory-profiling",
+    feature = "process-resource",
+    feature = "linux-socket"
+))]
 pub use recorder_ext::RecorderPerfExt;
 
 #[cfg(all(feature = "process-resource", unix))]

@@ -13,18 +13,16 @@ all-features = true
 
 [features]
 __internal-bench = []
-## Enables the dial9 `Source` integration for the profilers (`CpuProfiler`,
-## `SchedProfiler`, the memory profiler).
-dial9-source = ["dep:dial9-core"]
+## CPU and scheduler profiling as a dial9 `Source` (`CpuProfiler`, `SchedProfiler`).
+cpu-profiling = []
 ## Sampled memory allocation profiler. Feeds a dial9 trace via a `Source`.
-memory-profiling = ["dial9-source", "dep:scc", "dep:crossbeam-queue", "dep:bon"]
+memory-profiling = ["dep:scc", "dep:crossbeam-queue", "dep:bon"]
 ## Process resource usage sampled from `getrusage(RUSAGE_SELF)`. Feeds a dial9
 ## trace via a `Source` (unix).
-process-resource = ["dial9-source", "dep:bon", "dep:libc"]
+process-resource = ["dep:bon", "dep:libc"]
 ## TCP listener accept-queue depth sampled from Linux sock_diag. Feeds a dial9
 ## trace via a `Source` (Linux only).
 linux-socket = [
-    "dial9-source",
     "dep:bon",
     "dep:netlink-packet-core",
     "dep:netlink-packet-sock-diag",
@@ -36,7 +34,7 @@ linux-socket = [
 unstable-events = []
 ## Offline symbolization as a `SegmentProcessor`. Pulls dial9-core's pipeline
 ## traits and a minimal Tokio runtime for the `spawn_blocking` handoff.
-symbolize-processor = ["dep:dial9-core", "dial9-core/pipeline", "dep:tokio"]
+symbolize-processor = ["dial9-core/pipeline", "dep:tokio"]
 ## Test-only helpers.
 test-util = []
 
@@ -44,7 +42,7 @@ test-util = []
 bon = { version = "3", optional = true }
 bytes = "1"
 crossbeam-queue = { version = "0.3", optional = true }
-dial9-core = { workspace = true, optional = true }
+dial9-core = { workspace = true }
 dial9-trace-format = { workspace = true }
 scc = { version = "2", optional = true }
 tokio = { version = "1", features = ["rt"], optional = true, default-features = false }

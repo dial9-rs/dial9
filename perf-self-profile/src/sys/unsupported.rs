@@ -22,10 +22,12 @@ impl PerfSampler {
         unsupported()
     }
 
+    #[cfg(feature = "cpu-profiling")]
     pub(crate) fn start_perf_only(_config: SamplerConfig) -> io::Result<Self> {
         unsupported()
     }
 
+    #[cfg(feature = "cpu-profiling")]
     pub(crate) fn start_ctimer_only(_config: SamplerConfig) -> io::Result<Self> {
         unsupported()
     }

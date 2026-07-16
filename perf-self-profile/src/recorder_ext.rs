@@ -6,19 +6,19 @@
 
 use dial9_core::recorder::RecorderSourceExt;
 
-#[cfg(feature = "dial9-source")]
-use crate::rate_limit::rate_limited;
+#[cfg(any(feature = "cpu-profiling", feature = "memory-profiling"))]
+use dial9_core::rate_limited;
 
 /// `.with_*` convenience for this crate's profiling `Source`s, available on any
 /// [`RecorderSourceExt`]. The core [`RecorderBuilder`](dial9_core::recorder::RecorderBuilder)
 /// and runtime wrappers that forward to it.
 pub trait RecorderPerfExt: Sized {
     /// Register the process-wide CPU profiler. Warns and skips on start failure.
-    #[cfg(feature = "dial9-source")]
+    #[cfg(feature = "cpu-profiling")]
     fn with_cpu_profiling(self, config: crate::CpuProfilingConfig) -> Self;
 
     /// Register the per-thread scheduler-event profiler. Warns and skips on start failure.
-    #[cfg(feature = "dial9-source")]
+    #[cfg(feature = "cpu-profiling")]
     fn with_sched_events(self, config: crate::SchedEventConfig) -> Self;
 
     /// Register the `getrusage` resource-usage sampler. Warns and skips off unix.
@@ -37,7 +37,7 @@ pub trait RecorderPerfExt: Sized {
 }
 
 impl<T: RecorderSourceExt> RecorderPerfExt for T {
-    #[cfg(feature = "dial9-source")]
+    #[cfg(feature = "cpu-profiling")]
     fn with_cpu_profiling(self, config: crate::CpuProfilingConfig) -> Self {
         match crate::CpuProfiler::start(config) {
             Ok(source) => self.source(source),
@@ -50,7 +50,7 @@ impl<T: RecorderSourceExt> RecorderPerfExt for T {
         }
     }
 
-    #[cfg(feature = "dial9-source")]
+    #[cfg(feature = "cpu-profiling")]
     fn with_sched_events(self, config: crate::SchedEventConfig) -> Self {
         match crate::SchedProfiler::new(config) {
             Ok(source) => self.source(source),

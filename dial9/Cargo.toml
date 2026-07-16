@@ -70,7 +70,7 @@ tokio = [
 ## runtime when the `tokio` feature is also on.
 cpu-profiling = [
     "dep:dial9-perf-self-profile",
-    "dial9-perf-self-profile/dial9-source",
+    "dial9-perf-self-profile/cpu-profiling",
     "dial9-tokio-telemetry?/cpu-profiling",
 ]
 
@@ -78,7 +78,6 @@ cpu-profiling = [
 memory-profiling = [
     "dep:dial9-perf-self-profile",
     "dial9-perf-self-profile/memory-profiling",
-    "dial9-perf-self-profile/dial9-source",
     "dial9-tokio-telemetry?/memory-profiling",
 ]
 

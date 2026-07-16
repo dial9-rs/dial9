@@ -1,5 +1,5 @@
-use crate::rate_limit::rate_limited;
 use dial9_core::pipeline::{Payload, ProcessError, SegmentData, SegmentProcessor};
+use dial9_core::rate_limited;
 use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;

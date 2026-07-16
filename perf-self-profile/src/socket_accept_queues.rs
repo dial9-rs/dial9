@@ -87,8 +87,8 @@ mod tests {
 #[cfg(target_os = "linux")]
 mod linux {
     use super::{SocketAcceptQueuesConfig, TcpAcceptQueueEvent};
-    use crate::rate_limit::rate_limited;
     use dial9_core::clock::clock_monotonic_ns;
+    use dial9_core::rate_limited;
     use dial9_core::source::{FlushContext, Source};
     use netlink_packet_core::{
         NLM_F_DUMP, NLM_F_REQUEST, NetlinkBuffer, NetlinkMessage, NetlinkPayload,
