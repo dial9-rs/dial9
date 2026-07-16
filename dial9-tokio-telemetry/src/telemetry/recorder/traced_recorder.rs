@@ -16,7 +16,7 @@ use crate::primitives::sync::{Arc, Mutex};
 use crate::telemetry::task_dump_config::TaskDumpConfig;
 use dial9_core::buffer::{BufferMode, Disk};
 use dial9_core::handle::Dial9Handle;
-use dial9_core::recorder::{RecorderBuilder, RegisterSource};
+use dial9_core::recorder::{RecorderBuilder, RecorderSourceExt};
 use dial9_core::recording::Recorder;
 use dial9_core::source::Source;
 use std::time::Duration;
@@ -520,7 +520,7 @@ impl<W: BufferMode> TryFrom<TracedRuntimeBuilder<W>> for TracedRuntime {
     }
 }
 
-impl<W: BufferMode> RegisterSource for TracedRuntimeBuilder<W> {
+impl<W: BufferMode> RecorderSourceExt for TracedRuntimeBuilder<W> {
     fn source(self, source: impl Source + 'static) -> Self {
         Self {
             core: self.core.map(|c| c.source(source)),

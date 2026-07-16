@@ -12,7 +12,7 @@
 
 use std::time::Duration;
 
-use dial9::telemetry::Dial9TokioHandle;
+use dial9::Dial9TokioHandle;
 
 async fn cpu_work(iterations: u64) -> u64 {
     let mut result = 0u64;

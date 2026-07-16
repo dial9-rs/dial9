@@ -1,4 +1,4 @@
-use dial9::telemetry::Dial9TokioHandle;
+use dial9::Dial9TokioHandle;
 use dial9::{DiskBuffer, TracedRuntimeBuilder};
 use std::time::Duration;
 

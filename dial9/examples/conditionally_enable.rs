@@ -18,7 +18,8 @@
 
 use std::time::Duration;
 
-use dial9::telemetry::{Dial9Handle, Dial9TokioHandle};
+use dial9::Dial9Handle;
+use dial9::Dial9TokioHandle;
 use dial9::{DiskBuffer, TracedRuntimeBuilder};
 
 fn my_config() -> TracedRuntimeBuilder {

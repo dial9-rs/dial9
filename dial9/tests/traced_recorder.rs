@@ -3,7 +3,7 @@
 #![cfg(feature = "tokio")]
 
 use dial9::{DiskBuffer, recorder};
-use dial9::{RecorderBuilderTokioExt, RegisterSource};
+use dial9::{RecorderBuilderTokioExt, RecorderSourceExt};
 use dial9_trace_format::decoder::Decoder;
 
 #[test]

@@ -206,7 +206,7 @@ Programmatic builders leave process resource usage sampling disabled unless you
 opt in:
 
 ```rust,ignore
-use dial9::telemetry::ProcessResourceUsageConfig;
+use dial9::process::ProcessResourceUsageConfig;
 use dial9::{RecorderBuilderTokioExt, RecorderPerfExt};
 
 let traced = dial9::recorder(writer)
@@ -233,7 +233,7 @@ Programmatic builders leave socket accept queue sampling disabled unless you
 opt in:
 
 ```rust,ignore
-use dial9::telemetry::SocketAcceptQueuesConfig;
+use dial9::socket::SocketAcceptQueuesConfig;
 use dial9::{RecorderBuilderTokioExt, RecorderPerfExt};
 
 let traced = dial9::recorder(writer)
@@ -275,7 +275,7 @@ rustflags = ["--cfg", "tokio_unstable", "-C", "force-frame-pointers=yes"]
 **Enable CPU profiling** (`.with_cpu_profiling` on the recorder):
 
 ```rust,ignore
-use dial9::telemetry::{CpuProfilingConfig, SchedEventConfig};
+use dial9::cpu::{CpuProfilingConfig, SchedEventConfig};
 use dial9::{RecorderBuilderTokioExt, RecorderPerfExt};
 dial9::recorder(writer)
     // Enable normal CPU profiles
@@ -305,7 +305,7 @@ To use dial9 as a CPU profiler without installing Tokio runtime hooks, keep
 telemetry enabled and disable only Tokio instrumentation:
 
 ```rust,ignore
-use dial9::telemetry::CpuProfilingConfig;
+use dial9::cpu::CpuProfilingConfig;
 use dial9::{RecorderBuilderTokioExt, RecorderPerfExt};
 
 let traced = dial9::recorder(writer)
@@ -442,7 +442,7 @@ Careful filtering of the data you send to dial9 strongly recommended. dial9 does
 
 ```rust,ignore
 use std::time::Duration;
-use dial9::telemetry::TaskDumpConfig;
+use dial9::TaskDumpConfig;
 use dial9::{DiskBuffer, RecorderBuilderTokioExt, TracedRecorder};
 
 fn my_config() -> TracedRecorder {
@@ -499,7 +499,7 @@ custom events. This is useful for draining application-owned queues or taking
 periodic snapshots without passing a [`Dial9Handle`] through your code:
 
 ```rust,ignore
-use dial9::telemetry::CustomEventsConfig;
+use dial9::core::CustomEventsConfig;
 use dial9::{RecorderBuilderTokioExt, recorder};
 use dial9_core::custom_events::CustomEventsSource;
 use dial9_trace_format::TraceEvent;

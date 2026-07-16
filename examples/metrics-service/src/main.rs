@@ -8,13 +8,14 @@ use std::time::Duration;
 
 use aws_config::BehaviorVersion;
 use clap::Parser;
+#[cfg(target_os = "linux")]
+use dial9::cpu::{CpuProfilingConfig, SchedEventConfig};
 use dial9::memory::{Dial9Allocator, MemoryProfiler, MemoryProfilingConfig};
+use dial9::process::ProcessResourceUsageConfig;
 #[cfg(target_os = "linux")]
-use dial9::telemetry::SocketAcceptQueuesConfig;
-#[cfg(target_os = "linux")]
-use dial9::telemetry::{CpuProfilingConfig, SchedEventConfig};
-use dial9::telemetry::{Dial9TokioHandle, ProcessResourceUsageConfig, TaskDumpConfig};
+use dial9::socket::SocketAcceptQueuesConfig;
 use dial9::tracing_layer::Dial9TracingLayer;
+use dial9::{Dial9TokioHandle, TaskDumpConfig};
 use dial9::{DiskBuffer, recorder};
 use dial9::{RecorderBuilderTokioExt, RecorderPerfExt};
 use tokio_util::sync::CancellationToken;
@@ -239,7 +240,7 @@ fn main() -> std::io::Result<()> {
         );
     }
     if let Some(bucket) = &args.s3_bucket {
-        use dial9::background_task::s3::S3Config;
+        use dial9::core::pipeline::s3::S3Config;
 
         let s3_config = S3Config::builder()
             .bucket(bucket)

@@ -189,12 +189,14 @@ impl<M: BufferMode> RecorderBuilder<M> {
     }
 }
 
+// TODO(tokio-as-source): fold away once tokio is just a Source with its own ext
+// trait, source registration can then be inherent on RecorderBuilder.
 /// A builder that can register [`Source`]s.
 ///
 /// Implemented by [`RecorderBuilder`] and by runtime wrappers that own a core
 /// builder (e.g. the tokio layer's `TracedRuntimeBuilder`), so source-registration
 /// sugar works the same on either.
-pub trait RegisterSource: Sized {
+pub trait RecorderSourceExt: Sized {
     /// Register a [`Source`] with the underlying recording recorder.
     fn source(self, source: impl Source + 'static) -> Self;
 
@@ -220,7 +222,7 @@ pub trait RegisterSource: Sized {
     }
 }
 
-impl<M: BufferMode> RegisterSource for RecorderBuilder<M> {
+impl<M: BufferMode> RecorderSourceExt for RecorderBuilder<M> {
     fn source(mut self, source: impl Source + 'static) -> Self {
         self.sources.push(Box::new(source));
         self

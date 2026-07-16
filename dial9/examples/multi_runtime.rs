@@ -12,7 +12,7 @@
 //! After running, inspect the trace:
 //!   cargo run --example analyze_trace -- /tmp/multi_runtime/trace.0.bin
 
-use dial9::telemetry::{DiskBuffer, RecorderBuilderTokioExt, recorder};
+use dial9::{DiskBuffer, RecorderBuilderTokioExt, recorder};
 use std::time::Duration;
 
 fn main() -> std::io::Result<()> {

@@ -31,9 +31,9 @@ use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
 
+use dial9::Dial9TokioHandle;
 use dial9::DiskBuffer;
-use dial9::background_task::{ProcessError, SegmentData, SegmentProcessor};
-use dial9::telemetry::Dial9TokioHandle;
+use dial9::core::pipeline::{ProcessError, SegmentData, SegmentProcessor};
 
 const TRACE_DIR: &str = "/tmp/dial9-custom-pipeline";
 

@@ -25,8 +25,9 @@
 
 use std::time::Duration;
 
+use dial9::Dial9Handle;
+use dial9::Dial9TokioHandle;
 use dial9::DiskBuffer;
-use dial9::telemetry::{Dial9Handle, Dial9TokioHandle};
 
 const TRACE_DIR: &str = "/tmp/dial9-on-trigger-windows";
 

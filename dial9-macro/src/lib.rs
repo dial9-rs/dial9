@@ -157,7 +157,7 @@ fn expand_main(args: MainArgs, input: ItemFn) -> Result<TokenStream2, syn::Error
 /// Using a named function:
 ///
 /// ```no_run
-/// use dial9::telemetry::Dial9TokioHandle;
+/// use dial9::Dial9TokioHandle;
 /// use dial9::{main, DiskBuffer, RecorderBuilderTokioExt, TracedRuntimeBuilder};
 ///
 /// fn my_config() -> TracedRuntimeBuilder {

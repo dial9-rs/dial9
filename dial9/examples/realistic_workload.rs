@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use dial9::telemetry::Dial9TokioHandle;
+use dial9::Dial9TokioHandle;
 use dial9::{DiskBuffer, TracedRuntimeBuilder};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;

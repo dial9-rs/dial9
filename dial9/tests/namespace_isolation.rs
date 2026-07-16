@@ -154,7 +154,7 @@ fn gc_enabled_reclaims_dead_peer() {
 fn s3_boot_id_matches_namespace_dir() {
     use std::collections::HashMap;
 
-    use dial9::background_task::s3::S3Config;
+    use dial9::core::pipeline::s3::S3Config;
     use dial9_trace_format::decoder::Decoder;
 
     let dir = tempfile::tempdir().unwrap();

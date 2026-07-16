@@ -16,9 +16,9 @@ use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
 
+use dial9::Dial9TokioHandle;
 use dial9::RecorderBuilderTokioExt;
-use dial9::background_task::{ProcessError, SegmentData, SegmentProcessor};
-use dial9::telemetry::Dial9TokioHandle;
+use dial9::core::pipeline::{ProcessError, SegmentData, SegmentProcessor};
 use dial9::{MemoryBuffer, recorder};
 
 /// Stand-in delivery processor. Inspects each segment, forwards unchanged.

@@ -16,7 +16,7 @@
 // Core recording API
 pub use dial9_core::buffer::{Disk, DiskBuffer, Memory, MemoryBuffer};
 pub use dial9_core::handle::Dial9Handle;
-pub use dial9_core::recorder::{RecorderBuilder, RegisterSource, recorder};
+pub use dial9_core::recorder::{RecorderBuilder, RecorderSourceExt, recorder};
 pub use dial9_core::recording::Recorder;
 
 /// Building blocks for extending dial9: implement a [`Source`](crate::core::Source),
@@ -25,6 +25,7 @@ pub use dial9_core::recording::Recorder;
 pub mod core {
     pub use dial9_core::buffer::{self, BufferMode, SegmentWriter};
     pub use dial9_core::clock::{self, clock_monotonic_ns};
+    pub use dial9_core::custom_events::{CustomEventsConfig, CustomEventsContext};
     pub use dial9_core::encoder::{self, Encodable, ThreadLocalEncoder};
     pub use dial9_core::handle::{self, clear_tl_handle, current_handle, set_tl_handle};
     pub use dial9_core::recorder;
@@ -34,7 +35,8 @@ pub mod core {
     #[cfg(feature = "pipeline")]
     pub use dial9_core::{dump, worker};
 
-    /// Segment pipeline: background processors and offline symbolization.
+    /// Segment pipeline: processors, offline symbolization, and (with `tokio`)
+    /// the pipeline builder, worker config, and S3 upload stage.
     #[cfg(feature = "pipeline")]
     pub mod pipeline {
         pub use dial9_core::pipeline::{
@@ -45,6 +47,12 @@ pub mod core {
         /// Offline symbolization processor. Needs the CPU profiler for stack frames.
         #[cfg(feature = "cpu-profiling")]
         pub use dial9_perf_self_profile::SymbolizeProcessor;
+
+        #[cfg(feature = "tokio")]
+        pub use dial9_tokio_telemetry::background_task::{BackgroundTaskConfig, PipelineBuilder};
+
+        #[cfg(all(feature = "tokio", feature = "worker-s3"))]
+        pub use dial9_tokio_telemetry::background_task::s3;
     }
 }
 
@@ -62,10 +70,19 @@ pub fn record_event(event: impl Encodable) {
 #[cfg(feature = "tokio")]
 pub use dial9_macro::main;
 #[cfg(feature = "tokio")]
-pub use dial9_tokio_telemetry::{TracedFuture, TracedRuntime, background_task, spawn, telemetry};
+pub use dial9_tokio_telemetry::{TracedFuture, TracedRuntime, spawn};
 
 #[cfg(feature = "tokio")]
-pub use dial9_tokio_telemetry::telemetry::{RecorderBuilderTokioExt, TracedRuntimeBuilder};
+pub use dial9_tokio_telemetry::telemetry::{
+    Dial9TokioHandle, RecorderBuilderTokioExt, TaskDumpConfig, TokioHooks, TracedRuntimeBuilder,
+};
+
+/// Offline trace reading and analysis.
+#[cfg(all(feature = "tokio", feature = "analysis"))]
+pub mod analysis {
+    pub use dial9_tokio_telemetry::telemetry::analysis::*;
+    pub use dial9_tokio_telemetry::telemetry::analysis_events;
+}
 
 #[cfg(feature = "tokio")]
 mod config;

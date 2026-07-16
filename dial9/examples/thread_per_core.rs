@@ -16,8 +16,8 @@
 //! After running, inspect the trace:
 //!   cargo run --example analyze_trace -- /tmp/thread_per_core/trace.0.bin
 
-use dial9::telemetry::analysis_events::{Dial9Event, WorkerId};
-use dial9::telemetry::{DiskBuffer, RecorderBuilderTokioExt, recorder};
+use dial9::analysis::analysis_events::{Dial9Event, WorkerId};
+use dial9::{DiskBuffer, RecorderBuilderTokioExt, recorder};
 use dial9_trace_format::decoder::Decoder;
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;

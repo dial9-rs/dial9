@@ -95,7 +95,7 @@ mod fluent_builder {
     async fn with_nested_spawn() -> i32 {
         // `Dial9TokioHandle::current()` is populated by `on_thread_start` on
         // every runtime-owned thread — use it to spawn instrumented sub-tasks.
-        let handle = dial9::telemetry::Dial9TokioHandle::current();
+        let handle = dial9::Dial9TokioHandle::current();
         let sub = handle.spawn(async { 7 + 3 });
         sub.await.unwrap()
     }
@@ -209,7 +209,7 @@ mod fluent_builder {
     #[dial9::main(config = disabled_config)]
     async fn disabled_no_telemetry_handle() -> bool {
         // The current handle should be inert when telemetry is disabled.
-        !dial9::telemetry::Dial9Handle::current().is_enabled()
+        !dial9::Dial9Handle::current().is_enabled()
     }
 
     #[test]
@@ -244,8 +244,9 @@ mod in_memory {
     use std::future::Future;
     use std::pin::Pin;
 
-    use dial9::background_task::{ProcessError, SegmentData, SegmentProcessor};
-    use dial9::telemetry::{Dial9Handle, Dial9TokioHandle};
+    use dial9::Dial9Handle;
+    use dial9::Dial9TokioHandle;
+    use dial9::core::pipeline::{ProcessError, SegmentData, SegmentProcessor};
     use dial9::{MemoryBuffer, RecorderBuilderTokioExt, TracedRuntimeBuilder};
 
     /// Stand-in delivery processor: forwards each segment unchanged.
@@ -299,7 +300,7 @@ mod in_memory {
 mod fluent_builder_fallback {
     use std::path::PathBuf;
 
-    use dial9::telemetry::Dial9Handle;
+    use dial9::Dial9Handle;
     use dial9::{DiskBuffer, TracedRuntimeBuilder};
 
     use super::tmp_base_path;

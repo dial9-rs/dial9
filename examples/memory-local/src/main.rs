@@ -6,8 +6,9 @@
 //!
 //!   cargo run -p memory-local
 
+use dial9::Dial9Handle;
+use dial9::Dial9TokioHandle;
 use dial9::memory::{Dial9Allocator, MemoryProfiler, MemoryProfilingConfig};
-use dial9::telemetry::{Dial9Handle, Dial9TokioHandle};
 use dial9::{DiskBuffer, TracedRuntimeBuilder};
 use std::time::Duration;
 

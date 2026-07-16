@@ -4,13 +4,13 @@
 //! failure or unsupported platform. Use `.source(CpuProfiler::start(cfg)?)` to
 //! propagate the failure instead.
 
-use dial9_core::recorder::RegisterSource;
+use dial9_core::recorder::RecorderSourceExt;
 
 #[cfg(feature = "dial9-source")]
 use crate::rate_limit::rate_limited;
 
 /// `.with_*` convenience for this crate's profiling `Source`s, available on any
-/// [`RegisterSource`]. The core [`RecorderBuilder`](dial9_core::recorder::RecorderBuilder)
+/// [`RecorderSourceExt`]. The core [`RecorderBuilder`](dial9_core::recorder::RecorderBuilder)
 /// and runtime wrappers that forward to it.
 pub trait RecorderPerfExt: Sized {
     /// Register the process-wide CPU profiler. Warns and skips on start failure.
@@ -36,7 +36,7 @@ pub trait RecorderPerfExt: Sized {
     fn with_memory_profiling(self, config: crate::memory_profiling::MemoryProfilingConfig) -> Self;
 }
 
-impl<T: RegisterSource> RecorderPerfExt for T {
+impl<T: RecorderSourceExt> RecorderPerfExt for T {
     #[cfg(feature = "dial9-source")]
     fn with_cpu_profiling(self, config: crate::CpuProfilingConfig) -> Self {
         match crate::CpuProfiler::start(config) {

@@ -12,10 +12,10 @@
 //!
 //! - Returning a [`TracedRuntimeBuilder::disabled()`](dial9::TracedRuntimeBuilder::disabled) from the config
 //!   function produces a pass-through: the `#[main]` macro builds a plain, unmodified tokio runtime with zero dial9 overhead.
-//!   [`Dial9TokioHandle::current()`](dial9::telemetry::Dial9TokioHandle::current) returns an inert
+//!   [`Dial9TokioHandle::current()`](dial9::Dial9TokioHandle::current) returns an inert
 //!   handle, and `handle.spawn` falls through to `tokio::spawn`, so application code does not need branches.
 //! - Alternatively, you can install dial9 but leave recording disabled at runtime via the handle's
-//!   [`disable()`](dial9::telemetry::Dial9Handle::disable). The runtime hooks are installed
+//!   [`disable()`](dial9::Dial9Handle::disable). The runtime hooks are installed
 //!   but all event writes are no-ops behind a relaxed atomic read. This has slightly more overhead than
 //!   a [`TracedRuntimeBuilder::disabled()`](dial9::TracedRuntimeBuilder::disabled) recorder but lets a background task flip
 //!   recording on from dynamic configuration later. It is a larger surface area of code, so it is higher risk.
@@ -165,7 +165,7 @@
 use std::time::Duration;
 
 use clap::Parser;
-use dial9::telemetry::Dial9TokioHandle;
+use dial9::Dial9TokioHandle;
 use dial9::{Disk, DiskBuffer, RecorderBuilder, RecorderBuilderTokioExt, TracedRuntimeBuilder};
 use metrique::local::{LocalFormat, OutputStyle};
 use metrique::writer::format::FormatExt;
@@ -239,7 +239,7 @@ fn stderr_metrics_sink() -> metrique::writer::BoxEntrySink {
 #[cfg(feature = "cpu-profiling")]
 fn configure_sources(mut core: RecorderBuilder<Disk>, opts: &Dial9Opts) -> RecorderBuilder<Disk> {
     use dial9::RecorderPerfExt;
-    use dial9::telemetry::{CpuProfilingConfig, SchedEventConfig};
+    use dial9::cpu::{CpuProfilingConfig, SchedEventConfig};
     if opts.cpu_profile_enabled {
         core =
             core.with_cpu_profiling(CpuProfilingConfig::default().frequency_hz(opts.cpu_sample_hz));
@@ -304,7 +304,7 @@ fn configure_dial9(opts: &Dial9Opts) -> TracedRuntimeBuilder {
     #[cfg(feature = "worker-s3")]
     if let (Some(bucket), Some(service_name)) = (opts.s3_bucket.clone(), opts.service_name.clone())
     {
-        use dial9::background_task::s3::S3Config;
+        use dial9::core::pipeline::s3::S3Config;
         let s3 = S3Config::builder()
             .bucket(bucket)
             .service_name(service_name)

@@ -10,7 +10,7 @@
 //! `graceful_shutdown` itself: `run_workload()` is the only call.
 #![cfg(all(feature = "cpu-profiling", target_os = "linux"))]
 
-use dial9::telemetry::CpuProfilingConfig;
+use dial9::cpu::CpuProfilingConfig;
 use dial9::{DiskBuffer, RecorderBuilderTokioExt, RecorderPerfExt, TracedRuntimeBuilder};
 use dial9_trace_format::decoder::Decoder;
 use flate2::read::GzDecoder;

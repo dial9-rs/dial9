@@ -12,7 +12,7 @@
 
 use clap::Parser;
 use dial9::RecorderBuilderTokioExt;
-use dial9::background_task::s3::S3Config;
+use dial9::core::pipeline::s3::S3Config;
 use dial9::{DiskBuffer, recorder};
 use metrique::local::{LocalFormat, OutputStyle};
 use metrique::writer::format::FormatExt;

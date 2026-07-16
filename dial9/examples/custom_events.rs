@@ -9,10 +9,8 @@
 //! cargo run --example custom_events --features analysis
 //! ```
 
-use dial9::telemetry::{
-    DiskBuffer, Encodable, RecorderBuilderTokioExt, ThreadLocalEncoder, clock_monotonic_ns,
-    recorder,
-};
+use dial9::core::{Encodable, ThreadLocalEncoder, clock_monotonic_ns};
+use dial9::{DiskBuffer, RecorderBuilderTokioExt, recorder};
 use dial9_trace_format::{InternedString, TraceEvent};
 use std::time::Duration;
 

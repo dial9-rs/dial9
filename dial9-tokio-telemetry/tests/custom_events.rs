@@ -1,7 +1,7 @@
 mod common;
 
 use common::{CAPTURE_BUFFER_SIZE, capture_processor};
-use dial9_core::recorder::RegisterSource;
+use dial9_core::recorder::RecorderSourceExt;
 use dial9_tokio_telemetry::telemetry::{
     CustomEventsConfig, MemoryBuffer, RecorderBuilderTokioExt, recorder,
 };
