@@ -508,12 +508,11 @@ fn build_s3_config(
 /// | `DIAL9_MEMORY_SAMPLE_RATE_BYTES` | `524288` | Mean bytes between sampled allocations. |
 /// | `DIAL9_MEMORY_TRACK_LIVESET` | `false` | Track frees for leak detection. |
 ///
-/// Supported process resource usage variables (on by default with the `tokio`
-/// feature, which pulls in `process-resource`):
+/// Supported process resource usage variables (`process-resource` feature required):
 ///
 /// | Variable | Default | Meaning |
 /// | --- | --- | --- |
-/// | `DIAL9_PROCESS_RESOURCE_USAGE_ENABLED` | `true` on Unix, `false` otherwise | Enable process resource usage sampling from `getrusage(RUSAGE_SELF)`. |
+/// | `DIAL9_PROCESS_RESOURCE_USAGE_ENABLED` | `true` on Unix with `process-resource`, `false` otherwise | Enable process resource usage sampling from `getrusage(RUSAGE_SELF)`. |
 /// | `DIAL9_PROCESS_RESOURCE_USAGE_SAMPLE_INTERVAL_MS` | `100` | Sampling interval in milliseconds. |
 ///
 /// Supported socket accept queue variables (`linux-socket` feature required):
