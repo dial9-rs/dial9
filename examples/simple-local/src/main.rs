@@ -18,9 +18,8 @@ async fn do_some_work() {
 }
 
 fn my_config() -> TracedRuntimeBuilder {
-    let trace_path = format!("{}/trace.bin", TRACE_DIR);
     let writer = DiskBuffer::builder()
-        .base_path(&trace_path)
+        .base_path(TRACE_DIR)
         .max_file_size(10_000_000) // 10MB per file
         .max_total_size(50_000_000) // 50MB total
         .build();
