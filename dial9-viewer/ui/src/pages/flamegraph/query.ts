@@ -54,6 +54,12 @@ export interface ApiQueryState {
   /** Epoch-ns strings (pickerUtcToNs form); null omitted. */
   startNs: string | null;
   endNs: string | null;
+  /**
+   * Poll-duration band bounds (min_poll_ns/max_poll_ns), ns strings; null
+   * omitted. Set by the minimap brush / band inputs (msToNs of the ms boxes).
+   */
+  minPollNs: string | null;
+  maxPollNs: string | null;
   /** "Refine more" ceiling; null = backend default. */
   maxFiles: number | null;
 }
@@ -80,22 +86,20 @@ function appendScope(p: URLSearchParams, state: ApiQueryState): void {
   }
   if (state.startNs) p.set("start_ns", state.startNs);
   if (state.endNs) p.set("end_ns", state.endNs);
+  if (state.minPollNs) p.set("min_poll_ns", state.minPollNs);
+  if (state.maxPollNs) p.set("max_poll_ns", state.maxPollNs);
 }
 
 /**
- * The GET /api/flamegraph URL for one poll. The first poll per scope is
- * read-only (`refine` omitted); refining polls send the literal `refine=true`
- * (the backend param is a serde bool - "1" would 400).
+ * The GET /api/flamegraph URL for the aggregation stream. The endpoint is an
+ * SSE stream: the server emits the already-folded snapshot first, then folds to
+ * the cap and pushes a fresh tree per file, closing when done. There is no
+ * client `refine` flag - the server owns the refine/stop loop.
  */
-export function buildApiUrl(
-  state: ApiQueryState,
-  refine: boolean,
-  origin: string
-): string {
+export function buildApiUrl(state: ApiQueryState, origin: string): string {
   const u = new URL("/api/flamegraph", origin);
   appendScope(u.searchParams, state);
   if (state.maxFiles != null) u.searchParams.set("max_files", String(state.maxFiles));
-  if (refine) u.searchParams.set("refine", "true");
   return u.toString();
 }
 

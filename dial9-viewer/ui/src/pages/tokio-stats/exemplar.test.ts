@@ -10,38 +10,61 @@ const EX: PollExemplar = {
   duration_ns: 1000,
   host: "local",
   source_key: "traces/2026-04-09/1900/demo-service/local/host-0/abcd/1744224000-0.bin.gz",
+  worker_id: 3,
+  task_id: 42,
 };
 
+function viewerParams(link: string): URLSearchParams {
+  return new URLSearchParams(link.slice("viewer.html?".length));
+}
+
+function traceBucket(link: string): string | null {
+  const trace = viewerParams(link).get("trace") ?? "";
+  return new URLSearchParams(trace.slice("/api/object?".length)).get("bucket");
+}
+
 describe("exemplarLink", () => {
-  it("builds a viewer deep link that PRESERVES the /api/trace target (defect carried)", () => {
+  it("builds a non-destructive focus link to an /api/object trace component", () => {
     const link = exemplarLink(EX, "demo-traces", null);
     expect(link.startsWith("viewer.html?")).toBe(true);
-    const params = new URLSearchParams(link.slice("viewer.html?".length));
-    // The trace param is the /api/trace endpoint, which no longer exists, so
-    // this link 404s at HEAD; it is preserved byte-for-byte anyway. The
-    // source_key is encodeURIComponent'd inside the trace URL, so the
-    // once-decoded trace param carries the escaped key.
-    expect(params.get("trace")).toBe(
-      `/api/trace?bucket=demo-traces&keys=${encodeURIComponent(EX.source_key)}`,
-    );
-    expect(params.get("start_ns")).toBe("1000");
-    expect(params.get("end_ns")).toBe("2000");
+    const p = viewerParams(link);
+
+    const trace = p.get("trace") ?? "";
+    expect(trace.startsWith("/api/object?")).toBe(true);
+    const tq = new URLSearchParams(trace.slice("/api/object?".length));
+    expect(tq.get("bucket")).toBe("demo-traces");
+    expect(tq.get("key")).toBe(EX.source_key);
+
+    expect(p.get("focus_start")).toBe("1000");
+    expect(p.get("focus_end")).toBe("2000");
+    expect(p.get("focus_worker")).toBe("3");
+    expect(p.get("focus_task")).toBe("42");
+    expect(p.get("host")).toBe("local");
+
+    // Not the removed /api/trace endpoint or the destructive start/end filter.
+    expect(trace.includes("/api/trace")).toBe(false);
+    expect(p.get("start_ns")).toBeNull();
+    expect(p.get("end_ns")).toBeNull();
+  });
+
+  it("omits worker/task focus for a spawn-loc exemplar", () => {
+    const spawnLoc: PollExemplar = {
+      start_ns: 500,
+      end_ns: 900,
+      duration_ns: 400,
+      host: "h1",
+      source_key: "traces/x/y.bin.gz",
+    };
+    const p = viewerParams(exemplarLink(spawnLoc, "b", null));
+    expect(p.get("focus_start")).toBe("500");
+    expect(p.get("focus_worker")).toBeNull();
+    expect(p.get("focus_task")).toBeNull();
   });
 
   it("bucket precedence: response bucket wins, else the URL param, else empty", () => {
-    const fromData = exemplarLink(EX, "resp-bucket", "url-bucket");
-    expect(new URLSearchParams(fromData.split("?")[1]).get("trace")).toContain(
-      "bucket=resp-bucket",
-    );
-    // Empty/absent response bucket falls back to the URL param.
-    const fromParam = exemplarLink(EX, "", "url-bucket");
-    expect(new URLSearchParams(fromParam.split("?")[1]).get("trace")).toContain(
-      "bucket=url-bucket",
-    );
-    const neither = exemplarLink(EX, null, null);
-    expect(new URLSearchParams(neither.split("?")[1]).get("trace")).toContain(
-      "bucket=&keys=",
-    );
+    expect(traceBucket(exemplarLink(EX, "resp-bucket", "url-bucket"))).toBe("resp-bucket");
+    expect(traceBucket(exemplarLink(EX, "", "url-bucket"))).toBe("url-bucket");
+    expect(traceBucket(exemplarLink(EX, null, null))).toBe("");
   });
 
   it("returns '' for a null exemplar or one with no start_ns (guard)", () => {

@@ -17,4 +17,5 @@ export type {
   FlamegraphDataSample,
   FlamegraphInstance,
   FlamegraphSetDataOptions,
+  FlamegraphViewState,
 } from "../../../flamegraph.js";

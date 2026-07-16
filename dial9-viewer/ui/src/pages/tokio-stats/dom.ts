@@ -5,6 +5,7 @@ export interface PageEls {
   periods: HTMLElement;
   btnAdd: HTMLButtonElement;
   btnLoad: HTMLButtonElement;
+  btnMore: HTMLButtonElement;
   slider: HTMLInputElement;
   threshLabel: HTMLElement;
   utcToggle: HTMLInputElement;
@@ -26,6 +27,7 @@ export function pageEls(): PageEls {
     periods: byId("periods"),
     btnAdd: byId("btn-add"),
     btnLoad: byId("btn-load"),
+    btnMore: byId("btn-more"),
     slider: byId("threshold-slider"),
     threshLabel: byId("threshold-label"),
     utcToggle: byId("utc-toggle"),

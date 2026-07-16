@@ -11,6 +11,7 @@ import { mountActionsBar } from "./actions-bar.js";
 import { resolveBucketFilter } from "./bucket-filter.js";
 import { mountBrowseView } from "./browse-view.js";
 import { mountCredsPanel } from "./creds-panel.js";
+import { mountDiffTray } from "./diff-tray.js";
 import type { PageCtx } from "./ctx.js";
 import { queryEls } from "./dom.js";
 import { mountFooter } from "./footer.js";
@@ -74,6 +75,7 @@ function boot(): void {
   mountHeatmapKeys(ctx);
   mountRawView(ctx);
   mountActionsBar(ctx);
+  mountDiffTray(ctx);
   const credsPanel = mountCredsPanel(ctx);
   mountFooter(ctx);
 
@@ -94,20 +96,35 @@ function boot(): void {
   actions.mirrorPrefix();
   if (urlState.tab === "raw") actions.switchTab("raw");
 
+  // A shared link can carry an assume-role ARN (aws_role_arn): "read these
+  // traces as this role". Fold it into the store as the assume-role transport
+  // so every /api/* request carries the role-arn header and the server assumes
+  // it with its own identity. A role ARN grants nothing on its own, which is
+  // why it's safe in a link; an invalid one throws (setRoleArn validates the
+  // shape) - surface it rather than silently falling back to the server's
+  // identity. Restored before the region below so setRegion patches the ARN.
+  if (urlState.roleArn && window.Dial9Creds) {
+    try {
+      window.Dial9Creds.setRoleArn(urlState.roleArn, { region: urlState.region });
+    } catch (e) {
+      console.warn(
+        "ignoring invalid aws_role_arn in URL:",
+        e instanceof Error ? e.message : e,
+      );
+    }
+  }
+
   // A shared link can pin the bucket's region (aws_region). Fold it into
   // the stored credentials so every subsequent request carries it as the
   // region header - this is what lets a cross-region bucket link load
   // without a fresh detection round trip. Prefill the panel field too so
-  // it's visible. Only meaningful when credentials are present.
+  // it's visible. setRegion keeps the active transport's kind (a no-op when
+  // nothing is stored, and when the ARN branch above already pinned it).
   if (urlState.region && window.Dial9Creds) {
     if (!els.credsRegion.value) els.credsRegion.value = urlState.region;
     const stored = window.Dial9Creds.get();
-    if (stored && stored.accessKeyId && stored.region !== urlState.region) {
-      void window.Dial9Creds.set({
-        ...stored,
-        region: urlState.region,
-        autoDetectRegion: false,
-      });
+    if (stored && stored.region !== urlState.region) {
+      window.Dial9Creds.setRegion(urlState.region);
     }
   }
 
@@ -160,6 +177,9 @@ function boot(): void {
       // button drives the sampled server-side loop instead of decoding raw
       // traces; Tokio Stats enables on selection.
       store.update("config", { aggregationEnabled: !!config.aggregation_enabled });
+      // Local-dir servers have no BYO credentials; their buffer-style keys
+      // carry no scope, so selections open directly by key (#627).
+      store.update("config", { localMode: !config.supports_byo_credentials });
       // The server's bucket-picker filter applies unless the page URL
       // pinned an override at load (which wins). Servers predating the
       // field leave the "dial9" default in place.
@@ -197,6 +217,7 @@ function primeRenders(store: ReturnType<typeof createBrowserStore>): void {
     "browse",
     "raw",
     "creds",
+    "diff",
     "transient",
   ];
   for (const slice of slices) store.update(slice, {});

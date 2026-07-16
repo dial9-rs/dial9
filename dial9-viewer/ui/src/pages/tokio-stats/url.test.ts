@@ -9,6 +9,7 @@ import {
   buildSyncQuery,
   parseInitialPeriods,
   readScope,
+  scopeFromParams,
   shouldAutoLoad,
 } from "./url.js";
 
@@ -30,6 +31,20 @@ describe("readScope", () => {
       prefix: null,
       service: null,
       host: [],
+    });
+  });
+});
+
+describe("scopeFromParams (per-side diff scope)", () => {
+  it("pulls an independent scope out of a diff side's decoded params", () => {
+    // Each diff side (parseDiff decodes ?diff=1&a=&b= into per-side params) has
+    // its own bucket/prefix/service/host, distinct from the page scope.
+    const side = new URLSearchParams("bucket=B&prefix=p2&service=svc-b&host=hb&start_ns=9");
+    expect(scopeFromParams(side)).toEqual({
+      bucket: "B",
+      prefix: "p2",
+      service: "svc-b",
+      host: ["hb"],
     });
   });
 });

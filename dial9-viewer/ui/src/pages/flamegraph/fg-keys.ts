@@ -65,7 +65,11 @@ const MOUSE_ROWS: HelpSection = {
     { keys: "Click", text: "Zoom into frame" },
     { keys: "Option/Alt + click", text: "Pin tooltip" },
     { keys: "Cmd/Ctrl + click", text: "Open docs.rs" },
-    { keys: "Right-click", text: "Zoom out one level" },
+    { keys: "Right-click", text: "Menu: Inspect frame, Zoom out, Copy name" },
+    {
+      keys: "Inspect",
+      text: "Butterfly: all paths into (below) and out of (above) a frame",
+    },
   ],
 };
 

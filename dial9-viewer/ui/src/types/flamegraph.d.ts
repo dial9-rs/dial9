@@ -43,6 +43,22 @@ declare module "*/flamegraph.js" {
     runtimeWorkers?: Map<string, number[]> | null;
   }
 
+  /**
+   * The widget's complete, serializable view state (getViewState /
+   * applyViewState) - the exact shape the URL codec reads/writes. Every field
+   * is omitted when inactive, so consumers must treat each as possibly-absent.
+   * `inspect` carries the name/symbol split so a restored link re-derives the
+   * same identity key (fullName || name).
+   */
+  export interface FlamegraphViewState {
+    workerZoom?: readonly string[] | undefined;
+    offworkerZoom?: readonly string[] | undefined;
+    inspect?: { name: string; fullName: string } | undefined;
+    search?: string | undefined;
+    spawn?: string | undefined;
+    runtime?: string | undefined;
+  }
+
   export interface FlamegraphInstance {
     /** Build worker/off-worker trees from samples and render. */
     setData(
@@ -69,15 +85,36 @@ declare module "*/flamegraph.js" {
     getZoomPath(): { worker: string[]; offworker: string[] };
     /** Restore a zoom from a frame-name path. */
     zoomToPath(key: "worker" | "offworker", names: readonly string[]): void;
+    /** The complete, serializable view state (see FlamegraphViewState). */
+    getViewState(): FlamegraphViewState;
+    /**
+     * Restore a view state produced by getViewState. Silent by default: the
+     * restore must NOT fire onViewChange (that would rewrite the URL
+     * mid-restore). Full restore, not a merge - absent fields are cleared.
+     */
+    applyViewState(state: FlamegraphViewState, opts?: { silent?: boolean }): void;
+    /** The current inspect (butterfly) focus key (fullName||name), or null. */
+    getInspectFocus(): string | null;
+    /** Restore inspect focus by frame key; false when the frame is absent. */
+    focusInspectByKey(key: string): boolean;
+    /** The current frames-search query ("" when empty). */
+    getSearch(): string;
+    /** Set the frames-search query (used by view-state restore). */
+    setSearch(q: string): void;
+    /** The active spawn-location filter value ("" = none, or API mode). */
+    getSpawnFilter(): string;
+    /** The active runtime filter value ("" = none, or API mode). */
+    getRuntimeFilter(): string;
   }
 
   /**
-   * Create the flamegraph widget inside `container`. `onZoomChange` fires
-   * whenever the zoom stack changes (used for URL state).
+   * Create the flamegraph widget inside `container`. `onViewChange` fires
+   * whenever the view changes (zoom, inspect focus, search, or a filter),
+   * used to drive the URL view-state sync.
    */
   export function createFlamegraph(
     container: HTMLElement,
-    onZoomChange?: () => void
+    onViewChange?: () => void
   ): FlamegraphInstance;
 
   /**

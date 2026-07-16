@@ -1,20 +1,9 @@
-// Typed client for the tier-1 server aggregate endpoints `/api/flamegraph`
-// and `/api/tokio-stats`. Both answer from a server-side Parquet aggregation
-// that folds raw trace segments and refines on demand. Wire field names are
-// the JSON as served (snake_case).
-//
-// Coverage hard edge: the pipeline can lag or miss hosts, and the endpoints
-// 404 when the server has no aggregation context at all. Consumers never get
-// a thrown error for "no data" - they get a `CoverageSignal`
-// (full | partial | none) and fall back to listing-metadata density on
-// `none`, badge on `partial`, never blocking on aggregates. Genuinely
-// unexpected failures (500, auth) still throw - see AggregatesRequestError.
-//
-// Progressive refinement: both endpoints take a `refine` query param (a
-// serde bool - the literal string "true", never "1"). A read-only poll
-// (refine absent) returns whatever is already folded, instantly; each
-// refine=true poll folds one more bounded batch. `refineUntilFrozen` drives
-// that loop.
+// Wire types for the tier-1 server aggregate endpoints `/api/flamegraph` and
+// `/api/tokio-stats`, plus the tokio-stats URL builder and the coverage
+// full/partial/none classifier. Both endpoints stream a fresh snapshot per
+// folded file over SSE (see src/lib/trace/sse.ts), so the client owns no
+// fetch/refine loop; it just consumes the stream and reads `coverage` to badge
+// partial results. Wire field names are the JSON as served (snake_case).
 
 // ─── Coverage: the tier-1 fallback signal ────────────────────────────────
 
@@ -126,6 +115,18 @@ export interface ScopeEcho {
   filters: Record<string, string>;
 }
 
+/**
+ * One sample-weighted, log2-bucketed poll-duration histogram bar
+ * (metadata.poll_duration_histogram), ascending by range. Feeds the api-mode
+ * minimap. Optional on the wire: absent outside poll-aware aggregation and on
+ * older servers, so read it tolerantly.
+ */
+export interface PollDurationBar {
+  lo_ns: number;
+  hi_ns: number;
+  samples: number;
+}
+
 export interface FlamegraphMetadata {
   service: string | null;
   /** Distinct hosts that passed all filters. */
@@ -138,6 +139,8 @@ export interface FlamegraphMetadata {
   /** Toolbar facets, in display order. */
   facets: FacetResult[];
   scope: ScopeEcho;
+  /** Sample-weighted poll-duration histogram (minimap); absent on old servers. */
+  poll_duration_histogram?: PollDurationBar[];
 }
 
 export interface FlamegraphResponse {
@@ -161,6 +164,9 @@ export interface PollExemplar {
   host: string;
   /** Source trace file key for constructing the viewer deep link. */
   source_key: string;
+  /** Present on long-poll rows (refine the focus framing), absent on spawn-loc exemplars. */
+  worker_id?: number;
+  task_id?: number;
 }
 
 /** Long-poll stats for one spawn location. */
@@ -183,6 +189,20 @@ export interface SpawnLocStats {
   ];
 }
 
+/**
+ * One long-running poll for the "Longest polls" rollup (server `LongPoll`).
+ * Extends PollExemplar so a row deep-links through the same exemplarLink seam;
+ * unlike a spawn-loc exemplar the worker/task attribution is always present (the
+ * server only emits a row when it can attribute the poll to a worker + task) and
+ * it carries the spawn location.
+ */
+export interface LongPoll extends PollExemplar {
+  worker_id: number;
+  task_id: number;
+  /** Where the future was spawned; absent when the trace didn't record it. */
+  spawn_loc?: string;
+}
+
 export interface TokioStatsResponse {
   /** Time span covered by the data (ns), for per-minute rates. Min 1. */
   time_span_ns: number;
@@ -190,6 +210,13 @@ export interface TokioStatsResponse {
   /** Source bucket (for constructing viewer deep links). */
   bucket: string;
   by_spawn_loc: SpawnLocStats[];
+  /**
+   * Longest individual polls across the scope, ranked descending by duration
+   * (server top_long_polls, bounded to the top 100). Each row carries the
+   * coordinates to deep-link its trace segment. Optional so consumers tolerate a
+   * response that omits it (a server predating the rollup); read it as `[]`.
+   */
+  top_long_polls?: LongPoll[];
   /**
    * See FlamegraphResponse.coverage. Quirk: tokio-stats reports files
    * READ this request as `samples_folded` (its folded unit is files).
@@ -227,24 +254,12 @@ export interface AggregateScope {
 }
 
 /** Query params for GET /api/tokio-stats (TokioStatsParams). */
-export type TokioStatsQuery = AggregateScope;
-
-/** Query params for GET /api/flamegraph (FlamegraphParams). */
-export interface FlamegraphQuery extends AggregateScope {
-  /** Display-only time-range echo (see FlamegraphMetadata.time_range). */
-  from?: string;
-  to?: string;
-  /** "Fetch more": raise the sampling-cap ceiling (server clamps it). */
+export interface TokioStatsQuery extends AggregateScope {
+  /** "Load more": raise the sampling-cap ceiling (server clamps it). */
   max_files?: number;
-  /** "worker" | "off-worker" | omitted for all. */
-  thread_class?: string;
-  /** "cpu" (default view) | "sched" | "all". */
-  source?: string;
-  /** Exact-match spawn-location filter. */
-  spawn_location?: string;
 }
 
-export const FLAMEGRAPH_ENDPOINT = "/api/flamegraph";
+/** Query params for GET /api/flamegraph (FlamegraphParams). */
 export const TOKIO_STATS_ENDPOINT = "/api/tokio-stats";
 
 /** Append scope params common to both endpoints. */
@@ -257,211 +272,12 @@ function appendScope(search: URLSearchParams, scope: AggregateScope): void {
   if (scope.end_ns !== undefined) search.set("end_ns", String(scope.end_ns));
 }
 
-/** Build the GET /api/flamegraph URL (path + query string). */
-export function flamegraphUrl(query: FlamegraphQuery): string {
-  const search = new URLSearchParams();
-  appendScope(search, query);
-  if (query.from !== undefined) search.set("from", query.from);
-  if (query.to !== undefined) search.set("to", query.to);
-  if (query.max_files !== undefined) search.set("max_files", String(query.max_files));
-  if (query.thread_class !== undefined) search.set("thread_class", query.thread_class);
-  if (query.source !== undefined) search.set("source", query.source);
-  if (query.spawn_location !== undefined) search.set("spawn_location", query.spawn_location);
-  if (query.refine) search.set("refine", "true");
-  const qs = search.toString();
-  return qs ? `${FLAMEGRAPH_ENDPOINT}?${qs}` : FLAMEGRAPH_ENDPOINT;
-}
-
 /** Build the GET /api/tokio-stats URL (path + query string). */
 export function tokioStatsUrl(query: TokioStatsQuery): string {
   const search = new URLSearchParams();
   appendScope(search, query);
+  if (query.max_files !== undefined) search.set("max_files", String(query.max_files));
   if (query.refine) search.set("refine", "true");
   const qs = search.toString();
   return qs ? `${TOKIO_STATS_ENDPOINT}?${qs}` : TOKIO_STATS_ENDPOINT;
-}
-
-// ─── Fetch mechanism ─────────────────────────────────────────────────────
-
-/**
- * The fetch surface this client needs. Injectable so tests run against
- * recorded fixtures with a stub (no live server in vitest) and pages can
- * wrap fetch for instrumentation. Defaults to globalThis.fetch.
- */
-export type FetchLike = (
-  url: string,
-  init?: { headers?: Record<string, string>; signal?: AbortSignal }
-) => Promise<Response>;
-
-/** Options shared by fetchFlamegraph / fetchTokioStats. */
-export interface AggregatesRequestOptions {
-  /**
-   * The /api/config `aggregation_enabled` flag, caller-provided. `false`
-   * short-circuits to `unavailable("disabled")` WITHOUT issuing a request.
-   * Absent/true proceeds - but does not guarantee data (the endpoints can
-   * still 404, mapped to `unavailable("not-found")`, never thrown).
-   */
-  aggregationEnabled?: boolean;
-  /** Injectable fetch (see FetchLike). */
-  fetch?: FetchLike;
-  /** Extra request headers - the BYO-credential x-dial9-aws-* set. */
-  headers?: Record<string, string>;
-  /** Abort signal for stale-scope cancellation. */
-  signal?: AbortSignal;
-}
-
-/**
- * Why an aggregate result carries no data:
- *  - "disabled":  config said aggregation_enabled=false; no request made.
- *  - "not-found": the endpoint returned 404 - the server has no
- *    aggregation context, or no source files match the scope. Both mean
- *    "no data here", not an error.
- */
-export type AggregateUnavailableReason = "disabled" | "not-found";
-
-/**
- * The result of one aggregate request. `coverage` is the tier-1 fallback
- * signal: consumers switch on it, falling back to listing metadata on "none"
- * and badging on "partial", without having to re-derive the rule from counts.
- */
-export type AggregateResult<T> =
-  | { kind: "data"; response: T; coverage: CoverageSignal }
-  | {
-      kind: "unavailable";
-      reason: AggregateUnavailableReason;
-      coverage: "none";
-      /** The 404 response body (server's plain-text explanation), if any. */
-      message?: string;
-    };
-
-/**
- * A genuinely unexpected endpoint failure: any non-ok status other than the
- * 404-means-no-data case (500 internal, 401/403 auth, 421 wrong region).
- * Carries the status and the server's plain-text body so pages can surface an
- * actionable message.
- */
-export class AggregatesRequestError extends Error {
-  readonly status: number;
-  constructor(endpoint: string, status: number, body: string) {
-    super(`${endpoint} failed (${status}): ${body}`);
-    this.name = "AggregatesRequestError";
-    this.status = status;
-  }
-}
-
-/** Shared request path for both endpoints (degradation rules included). */
-async function fetchAggregate<T extends { coverage?: Coverage }>(
-  url: string,
-  opts: AggregatesRequestOptions | undefined
-): Promise<AggregateResult<T>> {
-  if (opts?.aggregationEnabled === false) {
-    return { kind: "unavailable", reason: "disabled", coverage: "none" };
-  }
-  const doFetch: FetchLike = opts?.fetch ?? globalThis.fetch;
-  const init: { headers?: Record<string, string>; signal?: AbortSignal } = {};
-  if (opts?.headers !== undefined) init.headers = opts.headers;
-  if (opts?.signal !== undefined) init.signal = opts.signal;
-  const resp = await doFetch(url, init);
-  if (resp.status === 404) {
-    // "No data", by design - not an error.
-    const message = await resp.text();
-    return { kind: "unavailable", reason: "not-found", coverage: "none", message };
-  }
-  if (!resp.ok) {
-    const endpoint = url.split("?", 1)[0] ?? url;
-    throw new AggregatesRequestError(endpoint, resp.status, await resp.text());
-  }
-  // The response shape is trusted to match the server structs this module
-  // mirrors (same binary serves API and UI; no version skew like traces).
-  const response = (await resp.json()) as T;
-  return { kind: "data", response, coverage: coverageSignal(response.coverage) };
-}
-
-/** GET /api/flamegraph for one scope (one poll of the refinement loop). */
-export function fetchFlamegraph(
-  query: FlamegraphQuery,
-  opts?: AggregatesRequestOptions
-): Promise<AggregateResult<FlamegraphResponse>> {
-  return fetchAggregate<FlamegraphResponse>(flamegraphUrl(query), opts);
-}
-
-/** GET /api/tokio-stats for one scope (one poll of the refinement loop). */
-export function fetchTokioStats(
-  query: TokioStatsQuery,
-  opts?: AggregatesRequestOptions
-): Promise<AggregateResult<TokioStatsResponse>> {
-  return fetchAggregate<TokioStatsResponse>(tokioStatsUrl(query), opts);
-}
-
-// ─── Refine-polling helper ───────────────────────────────────────────────
-
-/**
- * Default ceiling on refine polls. Each refine poll folds one bounded
- * server-side batch; the loop normally terminates by freezing well before
- * this. The ceiling exists so a scope where every poll folds a little more
- * (a huge fleet) still terminates deterministically instead of hammering
- * the server; consumers wanting deeper coverage raise it (or use the
- * flamegraph `max_files` "fetch more" escape hatch).
- */
-export const DEFAULT_MAX_REFINE_POLLS = 30;
-
-export interface RefineUntilFrozenOptions<T> {
-  /** Refine-poll ceiling (excludes the initial read-only poll). */
-  maxRefinePolls?: number;
-  /**
-   * Called with every poll's result as it lands (pollIndex 0 = the
-   * read-only poll), so consumers re-render progressively as coverage
-   * climbs.
-   */
-  onResult?: (result: AggregateResult<T>, pollIndex: number) => void;
-}
-
-/**
- * Drive an endpoint's progressive-refinement loop to completion.
- *
- * `poll(refine)` performs one request - typically an arrow over
- * fetchFlamegraph/fetchTokioStats closing over the scope and options:
- *
- *   refineUntilFrozen((refine) => fetchTokioStats({ ...scope, refine }, opts))
- *
- * Sequence: one read-only poll (instant server-side, establishes the
- * baseline), then refine=true polls. Termination rule - stops when:
- *  - FROZEN: `files_folded` did not increase between two consecutive
- *    polls (isCoverageFrozen - the server could fold nothing new, so more
- *    polls change nothing); or
- *  - CEILING: maxRefinePolls refine polls ran (default
- *    DEFAULT_MAX_REFINE_POLLS); or
- *  - the endpoint reports unavailable (disabled/404), returned as-is; or
- *  - a response carries no `coverage` (non-demand-driven single fetch:
- *    nothing to refine).
- *
- * Pacing: none built in. Consumers pace inside `poll` if desired; each
- * refine request already takes a server-side fold long, so unpaced loops
- * are bounded by fold time, not a tight spin.
- *
- * Returns the last result (the frozen/ceiling-hit one). Throws only what
- * `poll` throws (AggregatesRequestError, network, abort).
- */
-export async function refineUntilFrozen<T extends { coverage?: Coverage }>(
-  poll: (refine: boolean) => Promise<AggregateResult<T>>,
-  opts?: RefineUntilFrozenOptions<T>
-): Promise<AggregateResult<T>> {
-  const maxRefinePolls = opts?.maxRefinePolls ?? DEFAULT_MAX_REFINE_POLLS;
-
-  let result = await poll(false);
-  opts?.onResult?.(result, 0);
-  if (result.kind === "unavailable") return result;
-  let prev = result.response.coverage;
-  if (prev === undefined) return result; // non-demand-driven: single fetch
-
-  for (let i = 1; i <= maxRefinePolls; i++) {
-    result = await poll(true);
-    opts?.onResult?.(result, i);
-    if (result.kind === "unavailable") return result;
-    const curr = result.response.coverage;
-    if (curr === undefined) return result;
-    if (isCoverageFrozen(prev, curr)) return result;
-    prev = curr;
-  }
-  return result; // ceiling hit: best coverage reached within budget
 }

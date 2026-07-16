@@ -21,13 +21,11 @@ import { createCanvasSizer, makeColorAssigner } from "../../lib/canvas/index.js"
 import type { CanvasSizer } from "../../lib/canvas/index.js";
 import {
   buildWorkerSpans,
-  findSpanAt,
   formatFieldValue,
   formatHumanDuration,
 } from "../../lib/trace/index.js";
 import type {
   ParsedTrace,
-  PollSpan,
   TracingSpan,
   WorkerLane,
 } from "../../lib/trace/index.js";
@@ -88,13 +86,13 @@ export interface SpansTrackController {
 export function createSpansTrack(store: ViewerStore): SpansTrackController {
   // ── Derived caches ─────────────────────────────────────────────────────
   // Trace-invariant span data: recomputed only when the trace slice changes.
+  // The worker poll lanes reconstruct each span's active/idle segments and
+  // resolve its owning task, so the spans carry taskId directly.
   const spanData = store.derived(["trace"], (s) =>
-    computeSpanTrackData(s.trace.trace?.customEvents),
-  );
-  // Worker poll lanes, for resolving the task polling at a focused span's start.
-  // Same trace-keyed invalidation.
-  const workerLanes = store.derived(["trace"], (s) =>
-    buildWorkerLanes(s.trace.trace),
+    computeSpanTrackData(
+      s.trace.trace?.customEvents,
+      buildWorkerLanes(s.trace.trace),
+    ),
   );
 
   // Stable name -> color assignment for this track's lifetime.
@@ -216,7 +214,7 @@ export function createSpansTrack(store: ViewerStore): SpansTrackController {
       return;
     }
     const chain = spanFocusChain(spanId, data);
-    const taskId = resolveTaskAtSpanStart(spanId, data, workerLanes());
+    const taskId = data.allSpans.find((sp) => sp.spanId === spanId)?.taskId ?? null;
     const patch: Partial<StoreState["selection"]> = {
       focusedSpanId: spanId,
       spanFocus: { spanId, chain },
@@ -590,22 +588,6 @@ function buildWorkerLanes(trace: ParsedTrace | null): Record<number, WorkerLane>
   const workerIds = [...new Set(trace.tidToWorker.values())];
   return buildWorkerSpans(trace.events, workerIds, trace.maxTs, trace.blockInPlaceGaps)
     .workerSpans;
-}
-
-/** The task polling on the focused span's first-segment worker at its start, or
- *  null. */
-function resolveTaskAtSpanStart(
-  spanId: string,
-  data: SpanTrackData,
-  lanes: Record<number, WorkerLane>,
-): number | null {
-  const span = data.allSpans.find((s) => s.spanId === spanId);
-  const firstSeg = span?.segments[0];
-  if (firstSeg === undefined) return null;
-  const lane = lanes[firstSeg.workerId];
-  if (lane === undefined) return null;
-  const poll: PollSpan | null = findSpanAt(lane.polls, firstSeg.start);
-  return poll && poll.taskId ? poll.taskId : null;
 }
 
 /** Most-frequent-first "name xN" list, for cluster tooltips. */

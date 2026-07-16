@@ -5,7 +5,7 @@
 // case drives buildSpanData through real SpanEnter/SpanExit events.
 
 import { describe, it, expect } from "vitest";
-import type { CustomTraceEvent, TracingSpan } from "../../lib/trace/index.js";
+import type { CustomTraceEvent, TracingSpan, WorkerLane } from "../../lib/trace/index.js";
 import {
   buildSpanRenderModel,
   computeSpanTrackData,
@@ -31,6 +31,7 @@ interface SpanOpts {
   fields?: Record<string, unknown>;
   segments?: { start: number; end: number; workerId: number }[];
   activeNs?: number;
+  taskId?: number;
 }
 
 function span(id: string, name: string, start: number, end: number, o: SpanOpts = {}): TracingSpan {
@@ -46,6 +47,7 @@ function span(id: string, name: string, start: number, end: number, o: SpanOpts 
     segments,
     activeNs,
     depth: 0,
+    taskId: o.taskId ?? null,
   };
 }
 
@@ -93,12 +95,20 @@ function enter(ts: number, spanId: string, name: string, extra: Record<string, u
     units: null,
   };
 }
-function exit(ts: number, spanId: string, name: string): CustomTraceEvent {
+function exit(ts: number, spanId: string, name: string, worker = 0): CustomTraceEvent {
   return {
     name: "SpanExit:demo",
     timestamp: ts,
-    fields: { worker_id: 0, span_id: spanId, span_name: name } as CustomTraceEvent["fields"],
+    fields: { worker_id: worker, span_id: spanId, span_name: name } as CustomTraceEvent["fields"],
     units: null,
+  };
+}
+function lane(polls: { start: number; end: number; taskId: number }[]): WorkerLane {
+  return {
+    polls: polls.map((p) => ({ ...p, spawnLocId: null, spawnLoc: null })),
+    parks: [],
+    actives: [],
+    cpuSampleTimes: [],
   };
 }
 
@@ -129,6 +139,34 @@ describe("computeSpanTrackData", () => {
     ]);
     expect(data.allSpans.map((s) => s.spanId)).toEqual(["a"]);
     expect(data.unmatchedSpans.map((u) => u.spanId)).toEqual(["leak"]);
+  });
+
+  it("reconstructs active/idle segments and resolves taskId from workerSpans", () => {
+    // One on-wire span [1000, 9000] entered on worker 0, exited on worker 1.
+    // Task 42 polled three times in that window; reconstruction replaces the
+    // coarse segment with the real on-CPU polls so idle gaps materialize.
+    const span = computeSpanTrackData(
+      [enter(1000, "req", "GET /jobs"), exit(9000, "req", "GET /jobs", 1)],
+      {
+        0: lane([
+          { start: 900, end: 1100, taskId: 42 },
+          { start: 8800, end: 8900, taskId: 42 },
+        ]),
+        1: lane([{ start: 4000, end: 4100, taskId: 42 }]),
+      },
+    ).allSpans[0]!;
+    expect(span.taskId).toBe(42);
+    expect(span.segments.length).toBe(3);
+    expect(span.activeNs).toBe(300); // 3x100 on-CPU, not the 8000 wall-clock window
+  });
+
+  it("keeps the coarse on-wire segment and null taskId without workerSpans", () => {
+    const span = computeSpanTrackData([
+      enter(1000, "req", "GET /jobs"),
+      exit(9000, "req", "GET /jobs"),
+    ]).allSpans[0]!;
+    expect(span.taskId).toBeNull();
+    expect(span.activeNs).toBe(8000);
   });
 });
 

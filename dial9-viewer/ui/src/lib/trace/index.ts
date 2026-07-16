@@ -217,47 +217,56 @@ export type {
 // run one implementation.
 export {
   coveragePercent,
+  foldErrorNotice,
   formatCoverageBadge,
   formatHumanDuration,
   hostFacetOptions,
+  msToNs,
   nextMaxFiles,
+  nsToMs,
   nsToPickerUtc,
   pickerUtcToNs,
-  shouldAutoStopRefining,
 } from "./api_format.js";
 export type { FacetOption, LegacyCoverage } from "./api_format.js";
 
-// aggregates.ts - tier-1 server aggregate endpoints client:
-// /api/flamegraph + /api/tokio-stats typed requests, the refine-polling
-// helper, and the coverage full/partial/none fallback signal.
+// sse.ts - the fetch-based Server-Sent Events client for the streamed
+// aggregation endpoints (the server owns the refine/stop loop).
+export { openSse } from "./sse.js";
+export type { SseOptions } from "./sse.js";
+
+// trace_scope.ts - the compact, stateless scope codec (bucket/prefix/service/
+// host-set + time window) that keeps a large selection's viewer/flamegraph/
+// tokio-stats deep link under CloudFront's 8192-byte request-URI cap.
 export {
-  AggregatesRequestError,
-  DEFAULT_MAX_REFINE_POLLS,
-  FLAMEGRAPH_ENDPOINT,
+  encodeAggregationParams,
+  encodeScope,
+  hasScope,
+  readScope,
+  resolveScope,
+  scopeFromKeys,
+} from "./trace_scope.js";
+export type { EncodeScopeOptions, EncodedScope, TraceScope } from "./trace_scope.js";
+
+// aggregates.ts - server aggregate wire types (/api/flamegraph +
+// /api/tokio-stats), the tokio-stats URL builder, and the coverage
+// full/partial/none fallback signal. (Both endpoints stream over SSE now, so
+// the old client-side fetch/refine loop is gone.)
+export {
   TOKIO_STATS_ENDPOINT,
   coverageSignal,
-  fetchFlamegraph,
-  fetchTokioStats,
-  flamegraphUrl,
   isCoverageFrozen,
-  refineUntilFrozen,
   tokioStatsUrl,
 } from "./aggregates.js";
 export type {
-  AggregateResult,
   AggregateScope,
-  AggregateUnavailableReason,
-  AggregatesRequestOptions,
   ApiFlamegraphNode,
   Coverage,
   CoverageSignal,
   FacetResult,
-  FetchLike,
   FlamegraphMetadata,
-  FlamegraphQuery,
   FlamegraphResponse,
+  PollDurationBar,
   PollExemplar,
-  RefineUntilFrozenOptions,
   ScopeEcho,
   SpawnLocStats,
   TokioStatsQuery,

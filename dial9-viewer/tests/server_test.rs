@@ -297,7 +297,8 @@ async fn setup_s3_test(
     // but they share the same filesystem root)
     let backend = S3Backend::from_client(fake_s3_client(s3_root.path()));
 
-    let state = AppState::new(Arc::new(backend), default_bucket, default_prefix);
+    let state =
+        AppState::new(Arc::new(backend), default_bucket, default_prefix).with_byo_creds(true);
     let base = start_server(state).await;
     (upload_client, base, s3_root)
 }
@@ -728,7 +729,8 @@ async fn browse_overflow_attribution_survives_out_of_order_completion() {
         release_tx: std::sync::Mutex::new(Some(tx)),
         release_rx: std::sync::Mutex::new(Some(rx)),
     };
-    let state = AppState::new(Arc::new(backend), Some("traces-bucket".into()), None);
+    let state =
+        AppState::new(Arc::new(backend), Some("traces-bucket".into()), None).with_byo_creds(true);
     let base = start_server(state).await;
     let client = reqwest::Client::new();
 
@@ -1025,6 +1027,59 @@ async fn local_prefixes_lists_subdirs() {
         .unwrap();
     check!(resp.contains(&"2026-04-09/1910/".to_string()));
     check!(resp.contains(&"2026-04-09/1920/".to_string()));
+}
+
+/// In local mode (allow_byo_creds=false), browse does a flat mtime-based
+/// listing and finds on-disk buffer traces regardless of path structure.
+#[tokio::test]
+async fn browse_local_mode_finds_buffer_traces() {
+    let dir = tempfile::tempdir().unwrap();
+    let boot_dir = dir.path().join("aczi-148206");
+    std::fs::create_dir_all(&boot_dir).unwrap();
+    std::fs::write(boot_dir.join("trace.0.bin"), b"TRC\0fake-trace").unwrap();
+    std::fs::write(boot_dir.join("trace.1.bin"), b"TRC\0fake-trace-2").unwrap();
+    std::fs::write(boot_dir.join(".lock"), b"").unwrap();
+
+    let boot_dir2 = dir.path().join("bxyz-999999");
+    std::fs::create_dir_all(&boot_dir2).unwrap();
+    std::fs::write(boot_dir2.join("trace.0.bin.gz"), gzip_bytes(b"TRC\0other")).unwrap();
+
+    // No with_byo_creds → local mode → flat listing
+    let state = AppState::new(
+        Arc::new(LocalBackend::new(dir.path())),
+        Some("local".into()),
+        None,
+    );
+    let base = start_server(state).await;
+    let client = reqwest::Client::new();
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+
+    let resp = client
+        .get(format!(
+            "{base}/api/browse?bucket=local&from={}&to={}",
+            now - 86400,
+            now + 60
+        ))
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() == 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let objects = body["objects"].as_array().unwrap();
+
+    check!(
+        objects.len() == 3,
+        "expected 3 traces, got {}",
+        objects.len()
+    );
+    let keys: Vec<&str> = objects.iter().map(|o| o["key"].as_str().unwrap()).collect();
+    check!(keys.contains(&"aczi-148206/trace.0.bin"));
+    check!(keys.contains(&"aczi-148206/trace.1.bin"));
+    check!(keys.contains(&"bxyz-999999/trace.0.bin.gz"));
 }
 
 // --- trace upload tests ---
@@ -1765,4 +1820,80 @@ mod skills_unpack_tests {
             .join("red_flag_scan.js");
         assert!(red_flags_script.exists());
     }
+}
+
+// --- router composition: downstream embedders can customize the server ---
+
+/// An embedder can merge custom routes onto the router returned by
+/// `server::router()`.
+#[tokio::test]
+async fn router_supports_merged_routes() {
+    let state = AppState::new(Arc::new(FakeBackend), None, None);
+    let ui_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("ui");
+    let state = state.with_dev_ui_dir(ui_dir);
+
+    let app = router(state).merge(axum::Router::new().route(
+        "/api/feedback",
+        axum::routing::post(|| async { "feedback received" }),
+    ));
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let base = format!("http://{addr}");
+    let client = reqwest::Client::new();
+
+    // Custom route is reachable
+    let resp = client
+        .post(format!("{base}/api/feedback"))
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() == 200);
+    check!(resp.text().await.unwrap() == "feedback received");
+
+    // Built-in route still works
+    let resp = client
+        .get(format!("{base}/api/config"))
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() == 200);
+}
+
+/// An embedder can layer middleware (e.g. auth) onto the router.
+#[tokio::test]
+async fn router_supports_middleware_layers() {
+    let state = AppState::new(Arc::new(FakeBackend), None, None);
+    let ui_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("ui");
+    let state = state.with_dev_ui_dir(ui_dir);
+
+    let app = router(state).layer(axum::middleware::from_fn(
+        |req: axum::extract::Request, next: axum::middleware::Next| async move {
+            let mut resp = next.run(req).await;
+            resp.headers_mut().insert(
+                axum::http::header::HeaderName::from_static("x-custom-embedder"),
+                axum::http::HeaderValue::from_static("my-internal-tool"),
+            );
+            resp
+        },
+    ));
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let base = format!("http://{addr}");
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .get(format!("{base}/api/config"))
+        .send()
+        .await
+        .unwrap();
+    check!(resp.status().as_u16() == 200);
+    check!(resp.headers().get("x-custom-embedder").unwrap() == "my-internal-tool");
 }

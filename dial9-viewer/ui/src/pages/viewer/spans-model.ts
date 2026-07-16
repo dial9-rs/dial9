@@ -30,6 +30,7 @@ import type {
   SpanLayoutBucket,
   TracingSpan,
   UnmatchedSpan,
+  WorkerLane,
 } from "../../lib/trace/index.js";
 import type { SelectionSlice } from "../../types/state.js";
 
@@ -84,11 +85,15 @@ export const EMPTY_SPAN_TRACK_DATA: SpanTrackData = {
  */
 export function computeSpanTrackData(
   customEvents: readonly CustomTraceEvent[] | null | undefined,
+  workerSpans?: Record<number, WorkerLane>,
 ): SpanTrackData {
   if (customEvents == null || customEvents.length === 0) {
     return EMPTY_SPAN_TRACK_DATA;
   }
-  const data = buildSpanData(customEvents);
+  // With workerSpans, each span's active segments are reconstructed from its
+  // owning task's polls (idle gaps materialize, activeNs is on-CPU time) and
+  // its taskId is resolved; without it, the coarse on-wire segments are kept.
+  const data = buildSpanData(customEvents, workerSpans);
   if (data.allSpans.length === 0 && data.unmatchedSpans.length === 0) {
     return EMPTY_SPAN_TRACK_DATA;
   }

@@ -25,6 +25,8 @@ function state(over: Partial<ApiQueryState> = {}): ApiQueryState {
     facets: { source: "cpu", thread_class: "", spawn_location: "" },
     startNs: null,
     endNs: null,
+    minPollNs: null,
+    maxPollNs: null,
     maxFiles: null,
     ...over,
   };
@@ -88,14 +90,9 @@ describe("seedFacetState", () => {
 });
 
 describe("buildApiUrl (legacy buildApiUrl parity)", () => {
-  it("read-only first poll: scope + non-empty facets, no refine", () => {
-    expect(buildApiUrl(state(), false, ORIGIN)).toBe(
+  it("SSE stream URL: scope + non-empty facets, no refine flag", () => {
+    expect(buildApiUrl(state(), ORIGIN)).toBe(
       `${ORIGIN}/api/flamegraph?bucket=demo-traces&prefix=traces&source=cpu`,
-    );
-  });
-  it("refining poll appends the literal refine=true (serde bool)", () => {
-    expect(buildApiUrl(state(), true, ORIGIN)).toBe(
-      `${ORIGIN}/api/flamegraph?bucket=demo-traces&prefix=traces&source=cpu&refine=true`,
     );
   });
   it("hosts repeat, times and max_files serialize in legacy order", () => {
@@ -107,13 +104,30 @@ describe("buildApiUrl (legacy buildApiUrl parity)", () => {
         endNs: "1743003600000000000",
         maxFiles: 64,
       }),
-      true,
       ORIGIN,
     );
     expect(u).toBe(
       `${ORIGIN}/api/flamegraph?bucket=demo-traces&prefix=traces&service=svc-a` +
         "&host=h1&host=h2&source=cpu&start_ns=1743000000000000000" +
-        "&end_ns=1743003600000000000&max_files=64&refine=true",
+        "&end_ns=1743003600000000000&max_files=64",
+    );
+  });
+  it("poll-duration band rides after the time window (min_poll_ns/max_poll_ns)", () => {
+    const u = buildApiUrl(
+      state({ startNs: "1", endNs: "2", minPollNs: "500000", maxPollNs: "10000000" }),
+      ORIGIN,
+    );
+    expect(u).toBe(
+      `${ORIGIN}/api/flamegraph?bucket=demo-traces&prefix=traces&source=cpu` +
+        "&start_ns=1&end_ns=2&min_poll_ns=500000&max_poll_ns=10000000",
+    );
+  });
+  it("an open-ended band emits only the bound that is set", () => {
+    expect(buildApiUrl(state({ minPollNs: "1000000" }), ORIGIN)).toBe(
+      `${ORIGIN}/api/flamegraph?bucket=demo-traces&prefix=traces&source=cpu&min_poll_ns=1000000`,
+    );
+    expect(buildBrowserQuery(state({ maxPollNs: "2000000" }))).toBe(
+      "api=1&bucket=demo-traces&prefix=traces&source=cpu&max_poll_ns=2000000",
     );
   });
   it("data_dir passthrough, empty facets skipped, later facet keys ride in insertion order", () => {
@@ -124,7 +138,6 @@ describe("buildApiUrl (legacy buildApiUrl parity)", () => {
         prefix: null,
         facets: { source: "cpu", thread_class: "", spawn_location: "", host_group: "blue" },
       }),
-      false,
       ORIGIN,
     );
     expect(u).toBe(

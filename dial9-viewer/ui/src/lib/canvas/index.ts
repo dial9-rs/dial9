@@ -62,7 +62,64 @@ export type {
   FlamegraphDataSample,
   FlamegraphInstance,
   FlamegraphSetDataOptions,
+  FlamegraphViewState,
 } from "./flamegraph.js";
+
+export {
+  brushToBand,
+  fmtDurationNs,
+  histogramLayout,
+  normalizeHistogram,
+  pxToNs,
+  sampleWeightedMedianNs,
+} from "./flamegraph_histogram.js";
+export type {
+  HistogramColumn,
+  HistogramLayout,
+  PollBand,
+  PollHistogramBar,
+} from "./flamegraph_histogram.js";
+
+export {
+  mergeTrees,
+  diffColor,
+  layoutSide,
+  nodeAtPath,
+  fullScopeQuery,
+  scopeWithHost,
+  shiftScopeTime,
+  encodeScope,
+  decodeScope,
+  pollBandLabel,
+  diffSearch,
+  parseDiff,
+  chooseTarget,
+  addDiffCapture,
+  swapDiffCapture,
+  removeDiffSide,
+  DIFF_SHIFT_1H,
+  DIFF_SHIFT_24H,
+  DIFF_SHIFT_7D,
+} from "./flamegraph_diff.js";
+export type {
+  DiffScope,
+  DiffSides,
+  DiffCaptureState,
+  DiffMergedNode,
+  DiffTarget,
+} from "./flamegraph_diff.js";
+
+export {
+  createDiffView,
+  apiUrlFor,
+  scopeLabel,
+  isSearchFocusKey,
+} from "./flamegraph_diff_view.js";
+export type {
+  DiffViewOptions,
+  DiffViewHandle,
+  DiffViewState,
+} from "./flamegraph_diff_view.js";
 
 export {
   MAX_OPEN_BYTES,

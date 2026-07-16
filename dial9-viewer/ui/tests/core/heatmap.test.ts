@@ -30,6 +30,8 @@ const {
   segmentsOverlapping,
   totalBytes,
   densityColor,
+  niceTimeTicks,
+  shouldClearSelectionOnClick,
 } = require("../../heatmap.js") as {
   MAX_OPEN_BYTES: number;
   groupByHost: (
@@ -49,6 +51,15 @@ const {
   segmentsOverlapping: (segs: Segment[], t0: number, t1: number) => Segment[];
   totalBytes: (segs: Segment[]) => number;
   densityColor: (v: number) => string;
+  niceTimeTicks: (tMin: number, tMax: number, targetCount: number) => number[];
+  shouldClearSelectionOnClick: (o: {
+    isBrowseTab: boolean;
+    hasSelection: boolean;
+    wasDrag: boolean;
+    targetInHeatmap: boolean;
+    targetInActions: boolean;
+    targetInHeader?: boolean;
+  }) => boolean;
 };
 
 function seg(o: Partial<Segment>): Segment {
@@ -333,5 +344,143 @@ describe("densityColor", () => {
 describe("constants", () => {
   it("MAX_OPEN_BYTES is 200 MiB", () => {
     expect(MAX_OPEN_BYTES).toBe(200 * 1024 * 1024);
+  });
+});
+
+describe("shouldClearSelectionOnClick", () => {
+  // The regression: a selection drag that ends outside the pane fires a
+  // synthetic click on an ancestor above #heatmap-view. That click must NOT
+  // clear the just-created selection.
+  it("drag ending outside pane keeps selection", () => {
+    expect(
+      shouldClearSelectionOnClick({
+        isBrowseTab: true,
+        hasSelection: true,
+        wasDrag: true,
+        targetInHeatmap: false,
+        targetInActions: false,
+      }),
+    ).toBe(false);
+  });
+
+  it("genuine outside click clears", () => {
+    expect(
+      shouldClearSelectionOnClick({
+        isBrowseTab: true,
+        hasSelection: true,
+        wasDrag: false,
+        targetInHeatmap: false,
+        targetInActions: false,
+      }),
+    ).toBe(true);
+  });
+
+  it("click inside heatmap keeps selection", () => {
+    expect(
+      shouldClearSelectionOnClick({
+        isBrowseTab: true,
+        hasSelection: true,
+        wasDrag: false,
+        targetInHeatmap: true,
+        targetInActions: false,
+      }),
+    ).toBe(false);
+  });
+
+  it("click on actions bar keeps selection", () => {
+    expect(
+      shouldClearSelectionOnClick({
+        isBrowseTab: true,
+        hasSelection: true,
+        wasDrag: false,
+        targetInHeatmap: false,
+        targetInActions: true,
+      }),
+    ).toBe(false);
+  });
+
+  // Regression (#645/#644 interaction): the TZ toggle and credentials button
+  // live in the page <header>, which is neither the timeline nor the actions
+  // bar. Clicking header chrome must NOT clear the selection - toggling TZ only
+  // relabels the axis.
+  it("click in header (TZ toggle) keeps selection", () => {
+    expect(
+      shouldClearSelectionOnClick({
+        isBrowseTab: true,
+        hasSelection: true,
+        wasDrag: false,
+        targetInHeatmap: false,
+        targetInActions: false,
+        targetInHeader: true,
+      }),
+    ).toBe(false);
+  });
+
+  it("not browse tab -> no clear", () => {
+    expect(
+      shouldClearSelectionOnClick({
+        isBrowseTab: false,
+        hasSelection: true,
+        wasDrag: false,
+        targetInHeatmap: false,
+        targetInActions: false,
+      }),
+    ).toBe(false);
+  });
+
+  it("no selection -> no clear", () => {
+    expect(
+      shouldClearSelectionOnClick({
+        isBrowseTab: true,
+        hasSelection: false,
+        wasDrag: false,
+        targetInHeatmap: false,
+        targetInActions: false,
+      }),
+    ).toBe(false);
+  });
+});
+
+describe("niceTimeTicks", () => {
+  it("ticks ascending, in range, snapped to a round step", () => {
+    const ticks = niceTimeTicks(1000, 1600, 6);
+    expect(ticks.length, "returns at least one tick").toBeGreaterThan(0);
+    expect(
+      ticks.every((t, i) => i === 0 || t > ticks[i - 1]!),
+      "strictly ascending",
+    ).toBe(true);
+    expect(
+      ticks.every((t) => t >= 1000 && t <= 1600),
+      "all ticks within range",
+    ).toBe(true);
+
+    // A ~600s span with target 6 must snap to a round step (a multiple of a
+    // human interval like 120s), not an arbitrary 100s division.
+    const step = ticks[1]! - ticks[0]!;
+    expect([60, 120], `snaps to a round step (got ${step})`).toContain(step);
+    expect(step % 60 === 0 || step % 30 === 0, "step is a round interval").toBe(true);
+
+    // Count stays within the target.
+    expect(ticks.length, "count <= target").toBeLessThanOrEqual(6);
+
+    // Ticks are aligned to multiples of the step so they land on round times.
+    expect(
+      ticks.every((t) => t % step === 0),
+      "ticks aligned to the step",
+    ).toBe(true);
+  });
+
+  it("wide span still respects the target", () => {
+    const wide = niceTimeTicks(0, 86400, 8);
+    expect(wide.length, "wide span respects target").toBeLessThanOrEqual(8);
+    expect(
+      wide.every((t, i) => i === 0 || t > wide[i - 1]!),
+      "wide span ascending",
+    ).toBe(true);
+  });
+
+  it("degenerate range returns a single tick without throwing", () => {
+    expect(niceTimeTicks(500, 500, 6)).toStrictEqual([500]);
+    expect(niceTimeTicks(900, 500, 6).length, "inverted bounds -> single tick").toBe(1);
   });
 });

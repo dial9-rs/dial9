@@ -45,6 +45,20 @@ export function formatEpochStr(epoch: number, localTz: boolean): string {
   return formatDate(new Date(epoch * 1000).toISOString(), localTz);
 }
 
+/**
+ * Parse a browse object's `last_modified` into epoch seconds. The local-dir
+ * backend sends numeric epoch seconds; S3 sends ISO-8601 strings. Returns 0
+ * when absent/unparseable - the "no upload time" case, used as the mtime
+ * fallback for local traces whose buffer-style key names carry no date/epoch.
+ */
+export function epochSeconds(lastModified: string | number | null | undefined): number {
+  if (!lastModified) return 0;
+  const n = Number(lastModified);
+  if (!isNaN(n) && n > 0) return n;
+  const ms = new Date(lastModified).getTime();
+  return isNaN(ms) ? 0 : ms / 1000;
+}
+
 /** Axis/selection tick in the active TZ mode: HH:MM:SS by default; with
  * `withDate` the calendar date is prefixed ("YYYY-MM-DD HH:MM:SS") so ticks
  * on a day-crossing span stay unambiguous. The selection-count readout

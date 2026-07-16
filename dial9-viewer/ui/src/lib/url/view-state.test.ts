@@ -56,9 +56,34 @@ function randState(rnd: () => number): ViewState {
   const s: ViewState = {};
   if (rnd() < 0.7) s.fgWorkerZoom = randPath(rnd);
   if (rnd() < 0.5) s.fgOffworkerZoom = randPath(rnd);
+  if (rnd() < 0.5) {
+    // Inspect always carries both name + symbol (the widget defaults fullName
+    // to name); the symbol sometimes equals the name (the redundant case the
+    // codec collapses) and sometimes differs.
+    const name = randName(rnd);
+    s.fgInspect = name;
+    s.fgInspectFull = rnd() < 0.5 ? name : randName(rnd);
+  }
+  if (rnd() < 0.4) s.fgSearch = randName(rnd);
+  if (rnd() < 0.3) s.fgSpawn = randName(rnd);
+  if (rnd() < 0.3) s.fgRuntime = randName(rnd);
   if (rnd() < 0.4) s.timeMode = rnd() < 0.5 ? "rel" : "abs";
   if (rnd() < 0.4) s.timeZone = rnd() < 0.5 ? "utc" : "local";
   return s;
+}
+
+/** True when a state carries nothing the codec would serialize. */
+function isEmptyState(s: ViewState): boolean {
+  return (
+    s.fgWorkerZoom === undefined &&
+    s.fgOffworkerZoom === undefined &&
+    s.fgInspect === undefined &&
+    s.fgSearch === undefined &&
+    s.fgSpawn === undefined &&
+    s.fgRuntime === undefined &&
+    s.timeMode === undefined &&
+    s.timeZone === undefined
+  );
 }
 
 function randUnknown(rnd: () => number): UnknownEntry[] {
@@ -74,13 +99,7 @@ describe("view-state codec round-trip (property)", () => {
       const state = randState(rnd);
       const unknown = randUnknown(rnd);
       const payload = encodeViewState(state, unknown);
-      if (
-        state.fgWorkerZoom === undefined &&
-        state.fgOffworkerZoom === undefined &&
-        state.timeMode === undefined &&
-        state.timeZone === undefined &&
-        unknown.length === 0
-      ) {
+      if (isEmptyState(state) && unknown.length === 0) {
         expect(payload).toBe("");
         continue;
       }
@@ -103,7 +122,7 @@ describe("view-state codec round-trip (property)", () => {
     }
   });
 
-  it("legacy query mirror round-trips the same random zoom paths", () => {
+  it("legacy query mirror round-trips zoom + inspect/search/filters", () => {
     const rnd = mulberry32(0xbeef);
     for (let i = 0; i < 200; i++) {
       const state = randState(rnd);
@@ -117,10 +136,41 @@ describe("view-state codec round-trip (property)", () => {
       if (state.fgOffworkerZoom !== undefined && state.fgOffworkerZoom.length > 0) {
         expected.fgOffworkerZoom = state.fgOffworkerZoom;
       }
+      if (state.fgInspect) {
+        expected.fgInspect = state.fgInspect;
+        expected.fgInspectFull = state.fgInspectFull || state.fgInspect;
+      }
+      if (state.fgSearch) expected.fgSearch = state.fgSearch;
+      if (state.fgSpawn) expected.fgSpawn = state.fgSpawn;
+      if (state.fgRuntime) expected.fgRuntime = state.fgRuntime;
       expect(back).toEqual(expected);
-      // The mirror never touches anything but the two zoom params.
+      // The mirror never touches load-scope params.
       expect(params.get("trace")).toBe("demo-trace.bin");
     }
+  });
+
+  it("mirror emits inspect_full only when it differs from the display name", () => {
+    const same = new URLSearchParams();
+    applyLegacyZoomToQuery(same, { fgInspect: "leaf", fgInspectFull: "leaf" });
+    expect(same.get("inspect")).toBe("leaf");
+    expect(same.get("inspect_full")).toBeNull();
+
+    const diff = new URLSearchParams();
+    applyLegacyZoomToQuery(diff, { fgInspect: "poll", fgInspectFull: "core::poll" });
+    expect(diff.get("inspect")).toBe("poll");
+    expect(diff.get("inspect_full")).toBe("core::poll");
+  });
+
+  it("mirror deletes the view params on absence (URL stays clean)", () => {
+    const p = new URLSearchParams(
+      "trace=t.bin&worker-zoom=a&offworker-zoom=b&inspect=poll&inspect_full=core::poll" +
+        "&search=q&spawn=s&runtime=r",
+    );
+    applyLegacyZoomToQuery(p, {});
+    for (const k of ["worker-zoom", "offworker-zoom", "inspect", "inspect_full", "search", "spawn", "runtime"]) {
+      expect(p.get(k), k).toBeNull();
+    }
+    expect(p.get("trace")).toBe("t.bin");
   });
 });
 
@@ -226,6 +276,31 @@ describe("precedence: hash wins per field, legacy fills gaps", () => {
       fgOffworkerZoom: ["b", "c"],
       timeMode: "rel",
     });
+  });
+
+  it("hash inspect/search/filters override the legacy params per field", () => {
+    const s = resolveViewState({
+      search: "?inspect=old&inspect_full=old::s&search=stale&spawn=s0&runtime=r0",
+      hash: "#v=1&fg.i=poll&fg.if=core%3A%3Apoll&fg.s=tokio&fg.sp=s1",
+    });
+    expect(s.fgInspect).toBe("poll");
+    expect(s.fgInspectFull).toBe("core::poll");
+    expect(s.fgSearch).toBe("tokio");
+    expect(s.fgSpawn).toBe("s1");
+    // runtime not in the hash -> legacy fills it.
+    expect(s.fgRuntime).toBe("r0");
+  });
+
+  it("round-trips inspect/search/filters through the full codec", () => {
+    const state: ViewState = {
+      fgInspect: "poll",
+      fgInspectFull: "core::poll::poll",
+      fgSearch: "tokio::spawn",
+      fgSpawn: "src/main.rs:10",
+      fgRuntime: "app",
+    };
+    const decoded = decodeViewState(encodeViewState(state));
+    expect(decoded?.state).toEqual(state);
   });
 
   it("a foreign hash leaves the legacy interpretation untouched", () => {

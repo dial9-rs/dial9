@@ -334,6 +334,12 @@ declare module "*/trace_analysis.js" {
     activeNs: number;
     /** 0 for roots, +1 per ancestor (computed from the parent chain). */
     depth: number;
+    /**
+     * The owning task, resolved from the poll covering the first segment's
+     * (worker, start). null when buildSpanData was called without workerSpans
+     * or no poll covers the enter.
+     */
+    taskId: number | null;
   }
 
   export interface UnmatchedSpan {
@@ -363,7 +369,8 @@ declare module "*/trace_analysis.js" {
   }
 
   export function buildSpanData(
-    customEvents: readonly CustomTraceEvent[]
+    customEvents: readonly CustomTraceEvent[],
+    workerSpans?: Record<number, WorkerLane>
   ): SpanData;
 
   /** Seeds plus all their descendants; cycle-safe. */

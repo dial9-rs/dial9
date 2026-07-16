@@ -1,14 +1,14 @@
 // Type declarations for `flamegraph_api.js` (pure helpers for the aggregated
-// `?api=1` flamegraph mode: coverage badge/percent, auto-stop plateau
-// heuristic, UTC picker conversion, max_files ceiling, facet options).
-// See src/types/decode.d.ts for the declaration-form rationale.
+// `?api=1` flamegraph mode: coverage badge/percent, UTC picker conversion,
+// max_files ceiling, facet options). See src/types/decode.d.ts for the
+// declaration-form rationale.
 //
 // Not frozen core, but loaded as a browser global (CommonJS-guard form) and
 // consumed by typed src/ through the lib/trace boundary
-// (src/lib/trace/api_format.ts) exactly like the core. `isCoverageFrozen` is
-// deliberately NOT re-exported into src/: the typed port in
-// lib/trace/aggregates.ts (same semantics, typed Coverage) is the src/-side
-// implementation.
+// (src/lib/trace/api_format.ts) exactly like the core. Coverage-freeze and
+// plateau/auto-stop helpers used to live here but were dropped when aggregation
+// became a server-driven SSE stream; the coverage-signal port the src/ app
+// still needs lives in lib/trace/aggregates.ts (typed Coverage).
 
 declare module "*/flamegraph_api.js" {
   /**
@@ -43,20 +43,28 @@ declare module "*/flamegraph_api.js" {
     coverage: LegacyCoverage | null | undefined
   ): number;
 
-  export function isCoverageFrozen(
-    prev: LegacyCoverage | null | undefined,
-    curr: LegacyCoverage
-  ): boolean;
+  /**
+   * A "N files failed to fold" notice (with an example key when present), or
+   * null when the coverage has no fold errors. Surfaces unwritable-output /
+   * decode failures instead of silently rendering a shallow tree.
+   */
+  export function foldErrorNotice(
+    coverage: (LegacyCoverage & { fold_errors?: number; fold_error_sample?: string }) | null | undefined
+  ): string | null;
 
   /**
-   * True once the last `patience` (default 3) per-poll coverage gains
-   * (percentage points, newest last) are all below `minDeltaPct`
-   * (default 0.5) - the diminishing-returns auto-stop.
+   * Millisecond input -> integer-ns STRING (the min_poll_ns/max_poll_ns scope
+   * params are ns; the band inputs are human ms). null for empty/blank/
+   * non-numeric/negative input. Fractional ms allowed (0.5 -> "500000").
    */
-  export function shouldAutoStopRefining(
-    deltas: readonly number[],
-    opts?: { minDeltaPct?: number; patience?: number }
-  ): boolean;
+  export function msToNs(val: string | number | null | undefined): string | null;
+
+  /**
+   * Inverse of msToNs: epoch-ns -> millisecond string for seeding a band
+   * input from a URL param. "" for null/empty/non-numeric; trailing zeros
+   * trimmed (1_500_000 -> "1.5").
+   */
+  export function nsToMs(ns: string | number | null | undefined): string;
 
   /**
    * Next `max_files` ceiling for "Refine more": ~4x the current fold

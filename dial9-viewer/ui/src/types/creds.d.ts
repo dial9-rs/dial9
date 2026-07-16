@@ -5,15 +5,39 @@
 // Note: creds.js also publishes `window.Dial9Creds` as the stable
 // userscript contract; that global is intentionally NOT declared here --
 // typed src/ code should import the module instead.
+//
+// The store carries exactly one of two credential transports per request,
+// mirroring the server's `CredSource` union (src/server/credentials.rs):
+// static bring-your-own keys, OR an assume-role ARN. `get()` normalizes
+// storage to a discriminated union so consumers branch on `kind` instead of
+// re-deriving which transport applies, and the "both at once" pair is
+// unrepresentable.
 
 declare module "*/creds.js" {
-  /** Credentials as persisted in storage (trimmed; empty optionals omitted). */
-  export interface StoredCredentials {
+  /** Static bring-your-own key pair (the `x-dial9-aws-access-key-id` path). */
+  export interface StaticCredentials {
+    kind: "static";
     accessKeyId: string;
     secretAccessKey: string;
-    sessionToken?: string;
-    region?: string;
+    sessionToken?: string | undefined;
+    region?: string | undefined;
   }
+
+  /** An assume-role ARN the server assumes with its own identity (the linkable
+   * `?aws_role_arn=` path). Never coexists with static keys. */
+  export interface RoleCredentials {
+    kind: "role";
+    roleArn: string;
+    region?: string | undefined;
+  }
+
+  /**
+   * The active credential as `get()` returns it: exactly one transport,
+   * discriminated by `kind`. Named `StoredCredentials` for continuity (it is
+   * what storage resolves to). Narrow on `kind` before reading a transport's
+   * fields.
+   */
+  export type StoredCredentials = StaticCredentials | RoleCredentials;
 
   export interface SetCredentialsInput {
     accessKeyId: string;
@@ -45,16 +69,35 @@ declare module "*/creds.js" {
   }
 
   export interface Dial9CredsApi {
-    /** Stored credentials, or null if none are set (or unparseable). */
+    /** The active credential, or null if none is usable (or unparseable). */
     get(): StoredCredentials | null;
-    /** True if a usable credential set (key id + secret) is stored. */
+    /** True if a usable credential set (static keys or a role ARN) is stored. */
     has(): boolean;
     /**
-     * Store credentials, optionally validating and resolving the region.
-     * Never clears stored creds on a failed bucket check. Rejects when
-     * accessKeyId/secretAccessKey are missing.
+     * Store static credentials, optionally validating and resolving the
+     * region. Never clears stored creds on a failed bucket check. Rejects when
+     * accessKeyId/secretAccessKey are missing. Replaces any stored role ARN so
+     * the two transports never coexist.
      */
     set(creds: SetCredentialsInput): Promise<CredentialCheckResult>;
+    /**
+     * Store an assume-role ARN as the active credential (the linkable
+     * `?aws_role_arn=` path), clearing any static keys. Throws on a malformed
+     * ARN (see `isValidRoleArn`) so a bad link fails loudly. Returns the
+     * stored role credential.
+     */
+    setRoleArn(roleArn: string, opts?: { region?: string | undefined }): RoleCredentials;
+    /**
+     * Patch the region onto whatever credential is stored, preserving its
+     * kind (the one region-update entry point for both transports). No-op
+     * (returns null) when nothing is stored.
+     */
+    setRegion(region: string): StoredCredentials | null;
+    /**
+     * Syntactic check that `arn` names a single IAM role, mirroring the
+     * server's `is_valid_role_arn`, so a malformed value is rejected up front.
+     */
+    isValidRoleArn(arn: string): boolean;
     /**
      * Parse credentials from a pasted blob (STS AssumeRole JSON or a flat
      * object; tolerates snake_case/SCREAMING_CASE keys). Throws when the
@@ -79,8 +122,8 @@ declare module "*/creds.js" {
     /** Clear stored credentials and notify listeners. */
     clear(): void;
     /**
-     * x-dial9-aws-* request headers from the stored credentials; empty
-     * object when nothing is stored (safe to spread unconditionally).
+     * x-dial9-aws-* request headers for the active credential's transport;
+     * empty object when nothing is stored (safe to spread unconditionally).
      */
     headers(): Record<string, string>;
     /** Test seam: inject a fake storage backend. */

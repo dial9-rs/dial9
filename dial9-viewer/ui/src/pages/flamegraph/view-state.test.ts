@@ -1,41 +1,42 @@
 // Integration tests for the flamegraph page's URL view-state wiring:
 // restore-on-load at the vitest level (the widget is a recording fake; the
 // in-browser twin against the real page is a separate parity journey). Covers:
-// restore from legacy params / hash / both (hash precedence), the
-// timeRangeMatched gate, zero URL writes on restore, the zoom->URL write
-// carrying legacy params + hash together, Esc-reset cleanup, and context-param
-// preservation over the recorded legacy fixture URLs.
+// restore of the FULL view (zoom + inspect + search + filters) from legacy
+// params / hash / both (hash precedence), the timeRangeMatched gate, zero URL
+// writes on restore, the view->URL write carrying legacy params + hash
+// together, Esc-reset cleanup, and context-param preservation.
 
 import { describe, it, expect } from "vitest";
 import type { FrameScheduler } from "../../store/store.js";
 import type { DebounceTimer, UrlHost, UrlParts } from "../../lib/url/index.js";
+import type { FlamegraphViewState } from "../../lib/canvas/index.js";
 import { LEGACY_FIXTURE_URLS } from "../../lib/url/legacy-params.fixture.js";
 import {
   createFgUrlSync,
-  restoreZoomFromUrl,
-  type FgZoomPaths,
+  restoreFgStateFromUrl,
 } from "./view-state.js";
 
-// Recording stand-in for the widget's zoom surface.
+// Recording stand-in for the widget's view-state surface. `applied` records the
+// silent restore(s); `getViewState` reports the widget's live state to the sync.
 function fakeFg(): {
-  calls: Array<[string, readonly string[]]>;
-  paths: FgZoomPaths;
-  zoomToPath: (key: "worker" | "offworker", names: readonly string[]) => void;
-  getZoomPath: () => FgZoomPaths;
+  applied: FlamegraphViewState[];
+  setState: (s: FlamegraphViewState) => void;
+  applyViewState: (s: FlamegraphViewState, opts?: { silent?: boolean }) => void;
+  getViewState: () => FlamegraphViewState;
 } {
-  const calls: Array<[string, readonly string[]]> = [];
-  const self = {
-    calls,
-    paths: { worker: [], offworker: [] } as FgZoomPaths,
-    zoomToPath(key: "worker" | "offworker", names: readonly string[]) {
-      calls.push([key, names]);
-      const arr = [...names];
-      if (key === "worker") self.paths.worker = arr;
-      else self.paths.offworker = arr;
+  const applied: FlamegraphViewState[] = [];
+  let live: FlamegraphViewState = {};
+  return {
+    applied,
+    setState(s: FlamegraphViewState) {
+      live = s;
     },
-    getZoomPath: () => self.paths,
+    applyViewState(s: FlamegraphViewState, _opts?: { silent?: boolean }) {
+      applied.push(s);
+      live = s;
+    },
+    getViewState: () => live,
   };
-  return self;
 }
 
 function fakeRaf(): { scheduler: FrameScheduler; frame: () => void } {
@@ -85,81 +86,117 @@ function fakeHost(initial: UrlParts): UrlHost & { writes: string[] } {
   };
 }
 
-describe("restoreZoomFromUrl", () => {
-  it("restores from legacy query params (old links keep working)", () => {
+describe("restoreFgStateFromUrl", () => {
+  it("restores zoom from legacy query params (old links keep working)", () => {
     const fg = fakeFg();
-    restoreZoomFromUrl(
+    restoreFgStateFromUrl(
       { search: "?trace=t.bin&worker-zoom=main%09poll&offworker-zoom=blk", hash: "" },
       fg,
       true,
     );
-    expect(fg.calls).toEqual([
-      ["worker", ["main", "poll"]],
-      ["offworker", ["blk"]],
-    ]);
+    expect(fg.applied).toEqual([{ workerZoom: ["main", "poll"], offworkerZoom: ["blk"] }]);
   });
 
-  it("restores from the versioned hash", () => {
+  it("restores the full view (inspect/search/filters) from legacy params", () => {
     const fg = fakeFg();
-    restoreZoomFromUrl({ search: "?trace=t.bin", hash: "#v=1&fg.w=a%09b" }, fg, true);
-    expect(fg.calls).toEqual([["worker", ["a", "b"]]]);
-  });
-
-  it("hash wins per field when both are present", () => {
-    const fg = fakeFg();
-    restoreZoomFromUrl(
+    restoreFgStateFromUrl(
       {
-        search: "?worker-zoom=old&offworker-zoom=keep%09me",
-        hash: "#v=1&fg.w=new%09deep",
+        search:
+          "?trace=t.bin&worker-zoom=main&inspect=poll&inspect_full=core::poll" +
+          "&search=tokio&spawn=src/main.rs:10&runtime=app",
+        hash: "",
       },
       fg,
       true,
     );
-    expect(fg.calls).toEqual([
-      ["worker", ["new", "deep"]],
-      ["offworker", ["keep", "me"]],
+    expect(fg.applied).toEqual([
+      {
+        workerZoom: ["main"],
+        inspect: { name: "poll", fullName: "core::poll" },
+        search: "tokio",
+        spawn: "src/main.rs:10",
+        runtime: "app",
+      },
+    ]);
+  });
+
+  it("restores the full view from the versioned hash", () => {
+    const fg = fakeFg();
+    restoreFgStateFromUrl(
+      {
+        search: "?trace=t.bin",
+        hash: "#v=1&fg.w=a%09b&fg.i=poll&fg.if=core%3A%3Apoll&fg.s=tok",
+      },
+      fg,
+      true,
+    );
+    expect(fg.applied).toEqual([
+      {
+        workerZoom: ["a", "b"],
+        inspect: { name: "poll", fullName: "core::poll" },
+        search: "tok",
+      },
+    ]);
+  });
+
+  it("hash wins per field when both are present", () => {
+    const fg = fakeFg();
+    restoreFgStateFromUrl(
+      {
+        search: "?worker-zoom=old&offworker-zoom=keep%09me&search=stale",
+        hash: "#v=1&fg.w=new%09deep&fg.s=fresh",
+      },
+      fg,
+      true,
+    );
+    expect(fg.applied).toEqual([
+      {
+        workerZoom: ["new", "deep"],
+        offworkerZoom: ["keep", "me"],
+        search: "fresh",
+      },
     ]);
   });
 
   it("skips restore when the time range did not match", () => {
     const fg = fakeFg();
-    const state = restoreZoomFromUrl(
+    const state = restoreFgStateFromUrl(
       { search: "?worker-zoom=a", hash: "#v=1&fg.o=b" },
       fg,
       false,
     );
-    expect(fg.calls).toEqual([]);
+    expect(fg.applied).toEqual([]);
     expect(state).toEqual({});
   });
 
   it("ignores foreign hashes (legacy params still restore)", () => {
     const fg = fakeFg();
-    restoreZoomFromUrl({ search: "?worker-zoom=a", hash: "#anchor" }, fg, true);
-    expect(fg.calls).toEqual([["worker", ["a"]]]);
+    restoreFgStateFromUrl({ search: "?worker-zoom=a", hash: "#anchor" }, fg, true);
+    expect(fg.applied).toEqual([{ workerZoom: ["a"] }]);
   });
 
   it("restores every recorded legacy fixture URL like the legacy reader", () => {
     for (const url of LEGACY_FIXTURE_URLS) {
       const fg = fakeFg();
-      restoreZoomFromUrl({ search: url, hash: "" }, fg, true);
+      restoreFgStateFromUrl({ search: url, hash: "" }, fg, true);
       const p = new URLSearchParams(url);
-      const expected: Array<[string, readonly string[]]> = [];
+      const expected: FlamegraphViewState = {};
       const wz = p.get("worker-zoom");
-      if (wz !== null) expected.push(["worker", wz.split("\t")]);
+      if (wz !== null) expected.workerZoom = wz.split("\t");
       const oz = p.get("offworker-zoom");
-      if (oz !== null) expected.push(["offworker", oz.split("\t")]);
-      expect(fg.calls, url).toEqual(expected);
+      if (oz !== null) expected.offworkerZoom = oz.split("\t");
+      expect(fg.applied, url).toEqual([expected]);
     }
   });
 });
 
-describe("createFgUrlSync (restore -> zoom -> share loop)", () => {
+describe("createFgUrlSync (restore -> view -> share loop)", () => {
   function setup(url: UrlParts) {
     const fg = fakeFg();
     const raf = fakeRaf();
     const timer = fakeTimer();
     const host = fakeHost(url);
-    const sync = createFgUrlSync(fg.getZoomPath, {
+    const sync = createFgUrlSync(fg.getViewState, {
       host,
       timer,
       scheduler: raf.scheduler,
@@ -174,7 +211,7 @@ describe("createFgUrlSync (restore -> zoom -> share loop)", () => {
       hash: "",
     };
     const { fg, raf, timer, host } = setup(url);
-    restoreZoomFromUrl(host.read(), fg, true);
+    restoreFgStateFromUrl(host.read(), fg, true);
     raf.frame();
     timer.fire();
     expect(host.writes).toEqual([]);
@@ -186,10 +223,10 @@ describe("createFgUrlSync (restore -> zoom -> share loop)", () => {
       search: "?trace=t.bin&worker-zoom=main",
       hash: "",
     });
-    restoreZoomFromUrl(host.read(), fg, true);
-    // User zooms deeper: the widget fires onZoomChange with live stacks.
-    fg.paths.worker = ["main", "poll", "do_work"];
-    sync.onZoomChange();
+    restoreFgStateFromUrl(host.read(), fg, true);
+    // User zooms deeper: the widget reports the live state.
+    fg.setState({ workerZoom: ["main", "poll", "do_work"] });
+    sync.onViewChange();
     raf.frame();
     timer.fire();
     expect(host.writes).toEqual([
@@ -198,30 +235,61 @@ describe("createFgUrlSync (restore -> zoom -> share loop)", () => {
     ]);
   });
 
-  it("Esc reset clears both zoom params and the hash", () => {
+  it("captures inspect + search + filters into legacy params and the hash", () => {
     const { fg, raf, timer, host, sync } = setup({
       pathname: "/p",
-      search: "?trace=t.bin&worker-zoom=a&offworker-zoom=b",
-      hash: "#v=1&fg.w=a&fg.o=b",
+      search: "?trace=t.bin",
+      hash: "",
     });
-    fg.paths.worker = [];
-    fg.paths.offworker = [];
-    sync.onZoomChange();
+    fg.setState({
+      inspect: { name: "poll", fullName: "core::poll::poll" },
+      search: "tokio",
+      spawn: "src/main.rs:10",
+      runtime: "app",
+    });
+    sync.onViewChange();
+    raf.frame();
+    timer.fire();
+    expect(host.writes).toHaveLength(1);
+    const u = new URL(host.writes[0]!, "http://x");
+    // Legacy query mirror.
+    expect(u.searchParams.get("inspect")).toBe("poll");
+    expect(u.searchParams.get("inspect_full")).toBe("core::poll::poll");
+    expect(u.searchParams.get("search")).toBe("tokio");
+    expect(u.searchParams.get("spawn")).toBe("src/main.rs:10");
+    expect(u.searchParams.get("runtime")).toBe("app");
+    // Versioned hash carrier.
+    const hash = new URLSearchParams(u.hash.slice(1));
+    expect(hash.get("fg.i")).toBe("poll");
+    expect(hash.get("fg.if")).toBe("core::poll::poll");
+    expect(hash.get("fg.s")).toBe("tokio");
+    expect(hash.get("fg.sp")).toBe("src/main.rs:10");
+    expect(hash.get("fg.rt")).toBe("app");
+  });
+
+  it("Esc reset clears every view param and the hash", () => {
+    const { fg, raf, timer, host, sync } = setup({
+      pathname: "/p",
+      search: "?trace=t.bin&worker-zoom=a&offworker-zoom=b&search=q&inspect=poll",
+      hash: "#v=1&fg.w=a&fg.o=b&fg.s=q&fg.i=poll",
+    });
+    fg.setState({});
+    sync.onViewChange();
     raf.frame();
     timer.fire();
     expect(host.writes).toEqual(["/p?trace=t.bin"]);
   });
 
-  it("preserves every non-zoom context param on write", () => {
+  it("preserves every non-view context param on write", () => {
     const fixture = LEGACY_FIXTURE_URLS[3]!; // the full context-param fixture URL
     const { fg, raf, timer, host, sync } = setup({
       pathname: "/new/flamegraph.html",
       search: fixture,
       hash: "",
     });
-    restoreZoomFromUrl(host.read(), fg, true);
-    fg.paths.worker = ["main", "poll"];
-    sync.onZoomChange();
+    restoreFgStateFromUrl(host.read(), fg, true);
+    fg.setState({ workerZoom: ["main", "poll"] });
+    sync.onViewChange();
     raf.frame();
     timer.fire();
     expect(host.writes).toHaveLength(1);
@@ -241,8 +309,8 @@ describe("createFgUrlSync (restore -> zoom -> share loop)", () => {
       search: "?trace=t.bin",
       hash: "",
     });
-    fg.paths.worker = ["a"];
-    sync.onZoomChange();
+    fg.setState({ workerZoom: ["a"] });
+    sync.onViewChange();
     raf.frame();
     expect(host.writes).toEqual([]); // still debouncing
     sync.flush();

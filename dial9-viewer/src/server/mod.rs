@@ -16,6 +16,7 @@ mod config;
 pub mod credentials;
 mod error;
 pub(crate) mod flamegraph;
+pub(crate) mod metrics;
 mod prefixes;
 pub(crate) mod tokio_stats;
 mod trace;
@@ -29,7 +30,7 @@ use credentials::{CredError, CredSource, MaybeCreds};
 /// success and the `x-amz-bucket-region` response header on the redirect error
 /// that S3 returns when the client's region doesn't match the bucket's.
 ///
-/// Shared by startup region detection ([`crate::serve`]) and the
+/// Shared by startup region detection ([`crate::build_app`]) and the
 /// `/api/credentials/check` endpoint.
 pub(crate) async fn region_from_head_bucket(
     client: &aws_sdk_s3::Client,
@@ -134,6 +135,38 @@ impl AppState {
             bucket_filter: "dial9".to_string(),
             fold_limits: crate::ingest::aggregate::FoldLimits::default(),
         }
+    }
+
+    /// Build an `AppState` backed by an S3 bucket, with automatic region
+    /// detection, bring-your-own-credentials support, and the assume-role
+    /// credential path enabled.
+    ///
+    /// This is the high-level entry point for embedders who want to serve
+    /// traces from S3 without replicating the CLI's setup logic:
+    ///
+    /// ```ignore
+    /// let state = AppState::from_bucket("my-traces", None).await;
+    /// let app = dial9_viewer::server::router(state);
+    /// // … customize app, then bind …
+    /// ```
+    pub async fn from_bucket(bucket: impl Into<String>, prefix: Option<String>) -> Self {
+        let bucket = bucket.into();
+        let backend = Arc::new(crate::s3_backend_for(&bucket).await);
+        let assumer = credentials::StsRoleAssumer::from_env().await;
+        Self::new(backend, Some(bucket), prefix)
+            .with_byo_creds(true)
+            .with_role_assumer(Arc::new(assumer))
+    }
+
+    /// Build an `AppState` backed by a local directory.
+    ///
+    /// ```ignore
+    /// let state = AppState::from_local_dir("/tmp/my-traces");
+    /// let app = dial9_viewer::server::router(state);
+    /// ```
+    pub fn from_local_dir(dir: impl AsRef<std::path::Path>) -> Self {
+        let backend = Arc::new(crate::storage::LocalBackend::new(dir.as_ref()));
+        Self::new(backend, Some("local".into()), None)
     }
 
     pub fn with_dev_ui_dir(mut self, dir: PathBuf) -> Self {
@@ -332,7 +365,7 @@ impl AppState {
                 // server this means we fall back to the server's ambient identity
                 // — the usual cause of a "wrong account" error.
                 if self.allow_byo_creds {
-                    tracing::info!(
+                    tracing::debug!(
                         "no x-dial9-aws-* credentials on request; using server's default identity"
                     );
                 }
@@ -470,5 +503,9 @@ fn api_router(state: AppState) -> Router {
         // Permissive CORS so a page on another origin can POST a trace and read
         // it back via fetch(); also answers the OPTIONS preflight automatically.
         .layer(CorsLayer::permissive())
+        // Per-request metrics. Layered on the API router (not the outer one) so
+        // it sees the populated `MatchedPath` and only counts API requests, not
+        // static-asset fetches. Publishes to the global `ServiceMetrics` sink.
+        .layer(axum::middleware::from_fn(metrics::record_request_metrics))
         .with_state(state)
 }

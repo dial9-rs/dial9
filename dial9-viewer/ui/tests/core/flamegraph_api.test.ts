@@ -31,28 +31,39 @@ interface FacetOption {
   label: string;
 }
 
+// NOTE: isCoverageFrozen and shouldAutoStopRefining used to live here but were
+// dropped from flamegraph_api.js when aggregation became a server-driven SSE
+// stream (the server owns the refine/stop loop). isCoverageFrozen's typed port
+// still lives in src/lib/trace/aggregates.ts and is covered by
+// src/lib/trace/aggregates.test.ts.
 const {
   formatCoverageBadge,
-  isCoverageFrozen,
   coveragePercent,
-  shouldAutoStopRefining,
+  foldErrorNotice,
   nextMaxFiles,
   nsToPickerUtc,
   pickerUtcToNs,
+  msToNs,
+  nsToMs,
   sourceFacetOptions,
   threadFacetOptions,
   hostFacetOptions,
 } = require("../../flamegraph_api.js") as {
   formatCoverageBadge: (c: Coverage) => string;
-  isCoverageFrozen: (
-    prev: { files_folded: number } | null,
-    cur: { files_folded: number },
-  ) => boolean;
   coveragePercent: (c: { files_matched: number; files_folded: number } | null) => number;
-  shouldAutoStopRefining: (
-    history: number[],
-    opts?: { minDeltaPct?: number; patience?: number },
-  ) => boolean;
+  foldErrorNotice: (
+    c:
+      | {
+          fold_errors?: number;
+          fold_error_sample?: string;
+          files_matched?: number;
+          files_folded?: number;
+        }
+      | null
+      | undefined,
+  ) => string | null;
+  msToNs: (val: string) => string | null;
+  nsToMs: (ns: string | null) => string;
   nextMaxFiles: (folded: number, opts?: { cap?: number; min?: number }) => number;
   nsToPickerUtc: (ns: string | null) => string;
   pickerUtcToNs: (picker: string) => string | null;
@@ -106,21 +117,6 @@ describe("formatCoverageBadge", () => {
   });
 });
 
-describe("isCoverageFrozen", () => {
-  it("first poll (no previous) is never frozen", () => {
-    expect(isCoverageFrozen(null, { files_folded: 5 })).toBe(false);
-  });
-  it("progress (folded increased) is not frozen", () => {
-    expect(isCoverageFrozen({ files_folded: 5 }, { files_folded: 8 })).toBe(false);
-  });
-  it("no increase is frozen", () => {
-    expect(isCoverageFrozen({ files_folded: 8 }, { files_folded: 8 })).toBe(true);
-  });
-  it("decrease is frozen (defensive)", () => {
-    expect(isCoverageFrozen({ files_folded: 8 }, { files_folded: 7 })).toBe(true);
-  });
-});
-
 describe("nextMaxFiles", () => {
   it("4x current fold count", () => {
     expect(nextMaxFiles(12)).toBe(48);
@@ -157,30 +153,60 @@ describe("coveragePercent", () => {
   });
 });
 
-describe("shouldAutoStopRefining", () => {
-  it("no history -> keep refining", () => {
-    expect(shouldAutoStopRefining([])).toBe(false);
+describe("foldErrorNotice", () => {
+  it("no fold errors -> no notice", () => {
+    expect(
+      foldErrorNotice({ files_matched: 100, files_folded: 0, fold_errors: 0 }),
+    ).toBeNull();
   });
-  it("fewer than patience(3) samples -> keep going", () => {
-    expect(shouldAutoStopRefining([5, 4])).toBe(false);
+  it("zero fold errors -> null even without a sample", () => {
+    expect(foldErrorNotice({ fold_errors: 0 })).toBeNull();
   });
-  it("recent gains still large -> keep going", () => {
-    expect(shouldAutoStopRefining([5, 4, 3])).toBe(false);
+  it("null coverage -> null", () => {
+    expect(foldErrorNotice(null)).toBeNull();
   });
-  it("3 consecutive sub-0.5pp gains -> stop", () => {
-    expect(shouldAutoStopRefining([0.1, 0.2, 0.05])).toBe(true);
+  it("missing coverage -> null", () => {
+    expect(foldErrorNotice(undefined)).toBeNull();
   });
-  it("only the most recent `patience` matter (early spike ignored once it settles)", () => {
-    expect(shouldAutoStopRefining([5, 0.1, 0.2, 0.3])).toBe(true);
+  it("count + sample message", () => {
+    expect(
+      foldErrorNotice({ fold_errors: 15, fold_error_sample: "1782-4879.bin.gz: AccessDenied" }),
+    ).toBe("⚠ 15 files failed to fold — 1782-4879.bin.gz: AccessDenied");
   });
-  it("a large gain within the recent window prevents stopping", () => {
-    expect(shouldAutoStopRefining([0.1, 0.1, 5, 0.1, 0.2])).toBe(false);
+  it("singular noun for one error", () => {
+    expect(foldErrorNotice({ fold_errors: 1, fold_error_sample: "x.bin.gz: boom" })).toBe(
+      "⚠ 1 file failed to fold — x.bin.gz: boom",
+    );
   });
-  it("a large most-recent gain prevents stopping", () => {
-    expect(shouldAutoStopRefining([0.1, 0.1, 1.0])).toBe(false);
+  it("count without a sample message still renders", () => {
+    expect(foldErrorNotice({ fold_errors: 3 })).toBe("⚠ 3 files failed to fold");
   });
-  it("custom thresholds: both gains below 5pp -> stop", () => {
-    expect(shouldAutoStopRefining([2, 2], { minDeltaPct: 5, patience: 2 })).toBe(true);
+});
+
+// Poll-duration band ms<->ns conversion (the query-param boundary).
+describe("msToNs / nsToMs", () => {
+  // msToNs: human milliseconds -> integer-ns string, null for empty/invalid.
+  it("msToNs converts and rejects", () => {
+    expect(msToNs("10"), "10ms -> 10,000,000ns").toBe("10000000");
+    expect(msToNs("0.5"), "fractional 0.5ms -> 500,000ns").toBe("500000");
+    expect(msToNs("1.5"), "1.5ms -> 1,500,000ns").toBe("1500000");
+    expect(msToNs("0"), "0 is a real bound, not blank").toBe("0");
+    expect(msToNs(""), "empty -> null (no bound)").toBeNull();
+    expect(msToNs("   "), "blank -> null (no bound)").toBeNull();
+    expect(msToNs("abc"), "non-numeric -> null").toBeNull();
+    expect(msToNs("-5"), "negative -> null (rejected)").toBeNull();
+  });
+
+  // nsToMs: inverse for seeding the input from a URL ns param.
+  it("nsToMs inverts", () => {
+    expect(nsToMs("10000000"), "10,000,000ns -> 10 (trailing zeros trimmed)").toBe("10");
+    expect(nsToMs("1500000"), "1,500,000ns -> 1.5").toBe("1.5");
+    expect(nsToMs(""), "empty -> empty").toBe("");
+    expect(nsToMs(null), "null -> empty").toBe("");
+  });
+
+  it("ms -> ns -> ms round-trips", () => {
+    expect(nsToMs(msToNs("2.5"))).toBe("2.5");
   });
 });
 

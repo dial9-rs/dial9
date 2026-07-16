@@ -83,6 +83,10 @@ export interface UiSlice {
 export interface ConfigSlice {
   /** Server runs demand-driven aggregation. */
   aggregationEnabled: boolean;
+  /** Server is a local directory (no bring-your-own credentials): traces
+   * open directly by key rather than via a scope, since buffer-style local
+   * key names carry no service/host/date to build a scope from (#627). */
+  localMode: boolean;
   /** Server declared a default prefix; Search waits for one. */
   serverHasPrefix: boolean;
   /** Bucket-picker filter substring in effect: URL override >
@@ -157,6 +161,16 @@ export interface CredsSlice {
   selectedBucket: string | null;
 }
 
+/**
+ * Captured A/B differential-comparison scopes (#623). Each side is an
+ * aggregate scope (a URLSearchParams from the shared scope codec) or null;
+ * A fills before B. Held in the store so the diff tray re-renders on capture.
+ */
+export interface DiffSlice {
+  a: URLSearchParams | null;
+  b: URLSearchParams | null;
+}
+
 /** High-frequency overlay state (the "transient channel"). */
 export interface TransientSlice {
   /** In-progress heatmap drag (rubber band), in plot-local px. */
@@ -173,6 +187,7 @@ export interface BrowserState {
   browse: BrowseSlice;
   raw: RawSlice;
   creds: CredsSlice;
+  diff: DiffSlice;
   transient: TransientSlice;
 }
 
@@ -184,6 +199,7 @@ export function initialBrowserState(): BrowserState {
     ui: { tab: "browse", useLocalTz: false },
     config: {
       aggregationEnabled: false,
+      localMode: false,
       serverHasPrefix: false,
       bucketFilter: DEFAULT_BUCKET_FILTER,
       bucketFilterOverride: null,
@@ -234,6 +250,7 @@ export function initialBrowserState(): BrowserState {
       showAll: false,
       selectedBucket: null,
     },
+    diff: { a: null, b: null },
     transient: { drag: null, footerDragActive: false },
   };
 }

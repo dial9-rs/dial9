@@ -245,21 +245,5 @@ export function buildDiffModel(
   };
 }
 
-/**
- * The refine-loop termination predicate. Stops when: no coverage, OR fully
- * folded (files_folded >= files_matched), OR frozen (files_folded did not change
- * since the previous poll). `prevFolded` is -1 before the first poll.
- */
-export function shouldStopRefining(
-  coverage: { files_folded: number; files_matched: number } | null | undefined,
-  prevFolded: number,
-): boolean {
-  if (!coverage) return true;
-  return (
-    coverage.files_folded >= coverage.files_matched ||
-    coverage.files_folded === prevFolded
-  );
-}
-
 // Re-export for tests that build synthetic exemplars.
 export type { PollExemplar };

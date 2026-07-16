@@ -287,6 +287,21 @@ Dial9Config::builder()
     // ...
 ```
 
+By default, dial9 tries the perf backend and falls back to ctimer if
+`perf_event_open` is blocked. You can select the backend explicitly:
+
+```rust,ignore
+// Use ctimer directly — zero thread lifecycle overhead, ideal for workloads
+// with high thread churn (e.g. saturated block_in_place usage).
+CpuProfilingConfig::with_ctimer_backend()
+
+// Require perf — fail instead of silently degrading. Needed for kernel
+// stacks or hardware event sources.
+CpuProfilingConfig::with_perf_backend()
+    .event_source(EventSource::SwCpuClock)
+    .include_kernel(true)
+```
+
 To use dial9 as a CPU profiler without installing Tokio runtime hooks, keep
 telemetry enabled and disable only Tokio instrumentation:
 

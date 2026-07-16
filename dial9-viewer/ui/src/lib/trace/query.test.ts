@@ -33,6 +33,7 @@ function span(
     fields: {},
     activeNs: end - start,
     depth: 0,
+    taskId: null,
   };
 }
 

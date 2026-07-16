@@ -1,8 +1,14 @@
 //! End-to-end integration tests for the demand-driven aggregation refinement
-//! loop, driven through the real HTTP `/api/flamegraph` endpoint against a
+//! loop, driven through the real HTTP `/api/flamegraph` SSE endpoint against a
 //! simulated S3 (s3s). This is the Goal-1 "works against fake S3 so we can test
 //! the whole flow" coverage: folding, ordering, coverage reporting, the
 //! sampling cap, idempotency, zero-sample files, and scope filtering.
+//!
+//! The endpoint streams: one request folds to the sampling cap and emits a
+//! Server-Sent Event per file (the first is the already-folded snapshot, the
+//! last is the fully-refined snapshot). [`stream`] collects every event;
+//! [`stream_final`] returns just the last (at-cap) one — the natural replacement
+//! for the old "poll until coverage stops climbing" loops.
 
 use dial9_trace_format::encoder::Encoder;
 use dial9_trace_format::schema::FieldDef;
@@ -162,6 +168,141 @@ fn mini_counts() -> MiniCounts {
     mini_trace().1
 }
 
+/// A synthetic trace segment with reconstructable poll spans, so the
+/// poll-duration band filter can be exercised end-to-end. Worker 0 (tid 100)
+/// runs two polls: a "fast" one (0.5 ms) and a "slow" one (50 ms). CPU samples
+/// land inside each, plus one off-worker sample (no enclosing poll, so its
+/// `poll_duration_ns` is null). Gzipped, like a real source segment.
+///
+/// Expected on-CPU sample counts (default `source=cpu`):
+///   * fast poll (0.5 ms): 2 samples
+///   * slow poll  (50 ms): 3 samples
+///   * off-worker (no poll): 1 sample
+fn poll_trace_gz() -> Vec<u8> {
+    let mut enc = Encoder::new();
+    let park = enc
+        .register_schema(
+            "WorkerParkEvent",
+            vec![
+                FieldDef::new("worker_id", FieldType::Varint),
+                FieldDef::new("tid", FieldType::Varint),
+            ],
+        )
+        .unwrap();
+    // spawn_loc is optional (serde default) in the decoder, so we omit it here.
+    let poll_start = enc
+        .register_schema(
+            "PollStartEvent",
+            vec![
+                FieldDef::new("worker_id", FieldType::Varint),
+                FieldDef::new("task_id", FieldType::Varint),
+            ],
+        )
+        .unwrap();
+    let poll_end = enc
+        .register_schema(
+            "PollEndEvent",
+            vec![FieldDef::new("worker_id", FieldType::Varint)],
+        )
+        .unwrap();
+    let cpu = enc
+        .register_schema(
+            "CpuSampleEvent",
+            vec![
+                FieldDef::new("tid", FieldType::Varint),
+                FieldDef::new("source", FieldType::Varint),
+                FieldDef::new("callchain", FieldType::StackFrames),
+            ],
+        )
+        .unwrap();
+
+    // Bind tid 100 -> worker 0 early (before any poll), so the binding doesn't
+    // close an open poll span. The first varint of every event is its timestamp.
+    enc.write_event(
+        &park,
+        &[
+            FieldValue::Varint(1),
+            FieldValue::Varint(0),
+            FieldValue::Varint(100),
+        ],
+    )
+    .unwrap();
+
+    // Fast poll on worker 0: [1_000_000, 1_500_000) → 500_000 ns (0.5 ms).
+    enc.write_event(
+        &poll_start,
+        &[
+            FieldValue::Varint(1_000_000),
+            FieldValue::Varint(0),
+            FieldValue::Varint(7),
+        ],
+    )
+    .unwrap();
+    for ts in [1_100_000u64, 1_300_000] {
+        enc.write_event(
+            &cpu,
+            &[
+                FieldValue::Varint(ts),
+                FieldValue::Varint(100),
+                FieldValue::Varint(0),
+                FieldValue::StackFrames(vec![0x1000u64, 0x2000].into()),
+            ],
+        )
+        .unwrap();
+    }
+    enc.write_event(
+        &poll_end,
+        &[FieldValue::Varint(1_500_000), FieldValue::Varint(0)],
+    )
+    .unwrap();
+
+    // Slow poll on worker 0: [10_000_000, 60_000_000) → 50_000_000 ns (50 ms).
+    enc.write_event(
+        &poll_start,
+        &[
+            FieldValue::Varint(10_000_000),
+            FieldValue::Varint(0),
+            FieldValue::Varint(8),
+        ],
+    )
+    .unwrap();
+    for ts in [20_000_000u64, 30_000_000, 40_000_000] {
+        enc.write_event(
+            &cpu,
+            &[
+                FieldValue::Varint(ts),
+                FieldValue::Varint(100),
+                FieldValue::Varint(0),
+                FieldValue::StackFrames(vec![0x1000u64, 0x3000].into()),
+            ],
+        )
+        .unwrap();
+    }
+    enc.write_event(
+        &poll_end,
+        &[FieldValue::Varint(60_000_000), FieldValue::Varint(0)],
+    )
+    .unwrap();
+
+    // One off-worker sample (tid 999 is never bound) → no enclosing poll, so its
+    // poll_duration_ns is null and any band excludes it.
+    enc.write_event(
+        &cpu,
+        &[
+            FieldValue::Varint(70_000_000),
+            FieldValue::Varint(999),
+            FieldValue::Varint(0),
+            FieldValue::StackFrames(vec![0x1000u64, 0x2000].into()),
+        ],
+    )
+    .unwrap();
+
+    let raw = enc.finish();
+    let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    std::io::Write::write_all(&mut gz, &raw).unwrap();
+    gz.finish().unwrap()
+}
+
 async fn put(client: &aws_sdk_s3::Client, bucket: &str, key: &str, data: Vec<u8>) {
     client
         .put_object()
@@ -187,8 +328,21 @@ async fn start_agg_server(
     output_bucket: &str,
     segment_secs: i64,
 ) -> String {
-    let source = Arc::new(S3Backend::from_client(fake_s3_client(fs_root)));
     let output = Arc::new(S3Backend::from_client(fake_s3_client(fs_root)));
+    start_agg_server_with_output(fs_root, source_bucket, output_bucket, segment_secs, output).await
+}
+
+/// Like [`start_agg_server`], but the aggregation OUTPUT backend is injected — so
+/// a test can point it at a client that fails writes (see
+/// [`access_denied_on_put_client`]) to exercise the fold-error reporting path.
+async fn start_agg_server_with_output(
+    fs_root: &std::path::Path,
+    source_bucket: &str,
+    output_bucket: &str,
+    segment_secs: i64,
+    output: Arc<dyn dial9_viewer::storage::StorageBackend>,
+) -> String {
+    let source = Arc::new(S3Backend::from_client(fake_s3_client(fs_root)));
     let agg = AggContext {
         source,
         output,
@@ -208,6 +362,164 @@ async fn start_agg_server(
         axum::serve(listener, app).await.unwrap();
     });
     format!("http://{addr}")
+}
+
+/// An `aws_sdk_s3::Client` whose `PutObject` always fails with 403 AccessDenied
+/// (via an injected HTTP client), while `GET`/list return an empty
+/// `ListBucketResult`. This is the fold-failure analogue of a real read-only
+/// output bucket: reads/lists work, writes are denied — so every part-file write
+/// errors and no file ever folds. Used to drive the fold-error reporting path.
+fn access_denied_on_put_client() -> aws_sdk_s3::Client {
+    use aws_smithy_http_client::test_util::infallible_client_fn;
+    let http_client = infallible_client_fn(|req: http::Request<_>| {
+        if req.method() == http::Method::PUT {
+            let body = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+                <Error><Code>AccessDenied</Code>\
+                <Message>Access Denied</Message></Error>";
+            http::Response::builder()
+                .status(403)
+                .header("content-type", "application/xml")
+                .body(body)
+                .unwrap()
+        } else {
+            // Reads / LISTs succeed but return nothing folded.
+            let body = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+                <ListBucketResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
+                <KeyCount>0</KeyCount><IsTruncated>false</IsTruncated></ListBucketResult>";
+            http::Response::builder()
+                .status(200)
+                .header("content-type", "application/xml")
+                .body(body)
+                .unwrap()
+        }
+    });
+    let cfg = aws_sdk_s3::Config::builder()
+        .behavior_version_latest()
+        .credentials_provider(aws_sdk_s3::config::Credentials::new(
+            "test", "test", None, None, "test",
+        ))
+        .region(aws_sdk_s3::config::Region::new("us-east-1"))
+        .http_client(http_client)
+        .force_path_style(true)
+        .build();
+    aws_sdk_s3::Client::from_conf(cfg)
+}
+
+/// A [`StorageBackend`] wrapper whose `put_object` fails for keys containing
+/// `fail_substr`, delegating everything else to the inner backend. Simulates a
+/// fold whose part-file writes PARTIALLY succeed — the interleaving a cancelled
+/// or partially-denied fold produces — to pin down the commit-ordering
+/// invariant: the `samples/` part (the durable "folded" record) must never land
+/// unless the dict and polls parts landed first.
+///
+/// [`StorageBackend`]: dial9_viewer::storage::StorageBackend
+struct FailingPuts {
+    inner: Arc<dyn dial9_viewer::storage::StorageBackend>,
+    fail_substr: &'static str,
+}
+
+impl dial9_viewer::storage::StorageBackend for FailingPuts {
+    fn list_buckets(
+        &self,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<Vec<String>, dial9_viewer::storage::StorageError>,
+                > + Send
+                + '_,
+        >,
+    > {
+        self.inner.list_buckets()
+    }
+
+    fn list_objects(
+        &self,
+        bucket: &str,
+        prefix: &str,
+        cap: usize,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<
+                        dial9_viewer::storage::ListPage,
+                        dial9_viewer::storage::StorageError,
+                    >,
+                > + Send
+                + '_,
+        >,
+    > {
+        self.inner.list_objects(bucket, prefix, cap)
+    }
+
+    fn list_objects_all(
+        &self,
+        bucket: &str,
+        prefix: &str,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<
+                        Vec<dial9_viewer::storage::ObjectInfo>,
+                        dial9_viewer::storage::StorageError,
+                    >,
+                > + Send
+                + '_,
+        >,
+    > {
+        self.inner.list_objects_all(bucket, prefix)
+    }
+
+    fn list_prefixes(
+        &self,
+        bucket: &str,
+        prefix: &str,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<Vec<String>, dial9_viewer::storage::StorageError>,
+                > + Send
+                + '_,
+        >,
+    > {
+        self.inner.list_prefixes(bucket, prefix)
+    }
+
+    fn get_object(
+        &self,
+        bucket: &str,
+        key: &str,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<Vec<u8>, dial9_viewer::storage::StorageError>>
+                + Send
+                + '_,
+        >,
+    > {
+        self.inner.get_object(bucket, key)
+    }
+
+    fn put_object(
+        &self,
+        bucket: &str,
+        key: &str,
+        data: Vec<u8>,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<(), dial9_viewer::storage::StorageError>>
+                + Send
+                + '_,
+        >,
+    > {
+        if key.contains(self.fail_substr) {
+            let key = key.to_string();
+            return Box::pin(async move {
+                Err(dial9_viewer::storage::StorageError::Other(format!(
+                    "simulated write failure for {key}"
+                )))
+            });
+        }
+        self.inner.put_object(bucket, key, data)
+    }
 }
 
 /// Start a server WITHOUT a server-side `AggContext`, exercising the
@@ -242,14 +554,16 @@ async fn start_byoc_server(
     format!("http://{addr}")
 }
 
-/// A parsed response. The flamegraph `tree` is deeply nested (real call
+/// A parsed SSE event. The flamegraph `tree` is deeply nested (real call
 /// stacks) and would blow serde_json's default recursion limit, so we do NOT
 /// deserialize it into a recursive struct — we capture only the scalar fields
-/// and a shallow "is the tree non-trivial" flag derived from the raw JSON.
+/// and a shallow "is the tree non-trivial" flag derived from the raw JSON, plus
+/// the raw JSON body for tests that need to inspect metadata/facets verbatim.
 struct Resp {
     total_samples: usize,
     coverage: Option<Coverage>,
     tree_has_children: bool,
+    body: String,
 }
 
 #[derive(serde::Deserialize)]
@@ -259,27 +573,40 @@ struct Coverage {
     samples_folded: usize,
     hosts_matched: usize,
     hosts_folded: usize,
+    /// Files whose fold failed this stream (0 unless e.g. the output bucket is
+    /// unwritable). Defaults to 0 for the scalar extractor when absent.
+    fold_errors: usize,
 }
 
-/// Poll the refinement endpoint in REFINING mode (`refine=true`): each call
-/// folds a batch, so the existing "every poll makes progress" test semantics
-/// hold. Use [`poll_readonly`] to exercise the instant, no-fold first poll.
-async fn poll(client: &reqwest::Client, base: &str, query: &str) -> Resp {
-    poll_with(client, base, query, true).await
+/// Parse the `data:` payloads out of a `text/event-stream` body. Each event is
+/// separated by a blank line; we join a frame's `data:` lines and skip comment
+/// (keep-alive) frames. The endpoints emit one JSON object per event.
+fn parse_sse_events(body: &str) -> Vec<String> {
+    let body = body.replace("\r\n", "\n");
+    let mut events = Vec::new();
+    for frame in body.split("\n\n") {
+        let mut data = String::new();
+        for line in frame.split('\n') {
+            if let Some(rest) = line.strip_prefix("data:") {
+                if !data.is_empty() {
+                    data.push('\n');
+                }
+                data.push_str(rest.strip_prefix(' ').unwrap_or(rest));
+            }
+        }
+        if !data.is_empty() {
+            events.push(data);
+        }
+    }
+    events
 }
 
-/// Poll in READ-ONLY mode (`refine` omitted): the server returns whatever is
-/// already folded without folding anything new.
-async fn poll_readonly(client: &reqwest::Client, base: &str, query: &str) -> Resp {
-    poll_with(client, base, query, false).await
-}
-
-async fn poll_with(client: &reqwest::Client, base: &str, query: &str, refine: bool) -> Resp {
-    let url = if refine {
-        format!("{base}/api/flamegraph?{query}&refine=true")
-    } else {
-        format!("{base}/api/flamegraph?{query}")
-    };
+/// Open the flamegraph SSE stream for `query` and collect every event. The
+/// server folds to the sampling cap then closes, so `reqwest`'s buffered
+/// `.text()` returns the whole finite stream. The first event is the
+/// already-folded snapshot; the last is the fully-refined (at-cap) snapshot.
+async fn stream(client: &reqwest::Client, base: &str, query: &str) -> Vec<Resp> {
+    let url = format!("{base}/api/flamegraph?{query}");
     let r = client.get(&url).send().await.unwrap();
     assert!(
         r.status().is_success(),
@@ -288,19 +615,32 @@ async fn poll_with(client: &reqwest::Client, base: &str, query: &str, refine: bo
         r.text().await.unwrap_or_default()
     );
     let body = r.text().await.unwrap();
-    // Pull out the scalar fields with a depth-limited custom read: truncate the
-    // (deeply nested) `tree` value before handing the rest to serde. We locate
-    // the top-level scalar keys, which appear after the tree in the JSON object.
-    let total_samples = extract_usize(&body, "\"total_samples\":").expect("total_samples present");
-    let coverage = extract_coverage(&body);
-    // Shallow structural check: a non-trivial tree has a nested "children" array
-    // with at least one child object.
-    let tree_has_children = body.contains("\"children\":[{");
-    Resp {
-        total_samples,
-        coverage,
-        tree_has_children,
-    }
+    let events = parse_sse_events(&body);
+    assert!(
+        !events.is_empty(),
+        "stream for {url} produced no events; body = {body:?}"
+    );
+    events
+        .into_iter()
+        .map(|body| {
+            let total_samples =
+                extract_usize(&body, "\"total_samples\":").expect("total_samples present");
+            let coverage = extract_coverage(&body);
+            let tree_has_children = body.contains("\"children\":[{");
+            Resp {
+                total_samples,
+                coverage,
+                tree_has_children,
+                body,
+            }
+        })
+        .collect()
+}
+
+/// The final (fully-refined) event of a flamegraph stream — the natural
+/// replacement for the old "poll to the cap" loop.
+async fn stream_final(client: &reqwest::Client, base: &str, query: &str) -> Resp {
+    stream(client, base, query).await.pop().unwrap()
 }
 
 /// Find `key` in `json` and parse the unsigned integer immediately following it.
@@ -322,6 +662,9 @@ fn extract_coverage(json: &str) -> Option<Coverage> {
         samples_folded: extract_usize(rest, "\"samples_folded\":")?,
         hosts_matched: extract_usize(rest, "\"hosts_matched\":")?,
         hosts_folded: extract_usize(rest, "\"hosts_folded\":")?,
+        // `fold_errors` is 0 unless folds failed; absent in that common case
+        // because we only need it in the read-only-output regression test.
+        fold_errors: extract_usize(rest, "\"fold_errors\":").unwrap_or(0),
     })
 }
 
@@ -369,8 +712,10 @@ async fn flamegraph_thread_and_source_filters_apply() {
     let http = reqwest::Client::new();
     let want = mini_counts();
 
-    // Fold the one file (refining poll), then aggregate read-only per filter.
-    let folded = poll(&http, &base, "service=shale&source=all").await;
+    // Stream folds the one file and returns the final (at-cap) snapshot. Each
+    // subsequent stream re-reads the (idempotently) already-folded file under a
+    // new filter.
+    let folded = stream_final(&http, &base, "service=shale&source=all").await;
     assert_eq!(
         folded.coverage.as_ref().map(|c| c.files_folded),
         Some(1),
@@ -384,29 +729,29 @@ async fn flamegraph_thread_and_source_filters_apply() {
     );
 
     // Default (no source param) → on-CPU profile only, matching the viewer.
-    let def = poll_readonly(&http, &base, "service=shale").await;
+    let def = stream_final(&http, &base, "service=shale").await;
     assert_eq!(
         def.total_samples, want.cpu,
         "default view = CpuProfile only"
     );
 
     // source=cpu is the same as the default.
-    let cpu = poll_readonly(&http, &base, "service=shale&source=cpu").await;
+    let cpu = stream_final(&http, &base, "service=shale&source=cpu").await;
     assert_eq!(cpu.total_samples, want.cpu, "source=cpu = CpuProfile only");
 
     // source=sched → the scheduler context-switch series.
-    let sched = poll_readonly(&http, &base, "service=shale&source=sched").await;
+    let sched = stream_final(&http, &base, "service=shale&source=sched").await;
     assert_eq!(
         sched.total_samples, want.sched,
         "source=sched = SchedEvent only"
     );
 
     // thread_class=worker over the on-CPU source → on-runtime CpuProfile samples.
-    let worker = poll_readonly(&http, &base, "service=shale&source=cpu&thread_class=worker").await;
+    let worker = stream_final(&http, &base, "service=shale&source=cpu&thread_class=worker").await;
     assert_eq!(worker.total_samples, want.cpu_on, "CpuProfile on-runtime");
 
     // thread_class=off-worker over the on-CPU source → the off-runtime sample.
-    let off = poll_readonly(
+    let off = stream_final(
         &http,
         &base,
         "service=shale&source=cpu&thread_class=off-worker",
@@ -422,17 +767,110 @@ async fn flamegraph_thread_and_source_filters_apply() {
     );
 }
 
-/// Fetch the raw `/api/flamegraph` response body (the `Resp` parser drops the
-/// metadata; this test needs the facet arrays verbatim).
-async fn fetch_body(client: &reqwest::Client, base: &str, query: &str) -> String {
-    let url = format!("{base}/api/flamegraph?{query}");
-    let r = client.get(&url).send().await.unwrap();
-    assert!(
-        r.status().is_success(),
-        "request {url} failed: {}",
-        r.status()
+/// The `min_poll_ns` / `max_poll_ns` band filter must reach the aggregator and
+/// select samples by their enclosing poll's duration, end-to-end through
+/// `/api/flamegraph`. This is the "why are the slow polls slow" slice: A = fast
+/// polls, B = slow polls, which the diff view compares side by side.
+///
+/// The fixture ([`poll_trace_gz`]) has a 0.5 ms poll (2 on-CPU samples), a 50 ms
+/// poll (3 on-CPU samples), and one off-worker sample (no enclosing poll).
+#[tokio::test]
+async fn flamegraph_poll_duration_band_applies() {
+    let fs = tempfile::tempdir().unwrap();
+    std::fs::create_dir(fs.path().join("src-bucket")).unwrap();
+    std::fs::create_dir(fs.path().join("out-bucket")).unwrap();
+
+    let uploader = fake_s3_client(fs.path());
+    let key = segment_key("2026-04-09", "1910", "shale", "host-a", 1_744_224_000, 0);
+    put(&uploader, "src-bucket", &key, poll_trace_gz()).await;
+
+    let base = start_agg_server(fs.path(), "src-bucket", "out-bucket", 60).await;
+    let http = reqwest::Client::new();
+
+    // No band: default source=cpu → all 6 on-CPU samples (2 fast + 3 slow + 1
+    // off-worker).
+    let all = stream_final(&http, &base, "service=shale").await;
+    assert_eq!(all.total_samples, 6, "no band → every on-CPU sample");
+
+    // Slow slice: polls ≥ 10 ms keeps only the 50 ms poll's 3 samples. The
+    // off-worker sample (null poll duration) is excluded by the band.
+    let slow = stream_final(&http, &base, "service=shale&min_poll_ns=10000000").await;
+    assert_eq!(slow.total_samples, 3, "min_poll_ns=10ms → slow poll only");
+
+    // Fast slice: polls ≤ 1 ms keeps only the 0.5 ms poll's 2 samples.
+    let fast = stream_final(&http, &base, "service=shale&max_poll_ns=1000000").await;
+    assert_eq!(fast.total_samples, 2, "max_poll_ns=1ms → fast poll only");
+
+    // Explicit band [1 ms, 100 ms] keeps only the 50 ms poll (0.5 ms is below
+    // the lower bound).
+    let band = stream_final(
+        &http,
+        &base,
+        "service=shale&min_poll_ns=1000000&max_poll_ns=100000000",
+    )
+    .await;
+    assert_eq!(band.total_samples, 3, "band [1ms,100ms] → slow poll only");
+
+    // A band matching no poll yields an empty tree, not an error.
+    let none = stream_final(&http, &base, "service=shale&min_poll_ns=999000000").await;
+    assert_eq!(none.total_samples, 0, "band above every poll → no samples");
+
+    // The fast and slow slices partition the in-poll samples (5 = 2 + 3); the
+    // remaining one on-CPU sample is off-worker (no poll), correctly excluded by
+    // any band.
+    assert_eq!(
+        fast.total_samples + slow.total_samples,
+        5,
+        "fast + slow = the in-poll on-CPU samples"
     );
-    r.text().await.unwrap()
+
+    // The poll-duration histogram (the minimap) rides in metadata, is
+    // sample-weighted, and is accumulated PRE-band. The 0.5 ms poll (2 samples)
+    // and 50 ms poll (3 samples) each land in one log₂ bucket; the off-worker
+    // sample contributes to neither. Total histogram weight = 5 (the in-poll
+    // on-CPU samples), regardless of the band applied.
+    let hist_weight = |body: &str| -> i64 {
+        // Sum every "samples":N inside the poll_duration_histogram array. The
+        // array is the only place that key appears in the histogram objects; we
+        // slice from the histogram field to avoid the top-level total.
+        let start = body
+            .find("\"poll_duration_histogram\":")
+            .expect("histogram present in metadata");
+        let rest = &body[start..];
+        let end = rest.find(']').expect("histogram array closes");
+        let arr = &rest[..end];
+        arr.match_indices("\"samples\":")
+            .map(|(i, _)| {
+                let after = &arr[i + "\"samples\":".len()..];
+                let n = after
+                    .find(|c: char| !c.is_ascii_digit())
+                    .unwrap_or(after.len());
+                after[..n].parse::<i64>().unwrap()
+            })
+            .sum()
+    };
+    // No band: histogram covers all in-poll samples.
+    let no_band_body = fetch_body(&http, &base, "service=shale").await;
+    assert_eq!(
+        hist_weight(&no_band_body),
+        5,
+        "histogram is sample-weighted over the 5 in-poll samples"
+    );
+    // With a band applied, the histogram is unchanged (pre-band): it always
+    // shows the full distribution the band selects from.
+    let banded_body = fetch_body(&http, &base, "service=shale&min_poll_ns=10000000").await;
+    assert_eq!(
+        hist_weight(&banded_body),
+        5,
+        "histogram is pre-band: a band does not shrink it"
+    );
+}
+
+/// The raw JSON body of the final `/api/flamegraph` SSE event (the tests using
+/// this need the facet/metadata arrays verbatim, which the scalar `Resp` fields
+/// drop).
+async fn fetch_body(client: &reqwest::Client, base: &str, query: &str) -> String {
+    stream_final(client, base, query).await.body
 }
 
 /// The response metadata advertises the *available* facets for the scope —
@@ -454,8 +892,9 @@ async fn flamegraph_metadata_reports_available_facets() {
     let base = start_agg_server(fs.path(), "src-bucket", "out-bucket", 60).await;
     let http = reqwest::Client::new();
 
-    // Fold the segment, then read it back filtered to the on-CPU view.
-    let _ = poll(&http, &base, "service=shale&source=all").await;
+    // Fold the segment (any stream folds it), then read it back filtered to the
+    // on-CPU view — the final event carries the facet metadata verbatim.
+    let _ = stream_final(&http, &base, "service=shale&source=all").await;
     let json = fetch_body(&http, &base, "service=shale&source=cpu").await;
 
     // Parse the facets out of the raw JSON string (avoids a recursion limit on
@@ -521,13 +960,14 @@ async fn flamegraph_metadata_reports_available_facets() {
     );
 }
 
-/// The headline Goal-1 test: the full refinement flow over fake S3.
+/// The headline Goal-1 test: the full refinement flow over fake S3, now as one
+/// SSE stream.
 ///
-/// - The first (read-only) poll folds nothing and returns an empty tree.
-/// - The first refining poll folds the baseline (K=4) and returns a real tree.
-/// - Subsequent polls climb in coverage as more files fold.
-/// - Coverage plateaus at the sampling cap (never reaches 100%).
-/// - Folding is idempotent: total sample counts are stable per coverage level.
+/// - The first event is the already-folded snapshot: nothing folded, empty tree.
+/// - Coverage climbs monotonically across events as files fold.
+/// - The stream stops at the sampling cap (here K=4, floored at the baseline).
+/// - A second stream (everything already folded) is idempotent: it re-serves the
+///   same cap and totals, with the final event matching the first stream's final.
 #[tokio::test]
 async fn refinement_loop_folds_progressively_and_caps() {
     let fs = tempfile::tempdir().unwrap();
@@ -542,57 +982,52 @@ async fn refinement_loop_folds_progressively_and_caps() {
     let base = start_agg_server(fs.path(), "src-bucket", "out-bucket", 60).await;
     let http = reqwest::Client::new();
 
-    // Poll 0: read-only. Nothing folded yet → empty, but matched set is reported.
-    let r0 = poll_readonly(&http, &base, "service=shale").await;
-    let c0 = r0.coverage.expect("demand-driven mode returns coverage");
+    // One stream drives the whole fold. Cap = max(ceil(0.05 × 20), 4).min(100) =
+    // max(1,4) = 4, floored at the baseline. So the stream folds 4 files.
+    let events = stream(&http, &base, "service=shale").await;
+
+    // First event: the already-folded snapshot. Nothing folded yet → empty tree,
+    // but the matched set (coverage denominator) is already known.
+    let first = &events[0];
+    let c0 = first.coverage.as_ref().expect("coverage present");
     assert_eq!(c0.files_matched, 20, "all 20 segments match the scope");
-    assert_eq!(c0.files_folded, 0, "read-only poll folds nothing");
-    assert_eq!(r0.total_samples, 0, "nothing folded → no samples yet");
+    assert_eq!(c0.files_folded, 0, "first event folds nothing");
+    assert_eq!(first.total_samples, 0, "nothing folded → no samples yet");
 
-    // Poll 1 (refining): baseline floor only.
-    let r1 = poll(&http, &base, "service=shale").await;
-    let c1 = r1.coverage.expect("demand-driven mode returns coverage");
-    assert_eq!(c1.files_matched, 20, "all 20 segments match the scope");
-    assert_eq!(
-        c1.files_folded, 4,
-        "first refining poll folds exactly the baseline K=4"
-    );
-    assert!(r1.total_samples > 0, "baseline tree has samples");
-    assert!(r1.tree_has_children, "baseline tree has real structure");
-    let per_file = r1.total_samples / 4;
-    assert!(per_file > 0);
+    // Coverage climbs monotonically and every event agrees samples == coverage.
+    let mut prev_folded = 0;
+    for r in &events {
+        let c = r.coverage.as_ref().unwrap();
+        assert_eq!(c.files_matched, 20);
+        assert!(
+            c.files_folded >= prev_folded,
+            "coverage is monotonic: {} >= {}",
+            c.files_folded,
+            prev_folded
+        );
+        assert_eq!(c.samples_folded, r.total_samples, "samples track coverage");
+        prev_folded = c.files_folded;
+    }
 
-    // Subsequent polls refine: coverage climbs monotonically until the cap.
-    // Cap = max(ceil(0.05 × 20), 4).min(100) = max(1,4) = 4, floored at the
-    // baseline. So with 20 files the scope plateaus at the baseline. Verify it.
-    let r2 = poll(&http, &base, "service=shale").await;
-    let c2 = r2.coverage.unwrap();
-    assert_eq!(
-        c2.files_folded, 4,
-        "cap=max(ceil(0.05*20),4).min(100)=4 → already at cap, no further folding"
-    );
-    assert_eq!(
-        r2.total_samples, r1.total_samples,
-        "idempotent: re-polling at the cap yields identical totals"
-    );
-    assert_eq!(c2.samples_folded, r2.total_samples);
+    // Final event: folded exactly the baseline K=4, with a real tree.
+    let last = events.last().unwrap();
+    let cf = last.coverage.as_ref().unwrap();
+    assert_eq!(cf.files_folded, 4, "stream stops at cap=4");
+    assert!(last.total_samples > 0, "at-cap tree has samples");
+    assert!(last.tree_has_children, "at-cap tree has real structure");
 
-    // And a read-only poll now returns the folded tree instantly (the reload
-    // case): same coverage and totals, no additional folding.
-    let r_reload = poll_readonly(&http, &base, "service=shale").await;
-    let c_reload = r_reload.coverage.unwrap();
+    // A second stream over the fully-folded set is idempotent: same cap + totals.
+    let reload = stream_final(&http, &base, "service=shale").await;
+    let cr = reload.coverage.unwrap();
+    assert_eq!(cr.files_folded, 4, "reload sees the already-folded set");
     assert_eq!(
-        c_reload.files_folded, 4,
-        "reload sees the already-folded set"
-    );
-    assert_eq!(
-        r_reload.total_samples, r1.total_samples,
-        "reload is instant + identical"
+        reload.total_samples, last.total_samples,
+        "reload is identical to the first stream's final snapshot"
     );
 }
 
-/// With a large matched set, the cap is the 10% fraction (not the baseline), so
-/// the loop refines across several polls before plateauing — and never reaches
+/// With a large matched set, the cap is the 5% fraction (not the baseline), so
+/// the stream refines across several events before stopping — and never reaches
 /// 100%.
 #[tokio::test]
 async fn refinement_climbs_then_plateaus_below_full() {
@@ -625,14 +1060,12 @@ async fn refinement_climbs_then_plateaus_below_full() {
     let base = start_agg_server(fs.path(), "src-bucket", "out-bucket", 60).await;
     let http = reqwest::Client::new();
 
+    // One stream folds to the cap. Coverage must climb monotonically and stop at
+    // the 5% fraction (5 files), never the whole scope.
+    let events = stream(&http, &base, "service=shale").await;
     let mut last_folded = 0;
-    let mut last_total = 0;
-    let mut plateau_polls = 0;
-    let mut max_folded = 0;
-    // Poll until coverage stops increasing for two consecutive polls.
-    for _ in 0..20 {
-        let r = poll(&http, &base, "service=shale").await;
-        let c = r.coverage.unwrap();
+    for r in &events {
+        let c = r.coverage.as_ref().unwrap();
         assert_eq!(c.files_matched, 100);
         assert!(
             c.files_folded >= last_folded,
@@ -640,21 +1073,10 @@ async fn refinement_climbs_then_plateaus_below_full() {
             c.files_folded,
             last_folded
         );
-        if c.files_folded == last_folded {
-            plateau_polls += 1;
-            assert_eq!(r.total_samples, last_total, "idempotent at plateau");
-            if plateau_polls >= 2 {
-                break;
-            }
-        } else {
-            plateau_polls = 0;
-        }
         last_folded = c.files_folded;
-        last_total = r.total_samples;
-        max_folded = max_folded.max(c.files_folded);
     }
-    assert_eq!(max_folded, 5, "plateaus exactly at the 5% cap");
-    assert!(max_folded < 100, "never folds the whole scope");
+    assert_eq!(last_folded, 5, "stops exactly at the 5% cap");
+    assert!(last_folded < 100, "never folds the whole scope");
 }
 
 /// Regression: folded files that fall OUTSIDE the cap window must not starve
@@ -701,34 +1123,25 @@ async fn folded_outside_cap_does_not_starve_budget() {
     //    to 10 host-00 files become folded. These are scattered across the
     //    fleet-wide order (host-00 is just 1 of 10 hosts), mostly OUTSIDE the
     //    fleet cap of 5.
-    let mut prev = 0;
-    for _ in 0..20 {
-        let c = poll(&http, &base, "service=shale&host=host-00&max_files=10")
-            .await
-            .coverage
-            .unwrap();
-        if c.files_folded == prev {
-            break;
-        }
-        prev = c.files_folded;
-    }
-    assert!(prev >= 5, "host-00 folded several files, got {prev}");
+    let host_folded = stream_final(&http, &base, "service=shale&host=host-00&max_files=10")
+        .await
+        .coverage
+        .unwrap()
+        .files_folded;
+    assert!(
+        host_folded >= 5,
+        "host-00 folded several files, got {host_folded}"
+    );
 
-    // 2. Now query the whole fleet at the DEFAULT cap (5). Pre-fix, the ~prev
-    //    folded host-00 files (counted across the whole 100-file order) would
-    //    make room = 5 - prev <= 0, folding nothing. Post-fix, budgeting is
-    //    scoped to the capped prefix, so the fleet query folds toward its cap.
-    let mut fleet_folded = 0;
-    for _ in 0..20 {
-        let c = poll(&http, &base, "service=shale").await.coverage.unwrap();
-        assert_eq!(c.files_matched, 100);
-        if c.files_folded == fleet_folded {
-            break;
-        }
-        fleet_folded = c.files_folded;
-    }
+    // 2. Now query the whole fleet at the DEFAULT cap (5). Pre-fix, the folded
+    //    host-00 files (counted across the whole 100-file order) would make
+    //    room = 5 - host_folded <= 0, folding nothing. Post-fix, budgeting is
+    //    scoped to the capped prefix, so the fleet stream folds toward its cap.
+    let fleet = stream_final(&http, &base, "service=shale").await;
+    let cf = fleet.coverage.unwrap();
+    assert_eq!(cf.files_matched, 100);
     assert_eq!(
-        fleet_folded, 5,
+        cf.files_folded, 5,
         "fleet refines to its 5% cap despite folded host-00 files outside the cap"
     );
 }
@@ -762,30 +1175,22 @@ async fn fetch_more_raises_the_cap() {
     let base = start_agg_server(fs.path(), "src-bucket", "out-bucket", 60).await;
     let http = reqwest::Client::new();
 
-    // Drive to the default cap (4).
-    let mut last = 0;
-    for _ in 0..20 {
-        let c = poll(&http, &base, "service=shale").await.coverage.unwrap();
-        if c.files_folded == last {
-            break;
-        }
-        last = c.files_folded;
-    }
-    assert_eq!(last, 4, "default cap = max(5% of 40, baseline 4) = 4");
+    // Default cap (4): one stream folds to it.
+    let default = stream_final(&http, &base, "service=shale").await;
+    assert_eq!(
+        default.coverage.unwrap().files_folded,
+        4,
+        "default cap = max(5% of 40, baseline 4) = 4"
+    );
 
-    // Now request more: max_files=12 raises the ceiling for this scope.
-    let mut last_more = last;
-    for _ in 0..30 {
-        let c = poll(&http, &base, "service=shale&max_files=12")
-            .await
-            .coverage
-            .unwrap();
-        if c.files_folded == last_more {
-            break;
-        }
-        last_more = c.files_folded;
-    }
-    assert_eq!(last_more, 12, "fetch-more lifts the cap to 12");
+    // Now request more: max_files=12 raises the ceiling for this scope. The
+    // stream serves the 4 already-folded files instantly, then folds 8 more.
+    let more = stream_final(&http, &base, "service=shale&max_files=12").await;
+    assert_eq!(
+        more.coverage.unwrap().files_folded,
+        12,
+        "fetch-more lifts the cap to 12"
+    );
 }
 
 /// Re-folding is idempotent: a source file folds to a deterministically named
@@ -806,10 +1211,10 @@ async fn refold_is_idempotent_no_duplicate_part_files() {
     let base = start_agg_server(fs.path(), "src-bucket", "out-bucket", 60).await;
     let http = reqwest::Client::new();
 
-    let r1 = poll(&http, &base, "service=shale").await;
-    let r2 = poll(&http, &base, "service=shale").await;
-    let r3 = poll(&http, &base, "service=shale").await;
-    // Identical totals across re-polls: re-folding writes the same keys, and
+    let r1 = stream_final(&http, &base, "service=shale").await;
+    let r2 = stream_final(&http, &base, "service=shale").await;
+    let r3 = stream_final(&http, &base, "service=shale").await;
+    // Identical totals across re-streams: re-folding writes the same keys, and
     // aggregation over the same folded set yields the same counts.
     assert_eq!(r1.total_samples, r2.total_samples);
     assert_eq!(r2.total_samples, r3.total_samples);
@@ -851,7 +1256,7 @@ async fn scope_filters_matched_set() {
     let http = reqwest::Client::new();
 
     // Host filter: only host-a's 5 files match.
-    let r = poll(&http, &base, "service=shale&host=host-a").await;
+    let r = stream_final(&http, &base, "service=shale&host=host-a").await;
     assert_eq!(
         r.coverage.unwrap().files_matched,
         5,
@@ -879,7 +1284,7 @@ async fn multi_host_scope_matches_union() {
     let http = reqwest::Client::new();
 
     // Two hosts → 10 files (5 each); host-c/host-d excluded.
-    let r = poll(&http, &base, "service=shale&host=host-a&host=host-b").await;
+    let r = stream_final(&http, &base, "service=shale&host=host-a&host=host-b").await;
     let cov = r.coverage.unwrap();
     assert_eq!(
         cov.files_matched, 10,
@@ -900,7 +1305,7 @@ async fn multi_host_scope_matches_union() {
     );
 
     // Three hosts → 15.
-    let r3 = poll(
+    let r3 = stream_final(
         &http,
         &base,
         "service=shale&host=host-a&host=host-b&host=host-c",
@@ -969,7 +1374,7 @@ async fn byoc_writes_output_to_configured_bucket_not_source() {
 
     // Drive the BYOC path (bucket query param) — folds the baseline and returns
     // a real tree. This is the request that used to fail on the source bucket.
-    let r = poll(&http, &base, "bucket=src-bucket&service=shale&host=host-a").await;
+    let r = stream_final(&http, &base, "bucket=src-bucket&service=shale&host=host-a").await;
     assert!(
         r.total_samples > 0,
         "BYOC poll should fold and return samples"
@@ -1003,12 +1408,213 @@ async fn byoc_without_output_bucket_writes_to_source() {
     let base = start_byoc_server(fs.path(), "src-bucket", None, 60).await;
     let http = reqwest::Client::new();
 
-    let r = poll(&http, &base, "bucket=src-bucket&service=shale&host=host-a").await;
+    let r = stream_final(&http, &base, "bucket=src-bucket&service=shale&host=host-a").await;
     assert!(r.total_samples > 0);
 
     let src_n = count_objects(&uploader, "src-bucket", "flamegraph-data/").await;
     assert!(
         src_n > 0,
         "with no output override, output falls back to the source bucket"
+    );
+}
+
+/// The `/api/tokio-stats` SSE endpoint streams the same refinement machinery as
+/// flamegraph: one request folds to the sampling cap, emitting a
+/// `TokioStatsResponse` per file. We assert the stream mechanics — an initial
+/// already-folded snapshot, monotonic coverage climbing to the cap, and a
+/// well-formed final event — over the synthetic fleet. (The synthetic trace has
+/// no poll spans, so `total_polls` is 0; poll *contents* are covered by the
+/// `read_polls_part` unit test in `src/server/tokio_stats.rs`.)
+#[tokio::test]
+async fn tokio_stats_streams_and_refines_to_cap() {
+    let fs = tempfile::tempdir().unwrap();
+    std::fs::create_dir(fs.path().join("src-bucket")).unwrap();
+    std::fs::create_dir(fs.path().join("out-bucket")).unwrap();
+
+    let uploader = fake_s3_client(fs.path());
+    let body = mini_trace_gz();
+    seed_fleet(&uploader, "src-bucket", &body).await; // 20 segments → cap 4
+
+    let base = start_agg_server(fs.path(), "src-bucket", "out-bucket", 60).await;
+    let http = reqwest::Client::new();
+
+    // Collect every event of the tokio-stats stream.
+    let url = format!("{base}/api/tokio-stats?service=shale");
+    let resp = http.get(&url).send().await.unwrap();
+    assert!(
+        resp.status().is_success(),
+        "tokio-stats stream failed: {}",
+        resp.status()
+    );
+    let events = parse_sse_events(&resp.text().await.unwrap());
+    assert!(!events.is_empty(), "tokio-stats produced no events");
+
+    // First event: already-folded snapshot (nothing folded yet).
+    let c0 = extract_coverage(&events[0]).expect("coverage present");
+    assert_eq!(c0.files_matched, 20, "all 20 segments match");
+    assert_eq!(c0.files_folded, 0, "first event folds nothing");
+
+    // Coverage climbs monotonically; every event carries a total_polls field.
+    let mut prev = 0;
+    for ev in &events {
+        assert!(
+            extract_usize(ev, "\"total_polls\":").is_some(),
+            "each event has total_polls"
+        );
+        let c = extract_coverage(ev).unwrap();
+        assert_eq!(c.files_matched, 20);
+        assert!(c.files_folded >= prev, "monotonic coverage");
+        prev = c.files_folded;
+    }
+
+    // Final event stops at the cap (4 files for 20 matched).
+    let cf = extract_coverage(events.last().unwrap()).unwrap();
+    assert_eq!(cf.files_folded, 4, "tokio-stats stream stops at cap=4");
+}
+
+/// tokio-stats "Load more": `max_files` raises the sampling-cap ceiling, the
+/// same as the flamegraph's fetch-more (see [`fetch_more_raises_the_cap`]).
+/// A reopened stream serves the already-folded prefix instantly, then folds
+/// deeper into the matched set up to the new cap.
+#[tokio::test]
+async fn tokio_stats_max_files_raises_the_cap() {
+    let fs = tempfile::tempdir().unwrap();
+    std::fs::create_dir(fs.path().join("src-bucket")).unwrap();
+    std::fs::create_dir(fs.path().join("out-bucket")).unwrap();
+
+    let uploader = fake_s3_client(fs.path());
+    let body = mini_trace_gz();
+    seed_fleet(&uploader, "src-bucket", &body).await; // 20 segments → default cap 4
+
+    let base = start_agg_server(fs.path(), "src-bucket", "out-bucket", 60).await;
+    let http = reqwest::Client::new();
+
+    let final_folded = |body: String| {
+        let events = parse_sse_events(&body);
+        extract_coverage(events.last().unwrap())
+            .unwrap()
+            .files_folded
+    };
+
+    // Default cap: 4.
+    let resp = http
+        .get(format!("{base}/api/tokio-stats?service=shale"))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success());
+    assert_eq!(
+        final_folded(resp.text().await.unwrap()),
+        4,
+        "default cap = max(5% of 20, baseline 4) = 4"
+    );
+
+    // Load more: max_files=12 lifts the ceiling for this scope.
+    let resp = http
+        .get(format!("{base}/api/tokio-stats?service=shale&max_files=12"))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success());
+    assert_eq!(
+        final_folded(resp.text().await.unwrap()),
+        12,
+        "max_files lifts the tokio-stats cap to 12"
+    );
+}
+
+/// Regression: when folds FAIL (here: the aggregation OUTPUT client returns 403
+/// AccessDenied on every `PutObject`, the analogue of a read-only output bucket),
+/// the stream must SURFACE the failures rather than silently returning an empty
+/// tree. Coverage should report a non-zero `fold_errors` and a
+/// `fold_error_sample` message, while `files_folded` stays 0.
+#[tokio::test]
+async fn fold_failures_are_reported_in_coverage() {
+    let fs = tempfile::tempdir().unwrap();
+    std::fs::create_dir(fs.path().join("src-bucket")).unwrap();
+
+    let uploader = fake_s3_client(fs.path());
+    let body = mini_trace_gz();
+    seed_fleet(&uploader, "src-bucket", &body).await; // 20 segments → cap 4
+
+    // Inject an output client that denies writes: folds fetch + decode fine (the
+    // SOURCE is the normal fake S3) but every part-file PUT gets 403 AccessDenied.
+    let output = Arc::new(S3Backend::from_client(access_denied_on_put_client()));
+    let base =
+        start_agg_server_with_output(fs.path(), "src-bucket", "out-bucket", 60, output).await;
+    let http = reqwest::Client::new();
+
+    let events = stream(&http, &base, "service=shale").await;
+
+    // First event is the already-folded snapshot: nothing folded, no errors yet.
+    let first = events[0].coverage.as_ref().unwrap();
+    assert_eq!(first.files_folded, 0);
+    assert_eq!(
+        first.fold_errors, 0,
+        "no folds attempted yet on the first event"
+    );
+
+    // Final event: every attempted fold failed, so files_folded stayed 0 but the
+    // failures are counted (the whole point — not a silent empty result).
+    let last = events.last().unwrap();
+    let cf = last.coverage.as_ref().unwrap();
+    assert_eq!(
+        cf.files_folded, 0,
+        "no file could be written, so none folded"
+    );
+    assert_eq!(cf.samples_folded, 0, "empty tree");
+    assert_eq!(
+        cf.fold_errors, 4,
+        "all 4 capped folds failed and were counted"
+    );
+    // The representative error message rides on the event for the UI to show.
+    assert!(
+        last.body.contains("\"fold_error_sample\":"),
+        "coverage carries a fold_error_sample message; body = {}",
+        last.body
+    );
+}
+
+/// Regression for the fold commit ordering: when a fold's part-file writes only
+/// PARTIALLY succeed (here: `polls/` PUTs fail while everything else works —
+/// the same interleaving a fold task cancelled mid-write can produce, and with
+/// SSE streams a client disconnect cancels in-flight folds routinely), the file
+/// must NOT be recorded as folded. The `samples/` part is the durable folded
+/// record (`list_folded_leaves` lists it), so it must be written last: a file
+/// recorded as folded with its polls part missing would serve incomplete
+/// tokio-stats silently, forever — folded files are never re-folded.
+#[tokio::test]
+async fn partial_write_failure_does_not_commit_fold() {
+    let fs = tempfile::tempdir().unwrap();
+    std::fs::create_dir(fs.path().join("src-bucket")).unwrap();
+    std::fs::create_dir(fs.path().join("out-bucket")).unwrap();
+
+    let uploader = fake_s3_client(fs.path());
+    let body = mini_trace_gz();
+    seed_fleet(&uploader, "src-bucket", &body).await; // 20 segments → cap 4
+
+    let output = Arc::new(FailingPuts {
+        inner: Arc::new(S3Backend::from_client(fake_s3_client(fs.path()))),
+        fail_substr: "/polls/",
+    });
+    let base =
+        start_agg_server_with_output(fs.path(), "src-bucket", "out-bucket", 60, output).await;
+    let http = reqwest::Client::new();
+
+    // Every fold attempt fails at the polls write and is reported as an error.
+    let r = stream_final(&http, &base, "service=shale").await;
+    let c = r.coverage.unwrap();
+    assert_eq!(c.fold_errors, 4, "all 4 capped folds failed");
+    assert_eq!(c.files_folded, 0, "a failed fold is not counted as folded");
+
+    // The load-bearing assertion: a fresh stream must ALSO see nothing folded.
+    // If the samples part had been written before (or concurrently with) the
+    // failing polls part, the folded-set listing would now claim these files
+    // are folded — committing them with their polls data missing forever.
+    let again = stream(&http, &base, "service=shale").await;
+    let c0 = again[0].coverage.as_ref().unwrap();
+    assert_eq!(
+        c0.files_folded, 0,
+        "no samples part may exist after a partial write failure (samples must be written last)"
     );
 }

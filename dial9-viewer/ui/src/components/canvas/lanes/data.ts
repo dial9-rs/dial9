@@ -82,7 +82,7 @@ export function deriveLaneData(trace: ParsedTrace): LaneData {
 
   // Span-id index: id -> every instance (recycled ids highlight every
   // instance, but O(1) lookup instead of a full allSpans scan).
-  const spanData = buildSpanData(trace.customEvents);
+  const spanData = buildSpanData(trace.customEvents, workerSpans);
   const spansById = new Map<string, TracingSpan[]>();
   for (const s of spanData.allSpans) {
     let bucket = spansById.get(s.spanId);

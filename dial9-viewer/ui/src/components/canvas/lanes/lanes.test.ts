@@ -221,6 +221,7 @@ function span(
     segments: [{ start, end, workerId }],
     activeNs: end - start,
     depth: parentSpanId ? 1 : 0,
+    taskId: null,
   };
 }
 

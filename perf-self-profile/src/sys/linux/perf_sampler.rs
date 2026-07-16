@@ -110,10 +110,13 @@ impl PerfSamplerImpl {
             events.push(open_perf_event(&mut attr, pid, -1)?);
         } else {
             // With inherit + sampling, the kernel forbids cpu=-1 for mmap. We open
-            // one event per online CPU, each with its own mmap ring buffer.
-            let online_cpus = get_online_cpus()?;
-            events.reserve(online_cpus.len());
-            for &cpu in &online_cpus {
+            // one event per CPU in the process's affinity mask. Using affinity
+            // rather than all online CPUs avoids opening fds for CPUs the process
+            // can never run on, reducing inherited-context overhead on thread
+            // create/exit (see https://github.com/dial9-rs/dial9/issues/579).
+            let cpus = get_affinity_cpus()?;
+            events.reserve(cpus.len());
+            for &cpu in &cpus {
                 events.push(open_perf_event(&mut attr, pid, cpu)?);
             }
         }
@@ -395,12 +398,25 @@ fn filter_callchain(raw: &[u64], include_kernel: bool) -> Vec<u64> {
         .collect()
 }
 
-/// Get the list of online CPU indices from /sys/devices/system/cpu/online.
+/// Get the CPUs in this process's effective affinity mask from /proc/self/status Cpus_allowed_list.
 /// Format is like "0-7" or "0-3,5,7-11".
-fn get_online_cpus() -> io::Result<Vec<i32>> {
-    let content = std::fs::read_to_string("/sys/devices/system/cpu/online")?;
+fn get_affinity_cpus() -> io::Result<Vec<i32>> {
+    let status = std::fs::read_to_string("/proc/self/status")?;
+    for line in status.lines() {
+        if let Some(list) = line.strip_prefix("Cpus_allowed_list:\t") {
+            return parse_cpu_list(list.trim());
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::NotFound,
+        "Cpus_allowed_list not found in /proc/self/status",
+    ))
+}
+
+/// Parse a CPU list string like "0-7" or "0-3,5,7-11" into a sorted Vec of CPU indices.
+fn parse_cpu_list(s: &str) -> io::Result<Vec<i32>> {
     let mut cpus = Vec::new();
-    for part in content.trim().split(',') {
+    for part in s.split(',') {
         if let Some((start, end)) = part.split_once('-') {
             let start: i32 = start.parse().map_err(|e| {
                 io::Error::new(io::ErrorKind::InvalidData, format!("bad cpu range: {e}"))
@@ -422,19 +438,6 @@ fn get_online_cpus() -> io::Result<Vec<i32>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn parse_online_cpus_range() {
-        let cpus = get_online_cpus().expect("should read online cpus");
-        assert!(
-            !cpus.is_empty(),
-            "system should have at least one online CPU"
-        );
-        assert!(cpus.iter().all(|&c| c >= 0));
-        for w in cpus.windows(2) {
-            assert!(w[0] < w[1], "expected sorted unique CPUs, got {:?}", cpus);
-        }
-    }
 
     #[test]
     fn filter_callchain_removes_zeros_and_context_markers() {
@@ -468,5 +471,41 @@ mod tests {
             u64::MAX - 128,
         ];
         assert!(filter_callchain(&markers, true).is_empty());
+    }
+
+    #[test]
+    fn parse_cpu_list_single() {
+        assert_eq!(parse_cpu_list("0").unwrap(), vec![0]);
+        assert_eq!(parse_cpu_list("5").unwrap(), vec![5]);
+    }
+
+    #[test]
+    fn parse_cpu_list_range() {
+        assert_eq!(parse_cpu_list("0-3").unwrap(), vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn parse_cpu_list_mixed() {
+        assert_eq!(
+            parse_cpu_list("0-3,5,7-9").unwrap(),
+            vec![0, 1, 2, 3, 5, 7, 8, 9]
+        );
+    }
+
+    #[test]
+    fn get_affinity_cpus_returns_valid_set() {
+        let affinity = get_affinity_cpus().expect("should read affinity");
+        assert!(
+            !affinity.is_empty(),
+            "affinity should have at least one CPU"
+        );
+        assert!(affinity.iter().all(|&c| c >= 0));
+        for w in affinity.windows(2) {
+            assert!(
+                w[0] < w[1],
+                "expected sorted unique CPUs, got {:?}",
+                affinity
+            );
+        }
     }
 }

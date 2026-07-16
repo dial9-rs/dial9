@@ -44,10 +44,36 @@ describe("isDateLayer", () => {
     expect(isDateLayer(["dial9-traces/"])).toBe(false);
   });
 
-  // Mixed dates + real prefix -> not a clean date layer (be conservative,
-  // keep offering suggestions rather than silently emptying the prefix).
-  it("mixed dates and prefix -> not a date layer", () => {
+  // Mixed dates + real prefix, dates NOT a majority -> not a clean date layer
+  // (be conservative, keep offering suggestions rather than silently emptying
+  // the prefix).
+  it("50/50 dates and prefix -> not a date layer", () => {
     expect(isDateLayer(["2026-06-12/", "traces/"])).toBe(false);
+  });
+
+  // Regression (#656) for the gamma bucket that broke browse: many date
+  // partitions plus dial9's own auxiliary sibling folder (`diagnostics/`,
+  // written by crash capture; `flamegraph-data/` from on-demand aggregation
+  // behaves the same). Dates are a strict majority, so this IS a date layer and
+  // the prefix must be emptied. Before the majority fix, the lone
+  // `diagnostics/` made `.every()` return false, the dates were offered as
+  // prefix suggestions, and searching under a `YYYY-MM-DD/` prefix returned
+  // zero objects - an empty browse page.
+  it("many dates + one auxiliary sibling -> date layer", () => {
+    expect(
+      isDateLayer(["2026-06-11/", "2026-06-12/", "2026-06-13/", "diagnostics/"]),
+    ).toBe(true);
+  });
+
+  it("many dates + flamegraph-data sibling -> date layer", () => {
+    expect(
+      isDateLayer([
+        "2026-06-11/",
+        "2026-06-12/",
+        "2026-06-13/",
+        "flamegraph-data/",
+      ]),
+    ).toBe(true);
   });
 
   // Empty input -> not a date layer.

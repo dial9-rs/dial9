@@ -132,10 +132,50 @@ pub(crate) fn read_thread_name(tid: u32) -> Option<String> {
 
 // ── Config types ────────────────────────────────────────────────────────────
 
+/// Which CPU profiling backend to use.
+///
+/// The backend determines how stack samples are collected. Each variant only
+/// exposes configuration knobs that the backend actually supports, making
+/// invalid combinations (e.g. ctimer + kernel stacks) unrepresentable.
+///
+/// # `DIAL9_FORCE_CTIMER` interaction
+///
+/// The `DIAL9_FORCE_CTIMER` environment variable is only respected by
+/// [`Auto`](CpuBackend::Auto). When [`Perf`](CpuBackend::Perf) or
+/// [`Ctimer`](CpuBackend::Ctimer) is specified explicitly, the env var is
+/// ignored — the caller has already made a deterministic choice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CpuBackend {
+    /// Try perf first; falls back to ctimer if `perf_event_open` is blocked.
+    Auto,
+    /// Perf backend via `perf_event_open`. Fails if perf is blocked.
+    Perf,
+    /// Ctimer backend (userspace frame-pointer unwinding via `SIGPROF`).
+    Ctimer,
+}
+
 /// Configuration for CPU profiling integration.
+///
+/// # Examples
+///
+/// ```ignore
+/// use dial9_perf_self_profile::{CpuProfilingConfig, EventSource};
+///
+/// // Default: try perf, fall back to ctimer:
+/// let config = CpuProfilingConfig::default();
+///
+/// // Explicit perf with kernel stacks:
+/// let config = CpuProfilingConfig::with_perf_backend()
+///     .event_source(EventSource::SwCpuClock)
+///     .include_kernel(true);
+///
+/// // Explicit ctimer:
+/// let config = CpuProfilingConfig::with_ctimer_backend();
+/// ```
 #[derive(Debug, Clone)]
 pub struct CpuProfilingConfig {
     frequency_hz: u64,
+    backend: CpuBackend,
     event_source: EventSource,
     include_kernel: bool,
 }
@@ -144,6 +184,7 @@ impl Default for CpuProfilingConfig {
     fn default() -> Self {
         Self {
             frequency_hz: 99,
+            backend: CpuBackend::Auto,
             event_source: EventSource::SwCpuClock,
             include_kernel: false,
         }
@@ -151,19 +192,51 @@ impl Default for CpuProfilingConfig {
 }
 
 impl CpuProfilingConfig {
+    // ── Constructors ────────────────────────────────────────────────────────
+
+    /// Use the **perf** backend exclusively — no ctimer fallback.
+    ///
+    /// Fails at start time if `perf_event_open` is blocked. Use this when you
+    /// need capabilities only perf can provide (kernel stacks, hardware
+    /// counters, event-based sources).
+    pub fn with_perf_backend() -> Self {
+        Self {
+            backend: CpuBackend::Perf,
+            ..Self::default()
+        }
+    }
+
+    /// Use the **ctimer** backend exclusively — no perf attempt.
+    ///
+    /// Avoids perf's per-CPU inherited context overhead entirely. Only supports
+    /// frequency-based userspace CPU-time sampling (frame-pointer unwinding via
+    /// `SIGPROF`). Cannot capture kernel stacks or hardware events.
+    pub fn with_ctimer_backend() -> Self {
+        Self {
+            backend: CpuBackend::Ctimer,
+            ..Self::default()
+        }
+    }
+
+    // ── Setters ─────────────────────────────────────────────────────────────
+
     /// Sampling frequency in Hz. Default: 99 (low overhead).
     pub fn frequency_hz(mut self, hz: u64) -> Self {
         self.frequency_hz = hz;
         self
     }
 
-    /// Which perf event source to use.
+    /// Which perf event source to sample on. Default: `SwCpuClock`.
+    ///
+    /// Ignored by [`Ctimer`](CpuBackend::Ctimer).
     pub fn event_source(mut self, source: EventSource) -> Self {
         self.event_source = source;
         self
     }
 
-    /// Whether to include kernel stack frames.
+    /// Whether to include kernel stack frames. Default: `false`.
+    ///
+    /// Ignored by [`Ctimer`](CpuBackend::Ctimer).
     pub fn include_kernel(mut self, yes: bool) -> Self {
         self.include_kernel = yes;
         self
@@ -212,12 +285,25 @@ pub struct CpuProfiler {
 impl CpuProfiler {
     /// Start the process-wide CPU profiler with the given config.
     pub fn start(config: CpuProfilingConfig) -> io::Result<Self> {
-        let sampler = PerfSampler::start(
-            SamplerConfig::default()
-                .event_source(config.event_source)
-                .sampling(SamplingMode::FrequencyHz(config.frequency_hz))
-                .include_kernel(config.include_kernel),
-        )?;
+        let sampler = match config.backend {
+            CpuBackend::Auto => PerfSampler::start(
+                SamplerConfig::default()
+                    .event_source(config.event_source)
+                    .sampling(SamplingMode::FrequencyHz(config.frequency_hz))
+                    .include_kernel(config.include_kernel),
+            )?,
+            CpuBackend::Perf => PerfSampler::start_perf_only(
+                SamplerConfig::default()
+                    .event_source(config.event_source)
+                    .sampling(SamplingMode::FrequencyHz(config.frequency_hz))
+                    .include_kernel(config.include_kernel),
+            )?,
+            CpuBackend::Ctimer => PerfSampler::start_ctimer_only(
+                SamplerConfig::default()
+                    .sampling(SamplingMode::FrequencyHz(config.frequency_hz))
+                    .include_kernel(false),
+            )?,
+        };
         Ok(Self {
             sampler,
             pid: std::process::id(),

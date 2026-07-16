@@ -35,8 +35,11 @@ const { Dial9Creds } = require("../../creds.js") as {
   Dial9Creds: {
     _setStorage: (s: StorageLike) => void;
     has: () => boolean;
-    get: () => StoredCreds | null;
+    get: () => (StoredCreds & { kind?: string; roleArn?: string }) | null;
     set: (creds: Partial<StoredCreds>) => Promise<SetResult>;
+    setRoleArn: (arn: string, opts?: { region?: string }) => void;
+    setRegion: (region: string) => SetResult | null;
+    isValidRoleArn: (arn: string) => boolean;
     clear: () => void;
     headers: () => Record<string, string>;
     parse: (text: string) => StoredCreds;
@@ -62,6 +65,9 @@ const H_AKID = "x-dial9-aws-access-key-id";
 const H_SECRET = "x-dial9-aws-secret-access-key";
 const H_TOKEN = "x-dial9-aws-session-token";
 const H_REGION = "x-dial9-aws-region";
+const H_ROLE_ARN = "x-dial9-aws-role-arn";
+
+const VALID_ARN = "arn:aws:iam::123456789012:role/dial9-reader";
 
 describe("Dial9Creds", () => {
   it("no credentials -> empty headers and has()=false", () => {
@@ -126,6 +132,140 @@ describe("Dial9Creds", () => {
   it("clear() removes stored credentials", async () => {
     freshStore();
     await Dial9Creds.set({ accessKeyId: "AKIA", secretAccessKey: "secret" });
+    expect(Dial9Creds.has()).toBe(true);
+    Dial9Creds.clear();
+    expect(Dial9Creds.has()).toBe(false);
+    expect(Dial9Creds.headers()).toEqual({});
+  });
+
+  // -- assume-role transport (setRoleArn / role-arn header) --
+
+  it("setRoleArn() stores the ARN and emits the role-arn header", () => {
+    freshStore();
+    Dial9Creds.setRoleArn(VALID_ARN);
+    expect(Dial9Creds.has()).toBe(true);
+    expect(Dial9Creds.headers()).toEqual({ [H_ROLE_ARN]: VALID_ARN });
+  });
+
+  it("setRoleArn() carries an optional region alongside the ARN", () => {
+    freshStore();
+    Dial9Creds.setRoleArn(VALID_ARN, { region: "us-west-2" });
+    expect(Dial9Creds.headers()).toEqual({
+      [H_ROLE_ARN]: VALID_ARN,
+      [H_REGION]: "us-west-2",
+    });
+  });
+
+  it("setRoleArn() rejects a malformed ARN", () => {
+    freshStore();
+    expect(() => Dial9Creds.setRoleArn("not-an-arn")).toThrow(/invalid role ARN/);
+    // A rejected ARN must not leave anything stored.
+    expect(Dial9Creds.has()).toBe(false);
+  });
+
+  it("get(): a bag carrying both transports resolves to a single static kind", () => {
+    // The server rejects a request carrying both transports (ConflictingCredentials),
+    // so the store must resolve to exactly one. classify() is the single place that
+    // invariant lives: a full key set is the more specific intent, so it wins and the
+    // role ARN is dropped. Seed a store holding both directly (the writers never
+    // produce this) to prove classify().
+    const s = fakeStorage();
+    Dial9Creds._setStorage(s);
+    s.setItem(
+      "dial9.aws-credentials",
+      JSON.stringify({ accessKeyId: "AK", secretAccessKey: "SK", roleArn: VALID_ARN }),
+    );
+    const c = Dial9Creds.get();
+    expect(c!.kind).toBe("static");
+    expect("roleArn" in c!, "role ARN dropped when static keys present").toBe(false);
+    const h = Dial9Creds.headers();
+    expect(h[H_AKID]).toBe("AK");
+    expect(h[H_SECRET]).toBe("SK");
+    expect(H_ROLE_ARN in h, "role-arn header omitted when static keys present").toBe(
+      false,
+    );
+  });
+
+  it("get(): a legacy flat bag (no kind) is classified by the fields present", () => {
+    // sessionStorage is tab-scoped, but a tab open across the upgrade to the
+    // discriminated shape can hold a pre-kind bag. Static-only and role-only legacy
+    // bags must still classify and emit the right headers.
+    const s = fakeStorage();
+    Dial9Creds._setStorage(s);
+    s.setItem(
+      "dial9.aws-credentials",
+      JSON.stringify({ accessKeyId: "AK", secretAccessKey: "SK", region: "us-east-1" }),
+    );
+    expect(Dial9Creds.get()!.kind).toBe("static");
+    expect(Dial9Creds.headers()).toEqual({
+      [H_AKID]: "AK",
+      [H_SECRET]: "SK",
+      [H_REGION]: "us-east-1",
+    });
+
+    s.setItem("dial9.aws-credentials", JSON.stringify({ roleArn: VALID_ARN }));
+    expect(Dial9Creds.get()!.kind).toBe("role");
+    expect(Dial9Creds.headers()).toEqual({ [H_ROLE_ARN]: VALID_ARN });
+  });
+
+  // -- setRegion(): shape-agnostic region patch (both transports) --
+
+  it("setRegion() pins the region on a static credential, preserving the keys", async () => {
+    freshStore();
+    await Dial9Creds.set({ accessKeyId: "AK", secretAccessKey: "SK", sessionToken: "TK" });
+    Dial9Creds.setRegion("us-west-2");
+    expect(Dial9Creds.headers()).toEqual({
+      [H_AKID]: "AK",
+      [H_SECRET]: "SK",
+      [H_TOKEN]: "TK",
+      [H_REGION]: "us-west-2",
+    });
+  });
+
+  it("setRegion() pins the region on an assumed-role credential (the role path)", () => {
+    // Region auto-detection persists the resolved region via setRegion. With a role
+    // credential active this must keep the role transport - the old static-only
+    // set({...stored, region}) would have thrown here.
+    freshStore();
+    Dial9Creds.setRoleArn(VALID_ARN);
+    Dial9Creds.setRegion("eu-central-1");
+    expect(Dial9Creds.headers()).toEqual({
+      [H_ROLE_ARN]: VALID_ARN,
+      [H_REGION]: "eu-central-1",
+    });
+    // Still a role credential - no static keys crept in.
+    expect(Dial9Creds.get()!.kind).toBe("role");
+  });
+
+  it("setRegion() is a no-op when nothing is stored (ambient path)", () => {
+    freshStore();
+    expect(Dial9Creds.setRegion("us-east-1")).toBeNull();
+    expect(Dial9Creds.has()).toBe(false);
+    expect(Dial9Creds.headers()).toEqual({});
+  });
+
+  it("isValidRoleArn() mirrors the server's shape check", () => {
+    expect(Dial9Creds.isValidRoleArn(VALID_ARN)).toBe(true);
+    expect(
+      Dial9Creds.isValidRoleArn("arn:aws:iam::123456789012:role/path/to/reader"),
+    ).toBe(true);
+    expect(Dial9Creds.isValidRoleArn("arn:aws-us-gov:iam::123456789012:role/r")).toBe(
+      true,
+    );
+    // Rejections: wrong service, a region field, short account, wildcard, non-role.
+    expect(Dial9Creds.isValidRoleArn("arn:aws:sts::123456789012:role/r")).toBe(false);
+    expect(
+      Dial9Creds.isValidRoleArn("arn:aws:iam:us-east-1:123456789012:role/r"),
+    ).toBe(false);
+    expect(Dial9Creds.isValidRoleArn("arn:aws:iam::12345:role/r")).toBe(false);
+    expect(Dial9Creds.isValidRoleArn("arn:aws:iam::123456789012:role/*")).toBe(false);
+    expect(Dial9Creds.isValidRoleArn("arn:aws:iam::123456789012:user/u")).toBe(false);
+    expect(Dial9Creds.isValidRoleArn("")).toBe(false);
+  });
+
+  it("clear() removes a stored role ARN too", () => {
+    freshStore();
+    Dial9Creds.setRoleArn(VALID_ARN);
     expect(Dial9Creds.has()).toBe(true);
     Dial9Creds.clear();
     expect(Dial9Creds.has()).toBe(false);

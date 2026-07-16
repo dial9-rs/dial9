@@ -19,6 +19,10 @@ export interface UrlStateFields {
   bucket?: string;
   /** Serialized as `aws_region` (matches the backend's query param). */
   region?: string;
+  /** IAM role the server should assume; serialized as `aws_role_arn`. The
+   * linkable assume-role read path (a role ARN is not a secret, unlike the
+   * static BYOC keys, which are header-only and never in the URL). */
+  roleArn?: string;
   prefix?: string;
   tab?: "browse" | "raw";
   tz?: "utc" | "local";

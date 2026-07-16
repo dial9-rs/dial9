@@ -17,7 +17,8 @@ import { fileURLToPath } from "node:url";
 import { describe, it, expect } from "vitest";
 import type { TokioStatsResponse } from "../../lib/trace/index.js";
 import type { PeriodStats } from "./stats.js";
-import { diffTableTemplate, locTableTemplate } from "./render.js";
+import { nothing } from "lit-html";
+import { diffTableTemplate, locTableTemplate, longPollsTemplate } from "./render.js";
 
 // Two classic breakout payloads: an element-context inject and an
 // attribute-breakout inject.
@@ -123,6 +124,54 @@ describe("XSS: hostile spawn_loc renders inert (I1, #587 regression)", () => {
     expect(joined).toContain("<code>"); // the spawn-loc cell wrapper is ours
     expect(joined).not.toContain("<script");
     expect(joined).not.toContain("<img");
+  });
+});
+
+describe("longPollsTemplate (Longest polls card)", () => {
+  const data: TokioStatsResponse = {
+    time_span_ns: 60e9,
+    total_polls: 10,
+    bucket: "b",
+    by_spawn_loc: [],
+    top_long_polls: [
+      { duration_ns: 5_000_000, worker_id: 3, task_id: 42, spawn_loc: "app::f:f.rs:1", host: "h1", source_key: "traces/a.bin.gz", start_ns: 1000, end_ns: 6000 },
+      { duration_ns: 200_000, worker_id: 1, task_id: 7, spawn_loc: "app::g:g.rs:2", host: "h1", source_key: "traces/b.bin.gz", start_ns: 2000, end_ns: 2200 },
+    ],
+  };
+
+  it("filters rows below the threshold, keeps those above", () => {
+    const t = split(longPollsTemplate(data, 1_000_000, null, () => {}));
+    expect(t.leaves).toContain(42); // the 5ms poll's task id survives
+    expect(t.leaves).not.toContain(7); // the 0.2ms poll is filtered out
+  });
+
+  it("returns nothing when no poll exceeds the threshold", () => {
+    expect(longPollsTemplate(data, 10_000_000, null, () => {})).toBe(nothing);
+  });
+
+  it("each row deep-links its poll via a non-destructive focus link", () => {
+    const t = split(longPollsTemplate(data, 1_000_000, null, () => {}));
+    const url = t.leaves.find(
+      (v): v is string => typeof v === "string" && v.startsWith("viewer.html?"),
+    );
+    expect(url).toBeDefined();
+    expect(url).toContain("focus_start=1000");
+    expect(url).not.toContain("/api/trace");
+  });
+
+  it("hostile spawn_loc renders as an interpolated VALUE (XSS-safe)", () => {
+    const hostile: TokioStatsResponse = {
+      time_span_ns: 60e9,
+      total_polls: 1,
+      bucket: "b",
+      by_spawn_loc: [],
+      top_long_polls: [
+        { duration_ns: 5_000_000, worker_id: 0, task_id: 1, spawn_loc: HOSTILE_TAG, host: "h1", source_key: "k", start_ns: 1, end_ns: 2 },
+      ],
+    };
+    const t = split(longPollsTemplate(hostile, 0, null, () => {}));
+    expect(t.leaves).toContain(HOSTILE_TAG);
+    for (const chunk of t.strings) expect(chunk).not.toContain(HOSTILE_TAG);
   });
 });
 

@@ -123,8 +123,10 @@ pub struct WorkerUnparkEvent {
     pub local_queue: u8,
     /// Thread CPU time in nanoseconds.
     pub cpu_time_ns: u64,
-    /// Scheduling wait delta in nanoseconds.
-    pub sched_wait_ns: u64,
+    /// Scheduling wait delta in nanoseconds, or `None` when this park->unpark
+    /// pair was not sampled for schedstat (see `DIAL9_SCHED_WAIT_SAMPLE_RATE`).
+    /// `None` is distinct from `Some(0)`: the latter means "sampled, no wait".
+    pub sched_wait_ns: Option<u64>,
     /// OS thread ID of the unparking thread. On Linux/Android, the result of gettid();
     /// on other platforms, a synthetic per-process counter — see `events::current_tid`.
     pub tid: u32,

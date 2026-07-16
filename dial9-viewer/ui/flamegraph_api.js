@@ -1,11 +1,12 @@
 "use strict";
 
-// Pure helpers for the API-mode flamegraph refinement loop in flamegraph.html.
+// Pure helpers for the API-mode flamegraph view in flamegraph.html.
 //
-// The `/api/flamegraph` endpoint is demand-driven: each request folds a few
-// more source files and returns a `coverage` object alongside the tree. The
-// client polls repeatedly, re-rendering as coverage climbs, and stops once
-// coverage "freezes" (no more files get folded between polls).
+// The `/api/flamegraph` endpoint streams over Server-Sent Events: one request
+// folds source files up to the sampling cap and pushes a fresh tree + `coverage`
+// object per file, then closes. The client re-renders on every event and marks
+// the view "refined" when the stream closes — there is no client-driven polling
+// or plateau detection (the server owns the stop condition).
 //
 // These functions are factored out (and CommonJS-exported) so they can be
 // unit-tested under Node without a browser DOM. In the browser they attach as
@@ -50,14 +51,23 @@ function formatBytes(bytes) {
   return (bytes / (1024 * 1024 * 1024)).toFixed(1) + " GB";
 }
 
-// Coverage is "frozen" when files_folded does not increase between two
-// consecutive polls. `prev` is the previous coverage object (or null/undefined
-// on the first poll, which is never frozen).
-function isCoverageFrozen(prev, curr) {
-  if (prev == null) return false;
-  const prevFolded = Number(prev.files_folded) || 0;
-  const currFolded = Number(curr.files_folded) || 0;
-  return currFolded <= prevFolded;
+// Build a human warning when folds are failing, or null when none did. The
+// backend reports `fold_errors` (count) and `fold_error_sample` (a representative
+// message) on the coverage block; a non-zero count means the tree is incomplete
+// for a reason OTHER than the sampling cap (e.g. an unwritable output bucket →
+// PutObject AccessDenied), which would otherwise look like a silent empty result.
+// Pure + exported so it's unit-testable without a DOM.
+//
+//   { fold_errors: 15, fold_error_sample: "…: AccessDenied" }
+//     -> "⚠ 15 files failed to fold — …: AccessDenied"
+function foldErrorNotice(coverage) {
+  if (!coverage) return null;
+  const n = Number(coverage.fold_errors) || 0;
+  if (n <= 0) return null;
+  const noun = n === 1 ? "file" : "files";
+  let s = `⚠ ${n.toLocaleString()} ${noun} failed to fold`;
+  if (coverage.fold_error_sample) s += ` — ${coverage.fold_error_sample}`;
+  return s;
 }
 
 // Coverage percent (files_folded / files_matched * 100). 0 when the
@@ -67,24 +77,6 @@ function coveragePercent(coverage) {
   const matched = Number(coverage.files_matched) || 0;
   const folded = Number(coverage.files_folded) || 0;
   return matched > 0 ? (folded / matched) * 100 : 0;
-}
-
-// Decide whether progressive refinement should auto-stop. Refinement plateaus
-// long before 100% coverage (the sampling cap), and once each poll only nudges
-// coverage by a hair it is not worth the continued network traffic. We stop
-// after `patience` consecutive polls whose coverage gain is below `minDeltaPct`
-// percentage points.
-//
-// `deltas` is the recent history of per-poll coverage *gains* (newest last), in
-// percentage points. Returns true once the last `patience` entries are all
-// below `minDeltaPct`. Pure and history-based so it is unit-testable; the caller
-// keeps the rolling array.
-function shouldAutoStopRefining(deltas, opts) {
-  const o = opts || {};
-  const minDeltaPct = o.minDeltaPct != null ? o.minDeltaPct : 0.5;
-  const patience = o.patience != null ? o.patience : 3;
-  if (deltas.length < patience) return false;
-  return deltas.slice(-patience).every((d) => Math.abs(d) < minDeltaPct);
 }
 
 // Convert an epoch-nanoseconds value to the string a `datetime-local` input
@@ -106,6 +98,30 @@ function nsToPickerUtc(ns) {
 function pickerUtcToNs(val) {
   if (!val) return null;
   return Math.floor(new Date(val + "Z").getTime() * 1e6).toString();
+}
+
+// Poll-duration band inputs are in milliseconds (human-friendly); the API/scope
+// params (`min_poll_ns`/`max_poll_ns`) are nanoseconds. These two are the single
+// conversion boundary, symmetric like nsToPickerUtc/pickerUtcToNs.
+//
+// msToNs: parse a millisecond input value to an integer-ns string, or null for
+// empty/blank/non-numeric/negative input (so a cleared box means "no bound").
+// Fractional ms is allowed (0.5ms → "500000") and rounded to whole ns.
+function msToNs(val) {
+  if (val == null || String(val).trim() === "") return null;
+  const ms = Number(val);
+  if (!Number.isFinite(ms) || ms < 0) return null;
+  return String(Math.round(ms * 1e6));
+}
+
+// nsToMs: inverse of msToNs for seeding the input from a URL ns param. Returns
+// "" for null/empty/non-numeric so the box shows blank (no bound). Trailing
+// zeros are trimmed (1_500_000 → "1.5", 1_000_000 → "1").
+function nsToMs(ns) {
+  if (ns == null || String(ns).trim() === "") return "";
+  const n = Number(ns);
+  if (!Number.isFinite(n)) return "";
+  return String(n / 1e6);
 }
 
 // Compute the next `max_files` ceiling when the user clicks "Fetch more".
@@ -176,12 +192,13 @@ function hostFacetOptions(hostNames) {
 if (typeof module !== "undefined" && module.exports) {
   module.exports = {
     formatCoverageBadge,
-    isCoverageFrozen,
+    foldErrorNotice,
     coveragePercent,
-    shouldAutoStopRefining,
     nextMaxFiles,
     nsToPickerUtc,
     pickerUtcToNs,
+    msToNs,
+    nsToMs,
     sourceFacetOptions,
     threadFacetOptions,
     hostFacetOptions,

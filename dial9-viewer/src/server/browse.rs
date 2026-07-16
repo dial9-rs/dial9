@@ -1,4 +1,7 @@
 //! `browse` finds all trace files for a given timerange / filter set
+use std::sync::Arc;
+
+use axum::Extension;
 use axum::Json;
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
@@ -9,7 +12,8 @@ use time::OffsetDateTime;
 use crate::server::AppState;
 use crate::server::credentials::MaybeCreds;
 use crate::server::error::storage_error_response;
-use crate::storage::{ObjectInfo, StorageError};
+use crate::server::metrics::OperationMetrics;
+use crate::storage::{ObjectInfo, StorageBackend, StorageError};
 
 /// Per-prefix object cap. A 10-minute (or minute) prefix can legitimately fan
 /// out across many hosts; 10k absorbs a very busy bucket while still bounding
@@ -64,11 +68,13 @@ enum Granularity {
     Minute,
 }
 
+type BrowseOk = (Extension<OperationMetrics>, Json<BrowseResponse>);
+
 pub async fn browse(
     State(state): State<AppState>,
     creds: MaybeCreds,
     Query(params): Query<BrowseParams>,
-) -> Result<Json<BrowseResponse>, (StatusCode, String)> {
+) -> Result<BrowseOk, (StatusCode, String)> {
     let backend = state.resolve(creds).await?;
 
     let bucket = params
@@ -97,15 +103,62 @@ pub async fn browse(
     };
 
     let window = params.to - params.from;
+
+    // Local mode: flat listing (no date-prefix fan-out).
+    if !state.allow_byo_creds {
+        return browse_local(backend, &bucket, &base).await;
+    }
+
+    browse_s3(backend, &bucket, &base, params.from, params.to, window).await
+}
+
+/// Local mode: flat listing filtered to trace segments.
+/// Called when `allow_byo_creds == false` (i.e. `--local-dir`).
+/// No time filtering — the frontend shows all results, positioned by mtime.
+async fn browse_local(
+    backend: Arc<dyn StorageBackend>,
+    bucket: &str,
+    base: &str,
+) -> Result<BrowseOk, (StatusCode, String)> {
+    let page = backend
+        .list_objects(bucket, base, PER_PREFIX_CAP)
+        .await
+        .map_err(storage_error_response)?;
+    let objects: Vec<ObjectInfo> = page
+        .objects
+        .into_iter()
+        .filter(|o| crate::ingest::aggregate::is_trace_segment(&o.key))
+        .collect();
+    let op = OperationMetrics::browse(objects.len(), 0, page.truncated, false);
+    Ok((
+        Extension(op),
+        Json(BrowseResponse {
+            objects,
+            truncated: page.truncated,
+        }),
+    ))
+}
+
+/// S3 mode: date-prefix fan-out with overflow refinement.
+async fn browse_s3(
+    backend: Arc<dyn StorageBackend>,
+    bucket: &str,
+    base: &str,
+    from: i64,
+    to: i64,
+    window: i64,
+) -> Result<BrowseOk, (StatusCode, String)> {
     let gran = if window < MINUTE_GRANULARITY_THRESHOLD_SECS {
         Granularity::Minute
     } else {
         Granularity::Hour
     };
 
-    let (prefixes, range_truncated) = time_prefixes(&base, params.from, params.to, gran);
+    let (prefixes, range_truncated) = time_prefixes(base, from, to, gran);
 
-    tracing::info!(
+    // Per-request operational detail — the request-rate/latency signal lives in
+    // the per-request EMF metrics now, so keep this at debug to avoid log spam.
+    tracing::debug!(
         bucket = %bucket,
         prefixes = prefixes.len(),
         granularity = ?gran,
@@ -126,7 +179,7 @@ pub async fn browse(
         futures::stream::iter(prefixes.clone())
             .map(|p| {
                 let backend = backend.clone();
-                let bucket = bucket.clone();
+                let bucket = bucket.to_string();
                 async move { backend.list_objects(&bucket, &p, PER_PREFIX_CAP).await }
             })
             .buffered(LIST_CONCURRENCY)
@@ -149,6 +202,7 @@ pub async fn browse(
     }
 
     // Retry overflowed hour-level prefixes at 10-minute granularity.
+    let refined = !overflow_prefixes.is_empty();
     if !overflow_prefixes.is_empty() {
         // Expand each overflowed hour prefix into its 6 ten-minute sub-prefixes.
         let refined: Vec<String> = overflow_prefixes
@@ -156,7 +210,7 @@ pub async fn browse(
             .flat_map(|p| (0..6).map(move |d| format!("{p}{d}")))
             .collect();
 
-        tracing::info!(
+        tracing::debug!(
             refined_prefixes = refined.len(),
             overflowed_hours = overflow_prefixes.len(),
             "browse refining overflowed hours at 10-minute granularity"
@@ -166,7 +220,7 @@ pub async fn browse(
             futures::stream::iter(refined)
                 .map(|p| {
                     let backend = backend.clone();
-                    let bucket = bucket.clone();
+                    let bucket = bucket.to_string();
                     async move { backend.list_objects(&bucket, &p, PER_PREFIX_CAP).await }
                 })
                 .buffer_unordered(LIST_CONCURRENCY)
@@ -180,7 +234,10 @@ pub async fn browse(
         }
     }
 
-    Ok(Json(BrowseResponse { objects, truncated }))
+    // Operation-specific metrics: `truncated` is silent data loss behind a 200,
+    // and `prefixes_fanned_out`/`refined` show how hard the listing worked.
+    let op = OperationMetrics::browse(objects.len(), prefixes.len(), truncated, refined);
+    Ok((Extension(op), Json(BrowseResponse { objects, truncated })))
 }
 
 /// Build the date+time S3 key prefixes covering `[from, to]` (unix seconds),

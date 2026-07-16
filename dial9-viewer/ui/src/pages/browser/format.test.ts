@@ -7,6 +7,7 @@ import {
   clamp,
   crossesDayBoundary,
   dateToPickerStr,
+  epochSeconds,
   fmtTick,
   formatDate,
   formatEpochStr,
@@ -15,6 +16,37 @@ import {
   timeToX,
   xToTime,
 } from "./format.js";
+
+describe("epochSeconds (last_modified -> epoch seconds)", () => {
+  it("parses numeric epoch seconds (local-dir backend)", () => {
+    expect(epochSeconds(1782760500)).toBe(1782760500);
+    expect(epochSeconds("1782760500")).toBe(1782760500);
+  });
+
+  it("parses ISO-8601 strings (S3)", () => {
+    expect(epochSeconds("2026-06-29T19:15:05Z")).toBe(
+      Date.parse("2026-06-29T19:15:05Z") / 1000,
+    );
+  });
+
+  it("returns 0 for absent / empty / unparseable / zero input", () => {
+    expect(epochSeconds(undefined)).toBe(0);
+    expect(epochSeconds(null)).toBe(0);
+    expect(epochSeconds("")).toBe(0);
+    expect(epochSeconds("not-a-date")).toBe(0);
+    expect(epochSeconds(0)).toBe(0);
+  });
+
+  it("drives the mtime fallback start = keyEpoch || mtime (#627)", () => {
+    const mtime = epochSeconds("2026-06-29T19:15:05Z");
+    // Local traces have no key epoch (0), so the upload mtime fills in.
+    const localEpoch: number = epochSeconds("not-a-date");
+    expect(localEpoch || mtime).toBe(mtime);
+    // S3 traces keep the key epoch even when the mtime is later.
+    const s3Epoch: number = 1782760100;
+    expect(s3Epoch || mtime).toBe(s3Epoch);
+  });
+});
 
 describe("formatSize (legacy thresholds)", () => {
   it("bytes / KB / MB bands", () => {

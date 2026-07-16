@@ -11,6 +11,7 @@ const require = createRequire(import.meta.url);
 interface UrlStateShape {
   bucket?: string;
   region?: string;
+  roleArn?: string;
   prefix?: string;
   q?: string;
   tab?: string;
@@ -53,6 +54,14 @@ describe("UrlState.parse", () => {
     expect(s.region).toBe("us-west-2");
     // An absent region stays unset (falls back to detection / default).
     expect(UrlState.parse("?bucket=b").region).toBeUndefined();
+  });
+
+  it("reads aws_role_arn into roleArn", () => {
+    const arn = "arn:aws:iam::123456789012:role/dial9-reader";
+    const s = UrlState.parse("?bucket=b&aws_role_arn=" + encodeURIComponent(arn));
+    expect(s.roleArn).toBe(arn);
+    // An absent role ARN stays unset (ambient / static-BYOC path).
+    expect(UrlState.parse("?bucket=b").roleArn).toBeUndefined();
   });
 
   it("tab only accepts known values", () => {
@@ -146,6 +155,16 @@ describe("UrlState.serialize", () => {
     expect(UrlState.serialize({ bucket: "b", region: "" })).toBe("bucket=b");
   });
 
+  it("writes roleArn as aws_role_arn", () => {
+    const arn = "arn:aws:iam::123456789012:role/dial9-reader";
+    const qs = UrlState.serialize({ bucket: "b", region: "us-west-2", roleArn: arn });
+    expect(qs).toBe(
+      "bucket=b&aws_region=us-west-2&aws_role_arn=" + encodeURIComponent(arn),
+    );
+    // Empty roleArn is omitted (static-BYOC / ambient path carries none).
+    expect(UrlState.serialize({ bucket: "b", roleArn: "" })).toBe("bucket=b");
+  });
+
   it("stable key order", () => {
     const qs = UrlState.serialize({
       q: "x",
@@ -201,6 +220,18 @@ describe("UrlState round-trips", () => {
       bucket: "b",
       region: "ap-southeast-2",
       prefix: "traces",
+      last: 1,
+    };
+    const back = UrlState.parse("?" + UrlState.serialize(state));
+    expect(back).toStrictEqual(state);
+  });
+
+  it("assume-role link carries aws_role_arn", () => {
+    const state = {
+      bucket: "b",
+      region: "us-east-1",
+      roleArn: "arn:aws:iam::123456789012:role/dial9-reader",
+      prefix: "dial9-traces",
       last: 1,
     };
     const back = UrlState.parse("?" + UrlState.serialize(state));

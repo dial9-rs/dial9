@@ -14,13 +14,23 @@ import {
   tileSegments,
   totalBytes,
 } from "../../lib/canvas/heatmap.js";
-import { extractPrefix, parseKey } from "../../lib/trace/keys.js";
-import { objectTraceUrls } from "../../lib/trace/object-urls.js";
+import {
+  addDiffCapture,
+  chooseTarget,
+  removeDiffSide,
+  swapDiffCapture,
+} from "../../lib/canvas/flamegraph_diff.js";
+import { parseKey } from "../../lib/trace/keys.js";
 import { isDateLayer } from "../../lib/trace/prefixes.js";
 import { traceTitleParams } from "../../lib/trace/title.js";
+import {
+  encodeAggregationParams,
+  encodeScope,
+  scopeFromKeys,
+} from "../../lib/trace/trace_scope.js";
 import { apiFetch, type BrowseResponse } from "./api.js";
 import type { BrowserEls } from "./dom.js";
-import { dateToPickerStr, pickerToDate, xToTime } from "./format.js";
+import { dateToPickerStr, epochSeconds, pickerToDate, xToTime } from "./format.js";
 import { sortRawRows, toRawRows } from "./raw-rows.js";
 import type {
   BrowseObject,
@@ -74,6 +84,11 @@ export interface BrowserActions {
   viewSelected(): void;
   viewCpuProfile(): void;
   viewTokioStats(): void;
+  addToDiff(): void;
+  clearDiff(): void;
+  swapDiff(): void;
+  clearDiffSide(side: "a" | "b"): void;
+  launchDiff(kind: "flamegraph" | "tokio"): void;
 }
 
 export function createActions(store: BrowserStore, els: BrowserEls): BrowserActions {
@@ -104,6 +119,10 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
     const state: UrlStateFields = {
       bucket: els.bucketInput.value.trim(),
       region: (storedCreds && storedCreds.region) || "",
+      // Echo the assume-role ARN so the read stays shareable (it's not a
+      // secret; static BYOC keys are never serialized). Only the role
+      // transport carries one.
+      roleArn: storedCreds && storedCreds.kind === "role" ? storedCreds.roleArn : "",
       prefix: els.prefixInput.value.trim(),
       tab: s.ui.tab,
       tz: s.ui.useLocalTz ? "local" : "utc",
@@ -179,11 +198,15 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
   // Clear the selection, and either show the "no traces" status (no rows)
   // or reset the domain to the data extent and show the heatmap. The actual
   // painting is the browse-view component's render.
-  function renderHeatmapState(): void {
+  //
+  // `preserveSelection` keeps the current selection and zoom (#644): a TZ
+  // toggle only reformats labels, so the box the user drew must survive it.
+  function renderHeatmapState(opts?: { preserveSelection?: boolean }): void {
+    const preserve = opts?.preserveSelection ?? false;
     const b = store.getState().browse;
     if (!b.rows.length) {
       store.update("browse", {
-        selection: null,
+        selection: preserve ? b.selection : null,
         heatmapVisible: false,
         status: {
           visible: true,
@@ -196,9 +219,9 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
     }
     const extent = computeExtent(b.segments);
     store.update("browse", {
-      selection: null,
+      selection: preserve ? b.selection : null,
       fullDomain: extent,
-      domain: { ...extent },
+      domain: preserve && b.domain ? b.domain : { ...extent },
       heatmapVisible: true,
       status: { ...b.status, visible: false },
     });
@@ -217,10 +240,11 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
     if (fromDate) els.rangeFrom.value = dateToPickerStr(fromDate, nowLocal);
     if (toDate) els.rangeTo.value = dateToPickerStr(toDate, nowLocal);
 
-    // Re-render the current view.
+    // Re-render the current view. A TZ toggle is display-only, so keep the
+    // selection and zoom the user set (#644) - only the labels reformat.
     const s = store.getState();
     if (s.ui.tab === "browse") {
-      if (s.browse.rows.length) renderHeatmapState();
+      if (s.browse.rows.length) renderHeatmapState({ preserveSelection: true });
     } else {
       // Rebuild the raw table (dropping any checked rows) or, when empty,
       // re-run the sample-key empty-state fetch.
@@ -282,10 +306,9 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
       allObjects = allObjects.filter((obj) => {
         const p = parseKey(obj.key);
         if (!p.epoch) return true; // keep if we can't parse
-        // Include if segment overlaps the range (last_modified as end proxy)
-        const end = obj.last_modified
-          ? new Date(obj.last_modified).getTime() / 1000
-          : p.epoch;
+        // Include if segment overlaps the range (last_modified as end proxy).
+        // epochSeconds handles both numeric-epoch (local dir) and ISO-8601 (S3).
+        const end = epochSeconds(obj.last_modified) || p.epoch;
         return p.epoch <= toEpoch && end >= fromEpoch;
       });
 
@@ -347,10 +370,11 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
       const segments: HeatmapSegment[] = allObjects
         .map((obj) => {
           const p = parseKey(obj.key);
-          const start = p.epoch;
-          const end = obj.last_modified
-            ? new Date(obj.last_modified).getTime() / 1000
-            : start;
+          // Local traces carry no date/epoch in the key, so fall back to the
+          // upload mtime for time placement (#627); S3 traces keep p.epoch.
+          const mtime = epochSeconds(obj.last_modified);
+          const start = p.epoch || mtime;
+          const end = mtime || start;
           const shared = { key: obj.key, size: obj.size, start, end };
           if (p.layout === "known") {
             return {
@@ -547,12 +571,11 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
       if (result.ok && result.region) {
         const stored = window.Dial9Creds.get();
         if (stored && stored.region !== result.region) {
-          // Persist without a second round trip (region is known now).
-          void window.Dial9Creds.set({
-            ...stored,
-            region: result.region,
-            autoDetectRegion: false,
-          });
+          // Patch the region in place (known now, no second round trip).
+          // setRegion keeps the active transport's kind, so it works for an
+          // assumed-role credential too - a static-only set() would throw
+          // on the role path.
+          window.Dial9Creds.setRegion(result.region);
           els.credsRegion.value = result.region;
           syncUrl();
         }
@@ -743,27 +766,85 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
       .filter((key) => s.raw.selected.has(key));
   }
 
-  // Open the viewer on the selection.
+  // The bucket's region, stamped onto every link this page opens so the
+  // opened tab's URL is self-contained (signs the right regional S3 endpoint
+  // without inheriting a detected region). Source of truth is the credentials
+  // store; the panel's region field is the fallback. "" when unknown (the
+  // server then uses its default region).
+  function currentRegion(): string {
+    const stored = window.Dial9Creds ? window.Dial9Creds.get() : null;
+    if (stored && stored.region) return stored.region;
+    return els.credsRegion.value.trim() || "";
+  }
+
+  // The selection spanned too many hosts to name them all in the URL, so the
+  // scope degraded to "all hosts in the time window". Warn that the opened
+  // view may be broader than the literal box selection.
+  function warnHostsDropped(): void {
+    alert(
+      "This selection spans too many hosts to put in the link, so the opened " +
+        "view covers ALL hosts in the selected time window. Narrow the time " +
+        "range or host selection for an exact match.",
+    );
+  }
+
+  // Open the viewer on the selection. Carry it as a compact *scope*
+  // (bucket/prefix/service/host-set + time window) rather than one trace=
+  // component per file, so a large selection's URL stays under CloudFront's
+  // 8192-byte cap and re-resolves in any browser (#589). Local mode is the
+  // exception: buffer-style local key names carry nothing to derive a scope
+  // from, so open those directly by key (#627).
   function viewSelected(): void {
     const keys = getSelectedKeys();
     if (keys.length === 0) return;
 
     const bucket = els.bucketInput.value.trim();
 
-    // Pass structured metadata for the viewer title, plus one trace=
-    // component per file (downloaded in parallel + gunzipped client-side).
-    // Unknown-layout keys don't leak shifted svc/host params into the title.
-    const titleParams = traceTitleParams(keys, { localTz: localTz() });
-    for (const url of objectTraceUrls(bucket, keys)) titleParams.append("trace", url);
+    if (store.getState().config.localMode) {
+      const params = new URLSearchParams();
+      for (const key of keys) {
+        params.append("trace", "/api/object?key=" + encodeURIComponent(key));
+      }
+      window.open("viewer.html?" + params.toString(), "_blank");
+      return;
+    }
 
-    window.open(`viewer.html?${titleParams.toString()}`, "_blank");
+    // Structured metadata for the viewer title, plus the scope the viewer
+    // re-lists files from. Unknown-layout keys don't leak shifted svc/host.
+    const titleParams = traceTitleParams(keys, { localTz: localTz() });
+    const sel = store.getState().browse.selection;
+    const scope = scopeFromKeys(
+      bucket,
+      keys,
+      sel ? sel.t0 : null,
+      sel ? sel.t1 : null,
+      currentRegion(),
+    );
+    // Raw mode passes no window, so scopeFromKeys derives it from the keys'
+    // epochs; null means an unrecognized layout with nothing to scope.
+    if (!scope) {
+      alert(
+        "Could not derive a time range from the selected files. Their key " +
+          "names may use an unrecognized layout.",
+      );
+      return;
+    }
+    const { query, hostsDropped } = encodeScope(titleParams, scope);
+    if (hostsDropped) warnHostsDropped();
+    window.open(`viewer.html?${query}`, "_blank");
   }
 
-  // Flamegraph button. Two modes: aggregation-enabled servers get the
-  // sampled server-side refinement loop over the selection's scope;
-  // otherwise the exact per-key trace= set.
+  // Flamegraph button. Two modes: aggregation-enabled servers get the sampled
+  // server-side refinement loop over the selection's scope (encoded in the
+  // un-namespaced aggregation vocabulary, `api=1` selecting the demand-driven
+  // path); otherwise the exact per-file decode over a compact `s_*` scope.
+  // A captured A/B diff routes the button to the two-sided diff instead (#623).
   function viewCpuProfile(): void {
     const s = store.getState();
+    if (s.diff.a && s.diff.b) {
+      launchDiff("flamegraph");
+      return;
+    }
     const sel = s.browse.selection;
     if (!sel || !sel.keys.length) return;
     const bucket = els.bucketInput.value.trim();
@@ -771,44 +852,34 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
       alert("Bucket is required");
       return;
     }
-    const keys = sel.keys;
+    const scope = scopeFromKeys(bucket, sel.keys, sel.t0, sel.t1, currentRegion());
+    if (!scope) return; // a box selection always carries a window, so unreachable
+
     if (s.config.aggregationEnabled) {
-      // Scope params come from KNOWN layouts only, so we don't filter the
-      // aggregation on positionally shifted (wrong) names.
-      const known = keys.map((k) => parseKey(k)).filter((p) => p.layout === "known");
-      const services = [...new Set(known.map((p) => p.service).filter(Boolean))];
-      const hosts = [...new Set(known.map((p) => p.host).filter(Boolean))];
-      const fgParams = new URLSearchParams();
-      fgParams.set("api", "1");
-      // Pass the bucket so the flamegraph endpoint knows which bucket to
-      // aggregate from (required for bring-your-own-credentials mode).
-      if (bucket) fgParams.set("bucket", bucket);
-      // Extract the key prefix from the first selected key (everything
-      // before the date segment). Authoritative regardless of whether the
-      // prefix came from the server or the user's input.
-      const pfx = extractPrefix(keys[0]!);
-      if (pfx) fgParams.set("prefix", pfx);
-      // The loop's Scope takes a single service; a box almost always spans
-      // one service. If several, pass the first and let host-set + time do
-      // the narrowing.
-      if (services.length) fgParams.set("service", services[0]!);
-      for (const h of hosts) fgParams.append("host", h); // repeatable host set
-      // Selection times are epoch SECONDS; the loop wants epoch ns.
-      if (sel.t0 != null) fgParams.set("start_ns", String(Math.round(sel.t0 * 1e9)));
-      if (sel.t1 != null) fgParams.set("end_ns", String(Math.round(sel.t1 * 1e9)));
-      window.open("flamegraph.html?" + fgParams.toString(), "_blank");
+      const base = new URLSearchParams();
+      base.set("api", "1");
+      const { query, hostsDropped } = encodeAggregationParams(base, scope);
+      if (hostsDropped) warnHostsDropped();
+      window.open("flamegraph.html?" + query, "_blank");
       return;
     }
 
     // Exact mode: open the selected raw traces and decode client-side.
-    const fgParams = traceTitleParams(keys, { localTz: localTz() });
-    for (const url of objectTraceUrls(bucket, keys)) fgParams.append("trace", url);
-    window.open("flamegraph.html?" + fgParams.toString(), "_blank");
+    const fgParams = traceTitleParams(sel.keys, { localTz: localTz() });
+    const { query, hostsDropped } = encodeScope(fgParams, scope);
+    if (hostsDropped) warnHostsDropped();
+    window.open("flamegraph.html?" + query, "_blank");
   }
 
-  // Tokio Stats button.
+  // Tokio Stats button: the same aggregation scope the demand-driven
+  // flamegraph uses (/api/tokio-stats reads the same param vocabulary). A
+  // captured A/B diff routes to the two-sided diff instead (#623).
   function viewTokioStats(): void {
     const s = store.getState();
+    if (s.diff.a && s.diff.b) {
+      launchDiff("tokio");
+      return;
+    }
     const sel = s.browse.selection;
     if (!sel || !sel.keys.length) return;
     const bucket = els.bucketInput.value.trim();
@@ -816,20 +887,65 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
       alert("Bucket is required");
       return;
     }
-    const keys = sel.keys;
-    // Known layouts only, as in viewCpuProfile above.
-    const known = keys.map((k) => parseKey(k)).filter((p) => p.layout === "known");
-    const services = [...new Set(known.map((p) => p.service).filter(Boolean))];
-    const hosts = [...new Set(known.map((p) => p.host).filter(Boolean))];
-    const hp = new URLSearchParams();
-    if (bucket) hp.set("bucket", bucket);
-    const pfx = extractPrefix(keys[0]!);
-    if (pfx) hp.set("prefix", pfx);
-    if (services.length) hp.set("service", services[0]!);
-    for (const h of hosts) hp.append("host", h);
-    if (sel.t0 != null) hp.set("start_ns", String(Math.round(sel.t0 * 1e9)));
-    if (sel.t1 != null) hp.set("end_ns", String(Math.round(sel.t1 * 1e9)));
-    window.open("tokio_stats.html?" + hp.toString(), "_blank");
+    const scope = scopeFromKeys(bucket, sel.keys, sel.t0, sel.t1, currentRegion());
+    if (!scope) return; // window always present for a box selection
+    const { query, hostsDropped } = encodeAggregationParams(new URLSearchParams(), scope);
+    if (hostsDropped) warnHostsDropped();
+    window.open("tokio_stats.html?" + query, "_blank");
+  }
+
+  // ── Differential comparison (A/B) ──
+  // Two captured aggregate scopes launched into either viz via the shared
+  // FlamegraphDiff scope-link codec (?diff=1&a=<b64>&b=<b64>), which both
+  // flamegraph.html and tokio_stats.html consume. Held in the store only.
+
+  // The current selection as an aggregate scope (bucket/prefix/service/
+  // host-set + start_ns/end_ns), shared with the flamegraph/tokio buttons so
+  // all three agree on how a box maps to a scope. Null when there's no usable
+  // selection (or no bucket).
+  function selectionScope(): URLSearchParams | null {
+    const sel = store.getState().browse.selection;
+    if (!sel || !sel.keys.length) return null;
+    const bucket = els.bucketInput.value.trim();
+    if (!bucket) return null;
+    const scope = scopeFromKeys(bucket, sel.keys, sel.t0, sel.t1, currentRegion());
+    if (!scope) return null;
+    const { query, hostsDropped } = encodeAggregationParams(new URLSearchParams(), scope);
+    if (hostsDropped) warnHostsDropped();
+    return new URLSearchParams(query);
+  }
+
+  // Capture the current selection as one side (A first, then B) of a diff.
+  function addToDiff(): void {
+    const scope = selectionScope();
+    if (!scope) {
+      if (!els.bucketInput.value.trim()) alert("Bucket is required");
+      return;
+    }
+    store.update("diff", addDiffCapture(store.getState().diff, scope));
+  }
+
+  function clearDiff(): void {
+    store.update("diff", { a: null, b: null });
+  }
+
+  // Swap A and B (no-op unless both are set - the codec fills A first).
+  function swapDiff(): void {
+    store.update("diff", swapDiffCapture(store.getState().diff));
+  }
+
+  // Remove one side (clearing A promotes B to A so there's never a B-without-A).
+  function clearDiffSide(side: "a" | "b"): void {
+    store.update("diff", removeDiffSide(store.getState().diff, side));
+  }
+
+  // Launch the captured A/B diff in the chosen viz via the shared scope-link
+  // codec, so flamegraph and tokio-stats receive the same two-scope encoding.
+  function launchDiff(kind: "flamegraph" | "tokio"): void {
+    const d = store.getState().diff;
+    if (!d.a || !d.b) return;
+    const { page, search } = chooseTarget(kind, { hasDiff: true, diffA: d.a, diffB: d.b });
+    window.open(page + "?" + search, "_blank");
   }
 
   return {
@@ -861,5 +977,10 @@ export function createActions(store: BrowserStore, els: BrowserEls): BrowserActi
     viewSelected,
     viewCpuProfile,
     viewTokioStats,
+    addToDiff,
+    clearDiff,
+    swapDiff,
+    clearDiffSide,
+    launchDiff,
   };
 }

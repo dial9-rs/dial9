@@ -48,3 +48,16 @@ export function formatDuration(ns: number): string {
 export function thresholdNs(sliderValue: string): number {
   return Math.pow(10, parseFloat(sliderValue)) * 1e6;
 }
+
+/**
+ * Map a poll duration (ns) to a severity color: >=3ms red, >=1ms amber, else
+ * green (dial9's palette). Reimplemented from the frozen core's latencyHeat so
+ * the "Longest polls" heat reads consistently without crossing the core import
+ * boundary.
+ */
+export function latencyHeat(ns: number): string {
+  const ms = ns / 1e6;
+  if (ms >= 3) return "#f85149";
+  if (ms >= 1) return "#d29922";
+  return "#3fb950";
+}

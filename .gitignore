@@ -8,3 +8,6 @@ target/
 .claude/
 .zed/
 .progress/
+# Claude Code session transcripts (timestamped agent scratch logs), e.g.
+# 2026-06-28-090321-implement-....txt — never source, keep out of the tree.
+[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]-[0-9]*.txt

@@ -6,6 +6,11 @@ pub mod storage;
 
 pub use report_serve::report_serve_router;
 
+// Expose the standard per-request metrics sink so a caller embedding
+// `build_app` can attach it — or supply their own metrique sink instead.
+// Metrics are a process-global concern the caller owns, like logging.
+pub use server::metrics::attach_request_metrics;
+
 use std::path::PathBuf;
 
 async fn detect_bucket_region(bucket: &str) -> Option<String> {
@@ -14,9 +19,17 @@ async fn detect_bucket_region(bucket: &str) -> Option<String> {
     server::region_from_head_bucket(&client, bucket).await
 }
 
-/// Configuration for the `serve` subcommand, assembled from CLI args.
-pub(crate) struct ServeConfig {
-    pub port: u16,
+/// Configuration for [`build_app`]. Construct it directly in code, or map it
+/// from CLI args (see [`cli::run`]).
+///
+/// Deliberately excluded, because they are the caller's concern rather than
+/// part of app assembly:
+///   - the listen **port** — binding is the caller's job (see [`build_app`]);
+///   - **logging** and the per-request **metrics** format — see [`init_tracing`]
+///     and [`attach_request_metrics`], which the caller drives (often from a
+///     `--local`/deployed flag).
+#[derive(Debug, Clone)]
+pub struct ViewerConfig {
     pub bucket: Option<String>,
     pub prefix: Option<String>,
     pub local_dir: Option<PathBuf>,
@@ -40,9 +53,27 @@ pub(crate) struct ServeConfig {
     pub enable_upload: bool,
 }
 
+impl Default for ViewerConfig {
+    fn default() -> Self {
+        Self {
+            bucket: None,
+            prefix: None,
+            local_dir: None,
+            dev: false,
+            agg: false,
+            agg_source_dir: None,
+            agg_output_dir: None,
+            agg_output_bucket: None,
+            agg_output_prefix: "flamegraph-data".to_string(),
+            agg_segment_secs: crate::ingest::aggregate::DEFAULT_SEGMENT_DURATION_SECS,
+            enable_upload: false,
+        }
+    }
+}
+
 /// Build an [`S3Backend`] for `bucket`, pinned to the bucket's region when it
 /// can be detected (so cross-region buckets work), else the default chain.
-async fn s3_backend_for(bucket: &str) -> storage::S3Backend {
+pub(crate) async fn s3_backend_for(bucket: &str) -> storage::S3Backend {
     if let Some(region) = detect_bucket_region(bucket).await {
         tracing::info!(%region, %bucket, "detected bucket region");
         let config = aws_config::defaults(aws_config::BehaviorVersion::latest())
@@ -56,9 +87,41 @@ async fn s3_backend_for(bucket: &str) -> storage::S3Backend {
     }
 }
 
-pub(crate) async fn serve(
-    ServeConfig {
-        port,
+/// Initialize the process-global tracing subscriber: JSON logs by default (so
+/// they render cleanly in CloudWatch), human-readable under `local`. Call once,
+/// before serving. Logging is the binary's concern, so it is separate from
+/// [`build_app`].
+pub fn init_tracing(local: bool) {
+    let env_filter = || {
+        tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| "dial9_viewer=info".parse().unwrap())
+    };
+    if local {
+        tracing_subscriber::fmt()
+            .with_env_filter(env_filter())
+            .init();
+    } else {
+        tracing_subscriber::fmt()
+            .json()
+            .with_env_filter(env_filter())
+            .init();
+    }
+}
+
+/// Assemble the fully-configured viewer application — routes, storage backend,
+/// and optional demand-driven aggregation — and return it as an [`axum::Router`],
+/// which is also a `tower::Service`.
+///
+/// Binding is the caller's responsibility: add routes with [`axum::Router::merge`],
+/// wrap middleware such as auth with [`axum::Router::layer`], pick a
+/// server/listener/TLS, then serve. Two other process-global concerns are the
+/// caller's as well, so they compose freely and can be swapped:
+///   - **logging** — call [`init_tracing`] once beforehand;
+///   - **per-request metrics** — attach a sink with [`attach_request_metrics`]
+///     (the standard EMF/local sink) or supply your own metrique sink, and hold
+///     the returned handle for the life of the server.
+pub async fn build_app(
+    ViewerConfig {
         bucket,
         prefix,
         local_dir,
@@ -70,15 +133,8 @@ pub(crate) async fn serve(
         agg_output_prefix,
         agg_segment_secs,
         enable_upload,
-    }: ServeConfig,
-) -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "dial9_viewer=info".parse().unwrap()),
-        )
-        .init();
-
+    }: ViewerConfig,
+) -> anyhow::Result<axum::Router> {
     // Build the demand-driven aggregation context if requested. Two sources:
     //   - `agg_source_dir` (local): source + output are LocalBackends.
     //   - `agg` + `bucket` (S3): source is the served bucket/prefix; output is a
@@ -266,24 +322,13 @@ pub(crate) async fn serve(
     }
 
     let app = server::router(app_state);
-
-    let listener = tokio::net::TcpListener::bind(("0.0.0.0", port)).await?;
-    tracing::info!(port, dev, "dial9-viewer listening");
-    println!("\n  → http://localhost:{}\n", port);
-    if let Some(dir) = &local_dir {
-        tracing::info!(path = %dir.display(), "local directory mode");
-    } else if let Some(bucket) = &bucket {
-        tracing::info!(%bucket, "default bucket");
-    }
-
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
-
-    Ok(())
+    Ok(app)
 }
 
-async fn shutdown_signal() {
+/// Wait for a shutdown signal (Ctrl-C), then resolve. Pass this to
+/// `axum::serve(...).with_graceful_shutdown(...)` when binding a router from
+/// [`build_app`].
+pub async fn shutdown_signal() {
     tokio::signal::ctrl_c()
         .await
         .expect("failed to install CTRL+C handler");

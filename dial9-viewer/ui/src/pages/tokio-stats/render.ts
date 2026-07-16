@@ -8,7 +8,7 @@
 
 import { html, nothing, render, type TemplateResult } from "lit-html";
 import type { TokioStatsResponse } from "../../lib/trace/index.js";
-import { formatDuration, nsToDatetime } from "./format.js";
+import { formatDuration, latencyHeat, nsToDatetime } from "./format.js";
 import { exemplarLink } from "./exemplar.js";
 import {
   buildDiffModel,
@@ -232,6 +232,66 @@ export function locTableTemplate(
   `;
 }
 
+/**
+ * "Longest polls": the single polls that held a worker thread longest — the
+ * server ranks them (top_long_polls); the client filters by the same threshold
+ * slider as the table above so the two stay consistent. Each row deep-links its
+ * trace segment through the shared exemplarLink (LongPoll extends PollExemplar).
+ * lit-html escapes every interpolated value, so the attacker-influenceable
+ * spawn_loc/host render inert.
+ */
+export function longPollsTemplate(
+  data: TokioStatsResponse,
+  threshNs: number,
+  bucketParam: string | null,
+  onOpen: (url: string) => void,
+): TemplateResult | typeof nothing {
+  const rows = (data.top_long_polls ?? []).filter((p) => p.duration_ns >= threshNs).slice(0, 50);
+  if (!rows.length) return nothing;
+  // The host column only earns its space when the scope spans multiple hosts.
+  const multiHost = new Set(rows.map((p) => p.host || "")).size > 1;
+  const bucketFromData = data.bucket;
+  return html`
+    <h3 style="margin:20px 0 8px">Longest polls</h3>
+    <p style="font-size:0.8em;color:#8b949e;margin-bottom:6px">
+      Single polls that held a worker thread longest; long polls starve other
+      tasks on that worker. Click a row to open its trace segment.
+    </p>
+    <table>
+      <thead>
+        <tr>
+          <th>Duration</th>
+          <th>Worker</th>
+          <th>Task</th>
+          <th>Spawn Location</th>
+          ${multiHost ? html`<th>Host</th>` : nothing}
+        </tr>
+      </thead>
+      <tbody>
+        ${rows.map((p) => {
+          const url = exemplarLink(p, bucketFromData, bucketParam);
+          const cells = html`
+            <td>
+              <span style="color:${latencyHeat(p.duration_ns)};font-weight:600"
+                >${formatDuration(p.duration_ns)}</span
+              >
+            </td>
+            <td>w${p.worker_id}</td>
+            <td><code>${p.task_id}</code></td>
+            <td><code>${p.spawn_loc || "(unknown)"}</code></td>
+            ${multiHost ? html`<td>${p.host || ""}</td>` : nothing}
+          `;
+          return url
+            ? html`<tr style="cursor:pointer" data-url=${url} @click=${() => onOpen(url)}>
+                ${cells}
+              </tr>`
+            : html`<tr>${cells}</tr>`;
+        })}
+      </tbody>
+    </table>
+  `;
+}
+
 /** Render one period through the single-period view. */
 export function renderSinglePeriod(
   sumEl: HTMLElement,
@@ -243,7 +303,15 @@ export function renderSinglePeriod(
   onOpen: (url: string) => void,
 ): void {
   render(summaryCardsTemplate(s, threshNs), sumEl);
-  render(locTableTemplate(s, data, bucketParam, onOpen), tableEl);
+  render(
+    html`${locTableTemplate(s, data, bucketParam, onOpen)}${longPollsTemplate(
+      data,
+      threshNs,
+      bucketParam,
+      onOpen,
+    )}`,
+    tableEl,
+  );
 }
 
 /** Render the "Not loaded yet." guard for a stale detail tab. */

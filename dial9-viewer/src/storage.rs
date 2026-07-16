@@ -170,6 +170,12 @@ pub enum StorageError {
     /// opaque 500 — this is the failure the viewer's per-bucket region
     /// auto-detection exists to prevent.
     WrongRegion,
+    /// The request was malformed by the client — e.g. an S3 `InvalidBucketName`
+    /// for a bucket name that violates the naming rules (bad characters, wrong
+    /// length). Kept distinct from [`StorageError::Other`] so the HTTP layer
+    /// returns a `400` with an actionable message instead of an opaque `500`
+    /// `fault`; the mistake is in the user's input, not the server.
+    BadRequest(String),
     Other(String),
 }
 
@@ -199,6 +205,7 @@ impl std::fmt::Display for StorageError {
                      detected automatically) and try again."
                 )
             }
+            StorageError::BadRequest(msg) => write!(f, "{msg}"),
             StorageError::Other(msg) => write!(f, "{msg}"),
         }
     }
@@ -239,6 +246,26 @@ where
         // form) or the generic `Redirect`. Surface a clear message rather than
         // the opaque "unclassified S3 error" this used to fall through to.
         Some("PermanentRedirect" | "Redirect") => StorageError::WrongRegion,
+        // Missing bucket/key: the user pointed at something that does not exist
+        // (typo'd bucket name, deleted object). This is a client mistake, so map
+        // it to 404 rather than letting it fall through to the `Other` arm —
+        // which logged an "unclassified S3 error" and returned a 500 `fault`,
+        // polluting the fault metric with user input. The list/prefix paths hit
+        // this via the bucket-level `NoSuchBucket`; `GetObject`'s `NoSuchKey` is
+        // additionally handled at the call site (with the bucket/key in the
+        // message), so plain code matching here is the fallback.
+        Some("NoSuchBucket" | "NoSuchKey" | "NotFound") => {
+            StorageError::NotFound("the specified bucket or object does not exist".to_string())
+        }
+        // Malformed bucket name: the name itself violates S3's naming rules (bad
+        // characters, wrong length), so S3 rejects it with `InvalidBucketName`
+        // (HTTP 400) before it can look anything up. Like `NoSuchBucket` this is
+        // user input, not a server fault — but it's a *bad request*, not a
+        // missing resource, so map it to 400 rather than 404 and don't let it
+        // fall through to the `Other` arm's 500 `fault`.
+        Some("InvalidBucketName") => {
+            StorageError::BadRequest("the bucket name is not valid".to_string())
+        }
         // Unmapped error: keep the full SDK detail in the server log (it can
         // embed the access key id, region, and endpoint — server-eyes only) and
         // hand the client a generic message rather than reflecting it back.
@@ -460,10 +487,13 @@ impl StorageBackend for S3Backend {
                     req = req.continuation_token(token);
                 }
 
-                let resp = req.send().await.map_err(|e| {
-                    use aws_sdk_s3::error::DisplayErrorContext;
-                    StorageError::Other(format!("{}", DisplayErrorContext(&e)))
-                })?;
+                // Classify the error like the sibling listing methods do, so an
+                // auth failure surfaces as `Unauthorized` rather than a generic
+                // `Other` that callers can't distinguish from an empty listing.
+                // This is what lets a caller (e.g. a future per-side
+                // bring-your-own-credentials prompt) tell "needs different
+                // credentials" apart from "empty window".
+                let resp = req.send().await.map_err(|e| classify_s3_error(&e))?;
 
                 for obj in resp.contents() {
                     if let Some(key) = obj.key() {
@@ -1130,6 +1160,58 @@ mod tests {
         assert!(err.to_string().contains("region"), "message: {err}");
     }
 
+    /// A `NoSuchBucket` (the error S3 returns when the bucket name does not
+    /// exist — typically a user typo) must classify to [`StorageError::NotFound`]
+    /// (→ HTTP 404), not the opaque `Other` that produced an "unclassified S3
+    /// error" log and a 500 `fault`. Guards against user input polluting the
+    /// server-fault metric.
+    #[tokio::test]
+    async fn no_such_bucket_classifies_as_not_found() {
+        // The XML S3 sends when the bucket does not exist (HTTP 404).
+        let body = r#"<?xml version="1.0" encoding="UTF-8"?>
+            <Error>
+              <Code>NoSuchBucket</Code>
+              <Message>The specified bucket does not exist</Message>
+              <BucketName>test-shanks</BucketName>
+            </Error>"#;
+        let backend = replay_error_backend(404, body);
+
+        let err = backend
+            .list_prefixes("test-shanks", "")
+            .await
+            .expect_err("a NoSuchBucket must surface as an error");
+        assert!(
+            matches!(err, StorageError::NotFound(_)),
+            "expected NotFound, got {err:?}"
+        );
+    }
+
+    /// An `InvalidBucketName` (S3's error for a syntactically invalid bucket
+    /// name, HTTP 400) must classify to [`StorageError::BadRequest`] (→ HTTP
+    /// 400), not the opaque `Other` that produced an "unclassified S3 error"
+    /// log and a 500 `fault`. Like `NoSuchBucket` it's user input, but it's a
+    /// malformed request rather than a missing resource.
+    #[tokio::test]
+    async fn invalid_bucket_name_classifies_as_bad_request() {
+        // The XML S3 sends when the bucket name violates the naming rules.
+        let body = r#"<?xml version="1.0" encoding="UTF-8"?>
+            <Error>
+              <Code>InvalidBucketName</Code>
+              <Message>The specified bucket is not valid.</Message>
+              <BucketName>Not_A_Valid_Bucket</BucketName>
+            </Error>"#;
+        let backend = replay_error_backend(400, body);
+
+        let err = backend
+            .list_prefixes("Not_A_Valid_Bucket", "")
+            .await
+            .expect_err("an InvalidBucketName must surface as an error");
+        assert!(
+            matches!(err, StorageError::BadRequest(_)),
+            "expected BadRequest, got {err:?}"
+        );
+    }
+
     #[tokio::test]
     async fn list_prefixes_follows_continuation_token() {
         // Page 1 is truncated and carries a NextContinuationToken; page 2 is the
@@ -1209,6 +1291,56 @@ mod tests {
         let written = dir.path().join("a/b/c.bin");
         assert!(written.exists(), "expected file at {}", written.display());
         assert_eq!(std::fs::read(&written).unwrap(), b"hi");
+    }
+
+    /// Build a backend that replays a single response with an explicit status
+    /// and body — used to drive the SDK's error path (the success-only
+    /// `replay_backend` always returns 200).
+    fn replay_backend_status(status: u16, body: &str) -> S3Backend {
+        use aws_smithy_http_client::test_util::{ReplayEvent, StaticReplayClient};
+        use aws_smithy_types::body::SdkBody;
+        let events = vec![ReplayEvent::new(
+            http::Request::builder()
+                .uri("https://s3.amazonaws.com/")
+                .body(SdkBody::empty())
+                .unwrap(),
+            http::Response::builder()
+                .status(status)
+                .body(SdkBody::from(body))
+                .unwrap(),
+        )];
+        let http_client = StaticReplayClient::new(events);
+        let cfg = aws_sdk_s3::config::Builder::new()
+            .behavior_version(aws_sdk_s3::config::BehaviorVersion::latest())
+            .credentials_provider(aws_sdk_s3::config::Credentials::new(
+                "test", "test", None, None, "test",
+            ))
+            .region(aws_sdk_s3::config::Region::new("us-east-1"))
+            .http_client(http_client)
+            .build();
+        S3Backend::from_client(aws_sdk_s3::Client::from_conf(cfg))
+    }
+
+    #[tokio::test]
+    async fn list_objects_all_maps_auth_failure_to_unauthorized() {
+        // S3 returns 403 InvalidAccessKeyId when the credentials can't read the
+        // bucket. `list_objects_all` must classify this as `Unauthorized` (not
+        // the generic `Other`), consistent with the sibling listing methods, so
+        // callers can distinguish "needs different credentials" from "empty
+        // window".
+        let body = r#"<?xml version="1.0" encoding="UTF-8"?>
+            <Error><Code>InvalidAccessKeyId</Code>
+            <Message>The AWS Access Key Id you provided does not exist in our records.</Message>
+            </Error>"#;
+        let backend = replay_backend_status(403, body);
+        let err = backend
+            .list_objects_all("bucket", "prefix")
+            .await
+            .expect_err("auth failure must be an error");
+        assert!(
+            matches!(err, StorageError::Unauthorized),
+            "expected Unauthorized, got {err:?}"
+        );
     }
 
     #[test]

@@ -157,6 +157,7 @@ function bucket(id: string, y: number): SpanDrawBucket {
     segments: [{ start: 0, end: 100, workerId: 0 }],
     activeNs: 100,
     depth: 0,
+    taskId: null,
   };
   return { spans: [rep], representative: rep, x1: 0, x2: 50, y, h: 8 };
 }

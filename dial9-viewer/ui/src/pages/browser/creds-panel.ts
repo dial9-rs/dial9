@@ -38,10 +38,14 @@ export function mountCredsPanel({ store, els, actions }: PageCtx): CredsPanel {
     const stored = creds.get();
     store.update("creds", { active: creds.has() });
     if (stored) {
-      els.credsAkid.value = stored.accessKeyId || "";
-      els.credsSecret.value = stored.secretAccessKey || "";
-      els.credsToken.value = stored.sessionToken || "";
+      // Region rides both transports; the static key fields exist only on the
+      // static credential (a role ARN has no keys to reflect into the panel).
       els.credsRegion.value = stored.region || "";
+      if (stored.kind === "static") {
+        els.credsAkid.value = stored.accessKeyId || "";
+        els.credsSecret.value = stored.secretAccessKey || "";
+        els.credsToken.value = stored.sessionToken || "";
+      }
     }
   }
 

@@ -8,12 +8,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, it, expect } from "vitest";
 import type { SpawnLocStats, TokioStatsResponse } from "../../lib/trace/index.js";
-import {
-  buildDiffModel,
-  computeStats,
-  shouldStopRefining,
-  singlePeriodRows,
-} from "./stats.js";
+import { buildDiffModel, computeStats, singlePeriodRows } from "./stats.js";
 
 const REFINE: TokioStatsResponse = JSON.parse(
   readFileSync(
@@ -167,13 +162,3 @@ describe("buildDiffModel", () => {
   });
 });
 
-describe("shouldStopRefining (termination)", () => {
-  it("stops with no coverage, when fully folded, or when frozen", () => {
-    expect(shouldStopRefining(null, -1)).toBe(true);
-    expect(shouldStopRefining({ files_folded: 1, files_matched: 1 }, -1)).toBe(true);
-    expect(shouldStopRefining({ files_folded: 2, files_matched: 5 }, 2)).toBe(true); // frozen
-  });
-  it("continues while more files can still be folded", () => {
-    expect(shouldStopRefining({ files_folded: 2, files_matched: 5 }, 1)).toBe(false);
-  });
-});

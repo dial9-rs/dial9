@@ -149,6 +149,11 @@ describe("URL contract: README tables match the recorded fixtures", () => {
       encodeViewState({
         fgWorkerZoom: ["a"],
         fgOffworkerZoom: ["b"],
+        fgInspect: "poll",
+        fgInspectFull: "core::poll::poll",
+        fgSearch: "tokio",
+        fgSpawn: "src/main.rs:10",
+        fgRuntime: "app",
         timeMode: "abs",
         timeZone: "utc",
       }),
@@ -206,6 +211,34 @@ describe("URL contract: recipe URLs resolve", () => {
       hash: "#v=1&fg.w=main%09poll%09do_work",
     };
     expect(resolveViewState(url).fgWorkerZoom).toEqual(["main", "poll", "do_work"]);
+  });
+
+  it("inspect/search/filter hash keys resolve and win over their legacy params", () => {
+    const url = {
+      search:
+        "?trace=t.bin&inspect=old&inspect_full=old::sym&search=stale&spawn=s0&runtime=r0",
+      hash: "#v=1&fg.i=poll&fg.if=core%3A%3Apoll&fg.s=tokio&fg.sp=src%2Fmain.rs%3A10&fg.rt=app",
+    };
+    const s = resolveViewState(url);
+    expect(s.fgInspect).toBe("poll");
+    expect(s.fgInspectFull).toBe("core::poll");
+    expect(s.fgSearch).toBe("tokio");
+    expect(s.fgSpawn).toBe("src/main.rs:10");
+    expect(s.fgRuntime).toBe("app");
+  });
+
+  it("legacy inspect/search/filter params fill fields the hash omits", () => {
+    const url = {
+      search: "?trace=t.bin&inspect=poll&search=tokio&spawn=s&runtime=r",
+      hash: "#v=1&fg.w=main",
+    };
+    const s = resolveViewState(url);
+    expect(s.fgWorkerZoom).toEqual(["main"]);
+    expect(s.fgInspect).toBe("poll");
+    expect(s.fgInspectFull).toBe("poll"); // symbol defaults to display name
+    expect(s.fgSearch).toBe("tokio");
+    expect(s.fgSpawn).toBe("s");
+    expect(s.fgRuntime).toBe("r");
   });
 
   it("recipe 1 params are load scope: the codec never touches them", () => {

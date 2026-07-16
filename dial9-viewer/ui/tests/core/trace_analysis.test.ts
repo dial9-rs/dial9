@@ -33,6 +33,9 @@ const {
   flattenFlamegraph,
   buildFgData,
   buildSpanData,
+  indexPollsByTask,
+  resolveSpanTask,
+  reconstructSpanSegments,
   collectDescendants,
   selectSpanRenderSet,
   computeSpanLayout,
@@ -1099,6 +1102,261 @@ describe("buildSpanData", () => {
       spanB.segments[0].start === 2000 && spanB.segments[0].end === 2500,
       `Span B segment wrong: ${spanB.segments[0].start}-${spanB.segments[0].end}`,
     ).toBe(true);
+  });
+
+  it("derived-struct span schema (SpanEnter__/SpanExit__) parsed correctly", () => {
+    // Hand-written `#[derive(TraceEvent)]` span structs cannot put ':' in their
+    // wire name (it's a Rust identifier), so they use the "SpanEnter__"/
+    // "SpanExit__" prefix instead. The viewer must classify these as spans too.
+    const customEvents = [
+      { name: "SpanEnter__DemoOp", timestamp: 1000, fields: { worker_id: 0, span_id: 1, parent_span_id: null, span_name: "request", operation: "GET /widgets", detail: "request #0" } },
+      { name: "SpanEnter__DemoOp", timestamp: 1100, fields: { worker_id: 0, span_id: 2, parent_span_id: 1, span_name: "db_query", operation: "SELECT widgets", detail: "query for request #0" } },
+      { name: "SpanExit__DemoOp", timestamp: 1200, fields: { worker_id: 0, span_id: 2, span_name: "db_query" } },
+      { name: "SpanExit__DemoOp", timestamp: 1300, fields: { worker_id: 0, span_id: 1, span_name: "request" } },
+    ];
+    const { allSpans, maxDepth } = buildSpanData(customEvents);
+    expect(allSpans.length, `Expected 2 spans, got ${allSpans.length}`).toBe(2);
+    const req = allSpans.find((s: any) => s.spanName === "request");
+    const q = allSpans.find((s: any) => s.spanName === "db_query");
+    expect(req && q, "Missing request or db_query span").toBeTruthy();
+    // Both an interned (operation) and an inline (detail) user field should
+    // surface; base fields should not.
+    expect(
+      req.fields.operation,
+      `Expected operation='GET /widgets', got '${req.fields.operation}'`,
+    ).toBe("GET /widgets");
+    expect(
+      req.fields.detail,
+      `Expected detail='request #0', got '${req.fields.detail}'`,
+    ).toBe("request #0");
+    expect(req.fields.span_name, "span_name should not be in user fields").toBeFalsy();
+    // Nesting via parent_span_id must be reconstructed.
+    expect(q.parentSpanId, `Expected db_query parent '1', got '${q.parentSpanId}'`).toBe("1");
+    expect(maxDepth, `Expected maxDepth=1, got ${maxDepth}`).toBe(1);
+  });
+
+  it("cross-worker enter/exit: segment carries the enter worker", () => {
+    // Regression: a long-lived span entered on one worker and exited on a
+    // different worker (its task migrated between enter and exit). The segment's
+    // `start` is the ENTER timestamp, so the segment must carry the ENTER
+    // worker — otherwise the viewer's span->task lookup (find the poll on
+    // segment.workerId that overlaps segment.start) searches the wrong worker's
+    // poll timeline at the enter time, finds nothing, and fails to select a
+    // task. Single enter/exit pair, workers differ.
+    const customEvents = [
+      { name: "SpanEnter:app::req:req.rs:1", timestamp: 1000, fields: { worker_id: 3, span_id: 1, parent_span_id: null, span_name: "handle_request" } },
+      { name: "SpanExit:app::req:req.rs:1", timestamp: 5000, fields: { worker_id: 7, span_id: 1, span_name: "handle_request" } },
+    ];
+    const { allSpans } = buildSpanData(customEvents);
+    expect(allSpans.length, `Expected 1 span, got ${allSpans.length}`).toBe(1);
+    const seg = allSpans[0].segments[0];
+    expect(
+      seg.start === 1000 && seg.end === 5000,
+      `Segment timing wrong: ${seg.start}-${seg.end}`,
+    ).toBe(true);
+    // The segment start is the enter time (1000, on worker 3), so the segment
+    // must be attributed to worker 3, not the exit worker 7.
+    expect(seg.workerId, `Expected segment workerId=3 (enter worker), got ${seg.workerId}`).toBe(3);
+  });
+
+  it("reconstructs active/idle segments from the owning task's polls", () => {
+    // A long-lived request span: single SpanEnter/SpanExit pair [1000, 9000],
+    // but its owning task (id 42) was only polled twice in that window. The
+    // enter (worker 0, t=1000) falls inside poll [900,1100] which identifies
+    // task 42. Reconstruction should replace the one coarse segment with the
+    // two real on-CPU polls and expose the idle gap between them.
+    const workerSpans = {
+      0: { polls: [
+        { start: 900, end: 1100, taskId: 42 },   // covers the enter -> resolves task 42
+        { start: 8800, end: 8900, taskId: 42 },
+      ] },
+      1: { polls: [
+        { start: 4000, end: 4100, taskId: 42 },   // task migrated to worker 1
+      ] },
+    };
+    const customEvents = [
+      { name: "SpanEnter:app::req:req.rs:1", timestamp: 1000, fields: { worker_id: 0, span_id: 1, parent_span_id: null, span_name: "GET /jobs/next" } },
+      { name: "SpanExit:app::req:req.rs:1", timestamp: 9000, fields: { worker_id: 1, span_id: 1, span_name: "GET /jobs/next" } },
+    ];
+    const { allSpans } = buildSpanData(customEvents, workerSpans);
+    expect(allSpans.length, `Expected 1 span, got ${allSpans.length}`).toBe(1);
+    const s = allSpans[0];
+    // Span lifetime unchanged (the on-wire enter/exit).
+    expect(s.start === 1000 && s.end === 9000, `Span window wrong: ${s.start}-${s.end}`).toBe(true);
+    // Owning task resolved and stored on the span.
+    expect(s.taskId, `Expected taskId=42, got ${s.taskId}`).toBe(42);
+    // Three polls of task 42 fall in [1000,9000]: [1000,1100], [4000,4100], [8800,8900].
+    expect(s.segments.length, `Expected 3 reconstructed segments, got ${s.segments.length}`).toBe(3);
+    expect(
+      s.segments[0].start === 1000 && s.segments[0].end === 1100,
+      `seg0 wrong: ${JSON.stringify(s.segments[0])}`,
+    ).toBe(true);
+    expect(
+      s.segments[1].workerId,
+      `seg1 should be on worker 1 (migrated), got ${s.segments[1].workerId}`,
+    ).toBe(1);
+    // activeNs = 100 + 100 + 100 = 300, far below the 8000 wall-clock lifetime.
+    expect(s.activeNs, `Expected activeNs=300, got ${s.activeNs}`).toBe(300);
+    const idle = (s.end - s.start) - s.activeNs;
+    expect(idle, `Expected idle=7700, got ${idle}`).toBe(7700);
+  });
+
+  it("without workerSpans keeps raw segments (backwards compatible)", () => {
+    // Without workerSpans, behavior is unchanged: raw on-wire segment, no taskId.
+    const customEvents = [
+      { name: "SpanEnter:app::req:req.rs:1", timestamp: 1000, fields: { worker_id: 0, span_id: 1, parent_span_id: null, span_name: "req" } },
+      { name: "SpanExit:app::req:req.rs:1", timestamp: 9000, fields: { worker_id: 0, span_id: 1, span_name: "req" } },
+    ];
+    const { allSpans } = buildSpanData(customEvents);
+    expect(allSpans.length, `Expected 1 span, got ${allSpans.length}`).toBe(1);
+    const s = allSpans[0];
+    expect(s.segments.length, `Expected 1 raw segment, got ${s.segments.length}`).toBe(1);
+    expect(s.activeNs, `Expected activeNs=8000 (raw), got ${s.activeNs}`).toBe(8000);
+    expect(s.taskId, `Expected taskId=null without workerSpans, got ${s.taskId}`).toBeNull();
+  });
+
+  it("does not borrow a recycled task-id's later polls", () => {
+    // Task id 7 is recycled: instance A polled at [1000,1100], then a LATER
+    // instance polled at [50000,50100]. A span owned by instance A (enter at
+    // 1000, exit at 1200) must only pick up A's poll, not the recycled
+    // instance's — the `p.start > seg.end` break in reconstructSpanSegments
+    // guards this.
+    const workerSpans = {
+      0: { polls: [
+        { start: 900, end: 1100, taskId: 7 },   // instance A, covers enter
+        { start: 50000, end: 50100, taskId: 7 }, // recycled instance, far later
+      ] },
+    };
+    const customEvents = [
+      { name: "SpanEnter:app::f:f:1", timestamp: 1000, fields: { worker_id: 0, span_id: 1, parent_span_id: null, span_name: "f" } },
+      { name: "SpanExit:app::f:f:1", timestamp: 1200, fields: { worker_id: 0, span_id: 1, span_name: "f" } },
+    ];
+    const { allSpans } = buildSpanData(customEvents, workerSpans);
+    const s = allSpans[0];
+    expect(s.taskId, `Expected taskId=7, got ${s.taskId}`).toBe(7);
+    expect(
+      s.segments.length,
+      `Expected 1 segment (recycled poll excluded), got ${s.segments.length}`,
+    ).toBe(1);
+    expect(s.segments[0].end, `Expected segment clamped to 1100, got ${s.segments[0].end}`).toBe(1100);
+    expect(s.activeNs, `Expected activeNs=100, got ${s.activeNs}`).toBe(100);
+  });
+});
+
+// ── reconstructSpanSegments (unit) ──
+
+describe("reconstructSpanSegments", () => {
+  it("carves a coarse segment into per-poll active segments", () => {
+    // One coarse segment [0,1000] intersected with a task polled twice
+    // ([100,200] on w0, [500,600] on w1). Result: two active segments with an
+    // idle gap between; workers come from the polls, not the raw segment.
+    const raw = [{ start: 0, end: 1000, workerId: 9 }];
+    const taskPolls = [
+      { start: 100, end: 200, workerId: 0 },
+      { start: 500, end: 600, workerId: 1 },
+    ];
+    const segs = reconstructSpanSegments(raw, taskPolls);
+    expect(segs.length, `Expected 2 segments, got ${segs.length}`).toBe(2);
+    expect(
+      segs[0].start === 100 && segs[0].end === 200 && segs[0].workerId === 0,
+      `seg0 wrong: ${JSON.stringify(segs[0])}`,
+    ).toBe(true);
+    expect(
+      segs[1].start === 500 && segs[1].end === 600 && segs[1].workerId === 1,
+      `seg1 wrong: ${JSON.stringify(segs[1])}`,
+    ).toBe(true);
+  });
+
+  it("clamps overlapping polls to the segment window", () => {
+    // Polls extending past the segment on both ends are clamped to [start,end].
+    const raw = [{ start: 300, end: 700, workerId: 0 }];
+    const taskPolls = [
+      { start: 100, end: 400, workerId: 0 }, // overlaps left edge
+      { start: 600, end: 900, workerId: 0 }, // overlaps right edge
+    ];
+    const segs = reconstructSpanSegments(raw, taskPolls);
+    expect(segs.length, `Expected 2 segments, got ${segs.length}`).toBe(2);
+    expect(
+      segs[0].start === 300 && segs[0].end === 400,
+      `left clamp wrong: ${JSON.stringify(segs[0])}`,
+    ).toBe(true);
+    expect(
+      segs[1].start === 600 && segs[1].end === 700,
+      `right clamp wrong: ${JSON.stringify(segs[1])}`,
+    ).toBe(true);
+  });
+
+  it("falls back to raw segments when no poll overlaps", () => {
+    // Span window falls entirely between the task's polls -> no intersection.
+    // Rather than drop the span, keep the raw segments so it still renders.
+    const raw = [{ start: 300, end: 400, workerId: 5 }];
+    const taskPolls = [
+      { start: 0, end: 100, workerId: 0 },
+      { start: 700, end: 800, workerId: 0 },
+    ];
+    const segs = reconstructSpanSegments(raw, taskPolls);
+    expect(segs, "Expected raw segments returned by reference on no overlap").toBe(raw);
+  });
+
+  it("is identity when task has no polls", () => {
+    const raw = [{ start: 0, end: 10, workerId: 0 }];
+    expect(reconstructSpanSegments(raw, undefined), "undefined polls should return raw").toBe(raw);
+    expect(reconstructSpanSegments(raw, []), "empty polls should return raw").toBe(raw);
+  });
+
+  it("intersects each raw segment independently (gap polls excluded)", () => {
+    // A span already carrying two per-poll raw segments (e.g. re-entered).
+    // Each is intersected independently; a poll landing in the gap BETWEEN the
+    // two raw segments must NOT be attributed to the span.
+    const raw = [
+      { start: 100, end: 200, workerId: 0 },
+      { start: 500, end: 600, workerId: 0 },
+    ];
+    const taskPolls = [
+      { start: 120, end: 180, workerId: 0 }, // inside raw[0]
+      { start: 300, end: 400, workerId: 0 }, // in the gap — must be excluded
+      { start: 520, end: 640, workerId: 1 }, // overlaps raw[1], clamped to 600
+    ];
+    const segs = reconstructSpanSegments(raw, taskPolls);
+    expect(
+      segs.length,
+      `Expected 2 segments (gap poll excluded), got ${segs.length}: ${JSON.stringify(segs)}`,
+    ).toBe(2);
+    expect(
+      segs[0].start === 120 && segs[0].end === 180,
+      `seg0 wrong: ${JSON.stringify(segs[0])}`,
+    ).toBe(true);
+    expect(
+      segs[1].start === 520 && segs[1].end === 600 && segs[1].workerId === 1,
+      `seg1 wrong: ${JSON.stringify(segs[1])}`,
+    ).toBe(true);
+  });
+});
+
+// ── resolveSpanTask (unit) ──
+
+describe("resolveSpanTask", () => {
+  it("binary-searches the covering poll; gaps and unknown workers -> null", () => {
+    // Covering poll found among many; and a timestamp in an inter-poll gap
+    // resolves to null (not the nearest poll).
+    const workerSpans = {
+      2: { polls: [
+        { start: 0, end: 100, taskId: 11 },
+        { start: 200, end: 300, taskId: 22 },
+        { start: 400, end: 500, taskId: 33 },
+      ] },
+    };
+    expect(resolveSpanTask({ start: 250, workerId: 2 }, workerSpans), "Expected task 22 for ts=250").toBe(22);
+    expect(resolveSpanTask({ start: 400, workerId: 2 }, workerSpans), "Expected task 33 at poll start edge").toBe(33);
+    expect(resolveSpanTask({ start: 150, workerId: 2 }, workerSpans), "Gap timestamp should resolve to null").toBeNull();
+    expect(resolveSpanTask({ start: 250, workerId: 9 }, workerSpans), "Unknown worker should resolve to null").toBeNull();
+  });
+
+  it("treats a covering poll with taskId 0 as null", () => {
+    // A poll covers the timestamp but has taskId 0 (block-in-place stub) ->
+    // treated as "no task", not task 0.
+    const workerSpans = { 0: { polls: [{ start: 0, end: 100, taskId: 0 }] } };
+    expect(resolveSpanTask({ start: 50, workerId: 0 }, workerSpans), "taskId 0 should resolve to null").toBeNull();
   });
 });
 

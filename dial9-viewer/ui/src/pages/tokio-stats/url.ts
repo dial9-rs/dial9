@@ -16,14 +16,19 @@ export interface PeriodBounds {
   endNs: string | null;
 }
 
-/** Read the scope params once. Values are preserved verbatim by sync. */
-export function readScope(params: URLSearchParams): ScopeParams {
+/** Pull the scope dimensions out of a query params bag (page scope, or a diff side). */
+export function scopeFromParams(params: URLSearchParams): ScopeParams {
   return {
     bucket: params.get("bucket"),
     prefix: params.get("prefix"),
     service: params.get("service"),
     host: params.getAll("host"),
   };
+}
+
+/** Read the page scope params once. Values are preserved verbatim by sync. */
+export function readScope(params: URLSearchParams): ScopeParams {
+  return scopeFromParams(params);
 }
 
 /**

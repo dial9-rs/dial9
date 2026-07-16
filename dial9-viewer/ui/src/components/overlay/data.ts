@@ -63,7 +63,7 @@ export function deriveOverlayData(trace: ParsedTrace): OverlayData {
     attachCpuSamples(trace.cpuSamples, workerSpans);
   }
 
-  const spanData = buildSpanData(trace.customEvents);
+  const spanData = buildSpanData(trace.customEvents, workerSpans);
   const timeline = buildActiveTaskTimeline(
     trace.taskSpawnTimes,
     trace.taskTerminateTimes,

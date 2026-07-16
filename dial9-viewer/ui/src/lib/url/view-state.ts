@@ -52,6 +52,20 @@ export interface ViewState {
   fgWorkerZoom?: readonly string[];
   /** Flamegraph off-worker-tree zoom path, root -> target frame names. */
   fgOffworkerZoom?: readonly string[];
+  /** Flamegraph inspect (butterfly) focus display name (legacy `inspect`). */
+  fgInspect?: string | undefined;
+  /**
+   * Flamegraph inspect focus symbol (legacy `inspect_full`). The identity key
+   * is `fgInspectFull || fgInspect`; the legacy mirror only writes it when it
+   * differs from the display name.
+   */
+  fgInspectFull?: string | undefined;
+  /** Flamegraph frames-search query (legacy `search`). */
+  fgSearch?: string | undefined;
+  /** Flamegraph spawn-location filter value (legacy `spawn`), exact mode only. */
+  fgSpawn?: string | undefined;
+  /** Flamegraph runtime filter value (legacy `runtime`), exact mode only. */
+  fgRuntime?: string | undefined;
   /** Clock display mode (key `tm`). */
   timeMode?: TimeMode;
   /** Timezone for absolute timestamps (key `tz`). */
@@ -126,11 +140,21 @@ export interface DecodedViewState {
 // The v1 key registry. Order here is the canonical emit order (after `v`).
 const KEY_FG_WORKER = "fg.w";
 const KEY_FG_OFFWORKER = "fg.o";
+const KEY_FG_INSPECT = "fg.i";
+const KEY_FG_INSPECT_FULL = "fg.if";
+const KEY_FG_SEARCH = "fg.s";
+const KEY_FG_SPAWN = "fg.sp";
+const KEY_FG_RUNTIME = "fg.rt";
 const KEY_TIME_MODE = "tm";
 const KEY_TIME_ZONE = "tz";
 const KNOWN_KEYS: readonly string[] = [
   KEY_FG_WORKER,
   KEY_FG_OFFWORKER,
+  KEY_FG_INSPECT,
+  KEY_FG_INSPECT_FULL,
+  KEY_FG_SEARCH,
+  KEY_FG_SPAWN,
+  KEY_FG_RUNTIME,
   KEY_TIME_MODE,
   KEY_TIME_ZONE,
 ];
@@ -138,6 +162,14 @@ const KNOWN_KEYS: readonly string[] = [
 /** The legacy flamegraph zoom-state QUERY params. */
 export const LEGACY_WORKER_ZOOM_PARAM = "worker-zoom";
 export const LEGACY_OFFWORKER_ZOOM_PARAM = "offworker-zoom";
+// The legacy flamegraph inspect/search/filter QUERY params (flamegraph_view_state.js
+// STATE_KEYS). Names kept EXACTLY so a link copied from the migrated page
+// restores on the legacy page too.
+export const LEGACY_INSPECT_PARAM = "inspect";
+export const LEGACY_INSPECT_FULL_PARAM = "inspect_full";
+export const LEGACY_SEARCH_PARAM = "search";
+export const LEGACY_SPAWN_PARAM = "spawn";
+export const LEGACY_RUNTIME_PARAM = "runtime";
 
 /** Frame-path wire format: tab-joined, root -> target. */
 function encodeZoomPath(path: readonly string[]): string {
@@ -181,6 +213,16 @@ export function encodeViewState(
   if (state.fgOffworkerZoom !== undefined && state.fgOffworkerZoom.length > 0) {
     p.set(KEY_FG_OFFWORKER, encodeZoomPath(state.fgOffworkerZoom));
   }
+  // Inspect/search/filters ride verbatim (drop empties). `fg.if` carries the
+  // symbol only when it differs from the display name, matching the legacy
+  // mirror so both carriers agree on when the pair is redundant.
+  if (state.fgInspect) p.set(KEY_FG_INSPECT, state.fgInspect);
+  if (state.fgInspectFull && state.fgInspectFull !== state.fgInspect) {
+    p.set(KEY_FG_INSPECT_FULL, state.fgInspectFull);
+  }
+  if (state.fgSearch) p.set(KEY_FG_SEARCH, state.fgSearch);
+  if (state.fgSpawn) p.set(KEY_FG_SPAWN, state.fgSpawn);
+  if (state.fgRuntime) p.set(KEY_FG_RUNTIME, state.fgRuntime);
   if (state.timeMode !== undefined) p.set(KEY_TIME_MODE, state.timeMode);
   if (state.timeZone !== undefined) p.set(KEY_TIME_ZONE, state.timeZone);
   for (const [k, v] of unknown) p.append(k, v);
@@ -217,6 +259,20 @@ export function decodeViewState(hashPayload: string): DecodedViewState | null {
     const path = decodeZoomPath(oz);
     if (path !== null) state.fgOffworkerZoom = path;
   }
+  const inspect = p.get(KEY_FG_INSPECT);
+  if (inspect) {
+    state.fgInspect = inspect;
+    // Symbol defaults to the display name (legacy readState semantics), so the
+    // identity key `fgInspectFull || fgInspect` is always well-formed.
+    const full = p.get(KEY_FG_INSPECT_FULL);
+    state.fgInspectFull = full || inspect;
+  }
+  const search = p.get(KEY_FG_SEARCH);
+  if (search) state.fgSearch = search;
+  const spawn = p.get(KEY_FG_SPAWN);
+  if (spawn) state.fgSpawn = spawn;
+  const runtime = p.get(KEY_FG_RUNTIME);
+  if (runtime) state.fgRuntime = runtime;
   const tm = p.get(KEY_TIME_MODE);
   if (tm !== null && isTimeMode(tm)) state.timeMode = tm;
   const tz = p.get(KEY_TIME_ZONE);
@@ -230,16 +286,29 @@ export function decodeViewState(hashPayload: string): DecodedViewState | null {
   return { version, state, unknown };
 }
 
+/** The ViewState fields the legacy flamegraph query params mirror. */
+type LegacyMirroredState = Pick<
+  ViewState,
+  | "fgWorkerZoom"
+  | "fgOffworkerZoom"
+  | "fgInspect"
+  | "fgInspectFull"
+  | "fgSearch"
+  | "fgSpawn"
+  | "fgRuntime"
+>;
+
 /**
- * Read the LEGACY flamegraph zoom params from a query string, with their exact
- * legacy semantics: absent or empty param = no zoom for that tree. Field names
- * line up with ViewState so the result merges directly.
+ * Read the LEGACY flamegraph view params (zoom, inspect, search, spawn/runtime
+ * filters) from a query string, with their exact legacy semantics (see
+ * flamegraph_view_state.js readState): absent or empty param = that field is
+ * unset. Field names line up with ViewState so the result merges directly.
  */
 export function legacyZoomFromQuery(
   search: string | URLSearchParams,
-): Pick<ViewState, "fgWorkerZoom" | "fgOffworkerZoom"> {
+): LegacyMirroredState {
   const p = typeof search === "string" ? new URLSearchParams(search) : search;
-  const out: Pick<ViewState, "fgWorkerZoom" | "fgOffworkerZoom"> = {};
+  const out: LegacyMirroredState = {};
   const wz = p.get(LEGACY_WORKER_ZOOM_PARAM);
   if (wz !== null) {
     const path = decodeZoomPath(wz);
@@ -250,26 +319,66 @@ export function legacyZoomFromQuery(
     const path = decodeZoomPath(oz);
     if (path !== null) out.fgOffworkerZoom = path;
   }
+  const inspect = p.get(LEGACY_INSPECT_PARAM);
+  if (inspect) {
+    out.fgInspect = inspect;
+    // Symbol defaults to the display name (only serialized when it differs).
+    out.fgInspectFull = p.get(LEGACY_INSPECT_FULL_PARAM) || inspect;
+  }
+  const search2 = p.get(LEGACY_SEARCH_PARAM);
+  if (search2) out.fgSearch = search2;
+  const spawn = p.get(LEGACY_SPAWN_PARAM);
+  if (spawn) out.fgSpawn = spawn;
+  const runtime = p.get(LEGACY_RUNTIME_PARAM);
+  if (runtime) out.fgRuntime = runtime;
   return out;
 }
 
 /**
- * Mirror the zoom fields of `state` into the LEGACY query params, exactly as
- * the legacy page writes them: set when non-empty, DELETE when empty, touch
- * nothing else in `params`. Keeping the mirror alive is what makes an
- * address-bar copy from the migrated page open correctly on the legacy page.
+ * Mirror the flamegraph view fields of `state` into the LEGACY query params,
+ * exactly as the legacy page writes them (flamegraph_view_state.js writeState):
+ * set when non-empty, DELETE when empty, touch nothing else in `params`.
+ * `inspect_full` is emitted only when it differs from `inspect`. Keeping the
+ * mirror alive is what makes an address-bar copy from the migrated page open
+ * correctly on the legacy page.
  */
 export function applyLegacyZoomToQuery(params: URLSearchParams, state: ViewState): void {
-  if (state.fgWorkerZoom !== undefined && state.fgWorkerZoom.length > 0) {
-    params.set(LEGACY_WORKER_ZOOM_PARAM, encodeZoomPath(state.fgWorkerZoom));
+  setOrDelete(
+    params,
+    LEGACY_WORKER_ZOOM_PARAM,
+    state.fgWorkerZoom && state.fgWorkerZoom.length > 0
+      ? encodeZoomPath(state.fgWorkerZoom)
+      : null,
+  );
+  setOrDelete(
+    params,
+    LEGACY_OFFWORKER_ZOOM_PARAM,
+    state.fgOffworkerZoom && state.fgOffworkerZoom.length > 0
+      ? encodeZoomPath(state.fgOffworkerZoom)
+      : null,
+  );
+  if (state.fgInspect) {
+    params.set(LEGACY_INSPECT_PARAM, state.fgInspect);
+    setOrDelete(
+      params,
+      LEGACY_INSPECT_FULL_PARAM,
+      state.fgInspectFull && state.fgInspectFull !== state.fgInspect
+        ? state.fgInspectFull
+        : null,
+    );
   } else {
-    params.delete(LEGACY_WORKER_ZOOM_PARAM);
+    params.delete(LEGACY_INSPECT_PARAM);
+    params.delete(LEGACY_INSPECT_FULL_PARAM);
   }
-  if (state.fgOffworkerZoom !== undefined && state.fgOffworkerZoom.length > 0) {
-    params.set(LEGACY_OFFWORKER_ZOOM_PARAM, encodeZoomPath(state.fgOffworkerZoom));
-  } else {
-    params.delete(LEGACY_OFFWORKER_ZOOM_PARAM);
-  }
+  setOrDelete(params, LEGACY_SEARCH_PARAM, state.fgSearch || null);
+  setOrDelete(params, LEGACY_SPAWN_PARAM, state.fgSpawn || null);
+  setOrDelete(params, LEGACY_RUNTIME_PARAM, state.fgRuntime || null);
+}
+
+/** Set `key` to `value`, or delete it when `value` is null/empty. */
+function setOrDelete(params: URLSearchParams, key: string, value: string | null): void {
+  if (value != null && value !== "") params.set(key, value);
+  else params.delete(key);
 }
 
 /**

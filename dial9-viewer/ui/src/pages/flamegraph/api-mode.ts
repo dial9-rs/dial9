@@ -1,19 +1,19 @@
 // The aggregated server-side flamegraph mode (`?api=1`): instead of fetching +
-// decoding trace bytes client-side, the page polls the server's demand-driven
-// /api/flamegraph refinement loop and renders the pre-built tree each response
-// carries.
+// decoding trace bytes client-side, the page opens the server's /api/flamegraph
+// SSE stream and renders the pre-built tree each streamed snapshot carries. The
+// server owns the refine/stop loop: it emits the already-folded snapshot first,
+// then folds to the cap and pushes a fresh tree per file, closing the stream
+// when done.
 
 import {
-  coveragePercent,
   Dial9Creds,
   formatCoverageBadge,
   formatHumanDuration,
   hostFacetOptions,
-  isCoverageFrozen,
   nextMaxFiles,
   nsToPickerUtc,
+  openSse,
   pickerUtcToNs,
-  shouldAutoStopRefining,
 } from "../../lib/trace/index.js";
 import type {
   ApiFlamegraphNode,
@@ -22,11 +22,12 @@ import type {
   FlamegraphNode,
   FlamegraphResponse,
 } from "../../lib/trace/index.js";
-import { createFlamegraph } from "../../lib/canvas/index.js";
+import { createFlamegraph, diffSearch, fullScopeQuery } from "../../lib/canvas/index.js";
 import { mountCopyLink } from "../../lib/url/index.js";
 import type { PageEls } from "./dom.js";
 import { closeHelpOnEscape, mountFlamegraphKeys } from "./fg-keys.js";
 import type { FgKeys } from "./fg-keys.js";
+import { createPollMinimap, type PollMinimap } from "./minimap.js";
 import { buildApiUrl, buildBrowserQuery, seedFacetState, type ApiQueryState } from "./query.js";
 
 /** One accumulated facet: display label + monotonically-unioned values. */
@@ -103,7 +104,13 @@ export function runApiMode(params: URLSearchParams, els: PageEls): void {
   const scopeBucket = params.get("bucket");
   const scopePrefix = params.get("prefix");
 
+  // The poll-duration band minimap (aggregated mode). Seeded from the URL,
+  // read into the query via minimap.band(); a brush/Apply re-streams. Assigned
+  // below (before the first startStreaming), so queryState always sees it.
+  let minimap: PollMinimap | undefined;
+
   function queryState(): ApiQueryState {
+    const band = minimap?.band() ?? { minPollNs: null, maxPollNs: null };
     return {
       dataDir,
       bucket: scopeBucket,
@@ -113,6 +120,8 @@ export function runApiMode(params: URLSearchParams, els: PageEls): void {
       facets: facetState,
       startNs: pickerUtcToNs(fStart.value),
       endNs: pickerUtcToNs(fEnd.value),
+      minPollNs: band.minPollNs,
+      maxPollNs: band.maxPollNs,
       maxFiles,
     };
   }
@@ -184,7 +193,7 @@ export function runApiMode(params: URLSearchParams, els: PageEls): void {
     function applyFacetChange(): void {
       maxFiles = null;
       updateBrowserUrl();
-      startPolling();
+      startStreaming();
     }
 
     for (const [name, { label, values }] of Object.entries(availFacets)) {
@@ -280,153 +289,165 @@ export function runApiMode(params: URLSearchParams, els: PageEls): void {
     return bits.join(" \u00b7 ");
   }
 
-  // Poll-loop state. `pollToken` lets us cancel an in-flight loop when
-  // the filters change or "Refine more"/"Stop" is clicked: each loop
-  // captures the token and bails if it no longer matches the current one.
-  const POLL_INTERVAL_MS = 800;
-  let pollToken = 0;
-  let pollTimer: ReturnType<typeof setTimeout> | null = null;
-  let prevCoverage: Coverage | null = null;
-  // Per-poll coverage gains (percentage points), newest last. Drives the
-  // auto-stop heuristic (shouldAutoStopRefining).
-  let coverageDeltas: number[] = [];
+  // Stream state. Each open stream gets an AbortController; the next start
+  // (filters change, "Refine more") or "Stop" aborts it. A monotonic
+  // `streamToken` guards late callbacks from a stream that has since been
+  // superseded.
+  let streamToken = 0;
+  let abortCtl: AbortController | null = null;
+  // The last-rendered coverage badge (without the trailing status suffix), so
+  // the close/stop/error handlers can re-stamp it. `lastCoverage` feeds the
+  // "Refine more" ceiling computation.
+  let lastBadge = "";
+  let lastCoverage: Coverage | null = null;
+  let gotEvent = false;
   const stopBtn = document.getElementById("f-stop") as HTMLButtonElement;
   const moreBtn = document.getElementById("f-more") as HTMLButtonElement;
   const applyBtn = document.getElementById("f-apply") as HTMLButtonElement;
 
   function setRefiningUi(active: boolean): void {
+    // Stop button: enabled only while streaming.
     stopBtn.disabled = !active;
     stopBtn.style.opacity = active ? "1" : "0.4";
     stopBtn.style.cursor = active ? "pointer" : "not-allowed";
+    // Refine-more button: enabled only when idle (stream closed).
     moreBtn.disabled = active;
     moreBtn.style.opacity = active ? "0.4" : "1";
     moreBtn.style.cursor = active ? "not-allowed" : "pointer";
   }
 
-  function stopPolling(): void {
-    pollToken++;
-    if (pollTimer != null) {
-      clearTimeout(pollTimer);
-      pollTimer = null;
+  function stopStreaming(): void {
+    streamToken++;
+    if (abortCtl != null) {
+      abortCtl.abort();
+      abortCtl = null;
     }
     setRefiningUi(false);
   }
 
-  // `refine` is false on the first poll for a scope (read-only: the
-  // server returns whatever is already folded, instantly), then true to
-  // fold a batch each subsequent poll.
-  async function poll(token: number, refine: boolean): Promise<void> {
-    let resp: FlamegraphResponse;
-    try {
-      const credHeaders = Dial9Creds.headers();
-      const httpResp = await fetch(
-        buildApiUrl(queryState(), refine, window.location.origin),
-        { headers: credHeaders }
-      );
-      if (!httpResp.ok) throw new Error(await httpResp.text());
-      resp = (await httpResp.json()) as FlamegraphResponse;
-    } catch (err) {
-      if (token !== pollToken) return; // superseded
-      const message = err instanceof Error ? err.message : String(err);
-      els.showError("Failed to load flamegraph: " + message);
-      return;
-    }
-    if (token !== pollToken) return; // superseded while fetching
-
+  // Render one streamed snapshot (a full FlamegraphResponse).
+  function renderEvent(resp: FlamegraphResponse): void {
+    gotEvent = true;
     const meta = resp.metadata;
     renderScopeHeader(meta);
     renderFacets(meta);
 
-    // First successful response hides the loading overlay; subsequent polls
-    // refine in-place without it.
+    // Poll-duration minimap (#663). Guarded: a minimap failure must never
+    // strand the flamegraph (legacy wraps this in try/catch too).
+    try {
+      minimap?.render(meta.poll_duration_histogram);
+    } catch (e) {
+      console.warn("poll-duration minimap render failed:", e);
+    }
+
+    // First event hides the loading overlay; later events refine in-place
+    // without it.
     loadingEl.classList.add("hidden");
     containerEl.style.display = "flex";
     fg.setTreeDirect(toFgTree(resp.tree), resp.tree.count);
 
     const cov = resp.coverage;
-    if (cov == null) {
-      // Older / local-dir mode: no coverage, single fetch only.
-      statsEl.textContent = baseStats(resp);
-      stopPolling();
-      return;
-    }
-
-    // Track per-poll coverage gain (skip the read-only first poll, which
-    // establishes the baseline rather than refining).
-    if (refine && prevCoverage != null) {
-      coverageDeltas.push(coveragePercent(cov) - coveragePercent(prevCoverage));
-    }
-    const frozen = isCoverageFrozen(prevCoverage, cov);
-    const plateaued = shouldAutoStopRefining(coverageDeltas);
-    prevCoverage = cov;
-
-    const badge = baseStats(resp) + " \u00b7 " + formatCoverageBadge(cov);
-
-    // Stop when the server can't fold more (frozen) or coverage has plateaued
-    // (diminishing returns over recent polls).
-    if (refine && (frozen || plateaued)) {
-      statsEl.textContent = badge + " \u00b7 refined";
-      stopPolling();
-      return;
-    }
+    lastCoverage = cov ?? null;
+    // Local-dir / non-aggregation mode carries no coverage badge.
+    lastBadge =
+      cov == null
+        ? baseStats(resp)
+        : baseStats(resp) + " \u00b7 " + formatCoverageBadge(cov);
     statsEl.innerHTML =
-      badge +
+      lastBadge +
       ' \u00b7 <span class="spinner" style="width:0.9em;height:0.9em;display:inline-block;vertical-align:middle"></span> refining\u2026';
-
-    setRefiningUi(true);
-    pollTimer = setTimeout(() => {
-      if (token === pollToken) void poll(token, true);
-    }, POLL_INTERVAL_MS);
   }
 
-  // (Re)start the poll loop from scratch: cancels any in-flight loop,
-  // resets freeze tracking, and shows the loading overlay. The first poll
-  // is read-only (instant); refinement kicks in on the polls that follow.
-  function startPolling(): void {
-    stopPolling();
-    prevCoverage = null;
-    coverageDeltas = [];
+  // (Re)start the stream from scratch: aborts any in-flight stream and shows the
+  // loading overlay. The server emits the already-folded snapshot immediately,
+  // then refines to the cap and closes the stream.
+  function startStreaming(): void {
+    stopStreaming();
     setRefiningUi(true);
+    gotEvent = false;
     loadingEl.classList.remove("hidden");
     loadingEl.innerHTML = '<div class="spinner"></div>Loading aggregated flamegraph\u2026';
     containerEl.style.display = "none";
     errorEl.style.display = "none";
-    const token = pollToken;
-    void poll(token, false);
+    const token = ++streamToken;
+    abortCtl = new AbortController();
+    void openSse(buildApiUrl(queryState(), window.location.origin), {
+      headers: Dial9Creds.headers(),
+      signal: abortCtl.signal,
+      onEvent: (obj) => {
+        if (token === streamToken) renderEvent(obj as FlamegraphResponse);
+      },
+      onClose: () => {
+        if (token !== streamToken) return;
+        // Server folded to the cap and closed the stream.
+        statsEl.textContent = lastBadge + (gotEvent ? " \u00b7 refined" : "");
+        setRefiningUi(false);
+      },
+      onError: (err) => {
+        if (token !== streamToken) return;
+        if (!gotEvent) {
+          els.showError("Failed to load flamegraph: " + err.message);
+        } else {
+          // Mid-stream drop: keep the rendered tree but clear the
+          // (would-be-eternal) spinner.
+          statsEl.textContent = lastBadge + " \u00b7 interrupted";
+        }
+        setRefiningUi(false);
+      },
+    });
   }
 
   applyBtn.addEventListener("click", () => {
     // New filters invalidate the current scope; reset depth.
     maxFiles = null;
     updateBrowserUrl();
-    startPolling();
+    startStreaming();
   });
 
   moreBtn.addEventListener("click", () => {
     // Request deeper sampling for the current scope: raise the ceiling to ~4x
-    // the files folded so far, then resume refining (reset the plateau tracker
-    // so it doesn't immediately auto-stop on the prior history).
-    const folded = prevCoverage ? prevCoverage.files_folded : 0;
+    // the files folded so far, then reopen the stream. The server folds from
+    // where it left off (already-folded files served instantly) up to the cap.
+    const folded = lastCoverage ? lastCoverage.files_folded : 0;
     maxFiles = nextMaxFiles(folded);
-    coverageDeltas = [];
-    stopPolling();
-    setRefiningUi(true);
-    // Show the refining spinner immediately in the stats bar.
-    statsEl.innerHTML =
-      (statsEl.textContent ?? "").replace(/ \u00b7 (?:refined|stopped)$/, "") +
-      ' \u00b7 <span class="spinner" style="width:0.9em;height:0.9em;display:inline-block;vertical-align:middle"></span> refining\u2026';
-    const token = pollToken;
-    void poll(token, true);
+    startStreaming();
   });
 
   stopBtn.addEventListener("click", () => {
-    // Manual stop: freeze at the current coverage.
-    const badge = (statsEl.textContent ?? "").replace(/ \u00b7 refining\u2026$/, "");
-    stopPolling();
-    statsEl.textContent = badge + " \u00b7 stopped";
+    // Manual stop: abort the stream, freeze at the current coverage.
+    stopStreaming();
+    statsEl.textContent = lastBadge + " \u00b7 stopped";
   });
 
-  startPolling();
+  // Poll-duration minimap: built after the toolbar, seeded from the URL band
+  // params. A brush/Apply resets the fold ceiling, rewrites the browser URL and
+  // re-streams (like a facet change); the fast/slow split opens a two-sided diff.
+  minimap = createPollMinimap({
+    anchor: toolbar,
+    ctlStyle,
+    initialMinPollNs: params.get("min_poll_ns"),
+    initialMaxPollNs: params.get("max_poll_ns"),
+    onApply: () => {
+      maxFiles = null;
+      updateBrowserUrl();
+      startStreaming();
+    },
+    onDiffFastSlow: (splitNs) => {
+      // A = fast polls (< split), B = slow polls (>= split). Server band
+      // bounds are inclusive, so the fast side stops one ns below the split to
+      // keep the partition disjoint. Opens the two-sided diff in a new tab.
+      const base = () => fullScopeQuery(new URLSearchParams(buildBrowserQuery(queryState())));
+      const a = base();
+      a.delete("min_poll_ns");
+      a.set("max_poll_ns", String(splitNs - 1));
+      const b = base();
+      b.set("min_poll_ns", String(splitNs));
+      b.delete("max_poll_ns");
+      window.open(window.location.pathname + "?" + diffSearch(a, b), "_blank");
+    },
+  });
+
+  startStreaming();
   window.addEventListener("resize", () => fg.resize());
   // Escape cascade: an open unified help overlay closes first (no-op when closed).
   window.addEventListener("keydown", (e) => {

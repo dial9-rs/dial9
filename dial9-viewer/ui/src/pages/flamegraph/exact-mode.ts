@@ -20,7 +20,7 @@ import type { PageEls } from "./dom.js";
 import { closeHelpOnEscape, mountFlamegraphKeys } from "./fg-keys.js";
 import type { FgKeys } from "./fg-keys.js";
 import { loadingLabel, resolveTraceUrls } from "./query.js";
-import { createFgUrlSync, restoreZoomFromUrl } from "./view-state.js";
+import { createFgUrlSync, restoreFgStateFromUrl } from "./view-state.js";
 
 export async function runExactMode(
   params: URLSearchParams,
@@ -177,44 +177,44 @@ export async function runExactMode(
   els.loadingEl.classList.add("hidden");
   els.containerEl.style.display = "flex";
 
-  // Zoom -> URL sync: one debounced replaceState per zoom burst, touching the
-  // two zoom query params (every other param survives) and carrying the
-  // versioned view-state hash. The lazy getZoomPath closure resolves the widget
+  // View -> URL sync: one debounced replaceState per change burst, touching the
+  // legacy view query params (every other param survives) and carrying the
+  // versioned view-state hash. The lazy getViewState closure resolves the widget
   // created on the next line.
-  const urlSync = createFgUrlSync(() => fg.getZoomPath());
+  const urlSync = createFgUrlSync(() => fg.getViewState());
   flushUrlState = () => {
     urlSync.flush();
   };
 
-  // Unified keys: mounted after the URL zoom restore below so the landed state
-  // is the undo baseline; late-bound here because the widget's onZoomChange
+  // Unified keys: mounted after the URL view restore below so the landed state
+  // is the undo baseline; late-bound here because the widget's onViewChange
   // must also record zoom history for `z`.
   let keys: FgKeys | null = null;
   const fg = createFlamegraph(els.containerEl, () => {
     keys?.recordZoom();
-    urlSync.onZoomChange();
+    urlSync.onViewChange();
   });
   fg.setData(allSamples, trace.callframeSymbols, {
     exportTitle: `Flamegraph \u2014 ${label}`,
     runtimeWorkers: trace.runtimeWorkers,
   });
 
-  // Restore zoom from URL (only if the time-range filter succeeded, otherwise
-  // the tree differs). Hash state wins per field over the query params;
-  // restoring writes nothing back (see view-state.ts).
-  restoreZoomFromUrl(
+  // Restore the full view from the URL (only if the time-range filter succeeded,
+  // otherwise the tree differs). Hash state wins per field over the query
+  // params; the restore is silent, so it writes nothing back (see view-state.ts).
+  restoreFgStateFromUrl(
     { search: window.location.search, hash: window.location.hash },
     fg,
     timeRangeMatched,
   );
 
   // Unified keys: `?` help, `f` fit, `z` zoom-undo; the widget's own `/` /
-  // Ctrl+F / Escape bindings stay untouched. f/z settle the zoom URL sync
+  // Ctrl+F / Escape bindings stay untouched. f/z settle the view URL sync
   // through onZoomMutated.
   keys = mountFlamegraphKeys({
     fg,
     containerEl: els.containerEl,
-    onZoomMutated: urlSync.onZoomChange,
+    onZoomMutated: urlSync.onViewChange,
   });
 
   window.addEventListener("resize", () => fg.resize());
