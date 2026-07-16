@@ -106,10 +106,10 @@ Or via Docker (no host Rust/AWS/Java needed — DDB Local runs as a sidecar):
 Or manually:
 
 ```bash
-rm -f dial9-viewer/ui/demo-trace.bin
+rm -rf dial9-viewer/ui/demo-trace.bin sched-traces
 cargo build --release -p metrics-service
-AWS_PROFILE=your-profile cargo run --release -p metrics-service --bin metrics-service -- --trace-path sched-trace.bin --demo
-cp sched-trace.*.bin dial9-viewer/ui/demo-trace.bin
+AWS_PROFILE=your-profile cargo run --release -p metrics-service --bin metrics-service -- --trace-path sched-traces --demo
+cp sched-traces/trace.*.bin dial9-viewer/ui/demo-trace.bin
 ```
 
 The demo trace is used for:

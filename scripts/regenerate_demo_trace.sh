@@ -21,20 +21,21 @@ fi
 REPO_ROOT="$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
 
-TRACE_PATH="$REPO_ROOT/sched-trace.bin"
+TRACE_DIR="$REPO_ROOT/sched-traces"
 DEMO_DEST="$REPO_ROOT/dial9-viewer/ui/demo-trace.bin"
-# RotatingWriter turns "sched-trace.bin" into "sched-trace.0.bin.gz", etc.
-TRACE_GZ_GLOB="$REPO_ROOT/sched-trace.*.bin.gz"
+# The rotating writer names segments
+# sched-traces/trace.0.bin.gz, sched-traces/trace.1.bin.gz, etc.
+TRACE_GZ_GLOB="$TRACE_DIR/trace.*.bin.gz"
 
 echo "Building metrics-service..."
 cargo build --release -p metrics-service
 
 echo "Cleaning old traces..."
-rm -f $TRACE_GZ_GLOB "$DEMO_DEST"
+rm -rf "$TRACE_DIR" "$DEMO_DEST"
 
 echo "Recording demo trace..."
 cargo run --release -p metrics-service --bin metrics-service -- \
-    --trace-path "$TRACE_PATH" --demo
+    --trace-path "$TRACE_DIR" --demo
 
 # Concatenate all segments (sorted by index) into a single trace file.
 # When rotation occurs mid-run, early events (like TaskSpawn) end up in
@@ -48,7 +49,7 @@ if [ -z "$SEGMENTS" ]; then
 fi
 
 zcat $SEGMENTS | gzip > "$DEMO_DEST"
-rm -f $TRACE_GZ_GLOB
+rm -rf "$TRACE_DIR"
 
 echo "Demo trace size:"
 ls -lh "$DEMO_DEST"

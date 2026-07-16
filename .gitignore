@@ -1,5 +1,7 @@
 # ignore trace files in the root directory (produced by examples etc.)
 *.bin
+# demo/example trace segment directories (see regenerate_demo_trace.sh)
+/sched-traces/
 # except the demo trace
 !dial9-viewer/ui/demo-trace.bin
 !dial9-viewer/ui/test-traces/*.bin
