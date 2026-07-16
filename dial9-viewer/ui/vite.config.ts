@@ -46,6 +46,14 @@ function frozenCoreDevInterop(): Plugin {
     "flamegraph",
     "flamegraph_export",
     "flamegraph_api",
+    // Post-migration modules the merge brought in; each is named-imported by a
+    // lib seam, so dev (npm run dev) needs the ESM-named-export shim too.
+    "flamegraph_diff",
+    "flamegraph_diff_view",
+    "flamegraph_histogram",
+    "sse",
+    "tokio_stats_api",
+    "trace_scope",
   ];
   const VIRT = "\0d9core:";
   const uiRoot = process.cwd(); // npm scripts run from ui/
@@ -144,13 +152,20 @@ const legacyPageScripts = [
   "decode.js",
   "flamegraph.js",
   "flamegraph_api.js",
+  "flamegraph_diff.js",
+  "flamegraph_diff_view.js",
   "flamegraph_export.js",
+  "flamegraph_histogram.js",
+  "flamegraph_view_state.js",
   "format.js",
   "heatmap.js",
   "panel_layout.js",
   "prefix_detect.js",
+  "sse.js",
+  "tokio_stats_api.js",
   "trace_analysis.js",
   "trace_parser.js",
+  "trace_scope.js",
   // The dual-UI switch (ADR-0004 section 8): loaded by all four legacy
   // pages AND by future new-UI entries; plain browser JS, copied not bundled.
   "ui-switch.js",
