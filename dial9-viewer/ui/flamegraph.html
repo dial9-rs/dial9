@@ -83,7 +83,9 @@
 
         <script src="format.js"></script>
         <script src="flamegraph_api.js"></script>
+        <script src="flamegraph_histogram.js"></script>
         <script src="sse.js"></script>
+        <script src="flamegraph_view_state.js"></script>
         <script src="flamegraph_diff.js"></script>
         <script src="flamegraph_diff_view.js"></script>
         <script src="decode.js"></script>
@@ -133,6 +135,23 @@
                     loadingEl.classList.add("hidden");
                     errorEl.style.display = "flex";
                     errorEl.textContent = msg;
+                }
+
+                // ── View state <-> URL (single source of truth) ──────────────
+                // "Deep-link anything" means the URL IS the store for the
+                // flamegraph's view state (zoom path + inspect/butterfly focus +
+                // search/filters). The encode/decode lives in
+                // flamegraph_view_state.js — one codec shared with the unit tests
+                // — and the renderer owns the live state via
+                // getViewState/applyViewState. These two thin adapters bridge the
+                // two so every mode (exact-trace and API aggregate) serializes and
+                // restores identically: a shared link always reproduces the view.
+                const ViewState = window.Dial9FlamegraphViewState;
+                function writeViewState(p, fg) {
+                    return ViewState.writeState(p, fg.getViewState());
+                }
+                function restoreViewState(fg, p) {
+                    fg.applyViewState(ViewState.readState(p));
                 }
 
                 // --- Diff mode: two-sided differential flamegraph (?diff=1) ---
@@ -247,11 +266,22 @@
                         });
                     }
 
+                    // Persist the diff view's zoom + highlight to the URL so any
+                    // position is a shareable link. The scope keys (diff/a/b) are
+                    // already in the address bar; writeDiffState only touches its
+                    // own diff_zoom/diff_search keys, so it composes with them.
+                    function onDiffViewChange(st) {
+                        const p = new URLSearchParams(window.location.search);
+                        ViewState.writeDiffState(p, st);
+                        history.replaceState(null, "", window.location.pathname + "?" + p.toString());
+                    }
                     view = FlamegraphDiffView.createDiffView(containerEl, {
                         scopeA: diffParsed.a,
                         scopeB: diffParsed.b,
                         headersFor: headersFor,
                         onSideError: onSideError,
+                        onChange: onDiffViewChange,
+                        initialState: ViewState.readDiffState(params),
                     });
                     statsEl.textContent = "A (left) vs B (right) · blue = heavier in A, red = heavier in B";
                     return;
@@ -280,6 +310,9 @@
                             const dur = formatHumanDuration(Number(e) - Number(s));
                             bits.push(from + " UTC · " + dur);
                         }
+                        const pollBand = FlamegraphDiff.pollBandLabel(
+                            scope.get("min_poll_ns"), scope.get("max_poll_ns"));
+                        if (pollBand) bits.push(pollBand);
                         const bkt = scope.get("bucket");
                         if (bkt) bits.push(bkt);
                         return bits.join(" · ") || "(empty scope)";
@@ -464,11 +497,97 @@
                         <button id="f-more" style="background:#2a2a4a;color:#e0e0e0;${btnStyle}">Refine more</button>
                         <button id="f-stop" style="background:#2a2a4a;color:#e0e0e0;${btnStyle};opacity:0.4;cursor:not-allowed" disabled>Stop</button>
                         <span style="flex:1"></span>
-                        <button id="f-copylink" title="Copy a link that re-fetches this exact scope (bucket/prefix included; no credentials)" style="background:#2a2a4a;color:#e0e0e0;border:1px solid #444;padding:4px 14px;border-radius:3px;cursor:pointer;font-weight:600">Copy link</button>
+                        <button id="f-copylink" title="Copy a link that re-opens this exact view — scope (bucket/prefix included; no credentials) plus your current zoom/inspect focus" style="background:#2a2a4a;color:#e0e0e0;border:1px solid #444;padding:4px 14px;border-radius:3px;cursor:pointer;font-weight:600">Copy link</button>
                         <button id="f-adddiff" title="Capture this view (current host/filters) as one side of a diff; pick a second host/scope and add it to compare" style="background:#2a2a4a;color:#e0e0e0;border:1px solid #444;padding:4px 14px;border-radius:3px;cursor:pointer;font-weight:600">+ Add to diff</button>
                         <button id="f-diff" title="Compare this flamegraph against another" style="background:#2a2a4a;color:#e0e0e0;border:1px solid #444;padding:4px 14px;border-radius:3px;cursor:pointer;font-weight:600">Diff…</button>
                     `;
                     document.querySelector(".fg-page-header").after(toolbar);
+
+                    // Poll-duration panel: a collapsible strip unifying the
+                    // sample-weighted histogram (drag to select a band, click to
+                    // set the fast/slow diff split) with the exact ms band inputs.
+                    // Answers "what value do I set the band to?" visually. Hidden
+                    // until a response carries a non-empty histogram. Lives outside
+                    // #f-facets so facet re-renders don't clobber it.
+                    //
+                    // Structure: a PERSISTENT header (collapse toggle, title, ms
+                    // inputs, action buttons) built once here, plus a `body` div
+                    // that renderMinimap rebuilds per response (the SVG + axis).
+                    // Keeping the inputs out of the rebuilt body means their values
+                    // (and focus) survive a re-render.
+                    const minimap = document.createElement("div");
+                    minimap.id = "f-minimap";
+                    minimap.style.cssText = "display:none;padding:6px 12px 8px;background:#141428;border-bottom:1px solid #333;flex-shrink:0;";
+
+                    // Poll-band ms inputs: created as detached elements (not in the
+                    // toolbar HTML) so the query builders can reference fPollMin /
+                    // fPollMax while the inputs actually live in the panel header.
+                    const fPollMin = document.createElement("input");
+                    const fPollMax = document.createElement("input");
+                    for (const el of [fPollMin, fPollMax]) {
+                        el.type = "number"; el.min = "0"; el.step = "0.1"; el.placeholder = "ms";
+                        el.style.cssText = ctlStyle + ";width:70px";
+                    }
+                    fPollMin.id = "f-poll-min";
+                    fPollMax.id = "f-poll-max";
+
+                    // Persistent header. `collapsed` toggles the body + histogram.
+                    let minimapCollapsed = false;
+                    const mmHeader = document.createElement("div");
+                    mmHeader.style.cssText = "display:flex;align-items:center;gap:10px;font-size:0.75em;color:#9a9ab0;flex-wrap:wrap";
+                    const mmToggle = document.createElement("button");
+                    mmToggle.style.cssText = "background:none;border:none;color:#c0c0d0;cursor:pointer;font-weight:600;font-size:1em;padding:0";
+                    const mmTitle = document.createElement("span");
+                    mmTitle.style.cssText = "font-weight:600;color:#c0c0d0";
+                    mmTitle.textContent = "Poll duration";
+                    const mmHint = document.createElement("span");
+                    mmHint.textContent = "samples per duration · drag to select a band · click to set split";
+                    mmHint.title = "Bar height = on-CPU samples whose enclosing poll fell in that duration bucket. X axis = poll duration (log scale).";
+                    const mmSpacer = document.createElement("span");
+                    mmSpacer.style.flex = "1";
+                    // Inline ms band inputs (the exact / type-in path).
+                    const mmBandLabel = document.createElement("span");
+                    mmBandLabel.style.color = "#e0e0e0";
+                    const geLabel = document.createElement("label");
+                    geLabel.style.color = "#e0e0e0";
+                    geLabel.title = "Lower bound of the poll-duration band (poll ≥ this). Poll duration is PollStart→PollEnd, not request latency.";
+                    geLabel.append("≥ ", fPollMin, " ms");
+                    const leLabel = document.createElement("label");
+                    leLabel.style.color = "#e0e0e0";
+                    leLabel.title = "Upper bound of the poll-duration band (poll ≤ this).";
+                    leLabel.append("≤ ", fPollMax, " ms");
+                    const mmApply = document.createElement("button");
+                    mmApply.id = "f-poll-apply";
+                    mmApply.textContent = "Apply band";
+                    mmApply.style.cssText = "background:#6c63ff;color:#fff;border:none;padding:2px 10px;border-radius:3px;cursor:pointer;font-weight:600";
+                    const mmFastSlow = document.createElement("button");
+                    mmFastSlow.id = "f-diff-fastslow";
+                    mmFastSlow.style.cssText = "background:#2a2a4a;color:#e0e0e0;border:1px solid #444;padding:2px 10px;border-radius:3px;cursor:pointer;font-weight:600";
+                    const mmClear = document.createElement("button");
+                    mmClear.id = "f-band-clear";
+                    mmClear.textContent = "Clear band";
+                    mmClear.title = "Clear the poll-duration band";
+                    mmClear.style.cssText = "background:#2a2a4a;color:#e0e0e0;border:1px solid #444;padding:2px 10px;border-radius:3px;cursor:pointer";
+                    mmHeader.append(mmToggle, mmTitle, mmHint, mmSpacer, geLabel, leLabel, mmApply, mmFastSlow, mmClear);
+
+                    // Rebuildable body (SVG + axis + y-hint).
+                    const mmBody = document.createElement("div");
+                    mmBody.id = "f-minimap-body";
+
+                    minimap.append(mmHeader, mmBody);
+                    toolbar.after(minimap);
+
+                    function setMinimapCollapsed(c) {
+                        minimapCollapsed = c;
+                        mmBody.style.display = c ? "none" : "block";
+                        mmHint.style.display = c ? "none" : "";
+                        mmToggle.textContent = c ? "▸ Poll duration" : "▾";
+                        // When collapsed the ▸ button carries the title; hide the
+                        // standalone title to avoid duplication.
+                        mmTitle.style.display = c ? "none" : "";
+                    }
+                    mmToggle.addEventListener("click", () => setMinimapCollapsed(!minimapCollapsed));
+                    setMinimapCollapsed(false);
 
                     // In-page "Add to diff" tray. Captures two scopes (A/B) from
                     // this page's live view — respecting the Host dropdown's
@@ -533,6 +652,8 @@
 
                     const fStart = document.getElementById("f-start");
                     const fEnd = document.getElementById("f-end");
+                    // fPollMin / fPollMax are created above (in the poll-duration
+                    // panel header), not fetched from the toolbar HTML.
 
                     // The original scope host set from the URL (the heatmap box
                     // selection). "All" in the host selector re-applies this set;
@@ -561,6 +682,9 @@
                     // flamegraph_api.js (test_flamegraph_api.js).
                     if (params.get("start_ns")) fStart.value = nsToPickerUtc(params.get("start_ns"));
                     if (params.get("end_ns")) fEnd.value = nsToPickerUtc(params.get("end_ns"));
+                    // Seed the poll-duration band inputs (ms) from ns URL params.
+                    if (params.get("min_poll_ns")) fPollMin.value = nsToMs(params.get("min_poll_ns"));
+                    if (params.get("max_poll_ns")) fPollMax.value = nsToMs(params.get("max_poll_ns"));
 
                     // `max_files` ceiling override, raised by the "Refine more"
                     // button. null = let the backend pick its own ceiling.
@@ -597,6 +721,10 @@
                         const endNs = pickerUtcToNs(fEnd.value);
                         if (startNs) u.searchParams.set("start_ns", startNs);
                         if (endNs) u.searchParams.set("end_ns", endNs);
+                        const minPollNs = msToNs(fPollMin.value);
+                        const maxPollNs = msToNs(fPollMax.value);
+                        if (minPollNs) u.searchParams.set("min_poll_ns", minPollNs);
+                        if (maxPollNs) u.searchParams.set("max_poll_ns", maxPollNs);
                         if (maxFiles != null) u.searchParams.set("max_files", String(maxFiles));
                         // The endpoint is an SSE stream: the server emits the
                         // already-folded snapshot first, then folds to the cap and
@@ -621,7 +749,28 @@
                         const endNs = pickerUtcToNs(fEnd.value);
                         if (startNs) p.set("start_ns", startNs);
                         if (endNs) p.set("end_ns", endNs);
+                        const minPollNs = msToNs(fPollMin.value);
+                        const maxPollNs = msToNs(fPollMax.value);
+                        if (minPollNs) p.set("min_poll_ns", minPollNs);
+                        if (maxPollNs) p.set("max_poll_ns", maxPollNs);
+                        // Carry the live zoom/inspect focus so the address bar (and
+                        // anything copied from it) always reproduces the exact view.
+                        if (fg) writeViewState(p, fg);
                         history.pushState(null, "", window.location.pathname + "?" + p.toString());
+                    }
+
+                    // Fired by the renderer on every zoom/inspect change. Rewrites
+                    // the address bar in place (no history spam) so the URL always
+                    // reflects the current focus — deep-linkable at any moment.
+                    // A genuine (user-driven) change also ends URL-restore attempts
+                    // so a late-arriving snapshot can never snap the view back.
+                    let restoringView = false;
+                    function onApiViewChange() {
+                        if (!fg) return;
+                        if (!restoringView) viewRestored = true;
+                        const p = new URLSearchParams(window.location.search);
+                        writeViewState(p, fg);
+                        history.replaceState(null, "", window.location.pathname + "?" + p.toString());
                     }
 
                     // Build the data-driven facet controls from the backend's
@@ -731,6 +880,286 @@
                             : `Flamegraph \u2014 ${svc}`;
                     }
 
+                    // Render the poll-duration histogram minimap from the
+                    // backend's sample-weighted, log₂-bucketed histogram. Bars are
+                    // brushable: dragging sets the min/max poll-ns band inputs and
+                    // re-streams. A "Diff fast⇄slow" button splits at the
+                    // sample-weighted median and opens the two-sided diff. Rebuilt
+                    // per response (the histogram grows as more files fold), but
+                    // skipped while the user is mid-drag so it doesn't fight them.
+                    const MINIMAP_H = 46; // px, bar area height
+                    let minimapDragging = false;
+                    let renderedHistKey = null;
+                    // Drag state shared with the window-level move/up listeners
+                    // (attached ONCE below, not per render, so they don't
+                    // accumulate). `minimapDrag` is null except during a brush.
+                    let minimapDrag = null;
+                    // The split (ns) for the fast/slow diff. Seeded to the
+                    // sample-weighted median when a new scope's histogram first
+                    // arrives, and set explicitly by clicking the histogram. A
+                    // scope change (startStreaming without preserveSplit) resets it
+                    // to null so it re-seeds to the new distribution; a user click
+                    // survives re-renders and "Refine more" within the same scope.
+                    // Null until a histogram exists.
+                    let splitNs = null;
+                    // Latest layout, so the persistent header buttons + window drag
+                    // handlers can map pixels ↔ ns without recomputing.
+                    let mmLayout = null; // { bars, W, cols }
+                    function renderMinimap(meta) {
+                        const bars = FlamegraphHistogram.normalizeHistogram(
+                            meta.poll_duration_histogram);
+                        if (bars.length === 0) { minimap.style.display = "none"; return; }
+                        if (minimapDragging) return; // don't clobber an in-progress brush
+                        minimap.style.display = "block";
+
+                        // Seed the split to the sample-weighted median the FIRST
+                        // time we see a histogram for this scope; a user click
+                        // overrides it (and survives re-renders).
+                        const median = FlamegraphHistogram.sampleWeightedMedianNs(bars);
+                        if (splitNs == null) splitNs = median;
+
+                        // Skip a body rebuild when the bar shape + split are
+                        // unchanged (the SVG would be identical).
+                        const key = bars.map(b => `${b.lo_ns}:${b.samples}`).join(",") + "|" + splitNs +
+                            "|" + fPollMin.value + "|" + fPollMax.value;
+                        if (key === renderedHistKey && mmBody.dataset.built) { updateFastSlowLabel(); return; }
+                        renderedHistKey = key;
+                        mmBody.dataset.built = "1";
+
+                        const W = Math.max(200, mmBody.clientWidth || minimap.clientWidth - 24 || 600);
+                        const { cols, maxSamples } = FlamegraphHistogram.histogramLayout(bars, W, 2);
+                        mmLayout = { bars, W, cols };
+
+                        const NS = "http://www.w3.org/2000/svg";
+                        const svg = document.createElementNS(NS, "svg");
+                        svg.setAttribute("width", "100%");
+                        svg.setAttribute("viewBox", `0 0 ${W} ${MINIMAP_H}`);
+                        svg.setAttribute("preserveAspectRatio", "none");
+                        svg.style.cssText = "display:block;cursor:crosshair;overflow:visible";
+
+                        // Current band → shade the selected bars (vs the whole
+                        // distribution). Uses the continuous ns bounds, not bucket
+                        // membership, so a sub-bucket band shades partially-overlapping
+                        // bars too.
+                        const curMin = msToNs(fPollMin.value);
+                        const curMax = msToNs(fPollMax.value);
+                        const banded = curMin != null || curMax != null;
+                        for (const c of cols) {
+                            const inBand =
+                                (curMin == null || c.hi_ns > Number(curMin)) &&
+                                (curMax == null || c.lo_ns < Number(curMax));
+                            const rect = document.createElementNS(NS, "rect");
+                            const h = Math.max(1, c.hFrac * (MINIMAP_H - 2));
+                            rect.setAttribute("x", c.x);
+                            rect.setAttribute("y", MINIMAP_H - h);
+                            rect.setAttribute("width", c.w);
+                            rect.setAttribute("height", h);
+                            rect.setAttribute("fill", banded ? (inBand ? "#6c63ff" : "#3a3a5a") : "#6c63ff");
+                            svg.appendChild(rect);
+                        }
+
+                        // Split marker: a vertical line at splitNs (the fast/slow
+                        // boundary), positioned by log-interp of ns → px.
+                        function nsToPx(ns) {
+                            // Inverse of pxToNs: find the bar containing ns, then its
+                            // fractional log position within that bar's column.
+                            for (let i = 0; i < cols.length; i++) {
+                                const c = cols[i];
+                                if (ns < c.hi_ns || i === cols.length - 1) {
+                                    const frac = Math.log(Math.max(ns, c.lo_ns) / c.lo_ns) /
+                                        Math.log(c.hi_ns / c.lo_ns);
+                                    return c.x + Math.max(0, Math.min(1, frac)) * (W / cols.length);
+                                }
+                            }
+                            return 0;
+                        }
+                        if (splitNs != null) {
+                            const sx = nsToPx(splitNs);
+                            const line = document.createElementNS(NS, "line");
+                            line.setAttribute("x1", sx); line.setAttribute("x2", sx);
+                            line.setAttribute("y1", 0); line.setAttribute("y2", MINIMAP_H);
+                            line.setAttribute("stroke", "#ffcc55");
+                            line.setAttribute("stroke-width", "1.5");
+                            svg.appendChild(line);
+                        }
+
+                        // Brush overlay for drag-select.
+                        const brush = document.createElementNS(NS, "rect");
+                        brush.setAttribute("fill", "rgba(255,255,255,0.12)");
+                        brush.setAttribute("stroke", "#fff");
+                        brush.setAttribute("stroke-dasharray", "3 2");
+                        brush.setAttribute("y", "0");
+                        brush.setAttribute("height", MINIMAP_H);
+                        brush.style.display = "none";
+                        svg.appendChild(brush);
+
+                        function localX(clientX) {
+                            const r = svg.getBoundingClientRect();
+                            return (clientX - r.left) / r.width * W;
+                        }
+                        svg.addEventListener("mousedown", (e) => {
+                            const start = localX(e.clientX);
+                            minimapDragging = true;
+                            minimapDrag = { bars, W, brush, localX, start, moved: false };
+                            brush.setAttribute("x", start);
+                            brush.setAttribute("width", 0);
+                            brush.style.display = "block";
+                            e.preventDefault();
+                        });
+
+                        // X-axis tick labels (poll-duration units). The SVG uses
+                        // preserveAspectRatio="none" so text inside it would be
+                        // stretched; lay ticks out in an HTML row keyed by percentage
+                        // so they stay aligned at any width. Thin them (~1 per 60px).
+                        const axis = document.createElement("div");
+                        axis.style.cssText = "position:relative;height:1.2em;margin-top:2px;font-size:0.68em;color:#8a8aa0";
+                        const nBars = cols.length;
+                        const stride = Math.max(1, Math.ceil(nBars / Math.max(1, Math.floor(W / 60))));
+                        for (let i = 0; i < nBars; i++) {
+                            if (i % stride !== 0) continue;
+                            const c = cols[i];
+                            const pct = (c.x / W) * 100;
+                            const t = document.createElement("span");
+                            t.textContent = FlamegraphHistogram.fmtDurationNs(c.lo_ns);
+                            t.style.cssText = `position:absolute;left:${pct}%;white-space:nowrap;transform:translateX(-1px)`;
+                            axis.appendChild(t);
+                        }
+                        if (nBars > 0) {
+                            const last = document.createElement("span");
+                            last.textContent = FlamegraphHistogram.fmtDurationNs(cols[nBars - 1].hi_ns);
+                            last.style.cssText = "position:absolute;right:0;white-space:nowrap;color:#6a6a80";
+                            axis.appendChild(last);
+                        }
+
+                        // Y-axis hint: the peak sample count, so bar heights scale.
+                        const yhint = document.createElement("div");
+                        yhint.style.cssText = "font-size:0.66em;color:#6a6a80;margin-top:1px";
+                        yhint.textContent = `tallest bar = ${maxSamples.toLocaleString()} samples · yellow line = fast/slow split`;
+
+                        mmBody.innerHTML = "";
+                        mmBody.appendChild(svg);
+                        mmBody.appendChild(axis);
+                        mmBody.appendChild(yhint);
+
+                        // Cursor-following tooltip (native SVG <title> is slow and is
+                        // swallowed by the brush overlay). Reuse ONE body-level
+                        // element across renders so it doesn't leak.
+                        let tip = document.getElementById("f-minimap-tip");
+                        if (!tip) {
+                            tip = document.createElement("div");
+                            tip.id = "f-minimap-tip";
+                            tip.style.cssText = "position:fixed;pointer-events:none;background:#000;color:#fff;border:1px solid #555;border-radius:3px;padding:3px 7px;font-size:0.72em;white-space:nowrap;z-index:1000;display:none";
+                            document.body.appendChild(tip);
+                        }
+                        function barAtX(px) {
+                            const idx = Math.floor((px / W) * cols.length);
+                            return cols[Math.max(0, Math.min(cols.length - 1, idx))];
+                        }
+                        svg.addEventListener("mousemove", (e) => {
+                            if (minimapDragging) { tip.style.display = "none"; return; }
+                            const c = barAtX(localX(e.clientX));
+                            if (!c) { tip.style.display = "none"; return; }
+                            tip.textContent =
+                                `${FlamegraphHistogram.fmtDurationNs(c.lo_ns)}–` +
+                                `${FlamegraphHistogram.fmtDurationNs(c.hi_ns)} · ` +
+                                `${c.samples.toLocaleString()} samples`;
+                            tip.style.display = "block";
+                            tip.style.left = (e.clientX + 12) + "px";
+                            tip.style.top = (e.clientY - 28) + "px";
+                        });
+                        svg.addEventListener("mouseleave", () => { tip.style.display = "none"; });
+
+                        updateFastSlowLabel();
+                    }
+
+                    // Keep the "Diff fast vs slow polls (split @ …)" button label in
+                    // sync with the current split. Disabled until a split exists.
+                    function updateFastSlowLabel() {
+                        if (splitNs == null) {
+                            mmFastSlow.style.display = "none";
+                            return;
+                        }
+                        mmFastSlow.style.display = "";
+                        const s = FlamegraphHistogram.fmtDurationNs(splitNs);
+                        mmFastSlow.textContent = `Diff fast vs slow polls (split @ ${s})`;
+                        mmFastSlow.title =
+                            `Open a two-panel flamegraph diff: fast polls (< ${s}) on the left, ` +
+                            `slow polls (≥ ${s}) on the right. Red = where slow polls spend more time. ` +
+                            `Click the histogram to move the split (yellow line).`;
+                    }
+
+                    // Persistent header button wiring (once — the header is not
+                    // rebuilt per render).
+                    function applyPollBand() {
+                        maxFiles = null;
+                        renderedHistKey = null; // force a rebuild
+                        // Re-shade the histogram IMMEDIATELY from the bars already in
+                        // hand, so the new band's highlight appears the instant the
+                        // user releases the drag — not after the stream round-trips.
+                        // (renderMinimap keys off fPollMin/fPollMax, so it repaints
+                        // the selected bars without waiting for a response.)
+                        if (mmLayout) renderMinimap({ poll_duration_histogram: mmLayout.bars });
+                        updateBrowserUrl();
+                        startStreaming();
+                    }
+                    mmApply.addEventListener("click", applyPollBand);
+                    for (const el of [fPollMin, fPollMax]) {
+                        el.addEventListener("keydown", (e) => { if (e.key === "Enter") applyPollBand(); });
+                    }
+                    mmClear.addEventListener("click", () => {
+                        fPollMin.value = ""; fPollMax.value = "";
+                        applyPollBand();
+                    });
+                    mmFastSlow.addEventListener("click", () => {
+                        if (splitNs == null) return;
+                        // A = fast polls (< split), B = slow polls (≥ split). Each
+                        // side is a full scope query with its own band, opened in the
+                        // two-sided diff.
+                        // Server band bounds are inclusive on both ends, so the
+                        // fast side stops one ns below the split to keep the
+                        // partition disjoint (a poll of exactly `splitNs` counts
+                        // as "slow", matching the "< split" / "≥ split" labels).
+                        const a = new URLSearchParams(currentScopeQuery());
+                        a.delete("min_poll_ns"); a.set("max_poll_ns", String(splitNs - 1));
+                        const b = new URLSearchParams(currentScopeQuery());
+                        b.set("min_poll_ns", String(splitNs)); b.delete("max_poll_ns");
+                        window.open(window.location.pathname + "?" + FlamegraphDiff.diffSearch(a, b), "_blank");
+                    });
+
+                    // Window-level brush move/up, attached ONCE (renderMinimap must
+                    // not add listeners per render). Act only while a drag is armed.
+                    window.addEventListener("mousemove", (e) => {
+                        if (!minimapDragging || !minimapDrag) return;
+                        const x = minimapDrag.localX(e.clientX);
+                        if (Math.abs(x - minimapDrag.start) > 2) minimapDrag.moved = true;
+                        minimapDrag.brush.setAttribute("x", Math.min(minimapDrag.start, x));
+                        minimapDrag.brush.setAttribute("width", Math.abs(x - minimapDrag.start));
+                    });
+                    window.addEventListener("mouseup", (e) => {
+                        if (!minimapDragging || !minimapDrag) return;
+                        const d = minimapDrag;
+                        minimapDragging = false;
+                        minimapDrag = null;
+                        d.brush.style.display = "none";
+                        const endX = d.localX(e.clientX);
+                        const band = FlamegraphHistogram.brushToBand(d.bars, d.W, d.start, endX);
+                        if (band) {
+                            // A real drag → set the exact (continuous) ns band.
+                            fPollMin.value = nsToMs(String(band.min_ns));
+                            fPollMax.value = nsToMs(String(band.max_ns));
+                            applyPollBand();
+                        } else if (!d.moved) {
+                            // A click (no drag) → move the fast/slow split here. No
+                            // re-stream; just re-render the marker + button label.
+                            const ns = FlamegraphHistogram.pxToNs(d.bars, d.W, endX);
+                            if (ns != null) {
+                                splitNs = ns;
+                                renderedHistKey = null;
+                                renderMinimap({ poll_duration_histogram: d.bars });
+                            }
+                        }
+                    });
+
                     function toFgTree(node) {
                         const m = new Map();
                         for (const child of (node.children || [])) {
@@ -739,7 +1168,7 @@
                         return { name: node.name, count: node.count, self: node.self, children: m };
                     }
 
-                    const fg = FlamegraphRenderer.createFlamegraph(containerEl);
+                    const fg = FlamegraphRenderer.createFlamegraph(containerEl, onApiViewChange);
 
                     // Build the base stats string ("N samples \u00b7 M hosts \u00b7 \u2026")
                     // from the response metadata, shared by every event.
@@ -762,6 +1191,9 @@
                     // stream that has since been superseded.
                     let streamToken = 0;
                     let abortCtl = null;
+                    // One-time guard: restore zoom/inspect focus from the URL on
+                    // the first streamed snapshot only.
+                    let viewRestored = false;
                     // The last-rendered coverage badge (without the trailing status
                     // suffix), so close/stop handlers can re-stamp it. `lastCoverage`
                     // feeds the "Refine more" ceiling computation.
@@ -796,12 +1228,47 @@
                         // from the backend's reported metadata (data-driven).
                         renderScopeHeader(meta);
                         renderFacets(meta);
+                        // The minimap is a secondary aid — never let a failure in
+                        // it block the flamegraph from rendering (a thrown error
+                        // here would strand the loading spinner forever).
+                        try {
+                            renderMinimap(meta);
+                        } catch (e) {
+                            console.error("poll-duration minimap render failed:", e);
+                            minimap.style.display = "none";
+                        }
 
                         // First event hides the loading overlay; later events
                         // refine in-place without it.
                         loadingEl.classList.add("hidden");
                         containerEl.style.display = "flex";
                         fg.setTreeDirect(toFgTree(resp.tree), resp.tree.count);
+
+                        // Restore any zoom/inspect focus carried on the shared
+                        // link. The aggregate tree STREAMS in and refines, so a
+                        // deep target frame may not exist in the first snapshot —
+                        // we retry on each snapshot until the focus is applied
+                        // EXACTLY as the link asked. applyViewState resets the
+                        // view first, so re-applying over successive snapshots is
+                        // idempotent. A genuine user interaction flips
+                        // viewRestored via onApiViewChange, which stops us from
+                        // ever snapping their view back to the URL.
+                        if (!viewRestored) {
+                            const want = ViewState.readState(params);
+                            restoringView = true;
+                            fg.applyViewState(want);
+                            restoringView = false;
+                            const z = fg.getZoomPath();
+                            const zoomOk =
+                                (!want.workerZoom || z.worker.join("\t") === want.workerZoom.join("\t")) &&
+                                (!want.offworkerZoom || z.offworker.join("\t") === want.offworkerZoom.join("\t"));
+                            const inspectOk = !want.inspect || fg.getInspectFocus() != null;
+                            // Done once the link's focus is fully in place (or the
+                            // link carried no focus at all). search/spawn/runtime
+                            // apply synchronously, so zoom+inspect are the only
+                            // pieces that can lag a streamed snapshot.
+                            if (zoomOk && inspectOk) viewRestored = true;
+                        }
 
                         const cov = resp.coverage;
                         lastCoverage = cov;
@@ -827,7 +1294,16 @@
                     // (Re)start the stream from scratch: aborts any in-flight
                     // stream and shows the loading overlay. The server emits the
                     // already-folded snapshot immediately, then refines to the cap.
-                    function startStreaming() {
+                    //
+                    // A scope change (new filters/facets/time/poll-band) resets the
+                    // fast/slow split so it re-seeds to the incoming distribution's
+                    // median. "Refine more" passes preserveSplit=true: it's the same
+                    // scope with deeper sampling, so a user-chosen split must stick.
+                    function startStreaming(preserveSplit = false) {
+                        if (!preserveSplit) {
+                            splitNs = null;
+                            renderedHistKey = null; // force the marker to re-seed
+                        }
                         stopStreaming();
                         setRefiningUi(true);
                         gotEvent = false;
@@ -877,7 +1353,7 @@
                         // folded files are served instantly) up to the new cap.
                         const folded = lastCoverage ? lastCoverage.files_folded : 0;
                         maxFiles = nextMaxFiles(folded);
-                        startStreaming();
+                        startStreaming(true); // same scope → keep the chosen split
                     });
 
                     stopBtn.addEventListener("click", () => {
@@ -911,13 +1387,23 @@
                         const eNs = pickerUtcToNs(fEnd.value);
                         if (sNs) p.set("start_ns", sNs);
                         if (eNs) p.set("end_ns", eNs);
+                        const minPollNs = msToNs(fPollMin.value);
+                        const maxPollNs = msToNs(fPollMax.value);
+                        if (minPollNs) p.set("min_poll_ns", minPollNs);
+                        if (maxPollNs) p.set("max_poll_ns", maxPollNs);
                         if (maxFiles != null) p.set("max_files", String(maxFiles));
                         return FlamegraphDiff.fullScopeQuery(p);
                     }
 
                     document.getElementById("f-copylink").addEventListener("click", async () => {
+                        // The Copy link carries the full scope PLUS the live
+                        // zoom/inspect focus, so a coworker opening it lands on the
+                        // exact same focus position. (currentScopeQuery stays
+                        // focus-free so diff captures compare scopes, not views.)
+                        const q = currentScopeQuery();
+                        writeViewState(q, fg);
                         const url = window.location.origin + window.location.pathname +
-                            "?" + currentScopeQuery().toString();
+                            "?" + q.toString();
                         const btn = document.getElementById("f-copylink");
                         const orig = btn.textContent;
                         try {
@@ -1081,12 +1567,7 @@
                 containerEl.style.display = "flex";
 
                 function updateUrlZoom() {
-                    const p = new URLSearchParams(window.location.search);
-                    const z = fg.getZoomPath();
-                    if (z.worker.length > 0) p.set("worker-zoom", z.worker.join("\t"));
-                    else p.delete("worker-zoom");
-                    if (z.offworker.length > 0) p.set("offworker-zoom", z.offworker.join("\t"));
-                    else p.delete("offworker-zoom");
+                    const p = writeViewState(new URLSearchParams(window.location.search), fg);
                     const newUrl = window.location.pathname + "?" + p.toString();
                     window.history.replaceState(null, "", newUrl);
                 }
@@ -1097,12 +1578,10 @@
                     runtimeWorkers: trace.runtimeWorkers,
                 });
 
-                // Restore zoom from URL (only if time range filter succeeded, otherwise tree differs)
+                // Restore zoom + inspect focus from URL (only if time range filter
+                // succeeded, otherwise the tree differs and the path won't match)
                 if (timeRangeMatched) {
-                    const wz = params.get("worker-zoom");
-                    const oz = params.get("offworker-zoom");
-                    if (wz) fg.zoomToPath("worker", wz.split("\t"));
-                    if (oz) fg.zoomToPath("offworker", oz.split("\t"));
+                    restoreViewState(fg, params);
                 }
 
                 // Responsive resize

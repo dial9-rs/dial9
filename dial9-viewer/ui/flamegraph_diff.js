@@ -207,6 +207,10 @@ const SCOPE_KEYS_SINGLE = [
   "spawn_location",
   "start_ns",
   "end_ns",
+  // Poll-duration band (ns). Carried per-side so a diff can be
+  // A = fast polls, B = slow polls (the "why are the slow ones slow" view).
+  "min_poll_ns",
+  "max_poll_ns",
   "max_files",
 ];
 
@@ -301,6 +305,30 @@ function encodeScope(query) {
 // side's scope.
 function decodeScope(b64) {
   return new URLSearchParams(b64urlDecode(b64));
+}
+
+// Human label for a poll-duration band, given the ns bounds (strings or numbers,
+// either may be null/absent). Returns "" when neither bound is set. Used by the
+// scope summary and the diff legend so a fast-vs-slow diff is self-describing.
+//
+//   (null, null)          -> ""
+//   ("10000000", null)    -> "poll ≥ 10ms"
+//   (null, "1000000")     -> "poll ≤ 1ms"
+//   ("1000000","10000000")-> "poll 1–10ms"
+function pollBandLabel(minNs, maxNs) {
+  // ns → millisecond number (trailing zeros trimmed), or null if not numeric.
+  const ms = (ns) => {
+    if (ns == null || String(ns).trim() === "") return null;
+    const n = Number(ns);
+    if (!Number.isFinite(n)) return null;
+    return Number((n / 1e6).toFixed(3));
+  };
+  const lo = ms(minNs);
+  const hi = ms(maxNs);
+  if (lo != null && hi != null) return "poll " + lo + "–" + hi + "ms";
+  if (lo != null) return "poll ≥ " + lo + "ms";
+  if (hi != null) return "poll ≤ " + hi + "ms";
+  return "";
 }
 
 // Build the query string (no leading "?") for a diff view comparing two scopes.
@@ -410,6 +438,7 @@ var FlamegraphDiff = {
   b64urlDecode,
   encodeScope,
   decodeScope,
+  pollBandLabel,
   diffSearch,
   parseDiff,
   chooseTarget,

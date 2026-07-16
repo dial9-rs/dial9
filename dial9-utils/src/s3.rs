@@ -1,11 +1,13 @@
 //! S3 uploader for sealed trace segments.
 //!
-//! Uploads processed segment bytes to S3 using the transfer manager.
+//! Uploads processed segment bytes to S3 with a single `PutObject` per segment.
 //! Deletes local files only after confirmed upload.
 
 use crate::connection;
 pub use crate::instance_metadata::InstanceIdentity;
-use aws_sdk_s3_transfer_manager::Client;
+use aws_sdk_s3::Client;
+use aws_sdk_s3::error::SdkError;
+use aws_sdk_s3::operation::put_object::PutObjectError;
 use dial9_core::boot_id::generate_boot_id as default_boot_id;
 use dial9_core::pipeline::{
     ProcessError, ProcessErrorKind, SegmentData, SegmentProcessor, SegmentRef,
@@ -17,18 +19,27 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-/// Classify a transfer-manager error's retryability and wrap it as a
+/// Classify a `PutObject` `SdkError`'s retryability and wrap it as a
 /// [`ProcessErrorKind::transfer`]. A free fn rather than `impl From` because the
 /// orphan rule forbids implementing a foreign trait for a foreign type here.
-fn transfer_error_kind(e: aws_sdk_s3_transfer_manager::error::Error) -> ProcessErrorKind {
-    use aws_sdk_s3_transfer_manager::error::ErrorKind;
-    let retryable = matches!(
-        e.kind(),
-        ErrorKind::IOError
-            | ErrorKind::RuntimeError
-            | ErrorKind::ChildOperationFailed
-            | ErrorKind::ChunkFailed(_)
-    );
+///
+/// Transport-level failures (timeouts, dispatch/IO, unparseable responses) are
+/// transient and worth retrying. For a service error we keep the segment when
+/// the response is a 5xx or a throttle (429), and give up on a 4xx (auth,
+/// permission, malformed request) — retrying those would only spin.
+fn put_error_kind(e: SdkError<PutObjectError>) -> ProcessErrorKind {
+    let retryable = match &e {
+        SdkError::TimeoutError(_) | SdkError::DispatchFailure(_) | SdkError::ResponseError(_) => {
+            true
+        }
+        SdkError::ServiceError(ctx) => {
+            let status = ctx.raw().status().as_u16();
+            status >= 500 || status == 429
+        }
+        // ConstructionFailure and any future non-exhaustive variant: not worth
+        // retrying (the request never made it onto the wire coherently).
+        _ => false,
+    };
     ProcessErrorKind::transfer(Box::new(e), retryable)
 }
 
@@ -111,6 +122,17 @@ pub struct S3Config {
     /// Custom S3 key function. When set, overrides the default key layout.
     #[builder(with = |key_fn: impl S3KeyFn + 'static| Arc::new(key_fn) as Arc<dyn S3KeyFn>)]
     key_fn: Option<Arc<dyn S3KeyFn>>,
+    /// Per-attempt wall-clock timeout for individual S3 operations
+    /// (`PutObject`, `HeadBucket`). Bounds how long a single HTTP attempt may
+    /// stall before the SDK aborts it; the SDK retry policy and the pipeline
+    /// circuit breaker then decide whether to re-drive. Without it a hung
+    /// request could block the upload worker indefinitely. Defaults to 30s.
+    ///
+    /// Only applied to the client dial9 builds itself (the `.s3(..)` path). A
+    /// client supplied through `.s3_with_client(..)` keeps its own timeout
+    /// configuration untouched.
+    #[builder(default = Duration::from_secs(30))]
+    operation_attempt_timeout: Duration,
 }
 
 impl std::fmt::Debug for S3Config {
@@ -120,6 +142,7 @@ impl std::fmt::Debug for S3Config {
             .field("service_name", &self.service_name)
             .field("prefix", &self.prefix)
             .field("region", &self.region)
+            .field("operation_attempt_timeout", &self.operation_attempt_timeout)
             .finish_non_exhaustive()
     }
 }
@@ -153,6 +176,11 @@ impl S3Config {
     /// Optional region override for the S3 client.
     pub(crate) fn region(&self) -> Option<&str> {
         self.region.as_deref()
+    }
+
+    /// Per-attempt timeout applied to the client dial9 builds itself.
+    pub(crate) fn operation_attempt_timeout(&self) -> Duration {
+        self.operation_attempt_timeout
     }
 
     /// Build the S3 object key for a sealed segment.
@@ -329,7 +357,7 @@ impl std::fmt::Debug for S3Uploader {
 }
 
 impl S3Uploader {
-    /// Create a new uploader with the given transfer manager client and config.
+    /// Create a new uploader with the given S3 client and config.
     pub(crate) fn new(client: Client, config: S3Config) -> Self {
         Self { client, config }
     }
@@ -354,7 +382,9 @@ impl S3Uploader {
             "application/octet-stream"
         };
 
-        let mut input = aws_sdk_s3_transfer_manager::operation::upload::UploadInput::builder()
+        let mut req = self
+            .client
+            .put_object()
             .bucket(&self.config.bucket)
             .key(&key)
             .content_type(content_type)
@@ -374,12 +404,12 @@ impl S3Uploader {
         // (comma-joined), plus caller correlation pairs with the `dump.`
         // namespace stripped.
         if let Some(dump_ids) = metadata.get("dump_id") {
-            input = input.metadata("dump-id", dump_ids);
+            req = req.metadata("dump-id", dump_ids);
             for (k, v) in metadata {
                 if let Some(stripped) = k.strip_prefix("dump.") {
                     let header_key = stripped.to_ascii_lowercase();
                     if valid_user_metadata_key(&header_key) && valid_user_metadata_value(v) {
-                        input = input.metadata(header_key, v);
+                        req = req.metadata(header_key, v);
                     } else {
                         rate_limited!(Duration::from_secs(60), {
                             tracing::warn!(
@@ -393,12 +423,12 @@ impl S3Uploader {
             }
         }
 
-        let handle = input
-            .body(payload.into_bytes().into())
-            .initiate_with(&self.client)
-            .map_err(transfer_error_kind)?;
-
-        handle.join().await.map_err(transfer_error_kind)?;
+        req.body(aws_sdk_s3::primitives::ByteStream::from(
+            payload.into_bytes(),
+        ))
+        .send()
+        .await
+        .map_err(put_error_kind)?;
 
         // Remove local files if disk-backed (memory segments are gone once popped).
         if let Some(path) = segment.disk_path() {
@@ -425,14 +455,15 @@ impl S3Uploader {
         key: &str,
         body: Vec<u8>,
     ) -> Result<(), ProcessErrorKind> {
-        let handle = aws_sdk_s3_transfer_manager::operation::upload::UploadInput::builder()
+        self.client
+            .put_object()
             .bucket(&self.config.bucket)
             .key(key)
             .content_type("application/json")
-            .body(bytes::Bytes::from(body).into())
-            .initiate_with(&self.client)
-            .map_err(transfer_error_kind)?;
-        handle.join().await.map_err(transfer_error_kind)?;
+            .body(aws_sdk_s3::primitives::ByteStream::from(body))
+            .send()
+            .await
+            .map_err(put_error_kind)?;
         Ok(())
     }
 }
@@ -536,7 +567,15 @@ impl S3PipelineUploader {
         let bootstrap_client = match client {
             Some(c) => c,
             None => {
+                // Bound each attempt so a hung PutObject/HeadBucket can't wedge
+                // the upload worker; retries are left to the SDK policy and the
+                // pipeline circuit breaker. Only the client we build ourselves
+                // gets this — a caller-supplied client keeps its own config.
+                let timeout_config = aws_sdk_s3::config::timeout::TimeoutConfig::builder()
+                    .operation_attempt_timeout(s3_config.operation_attempt_timeout())
+                    .build();
                 let sdk_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+                    .timeout_config(timeout_config)
                     .load()
                     .await;
                 aws_sdk_s3::Client::new(&sdk_config)
@@ -557,14 +596,8 @@ impl S3PipelineUploader {
             .build();
         let corrected_client = aws_sdk_s3::Client::from_conf(corrected_conf);
 
-        let tm_client = aws_sdk_s3_transfer_manager::Client::new(
-            aws_sdk_s3_transfer_manager::Config::builder()
-                .client(corrected_client)
-                .build(),
-        );
-
         (
-            S3Uploader::new(tm_client, s3_config),
+            S3Uploader::new(corrected_client, s3_config),
             connection::CircuitBreaker::new(),
         )
     }
@@ -806,35 +839,11 @@ mod tests {
         ])
     }
 
-    /// Create a transfer manager Client backed by s3s-fs (in-memory fake S3).
-    fn fake_s3_client(fs_root: &std::path::Path) -> aws_sdk_s3_transfer_manager::Client {
-        let fs = s3s_fs::FileSystem::new(fs_root).unwrap();
-        let mut builder = s3s::service::S3ServiceBuilder::new(fs);
-        builder.set_auth(s3s::auth::SimpleAuth::from_single("test", "test"));
-        let s3_service = builder.build();
-        let s3_client: s3s_aws::Client = s3_service.into();
-
-        let s3_config = aws_sdk_s3::Config::builder()
-            .behavior_version_latest()
-            .credentials_provider(aws_sdk_s3::config::Credentials::new(
-                "test", "test", None, None, "test",
-            ))
-            .region(aws_sdk_s3::config::Region::new("us-east-1"))
-            .http_client(s3_client)
-            .force_path_style(true)
-            .build();
-
-        let sdk_client = aws_sdk_s3::Client::from_conf(s3_config);
-
-        let tm_config = aws_sdk_s3_transfer_manager::Config::builder()
-            .client(sdk_client)
-            .build();
-
-        aws_sdk_s3_transfer_manager::Client::new(tm_config)
-    }
-
-    /// Create a raw aws_sdk_s3::Client for reading back objects from the fake S3.
-    fn fake_raw_s3_client(fs_root: &std::path::Path) -> aws_sdk_s3::Client {
+    /// Create an `aws_sdk_s3::Client` backed by s3s-fs (in-memory fake S3).
+    /// The same builder drives both the uploader under test and the read-back
+    /// client tests use to verify uploaded objects; each call returns an
+    /// independent client over the same on-disk bucket at `fs_root`.
+    fn fake_s3_client(fs_root: &std::path::Path) -> aws_sdk_s3::Client {
         let fs = s3s_fs::FileSystem::new(fs_root).unwrap();
         let mut builder = s3s::service::S3ServiceBuilder::new(fs);
         builder.set_auth(s3s::auth::SimpleAuth::from_single("test", "test"));
@@ -852,6 +861,22 @@ mod tests {
             .build();
 
         aws_sdk_s3::Client::from_conf(s3_config)
+    }
+
+    #[test]
+    fn operation_attempt_timeout_defaults_to_30s_and_is_overridable() {
+        let default_cfg = S3Config::builder().bucket("b").service_name("svc").build();
+        check!(
+            default_cfg.operation_attempt_timeout() == std::time::Duration::from_secs(30),
+            "self-built client must get a bounded per-attempt timeout by default"
+        );
+
+        let custom = S3Config::builder()
+            .bucket("b")
+            .service_name("svc")
+            .operation_attempt_timeout(std::time::Duration::from_secs(5))
+            .build();
+        check!(custom.operation_attempt_timeout() == std::time::Duration::from_secs(5));
     }
 
     // --- Key format tests ---
@@ -990,7 +1015,7 @@ mod tests {
         std::fs::create_dir(s3_root.path().join("test-bucket")).unwrap();
 
         let client = fake_s3_client(s3_root.path());
-        let raw_client = fake_raw_s3_client(s3_root.path());
+        let raw_client = fake_s3_client(s3_root.path());
         let config = make_config();
         let uploader = S3Uploader::new(client, config);
 
@@ -1037,7 +1062,7 @@ mod tests {
         std::fs::create_dir(s3_root.path().join("test-bucket")).unwrap();
 
         let client = fake_s3_client(s3_root.path());
-        let raw_s3_client = fake_raw_s3_client(s3_root.path());
+        let raw_s3_client = fake_s3_client(s3_root.path());
 
         let config = make_config();
         let uploader = S3Uploader::new(client, config);
@@ -1079,7 +1104,7 @@ mod tests {
         std::fs::create_dir(s3_root.path().join("test-bucket")).unwrap();
 
         let client = fake_s3_client(s3_root.path());
-        let raw_s3_client = fake_raw_s3_client(s3_root.path());
+        let raw_s3_client = fake_s3_client(s3_root.path());
 
         let config = with_boot_id(
             S3Config::builder()
@@ -1129,7 +1154,7 @@ mod tests {
         std::fs::create_dir(s3_root.path().join("test-bucket")).unwrap();
 
         let client = fake_s3_client(s3_root.path());
-        let raw_s3_client = fake_raw_s3_client(s3_root.path());
+        let raw_s3_client = fake_s3_client(s3_root.path());
         let uploader = S3Uploader::new(client, make_config());
 
         let segment_path = local_dir.path().join("trace.4.bin");
@@ -1323,12 +1348,7 @@ mod worker_integration_tests {
             .region(aws_sdk_s3::config::Region::new("us-east-1"))
             .build();
         let sdk_client = aws_sdk_s3::Client::from_conf(sdk_config);
-        let tm_client = aws_sdk_s3_transfer_manager::Client::new(
-            aws_sdk_s3_transfer_manager::Config::builder()
-                .client(sdk_client.clone())
-                .build(),
-        );
-        let uploader = S3Uploader::new(tm_client, s3_config);
+        let uploader = S3Uploader::new(sdk_client.clone(), s3_config);
         let mut pipeline_uploader = S3PipelineUploader::from_ready(uploader, CircuitBreaker::new());
         pipeline_uploader.set_client(sdk_client);
     }
@@ -1368,7 +1388,7 @@ mod worker_integration_tests {
 
     // === Worker-integration tests (real S3 via s3s-fs, driven through dial9_core::test_util) ===
 
-    fn fake_tm_client(fs_root: &Path) -> aws_sdk_s3_transfer_manager::Client {
+    fn fake_s3_client(fs_root: &Path) -> aws_sdk_s3::Client {
         let fs = s3s_fs::FileSystem::new(fs_root).unwrap();
         let mut builder = s3s::service::S3ServiceBuilder::new(fs);
         builder.set_auth(s3s::auth::SimpleAuth::from_single("test", "test"));
@@ -1383,12 +1403,7 @@ mod worker_integration_tests {
             .http_client(s3_client)
             .force_path_style(true)
             .build();
-        let sdk_client = aws_sdk_s3::Client::from_conf(s3_config);
-        aws_sdk_s3_transfer_manager::Client::new(
-            aws_sdk_s3_transfer_manager::Config::builder()
-                .client(sdk_client)
-                .build(),
-        )
+        aws_sdk_s3::Client::from_conf(s3_config)
     }
 
     fn s3_uploader_for(root: &Path) -> S3PipelineUploader {
@@ -1399,7 +1414,7 @@ mod worker_integration_tests {
             .instance_path("test")
             .region("us-east-1")
             .build();
-        let uploader = S3Uploader::new(fake_tm_client(root), config);
+        let uploader = S3Uploader::new(fake_s3_client(root), config);
         S3PipelineUploader::from_ready(uploader, CircuitBreaker::new())
     }
 
@@ -1610,11 +1625,7 @@ mod worker_integration_tests {
             .http_client(s3_client)
             .force_path_style(true)
             .build();
-        let tm_client = aws_sdk_s3_transfer_manager::Client::new(
-            aws_sdk_s3_transfer_manager::Config::builder()
-                .client(aws_sdk_s3::Client::from_conf(sdk_config))
-                .build(),
-        );
+        let sdk_client = aws_sdk_s3::Client::from_conf(sdk_config);
         let s3_config = s3::S3Config::builder()
             .bucket("test-bucket")
             .service_name("test")
@@ -1622,7 +1633,7 @@ mod worker_integration_tests {
             .region("us-east-1")
             .build();
         FlakyHarness {
-            uploader: S3Uploader::new(tm_client, s3_config),
+            uploader: S3Uploader::new(sdk_client, s3_config),
             fail_counter,
             s3_root,
         }

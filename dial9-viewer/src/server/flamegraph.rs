@@ -21,8 +21,8 @@ use futures::stream::{self, Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 
 use crate::ingest::aggregate::{
-    self, AggContext, AggSnapshot, Coverage, FACETS, FacetResult, FlamegraphAccum, SampleFilter,
-    Scope,
+    self, AggContext, AggSnapshot, Coverage, FACETS, FacetResult, FlamegraphAccum,
+    PollDurationBucket, SampleFilter, Scope,
 };
 use crate::ingest::refine::{self, FoldErrors, FoldOutcome, RefineOpts, Resolved};
 use crate::server::AppState;
@@ -62,6 +62,13 @@ pub struct FlamegraphParams {
     /// Only samples attributed to a poll with this spawn location are counted.
     /// Sent by the flamegraph UI's "Spawn location" selector.
     pub spawn_location: Option<String>,
+    /// Poll-duration band, lower bound in nanoseconds (inclusive). Keeps only
+    /// samples inside a poll at least this long. Sent by the flamegraph UI's
+    /// "Poll duration" min input. This is *poll* duration, not request latency.
+    pub min_poll_ns: Option<i64>,
+    /// Poll-duration band, upper bound in nanoseconds (inclusive). Keeps only
+    /// samples inside a poll at most this long.
+    pub max_poll_ns: Option<i64>,
 }
 
 #[derive(Serialize)]
@@ -96,6 +103,11 @@ pub struct FlamegraphMetadata {
     /// Generic facets array: each entry has name, label, and sorted values.
     /// The UI renders the toolbar entirely from this array.
     pub facets: Vec<FacetResult>,
+    /// Sample-weighted poll-duration histogram (log₂ ns buckets): the minimap
+    /// over the poll-duration band picker. Bar height = samples you'd select by
+    /// brushing that range. Accumulated pre-band, so it always shows the full
+    /// distribution the band selects from.
+    pub poll_duration_histogram: Vec<PollDurationBucket>,
     /// The resolved scope the server queried, echoed so the UI's header can
     /// render the current selection without re-deriving it from the URL.
     pub scope: ScopeEcho,
@@ -111,6 +123,12 @@ pub struct ScopeEcho {
     pub hosts: Vec<String>,
     pub start_ns: Option<i64>,
     pub end_ns: Option<i64>,
+    /// Active poll-duration band (nanoseconds, inclusive), echoed so the header
+    /// and diff links reflect the backend's applied slice. Null = no bound.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_poll_ns: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_poll_ns: Option<i64>,
     /// Active facet filter values (facet name → selected value, empty = all).
     pub filters: HashMap<String, String>,
 }
@@ -301,6 +319,8 @@ fn sample_filter(params: &FlamegraphParams) -> SampleFilter {
     SampleFilter {
         start_ns: params.start_ns,
         end_ns: params.end_ns,
+        min_poll_ns: params.min_poll_ns,
+        max_poll_ns: params.max_poll_ns,
         facets,
     }
 }
@@ -319,6 +339,8 @@ struct StreamCtx {
     to: Option<String>,
     start_ns: Option<i64>,
     end_ns: Option<i64>,
+    min_poll_ns: Option<i64>,
+    max_poll_ns: Option<i64>,
 }
 
 /// The mutable state carried through the folding phase: the incremental
@@ -365,6 +387,8 @@ fn flamegraph_stream(
         to: params.to.clone(),
         start_ns: params.start_ns,
         end_ns: params.end_ns,
+        min_poll_ns: params.min_poll_ns,
+        max_poll_ns: params.max_poll_ns,
         resolved,
     });
 
@@ -503,11 +527,14 @@ fn build_response(ctx: &StreamCtx, snap: &AggSnapshot, coverage: Coverage) -> Fl
             min_timestamp_ns: snap.min_ts,
             max_timestamp_ns: snap.max_ts,
             facets: snap.facets.clone(),
+            poll_duration_histogram: snap.poll_duration_histogram.clone(),
             scope: ScopeEcho {
                 service: ctx.service.clone(),
                 hosts: ctx.hosts.clone(),
                 start_ns: ctx.start_ns,
                 end_ns: ctx.end_ns,
+                min_poll_ns: ctx.min_poll_ns,
+                max_poll_ns: ctx.max_poll_ns,
                 filters,
             },
         },

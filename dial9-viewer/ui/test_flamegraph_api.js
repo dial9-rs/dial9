@@ -18,6 +18,8 @@ const {
   nextMaxFiles,
   nsToPickerUtc,
   pickerUtcToNs,
+  msToNs,
+  nsToMs,
   sourceFacetOptions,
   threadFacetOptions,
   hostFacetOptions,
@@ -265,6 +267,24 @@ assertDeepEq(
   "single host -> plain All + the host",
 );
 assertDeepEq(hostFacetOptions([]), [{ value: "", label: "All" }], "no hosts -> just All");
+
+// ── Poll-duration band ms↔ns conversion (the query-param boundary) ──
+// msToNs: human milliseconds → integer-ns string, null for empty/invalid.
+assertEq(msToNs("10"), "10000000", "msToNs: 10ms -> 10,000,000ns");
+assertEq(msToNs("0.5"), "500000", "msToNs: fractional 0.5ms -> 500,000ns");
+assertEq(msToNs("1.5"), "1500000", "msToNs: 1.5ms -> 1,500,000ns");
+assertEq(msToNs("0"), "0", "msToNs: 0 is a real bound, not blank");
+assertEq(msToNs(""), null, "msToNs: empty -> null (no bound)");
+assertEq(msToNs("   "), null, "msToNs: blank -> null (no bound)");
+assertEq(msToNs("abc"), null, "msToNs: non-numeric -> null");
+assertEq(msToNs("-5"), null, "msToNs: negative -> null (rejected)");
+// nsToMs: inverse for seeding the input from a URL ns param.
+assertEq(nsToMs("10000000"), "10", "nsToMs: 10,000,000ns -> 10 (trailing zeros trimmed)");
+assertEq(nsToMs("1500000"), "1.5", "nsToMs: 1,500,000ns -> 1.5");
+assertEq(nsToMs(""), "", "nsToMs: empty -> empty");
+assertEq(nsToMs(null), "", "nsToMs: null -> empty");
+// Round-trip: a value entered in ms survives ms→ns→ms.
+assertEq(nsToMs(msToNs("2.5")), "2.5", "ms→ns→ms round-trips");
 
 // ── Summary ──
 console.log(`\n${passed} passed, ${failed} failed`);

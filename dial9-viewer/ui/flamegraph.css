@@ -8,6 +8,10 @@
     background: #16213e;
     border-bottom: 1px solid #222;
     flex-shrink: 0;
+    /* Anchor the absolutely-positioned search-results dropdown (top:100%) to the
+       bar itself; without this it resolves against #fg-container and lands at
+       the bottom of the viewport. */
+    position: relative;
 }
 .fg-search-input {
     background: #2a2a4a;
@@ -165,6 +169,135 @@
     max-width: min(600px, calc(100vw - 24px));
     overflow-wrap: anywhere;
     color: #e0e0e0;
+}
+
+/* ── Right-click context menu (Inspect / Zoom out / Copy name) ── */
+.fg-ctx-menu {
+    position: fixed;
+    z-index: 250;
+    background: #16213e;
+    border: 1px solid #444;
+    border-radius: 5px;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5);
+    padding: 4px;
+    min-width: 150px;
+}
+.fg-ctx-menu button {
+    display: block;
+    width: 100%;
+    text-align: left;
+    background: none;
+    border: none;
+    color: #ddd;
+    cursor: pointer;
+    font-size: 0.85em;
+    padding: 6px 10px;
+    border-radius: 3px;
+    white-space: nowrap;
+}
+.fg-ctx-menu button:hover { background: #2a2a4a; color: #fff; }
+.fg-ctx-menu .fg-ctx-inspect { color: #b7b0ff; }
+
+/* ── Search results dropdown (issue #653) ── */
+.fg-search-results {
+    position: absolute;
+    top: 100%;
+    left: 12px;
+    margin-top: 4px;
+    background: #16213e;
+    border: 1px solid #444;
+    border-radius: 5px;
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.5);
+    z-index: 30;
+    width: 460px;
+    max-width: calc(100vw - 24px);
+    max-height: 420px;
+    overflow-y: auto;
+    padding: 4px;
+}
+.fg-sr-header {
+    color: #9aa;
+    font-size: 0.75em;
+    padding: 4px 8px 6px;
+    border-bottom: 1px solid #2a2a4a;
+    margin-bottom: 2px;
+}
+.fg-sr-empty { color: #888; font-size: 0.82em; padding: 8px 10px; }
+.fg-sr-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 8px;
+    border-radius: 3px;
+    cursor: pointer;
+    position: relative;
+}
+.fg-sr-row:hover { background: #2a2a4a; }
+.fg-sr-bar {
+    flex: 0 0 auto;
+    height: 10px;
+    min-width: 2px;
+    max-width: 90px;
+    border-radius: 2px;
+    opacity: 0.85;
+}
+.fg-sr-name {
+    flex: 1 1 auto;
+    color: #e0e0e0;
+    font-family: monospace;
+    font-size: 0.82em;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.fg-sr-size {
+    flex: 0 0 auto;
+    color: #9aa;
+    font-size: 0.76em;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+
+/* ── Inspect (butterfly) view (issue #652) ── */
+/* The whole butterfly scrolls as one unit inside .fg-body; the focus band is
+   sticky so it stays on screen while scrolling through tall stacks. */
+.fg-inspect { display: flex; flex-direction: column; }
+.fg-inspect-label { color: #b7b0ff; flex-shrink: 0; }
+/* The focused frame. Deliberately NOT tinted by the per-frame hash color and
+   NOT rounded — it's chrome, not a flame frame, so it always looks identical:
+   a flat accent band with a bright left rule and a soft glow that lifts it off
+   the frames it's pinned over. */
+.fg-focus-band {
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+    padding: 6px 12px 6px 14px;
+    background: #2b2748;
+    border-left: 4px solid #6c63ff;
+    border-top: 1px solid rgba(108, 99, 255, 0.5);
+    border-bottom: 1px solid rgba(108, 99, 255, 0.5);
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.55);
+    overflow: hidden;
+    flex-shrink: 0;
+    /* Pin the band to the top of the scroll viewport while scrolling down into
+       callers, and to the bottom while scrolling up into callees. */
+    position: sticky;
+    top: 0;
+    bottom: 0;
+    z-index: 5;
+}
+.fg-focus-name {
+    font-family: monospace;
+    font-weight: 700;
+    color: #fff;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.fg-focus-stat {
+    color: #b7b0ff;
+    font-size: 0.8em;
+    white-space: nowrap;
 }
 
 /* ── Two-sided differential flamegraph (diff=1) ── */

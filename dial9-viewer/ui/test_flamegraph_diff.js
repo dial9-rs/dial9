@@ -22,6 +22,7 @@ const {
   b64urlDecode,
   encodeScope,
   decodeScope,
+  pollBandLabel,
   diffSearch,
   parseDiff,
   chooseTarget,
@@ -338,6 +339,31 @@ assertEq(
   assertEq(parsed.b.get("start_ns"), "8000", "side B start_ns (independent window) round-trips");
   assertEq(parsed.b.get("end_ns"), "9000", "side B end_ns (independent window) round-trips");
 }
+
+// ── diffSearch carries INDEPENDENT per-side poll-duration bands ──
+// The marquee "why are the slow polls slow" diff: same service/host, A = fast
+// polls, B = slow polls. Both sides' min_poll_ns / max_poll_ns must survive the
+// codec independently, exactly like the per-side time windows above.
+{
+  const scopeA = fullScopeQuery(new URLSearchParams(
+    "api=1&bucket=b&prefix=p&service=svc&host=h1&max_poll_ns=1000000"));
+  const scopeB = fullScopeQuery(new URLSearchParams(
+    "api=1&bucket=b&prefix=p&service=svc&host=h1&min_poll_ns=10000000"));
+  const parsed = parseDiff(diffSearch(scopeA, scopeB));
+  assertEq(parsed.a.get("max_poll_ns"), "1000000", "side A max_poll_ns (fast polls ≤1ms) round-trips");
+  assertEq(parsed.a.get("min_poll_ns"), null, "side A has no lower bound");
+  assertEq(parsed.b.get("min_poll_ns"), "10000000", "side B min_poll_ns (slow polls ≥10ms) round-trips");
+  assertEq(parsed.b.get("max_poll_ns"), null, "side B has no upper bound");
+}
+
+// ── pollBandLabel: human band summary for the scope header / diff legend ──
+assertEq(pollBandLabel(null, null), "", "no band -> empty label");
+assertEq(pollBandLabel("", ""), "", "empty-string bounds -> empty label");
+assertEq(pollBandLabel("10000000", null), "poll ≥ 10ms", "lower bound only");
+assertEq(pollBandLabel(null, "1000000"), "poll ≤ 1ms", "upper bound only");
+assertEq(pollBandLabel("1000000", "10000000"), "poll 1–10ms", "both bounds -> range");
+assertEq(pollBandLabel("500000", null), "poll ≥ 0.5ms", "sub-ms bound formats with decimal");
+assertEq(pollBandLabel(1000000, 10000000), "poll 1–10ms", "accepts numbers as well as strings");
 
 // ── parseDiff: rejects non-diff and malformed links ──
 assertEq(parseDiff("api=1&bucket=b"), null, "api-mode (non-diff) link -> null");

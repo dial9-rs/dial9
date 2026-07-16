@@ -1096,19 +1096,129 @@
   }
 
   /**
+   * Index every poll by its owning task id, sorted by start. Polls with no
+   * task id (taskId 0/falsy, e.g. block-in-place stubs) are skipped — they
+   * carry no task to attribute a span to.
+   * @param {Object} workerSpans per-worker `{polls}` from {@link buildWorkerSpans}
+   * @returns {Map<number, Array<{start:number, end:number, workerId:number}>>}
+   */
+  function indexPollsByTask(workerSpans) {
+    const byTask = new Map();
+    for (const [w, spans] of Object.entries(workerSpans)) {
+      const workerId = Number(w);
+      for (const p of spans.polls) {
+        if (!p.taskId) continue;
+        let arr = byTask.get(p.taskId);
+        if (!arr) { arr = []; byTask.set(p.taskId, arr); }
+        arr.push({ start: p.start, end: p.end, workerId });
+      }
+    }
+    for (const arr of byTask.values()) arr.sort((a, b) => a.start - b.start);
+    return byTask;
+  }
+
+  /**
+   * Resolve the task that owns a span, from its first (enter) segment: the poll
+   * on `segment.workerId` whose window covers `segment.start`. Returns the
+   * task id, or null when no poll overlaps (span emitted outside any poll).
+   *
+   * Binary search — this runs once per span, and a worker's poll list holds
+   * hundreds of thousands of entries on a >10M-event trace, so a linear scan
+   * here would be O(#spans × #polls). A worker's polls are sorted ascending by
+   * `start` and non-overlapping (built in {@link buildWorkerSpans} from that
+   * worker's events in timestamp order), so the covering poll is unique.
+   * @param {{start:number, workerId:number}} firstSeg
+   * @param {Object} workerSpans per-worker `{polls}` from {@link buildWorkerSpans}
+   * @returns {number|null}
+   */
+  function resolveSpanTask(firstSeg, workerSpans) {
+    if (!firstSeg) return null;
+    const polls = workerSpans[firstSeg.workerId]?.polls;
+    if (!polls) return null;
+    const t = firstSeg.start;
+    let lo = 0, hi = polls.length - 1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      if (polls[mid].end < t) lo = mid + 1;
+      else if (polls[mid].start > t) hi = mid - 1;
+      else return polls[mid].taskId ? polls[mid].taskId : null;
+    }
+    return null;
+  }
+
+  /**
+   * Reconstruct a span's active segments from its owning task's polls.
+   *
+   * A span entered with a guard held across `.await` points is emitted as a
+   * single SpanEnter/SpanExit pair covering the whole request, even though the
+   * task was only on-CPU during a handful of polls scattered across that
+   * window (and possibly across several workers). Trusting the raw segment
+   * would report the entire await as "active" and draw no idle gap.
+   *
+   * Instead, intersect each raw segment with the task's polls: the overlaps are
+   * the true on-CPU segments, and the space between them is idle. Intersecting
+   * per-segment (rather than over the span's whole `[start,end]`) keeps
+   * multi-poll spans that already carry per-poll segments unchanged, and avoids
+   * attributing between-segment gaps to the span.
+   *
+   * `taskPolls` MUST be sorted ascending by `start` (as {@link indexPollsByTask}
+   * returns) AND non-overlapping: a task is polled on one worker at a time, so
+   * its polls do not overlap even when merged across workers. That invariant
+   * makes `end` monotonic too, which the binary search below relies on. Returns
+   * the raw segments unchanged when the task has no polls.
+   * @param {Array<{start:number, end:number, workerId:number}>} rawSegments sorted by start
+   * @param {Array<{start:number, end:number, workerId:number}>|undefined} taskPolls sorted by start, non-overlapping
+   * @returns {Array<{start:number, end:number, workerId:number}>}
+   */
+  function reconstructSpanSegments(rawSegments, taskPolls) {
+    if (!taskPolls || taskPolls.length === 0) return rawSegments;
+    const out = [];
+    for (const seg of rawSegments) {
+      // Binary search for the first poll that could overlap this segment, i.e.
+      // the first poll whose end is >= seg.start. Polls are non-overlapping so
+      // `end` is monotonic; a linear scan here would be O(#polls) per segment.
+      let lo = 0, hi = taskPolls.length;
+      while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        if (taskPolls[mid].end < seg.start) lo = mid + 1;
+        else hi = mid;
+      }
+      for (let i = lo; i < taskPolls.length; i++) {
+        const p = taskPolls[i];
+        if (p.start > seg.end) break; // past the segment; no further overlaps
+        const a = Math.max(p.start, seg.start);
+        const b = Math.min(p.end, seg.end);
+        if (b > a) out.push({ start: a, end: b, workerId: p.workerId });
+      }
+    }
+    // Defensive fallback for direct callers: through buildSpanData the taskId is
+    // resolved from a poll covering segments[0].start, so that poll always
+    // intersects and `out` is non-empty. A direct caller passing a window that
+    // falls entirely between the task's polls keeps its raw segments so the
+    // span still renders rather than vanishing.
+    return out.length > 0 ? out : rawSegments;
+  }
+
+  /**
    * Build span data structures from custom events.
    * Groups SpanEnter/SpanExit pairs into spans with segments (one per poll).
    * SpanCloseEvent finalizes a span and enables span ID recycling.
+   *
+   * When `workerSpans` is supplied, each span's active segments are
+   * reconstructed from its owning task's poll timeline instead of trusting the
+   * raw on-wire SpanEnter/SpanExit segments (see `reconstructSpanSegments`).
    * @param {Array<{name: string, timestamp: number, fields: Object}>} customEvents
+   * @param {Object} [workerSpans] per-worker `{polls}` from {@link buildWorkerSpans};
+   *   when present, enables poll-based active/idle reconstruction.
    * @returns {{
-   *   allSpans: Array<{start: number, end: number, spanId: string, spanName: string, fields: Object, parentSpanId: string|null, segments: Array<{start: number, end: number, workerId: number}>, activeNs: number, depth: number}>,
+   *   allSpans: Array<{start: number, end: number, spanId: string, spanName: string, fields: Object, parentSpanId: string|null, segments: Array<{start: number, end: number, workerId: number}>, activeNs: number, taskId: number|null, depth: number}>,
    *   spanMeta: Map<string, {spanName: string, fields: Object, parentSpanId: string|null}>,
    *   maxDepth: number,
    *   unmatchedSpans: Array<{start: number, spanId: string, workerId: number, spanName: string, fields: Object, parentSpanId: string|null}>,
    *   childrenByParent: Map<string|null, string[]>,
    * }}
    */
-  function buildSpanData(customEvents) {
+  function buildSpanData(customEvents, workerSpans) {
     // Events are only ordered within a single worker's stream. Cross-worker
     // interleaving can produce globally out-of-order timestamps, so we must
     // sort before processing to ensure close events are seen after all
@@ -1170,7 +1280,6 @@
         ev.name === "SpanExitEvent"
       ) {
         const v = ev.fields;
-        const workerId = Number(v.worker_id);
         const spanId = String(v.span_id);
 
         const enter = openEnters.get(spanId);
@@ -1186,7 +1295,11 @@
             spanMap.set(spanId, rec);
           }
           if (Object.keys(exitFields).length > 0) rec.fields = exitFields;
-          rec.segments.push({ start: enter.timestamp, end: ev.timestamp, workerId });
+          // Pair the segment with the ENTER worker, not the exit worker. `start`
+          // is the enter timestamp, and a long-lived span's task can migrate
+          // workers between enter and exit; using the exit worker here makes the
+          // span->task lookup (poll overlap at `start` on this worker) miss.
+          rec.segments.push({ start: enter.timestamp, end: ev.timestamp, workerId: enter.workerId });
         }
       } else if (ev.name.startsWith("SpanClose__") || ev.name === "SpanCloseEvent") {
         const spanId = String(ev.fields.span_id);
@@ -1200,21 +1313,42 @@
       finalizeSpan(spanId);
     }
 
+    // Optional: index polls by owning task so we can reconstruct a span's
+    // active segments from the task that ran it (see reconstructSpanSegments).
+    const pollsByTask = workerSpans ? indexPollsByTask(workerSpans) : null;
+
     // Build allSpans
     const allSpans = [];
     for (const rec of closedSpans) {
       rec.segments.sort((a, b) => a.start - b.start);
       const start = rec.segments[0].start;
       const end = rec.segments[rec.segments.length - 1].end;
-      const activeNs = rec.segments.reduce((sum, seg) => sum + (seg.end - seg.start), 0);
+      // Resolve the owning task from the ENTER of the first segment: the poll
+      // covering (segment.workerId, segment.start). This is the same lookup the
+      // viewer uses to jump to a task on span-click.
+      const taskId = pollsByTask
+        ? resolveSpanTask(rec.segments[0], workerSpans)
+        : null;
+      // When we know the owning task, reconstruct active segments by
+      // intersecting each on-wire segment with that task's polls. This turns a
+      // coarse "entered across .await" span (one segment covering the whole
+      // request) into the actual on-CPU polls, so idle gaps render and
+      // activeNs reflects on-CPU time rather than span-open time. When we can't
+      // resolve a task (no covering poll), keep the raw on-wire segments.
+      const segments =
+        taskId != null
+          ? reconstructSpanSegments(rec.segments, pollsByTask.get(taskId))
+          : rec.segments;
+      const activeNs = segments.reduce((sum, seg) => sum + (seg.end - seg.start), 0);
       allSpans.push({
         start, end,
         spanId: rec.spanId,
         spanName: rec.spanName,
         fields: rec.fields,
         parentSpanId: rec.parentSpanId,
-        segments: rec.segments,
+        segments,
         activeNs,
+        taskId,
       });
     }
     allSpans.sort((a, b) => a.start - b.start);
@@ -1660,6 +1794,9 @@
     hasCpuProfileSamples,
     buildProcessCpuUsageSeries,
     buildSpanData,
+    indexPollsByTask,
+    resolveSpanTask,
+    reconstructSpanSegments,
     collectDescendants,
     selectSpanRenderSet,
     enclosingSpans,

@@ -168,6 +168,141 @@ fn mini_counts() -> MiniCounts {
     mini_trace().1
 }
 
+/// A synthetic trace segment with reconstructable poll spans, so the
+/// poll-duration band filter can be exercised end-to-end. Worker 0 (tid 100)
+/// runs two polls: a "fast" one (0.5 ms) and a "slow" one (50 ms). CPU samples
+/// land inside each, plus one off-worker sample (no enclosing poll, so its
+/// `poll_duration_ns` is null). Gzipped, like a real source segment.
+///
+/// Expected on-CPU sample counts (default `source=cpu`):
+///   * fast poll (0.5 ms): 2 samples
+///   * slow poll  (50 ms): 3 samples
+///   * off-worker (no poll): 1 sample
+fn poll_trace_gz() -> Vec<u8> {
+    let mut enc = Encoder::new();
+    let park = enc
+        .register_schema(
+            "WorkerParkEvent",
+            vec![
+                FieldDef::new("worker_id", FieldType::Varint),
+                FieldDef::new("tid", FieldType::Varint),
+            ],
+        )
+        .unwrap();
+    // spawn_loc is optional (serde default) in the decoder, so we omit it here.
+    let poll_start = enc
+        .register_schema(
+            "PollStartEvent",
+            vec![
+                FieldDef::new("worker_id", FieldType::Varint),
+                FieldDef::new("task_id", FieldType::Varint),
+            ],
+        )
+        .unwrap();
+    let poll_end = enc
+        .register_schema(
+            "PollEndEvent",
+            vec![FieldDef::new("worker_id", FieldType::Varint)],
+        )
+        .unwrap();
+    let cpu = enc
+        .register_schema(
+            "CpuSampleEvent",
+            vec![
+                FieldDef::new("tid", FieldType::Varint),
+                FieldDef::new("source", FieldType::Varint),
+                FieldDef::new("callchain", FieldType::StackFrames),
+            ],
+        )
+        .unwrap();
+
+    // Bind tid 100 -> worker 0 early (before any poll), so the binding doesn't
+    // close an open poll span. The first varint of every event is its timestamp.
+    enc.write_event(
+        &park,
+        &[
+            FieldValue::Varint(1),
+            FieldValue::Varint(0),
+            FieldValue::Varint(100),
+        ],
+    )
+    .unwrap();
+
+    // Fast poll on worker 0: [1_000_000, 1_500_000) → 500_000 ns (0.5 ms).
+    enc.write_event(
+        &poll_start,
+        &[
+            FieldValue::Varint(1_000_000),
+            FieldValue::Varint(0),
+            FieldValue::Varint(7),
+        ],
+    )
+    .unwrap();
+    for ts in [1_100_000u64, 1_300_000] {
+        enc.write_event(
+            &cpu,
+            &[
+                FieldValue::Varint(ts),
+                FieldValue::Varint(100),
+                FieldValue::Varint(0),
+                FieldValue::StackFrames(vec![0x1000u64, 0x2000].into()),
+            ],
+        )
+        .unwrap();
+    }
+    enc.write_event(
+        &poll_end,
+        &[FieldValue::Varint(1_500_000), FieldValue::Varint(0)],
+    )
+    .unwrap();
+
+    // Slow poll on worker 0: [10_000_000, 60_000_000) → 50_000_000 ns (50 ms).
+    enc.write_event(
+        &poll_start,
+        &[
+            FieldValue::Varint(10_000_000),
+            FieldValue::Varint(0),
+            FieldValue::Varint(8),
+        ],
+    )
+    .unwrap();
+    for ts in [20_000_000u64, 30_000_000, 40_000_000] {
+        enc.write_event(
+            &cpu,
+            &[
+                FieldValue::Varint(ts),
+                FieldValue::Varint(100),
+                FieldValue::Varint(0),
+                FieldValue::StackFrames(vec![0x1000u64, 0x3000].into()),
+            ],
+        )
+        .unwrap();
+    }
+    enc.write_event(
+        &poll_end,
+        &[FieldValue::Varint(60_000_000), FieldValue::Varint(0)],
+    )
+    .unwrap();
+
+    // One off-worker sample (tid 999 is never bound) → no enclosing poll, so its
+    // poll_duration_ns is null and any band excludes it.
+    enc.write_event(
+        &cpu,
+        &[
+            FieldValue::Varint(70_000_000),
+            FieldValue::Varint(999),
+            FieldValue::Varint(0),
+            FieldValue::StackFrames(vec![0x1000u64, 0x2000].into()),
+        ],
+    )
+    .unwrap();
+
+    let raw = enc.finish();
+    let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    std::io::Write::write_all(&mut gz, &raw).unwrap();
+    gz.finish().unwrap()
+}
+
 async fn put(client: &aws_sdk_s3::Client, bucket: &str, key: &str, data: Vec<u8>) {
     client
         .put_object()
@@ -629,6 +764,105 @@ async fn flamegraph_thread_and_source_filters_apply() {
         worker.total_samples + off.total_samples,
         cpu.total_samples,
         "worker + off-worker partitions the CpuProfile samples"
+    );
+}
+
+/// The `min_poll_ns` / `max_poll_ns` band filter must reach the aggregator and
+/// select samples by their enclosing poll's duration, end-to-end through
+/// `/api/flamegraph`. This is the "why are the slow polls slow" slice: A = fast
+/// polls, B = slow polls, which the diff view compares side by side.
+///
+/// The fixture ([`poll_trace_gz`]) has a 0.5 ms poll (2 on-CPU samples), a 50 ms
+/// poll (3 on-CPU samples), and one off-worker sample (no enclosing poll).
+#[tokio::test]
+async fn flamegraph_poll_duration_band_applies() {
+    let fs = tempfile::tempdir().unwrap();
+    std::fs::create_dir(fs.path().join("src-bucket")).unwrap();
+    std::fs::create_dir(fs.path().join("out-bucket")).unwrap();
+
+    let uploader = fake_s3_client(fs.path());
+    let key = segment_key("2026-04-09", "1910", "shale", "host-a", 1_744_224_000, 0);
+    put(&uploader, "src-bucket", &key, poll_trace_gz()).await;
+
+    let base = start_agg_server(fs.path(), "src-bucket", "out-bucket", 60).await;
+    let http = reqwest::Client::new();
+
+    // No band: default source=cpu → all 6 on-CPU samples (2 fast + 3 slow + 1
+    // off-worker).
+    let all = stream_final(&http, &base, "service=shale").await;
+    assert_eq!(all.total_samples, 6, "no band → every on-CPU sample");
+
+    // Slow slice: polls ≥ 10 ms keeps only the 50 ms poll's 3 samples. The
+    // off-worker sample (null poll duration) is excluded by the band.
+    let slow = stream_final(&http, &base, "service=shale&min_poll_ns=10000000").await;
+    assert_eq!(slow.total_samples, 3, "min_poll_ns=10ms → slow poll only");
+
+    // Fast slice: polls ≤ 1 ms keeps only the 0.5 ms poll's 2 samples.
+    let fast = stream_final(&http, &base, "service=shale&max_poll_ns=1000000").await;
+    assert_eq!(fast.total_samples, 2, "max_poll_ns=1ms → fast poll only");
+
+    // Explicit band [1 ms, 100 ms] keeps only the 50 ms poll (0.5 ms is below
+    // the lower bound).
+    let band = stream_final(
+        &http,
+        &base,
+        "service=shale&min_poll_ns=1000000&max_poll_ns=100000000",
+    )
+    .await;
+    assert_eq!(band.total_samples, 3, "band [1ms,100ms] → slow poll only");
+
+    // A band matching no poll yields an empty tree, not an error.
+    let none = stream_final(&http, &base, "service=shale&min_poll_ns=999000000").await;
+    assert_eq!(none.total_samples, 0, "band above every poll → no samples");
+
+    // The fast and slow slices partition the in-poll samples (5 = 2 + 3); the
+    // remaining one on-CPU sample is off-worker (no poll), correctly excluded by
+    // any band.
+    assert_eq!(
+        fast.total_samples + slow.total_samples,
+        5,
+        "fast + slow = the in-poll on-CPU samples"
+    );
+
+    // The poll-duration histogram (the minimap) rides in metadata, is
+    // sample-weighted, and is accumulated PRE-band. The 0.5 ms poll (2 samples)
+    // and 50 ms poll (3 samples) each land in one log₂ bucket; the off-worker
+    // sample contributes to neither. Total histogram weight = 5 (the in-poll
+    // on-CPU samples), regardless of the band applied.
+    let hist_weight = |body: &str| -> i64 {
+        // Sum every "samples":N inside the poll_duration_histogram array. The
+        // array is the only place that key appears in the histogram objects; we
+        // slice from the histogram field to avoid the top-level total.
+        let start = body
+            .find("\"poll_duration_histogram\":")
+            .expect("histogram present in metadata");
+        let rest = &body[start..];
+        let end = rest.find(']').expect("histogram array closes");
+        let arr = &rest[..end];
+        arr.match_indices("\"samples\":")
+            .map(|(i, _)| {
+                let after = &arr[i + "\"samples\":".len()..];
+                let n = after
+                    .find(|c: char| !c.is_ascii_digit())
+                    .unwrap_or(after.len());
+                after[..n].parse::<i64>().unwrap()
+            })
+            .sum()
+    };
+    // No band: histogram covers all in-poll samples.
+    let no_band_body = fetch_body(&http, &base, "service=shale").await;
+    assert_eq!(
+        hist_weight(&no_band_body),
+        5,
+        "histogram is sample-weighted over the 5 in-poll samples"
+    );
+    // With a band applied, the histogram is unchanged (pre-band): it always
+    // shows the full distribution the band selects from.
+    let banded_body = fetch_body(&http, &base, "service=shale&min_poll_ns=10000000").await;
+    assert_eq!(
+        hist_weight(&banded_body),
+        5,
+        "histogram is pre-band: a band does not shrink it"
     );
 }
 

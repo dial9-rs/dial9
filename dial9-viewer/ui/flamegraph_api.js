@@ -100,6 +100,30 @@ function pickerUtcToNs(val) {
   return Math.floor(new Date(val + "Z").getTime() * 1e6).toString();
 }
 
+// Poll-duration band inputs are in milliseconds (human-friendly); the API/scope
+// params (`min_poll_ns`/`max_poll_ns`) are nanoseconds. These two are the single
+// conversion boundary, symmetric like nsToPickerUtc/pickerUtcToNs.
+//
+// msToNs: parse a millisecond input value to an integer-ns string, or null for
+// empty/blank/non-numeric/negative input (so a cleared box means "no bound").
+// Fractional ms is allowed (0.5ms → "500000") and rounded to whole ns.
+function msToNs(val) {
+  if (val == null || String(val).trim() === "") return null;
+  const ms = Number(val);
+  if (!Number.isFinite(ms) || ms < 0) return null;
+  return String(Math.round(ms * 1e6));
+}
+
+// nsToMs: inverse of msToNs for seeding the input from a URL ns param. Returns
+// "" for null/empty/non-numeric so the box shows blank (no bound). Trailing
+// zeros are trimmed (1_500_000 → "1.5", 1_000_000 → "1").
+function nsToMs(ns) {
+  if (ns == null || String(ns).trim() === "") return "";
+  const n = Number(ns);
+  if (!Number.isFinite(n)) return "";
+  return String(n / 1e6);
+}
+
 // Compute the next `max_files` ceiling when the user clicks "Fetch more".
 // Each click requests roughly 4x the current depth, rounded up, capped at a
 // sane ceiling so a single click can't ask the backend for everything. Always
@@ -173,6 +197,8 @@ if (typeof module !== "undefined" && module.exports) {
     nextMaxFiles,
     nsToPickerUtc,
     pickerUtcToNs,
+    msToNs,
+    nsToMs,
     sourceFacetOptions,
     threadFacetOptions,
     hostFacetOptions,
