@@ -224,6 +224,39 @@ describe("URL / demo loads feed the worker and close on success", () => {
   });
 });
 
+// The boot `s_*` scope must show the loading view during the async /api/browse
+// re-list BEFORE any URLs exist (otherwise the viewer sits in the drop zone —
+// the bug this fixes). showLoading enters "loading" without a worker load; the
+// entry then either loadUrls the resolved files or cancels on failure/empty.
+describe("scope boot: showLoading bridges the async re-list", () => {
+  it("shows the loading view without starting a worker load", () => {
+    const h = makeHarness();
+    h.ctrl.showLoading("Loading trace selection…");
+    expect(h.ctrl.getState().section).toBe("loading");
+    expect(h.ctrl.getState().progressLabel).toBe("Loading trace selection…");
+    expect(h.loads).toHaveLength(0); // no fetch until the scope resolves
+  });
+
+  it("resolved scope: loadUrls takes over the loading view", () => {
+    const h = makeHarness();
+    h.ctrl.showLoading("Loading trace selection…");
+    h.ctrl.loadUrls(["/api/object?key=a", "/api/object?key=b"], initialUrlLabel(2));
+    expect(h.ctrl.getState().section).toBe("loading");
+    expect(h.loads).toHaveLength(1);
+    expect(h.loads[0]?.urls).toEqual(["/api/object?key=a", "/api/object?key=b"]);
+  });
+
+  it("failed/empty scope: cancel returns to the chooser and invalidates the scope", () => {
+    const h = makeHarness();
+    const token = h.ctrl.showLoading("Loading trace selection…");
+    expect(h.ctrl.isCurrentLoad(token)).toBe(true);
+    h.ctrl.cancel();
+    expect(h.ctrl.getState().section).toBe("chooser");
+    expect(h.ctrl.isCurrentLoad(token)).toBe(false);
+    expect(h.loads).toHaveLength(0);
+  });
+});
+
 // ── File drop / pick ────────────────────────────────────────────────────────
 
 describe("file loads via object URL", () => {

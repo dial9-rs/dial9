@@ -57,6 +57,16 @@ export interface LoadChrome {
    * Runs off the main thread; a no-op before the first load.
    */
   reparseToRange(range: ReparseRange | null): void;
+  /**
+   * Boot `s_*` scope: show the loading view immediately (`scopeLoading`) while
+   * the entry re-lists the scope to its file URLs, then `loadUrls` the result
+   * through the credentialed worker path — or `scopeFailed` to drop back to the
+   * chooser when resolution errors or yields nothing. Returns a predicate that
+   * remains true only while this scope load is current.
+   */
+  scopeLoading(label: string): () => boolean;
+  loadUrls(urls: readonly string[], label: string): void;
+  scopeFailed(): void;
   dispose(): void;
 }
 
@@ -283,6 +293,15 @@ export function mountLoadChrome(options: LoadChromeOptions): LoadChrome {
     },
     currentLabel: () => committedLabel,
     reparseToRange: (range) => controller.reparse(range),
+    scopeLoading: (label) => {
+      const token = controller.showLoading(label);
+      return () => controller.isCurrentLoad(token);
+    },
+    loadUrls: (urls, label) => {
+      pendingLabel = label;
+      controller.loadUrls(urls, label);
+    },
+    scopeFailed: () => controller.cancel(),
     dispose(): void {
       controller.dispose();
       unregisterEsc();
