@@ -365,6 +365,11 @@ impl<W: BufferMode> TracedRuntimeBuilder<W> {
         mut self,
         config: crate::telemetry::task_dump_config::TaskDumpConfig,
     ) -> Self {
+        if cfg!(not(feature = "taskdump")) {
+            tracing::warn!(
+                "taskdumps enabled but `taskdump` feature was not. No task dumps will be captured."
+            )
+        }
         self.task_dump_config = Some(config);
         self
     }
