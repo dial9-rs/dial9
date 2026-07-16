@@ -35,7 +35,7 @@ for i in "${!LABELS[@]}"; do
     client_out="$WORK_DIR/client_$i.json"
     mkdir -p "$trace_dir"
 
-    args=(--trace-path "$trace_dir/trace.bin" --demo --leak --no-task-dumps)
+    args=(--trace-path "$trace_dir" --demo --leak --no-task-dumps)
     if [ -z "$rate" ]; then
         args+=(--no-memory-profiling)
     else

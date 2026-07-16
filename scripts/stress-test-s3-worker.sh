@@ -27,7 +27,6 @@ REPO_ROOT="$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
 
 TRACE_DIR=$(mktemp -d /tmp/dial9-stress-XXXXXX)
-TRACE_PATH="$TRACE_DIR/trace.bin"
 PREFIX="stress-test/$(date -u +%Y-%m-%dT%H%M%S)"
 
 cleanup() {
@@ -84,7 +83,7 @@ cargo build --release -p dial9-tokio-telemetry --example s3_stress_test
 echo "Running stress test..."
 RUST_LOG=info,dial9_worker=debug \
   cargo run --release -p dial9-tokio-telemetry --example s3_stress_test -- \
-    --trace-path "$TRACE_PATH" \
+    --trace-path "$TRACE_DIR" \
     --bucket "$BUCKET" \
     --prefix "$PREFIX" \
     --region "$REGION" \
