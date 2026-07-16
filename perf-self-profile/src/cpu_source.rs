@@ -25,6 +25,7 @@ const WORKER_ID_UNKNOWN: u64 = 255;
 
 /// What triggered a CPU sample.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum CpuSampleSource {
     /// Periodic CPU profiling sample (frequency-based).
     CpuProfile = 0,

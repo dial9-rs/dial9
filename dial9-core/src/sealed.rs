@@ -61,6 +61,7 @@ impl MemorySegment {
 
 /// A sealed trace segment, either disk-backed or memory-backed.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum SegmentRef {
     /// On-disk segment file
     Disk(SealedSegment),

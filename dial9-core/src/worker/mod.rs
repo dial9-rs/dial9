@@ -147,7 +147,7 @@ pub(crate) fn run_background_task(
 /// a teardown closure run after it (e.g. profiler register/unregister).
 ///
 /// Owns the fs handoff so callers never touch the writer's storage backend.
-pub fn spawn<M, Init, Teardown>(
+pub(crate) fn spawn<M, Init, Teardown>(
     writer: &crate::buffer::SegmentWriter<M>,
     config: BackgroundTaskConfig,
     shutdown: tokio::sync::oneshot::Receiver<Duration>,
