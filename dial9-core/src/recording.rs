@@ -10,7 +10,7 @@ use std::time::Duration;
 ///
 /// Present only when a segment-processing pipeline is configured.
 #[cfg(feature = "pipeline")]
-pub struct WorkerHandle {
+pub(crate) struct WorkerHandle {
     shutdown: Option<tokio::sync::oneshot::Sender<Duration>>,
     thread: Option<JoinHandle<()>>,
 }
@@ -18,7 +18,10 @@ pub struct WorkerHandle {
 #[cfg(feature = "pipeline")]
 impl WorkerHandle {
     /// Wrap the worker's shutdown sender and join handle.
-    pub fn new(shutdown: tokio::sync::oneshot::Sender<Duration>, thread: JoinHandle<()>) -> Self {
+    pub(crate) fn new(
+        shutdown: tokio::sync::oneshot::Sender<Duration>,
+        thread: JoinHandle<()>,
+    ) -> Self {
         Self {
             shutdown: Some(shutdown),
             thread: Some(thread),
