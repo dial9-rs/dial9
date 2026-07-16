@@ -90,6 +90,16 @@ function collectSkillMds(): { name: string; path: string }[] {
   return results.sort((a, b) => a.name.localeCompare(b.name));
 }
 
+// Recipes whose snippet is O(polls x spans) and runs ~77s on the real demo
+// trace (kept readable as user-facing example code, not optimized). Under
+// Vitest's parallel workers on a slow CI runner they exceed the suite's 120s
+// ceiling; give them a wider per-test ceiling. Per AGENTS.md these are
+// "ceilings for stragglers, not expected durations".
+const SLOW_RECIPES = new Set([
+  "dial9-trace-recipes: Detect tight loops (many spans per poll)",
+]);
+const SLOW_RECIPE_TIMEOUT = 300_000;
+
 const skillMds = collectSkillMds();
 
 // Collect recipes from all SKILL.md files (sync, at collection time).
@@ -216,7 +226,19 @@ for (const input of inputs) {
         continue;
       }
 
-      it(recipe.heading, async () => {
+      // Slow O(polls x spans) recipes do identical work in both modes (both
+      // read the single prelude trace), so run them once (file mode) rather
+      // than paying the ~77s cost twice: the dir-mode run adds no coverage and
+      // only doubles the timeout-flake surface.
+      if (input.label === "dir" && SLOW_RECIPES.has(recipe.heading)) {
+        it.skip(recipe.heading, () => {});
+        continue;
+      }
+
+      const recipeTimeout = SLOW_RECIPES.has(recipe.heading)
+        ? SLOW_RECIPE_TIMEOUT
+        : 120_000;
+      it(recipe.heading, { timeout: recipeTimeout }, async () => {
         const origLog = console.log;
         const logs: string[] = [];
         console.log = (...args: unknown[]) => logs.push(args.join(" "));
