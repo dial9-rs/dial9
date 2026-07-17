@@ -229,11 +229,13 @@ export function upperBoundByStart(
 }
 
 /**
- * Spans that overlap [viewStart, viewEnd] AND pass the filter. The right edge is
- * binary-searched (upperBoundByStart); the candidate prefix is then scanned for
- * `end >= viewStart` (a long-running span with a small start survives). The
- * prefix scan's left edge is not itself binary-bounded (that needs a max-end
- * interval index).
+ * Spans that overlap [viewStart, viewEnd] AND pass the filter. On the columnar
+ * path BOTH edges are bounded: `ColumnarSpans.windowRows` binary-searches the
+ * right edge (start <= viewEnd) and the left edge via the maxSpanDur interval
+ * bound (start >= viewStart - maxSpanDur), so panning right no longer walks the
+ * whole prefix from row 0 each frame. Rows in the band still test `end >=
+ * viewStart` (a maxSpanDur-wide band admits some non-overlappers). Output is
+ * identical to the old full-prefix scan.
  */
 export function filterVisibleSpans(
   data: SpanTrackData,
@@ -244,12 +246,9 @@ export function filterVisibleSpans(
   const cs = data.columnarSpans;
   const out: TracingSpan[] = [];
   if (cs) {
-    // Right edge: binary search the start column. Left edge: prefix scan reading
-    // the end column (cheap), materializing a span only for a viewport survivor.
-    let lo = 0, hiB = cs.length;
-    while (lo < hiB) { const m = (lo + hiB) >> 1; if (cs.start[m] <= viewEnd) lo = m + 1; else hiB = m; }
-    for (let i = 0; i < lo; i++) {
-      if (cs.end[i] < viewStart) continue;
+    const { lo, hi } = cs.windowRows(viewStart, viewEnd);
+    for (let i = lo; i < hi; i++) {
+      if (cs.end[i]! < viewStart) continue;
       const s = cs.at(i);
       if (!spanMatchesFilter(s, filter, data.durationsByName)) continue;
       out.push(s);

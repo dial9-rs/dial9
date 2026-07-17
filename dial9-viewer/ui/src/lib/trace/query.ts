@@ -60,9 +60,11 @@ export function taskAt(
 
 /**
  * Find a span whose time range contains `ns` AND which has a segment
- * actively executing on `workerId` at `ns` - the span under a lane click.
- * First match in allSpans order (sorted by start). On the columnar path scans
- * the store columns (segments CSR), materializing only the match.
+ * actively executing on `workerId` at `ns` - the span under a lane click/hover.
+ * First match in start order. On the columnar path the candidate rows are
+ * bounded by `windowRows(ns, ns)` (the maxSpanDur interval bound) instead of a
+ * full O(spans) scan - this runs every hover frame, so the bound matters. Only
+ * the returned match is materialized.
  */
 export function findContainingSpan(
   allSpans: readonly TracingSpan[],
@@ -72,11 +74,14 @@ export function findContainingSpan(
 ): TracingSpan | null {
   if (columnarSpans) {
     const cs = columnarSpans;
-    for (let r = 0; r < cs.length; r++) {
-      if (cs.end[r] < ns || cs.start[r] > ns) continue;
-      const lo = cs.segOff[r], hi = cs.segOff[r + 1];
-      for (let j = lo; j < hi; j++) {
-        if (cs.segWorker[j] === workerId && cs.segStart[j] <= ns && cs.segEnd[j] >= ns) return cs.at(r);
+    // Window rows have start <= ns; test end >= ns per row (== the old
+    // start<=ns<=end containment, same first-match).
+    const { lo, hi } = cs.windowRows(ns, ns);
+    for (let r = lo; r < hi; r++) {
+      if (cs.end[r]! < ns) continue;
+      const so = cs.segOff[r]!, se = cs.segOff[r + 1]!;
+      for (let j = so; j < se; j++) {
+        if (cs.segWorker[j] === workerId && cs.segStart[j]! <= ns && cs.segEnd[j]! >= ns) return cs.at(r);
       }
     }
     return null;
@@ -93,8 +98,9 @@ export function findContainingSpan(
 }
 
 /** Columnar port of the frozen enclosingSpans: spans with a segment covering
- * (ev.fields.worker_id, ev.timestamp), sorted by depth then start. Scans the
- * segments CSR, materializing only matches. */
+ * (ev.fields.worker_id, ev.timestamp), sorted by depth then start. Candidate
+ * rows are bounded by `windowRows(ts, ts)` (a covering segment implies the span
+ * itself contains ts) instead of a full scan; only matches are materialized. */
 export function enclosingSpansColumnar(
   cs: ColumnarSpans,
   ev: { timestamp: number; fields?: Record<string, unknown> }
@@ -105,10 +111,11 @@ export function enclosingSpansColumnar(
   if (!Number.isFinite(wid)) return [];
   const ts = ev.timestamp;
   const out: TracingSpan[] = [];
-  for (let r = 0; r < cs.length; r++) {
-    const lo = cs.segOff[r], hi = cs.segOff[r + 1];
+  const { lo: wLo, hi: wHi } = cs.windowRows(ts, ts);
+  for (let r = wLo; r < wHi; r++) {
+    const lo = cs.segOff[r]!, hi = cs.segOff[r + 1]!;
     for (let j = lo; j < hi; j++) {
-      if (cs.segWorker[j] === wid && cs.segStart[j] <= ts && cs.segEnd[j] >= ts) {
+      if (cs.segWorker[j] === wid && cs.segStart[j]! <= ts && cs.segEnd[j]! >= ts) {
         out.push(cs.at(r) as unknown as TracingSpan);
         break;
       }

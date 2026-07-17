@@ -381,6 +381,14 @@ export class ColumnarWorkerSpans {
     return out;
   }
 
+  // ── cheap poll scalar reads (no PollView / sample-slice materialization) ──
+  // For the every-frame render window loops (open-ended markers, waker/sched
+  // scans) that need one column, not a full flyweight.
+  pollStartAt(w: number, i: number): number { const c = this.byWorker.get(w); return c ? c.start[i]! : NaN; }
+  pollEndAt(w: number, i: number): number { const c = this.byWorker.get(w); return c ? c.end[i]! : NaN; }
+  pollTaskIdAt(w: number, i: number): number { const c = this.byWorker.get(w); return c ? c.taskId[i]! : 0; }
+  pollOpenEndedAt(w: number, i: number): boolean { const c = this.byWorker.get(w); return c ? c.openEnded[i] === 1 : false; }
+
   /** Per-worker cpu-sample tick timestamps (source!==1), for drawCpuTicks. */
   cpuSampleTimes(w: number): number[] {
     return this.byWorker.get(w)?.cpuSampleTimes ?? [];

@@ -11,9 +11,21 @@ import {
   spansById,
   taskAt,
 } from "./query.js";
+import { ColumnarSpansBuilder } from "./columnar-spans.js";
 
 function poll(start: number, end: number, taskId: number): PollSpan {
   return { start, end, taskId, spawnLocId: null, spawnLoc: null };
+}
+
+/** Pack fat spans into a ColumnarSpans store (start-sorted by finish()). */
+function columnarize(spans: TracingSpan[]) {
+  const b = new ColumnarSpansBuilder();
+  const parents = new Map<string, string | null>();
+  for (const s of spans) {
+    parents.set(s.spanId, s.parentSpanId);
+    b.push(s.start, s.end, s.spanId, s.spanName, s.parentSpanId, s.taskId, s.activeNs, s.segments, s.fields);
+  }
+  return b.finish(parents).store;
 }
 
 function span(
@@ -90,6 +102,18 @@ describe("findContainingSpan", () => {
   it("returns null when no segment matches", () => {
     expect(findContainingSpan(all, 2, 20)).toBeNull();
     expect(findContainingSpan(all, 0, 200)).toBeNull();
+  });
+
+  it("columnar path (windowRows-bounded) matches the fat path", () => {
+    // Include a far-right span so the pre-bound version would have scanned from
+    // row 0; the bounded version must still find it and skip the rest.
+    const far = span("far", 10_000, 10_100, null, [{ start: 10_000, end: 10_100, workerId: 3 }]);
+    const cs = columnarize([a, b, far]);
+    for (const [wid, ns] of [[1, 20], [0, 20], [0, 50], [2, 20], [3, 10_050], [3, 10_050]] as const) {
+      const col = findContainingSpan([], wid, ns, cs)?.spanId ?? null;
+      const fat = findContainingSpan([a, b, far], wid, ns)?.spanId ?? null;
+      expect(col, `worker ${wid} @ ${ns}`).toBe(fat);
+    }
   });
 });
 

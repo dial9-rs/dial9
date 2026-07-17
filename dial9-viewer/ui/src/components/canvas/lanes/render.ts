@@ -522,14 +522,27 @@ function drawPolls(
     drawCoalesced((s) => pollColor(s.start, s.end));
   }
 
-  // Open-ended poll markers - dashed right edge, batched. Reads via .at(i) so a
-  // columnar view backs it (bounded: breaks once start passes viewEnd).
-  for (let i = pollStart; i < spans.polls.length; i++) {
-    const s = spans.polls.at(i)!;
-    if (s.start > viewEnd) break;
-    if (!s.openEnded) continue;
-    const x2 = Math.min(drawW, nsToX(s.end));
-    batcher.tick(`openpoll:w${row}`, x2, bandTop, bandTop + bandH);
+  // Open-ended poll markers - dashed right edge, batched (bounded: breaks once
+  // start passes viewEnd). On the columnar path read the raw columns directly
+  // rather than materializing a PollView (+ CSR sample slices) per poll every
+  // frame; the fat path keeps the .at(i) flyweight.
+  const nPolls = spans.polls.length;
+  if (cstore) {
+    const w = (spans as WorkerLaneView).w;
+    for (let i = pollStart; i < nPolls; i++) {
+      if (cstore.pollStartAt(w, i) > viewEnd) break;
+      if (!cstore.pollOpenEndedAt(w, i)) continue;
+      const x2 = Math.min(drawW, nsToX(cstore.pollEndAt(w, i)));
+      batcher.tick(`openpoll:w${row}`, x2, bandTop, bandTop + bandH);
+    }
+  } else {
+    for (let i = pollStart; i < nPolls; i++) {
+      const s = spans.polls.at(i)!;
+      if (s.start > viewEnd) break;
+      if (!s.openEnded) continue;
+      const x2 = Math.min(drawW, nsToX(s.end));
+      batcher.tick(`openpoll:w${row}`, x2, bandTop, bandTop + bandH);
+    }
   }
 
   // Pinned custom-event poll highlight (in-lane mark): resolve the worker by
@@ -740,9 +753,10 @@ function drawQueueStepLine(
   // expand into a step polyline, and extend the last level to the right edge
   // - one batched stroke per lane instead of a per-sample path.
   const yOf = (s: { local: number }): number => qTop + qH - (s.local / maxQ) * qH;
-  const visible = samples.slice(iStart, iEnd + 1);
-  const last = visible[visible.length - 1]!;
-  const points: { t: number; local: number }[] = visible.slice();
+  // One slice of the visible window (was two: an intermediate copy per worker
+  // per frame). `points` is pushed onto below; nothing else reads the slice.
+  const points: { t: number; local: number }[] = samples.slice(iStart, iEnd + 1);
+  const last = points[points.length - 1]!;
   // Trailing extension so the final level runs to the panel edge - but ONLY
   // when the last visible sample sits left of the edge. iEnd may include one
   // sample past viewEnd (so the step line exits at the correct height);

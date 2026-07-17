@@ -22,6 +22,7 @@ import {
   type SpanFilterState,
   type SpanTrackData,
 } from "./spans-model.js";
+import { ColumnarSpansBuilder } from "../../lib/trace/columnar-spans.js";
 
 // ── Synthetic span builders ──────────────────────────────────────────────
 
@@ -248,6 +249,68 @@ describe("visibility window", () => {
     const named = trackData([span("a", "keep", 0, 100), span("b", "drop", 10, 90)]);
     const vis = filterVisibleSpans(named, 0, 200, { ...noFilter, text: "keep" });
     expect(vis.map((s) => s.spanId)).toEqual(["a"]);
+  });
+});
+
+// ── filterVisibleSpans: columnar path parity + bounded window ─────────────
+
+/** A SpanTrackData whose spans live in a ColumnarSpans store (allSpans empty),
+ *  mirroring durationsByName so the filter works identically to the fat path. */
+function columnarTrackData(spans: TracingSpan[]): SpanTrackData {
+  const b = new ColumnarSpansBuilder();
+  const parentBySpanId = new Map<string, string | null>();
+  const durationsByName = new Map<string, number[]>();
+  for (const s of spans) {
+    parentBySpanId.set(s.spanId, s.parentSpanId);
+    b.push(s.start, s.end, s.spanId, s.spanName, s.parentSpanId, s.taskId, s.activeNs, s.segments, s.fields);
+    const durs = durationsByName.get(s.spanName) ?? [];
+    durs.push(s.end - s.start);
+    durationsByName.set(s.spanName, durs);
+  }
+  for (const d of durationsByName.values()) d.sort((a, b2) => a - b2);
+  const { store } = b.finish(parentBySpanId);
+  return {
+    allSpans: [],
+    columnarSpans: store,
+    spanMeta: new Map(),
+    childrenByParent: new Map(),
+    unmatchedSpans: [],
+    maxDepth: 0,
+    spanNames: [...new Set(spans.map((s) => s.spanName))].sort(),
+    durationsByName,
+  };
+}
+
+describe("filterVisibleSpans (columnar path)", () => {
+  // Nested + long-straddler mix: end is NOT monotonic in start order.
+  const spans = [
+    span("a", "s", 0, 5),
+    span("straddler", "s", 1, 5000),
+    span("b", "s", 100, 120),
+    span("c", "s", 4000, 6000),
+    span("d", "s", 4010, 4011),
+    span("e", "s", 9000, 9100),
+  ];
+  const fat = trackData(spans);
+  const col = columnarTrackData(spans);
+
+  it("matches the fat path across every window (incl. panned far right)", () => {
+    for (const [vs, ve] of [[0, 50], [110, 130], [4005, 4020], [5500, 8000], [9000, 9100], [20000, 21000]] as const) {
+      const got = filterVisibleSpans(col, vs, ve, noFilter).map((s) => s.spanId).sort();
+      const want = filterVisibleSpans(fat, vs, ve, noFilter).map((s) => s.spanId).sort();
+      expect(got, `window ${vs}..${ve}`).toEqual(want);
+    }
+  });
+
+  it("keeps the long straddler when the window is deep inside it", () => {
+    const vis = filterVisibleSpans(col, 3000, 3001, noFilter).map((s) => s.spanId);
+    expect(vis).toContain("straddler");
+  });
+
+  it("window bound skips rows left of viewStart - maxSpanDur", () => {
+    // Panned to the far-right span; the window must not start at row 0.
+    const { lo } = col.columnarSpans!.windowRows(9000, 9100);
+    expect(lo).toBeGreaterThan(0);
   });
 });
 

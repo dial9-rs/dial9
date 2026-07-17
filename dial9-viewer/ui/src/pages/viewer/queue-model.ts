@@ -343,23 +343,25 @@ function buildActiveTaskModel(
   drawW: number,
 ): QueueActiveTaskModel | null {
   const samples = data.activeTaskSamples;
-  if (samples.length === 0) return null;
+  const n = samples.length;
+  if (n === 0) return null;
 
-  let maxTasks = 1;
-  for (const s of samples) {
-    if (s.t >= viewStart && s.t <= viewEnd && s.count > maxTasks) maxTasks = s.count;
-  }
-  let startCount = 0;
-  for (const s of samples) {
-    if (s.t > viewStart) break;
-    startCount = s.count;
-  }
-  if (startCount > maxTasks) maxTasks = startCount;
+  // Bounded window: samples are t-sorted, so seek the edges by binary search
+  // instead of scanning all ~O(tasks) samples every frame. `startCount` is the
+  // level entering the view = the last sample with t <= viewStart (upperBound-1);
+  // a sample exactly at viewStart seeds AND becomes the first point, matching the
+  // old scan.
+  let a = 0, b = n;
+  while (a < b) { const m = (a + b) >>> 1; if (samples[m]!.t <= viewStart) a = m + 1; else b = m; }
+  const startCount = a > 0 ? samples[a - 1]!.count : 0;
 
+  const from = lowerBoundT(samples, viewStart);
+  let maxTasks = Math.max(1, startCount);
   const points: { x: number; count: number }[] = [];
-  for (const s of samples) {
-    if (s.t < viewStart) continue;
+  for (let i = from; i < n; i++) {
+    const s = samples[i]!;
     if (s.t > viewEnd) break;
+    if (s.count > maxTasks) maxTasks = s.count;
     const x = ((s.t - viewStart) / viewDur) * drawW;
     points.push({ x, count: s.count });
   }

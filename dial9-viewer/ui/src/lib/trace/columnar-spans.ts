@@ -67,6 +67,13 @@ export class ColumnarSpans {
 
   readonly n: number;
 
+  /** Longest span duration (end - start) in the store. The interval bound the
+   * viewport window uses: any span overlapping [viewStart, viewEnd] has
+   * end >= viewStart and end - start <= maxSpanDur, so start >= viewStart -
+   * maxSpanDur. Lets the left edge binary-search instead of scanning from 0
+   * (spans nest, so `end` is not monotonic - a plain end-column search is wrong). */
+  readonly maxSpanDur: number;
+
   constructor(cols: {
     start: Float64Array; end: Float64Array; activeNs: Float64Array;
     depth: Uint16Array; taskIdRaw: Float64Array; spanNameId: Int32Array; parentRow: Int32Array;
@@ -83,6 +90,9 @@ export class ColumnarSpans {
     this.fieldOff = cols.fieldOff; this.fieldKeyId = cols.fieldKeyId; this.fieldValId = cols.fieldValId;
     this.fieldKeys = cols.fieldKeys; this.fieldVals = cols.fieldVals;
     this.n = cols.start.length;
+    let md = 0;
+    for (let i = 0; i < this.n; i++) { const d = cols.end[i]! - cols.start[i]!; if (d > md) md = d; }
+    this.maxSpanDur = md;
   }
 
   get length(): number {
@@ -98,6 +108,28 @@ export class ColumnarSpans {
   taskIdAt(r: number): number | null { const t = this.taskIdRaw[r]; return Number.isNaN(t) ? null : t; }
   activeNsAt(r: number): number { return this.activeNs[r]; }
   parentSpanIdAt(r: number): string | null { const p = this.parentRow[r]; return p < 0 ? null : this.spanIds[p]; }
+
+  /**
+   * Half-open row range [lo, hi) whose spans may overlap [viewStart, viewEnd].
+   * Rows are start-sorted, so:
+   *   hi = upperBound(start, viewEnd)          (first start > viewEnd)
+   *   lo = lowerBound(start, viewStart - maxSpanDur)  (interval bound)
+   * Callers still test `end >= viewStart` per row - the left bound admits at most
+   * a maxSpanDur-wide band of non-overlappers, never the whole prefix. O(log n).
+   */
+  windowRows(viewStart: number, viewEnd: number): { lo: number; hi: number } {
+    const s = this.start;
+    const nn = this.n;
+    // hi: first row with start > viewEnd.
+    let a = 0, b = nn;
+    while (a < b) { const m = (a + b) >>> 1; if (s[m]! <= viewEnd) a = m + 1; else b = m; }
+    const hi = a;
+    // lo: first row with start >= viewStart - maxSpanDur.
+    const floor = viewStart - this.maxSpanDur;
+    a = 0; b = hi;
+    while (a < b) { const m = (a + b) >>> 1; if (s[m]! < floor) a = m + 1; else b = m; }
+    return { lo: a, hi };
+  }
 
   /** Fresh {start,end,workerId}[] for row r (bounded ~few per span). */
   segmentsAt(r: number): Seg[] {

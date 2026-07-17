@@ -13,6 +13,7 @@ import {
   minimapClickWindow,
   minimapDragWindow,
   nsToFrac,
+  poiTickColumns,
   overallCoverage,
   segmentBinCoverage,
   viewportBox,
@@ -126,6 +127,51 @@ function nsToFracRoundTrip(
   const frac = nsToFrac(range, ns);
   return range.startNs + frac * (range.endNs - range.startNs);
 }
+
+describe("poiTickColumns (bucketed POI ticks == old per-POI pixels)", () => {
+  const range = { startNs: 0, endNs: 1000 };
+  const cssW = 100;
+
+  /** The old per-POI logic: one lit column per in-range poi. */
+  function brute(pois: { time: number }[]): Uint8Array {
+    const cols = new Uint8Array(cssW + 1);
+    for (const p of pois) {
+      if (p.time < range.startNs || p.time > range.endNs) continue;
+      cols[Math.floor(nsToFrac(range, p.time) * cssW)] = 1;
+    }
+    return cols;
+  }
+
+  it("matches the old per-POI column for a mix of times", () => {
+    const pois = [{ time: 0 }, { time: 5 }, { time: 250 }, { time: 251 }, { time: 999 }, { time: 1000 }];
+    expect(poiTickColumns(range, pois, cssW)).toEqual(brute(pois));
+  });
+
+  it("drops out-of-range POIs and is O(cssW)-sized", () => {
+    const cols = poiTickColumns(range, [{ time: -50 }, { time: 2000 }, { time: 500 }], cssW);
+    expect(cols.length).toBe(cssW + 1);
+    // Only the in-range one lights a column.
+    expect(cols.reduce((n, v) => n + v, 0)).toBe(1);
+    expect(cols[Math.floor(0.5 * cssW)]).toBe(1);
+  });
+
+  it("collapses many POIs in one column to a single lit tick (idempotent)", () => {
+    const dense = Array.from({ length: 10_000 }, (_, i) => ({ time: 500 + (i % 3) })); // all ~col 50
+    const cols = poiTickColumns(range, dense, cssW);
+    expect(cols.reduce((n, v) => n + v, 0)).toBe(1);
+    expect(cols[50]).toBe(1);
+  });
+
+  it("a POI at endNs lands off the visible width (column cssW), never OOB", () => {
+    const cols = poiTickColumns(range, [{ time: 1000 }], cssW);
+    expect(cols[cssW]).toBe(1); // the +1 slot; drawPoiTicks loops x < cssW so it stays hidden
+  });
+
+  it("empty for a degenerate range or zero width", () => {
+    expect(poiTickColumns({ startNs: 5, endNs: 5 }, [{ time: 5 }], cssW).reduce((n, v) => n + v, 0)).toBe(0);
+    expect(poiTickColumns(range, [{ time: 5 }], 0).reduce((n, v) => n + v, 0)).toBe(0);
+  });
+});
 
 describe("computeDensityBins - source precedence", () => {
   const range = { startNs: 0, endNs: 1000 };

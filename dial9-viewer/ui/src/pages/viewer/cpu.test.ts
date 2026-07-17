@@ -94,6 +94,15 @@ describe("visibleCpuStats (legacy visibleCpuStats, verbatim)", () => {
     expect(stats.avgCores).toBe(2);
     expect(stats.maxCores).toBe(2);
   });
+
+  it("binary-searches the left edge (many intervals before a far-right view)", () => {
+    // 1000 contiguous 100ns intervals; the view is the very last one. The old
+    // code skipped all 999 before it each frame; the result must be unchanged.
+    const intervals = Array.from({ length: 1000 }, (_, i) => iv(i * 100, i * 100 + 100, i % 7));
+    const stats = visibleCpuStats(intervals, 99_900, 100_000);
+    expect(stats.maxCores).toBe(999 % 7);
+    expect(stats.avgCores).toBeCloseTo(999 % 7, 10);
+  });
 });
 
 // ── Formatting (fmtCpuCores / fmtCpuPercent) ─────────────────────────────

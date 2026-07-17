@@ -389,3 +389,27 @@ export function grabOffsetFor(
   if (insideViewport(window, pointerNs)) return pointerNs - window.viewStart;
   return viewWidth / 2;
 }
+
+/**
+ * POI-tick occupancy per pixel column: `cols[x] === 1` iff some POI maps to
+ * column `x` (`Math.floor(nsToFrac(range, time) * cssW)`, the exact pixel the old
+ * per-POI tick loop drew). The minimap range is the whole trace and cssW is
+ * stable across pans, so the caller caches this once and repaints the columns in
+ * O(cssW) - instead of an O(pois) fillRect loop every frame (pois can be 100K+).
+ * The array has `cssW + 1` slots so a POI at endNs (frac 1 -> column cssW) never
+ * indexes out of range; that column sits off the visible width, matching the old
+ * off-edge draw.
+ */
+export function poiTickColumns(
+  range: MinimapRange,
+  pois: readonly { time: number }[],
+  cssW: number,
+): Uint8Array {
+  const cols = new Uint8Array(Math.max(0, cssW) + 1);
+  if (cssW <= 0 || range.endNs <= range.startNs) return cols;
+  for (const p of pois) {
+    if (p.time < range.startNs || p.time > range.endNs) continue;
+    cols[Math.floor(nsToFrac(range, p.time) * cssW)] = 1;
+  }
+  return cols;
+}

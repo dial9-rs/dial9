@@ -140,8 +140,10 @@ export interface CpuStats {
 /**
  * The avg/max readout stats for the visible window: `avgCores` is the
  * overlap-weighted mean of `interval.cores`, `maxCores` the peak interval
- * touching the window. Intervals are sorted by start, so the loop breaks once
- * past the right edge.
+ * touching the window. Intervals are non-overlapping + start-sorted, so `end` is
+ * monotonic too: the left edge (first interval with end >= viewStart) is
+ * binary-searched rather than skipped from index 0 (which grew as you pan right),
+ * and the loop breaks once start passes the right edge.
  */
 export function visibleCpuStats(
   intervals: readonly ProcessCpuUsageInterval[],
@@ -151,8 +153,14 @@ export function visibleCpuStats(
   let maxCores = 0;
   let totalOverlapNs = 0;
   let weightedCoresNs = 0;
-  for (const interval of intervals) {
-    if (interval.end < viewStart) continue;
+  let lo = 0, hi = intervals.length;
+  while (lo < hi) {
+    const m = (lo + hi) >> 1;
+    if (intervals[m]!.end < viewStart) lo = m + 1;
+    else hi = m;
+  }
+  for (let i = lo; i < intervals.length; i++) {
+    const interval = intervals[i]!;
     if (interval.start > viewEnd) break;
     const overlap =
       Math.min(interval.end, viewEnd) - Math.max(interval.start, viewStart);

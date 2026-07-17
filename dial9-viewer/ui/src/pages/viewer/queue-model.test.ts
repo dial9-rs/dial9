@@ -156,6 +156,24 @@ describe("buildQueueRenderModel (legacy bucket numbers preserved)", () => {
     });
     expect(m.activeTask).toBeNull();
   });
+
+  it("active-task window is bounded when panned far right (many samples before view)", () => {
+    // Dense samples before the view (the old code scanned all of them each
+    // frame); the binary-searched window must still seed startCount from the
+    // last pre-view sample and only emit in-view points.
+    const before = Array.from({ length: 1000 }, (_, i) => ({ t: i, count: i % 5 }));
+    const inView = [{ t: 5000, count: 42 }, { t: 5050, count: 7 }];
+    const m = buildQueueRenderModel({
+      data: queueData({ activeTaskSamples: [...before, ...inView, { t: 9999, count: 100 }] }),
+      viewStart: 4900,
+      viewEnd: 5100,
+      drawW: 200,
+    });
+    expect(m.activeTask!.startCount).toBe(999 % 5); // last sample with t <= viewStart
+    expect(m.activeTask!.maxTasks).toBe(42); // peak in-view, not the 100 past it
+    expect(m.activeTask!.points).toHaveLength(2);
+    expect(m.activeTask!.points[0]!.count).toBe(42);
+  });
 });
 
 describe("computeSpawnedTasks (legacy task-finding + grouping)", () => {

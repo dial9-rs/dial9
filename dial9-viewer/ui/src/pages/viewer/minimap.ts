@@ -15,6 +15,7 @@
 import type { ViewerStore } from "../../store/store.js";
 import type { StoreState } from "../../types/state.js";
 import { createCanvasSizer, type CanvasSizer } from "../../lib/canvas/dpr.js";
+import { ColumnarEvents } from "../../lib/trace/columnar-events.js";
 import {
   binTimestamps,
   buildMinimapModel,
@@ -23,7 +24,7 @@ import {
   grabOffsetFor,
   minimapClickWindow,
   minimapDragWindow,
-  nsToFrac,
+  poiTickColumns,
   type AggregateDensity,
   type BinCoverage,
   type MinimapModel,
@@ -99,12 +100,37 @@ export function mountMinimap(
     if (t === null || t.minTs === null || t.maxTs === null || t.maxTs <= t.minTs) {
       return null;
     }
+    // Columnar path: bin straight off the ts column (bin-for-bin identical to the
+    // fat path below, but without the ~13.7M-number `.map(e => e.timestamp)`
+    // transient - the whole point of the columnar store).
+    if (t.events instanceof ColumnarEvents) {
+      return t.events.densityBins(t.minTs, t.maxTs, TRACE_DENSITY_RESOLUTION);
+    }
     const times = t.events.map((e) => e.timestamp);
     return binTimestamps(times, { startNs: t.minTs, endNs: t.maxTs }, TRACE_DENSITY_RESOLUTION);
   });
 
   let sizer: CanvasSizer<CanvasRenderingContext2D> | null = null;
   let sizerCanvas: HTMLCanvasElement | null = null;
+
+  // POI ticks bucketed to pixel columns. The minimap range is the whole trace
+  // (deriveMinimapRange reads viewport.min/maxTs, the fixed extent) and cssW is
+  // stable across pans, so this is a cache HIT every pan frame - turning an
+  // O(pois) per-frame fillRect loop (pois can be 100K+ on a big trace) into an
+  // O(cssW) column paint. Recomputed only when the poi set, range, or width
+  // actually change (trace load, streaming extent, resize).
+  let poiColCache:
+    | { pois: readonly MinimapPoi[]; startNs: number; endNs: number; cssW: number; cols: Uint8Array }
+    | null = null;
+  function poiColumns(range: MinimapRange, ps: readonly MinimapPoi[], cssW: number): Uint8Array {
+    const c = poiColCache;
+    if (c && c.pois === ps && c.startNs === range.startNs && c.endNs === range.endNs && c.cssW === cssW) {
+      return c.cols;
+    }
+    const cols = poiTickColumns(range, ps, cssW);
+    poiColCache = { pois: ps, startNs: range.startNs, endNs: range.endNs, cssW, cols };
+    return cols;
+  }
 
   /** Create the canvas + badge once and keep them attached (idempotent). */
   function ensureCanvas(): HTMLCanvasElement {
@@ -178,7 +204,7 @@ export function mountMinimap(
     }
 
     drawDensity(ctx, model, cssW, cssH);
-    drawPoiTicks(ctx, model.range, pois(), cssW);
+    drawPoiTicks(ctx, poiColumns(model.range, pois(), cssW), cssW);
     drawViewportBox(ctx, model, cssW, cssH);
     updateBadge(badge, model);
 
@@ -307,16 +333,14 @@ function drawDensity(
 
 function drawPoiTicks(
   ctx: CanvasRenderingContext2D,
-  range: MinimapRange,
-  pois: readonly MinimapPoi[],
+  cols: Uint8Array,
   cssW: number,
 ): void {
-  if (pois.length === 0) return;
   ctx.fillStyle = POI_TICK;
-  for (const p of pois) {
-    if (p.time < range.startNs || p.time > range.endNs) continue;
-    const x = nsToFrac(range, p.time) * cssW;
-    ctx.fillRect(Math.floor(x), 0, 1, 5);
+  // One 1px tick per occupied pixel column (bucketed + cached upstream), so this
+  // is O(cssW) regardless of how many POIs the trace has.
+  for (let x = 0; x < cssW; x++) {
+    if (cols[x]) ctx.fillRect(x, 0, 1, 5);
   }
 }
 
