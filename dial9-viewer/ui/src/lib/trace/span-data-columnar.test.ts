@@ -52,7 +52,7 @@ describe("buildSpanDataColumnar matches frozen buildSpanData(customEvents, worke
     // The store materializes each span byte-identical to the fat span, in the
     // same (start-sorted) row order.
     for (let i = 0; i < fat.allSpans.length; i++) {
-      const a = fat.allSpans[i], c = cs.at(i);
+      const a = fat.allSpans[i]!, c = cs.at(i);
       expect(c.spanId, `span ${i} id`).toBe(a.spanId);
       expect(c.start).toBe(a.start);
       expect(c.end).toBe(a.end);

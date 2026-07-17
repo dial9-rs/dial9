@@ -87,7 +87,7 @@ export interface PoiSource {
   taskInstrumented: Map<number, boolean>;
   /** Columnar store on the main-thread path; detectors scan its raw columns
    * instead of the fat filterPointsOfInterest over the flyweight views. */
-  store?: ColumnarWorkerSpans;
+  store?: ColumnarWorkerSpans | undefined;
   /** Lazy per-filter detector output cache (keyed by filter type). */
   readonly _byFilter: Map<PointOfInterestType, PointOfInterest[]>;
 }

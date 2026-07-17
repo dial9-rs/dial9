@@ -55,7 +55,7 @@ export interface SpanTrackData {
   allSpans: readonly TracingSpan[];
   /** Columnar span store (main-thread path); scan/window fns dispatch on it.
    * When set, `allSpans` is empty. */
-  columnarSpans?: ColumnarSpans;
+  columnarSpans?: ColumnarSpans | undefined;
   spanMeta: SpanData["spanMeta"];
   childrenByParent: SpanData["childrenByParent"];
   /** Spans with an enter but no exit - the truncation/incompleteness surface,
@@ -119,7 +119,7 @@ export function computeSpanTrackData(
     durs.push(dur);
   };
   if (cs) {
-    for (let r = 0; r < cs.length; r++) addDur(cs.spanNameAt(r), cs.end[r] - cs.start[r]);
+    for (let r = 0; r < cs.length; r++) addDur(cs.spanNameAt(r), cs.end[r]! - cs.start[r]!);
   } else {
     for (const s of data.allSpans) addDur(s.spanName, s.end - s.start);
   }

@@ -24,7 +24,7 @@ export interface LaneClickInput {
    * columnar path - read `columnarSpans`. */
   allSpans: readonly TracingSpan[];
   /** Columnar span store (main-thread path); the containing-span lookup uses it. */
-  columnarSpans?: ColumnarSpans;
+  columnarSpans?: ColumnarSpans | undefined;
   /** span id -> span, for the ancestor walk (LaneData.spanByIdSingle - a Map on
    * the fat path, a lazy store adapter on the columnar path). */
   spanById: SpanByIdSingle;

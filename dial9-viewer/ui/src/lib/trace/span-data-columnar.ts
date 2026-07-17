@@ -31,7 +31,7 @@ interface SpanRec {
  * directly - no per-poll object. Same logic + tie-break as frozen
  * reconstructSpanSegments. */
 function reconstructSpanSegments(rawSegments: Seg[], csr: PollsByTaskCSR, slot: number): Seg[] {
-  const lo0 = csr.off[slot], hi0 = csr.off[slot + 1];
+  const lo0 = csr.off[slot]!, hi0 = csr.off[slot + 1]!;
   if (lo0 === hi0) return rawSegments;
   const { start, end, worker } = csr;
   const out: Seg[] = [];
@@ -40,14 +40,14 @@ function reconstructSpanSegments(rawSegments: Seg[], csr: PollsByTaskCSR, slot: 
     let lo = lo0, hi = hi0;
     while (lo < hi) {
       const mid = (lo + hi) >> 1;
-      if (end[mid] < seg.start) lo = mid + 1;
+      if (end[mid]! < seg.start) lo = mid + 1;
       else hi = mid;
     }
     for (let i = lo; i < hi0; i++) {
-      if (start[i] > seg.end) break;
-      const a = Math.max(start[i], seg.start);
-      const b = Math.min(end[i], seg.end);
-      if (b > a) out.push({ start: a, end: b, workerId: worker[i] });
+      if (start[i]! > seg.end) break;
+      const a = Math.max(start[i]!, seg.start);
+      const b = Math.min(end[i]!, seg.end);
+      if (b > a) out.push({ start: a, end: b, workerId: worker[i]! });
     }
   }
   return out.length > 0 ? out : rawSegments;
@@ -81,9 +81,9 @@ export function buildSpanDataColumnar(
     const rec = spanMap.get(spanId);
     if (rec && rec.segments.length > 0) {
       rec.segments.sort((a, b) => a.start - b.start);
-      const start = rec.segments[0].start;
-      const end = rec.segments[rec.segments.length - 1].end;
-      const seg0 = rec.segments[0];
+      const start = rec.segments[0]!.start;
+      const end = rec.segments[rec.segments.length - 1]!.end;
+      const seg0 = rec.segments[0]!;
       const taskId = store.resolveSpanTaskAt(seg0.workerId, seg0.start);
       const slot = taskId != null ? csr.slotOf.get(taskId) : undefined;
       const segments = slot !== undefined ? reconstructSpanSegments(rec.segments, csr, slot) : rec.segments;
@@ -97,12 +97,12 @@ export function buildSpanDataColumnar(
   // Walk span events in ts order (stable) - the frozen sort of customEvents.
   const perm = spanEvents.tsIndex();
   for (let k = 0; k < perm.length; k++) {
-    const i = perm[k];
+    const i = perm[k]!;
     const kind = spanEvents.kind[i];
-    const ts = spanEvents.ts[i];
+    const ts = spanEvents.ts[i]!;
 
     if (kind === SPAN_KIND.Enter) {
-      const workerId = spanEvents.workerId[i]; // Number(v.worker_id); NaN if absent
+      const workerId = spanEvents.workerId[i]!; // Number(v.worker_id); NaN if absent
       const spanId = spanEvents.spanIdAt(i); // String(v.span_id)
       const parentSpanId = spanEvents.parentAt(i);
       const spanName = spanEvents.spanNameAt(i);

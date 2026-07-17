@@ -311,7 +311,7 @@ export interface RelatedContext {
   allEvents: readonly CustomTraceEvent[];
   allSpans: readonly TracingSpan[];
   /** Columnar span store (main-thread path); enclosingSpans dispatches on it. */
-  columnarSpans?: ColumnarSpans;
+  columnarSpans?: ColumnarSpans | undefined;
   /** Resolve the enclosing task for an event (events-model resolveTaskForEvent). */
   taskOf: (ev: CustomTraceEvent) => number | null;
   fmtTs: (ns: number) => string;

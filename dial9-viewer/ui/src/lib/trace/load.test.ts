@@ -194,9 +194,9 @@ describe("loadTraceOnMainThread", () => {
     const store = fakeStore();
     const result = await loadTraceOnMainThread(store, ["/t.bin"], {}).done;
     expect(store.updates).toHaveLength(1);
-    expect(store.updates[0].trace.events.length).toBe(singleEvents);
+    expect(store.updates[0]!.trace.events.length).toBe(singleEvents);
     // The resolved trace IS the one written to the store (same identity, no clone).
-    expect(result.trace).toBe(store.updates[0].trace);
+    expect(result.trace).toBe(store.updates[0]!.trace);
     expect(result.mode).toBe(canStreamDecode() ? "stream" : "buffered");
     expect(result.timing.events).toBe(singleEvents);
     expect(result.buffer.byteLength).toBe(rawTrace.length);

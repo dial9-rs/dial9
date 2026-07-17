@@ -178,10 +178,10 @@ describe("ColumnarEvents windowing substrate (tsIndex + windowRange)", () => {
       const { lo, hi } = c.windowRange(t0, t1);
       const perm = c.tsIndex();
       const windowed = [];
-      for (let k = lo; k < hi; k++) windowed.push(c.ts[perm[k]]);
+      for (let k = lo; k < hi; k++) windowed.push(c.ts[perm[k]!]);
       // Brute-force truth: every event's ts in [t0,t1], sorted.
       const truth = [];
-      for (let i = 0; i < c.length; i++) if (c.ts[i] >= t0 && c.ts[i] <= t1) truth.push(c.ts[i]);
+      for (let i = 0; i < c.length; i++) if (c.ts[i]! >= t0 && c.ts[i]! <= t1) truth.push(c.ts[i]!);
       truth.sort((a, b) => a - b);
       expect(windowed, `window [${t0},${t1}]`).toEqual(truth);
     }
@@ -193,11 +193,11 @@ describe("ColumnarEvents windowing substrate (tsIndex + windowRange)", () => {
     const s = trace.events as unknown as ColumnarEvents;
     const min = s.minTs, max = s.maxTs, span = max - min;
     // A few interior windows.
-    for (const [f0, f1] of [[0.2, 0.4], [0.45, 0.55], [0, 1], [0.9, 1.1]]) {
+    for (const [f0, f1] of [[0.2, 0.4], [0.45, 0.55], [0, 1], [0.9, 1.1]] as [number, number][]) {
       const t0 = min + span * f0, t1 = min + span * f1;
       const { lo, hi } = s.windowRange(t0, t1);
       let truth = 0;
-      for (let i = 0; i < s.length; i++) if (s.ts[i] >= t0 && s.ts[i] <= t1) truth++;
+      for (let i = 0; i < s.length; i++) if (s.ts[i]! >= t0 && s.ts[i]! <= t1) truth++;
       expect(hi - lo, `window frac [${f0},${f1}]`).toBe(truth);
     }
   });

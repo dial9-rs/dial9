@@ -28,8 +28,8 @@ export class SegmentForest<T> {
     }
     // Iterative segment tree: leaves at [n, 2n), internal node i = merge(2i, 2i+1).
     const tree = new Array<T>(2 * n);
-    for (let i = 0; i < n; i++) tree[n + i] = leaves[i];
-    for (let i = n - 1; i >= 1; i--) tree[i] = merge(tree[2 * i], tree[2 * i + 1]);
+    for (let i = 0; i < n; i++) tree[n + i] = leaves[i]!;
+    for (let i = n - 1; i >= 1; i--) tree[i] = merge(tree[2 * i]!, tree[2 * i + 1]!);
     this.tree = tree;
   }
 
@@ -52,8 +52,8 @@ export class SegmentForest<T> {
     let l = lo + this.n;
     let r = hi + this.n;
     while (l < r) {
-      if (l & 1) { acc = acc === null ? tree[l] : merge(acc, tree[l]); l++; }
-      if (r & 1) { r--; acc = acc === null ? tree[r] : merge(acc, tree[r]); }
+      if (l & 1) { acc = acc === null ? tree[l]! : merge(acc, tree[l]!); l++; }
+      if (r & 1) { r--; acc = acc === null ? tree[r]! : merge(acc, tree[r]!); }
       l >>= 1;
       r >>= 1;
     }

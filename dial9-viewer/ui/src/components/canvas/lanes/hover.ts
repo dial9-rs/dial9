@@ -63,7 +63,7 @@ export interface LaneHoverInput {
    * EMPTY on the columnar path - read `columnarSpans` instead. */
   allSpans: readonly TracingSpan[];
   /** Columnar span store (main-thread path); span lookups dispatch on it. */
-  columnarSpans?: ColumnarSpans;
+  columnarSpans?: ColumnarSpans | undefined;
   /** Global injection-queue series {t, global}, sorted by t. */
   queueSamples: readonly { t: number; global: number }[];
   /** This worker's local-queue series {t, local}, sorted by t. */
@@ -172,11 +172,11 @@ export function assembleLaneHover(input: LaneHoverInput): LaneHoverData {
     const cs = input.columnarSpans;
     if (cs) {
       for (let r = 0; r < cs.length; r++) {
-        if (cs.start[r] > hitPoll.end) break; // start-sorted
-        if (cs.end[r] < hitPoll.start) continue;
-        const lo = cs.segOff[r], hi = cs.segOff[r + 1];
+        if (cs.start[r]! > hitPoll.end) break; // start-sorted
+        if (cs.end[r]! < hitPoll.start) continue;
+        const lo = cs.segOff[r]!, hi = cs.segOff[r + 1]!;
         for (let j = lo; j < hi; j++) {
-          if (cs.segWorker[j] === workerId && cs.segStart[j] >= hitPoll.start && cs.segEnd[j] <= hitPoll.end) {
+          if (cs.segWorker[j]! === workerId && cs.segStart[j]! >= hitPoll.start && cs.segEnd[j]! <= hitPoll.end) {
             spanCount++;
             const nm = cs.spanNameAt(r);
             spanNames[nm] = (spanNames[nm] ?? 0) + 1;

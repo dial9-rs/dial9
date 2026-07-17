@@ -21,8 +21,8 @@ describe("ColumnarCpuSamples sink parity", () => {
     expect(col.cpuSamples[0]).toBeInstanceOf(CpuSample);
 
     for (let i = 0; i < fat.cpuSamples.length; i++) {
-      const a = fat.cpuSamples[i];
-      const b = col.cpuSamples[i];
+      const a = fat.cpuSamples[i]!;
+      const b = col.cpuSamples[i]!;
       expect(b.timestamp).toBe(a.timestamp);
       expect(b.workerId).toBe(a.workerId); // finalize resolves tid->worker on both
       expect(b.tid).toBe(a.tid);
@@ -45,7 +45,7 @@ describe("ColumnarCpuSamples sink parity", () => {
 
   it("scalar fields stay mutable (attachCpuSamples writes spawnLoc/inPoll)", async () => {
     const col = await parseTraceBuffer(raw, { cpuSampleSink: new ColumnarCpuSamples() } as never);
-    const s = col.cpuSamples[0];
+    const s = col.cpuSamples[0]!;
     s.spawnLoc = "x::y";
     s.inPoll = true;
     s.workerId = 42;

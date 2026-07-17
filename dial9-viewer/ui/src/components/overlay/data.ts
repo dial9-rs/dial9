@@ -36,7 +36,7 @@ export interface OverlayData {
    * EMPTY on the columnar path - read `columnarSpans`. */
   allSpans: TracingSpan[];
   /** Columnar span store (main-thread path); hover span lookups dispatch on it. */
-  columnarSpans?: ColumnarSpans;
+  columnarSpans?: ColumnarSpans | undefined;
   /** Per-worker local-queue series, sorted by t (local Q). */
   workerQueueSamples: Record<number, { t: number; local: number }[]>;
   /** Global injection-queue series, sorted by t (tooltip Global Q). */

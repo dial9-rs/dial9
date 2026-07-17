@@ -19,6 +19,11 @@ declare module "*/trace_analysis.js" {
   } from "*/trace_parser.js";
   import type { DecodedFieldValue } from "*/decode.js";
 
+  // Re-export the block-in-place gap type: consumers import it from this module
+  // (it is threaded through buildWorkerSpans / the columnar reconstruction),
+  // and it is only otherwise reachable via trace_parser.js.
+  export type { BlockInPlaceGap };
+
   // ── Worker span reconstruction ────────────────────────────────────────
 
   export interface PollSpan {

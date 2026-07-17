@@ -53,7 +53,7 @@ export interface LaneData {
   spanByIdSingle: SpanByIdSingle;
   /** Columnar span store on the main-thread path; scan/window consumers dispatch
    * on it. Undefined on the fat/worker path. */
-  columnarSpans?: ColumnarSpans;
+  columnarSpans?: ColumnarSpans | undefined;
   hasCpuTime: boolean;
   hasSchedWait: boolean;
   hasTaskTracking: boolean;
@@ -121,7 +121,9 @@ export function sharedWorkerSpans(trace: ParsedTrace): WorkerSpansResult {
         ev, deriveWorkerIds(trace), trace.maxTs ?? 0, trace.blockInPlaceGaps,
       );
       if (trace.cpuSamples && trace.cpuSamples.length > 0) {
-        built.store.attachCpuSamples(trace.cpuSamples);
+        // Frozen-core CpuSample[] bridges to the columnar store's sample type
+        // (it reads only the common fields); same `as never` idiom as poi.ts.
+        built.store.attachCpuSamples(trace.cpuSamples as never);
       }
       columnarStoreCache.set(trace, built.store);
       r = {

@@ -11,7 +11,7 @@ describe("SegmentForest (mipmap LOD)", () => {
     let best = { dur: -1, count: 0, idx: -1 };
     for (let i = lo; i < hi; i++) {
       best.count += 1;
-      if (durs[i] > best.dur) { best.dur = durs[i]; best.idx = i; }
+      if (durs[i]! > best.dur) { best.dur = durs[i]!; best.idx = i; }
     }
     return best;
   }

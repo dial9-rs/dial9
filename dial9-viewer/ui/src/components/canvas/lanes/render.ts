@@ -42,6 +42,7 @@ import { laneRowLayout } from "../../../lib/canvas/layout.js";
 import type { LaneRowLayout } from "../../../lib/canvas/layout.js";
 import { findSpanAt } from "../../../lib/trace/query.js";
 import type { WorkerLaneView } from "../../../lib/trace/columnar-worker-spans.js";
+import type { SpanByIdMulti } from "../../../lib/trace/columnar-spans.js";
 
 /** The per-lane reference height. Band offsets below are expressed against
  *  this and scaled to the real row height. */
@@ -79,7 +80,7 @@ export interface LanesRenderInput {
   /** Wake events indexed by target worker. */
   wakesByWorker: Readonly<Record<number, readonly WorkerWake[]>>;
   /** span id -> every span instance sharing it (highlight lookup). */
-  spansById: ReadonlyMap<string, readonly TracingSpan[]>;
+  spansById: SpanByIdMulti;
   /** Block-in-place handoff gaps (hatched overlay). */
   blockInPlaceGaps: readonly BlockInPlaceGap[];
   hasCpuTime: boolean;
@@ -341,10 +342,10 @@ function drawLaneBackground(
   // CPU scheduling tint: one representative active per pixel column, longest
   // wins. Only when the trace carries CPU time.
   if (!input.hasCpuTime) return;
-  const cstore = (spans as Partial<WorkerLaneView>).store;
+  const cstore = (spans as unknown as Partial<WorkerLaneView>).store;
   let reps: ActiveSpan[];
   if (cstore) {
-    const w = (spans as WorkerLaneView).w;
+    const w = (spans as unknown as WorkerLaneView).w;
     const startIdx = cstore.firstVisibleActive(w, input.viewStart);
     reps = cstore.downsampleActives(
       w, startIdx, input.viewStart, input.viewEnd, drawW,
@@ -412,10 +413,10 @@ function drawParks(
   laneH: number,
   sf: number,
 ): void {
-  const cstore = (spans as Partial<WorkerLaneView>).store;
+  const cstore = (spans as unknown as Partial<WorkerLaneView>).store;
   let reps: ParkSpan[];
   if (cstore) {
-    const w = (spans as WorkerLaneView).w;
+    const w = (spans as unknown as WorkerLaneView).w;
     const startIdx = cstore.firstVisiblePark(w, input.viewStart);
     reps = cstore.downsampleParks(
       w, startIdx, input.viewStart, input.viewEnd, drawW,
@@ -473,13 +474,13 @@ function drawPolls(
   bandH: number,
 ): void {
   const { viewStart, viewEnd, selectedTaskId } = input;
-  const cstore = (spans as Partial<WorkerLaneView>).store;
+  const cstore = (spans as unknown as Partial<WorkerLaneView>).store;
   let pollStart: number;
   let reps: PollSpan[];
   if (cstore) {
     // Columnar path: the store binary-searches + LOD-downsamples the poll
     // columns for the viewport, materializing only the <= drawW representatives.
-    const w = (spans as WorkerLaneView).w;
+    const w = (spans as unknown as WorkerLaneView).w;
     pollStart = cstore.firstVisiblePoll(w, viewStart);
     reps = cstore.downsamplePolls(
       w, pollStart, viewStart, viewEnd, drawW, selectedTaskId ?? null,
@@ -528,7 +529,7 @@ function drawPolls(
   // frame; the fat path keeps the .at(i) flyweight.
   const nPolls = spans.polls.length;
   if (cstore) {
-    const w = (spans as WorkerLaneView).w;
+    const w = (spans as unknown as WorkerLaneView).w;
     for (let i = pollStart; i < nPolls; i++) {
       if (cstore.pollStartAt(w, i) > viewEnd) break;
       if (!cstore.pollOpenEndedAt(w, i)) continue;

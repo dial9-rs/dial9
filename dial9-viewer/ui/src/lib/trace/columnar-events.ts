@@ -210,11 +210,11 @@ export class ColumnarEvents {
 
   // ── Column decoders (sentinel -> semantic value) for index-based consumers ──
   spawnLocAt(i: number): string | null {
-    const idx = this.spawnLocIdx[i];
-    return idx < 0 ? null : this.spawnList[idx];
+    const idx = this.spawnLocIdx[i]!;
+    return idx < 0 ? null : this.spawnList[idx]!;
   }
   schedWaitAt(i: number): number | null {
-    const v = this.schedWaitRaw[i];
+    const v = this.schedWaitRaw[i]!;
     return Number.isNaN(v) ? null : v;
   }
   tidAt(i: number): number | undefined {
@@ -291,12 +291,12 @@ export class ColumnarEvents {
     const ts = this.ts;
     const n = this._len;
     for (let i = 0; i < n; i++) {
-      const t = ts[i];
+      const t = ts[i]!;
       if (t < startNs || t > endNs) continue;
       let idx = Math.floor(((t - startNs) / span) * resolution);
       if (idx >= resolution) idx = resolution - 1;
       else if (idx < 0) idx = 0;
-      bins[idx]++;
+      bins[idx] = bins[idx]! + 1;
     }
     return bins;
   }
@@ -312,7 +312,7 @@ export class ColumnarEvents {
       const idx = new Int32Array(n);
       for (let i = 0; i < n; i++) idx[i] = i;
       const ts = this.ts;
-      idx.sort((a, b) => ts[a] - ts[b]);
+      idx.sort((a, b) => ts[a]! - ts[b]!);
       this._tsIndex = idx;
     }
     return this._tsIndex;
@@ -330,31 +330,31 @@ export class ColumnarEvents {
     const n = this._len;
     // lower_bound: first k with ts[perm[k]] >= t0
     let a = 0, b = n;
-    while (a < b) { const m = (a + b) >>> 1; if (ts[perm[m]] < t0) a = m + 1; else b = m; }
+    while (a < b) { const m = (a + b) >>> 1; if (ts[perm[m]!]! < t0) a = m + 1; else b = m; }
     const lo = a;
     // upper_bound: first k with ts[perm[k]] > t1
     a = lo; b = n;
-    while (a < b) { const m = (a + b) >>> 1; if (ts[perm[m]] <= t1) a = m + 1; else b = m; }
+    while (a < b) { const m = (a + b) >>> 1; if (ts[perm[m]!]! <= t1) a = m + 1; else b = m; }
     return { lo, hi: a };
   }
 }
 
 function materialize(c: ColumnarEvents, i: number): EventLike {
-  const workerId = c.workerId[i];
+  const workerId = c.workerId[i]!;
   return {
-    eventType: c.eventType[i],
-    timestamp: c.ts[i],
+    eventType: c.eventType[i]!,
+    timestamp: c.ts[i]!,
     workerId,
-    localQueue: c.localQueue[i],
-    globalQueue: c.globalQueue[i],
-    cpuTime: c.cpuTime[i],
+    localQueue: c.localQueue[i]!,
+    globalQueue: c.globalQueue[i]!,
+    cpuTime: c.cpuTime[i]!,
     schedWait: c.schedWaitAt(i),
-    taskId: c.taskId[i],
+    taskId: c.taskId[i]!,
     spawnLocId: c.spawnLocAt(i),
     spawnLoc: c.spawnLocAt(i),
     tid: c.tidAt(i),
-    wakerTaskId: c.wakerTaskIdRaw[i],
-    wokenTaskId: c.wokenTaskIdRaw[i],
+    wakerTaskId: c.wakerTaskIdRaw[i]!,
+    wokenTaskId: c.wokenTaskIdRaw[i]!,
     targetWorker: workerId,
   };
 }
@@ -367,19 +367,20 @@ function materialize(c: ColumnarEvents, i: number): EventLike {
  */
 class MutableView {
   _i = 0;
-  constructor(private readonly c: ColumnarEvents) {}
-  get eventType(): number { return this.c.eventType[this._i]; }
-  get timestamp(): number { return this.c.ts[this._i]; }
-  get workerId(): number { return this.c.workerId[this._i]; }
-  get localQueue(): number { return this.c.localQueue[this._i]; }
-  get globalQueue(): number { return this.c.globalQueue[this._i]; }
-  get cpuTime(): number { return this.c.cpuTime[this._i]; }
+  private readonly c: ColumnarEvents;
+  constructor(c: ColumnarEvents) { this.c = c; }
+  get eventType(): number { return this.c.eventType[this._i]!; }
+  get timestamp(): number { return this.c.ts[this._i]!; }
+  get workerId(): number { return this.c.workerId[this._i]!; }
+  get localQueue(): number { return this.c.localQueue[this._i]!; }
+  get globalQueue(): number { return this.c.globalQueue[this._i]!; }
+  get cpuTime(): number { return this.c.cpuTime[this._i]!; }
   get schedWait(): number | null { return this.c.schedWaitAt(this._i); }
-  get taskId(): number { return this.c.taskId[this._i]; }
+  get taskId(): number { return this.c.taskId[this._i]!; }
   get spawnLocId(): string | null { return this.c.spawnLocAt(this._i); }
   get spawnLoc(): string | null { return this.c.spawnLocAt(this._i); }
   get tid(): number | undefined { return this.c.tidAt(this._i); }
-  get wakerTaskId(): number { return this.c.wakerTaskIdRaw[this._i]; }
-  get wokenTaskId(): number { return this.c.wokenTaskIdRaw[this._i]; }
-  get targetWorker(): number { return this.c.workerId[this._i]; }
+  get wakerTaskId(): number { return this.c.wakerTaskIdRaw[this._i]!; }
+  get wokenTaskId(): number { return this.c.wokenTaskIdRaw[this._i]!; }
+  get targetWorker(): number { return this.c.workerId[this._i]!; }
 }

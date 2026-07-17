@@ -72,7 +72,7 @@ describe("ColumnarWorkerSpans", () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const polls = (ws as any)[w].polls as any[];
     const min = trace.minTs!, max = trace.maxTs!, span = max - min;
-    for (const [f0, f1] of [[0.2, 0.4], [0.45, 0.55], [0, 1], [-0.1, 1.1]]) {
+    for (const [f0, f1] of [[0.2, 0.4], [0.45, 0.55], [0, 1], [-0.1, 1.1]] as [number, number][]) {
       const t0 = min + span * f0, t1 = min + span * f1;
       const { lo, hi } = store.windowRange(w, t0, t1);
       const got = new Set<number>();
@@ -149,8 +149,8 @@ describe("ColumnarWorkerSpans.attachCpuSamples matches the frozen attachCpuSampl
     // (both parses see the same wire order).
     expect(cpuStore.samples.length).toBe(fatTrace.cpuSamples.length);
     for (let i = 0; i < cpuStore.samples.length; i++) {
-      expect(cpuStore.samples[i].spawnLoc, `sample ${i} spawnLoc`).toBe(fatTrace.cpuSamples[i].spawnLoc);
-      expect(cpuStore.samples[i].inPoll, `sample ${i} inPoll`).toBe(fatTrace.cpuSamples[i].inPoll);
+      expect(cpuStore.samples[i]!.spawnLoc, `sample ${i} spawnLoc`).toBe(fatTrace.cpuSamples[i]!.spawnLoc);
+      expect(cpuStore.samples[i]!.inPoll, `sample ${i} inPoll`).toBe(fatTrace.cpuSamples[i]!.inPoll);
     }
   });
 });
@@ -269,7 +269,7 @@ describe("ColumnarWorkerSpans.laneView flyweight matches the fat lane arrays", (
     for (const w of store.workers()) {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const fat = (ws as any)[w];
-      const view = lanes[w];
+      const view = lanes[w]!;
       expect(view.polls.length).toBe(fat.polls.length);
       expect(view.parks.length).toBe(fat.parks.length);
       expect(view.actives.length).toBe(fat.actives.length);

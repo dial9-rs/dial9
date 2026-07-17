@@ -43,20 +43,23 @@ class FatSpanEmitter implements SpanEmitter {
   poll(w: number, start: number, end: number, taskId: number, spawnLocId: number | string, spawnLoc: string | null, openEnded: boolean): void {
     const o: Record<string, unknown> = { start, end, taskId, spawnLocId, spawnLoc };
     if (openEnded) o.openEnded = true;
-    this.workerSpans[w].polls.push(o);
+    this.workerSpans[w]!.polls.push(o);
   }
   park(w: number, start: number, end: number, schedWait?: number | null): void {
     // Omit the key entirely on the trace-end close, matching the frozen push.
-    this.workerSpans[w].parks.push(schedWait === undefined ? { start, end } : { start, end, schedWait });
+    this.workerSpans[w]!.parks.push(schedWait === undefined ? { start, end } : { start, end, schedWait });
   }
   active(w: number, start: number, end: number, ratio: number): void {
-    this.workerSpans[w].actives.push({ start, end, ratio });
+    this.workerSpans[w]!.actives.push({ start, end, ratio });
   }
 }
 
 /** Builds the typed-array store directly - no fat span object ever exists. */
 class StoreSpanEmitter implements SpanEmitter {
-  constructor(private readonly b: ColumnarWorkerSpansBuilder) {}
+  private readonly b: ColumnarWorkerSpansBuilder;
+  constructor(b: ColumnarWorkerSpansBuilder) {
+    this.b = b;
+  }
   poll(w: number, start: number, end: number, taskId: number, _spawnLocId: number | string, spawnLoc: string | null, openEnded: boolean): void {
     this.b.pushPoll(w, start, end, taskId, spawnLoc, openEnded);
   }
@@ -120,31 +123,31 @@ function reconstruct(
   for (let i = 0; i < n; i++) {
     const et = eventType[i];
     if (et === EVT.WakeEvent) {
-      const woken = wokenRaw[i];
-      const target = workerId[i]; // targetWorker === workerId for wake events
-      const waker = wakerRaw[i];
-      (wakesByTask[woken] ??= []).push({ timestamp: ts[i], wakerTaskId: waker, targetWorker: target });
-      (wakesByWorker[target] ??= []).push({ timestamp: ts[i], wakerTaskId: waker, wokenTaskId: woken });
+      const woken = wokenRaw[i]!;
+      const target = workerId[i]!; // targetWorker === workerId for wake events
+      const waker = wakerRaw[i]!;
+      (wakesByTask[woken] ??= []).push({ timestamp: ts[i]!, wakerTaskId: waker, targetWorker: target });
+      (wakesByWorker[target] ??= []).push({ timestamp: ts[i]!, wakerTaskId: waker, wokenTaskId: woken });
     } else if (et !== EVT.QueueSample) {
-      (perWorker[workerId[i]] ??= []).push(i);
+      (perWorker[workerId[i]!] ??= []).push(i);
     }
   }
 
   // Stable sort of indices by ts (JS sort is stable, so equal-ts events keep
   // their original event order, matching the frozen object sort).
-  for (const key in perWorker) perWorker[key].sort((a, b) => ts[a] - ts[b]);
-  for (const key in wakesByTask) wakesByTask[key].sort((a, b) => a.timestamp - b.timestamp);
-  for (const key in wakesByWorker) wakesByWorker[key].sort((a, b) => a.timestamp - b.timestamp);
+  for (const key in perWorker) perWorker[key]!.sort((a, b) => ts[a]! - ts[b]!);
+  for (const key in wakesByTask) wakesByTask[key]!.sort((a, b) => a.timestamp - b.timestamp);
+  for (const key in wakesByWorker) wakesByWorker[key]!.sort((a, b) => a.timestamp - b.timestamp);
 
   for (const wKey in perWorker) {
     const w = Number(wKey); // numeric worker id for the emitter/store keys
-    for (const i of perWorker[wKey]) {
+    for (const i of perWorker[wKey]!) {
       const et = eventType[i];
-      const t = ts[i];
+      const t = ts[i]!;
 
       if (et === EVT.PollStart || et === EVT.WorkerPark || et === EVT.WorkerUnpark) {
-        workerQueueSamples[wKey].push({ t, local: localQueue[i] });
-        if (localQueue[i] > maxLocalQueue) maxLocalQueue = localQueue[i];
+        workerQueueSamples[wKey]!.push({ t, local: localQueue[i]! });
+        if (localQueue[i]! > maxLocalQueue) maxLocalQueue = localQueue[i]!;
       }
 
       if (et === EVT.PollStart) {
@@ -154,7 +157,7 @@ function reconstruct(
         }
         openPoll[wKey] = t;
         const sl = store.spawnLocAt(i);
-        openPollMeta[wKey] = { taskId: taskId[i], spawnLocId: sl as unknown as string, spawnLoc: sl };
+        openPollMeta[wKey] = { taskId: taskId[i]!, spawnLocId: sl as unknown as string, spawnLoc: sl };
       } else if (et === EVT.PollEnd) {
         if (openPoll[wKey] != null) {
           const meta = openPollMeta[wKey] || defaultMeta;
@@ -182,7 +185,7 @@ function reconstruct(
           }
           if (!crossesGap) {
             const wallDelta = activeEnd - activeStart;
-            const cpuDelta = cpuTime[i] - ou.cpuTime;
+            const cpuDelta = cpuTime[i]! - ou.cpuTime;
             const ratio = wallDelta > 0 ? Math.min(cpuDelta / wallDelta, 1.0) : 1.0;
             emit.active(w, activeStart, activeEnd, ratio);
           }
@@ -193,7 +196,7 @@ function reconstruct(
           emit.park(w, openPark[wKey]!, t, store.schedWaitAt(i));
           openPark[wKey] = null;
         }
-        openUnpark[wKey] = { timestamp: t, cpuTime: cpuTime[i] };
+        openUnpark[wKey] = { timestamp: t, cpuTime: cpuTime[i]! };
       }
     }
   }
@@ -206,7 +209,7 @@ function reconstruct(
   // Global queue samples, in original event order (not per-worker sorted).
   const queueSamples: { t: number; global: number }[] = [];
   for (let i = 0; i < n; i++) {
-    if (eventType[i] === EVT.QueueSample) queueSamples.push({ t: ts[i], global: globalQueue[i] });
+    if (eventType[i] === EVT.QueueSample) queueSamples.push({ t: ts[i]!, global: globalQueue[i]! });
   }
 
   return { perWorker, queueSamples, workerQueueSamples, maxLocalQueue, wakesByTask, wakesByWorker };

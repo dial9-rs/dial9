@@ -88,14 +88,14 @@ describe("columnar big-trace path via sharedWorkerSpans / sharedSpanData", () =>
     expect(cs.length).toBe(fatSD.allSpans.length);
     expect(cs.length).toBeGreaterThan(0);
     for (let i = 0; i < fatSD.allSpans.length; i += Math.max(1, Math.floor(fatSD.allSpans.length / 500))) {
-      const a = fatSD.allSpans[i], c = cs.at(i);
+      const a = fatSD.allSpans[i]!, c = cs.at(i);
       expect(c.spanId).toBe(a.spanId);
       expect(c.taskId, `span ${i} taskId`).toBe(a.taskId);
       expect(c.activeNs, `span ${i} activeNs`).toBe(a.activeNs);
       expect(c.segments, `span ${i} segments`).toEqual(a.segments);
     }
     // Lazy id-map adapter materializes the right span (deriveLaneData path).
-    const someId = fatSD.allSpans[0].spanId;
+    const someId = fatSD.allSpans[0]!.spanId;
     expect(cs.spanIdToRow.get(someId)).toBe(0);
   });
 });

@@ -77,21 +77,38 @@ export class ColumnarCpuSamples {
 export class CpuSample {
   spawnLoc: string | null = null;
   inPoll = false;
+  private readonly _store: ColumnarCpuSamples;
+  private readonly _cs: number;
+  private readonly _cl: number;
+  timestamp: number;
+  workerId: number;
+  tid: number;
+  source: number;
+  cpu: number | null;
   constructor(
-    private readonly _store: ColumnarCpuSamples,
-    private readonly _cs: number,
-    private readonly _cl: number,
-    public timestamp: number,
-    public workerId: number,
-    public tid: number,
-    public source: number,
-    public cpu: number | null
-  ) {}
+    _store: ColumnarCpuSamples,
+    _cs: number,
+    _cl: number,
+    timestamp: number,
+    workerId: number,
+    tid: number,
+    source: number,
+    cpu: number | null
+  ) {
+    this._store = _store;
+    this._cs = _cs;
+    this._cl = _cl;
+    this.timestamp = timestamp;
+    this.workerId = workerId;
+    this.tid = tid;
+    this.source = source;
+    this.cpu = cpu;
+  }
 
   get callchain(): string[] {
     const { _store, _cs, _cl } = this;
     const out = new Array<string>(_cl);
-    for (let i = 0; i < _cl; i++) out[i] = _store.hexStrings[_store.pool[_cs + i]];
+    for (let i = 0; i < _cl; i++) out[i] = _store.hexStrings[_store.pool[_cs + i]!]!;
     return out;
   }
 }

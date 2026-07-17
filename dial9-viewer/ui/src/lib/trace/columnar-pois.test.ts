@@ -31,7 +31,7 @@ beforeAll(async () => {
   ws = r.workerSpans;
   attachCpuSamples(trace.cpuSamples, ws); // so the fat cpu-sampled detector sees samples
   store = ColumnarWorkerSpans.fromWorkerSpans(ws);
-  store.attachCpuSamples(trace.cpuSamples);
+  store.attachCpuSamples(trace.cpuSamples as never);
   fatSched = computeSchedulingDelays(ws, workerIds, r.wakesByTask);
   colSched = store.schedulingDelays(workerIds, r.wakesByTask as never);
   // Synthesize an instrumentation map so "uninstrumented" has matches.

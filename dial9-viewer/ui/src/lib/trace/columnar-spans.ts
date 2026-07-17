@@ -100,14 +100,14 @@ export class ColumnarSpans {
   }
 
   // ── cheap scalar reads (no materialization) - for the render window scan ──
-  startAt(r: number): number { return this.start[r]; }
-  endAt(r: number): number { return this.end[r]; }
-  spanIdAt(r: number): string { return this.spanIds[r]; }
-  spanNameAt(r: number): string { return this.spanNames[this.spanNameId[r]]; }
-  depthAt(r: number): number { return this.depth[r]; }
-  taskIdAt(r: number): number | null { const t = this.taskIdRaw[r]; return Number.isNaN(t) ? null : t; }
-  activeNsAt(r: number): number { return this.activeNs[r]; }
-  parentSpanIdAt(r: number): string | null { const p = this.parentRow[r]; return p < 0 ? null : this.spanIds[p]; }
+  startAt(r: number): number { return this.start[r]!; }
+  endAt(r: number): number { return this.end[r]!; }
+  spanIdAt(r: number): string { return this.spanIds[r]!; }
+  spanNameAt(r: number): string { return this.spanNames[this.spanNameId[r]!]!; }
+  depthAt(r: number): number { return this.depth[r]!; }
+  taskIdAt(r: number): number | null { const t = this.taskIdRaw[r]!; return Number.isNaN(t) ? null : t; }
+  activeNsAt(r: number): number { return this.activeNs[r]!; }
+  parentSpanIdAt(r: number): string | null { const p = this.parentRow[r]!; return p < 0 ? null : this.spanIds[p]!; }
 
   /**
    * Half-open row range [lo, hi) whose spans may overlap [viewStart, viewEnd].
@@ -133,19 +133,19 @@ export class ColumnarSpans {
 
   /** Fresh {start,end,workerId}[] for row r (bounded ~few per span). */
   segmentsAt(r: number): Seg[] {
-    const lo = this.segOff[r], hi = this.segOff[r + 1];
+    const lo = this.segOff[r]!, hi = this.segOff[r + 1]!;
     const out = new Array<Seg>(hi - lo);
-    for (let j = lo; j < hi; j++) out[j - lo] = { start: this.segStart[j], end: this.segEnd[j], workerId: this.segWorker[j] };
+    for (let j = lo; j < hi; j++) out[j - lo] = { start: this.segStart[j]!, end: this.segEnd[j]!, workerId: this.segWorker[j]! };
     return out;
   }
 
   /** Fresh fields map for row r, rebuilt from the interned CSR. */
   fieldsAt(r: number): Fields {
-    const lo = this.fieldOff[r], hi = this.fieldOff[r + 1];
+    const lo = this.fieldOff[r]!, hi = this.fieldOff[r + 1]!;
     const out: Fields = {};
     for (let j = lo; j < hi; j++) {
-      const id = this.fieldValId[j];
-      out[this.fieldKeys[this.fieldKeyId[j]]] = id === 0 ? null : this.fieldVals[id - 1];
+      const id = this.fieldValId[j]!;
+      out[this.fieldKeys[this.fieldKeyId[j]!]!] = id === 0 ? null : this.fieldVals[id - 1]!;
     }
     return out;
   }
@@ -153,14 +153,14 @@ export class ColumnarSpans {
   /** Materialize row r as a fresh TracingSpan-shaped view (safe to retain). */
   at(r: number): SpanView {
     return {
-      start: this.start[r], end: this.end[r],
-      spanId: this.spanIds[r], spanName: this.spanNames[this.spanNameId[r]],
+      start: this.start[r]!, end: this.end[r]!,
+      spanId: this.spanIds[r]!, spanName: this.spanNames[this.spanNameId[r]!]!,
       fields: this.fieldsAt(r),
       parentSpanId: this.parentSpanIdAt(r),
       segments: this.segmentsAt(r),
-      activeNs: this.activeNs[r],
+      activeNs: this.activeNs[r]!,
       taskId: this.taskIdAt(r),
-      depth: this.depth[r],
+      depth: this.depth[r]!,
     };
   }
 
@@ -171,7 +171,7 @@ export class ColumnarSpans {
     if (this._rowsById === null) {
       const m = new Map<string, number[]>();
       for (let r = 0; r < this.n; r++) {
-        const id = this.spanIds[r];
+        const id = this.spanIds[r]!;
         let arr = m.get(id);
         if (!arr) { arr = []; m.set(id, arr); }
         arr.push(r);
@@ -231,7 +231,7 @@ export class ColumnarSpansBuilder {
     this.spanIds.push(spanId); this.parentIds.push(parentSpanId);
     for (const s of segments) { this.segStart.push(s.start); this.segEnd.push(s.end); this.segWorker.push(s.workerId); }
     this.segOff.push(this.segStart.length);
-    for (const k in fields) { this.fieldKeyId.push(this.internKey(k)); this.fieldValId.push(this.internVal(fields[k])); }
+    for (const k in fields) { this.fieldKeyId.push(this.internKey(k)); this.fieldValId.push(this.internVal(fields[k]!)); }
     this.fieldOff.push(this.fieldKeyId.length);
   }
 
@@ -245,19 +245,19 @@ export class ColumnarSpansBuilder {
     const N = this.start.length;
     const cStart = this.start;
     const perm = Array.from({ length: N }, (_, i) => i);
-    perm.sort((a, b) => cStart[a] - cStart[b] || a - b);
+    perm.sort((a, b) => cStart[a]! - cStart[b]! || a - b);
 
     const spanIdToRow = new Map<string, number>();
-    for (let r = 0; r < N; r++) spanIdToRow.set(this.spanIds[perm[r]], r);
+    for (let r = 0; r < N; r++) spanIdToRow.set(this.spanIds[perm[r]!]!, r);
 
     const start = new Float64Array(N), end = new Float64Array(N), activeNs = new Float64Array(N);
     const taskIdRaw = new Float64Array(N), spanNameId = new Int32Array(N), parentRow = new Int32Array(N);
     const spanIds = new Array<string>(N);
     for (let r = 0; r < N; r++) {
-      const o = perm[r];
-      start[r] = this.start[o]; end[r] = this.end[o]; activeNs[r] = this.activeNs[o];
-      taskIdRaw[r] = this.taskIdRaw[o]; spanNameId[r] = this.spanNameId[o];
-      spanIds[r] = this.spanIds[o];
+      const o = perm[r]!;
+      start[r] = this.start[o]!; end[r] = this.end[o]!; activeNs[r] = this.activeNs[o]!;
+      taskIdRaw[r] = this.taskIdRaw[o]!; spanNameId[r] = this.spanNameId[o]!;
+      spanIds[r] = this.spanIds[o]!;
       const pid = this.parentIds[o];
       parentRow[r] = pid != null ? (spanIdToRow.get(pid) ?? -1) : -1;
     }
@@ -275,24 +275,24 @@ export class ColumnarSpansBuilder {
       depthCache.set(spanId, d); return d;
     };
     let maxDepth = 0;
-    for (let r = 0; r < N; r++) { const d = getDepth(spanIds[r]); depth[r] = d; if (d > maxDepth) maxDepth = d; }
+    for (let r = 0; r < N; r++) { const d = getDepth(spanIds[r]!); depth[r] = d; if (d > maxDepth) maxDepth = d; }
 
     // Reorder the segments CSR.
     const segOff = new Int32Array(N + 1);
-    for (let r = 0; r < N; r++) { const o = perm[r]; segOff[r + 1] = segOff[r] + (this.segOff[o + 1] - this.segOff[o]); }
-    const segStart = new Float64Array(segOff[N]), segEnd = new Float64Array(segOff[N]), segWorker = new Int32Array(segOff[N]);
+    for (let r = 0; r < N; r++) { const o = perm[r]!; segOff[r + 1] = segOff[r]! + (this.segOff[o + 1]! - this.segOff[o]!); }
+    const segStart = new Float64Array(segOff[N]!), segEnd = new Float64Array(segOff[N]!), segWorker = new Int32Array(segOff[N]!);
     for (let r = 0; r < N; r++) {
-      const o = perm[r]; let w = segOff[r];
-      for (let j = this.segOff[o]; j < this.segOff[o + 1]; j++) { segStart[w] = this.segStart[j]; segEnd[w] = this.segEnd[j]; segWorker[w] = this.segWorker[j]; w++; }
+      const o = perm[r]!; let w = segOff[r]!;
+      for (let j = this.segOff[o]!; j < this.segOff[o + 1]!; j++) { segStart[w] = this.segStart[j]!; segEnd[w] = this.segEnd[j]!; segWorker[w] = this.segWorker[j]!; w++; }
     }
 
     // Reorder the fields CSR.
     const fieldOff = new Int32Array(N + 1);
-    for (let r = 0; r < N; r++) { const o = perm[r]; fieldOff[r + 1] = fieldOff[r] + (this.fieldOff[o + 1] - this.fieldOff[o]); }
-    const fieldKeyId = new Int32Array(fieldOff[N]), fieldValId = new Int32Array(fieldOff[N]);
+    for (let r = 0; r < N; r++) { const o = perm[r]!; fieldOff[r + 1] = fieldOff[r]! + (this.fieldOff[o + 1]! - this.fieldOff[o]!); }
+    const fieldKeyId = new Int32Array(fieldOff[N]!), fieldValId = new Int32Array(fieldOff[N]!);
     for (let r = 0; r < N; r++) {
-      const o = perm[r]; let w = fieldOff[r];
-      for (let j = this.fieldOff[o]; j < this.fieldOff[o + 1]; j++) { fieldKeyId[w] = this.fieldKeyId[j]; fieldValId[w] = this.fieldValId[j]; w++; }
+      const o = perm[r]!; let w = fieldOff[r]!;
+      for (let j = this.fieldOff[o]!; j < this.fieldOff[o + 1]!; j++) { fieldKeyId[w] = this.fieldKeyId[j]!; fieldValId[w] = this.fieldValId[j]!; w++; }
     }
 
     const store = new ColumnarSpans({
@@ -325,7 +325,8 @@ export interface SpanByIdMulti {
  * get()/iteration (never retains 982K). Drop-in for url-selection.has,
  * inspector.get, search.values, spanAncestryAt's byId walk. */
 export class LazySpanByIdSingle implements SpanByIdSingle {
-  constructor(private readonly s: ColumnarSpans) {}
+  private readonly s: ColumnarSpans;
+  constructor(s: ColumnarSpans) { this.s = s; }
   has(spanId: string): boolean {
     return this.s.spanIdToRow.has(spanId);
   }
@@ -341,7 +342,8 @@ export class LazySpanByIdSingle implements SpanByIdSingle {
 /** Lazy Map<spanId, SpanView[]> over the store (recycled ids -> multiple rows).
  * Drop-in for the render-highlight `spansById.get(id)`. */
 export class LazySpansById implements SpanByIdMulti {
-  constructor(private readonly s: ColumnarSpans) {}
+  private readonly s: ColumnarSpans;
+  constructor(s: ColumnarSpans) { this.s = s; }
   get(spanId: string): SpanView[] | undefined {
     const rows = this.s.rowsForSpanId(spanId);
     return rows.length ? rows.map((r) => this.s.at(r)) : undefined;

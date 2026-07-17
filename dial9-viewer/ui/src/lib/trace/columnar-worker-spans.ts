@@ -89,10 +89,12 @@ export interface PollsByTaskCSR {
  * per-frame draw loop (which reads the store's windowRange/mipmap directly).
  */
 export class ColumnSpanView<T> implements SpanList<T>, Iterable<T> {
-  constructor(
-    private readonly _len: number,
-    private readonly _at: (i: number) => T | undefined
-  ) {}
+  private readonly _len: number;
+  private readonly _at: (i: number) => T | undefined;
+  constructor(_len: number, _at: (i: number) => T | undefined) {
+    this._len = _len;
+    this._at = _at;
+  }
   get length(): number {
     return this._len;
   }
@@ -156,11 +158,14 @@ class WorkerPollColumns {
   schedIdx: Int32Array | null = null;
   cpuSampleTimes: number[] = [];
 
-  constructor(
-    public readonly n: number,
-    public readonly nParks: number,
-    public readonly nActives: number
-  ) {
+  readonly n: number;
+  readonly nParks: number;
+  readonly nActives: number;
+
+  constructor(n: number, nParks: number, nActives: number) {
+    this.n = n;
+    this.nParks = nParks;
+    this.nActives = nActives;
     this.start = new Float64Array(n);
     this.end = new Float64Array(n);
     this.taskId = new Float64Array(n);
@@ -180,10 +185,10 @@ class WorkerPollColumns {
     let lo = 0, hi = this.n - 1;
     while (lo <= hi) {
       const mid = (lo + hi) >> 1;
-      if (this.start[mid] <= ts) lo = mid + 1;
+      if (this.start[mid]! <= ts) lo = mid + 1;
       else hi = mid - 1;
     }
-    return hi >= 0 && ts <= this.end[hi] ? hi : -1;
+    return hi >= 0 && ts <= this.end[hi]! ? hi : -1;
   }
 
   /** Lazily-built per-worker mipmap over the polls, keyed by index (which is
@@ -192,7 +197,7 @@ class WorkerPollColumns {
     if (this._forest === null) {
       const leaves: SpanAgg[] = new Array(this.n);
       for (let i = 0; i < this.n; i++) {
-        leaves[i] = { dur: this.end[i] - this.start[i], count: 1, idx: i };
+        leaves[i] = { dur: this.end[i]! - this.start[i]!, count: 1, idx: i };
       }
       this._forest = new SegmentForest(leaves, spanBucketMerge);
     }
@@ -237,13 +242,13 @@ export class ColumnarWorkerSpans {
     const store = new ColumnarWorkerSpans();
     for (const key of Object.keys(workerSpans)) {
       const w = Number(key);
-      const lane = workerSpans[w];
+      const lane = workerSpans[w]!;
       const polls = lane.polls as unknown as PollView[];
       const parks = lane.parks as unknown as ParkView[];
       const actives = lane.actives as unknown as ActiveView[];
       const cols = new WorkerPollColumns(polls.length, parks.length, actives.length);
       for (let i = 0; i < polls.length; i++) {
-        const p = polls[i];
+        const p = polls[i]!;
         cols.start[i] = p.start;
         cols.end[i] = p.end;
         cols.taskId[i] = p.taskId;
@@ -251,14 +256,14 @@ export class ColumnarWorkerSpans {
         cols.openEnded[i] = p.openEnded ? 1 : 0;
       }
       for (let i = 0; i < parks.length; i++) {
-        cols.parkStart[i] = parks[i].start;
-        cols.parkEnd[i] = parks[i].end;
-        cols.parkSchedWait[i] = parks[i].schedWait == null ? NaN : parks[i].schedWait!;
+        cols.parkStart[i] = parks[i]!.start;
+        cols.parkEnd[i] = parks[i]!.end;
+        cols.parkSchedWait[i] = parks[i]!.schedWait == null ? NaN : parks[i]!.schedWait!;
       }
       for (let i = 0; i < actives.length; i++) {
-        cols.activeStart[i] = actives[i].start;
-        cols.activeEnd[i] = actives[i].end;
-        cols.activeRatio[i] = actives[i].ratio;
+        cols.activeStart[i] = actives[i]!.start;
+        cols.activeEnd[i] = actives[i]!.end;
+        cols.activeRatio[i] = actives[i]!.ratio;
       }
       store.byWorker.set(w, cols);
     }
@@ -305,7 +310,7 @@ export class ColumnarWorkerSpans {
       c.cpuSampleTimes = [];
     }
     for (let si = 0; si < m; si++) {
-      const sample = samples[si];
+      const sample = samples[si]!;
       const c = this.byWorker.get(sample.workerId);
       if (!c) { sample.spawnLoc = null; sample.inPoll = false; continue; }
       const isSched = sample.source === 1;
@@ -314,8 +319,8 @@ export class ColumnarWorkerSpans {
       if (pi >= 0) {
         samplePoll[si] = pi;
         // count in the [i+1] slot so a prefix-sum turns offsets into starts.
-        if (isSched) c.schedOff![pi + 1]++; else c.cpuOff![pi + 1]++;
-        const spawn = c.spawnIdx[pi] < 0 ? null : this.spawnStrings[c.spawnIdx[pi]];
+        if (isSched) c.schedOff![pi + 1]!++; else c.cpuOff![pi + 1]!++;
+        const spawn = c.spawnIdx[pi]! < 0 ? null : this.spawnStrings[c.spawnIdx[pi]!]!;
         sample.spawnLoc = spawn;
         sample.inPoll = true;
       } else {
@@ -328,13 +333,13 @@ export class ColumnarWorkerSpans {
     for (const c of this.byWorker.values()) {
       const cpuOff = c.cpuOff!, schedOff = c.schedOff!;
       for (let i = 0; i < c.n; i++) {
-        if (cpuOff[i + 1] > 0) pollsWithCpuSamples++;
-        if (schedOff[i + 1] > 0) pollsWithSchedSamples++;
-        cpuOff[i + 1] += cpuOff[i];
-        schedOff[i + 1] += schedOff[i];
+        if (cpuOff[i + 1]! > 0) pollsWithCpuSamples++;
+        if (schedOff[i + 1]! > 0) pollsWithSchedSamples++;
+        cpuOff[i + 1]! += cpuOff[i]!;
+        schedOff[i + 1]! += schedOff[i]!;
       }
-      c.cpuIdx = new Int32Array(cpuOff[c.n]);
-      c.schedIdx = new Int32Array(schedOff[c.n]);
+      c.cpuIdx = new Int32Array(cpuOff[c.n]!);
+      c.schedIdx = new Int32Array(schedOff[c.n]!);
     }
     // Pass 2: place sample indices into the CSR via a per-poll cursor. Iterating
     // samples in the same order preserves within-poll order (== fat push order).
@@ -345,12 +350,12 @@ export class ColumnarWorkerSpans {
       schedCur.set(w, c.schedOff!.slice(0, c.n));
     }
     for (let si = 0; si < m; si++) {
-      const pi = samplePoll[si];
+      const pi = samplePoll[si]!;
       if (pi < 0) continue;
-      const sample = samples[si];
+      const sample = samples[si]!;
       const c = this.byWorker.get(sample.workerId)!;
-      if (sample.source === 1) c.schedIdx![schedCur.get(sample.workerId)![pi]++] = si;
-      else c.cpuIdx![cpuCur.get(sample.workerId)![pi]++] = si;
+      if (sample.source === 1) c.schedIdx![schedCur.get(sample.workerId)![pi]!++] = si;
+      else c.cpuIdx![cpuCur.get(sample.workerId)![pi]!++] = si;
     }
     return { pollsWithCpuSamples, pollsWithSchedSamples };
   }
@@ -360,16 +365,16 @@ export class ColumnarWorkerSpans {
   pollAt(w: number, i: number): PollView | undefined {
     const c = this.byWorker.get(w);
     if (!c || i < 0 || i >= c.n) return undefined;
-    const s = c.spawnIdx[i] < 0 ? null : this.spawnStrings[c.spawnIdx[i]];
+    const s = c.spawnIdx[i]! < 0 ? null : this.spawnStrings[c.spawnIdx[i]!]!;
     const view: PollView = {
-      start: c.start[i], end: c.end[i], taskId: c.taskId[i],
+      start: c.start[i]!, end: c.end[i]!, taskId: c.taskId[i]!,
       spawnLocId: s, spawnLoc: s, openEnded: c.openEnded[i] === 1,
     };
-    if (this.cpuSamplesArr && c.cpuOff && c.cpuOff[i + 1] > c.cpuOff[i]) {
-      view.cpuSamples = this.sliceSamples(c.cpuIdx!, c.cpuOff[i], c.cpuOff[i + 1]);
+    if (this.cpuSamplesArr && c.cpuOff && c.cpuOff[i + 1]! > c.cpuOff[i]!) {
+      view.cpuSamples = this.sliceSamples(c.cpuIdx!, c.cpuOff[i]!, c.cpuOff[i + 1]!);
     }
-    if (this.cpuSamplesArr && c.schedOff && c.schedOff[i + 1] > c.schedOff[i]) {
-      view.schedSamples = this.sliceSamples(c.schedIdx!, c.schedOff[i], c.schedOff[i + 1]);
+    if (this.cpuSamplesArr && c.schedOff && c.schedOff[i + 1]! > c.schedOff[i]!) {
+      view.schedSamples = this.sliceSamples(c.schedIdx!, c.schedOff[i]!, c.schedOff[i + 1]!);
     }
     return view;
   }
@@ -377,7 +382,7 @@ export class ColumnarWorkerSpans {
   private sliceSamples(idx: Int32Array, lo: number, hi: number): CpuSample[] {
     const arr = this.cpuSamplesArr!;
     const out = new Array<CpuSample>(hi - lo);
-    for (let k = lo; k < hi; k++) out[k - lo] = arr[idx[k]];
+    for (let k = lo; k < hi; k++) out[k - lo] = arr[idx[k]!]!;
     return out;
   }
 
@@ -427,7 +432,7 @@ export class ColumnarWorkerSpans {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const points: any[] = [];
     const lightPoll = (c: WorkerPollColumns, i: number): { start: number; end: number; taskId: number } => ({
-      start: c.start[i], end: c.end[i], taskId: c.taskId[i],
+      start: c.start[i]!, end: c.end[i]!, taskId: c.taskId[i]!,
     });
 
     for (const w of workerIds) {
@@ -435,26 +440,26 @@ export class ColumnarWorkerSpans {
       if (!c) continue;
       if (filterType === "sched") {
         for (let i = 0; i < c.nParks; i++) {
-          const sw = c.parkSchedWait[i];
+          const sw = c.parkSchedWait[i]!;
           if (hasSchedWait && !Number.isNaN(sw) && sw > 100) {
             points.push({
-              time: c.parkEnd[i] - sw, worker: w, type: "sched", value: sw,
+              time: c.parkEnd[i]! - sw, worker: w, type: "sched", value: sw,
               span: { start: c.parkStart[i], end: c.parkEnd[i] },
             });
           }
         }
       } else if (filterType === "long-poll") {
         for (let i = 0; i < c.n; i++) {
-          const durMs = (c.end[i] - c.start[i]) / 1e6;
+          const durMs = (c.end[i]! - c.start[i]!) / 1e6;
           if (durMs > 1) points.push({ time: c.start[i], worker: w, type: "long-poll", value: durMs, span: lightPoll(c, i) });
         }
       } else if (filterType === "cpu-sampled") {
         const cpuOff = c.cpuOff, schedOff = c.schedOff;
         for (let i = 0; i < c.n; i++) {
-          const cpuCount = cpuOff ? cpuOff[i + 1] - cpuOff[i] : 0;
-          const schedCount = schedOff ? schedOff[i + 1] - schedOff[i] : 0;
+          const cpuCount = cpuOff ? cpuOff[i + 1]! - cpuOff[i]! : 0;
+          const schedCount = schedOff ? schedOff[i + 1]! - schedOff[i]! : 0;
           if (cpuCount + schedCount > 0) {
-            points.push({ time: c.start[i], worker: w, type: "cpu-sampled", value: (c.end[i] - c.start[i]) / 1e6, span: lightPoll(c, i) });
+            points.push({ time: c.start[i], worker: w, type: "cpu-sampled", value: (c.end[i]! - c.start[i]!) / 1e6, span: lightPoll(c, i) });
           }
         }
       }
@@ -477,7 +482,7 @@ export class ColumnarWorkerSpans {
         for (let i = 0; i < c.n; i++) {
           const tid = c.taskId[i];
           if (tid && ti.get(tid) === false) {
-            points.push({ time: c.start[i], worker: w, type: "uninstrumented", value: (c.end[i] - c.start[i]) / 1e6, span: lightPoll(c, i) });
+            points.push({ time: c.start[i], worker: w, type: "uninstrumented", value: (c.end[i]! - c.start[i]!) / 1e6, span: lightPoll(c, i) });
           }
         }
       }
@@ -514,27 +519,27 @@ export class ColumnarWorkerSpans {
         if (!t) continue;
         let s = slotOf.get(t);
         if (s === undefined) { s = counts.length; slotOf.set(t, s); counts.push(0); }
-        counts[s]++;
+        counts[s]!++;
       }
     }
     const T = counts.length;
     const off = new Int32Array(T + 1);
-    for (let s = 0; s < T; s++) off[s + 1] = off[s] + counts[s];
-    const start = new Float64Array(off[T]);
-    const end = new Float64Array(off[T]);
-    const worker = new Float64Array(off[T]);
+    for (let s = 0; s < T; s++) off[s + 1] = off[s]! + counts[s]!;
+    const start = new Float64Array(off[T]!);
+    const end = new Float64Array(off[T]!);
+    const worker = new Float64Array(off[T]!);
     const cur = off.slice(0, T);
     // Pass 2: fill.
     for (const [w, c] of this.byWorker) {
       for (let i = 0; i < c.n; i++) {
         const t = c.taskId[i];
         if (!t) continue;
-        const p = cur[slotOf.get(t)!]++;
-        start[p] = c.start[i]; end[p] = c.end[i]; worker[p] = w;
+        const p = cur[slotOf.get(t)!]!++;
+        start[p] = c.start[i]!; end[p] = c.end[i]!; worker[p] = w;
       }
     }
     // Sort each task slice by start (stable - matches the fat arr.sort tie-break).
-    for (let s = 0; s < T; s++) sortTriByStart(start, end, worker, off[s], off[s + 1]);
+    for (let s = 0; s < T; s++) sortTriByStart(start, end, worker, off[s]!, off[s + 1]!);
     return (this._pollsByTaskCSR = { slotOf, off, start, end, worker });
   }
 
@@ -559,10 +564,10 @@ export class ColumnarWorkerSpans {
     if (!c || pw <= 0 || viewEnd <= viewStart) return out;
     const span2px = pw / (viewEnd - viewStart);
     const weight = (i: number): number =>
-      selectedTaskId && c.taskId[i] === selectedTaskId ? Infinity : c.start[i];
+      selectedTaskId && c.taskId[i] === selectedTaskId ? Infinity : c.start[i]!;
     let curPx = -1, bestIdx = -1, bestW = -Infinity;
     for (let i = startIdx; i < c.n; i++) {
-      const st = c.start[i];
+      const st = c.start[i]!;
       if (st > viewEnd) break;
       let px = ((st - viewStart) * span2px) | 0;
       if (px < 0) px = 0; else if (px >= pw) px = pw - 1;
@@ -593,11 +598,11 @@ export class ColumnarWorkerSpans {
     const span2px = pw / (viewEnd - viewStart);
     let curPx = -1, bestIdx = -1, bestW = -Infinity;
     for (let i = startIdx; i < c.nActives; i++) {
-      const st = c.activeStart[i];
+      const st = c.activeStart[i]!;
       if (st > viewEnd) break;
       let px = ((st - viewStart) * span2px) | 0;
       if (px < 0) px = 0; else if (px >= pw) px = pw - 1;
-      const dur = c.activeEnd[i] - st;
+      const dur = c.activeEnd[i]! - st;
       if (px !== curPx) {
         if (bestIdx >= 0) out.push(this.activeAt(w, bestIdx)!);
         curPx = px; bestIdx = i; bestW = dur;
@@ -622,11 +627,11 @@ export class ColumnarWorkerSpans {
     const span2px = pw / (viewEnd - viewStart);
     let curPx = -1, bestIdx = -1, bestW = -Infinity;
     for (let i = startIdx; i < c.nParks; i++) {
-      const st = c.parkStart[i];
+      const st = c.parkStart[i]!;
       if (st > viewEnd) break;
       let px = ((st - viewStart) * span2px) | 0;
       if (px < 0) px = 0; else if (px >= pw) px = pw - 1;
-      const dur = c.parkEnd[i] - st;
+      const dur = c.parkEnd[i]! - st;
       if (px !== curPx) {
         if (bestIdx >= 0) out.push(this.parkAt(w, bestIdx)!);
         curPx = px; bestIdx = i; bestW = dur;
@@ -641,7 +646,7 @@ export class ColumnarWorkerSpans {
     const c = this.byWorker.get(w);
     if (!c) return 0;
     let lo = 0, hi = c.nParks - 1;
-    while (lo <= hi) { const mid = (lo + hi) >> 1; if (c.parkEnd[mid] < viewStart) lo = mid + 1; else hi = mid - 1; }
+    while (lo <= hi) { const mid = (lo + hi) >> 1; if (c.parkEnd[mid]! < viewStart) lo = mid + 1; else hi = mid - 1; }
     return lo;
   }
 
@@ -651,7 +656,7 @@ export class ColumnarWorkerSpans {
     const c = this.byWorker.get(w);
     if (!c) return 0;
     let lo = 0, hi = c.n - 1;
-    while (lo <= hi) { const mid = (lo + hi) >> 1; if (c.end[mid] < viewStart) lo = mid + 1; else hi = mid - 1; }
+    while (lo <= hi) { const mid = (lo + hi) >> 1; if (c.end[mid]! < viewStart) lo = mid + 1; else hi = mid - 1; }
     return lo;
   }
 
@@ -660,7 +665,7 @@ export class ColumnarWorkerSpans {
     const c = this.byWorker.get(w);
     if (!c) return 0;
     let lo = 0, hi = c.nActives - 1;
-    while (lo <= hi) { const mid = (lo + hi) >> 1; if (c.activeEnd[mid] < viewStart) lo = mid + 1; else hi = mid - 1; }
+    while (lo <= hi) { const mid = (lo + hi) >> 1; if (c.activeEnd[mid]! < viewStart) lo = mid + 1; else hi = mid - 1; }
     return lo;
   }
 
@@ -688,13 +693,13 @@ export class ColumnarWorkerSpans {
   parkAt(w: number, i: number): ParkView | undefined {
     const c = this.byWorker.get(w);
     if (!c || i < 0 || i >= c.nParks) return undefined;
-    const sw = c.parkSchedWait[i];
-    return { start: c.parkStart[i], end: c.parkEnd[i], schedWait: Number.isNaN(sw) ? null : sw };
+    const sw = c.parkSchedWait[i]!;
+    return { start: c.parkStart[i]!, end: c.parkEnd[i]!, schedWait: Number.isNaN(sw) ? null : sw };
   }
   activeAt(w: number, i: number): ActiveView | undefined {
     const c = this.byWorker.get(w);
     if (!c || i < 0 || i >= c.nActives) return undefined;
-    return { start: c.activeStart[i], end: c.activeEnd[i], ratio: c.activeRatio[i] };
+    return { start: c.activeStart[i]!, end: c.activeEnd[i]!, ratio: c.activeRatio[i]! };
   }
 
   /**
@@ -710,17 +715,17 @@ export class ColumnarWorkerSpans {
     const n = c.n;
     // hi = first poll with start > t1
     let a = 0, b = n;
-    while (a < b) { const m = (a + b) >>> 1; if (start[m] <= t1) a = m + 1; else b = m; }
+    while (a < b) { const m = (a + b) >>> 1; if (start[m]! <= t1) a = m + 1; else b = m; }
     const hi = a;
     // lo = first poll (by start order) whose end >= t0. Since polls are
     // start-sorted (not end-sorted), scan back from the start-lower-bound; the
     // number of long straddlers is small in practice.
     a = 0; b = hi;
-    while (a < b) { const m = (a + b) >>> 1; if (c.end[m] < t0) a = m + 1; else b = m; }
+    while (a < b) { const m = (a + b) >>> 1; if (c.end[m]! < t0) a = m + 1; else b = m; }
     // a is a start-order lower bound on end>=t0 among a run; walk back to catch
     // an earlier long poll whose end also reaches t0.
     let lo = a;
-    while (lo > 0 && c.end[lo - 1] >= t0) lo--;
+    while (lo > 0 && c.end[lo - 1]! >= t0) lo--;
     return { lo, hi };
   }
 
@@ -742,15 +747,15 @@ export class ColumnarWorkerSpans {
     // Walk buckets of `resolution` ns across the window; for each, the poll
     // index sub-range is found by scanning start-sorted starts.
     let k = lo;
-    for (let bucketStart = Math.floor(c.start[lo] / resolution) * resolution;
+    for (let bucketStart = Math.floor(c.start[lo]! / resolution) * resolution;
          bucketStart <= t1 && k < hi;
          bucketStart += resolution) {
       const bucketEnd = bucketStart + resolution;
       const bLo = k;
-      while (k < hi && c.start[k] < bucketEnd) k++;
+      while (k < hi && c.start[k]! < bucketEnd) k++;
       if (k > bLo) {
         const agg = forest.query(bLo, k);
-        if (agg) out.push({ ts: c.start[agg.idx], dur: agg.dur, count: agg.count, idx: agg.idx });
+        if (agg) out.push({ ts: c.start[agg.idx]!, dur: agg.dur, count: agg.count, idx: agg.idx });
       }
     }
     return out;
@@ -780,26 +785,26 @@ export class ColumnarWorkerSpans {
         if (!taskId) continue;
         const wakes = wakesByTask[taskId];
         if (!wakes || !wakes.length) continue;
-        const sStart = c.start[i];
+        const sStart = c.start[i]!;
         // latest wake with timestamp <= sStart
         let lo = 0, hi = wakes.length - 1, best = -1;
         while (lo <= hi) {
           const mid = (lo + hi) >> 1;
-          if (wakes[mid].timestamp <= sStart) { best = mid; lo = mid + 1; } else hi = mid - 1;
+          if (wakes[mid]!.timestamp <= sStart) { best = mid; lo = mid + 1; } else hi = mid - 1;
         }
         if (best < 0) continue;
-        const wake = wakes[best];
+        const wake = wakes[best]!;
         let effectiveWake = wake.timestamp;
         const s = slot.get(taskId);
         if (s !== undefined) {
           // rightmost poll of the task with start <= wake.timestamp
-          let plo = off[s], phi = off[s + 1] - 1, pbest = -1;
+          let plo = off[s]!, phi = off[s + 1]! - 1, pbest = -1;
           while (plo <= phi) {
             const pmid = (plo + phi) >> 1;
-            if (pStart[pmid] <= wake.timestamp) { pbest = pmid; plo = pmid + 1; } else phi = pmid - 1;
+            if (pStart[pmid]! <= wake.timestamp) { pbest = pmid; plo = pmid + 1; } else phi = pmid - 1;
           }
-          if (pbest >= 0 && pStart[pbest] < sStart && wake.timestamp <= pEnd[pbest]) {
-            effectiveWake = pEnd[pbest];
+          if (pbest >= 0 && pStart[pbest]! < sStart && wake.timestamp <= pEnd[pbest]!) {
+            effectiveWake = pEnd[pbest]!;
           }
         }
         const delay = sStart - effectiveWake;
@@ -883,9 +888,9 @@ function sortTriByStart(
   // Array.prototype.sort is stable in V8; the index tiebreak keeps it stable
   // across engines regardless.
   const arr = Array.from({ length: n }, (_, k) => lo + k);
-  arr.sort((x, y) => pStart[x] - pStart[y] || x - y);
+  arr.sort((x, y) => pStart[x]! - pStart[y]! || x - y);
   const ts = new Float64Array(n), te = new Float64Array(n), tw = new Float64Array(n);
-  for (let k = 0; k < n; k++) { ts[k] = pStart[arr[k]]; te[k] = pEnd[arr[k]]; tw[k] = pWorker[arr[k]]; }
+  for (let k = 0; k < n; k++) { ts[k] = pStart[arr[k]!]!; te[k] = pEnd[arr[k]!]!; tw[k] = pWorker[arr[k]!]!; }
   pStart.set(ts, lo);
   pEnd.set(te, lo);
   pWorker.set(tw, lo);

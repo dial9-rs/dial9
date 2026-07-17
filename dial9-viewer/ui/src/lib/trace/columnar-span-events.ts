@@ -155,7 +155,7 @@ export class ColumnarSpanEvents {
       const ts = this.ts;
       // Array sort (stable in V8) with an index tiebreak for cross-engine stability.
       const arr = Array.from(perm);
-      arr.sort((a, b) => ts[a] - ts[b] || a - b);
+      arr.sort((a, b) => ts[a]! - ts[b]! || a - b);
       this._tsIndex = Int32Array.from(arr);
     }
     return this._tsIndex;
@@ -242,7 +242,7 @@ export class ColumnarSpanEvents {
       if (!baseSet.has(k)) {
         if (this.extraLen === this._extraCap) this.growExtra();
         this.extraKeyId[this.extraLen] = this.internKey(k);
-        this.extraValId[this.extraLen] = this.internVal(v[k]);
+        this.extraValId[this.extraLen] = this.internVal(v[k]!);
         this.extraLen++;
       }
     }
@@ -253,28 +253,28 @@ export class ColumnarSpanEvents {
   /** span_id as the exact string buildSpanData keys by (String(v.span_id));
    * "undefined" when absent, matching String(undefined). */
   spanIdAt(i: number): string {
-    const idx = this.spanIdIdx[i];
-    return idx < 0 ? "undefined" : this.strings[idx];
+    const idx = this.spanIdIdx[i]!;
+    return idx < 0 ? "undefined" : this.strings[idx]!;
   }
   /** parent_span_id string, or null (matching v.parent_span_id != null ? … : null). */
   parentAt(i: number): string | null {
-    const idx = this.parentIdx[i];
-    return idx < 0 ? null : this.strings[idx];
+    const idx = this.parentIdx[i]!;
+    return idx < 0 ? null : this.strings[idx]!;
   }
   /** span_name, or "unknown" (matching v.span_name || "unknown"). */
   spanNameAt(i: number): string {
-    const idx = this.spanNameIdx[i];
-    return idx < 0 ? "unknown" : this.spanNames[idx];
+    const idx = this.spanNameIdx[i]!;
+    return idx < 0 ? "unknown" : this.spanNames[idx]!;
   }
   /** Non-base fields for this event ({} when none), rebuilt from the interned
    * CSR - matches the fat buildSpanData per-span `fields`. */
   extraFieldsAt(i: number): Record<string, DecodedFieldValue> {
-    const lo = this.extraOff[i], hi = this.extraOff[i + 1];
+    const lo = this.extraOff[i]!, hi = this.extraOff[i + 1]!;
     if (lo === hi) return {};
     const out: Record<string, DecodedFieldValue> = {};
     for (let j = lo; j < hi; j++) {
-      const id = this.extraValId[j];
-      out[this.extraKeys[this.extraKeyId[j]]] = id === 0 ? null : this.extraVals[id - 1];
+      const id = this.extraValId[j]!;
+      out[this.extraKeys[this.extraKeyId[j]!]!] = id === 0 ? null : this.extraVals[id - 1]!;
     }
     return out;
   }
