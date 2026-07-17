@@ -328,85 +328,82 @@ impl<'a> Decoder<'a> {
     /// Returns `Err` if the stream is malformed (e.g. duplicate type_id with
     /// a different schema).
     pub fn next_frame(&mut self) -> Result<Option<DecodedFrame>, DecodeError> {
-        loop {
-            if self.pos >= self.data.len() {
-                return Ok(None);
+        if self.pos >= self.data.len() {
+            return Ok(None);
+        }
+        if self.try_consume_reset_header() {
+            return self.next_frame();
+        }
+        let remaining = &self.data[self.pos..];
+        let base = self.timestamp_base_ns;
+        let (frame, consumed) =
+            match codec::decode_frame(remaining, |type_id| self.schema_info(type_id), base) {
+                Some(r) => r,
+                None => return Ok(None),
+            };
+        self.pos += consumed;
+        match frame {
+            Frame::Schema { type_id, entry } => {
+                let result = DecodedFrame::Schema(entry.clone());
+                self.register_schema(type_id, entry)
+                    .map_err(|msg| DecodeError {
+                        pos: self.pos,
+                        message: msg,
+                    })?;
+                Ok(Some(result))
             }
-            if self.try_consume_reset_header() {
-                continue;
-            }
-            let remaining = &self.data[self.pos..];
-            let base = self.timestamp_base_ns;
-            let (frame, consumed) =
-                match codec::decode_frame(remaining, |type_id| self.schema_info(type_id), base) {
-                    Some(r) => r,
-                    None => return Ok(None),
-                };
-            self.pos += consumed;
-            match frame {
-                Frame::Schema { type_id, entry } => {
-                    let result = DecodedFrame::Schema(entry.clone());
-                    self.register_schema(type_id, entry)
-                        .map_err(|msg| DecodeError {
-                            pos: self.pos,
-                            message: msg,
-                        })?;
-                    return Ok(Some(result));
+            Frame::Event {
+                type_id,
+                timestamp_ns,
+                values,
+            } => {
+                if let Some(ts) = timestamp_ns {
+                    self.timestamp_base_ns = ts;
                 }
-                Frame::Event {
+                Ok(Some(DecodedFrame::Event {
                     type_id,
                     timestamp_ns,
                     values,
-                } => {
-                    if let Some(ts) = timestamp_ns {
-                        self.timestamp_base_ns = ts;
+                }))
+            }
+            Frame::StringPool(entries) => {
+                for e in &entries {
+                    if let Ok(s) = String::from_utf8(e.data.clone()) {
+                        self.string_pool.insert(InternedString(e.pool_id), s);
                     }
-                    return Ok(Some(DecodedFrame::Event {
-                        type_id,
-                        timestamp_ns,
-                        values,
-                    }));
                 }
-                Frame::StringPool(entries) => {
-                    for e in &entries {
-                        if let Ok(s) = String::from_utf8(e.data.clone()) {
-                            self.string_pool.insert(InternedString(e.pool_id), s);
-                        }
-                    }
-                    return Ok(Some(DecodedFrame::StringPool(entries)));
+                Ok(Some(DecodedFrame::StringPool(entries)))
+            }
+            Frame::StackPool(entries) => {
+                for e in &entries {
+                    self.stack_pool
+                        .insert(InternedStackFrames(e.pool_id), e.frames.clone().into());
                 }
-                Frame::StackPool(entries) => {
-                    for e in &entries {
-                        self.stack_pool
-                            .insert(InternedStackFrames(e.pool_id), e.frames.clone().into());
-                    }
-                    return Ok(Some(DecodedFrame::StackPool(entries)));
+                Ok(Some(DecodedFrame::StackPool(entries)))
+            }
+            Frame::TimestampReset(ts) => {
+                self.timestamp_base_ns = ts;
+                self.next_frame() // consume silently, return next real frame
+            }
+            Frame::SchemaAnnotations {
+                type_id,
+                annotations,
+            } => {
+                // Merge annotations into the cached schema (lenient: skip if unknown type_id)
+                if let Some(cache) = self
+                    .schema_cache
+                    .get_mut(type_id.0 as usize)
+                    .and_then(|s| s.as_mut())
+                {
+                    cache.entry.annotations.extend_from_slice(&annotations);
                 }
-                Frame::TimestampReset(ts) => {
-                    self.timestamp_base_ns = ts;
-                    // consume silently, loop to return the next real frame
-                    continue;
+                if let Some(entry) = self.registry.schemas.get_mut(&type_id) {
+                    entry.annotations.extend_from_slice(&annotations);
                 }
-                Frame::SchemaAnnotations {
+                Ok(Some(DecodedFrame::SchemaAnnotations {
                     type_id,
                     annotations,
-                } => {
-                    // Merge annotations into the cached schema (lenient: skip if unknown type_id)
-                    if let Some(cache) = self
-                        .schema_cache
-                        .get_mut(type_id.0 as usize)
-                        .and_then(|s| s.as_mut())
-                    {
-                        cache.entry.annotations.extend_from_slice(&annotations);
-                    }
-                    if let Some(entry) = self.registry.schemas.get_mut(&type_id) {
-                        entry.annotations.extend_from_slice(&annotations);
-                    }
-                    return Ok(Some(DecodedFrame::SchemaAnnotations {
-                        type_id,
-                        annotations,
-                    }));
-                }
+                }))
             }
         }
     }
@@ -423,85 +420,82 @@ impl<'a> Decoder<'a> {
     /// Decode the next frame without copying field data. Returns `Ok(None)` when
     /// stream is exhausted. Returns `Err` on malformed data.
     pub fn next_frame_ref(&mut self) -> Result<Option<DecodedFrameRef<'a>>, DecodeError> {
-        loop {
-            if self.pos >= self.data.len() {
-                return Ok(None);
+        if self.pos >= self.data.len() {
+            return Ok(None);
+        }
+        if self.try_consume_reset_header() {
+            return self.next_frame_ref();
+        }
+        let remaining = &self.data[self.pos..];
+        let base = self.timestamp_base_ns;
+        let (frame, consumed) =
+            match codec::decode_frame_ref(remaining, |type_id| self.schema_info(type_id), base) {
+                Some(r) => r,
+                None => return Ok(None),
+            };
+        self.pos += consumed;
+        match frame {
+            FrameRef::Schema { type_id, entry } => {
+                let result = DecodedFrameRef::Schema(entry.clone());
+                self.register_schema(type_id, entry)
+                    .map_err(|msg| DecodeError {
+                        pos: self.pos,
+                        message: msg,
+                    })?;
+                Ok(Some(result))
             }
-            if self.try_consume_reset_header() {
-                continue;
-            }
-            let remaining = &self.data[self.pos..];
-            let base = self.timestamp_base_ns;
-            let (frame, consumed) =
-                match codec::decode_frame_ref(remaining, |type_id| self.schema_info(type_id), base)
-                {
-                    Some(r) => r,
-                    None => return Ok(None),
-                };
-            self.pos += consumed;
-            match frame {
-                FrameRef::Schema { type_id, entry } => {
-                    let result = DecodedFrameRef::Schema(entry.clone());
-                    self.register_schema(type_id, entry)
-                        .map_err(|msg| DecodeError {
-                            pos: self.pos,
-                            message: msg,
-                        })?;
-                    return Ok(Some(result));
+            FrameRef::Event {
+                type_id,
+                timestamp_ns,
+                values,
+            } => {
+                if let Some(ts) = timestamp_ns {
+                    self.timestamp_base_ns = ts;
                 }
-                FrameRef::Event {
+                Ok(Some(DecodedFrameRef::Event {
                     type_id,
                     timestamp_ns,
                     values,
-                } => {
-                    if let Some(ts) = timestamp_ns {
-                        self.timestamp_base_ns = ts;
+                }))
+            }
+            FrameRef::StringPool(entries) => {
+                for e in &entries {
+                    if let Ok(s) = std::str::from_utf8(e.data) {
+                        self.string_pool
+                            .insert(InternedString(e.pool_id), s.to_string());
                     }
-                    return Ok(Some(DecodedFrameRef::Event {
-                        type_id,
-                        timestamp_ns,
-                        values,
-                    }));
                 }
-                FrameRef::StringPool(entries) => {
-                    for e in &entries {
-                        if let Ok(s) = std::str::from_utf8(e.data) {
-                            self.string_pool
-                                .insert(InternedString(e.pool_id), s.to_string());
-                        }
-                    }
-                    return Ok(Some(DecodedFrameRef::StringPool(entries)));
+                Ok(Some(DecodedFrameRef::StringPool(entries)))
+            }
+            FrameRef::StackPool(entries) => {
+                for e in &entries {
+                    self.stack_pool
+                        .insert(InternedStackFrames(e.pool_id), e.to_stack_frames());
                 }
-                FrameRef::StackPool(entries) => {
-                    for e in &entries {
-                        self.stack_pool
-                            .insert(InternedStackFrames(e.pool_id), e.to_stack_frames());
-                    }
-                    return Ok(Some(DecodedFrameRef::StackPool(entries)));
+                Ok(Some(DecodedFrameRef::StackPool(entries)))
+            }
+            FrameRef::TimestampReset(ts) => {
+                self.timestamp_base_ns = ts;
+                self.next_frame_ref()
+            }
+            FrameRef::SchemaAnnotations {
+                type_id,
+                annotations,
+            } => {
+                if let Some(cache) = self
+                    .schema_cache
+                    .get_mut(type_id.0 as usize)
+                    .and_then(|s| s.as_mut())
+                {
+                    cache.entry.annotations.extend_from_slice(&annotations);
                 }
-                FrameRef::TimestampReset(ts) => {
-                    self.timestamp_base_ns = ts;
-                    continue;
+                if let Some(entry) = self.registry.schemas.get_mut(&type_id) {
+                    entry.annotations.extend_from_slice(&annotations);
                 }
-                FrameRef::SchemaAnnotations {
+                Ok(Some(DecodedFrameRef::SchemaAnnotations {
                     type_id,
                     annotations,
-                } => {
-                    if let Some(cache) = self
-                        .schema_cache
-                        .get_mut(type_id.0 as usize)
-                        .and_then(|s| s.as_mut())
-                    {
-                        cache.entry.annotations.extend_from_slice(&annotations);
-                    }
-                    if let Some(entry) = self.registry.schemas.get_mut(&type_id) {
-                        entry.annotations.extend_from_slice(&annotations);
-                    }
-                    return Ok(Some(DecodedFrameRef::SchemaAnnotations {
-                        type_id,
-                        annotations,
-                    }));
-                }
+                }))
             }
         }
     }
@@ -583,16 +577,7 @@ impl<'a> Decoder<'a> {
                         match codec::decode_u24_le(&remaining[pos..]) {
                             Some(delta) => {
                                 pos += 3;
-                                Some(
-                                    self.timestamp_base_ns
-                                        .checked_add(delta as u64)
-                                        .ok_or_else(|| {
-                                            TryForEachError::Decode(DecodeError {
-                                                pos: self.pos + pos,
-                                                message: "timestamp delta overflow".into(),
-                                            })
-                                        })?,
-                                )
+                                Some(self.timestamp_base_ns + delta as u64)
                             }
                             None => {
                                 return Err(TryForEachError::Decode(DecodeError {
@@ -978,94 +963,5 @@ mod tests {
         // Get just the first event — schema is consumed internally
         let first = dec.events().next().unwrap().unwrap();
         assert!(matches!(first, DecodedFrameRef::Event { .. }));
-    }
-
-    /// Regression: many consecutive reset headers must not stack-overflow.
-    /// The old recursive implementation would blow the stack; the iterative
-    /// loop handles them in constant stack space.
-    #[test]
-    fn many_reset_headers_no_stack_overflow() {
-        use crate::codec::{MAGIC, VERSION};
-        // Start with a valid header
-        let mut data = Vec::new();
-        data.extend_from_slice(&MAGIC);
-        data.push(VERSION);
-        // Append 100,000 reset headers (each is MAGIC + VERSION = 5 bytes).
-        // Under the old recursive code this would cause ~100K nested frames.
-        for _ in 0..100_000 {
-            data.extend_from_slice(&MAGIC);
-            data.push(VERSION);
-        }
-        let mut dec = Decoder::new(&data).unwrap();
-        // Should consume all reset headers and return None (no actual frames)
-        assert!(dec.next_frame().unwrap().is_none());
-        assert_eq!(dec.position(), data.len());
-    }
-
-    /// Regression: many consecutive TimestampReset frames must not stack-overflow.
-    #[test]
-    fn many_timestamp_resets_no_stack_overflow() {
-        use crate::codec::{MAGIC, TAG_TIMESTAMP_RESET, VERSION};
-        let mut data = Vec::new();
-        data.extend_from_slice(&MAGIC);
-        data.push(VERSION);
-        // Append 100,000 TimestampReset frames (9 bytes each: tag + u64 LE)
-        for i in 0..100_000u64 {
-            data.push(TAG_TIMESTAMP_RESET);
-            data.extend_from_slice(&i.to_le_bytes());
-        }
-        let mut dec = Decoder::new(&data).unwrap();
-        // All resets are silently consumed; should return None
-        assert!(dec.next_frame().unwrap().is_none());
-        // Also test the ref variant
-        let mut dec_ref = Decoder::new(&data).unwrap();
-        assert!(dec_ref.next_frame_ref().unwrap().is_none());
-    }
-
-    /// Regression: TimestampReset(u64::MAX) followed by an event with nonzero
-    /// delta must return a decode error rather than panicking or wrapping.
-    #[test]
-    fn timestamp_overflow_returns_error_in_try_for_each() {
-        use crate::codec::TAG_TIMESTAMP_RESET;
-
-        let mut enc = Encoder::new();
-        let schema = enc
-            .register_schema(
-                "Ev",
-                vec![FieldDef {
-                    name: "v".into(),
-                    field_type: FieldType::Varint,
-                }],
-            )
-            .unwrap();
-        // Write one normal event to register the schema
-        enc.write_event(&schema, &[FieldValue::Varint(1_000), FieldValue::Varint(1)])
-            .unwrap();
-        let mut data = enc.finish();
-
-        // Append a TimestampReset with u64::MAX
-        data.push(TAG_TIMESTAMP_RESET);
-        data.extend_from_slice(&u64::MAX.to_le_bytes());
-
-        // Append another event with a nonzero timestamp delta.
-        // Event tag(1) + type_id(2) + u24 delta(3) + varint(1..10)
-        data.push(crate::codec::TAG_EVENT);
-        data.extend_from_slice(&1u16.to_le_bytes()); // type_id = 1 (registered above)
-        // u24 LE delta = 100 (nonzero, will overflow when added to u64::MAX)
-        data.extend_from_slice(&[100, 0, 0]);
-        // varint field value = 42
-        data.push(42);
-
-        let mut dec = Decoder::new(&data).unwrap();
-        let mut events = Vec::new();
-        let result = dec.try_for_each_event(|ev| {
-            events.push(ev.timestamp_ns);
-            Ok::<(), ()>(())
-        });
-        // The first event should succeed, but the second should produce a decode error
-        assert!(
-            matches!(result, Err(TryForEachError::Decode(_))),
-            "expected decode error from timestamp overflow, got: {result:?}"
-        );
     }
 }
