@@ -6,7 +6,6 @@
 
 pub(crate) mod interval_pairing;
 pub(crate) mod legacy;
-pub(crate) mod modern;
 pub(crate) mod span_builder;
 
 // Keep child adapters focused on span semantics while exposing only decode-
@@ -14,7 +13,7 @@ pub(crate) mod span_builder;
 pub(crate) use super::clock;
 pub(crate) use super::events::{
     LegacySpanCloseEvent, LegacySpanEnterEvent, LegacySpanExitEvent, LegacySpanSchemaInfo,
-    SpanCloseSummary, SpanEnterEvent, SpanExitEvent, parse_legacy_span_schema_name,
+    parse_legacy_span_schema_name,
 };
 pub(crate) use super::polls;
 pub(crate) use super::types::ResolvedSpan;

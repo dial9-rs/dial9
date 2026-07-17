@@ -27,12 +27,12 @@ struct SpanInterval {
 /// Mutates `samples` (populates `enclosing_spans`) and `resolved_spans`
 /// (increments `cpu_sample_count` / `sched_sample_count`).
 ///
-/// `instance_intervals` maps span_instance_id → list of monotonic (enter, exit)
-/// intervals. `boot_id` is needed to compute span_uid for each instance_id.
+/// `legacy_intervals` maps synthetic span instance_id → list of monotonic
+/// (enter, exit) intervals. `boot_id` is needed to compute span_uid for each
+/// instance_id.
 pub(crate) fn attribute_samples_to_spans(
     samples: &mut [ResolvedSample],
     resolved_spans: &mut [ResolvedSpan],
-    instance_intervals: &FxHashMap<u64, Vec<MonoInterval>>,
     legacy_intervals: &FxHashMap<u64, Vec<MonoInterval>>,
     boot_id: &str,
     clock_offset: Option<ClockOffset>,
@@ -41,20 +41,7 @@ pub(crate) fn attribute_samples_to_spans(
 
     let to_wall = |mono: super::clock::MonoNs| mono.to_wall_or_raw(clock_offset);
 
-    for (instance_id, intervals) in instance_intervals {
-        let target_uid = compute_span_uid(boot_id, *instance_id);
-        if let Some(span_idx) = resolved_spans.iter().position(|s| s.span_uid == target_uid) {
-            for &(enter_ts, exit_ts) in intervals {
-                all_intervals.push(SpanInterval {
-                    start_wall: to_wall(enter_ts),
-                    end_wall: to_wall(exit_ts),
-                    span_idx,
-                });
-            }
-        }
-    }
-
-    // Also include legacy intervals (already computed with synthetic instance_ids).
+    // Legacy intervals are computed with synthetic instance_ids.
     for (synthetic_instance_id, intervals) in legacy_intervals {
         let target_uid = compute_span_uid(boot_id, *synthetic_instance_id);
         if let Some(span_idx) = resolved_spans.iter().position(|s| s.span_uid == target_uid) {

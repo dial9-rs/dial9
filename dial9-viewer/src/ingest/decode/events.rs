@@ -9,7 +9,7 @@ use lasso::{Rodeo, Spur};
 use rustc_hash::FxHashMap;
 use serde::Deserialize;
 
-use super::clock::{ClockOffset, MonoNs};
+use super::clock::ClockOffset;
 
 // ─── Lightweight serde structs (select only needed fields) ───────────────────
 
@@ -62,83 +62,6 @@ pub(crate) struct SymbolEntry {
     pub(crate) inline_depth: u64,
     pub(crate) symbol_name: String,
 }
-
-/// Self-contained span close summary emitted by `Dial9TracingLayer` (stage 1).
-/// Fields default to zero/empty for old traces that lack them.
-#[derive(Debug, Clone, Deserialize)]
-#[allow(dead_code)] // Fields deserialized for completeness; some used only in future stages.
-pub(crate) struct SpanCloseSummary {
-    pub(crate) timestamp_ns: u64,
-    #[serde(default)]
-    pub(crate) span_id: u64,
-    #[serde(default)]
-    pub(crate) span_instance_id: u64,
-    #[serde(default)]
-    pub(crate) start_timestamp_ns: u64,
-    #[serde(default)]
-    pub(crate) first_enter_timestamp_ns: Option<u64>,
-    #[serde(default)]
-    pub(crate) active_ns: u64,
-    #[serde(default)]
-    pub(crate) span_name: String,
-    #[serde(default)]
-    pub(crate) target: String,
-    #[serde(default)]
-    pub(crate) file: Option<String>,
-    #[serde(default)]
-    pub(crate) line: Option<u32>,
-    #[serde(default)]
-    pub(crate) parent_span_instance_id: Option<u64>,
-    #[serde(default)]
-    pub(crate) attributes: Vec<(String, String)>,
-    #[serde(default)]
-    pub(crate) unbalanced_enters: u32,
-    #[serde(default)]
-    pub(crate) concurrent: u32,
-    /// Whether `active_ns` saturated (hit `u64::MAX`) during accumulation.
-    /// Non-zero indicates the reported `active_ns` is a lower bound.
-    #[serde(default)]
-    pub(crate) saturated: u32,
-    /// Whether exact drop/loss counts are available for this span's events.
-    /// When `0`, loss is **unobservable**: the backend must classify dropped
-    /// enter/exit events as Unknown rather than assuming zero loss.
-    #[serde(default)]
-    pub(crate) loss_observable: u32,
-}
-
-/// Span enter event carrying instance_id and tid for interval tracking.
-#[derive(Debug, Deserialize)]
-pub(crate) struct SpanEnterEvent {
-    pub(crate) timestamp_ns: u64,
-    #[serde(default)]
-    pub(crate) span_instance_id: u64,
-    #[serde(default)]
-    pub(crate) tid: u64,
-    /// Monotonically increasing decode sequence number, assigned in wire decode
-    /// order. Used to break ties when two events share the same timestamp_ns.
-    #[serde(skip)]
-    pub(crate) decode_sequence: u64,
-}
-
-/// Span exit event carrying instance_id and tid for interval tracking.
-#[derive(Debug, Deserialize)]
-pub(crate) struct SpanExitEvent {
-    pub(crate) timestamp_ns: u64,
-    #[serde(default)]
-    pub(crate) span_instance_id: u64,
-    #[serde(default)]
-    pub(crate) tid: u64,
-    /// Monotonically increasing decode sequence number, assigned in wire decode
-    /// order. Used to break ties when two events share the same timestamp_ns.
-    #[serde(skip)]
-    pub(crate) decode_sequence: u64,
-}
-
-// ─── Legacy (old-producer) span event structs ────────────────────────────────
-//
-// Old producers emit SpanEnter/SpanExit with `span_id` and `worker_id` but
-// no `span_instance_id` or `tid`. The SpanCloseEvent only has `span_id`.
-// We reconstruct spans from these events using span_id + first-enter context.
 
 /// Legacy span enter event from old producers.
 ///
@@ -329,11 +252,7 @@ pub(crate) struct DecodedTrace {
     pub(crate) addr_to_keys: FxHashMap<u64, Vec<(u64, Spur)>>,
     pub(crate) events: Vec<TraceEvent>,
     pub(crate) clock_offset: Option<ClockOffset>,
-    pub(crate) first_clock_sync_mono: Option<MonoNs>,
     pub(crate) segment_metadata_boot_id: Option<String>,
-    pub(crate) span_closes: Vec<SpanCloseSummary>,
-    pub(crate) span_enters: Vec<SpanEnterEvent>,
-    pub(crate) span_exits: Vec<SpanExitEvent>,
     pub(crate) legacy_enters: Vec<(String, LegacySpanEnterEvent)>,
     pub(crate) legacy_exits: Vec<(String, LegacySpanExitEvent)>,
     pub(crate) legacy_closes: Vec<LegacySpanCloseEvent>,
@@ -347,54 +266,37 @@ pub(crate) fn decode_trace(data: &[u8], source_key: &str) -> anyhow::Result<Deco
     let mut addr_to_keys: FxHashMap<u64, Vec<(u64, Spur)>> = FxHashMap::default();
     let mut events: Vec<TraceEvent> = Vec::new();
     let mut clock_offset: Option<ClockOffset> = None;
-    // Monotonic timestamp of the first ClockSync in this file — used as the
-    // file boundary marker for determining whether a span's lifecycle starts
-    // within this source file.
-    let mut first_clock_sync_mono: Option<MonoNs> = None;
     // Authoritative boot_id decoded from SegmentMetadata entries. When the
     // namespace isolation layer is active, the writer stamps a
     // `boot_id` key in segment metadata. This is the stable cross-segment
     // process identity anchor. When absent, we fall back to the path-based
     // extraction which cannot claim cross-file stability.
     let mut segment_metadata_boot_id: Option<String> = None;
-    // Span close summaries collected from SpanCloseEvent (stage 1 producer).
-    let mut span_closes: Vec<SpanCloseSummary> = Vec::new();
-    // Span enter/exit intervals for local observation tracking.
-    let mut span_enters: Vec<SpanEnterEvent> = Vec::new();
-    let mut span_exits: Vec<SpanExitEvent> = Vec::new();
-    let mut span_close_decode_errors: u64 = 0;
-    let mut span_enter_decode_errors: u64 = 0;
-    let mut span_exit_decode_errors: u64 = 0;
     // Monotonically increasing counter assigned to span enter/exit events in
     // wire decode order. Used to break timestamp ties deterministically.
     let mut span_decode_sequence: u64 = 0;
 
-    // Legacy (old-producer) span events: SpanEnter/Exit with span_id + worker_id
-    // and SpanCloseEvent with only span_id. These are reconstructed into
-    // ResolvedSpan rows using local context.
+    // Span events: SpanEnter/Exit with span_id + worker_id and SpanCloseEvent
+    // with only span_id. These are reconstructed into ResolvedSpan rows using
+    // local context (`resolve_legacy_spans`).
     let mut legacy_enters: Vec<(String, LegacySpanEnterEvent)> = Vec::new(); // (schema_name, event)
     let mut legacy_exits: Vec<(String, LegacySpanExitEvent)> = Vec::new();
     let mut legacy_closes: Vec<LegacySpanCloseEvent> = Vec::new();
     let mut legacy_enter_decode_errors: u64 = 0;
     let mut legacy_exit_decode_errors: u64 = 0;
-    let legacy_close_decode_errors: u64 = 0;
+    let mut legacy_close_decode_errors: u64 = 0;
     decoder
         .for_each_event(|ev| match ev.name {
             "ClockSyncEvent" => {
                 if let Ok(cs) = ev.deserialize::<ClockSync>()
                     && cs.realtime_ns > 0
                     && cs.timestamp_ns > 0
+                    && clock_offset.is_none()
                 {
-                    // Record the first ClockSync monotonic timestamp as file boundary.
-                    if first_clock_sync_mono.is_none() {
-                        first_clock_sync_mono = Some(MonoNs(cs.timestamp_ns));
-                    }
-                    if clock_offset.is_none() {
-                        clock_offset = Some(ClockOffset::from_clock_sync(
-                            cs.realtime_ns,
-                            cs.timestamp_ns,
-                        ));
-                    }
+                    clock_offset = Some(ClockOffset::from_clock_sync(
+                        cs.realtime_ns,
+                        cs.timestamp_ns,
+                    ));
                 }
             }
             "SegmentMetadataEvent" => {
@@ -449,34 +351,16 @@ pub(crate) fn decode_trace(data: &[u8], source_key: &str) -> anyhow::Result<Deco
                         .push((sym.inline_depth, key));
                 }
             }
-            // Stage 1 producer: self-contained span close summary. Accept both
-            // the exact `SpanCloseEvent` name and the struct-derived
-            // `SpanClose__{Type}` convention (see the enter/exit arms below).
+            // Span close: the old producer's `SpanCloseEvent` carries only
+            // `span_id`. Also accept the struct-derived `SpanClose__{Type}`
+            // convention (a Rust identifier cannot contain `:`).
             name if name == "SpanCloseEvent" || name.starts_with("SpanClose__") => {
-                match ev.deserialize::<SpanCloseSummary>() {
-                    Ok(sc) if sc.span_instance_id > 0 => {
-                        span_closes.push(sc);
+                match ev.deserialize::<LegacySpanCloseEvent>() {
+                    Ok(lc) if lc.span_id > 0 => {
+                        legacy_closes.push(lc);
                     }
-                    Ok(_) => {
-                        // span_instance_id == 0: either telemetry was disabled at
-                        // span creation (modern minimal close event) or this is an
-                        // old-producer close event (only has span_id). Try legacy.
-                        if let Ok(lc) = ev.deserialize::<LegacySpanCloseEvent>()
-                            && lc.span_id > 0
-                        {
-                            legacy_closes.push(lc);
-                        }
-                    }
-                    Err(_) => {
-                        // Try legacy deserialization (old format may not have all new fields)
-                        match ev.deserialize::<LegacySpanCloseEvent>() {
-                            Ok(lc) if lc.span_id > 0 => {
-                                legacy_closes.push(lc);
-                            }
-                            _ => {
-                                span_close_decode_errors += 1;
-                            }
-                        }
+                    _ => {
+                        legacy_close_decode_errors += 1;
                     }
                 }
             }
@@ -490,68 +374,26 @@ pub(crate) fn decode_trace(data: &[u8], source_key: &str) -> anyhow::Result<Deco
             //     `:`, so struct-named events use the `__` separator instead.
             // We accept both, mirroring the viewer's `buildSpanData`.
             name if name.starts_with("SpanEnter:") || name.starts_with("SpanEnter__") => {
-                match ev.deserialize::<SpanEnterEvent>() {
-                    Ok(mut enter) if enter.span_instance_id > 0 => {
-                        enter.decode_sequence = span_decode_sequence;
+                match ev.deserialize::<LegacySpanEnterEvent>() {
+                    Ok(mut le) if le.span_id > 0 => {
+                        le.decode_sequence = span_decode_sequence;
                         span_decode_sequence += 1;
-                        span_enters.push(enter);
+                        legacy_enters.push((name.to_string(), le));
                     }
-                    Ok(_) => {
-                        // span_instance_id == 0: try legacy format (has span_id + worker_id)
-                        if let Ok(mut le) = ev.deserialize::<LegacySpanEnterEvent>()
-                            && le.span_id > 0
-                        {
-                            le.decode_sequence = span_decode_sequence;
-                            span_decode_sequence += 1;
-                            legacy_enters.push((name.to_string(), le));
-                        }
-                    }
-                    Err(_) => {
-                        // May be old format that doesn't have span_instance_id at all
-                        match ev.deserialize::<LegacySpanEnterEvent>() {
-                            Ok(mut le) if le.span_id > 0 => {
-                                le.decode_sequence = span_decode_sequence;
-                                span_decode_sequence += 1;
-                                legacy_enters.push((name.to_string(), le));
-                            }
-                            _ => {
-                                span_enter_decode_errors += 1;
-                                legacy_enter_decode_errors += 1;
-                            }
-                        }
+                    _ => {
+                        legacy_enter_decode_errors += 1;
                     }
                 }
             }
             name if name.starts_with("SpanExit:") || name.starts_with("SpanExit__") => {
-                match ev.deserialize::<SpanExitEvent>() {
-                    Ok(mut exit) if exit.span_instance_id > 0 => {
-                        exit.decode_sequence = span_decode_sequence;
+                match ev.deserialize::<LegacySpanExitEvent>() {
+                    Ok(mut le) if le.span_id > 0 => {
+                        le.decode_sequence = span_decode_sequence;
                         span_decode_sequence += 1;
-                        span_exits.push(exit);
+                        legacy_exits.push((name.to_string(), le));
                     }
-                    Ok(_) => {
-                        // span_instance_id == 0: try legacy format
-                        if let Ok(mut le) = ev.deserialize::<LegacySpanExitEvent>()
-                            && le.span_id > 0
-                        {
-                            le.decode_sequence = span_decode_sequence;
-                            span_decode_sequence += 1;
-                            legacy_exits.push((name.to_string(), le));
-                        }
-                    }
-                    Err(_) => {
-                        // May be old format without span_instance_id field
-                        match ev.deserialize::<LegacySpanExitEvent>() {
-                            Ok(mut le) if le.span_id > 0 => {
-                                le.decode_sequence = span_decode_sequence;
-                                span_decode_sequence += 1;
-                                legacy_exits.push((name.to_string(), le));
-                            }
-                            _ => {
-                                span_exit_decode_errors += 1;
-                                legacy_exit_decode_errors += 1;
-                            }
-                        }
+                    _ => {
+                        legacy_exit_decode_errors += 1;
                     }
                 }
             }
@@ -559,14 +401,14 @@ pub(crate) fn decode_trace(data: &[u8], source_key: &str) -> anyhow::Result<Deco
         })
         .map_err(|e| anyhow::anyhow!("decode error: {e}"))?;
 
-    if span_close_decode_errors > 0 || span_enter_decode_errors > 0 || span_exit_decode_errors > 0 {
+    if legacy_close_decode_errors > 0
+        || legacy_enter_decode_errors > 0
+        || legacy_exit_decode_errors > 0
+    {
         use dial9_core::rate_limited;
         rate_limited!(std::time::Duration::from_secs(60), {
             tracing::warn!(
                 source_key,
-                span_close_errors = span_close_decode_errors,
-                span_enter_errors = span_enter_decode_errors,
-                span_exit_errors = span_exit_decode_errors,
                 legacy_enter_errors = legacy_enter_decode_errors,
                 legacy_exit_errors = legacy_exit_decode_errors,
                 legacy_close_errors = legacy_close_decode_errors,
@@ -580,11 +422,7 @@ pub(crate) fn decode_trace(data: &[u8], source_key: &str) -> anyhow::Result<Deco
         addr_to_keys,
         events,
         clock_offset,
-        first_clock_sync_mono,
         segment_metadata_boot_id,
-        span_closes,
-        span_enters,
-        span_exits,
         legacy_enters,
         legacy_exits,
         legacy_closes,
