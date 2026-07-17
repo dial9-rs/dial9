@@ -1,14 +1,12 @@
 #![cfg(feature = "memory-profiling")]
 #![cfg(target_os = "linux")]
-//! Test that no MemoryProfileOverflowEvent is emitted when ring has sufficient capacity.
+//! Test that MemoryProfileOverflowEvent is emitted when ring buffers overflow.
 
 mod common;
 
 use common::{CAPTURE_BUFFER_SIZE, capture_processor, decode_all};
-use dial9_tokio_telemetry::memory_profiling::{
-    Dial9Allocator, MemoryProfiler, MemoryProfilingConfig,
-};
-use dial9_tokio_telemetry::telemetry::{MemoryBuffer, RecorderBuilderTokioExt, recorder};
+use dial9::memory::{Dial9Allocator, MemoryProfiler, MemoryProfilingConfig};
+use dial9::{MemoryBuffer, RecorderBuilderTokioExt, recorder};
 use serde::Deserialize;
 use std::time::Duration;
 
@@ -21,9 +19,7 @@ enum OverflowEvent {
     MemoryProfileOverflowEvent {
         #[allow(dead_code)]
         timestamp_ns: u64,
-        #[allow(dead_code)]
         dropped_allocs: u64,
-        #[allow(dead_code)]
         dropped_frees: u64,
     },
     #[serde(other)]
@@ -31,7 +27,7 @@ enum OverflowEvent {
 }
 
 #[test]
-fn no_overflow_event_when_ring_has_capacity() {
+fn overflow_event_emitted_when_ring_overflows() {
     let (capture, batches) = capture_processor();
 
     let traced = recorder(MemoryBuffer::new(CAPTURE_BUFFER_SIZE).unwrap())
@@ -43,22 +39,25 @@ fn no_overflow_event_when_ring_has_capacity() {
         .unwrap();
 
     let handle = traced.record_handle();
+    // Use a tiny ring (capacity 4) so it overflows easily under allocation pressure.
     let _mem_guard = MemoryProfiler::from_config(
         MemoryProfilingConfig::builder()
-            .sample_rate_bytes(512 * 1024)
-            .ring_capacity(4096)
+            .sample_rate_bytes(1) // sample every allocation
+            .ring_capacity(4)
             .rng_seed(42)
             .build(),
     )
     .install(handle)
     .expect("install should succeed");
 
+    // Generate enough allocations to overflow the tiny ring.
     traced.runtime().block_on(async {
-        for _ in 0..10 {
+        for _ in 0..1000 {
             let v: Vec<u8> = vec![0u8; 64];
             std::hint::black_box(&v);
             drop(v);
         }
+        // Wait for at least one flush cycle to pick up the overflow.
         tokio::time::sleep(Duration::from_millis(100)).await;
     });
 
@@ -69,12 +68,28 @@ fn no_overflow_event_when_ring_has_capacity() {
 
     let overflows: Vec<_> = events
         .iter()
-        .filter(|e| matches!(e, OverflowEvent::MemoryProfileOverflowEvent { .. }))
+        .filter_map(|e| match e {
+            OverflowEvent::MemoryProfileOverflowEvent {
+                dropped_allocs,
+                dropped_frees,
+                ..
+            } => Some((*dropped_allocs, *dropped_frees)),
+            _ => None,
+        })
         .collect();
 
     assert!(
-        overflows.is_empty(),
-        "expected no MemoryProfileOverflowEvent when ring has capacity, got {}",
-        overflows.len()
+        !overflows.is_empty(),
+        "expected at least one MemoryProfileOverflowEvent"
+    );
+
+    let total_dropped_allocs: u64 = overflows.iter().map(|(a, _)| a).sum();
+    let total_dropped_frees: u64 = overflows.iter().map(|(_, f)| f).sum();
+
+    // With ring capacity 4 and 1000 allocations at sample_rate=1, we should
+    // have many dropped samples.
+    assert!(
+        total_dropped_allocs > 0 || total_dropped_frees > 0,
+        "expected non-zero drops, got allocs={total_dropped_allocs} frees={total_dropped_frees}"
     );
 }

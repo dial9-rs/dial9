@@ -7,10 +7,8 @@
 //! its slot. Without the OPT_OUT pattern, `scc` operations in `LateGuard::drop`
 //! would panic. With OPT_OUT, they bail out cleanly.
 
-use dial9_tokio_telemetry::memory_profiling::{
-    Dial9Allocator, MemoryProfiler, MemoryProfilingConfig,
-};
-use dial9_tokio_telemetry::telemetry::{MemoryBuffer, RecorderBuilderTokioExt, recorder};
+use dial9::memory::{Dial9Allocator, MemoryProfiler, MemoryProfilingConfig};
+use dial9::{MemoryBuffer, RecorderBuilderTokioExt, recorder};
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;

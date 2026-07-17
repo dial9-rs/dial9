@@ -157,6 +157,7 @@ pub mod cpu {
 pub mod memory {
     pub use dial9_perf_self_profile::memory_profiling::{
         Dial9Allocator, InstallError, MemoryProfiler, MemoryProfilerGuard, MemoryProfilingConfig,
+        is_installed,
     };
 }
 

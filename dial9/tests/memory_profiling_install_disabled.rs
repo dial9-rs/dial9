@@ -1,8 +1,8 @@
 #![cfg(feature = "memory-profiling")]
 //! Test that install with a disabled handle is a no-op.
 
-use dial9_tokio_telemetry::memory_profiling::{MemoryProfiler, MemoryProfilingConfig};
-use dial9_tokio_telemetry::telemetry::Dial9Handle;
+use dial9::Dial9Handle;
+use dial9::memory::{MemoryProfiler, MemoryProfilingConfig};
 
 #[test]
 fn install_with_disabled_handle_is_noop() {

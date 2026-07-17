@@ -2,8 +2,8 @@
 #![cfg(target_os = "linux")]
 //! Test that a second install() returns AlreadyInstalled.
 
-use dial9_tokio_telemetry::memory_profiling::{InstallError, MemoryProfiler};
-use dial9_tokio_telemetry::telemetry::{RecorderBuilderTokioExt, recorder};
+use dial9::memory::{InstallError, MemoryProfiler};
+use dial9::{RecorderBuilderTokioExt, recorder};
 
 mod common;
 

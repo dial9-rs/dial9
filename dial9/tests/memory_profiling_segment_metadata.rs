@@ -6,11 +6,9 @@
 mod common;
 
 use common::decode_file;
-use dial9_tokio_telemetry::memory_profiling::{
-    Dial9Allocator, MemoryProfiler, MemoryProfilingConfig,
-};
-use dial9_tokio_telemetry::telemetry::analysis_events::Dial9Event;
-use dial9_tokio_telemetry::telemetry::{DiskBuffer, RecorderBuilderTokioExt, recorder};
+use dial9::analysis::analysis_events::Dial9Event;
+use dial9::memory::{Dial9Allocator, MemoryProfiler, MemoryProfilingConfig};
+use dial9::{DiskBuffer, RecorderBuilderTokioExt, recorder};
 use std::time::Duration;
 
 #[global_allocator]

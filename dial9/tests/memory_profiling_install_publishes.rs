@@ -2,10 +2,8 @@
 #![cfg(target_os = "linux")]
 //! Test that install() publishes the process-global ACTIVE state.
 
-use dial9_tokio_telemetry::memory_profiling::{
-    MemoryProfiler, MemoryProfilingConfig, is_installed,
-};
-use dial9_tokio_telemetry::telemetry::{RecorderBuilderTokioExt, recorder};
+use dial9::memory::{MemoryProfiler, MemoryProfilingConfig, is_installed};
+use dial9::{RecorderBuilderTokioExt, recorder};
 
 mod common;
 

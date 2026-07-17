@@ -6,11 +6,9 @@
 mod common;
 
 use common::{CAPTURE_BUFFER_SIZE, capture_processor, decode_all};
-use dial9_tokio_telemetry::memory_profiling::{
-    Dial9Allocator, MemoryProfiler, MemoryProfilingConfig,
-};
-use dial9_tokio_telemetry::telemetry::analysis_events::Dial9Event;
-use dial9_tokio_telemetry::telemetry::{MemoryBuffer, RecorderBuilderTokioExt, recorder};
+use dial9::analysis::analysis_events::Dial9Event;
+use dial9::memory::{Dial9Allocator, MemoryProfiler, MemoryProfilingConfig};
+use dial9::{MemoryBuffer, RecorderBuilderTokioExt, recorder};
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
