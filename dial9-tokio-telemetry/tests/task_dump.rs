@@ -5,6 +5,9 @@ mod common;
 use common::{CAPTURE_BUFFER_SIZE, capture_processor, decode_all};
 use dial9_tokio_telemetry::telemetry::{InMemoryWriter, TaskDumpConfig, TracedRuntime};
 use serde::Deserialize;
+use std::future::Future;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 use std::time::Duration;
 use tokio::task::JoinSet;
 
@@ -210,5 +213,61 @@ fn spawn_with_joinset_emits_task_dump() {
     assert!(
         !dumps.is_empty(),
         "expected TaskDump events from spawn_with JoinSet task"
+    );
+}
+
+/// A contract-abiding future that completes on its **second** poll, used to
+/// reproduce the race condition in the regression test below.
+struct CompletesOnSecondPoll {
+    polls: u32,
+}
+
+impl Future for CompletesOnSecondPoll {
+    type Output = ();
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        self.polls += 1;
+        match self.polls {
+            // Park and arm the waker, as a future waiting on an external
+            // resource does; this pending wake reschedules the task.
+            1 => {
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+            // The capture re-poll completes the future.
+            2 => Poll::Ready(()),
+            // Any further poll is a poll-after-`Ready` contract violation.
+            n => panic!("future polled again after it returned Ready (poll #{n})"),
+        }
+    }
+}
+
+/// Regression: the task-dump capture re-poll must not complete a future and
+/// then let it be polled again. Before the fix this panicked with a
+/// poll-after-`Ready` (surfacing as a `JoinError`); the task must instead
+/// complete cleanly.
+#[test]
+fn task_dump_capture_repoll_does_not_cause_poll_after_ready() {
+    let (capture, _batches) = capture_processor();
+
+    let mut builder = tokio::runtime::Builder::new_current_thread();
+    builder.enable_all();
+    let (runtime, guard) = TracedRuntime::builder()
+        .with_task_tracking(true)
+        .with_task_dumps(TaskDumpConfig::builder().rng_seed(42).build())
+        .with_custom_pipeline(|p| p.pipe(capture))
+        .build_and_start(builder, InMemoryWriter::new(CAPTURE_BUFFER_SIZE).unwrap())
+        .unwrap();
+
+    let handle = guard.tokio_handle(runtime.handle());
+    let result = runtime.block_on(async { handle.spawn(CompletesOnSecondPoll { polls: 0 }).await });
+
+    drop(runtime);
+    let _ = guard.graceful_shutdown(Duration::from_secs(1));
+
+    assert!(
+        result.is_ok(),
+        "spawned future was polled after it returned Ready \
+         (TaskDumped re-polled a completed future): {result:?}"
     );
 }
