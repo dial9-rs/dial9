@@ -6573,7 +6573,7 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     #[test]
     fn generate_dev_full_returns_error() {
         // (4) Writing to /dev/full must return an error
